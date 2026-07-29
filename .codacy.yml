@@ -3,6 +3,7 @@ exclude_paths:
   - '.svelte-kit/**'
   - 'build/**'
   - 'node_modules/**'
+  - 'package-lock.json'
 engines:
   agentlinter:
     exclude_paths:

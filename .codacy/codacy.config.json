@@ -1361,7 +1361,7 @@
     },
     {
       "toolId": "Biome",
-      "localConfigurationFile": "/var/home/user/Documents/Moderaty/biome.json",
+      "localConfigurationFile": "biome.json",
       "useLocalConfigurationFile": true,
       "patterns": []
     }

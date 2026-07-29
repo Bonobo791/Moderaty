@@ -11,6 +11,7 @@ NEVER write fallbacks that are silent.
 ALWAYS write fallbacks that are loud, log to the server, and show to the user.
 Always run codacy before committing any work.
 Every test must fail if the real logic is wrong. If a test still passes when the function returns garbage, rewrite the test.
+DO NOT copy and paste code. DO create reusable code.
 
 ## Review Rules (learned from PR #4)
 

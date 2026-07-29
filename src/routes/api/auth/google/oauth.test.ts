@@ -132,6 +132,12 @@ async function captureCallback(
 	}
 }
 
+async function expectCallbackThrows(status: number) {
+	const thrown = await captureCallback(makeCookiesWithState('s'), { code: 'abc', state: 's' });
+	expect(thrown?.status).toBe(status);
+	return thrown;
+}
+
 function assertNoTokenLeak(
 	thrown: { status: number; body?: { message: string } } | undefined,
 	errorSpy: { mock: { calls: unknown[][] } }
@@ -220,8 +226,7 @@ test('callback fails loudly when the channels lookup returns a non-OK status', a
 	// 403 is non-retryable, so fetchWithRetry returns it immediately.
 	stubTokenAndChannelResponses(new Response('quota exceeded', { status: 403 }));
 
-	const thrown = await captureCallback(makeCookiesWithState('s'), { code: 'abc', state: 's' });
-	expect(thrown?.status).toBe(502);
+	await expectCallbackThrows(502);
 });
 
 test('callback upserts the channel and redirects home on the happy path', async () => {
@@ -271,23 +276,20 @@ test('callback returns 502 when the token request itself fails', async () => {
 		})
 	);
 
-	const thrown = await captureCallback(makeCookiesWithState('s'), { code: 'abc', state: 's' });
-	expect(thrown?.status).toBe(502);
+	await expectCallbackThrows(502);
 	expect(errorSpy.mock.calls.length > 0).toBe(true);
 });
 
 test('callback returns 502 when the token response is valid JSON but not an object', async () => {
 	vi.stubGlobal('fetch', vi.fn(async () => new Response('null', { status: 200 })));
 
-	const thrown = await captureCallback(makeCookiesWithState('s'), { code: 'abc', state: 's' });
-	expect(thrown?.status).toBe(502);
+	await expectCallbackThrows(502);
 });
 
 test('callback returns 502 when the channels response is valid JSON but not an object', async () => {
 	stubTokenAndChannelResponses(new Response('null', { status: 200 }));
 
-	const thrown = await captureCallback(makeCookiesWithState('s'), { code: 'abc', state: 's' });
-	expect(thrown?.status).toBe(502);
+	await expectCallbackThrows(502);
 });
 
 test('state survives a failed token exchange so the callback can be retried', async () => {
@@ -311,8 +313,7 @@ test('youtube lookup failure logs do not include the upstream response body', as
 	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 	stubTokenAndChannelResponses(new Response('quota exceeded', { status: 403 }));
 
-	const thrown = await captureCallback(makeCookiesWithState('s'), { code: 'abc', state: 's' });
-	expect(thrown?.status).toBe(502);
+	await expectCallbackThrows(502);
 	expect(errorSpy.mock.calls.length > 0).toBe(true);
 	for (const call of errorSpy.mock.calls) {
 		expect(call.join(' ')).not.toContain('quota exceeded');

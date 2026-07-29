@@ -106,7 +106,7 @@ export async function fetchWithRetry(
 		if (response && !retryable(response)) return response;
 		if (retry === MAX_RETRIES) {
 			if ('error' in attempt) throw attempt.error;
-			return response!;
+			return attempt.response;
 		}
 		await new Promise((resolve) => setTimeout(resolve, boundedRetryDelay(response, retry, deadline)));
 	}

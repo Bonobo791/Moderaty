@@ -1,0 +1,32 @@
+{
+  "summary": {
+    "enabledPatterns": { "before": 0, "after": 2554 },
+    "enabledTools": { "before": 0, "after": 11 },
+    "issues": { "before": 0, "after": 23 },
+    "analysisRuntime": { "before": null, "after": 9604 }
+  },
+  "toolChanges": [],
+  "patternChanges": [],
+  "fileExclusions": {
+    "global": ["package-lock.json"],
+    "perTool": {
+      "Agentlinter": ["AGENTS.md"]
+    }
+  },
+  "securityCoverage": {
+    "deduplication": [],
+    "newCoverage": [],
+    "noisyButKept": [
+      "Semgrep package-dependencies-check (6 High findings) remains enabled because package dependency integrity is a security concern."
+    ]
+  },
+  "keyImprovements": [
+    "Configured 11 analyzers and 2,554 patterns for the SvelteKit TypeScript stack.",
+    "Excluded AGENTS.md from Agentlinter after its runtime-agent assumptions produced 30 false positives.",
+    "Retained Semgrep, Trivy, ESLint, Biome, and Markdown checks; the tuned scan reports 23 actionable findings."
+  ],
+  "localConfigTools": [],
+  "codacyYaml": "exclude_paths:\n  - 'svelte.config.js'\n  - '.svelte-kit/**'\n  - 'build/**'\n  - 'node_modules/**'\nengines:\n  agentlinter:\n    exclude_paths:\n      - 'AGENTS.md'\n",
+  "importResults": null,
+  "cloudVerification": null
+}

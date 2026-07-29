@@ -21,6 +21,8 @@ import { checkSync } from 'recheck';
 const RULE_TYPES = ['keyword', 'regex', 'user'] as const;
 const RULE_ACTIONS = ['hold', 'reject', 'delete', 'ban'] as const;
 const MAX_REGEX_PATTERN_LENGTH = 256;
+const BACKREFERENCE_DIGIT = /[1-9]/;
+const GROUP_PREFIX = /^\?(?:<[a-zA-Z][^>]*>|<?[=!:]|[-a-z]*:)/i;
 
 export type RuleAction = (typeof RULE_ACTIONS)[number];
 
@@ -87,9 +89,9 @@ function unsafeSyntax(pattern: string): boolean {
 	let escaped = false;
 	let characterClass = false;
 	for (let index = 0; index < pattern.length; index++) {
-		const character = pattern[index]!;
+		const character = pattern.charAt(index);
 		if (escaped) {
-			if (/[1-9]/.test(character) || (character === 'k' && pattern[index + 1] === '<')) return true;
+			if (BACKREFERENCE_DIGIT.test(character) || (character === 'k' && pattern[index + 1] === '<')) return true;
 			escaped = false;
 			continue;
 		}
@@ -114,7 +116,7 @@ function unsafeSyntax(pattern: string): boolean {
 			const start = starts.pop();
 			if (start === undefined) continue; // unbalanced: new RegExp reports the pattern invalid
 			// Strip the group prefix (`?:`, `?=`, `?!`, `?<=`, `?<!`, `?<name>`, `?flags:`) before comparing alternatives.
-			const body = pattern.slice(start + 1, index).replace(/^\?(?:<[a-zA-Z][^>]*>|<?[=!:]|[-a-z]*:)/i, '');
+			const body = pattern.slice(start + 1, index).replace(GROUP_PREFIX, '');
 			if (duplicateAlternation(body)) return true;
 		}
 	}

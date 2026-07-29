@@ -37,8 +37,6 @@ import {
 const AUTO_REJECT = 0.85;
 const QUEUE = 0.35;
 
-export { matchRule, type RuleRow } from '$lib/server/rules';
-
 export interface RunChannelOptions {
 	maxPages?: number;
 	deadline?: number;
@@ -157,12 +155,14 @@ async function decide(comment: NewComment, rules: RuleRow[], deadline?: number):
 
 function auditRows(channelId: string, decisions: Decision[], dryRun: boolean) {
 	return decisions
-		.filter((decision) => decision.auditAction && decision.reason)
+		.filter((decision): decision is Decision & { auditAction: string; reason: string } =>
+			Boolean(decision.auditAction && decision.reason)
+		)
 		.map((decision) => ({
 			channelId,
 			commentId: decision.comment.id,
-			action: dryRun ? 'dry-run' : decision.auditAction!,
-			reason: decision.reason!,
+			action: dryRun ? 'dry-run' : decision.auditAction,
+			reason: decision.reason,
 			actor: 'system',
 			createdAt: new Date().toISOString()
 		}));

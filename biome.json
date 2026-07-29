@@ -4,8 +4,29 @@
 		"rules": {
 			"correctness": {
 				"noNodejsModules": "off",
-				"useQwikValidLexicalScope": "off"
+				"useQwikValidLexicalScope": "off",
+				"noUndeclaredDependencies": "off"
+			},
+			"performance": {
+				"noAwaitInLoops": "off",
+				"noNamespaceImport": "off"
 			}
 		}
-	}
+	},
+	"overrides": [
+		{
+			"includes": ["**/*.test.ts"],
+			"linter": {
+				"rules": {
+					"performance": {
+						"noDelete": "off",
+						"useTopLevelRegex": "off"
+					},
+					"style": {
+						"noNonNullAssertion": "off"
+					}
+				}
+			}
+		}
+	]
 }

@@ -19,10 +19,12 @@
 import { defineConfig } from 'drizzle-kit';
 
 export default defineConfig({
-	dialect: 'sqlite',
+	// 'turso' (not 'sqlite') so drizzle-kit connects via @libsql/client, which is the
+	// installed driver; the 'sqlite' dialect requires better-sqlite3 and fails silently here.
+	dialect: 'turso',
 	schema: './src/lib/server/db/schema.ts',
 	dbCredentials: {
 		url: process.env.TURSO_DATABASE_URL ?? 'file:local.db',
-		token: process.env.TURSO_AUTH_TOKEN || undefined
+		authToken: process.env.TURSO_AUTH_TOKEN || undefined
 	}
-} as never);
+});

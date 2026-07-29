@@ -16,24 +16,25 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { drizzle } from 'drizzle-orm/libsql';
-import { createClient } from '@libsql/client';
-import { env } from '$env/dynamic/private';
-import * as schema from '$lib/server/db/schema';
+// @ts-nocheck
 
-const databaseUrl = env.TURSO_DATABASE_URL;
-const authToken = env.TURSO_AUTH_TOKEN;
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { matchRule } from './rules.js';
 
-if (!databaseUrl) {
-	throw new Error('TURSO_DATABASE_URL is required');
-}
-if (!databaseUrl.startsWith('file:') && !authToken) {
-	throw new Error('TURSO_AUTH_TOKEN is required for remote databases');
-}
-
-const client = createClient({
-	url: databaseUrl,
-	authToken: authToken || undefined
+test('matches valid rules and rejects invalid stored rules', () => {
+	const rule = { id: 1, type: 'keyword', pattern: 'spam', action: 'hold' };
+	assert.equal(matchRule('This is spam', 'author', [rule]), rule);
+	assert.throws(
+		() => matchRule('text', 'author', [{ id: 2, type: 'regex', pattern: '(', action: 'hold' }]),
+		/rule #2 has an invalid regex/
+	);
+	assert.throws(
+		() => matchRule('text', 'author', [{ id: 3, type: 'unknown', pattern: 'text', action: 'hold' }]),
+		/rule #3 has an unsupported type/
+	);
+	assert.throws(
+		() => matchRule('text', 'author', [{ id: 4, type: 'keyword', pattern: 'text', action: 'archive' }]),
+		/rule #4 has an unsupported action/
+	);
 });
-
-export const db = drizzle(client, { schema });

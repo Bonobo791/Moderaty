@@ -22,6 +22,7 @@ import { db } from '$lib/server/db';
 import { auditLog, channels, comments, rules } from '$lib/server/db/schema';
 import { assertBeforeDeadline, DeadlineExceededError } from '$lib/server/http';
 import { scoreComment, serializeScores } from '$lib/server/moderation';
+import { matchRule, type RuleAction, type RuleRow } from '$lib/server/rules';
 import {
 	deleteComment,
 	fetchNewComments,
@@ -34,12 +35,7 @@ import {
 const AUTO_REJECT = 0.85;
 const QUEUE = 0.35;
 
-export interface RuleRow {
-	id: number;
-	type: string;
-	pattern: string;
-	action: string;
-}
+export { matchRule, type RuleRow } from '$lib/server/rules';
 
 export interface RunChannelOptions {
 	maxPages?: number;
@@ -51,6 +47,8 @@ export interface ChannelRunResult {
 	acted: number;
 	queued: number;
 	partial: boolean;
+	skipped: boolean;
+	dryRun: boolean;
 }
 
 interface Decision {
@@ -64,7 +62,11 @@ interface Decision {
 	youtubeAction: 'hold' | 'reject' | 'delete' | 'ban' | null;
 }
 
-const RULE_ACTIONS = {
+const RULE_ACTIONS: Record<RuleAction, {
+	status: string;
+	auditAction: string;
+	youtubeAction: 'hold' | 'reject' | 'delete' | 'ban';
+}> = {
 	hold: { status: 'held', auditAction: 'hold', youtubeAction: 'hold' },
 	reject: { status: 'rejected', auditAction: 'reject', youtubeAction: 'reject' },
 	delete: { status: 'deleted', auditAction: 'delete', youtubeAction: 'delete' },
@@ -72,36 +74,12 @@ const RULE_ACTIONS = {
 } as const;
 
 /**
- * Finds the first moderation rule that matches the comment or its author.
- *
- * @param text - The comment text to evaluate.
- * @param authorChannelId - The channel ID of the comment author.
- * @param rules - The moderation rules to evaluate in order.
- * @returns The first matching rule, or `null` if no rule matches.
- */
-export function matchRule(text: string, authorChannelId: string, rules: RuleRow[]): RuleRow | null {
-	const lower = text.toLowerCase();
-	for (const rule of rules) {
-		if (rule.type === 'keyword' && lower.includes(rule.pattern.toLowerCase())) return rule;
-		if (rule.type === 'user' && authorChannelId === rule.pattern) return rule;
-		if (rule.type === 'regex') {
-			try {
-				if (new RegExp(rule.pattern, 'i').test(text)) return rule;
-			} catch {
-				// invalid user-supplied regex: skip the rule, never crash the pipeline
-			}
-		}
-	}
-	return null;
-}
-
-/**
  * Creates an empty channel run result with no processed comments or actions.
  *
- * @returns A zero-count result indicating that the run was not partial
+ * @returns A zero-count result indicating that the channel was skipped
  */
 function emptyResult(): ChannelRunResult {
-	return { fetched: 0, acted: 0, queued: 0, partial: false };
+	return { fetched: 0, acted: 0, queued: 0, partial: false, skipped: true, dryRun: false };
 }
 
 /**
@@ -112,7 +90,7 @@ function emptyResult(): ChannelRunResult {
  * @returns The moderation decision, including its status, rationale, and YouTube action.
  */
 function ruleDecision(comment: NewComment, rule: RuleRow): Decision {
-	const action = rule.action in RULE_ACTIONS ? rule.action as keyof typeof RULE_ACTIONS : 'ban';
+	const action = rule.action as RuleAction;
 	const outcome = RULE_ACTIONS[action];
 	return {
 		comment,
@@ -264,7 +242,8 @@ async function persistResults(
  * @param channelId - The channel to scan and moderate
  * @param maxPages - The maximum number of comment pages to fetch
  * @param deadline - Optional execution deadline
- * @returns Counts of fetched, moderated, and queued comments, plus whether execution was interrupted
+ * @returns Counts and explicit state for completed, simulated, skipped, or deadline-limited work
+ * @throws If the channel, configuration, or stored rules are invalid
  */
 export async function runChannel(
 	channelId: string,
@@ -273,10 +252,15 @@ export async function runChannel(
 	let fetched = 0;
 	let acted = 0;
 	let queued = 0;
+	let dryRun = false;
 	try {
 		const channel = await db.select().from(channels).where(eq(channels.id, channelId)).get();
-		if (!channel || !channel.active) return emptyResult();
-		const dryRun = process.env.DRY_RUN === 'true';
+		if (!channel) throw new Error(`channel not found: ${channelId}`);
+		if (!channel.active) return emptyResult();
+		if (process.env.DRY_RUN !== 'true' && process.env.DRY_RUN !== 'false') {
+			throw new Error('DRY_RUN must be true or false');
+		}
+		dryRun = process.env.DRY_RUN === 'true';
 		const accessToken = await refreshAccessToken(decrypt(channel.refreshTokenEnc), deadline);
 		const page = await fetchNewComments(channelId, accessToken, channel.cursor, {
 			maxPages,
@@ -292,15 +276,17 @@ export async function runChannel(
 		if (dryRun) {
 			const audits = auditRows(channelId, decisions, true);
 			if (audits.length) await db.insert(auditLog).values(audits);
-			return { fetched, acted, queued, partial: false };
+			return { fetched, acted, queued, partial: false, skipped: false, dryRun };
 		}
 
 		await applyYoutubeActions(decisions, accessToken, deadline);
 		assertBeforeDeadline(deadline);
 		await persistResults(channelId, channel, page, decisions);
-		return { fetched, acted, queued, partial: false };
+		return { fetched, acted, queued, partial: false, skipped: false, dryRun };
 	} catch (error) {
-		if (error instanceof DeadlineExceededError) return { fetched, acted, queued, partial: true };
+		if (error instanceof DeadlineExceededError) {
+			return { fetched, acted, queued, partial: true, skipped: false, dryRun };
+		}
 		throw error;
 	}
 }

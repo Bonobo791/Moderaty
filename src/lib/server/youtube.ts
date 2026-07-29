@@ -21,6 +21,8 @@ import { fetchWithRetry } from '$lib/server/http';
 
 const YT = 'https://www.googleapis.com/youtube/v3';
 
+type JsonObject = Record<string, unknown>;
+
 export interface NewComment {
 	id: string;
 	threadId: string;
@@ -40,6 +42,53 @@ export interface CommentPage {
 	comments: NewComment[];
 	nextPageToken: string | null;
 	reachedCursor: boolean;
+}
+
+function object(value: unknown, context: string): JsonObject {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		throw new Error(`${context} is missing or invalid`);
+	}
+	return value as JsonObject;
+}
+
+function requiredString(value: unknown, context: string): string {
+	if (typeof value !== 'string' || !value) throw new Error(`${context} is missing or invalid`);
+	return value;
+}
+
+function optionalPageToken(value: unknown): string | null {
+	if (value === undefined || value === null) return null;
+	return requiredString(value, 'commentThreads.list response nextPageToken');
+}
+
+async function jsonResponse(response: Response, operation: string): Promise<unknown> {
+	const body = await response.text();
+	if (!response.ok) throw new Error(`${operation} failed: ${response.status} ${body}`);
+	try {
+		return JSON.parse(body) as unknown;
+	} catch {
+		throw new Error(`${operation} returned invalid JSON`);
+	}
+}
+
+function parseComment(item: unknown, index: number): NewComment {
+	const context = `commentThreads.list response item ${index}`;
+	const thread = object(item, context);
+	const topLevelComment = object(object(thread.snippet, `${context}.snippet`).topLevelComment, `${context}.topLevelComment`);
+	const snippet = object(topLevelComment.snippet, `${context}.topLevelComment.snippet`);
+	const publishedAt = requiredString(snippet.publishedAt, `${context}.publishedAt`);
+	if (Number.isNaN(Date.parse(publishedAt))) throw new Error(`${context}.publishedAt is invalid`);
+	return {
+		id: requiredString(topLevelComment.id, `${context}.topLevelComment.id`),
+		threadId: requiredString(thread.id, `${context}.id`),
+		authorChannelId: requiredString(
+			object(snippet.authorChannelId, `${context}.authorChannelId`).value,
+			`${context}.authorChannelId.value`
+		),
+		authorName: requiredString(snippet.authorDisplayName, `${context}.authorDisplayName`),
+		text: requiredString(snippet.textDisplay, `${context}.textDisplay`).slice(0, 500),
+		publishedAt
+	};
 }
 
 /**
@@ -62,11 +111,8 @@ export async function refreshAccessToken(refreshToken: string, deadline?: number
 			grant_type: 'refresh_token'
 		})
 	}, deadline);
-	const data = await res.json();
-	if (!res.ok || !data.access_token) {
-		throw new Error(`token refresh failed: ${res.status} ${JSON.stringify(data)}`);
-	}
-	return data.access_token as string;
+	const data = object(await jsonResponse(res, 'token refresh'), 'token refresh response');
+	return requiredString(data.access_token, 'token refresh response access_token');
 }
 
 /**
@@ -120,29 +166,22 @@ export async function fetchNewComments(
 		});
 		if (pageToken) params.set('pageToken', pageToken);
 		const res = await ytFetch(`/commentThreads?${params}`, accessToken, undefined, deadline);
-		const data = await res.json();
-		if (!res.ok) throw new Error(`commentThreads.list failed: ${res.status} ${JSON.stringify(data)}`);
+		const data = object(await jsonResponse(res, 'commentThreads.list'), 'commentThreads.list response');
+		if (!Array.isArray(data.items)) throw new Error('commentThreads.list response items is missing or invalid');
+		const nextPageToken = optionalPageToken(data.nextPageToken);
 		let reachedCursor = false;
-		for (const item of data.items ?? []) {
-			const c = item.snippet.topLevelComment;
-			const s = c.snippet;
-			if (cursor && s.publishedAt < cursor) {
+		for (const [index, item] of data.items.entries()) {
+			const comment = parseComment(item, index);
+			if (cursor && comment.publishedAt < cursor) {
 				reachedCursor = true;
 				break;
 			}
-			out.push({
-				id: c.id,
-				threadId: item.id,
-				authorChannelId: s.authorChannelId?.value ?? 'unknown',
-				authorName: s.authorDisplayName ?? 'unknown',
-				text: (s.textDisplay ?? '').slice(0, 500),
-				publishedAt: s.publishedAt
-			});
+			out.push(comment);
 		}
-		if (reachedCursor || !data.nextPageToken) {
+		if (reachedCursor || !nextPageToken) {
 			return { comments: out, nextPageToken: null, reachedCursor };
 		}
-		pageToken = data.nextPageToken;
+		pageToken = nextPageToken;
 	}
 	return { comments: out, nextPageToken: pageToken, reachedCursor: false };
 }

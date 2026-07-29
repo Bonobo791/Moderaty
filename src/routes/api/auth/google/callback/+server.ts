@@ -29,7 +29,6 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 	const state = url.searchParams.get('state');
 	const pending = readPendingStates(cookies);
 	if (!state || !pending.includes(state)) throw error(400, 'bad state');
-	storePendingStates(cookies, pending.filter((s) => s !== state));
 
 	const code = url.searchParams.get('code');
 	if (!code) throw error(400, 'missing code');
@@ -42,18 +41,26 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 	// sees the generic messages below — never tokens (AGENTS.md).
 	// The authorization code is one-time use, so this exchange must not retry:
 	// a retried request after a transient timeout would fail the sign-in.
-	const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams({
-			code,
-			client_id: env.GOOGLE_CLIENT_ID,
-			client_secret: env.GOOGLE_CLIENT_SECRET,
-			redirect_uri: new URL('/api/auth/google/callback', env.APP_URL).toString(),
-			grant_type: 'authorization_code'
-		})
-	});
-	const tokenText = await tokenRes.text();
+	let tokenRes: Response;
+	let tokenText: string;
+	try {
+		tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({
+				code,
+				client_id: env.GOOGLE_CLIENT_ID,
+				client_secret: env.GOOGLE_CLIENT_SECRET,
+				redirect_uri: new URL('/api/auth/google/callback', env.APP_URL).toString(),
+				grant_type: 'authorization_code'
+			}),
+			signal: AbortSignal.timeout(10_000)
+		});
+		tokenText = await tokenRes.text();
+	} catch (e) {
+		console.error(`google token exchange request failed: ${e instanceof Error ? e.message : e}`);
+		throw error(502, 'Google token exchange failed — please retry');
+	}
 	let tokens: {
 		refresh_token?: unknown;
 		access_token?: unknown;
@@ -64,6 +71,10 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 		tokens = JSON.parse(tokenText) as typeof tokens;
 	} catch {
 		console.error(`google token exchange returned invalid JSON: ${tokenRes.status}`);
+		throw error(502, 'invalid response from Google — please retry');
+	}
+	if (typeof tokens !== 'object' || tokens === null) {
+		console.error(`google token exchange returned a non-object body: ${tokenRes.status}`);
 		throw error(502, 'invalid response from Google — please retry');
 	}
 	if (!tokenRes.ok) {
@@ -93,14 +104,18 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 	);
 	const chText = await chRes.text();
 	if (!chRes.ok) {
-		console.error(`youtube channels lookup failed: ${chRes.status} ${chText}`);
+		console.error(`youtube channels lookup failed: ${chRes.status}`);
 		throw error(502, 'YouTube channel lookup failed — please retry');
 	}
 	let chData: { items?: Array<{ id?: unknown; snippet?: { title?: unknown } }> };
 	try {
 		chData = JSON.parse(chText) as typeof chData;
 	} catch {
-		console.error(`youtube channels lookup returned invalid JSON: ${chText}`);
+		console.error(`youtube channels lookup returned invalid JSON: ${chRes.status}`);
+		throw error(502, 'invalid response from YouTube — please retry');
+	}
+	if (typeof chData !== 'object' || chData === null) {
+		console.error(`youtube channels lookup returned a non-object body: ${chRes.status}`);
 		throw error(502, 'invalid response from YouTube — please retry');
 	}
 
@@ -123,6 +138,10 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 			target: channels.id,
 			set: { title, refreshTokenEnc: encrypt(tokens.refresh_token), active: 1 }
 		});
+
+	// Consume the state only once the flow has succeeded, so a transient
+	// failure leaves the callback retryable while a success cannot be replayed.
+	storePendingStates(cookies, pending.filter((s) => s !== state));
 
 	throw redirect(302, '/');
 }

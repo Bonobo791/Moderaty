@@ -17,6 +17,7 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';
+import { sql } from 'drizzle-orm';
 
 export const channels = sqliteTable('channels', {
 	id: text('id').primaryKey(), // YouTube channel ID (UC...)
@@ -24,7 +25,7 @@ export const channels = sqliteTable('channels', {
 	refreshTokenEnc: text('refresh_token_enc').notNull(),
 	cursor: text('cursor'), // ISO timestamp of newest comment seen; null = never polled
 	active: integer('active').notNull().default(1),
-	createdAt: text('created_at').notNull().default(new Date().toISOString())
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 });
 
 export const rules = sqliteTable('rules', {
@@ -33,7 +34,7 @@ export const rules = sqliteTable('rules', {
 	type: text('type').notNull(), // 'keyword' | 'regex' | 'user'
 	pattern: text('pattern').notNull(), // keyword string | regex source | authorChannelId
 	action: text('action').notNull(), // 'hold' | 'reject' | 'delete' | 'ban'
-	createdAt: text('created_at').notNull().default(new Date().toISOString())
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 });
 
 export const comments = sqliteTable('comments', {
@@ -47,7 +48,7 @@ export const comments = sqliteTable('comments', {
 	decidedBy: text('decided_by').notNull(), // 'rule' | 'ai' | 'human' | 'none'
 	matchedRuleId: integer('matched_rule_id'),
 	aiScore: text('ai_score'), // JSON string of the six category scores, or null
-	createdAt: text('created_at').notNull().default(new Date().toISOString())
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 });
 
 export const auditLog = sqliteTable('audit_log', {
@@ -57,5 +58,5 @@ export const auditLog = sqliteTable('audit_log', {
 	action: text('action').notNull(), // 'hold' | 'reject' | 'delete' | 'ban' | 'approve' | 'queue' | 'dry-run'
 	reason: text('reason').notNull(), // human-readable, e.g. "rule #4 (keyword)" or "ai score 0.91"
 	actor: text('actor').notNull(), // 'system' | 'user'
-	createdAt: text('created_at').notNull().default(new Date().toISOString())
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 });

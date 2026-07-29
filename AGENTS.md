@@ -1,23 +1,3 @@
-<!--
-# Moderaty — YouTube Comment Auto-Moderation Tool
-# Copyright (C) 2026 Andrew Philip Weilbacher
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published
-by the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License
-along with this program. If not, see <https://www.gnu.org/licenses/>.
-
-Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
--->
-
 # Repository Guidelines
 
 ## Agent Role
@@ -25,12 +5,16 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 Act as a pragmatic repository contributor: make the smallest safe change,
 validate it, and leave unrelated work untouched.
 
+# Rules
+- Always fail loudly.
+
 ## Project Structure
 
 Moderaty is a SvelteKit 2 app using Svelte 5 and TypeScript. Routes live in
 `src/routes/`; reusable code belongs in `src/lib/`, with server-only modules in
-`src/lib/server/`. Put static files in `static/`. Configure adapter-node in
-`svelte.config.js`; keep `vite.config.ts` for Vite-only settings. Do not edit
+`src/lib/server/`. Put static files in `static/`. Configure adapter-netlify in
+`svelte.config.js`; Netlify deploys endpoints as standard Node Functions. Keep
+`vite.config.ts` for Vite-only settings. Do not edit
 generated `.svelte-kit/` files or commit build output.
 
 ## Commands
@@ -39,7 +23,7 @@ Use Node 24 and npm 11.
 
 - `npm run dev` — start local development.
 - `npm run check` — run SvelteKit sync and strict diagnostics.
-- `npm run build` — create the Node deployment build.
+- `npm run build` — create the Netlify deployment build.
 - `npm run preview` — serve the production build locally.
 
 No test framework exists yet; `npm run check` is required before a PR.

@@ -42,7 +42,7 @@ By the end, there is a working SvelteKit web app called `Moderaty` that:
 
 1. Lets a YouTube channel owner connect their channel via Google OAuth (scope `youtube.force-ssl`, offline access). The encrypted refresh token is stored in the database.
 2. Stores per-channel moderation rules: keyword, regex, or blocked-user, each mapping to an action (`hold`, `reject`, `delete`, `ban`).
-3. Exposes `POST /api/cron` authenticated with `Authorization: Bearer <CRON_SECRET>` which, for every active channel: fetches new comments since the last run (incremental, via a stored cursor), applies rules, then the OpenAI Moderation API, and enforces: high-confidence violations (score ≥ 0.85) are auto-rejected on YouTube, borderline (0.35 ≤ score < 0.85) go to a local review queue, clean (< 0.35) are marked approved. Rule hits execute their configured action immediately. Every action is written to an audit log.
+3. Is hosted on Netlify. `POST /api/cron` remains authenticated with `Authorization: Bearer <CRON_SECRET>` for manual runs. A Netlify Scheduled Function invokes its bounded scheduled mode every 15 minutes: it processes one fairly selected active channel and at most one page (100 comments), keeping the run within Netlify's 30-second limit. It applies rules, then the OpenAI Moderation API, and enforces: high-confidence violations (score ≥ 0.85) are auto-rejected on YouTube, borderline (0.35 ≤ score < 0.85) go to a local review queue, clean (< 0.35) are marked approved. Rule hits execute their configured action immediately. Every action is written to an audit log.
 4. Has four pages: a dashboard (`/`), a rules editor (`/channels/[id]/rules`), a review queue (`/channels/[id]/queue`) with one-click approve/reject/delete/ban, and an audit log (`/channels/[id]/log`).
 5. Supports `DRY_RUN=true`, in which the pipeline classifies and logs but performs no write calls to YouTube.
 6. Builds cleanly (`npm run build` exits 0) and runs with `npm run dev`.
@@ -76,6 +76,7 @@ Polling: fetch pages of comment threads ordered by time (newest first); stop pag
 
 **Files you will create or modify:**
 - `svelte.config.js` — modify (switch adapter)
+- `netlify.toml` — create (build settings, Node 24, schedule)
 - `vite.config.ts` — modify (Vite-only configuration)
 - `package.json` — modify (add `db:push` script)
 - `.env.example` — create; copy it to `.env` locally (never commit)
@@ -92,6 +93,7 @@ Polling: fetch pages of comment threads ordered by time (newest first); stop pag
 - `src/routes/api/auth/google/+server.ts` — create
 - `src/routes/api/auth/google/callback/+server.ts` — create
 - `src/routes/api/cron/+server.ts` — create
+- `netlify/functions/cron.ts` — create (scheduled trigger)
 - `src/routes/+layout.svelte` — modify (nav bar)
 - `src/routes/+page.server.ts` — create (dashboard data)
 - `src/routes/+page.svelte` — modify (dashboard)
@@ -107,7 +109,7 @@ Polling: fetch pages of comment threads ordered by time (newest first); stop pag
 ## 4. Constraints
 
 **Do NOT:**
-- Do not add dependencies beyond: `drizzle-orm`, `@libsql/client` (runtime), and `@sveltejs/adapter-node` plus `drizzle-kit` (dev). No auth libraries, no googleapis SDK, no OpenAI SDK, no CSS frameworks — everything uses `fetch` and hand-written CSS.
+- Do not add dependencies beyond: `drizzle-orm`, `@libsql/client` (runtime), and `@sveltejs/adapter-netlify` plus `drizzle-kit` (dev). No auth libraries, no googleapis SDK, no OpenAI SDK, no CSS frameworks — everything uses `fetch` and hand-written CSS.
 - Do not commit or push directly to `main`; never merge your own PR (see section 0). Stop after opening each phase PR and wait for human merge confirmation.
 - Do not refactor, rename, or reformat anything outside the steps below.
 - Do not add features not listed: no LLM judge, no reply moderation, no live chat, no pagination UI on the queue, no user accounts beyond the OAuth'd channel, no settings page.
@@ -117,7 +119,7 @@ Polling: fetch pages of comment threads ordered by time (newest first); stop pag
 
 **Non-goals (look related, but are NOT part of this task):**
 - LLM-as-judge for borderline comments (borderline → human queue instead). Post-MVP.
-- Stripe/billing, landing page, multi-platform moderation, deployment config (Dockerfile, CI).
+- Stripe/billing, landing page, multi-platform moderation, Docker, and CI.
 - Replies moderation, real-time scanning, websockets.
 
 ---
@@ -145,14 +147,14 @@ cd Moderaty
 
 ```bash
 npm install drizzle-orm @libsql/client
-npm install -D @sveltejs/adapter-node drizzle-kit
+npm install -D @sveltejs/adapter-netlify drizzle-kit
 ```
 
-**Verify:** `npm ls drizzle-orm @libsql/client @sveltejs/adapter-node drizzle-kit` prints all four with versions, no `UNMET` or errors.
+**Verify:** `npm ls drizzle-orm @libsql/client @sveltejs/adapter-netlify drizzle-kit` prints all four with versions, no `UNMET` or errors.
 
 **If this fails:** stop, paste the full error, report back.
 
-#### Step 3: Switch to adapter-node
+#### Step 3: Configure the Netlify adapter
 
 **File:** `svelte.config.js`
 
@@ -163,12 +165,30 @@ import adapter from '@sveltejs/adapter-auto';
 
 **Action:** replace that line with:
 ```js
-import adapter from '@sveltejs/adapter-node';
+import adapter from '@sveltejs/adapter-netlify';
 ```
 
-**Verify:** `grep adapter-node svelte.config.js` prints the line.
+**Verify:** `grep adapter-netlify svelte.config.js` prints the line.
 
-**If this fails:** if the import line differs slightly, replace whatever adapter import exists with the adapter-node import, keeping the rest of the file unchanged.
+**If this fails:** if the import line differs slightly, replace whatever adapter import exists with the adapter-netlify import, keeping the rest of the file unchanged. Do not enable Edge Functions: this plan depends on Node APIs and libSQL.
+
+#### Step 3b: Add Netlify build and schedule configuration
+
+**File:** `netlify.toml` — create with:
+
+```toml
+[build]
+  command = "npm run build"
+  publish = "build"
+
+[build.environment]
+  NODE_VERSION = "24"
+
+[functions."cron"]
+  schedule = "*/15 * * * *"
+```
+
+Netlify Scheduled Functions run only on published deploys and use UTC. Do not add redirects to this file; SvelteKit owns routing.
 
 #### Step 4: Create `.env.example` and gitignore local secrets
 
@@ -210,6 +230,7 @@ Copy `.env.example` to `.env` locally and replace placeholders; never commit `.e
 **File:** `src/lib/server/db/schema.ts` — create with exactly:
 
 ```ts
+import { sql } from 'drizzle-orm';
 import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';
 
 export const channels = sqliteTable('channels', {
@@ -217,8 +238,9 @@ export const channels = sqliteTable('channels', {
   title: text('title').notNull(),
   refreshTokenEnc: text('refresh_token_enc').notNull(),
   cursor: text('cursor'), // ISO timestamp of newest comment seen; null = never polled
+  lastScheduledAt: text('last_scheduled_at'), // scheduling fairness; null = never selected
   active: integer('active').notNull().default(1),
-  createdAt: text('created_at').notNull().default(new Date().toISOString())
+  createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 });
 
 export const rules = sqliteTable('rules', {
@@ -227,7 +249,7 @@ export const rules = sqliteTable('rules', {
   type: text('type').notNull(), // 'keyword' | 'regex' | 'user'
   pattern: text('pattern').notNull(), // keyword string | regex source | authorChannelId
   action: text('action').notNull(), // 'hold' | 'reject' | 'delete' | 'ban'
-  createdAt: text('created_at').notNull().default(new Date().toISOString())
+  createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 });
 
 export const comments = sqliteTable('comments', {
@@ -241,7 +263,7 @@ export const comments = sqliteTable('comments', {
   decidedBy: text('decided_by').notNull(), // 'rule' | 'ai' | 'human' | 'none'
   matchedRuleId: integer('matched_rule_id'),
   aiScore: text('ai_score'), // JSON string of the six category scores, or null
-  createdAt: text('created_at').notNull().default(new Date().toISOString())
+  createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 });
 
 export const auditLog = sqliteTable('audit_log', {
@@ -251,7 +273,7 @@ export const auditLog = sqliteTable('audit_log', {
   action: text('action').notNull(), // 'hold' | 'reject' | 'delete' | 'ban' | 'approve' | 'queue' | 'dry-run'
   reason: text('reason').notNull(), // human-readable, e.g. "rule #4 (keyword)" or "ai score 0.91"
   actor: text('actor').notNull(), // 'system' | 'user'
-  createdAt: text('created_at').notNull().default(new Date().toISOString())
+  createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 });
 
 export const sessions = sqliteTable('sessions', {
@@ -259,13 +281,13 @@ export const sessions = sqliteTable('sessions', {
   channelId: text('channel_id').notNull(),
   tokenHash: text('token_hash').notNull().unique(),
   expiresAt: text('expires_at').notNull(),
-  createdAt: text('created_at').notNull().default(new Date().toISOString())
+  createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 });
 ```
 
 **Verify:** `npx tsc --noEmit` later; for now `grep -c sqliteTable src/lib/server/db/schema.ts` prints `5`.
 
-**If this fails:** if drizzle-orm reports a type error on `default(new Date().toISOString())`, that is acceptable — it is evaluated once at import in some drizzle versions; leave it (dates are also set explicitly at insert time in the pipeline). Do not restructure the schema.
+**If this fails:** import `sql` from `drizzle-orm` and keep the default as a database-side expression; do not use `new Date()` in the schema default.
 
 #### Step 6: Create the DB client and drizzle config
 
@@ -275,10 +297,16 @@ export const sessions = sqliteTable('sessions', {
 import { drizzle } from 'drizzle-orm/libsql';
 import { createClient } from '@libsql/client';
 import { env } from '$env/dynamic/private';
-import * as schema from './schema';
+import * as schema from '$lib/server/db/schema';
+
+const databaseUrl = env.TURSO_DATABASE_URL;
+
+if (!databaseUrl) {
+  throw new Error('TURSO_DATABASE_URL is required');
+}
 
 const client = createClient({
-  url: env.TURSO_DATABASE_URL ?? 'file:local.db',
+  url: databaseUrl,
   authToken: env.TURSO_AUTH_TOKEN || undefined
 });
 
@@ -290,17 +318,23 @@ export const db = drizzle(client, { schema });
 ```ts
 import { defineConfig } from 'drizzle-kit';
 
+const databaseUrl = process.env.TURSO_DATABASE_URL;
+
+if (!databaseUrl) {
+  throw new Error('TURSO_DATABASE_URL is required');
+}
+
 export default defineConfig({
-  dialect: 'sqlite',
+  dialect: 'turso',
   schema: './src/lib/server/db/schema.ts',
   dbCredentials: {
-    url: process.env.TURSO_DATABASE_URL ?? 'file:local.db',
-    token: process.env.TURSO_AUTH_TOKEN || undefined
+    url: databaseUrl,
+    authToken: process.env.TURSO_AUTH_TOKEN || undefined
   }
-} as never);
+});
 ```
 
-(The `as never` cast silences a drizzle-kit typing quirk where `token` is not accepted for local file URLs. Do not remove it.)
+(Use the `turso` dialect so drizzle-kit uses the installed `@libsql/client` driver for both local files and remote Turso.)
 
 **File:** `package.json` — add `"db:push": "drizzle-kit push"` only now, after the schema and config exist.
 
@@ -375,6 +409,8 @@ channel; a failed channel leaves its cursor unchanged for the next run. Dry runs
 write only `dry-run` audit rows, perform no YouTube writes, persist no comment
 decision, and never advance the cursor.
 
+For scheduled runs, pass a 23-second deadline through the pipeline, check it before starting each external request, and return `partial: true` rather than advancing the cursor when it expires. The scheduler's outer request timeout is 25 seconds. `fetchNewComments` accepts a `maxPages` argument (default `3`); scheduled mode passes `1`.
+
 #### Step 9: YouTube API client
 
 **File:** `src/lib/server/youtube.ts` — create with exactly:
@@ -422,11 +458,12 @@ async function ytFetch(path: string, accessToken: string, init?: RequestInit): P
 export async function fetchNewComments(
   channelId: string,
   accessToken: string,
-  cursor: string | null
+  cursor: string | null,
+  maxPages = 3
 ): Promise<NewComment[]> {
   const out: NewComment[] = [];
   let pageToken: string | null = null;
-  for (let page = 0; page < 3; page++) {
+  for (let page = 0; page < maxPages; page++) {
     const params = new URLSearchParams({
       part: 'snippet',
       allThreadsRelatedToChannelId: channelId,
@@ -843,6 +880,26 @@ export async function POST({ request }) {
 }
 ```
 
+Extend this endpoint with `?scheduled=1` mode before its manual all-channel loop: select one active channel ordered by `lastScheduledAt` (null first, then oldest, then channel ID), immediately set its `lastScheduledAt` to the current ISO time, and call `runChannel` with `{ maxPages: 1, deadline: Date.now() + 23_000 }`. Return that single result, including `partial: true` when the deadline is reached. The existing authenticated request without `scheduled=1` remains the manual all-channel path and uses three pages. Keep the cursor unchanged for partial or failed work.
+
+**File:** `netlify/functions/cron.ts` — create with:
+
+```ts
+export default async function () {
+  // ponytail: 25s Netlify schedule budget; use a Background Function when one page/channel no longer fits.
+  const appUrl = process.env.APP_URL;
+  const secret = process.env.CRON_SECRET;
+  if (!appUrl || !secret) throw new Error('APP_URL and CRON_SECRET are required');
+
+  const response = await fetch(`${appUrl}/api/cron?scheduled=1`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${secret}` },
+    signal: AbortSignal.timeout(25_000)
+  });
+  if (!response.ok) throw new Error(`scheduled cron failed: ${response.status}`);
+}
+```
+
 **Verify:** `npm run build` exits 0.
 
 **If this fails:**
@@ -1240,8 +1297,9 @@ npm run check && npm run build
 
 Manually (human task — the executor stops here and asks the human):
 
-1. Google Cloud Console → create project → enable **YouTube Data API v3** → OAuth consent screen (external, add scope `https://www.googleapis.com/auth/youtube.force-ssl`, add the test user's Gmail as a test user) → create OAuth client (Web) with authorized redirect URI `http://localhost:5173/api/auth/google/callback`.
-2. Put the client ID/secret and a valid OpenAI key into `.env`, generate a real `ENCRYPTION_KEY`, set a `CRON_SECRET`. Keep `DRY_RUN=true` for the first run.
+1. Google Cloud Console → create project → enable **YouTube Data API v3** → OAuth consent screen (external, add scope `https://www.googleapis.com/auth/youtube.force-ssl`, add the test user's Gmail as a test user) → create OAuth client (Web) with both `http://localhost:5173/api/auth/google/callback` and `https://<production-domain>/api/auth/google/callback` as authorized redirect URIs.
+2. In Netlify, configure `APP_URL=https://<production-domain>` plus `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, remote `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `OPENAI_API_KEY`, `CRON_SECRET`, `ENCRYPTION_KEY`, and `DRY_RUN=true` as secret Functions environment variables. Do not set `TURSO_DATABASE_URL=file:local.db` in production.
+3. Put matching development values in `.env` locally; never commit it.
 
 **Verify:** `.env` contains no `placeholder` values except unchanged optional ones: `grep -c placeholder .env` prints `0` (or `1` if `TURSO_AUTH_TOKEN` line untouched — it should be empty, not placeholder).
 
@@ -1254,6 +1312,7 @@ Manually (human task — the executor stops here and asks the human):
 5. Check the audit log page — expect rows. Check the rules hit appears as action `dry-run`.
 6. Set `DRY_RUN=false`, restart, re-run the cron — expect the matched comment to be held on YouTube (visible in YouTube Studio → Comments → Held for review), DB status `held`, audit action `hold`.
 7. Approve one pending queue item from the UI — expect status change and audit row with actor `user`.
+8. Deploy the main branch to Netlify, confirm the build uses Node 24 and the Functions view lists the scheduled `cron` function. Use **Run now** to verify it makes one bounded scheduled request; schedules run only after a published deploy.
 
 **If this fails:**
 - OAuth error `redirect_uri_mismatch`: the redirect URI in Google Cloud Console must be exactly `http://localhost:5173/api/auth/google/callback` and `APP_URL` must be `http://localhost:5173`. Fix the console, not the code.
@@ -1276,6 +1335,8 @@ All of the following must be true before reporting completion:
 - [ ] Review queue shows borderline comments (0.35 ≤ score < 0.85) and each of the four buttons (approve/reject/delete/ban) updates only the authenticated channel's DB rows and audit log with actor `user`
 - [ ] Rules page rejects invalid regex input with an error message
 - [ ] Invalid `secret` on `/api/cron` returns 401
+- [ ] Netlify deploy succeeds with standard Node Functions, remote Turso, and the production OAuth callback URL
+- [ ] Netlify lists `cron` as a `*/15 * * * *` scheduled function; a manual run processes no more than one channel and one page
 - [ ] No files outside the "Files you will create or modify" list were changed
 - [ ] No dependencies beyond the approved list were added (`grep '"dependencies"' -A 10 package.json` shows only the approved packages plus scaffold defaults)
 

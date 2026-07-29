@@ -20,6 +20,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => {
 	const state = {
+		env: { DRY_RUN: 'false' } as Record<string, string | undefined>,
 		tables: {
 			channels: undefined as unknown,
 			comments: undefined as unknown,
@@ -76,6 +77,7 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('$lib/server/crypto', () => ({ decrypt: mocks.decrypt }));
 vi.mock('$lib/server/db', () => ({ db: mocks.db }));
+vi.mock('$env/dynamic/private', () => ({ env: mocks.state.env }));
 vi.mock('$lib/server/http', () => ({
 	assertBeforeDeadline: mocks.assertBeforeDeadline,
 	DeadlineExceededError: mocks.DeadlineExceededError
@@ -97,14 +99,15 @@ import type { NewComment } from './youtube';
 
 const originalDryRun = process.env.DRY_RUN;
 
-function newComment(): NewComment {
+function newComment(overrides: Partial<NewComment> = {}): NewComment {
 	return {
 		id: 'comment',
 		threadId: 'thread',
 		authorChannelId: 'author',
 		authorName: 'Author',
 		text: 'A comment',
-		publishedAt: '2026-01-04T00:00:00.000Z'
+		publishedAt: '2026-01-04T00:00:00.000Z',
+		...overrides
 	};
 }
 
@@ -125,6 +128,7 @@ function moderation(score: number) {
 beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.state.tables = { channels, comments, rules, auditLog };
+	mocks.state.env.DRY_RUN = 'false';
 	mocks.state.channel = {
 		id: 'channel',
 		title: 'Channel',
@@ -174,6 +178,7 @@ test.each([
 test('does not call YouTube moderation or deletion APIs during a dry run', async () => {
 	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'delete' }];
 	process.env.DRY_RUN = 'true';
+	mocks.state.env.DRY_RUN = 'true';
 
 	const result = await runChannel('channel');
 
@@ -186,4 +191,62 @@ test('does not call YouTube moderation or deletion APIs during a dry run', async
 		action: 'dry-run'
 	})]);
 	expect(result).toMatchObject({ fetched: 1, acted: 1, queued: 0, partial: false, skipped: false, dryRun: true });
+});
+
+test('reads DRY_RUN from private runtime environment variables', async () => {
+	delete process.env.DRY_RUN;
+	mocks.state.env.DRY_RUN = 'true';
+	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'delete' }];
+
+	const result = await runChannel('channel');
+
+	expect(result.dryRun).toBe(true);
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
+});
+
+test('writes an approval audit entry for a low-risk AI decision', async () => {
+	mocks.scoreComment.mockResolvedValue(moderation(0.34));
+
+	await runChannel('channel');
+
+	expect(mocks.state.insertedAudits).toEqual([expect.objectContaining({
+		commentId: 'comment',
+		action: 'approve',
+		reason: 'ai score 0.34'
+	})]);
+});
+
+test('scores full comment text but truncates the stored copy', async () => {
+	const text = 'x'.repeat(501);
+	mocks.scoreComment.mockResolvedValue(moderation(0.34));
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ text })],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	await runChannel('channel');
+
+	expect(mocks.scoreComment).toHaveBeenCalledWith(text, undefined);
+	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ text: text.slice(0, 500) })]);
+});
+
+test('records successful remote actions before a later action fails', async () => {
+	mocks.state.ruleRows = [
+		{ id: 1, type: 'keyword', pattern: 'hold', action: 'hold' },
+		{ id: 2, type: 'keyword', pattern: 'reject', action: 'reject' }
+	];
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ id: 'held', text: 'hold this' }), newComment({ id: 'rejected', text: 'reject this' })],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+	mocks.setModerationStatus
+		.mockResolvedValueOnce(undefined)
+		.mockRejectedValueOnce(new Error('YouTube rejected request'));
+
+	await expect(runChannel('channel')).rejects.toThrow('YouTube rejected request');
+
+	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'held', status: 'held' })]);
+	expect(mocks.state.insertedAudits).toEqual([expect.objectContaining({ commentId: 'held', action: 'hold' })]);
 });

@@ -17,6 +17,7 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { eq, inArray } from 'drizzle-orm';
+import { env } from '$env/dynamic/private';
 import { decrypt } from '$lib/server/crypto';
 import { db } from '$lib/server/db';
 import { auditLog, channels, comments, rules } from '$lib/server/db/schema';
@@ -90,8 +91,8 @@ function emptyResult(): ChannelRunResult {
  * @returns The moderation decision, including its status, rationale, and YouTube action.
  */
 function ruleDecision(comment: NewComment, rule: RuleRow): Decision {
-	const action = rule.action as RuleAction;
-	const outcome = RULE_ACTIONS[action];
+	validateRule(rule);
+	const outcome = RULE_ACTIONS[rule.action];
 	return {
 		comment,
 		...outcome,
@@ -136,8 +137,8 @@ async function aiDecision(comment: NewComment, deadline?: number): Promise<Decis
 		decidedBy: 'ai',
 		matchedRuleId: null,
 		aiScore,
-		auditAction: null,
-		reason: null,
+		auditAction: 'approve',
+		reason,
 		youtubeAction: null
 	};
 }
@@ -160,6 +161,22 @@ function auditRows(channelId: string, decisions: Decision[], dryRun: boolean) {
 		}));
 }
 
+function commentRows(channelId: string, decisions: Decision[]) {
+	return decisions.map((decision) => ({
+		id: decision.comment.id,
+		channelId,
+		authorChannelId: decision.comment.authorChannelId,
+		authorName: decision.comment.authorName,
+		text: decision.comment.text.slice(0, 500),
+		publishedAt: decision.comment.publishedAt,
+		status: decision.status,
+		decidedBy: decision.decidedBy,
+		matchedRuleId: decision.matchedRuleId,
+		aiScore: decision.aiScore,
+		createdAt: new Date().toISOString()
+	}));
+}
+
 async function decideNewComments(
 	channelId: string,
 	page: CommentPage,
@@ -178,23 +195,53 @@ async function decideNewComments(
 	);
 	const rulesForChannel = await db.select().from(rules).where(eq(rules.channelId, channelId)).all();
 	rulesForChannel.forEach(validateRule);
-	const decisions: Decision[] = [];
-	for (const comment of page.comments) {
-		if (!existingIds.has(comment.id)) decisions.push(await decide(comment, rulesForChannel, deadline));
-	}
-	return decisions;
+	return Promise.all(
+		page.comments
+			.filter((comment) => !existingIds.has(comment.id))
+			.map((comment) => decide(comment, rulesForChannel, deadline))
+	);
 }
 
-async function applyYoutubeActions(decisions: Decision[], accessToken: string, deadline?: number) {
-	const ids = (action: Decision['youtubeAction']) =>
-		decisions.filter((decision) => decision.youtubeAction === action).map((decision) => decision.comment.id);
-	const holds = ids('hold');
-	const rejections = ids('reject');
-	const bans = ids('ban');
-	if (holds.length) await setModerationStatus(holds, 'heldForReview', false, accessToken, deadline);
-	if (rejections.length) await setModerationStatus(rejections, 'rejected', false, accessToken, deadline);
-	if (bans.length) await setModerationStatus(bans, 'rejected', true, accessToken, deadline);
-	for (const commentId of ids('delete')) await deleteComment(commentId, accessToken, deadline);
+async function persistDecisions(channelId: string, decisions: Decision[]) {
+	if (!decisions.length) return;
+	await db.transaction(async (transaction) => {
+		await transaction.insert(comments).values(commentRows(channelId, decisions));
+		const audits = auditRows(channelId, decisions, false);
+		if (audits.length) await transaction.insert(auditLog).values(audits);
+	});
+}
+
+async function applyModerationAction(
+	decisions: Decision[],
+	status: 'heldForReview' | 'rejected',
+	banAuthor: boolean,
+	accessToken: string,
+	deadline: number | undefined,
+	onSuccess: (decisions: Decision[]) => Promise<void>
+) {
+	for (let index = 0; index < decisions.length; index += 50) {
+		const batch = decisions.slice(index, index + 50);
+		assertBeforeDeadline(deadline);
+		await setModerationStatus(batch.map((decision) => decision.comment.id), status, banAuthor, accessToken, deadline);
+		await onSuccess(batch);
+	}
+}
+
+async function applyYoutubeActions(
+	decisions: Decision[],
+	accessToken: string,
+	deadline: number | undefined,
+	onSuccess: (decisions: Decision[]) => Promise<void>
+) {
+	const selected = (action: Decision['youtubeAction']) => decisions.filter((decision) => decision.youtubeAction === action);
+	await applyModerationAction(selected('hold'), 'heldForReview', false, accessToken, deadline, onSuccess);
+	await applyModerationAction(selected('reject'), 'rejected', false, accessToken, deadline, onSuccess);
+	await applyModerationAction(selected('ban'), 'rejected', true, accessToken, deadline, onSuccess);
+	for (const decision of selected('delete')) {
+		assertBeforeDeadline(deadline);
+		await deleteComment(decision.comment.id, accessToken, deadline);
+		await onSuccess([decision]);
+	}
 }
 
 async function persistResults(
@@ -208,21 +255,7 @@ async function persistResults(
 	const complete = page.reachedCursor || !page.nextPageToken;
 	await db.transaction(async (transaction) => {
 		if (decisions.length) {
-			await transaction.insert(comments).values(
-				decisions.map((decision) => ({
-					id: decision.comment.id,
-					channelId,
-					authorChannelId: decision.comment.authorChannelId,
-					authorName: decision.comment.authorName,
-					text: decision.comment.text,
-					publishedAt: decision.comment.publishedAt,
-					status: decision.status,
-					decidedBy: decision.decidedBy,
-					matchedRuleId: decision.matchedRuleId,
-					aiScore: decision.aiScore,
-					createdAt: new Date().toISOString()
-				}))
-			);
+			await transaction.insert(comments).values(commentRows(channelId, decisions));
 		}
 		const audits = auditRows(channelId, decisions, false);
 		if (audits.length) await transaction.insert(auditLog).values(audits);
@@ -258,10 +291,10 @@ export async function runChannel(
 		const channel = await db.select().from(channels).where(eq(channels.id, channelId)).get();
 		if (!channel) throw new Error(`channel not found: ${channelId}`);
 		if (!channel.active) return emptyResult();
-		if (process.env.DRY_RUN !== 'true' && process.env.DRY_RUN !== 'false') {
+		if (env.DRY_RUN !== 'true' && env.DRY_RUN !== 'false') {
 			throw new Error('DRY_RUN must be true or false');
 		}
-		dryRun = process.env.DRY_RUN === 'true';
+		dryRun = env.DRY_RUN === 'true';
 		const accessToken = await refreshAccessToken(decrypt(channel.refreshTokenEnc), deadline);
 		const page = await fetchNewComments(channelId, accessToken, channel.cursor, {
 			maxPages,
@@ -271,18 +304,25 @@ export async function runChannel(
 		fetched = page.comments.length;
 
 		const decisions = await decideNewComments(channelId, page, deadline);
-		acted = decisions.filter((decision) => decision.youtubeAction).length;
 		queued = decisions.filter((decision) => decision.auditAction === 'queue').length;
 
 		if (dryRun) {
+			acted = decisions.filter((decision) => decision.youtubeAction).length;
 			const audits = auditRows(channelId, decisions, true);
 			if (audits.length) await db.insert(auditLog).values(audits);
 			return { fetched, acted, queued, partial: false, skipped: false, dryRun };
 		}
 
-		await applyYoutubeActions(decisions, accessToken, deadline);
-		assertBeforeDeadline(deadline);
-		await persistResults(channelId, channel, page, decisions);
+		const persisted = new Set<string>();
+		// ponytail: remote mutations and database writes cannot share a transaction; persist after each successful request.
+		await applyYoutubeActions(decisions, accessToken, deadline, async (completed) => {
+			await persistDecisions(channelId, completed);
+			completed.forEach((decision) => {
+				persisted.add(decision.comment.id);
+			});
+			acted += completed.length;
+		});
+		await persistResults(channelId, channel, page, decisions.filter((decision) => !persisted.has(decision.comment.id)));
 		return { fetched, acted, queued, partial: false, skipped: false, dryRun };
 	} catch (error) {
 		if (error instanceof DeadlineExceededError) {

@@ -19,7 +19,7 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import { fetchNewComments, setModerationStatus } from './youtube';
 
-function comment(id: string, publishedAt: string) {
+function comment(id: string, publishedAt: string, text = `Comment ${id}`) {
 	return {
 		id: `thread-${id}`,
 		snippet: {
@@ -28,7 +28,7 @@ function comment(id: string, publishedAt: string) {
 				snippet: {
 					authorChannelId: { value: `author-${id}` },
 					authorDisplayName: `Author ${id}`,
-					textDisplay: `Comment ${id}`,
+					textDisplay: text,
 					publishedAt
 				}
 			}
@@ -73,6 +73,18 @@ test('stops pagination when a comment is older than the cursor', async () => {
 	expect(fetch).toHaveBeenCalledTimes(1);
 	expect(result.comments.map((item) => item.id)).toEqual(['new']);
 	expect(result).toMatchObject({ nextPageToken: null, reachedCursor: true });
+});
+
+test('returns the complete comment text for moderation', async () => {
+	const text = 'x'.repeat(501);
+	const fetch = vi.fn().mockResolvedValue(page([
+		comment('long', '2026-01-04T00:00:00.000Z', text)
+	]));
+	vi.stubGlobal('fetch', fetch);
+
+	const result = await fetchNewComments('channel', 'token', null);
+
+	expect(result.comments[0]?.text).toBe(text);
 });
 
 test('batches moderation-status updates into groups of fifty', async () => {

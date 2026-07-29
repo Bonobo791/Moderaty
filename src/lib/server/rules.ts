@@ -18,6 +18,7 @@
 
 const RULE_TYPES = ['keyword', 'regex', 'user'] as const;
 const RULE_ACTIONS = ['hold', 'reject', 'delete', 'ban'] as const;
+const MAX_REGEX_PATTERN_LENGTH = 256;
 
 export type RuleAction = (typeof RULE_ACTIONS)[number];
 
@@ -28,8 +29,56 @@ export interface RuleRow {
 	action: string;
 }
 
+function quantifier(character: string | undefined): boolean {
+	return character === '*' || character === '+' || character === '?' || character === '{';
+}
+
+function unsafeRegex(pattern: string): boolean {
+	if (pattern.length > MAX_REGEX_PATTERN_LENGTH) return true;
+	const groups: boolean[] = [];
+	let escaped = false;
+	let characterClass = false;
+	for (let index = 0; index < pattern.length; index++) {
+		const character = pattern[index]!;
+		if (escaped) {
+			if (/[1-9]/.test(character)) return true;
+			escaped = false;
+			continue;
+		}
+		if (character === '\\') {
+			escaped = true;
+			continue;
+		}
+		if (character === '[') {
+			characterClass = true;
+			continue;
+		}
+		if (character === ']') {
+			characterClass = false;
+			continue;
+		}
+		if (characterClass) continue;
+		if (character === '(') {
+			groups.push(false);
+			continue;
+		}
+		if (character === ')') {
+			const containsQuantifier = groups.pop() ?? false;
+			if (containsQuantifier && quantifier(pattern[index + 1])) return true;
+			if (containsQuantifier && groups.length) groups[groups.length - 1] = true;
+			continue;
+		}
+		if (quantifier(character) && pattern[index - 1] !== '(' && groups.length) {
+			groups[groups.length - 1] = true;
+		}
+	}
+	return false;
+}
+
 function regex(rule: RuleRow): RegExp {
+	if (unsafeRegex(rule.pattern)) throw new Error(`rule #${rule.id} has an unsafe regex`);
 	try {
+		// nosemgrep: unsafeRegex rejects bounded, backreferencing, and nested-quantifier patterns.
 		return new RegExp(rule.pattern, 'i');
 	} catch (error) {
 		throw new Error(`rule #${rule.id} has an invalid regex: ${error instanceof Error ? error.message : String(error)}`);

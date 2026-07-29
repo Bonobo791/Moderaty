@@ -86,7 +86,7 @@ function parseComment(item: unknown, index: number): NewComment {
 			`${context}.authorChannelId.value`
 		),
 		authorName: requiredString(snippet.authorDisplayName, `${context}.authorDisplayName`),
-		text: requiredString(snippet.textDisplay, `${context}.textDisplay`).slice(0, 500),
+		text: requiredString(snippet.textDisplay, `${context}.textDisplay`),
 		publishedAt
 	};
 }
@@ -140,7 +140,7 @@ async function ytFetch(
 /**
  * Fetches recent top-level comments for a YouTube channel.
  *
- * Stops when the cursor boundary is reached or the configured page limit is exhausted. Comment text is limited to 500 characters.
+ * Stops when the cursor boundary is reached or the configured page limit is exhausted.
  *
  * @param cursor - Timestamp boundary; comments published earlier than this value are excluded.
  * @param maxPages - Maximum number of API pages to fetch.

@@ -8,6 +8,7 @@
 		"npm": ">=11"
 	},
 	"scripts": {
+		"db:migrate": "drizzle-kit migrate",
 		"dev": "vite dev",
 		"build": "vite build",
 		"preview": "vite preview",

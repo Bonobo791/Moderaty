@@ -33,6 +33,7 @@ export default defineConfig({
 	// installed driver; the 'sqlite' dialect requires better-sqlite3 and fails silently here.
 	dialect: 'turso',
 	schema: './src/lib/server/db/schema.ts',
+	out: './drizzle',
 	dbCredentials: {
 		url: databaseUrl,
 		authToken: authToken || undefined

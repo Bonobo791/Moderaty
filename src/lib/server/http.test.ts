@@ -21,6 +21,8 @@ import { fetchWithRetry } from './http';
 
 afterEach(() => {
 	vi.unstubAllGlobals();
+	vi.useRealTimers();
+	vi.restoreAllMocks();
 });
 
 test('retries transient responses but not client errors', async () => {
@@ -42,4 +44,28 @@ test('retries transient responses but not client errors', async () => {
 	});
 	expect((await fetchWithRetry('https://example.test')).status).toBe(400);
 	expect(calls).toBe(1);
+});
+
+test('caps retry sleeps at the remaining deadline', async () => {
+	vi.useFakeTimers();
+	const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', {
+		status: 429,
+		headers: { 'Retry-After': '60' }
+	})));
+
+	void fetchWithRetry('https://example.test', {}, Date.now() + 10).catch(() => undefined);
+	await vi.advanceTimersByTimeAsync(0);
+
+	expect(setTimeoutSpy).toHaveBeenLastCalledWith(expect.any(Function), 10);
+});
+
+test('fails before fetching when the deadline has passed', async () => {
+	const fetch = vi.fn();
+	vi.stubGlobal('fetch', fetch);
+
+	await expect(fetchWithRetry('https://example.test', {}, Date.now())).rejects.toThrow(
+		'request deadline exceeded'
+	);
+	expect(fetch).not.toHaveBeenCalled();
 });

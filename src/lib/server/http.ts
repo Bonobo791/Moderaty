@@ -63,6 +63,30 @@ function retryable(response: Response | undefined): boolean {
 	return response === undefined || response.status === 429 || response.status >= 500;
 }
 
+function requestTimeout(deadline?: number): number {
+	const remaining = deadline === undefined ? TIMEOUT_MS : Math.min(TIMEOUT_MS, deadline - Date.now());
+	if (remaining <= 0) throw new DeadlineExceededError();
+	return remaining;
+}
+
+type FetchAttempt = { response: Response } | { error: unknown };
+
+async function fetchAttempt(input: RequestInfo | URL, init: RequestInit, deadline?: number): Promise<FetchAttempt> {
+	try {
+		return {
+			response: await fetch(input, { ...init, signal: AbortSignal.timeout(requestTimeout(deadline)) })
+		};
+	} catch (error) {
+		if (deadline !== undefined && Date.now() >= deadline) throw new DeadlineExceededError();
+		return { error };
+	}
+}
+
+function boundedRetryDelay(response: Response | undefined, retry: number, deadline?: number): number {
+	const delay = retryDelay(response, retry);
+	return deadline === undefined ? delay : Math.min(delay, Math.max(0, deadline - Date.now()));
+}
+
 /**
  * Fetches a resource with bounded retries and optional deadline enforcement.
  *
@@ -77,18 +101,13 @@ export async function fetchWithRetry(
 	deadline?: number
 ): Promise<Response> {
 	for (let retry = 0; ; retry++) {
-		assertBeforeDeadline(deadline);
-		const remaining = deadline === undefined ? TIMEOUT_MS : Math.min(TIMEOUT_MS, deadline - Date.now());
-		if (remaining <= 0) throw new DeadlineExceededError();
-		let response: Response | undefined;
-		try {
-			response = await fetch(input, { ...init, signal: AbortSignal.timeout(remaining) });
-		} catch (error) {
-			if (deadline !== undefined && Date.now() >= deadline) throw new DeadlineExceededError();
-			if (retry === MAX_RETRIES) throw error;
-		}
+		const attempt = await fetchAttempt(input, init, deadline);
+		const response = 'response' in attempt ? attempt.response : undefined;
 		if (response && !retryable(response)) return response;
-		if (retry === MAX_RETRIES) return response!;
-		await new Promise((resolve) => setTimeout(resolve, retryDelay(response, retry)));
+		if (retry === MAX_RETRIES) {
+			if ('error' in attempt) throw attempt.error;
+			return response!;
+		}
+		await new Promise((resolve) => setTimeout(resolve, boundedRetryDelay(response, retry, deadline)));
 	}
 }

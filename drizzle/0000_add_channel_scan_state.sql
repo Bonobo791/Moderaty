@@ -16,6 +16,6 @@
 --
 -- Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-ALTER TABLE `channels` ADD `next_page_token` text;
+ALTER TABLE channels ADD next_page_token text;
 --> statement-breakpoint
-ALTER TABLE `channels` ADD `scan_cursor` text;
+ALTER TABLE channels ADD scan_cursor text;

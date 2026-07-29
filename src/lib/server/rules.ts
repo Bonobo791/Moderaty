@@ -41,7 +41,7 @@ function unsafeRegex(pattern: string): boolean {
 	for (let index = 0; index < pattern.length; index++) {
 		const character = pattern[index]!;
 		if (escaped) {
-			if (/[1-9]/.test(character)) return true;
+			if (/[1-9]/.test(character) || (character === 'k' && pattern[index + 1] === '<')) return true;
 			escaped = false;
 			continue;
 		}

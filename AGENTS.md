@@ -10,6 +10,11 @@ contact@marketingprowess.simplelogin.com — see COMMERCIAL.md.
 
 # Repository Guidelines
 
+## Agent Role
+
+Act as a pragmatic repository contributor: make the smallest safe change,
+validate it, and leave unrelated work untouched.
+
 ## Project Structure
 
 Moderaty is a SvelteKit 2 app using Svelte 5 and TypeScript. Routes live in
@@ -31,18 +36,21 @@ No test framework exists yet; `npm run check` is required before a PR.
 
 ## Code Style
 
-Use TypeScript and Svelte 5 runes only (`$state`, `$derived`, `$props`, and
-`{@render}`); never introduce `export let`, `$:`, or `<slot>`. Use tabs and
-SvelteKit `+page`, `+layout`, and `+server` conventions. Prefer `$lib` imports,
-platform APIs, and installed dependencies.
+Use TypeScript and Svelte 5 runes (`$state`, `$derived`, `$props`, and
+`{@render}`) for new code. Keep legacy `export let`, `$:`, or `<slot>` syntax
+only for a documented, maintainer-approved compatibility exception. Use tabs
+and SvelteKit `+page`, `+layout`, and `+server` conventions. Prefer `$lib`
+imports, platform APIs, and installed dependencies.
 
 ## Commits, Security, and Licensing
 
 Use focused, imperative commits such as `step N: <change>` or `chore: <change>`.
 PRs need behavior, verification, linked issues, and UI screenshots where useful;
-contributors must complete the CLA. Never commit secrets: document values in
-`.env.example`, keep `.env` and `.env.*` ignored, and reserve `.env.test` for
-test configuration. Preserve [LICENSE](LICENSE) and [COMMERCIAL.md](COMMERCIAL.md).
+contributors must complete the Contributor License Agreement (CLA). Keep secrets
+out of commits: document non-sensitive values in `.env.example`, keep `.env` and
+`.env.*` ignored, and reserve `.env.test` for test configuration. Commit a
+secret-like test value only when it is synthetic and a maintainer approves the
+documented exception. Preserve [LICENSE](LICENSE) and [COMMERCIAL.md](COMMERCIAL.md).
 
 ## License Headers
 

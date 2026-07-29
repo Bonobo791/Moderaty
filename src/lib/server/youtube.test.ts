@@ -107,6 +107,43 @@ test('returns the complete comment text for moderation', async () => {
 	expect(result.comments[0]?.text).toBe(text);
 });
 
+test('normalizes missing author metadata instead of failing the page', async () => {
+	const deletedAuthor = comment('deleted', '2026-01-04T00:00:00.000Z');
+	delete (deletedAuthor.snippet.topLevelComment.snippet as Record<string, unknown>).authorChannelId;
+	delete (deletedAuthor.snippet.topLevelComment.snippet as Record<string, unknown>).authorDisplayName;
+	const fetch = vi.fn().mockResolvedValue(page([
+		deletedAuthor,
+		comment('normal', '2026-01-03T00:00:00.000Z')
+	]));
+	vi.stubGlobal('fetch', fetch);
+	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+	const result = await fetchNewComments('channel', 'token', null);
+
+	expect(result.comments.map((item) => item.id)).toEqual(['deleted', 'normal']);
+	expect(result.comments[0]).toMatchObject({ authorChannelId: '', authorName: '[unavailable author]' });
+	expect(warn).toHaveBeenCalled();
+});
+
+test('skips a malformed comment without failing the page', async () => {
+	const malformed = comment('malformed', '2026-01-04T00:00:00.000Z');
+	delete (malformed.snippet.topLevelComment.snippet as Record<string, unknown>).textDisplay;
+	const fetch = vi.fn()
+		.mockResolvedValueOnce(page([
+			malformed,
+			comment('normal', '2026-01-03T00:00:00.000Z')
+		], 'page-2'))
+		.mockResolvedValueOnce(page([comment('next', '2026-01-02T00:00:00.000Z')]));
+	vi.stubGlobal('fetch', fetch);
+	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+	const result = await fetchNewComments('channel', 'token', null);
+
+	expect(result.comments.map((item) => item.id)).toEqual(['normal', 'next']);
+	expect(result).toMatchObject({ nextPageToken: null, reachedCursor: false });
+	expect(warn).toHaveBeenCalled();
+});
+
 test('batches moderation-status updates into groups of fifty', async () => {
 	const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
 	vi.stubGlobal('fetch', fetch);

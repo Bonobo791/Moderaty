@@ -26,6 +26,8 @@ export const channels = sqliteTable('channels', {
 	cursor: text('cursor'), // ISO timestamp of newest comment seen; null = never polled
 	nextPageToken: text('next_page_token'), // YouTube continuation token for an incomplete scan
 	scanCursor: text('scan_cursor'), // high-water timestamp to commit once an incomplete scan ends
+	lastRunAt: text('last_run_at'), // ISO timestamp of last cron run; rotation orders by it ASC (NULLs first)
+	leaseExpiresAt: text('lease_expires_at'), // expiring cron claim; null or past = claimable
 	active: integer('active').notNull().default(1),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 });

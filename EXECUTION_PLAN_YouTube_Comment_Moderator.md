@@ -1279,6 +1279,13 @@ already diverged from Step 5 (`scanCursor`/`nextPageToken`, no `lastRunAt` yet).
 
 **If this fails:** stop, paste the full error, report back.
 
+**Trigger (deployment config):** the endpoint does not run on its own — an external
+scheduler must call `GET /api/cron?secret=$CRON_SECRET` on an interval (e.g. every
+minute; each invocation processes exactly one channel, so the interval sets the
+per-channel scan cadence). Options: a Netlify Scheduled Function, or any external
+cron service (e.g. cron-job.org, GitHub Actions schedule) hitting the deployed URL.
+Set `CRON_SECRET` in the Netlify environment.
+
 ---
 
 ### Phase F — UI (Steps 18–23)

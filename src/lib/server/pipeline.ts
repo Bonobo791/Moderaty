@@ -206,7 +206,7 @@ async function decideNewComments(
 	channelId: string,
 	page: CommentPage,
 	deadline?: number
-): Promise<Decision[]> {
+): Promise<{ decisions: Decision[]; failures: string[] }> {
 	const existingIds = new Set(
 		page.comments.length
 			? (
@@ -220,11 +220,29 @@ async function decideNewComments(
 	);
 	const rulesForChannel = await db.select().from(rules).where(eq(rules.channelId, channelId)).all();
 	rulesForChannel.forEach(validateRule);
-	return Promise.all(
+	const settled = await Promise.allSettled(
 		page.comments
 			.filter((comment) => !existingIds.has(comment.id))
-			.map((comment) => decide(comment, rulesForChannel, deadline))
+			.map(async (comment) => {
+				try {
+					return await decide(comment, rulesForChannel, deadline);
+				} catch (error) {
+					if (error instanceof DeadlineExceededError) throw error;
+					throw new Error(`comment ${comment.id}: ${error instanceof Error ? error.message : String(error)}`);
+				}
+			})
 	);
+	const decisions: Decision[] = [];
+	const failures: string[] = [];
+	for (const result of settled) {
+		if (result.status === 'fulfilled') {
+			decisions.push(result.value);
+			continue;
+		}
+		if (result.reason instanceof DeadlineExceededError) throw result.reason;
+		failures.push(result.reason instanceof Error ? result.reason.message : String(result.reason));
+	}
+	return { decisions, failures };
 }
 
 async function stageDecisions(channelId: string, decisions: Decision[]) {
@@ -256,6 +274,19 @@ async function markDispatched(actions: OutstandingAction[]) {
 		.update(moderationActions)
 		.set({ state: 'dispatched', lastAttemptAt: new Date().toISOString() })
 		.where(inArray(moderationActions.commentId, actions.map((action) => action.commentId)));
+}
+
+async function claimPendingActions(actions: OutstandingAction[]): Promise<Set<string>> {
+	if (!actions.length) return new Set();
+	const claimed = await db
+		.update(moderationActions)
+		.set({ state: 'dispatched' })
+		.where(and(
+			inArray(moderationActions.commentId, actions.map((action) => action.commentId)),
+			eq(moderationActions.state, 'pending')
+		))
+		.returning({ commentId: moderationActions.commentId });
+	return new Set(claimed.map((row) => row.commentId));
 }
 
 async function completeActions(actions: OutstandingAction[]) {
@@ -345,10 +376,13 @@ async function processOutstandingActions(channelId: string, accessToken: string,
 			inArray(moderationActions.state, ['pending', 'dispatched'])
 		))
 		.all()).map(outstandingAction);
+	const claimed = await claimPendingActions(actions.filter((action) => action.state === 'pending'));
 	const ready: OutstandingAction[] = [];
 	for (const action of actions) {
 		if (action.state === 'pending') {
-			ready.push(action);
+			// Only actions this run claimed may be applied; an empty claim means a
+			// concurrent run owns the action, so skip it to avoid duplicate enforcement.
+			if (claimed.has(action.commentId)) ready.push({ ...action, state: 'dispatched' });
 			continue;
 		}
 		let result: 'completed' | 'retry' | 'manual_review' = 'manual_review';
@@ -379,7 +413,15 @@ async function persistResults(
 	channel: typeof channels.$inferSelect,
 	page: CommentPage
 ) {
-	const newest = page.comments.map((comment) => comment.publishedAt).sort().at(-1) ?? channel.cursor;
+	// Compare instants, not strings: timestamps may carry different UTC offsets,
+	// so lexicographic order can select an older comment and move the cursor back.
+	const newest = page.comments.reduce<string | null>(
+		(best, comment) =>
+			best === null || Date.parse(comment.publishedAt) > Date.parse(best)
+				? comment.publishedAt
+				: best,
+		null
+	) ?? channel.cursor;
 	const scanCursor = channel.scanCursor ?? newest;
 	const complete = page.reachedCursor || !page.nextPageToken;
 	await db
@@ -425,17 +467,25 @@ export async function runChannel(
 		});
 		fetched = page.comments.length;
 
-		const decisions = await decideNewComments(channelId, page, deadline);
+		const { decisions, failures } = await decideNewComments(channelId, page, deadline);
 		queued = decisions.filter((decision) => decision.auditAction === 'queue').length;
 
 		if (dryRun) {
 			acted = decisions.filter((decision) => decision.youtubeAction).length;
 			const audits = auditRows(channelId, decisions, true);
 			if (audits.length) await db.insert(auditLog).values(audits);
+		} else {
+			await stageDecisions(channelId, decisions);
+		}
+		// Fail loudly only after successful decisions are staged, and before the
+		// cursor advances, so the next run retries just the failed comments.
+		if (failures.length) {
+			throw new Error(`moderation decision failed for ${failures.length} comment(s): ${failures.join('; ')}`);
+		}
+		if (dryRun) {
 			return { fetched, acted, queued, partial: false, skipped: false, dryRun };
 		}
 
-		await stageDecisions(channelId, decisions);
 		acted = await processOutstandingActions(channelId, accessToken, deadline);
 		await persistResults(channelId, channel, page);
 		return { fetched, acted, queued, partial: false, skipped: false, dryRun };

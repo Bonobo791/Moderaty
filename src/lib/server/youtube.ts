@@ -73,22 +73,41 @@ async function jsonResponse(response: Response, operation: string): Promise<unkn
 	}
 }
 
-function parseComment(item: unknown, index: number): NewComment {
+function optionalString(value: unknown): string | null {
+	return typeof value === 'string' && value ? value : null;
+}
+
+function parseComment(item: unknown, index: number): NewComment | null {
 	const context = `commentThreads.list response item ${index}`;
 	const thread = object(item, context);
 	const topLevelComment = object(object(thread.snippet, `${context}.snippet`).topLevelComment, `${context}.topLevelComment`);
 	const snippet = object(topLevelComment.snippet, `${context}.topLevelComment.snippet`);
-	const publishedAt = requiredString(snippet.publishedAt, `${context}.publishedAt`);
-	if (Number.isNaN(Date.parse(publishedAt))) throw new Error(`${context}.publishedAt is invalid`);
+	const id = optionalString(topLevelComment.id);
+	const threadId = optionalString(thread.id);
+	const publishedAt = optionalString(snippet.publishedAt);
+	const text = optionalString(snippet.textDisplay);
+	if (!id || !threadId || !text || !publishedAt || Number.isNaN(Date.parse(publishedAt))) {
+		console.warn(`${context} is malformed (missing id, text, or a valid publishedAt); skipping it`);
+		return null;
+	}
+	const channelIdObject = snippet.authorChannelId;
+	const authorChannelId =
+		channelIdObject && typeof channelIdObject === 'object' && !Array.isArray(channelIdObject)
+			? optionalString((channelIdObject as JsonObject).value)
+			: null;
+	if (authorChannelId === null) {
+		console.warn(`${context} (comment ${id}) has no authorChannelId; the author channel may be deleted`);
+	}
+	const authorName = optionalString(snippet.authorDisplayName);
+	if (authorName === null) {
+		console.warn(`${context} (comment ${id}) has no authorDisplayName; the author channel may be deleted`);
+	}
 	return {
-		id: requiredString(topLevelComment.id, `${context}.topLevelComment.id`),
-		threadId: requiredString(thread.id, `${context}.id`),
-		authorChannelId: requiredString(
-			object(snippet.authorChannelId, `${context}.authorChannelId`).value,
-			`${context}.authorChannelId.value`
-		),
-		authorName: requiredString(snippet.authorDisplayName, `${context}.authorDisplayName`),
-		text: requiredString(snippet.textDisplay, `${context}.textDisplay`),
+		id,
+		threadId,
+		authorChannelId: authorChannelId ?? '',
+		authorName: authorName ?? '[unavailable author]',
+		text,
 		publishedAt
 	};
 }
@@ -179,6 +198,7 @@ export async function fetchNewComments(
 		let reachedCursor = false;
 		for (const [index, item] of data.items.entries()) {
 			const comment = parseComment(item, index);
+			if (!comment) continue;
 			if (cursorMs !== null && Date.parse(comment.publishedAt) < cursorMs) {
 				reachedCursor = true;
 				break;

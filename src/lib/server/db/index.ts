@@ -27,7 +27,8 @@ const authToken = env.TURSO_AUTH_TOKEN;
 if (!databaseUrl) {
 	throw new Error('TURSO_DATABASE_URL is required');
 }
-if (!databaseUrl.startsWith('file:') && !authToken) {
+const isLocalUrl = databaseUrl === ':memory:' || databaseUrl.startsWith('file:');
+if (!isLocalUrl && !authToken) {
 	throw new Error('TURSO_AUTH_TOKEN is required for remote databases');
 }
 

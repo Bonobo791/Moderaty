@@ -1,20 +1,27 @@
 {
-	"version": "6",
-	"dialect": "turso",
-	"entries": [
-		{
-			"idx": 0,
-			"version": "6",
-			"when": 1785326400000,
-			"tag": "0000_add_channel_scan_state",
-			"breakpoints": true
-		},
-		{
-			"idx": 1,
-			"version": "6",
-			"when": 1785346341284,
-			"tag": "0001_add_moderation_actions",
-			"breakpoints": true
-		}
-	]
+  "version": "6",
+  "dialect": "turso",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1785326400000,
+      "tag": "0000_add_channel_scan_state",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1785346341284,
+      "tag": "0001_add_moderation_actions",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1785351852611,
+      "tag": "0002_add_channel_cron_lease",
+      "breakpoints": true
+    }
+  ]
 }

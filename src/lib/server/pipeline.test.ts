@@ -29,7 +29,9 @@ const mocks = vi.hoisted(() => {
 			moderationActions: undefined as unknown
 		},
 		channel: null as unknown,
+		channelUpdates: [] as Record<string, unknown>[],
 		existingIds: [] as string[],
+		unclaimedIds: [] as string[],
 		ruleRows: [] as unknown[],
 		insertedComments: [] as Record<string, unknown>[],
 		insertedAudits: [] as Record<string, unknown>[],
@@ -66,13 +68,28 @@ const mocks = vi.hoisted(() => {
 		insert: (table: unknown) => ({ values: async (values: unknown) => store(table, values) }),
 		update: (table: unknown) => ({
 			set: (values: Record<string, unknown>) => ({
-				where: async () => {
-					if (table !== state.tables.moderationActions || !('state' in values)) return;
+				where: () => {
+					const none = { returning: async () => [] as Record<string, unknown>[] };
+					if (table === state.tables.channels) {
+						state.channelUpdates.push(values);
+						return none;
+					}
+					if (table !== state.tables.moderationActions || !('state' in values)) return none;
+					if (values.state === 'dispatched' && !('lastAttemptAt' in values)) {
+						// Atomic claim: only pending rows transition, and the claimed ids
+						// come back via RETURNING. Ids in unclaimedIds simulate a
+						// concurrent run that claimed the row first.
+						const claimed = state.moderationActions.filter((item) =>
+							item.state === 'pending' && !state.unclaimedIds.includes(String(item.commentId)));
+						claimed.forEach((item) => Object.assign(item, values));
+						return { returning: async () => claimed.map((item) => ({ commentId: item.commentId })) };
+					}
 					const action = state.moderationActions.find((item) => {
 						if (values.state === 'dispatched') return item.state === 'pending';
 						return item.state === 'dispatched';
 					});
 					if (action) Object.assign(action, values);
+					return none;
 				}
 			})
 		})
@@ -165,7 +182,9 @@ beforeEach(() => {
 		active: 1,
 		createdAt: '2026-01-01T00:00:00.000Z'
 	};
+	mocks.state.channelUpdates = [];
 	mocks.state.existingIds = [];
+	mocks.state.unclaimedIds = [];
 	mocks.state.ruleRows = [];
 	mocks.state.insertedComments = [];
 	mocks.state.insertedAudits = [];
@@ -201,6 +220,25 @@ test.each([
 	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status })]);
 	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(acted);
 	expect(result).toMatchObject({ fetched: 1, acted, queued, partial: false, skipped: false, dryRun: false });
+});
+
+test('persists the chronologically newest timestamp when UTC offsets differ', async () => {
+	mocks.scoreComment.mockResolvedValue(moderation(0));
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [
+			// Lexicographically later but an older instant (2026-01-03T23:30:00Z).
+			newComment({ id: 'offset', publishedAt: '2026-01-04T05:00:00+05:30' }),
+			newComment({ id: 'newest', publishedAt: '2026-01-03T23:45:00.000Z' })
+		],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	await runChannel('channel');
+
+	expect(mocks.state.channelUpdates).toContainEqual(
+		expect.objectContaining({ cursor: '2026-01-03T23:45:00.000Z' })
+	);
 });
 
 test('does not call YouTube moderation or deletion APIs during a dry run', async () => {
@@ -282,6 +320,36 @@ test('records successful remote actions before a later action fails', async () =
 	expect(mocks.state.insertedAudits).toEqual([expect.objectContaining({ commentId: 'held', action: 'hold' })]);
 });
 
+test('persists successful decisions and retries only the failed comment on the next run', async () => {
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ id: 'good', text: 'good' }), newComment({ id: 'bad', text: 'bad' })],
+		nextPageToken: 'next-page',
+		reachedCursor: false
+	});
+	mocks.scoreComment.mockImplementation(async (text: string) => {
+		if (text === 'bad') throw new Error('OpenAI overloaded');
+		return moderation(0.34);
+	});
+
+	await expect(runChannel('channel')).rejects.toThrow(
+		'moderation decision failed for 1 comment(s): comment bad: OpenAI overloaded'
+	);
+
+	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'good', status: 'approved' })]);
+	expect(mocks.db.update).not.toHaveBeenCalled();
+
+	mocks.scoreComment.mockResolvedValue(moderation(0.34));
+	const result = await runChannel('channel');
+
+	expect(mocks.scoreComment).toHaveBeenCalledTimes(3);
+	expect(mocks.scoreComment).toHaveBeenLastCalledWith('bad', undefined);
+	expect(mocks.state.insertedComments).toEqual(expect.arrayContaining([
+		expect.objectContaining({ id: 'good', status: 'approved' }),
+		expect.objectContaining({ id: 'bad', status: 'approved' })
+	]));
+	expect(result).toMatchObject({ fetched: 2, partial: false, skipped: false, dryRun: false });
+});
+
 test('verifies a dispatched action after its completion transaction fails', async () => {
 	mocks.scoreComment.mockResolvedValue(moderation(0.85));
 	mocks.db.transaction
@@ -358,4 +426,20 @@ test('keeps a dispatched action retriable when verification fails transiently', 
 		commentId: 'comment',
 		state: 'completed'
 	})]);
+});
+
+test('skips a pending action already claimed by a concurrent run', async () => {
+	mocks.scoreComment.mockResolvedValue(moderation(0.85));
+	mocks.state.unclaimedIds = ['comment'];
+
+	const result = await runChannel('channel');
+
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expect(mocks.state.insertedAudits).toEqual([]);
+	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({
+		commentId: 'comment',
+		state: 'pending'
+	})]);
+	expect(result).toMatchObject({ fetched: 1, acted: 0, skipped: false, dryRun: false });
 });

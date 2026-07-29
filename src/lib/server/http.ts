@@ -73,10 +73,11 @@ type FetchAttempt = { response: Response } | { error: unknown };
 
 async function fetchAttempt(input: RequestInfo | URL, init: RequestInit, deadline?: number): Promise<FetchAttempt> {
 	try {
-		return {
-			response: await fetch(input, { ...init, signal: AbortSignal.timeout(requestTimeout(deadline)) })
-		};
+		const timeout = AbortSignal.timeout(requestTimeout(deadline));
+		const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+		return { response: await fetch(input, { ...init, signal }) };
 	} catch (error) {
+		if (init.signal?.aborted) throw error;
 		if (deadline !== undefined && Date.now() >= deadline) throw new DeadlineExceededError();
 		return { error };
 	}

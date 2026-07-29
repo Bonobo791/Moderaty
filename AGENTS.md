@@ -10,6 +10,7 @@ Always fail loudly.
 NEVER write fallbacks that are silent.
 ALWAYS write fallbacks that are loud, log to the server, and show to the user.
 Always run codacy before committing any work.
+When writing tests, do not test the mock, test the functionality and logic.
 
 ## Project Structure
 

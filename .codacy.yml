@@ -1,0 +1,10 @@
+exclude_paths:
+  - 'svelte.config.js'
+  - '.svelte-kit/**'
+  - 'build/**'
+  - 'node_modules/**'
+engines:
+  agentlinter:
+    exclude_paths:
+      - 'AGENTS.md'
+      - 'package-lock.json'

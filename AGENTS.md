@@ -10,7 +10,46 @@ Always fail loudly.
 NEVER write fallbacks that are silent.
 ALWAYS write fallbacks that are loud, log to the server, and show to the user.
 Always run codacy before committing any work.
-When writing tests, do not test the mock, test the functionality and logic.
+Every test must fail if the real logic is wrong. If a test still passes when the function returns garbage, rewrite the test.
+DO NOT copy and paste code. DO create reusable code.
+
+## Review Rules (learned from PR #4)
+
+Security:
+
+- Never return secrets, tokens, or raw third-party API responses to the
+  client. Log full details on the server; return a generic error message.
+- OAuth flows must use a `state` parameter: random value, HttpOnly cookie,
+  verified in the callback.
+- Routes that enroll, modify, or trigger privileged work must authenticate
+  the caller and check ownership before acting.
+
+Reliability:
+
+- Validate required environment variables at handler start and throw a
+  descriptive `error(500, ...)`; never use non-null assertions (`env.X!`).
+  Failing loudly means failing with a clear message.
+- In SvelteKit server code, read env vars via `$env/dynamic/private`
+  (or `$env/static/private`), never `process.env`.
+- Check `res.ok` before calling `.json()` on any external API response,
+  and fail loudly on non-OK statuses.
+- Build URLs with `new URL(path, base)` instead of string interpolation.
+
+Architecture:
+
+- Never replace an existing concurrency/scaling mechanism (leases, queues,
+  batching) with a simpler synchronous loop. If a plan step conflicts with
+  merged behavior, stop and reconcile with main instead of overwriting it.
+- Cron/background work must isolate per-item failures and stay within
+  serverless time limits.
+
+Process:
+
+- Keep PR title, description, and diff in sync; do not merge while a step's
+  Verify failed or reviewer HIGH/P1 findings are unresolved.
+- New complex server logic ships with tests for behavior (token exchange
+  failure paths, auth rejection, per-channel error capture), per the
+  existing test rule.
 
 ## Project Structure
 
@@ -30,7 +69,10 @@ Use Node 24 and npm 11.
 - `npm run build` — create the Netlify deployment build.
 - `npm run preview` — serve the production build locally.
 
-No test framework exists yet; `npm run check` is required before a PR.
+- `npm run test` — run the Vitest suite (see
+  `src/routes/api/auth/google/oauth.test.ts`).
+
+`npm run check` and `npm run test` are required before a PR.
 
 ## Code Style
 

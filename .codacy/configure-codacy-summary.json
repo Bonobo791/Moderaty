@@ -1,32 +1,72 @@
 {
   "summary": {
-    "enabledPatterns": { "before": 0, "after": 2554 },
-    "enabledTools": { "before": 0, "after": 11 },
-    "issues": { "before": 0, "after": 23 },
-    "analysisRuntime": { "before": null, "after": 9604 }
+    "enabledPatterns": { "before": 5006, "after": 442 },
+    "enabledTools": { "before": 16, "after": 3 },
+    "issues": { "before": 37, "after": 13 },
+    "analysisRuntime": { "before": null, "after": 7102 }
   },
-  "toolChanges": [],
-  "patternChanges": [],
-  "fileExclusions": {
-    "global": ["package-lock.json"],
-    "perTool": {
-      "Agentlinter": ["AGENTS.md"]
-    }
-  },
+  "toolChanges": [
+    { "toolId": "jackson", "action": "disabled", "reason": "No JSON schema workload requires this analyzer.", "patternsAffected": 2 },
+    { "toolId": "spectral", "action": "disabled", "reason": "No OpenAPI or AsyncAPI specifications are present.", "patternsAffected": 71 },
+    { "toolId": "PMD7", "action": "disabled", "reason": "Java analyzer; this is a SvelteKit TypeScript project.", "patternsAffected": 202 },
+    { "toolId": "ESLint8", "action": "disabled", "reason": "Biome is the repository's configured JavaScript and TypeScript linter.", "patternsAffected": 883 },
+    { "toolId": "markdownlint", "action": "disabled", "reason": "All 19 findings were minor documentation-style conventions while High and Critical code findings remain.", "patternsAffected": 5 },
+    { "toolId": "Checkov", "action": "disabled", "reason": "No IaC workload is present and the required runtime cannot install locally.", "patternsAffected": 1348 },
+    { "toolId": "Agentlinter", "action": "disabled", "reason": "Its only relevant file is already excluded and it does not analyze application code.", "patternsAffected": 102 },
+    { "toolId": "TSQLLint", "action": "disabled", "reason": "The Drizzle migrations target SQLite, not T-SQL.", "patternsAffected": 23 },
+    { "toolId": "PMD", "action": "disabled", "reason": "No supported PMD language is present.", "patternsAffected": 195 },
+    { "toolId": "SQLFluff", "action": "disabled", "reason": "The small SQLite migration set does not justify a missing Python runtime.", "patternsAffected": 10 },
+    { "toolId": "ESLint9", "action": "disabled", "reason": "Biome provides the repository's native lint configuration without duplicated rules.", "patternsAffected": 1054 },
+    { "toolId": "SQLint", "action": "disabled", "reason": "The tool requires an unavailable Ruby runtime and is not needed for SQLite migrations.", "patternsAffected": 1 },
+    { "toolId": "Lizard", "action": "disabled", "reason": "The tool cannot install locally; retain the configured Biome checks instead.", "patternsAffected": 3 }
+  ],
+  "patternChanges": [
+    { "patternId": "Semgrep stack selection", "toolId": "Semgrep", "action": "updated", "reason": "Removed 377 non-JavaScript/TypeScript security patterns while retaining JavaScript, TypeScript, JSON, and generic coverage.", "delta": 0, "parameters": [] },
+    { "patternId": "Biome local configuration", "toolId": "Biome", "action": "updated", "reason": "Use the repository's biome.json rather than Codacy-managed rules.", "delta": 0, "parameters": [] },
+    { "patternId": "Trivy vulnerability coverage", "toolId": "Trivy", "action": "enabled", "reason": "Retains critical, high, medium, and minor dependency-vulnerability coverage plus malicious-package and secret detection.", "delta": 0, "parameters": [] }
+  ],
   "securityCoverage": {
     "deduplication": [],
-    "newCoverage": [],
+    "newCoverage": ["Trivy dependency vulnerability and malicious-package checks"],
     "noisyButKept": [
-      "Semgrep package-dependencies-check (6 High findings) remains enabled because package dependency integrity is a security concern."
+      "Semgrep package-dependencies-check (8 High findings) remains enabled because package dependency integrity is a security concern.",
+      "Semgrep non-literal RegExp checks (1 Critical and 1 High finding) remain enabled to detect ReDoS risk.",
+      "Semgrep unsafe-formatstring (1 High finding) remains enabled for server log safety."
     ]
   },
   "keyImprovements": [
-    "Configured 11 analyzers and 2,554 patterns for the SvelteKit TypeScript stack.",
-    "Excluded AGENTS.md from Agentlinter after its runtime-agent assumptions produced 30 false positives.",
-    "Retained Semgrep, Trivy, ESLint, Biome, and Markdown checks; the tuned scan reports 23 actionable findings."
+    "Reduced the local configuration from 16 tools and 5,006 patterns to 3 tools and 442 patterns.",
+    "Kept Semgrep, Trivy, and the repository's Biome configuration; the validated scan reports 13 actionable findings in 7.1 seconds.",
+    "Removed analyzers for absent stacks, duplicate linting, minor documentation conventions, and unavailable runtimes."
   ],
-  "localConfigTools": [],
-  "codacyYaml": "exclude_paths:\n  - 'svelte.config.js'\n  - '.svelte-kit/**'\n  - 'build/**'\n  - 'node_modules/**'\nengines:\n  agentlinter:\n    exclude_paths:\n      - 'AGENTS.md'\n",
-  "importResults": null,
-  "cloudVerification": null
+  "localConfigTools": [
+    {
+      "toolId": "Biome",
+      "configFile": "biome.json",
+      "issueCount": 2,
+      "note": "Biome findings are controlled by biome.json rather than Codacy-managed patterns."
+    }
+  ],
+  "warnings": [
+    "Semgrep partially parsed two SvelteKit route files because of import('@sveltejs/kit') type syntax.",
+    "The untrimmed auto configuration could not run because Checkov, Lizard, SQLFluff, and SQLint cannot install in this environment."
+  ],
+  "codacyYaml": null,
+  "importResults": {
+    "status": "success",
+    "toolsConfigured": 15,
+    "toolsEnabled": [],
+    "toolsDisabled": ["Jackson Linter", "Spectral", "PMD7", "ESLint", "markdownlint", "Checkov", "Agentlinter", "PMD", "SQLFluff", "ESLint9", "SQLint", "Lizard"],
+    "errors": [],
+    "warnings": ["The pull-request-specific Codacy analysis remains in progress."],
+    "codingStandards": [],
+    "forceUsed": true
+  },
+  "cloudVerification": {
+    "reanalysisCompleted": true,
+    "issuesBefore": 37,
+    "issuesAfter": 14,
+    "patternsDisabled": [],
+    "warnings": ["Default-branch reanalysis completed; the open pull request is still analyzing."]
+  }
 }

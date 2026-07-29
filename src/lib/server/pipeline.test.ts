@@ -25,18 +25,21 @@ const mocks = vi.hoisted(() => {
 			channels: undefined as unknown,
 			comments: undefined as unknown,
 			rules: undefined as unknown,
-			auditLog: undefined as unknown
+			auditLog: undefined as unknown,
+			moderationActions: undefined as unknown
 		},
 		channel: null as unknown,
 		existingIds: [] as string[],
 		ruleRows: [] as unknown[],
 		insertedComments: [] as Record<string, unknown>[],
-		insertedAudits: [] as Record<string, unknown>[]
+		insertedAudits: [] as Record<string, unknown>[],
+		moderationActions: [] as Record<string, unknown>[]
 	};
 	const store = (table: unknown, values: unknown) => {
 		const rows = (Array.isArray(values) ? values : [values]) as Record<string, unknown>[];
 		if (table === state.tables.comments) state.insertedComments.push(...rows);
 		if (table === state.tables.auditLog) state.insertedAudits.push(...rows);
+		if (table === state.tables.moderationActions) state.moderationActions.push(...rows);
 	};
 	const query = (table: unknown) => ({
 		where: () => ({
@@ -45,15 +48,34 @@ const mocks = vi.hoisted(() => {
 				throw new Error('unexpected get query');
 			},
 			all: async () => {
-				if (table === state.tables.comments) return state.existingIds.map((id) => ({ id }));
+				if (table === state.tables.comments) {
+					return [...new Set([
+						...state.existingIds,
+						...state.insertedComments.map((comment) => String(comment.id))
+					])].map((id) => ({ id }));
+				}
 				if (table === state.tables.rules) return state.ruleRows;
+				if (table === state.tables.moderationActions) {
+					return state.moderationActions.filter((action) => action.state === 'pending' || action.state === 'dispatched');
+				}
 				throw new Error('unexpected all query');
 			}
 		})
 	});
 	const transaction = {
 		insert: (table: unknown) => ({ values: async (values: unknown) => store(table, values) }),
-		update: () => ({ set: () => ({ where: async () => undefined }) })
+		update: (table: unknown) => ({
+			set: (values: Record<string, unknown>) => ({
+				where: async () => {
+					if (table !== state.tables.moderationActions || !('state' in values)) return;
+					const action = state.moderationActions.find((item) => {
+						if (values.state === 'dispatched') return item.state === 'pending';
+						return item.state === 'dispatched';
+					});
+					if (action) Object.assign(action, values);
+				}
+			})
+		})
 	};
 
 	return {
@@ -61,12 +83,15 @@ const mocks = vi.hoisted(() => {
 		db: {
 			select: vi.fn(() => ({ from: (table: unknown) => query(table) })),
 			insert: vi.fn((table: unknown) => ({ values: async (values: unknown) => store(table, values) })),
-			transaction: vi.fn(async (callback: (value: typeof transaction) => Promise<unknown>) => callback(transaction))
+			transaction: vi.fn(async (callback: (value: typeof transaction) => Promise<unknown>) => callback(transaction)),
+			update: vi.fn((table: unknown) => transaction.update(table)),
+			transactionValue: transaction
 		},
 		decrypt: vi.fn(),
 		assertBeforeDeadline: vi.fn(),
 		refreshAccessToken: vi.fn(),
 		fetchNewComments: vi.fn(),
+		getCommentModerationStatus: vi.fn(),
 		setModerationStatus: vi.fn(),
 		deleteComment: vi.fn(),
 		scoreComment: vi.fn(),
@@ -89,11 +114,12 @@ vi.mock('$lib/server/moderation', () => ({
 vi.mock('$lib/server/youtube', () => ({
 	refreshAccessToken: mocks.refreshAccessToken,
 	fetchNewComments: mocks.fetchNewComments,
+	getCommentModerationStatus: mocks.getCommentModerationStatus,
 	setModerationStatus: mocks.setModerationStatus,
 	deleteComment: mocks.deleteComment
 }));
 
-import { auditLog, channels, comments, rules } from '$lib/server/db/schema';
+import { auditLog, channels, comments, moderationActions, rules } from '$lib/server/db/schema';
 import { runChannel } from './pipeline';
 import type { NewComment } from './youtube';
 
@@ -127,7 +153,7 @@ function moderation(score: number) {
 
 beforeEach(() => {
 	vi.clearAllMocks();
-	mocks.state.tables = { channels, comments, rules, auditLog };
+	mocks.state.tables = { channels, comments, rules, auditLog, moderationActions };
 	mocks.state.env.DRY_RUN = 'false';
 	mocks.state.channel = {
 		id: 'channel',
@@ -143,6 +169,7 @@ beforeEach(() => {
 	mocks.state.ruleRows = [];
 	mocks.state.insertedComments = [];
 	mocks.state.insertedAudits = [];
+	mocks.state.moderationActions = [];
 	mocks.decrypt.mockReturnValue('refresh-token');
 	mocks.refreshAccessToken.mockResolvedValue('access-token');
 	mocks.fetchNewComments.mockResolvedValue({
@@ -152,6 +179,7 @@ beforeEach(() => {
 	});
 	mocks.setModerationStatus.mockResolvedValue(undefined);
 	mocks.deleteComment.mockResolvedValue(undefined);
+	mocks.getCommentModerationStatus.mockResolvedValue('rejected');
 	mocks.serializeScores.mockReturnValue('{}');
 	process.env.DRY_RUN = 'false';
 });
@@ -247,6 +275,56 @@ test('records successful remote actions before a later action fails', async () =
 
 	await expect(runChannel('channel')).rejects.toThrow('YouTube rejected request');
 
-	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'held', status: 'held' })]);
+	expect(mocks.state.insertedComments).toEqual(expect.arrayContaining([
+		expect.objectContaining({ id: 'held', status: 'held' }),
+		expect.objectContaining({ id: 'rejected', status: 'rejected' })
+	]));
 	expect(mocks.state.insertedAudits).toEqual([expect.objectContaining({ commentId: 'held', action: 'hold' })]);
+});
+
+test('verifies a dispatched action after its completion transaction fails', async () => {
+	mocks.scoreComment.mockResolvedValue(moderation(0.85));
+	mocks.db.transaction
+		.mockImplementationOnce(async (callback: (value: typeof mocks.db.transactionValue) => Promise<unknown>) => callback(mocks.db.transactionValue))
+		.mockRejectedValueOnce(new Error('database write failed'));
+
+	await expect(runChannel('channel')).rejects.toThrow('database write failed');
+
+	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
+	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({
+		commentId: 'comment',
+		state: 'dispatched'
+	})]);
+
+	await runChannel('channel');
+
+	expect(mocks.getCommentModerationStatus).toHaveBeenCalledWith('comment', 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
+	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({
+		commentId: 'comment',
+		state: 'completed'
+	})]);
+});
+
+test('routes an ambiguous ban to manual review without retrying it', async () => {
+	mocks.state.existingIds = ['comment'];
+	mocks.state.moderationActions = [{
+		commentId: 'comment',
+		channelId: 'channel',
+		action: 'ban',
+		reason: 'rule #1 (user: author)',
+		state: 'dispatched',
+		lastAttemptAt: '2026-01-04T00:00:00.000Z',
+		lastManualRetryAt: null,
+		createdAt: '2026-01-04T00:00:00.000Z'
+	}];
+	mocks.getCommentModerationStatus.mockResolvedValue('rejected');
+
+	await expect(runChannel('channel')).rejects.toThrow('requires manual review');
+
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({
+		commentId: 'comment',
+		state: 'manual_review'
+	})]);
 });

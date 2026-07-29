@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, test } from 'vitest';
 
-test('upgrades an existing channels table with scan state', async () => {
+test('upgrades an existing database with scan state and moderation actions', async () => {
 	const directory = await mkdtemp(join(tmpdir(), 'moderaty-migration-'));
 	const client = createClient({ url: `file:${join(directory, 'moderaty.db')}` });
 	try {
@@ -40,11 +40,23 @@ test('upgrades an existing channels table with scan state', async () => {
 		`);
 
 		await client.executeMultiple(await readFile(new URL('../../../../drizzle/0000_add_channel_scan_state.sql', import.meta.url), 'utf8'));
+		await client.executeMultiple(await readFile(new URL('../../../../drizzle/0001_add_moderation_actions.sql', import.meta.url), 'utf8'));
 
 		const columns = await client.execute('PRAGMA table_info(channels)');
 		const channel = await client.execute('SELECT id, next_page_token, scan_cursor FROM channels');
+		const actionColumns = await client.execute('PRAGMA table_info(moderation_actions)');
 		expect(columns.rows.map((column) => column.name)).toEqual(expect.arrayContaining(['next_page_token', 'scan_cursor']));
 		expect(channel.rows).toEqual([{ id: 'UC-existing', next_page_token: null, scan_cursor: null }]);
+		expect(actionColumns.rows.map((column) => column.name)).toEqual(expect.arrayContaining([
+			'comment_id',
+			'channel_id',
+			'action',
+			'reason',
+			'state',
+			'last_attempt_at',
+			'last_manual_retry_at',
+			'created_at'
+		]));
 	} finally {
 		client.close();
 		await rm(directory, { recursive: true, force: true });

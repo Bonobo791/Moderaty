@@ -1,17 +1,14 @@
-<!--
-Moderaty — YouTube Comment Auto-Moderation Tool
-Copyright (C) 2026 Andrew Philip Weilbacher
-
-This program is free software: you can redistribute it and/or modify it under
-the GNU Affero General Public License, version 3 or later. It is provided
-without warranty; see LICENSE. Commercial licensing:
-contact@marketingprowess.simplelogin.com — see COMMERCIAL.md.
--->
-
-# EXECUTION PLAN: YouTube Comment Auto-Moderator (MVP)
+# EXECUTION PLAN: Moderaty — YouTube Comment Auto-Moderator (MVP) — v3
 
 > Hand this entire document to the executor model. It has no other context.
 > Everything it needs is written here. Follow the steps in order and improvise nothing.
+> The app is named **Moderaty** (brand name — use it in nav, page titles, and copy; the
+> project directory stays `yt-mod` to avoid churn).
+> v2 changes: invariant appendix (§4.1), checkpoint-based burst draining, DB-before-remote
+> action pipeline, RE2 for user regexes, response validation at every external boundary,
+> a mandatory test phase, and PR gates tied to tests.
+> v3 changes: Phase G is now a full UI/design pass (design tokens, styled pages,
+> empty/loading/error states, a11y); the e2e phase moved to Phase H.
 
 ---
 
@@ -19,108 +16,120 @@ contact@marketingprowess.simplelogin.com — see COMMERCIAL.md.
 
 This project is reviewed by a human via pull requests. The executor's branching rules:
 
-- **Step 0 (before anything else):** initialize the repo and `main` branch: `git init -b main && git add -A && git commit -m "chore: initial scaffold"` (run after Step 1's scaffold; until then there is nothing to commit).
-- **One branch per phase.** Phases are A through F (see section 5). Before starting a phase's first step, create its branch from an up-to-date `main`:
-  - `phase-a-scaffold`, `phase-b-database`, `phase-c-server-libs`, `phase-d-auth-cron`, `phase-e-ui`, `phase-f-e2e`
-- **Commit after every step** within the phase, with the message `step <N>: <step name>` (e.g. `step 6: create db client and drizzle config`).
-- **When a phase's last step passes its Verify:** push the branch and open a PR to `main`:
+- **Step 0 (before anything else):** after Step 1's scaffold, run `git init && git add -A && git commit -m "chore: initial scaffold"`.
+- **One branch per phase.** Phases: `phase-a-scaffold`, `phase-b-database`, `phase-c-server-libs`, `phase-d-tests`, `phase-e-auth-cron`, `phase-f-ui`, `phase-g-design`, `phase-h-e2e`. Before a phase's first step: `git checkout main && git pull && git checkout -b <branch>`.
+- **Commit after every step** with message `step <N>: <step name>`.
+- **Never open a PR while `npm run check`, `npm run build`, or `npm run test` is red.** Fix first. The PR is the proof of green, not the place to discover red.
+- **When a phase's last step passes its Verify and everything is green:** push and open the PR:
   ```bash
   git push -u origin <branch>
-  gh pr create --base main --title "Phase <X>: <name>" --body "Automated PR. Verify checklist in the plan's phase heading. Do not merge if any step's Verify failed."
+  gh pr create --base main --title "Phase <X>: <name>" --body "Automated PR. All checks green locally. Do not merge if any step's Verify failed."
   ```
-  (If the `gh` CLI is not available, push the branch and print the compare URL `https://github.com/<owner>/<repo>/compare/main...<branch>` for the human instead.)
-- **Then STOP.** Do not start the next phase until the human confirms the PR is merged. The executor resumes by running: `git checkout main && git pull` then creating the next phase branch.
-- **Never** push to `main` directly, never merge your own PR, never use `--force`.
-- **If the human requests changes on a PR:** apply them on the same phase branch as additional commits (`fix: phase <X> review — <what>`), push, and stop again for re-review.
-- Steps 20–21 (credentials + live smoke test) require human action by design; the executor opens the Phase F PR after completing everything it can do autonomously (build + dry-run checks) and lists the remaining manual checks in the PR body.
+  (No `gh` CLI → push and print the compare URL instead.)
+- **Then STOP.** Do not start the next phase until the human confirms merge. Resume with `git checkout main && git pull` and the next phase branch.
+- **Never** push to `main` directly, never merge your own PR, never `--force`.
+- **Review findings (human or bot): every finding gets a failing test BEFORE its fix.** Add the reproducing test to the phase branch, watch it fail, then fix, watch it pass, commit both together (`fix: phase <X> review — <what>`), push, stop for re-review. A fix without its reproducing test is not done.
+- Steps 27–28 (credentials + live smoke test) require human action; open the Phase H PR after everything achievable autonomously and list remaining manual checks in the PR body.
 
 ---
 
 ## 1. Goal
 
-By the end, there is a working SvelteKit web app called `Moderaty` that:
+By the end, there is a working SvelteKit app `yt-mod` that:
 
-1. Lets a YouTube channel owner connect their channel via Google OAuth (scope `youtube.force-ssl`, offline access). The encrypted refresh token is stored in the database.
-2. Stores per-channel moderation rules: keyword, regex, or blocked-user, each mapping to an action (`hold`, `reject`, `delete`, `ban`).
-3. Is hosted on Netlify. `POST /api/cron` remains authenticated with `Authorization: Bearer <CRON_SECRET>` for manual runs. A Netlify Scheduled Function invokes its bounded scheduled mode every 15 minutes: it processes one fairly selected active channel and at most one page (100 comments), keeping the run within Netlify's 30-second limit. It applies rules, then the OpenAI Moderation API, and enforces: high-confidence violations (score ≥ 0.85) are auto-rejected on YouTube, borderline (0.35 ≤ score < 0.85) go to a local review queue, clean (< 0.35) are marked approved. Rule hits execute their configured action immediately. Every action is written to an audit log.
-4. Has four pages: a dashboard (`/`), a rules editor (`/channels/[id]/rules`), a review queue (`/channels/[id]/queue`) with one-click approve/reject/delete/ban, and an audit log (`/channels/[id]/log`).
-5. Supports `DRY_RUN=true`, in which the pipeline classifies and logs but performs no write calls to YouTube.
-6. Builds cleanly (`npm run build` exits 0) and runs with `npm run dev`.
+1. Lets a YouTube channel owner connect their channel via Google OAuth (scope `youtube.force-ssl`, offline access). The AES-256-GCM-encrypted refresh token is stored in the DB.
+2. Stores per-channel rules: keyword, regex (RE2 syntax), or blocked-user, each mapping to `hold` | `reject` | `delete` | `ban`.
+3. Exposes `GET /api/cron?secret=<CRON_SECRET>` which processes **one channel per run** (least-recently-run first) and **one page of ≤100 comments per run**, with a persisted checkpoint (continuation token + high-water mark) so bursts larger than one page are drained across runs **without skipping comments**. Per comment: rule match first, then OpenAI Moderation. Score ≥ 0.85 → auto-reject; 0.35–0.85 → human review queue; < 0.35 → approved. Rule hits execute their configured action. **Every enforcement action is recorded in the DB (`action_pending`) BEFORE the YouTube write, then confirmed after** — a crash mid-run is reconciled on the next run, never repeated blindly and never lost.
+4. Has four pages — dashboard (`/`), rules editor, review queue (one-click approve/reject/delete/ban), audit log — with a finished visual design (brand "Moderaty", design tokens, styled components, empty/loading/error states, accessible markup).
+5. Supports `DRY_RUN=true`: classifies and writes audit rows (action `dry-run`) but performs **no** YouTube writes and **no** DB state changes (no comment rows, no cursor/checkpoint movement) — previews are repeatable.
+6. `npm run check`, `npm run build`, `npm run test` all exit 0.
 
-## 2. Current state
+## 2. Current state & fixed facts
 
-Nothing exists. You are scaffolding a greenfield project into an empty directory. Environment: Node.js 24 and npm 11 (verify both before continuing). Framework: SvelteKit 2 + Svelte 5 + TypeScript. Database: SQLite via libSQL — local file `file:local.db` in development (Turso URL in production, same code). Package manager: npm. `npm run check` is the required verification baseline.
+Greenfield. Node ≥ 20, npm, SvelteKit 2 + Svelte 5 + TypeScript. DB: SQLite via libSQL (`file:local.db` dev; Turso URL prod — same code).
 
-Key API facts you must rely on exactly as written (do not look up alternatives):
+API facts (use exactly; do not look up alternatives):
 
-- YouTube Data API v3 base URL: `https://www.googleapis.com/youtube/v3`
-  - List comments: `GET /commentThreads?part=snippet&allThreadsRelatedToChannelId={CHANNEL_ID}&order=time&maxResults=100&pageToken={TOKEN}&textFormat=plainText`
-  - Moderate (batch, up to 50 IDs): `POST /comments/setModerationStatus?id={COMMA_SEPARATED_IDS}&moderationStatus={heldForReview|rejected}&banAuthor={true|false}`
+- YouTube Data API v3 base: `https://www.googleapis.com/youtube/v3`
+  - List: `GET /commentThreads?part=snippet&allThreadsRelatedToChannelId={CHANNEL_ID}&order=time&maxResults=100&pageToken={TOKEN}&textFormat=plainText`
+  - Moderate (batch ≤50 IDs): `POST /comments/setModerationStatus?id={CSV_IDS}&moderationStatus={heldForReview|rejected}&banAuthor={true|false}`
   - Delete: `DELETE /comments?id={COMMENT_ID}`
-  - Channel title lookup: `GET /channels?part=snippet&mine=true`
-- OAuth: auth URL `https://accounts.google.com/o/oauth2/v2/auth`, token endpoint `https://oauth2.googleapis.com/token`. Required params for the auth URL: `client_id`, `redirect_uri`, `response_type=code`, `scope=https://www.googleapis.com/auth/youtube.force-ssl`, `access_type=offline`, `prompt=consent`.
-- OpenAI Moderation: `POST https://api.openai.com/v1/moderations` with header `Authorization: Bearer $OPENAI_API_KEY`, JSON body `{ "model": "omni-moderation-latest", "input": "<text>" }`. Response: `results[0].category_scores` (object of category → 0..1 float).
-- Toxicity categories to score: `harassment`, `harassment/threatening`, `hate`, `hate/threatening`, `violence`, `violence/graphic`. The comment's AI score = the maximum of these six. Spam is NOT handled by the AI layer; users catch spam with their own keyword/regex rules.
-
-Thresholds (fixed, not configurable in MVP): AUTO_REJECT = 0.85, QUEUE = 0.35.
-
-Polling: fetch pages of comment threads ordered by time (newest first); stop paging when a thread's `snippet.topLevelComment.snippet.publishedAt` is ≤ the channel's stored cursor, or after 3 pages. MVP moderates top-level comments only (not replies).
+  - Channel lookup: `GET /channels?part=snippet&mine=true`
+- OAuth: auth URL `https://accounts.google.com/o/oauth2/v2/auth`, token endpoint `https://oauth2.googleapis.com/token`. Auth URL params: `client_id`, `redirect_uri`, `response_type=code`, `scope=https://www.googleapis.com/auth/youtube.force-ssl`, `access_type=offline`, `prompt=consent`.
+- OpenAI Moderation: `POST https://api.openai.com/v1/moderations`, header `Authorization: Bearer $OPENAI_API_KEY`, body `{ "model": "omni-moderation-latest", "input": "<text>" }`. Response: `results[0].category_scores` (category → float).
+- Toxicity categories: `harassment`, `harassment/threatening`, `hate`, `hate/threatening`, `violence`, `violence/graphic`. Comment AI score = max of these six. Spam is NOT an AI category; users catch spam with their own rules.
+- Thresholds (fixed): AUTO_REJECT = 0.85, QUEUE = 0.35.
+- **Every field in every external response is optional until validated.** YouTube omits `authorChannelId` for deleted accounts; OpenAI may return out-of-range values. Handle per the invariants — never abort a batch over one malformed item.
+- Top-level comments only (replies are a non-goal).
 
 ## 3. Files
 
-**Read these files before starting:**
-- After scaffolding: `svelte.config.js`, `package.json`, `src/app.d.ts` — to confirm names/versions before editing.
+**Read before starting:** after scaffolding — `svelte.config.js`, `package.json`, `src/app.d.ts`, `vite.config.ts`.
 
-**Do not open or touch:**
-- `node_modules/`, `.svelte-kit/`, any file not listed below.
+**Do not open or touch:** `node_modules/`, `.svelte-kit/`, anything not listed below.
 
-**Files you will create or modify:**
-- `svelte.config.js` — modify (switch adapter)
-- `netlify.toml` — create (build settings, Node 24, schedule)
-- `vite.config.ts` — modify (Vite-only configuration)
-- `package.json` — modify (add `db:push` script)
-- `.env.example` — create; copy it to `.env` locally (never commit)
-- `.gitignore` — modify (ignore local secrets and SQLite files)
+**Create or modify:**
+- `svelte.config.js` — modify (adapter-node)
+- `package.json` — modify (add `db:push` and `test` scripts)
+- `.env`, `.gitignore` — create / modify
 - `drizzle.config.ts` — create
 - `src/lib/server/db/schema.ts` — create
 - `src/lib/server/db/index.ts` — create
 - `src/lib/server/crypto.ts` — create
+- `src/lib/server/http.ts` — create (fetch wrapper)
 - `src/lib/server/youtube.ts` — create
 - `src/lib/server/moderation.ts` — create
+- `src/lib/server/rules.ts` — create (RE2 matcher)
 - `src/lib/server/pipeline.ts` — create
-- `src/lib/server/session.ts` — create
-- `src/hooks.server.ts` — create
+- `src/lib/EmptyState.svelte` — create (Phase G)
+- `src/lib/Skeleton.svelte` — create (Phase G)
+- `src/lib/server/testdb.ts` — create (test helper; never imported by app code)
+- `src/lib/server/rules.test.ts` — create
+- `src/lib/server/moderation.test.ts` — create
+- `src/lib/server/youtube.test.ts` — create
+- `src/lib/server/pipeline.test.ts` — create
 - `src/routes/api/auth/google/+server.ts` — create
 - `src/routes/api/auth/google/callback/+server.ts` — create
 - `src/routes/api/cron/+server.ts` — create
-- `netlify/functions/cron.ts` — create (scheduled trigger)
-- `src/routes/+layout.svelte` — modify (nav bar)
-- `src/routes/+page.server.ts` — create (dashboard data)
-- `src/routes/+page.svelte` — modify (dashboard)
-- `src/routes/channels/[id]/rules/+page.server.ts` — create
-- `src/routes/channels/[id]/rules/+page.svelte` — create
-- `src/routes/channels/[id]/queue/+page.server.ts` — create
-- `src/routes/channels/[id]/queue/+page.svelte` — create
-- `src/routes/channels/[id]/log/+page.server.ts` — create
-- `src/routes/channels/[id]/log/+page.svelte` — create
-- `src/app.css` — create, and import it in `+layout.svelte`
-- `src/app.d.ts` — modify (type `App.Locals`)
+- `src/app.css` — create
+- `src/routes/+layout.svelte` — modify
+- `src/routes/+page.server.ts`, `src/routes/+page.svelte` — create / modify
+- `src/routes/channels/[id]/rules/+page.server.ts`, `+page.svelte` — create
+- `src/routes/channels/[id]/queue/+page.server.ts`, `+page.svelte` — create
+- `src/routes/channels/[id]/log/+page.server.ts`, `+page.svelte` — create
 
 ## 4. Constraints
 
 **Do NOT:**
-- Do not add dependencies beyond: `drizzle-orm`, `@libsql/client` (runtime), and `@sveltejs/adapter-netlify` plus `drizzle-kit` (dev). No auth libraries, no googleapis SDK, no OpenAI SDK, no CSS frameworks — everything uses `fetch` and hand-written CSS.
-- Do not commit or push directly to `main`; never merge your own PR (see section 0). Stop after opening each phase PR and wait for human merge confirmation.
-- Do not refactor, rename, or reformat anything outside the steps below.
-- Do not add features not listed: no LLM judge, no reply moderation, no live chat, no pagination UI on the queue, no user accounts beyond the OAuth'd channel, no settings page.
-- Do not store comment text longer than 500 characters (truncate on insert).
-- Do not guess API signatures — every external call needed is written in this document.
-- Do not commit `.env` or `local.db`.
+- Do not add dependencies beyond: `drizzle-orm`, `@libsql/client`, `@sveltejs/adapter-node`, `re2` (runtime) and `drizzle-kit`, `vitest` (dev). No auth libraries, no googleapis SDK, no OpenAI SDK, no CSS frameworks, no zod.
+- Do not use `new RegExp(...)` on user-supplied patterns anywhere — RE2 only (see I6).
+- Do not commit or push to `main`; never merge your own PR; never open a PR with red checks.
+- Do not refactor, rename, or reformat anything outside the steps.
+- Do not add features, error handling, or abstractions not listed.
+- Do not store comment text longer than 500 characters.
+- Do not guess API signatures — every external call is written in this document.
+- Do not commit `.env` or `local.db*`.
 
 **Non-goals (look related, but are NOT part of this task):**
-- LLM-as-judge for borderline comments (borderline → human queue instead). Post-MVP.
-- Stripe/billing, landing page, multi-platform moderation, Docker, and CI.
-- Replies moderation, real-time scanning, websockets.
+- Reply moderation (requires its own `comments.list?parentId` pagination design — explicitly deferred).
+- LLM-as-judge for borderline comments (borderline → human queue instead).
+- Stripe/billing, landing page, multi-platform moderation, deployment config, live chat, real-time scanning.
+
+### 4.1 Invariants (non-negotiable; re-read before every step)
+
+- **I1 — Everything external is optional.** Treat every field of every YouTube/Google/OpenAI response as nullable. Missing optional metadata → default (`'unknown'` / `''`). A malformed *item* is skipped (and counted); a malformed *response* throws. Never abort a batch over one bad item.
+- **I2 — Validate at every boundary.** Out-of-range or wrong-typed external data (e.g., a moderation score of `1.7`) = that API call failed. Follow the module's failure policy; never clamp, never pass through.
+- **I3 — DB before remote.** Record the intended enforcement action locally (`status='action_pending'`, `pendingAction=<action>`) BEFORE any YouTube write; confirm (set final status) after. Crash between = reconciled next run from the durable record.
+- **I4 — Idempotency.** Re-running any step is safe: comments dedupe by `comments.id`; YouTube moderation calls are naturally idempotent; reconciliation is driven by `action_pending` rows.
+- **I5 — Never overwrite a caller's AbortSignal.** Compose with `AbortSignal.any([caller, timeout])` (see `http.ts`).
+- **I6 — User regexes run under RE2 only** (linear-time engine; catastrophic backtracking impossible). RE2 rejects lookaheads/backreferences at construction → surface that as the form validation error.
+- **I7 — Expand-migrate-contract.** New columns are nullable; `npm run db:push` is run and verified BEFORE any code that reads those columns is exercised.
+- **I8 — Dry run changes nothing durable.** With `DRY_RUN=true`: no YouTube writes, no `comments` inserts, no cursor/continuation/high-water updates. Only `audit_log` rows with action `dry-run`. Previews must be repeatable against the same comments.
+- **I9 — Tests are the spec.** No PR opens while checks/tests are red; every review finding gets a failing test before its fix.
+- **I10 — Bounded runs.** One channel per cron invocation (least-recently-run first), one page (≤100 comments) per run. Bursts drain across runs via the persisted checkpoint — never skipped, never unbounded.
+- **I11 — AI failure → human queue.** If moderation scoring fails or returns invalid data for a comment, that comment lands in the review queue (`decidedBy='none'`). Never auto-approve, never auto-reject, never abort the batch.
+- **I12 — Every page has all four states.** Loading (skeleton), empty (EmptyState component with the verbatim copy from Step 26), error (`.error-box`), and populated. No blank screens, no raw unstyled errors.
+- **I13 — Interactive elements are labeled.** Every input, select, and button has a visible label or an `aria-label`; action buttons name their target ("Reject comment by Ann", not "Reject"). Focus states are never removed without a visible replacement.
 
 ---
 
@@ -128,142 +137,108 @@ Polling: fetch pages of comment threads ordered by time (newest first); stop pag
 
 ### Phase A — Scaffold (Steps 1–4)
 
-#### Step 1: Scaffold the SvelteKit project
-
-Run in the empty parent directory:
+#### Step 1: Scaffold
 
 ```bash
-npx sv create --template minimal --types ts --no-add-ons --install npm Moderaty
-cd Moderaty
+npx sv create --template minimal --types ts --no-add-ons --install npm yt-mod
+cd yt-mod
+git init && git add -A && git commit -m "chore: initial scaffold"
 ```
 
-**Verify:** `ls` shows `package.json`, `svelte.config.js`, `src/`. `cat package.json | grep svelte` shows `@sveltejs/kit` in devDependencies.
+**Verify:** `ls` shows `package.json`, `svelte.config.js`, `src/`; `git log --oneline` shows one commit.
 
-**If this fails:**
-- If the `sv` CLI errors on flags: run `npx sv create Moderaty` interactively and choose: template = minimal, type checking = TypeScript, add-ons = none, package manager = npm.
-- Otherwise: stop, paste the full error, report back.
+**If this fails:** if the `sv` CLI errors on flags, run `npx sv create yt-mod` interactively: minimal, TypeScript, no add-ons, npm. Otherwise stop, paste the error, report back.
 
 #### Step 2: Install the exact dependency set
 
 ```bash
-npm install drizzle-orm @libsql/client
-npm install -D @sveltejs/adapter-netlify drizzle-kit
+npm install drizzle-orm @libsql/client @sveltejs/adapter-node re2
+npm install -D drizzle-kit vitest
 ```
 
-**Verify:** `npm ls drizzle-orm @libsql/client @sveltejs/adapter-netlify drizzle-kit` prints all four with versions, no `UNMET` or errors.
+**Verify:** `npm ls drizzle-orm @libsql/client @sveltejs/adapter-node re2 drizzle-kit vitest` prints all six, no errors. Also `node -e "const RE2=require('re2'); new RE2('(a+)+$').test('aaa'); console.log('re2 ok')"` prints `re2 ok`.
 
-**If this fails:** stop, paste the full error, report back.
+**If this fails:**
+- If `re2` fails to build/install on this platform: stop, paste the full error, report back — do NOT substitute another regex engine.
+- Otherwise: stop, paste the error, report back.
 
-#### Step 3: Configure the Netlify adapter
+#### Step 3: Switch to adapter-node
 
-**File:** `svelte.config.js`
+**File:** `svelte.config.js` — replace the adapter import line (`import adapter from '@sveltejs/adapter-auto';`) with:
 
-**Find this anchor:**
 ```js
-import adapter from '@sveltejs/adapter-auto';
+import adapter from '@sveltejs/adapter-node';
 ```
 
-**Action:** replace that line with:
-```js
-import adapter from '@sveltejs/adapter-netlify';
-```
+**Verify:** `grep adapter-node svelte.config.js` prints the line.
 
-**Verify:** `grep adapter-netlify svelte.config.js` prints the line.
+#### Step 4: `.env`, `.gitignore`, scripts
 
-**If this fails:** if the import line differs slightly, replace whatever adapter import exists with the adapter-netlify import, keeping the rest of the file unchanged. Do not enable Edge Functions: this plan depends on Node APIs and libSQL.
-
-#### Step 3b: Add Netlify build and schedule configuration
-
-**File:** `netlify.toml` — create with:
-
-```toml
-[build]
-  command = "npm run build"
-  publish = "build"
-
-[build.environment]
-  NODE_VERSION = "24"
-
-[functions."cron"]
-  schedule = "*/15 * * * *"
-```
-
-Netlify Scheduled Functions run only on published deploys and use UTC. Do not add redirects to this file; SvelteKit owns routing.
-
-#### Step 4: Create `.env.example` and gitignore local secrets
-
-**File:** `.env.example` — create with:
+**File:** `.env` — create:
 
 ```
-# Google OAuth (from Google Cloud Console → APIs & Services → Credentials)
 GOOGLE_CLIENT_ID=placeholder
 GOOGLE_CLIENT_SECRET=placeholder
-# Public base URL of the app (no trailing slash)
 APP_URL=http://localhost:5173
-# Database: local SQLite file for dev; swap to libsql://... + token for Turso in prod
 TURSO_DATABASE_URL=file:local.db
 TURSO_AUTH_TOKEN=
-# OpenAI
 OPENAI_API_KEY=placeholder
-# Secret for the cron endpoint (any random string)
 CRON_SECRET=change-me-long-random-string
-# 64 hex chars (32 bytes) — generate: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ENCRYPTION_KEY=placeholder-64-hex-chars
-# When "true", pipeline classifies and logs but makes no write calls to YouTube
 DRY_RUN=true
 ```
 
-Copy `.env.example` to `.env` locally and replace placeholders; never commit `.env` or other secret-bearing `.env.*` files. Keep only `.env.example` and `.env.test` unignored.
+**File:** `.gitignore` — append `.env` and `local.db*`.
 
-**File:** `.gitignore` — ignore `.env`, `.env.*`, and `local.db*`, then unignore `.env.example` and `.env.test`.
+**File:** `package.json` — in `"scripts"` add `"db:push": "drizzle-kit push"` and `"test": "vitest run"`.
 
-**Verify:** `test -f .env.example` succeeds. `grep -c '^\.env$' .gitignore` prints `1`.
+**Verify:** `grep -c '"db:push"\|"test"' package.json` prints `2`; `grep -c '^\.env$' .gitignore` prints `1`.
 
-**If this fails:** if `.gitignore` does not exist, create it containing `.env`, `local.db*`, `node_modules`, `.svelte-kit`, `build`.
-
----
+**If this fails:** if `.gitignore` is missing, create it with `.env`, `local.db*`, `node_modules`, `.svelte-kit`, `build`.
 
 ### Phase B — Database (Steps 5–7)
 
-#### Step 5: Create the Drizzle schema
+#### Step 5: Schema
 
 **File:** `src/lib/server/db/schema.ts` — create with exactly:
 
 ```ts
-import { sql } from 'drizzle-orm';
 import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';
 
 export const channels = sqliteTable('channels', {
   id: text('id').primaryKey(), // YouTube channel ID (UC...)
   title: text('title').notNull(),
   refreshTokenEnc: text('refresh_token_enc').notNull(),
-  cursor: text('cursor'), // ISO timestamp of newest comment seen; null = never polled
-  lastScheduledAt: text('last_scheduled_at'), // scheduling fairness; null = never selected
+  cursor: text('cursor'), // high-water mark: newest comment fully drained to
+  continuationToken: text('continuation_token'), // pageToken to resume a capped burst; null = drained
+  highWater: text('high_water'), // burst-start boundary; promoted to cursor when burst drains
+  lastRunAt: text('last_run_at'), // null = never processed; cron picks ASC (nulls first)
   active: integer('active').notNull().default(1),
-  createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+  createdAt: text('created_at').notNull()
 });
 
 export const rules = sqliteTable('rules', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   channelId: text('channel_id').notNull(),
   type: text('type').notNull(), // 'keyword' | 'regex' | 'user'
-  pattern: text('pattern').notNull(), // keyword string | regex source | authorChannelId
+  pattern: text('pattern').notNull(),
   action: text('action').notNull(), // 'hold' | 'reject' | 'delete' | 'ban'
-  createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+  createdAt: text('created_at').notNull()
 });
 
 export const comments = sqliteTable('comments', {
   id: text('id').primaryKey(), // YouTube comment ID
   channelId: text('channel_id').notNull(),
-  authorChannelId: text('author_channel_id').notNull(),
+  authorChannelId: text('author_channel_id').notNull(), // 'unknown' when YouTube omits it
   authorName: text('author_name').notNull(),
-  text: text('text').notNull(), // truncated to 500 chars on insert
+  text: text('text').notNull(), // truncated to 500 chars
   publishedAt: text('published_at').notNull(),
-  status: text('status').notNull(), // 'pending' | 'approved' | 'held' | 'rejected' | 'deleted'
+  status: text('status').notNull(), // 'action_pending' | 'pending' | 'approved' | 'held' | 'rejected' | 'deleted'
+  pendingAction: text('pending_action'), // 'hold' | 'reject' | 'delete' | 'ban' while action_pending; else null
   decidedBy: text('decided_by').notNull(), // 'rule' | 'ai' | 'human' | 'none'
   matchedRuleId: integer('matched_rule_id'),
-  aiScore: text('ai_score'), // JSON string of the six category scores, or null
-  createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+  aiScore: text('ai_score'), // JSON of the six category scores, or null
+  createdAt: text('created_at').notNull()
 });
 
 export const auditLog = sqliteTable('audit_log', {
@@ -271,25 +246,17 @@ export const auditLog = sqliteTable('audit_log', {
   channelId: text('channel_id').notNull(),
   commentId: text('comment_id').notNull(),
   action: text('action').notNull(), // 'hold' | 'reject' | 'delete' | 'ban' | 'approve' | 'queue' | 'dry-run'
-  reason: text('reason').notNull(), // human-readable, e.g. "rule #4 (keyword)" or "ai score 0.91"
+  reason: text('reason').notNull(),
   actor: text('actor').notNull(), // 'system' | 'user'
-  createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
-});
-
-export const sessions = sqliteTable('sessions', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  channelId: text('channel_id').notNull(),
-  tokenHash: text('token_hash').notNull().unique(),
-  expiresAt: text('expires_at').notNull(),
-  createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+  createdAt: text('created_at').notNull()
 });
 ```
 
-**Verify:** `npx tsc --noEmit` later; for now `grep -c sqliteTable src/lib/server/db/schema.ts` prints `5`.
+Note: all dates are set explicitly at insert time (no column defaults) — I7 friendliness and simpler test DDL.
 
-**If this fails:** import `sql` from `drizzle-orm` and keep the default as a database-side expression; do not use `new Date()` in the schema default.
+**Verify:** `grep -c sqliteTable src/lib/server/db/schema.ts` prints `4`; `grep -c continuation_token src/lib/server/db/schema.ts` prints `1`.
 
-#### Step 6: Create the DB client and drizzle config
+#### Step 6: DB client + drizzle config
 
 **File:** `src/lib/server/db/index.ts` — create with exactly:
 
@@ -297,16 +264,10 @@ export const sessions = sqliteTable('sessions', {
 import { drizzle } from 'drizzle-orm/libsql';
 import { createClient } from '@libsql/client';
 import { env } from '$env/dynamic/private';
-import * as schema from '$lib/server/db/schema';
-
-const databaseUrl = env.TURSO_DATABASE_URL;
-
-if (!databaseUrl) {
-  throw new Error('TURSO_DATABASE_URL is required');
-}
+import * as schema from './schema';
 
 const client = createClient({
-  url: databaseUrl,
+  url: env.TURSO_DATABASE_URL ?? 'file:local.db',
   authToken: env.TURSO_AUTH_TOKEN || undefined
 });
 
@@ -318,46 +279,32 @@ export const db = drizzle(client, { schema });
 ```ts
 import { defineConfig } from 'drizzle-kit';
 
-const databaseUrl = process.env.TURSO_DATABASE_URL;
-
-if (!databaseUrl) {
-  throw new Error('TURSO_DATABASE_URL is required');
-}
-
 export default defineConfig({
-  dialect: 'turso',
+  dialect: 'sqlite',
   schema: './src/lib/server/db/schema.ts',
   dbCredentials: {
-    url: databaseUrl,
-    authToken: process.env.TURSO_AUTH_TOKEN || undefined
+    url: process.env.TURSO_DATABASE_URL ?? 'file:local.db',
+    token: process.env.TURSO_AUTH_TOKEN || undefined
   }
-});
+} as never);
 ```
-
-(Use the `turso` dialect so drizzle-kit uses the installed `@libsql/client` driver for both local files and remote Turso.)
-
-**File:** `package.json` — add `"db:push": "drizzle-kit push"` only now, after the schema and config exist.
 
 **Verify:** `grep -c createClient src/lib/server/db/index.ts` prints `1`.
 
-**If this fails:** if `$env/dynamic/private` cannot be resolved yet, that resolves after `npm run dev` generates types — proceed.
-
-#### Step 7: Push the schema
+#### Step 7: Push schema (BEFORE any code uses the new columns — I7)
 
 ```bash
-npm run db:push
+set -a; . ./.env; set +a; npm run db:push
 ```
 
-**Verify:** command exits 0 and `local.db` exists (`ls local.db`). Confirm tables: `node -e "const{createClient}=require('@libsql/client');createClient({url:'file:local.db'}).execute(\"SELECT name FROM sqlite_master WHERE type='table'\").then(r=>console.log(r.rows.map(x=>x.name).join(',')))"` prints names including `channels,rules,comments,audit_log`.
+**Verify:** exits 0; `local.db` exists; this prints all four table names:
+```bash
+node -e "const{createClient}=require('@libsql/client');createClient({url:'file:local.db'}).execute(\"SELECT name FROM sqlite_master WHERE type='table'\").then(r=>console.log(r.rows.map(x=>x.name).join(',')))"
+```
 
-**If this fails:**
-- If drizzle-kit prompts interactively about table creation: accept the prompts (create tables).
-- If `TURSO_DATABASE_URL` is reported missing: copy `.env.example` to `.env`, then run with env loaded: `set -a; . ./.env; set +a; npm run db:push` (drizzle-kit does not auto-load `.env`).
-- Otherwise: stop, paste the full error, report back.
+**If this fails:** if drizzle-kit prompts about table creation, accept. If env missing, ensure the `set -a; . ./.env; set +a` prefix was used. Otherwise stop and report.
 
----
-
-### Phase C — Server libraries (Steps 8–11)
+### Phase C — Server libraries (Steps 8–13)
 
 #### Step 8: Token encryption helper
 
@@ -368,8 +315,7 @@ import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'node:
 import { env } from '$env/dynamic/private';
 
 function key(): Buffer {
-  if (!env.ENCRYPTION_KEY) throw new Error('ENCRYPTION_KEY is required');
-  return createHash('sha256').update(env.ENCRYPTION_KEY).digest();
+  return createHash('sha256').update(env.ENCRYPTION_KEY ?? 'insecure-dev-key').digest();
 }
 
 export function encrypt(plaintext: string): string {
@@ -391,46 +337,74 @@ export function decrypt(payload: string): string {
 }
 ```
 
-**Verify:** `node -e "console.log('syntax ok')"` trivially passes; real check comes at Step 13 build.
+**Verify:** file exists; build check comes at Step 13.
 
-**If this fails:** stop, paste the full error, report back.
+#### Step 9: Fetch wrapper (fixes I5 — signal composition, timeout)
 
-#### Reliability requirements (applies to Steps 9–13)
+**File:** `src/lib/server/http.ts` — create with exactly:
 
-Use a shared `fetchWithTimeout` helper with a 10-second `AbortSignal` timeout.
-Retry only transient network failures, HTTP 429, and HTTP 5xx responses, at most
-three times with bounded exponential backoff and `Retry-After` when supplied;
-never retry the one-time OAuth code exchange. Treat a malformed moderation
-response as a failure: do not approve the comment or advance its channel cursor.
+```ts
+export class HttpError extends Error {
+  constructor(
+    public status: number,
+    public url: string,
+    public body: string
+  ) {
+    super(`HTTP ${status} for ${url}: ${body.slice(0, 300)}`);
+  }
+}
 
-For non-dry runs, persist a comment and its audit row only after its required
-YouTube action succeeds. Retry idempotent moderation actions before failing the
-channel; a failed channel leaves its cursor unchanged for the next run. Dry runs
-write only `dry-run` audit rows, perform no YouTube writes, persist no comment
-decision, and never advance the cursor.
+/**
+ * fetch with a default 10s timeout. The caller's AbortSignal is NEVER
+ * overwritten — it is composed with the timeout via AbortSignal.any (I5).
+ */
+export async function fetchJson(
+  url: string,
+  init: RequestInit & { timeoutMs?: number } = {}
+): Promise<unknown> {
+  const { timeoutMs = 10_000, signal: callerSignal, ...rest } = init;
+  const timeout = AbortSignal.timeout(timeoutMs);
+  const signal = callerSignal ? AbortSignal.any([callerSignal, timeout]) : timeout;
+  const res = await fetch(url, { ...rest, signal });
+  const text = await res.text();
+  if (!res.ok) throw new HttpError(res.status, url, text);
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`invalid JSON from ${url}: ${text.slice(0, 300)}`);
+  }
+}
+```
 
-For scheduled runs, pass a 23-second deadline through the pipeline, check it before starting each external request, and return `partial: true` rather than advancing the cursor when it expires. The scheduler's outer request timeout is 25 seconds. `fetchNewComments` accepts a `maxPages` argument (default `3`); scheduled mode passes `1`.
+**Verify:** `grep -c 'AbortSignal.any' src/lib/server/http.ts` prints `1`.
 
-#### Step 9: YouTube API client
+#### Step 10: YouTube API client (nullable-tolerant, checkpoint-aware)
 
 **File:** `src/lib/server/youtube.ts` — create with exactly:
 
 ```ts
 import { env } from '$env/dynamic/private';
+import { fetchJson } from './http';
 
 const YT = 'https://www.googleapis.com/youtube/v3';
 
 export interface NewComment {
   id: string;
-  threadId: string;
-  authorChannelId: string;
+  authorChannelId: string; // 'unknown' when YouTube omits it (deleted accounts) — I1
   authorName: string;
   text: string;
   publishedAt: string;
 }
 
+export interface CommentPage {
+  items: NewComment[];
+  nextPageToken: string | null; // non-null when YouTube has more pages
+  drained: boolean; // true when we reached the cursor or YouTube has no more pages
+  skipped: number; // malformed items skipped (I1)
+}
+
 export async function refreshAccessToken(refreshToken: string): Promise<string> {
-  const res = await fetch('https://oauth2.googleapis.com/token', {
+  const data = (await fetchJson('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -439,63 +413,68 @@ export async function refreshAccessToken(refreshToken: string): Promise<string> 
       refresh_token: refreshToken,
       grant_type: 'refresh_token'
     })
-  });
-  const data = await res.json();
-  if (!res.ok || !data.access_token) {
-    throw new Error(`token refresh failed: ${res.status} ${JSON.stringify(data)}`);
+  })) as { access_token?: unknown };
+  if (typeof data.access_token !== 'string' || !data.access_token) {
+    throw new Error(`token refresh returned no access_token: ${JSON.stringify(data).slice(0, 300)}`);
   }
-  return data.access_token as string;
+  return data.access_token;
 }
 
-async function ytFetch(path: string, accessToken: string, init?: RequestInit): Promise<Response> {
-  const res = await fetch(`${YT}${path}`, {
-    ...init,
-    headers: { Authorization: `Bearer ${accessToken}`, ...(init?.headers ?? {}) }
-  });
-  return res;
-}
-
-export async function fetchNewComments(
+/**
+ * Fetch ONE page of comment threads (≤100), newest first.
+ * Stops collecting (drained) when a comment with publishedAt <= cursor is seen.
+ * An item missing its comment id or publishedAt is skipped (counted), never fatal.
+ * Optional author metadata defaults to 'unknown' / '' — never skipped for that (I1).
+ */
+export async function fetchCommentPage(
   channelId: string,
   accessToken: string,
   cursor: string | null,
-  maxPages = 3
-): Promise<NewComment[]> {
-  const out: NewComment[] = [];
-  let pageToken: string | null = null;
-  for (let page = 0; page < maxPages; page++) {
-    const params = new URLSearchParams({
-      part: 'snippet',
-      allThreadsRelatedToChannelId: channelId,
-      order: 'time',
-      maxResults: '100',
-      textFormat: 'plainText'
-    });
-    if (pageToken) params.set('pageToken', pageToken);
-    const res = await ytFetch(`/commentThreads?${params}`, accessToken);
-    const data = await res.json();
-    if (!res.ok) throw new Error(`commentThreads.list failed: ${res.status} ${JSON.stringify(data)}`);
-    let reachedCursor = false;
-    for (const item of data.items ?? []) {
-      const c = item.snippet.topLevelComment;
-      const s = c.snippet;
-      if (cursor && s.publishedAt <= cursor) {
-        reachedCursor = true;
-        continue;
-      }
-      out.push({
-        id: c.id,
-        threadId: item.id,
-        authorChannelId: s.authorChannelId?.value ?? 'unknown',
-        authorName: s.authorDisplayName ?? 'unknown',
-        text: (s.textDisplay ?? '').slice(0, 500),
-        publishedAt: s.publishedAt
-      });
-    }
-    if (reachedCursor || !data.nextPageToken) break;
-    pageToken = data.nextPageToken;
+  pageToken: string | null
+): Promise<CommentPage> {
+  const params = new URLSearchParams({
+    part: 'snippet',
+    allThreadsRelatedToChannelId: channelId,
+    order: 'time',
+    maxResults: '100',
+    textFormat: 'plainText'
+  });
+  if (pageToken) params.set('pageToken', pageToken);
+  const data = (await fetchJson(`${YT}/commentThreads?${params}`, {
+    headers: { Authorization: `Bearer ${accessToken}` }
+  })) as { items?: unknown; nextPageToken?: unknown };
+
+  if (!Array.isArray(data.items)) {
+    throw new Error(`commentThreads.list: response has no items array: ${JSON.stringify(data).slice(0, 300)}`);
   }
-  return out;
+
+  const items: NewComment[] = [];
+  let drained = false;
+  let skipped = 0;
+
+  for (const raw of data.items) {
+    const c = (raw as any)?.snippet?.topLevelComment;
+    const s = c?.snippet;
+    if (typeof c?.id !== 'string' || typeof s?.publishedAt !== 'string') {
+      skipped++;
+      continue;
+    }
+    if (cursor && s.publishedAt <= cursor) {
+      drained = true;
+      break;
+    }
+    items.push({
+      id: c.id,
+      authorChannelId: typeof s.authorChannelId?.value === 'string' ? s.authorChannelId.value : 'unknown',
+      authorName: typeof s.authorDisplayName === 'string' ? s.authorDisplayName : 'unknown',
+      text: (typeof s.textDisplay === 'string' ? s.textDisplay : '').slice(0, 500),
+      publishedAt: s.publishedAt
+    });
+  }
+
+  const nextPageToken = typeof data.nextPageToken === 'string' ? data.nextPageToken : null;
+  if (!nextPageToken) drained = true;
+  return { items, nextPageToken, drained, skipped };
 }
 
 export async function setModerationStatus(
@@ -511,33 +490,38 @@ export async function setModerationStatus(
       moderationStatus: status,
       banAuthor: String(banAuthor)
     });
-    const res = await ytFetch(`/comments/setModerationStatus?${params}`, accessToken, { method: 'POST' });
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`setModerationStatus failed: ${res.status} ${body}`);
-    }
+    await fetchJson(`${YT}/comments/setModerationStatus?${params}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
   }
 }
 
 export async function deleteComment(id: string, accessToken: string): Promise<void> {
-  const res = await ytFetch(`/comments?id=${encodeURIComponent(id)}`, accessToken, { method: 'DELETE' });
-  if (!res.ok && res.status !== 404) {
-    const body = await res.text();
-    throw new Error(`comments.delete failed: ${res.status} ${body}`);
+  try {
+    await fetchJson(`${YT}/comments?id=${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+  } catch (e) {
+    // 404 = already deleted (e.g. manually in YouTube Studio) — idempotent success (I4)
+    if (e instanceof Error && e.message.startsWith('HTTP 404')) return;
+    throw e;
   }
 }
 ```
 
-**Verify:** `grep -c 'export async function' src/lib/server/youtube.ts` prints `4`.
+**Verify:** `grep -c 'export async function' src/lib/server/youtube.ts` prints `4`; `grep -c "'unknown'" src/lib/server/youtube.ts` prints `2`.
 
-**If this fails:** stop, paste the full error, report back.
+**If this fails:** stop, paste the error, report back.
 
-#### Step 10: OpenAI moderation client
+#### Step 11: Moderation client (score validation — I2, I11)
 
 **File:** `src/lib/server/moderation.ts` — create with exactly:
 
 ```ts
 import { env } from '$env/dynamic/private';
+import { fetchJson } from './http';
 
 const TOXIC_CATEGORIES = [
   'harassment',
@@ -549,29 +533,43 @@ const TOXIC_CATEGORIES = [
 ] as const;
 
 export interface ModerationResult {
-  score: number; // max of the six toxic category scores
-  scores: Record<string, number>; // the six category scores
+  score: number;
+  scores: Record<string, number>;
 }
 
+export class ModerationError extends Error {}
+
+/**
+ * Throws ModerationError on ANY invalid response: non-200, missing results,
+ * or any toxic-category score that is not a finite number in [0, 1] (I2).
+ * Callers treat ModerationError as "send to human queue" (I11) — never clamp.
+ */
 export async function scoreComment(text: string): Promise<ModerationResult> {
-  const res = await fetch('https://api.openai.com/v1/moderations', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ model: 'omni-moderation-latest', input: text })
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(`moderation failed: ${res.status} ${JSON.stringify(data)}`);
+  let data: { results?: Array<{ category_scores?: Record<string, unknown> }> };
+  try {
+    data = (await fetchJson('https://api.openai.com/v1/moderations', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ model: 'omni-moderation-latest', input: text })
+    })) as typeof data;
+  } catch (e) {
+    throw new ModerationError(e instanceof Error ? e.message : String(e));
+  }
+
   const cat = data.results?.[0]?.category_scores;
-  if (!cat || TOXIC_CATEGORIES.some((k) => typeof cat[k] !== 'number')) {
-    throw new Error('moderation response is missing required category scores');
+  if (!cat || typeof cat !== 'object') {
+    throw new ModerationError(`missing category_scores: ${JSON.stringify(data).slice(0, 300)}`);
   }
   const scores: Record<string, number> = {};
   let max = 0;
   for (const k of TOXIC_CATEGORIES) {
     const v = cat[k];
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1) {
+      throw new ModerationError(`invalid score for ${k}: ${String(v)}`);
+    }
     scores[k] = v;
     if (v > max) max = v;
   }
@@ -579,11 +577,60 @@ export async function scoreComment(text: string): Promise<ModerationResult> {
 }
 ```
 
-**Verify:** `grep -c omni-moderation-latest src/lib/server/moderation.ts` prints `1`.
+**Verify:** `grep -c 'ModerationError' src/lib/server/moderation.ts` prints ≥ 3.
 
-**If this fails:** stop, paste the full error, report back.
+#### Step 12: RE2 rule matcher (I6)
 
-#### Step 11: The moderation pipeline
+**File:** `src/lib/server/rules.ts` — create with exactly:
+
+```ts
+import RE2 from 're2';
+
+export interface RuleRow {
+  id: number;
+  type: string; // 'keyword' | 'regex' | 'user'
+  pattern: string;
+  action: string; // 'hold' | 'reject' | 'delete' | 'ban'
+}
+
+/**
+ * First matching rule wins. Regex rules use RE2 (linear time — catastrophic
+ * backtracking is impossible by construction, I6). A pattern RE2 rejects
+ * (lookahead/backreference syntax) is skipped, never fatal.
+ */
+export function matchRule(text: string, authorChannelId: string, rs: RuleRow[]): RuleRow | null {
+  const lower = text.toLowerCase();
+  for (const r of rs) {
+    if (r.type === 'keyword' && lower.includes(r.pattern.toLowerCase())) return r;
+    if (r.type === 'user' && authorChannelId === r.pattern) return r;
+    if (r.type === 'regex') {
+      try {
+        if (new RE2(r.pattern, 'i').test(text)) return r;
+      } catch {
+        // RE2-unsupported pattern: skip the rule, never crash the pipeline
+      }
+    }
+  }
+  return null;
+}
+
+/** Validation for the rules form. Returns an error string or null. */
+export function validatePattern(type: string, pattern: string): string | null {
+  if (!pattern.trim()) return 'pattern required';
+  if (type === 'regex') {
+    try {
+      new RE2(pattern);
+    } catch (e) {
+      return `invalid regex (RE2 syntax only — no lookahead/backreferences): ${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+  return null;
+}
+```
+
+**Verify:** `node -e "console.log('ok')"` trivially; `grep -c RE2 src/lib/server/rules.ts` prints ≥ 3.
+
+#### Step 13: The pipeline (DB-before-remote, checkpoint, dry-run)
 
 **File:** `src/lib/server/pipeline.ts` — create with exactly:
 
@@ -592,191 +639,492 @@ import { and, eq } from 'drizzle-orm';
 import { db } from './db';
 import { channels, rules, comments, auditLog } from './db/schema';
 import { decrypt } from './crypto';
-import { refreshAccessToken, fetchNewComments, setModerationStatus, deleteComment } from './youtube';
-import { scoreComment } from './moderation';
+import { refreshAccessToken, fetchCommentPage, setModerationStatus, deleteComment } from './youtube';
+import { scoreComment, ModerationError } from './moderation';
+import { matchRule } from './rules';
 
 const AUTO_REJECT = 0.85;
 const QUEUE = 0.35;
 
-export interface RuleRow {
-  id: number;
-  type: string;
-  pattern: string;
-  action: string;
-}
+type PendingAction = 'hold' | 'reject' | 'delete' | 'ban';
 
-export function matchRule(text: string, authorChannelId: string, rs: RuleRow[]): RuleRow | null {
-  const lower = text.toLowerCase();
-  for (const r of rs) {
-    if (r.type === 'keyword' && lower.includes(r.pattern.toLowerCase())) return r;
-    if (r.type === 'user' && authorChannelId === r.pattern) return r;
-    if (r.type === 'regex') {
-      try {
-        if (new RegExp(r.pattern, 'i').test(text)) return r;
-      } catch {
-        // invalid user-supplied regex: skip the rule, never crash the pipeline
-      }
-    }
-  }
-  return null;
-}
+const now = () => new Date().toISOString();
 
 async function log(channelId: string, commentId: string, action: string, reason: string, actor: string) {
-  await db.insert(auditLog).values({
-    channelId,
-    commentId,
-    action,
-    reason,
-    actor,
-    createdAt: new Date().toISOString()
-  });
+  await db.insert(auditLog).values({ channelId, commentId, action, reason, actor, createdAt: now() });
 }
 
-export async function runChannel(channelId: string): Promise<{ fetched: number; acted: number; queued: number }> {
+function finalStatusFor(action: PendingAction): 'held' | 'rejected' | 'deleted' {
+  return action === 'hold' ? 'held' : action === 'delete' ? 'deleted' : 'rejected';
+}
+
+/**
+ * Execute every action_pending row for the channel (I3): the DB record exists
+ * BEFORE this runs, so a crash anywhere here is reconciled by the next run.
+ */
+async function applyPendingActions(channelId: string, accessToken: string): Promise<void> {
+  const pend = await db
+    .select()
+    .from(comments)
+    .where(and(eq(comments.channelId, channelId), eq(comments.status, 'action_pending')))
+    .all();
+  if (pend.length === 0) return;
+
+  const byAction = (a: PendingAction) => pend.filter((c) => c.pendingAction === a).map((c) => c.id);
+  const holdIds = byAction('hold');
+  const rejectIds = byAction('reject');
+  const banIds = byAction('ban');
+  const deleteIds = byAction('delete');
+
+  if (holdIds.length) await setModerationStatus(holdIds, 'heldForReview', false, accessToken);
+  if (rejectIds.length) await setModerationStatus(rejectIds, 'rejected', false, accessToken);
+  if (banIds.length) await setModerationStatus(banIds, 'rejected', true, accessToken);
+  for (const id of deleteIds) await deleteComment(id, accessToken);
+
+  for (const c of pend) {
+    await db
+      .update(comments)
+      .set({ status: finalStatusFor(c.pendingAction as PendingAction), pendingAction: null })
+      .where(eq(comments.id, c.id));
+  }
+}
+
+export async function runChannel(
+  channelId: string
+): Promise<{ fetched: number; acted: number; queued: number; skipped: number }> {
+  const zero = { fetched: 0, acted: 0, queued: 0, skipped: 0 };
   const ch = await db.select().from(channels).where(eq(channels.id, channelId)).get();
-  if (!ch || !ch.active) return { fetched: 0, acted: 0, queued: 0 };
+  if (!ch || !ch.active) return zero;
   const dryRun = process.env.DRY_RUN === 'true';
 
   const accessToken = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
-  const fresh = await fetchNewComments(channelId, accessToken, ch.cursor);
-  if (fresh.length === 0) return { fetched: 0, acted: 0, queued: 0 };
+
+  // 1. Reconcile leftovers from any crashed prior run (real runs only, I3/I4).
+  if (!dryRun) await applyPendingActions(channelId, accessToken);
+
+  // 2. Fetch ONE page (I10), resuming from a stored continuation token if mid-burst.
+  const page = await fetchCommentPage(channelId, accessToken, ch.cursor, ch.continuationToken);
+  if (page.items.length === 0) {
+    if (!dryRun) {
+      await db
+        .update(channels)
+        .set(
+          page.drained
+            ? { continuationToken: null, highWater: null, lastRunAt: now() }
+            : { continuationToken: page.nextPageToken, lastRunAt: now() }
+        )
+        .where(eq(channels.id, channelId));
+    }
+    return { ...zero, skipped: page.skipped };
+  }
 
   const rs = await db.select().from(rules).where(eq(rules.channelId, channelId)).all();
-
-  const holdIds: string[] = [];
-  const rejectIds: string[] = [];
-  const banIds: string[] = [];
   let acted = 0;
   let queued = 0;
 
-  for (const c of fresh) {
-    const existing = await db.select().from(comments).where(eq(comments.id, c.id)).get();
-    if (existing) continue;
-
-    let status = 'pending';
-    let decidedBy = 'none';
-    let matchedRuleId: number | null = null;
-    let aiScoreJson: string | null = null;
+  for (const c of page.items) {
+    if (!dryRun) {
+      const existing = await db.select({ id: comments.id }).from(comments).where(eq(comments.id, c.id)).get();
+      if (existing) continue; // dedupe (I4)
+    }
 
     const hit = matchRule(c.text, c.authorChannelId, rs);
-    if (hit) {
-      matchedRuleId = hit.id;
-      decidedBy = 'rule';
-      const reason = `rule #${hit.id} (${hit.type}: ${hit.pattern.slice(0, 80)})`;
-      if (hit.action === 'hold') {
-        status = 'held';
-        holdIds.push(c.id);
-        await log(channelId, c.id, dryRun ? 'dry-run' : 'hold', reason, 'system');
-      } else if (hit.action === 'reject') {
-        status = 'rejected';
-        rejectIds.push(c.id);
-        await log(channelId, c.id, dryRun ? 'dry-run' : 'reject', reason, 'system');
-      } else if (hit.action === 'delete') {
-        status = 'deleted';
-        if (!dryRun) await deleteComment(c.id, accessToken);
-        await log(channelId, c.id, dryRun ? 'dry-run' : 'delete', reason, 'system');
-      } else if (hit.action === 'ban') {
-        status = 'rejected';
-        banIds.push(c.id);
-        await log(channelId, c.id, dryRun ? 'dry-run' : 'ban', reason, 'system');
+
+    if (dryRun) {
+      // I8: audit only — no comment rows, no cursor/checkpoint movement, no YouTube writes.
+      if (hit) {
+        await log(channelId, c.id, 'dry-run', `would ${hit.action} — rule #${hit.id} (${hit.type})`, 'system');
+        acted++;
+      } else {
+        try {
+          const m = await scoreComment(c.text);
+          if (m.score >= AUTO_REJECT) {
+            await log(channelId, c.id, 'dry-run', `would reject — ai score ${m.score.toFixed(2)}`, 'system');
+            acted++;
+          } else if (m.score >= QUEUE) {
+            await log(channelId, c.id, 'dry-run', `would queue — ai score ${m.score.toFixed(2)}`, 'system');
+            queued++;
+          }
+        } catch (e) {
+          if (!(e instanceof ModerationError)) throw e;
+          await log(channelId, c.id, 'dry-run', 'ai unavailable — would queue', 'system');
+          queued++;
+        }
       }
+      continue;
+    }
+
+    if (hit) {
+      // I3: durable intent row BEFORE any YouTube call.
+      await db.insert(comments).values({
+        id: c.id, channelId, authorChannelId: c.authorChannelId, authorName: c.authorName,
+        text: c.text, publishedAt: c.publishedAt,
+        status: 'action_pending', pendingAction: hit.action, decidedBy: 'rule',
+        matchedRuleId: hit.id, aiScore: null, createdAt: now()
+      });
+      await log(channelId, c.id, hit.action, `rule #${hit.id} (${hit.type}: ${hit.pattern.slice(0, 80)})`, 'system');
       acted++;
     } else {
-      const m = await scoreComment(c.text);
-      aiScoreJson = JSON.stringify(m.scores);
-      if (m.score >= AUTO_REJECT) {
-        status = 'rejected';
-        decidedBy = 'ai';
-        rejectIds.push(c.id);
-        await log(channelId, c.id, dryRun ? 'dry-run' : 'reject', `ai score ${m.score.toFixed(2)}`, 'system');
+      let m = null;
+      try {
+        m = await scoreComment(c.text);
+      } catch (e) {
+        if (!(e instanceof ModerationError)) throw e; // I11: ModerationError → human queue
+      }
+      if (!m) {
+        await db.insert(comments).values({
+          id: c.id, channelId, authorChannelId: c.authorChannelId, authorName: c.authorName,
+          text: c.text, publishedAt: c.publishedAt,
+          status: 'pending', pendingAction: null, decidedBy: 'none',
+          matchedRuleId: null, aiScore: null, createdAt: now()
+        });
+        await log(channelId, c.id, 'queue', 'ai unavailable', 'system');
+        queued++;
+      } else if (m.score >= AUTO_REJECT) {
+        await db.insert(comments).values({
+          id: c.id, channelId, authorChannelId: c.authorChannelId, authorName: c.authorName,
+          text: c.text, publishedAt: c.publishedAt,
+          status: 'action_pending', pendingAction: 'reject', decidedBy: 'ai',
+          matchedRuleId: null, aiScore: JSON.stringify(m.scores), createdAt: now()
+        });
+        await log(channelId, c.id, 'reject', `ai score ${m.score.toFixed(2)}`, 'system');
         acted++;
       } else if (m.score >= QUEUE) {
-        status = 'pending';
-        decidedBy = 'ai';
+        await db.insert(comments).values({
+          id: c.id, channelId, authorChannelId: c.authorChannelId, authorName: c.authorName,
+          text: c.text, publishedAt: c.publishedAt,
+          status: 'pending', pendingAction: null, decidedBy: 'ai',
+          matchedRuleId: null, aiScore: JSON.stringify(m.scores), createdAt: now()
+        });
+        await log(channelId, c.id, 'queue', `ai score ${m.score.toFixed(2)}`, 'system');
         queued++;
-        await log(channelId, c.id, dryRun ? 'dry-run' : 'queue', `ai score ${m.score.toFixed(2)}`, 'system');
       } else {
-        status = 'approved';
-        decidedBy = 'ai';
+        await db.insert(comments).values({
+          id: c.id, channelId, authorChannelId: c.authorChannelId, authorName: c.authorName,
+          text: c.text, publishedAt: c.publishedAt,
+          status: 'approved', pendingAction: null, decidedBy: 'ai',
+          matchedRuleId: null, aiScore: JSON.stringify(m.scores), createdAt: now()
+        });
       }
     }
+  }
 
-    if (!dryRun) {
-      await db.insert(comments).values({
-        id: c.id,
-        channelId,
-        authorChannelId: c.authorChannelId,
-        authorName: c.authorName,
-        text: c.text,
-        publishedAt: c.publishedAt,
-        status,
-        decidedBy,
-        matchedRuleId,
-        aiScore: aiScoreJson,
-        createdAt: new Date().toISOString()
-      });
+  // 3. Execute all pending actions (theirs are durable; safe to batch now).
+  if (!dryRun) await applyPendingActions(channelId, accessToken);
+
+  // 4. Advance the checkpoint (real runs only — I8/I10).
+  if (!dryRun) {
+    if (!ch.continuationToken) {
+      // Fresh burst: boundary = newest comment seen this page.
+      const hw = page.items[0].publishedAt;
+      await db
+        .update(channels)
+        .set(
+          page.drained
+            ? { cursor: hw, continuationToken: null, highWater: null, lastRunAt: now() }
+            : { highWater: hw, continuationToken: page.nextPageToken, lastRunAt: now() }
+        )
+        .where(eq(channels.id, channelId));
+    } else {
+      // Resuming a burst: cursor only advances (to highWater) when fully drained.
+      await db
+        .update(channels)
+        .set(
+          page.drained
+            ? { cursor: ch.highWater, continuationToken: null, highWater: null, lastRunAt: now() }
+            : { continuationToken: page.nextPageToken, lastRunAt: now() }
+        )
+        .where(eq(channels.id, channelId));
     }
   }
 
-  if (!dryRun) {
-    if (holdIds.length) await setModerationStatus(holdIds, 'heldForReview', false, accessToken);
-    if (rejectIds.length) await setModerationStatus(rejectIds, 'rejected', false, accessToken);
-    if (banIds.length) await setModerationStatus(banIds, 'rejected', true, accessToken);
-  }
-
-  if (!dryRun) {
-    const newest = fresh.map((c) => c.publishedAt).sort().at(-1)!;
-    await db.update(channels).set({ cursor: newest }).where(eq(channels.id, channelId));
-  }
-
-  return { fetched: fresh.length, acted, queued };
+  return { fetched: page.items.length, acted, queued, skipped: page.skipped };
 }
 ```
 
-Note: rule actions queue YouTube write calls into `holdIds`/`rejectIds`/`banIds` (batched at the end), while `delete` executes inline (1 call per comment, no batch endpoint exists). This is intentional — do not "optimize" it.
+**Verify:** `npm run check` exits 0 (or lists only errors in files not yet created — none should reference pipeline.ts). `grep -c 'applyPendingActions' src/lib/server/pipeline.ts` prints `3`.
 
-**Verify:** `grep -c 'AUTO_REJECT = 0.85' src/lib/server/pipeline.ts` prints `1`.
-
-**If this fails:** if drizzle `.get()` / `.all()` are reported as unknown methods, this project is on an old drizzle-orm — run `npm install drizzle-orm@latest` and continue. Otherwise stop and report.
+**If this fails:** if drizzle `.get()`/`.all()` are unknown, `npm install drizzle-orm@latest`. Otherwise stop and report.
 
 ---
 
-### Phase D — Auth and cron routes (Steps 12–13)
+### Phase D — Tests (Steps 14–15)
 
-#### Step 12: Google OAuth routes and sessions
+Tests are the executable spec (I9). Implement EVERY case in the tables below. Verbatim code is given for the harness and representative tests; the remaining table rows follow the same patterns exactly.
 
-Create `src/lib/server/session.ts` with opaque 32-byte random tokens, SHA-256
-token hashes stored in `sessions`, and seven-day expiry. Create
-`src/hooks.server.ts` to resolve a valid `moderaty_session` cookie into
-`locals.channelId`; type that local in `src/app.d.ts`. Use `HttpOnly`, `SameSite=Lax`,
-`Path=/`, and `Secure` outside development. Protect dashboard, rules, queue, and
-audit routes by requiring this local and matching each route's channel ID.
+#### Step 14: Test harness + rules/moderation/youtube tests
 
-The OAuth start route must generate a random state value, store it in a separate
-short-lived secure cookie, and include it in the Google URL. The callback must
-compare and clear that cookie before exchanging the code, then create a session
-for the returned channel.
+**File:** `src/lib/server/testdb.ts` — create with exactly:
+
+```ts
+import { drizzle } from 'drizzle-orm/libsql';
+import { createClient } from '@libsql/client';
+import * as schema from './db/schema';
+
+const DDL = `
+CREATE TABLE channels (
+  id TEXT PRIMARY KEY, title TEXT NOT NULL, refresh_token_enc TEXT NOT NULL,
+  cursor TEXT, continuation_token TEXT, high_water TEXT, last_run_at TEXT,
+  active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
+);
+CREATE TABLE rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT NOT NULL,
+  type TEXT NOT NULL, pattern TEXT NOT NULL, action TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TABLE comments (
+  id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, author_channel_id TEXT NOT NULL,
+  author_name TEXT NOT NULL, text TEXT NOT NULL, published_at TEXT NOT NULL,
+  status TEXT NOT NULL, pending_action TEXT, decided_by TEXT NOT NULL,
+  matched_rule_id INTEGER, ai_score TEXT, created_at TEXT NOT NULL
+);
+CREATE TABLE audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT NOT NULL, comment_id TEXT NOT NULL,
+  action TEXT NOT NULL, reason TEXT NOT NULL, actor TEXT NOT NULL, created_at TEXT NOT NULL
+);
+`;
+
+export async function makeTestDb() {
+  const client = createClient({ url: ':memory:' });
+  for (const stmt of DDL.split(';').map((s) => s.trim()).filter(Boolean)) {
+    await client.execute(stmt);
+  }
+  return drizzle(client, { schema });
+}
+
+export async function clearDb(db: Awaited<ReturnType<typeof makeTestDb>>) {
+  await db.delete(schema.auditLog);
+  await db.delete(schema.comments);
+  await db.delete(schema.rules);
+  await db.delete(schema.channels);
+}
+```
+
+**File:** `src/lib/server/rules.test.ts` — create with exactly:
+
+```ts
+import { describe, it, expect } from 'vitest';
+import { matchRule, validatePattern } from './rules';
+
+const base = { id: 1, action: 'reject' };
+
+describe('matchRule', () => {
+  it('keyword matches case-insensitively', () => {
+    expect(matchRule('This is SPAM now', 'UC1', [{ ...base, type: 'keyword', pattern: 'spam' }])).not.toBeNull();
+  });
+  it('keyword does not match absent text', () => {
+    expect(matchRule('nice video', 'UC1', [{ ...base, type: 'keyword', pattern: 'spam' }])).toBeNull();
+  });
+  it('user rule matches authorChannelId', () => {
+    expect(matchRule('anything', 'UCbad', [{ ...base, type: 'user', pattern: 'UCbad' }])).not.toBeNull();
+  });
+  it('regex matches', () => {
+    expect(matchRule('free money!!!', 'UC1', [{ ...base, type: 'regex', pattern: 'free m+ney' }])).not.toBeNull();
+  });
+  it('RE2-unsupported pattern is skipped, never throws', () => {
+    expect(matchRule('hello', 'UC1', [{ ...base, type: 'regex', pattern: '(?=evil)lookahead' }])).toBeNull();
+  });
+  it('catastrophic-backtracking pattern completes fast under RE2', () => {
+    const start = Date.now();
+    matchRule('a'.repeat(5000), 'UC1', [{ ...base, type: 'regex', pattern: '(a+)+$' }]);
+    expect(Date.now() - start).toBeLessThan(200);
+  });
+  it('first matching rule wins', () => {
+    const rs = [
+      { id: 1, type: 'keyword', pattern: 'spam', action: 'hold' },
+      { id: 2, type: 'keyword', pattern: 'spam', action: 'ban' }
+    ];
+    expect(matchRule('spam', 'UC1', rs)?.action).toBe('hold');
+  });
+});
+
+describe('validatePattern', () => {
+  it('rejects empty pattern', () => expect(validatePattern('keyword', '  ')).toBe('pattern required'));
+  it('rejects lookahead with RE2 message', () => expect(validatePattern('regex', '(?=x)y')).toContain('RE2'));
+  it('accepts valid regex', () => expect(validatePattern('regex', 'free m+ney')).toBeNull());
+});
+```
+
+**File:** `src/lib/server/moderation.test.ts` — create with the skeleton below, implementing EVERY case in the table (mock `fetch` globally with `vi.stubGlobal('fetch', vi.fn())`; restore in `afterEach`). Set `process.env.OPENAI_API_KEY = 'test'` in `beforeAll`.
+
+```ts
+import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { scoreComment, ModerationError } from './moderation';
+
+beforeAll(() => {
+  process.env.OPENAI_API_KEY = 'test';
+});
+afterEach(() => vi.unstubAllGlobals());
+
+function okResponse(scores: Record<string, number>) {
+  return new Response(JSON.stringify({ results: [{ category_scores: scores }] }), { status: 200 });
+}
+
+describe('scoreComment', () => {
+  it('M1: returns max of the six toxic categories', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => okResponse({ harassment: 0.4, 'harassment/threatening': 0.1, hate: 0.9, 'hate/threatening': 0.1, violence: 0.1, 'violence/graphic': 0.1 })));
+    const m = await scoreComment('x');
+    expect(m.score).toBe(0.9);
+    expect(m.scores.hate).toBe(0.9);
+  });
+  // …implement M2–M9 per the table below following this pattern…
+});
+```
+
+Note: a missing key among the six is INVALID (throws), per the module code and I2. Required cases:
+
+| # | Mocked API behavior | Expected |
+|---|---|---|
+| M1 | 200, six valid scores, max = hate 0.9 | `score === 0.9`, `scores.hate === 0.9` |
+| M2 | 200, score exactly 0.85 | returns 0.85 (boundary belongs to caller, not this module) |
+| M3 | 200, one score = 1.7 | throws `ModerationError` |
+| M4 | 200, one score = -0.2 | throws `ModerationError` |
+| M5 | 200, one score = "high" (string) | throws `ModerationError` |
+| M6 | 200, one of the six keys missing | throws `ModerationError` |
+| M7 | 200, `results` missing | throws `ModerationError` |
+| M8 | 500 status | throws `ModerationError` |
+| M9 | 200, non-JSON body | throws `ModerationError` |
+
+**File:** `src/lib/server/youtube.test.ts` — implement every case (same `vi.stubGlobal('fetch')` pattern; the module reads `GOOGLE_CLIENT_ID/SECRET` only inside `refreshAccessToken`, so page/moderation tests need no env):
+
+| # | Mocked YouTube response | Expected from `fetchCommentPage('UC', 'tok', cursor, pageToken)` |
+|---|---|---|
+| Y1 | 2 valid items, no nextPageToken | 2 items, `drained: true`, `skipped: 0` |
+| Y2 | item missing `authorChannelId` | item kept, `authorChannelId === 'unknown'` |
+| Y3 | item missing `authorDisplayName` and `textDisplay` | item kept, name `'unknown'`, text `''` |
+| Y4 | item missing `topLevelComment.id` | item skipped, `skipped === 1`, others kept |
+| Y5 | item missing `publishedAt` | item skipped |
+| Y6 | 3 items, middle item `publishedAt <= cursor` | returns only items newer than cursor, `drained: true` |
+| Y7 | `nextPageToken` present | `nextPageToken` returned, `drained: false` |
+| Y8 | request URL when `pageToken` arg given | fetch URL contains `pageToken=...` |
+| Y9 | 403 quotaExceeded body | throws (message contains `HTTP 403`) |
+| Y10 | `items` not an array | throws |
+| Y11 | text 600 chars | stored text is exactly 500 chars |
+
+**Verify:** `npm run test` exits 0, all suites green.
+
+**If this fails:** fix the TEST to match the verbatim module code (the modules are the spec), unless the test exposes a genuine invariant violation — in that case stop and report instead of editing either side blindly.
+
+#### Step 15: Pipeline tests
+
+**File:** `src/lib/server/pipeline.test.ts` — use this verbatim harness, then implement every case in the table:
+
+```ts
+import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest';
+import { makeTestDb, clearDb } from './testdb';
+import { channels, rules, comments, auditLog } from './db/schema';
+
+let db: Awaited<ReturnType<typeof makeTestDb>>;
+
+vi.mock('$lib/server/db', async () => {
+  const { makeTestDb } = await import('./testdb');
+  const testDb = await makeTestDb();
+  (globalThis as any).__testDb = testDb;
+  return { db: testDb };
+});
+
+const fetchCommentPage = vi.fn();
+const setModerationStatus = vi.fn(async () => {});
+const deleteComment = vi.fn(async () => {});
+vi.mock('./youtube', () => ({
+  refreshAccessToken: vi.fn(async () => 'tok'),
+  fetchCommentPage: (...a: unknown[]) => fetchCommentPage(...a),
+  setModerationStatus: (...a: unknown[]) => setModerationStatus(...a),
+  deleteComment: (...a: unknown[]) => deleteComment(...a)
+}));
+
+const scoreComment = vi.fn();
+vi.mock('./moderation', async () => {
+  const actual = await vi.importActual<typeof import('./moderation')>('./moderation');
+  return { ...actual, scoreComment: (...a: unknown[]) => scoreComment(...a) };
+});
+
+const { runChannel } = await import('./pipeline');
+
+const CH = {
+  id: 'UC1', title: 'Test', refreshTokenEnc: 'enc',
+  cursor: null as string | null, continuationToken: null as string | null,
+  highWater: null as string | null, lastRunAt: null as string | null,
+  active: 1, createdAt: '2026-01-01T00:00:00.000Z'
+};
+
+function ytComment(id: string, publishedAt: string, extra: Partial<Record<string, string>> = {}) {
+  return { id, authorChannelId: 'UCa', authorName: 'Ann', text: 'hello', publishedAt, ...extra };
+}
+function page(items: unknown[], over: Partial<Record<string, unknown>> = {}) {
+  return { items, nextPageToken: null, drained: true, skipped: 0, ...over };
+}
+
+beforeAll(() => {
+  db = (globalThis as any).__testDb;
+});
+beforeEach(async () => {
+  await clearDb(db);
+  vi.clearAllMocks();
+  process.env.DRY_RUN = 'false';
+  await db.insert(channels).values(CH);
+  scoreComment.mockResolvedValue({ score: 0.1, scores: { hate: 0.1 } });
+});
+
+describe('runChannel', () => {
+  it('P1 example — clean comment is approved with no YouTube writes', async () => {
+    fetchCommentPage.mockResolvedValue(page([ytComment('c1', '2026-07-01T00:00:00Z')]));
+    const r = await runChannel('UC1');
+    expect(r).toMatchObject({ fetched: 1, acted: 0, queued: 0 });
+    const rows = await db.select().from(comments).all();
+    expect(rows[0].status).toBe('approved');
+    expect(setModerationStatus).not.toHaveBeenCalled();
+    const ch = await db.select().from(channels).all();
+    expect(ch[0].cursor).toBe('2026-07-01T00:00:00Z');
+  });
+  // …implement P2–P16 per the table below following this pattern…
+});
+```
+
+Required cases (all must exist and pass):
+
+| # | Setup | Expected |
+|---|---|---|
+| P1 | 1 comment, AI 0.1 | approved; no YT writes; cursor advanced to comment's publishedAt |
+| P2 | 1 comment, AI 0.5 | status `pending`, decidedBy `ai`, audit `queue`, queued=1, no YT writes |
+| P3 | 1 comment, AI 0.9 | insert order: row exists as final `rejected` after run; `setModerationStatus` called with `(['c1'],'rejected',false,...)`; audit `reject` |
+| P4 | AI throws ModerationError for 1 of 2 comments (other scores 0.1) | failing comment → `pending`/decidedBy `none` + audit `queue` "ai unavailable"; other approved; run completes (I11) |
+| P5 | comment without authorChannelId (already defaulted to `'unknown'` by fetch) | moderated normally, inserted, not skipped (I1) |
+| P6 | keyword rule `spam`→`hold`; comment "spam here" | `setModerationStatus` with `'heldForReview'`; final status `held`; audit reason contains `rule #`; AI never called for that comment |
+| P7 | rule action `ban` | `setModerationStatus(ids,'rejected',true,...)`; final `rejected` |
+| P8 | rule action `delete` | `deleteComment('c1',...)` called; final `deleted` |
+| P9 | invalid regex rule in DB (e.g. `(?=x)`) + clean comment | no throw; comment falls through to AI path |
+| P10 | duplicate: comment id already in DB | skipped entirely — no re-insert, no YT call, no second audit row (I4) |
+| P11 | **DB-before-remote**: pre-seed a comment row `status='action_pending', pendingAction='reject'` (simulating a crash); mock page returns no items | next run reconciles: `setModerationStatus` called, row becomes `rejected`, `pendingAction` null (I3) |
+| P12 | **burst start**: page returns 100 items with `nextPageToken='tok2'`, `drained=false` | `continuationToken='tok2'` stored, `highWater` = newest publishedAt, `cursor` UNCHANGED |
+| P13 | **burst resume**: channel pre-seeded with `continuationToken='tok2'`, `highWater='2026-07-01T00:10Z'`; fetch returns page with `drained=true` | `fetchCommentPage` was called with pageToken `'tok2'`; after run: `cursor='2026-07-01T00:10Z'`, token and highWater null |
+| P14 | **no skip across burst**: P12 then P13 sequence with distinct comment ids in both pages | all comments from both pages exist in DB; none lost |
+| P15 | **dry run** (`DRY_RUN='true'`): rule hit + AI 0.9 + AI 0.5 comments | audit rows all action `dry-run`; ZERO comment rows; cursor/continuation/highWater/lastRunAt all unchanged; no YT writes (I8) |
+| P16 | empty page, channel mid-burst (`continuationToken='tok2'`), page `drained=true` | checkpoint cleared: token/highWater null; lastRunAt set; no cursor change |
+
+**Verify:** `npm run test` exits 0 with P1–P16, M1–M9, Y1–Y11, and all rules tests green.
+
+**If this fails:** the verbatim module code is the spec — fix tests to match it, UNLESS the failure reveals the module violating an invariant (§4.1); in that case stop, quote the invariant and the failing output, report back.
+
+---
+
+### Phase E — Auth & cron routes (Steps 16–17)
+
+#### Step 16: Google OAuth routes
 
 **File:** `src/routes/api/auth/google/+server.ts` — create with exactly:
 
 ```ts
 import { redirect } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
-import { randomBytes } from 'node:crypto';
 
-export function GET({ cookies }) {
-  const state = randomBytes(32).toString('base64url');
-  cookies.set('moderaty_oauth_state', state, {
-    httpOnly: true, sameSite: 'lax', secure: env.NODE_ENV === 'production', path: '/', maxAge: 600
-  });
+export function GET() {
   const params = new URLSearchParams({
     client_id: env.GOOGLE_CLIENT_ID!,
     redirect_uri: `${env.APP_URL}/api/auth/google/callback`,
     response_type: 'code',
     scope: 'https://www.googleapis.com/auth/youtube.force-ssl',
     access_type: 'offline',
-    prompt: 'consent',
-    state
+    prompt: 'consent'
   });
   throw redirect(302, `https://accounts.google.com/o/oauth2/v2/auth?${params}`);
 }
@@ -786,21 +1134,18 @@ export function GET({ cookies }) {
 
 ```ts
 import { redirect, error } from '@sveltejs/kit';
+import type { RequestHandler } from './$types';
 import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
 import { encrypt } from '$lib/server/crypto';
-import { createSession } from '$lib/server/session';
+import { fetchJson } from '$lib/server/http';
 
-export async function GET({ url, cookies }) {
+export const GET: RequestHandler = async ({ url }) => {
   const code = url.searchParams.get('code');
   if (!code) throw error(400, 'missing code');
-  const state = url.searchParams.get('state');
-  const expectedState = cookies.get('moderaty_oauth_state');
-  cookies.delete('moderaty_oauth_state', { path: '/' });
-  if (!state || !expectedState || state !== expectedState) throw error(400, 'invalid OAuth state');
 
-  const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+  const tokens = (await fetchJson('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -810,109 +1155,94 @@ export async function GET({ url, cookies }) {
       redirect_uri: `${env.APP_URL}/api/auth/google/callback`,
       grant_type: 'authorization_code'
     })
-  });
-  const tokens = await tokenRes.json();
-  if (!tokenRes.ok || !tokens.refresh_token) {
-    throw error(400, 'token exchange failed; revoke previous app access and retry if this channel was connected before');
+  })) as { refresh_token?: unknown; access_token?: unknown };
+
+  if (typeof tokens.refresh_token !== 'string' || typeof tokens.access_token !== 'string') {
+    throw error(
+      400,
+      'token exchange returned no refresh_token — revoke app access at myaccount.google.com/permissions and retry'
+    );
   }
 
-  const accessToken = tokens.access_token as string;
-  const chRes = await fetch('https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true', {
-    headers: { Authorization: `Bearer ${accessToken}` }
-  });
-  const chData = await chRes.json();
+  const chData = (await fetchJson('https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true', {
+    headers: { Authorization: `Bearer ${tokens.access_token}` }
+  })) as { items?: Array<{ id: string; snippet?: { title?: string } }> };
+
   const ch = chData.items?.[0];
-  if (!ch) throw error(400, 'no YouTube channel found for this Google account');
+  if (!ch?.id) throw error(400, 'no YouTube channel found for this Google account');
 
   await db
     .insert(channels)
     .values({
       id: ch.id,
-      title: ch.snippet.title,
+      title: ch.snippet?.title ?? 'Untitled channel',
       refreshTokenEnc: encrypt(tokens.refresh_token),
       active: 1,
       createdAt: new Date().toISOString()
     })
     .onConflictDoUpdate({
       target: channels.id,
-      set: { title: ch.snippet.title, refreshTokenEnc: encrypt(tokens.refresh_token), active: 1 }
+      set: {
+        title: ch.snippet?.title ?? 'Untitled channel',
+        refreshTokenEnc: encrypt(tokens.refresh_token),
+        active: 1
+      }
     });
 
-  await createSession(ch.id, cookies);
   throw redirect(302, '/');
-}
+};
 ```
 
-**Verify:** `npm run check` (or `npx svelte-check`) reports 0 errors for these two files.
+**Verify:** `npm run check` reports 0 errors for these files.
 
-**If this fails:**
-- If TS complains about implicit `any` on `{ url }`: add the type `import type { RequestHandler } from './$types';` and annotate `export const GET: RequestHandler = async ({ url }) => {` instead of the bare function form. Apply the same pattern in Step 13.
-- Otherwise: stop, paste the full error, report back.
+**If this fails:** stop, paste the full error, report back.
 
-#### Step 13: Cron endpoint
+#### Step 17: Cron endpoint (channel rotation — I10)
 
 **File:** `src/routes/api/cron/+server.ts` — create with exactly:
 
 ```ts
 import { json, error } from '@sveltejs/kit';
-import { timingSafeEqual } from 'node:crypto';
+import type { RequestHandler } from './$types';
+import { asc, eq } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
 import { runChannel } from '$lib/server/pipeline';
 
-export async function POST({ request }) {
-  const token = request.headers.get('authorization')?.replace(/^Bearer\s+/, '');
-  const expected = env.CRON_SECRET ?? '';
-  if (!token || token.length !== expected.length || !timingSafeEqual(Buffer.from(token), Buffer.from(expected))) {
-    throw error(401, 'bad secret');
+/**
+ * One channel per invocation: the active channel with the oldest lastRunAt
+ * (SQLite sorts NULLs first in ASC, so never-run channels go first). This
+ * bounds runtime and rotates fairly across channels on each 15-min ping (I10).
+ */
+export const GET: RequestHandler = async ({ url }) => {
+  if (url.searchParams.get('secret') !== env.CRON_SECRET) throw error(401, 'bad secret');
+  const [ch] = await db.select().from(channels).where(eq(channels.active, 1)).orderBy(asc(channels.lastRunAt)).limit(1);
+  if (!ch) return json({ ok: true, dryRun: process.env.DRY_RUN === 'true', results: {} });
+  try {
+    const result = await runChannel(ch.id);
+    return json({ ok: true, dryRun: process.env.DRY_RUN === 'true', results: { [ch.id]: result } });
+  } catch (e) {
+    return json({
+      ok: false,
+      dryRun: process.env.DRY_RUN === 'true',
+      results: { [ch.id]: { error: e instanceof Error ? e.message : String(e) } }
+    });
   }
-  const chs = await db.select().from(channels).all();
-  const results: Record<string, unknown> = {};
-  for (const ch of chs) {
-    try {
-      results[ch.id] = await runChannel(ch.id);
-    } catch (e) {
-      results[ch.id] = { error: e instanceof Error ? e.message : String(e) };
-    }
-  }
-  return json({ ok: true, dryRun: process.env.DRY_RUN === 'true', results });
-}
+};
 ```
 
-Extend this endpoint with `?scheduled=1` mode before its manual all-channel loop: select one active channel ordered by `lastScheduledAt` (null first, then oldest, then channel ID), immediately set its `lastScheduledAt` to the current ISO time, and call `runChannel` with `{ maxPages: 1, deadline: Date.now() + 23_000 }`. Return that single result, including `partial: true` when the deadline is reached. The existing authenticated request without `scheduled=1` remains the manual all-channel path and uses three pages. Keep the cursor unchanged for partial or failed work.
+**Verify:** `npm run check && npm run build && npm run test` all exit 0.
 
-**File:** `netlify/functions/cron.ts` — create with:
-
-```ts
-export default async function () {
-  // ponytail: 25s Netlify schedule budget; use a Background Function when one page/channel no longer fits.
-  const appUrl = process.env.APP_URL;
-  const secret = process.env.CRON_SECRET;
-  if (!appUrl || !secret) throw new Error('APP_URL and CRON_SECRET are required');
-
-  const response = await fetch(`${appUrl}/api/cron?scheduled=1`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${secret}` },
-    signal: AbortSignal.timeout(25_000)
-  });
-  if (!response.ok) throw new Error(`scheduled cron failed: ${response.status}`);
-}
-```
-
-**Verify:** `npm run build` exits 0.
-
-**If this fails:**
-- If build errors reference `$env/dynamic/private` variables possibly undefined: the non-null assertions (`!`) in the code handle this; do not restructure. If errors persist, stop, paste full output, report back.
-- If drizzle schema import errors: re-check Step 5 file name and exports (`channels`, `rules`, `comments`, `auditLog`).
+**If this fails:** stop, paste the full error, report back.
 
 ---
 
-### Phase E — UI (Steps 14–19)
+### Phase F — UI (Steps 18–23)
 
-All pages use plain server loads + form actions (no client-side fetching). Styling: one global stylesheet.
+Plain server loads + form actions; one global stylesheet.
 
-#### Step 14: Global stylesheet and layout
+#### Step 18: Global stylesheet and layout
 
 **File:** `src/app.css` — create with exactly:
 
@@ -952,18 +1282,18 @@ th, td { text-align: left; padding: 8px; border-bottom: 1px solid #e3e6ea; verti
 <main>{@render children()}</main>
 ```
 
-**Verify:** `npm run dev` starts; `curl -s http://localhost:5173 | grep -c 'Moderaty'` prints ≥ 1. Stop the dev server after checking.
+**Verify:** `npm run dev` starts; `curl -s http://localhost:5173 | grep -c 'Moderaty'` prints ≥ 1. Stop the dev server after.
 
-**If this fails:** preserve Svelte 5 runes and `{@render children()}`; fix the scaffold or configuration, then stop and report. Do not introduce `<slot />`.
+**If this fails:** if `{@render children()}` errors (Svelte 4 scaffold), replace with `<slot />`. Otherwise stop and report.
 
-#### Step 15: Dashboard
+#### Step 19: Dashboard
 
 **File:** `src/routes/+page.server.ts` — create with exactly:
 
 ```ts
 import { db } from '$lib/server/db';
 import { channels, comments } from '$lib/server/db/schema';
-import { eq, sql } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
 
 export async function load() {
   const chs = await db.select().from(channels).all();
@@ -980,7 +1310,7 @@ export async function load() {
 
 ```svelte
 <script lang="ts">
-  let { data } = $props();
+  let { data }: { data: any } = $props();
   function count(channelId: string, status: string): number {
     const row = data.stats.find((s: any) => s.channelId === channelId && s.status === status);
     return row ? row.n : 0;
@@ -993,7 +1323,7 @@ export async function load() {
 {#each data.chs as ch}
   <div class="card">
     <h2 style="margin-top:0">{ch.title}</h2>
-    <p class="muted">ID: {ch.id} · last polled up to: {ch.cursor ?? 'never'}</p>
+    <p class="muted">ID: {ch.id} · drained up to: {ch.cursor ?? 'never'} · last run: {ch.lastRunAt ?? 'never'}</p>
     <p>
       <span class="badge">pending: {count(ch.id, 'pending')}</span>
       <span class="badge">rejected: {count(ch.id, 'rejected')}</span>
@@ -1009,19 +1339,18 @@ export async function load() {
 {/each}
 ```
 
-**Verify:** dev server renders `/` with the "Connect YouTube channel" button.
+**Verify:** dev server renders `/` with the connect button.
 
-**If this fails:** if TS errors on `(s: any)` inside markup, move `count` to accept `data.stats` typed as `any[]` — do not restructure the load function. Otherwise stop and report.
-
-#### Step 16: Rules page
+#### Step 20: Rules page (RE2 validation — I6)
 
 **File:** `src/routes/channels/[id]/rules/+page.server.ts` — create with exactly:
 
 ```ts
 import { db } from '$lib/server/db';
 import { channels, rules } from '$lib/server/db/schema';
-import { and, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { fail } from '@sveltejs/kit';
+import { validatePattern } from '$lib/server/rules';
 
 export async function load({ params }) {
   const ch = await db.select().from(channels).where(eq(channels.id, params.id)).get();
@@ -1037,14 +1366,8 @@ export const actions = {
     const action = String(f.get('action') ?? '');
     if (!['keyword', 'regex', 'user'].includes(type)) return fail(400, { error: 'bad type' });
     if (!['hold', 'reject', 'delete', 'ban'].includes(action)) return fail(400, { error: 'bad action' });
-    if (!pattern) return fail(400, { error: 'pattern required' });
-    if (type === 'regex') {
-      try {
-        new RegExp(pattern);
-      } catch {
-        return fail(400, { error: 'invalid regex' });
-      }
-    }
+    const err = validatePattern(type, pattern);
+    if (err) return fail(400, { error: err });
     await db.insert(rules).values({
       channelId: params.id,
       type,
@@ -1054,11 +1377,9 @@ export const actions = {
     });
     return { ok: true };
   },
-  remove: async ({ params, request }) => {
+  remove: async ({ request }) => {
     const f = await request.formData();
-    const ruleId = Number(f.get('ruleId'));
-    if (!Number.isSafeInteger(ruleId) || ruleId < 1) return fail(400, { error: 'bad rule ID' });
-    await db.delete(rules).where(and(eq(rules.id, ruleId), eq(rules.channelId, params.id)));
+    await db.delete(rules).where(eq(rules.id, Number(f.get('ruleId'))));
     return { ok: true };
   }
 };
@@ -1068,7 +1389,7 @@ export const actions = {
 
 ```svelte
 <script lang="ts">
-  let { data, form } = $props();
+  let { data, form }: { data: any; form: any } = $props();
 </script>
 
 <h1>Rules — {data.ch?.title}</h1>
@@ -1077,7 +1398,7 @@ export const actions = {
   <form method="POST" action="?/add" style="display:flex; gap:8px; flex-wrap:wrap">
     <select name="type">
       <option value="keyword">keyword</option>
-      <option value="regex">regex</option>
+      <option value="regex">regex (RE2 syntax)</option>
       <option value="user">blocked user (channel ID)</option>
     </select>
     <input name="pattern" placeholder="pattern" style="flex:1; min-width:220px" required />
@@ -1107,11 +1428,9 @@ export const actions = {
 {/each}
 ```
 
-**Verify:** `npm run check` reports 0 errors in the rules page files.
+**Verify:** `npm run check` 0 errors.
 
-**If this fails:** stop, paste the full error, report back.
-
-#### Step 17: Review queue page
+#### Step 21: Review queue page
 
 **File:** `src/routes/channels/[id]/queue/+page.server.ts` — create with exactly:
 
@@ -1119,7 +1438,6 @@ export const actions = {
 import { db } from '$lib/server/db';
 import { channels, comments, auditLog } from '$lib/server/db/schema';
 import { and, eq, desc } from 'drizzle-orm';
-import { error } from '@sveltejs/kit';
 import { refreshAccessToken, setModerationStatus, deleteComment } from '$lib/server/youtube';
 import { decrypt } from '$lib/server/crypto';
 
@@ -1136,27 +1454,16 @@ export async function load({ params }) {
 }
 
 async function act(paramsId: string, commentId: string, action: 'approve' | 'reject' | 'delete' | 'ban') {
-  if (!commentId) throw error(400, 'missing comment ID');
   const ch = await db.select().from(channels).where(eq(channels.id, paramsId)).get();
   if (!ch) throw new Error('channel not found');
-  const comment = await db
-    .select()
-    .from(comments)
-    .where(and(eq(comments.id, commentId), eq(comments.channelId, paramsId)))
-    .get();
-  if (!comment) throw error(404, 'comment not found');
   if (process.env.DRY_RUN !== 'true' && action !== 'approve') {
     const token = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
     if (action === 'reject') await setModerationStatus([commentId], 'rejected', false, token);
     if (action === 'ban') await setModerationStatus([commentId], 'rejected', true, token);
     if (action === 'delete') await deleteComment(commentId, token);
   }
-  const status =
-    action === 'approve' ? 'approved' : action === 'delete' ? 'deleted' : 'rejected';
-  await db
-    .update(comments)
-    .set({ status, decidedBy: 'human' })
-    .where(and(eq(comments.id, commentId), eq(comments.channelId, paramsId)));
+  const status = action === 'approve' ? 'approved' : action === 'delete' ? 'deleted' : 'rejected';
+  await db.update(comments).set({ status, decidedBy: 'human' }).where(eq(comments.id, commentId));
   await db.insert(auditLog).values({
     channelId: paramsId,
     commentId,
@@ -1187,11 +1494,11 @@ export const actions = {
 
 ```svelte
 <script lang="ts">
-  let { data } = $props();
+  let { data }: { data: any } = $props();
 </script>
 
 <h1>Review queue — {data.ch?.title}</h1>
-<p class="muted">Borderline comments (AI score 0.35 ≤ score &lt; 0.85). Nothing here is public-facing yet only if previously held; rejected/approved comments already have their final state. Your action is final.</p>
+<p class="muted">Borderline comments (AI score 0.35–0.85, or AI unavailable). Your action is final.</p>
 
 {#each data.pending as c}
   <div class="card">
@@ -1219,11 +1526,9 @@ export const actions = {
 {/each}
 ```
 
-**Verify:** `npm run check` reports 0 errors.
+**Verify:** `npm run check` 0 errors.
 
-**If this fails:** stop, paste the full error, report back.
-
-#### Step 18: Audit log page
+#### Step 22: Audit log page
 
 **File:** `src/routes/channels/[id]/log/+page.server.ts` — create with exactly:
 
@@ -1249,7 +1554,7 @@ export async function load({ params }) {
 
 ```svelte
 <script lang="ts">
-  let { data } = $props();
+  let { data }: { data: any } = $props();
 </script>
 
 <h1>Audit log — {data.ch?.title}</h1>
@@ -1273,71 +1578,312 @@ export async function load({ params }) {
 </div>
 ```
 
-**Verify:** `npm run check` reports 0 errors.
+**Verify:** `npm run check` 0 errors.
 
-**If this fails:** stop, paste the full error, report back.
-
-#### Step 19: Full build
+#### Step 23: Full gate
 
 ```bash
-npm run check && npm run build
+npm run check && npm run build && npm run test
 ```
 
-**Verify:** both exit 0 with no errors.
+**Verify:** all three exit 0.
 
-**If this fails:**
-- If errors are TS `any` complaints in `.svelte` files: add `lang="ts"` is already present; annotate the `let { data } = $props();` as `let { data }: { data: any } = $props();` in the failing file only.
-- Otherwise: stop, paste the full error, report back.
+**If this fails:** fix the cause in the failing file only; do not weaken tests to make them pass. Otherwise stop and report.
 
 ---
 
-### Phase F — End-to-end verification (Steps 20–21)
+### Phase G — Design pass (Steps 24–26)
 
-#### Step 20: Configure real credentials
+Phase F built functional pages with a minimal stylesheet. This phase turns them into a designed product. Everything below is pre-decided — implement values verbatim, do not pick alternatives.
 
-Manually (human task — the executor stops here and asks the human):
+#### Step 24: Design tokens and base stylesheet
 
-1. Google Cloud Console → create project → enable **YouTube Data API v3** → OAuth consent screen (external, add scope `https://www.googleapis.com/auth/youtube.force-ssl`, add the test user's Gmail as a test user) → create OAuth client (Web) with both `http://localhost:5173/api/auth/google/callback` and `https://<production-domain>/api/auth/google/callback` as authorized redirect URIs.
-2. In Netlify, configure `APP_URL=https://<production-domain>` plus `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, remote `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `OPENAI_API_KEY`, `CRON_SECRET`, `ENCRYPTION_KEY`, and `DRY_RUN=true` as secret Functions environment variables. Do not set `TURSO_DATABASE_URL=file:local.db` in production.
-3. Put matching development values in `.env` locally; never commit it.
+**File:** `src/app.css` — replace the ENTIRE file with:
 
-**Verify:** `.env` contains no `placeholder` values except unchanged optional ones: `grep -c placeholder .env` prints `0` (or `1` if `TURSO_AUTH_TOKEN` line untouched — it should be empty, not placeholder).
+```css
+/* ── Moderaty design tokens ─────────────────────────────── */
+:root {
+  --bg: #f7f7f5;
+  --surface: #ffffff;
+  --border: #e5e3de;
+  --ink: #1c1b1a;
+  --ink-2: #6f6a63;          /* muted text */
+  --brand: #4f46e5;          /* indigo 600 */
+  --brand-hover: #4338ca;    /* indigo 700 */
+  --brand-soft: #eef2ff;     /* indigo 50  */
+  --danger: #dc2626;
+  --danger-hover: #b91c1c;
+  --danger-soft: #fef2f2;
+  --warn-soft: #fffbeb;
+  --ok: #16a34a;
+  --ok-soft: #f0fdf4;
+  --radius: 10px;
+  --radius-sm: 6px;
+  --shadow: 0 1px 2px rgb(28 27 26 / 0.06), 0 4px 12px rgb(28 27 26 / 0.05);
+  --font: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
 
-#### Step 21: Live smoke test (dry run, then real)
+* { box-sizing: border-box; }
+html { -webkit-font-smoothing: antialiased; }
+body {
+  font-family: var(--font);
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 15px;
+  line-height: 1.55;
+}
 
-1. `npm run dev`
-2. Open `http://localhost:5173`, click "Connect YouTube channel", complete OAuth with the test account that owns a YouTube channel. Expect redirect back to `/` showing the channel card.
-3. Add one keyword rule matching a word in a recent comment on that channel (action: `hold`).
-4. `curl -X POST -H "Authorization: Bearer <CRON_SECRET>" http://localhost:5173/api/cron` — expect JSON with `dryRun: true` and per-channel `{ fetched, acted, queued }` counts ≥ 0, no `error` values.
-5. Check the audit log page — expect rows. Check the rules hit appears as action `dry-run`.
-6. Set `DRY_RUN=false`, restart, re-run the cron — expect the matched comment to be held on YouTube (visible in YouTube Studio → Comments → Held for review), DB status `held`, audit action `hold`.
-7. Approve one pending queue item from the UI — expect status change and audit row with actor `user`.
-8. Deploy the main branch to Netlify, confirm the build uses Node 24 and the Functions view lists the scheduled `cron` function. Use **Run now** to verify it makes one bounded scheduled request; schedules run only after a published deploy.
+/* ── layout ─────────────────────────────────────────────── */
+nav {
+  background: var(--ink);
+  padding: 0 24px;
+  height: 56px;
+  display: flex;
+  gap: 24px;
+  align-items: center;
+}
+nav a { color: #b8b4ac; text-decoration: none; font-size: 14px; }
+nav a:hover { color: #fff; }
+nav .brand { font-weight: 700; color: #fff; font-size: 17px; letter-spacing: -0.01em; }
+main { max-width: 900px; margin: 32px auto; padding: 0 20px; }
+h1 { font-size: 22px; letter-spacing: -0.02em; margin: 0 0 4px; }
+.page-sub { color: var(--ink-2); margin: 0 0 24px; font-size: 14px; }
+
+/* ── card ───────────────────────────────────────────────── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 20px;
+  margin-bottom: 14px;
+}
+
+/* ── buttons ────────────────────────────────────────────── */
+.btn {
+  display: inline-block;
+  background: var(--brand);
+  color: #fff;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: 500;
+  font-family: var(--font);
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 120ms ease;
+}
+.btn:hover { background: var(--brand-hover); }
+.btn.secondary { background: var(--surface); color: var(--ink); border-color: var(--border); }
+.btn.secondary:hover { background: var(--bg); }
+.btn.danger { background: var(--danger); }
+.btn.danger:hover { background: var(--danger-hover); }
+.btn.small { padding: 5px 11px; font-size: 13px; }
+.btn:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+/* ── forms ──────────────────────────────────────────────── */
+input, select {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-family: var(--font);
+  background: var(--surface);
+  color: var(--ink);
+}
+input:focus, select:focus { border-color: var(--brand); outline: none; box-shadow: 0 0 0 3px var(--brand-soft); }
+form.inline { display: inline; }
+
+/* ── text & badges ──────────────────────────────────────── */
+.muted { color: var(--ink-2); font-size: 13px; }
+.badge {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  background: var(--brand-soft);
+  color: var(--brand);
+}
+.badge.neutral { background: #f1efe9; color: var(--ink-2); }
+.badge.ok { background: var(--ok-soft); color: var(--ok); }
+.badge.danger { background: var(--danger-soft); color: var(--danger); }
+
+/* ── table ──────────────────────────────────────────────── */
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th { color: var(--ink-2); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; }
+th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+tbody tr:last-child td { border-bottom: 0; }
+
+/* ── states (I12) ───────────────────────────────────────── */
+.empty {
+  text-align: center;
+  padding: 48px 24px;
+  color: var(--ink-2);
+  background: var(--surface);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+}
+.empty p { margin: 0 0 6px; font-size: 15px; color: var(--ink); font-weight: 500; }
+.empty .muted { font-size: 14px; }
+.skeleton {
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, #efece7 25%, #f7f5f2 50%, #efece7 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.2s infinite linear;
+  min-height: 16px;
+}
+@keyframes shimmer { to { background-position: -200% 0; } }
+.error-box {
+  background: var(--danger-soft);
+  border: 1px solid #fecaca;
+  color: var(--danger);
+  border-radius: var(--radius-sm);
+  padding: 12px 16px;
+  font-size: 14px;
+  margin-bottom: 14px;
+}
+.flash {
+  background: var(--ok-soft);
+  border: 1px solid #bbf7d0;
+  color: var(--ok);
+  border-radius: var(--radius-sm);
+  padding: 10px 16px;
+  font-size: 14px;
+  margin-bottom: 14px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton { animation: none; }
+  .btn { transition: none; }
+}
+```
+
+**Verify:** `grep -c -- '--brand: #4f46e5' src/app.css` prints `1`; `npm run check` still exits 0.
+
+**If this fails:** stop, paste the error, report back.
+
+#### Step 25: Design components
+
+**File:** `src/lib/EmptyState.svelte` — create with exactly:
+
+```svelte
+<script lang="ts">
+  let { title, hint = '' }: { title: string; hint?: string } = $props();
+</script>
+
+<div class="empty">
+  <p>{title}</p>
+  {#if hint}<span class="muted">{hint}</span>{/if}
+</div>
+```
+
+**File:** `src/lib/Skeleton.svelte` — create with exactly:
+
+```svelte
+<script lang="ts">
+  let { rows = 3 }: { rows?: number } = $props();
+</script>
+
+<div aria-busy="true" aria-label="Loading">
+  {#each Array(rows) as _, i}
+    <div class="card">
+      <div class="skeleton" style="width: 40%; margin-bottom: 10px"></div>
+      <div class="skeleton" style="width: {i % 2 === 0 ? '85%' : '70%'}"></div>
+    </div>
+  {/each}
+</div>
+```
+
+**Verify:** `npm run check` exits 0 with both new components.
+
+**If this fails:** if Svelte 5 prop-typing syntax errors, drop the type annotations (`let { title, hint = '' } = $props();`). Otherwise stop and report.
+
+#### Step 26: Restyle the four pages + states (I12)
+
+Rules for every page below — apply uniformly:
+
+- **Brand:** nav brand text is `Moderaty` (already in the layout from Phase F — change `yt-mod` to `Moderaty` there and in the page `<h1>`s where a product name appears).
+- **Heading pattern:** each page starts with `<h1>` + `<p class="page-sub">` one-line description.
+- **Loading:** while data loads, render `<Skeleton rows={3} />` instead of blank space (SvelteKit streams server loads slowly on cold start — wrap page content so the nav renders instantly; the simplest correct approach: keep the `load` functions as-is and render the skeleton only inside `{#await}`-free markup is NOT possible with blocking loads — therefore: add `export const ssr = true` (default) and accept server-blocking loads, but DO add the skeleton as the fallback content of each page's `{:else}` branch during client navigations). **Decision (no judgment left):** use SvelteKit's blocking loads; the "loading state" requirement is satisfied by rendering `<Skeleton>` on the queue page when `data.pending` is `undefined`, and by the shimmer styles being available — do not restructure load functions.
+- **Empty states (verbatim copy):**
+  - Dashboard, no channels: `<EmptyState title="No channels connected" hint="Connect your YouTube channel to start moderating comments automatically." />`
+  - Rules, no rules: `<EmptyState title="No rules yet" hint="AI moderation still applies to every comment — rules add your own keywords, patterns, and blocked users." />`
+  - Queue, empty: `<EmptyState title="Queue is clear" hint="Borderline comments will appear here for your review." />`
+  - Log, empty: `<EmptyState title="No activity yet" hint="Every moderation action — automatic or manual — is recorded here." />`
+- **Error state:** each page checks `form?.error` (actions pages) and renders `<div class="error-box">{form.error}</div>`; the rules page's existing inline error paragraph moves into this box.
+- **Badge semantics (apply to dashboard counts and log actions):** `pending`/`queue` → `class="badge"` (brand), `approved`/`approve` → `badge ok`, `rejected`/`deleted`/`reject`/`delete`/`ban`/`dry-run` → `badge danger`, everything else → `badge neutral`.
+- **Rule rows:** pattern in `<code>` with `background: var(--brand-soft); padding: 1px 6px; border-radius: 4px;` (add this `code` selector to `app.css`), action label bold, delete button right-aligned (keep the flex layout from Phase F).
+- **Queue cards:** author name `font-weight: 600`; comment text in a `<blockquote style="margin:8px 0; padding:8px 12px; border-left:3px solid var(--border); color: var(--ink-2)">`; action buttons grouped with `style="display:flex; gap:8px"` replacing the four separate `form.inline` wrappers' default spacing (keep the four forms, wrap them in one flex div).
+- **Accessibility (I13):** every form input/select has an `aria-label` matching its purpose (e.g. `aria-label="Rule type"`); the delete-rule and queue buttons have `aria-label` including the target (e.g. `aria-label="Delete rule {r.id}"`, `aria-label="Reject comment by {c.authorName}"`); the log table gets `<caption class="muted" style="text-align:left; padding-bottom:8px">Latest moderation actions</caption>`.
+- **Page `<svelte:head>` titles:** `<title>Moderaty — Dashboard</title>`, `— Rules`, `— Review queue`, `— Audit log` respectively.
+
+Do not change any `load` function, form action, route, or class logic in this step — presentation only. If a page's Phase F markup conflicts with a rule above, the rule above wins for markup; behavior stays identical.
+
+**Verify:**
+1. `npm run check && npm run build && npm run test` all exit 0 (behavior unchanged → tests must stay green).
+2. `grep -rc 'yt-mod' src/` prints `0` for every file (brand fully renamed in the UI).
+3. `grep -c EmptyState src/routes/+page.svelte src/routes/channels/*/rules/+page.svelte src/routes/channels/*/queue/+page.svelte src/routes/channels/*/log/+page.svelte` — each of the four files prints ≥ 1.
+4. `grep -c 'aria-label' src/routes/channels/*/rules/+page.svelte` prints ≥ 3.
 
 **If this fails:**
-- OAuth error `redirect_uri_mismatch`: the redirect URI in Google Cloud Console must be exactly `http://localhost:5173/api/auth/google/callback` and `APP_URL` must be `http://localhost:5173`. Fix the console, not the code.
-- `token exchange failed ... refresh_token` absent: revoke the app at https://myaccount.google.com/permissions and reconnect (Google only issues a refresh token on first consent or with `prompt=consent`, which we set).
-- `commentThreads.list failed: 403 quotaExceeded`: wait for the daily quota reset; do not create additional Google Cloud projects.
-- Anything else: stop, paste the full error, report back.
+- If `npm run test` breaks, a behavioral change slipped in — `git diff` against the phase start, revert the behavioral part, keep presentation changes.
+- Otherwise stop, paste the error, report back.
+
+---
+
+### Phase H — End-to-end (Steps 27–28)
+
+#### Step 27: Credentials (human task — executor stops and asks)
+
+1. Google Cloud Console → project → enable **YouTube Data API v3** → OAuth consent screen (external; scope `https://www.googleapis.com/auth/youtube.force-ssl`; add the test Gmail as a test user; **app name shown to users: "Moderaty"**) → OAuth client (Web) with redirect URI `http://localhost:5173/api/auth/google/callback`.
+2. Fill `.env` with real values; generate `ENCRYPTION_KEY` via `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`; set `CRON_SECRET`. Keep `DRY_RUN=true`.
+
+**Verify:** `grep -c placeholder .env` prints `0`.
+
+#### Step 28: Live smoke test
+
+1. `npm run dev`; open `/`; connect the test channel; expect the channel card on `/`.
+2. Add a keyword rule matching a word in a recent comment (action `hold`).
+3. `curl "http://localhost:5173/api/cron?secret=<CRON_SECRET>"` — expect `dryRun: true`, counts ≥ 0, no `error`; audit log shows `dry-run` rows; DB has ZERO new comment rows (I8).
+4. `DRY_RUN=false`, restart, re-run cron — the matched comment appears in YouTube Studio → Comments → Held for review; DB status `held`; audit action `hold`.
+5. Queue: approve one item → status `approved`, audit actor `user`.
+6. Rotation: connect or seed a second channel row; two consecutive cron calls process DIFFERENT channels (I10).
+
+**If this fails:**
+- `redirect_uri_mismatch` → fix the console URI to match exactly; do not change code.
+- No `refresh_token` → revoke at myaccount.google.com/permissions, reconnect.
+- `HTTP 403 ... quotaExceeded` → wait for quota reset; never create extra projects.
+- Anything else → stop, paste the full error, report back.
 
 ---
 
 ## 6. Definition of done
 
-All of the following must be true before reporting completion:
+All must be true before reporting completion:
 
-- [ ] Every phase A–F has its own branch, an open-then-merged PR reviewed by the human, and the executor never committed directly to `main` or merged its own PR
-- [ ] `npm run check` and `npm run build` both exit 0
-- [ ] `local.db` contains tables `channels`, `rules`, `comments`, `audit_log`
-- [ ] OAuth flow completes and a channel row exists with a non-null encrypted refresh token
-- [ ] `POST /api/cron` with a Bearer token and `DRY_RUN=true` returns `dryRun: true`, writes only `dry-run` audit rows, leaves the cursor unchanged, and makes no YouTube write calls
-- [ ] With `DRY_RUN=false`, a keyword-rule hit results in the comment held/rejected on YouTube (confirmed in YouTube Studio), DB status updated, audit row with actor `system`
-- [ ] Review queue shows borderline comments (0.35 ≤ score < 0.85) and each of the four buttons (approve/reject/delete/ban) updates only the authenticated channel's DB rows and audit log with actor `user`
-- [ ] Rules page rejects invalid regex input with an error message
-- [ ] Invalid `secret` on `/api/cron` returns 401
-- [ ] Netlify deploy succeeds with standard Node Functions, remote Turso, and the production OAuth callback URL
-- [ ] Netlify lists `cron` as a `*/15 * * * *` scheduled function; a manual run processes no more than one channel and one page
-- [ ] No files outside the "Files you will create or modify" list were changed
-- [ ] No dependencies beyond the approved list were added (`grep '"dependencies"' -A 10 package.json` shows only the approved packages plus scaffold defaults)
+- [ ] Every phase A–H has its own branch and a human-reviewed, merged PR; no direct commits to `main`; no PR was opened with red checks
+- [ ] `npm run check`, `npm run build`, `npm run test` all exit 0
+- [ ] All test cases exist and pass: rules suite, M1–M9, Y1–Y11, P1–P16
+- [ ] `local.db` has `channels` (with `cursor`, `continuation_token`, `high_water`, `last_run_at`), `rules`, `comments` (with `pending_action`), `audit_log`
+- [ ] Dry run: audit rows only, zero comment rows, zero checkpoint movement, zero YouTube writes (P15 verified live too)
+- [ ] Burst test: a >100-comment burst drains across runs with no skipped comments (P12–P14)
+- [ ] Crash recovery: a seeded `action_pending` row is reconciled on the next run (P11)
+- [ ] User regexes execute under RE2; `(a+)+$` completes instantly; lookahead patterns are rejected at the form with an RE2 message
+- [ ] Comment without author metadata is moderated, not skipped (P5/Y2–Y3)
+- [ ] Out-of-range AI scores throw and route the comment to the human queue (M3–M6, P4)
+- [ ] Cron processes one channel per call and rotates by `lastRunAt`
+- [ ] Invalid cron secret returns 401
+- [ ] Brand is `Moderaty` everywhere in the UI: `grep -rc 'yt-mod' src/` prints 0 for every file
+- [ ] All four pages render the designed empty state (EmptyState component) when their data is empty, `.error-box` on form errors, and skeletons per I12
+- [ ] Design tokens in `src/app.css` match the verbatim values in Step 24 (`--brand: #4f46e5` present)
+- [ ] Every form control and action button has a label or aria-label per I13; each page has a `<svelte:head>` title starting with `Moderaty`
+- [ ] Every review finding from every PR has a reproducing test committed alongside its fix
+- [ ] No files outside the Files list changed; no dependencies beyond the approved list
 
 If any box cannot be checked, report which one and the exact failure output. Do not report success with unchecked boxes.

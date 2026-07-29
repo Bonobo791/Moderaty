@@ -44,6 +44,8 @@ export interface CommentPage {
 	reachedCursor: boolean;
 }
 
+export type CommentModerationStatus = 'heldForReview' | 'rejected' | 'published' | 'likelySpam';
+
 function object(value: unknown, context: string): JsonObject {
 	if (!value || typeof value !== 'object' || Array.isArray(value)) {
 		throw new Error(`${context} is missing or invalid`);
@@ -218,6 +220,35 @@ export async function setModerationStatus(
 			throw new Error(`setModerationStatus failed: ${res.status} ${body}`);
 		}
 	}
+}
+
+/**
+ * Returns a comment's current moderation status, or null when it no longer exists.
+ *
+ * @param id - The YouTube comment ID.
+ * @param accessToken - The OAuth access token for the YouTube API.
+ * @param deadline - Optional request deadline.
+ */
+export async function getCommentModerationStatus(
+	id: string,
+	accessToken: string,
+	deadline?: number
+): Promise<CommentModerationStatus | null> {
+	const params = new URLSearchParams({ part: 'snippet', id });
+	const res = await ytFetch(`/comments?${params}`, accessToken, undefined, deadline);
+	if (res.status === 404) return null;
+	const data = object(await jsonResponse(res, 'comments.list'), 'comments.list response');
+	if (!Array.isArray(data.items)) throw new Error('comments.list response items is missing or invalid');
+	if (!data.items.length) return null;
+	if (data.items.length !== 1) throw new Error('comments.list response returned multiple comments');
+	const status = requiredString(
+		object(object(data.items[0], 'comments.list response item').snippet, 'comments.list response item snippet').moderationStatus,
+		'comments.list response moderationStatus'
+	);
+	if (status !== 'heldForReview' && status !== 'rejected' && status !== 'published' && status !== 'likelySpam') {
+		throw new Error(`comments.list response moderationStatus is unsupported: ${status}`);
+	}
+	return status;
 }
 
 /**

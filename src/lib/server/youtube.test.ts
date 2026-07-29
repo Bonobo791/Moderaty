@@ -17,7 +17,7 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { afterEach, expect, test, vi } from 'vitest';
-import { fetchNewComments, setModerationStatus } from './youtube';
+import { fetchNewComments, getCommentModerationStatus, setModerationStatus } from './youtube';
 
 function comment(id: string, publishedAt: string, text = `Comment ${id}`) {
 	return {
@@ -97,4 +97,21 @@ test('batches moderation-status updates into groups of fifty', async () => {
 	expect(fetch).toHaveBeenCalledTimes(3);
 	const batches = fetch.mock.calls.map(([url]) => new URL(String(url)).searchParams.get('id')!.split(','));
 	expect(batches).toEqual([ids.slice(0, 50), ids.slice(50, 100), ids.slice(100)]);
+});
+
+test('returns a comment moderation status for recovery verification', async () => {
+	const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+		items: [{ snippet: { moderationStatus: 'rejected' } }]
+	}), { status: 200 }));
+	vi.stubGlobal('fetch', fetch);
+
+	await expect(getCommentModerationStatus('comment', 'token')).resolves.toBe('rejected');
+	expect(String(fetch.mock.calls[0]?.[0])).toContain('part=snippet');
+	expect(String(fetch.mock.calls[0]?.[0])).toContain('id=comment');
+});
+
+test('treats a missing comment as absent during recovery verification', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 404 })));
+
+	await expect(getCommentModerationStatus('comment', 'token')).resolves.toBeNull();
 });

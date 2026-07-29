@@ -1,0 +1,38 @@
+/*
+ * Moderaty — YouTube Comment Auto-Moderation Tool
+ * Copyright (C) 2026 Andrew Philip Weilbacher
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published
+ * by the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+ */
+
+* { box-sizing: border-box; }
+body { font-family: system-ui, -apple-system, sans-serif; margin: 0; background: #f6f7f9; color: #1a1d21; }
+nav { background: #111; color: #fff; padding: 10px 20px; display: flex; gap: 16px; align-items: center; }
+nav a { color: #cdd3da; text-decoration: none; font-size: 14px; }
+nav a:hover { color: #fff; }
+nav .brand { font-weight: 700; color: #fff; }
+main { max-width: 860px; margin: 24px auto; padding: 0 16px; }
+.card { background: #fff; border: 1px solid #e3e6ea; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+.btn { display: inline-block; background: #111; color: #fff; border: 0; border-radius: 6px; padding: 8px 14px; font-size: 14px; cursor: pointer; text-decoration: none; }
+.btn.secondary { background: #e3e6ea; color: #111; }
+.btn.danger { background: #b3261e; }
+.btn.small { padding: 4px 10px; font-size: 13px; }
+input, select { padding: 8px; border: 1px solid #c9cfd6; border-radius: 6px; font-size: 14px; }
+form.inline { display: inline; }
+.muted { color: #6b7280; font-size: 13px; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { text-align: left; padding: 8px; border-bottom: 1px solid #e3e6ea; vertical-align: top; }
+.badge { display: inline-block; border-radius: 4px; padding: 2px 8px; font-size: 12px; background: #e3e6ea; }

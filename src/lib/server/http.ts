@@ -25,10 +25,23 @@ export class DeadlineExceededError extends Error {
 	}
 }
 
+/**
+ * Ensures the current time is before the specified deadline.
+ *
+ * @param deadline - The time limit, expressed as milliseconds since the Unix epoch.
+ * @throws DeadlineExceededError if the deadline has been reached or passed.
+ */
 export function assertBeforeDeadline(deadline?: number) {
 	if (deadline !== undefined && Date.now() >= deadline) throw new DeadlineExceededError();
 }
 
+/**
+ * Determines the delay before the next retry attempt.
+ *
+ * @param response - The response containing an optional `Retry-After` header
+ * @param retry - The zero-based retry attempt number
+ * @returns The delay in milliseconds
+ */
 function retryDelay(response: Response | undefined, retry: number): number {
 	const retryAfter = response?.headers.get('retry-after');
 	if (retryAfter) {
@@ -40,10 +53,24 @@ function retryDelay(response: Response | undefined, retry: number): number {
 	return Math.min(1_000 * 2 ** retry, 10_000);
 }
 
+/**
+ * Determines whether an HTTP response or failed request can be retried.
+ *
+ * @param response - The response to evaluate, or `undefined` when no response was received
+ * @returns `true` if no response was received or the status indicates throttling or a server error, `false` otherwise
+ */
 function retryable(response: Response | undefined): boolean {
 	return response === undefined || response.status === 429 || response.status >= 500;
 }
 
+/**
+ * Fetches a resource with bounded retries and optional deadline enforcement.
+ *
+ * @param input - The request resource to fetch.
+ * @param deadline - An absolute time in milliseconds after which the request fails with `DeadlineExceededError`.
+ * @returns The first non-retryable response, or the final response after retries are exhausted.
+ * @throws `DeadlineExceededError` when the deadline is reached before or during a request.
+ */
 export async function fetchWithRetry(
 	input: RequestInfo | URL,
 	init: RequestInit = {},

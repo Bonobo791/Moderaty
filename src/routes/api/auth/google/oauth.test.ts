@@ -138,8 +138,9 @@ test('auth start sets an HttpOnly oauth_state cookie and redirects with matching
 	expect(stateCall?.opts.httpOnly).toBe(true);
 
 	const target = new URL(thrown?.location ?? '');
+	const pendingStates: unknown = JSON.parse(stateCall?.value ?? '[]');
 	expect(target.origin + target.pathname).toBe('https://accounts.google.com/o/oauth2/v2/auth');
-	expect(target.searchParams.get('state')).toBe(stateCall?.value);
+	expect(pendingStates).toContain(target.searchParams.get('state'));
 	expect(target.searchParams.get('scope')).toBe('https://www.googleapis.com/auth/youtube.force-ssl');
 	expect(target.searchParams.get('access_type')).toBe('offline');
 	expect(target.searchParams.get('prompt')).toBe('consent');
@@ -157,7 +158,7 @@ test('auth start fails loudly with 500 when GOOGLE_CLIENT_ID is not configured',
 
 test('callback rejects a missing or mismatched state with 400', async () => {
 	const cookies = makeCookies();
-	cookies.set('oauth_state', 'the-real-state', { path: '/' });
+	cookies.set('oauth_state', JSON.stringify(['the-real-state']), { path: '/' });
 
 	await expect(
 		authCallback({ url: callbackUrl({ code: 'abc' }), cookies } as never)
@@ -170,54 +171,48 @@ test('callback rejects a missing or mismatched state with 400', async () => {
 
 test('callback rejects a missing code with 400', async () => {
 	const cookies = makeCookies();
-	cookies.set('oauth_state', 's', { path: '/' });
+	cookies.set('oauth_state', JSON.stringify(['s']), { path: '/' });
 	await expect(
 		authCallback({ url: callbackUrl({ state: 's' }), cookies } as never)
 	).rejects.toMatchObject({ status: 400 });
 });
 
-test('callback error for missing refresh_token never leaks the access token', async () => {
-	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-	vi.stubGlobal(
-		'fetch',
-		vi.fn(async () =>
-			// Google answers 200 but without a refresh_token (re-consent case).
-			new Response(JSON.stringify({ access_token: 'super-secret-access-token' }), { status: 200 })
-		)
-	);
-	const cookies = makeCookies();
-	cookies.set('oauth_state', 's', { path: '/' });
+test.each([
+	{
+		name: 'missing refresh_token',
+		status: 200,
+		// Google answers 200 but without a refresh_token (re-consent case).
+		body: { access_token: 'super-secret-access-token' },
+		expectedStatus: 400,
+		logged: false
+	},
+	{
+		name: 'failed token exchange',
+		status: 400,
+		// Must not surface as a 400 "revoke access" message, and even a
+		// hypothetical token in the error body must stay out of logs.
+		body: {
+			error: 'invalid_grant',
+			error_description: 'Code was already redeemed',
+			access_token: 'super-secret-access-token'
+		},
+		expectedStatus: 502,
+		logged: true
+	}
+])(
+	'callback errors never leak tokens to client or logs ($name)',
+	async ({ status, body, expectedStatus, logged }) => {
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status })));
+		const cookies = makeCookies();
+		cookies.set('oauth_state', JSON.stringify(['s']), { path: '/' });
 
-	const thrown = await captureCallbackError(cookies, { code: 'abc', state: 's' });
-	expect(thrown?.status).toBe(400);
-	assertNoTokenLeak(thrown, errorSpy);
-});
-
-test('callback returns 502 and keeps tokens out of logs when the token exchange fails', async () => {
-	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-	vi.stubGlobal(
-		'fetch',
-		vi.fn(async () =>
-			// A failed exchange must not surface as a 400 "revoke access" message,
-			// and even a hypothetical token in the error body must stay out of logs.
-			new Response(
-				JSON.stringify({
-					error: 'invalid_grant',
-					error_description: 'Code was already redeemed',
-					access_token: 'super-secret-access-token'
-				}),
-				{ status: 400 }
-			)
-		)
-	);
-	const cookies = makeCookies();
-	cookies.set('oauth_state', 's', { path: '/' });
-
-	const thrown = await captureCallbackError(cookies, { code: 'abc', state: 's' });
-	expect(thrown?.status).toBe(502);
-	expect(errorSpy).toHaveBeenCalled();
-	assertNoTokenLeak(thrown, errorSpy);
-});
+		const thrown = await captureCallbackError(cookies, { code: 'abc', state: 's' });
+		expect(thrown?.status).toBe(expectedStatus);
+		expect(errorSpy.mock.calls.length > 0).toBe(logged);
+		assertNoTokenLeak(thrown, errorSpy);
+	}
+);
 
 test('callback fails loudly when the channels lookup returns a non-OK status', async () => {
 	vi.stubGlobal(
@@ -235,7 +230,7 @@ test('callback fails loudly when the channels lookup returns a non-OK status', a
 		})
 	);
 	const cookies = makeCookies();
-	cookies.set('oauth_state', 's', { path: '/' });
+	cookies.set('oauth_state', JSON.stringify(['s']), { path: '/' });
 
 	await expect(
 		authCallback({ url: callbackUrl({ code: 'abc', state: 's' }), cookies } as never)
@@ -245,7 +240,7 @@ test('callback fails loudly when the channels lookup returns a non-OK status', a
 test('callback upserts the channel and redirects home on the happy path', async () => {
 	stubTokenAndChannelResponses();
 	const cookies = makeCookies();
-	cookies.set('oauth_state', 's', { path: '/' });
+	cookies.set('oauth_state', JSON.stringify(['s']), { path: '/' });
 
 	let thrown: { status: number; location: string } | undefined;
 	try {
@@ -260,4 +255,32 @@ test('callback upserts the channel and redirects home on the happy path', async 
 	expect(values.id).toBe('UC123');
 	expect(values.title).toBe('My Channel');
 	expect(values.refreshTokenEnc).not.toBe('refresh-token');
+});
+
+test('overlapping OAuth starts in two tabs both stay valid', async () => {
+	stubTokenAndChannelResponses();
+	const cookies = makeCookies();
+
+	// Two tabs each start the flow before either callback returns.
+	const states: string[] = [];
+	for (let i = 0; i < 2; i++) {
+		try {
+			startAuth({ cookies } as never);
+		} catch (e) {
+			states.push(new URL((e as { location: string }).location).searchParams.get('state') ?? '');
+		}
+	}
+	expect(states[0]).not.toBe(states[1]);
+
+	// Tab 1's callback must succeed even though tab 2's start wrote the cookie
+	// after it — and vice versa. Each state is consumed exactly once.
+	for (const state of states) {
+		const thrown = await captureCallbackError(cookies, { code: 'abc', state });
+		expect(thrown?.status).toBe(302);
+	}
+	expect(mocks.upserts).toHaveLength(2);
+
+	// A consumed state cannot be replayed.
+	const replay = await captureCallbackError(cookies, { code: 'abc', state: states[0] });
+	expect(replay?.status).toBe(400);
 });

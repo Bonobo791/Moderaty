@@ -23,11 +23,13 @@ import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
 import { encrypt } from '$lib/server/crypto';
 import { fetchWithRetry } from '$lib/server/http';
+import { readPendingStates, storePendingStates } from '$lib/server/oauthState';
 
 export async function GET({ url, cookies }: { url: URL; cookies: import('@sveltejs/kit').Cookies }) {
 	const state = url.searchParams.get('state');
-	if (!state || state !== cookies.get('oauth_state')) throw error(400, 'bad state');
-	cookies.delete('oauth_state', { path: '/' });
+	const pending = readPendingStates(cookies);
+	if (!state || !pending.includes(state)) throw error(400, 'bad state');
+	storePendingStates(cookies, pending.filter((s) => s !== state));
 
 	const code = url.searchParams.get('code');
 	if (!code) throw error(400, 'missing code');

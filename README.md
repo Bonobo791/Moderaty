@@ -29,8 +29,8 @@ Moderaty is dual-licensed:
   product or offer it as a hosted service without AGPL obligations,
   contact contact@marketingprowess.simplelogin.com for a commercial license.
 
-# Moderaty — YouTube Comment Auto-Moderation Tool
-## Copyright (C) 2026 Andrew Philip Weilbacher
+### Moderaty — YouTube Comment Auto-Moderation Tool
+#### Copyright (C) 2026 Andrew Philip Weilbacher
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published

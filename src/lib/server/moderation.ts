@@ -17,6 +17,7 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { env } from '$env/dynamic/private';
+import { fetchWithRetry } from '$lib/server/http';
 
 const TOXIC_CATEGORIES = [
 	'harassment',
@@ -32,22 +33,26 @@ export interface ModerationResult {
 	scores: Record<string, number>; // the six category scores
 }
 
-export async function scoreComment(text: string): Promise<ModerationResult> {
-	const res = await fetch('https://api.openai.com/v1/moderations', {
+export async function scoreComment(text: string, deadline?: number): Promise<ModerationResult> {
+	if (!env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY is required');
+	const res = await fetchWithRetry('https://api.openai.com/v1/moderations', {
 		method: 'POST',
 		headers: {
 			Authorization: `Bearer ${env.OPENAI_API_KEY}`,
 			'Content-Type': 'application/json'
 		},
 		body: JSON.stringify({ model: 'omni-moderation-latest', input: text })
-	});
+	}, deadline);
 	const data = await res.json();
 	if (!res.ok) throw new Error(`moderation failed: ${res.status} ${JSON.stringify(data)}`);
-	const cat = data.results?.[0]?.category_scores ?? {};
+	const cat = data.results?.[0]?.category_scores;
+	if (!cat || TOXIC_CATEGORIES.some((category) => !Number.isFinite(cat[category]))) {
+		throw new Error('moderation response is missing required category scores');
+	}
 	const scores: Record<string, number> = {};
 	let max = 0;
 	for (const k of TOXIC_CATEGORIES) {
-		const v = typeof cat[k] === 'number' ? cat[k] : 0;
+		const v = cat[k];
 		scores[k] = v;
 		if (v > max) max = v;
 	}

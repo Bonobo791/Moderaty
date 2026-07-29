@@ -24,6 +24,8 @@ export const channels = sqliteTable('channels', {
 	title: text('title').notNull(),
 	refreshTokenEnc: text('refresh_token_enc').notNull(),
 	cursor: text('cursor'), // ISO timestamp of newest comment seen; null = never polled
+	nextPageToken: text('next_page_token'), // YouTube continuation token for an incomplete scan
+	scanCursor: text('scan_cursor'), // high-water timestamp to commit once an incomplete scan ends
 	active: integer('active').notNull().default(1),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 });

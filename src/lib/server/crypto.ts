@@ -20,7 +20,8 @@ import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'node:
 import { env } from '$env/dynamic/private';
 
 function key(): Buffer {
-	return createHash('sha256').update(env.ENCRYPTION_KEY ?? 'insecure-dev-key').digest();
+	if (!env.ENCRYPTION_KEY) throw new Error('ENCRYPTION_KEY is required');
+	return createHash('sha256').update(env.ENCRYPTION_KEY).digest();
 }
 
 export function encrypt(plaintext: string): string {
@@ -36,7 +37,7 @@ export function decrypt(payload: string): string {
 	const iv = buf.subarray(0, 12);
 	const tag = buf.subarray(12, 28);
 	const enc = buf.subarray(28);
-	const decipher = createDecipheriv('aes-256-gcm', key(), iv);
+	const decipher = createDecipheriv('aes-256-gcm', key(), iv, { authTagLength: 16 });
 	decipher.setAuthTag(tag);
 	return Buffer.concat([decipher.update(enc), decipher.final()]).toString('utf8');
 }

@@ -16,12 +16,19 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { eq } from 'drizzle-orm';
-import { db } from './db';
-import { channels, rules, comments, auditLog } from './db/schema';
-import { decrypt } from './crypto';
-import { refreshAccessToken, fetchNewComments, setModerationStatus, deleteComment } from './youtube';
-import { scoreComment } from './moderation';
+import { eq, inArray } from 'drizzle-orm';
+import { decrypt } from '$lib/server/crypto';
+import { db } from '$lib/server/db';
+import { auditLog, channels, comments, rules } from '$lib/server/db/schema';
+import { assertBeforeDeadline, DeadlineExceededError } from '$lib/server/http';
+import { scoreComment } from '$lib/server/moderation';
+import {
+	deleteComment,
+	fetchNewComments,
+	refreshAccessToken,
+	setModerationStatus,
+	type NewComment
+} from '$lib/server/youtube';
 
 const AUTO_REJECT = 0.85;
 const QUEUE = 0.35;
@@ -33,14 +40,37 @@ export interface RuleRow {
 	action: string;
 }
 
-export function matchRule(text: string, authorChannelId: string, rs: RuleRow[]): RuleRow | null {
+export interface RunChannelOptions {
+	maxPages?: number;
+	deadline?: number;
+}
+
+export interface ChannelRunResult {
+	fetched: number;
+	acted: number;
+	queued: number;
+	partial: boolean;
+}
+
+interface Decision {
+	comment: NewComment;
+	status: string;
+	decidedBy: string;
+	matchedRuleId: number | null;
+	aiScore: string | null;
+	auditAction: string | null;
+	reason: string | null;
+	youtubeAction: 'hold' | 'reject' | 'delete' | 'ban' | null;
+}
+
+export function matchRule(text: string, authorChannelId: string, rules: RuleRow[]): RuleRow | null {
 	const lower = text.toLowerCase();
-	for (const r of rs) {
-		if (r.type === 'keyword' && lower.includes(r.pattern.toLowerCase())) return r;
-		if (r.type === 'user' && authorChannelId === r.pattern) return r;
-		if (r.type === 'regex') {
+	for (const rule of rules) {
+		if (rule.type === 'keyword' && lower.includes(rule.pattern.toLowerCase())) return rule;
+		if (rule.type === 'user' && authorChannelId === rule.pattern) return rule;
+		if (rule.type === 'regex') {
 			try {
-				if (new RegExp(r.pattern, 'i').test(text)) return r;
+				if (new RegExp(rule.pattern, 'i').test(text)) return rule;
 			} catch {
 				// invalid user-supplied regex: skip the rule, never crash the pipeline
 			}
@@ -49,109 +79,217 @@ export function matchRule(text: string, authorChannelId: string, rs: RuleRow[]):
 	return null;
 }
 
-async function log(channelId: string, commentId: string, action: string, reason: string, actor: string) {
-	await db.insert(auditLog).values({
-		channelId,
-		commentId,
-		action,
-		reason,
-		actor,
-		createdAt: new Date().toISOString()
-	});
+function emptyResult(): ChannelRunResult {
+	return { fetched: 0, acted: 0, queued: 0, partial: false };
 }
 
-export async function runChannel(channelId: string): Promise<{ fetched: number; acted: number; queued: number }> {
-	const ch = await db.select().from(channels).where(eq(channels.id, channelId)).get();
-	if (!ch || !ch.active) return { fetched: 0, acted: 0, queued: 0 };
-	const dryRun = process.env.DRY_RUN === 'true';
+async function decide(comment: NewComment, rules: RuleRow[], deadline?: number): Promise<Decision> {
+	const rule = matchRule(comment.text, comment.authorChannelId, rules);
+	if (rule) {
+		const reason = `rule #${rule.id} (${rule.type}: ${rule.pattern.slice(0, 80)})`;
+		if (rule.action === 'hold') {
+			return {
+				comment,
+				status: 'held',
+				decidedBy: 'rule',
+				matchedRuleId: rule.id,
+				aiScore: null,
+				auditAction: 'hold',
+				reason,
+				youtubeAction: 'hold'
+			};
+		}
+		if (rule.action === 'reject') {
+			return {
+				comment,
+				status: 'rejected',
+				decidedBy: 'rule',
+				matchedRuleId: rule.id,
+				aiScore: null,
+				auditAction: 'reject',
+				reason,
+				youtubeAction: 'reject'
+			};
+		}
+		if (rule.action === 'delete') {
+			return {
+				comment,
+				status: 'deleted',
+				decidedBy: 'rule',
+				matchedRuleId: rule.id,
+				aiScore: null,
+				auditAction: 'delete',
+				reason,
+				youtubeAction: 'delete'
+			};
+		}
+		return {
+			comment,
+			status: 'rejected',
+			decidedBy: 'rule',
+			matchedRuleId: rule.id,
+			aiScore: null,
+			auditAction: 'ban',
+			reason,
+			youtubeAction: 'ban'
+		};
+	}
 
-	const accessToken = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
-	const fresh = await fetchNewComments(channelId, accessToken, ch.cursor);
-	if (fresh.length === 0) return { fetched: 0, acted: 0, queued: 0 };
+	const moderation = await scoreComment(comment.text, deadline);
+	const reason = `ai score ${moderation.score.toFixed(2)}`;
+	if (moderation.score >= AUTO_REJECT) {
+		return {
+			comment,
+			status: 'rejected',
+			decidedBy: 'ai',
+			matchedRuleId: null,
+			aiScore: JSON.stringify(moderation.scores),
+			auditAction: 'reject',
+			reason,
+			youtubeAction: 'reject'
+		};
+	}
+	if (moderation.score >= QUEUE) {
+		return {
+			comment,
+			status: 'pending',
+			decidedBy: 'ai',
+			matchedRuleId: null,
+			aiScore: JSON.stringify(moderation.scores),
+			auditAction: 'queue',
+			reason,
+			youtubeAction: null
+		};
+	}
+	return {
+		comment,
+		status: 'approved',
+		decidedBy: 'ai',
+		matchedRuleId: null,
+		aiScore: JSON.stringify(moderation.scores),
+		auditAction: null,
+		reason: null,
+		youtubeAction: null
+	};
+}
 
-	const rs = await db.select().from(rules).where(eq(rules.channelId, channelId)).all();
-
-	const holdIds: string[] = [];
-	const rejectIds: string[] = [];
-	const banIds: string[] = [];
+export async function runChannel(
+	channelId: string,
+	{ maxPages = 3, deadline }: RunChannelOptions = {}
+): Promise<ChannelRunResult> {
+	let fetched = 0;
 	let acted = 0;
 	let queued = 0;
+	try {
+		const channel = await db.select().from(channels).where(eq(channels.id, channelId)).get();
+		if (!channel || !channel.active) return emptyResult();
+		const dryRun = process.env.DRY_RUN === 'true';
+		const accessToken = await refreshAccessToken(decrypt(channel.refreshTokenEnc), deadline);
+		const page = await fetchNewComments(channelId, accessToken, channel.cursor, {
+			maxPages,
+			pageToken: channel.nextPageToken,
+			deadline
+		});
+		fetched = page.comments.length;
 
-	for (const c of fresh) {
-		const existing = await db.select().from(comments).where(eq(comments.id, c.id)).get();
-		if (existing) continue;
-
-		let status = 'pending';
-		let decidedBy = 'none';
-		let matchedRuleId: number | null = null;
-		let aiScoreJson: string | null = null;
-
-		const hit = matchRule(c.text, c.authorChannelId, rs);
-		if (hit) {
-			matchedRuleId = hit.id;
-			decidedBy = 'rule';
-			const reason = `rule #${hit.id} (${hit.type}: ${hit.pattern.slice(0, 80)})`;
-			if (hit.action === 'hold') {
-				status = 'held';
-				holdIds.push(c.id);
-				await log(channelId, c.id, dryRun ? 'dry-run' : 'hold', reason, 'system');
-			} else if (hit.action === 'reject') {
-				status = 'rejected';
-				rejectIds.push(c.id);
-				await log(channelId, c.id, dryRun ? 'dry-run' : 'reject', reason, 'system');
-			} else if (hit.action === 'delete') {
-				status = 'deleted';
-				if (!dryRun) await deleteComment(c.id, accessToken);
-				await log(channelId, c.id, dryRun ? 'dry-run' : 'delete', reason, 'system');
-			} else if (hit.action === 'ban') {
-				status = 'rejected';
-				banIds.push(c.id);
-				await log(channelId, c.id, dryRun ? 'dry-run' : 'ban', reason, 'system');
-			}
-			acted++;
-		} else {
-			const m = await scoreComment(c.text);
-			aiScoreJson = JSON.stringify(m.scores);
-			if (m.score >= AUTO_REJECT) {
-				status = 'rejected';
-				decidedBy = 'ai';
-				rejectIds.push(c.id);
-				await log(channelId, c.id, dryRun ? 'dry-run' : 'reject', `ai score ${m.score.toFixed(2)}`, 'system');
-				acted++;
-			} else if (m.score >= QUEUE) {
-				status = 'pending';
-				decidedBy = 'ai';
-				queued++;
-				await log(channelId, c.id, 'queue', `ai score ${m.score.toFixed(2)}`, 'system');
-			} else {
-				status = 'approved';
-				decidedBy = 'ai';
-			}
+		const existingIds = new Set(
+			page.comments.length
+				? (
+						await db
+							.select({ id: comments.id })
+							.from(comments)
+							.where(inArray(comments.id, page.comments.map((comment) => comment.id)))
+							.all()
+					).map((comment) => comment.id)
+				: []
+		);
+		const rulesForChannel = await db.select().from(rules).where(eq(rules.channelId, channelId)).all();
+		const decisions: Decision[] = [];
+		for (const comment of page.comments) {
+			if (existingIds.has(comment.id)) continue;
+			const decision = await decide(comment, rulesForChannel, deadline);
+			decisions.push(decision);
+			if (decision.youtubeAction) acted++;
+			if (decision.auditAction === 'queue') queued++;
 		}
 
-		await db.insert(comments).values({
-			id: c.id,
-			channelId,
-			authorChannelId: c.authorChannelId,
-			authorName: c.authorName,
-			text: c.text,
-			publishedAt: c.publishedAt,
-			status,
-			decidedBy,
-			matchedRuleId,
-			aiScore: aiScoreJson,
-			createdAt: new Date().toISOString()
+		if (dryRun) {
+			const audits = decisions
+				.filter((decision) => decision.auditAction && decision.reason)
+				.map((decision) => ({
+					channelId,
+					commentId: decision.comment.id,
+					action: 'dry-run',
+					reason: decision.reason!,
+					actor: 'system',
+					createdAt: new Date().toISOString()
+				}));
+			if (audits.length) await db.insert(auditLog).values(audits);
+			return { fetched, acted, queued, partial: false };
+		}
+
+		const holds = decisions
+			.filter((decision) => decision.youtubeAction === 'hold')
+			.map((decision) => decision.comment.id);
+		const rejections = decisions
+			.filter((decision) => decision.youtubeAction === 'reject')
+			.map((decision) => decision.comment.id);
+		const bans = decisions
+			.filter((decision) => decision.youtubeAction === 'ban')
+			.map((decision) => decision.comment.id);
+		const deletions = decisions
+			.filter((decision) => decision.youtubeAction === 'delete')
+			.map((decision) => decision.comment.id);
+		if (holds.length) await setModerationStatus(holds, 'heldForReview', false, accessToken, deadline);
+		if (rejections.length) await setModerationStatus(rejections, 'rejected', false, accessToken, deadline);
+		if (bans.length) await setModerationStatus(bans, 'rejected', true, accessToken, deadline);
+		for (const commentId of deletions) await deleteComment(commentId, accessToken, deadline);
+
+		assertBeforeDeadline(deadline);
+		const newest = page.comments.map((comment) => comment.publishedAt).sort().at(-1) ?? channel.cursor;
+		const scanCursor = channel.scanCursor ?? newest;
+		const complete = page.reachedCursor || !page.nextPageToken;
+		await db.transaction(async (transaction) => {
+			if (decisions.length) {
+				await transaction.insert(comments).values(
+					decisions.map((decision) => ({
+						id: decision.comment.id,
+						channelId,
+						authorChannelId: decision.comment.authorChannelId,
+						authorName: decision.comment.authorName,
+						text: decision.comment.text,
+						publishedAt: decision.comment.publishedAt,
+						status: decision.status,
+						decidedBy: decision.decidedBy,
+						matchedRuleId: decision.matchedRuleId,
+						aiScore: decision.aiScore,
+						createdAt: new Date().toISOString()
+					}))
+				);
+			}
+			const audits = decisions
+				.filter((decision) => decision.auditAction && decision.reason)
+				.map((decision) => ({
+					channelId,
+					commentId: decision.comment.id,
+					action: decision.auditAction!,
+					reason: decision.reason!,
+					actor: 'system',
+					createdAt: new Date().toISOString()
+				}));
+			if (audits.length) await transaction.insert(auditLog).values(audits);
+			await transaction
+				.update(channels)
+				.set(
+					complete
+						? { cursor: scanCursor, nextPageToken: null, scanCursor: null }
+						: { nextPageToken: page.nextPageToken, scanCursor }
+				)
+				.where(eq(channels.id, channelId));
 		});
+		return { fetched, acted, queued, partial: false };
+	} catch (error) {
+		if (error instanceof DeadlineExceededError) return { fetched, acted, queued, partial: true };
+		throw error;
 	}
-
-	if (!dryRun) {
-		if (holdIds.length) await setModerationStatus(holdIds, 'heldForReview', false, accessToken);
-		if (rejectIds.length) await setModerationStatus(rejectIds, 'rejected', false, accessToken);
-		if (banIds.length) await setModerationStatus(banIds, 'rejected', true, accessToken);
-	}
-
-	const newest = fresh.map((c) => c.publishedAt).sort().at(-1)!;
-	await db.update(channels).set({ cursor: newest }).where(eq(channels.id, channelId));
-
-	return { fetched: fresh.length, acted, queued };
 }

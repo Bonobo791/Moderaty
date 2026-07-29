@@ -17,6 +17,7 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { env } from '$env/dynamic/private';
+import { fetchWithRetry } from '$lib/server/http';
 
 const YT = 'https://www.googleapis.com/youtube/v3';
 
@@ -29,17 +30,32 @@ export interface NewComment {
 	publishedAt: string;
 }
 
-export async function refreshAccessToken(refreshToken: string): Promise<string> {
-	const res = await fetch('https://oauth2.googleapis.com/token', {
+export interface FetchCommentsOptions {
+	maxPages?: number;
+	pageToken?: string | null;
+	deadline?: number;
+}
+
+export interface CommentPage {
+	comments: NewComment[];
+	nextPageToken: string | null;
+	reachedCursor: boolean;
+}
+
+export async function refreshAccessToken(refreshToken: string, deadline?: number): Promise<string> {
+	if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) {
+		throw new Error('GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are required');
+	}
+	const res = await fetchWithRetry('https://oauth2.googleapis.com/token', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
 		body: new URLSearchParams({
-			client_id: env.GOOGLE_CLIENT_ID!,
-			client_secret: env.GOOGLE_CLIENT_SECRET!,
+			client_id: env.GOOGLE_CLIENT_ID,
+			client_secret: env.GOOGLE_CLIENT_SECRET,
 			refresh_token: refreshToken,
 			grant_type: 'refresh_token'
 		})
-	});
+	}, deadline);
 	const data = await res.json();
 	if (!res.ok || !data.access_token) {
 		throw new Error(`token refresh failed: ${res.status} ${JSON.stringify(data)}`);
@@ -47,22 +63,28 @@ export async function refreshAccessToken(refreshToken: string): Promise<string> 
 	return data.access_token as string;
 }
 
-async function ytFetch(path: string, accessToken: string, init?: RequestInit): Promise<Response> {
-	const res = await fetch(`${YT}${path}`, {
+async function ytFetch(
+	path: string,
+	accessToken: string,
+	init?: RequestInit,
+	deadline?: number
+): Promise<Response> {
+	const res = await fetchWithRetry(`${YT}${path}`, {
 		...init,
 		headers: { Authorization: `Bearer ${accessToken}`, ...(init?.headers ?? {}) }
-	});
+	}, deadline);
 	return res;
 }
 
 export async function fetchNewComments(
 	channelId: string,
 	accessToken: string,
-	cursor: string | null
-): Promise<NewComment[]> {
+	cursor: string | null,
+	{ maxPages = 3, pageToken: initialPageToken = null, deadline }: FetchCommentsOptions = {}
+): Promise<CommentPage> {
 	const out: NewComment[] = [];
-	let pageToken: string | null = null;
-	for (let page = 0; page < 3; page++) {
+	let pageToken = initialPageToken;
+	for (let page = 0; page < maxPages; page++) {
 		const params = new URLSearchParams({
 			part: 'snippet',
 			allThreadsRelatedToChannelId: channelId,
@@ -71,16 +93,16 @@ export async function fetchNewComments(
 			textFormat: 'plainText'
 		});
 		if (pageToken) params.set('pageToken', pageToken);
-		const res = await ytFetch(`/commentThreads?${params}`, accessToken);
+		const res = await ytFetch(`/commentThreads?${params}`, accessToken, undefined, deadline);
 		const data = await res.json();
 		if (!res.ok) throw new Error(`commentThreads.list failed: ${res.status} ${JSON.stringify(data)}`);
 		let reachedCursor = false;
 		for (const item of data.items ?? []) {
 			const c = item.snippet.topLevelComment;
 			const s = c.snippet;
-			if (cursor && s.publishedAt <= cursor) {
+			if (cursor && s.publishedAt < cursor) {
 				reachedCursor = true;
-				continue;
+				break;
 			}
 			out.push({
 				id: c.id,
@@ -91,17 +113,20 @@ export async function fetchNewComments(
 				publishedAt: s.publishedAt
 			});
 		}
-		if (reachedCursor || !data.nextPageToken) break;
+		if (reachedCursor || !data.nextPageToken) {
+			return { comments: out, nextPageToken: null, reachedCursor };
+		}
 		pageToken = data.nextPageToken;
 	}
-	return out;
+	return { comments: out, nextPageToken: pageToken, reachedCursor: false };
 }
 
 export async function setModerationStatus(
 	ids: string[],
 	status: 'heldForReview' | 'rejected',
 	banAuthor: boolean,
-	accessToken: string
+	accessToken: string,
+	deadline?: number
 ): Promise<void> {
 	for (let i = 0; i < ids.length; i += 50) {
 		const batch = ids.slice(i, i + 50);
@@ -110,7 +135,12 @@ export async function setModerationStatus(
 			moderationStatus: status,
 			banAuthor: String(banAuthor)
 		});
-		const res = await ytFetch(`/comments/setModerationStatus?${params}`, accessToken, { method: 'POST' });
+		const res = await ytFetch(
+			`/comments/setModerationStatus?${params}`,
+			accessToken,
+			{ method: 'POST' },
+			deadline
+		);
 		if (!res.ok) {
 			const body = await res.text();
 			throw new Error(`setModerationStatus failed: ${res.status} ${body}`);
@@ -118,8 +148,13 @@ export async function setModerationStatus(
 	}
 }
 
-export async function deleteComment(id: string, accessToken: string): Promise<void> {
-	const res = await ytFetch(`/comments?id=${encodeURIComponent(id)}`, accessToken, { method: 'DELETE' });
+export async function deleteComment(id: string, accessToken: string, deadline?: number): Promise<void> {
+	const res = await ytFetch(
+		`/comments?id=${encodeURIComponent(id)}`,
+		accessToken,
+		{ method: 'DELETE' },
+		deadline
+	);
 	if (!res.ok && res.status !== 404) {
 		const body = await res.text();
 		throw new Error(`comments.delete failed: ${res.status} ${body}`);

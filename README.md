@@ -1,6 +1,8 @@
 # Moderaty
 Moderaty is a YouTube Comment Moderator platform to eliminate hate comments forever.
 
+[![Codacy Badge](https://app.codacy.com/project/badge/Grade/a971fb52cb6142efab9a17572f3e3f57)](https://app.codacy.com/gh/Bonobo791/Moderaty/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
+
 ## Hosting
 
 Moderaty is hosted on Netlify using SvelteKit's Netlify adapter and standard Node

@@ -53,9 +53,9 @@ export function validateRule(rule: RuleRow): asserts rule is RuleRow & { type: (
  * @throws If a stored rule is invalid.
  */
 export function matchRule(text: string, authorChannelId: string, rules: RuleRow[]): RuleRow | null {
+	rules.forEach(validateRule);
 	const lower = text.toLowerCase();
 	for (const rule of rules) {
-		validateRule(rule);
 		if (rule.type === 'keyword' && lower.includes(rule.pattern.toLowerCase())) return rule;
 		if (rule.type === 'user' && authorChannelId === rule.pattern) return rule;
 		if (rule.type === 'regex' && regex(rule).test(text)) return rule;

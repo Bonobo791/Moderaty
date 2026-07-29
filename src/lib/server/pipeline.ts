@@ -22,7 +22,7 @@ import { db } from '$lib/server/db';
 import { auditLog, channels, comments, rules } from '$lib/server/db/schema';
 import { assertBeforeDeadline, DeadlineExceededError } from '$lib/server/http';
 import { scoreComment, serializeScores } from '$lib/server/moderation';
-import { matchRule, type RuleAction, type RuleRow } from '$lib/server/rules';
+import { matchRule, validateRule, type RuleAction, type RuleRow } from '$lib/server/rules';
 import {
 	deleteComment,
 	fetchNewComments,
@@ -177,6 +177,7 @@ async function decideNewComments(
 			: []
 	);
 	const rulesForChannel = await db.select().from(rules).where(eq(rules.channelId, channelId)).all();
+	rulesForChannel.forEach(validateRule);
 	const decisions: Decision[] = [];
 	for (const comment of page.comments) {
 		if (!existingIds.has(comment.id)) decisions.push(await decide(comment, rulesForChannel, deadline));

@@ -9,6 +9,7 @@ validate it, and leave unrelated work untouched.
 Always fail loudly. 
 NEVER write fallbacks that are silent.
 ALWAYS write fallbacks that are loud, log to the server, and show to the user.
+Always run codacy before committing any work.
 
 ## Project Structure
 

@@ -144,7 +144,8 @@ async function ytFetch(
  *
  * Stops when the cursor boundary is reached or the configured page limit is exhausted.
  *
- * @param cursor - Timestamp boundary; comments published earlier than this value are excluded.
+ * @param cursor - Timestamp boundary; comments published earlier than this instant are excluded.
+ * Any `Date.parse`-valid timestamp is accepted and compared by instant, not lexicographically.
  * @param maxPages - Maximum number of API pages to fetch.
  * @param pageToken - Token for the initial API page.
  * @param deadline - Optional request deadline.
@@ -158,6 +159,10 @@ export async function fetchNewComments(
 ): Promise<CommentPage> {
 	const out: NewComment[] = [];
 	let pageToken = initialPageToken;
+	const cursorMs = cursor === null ? null : Date.parse(cursor);
+	if (cursorMs !== null && Number.isNaN(cursorMs)) {
+		throw new Error(`fetchNewComments cursor is invalid: ${cursor}`);
+	}
 	for (let page = 0; page < maxPages; page++) {
 		const params = new URLSearchParams({
 			part: 'snippet',
@@ -174,7 +179,7 @@ export async function fetchNewComments(
 		let reachedCursor = false;
 		for (const [index, item] of data.items.entries()) {
 			const comment = parseComment(item, index);
-			if (cursor && comment.publishedAt < cursor) {
+			if (cursorMs !== null && Date.parse(comment.publishedAt) < cursorMs) {
 				reachedCursor = true;
 				break;
 			}

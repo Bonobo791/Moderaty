@@ -46,4 +46,15 @@ test('rejects invalid stored rules', () => {
 	expect(() => matchRule('aa', 'author', [{ id: 6, type: 'regex', pattern: '(?<word>a+)\\k<word>', action: 'hold' }])).toThrow(
 		/rule #6 has an unsafe regex/
 	);
+	expect(() => matchRule('text', 'author', [{ id: 7, type: 'regex', pattern: '(a|a)+', action: 'hold' }])).toThrow(
+		/rule #7 has an unsafe regex/
+	);
+	expect(() => matchRule('text', 'author', [{ id: 8, type: 'regex', pattern: '(a|ab)*c', action: 'hold' }])).toThrow(
+		/rule #8 has an unsafe regex/
+	);
+});
+
+test('accepts regex rules without overlapping alternation', () => {
+	const alternation = { id: 9, type: 'regex', pattern: '(cat|dog)+', action: 'hold' };
+	expect(matchRule('catcatdog', 'author', [alternation])).toBe(alternation);
 });

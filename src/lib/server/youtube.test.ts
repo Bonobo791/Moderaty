@@ -75,6 +75,26 @@ test('stops pagination when a comment is older than the cursor', async () => {
 	expect(result).toMatchObject({ nextPageToken: null, reachedCursor: true });
 });
 
+test('compares the cursor by instant, not lexicographically', async () => {
+	const fetch = vi.fn().mockResolvedValue(page([
+		comment('same-instant', '2026-01-02T00:00:00.000Z'),
+		comment('older-offset', '2026-01-01T20:00:00-02:00')
+	], 'page-2'));
+	vi.stubGlobal('fetch', fetch);
+
+	const result = await fetchNewComments('channel', 'token', '2026-01-02T00:00:00Z');
+
+	expect(fetch).toHaveBeenCalledTimes(1);
+	expect(result.comments.map((item) => item.id)).toEqual(['same-instant']);
+	expect(result).toMatchObject({ nextPageToken: null, reachedCursor: true });
+});
+
+test('rejects a cursor that is not a valid timestamp', async () => {
+	await expect(fetchNewComments('channel', 'token', 'not-a-date')).rejects.toThrow(
+		'fetchNewComments cursor is invalid: not-a-date'
+	);
+});
+
 test('returns the complete comment text for moderation', async () => {
 	const text = 'x'.repeat(501);
 	const fetch = vi.fn().mockResolvedValue(page([

@@ -16,6 +16,8 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
+import { checkSync } from 'recheck';
+
 const RULE_TYPES = ['keyword', 'regex', 'user'] as const;
 const RULE_ACTIONS = ['hold', 'reject', 'delete', 'ban'] as const;
 const MAX_REGEX_PATTERN_LENGTH = 256;
@@ -29,13 +31,59 @@ export interface RuleRow {
 	action: string;
 }
 
-function quantifier(character: string | undefined): boolean {
-	return character === '*' || character === '+' || character === '?' || character === '{';
+/**
+ * Detects exact duplicate top-level alternatives in a group body (e.g. `a|a`).
+ * recheck deduplicates identical branches during analysis and reports patterns
+ * such as `(a|a)+` safe, even though backtracking engines explore both branches
+ * exponentially, so this blind spot is covered here.
+ */
+function duplicateAlternation(body: string): boolean {
+	const alternatives = new Set<string>();
+	let depth = 0;
+	let escaped = false;
+	let characterClass = false;
+	let start = 0;
+	for (let index = 0; index <= body.length; index++) {
+		const character = body[index];
+		if (index < body.length) {
+			if (escaped) {
+				escaped = false;
+				continue;
+			}
+			if (character === '\\') {
+				escaped = true;
+				continue;
+			}
+			if (character === '[') {
+				characterClass = true;
+				continue;
+			}
+			if (character === ']') {
+				characterClass = false;
+				continue;
+			}
+			if (characterClass) continue;
+			if (character === '(') {
+				depth++;
+				continue;
+			}
+			if (character === ')') {
+				depth--;
+				continue;
+			}
+			if (character !== '|' || depth > 0) continue;
+		}
+		const alternative = body.slice(start, index);
+		if (alternatives.has(alternative)) return true;
+		alternatives.add(alternative);
+		start = index + 1;
+	}
+	return false;
 }
 
-function unsafeRegex(pattern: string): boolean {
-	if (pattern.length > MAX_REGEX_PATTERN_LENGTH) return true;
-	const groups: boolean[] = [];
+/** Rejects backreferences (`\1`–`\9`, `\k<name>`) and groups with duplicate alternatives. */
+function unsafeSyntax(pattern: string): boolean {
+	const starts: number[] = [];
 	let escaped = false;
 	let characterClass = false;
 	for (let index = 0; index < pattern.length; index++) {
@@ -59,30 +107,42 @@ function unsafeRegex(pattern: string): boolean {
 		}
 		if (characterClass) continue;
 		if (character === '(') {
-			groups.push(false);
+			starts.push(index);
 			continue;
 		}
 		if (character === ')') {
-			const containsQuantifier = groups.pop() ?? false;
-			if (containsQuantifier && quantifier(pattern[index + 1])) return true;
-			if (containsQuantifier && groups.length) groups[groups.length - 1] = true;
-			continue;
-		}
-		if (quantifier(character) && pattern[index - 1] !== '(' && groups.length) {
-			groups[groups.length - 1] = true;
+			const start = starts.pop();
+			if (start === undefined) continue; // unbalanced: new RegExp reports the pattern invalid
+			// Strip the group prefix (`?:`, `?=`, `?!`, `?<=`, `?<!`, `?<name>`, `?flags:`) before comparing alternatives.
+			const body = pattern.slice(start + 1, index).replace(/^\?(?:<[a-zA-Z][^>]*>|<?[=!:]|[-a-z]*:)/i, '');
+			if (duplicateAlternation(body)) return true;
 		}
 	}
 	return false;
 }
 
-function regex(rule: RuleRow): RegExp {
-	if (unsafeRegex(rule.pattern)) throw new Error(`rule #${rule.id} has an unsafe regex`);
+function unsafeRegex(pattern: string): boolean {
+	if (pattern.length > MAX_REGEX_PATTERN_LENGTH) return true;
+	if (unsafeSyntax(pattern)) return true;
 	try {
-		// nosemgrep: unsafeRegex rejects bounded, backreferencing, and nested-quantifier patterns.
-		return new RegExp(rule.pattern, 'i');
+		// 'unknown' means recheck could not prove the pattern safe; reject it loudly rather than risk ReDoS.
+		return checkSync(pattern, 'i').status !== 'safe';
+	} catch (error) {
+		console.warn(`recheck could not analyze a rule pattern; rejecting it as unsafe:`, error);
+		return true;
+	}
+}
+
+function regex(rule: RuleRow): RegExp {
+	let compiled: RegExp;
+	try {
+		// nosemgrep: unsafeRegex below rejects overly long, backreferencing, duplicate-alternation, and ReDoS-prone patterns.
+		compiled = new RegExp(rule.pattern, 'i');
 	} catch (error) {
 		throw new Error(`rule #${rule.id} has an invalid regex: ${error instanceof Error ? error.message : String(error)}`);
 	}
+	if (unsafeRegex(rule.pattern)) throw new Error(`rule #${rule.id} has an unsafe regex`);
+	return compiled;
 }
 
 export function validateRule(rule: RuleRow): asserts rule is RuleRow & { type: (typeof RULE_TYPES)[number]; action: RuleAction } {

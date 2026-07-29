@@ -213,6 +213,7 @@ export const channels = sqliteTable('channels', {
   continuationToken: text('continuation_token'), // pageToken to resume a capped burst; null = drained
   highWater: text('high_water'), // burst-start boundary; promoted to cursor when burst drains
   lastRunAt: text('last_run_at'), // null = never processed; cron picks ASC (nulls first)
+  leaseExpiresAt: text('lease_expires_at'), // set while a cron run holds this channel; null or past = claimable
   active: integer('active').notNull().default(1),
   createdAt: text('created_at').notNull()
 });
@@ -1204,33 +1205,62 @@ export const GET: RequestHandler = async ({ url }) => {
 ```ts
 import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { asc, eq } from 'drizzle-orm';
+import { and, asc, eq, isNull, lt, or } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
 import { runChannel } from '$lib/server/pipeline';
 
+const LEASE_MS = 10 * 60 * 1000; // exceeds one bounded run; expiry alone re-eligibilizes after a crash
+
 /**
- * One channel per invocation: the active channel with the oldest lastRunAt
- * (SQLite sorts NULLs first in ASC, so never-run channels go first). This
- * bounds runtime and rotates fairly across channels on each 15-min ping (I10).
+ * One channel per invocation: the active, unleased channel with the oldest
+ * lastRunAt (SQLite sorts NULLs first in ASC, so never-run channels go first).
+ * The channel is claimed atomically with an expiring lease before runChannel,
+ * so concurrent cron invocations cannot process the same channel (I10).
  */
 export const GET: RequestHandler = async ({ url }) => {
   if (url.searchParams.get('secret') !== env.CRON_SECRET) throw error(401, 'bad secret');
-  const [ch] = await db.select().from(channels).where(eq(channels.active, 1)).orderBy(asc(channels.lastRunAt)).limit(1);
-  if (!ch) return json({ ok: true, dryRun: process.env.DRY_RUN === 'true', results: {} });
+  const dryRun = process.env.DRY_RUN === 'true';
+  const nowIso = new Date().toISOString();
+  const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, nowIso));
+  const [ch] = await db
+    .select()
+    .from(channels)
+    .where(and(eq(channels.active, 1), claimable))
+    .orderBy(asc(channels.lastRunAt))
+    .limit(1);
+  if (!ch) return json({ ok: true, dryRun, results: {} });
+
+  // Atomic claim: a concurrent claimant's UPDATE matches 0 rows and exits cleanly.
+  const claimed = await db
+    .update(channels)
+    .set({ leaseExpiresAt: new Date(Date.now() + LEASE_MS).toISOString() })
+    .where(and(eq(channels.id, ch.id), claimable))
+    .returning({ id: channels.id });
+  if (claimed.length === 0) return json({ ok: true, claimed: false, dryRun, results: {} });
+
   try {
     const result = await runChannel(ch.id);
-    return json({ ok: true, dryRun: process.env.DRY_RUN === 'true', results: { [ch.id]: result } });
+    return json({ ok: true, dryRun, results: { [ch.id]: result } });
   } catch (e) {
-    return json({
-      ok: false,
-      dryRun: process.env.DRY_RUN === 'true',
-      results: { [ch.id]: { error: e instanceof Error ? e.message : String(e) } }
-    });
+    return json(
+      {
+        ok: false,
+        dryRun,
+        results: { [ch.id]: { error: e instanceof Error ? e.message : String(e) } }
+      },
+      { status: 500 } // failure must not look like success to the cron caller
+    );
+  } finally {
+    await db.update(channels).set({ leaseExpiresAt: null }).where(eq(channels.id, ch.id));
   }
 };
 ```
+
+Note: the implementing PR must also add `lease_expires_at` to
+`src/lib/server/db/schema.ts` plus a drizzle migration — the live schema has
+already diverged from Step 5 (`scanCursor`/`nextPageToken`, no `lastRunAt` yet).
 
 **Verify:** `npm run check && npm run build && npm run test` all exit 0.
 

@@ -963,7 +963,7 @@ export async function load() {
 ```ts
 import { db } from '$lib/server/db';
 import { channels, rules } from '$lib/server/db/schema';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { fail } from '@sveltejs/kit';
 
 export async function load({ params }) {

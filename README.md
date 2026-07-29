@@ -1,6 +1,7 @@
 # Moderaty
 Moderaty is a YouTube Comment Moderator platform to eliminate hate comments forever.
 
+[![Codacy Badge](https://api.codacy.com/project/badge/Grade/f7718b5fbe7e4006be9b731041f48290)](https://app.codacy.com/gh/Bonobo791/Moderaty?utm_source=github.com&utm_medium=referral&utm_content=Bonobo791/Moderaty&utm_campaign=Badge_Grade)
 [![Codacy Badge](https://app.codacy.com/project/badge/Grade/a971fb52cb6142efab9a17572f3e3f57)](https://app.codacy.com/gh/Bonobo791/Moderaty/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
 [![Quality gate status](https://sonarcloud.io/api/project_badges/measure?project=Bonobo791_Moderaty&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=Bonobo791_Moderaty)
 [![Bugs](https://sonarcloud.io/api/project_badges/measure?project=Bonobo791_Moderaty&metric=bugs)](https://sonarcloud.io/summary/new_code?id=Bonobo791_Moderaty)

@@ -22,50 +22,90 @@ import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
 import { encrypt } from '$lib/server/crypto';
+import { fetchWithRetry } from '$lib/server/http';
 
-export async function GET({ url }) {
+export async function GET({ url, cookies }: { url: URL; cookies: import('@sveltejs/kit').Cookies }) {
+	const state = url.searchParams.get('state');
+	if (!state || state !== cookies.get('oauth_state')) throw error(400, 'bad state');
+	cookies.delete('oauth_state', { path: '/' });
+
 	const code = url.searchParams.get('code');
 	if (!code) throw error(400, 'missing code');
 
-	const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+	if (!env.GOOGLE_CLIENT_ID) throw error(500, 'GOOGLE_CLIENT_ID is not configured');
+	if (!env.GOOGLE_CLIENT_SECRET) throw error(500, 'GOOGLE_CLIENT_SECRET is not configured');
+	if (!env.APP_URL) throw error(500, 'APP_URL is not configured');
+
+	// Non-OK responses and raw bodies are logged server-side only; the client
+	// only ever sees the generic messages below — never tokens (AGENTS.md).
+	const tokenRes = await fetchWithRetry('https://oauth2.googleapis.com/token', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
 		body: new URLSearchParams({
 			code,
-			client_id: env.GOOGLE_CLIENT_ID!,
-			client_secret: env.GOOGLE_CLIENT_SECRET!,
-			redirect_uri: `${env.APP_URL}/api/auth/google/callback`,
+			client_id: env.GOOGLE_CLIENT_ID,
+			client_secret: env.GOOGLE_CLIENT_SECRET,
+			redirect_uri: new URL('/api/auth/google/callback', env.APP_URL).toString(),
 			grant_type: 'authorization_code'
 		})
 	});
-	const tokens = await tokenRes.json();
-	if (!tokenRes.ok || !tokens.refresh_token) {
+	const tokenText = await tokenRes.text();
+	let tokens: { refresh_token?: unknown; access_token?: unknown };
+	try {
+		tokens = JSON.parse(tokenText) as typeof tokens;
+	} catch {
+		console.error(`google token exchange returned invalid JSON: ${tokenRes.status} ${tokenText}`);
+		throw error(502, 'invalid response from Google — please retry');
+	}
+	if (
+		!tokenRes.ok ||
+		typeof tokens.refresh_token !== 'string' ||
+		!tokens.refresh_token ||
+		typeof tokens.access_token !== 'string' ||
+		!tokens.access_token
+	) {
+		console.error(`google token exchange failed: ${tokenRes.status} ${tokenText}`);
 		throw error(
 			400,
-			`token exchange failed: ${JSON.stringify(tokens)} — if this channel was connected before, revoke app access at myaccount.google.com/permissions and retry`
+			'token exchange returned no refresh_token — if this channel was connected before, revoke app access at myaccount.google.com/permissions and retry'
 		);
 	}
 
-	const accessToken = tokens.access_token as string;
-	const chRes = await fetch('https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true', {
-		headers: { Authorization: `Bearer ${accessToken}` }
-	});
-	const chData = await chRes.json();
-	const ch = chData.items?.[0];
-	if (!ch) throw error(400, 'no YouTube channel found for this Google account');
+	const chRes = await fetchWithRetry(
+		'https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true',
+		{ headers: { Authorization: `Bearer ${tokens.access_token}` } }
+	);
+	const chText = await chRes.text();
+	if (!chRes.ok) {
+		console.error(`youtube channels lookup failed: ${chRes.status} ${chText}`);
+		throw error(502, 'YouTube channel lookup failed — please retry');
+	}
+	let chData: { items?: Array<{ id?: unknown; snippet?: { title?: unknown } }> };
+	try {
+		chData = JSON.parse(chText) as typeof chData;
+	} catch {
+		console.error(`youtube channels lookup returned invalid JSON: ${chText}`);
+		throw error(502, 'invalid response from YouTube — please retry');
+	}
+
+	const ch = Array.isArray(chData.items) ? chData.items[0] : undefined;
+	if (typeof ch?.id !== 'string' || !ch.id) {
+		throw error(400, 'no YouTube channel found for this Google account');
+	}
+	const title = typeof ch.snippet?.title === 'string' ? ch.snippet.title : 'Untitled channel';
 
 	await db
 		.insert(channels)
 		.values({
 			id: ch.id,
-			title: ch.snippet.title,
+			title,
 			refreshTokenEnc: encrypt(tokens.refresh_token),
 			active: 1,
 			createdAt: new Date().toISOString()
 		})
 		.onConflictDoUpdate({
 			target: channels.id,
-			set: { title: ch.snippet.title, refreshTokenEnc: encrypt(tokens.refresh_token), active: 1 }
+			set: { title, refreshTokenEnc: encrypt(tokens.refresh_token), active: 1 }
 		});
 
 	throw redirect(302, '/');

@@ -16,58 +16,23 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { error, json } from '@sveltejs/kit';
-import { and, asc, eq, isNull, lt, or } from 'drizzle-orm';
+import { json, error } from '@sveltejs/kit';
+
 import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
 import { runChannel } from '$lib/server/pipeline';
-import type { RequestHandler } from './$types';
 
-const LEASE_MS = 10 * 60 * 1000; // exceeds one bounded run; expiry alone re-eligibilizes after a crash
-
-/**
- * One channel per invocation: the active, unleased channel with the oldest
- * lastRunAt (SQLite sorts NULLs first in ASC, so never-run channels go first).
- * The channel is claimed atomically with an expiring lease before runChannel,
- * so concurrent cron invocations cannot process the same channel.
- */
-export const GET: RequestHandler = async ({ url }) => {
+export async function GET({ url }) {
 	if (url.searchParams.get('secret') !== env.CRON_SECRET) throw error(401, 'bad secret');
-	const dryRun = env.DRY_RUN === 'true';
-	const nowIso = new Date().toISOString();
-	const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, nowIso));
-	const [channel] = await db
-		.select()
-		.from(channels)
-		.where(and(eq(channels.active, 1), claimable))
-		.orderBy(asc(channels.lastRunAt))
-		.limit(1);
-	if (!channel) return json({ ok: true, dryRun, results: {} });
-
-	// Atomic claim: a concurrent claimant's UPDATE matches 0 rows and exits cleanly.
-	const claimed = await db
-		.update(channels)
-		.set({ leaseExpiresAt: new Date(Date.now() + LEASE_MS).toISOString() })
-		.where(and(eq(channels.id, channel.id), claimable))
-		.returning({ id: channels.id });
-	if (claimed.length === 0) return json({ ok: true, claimed: false, dryRun, results: {} });
-
-	try {
-		const result = await runChannel(channel.id);
-		return json({ ok: true, dryRun, results: { [channel.id]: result } });
-	} catch (cause) {
-		const message = cause instanceof Error ? cause.message : String(cause);
-		console.error(`channel run ${channel.id} failed:`, cause);
-		return json(
-			{ ok: false, dryRun, results: { [channel.id]: { error: message } } },
-			{ status: 500 } // failure must not look like success to the cron caller
-		);
-	} finally {
-		// Record the run even on failure so a failing channel cannot starve the others.
-		await db
-			.update(channels)
-			.set({ leaseExpiresAt: null, lastRunAt: nowIso })
-			.where(eq(channels.id, channel.id));
+	const chs = await db.select().from(channels).all();
+	const results: Record<string, unknown> = {};
+	for (const ch of chs) {
+		try {
+			results[ch.id] = await runChannel(ch.id);
+		} catch (e) {
+			results[ch.id] = { error: e instanceof Error ? e.message : String(e) };
+		}
 	}
-};
+	return json({ ok: true, dryRun: process.env.DRY_RUN === 'true', results });
+}

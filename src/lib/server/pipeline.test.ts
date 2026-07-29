@@ -328,3 +328,34 @@ test('routes an ambiguous ban to manual review without retrying it', async () =>
 		state: 'manual_review'
 	})]);
 });
+
+test('keeps a dispatched action retriable when verification fails transiently', async () => {
+	mocks.state.existingIds = ['comment'];
+	mocks.state.moderationActions = [{
+		commentId: 'comment',
+		channelId: 'channel',
+		action: 'reject',
+		reason: 'rule #1 (keyword)',
+		state: 'dispatched',
+		lastAttemptAt: '2026-01-04T00:00:00.000Z',
+		lastManualRetryAt: null,
+		createdAt: '2026-01-04T00:00:00.000Z'
+	}];
+	mocks.getCommentModerationStatus.mockRejectedValueOnce(new Error('socket hang up'));
+
+	await expect(runChannel('channel')).rejects.toThrow('verification failed');
+
+	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({
+		commentId: 'comment',
+		state: 'dispatched'
+	})]);
+
+	await runChannel('channel');
+
+	expect(mocks.getCommentModerationStatus).toHaveBeenCalledWith('comment', 'access-token', undefined);
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({
+		commentId: 'comment',
+		state: 'completed'
+	})]);
+});

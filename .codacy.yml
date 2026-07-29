@@ -1,3 +1,4 @@
+---
 exclude_paths:
   - 'svelte.config.js'
   - '.svelte-kit/**'
@@ -9,3 +10,13 @@ engines:
       - 'AGENTS.md'
       - 'package.json'
       - 'package-lock.json'
+  # Drizzle migrations target SQLite; TSQLLint rules (schema qualification,
+  # SET ANSI options) are T-SQL-specific and do not apply.
+  tsqllint:
+    exclude_paths:
+      - 'drizzle/**'
+  # Test files use patterns (mock calls, stringified assertions) that trip
+  # correctness rules intended for production code.
+  opengrep:
+    exclude_paths:
+      - '**/*.test.ts'

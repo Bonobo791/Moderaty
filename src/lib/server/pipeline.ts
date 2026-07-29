@@ -355,9 +355,11 @@ async function processOutstandingActions(channelId: string, accessToken: string,
 		try {
 			result = await verificationResult(action, accessToken, deadline);
 		} catch (error) {
-			await requireManualReview(
-				action,
-				`YouTube verification failed: ${error instanceof Error ? error.message : String(error)}`
+			// Transient verification failures must not strand the action: leave it
+			// 'dispatched' so the next run re-verifies, and fail loudly.
+			if (error instanceof DeadlineExceededError) throw error;
+			throw new Error(
+				`moderation action ${action.commentId} verification failed: ${error instanceof Error ? error.message : String(error)}`
 			);
 		}
 		if (result === 'completed') {

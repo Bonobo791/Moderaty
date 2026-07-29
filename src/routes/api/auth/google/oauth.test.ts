@@ -61,12 +61,18 @@ function makeCookies() {
 	};
 }
 
+function makeCookiesWithState(...states: string[]) {
+	const cookies = makeCookies();
+	cookies.set('oauth_state', JSON.stringify(states), { path: '/' });
+	return cookies;
+}
+
 function callbackUrl(params: Record<string, string>) {
 	const search = new URLSearchParams(params);
 	return new URL(`http://localhost:5173/api/auth/google/callback?${search}`);
 }
 
-function stubTokenAndChannelResponses() {
+function stubTokenAndChannelResponses(channelResponse?: Response) {
 	vi.stubGlobal(
 		'fetch',
 		vi.fn(async (input: RequestInfo | URL) => {
@@ -78,9 +84,11 @@ function stubTokenAndChannelResponses() {
 				);
 			}
 			if (url.startsWith('https://www.googleapis.com/youtube/v3/channels')) {
-				return new Response(
-					JSON.stringify({ items: [{ id: 'UC123', snippet: { title: 'My Channel' } }] }),
-					{ status: 200 }
+				return (
+					channelResponse ??
+					new Response(JSON.stringify({ items: [{ id: 'UC123', snippet: { title: 'My Channel' } }] }), {
+						status: 200
+					})
 				);
 			}
 			throw new Error(`unexpected fetch: ${url}`);
@@ -101,15 +109,26 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-async function captureCallbackError(
-	cookies: ReturnType<typeof makeCookies>,
+type Cookies = ReturnType<typeof makeCookies>;
+
+function captureStartAuth(cookies: Cookies): { status: number; location: string } | undefined {
+	try {
+		startAuth({ cookies } as never);
+		return undefined;
+	} catch (e) {
+		return e as { status: number; location: string };
+	}
+}
+
+async function captureCallback(
+	cookies: Cookies,
 	params: Record<string, string>
-): Promise<{ status: number; body?: { message: string } } | undefined> {
+): Promise<{ status: number; location?: string; body?: { message: string } } | undefined> {
 	try {
 		await authCallback({ url: callbackUrl(params), cookies } as never);
 		return undefined;
 	} catch (e) {
-		return e as { status: number; body?: { message: string } };
+		return e as { status: number; location?: string; body?: { message: string } };
 	}
 }
 
@@ -125,12 +144,7 @@ function assertNoTokenLeak(
 
 test('auth start sets an HttpOnly oauth_state cookie and redirects with matching state', () => {
 	const cookies = makeCookies();
-	let thrown: { status: number; location: string } | undefined;
-	try {
-		startAuth({ cookies } as never);
-	} catch (e) {
-		thrown = e as { status: number; location: string };
-	}
+	const thrown = captureStartAuth(cookies);
 	expect(thrown?.status).toBe(302);
 
 	const stateCall = cookies.setCalls.find((c) => c.name === 'oauth_state');
@@ -157,24 +171,14 @@ test('auth start fails loudly with 500 when GOOGLE_CLIENT_ID is not configured',
 });
 
 test('callback rejects a missing or mismatched state with 400', async () => {
-	const cookies = makeCookies();
-	cookies.set('oauth_state', JSON.stringify(['the-real-state']), { path: '/' });
-
-	await expect(
-		authCallback({ url: callbackUrl({ code: 'abc' }), cookies } as never)
-	).rejects.toMatchObject({ status: 400 });
-
-	await expect(
-		authCallback({ url: callbackUrl({ code: 'abc', state: 'forged' }), cookies } as never)
-	).rejects.toMatchObject({ status: 400 });
+	const cookies = makeCookiesWithState('the-real-state');
+	expect((await captureCallback(cookies, { code: 'abc' }))?.status).toBe(400);
+	expect((await captureCallback(cookies, { code: 'abc', state: 'forged' }))?.status).toBe(400);
 });
 
 test('callback rejects a missing code with 400', async () => {
-	const cookies = makeCookies();
-	cookies.set('oauth_state', JSON.stringify(['s']), { path: '/' });
-	await expect(
-		authCallback({ url: callbackUrl({ state: 's' }), cookies } as never)
-	).rejects.toMatchObject({ status: 400 });
+	const cookies = makeCookiesWithState('s');
+	expect((await captureCallback(cookies, { state: 's' }))?.status).toBe(400);
 });
 
 test.each([
@@ -204,10 +208,8 @@ test.each([
 	async ({ status, body, expectedStatus, logged }) => {
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status })));
-		const cookies = makeCookies();
-		cookies.set('oauth_state', JSON.stringify(['s']), { path: '/' });
 
-		const thrown = await captureCallbackError(cookies, { code: 'abc', state: 's' });
+		const thrown = await captureCallback(makeCookiesWithState('s'), { code: 'abc', state: 's' });
 		expect(thrown?.status).toBe(expectedStatus);
 		expect(errorSpy.mock.calls.length > 0).toBe(logged);
 		assertNoTokenLeak(thrown, errorSpy);
@@ -215,39 +217,17 @@ test.each([
 );
 
 test('callback fails loudly when the channels lookup returns a non-OK status', async () => {
-	vi.stubGlobal(
-		'fetch',
-		vi.fn(async (input: RequestInfo | URL) => {
-			const url = String(input);
-			if (url === 'https://oauth2.googleapis.com/token') {
-				return new Response(
-					JSON.stringify({ access_token: 'tok', refresh_token: 'refresh-token' }),
-					{ status: 200 }
-				);
-			}
-			// 403 is non-retryable, so fetchWithRetry returns it immediately.
-			return new Response('quota exceeded', { status: 403 });
-		})
-	);
-	const cookies = makeCookies();
-	cookies.set('oauth_state', JSON.stringify(['s']), { path: '/' });
+	// 403 is non-retryable, so fetchWithRetry returns it immediately.
+	stubTokenAndChannelResponses(new Response('quota exceeded', { status: 403 }));
 
-	await expect(
-		authCallback({ url: callbackUrl({ code: 'abc', state: 's' }), cookies } as never)
-	).rejects.toMatchObject({ status: 502 });
+	const thrown = await captureCallback(makeCookiesWithState('s'), { code: 'abc', state: 's' });
+	expect(thrown?.status).toBe(502);
 });
 
 test('callback upserts the channel and redirects home on the happy path', async () => {
 	stubTokenAndChannelResponses();
-	const cookies = makeCookies();
-	cookies.set('oauth_state', JSON.stringify(['s']), { path: '/' });
 
-	let thrown: { status: number; location: string } | undefined;
-	try {
-		await authCallback({ url: callbackUrl({ code: 'abc', state: 's' }), cookies } as never);
-	} catch (e) {
-		thrown = e as { status: number; location: string };
-	}
+	const thrown = await captureCallback(makeCookiesWithState('s'), { code: 'abc', state: 's' });
 	expect(thrown).toMatchObject({ status: 302, location: '/' });
 
 	expect(mocks.upserts).toHaveLength(1);
@@ -264,23 +244,20 @@ test('overlapping OAuth starts in two tabs both stay valid', async () => {
 	// Two tabs each start the flow before either callback returns.
 	const states: string[] = [];
 	for (let i = 0; i < 2; i++) {
-		try {
-			startAuth({ cookies } as never);
-		} catch (e) {
-			states.push(new URL((e as { location: string }).location).searchParams.get('state') ?? '');
-		}
+		const thrown = captureStartAuth(cookies);
+		states.push(new URL(thrown?.location ?? '').searchParams.get('state') ?? '');
 	}
 	expect(states[0]).not.toBe(states[1]);
 
 	// Tab 1's callback must succeed even though tab 2's start wrote the cookie
 	// after it — and vice versa. Each state is consumed exactly once.
 	for (const state of states) {
-		const thrown = await captureCallbackError(cookies, { code: 'abc', state });
+		const thrown = await captureCallback(cookies, { code: 'abc', state });
 		expect(thrown?.status).toBe(302);
 	}
 	expect(mocks.upserts).toHaveLength(2);
 
 	// A consumed state cannot be replayed.
-	const replay = await captureCallbackError(cookies, { code: 'abc', state: states[0] });
+	const replay = await captureCallback(cookies, { code: 'abc', state: states[0] });
 	expect(replay?.status).toBe(400);
 });

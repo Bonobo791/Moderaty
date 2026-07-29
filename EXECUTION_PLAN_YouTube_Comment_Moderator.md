@@ -1,3 +1,13 @@
+<!--
+Moderaty — YouTube Comment Auto-Moderation Tool
+Copyright (C) 2026 Andrew Philip Weilbacher
+
+This program is free software: you can redistribute it and/or modify it under
+the GNU Affero General Public License, version 3 or later. It is provided
+without warranty; see LICENSE. Commercial licensing:
+contact@marketingprowess.simplelogin.com — see COMMERCIAL.md.
+-->
+
 # EXECUTION PLAN: YouTube Comment Auto-Moderator (MVP)
 
 > Hand this entire document to the executor model. It has no other context.
@@ -9,7 +19,7 @@
 
 This project is reviewed by a human via pull requests. The executor's branching rules:
 
-- **Step 0 (before anything else):** initialize the repo and `main` branch: `git init && git add -A && git commit -m "chore: initial scaffold"` (run after Step 1's scaffold; until then there is nothing to commit).
+- **Step 0 (before anything else):** initialize the repo and `main` branch: `git init -b main && git add -A && git commit -m "chore: initial scaffold"` (run after Step 1's scaffold; until then there is nothing to commit).
 - **One branch per phase.** Phases are A through F (see section 5). Before starting a phase's first step, create its branch from an up-to-date `main`:
   - `phase-a-scaffold`, `phase-b-database`, `phase-c-server-libs`, `phase-d-auth-cron`, `phase-e-ui`, `phase-f-e2e`
 - **Commit after every step** within the phase, with the message `step <N>: <step name>` (e.g. `step 6: create db client and drizzle config`).
@@ -32,14 +42,14 @@ By the end, there is a working SvelteKit web app called `Moderaty` that:
 
 1. Lets a YouTube channel owner connect their channel via Google OAuth (scope `youtube.force-ssl`, offline access). The encrypted refresh token is stored in the database.
 2. Stores per-channel moderation rules: keyword, regex, or blocked-user, each mapping to an action (`hold`, `reject`, `delete`, `ban`).
-3. Exposes `GET /api/cron?secret=<CRON_SECRET>` which, for every active channel: fetches new comments since the last run (incremental, via a stored cursor), applies rules, then the OpenAI Moderation API, and enforces: high-confidence violations (score ≥ 0.85) are auto-rejected on YouTube, borderline (0.35–0.85) go to a local review queue, clean (< 0.35) are marked approved. Rule hits execute their configured action immediately. Every action is written to an audit log.
+3. Exposes `POST /api/cron` authenticated with `Authorization: Bearer <CRON_SECRET>` which, for every active channel: fetches new comments since the last run (incremental, via a stored cursor), applies rules, then the OpenAI Moderation API, and enforces: high-confidence violations (score ≥ 0.85) are auto-rejected on YouTube, borderline (0.35 ≤ score < 0.85) go to a local review queue, clean (< 0.35) are marked approved. Rule hits execute their configured action immediately. Every action is written to an audit log.
 4. Has four pages: a dashboard (`/`), a rules editor (`/channels/[id]/rules`), a review queue (`/channels/[id]/queue`) with one-click approve/reject/delete/ban, and an audit log (`/channels/[id]/log`).
 5. Supports `DRY_RUN=true`, in which the pipeline classifies and logs but performs no write calls to YouTube.
 6. Builds cleanly (`npm run build` exits 0) and runs with `npm run dev`.
 
 ## 2. Current state
 
-Nothing exists. You are scaffolding a greenfield project into an empty directory. Environment: Node.js ≥ 20, npm. Framework: SvelteKit 2 + Svelte 5 + TypeScript. Database: SQLite via libSQL — local file `file:local.db` in development (Turso URL in production, same code). Package manager: npm.
+Nothing exists. You are scaffolding a greenfield project into an empty directory. Environment: Node.js 24 and npm 11 (verify both before continuing). Framework: SvelteKit 2 + Svelte 5 + TypeScript. Database: SQLite via libSQL — local file `file:local.db` in development (Turso URL in production, same code). Package manager: npm. `npm run check` is the required verification baseline.
 
 Key API facts you must rely on exactly as written (do not look up alternatives):
 
@@ -66,8 +76,10 @@ Polling: fetch pages of comment threads ordered by time (newest first); stop pag
 
 **Files you will create or modify:**
 - `svelte.config.js` — modify (switch adapter)
+- `vite.config.ts` — modify (Vite-only configuration)
 - `package.json` — modify (add `db:push` script)
-- `.env` — create (never commit; also add `.env` to `.gitignore`)
+- `.env.example` — create; copy it to `.env` locally (never commit)
+- `.gitignore` — modify (ignore local secrets and SQLite files)
 - `drizzle.config.ts` — create
 - `src/lib/server/db/schema.ts` — create
 - `src/lib/server/db/index.ts` — create
@@ -75,6 +87,8 @@ Polling: fetch pages of comment threads ordered by time (newest first); stop pag
 - `src/lib/server/youtube.ts` — create
 - `src/lib/server/moderation.ts` — create
 - `src/lib/server/pipeline.ts` — create
+- `src/lib/server/session.ts` — create
+- `src/hooks.server.ts` — create
 - `src/routes/api/auth/google/+server.ts` — create
 - `src/routes/api/auth/google/callback/+server.ts` — create
 - `src/routes/api/cron/+server.ts` — create
@@ -88,11 +102,12 @@ Polling: fetch pages of comment threads ordered by time (newest first); stop pag
 - `src/routes/channels/[id]/log/+page.server.ts` — create
 - `src/routes/channels/[id]/log/+page.svelte` — create
 - `src/app.css` — create, and import it in `+layout.svelte`
+- `src/app.d.ts` — modify (type `App.Locals`)
 
 ## 4. Constraints
 
 **Do NOT:**
-- Do not add dependencies beyond: `drizzle-orm`, `@libsql/client`, `@sveltejs/adapter-node` (runtime) and `drizzle-kit` (dev). No auth libraries, no googleapis SDK, no OpenAI SDK, no CSS frameworks — everything uses `fetch` and hand-written CSS.
+- Do not add dependencies beyond: `drizzle-orm`, `@libsql/client` (runtime), and `@sveltejs/adapter-node` plus `drizzle-kit` (dev). No auth libraries, no googleapis SDK, no OpenAI SDK, no CSS frameworks — everything uses `fetch` and hand-written CSS.
 - Do not commit or push directly to `main`; never merge your own PR (see section 0). Stop after opening each phase PR and wait for human merge confirmation.
 - Do not refactor, rename, or reformat anything outside the steps below.
 - Do not add features not listed: no LLM judge, no reply moderation, no live chat, no pagination UI on the queue, no user accounts beyond the OAuth'd channel, no settings page.
@@ -129,8 +144,8 @@ cd Moderaty
 #### Step 2: Install the exact dependency set
 
 ```bash
-npm install drizzle-orm @libsql/client @sveltejs/adapter-node
-npm install -D drizzle-kit
+npm install drizzle-orm @libsql/client
+npm install -D @sveltejs/adapter-node drizzle-kit
 ```
 
 **Verify:** `npm ls drizzle-orm @libsql/client @sveltejs/adapter-node drizzle-kit` prints all four with versions, no `UNMET` or errors.
@@ -155,9 +170,9 @@ import adapter from '@sveltejs/adapter-node';
 
 **If this fails:** if the import line differs slightly, replace whatever adapter import exists with the adapter-node import, keeping the rest of the file unchanged.
 
-#### Step 4: Create `.env` and gitignore it
+#### Step 4: Create `.env.example` and gitignore local secrets
 
-**File:** `.env` — create with:
+**File:** `.env.example` — create with:
 
 ```
 # Google OAuth (from Google Cloud Console → APIs & Services → Credentials)
@@ -178,11 +193,11 @@ ENCRYPTION_KEY=placeholder-64-hex-chars
 DRY_RUN=true
 ```
 
-**File:** `.gitignore` — append two lines: `.env` and `local.db*`.
+Copy `.env.example` to `.env` locally and replace placeholders; never commit `.env` or other secret-bearing `.env.*` files. Keep only `.env.example` and `.env.test` unignored.
 
-**File:** `package.json` — in `"scripts"`, add: `"db:push": "drizzle-kit push"` (keep all existing scripts).
+**File:** `.gitignore` — ignore `.env`, `.env.*`, and `local.db*`, then unignore `.env.example` and `.env.test`.
 
-**Verify:** `grep '"db:push"' package.json` prints the script. `grep -c '^\.env$' .gitignore` prints `1`.
+**Verify:** `test -f .env.example` succeeds. `grep -c '^\.env$' .gitignore` prints `1`.
 
 **If this fails:** if `.gitignore` does not exist, create it containing `.env`, `local.db*`, `node_modules`, `.svelte-kit`, `build`.
 
@@ -238,9 +253,17 @@ export const auditLog = sqliteTable('audit_log', {
   actor: text('actor').notNull(), // 'system' | 'user'
   createdAt: text('created_at').notNull().default(new Date().toISOString())
 });
+
+export const sessions = sqliteTable('sessions', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  channelId: text('channel_id').notNull(),
+  tokenHash: text('token_hash').notNull().unique(),
+  expiresAt: text('expires_at').notNull(),
+  createdAt: text('created_at').notNull().default(new Date().toISOString())
+});
 ```
 
-**Verify:** `npx tsc --noEmit` later; for now `grep -c sqliteTable src/lib/server/db/schema.ts` prints `4`.
+**Verify:** `npx tsc --noEmit` later; for now `grep -c sqliteTable src/lib/server/db/schema.ts` prints `5`.
 
 **If this fails:** if drizzle-orm reports a type error on `default(new Date().toISOString())`, that is acceptable — it is evaluated once at import in some drizzle versions; leave it (dates are also set explicitly at insert time in the pipeline). Do not restructure the schema.
 
@@ -279,6 +302,8 @@ export default defineConfig({
 
 (The `as never` cast silences a drizzle-kit typing quirk where `token` is not accepted for local file URLs. Do not remove it.)
 
+**File:** `package.json` — add `"db:push": "drizzle-kit push"` only now, after the schema and config exist.
+
 **Verify:** `grep -c createClient src/lib/server/db/index.ts` prints `1`.
 
 **If this fails:** if `$env/dynamic/private` cannot be resolved yet, that resolves after `npm run dev` generates types — proceed.
@@ -293,7 +318,7 @@ npm run db:push
 
 **If this fails:**
 - If drizzle-kit prompts interactively about table creation: accept the prompts (create tables).
-- If `TURSO_DATABASE_URL` is reported missing: ensure `.env` exists and run with env loaded: `set -a; . ./.env; set +a; npm run db:push` (drizzle-kit does not auto-load `.env`).
+- If `TURSO_DATABASE_URL` is reported missing: copy `.env.example` to `.env`, then run with env loaded: `set -a; . ./.env; set +a; npm run db:push` (drizzle-kit does not auto-load `.env`).
 - Otherwise: stop, paste the full error, report back.
 
 ---
@@ -309,7 +334,8 @@ import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'node:
 import { env } from '$env/dynamic/private';
 
 function key(): Buffer {
-  return createHash('sha256').update(env.ENCRYPTION_KEY ?? 'insecure-dev-key').digest();
+  if (!env.ENCRYPTION_KEY) throw new Error('ENCRYPTION_KEY is required');
+  return createHash('sha256').update(env.ENCRYPTION_KEY).digest();
 }
 
 export function encrypt(plaintext: string): string {
@@ -334,6 +360,20 @@ export function decrypt(payload: string): string {
 **Verify:** `node -e "console.log('syntax ok')"` trivially passes; real check comes at Step 13 build.
 
 **If this fails:** stop, paste the full error, report back.
+
+#### Reliability requirements (applies to Steps 9–13)
+
+Use a shared `fetchWithTimeout` helper with a 10-second `AbortSignal` timeout.
+Retry only transient network failures, HTTP 429, and HTTP 5xx responses, at most
+three times with bounded exponential backoff and `Retry-After` when supplied;
+never retry the one-time OAuth code exchange. Treat a malformed moderation
+response as a failure: do not approve the comment or advance its channel cursor.
+
+For non-dry runs, persist a comment and its audit row only after its required
+YouTube action succeeds. Retry idempotent moderation actions before failing the
+channel; a failed channel leaves its cursor unchanged for the next run. Dry runs
+write only `dry-run` audit rows, perform no YouTube writes, persist no comment
+decision, and never advance the cursor.
 
 #### Step 9: YouTube API client
 
@@ -487,11 +527,14 @@ export async function scoreComment(text: string): Promise<ModerationResult> {
   });
   const data = await res.json();
   if (!res.ok) throw new Error(`moderation failed: ${res.status} ${JSON.stringify(data)}`);
-  const cat = data.results?.[0]?.category_scores ?? {};
+  const cat = data.results?.[0]?.category_scores;
+  if (!cat || TOXIC_CATEGORIES.some((k) => typeof cat[k] !== 'number')) {
+    throw new Error('moderation response is missing required category scores');
+  }
   const scores: Record<string, number> = {};
   let max = 0;
   for (const k of TOXIC_CATEGORIES) {
-    const v = typeof cat[k] === 'number' ? cat[k] : 0;
+    const v = cat[k];
     scores[k] = v;
     if (v > max) max = v;
   }
@@ -508,7 +551,7 @@ export async function scoreComment(text: string): Promise<ModerationResult> {
 **File:** `src/lib/server/pipeline.ts` — create with exactly:
 
 ```ts
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { db } from './db';
 import { channels, rules, comments, auditLog } from './db/schema';
 import { decrypt } from './crypto';
@@ -614,26 +657,28 @@ export async function runChannel(channelId: string): Promise<{ fetched: number; 
         status = 'pending';
         decidedBy = 'ai';
         queued++;
-        await log(channelId, c.id, 'queue', `ai score ${m.score.toFixed(2)}`, 'system');
+        await log(channelId, c.id, dryRun ? 'dry-run' : 'queue', `ai score ${m.score.toFixed(2)}`, 'system');
       } else {
         status = 'approved';
         decidedBy = 'ai';
       }
     }
 
-    await db.insert(comments).values({
-      id: c.id,
-      channelId,
-      authorChannelId: c.authorChannelId,
-      authorName: c.authorName,
-      text: c.text,
-      publishedAt: c.publishedAt,
-      status,
-      decidedBy,
-      matchedRuleId,
-      aiScore: aiScoreJson,
-      createdAt: new Date().toISOString()
-    });
+    if (!dryRun) {
+      await db.insert(comments).values({
+        id: c.id,
+        channelId,
+        authorChannelId: c.authorChannelId,
+        authorName: c.authorName,
+        text: c.text,
+        publishedAt: c.publishedAt,
+        status,
+        decidedBy,
+        matchedRuleId,
+        aiScore: aiScoreJson,
+        createdAt: new Date().toISOString()
+      });
+    }
   }
 
   if (!dryRun) {
@@ -642,8 +687,10 @@ export async function runChannel(channelId: string): Promise<{ fetched: number; 
     if (banIds.length) await setModerationStatus(banIds, 'rejected', true, accessToken);
   }
 
-  const newest = fresh.map((c) => c.publishedAt).sort().at(-1)!;
-  await db.update(channels).set({ cursor: newest }).where(eq(channels.id, channelId));
+  if (!dryRun) {
+    const newest = fresh.map((c) => c.publishedAt).sort().at(-1)!;
+    await db.update(channels).set({ cursor: newest }).where(eq(channels.id, channelId));
+  }
 
   return { fetched: fresh.length, acted, queued };
 }
@@ -659,22 +706,40 @@ Note: rule actions queue YouTube write calls into `holdIds`/`rejectIds`/`banIds`
 
 ### Phase D — Auth and cron routes (Steps 12–13)
 
-#### Step 12: Google OAuth routes
+#### Step 12: Google OAuth routes and sessions
+
+Create `src/lib/server/session.ts` with opaque 32-byte random tokens, SHA-256
+token hashes stored in `sessions`, and seven-day expiry. Create
+`src/hooks.server.ts` to resolve a valid `moderaty_session` cookie into
+`locals.channelId`; type that local in `src/app.d.ts`. Use `HttpOnly`, `SameSite=Lax`,
+`Path=/`, and `Secure` outside development. Protect dashboard, rules, queue, and
+audit routes by requiring this local and matching each route's channel ID.
+
+The OAuth start route must generate a random state value, store it in a separate
+short-lived secure cookie, and include it in the Google URL. The callback must
+compare and clear that cookie before exchanging the code, then create a session
+for the returned channel.
 
 **File:** `src/routes/api/auth/google/+server.ts` — create with exactly:
 
 ```ts
 import { redirect } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
+import { randomBytes } from 'node:crypto';
 
-export function GET() {
+export function GET({ cookies }) {
+  const state = randomBytes(32).toString('base64url');
+  cookies.set('moderaty_oauth_state', state, {
+    httpOnly: true, sameSite: 'lax', secure: env.NODE_ENV === 'production', path: '/', maxAge: 600
+  });
   const params = new URLSearchParams({
     client_id: env.GOOGLE_CLIENT_ID!,
     redirect_uri: `${env.APP_URL}/api/auth/google/callback`,
     response_type: 'code',
     scope: 'https://www.googleapis.com/auth/youtube.force-ssl',
     access_type: 'offline',
-    prompt: 'consent'
+    prompt: 'consent',
+    state
   });
   throw redirect(302, `https://accounts.google.com/o/oauth2/v2/auth?${params}`);
 }
@@ -688,10 +753,15 @@ import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
 import { encrypt } from '$lib/server/crypto';
+import { createSession } from '$lib/server/session';
 
-export async function GET({ url }) {
+export async function GET({ url, cookies }) {
   const code = url.searchParams.get('code');
   if (!code) throw error(400, 'missing code');
+  const state = url.searchParams.get('state');
+  const expectedState = cookies.get('moderaty_oauth_state');
+  cookies.delete('moderaty_oauth_state', { path: '/' });
+  if (!state || !expectedState || state !== expectedState) throw error(400, 'invalid OAuth state');
 
   const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
@@ -706,7 +776,7 @@ export async function GET({ url }) {
   });
   const tokens = await tokenRes.json();
   if (!tokenRes.ok || !tokens.refresh_token) {
-    throw error(400, `token exchange failed: ${JSON.stringify(tokens)} — if this channel was connected before, revoke app access at myaccount.google.com/permissions and retry`);
+    throw error(400, 'token exchange failed; revoke previous app access and retry if this channel was connected before');
   }
 
   const accessToken = tokens.access_token as string;
@@ -731,6 +801,7 @@ export async function GET({ url }) {
       set: { title: ch.snippet.title, refreshTokenEnc: encrypt(tokens.refresh_token), active: 1 }
     });
 
+  await createSession(ch.id, cookies);
   throw redirect(302, '/');
 }
 ```
@@ -747,13 +818,18 @@ export async function GET({ url }) {
 
 ```ts
 import { json, error } from '@sveltejs/kit';
+import { timingSafeEqual } from 'node:crypto';
 import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
 import { runChannel } from '$lib/server/pipeline';
 
-export async function GET({ url }) {
-  if (url.searchParams.get('secret') !== env.CRON_SECRET) throw error(401, 'bad secret');
+export async function POST({ request }) {
+  const token = request.headers.get('authorization')?.replace(/^Bearer\s+/, '');
+  const expected = env.CRON_SECRET ?? '';
+  if (!token || token.length !== expected.length || !timingSafeEqual(Buffer.from(token), Buffer.from(expected))) {
+    throw error(401, 'bad secret');
+  }
   const chs = await db.select().from(channels).all();
   const results: Record<string, unknown> = {};
   for (const ch of chs) {
@@ -821,7 +897,7 @@ th, td { text-align: left; padding: 8px; border-bottom: 1px solid #e3e6ea; verti
 
 **Verify:** `npm run dev` starts; `curl -s http://localhost:5173 | grep -c 'Moderaty'` prints ≥ 1. Stop the dev server after checking.
 
-**If this fails:** if `{@render children()}` errors, the scaffold is Svelte 4 legacy syntax — replace with `<slot />`. Otherwise stop and report.
+**If this fails:** preserve Svelte 5 runes and `{@render children()}`; fix the scaffold or configuration, then stop and report. Do not introduce `<slot />`.
 
 #### Step 15: Dashboard
 
@@ -921,9 +997,11 @@ export const actions = {
     });
     return { ok: true };
   },
-  remove: async ({ request }) => {
+  remove: async ({ params, request }) => {
     const f = await request.formData();
-    await db.delete(rules).where(eq(rules.id, Number(f.get('ruleId'))));
+    const ruleId = Number(f.get('ruleId'));
+    if (!Number.isSafeInteger(ruleId) || ruleId < 1) return fail(400, { error: 'bad rule ID' });
+    await db.delete(rules).where(and(eq(rules.id, ruleId), eq(rules.channelId, params.id)));
     return { ok: true };
   }
 };
@@ -984,6 +1062,7 @@ export const actions = {
 import { db } from '$lib/server/db';
 import { channels, comments, auditLog } from '$lib/server/db/schema';
 import { and, eq, desc } from 'drizzle-orm';
+import { error } from '@sveltejs/kit';
 import { refreshAccessToken, setModerationStatus, deleteComment } from '$lib/server/youtube';
 import { decrypt } from '$lib/server/crypto';
 
@@ -1000,8 +1079,15 @@ export async function load({ params }) {
 }
 
 async function act(paramsId: string, commentId: string, action: 'approve' | 'reject' | 'delete' | 'ban') {
+  if (!commentId) throw error(400, 'missing comment ID');
   const ch = await db.select().from(channels).where(eq(channels.id, paramsId)).get();
   if (!ch) throw new Error('channel not found');
+  const comment = await db
+    .select()
+    .from(comments)
+    .where(and(eq(comments.id, commentId), eq(comments.channelId, paramsId)))
+    .get();
+  if (!comment) throw error(404, 'comment not found');
   if (process.env.DRY_RUN !== 'true' && action !== 'approve') {
     const token = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
     if (action === 'reject') await setModerationStatus([commentId], 'rejected', false, token);
@@ -1010,7 +1096,10 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
   }
   const status =
     action === 'approve' ? 'approved' : action === 'delete' ? 'deleted' : 'rejected';
-  await db.update(comments).set({ status, decidedBy: 'human' }).where(eq(comments.id, commentId));
+  await db
+    .update(comments)
+    .set({ status, decidedBy: 'human' })
+    .where(and(eq(comments.id, commentId), eq(comments.channelId, paramsId)));
   await db.insert(auditLog).values({
     channelId: paramsId,
     commentId,
@@ -1045,7 +1134,7 @@ export const actions = {
 </script>
 
 <h1>Review queue — {data.ch?.title}</h1>
-<p class="muted">Borderline comments (AI score 0.35–0.85). Nothing here is public-facing yet only if previously held; rejected/approved comments already have their final state. Your action is final.</p>
+<p class="muted">Borderline comments (AI score 0.35 ≤ score &lt; 0.85). Nothing here is public-facing yet only if previously held; rejected/approved comments already have their final state. Your action is final.</p>
 
 {#each data.pending as c}
   <div class="card">
@@ -1161,7 +1250,7 @@ Manually (human task — the executor stops here and asks the human):
 1. `npm run dev`
 2. Open `http://localhost:5173`, click "Connect YouTube channel", complete OAuth with the test account that owns a YouTube channel. Expect redirect back to `/` showing the channel card.
 3. Add one keyword rule matching a word in a recent comment on that channel (action: `hold`).
-4. `curl "http://localhost:5173/api/cron?secret=<CRON_SECRET>"` — expect JSON with `dryRun: true` and per-channel `{ fetched, acted, queued }` counts ≥ 0, no `error` values.
+4. `curl -X POST -H "Authorization: Bearer <CRON_SECRET>" http://localhost:5173/api/cron` — expect JSON with `dryRun: true` and per-channel `{ fetched, acted, queued }` counts ≥ 0, no `error` values.
 5. Check the audit log page — expect rows. Check the rules hit appears as action `dry-run`.
 6. Set `DRY_RUN=false`, restart, re-run the cron — expect the matched comment to be held on YouTube (visible in YouTube Studio → Comments → Held for review), DB status `held`, audit action `hold`.
 7. Approve one pending queue item from the UI — expect status change and audit row with actor `user`.
@@ -1182,9 +1271,9 @@ All of the following must be true before reporting completion:
 - [ ] `npm run check` and `npm run build` both exit 0
 - [ ] `local.db` contains tables `channels`, `rules`, `comments`, `audit_log`
 - [ ] OAuth flow completes and a channel row exists with a non-null encrypted refresh token
-- [ ] `GET /api/cron?secret=...` with `DRY_RUN=true` returns `dryRun: true`, classifies comments, writes audit rows with action `dry-run`, and makes no YouTube write calls
+- [ ] `POST /api/cron` with a Bearer token and `DRY_RUN=true` returns `dryRun: true`, writes only `dry-run` audit rows, leaves the cursor unchanged, and makes no YouTube write calls
 - [ ] With `DRY_RUN=false`, a keyword-rule hit results in the comment held/rejected on YouTube (confirmed in YouTube Studio), DB status updated, audit row with actor `system`
-- [ ] Review queue shows borderline comments (AI 0.35–0.85) and each of the four buttons (approve/reject/delete/ban) updates the DB and audit log with actor `user`
+- [ ] Review queue shows borderline comments (0.35 ≤ score < 0.85) and each of the four buttons (approve/reject/delete/ban) updates only the authenticated channel's DB rows and audit log with actor `user`
 - [ ] Rules page rejects invalid regex input with an error message
 - [ ] Invalid `secret` on `/api/cron` returns 401
 - [ ] No files outside the "Files you will create or modify" list were changed

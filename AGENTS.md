@@ -1,58 +1,56 @@
+<!--
+Moderaty — YouTube Comment Auto-Moderation Tool
+Copyright (C) 2026 Andrew Philip Weilbacher
+
+This program is free software: you can redistribute it and/or modify it under
+the GNU Affero General Public License, version 3 or later. It is provided
+without warranty; see LICENSE. Commercial licensing:
+contact@marketingprowess.simplelogin.com — see COMMERCIAL.md.
+-->
+
 # Repository Guidelines
 
 ## Project Structure
 
-Moderaty is a SvelteKit 2 application using Svelte 5 and TypeScript. Routes and
-pages live in `src/routes/`; reusable code belongs in `src/lib/`, with
-server-only modules under `src/lib/server/` as they are added. Put static files
-in `static/`. `vite.config.ts` uses `@sveltejs/adapter-node`; database work is
-intended to use Drizzle ORM with libSQL. Do not edit generated `.svelte-kit/`
-files or commit build output.
+Moderaty is a SvelteKit 2 app using Svelte 5 and TypeScript. Routes live in
+`src/routes/`; reusable code belongs in `src/lib/`, with server-only modules in
+`src/lib/server/`. Put static files in `static/`. Configure adapter-node in
+`svelte.config.js`; keep `vite.config.ts` for Vite-only settings. Do not edit
+generated `.svelte-kit/` files or commit build output.
 
-## Build, Test, and Development Commands
+## Commands
 
-Use Node 24 and npm 11 (the repository enables strict engine checks).
+Use Node 24 and npm 11.
 
-- `npm run dev` — start the Vite development server.
-- `npm run check` — run SvelteKit sync and `svelte-check` in strict mode.
-- `npm run build` — create the production Node build.
+- `npm run dev` — start local development.
+- `npm run check` — run SvelteKit sync and strict diagnostics.
+- `npm run build` — create the Node deployment build.
 - `npm run preview` — serve the production build locally.
 
-There is no test runner yet; `npm run check` is the required verification gate.
+No test framework exists yet; `npm run check` is required before a PR.
 
-## Coding Style & Naming
+## Code Style
 
-Use TypeScript with `<script lang="ts">` and Svelte 5 runes (`$state`,
-`$derived`, `$props`, and `{@render}`). Do not introduce Svelte 4 patterns such
-as `export let`, `$:`, or `<slot>`. Use tabs for indentation, `$lib` imports for
-`src/lib`, and SvelteKit’s `+page`, `+layout`, and `+server` naming conventions.
-Prefer the existing platform APIs and installed dependencies before adding new
-packages.
+Use TypeScript and Svelte 5 runes only (`$state`, `$derived`, `$props`, and
+`{@render}`); never introduce `export let`, `$:`, or `<slot>`. Use tabs and
+SvelteKit `+page`, `+layout`, and `+server` conventions. Prefer `$lib` imports,
+platform APIs, and installed dependencies.
 
-## Testing Guidelines
+## Commits, Security, and Licensing
 
-Run `npm run check` before opening a pull request. If tests are introduced,
-choose a lightweight framework, add its npm scripts, and place tests near the
-code they cover with descriptive names.
+Use focused, imperative commits such as `step N: <change>` or `chore: <change>`.
+PRs need behavior, verification, linked issues, and UI screenshots where useful;
+contributors must complete the CLA. Never commit secrets: document values in
+`.env.example`, keep `.env` and `.env.*` ignored, and reserve `.env.test` for
+test configuration. Preserve [LICENSE](LICENSE) and [COMMERCIAL.md](COMMERCIAL.md).
 
-## Commits & Pull Requests
+## License Headers
 
-Existing history uses short imperative messages, including `step N: <change>`
-and `chore: <change>`. Keep commits focused and follow that style. Pull
-requests should describe the behavior changed, include verification commands,
-link related issues, and add screenshots for UI changes. Contributors must
-complete the CLA requested by CLA Assistant; do not commit directly to `main`.
+Add this notice to new comment-capable source and documentation files, using
+the file's native comment syntax. Do not add comment headers to JSON or other
+data formats.
 
-## Security & Licensing
-
-Never commit `.env` files or credentials; use `.env.example` for documented
-configuration. Keep secrets and OAuth tokens server-side. Preserve the project’s
-AGPLv3/commercial licensing notices in `LICENSE` and `COMMERCIAL.md`.
-
-# Mandatory File Text
-
-This must always be added at the top of every file:
-
+```text
 # Moderaty — YouTube Comment Auto-Moderation Tool
 # Copyright (C) 2026 Andrew Philip Weilbacher
 #
@@ -70,3 +68,4 @@ This must always be added at the top of every file:
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 #
 # Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+```

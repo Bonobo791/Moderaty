@@ -16,12 +16,19 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { sveltekit } from '@sveltejs/kit/vite';
-import { defineConfig } from 'vitest/config';
+import { expect, test, vi } from 'vitest';
 
-export default defineConfig({
-	plugins: [sveltekit()],
-	test: {
-		environment: 'node'
-	}
+vi.mock('$env/dynamic/private', () => ({
+	env: { ENCRYPTION_KEY: 'test-encryption-key' }
+}));
+
+import { decrypt, encrypt } from './crypto';
+
+test('round trips plaintext through AES-256-GCM encryption', () => {
+	const plaintext = 'refresh-token: secret value';
+	const payload = encrypt(plaintext);
+
+	expect(payload).not.toBe(plaintext);
+	expect(Buffer.from(payload, 'base64').length).toBeGreaterThan(28);
+	expect(decrypt(payload)).toBe(plaintext);
 });

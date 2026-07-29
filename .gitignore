@@ -31,4 +31,3 @@ vite.config.ts.timestamp-*
 .vscode
 .serena
 local.db*
-.codacy

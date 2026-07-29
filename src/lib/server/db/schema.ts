@@ -16,7 +16,7 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, index } from 'drizzle-orm/sqlite-core';
 import { sql } from 'drizzle-orm';
 
 export const channels = sqliteTable('channels', {
@@ -24,6 +24,10 @@ export const channels = sqliteTable('channels', {
 	title: text('title').notNull(),
 	refreshTokenEnc: text('refresh_token_enc').notNull(),
 	cursor: text('cursor'), // ISO timestamp of newest comment seen; null = never polled
+	nextPageToken: text('next_page_token'), // YouTube continuation token for an incomplete scan
+	scanCursor: text('scan_cursor'), // high-water timestamp to commit once an incomplete scan ends
+	lastRunAt: text('last_run_at'), // ISO timestamp of last cron run; rotation orders by it ASC (NULLs first)
+	leaseExpiresAt: text('lease_expires_at'), // expiring cron claim; null or past = claimable
 	active: integer('active').notNull().default(1),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 });
@@ -50,6 +54,19 @@ export const comments = sqliteTable('comments', {
 	aiScore: text('ai_score'), // JSON string of the six category scores, or null
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 });
+
+export const moderationActions = sqliteTable('moderation_actions', {
+	commentId: text('comment_id').primaryKey(),
+	channelId: text('channel_id').notNull(),
+	action: text('action').notNull(), // 'hold' | 'reject' | 'delete' | 'ban'
+	reason: text('reason').notNull(),
+	state: text('state').notNull(), // 'pending' | 'dispatched' | 'completed' | 'manual_review'
+	lastAttemptAt: text('last_attempt_at'),
+	lastManualRetryAt: text('last_manual_retry_at'),
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+}, (table) => [
+	index('moderation_actions_channel_state_idx').on(table.channelId, table.state)
+]);
 
 export const auditLog = sqliteTable('audit_log', {
 	id: integer('id').primaryKey({ autoIncrement: true }),

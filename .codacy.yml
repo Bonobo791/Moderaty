@@ -1,4 +1,5 @@
 exclude_paths:
+  - 'svelte.config.js'
   - '.svelte-kit/**'
   - 'build/**'
   - 'node_modules/**'

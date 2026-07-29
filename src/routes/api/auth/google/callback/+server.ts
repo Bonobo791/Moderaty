@@ -36,9 +36,11 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 	if (!env.GOOGLE_CLIENT_SECRET) throw error(500, 'GOOGLE_CLIENT_SECRET is not configured');
 	if (!env.APP_URL) throw error(500, 'APP_URL is not configured');
 
-	// Non-OK responses and raw bodies are logged server-side only; the client
-	// only ever sees the generic messages below — never tokens (AGENTS.md).
-	const tokenRes = await fetchWithRetry('https://oauth2.googleapis.com/token', {
+	// Failures are logged server-side with redacted detail; the client only ever
+	// sees the generic messages below — never tokens (AGENTS.md).
+	// The authorization code is one-time use, so this exchange must not retry:
+	// a retried request after a transient timeout would fail the sign-in.
+	const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
 		body: new URLSearchParams({
@@ -50,25 +52,37 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 		})
 	});
 	const tokenText = await tokenRes.text();
-	let tokens: { refresh_token?: unknown; access_token?: unknown };
+	let tokens: {
+		refresh_token?: unknown;
+		access_token?: unknown;
+		error?: unknown;
+		error_description?: unknown;
+	};
 	try {
 		tokens = JSON.parse(tokenText) as typeof tokens;
 	} catch {
-		console.error(`google token exchange returned invalid JSON: ${tokenRes.status} ${tokenText}`);
+		console.error(`google token exchange returned invalid JSON: ${tokenRes.status}`);
 		throw error(502, 'invalid response from Google — please retry');
 	}
-	if (
-		!tokenRes.ok ||
-		typeof tokens.refresh_token !== 'string' ||
-		!tokens.refresh_token ||
-		typeof tokens.access_token !== 'string' ||
-		!tokens.access_token
-	) {
-		console.error(`google token exchange failed: ${tokenRes.status} ${tokenText}`);
+	if (!tokenRes.ok) {
+		// Upstream failure, not a user error. Log only status and Google's
+		// non-secret error fields — never the raw body, which may carry tokens.
+		const detail =
+			typeof tokens.error === 'string'
+				? `${tokens.error}${typeof tokens.error_description === 'string' ? `: ${tokens.error_description}` : ''}`
+				: 'no error detail';
+		console.error(`google token exchange failed: ${tokenRes.status} ${detail}`);
+		throw error(502, 'Google token exchange failed — please retry');
+	}
+	if (typeof tokens.refresh_token !== 'string' || !tokens.refresh_token) {
 		throw error(
 			400,
 			'token exchange returned no refresh_token — if this channel was connected before, revoke app access at myaccount.google.com/permissions and retry'
 		);
+	}
+	if (typeof tokens.access_token !== 'string' || !tokens.access_token) {
+		console.error('google token exchange returned 200 without an access_token');
+		throw error(502, 'invalid response from Google — please retry');
 	}
 
 	const chRes = await fetchWithRetry(

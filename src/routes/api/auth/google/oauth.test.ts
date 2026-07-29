@@ -96,7 +96,32 @@ beforeEach(() => {
 	mocks.upserts.length = 0;
 });
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+	vi.unstubAllGlobals();
+	vi.restoreAllMocks();
+});
+
+async function captureCallbackError(
+	cookies: ReturnType<typeof makeCookies>,
+	params: Record<string, string>
+): Promise<{ status: number; body?: { message: string } } | undefined> {
+	try {
+		await authCallback({ url: callbackUrl(params), cookies } as never);
+		return undefined;
+	} catch (e) {
+		return e as { status: number; body?: { message: string } };
+	}
+}
+
+function assertNoTokenLeak(
+	thrown: { status: number; body?: { message: string } } | undefined,
+	errorSpy: { mock: { calls: unknown[][] } }
+) {
+	expect(thrown?.body?.message ?? '').not.toContain('super-secret-access-token');
+	for (const call of errorSpy.mock.calls) {
+		expect(call.join(' ')).not.toContain('super-secret-access-token');
+	}
+}
 
 test('auth start sets an HttpOnly oauth_state cookie and redirects with matching state', () => {
 	const cookies = makeCookies();
@@ -152,6 +177,7 @@ test('callback rejects a missing code with 400', async () => {
 });
 
 test('callback error for missing refresh_token never leaks the access token', async () => {
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 	vi.stubGlobal(
 		'fetch',
 		vi.fn(async () =>
@@ -162,14 +188,35 @@ test('callback error for missing refresh_token never leaks the access token', as
 	const cookies = makeCookies();
 	cookies.set('oauth_state', 's', { path: '/' });
 
-	let thrown: { status: number; body?: { message: string } } | undefined;
-	try {
-		await authCallback({ url: callbackUrl({ code: 'abc', state: 's' }), cookies } as never);
-	} catch (e) {
-		thrown = e as { status: number; body?: { message: string } };
-	}
+	const thrown = await captureCallbackError(cookies, { code: 'abc', state: 's' });
 	expect(thrown?.status).toBe(400);
-	expect(thrown?.body?.message ?? '').not.toContain('super-secret-access-token');
+	assertNoTokenLeak(thrown, errorSpy);
+});
+
+test('callback returns 502 and keeps tokens out of logs when the token exchange fails', async () => {
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	vi.stubGlobal(
+		'fetch',
+		vi.fn(async () =>
+			// A failed exchange must not surface as a 400 "revoke access" message,
+			// and even a hypothetical token in the error body must stay out of logs.
+			new Response(
+				JSON.stringify({
+					error: 'invalid_grant',
+					error_description: 'Code was already redeemed',
+					access_token: 'super-secret-access-token'
+				}),
+				{ status: 400 }
+			)
+		)
+	);
+	const cookies = makeCookies();
+	cookies.set('oauth_state', 's', { path: '/' });
+
+	const thrown = await captureCallbackError(cookies, { code: 'abc', state: 's' });
+	expect(thrown?.status).toBe(502);
+	expect(errorSpy).toHaveBeenCalled();
+	assertNoTokenLeak(thrown, errorSpy);
 });
 
 test('callback fails loudly when the channels lookup returns a non-OK status', async () => {

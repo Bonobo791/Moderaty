@@ -68,7 +68,10 @@ Use Node 24 and npm 11.
 - `npm run build` — create the Netlify deployment build.
 - `npm run preview` — serve the production build locally.
 
-No test framework exists yet; `npm run check` is required before a PR.
+- `npm run test` — run the Vitest suite (see
+  `src/routes/api/auth/google/oauth.test.ts`).
+
+`npm run check` and `npm run test` are required before a PR.
 
 ## Code Style
 

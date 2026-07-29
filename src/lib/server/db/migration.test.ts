@@ -57,6 +57,16 @@ test('upgrades an existing database with scan state and moderation actions', asy
 			'last_manual_retry_at',
 			'created_at'
 		]));
+
+		const indexes = await client.execute('PRAGMA index_list(moderation_actions)');
+		expect(indexes.rows.map((row) => row.name)).toContain('moderation_actions_channel_state_idx');
+
+		await client.execute(`
+			INSERT INTO moderation_actions (comment_id, channel_id, action, reason, state)
+			VALUES ('comment-1', 'UC-existing', 'hold', 'rule #1 (keyword)', 'pending')
+		`);
+		const inserted = await client.execute('SELECT created_at FROM moderation_actions WHERE comment_id = \'comment-1\'');
+		expect(inserted.rows[0]?.created_at).toEqual(expect.any(String));
 	} finally {
 		client.close();
 		await rm(directory, { recursive: true, force: true });

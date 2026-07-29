@@ -24,7 +24,7 @@ CREATE TABLE moderation_actions (
 	state text NOT NULL,
 	last_attempt_at text,
 	last_manual_retry_at text,
-	created_at text NOT NULL
+	created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 --> statement-breakpoint
 CREATE INDEX moderation_actions_channel_state_idx ON moderation_actions (channel_id, state);

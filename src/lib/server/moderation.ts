@@ -55,7 +55,7 @@ export function serializeScores(scores: ToxicityScores): string {
  *
  * @param text - The comment text to evaluate
  * @returns The maximum toxicity score and the score for each category
- * @throws If the OpenAI API key is missing, the moderation request fails, or required scores are absent
+ * @throws If the OpenAI API key is missing, the moderation request fails, or required scores are absent or outside [0, 1]
  */
 export async function scoreComment(text: string, deadline?: number): Promise<ModerationResult> {
 	if (!env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY is required');
@@ -73,8 +73,9 @@ export async function scoreComment(text: string, deadline?: number): Promise<Mod
 	}
 	const data = response as { results?: Array<{ category_scores?: Record<string, unknown> }> };
 	const cat = data.results?.[0]?.category_scores;
-	if (!cat || TOXIC_CATEGORIES.some((category) => typeof cat[category] !== 'number' || !Number.isFinite(cat[category]))) {
-		throw new Error('moderation response is missing required category scores');
+	const invalid = (v: unknown) => typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1;
+	if (!cat || TOXIC_CATEGORIES.some((category) => invalid(cat[category]))) {
+		throw new Error('moderation response has missing or out-of-range category scores');
 	}
 	const scores = {} as ToxicityScores;
 	let max = 0;

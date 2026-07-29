@@ -316,7 +316,8 @@ import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'node:
 import { env } from '$env/dynamic/private';
 
 function key(): Buffer {
-  return createHash('sha256').update(env.ENCRYPTION_KEY ?? 'insecure-dev-key').digest();
+  if (!env.ENCRYPTION_KEY) throw new Error('ENCRYPTION_KEY is required');
+  return createHash('sha256').update(env.ENCRYPTION_KEY).digest();
 }
 
 export function encrypt(plaintext: string): string {
@@ -332,7 +333,7 @@ export function decrypt(payload: string): string {
   const iv = buf.subarray(0, 12);
   const tag = buf.subarray(12, 28);
   const enc = buf.subarray(28);
-  const decipher = createDecipheriv('aes-256-gcm', key(), iv);
+  const decipher = createDecipheriv('aes-256-gcm', key(), iv, { authTagLength: 16 });
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(enc), decipher.final()]).toString('utf8');
 }
@@ -1116,19 +1117,25 @@ Required cases (all must exist and pass):
 
 ```ts
 import { redirect } from '@sveltejs/kit';
+import type { RequestHandler } from './$types';
+import { randomBytes } from 'node:crypto';
 import { env } from '$env/dynamic/private';
 
-export function GET() {
+export const GET: RequestHandler = ({ cookies }) => {
+  // CSRF guard: bind the auth request to this browser session.
+  const state = randomBytes(16).toString('hex');
+  cookies.set('oauth_state', state, { path: '/', httpOnly: true, sameSite: 'lax', maxAge: 600 });
   const params = new URLSearchParams({
     client_id: env.GOOGLE_CLIENT_ID!,
     redirect_uri: `${env.APP_URL}/api/auth/google/callback`,
     response_type: 'code',
     scope: 'https://www.googleapis.com/auth/youtube.force-ssl',
     access_type: 'offline',
-    prompt: 'consent'
+    prompt: 'consent',
+    state
   });
   throw redirect(302, `https://accounts.google.com/o/oauth2/v2/auth?${params}`);
-}
+};
 ```
 
 **File:** `src/routes/api/auth/google/callback/+server.ts` — create with exactly:
@@ -1142,7 +1149,10 @@ import { channels } from '$lib/server/db/schema';
 import { encrypt } from '$lib/server/crypto';
 import { fetchJson } from '$lib/server/http';
 
-export const GET: RequestHandler = async ({ url }) => {
+export const GET: RequestHandler = async ({ url, cookies }) => {
+  const state = url.searchParams.get('state');
+  if (!state || state !== cookies.get('oauth_state')) throw error(400, 'bad state');
+  cookies.delete('oauth_state', { path: '/' });
   const code = url.searchParams.get('code');
   if (!code) throw error(400, 'missing code');
 
@@ -1158,7 +1168,10 @@ export const GET: RequestHandler = async ({ url }) => {
     })
   })) as { refresh_token?: unknown; access_token?: unknown };
 
-  if (typeof tokens.refresh_token !== 'string' || typeof tokens.access_token !== 'string') {
+  if (
+    typeof tokens.refresh_token !== 'string' || !tokens.refresh_token ||
+    typeof tokens.access_token !== 'string' || !tokens.access_token
+  ) {
     throw error(
       400,
       'token exchange returned no refresh_token — revoke app access at myaccount.google.com/permissions and retry'
@@ -1167,10 +1180,10 @@ export const GET: RequestHandler = async ({ url }) => {
 
   const chData = (await fetchJson('https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true', {
     headers: { Authorization: `Bearer ${tokens.access_token}` }
-  })) as { items?: Array<{ id: string; snippet?: { title?: string } }> };
+  })) as { items?: Array<{ id?: unknown; snippet?: { title?: string } }> };
 
-  const ch = chData.items?.[0];
-  if (!ch?.id) throw error(400, 'no YouTube channel found for this Google account');
+  const ch = Array.isArray(chData.items) ? chData.items[0] : undefined;
+  if (typeof ch?.id !== 'string' || !ch.id) throw error(400, 'no YouTube channel found for this Google account');
 
   await db
     .insert(channels)
@@ -1378,7 +1391,7 @@ export async function load() {
 ```ts
 import { db } from '$lib/server/db';
 import { channels, rules } from '$lib/server/db/schema';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { fail } from '@sveltejs/kit';
 import { validatePattern } from '$lib/server/rules';
 
@@ -1407,9 +1420,14 @@ export const actions = {
     });
     return { ok: true };
   },
-  remove: async ({ request }) => {
+  remove: async ({ params, request }) => {
     const f = await request.formData();
-    await db.delete(rules).where(eq(rules.id, Number(f.get('ruleId'))));
+    // Scope to this route's channel so a request here cannot delete another channel's rule.
+    const deleted = await db
+      .delete(rules)
+      .where(and(eq(rules.id, Number(f.get('ruleId'))), eq(rules.channelId, params.id)))
+      .returning({ id: rules.id });
+    if (deleted.length === 0) return fail(404, { error: 'rule not found' });
     return { ok: true };
   }
 };

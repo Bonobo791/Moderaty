@@ -46,3 +46,23 @@ test('returns the maximum score across all toxic categories', async () => {
 	expect(result.scores).toEqual(scores);
 	expect(result.score).toBe(0.91);
 });
+
+test.each([
+	['above range', 2],
+	['below range', -0.5]
+])('rejects a category score %s (%f)', async (_label, badScore) => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+		results: [{
+			category_scores: {
+				harassment: 0.11,
+				'harassment/threatening': 0.22,
+				hate: 0.33,
+				'hate/threatening': 0.44,
+				violence: badScore,
+				'violence/graphic': 0.55
+			}
+		}]
+	}), { status: 200 })));
+
+	await expect(scoreComment('comment text')).rejects.toThrow('out-of-range');
+});

@@ -33,6 +33,13 @@ export interface ModerationResult {
 	scores: Record<string, number>; // the six category scores
 }
 
+/**
+ * Scores a comment for toxicity across the supported moderation categories.
+ *
+ * @param text - The comment text to evaluate
+ * @returns The maximum toxicity score and the score for each category
+ * @throws If the OpenAI API key is missing, the moderation request fails, or required scores are absent
+ */
 export async function scoreComment(text: string, deadline?: number): Promise<ModerationResult> {
 	if (!env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY is required');
 	const res = await fetchWithRetry('https://api.openai.com/v1/moderations', {

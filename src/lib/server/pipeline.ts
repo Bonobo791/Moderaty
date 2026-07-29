@@ -63,6 +63,14 @@ interface Decision {
 	youtubeAction: 'hold' | 'reject' | 'delete' | 'ban' | null;
 }
 
+/**
+ * Finds the first moderation rule that matches the comment or its author.
+ *
+ * @param text - The comment text to evaluate.
+ * @param authorChannelId - The channel ID of the comment author.
+ * @param rules - The moderation rules to evaluate in order.
+ * @returns The first matching rule, or `null` if no rule matches.
+ */
 export function matchRule(text: string, authorChannelId: string, rules: RuleRow[]): RuleRow | null {
 	const lower = text.toLowerCase();
 	for (const rule of rules) {
@@ -79,10 +87,22 @@ export function matchRule(text: string, authorChannelId: string, rules: RuleRow[
 	return null;
 }
 
+/**
+ * Creates an empty channel run result with no processed comments or actions.
+ *
+ * @returns A zero-count result indicating that the run was not partial
+ */
 function emptyResult(): ChannelRunResult {
 	return { fetched: 0, acted: 0, queued: 0, partial: false };
 }
 
+/**
+ * Determines the moderation outcome for a comment using matching rules or AI scoring.
+ *
+ * @param comment - The comment to evaluate.
+ * @param rules - The channel's moderation rules.
+ * @returns The moderation decision, including its status, rationale, and any actions to perform.
+ */
 async function decide(comment: NewComment, rules: RuleRow[], deadline?: number): Promise<Decision> {
 	const rule = matchRule(comment.text, comment.authorChannelId, rules);
 	if (rule) {
@@ -173,6 +193,14 @@ async function decide(comment: NewComment, rules: RuleRow[], deadline?: number):
 	};
 }
 
+/**
+ * Processes new comments for an active channel and records moderation outcomes.
+ *
+ * @param channelId - The channel to scan and moderate
+ * @param maxPages - The maximum number of comment pages to fetch
+ * @param deadline - Optional execution deadline
+ * @returns Counts of fetched, moderated, and queued comments, plus whether execution was interrupted
+ */
 export async function runChannel(
 	channelId: string,
 	{ maxPages = 3, deadline }: RunChannelOptions = {}

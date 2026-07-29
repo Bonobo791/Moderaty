@@ -42,6 +42,12 @@ export interface CommentPage {
 	reachedCursor: boolean;
 }
 
+/**
+ * Refreshes an OAuth access token using a Google refresh token.
+ *
+ * @param refreshToken - The Google OAuth refresh token.
+ * @returns The refreshed OAuth access token.
+ */
 export async function refreshAccessToken(refreshToken: string, deadline?: number): Promise<string> {
 	if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) {
 		throw new Error('GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are required');
@@ -63,6 +69,15 @@ export async function refreshAccessToken(refreshToken: string, deadline?: number
 	return data.access_token as string;
 }
 
+/**
+ * Sends an authenticated request to the YouTube Data API.
+ *
+ * @param path - The API path to append to the YouTube API base URL
+ * @param accessToken - The OAuth access token used for authorization
+ * @param init - Optional request configuration
+ * @param deadline - Optional request deadline
+ * @returns The raw API response
+ */
 async function ytFetch(
 	path: string,
 	accessToken: string,
@@ -76,6 +91,17 @@ async function ytFetch(
 	return res;
 }
 
+/**
+ * Fetches recent top-level comments for a YouTube channel.
+ *
+ * Stops when the cursor boundary is reached or the configured page limit is exhausted. Comment text is limited to 500 characters.
+ *
+ * @param cursor - Timestamp boundary; comments published earlier than this value are excluded.
+ * @param maxPages - Maximum number of API pages to fetch.
+ * @param pageToken - Token for the initial API page.
+ * @param deadline - Optional request deadline.
+ * @returns The fetched comments, a token for the next page when applicable, and whether the cursor boundary was reached.
+ */
 export async function fetchNewComments(
 	channelId: string,
 	accessToken: string,
@@ -121,6 +147,13 @@ export async function fetchNewComments(
 	return { comments: out, nextPageToken: pageToken, reachedCursor: false };
 }
 
+/**
+ * Updates the moderation status of comments, optionally banning their authors.
+ *
+ * @param ids - The comment IDs to update
+ * @param status - The moderation status to apply
+ * @param banAuthor - Whether to ban the authors of the comments
+ */
 export async function setModerationStatus(
 	ids: string[],
 	status: 'heldForReview' | 'rejected',
@@ -148,6 +181,15 @@ export async function setModerationStatus(
 	}
 }
 
+/**
+ * Deletes a YouTube comment.
+ *
+ * A missing comment is treated as a successful deletion.
+ *
+ * @param id - The ID of the comment to delete
+ * @param accessToken - The OAuth access token for the YouTube API
+ * @param deadline - Optional request deadline
+ */
 export async function deleteComment(id: string, accessToken: string, deadline?: number): Promise<void> {
 	const res = await ytFetch(
 		`/comments?id=${encodeURIComponent(id)}`,

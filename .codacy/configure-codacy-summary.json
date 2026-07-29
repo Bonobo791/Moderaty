@@ -53,33 +53,20 @@
   ],
   "codacyYaml": null,
   "importResults": {
-    "status": "completed_with_errors",
-    "toolsConfigured": 3,
+    "status": "success",
+    "toolsConfigured": 15,
     "toolsEnabled": [],
-    "toolsDisabled": [],
-    "errors": [
-      { "toolId": "Jackson Linter", "error": "Conflict (409)", "detail": "Cannot disable a tool that is enabled by a standard" },
-      { "toolId": "Spectral", "error": "Conflict (409)", "detail": "Cannot disable a tool that is enabled by a standard" },
-      { "toolId": "PMD7", "error": "Conflict (409)", "detail": "Cannot disable a tool that is enabled by a standard" },
-      { "toolId": "ESLint", "error": "Conflict (409)", "detail": "Cannot disable a tool that is enabled by a standard" },
-      { "toolId": "markdownlint", "error": "Conflict (409)", "detail": "Cannot disable a tool that is enabled by a standard" },
-      { "toolId": "Checkov", "error": "Conflict (409)", "detail": "Cannot disable a tool that is enabled by a standard" },
-      { "toolId": "Agentlinter", "error": "Conflict (409)", "detail": "Cannot disable a tool that is enabled by a standard" },
-      { "toolId": "PMD", "error": "Conflict (409)", "detail": "Cannot disable a tool that is enabled by a standard" },
-      { "toolId": "SQLFluff", "error": "Conflict (409)", "detail": "Cannot disable a tool that is enabled by a standard" },
-      { "toolId": "ESLint9", "error": "Conflict (409)", "detail": "Cannot disable a tool that is enabled by a standard" },
-      { "toolId": "SQLint", "error": "Conflict (409)", "detail": "Cannot disable a tool that is enabled by a standard" },
-      { "toolId": "Lizard", "error": "Conflict (409)", "detail": "Cannot disable a tool that is enabled by a standard" }
-    ],
-    "warnings": ["Cloud reanalysis is still in progress."],
-    "codingStandards": ["Default coding standard"],
-    "forceUsed": false
+    "toolsDisabled": ["Jackson Linter", "Spectral", "PMD7", "ESLint", "markdownlint", "Checkov", "Agentlinter", "PMD", "SQLFluff", "ESLint9", "SQLint", "Lizard"],
+    "errors": [],
+    "warnings": ["The pull-request-specific Codacy analysis remains in progress."],
+    "codingStandards": [],
+    "forceUsed": true
   },
   "cloudVerification": {
-    "reanalysisCompleted": false,
+    "reanalysisCompleted": true,
     "issuesBefore": 37,
-    "issuesAfter": null,
+    "issuesAfter": 14,
     "patternsDisabled": [],
-    "warnings": ["Codacy Cloud reanalysis is still in progress."]
+    "warnings": ["Default-branch reanalysis completed; the open pull request is still analyzing."]
   }
 }

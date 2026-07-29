@@ -1,5 +1,3 @@
-<!--
-
 // Moderaty — YouTube Comment Auto-Moderation Tool
 // Copyright (C) 2026 Andrew Philip Weilbacher
 //
@@ -18,17 +16,21 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
--->
+import { defineConfig } from 'drizzle-kit';
 
-<!doctype html>
-<html lang="en">
-	<head>
-		<meta charset="utf-8" />
-		<meta name="viewport" content="width=device-width, initial-scale=1" />
-		<meta name="text-scale" content="scale" />
-		%sveltekit.head%
-	</head>
-	<body data-sveltekit-preload-data="hover">
-		<div style="display: contents">%sveltekit.body%</div>
-	</body>
-</html>
+const databaseUrl = process.env.TURSO_DATABASE_URL;
+
+if (!databaseUrl) {
+	throw new Error('TURSO_DATABASE_URL is required');
+}
+
+export default defineConfig({
+	// 'turso' (not 'sqlite') so drizzle-kit connects via @libsql/client, which is the
+	// installed driver; the 'sqlite' dialect requires better-sqlite3 and fails silently here.
+	dialect: 'turso',
+	schema: './src/lib/server/db/schema.ts',
+	dbCredentials: {
+		url: databaseUrl,
+		authToken: process.env.TURSO_AUTH_TOKEN || undefined
+	}
+});

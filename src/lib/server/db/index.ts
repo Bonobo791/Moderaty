@@ -1,5 +1,3 @@
-<!--
-
 // Moderaty — YouTube Comment Auto-Moderation Tool
 // Copyright (C) 2026 Andrew Philip Weilbacher
 //
@@ -18,17 +16,20 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
--->
+import { drizzle } from 'drizzle-orm/libsql';
+import { createClient } from '@libsql/client';
+import { env } from '$env/dynamic/private';
+import * as schema from '$lib/server/db/schema';
 
-<!doctype html>
-<html lang="en">
-	<head>
-		<meta charset="utf-8" />
-		<meta name="viewport" content="width=device-width, initial-scale=1" />
-		<meta name="text-scale" content="scale" />
-		%sveltekit.head%
-	</head>
-	<body data-sveltekit-preload-data="hover">
-		<div style="display: contents">%sveltekit.body%</div>
-	</body>
-</html>
+const databaseUrl = env.TURSO_DATABASE_URL;
+
+if (!databaseUrl) {
+	throw new Error('TURSO_DATABASE_URL is required');
+}
+
+const client = createClient({
+	url: databaseUrl,
+	authToken: env.TURSO_AUTH_TOKEN || undefined
+});
+
+export const db = drizzle(client, { schema });

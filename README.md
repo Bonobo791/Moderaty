@@ -1,6 +1,14 @@
 # Moderaty
 Moderaty is a YouTube Comment Moderator platform to eliminate hate comments forever.
 
+## Hosting
+
+Moderaty is hosted on Netlify using SvelteKit's Netlify adapter and standard Node
+Functions. Production uses a remote Turso database; local SQLite files are only
+for development. Configure the existing secrets as Netlify Functions environment
+variables and set `APP_URL` to the canonical HTTPS production URL before enabling
+Google OAuth.
+
 ## License
 
 Moderaty is dual-licensed:
@@ -11,4 +19,22 @@ Moderaty is dual-licensed:
   offer as a network service).
 - **Commercial license:** if you want to use Moderaty in a proprietary
   product or offer it as a hosted service without AGPL obligations,
-  contact <your-email> for a commercial license.
+  contact contact@marketingprowess.simplelogin.com for a commercial license.
+
+# Moderaty — YouTube Comment Auto-Moderation Tool
+## Copyright (C) 2026 Andrew Philip Weilbacher
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md

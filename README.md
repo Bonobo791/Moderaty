@@ -8,6 +8,7 @@ Moderaty is a YouTube Comment Moderator platform to eliminate hate comments fore
 [![Security Rating](https://sonarcloud.io/api/project_badges/measure?project=Bonobo791_Moderaty&metric=security_rating)](https://sonarcloud.io/summary/new_code?id=Bonobo791_Moderaty)
 [![Reliability Rating](https://sonarcloud.io/api/project_badges/measure?project=Bonobo791_Moderaty&metric=reliability_rating)](https://sonarcloud.io/summary/new_code?id=Bonobo791_Moderaty)
 
+
 ## Hosting
 
 Moderaty is hosted on Netlify using SvelteKit's Netlify adapter and standard Node

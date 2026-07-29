@@ -11,7 +11,7 @@
 		"dev": "vite dev",
 		"build": "vite build",
 		"preview": "vite preview",
-		"test": "tsc --ignoreConfig --ignoreDeprecations 6.0 --target es2022 --module commonjs --moduleResolution node --esModuleInterop --outDir /tmp/moderaty-http-test src/lib/server/http.ts src/lib/server/http.test.ts src/lib/server/rules.ts src/lib/server/rules.test.ts && node --test /tmp/moderaty-http-test/http.test.js /tmp/moderaty-http-test/rules.test.js",
+		"test": "vitest run",
 		"prepare": "svelte-kit sync",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
@@ -24,7 +24,8 @@
 		"svelte": "^5.56.1",
 		"svelte-check": "^4.6.0",
 		"typescript": "^6.0.3",
-		"vite": "^8.0.16"
+		"vite": "^8.0.16",
+		"vitest": "^4.1.10"
 	},
 	"dependencies": {
 		"@libsql/client": "^0.17.4",

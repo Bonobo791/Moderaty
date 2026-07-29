@@ -16,12 +16,33 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { sveltekit } from '@sveltejs/kit/vite';
-import { defineConfig } from 'vitest/config';
+import { afterEach, expect, test, vi } from 'vitest';
 
-export default defineConfig({
-	plugins: [sveltekit()],
-	test: {
-		environment: 'node'
-	}
+vi.mock('$env/dynamic/private', () => ({
+	env: { OPENAI_API_KEY: 'test-openai-key' }
+}));
+
+import { scoreComment } from './moderation';
+
+afterEach(() => {
+	vi.unstubAllGlobals();
+});
+
+test('returns the maximum score across all toxic categories', async () => {
+	const scores = {
+		harassment: 0.11,
+		'harassment/threatening': 0.22,
+		hate: 0.33,
+		'hate/threatening': 0.44,
+		violence: 0.55,
+		'violence/graphic': 0.91
+	};
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+		results: [{ category_scores: scores }]
+	}), { status: 200 })));
+
+	const result = await scoreComment('comment text');
+
+	expect(result.scores).toEqual(scores);
+	expect(result.score).toBe(0.91);
 });

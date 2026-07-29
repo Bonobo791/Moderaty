@@ -16,33 +16,30 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-// @ts-nocheck
+import { afterEach, expect, test, vi } from 'vitest';
+import { fetchWithRetry } from './http';
 
-import assert from 'node:assert/strict';
-import test from 'node:test';
-import { fetchWithRetry } from './http.js';
+afterEach(() => {
+	vi.unstubAllGlobals();
+});
 
-test('retries transient responses but not client errors', async (context) => {
-	const originalFetch = globalThis.fetch;
-	context.after(() => {
-		globalThis.fetch = originalFetch;
-	});
+test('retries transient responses but not client errors', async () => {
 
 	let calls = 0;
-	globalThis.fetch = async () => {
+	vi.stubGlobal('fetch', async () => {
 		calls++;
 		return calls === 1
 			? new Response('', { status: 429, headers: { 'Retry-After': '0' } })
 			: new Response('', { status: 200 });
-	};
-	assert.equal((await fetchWithRetry('https://example.test')).status, 200);
-	assert.equal(calls, 2);
+	});
+	expect((await fetchWithRetry('https://example.test')).status).toBe(200);
+	expect(calls).toBe(2);
 
 	calls = 0;
-	globalThis.fetch = async () => {
+	vi.stubGlobal('fetch', async () => {
 		calls++;
 		return new Response('', { status: 400 });
-	};
-	assert.equal((await fetchWithRetry('https://example.test')).status, 400);
-	assert.equal(calls, 1);
+	});
+	expect((await fetchWithRetry('https://example.test')).status).toBe(400);
+	expect(calls).toBe(1);
 });

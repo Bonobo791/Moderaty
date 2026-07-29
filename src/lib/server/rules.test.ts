@@ -16,25 +16,28 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-// @ts-nocheck
+import { expect, test } from 'vitest';
+import { matchRule } from './rules';
 
-import assert from 'node:assert/strict';
-import test from 'node:test';
-import { matchRule } from './rules.js';
+test('matches keyword, user ID, and regex rules', () => {
+	const keyword = { id: 1, type: 'keyword', pattern: 'spam', action: 'hold' };
+	const user = { id: 2, type: 'user', pattern: 'UC-author', action: 'reject' };
+	const regex = { id: 3, type: 'regex', pattern: 'buy\\s+now', action: 'delete' };
 
-test('matches valid rules and rejects invalid stored rules', () => {
-	const rule = { id: 1, type: 'keyword', pattern: 'spam', action: 'hold' };
-	assert.equal(matchRule('This is spam', 'author', [rule]), rule);
-	assert.throws(
-		() => matchRule('text', 'author', [{ id: 2, type: 'regex', pattern: '(', action: 'hold' }]),
+	expect(matchRule('This is SPAM', 'other', [keyword])).toBe(keyword);
+	expect(matchRule('A normal comment', 'UC-author', [user])).toBe(user);
+	expect(matchRule('BUY now!', 'other', [regex])).toBe(regex);
+	expect(matchRule('A normal comment', 'other', [keyword, user, regex])).toBeNull();
+});
+
+test('rejects invalid stored rules', () => {
+	expect(() => matchRule('text', 'author', [{ id: 2, type: 'regex', pattern: '(', action: 'hold' }])).toThrow(
 		/rule #2 has an invalid regex/
 	);
-	assert.throws(
-		() => matchRule('text', 'author', [{ id: 3, type: 'unknown', pattern: 'text', action: 'hold' }]),
+	expect(() => matchRule('text', 'author', [{ id: 3, type: 'unknown', pattern: 'text', action: 'hold' }])).toThrow(
 		/rule #3 has an unsupported type/
 	);
-	assert.throws(
-		() => matchRule('text', 'author', [{ id: 4, type: 'keyword', pattern: 'text', action: 'archive' }]),
+	expect(() => matchRule('text', 'author', [{ id: 4, type: 'keyword', pattern: 'text', action: 'archive' }])).toThrow(
 		/rule #4 has an unsupported action/
 	);
 });

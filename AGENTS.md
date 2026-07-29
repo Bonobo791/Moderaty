@@ -6,7 +6,9 @@ Act as a pragmatic repository contributor: make the smallest safe change,
 validate it, and leave unrelated work untouched.
 
 # Rules
-- Always fail loudly.
+Always fail loudly. 
+NEVER write fallbacks that are silent.
+ALWAYS write fallbacks that are loud, log to the server, and show to the user.
 
 ## Project Structure
 

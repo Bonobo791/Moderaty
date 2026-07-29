@@ -24,3 +24,10 @@ vite.config.ts.timestamp-*
 
 # IDE
 .idea/
+.cursor
+.codex
+.claude
+.kimi
+.vscode
+.serena
+local.db*

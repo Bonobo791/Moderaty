@@ -21,12 +21,13 @@ import { decrypt } from '$lib/server/crypto';
 import { db } from '$lib/server/db';
 import { auditLog, channels, comments, rules } from '$lib/server/db/schema';
 import { assertBeforeDeadline, DeadlineExceededError } from '$lib/server/http';
-import { scoreComment } from '$lib/server/moderation';
+import { scoreComment, serializeScores } from '$lib/server/moderation';
 import {
 	deleteComment,
 	fetchNewComments,
 	refreshAccessToken,
 	setModerationStatus,
+	type CommentPage,
 	type NewComment
 } from '$lib/server/youtube';
 
@@ -63,6 +64,13 @@ interface Decision {
 	youtubeAction: 'hold' | 'reject' | 'delete' | 'ban' | null;
 }
 
+const RULE_ACTIONS = {
+	hold: { status: 'held', auditAction: 'hold', youtubeAction: 'hold' },
+	reject: { status: 'rejected', auditAction: 'reject', youtubeAction: 'reject' },
+	delete: { status: 'deleted', auditAction: 'delete', youtubeAction: 'delete' },
+	ban: { status: 'rejected', auditAction: 'ban', youtubeAction: 'ban' }
+} as const;
+
 /**
  * Finds the first moderation rule that matches the comment or its author.
  *
@@ -97,73 +105,36 @@ function emptyResult(): ChannelRunResult {
 }
 
 /**
- * Determines the moderation outcome for a comment using matching rules or AI scoring.
+ * Creates the moderation outcome for a comment that matched a configured rule.
  *
  * @param comment - The comment to evaluate.
- * @param rules - The channel's moderation rules.
- * @returns The moderation decision, including its status, rationale, and any actions to perform.
+ * @param rule - The matched moderation rule.
+ * @returns The moderation decision, including its status, rationale, and YouTube action.
  */
-async function decide(comment: NewComment, rules: RuleRow[], deadline?: number): Promise<Decision> {
-	const rule = matchRule(comment.text, comment.authorChannelId, rules);
-	if (rule) {
-		const reason = `rule #${rule.id} (${rule.type}: ${rule.pattern.slice(0, 80)})`;
-		if (rule.action === 'hold') {
-			return {
-				comment,
-				status: 'held',
-				decidedBy: 'rule',
-				matchedRuleId: rule.id,
-				aiScore: null,
-				auditAction: 'hold',
-				reason,
-				youtubeAction: 'hold'
-			};
-		}
-		if (rule.action === 'reject') {
-			return {
-				comment,
-				status: 'rejected',
-				decidedBy: 'rule',
-				matchedRuleId: rule.id,
-				aiScore: null,
-				auditAction: 'reject',
-				reason,
-				youtubeAction: 'reject'
-			};
-		}
-		if (rule.action === 'delete') {
-			return {
-				comment,
-				status: 'deleted',
-				decidedBy: 'rule',
-				matchedRuleId: rule.id,
-				aiScore: null,
-				auditAction: 'delete',
-				reason,
-				youtubeAction: 'delete'
-			};
-		}
-		return {
-			comment,
-			status: 'rejected',
-			decidedBy: 'rule',
-			matchedRuleId: rule.id,
-			aiScore: null,
-			auditAction: 'ban',
-			reason,
-			youtubeAction: 'ban'
-		};
-	}
+function ruleDecision(comment: NewComment, rule: RuleRow): Decision {
+	const action = rule.action in RULE_ACTIONS ? rule.action as keyof typeof RULE_ACTIONS : 'ban';
+	const outcome = RULE_ACTIONS[action];
+	return {
+		comment,
+		...outcome,
+		decidedBy: 'rule',
+		matchedRuleId: rule.id,
+		aiScore: null,
+		reason: `rule #${rule.id} (${rule.type}: ${rule.pattern.slice(0, 80)})`
+	};
+}
 
+async function aiDecision(comment: NewComment, deadline?: number): Promise<Decision> {
 	const moderation = await scoreComment(comment.text, deadline);
 	const reason = `ai score ${moderation.score.toFixed(2)}`;
+	const aiScore = serializeScores(moderation.scores);
 	if (moderation.score >= AUTO_REJECT) {
 		return {
 			comment,
 			status: 'rejected',
 			decidedBy: 'ai',
 			matchedRuleId: null,
-			aiScore: JSON.stringify(moderation.scores),
+			aiScore,
 			auditAction: 'reject',
 			reason,
 			youtubeAction: 'reject'
@@ -175,7 +146,7 @@ async function decide(comment: NewComment, rules: RuleRow[], deadline?: number):
 			status: 'pending',
 			decidedBy: 'ai',
 			matchedRuleId: null,
-			aiScore: JSON.stringify(moderation.scores),
+			aiScore,
 			auditAction: 'queue',
 			reason,
 			youtubeAction: null
@@ -186,11 +157,105 @@ async function decide(comment: NewComment, rules: RuleRow[], deadline?: number):
 		status: 'approved',
 		decidedBy: 'ai',
 		matchedRuleId: null,
-		aiScore: JSON.stringify(moderation.scores),
+		aiScore,
 		auditAction: null,
 		reason: null,
 		youtubeAction: null
 	};
+}
+
+async function decide(comment: NewComment, rules: RuleRow[], deadline?: number): Promise<Decision> {
+	const rule = matchRule(comment.text, comment.authorChannelId, rules);
+	return rule ? ruleDecision(comment, rule) : aiDecision(comment, deadline);
+}
+
+function auditRows(channelId: string, decisions: Decision[], dryRun: boolean) {
+	return decisions
+		.filter((decision) => decision.auditAction && decision.reason)
+		.map((decision) => ({
+			channelId,
+			commentId: decision.comment.id,
+			action: dryRun ? 'dry-run' : decision.auditAction!,
+			reason: decision.reason!,
+			actor: 'system',
+			createdAt: new Date().toISOString()
+		}));
+}
+
+async function decideNewComments(
+	channelId: string,
+	page: CommentPage,
+	deadline?: number
+): Promise<Decision[]> {
+	const existingIds = new Set(
+		page.comments.length
+			? (
+					await db
+						.select({ id: comments.id })
+						.from(comments)
+						.where(inArray(comments.id, page.comments.map((comment) => comment.id)))
+						.all()
+				).map((comment) => comment.id)
+			: []
+	);
+	const rulesForChannel = await db.select().from(rules).where(eq(rules.channelId, channelId)).all();
+	const decisions: Decision[] = [];
+	for (const comment of page.comments) {
+		if (!existingIds.has(comment.id)) decisions.push(await decide(comment, rulesForChannel, deadline));
+	}
+	return decisions;
+}
+
+async function applyYoutubeActions(decisions: Decision[], accessToken: string, deadline?: number) {
+	const ids = (action: Decision['youtubeAction']) =>
+		decisions.filter((decision) => decision.youtubeAction === action).map((decision) => decision.comment.id);
+	const holds = ids('hold');
+	const rejections = ids('reject');
+	const bans = ids('ban');
+	if (holds.length) await setModerationStatus(holds, 'heldForReview', false, accessToken, deadline);
+	if (rejections.length) await setModerationStatus(rejections, 'rejected', false, accessToken, deadline);
+	if (bans.length) await setModerationStatus(bans, 'rejected', true, accessToken, deadline);
+	for (const commentId of ids('delete')) await deleteComment(commentId, accessToken, deadline);
+}
+
+async function persistResults(
+	channelId: string,
+	channel: typeof channels.$inferSelect,
+	page: CommentPage,
+	decisions: Decision[]
+) {
+	const newest = page.comments.map((comment) => comment.publishedAt).sort().at(-1) ?? channel.cursor;
+	const scanCursor = channel.scanCursor ?? newest;
+	const complete = page.reachedCursor || !page.nextPageToken;
+	await db.transaction(async (transaction) => {
+		if (decisions.length) {
+			await transaction.insert(comments).values(
+				decisions.map((decision) => ({
+					id: decision.comment.id,
+					channelId,
+					authorChannelId: decision.comment.authorChannelId,
+					authorName: decision.comment.authorName,
+					text: decision.comment.text,
+					publishedAt: decision.comment.publishedAt,
+					status: decision.status,
+					decidedBy: decision.decidedBy,
+					matchedRuleId: decision.matchedRuleId,
+					aiScore: decision.aiScore,
+					createdAt: new Date().toISOString()
+				}))
+			);
+		}
+		const audits = auditRows(channelId, decisions, false);
+		if (audits.length) await transaction.insert(auditLog).values(audits);
+		await transaction
+			.update(channels)
+			.set(
+				complete
+					? { cursor: scanCursor, nextPageToken: null, scanCursor: null }
+					: { nextPageToken: page.nextPageToken, scanCursor }
+			)
+			.where(eq(channels.id, channelId));
+	});
 }
 
 /**
@@ -220,101 +285,19 @@ export async function runChannel(
 		});
 		fetched = page.comments.length;
 
-		const existingIds = new Set(
-			page.comments.length
-				? (
-						await db
-							.select({ id: comments.id })
-							.from(comments)
-							.where(inArray(comments.id, page.comments.map((comment) => comment.id)))
-							.all()
-					).map((comment) => comment.id)
-				: []
-		);
-		const rulesForChannel = await db.select().from(rules).where(eq(rules.channelId, channelId)).all();
-		const decisions: Decision[] = [];
-		for (const comment of page.comments) {
-			if (existingIds.has(comment.id)) continue;
-			const decision = await decide(comment, rulesForChannel, deadline);
-			decisions.push(decision);
-			if (decision.youtubeAction) acted++;
-			if (decision.auditAction === 'queue') queued++;
-		}
+		const decisions = await decideNewComments(channelId, page, deadline);
+		acted = decisions.filter((decision) => decision.youtubeAction).length;
+		queued = decisions.filter((decision) => decision.auditAction === 'queue').length;
 
 		if (dryRun) {
-			const audits = decisions
-				.filter((decision) => decision.auditAction && decision.reason)
-				.map((decision) => ({
-					channelId,
-					commentId: decision.comment.id,
-					action: 'dry-run',
-					reason: decision.reason!,
-					actor: 'system',
-					createdAt: new Date().toISOString()
-				}));
+			const audits = auditRows(channelId, decisions, true);
 			if (audits.length) await db.insert(auditLog).values(audits);
 			return { fetched, acted, queued, partial: false };
 		}
 
-		const holds = decisions
-			.filter((decision) => decision.youtubeAction === 'hold')
-			.map((decision) => decision.comment.id);
-		const rejections = decisions
-			.filter((decision) => decision.youtubeAction === 'reject')
-			.map((decision) => decision.comment.id);
-		const bans = decisions
-			.filter((decision) => decision.youtubeAction === 'ban')
-			.map((decision) => decision.comment.id);
-		const deletions = decisions
-			.filter((decision) => decision.youtubeAction === 'delete')
-			.map((decision) => decision.comment.id);
-		if (holds.length) await setModerationStatus(holds, 'heldForReview', false, accessToken, deadline);
-		if (rejections.length) await setModerationStatus(rejections, 'rejected', false, accessToken, deadline);
-		if (bans.length) await setModerationStatus(bans, 'rejected', true, accessToken, deadline);
-		for (const commentId of deletions) await deleteComment(commentId, accessToken, deadline);
-
+		await applyYoutubeActions(decisions, accessToken, deadline);
 		assertBeforeDeadline(deadline);
-		const newest = page.comments.map((comment) => comment.publishedAt).sort().at(-1) ?? channel.cursor;
-		const scanCursor = channel.scanCursor ?? newest;
-		const complete = page.reachedCursor || !page.nextPageToken;
-		await db.transaction(async (transaction) => {
-			if (decisions.length) {
-				await transaction.insert(comments).values(
-					decisions.map((decision) => ({
-						id: decision.comment.id,
-						channelId,
-						authorChannelId: decision.comment.authorChannelId,
-						authorName: decision.comment.authorName,
-						text: decision.comment.text,
-						publishedAt: decision.comment.publishedAt,
-						status: decision.status,
-						decidedBy: decision.decidedBy,
-						matchedRuleId: decision.matchedRuleId,
-						aiScore: decision.aiScore,
-						createdAt: new Date().toISOString()
-					}))
-				);
-			}
-			const audits = decisions
-				.filter((decision) => decision.auditAction && decision.reason)
-				.map((decision) => ({
-					channelId,
-					commentId: decision.comment.id,
-					action: decision.auditAction!,
-					reason: decision.reason!,
-					actor: 'system',
-					createdAt: new Date().toISOString()
-				}));
-			if (audits.length) await transaction.insert(auditLog).values(audits);
-			await transaction
-				.update(channels)
-				.set(
-					complete
-						? { cursor: scanCursor, nextPageToken: null, scanCursor: null }
-						: { nextPageToken: page.nextPageToken, scanCursor }
-				)
-				.where(eq(channels.id, channelId));
-		});
+		await persistResults(channelId, channel, page, decisions);
 		return { fetched, acted, queued, partial: false };
 	} catch (error) {
 		if (error instanceof DeadlineExceededError) return { fetched, acted, queued, partial: true };

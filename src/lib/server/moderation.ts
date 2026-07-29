@@ -28,9 +28,16 @@ const TOXIC_CATEGORIES = [
 	'violence/graphic'
 ] as const;
 
+export type ToxicCategory = (typeof TOXIC_CATEGORIES)[number];
+export type ToxicityScores = Record<ToxicCategory, number>;
+
 export interface ModerationResult {
 	score: number; // max of the six toxic category scores
-	scores: Record<string, number>; // the six category scores
+	scores: ToxicityScores; // the six category scores
+}
+
+export function serializeScores(scores: ToxicityScores): string {
+	return `{"harassment":${scores.harassment},"harassment/threatening":${scores['harassment/threatening']},"hate":${scores.hate},"hate/threatening":${scores['hate/threatening']},"violence":${scores.violence},"violence/graphic":${scores['violence/graphic']}}`;
 }
 
 /**
@@ -51,12 +58,12 @@ export async function scoreComment(text: string, deadline?: number): Promise<Mod
 		body: JSON.stringify({ model: 'omni-moderation-latest', input: text })
 	}, deadline);
 	const data = await res.json();
-	if (!res.ok) throw new Error(`moderation failed: ${res.status} ${JSON.stringify(data)}`);
+	if (!res.ok) throw new Error(`moderation failed: ${res.status}`);
 	const cat = data.results?.[0]?.category_scores;
 	if (!cat || TOXIC_CATEGORIES.some((category) => !Number.isFinite(cat[category]))) {
 		throw new Error('moderation response is missing required category scores');
 	}
-	const scores: Record<string, number> = {};
+	const scores = {} as ToxicityScores;
 	let max = 0;
 	for (const k of TOXIC_CATEGORIES) {
 		const v = cat[k];

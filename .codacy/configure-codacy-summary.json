@@ -52,6 +52,34 @@
     "The untrimmed auto configuration could not run because Checkov, Lizard, SQLFluff, and SQLint cannot install in this environment."
   ],
   "codacyYaml": null,
-  "importResults": null,
-  "cloudVerification": null
+  "importResults": {
+    "status": "completed_with_errors",
+    "toolsConfigured": 3,
+    "toolsEnabled": [],
+    "toolsDisabled": [],
+    "errors": [
+      { "toolId": "Jackson Linter", "error": "Conflict (409)", "detail": "Cannot disable a tool that is enabled by a standard" },
+      { "toolId": "Spectral", "error": "Conflict (409)", "detail": "Cannot disable a tool that is enabled by a standard" },
+      { "toolId": "PMD7", "error": "Conflict (409)", "detail": "Cannot disable a tool that is enabled by a standard" },
+      { "toolId": "ESLint", "error": "Conflict (409)", "detail": "Cannot disable a tool that is enabled by a standard" },
+      { "toolId": "markdownlint", "error": "Conflict (409)", "detail": "Cannot disable a tool that is enabled by a standard" },
+      { "toolId": "Checkov", "error": "Conflict (409)", "detail": "Cannot disable a tool that is enabled by a standard" },
+      { "toolId": "Agentlinter", "error": "Conflict (409)", "detail": "Cannot disable a tool that is enabled by a standard" },
+      { "toolId": "PMD", "error": "Conflict (409)", "detail": "Cannot disable a tool that is enabled by a standard" },
+      { "toolId": "SQLFluff", "error": "Conflict (409)", "detail": "Cannot disable a tool that is enabled by a standard" },
+      { "toolId": "ESLint9", "error": "Conflict (409)", "detail": "Cannot disable a tool that is enabled by a standard" },
+      { "toolId": "SQLint", "error": "Conflict (409)", "detail": "Cannot disable a tool that is enabled by a standard" },
+      { "toolId": "Lizard", "error": "Conflict (409)", "detail": "Cannot disable a tool that is enabled by a standard" }
+    ],
+    "warnings": ["Cloud reanalysis is still in progress."],
+    "codingStandards": ["Default coding standard"],
+    "forceUsed": false
+  },
+  "cloudVerification": {
+    "reanalysisCompleted": false,
+    "issuesBefore": 37,
+    "issuesAfter": null,
+    "patternsDisabled": [],
+    "warnings": ["Codacy Cloud reanalysis is still in progress."]
+  }
 }

@@ -32,5 +32,10 @@
 		"@libsql/client": "^0.17.4",
 		"drizzle-orm": "^0.45.2",
 		"recheck": "^4.5.0"
+	},
+	"overrides": {
+		"@esbuild-kit/core-utils": {
+			"esbuild": "^0.25.12"
+		}
 	}
 }

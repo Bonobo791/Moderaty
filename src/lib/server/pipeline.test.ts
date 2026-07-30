@@ -387,7 +387,10 @@ test('verifies a dispatched action after its completion transaction fails', asyn
 	})]);
 });
 
-test('routes an ambiguous ban to manual review without retrying it', async () => {
+test.each([
+	{ observed: 'rejected' as const },
+	{ observed: null }
+])('completes a dispatched ban when the comment is already terminal ($observed)', async ({ observed }) => {
 	mocks.state.existingIds = ['comment'];
 	mocks.state.moderationActions = [{
 		commentId: 'comment',
@@ -399,15 +402,51 @@ test('routes an ambiguous ban to manual review without retrying it', async () =>
 		lastManualRetryAt: null,
 		createdAt: '2026-01-04T00:00:00.000Z'
 	}];
-	mocks.getCommentModerationStatus.mockResolvedValue('rejected');
+	mocks.getCommentModerationStatus.mockResolvedValue(observed);
 
-	await expect(runChannel('channel')).rejects.toThrow('requires manual review');
+	await runChannel('channel');
 
 	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
 	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({
 		commentId: 'comment',
-		state: 'manual_review'
+		state: 'completed'
 	})]);
+});
+
+test('retries a dispatched ban while the comment is still public', async () => {
+	mocks.state.existingIds = ['comment'];
+	mocks.state.moderationActions = [{
+		commentId: 'comment',
+		channelId: 'channel',
+		action: 'ban',
+		reason: 'rule #1 (user: author)',
+		state: 'dispatched',
+		lastAttemptAt: '2026-01-04T00:00:00.000Z',
+		lastManualRetryAt: null,
+		createdAt: '2026-01-04T00:00:00.000Z'
+	}];
+	mocks.getCommentModerationStatus.mockResolvedValue('published');
+
+	await runChannel('channel');
+
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', true, 'access-token', undefined);
+	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({
+		commentId: 'comment',
+		state: 'completed'
+	})]);
+});
+
+test.each([
+	{ raw: 0.506, status: 'deleted', reason: 'ai score 0.51' },
+	{ raw: 0.504, status: 'pending', reason: 'ai score 0.50' }
+])('rounds the AI score to 2 decimals before deciding ($raw → $status)', async ({ raw, status, reason }) => {
+	mocks.scoreComment.mockResolvedValue(moderation(raw));
+
+	await runChannel('channel');
+
+	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status })]);
+	expect(mocks.state.insertedAudits).toEqual([expect.objectContaining({ commentId: 'comment', reason })]);
 });
 
 test('keeps a dispatched action retriable when verification fails transiently', async () => {

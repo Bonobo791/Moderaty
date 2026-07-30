@@ -111,9 +111,12 @@ function ruleDecision(comment: NewComment, rule: RuleRow): Decision {
 
 async function aiDecision(comment: NewComment, deadline?: number): Promise<Decision> {
 	const moderation = await scoreComment(comment.text, deadline);
-	const reason = `ai score ${moderation.score.toFixed(2)}`;
+	// Round to the displayed precision before comparing so a score that reads
+	// as "0.51" in the audit log also behaves as 0.51 against the thresholds.
+	const score = Math.round(moderation.score * 100) / 100;
+	const reason = `ai score ${score.toFixed(2)}`;
 	const aiScore = serializeScores(moderation.scores);
-	if (moderation.score > AUTO_BAN) {
+	if (score > AUTO_BAN) {
 		return {
 			comment,
 			status: 'rejected',
@@ -125,7 +128,7 @@ async function aiDecision(comment: NewComment, deadline?: number): Promise<Decis
 			youtubeAction: 'ban'
 		};
 	}
-	if (moderation.score >= AUTO_DELETE) {
+	if (score >= AUTO_DELETE) {
 		return {
 			comment,
 			status: 'deleted',

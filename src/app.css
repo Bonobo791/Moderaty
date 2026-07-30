@@ -18,21 +18,164 @@
  * Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
  */
 
+/* ── Moderaty design tokens ─────────────────────────────── */
+:root {
+  --bg: #f7f7f5;
+  --surface: #ffffff;
+  --border: #e5e3de;
+  --ink: #1c1b1a;
+  --ink-2: #6f6a63;          /* muted text */
+  --brand: #4f46e5;          /* indigo 600 */
+  --brand-hover: #4338ca;    /* indigo 700 */
+  --brand-soft: #eef2ff;     /* indigo 50  */
+  --danger: #dc2626;
+  --danger-hover: #b91c1c;
+  --danger-soft: #fef2f2;
+  --warn-soft: #fffbeb;
+  --ok: #16a34a;
+  --ok-soft: #f0fdf4;
+  --radius: 10px;
+  --radius-sm: 6px;
+  --shadow: 0 1px 2px rgb(28 27 26 / 0.06), 0 4px 12px rgb(28 27 26 / 0.05);
+  --font: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
 * { box-sizing: border-box; }
-body { font-family: system-ui, -apple-system, sans-serif; margin: 0; background: #f6f7f9; color: #1a1d21; }
-nav { background: #111; color: #fff; padding: 10px 20px; display: flex; gap: 16px; align-items: center; }
-nav a { color: #cdd3da; text-decoration: none; font-size: 14px; }
+html { -webkit-font-smoothing: antialiased; }
+body {
+  font-family: var(--font);
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+/* ── layout ─────────────────────────────────────────────── */
+nav {
+  background: var(--ink);
+  padding: 0 24px;
+  height: 56px;
+  display: flex;
+  gap: 24px;
+  align-items: center;
+}
+nav a { color: #b8b4ac; text-decoration: none; font-size: 14px; }
 nav a:hover { color: #fff; }
-nav .brand { font-weight: 700; color: #fff; }
-main { max-width: 860px; margin: 24px auto; padding: 0 16px; }
-.card { background: #fff; border: 1px solid #e3e6ea; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
-.btn { display: inline-block; background: #111; color: #fff; border: 0; border-radius: 6px; padding: 8px 14px; font-size: 14px; cursor: pointer; text-decoration: none; }
-.btn.secondary { background: #e3e6ea; color: #111; }
-.btn.danger { background: #b3261e; }
-.btn.small { padding: 4px 10px; font-size: 13px; }
-input, select { padding: 8px; border: 1px solid #c9cfd6; border-radius: 6px; font-size: 14px; }
+nav .brand { font-weight: 700; color: #fff; font-size: 17px; letter-spacing: -0.01em; }
+main { max-width: 900px; margin: 32px auto; padding: 0 20px; }
+h1 { font-size: 22px; letter-spacing: -0.02em; margin: 0 0 4px; }
+.page-sub { color: var(--ink-2); margin: 0 0 24px; font-size: 14px; }
+
+/* ── card ───────────────────────────────────────────────── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 20px;
+  margin-bottom: 14px;
+}
+
+/* ── buttons ────────────────────────────────────────────── */
+.btn {
+  display: inline-block;
+  background: var(--brand);
+  color: #fff;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: 500;
+  font-family: var(--font);
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 120ms ease;
+}
+.btn:hover { background: var(--brand-hover); }
+.btn.secondary { background: var(--surface); color: var(--ink); border-color: var(--border); }
+.btn.secondary:hover { background: var(--bg); }
+.btn.danger { background: var(--danger); }
+.btn.danger:hover { background: var(--danger-hover); }
+.btn.small { padding: 5px 11px; font-size: 13px; }
+.btn:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+/* ── forms ──────────────────────────────────────────────── */
+input, select {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-family: var(--font);
+  background: var(--surface);
+  color: var(--ink);
+}
+input:focus, select:focus { border-color: var(--brand); outline: none; box-shadow: 0 0 0 3px var(--brand-soft); }
 form.inline { display: inline; }
-.muted { color: #6b7280; font-size: 13px; }
+
+/* ── text & badges ──────────────────────────────────────── */
+.muted { color: var(--ink-2); font-size: 13px; }
+.badge {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  background: var(--brand-soft);
+  color: var(--brand);
+}
+.badge.neutral { background: #f1efe9; color: var(--ink-2); }
+.badge.ok { background: var(--ok-soft); color: var(--ok); }
+.badge.danger { background: var(--danger-soft); color: var(--danger); }
+
+/* ── table ──────────────────────────────────────────────── */
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
-th, td { text-align: left; padding: 8px; border-bottom: 1px solid #e3e6ea; vertical-align: top; }
-.badge { display: inline-block; border-radius: 4px; padding: 2px 8px; font-size: 12px; background: #e3e6ea; }
+th { color: var(--ink-2); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; }
+th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+tbody tr:last-child td { border-bottom: 0; }
+
+/* ── states (I12) ───────────────────────────────────────── */
+.empty {
+  text-align: center;
+  padding: 48px 24px;
+  color: var(--ink-2);
+  background: var(--surface);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+}
+.empty p { margin: 0 0 6px; font-size: 15px; color: var(--ink); font-weight: 500; }
+.empty .muted { font-size: 14px; }
+.skeleton {
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, #efece7 25%, #f7f5f2 50%, #efece7 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.2s infinite linear;
+  min-height: 16px;
+}
+@keyframes shimmer { to { background-position: -200% 0; } }
+.error-box {
+  background: var(--danger-soft);
+  border: 1px solid #fecaca;
+  color: var(--danger);
+  border-radius: var(--radius-sm);
+  padding: 12px 16px;
+  font-size: 14px;
+  margin-bottom: 14px;
+}
+.flash {
+  background: var(--ok-soft);
+  border: 1px solid #bbf7d0;
+  color: var(--ok);
+  border-radius: var(--radius-sm);
+  padding: 10px 16px;
+  font-size: 14px;
+  margin-bottom: 14px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton { animation: none; }
+  .btn { transition: none; }
+}

@@ -22,7 +22,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	import EmptyState from '$lib/EmptyState.svelte';
 	import Skeleton from '$lib/Skeleton.svelte';
 
-	let { data } = $props();
+	let { data, form } = $props();
 </script>
 
 <svelte:head>
@@ -35,7 +35,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 {#if data.pending === undefined}
 	<Skeleton rows={3} />
 {:else}
-	<p class="muted">Nothing here is public-facing yet only if previously held; rejected/approved comments already have their final state. Your action is final.</p>
+	{#if form?.error}<div class="error-box" role="alert">{form.error}</div>{/if}
+
+	<p class="muted">These comments are held for review and are not public yet. Rejected or approved comments already have a final state. Your action is final.</p>
 
 	{#each data.pending as c}
 		<div class="card">

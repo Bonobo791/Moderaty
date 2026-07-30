@@ -31,7 +31,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <h1>Rules — {data.ch?.title}</h1>
 <p class="page-sub">Keyword, regex, and blocked-user rules that act before AI scoring.</p>
 
-{#if form?.error}<div class="error-box">{form.error}</div>{/if}
+{#if form?.error}<div class="error-box" role="alert">{form.error}</div>{/if}
 
 <div class="card">
 	<form method="POST" action="?/add" style="display:flex; gap:8px; flex-wrap:wrap">

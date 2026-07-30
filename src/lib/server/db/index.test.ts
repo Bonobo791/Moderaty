@@ -23,11 +23,16 @@ import { expect, test, vi } from 'vitest';
 const fakeEnv = vi.hoisted(() => ({ values: {} as Record<string, string | undefined> }));
 vi.mock('$env/dynamic/private', () => ({ env: fakeEnv.values }));
 
+function setEnv(values: Record<string, string | undefined>) {
+	for (const key of Object.keys(fakeEnv.values)) delete fakeEnv.values[key];
+	Object.assign(fakeEnv.values, values);
+}
+
 // SvelteKit's postbuild analyse imports every server module. Without env vars
 // (a clean Netlify build), a top-level throw in this module fails the deploy.
 // Env validation must happen at first use (handler start), not at import.
 test('db module imports without env vars; first use throws loudly', async () => {
-	fakeEnv.values = {};
+	setEnv({});
 	vi.resetModules();
 	const mod = await import('./index');
 	expect(mod.db).toBeDefined();
@@ -35,14 +40,14 @@ test('db module imports without env vars; first use throws loudly', async () => 
 });
 
 test('remote URL without auth token throws loudly at first use', async () => {
-	fakeEnv.values = { TURSO_DATABASE_URL: 'libsql://example.turso.io' };
+	setEnv({ TURSO_DATABASE_URL: 'libsql://example.turso.io' });
 	vi.resetModules();
 	const mod = await import('./index');
 	expect(() => mod.db.select()).toThrow(/TURSO_AUTH_TOKEN is required/);
 });
 
 test('local database URL needs no token and works at first use', async () => {
-	fakeEnv.values = { TURSO_DATABASE_URL: ':memory:' };
+	setEnv({ TURSO_DATABASE_URL: ':memory:' });
 	vi.resetModules();
 	const mod = await import('./index');
 	expect(() => mod.db.select()).not.toThrow();

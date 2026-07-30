@@ -20,13 +20,15 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <script lang="ts">
 	import EmptyState from '$lib/EmptyState.svelte';
+	import { relativeTime } from '$lib/relative-time';
 
 	let { data } = $props();
 
 	function badgeClass(action: string): string {
 		if (action === 'approve' || action === 'approved') return 'badge ok';
-		if (action === 'queue' || action === 'pending') return 'badge';
-		if (['rejected', 'deleted', 'reject', 'delete', 'ban', 'dry-run'].includes(action))
+		if (action === 'queue' || action === 'pending') return 'badge attention';
+		if (action === 'dry-run') return 'badge neutral';
+		if (['rejected', 'deleted', 'reject', 'delete', 'ban'].includes(action))
 			return 'badge danger';
 		return 'badge neutral';
 	}
@@ -46,19 +48,18 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	/>
 {:else}
 	<div class="card">
-		<table>
-			<caption class="muted" style="text-align:left; padding-bottom:8px">Latest moderation actions</caption>
+		<table class="stack-table">
 			<thead>
 				<tr><th>Time</th><th>Action</th><th>Comment</th><th>Reason</th><th>Actor</th></tr>
 			</thead>
 			<tbody>
 				{#each data.entries as e}
 					<tr>
-						<td class="muted">{e.createdAt}</td>
-						<td><span class={badgeClass(e.action)}>{e.action}</span></td>
-						<td class="muted">{e.commentId}</td>
-						<td>{e.reason}</td>
-						<td class="muted">{e.actor}</td>
+						<td class="muted" data-label="Time" title={e.createdAt}>{relativeTime(e.createdAt)}</td>
+						<td data-label="Action"><span class={badgeClass(e.action)}>{e.action}</span></td>
+						<td class="muted" data-label="Comment">{e.commentId}</td>
+						<td data-label="Reason">{e.reason}</td>
+						<td class="muted" data-label="Actor">{e.actor}</td>
 					</tr>
 				{/each}
 			</tbody>

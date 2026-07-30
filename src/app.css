@@ -212,6 +212,19 @@ code { background: var(--dawn-soft); padding: 1px 6px; border-radius: 4px; }
 .badge.neutral { background: #f1edf5; color: var(--ink-2); }
 .badge.ok { background: var(--brand-soft); color: var(--brand); }
 .badge.danger { background: var(--danger-soft); color: var(--danger); }
+/* attention = needs a human decision; danger = a destructive action was taken.
+   Same hues, different semantics — no new color enters the world. */
+.badge.attention { background: var(--danger-soft); color: var(--danger); }
+
+/* per-channel stat row (dashboard) */
+.stats {
+	list-style: none;
+	margin: 0 0 12px;
+	padding: 0;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
 
 /* ── quote (review queue) ───────────────────────────────── */
 .quote {
@@ -234,6 +247,25 @@ th {
 }
 th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
 tbody tr:last-child td { border-bottom: 0; }
+
+/* stack-table: on narrow screens rows become labeled cards instead of
+   overflowing columns (audit log) */
+@media (max-width: 760px) {
+	.stack-table thead { display: none; }
+	.stack-table, .stack-table tbody, .stack-table tr, .stack-table td { display: block; width: 100%; }
+	.stack-table tr { border-bottom: 1px solid var(--border); padding: 8px 0; }
+	.stack-table tbody tr:last-child { border-bottom: 0; }
+	.stack-table td { border-bottom: 0; padding: 3px 0; }
+	.stack-table td::before {
+		content: attr(data-label);
+		display: block;
+		font-size: 11px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--ink-2);
+	}
+}
 
 /* ── states (I12) ───────────────────────────────────────── */
 .empty {

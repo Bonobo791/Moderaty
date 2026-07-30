@@ -270,7 +270,8 @@ violet-tinted Gel Border, dashed only for empty states.
 
 ### Badges
 - **Style:** pill, 2px 10px, 12px/500, tabular-nums. Default is the held pairing (held-soft ground, rose text) — the queue's "waiting" tone.
-- **Variants:** neutral (gray-violet), ok (cobalt on brand-soft), danger (crimson on danger-soft). A badge is always a soft tint under its saturated ink, never a saturated fill with white text.
+- **Variants:** neutral (gray-violet), ok (cobalt on brand-soft), attention (crimson on danger-soft), danger (crimson on danger-soft). Attention and danger share the crimson pairing but carry different semantics: **attention = a human decision is needed** (pending counts, queued items), **danger = a destructive action was taken** (reject/delete/ban in the log). A settled outcome (rejected/deleted counts on the dashboard) is neutral, not danger — the alarm color is reserved for what still needs you.
+- **Rule:** a badge is always a soft tint under its saturated ink, never a saturated fill with white text.
 
 ### Cards / Containers
 - **Corner Style:** gently rounded (12px).

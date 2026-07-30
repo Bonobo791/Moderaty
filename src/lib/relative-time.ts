@@ -1,5 +1,3 @@
-<!--
-
 // Moderaty — YouTube Comment Auto-Moderation Tool
 // Copyright (C) 2026 Andrew Philip Weilbacher
 //
@@ -18,19 +16,23 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
--->
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+const WEEK = 7 * DAY;
 
-<!doctype html>
-<html lang="en">
-	<head>
-		<meta charset="utf-8" />
-		<meta name="viewport" content="width=device-width, initial-scale=1" />
-		<meta name="text-scale" content="scale" />
-		<link rel="preload" href="/fonts/SairaCondensed-700.woff2" as="font" type="font/woff2" crossorigin />
-		<link rel="preload" href="/fonts/SairaStencilOne-400.woff2" as="font" type="font/woff2" crossorigin />
-		%sveltekit.head%
-	</head>
-	<body data-sveltekit-preload-data="hover">
-		<div style="display: contents">%sveltekit.body%</div>
-	</body>
-</html>
+function plural(n: number, unit: string): string {
+	return `${n} ${unit}${n === 1 ? '' : 's'} ago`;
+}
+
+/** Human "N units ago" rendering for ISO timestamps; falls back to the raw string if unparseable. */
+export function relativeTime(iso: string, now: Date = new Date()): string {
+	const then = new Date(iso).getTime();
+	if (Number.isNaN(then)) return iso;
+	const diff = now.getTime() - then;
+	if (diff < MINUTE) return 'just now';
+	if (diff < HOUR) return plural(Math.floor(diff / MINUTE), 'minute');
+	if (diff < DAY) return plural(Math.floor(diff / HOUR), 'hour');
+	if (diff < WEEK) return plural(Math.floor(diff / DAY), 'day');
+	return plural(Math.floor(diff / WEEK), 'week');
+}

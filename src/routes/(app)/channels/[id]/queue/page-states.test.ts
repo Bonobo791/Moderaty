@@ -35,6 +35,18 @@ describe('queue page states (I12)', () => {
 		expect(queuePage).not.toContain('Nothing here is public-facing yet only if previously held');
 		expect(queuePage).toContain('These comments are held for review and are not public yet.');
 	});
+
+	it('confirms destructive actions inline, naming the author', () => {
+		expect(queuePage).toContain("This can't be undone.");
+		expect(queuePage).toContain("Their comments will be rejected and they'll be blocked.");
+		expect(queuePage).toContain('?/del');
+		expect(queuePage).toContain('?/ban');
+	});
+
+	it('announces successful actions via a status flash', () => {
+		expect(queuePage).toContain('form?.success');
+		expect(queuePage).toMatch(/class="flash"[^>]*role="status"/);
+	});
 });
 
 describe('rules page states (I12)', () => {

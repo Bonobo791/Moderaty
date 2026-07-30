@@ -92,7 +92,10 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		property="og:description"
 		content="Comment protection for YouTube creators — your community's norms, enforced while you sleep. Rules first, AI second, you on doubt."
 	/>
-	<meta name="twitter:card" content="summary" />
+	<meta name="twitter:card" content="summary_large_image" />
+	<!-- relative for now — must become an absolute URL at deploy time -->
+	<meta property="og:image" content="/og.png" />
+	<meta name="twitter:image" content="/og.png" />
 </svelte:head>
 
 <div class="page" class:live>

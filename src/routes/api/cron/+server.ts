@@ -26,6 +26,7 @@ import { runChannel } from '$lib/server/pipeline';
 import type { RequestHandler } from './$types';
 
 const LEASE_MS = 10 * 60 * 1000; // exceeds one bounded run; expiry alone re-eligibilizes after a crash
+const RUN_BUDGET_MS = 20 * 1000; // below the scheduled trigger's 25s abort, so the server stops first
 
 /** Constant-time secret comparison; never throws on length mismatch. */
 function secretMatches(provided: string | null, expected: string): boolean {
@@ -68,7 +69,7 @@ export const GET: RequestHandler = async ({ url, request }) => {
 	if (claimed.length === 0) return json({ ok: true, claimed: false, dryRun, results: {} });
 
 	try {
-		const result = await runChannel(channel.id);
+		const result = await runChannel(channel.id, { deadline: Date.now() + RUN_BUDGET_MS });
 		return json({ ok: true, dryRun, results: { [channel.id]: result } });
 	} catch (cause) {
 		const message = cause instanceof Error ? cause.message : String(cause);

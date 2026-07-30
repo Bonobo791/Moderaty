@@ -17,7 +17,8 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { beforeEach, expect, test, vi } from 'vitest';
-import { setupTestDb } from '$lib/server/testdb';
+import { setupTestDb, testDb } from '$lib/server/testdb';
+import { channels } from '$lib/server/db/schema';
 
 const mocks = vi.hoisted(() => ({
 	env: { CRON_SECRET: 'test-secret', DRY_RUN: 'true' } as Record<string, string | undefined>,
@@ -78,4 +79,19 @@ test('accepts an Authorization bearer secret without a query param', async () =>
 
 	expect(res.status).toBe(200);
 	expect(await res.json()).toMatchObject({ ok: true, results: {} });
+});
+
+test('runs the channel with a server-side deadline inside the caller abort window', async () => {
+	await testDb().db.insert(channels).values({ id: 'UC1', title: 'One', refreshTokenEnc: 'enc' });
+	const before = Date.now();
+
+	await call({ bearer: 'test-secret' });
+
+	expect(mocks.runChannel).toHaveBeenCalledWith('UC1', expect.objectContaining({
+		// The scheduled function aborts at 25s; the server must stop before that.
+		deadline: expect.any(Number)
+	}));
+	const deadline = mocks.runChannel.mock.calls[0][1].deadline;
+	expect(deadline - before).toBeGreaterThanOrEqual(19_000);
+	expect(deadline - before).toBeLessThanOrEqual(21_000);
 });

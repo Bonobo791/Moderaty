@@ -21,10 +21,19 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <script lang="ts">
 	import EmptyState from '$lib/EmptyState.svelte';
 	import Skeleton from '$lib/Skeleton.svelte';
+	import { autoRefresh } from '$lib/auto-refresh.svelte';
 	import { relativeTime } from '$lib/relative-time';
 
 	let { data, form } = $props();
 	let confirming = $state<{ id: string; author: string; kind: 'delete' | 'ban' } | null>(null);
+
+	autoRefresh();
+
+	// Auto-refresh can drop a comment from the queue while its confirmation
+	// dialog is open; close the dialog rather than act on a stale target.
+	$effect(() => {
+		if (confirming && !data.pending?.some((c) => c.id === confirming?.id)) confirming = null;
+	});
 </script>
 
 <svelte:head>

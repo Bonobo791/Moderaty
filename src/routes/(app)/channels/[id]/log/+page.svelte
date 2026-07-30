@@ -20,9 +20,12 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <script lang="ts">
 	import EmptyState from '$lib/EmptyState.svelte';
+	import { autoRefresh } from '$lib/auto-refresh.svelte';
 	import { relativeTime } from '$lib/relative-time';
 
 	let { data } = $props();
+
+	autoRefresh();
 
 	function badgeClass(action: string): string {
 		if (action === 'approve' || action === 'approved') return 'badge ok';

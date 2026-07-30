@@ -69,6 +69,15 @@ test('fails loudly when CRON_SECRET is not configured', async () => {
 	await expect(call({ bearer: 'anything' })).rejects.toThrowError(expect.objectContaining({ status: 500 }));
 });
 
+test('rejects a malformed Authorization header even with a valid query secret', async () => {
+	const url = new URL('http://localhost/api/cron?secret=test-secret');
+	const request = new Request(url, { headers: { authorization: 'Basic anything' } });
+
+	await expect(GET({ url, request } as never)).rejects.toThrowError(
+		expect.objectContaining({ status: 401 })
+	);
+});
+
 test.each([
 	{ label: 'plan-documented query secret for manual triggers', secret: { query: 'test-secret' } },
 	{ label: 'Authorization bearer secret without a query param', secret: { bearer: 'test-secret' } }

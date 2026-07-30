@@ -43,11 +43,17 @@ function secretMatches(provided: string | null, expected: string): boolean {
  * so concurrent cron invocations cannot process the same channel.
  */
 export const GET: RequestHandler = async ({ url, request }) => {
+	// Captured at handler start so the DB prelude consumes the same budget.
+	const deadline = Date.now() + RUN_BUDGET_MS;
 	if (!env.CRON_SECRET) throw error(500, 'CRON_SECRET is not configured');
 	// Bearer header is the preferred path (used by the Netlify scheduled
 	// function); the query param stays for the plan-documented manual curl.
+	// A present-but-malformed Authorization header fails closed — query auth
+	// is a separate mode only when no header was sent at all.
 	const bearer = request.headers.get('authorization');
-	const secret = bearer?.startsWith('Bearer ') ? bearer.slice('Bearer '.length) : url.searchParams.get('secret');
+	let secret: string | null = null;
+	if (bearer === null) secret = url.searchParams.get('secret');
+	else if (bearer.startsWith('Bearer ')) secret = bearer.slice('Bearer '.length);
 	if (!secretMatches(secret, env.CRON_SECRET)) throw error(401, 'bad secret');
 	const dryRun = env.DRY_RUN === 'true';
 	const nowIso = new Date().toISOString();
@@ -69,7 +75,7 @@ export const GET: RequestHandler = async ({ url, request }) => {
 	if (claimed.length === 0) return json({ ok: true, claimed: false, dryRun, results: {} });
 
 	try {
-		const result = await runChannel(channel.id, { deadline: Date.now() + RUN_BUDGET_MS });
+		const result = await runChannel(channel.id, { deadline });
 		return json({ ok: true, dryRun, results: { [channel.id]: result } });
 	} catch (cause) {
 		const message = cause instanceof Error ? cause.message : String(cause);

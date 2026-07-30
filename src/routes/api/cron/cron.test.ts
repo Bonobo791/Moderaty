@@ -54,6 +54,12 @@ test('rejects a wrong secret in both query and header', async () => {
 	await expect(call({ bearer: 'wrong' })).rejects.toThrowError(expect.objectContaining({ status: 401 }));
 });
 
+test('rejects length-mismatched secrets without throwing a 500', async () => {
+	await expect(call({ bearer: 'x' })).rejects.toThrowError(expect.objectContaining({ status: 401 }));
+	await expect(call({ bearer: 'test-secret-but-longer' })).rejects.toThrowError(expect.objectContaining({ status: 401 }));
+	await expect(call({ bearer: 'test-secrex' })).rejects.toThrowError(expect.objectContaining({ status: 401 }));
+});
+
 test('fails loudly when CRON_SECRET is not configured', async () => {
 	delete mocks.env.CRON_SECRET;
 

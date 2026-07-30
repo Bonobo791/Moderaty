@@ -16,6 +16,7 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
+import { timingSafeEqual } from 'node:crypto';
 import { error, json } from '@sveltejs/kit';
 import { and, asc, eq, isNull, lt, or } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
@@ -25,6 +26,14 @@ import { runChannel } from '$lib/server/pipeline';
 import type { RequestHandler } from './$types';
 
 const LEASE_MS = 10 * 60 * 1000; // exceeds one bounded run; expiry alone re-eligibilizes after a crash
+
+/** Constant-time secret comparison; never throws on length mismatch. */
+function secretMatches(provided: string | null, expected: string): boolean {
+	if (!provided) return false;
+	const a = Buffer.from(provided);
+	const b = Buffer.from(expected);
+	return a.length === b.length && timingSafeEqual(a, b);
+}
 
 /**
  * One channel per invocation: the active, unleased channel with the oldest
@@ -38,7 +47,7 @@ export const GET: RequestHandler = async ({ url, request }) => {
 	// function); the query param stays for the plan-documented manual curl.
 	const bearer = request.headers.get('authorization');
 	const secret = bearer?.startsWith('Bearer ') ? bearer.slice('Bearer '.length) : url.searchParams.get('secret');
-	if (secret !== env.CRON_SECRET) throw error(401, 'bad secret');
+	if (!secretMatches(secret, env.CRON_SECRET)) throw error(401, 'bad secret');
 	const dryRun = env.DRY_RUN === 'true';
 	const nowIso = new Date().toISOString();
 	const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, nowIso));

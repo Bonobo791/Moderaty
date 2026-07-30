@@ -117,7 +117,8 @@ test('act fails loudly on a comment that is no longer pending', async () => {
 
 test('approve in DRY_RUN finalizes locally, audits dry-run, and skips YouTube', async () => {
 	await seedComment('c1', 'UC1');
-	await act('approve', { commentId: 'c1' });
+	const res = await act('approve', { commentId: 'c1' });
+	expect(res).toMatchObject({ success: 'Approved — recorded in audit log.' });
 
 	const row = await commentRow('c1');
 	expect(row?.status).toBe('approved');
@@ -135,7 +136,8 @@ test('approve in DRY_RUN finalizes locally, audits dry-run, and skips YouTube', 
 test('reject outside DRY_RUN calls YouTube and audits reject', async () => {
 	mocks.env.DRY_RUN = 'false';
 	await seedComment('c1', 'UC1');
-	await act('reject', { commentId: 'c1' });
+	const res = await act('reject', { commentId: 'c1' });
+	expect(res).toMatchObject({ success: 'Rejected — recorded in audit log.' });
 
 	expect(mocks.refreshAccessToken).toHaveBeenCalledWith('decrypted-refresh-token');
 	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'rejected', false, 'access-token');

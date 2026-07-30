@@ -20,6 +20,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <script lang="ts">
 	import EmptyState from '$lib/EmptyState.svelte';
+	import { relativeTime } from '$lib/relative-time';
 
 	let { data } = $props();
 	function count(channelId: string, status: string): number {
@@ -34,21 +35,31 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <h1>Channels</h1>
 <p class="page-sub">Connect a channel and track its moderation activity.</p>
-<a class="btn" href="/api/auth/google">Connect YouTube channel</a>
 
 {#each data.chs as ch}
+	{@const pending = count(ch.id, 'pending')}
 	<div class="card">
 		<h2 style="margin-top:0">{ch.title}</h2>
-		<p class="muted">ID: {ch.id} · last polled up to: {ch.cursor ?? 'never'}</p>
-		<p>
-			<span class="badge">pending: {count(ch.id, 'pending')}</span>
-			<span class="badge danger">rejected: {count(ch.id, 'rejected')}</span>
-			<span class="badge danger">deleted: {count(ch.id, 'deleted')}</span>
-			<span class="badge ok">approved: {count(ch.id, 'approved')}</span>
+		<p style="margin-top:0">
+			protected —
+			{#if pending > 0}
+				<a style="color: var(--danger); font-weight: 600" href="/channels/{ch.id}/queue">{pending} comment{pending === 1 ? '' : 's'} waiting for review</a>
+			{:else}
+				queue is clear
+			{/if}
 		</p>
+		<ul class="stats">
+			<li><span class="badge attention">pending: {pending}</span></li>
+			<li><span class="badge neutral">rejected: {count(ch.id, 'rejected')}</span></li>
+			<li><span class="badge neutral">deleted: {count(ch.id, 'deleted')}</span></li>
+			<li><span class="badge ok">approved: {count(ch.id, 'approved')}</span></li>
+		</ul>
 		<a class="btn secondary small" href="/channels/{ch.id}/rules">Rules</a>
 		<a class="btn secondary small" href="/channels/{ch.id}/queue">Review queue</a>
 		<a class="btn secondary small" href="/channels/{ch.id}/log">Audit log</a>
+		<p class="muted" style="margin:12px 0 0">
+			last checked {ch.cursor ? relativeTime(ch.cursor) : 'never'} · ID: {ch.id}
+		</p>
 	</div>
 {:else}
 	<EmptyState
@@ -56,3 +67,5 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		hint="Connect your YouTube channel to start moderating comments automatically."
 	/>
 {/each}
+
+<a class="btn" href="/api/auth/google">Connect YouTube channel</a>

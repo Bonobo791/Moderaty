@@ -87,20 +87,24 @@ export const actions = {
 		const commentId = commentIdFrom(await request.formData());
 		if (!commentId) return fail(400, { error: 'Invalid comment ID' });
 		await act(params.id, commentId, 'approve');
+		return { success: 'Approved — recorded in audit log.' };
 	},
 	reject: async ({ params, request }) => {
 		const commentId = commentIdFrom(await request.formData());
 		if (!commentId) return fail(400, { error: 'Invalid comment ID' });
 		await act(params.id, commentId, 'reject');
+		return { success: 'Rejected — recorded in audit log.' };
 	},
 	del: async ({ params, request }) => {
 		const commentId = commentIdFrom(await request.formData());
 		if (!commentId) return fail(400, { error: 'Invalid comment ID' });
 		await act(params.id, commentId, 'delete');
+		return { success: 'Deleted — recorded in audit log.' };
 	},
 	ban: async ({ params, request }) => {
 		const commentId = commentIdFrom(await request.formData());
 		if (!commentId) return fail(400, { error: 'Invalid comment ID' });
 		await act(params.id, commentId, 'ban');
+		return { success: 'Author banned — recorded in audit log.' };
 	}
 };

@@ -42,7 +42,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	{#each data.pending as c}
 		<div class="card">
 			<p style="margin-top:0"><span style="font-weight:600">{c.authorName}</span> <span class="muted">{c.publishedAt}</span></p>
-			<blockquote style="margin:8px 0; padding:8px 12px; border-left:3px solid var(--border); color: var(--ink-2)">{c.text}</blockquote>
+			<blockquote class="quote">{c.text}</blockquote>
 			<div style="display:flex; gap:8px">
 				<form class="inline" method="POST" action="?/approve">
 					<input type="hidden" name="commentId" value={c.id} />

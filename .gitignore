@@ -31,3 +31,6 @@ vite.config.ts.timestamp-*
 .vscode
 .serena
 local.db*
+.tokensave
+.impeccable
+.playwright-cli

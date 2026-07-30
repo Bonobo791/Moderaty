@@ -233,7 +233,7 @@ test('callback upserts the channel and redirects home on the happy path', async 
 	stubTokenAndChannelResponses();
 
 	const thrown = await captureCallback(makeCookiesWithState('s'), { code: 'abc', state: 's' });
-	expect(thrown).toMatchObject({ status: 302, location: '/' });
+	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
 
 	expect(mocks.upserts).toHaveLength(1);
 	const values = mocks.upserts[0].values as Record<string, unknown>;
@@ -305,7 +305,7 @@ test('state survives a failed token exchange so the callback can be retried', as
 
 	stubTokenAndChannelResponses();
 	const second = await captureCallback(cookies, { code: 'abc', state: 's' });
-	expect(second).toMatchObject({ status: 302, location: '/' });
+	expect(second).toMatchObject({ status: 302, location: '/dashboard' });
 	expect(mocks.upserts).toHaveLength(1);
 });
 

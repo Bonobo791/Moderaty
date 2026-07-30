@@ -143,5 +143,5 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 	// failure leaves the callback retryable while a success cannot be replayed.
 	storePendingStates(cookies, pending.filter((s) => s !== state));
 
-	throw redirect(302, '/');
+	throw redirect(302, '/dashboard');
 }

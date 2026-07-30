@@ -18,165 +18,262 @@
  * Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
  */
 
-/* ── Moderaty design tokens ─────────────────────────────── */
+/* ── Cyclorama Cue Sheet — world tokens ─────────────────────
+   The night shift as a lighting plot: cyc black ground, a low
+   cobalt horizon, rose gathering above it, dawn wash, white day. */
+
+/* self-hosted faces (Saira is a variable font — one file, weight axis) */
+@font-face {
+	font-family: 'Saira';
+	src: url('/fonts/Saira-var.woff2') format('woff2');
+	font-weight: 100 900;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'Saira Condensed';
+	src: url('/fonts/SairaCondensed-500.woff2') format('woff2');
+	font-weight: 500;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'Saira Condensed';
+	src: url('/fonts/SairaCondensed-600.woff2') format('woff2');
+	font-weight: 600;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'Saira Condensed';
+	src: url('/fonts/SairaCondensed-700.woff2') format('woff2');
+	font-weight: 700;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'Saira Stencil One';
+	src: url('/fonts/SairaStencilOne-400.woff2') format('woff2');
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+}
+
 :root {
-  --bg: #f7f7f5;
-  --surface: #ffffff;
-  --border: #e5e3de;
-  --ink: #1c1b1a;
-  --ink-2: #6f6a63;          /* muted text */
-  --brand: #4f46e5;          /* indigo 600 */
-  --brand-hover: #4338ca;    /* indigo 700 */
-  --brand-soft: #eef2ff;     /* indigo 50  */
-  --danger: #dc2626;
-  --danger-hover: #b91c1c;
-  --danger-soft: #fef2f2;
-  --warn-soft: #fffbeb;
-  --ok: #16a34a;
-  --ok-soft: #f0fdf4;
-  --radius: 10px;
-  --radius-sm: 6px;
-  --shadow: 0 1px 2px rgb(28 27 26 / 0.06), 0 4px 12px rgb(28 27 26 / 0.05);
-  --font: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+	/* world palette (see .impeccable/quality-bar/cyclorama-board.webp) */
+	--night: #050506;
+	--cobalt: #0a2bff;
+	--rose: #024bff;
+	--rose-light: #ff7bae;
+	--dawn: #ffd7e6;
+	--day: #ffffff;
+
+	/* operate-register semantics (light side of the cyc) */
+	--bg: #fbfafd;
+	--surface: var(--day);
+	--border: #e9e2f1;
+	--ink: #17121f;
+	--ink-2: #5f566d;
+	--brand: var(--cobalt);
+	--brand-hover: #0822c8;
+	--brand-soft: #e9ecff;
+	--held: var(--rose);
+	--held-soft: #e4e9ff;
+	--danger: #cf1f5c; /* rose light, deepened to readable crimson */
+	--danger-hover: #a81448;
+	--danger-soft: #ffe9f1;
+	--dawn-soft: #fff3f8;
+
+	/* persuade-register text (the night/day phases of the cyc) */
+	--night-prose: #e7e0f3;
+	--night-fine: #efe9f8;
+	--night-dim: #9a8fb0;
+	--day-prose: #463e55;
+	--radius: 12px;
+	--radius-sm: 8px;
+	--shadow: 0 1px 2px rgb(23 18 31 / 0.07), 0 6px 16px rgb(23 18 31 / 0.06);
+	--shadow-raise: 0 2px 4px rgb(23 18 31 / 0.1), 0 10px 24px rgb(2 75 255 / 0.16);
+	--horizon: linear-gradient(90deg, var(--cobalt), var(--rose) 46%, var(--rose-light));
+	/* CTA variant: the rose end is deepened so white cue-caps labels keep
+	   ≥4.5:1 contrast across the whole pill */
+	--horizon-cta: linear-gradient(90deg, var(--cobalt), var(--rose) 50%, #c22b6b);
+	--font: system-ui, -apple-system, 'Segoe UI', sans-serif;
+	--font-display: 'Saira Condensed', var(--font);
+	--font-cue: 'Saira Stencil One', var(--font-display);
 }
 
 * { box-sizing: border-box; }
 html { -webkit-font-smoothing: antialiased; }
 body {
-  font-family: var(--font);
-  margin: 0;
-  background: var(--bg);
-  color: var(--ink);
-  font-size: 15px;
-  line-height: 1.55;
+	font-family: var(--font);
+	margin: 0;
+	background: var(--bg);
+	color: var(--ink);
+	font-size: 15px;
+	line-height: 1.55;
 }
 
-/* ── layout ─────────────────────────────────────────────── */
-nav {
-  background: var(--ink);
-  padding: 0 24px;
-  height: 56px;
-  display: flex;
-  gap: 24px;
-  align-items: center;
+/* ── app chrome (operate register) ────────────────────────── */
+.app-nav {
+	background: var(--night);
+	border-bottom: 3px solid transparent;
+	border-image: var(--horizon) 1;
+	padding: 0 24px;
+	height: 56px;
+	display: flex;
+	gap: 24px;
+	align-items: center;
 }
-nav a { color: #b8b4ac; text-decoration: none; font-size: 14px; }
-nav a:hover { color: #fff; }
-nav .brand { font-weight: 700; color: #fff; font-size: 17px; letter-spacing: -0.01em; }
-main { max-width: 900px; margin: 32px auto; padding: 0 20px; }
-h1 { font-size: 22px; letter-spacing: -0.02em; margin: 0 0 4px; }
+.app-nav a { color: #c9bed6; text-decoration: none; font-size: 14px; }
+.app-nav a:hover { color: var(--day); }
+.app-nav .brand {
+	font-family: var(--font-cue);
+	font-weight: 400;
+	color: var(--day);
+	font-size: 15px;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+}
+.app-main { max-width: 900px; margin: 32px auto; padding: 0 20px; }
+.app-main > .btn { margin-bottom: 18px; }
+h1 {
+	font-family: var(--font-display);
+	font-weight: 600;
+	font-size: 26px;
+	letter-spacing: 0.01em;
+	margin: 0 0 4px;
+}
 .page-sub { color: var(--ink-2); margin: 0 0 24px; font-size: 14px; }
 
 /* ── card ───────────────────────────────────────────────── */
 .card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  padding: 20px;
-  margin-bottom: 14px;
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	box-shadow: var(--shadow);
+	padding: 20px;
+	margin-bottom: 14px;
 }
 
-/* ── buttons ────────────────────────────────────────────── */
+/* ── controls — the world's ACTIVATE / PREVIEW family ─────── */
 .btn {
-  display: inline-block;
-  background: var(--brand);
-  color: #fff;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  padding: 8px 16px;
-  font-size: 14px;
-  font-weight: 500;
-  font-family: var(--font);
-  cursor: pointer;
-  text-decoration: none;
-  transition: background 120ms ease;
+	display: inline-block;
+	background: var(--horizon-cta);
+	color: var(--day);
+	border: 1px solid transparent;
+	border-radius: 999px;
+	padding: 8px 20px;
+	font-size: 14px;
+	font-weight: 600;
+	font-family: var(--font);
+	cursor: pointer;
+	text-decoration: none;
+	transition: transform 140ms ease, box-shadow 140ms ease, filter 140ms ease;
 }
-.btn:hover { background: var(--brand-hover); }
-.btn.secondary { background: var(--surface); color: var(--ink); border-color: var(--border); }
-.btn.secondary:hover { background: var(--bg); }
+.btn:hover { filter: brightness(1.12); transform: translateY(-1px); box-shadow: var(--shadow-raise); }
+.btn:active { transform: translateY(0); }
+.btn.secondary { background: var(--surface); color: var(--ink); border-color: var(--border); font-weight: 500; }
+.btn.secondary:hover { background: var(--bg); filter: none; box-shadow: none; }
 .btn.danger { background: var(--danger); }
-.btn.danger:hover { background: var(--danger-hover); }
-.btn.small { padding: 5px 11px; font-size: 13px; }
+.btn.danger:hover { background: var(--danger-hover); filter: none; }
+.btn.small { padding: 5px 12px; font-size: 13px; }
 .btn:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible {
-  outline: 2px solid var(--brand);
-  outline-offset: 2px;
+	outline: 2px solid var(--brand);
+	outline-offset: 2px;
 }
+.app-nav a:focus-visible, .cue-strip a:focus-visible { outline-color: var(--rose-light); }
 
 /* ── forms ──────────────────────────────────────────────── */
 input, select {
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  font-size: 14px;
-  font-family: var(--font);
-  background: var(--surface);
-  color: var(--ink);
+	padding: 8px 10px;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	font-size: 14px;
+	font-family: var(--font);
+	background: var(--surface);
+	color: var(--ink);
 }
 input:focus, select:focus { border-color: var(--brand); outline: none; box-shadow: 0 0 0 3px var(--brand-soft); }
 form.inline { display: inline; }
 
 /* ── text & badges ──────────────────────────────────────── */
 .muted { color: var(--ink-2); font-size: 13px; }
-code { background: var(--brand-soft); padding: 1px 6px; border-radius: 4px; }
+code { background: var(--dawn-soft); padding: 1px 6px; border-radius: 4px; }
 .badge {
-  display: inline-block;
-  border-radius: 999px;
-  padding: 2px 10px;
-  font-size: 12px;
-  font-weight: 500;
-  background: var(--brand-soft);
-  color: var(--brand);
+	display: inline-block;
+	border-radius: 999px;
+	padding: 2px 10px;
+	font-size: 12px;
+	font-weight: 500;
+	font-variant-numeric: tabular-nums;
+	background: var(--held-soft);
+	color: var(--held);
 }
-.badge.neutral { background: #f1efe9; color: var(--ink-2); }
-.badge.ok { background: var(--ok-soft); color: var(--ok); }
+.badge.neutral { background: #f1edf5; color: var(--ink-2); }
+.badge.ok { background: var(--brand-soft); color: var(--brand); }
 .badge.danger { background: var(--danger-soft); color: var(--danger); }
 
+/* ── quote (review queue) ───────────────────────────────── */
+.quote {
+	margin: 8px 0;
+	padding: 10px 14px;
+	background: var(--dawn-soft);
+	border-radius: var(--radius-sm);
+	color: var(--ink);
+}
+
 /* ── table ──────────────────────────────────────────────── */
-table { width: 100%; border-collapse: collapse; font-size: 14px; }
-th { color: var(--ink-2); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; }
+th {
+	font-family: var(--font-display);
+	color: var(--ink-2);
+	font-size: 12px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.1em;
+}
 th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
 tbody tr:last-child td { border-bottom: 0; }
 
 /* ── states (I12) ───────────────────────────────────────── */
 .empty {
-  text-align: center;
-  padding: 48px 24px;
-  color: var(--ink-2);
-  background: var(--surface);
-  border: 1px dashed var(--border);
-  border-radius: var(--radius);
+	text-align: center;
+	padding: 48px 24px;
+	color: var(--ink-2);
+	background: var(--surface);
+	border: 1px dashed var(--border);
+	border-radius: var(--radius);
 }
 .empty p { margin: 0 0 6px; font-size: 15px; color: var(--ink); font-weight: 500; }
 .empty .muted { font-size: 14px; }
 .skeleton {
-  border-radius: var(--radius-sm);
-  background: linear-gradient(90deg, #efece7 25%, #f7f5f2 50%, #efece7 75%);
-  background-size: 200% 100%;
-  animation: shimmer 1.2s infinite linear;
-  min-height: 16px;
+	border-radius: var(--radius-sm);
+	background: linear-gradient(90deg, #f0ecf6 25%, #faf7fc 50%, #f0ecf6 75%);
+	background-size: 200% 100%;
+	animation: shimmer 1.2s infinite linear;
+	min-height: 16px;
 }
 @keyframes shimmer { to { background-position: -200% 0; } }
 .error-box {
-  background: var(--danger-soft);
-  border: 1px solid #fecaca;
-  color: var(--danger);
-  border-radius: var(--radius-sm);
-  padding: 12px 16px;
-  font-size: 14px;
-  margin-bottom: 14px;
+	background: var(--danger-soft);
+	border: 1px solid #f6b8cd;
+	color: var(--danger);
+	border-radius: var(--radius-sm);
+	padding: 12px 16px;
+	font-size: 14px;
+	margin-bottom: 14px;
 }
 .flash {
-  background: var(--ok-soft);
-  border: 1px solid #bbf7d0;
-  color: var(--ok);
-  border-radius: var(--radius-sm);
-  padding: 10px 16px;
-  font-size: 14px;
-  margin-bottom: 14px;
+	background: var(--brand-soft);
+	border: 1px solid #b9c4ff;
+	color: var(--brand);
+	border-radius: var(--radius-sm);
+	padding: 10px 16px;
+	font-size: 14px;
+	margin-bottom: 14px;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .skeleton { animation: none; }
-  .btn { transition: none; }
+	.skeleton { animation: none; }
+	.btn { transition: none; }
 }

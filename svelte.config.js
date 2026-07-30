@@ -21,7 +21,10 @@ import adapter from '@sveltejs/adapter-netlify';
 export default {
 	compilerOptions: {
 		// Force runes mode for the project, except for libraries. Can be removed in Svelte 6.
-		runes: ({ filename }) => filename.split(/[/\\]/).includes('node_modules') ? undefined : true
+		runes: ({ filename }) => filename.split(/[/\\]/).includes('node_modules') ? undefined : true,
+		// Keep the direction-contract HTML comment in the root layout auditable
+		// in the production build (impeccable new-work contract).
+		preserveComments: true
 	},
 	kit: {
 		adapter: adapter()

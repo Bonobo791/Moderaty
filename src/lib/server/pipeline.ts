@@ -34,7 +34,8 @@ import {
 	type NewComment
 } from '$lib/server/youtube';
 
-const AUTO_REJECT = 0.85;
+const AUTO_BAN = 0.85;
+const AUTO_DELETE = 0.51;
 const QUEUE = 0.35;
 
 export interface RunChannelOptions {
@@ -110,21 +111,36 @@ function ruleDecision(comment: NewComment, rule: RuleRow): Decision {
 
 async function aiDecision(comment: NewComment, deadline?: number): Promise<Decision> {
 	const moderation = await scoreComment(comment.text, deadline);
-	const reason = `ai score ${moderation.score.toFixed(2)}`;
+	// Round to the displayed precision before comparing so a score that reads
+	// as "0.51" in the audit log also behaves as 0.51 against the thresholds.
+	const score = Math.round(moderation.score * 100) / 100;
+	const reason = `ai score ${score.toFixed(2)}`;
 	const aiScore = serializeScores(moderation.scores);
-	if (moderation.score >= AUTO_REJECT) {
+	if (score > AUTO_BAN) {
 		return {
 			comment,
 			status: 'rejected',
 			decidedBy: 'ai',
 			matchedRuleId: null,
 			aiScore,
-			auditAction: 'reject',
+			auditAction: 'ban',
 			reason,
-			youtubeAction: 'reject'
+			youtubeAction: 'ban'
 		};
 	}
-	if (moderation.score >= QUEUE) {
+	if (score >= AUTO_DELETE) {
+		return {
+			comment,
+			status: 'deleted',
+			decidedBy: 'ai',
+			matchedRuleId: null,
+			aiScore,
+			auditAction: 'delete',
+			reason,
+			youtubeAction: 'delete'
+		};
+	}
+	if (score >= QUEUE) {
 		return {
 			comment,
 			status: 'pending',
@@ -307,25 +323,20 @@ async function completeActions(actions: OutstandingAction[]) {
 	});
 }
 
-async function requireManualReview(action: OutstandingAction, detail: string): Promise<never> {
-	await db
-		.update(moderationActions)
-		.set({ state: 'manual_review' })
-		.where(eq(moderationActions.commentId, action.commentId));
-	throw new Error(`moderation action ${action.commentId} requires manual review: ${detail}`);
-}
-
 async function verificationResult(
 	action: OutstandingAction,
 	accessToken: string,
 	deadline: number | undefined
-): Promise<'completed' | 'retry' | 'manual_review'> {
+): Promise<'completed' | 'retry'> {
 	assertBeforeDeadline(deadline);
 	const status = await getCommentModerationStatus(action.commentId, accessToken, deadline);
 	if (action.action === 'delete') return status === null ? 'completed' : 'retry';
 	if (action.action === 'hold') return status === 'heldForReview' ? 'completed' : 'retry';
 	if (action.action === 'reject') return status === 'rejected' ? 'completed' : 'retry';
-	return status === 'rejected' || status === null ? 'manual_review' : 'retry';
+	// Ban is a single atomic API call (reject + banAuthor), so a comment already
+	// in a terminal state after dispatch means the call landed — complete it
+	// rather than stranding the action in manual review.
+	return status === 'rejected' || status === null ? 'completed' : 'retry';
 }
 
 async function applyModerationAction(
@@ -385,7 +396,7 @@ async function processOutstandingActions(channelId: string, accessToken: string,
 			if (claimed.has(action.commentId)) ready.push({ ...action, state: 'dispatched' });
 			continue;
 		}
-		let result: 'completed' | 'retry' | 'manual_review' = 'manual_review';
+		let result: 'completed' | 'retry';
 		try {
 			result = await verificationResult(action, accessToken, deadline);
 		} catch (error) {
@@ -399,9 +410,6 @@ async function processOutstandingActions(channelId: string, accessToken: string,
 		if (result === 'completed') {
 			await completeActions([action]);
 			continue;
-		}
-		if (result === 'manual_review') {
-			await requireManualReview(action, 'the author ban cannot be verified from the comment state');
 		}
 		ready.push(action);
 	}

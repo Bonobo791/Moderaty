@@ -168,6 +168,24 @@ function moderation(score: number) {
 	};
 }
 
+function dispatchedAction(overrides: Record<string, unknown> = {}) {
+	return {
+		commentId: 'comment',
+		channelId: 'channel',
+		action: 'ban',
+		reason: 'rule #1 (user: author)',
+		state: 'dispatched',
+		lastAttemptAt: '2026-01-04T00:00:00.000Z',
+		lastManualRetryAt: null,
+		createdAt: '2026-01-04T00:00:00.000Z',
+		...overrides
+	};
+}
+
+function expectActionState(state: string) {
+	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({ commentId: 'comment', state })]);
+}
+
 beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.state.tables = { channels, comments, rules, auditLog, moderationActions };
@@ -209,16 +227,29 @@ afterEach(() => {
 });
 
 test.each([
-	{ score: 0.34, status: 'approved', queued: 0, acted: 0 },
-	{ score: 0.35, status: 'pending', queued: 1, acted: 0 },
-	{ score: 0.85, status: 'rejected', queued: 0, acted: 1 }
-])('categorizes score $score as $status', async ({ score, status, queued, acted }) => {
+	{ score: 0.34, status: 'approved', queued: 0, acted: 0, api: 'none', audit: 'approve' },
+	{ score: 0.35, status: 'pending', queued: 1, acted: 0, api: 'none', audit: 'queue' },
+	{ score: 0.5, status: 'pending', queued: 1, acted: 0, api: 'none', audit: 'queue' },
+	{ score: 0.51, status: 'deleted', queued: 0, acted: 1, api: 'delete', audit: 'delete' },
+	{ score: 0.85, status: 'deleted', queued: 0, acted: 1, api: 'delete', audit: 'delete' },
+	{ score: 0.86, status: 'rejected', queued: 0, acted: 1, api: 'ban', audit: 'ban' }
+])('categorizes score $score as $status', async ({ score, status, queued, acted, api, audit }) => {
 	mocks.scoreComment.mockResolvedValue(moderation(score));
 
 	const result = await runChannel('channel');
 
 	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status })]);
-	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(acted);
+	expect(mocks.state.insertedAudits).toEqual([expect.objectContaining({ commentId: 'comment', action: audit })]);
+	if (api === 'delete') {
+		expect(mocks.deleteComment).toHaveBeenCalledWith('comment', 'access-token', undefined);
+		expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	} else if (api === 'ban') {
+		expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', true, 'access-token', undefined);
+		expect(mocks.deleteComment).not.toHaveBeenCalled();
+	} else {
+		expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+		expect(mocks.deleteComment).not.toHaveBeenCalled();
+	}
 	expect(result).toMatchObject({ fetched: 1, acted, queued, partial: false, skipped: false, dryRun: false });
 });
 
@@ -351,7 +382,7 @@ test('persists successful decisions and retries only the failed comment on the n
 });
 
 test('verifies a dispatched action after its completion transaction fails', async () => {
-	mocks.scoreComment.mockResolvedValue(moderation(0.85));
+	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'reject' }];
 	mocks.db.transaction
 		.mockImplementationOnce(async (callback: (value: typeof mocks.db.transactionValue) => Promise<unknown>) => callback(mocks.db.transactionValue))
 		.mockRejectedValueOnce(new Error('database write failed'));
@@ -359,77 +390,71 @@ test('verifies a dispatched action after its completion transaction fails', asyn
 	await expect(runChannel('channel')).rejects.toThrow('database write failed');
 
 	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
-	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({
-		commentId: 'comment',
-		state: 'dispatched'
-	})]);
+	expectActionState('dispatched');
 
 	await runChannel('channel');
 
 	expect(mocks.getCommentModerationStatus).toHaveBeenCalledWith('comment', 'access-token', undefined);
 	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
-	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({
-		commentId: 'comment',
-		state: 'completed'
-	})]);
+	expectActionState('completed');
 });
 
-test('routes an ambiguous ban to manual review without retrying it', async () => {
+test.each([
+	{ observed: 'rejected' as const },
+	{ observed: null }
+])('completes a dispatched ban when the comment is already terminal ($observed)', async ({ observed }) => {
 	mocks.state.existingIds = ['comment'];
-	mocks.state.moderationActions = [{
-		commentId: 'comment',
-		channelId: 'channel',
-		action: 'ban',
-		reason: 'rule #1 (user: author)',
-		state: 'dispatched',
-		lastAttemptAt: '2026-01-04T00:00:00.000Z',
-		lastManualRetryAt: null,
-		createdAt: '2026-01-04T00:00:00.000Z'
-	}];
-	mocks.getCommentModerationStatus.mockResolvedValue('rejected');
+	mocks.state.moderationActions = [dispatchedAction()];
+	mocks.getCommentModerationStatus.mockResolvedValue(observed);
 
-	await expect(runChannel('channel')).rejects.toThrow('requires manual review');
+	await runChannel('channel');
 
 	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
-	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({
-		commentId: 'comment',
-		state: 'manual_review'
-	})]);
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expectActionState('completed');
+});
+
+test('retries a dispatched ban while the comment is still public', async () => {
+	mocks.state.existingIds = ['comment'];
+	mocks.state.moderationActions = [dispatchedAction()];
+	mocks.getCommentModerationStatus.mockResolvedValue('published');
+
+	await runChannel('channel');
+
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', true, 'access-token', undefined);
+	expectActionState('completed');
+});
+
+test.each([
+	{ raw: 0.506, status: 'deleted', reason: 'ai score 0.51' },
+	{ raw: 0.504, status: 'pending', reason: 'ai score 0.50' }
+])('rounds the AI score to 2 decimals before deciding ($raw → $status)', async ({ raw, status, reason }) => {
+	mocks.scoreComment.mockResolvedValue(moderation(raw));
+
+	await runChannel('channel');
+
+	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status })]);
+	expect(mocks.state.insertedAudits).toEqual([expect.objectContaining({ commentId: 'comment', reason })]);
 });
 
 test('keeps a dispatched action retriable when verification fails transiently', async () => {
 	mocks.state.existingIds = ['comment'];
-	mocks.state.moderationActions = [{
-		commentId: 'comment',
-		channelId: 'channel',
-		action: 'reject',
-		reason: 'rule #1 (keyword)',
-		state: 'dispatched',
-		lastAttemptAt: '2026-01-04T00:00:00.000Z',
-		lastManualRetryAt: null,
-		createdAt: '2026-01-04T00:00:00.000Z'
-	}];
+	mocks.state.moderationActions = [dispatchedAction({ action: 'reject', reason: 'rule #1 (keyword)' })];
 	mocks.getCommentModerationStatus.mockRejectedValueOnce(new Error('socket hang up'));
 
 	await expect(runChannel('channel')).rejects.toThrow('verification failed');
 
-	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({
-		commentId: 'comment',
-		state: 'dispatched'
-	})]);
+	expectActionState('dispatched');
 
 	await runChannel('channel');
 
 	expect(mocks.getCommentModerationStatus).toHaveBeenCalledWith('comment', 'access-token', undefined);
 	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
-	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({
-		commentId: 'comment',
-		state: 'completed'
-	})]);
+	expectActionState('completed');
 });
 
 test('skips a pending action already claimed by a concurrent run', async () => {
-	mocks.scoreComment.mockResolvedValue(moderation(0.85));
+	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'reject' }];
 	mocks.state.unclaimedIds = ['comment'];
 
 	const result = await runChannel('channel');
@@ -437,9 +462,6 @@ test('skips a pending action already claimed by a concurrent run', async () => {
 	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
 	expect(mocks.state.insertedAudits).toEqual([]);
-	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({
-		commentId: 'comment',
-		state: 'pending'
-	})]);
+	expectActionState('pending');
 	expect(result).toMatchObject({ fetched: 1, acted: 0, skipped: false, dryRun: false });
 });

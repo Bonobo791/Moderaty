@@ -16,6 +16,7 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
+import { timingSafeEqual } from 'node:crypto';
 import { error, json } from '@sveltejs/kit';
 import { and, asc, eq, isNull, lt, or } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
@@ -25,6 +26,15 @@ import { runChannel } from '$lib/server/pipeline';
 import type { RequestHandler } from './$types';
 
 const LEASE_MS = 10 * 60 * 1000; // exceeds one bounded run; expiry alone re-eligibilizes after a crash
+const RUN_BUDGET_MS = 20 * 1000; // below the scheduled trigger's 25s abort, so the server stops first
+
+/** Constant-time secret comparison; never throws on length mismatch. */
+function secretMatches(provided: string | null, expected: string): boolean {
+	if (!provided) return false;
+	const a = Buffer.from(provided);
+	const b = Buffer.from(expected);
+	return a.length === b.length && timingSafeEqual(a, b);
+}
 
 /**
  * One channel per invocation: the active, unleased channel with the oldest
@@ -32,8 +42,19 @@ const LEASE_MS = 10 * 60 * 1000; // exceeds one bounded run; expiry alone re-eli
  * The channel is claimed atomically with an expiring lease before runChannel,
  * so concurrent cron invocations cannot process the same channel.
  */
-export const GET: RequestHandler = async ({ url }) => {
-	if (url.searchParams.get('secret') !== env.CRON_SECRET) throw error(401, 'bad secret');
+export const GET: RequestHandler = async ({ url, request }) => {
+	// Captured at handler start so the DB prelude consumes the same budget.
+	const deadline = Date.now() + RUN_BUDGET_MS;
+	if (!env.CRON_SECRET) throw error(500, 'CRON_SECRET is not configured');
+	// Bearer header is the preferred path (used by the Netlify scheduled
+	// function); the query param stays for the plan-documented manual curl.
+	// A present-but-malformed Authorization header fails closed — query auth
+	// is a separate mode only when no header was sent at all.
+	const bearer = request.headers.get('authorization');
+	let secret: string | null = null;
+	if (bearer === null) secret = url.searchParams.get('secret');
+	else if (bearer.startsWith('Bearer ')) secret = bearer.slice('Bearer '.length);
+	if (!secretMatches(secret, env.CRON_SECRET)) throw error(401, 'bad secret');
 	const dryRun = env.DRY_RUN === 'true';
 	const nowIso = new Date().toISOString();
 	const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, nowIso));
@@ -54,7 +75,7 @@ export const GET: RequestHandler = async ({ url }) => {
 	if (claimed.length === 0) return json({ ok: true, claimed: false, dryRun, results: {} });
 
 	try {
-		const result = await runChannel(channel.id);
+		const result = await runChannel(channel.id, { deadline });
 		return json({ ok: true, dryRun, results: { [channel.id]: result } });
 	} catch (cause) {
 		const message = cause instanceof Error ? cause.message : String(cause);

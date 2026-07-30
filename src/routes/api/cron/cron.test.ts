@@ -21,7 +21,7 @@ import { setupTestDb, testDb } from '$lib/server/testdb';
 import { channels } from '$lib/server/db/schema';
 
 // Synthetic credential fixture — same maintainer-approved exception as
-// netlify/functions/cron.test.mjs (2026-07-30, PR #13 review, per AGENTS.md).
+// netlify/cron.test.mjs (2026-07-30, PR #13 review, per AGENTS.md).
 const mocks = vi.hoisted(() => ({
 	env: { CRON_SECRET: 'test-secret', DRY_RUN: 'true' } as Record<string, string | undefined>,
 	runChannel: vi.fn()

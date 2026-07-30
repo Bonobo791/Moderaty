@@ -17,7 +17,7 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import handler, { config } from './cron.mjs';
+import handler, { config } from './functions/cron.mjs';
 
 // 'test-secret' is a synthetic credential fixture — maintainer-approved
 // documented exception per AGENTS.md (approved 2026-07-30, PR #13 review).

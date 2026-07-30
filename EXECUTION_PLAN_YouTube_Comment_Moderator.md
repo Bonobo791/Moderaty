@@ -583,56 +583,15 @@ export async function scoreComment(text: string): Promise<ModerationResult> {
 
 #### Step 12: Rule matcher (I6)
 
-> **Reconciled:** this step originally specified an RE2-based matcher. The merged implementation (`src/lib/server/rules.ts`) validates every user pattern with `recheck` plus explicit syntax guards, rejecting ReDoS-prone patterns before compiling — see I6 for the reconciliation note. The listing below is the historical RE2 version, kept for reference.
+> **Reconciled:** this step originally specified an RE2-based matcher. The merged implementation validates every user pattern with `recheck` plus explicit syntax guards (backreferences, duplicate alternation, length), rejecting ReDoS-prone or unprovable patterns before compiling with the native engine — see I6 for the reconciliation note.
 
-**File:** `src/lib/server/rules.ts` — create with exactly:
+**File:** `src/lib/server/rules.ts` — the merged implementation is the source of truth; do not recreate it from this plan. In outline:
 
-```ts
-import RE2 from 're2';
+- `matchRule(text, authorChannelId, rules)` — first matching rule wins; keyword is a case-insensitive substring test, user is an exact author-ID match, regex compiles only after `recheck` validation and throws on invalid/unsafe stored patterns.
+- `validateRule(rule)` — asserts supported type/action and non-empty pattern; regex patterns must compile and pass the safety check.
+- Form validation rejects patterns that fail compilation or the recheck check, surfacing the reason as the validation error.
 
-export interface RuleRow {
-  id: number;
-  type: string; // 'keyword' | 'regex' | 'user'
-  pattern: string;
-  action: string; // 'hold' | 'reject' | 'delete' | 'ban'
-}
-
-/**
- * First matching rule wins. Regex rules use RE2 (linear time — catastrophic
- * backtracking is impossible by construction, I6). A pattern RE2 rejects
- * (lookahead/backreference syntax) is skipped, never fatal.
- */
-export function matchRule(text: string, authorChannelId: string, rs: RuleRow[]): RuleRow | null {
-  const lower = text.toLowerCase();
-  for (const r of rs) {
-    if (r.type === 'keyword' && lower.includes(r.pattern.toLowerCase())) return r;
-    if (r.type === 'user' && authorChannelId === r.pattern) return r;
-    if (r.type === 'regex') {
-      try {
-        if (new RE2(r.pattern, 'i').test(text)) return r;
-      } catch {
-        // RE2-unsupported pattern: skip the rule, never crash the pipeline
-      }
-    }
-  }
-  return null;
-}
-
-/** Validation for the rules form. Returns an error string or null. */
-export function validatePattern(type: string, pattern: string): string | null {
-  if (!pattern.trim()) return 'pattern required';
-  if (type === 'regex') {
-    try {
-      new RE2(pattern);
-    } catch (e) {
-      return `invalid regex (RE2 syntax only — no lookahead/backreferences): ${e instanceof Error ? e.message : String(e)}`;
-    }
-  }
-  return null;
-}
-```
-
-**Verify:** `node -e "console.log('ok')"` trivially; `grep -c RE2 src/lib/server/rules.ts` prints ≥ 3.
+**Verify:** `grep -c recheck src/lib/server/rules.ts` prints ≥ 1; the rules suite in `src/lib/server/rules.test.ts` passes.
 
 #### Step 13: The pipeline (DB-before-remote, checkpoint, dry-run)
 
@@ -907,7 +866,7 @@ export async function clearDb(db: Awaited<ReturnType<typeof makeTestDb>>) {
 
 ```ts
 import { describe, it, expect } from 'vitest';
-import { matchRule, validatePattern } from './rules';
+import { matchRule, validateRule } from './rules';
 
 const base = { id: 1, action: 'reject' };
 
@@ -924,13 +883,8 @@ describe('matchRule', () => {
   it('regex matches', () => {
     expect(matchRule('free money!!!', 'UC1', [{ ...base, type: 'regex', pattern: 'free m+ney' }])).not.toBeNull();
   });
-  it('RE2-unsupported pattern is skipped, never throws', () => {
-    expect(matchRule('hello', 'UC1', [{ ...base, type: 'regex', pattern: '(?=evil)lookahead' }])).toBeNull();
-  });
-  it('catastrophic-backtracking pattern completes fast under RE2', () => {
-    const start = Date.now();
-    matchRule('a'.repeat(5000), 'UC1', [{ ...base, type: 'regex', pattern: '(a+)+$' }]);
-    expect(Date.now() - start).toBeLessThan(200);
+  it('unsafe regex (catastrophic backtracking) is rejected loudly', () => {
+    expect(() => matchRule('a'.repeat(5000), 'UC1', [{ ...base, type: 'regex', pattern: '(a+)+$' }])).toThrow(/unsafe regex/);
   });
   it('first matching rule wins', () => {
     const rs = [
@@ -941,10 +895,10 @@ describe('matchRule', () => {
   });
 });
 
-describe('validatePattern', () => {
-  it('rejects empty pattern', () => expect(validatePattern('keyword', '  ')).toBe('pattern required'));
-  it('rejects lookahead with RE2 message', () => expect(validatePattern('regex', '(?=x)y')).toContain('RE2'));
-  it('accepts valid regex', () => expect(validatePattern('regex', 'free m+ney')).toBeNull());
+describe('rule validation (reconciled: merged code exposes validateRule, not validatePattern)', () => {
+  it('rejects empty pattern', () => expect(() => validateRule({ ...base, type: 'keyword', pattern: '' })).toThrow(/empty pattern/));
+  it('rejects unsafe regex via recheck', () => expect(() => validateRule({ ...base, type: 'regex', pattern: '(a+)+$' })).toThrow(/unsafe regex/));
+  it('accepts valid regex', () => expect(() => validateRule({ ...base, type: 'regex', pattern: 'free m+ney' })).not.toThrow());
 });
 ```
 
@@ -1393,7 +1347,7 @@ export async function load() {
 
 **Verify:** dev server renders `/` with the connect button.
 
-#### Step 20: Rules page (RE2 validation — I6)
+#### Step 20: Rules page (recheck validation — I6)
 
 **File:** `src/routes/channels/[id]/rules/+page.server.ts` — create with exactly:
 
@@ -1402,7 +1356,7 @@ import { db } from '$lib/server/db';
 import { channels, rules } from '$lib/server/db/schema';
 import { and, eq } from 'drizzle-orm';
 import { fail } from '@sveltejs/kit';
-import { validatePattern } from '$lib/server/rules';
+import { validateRule } from '$lib/server/rules';
 
 export async function load({ params }) {
   const ch = await db.select().from(channels).where(eq(channels.id, params.id)).get();
@@ -1418,8 +1372,11 @@ export const actions = {
     const action = String(f.get('action') ?? '');
     if (!['keyword', 'regex', 'user'].includes(type)) return fail(400, { error: 'bad type' });
     if (!['hold', 'reject', 'delete', 'ban'].includes(action)) return fail(400, { error: 'bad action' });
-    const err = validatePattern(type, pattern);
-    if (err) return fail(400, { error: err });
+    try {
+      validateRule({ id: 0, type, pattern, action });
+    } catch (e) {
+      return fail(400, { error: e instanceof Error ? e.message : String(e) });
+    }
     await db.insert(rules).values({
       channelId: params.id,
       type,
@@ -1455,7 +1412,7 @@ export const actions = {
   <form method="POST" action="?/add" style="display:flex; gap:8px; flex-wrap:wrap">
     <select name="type">
       <option value="keyword">keyword</option>
-      <option value="regex">regex (RE2 syntax)</option>
+      <option value="regex">regex</option>
       <option value="user">blocked user (channel ID)</option>
     </select>
     <input name="pattern" placeholder="pattern" style="flex:1; min-width:220px" required />

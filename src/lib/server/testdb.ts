@@ -21,11 +21,48 @@
 
 import { createClient, type Client } from '@libsql/client';
 import { drizzle, type LibSQLDatabase } from 'drizzle-orm/libsql';
+import { beforeAll, beforeEach, vi } from 'vitest';
 import * as schema from './db/schema';
 
 export interface TestDb {
 	db: LibSQLDatabase<typeof schema>;
 	client: Client;
+}
+
+const holder: { current: TestDb | null } = { current: null };
+
+// Every test file that imports this helper gets the app db mocked onto the
+// shared in-memory instance. This module is always imported before the
+// route-under-test, so the mock is registered before $lib/server/db loads.
+vi.mock('$lib/server/db', () => ({
+	get db() {
+		return testDb().db;
+	}
+}));
+
+/**
+ * Registers beforeAll/beforeEach hooks that create the in-memory db and wipe
+ * the given tables before each test. File-local beforeEach hooks registered
+ * after this call run after the cleanup.
+ */
+export function setupTestDb(tables: string[]): void {
+	beforeAll(async () => {
+		holder.current = await createTestDb();
+	});
+	beforeEach(async () => {
+		await testDb().client.batch(tables.map((table) => `DELETE FROM ${table}`));
+	});
+}
+
+export function testDb(): TestDb {
+	if (!holder.current) throw new Error('test db not initialized — call setupTestDb() first');
+	return holder.current;
+}
+
+export function postForm(fields: Record<string, string>, url = 'http://localhost/'): Request {
+	const form = new FormData();
+	for (const [key, value] of Object.entries(fields)) form.set(key, value);
+	return new Request(url, { method: 'POST', body: form });
 }
 
 export async function createTestDb(): Promise<TestDb> {

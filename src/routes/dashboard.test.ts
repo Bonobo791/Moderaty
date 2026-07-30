@@ -16,32 +16,16 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { beforeAll, beforeEach, expect, test, vi } from 'vitest';
-import { createTestDb, type TestDb } from '$lib/server/testdb';
+import { expect, test } from 'vitest';
+import { setupTestDb, testDb } from '$lib/server/testdb';
 import { channels } from '$lib/server/db/schema';
-
-const mocks = vi.hoisted(() => ({ db: null as unknown }));
-vi.mock('$lib/server/db', () => ({
-	get db() {
-		return mocks.db;
-	}
-}));
 
 import { load } from './+page.server';
 
-let testDb: TestDb;
-
-beforeAll(async () => {
-	testDb = await createTestDb();
-	mocks.db = testDb.db;
-});
-
-beforeEach(async () => {
-	await testDb.client.batch(['DELETE FROM comments', 'DELETE FROM channels']);
-});
+setupTestDb(['comments', 'channels']);
 
 test('dashboard load never serializes the encrypted refresh token', async () => {
-	await testDb.db.insert(channels).values({
+	await testDb().db.insert(channels).values({
 		id: 'UC1',
 		title: 'One',
 		refreshTokenEnc: 'encrypted-refresh-token',

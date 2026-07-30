@@ -16,24 +16,18 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { beforeAll, beforeEach, expect, test, vi } from 'vitest';
-import { createTestDb, type TestDb } from '$lib/server/testdb';
+import { beforeEach, expect, test, vi } from 'vitest';
+import { postForm, setupTestDb, testDb } from '$lib/server/testdb';
 import { auditLog, channels, comments } from '$lib/server/db/schema';
 import { eq } from 'drizzle-orm';
 
 const mocks = vi.hoisted(() => ({
-	db: null as unknown,
 	env: { DRY_RUN: 'true' } as Record<string, string | undefined>,
 	refreshAccessToken: vi.fn(async () => 'access-token'),
 	setModerationStatus: vi.fn(async () => {}),
 	deleteComment: vi.fn(async () => {})
 }));
 
-vi.mock('$lib/server/db', () => ({
-	get db() {
-		return mocks.db;
-	}
-}));
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 vi.mock('$lib/server/crypto', () => ({ decrypt: vi.fn(() => 'decrypted-refresh-token') }));
 vi.mock('$lib/server/youtube', () => ({
@@ -44,37 +38,35 @@ vi.mock('$lib/server/youtube', () => ({
 
 import { actions } from './+page.server';
 
-let testDb: TestDb;
-
-beforeAll(async () => {
-	testDb = await createTestDb();
-	mocks.db = testDb.db;
-});
+setupTestDb(['audit_log', 'comments', 'channels']);
 
 beforeEach(async () => {
-	await testDb.client.batch([
-		'DELETE FROM audit_log',
-		'DELETE FROM comments',
-		'DELETE FROM channels'
-	]);
-	await testDb.db
-		.insert(channels)
-		.values({ id: 'UC1', title: 'One', refreshTokenEnc: 'enc-1' });
-	await testDb.db
-		.insert(channels)
-		.values({ id: 'UC2', title: 'Two', refreshTokenEnc: 'enc-2' });
+	await testDb()
+		.db.insert(channels)
+		.values([
+			{ id: 'UC1', title: 'One', refreshTokenEnc: 'enc-1' },
+			{ id: 'UC2', title: 'Two', refreshTokenEnc: 'enc-2' }
+		]);
 	mocks.env.DRY_RUN = 'true';
 	vi.clearAllMocks();
 });
 
-function post(fields: Record<string, string>): Request {
-	const form = new FormData();
-	for (const [key, value] of Object.entries(fields)) form.set(key, value);
-	return new Request('http://localhost/channels/UC1/queue', { method: 'POST', body: form });
+const QUEUE_URL = 'http://localhost/channels/UC1/queue';
+
+const actionNames = ['approve', 'reject', 'del', 'ban'] as const;
+
+function act(name: (typeof actionNames)[number], fields: Record<string, string>) {
+	return actions[name]({ params: { id: 'UC1' }, request: postForm(fields, QUEUE_URL) } as never);
+}
+
+async function expectAllActions404(fields: Record<string, string>) {
+	for (const name of actionNames) {
+		await expect(act(name, fields)).rejects.toThrowError(expect.objectContaining({ status: 404 }));
+	}
 }
 
 async function seedComment(id: string, channelId: string, status = 'pending') {
-	await testDb.db.insert(comments).values({
+	await testDb().db.insert(comments).values({
 		id,
 		channelId,
 		authorChannelId: 'UCa',
@@ -87,53 +79,45 @@ async function seedComment(id: string, channelId: string, status = 'pending') {
 }
 
 async function commentRow(id: string) {
-	return testDb.db.select().from(comments).where(eq(comments.id, id)).get();
+	return testDb().db.select().from(comments).where(eq(comments.id, id)).get();
 }
 
 async function auditRows() {
-	return testDb.db.select().from(auditLog).all();
+	return testDb().db.select().from(auditLog).all();
 }
 
-const actionNames = ['approve', 'reject', 'del', 'ban'] as const;
+async function expectNothingDecided(id: string, status: string) {
+	expect((await commentRow(id))?.status).toBe(status);
+	expect(await auditRows()).toHaveLength(0);
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
+}
 
 test('every action rejects a missing commentId with 400 and mutates nothing', async () => {
 	await seedComment('c1', 'UC1');
 	for (const name of actionNames) {
-		const res = await actions[name]({ params: { id: 'UC1' }, request: post({}) } as never);
+		const res = await act(name, {});
 		expect(res).toMatchObject({ status: 400 });
 	}
-	expect((await commentRow('c1'))?.status).toBe('pending');
-	expect(await auditRows()).toHaveLength(0);
-	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
-	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	await expectNothingDecided('c1', 'pending');
 });
 
 test('act fails loudly on another channel comment and changes nothing', async () => {
 	await seedComment('c2', 'UC2');
-	for (const name of actionNames) {
-		await expect(
-			actions[name]({ params: { id: 'UC1' }, request: post({ commentId: 'c2' }) } as never)
-		).rejects.toThrowError(expect.objectContaining({ status: 404 }));
-	}
-	expect((await commentRow('c2'))?.status).toBe('pending');
-	expect(await auditRows()).toHaveLength(0);
-	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
-	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	await expectAllActions404({ commentId: 'c2' });
+	await expectNothingDecided('c2', 'pending');
 });
 
 test('act fails loudly on a comment that is no longer pending', async () => {
 	await seedComment('c3', 'UC1', 'approved');
-	await expect(
-		actions.approve({ params: { id: 'UC1' }, request: post({ commentId: 'c3' }) } as never)
-	).rejects.toThrowError(expect.objectContaining({ status: 404 }));
-	expect((await commentRow('c3'))?.status).toBe('approved');
+	await expectAllActions404({ commentId: 'c3' });
 	expect((await commentRow('c3'))?.decidedBy).toBe('ai');
-	expect(await auditRows()).toHaveLength(0);
+	await expectNothingDecided('c3', 'approved');
 });
 
 test('approve in DRY_RUN finalizes locally, audits dry-run, and skips YouTube', async () => {
 	await seedComment('c1', 'UC1');
-	await actions.approve({ params: { id: 'UC1' }, request: post({ commentId: 'c1' }) } as never);
+	await act('approve', { commentId: 'c1' });
 
 	const row = await commentRow('c1');
 	expect(row?.status).toBe('approved');
@@ -151,7 +135,7 @@ test('approve in DRY_RUN finalizes locally, audits dry-run, and skips YouTube', 
 test('reject outside DRY_RUN calls YouTube and audits reject', async () => {
 	mocks.env.DRY_RUN = 'false';
 	await seedComment('c1', 'UC1');
-	await actions.reject({ params: { id: 'UC1' }, request: post({ commentId: 'c1' }) } as never);
+	await act('reject', { commentId: 'c1' });
 
 	expect(mocks.refreshAccessToken).toHaveBeenCalledWith('decrypted-refresh-token');
 	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'rejected', false, 'access-token');

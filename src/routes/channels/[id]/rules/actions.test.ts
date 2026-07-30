@@ -16,67 +16,53 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { beforeAll, beforeEach, expect, test, vi } from 'vitest';
-import { createTestDb, type TestDb } from '$lib/server/testdb';
+import { expect, test } from 'vitest';
+import { postForm, setupTestDb, testDb } from '$lib/server/testdb';
 import { rules } from '$lib/server/db/schema';
-
-const mocks = vi.hoisted(() => ({ db: null as unknown }));
-vi.mock('$lib/server/db', () => ({
-	get db() {
-		return mocks.db;
-	}
-}));
 
 import { actions } from './+page.server';
 
-let testDb: TestDb;
+setupTestDb(['rules']);
 
-beforeAll(async () => {
-	testDb = await createTestDb();
-	mocks.db = testDb.db;
-});
-
-beforeEach(async () => {
-	await testDb.client.execute('DELETE FROM rules');
-});
-
-function post(fields: Record<string, string>): Request {
-	const form = new FormData();
-	for (const [key, value] of Object.entries(fields)) form.set(key, value);
-	return new Request('http://localhost/channels/UC1/rules?/remove', { method: 'POST', body: form });
-}
+const RULES_URL = 'http://localhost/channels/UC1/rules?/remove';
 
 async function seedRule(channelId: string): Promise<number> {
-	const rows = await testDb.db
-		.insert(rules)
+	const rows = await testDb()
+		.db.insert(rules)
 		.values({ channelId, type: 'keyword', pattern: 'spam', action: 'hold' })
 		.returning({ id: rules.id });
 	return rows[0].id;
 }
 
+function remove(channelId: string, ruleId: string) {
+	return actions.remove({ params: { id: channelId }, request: postForm({ ruleId }, RULES_URL) } as never);
+}
+
+async function ruleRows() {
+	return testDb().db.select().from(rules).all();
+}
+
 test('remove deletes this channel rule and reports ok', async () => {
 	const id = await seedRule('UC1');
-	const res = await actions.remove({ params: { id: 'UC1' }, request: post({ ruleId: String(id) }) } as never);
+	const res = await remove('UC1', String(id));
 	expect(res).toMatchObject({ ok: true });
-	expect(await testDb.db.select().from(rules).all()).toHaveLength(0);
+	expect(await ruleRows()).toHaveLength(0);
 });
 
 test('remove cannot delete another channel rule', async () => {
 	const otherId = await seedRule('UC2');
-	const res = await actions.remove({
-		params: { id: 'UC1' },
-		request: post({ ruleId: String(otherId) })
-	} as never);
+	const res = await remove('UC1', String(otherId));
 	expect(res).toMatchObject({ status: 404 });
-	expect(await testDb.db.select().from(rules).all()).toHaveLength(1);
+	expect(await ruleRows()).toHaveLength(1);
 });
 
 test('remove rejects a malformed ruleId with 400', async () => {
 	const id = await seedRule('UC1');
 	for (const ruleId of ['abc', '', '0', '-3']) {
-		const res = await actions.remove({ params: { id: 'UC1' }, request: post({ ruleId }) } as never);
+		const res = await remove('UC1', ruleId);
 		expect(res).toMatchObject({ status: 400 });
 	}
-	expect(await testDb.db.select().from(rules).all()).toHaveLength(1);
-	expect((await testDb.db.select().from(rules).all())[0].id).toBe(id);
+	const rows = await ruleRows();
+	expect(rows).toHaveLength(1);
+	expect(rows[0].id).toBe(id);
 });

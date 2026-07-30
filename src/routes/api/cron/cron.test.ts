@@ -69,15 +69,11 @@ test('fails loudly when CRON_SECRET is not configured', async () => {
 	await expect(call({ bearer: 'anything' })).rejects.toThrowError(expect.objectContaining({ status: 500 }));
 });
 
-test('accepts the plan-documented query secret for manual triggers', async () => {
-	const res = await call({ query: 'test-secret' });
-
-	expect(res.status).toBe(200);
-	expect(await res.json()).toMatchObject({ ok: true, results: {} });
-});
-
-test('accepts an Authorization bearer secret without a query param', async () => {
-	const res = await call({ bearer: 'test-secret' });
+test.each([
+	{ label: 'plan-documented query secret for manual triggers', secret: { query: 'test-secret' } },
+	{ label: 'Authorization bearer secret without a query param', secret: { bearer: 'test-secret' } }
+])('accepts the $label', async ({ secret }) => {
+	const res = await call(secret);
 
 	expect(res.status).toBe(200);
 	expect(await res.json()).toMatchObject({ ok: true, results: {} });

@@ -16,25 +16,41 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { drizzle } from 'drizzle-orm/libsql';
+import { drizzle, type LibSQLDatabase } from 'drizzle-orm/libsql';
 import { createClient } from '@libsql/client';
 import { env } from '$env/dynamic/private';
 import * as schema from '$lib/server/db/schema';
 
-const databaseUrl = env.TURSO_DATABASE_URL;
-const authToken = env.TURSO_AUTH_TOKEN;
+// The client is created lazily on first use: SvelteKit's postbuild analyse
+// imports every server module, and deploy platforms build without runtime
+// env vars, so validating here at module top level would fail the build.
+// Validation still fails loudly — just at handler start (first DB access).
+let instance: LibSQLDatabase<typeof schema> | undefined;
 
-if (!databaseUrl) {
-	throw new Error('TURSO_DATABASE_URL is required');
-}
-const isLocalUrl = databaseUrl === ':memory:' || databaseUrl.startsWith('file:');
-if (!isLocalUrl && !authToken) {
-	throw new Error('TURSO_AUTH_TOKEN is required for remote databases');
+function createDb(): LibSQLDatabase<typeof schema> {
+	const databaseUrl = env.TURSO_DATABASE_URL;
+	const authToken = env.TURSO_AUTH_TOKEN;
+
+	if (!databaseUrl) {
+		throw new Error('TURSO_DATABASE_URL is required');
+	}
+	const isLocalUrl = databaseUrl === ':memory:' || databaseUrl.startsWith('file:');
+	if (!isLocalUrl && !authToken) {
+		throw new Error('TURSO_AUTH_TOKEN is required for remote databases');
+	}
+
+	const client = createClient({
+		url: databaseUrl,
+		authToken: authToken || undefined
+	});
+
+	return drizzle(client, { schema });
 }
 
-const client = createClient({
-	url: databaseUrl,
-	authToken: authToken || undefined
+export const db = new Proxy({} as LibSQLDatabase<typeof schema>, {
+	get(_target, property) {
+		const real = (instance ??= createDb());
+		const value = Reflect.get(real, property);
+		return typeof value === 'function' ? value.bind(real) : value;
+	}
 });
-
-export const db = drizzle(client, { schema });

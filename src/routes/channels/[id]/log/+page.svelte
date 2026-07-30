@@ -19,18 +19,25 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 -->
 
 <script lang="ts">
-	import '../app.css';
-	import favicon from '$lib/assets/favicon.svg';
-
-	let { children } = $props();
+	let { data } = $props();
 </script>
 
-<svelte:head>
-	<link rel="icon" href={favicon} />
-</svelte:head>
-
-<nav>
-	<a class="brand" href="/">Moderaty</a>
-	<a href="/">Dashboard</a>
-</nav>
-<main>{@render children()}</main>
+<h1>Audit log — {data.ch?.title}</h1>
+<div class="card">
+	<table>
+		<thead>
+			<tr><th>Time</th><th>Action</th><th>Comment</th><th>Reason</th><th>Actor</th></tr>
+		</thead>
+		<tbody>
+			{#each data.entries as e}
+				<tr>
+					<td class="muted">{e.createdAt}</td>
+					<td><span class="badge">{e.action}</span></td>
+					<td class="muted">{e.commentId}</td>
+					<td>{e.reason}</td>
+					<td class="muted">{e.actor}</td>
+				</tr>
+			{/each}
+		</tbody>
+	</table>
+</div>

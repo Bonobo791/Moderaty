@@ -19,7 +19,7 @@
 import { db } from '$lib/server/db';
 import { channels, rules } from '$lib/server/db/schema';
 import { validateRule } from '$lib/server/rules';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { fail } from '@sveltejs/kit';
 
 export async function load({ params }) {
@@ -48,9 +48,18 @@ export const actions = {
 		});
 		return { ok: true };
 	},
-	remove: async ({ request }) => {
+	remove: async ({ params, request }) => {
 		const f = await request.formData();
-		await db.delete(rules).where(eq(rules.id, Number(f.get('ruleId'))));
+		const ruleId = Number(f.get('ruleId'));
+		if (!Number.isInteger(ruleId) || ruleId <= 0) {
+			return fail(400, { error: 'Invalid rule ID' });
+		}
+		// Scope to this route's channel so a request here cannot delete another channel's rule.
+		const deleted = await db
+			.delete(rules)
+			.where(and(eq(rules.id, ruleId), eq(rules.channelId, params.id)))
+			.returning({ id: rules.id });
+		if (deleted.length === 0) return fail(404, { error: 'rule not found' });
 		return { ok: true };
 	}
 };

@@ -18,10 +18,15 @@
 
 import { db } from '$lib/server/db';
 import { channels, comments } from '$lib/server/db/schema';
-import { eq, sql } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
 
 export async function load() {
-	const chs = await db.select().from(channels).all();
+	// Project only the fields the page renders; never serialize refreshTokenEnc
+	// (or any future secret column) to the browser.
+	const chs = await db
+		.select({ id: channels.id, title: channels.title, cursor: channels.cursor })
+		.from(channels)
+		.all();
 	const stats = await db
 		.select({ channelId: comments.channelId, status: comments.status, n: sql<number>`count(*)` })
 		.from(comments)

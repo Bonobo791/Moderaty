@@ -118,6 +118,7 @@ form.inline { display: inline; }
 
 /* ── text & badges ──────────────────────────────────────── */
 .muted { color: var(--ink-2); font-size: 13px; }
+code { background: var(--brand-soft); padding: 1px 6px; border-radius: 4px; }
 .badge {
   display: inline-block;
   border-radius: 999px;

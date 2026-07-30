@@ -19,25 +19,49 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 -->
 
 <script lang="ts">
+	import EmptyState from '$lib/EmptyState.svelte';
+
 	let { data } = $props();
+
+	function badgeClass(action: string): string {
+		if (action === 'approve' || action === 'approved') return 'badge ok';
+		if (action === 'queue' || action === 'pending') return 'badge';
+		if (['rejected', 'deleted', 'reject', 'delete', 'ban', 'dry-run'].includes(action))
+			return 'badge danger';
+		return 'badge neutral';
+	}
 </script>
 
+<svelte:head>
+	<title>Moderaty — Audit log</title>
+</svelte:head>
+
 <h1>Audit log — {data.ch?.title}</h1>
-<div class="card">
-	<table>
-		<thead>
-			<tr><th>Time</th><th>Action</th><th>Comment</th><th>Reason</th><th>Actor</th></tr>
-		</thead>
-		<tbody>
-			{#each data.entries as e}
-				<tr>
-					<td class="muted">{e.createdAt}</td>
-					<td><span class="badge">{e.action}</span></td>
-					<td class="muted">{e.commentId}</td>
-					<td>{e.reason}</td>
-					<td class="muted">{e.actor}</td>
-				</tr>
-			{/each}
-		</tbody>
-	</table>
-</div>
+<p class="page-sub">Every moderation action, automatic or manual, newest first.</p>
+
+{#if data.entries.length === 0}
+	<EmptyState
+		title="No activity yet"
+		hint="Every moderation action — automatic or manual — is recorded here."
+	/>
+{:else}
+	<div class="card">
+		<table>
+			<caption class="muted" style="text-align:left; padding-bottom:8px">Latest moderation actions</caption>
+			<thead>
+				<tr><th>Time</th><th>Action</th><th>Comment</th><th>Reason</th><th>Actor</th></tr>
+			</thead>
+			<tbody>
+				{#each data.entries as e}
+					<tr>
+						<td class="muted">{e.createdAt}</td>
+						<td><span class={badgeClass(e.action)}>{e.action}</span></td>
+						<td class="muted">{e.commentId}</td>
+						<td>{e.reason}</td>
+						<td class="muted">{e.actor}</td>
+					</tr>
+				{/each}
+			</tbody>
+		</table>
+	</div>
+{/if}

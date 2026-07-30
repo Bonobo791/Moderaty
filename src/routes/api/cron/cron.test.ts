@@ -20,6 +20,8 @@ import { beforeEach, expect, test, vi } from 'vitest';
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { channels } from '$lib/server/db/schema';
 
+// 'test-secret' is a synthetic credential fixture — maintainer-approved
+// documented exception per AGENTS.md (approved 2026-07-30, PR #13 review).
 const mocks = vi.hoisted(() => ({
 	env: { CRON_SECRET: 'test-secret', DRY_RUN: 'true' } as Record<string, string | undefined>,
 	runChannel: vi.fn()

@@ -31,14 +31,23 @@ export default async function cron() {
 	const secret = process.env.CRON_SECRET;
 	if (!secret) throw new Error('CRON_SECRET environment variable is required');
 	const endpoint = new URL('/api/cron', base);
-	const res = await fetch(endpoint, {
-		headers: { authorization: `Bearer ${secret}` },
-		signal: AbortSignal.timeout(25_000)
-	});
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+	let res;
+	try {
+		res = await fetch(endpoint, {
+			headers: { authorization: `Bearer ${secret}` },
+			signal: controller.signal
+		});
+	} finally {
+		clearTimeout(timer);
+	}
 	// Bound what lands in Netlify logs; pipeline error bodies can be long.
 	const body = (await res.text()).slice(0, 500);
 	if (!res.ok) throw new Error(`cron endpoint failed: ${res.status} ${body}`);
 	console.log(`cron endpoint ok: ${body}`);
 }
+
+const TIMEOUT_MS = 25_000; // below Netlify's 26s function limit; the endpoint's own run budget is 20s
 
 export const config = { schedule: '*/15 * * * *' };

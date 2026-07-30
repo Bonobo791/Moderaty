@@ -63,9 +63,16 @@ The steps below are the one-time manual setup.
   one channel (least-recently-run first), so the 15-minute schedule sets the
   per-channel scan cadence. A failed run throws and appears as a failed
   invocation in **Netlify → Functions → cron** logs.
-- Manual trigger (e.g. right after connecting a channel) — the endpoint also
-  accepts the query-param form:
-  `curl "https://<your-site>/api/cron?secret=<CRON_SECRET>"`
+- **Function timeout:** Netlify's default is 10s, below the trigger's 25s
+  abort and the endpoint's 20s run budget. Raise it to 26s (Site settings →
+  Functions) so the graceful-timeout path can fire; on a 10s limit the
+  platform kills first (runs still recover via lease expiry, but failures are
+  reported less cleanly).
+- Manual trigger (e.g. right after connecting a channel) — prefer the header
+  form so the secret stays out of shell history and logs:
+  `curl -H "Authorization: Bearer <CRON_SECRET>" "https://<your-site>/api/cron"`
+  (the endpoint also accepts the plan-documented `?secret=` query form as a
+  fallback)
 
 ## 5. Post-launch verification
 

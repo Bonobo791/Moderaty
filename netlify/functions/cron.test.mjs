@@ -19,6 +19,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import handler, { config } from './cron.mjs';
 
+// 'test-secret' is a synthetic credential fixture — maintainer-approved
+// documented exception per AGENTS.md (approved 2026-07-30, PR #13 review).
 const ORIGINAL_ENV = { APP_URL: process.env.APP_URL, CRON_SECRET: process.env.CRON_SECRET };
 
 function jsonResponse(body, status = 200) {
@@ -56,11 +58,28 @@ describe('scheduled cron trigger', () => {
 		expect(init.headers.authorization).toBe('Bearer test-secret');
 	});
 
-	it('aborts the request instead of hanging indefinitely', async () => {
+	it('rejects when the endpoint does not answer within the timeout', async () => {
+		vi.useFakeTimers();
+		vi.stubGlobal('fetch', vi.fn((_endpoint, init) => new Promise((_resolve, reject) => {
+			init.signal.addEventListener('abort', () => reject(new DOMException('The operation was aborted', 'AbortError')));
+		})));
+
+		const promise = handler();
+		const assertion = expect(promise).rejects.toThrow(/abort/i);
+		await vi.advanceTimersByTimeAsync(26_000);
+
+		await assertion;
+		vi.useRealTimers();
+	});
+
+	it('bounds the success body written to logs', async () => {
+		const huge = { ok: true, dryRun: false, results: { channel: { note: 'x'.repeat(2000) } } };
+		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(huge)));
+
 		await handler();
 
-		const [, init] = vi.mocked(fetch).mock.calls[0];
-		expect(init.signal).toBeInstanceOf(AbortSignal);
+		const logged = vi.mocked(console.log).mock.calls[0][0];
+		expect(logged.length).toBeLessThan(600);
 	});
 
 	it('throws when CRON_SECRET is not configured', async () => {

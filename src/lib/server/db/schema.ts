@@ -60,7 +60,7 @@ export const moderationActions = sqliteTable('moderation_actions', {
 	channelId: text('channel_id').notNull(),
 	action: text('action').notNull(), // 'hold' | 'reject' | 'delete' | 'ban'
 	reason: text('reason').notNull(),
-	state: text('state').notNull(), // 'pending' | 'dispatched' | 'completed' | 'manual_review'
+	state: text('state').notNull(), // 'pending' | 'dispatched' | 'completed' ('manual_review' legacy)
 	lastAttemptAt: text('last_attempt_at'),
 	lastManualRetryAt: text('last_manual_retry_at'),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)

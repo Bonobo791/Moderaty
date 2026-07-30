@@ -182,6 +182,10 @@ function dispatchedAction(overrides: Record<string, unknown> = {}) {
 	};
 }
 
+function expectActionState(state: string) {
+	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({ commentId: 'comment', state })]);
+}
+
 beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.state.tables = { channels, comments, rules, auditLog, moderationActions };
@@ -386,19 +390,13 @@ test('verifies a dispatched action after its completion transaction fails', asyn
 	await expect(runChannel('channel')).rejects.toThrow('database write failed');
 
 	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
-	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({
-		commentId: 'comment',
-		state: 'dispatched'
-	})]);
+	expectActionState('dispatched');
 
 	await runChannel('channel');
 
 	expect(mocks.getCommentModerationStatus).toHaveBeenCalledWith('comment', 'access-token', undefined);
 	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
-	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({
-		commentId: 'comment',
-		state: 'completed'
-	})]);
+	expectActionState('completed');
 });
 
 test.each([
@@ -413,10 +411,7 @@ test.each([
 
 	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
-	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({
-		commentId: 'comment',
-		state: 'completed'
-	})]);
+	expectActionState('completed');
 });
 
 test('retries a dispatched ban while the comment is still public', async () => {
@@ -427,10 +422,7 @@ test('retries a dispatched ban while the comment is still public', async () => {
 	await runChannel('channel');
 
 	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', true, 'access-token', undefined);
-	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({
-		commentId: 'comment',
-		state: 'completed'
-	})]);
+	expectActionState('completed');
 });
 
 test.each([
@@ -452,19 +444,13 @@ test('keeps a dispatched action retriable when verification fails transiently', 
 
 	await expect(runChannel('channel')).rejects.toThrow('verification failed');
 
-	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({
-		commentId: 'comment',
-		state: 'dispatched'
-	})]);
+	expectActionState('dispatched');
 
 	await runChannel('channel');
 
 	expect(mocks.getCommentModerationStatus).toHaveBeenCalledWith('comment', 'access-token', undefined);
 	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
-	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({
-		commentId: 'comment',
-		state: 'completed'
-	})]);
+	expectActionState('completed');
 });
 
 test('skips a pending action already claimed by a concurrent run', async () => {
@@ -476,9 +462,6 @@ test('skips a pending action already claimed by a concurrent run', async () => {
 	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
 	expect(mocks.state.insertedAudits).toEqual([]);
-	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({
-		commentId: 'comment',
-		state: 'pending'
-	})]);
+	expectActionState('pending');
 	expect(result).toMatchObject({ fetched: 1, acted: 0, skipped: false, dryRun: false });
 });

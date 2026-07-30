@@ -21,10 +21,13 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <script lang="ts">
 	import EmptyState from '$lib/EmptyState.svelte';
 	import Skeleton from '$lib/Skeleton.svelte';
+	import { autoRefresh } from '$lib/auto-refresh.svelte';
 	import { relativeTime } from '$lib/relative-time';
 
 	let { data, form } = $props();
 	let confirming = $state<{ id: string; author: string; kind: 'delete' | 'ban' } | null>(null);
+
+	autoRefresh();
 </script>
 
 <svelte:head>

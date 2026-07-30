@@ -49,11 +49,15 @@ Human review happens via pull requests. Executor rules:
   reconciliation is driven by `action_pending` rows.
 - **I5 — Never overwrite a caller's AbortSignal.** Compose with
   `AbortSignal.any([caller, timeout])` (see `src/lib/server/http.ts`).
-- **I6 — User regexes run under RE2 only.** Never `new RegExp(...)` on
-  user-supplied patterns; RE2 rejects lookaheads/backreferences at
-  construction — surface that as the form validation error.
-  (Plan v3 mandates the `re2` package; `main` currently uses `recheck` —
-  reconcile before touching rule validation.)
+- **I6 — User regexes are validated by recheck before compiling.** Every
+  user-supplied pattern must pass `recheck` plus the syntax guards in
+  `src/lib/server/rules.ts` (backreferences, duplicate alternation, length);
+  unsafe or unprovable (`unknown`) patterns are rejected loudly at the form.
+  Never compile a user pattern without this validation.
+  (Reconciled: plan v3 mandated the `re2` engine; `main` adopted recheck
+  validation + native compile as the accepted approach — same ReDoS
+  guarantee, no native dependency. Do not swap engines without a maintainer
+  decision.)
 - **I7 — Expand-migrate-contract.** New columns are nullable; the migration
   (`npm run db:migrate`) is run and verified BEFORE code that reads those
   columns is exercised.
@@ -129,7 +133,7 @@ the plan-documented `?secret=` query form for manual triggers). Deployment
 steps live in [DEPLOY.md](DEPLOY.md).
 
 Approved dependencies only (execution plan v3): `drizzle-orm`,
-`@libsql/client`, the SvelteKit adapter, `re2` (runtime); `drizzle-kit`,
+`@libsql/client`, the SvelteKit adapter, `recheck` (runtime); `drizzle-kit`,
 `vitest` (dev). No auth libraries, no googleapis SDK, no OpenAI SDK, no CSS
 frameworks, no zod. UI copy uses the brand **Moderaty** — the string `yt-mod`
 must not appear in `src/`.

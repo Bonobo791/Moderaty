@@ -38,7 +38,7 @@ This project is reviewed by a human via pull requests. The executor's branching 
 By the end, there is a working SvelteKit app `yt-mod` that:
 
 1. Lets a YouTube channel owner connect their channel via Google OAuth (scope `youtube.force-ssl`, offline access). The AES-256-GCM-encrypted refresh token is stored in the DB.
-2. Stores per-channel rules: keyword, regex (RE2 syntax), or blocked-user, each mapping to `hold` | `reject` | `delete` | `ban`.
+2. Stores per-channel rules: keyword, regex (recheck-validated), or blocked-user, each mapping to `hold` | `reject` | `delete` | `ban`.
 3. Exposes `GET /api/cron?secret=<CRON_SECRET>` which processes **one channel per run** (least-recently-run first) and **one page of ≤100 comments per run**, with a persisted checkpoint (continuation token + high-water mark) so bursts larger than one page are drained across runs **without skipping comments**. Per comment: rule match first, then OpenAI Moderation. Score ≥ 0.85 → auto-reject; 0.35–0.85 → human review queue; < 0.35 → approved. Rule hits execute their configured action. **Every enforcement action is recorded in the DB (`action_pending`) BEFORE the YouTube write, then confirmed after** — a crash mid-run is reconciled on the next run, never repeated blindly and never lost.
 4. Has four pages — dashboard (`/`), rules editor, review queue (one-click approve/reject/delete/ban), audit log — with a finished visual design (brand "Moderaty", design tokens, styled components, empty/loading/error states, accessible markup).
 5. Supports `DRY_RUN=true`: classifies and writes audit rows (action `dry-run`) but performs **no** YouTube writes and **no** DB state changes (no comment rows, no cursor/checkpoint movement) — previews are repeatable.
@@ -79,7 +79,7 @@ API facts (use exactly; do not look up alternatives):
 - `src/lib/server/http.ts` — create (fetch wrapper)
 - `src/lib/server/youtube.ts` — create
 - `src/lib/server/moderation.ts` — create
-- `src/lib/server/rules.ts` — create (RE2 matcher)
+- `src/lib/server/rules.ts` — create (recheck-validated matcher)
 - `src/lib/server/pipeline.ts` — create
 - `src/lib/EmptyState.svelte` — create (Phase G)
 - `src/lib/Skeleton.svelte` — create (Phase G)
@@ -101,8 +101,8 @@ API facts (use exactly; do not look up alternatives):
 ## 4. Constraints
 
 **Do NOT:**
-- Do not add dependencies beyond: `drizzle-orm`, `@libsql/client`, `@sveltejs/adapter-node`, `re2` (runtime) and `drizzle-kit`, `vitest` (dev). No auth libraries, no googleapis SDK, no OpenAI SDK, no CSS frameworks, no zod.
-- Do not use `new RegExp(...)` on user-supplied patterns anywhere — RE2 only (see I6).
+- Do not add dependencies beyond: `drizzle-orm`, `@libsql/client`, `@sveltejs/adapter-node`, `recheck` (runtime) and `drizzle-kit`, `vitest` (dev). No auth libraries, no googleapis SDK, no OpenAI SDK, no CSS frameworks, no zod.
+- Do not run user-supplied regexes without a ReDoS-safety check — recheck validation only (see I6).
 - Do not commit or push to `main`; never merge your own PR; never open a PR with red checks.
 - Do not refactor, rename, or reformat anything outside the steps.
 - Do not add features, error handling, or abstractions not listed.
@@ -122,7 +122,7 @@ API facts (use exactly; do not look up alternatives):
 - **I3 — DB before remote.** Record the intended enforcement action locally (`status='action_pending'`, `pendingAction=<action>`) BEFORE any YouTube write; confirm (set final status) after. Crash between = reconciled next run from the durable record.
 - **I4 — Idempotency.** Re-running any step is safe: comments dedupe by `comments.id`; YouTube moderation calls are naturally idempotent; reconciliation is driven by `action_pending` rows.
 - **I5 — Never overwrite a caller's AbortSignal.** Compose with `AbortSignal.any([caller, timeout])` (see `http.ts`).
-- **I6 — User regexes run under RE2 only** (linear-time engine; catastrophic backtracking impossible). RE2 rejects lookaheads/backreferences at construction → surface that as the form validation error.
+- **I6 — User regexes are validated by recheck before execution** (ReDoS-prone patterns are rejected at the form with a validation error; unprovable/`unknown` patterns are rejected loudly). **Reconciliation note:** v3 originally mandated the `re2` engine here; the merged implementation instead validates every user pattern with `recheck` (plus explicit guards for backreferences and duplicate-alternation blind spots) before compiling with the native engine. This provides the same safety guarantee — catastrophic backtracking is impossible because unsafe patterns never compile — without a native dependency. Adopted as the accepted approach; do not swap engines without a maintainer decision.
 - **I7 — Expand-migrate-contract.** New columns are nullable; `npm run db:push` is run and verified BEFORE any code that reads those columns is exercised.
 - **I8 — Dry run changes nothing durable.** With `DRY_RUN=true`: no YouTube writes, no `comments` inserts, no cursor/continuation/high-water updates. Only `audit_log` rows with action `dry-run`. Previews must be repeatable against the same comments.
 - **I9 — Tests are the spec.** No PR opens while checks/tests are red; every review finding gets a failing test before its fix.
@@ -152,14 +152,14 @@ git init && git add -A && git commit -m "chore: initial scaffold"
 #### Step 2: Install the exact dependency set
 
 ```bash
-npm install drizzle-orm @libsql/client @sveltejs/adapter-node re2
+npm install drizzle-orm @libsql/client @sveltejs/adapter-node recheck
 npm install -D drizzle-kit vitest
 ```
 
-**Verify:** `npm ls drizzle-orm @libsql/client @sveltejs/adapter-node re2 drizzle-kit vitest` prints all six, no errors. Also `node -e "const RE2=require('re2'); new RE2('(a+)+$').test('aaa'); console.log('re2 ok')"` prints `re2 ok`.
+**Verify:** `npm ls drizzle-orm @libsql/client @sveltejs/adapter-node recheck drizzle-kit vitest` prints all six, no errors. Also `node -e "const { checkSync } = require('recheck'); console.log(checkSync('(a+)+$', 'i').status)"` prints `unsafe`.
 
 **If this fails:**
-- If `re2` fails to build/install on this platform: stop, paste the full error, report back — do NOT substitute another regex engine.
+- If `recheck` fails to install on this platform: stop, paste the full error, report back — do NOT substitute another regex-safety approach.
 - Otherwise: stop, paste the error, report back.
 
 #### Step 3: Switch to adapter-node
@@ -581,7 +581,9 @@ export async function scoreComment(text: string): Promise<ModerationResult> {
 
 **Verify:** `grep -c 'ModerationError' src/lib/server/moderation.ts` prints ≥ 3.
 
-#### Step 12: RE2 rule matcher (I6)
+#### Step 12: Rule matcher (I6)
+
+> **Reconciled:** this step originally specified an RE2-based matcher. The merged implementation (`src/lib/server/rules.ts`) validates every user pattern with `recheck` plus explicit syntax guards, rejecting ReDoS-prone patterns before compiling — see I6 for the reconciliation note. The listing below is the historical RE2 version, kept for reference.
 
 **File:** `src/lib/server/rules.ts` — create with exactly:
 
@@ -1929,7 +1931,7 @@ All must be true before reporting completion:
 - [ ] Dry run: audit rows only, zero comment rows, zero checkpoint movement, zero YouTube writes (P15 verified live too)
 - [ ] Burst test: a >100-comment burst drains across runs with no skipped comments (P12–P14)
 - [ ] Crash recovery: a seeded `action_pending` row is reconciled on the next run (P11)
-- [ ] User regexes execute under RE2; `(a+)+$` completes instantly; lookahead patterns are rejected at the form with an RE2 message
+- [ ] User regexes are validated by recheck before compiling; `(a+)+$` is rejected as unsafe at the form; valid patterns match case-insensitively
 - [ ] Comment without author metadata is moderated, not skipped (P5/Y2–Y3)
 - [ ] Out-of-range AI scores throw and route the comment to the human queue (M3–M6, P4)
 - [ ] Cron processes one channel per call and rotates by `lastRunAt`

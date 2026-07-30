@@ -20,18 +20,23 @@
  * Netlify Scheduled Function: triggers one bounded moderation run every
  * 15 minutes by calling the app's cron endpoint on the deployed site.
  * The endpoint itself enforces one channel per invocation, so this schedule
- * sets the per-channel scan cadence. Any failure throws so the invocation
- * shows up as failed in the Netlify function logs.
+ * sets the per-channel scan cadence. The secret travels in an Authorization
+ * header, never in the URL; the request aborts after 25s rather than hanging
+ * into the platform limit. Any failure throws so the invocation shows up as
+ * failed in the Netlify function logs.
  */
 export default async function cron() {
-	const base = process.env.URL;
-	if (!base) throw new Error('URL environment variable is required (Netlify sets it in production)');
+	const base = process.env.APP_URL;
+	if (!base) throw new Error('APP_URL environment variable is required (set it in Netlify Site settings)');
 	const secret = process.env.CRON_SECRET;
 	if (!secret) throw new Error('CRON_SECRET environment variable is required');
 	const endpoint = new URL('/api/cron', base);
-	endpoint.searchParams.set('secret', secret);
-	const res = await fetch(endpoint);
-	const body = await res.text();
+	const res = await fetch(endpoint, {
+		headers: { authorization: `Bearer ${secret}` },
+		signal: AbortSignal.timeout(25_000)
+	});
+	// Bound what lands in Netlify logs; pipeline error bodies can be long.
+	const body = (await res.text()).slice(0, 500);
 	if (!res.ok) throw new Error(`cron endpoint failed: ${res.status} ${body}`);
 	console.log(`cron endpoint ok: ${body}`);
 }

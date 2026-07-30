@@ -19,22 +19,24 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import handler, { config } from './cron.mjs';
 
-const ORIGINAL_ENV = { URL: process.env.URL, CRON_SECRET: process.env.CRON_SECRET };
+const ORIGINAL_ENV = { APP_URL: process.env.APP_URL, CRON_SECRET: process.env.CRON_SECRET };
 
 function jsonResponse(body, status = 200) {
 	return new Response(JSON.stringify(body), { status });
 }
 
 beforeEach(() => {
-	process.env.URL = 'https://moderaty.example.netlify.app';
+	process.env.APP_URL = 'https://moderaty.example.netlify.app';
 	process.env.CRON_SECRET = 'test-secret';
 	vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ok: true, dryRun: false, results: {} })));
+	vi.spyOn(console, 'log').mockImplementation(() => {});
 });
 
 afterEach(() => {
 	vi.unstubAllGlobals();
-	if (ORIGINAL_ENV.URL === undefined) delete process.env.URL;
-	else process.env.URL = ORIGINAL_ENV.URL;
+	vi.restoreAllMocks();
+	if (ORIGINAL_ENV.APP_URL === undefined) delete process.env.APP_URL;
+	else process.env.APP_URL = ORIGINAL_ENV.APP_URL;
 	if (ORIGINAL_ENV.CRON_SECRET === undefined) delete process.env.CRON_SECRET;
 	else process.env.CRON_SECRET = ORIGINAL_ENV.CRON_SECRET;
 });
@@ -44,12 +46,21 @@ describe('scheduled cron trigger', () => {
 		expect(config.schedule).toBe('*/15 * * * *');
 	});
 
-	it('calls the deployed site cron endpoint with the secret', async () => {
+	it('sends the secret as a bearer header, never in the URL', async () => {
 		await handler();
 
 		expect(fetch).toHaveBeenCalledTimes(1);
-		const endpoint = vi.mocked(fetch).mock.calls[0][0];
-		expect(endpoint.href).toBe('https://moderaty.example.netlify.app/api/cron?secret=test-secret');
+		const [endpoint, init] = vi.mocked(fetch).mock.calls[0];
+		expect(endpoint.href).toBe('https://moderaty.example.netlify.app/api/cron');
+		expect(endpoint.search).toBe('');
+		expect(init.headers.authorization).toBe('Bearer test-secret');
+	});
+
+	it('aborts the request instead of hanging indefinitely', async () => {
+		await handler();
+
+		const [, init] = vi.mocked(fetch).mock.calls[0];
+		expect(init.signal).toBeInstanceOf(AbortSignal);
 	});
 
 	it('throws when CRON_SECRET is not configured', async () => {
@@ -59,10 +70,10 @@ describe('scheduled cron trigger', () => {
 		expect(fetch).not.toHaveBeenCalled();
 	});
 
-	it('throws when the site URL is not configured', async () => {
-		delete process.env.URL;
+	it('throws when APP_URL is not configured', async () => {
+		delete process.env.APP_URL;
 
-		await expect(handler()).rejects.toThrow('URL');
+		await expect(handler()).rejects.toThrow('APP_URL');
 		expect(fetch).not.toHaveBeenCalled();
 	});
 
@@ -70,5 +81,13 @@ describe('scheduled cron trigger', () => {
 		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ok: false, results: { channel: { error: 'YouTube quota' } } }, 500)));
 
 		await expect(handler()).rejects.toThrow('500');
+	});
+
+	it('bounds the response body written to logs and errors', async () => {
+		const huge = { ok: false, results: { channel: { error: 'x'.repeat(2000) } } };
+		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(huge, 500)));
+
+		const failure = await handler().catch((error) => error);
+		expect(failure.message.length).toBeLessThan(600);
 	});
 });

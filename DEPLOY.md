@@ -58,11 +58,13 @@ The steps below are the one-time manual setup.
 ## 4. Cron
 
 - `netlify/functions/cron.mjs` runs on a `*/15 * * * *` schedule and calls
-  `GET $URL/api/cron?secret=$CRON_SECRET`. Each invocation processes exactly
+  `GET $APP_URL/api/cron` with the secret in an `Authorization: Bearer` header
+  (never in the URL). Each invocation processes exactly
   one channel (least-recently-run first), so the 15-minute schedule sets the
   per-channel scan cadence. A failed run throws and appears as a failed
   invocation in **Netlify → Functions → cron** logs.
-- Manual trigger (e.g. right after connecting a channel):
+- Manual trigger (e.g. right after connecting a channel) — the endpoint also
+  accepts the query-param form:
   `curl "https://<your-site>/api/cron?secret=<CRON_SECRET>"`
 
 ## 5. Post-launch verification

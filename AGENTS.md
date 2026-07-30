@@ -123,9 +123,10 @@ Moderaty is a SvelteKit 2 app using Svelte 5 and TypeScript. Routes live in
 generated `.svelte-kit/` files or commit build output.
 
 The cron trigger is a Netlify Scheduled Function in
-`netlify/functions/cron.mjs` (every 15 minutes; calls
-`GET $URL/api/cron?secret=$CRON_SECRET`, where `URL` is Netlify's own site-URL
-variable). Deployment steps live in [DEPLOY.md](DEPLOY.md).
+`netlify/functions/cron.mjs` (every 15 minutes; calls `GET $APP_URL/api/cron`
+with the secret in an `Authorization: Bearer` header; the endpoint also keeps
+the plan-documented `?secret=` query form for manual triggers). Deployment
+steps live in [DEPLOY.md](DEPLOY.md).
 
 Approved dependencies only (execution plan v3): `drizzle-orm`,
 `@libsql/client`, the SvelteKit adapter, `re2` (runtime); `drizzle-kit`,

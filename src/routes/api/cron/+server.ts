@@ -32,8 +32,13 @@ const LEASE_MS = 10 * 60 * 1000; // exceeds one bounded run; expiry alone re-eli
  * The channel is claimed atomically with an expiring lease before runChannel,
  * so concurrent cron invocations cannot process the same channel.
  */
-export const GET: RequestHandler = async ({ url }) => {
-	if (url.searchParams.get('secret') !== env.CRON_SECRET) throw error(401, 'bad secret');
+export const GET: RequestHandler = async ({ url, request }) => {
+	if (!env.CRON_SECRET) throw error(500, 'CRON_SECRET is not configured');
+	// Bearer header is the preferred path (used by the Netlify scheduled
+	// function); the query param stays for the plan-documented manual curl.
+	const bearer = request.headers.get('authorization');
+	const secret = bearer?.startsWith('Bearer ') ? bearer.slice('Bearer '.length) : url.searchParams.get('secret');
+	if (secret !== env.CRON_SECRET) throw error(401, 'bad secret');
 	const dryRun = env.DRY_RUN === 'true';
 	const nowIso = new Date().toISOString();
 	const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, nowIso));

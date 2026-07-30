@@ -19,20 +19,29 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 -->
 
 <script lang="ts">
+	import EmptyState from '$lib/EmptyState.svelte';
+
 	let { data, form } = $props();
 </script>
 
+<svelte:head>
+	<title>Moderaty — Rules</title>
+</svelte:head>
+
 <h1>Rules — {data.ch?.title}</h1>
+<p class="page-sub">Keyword, regex, and blocked-user rules that act before AI scoring.</p>
+
+{#if form?.error}<div class="error-box" role="alert">{form.error}</div>{/if}
 
 <div class="card">
 	<form method="POST" action="?/add" style="display:flex; gap:8px; flex-wrap:wrap">
-		<select name="type">
+		<select name="type" aria-label="Rule type">
 			<option value="keyword">keyword</option>
 			<option value="regex">regex</option>
 			<option value="user">blocked user (channel ID)</option>
 		</select>
-		<input name="pattern" placeholder="pattern" style="flex:1; min-width:220px" required />
-		<select name="action">
+		<input name="pattern" placeholder="pattern" aria-label="Rule pattern" style="flex:1; min-width:220px" required />
+		<select name="action" aria-label="Rule action">
 			<option value="hold">hold for review</option>
 			<option value="reject">reject (hide)</option>
 			<option value="delete">delete permanently</option>
@@ -40,19 +49,21 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		</select>
 		<button class="btn" type="submit">Add rule</button>
 	</form>
-	{#if form?.error}<p style="color:#b3261e">{form.error}</p>{/if}
 </div>
 
 {#each data.rs as r}
 	<div class="card" style="display:flex; justify-content:space-between; align-items:center">
 		<div>
-			<span class="badge">{r.type}</span> <code>{r.pattern}</code> → <strong>{r.action}</strong>
+			<span class="badge neutral">{r.type}</span> <code>{r.pattern}</code> → <strong>{r.action}</strong>
 		</div>
 		<form class="inline" method="POST" action="?/remove">
 			<input type="hidden" name="ruleId" value={r.id} />
-			<button class="btn danger small" type="submit">Delete</button>
+			<button class="btn danger small" type="submit" aria-label="Delete rule {r.id}">Delete</button>
 		</form>
 	</div>
 {:else}
-	<p class="muted">No rules yet. AI moderation still applies to all comments.</p>
+	<EmptyState
+		title="No rules yet"
+		hint="AI moderation still applies to every comment — rules add your own keywords, patterns, and blocked users."
+	/>
 {/each}

@@ -19,6 +19,8 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 -->
 
 <script lang="ts">
+	import EmptyState from '$lib/EmptyState.svelte';
+
 	let { data } = $props();
 	function count(channelId: string, status: string): number {
 		const row = data.stats.find((s: any) => s.channelId === channelId && s.status === status);
@@ -26,7 +28,12 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	}
 </script>
 
+<svelte:head>
+	<title>Moderaty — Dashboard</title>
+</svelte:head>
+
 <h1>Channels</h1>
+<p class="page-sub">Connect a channel and track its moderation activity.</p>
 <a class="btn" href="/api/auth/google">Connect YouTube channel</a>
 
 {#each data.chs as ch}
@@ -35,14 +42,17 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		<p class="muted">ID: {ch.id} · last polled up to: {ch.cursor ?? 'never'}</p>
 		<p>
 			<span class="badge">pending: {count(ch.id, 'pending')}</span>
-			<span class="badge">rejected: {count(ch.id, 'rejected')}</span>
-			<span class="badge">deleted: {count(ch.id, 'deleted')}</span>
-			<span class="badge">approved: {count(ch.id, 'approved')}</span>
+			<span class="badge danger">rejected: {count(ch.id, 'rejected')}</span>
+			<span class="badge danger">deleted: {count(ch.id, 'deleted')}</span>
+			<span class="badge ok">approved: {count(ch.id, 'approved')}</span>
 		</p>
 		<a class="btn secondary small" href="/channels/{ch.id}/rules">Rules</a>
 		<a class="btn secondary small" href="/channels/{ch.id}/queue">Review queue</a>
 		<a class="btn secondary small" href="/channels/{ch.id}/log">Audit log</a>
 	</div>
 {:else}
-	<p class="muted" style="margin-top:16px">No channels connected yet.</p>
+	<EmptyState
+		title="No channels connected"
+		hint="Connect your YouTube channel to start moderating comments automatically."
+	/>
 {/each}

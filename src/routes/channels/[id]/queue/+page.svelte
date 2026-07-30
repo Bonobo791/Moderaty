@@ -19,33 +19,50 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 -->
 
 <script lang="ts">
-	let { data } = $props();
+	import EmptyState from '$lib/EmptyState.svelte';
+	import Skeleton from '$lib/Skeleton.svelte';
+
+	let { data, form } = $props();
 </script>
 
-<h1>Review queue — {data.ch?.title}</h1>
-<p class="muted">Borderline comments (AI score 0.35–0.85). Nothing here is public-facing yet only if previously held; rejected/approved comments already have their final state. Your action is final.</p>
+<svelte:head>
+	<title>Moderaty — Review queue</title>
+</svelte:head>
 
-{#each data.pending as c}
-	<div class="card">
-		<p style="margin-top:0"><strong>{c.authorName}</strong> <span class="muted">{c.publishedAt}</span></p>
-		<p>{c.text}</p>
-		<form class="inline" method="POST" action="?/approve">
-			<input type="hidden" name="commentId" value={c.id} />
-			<button class="btn secondary small">Approve</button>
-		</form>
-		<form class="inline" method="POST" action="?/reject">
-			<input type="hidden" name="commentId" value={c.id} />
-			<button class="btn small">Reject</button>
-		</form>
-		<form class="inline" method="POST" action="?/del">
-			<input type="hidden" name="commentId" value={c.id} />
-			<button class="btn danger small">Delete</button>
-		</form>
-		<form class="inline" method="POST" action="?/ban">
-			<input type="hidden" name="commentId" value={c.id} />
-			<button class="btn danger small">Ban author</button>
-		</form>
-	</div>
+<h1>Review queue — {data.ch?.title}</h1>
+<p class="page-sub">Borderline comments (AI score 0.35–0.85) waiting for your decision.</p>
+
+{#if data.pending === undefined}
+	<Skeleton rows={3} />
 {:else}
-	<p class="muted">Queue is empty.</p>
-{/each}
+	{#if form?.error}<div class="error-box" role="alert">{form.error}</div>{/if}
+
+	<p class="muted">These comments are held for review and are not public yet. Rejected or approved comments already have a final state. Your action is final.</p>
+
+	{#each data.pending as c}
+		<div class="card">
+			<p style="margin-top:0"><span style="font-weight:600">{c.authorName}</span> <span class="muted">{c.publishedAt}</span></p>
+			<blockquote style="margin:8px 0; padding:8px 12px; border-left:3px solid var(--border); color: var(--ink-2)">{c.text}</blockquote>
+			<div style="display:flex; gap:8px">
+				<form class="inline" method="POST" action="?/approve">
+					<input type="hidden" name="commentId" value={c.id} />
+					<button class="btn secondary small" aria-label="Approve comment by {c.authorName}">Approve</button>
+				</form>
+				<form class="inline" method="POST" action="?/reject">
+					<input type="hidden" name="commentId" value={c.id} />
+					<button class="btn small" aria-label="Reject comment by {c.authorName}">Reject</button>
+				</form>
+				<form class="inline" method="POST" action="?/del">
+					<input type="hidden" name="commentId" value={c.id} />
+					<button class="btn danger small" aria-label="Delete comment by {c.authorName}">Delete</button>
+				</form>
+				<form class="inline" method="POST" action="?/ban">
+					<input type="hidden" name="commentId" value={c.id} />
+					<button class="btn danger small" aria-label="Ban author {c.authorName}">Ban author</button>
+				</form>
+			</div>
+		</div>
+	{:else}
+		<EmptyState title="Queue is clear" hint="Borderline comments will appear here for your review." />
+	{/each}
+{/if}

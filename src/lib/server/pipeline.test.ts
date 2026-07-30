@@ -168,6 +168,20 @@ function moderation(score: number) {
 	};
 }
 
+function dispatchedAction(overrides: Record<string, unknown> = {}) {
+	return {
+		commentId: 'comment',
+		channelId: 'channel',
+		action: 'ban',
+		reason: 'rule #1 (user: author)',
+		state: 'dispatched',
+		lastAttemptAt: '2026-01-04T00:00:00.000Z',
+		lastManualRetryAt: null,
+		createdAt: '2026-01-04T00:00:00.000Z',
+		...overrides
+	};
+}
+
 beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.state.tables = { channels, comments, rules, auditLog, moderationActions };
@@ -392,16 +406,7 @@ test.each([
 	{ observed: null }
 ])('completes a dispatched ban when the comment is already terminal ($observed)', async ({ observed }) => {
 	mocks.state.existingIds = ['comment'];
-	mocks.state.moderationActions = [{
-		commentId: 'comment',
-		channelId: 'channel',
-		action: 'ban',
-		reason: 'rule #1 (user: author)',
-		state: 'dispatched',
-		lastAttemptAt: '2026-01-04T00:00:00.000Z',
-		lastManualRetryAt: null,
-		createdAt: '2026-01-04T00:00:00.000Z'
-	}];
+	mocks.state.moderationActions = [dispatchedAction()];
 	mocks.getCommentModerationStatus.mockResolvedValue(observed);
 
 	await runChannel('channel');
@@ -416,16 +421,7 @@ test.each([
 
 test('retries a dispatched ban while the comment is still public', async () => {
 	mocks.state.existingIds = ['comment'];
-	mocks.state.moderationActions = [{
-		commentId: 'comment',
-		channelId: 'channel',
-		action: 'ban',
-		reason: 'rule #1 (user: author)',
-		state: 'dispatched',
-		lastAttemptAt: '2026-01-04T00:00:00.000Z',
-		lastManualRetryAt: null,
-		createdAt: '2026-01-04T00:00:00.000Z'
-	}];
+	mocks.state.moderationActions = [dispatchedAction()];
 	mocks.getCommentModerationStatus.mockResolvedValue('published');
 
 	await runChannel('channel');
@@ -451,16 +447,7 @@ test.each([
 
 test('keeps a dispatched action retriable when verification fails transiently', async () => {
 	mocks.state.existingIds = ['comment'];
-	mocks.state.moderationActions = [{
-		commentId: 'comment',
-		channelId: 'channel',
-		action: 'reject',
-		reason: 'rule #1 (keyword)',
-		state: 'dispatched',
-		lastAttemptAt: '2026-01-04T00:00:00.000Z',
-		lastManualRetryAt: null,
-		createdAt: '2026-01-04T00:00:00.000Z'
-	}];
+	mocks.state.moderationActions = [dispatchedAction({ action: 'reject', reason: 'rule #1 (keyword)' })];
 	mocks.getCommentModerationStatus.mockRejectedValueOnce(new Error('socket hang up'));
 
 	await expect(runChannel('channel')).rejects.toThrow('verification failed');

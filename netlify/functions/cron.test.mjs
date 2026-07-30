@@ -72,14 +72,18 @@ describe('scheduled cron trigger', () => {
 		vi.useRealTimers();
 	});
 
-	it('bounds the success body written to logs', async () => {
-		const huge = { ok: true, dryRun: false, results: { channel: { note: 'x'.repeat(2000) } } };
-		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(huge)));
+	it('bounds response bodies written to logs and errors', async () => {
+		const huge = (overrides) => ({ results: { channel: { note: 'x'.repeat(2000) } }, ...overrides });
+		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(huge({ ok: true }))));
 
 		await handler();
 
-		const logged = vi.mocked(console.log).mock.calls[0][0];
-		expect(logged.length).toBeLessThan(600);
+		expect(vi.mocked(console.log).mock.calls[0][0].length).toBeLessThan(600);
+
+		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(huge({ ok: false }), 500)));
+
+		const failure = await handler().catch((error) => error);
+		expect(failure.message.length).toBeLessThan(600);
 	});
 
 	it('throws when CRON_SECRET is not configured', async () => {
@@ -100,13 +104,5 @@ describe('scheduled cron trigger', () => {
 		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ok: false, results: { channel: { error: 'YouTube quota' } } }, 500)));
 
 		await expect(handler()).rejects.toThrow('500');
-	});
-
-	it('bounds the response body written to logs and errors', async () => {
-		const huge = { ok: false, results: { channel: { error: 'x'.repeat(2000) } } };
-		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(huge, 500)));
-
-		const failure = await handler().catch((error) => error);
-		expect(failure.message.length).toBeLessThan(600);
 	});
 });

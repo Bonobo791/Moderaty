@@ -32,7 +32,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 </svelte:head>
 
 <h1>Review queue — {data.ch?.title}</h1>
-<p class="page-sub">Borderline comments (AI score 0.35–0.85) waiting for your decision.</p>
+<p class="page-sub">Borderline comments (AI score 0.35–0.50) waiting for your decision.</p>
 
 {#if data.pending === undefined}
 	<Skeleton rows={3} />

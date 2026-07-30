@@ -34,7 +34,8 @@ import {
 	type NewComment
 } from '$lib/server/youtube';
 
-const AUTO_REJECT = 0.85;
+const AUTO_BAN = 0.85;
+const AUTO_DELETE = 0.51;
 const QUEUE = 0.35;
 
 export interface RunChannelOptions {
@@ -112,16 +113,28 @@ async function aiDecision(comment: NewComment, deadline?: number): Promise<Decis
 	const moderation = await scoreComment(comment.text, deadline);
 	const reason = `ai score ${moderation.score.toFixed(2)}`;
 	const aiScore = serializeScores(moderation.scores);
-	if (moderation.score >= AUTO_REJECT) {
+	if (moderation.score > AUTO_BAN) {
 		return {
 			comment,
 			status: 'rejected',
 			decidedBy: 'ai',
 			matchedRuleId: null,
 			aiScore,
-			auditAction: 'reject',
+			auditAction: 'ban',
 			reason,
-			youtubeAction: 'reject'
+			youtubeAction: 'ban'
+		};
+	}
+	if (moderation.score >= AUTO_DELETE) {
+		return {
+			comment,
+			status: 'deleted',
+			decidedBy: 'ai',
+			matchedRuleId: null,
+			aiScore,
+			auditAction: 'delete',
+			reason,
+			youtubeAction: 'delete'
 		};
 	}
 	if (moderation.score >= QUEUE) {

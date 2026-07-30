@@ -209,16 +209,29 @@ afterEach(() => {
 });
 
 test.each([
-	{ score: 0.34, status: 'approved', queued: 0, acted: 0 },
-	{ score: 0.35, status: 'pending', queued: 1, acted: 0 },
-	{ score: 0.85, status: 'rejected', queued: 0, acted: 1 }
-])('categorizes score $score as $status', async ({ score, status, queued, acted }) => {
+	{ score: 0.34, status: 'approved', queued: 0, acted: 0, api: 'none', audit: 'approve' },
+	{ score: 0.35, status: 'pending', queued: 1, acted: 0, api: 'none', audit: 'queue' },
+	{ score: 0.5, status: 'pending', queued: 1, acted: 0, api: 'none', audit: 'queue' },
+	{ score: 0.51, status: 'deleted', queued: 0, acted: 1, api: 'delete', audit: 'delete' },
+	{ score: 0.85, status: 'deleted', queued: 0, acted: 1, api: 'delete', audit: 'delete' },
+	{ score: 0.86, status: 'rejected', queued: 0, acted: 1, api: 'ban', audit: 'ban' }
+])('categorizes score $score as $status', async ({ score, status, queued, acted, api, audit }) => {
 	mocks.scoreComment.mockResolvedValue(moderation(score));
 
 	const result = await runChannel('channel');
 
 	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status })]);
-	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(acted);
+	expect(mocks.state.insertedAudits).toEqual([expect.objectContaining({ commentId: 'comment', action: audit })]);
+	if (api === 'delete') {
+		expect(mocks.deleteComment).toHaveBeenCalledWith('comment', 'access-token', undefined);
+		expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	} else if (api === 'ban') {
+		expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', true, 'access-token', undefined);
+		expect(mocks.deleteComment).not.toHaveBeenCalled();
+	} else {
+		expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+		expect(mocks.deleteComment).not.toHaveBeenCalled();
+	}
 	expect(result).toMatchObject({ fetched: 1, acted, queued, partial: false, skipped: false, dryRun: false });
 });
 
@@ -351,7 +364,7 @@ test('persists successful decisions and retries only the failed comment on the n
 });
 
 test('verifies a dispatched action after its completion transaction fails', async () => {
-	mocks.scoreComment.mockResolvedValue(moderation(0.85));
+	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'reject' }];
 	mocks.db.transaction
 		.mockImplementationOnce(async (callback: (value: typeof mocks.db.transactionValue) => Promise<unknown>) => callback(mocks.db.transactionValue))
 		.mockRejectedValueOnce(new Error('database write failed'));
@@ -429,7 +442,7 @@ test('keeps a dispatched action retriable when verification fails transiently', 
 });
 
 test('skips a pending action already claimed by a concurrent run', async () => {
-	mocks.scoreComment.mockResolvedValue(moderation(0.85));
+	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'reject' }];
 	mocks.state.unclaimedIds = ['comment'];
 
 	const result = await runChannel('channel');

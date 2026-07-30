@@ -52,9 +52,9 @@ Category line: "Comment protection for YouTube creators."
 - Rule types: keyword, regex (RE2 syntax only — never `new RegExp` on user
   patterns), blocked-user; actions: hold, reject, delete, ban.
 - AI scoring: OpenAI Moderation `omni-moderation-latest`; score = max of six
-  toxicity categories; fixed thresholds ≥0.85 auto-reject, 0.35–0.85 human
-  queue, <0.35 approved. AI failure always routes to the human queue — never
-  auto-approve, never auto-reject.
+  toxicity categories; fixed thresholds >0.85 auto-ban, 0.51–0.85 auto-delete,
+  0.35–0.50 human queue, <0.35 approved. AI failure always routes to the human
+  queue — never auto-approve, never auto-reject.
 - Enforcement durability: every action is recorded locally (`action_pending`)
   BEFORE any YouTube write and confirmed after; `DRY_RUN=true` previews change
   nothing durable (audit rows only).

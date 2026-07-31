@@ -34,3 +34,4 @@ local.db*
 .tokensave
 .impeccable
 .playwright-cli
+.netlify-sim

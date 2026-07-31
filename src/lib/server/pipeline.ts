@@ -23,7 +23,7 @@ import { db } from '$lib/server/db';
 import { auditLog, channels, comments, moderationActions, rules } from '$lib/server/db/schema';
 import { assertBeforeDeadline, DeadlineExceededError } from '$lib/server/http';
 import { scoreComment, serializeScores } from '$lib/server/moderation';
-import { matchRule, validateRule, type RuleAction, type RuleRow } from '$lib/server/rules';
+import { matchPreparedRule, prepareRules, type PreparedRule, type RuleAction } from '$lib/server/rules';
 import {
 	deleteComment,
 	fetchNewComments,
@@ -96,8 +96,7 @@ function emptyResult(): ChannelRunResult {
  * @param rule - The matched moderation rule.
  * @returns The moderation decision, including its status, rationale, and YouTube action.
  */
-function ruleDecision(comment: NewComment, rule: RuleRow): Decision {
-	validateRule(rule);
+function ruleDecision(comment: NewComment, rule: PreparedRule['rule']): Decision {
 	const outcome = RULE_ACTIONS[rule.action];
 	return {
 		comment,
@@ -180,8 +179,8 @@ async function aiDecision(comment: NewComment, deadline?: number): Promise<Decis
 	};
 }
 
-async function decide(comment: NewComment, rules: RuleRow[], deadline?: number): Promise<Decision> {
-	const rule = matchRule(comment.text, comment.authorChannelId, rules);
+async function decide(comment: NewComment, rules: PreparedRule[], deadline?: number): Promise<Decision> {
+	const rule = matchPreparedRule(comment.text, comment.authorChannelId, rules);
 	return rule ? ruleDecision(comment, rule) : aiDecision(comment, deadline);
 }
 
@@ -250,8 +249,7 @@ async function decideNewComments(
 				).map((comment) => comment.id)
 			: []
 	);
-	const rulesForChannel = await db.select().from(rules).where(eq(rules.channelId, channelId)).all();
-	rulesForChannel.forEach(validateRule);
+	const rulesForChannel = prepareRules(await db.select().from(rules).where(eq(rules.channelId, channelId)).all());
 	const settled = await Promise.allSettled(
 		page.comments
 			.filter((comment) => !existingIds.has(comment.id))

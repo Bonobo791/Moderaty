@@ -162,21 +162,34 @@ export function validateRule(rule: RuleRow): asserts rule is RuleRow & { type: (
 	if (rule.type === 'regex') regex(rule);
 }
 
+/** A validated rule with its regex (if any) compiled, ready for matching. */
+export interface PreparedRule {
+	rule: RuleRow & { type: (typeof RULE_TYPES)[number]; action: RuleAction };
+	compiled: RegExp | null;
+}
+
 /**
- * Finds the validated moderation rule that matches the comment or its author.
- * Each rule is shape-validated and compiled at most once per call (validation
- * happens before any pattern length is dereferenced), and the most specific
- * (longest) pattern wins, so `fuck you` beats a stored `fuck` regardless of
- * insertion order; ties keep first-stored-wins.
+ * Validates, compiles, and orders stored rules once so a batch of comments can
+ * be matched without repeating the work. Shape validation happens before any
+ * pattern length is dereferenced, each regex is compiled (and ReDoS-checked)
+ * exactly once, and the most specific (longest) pattern sorts first, so
+ * `fuck you` beats a stored `fuck` regardless of insertion order; ties keep
+ * first-stored-wins.
  *
  * @throws If a stored rule is invalid.
  */
-export function matchRule(text: string, authorChannelId: string, rules: RuleRow[]): RuleRow | null {
+export function prepareRules(rules: RuleRow[]): PreparedRule[] {
 	const prepared = rules.map((rule) => {
 		assertShape(rule);
-		return { rule, compiled: rule.type === 'regex' ? regex(rule) : null };
+		const valid = rule as PreparedRule['rule'];
+		return { rule: valid, compiled: rule.type === 'regex' ? regex(rule) : null };
 	});
 	prepared.sort((a, b) => b.rule.pattern.length - a.rule.pattern.length);
+	return prepared;
+}
+
+/** Finds the prepared rule that matches the comment or its author. */
+export function matchPreparedRule(text: string, authorChannelId: string, prepared: PreparedRule[]): PreparedRule['rule'] | null {
 	const lower = text.toLowerCase();
 	for (const { rule, compiled } of prepared) {
 		if (rule.type === 'keyword' && lower.includes(rule.pattern.toLowerCase())) return rule;
@@ -184,4 +197,16 @@ export function matchRule(text: string, authorChannelId: string, rules: RuleRow[
 		if (compiled?.test(text)) return rule;
 	}
 	return null;
+}
+
+/**
+ * Finds the validated moderation rule that matches the comment or its author.
+ * Prepares the rules for this single call; callers matching multiple comments
+ * against the same rules should call `prepareRules` once and `matchPreparedRule`
+ * per comment instead.
+ *
+ * @throws If a stored rule is invalid.
+ */
+export function matchRule(text: string, authorChannelId: string, rules: RuleRow[]): RuleRow | null {
+	return matchPreparedRule(text, authorChannelId, prepareRules(rules));
 }

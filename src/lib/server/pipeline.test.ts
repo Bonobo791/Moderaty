@@ -113,10 +113,12 @@ const mocks = vi.hoisted(() => {
 		deleteComment: vi.fn(),
 		scoreComment: vi.fn(),
 		serializeScores: vi.fn(),
+		checkSync: vi.fn(() => ({ status: 'safe' })),
 		DeadlineExceededError: class DeadlineExceededError extends Error {}
 	};
 });
 
+vi.mock('recheck', () => ({ checkSync: mocks.checkSync }));
 vi.mock('$lib/server/crypto', () => ({ decrypt: mocks.decrypt }));
 vi.mock('$lib/server/db', () => ({ db: mocks.db }));
 vi.mock('$env/dynamic/private', () => ({ env: mocks.state.env }));
@@ -251,6 +253,19 @@ test.each([
 		expect(mocks.deleteComment).not.toHaveBeenCalled();
 	}
 	expect(result).toMatchObject({ fetched: 1, acted, queued, partial: false, skipped: false, dryRun: false });
+});
+
+test('validates and compiles each regex rule once per run, not per comment', async () => {
+	mocks.state.ruleRows = [{ id: 1, type: 'regex', pattern: 'spam', action: 'hold' }];
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ id: 'a', text: 'spam one' }), newComment({ id: 'b', text: 'spam two' })],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	await runChannel('channel');
+
+	expect(mocks.checkSync).toHaveBeenCalledTimes(1);
 });
 
 test('routes AI scoring failures to the review queue instead of failing the run (I11)', async () => {

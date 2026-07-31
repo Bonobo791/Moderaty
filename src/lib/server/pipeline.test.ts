@@ -148,6 +148,7 @@ function newComment(overrides: Partial<NewComment> = {}): NewComment {
 	return {
 		id: 'comment',
 		threadId: 'thread',
+		videoId: 'video',
 		authorChannelId: 'author',
 		authorName: 'Author',
 		text: 'A comment',

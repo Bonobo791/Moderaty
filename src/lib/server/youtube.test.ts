@@ -17,7 +17,7 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { afterEach, expect, test, vi } from 'vitest';
-import { fetchNewComments, getCommentModerationStatus, setModerationStatus } from './youtube';
+import { fetchNewComments, fetchVideoMetadata, getCommentModerationStatus, setModerationStatus } from './youtube';
 
 function comment(id: string, publishedAt: string, text = `Comment ${id}`) {
 	return {
@@ -26,6 +26,7 @@ function comment(id: string, publishedAt: string, text = `Comment ${id}`) {
 			topLevelComment: {
 				id,
 				snippet: {
+					videoId: `video-${id}`,
 					authorChannelId: { value: `author-${id}` },
 					authorDisplayName: `Author ${id}`,
 					textDisplay: text,
@@ -171,4 +172,91 @@ test('treats a missing comment as absent during recovery verification', async ()
 	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 404 })));
 
 	await expect(getCommentModerationStatus('comment', 'token')).resolves.toBeNull();
+});
+
+test('parses each comment\'s video ID for tone context', async () => {
+	const fetch = vi.fn().mockResolvedValue(page([comment('1', '2026-01-04T00:00:00.000Z')]));
+	vi.stubGlobal('fetch', fetch);
+
+	const result = await fetchNewComments('channel', 'token', null);
+
+	expect(result.comments[0]).toMatchObject({ id: '1', videoId: 'video-1' });
+});
+
+test('falls back to the thread video ID when the comment snippet lacks one', async () => {
+	const fallback = comment('1', '2026-01-04T00:00:00.000Z');
+	delete (fallback.snippet.topLevelComment.snippet as Record<string, unknown>).videoId;
+	(fallback.snippet as Record<string, unknown>).videoId = 'video-thread';
+	const fetch = vi.fn().mockResolvedValue(page([fallback]));
+	vi.stubGlobal('fetch', fetch);
+
+	const result = await fetchNewComments('channel', 'token', null);
+
+	expect(result.comments[0]).toMatchObject({ id: '1', videoId: 'video-thread' });
+});
+
+test('skips a comment with no video ID instead of failing the page', async () => {
+	const noVideo = comment('no-video', '2026-01-04T00:00:00.000Z');
+	delete (noVideo.snippet.topLevelComment.snippet as Record<string, unknown>).videoId;
+	const fetch = vi.fn().mockResolvedValue(page([
+		noVideo,
+		comment('normal', '2026-01-03T00:00:00.000Z')
+	]));
+	vi.stubGlobal('fetch', fetch);
+	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+	const result = await fetchNewComments('channel', 'token', null);
+
+	expect(result.comments.map((item) => item.id)).toEqual(['normal']);
+	expect(warn).toHaveBeenCalled();
+});
+
+function videoItem(id: string, title = `Title ${id}`, description = `Description ${id}`) {
+	return { id, snippet: { title, description } };
+}
+
+test('fetches video metadata in batches of fifty', async () => {
+	const ids = Array.from({ length: 51 }, (_, index) => `video-${index + 1}`);
+	const fetch = vi.fn()
+		.mockResolvedValueOnce(new Response(JSON.stringify({ items: ids.slice(0, 50).map((id) => videoItem(id)) }), { status: 200 }))
+		.mockResolvedValueOnce(new Response(JSON.stringify({ items: [videoItem('video-51')] }), { status: 200 }));
+	vi.stubGlobal('fetch', fetch);
+
+	const result = await fetchVideoMetadata(ids, 'token');
+
+	expect(fetch).toHaveBeenCalledTimes(2);
+	expect(String(fetch.mock.calls[0]?.[0])).toContain('part=snippet');
+	expect(result.get('video-1')).toEqual({ title: 'Title video-1', description: 'Description video-1' });
+	expect(result.get('video-51')).toEqual({ title: 'Title video-51', description: 'Description video-51' });
+});
+
+test('truncates long video descriptions for the tone prompt', async () => {
+	const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+		items: [videoItem('video-1', 'Title', 'd'.repeat(600))]
+	}), { status: 200 }));
+	vi.stubGlobal('fetch', fetch);
+
+	const result = await fetchVideoMetadata(['video-1'], 'token');
+
+	expect(result.get('video-1')?.description).toBe('d'.repeat(500));
+});
+
+test('skips malformed video metadata items without failing the batch', async () => {
+	const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+		items: [{ id: 'bad', snippet: {} }, videoItem('good')]
+	}), { status: 200 }));
+	vi.stubGlobal('fetch', fetch);
+	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+	const result = await fetchVideoMetadata(['bad', 'good'], 'token');
+
+	expect(result.has('bad')).toBe(false);
+	expect(result.get('good')).toEqual({ title: 'Title good', description: 'Description good' });
+	expect(warn).toHaveBeenCalled();
+});
+
+test('fails loudly when the videos.list request fails', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('quota exceeded', { status: 403 })));
+
+	await expect(fetchVideoMetadata(['video-1'], 'token')).rejects.toThrow('videos.list failed: 403');
 });

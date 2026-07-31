@@ -78,6 +78,7 @@ export async function createTestDb(): Promise<TestDb> {
 			last_run_at TEXT,
 			lease_expires_at TEXT,
 			active INTEGER NOT NULL DEFAULT 1,
+			tone_level INTEGER,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE TABLE rules (

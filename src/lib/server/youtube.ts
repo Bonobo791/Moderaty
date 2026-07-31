@@ -26,6 +26,7 @@ type JsonObject = Record<string, unknown>;
 export interface NewComment {
 	id: string;
 	threadId: string;
+	videoId: string;
 	authorChannelId: string;
 	authorName: string;
 	text: string;
@@ -86,8 +87,13 @@ function parseComment(item: unknown, index: number): NewComment | null {
 	const threadId = optionalString(thread.id);
 	const publishedAt = optionalString(snippet.publishedAt);
 	const text = optionalString(snippet.textDisplay);
+	const videoId = optionalString(snippet.videoId) ?? optionalString(object(thread.snippet, `${context}.snippet`).videoId);
 	if (!id || !threadId || !text || !publishedAt || Number.isNaN(Date.parse(publishedAt))) {
 		console.warn(`${context} is malformed (missing id, text, or a valid publishedAt); skipping it`);
+		return null;
+	}
+	if (!videoId) {
+		console.warn(`${context} (comment ${id}) has no videoId; skipping it`);
 		return null;
 	}
 	const channelIdObject = snippet.authorChannelId;
@@ -105,11 +111,54 @@ function parseComment(item: unknown, index: number): NewComment | null {
 	return {
 		id,
 		threadId,
+		videoId,
 		authorChannelId: authorChannelId ?? '',
 		authorName: authorName ?? '[unavailable author]',
 		text,
 		publishedAt
 	};
+}
+
+const MAX_VIDEO_DESCRIPTION_LENGTH = 500;
+
+/**
+ * Fetches titles and descriptions for videos, for tone-scoring context.
+ *
+ * @param videoIds - The video IDs to look up (batched 50 per API call).
+ * @param accessToken - The OAuth access token for the YouTube API.
+ * @param deadline - Optional request deadline.
+ * @returns A map from video ID to its title and truncated description; videos
+ * whose metadata fails validation are omitted (and logged), never fatal.
+ */
+export async function fetchVideoMetadata(
+	videoIds: string[],
+	accessToken: string,
+	deadline?: number
+): Promise<Map<string, { title: string; description: string }>> {
+	const out = new Map<string, { title: string; description: string }>();
+	for (let i = 0; i < videoIds.length; i += 50) {
+		const batch = videoIds.slice(i, i + 50);
+		const params = new URLSearchParams({ part: 'snippet', id: batch.join(',') });
+		const res = await ytFetch(`/videos?${params}`, accessToken, undefined, deadline);
+		const data = object(await jsonResponse(res, 'videos.list'), 'videos.list response');
+		if (!Array.isArray(data.items)) throw new Error('videos.list response items is missing or invalid');
+		for (const [index, item] of data.items.entries()) {
+			const context = `videos.list response item ${index}`;
+			try {
+				const video = object(item, context);
+				const id = requiredString(video.id, `${context}.id`);
+				const snippet = object(video.snippet, `${context}.snippet`);
+				const title = requiredString(snippet.title, `${context}.snippet.title`);
+				out.set(id, {
+					title,
+					description: optionalString(snippet.description)?.slice(0, MAX_VIDEO_DESCRIPTION_LENGTH) ?? ''
+				});
+			} catch (error) {
+				console.warn(`${context} is malformed; skipping it:`, error);
+			}
+		}
+	}
+	return out;
 }
 
 /**

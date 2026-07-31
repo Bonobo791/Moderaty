@@ -69,10 +69,14 @@ export function applyArrival(counts: Counts): Counts {
 	return { ...counts, incoming: counts.incoming + 1 };
 }
 
-/** A verdict settles: enforcement actions feed "actioned", doubt feeds "yours". */
+/**
+ * A verdict settles. The tool acts on every comment it judges — approve,
+ * delete, ban, reject, hold — so actioned always +1. HELD also lands on the
+ * creator's pile, so yours +1 on top. That closes the books on the
+ * illustrative night: incoming 47 = actioned 41 + yours 6.
+ */
 export function applyVerdict(counts: Counts, verdict: Verdict): Counts {
-	if (verdict === 'HELD') return { ...counts, yours: counts.yours + 1 };
-	if (verdict === 'APPROVED') return counts;
+	if (verdict === 'HELD') return { ...counts, actioned: counts.actioned + 1, yours: counts.yours + 1 };
 	return { ...counts, actioned: counts.actioned + 1 };
 }
 

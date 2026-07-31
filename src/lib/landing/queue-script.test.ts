@@ -44,25 +44,24 @@ describe('Bonk Queue counter logic', () => {
 		}
 	);
 
-	it('HELD goes to the human: yours +1, actioned untouched', () => {
+	it('HELD goes to the human: yours +1 on top of the tool action', () => {
 		const next = applyVerdict(INITIAL_COUNTS, 'HELD');
 		expect(next.yours).toBe(INITIAL_COUNTS.yours + 1);
-		expect(next.actioned).toBe(INITIAL_COUNTS.actioned);
+		expect(next.actioned).toBe(INITIAL_COUNTS.actioned + 1);
 	});
 
-	it('APPROVED touches neither pile', () => {
+	it('APPROVED is still a tool action: actioned +1, yours untouched', () => {
 		const next = applyVerdict(INITIAL_COUNTS, 'APPROVED');
-		expect(next.actioned).toBe(INITIAL_COUNTS.actioned);
+		expect(next.actioned).toBe(INITIAL_COUNTS.actioned + 1);
 		expect(next.yours).toBe(INITIAL_COUNTS.yours);
 	});
 
-	it('a full scripted pass lands on the illustrative incoming/yours totals', () => {
+	it('a full scripted pass lands exactly on the illustrative night: 47/41/6', () => {
 		let counts = INITIAL_COUNTS;
 		for (const item of SCRIPT) {
 			counts = applyVerdict(applyArrival(counts), item.verdict);
 		}
-		expect(counts.incoming).toBe(FINAL_COUNTS.incoming);
-		expect(counts.yours).toBe(FINAL_COUNTS.yours);
+		expect(counts).toEqual(FINAL_COUNTS);
 	});
 
 	it('the reduced-motion end state is the labeled illustrative night: 47/41/6', () => {

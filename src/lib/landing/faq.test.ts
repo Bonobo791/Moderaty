@@ -1,5 +1,3 @@
-<!--
-
 // Moderaty — YouTube Comment Auto-Moderation Tool
 // Copyright (C) 2026 Andrew Philip Weilbacher
 //
@@ -18,19 +16,27 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
--->
+import { describe, expect, it } from 'vitest';
+import { FAQ_ENTRIES } from './faq';
+import { SCRIPT } from './queue-script';
 
-<!doctype html>
-<html lang="en">
-	<head>
-		<meta charset="utf-8" />
-		<meta name="viewport" content="width=device-width, initial-scale=1" />
-		<meta name="text-scale" content="scale" />
-		<link rel="preload" href="/fonts/Archivo-var.woff2" as="font" type="font/woff2" crossorigin />
-		<link rel="preload" href="/fonts/IBMPlexMono-500.woff2" as="font" type="font/woff2" crossorigin />
-		%sveltekit.head%
-	</head>
-	<body data-sveltekit-preload-data="hover">
-		<div style="display: contents">%sveltekit.body%</div>
-	</body>
-</html>
+describe('landing copy guardrails', () => {
+	it('ships exactly the 8 FAQ pairs, each a real question with a real answer', () => {
+		expect(FAQ_ENTRIES).toHaveLength(8);
+		for (const { q, a } of FAQ_ENTRIES) {
+			expect(q.endsWith('?')).toBe(true);
+			expect(a.length).toBeGreaterThan(40);
+		}
+	});
+
+	it('uses no em-dashes or en-dashes anywhere in FAQ or queue copy', () => {
+		for (const { q, a } of FAQ_ENTRIES) {
+			expect(q).not.toMatch(/[—–]/);
+			expect(a).not.toMatch(/[—–]/);
+		}
+		for (const item of SCRIPT) {
+			expect(item.text).not.toMatch(/[—–]/);
+			expect(item.reason).not.toMatch(/[—–]/);
+		}
+	});
+});

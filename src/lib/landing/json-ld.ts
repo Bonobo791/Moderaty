@@ -1,5 +1,3 @@
-<!--
-
 // Moderaty — YouTube Comment Auto-Moderation Tool
 // Copyright (C) 2026 Andrew Philip Weilbacher
 //
@@ -18,19 +16,13 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
--->
-
-<!doctype html>
-<html lang="en">
-	<head>
-		<meta charset="utf-8" />
-		<meta name="viewport" content="width=device-width, initial-scale=1" />
-		<meta name="text-scale" content="scale" />
-		<link rel="preload" href="/fonts/Archivo-var.woff2" as="font" type="font/woff2" crossorigin />
-		<link rel="preload" href="/fonts/IBMPlexMono-500.woff2" as="font" type="font/woff2" crossorigin />
-		%sveltekit.head%
-	</head>
-	<body data-sveltekit-preload-data="hover">
-		<div style="display: contents">%sveltekit.body%</div>
-	</body>
-</html>
+/**
+ * Serialize data into a <script type="application/ld+json"> block safe for
+ * {@html} injection. Escaping every "<" as the six characters \\u003c keeps the JSON valid
+ * while making it impossible to close the script element (</script>) or
+ * open an HTML comment (<!--) from inside a string value.
+ */
+export function jsonLd(data: object): string {
+	const json = JSON.stringify(data).replace(/</g, '\\u003c');
+	return '<' + 'script type="application/ld+json">' + json + '</' + 'script>';
+}

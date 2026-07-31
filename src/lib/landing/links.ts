@@ -1,5 +1,3 @@
-<!--
-
 // Moderaty — YouTube Comment Auto-Moderation Tool
 // Copyright (C) 2026 Andrew Philip Weilbacher
 //
@@ -18,19 +16,8 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
--->
-
-<!doctype html>
-<html lang="en">
-	<head>
-		<meta charset="utf-8" />
-		<meta name="viewport" content="width=device-width, initial-scale=1" />
-		<meta name="text-scale" content="scale" />
-		<link rel="preload" href="/fonts/Archivo-var.woff2" as="font" type="font/woff2" crossorigin />
-		<link rel="preload" href="/fonts/IBMPlexMono-500.woff2" as="font" type="font/woff2" crossorigin />
-		%sveltekit.head%
-	</head>
-	<body data-sveltekit-preload-data="hover">
-		<div style="display: contents">%sveltekit.body%</div>
-	</body>
-</html>
+export const GITHUB_URL = 'https://github.com/Bonobo791/Moderaty';
+export const AGPL_URL = 'https://www.gnu.org/licenses/agpl-3.0.html';
+export const CONTACT_URL = 'mailto:contact@marketingprowess.simplelogin.com';
+/** Every "Connect YouTube channel" CTA starts the real OAuth flow. */
+export const LOGIN_URL = '/login';

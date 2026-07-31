@@ -19,6 +19,7 @@
 import { randomBytes } from 'node:crypto';
 import { env } from '$env/dynamic/private';
 import { fetchWithRetry, jsonResponse } from '$lib/server/http';
+import { TONE_PROMPT } from '$lib/server/tonePrompt';
 
 export interface ToneContext {
 	videoTitle: string;
@@ -28,32 +29,6 @@ export interface ToneContext {
 export interface ToneResult {
 	score: number; // 0 = respectful, 1 = genuine harm without verbal abuse
 }
-
-// The calibrated rubric is part of the prompt contract: over-scoring drives
-// real-world bans, so the model must stay conservative and treat 0.95+ as
-// rare — genuine attempts to harm (targeted harassment, dogpiling,
-// manipulation) expressed WITHOUT verbal abuse. Verbal abuse itself is the
-// omni-moderation signal's job, not this one.
-const TONE_PROMPT = `You score the tone of YouTube comments for a channel owner.
-Given the video's title and description for context, score how demeaning,
-condescending, or sarcastically mocking ONE comment is toward the creator or
-other commenters. Respond with JSON only: {"score": <number from 0 to 1>}.
-
-Use this exact calibrated scale:
-- 0.00-0.50 Acceptable: genuine or respectful disagreement, criticism of ideas,
-  earnest questions. Most comments land here.
-- 0.51-0.75 Borderline: mildly condescending or passive-aggressive; snark
-  without clear malice.
-- 0.76-0.94 Clearly demeaning: mockery, belittling, or contempt aimed at a
-  person. Requires clear evidence in the text.
-- 0.95-1.00 Reserved and rare: the author is genuinely attempting to cause
-  harm WITHOUT verbal abuse — targeted harassment, dogpiling or brigading,
-  manipulation or humiliation campaigns. Almost never used; when unsure,
-  score lower.
-
-Stay conservative: over-scoring leads to real bans on real people. Scores
-above 0.75 need concrete textual evidence, and 0.95 or above should almost
-never be used.`;
 
 /**
  * Scores a comment's tone (demeaning / condescending / sarcastic) with video context.

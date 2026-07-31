@@ -1,0 +1,58 @@
+// Moderaty — YouTube Comment Auto-Moderation Tool
+// Copyright (C) 2026 Andrew Philip Weilbacher
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+//
+// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+
+export type FaqEntry = { q: string; a: string };
+
+/**
+ * The 8 landing-page Q&As. Single source for both the visible FAQ
+ * accordion and the FAQPage JSON-LD in +page.svelte — keep them verbatim.
+ */
+export const FAQ_ENTRIES: FaqEntry[] = [
+	{
+		q: 'What is Moderaty?',
+		a: "Moderaty is comment protection for YouTube creators. It reads every new comment on your channel, enforces your rules instantly, scores the rest with AI across 13 toxicity categories, and holds anything borderline for your one-click review. It's free and open source under AGPL."
+	},
+	{
+		q: 'Will Moderaty ban my real fans?',
+		a: "Not by default. Only comments scoring 0.95 or higher on the AI's toxicity scale trigger an automatic ban. Anything uncertain waits in your review queue for a one-click decision, and every action is logged and reversible."
+	},
+	{
+		q: "What happens when the AI isn't sure about a comment?",
+		a: "It goes to your queue. If the AI can't score a comment at all, the comment is held for you, never auto-approved and never auto-rejected."
+	},
+	{
+		q: 'Does Moderaty reply to comments or post anything?',
+		a: 'No. Moderaty is protection-only. It holds, hides, deletes, and bans. It never writes replies, never posts under your name, and never does growth automation.'
+	},
+	{
+		q: 'What YouTube account access does Moderaty need?',
+		a: 'Google OAuth permission to read and moderate comments on your channel. Nothing else. The code is open source under AGPL, so you can verify exactly what it does with that access.'
+	},
+	{
+		q: 'Is Moderaty really free?',
+		a: 'Yes. Moderaty is free and open source under the AGPL license. Connect your channel and your next 100 comments are protected in about two minutes of setup.'
+	},
+	{
+		q: 'How is Moderaty different from CommentShark or YouTube Studio?',
+		a: 'YouTube Studio flags comments but leaves you to read and act on them. CommentShark automates engagement, including AI replies. Moderaty does one job: enforce your norms so you never have to read the hate.'
+	},
+	{
+		q: 'Can I test Moderaty without changing anything on my channel?',
+		a: 'Yes. Dry-run mode classifies everything and changes nothing. The audit trail shows exactly what would have happened, comment by comment.'
+	}
+];

@@ -34,7 +34,9 @@ export async function load({ params, locals }) {
 		.orderBy(desc(comments.publishedAt))
 		.limit(100)
 		.all();
-	return { ch, pending };
+	// Project only what the page renders — never serialize refreshTokenEnc (or
+	// any future secret column) to the browser.
+	return { ch: { id: ch.id, title: ch.title }, pending };
 }
 
 async function act(paramsId: string, commentId: string, action: 'approve' | 'reject' | 'delete' | 'ban', locals: App.Locals) {

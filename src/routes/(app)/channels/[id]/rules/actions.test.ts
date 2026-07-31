@@ -20,7 +20,7 @@ import { expect, test } from 'vitest';
 import { postForm, setupTestDb, testDb } from '$lib/server/testdb';
 import { channels, rules } from '$lib/server/db/schema';
 
-import { actions } from './+page.server';
+import { actions, load } from './+page.server';
 
 setupTestDb(['rules', 'channels']);
 
@@ -47,6 +47,13 @@ function remove(channelId: string, ruleId: string, user: typeof OWNER | null = O
 async function ruleRows() {
 	return testDb().db.select().from(rules).all();
 }
+
+test('load projects only the channel fields the page renders — never the credential', async () => {
+	await seedChannel('UC1');
+	const result = await load({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);
+	expect(result?.ch).toEqual({ id: 'UC1', title: 'Ch' });
+	expect(result?.ch).not.toHaveProperty('refreshTokenEnc');
+});
 
 test('remove deletes this channel rule and reports ok', async () => {
 	await seedChannel('UC1');

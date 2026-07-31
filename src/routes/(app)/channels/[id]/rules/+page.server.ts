@@ -26,7 +26,9 @@ import { fail } from '@sveltejs/kit';
 export async function load({ params, locals }) {
 	const ch = await ownedChannel(params.id, locals);
 	const rs = await db.select().from(rules).where(eq(rules.channelId, params.id)).all();
-	return { ch, rs };
+	// Project only what the page renders — never serialize refreshTokenEnc (or
+	// any future secret column) to the browser.
+	return { ch: { id: ch.id, title: ch.title }, rs };
 }
 
 export const actions = {

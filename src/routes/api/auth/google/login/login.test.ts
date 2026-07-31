@@ -129,6 +129,26 @@ test('callback returns 502 when userinfo fails', async () => {
 	await expectHttpError(loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never), 502);
 });
 
+test('callback returns 502 when the userinfo request itself fails', async () => {
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	vi.stubGlobal(
+		'fetch',
+		vi.fn(async (input: RequestInfo | URL) => {
+			const url = String(input);
+			if (url === 'https://oauth2.googleapis.com/token') {
+				return new Response(JSON.stringify({ access_token: 't' }), { status: 200 });
+			}
+			throw new Error('socket hang up');
+		})
+	);
+	const cookies = makeCookiesWithState('s');
+	await expectHttpError(loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never), 502);
+	expect(errorSpy.mock.calls.length > 0).toBe(true);
+	// The state is not consumed on a transient failure — the only oauth_state
+	// write is the initial seed, so the callback stays retryable.
+	expect(cookies.setCalls.filter((c) => c.name === 'oauth_state')).toHaveLength(1);
+});
+
 test('callback returns 502 when userinfo has no usable sub claim', async () => {
 	stubTokenAndUserinfo({ email: 'a@example.com' });
 	const cookies = makeCookiesWithState('s');

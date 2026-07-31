@@ -16,22 +16,23 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { db } from '$lib/server/db';
-import { auditLog } from '$lib/server/db/schema';
-import { ownedChannel } from '$lib/server/ownership';
-import { eq, desc } from 'drizzle-orm';
+import { expect, test } from 'vitest';
+import { setupTestDb, testDb } from '$lib/server/testdb';
+import { channels } from '$lib/server/db/schema';
 
-export async function load({ params, locals }) {
-	// Ownership-scoped: another user's channel (and its audit log) reads as "not found".
-	const ch = await ownedChannel(params.id, locals);
-	const entries = await db
-		.select()
-		.from(auditLog)
-		.where(eq(auditLog.channelId, params.id))
-		.orderBy(desc(auditLog.createdAt))
-		.limit(200)
-		.all();
-	// Project only what the page renders — never serialize refreshTokenEnc (or
-	// any future secret column) to the browser.
-	return { ch: { id: ch.id, title: ch.title }, entries };
-}
+import { load } from './+page.server';
+
+setupTestDb(['audit_log', 'channels']);
+
+const OWNER = { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' };
+
+test('load projects only the channel fields the page renders — never the credential', async () => {
+	await testDb()
+		.db.insert(channels)
+		.values({ id: 'UC1', userId: OWNER.id, title: 'Ch', refreshTokenEnc: 'enc-secret' });
+
+	const result = await load({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);
+
+	expect(result?.ch).toEqual({ id: 'UC1', title: 'Ch' });
+	expect(result?.ch).not.toHaveProperty('refreshTokenEnc');
+});

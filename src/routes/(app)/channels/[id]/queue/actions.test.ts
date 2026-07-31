@@ -36,7 +36,7 @@ vi.mock('$lib/server/youtube', () => ({
 	deleteComment: mocks.deleteComment
 }));
 
-import { actions } from './+page.server';
+import { actions, load } from './+page.server';
 
 setupTestDb(['audit_log', 'comments', 'channels']);
 
@@ -94,6 +94,12 @@ async function expectNothingDecided(id: string, status: string) {
 	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
 }
+
+test('load projects only the channel fields the page renders — never the credential', async () => {
+	const result = await load({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);
+	expect(result?.ch).toEqual({ id: 'UC1', title: 'One' });
+	expect(result?.ch).not.toHaveProperty('refreshTokenEnc');
+});
 
 test('every action rejects a missing commentId with 400 and mutates nothing', async () => {
 	await seedComment('c1', 'UC1');

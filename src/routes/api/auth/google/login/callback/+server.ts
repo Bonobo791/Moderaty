@@ -43,11 +43,18 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 		'Google sign-in failed — please retry'
 	);
 
-	const infoRes = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
-		headers: { Authorization: `Bearer ${tokens.accessToken}` },
-		signal: AbortSignal.timeout(10_000)
-	});
-	const infoText = await infoRes.text();
+	let infoRes: Response;
+	let infoText: string;
+	try {
+		infoRes = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
+			headers: { Authorization: `Bearer ${tokens.accessToken}` },
+			signal: AbortSignal.timeout(10_000)
+		});
+		infoText = await infoRes.text();
+	} catch (e) {
+		console.error(`google userinfo request failed: ${e instanceof Error ? e.message : e}`);
+		throw error(502, 'Google sign-in failed — please retry');
+	}
 	if (!infoRes.ok) {
 		console.error(`google userinfo lookup failed: ${infoRes.status}`);
 		throw error(502, 'Google sign-in failed — please retry');

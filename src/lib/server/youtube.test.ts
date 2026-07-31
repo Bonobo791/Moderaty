@@ -44,6 +44,16 @@ function page(items: ReturnType<typeof comment>[], nextPageToken?: string) {
 	}), { status: 200 });
 }
 
+/** Stubs fetch with the given commentThread pages, captures warnings, and runs one fetch. */
+async function fetchComments(...pages: Response[]) {
+	const fetch = vi.fn();
+	for (const response of pages) fetch.mockResolvedValueOnce(response);
+	vi.stubGlobal('fetch', fetch);
+	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+	const result = await fetchNewComments('channel', 'token', null);
+	return { result, warn };
+}
+
 afterEach(() => {
 	vi.unstubAllGlobals();
 });
@@ -112,14 +122,11 @@ test('normalizes missing author metadata instead of failing the page', async () 
 	const deletedAuthor = comment('deleted', '2026-01-04T00:00:00.000Z');
 	delete (deletedAuthor.snippet.topLevelComment.snippet as Record<string, unknown>).authorChannelId;
 	delete (deletedAuthor.snippet.topLevelComment.snippet as Record<string, unknown>).authorDisplayName;
-	const fetch = vi.fn().mockResolvedValue(page([
+
+	const { result, warn } = await fetchComments(page([
 		deletedAuthor,
 		comment('normal', '2026-01-03T00:00:00.000Z')
 	]));
-	vi.stubGlobal('fetch', fetch);
-	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
-	const result = await fetchNewComments('channel', 'token', null);
 
 	expect(result.comments.map((item) => item.id)).toEqual(['deleted', 'normal']);
 	expect(result.comments[0]).toMatchObject({ authorChannelId: '', authorName: '[unavailable author]' });
@@ -129,16 +136,11 @@ test('normalizes missing author metadata instead of failing the page', async () 
 test('skips a malformed comment without failing the page', async () => {
 	const malformed = comment('malformed', '2026-01-04T00:00:00.000Z');
 	delete (malformed.snippet.topLevelComment.snippet as Record<string, unknown>).textDisplay;
-	const fetch = vi.fn()
-		.mockResolvedValueOnce(page([
-			malformed,
-			comment('normal', '2026-01-03T00:00:00.000Z')
-		], 'page-2'))
-		.mockResolvedValueOnce(page([comment('next', '2026-01-02T00:00:00.000Z')]));
-	vi.stubGlobal('fetch', fetch);
-	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-	const result = await fetchNewComments('channel', 'token', null);
+	const { result, warn } = await fetchComments(
+		page([malformed, comment('normal', '2026-01-03T00:00:00.000Z')], 'page-2'),
+		page([comment('next', '2026-01-02T00:00:00.000Z')])
+	);
 
 	expect(result.comments.map((item) => item.id)).toEqual(['normal', 'next']);
 	expect(result).toMatchObject({ nextPageToken: null, reachedCursor: false });
@@ -175,10 +177,7 @@ test('treats a missing comment as absent during recovery verification', async ()
 });
 
 test('parses each comment\'s video ID for tone context', async () => {
-	const fetch = vi.fn().mockResolvedValue(page([comment('1', '2026-01-04T00:00:00.000Z')]));
-	vi.stubGlobal('fetch', fetch);
-
-	const result = await fetchNewComments('channel', 'token', null);
+	const { result } = await fetchComments(page([comment('1', '2026-01-04T00:00:00.000Z')]));
 
 	expect(result.comments[0]).toMatchObject({ id: '1', videoId: 'video-1' });
 });
@@ -187,10 +186,8 @@ test('falls back to the thread video ID when the comment snippet lacks one', asy
 	const fallback = comment('1', '2026-01-04T00:00:00.000Z');
 	delete (fallback.snippet.topLevelComment.snippet as Record<string, unknown>).videoId;
 	(fallback.snippet as Record<string, unknown>).videoId = 'video-thread';
-	const fetch = vi.fn().mockResolvedValue(page([fallback]));
-	vi.stubGlobal('fetch', fetch);
 
-	const result = await fetchNewComments('channel', 'token', null);
+	const { result } = await fetchComments(page([fallback]));
 
 	expect(result.comments[0]).toMatchObject({ id: '1', videoId: 'video-thread' });
 });
@@ -198,14 +195,11 @@ test('falls back to the thread video ID when the comment snippet lacks one', asy
 test('skips a comment with no video ID instead of failing the page', async () => {
 	const noVideo = comment('no-video', '2026-01-04T00:00:00.000Z');
 	delete (noVideo.snippet.topLevelComment.snippet as Record<string, unknown>).videoId;
-	const fetch = vi.fn().mockResolvedValue(page([
+
+	const { result, warn } = await fetchComments(page([
 		noVideo,
 		comment('normal', '2026-01-03T00:00:00.000Z')
 	]));
-	vi.stubGlobal('fetch', fetch);
-	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
-	const result = await fetchNewComments('channel', 'token', null);
 
 	expect(result.comments.map((item) => item.id)).toEqual(['normal']);
 	expect(warn).toHaveBeenCalled();

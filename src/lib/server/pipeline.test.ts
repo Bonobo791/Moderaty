@@ -195,6 +195,16 @@ function expectActionState(state: string) {
 	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({ commentId: 'comment', state })]);
 }
 
+function expectAiUnavailableQueued(result: unknown, extra: Record<string, unknown> = {}) {
+	expect(mocks.state.insertedComments).toEqual([
+		expect.objectContaining({ id: 'comment', status: 'pending', decidedBy: 'none', aiScore: null })
+	]);
+	expect(mocks.state.insertedAudits).toEqual([
+		expect.objectContaining({ commentId: 'comment', action: 'queue', reason: expect.stringContaining('ai unavailable') })
+	]);
+	expect(result).toMatchObject({ acted: 0, queued: 1, ...extra });
+}
+
 beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.state.tables = { channels, comments, rules, auditLog, moderationActions };
@@ -288,13 +298,7 @@ test('routes AI scoring failures to the review queue instead of failing the run 
 
 	const result = await runChannel('channel');
 
-	expect(mocks.state.insertedComments).toEqual([
-		expect.objectContaining({ id: 'comment', status: 'pending', decidedBy: 'none', aiScore: null })
-	]);
-	expect(mocks.state.insertedAudits).toEqual([
-		expect.objectContaining({ commentId: 'comment', action: 'queue', reason: expect.stringContaining('ai unavailable') })
-	]);
-	expect(result).toMatchObject({ fetched: 1, acted: 0, queued: 1, partial: false, skipped: false });
+	expectAiUnavailableQueued(result, { fetched: 1, partial: false, skipped: false });
 });
 
 test.each([
@@ -389,13 +393,7 @@ test('routes tone scoring failures to the review queue (I11)', async () => {
 
 	const result = await runChannel('channel');
 
-	expect(mocks.state.insertedComments).toEqual([
-		expect.objectContaining({ id: 'comment', status: 'pending', decidedBy: 'none', aiScore: null })
-	]);
-	expect(mocks.state.insertedAudits).toEqual([
-		expect.objectContaining({ commentId: 'comment', action: 'queue', reason: expect.stringContaining('ai unavailable') })
-	]);
-	expect(result).toMatchObject({ acted: 0, queued: 1 });
+	expectAiUnavailableQueued(result);
 });
 
 test('persists the chronologically newest timestamp when UTC offsets differ', async () => {

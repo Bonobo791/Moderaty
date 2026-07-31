@@ -28,7 +28,8 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
-import { makeCookies, makeCookiesWithState, setupTestDb, testDb } from '$lib/server/testdb';
+import { setupTestDb, testDb } from '$lib/server/testdb';
+import { makeCookies, makeCookiesWithState } from '$lib/server/testcookies';
 import { channels, sessions, users } from '$lib/server/db/schema';
 import { GET as startLogin } from './+server';
 import { GET as loginCallback } from './callback/+server';

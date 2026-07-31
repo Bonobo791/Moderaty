@@ -24,14 +24,17 @@
 export function makeCookies() {
 	const store = new Map<string, string>();
 	const setCalls: Array<{ name: string; value: string; opts: Record<string, unknown> }> = [];
+	const deleteCalls: Array<{ name: string; opts: Record<string, unknown> | undefined }> = [];
 	return {
 		setCalls,
+		deleteCalls,
 		get: (name: string) => store.get(name),
 		set: (name: string, value: string, opts: Record<string, unknown>) => {
 			setCalls.push({ name, value, opts });
 			store.set(name, value);
 		},
-		delete: (name: string) => {
+		delete: (name: string, opts?: Record<string, unknown>) => {
+			deleteCalls.push({ name, opts });
 			store.delete(name);
 		}
 	};

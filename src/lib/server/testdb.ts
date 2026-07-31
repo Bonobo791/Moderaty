@@ -65,11 +65,10 @@ export function postForm(fields: Record<string, string>, url = 'http://localhost
 	return new Request(url, { method: 'POST', body: form });
 }
 
-/** Minimal Cookies stand-in that records set/delete calls like SvelteKit's. */
-export { makeCookies, makeCookiesWithState } from './testcookies';
-
 export async function createTestDb(): Promise<TestDb> {
 	const client = createClient({ url: 'file::memory:?cache=shared' });
+	// Match production Turso behavior so FK violations fail in tests too.
+	await client.execute('PRAGMA foreign_keys = ON');
 	await client.batch([
 		`CREATE TABLE users (
 			id TEXT PRIMARY KEY,

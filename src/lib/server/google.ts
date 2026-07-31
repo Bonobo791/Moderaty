@@ -72,11 +72,26 @@ export async function exchangeGoogleCode(
 		console.error(`${logPrefix} request failed: ${e instanceof Error ? e.message : e}`);
 		throw error(502, userError);
 	}
+	// Check the status before parsing (AGENTS.md): a non-OK response with a
+	// non-JSON body (e.g. a proxy error page) is an upstream failure, not a
+	// parse failure. Google's own error bodies carry non-secret error fields we
+	// can log — never the raw body, which may carry tokens.
+	if (!tokenRes.ok) {
+		let detail = 'no error detail';
+		try {
+			const body = JSON.parse(tokenText) as { error?: unknown; error_description?: unknown };
+			if (typeof body?.error === 'string') {
+				detail = `${body.error}${typeof body.error_description === 'string' ? `: ${body.error_description}` : ''}`;
+			}
+		} catch {
+			// Non-JSON error body — status alone is enough.
+		}
+		console.error(`${logPrefix} failed: ${tokenRes.status} ${detail}`);
+		throw error(502, userError);
+	}
 	let tokens: {
 		access_token?: unknown;
 		refresh_token?: unknown;
-		error?: unknown;
-		error_description?: unknown;
 	};
 	try {
 		tokens = JSON.parse(tokenText) as typeof tokens;
@@ -87,16 +102,6 @@ export async function exchangeGoogleCode(
 	if (typeof tokens !== 'object' || tokens === null) {
 		console.error(`${logPrefix} returned a non-object body: ${tokenRes.status}`);
 		throw error(502, 'invalid response from Google — please retry');
-	}
-	if (!tokenRes.ok) {
-		// Upstream failure, not a user error. Log only status and Google's
-		// non-secret error fields — never the raw body, which may carry tokens.
-		const detail =
-			typeof tokens.error === 'string'
-				? `${tokens.error}${typeof tokens.error_description === 'string' ? `: ${tokens.error_description}` : ''}`
-				: 'no error detail';
-		console.error(`${logPrefix} failed: ${tokenRes.status} ${detail}`);
-		throw error(502, userError);
 	}
 	if (typeof tokens.access_token !== 'string' || !tokens.access_token) {
 		console.error(`${logPrefix} returned 200 without an access_token`);

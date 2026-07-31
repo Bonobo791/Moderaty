@@ -18,7 +18,7 @@
 
 import { redirect, error } from '@sveltejs/kit';
 
-import { eq } from 'drizzle-orm';
+import { eq, isNull, or } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
@@ -80,17 +80,9 @@ export async function GET({ url, cookies, locals }: { url: URL; cookies: import(
 	const title = typeof ch.snippet?.title === 'string' ? ch.snippet.title : 'Untitled channel';
 
 	// A channel already owned by another account must not be reattached (or have
-	// its refresh token overwritten) by this one.
-	const existing = await db
-		.select({ userId: channels.userId })
-		.from(channels)
-		.where(eq(channels.id, ch.id))
-		.get();
-	if (existing?.userId && existing.userId !== user.id) {
-		throw error(409, 'this channel is connected to a different Moderaty account');
-	}
-
-	await db
+	// its refresh token overwritten) by this one. The conditional upsert keeps
+	// that check atomic with the write — a SELECT-then-upsert would race.
+	const updated = await db
 		.insert(channels)
 		.values({
 			id: ch.id,
@@ -102,8 +94,13 @@ export async function GET({ url, cookies, locals }: { url: URL; cookies: import(
 		})
 		.onConflictDoUpdate({
 			target: channels.id,
-			set: { userId: user.id, title, refreshTokenEnc: encrypt(tokens.refreshToken), active: 1 }
-		});
+			set: { userId: user.id, title, refreshTokenEnc: encrypt(tokens.refreshToken), active: 1 },
+			setWhere: or(isNull(channels.userId), eq(channels.userId, user.id))
+		})
+		.returning({ id: channels.id });
+	if (updated.length === 0) {
+		throw error(409, 'this channel is connected to a different Moderaty account');
+	}
 
 	// Consume the state only once the flow has succeeded, so a transient
 	// failure leaves the callback retryable while a success cannot be replayed.

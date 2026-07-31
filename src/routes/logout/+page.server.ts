@@ -18,7 +18,7 @@
 
 import { redirect } from '@sveltejs/kit';
 
-import { destroySession, SESSION_COOKIE } from '$lib/server/session';
+import { destroySession, requireUser, SESSION_COOKIE } from '$lib/server/session';
 
 import type { PageServerLoad, Actions } from './$types';
 
@@ -27,7 +27,8 @@ export const load: PageServerLoad = () => {
 };
 
 export const actions: Actions = {
-	default: async ({ cookies }) => {
+	default: async ({ cookies, locals }) => {
+		requireUser(locals);
 		const token = cookies.get(SESSION_COOKIE);
 		if (token) await destroySession(token);
 		cookies.delete(SESSION_COOKIE, { path: '/' });

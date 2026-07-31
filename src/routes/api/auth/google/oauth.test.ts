@@ -37,15 +37,15 @@ vi.mock('$lib/server/db', () => ({
 	db: {
 		insert: () => ({
 			values: (values: unknown) => ({
-				onConflictDoUpdate: async ({ set }: { set: unknown }) => {
-					mocks.upserts.push({ values, set });
-				}
-			})
-		}),
-		select: () => ({
-			from: () => ({
-				where: () => ({
-					get: async () => mocks.existingChannel
+				onConflictDoUpdate: ({ set, setWhere }: { set: unknown; setWhere: unknown }) => ({
+					returning: async () => {
+						mocks.upserts.push({ values, set, setWhere });
+						// The mock can't evaluate the setWhere predicate; simulate the
+						// "owned by another account" case as a skipped (empty) update.
+						// 'user-1' matches OWNER.id below.
+						if (mocks.existingChannel?.userId && mocks.existingChannel.userId !== 'user-1') return [];
+						return [{ id: 'UC123' }];
+					}
 				})
 			})
 		})
@@ -337,5 +337,8 @@ test('callback refuses to reconnect a channel owned by another account with 409'
 	const thrown = await captureCallback(makeCookiesWithState('s'), { code: 'abc', state: 's' });
 
 	expect(thrown?.status).toBe(409);
-	expect(mocks.upserts).toHaveLength(0);
+	// The write is attempted — the conditional upsert predicate is what blocks
+	// it (simulated as an empty returning set), keeping the check atomic.
+	expect(mocks.upserts).toHaveLength(1);
+	expect(mocks.upserts[0].setWhere).toBeDefined();
 });

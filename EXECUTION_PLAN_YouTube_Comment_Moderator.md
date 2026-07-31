@@ -1885,7 +1885,8 @@ Multi-user accounts landed after the MVP phases (branch `feat-user-accounts`).
 Decisions, confirmed with the maintainer:
 
 - **Sign-in is Google identity only** (`GET /api/auth/google/login` +
-  `/login/callback`, scopes `openid email profile`, `access_type=online`).
+  `/api/auth/google/login/callback`, scopes `openid email profile`,
+  `access_type=online`).
   YouTube channel connection stays a **separate** consent at the existing
   `/api/auth/google` URLs (`youtube.force-ssl`), now session-gated: the
   callback attaches `channels.userId` and refuses (409) to reattach a channel

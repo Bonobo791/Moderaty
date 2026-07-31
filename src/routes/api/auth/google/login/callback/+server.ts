@@ -77,11 +77,15 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 		const existing = await tx.select().from(users).where(eq(users.googleSub, sub)).get();
 		if (existing) return existing;
 		const count = await tx.select({ n: sql<number>`count(*)` }).from(users).get();
-		const created = await tx
+		// A concurrent same-sub sign-in can win the insert between the existence
+		// check above and here — insert conflict-tolerantly and re-select instead
+		// of surfacing a raw unique-violation to the user.
+		await tx
 			.insert(users)
 			.values({ id: randomBytes(16).toString('hex'), googleSub: sub, email, displayName })
-			.returning()
-			.get();
+			.onConflictDoNothing();
+		const created = await tx.select().from(users).where(eq(users.googleSub, sub)).get();
+		if (!created) throw error(500, 'account creation failed — please retry');
 		if (count?.n === 0) {
 			await tx.update(channels).set({ userId: created.id }).where(isNull(channels.userId));
 		}

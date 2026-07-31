@@ -25,16 +25,23 @@ import { getSessionUser, SESSION_COOKIE } from '$lib/server/session';
 // expiry so active users never get logged out.
 export const handle: Handle = async ({ event, resolve }) => {
 	const token = event.cookies.get(SESSION_COOKIE);
-	const resolution = await getSessionUser(token);
-	event.locals.user = resolution?.user ?? null;
-	if (resolution?.renewed && token) {
-		event.cookies.set(SESSION_COOKIE, token, {
-			path: '/',
-			httpOnly: true,
-			sameSite: 'lax',
-			secure: event.url.protocol === 'https:',
-			expires: new Date(resolution.expiresAt)
-		});
+	// A database outage must not take down public pages — treat it as signed
+	// out and let auth-gated routes fail their own requireUser check loudly.
+	try {
+		const resolution = await getSessionUser(token);
+		event.locals.user = resolution?.user ?? null;
+		if (resolution?.renewed && token) {
+			event.cookies.set(SESSION_COOKIE, token, {
+				path: '/',
+				httpOnly: true,
+				sameSite: 'lax',
+				secure: event.url.protocol === 'https:',
+				expires: new Date(resolution.expiresAt)
+			});
+		}
+	} catch (e) {
+		console.error('session lookup failed — treating request as signed out:', e);
+		event.locals.user = null;
 	}
 	return resolve(event);
 };

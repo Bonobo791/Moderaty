@@ -129,6 +129,33 @@ test('act fails loudly on a comment that is no longer pending', async () => {
 	await expectNothingDecided('c3', 'approved');
 });
 
+test('a second act on an already-claimed comment 404s and audits nothing new', async () => {
+	await seedComment('c1', 'UC1');
+	await act('approve', { commentId: 'c1' });
+
+	await expect(act('reject', { commentId: 'c1' })).rejects.toThrowError(expect.objectContaining({ status: 404 }));
+
+	expect((await commentRow('c1'))?.status).toBe('approved');
+	expect(await auditRows()).toHaveLength(1);
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+});
+
+test('a failed YouTube call releases the claim so the action stays retryable', async () => {
+	mocks.env.DRY_RUN = 'false';
+	mocks.setModerationStatus.mockRejectedValueOnce(new Error('youtube 500'));
+	await seedComment('c1', 'UC1');
+
+	await expect(act('reject', { commentId: 'c1' })).rejects.toThrowError('youtube 500');
+
+	expect(await commentRow('c1')).toMatchObject({ status: 'pending', decidedBy: 'none' });
+	expect(await auditRows()).toHaveLength(0);
+
+	// The retry goes through.
+	const res = await act('reject', { commentId: 'c1' });
+	expect(res).toMatchObject({ success: 'Rejected — recorded in audit log.' });
+	expect((await commentRow('c1'))?.status).toBe('rejected');
+});
+
 test('approve in DRY_RUN finalizes locally, audits dry-run, and skips YouTube', async () => {
 	await seedComment('c1', 'UC1');
 	const res = await act('approve', { commentId: 'c1' });

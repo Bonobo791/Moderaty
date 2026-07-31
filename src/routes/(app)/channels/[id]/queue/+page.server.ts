@@ -42,32 +42,30 @@ export async function load({ params, locals }) {
 
 async function act(paramsId: string, commentId: string, action: 'approve' | 'reject' | 'delete' | 'ban', locals: App.Locals) {
 	const ch = await ownedChannel(paramsId, locals);
-	// Scope to this route's channel and to still-pending comments so a forged
-	// POST cannot moderate another channel's comment or re-decide a settled one.
-	const comment = await db
-		.select({ id: comments.id })
-		.from(comments)
-		.where(
-			and(
-				eq(comments.id, commentId),
-				eq(comments.channelId, paramsId),
-				eq(comments.status, 'pending')
-			)
-		)
-		.get();
-	if (!comment) throw error(404, 'pending comment not found in this channel');
-	const dryRun = env.DRY_RUN === 'true';
-	if (!dryRun && action !== 'approve') {
-		const token = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
-		if (action === 'reject') await setModerationStatus([commentId], 'rejected', false, token);
-		if (action === 'ban') await setModerationStatus([commentId], 'rejected', true, token);
-		if (action === 'delete') await deleteComment(commentId, token);
-	}
 	const status = action === 'approve' ? 'approved' : action === 'delete' ? 'deleted' : 'rejected';
-	await db
+	// Atomically claim the still-pending comment BEFORE any external call.
+	// Concurrent submissions otherwise both pass the pending check and issue
+	// duplicate YouTube actions and duplicate audit rows; with the conditional
+	// update, the loser finds zero rows and 404s.
+	const claimed = await db
 		.update(comments)
 		.set({ status, decidedBy: 'human' })
-		.where(and(eq(comments.id, commentId), eq(comments.channelId, paramsId)));
+		.where(and(eq(comments.id, commentId), eq(comments.channelId, paramsId), eq(comments.status, 'pending')))
+		.returning({ id: comments.id });
+	if (claimed.length === 0) throw error(404, 'pending comment not found in this channel');
+	const dryRun = env.DRY_RUN === 'true';
+	try {
+		if (!dryRun && action !== 'approve') {
+			const token = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
+			if (action === 'reject') await setModerationStatus([commentId], 'rejected', false, token);
+			if (action === 'ban') await setModerationStatus([commentId], 'rejected', true, token);
+			if (action === 'delete') await deleteComment(commentId, token);
+		}
+	} catch (e) {
+		// Release the claim so a failed external action stays retryable.
+		await db.update(comments).set({ status: 'pending', decidedBy: 'none' }).where(eq(comments.id, commentId));
+		throw e;
+	}
 	await db.insert(auditLog).values({
 		channelId: paramsId,
 		commentId,

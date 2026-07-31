@@ -192,7 +192,7 @@ test('falls back to the thread video ID when the comment snippet lacks one', asy
 	expect(result.comments[0]).toMatchObject({ id: '1', videoId: 'video-thread' });
 });
 
-test('skips a comment with no video ID instead of failing the page', async () => {
+test('keeps a comment with no video ID so omni and rules still moderate it', async () => {
 	const noVideo = comment('no-video', '2026-01-04T00:00:00.000Z');
 	delete (noVideo.snippet.topLevelComment.snippet as Record<string, unknown>).videoId;
 
@@ -201,7 +201,8 @@ test('skips a comment with no video ID instead of failing the page', async () =>
 		comment('normal', '2026-01-03T00:00:00.000Z')
 	]));
 
-	expect(result.comments.map((item) => item.id)).toEqual(['normal']);
+	expect(result.comments.map((item) => item.id)).toEqual(['no-video', 'normal']);
+	expect(result.comments[0]).toMatchObject({ id: 'no-video', videoId: null });
 	expect(warn).toHaveBeenCalled();
 });
 

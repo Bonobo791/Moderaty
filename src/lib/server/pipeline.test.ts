@@ -407,6 +407,26 @@ test('routes video metadata failures to the review queue instead of aborting the
 	expect(mocks.scoreTone).not.toHaveBeenCalled();
 });
 
+test('scores tone with empty context when a comment has no video ID', async () => {
+	mocks.state.channel.toneLevel = 2;
+	mocks.scoreComment.mockResolvedValue(moderation(0.1));
+	mocks.scoreTone.mockResolvedValue({ score: 0.2 });
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ videoId: null })],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	await runChannel('channel');
+
+	expect(mocks.fetchVideoMetadata).not.toHaveBeenCalled();
+	expect(mocks.scoreTone).toHaveBeenCalledWith(
+		'A comment',
+		{ videoTitle: '', videoDescription: '' },
+		undefined
+	);
+});
+
 test('persists the chronologically newest timestamp when UTC offsets differ', async () => {
 	mocks.scoreComment.mockResolvedValue(moderation(0));
 	mocks.fetchNewComments.mockResolvedValue({

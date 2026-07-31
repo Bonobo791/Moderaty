@@ -26,7 +26,7 @@ type JsonObject = Record<string, unknown>;
 export interface NewComment {
 	id: string;
 	threadId: string;
-	videoId: string;
+	videoId: string | null;
 	authorChannelId: string;
 	authorName: string;
 	text: string;
@@ -93,8 +93,9 @@ function parseComment(item: unknown, index: number): NewComment | null {
 		return null;
 	}
 	if (!videoId) {
-		console.warn(`${context} (comment ${id}) has no videoId; skipping it`);
-		return null;
+		// Omni moderation and rule matching do not need a videoId — keep the
+		// comment and let tone scoring degrade to empty context (best-effort).
+		console.warn(`${context} (comment ${id}) has no videoId; tone context will be empty`);
 	}
 	const channelIdObject = snippet.authorChannelId;
 	const authorChannelId =

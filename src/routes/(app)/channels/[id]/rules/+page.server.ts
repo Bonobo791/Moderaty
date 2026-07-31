@@ -21,7 +21,7 @@ import { channels, rules } from '$lib/server/db/schema';
 import { validateRule } from '$lib/server/rules';
 import { ownedChannel } from '$lib/server/ownership';
 import { and, eq } from 'drizzle-orm';
-import { error, fail } from '@sveltejs/kit';
+import { fail } from '@sveltejs/kit';
 
 export async function load({ params, locals }) {
 	const ch = await ownedChannel(params.id, locals);

@@ -16,14 +16,12 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { sveltekit } from '@sveltejs/kit/vite';
-import { defineConfig } from 'vitest/config';
+import { redirect } from '@sveltejs/kit';
 
-export default defineConfig({
-	plugins: [sveltekit()],
-	test: {
-		environment: 'node',
-		// Local git worktrees (e.g. parallel agent work) run their own suites.
-		exclude: ['**/node_modules/**', '**/.worktrees/**']
-	}
-});
+import type { LayoutServerLoad } from './$types';
+
+// Everything under (app) requires a signed-in user.
+export const load: LayoutServerLoad = ({ locals }) => {
+	if (!locals.user) throw redirect(302, '/login');
+	return { user: locals.user };
+};

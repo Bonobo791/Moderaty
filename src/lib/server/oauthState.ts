@@ -18,10 +18,26 @@
 
 import type { Cookies } from '@sveltejs/kit';
 
+import { error } from '@sveltejs/kit';
+
+import { env } from '$env/dynamic/private';
+
 export const OAUTH_STATE_COOKIE = 'oauth_state';
 
 // Bounds the cookie; a user realistically has one or two tabs mid-flow.
 const MAX_PENDING_STATES = 5;
+
+/**
+ * The single source of the cookie `Secure` attribute for every cookie the app
+ * writes (OAuth state + session). Derived from the configured APP_URL — never
+ * from the per-request URL, which a TLS-terminating proxy can misrepresent.
+ * A missing APP_URL fails loudly rather than silently dropping `Secure`.
+ */
+export function cookieSecure(): boolean {
+	const appUrl = env.APP_URL;
+	if (!appUrl) throw error(500, 'APP_URL is not configured');
+	return appUrl.startsWith('https://');
+}
 
 /**
  * Reads the pending OAuth states from the cookie. Several states are kept at
@@ -53,6 +69,9 @@ export function storePendingStates(cookies: Cookies, states: string[]): void {
 		path: '/',
 		httpOnly: true,
 		sameSite: 'lax',
+		// The state cookie carries the CSRF guard, so it must never travel over
+		// plain HTTP outside local development.
+		secure: cookieSecure(),
 		maxAge: 600
 	});
 }

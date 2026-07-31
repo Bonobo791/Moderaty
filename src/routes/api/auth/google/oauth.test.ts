@@ -25,8 +25,11 @@ const mocks = vi.hoisted(() => ({
 		APP_URL: 'http://localhost:5173',
 		ENCRYPTION_KEY: 'test-encryption-key'
 	} as Record<string, string | undefined>,
-	upserts: [] as Record<string, unknown>[]
+	upserts: [] as Record<string, unknown>[],
+	existingChannel: undefined as { userId: string | null } | undefined
 }));
+
+const OWNER = { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' };
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
@@ -34,38 +37,24 @@ vi.mock('$lib/server/db', () => ({
 	db: {
 		insert: () => ({
 			values: (values: unknown) => ({
-				onConflictDoUpdate: async ({ set }: { set: unknown }) => {
-					mocks.upserts.push({ values, set });
-				}
+				onConflictDoUpdate: ({ set, setWhere }: { set: unknown; setWhere: unknown }) => ({
+					returning: async () => {
+						mocks.upserts.push({ values, set, setWhere });
+						// The mock can't evaluate the setWhere predicate; simulate the
+						// "owned by another account" case as a skipped (empty) update.
+						// 'user-1' matches OWNER.id below.
+						if (mocks.existingChannel?.userId && mocks.existingChannel.userId !== 'user-1') return [];
+						return [{ id: 'UC123' }];
+					}
+				})
 			})
 		})
 	}
 }));
 
+import { makeCookies, makeCookiesWithState } from '$lib/server/testcookies';
 import { GET as startAuth } from './+server';
 import { GET as authCallback } from './callback/+server';
-
-function makeCookies() {
-	const store = new Map<string, string>();
-	const setCalls: Array<{ name: string; value: string; opts: Record<string, unknown> }> = [];
-	return {
-		setCalls,
-		get: (name: string) => store.get(name),
-		set: (name: string, value: string, opts: Record<string, unknown>) => {
-			setCalls.push({ name, value, opts });
-			store.set(name, value);
-		},
-		delete: (name: string) => {
-			store.delete(name);
-		}
-	};
-}
-
-function makeCookiesWithState(...states: string[]) {
-	const cookies = makeCookies();
-	cookies.set('oauth_state', JSON.stringify(states), { path: '/' });
-	return cookies;
-}
 
 function callbackUrl(params: Record<string, string>) {
 	const search = new URLSearchParams(params);
@@ -102,6 +91,7 @@ beforeEach(() => {
 	mocks.env.APP_URL = 'http://localhost:5173';
 	mocks.env.ENCRYPTION_KEY = 'test-encryption-key';
 	mocks.upserts.length = 0;
+	mocks.existingChannel = undefined;
 });
 
 afterEach(() => {
@@ -122,10 +112,11 @@ function captureStartAuth(cookies: Cookies): { status: number; location: string 
 
 async function captureCallback(
 	cookies: Cookies,
-	params: Record<string, string>
+	params: Record<string, string>,
+	user: typeof OWNER | null = OWNER
 ): Promise<{ status: number; location?: string; body?: { message: string } } | undefined> {
 	try {
-		await authCallback({ url: callbackUrl(params), cookies } as never);
+		await authCallback({ url: callbackUrl(params), cookies, locals: { user } } as never);
 		return undefined;
 	} catch (e) {
 		return e as { status: number; location?: string; body?: { message: string } };
@@ -318,4 +309,36 @@ test('youtube lookup failure logs do not include the upstream response body', as
 	for (const call of errorSpy.mock.calls) {
 		expect(call.join(' ')).not.toContain('quota exceeded');
 	}
+});
+
+test('callback rejects a signed-out request with 401', async () => {
+	stubTokenAndChannelResponses();
+
+	const thrown = await captureCallback(makeCookiesWithState('s'), { code: 'abc', state: 's' }, null);
+
+	expect(thrown?.status).toBe(401);
+	expect(mocks.upserts).toHaveLength(0);
+});
+
+test('callback attaches the connected channel to the signed-in user', async () => {
+	stubTokenAndChannelResponses();
+
+	const thrown = await captureCallback(makeCookiesWithState('s'), { code: 'abc', state: 's' });
+
+	expect(thrown).toMatchObject({ status: 302 });
+	expect(mocks.upserts).toHaveLength(1);
+	expect((mocks.upserts[0].values as Record<string, unknown>).userId).toBe(OWNER.id);
+});
+
+test('callback refuses to reconnect a channel owned by another account with 409', async () => {
+	mocks.existingChannel = { userId: 'user-2' };
+	stubTokenAndChannelResponses();
+
+	const thrown = await captureCallback(makeCookiesWithState('s'), { code: 'abc', state: 's' });
+
+	expect(thrown?.status).toBe(409);
+	// The write is attempted — the conditional upsert predicate is what blocks
+	// it (simulated as an empty returning set), keeping the check atomic.
+	expect(mocks.upserts).toHaveLength(1);
+	expect(mocks.upserts[0].setWhere).toBeDefined();
 });

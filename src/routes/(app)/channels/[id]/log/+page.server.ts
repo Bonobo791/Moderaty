@@ -17,11 +17,13 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { db } from '$lib/server/db';
-import { channels, auditLog } from '$lib/server/db/schema';
+import { auditLog } from '$lib/server/db/schema';
+import { ownedChannel } from '$lib/server/ownership';
 import { eq, desc } from 'drizzle-orm';
 
-export async function load({ params }) {
-	const ch = await db.select().from(channels).where(eq(channels.id, params.id)).get();
+export async function load({ params, locals }) {
+	// Ownership-scoped: another user's channel (and its audit log) reads as "not found".
+	const ch = await ownedChannel(params.id, locals);
 	const entries = await db
 		.select()
 		.from(auditLog)
@@ -29,5 +31,7 @@ export async function load({ params }) {
 		.orderBy(desc(auditLog.createdAt))
 		.limit(200)
 		.all();
-	return { ch, entries };
+	// Project only what the page renders — never serialize refreshTokenEnc (or
+	// any future secret column) to the browser.
+	return { ch: { id: ch.id, title: ch.title }, entries };
 }

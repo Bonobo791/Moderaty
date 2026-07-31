@@ -24,18 +24,38 @@ import { load } from './+page.server';
 
 setupTestDb(['comments', 'channels']);
 
+const OWNER = { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' };
+
+function loadDashboard(user: typeof OWNER | null = OWNER) {
+	return load({ locals: { user } } as never);
+}
+
 test('dashboard load never serializes the encrypted refresh token', async () => {
 	await testDb().db.insert(channels).values({
 		id: 'UC1',
+		userId: OWNER.id,
 		title: 'One',
 		refreshTokenEnc: 'encrypted-refresh-token',
 		cursor: '2026-01-01T00:00:00Z'
 	});
 
-	const data = await load();
+	const data = await loadDashboard();
 
 	expect(data.chs).toHaveLength(1);
 	expect(data.chs[0]).toMatchObject({ id: 'UC1', title: 'One', cursor: '2026-01-01T00:00:00Z' });
 	expect(data.chs[0]).not.toHaveProperty('refreshTokenEnc');
 	expect(JSON.stringify(data)).not.toContain('encrypted-refresh-token');
+});
+
+test('dashboard load shows only the signed-in user\'s channels', async () => {
+	await testDb().db.insert(channels).values({ id: 'UC1', userId: OWNER.id, title: 'Mine', refreshTokenEnc: 'enc' });
+	await testDb().db.insert(channels).values({ id: 'UC2', userId: 'user-2', title: 'Theirs', refreshTokenEnc: 'enc' });
+
+	const data = await loadDashboard();
+
+	expect(data.chs.map((ch) => ch.id)).toEqual(['UC1']);
+});
+
+test('dashboard load rejects a signed-out request with 401', async () => {
+	await expect(loadDashboard(null)).rejects.toMatchObject({ status: 401 });
 });

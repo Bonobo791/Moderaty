@@ -16,14 +16,22 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { sveltekit } from '@sveltejs/kit/vite';
-import { defineConfig } from 'vitest/config';
+import { redirect } from '@sveltejs/kit';
 
-export default defineConfig({
-	plugins: [sveltekit()],
-	test: {
-		environment: 'node',
-		// Local git worktrees (e.g. parallel agent work) run their own suites.
-		exclude: ['**/node_modules/**', '**/.worktrees/**']
+import { destroySession, requireUser, SESSION_COOKIE } from '$lib/server/session';
+
+import type { PageServerLoad, Actions } from './$types';
+
+export const load: PageServerLoad = () => {
+	throw redirect(302, '/login');
+};
+
+export const actions: Actions = {
+	default: async ({ cookies, locals }) => {
+		requireUser(locals);
+		const token = cookies.get(SESSION_COOKIE);
+		if (token) await destroySession(token);
+		cookies.delete(SESSION_COOKIE, { path: '/' });
+		throw redirect(302, '/login');
 	}
-});
+};

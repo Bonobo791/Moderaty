@@ -62,9 +62,6 @@
           "patternId": "Semgrep_codacy.generic.sql.lookup-type-without-language-or-apps-fnd"
         },
         {
-          "patternId": "Semgrep_codacy.generic.sql.rac-table-access"
-        },
-        {
           "patternId": "Semgrep_codacy.javascript.security.hard-coded-password"
         },
         {

@@ -18,14 +18,20 @@
 
 import { redirect, error } from '@sveltejs/kit';
 
-import { env } from '$env/dynamic/private';
+import { eq, isNull, or } from 'drizzle-orm';
+
 import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
 import { encrypt } from '$lib/server/crypto';
+import { exchangeGoogleCode } from '$lib/server/google';
 import { fetchWithRetry } from '$lib/server/http';
 import { readPendingStates, storePendingStates } from '$lib/server/oauthState';
+import { requireUser } from '$lib/server/session';
 
-export async function GET({ url, cookies }: { url: URL; cookies: import('@sveltejs/kit').Cookies }) {
+export async function GET({ url, cookies, locals }: { url: URL; cookies: import('@sveltejs/kit').Cookies; locals: { user: import('$lib/server/session').SessionUser | null } }) {
+	// Connecting a channel requires a signed-in account to attach it to.
+	const user = requireUser(locals);
+
 	const state = url.searchParams.get('state');
 	const pending = readPendingStates(cookies);
 	if (!state || !pending.includes(state)) throw error(400, 'bad state');
@@ -33,74 +39,22 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 	const code = url.searchParams.get('code');
 	if (!code) throw error(400, 'missing code');
 
-	if (!env.GOOGLE_CLIENT_ID) throw error(500, 'GOOGLE_CLIENT_ID is not configured');
-	if (!env.GOOGLE_CLIENT_SECRET) throw error(500, 'GOOGLE_CLIENT_SECRET is not configured');
-	if (!env.APP_URL) throw error(500, 'APP_URL is not configured');
-
-	// Failures are logged server-side with redacted detail; the client only ever
-	// sees the generic messages below — never tokens (AGENTS.md).
-	// The authorization code is one-time use, so this exchange must not retry:
-	// a retried request after a transient timeout would fail the sign-in.
-	let tokenRes: Response;
-	let tokenText: string;
-	try {
-		tokenRes = await fetch('https://oauth2.googleapis.com/token', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-			body: new URLSearchParams({
-				code,
-				client_id: env.GOOGLE_CLIENT_ID,
-				client_secret: env.GOOGLE_CLIENT_SECRET,
-				redirect_uri: new URL('/api/auth/google/callback', env.APP_URL).toString(),
-				grant_type: 'authorization_code'
-			}),
-			signal: AbortSignal.timeout(10_000)
-		});
-		tokenText = await tokenRes.text();
-	} catch (e) {
-		console.error(`google token exchange request failed: ${e instanceof Error ? e.message : e}`);
-		throw error(502, 'Google token exchange failed — please retry');
-	}
-	let tokens: {
-		refresh_token?: unknown;
-		access_token?: unknown;
-		error?: unknown;
-		error_description?: unknown;
-	};
-	try {
-		tokens = JSON.parse(tokenText) as typeof tokens;
-	} catch {
-		console.error(`google token exchange returned invalid JSON: ${tokenRes.status}`);
-		throw error(502, 'invalid response from Google — please retry');
-	}
-	if (typeof tokens !== 'object' || tokens === null) {
-		console.error(`google token exchange returned a non-object body: ${tokenRes.status}`);
-		throw error(502, 'invalid response from Google — please retry');
-	}
-	if (!tokenRes.ok) {
-		// Upstream failure, not a user error. Log only status and Google's
-		// non-secret error fields — never the raw body, which may carry tokens.
-		const detail =
-			typeof tokens.error === 'string'
-				? `${tokens.error}${typeof tokens.error_description === 'string' ? `: ${tokens.error_description}` : ''}`
-				: 'no error detail';
-		console.error(`google token exchange failed: ${tokenRes.status} ${detail}`);
-		throw error(502, 'Google token exchange failed — please retry');
-	}
-	if (typeof tokens.refresh_token !== 'string' || !tokens.refresh_token) {
+	const tokens = await exchangeGoogleCode(
+		code,
+		'/api/auth/google/callback',
+		'google token exchange',
+		'Google token exchange failed — please retry'
+	);
+	if (!tokens.refreshToken) {
 		throw error(
 			400,
 			'token exchange returned no refresh_token — if this channel was connected before, revoke app access at myaccount.google.com/permissions and retry'
 		);
 	}
-	if (typeof tokens.access_token !== 'string' || !tokens.access_token) {
-		console.error('google token exchange returned 200 without an access_token');
-		throw error(502, 'invalid response from Google — please retry');
-	}
 
 	const chRes = await fetchWithRetry(
 		'https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true',
-		{ headers: { Authorization: `Bearer ${tokens.access_token}` } }
+		{ headers: { Authorization: `Bearer ${tokens.accessToken}` } }
 	);
 	const chText = await chRes.text();
 	if (!chRes.ok) {
@@ -125,19 +79,29 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 	}
 	const title = typeof ch.snippet?.title === 'string' ? ch.snippet.title : 'Untitled channel';
 
-	await db
+	// A channel already owned by another account must not be reattached (or have
+	// its refresh token overwritten) by this one. The conditional upsert keeps
+	// that check atomic with the write — a SELECT-then-upsert would race.
+	const refreshTokenEnc = encrypt(tokens.refreshToken);
+	const updated = await db
 		.insert(channels)
 		.values({
 			id: ch.id,
+			userId: user.id,
 			title,
-			refreshTokenEnc: encrypt(tokens.refresh_token),
+			refreshTokenEnc,
 			active: 1,
 			createdAt: new Date().toISOString()
 		})
 		.onConflictDoUpdate({
 			target: channels.id,
-			set: { title, refreshTokenEnc: encrypt(tokens.refresh_token), active: 1 }
-		});
+			set: { userId: user.id, title, refreshTokenEnc, active: 1 },
+			setWhere: or(isNull(channels.userId), eq(channels.userId, user.id))
+		})
+		.returning({ id: channels.id });
+	if (updated.length === 0) {
+		throw error(409, 'this channel is connected to a different Moderaty account');
+	}
 
 	// Consume the state only once the flow has succeeded, so a transient
 	// failure leaves the callback retryable while a success cannot be replayed.

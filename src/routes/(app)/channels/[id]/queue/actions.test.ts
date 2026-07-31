@@ -36,7 +36,7 @@ vi.mock('$lib/server/youtube', () => ({
 	deleteComment: mocks.deleteComment
 }));
 
-import { actions } from './+page.server';
+import { actions, load } from './+page.server';
 
 setupTestDb(['audit_log', 'comments', 'channels']);
 
@@ -44,8 +44,8 @@ beforeEach(async () => {
 	await testDb()
 		.db.insert(channels)
 		.values([
-			{ id: 'UC1', title: 'One', refreshTokenEnc: 'enc-1' },
-			{ id: 'UC2', title: 'Two', refreshTokenEnc: 'enc-2' }
+			{ id: 'UC1', userId: OWNER.id, title: 'One', refreshTokenEnc: 'enc-1' },
+			{ id: 'UC2', userId: OWNER.id, title: 'Two', refreshTokenEnc: 'enc-2' }
 		]);
 	mocks.env.DRY_RUN = 'true';
 	vi.clearAllMocks();
@@ -53,10 +53,12 @@ beforeEach(async () => {
 
 const QUEUE_URL = 'http://localhost/channels/UC1/queue';
 
+const OWNER = { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' };
+
 const actionNames = ['approve', 'reject', 'del', 'ban'] as const;
 
-function act(name: (typeof actionNames)[number], fields: Record<string, string>) {
-	return actions[name]({ params: { id: 'UC1' }, request: postForm(fields, QUEUE_URL) } as never);
+function act(name: (typeof actionNames)[number], fields: Record<string, string>, channelId = 'UC1', user: typeof OWNER | null = OWNER) {
+	return actions[name]({ params: { id: channelId }, request: postForm(fields, QUEUE_URL), locals: { user } } as never);
 }
 
 async function expectAllActions404(fields: Record<string, string>) {
@@ -93,6 +95,18 @@ async function expectNothingDecided(id: string, status: string) {
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
 }
 
+test('load projects only the channel fields the page renders — never the credential', async () => {
+	const result = await load({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);
+	expect(result?.ch).toEqual({ id: 'UC1', title: 'One' });
+	expect(result?.ch).not.toHaveProperty('refreshTokenEnc');
+});
+
+test('every action rejects a signed-out request with 401 before validating the form', async () => {
+	for (const name of actionNames) {
+		await expect(act(name, {}, 'UC1', null)).rejects.toThrowError(expect.objectContaining({ status: 401 }));
+	}
+});
+
 test('every action rejects a missing commentId with 400 and mutates nothing', async () => {
 	await seedComment('c1', 'UC1');
 	for (const name of actionNames) {
@@ -113,6 +127,33 @@ test('act fails loudly on a comment that is no longer pending', async () => {
 	await expectAllActions404({ commentId: 'c3' });
 	expect((await commentRow('c3'))?.decidedBy).toBe('ai');
 	await expectNothingDecided('c3', 'approved');
+});
+
+test('a second act on an already-claimed comment 404s and audits nothing new', async () => {
+	await seedComment('c1', 'UC1');
+	await act('approve', { commentId: 'c1' });
+
+	await expect(act('reject', { commentId: 'c1' })).rejects.toThrowError(expect.objectContaining({ status: 404 }));
+
+	expect((await commentRow('c1'))?.status).toBe('approved');
+	expect(await auditRows()).toHaveLength(1);
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+});
+
+test('a failed YouTube call releases the claim so the action stays retryable', async () => {
+	mocks.env.DRY_RUN = 'false';
+	mocks.setModerationStatus.mockRejectedValueOnce(new Error('youtube 500'));
+	await seedComment('c1', 'UC1');
+
+	await expect(act('reject', { commentId: 'c1' })).rejects.toThrowError('youtube 500');
+
+	expect(await commentRow('c1')).toMatchObject({ status: 'pending', decidedBy: 'none' });
+	expect(await auditRows()).toHaveLength(0);
+
+	// The retry goes through.
+	const res = await act('reject', { commentId: 'c1' });
+	expect(res).toMatchObject({ success: 'Rejected — recorded in audit log.' });
+	expect((await commentRow('c1'))?.status).toBe('rejected');
 });
 
 test('approve in DRY_RUN finalizes locally, audits dry-run, and skips YouTube', async () => {
@@ -146,4 +187,21 @@ test('reject outside DRY_RUN calls YouTube and audits reject', async () => {
 	const audits = await auditRows();
 	expect(audits).toHaveLength(1);
 	expect(audits[0]).toMatchObject({ channelId: 'UC1', commentId: 'c1', action: 'reject', actor: 'user' });
+});
+
+test('act fails loudly on a channel owned by another user and changes nothing', async () => {
+	await testDb().db.update(channels).set({ userId: 'user-2' }).where(eq(channels.id, 'UC1'));
+	await seedComment('c9', 'UC1');
+	for (const name of actionNames) {
+		await expect(act(name, { commentId: 'c9' })).rejects.toThrowError(expect.objectContaining({ status: 404 }));
+	}
+	await expectNothingDecided('c9', 'pending');
+});
+
+test('act rejects a signed-out request with 401', async () => {
+	await seedComment('c8', 'UC1');
+	for (const name of actionNames) {
+		await expect(act(name, { commentId: 'c8' }, 'UC1', null)).rejects.toThrowError(expect.objectContaining({ status: 401 }));
+	}
+	await expectNothingDecided('c8', 'pending');
 });

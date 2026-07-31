@@ -18,27 +18,35 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 -->
 
-<script lang="ts">
-	let { children, data } = $props();
-</script>
+<svelte:head>
+	<title>Moderaty — Sign in</title>
+</svelte:head>
 
-<nav class="app-nav" aria-label="App">
-	<a class="brand" href="/dashboard">Moderaty</a>
-	<a href="/dashboard">Dashboard</a>
-	<span class="account">
-		<span class="muted">{data.user.displayName}</span>
-		<form method="POST" action="/logout">
-			<button class="btn secondary small" type="submit">Sign out</button>
-		</form>
-	</span>
-</nav>
-<main class="app-main">{@render children()}</main>
+<!-- Static sign-in prompt; the guard redirect lives in +page.server.ts. -->
+<main class="login-main">
+	<div class="card login-card">
+		<h1>Sign in to Moderaty</h1>
+		<p class="muted">
+			Sign in with your Google account, then connect your YouTube channel to start moderating
+			comments automatically.
+		</p>
+		<a class="btn" href="/api/auth/google/login">Sign in with Google</a>
+	</div>
+</main>
 
 <style>
-	.account {
-		margin-left: auto;
-		display: flex;
-		align-items: center;
-		gap: 10px;
+	.login-main {
+		display: grid;
+		place-items: center;
+		min-height: 100vh;
+		padding: 24px;
+	}
+	.login-card {
+		max-width: 420px;
+		text-align: center;
+	}
+	.login-card .btn {
+		display: inline-block;
+		margin-top: 16px;
 	}
 </style>

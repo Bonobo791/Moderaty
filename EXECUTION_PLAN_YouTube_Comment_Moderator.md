@@ -1879,6 +1879,43 @@ Do not change any `load` function, form action, route, or class logic in this st
 
 ---
 
+## 5b. Post-MVP phase: user accounts (shipped)
+
+Multi-user accounts landed after the MVP phases (branch `feat-user-accounts`).
+Decisions, confirmed with the maintainer:
+
+- **Sign-in is Google identity only** (`GET /api/auth/google/login` +
+  `/api/auth/google/login/callback`, scopes `openid email profile`,
+  `access_type=online`).
+  YouTube channel connection stays a **separate** consent at the existing
+  `/api/auth/google` URLs (`youtube.force-ssl`), now session-gated: the
+  callback attaches `channels.userId` and refuses (409) to reattach a channel
+  owned by another account.
+- **No auth library** — the "no auth libraries" constraint stands. Sessions
+  are DIY: `src/lib/server/session.ts` (random 32-byte token PK, `sessions`
+  table, httpOnly `moderaty_session` cookie, 30-day sliding expiry with
+  renewal at <15 days). `src/hooks.server.ts` resolves the cookie into
+  `locals.user`; the `(app)` group layout redirects signed-out visitors to
+  `/login`; every form action calls `requireUser(locals)` and scopes every
+  channel read/write by `channels.userId` (cross-owner always 404).
+- **Schema:** `users` (`google_sub` unique, `email`, `display_name`, `plan`
+  default `'free'`), `sessions`, nullable `channels.user_id` (migration
+  0004). Orphaned pre-accounts channels (`user_id IS NULL`) are claimed by
+  the first user ever to sign in — that is how the original single-operator
+  database attaches to its owner.
+- **Accounts everywhere; BYOK for self-hosted.** Hosted and self-hosted run
+  the same code path. Self-hosters supply their own `GOOGLE_CLIENT_ID`/
+  `GOOGLE_CLIENT_SECRET`, `OPENAI_API_KEY`, and Turso credentials via env, so
+  the hosted operator never pays for non-subscribers.
+
+## 7. Future features
+
+- **Stripe integration (hosted plans).** The hosted service will require paid
+  plan purchases via Stripe (checkout, webhooks, plan enforcement, customer
+  portal). **The free tier is self-hosted only** (BYOK: own Google/OpenAI/
+  Turso keys). The `users.plan` column shipped in the accounts phase is the
+  enforcement hook. Until Stripe lands, hosted signups are ungated.
+
 ## 6. Definition of done
 
 All must be true before reporting completion:

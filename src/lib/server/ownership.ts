@@ -16,14 +16,25 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { sveltekit } from '@sveltejs/kit/vite';
-import { defineConfig } from 'vitest/config';
+import { error } from '@sveltejs/kit';
+import { and, eq } from 'drizzle-orm';
 
-export default defineConfig({
-	plugins: [sveltekit()],
-	test: {
-		environment: 'node',
-		// Local git worktrees (e.g. parallel agent work) run their own suites.
-		exclude: ['**/node_modules/**', '**/.worktrees/**']
-	}
-});
+import { db } from '$lib/server/db';
+import { channels } from '$lib/server/db/schema';
+import { requireUser, type SessionUser } from '$lib/server/session';
+
+/**
+ * Loads a channel only when the signed-in user owns it. The single ownership
+ * gate for every channel-scoped route: 401 when signed out, 404 when the
+ * channel is missing or owned by someone else (never leak existence).
+ */
+export async function ownedChannel(channelId: string, locals: { user: SessionUser | null }) {
+	const user = requireUser(locals);
+	const ch = await db
+		.select()
+		.from(channels)
+		.where(and(eq(channels.id, channelId), eq(channels.userId, user.id)))
+		.get();
+	if (!ch) throw error(404, 'channel not found');
+	return ch;
+}

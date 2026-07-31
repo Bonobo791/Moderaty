@@ -21,11 +21,13 @@ import { channels, comments, auditLog } from '$lib/server/db/schema';
 import { and, eq, desc } from 'drizzle-orm';
 import { refreshAccessToken, setModerationStatus, deleteComment } from '$lib/server/youtube';
 import { decrypt } from '$lib/server/crypto';
+import { ownedChannel } from '$lib/server/ownership';
+import { requireUser } from '$lib/server/session';
 import { env } from '$env/dynamic/private';
 import { error, fail } from '@sveltejs/kit';
 
-export async function load({ params }) {
-	const ch = await db.select().from(channels).where(eq(channels.id, params.id)).get();
+export async function load({ params, locals }) {
+	const ch = await ownedChannel(params.id, locals);
 	const pending = await db
 		.select()
 		.from(comments)
@@ -33,38 +35,37 @@ export async function load({ params }) {
 		.orderBy(desc(comments.publishedAt))
 		.limit(100)
 		.all();
-	return { ch, pending };
+	// Project only what the page renders — never serialize refreshTokenEnc (or
+	// any future secret column) to the browser.
+	return { ch: { id: ch.id, title: ch.title }, pending };
 }
 
-async function act(paramsId: string, commentId: string, action: 'approve' | 'reject' | 'delete' | 'ban') {
-	const ch = await db.select().from(channels).where(eq(channels.id, paramsId)).get();
-	if (!ch) throw error(404, 'channel not found');
-	// Scope to this route's channel and to still-pending comments so a forged
-	// POST cannot moderate another channel's comment or re-decide a settled one.
-	const comment = await db
-		.select({ id: comments.id })
-		.from(comments)
-		.where(
-			and(
-				eq(comments.id, commentId),
-				eq(comments.channelId, paramsId),
-				eq(comments.status, 'pending')
-			)
-		)
-		.get();
-	if (!comment) throw error(404, 'pending comment not found in this channel');
-	const dryRun = env.DRY_RUN === 'true';
-	if (!dryRun && action !== 'approve') {
-		const token = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
-		if (action === 'reject') await setModerationStatus([commentId], 'rejected', false, token);
-		if (action === 'ban') await setModerationStatus([commentId], 'rejected', true, token);
-		if (action === 'delete') await deleteComment(commentId, token);
-	}
+async function act(paramsId: string, commentId: string, action: 'approve' | 'reject' | 'delete' | 'ban', locals: App.Locals) {
+	const ch = await ownedChannel(paramsId, locals);
 	const status = action === 'approve' ? 'approved' : action === 'delete' ? 'deleted' : 'rejected';
-	await db
+	// Atomically claim the still-pending comment BEFORE any external call.
+	// Concurrent submissions otherwise both pass the pending check and issue
+	// duplicate YouTube actions and duplicate audit rows; with the conditional
+	// update, the loser finds zero rows and 404s.
+	const claimed = await db
 		.update(comments)
 		.set({ status, decidedBy: 'human' })
-		.where(and(eq(comments.id, commentId), eq(comments.channelId, paramsId)));
+		.where(and(eq(comments.id, commentId), eq(comments.channelId, paramsId), eq(comments.status, 'pending')))
+		.returning({ id: comments.id });
+	if (claimed.length === 0) throw error(404, 'pending comment not found in this channel');
+	const dryRun = env.DRY_RUN === 'true';
+	try {
+		if (!dryRun && action !== 'approve') {
+			const token = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
+			if (action === 'reject') await setModerationStatus([commentId], 'rejected', false, token);
+			if (action === 'ban') await setModerationStatus([commentId], 'rejected', true, token);
+			if (action === 'delete') await deleteComment(commentId, token);
+		}
+	} catch (e) {
+		// Release the claim so a failed external action stays retryable.
+		await db.update(comments).set({ status: 'pending', decidedBy: 'none' }).where(eq(comments.id, commentId));
+		throw e;
+	}
 	await db.insert(auditLog).values({
 		channelId: paramsId,
 		commentId,
@@ -83,28 +84,32 @@ function commentIdFrom(formData: FormData): string | null {
 }
 
 export const actions = {
-	approve: async ({ params, request }) => {
+	approve: async ({ params, request, locals }) => {
+		requireUser(locals);
 		const commentId = commentIdFrom(await request.formData());
 		if (!commentId) return fail(400, { error: 'Invalid comment ID' });
-		await act(params.id, commentId, 'approve');
+		await act(params.id, commentId, 'approve', locals);
 		return { success: 'Approved — recorded in audit log.' };
 	},
-	reject: async ({ params, request }) => {
+	reject: async ({ params, request, locals }) => {
+		requireUser(locals);
 		const commentId = commentIdFrom(await request.formData());
 		if (!commentId) return fail(400, { error: 'Invalid comment ID' });
-		await act(params.id, commentId, 'reject');
+		await act(params.id, commentId, 'reject', locals);
 		return { success: 'Rejected — recorded in audit log.' };
 	},
-	del: async ({ params, request }) => {
+	del: async ({ params, request, locals }) => {
+		requireUser(locals);
 		const commentId = commentIdFrom(await request.formData());
 		if (!commentId) return fail(400, { error: 'Invalid comment ID' });
-		await act(params.id, commentId, 'delete');
+		await act(params.id, commentId, 'delete', locals);
 		return { success: 'Deleted — recorded in audit log.' };
 	},
-	ban: async ({ params, request }) => {
+	ban: async ({ params, request, locals }) => {
+		requireUser(locals);
 		const commentId = commentIdFrom(await request.formData());
 		if (!commentId) return fail(400, { error: 'Invalid comment ID' });
-		await act(params.id, commentId, 'ban');
+		await act(params.id, commentId, 'ban', locals);
 		return { success: 'Author banned — recorded in audit log.' };
 	}
 };

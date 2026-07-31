@@ -66,10 +66,27 @@ export function postForm(fields: Record<string, string>, url = 'http://localhost
 }
 
 export async function createTestDb(): Promise<TestDb> {
-	const client = createClient({ url: ':memory:' });
+	const client = createClient({ url: 'file::memory:?cache=shared' });
+	// Match production Turso behavior so FK violations fail in tests too.
+	await client.execute('PRAGMA foreign_keys = ON');
 	await client.batch([
+		`CREATE TABLE users (
+			id TEXT PRIMARY KEY,
+			google_sub TEXT NOT NULL UNIQUE,
+			email TEXT NOT NULL,
+			display_name TEXT NOT NULL,
+			plan TEXT NOT NULL DEFAULT 'free',
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`,
+		`CREATE TABLE sessions (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			expires_at TEXT NOT NULL,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`,
 		`CREATE TABLE channels (
 			id TEXT PRIMARY KEY,
+			user_id TEXT,
 			title TEXT NOT NULL,
 			refresh_token_enc TEXT NOT NULL,
 			cursor TEXT,

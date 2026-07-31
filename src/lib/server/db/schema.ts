@@ -19,8 +19,29 @@
 import { sqliteTable, text, integer, index } from 'drizzle-orm/sqlite-core';
 import { sql } from 'drizzle-orm';
 
+export const users = sqliteTable('users', {
+	id: text('id').primaryKey(), // random hex
+	googleSub: text('google_sub').notNull().unique(), // Google's stable `sub` claim
+	email: text('email').notNull(),
+	displayName: text('display_name').notNull(),
+	plan: text('plan').notNull().default('free'), // future Stripe gating hook (hosted plans)
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+});
+
+export const sessions = sqliteTable('sessions', {
+	id: text('id').primaryKey(), // random 32-byte hex token; also the cookie value
+	userId: text('user_id')
+		.notNull()
+		.references(() => users.id, { onDelete: 'cascade' }),
+	expiresAt: text('expires_at').notNull(), // ISO timestamp; sliding 30-day expiry
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+}, (table) => [
+	index('sessions_user_id_idx').on(table.userId)
+]);
+
 export const channels = sqliteTable('channels', {
 	id: text('id').primaryKey(), // YouTube channel ID (UC...)
+	userId: text('user_id'), // owning user; null = pre-accounts orphan, claimed on first login
 	title: text('title').notNull(),
 	refreshTokenEnc: text('refresh_token_enc').notNull(),
 	cursor: text('cursor'), // ISO timestamp of newest comment seen; null = never polled
@@ -31,7 +52,9 @@ export const channels = sqliteTable('channels', {
 	active: integer('active').notNull().default(1),
 	toneLevel: integer('tone_level'), // moderation sensitivity: null or 1 = omni only, 2 = omni + tone pass
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
-});
+}, (table) => [
+	index('channels_user_id_idx').on(table.userId)
+]);
 
 export const rules = sqliteTable('rules', {
 	id: integer('id').primaryKey({ autoIncrement: true }),

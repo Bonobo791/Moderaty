@@ -19,17 +19,21 @@
 import { db } from '$lib/server/db';
 import { channels, rules } from '$lib/server/db/schema';
 import { validateRule } from '$lib/server/rules';
+import { ownedChannel } from '$lib/server/ownership';
 import { and, eq } from 'drizzle-orm';
 import { fail } from '@sveltejs/kit';
 
-export async function load({ params }) {
-	const ch = await db.select().from(channels).where(eq(channels.id, params.id)).get();
+export async function load({ params, locals }) {
+	const ch = await ownedChannel(params.id, locals);
 	const rs = await db.select().from(rules).where(eq(rules.channelId, params.id)).all();
-	return { ch, rs };
+	// Project only what the page renders — never serialize refreshTokenEnc (or
+	// any future secret column) to the browser.
+	return { ch: { id: ch.id, title: ch.title }, rs };
 }
 
 export const actions = {
-	add: async ({ params, request }) => {
+	add: async ({ params, request, locals }) => {
+		await ownedChannel(params.id, locals);
 		const f = await request.formData();
 		const type = String(f.get('type') ?? '');
 		const pattern = String(f.get('pattern') ?? '').trim();
@@ -48,7 +52,8 @@ export const actions = {
 		});
 		return { ok: true };
 	},
-	remove: async ({ params, request }) => {
+	remove: async ({ params, request, locals }) => {
+		await ownedChannel(params.id, locals);
 		const f = await request.formData();
 		const ruleId = Number(f.get('ruleId'));
 		if (!Number.isInteger(ruleId) || ruleId <= 0) {

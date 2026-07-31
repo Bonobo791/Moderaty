@@ -18,14 +18,20 @@
 
 import { redirect, error } from '@sveltejs/kit';
 
+import { eq } from 'drizzle-orm';
+
 import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
 import { encrypt } from '$lib/server/crypto';
 import { fetchWithRetry } from '$lib/server/http';
 import { readPendingStates, storePendingStates } from '$lib/server/oauthState';
+import { requireUser } from '$lib/server/session';
 
-export async function GET({ url, cookies }: { url: URL; cookies: import('@sveltejs/kit').Cookies }) {
+export async function GET({ url, cookies, locals }: { url: URL; cookies: import('@sveltejs/kit').Cookies; locals: { user: import('$lib/server/session').SessionUser | null } }) {
+	// Connecting a channel requires a signed-in account to attach it to.
+	const user = requireUser(locals);
+
 	const state = url.searchParams.get('state');
 	const pending = readPendingStates(cookies);
 	if (!state || !pending.includes(state)) throw error(400, 'bad state');
@@ -125,10 +131,22 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 	}
 	const title = typeof ch.snippet?.title === 'string' ? ch.snippet.title : 'Untitled channel';
 
+	// A channel already owned by another account must not be reattached (or have
+	// its refresh token overwritten) by this one.
+	const existing = await db
+		.select({ userId: channels.userId })
+		.from(channels)
+		.where(eq(channels.id, ch.id))
+		.get();
+	if (existing?.userId && existing.userId !== user.id) {
+		throw error(409, 'this channel is connected to a different Moderaty account');
+	}
+
 	await db
 		.insert(channels)
 		.values({
 			id: ch.id,
+			userId: user.id,
 			title,
 			refreshTokenEnc: encrypt(tokens.refresh_token),
 			active: 1,
@@ -136,7 +154,7 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 		})
 		.onConflictDoUpdate({
 			target: channels.id,
-			set: { title, refreshTokenEnc: encrypt(tokens.refresh_token), active: 1 }
+			set: { userId: user.id, title, refreshTokenEnc: encrypt(tokens.refresh_token), active: 1 }
 		});
 
 	// Consume the state only once the flow has succeeded, so a transient

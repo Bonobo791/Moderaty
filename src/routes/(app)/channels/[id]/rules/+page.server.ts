@@ -19,17 +19,31 @@
 import { db } from '$lib/server/db';
 import { channels, rules } from '$lib/server/db/schema';
 import { validateRule } from '$lib/server/rules';
+import { requireUser } from '$lib/server/session';
 import { and, eq } from 'drizzle-orm';
-import { fail } from '@sveltejs/kit';
+import { error, fail } from '@sveltejs/kit';
 
-export async function load({ params }) {
-	const ch = await db.select().from(channels).where(eq(channels.id, params.id)).get();
+/** Loads this route's channel only when the signed-in user owns it (404 otherwise). */
+async function ownedChannel(paramsId: string, locals: { user: import('$lib/server/session').SessionUser | null }) {
+	const user = requireUser(locals);
+	const ch = await db
+		.select()
+		.from(channels)
+		.where(and(eq(channels.id, paramsId), eq(channels.userId, user.id)))
+		.get();
+	if (!ch) throw error(404, 'channel not found');
+	return ch;
+}
+
+export async function load({ params, locals }) {
+	const ch = await ownedChannel(params.id, locals);
 	const rs = await db.select().from(rules).where(eq(rules.channelId, params.id)).all();
 	return { ch, rs };
 }
 
 export const actions = {
-	add: async ({ params, request }) => {
+	add: async ({ params, request, locals }) => {
+		await ownedChannel(params.id, locals);
 		const f = await request.formData();
 		const type = String(f.get('type') ?? '');
 		const pattern = String(f.get('pattern') ?? '').trim();
@@ -48,7 +62,8 @@ export const actions = {
 		});
 		return { ok: true };
 	},
-	remove: async ({ params, request }) => {
+	remove: async ({ params, request, locals }) => {
+		await ownedChannel(params.id, locals);
 		const f = await request.formData();
 		const ruleId = Number(f.get('ruleId'));
 		if (!Number.isInteger(ruleId) || ruleId <= 0) {

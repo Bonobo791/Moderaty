@@ -16,27 +16,21 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { db } from '$lib/server/db';
-import { channels, auditLog } from '$lib/server/db/schema';
-import { requireUser } from '$lib/server/session';
-import { and, eq, desc } from 'drizzle-orm';
-import { error } from '@sveltejs/kit';
+import { redirect } from '@sveltejs/kit';
 
-export async function load({ params, locals }) {
-	// Ownership-scoped: another user's channel (and its audit log) reads as "not found".
-	const user = requireUser(locals);
-	const ch = await db
-		.select()
-		.from(channels)
-		.where(and(eq(channels.id, params.id), eq(channels.userId, user.id)))
-		.get();
-	if (!ch) throw error(404, 'channel not found');
-	const entries = await db
-		.select()
-		.from(auditLog)
-		.where(eq(auditLog.channelId, params.id))
-		.orderBy(desc(auditLog.createdAt))
-		.limit(200)
-		.all();
-	return { ch, entries };
-}
+import { destroySession, SESSION_COOKIE } from '$lib/server/session';
+
+import type { PageServerLoad, Actions } from './$types';
+
+export const load: PageServerLoad = () => {
+	throw redirect(302, '/login');
+};
+
+export const actions: Actions = {
+	default: async ({ cookies }) => {
+		const token = cookies.get(SESSION_COOKIE);
+		if (token) await destroySession(token);
+		cookies.delete(SESSION_COOKIE, { path: '/' });
+		throw redirect(302, '/login');
+	}
+};

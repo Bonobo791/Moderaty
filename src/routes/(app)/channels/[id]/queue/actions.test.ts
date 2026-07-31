@@ -44,8 +44,8 @@ beforeEach(async () => {
 	await testDb()
 		.db.insert(channels)
 		.values([
-			{ id: 'UC1', title: 'One', refreshTokenEnc: 'enc-1' },
-			{ id: 'UC2', title: 'Two', refreshTokenEnc: 'enc-2' }
+			{ id: 'UC1', userId: OWNER.id, title: 'One', refreshTokenEnc: 'enc-1' },
+			{ id: 'UC2', userId: OWNER.id, title: 'Two', refreshTokenEnc: 'enc-2' }
 		]);
 	mocks.env.DRY_RUN = 'true';
 	vi.clearAllMocks();
@@ -53,10 +53,12 @@ beforeEach(async () => {
 
 const QUEUE_URL = 'http://localhost/channels/UC1/queue';
 
+const OWNER = { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' };
+
 const actionNames = ['approve', 'reject', 'del', 'ban'] as const;
 
-function act(name: (typeof actionNames)[number], fields: Record<string, string>) {
-	return actions[name]({ params: { id: 'UC1' }, request: postForm(fields, QUEUE_URL) } as never);
+function act(name: (typeof actionNames)[number], fields: Record<string, string>, channelId = 'UC1', user: typeof OWNER | null = OWNER) {
+	return actions[name]({ params: { id: channelId }, request: postForm(fields, QUEUE_URL), locals: { user } } as never);
 }
 
 async function expectAllActions404(fields: Record<string, string>) {
@@ -146,4 +148,21 @@ test('reject outside DRY_RUN calls YouTube and audits reject', async () => {
 	const audits = await auditRows();
 	expect(audits).toHaveLength(1);
 	expect(audits[0]).toMatchObject({ channelId: 'UC1', commentId: 'c1', action: 'reject', actor: 'user' });
+});
+
+test('act fails loudly on a channel owned by another user and changes nothing', async () => {
+	await testDb().db.update(channels).set({ userId: 'user-2' }).where(eq(channels.id, 'UC1'));
+	await seedComment('c9', 'UC1');
+	for (const name of actionNames) {
+		await expect(act(name, { commentId: 'c9' })).rejects.toThrowError(expect.objectContaining({ status: 404 }));
+	}
+	await expectNothingDecided('c9', 'pending');
+});
+
+test('act rejects a signed-out request with 401', async () => {
+	await seedComment('c8', 'UC1');
+	for (const name of actionNames) {
+		await expect(act(name, { commentId: 'c8' }, 'UC1', null)).rejects.toThrowError(expect.objectContaining({ status: 401 }));
+	}
+	await expectNothingDecided('c8', 'pending');
 });

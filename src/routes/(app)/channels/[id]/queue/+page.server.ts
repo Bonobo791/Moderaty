@@ -21,11 +21,12 @@ import { channels, comments, auditLog } from '$lib/server/db/schema';
 import { and, eq, desc } from 'drizzle-orm';
 import { refreshAccessToken, setModerationStatus, deleteComment } from '$lib/server/youtube';
 import { decrypt } from '$lib/server/crypto';
+import { requireUser } from '$lib/server/session';
 import { env } from '$env/dynamic/private';
 import { error, fail } from '@sveltejs/kit';
 
-export async function load({ params }) {
-	const ch = await db.select().from(channels).where(eq(channels.id, params.id)).get();
+export async function load({ params, locals }) {
+	const ch = await ownedChannel(params.id, locals);
 	const pending = await db
 		.select()
 		.from(comments)
@@ -36,9 +37,20 @@ export async function load({ params }) {
 	return { ch, pending };
 }
 
-async function act(paramsId: string, commentId: string, action: 'approve' | 'reject' | 'delete' | 'ban') {
-	const ch = await db.select().from(channels).where(eq(channels.id, paramsId)).get();
+/** Loads this route's channel only when the signed-in user owns it (404 otherwise). */
+async function ownedChannel(paramsId: string, locals: { user: import('$lib/server/session').SessionUser | null }) {
+	const user = requireUser(locals);
+	const ch = await db
+		.select()
+		.from(channels)
+		.where(and(eq(channels.id, paramsId), eq(channels.userId, user.id)))
+		.get();
 	if (!ch) throw error(404, 'channel not found');
+	return ch;
+}
+
+async function act(paramsId: string, commentId: string, action: 'approve' | 'reject' | 'delete' | 'ban', locals: { user: import('$lib/server/session').SessionUser | null }) {
+	const ch = await ownedChannel(paramsId, locals);
 	// Scope to this route's channel and to still-pending comments so a forged
 	// POST cannot moderate another channel's comment or re-decide a settled one.
 	const comment = await db
@@ -83,28 +95,28 @@ function commentIdFrom(formData: FormData): string | null {
 }
 
 export const actions = {
-	approve: async ({ params, request }) => {
+	approve: async ({ params, request, locals }) => {
 		const commentId = commentIdFrom(await request.formData());
 		if (!commentId) return fail(400, { error: 'Invalid comment ID' });
-		await act(params.id, commentId, 'approve');
+		await act(params.id, commentId, 'approve', locals);
 		return { success: 'Approved — recorded in audit log.' };
 	},
-	reject: async ({ params, request }) => {
+	reject: async ({ params, request, locals }) => {
 		const commentId = commentIdFrom(await request.formData());
 		if (!commentId) return fail(400, { error: 'Invalid comment ID' });
-		await act(params.id, commentId, 'reject');
+		await act(params.id, commentId, 'reject', locals);
 		return { success: 'Rejected — recorded in audit log.' };
 	},
-	del: async ({ params, request }) => {
+	del: async ({ params, request, locals }) => {
 		const commentId = commentIdFrom(await request.formData());
 		if (!commentId) return fail(400, { error: 'Invalid comment ID' });
-		await act(params.id, commentId, 'delete');
+		await act(params.id, commentId, 'delete', locals);
 		return { success: 'Deleted — recorded in audit log.' };
 	},
-	ban: async ({ params, request }) => {
+	ban: async ({ params, request, locals }) => {
 		const commentId = commentIdFrom(await request.formData());
 		if (!commentId) return fail(400, { error: 'Invalid comment ID' });
-		await act(params.id, commentId, 'ban');
+		await act(params.id, commentId, 'ban', locals);
 		return { success: 'Author banned — recorded in audit log.' };
 	}
 };

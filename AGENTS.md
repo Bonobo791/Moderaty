@@ -139,6 +139,24 @@ Approved dependencies only (execution plan v3): `drizzle-orm`,
 frameworks, no zod. UI copy uses the brand **Moderaty** — the string `yt-mod`
 must not appear in `src/`.
 
+## Accounts & Sessions
+
+Moderaty is multi-user. Sign-in is Google identity only
+(`/api/auth/google/login`, scopes `openid email profile`); YouTube channel
+connection is a separate consent (`/api/auth/google`, `youtube.force-ssl`)
+that requires a session and attaches the channel to the caller. Sessions are
+DIY by design — **no auth library**: `src/lib/server/session.ts` (random
+32-byte token, `sessions` table, httpOnly `moderaty_session` cookie, 30-day
+sliding expiry). `src/hooks.server.ts` populates `locals.user`; the `(app)`
+layout redirects signed-out visitors to `/login`; every form action must call
+`requireUser(locals)` and scope every channel query/mutation by
+`channels.userId` (another user's channel always reads as 404 — never leak
+existence). Pre-accounts "orphan" channels (`user_id IS NULL`) are claimed by
+the first user ever to sign in. Self-hosted instances use the same code path;
+BYOK is via env (`GOOGLE_CLIENT_ID/SECRET`, `OPENAI_API_KEY`, Turso), so
+self-hosters never cost the hosted operator. `users.plan` is the hook for the
+future Stripe integration (hosted plans; free tier = self-hosted only).
+
 ## Commands
 
 Use Node 24 and npm 11.

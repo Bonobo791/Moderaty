@@ -119,7 +119,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			{/each}
 		</nav>
 		<p class="strip-current"><span class="sc-num">{currentCue.num} · </span>{currentCue.name}</p>
-		<a class="strip-cta" href="/api/auth/google">Connect</a>
+		<a class="strip-cta" href="/login">Connect</a>
 	</header>
 
 	<main>
@@ -134,7 +134,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				<span class="monitor-note">(an illustrative night)</span>
 			</p>
 			<div class="actions">
-				<a class="btn-activate" href="/api/auth/google">Connect YouTube channel</a>
+				<a class="btn-activate" href="/login">Connect YouTube channel</a>
 				<a class="btn-preview" href="#lx-01">Watch the night shift</a>
 			</div>
 			<p class="cta-fine">
@@ -233,7 +233,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			<p class="cue-tag"><span>LX-05</span> DAY <span class="cue-time">50.00</span></p>
 			<h2>Every other comment tool wants to grow your channel. Moderaty wants to protect you.</h2>
 			<div class="actions">
-				<a class="btn-activate" href="/api/auth/google">Connect YouTube channel</a>
+				<a class="btn-activate" href="/login">Connect YouTube channel</a>
 			</div>
 		</div>
 	</section>

@@ -25,12 +25,14 @@ import { actions } from './+page.server';
 
 setupTestDb(['channels']);
 
-async function seedChannel(id: string) {
-	await testDb().db.insert(channels).values({ id, title: `Channel ${id}`, refreshTokenEnc: 'enc' });
+const OWNER = { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' };
+
+async function seedChannel(id: string, userId: string | null = OWNER.id) {
+	await testDb().db.insert(channels).values({ id, userId, title: `Channel ${id}`, refreshTokenEnc: 'enc' });
 }
 
-function setToneLevel(channelId: string, toneLevel: string) {
-	return actions.setToneLevel({ request: postForm({ channelId, toneLevel }) } as never);
+function setToneLevel(channelId: string, toneLevel: string, user: typeof OWNER | null = OWNER) {
+	return actions.setToneLevel({ request: postForm({ channelId, toneLevel }), locals: { user } } as never);
 }
 
 async function toneLevelOf(id: string) {
@@ -63,4 +65,20 @@ test('rejects an unknown channel with 404', async () => {
 	const res = await setToneLevel('UC-missing', '2');
 
 	expect(res).toMatchObject({ status: 404 });
+});
+
+test('rejects a channel owned by another user with 404 and changes nothing', async () => {
+	await seedChannel('UC1', 'user-2');
+
+	const res = await setToneLevel('UC1', '2');
+
+	expect(res).toMatchObject({ status: 404 });
+	expect(await toneLevelOf('UC1')).toBeNull();
+});
+
+test('rejects a signed-out request with 401', async () => {
+	await seedChannel('UC1');
+
+	await expect(setToneLevel('UC1', '2', null)).rejects.toMatchObject({ status: 401 });
+	expect(await toneLevelOf('UC1')).toBeNull();
 });

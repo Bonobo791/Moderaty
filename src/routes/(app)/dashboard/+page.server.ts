@@ -18,42 +18,60 @@
 
 import { db } from '$lib/server/db';
 import { channels, comments, moderationActions } from '$lib/server/db/schema';
-import { and, eq, sql } from 'drizzle-orm';
+import { requireUser } from '$lib/server/session';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { fail } from '@sveltejs/kit';
 
-export async function load() {
+export async function load({ locals }) {
+	const user = requireUser(locals);
 	// Project only the fields the page renders; never serialize refreshTokenEnc
-	// (or any future secret column) to the browser.
+	// (or any future secret column) to the browser. Everything below is scoped
+	// to channels the signed-in user owns.
 	const chs = await db
 		.select({ id: channels.id, title: channels.title, cursor: channels.cursor, toneLevel: channels.toneLevel })
 		.from(channels)
+		.where(eq(channels.userId, user.id))
 		.all();
-	const stats = await db
-		.select({ channelId: comments.channelId, status: comments.status, n: sql<number>`count(*)` })
-		.from(comments)
-		.groupBy(comments.channelId, comments.status)
-		.all();
-	const bans = await db
-		.select({ channelId: moderationActions.channelId, n: sql<number>`count(*)` })
-		.from(moderationActions)
-		.where(and(eq(moderationActions.action, 'ban'), eq(moderationActions.state, 'completed')))
-		.groupBy(moderationActions.channelId)
-		.all();
+	const channelIds = chs.map((ch) => ch.id);
+	const stats = channelIds.length
+		? await db
+				.select({ channelId: comments.channelId, status: comments.status, n: sql<number>`count(*)` })
+				.from(comments)
+				.where(inArray(comments.channelId, channelIds))
+				.groupBy(comments.channelId, comments.status)
+				.all()
+		: [];
+	const bans = channelIds.length
+		? await db
+				.select({ channelId: moderationActions.channelId, n: sql<number>`count(*)` })
+				.from(moderationActions)
+				.where(
+					and(
+						eq(moderationActions.action, 'ban'),
+						eq(moderationActions.state, 'completed'),
+						inArray(moderationActions.channelId, channelIds)
+					)
+				)
+				.groupBy(moderationActions.channelId)
+				.all()
+		: [];
 	return { chs, stats, bans };
 }
 
 export const actions = {
-	setToneLevel: async ({ request }) => {
+	setToneLevel: async ({ request, locals }) => {
+		const user = requireUser(locals);
 		const f = await request.formData();
 		const channelId = String(f.get('channelId') ?? '');
 		const toneLevel = Number(f.get('toneLevel'));
 		if (toneLevel !== 1 && toneLevel !== 2) {
 			return fail(400, { error: 'tone level must be 1 (Edge Lord) or 2 (Edge lord + Ackchyually…)' });
 		}
+		// Ownership-scoped: another user's channel reads as "not found".
 		const updated = await db
 			.update(channels)
 			.set({ toneLevel })
-			.where(eq(channels.id, channelId))
+			.where(and(eq(channels.id, channelId), eq(channels.userId, user.id)))
 			.returning({ id: channels.id });
 		if (updated.length === 0) return fail(404, { error: 'channel not found' });
 		return { ok: true };

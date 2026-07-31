@@ -8,6 +8,16 @@ Moderaty is a YouTube Comment Moderator platform to eliminate hate comments fore
 [![Reliability Rating](https://sonarcloud.io/api/project_badges/measure?project=Bonobo791_Moderaty&metric=reliability_rating)](https://sonarcloud.io/summary/new_code?id=Bonobo791_Moderaty)
 
 
+## Accounts
+
+Anyone can sign up: sign in with Google (identity only), then connect your
+YouTube channel with a separate YouTube-scoped consent. Self-hosted instances
+run the same code and are BYOK — set your own `GOOGLE_CLIENT_ID`/
+`GOOGLE_CLIENT_SECRET` (your own Google Cloud OAuth client), `OPENAI_API_KEY`,
+and Turso credentials in `.env` (see `.env.example`), so self-hosting costs
+the hosted operator nothing. A Stripe integration for hosted plan purchases
+is planned; the free tier will remain self-hosted only.
+
 ## Hosting
 
 Moderaty is hosted on Netlify using SvelteKit's Netlify adapter and standard Node

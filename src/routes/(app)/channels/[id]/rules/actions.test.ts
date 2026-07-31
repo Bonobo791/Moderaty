@@ -18,11 +18,17 @@
 
 import { expect, test } from 'vitest';
 import { postForm, setupTestDb, testDb } from '$lib/server/testdb';
-import { rules } from '$lib/server/db/schema';
+import { channels, rules } from '$lib/server/db/schema';
 
 import { actions } from './+page.server';
 
-setupTestDb(['rules']);
+setupTestDb(['rules', 'channels']);
+
+const OWNER = { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' };
+
+async function seedChannel(channelId: string, userId: string | null = OWNER.id) {
+	await testDb().db.insert(channels).values({ id: channelId, userId, title: 'Ch', refreshTokenEnc: 'enc' });
+}
 
 const RULES_URL = 'http://localhost/channels/UC1/rules?/remove';
 
@@ -34,8 +40,8 @@ async function seedRule(channelId: string): Promise<number> {
 	return rows[0].id;
 }
 
-function remove(channelId: string, ruleId: string) {
-	return actions.remove({ params: { id: channelId }, request: postForm({ ruleId }, RULES_URL) } as never);
+function remove(channelId: string, ruleId: string, user: typeof OWNER | null = OWNER) {
+	return actions.remove({ params: { id: channelId }, request: postForm({ ruleId }, RULES_URL), locals: { user } } as never);
 }
 
 async function ruleRows() {
@@ -43,6 +49,7 @@ async function ruleRows() {
 }
 
 test('remove deletes this channel rule and reports ok', async () => {
+	await seedChannel('UC1');
 	const id = await seedRule('UC1');
 	const res = await remove('UC1', String(id));
 	expect(res).toMatchObject({ ok: true });
@@ -50,6 +57,8 @@ test('remove deletes this channel rule and reports ok', async () => {
 });
 
 test('remove cannot delete another channel rule', async () => {
+	await seedChannel('UC1');
+	await seedChannel('UC2');
 	const otherId = await seedRule('UC2');
 	const res = await remove('UC1', String(otherId));
 	expect(res).toMatchObject({ status: 404 });
@@ -57,6 +66,7 @@ test('remove cannot delete another channel rule', async () => {
 });
 
 test('remove rejects a malformed ruleId with 400', async () => {
+	await seedChannel('UC1');
 	const id = await seedRule('UC1');
 	for (const ruleId of ['abc', '', '0', '-3']) {
 		const res = await remove('UC1', ruleId);
@@ -65,4 +75,20 @@ test('remove rejects a malformed ruleId with 400', async () => {
 	const rows = await ruleRows();
 	expect(rows).toHaveLength(1);
 	expect(rows[0].id).toBe(id);
+});
+
+test('remove on a channel owned by another user fails with 404', async () => {
+	await seedChannel('UC1', 'user-2');
+	const id = await seedRule('UC1');
+
+	await expect(remove('UC1', String(id))).rejects.toMatchObject({ status: 404 });
+	expect(await ruleRows()).toHaveLength(1);
+});
+
+test('remove rejects a signed-out request with 401', async () => {
+	await seedChannel('UC1');
+	const id = await seedRule('UC1');
+
+	await expect(remove('UC1', String(id), null)).rejects.toMatchObject({ status: 401 });
+	expect(await ruleRows()).toHaveLength(1);
 });

@@ -16,27 +16,25 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { db } from '$lib/server/db';
-import { channels, auditLog } from '$lib/server/db/schema';
-import { requireUser } from '$lib/server/session';
-import { and, eq, desc } from 'drizzle-orm';
-import { error } from '@sveltejs/kit';
+import type { Handle } from '@sveltejs/kit';
 
-export async function load({ params, locals }) {
-	// Ownership-scoped: another user's channel (and its audit log) reads as "not found".
-	const user = requireUser(locals);
-	const ch = await db
-		.select()
-		.from(channels)
-		.where(and(eq(channels.id, params.id), eq(channels.userId, user.id)))
-		.get();
-	if (!ch) throw error(404, 'channel not found');
-	const entries = await db
-		.select()
-		.from(auditLog)
-		.where(eq(auditLog.channelId, params.id))
-		.orderBy(desc(auditLog.createdAt))
-		.limit(200)
-		.all();
-	return { ch, entries };
-}
+import { getSessionUser, SESSION_COOKIE } from '$lib/server/session';
+
+// Resolves the session cookie into locals.user for every request. When the
+// session slid into its renewal window, the cookie is refreshed with the new
+// expiry so active users never get logged out.
+export const handle: Handle = async ({ event, resolve }) => {
+	const token = event.cookies.get(SESSION_COOKIE);
+	const resolution = await getSessionUser(token);
+	event.locals.user = resolution?.user ?? null;
+	if (resolution?.renewed && token) {
+		event.cookies.set(SESSION_COOKIE, token, {
+			path: '/',
+			httpOnly: true,
+			sameSite: 'lax',
+			secure: event.url.protocol === 'https:',
+			expires: new Date(resolution.expiresAt)
+		});
+	}
+	return resolve(event);
+};

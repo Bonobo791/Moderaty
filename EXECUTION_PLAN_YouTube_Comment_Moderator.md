@@ -920,7 +920,7 @@ function okResponse(scores: Record<string, number>) {
 
 describe('scoreComment', () => {
   it('M1: returns max of the thirteen toxic categories', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => okResponse({ harassment: 0.4, 'harassment/threatening': 0.1, hate: 0.9, 'hate/threatening': 0.1, violence: 0.1, 'violence/graphic': 0.1 })));
+    vi.stubGlobal('fetch', vi.fn(async () => okResponse({ harassment: 0.4, 'harassment/threatening': 0.1, hate: 0.9, 'hate/threatening': 0.1, illicit: 0.1, 'illicit/violent': 0.1, 'self-harm': 0.1, 'self-harm/intent': 0.1, 'self-harm/instructions': 0.1, sexual: 0.1, 'sexual/minors': 0.1, violence: 0.1, 'violence/graphic': 0.1 })));
     const m = await scoreComment('x');
     expect(m.score).toBe(0.9);
     expect(m.scores.hate).toBe(0.9);

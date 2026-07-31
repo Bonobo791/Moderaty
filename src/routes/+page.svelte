@@ -31,6 +31,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	import FinalCta from '$lib/components/landing/FinalCta.svelte';
 	import Footer from '$lib/components/landing/Footer.svelte';
 	import { FAQ_ENTRIES } from '$lib/landing/faq';
+	import { jsonLd } from '$lib/landing/json-ld';
 
 	const softwareApplication = {
 		'@context': 'https://schema.org',
@@ -53,9 +54,6 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			acceptedAnswer: { '@type': 'Answer', text: f.a }
 		}))
 	};
-
-	const jsonLd = (data: object) =>
-		'<' + 'script type="application/ld+json">' + JSON.stringify(data) + '</' + 'script>';
 </script>
 
 <svelte:head>

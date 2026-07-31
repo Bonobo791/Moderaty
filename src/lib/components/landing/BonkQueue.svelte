@@ -31,17 +31,14 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	import { cubicOut } from 'svelte/easing';
 	import {
 		INITIAL_COUNTS,
-		FINAL_COUNTS,
 		SCRIPT,
 		applyArrival,
 		applyVerdict,
+		initialQueueState,
 		type Counts,
-		type QueueItem,
+		type QueueRow,
 		type Verdict
 	} from '$lib/landing/queue-script';
-
-	type RowState = 'incoming' | 'judged' | 'settled';
-	type Row = { key: number; item: QueueItem; state: RowState };
 
 	const VERDICT_CLASS: Record<Verdict, string> = {
 		APPROVED: 'v-mint',
@@ -54,16 +51,19 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 	let root: HTMLDivElement | undefined = $state();
-	let rows: Row[] = $state([]);
-	let counts: Counts = $state(INITIAL_COUNTS);
+	// SSR and no-JS clients render the completed night; the live loop resets it.
+	const initial = initialQueueState();
+	let rows: QueueRow[] = $state(initial.rows);
+	let counts: Counts = $state(initial.counts);
 
 	onMount(() => {
 		if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-			// Static completed state: the last four comments already actioned.
-			rows = SCRIPT.slice(-4).map((item, i) => ({ key: i, item, state: 'settled' }));
-			counts = FINAL_COUNTS;
+			// Static completed state is already rendered.
 			return;
 		}
+
+		rows = [];
+		counts = INITIAL_COUNTS;
 
 		let cancelled = false;
 		let running = false;

@@ -22,7 +22,8 @@ import {
 	FINAL_COUNTS,
 	SCRIPT,
 	applyArrival,
-	applyVerdict
+	applyVerdict,
+	initialQueueState
 } from './queue-script';
 
 describe('Bonk Queue counter logic', () => {
@@ -66,6 +67,15 @@ describe('Bonk Queue counter logic', () => {
 
 	it('the reduced-motion end state is the labeled illustrative night: 47/41/6', () => {
 		expect(FINAL_COUNTS).toEqual({ incoming: 47, actioned: 41, yours: 6 });
+	});
+
+	it('the SSR/no-JS state is the completed night: settled tail rows and final counts', () => {
+		const state = initialQueueState();
+		expect(state.counts).toEqual(FINAL_COUNTS);
+		expect(state.rows).toHaveLength(4);
+		expect(state.rows.map((r) => r.item)).toEqual(SCRIPT.slice(-4));
+		expect(state.rows.every((r) => r.state === 'settled')).toBe(true);
+		expect(new Set(state.rows.map((r) => r.key)).size).toBe(4);
 	});
 
 	it('the script never ships an empty queue or an unstyled verdict', () => {

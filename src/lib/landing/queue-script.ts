@@ -31,6 +31,14 @@ export type Counts = {
 	yours: number;
 };
 
+export type RowState = 'incoming' | 'judged' | 'settled';
+
+export type QueueRow = {
+	key: number;
+	item: QueueItem;
+	state: RowState;
+};
+
 /** Counters when the loop first appears: the night is already underway. */
 export const INITIAL_COUNTS: Counts = { incoming: 39, actioned: 33, yours: 4 };
 
@@ -66,4 +74,16 @@ export function applyVerdict(counts: Counts, verdict: Verdict): Counts {
 	if (verdict === 'HELD') return { ...counts, yours: counts.yours + 1 };
 	if (verdict === 'APPROVED') return counts;
 	return { ...counts, actioned: counts.actioned + 1 };
+}
+
+/**
+ * The completed night, rendered by SSR and no-JS clients so the panel is
+ * never empty. The live loop resets to INITIAL_COUNTS and starts over when
+ * JS runs with motion allowed.
+ */
+export function initialQueueState(): { rows: QueueRow[]; counts: Counts } {
+	return {
+		rows: SCRIPT.slice(-4).map((item, i) => ({ key: i, item, state: 'settled' })),
+		counts: FINAL_COUNTS
+	};
 }

@@ -198,6 +198,11 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				<p role="listitem"><span class="plot-kind">0.51 – 0.75</span> HELD FOR YOUR REVIEW</p>
 				<p role="listitem"><span class="plot-kind">&le; 0.50</span> APPROVED</p>
 			</div>
+			<p>
+				Turn the sensitivity up to <strong>Edge lord + Ackchyually&hellip;</strong> and a second
+				AI pass also reads the tone — demeaning, condescending, and sarcastic comments get
+				caught too, with your video&rsquo;s title and description as context.
+			</p>
 			<p class="fine">
 				If the AI can&rsquo;t score a comment, it lands in your queue — never auto-approved,
 				never auto-rejected.

@@ -28,7 +28,7 @@ const mocks = vi.hoisted(() => {
 			auditLog: undefined as unknown,
 			moderationActions: undefined as unknown
 		},
-		channel: null as unknown,
+		channel: {} as Record<string, unknown>,
 		channelUpdates: [] as Record<string, unknown>[],
 		existingIds: [] as string[],
 		unclaimedIds: [] as string[],
@@ -108,11 +108,13 @@ const mocks = vi.hoisted(() => {
 		assertBeforeDeadline: vi.fn(),
 		refreshAccessToken: vi.fn(),
 		fetchNewComments: vi.fn(),
+		fetchVideoMetadata: vi.fn(),
 		getCommentModerationStatus: vi.fn(),
 		setModerationStatus: vi.fn(),
 		deleteComment: vi.fn(),
 		scoreComment: vi.fn(),
 		serializeScores: vi.fn(),
+		scoreTone: vi.fn(),
 		checkSync: vi.fn(() => ({ status: 'safe' })),
 		DeadlineExceededError: class DeadlineExceededError extends Error {}
 	};
@@ -130,9 +132,13 @@ vi.mock('$lib/server/moderation', () => ({
 	scoreComment: mocks.scoreComment,
 	serializeScores: mocks.serializeScores
 }));
+vi.mock('$lib/server/tone', () => ({
+	scoreTone: mocks.scoreTone
+}));
 vi.mock('$lib/server/youtube', () => ({
 	refreshAccessToken: mocks.refreshAccessToken,
 	fetchNewComments: mocks.fetchNewComments,
+	fetchVideoMetadata: mocks.fetchVideoMetadata,
 	getCommentModerationStatus: mocks.getCommentModerationStatus,
 	setModerationStatus: mocks.setModerationStatus,
 	deleteComment: mocks.deleteComment
@@ -201,6 +207,7 @@ beforeEach(() => {
 		nextPageToken: null,
 		scanCursor: null,
 		active: 1,
+		toneLevel: null,
 		createdAt: '2026-01-01T00:00:00.000Z'
 	};
 	mocks.state.channelUpdates = [];
@@ -221,6 +228,10 @@ beforeEach(() => {
 	mocks.deleteComment.mockResolvedValue(undefined);
 	mocks.getCommentModerationStatus.mockResolvedValue('rejected');
 	mocks.serializeScores.mockReturnValue('{}');
+	mocks.scoreTone.mockResolvedValue({ score: 0 });
+	mocks.fetchVideoMetadata.mockResolvedValue(new Map([
+		['video', { title: 'Video title', description: 'Video description' }]
+	]));
 	process.env.DRY_RUN = 'false';
 });
 
@@ -284,6 +295,107 @@ test('routes AI scoring failures to the review queue instead of failing the run 
 		expect.objectContaining({ commentId: 'comment', action: 'queue', reason: expect.stringContaining('ai unavailable') })
 	]);
 	expect(result).toMatchObject({ fetched: 1, acted: 0, queued: 1, partial: false, skipped: false });
+});
+
+test.each([
+	{ toneLevel: null },
+	{ toneLevel: 1 }
+])('never calls the tone classifier at sensitivity level $toneLevel', async ({ toneLevel }) => {
+	mocks.state.channel.toneLevel = toneLevel;
+	mocks.scoreComment.mockResolvedValue(moderation(0.1));
+
+	await runChannel('channel');
+
+	expect(mocks.fetchVideoMetadata).not.toHaveBeenCalled();
+	expect(mocks.scoreTone).not.toHaveBeenCalled();
+	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'approved' })]);
+});
+
+test('rejects a demeaning comment the omni score alone would approve', async () => {
+	mocks.state.channel.toneLevel = 2;
+	mocks.scoreComment.mockResolvedValue(moderation(0.1));
+	mocks.scoreTone.mockResolvedValue({ score: 0.82 });
+
+	const result = await runChannel('channel');
+
+	expect(mocks.scoreTone).toHaveBeenCalledWith(
+		'A comment',
+		{ videoTitle: 'Video title', videoDescription: 'Video description' },
+		undefined
+	);
+	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'rejected' })]);
+	expect(mocks.state.insertedAudits).toEqual([
+		expect.objectContaining({ commentId: 'comment', action: 'reject', reason: 'tone score 0.82' })
+	]);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
+	expect(result).toMatchObject({ acted: 1, queued: 0 });
+});
+
+test('bans the author of a genuinely harmful tone attack (≥0.95)', async () => {
+	mocks.state.channel.toneLevel = 2;
+	mocks.scoreComment.mockResolvedValue(moderation(0.1));
+	mocks.scoreTone.mockResolvedValue({ score: 0.97 });
+
+	await runChannel('channel');
+
+	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'rejected' })]);
+	expect(mocks.state.insertedAudits).toEqual([
+		expect.objectContaining({ commentId: 'comment', action: 'ban', reason: 'tone score 0.97' })
+	]);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', true, 'access-token', undefined);
+});
+
+test('queues a borderline tone score (0.51–0.75)', async () => {
+	mocks.state.channel.toneLevel = 2;
+	mocks.scoreComment.mockResolvedValue(moderation(0.1));
+	mocks.scoreTone.mockResolvedValue({ score: 0.6 });
+
+	const result = await runChannel('channel');
+
+	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'pending' })]);
+	expect(mocks.state.insertedAudits).toEqual([
+		expect.objectContaining({ commentId: 'comment', action: 'queue', reason: 'tone score 0.60' })
+	]);
+	expect(result).toMatchObject({ acted: 0, queued: 1 });
+});
+
+test('keeps the omni outcome when it is the stronger signal', async () => {
+	mocks.state.channel.toneLevel = 2;
+	mocks.scoreComment.mockResolvedValue(moderation(0.6));
+	mocks.scoreTone.mockResolvedValue({ score: 0.2 });
+
+	await runChannel('channel');
+
+	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'pending' })]);
+	expect(mocks.state.insertedAudits).toEqual([
+		expect.objectContaining({ commentId: 'comment', action: 'queue', reason: 'ai score 0.60' })
+	]);
+});
+
+test('skips the tone call entirely when the omni score already rejects', async () => {
+	mocks.state.channel.toneLevel = 2;
+	mocks.scoreComment.mockResolvedValue(moderation(0.8));
+
+	await runChannel('channel');
+
+	expect(mocks.scoreTone).not.toHaveBeenCalled();
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
+});
+
+test('routes tone scoring failures to the review queue (I11)', async () => {
+	mocks.state.channel.toneLevel = 2;
+	mocks.scoreComment.mockResolvedValue(moderation(0.1));
+	mocks.scoreTone.mockRejectedValue(new Error('tone response has missing or out-of-range score'));
+
+	const result = await runChannel('channel');
+
+	expect(mocks.state.insertedComments).toEqual([
+		expect.objectContaining({ id: 'comment', status: 'pending', decidedBy: 'none', aiScore: null })
+	]);
+	expect(mocks.state.insertedAudits).toEqual([
+		expect.objectContaining({ commentId: 'comment', action: 'queue', reason: expect.stringContaining('ai unavailable') })
+	]);
+	expect(result).toMatchObject({ acted: 0, queued: 1 });
 });
 
 test('persists the chronologically newest timestamp when UTC offsets differ', async () => {

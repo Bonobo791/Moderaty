@@ -24,9 +24,11 @@ import { auditLog, channels, comments, moderationActions, rules } from '$lib/ser
 import { assertBeforeDeadline, DeadlineExceededError } from '$lib/server/http';
 import { scoreComment, serializeScores } from '$lib/server/moderation';
 import { matchPreparedRule, prepareRules, type PreparedRule, type RuleAction } from '$lib/server/rules';
+import { scoreTone, type ToneContext } from '$lib/server/tone';
 import {
 	deleteComment,
 	fetchNewComments,
+	fetchVideoMetadata,
 	getCommentModerationStatus,
 	refreshAccessToken,
 	setModerationStatus,
@@ -108,80 +110,72 @@ function ruleDecision(comment: NewComment, rule: PreparedRule['rule']): Decision
 	};
 }
 
-async function aiDecision(comment: NewComment, deadline?: number): Promise<Decision> {
-	let moderation: Awaited<ReturnType<typeof scoreComment>>;
-	try {
-		moderation = await scoreComment(comment.text, deadline);
-	} catch (error) {
-		// I11: a scoring failure never auto-approves, never auto-rejects, and
-		// never aborts the batch — the comment lands in the human review queue.
-		return {
-			comment,
-			status: 'pending',
-			decidedBy: 'none',
-			matchedRuleId: null,
-			aiScore: null,
-			auditAction: 'queue',
-			reason: `ai unavailable: ${error instanceof Error ? error.message : String(error)}`.slice(0, 200),
-			youtubeAction: null
-		};
-	}
-	// Round to the displayed precision before comparing so a score that reads
-	// as "0.51" in the audit log also behaves as 0.51 against the thresholds.
-	const score = Math.round(moderation.score * 100) / 100;
-	const reason = `ai score ${score.toFixed(2)}`;
-	const aiScore = serializeScores(moderation.scores);
-	if (score >= AUTO_BAN) {
-		return {
-			comment,
-			status: 'rejected',
-			decidedBy: 'ai',
-			matchedRuleId: null,
-			aiScore,
-			auditAction: 'ban',
-			reason,
-			youtubeAction: 'ban'
-		};
-	}
-	if (score >= AUTO_REJECT) {
-		return {
-			comment,
-			status: 'rejected',
-			decidedBy: 'ai',
-			matchedRuleId: null,
-			aiScore,
-			auditAction: 'reject',
-			reason,
-			youtubeAction: 'reject'
-		};
-	}
-	if (score >= QUEUE) {
-		return {
-			comment,
-			status: 'pending',
-			decidedBy: 'ai',
-			matchedRuleId: null,
-			aiScore,
-			auditAction: 'queue',
-			reason,
-			youtubeAction: null
-		};
-	}
+/** Queues a comment for human review when AI scoring is unavailable (I11). */
+function aiUnavailable(comment: NewComment, error: unknown): Decision {
+	// I11: a scoring failure never auto-approves, never auto-rejects, and
+	// never aborts the batch — the comment lands in the human review queue.
 	return {
 		comment,
-		status: 'approved',
-		decidedBy: 'ai',
+		status: 'pending',
+		decidedBy: 'none',
 		matchedRuleId: null,
-		aiScore,
-		auditAction: 'approve',
-		reason,
+		aiScore: null,
+		auditAction: 'queue',
+		reason: `ai unavailable: ${error instanceof Error ? error.message : String(error)}`.slice(0, 200),
 		youtubeAction: null
 	};
 }
 
-async function decide(comment: NewComment, rules: PreparedRule[], deadline?: number): Promise<Decision> {
+function aiOutcome(comment: NewComment, aiScore: string | null, signal: 'ai' | 'tone', score: number): Decision {
+	const reason = `${signal} score ${score.toFixed(2)}`;
+	if (score >= AUTO_BAN) {
+		return { comment, status: 'rejected', decidedBy: 'ai', matchedRuleId: null, aiScore, auditAction: 'ban', reason, youtubeAction: 'ban' };
+	}
+	if (score >= AUTO_REJECT) {
+		return { comment, status: 'rejected', decidedBy: 'ai', matchedRuleId: null, aiScore, auditAction: 'reject', reason, youtubeAction: 'reject' };
+	}
+	if (score >= QUEUE) {
+		return { comment, status: 'pending', decidedBy: 'ai', matchedRuleId: null, aiScore, auditAction: 'queue', reason, youtubeAction: null };
+	}
+	return { comment, status: 'approved', decidedBy: 'ai', matchedRuleId: null, aiScore, auditAction: 'approve', reason, youtubeAction: null };
+}
+
+async function aiDecision(comment: NewComment, tone: { context: ToneContext } | null, deadline?: number): Promise<Decision> {
+	let moderation: Awaited<ReturnType<typeof scoreComment>>;
+	try {
+		moderation = await scoreComment(comment.text, deadline);
+	} catch (error) {
+		return aiUnavailable(comment, error);
+	}
+	// Round to the displayed precision before comparing so a score that reads
+	// as "0.51" in the audit log also behaves as 0.51 against the thresholds.
+	const score = Math.round(moderation.score * 100) / 100;
+	const aiScore = serializeScores(moderation.scores);
+	// Omni already condemns the comment on its own — no need to spend a tone call.
+	if (score >= AUTO_REJECT) return aiOutcome(comment, aiScore, 'ai', score);
+	// Level 2 ("Edge lord + Ackchyually..."): the tone pass sees demeaning,
+	// condescending, and sarcastic comments the safety classifier cannot. The
+	// stronger of the two signals decides, on identical bands (tone included).
+	if (tone) {
+		let toneScore: number;
+		try {
+			toneScore = Math.round((await scoreTone(comment.text, tone.context, deadline)).score * 100) / 100;
+		} catch (error) {
+			return aiUnavailable(comment, error);
+		}
+		if (toneScore > score) return aiOutcome(comment, aiScore, 'tone', toneScore);
+	}
+	return aiOutcome(comment, aiScore, 'ai', score);
+}
+
+async function decide(
+	comment: NewComment,
+	rules: PreparedRule[],
+	tone: { context: ToneContext } | null,
+	deadline?: number
+): Promise<Decision> {
 	const rule = matchPreparedRule(comment.text, comment.authorChannelId, rules);
-	return rule ? ruleDecision(comment, rule) : aiDecision(comment, deadline);
+	return rule ? ruleDecision(comment, rule) : aiDecision(comment, tone, deadline);
 }
 
 function auditRows(channelId: string, decisions: Decision[], dryRun: boolean) {
@@ -236,7 +230,7 @@ function actionRows(channelId: string, decisions: Decision[]) {
 async function decideNewComments(
 	channelId: string,
 	page: CommentPage,
-	deadline?: number
+	{ accessToken, toneLevel, deadline }: { accessToken: string; toneLevel: number; deadline?: number }
 ): Promise<{ decisions: Decision[]; failures: string[] }> {
 	const existingIds = new Set(
 		page.comments.length
@@ -250,17 +244,28 @@ async function decideNewComments(
 			: []
 	);
 	const rulesForChannel = prepareRules(await db.select().from(rules).where(eq(rules.channelId, channelId)).all());
+	const newComments = page.comments.filter((comment) => !existingIds.has(comment.id));
+	// Level 2 tone scoring needs each video's title/description as context. One
+	// batched videos.list call per run; videos whose metadata failed validation
+	// score with empty context (best-effort), and a videos.list API failure
+	// fails the run loudly (I2) to be retried next run.
+	const videoContext =
+		toneLevel >= 2 && newComments.length
+			? await fetchVideoMetadata([...new Set(newComments.map((comment) => comment.videoId))], accessToken, deadline)
+			: null;
 	const settled = await Promise.allSettled(
-		page.comments
-			.filter((comment) => !existingIds.has(comment.id))
-			.map(async (comment) => {
-				try {
-					return await decide(comment, rulesForChannel, deadline);
-				} catch (error) {
-					if (error instanceof DeadlineExceededError) throw error;
-					throw new Error(`comment ${comment.id}: ${error instanceof Error ? error.message : String(error)}`);
-				}
-			})
+		newComments.map(async (comment) => {
+			try {
+				const meta = videoContext?.get(comment.videoId);
+				const tone = videoContext
+					? { context: { videoTitle: meta?.title ?? '', videoDescription: meta?.description ?? '' } }
+					: null;
+				return await decide(comment, rulesForChannel, tone, deadline);
+			} catch (error) {
+				if (error instanceof DeadlineExceededError) throw error;
+				throw new Error(`comment ${comment.id}: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		})
 	);
 	const decisions: Decision[] = [];
 	const failures: string[] = [];
@@ -489,7 +494,11 @@ export async function runChannel(
 		});
 		fetched = page.comments.length;
 
-		const { decisions, failures } = await decideNewComments(channelId, page, deadline);
+		const { decisions, failures } = await decideNewComments(channelId, page, {
+			accessToken,
+			toneLevel: channel.toneLevel ?? 1,
+			deadline
+		});
 		queued = decisions.filter((decision) => decision.auditAction === 'queue').length;
 
 		if (dryRun) {

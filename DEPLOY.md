@@ -22,7 +22,8 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 The repo is deploy-ready: `netlify.toml` pins the build (`npm run build`,
 publish `build`, Node 24) and `netlify/functions/cron.mjs` is a Netlify
-Scheduled Function that triggers one bounded moderation run every 15 minutes.
+Scheduled Function that triggers one bounded moderation run every minute
+(during early operation; raise to `*/15 * * * *` when user volume grows).
 The steps below are the one-time manual setup.
 
 ## 1. Database (Turso)
@@ -57,10 +58,10 @@ The steps below are the one-time manual setup.
 
 ## 4. Cron
 
-- `netlify/functions/cron.mjs` runs on a `*/15 * * * *` schedule and calls
+- `netlify/functions/cron.mjs` runs on a `* * * * *` schedule and calls
   `GET $APP_URL/api/cron` with the secret in an `Authorization: Bearer` header
   (never in the URL). Each invocation processes exactly
-  one channel (least-recently-run first), so the 15-minute schedule sets the
+  one channel (least-recently-run first), so the schedule sets the
   per-channel scan cadence. A failed run throws and appears as a failed
   invocation in **Netlify → Functions → cron** logs.
 - **Function timeout:** Netlify's default is 10s, below the trigger's 25s

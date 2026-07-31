@@ -44,7 +44,7 @@ afterEach(() => {
 });
 
 describe('scheduled cron trigger', () => {
-	it('runs every minute while the production fetch issue is being debugged (temporary)', () => {
+	it('runs every minute during early operation (raise to */15 when user volume grows)', () => {
 		expect(config.schedule).toBe('* * * * *');
 	});
 

@@ -17,10 +17,9 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 /**
- * Netlify Scheduled Function: triggers one bounded moderation run every
- * 15 minutes by calling the app's cron endpoint on the deployed site.
- * The endpoint itself enforces one channel per invocation, so this schedule
- * sets the per-channel scan cadence. The secret travels in an Authorization
+ * Netlify Scheduled Function: triggers one bounded moderation run by
+ * calling the app's cron endpoint on the deployed site (see the schedule
+ * note at `config` below). The secret travels in an Authorization
  * header, never in the URL; the request aborts after 25s rather than hanging
  * into the platform limit. Any failure throws so the invocation shows up as
  * failed in the Netlify function logs.
@@ -58,7 +57,8 @@ export default async function cron() {
 
 const TIMEOUT_MS = 25_000; // below Netlify's 26s function limit; the endpoint's own run budget is 20s
 
-// TEMPORARY (debugging production fetch failures, 2026-07-31): every minute
-// instead of every 15 until the Lambda -> APP_URL fetch issue is resolved.
-// Revert to '*/15 * * * *' afterward.
+// The schedule is every minute while the app is in early single-channel
+// operation; raise to '*/15 * * * *' when user volume grows. The endpoint
+// itself enforces one channel per invocation, so this schedule sets the
+// per-channel scan cadence.
 export const config = { schedule: '* * * * *' };

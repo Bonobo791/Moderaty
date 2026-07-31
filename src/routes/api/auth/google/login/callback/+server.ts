@@ -25,7 +25,7 @@ import { isNull, eq, sql } from 'drizzle-orm';
 import { db } from '$lib/server/db';
 import { channels, users } from '$lib/server/db/schema';
 import { exchangeGoogleCode } from '$lib/server/google';
-import { readPendingStates, storePendingStates } from '$lib/server/oauthState';
+import { cookieSecure, readPendingStates, storePendingStates } from '$lib/server/oauthState';
 import { createSession, SESSION_COOKIE } from '$lib/server/session';
 
 export async function GET({ url, cookies }: { url: URL; cookies: import('@sveltejs/kit').Cookies }) {
@@ -104,7 +104,7 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 		path: '/',
 		httpOnly: true,
 		sameSite: 'lax',
-		secure: url.protocol === 'https:',
+		secure: cookieSecure(),
 		expires: new Date(expiresAt)
 	});
 

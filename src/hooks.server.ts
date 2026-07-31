@@ -18,15 +18,18 @@
 
 import type { Handle } from '@sveltejs/kit';
 
+import { error } from '@sveltejs/kit';
+
+import { cookieSecure } from '$lib/server/oauthState';
 import { getSessionUser, SESSION_COOKIE } from '$lib/server/session';
 
 // Resolves the session cookie into locals.user for every request. When the
 // session slid into its renewal window, the cookie is refreshed with the new
-// expiry so active users never get logged out.
+// expiry so active users never get logged out. A database failure here fails
+// loudly (AGENTS.md): a valid user must see a server error, not a silent
+// downgrade to signed-out.
 export const handle: Handle = async ({ event, resolve }) => {
 	const token = event.cookies.get(SESSION_COOKIE);
-	// A database outage must not take down public pages — treat it as signed
-	// out and let auth-gated routes fail their own requireUser check loudly.
 	try {
 		const resolution = await getSessionUser(token);
 		event.locals.user = resolution?.user ?? null;
@@ -35,13 +38,13 @@ export const handle: Handle = async ({ event, resolve }) => {
 				path: '/',
 				httpOnly: true,
 				sameSite: 'lax',
-				secure: event.url.protocol === 'https:',
+				secure: cookieSecure(),
 				expires: new Date(resolution.expiresAt)
 			});
 		}
 	} catch (e) {
-		console.error('session lookup failed — treating request as signed out:', e);
-		event.locals.user = null;
+		console.error('session lookup failed:', e);
+		throw error(500, 'something went wrong on our side — please retry');
 	}
 	return resolve(event);
 };

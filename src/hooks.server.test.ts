@@ -27,6 +27,10 @@ vi.mock('$lib/server/session', () => ({
 	getSessionUser: mocks.getSessionUser
 }));
 
+vi.mock('$lib/server/oauthState', () => ({
+	cookieSecure: () => false
+}));
+
 import { handle } from './hooks.server';
 
 function makeEvent() {
@@ -37,16 +41,14 @@ function makeEvent() {
 	};
 }
 
-test('a database failure during session lookup degrades to signed out instead of failing the request', async () => {
+test('a database failure during session lookup fails loudly with a user-visible 500', async () => {
 	mocks.getSessionUser.mockRejectedValue(new Error('database is locked'));
 	vi.spyOn(console, 'error').mockImplementation(() => {});
 	const event = makeEvent();
 	const resolve = vi.fn(async () => new Response('ok'));
 
-	await handle({ event, resolve } as never);
-
-	expect(resolve).toHaveBeenCalledOnce();
-	expect(event.locals.user).toBeNull();
+	await expect(handle({ event, resolve } as never)).rejects.toMatchObject({ status: 500 });
+	expect(resolve).not.toHaveBeenCalled();
 });
 
 test('a resolved session user populates locals.user', async () => {

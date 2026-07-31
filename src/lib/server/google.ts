@@ -81,7 +81,8 @@ export async function exchangeGoogleCode(
 		try {
 			const body = JSON.parse(tokenText) as { error?: unknown; error_description?: unknown };
 			if (typeof body?.error === 'string') {
-				detail = `${body.error}${typeof body.error_description === 'string' ? `: ${body.error_description}` : ''}`;
+				const description = typeof body.error_description === 'string' ? `: ${body.error_description}` : '';
+				detail = `${body.error}${description}`;
 			}
 		} catch {
 			// Non-JSON error body — status alone is enough.

@@ -85,8 +85,15 @@ test('creating a session purges already-expired rows', async () => {
 		userId,
 		expiresAt: new Date(Date.now() - 1000).toISOString()
 	});
+	await testDb().db.insert(sessions).values({
+		id: 'live-token',
+		userId,
+		expiresAt: new Date(Date.now() + 60_000).toISOString()
+	});
 
 	await createSession(userId);
 
-	expect((await testDb().db.select().from(sessions).all()).map((s) => s.id)).not.toContain('stale-token');
+	const ids = (await testDb().db.select().from(sessions).all()).map((s) => s.id);
+	expect(ids).not.toContain('stale-token');
+	expect(ids).toContain('live-token');
 });

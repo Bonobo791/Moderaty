@@ -22,6 +22,7 @@ import { and, eq, desc } from 'drizzle-orm';
 import { refreshAccessToken, setModerationStatus, deleteComment } from '$lib/server/youtube';
 import { decrypt } from '$lib/server/crypto';
 import { ownedChannel } from '$lib/server/ownership';
+import { requireUser } from '$lib/server/session';
 import { env } from '$env/dynamic/private';
 import { error, fail } from '@sveltejs/kit';
 
@@ -86,24 +87,28 @@ function commentIdFrom(formData: FormData): string | null {
 
 export const actions = {
 	approve: async ({ params, request, locals }) => {
+		requireUser(locals);
 		const commentId = commentIdFrom(await request.formData());
 		if (!commentId) return fail(400, { error: 'Invalid comment ID' });
 		await act(params.id, commentId, 'approve', locals);
 		return { success: 'Approved — recorded in audit log.' };
 	},
 	reject: async ({ params, request, locals }) => {
+		requireUser(locals);
 		const commentId = commentIdFrom(await request.formData());
 		if (!commentId) return fail(400, { error: 'Invalid comment ID' });
 		await act(params.id, commentId, 'reject', locals);
 		return { success: 'Rejected — recorded in audit log.' };
 	},
 	del: async ({ params, request, locals }) => {
+		requireUser(locals);
 		const commentId = commentIdFrom(await request.formData());
 		if (!commentId) return fail(400, { error: 'Invalid comment ID' });
 		await act(params.id, commentId, 'delete', locals);
 		return { success: 'Deleted — recorded in audit log.' };
 	},
 	ban: async ({ params, request, locals }) => {
+		requireUser(locals);
 		const commentId = commentIdFrom(await request.formData());
 		if (!commentId) return fail(400, { error: 'Invalid comment ID' });
 		await act(params.id, commentId, 'ban', locals);

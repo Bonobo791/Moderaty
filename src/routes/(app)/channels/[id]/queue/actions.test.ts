@@ -101,6 +101,12 @@ test('load projects only the channel fields the page renders — never the crede
 	expect(result?.ch).not.toHaveProperty('refreshTokenEnc');
 });
 
+test('every action rejects a signed-out request with 401 before validating the form', async () => {
+	for (const name of actionNames) {
+		await expect(act(name, {}, 'UC1', null)).rejects.toThrowError(expect.objectContaining({ status: 401 }));
+	}
+});
+
 test('every action rejects a missing commentId with 400 and mutates nothing', async () => {
 	await seedComment('c1', 'UC1');
 	for (const name of actionNames) {

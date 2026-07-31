@@ -99,3 +99,25 @@ test('remove rejects a signed-out request with 401', async () => {
 	await expect(remove('UC1', String(id), null)).rejects.toMatchObject({ status: 401 });
 	expect(await ruleRows()).toHaveLength(1);
 });
+
+function add(channelId: string, user: typeof OWNER | null = OWNER) {
+	return actions.add({
+		params: { id: channelId },
+		request: postForm({ type: 'keyword', pattern: 'spam', action: 'hold' }, 'http://localhost/channels/UC1/rules?/add'),
+		locals: { user }
+	} as never);
+}
+
+test('add on a channel owned by another user fails with 404 and inserts nothing', async () => {
+	await seedChannel('UC1', 'user-2');
+
+	await expect(add('UC1')).rejects.toMatchObject({ status: 404 });
+	expect(await ruleRows()).toHaveLength(0);
+});
+
+test('add rejects a signed-out request with 401 and inserts nothing', async () => {
+	await seedChannel('UC1');
+
+	await expect(add('UC1', null)).rejects.toMatchObject({ status: 401 });
+	expect(await ruleRows()).toHaveLength(0);
+});

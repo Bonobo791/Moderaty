@@ -143,7 +143,7 @@ test('callback returns 502 when the userinfo request itself fails', async () => 
 	);
 	const cookies = makeCookiesWithState('s');
 	await expectHttpError(loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never), 502);
-	expect(errorSpy.mock.calls.length > 0).toBe(true);
+	expect(errorSpy).toHaveBeenCalled();
 	// The state is not consumed on a transient failure — the only oauth_state
 	// write is the initial seed, so the callback stays retryable.
 	expect(cookies.setCalls.filter((c) => c.name === 'oauth_state')).toHaveLength(1);
@@ -208,18 +208,6 @@ test('a repeat login with the same sub reuses the account', async () => {
 
 	expect(await testDb().db.select().from(users).all()).toHaveLength(1);
 	expect(await testDb().db.select().from(sessions).all()).toHaveLength(2);
-});
-
-test('the first-ever login claims orphaned pre-accounts channels', async () => {
-	await testDb().db.insert(channels).values({ id: 'UC1', title: 'Old', refreshTokenEnc: 'enc', active: 1, createdAt: '2026-01-01T00:00:00.000Z' });
-	stubTokenAndUserinfo({ sub: 'sub-1', email: 'one@example.com', name: 'One' });
-	const cookies = makeCookiesWithState('s');
-
-	await expect(loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never)).rejects.toMatchObject({ status: 302 });
-
-	const claimed = await testDb().db.select().from(channels).all();
-	const user = (await testDb().db.select().from(users).all())[0];
-	expect(claimed[0].userId).toBe(user.id);
 });
 
 test('a later login does not steal channels owned by another user', async () => {

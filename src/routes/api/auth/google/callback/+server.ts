@@ -82,19 +82,20 @@ export async function GET({ url, cookies, locals }: { url: URL; cookies: import(
 	// A channel already owned by another account must not be reattached (or have
 	// its refresh token overwritten) by this one. The conditional upsert keeps
 	// that check atomic with the write — a SELECT-then-upsert would race.
+	const refreshTokenEnc = encrypt(tokens.refreshToken);
 	const updated = await db
 		.insert(channels)
 		.values({
 			id: ch.id,
 			userId: user.id,
 			title,
-			refreshTokenEnc: encrypt(tokens.refreshToken),
+			refreshTokenEnc,
 			active: 1,
 			createdAt: new Date().toISOString()
 		})
 		.onConflictDoUpdate({
 			target: channels.id,
-			set: { userId: user.id, title, refreshTokenEnc: encrypt(tokens.refreshToken), active: 1 },
+			set: { userId: user.id, title, refreshTokenEnc, active: 1 },
 			setWhere: or(isNull(channels.userId), eq(channels.userId, user.id))
 		})
 		.returning({ id: channels.id });

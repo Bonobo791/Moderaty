@@ -36,3 +36,19 @@ test('load projects only the channel fields the page renders — never the crede
 	expect(result?.ch).toEqual({ id: 'UC1', title: 'Ch' });
 	expect(result?.ch).not.toHaveProperty('refreshTokenEnc');
 });
+
+test('load on a channel owned by another user fails with 404', async () => {
+	await testDb()
+		.db.insert(channels)
+		.values({ id: 'UC1', userId: 'user-2', title: 'Ch', refreshTokenEnc: 'enc-secret' });
+
+	await expect(load({ params: { id: 'UC1' }, locals: { user: OWNER } } as never)).rejects.toMatchObject({ status: 404 });
+});
+
+test('load rejects a signed-out request with 401', async () => {
+	await testDb()
+		.db.insert(channels)
+		.values({ id: 'UC1', userId: OWNER.id, title: 'Ch', refreshTokenEnc: 'enc-secret' });
+
+	await expect(load({ params: { id: 'UC1' }, locals: { user: null } } as never)).rejects.toMatchObject({ status: 401 });
+});

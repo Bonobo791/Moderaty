@@ -37,56 +37,24 @@ export const INITIAL_COUNTS: Counts = { incoming: 39, actioned: 33, yours: 4 };
 /** The labeled illustrative night, also the reduced-motion end state. */
 export const FINAL_COUNTS: Counts = { incoming: 47, actioned: 41, yours: 6 };
 
-export const SCRIPT: QueueItem[] = [
-	{
-		author: 'dana.plays',
-		text: 'The pacing in the mid section was your best yet. More of this.',
-		verdict: 'APPROVED',
-		reason: 'score 0.04'
-	},
-	{
-		author: 'CryptoKingdom42',
-		text: 'I made $8,412 in 3 days thanks to this one method, DM me to...',
-		verdict: 'DELETED',
-		reason: 'rule: KEYWORD "crypto"'
-	},
-	{
-		author: 'UmAckchyually',
-		text: 'Ackchyually, your point at 4:12 is wrong, and here are 400 words on why...',
-		verdict: 'HELD',
-		reason: 'score 0.68, your call'
-	},
-	{
-		author: 'xX_grassfree_Xx',
-		text: 'People like you ruin this hobby. It is just dark humor bro, cope...',
-		verdict: 'BANNED',
-		reason: 'score 0.97'
-	},
-	{
-		author: 'bia_souza',
-		text: 'first!! love from Brazil, this helped me so much',
-		verdict: 'APPROVED',
-		reason: 'score 0.02'
-	},
-	{
-		author: 'sub4sub_andy',
-		text: 'nice video!! check out my channel, sub4sub anyone?',
-		verdict: 'REJECTED',
-		reason: 'rule: REGEX promo pattern'
-	},
-	{
-		author: 'drama.tourist',
-		text: 'Coming from the drama video. This take is garbage and so are...',
-		verdict: 'HELD',
-		reason: 'score 0.81, spike detected'
-	},
-	{
-		author: 'regular_tom',
-		text: 'lol the sponsor segue was actually smooth this time',
-		verdict: 'APPROVED',
-		reason: 'score 0.05'
-	}
+/** [author, text, verdict, reason] — kept as tuples so the data stays scannable. */
+const RAW_SCRIPT: [string, string, Verdict, string][] = [
+	['dana.plays', 'The pacing in the mid section was your best yet. More of this.', 'APPROVED', 'score 0.04'],
+	['CryptoKingdom42', 'I made $8,412 in 3 days thanks to this one method, DM me to...', 'DELETED', 'rule: KEYWORD "crypto"'],
+	['UmAckchyually', 'Ackchyually, your point at 4:12 is wrong, and here are 400 words on why...', 'HELD', 'score 0.68, your call'],
+	['xX_grassfree_Xx', 'People like you ruin this hobby. It is just dark humor bro, cope...', 'BANNED', 'score 0.97'],
+	['bia_souza', 'first!! love from Brazil, this helped me so much', 'APPROVED', 'score 0.02'],
+	['sub4sub_andy', 'nice video!! check out my channel, sub4sub anyone?', 'REJECTED', 'rule: REGEX promo pattern'],
+	['drama.tourist', 'Coming from the drama video. This take is garbage and so are...', 'HELD', 'score 0.81, spike detected'],
+	['regular_tom', 'lol the sponsor segue was actually smooth this time', 'APPROVED', 'score 0.05']
 ];
+
+export const SCRIPT: QueueItem[] = RAW_SCRIPT.map(([author, text, verdict, reason]) => ({
+	author,
+	text,
+	verdict,
+	reason
+}));
 
 /** A comment lands in the queue. */
 export function applyArrival(counts: Counts): Counts {

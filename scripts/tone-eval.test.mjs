@@ -83,6 +83,14 @@ test('scoffing interjections are judged against the video context', () => {
 	// Same word, opposite bands: demeaning on a tutorial, acceptable on comedy.
 	expect(Number(lolOnTutorial?.[1])).toBeGreaterThanOrEqual(0.76);
 	expect(Number(lolOnComedy?.[1])).toBeLessThanOrEqual(0.5);
+	// PR #27 review: assert the "what?" anchors too, so they cannot regress
+	// silently — demeaning on an ordinary video, acceptable on a surprising one.
+	const whatOnHowto = TONE_PROMPT.match(/"what\?"[^\n]*how-to[^\n]*->\s*(0\.\d+)/i);
+	const whatOnSurprising = TONE_PROMPT.match(/"what\?"[^\n]*surprising[^\n]*->\s*(0\.\d+)/i);
+	expect(whatOnHowto).toBeTruthy();
+	expect(whatOnSurprising).toBeTruthy();
+	expect(Number(whatOnHowto?.[1])).toBeGreaterThanOrEqual(0.76);
+	expect(Number(whatOnSurprising?.[1])).toBeLessThanOrEqual(0.5);
 });
 
 test('the contextual exemption requires evidence — empty context means ordinary content', () => {

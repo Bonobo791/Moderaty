@@ -190,13 +190,13 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			<h2>Then the AI scores what your rules miss.</h2>
 			<p>
 				Every comment your rules don&rsquo;t catch is scored by OpenAI&rsquo;s moderation model
-				across six toxicity categories. The highest score decides:
+				across thirteen toxicity categories. The highest score decides:
 			</p>
 			<div class="plot" role="list" aria-label="Score thresholds">
-				<p role="listitem"><span class="plot-kind">&gt; 0.85</span> AUTHOR BANNED AUTOMATICALLY</p>
-				<p role="listitem"><span class="plot-kind">0.51 – 0.85</span> DELETED AUTOMATICALLY</p>
-				<p role="listitem"><span class="plot-kind">0.35 – 0.50</span> HELD FOR YOUR REVIEW</p>
-				<p role="listitem"><span class="plot-kind">&lt; 0.35</span> APPROVED</p>
+				<p role="listitem"><span class="plot-kind">&ge; 0.95</span> AUTHOR BANNED AUTOMATICALLY</p>
+				<p role="listitem"><span class="plot-kind">0.76 – 0.94</span> REJECTED AUTOMATICALLY</p>
+				<p role="listitem"><span class="plot-kind">0.51 – 0.75</span> HELD FOR YOUR REVIEW</p>
+				<p role="listitem"><span class="plot-kind">&le; 0.50</span> APPROVED</p>
 			</div>
 			<p class="fine">
 				If the AI can&rsquo;t score a comment, it lands in your queue — never auto-approved,

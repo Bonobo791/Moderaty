@@ -291,7 +291,7 @@ violet-tinted Gel Border, dashed only for empty states.
 
 ### Lighting plot (signature)
 Landing rule/threshold lists render as a cue sheet: a top rule line, rows of
-stencil cue-kind labels (KEYWORD / ≥ 0.85) against their action, separated by
+stencil cue-kind labels (KEYWORD / ≥ 0.95) against their action, separated by
 28%-alpha currentColor hairlines, numerals always tabular. This is how the
 world shows a list of consequences — reuse it for any landing enumeration.
 

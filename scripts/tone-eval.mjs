@@ -134,6 +134,22 @@ const CASES = [
 		note: 'pedantic opener but constructive content'
 	},
 	{
+		text: "All of the information in this video isn't correct.",
+		expected: 'reject',
+		note: 'sweeping negative falsehood claim, no specifics'
+	},
+	{
+		text: "The torque spec at 4:20 is wrong — it's 25 ft-lb.",
+		expected: 'approve',
+		note: 'specific factual correction'
+	},
+	{
+		text: 'Literally everything in this one is wrong 😂',
+		video: COMEDY,
+		expected: 'approve',
+		note: 'humorous exaggeration on a comedy video'
+	},
+	{
 		text: 'Everyone go report this clown and run him off the platform.',
 		expected: 'ban',
 		note: 'brigading campaign'

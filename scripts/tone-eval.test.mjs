@@ -119,3 +119,24 @@ test('condescending bare contradiction is demeaning; constructive correction sta
 	expect(Number(bareActually?.[1])).toBeGreaterThanOrEqual(0.76);
 	expect(Number(constructive?.[1])).toBeLessThanOrEqual(0.5);
 });
+
+test('sweeping negative exaggeration about facts is demeaning; specific corrections and humor stay out', () => {
+	// Totalizing falsehood claims ("All of the information in this video isn't
+	// correct.") dismiss the creator's credibility wholesale without engaging a
+	// single specific — demeaning when negative. Specific factual corrections
+	// stay acceptable, and clearly humorous exaggeration is not condemned. The
+	// rubric must say so and anchor each direction.
+	expect(TONE_PROMPT).toMatch(/totalizing|sweeping|exaggerat/i);
+	expect(TONE_PROMPT).toMatch(/humor|jok/i);
+	const sweeping = TONE_PROMPT.match(/"All of the information in this video isn't correct\."[^\n]*->\s*(0\.\d+)/i);
+	const specific = TONE_PROMPT.match(/"[^"\n]*(?:4:20|timestamp|specific)[^"\n]*"[^\n]*->\s*(0\.\d+)/i);
+	// PR #31 review: the humor exemption anchor must be asserted numerically,
+	// not just mentioned — otherwise it can drift into the reject band silently.
+	const humor = TONE_PROMPT.match(/"Literally everything in this one is wrong 😂"[^\n]*->\s*(0\.\d+)/i);
+	expect(sweeping).toBeTruthy();
+	expect(specific).toBeTruthy();
+	expect(humor).toBeTruthy();
+	expect(Number(sweeping?.[1])).toBeGreaterThanOrEqual(0.76);
+	expect(Number(specific?.[1])).toBeLessThanOrEqual(0.5);
+	expect(Number(humor?.[1])).toBeLessThanOrEqual(0.5);
+});

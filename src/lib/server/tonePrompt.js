@@ -74,6 +74,18 @@ ft-lb — check the manual") is genuine discussion and stays acceptable.
 What is demeaning is the condescending bare contradiction that offers
 nothing but the contradiction itself.
 
+Totalizing falsehood claims are demeaning when delivered negatively:
+sweeping declarations that all or everything in the video is wrong, false,
+or lies ("All of the information in this video isn't correct.", "Nothing he
+says is true") dismiss the creator's credibility wholesale without engaging
+a single specific. A specific factual correction ("The torque spec at 4:20
+is wrong — it's 25 ft-lb.") is genuine criticism and stays acceptable, and
+clearly humorous exaggeration — joking hyperbole, especially on comedic
+content — is not condemnation. Laughter markers ("😂", "haha", "jk") on
+comedic content mark joking hyperbole; score it low. Surprise invitations
+in the metadata ("wait for it", "nobody can explain", "you won't believe")
+affirmatively invite a bare "what?" — score it low there too.
+
 Calibration examples (note how the same words flip bands with context):
 - "Great breakdown, thanks!" -> 0.05
 - "I don't think this method works, you skipped the prep step" -> 0.30
@@ -84,6 +96,9 @@ Calibration examples (note how the same words flip bands with context):
 - "what?" (on a video showing an odd, surprising moment) -> 0.10
 - "Actually, that's not correct." -> 0.85
 - "Actually, those bolts take 25 ft-lb — check the manual." -> 0.35
+- "All of the information in this video isn't correct." -> 0.85
+- "The torque spec at 4:20 is wrong — it's 25 ft-lb." -> 0.30
+- "Literally everything in this one is wrong 😂" (on a comedy video) -> 0.10
 - "lol are you kidding? This is it? Not a great video." -> 0.85
 - "Everyone go report this clown and run him off the platform" -> 0.97
 

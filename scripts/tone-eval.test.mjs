@@ -130,10 +130,15 @@ test('sweeping negative exaggeration about facts is demeaning; specific correcti
 	expect(TONE_PROMPT).toMatch(/humor|jok/i);
 	const sweeping = TONE_PROMPT.match(/"All of the information in this video isn't correct\."[^\n]*->\s*(0\.\d+)/i);
 	const specific = TONE_PROMPT.match(/"[^"\n]*(?:4:20|timestamp|specific)[^"\n]*"[^\n]*->\s*(0\.\d+)/i);
+	// PR #31 review: the humor exemption anchor must be asserted numerically,
+	// not just mentioned — otherwise it can drift into the reject band silently.
+	const humor = TONE_PROMPT.match(/"Literally everything in this one is wrong 😂"[^\n]*->\s*(0\.\d+)/i);
 	expect(sweeping).toBeTruthy();
 	expect(specific).toBeTruthy();
+	expect(humor).toBeTruthy();
 	expect(Number(sweeping?.[1])).toBeGreaterThanOrEqual(0.76);
 	expect(Number(specific?.[1])).toBeLessThanOrEqual(0.5);
+	expect(Number(humor?.[1])).toBeLessThanOrEqual(0.5);
 });
 
 test('moral attacks on the person are demeaning; criticism of the content stays out', () => {

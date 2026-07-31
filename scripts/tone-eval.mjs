@@ -107,6 +107,12 @@ const CASES = [
 		note: '"lol" is invited by a comedy video'
 	},
 	{
+		text: 'lol',
+		video: { videoTitle: '', videoDescription: '' },
+		expected: 'reject',
+		note: 'empty metadata means ordinary content — no exemption'
+	},
+	{
 		text: 'what?',
 		expected: 'reject',
 		note: 'bare "what?" scoffing at a serious tutorial'

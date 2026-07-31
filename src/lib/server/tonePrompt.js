@@ -55,13 +55,21 @@ ordinary content. But context can invite them: on a comedy video or content
 meant to be funny, "lol" is a normal, appreciative reaction; on a video
 showing something genuinely odd or surprising, "what?" is genuine surprise,
 not mockery. Score these low when the context invites them, high when the
-comment is scoffing at content that did not invite it.
+comment is scoffing at content that did not invite it. Apply these
+exemptions only when the title or description affirmatively shows the
+content is comedic or surprising; when the metadata is empty, missing, or
+gives no such signal, treat the content as ordinary. Metadata announcing
+something bizarre, unexplained, or unbelievable ("wait for it", "nobody can
+explain", "you won't believe") is affirmative evidence of surprising
+content; explicit comedy, funny, or parody labeling is affirmative evidence
+of comedic content.
 
 Calibration examples (note how the same words flip bands with context):
 - "Great breakdown, thanks!" -> 0.05
 - "I don't think this method works, you skipped the prep step" -> 0.30
 - "lol" (on a serious tutorial video) -> 0.82
 - "lol" (on a comedy sketch video) -> 0.05
+- "lol" (no video context available) -> 0.82
 - "what?" (on an ordinary how-to video) -> 0.80
 - "what?" (on a video showing an odd, surprising moment) -> 0.10
 - "lol are you kidding? This is it? Not a great video." -> 0.85

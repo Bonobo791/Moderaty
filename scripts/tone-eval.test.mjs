@@ -84,3 +84,16 @@ test('scoffing interjections are judged against the video context', () => {
 	expect(Number(lolOnTutorial?.[1])).toBeGreaterThanOrEqual(0.76);
 	expect(Number(lolOnComedy?.[1])).toBeLessThanOrEqual(0.5);
 });
+
+test('the contextual exemption requires evidence — empty context means ordinary content', () => {
+	// PR #27 review: production sends empty title/description for comments
+	// without a videoId or after metadata failure. Without an explicit policy
+	// the model would guess whether the content is comedic or surprising and
+	// score the same bare interjection inconsistently. The rubric must say the
+	// exemption applies only on affirmative evidence, and anchor it.
+	expect(TONE_PROMPT).toMatch(/empty|missing|no (such )?(signal|context|evidence)/i);
+	expect(TONE_PROMPT).toMatch(/treat (the content|it) as ordinary/i);
+	const lolNoContext = TONE_PROMPT.match(/"lol"[^\n]*(?:no video context|unknown context)[^\n]*->\s*(0\.\d+)/i);
+	expect(lolNoContext).toBeTruthy();
+	expect(Number(lolNoContext?.[1])).toBeGreaterThanOrEqual(0.76);
+});

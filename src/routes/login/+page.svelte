@@ -22,6 +22,10 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	<title>Moderaty — Sign in</title>
 </svelte:head>
 
+<script lang="ts">
+	// Static sign-in prompt; the guard redirect lives in +page.server.ts.
+</script>
+
 <main class="login-main">
 	<div class="card login-card">
 		<h1>Sign in to Moderaty</h1>

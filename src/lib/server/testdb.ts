@@ -69,7 +69,7 @@ export function postForm(fields: Record<string, string>, url = 'http://localhost
 export { makeCookies, makeCookiesWithState } from './testcookies';
 
 export async function createTestDb(): Promise<TestDb> {
-	const client = createClient({ url: ':memory:' });
+	const client = createClient({ url: 'file::memory:?cache=shared' });
 	await client.batch([
 		`CREATE TABLE users (
 			id TEXT PRIMARY KEY,

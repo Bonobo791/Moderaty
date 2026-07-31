@@ -20,7 +20,7 @@ import { redirect, error } from '@sveltejs/kit';
 
 import { randomBytes } from 'node:crypto';
 
-import { isNull, eq } from 'drizzle-orm';
+import { isNull, eq, sql } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
 import { channels, users } from '$lib/server/db/schema';
@@ -66,19 +66,27 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 	}
 	const email = typeof info.email === 'string' && info.email ? info.email : `${info.sub}@accounts.google.com`;
 	const displayName = typeof info.name === 'string' && info.name ? info.name : email;
+	const sub: string = info.sub;
 
-	// Find-or-create the account by Google's stable sub claim.
-	let user = await db.select().from(users).where(eq(users.googleSub, info.sub)).get();
-	if (!user) {
-		user = await db
+	// Find-or-create the account by Google's stable sub claim. The orphan claim
+	// is one-time initialization — only the FIRST user ever created (users table
+	// empty before this insert) takes the pre-accounts ownerless channels, so a
+	// later signup can never steal them. The transaction keeps the check, the
+	// insert, and the claim from interleaving with a concurrent first sign-in.
+	const user = await db.transaction(async (tx) => {
+		const existing = await tx.select().from(users).where(eq(users.googleSub, sub)).get();
+		if (existing) return existing;
+		const count = await tx.select({ n: sql<number>`count(*)` }).from(users).get();
+		const created = await tx
 			.insert(users)
-			.values({ id: randomBytes(16).toString('hex'), googleSub: info.sub, email, displayName })
+			.values({ id: randomBytes(16).toString('hex'), googleSub: sub, email, displayName })
 			.returning()
 			.get();
-		// First login ever on a pre-accounts database claims the orphaned
-		// (ownerless) channels. A fresh multi-user deploy has no orphans.
-		await db.update(channels).set({ userId: user.id }).where(isNull(channels.userId));
-	}
+		if (count?.n === 0) {
+			await tx.update(channels).set({ userId: created.id }).where(isNull(channels.userId));
+		}
+		return created;
+	});
 
 	const { token, expiresAt } = await createSession(user.id);
 	cookies.set(SESSION_COOKIE, token, {

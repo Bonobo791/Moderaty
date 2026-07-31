@@ -23,7 +23,7 @@
 import { randomBytes } from 'node:crypto';
 
 import { error } from '@sveltejs/kit';
-import { eq } from 'drizzle-orm';
+import { eq, lte } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
 import { sessions, users } from '$lib/server/db/schema';
@@ -47,8 +47,12 @@ export interface SessionResolution {
 
 /** Creates a session for a user and returns its cookie token and expiry. */
 export async function createSession(userId: string): Promise<{ token: string; expiresAt: string }> {
+	// Opportunistic cleanup: logins are infrequent, so this bounds the expired-row
+	// buildup for users who never come back (lazy per-token delete can't catch those).
+	const now = new Date();
+	await db.delete(sessions).where(lte(sessions.expiresAt, now.toISOString()));
 	const token = randomBytes(32).toString('hex');
-	const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
+	const expiresAt = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
 	await db.insert(sessions).values({ id: token, userId, expiresAt });
 	return { token, expiresAt };
 }

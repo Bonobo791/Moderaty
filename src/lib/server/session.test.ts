@@ -77,3 +77,16 @@ test('destroys a session so it no longer resolves', async () => {
 
 	expect(await getSessionUser(token)).toBeNull();
 });
+
+test('creating a session purges already-expired rows', async () => {
+	const userId = await seedUser();
+	await testDb().db.insert(sessions).values({
+		id: 'stale-token',
+		userId,
+		expiresAt: new Date(Date.now() - 1000).toISOString()
+	});
+
+	await createSession(userId);
+
+	expect((await testDb().db.select().from(sessions).all()).map((s) => s.id)).not.toContain('stale-token');
+});

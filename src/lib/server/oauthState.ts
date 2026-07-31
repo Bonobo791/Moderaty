@@ -18,6 +18,8 @@
 
 import type { Cookies } from '@sveltejs/kit';
 
+import { env } from '$env/dynamic/private';
+
 export const OAUTH_STATE_COOKIE = 'oauth_state';
 
 // Bounds the cookie; a user realistically has one or two tabs mid-flow.
@@ -53,6 +55,9 @@ export function storePendingStates(cookies: Cookies, states: string[]): void {
 		path: '/',
 		httpOnly: true,
 		sameSite: 'lax',
+		// The state cookie carries the CSRF guard, so it must never travel over
+		// plain HTTP outside local development.
+		secure: (env.APP_URL ?? '').startsWith('https://'),
 		maxAge: 600
 	});
 }

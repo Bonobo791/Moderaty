@@ -52,7 +52,9 @@ export const channels = sqliteTable('channels', {
 	active: integer('active').notNull().default(1),
 	toneLevel: integer('tone_level'), // moderation sensitivity: null or 1 = omni only, 2 = omni + tone pass
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
-});
+}, (table) => [
+	index('channels_user_id_idx').on(table.userId)
+]);
 
 export const rules = sqliteTable('rules', {
 	id: integer('id').primaryKey({ autoIncrement: true }),

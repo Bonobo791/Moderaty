@@ -156,6 +156,27 @@ test('happy path creates the user and session, sets the cookie, consumes state, 
 	expect(cookies.get('oauth_state')).toBeUndefined();
 });
 
+test('only the first-ever user claims orphaned channels', async () => {
+	await testDb().db.insert(channels).values({ id: 'UC1', title: 'Old', refreshTokenEnc: 'enc', active: 1, createdAt: '2026-01-01T00:00:00.000Z' });
+	stubTokenAndUserinfo({ sub: 'sub-1', email: 'one@example.com', name: 'One' });
+	await expect(
+		loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies: makeCookiesWithState('s') } as never)
+	).rejects.toMatchObject({ status: 302 });
+	expect((await testDb().db.select().from(channels).all())[0].userId).toBe(
+		(await testDb().db.select().from(users).all())[0].id
+	);
+
+	// A second, distinct signup while another orphan exists must NOT claim it:
+	// the claim is one-time initialization, not a per-signup action.
+	await testDb().db.insert(channels).values({ id: 'UC2', title: 'Late', refreshTokenEnc: 'enc', active: 1, createdAt: '2026-01-01T00:00:00.000Z' });
+	stubTokenAndUserinfo({ sub: 'sub-2', email: 'two@example.com', name: 'Two' });
+	await expect(
+		loginCallback({ url: callbackUrl({ state: 's2', code: 'y' }), cookies: makeCookiesWithState('s2') } as never)
+	).rejects.toMatchObject({ status: 302 });
+
+	expect((await testDb().db.select().from(channels).all()).find((c) => c.id === 'UC2')!.userId).toBeNull();
+});
+
 test('a repeat login with the same sub reuses the account', async () => {
 	stubTokenAndUserinfo({ sub: 'sub-1', email: 'one@example.com', name: 'One' });
 	const first = makeCookiesWithState('s1');

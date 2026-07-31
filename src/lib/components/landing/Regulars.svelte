@@ -206,7 +206,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			grid-template-columns: repeat(12, 1fr);
 		}
 		:global(.rogue-slot) {
-			grid-column: span 5;
+			grid-column: span 5 / span 5;
 		}
 		:global(.rogue-slot.slot-left) {
 			grid-column-start: 1;
@@ -217,8 +217,8 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		:global(.rogue-slot.slot-offset) {
 			margin-top: 64px;
 		}
-		.rot-neg-1 { transform: rotate(-1.5deg); }
-		.rot-1 { transform: rotate(1deg); }
-		.rot-neg-2 { transform: rotate(-2deg); }
+		.rot-neg-1 { --rogue-rot: -1.5deg; }
+		.rot-1 { --rogue-rot: 1deg; }
+		.rot-neg-2 { --rogue-rot: -2deg; }
 	}
 </style>

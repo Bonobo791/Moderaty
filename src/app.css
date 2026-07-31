@@ -213,6 +213,11 @@ body {
 	}
 }
 
+/* rogue cards sit slightly rotated in the collage; the angle arrives as a
+   custom property from the component so this base rule (and the hover
+   straighten below) owns the only transform declarations on the card */
+.rogue-card { transform: rotate(var(--rogue-rot, 0deg)); }
+
 /* hover states gated to devices that actually hover */
 @media (hover: hover) and (pointer: fine) {
 	.rogue-card {

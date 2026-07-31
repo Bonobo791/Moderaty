@@ -396,6 +396,17 @@ test('routes tone scoring failures to the review queue (I11)', async () => {
 	expectAiUnavailableQueued(result);
 });
 
+test('routes video metadata failures to the review queue instead of aborting the run (I11)', async () => {
+	mocks.state.channel.toneLevel = 2;
+	mocks.scoreComment.mockResolvedValue(moderation(0.1));
+	mocks.fetchVideoMetadata.mockRejectedValue(new Error('videos.list failed with 500'));
+
+	const result = await runChannel('channel');
+
+	expectAiUnavailableQueued(result);
+	expect(mocks.scoreTone).not.toHaveBeenCalled();
+});
+
 test('persists the chronologically newest timestamp when UTC offsets differ', async () => {
 	mocks.scoreComment.mockResolvedValue(moderation(0));
 	mocks.fetchNewComments.mockResolvedValue({

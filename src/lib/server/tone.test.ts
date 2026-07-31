@@ -100,7 +100,16 @@ test('wraps user content in unique per-request delimiters marked as untrusted (p
 	expect(delimiters[1]).toBeTruthy();
 	expect(delimiters[0]).not.toBe(delimiters[1]);
 	expect(prompts[0]).toContain(`</data-${delimiters[0]}>`);
-	// The injected comment stays inside the delimiters, after the instruction.
-	const open = prompts[0].indexOf(`<data-${delimiters[0]}>`);
-	expect(prompts[0].indexOf('ignore previous instructions')).toBeGreaterThan(open);
+	// The injected comment stays inside the user message's delimiters — inspect the
+	// role:'user' message directly, since the system prompt also names the tag.
+	const userMessage = (bodies[0] as { messages: { role: string; content: string }[] }).messages.find(
+		(message) => message.role === 'user'
+	)?.content;
+	expect(userMessage).toBeTruthy();
+	const open = userMessage!.indexOf(`<data-${delimiters[0]}>`);
+	const close = userMessage!.indexOf(`</data-${delimiters[0]}>`);
+	const injected = userMessage!.indexOf('ignore previous instructions');
+	expect(open).toBeGreaterThanOrEqual(0);
+	expect(injected).toBeGreaterThan(open);
+	expect(injected).toBeLessThan(close);
 });

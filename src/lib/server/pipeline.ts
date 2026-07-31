@@ -247,15 +247,23 @@ async function decideNewComments(
 	const newComments = page.comments.filter((comment) => !existingIds.has(comment.id));
 	// Level 2 tone scoring needs each video's title/description as context. One
 	// batched videos.list call per run; videos whose metadata failed validation
-	// score with empty context (best-effort), and a videos.list API failure
-	// fails the run loudly (I2) to be retried next run.
-	const videoContext =
-		toneLevel >= 2 && newComments.length
-			? await fetchVideoMetadata([...new Set(newComments.map((comment) => comment.videoId))], accessToken, deadline)
-			: null;
+	// score with empty context (best-effort). If the videos.list call itself
+	// fails, the tone pass cannot run — every new comment lands in the human
+	// queue (I11) rather than aborting the batch or silently scoring omni-only.
+	let videoContext: Awaited<ReturnType<typeof fetchVideoMetadata>> | null = null;
+	let metadataError: unknown = null;
+	if (toneLevel >= 2 && newComments.length) {
+		try {
+			videoContext = await fetchVideoMetadata([...new Set(newComments.map((comment) => comment.videoId))], accessToken, deadline);
+		} catch (error) {
+			if (error instanceof DeadlineExceededError) throw error;
+			metadataError = error;
+		}
+	}
 	const settled = await Promise.allSettled(
 		newComments.map(async (comment) => {
 			try {
+				if (metadataError) return aiUnavailable(comment, metadataError);
 				const meta = videoContext?.get(comment.videoId);
 				const tone = videoContext
 					? { context: { videoTitle: meta?.title ?? '', videoDescription: meta?.description ?? '' } }

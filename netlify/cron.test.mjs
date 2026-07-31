@@ -44,8 +44,8 @@ afterEach(() => {
 });
 
 describe('scheduled cron trigger', () => {
-	it('runs every 15 minutes', () => {
-		expect(config.schedule).toBe('*/15 * * * *');
+	it('runs every minute while the production fetch issue is being debugged (temporary)', () => {
+		expect(config.schedule).toBe('* * * * *');
 	});
 
 	it('sends the secret as a bearer header, never in the URL', async () => {

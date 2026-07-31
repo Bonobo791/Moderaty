@@ -78,6 +78,7 @@ export async function createTestDb(): Promise<TestDb> {
 			last_run_at TEXT,
 			lease_expires_at TEXT,
 			active INTEGER NOT NULL DEFAULT 1,
+			tone_level INTEGER,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE TABLE rules (
@@ -108,6 +109,16 @@ export async function createTestDb(): Promise<TestDb> {
 			action TEXT NOT NULL,
 			reason TEXT NOT NULL,
 			actor TEXT NOT NULL,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`,
+		`CREATE TABLE moderation_actions (
+			comment_id TEXT PRIMARY KEY,
+			channel_id TEXT NOT NULL,
+			action TEXT NOT NULL,
+			reason TEXT NOT NULL,
+			state TEXT NOT NULL,
+			last_attempt_at TEXT,
+			last_manual_retry_at TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`
 	]);

@@ -55,6 +55,13 @@ Category line: "Comment protection for YouTube creators."
   thirteen toxicity categories; fixed thresholds ≥0.95 auto-ban, 0.76–0.94
   auto-reject, 0.51–0.75 human queue, ≤0.50 approved. AI failure always routes
   to the human queue — never auto-approve, never auto-reject.
+- Tone pass (per-channel sensitivity level 2, "Edge lord + Ackchyually…"):
+  a prompted `gpt-4.1-nano` classifier scores demeaning/condescending/sarcastic
+  tone with the video's title and description as context, on the same bands
+  (tone ≥0.95 bans — reserved for genuine harm without verbal abuse). Level 1
+  ("Edge Lord") runs the omni pass only. The stronger signal decides; the tone
+  call is skipped when omni already rejects. The dashboard shows each channel's
+  level slider and completed-ban count ("X Edge Lords Banned").
 - Enforcement durability: every action is recorded locally (`action_pending`)
   BEFORE any YouTube write and confirmed after; `DRY_RUN=true` previews change
   nothing durable (audit rows only).

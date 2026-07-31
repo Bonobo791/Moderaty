@@ -29,6 +29,7 @@ export const channels = sqliteTable('channels', {
 	lastRunAt: text('last_run_at'), // ISO timestamp of last cron run; rotation orders by it ASC (NULLs first)
 	leaseExpiresAt: text('lease_expires_at'), // expiring cron claim; null or past = claimable
 	active: integer('active').notNull().default(1),
+	toneLevel: integer('tone_level'), // moderation sensitivity: null or 1 = omni only, 2 = omni + tone pass
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 });
 

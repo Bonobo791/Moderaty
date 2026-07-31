@@ -1,0 +1,66 @@
+// Moderaty — YouTube Comment Auto-Moderation Tool
+// Copyright (C) 2026 Andrew Philip Weilbacher
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+//
+// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+
+import { expect, test } from 'vitest';
+import { postForm, setupTestDb, testDb } from '$lib/server/testdb';
+import { channels } from '$lib/server/db/schema';
+import { eq } from 'drizzle-orm';
+
+import { actions } from './+page.server';
+
+setupTestDb(['channels']);
+
+async function seedChannel(id: string) {
+	await testDb().db.insert(channels).values({ id, title: `Channel ${id}`, refreshTokenEnc: 'enc' });
+}
+
+function setToneLevel(channelId: string, toneLevel: string) {
+	return actions.setToneLevel({ request: postForm({ channelId, toneLevel }) } as never);
+}
+
+async function toneLevelOf(id: string) {
+	const row = await testDb().db.select().from(channels).where(eq(channels.id, id)).get();
+	return row?.toneLevel;
+}
+
+test.each([{ level: '1' }, { level: '2' }])('persists sensitivity level $level', async ({ level }) => {
+	await seedChannel('UC1');
+
+	const res = await setToneLevel('UC1', level);
+
+	expect(res).toMatchObject({ ok: true });
+	expect(await toneLevelOf('UC1')).toBe(Number(level));
+});
+
+test.each([{ level: '0' }, { level: '3' }, { level: 'x' }, { level: '' }])(
+	'rejects invalid sensitivity level "$level" with 400 and changes nothing',
+	async ({ level }) => {
+		await seedChannel('UC1');
+
+		const res = await setToneLevel('UC1', level);
+
+		expect(res).toMatchObject({ status: 400 });
+		expect(await toneLevelOf('UC1')).toBeNull();
+	}
+);
+
+test('rejects an unknown channel with 404', async () => {
+	const res = await setToneLevel('UC-missing', '2');
+
+	expect(res).toMatchObject({ status: 404 });
+});

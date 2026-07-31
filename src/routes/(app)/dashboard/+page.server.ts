@@ -17,14 +17,15 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { db } from '$lib/server/db';
-import { channels, comments } from '$lib/server/db/schema';
-import { sql } from 'drizzle-orm';
+import { channels, comments, moderationActions } from '$lib/server/db/schema';
+import { and, eq, sql } from 'drizzle-orm';
+import { fail } from '@sveltejs/kit';
 
 export async function load() {
 	// Project only the fields the page renders; never serialize refreshTokenEnc
 	// (or any future secret column) to the browser.
 	const chs = await db
-		.select({ id: channels.id, title: channels.title, cursor: channels.cursor })
+		.select({ id: channels.id, title: channels.title, cursor: channels.cursor, toneLevel: channels.toneLevel })
 		.from(channels)
 		.all();
 	const stats = await db
@@ -32,5 +33,29 @@ export async function load() {
 		.from(comments)
 		.groupBy(comments.channelId, comments.status)
 		.all();
-	return { chs, stats };
+	const bans = await db
+		.select({ channelId: moderationActions.channelId, n: sql<number>`count(*)` })
+		.from(moderationActions)
+		.where(and(eq(moderationActions.action, 'ban'), eq(moderationActions.state, 'completed')))
+		.groupBy(moderationActions.channelId)
+		.all();
+	return { chs, stats, bans };
 }
+
+export const actions = {
+	setToneLevel: async ({ request }) => {
+		const f = await request.formData();
+		const channelId = String(f.get('channelId') ?? '');
+		const toneLevel = Number(f.get('toneLevel'));
+		if (toneLevel !== 1 && toneLevel !== 2) {
+			return fail(400, { error: 'tone level must be 1 (Edge Lord) or 2 (Edge lord + Ackchyually…)' });
+		}
+		const updated = await db
+			.update(channels)
+			.set({ toneLevel })
+			.where(eq(channels.id, channelId))
+			.returning({ id: channels.id });
+		if (updated.length === 0) return fail(404, { error: 'channel not found' });
+		return { ok: true };
+	}
+};

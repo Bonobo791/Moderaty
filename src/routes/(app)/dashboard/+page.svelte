@@ -19,6 +19,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 -->
 
 <script lang="ts">
+	import { enhance } from '$app/forms';
 	import EmptyState from '$lib/EmptyState.svelte';
 	import { autoRefresh } from '$lib/auto-refresh.svelte';
 	import { relativeTime } from '$lib/relative-time';
@@ -32,6 +33,10 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		const row = data.stats.find((s: any) => s.channelId === channelId && s.status === status);
 		return row ? row.n : 0;
 	}
+
+	function bans(channelId: string): number {
+		return data.bans.find((b: any) => b.channelId === channelId)?.n ?? 0;
+	}
 </script>
 
 <svelte:head>
@@ -43,6 +48,8 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 {#each data.chs as ch}
 	{@const pending = count(ch.id, 'pending')}
+	{@const level = ch.toneLevel ?? 1}
+	{@const banned = bans(ch.id)}
 	<div class="card">
 		<h2 style="margin-top:0">{ch.title}</h2>
 		<p style="margin-top:0">
@@ -59,6 +66,32 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			<li><span class="badge neutral">deleted: {count(ch.id, 'deleted')}</span></li>
 			<li><span class="badge ok">approved: {count(ch.id, 'approved')}</span></li>
 		</ul>
+		<p class="edge-lords">{banned} Edge Lord{banned === 1 ? '' : 's'} Banned</p>
+		<form class="sensitivity" method="POST" action="?/setToneLevel" use:enhance>
+			<input type="hidden" name="channelId" value={ch.id} />
+			<label class="sensitivity-title" for="tone-{ch.id}">Moderation sensitivity</label>
+			<input
+				id="tone-{ch.id}"
+				type="range"
+				name="toneLevel"
+				min="1"
+				max="2"
+				step="1"
+				value={level}
+				aria-label="Moderation sensitivity for {ch.title}"
+				onchange={(event) => event.currentTarget.form?.requestSubmit()}
+			/>
+			<!-- TODO: meme banner images from the channel owner, one per level -->
+			<div class="sensitivity-options">
+				<span class="banner" class:chosen={level === 1}>EDGE LORD</span>
+				<span class="banner" class:chosen={level === 2}>EDGE LORD + ACKCHYUALLY&hellip;</span>
+			</div>
+			<p class="muted" style="margin:6px 0 0">
+				{level === 2
+					? 'Hateful comments and demeaning, condescending, or sarcastic tone are moderated.'
+					: 'Only hateful and abusive comments are moderated.'}
+			</p>
+		</form>
 		<a class="btn secondary small" href="/channels/{ch.id}/rules">Rules</a>
 		<a class="btn secondary small" href="/channels/{ch.id}/queue">Review queue</a>
 		<a class="btn secondary small" href="/channels/{ch.id}/log">Audit log</a>
@@ -74,3 +107,50 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 {/each}
 
 <a class="btn" href="/api/auth/google">Connect YouTube channel</a>
+
+<style>
+	.edge-lords {
+		margin: 10px 0 0;
+		font-weight: 700;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		color: var(--danger);
+	}
+	.sensitivity {
+		margin: 10px 0 14px;
+		padding: 10px 12px;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		background: var(--bg);
+	}
+	.sensitivity-title {
+		display: block;
+		font-size: 0.85rem;
+		font-weight: 600;
+		margin-bottom: 6px;
+	}
+	.sensitivity input[type='range'] {
+		width: 100%;
+		accent-color: var(--brand);
+	}
+	.sensitivity-options {
+		display: flex;
+		justify-content: space-between;
+		gap: 8px;
+		margin-top: 4px;
+	}
+	.banner {
+		padding: 3px 8px;
+		border-radius: 6px;
+		font-size: 0.78rem;
+		font-weight: 700;
+		letter-spacing: 0.03em;
+		color: var(--ink);
+		opacity: 0.45;
+	}
+	.banner.chosen {
+		opacity: 1;
+		background: var(--danger-soft);
+		color: var(--danger);
+	}
+</style>

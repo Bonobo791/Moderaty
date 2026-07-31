@@ -110,6 +110,16 @@ export async function createTestDb(): Promise<TestDb> {
 			reason TEXT NOT NULL,
 			actor TEXT NOT NULL,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`,
+		`CREATE TABLE moderation_actions (
+			comment_id TEXT PRIMARY KEY,
+			channel_id TEXT NOT NULL,
+			action TEXT NOT NULL,
+			reason TEXT NOT NULL,
+			state TEXT NOT NULL,
+			last_attempt_at TEXT,
+			last_manual_retry_at TEXT,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`
 	]);
 	return { db: drizzle(client, { schema }), client };

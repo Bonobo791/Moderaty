@@ -147,7 +147,7 @@ function regex(rule: RuleRow): RegExp {
 	return compiled;
 }
 
-export function validateRule(rule: RuleRow): asserts rule is RuleRow & { type: (typeof RULE_TYPES)[number]; action: RuleAction } {
+function assertShape(rule: RuleRow): void {
 	if (!RULE_TYPES.includes(rule.type as (typeof RULE_TYPES)[number])) {
 		throw new Error(`rule #${rule.id} has an unsupported type: ${rule.type}`);
 	}
@@ -155,24 +155,33 @@ export function validateRule(rule: RuleRow): asserts rule is RuleRow & { type: (
 		throw new Error(`rule #${rule.id} has an unsupported action: ${rule.action}`);
 	}
 	if (!rule.pattern) throw new Error(`rule #${rule.id} has an empty pattern`);
+}
+
+export function validateRule(rule: RuleRow): asserts rule is RuleRow & { type: (typeof RULE_TYPES)[number]; action: RuleAction } {
+	assertShape(rule);
 	if (rule.type === 'regex') regex(rule);
 }
 
 /**
  * Finds the validated moderation rule that matches the comment or its author.
- * Most specific (longest) pattern wins, so `fuck you` beats a stored `fuck`
- * regardless of insertion order; ties keep first-stored-wins.
+ * Each rule is shape-validated and compiled at most once per call (validation
+ * happens before any pattern length is dereferenced), and the most specific
+ * (longest) pattern wins, so `fuck you` beats a stored `fuck` regardless of
+ * insertion order; ties keep first-stored-wins.
  *
  * @throws If a stored rule is invalid.
  */
 export function matchRule(text: string, authorChannelId: string, rules: RuleRow[]): RuleRow | null {
-	const ordered = [...rules].sort((a, b) => b.pattern.length - a.pattern.length);
-	ordered.forEach(validateRule);
+	const prepared = rules.map((rule) => {
+		assertShape(rule);
+		return { rule, compiled: rule.type === 'regex' ? regex(rule) : null };
+	});
+	prepared.sort((a, b) => b.rule.pattern.length - a.rule.pattern.length);
 	const lower = text.toLowerCase();
-	for (const rule of ordered) {
+	for (const { rule, compiled } of prepared) {
 		if (rule.type === 'keyword' && lower.includes(rule.pattern.toLowerCase())) return rule;
 		if (rule.type === 'user' && authorChannelId === rule.pattern) return rule;
-		if (rule.type === 'regex' && regex(rule).test(text)) return rule;
+		if (compiled?.test(text)) return rule;
 	}
 	return null;
 }

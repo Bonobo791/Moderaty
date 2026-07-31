@@ -59,6 +59,14 @@ test('accepts regex rules without overlapping alternation', () => {
 	expect(matchRule('catcatdog', 'author', [alternation])).toBe(alternation);
 });
 
+test('validates malformed rows before touching their pattern during ordering', () => {
+	// A malformed stored row (e.g. NULL pattern from a bad import) must surface the
+	// descriptive validation error, not a raw TypeError from the specificity sort.
+	const malformed = { id: 12, type: 'keyword', pattern: null as unknown as string, action: 'hold' };
+	const valid = { id: 13, type: 'keyword', pattern: 'spam', action: 'hold' };
+	expect(() => matchRule('text', 'author', [malformed, valid])).toThrow(/rule #12 has an empty pattern/);
+});
+
 test('most specific pattern wins regardless of stored order', () => {
 	const broad = { id: 10, type: 'keyword', pattern: 'fuck', action: 'hold' };
 	const specific = { id: 11, type: 'keyword', pattern: 'fuck you', action: 'reject' };

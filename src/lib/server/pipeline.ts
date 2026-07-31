@@ -110,7 +110,23 @@ function ruleDecision(comment: NewComment, rule: RuleRow): Decision {
 }
 
 async function aiDecision(comment: NewComment, deadline?: number): Promise<Decision> {
-	const moderation = await scoreComment(comment.text, deadline);
+	let moderation: Awaited<ReturnType<typeof scoreComment>>;
+	try {
+		moderation = await scoreComment(comment.text, deadline);
+	} catch (error) {
+		// I11: a scoring failure never auto-approves, never auto-rejects, and
+		// never aborts the batch — the comment lands in the human review queue.
+		return {
+			comment,
+			status: 'pending',
+			decidedBy: 'none',
+			matchedRuleId: null,
+			aiScore: null,
+			auditAction: 'queue',
+			reason: `ai unavailable: ${error instanceof Error ? error.message : String(error)}`.slice(0, 200),
+			youtubeAction: null
+		};
+	}
 	// Round to the displayed precision before comparing so a score that reads
 	// as "0.51" in the audit log also behaves as 0.51 against the thresholds.
 	const score = Math.round(moderation.score * 100) / 100;

@@ -100,6 +100,18 @@ describe('scheduled cron trigger', () => {
 		expect(fetch).not.toHaveBeenCalled();
 	});
 
+	it('surfaces the network cause when the endpoint is unreachable', async () => {
+		const cause = new Error('getaddrinfo ENOTFOUND moderaty.netlify.app');
+		cause.code = 'ENOTFOUND';
+		vi.stubGlobal('fetch', vi.fn(async () => {
+			throw new TypeError('fetch failed', { cause });
+		}));
+
+		const error = await handler().catch((e) => e);
+		expect(error.message).toContain('fetch failed');
+		expect(error.message).toContain('ENOTFOUND');
+	});
+
 	it('throws loudly when the cron endpoint fails', async () => {
 		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ok: false, results: { channel: { error: 'YouTube quota' } } }, 500)));
 

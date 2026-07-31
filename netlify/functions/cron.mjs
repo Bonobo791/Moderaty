@@ -39,6 +39,14 @@ export default async function cron() {
 			headers: { authorization: `Bearer ${secret}` },
 			signal: controller.signal
 		});
+	} catch (error) {
+		// undici hides the real network reason (DNS, TLS, refused) in `cause`;
+		// surface it so failed invocations are diagnosable from the logs alone.
+		const cause = error instanceof Error ? error.cause : undefined;
+		const detail = cause instanceof Error ? `${cause.code ?? cause.name}: ${cause.message}` : 'no cause';
+		throw new Error(
+			`cron endpoint unreachable: ${error instanceof Error ? error.message : String(error)} (${detail})`
+		);
 	} finally {
 		clearTimeout(timer);
 	}

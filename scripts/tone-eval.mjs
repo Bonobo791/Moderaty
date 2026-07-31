@@ -150,6 +150,26 @@ const CASES = [
 		note: 'humorous exaggeration on a comedy video'
 	},
 	{
+		text: "He's a grifter who lies to his audience for money.",
+		expected: 'reject',
+		note: 'character assassination / discrediting'
+	},
+	{
+		text: 'People like you are everything wrong with this platform.',
+		expected: 'reject',
+		note: 'demonization of the creator'
+	},
+	{
+		text: 'Imagine being this desperate for views. Pathetic.',
+		expected: 'reject',
+		note: 'humiliation, condescending superiority'
+	},
+	{
+		text: 'The claims in this video are exaggerated and unsourced.',
+		expected: 'approve',
+		note: 'criticizes the content, not the person'
+	},
+	{
 		text: 'Everyone go report this clown and run him off the platform.',
 		expected: 'ban',
 		note: 'brigading campaign'

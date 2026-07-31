@@ -135,3 +135,22 @@ test('sweeping negative exaggeration about facts is demeaning; specific correcti
 	expect(Number(sweeping?.[1])).toBeGreaterThanOrEqual(0.76);
 	expect(Number(specific?.[1])).toBeLessThanOrEqual(0.5);
 });
+
+test('moral attacks on the person are demeaning; criticism of the content stays out', () => {
+	// Character assassination, humiliation, discrediting, demonization, and
+	// condescending moral superiority attack WHO the creator is, not what the
+	// video says — immediately demeaning. Criticizing the content or its claims
+	// stays acceptable. The rubric must say so and anchor both directions.
+	expect(TONE_PROMPT).toMatch(/character assassination|demoniz/i);
+	expect(TONE_PROMPT).toMatch(/humiliat|discredit/i);
+	expect(TONE_PROMPT).toMatch(/who the (creator|person) is|attacks? on (the )?(character|person)/i);
+	const assassination = TONE_PROMPT.match(/"[^"\n]*grifter[^"\n]*"[^\n]*->\s*(0\.\d+)/i);
+	const demonization = TONE_PROMPT.match(/"People like you[^"\n]*"[^\n]*->\s*(0\.\d+)/i);
+	const contentCritique = TONE_PROMPT.match(/"[^"\n]*exaggerated and unsourced[^"\n]*"[^\n]*->\s*(0\.\d+)/i);
+	expect(assassination).toBeTruthy();
+	expect(demonization).toBeTruthy();
+	expect(contentCritique).toBeTruthy();
+	expect(Number(assassination?.[1])).toBeGreaterThanOrEqual(0.76);
+	expect(Number(demonization?.[1])).toBeGreaterThanOrEqual(0.76);
+	expect(Number(contentCritique?.[1])).toBeLessThanOrEqual(0.5);
+});

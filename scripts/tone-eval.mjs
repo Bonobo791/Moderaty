@@ -65,6 +65,20 @@ export function loadEnvIfPresent(dir) {
 	}
 }
 
+const TUTORIAL = {
+	videoTitle: 'How to rebuild a carburetor',
+	videoDescription: 'Step-by-step carburetor rebuild for beginners.'
+};
+const COMEDY = {
+	videoTitle: 'Try Not To Laugh: Funniest Fails of the Year',
+	videoDescription: 'A comedy compilation of the internet\u2019s funniest moments.'
+};
+const SURPRISING = {
+	videoTitle: 'The ball defies gravity — wait for it',
+	videoDescription: 'We caught something genuinely bizarre on camera; nobody can explain it.'
+};
+
+// Cases without an explicit context run against the ordinary tutorial video.
 const CASES = [
 	{
 		text: 'lol are you kidding? This is it? Not a great video.',
@@ -82,6 +96,28 @@ const CASES = [
 		note: 'plain substantive criticism'
 	},
 	{
+		text: 'lol',
+		expected: 'reject',
+		note: 'bare "lol" scoffing at a serious tutorial'
+	},
+	{
+		text: 'lol',
+		video: COMEDY,
+		expected: 'approve',
+		note: '"lol" is invited by a comedy video'
+	},
+	{
+		text: 'what?',
+		expected: 'reject',
+		note: 'bare "what?" scoffing at a serious tutorial'
+	},
+	{
+		text: 'what?',
+		video: SURPRISING,
+		expected: 'approve',
+		note: '"what?" is genuine surprise at an odd video'
+	},
+	{
 		text: 'Everyone go report this clown and run him off the platform.',
 		expected: 'ban',
 		note: 'brigading campaign'
@@ -95,7 +131,8 @@ function band(score) {
 	return 'approve';
 }
 
-async function score(text, apiKey, model) {
+async function score(testCase, apiKey, model) {
+	const video = testCase.video ?? TUTORIAL;
 	const tag = `data-${randomBytes(8).toString('hex')}`;
 	const res = await fetch('https://api.openai.com/v1/chat/completions', {
 		method: 'POST',
@@ -111,7 +148,7 @@ async function score(text, apiKey, model) {
 				},
 				{
 					role: 'user',
-					content: `<${tag}>\nVideo title: How to rebuild a carburetor\nVideo description: Step-by-step carburetor rebuild for beginners.\n\nComment: ${text}\n</${tag}>`
+					content: `<${tag}>\nVideo title: ${video.videoTitle}\nVideo description: ${video.videoDescription}\n\nComment: ${testCase.text}\n</${tag}>`
 				}
 			]
 		}),
@@ -141,7 +178,7 @@ async function main() {
 
 	let failures = 0;
 	for (const testCase of CASES) {
-		const value = await score(testCase.text, apiKey, model);
+		const value = await score(testCase, apiKey, model);
 		const actual = band(value);
 		const pass = actual === testCase.expected;
 		if (!pass) failures += 1;

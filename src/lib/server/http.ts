@@ -26,6 +26,24 @@ export class DeadlineExceededError extends Error {
 }
 
 /**
+ * Reads a response body as JSON, failing loudly on transport or parse errors.
+ *
+ * @param response - The HTTP response to read.
+ * @param label - The operation name used in error messages (e.g. 'moderation').
+ * @returns The parsed JSON body.
+ * @throws If the response status is not OK or the body is not valid JSON.
+ */
+export async function jsonResponse(response: Response, label: string): Promise<unknown> {
+	const body = await response.text();
+	if (!response.ok) throw new Error(`${label} failed: ${response.status} ${body}`);
+	try {
+		return JSON.parse(body) as unknown;
+	} catch {
+		throw new Error(`${label} returned invalid JSON`);
+	}
+}
+
+/**
  * Ensures the current time is before the specified deadline.
  *
  * @param deadline - The time limit, expressed as milliseconds since the Unix epoch.

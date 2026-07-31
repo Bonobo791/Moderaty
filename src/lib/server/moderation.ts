@@ -17,7 +17,7 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { env } from '$env/dynamic/private';
-import { fetchWithRetry } from '$lib/server/http';
+import { fetchWithRetry, jsonResponse } from '$lib/server/http';
 
 const MODERATION_CATEGORIES = [
 	'harassment',
@@ -34,16 +34,6 @@ const MODERATION_CATEGORIES = [
 	'violence',
 	'violence/graphic'
 ] as const;
-
-async function jsonResponse(response: Response): Promise<unknown> {
-	const body = await response.text();
-	if (!response.ok) throw new Error(`moderation failed: ${response.status} ${body}`);
-	try {
-		return JSON.parse(body) as unknown;
-	} catch {
-		throw new Error('moderation returned invalid JSON');
-	}
-}
 
 export type ModerationCategory = (typeof MODERATION_CATEGORIES)[number];
 export type ToxicityScores = Record<ModerationCategory, number>;
@@ -74,7 +64,7 @@ export async function scoreComment(text: string, deadline?: number): Promise<Mod
 		},
 		body: JSON.stringify({ model: 'omni-moderation-latest', input: text })
 	}, deadline);
-	const response = await jsonResponse(res);
+	const response = await jsonResponse(res, 'moderation');
 	if (!response || typeof response !== 'object') {
 		throw new Error('moderation response is missing required category scores');
 	}

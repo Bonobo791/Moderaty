@@ -53,6 +53,17 @@ test('returns the tone score and sends context, model, and the calibrated rubric
 	// stays conservative (0.95+ reserved for genuine harm without verbal abuse).
 	expect(prompt).toContain('0.95');
 	expect(prompt).toMatch(/reserved|rare/i);
+	// The demeaning band must cover scoffing dismissal of the video or the
+	// creator's work — not only mockery aimed at a named person — so that
+	// "lol are you kidding? This is it?" lands in the reject band.
+	expect(prompt).toMatch(/scoffing dismissal of the video/i);
+	// The acceptable band must be limited to criticism delivered without
+	// mockery, so plainly-worded negative opinions are not over-scored.
+	expect(prompt).toMatch(/without mockery or scoffing/i);
+	// Few-shot calibration anchors, including the dismissive-mockery case
+	// anchored in the reject band (0.76-0.94).
+	expect(prompt).toContain('lol are you kidding? This is it? Not a great video.');
+	expect(prompt).toContain('0.85');
 });
 
 test('fails loudly when the chat request fails', async () => {

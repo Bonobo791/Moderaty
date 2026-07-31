@@ -34,9 +34,9 @@ import {
 	type NewComment
 } from '$lib/server/youtube';
 
-const AUTO_BAN = 0.85;
-const AUTO_DELETE = 0.51;
-const QUEUE = 0.35;
+const AUTO_BAN = 0.95;
+const AUTO_REJECT = 0.76;
+const QUEUE = 0.51;
 
 export interface RunChannelOptions {
 	maxPages?: number;
@@ -131,7 +131,7 @@ async function aiDecision(comment: NewComment, deadline?: number): Promise<Decis
 	const score = Math.round(moderation.score * 100) / 100;
 	const reason = `ai score ${score.toFixed(2)}`;
 	const aiScore = serializeScores(moderation.scores);
-	if (score > AUTO_BAN) {
+	if (score >= AUTO_BAN) {
 		return {
 			comment,
 			status: 'rejected',
@@ -143,16 +143,16 @@ async function aiDecision(comment: NewComment, deadline?: number): Promise<Decis
 			youtubeAction: 'ban'
 		};
 	}
-	if (score >= AUTO_DELETE) {
+	if (score >= AUTO_REJECT) {
 		return {
 			comment,
-			status: 'deleted',
+			status: 'rejected',
 			decidedBy: 'ai',
 			matchedRuleId: null,
 			aiScore,
-			auditAction: 'delete',
+			auditAction: 'reject',
 			reason,
-			youtubeAction: 'delete'
+			youtubeAction: 'reject'
 		};
 	}
 	if (score >= QUEUE) {

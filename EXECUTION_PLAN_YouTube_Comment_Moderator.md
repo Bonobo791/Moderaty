@@ -39,7 +39,7 @@ By the end, there is a working SvelteKit app `yt-mod` that:
 
 1. Lets a YouTube channel owner connect their channel via Google OAuth (scope `youtube.force-ssl`, offline access). The AES-256-GCM-encrypted refresh token is stored in the DB.
 2. Stores per-channel rules: keyword, regex (recheck-validated), or blocked-user, each mapping to `hold` | `reject` | `delete` | `ban`.
-3. Exposes `GET /api/cron?secret=<CRON_SECRET>` which processes **one channel per run** (least-recently-run first) and **one page of ≤100 comments per run**, with a persisted checkpoint (continuation token + high-water mark) so bursts larger than one page are drained across runs **without skipping comments**. Per comment: rule match first, then OpenAI Moderation. Score ≥ 0.85 → auto-reject; 0.35–0.85 → human review queue; < 0.35 → approved. Rule hits execute their configured action. **Every enforcement action is recorded in the DB (`action_pending`) BEFORE the YouTube write, then confirmed after** — a crash mid-run is reconciled on the next run, never repeated blindly and never lost.
+3. Exposes `GET /api/cron?secret=<CRON_SECRET>` which processes **one channel per run** (least-recently-run first) and **one page of ≤100 comments per run**, with a persisted checkpoint (continuation token + high-water mark) so bursts larger than one page are drained across runs **without skipping comments**. Per comment: rule match first, then OpenAI Moderation. Score ≥ 0.95 → auto-ban (reject + ban author); 0.76–0.94 → auto-reject; 0.51–0.75 → human review queue; ≤ 0.50 → approved. Rule hits execute their configured action. **Every enforcement action is recorded in the DB (`action_pending`) BEFORE the YouTube write, then confirmed after** — a crash mid-run is reconciled on the next run, never repeated blindly and never lost.
 4. Has four pages — dashboard (`/`), rules editor, review queue (one-click approve/reject/delete/ban), audit log — with a finished visual design (brand "Moderaty", design tokens, styled components, empty/loading/error states, accessible markup).
 5. Supports `DRY_RUN=true`: classifies and writes audit rows (action `dry-run`) but performs **no** YouTube writes and **no** DB state changes (no comment rows, no cursor/checkpoint movement) — previews are repeatable.
 6. `npm run check`, `npm run build`, `npm run test` all exit 0.
@@ -57,8 +57,8 @@ API facts (use exactly; do not look up alternatives):
   - Channel lookup: `GET /channels?part=snippet&mine=true`
 - OAuth: auth URL `https://accounts.google.com/o/oauth2/v2/auth`, token endpoint `https://oauth2.googleapis.com/token`. Auth URL params: `client_id`, `redirect_uri`, `response_type=code`, `scope=https://www.googleapis.com/auth/youtube.force-ssl`, `access_type=offline`, `prompt=consent`.
 - OpenAI Moderation: `POST https://api.openai.com/v1/moderations`, header `Authorization: Bearer $OPENAI_API_KEY`, body `{ "model": "omni-moderation-latest", "input": "<text>" }`. Response: `results[0].category_scores` (category → float).
-- Toxicity categories: `harassment`, `harassment/threatening`, `hate`, `hate/threatening`, `violence`, `violence/graphic`. Comment AI score = max of these six. Spam is NOT an AI category; users catch spam with their own rules.
-- Thresholds (fixed): AUTO_REJECT = 0.85, QUEUE = 0.35.
+- Toxicity categories: `harassment`, `harassment/threatening`, `hate`, `hate/threatening`, `illicit`, `illicit/violent`, `self-harm`, `self-harm/intent`, `self-harm/instructions`, `sexual`, `sexual/minors`, `violence`, `violence/graphic`. Comment AI score = max of these thirteen. Spam is NOT an AI category; users catch spam with their own rules.
+- Thresholds (fixed): AUTO_BAN = 0.95, AUTO_REJECT = 0.76, QUEUE = 0.51.
 - **Every field in every external response is optional until validated.** YouTube omits `authorChannelId` for deleted accounts; OpenAI may return out-of-range values. Handle per the invariants — never abort a batch over one malformed item.
 - Top-level comments only (replies are a non-goal).
 
@@ -238,7 +238,7 @@ export const comments = sqliteTable('comments', {
   pendingAction: text('pending_action'), // 'hold' | 'reject' | 'delete' | 'ban' while action_pending; else null
   decidedBy: text('decided_by').notNull(), // 'rule' | 'ai' | 'human' | 'none'
   matchedRuleId: integer('matched_rule_id'),
-  aiScore: text('ai_score'), // JSON of the six category scores, or null
+  aiScore: text('ai_score'), // JSON of the thirteen category scores, or null
   createdAt: text('created_at').notNull()
 });
 
@@ -606,8 +606,9 @@ import { refreshAccessToken, fetchCommentPage, setModerationStatus, deleteCommen
 import { scoreComment, ModerationError } from './moderation';
 import { matchRule } from './rules';
 
-const AUTO_REJECT = 0.85;
-const QUEUE = 0.35;
+const AUTO_BAN = 0.95;
+const AUTO_REJECT = 0.76;
+const QUEUE = 0.51;
 
 type PendingAction = 'hold' | 'reject' | 'delete' | 'ban';
 
@@ -918,7 +919,7 @@ function okResponse(scores: Record<string, number>) {
 }
 
 describe('scoreComment', () => {
-  it('M1: returns max of the six toxic categories', async () => {
+  it('M1: returns max of the thirteen toxic categories', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => okResponse({ harassment: 0.4, 'harassment/threatening': 0.1, hate: 0.9, 'hate/threatening': 0.1, violence: 0.1, 'violence/graphic': 0.1 })));
     const m = await scoreComment('x');
     expect(m.score).toBe(0.9);
@@ -928,16 +929,16 @@ describe('scoreComment', () => {
 });
 ```
 
-Note: a missing key among the six is INVALID (throws), per the module code and I2. Required cases:
+Note: a missing key among the thirteen is INVALID (throws), per the module code and I2. Required cases:
 
 | # | Mocked API behavior | Expected |
 |---|---|---|
-| M1 | 200, six valid scores, max = hate 0.9 | `score === 0.9`, `scores.hate === 0.9` |
-| M2 | 200, score exactly 0.85 | returns 0.85 (boundary belongs to caller, not this module) |
+| M1 | 200, thirteen valid scores, max = hate 0.9 | `score === 0.9`, `scores.hate === 0.9` |
+| M2 | 200, score exactly 0.95 | returns 0.95 (boundary belongs to caller, not this module) |
 | M3 | 200, one score = 1.7 | throws `ModerationError` |
 | M4 | 200, one score = -0.2 | throws `ModerationError` |
 | M5 | 200, one score = "high" (string) | throws `ModerationError` |
-| M6 | 200, one of the six keys missing | throws `ModerationError` |
+| M6 | 200, one of the thirteen keys missing | throws `ModerationError` |
 | M7 | 200, `results` missing | throws `ModerationError` |
 | M8 | 500 status | throws `ModerationError` |
 | M9 | 200, non-JSON body | throws `ModerationError` |
@@ -1512,7 +1513,7 @@ export const actions = {
 </script>
 
 <h1>Review queue — {data.ch?.title}</h1>
-<p class="muted">Borderline comments (AI score 0.35–0.85, or AI unavailable). Your action is final.</p>
+<p class="muted">Borderline comments (AI score 0.51–0.75, or AI unavailable). Your action is final.</p>
 
 {#each data.pending as c}
   <div class="card">

@@ -229,12 +229,12 @@ afterEach(() => {
 });
 
 test.each([
-	{ score: 0.34, status: 'approved', queued: 0, acted: 0, api: 'none', audit: 'approve' },
-	{ score: 0.35, status: 'pending', queued: 1, acted: 0, api: 'none', audit: 'queue' },
-	{ score: 0.5, status: 'pending', queued: 1, acted: 0, api: 'none', audit: 'queue' },
-	{ score: 0.51, status: 'deleted', queued: 0, acted: 1, api: 'delete', audit: 'delete' },
-	{ score: 0.85, status: 'deleted', queued: 0, acted: 1, api: 'delete', audit: 'delete' },
-	{ score: 0.86, status: 'rejected', queued: 0, acted: 1, api: 'ban', audit: 'ban' }
+	{ score: 0.5, status: 'approved', queued: 0, acted: 0, api: 'none', audit: 'approve' },
+	{ score: 0.51, status: 'pending', queued: 1, acted: 0, api: 'none', audit: 'queue' },
+	{ score: 0.75, status: 'pending', queued: 1, acted: 0, api: 'none', audit: 'queue' },
+	{ score: 0.76, status: 'rejected', queued: 0, acted: 1, api: 'reject', audit: 'reject' },
+	{ score: 0.94, status: 'rejected', queued: 0, acted: 1, api: 'reject', audit: 'reject' },
+	{ score: 0.95, status: 'rejected', queued: 0, acted: 1, api: 'ban', audit: 'ban' }
 ])('categorizes score $score as $status', async ({ score, status, queued, acted, api, audit }) => {
 	mocks.scoreComment.mockResolvedValue(moderation(score));
 
@@ -245,6 +245,9 @@ test.each([
 	if (api === 'delete') {
 		expect(mocks.deleteComment).toHaveBeenCalledWith('comment', 'access-token', undefined);
 		expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	} else if (api === 'reject') {
+		expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
+		expect(mocks.deleteComment).not.toHaveBeenCalled();
 	} else if (api === 'ban') {
 		expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', true, 'access-token', undefined);
 		expect(mocks.deleteComment).not.toHaveBeenCalled();
@@ -454,8 +457,8 @@ test('retries a dispatched ban while the comment is still public', async () => {
 });
 
 test.each([
-	{ raw: 0.506, status: 'deleted', reason: 'ai score 0.51' },
-	{ raw: 0.504, status: 'pending', reason: 'ai score 0.50' }
+	{ raw: 0.506, status: 'pending', reason: 'ai score 0.51' },
+	{ raw: 0.504, status: 'approved', reason: 'ai score 0.50' }
 ])('rounds the AI score to 2 decimals before deciding ($raw → $status)', async ({ raw, status, reason }) => {
 	mocks.scoreComment.mockResolvedValue(moderation(raw));
 

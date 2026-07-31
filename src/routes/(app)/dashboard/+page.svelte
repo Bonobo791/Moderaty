@@ -81,10 +81,15 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				aria-label="Moderation sensitivity for {ch.title}"
 				onchange={(event) => event.currentTarget.form?.requestSubmit()}
 			/>
-			<!-- TODO: meme banner images from the channel owner, one per level -->
 			<div class="sensitivity-options">
-				<span class="banner" class:chosen={level === 1}>EDGE LORD</span>
-				<span class="banner" class:chosen={level === 2}>EDGE LORD + ACKCHYUALLY&hellip;</span>
+				<span class="banner" class:chosen={level === 1}>
+					<img src="/edge-lord.jpg" alt="Smug Pepe, the Edge Lord" width="44" height="44" />
+					EDGE LORD
+				</span>
+				<span class="banner" class:chosen={level === 2}>
+					<img src="/ackchyually.gif" alt="The Ackchyually meme guy" width="44" height="44" />
+					EDGE LORD + ACKCHYUALLY&hellip;
+				</span>
 			</div>
 			<p class="muted" style="margin:6px 0 0">
 				{level === 2
@@ -140,6 +145,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		margin-top: 4px;
 	}
 	.banner {
+		display: flex;
+		align-items: center;
+		gap: 6px;
 		padding: 3px 8px;
 		border-radius: 6px;
 		font-size: 0.78rem;
@@ -148,9 +156,16 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		color: var(--ink);
 		opacity: 0.45;
 	}
+	.banner img {
+		border-radius: 6px;
+		filter: grayscale(1);
+	}
 	.banner.chosen {
 		opacity: 1;
 		background: var(--danger-soft);
 		color: var(--danger);
+	}
+	.banner.chosen img {
+		filter: none;
 	}
 </style>

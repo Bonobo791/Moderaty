@@ -154,7 +154,7 @@ export async function fetchVideoMetadata(
 					description: optionalString(snippet.description)?.slice(0, MAX_VIDEO_DESCRIPTION_LENGTH) ?? ''
 				});
 			} catch (error) {
-				console.warn(`${context} is malformed; skipping it:`, error);
+				console.warn('videos.list response item is malformed; skipping it:', context, error);
 			}
 		}
 	}

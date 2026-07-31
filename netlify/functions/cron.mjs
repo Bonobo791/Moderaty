@@ -58,4 +58,7 @@ export default async function cron() {
 
 const TIMEOUT_MS = 25_000; // below Netlify's 26s function limit; the endpoint's own run budget is 20s
 
-export const config = { schedule: '*/15 * * * *' };
+// TEMPORARY (debugging production fetch failures, 2026-07-31): every minute
+// instead of every 15 until the Lambda -> APP_URL fetch issue is resolved.
+// Revert to '*/15 * * * *' afterward.
+export const config = { schedule: '* * * * *' };

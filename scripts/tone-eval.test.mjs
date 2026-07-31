@@ -76,8 +76,8 @@ test('scoffing interjections are judged against the video context', () => {
 	// anchors covering both directions.
 	expect(TONE_PROMPT).toMatch(/comedy|funny/i);
 	expect(TONE_PROMPT).toMatch(/odd or surprising|surprising|odd/i);
-	const lolOnTutorial = TONE_PROMPT.match(/"lol"[^\n]*tutorial[^\n]*->\s*(0\.\d+)/i);
-	const lolOnComedy = TONE_PROMPT.match(/"lol"[^\n]*comedy[^\n]*->\s*(0\.\d+)/i);
+	const lolOnTutorial = TONE_PROMPT.match(/"lol"[^\n]*tutorial[^\n]*->\s*(0\.\d+|1\.0+)/i);
+	const lolOnComedy = TONE_PROMPT.match(/"lol"[^\n]*comedy[^\n]*->\s*(0\.\d+|1\.0+)/i);
 	expect(lolOnTutorial).toBeTruthy();
 	expect(lolOnComedy).toBeTruthy();
 	// Same word, opposite bands: demeaning on a tutorial, acceptable on comedy.
@@ -85,8 +85,8 @@ test('scoffing interjections are judged against the video context', () => {
 	expect(Number(lolOnComedy?.[1])).toBeLessThanOrEqual(0.5);
 	// PR #27 review: assert the "what?" anchors too, so they cannot regress
 	// silently — demeaning on an ordinary video, acceptable on a surprising one.
-	const whatOnHowto = TONE_PROMPT.match(/"what\?"[^\n]*how-to[^\n]*->\s*(0\.\d+)/i);
-	const whatOnSurprising = TONE_PROMPT.match(/"what\?"[^\n]*surprising[^\n]*->\s*(0\.\d+)/i);
+	const whatOnHowto = TONE_PROMPT.match(/"what\?"[^\n]*how-to[^\n]*->\s*(0\.\d+|1\.0+)/i);
+	const whatOnSurprising = TONE_PROMPT.match(/"what\?"[^\n]*surprising[^\n]*->\s*(0\.\d+|1\.0+)/i);
 	expect(whatOnHowto).toBeTruthy();
 	expect(whatOnSurprising).toBeTruthy();
 	expect(Number(whatOnHowto?.[1])).toBeGreaterThanOrEqual(0.76);
@@ -101,7 +101,7 @@ test('the contextual exemption requires evidence — empty context means ordinar
 	// exemption applies only on affirmative evidence, and anchor it.
 	expect(TONE_PROMPT).toMatch(/empty|missing|no (such )?(signal|context|evidence)/i);
 	expect(TONE_PROMPT).toMatch(/treat (the content|it) as ordinary/i);
-	const lolNoContext = TONE_PROMPT.match(/"lol"[^\n]*(?:no video context|unknown context)[^\n]*->\s*(0\.\d+)/i);
+	const lolNoContext = TONE_PROMPT.match(/"lol"[^\n]*(?:no video context|unknown context)[^\n]*->\s*(0\.\d+|1\.0+)/i);
 	expect(lolNoContext).toBeTruthy();
 	expect(Number(lolNoContext?.[1])).toBeGreaterThanOrEqual(0.76);
 });
@@ -112,8 +112,8 @@ test('condescending bare contradiction is demeaning; constructive correction sta
 	// correction that adds constructive content stays acceptable even with a
 	// pedantic opener. The rubric must say so and anchor both directions.
 	expect(TONE_PROMPT).toMatch(/bare contradiction|contradict|pedantic/i);
-	const bareActually = TONE_PROMPT.match(/"Actually, that's not correct\."[^\n]*->\s*(0\.\d+)/i);
-	const constructive = TONE_PROMPT.match(/"Actually,[^\n"]*(?:ft-lb|torque|manual)[^\n"]*"[^\n]*->\s*(0\.\d+)/i);
+	const bareActually = TONE_PROMPT.match(/"Actually, that's not correct\."[^\n]*->\s*(0\.\d+|1\.0+)/i);
+	const constructive = TONE_PROMPT.match(/"Actually,[^\n"]*(?:ft-lb|torque|manual)[^\n"]*"[^\n]*->\s*(0\.\d+|1\.0+)/i);
 	expect(bareActually).toBeTruthy();
 	expect(constructive).toBeTruthy();
 	expect(Number(bareActually?.[1])).toBeGreaterThanOrEqual(0.76);
@@ -128,11 +128,11 @@ test('sweeping negative exaggeration about facts is demeaning; specific correcti
 	// rubric must say so and anchor each direction.
 	expect(TONE_PROMPT).toMatch(/totalizing|sweeping|exaggerat/i);
 	expect(TONE_PROMPT).toMatch(/humor|jok/i);
-	const sweeping = TONE_PROMPT.match(/"All of the information in this video isn't correct\."[^\n]*->\s*(0\.\d+)/i);
-	const specific = TONE_PROMPT.match(/"[^"\n]*(?:4:20|timestamp|specific)[^"\n]*"[^\n]*->\s*(0\.\d+)/i);
+	const sweeping = TONE_PROMPT.match(/"All of the information in this video isn't correct\."[^\n]*->\s*(0\.\d+|1\.0+)/i);
+	const specific = TONE_PROMPT.match(/"[^"\n]*(?:4:20|timestamp|specific)[^"\n]*"[^\n]*->\s*(0\.\d+|1\.0+)/i);
 	// PR #31 review: the humor exemption anchor must be asserted numerically,
 	// not just mentioned — otherwise it can drift into the reject band silently.
-	const humor = TONE_PROMPT.match(/"Literally everything in this one is wrong 😂"[^\n]*->\s*(0\.\d+)/i);
+	const humor = TONE_PROMPT.match(/"Literally everything in this one is wrong 😂"[^\n]*->\s*(0\.\d+|1\.0+)/i);
 	expect(sweeping).toBeTruthy();
 	expect(specific).toBeTruthy();
 	expect(humor).toBeTruthy();
@@ -149,9 +149,9 @@ test('moral attacks on the person are demeaning; criticism of the content stays 
 	expect(TONE_PROMPT).toMatch(/character assassination|demoniz/i);
 	expect(TONE_PROMPT).toMatch(/humiliat|discredit/i);
 	expect(TONE_PROMPT).toMatch(/who the (creator|person) is|attacks? on (the )?(character|person)/i);
-	const assassination = TONE_PROMPT.match(/"[^"\n]*grifter[^"\n]*"[^\n]*->\s*(0\.\d+)/i);
-	const demonization = TONE_PROMPT.match(/"People like you[^"\n]*"[^\n]*->\s*(0\.\d+)/i);
-	const contentCritique = TONE_PROMPT.match(/"[^"\n]*exaggerated and unsourced[^"\n]*"[^\n]*->\s*(0\.\d+)/i);
+	const assassination = TONE_PROMPT.match(/"[^"\n]*grifter[^"\n]*"[^\n]*->\s*(0\.\d+|1\.0+)/i);
+	const demonization = TONE_PROMPT.match(/"People like you[^"\n]*"[^\n]*->\s*(0\.\d+|1\.0+)/i);
+	const contentCritique = TONE_PROMPT.match(/"[^"\n]*exaggerated and unsourced[^"\n]*"[^\n]*->\s*(0\.\d+|1\.0+)/i);
 	expect(assassination).toBeTruthy();
 	expect(demonization).toBeTruthy();
 	expect(contentCritique).toBeTruthy();

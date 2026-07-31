@@ -194,6 +194,8 @@ export function matchPreparedRule(text: string, authorChannelId: string, prepare
 	for (const { rule, compiled } of prepared) {
 		if (rule.type === 'keyword' && lower.includes(rule.pattern.toLowerCase())) return rule;
 		if (rule.type === 'user' && authorChannelId === rule.pattern) return rule;
+		// nosemgrep: `compiled` only ever comes from regex() above, which rejects overly long,
+		// backreferencing, duplicate-alternation, and recheck-unprovable patterns (I6).
 		if (compiled?.test(text)) return rule;
 	}
 	return null;

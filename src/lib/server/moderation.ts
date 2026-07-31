@@ -19,11 +19,18 @@
 import { env } from '$env/dynamic/private';
 import { fetchWithRetry } from '$lib/server/http';
 
-const TOXIC_CATEGORIES = [
+const MODERATION_CATEGORIES = [
 	'harassment',
 	'harassment/threatening',
 	'hate',
 	'hate/threatening',
+	'illicit',
+	'illicit/violent',
+	'self-harm',
+	'self-harm/intent',
+	'self-harm/instructions',
+	'sexual',
+	'sexual/minors',
 	'violence',
 	'violence/graphic'
 ] as const;
@@ -38,16 +45,16 @@ async function jsonResponse(response: Response): Promise<unknown> {
 	}
 }
 
-export type ToxicCategory = (typeof TOXIC_CATEGORIES)[number];
-export type ToxicityScores = Record<ToxicCategory, number>;
+export type ModerationCategory = (typeof MODERATION_CATEGORIES)[number];
+export type ToxicityScores = Record<ModerationCategory, number>;
 
 export interface ModerationResult {
-	score: number; // max of the six toxic category scores
-	scores: ToxicityScores; // the six category scores
+	score: number; // max across all moderation category scores
+	scores: ToxicityScores; // every category score
 }
 
 export function serializeScores(scores: ToxicityScores): string {
-	return `{"harassment":${scores.harassment},"harassment/threatening":${scores['harassment/threatening']},"hate":${scores.hate},"hate/threatening":${scores['hate/threatening']},"violence":${scores.violence},"violence/graphic":${scores['violence/graphic']}}`;
+	return JSON.stringify(scores);
 }
 
 /**
@@ -74,12 +81,12 @@ export async function scoreComment(text: string, deadline?: number): Promise<Mod
 	const data = response as { results?: Array<{ category_scores?: Record<string, unknown> }> };
 	const cat = data.results?.[0]?.category_scores;
 	const invalid = (v: unknown) => typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1;
-	if (!cat || TOXIC_CATEGORIES.some((category) => invalid(cat[category]))) {
+	if (!cat || MODERATION_CATEGORIES.some((category) => invalid(cat[category]))) {
 		throw new Error('moderation response has missing or out-of-range category scores');
 	}
 	const scores = {} as ToxicityScores;
 	let max = 0;
-	for (const k of TOXIC_CATEGORIES) {
+	for (const k of MODERATION_CATEGORIES) {
 		const v = cat[k] as number;
 		scores[k] = v;
 		if (v > max) max = v;

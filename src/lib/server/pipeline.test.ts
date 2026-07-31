@@ -113,10 +113,12 @@ const mocks = vi.hoisted(() => {
 		deleteComment: vi.fn(),
 		scoreComment: vi.fn(),
 		serializeScores: vi.fn(),
+		checkSync: vi.fn(() => ({ status: 'safe' })),
 		DeadlineExceededError: class DeadlineExceededError extends Error {}
 	};
 });
 
+vi.mock('recheck', () => ({ checkSync: mocks.checkSync }));
 vi.mock('$lib/server/crypto', () => ({ decrypt: mocks.decrypt }));
 vi.mock('$lib/server/db', () => ({ db: mocks.db }));
 vi.mock('$env/dynamic/private', () => ({ env: mocks.state.env }));
@@ -253,6 +255,33 @@ test.each([
 	expect(result).toMatchObject({ fetched: 1, acted, queued, partial: false, skipped: false, dryRun: false });
 });
 
+test('validates and compiles each regex rule once per run, not per comment', async () => {
+	mocks.state.ruleRows = [{ id: 1, type: 'regex', pattern: 'spam', action: 'hold' }];
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ id: 'a', text: 'spam one' }), newComment({ id: 'b', text: 'spam two' })],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	await runChannel('channel');
+
+	expect(mocks.checkSync).toHaveBeenCalledTimes(1);
+});
+
+test('routes AI scoring failures to the review queue instead of failing the run (I11)', async () => {
+	mocks.scoreComment.mockRejectedValue(new Error('moderation response has missing or out-of-range category scores'));
+
+	const result = await runChannel('channel');
+
+	expect(mocks.state.insertedComments).toEqual([
+		expect.objectContaining({ id: 'comment', status: 'pending', decidedBy: 'none', aiScore: null })
+	]);
+	expect(mocks.state.insertedAudits).toEqual([
+		expect.objectContaining({ commentId: 'comment', action: 'queue', reason: expect.stringContaining('ai unavailable') })
+	]);
+	expect(result).toMatchObject({ fetched: 1, acted: 0, queued: 1, partial: false, skipped: false });
+});
+
 test('persists the chronologically newest timestamp when UTC offsets differ', async () => {
 	mocks.scoreComment.mockResolvedValue(moderation(0));
 	mocks.fetchNewComments.mockResolvedValue({
@@ -351,7 +380,7 @@ test('records successful remote actions before a later action fails', async () =
 	expect(mocks.state.insertedAudits).toEqual([expect.objectContaining({ commentId: 'held', action: 'hold' })]);
 });
 
-test('persists successful decisions and retries only the failed comment on the next run', async () => {
+test('queues AI scoring failures for human review and never rescores them (I11)', async () => {
 	mocks.fetchNewComments.mockResolvedValue({
 		comments: [newComment({ id: 'good', text: 'good' }), newComment({ id: 'bad', text: 'bad' })],
 		nextPageToken: 'next-page',
@@ -362,23 +391,22 @@ test('persists successful decisions and retries only the failed comment on the n
 		return moderation(0.34);
 	});
 
-	await expect(runChannel('channel')).rejects.toThrow(
-		'moderation decision failed for 1 comment(s): comment bad: OpenAI overloaded'
-	);
+	const first = await runChannel('channel');
 
-	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'good', status: 'approved' })]);
-	expect(mocks.db.update).not.toHaveBeenCalled();
-
-	mocks.scoreComment.mockResolvedValue(moderation(0.34));
-	const result = await runChannel('channel');
-
-	expect(mocks.scoreComment).toHaveBeenCalledTimes(3);
-	expect(mocks.scoreComment).toHaveBeenLastCalledWith('bad', undefined);
 	expect(mocks.state.insertedComments).toEqual(expect.arrayContaining([
 		expect.objectContaining({ id: 'good', status: 'approved' }),
-		expect.objectContaining({ id: 'bad', status: 'approved' })
+		expect.objectContaining({ id: 'bad', status: 'pending', decidedBy: 'none' })
 	]));
-	expect(result).toMatchObject({ fetched: 2, partial: false, skipped: false, dryRun: false });
+	expect(mocks.state.insertedAudits).toEqual(expect.arrayContaining([
+		expect.objectContaining({ commentId: 'bad', action: 'queue', reason: expect.stringContaining('ai unavailable') })
+	]));
+	expect(first).toMatchObject({ fetched: 2, queued: 1, partial: false, skipped: false, dryRun: false });
+
+	mocks.scoreComment.mockClear();
+	const second = await runChannel('channel');
+
+	expect(mocks.scoreComment).not.toHaveBeenCalled();
+	expect(second).toMatchObject({ partial: false, skipped: false, dryRun: false });
 });
 
 test('verifies a dispatched action after its completion transaction fails', async () => {

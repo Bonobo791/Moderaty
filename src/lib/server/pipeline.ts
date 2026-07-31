@@ -23,7 +23,7 @@ import { db } from '$lib/server/db';
 import { auditLog, channels, comments, moderationActions, rules } from '$lib/server/db/schema';
 import { assertBeforeDeadline, DeadlineExceededError } from '$lib/server/http';
 import { scoreComment, serializeScores } from '$lib/server/moderation';
-import { matchRule, validateRule, type RuleAction, type RuleRow } from '$lib/server/rules';
+import { matchPreparedRule, prepareRules, type PreparedRule, type RuleAction } from '$lib/server/rules';
 import {
 	deleteComment,
 	fetchNewComments,
@@ -96,8 +96,7 @@ function emptyResult(): ChannelRunResult {
  * @param rule - The matched moderation rule.
  * @returns The moderation decision, including its status, rationale, and YouTube action.
  */
-function ruleDecision(comment: NewComment, rule: RuleRow): Decision {
-	validateRule(rule);
+function ruleDecision(comment: NewComment, rule: PreparedRule['rule']): Decision {
 	const outcome = RULE_ACTIONS[rule.action];
 	return {
 		comment,
@@ -110,7 +109,23 @@ function ruleDecision(comment: NewComment, rule: RuleRow): Decision {
 }
 
 async function aiDecision(comment: NewComment, deadline?: number): Promise<Decision> {
-	const moderation = await scoreComment(comment.text, deadline);
+	let moderation: Awaited<ReturnType<typeof scoreComment>>;
+	try {
+		moderation = await scoreComment(comment.text, deadline);
+	} catch (error) {
+		// I11: a scoring failure never auto-approves, never auto-rejects, and
+		// never aborts the batch — the comment lands in the human review queue.
+		return {
+			comment,
+			status: 'pending',
+			decidedBy: 'none',
+			matchedRuleId: null,
+			aiScore: null,
+			auditAction: 'queue',
+			reason: `ai unavailable: ${error instanceof Error ? error.message : String(error)}`.slice(0, 200),
+			youtubeAction: null
+		};
+	}
 	// Round to the displayed precision before comparing so a score that reads
 	// as "0.51" in the audit log also behaves as 0.51 against the thresholds.
 	const score = Math.round(moderation.score * 100) / 100;
@@ -164,8 +179,8 @@ async function aiDecision(comment: NewComment, deadline?: number): Promise<Decis
 	};
 }
 
-async function decide(comment: NewComment, rules: RuleRow[], deadline?: number): Promise<Decision> {
-	const rule = matchRule(comment.text, comment.authorChannelId, rules);
+async function decide(comment: NewComment, rules: PreparedRule[], deadline?: number): Promise<Decision> {
+	const rule = matchPreparedRule(comment.text, comment.authorChannelId, rules);
 	return rule ? ruleDecision(comment, rule) : aiDecision(comment, deadline);
 }
 
@@ -234,8 +249,7 @@ async function decideNewComments(
 				).map((comment) => comment.id)
 			: []
 	);
-	const rulesForChannel = await db.select().from(rules).where(eq(rules.channelId, channelId)).all();
-	rulesForChannel.forEach(validateRule);
+	const rulesForChannel = prepareRules(await db.select().from(rules).where(eq(rules.channelId, channelId)).all());
 	const settled = await Promise.allSettled(
 		page.comments
 			.filter((comment) => !existingIds.has(comment.id))

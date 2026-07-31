@@ -65,6 +65,9 @@ export function postForm(fields: Record<string, string>, url = 'http://localhost
 	return new Request(url, { method: 'POST', body: form });
 }
 
+/** Minimal Cookies stand-in that records set/delete calls like SvelteKit's. */
+export { makeCookies, makeCookiesWithState } from './testcookies';
+
 export async function createTestDb(): Promise<TestDb> {
 	const client = createClient({ url: ':memory:' });
 	await client.batch([
@@ -78,7 +81,7 @@ export async function createTestDb(): Promise<TestDb> {
 		)`,
 		`CREATE TABLE sessions (
 			id TEXT PRIMARY KEY,
-			user_id TEXT NOT NULL,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			expires_at TEXT NOT NULL,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,

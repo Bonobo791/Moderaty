@@ -17,20 +17,13 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { db } from '$lib/server/db';
-import { channels, auditLog } from '$lib/server/db/schema';
-import { requireUser } from '$lib/server/session';
-import { and, eq, desc } from 'drizzle-orm';
-import { error } from '@sveltejs/kit';
+import { auditLog } from '$lib/server/db/schema';
+import { ownedChannel } from '$lib/server/ownership';
+import { eq, desc } from 'drizzle-orm';
 
 export async function load({ params, locals }) {
 	// Ownership-scoped: another user's channel (and its audit log) reads as "not found".
-	const user = requireUser(locals);
-	const ch = await db
-		.select()
-		.from(channels)
-		.where(and(eq(channels.id, params.id), eq(channels.userId, user.id)))
-		.get();
-	if (!ch) throw error(404, 'channel not found');
+	const ch = await ownedChannel(params.id, locals);
 	const entries = await db
 		.select()
 		.from(auditLog)

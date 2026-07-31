@@ -52,30 +52,9 @@ vi.mock('$lib/server/db', () => ({
 	}
 }));
 
+import { makeCookies, makeCookiesWithState } from '$lib/server/testcookies';
 import { GET as startAuth } from './+server';
 import { GET as authCallback } from './callback/+server';
-
-function makeCookies() {
-	const store = new Map<string, string>();
-	const setCalls: Array<{ name: string; value: string; opts: Record<string, unknown> }> = [];
-	return {
-		setCalls,
-		get: (name: string) => store.get(name),
-		set: (name: string, value: string, opts: Record<string, unknown>) => {
-			setCalls.push({ name, value, opts });
-			store.set(name, value);
-		},
-		delete: (name: string) => {
-			store.delete(name);
-		}
-	};
-}
-
-function makeCookiesWithState(...states: string[]) {
-	const cookies = makeCookies();
-	cookies.set('oauth_state', JSON.stringify(states), { path: '/' });
-	return cookies;
-}
 
 function callbackUrl(params: Record<string, string>) {
 	const search = new URLSearchParams(params);

@@ -28,7 +28,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
-import { setupTestDb, testDb } from '$lib/server/testdb';
+import { makeCookies, makeCookiesWithState, setupTestDb, testDb } from '$lib/server/testdb';
 import { channels, sessions, users } from '$lib/server/db/schema';
 import { GET as startLogin } from './+server';
 import { GET as loginCallback } from './callback/+server';
@@ -39,28 +39,6 @@ afterEach(() => {
 	vi.unstubAllGlobals();
 	vi.restoreAllMocks();
 });
-
-function makeCookies() {
-	const store = new Map<string, string>();
-	const setCalls: Array<{ name: string; value: string; opts: Record<string, unknown> }> = [];
-	return {
-		setCalls,
-		get: (name: string) => store.get(name),
-		set: (name: string, value: string, opts: Record<string, unknown>) => {
-			setCalls.push({ name, value, opts });
-			store.set(name, value);
-		},
-		delete: (name: string) => {
-			store.delete(name);
-		}
-	};
-}
-
-function makeCookiesWithState(...states: string[]) {
-	const cookies = makeCookies();
-	cookies.set('oauth_state', JSON.stringify(states), { path: '/' });
-	return cookies;
-}
 
 function callbackUrl(params: Record<string, string>) {
 	return new URL(`http://localhost:5173/api/auth/google/login/callback?${new URLSearchParams(params)}`);

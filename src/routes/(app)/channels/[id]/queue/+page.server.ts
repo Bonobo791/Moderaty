@@ -21,7 +21,7 @@ import { channels, comments, auditLog } from '$lib/server/db/schema';
 import { and, eq, desc } from 'drizzle-orm';
 import { refreshAccessToken, setModerationStatus, deleteComment } from '$lib/server/youtube';
 import { decrypt } from '$lib/server/crypto';
-import { requireUser } from '$lib/server/session';
+import { ownedChannel } from '$lib/server/ownership';
 import { env } from '$env/dynamic/private';
 import { error, fail } from '@sveltejs/kit';
 
@@ -37,19 +37,7 @@ export async function load({ params, locals }) {
 	return { ch, pending };
 }
 
-/** Loads this route's channel only when the signed-in user owns it (404 otherwise). */
-async function ownedChannel(paramsId: string, locals: { user: import('$lib/server/session').SessionUser | null }) {
-	const user = requireUser(locals);
-	const ch = await db
-		.select()
-		.from(channels)
-		.where(and(eq(channels.id, paramsId), eq(channels.userId, user.id)))
-		.get();
-	if (!ch) throw error(404, 'channel not found');
-	return ch;
-}
-
-async function act(paramsId: string, commentId: string, action: 'approve' | 'reject' | 'delete' | 'ban', locals: { user: import('$lib/server/session').SessionUser | null }) {
+async function act(paramsId: string, commentId: string, action: 'approve' | 'reject' | 'delete' | 'ban', locals: App.Locals) {
 	const ch = await ownedChannel(paramsId, locals);
 	// Scope to this route's channel and to still-pending comments so a forged
 	// POST cannot moderate another channel's comment or re-decide a settled one.

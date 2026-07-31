@@ -22,9 +22,9 @@ import { randomBytes } from 'node:crypto';
 
 import { isNull, eq } from 'drizzle-orm';
 
-import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { channels, users } from '$lib/server/db/schema';
+import { exchangeGoogleCode } from '$lib/server/google';
 import { readPendingStates, storePendingStates } from '$lib/server/oauthState';
 import { createSession, SESSION_COOKIE } from '$lib/server/session';
 
@@ -36,62 +36,15 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 	const code = url.searchParams.get('code');
 	if (!code) throw error(400, 'missing code');
 
-	if (!env.GOOGLE_CLIENT_ID) throw error(500, 'GOOGLE_CLIENT_ID is not configured');
-	if (!env.GOOGLE_CLIENT_SECRET) throw error(500, 'GOOGLE_CLIENT_SECRET is not configured');
-	if (!env.APP_URL) throw error(500, 'APP_URL is not configured');
-
-	// Failures are logged server-side with redacted detail; the client only ever
-	// sees the generic messages below — never tokens (AGENTS.md).
-	// The authorization code is one-time use, so this exchange must not retry:
-	// a retried request after a transient timeout would fail the sign-in.
-	let tokenRes: Response;
-	let tokenText: string;
-	try {
-		tokenRes = await fetch('https://oauth2.googleapis.com/token', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-			body: new URLSearchParams({
-				code,
-				client_id: env.GOOGLE_CLIENT_ID,
-				client_secret: env.GOOGLE_CLIENT_SECRET,
-				redirect_uri: new URL('/api/auth/google/login/callback', env.APP_URL).toString(),
-				grant_type: 'authorization_code'
-			}),
-			signal: AbortSignal.timeout(10_000)
-		});
-		tokenText = await tokenRes.text();
-	} catch (e) {
-		console.error(`google login token exchange request failed: ${e instanceof Error ? e.message : e}`);
-		throw error(502, 'Google sign-in failed — please retry');
-	}
-	let tokens: { access_token?: unknown; error?: unknown; error_description?: unknown };
-	try {
-		tokens = JSON.parse(tokenText) as typeof tokens;
-	} catch {
-		console.error(`google login token exchange returned invalid JSON: ${tokenRes.status}`);
-		throw error(502, 'invalid response from Google — please retry');
-	}
-	if (typeof tokens !== 'object' || tokens === null) {
-		console.error(`google login token exchange returned a non-object body: ${tokenRes.status}`);
-		throw error(502, 'invalid response from Google — please retry');
-	}
-	if (!tokenRes.ok) {
-		// Upstream failure, not a user error. Log only status and Google's
-		// non-secret error fields — never the raw body, which may carry tokens.
-		const detail =
-			typeof tokens.error === 'string'
-				? `${tokens.error}${typeof tokens.error_description === 'string' ? `: ${tokens.error_description}` : ''}`
-				: 'no error detail';
-		console.error(`google login token exchange failed: ${tokenRes.status} ${detail}`);
-		throw error(502, 'Google sign-in failed — please retry');
-	}
-	if (typeof tokens.access_token !== 'string' || !tokens.access_token) {
-		console.error('google login token exchange returned 200 without an access_token');
-		throw error(502, 'invalid response from Google — please retry');
-	}
+	const tokens = await exchangeGoogleCode(
+		code,
+		'/api/auth/google/login/callback',
+		'google login token exchange',
+		'Google sign-in failed — please retry'
+	);
 
 	const infoRes = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
-		headers: { Authorization: `Bearer ${tokens.access_token}` },
+		headers: { Authorization: `Bearer ${tokens.accessToken}` },
 		signal: AbortSignal.timeout(10_000)
 	});
 	const infoText = await infoRes.text();

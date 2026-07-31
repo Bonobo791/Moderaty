@@ -19,21 +19,9 @@
 import { db } from '$lib/server/db';
 import { channels, rules } from '$lib/server/db/schema';
 import { validateRule } from '$lib/server/rules';
-import { requireUser } from '$lib/server/session';
+import { ownedChannel } from '$lib/server/ownership';
 import { and, eq } from 'drizzle-orm';
 import { error, fail } from '@sveltejs/kit';
-
-/** Loads this route's channel only when the signed-in user owns it (404 otherwise). */
-async function ownedChannel(paramsId: string, locals: { user: import('$lib/server/session').SessionUser | null }) {
-	const user = requireUser(locals);
-	const ch = await db
-		.select()
-		.from(channels)
-		.where(and(eq(channels.id, paramsId), eq(channels.userId, user.id)))
-		.get();
-	if (!ch) throw error(404, 'channel not found');
-	return ch;
-}
 
 export async function load({ params, locals }) {
 	const ch = await ownedChannel(params.id, locals);

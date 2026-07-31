@@ -124,6 +124,16 @@ const CASES = [
 		note: '"what?" is genuine surprise at an odd video'
 	},
 	{
+		text: "Actually, that's not correct.",
+		expected: 'reject',
+		note: 'condescending bare contradiction, no substance'
+	},
+	{
+		text: 'Um, actually the torque spec is 25 ft-lb — check the manual, page 12.',
+		expected: 'approve',
+		note: 'pedantic opener but constructive content'
+	},
+	{
 		text: 'Everyone go report this clown and run him off the platform.',
 		expected: 'ban',
 		note: 'brigading campaign'

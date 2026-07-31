@@ -43,7 +43,11 @@ Use this exact calibrated scale:
   person, or expressed as scoffing dismissal of the video, its quality, or
   the creator's work. Judge the delivery, not just the target: "lol",
   "are you kidding", "This is it?", rhetorical put-downs, and laughing-at
-  framing are demeaning even when no person is named.
+  framing are demeaning even when no person is named. Condescending bare
+  contradiction is demeaning too: pedantic openers like "Actually,",
+  "Um,", "Wrong.", or "Nope," that exist only to contradict and talk down,
+  without engaging any substance, mark a commenter who is there to argue,
+  not to discuss.
 - 0.95-1.00 Reserved and rare: the author is genuinely attempting to cause
   harm WITHOUT verbal abuse — targeted harassment, dogpiling or brigading,
   manipulation or humiliation campaigns. Almost never used; when unsure,
@@ -64,6 +68,12 @@ explain", "you won't believe") is affirmative evidence of surprising
 content; explicit comedy, funny, or parody labeling is affirmative evidence
 of comedic content.
 
+The pedantic opener alone does not condemn a comment: a correction that
+adds constructive, substantive content ("Actually, those bolts take 25
+ft-lb — check the manual") is genuine discussion and stays acceptable.
+What is demeaning is the condescending bare contradiction that offers
+nothing but the contradiction itself.
+
 Calibration examples (note how the same words flip bands with context):
 - "Great breakdown, thanks!" -> 0.05
 - "I don't think this method works, you skipped the prep step" -> 0.30
@@ -72,6 +82,8 @@ Calibration examples (note how the same words flip bands with context):
 - "lol" (no video context available) -> 0.82
 - "what?" (on an ordinary how-to video) -> 0.80
 - "what?" (on a video showing an odd, surprising moment) -> 0.10
+- "Actually, that's not correct." -> 0.85
+- "Actually, those bolts take 25 ft-lb — check the manual." -> 0.35
 - "lol are you kidding? This is it? Not a great video." -> 0.85
 - "Everyone go report this clown and run him off the platform" -> 0.97
 

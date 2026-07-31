@@ -105,3 +105,17 @@ test('the contextual exemption requires evidence — empty context means ordinar
 	expect(lolNoContext).toBeTruthy();
 	expect(Number(lolNoContext?.[1])).toBeGreaterThanOrEqual(0.76);
 });
+
+test('condescending bare contradiction is demeaning; constructive correction stays acceptable', () => {
+	// The "actually..." crowd: comments that exist only to contradict and talk
+	// down, with no substantive engagement, belong in the demeaning band. A
+	// correction that adds constructive content stays acceptable even with a
+	// pedantic opener. The rubric must say so and anchor both directions.
+	expect(TONE_PROMPT).toMatch(/bare contradiction|contradict|pedantic/i);
+	const bareActually = TONE_PROMPT.match(/"Actually, that's not correct\."[^\n]*->\s*(0\.\d+)/i);
+	const constructive = TONE_PROMPT.match(/"Actually,[^\n"]*(?:ft-lb|torque|manual)[^\n"]*"[^\n]*->\s*(0\.\d+)/i);
+	expect(bareActually).toBeTruthy();
+	expect(constructive).toBeTruthy();
+	expect(Number(bareActually?.[1])).toBeGreaterThanOrEqual(0.76);
+	expect(Number(constructive?.[1])).toBeLessThanOrEqual(0.5);
+});

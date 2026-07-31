@@ -20,9 +20,14 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <script lang="ts">
 	import EmptyState from '$lib/EmptyState.svelte';
+	import { autoRefresh } from '$lib/auto-refresh.svelte';
 	import { relativeTime } from '$lib/relative-time';
 
 	let { data } = $props();
+
+	// Counts change with every cron run; revalidate like the queue and log pages.
+	autoRefresh();
+
 	function count(channelId: string, status: string): number {
 		const row = data.stats.find((s: any) => s.channelId === channelId && s.status === status);
 		return row ? row.n : 0;

@@ -159,14 +159,17 @@ export function validateRule(rule: RuleRow): asserts rule is RuleRow & { type: (
 }
 
 /**
- * Finds the first validated moderation rule that matches the comment or its author.
+ * Finds the validated moderation rule that matches the comment or its author.
+ * Most specific (longest) pattern wins, so `fuck you` beats a stored `fuck`
+ * regardless of insertion order; ties keep first-stored-wins.
  *
  * @throws If a stored rule is invalid.
  */
 export function matchRule(text: string, authorChannelId: string, rules: RuleRow[]): RuleRow | null {
-	rules.forEach(validateRule);
+	const ordered = [...rules].sort((a, b) => b.pattern.length - a.pattern.length);
+	ordered.forEach(validateRule);
 	const lower = text.toLowerCase();
-	for (const rule of rules) {
+	for (const rule of ordered) {
 		if (rule.type === 'keyword' && lower.includes(rule.pattern.toLowerCase())) return rule;
 		if (rule.type === 'user' && authorChannelId === rule.pattern) return rule;
 		if (rule.type === 'regex' && regex(rule).test(text)) return rule;

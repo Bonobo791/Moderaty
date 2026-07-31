@@ -28,12 +28,19 @@ afterEach(() => {
 	vi.unstubAllGlobals();
 });
 
-test('returns the maximum score across all toxic categories', async () => {
+test('returns the maximum score across all moderation categories, including sexual', async () => {
 	const scores = {
 		harassment: 0.11,
 		'harassment/threatening': 0.22,
 		hate: 0.33,
 		'hate/threatening': 0.44,
+		illicit: 0.05,
+		'illicit/violent': 0.06,
+		'self-harm': 0.07,
+		'self-harm/intent': 0.08,
+		'self-harm/instructions': 0.09,
+		sexual: 0.95,
+		'sexual/minors': 0.01,
 		violence: 0.55,
 		'violence/graphic': 0.91
 	};
@@ -44,7 +51,37 @@ test('returns the maximum score across all toxic categories', async () => {
 	const result = await scoreComment('comment text');
 
 	expect(result.scores).toEqual(scores);
-	expect(result.score).toBe(0.91);
+	expect(result.score).toBe(0.95);
+});
+
+test.each([
+	['sexual', 0.95],
+	['self-harm', 0.9],
+	['illicit', 0.88]
+])('treats %s as a scored category (%f wins the max)', async (category, categoryScore) => {
+	const scores = {
+		harassment: 0.01,
+		'harassment/threatening': 0.01,
+		hate: 0.01,
+		'hate/threatening': 0.01,
+		illicit: 0.01,
+		'illicit/violent': 0.01,
+		'self-harm': 0.01,
+		'self-harm/intent': 0.01,
+		'self-harm/instructions': 0.01,
+		sexual: 0.01,
+		'sexual/minors': 0.01,
+		violence: 0.01,
+		'violence/graphic': 0.01,
+		[category]: categoryScore
+	};
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+		results: [{ category_scores: scores }]
+	}), { status: 200 })));
+
+	const result = await scoreComment('comment text');
+
+	expect(result.score).toBe(categoryScore);
 });
 
 test.each([
@@ -58,6 +95,13 @@ test.each([
 				'harassment/threatening': 0.22,
 				hate: 0.33,
 				'hate/threatening': 0.44,
+				illicit: 0.05,
+				'illicit/violent': 0.06,
+				'self-harm': 0.07,
+				'self-harm/intent': 0.08,
+				'self-harm/instructions': 0.09,
+				sexual: 0.1,
+				'sexual/minors': 0.01,
 				violence: badScore,
 				'violence/graphic': 0.55
 			}
@@ -65,4 +109,21 @@ test.each([
 	}), { status: 200 })));
 
 	await expect(scoreComment('comment text')).rejects.toThrow('out-of-range');
+});
+
+test('rejects a response missing a required category score', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+		results: [{
+			category_scores: {
+				harassment: 0.11,
+				'harassment/threatening': 0.22,
+				hate: 0.33,
+				'hate/threatening': 0.44,
+				violence: 0.55,
+				'violence/graphic': 0.91
+			}
+		}]
+	}), { status: 200 })));
+
+	await expect(scoreComment('comment text')).rejects.toThrow('missing or out-of-range');
 });

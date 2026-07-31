@@ -58,3 +58,11 @@ test('accepts regex rules without overlapping alternation', () => {
 	const alternation = { id: 9, type: 'regex', pattern: '(cat|dog)+', action: 'hold' };
 	expect(matchRule('catcatdog', 'author', [alternation])).toBe(alternation);
 });
+
+test('most specific pattern wins regardless of stored order', () => {
+	const broad = { id: 10, type: 'keyword', pattern: 'fuck', action: 'hold' };
+	const specific = { id: 11, type: 'keyword', pattern: 'fuck you', action: 'reject' };
+	expect(matchRule('well fuck you too', 'author', [broad, specific])).toBe(specific);
+	expect(matchRule('well fuck you too', 'author', [specific, broad])).toBe(specific);
+	expect(matchRule('what the fuck', 'author', [broad, specific])).toBe(broad);
+});

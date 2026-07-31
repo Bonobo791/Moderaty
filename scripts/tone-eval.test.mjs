@@ -68,3 +68,19 @@ test('the tone rubric lives in one shared module imported by both tone.ts and th
 	expect(scriptSource).toMatch(/from '\.\.\/src\/lib\/server\/tonePrompt\.js'/);
 	expect(scriptSource).not.toContain('const TONE_PROMPT = `');
 });
+
+test('scoffing interjections are judged against the video context', () => {
+	// A bare "lol" is demeaning on ordinary content but a normal reaction on a
+	// comedy video; a bare "what?" is demeaning unless the video shows something
+	// genuinely odd or surprising. The rubric must say so, with calibration
+	// anchors covering both directions.
+	expect(TONE_PROMPT).toMatch(/comedy|funny/i);
+	expect(TONE_PROMPT).toMatch(/odd or surprising|surprising|odd/i);
+	const lolOnTutorial = TONE_PROMPT.match(/"lol"[^\n]*tutorial[^\n]*->\s*(0\.\d+)/i);
+	const lolOnComedy = TONE_PROMPT.match(/"lol"[^\n]*comedy[^\n]*->\s*(0\.\d+)/i);
+	expect(lolOnTutorial).toBeTruthy();
+	expect(lolOnComedy).toBeTruthy();
+	// Same word, opposite bands: demeaning on a tutorial, acceptable on comedy.
+	expect(Number(lolOnTutorial?.[1])).toBeGreaterThanOrEqual(0.76);
+	expect(Number(lolOnComedy?.[1])).toBeLessThanOrEqual(0.5);
+});

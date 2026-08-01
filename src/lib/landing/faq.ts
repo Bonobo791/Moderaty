@@ -54,5 +54,9 @@ export const FAQ_ENTRIES: FaqEntry[] = [
 	{
 		q: 'Can I test Moderaty without changing anything on my channel?',
 		a: 'Yes. Dry-run mode classifies everything and changes nothing. The audit trail shows exactly what would have happened, comment by comment.'
+	},
+	{
+		q: 'Is Moderaty LGPD compliant?',
+		a: 'Yes. Moderaty is built in Brazil around the LGPD: comments are classified and discarded, never stored, and only the minimal verdict record is kept. No author profiling, no model training on comment data. The Privacy Policy and DPA, linked in the footer, spell it out.'
 	}
 ];

@@ -28,6 +28,7 @@ import {
 	CONSENT_CHECKBOX_TEXT,
 	LEGAL_VERSION,
 	MARKETING_CHECKBOX_TEXT,
+	REFUND_NOTICE_TEXT,
 	clearPendingConsent,
 	readPendingConsent
 } from '$lib/server/legal';
@@ -45,7 +46,8 @@ export const load: PageServerLoad = ({ cookies, url }) => {
 		kind: pending.kind,
 		displayName: pending.kind === 'new' ? pending.displayName : null,
 		consentText: CONSENT_CHECKBOX_TEXT,
-		marketingText: MARKETING_CHECKBOX_TEXT
+		marketingText: MARKETING_CHECKBOX_TEXT,
+		refundText: REFUND_NOTICE_TEXT
 	};
 };
 

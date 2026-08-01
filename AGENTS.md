@@ -167,8 +167,10 @@ unticked
 18+/ToS/PP/DPA checkbox (plus an optional unbundled marketing opt-in) gates a
 single transaction that creates the user and writes a `consents` row
 (userId, `doc_version`, exact checkbox text, IP, user agent) — the
-evidentiary log. The visible checkbox sentence must stay byte-identical to
-`CONSENT_CHECKBOX_TEXT`. On material legal-doc changes bump `LEGAL_VERSION`
+evidentiary log. The visible checkbox sentence is rendered from
+`CONSENT_CHECKBOX_TEXT` itself (the load passes it to the page;
+`src/lib/consentText.ts` splits it into text/link segments), so the page can
+never drift from the logged text. On material legal-doc changes bump `LEGAL_VERSION`
 (declared with the documents in `src/lib/landing/legal.ts`, re-exported from
 `src/lib/server/legal.ts`); users whose consent predates it are routed back
 through `/consent` on next login.

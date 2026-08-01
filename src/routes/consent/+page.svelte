@@ -19,7 +19,14 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 -->
 
 <script lang="ts">
+	import { segmentConsentText } from '$lib/consentText';
+
 	let { data, form } = $props();
+	// The sentence arrives as data.consentText = CONSENT_CHECKBOX_TEXT — the
+	// same constant the consent log stores as "the exact text shown". Splitting
+	// preserves every character, so the visible sentence cannot drift from the
+	// logged one; the document links sit between the corresponding segments.
+	const segments = $derived(segmentConsentText(data.consentText));
 </script>
 
 <svelte:head>
@@ -41,17 +48,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		{/if}
 
 		<form method="POST">
-			<!-- The visible sentence must stay byte-identical to CONSENT_CHECKBOX_TEXT
-			     in src/lib/server/legal.ts — that constant is what the consent log
-			     stores as "the exact text shown". Links don't alter the wording. -->
 			<label class="check">
 				<input type="checkbox" name="consent" />
-				<span>
-					I am at least 18 years old and agree to the
-					<a href="/terms" target="_blank" rel="noopener">Terms of Service</a>,
-					<a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>, and
-					<a href="/dpa" target="_blank" rel="noopener">Data Processing Agreement</a>
-				</span>
+				<span>{#each segments as segment}{#if segment.href}<a href={segment.href} target="_blank" rel="noopener">{segment.text}</a>{:else}{segment.text}{/if}{/each}</span>
 			</label>
 			<label class="check">
 				<input type="checkbox" name="marketing" />

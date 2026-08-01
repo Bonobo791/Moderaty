@@ -44,6 +44,7 @@ export const load: PageServerLoad = ({ cookies, url }) => {
 	return {
 		kind: pending.kind,
 		displayName: pending.kind === 'new' ? pending.displayName : null,
+		consentText: CONSENT_CHECKBOX_TEXT,
 		marketingText: MARKETING_CHECKBOX_TEXT
 	};
 };

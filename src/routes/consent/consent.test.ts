@@ -31,6 +31,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
+import { segmentConsentText } from '$lib/consentText';
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { makeCookies } from '$lib/server/testcookies';
 import { channels, consents, sessions, users } from '$lib/server/db/schema';
@@ -101,16 +102,29 @@ async function expectNothingWritten() {
 	expect(await testDb().db.select().from(consents).all()).toHaveLength(0);
 }
 
-test('page states: consent sentence matches the logged text, docs are linked, errors are announced', () => {
-	// The visible sentence must stay in sync with CONSENT_CHECKBOX_TEXT — that
-	// constant is what the consent log stores as "the exact text shown".
-	expect(consentPage).toContain('I am at least 18 years old and agree to the');
-	expect(consentPage).toContain('href="/terms"');
-	expect(consentPage).toContain('href="/privacy"');
-	expect(consentPage).toContain('href="/dpa"');
+test('page states: the rendered sentence equals the logged text exactly, docs are linked, errors are announced', () => {
+	// The visible sentence is derived from CONSENT_CHECKBOX_TEXT — the same
+	// constant the consent log stores as "the exact text shown". Reassemble
+	// the rendered segments (markup removed) and compare byte-for-byte.
+	const segments = segmentConsentText(CONSENT_CHECKBOX_TEXT);
+	expect(segments.map((s) => s.text).join('')).toBe(CONSENT_CHECKBOX_TEXT);
+	expect(segments.filter((s) => s.href)).toEqual([
+		{ text: 'Terms of Service', href: '/terms' },
+		{ text: 'Privacy Policy', href: '/privacy' },
+		{ text: 'Data Processing Agreement', href: '/dpa' }
+	]);
+	expect(consentPage).toContain('segmentConsentText');
 	expect(consentPage).toMatch(/class="error-box"[^>]*role="alert"/);
 	// The consent checkbox renders unticked by default (no checked attribute).
 	expect(consentPage).not.toMatch(/name="consent"[^>]*checked/);
+});
+
+test('load hands the page the exact consent sentence the log will store', () => {
+	const data = load({
+		cookies: cookiesWithPending(NEW_SUB),
+		url: new URL('http://localhost/consent?state=state-1')
+	} as never) as Record<string, unknown>;
+	expect(data).toMatchObject({ consentText: CONSENT_CHECKBOX_TEXT, kind: 'new', displayName: 'One' });
 });
 
 test('load without a pending cookie redirects to /login', () => {

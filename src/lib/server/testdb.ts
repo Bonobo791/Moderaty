@@ -76,6 +76,7 @@ export async function createTestDb(): Promise<TestDb> {
 			email TEXT NOT NULL,
 			display_name TEXT NOT NULL,
 			plan TEXT NOT NULL DEFAULT 'free',
+			deleted_at TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE TABLE sessions (

@@ -57,6 +57,13 @@
       "when": 1785616677162,
       "tag": "0007_curved_blade",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1785622824165,
+      "tag": "0008_aromatic_red_wolf",
+      "breakpoints": true
     }
   ]
 }

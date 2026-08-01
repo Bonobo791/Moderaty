@@ -18,16 +18,16 @@
 
 import { timingSafeEqual } from 'node:crypto';
 import { error, json } from '@sveltejs/kit';
-import { and, asc, eq, inArray, isNotNull, isNull, lt, or } from 'drizzle-orm';
+import { and, asc, eq, isNull, lt, or } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
-import { auditLog, channels, comments, moderationActions, rules, sessions, users } from '$lib/server/db/schema';
+import { channels } from '$lib/server/db/schema';
 import { runChannel } from '$lib/server/pipeline';
+import { purgeExpiredUser } from '$lib/server/retention';
 import type { RequestHandler } from './$types';
 
 const LEASE_MS = 10 * 60 * 1000; // exceeds one bounded run; expiry alone re-eligibilizes after a crash
 const RUN_BUDGET_MS = 20 * 1000; // below the scheduled trigger's 25s abort, so the server stops first
-const RETENTION_MS = 180 * 24 * 60 * 60 * 1000; // deleted accounts are purged after 6 months
 
 /** Constant-time secret comparison; never throws on length mismatch. */
 function secretMatches(provided: string | null, expected: string): boolean {
@@ -35,43 +35,6 @@ function secretMatches(provided: string | null, expected: string): boolean {
 	const a = Buffer.from(provided);
 	const b = Buffer.from(expected);
 	return a.length === b.length && timingSafeEqual(a, b);
-}
-
-/**
- * Permanently purges ONE user whose 6-month retention expired (I10: the rest
- * drain across invocations). Everything the user owned goes — sessions,
- * channels and their rules/comments/moderation actions/audit rows — EXCEPT
- * the evidentiary consent log (LGPD Art. 16 legal-defense retention): the
- * users row is anonymized to a tombstone so consents.userId stays valid and
- * the real Google sub is freed for a future fresh signup.
- */
-async function purgeExpiredUser(): Promise<string | null> {
-	const cutoff = new Date(Date.now() - RETENTION_MS).toISOString();
-	const expired = await db
-		.select({ id: users.id })
-		.from(users)
-		.where(and(isNotNull(users.deletedAt), lt(users.deletedAt, cutoff)))
-		.orderBy(asc(users.deletedAt))
-		.limit(1)
-		.get();
-	if (!expired) return null;
-	await db.transaction(async (tx) => {
-		const chs = await tx.select({ id: channels.id }).from(channels).where(eq(channels.userId, expired.id)).all();
-		const channelIds = chs.map((ch) => ch.id);
-		if (channelIds.length) {
-			await tx.delete(moderationActions).where(inArray(moderationActions.channelId, channelIds));
-			await tx.delete(comments).where(inArray(comments.channelId, channelIds));
-			await tx.delete(auditLog).where(inArray(auditLog.channelId, channelIds));
-			await tx.delete(rules).where(inArray(rules.channelId, channelIds));
-		}
-		await tx.delete(channels).where(eq(channels.userId, expired.id));
-		await tx.delete(sessions).where(eq(sessions.userId, expired.id));
-		await tx
-			.update(users)
-			.set({ googleSub: `deleted:${expired.id}`, email: '[deleted]', displayName: '[deleted]' })
-			.where(eq(users.id, expired.id));
-	});
-	return expired.id;
 }
 
 /**

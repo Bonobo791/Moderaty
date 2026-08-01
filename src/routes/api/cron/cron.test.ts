@@ -147,7 +147,13 @@ test('purges a user whose 6-month retention expired, keeping only the consent lo
 	expect(await res.json()).toMatchObject({ ok: true, purged: 'old' });
 	expect(await ownedRowCounts('old')).toEqual({ sessions: 0, channels: 0, rules: 0, comments: 0, actions: 0, audit: 0, consents: 1 });
 	const tombstone = (await testDb().db.select().from(users).all())[0];
-	expect(tombstone).toMatchObject({ id: 'old', googleSub: 'deleted:old', email: '[deleted]', displayName: '[deleted]' });
+	expect(tombstone).toMatchObject({
+		id: 'old',
+		googleSub: 'deleted:old',
+		email: '[deleted]',
+		displayName: '[deleted]',
+		deletedAt: null // cleared so the tombstone never re-enters the purge queue
+	});
 });
 
 test('leaves a user inside the retention window untouched', async () => {
@@ -166,11 +172,17 @@ test('purges only one expired user per invocation, oldest first (I10)', async ()
 	await seedUserWithData('older', new Date(Date.now() - 200 * DAY_MS).toISOString());
 	await seedUserWithData('newer', new Date(Date.now() - 190 * DAY_MS).toISOString());
 
-	const res = await call({ bearer: 'test-secret' });
+	const first = await call({ bearer: 'test-secret' });
 
-	expect(await res.json()).toMatchObject({ purged: 'older' });
+	expect(await first.json()).toMatchObject({ purged: 'older' });
 	expect((await testDb().db.select().from(users).all()).find((u) => u.id === 'newer')!.googleSub).toBe('sub-newer');
 	expect(await ownedRowCounts('newer')).toEqual({ sessions: 1, channels: 1, rules: 1, comments: 1, actions: 1, audit: 1, consents: 1 });
+
+	// The tombstoned user must not be re-selected: the next invocation drains
+	// the remaining expired user instead of starving on 'older'.
+	const second = await call({ bearer: 'test-secret' });
+	expect(await second.json()).toMatchObject({ purged: 'newer' });
+	expect(await ownedRowCounts('newer')).toEqual({ sessions: 0, channels: 0, rules: 0, comments: 0, actions: 0, audit: 0, consents: 1 });
 });
 
 test('a dry run skips the purge entirely (I8)', async () => {

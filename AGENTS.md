@@ -178,7 +178,9 @@ through `/consent` on next login.
 Account deletion is **soft with 6-month retention**: the dashboard
 `deleteAccount` action sets `users.deletedAt`, destroys every session, and
 deactivates the user's channels in one transaction. Signing back in within
-the window clears `deletedAt` (channels stay `active=0` until re-enabled).
+the window clears `deletedAt` (channels stay `active=0` until re-enabled);
+signing in AFTER the window purges the account inline (shared helpers in
+`src/lib/server/retention.ts`) and the flow continues as a fresh signup.
 Each cron invocation purges ONE user whose retention expired (I10): sessions,
 channels, and their rules/comments/moderation actions/audit rows are deleted
 and the users row is anonymized to a tombstone (`deleted:<id>`), so the

@@ -261,3 +261,24 @@ test('signing back in within the retention window restores a soft-deleted accoun
 	expect(restored[0].deletedAt).toBeNull();
 	expect(await testDb().db.select().from(sessions).all()).toHaveLength(1);
 });
+
+test('a sign-in past the retention window purges the account and starts a fresh signup', async () => {
+	const userId = await seedConsentedUser('sub-1');
+	const expired = new Date(Date.now() - 181 * 24 * 60 * 60 * 1000).toISOString();
+	await testDb().db.update(users).set({ deletedAt: expired }).where(eq(users.id, userId));
+	stubTokenAndUserinfo({ sub: 'sub-1', email: 'one@example.com', name: 'One' });
+	const cookies = makeCookiesWithState('s');
+
+	// No restore past the cutoff: the account is purged inline and the flow
+	// continues as a brand-new signup through the consent interstitial.
+	await expect(loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never)).rejects.toMatchObject({
+		status: 302,
+		location: '/consent?state=s'
+	});
+
+	const tombstone = (await testDb().db.select().from(users).all())[0];
+	expect(tombstone).toMatchObject({ id: userId, googleSub: `deleted:${userId}`, deletedAt: null });
+	// The evidentiary consent log survives the purge; no session was created.
+	expect(await testDb().db.select().from(consents).all()).toHaveLength(1);
+	expect(await testDb().db.select().from(sessions).all()).toHaveLength(0);
+});

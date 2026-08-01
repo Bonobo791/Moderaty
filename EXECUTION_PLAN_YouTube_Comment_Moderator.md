@@ -1953,7 +1953,9 @@ account exists — never pre-OAuth friction, never browsewrap:
 - **Retention window = 6 months, sign-in restores.** A soft-deleted user who
   authenticates again has `deleted_at` cleared in the login callback;
   channels stay inactive until manually re-enabled, so moderation never
-  resumes silently.
+  resumes silently. A sign-in AFTER the window instead purges the account
+  inline (`purgeUserById` in `src/lib/server/retention.ts`, shared with cron
+  so both enforce the same cutoff) and continues as a fresh signup.
 - **Bounded purge in cron (I10).** One expired user per invocation, skipped
   under `DRY_RUN` (I8): sessions, channels, and their rules, comments,
   moderation actions, and audit rows are deleted explicitly (no FK cascades

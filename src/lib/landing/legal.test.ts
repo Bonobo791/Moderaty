@@ -18,7 +18,9 @@
 
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { REFUND_NOTICE_TEXT } from '../server/legal';
 import { LEGAL_DOCS, LEGAL_EFFECTIVE_DATE, LEGAL_VERSION } from './legal';
+import { PRICING_FAQ_ENTRIES } from './pricing-faq';
 
 const COMPONENTS: Record<string, string> = {
 	terms: 'Terms.svelte',

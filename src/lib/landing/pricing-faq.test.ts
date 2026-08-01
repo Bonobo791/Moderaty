@@ -34,18 +34,40 @@ const PRICING_COPY = [
 	...TICKS_HOSTED_DETAILED
 ];
 
+/**
+ * Lines that can carry a billing claim: answers and ticks. Questions are
+ * excluded — a question names a topic ("Can I get a refund?"), the answer
+ * makes the claim, and the claim is where the legal anchor must live.
+ */
+const CLAIM_LINES = [
+	...PRICING_FAQ_ENTRIES.map((f) => f.a),
+	...TICKS_SELF_HOSTED,
+	...TICKS_SELF_HOSTED_DETAILED,
+	...TICKS_HOSTED,
+	...TICKS_HOSTED_DETAILED
+];
+
 /** The one billing policy the product actually has, stated verbatim. */
 const APPROVED_POLICY = 'Nothing renews, nothing auto-charges';
 
 /**
- * Anything else is an unsupported billing claim: refunds, expiry, rollover,
- * cancellation, trials, discounts, fees, or credit retention.
+ * Policy expansion (feat-consumer-copy, user-directed): now that the Terms of
+ * Service publish a refund policy (§7 — CDC Art. 49 7-day withdrawal; outside
+ * that window all sales are final, unused credits included), refund claims
+ * are allowed in pricing
+ * copy, but ONLY when anchored to the legal basis. A refund/credit/cancel
+ * claim without "CDC Art. 49" on the same line is still an unsupported
+ * billing claim and fails here.
  */
-const UNSUPPORTED_CLAIM = /refund|expir|rollover|roll over|cancel|trial|discount|\bfees?\b|credit/i;
+const REFUND_ANCHOR = /CDC Art\. 49/;
+const REFUND_CLAIM = /refund|credit|cancel/i;
+
+/** Never supported, anchored or not: expiry, rollover, trials, discounts, fees. */
+const UNSUPPORTED_CLAIM = /expir|rollover|roll over|trial|discount|\bfees?\b/i;
 
 describe('pricing copy guardrails', () => {
-	it('ships exactly the 5 pricing FAQ pairs, each a real question with a real answer', () => {
-		expect(PRICING_FAQ_ENTRIES).toHaveLength(5);
+	it('ships exactly the 6 pricing FAQ pairs, each a real question with a real answer', () => {
+		expect(PRICING_FAQ_ENTRIES).toHaveLength(6);
 		for (const { q, a } of PRICING_FAQ_ENTRIES) {
 			expect(q.endsWith('?')).toBe(true);
 			expect(a.length).toBeGreaterThan(40);
@@ -62,9 +84,13 @@ describe('pricing copy guardrails', () => {
 	it('makes no billing-policy claims beyond nothing-renews-nothing-auto-charges', () => {
 		// the approved policy is present, verbatim
 		expect(PRICING_COPY.join(' ')).toContain(APPROVED_POLICY);
-		// and no unsupported claim appears anywhere in pricing copy
-		for (const line of PRICING_COPY) {
+		for (const line of CLAIM_LINES) {
+			// never supported, anchored or not
 			expect(line).not.toMatch(UNSUPPORTED_CLAIM);
+			// refund claims only with the ToS §7 legal anchor on the same line
+			if (REFUND_CLAIM.test(line)) {
+				expect(line).toMatch(REFUND_ANCHOR);
+			}
 		}
 	});
 });

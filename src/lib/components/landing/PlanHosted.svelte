@@ -57,6 +57,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	</ul>
 	<div class="plan-cta">
 		<a href={LOGIN_URL} class="btn-press primary-btn">Connect YouTube channel</a>
+		<p class="refund-note">
+			Full refund within 7 days of purchase (CDC Art. 49). After that, all sales are final, credits unused or not.
+		</p>
 	</div>
 </article>
 
@@ -151,6 +154,15 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	.plan-cta {
 		margin-top: auto;
 		padding-top: 32px;
+	}
+	.refund-note {
+		margin: 16px 0 0;
+		font-family: var(--font-mono);
+		font-size: 10px;
+		line-height: 1.7;
+		text-transform: uppercase;
+		letter-spacing: 0.12em;
+		color: rgb(244 244 248 / 0.45);
 	}
 	.primary-btn {
 		display: inline-block;

@@ -88,7 +88,15 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 	// Signing back in within the 6-month retention window cancels a pending
 	// deletion. Channels stay inactive (active=0 from the deletion) until the
 	// user re-enables them — moderation never resumes silently.
+	// Signing back in within the 6-month retention window cancels a pending
+	// deletion. Channels stay inactive (active=0 from the deletion) until the
+	// user re-enables them — moderation never resumes silently.
 	if (user.deletedAt) {
+		const RETENTION_MS = 180 * 24 * 60 * 60 * 1000;
+		const cutoff = new Date(Date.now() - RETENTION_MS).toISOString();
+		if (user.deletedAt < cutoff) {
+			throw error(403, 'Account deletion period has expired and cannot be restored');
+		}
 		await db.update(users).set({ deletedAt: null }).where(eq(users.id, user.id));
 		console.info(`account ${user.id} restored by sign-in; pending deletion cancelled`);
 	}

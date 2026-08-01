@@ -175,6 +175,16 @@ never drift from the logged text. On material legal-doc changes bump `LEGAL_VERS
 `src/lib/server/legal.ts`); users whose consent predates it are routed back
 through `/consent` on next login.
 
+Account deletion is **soft with 6-month retention**: the dashboard
+`deleteAccount` action sets `users.deletedAt`, destroys every session, and
+deactivates the user's channels in one transaction. Signing back in within
+the window clears `deletedAt` (channels stay `active=0` until re-enabled).
+Each cron invocation purges ONE user whose retention expired (I10): sessions,
+channels, and their rules/comments/moderation actions/audit rows are deleted
+and the users row is anonymized to a tombstone (`deleted:<id>`), so the
+`consents` evidentiary log survives (LGPD Art. 16 legal-defense retention).
+The purge never runs under `DRY_RUN=true` (I8).
+
 ## Commands
 
 Use Node 24 and npm 11.
@@ -185,7 +195,11 @@ Use Node 24 and npm 11.
 - `npm run preview` — serve the production build locally.
 - `npm run db:migrate` — apply Drizzle migrations from `drizzle/` (loads
   `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN` from the environment; source `.env`
-  first — drizzle-kit does not auto-load it).
+  first — drizzle-kit does not auto-load it). **Always verify afterwards
+  that the schema actually changed** (query the new table/column, or check
+  `__drizzle_migrations` in the Turso dashboard): drizzle-kit's spinner can
+  exit 0 without applying anything when the database is unreachable (the
+  0007 incident — three clean exits, zero applications).
 - `npm run test` — run the Vitest suite (see
   `src/routes/api/auth/google/oauth.test.ts`).
 

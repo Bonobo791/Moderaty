@@ -140,4 +140,33 @@ describe('replica-region record location (PR #39 review)', () => {
 		expect(privacy).not.toMatch(/replicas[^.]*transfer records/i);
 		expect(privacy).toContain('operate only in regions recorded in Annex III of the DPA');
 	});
+
+	// CDC Art. 49 sole paragraph: within the 7-day window the refund is 100%
+	// of everything paid, at any title, monetarily updated — no deductions
+	// (processing fees, compute, "administrative fees"), and partial use of
+	// the Service inside the window does NOT reduce it. "Unused credits only"
+	// is not compliant.
+	it('the 7-day refund is full and unconditional — never limited to unused credits', () => {
+		const CONDITIONING = [
+			/only unused credits/i,
+			/unused credits only/i,
+			/refund of (only )?(the )?unused (portion|credits) within 7 days/i,
+			/minus|less (processing|administrative|transaction) fees/i
+		];
+		for (const [name, text] of Object.entries(surfaces)) {
+			for (const pattern of CONDITIONING) {
+				expect(text, `${name} conditions the 7-day refund: ${pattern}`).not.toMatch(pattern);
+			}
+		}
+		for (const name of ['hosted plan panel', 'consent refund notice', 'pricing FAQ']) {
+			expect(surfaces[name], name).toMatch(/full refund/i);
+		}
+	});
+
+	it('Terms §7.1 carries the statutory no-deductions language', () => {
+		const terms = readComponent('terms');
+		expect(terms).toMatch(/at any title/i);
+		expect(terms).toMatch(/without deductions of any kind/i);
+		expect(terms).toMatch(/monetarily updated/i);
+	});
 });

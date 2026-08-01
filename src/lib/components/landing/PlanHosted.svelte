@@ -58,7 +58,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	<div class="plan-cta">
 		<a href={LOGIN_URL} class="btn-press primary-btn">Connect YouTube channel</a>
 		<p class="refund-note">
-			Full refund within 7 days of purchase (CDC Art. 49). After that, all sales are final, credits unused or not.
+			Full refund of everything you paid within 7 days of purchase (CDC Art. 49). After that, all sales are final, credits unused or not.
 		</p>
 	</div>
 </article>

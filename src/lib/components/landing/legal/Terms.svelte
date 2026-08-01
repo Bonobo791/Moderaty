@@ -80,7 +80,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <h2 id="s7">7. Right of Withdrawal and Refunds</h2>
 
-<p><strong>7.1</strong> If you are a Consumer, you may withdraw from your purchase within 7 (seven) days, counted from acceptance of these Terms or from the purchase, under Article 49 of the CDC, and receive a full refund of amounts paid, without penalty. To exercise this right, contact us through any channel listed in Section 21.</p>
+<p><strong>7.1</strong> If you are a Consumer, you may withdraw from your purchase within 7 (seven) days, counted from acceptance of these Terms or from the purchase, under Article 49 of the CDC, and receive a full refund of all amounts paid, at any title, without deductions of any kind, monetarily updated, and without penalty — even if you have used the Service during that period. To exercise this right, contact us through any channel listed in Section 21.</p>
 
 <p><strong>7.2</strong> Outside the withdrawal period, all purchases are final and no refunds are issued — including for unconsumed Credits and including upon cancellation or closure of your account — except where required by applicable law.</p>
 

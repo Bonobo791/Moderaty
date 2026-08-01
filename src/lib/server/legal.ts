@@ -54,20 +54,41 @@ export const MARKETING_CHECKBOX_TEXT =
 
 export const PENDING_CONSENT_COOKIE = 'moderaty_consent_pending';
 const PENDING_TTL_MS = 10 * 60 * 1000;
+// Bounds the cookie; a user realistically has one or two tabs mid-flow. Same
+// collision class as the multi-state OAuth cookie (PR #4): each parked
+// identity is keyed by its flow's state so concurrent tabs/accounts never
+// overwrite one another.
+const MAX_PENDING_CONSENTS = 5;
 
 /** Identity parked between the OAuth callback and the consent interstitial. */
 export type PendingConsent =
 	| { kind: 'new'; sub: string; email: string; displayName: string }
 	| { kind: 'existing'; userId: string };
 
-/**
- * Parks a Google-verified identity in a short-lived encrypted httpOnly cookie.
- * AES-GCM makes the payload tamper-proof and confidential, so account
- * creation claims cannot be forged client-side.
- */
-export function parkPendingConsent(cookies: Cookies, payload: PendingConsent): void {
-	const wrapped = JSON.stringify({ ...payload, ts: Date.now() });
-	cookies.set(PENDING_CONSENT_COOKIE, encrypt(wrapped), {
+type PendingEntry = PendingConsent & { state: string; ts: number };
+
+function readEntries(cookies: Cookies): PendingEntry[] {
+	const raw = cookies.get(PENDING_CONSENT_COOKIE);
+	if (!raw) return [];
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(decrypt(raw));
+	} catch {
+		return [];
+	}
+	if (!Array.isArray(parsed)) return [];
+	return parsed.filter(
+		(e): e is PendingEntry =>
+			typeof e === 'object' && e !== null && typeof (e as PendingEntry).state === 'string'
+	) as PendingEntry[];
+}
+
+function writeEntries(cookies: Cookies, entries: PendingEntry[]): void {
+	if (entries.length === 0) {
+		cookies.delete(PENDING_CONSENT_COOKIE, { path: '/' });
+		return;
+	}
+	cookies.set(PENDING_CONSENT_COOKIE, encrypt(JSON.stringify(entries)), {
 		path: '/',
 		httpOnly: true,
 		sameSite: 'lax',
@@ -77,38 +98,48 @@ export function parkPendingConsent(cookies: Cookies, payload: PendingConsent): v
 }
 
 /**
- * Reads and validates the parked identity. Returns null when the cookie is
- * missing, tampered, malformed, or expired — the caller redirects to /login
- * so the flow restarts cleanly.
+ * Parks a Google-verified identity, keyed by the OAuth state of its flow, in a
+ * short-lived encrypted httpOnly cookie. AES-GCM makes the payload tamper-proof
+ * and confidential, so account creation claims cannot be forged client-side.
  */
-export function readPendingConsent(cookies: Cookies): PendingConsent | null {
-	const raw = cookies.get(PENDING_CONSENT_COOKIE);
-	if (!raw) return null;
-	let parsed: Record<string, unknown>;
-	try {
-		parsed = JSON.parse(decrypt(raw)) as Record<string, unknown>;
-	} catch {
-		return null;
-	}
-	if (typeof parsed?.ts !== 'number' || Date.now() - parsed.ts > PENDING_TTL_MS) return null;
-	if (parsed.kind === 'existing' && typeof parsed.userId === 'string' && parsed.userId) {
-		return { kind: 'existing', userId: parsed.userId };
+export function parkPendingConsent(cookies: Cookies, state: string, payload: PendingConsent): void {
+	const now = Date.now();
+	const entries = readEntries(cookies).filter(
+		(e) => e.state !== state && now - e.ts <= PENDING_TTL_MS
+	);
+	entries.push({ ...payload, state, ts: now });
+	writeEntries(cookies, entries.slice(-MAX_PENDING_CONSENTS));
+}
+
+/**
+ * Reads and validates the parked identity for ONE flow. Returns null when the
+ * entry is missing, tampered, malformed, or expired — the caller redirects to
+ * /login so the flow restarts cleanly. Other flows' entries are untouched.
+ */
+export function readPendingConsent(cookies: Cookies, state: string): PendingConsent | null {
+	const entry = readEntries(cookies).find((e) => e.state === state);
+	if (!entry || typeof entry.ts !== 'number' || Date.now() - entry.ts > PENDING_TTL_MS) return null;
+	if (entry.kind === 'existing' && typeof entry.userId === 'string' && entry.userId) {
+		return { kind: 'existing', userId: entry.userId };
 	}
 	if (
-		parsed.kind === 'new' &&
-		typeof parsed.sub === 'string' &&
-		parsed.sub &&
-		typeof parsed.email === 'string' &&
-		parsed.email &&
-		typeof parsed.displayName === 'string' &&
-		parsed.displayName
+		entry.kind === 'new' &&
+		typeof entry.sub === 'string' &&
+		entry.sub &&
+		typeof entry.email === 'string' &&
+		entry.email &&
+		typeof entry.displayName === 'string' &&
+		entry.displayName
 	) {
-		return { kind: 'new', sub: parsed.sub, email: parsed.email, displayName: parsed.displayName };
+		return { kind: 'new', sub: entry.sub, email: entry.email, displayName: entry.displayName };
 	}
 	return null;
 }
 
-/** Clears the parked identity once the account/consent flow completes. */
-export function clearPendingConsent(cookies: Cookies): void {
-	cookies.delete(PENDING_CONSENT_COOKIE, { path: '/' });
+/** Clears only this flow's parked identity once its consent flow completes. */
+export function clearPendingConsent(cookies: Cookies, state: string): void {
+	writeEntries(
+		cookies,
+		readEntries(cookies).filter((e) => e.state !== state)
+	);
 }

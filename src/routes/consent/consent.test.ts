@@ -49,9 +49,9 @@ setupTestDb(['consents', 'sessions', 'users', 'channels']);
 const here = dirname(fileURLToPath(import.meta.url));
 const consentPage = readFileSync(join(here, '+page.svelte'), 'utf8');
 
-function cookiesWithPending(payload: PendingConsent) {
+function cookiesWithPending(payload: PendingConsent, state = 'state-1') {
 	const cookies = makeCookies();
-	parkPendingConsent(cookies as never, payload);
+	parkPendingConsent(cookies as never, state, payload);
 	return cookies;
 }
 
@@ -65,10 +65,19 @@ function consentRequest(fields: Record<string, string>) {
 	});
 }
 
-async function captureAction(cookies: ReturnType<typeof makeCookies>, fields: Record<string, string>) {
+async function captureAction(
+	cookies: ReturnType<typeof makeCookies>,
+	fields: Record<string, string>,
+	state = 'state-1'
+) {
 	try {
 		// fail() returns an ActionFailure ({ status, data }); redirect/error throw.
-		return (await actions.default({ cookies, request: consentRequest(fields), getClientAddress: () => '203.0.113.7' } as never)) as
+		return (await actions.default({
+			cookies,
+			request: consentRequest(fields),
+			url: new URL(`http://localhost/consent?state=${state}`),
+			getClientAddress: () => '203.0.113.7'
+		} as never)) as
 			| { status: number }
 			| undefined;
 	} catch (e) {
@@ -92,7 +101,17 @@ test('page states: consent sentence matches the logged text, docs are linked, er
 
 test('load without a pending cookie redirects to /login', () => {
 	try {
-		load({ cookies: makeCookies() } as never);
+		load({ cookies: makeCookies(), url: new URL('http://localhost/consent?state=state-1') } as never);
+		expect.unreachable('load should redirect');
+	} catch (e) {
+		expect(e).toMatchObject({ status: 302, location: '/login' });
+	}
+});
+
+test('load without a state param redirects to /login', () => {
+	const cookies = cookiesWithPending(NEW_SUB);
+	try {
+		load({ cookies, url: new URL('http://localhost/consent') } as never);
 		expect.unreachable('load should redirect');
 	} catch (e) {
 		expect(e).toMatchObject({ status: 302, location: '/login' });
@@ -103,7 +122,7 @@ test('load with a tampered pending cookie redirects to /login', () => {
 	const cookies = makeCookies();
 	cookies.set(PENDING_CONSENT_COOKIE, 'forged-ciphertext', { path: '/' });
 	try {
-		load({ cookies } as never);
+		load({ cookies, url: new URL('http://localhost/consent?state=state-1') } as never);
 		expect.unreachable('load should redirect');
 	} catch (e) {
 		expect(e).toMatchObject({ status: 302, location: '/login' });
@@ -195,4 +214,33 @@ test('an existing-user pending payload naming an unknown account fails with 400'
 	const res = await captureAction(cookiesWithPending({ kind: 'existing', userId: 'ghost' }), { consent: 'on' });
 	expect(res).toMatchObject({ status: 400 });
 	expect(await testDb().db.select().from(consents).all()).toHaveLength(0);
+});
+
+test('a pending identity parked under a different state is invisible to this flow', async () => {
+	const res = await captureAction(cookiesWithPending(NEW_SUB, 'state-a'), { consent: 'on' }, 'state-b');
+	expect(res).toMatchObject({ status: 400 });
+	expect(await testDb().db.select().from(users).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(consents).all()).toHaveLength(0);
+});
+
+test('concurrent flows are isolated by state — each tab consents its own identity', async () => {
+	const cookies = makeCookies();
+	parkPendingConsent(cookies as never, 'state-a', NEW_SUB);
+	parkPendingConsent(cookies as never, 'state-b', { kind: 'new', sub: 'sub-2', email: 'two@example.com', displayName: 'Two' });
+
+	// Tab B submits first: only sub-2's account is created.
+	const first = await captureAction(cookies, { consent: 'on' }, 'state-b');
+	expect(first).toMatchObject({ status: 302, location: '/dashboard' });
+	const afterFirst = await testDb().db.select().from(users).all();
+	expect(afterFirst).toHaveLength(1);
+	expect(afterFirst[0].googleSub).toBe('sub-2');
+
+	// Tab A's parked identity survived the overwrite attempt and still
+	// consents its own intended account.
+	const second = await captureAction(cookies, { consent: 'on' }, 'state-a');
+	expect(second).toMatchObject({ status: 302, location: '/dashboard' });
+	const all = await testDb().db.select().from(users).all();
+	expect(all.map((u) => u.googleSub).sort()).toEqual(['sub-1', 'sub-2']);
+	// Both entries consumed — the cookie itself is gone.
+	expect(cookies.get(PENDING_CONSENT_COOKIE)).toBeUndefined();
 });

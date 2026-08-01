@@ -36,9 +36,10 @@ import { createSession, SESSION_COOKIE } from '$lib/server/session';
 
 import type { Actions, PageServerLoad } from './$types';
 
-export const load: PageServerLoad = ({ cookies }) => {
-	const pending = readPendingConsent(cookies);
-	// No parked identity — nothing to consent to; restart the sign-in flow.
+export const load: PageServerLoad = ({ cookies, url }) => {
+	const state = url.searchParams.get('state');
+	const pending = state ? readPendingConsent(cookies, state) : null;
+	// No parked identity for this flow — nothing to consent to; restart sign-in.
 	if (!pending) throw redirect(302, '/login');
 	return {
 		kind: pending.kind,
@@ -48,8 +49,9 @@ export const load: PageServerLoad = ({ cookies }) => {
 };
 
 export const actions: Actions = {
-	default: async ({ cookies, request, getClientAddress }) => {
-		const pending = readPendingConsent(cookies);
+	default: async ({ cookies, request, url, getClientAddress }) => {
+		const state = url.searchParams.get('state');
+		const pending = state ? readPendingConsent(cookies, state) : null;
 		if (!pending) return fail(400, { error: 'Your sign-in session expired — please sign in again.' });
 
 		const form = await request.formData();
@@ -120,7 +122,7 @@ export const actions: Actions = {
 			secure: cookieSecure(),
 			expires: new Date(expiresAt)
 		});
-		clearPendingConsent(cookies);
+		clearPendingConsent(cookies, state as string);
 		throw redirect(302, '/dashboard');
 	}
 };

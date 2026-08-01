@@ -32,7 +32,7 @@ vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { makeCookies, makeCookiesWithState } from '$lib/server/testcookies';
 import { consents, sessions, users } from '$lib/server/db/schema';
-import { LEGAL_VERSION, PENDING_CONSENT_COOKIE } from '$lib/server/legal';
+import { LEGAL_VERSION, PENDING_CONSENT_COOKIE, readPendingConsent } from '$lib/server/legal';
 import { GET as startLogin } from './+server';
 import { GET as loginCallback } from './callback/+server';
 
@@ -176,7 +176,7 @@ test('callback with a new identity parks a pending consent and redirects to /con
 
 	await expect(loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never)).rejects.toMatchObject({
 		status: 302,
-		location: '/consent'
+		location: '/consent?state=s'
 	});
 
 	// The contract forms at the /consent checkbox — no account, no session yet.
@@ -185,6 +185,14 @@ test('callback with a new identity parks a pending consent and redirects to /con
 	const pendingCall = cookies.setCalls.find((c) => c.name === PENDING_CONSENT_COOKIE);
 	expect(pendingCall).toBeTruthy();
 	expect(pendingCall!.opts).toMatchObject({ httpOnly: true, sameSite: 'lax', path: '/' });
+	// The parked identity is keyed by this flow's state, so concurrent tabs
+	// signing into different accounts cannot overwrite one another.
+	expect(readPendingConsent(cookies as never, 's')).toEqual({
+		kind: 'new',
+		sub: 'sub-1',
+		email: 'one@example.com',
+		displayName: 'One'
+	});
 	// State consumed — the OAuth leg completed successfully.
 	expect(cookies.get('oauth_state')).toBeUndefined();
 });
@@ -217,7 +225,7 @@ test('callback with an existing user on a stale document version sends them back
 
 	await expect(loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never)).rejects.toMatchObject({
 		status: 302,
-		location: '/consent'
+		location: '/consent?state=s'
 	});
 	expect(await testDb().db.select().from(sessions).all()).toHaveLength(0);
 });

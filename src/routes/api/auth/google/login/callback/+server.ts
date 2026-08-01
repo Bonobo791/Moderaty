@@ -81,9 +81,9 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 	// consent sends it back through /consent (re-acceptance on doc updates).
 	const user = await db.select().from(users).where(eq(users.googleSub, sub)).get();
 	if (!user) {
-		parkPendingConsent(cookies, { kind: 'new', sub, email, displayName });
+		parkPendingConsent(cookies, state, { kind: 'new', sub, email, displayName });
 		storePendingStates(cookies, pending.filter((s) => s !== state));
-		throw redirect(302, '/consent');
+		throw redirect(302, `/consent?state=${encodeURIComponent(state)}`);
 	}
 	const consent = await db
 		.select({ id: consents.id })
@@ -91,9 +91,9 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 		.where(and(eq(consents.userId, user.id), eq(consents.docVersion, LEGAL_VERSION)))
 		.get();
 	if (!consent) {
-		parkPendingConsent(cookies, { kind: 'existing', userId: user.id });
+		parkPendingConsent(cookies, state, { kind: 'existing', userId: user.id });
 		storePendingStates(cookies, pending.filter((s) => s !== state));
-		throw redirect(302, '/consent');
+		throw redirect(302, `/consent?state=${encodeURIComponent(state)}`);
 	}
 
 	const { token, expiresAt } = await createSession(user.id);

@@ -45,24 +45,13 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			<div class="wordmark">Moderaty</div>
 			<p class="tagline">Built by a creator who got tired of the comments.</p>
 			<p class="made-in">
-				<svg viewBox="0 0 44 40" width="30" height="27" role="img" aria-label="Capybara holding a Brazilian flag">
-					<!-- flag pole, held at the head -->
-					<rect x="31.6" y="2" width="1.6" height="18" rx="0.8" fill="#b08968" />
-					<!-- Brazilian flag -->
-					<rect x="33.2" y="2" width="10.8" height="7.6" rx="1" fill="#009b3a" />
-					<path d="M38.6 3.1 42.2 5.8 38.6 8.5 35 5.8Z" fill="#fedf00" />
-					<circle cx="38.6" cy="5.8" r="1.4" fill="#002776" />
-					<!-- capybara -->
-					<g fill="#b08968">
-						<rect x="2" y="19" width="22" height="13" rx="6.5" />
-						<rect x="20" y="14" width="11.5" height="11.5" rx="4.5" />
-						<circle cx="27.5" cy="13.5" r="2" />
-						<rect x="5" y="30" width="3.4" height="6" rx="1.7" />
-						<rect x="17" y="30" width="3.4" height="6" rx="1.7" />
-					</g>
-					<circle cx="27.2" cy="19" r="1.2" fill="#0b0b14" />
-					<circle cx="30" cy="23.2" r="1.1" fill="#0b0b14" />
-				</svg>
+				<img
+					src="/capybara-brazil-flag.webp"
+					alt="Capybara holding a Brazilian flag"
+					width="58"
+					height="96"
+					class="capy"
+				/>
 				<span>Made in Brazil</span>
 			</p>
 			<nav class="footer-links" aria-label="Footer">
@@ -126,12 +115,17 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		margin: 20px 0 0;
 		display: flex;
 		align-items: center;
-		gap: 10px;
+		gap: 12px;
 		font-family: var(--font-mono);
 		font-size: 10px;
 		text-transform: uppercase;
 		letter-spacing: 0.16em;
 		color: rgb(244 244 248 / 0.45);
+	}
+	.capy {
+		display: block;
+		border-radius: var(--radius-sm);
+		border: 1px solid var(--line);
 	}
 	.footer-links {
 		margin-top: 24px;

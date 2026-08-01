@@ -20,6 +20,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <script lang="ts">
 	import { GITHUB_URL, AGPL_URL, CONTACT_URL } from '$lib/landing/links';
+	import { LEGAL_DOCS } from '$lib/landing/legal';
 
 	// Illustrative "quiet night": 24 hourly bars, comments handled while the
 	// creator slept. Height = comments handled that hour. Pink = actioned,
@@ -59,6 +60,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				<a href={AGPL_URL} target="_blank" rel="noreferrer" class="footer-link">AGPL-3.0 License</a>
 				<a href="/pricing" class="footer-link">Pricing</a>
 				<a href="/#faq" class="footer-link">FAQ</a>
+				{#each LEGAL_DOCS as doc (doc.slug)}
+					<a href="/{doc.slug}" class="footer-link">{doc.label}</a>
+				{/each}
 				<a href={CONTACT_URL} class="footer-link">Contact</a>
 			</nav>
 		</div>

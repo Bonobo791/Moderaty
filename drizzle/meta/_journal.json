@@ -57,6 +57,13 @@
       "when": 1785616677162,
       "tag": "0007_curved_blade",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1785625355953,
+      "tag": "0008_drop_comment_author_pii",
+      "breakpoints": true
     }
   ]
 }

@@ -68,8 +68,8 @@ export const rules = sqliteTable('rules', {
 export const comments = sqliteTable('comments', {
 	id: text('id').primaryKey(), // YouTube comment ID
 	channelId: text('channel_id').notNull(),
-	authorChannelId: text('author_channel_id').notNull(),
-	authorName: text('author_name').notNull(),
+	// Author identifiers (display name, author channel ID) are never stored —
+	// they are processed in memory at decision time only.
 	text: text('text').notNull(), // truncated to 500 chars on insert
 	publishedAt: text('published_at').notNull(),
 	status: text('status').notNull(), // 'pending' | 'approved' | 'held' | 'rejected' | 'deleted'

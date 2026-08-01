@@ -27,8 +27,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	let { data, form } = $props();
 	let confirming = $state<{ id: string; kind: 'delete' | 'ban' } | null>(null);
 
-	// Author identifiers are never stored, so buttons name their target with a
-	// short text preview instead of the (unknown) author name (I13).
+	// Author identifiers are never stored from fetched comments, so buttons
+	// name their target with a short text preview instead of the (unknown)
+	// author name (I13).
 	const preview = (text: string) => (text.length > 40 ? `${text.slice(0, 40)}…` : text);
 
 	autoRefresh();

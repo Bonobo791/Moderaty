@@ -154,6 +154,18 @@ describe('storage claims match implementation (comment PII)', () => {
 			expect(readComponent(doc), doc).toMatch(/author identifiers?[^.]*never (persistently )?stored|never store[^.]*author identifiers/i);
 		}
 	});
+
+	// PR #40 review: rules.pattern with type 'user' persists an owner-entered
+	// authorChannelId (matched in memory by rules.ts). The "never stored" claim
+	// covers identifiers taken FROM comments; the owner-configured blocklist is
+	// a documented exception and every authoritative surface must say so.
+	it('scopes the claim: identifiers entered in user rules are carved out', () => {
+		expect(readComponent('privacy')).toMatch(/blocked-user|user rules?[^.]*configuration/i);
+		expect(readComponent('terms')).toMatch(/user rules?/i);
+		expect(readComponent('dpa')).toMatch(/user rules?/i);
+		const schema = readFileSync(new URL('../server/db/schema.ts', import.meta.url), 'utf8');
+		expect(schema).toMatch(/user rules?/i);
+	});
 });
 
 // Guard for the PR #38 review finding: the consent notice, hosted plan panel,

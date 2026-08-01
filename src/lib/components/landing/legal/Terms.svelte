@@ -54,7 +54,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <p><strong>4.1</strong> The Service retrieves comments from your connected YouTube channel(s) via the YouTube API Services, classifies them automatically (including detection of hate speech and related abusive content), and executes the Moderation Actions you configure.</p>
 
-<p><strong>4.2</strong> We minimize comment data: comment text (truncated to 500 characters) is stored as part of Moderation Outcome Data, and comment author identifiers are processed in memory only and never stored, as described in the DPA and Privacy Policy.</p>
+<p><strong>4.2</strong> We minimize comment data: comment text (truncated to 500 characters) is stored as part of Moderation Outcome Data, and comment author identifiers are processed in memory only and never stored — except identifiers you enter in user rules, which are stored as your own configuration — as described in the DPA and Privacy Policy.</p>
 
 <p><strong>4.3</strong> The Service is a tool. Automated classification may produce false positives or false negatives. You are responsible for reviewing your configuration and its effects on your channel (see Section 9).</p>
 

@@ -72,6 +72,9 @@ export const comments = sqliteTable('comments', {
 	// change — they are processed in memory at decision time only. Relaxed
 	// to nullable + wiped by migration 0008 so old and new code coexist
 	// during rollout; DROPPED by the follow-up contract migration.
+	// Exception: user rules (rules.pattern with type 'user') store an
+	// authorChannelId the channel owner enters as their own configuration;
+	// no identifier is ever taken from a fetched comment and stored.
 	authorChannelId: text('author_channel_id'),
 	authorName: text('author_name'),
 	text: text('text').notNull(), // truncated to 500 chars on insert

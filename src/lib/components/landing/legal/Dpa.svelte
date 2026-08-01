@@ -184,7 +184,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <p>
 	<strong>7.4</strong> The Parties acknowledge that pseudonymized identifiers (such as hashed
 	usernames) remain personal data under the LGPD. The Processor shall not retain author
-	identifiers, pseudonymized or otherwise, and never for profiling or enrichment.
+	identifiers taken from Comment Data, pseudonymized or otherwise, and never for profiling or
+	enrichment. Channel identifiers entered by the Controller in user rules are Controller
+	configuration, not retained Comment Data.
 </p>
 <p>
 	<strong>7.5</strong> The Processor shall not use Comment Data or Moderation Outcome Data to

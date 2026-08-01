@@ -106,7 +106,7 @@ export const DPA_DOC: LegalDoc = {
 	version: LEGAL_VERSION,
 	effectiveDate: LEGAL_EFFECTIVE_DATE,
 	description:
-		'The LGPD data processing agreement between you (controller) and Moderaty (processor) for YouTube comment data: comment-data minimization (author identifiers never stored), sub-processors, and ANPD transfer clauses.',
+		'The LGPD data processing agreement between you (controller) and Moderaty (processor) for YouTube comment data: comment-data minimization (author identifiers never stored from comments), sub-processors, and ANPD transfer clauses.',
 	toc: [
 		{ id: 's1', label: '1. Purpose and Scope' },
 		{ id: 's2', label: '2. Definitions' },

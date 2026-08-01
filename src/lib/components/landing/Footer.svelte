@@ -47,7 +47,8 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			<nav class="footer-links" aria-label="Footer">
 				<a href={GITHUB_URL} target="_blank" rel="noreferrer" class="footer-link">GitHub</a>
 				<a href={AGPL_URL} target="_blank" rel="noreferrer" class="footer-link">AGPL-3.0 License</a>
-				<a href="#faq" class="footer-link">FAQ</a>
+				<a href="/pricing" class="footer-link">Pricing</a>
+				<a href="/#faq" class="footer-link">FAQ</a>
 				<a href={CONTACT_URL} class="footer-link">Contact</a>
 			</nav>
 		</div>

@@ -27,6 +27,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	import Numbers from '$lib/components/landing/Numbers.svelte';
 	import Regulars from '$lib/components/landing/Regulars.svelte';
 	import Manifesto from '$lib/components/landing/Manifesto.svelte';
+	import Pricing from '$lib/components/landing/Pricing.svelte';
 	import Faq from '$lib/components/landing/Faq.svelte';
 	import FinalCta from '$lib/components/landing/FinalCta.svelte';
 	import Footer from '$lib/components/landing/Footer.svelte';
@@ -85,6 +86,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	<Numbers />
 	<Regulars />
 	<Manifesto />
+	<Pricing />
 	<Faq />
 	<FinalCta />
 </main>

@@ -26,23 +26,31 @@ import { auditLog, channels, comments, moderationActions, rules, sessions, users
 
 export const RETENTION_MS = 180 * 24 * 60 * 60 * 1000; // 180 days ≈ 6 months
 
-/** ISO cutoff: soft-deleted before this moment = past the retention window. */
+/**
+ * Calculates the cutoff timestamp for the account-deletion retention window.
+ *
+ * @param now - The reference time in milliseconds since the Unix epoch
+ * @returns The ISO timestamp 180 days before `now`
+ */
 export function retentionCutoffIso(now = Date.now()): string {
 	return new Date(now - RETENTION_MS).toISOString();
 }
 
-/** True when a soft-delete marker is past the retention window. */
+/**
+ * Determines whether a soft-deleted account has exceeded the retention period.
+ *
+ * @param deletedAt - The account's soft-deletion timestamp in ISO format
+ * @param now - The current time as a Unix timestamp in milliseconds
+ * @returns `true` if the deletion timestamp precedes the retention cutoff, `false` otherwise
+ */
 export function isRetentionExpired(deletedAt: string, now = Date.now()): boolean {
 	return deletedAt < retentionCutoffIso(now);
 }
 
 /**
- * Permanently removes everything ONE user owned — sessions, channels and
- * their rules/comments/moderation actions/audit rows — EXCEPT the evidentiary
- * consent log (LGPD Art. 16 legal-defense retention): the users row is
- * anonymized to a tombstone so consents.userId stays valid and the real
- * Google sub is freed for a future fresh signup. deletedAt is cleared so the
- * tombstone never re-enters the purge queue and starves other expired users.
+ * Permanently removes a user's owned records while preserving an anonymized user tombstone for retained consent records.
+ *
+ * @param userId - The ID of the user to purge
  */
 export async function purgeUserById(userId: string): Promise<void> {
 	await db.transaction(async (tx) => {
@@ -64,8 +72,9 @@ export async function purgeUserById(userId: string): Promise<void> {
 }
 
 /**
- * Purges ONE user past the retention window (I10: the rest drain across
- * invocations, oldest first). Returns the purged user id, or null.
+ * Purges the oldest user whose soft-deletion retention period has expired.
+ *
+ * @returns The purged user ID, or `null` when no expired user exists.
  */
 export async function purgeExpiredUser(): Promise<string | null> {
 	const expired = await db

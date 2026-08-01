@@ -28,6 +28,12 @@ import { cookieSecure, readPendingStates, storePendingStates } from '$lib/server
 import { isRetentionExpired, purgeUserById } from '$lib/server/retention';
 import { createSession, SESSION_COOKIE } from '$lib/server/session';
 
+/**
+ * Handles the Google OAuth login callback, completing authentication or redirecting the user to consent.
+ *
+ * @param url - The callback URL containing the OAuth state and authorization code
+ * @param cookies - The request cookies used to validate OAuth state and manage authentication data
+ */
 export async function GET({ url, cookies }: { url: URL; cookies: import('@sveltejs/kit').Cookies }) {
 	const state = url.searchParams.get('state');
 	const pending = readPendingStates(cookies);

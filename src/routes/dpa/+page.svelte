@@ -20,62 +20,12 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <script lang="ts">
 	// I12 exception (approved for static marketing routes, same as the
-	// homepage): this page is fully static and prerendered — there is no data
-	// loading, so loading/empty/error states cannot occur and SSR always
-	// renders the populated page.
-	import Nav from '$lib/components/landing/Nav.svelte';
-	import Footer from '$lib/components/landing/Footer.svelte';
-	import LegalDoc from '$lib/components/landing/legal/LegalDoc.svelte';
+	// homepage): this page is fully static and prerendered (see +page.ts) —
+	// there is no data loading, so loading/empty/error states cannot occur
+	// and SSR always renders the populated page.
+	import LegalPage from '$lib/components/landing/legal/LegalPage.svelte';
 	import Dpa from '$lib/components/landing/legal/Dpa.svelte';
-	import { DPA_DOC as doc } from '$lib/landing/legal';
-
-	const toc = [
-		{ id: 's1', label: '1. Purpose and Scope' },
-		{ id: 's2', label: '2. Definitions' },
-		{ id: 's3', label: '3. Roles of the Parties' },
-		{ id: 's4', label: '4. Subject Matter, Duration, Nature and Purpose' },
-		{ id: 's5', label: '5. Controller Obligations and Lawful Basis' },
-		{ id: 's6', label: '6. Processor Obligations' },
-		{ id: 's7', label: '7. Data Minimization and Process-and-Discard' },
-		{ id: 's8', label: '8. Sensitive Personal Data' },
-		{ id: 's9', label: '9. Data of Children and Adolescents' },
-		{ id: 's10', label: '10. Sub-processors' },
-		{ id: 's11', label: '11. International Data Transfers' },
-		{ id: 's12', label: '12. Security Measures' },
-		{ id: 's13', label: '13. Data Subject Requests' },
-		{ id: 's14', label: '14. Personal Data Incident Notification' },
-		{ id: 's15', label: '15. Statutory Log Retention (Marco Civil)' },
-		{ id: 's16', label: '16. Audits and Compliance Documentation' },
-		{ id: 's17', label: '17. Term, Termination and Deletion' },
-		{ id: 's18', label: '18. Liability' },
-		{ id: 's19', label: '19. Governing Law, Language and Disputes' },
-		{ id: 's20', label: '20. Final Provisions' },
-		{ id: 'signature', label: 'Signature Page' },
-		{ id: 'annex-1', label: 'Annex I — Details of the Processing' },
-		{ id: 'annex-2', label: 'Annex II — Technical and Organizational Measures' },
-		{ id: 'annex-3', label: 'Annex III — Authorized Sub-processors' },
-		{ id: 'annex-4', label: 'Annex IV — International Transfer Mechanism' }
-	];
+	import { DPA_DOC } from '$lib/landing/legal';
 </script>
 
-<svelte:head>
-	<title>{doc.title} | Moderaty</title>
-	<meta name="description" content={doc.description} />
-	<meta property="og:type" content="website" />
-	<meta property="og:title" content="{doc.title} | Moderaty" />
-	<meta property="og:description" content={doc.description} />
-</svelte:head>
-
-<Nav />
-<main>
-	<LegalDoc
-		kicker="Acordo de Tratamento de Dados Pessoais"
-		title={doc.title}
-		version={doc.version}
-		effectiveDate={doc.effectiveDate}
-		{toc}
-	>
-		<Dpa />
-	</LegalDoc>
-</main>
-<Footer />
+<LegalPage doc={DPA_DOC} content={Dpa} />

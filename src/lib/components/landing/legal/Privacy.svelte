@@ -23,7 +23,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <h2 id="s1">1. Who We Are and What This Policy Covers</h2>
 <p><strong>1.1</strong> Moderaty is a YouTube comment moderation service operated by [legal name], a sole proprietorship registered in Brazil, CNPJ [number], registered address [address] (Moderaty, we, us). For the personal data described in this Policy, Moderaty is the data controller under the LGPD.</p>
 <p><strong>1.2</strong> This Policy covers personal data of our users (YouTube channel owners and their authorized team members) and of people who contact us. It also explains, for transparency, how comment data flows through the Service — but note that for comment data we act as processor on behalf of the channel owner, who is the controller (Section 3).</p>
-<p><strong>1.3</strong> Our Data Protection Officer (Encarregado de Protecao de Dados) is Andrew Philip Weilbacher, reachable at <a href="mailto:contact@marketingprowess.simplelogin.com">contact@marketingprowess.simplelogin.com</a>. The DPO acts with independence and technical autonomy, in accordance with ANPD Resolution CD/ANPD no 18/2024.</p>
+<p><strong>1.3</strong> Our Data Protection Officer (Encarregado de Proteção de Dados) is Andrew Philip Weilbacher, reachable at <a href="mailto:contact@marketingprowess.simplelogin.com">contact@marketingprowess.simplelogin.com</a>. The DPO acts with independence and technical autonomy, in accordance with ANPD Resolution CD/ANPD no 18/2024.</p>
 <p><strong>1.4</strong> <strong class="highlight">PROVIDING CERTAIN PERSONAL DATA (ACCOUNT AND BILLING INFORMATION) IS A CONDITION FOR USING THE SERVICE, BECAUSE WITHOUT IT WE CANNOT CREATE YOUR ACCOUNT, CONNECT YOUR CHANNEL, OR PROCESS PAYMENTS. WHERE THAT IS THE CASE, THIS FACT IS DISCLOSED HERE WITH PROMINENCE, AS REQUIRED BY ARTICLE 9, §3, OF THE LGPD. YOUR RIGHTS AND HOW TO EXERCISE THEM ARE IN SECTION 10.</strong></p>
 
 <h2 id="s2">2. The Data We Process, and Why</h2>
@@ -93,14 +93,14 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <h2 id="s4">4. YouTube API Services Disclosures</h2>
 <p><strong>4.1</strong> Moderaty uses YouTube API Services to retrieve comments and execute moderation actions on channels our users authorize. By using the Service, you agree to be bound by the YouTube Terms of Service at <a href="https://www.youtube.com/t/terms" target="_blank" rel="noreferrer">https://www.youtube.com/t/terms</a>.</p>
-<p><strong>4.2</strong> Information received from YouTube API Services is used only to provide the moderation features described in this Policy, in accordance with the Google Privacy Policy at <a href="http://www.google.com/policies/privacy" target="_blank" rel="noreferrer">http://www.google.com/policies/privacy</a>.</p>
+<p><strong>4.2</strong> Information received from YouTube API Services is used only to provide the moderation features described in this Policy, in accordance with the Google Privacy Policy at <a href="https://policies.google.com/privacy" target="_blank" rel="noreferrer">https://policies.google.com/privacy</a>.</p>
 <p><strong>4.3</strong> You can revoke Moderaty's access to your YouTube data at any time via the Google security settings page at <a href="https://security.google.com/settings/security/permissions" target="_blank" rel="noreferrer">https://security.google.com/settings/security/permissions</a>. After revocation, we can no longer access the affected channel; data already discarded under our process-and-discard architecture is unrecoverable by design, and moderation outcome records are handled as described in Section 2.</p>
 <p><strong>4.4</strong> YouTube and Google operate under their own privacy policies, which we do not control and for which we are not responsible.</p>
 
 <h2 id="s5">5. Sharing and Recipients</h2>
 <p>We share personal data only with:</p>
 <ul>
-	<li>(a) Infrastructure and service providers acting as our sub-processors or processors under contract — hosting provider Netlify, Inc. (United States), payment processor Stripe, Inc. — limited to what each needs to perform its function;</li>
+	<li>(a) Infrastructure and service providers acting as our sub-processors or processors under contract — hosting provider Netlify, Inc. (United States), database provider Turso (ChiselStrike, Inc.), classification provider OpenAI, LLC (transient comment classification only, no retention, no model training), payment processor Stripe, Inc. — limited to what each needs to perform its function;</li>
 	<li>(b) Google/YouTube, as the platform through which the Service operates and as an independent controller of its own processing;</li>
 	<li>(c) Public authorities, courts, or regulators, only when required by law, court order, or to protect our rights, users, or third parties, and always limited to what is legally required; and</li>
 	<li>(d) A successor entity in the event of a merger, acquisition, or sale of the Service, subject to this Policy and with prior notice to you.</li>
@@ -125,7 +125,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <h2 id="s10">10. Your Rights</h2>
 <p><strong>10.1</strong> Under Article 18 of the LGPD, you have the right to: (I) confirmation that we process your data; (II) access; (III) correction of incomplete, inaccurate, or outdated data; (IV) anonymization, blocking, or deletion of unnecessary, excessive, or unlawfully processed data; (V) portability, as regulated by the ANPD; (VI) deletion of data processed with consent; (VII) information about the entities with which we share data; (VIII) information about the option not to consent and its consequences; (IX) revocation of consent; and (X) opposition to processing based on legitimate interest, where the legal requirements are met.</p>
 <p><strong>10.2</strong> To exercise any right, contact our DPO at <a href="mailto:contact@marketingprowess.simplelogin.com">contact@marketingprowess.simplelogin.com</a>. We respond within 15 days. We may need to verify your identity before acting — a proportionate security measure. Requests are free of charge. If we cannot fulfill a request (for example, because the data was already discarded or must be retained by law), we will explain why within the same period.</p>
-<p><strong>10.3</strong> You may also lodge a complaint with the ANPD (Autoridade Nacional de Protecao de Dados) at <a href="https://www.gov.br/anpd/pt-br" target="_blank" rel="noreferrer">https://www.gov.br/anpd/pt-br</a>.</p>
+<p><strong>10.3</strong> You may also lodge a complaint with the ANPD (Autoridade Nacional de Proteção de Dados) at <a href="https://www.gov.br/anpd/pt-br" target="_blank" rel="noreferrer">https://www.gov.br/anpd/pt-br</a>.</p>
 
 <h2 id="s11">11. Children and Adolescents</h2>
 <p><strong>11.1</strong> The Service is a professional tool directed exclusively at persons aged 18 or older and is not likely or foreseeably accessed by minors. We do not knowingly collect personal data directly from children or adolescents. If we learn that an account belongs to a minor, we will suspend and delete it.</p>
@@ -139,4 +139,4 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <p><strong>13.2</strong> The current version is always available at <a href="/privacy">/privacy</a>, with its effective date and a change history.</p>
 
 <h2 id="s14">14. Language and Governing Law</h2>
-<p><strong>14.1</strong> This Policy is published in English and Portuguese. For data subjects located in Brazil, the Portuguese version prevails. This Policy is governed by Brazilian law, in particular the LGPD, the Marco Civil da Internet (Law no 12.965/2014), and the ECA Digital (Law no 15.211/2025).</p>
+<p><strong>14.1</strong> This Policy is published in English. A Portuguese version will be made available and, once published, will prevail for data subjects located in Brazil. This Policy is governed by Brazilian law, in particular the LGPD, the Marco Civil da Internet (Law no 12.965/2014), and the ECA Digital (Law no 15.211/2025).</p>

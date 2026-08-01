@@ -62,7 +62,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <p><strong>5.1</strong> The Service uses YouTube API Services. By using the Service, you agree to be bound by the YouTube Terms of Service, available at <a href="https://www.youtube.com/t/terms" target="_blank" rel="noreferrer">https://www.youtube.com/t/terms</a>, and by the YouTube Community Guidelines.</p>
 
-<p><strong>5.2</strong> Our use of information received from YouTube API Services is described in our Privacy Policy, which references the Google Privacy Policy at <a href="" target="_blank" rel="noreferrer"></a>.</p>
+<p><strong>5.2</strong> Our use of information received from YouTube API Services is described in our Privacy Policy, which references the Google Privacy Policy at <a href="https://policies.google.com/privacy" target="_blank" rel="noreferrer">https://policies.google.com/privacy</a>.</p>
 
 <p><strong>5.3</strong> You can revoke the Service's access to your YouTube data at any time via the Google security settings page at <a href="https://security.google.com/settings/security/permissions" target="_blank" rel="noreferrer">https://security.google.com/settings/security/permissions</a>. Revoking access disables the Service for the affected channel; Moderation Outcome Data is then handled as described in the DPA.</p>
 
@@ -84,7 +84,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <p><strong>7.2</strong> Outside the withdrawal period, refunds are issued only: (a) for unconsumed Credits, upon cancellation of your account; and (b) where required by applicable law.</p>
 
-<strong class="highlight">7.3 BY PURCHASING CREDITS YOU EXPRESSLY REQUEST IMMEDIATE PERFORMANCE OF THE SERVICE. YOU ACKNOWLEDGE THAT, UNDER BRAZILIAN CASE LAW ON DIGITAL SERVICES, THE RIGHT OF WITHDRAWAL MAY BE LIMITED FOR DIGITAL SERVICES IMMEDIATELY AND FULLY CONSUMED AT YOUR REQUEST, WHERE THIS CONSEQUENCE WAS CLEARLY AND PROMINENTLY DISCLOSED BEFORE PURCHASE — AS IT IS HERE. NOTHING IN THIS CLAUSE LIMITS YOUR RIGHT TO A REFUND OF CREDITS THAT HAVE NOT BEEN CONSUMED.</strong>
+<p><strong class="highlight">7.3 BY PURCHASING CREDITS YOU EXPRESSLY REQUEST IMMEDIATE PERFORMANCE OF THE SERVICE. YOU ACKNOWLEDGE THAT, UNDER BRAZILIAN CASE LAW ON DIGITAL SERVICES, THE RIGHT OF WITHDRAWAL MAY BE LIMITED FOR DIGITAL SERVICES IMMEDIATELY AND FULLY CONSUMED AT YOUR REQUEST, WHERE THIS CONSEQUENCE WAS CLEARLY AND PROMINENTLY DISCLOSED BEFORE PURCHASE — AS IT IS HERE. NOTHING IN THIS CLAUSE LIMITS YOUR RIGHT TO A REFUND OF CREDITS THAT HAVE NOT BEEN CONSUMED.</strong></p>
 
 <h2 id="s8">8. Acceptable Use</h2>
 
@@ -139,15 +139,15 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <h2 id="s14">14. Warranty Disclaimer</h2>
 
-<strong class="highlight">14.1 TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE SERVICE IS PROVIDED AS IS AND AS AVAILABLE, WITHOUT WARRANTIES OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, ACCURACY OF AUTOMATED CLASSIFICATION, AND NON-INFRINGEMENT.</strong>
+<p><strong class="highlight">14.1 TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE SERVICE IS PROVIDED AS IS AND AS AVAILABLE, WITHOUT WARRANTIES OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, ACCURACY OF AUTOMATED CLASSIFICATION, AND NON-INFRINGEMENT.</strong></p>
 
-<strong class="highlight">14.2 IF YOU ARE A CONSUMER, THIS DISCLAIMER DOES NOT EXCLUDE OR LIMIT THE LEGAL GUARANTEE AND OTHER RIGHTS THAT CANNOT BE WAIVED UNDER ARTICLES 14, 24, 26, AND 51 OF THE CDC, WHICH PREVAIL OVER THIS CLAUSE.</strong>
+<p><strong class="highlight">14.2 IF YOU ARE A CONSUMER, THIS DISCLAIMER DOES NOT EXCLUDE OR LIMIT THE LEGAL GUARANTEE AND OTHER RIGHTS THAT CANNOT BE WAIVED UNDER ARTICLES 14, 24, 26, AND 51 OF THE CDC, WHICH PREVAIL OVER THIS CLAUSE.</strong></p>
 
 <h2 id="s15">15. Limitation of Liability</h2>
 
-<strong class="highlight">15.1 TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW: (A) OUR TOTAL AGGREGATE LIABILITY ARISING OUT OF OR RELATED TO THESE TERMS OR THE SERVICE SHALL NOT EXCEED THE AMOUNTS YOU PAID FOR THE SERVICE IN THE TWELVE (12) MONTHS PRECEDING THE EVENT GIVING RISE TO THE CLAIM, OR, IF GREATER AND ONLY WHERE MANDATORY LAW SO PROVIDES, THE MINIMUM AMOUNT THAT MANDATORY LAW REQUIRES US TO PAY; AND (B) WE SHALL NOT BE LIABLE FOR INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR PUNITIVE DAMAGES, LOSS OF PROFITS, REVENUE, DATA, GOODWILL, OR CHANNEL MONETIZATION, EVEN IF ADVISED OF THEIR POSSIBILITY.</strong>
+<p><strong class="highlight">15.1 TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW: (A) OUR TOTAL AGGREGATE LIABILITY ARISING OUT OF OR RELATED TO THESE TERMS OR THE SERVICE SHALL NOT EXCEED THE AMOUNTS YOU PAID FOR THE SERVICE IN THE TWELVE (12) MONTHS PRECEDING THE EVENT GIVING RISE TO THE CLAIM, OR, IF GREATER AND ONLY WHERE MANDATORY LAW SO PROVIDES, THE MINIMUM AMOUNT THAT MANDATORY LAW REQUIRES US TO PAY; AND (B) WE SHALL NOT BE LIABLE FOR INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR PUNITIVE DAMAGES, LOSS OF PROFITS, REVENUE, DATA, GOODWILL, OR CHANNEL MONETIZATION, EVEN IF ADVISED OF THEIR POSSIBILITY.</strong></p>
 
-<strong class="highlight">15.2 NOTHING IN THESE TERMS EXCLUDES OR LIMITS LIABILITY THAT CANNOT LAWFULLY BE EXCLUDED OR LIMITED, INCLUDING LIABILITY FOR WILLFUL MISCONDUCT (DOLO), FOR MORAL DAMAGES (DANOS MORAIS), UNDER THE LGPD, AND, WHERE YOU ARE A CONSUMER, LIABILITY THAT THE CDC RENDERS NON-WAIVABLE. IN THOSE CASES, THE LIMITATION ABOVE APPLIES ONLY TO THE EXTENT PERMITTED.</strong>
+<p><strong class="highlight">15.2 NOTHING IN THESE TERMS EXCLUDES OR LIMITS LIABILITY THAT CANNOT LAWFULLY BE EXCLUDED OR LIMITED, INCLUDING LIABILITY FOR WILLFUL MISCONDUCT (DOLO), FOR MORAL DAMAGES (DANOS MORAIS), UNDER THE LGPD, AND, WHERE YOU ARE A CONSUMER, LIABILITY THAT THE CDC RENDERS NON-WAIVABLE. IN THOSE CASES, THE LIMITATION ABOVE APPLIES ONLY TO THE EXTENT PERMITTED.</strong></p>
 
 <h2 id="s16">16. Indemnification</h2>
 
@@ -179,7 +179,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <h2 id="s20">20. General Provisions</h2>
 
-<p><strong>20.1</strong> These Terms are published in English and Portuguese. For users domiciled in Brazil, the Portuguese version prevails. Both versions are equally available before acceptance.</p>
+<p><strong>20.1</strong> These Terms are published in English. A Portuguese version will be made available and, once published, will prevail for users domiciled in Brazil. Both versions will then be equally available before acceptance.</p>
 
 <p><strong>20.2</strong> If any provision is held invalid or unenforceable (including under Article 51 of the CDC), it shall be enforced to the maximum extent permissible and the remainder stays in force.</p>
 

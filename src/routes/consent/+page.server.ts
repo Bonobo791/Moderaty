@@ -76,6 +76,7 @@ export const actions: Actions = {
 		});
 
 		let userId: string;
+		let session: { token: string; expiresAt: string };
 		if (pending.kind === 'new') {
 			// The account is created ONLY now that the contract has formed. The
 			// orphan claim is one-time initialization — only the FIRST user ever
@@ -84,7 +85,9 @@ export const actions: Actions = {
 			// itself, so a concurrent first sign-up whose transaction is
 			// serialized after this one sees count=2 and claims nothing. The
 			// conflict-tolerant insert + re-select absorbs a concurrent
-			// same-sub sign-up.
+			// same-sub sign-up. User, consent record, and first session commit
+			// as ONE unit — a session-write failure rolls everything back and
+			// the parked cookie lets the same submission retry cleanly.
 			const created = await db.transaction(async (tx) => {
 				await tx
 					.insert(users)
@@ -102,17 +105,21 @@ export const actions: Actions = {
 					.set({ userId: user.id })
 					.where(and(isNull(channels.userId), sql`(select count(*) from ${users}) = 1`));
 				await tx.insert(consents).values(consentRecord(user.id));
-				return user;
+				return { user, session: await createSession(user.id, tx) };
 			});
-			userId = created.id;
+			userId = created.user.id;
+			session = created.session;
 		} else {
 			const user = await db.select({ id: users.id }).from(users).where(eq(users.id, pending.userId)).get();
 			if (!user) return fail(400, { error: 'Your sign-in session expired — please sign in again.' });
-			await db.insert(consents).values(consentRecord(user.id));
+			session = await db.transaction(async (tx) => {
+				await tx.insert(consents).values(consentRecord(user.id));
+				return createSession(user.id, tx);
+			});
 			userId = user.id;
 		}
 
-		const { token, expiresAt } = await createSession(userId);
+		const { token, expiresAt } = session;
 		cookies.set(SESSION_COOKIE, token, {
 			path: '/',
 			httpOnly: true,

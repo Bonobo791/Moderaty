@@ -45,15 +45,22 @@ export interface SessionResolution {
 	renewed: boolean;
 }
 
-/** Creates a session for a user and returns its cookie token and expiry. */
-export async function createSession(userId: string): Promise<{ token: string; expiresAt: string }> {
+/**
+ * Creates a session for a user and returns its cookie token and expiry.
+ * Callers that must commit the session atomically with other writes (e.g.
+ * account creation) pass their transaction as `handle`.
+ */
+export async function createSession(
+	userId: string,
+	handle: Pick<typeof db, 'delete' | 'insert'> = db
+): Promise<{ token: string; expiresAt: string }> {
 	// Opportunistic cleanup: logins are infrequent, so this bounds the expired-row
 	// buildup for users who never come back (lazy per-token delete can't catch those).
 	const now = new Date();
-	await db.delete(sessions).where(lte(sessions.expiresAt, now.toISOString()));
+	await handle.delete(sessions).where(lte(sessions.expiresAt, now.toISOString()));
 	const token = randomBytes(32).toString('hex');
 	const expiresAt = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
-	await db.insert(sessions).values({ id: token, userId, expiresAt });
+	await handle.insert(sessions).values({ id: token, userId, expiresAt });
 	return { token, expiresAt };
 }
 

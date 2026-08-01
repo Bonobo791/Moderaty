@@ -31,6 +31,11 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
+vi.mock('$lib/server/session', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('$lib/server/session')>();
+	return { ...actual, createSession: vi.fn(actual.createSession) };
+});
+
 import { segmentConsentText } from '$lib/consentText';
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { makeCookies } from '$lib/server/testcookies';
@@ -42,6 +47,7 @@ import {
 	parkPendingConsent,
 	type PendingConsent
 } from '$lib/server/legal';
+import { createSession } from '$lib/server/session';
 
 import { actions, load } from './+page.server';
 
@@ -230,6 +236,24 @@ test('a pending identity parked under a different state is invisible to this flo
 	const res = await captureAction(cookiesWithPending(NEW_SUB, 'state-a'), { consent: 'on' }, 'state-b');
 	expect(res).toMatchObject({ status: 400 });
 	await expectNothingWritten();
+});
+
+test('a session-creation failure rolls back the account and consent, leaving the flow retryable', async () => {
+	vi.mocked(createSession).mockRejectedValueOnce(new Error('sessions table unavailable'));
+	const cookies = cookiesWithPending(NEW_SUB);
+
+	const failed = await captureAction(cookies, { consent: 'on' });
+	expect(failed).toBeInstanceOf(Error);
+	// Nothing committed: the user, consent, and session writes are one unit.
+	await expectNothingWritten();
+	expect(await testDb().db.select().from(sessions).all()).toHaveLength(0);
+
+	// The pending cookie was never consumed, so the same submission retries clean.
+	const retried = await captureAction(cookies, { consent: 'on' });
+	expect(retried).toMatchObject({ status: 302, location: '/dashboard' });
+	expect(await testDb().db.select().from(users).all()).toHaveLength(1);
+	expect(await testDb().db.select().from(consents).all()).toHaveLength(1);
+	expect(await testDb().db.select().from(sessions).all()).toHaveLength(1);
 });
 
 test('concurrent flows are isolated by state — each tab consents its own identity', async () => {

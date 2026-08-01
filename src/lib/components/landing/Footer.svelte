@@ -20,6 +20,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <script lang="ts">
 	import { GITHUB_URL, AGPL_URL, CONTACT_URL } from '$lib/landing/links';
+	import { LEGAL_DOCS } from '$lib/landing/legal';
 
 	// Illustrative "quiet night": 24 hourly bars, comments handled while the
 	// creator slept. Height = comments handled that hour. Pink = actioned,
@@ -44,10 +45,24 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		<div>
 			<div class="wordmark">Moderaty</div>
 			<p class="tagline">Built by a creator who got tired of the comments.</p>
+			<p class="made-in">
+				<img
+					src="/capybara-brazil-flag.webp"
+					alt="Capybara holding a Brazilian flag"
+					width="58"
+					height="96"
+					class="capy"
+				/>
+				<span>Made in Brazil</span>
+			</p>
 			<nav class="footer-links" aria-label="Footer">
 				<a href={GITHUB_URL} target="_blank" rel="noreferrer" class="footer-link">GitHub</a>
 				<a href={AGPL_URL} target="_blank" rel="noreferrer" class="footer-link">AGPL-3.0 License</a>
-				<a href="#faq" class="footer-link">FAQ</a>
+				<a href="/pricing" class="footer-link">Pricing</a>
+				<a href="/#faq" class="footer-link">FAQ</a>
+				{#each LEGAL_DOCS as doc (doc.slug)}
+					<a href="/{doc.slug}" class="footer-link">{doc.label}</a>
+				{/each}
 				<a href={CONTACT_URL} class="footer-link">Contact</a>
 			</nav>
 		</div>
@@ -99,6 +114,22 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		max-width: 40ch;
 		line-height: 1.6;
 		color: rgb(244 244 248 / 0.6);
+	}
+	.made-in {
+		margin: 20px 0 0;
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		font-family: var(--font-mono);
+		font-size: 10px;
+		text-transform: uppercase;
+		letter-spacing: 0.16em;
+		color: rgb(244 244 248 / 0.45);
+	}
+	.capy {
+		display: block;
+		border-radius: var(--radius-sm);
+		border: 1px solid var(--line);
 	}
 	.footer-links {
 		margin-top: 24px;

@@ -16,11 +16,4 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-export const GITHUB_URL = 'https://github.com/Bonobo791/Moderaty';
-export const AGPL_URL = 'https://www.gnu.org/licenses/agpl-3.0.html';
-export const CONTACT_URL = 'mailto:contact@marketingprowess.simplelogin.com';
-/** Source for the BYOK pricing claim: OpenAI's moderation endpoint is free to use. */
-export const OPENAI_MODERATION_URL =
-	'https://help.openai.com/en/articles/4936833-is-the-moderation-endpoint-free-to-use';
-/** Every "Connect YouTube channel" CTA starts the real OAuth flow. */
-export const LOGIN_URL = '/login';
+export const prerender = true;

@@ -43,7 +43,11 @@ Use this exact calibrated scale:
   person, or expressed as scoffing dismissal of the video, its quality, or
   the creator's work. Judge the delivery, not just the target: "lol",
   "are you kidding", "This is it?", rhetorical put-downs, and laughing-at
-  framing are demeaning even when no person is named.
+  framing are demeaning even when no person is named. Condescending bare
+  contradiction is demeaning too: pedantic openers like "Actually,",
+  "Um,", "Wrong.", or "Nope," that exist only to contradict and talk down,
+  without engaging any substance, mark a commenter who is there to argue,
+  not to discuss.
 - 0.95-1.00 Reserved and rare: the author is genuinely attempting to cause
   harm WITHOUT verbal abuse — targeted harassment, dogpiling or brigading,
   manipulation or humiliation campaigns. Almost never used; when unsure,
@@ -58,11 +62,41 @@ not mockery. Score these low when the context invites them, high when the
 comment is scoffing at content that did not invite it. Apply these
 exemptions only when the title or description affirmatively shows the
 content is comedic or surprising; when the metadata is empty, missing, or
-gives no such signal, treat the content as ordinary. Metadata announcing
+gives no such signal, treat the content as ordinary — a bare scoffing
+interjection with empty or uninformative metadata is demeaning, because no
+context invited it. Metadata announcing
 something bizarre, unexplained, or unbelievable ("wait for it", "nobody can
 explain", "you won't believe") is affirmative evidence of surprising
 content; explicit comedy, funny, or parody labeling is affirmative evidence
 of comedic content.
+
+The pedantic opener alone does not condemn a comment: a correction that
+adds constructive, substantive content ("Actually, those bolts take 25
+ft-lb — check the manual") is genuine discussion and stays acceptable.
+What is demeaning is the condescending bare contradiction that offers
+nothing but the contradiction itself.
+
+Totalizing falsehood claims are demeaning when delivered negatively:
+sweeping declarations that all or everything in the video is wrong, false,
+or lies ("All of the information in this video isn't correct.", "Nothing he
+says is true") dismiss the creator's credibility wholesale without engaging
+a single specific. A specific factual correction ("The torque spec at 4:20
+is wrong — it's 25 ft-lb.") is genuine criticism and stays acceptable, and
+clearly humorous exaggeration — joking hyperbole, especially on comedic
+content — is not condemnation. Laughter markers ("😂", "haha", "jk") on
+comedic content mark joking hyperbole; score it low. Surprise invitations
+in the metadata ("wait for it", "nobody can explain", "you won't believe")
+affirmatively invite a bare "what?" — score it low there too.
+
+Moral attacks on the person are demeaning: character assassination,
+humiliation, discrediting, demonization, and condescending moral
+superiority attack WHO the creator or a commenter is — their character,
+motives, or worth ("He's a grifter who lies to his audience for money.",
+"People like you are everything wrong with this platform.", "Imagine being
+this desperate for views. Pathetic.") — not what the video says. Criticism
+of the content or its claims ("The claims in this video are exaggerated and
+unsourced.") is legitimate and stays acceptable: attack the idea, never
+the person.
 
 Calibration examples (note how the same words flip bands with context):
 - "Great breakdown, thanks!" -> 0.05
@@ -72,6 +106,15 @@ Calibration examples (note how the same words flip bands with context):
 - "lol" (no video context available) -> 0.82
 - "what?" (on an ordinary how-to video) -> 0.80
 - "what?" (on a video showing an odd, surprising moment) -> 0.10
+- "Actually, that's not correct." -> 0.85
+- "Actually, those bolts take 25 ft-lb — check the manual." -> 0.35
+- "All of the information in this video isn't correct." -> 0.85
+- "The torque spec at 4:20 is wrong — it's 25 ft-lb." -> 0.30
+- "Literally everything in this one is wrong 😂" (on a comedy video) -> 0.10
+- "He's a grifter who lies to his audience for money." -> 0.88
+- "People like you are everything wrong with this platform." -> 0.85
+- "Imagine being this desperate for views. Pathetic." -> 0.85
+- "The claims in this video are exaggerated and unsourced." -> 0.35
 - "lol are you kidding? This is it? Not a great video." -> 0.85
 - "Everyone go report this clown and run him off the platform" -> 0.97
 

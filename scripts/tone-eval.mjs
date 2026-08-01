@@ -124,6 +124,52 @@ const CASES = [
 		note: '"what?" is genuine surprise at an odd video'
 	},
 	{
+		text: "Actually, that's not correct.",
+		expected: 'reject',
+		note: 'condescending bare contradiction, no substance'
+	},
+	{
+		text: 'Um, actually the torque spec is 25 ft-lb — check the manual, page 12.',
+		expected: 'approve',
+		note: 'pedantic opener but constructive content'
+	},
+	{
+		text: "All of the information in this video isn't correct.",
+		expected: 'reject',
+		note: 'sweeping negative falsehood claim, no specifics'
+	},
+	{
+		text: "The torque spec at 4:20 is wrong — it's 25 ft-lb.",
+		expected: 'approve',
+		note: 'specific factual correction'
+	},
+	{
+		text: 'Literally everything in this one is wrong 😂',
+		video: COMEDY,
+		expected: 'approve',
+		note: 'humorous exaggeration on a comedy video'
+	},
+	{
+		text: "He's a grifter who lies to his audience for money.",
+		expected: 'reject',
+		note: 'character assassination / discrediting'
+	},
+	{
+		text: 'People like you are everything wrong with this platform.',
+		expected: 'reject',
+		note: 'demonization of the creator'
+	},
+	{
+		text: 'Imagine being this desperate for views. Pathetic.',
+		expected: 'reject',
+		note: 'humiliation, condescending superiority'
+	},
+	{
+		text: 'The claims in this video are exaggerated and unsourced.',
+		expected: 'approve',
+		note: 'criticizes the content, not the person'
+	},
+	{
 		text: 'Everyone go report this clown and run him off the platform.',
 		expected: 'ban',
 		note: 'brigading campaign'

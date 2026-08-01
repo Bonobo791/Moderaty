@@ -18,6 +18,30 @@
 
 import { describe, expect, it } from 'vitest';
 import { PRICING_FAQ_ENTRIES } from './pricing-faq';
+import {
+	TICKS_HOSTED,
+	TICKS_HOSTED_DETAILED,
+	TICKS_SELF_HOSTED,
+	TICKS_SELF_HOSTED_DETAILED
+} from './plans';
+
+/** Every line of pricing copy the guardrail polices: FAQ plus plan ticks. */
+const PRICING_COPY = [
+	...PRICING_FAQ_ENTRIES.flatMap((f) => [f.q, f.a]),
+	...TICKS_SELF_HOSTED,
+	...TICKS_SELF_HOSTED_DETAILED,
+	...TICKS_HOSTED,
+	...TICKS_HOSTED_DETAILED
+];
+
+/** The one billing policy the product actually has, stated verbatim. */
+const APPROVED_POLICY = 'Nothing renews, nothing auto-charges';
+
+/**
+ * Anything else is an unsupported billing claim: refunds, expiry, rollover,
+ * cancellation, trials, discounts, fees, or credit retention.
+ */
+const UNSUPPORTED_CLAIM = /refund|expir|rollover|roll over|cancel|trial|discount|\bfees?\b|credit/i;
 
 describe('pricing copy guardrails', () => {
 	it('ships exactly the 5 pricing FAQ pairs, each a real question with a real answer', () => {
@@ -36,7 +60,11 @@ describe('pricing copy guardrails', () => {
 	});
 
 	it('makes no billing-policy claims beyond nothing-renews-nothing-auto-charges', () => {
-		const all = PRICING_FAQ_ENTRIES.map((f) => f.a).join(' ');
-		expect(all).not.toMatch(/refund|expire|expiry|rollover|roll over/i);
+		// the approved policy is present, verbatim
+		expect(PRICING_COPY.join(' ')).toContain(APPROVED_POLICY);
+		// and no unsupported claim appears anywhere in pricing copy
+		for (const line of PRICING_COPY) {
+			expect(line).not.toMatch(UNSUPPORTED_CLAIM);
+		}
 	});
 });

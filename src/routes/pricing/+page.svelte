@@ -19,6 +19,10 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 -->
 
 <script lang="ts">
+	// I12 exception (approved for static marketing routes, same as the
+	// homepage): this page is fully static and prerendered — there is no data
+	// loading, so loading/empty/error states cannot occur and SSR always
+	// renders the populated page.
 	import Nav from '$lib/components/landing/Nav.svelte';
 	import PricingHero from '$lib/components/landing/pricing/PricingHero.svelte';
 	import PricingPlans from '$lib/components/landing/pricing/PricingPlans.svelte';

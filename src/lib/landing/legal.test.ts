@@ -18,7 +18,9 @@
 
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { REFUND_NOTICE_TEXT } from '../server/legal';
 import { LEGAL_DOCS, LEGAL_EFFECTIVE_DATE, LEGAL_VERSION } from './legal';
+import { PRICING_FAQ_ENTRIES } from './pricing-faq';
 
 const COMPONENTS: Record<string, string> = {
 	terms: 'Terms.svelte',
@@ -111,6 +113,52 @@ describe('legal page content (PR #35 review)', () => {
 	it('prerenders every legal route', () => {
 		for (const doc of LEGAL_DOCS) {
 			expect(readRoute(doc.slug, '+page.ts')).toContain('export const prerender = true');
+		}
+	});
+});
+
+// Guard for the PR #38 review finding: the consent notice, hosted plan panel,
+// and pricing FAQ promised refunds of unused credits beyond the Terms §7
+// 7-day withdrawal window. Maintainer-directed policy: refunds exist ONLY
+// inside the 7-day CDC Art. 49 window; outside it all sales are final — no
+// refunds of unused credits, not on account closure, not on our termination,
+// not on price or Terms changes — except where applicable law requires.
+describe('refund policy consistency (PR #38 review)', () => {
+	const surfaces: Record<string, string> = {
+		'Terms of Service': readComponent('terms'),
+		'hosted plan panel': readFileSync(
+			new URL('../components/landing/PlanHosted.svelte', import.meta.url),
+			'utf8'
+		),
+		'consent refund notice': REFUND_NOTICE_TEXT,
+		'pricing FAQ': PRICING_FAQ_ENTRIES.map((f) => `${f.q} ${f.a}`).join('\n')
+	};
+
+	it('no surface promises refunds of unused credits outside the 7-day window', () => {
+		const RETIRED_PROMISES = [
+			/always refunded/i,
+			/refunded when you close/i,
+			/upon cancellation of your account/i,
+			/refund(ing|s)? of (your )?unconsumed Credits/i,
+			/refund unconsumed Credits/i
+		];
+		for (const [name, text] of Object.entries(surfaces)) {
+			for (const pattern of RETIRED_PROMISES) {
+				expect(text, `${name} still promises: ${pattern}`).not.toMatch(pattern);
+			}
+		}
+	});
+
+	it('Terms declares purchases final and credits non-refundable outside the withdrawal period', () => {
+		const terms = readComponent('terms');
+		expect(terms).toMatch(/all purchases are final/i);
+		expect(terms).toMatch(/NOT REFUNDABLE/);
+	});
+
+	it('every commercial surface ties its refund mention to the 7-day window and the final-sale rule', () => {
+		for (const name of ['hosted plan panel', 'consent refund notice', 'pricing FAQ']) {
+			expect(surfaces[name], name).toMatch(/CDC Art\. 49/);
+			expect(surfaces[name], name).toMatch(/final|not refunded/i);
 		}
 	});
 });

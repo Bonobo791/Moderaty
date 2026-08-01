@@ -43,6 +43,6 @@ export const PRICING_FAQ_ENTRIES: { q: string; a: string }[] = [
 	},
 	{
 		q: 'Can I get a refund?',
-		a: 'Yes. Brazilian consumer law (CDC Art. 49) gives you 7 days from purchase for a full refund, no questions, through any contact channel. After that, unused credits are refunded when you close your account. Nothing renews, nothing auto-charges.'
+		a: 'Yes, within 7 days. Brazilian consumer law (CDC Art. 49) gives you 7 days from purchase for a full refund, no questions, through any contact channel. After that, all sales are final: unused credits are not refunded. Nothing renews, nothing auto-charges.'
 	}
 ];

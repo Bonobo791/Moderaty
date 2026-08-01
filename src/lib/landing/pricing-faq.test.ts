@@ -52,8 +52,9 @@ const APPROVED_POLICY = 'Nothing renews, nothing auto-charges';
 
 /**
  * Policy expansion (feat-consumer-copy, user-directed): now that the Terms of
- * Service publish a refund policy (§7 — CDC Art. 49 withdrawal plus unused
- * credits refunded on account closure), refund claims are allowed in pricing
+ * Service publish a refund policy (§7 — CDC Art. 49 7-day withdrawal; outside
+ * that window all sales are final, unused credits included), refund claims
+ * are allowed in pricing
  * copy, but ONLY when anchored to the legal basis. A refund/credit/cancel
  * claim without "CDC Art. 49" on the same line is still an unsupported
  * billing claim and fails here.

@@ -24,7 +24,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	import { autoRefresh } from '$lib/auto-refresh.svelte';
 	import { relativeTime } from '$lib/relative-time';
 
-	let { data } = $props();
+	let { data, form } = $props();
 
 	// Counts change with every cron run; revalidate like the queue and log pages.
 	autoRefresh();
@@ -113,7 +113,45 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <a class="btn" href="/api/auth/google">Connect YouTube channel</a>
 
+<div class="card danger-zone">
+	<h2>Delete account</h2>
+	<p class="muted">
+		Deleting your account signs you out everywhere and stops moderation on your channels immediately.
+		Your records are kept for 6 months — signing back in within that window restores your account —
+		then they are permanently erased. Your legal consent records are retained beyond that as required
+		for compliance.
+	</p>
+	{#if form?.error}
+		<p class="error-box" role="alert">{form.error}</p>
+	{/if}
+	<form method="POST" action="?/deleteAccount" use:enhance>
+		<label class="confirm-delete" for="confirm-delete">
+			<input id="confirm-delete" type="checkbox" name="confirm" />
+			I understand and want to delete my Moderaty account
+		</label>
+		<button class="btn danger" type="submit">Delete my account</button>
+	</form>
+</div>
+
 <style>
+	.danger-zone {
+		margin-top: 24px;
+		border-color: var(--danger);
+	}
+	.danger-zone h2 {
+		color: var(--danger);
+	}
+	.confirm-delete {
+		display: flex;
+		gap: 10px;
+		align-items: flex-start;
+		font-size: 0.9rem;
+		margin: 12px 0;
+	}
+	.confirm-delete input {
+		margin-top: 3px;
+		flex-shrink: 0;
+	}
 	.edge-lords {
 		margin: 10px 0 0;
 		font-weight: 700;

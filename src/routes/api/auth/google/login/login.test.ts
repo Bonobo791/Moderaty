@@ -22,7 +22,8 @@ const mocks = vi.hoisted(() => ({
 	env: {
 		GOOGLE_CLIENT_ID: 'client-id',
 		GOOGLE_CLIENT_SECRET: 'client-secret',
-		APP_URL: 'http://localhost:5173'
+		APP_URL: 'http://localhost:5173',
+		ENCRYPTION_KEY: 'test-encryption-key'
 	} as Record<string, string | undefined>
 }));
 
@@ -30,11 +31,12 @@ vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { makeCookies, makeCookiesWithState } from '$lib/server/testcookies';
-import { channels, sessions, users } from '$lib/server/db/schema';
+import { consents, sessions, users } from '$lib/server/db/schema';
+import { LEGAL_VERSION, PENDING_CONSENT_COOKIE, readPendingConsent } from '$lib/server/legal';
 import { GET as startLogin } from './+server';
 import { GET as loginCallback } from './callback/+server';
 
-setupTestDb(['sessions', 'users', 'channels']);
+setupTestDb(['consents', 'sessions', 'users', 'channels']);
 
 afterEach(() => {
 	vi.unstubAllGlobals();
@@ -155,7 +157,48 @@ test('callback returns 502 when userinfo has no usable sub claim', async () => {
 	await expectHttpError(loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never), 502);
 });
 
-test('happy path creates the user and session, sets the cookie, consumes state, and redirects to the dashboard', async () => {
+async function seedConsentedUser(sub: string, docVersion: string = LEGAL_VERSION) {
+	const userId = `user-${sub}`;
+	await testDb().db.insert(users).values({ id: userId, googleSub: sub, email: `${sub}@example.com`, displayName: sub });
+	await testDb().db.insert(consents).values({
+		userId,
+		docVersion,
+		checkboxText: 'previously accepted',
+		ip: '127.0.0.1',
+		userAgent: 'test'
+	});
+	return userId;
+}
+
+test('callback with a new identity parks a pending consent and redirects to /consent without creating anything', async () => {
+	stubTokenAndUserinfo({ sub: 'sub-1', email: 'one@example.com', name: 'One' });
+	const cookies = makeCookiesWithState('s');
+
+	await expect(loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never)).rejects.toMatchObject({
+		status: 302,
+		location: '/consent?state=s'
+	});
+
+	// The contract forms at the /consent checkbox — no account, no session yet.
+	expect(await testDb().db.select().from(users).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(sessions).all()).toHaveLength(0);
+	const pendingCall = cookies.setCalls.find((c) => c.name === PENDING_CONSENT_COOKIE);
+	expect(pendingCall).toBeTruthy();
+	expect(pendingCall!.opts).toMatchObject({ httpOnly: true, sameSite: 'lax', path: '/' });
+	// The parked identity is keyed by this flow's state, so concurrent tabs
+	// signing into different accounts cannot overwrite one another.
+	expect(readPendingConsent(cookies as never, 's')).toEqual({
+		kind: 'new',
+		sub: 'sub-1',
+		email: 'one@example.com',
+		displayName: 'One'
+	});
+	// State consumed — the OAuth leg completed successfully.
+	expect(cookies.get('oauth_state')).toBeUndefined();
+});
+
+test('callback with a consented existing user creates a session and redirects to the dashboard', async () => {
+	const userId = await seedConsentedUser('sub-1');
 	stubTokenAndUserinfo({ sub: 'sub-1', email: 'one@example.com', name: 'One' });
 	const cookies = makeCookiesWithState('s');
 
@@ -164,11 +207,9 @@ test('happy path creates the user and session, sets the cookie, consumes state, 
 		location: '/dashboard'
 	});
 
-	const created = await testDb().db.select().from(users).all();
-	expect(created).toHaveLength(1);
-	expect(created[0]).toMatchObject({ googleSub: 'sub-1', email: 'one@example.com', displayName: 'One', plan: 'free' });
 	const createdSessions = await testDb().db.select().from(sessions).all();
 	expect(createdSessions).toHaveLength(1);
+	expect(createdSessions[0].userId).toBe(userId);
 	const sessionCall = cookies.setCalls.find((c) => c.name === 'moderaty_session');
 	expect(sessionCall).toBeTruthy();
 	expect(sessionCall!.opts).toMatchObject({ httpOnly: true, sameSite: 'lax', path: '/' });
@@ -177,52 +218,27 @@ test('happy path creates the user and session, sets the cookie, consumes state, 
 	expect(cookies.get('oauth_state')).toBeUndefined();
 });
 
-test('only the first-ever user claims orphaned channels', async () => {
-	await testDb().db.insert(channels).values({ id: 'UC1', title: 'Old', refreshTokenEnc: 'enc', active: 1, createdAt: '2026-01-01T00:00:00.000Z' });
+test('callback with an existing user on a stale document version sends them back through /consent', async () => {
+	await seedConsentedUser('sub-1', 'v0.9');
 	stubTokenAndUserinfo({ sub: 'sub-1', email: 'one@example.com', name: 'One' });
-	await expect(
-		loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies: makeCookiesWithState('s') } as never)
-	).rejects.toMatchObject({ status: 302 });
-	expect((await testDb().db.select().from(channels).all())[0].userId).toBe(
-		(await testDb().db.select().from(users).all())[0].id
-	);
+	const cookies = makeCookiesWithState('s');
 
-	// A second, distinct signup while another orphan exists must NOT claim it:
-	// the claim is one-time initialization, not a per-signup action.
-	await testDb().db.insert(channels).values({ id: 'UC2', title: 'Late', refreshTokenEnc: 'enc', active: 1, createdAt: '2026-01-01T00:00:00.000Z' });
-	stubTokenAndUserinfo({ sub: 'sub-2', email: 'two@example.com', name: 'Two' });
-	await expect(
-		loginCallback({ url: callbackUrl({ state: 's2', code: 'y' }), cookies: makeCookiesWithState('s2') } as never)
-	).rejects.toMatchObject({ status: 302 });
-
-	expect((await testDb().db.select().from(channels).all()).find((c) => c.id === 'UC2')!.userId).toBeNull();
+	await expect(loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never)).rejects.toMatchObject({
+		status: 302,
+		location: '/consent?state=s'
+	});
+	expect(await testDb().db.select().from(sessions).all()).toHaveLength(0);
 });
 
 test('a repeat login with the same sub reuses the account', async () => {
+	await seedConsentedUser('sub-1');
 	stubTokenAndUserinfo({ sub: 'sub-1', email: 'one@example.com', name: 'One' });
 	const first = makeCookiesWithState('s1');
-	await expect(loginCallback({ url: callbackUrl({ state: 's1', code: 'x' }), cookies: first } as never)).rejects.toMatchObject({ status: 302 });
+	await expect(loginCallback({ url: callbackUrl({ state: 's1', code: 'x' }), cookies: first } as never)).rejects.toMatchObject({ status: 302, location: '/dashboard' });
 
 	const second = makeCookiesWithState('s2');
-	await expect(loginCallback({ url: callbackUrl({ state: 's2', code: 'y' }), cookies: second } as never)).rejects.toMatchObject({ status: 302 });
+	await expect(loginCallback({ url: callbackUrl({ state: 's2', code: 'y' }), cookies: second } as never)).rejects.toMatchObject({ status: 302, location: '/dashboard' });
 
 	expect(await testDb().db.select().from(users).all()).toHaveLength(1);
 	expect(await testDb().db.select().from(sessions).all()).toHaveLength(2);
-});
-
-test('a later login does not steal channels owned by another user', async () => {
-	stubTokenAndUserinfo({ sub: 'sub-1', email: 'one@example.com', name: 'One' });
-	await expect(
-		loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies: makeCookiesWithState('s') } as never)
-	).rejects.toMatchObject({ status: 302 });
-	const owner = (await testDb().db.select().from(users).all())[0];
-	await testDb().db.insert(channels).values({ id: 'UC2', userId: owner.id, title: 'Owned', refreshTokenEnc: 'enc', active: 1, createdAt: '2026-01-01T00:00:00.000Z' });
-
-	stubTokenAndUserinfo({ sub: 'sub-2', email: 'two@example.com', name: 'Two' });
-	await expect(
-		loginCallback({ url: callbackUrl({ state: 's2', code: 'y' }), cookies: makeCookiesWithState('s2') } as never)
-	).rejects.toMatchObject({ status: 302 });
-
-	const channel = (await testDb().db.select().from(channels).all()).find((c) => c.id === 'UC2');
-	expect(channel!.userId).toBe(owner.id);
 });

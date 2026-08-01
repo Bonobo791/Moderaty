@@ -152,10 +152,28 @@ layout redirects signed-out visitors to `/login`; every form action must call
 `requireUser(locals)` and scope every channel query/mutation by
 `channels.userId` (another user's channel always reads as 404 — never leak
 existence). Pre-accounts "orphan" channels (`user_id IS NULL`) are claimed by
-the first user ever to sign in. Self-hosted instances use the same code path;
-BYOK is via env (`GOOGLE_CLIENT_ID/SECRET`, `OPENAI_API_KEY`, Turso), so
-self-hosters never cost the hosted operator. `users.plan` is the hook for the
-future Stripe integration (hosted plans; free tier = self-hosted only).
+the first user ever to complete account creation. Self-hosted instances use
+the same code path; BYOK is via env (`GOOGLE_CLIENT_ID/SECRET`,
+`OPENAI_API_KEY`, Turso), so self-hosters never cost the hosted operator.
+`users.plan` is the hook for the future Stripe integration (hosted plans;
+free tier = self-hosted only).
+
+Accounts are created only by the **consent interstitial**, never by the OAuth
+callback itself: login parks the identity in the encrypted
+`moderaty_consent_pending` cookie (a bounded list keyed by the flow's OAuth
+state so concurrent tabs cannot collide; 10-minute TTL, helpers in
+`src/lib/server/legal.ts`) and redirects to `/consent?state=...`, where a
+required 18+/ToS/PP/DPA checkbox — rendered unticked, must be ticked to
+continue — plus an optional unbundled marketing opt-in gates a
+single transaction that creates the user and writes a `consents` row
+(userId, `doc_version`, exact checkbox text, IP, user agent) — the
+evidentiary log. The visible checkbox sentence is rendered from
+`CONSENT_CHECKBOX_TEXT` itself (the load passes it to the page;
+`src/lib/consentText.ts` splits it into text/link segments), so the page can
+never drift from the logged text. On material legal-doc changes bump `LEGAL_VERSION`
+(declared with the documents in `src/lib/landing/legal.ts`, re-exported from
+`src/lib/server/legal.ts`); users whose consent predates it are routed back
+through `/consent` on next login.
 
 ## Commands
 

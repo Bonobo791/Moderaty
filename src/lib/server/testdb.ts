@@ -137,6 +137,16 @@ export async function createTestDb(): Promise<TestDb> {
 			last_attempt_at TEXT,
 			last_manual_retry_at TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`,
+		`CREATE TABLE consents (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			doc_version TEXT NOT NULL,
+			checkbox_text TEXT NOT NULL,
+			ip TEXT NOT NULL,
+			user_agent TEXT NOT NULL,
+			marketing_opt_in INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`
 	]);
 	return { db: drizzle(client, { schema }), client };

@@ -1901,12 +1901,48 @@ Decisions, confirmed with the maintainer:
 - **Schema:** `users` (`google_sub` unique, `email`, `display_name`, `plan`
   default `'free'`), `sessions`, nullable `channels.user_id` (migration
   0004). Orphaned pre-accounts channels (`user_id IS NULL`) are claimed by
-  the first user ever to sign in — that is how the original single-operator
-  database attaches to its owner.
+  the first user ever to complete account creation — that is how the original
+  single-operator database attaches to its owner.
 - **Accounts everywhere; BYOK for self-hosted.** Hosted and self-hosted run
   the same code path. Self-hosters supply their own `GOOGLE_CLIENT_ID`/
   `GOOGLE_CLIENT_SECRET`, `OPENAI_API_KEY`, and Turso credentials via env, so
   the hosted operator never pays for non-subscribers.
+
+### 5b-2. Legal consent interstitial (branch `feat-account-consent`)
+
+The contract forms at a checkbox, **after** Google sign-in but **before** the
+account exists — never pre-OAuth friction, never browsewrap:
+
+- **Flow:** the login callback no longer creates accounts. A new Google
+  identity (or an existing account whose latest consent predates the current
+  `LEGAL_VERSION`) is parked in a short-lived AES-GCM-encrypted httpOnly
+  cookie (`moderaty_consent_pending`, 10 min) and redirected to `/consent`.
+  Only the "Create account" action — gated on a required checkbox that renders
+  unticked and must be ticked to continue — writes the `users` row, the
+  consent record, and the first session.
+- **The checkbox text is the age gate:** "I am at least 18 years old and
+  agree to the Terms of Service, Privacy Policy, and Data Processing
+  Agreement". Google OAuth is identity, not age verification, so the 18+
+  self-declaration rides in the same required box; the exact string
+  (`CONSENT_CHECKBOX_TEXT` in `src/lib/server/legal.ts`) is stored verbatim
+  in every consent row, and the `/consent` page renders its visible sentence
+  from that constant (split into text/link segments by
+  `src/lib/consentText.ts`).
+- **Consent is logged as evidence** (`consents` table, migration 0007):
+  user, `doc_version`, exact checkbox text, IP (`getClientAddress()`), user
+  agent, timestamp. One row per acceptance event; never updated. CDC
+  Art. 6º, VIII can shift the burden of proof to the operator — this table
+  is the "I never agreed to that" rebuttal.
+- **Marketing e-mail is a separate, unbundled, unticked box** (LGPD):
+  recorded as `marketing_opt_in` on the same event row; bundling it into the
+  contract checkbox would invalidate it.
+- **Re-acceptance:** bump `LEGAL_VERSION` on material document changes;
+  every account whose latest consent is stale is sent back through
+  `/consent` at next login. Silent "continued use = acceptance" stays
+  reserved for minor changes (ToS §18).
+- **Progressive scopes hold:** basic Google profile at sign-up, YouTube
+  API scopes only at the separate "Connect YouTube channel" step — no
+  comment data can flow before the contract exists.
 
 ## 7. Future features
 

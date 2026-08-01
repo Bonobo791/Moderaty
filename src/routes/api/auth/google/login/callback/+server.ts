@@ -18,13 +18,12 @@
 
 import { redirect, error } from '@sveltejs/kit';
 
-import { randomBytes } from 'node:crypto';
-
-import { isNull, eq, sql } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
-import { channels, users } from '$lib/server/db/schema';
+import { consents, users } from '$lib/server/db/schema';
 import { exchangeGoogleCode } from '$lib/server/google';
+import { LEGAL_VERSION, parkPendingConsent } from '$lib/server/legal';
 import { cookieSecure, readPendingStates, storePendingStates } from '$lib/server/oauthState';
 import { createSession, SESSION_COOKIE } from '$lib/server/session';
 
@@ -75,29 +74,27 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 	const displayName = typeof info.name === 'string' && info.name ? info.name : email;
 	const sub: string = info.sub;
 
-	// Find-or-create the account by Google's stable sub claim. The orphan claim
-	// is one-time initialization — only the FIRST user ever created (users table
-	// empty before this insert) takes the pre-accounts ownerless channels, so a
-	// later signup can never steal them. The transaction keeps the check, the
-	// insert, and the claim from interleaving with a concurrent first sign-in.
-	const user = await db.transaction(async (tx) => {
-		const existing = await tx.select().from(users).where(eq(users.googleSub, sub)).get();
-		if (existing) return existing;
-		const count = await tx.select({ n: sql<number>`count(*)` }).from(users).get();
-		// A concurrent same-sub sign-in can win the insert between the existence
-		// check above and here — insert conflict-tolerantly and re-select instead
-		// of surfacing a raw unique-violation to the user.
-		await tx
-			.insert(users)
-			.values({ id: randomBytes(16).toString('hex'), googleSub: sub, email, displayName })
-			.onConflictDoNothing();
-		const created = await tx.select().from(users).where(eq(users.googleSub, sub)).get();
-		if (!created) throw error(500, 'account creation failed — please retry');
-		if (count?.n === 0) {
-			await tx.update(channels).set({ userId: created.id }).where(isNull(channels.userId));
-		}
-		return created;
-	});
+	// The contract forms at the /consent checkbox, not here. A NEW identity is
+	// parked in an encrypted pending cookie — no account and no session exist
+	// before acceptance. An existing account skips the interstitial only when
+	// its latest consent covers the current LEGAL_VERSION; a stale or missing
+	// consent sends it back through /consent (re-acceptance on doc updates).
+	const user = await db.select().from(users).where(eq(users.googleSub, sub)).get();
+	if (!user) {
+		parkPendingConsent(cookies, { kind: 'new', sub, email, displayName });
+		storePendingStates(cookies, pending.filter((s) => s !== state));
+		throw redirect(302, '/consent');
+	}
+	const consent = await db
+		.select({ id: consents.id })
+		.from(consents)
+		.where(and(eq(consents.userId, user.id), eq(consents.docVersion, LEGAL_VERSION)))
+		.get();
+	if (!consent) {
+		parkPendingConsent(cookies, { kind: 'existing', userId: user.id });
+		storePendingStates(cookies, pending.filter((s) => s !== state));
+		throw redirect(302, '/consent');
+	}
 
 	const { token, expiresAt } = await createSession(user.id);
 	cookies.set(SESSION_COOKIE, token, {

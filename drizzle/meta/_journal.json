@@ -50,6 +50,13 @@
       "when": 1785506727822,
       "tag": "0006_huge_boom_boom",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1785616677162,
+      "tag": "0007_curved_blade",
+      "breakpoints": true
     }
   ]
 }

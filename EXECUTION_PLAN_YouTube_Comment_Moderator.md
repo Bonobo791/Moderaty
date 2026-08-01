@@ -1908,6 +1908,40 @@ Decisions, confirmed with the maintainer:
   `GOOGLE_CLIENT_SECRET`, `OPENAI_API_KEY`, and Turso credentials via env, so
   the hosted operator never pays for non-subscribers.
 
+### 5b-2. Legal consent interstitial (branch `feat-account-consent`)
+
+The contract forms at a checkbox, **after** Google sign-in but **before** the
+account exists — never pre-OAuth friction, never browsewrap:
+
+- **Flow:** the login callback no longer creates accounts. A new Google
+  identity (or an existing account whose latest consent predates the current
+  `LEGAL_VERSION`) is parked in a short-lived AES-GCM-encrypted httpOnly
+  cookie (`moderaty_consent_pending`, 10 min) and redirected to `/consent`.
+  Only the "Create account" action — gated on an unticked required checkbox —
+  writes the `users` row, the consent record, and the first session.
+- **The checkbox text is the age gate:** "I am at least 18 years old and
+  agree to the Terms of Service, Privacy Policy, and Data Processing
+  Agreement". Google OAuth is identity, not age verification, so the 18+
+  self-declaration rides in the same required box; the exact string
+  (`CONSENT_CHECKBOX_TEXT` in `src/lib/server/legal.ts`) is stored verbatim
+  in every consent row, and the `/consent` page keeps its visible copy
+  byte-identical to it.
+- **Consent is logged as evidence** (`consents` table, migration 0007):
+  user, `doc_version`, exact checkbox text, IP (`getClientAddress()`), user
+  agent, timestamp. One row per acceptance event; never updated. CDC
+  Art. 6º, VIII can shift the burden of proof to the operator — this table
+  is the "I never agreed to that" rebuttal.
+- **Marketing e-mail is a separate, unbundled, unticked box** (LGPD):
+  recorded as `marketing_opt_in` on the same event row; bundling it into the
+  contract checkbox would invalidate it.
+- **Re-acceptance:** bump `LEGAL_VERSION` on material document changes;
+  every account whose latest consent is stale is sent back through
+  `/consent` at next login. Silent "continued use = acceptance" stays
+  reserved for minor changes (ToS §18).
+- **Progressive scopes hold:** basic Google profile at sign-up, YouTube
+  API scopes only at the separate "Connect YouTube channel" step — no
+  comment data can flow before the contract exists.
+
 ## 7. Future features
 
 - **Stripe integration (hosted plans).** The hosted service will require paid

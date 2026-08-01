@@ -152,10 +152,23 @@ layout redirects signed-out visitors to `/login`; every form action must call
 `requireUser(locals)` and scope every channel query/mutation by
 `channels.userId` (another user's channel always reads as 404 — never leak
 existence). Pre-accounts "orphan" channels (`user_id IS NULL`) are claimed by
-the first user ever to sign in. Self-hosted instances use the same code path;
-BYOK is via env (`GOOGLE_CLIENT_ID/SECRET`, `OPENAI_API_KEY`, Turso), so
-self-hosters never cost the hosted operator. `users.plan` is the hook for the
-future Stripe integration (hosted plans; free tier = self-hosted only).
+the first user ever to complete account creation. Self-hosted instances use
+the same code path; BYOK is via env (`GOOGLE_CLIENT_ID/SECRET`,
+`OPENAI_API_KEY`, Turso), so self-hosters never cost the hosted operator.
+`users.plan` is the hook for the future Stripe integration (hosted plans;
+free tier = self-hosted only).
+
+Accounts are created only by the **consent interstitial**, never by the OAuth
+callback itself: login parks the identity in the encrypted
+`moderaty_consent_pending` cookie (10-minute TTL, helpers in
+`src/lib/server/legal.ts`) and redirects to `/consent`, where an unticked
+18+/ToS/PP/DPA checkbox (plus an optional unbundled marketing opt-in) gates a
+single transaction that creates the user and writes a `consents` row
+(userId, `doc_version`, exact checkbox text, IP, user agent) — the
+evidentiary log. The visible checkbox sentence must stay byte-identical to
+`CONSENT_CHECKBOX_TEXT`. On material legal-doc changes bump `LEGAL_VERSION`;
+users whose consent predates it are routed back through `/consent` on next
+login.
 
 ## Commands
 

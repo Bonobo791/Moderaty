@@ -54,7 +54,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <p><strong>4.1</strong> The Service retrieves comments from your connected YouTube channel(s) via the YouTube API Services, classifies them automatically (including detection of hate speech and related abusive content), and executes the Moderation Actions you configure.</p>
 
-<p><strong>4.2</strong> We operate a process-and-discard architecture: comment text and author identifiers are not persistently stored; we retain only Moderation Outcome Data, as described in the DPA and Privacy Policy.</p>
+<p><strong>4.2</strong> We minimize comment data: comment text (truncated to 500 characters) is stored as part of Moderation Outcome Data, and comment author identifiers are processed in memory only and never stored, as described in the DPA and Privacy Policy.</p>
 
 <p><strong>4.3</strong> The Service is a tool. Automated classification may produce false positives or false negatives. You are responsible for reviewing your configuration and its effects on your channel (see Section 9).</p>
 
@@ -111,7 +111,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <p><strong>10.1</strong> For your account, contact, and billing data, we act as data controller under the LGPD; our <a href="/privacy">Privacy Policy</a> explains that processing and your rights, and our data protection officer (encarregado) is identified in Section 21.</p>
 
-<p><strong>10.2</strong> For Comment Data, you are the controller and we are the operator (processor), under the <a href="/dpa">DPA</a>, which forms part of these Terms. The DPA includes the sensitive-data and minors safeguards, the process-and-discard architecture, the prohibition on model training, and the international transfer mechanisms required by the LGPD.</p>
+<p><strong>10.2</strong> For Comment Data, you are the controller and we are the operator (processor), under the <a href="/dpa">DPA</a>, which forms part of these Terms. The DPA includes the sensitive-data and minors safeguards, the comment-data minimization measures, the prohibition on model training, and the international transfer mechanisms required by the LGPD.</p>
 
 <p><strong>10.3</strong> We retain statutory connection and application-access logs for 6 months under Articles 13 and 15 of the Marco Civil da Internet, kept segregated and under secrecy, as our only retention exception.</p>
 

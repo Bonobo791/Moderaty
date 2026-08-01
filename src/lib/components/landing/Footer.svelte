@@ -56,7 +56,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				<span>Made in Brazil</span>
 			</p>
 			<p class="lgpd-note">
-				LGPD (Lei 13.709/2018) compliant. Comments are processed and discarded, never stored.
+				LGPD (Lei 13.709/2018) compliant. Comment author identities are never stored.
 			</p>
 			<nav class="footer-links" aria-label="Footer">
 				<a href={GITHUB_URL} target="_blank" rel="noreferrer" class="footer-link">GitHub</a>

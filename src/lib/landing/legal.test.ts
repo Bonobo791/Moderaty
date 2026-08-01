@@ -19,6 +19,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { REFUND_NOTICE_TEXT } from '../server/legal';
+import { FAQ_ENTRIES } from './faq';
 import { LEGAL_DOCS, LEGAL_EFFECTIVE_DATE, LEGAL_VERSION } from './legal';
 import { PRICING_FAQ_ENTRIES } from './pricing-faq';
 
@@ -113,6 +114,44 @@ describe('legal page content (PR #35 review)', () => {
 	it('prerenders every legal route', () => {
 		for (const doc of LEGAL_DOCS) {
 			expect(readRoute(doc.slug, '+page.ts')).toContain('export const prerender = true');
+		}
+	});
+});
+
+// Guard for the comment-PII change: the app stores comment text (≤500 chars)
+// with the moderation outcome but never persists author identifiers. Public
+// copy must say exactly that — the earlier "processed and discarded, never
+// stored" claim contradicted the database and had to be corrected everywhere.
+describe('storage claims match implementation (comment PII)', () => {
+	const surfaces: Record<string, string> = {
+		'Terms of Service': readComponent('terms'),
+		'Privacy Policy': readComponent('privacy'),
+		DPA: readComponent('dpa'),
+		footer: readFileSync(new URL('../components/landing/Footer.svelte', import.meta.url), 'utf8'),
+		FAQ: FAQ_ENTRIES.map((f) => `${f.q} ${f.a}`).join('\n'),
+		'doc descriptions': LEGAL_DOCS.map((d) => d.description).join('\n')
+	};
+
+	it('no surface claims comments are discarded or never stored', () => {
+		const RETIRED_CLAIMS = [
+			/process-and-discard/i,
+			/processed and discarded/i,
+			/classified and discarded/i,
+			/no comment bodies/i,
+			/immediate discard of raw comment content/i,
+			/comments are [^.]*never stored/i,
+			/comment (text|content) is never (persistently )?stored/i
+		];
+		for (const [name, text] of Object.entries(surfaces)) {
+			for (const pattern of RETIRED_CLAIMS) {
+				expect(text, `${name} still claims: ${pattern}`).not.toMatch(pattern);
+			}
+		}
+	});
+
+	it('the legal documents state that author identifiers are never stored', () => {
+		for (const doc of ['privacy', 'dpa'] as const) {
+			expect(readComponent(doc), doc).toMatch(/author identifiers?[^.]*never (persistently )?stored|never store[^.]*author identifiers/i);
 		}
 	});
 });

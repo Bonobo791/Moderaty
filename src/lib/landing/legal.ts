@@ -34,7 +34,7 @@ export type LegalDoc = {
 };
 
 export const LEGAL_EFFECTIVE_DATE = '1 August 2026';
-export const LEGAL_VERSION = '1.1';
+export const LEGAL_VERSION = '1.2';
 export const LEGAL_KICKER = 'YouTube Comment Moderation Service';
 
 export const TERMS_DOC: LegalDoc = {
@@ -106,7 +106,7 @@ export const DPA_DOC: LegalDoc = {
 	version: LEGAL_VERSION,
 	effectiveDate: LEGAL_EFFECTIVE_DATE,
 	description:
-		'The LGPD data processing agreement between you (controller) and Moderaty (processor) for YouTube comment data: process-and-discard architecture, sub-processors, and ANPD transfer clauses.',
+		'The LGPD data processing agreement between you (controller) and Moderaty (processor) for YouTube comment data: comment-data minimization (author identifiers never stored), sub-processors, and ANPD transfer clauses.',
 	toc: [
 		{ id: 's1', label: '1. Purpose and Scope' },
 		{ id: 's2', label: '2. Definitions' },
@@ -114,7 +114,7 @@ export const DPA_DOC: LegalDoc = {
 		{ id: 's4', label: '4. Subject Matter, Duration, Nature and Purpose' },
 		{ id: 's5', label: '5. Controller Obligations and Lawful Basis' },
 		{ id: 's6', label: '6. Processor Obligations' },
-		{ id: 's7', label: '7. Data Minimization and Process-and-Discard' },
+		{ id: 's7', label: '7. Data Minimization and Author-Identifier Non-Retention' },
 		{ id: 's8', label: '8. Sensitive Personal Data' },
 		{ id: 's9', label: '9. Data of Children and Adolescents' },
 		{ id: 's10', label: '10. Sub-processors' },

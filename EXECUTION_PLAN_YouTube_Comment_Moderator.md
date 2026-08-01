@@ -1949,10 +1949,13 @@ account exists — never pre-OAuth friction, never browsewrap:
 - **The `comments` table stores comment text (≤500 chars) with the
   moderation outcome** (status, decidedBy, matchedRuleId, aiScore,
   timestamps) so the review queue and audit history work.
-- **Author identifiers are never persisted.** `author_name` and
-  `author_channel_id` are dropped (migration: `ALTER TABLE comments DROP
-  COLUMN`, which also destroys previously stored author PII). Rule matching
-  still uses the in-memory author channel ID at decision time.
+- **Author identifiers are never persisted.** Migration 0008 relaxes
+  `author_name` and `author_channel_id` to nullable and wipes the stored
+  values (table rebuild whose INSERT SELECT carries NULL) — the expand
+  phase, so pre- and post-change code coexist during the rollout (Netlify
+  deploys are not atomic). A follow-up contract migration DROPS the columns
+  once 0008 is verified applied. Rule matching still uses the in-memory
+  author channel ID at decision time.
 - **The review queue labels targets by text preview**, not author name
   ("Approve comment: …", "Ban this comment's author?"), since the author
   name is no longer known.
@@ -1965,8 +1968,9 @@ account exists — never pre-OAuth friction, never browsewrap:
 - **Material legal change → `LEGAL_VERSION` bump (1.2);** existing users
   re-consent at next login via the §5b-2 flow.
 - Migration ritual: run `npm run db:migrate` right after merge AND verify
-  the columns are gone (0007 incident — drizzle-kit can exit 0 without
-  applying).
+  the author columns are nullable with all values NULL (0007 incident —
+  drizzle-kit can exit 0 without applying). The contract migration that
+  DROPS them ships only after that verification.
 
 ## 7. Future features
 

@@ -210,10 +210,11 @@ secret-like test value only when it is synthetic and a maintainer approves the
 documented exception. Preserve [LICENSE](LICENSE) and [COMMERCIAL.md](COMMERCIAL.md).
 Do not store comment text longer than 500 characters. Never persist
 comment-author identifiers (`author_name`, `author_channel_id`) — they are
-processed in memory at decision time only. Public copy (landing, FAQ, legal
-docs) must match actual storage: comment text is stored with the moderation
-outcome, author identities are never stored; the consistency guard lives in
-`src/lib/landing/legal.test.ts`.
+processed in memory at decision time only (the columns linger, nullable and
+wiped, until the contract migration drops them; never write to them).
+Public copy (landing, FAQ, legal docs) must match actual storage: comment
+text is stored with the moderation outcome, author identities are never
+stored; the consistency guard lives in `src/lib/landing/legal.test.ts`.
 
 ## License Headers
 

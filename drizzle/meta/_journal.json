@@ -61,8 +61,8 @@
     {
       "idx": 8,
       "version": "6",
-      "when": 1785625355953,
-      "tag": "0008_drop_comment_author_pii",
+      "when": 1785627758830,
+      "tag": "0008_relax_comment_author_pii",
       "breakpoints": true
     }
   ]

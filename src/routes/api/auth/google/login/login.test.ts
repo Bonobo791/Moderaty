@@ -31,7 +31,7 @@ vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { makeCookies, makeCookiesWithState } from '$lib/server/testcookies';
-import { channels, consents, sessions, users } from '$lib/server/db/schema';
+import { consents, sessions, users } from '$lib/server/db/schema';
 import { LEGAL_VERSION, PENDING_CONSENT_COOKIE } from '$lib/server/legal';
 import { GET as startLogin } from './+server';
 import { GET as loginCallback } from './callback/+server';

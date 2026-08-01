@@ -1901,8 +1901,8 @@ Decisions, confirmed with the maintainer:
 - **Schema:** `users` (`google_sub` unique, `email`, `display_name`, `plan`
   default `'free'`), `sessions`, nullable `channels.user_id` (migration
   0004). Orphaned pre-accounts channels (`user_id IS NULL`) are claimed by
-  the first user ever to sign in — that is how the original single-operator
-  database attaches to its owner.
+  the first user ever to complete account creation — that is how the original
+  single-operator database attaches to its owner.
 - **Accounts everywhere; BYOK for self-hosted.** Hosted and self-hosted run
   the same code path. Self-hosters supply their own `GOOGLE_CLIENT_ID`/
   `GOOGLE_CLIENT_SECRET`, `OPENAI_API_KEY`, and Turso credentials via env, so
@@ -1917,15 +1917,17 @@ account exists — never pre-OAuth friction, never browsewrap:
   identity (or an existing account whose latest consent predates the current
   `LEGAL_VERSION`) is parked in a short-lived AES-GCM-encrypted httpOnly
   cookie (`moderaty_consent_pending`, 10 min) and redirected to `/consent`.
-  Only the "Create account" action — gated on an unticked required checkbox —
-  writes the `users` row, the consent record, and the first session.
+  Only the "Create account" action — gated on a required checkbox that renders
+  unticked and must be ticked to continue — writes the `users` row, the
+  consent record, and the first session.
 - **The checkbox text is the age gate:** "I am at least 18 years old and
   agree to the Terms of Service, Privacy Policy, and Data Processing
   Agreement". Google OAuth is identity, not age verification, so the 18+
   self-declaration rides in the same required box; the exact string
   (`CONSENT_CHECKBOX_TEXT` in `src/lib/server/legal.ts`) is stored verbatim
-  in every consent row, and the `/consent` page keeps its visible copy
-  byte-identical to it.
+  in every consent row, and the `/consent` page renders its visible sentence
+  from that constant (split into text/link segments by
+  `src/lib/consentText.ts`).
 - **Consent is logged as evidence** (`consents` table, migration 0007):
   user, `doc_version`, exact checkbox text, IP (`getClientAddress()`), user
   agent, timestamp. One row per acceptance event; never updated. CDC

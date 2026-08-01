@@ -162,9 +162,9 @@ Accounts are created only by the **consent interstitial**, never by the OAuth
 callback itself: login parks the identity in the encrypted
 `moderaty_consent_pending` cookie (a bounded list keyed by the flow's OAuth
 state so concurrent tabs cannot collide; 10-minute TTL, helpers in
-`src/lib/server/legal.ts`) and redirects to `/consent?state=...`, where an
-unticked
-18+/ToS/PP/DPA checkbox (plus an optional unbundled marketing opt-in) gates a
+`src/lib/server/legal.ts`) and redirects to `/consent?state=...`, where a
+required 18+/ToS/PP/DPA checkbox — rendered unticked, must be ticked to
+continue — plus an optional unbundled marketing opt-in gates a
 single transaction that creates the user and writes a `consents` row
 (userId, `doc_version`, exact checkbox text, IP, user agent) — the
 evidentiary log. The visible checkbox sentence is rendered from

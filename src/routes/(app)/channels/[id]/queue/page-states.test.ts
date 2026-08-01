@@ -36,7 +36,7 @@ describe('queue page states (I12)', () => {
 		expect(queuePage).toContain('These comments are held for review and are not public yet.');
 	});
 
-	it('confirms destructive actions inline, naming the author', () => {
+	it('confirms destructive actions inline', () => {
 		expect(queuePage).toContain("This can't be undone.");
 		expect(queuePage).toContain("Their comments will be rejected and they'll be blocked.");
 		expect(queuePage).toContain('?/del');

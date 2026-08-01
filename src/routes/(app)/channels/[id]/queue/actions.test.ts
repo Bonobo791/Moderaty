@@ -71,8 +71,6 @@ async function seedComment(id: string, channelId: string, status = 'pending') {
 	await testDb().db.insert(comments).values({
 		id,
 		channelId,
-		authorChannelId: 'UCa',
-		authorName: 'Ann',
 		text: 'hello',
 		publishedAt: '2026-01-01T00:00:00Z',
 		status,

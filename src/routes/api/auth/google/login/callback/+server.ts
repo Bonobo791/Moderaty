@@ -85,6 +85,13 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 		storePendingStates(cookies, pending.filter((s) => s !== state));
 		throw redirect(302, `/consent?state=${encodeURIComponent(state)}`);
 	}
+	// Signing back in within the 6-month retention window cancels a pending
+	// deletion. Channels stay inactive (active=0 from the deletion) until the
+	// user re-enables them — moderation never resumes silently.
+	if (user.deletedAt) {
+		await db.update(users).set({ deletedAt: null }).where(eq(users.id, user.id));
+		console.info(`account ${user.id} restored by sign-in; pending deletion cancelled`);
+	}
 	const consent = await db
 		.select({ id: consents.id })
 		.from(consents)

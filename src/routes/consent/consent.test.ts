@@ -87,6 +87,20 @@ async function captureAction(
 
 const NEW_SUB: PendingConsent = { kind: 'new', sub: 'sub-1', email: 'one@example.com', displayName: 'One' };
 
+function expectLoadRedirectsToLogin(cookies: ReturnType<typeof makeCookies>, url: string) {
+	try {
+		load({ cookies, url: new URL(url) } as never);
+		expect.unreachable('load should redirect');
+	} catch (e) {
+		expect(e).toMatchObject({ status: 302, location: '/login' });
+	}
+}
+
+async function expectNothingWritten() {
+	expect(await testDb().db.select().from(users).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(consents).all()).toHaveLength(0);
+}
+
 test('page states: consent sentence matches the logged text, docs are linked, errors are announced', () => {
 	// The visible sentence must stay in sync with CONSENT_CHECKBOX_TEXT — that
 	// constant is what the consent log stores as "the exact text shown".
@@ -100,47 +114,29 @@ test('page states: consent sentence matches the logged text, docs are linked, er
 });
 
 test('load without a pending cookie redirects to /login', () => {
-	try {
-		load({ cookies: makeCookies(), url: new URL('http://localhost/consent?state=state-1') } as never);
-		expect.unreachable('load should redirect');
-	} catch (e) {
-		expect(e).toMatchObject({ status: 302, location: '/login' });
-	}
+	expectLoadRedirectsToLogin(makeCookies(), 'http://localhost/consent?state=state-1');
 });
 
 test('load without a state param redirects to /login', () => {
-	const cookies = cookiesWithPending(NEW_SUB);
-	try {
-		load({ cookies, url: new URL('http://localhost/consent') } as never);
-		expect.unreachable('load should redirect');
-	} catch (e) {
-		expect(e).toMatchObject({ status: 302, location: '/login' });
-	}
+	expectLoadRedirectsToLogin(cookiesWithPending(NEW_SUB), 'http://localhost/consent');
 });
 
 test('load with a tampered pending cookie redirects to /login', () => {
 	const cookies = makeCookies();
 	cookies.set(PENDING_CONSENT_COOKIE, 'forged-ciphertext', { path: '/' });
-	try {
-		load({ cookies, url: new URL('http://localhost/consent?state=state-1') } as never);
-		expect.unreachable('load should redirect');
-	} catch (e) {
-		expect(e).toMatchObject({ status: 302, location: '/login' });
-	}
+	expectLoadRedirectsToLogin(cookies, 'http://localhost/consent?state=state-1');
 });
 
 test('action without a pending cookie fails with 400 and writes nothing', async () => {
 	const res = await captureAction(makeCookies(), { consent: 'on' });
 	expect(res).toMatchObject({ status: 400 });
-	expect(await testDb().db.select().from(users).all()).toHaveLength(0);
-	expect(await testDb().db.select().from(consents).all()).toHaveLength(0);
+	await expectNothingWritten();
 });
 
 test('action without the required checkbox fails with 400 and writes nothing', async () => {
 	const res = await captureAction(cookiesWithPending(NEW_SUB), {});
 	expect(res).toMatchObject({ status: 400 });
-	expect(await testDb().db.select().from(users).all()).toHaveLength(0);
-	expect(await testDb().db.select().from(consents).all()).toHaveLength(0);
+	await expectNothingWritten();
 	expect(await testDb().db.select().from(sessions).all()).toHaveLength(0);
 });
 
@@ -219,8 +215,7 @@ test('an existing-user pending payload naming an unknown account fails with 400'
 test('a pending identity parked under a different state is invisible to this flow', async () => {
 	const res = await captureAction(cookiesWithPending(NEW_SUB, 'state-a'), { consent: 'on' }, 'state-b');
 	expect(res).toMatchObject({ status: 400 });
-	expect(await testDb().db.select().from(users).all()).toHaveLength(0);
-	expect(await testDb().db.select().from(consents).all()).toHaveLength(0);
+	await expectNothingWritten();
 });
 
 test('concurrent flows are isolated by state — each tab consents its own identity', async () => {

@@ -63,6 +63,17 @@ export const actions: Actions = {
 		// Marketing is a separate, unbundled opt-in (LGPD) — unticked means no.
 		const marketingOptIn = form.get('marketing') === 'on' ? 1 : 0;
 
+		// One builder for the evidentiary row so the new-account and
+		// re-acceptance paths cannot drift apart.
+		const consentRecord = (userId: string) => ({
+			userId,
+			docVersion: LEGAL_VERSION,
+			checkboxText: CONSENT_CHECKBOX_TEXT,
+			ip: getClientAddress(),
+			userAgent: request.headers.get('user-agent') ?? '',
+			marketingOptIn
+		});
+
 		let userId: string;
 		if (pending.kind === 'new') {
 			// The account is created ONLY now that the contract has formed. The
@@ -89,28 +100,14 @@ export const actions: Actions = {
 					.update(channels)
 					.set({ userId: user.id })
 					.where(and(isNull(channels.userId), sql`(select count(*) from ${users}) = 1`));
-				await tx.insert(consents).values({
-					userId: user.id,
-					docVersion: LEGAL_VERSION,
-					checkboxText: CONSENT_CHECKBOX_TEXT,
-					ip: getClientAddress(),
-					userAgent: request.headers.get('user-agent') ?? '',
-					marketingOptIn
-				});
+				await tx.insert(consents).values(consentRecord(user.id));
 				return user;
 			});
 			userId = created.id;
 		} else {
 			const user = await db.select({ id: users.id }).from(users).where(eq(users.id, pending.userId)).get();
 			if (!user) return fail(400, { error: 'Your sign-in session expired — please sign in again.' });
-			await db.insert(consents).values({
-				userId: user.id,
-				docVersion: LEGAL_VERSION,
-				checkboxText: CONSENT_CHECKBOX_TEXT,
-				ip: getClientAddress(),
-				userAgent: request.headers.get('user-agent') ?? '',
-				marketingOptIn
-			});
+			await db.insert(consents).values(consentRecord(user.id));
 			userId = user.id;
 		}
 

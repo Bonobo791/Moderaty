@@ -33,7 +33,7 @@ import { eq } from 'drizzle-orm';
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { makeCookies, makeCookiesWithState } from '$lib/server/testcookies';
-import { consents, sessions, users } from '$lib/server/db/schema';
+import { channels, consents, sessions, users } from '$lib/server/db/schema';
 import { LEGAL_VERSION, PENDING_CONSENT_COOKIE, readPendingConsent } from '$lib/server/legal';
 import { GET as startLogin } from './+server';
 import { GET as loginCallback } from './callback/+server';
@@ -247,7 +247,13 @@ test('a repeat login with the same sub reuses the account', async () => {
 
 test('signing back in within the retention window restores a soft-deleted account', async () => {
 	const userId = await seedConsentedUser('sub-1');
-	await testDb().db.update(users).set({ deletedAt: '2026-07-01T00:00:00.000Z' }).where(eq(users.id, userId));
+	// Derived from the current clock: a fixed date would silently cross the
+	// 180-day boundary one day and flip this test to the purge path.
+	const inWindow = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+	await testDb().db.update(users).set({ deletedAt: inWindow }).where(eq(users.id, userId));
+	// Deletion leaves channels inactive; restoration must NOT re-enable them —
+	// moderation never resumes silently.
+	await testDb().db.insert(channels).values({ id: 'UC1', userId, title: 'Mine', refreshTokenEnc: 'enc', active: 0 });
 	stubTokenAndUserinfo({ sub: 'sub-1', email: 'one@example.com', name: 'One' });
 	const cookies = makeCookiesWithState('s');
 
@@ -260,6 +266,7 @@ test('signing back in within the retention window restores a soft-deleted accoun
 	expect(restored).toHaveLength(1);
 	expect(restored[0].deletedAt).toBeNull();
 	expect(await testDb().db.select().from(sessions).all()).toHaveLength(1);
+	expect((await testDb().db.select().from(channels).all())[0].active).toBe(0);
 });
 
 test('a sign-in past the retention window purges the account and starts a fresh signup', async () => {

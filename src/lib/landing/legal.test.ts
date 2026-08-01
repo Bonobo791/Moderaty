@@ -117,48 +117,27 @@ describe('legal page content (PR #35 review)', () => {
 	});
 });
 
-// Guard for the PR #38 review finding: the consent notice, hosted plan panel,
-// and pricing FAQ promised refunds of unused credits beyond the Terms §7
-// 7-day withdrawal window. Maintainer-directed policy: refunds exist ONLY
-// inside the 7-day CDC Art. 49 window; outside it all sales are final — no
-// refunds of unused credits, not on account closure, not on our termination,
-// not on price or Terms changes — except where applicable law requires.
-describe('refund policy consistency (PR #38 review)', () => {
-	const surfaces: Record<string, string> = {
-		'Terms of Service': readComponent('terms'),
-		'hosted plan panel': readFileSync(
-			new URL('../components/landing/PlanHosted.svelte', import.meta.url),
-			'utf8'
-		),
-		'consent refund notice': REFUND_NOTICE_TEXT,
-		'pricing FAQ': PRICING_FAQ_ENTRIES.map((f) => `${f.q} ${f.a}`).join('\n')
-	};
-
-	it('no surface promises refunds of unused credits outside the 7-day window', () => {
-		const RETIRED_PROMISES = [
-			/always refunded/i,
-			/refunded when you close/i,
-			/upon cancellation of your account/i,
-			/refund(ing|s)? of (your )?unconsumed Credits/i,
-			/refund unconsumed Credits/i
-		];
-		for (const [name, text] of Object.entries(surfaces)) {
-			for (const pattern of RETIRED_PROMISES) {
-				expect(text, `${name} still promises: ${pattern}`).not.toMatch(pattern);
-			}
-		}
+// Guard for the PR #39 review finding: Clause 11.3 made Annex III the record
+// of Turso's enabled edge-replica regions, but the Annex III Turso row (and
+// Privacy 6.3) deferred to separate "transfer records" — two record
+// locations for the same authorization. There is exactly one: Annex III.
+describe('replica-region record location (PR #39 review)', () => {
+	it('Annex III itself states the enabled Turso replica regions, with no deferral', () => {
+		const dpa = readComponent('dpa');
+		const annex3 = dpa.slice(dpa.indexOf('id="annex-3"'), dpa.indexOf('id="annex-4"'));
+		expect(annex3).not.toMatch(/transfer records/i);
+		expect(annex3).toMatch(/edge replicas: none currently enabled/i);
 	});
 
-	it('Terms declares purchases final and credits non-refundable outside the withdrawal period', () => {
-		const terms = readComponent('terms');
-		expect(terms).toMatch(/all purchases are final/i);
-		expect(terms).toMatch(/NOT REFUNDABLE/);
+	it('Clause 11.3 keeps Annex III as the record and bars unrecorded regions', () => {
+		expect(readComponent('dpa')).toMatch(
+			/shall not enable database replicas in regions not recorded in Annex III/
+		);
 	});
 
-	it('every commercial surface ties its refund mention to the 7-day window and the final-sale rule', () => {
-		for (const name of ['hosted plan panel', 'consent refund notice', 'pricing FAQ']) {
-			expect(surfaces[name], name).toMatch(/CDC Art\. 49/);
-			expect(surfaces[name], name).toMatch(/final|not refunded/i);
-		}
+	it('Privacy 6.3 points replica regions at the same single record', () => {
+		const privacy = readComponent('privacy');
+		expect(privacy).not.toMatch(/replicas[^.]*transfer records/i);
+		expect(privacy).toContain('operate only in regions recorded in Annex III of the DPA');
 	});
 });

@@ -267,7 +267,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 </p>
 <p>
 	<strong>11.3</strong> The Processor shall maintain in Annex III a current record of the
-	transfer mechanism relied upon for each sub-processor and shall update it upon any change.
+	transfer mechanism relied upon for each sub-processor — including, for Turso, the specific
+	edge-replica regions enabled at any time — and shall update it upon any change. The Processor
+	shall not enable database replicas in regions not recorded in Annex III.
 </p>
 
 <h2 id="s12">12. Security Measures</h2>
@@ -617,7 +619,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			</tr>
 			<tr>
 				<td>Netlify, Inc.</td>
-				<td>Application hosting and serverless functions</td>
+				<td>Application hosting and delivery (website, application, and serverless functions)</td>
 				<td>United States</td>
 				<td>ANPD SCCs (Annex IV)</td>
 			</tr>
@@ -629,16 +631,26 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			</tr>
 			<tr>
 				<td>Turso (ChiselStrike, Inc.)</td>
-				<td>Database: Moderation Outcome Data storage</td>
-				<td>United States (region per instance)</td>
+				<td>Database hosting for account data and Moderation Outcome Data</td>
+				<td>
+					United States (primary); edge replicas: none currently enabled — a region
+					may be enabled only after being recorded in this Annex III
+				</td>
 				<td>ANPD SCCs (Annex IV)</td>
+			</tr>
+			<tr>
+				<td>[E-mail delivery provider]</td>
+				<td>Transactional e-mail (notices, receipts, security alerts)</td>
+				<td>[Region]</td>
+				<td>ANPD SCCs (Annex IV) if outside Brazil</td>
 			</tr>
 		</tbody>
 	</table>
 </div>
 <p>
-	Billing processors (e.g., Stripe) handle Controller-side billing data for which the Processor
-	is controller and are outside the scope of this DPA.
+	Additions or replacements follow the notice-and-objection procedure of Clause 10.1. Billing
+	processors (e.g., Stripe) handle Controller-side billing data for which the Processor is
+	controller and are outside the scope of this DPA.
 </p>
 
 <h2 id="annex-4">Annex IV — International Transfer Mechanism (ANPD Standard Contractual Clauses)</h2>

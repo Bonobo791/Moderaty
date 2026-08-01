@@ -23,10 +23,11 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	import { GITHUB_URL, LOGIN_URL } from '$lib/landing/links';
 
 	const LINKS = [
-		{ label: 'How it works', href: '#how-it-works' },
-		{ label: 'Who gets bonked', href: '#regulars' },
-		{ label: 'The numbers', href: '#numbers' },
-		{ label: 'FAQ', href: '#faq' }
+		{ label: 'How it works', href: '/#how-it-works' },
+		{ label: 'Who gets bonked', href: '/#regulars' },
+		{ label: 'The numbers', href: '/#numbers' },
+		{ label: 'Pricing', href: '/pricing' },
+		{ label: 'FAQ', href: '/#faq' }
 	];
 
 	let open = $state(false);
@@ -34,7 +35,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <header class="nav">
 	<div class="nav-inner">
-		<a href="#top" class="wordmark">Moderaty</a>
+		<a href="/#top" class="wordmark">Moderaty</a>
 		<nav class="links" aria-label="Primary">
 			{#each LINKS as l}
 				<a href={l.href} class="link">{l.label}</a>

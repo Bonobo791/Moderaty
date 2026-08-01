@@ -62,7 +62,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <p><strong>5.1</strong> The Service uses YouTube API Services. By using the Service, you agree to be bound by the YouTube Terms of Service, available at <a href="https://www.youtube.com/t/terms" target="_blank" rel="noreferrer">https://www.youtube.com/t/terms</a>, and by the YouTube Community Guidelines.</p>
 
-<p><strong>5.2</strong> Our use of information received from YouTube API Services is described in our Privacy Policy, which references the Google Privacy Policy at <a href="http://www.google.com/policies/privacy" target="_blank" rel="noreferrer">http://www.google.com/policies/privacy</a>.</p>
+<p><strong>5.2</strong> Our use of information received from YouTube API Services is described in our Privacy Policy, which references the Google Privacy Policy at <a href="" target="_blank" rel="noreferrer"></a>.</p>
 
 <p><strong>5.3</strong> You can revoke the Service's access to your YouTube data at any time via the Google security settings page at <a href="https://security.google.com/settings/security/permissions" target="_blank" rel="noreferrer">https://security.google.com/settings/security/permissions</a>. Revoking access disables the Service for the affected channel; Moderation Outcome Data is then handled as described in the DPA.</p>
 

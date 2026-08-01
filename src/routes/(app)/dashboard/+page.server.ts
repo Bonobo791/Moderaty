@@ -22,6 +22,11 @@ import { requireUser, SESSION_COOKIE } from '$lib/server/session';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { fail, redirect } from '@sveltejs/kit';
 
+/**
+ * Loads the authenticated user's channels and moderation statistics for the dashboard.
+ *
+ * @returns The user's channels, comment counts grouped by channel and status, and completed ban counts grouped by channel.
+ */
 export async function load({ locals }) {
 	const user = requireUser(locals);
 	// Project only the fields the page renders; never serialize refreshTokenEnc

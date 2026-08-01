@@ -58,13 +58,13 @@ async function purgeExpiredUser(): Promise<string | null> {
 	await db.transaction(async (tx) => {
 		const chs = await tx.select({ id: channels.id }).from(channels).where(eq(channels.userId, expired.id)).all();
 		const channelIds = chs.map((ch) => ch.id);
-		if (channelIds.length) {
+		if (channelIds.length > 0) {
 			await tx.delete(moderationActions).where(inArray(moderationActions.channelId, channelIds));
 			await tx.delete(comments).where(inArray(comments.channelId, channelIds));
 			await tx.delete(auditLog).where(inArray(auditLog.channelId, channelIds));
 			await tx.delete(rules).where(inArray(rules.channelId, channelIds));
+			await tx.delete(channels).where(eq(channels.userId, expired.id));
 		}
-		await tx.delete(channels).where(eq(channels.userId, expired.id));
 		await tx.delete(sessions).where(eq(sessions.userId, expired.id));
 		await tx
 			.update(users)

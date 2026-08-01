@@ -21,8 +21,8 @@ import { FAQ_ENTRIES } from './faq';
 import { SCRIPT } from './queue-script';
 
 describe('landing copy guardrails', () => {
-	it('ships exactly the 8 FAQ pairs, each a real question with a real answer', () => {
-		expect(FAQ_ENTRIES).toHaveLength(8);
+	it('ships exactly the 9 FAQ pairs, each a real question with a real answer', () => {
+		expect(FAQ_ENTRIES).toHaveLength(9);
 		for (const { q, a } of FAQ_ENTRIES) {
 			expect(q.endsWith('?')).toBe(true);
 			expect(a.length).toBeGreaterThan(40);

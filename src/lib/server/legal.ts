@@ -52,6 +52,17 @@ export const CONSENT_CHECKBOX_TEXT =
 export const MARKETING_CHECKBOX_TEXT =
 	'Send me occasional product updates and moderation tips by e-mail (optional)';
 
+/**
+ * Refund notice shown on the consent page, below the form. Mirrors Terms §7
+ * (maintainer-directed, PR #38 review): CDC Art. 49 withdrawal covers a full
+ * refund within 7 days of purchase; outside that window all sales are final,
+ * unused credits included. Kept OUT of CONSENT_CHECKBOX_TEXT
+ * on purpose: the checkbox sentence is an evidentiary artifact logged
+ * verbatim per consent row and never changes without a doc-version bump.
+ */
+export const REFUND_NOTICE_TEXT =
+	'Every purchase is covered by Brazilian consumer law: you have 7 days from purchase to request a full refund, no questions asked (CDC Art. 49). After that, all sales are final and unused credits are not refunded.';
+
 export const PENDING_CONSENT_COOKIE = 'moderaty_consent_pending';
 const PENDING_TTL_MS = 10 * 60 * 1000;
 // Bounds the cookie; a user realistically has one or two tabs mid-flow. Same

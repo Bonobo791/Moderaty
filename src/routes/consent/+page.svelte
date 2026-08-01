@@ -58,6 +58,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			</label>
 			<button class="btn" type="submit">{data.kind === 'new' ? 'Create account' : 'Accept and continue'}</button>
 		</form>
+		<p class="refund-note">{data.refundText}</p>
 	</div>
 </main>
 
@@ -90,5 +91,11 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	.consent-card .btn {
 		justify-self: start;
 		margin-top: 4px;
+	}
+	.refund-note {
+		margin: 20px 0 0;
+		font-size: 12px;
+		line-height: 1.6;
+		color: var(--ink-2);
 	}
 </style>

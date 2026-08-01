@@ -17,17 +17,34 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { expect, test } from 'vitest';
-import { setupTestDb, testDb } from '$lib/server/testdb';
-import { channels } from '$lib/server/db/schema';
+import { postForm, setupTestDb, testDb } from '$lib/server/testdb';
+import { makeCookies } from '$lib/server/testcookies';
+import { channels, sessions, users } from '$lib/server/db/schema';
 
-import { load } from './+page.server';
+import { actions, load } from './+page.server';
 
-setupTestDb(['comments', 'channels']);
+setupTestDb(['comments', 'channels', 'users', 'sessions']);
 
 const OWNER = { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' };
 
 function loadDashboard(user: typeof OWNER | null = OWNER) {
 	return load({ locals: { user } } as never);
+}
+
+async function seedActiveUser() {
+	await testDb().db.insert(users).values({ id: OWNER.id, googleSub: 'sub-1', email: OWNER.email, displayName: OWNER.displayName });
+	await testDb().db.insert(sessions).values({ id: 'sess-1', userId: OWNER.id, expiresAt: '2027-01-01T00:00:00.000Z' });
+	await testDb().db.insert(channels).values({ id: 'UC1', userId: OWNER.id, title: 'Mine', refreshTokenEnc: 'enc', active: 1 });
+}
+
+async function captureDelete(user: typeof OWNER | null, fields: Record<string, string>) {
+	const cookies = makeCookies();
+	try {
+		const res = await actions.deleteAccount({ request: postForm(fields), locals: { user }, cookies } as never);
+		return { res, cookies };
+	} catch (e) {
+		return { res: e as { status: number; location?: string }, cookies };
+	}
 }
 
 test('dashboard load never serializes the encrypted refresh token', async () => {
@@ -58,4 +75,34 @@ test('dashboard load shows only the signed-in user\'s channels', async () => {
 
 test('dashboard load rejects a signed-out request with 401', async () => {
 	await expect(loadDashboard(null)).rejects.toMatchObject({ status: 401 });
+});
+
+test('delete account rejects a signed-out request with 401', async () => {
+	const { res } = await captureDelete(null, { confirm: 'on' });
+	expect(res).toMatchObject({ status: 401 });
+});
+
+test('delete account without the confirmation checkbox writes nothing', async () => {
+	await seedActiveUser();
+
+	const { res } = await captureDelete(OWNER, {});
+
+	expect(res).toMatchObject({ status: 400 });
+	expect((await testDb().db.select().from(users).all())[0].deletedAt).toBeNull();
+	expect(await testDb().db.select().from(sessions).all()).toHaveLength(1);
+	expect((await testDb().db.select().from(channels).all())[0].active).toBe(1);
+});
+
+test('delete account soft-deletes, destroys sessions, deactivates channels, and signs out', async () => {
+	await seedActiveUser();
+
+	const { res, cookies } = await captureDelete(OWNER, { confirm: 'on' });
+
+	expect(res).toMatchObject({ status: 302, location: '/' });
+	const deleted = await testDb().db.select().from(users).all();
+	expect(deleted).toHaveLength(1);
+	expect(deleted[0].deletedAt).toBeTruthy();
+	expect(await testDb().db.select().from(sessions).all()).toHaveLength(0);
+	expect((await testDb().db.select().from(channels).all())[0].active).toBe(0);
+	expect(cookies.deleteCalls.some((c) => c.name === 'moderaty_session')).toBe(true);
 });

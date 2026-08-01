@@ -18,7 +18,7 @@
 
 import { beforeEach, expect, test, vi } from 'vitest';
 import { setupTestDb, testDb } from '$lib/server/testdb';
-import { channels } from '$lib/server/db/schema';
+import { auditLog, channels, comments, consents, moderationActions, rules, sessions, users } from '$lib/server/db/schema';
 
 // Synthetic credential fixture — same maintainer-approved exception as
 // netlify/cron.test.mjs (2026-07-30, PR #13 review, per AGENTS.md).
@@ -32,7 +32,42 @@ vi.mock('$lib/server/pipeline', () => ({ runChannel: mocks.runChannel }));
 
 import { GET } from './+server';
 
-setupTestDb(['channels']);
+setupTestDb(['channels', 'users', 'sessions', 'rules', 'comments', 'moderation_actions', 'audit_log', 'consents']);
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Seeds a user with one of every owned record, channel inactive (as deletion leaves it). */
+async function seedUserWithData(id: string, deletedAt: string | null) {
+	await testDb().db.insert(users).values({ id, googleSub: `sub-${id}`, email: `${id}@example.com`, displayName: id, deletedAt });
+	await testDb().db.insert(sessions).values({ id: `sess-${id}`, userId: id, expiresAt: new Date(Date.now() + DAY_MS).toISOString() });
+	await testDb().db.insert(channels).values({ id: `UC-${id}`, userId: id, title: 'T', refreshTokenEnc: 'enc', active: 0 });
+	await testDb().db.insert(rules).values({ channelId: `UC-${id}`, type: 'keyword', pattern: 'spam', action: 'reject' });
+	await testDb().db.insert(comments).values({
+		id: `c-${id}`,
+		channelId: `UC-${id}`,
+		authorChannelId: 'a',
+		authorName: 'A',
+		text: 'hi',
+		publishedAt: '2026-01-01T00:00:00.000Z',
+		status: 'pending',
+		decidedBy: 'none'
+	});
+	await testDb().db.insert(moderationActions).values({ commentId: `c-${id}`, channelId: `UC-${id}`, action: 'reject', reason: 'r', state: 'pending' });
+	await testDb().db.insert(auditLog).values({ channelId: `UC-${id}`, commentId: `c-${id}`, action: 'queue', reason: 'r', actor: 'system' });
+	await testDb().db.insert(consents).values({ userId: id, docVersion: '1.0', checkboxText: 'text', ip: '1.2.3.4', userAgent: 'ua' });
+}
+
+async function ownedRowCounts(id: string) {
+	return {
+		sessions: (await testDb().db.select().from(sessions).all()).filter((r) => r.userId === id).length,
+		channels: (await testDb().db.select().from(channels).all()).filter((r) => r.userId === id).length,
+		rules: (await testDb().db.select().from(rules).all()).filter((r) => r.channelId === `UC-${id}`).length,
+		comments: (await testDb().db.select().from(comments).all()).filter((r) => r.channelId === `UC-${id}`).length,
+		actions: (await testDb().db.select().from(moderationActions).all()).filter((r) => r.channelId === `UC-${id}`).length,
+		audit: (await testDb().db.select().from(auditLog).all()).filter((r) => r.channelId === `UC-${id}`).length,
+		consents: (await testDb().db.select().from(consents).all()).filter((r) => r.userId === id).length
+	};
+}
 
 beforeEach(() => {
 	mocks.env.CRON_SECRET = 'test-secret';
@@ -101,4 +136,49 @@ test('runs the channel with a server-side deadline inside the caller abort windo
 	const deadline = mocks.runChannel.mock.calls[0][1].deadline;
 	expect(deadline - before).toBeGreaterThanOrEqual(19_000);
 	expect(deadline - before).toBeLessThanOrEqual(21_000);
+});
+
+test('purges a user whose 6-month retention expired, keeping only the consent log', async () => {
+	mocks.env.DRY_RUN = 'false';
+	await seedUserWithData('old', new Date(Date.now() - 181 * DAY_MS).toISOString());
+
+	const res = await call({ bearer: 'test-secret' });
+
+	expect(await res.json()).toMatchObject({ ok: true, purged: 'old' });
+	expect(await ownedRowCounts('old')).toEqual({ sessions: 0, channels: 0, rules: 0, comments: 0, actions: 0, audit: 0, consents: 1 });
+	const tombstone = (await testDb().db.select().from(users).all())[0];
+	expect(tombstone).toMatchObject({ id: 'old', googleSub: 'deleted:old', email: '[deleted]', displayName: '[deleted]' });
+});
+
+test('leaves a user inside the retention window untouched', async () => {
+	mocks.env.DRY_RUN = 'false';
+	await seedUserWithData('recent', new Date(Date.now() - 100 * DAY_MS).toISOString());
+
+	const res = await call({ bearer: 'test-secret' });
+
+	expect(await res.json()).toMatchObject({ ok: true, purged: null });
+	expect((await testDb().db.select().from(users).all())[0].googleSub).toBe('sub-recent');
+	expect(await ownedRowCounts('recent')).toEqual({ sessions: 1, channels: 1, rules: 1, comments: 1, actions: 1, audit: 1, consents: 1 });
+});
+
+test('purges only one expired user per invocation, oldest first (I10)', async () => {
+	mocks.env.DRY_RUN = 'false';
+	await seedUserWithData('older', new Date(Date.now() - 200 * DAY_MS).toISOString());
+	await seedUserWithData('newer', new Date(Date.now() - 190 * DAY_MS).toISOString());
+
+	const res = await call({ bearer: 'test-secret' });
+
+	expect(await res.json()).toMatchObject({ purged: 'older' });
+	expect((await testDb().db.select().from(users).all()).find((u) => u.id === 'newer')!.googleSub).toBe('sub-newer');
+	expect(await ownedRowCounts('newer')).toEqual({ sessions: 1, channels: 1, rules: 1, comments: 1, actions: 1, audit: 1, consents: 1 });
+});
+
+test('a dry run skips the purge entirely (I8)', async () => {
+	await seedUserWithData('old', new Date(Date.now() - 181 * DAY_MS).toISOString());
+
+	const res = await call({ bearer: 'test-secret' });
+
+	expect(await res.json()).toMatchObject({ ok: true, dryRun: true, purged: null });
+	expect((await testDb().db.select().from(users).all())[0].googleSub).toBe('sub-old');
+	expect(await ownedRowCounts('old')).toEqual({ sessions: 1, channels: 1, rules: 1, comments: 1, actions: 1, audit: 1, consents: 1 });
 });

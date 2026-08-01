@@ -29,6 +29,8 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
+import { eq } from 'drizzle-orm';
+
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { makeCookies, makeCookiesWithState } from '$lib/server/testcookies';
 import { consents, sessions, users } from '$lib/server/db/schema';
@@ -241,4 +243,21 @@ test('a repeat login with the same sub reuses the account', async () => {
 
 	expect(await testDb().db.select().from(users).all()).toHaveLength(1);
 	expect(await testDb().db.select().from(sessions).all()).toHaveLength(2);
+});
+
+test('signing back in within the retention window restores a soft-deleted account', async () => {
+	const userId = await seedConsentedUser('sub-1');
+	await testDb().db.update(users).set({ deletedAt: '2026-07-01T00:00:00.000Z' }).where(eq(users.id, userId));
+	stubTokenAndUserinfo({ sub: 'sub-1', email: 'one@example.com', name: 'One' });
+	const cookies = makeCookiesWithState('s');
+
+	await expect(loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never)).rejects.toMatchObject({
+		status: 302,
+		location: '/dashboard'
+	});
+
+	const restored = await testDb().db.select().from(users).all();
+	expect(restored).toHaveLength(1);
+	expect(restored[0].deletedAt).toBeNull();
+	expect(await testDb().db.select().from(sessions).all()).toHaveLength(1);
 });

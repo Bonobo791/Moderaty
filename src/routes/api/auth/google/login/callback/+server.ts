@@ -96,7 +96,8 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 	}
 	// Signing back in WITHIN the 6-month retention window cancels a pending
 	// deletion. Channels stay inactive (active=0 from the deletion) until the
-	// user re-enables them — moderation never resumes silently.
+	// user re-enables them — moderation never resumes silently. (Accounts past
+	// the window never reach here — they are purged inline above.)
 	if (user.deletedAt) {
 		await db.update(users).set({ deletedAt: null }).where(eq(users.id, user.id));
 		console.info(`account ${user.id} restored by sign-in; pending deletion cancelled`);

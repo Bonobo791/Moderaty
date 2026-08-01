@@ -633,8 +633,8 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				<td>Turso (ChiselStrike, Inc.)</td>
 				<td>Database hosting for account data and Moderation Outcome Data</td>
 				<td>
-					United States (primary); edge replicas only in regions recorded in the
-					Processor's transfer records
+					United States (primary); edge replicas: none currently enabled — a region
+					may be enabled only after being recorded in this Annex III
 				</td>
 				<td>ANPD SCCs (Annex IV)</td>
 			</tr>

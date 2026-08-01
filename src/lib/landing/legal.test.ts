@@ -114,3 +114,28 @@ describe('legal page content (PR #35 review)', () => {
 		}
 	});
 });
+
+// Guard for the PR #39 review finding: Clause 11.3 made Annex III the record
+// of Turso's enabled edge-replica regions, but the Annex III Turso row (and
+// Privacy 6.3) deferred to separate "transfer records" — two record
+// locations for the same authorization. There is exactly one: Annex III.
+describe('replica-region record location (PR #39 review)', () => {
+	it('Annex III itself states the enabled Turso replica regions, with no deferral', () => {
+		const dpa = readComponent('dpa');
+		const annex3 = dpa.slice(dpa.indexOf('id="annex-3"'), dpa.indexOf('id="annex-4"'));
+		expect(annex3).not.toMatch(/transfer records/i);
+		expect(annex3).toMatch(/edge replicas: none currently enabled/i);
+	});
+
+	it('Clause 11.3 keeps Annex III as the record and bars unrecorded regions', () => {
+		expect(readComponent('dpa')).toMatch(
+			/shall not enable database replicas in regions not recorded in Annex III/
+		);
+	});
+
+	it('Privacy 6.3 points replica regions at the same single record', () => {
+		const privacy = readComponent('privacy');
+		expect(privacy).not.toMatch(/replicas[^.]*transfer records/i);
+		expect(privacy).toContain('operate only in regions recorded in Annex III of the DPA');
+	});
+});

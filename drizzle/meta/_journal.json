@@ -64,6 +64,13 @@
       "when": 1785622824165,
       "tag": "0008_aromatic_red_wolf",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1785627509871,
+      "tag": "0009_users_deleted_at_idx",
+      "breakpoints": true
     }
   ]
 }

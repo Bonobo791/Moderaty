@@ -29,7 +29,10 @@ export const users = sqliteTable('users', {
 	// in. Rows past the 6-month retention are anonymized by the cron purge.
 	deletedAt: text('deleted_at'),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
-});
+}, (table) => [
+	// The cron retention purge filters/orders by deleted_at every invocation.
+	index('users_deleted_at_idx').on(table.deletedAt)
+]);
 
 export const sessions = sqliteTable('sessions', {
 	id: text('id').primaryKey(), // random 32-byte hex token; also the cookie value

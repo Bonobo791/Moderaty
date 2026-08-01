@@ -20,7 +20,7 @@ import { error, fail, redirect } from '@sveltejs/kit';
 
 import { randomBytes } from 'node:crypto';
 
-import { eq, isNull, sql } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
 import { channels, consents, users } from '$lib/server/db/schema';
@@ -65,13 +65,13 @@ export const actions: Actions = {
 		if (pending.kind === 'new') {
 			// The account is created ONLY now that the contract has formed. The
 			// orphan claim is one-time initialization — only the FIRST user ever
-			// created (users table empty before this insert) takes the
-			// pre-accounts ownerless channels. The transaction keeps the check,
-			// the insert, the claim, and the consent record atomic; the
-			// conflict-tolerant insert + re-select absorbs a concurrent same-sub
-			// sign-up.
+			// (users holding exactly this one row after the insert) takes the
+			// pre-accounts ownerless channels. The count is part of the UPDATE
+			// itself, so a concurrent first sign-up whose transaction is
+			// serialized after this one sees count=2 and claims nothing. The
+			// conflict-tolerant insert + re-select absorbs a concurrent
+			// same-sub sign-up.
 			const created = await db.transaction(async (tx) => {
-				const count = await tx.select({ n: sql<number>`count(*)` }).from(users).get();
 				await tx
 					.insert(users)
 					.values({
@@ -83,9 +83,10 @@ export const actions: Actions = {
 					.onConflictDoNothing();
 				const user = await tx.select().from(users).where(eq(users.googleSub, pending.sub)).get();
 				if (!user) throw error(500, 'account creation failed — please retry');
-				if (count?.n === 0) {
-					await tx.update(channels).set({ userId: user.id }).where(isNull(channels.userId));
-				}
+				await tx
+					.update(channels)
+					.set({ userId: user.id })
+					.where(and(isNull(channels.userId), sql`(select count(*) from ${users}) = 1`));
 				await tx.insert(consents).values({
 					userId: user.id,
 					docVersion: LEGAL_VERSION,

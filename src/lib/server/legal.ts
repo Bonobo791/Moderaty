@@ -28,10 +28,13 @@ import { cookieSecure } from '$lib/server/oauthState';
 
 /**
  * Version of the legal document bundle (Terms of Service, Privacy Policy,
- * Data Processing Agreement). Bump on ANY material change: every user whose
- * latest consent row predates the new version re-accepts at next login.
+ * Data Processing Agreement). The label is declared with the documents
+ * themselves in src/lib/landing/legal.ts and re-exported here so the consent
+ * log names the exact document version the user saw. Bump on ANY material
+ * change: every user whose latest consent row predates the new version
+ * re-accepts at next login.
  */
-export const LEGAL_VERSION = 'v1.0';
+export { LEGAL_VERSION } from '$lib/landing/legal';
 
 /**
  * The exact text of the required consent checkbox, stored verbatim in each
@@ -96,7 +99,9 @@ export function readPendingConsent(cookies: Cookies): PendingConsent | null {
 		typeof parsed.sub === 'string' &&
 		parsed.sub &&
 		typeof parsed.email === 'string' &&
-		typeof parsed.displayName === 'string'
+		parsed.email &&
+		typeof parsed.displayName === 'string' &&
+		parsed.displayName
 	) {
 		return { kind: 'new', sub: parsed.sub, email: parsed.email, displayName: parsed.displayName };
 	}

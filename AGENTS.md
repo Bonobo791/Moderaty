@@ -166,9 +166,10 @@ callback itself: login parks the identity in the encrypted
 single transaction that creates the user and writes a `consents` row
 (userId, `doc_version`, exact checkbox text, IP, user agent) — the
 evidentiary log. The visible checkbox sentence must stay byte-identical to
-`CONSENT_CHECKBOX_TEXT`. On material legal-doc changes bump `LEGAL_VERSION`;
-users whose consent predates it are routed back through `/consent` on next
-login.
+`CONSENT_CHECKBOX_TEXT`. On material legal-doc changes bump `LEGAL_VERSION`
+(declared with the documents in `src/lib/landing/legal.ts`, re-exported from
+`src/lib/server/legal.ts`); users whose consent predates it are routed back
+through `/consent` on next login.
 
 ## Commands
 

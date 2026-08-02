@@ -40,7 +40,15 @@ import { GET as authCallback } from './+server';
 
 setupTestDb(['channels']);
 
-const OWNER = { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' };
+const OWNER = {
+	id: 'user-1',
+	email: 'one@example.com',
+	displayName: 'One',
+	plan: 'free',
+	orgId: 'org-1',
+	orgName: 'One',
+	orgRole: 'owner'
+} as const;
 
 afterEach(() => {
 	vi.unstubAllGlobals();
@@ -84,33 +92,49 @@ test('a new channel is inserted and attached to the caller', async () => {
 
 	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
 	const row = await testDb().db.select().from(channels).get();
-	expect(row).toMatchObject({ id: 'UC123', userId: OWNER.id, title: 'My Channel' });
+	expect(row).toMatchObject({ id: 'UC123', userId: OWNER.id, orgId: 'org-1', title: 'My Channel' });
 	expect(row?.refreshTokenEnc).not.toBe('refresh-token');
 });
 
 test('a channel already owned by the caller is updated', async () => {
 	await testDb()
 		.db.insert(channels)
-		.values({ id: 'UC123', userId: OWNER.id, title: 'Old title', refreshTokenEnc: 'old-enc', active: 0 });
+		.values({ id: 'UC123', userId: OWNER.id, orgId: 'org-1', title: 'Old title', refreshTokenEnc: 'old-enc', active: 0 });
 	stubTokenAndChannel();
 
 	const thrown = await captureCallback();
 
 	expect(thrown).toMatchObject({ status: 302 });
 	const row = await testDb().db.select().from(channels).get();
-	expect(row).toMatchObject({ id: 'UC123', userId: OWNER.id, title: 'My Channel', active: 1 });
+	expect(row).toMatchObject({ id: 'UC123', userId: OWNER.id, orgId: 'org-1', title: 'My Channel', active: 1 });
 	expect(row?.refreshTokenEnc).not.toBe('old-enc');
 });
 
-test('a channel owned by another user stays unchanged and yields 409', async () => {
+test('a channel owned by a teammate is updated — the token-handover path', async () => {
+	// Same org, different connector: the re-connect hands the token over to
+	// the caller while the channel stays in the team.
 	await testDb()
 		.db.insert(channels)
-		.values({ id: 'UC123', userId: 'user-2', title: 'Not yours', refreshTokenEnc: 'foreign-enc' });
+		.values({ id: 'UC123', userId: 'user-2', orgId: 'org-1', title: 'Old title', refreshTokenEnc: 'old-enc', active: 0 });
+	stubTokenAndChannel();
+
+	const thrown = await captureCallback();
+
+	expect(thrown).toMatchObject({ status: 302 });
+	const row = await testDb().db.select().from(channels).get();
+	expect(row).toMatchObject({ id: 'UC123', userId: OWNER.id, orgId: 'org-1', title: 'My Channel', active: 1 });
+	expect(row?.refreshTokenEnc).not.toBe('old-enc');
+});
+
+test('a channel owned by another team stays unchanged and yields 409', async () => {
+	await testDb()
+		.db.insert(channels)
+		.values({ id: 'UC123', userId: 'user-2', orgId: 'org-2', title: 'Not yours', refreshTokenEnc: 'foreign-enc' });
 	stubTokenAndChannel();
 
 	const thrown = await captureCallback();
 
 	expect(thrown?.status).toBe(409);
 	const row = await testDb().db.select().from(channels).get();
-	expect(row).toMatchObject({ id: 'UC123', userId: 'user-2', title: 'Not yours', refreshTokenEnc: 'foreign-enc' });
+	expect(row).toMatchObject({ id: 'UC123', userId: 'user-2', orgId: 'org-2', title: 'Not yours', refreshTokenEnc: 'foreign-enc' });
 });

@@ -25,10 +25,18 @@ import { actions } from './+page.server';
 
 setupTestDb(['channels']);
 
-const OWNER = { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' };
+const OWNER = {
+	id: 'user-1',
+	email: 'one@example.com',
+	displayName: 'One',
+	plan: 'free',
+	orgId: 'org-1',
+	orgName: 'One',
+	orgRole: 'owner'
+} as const;
 
-async function seedChannel(id: string, userId: string | null = OWNER.id) {
-	await testDb().db.insert(channels).values({ id, userId, title: `Channel ${id}`, refreshTokenEnc: 'enc' });
+async function seedChannel(id: string, userId: string | null = OWNER.id, orgId: string | null = 'org-1') {
+	await testDb().db.insert(channels).values({ id, userId, orgId, title: `Channel ${id}`, refreshTokenEnc: 'enc' });
 }
 
 function setToneLevel(channelId: string, toneLevel: string, user: typeof OWNER | null = OWNER) {
@@ -67,8 +75,8 @@ test('rejects an unknown channel with 404', async () => {
 	expect(res).toMatchObject({ status: 404 });
 });
 
-test('rejects a channel owned by another user with 404 and changes nothing', async () => {
-	await seedChannel('UC1', 'user-2');
+test('rejects a channel owned by another team with 404 and changes nothing', async () => {
+	await seedChannel('UC1', 'user-2', 'org-2');
 
 	const res = await setToneLevel('UC1', '2');
 

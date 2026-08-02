@@ -249,8 +249,17 @@ test('the marketing opt-in is recorded separately and only when ticked', async (
 test('only the first-ever user claims orphaned channels', async () => {
 	await testDb().db.insert(channels).values({ id: 'UC1', title: 'Old', refreshTokenEnc: 'enc', active: 1, createdAt: '2026-01-01T00:00:00.000Z' });
 	await captureAction(cookiesWithPending(NEW_SUB), { consent: 'on' });
-	expect((await testDb().db.select().from(channels).all())[0].userId).toBe(
-		(await testDb().db.select().from(users).all())[0].id
+	const firstUser = (await testDb().db.select().from(users).all())[0];
+	const claimed = (await testDb().db.select().from(channels).all())[0];
+	expect(claimed.userId).toBe(firstUser.id);
+	// The claim also tenants the channel into the first user's personal org —
+	// an untenanted orphan would 404 for everyone under ownedChannel.
+	const personalOrg = (await testDb().db.select().from(organizations).all()).find((o) => o.personalFor === firstUser.id);
+	expect(personalOrg).toBeDefined();
+	expect(claimed.orgId).toBe(personalOrg?.id);
+	// And the first user is the org's owner, so the claim is actionable.
+	expect(await testDb().db.select().from(memberships).all()).toContainEqual(
+		expect.objectContaining({ userId: firstUser.id, orgId: personalOrg?.id, role: 'owner' })
 	);
 
 	// A second, distinct signup while another orphan exists must NOT claim it:
@@ -258,7 +267,9 @@ test('only the first-ever user claims orphaned channels', async () => {
 	await testDb().db.insert(channels).values({ id: 'UC2', title: 'Late', refreshTokenEnc: 'enc', active: 1, createdAt: '2026-01-01T00:00:00.000Z' });
 	await captureAction(cookiesWithPending({ kind: 'new', sub: 'sub-2', email: 'two@example.com', displayName: 'Two' }), { consent: 'on' });
 
-	expect((await testDb().db.select().from(channels).all()).find((c) => c.id === 'UC2')!.userId).toBeNull();
+	const unclaimed = (await testDb().db.select().from(channels).all()).find((c) => c.id === 'UC2')!;
+	expect(unclaimed.userId).toBeNull();
+	expect(unclaimed.orgId).toBeNull();
 });
 
 /** Seeds existing sub-1 and completes its re-consent. */

@@ -24,10 +24,18 @@ import { actions, load } from './+page.server';
 
 setupTestDb(['rules', 'channels']);
 
-const OWNER = { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' };
+const OWNER = {
+	id: 'user-1',
+	email: 'one@example.com',
+	displayName: 'One',
+	plan: 'free',
+	orgId: 'org-1',
+	orgName: 'One',
+	orgRole: 'owner'
+} as const;
 
-async function seedChannel(channelId: string, userId: string | null = OWNER.id) {
-	await testDb().db.insert(channels).values({ id: channelId, userId, title: 'Ch', refreshTokenEnc: 'enc' });
+async function seedChannel(channelId: string, userId: string | null = OWNER.id, orgId: string | null = 'org-1') {
+	await testDb().db.insert(channels).values({ id: channelId, userId, orgId, title: 'Ch', refreshTokenEnc: 'enc' });
 }
 
 const RULES_URL = 'http://localhost/channels/UC1/rules?/remove';
@@ -84,8 +92,8 @@ test('remove rejects a malformed ruleId with 400', async () => {
 	expect(rows[0].id).toBe(id);
 });
 
-test('remove on a channel owned by another user fails with 404', async () => {
-	await seedChannel('UC1', 'user-2');
+test('remove on a channel owned by another team fails with 404', async () => {
+	await seedChannel('UC1', 'user-2', 'org-2');
 	const id = await seedRule('UC1');
 
 	await expect(remove('UC1', String(id))).rejects.toMatchObject({ status: 404 });
@@ -108,8 +116,8 @@ function add(channelId: string, user: typeof OWNER | null = OWNER) {
 	} as never);
 }
 
-test('add on a channel owned by another user fails with 404 and inserts nothing', async () => {
-	await seedChannel('UC1', 'user-2');
+test('add on a channel owned by another team fails with 404 and inserts nothing', async () => {
+	await seedChannel('UC1', 'user-2', 'org-2');
 
 	await expect(add('UC1')).rejects.toMatchObject({ status: 404 });
 	expect(await ruleRows()).toHaveLength(0);

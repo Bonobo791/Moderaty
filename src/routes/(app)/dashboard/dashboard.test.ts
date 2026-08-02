@@ -39,7 +39,15 @@ setupTestDb([
 	'consents'
 ]);
 
-const OWNER = { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' };
+const OWNER = {
+	id: 'user-1',
+	email: 'one@example.com',
+	displayName: 'One',
+	plan: 'free',
+	orgId: 'org-1',
+	orgName: 'One',
+	orgRole: 'owner'
+} as const;
 
 function loadDashboard(user: typeof OWNER | null = OWNER) {
 	return load({ locals: { user } } as never);
@@ -54,7 +62,7 @@ async function seedActiveUser() {
 		.values({ id: 'sess-1', userId: OWNER.id, expiresAt: '2027-01-01T00:00:00.000Z' });
 	await testDb()
 		.db.insert(channels)
-		.values({ id: 'UC1', userId: OWNER.id, title: 'Mine', refreshTokenEnc: 'enc', active: 1 });
+		.values({ id: 'UC1', userId: OWNER.id, orgId: 'org-1', title: 'Mine', refreshTokenEnc: 'enc', active: 1 });
 }
 
 /** Token revocation succeeds. Returns the fetch spy for assertions. */
@@ -85,6 +93,7 @@ test('dashboard load never serializes the encrypted refresh token', async () => 
 	await testDb().db.insert(channels).values({
 		id: 'UC1',
 		userId: OWNER.id,
+		orgId: 'org-1',
 		title: 'One',
 		refreshTokenEnc: 'encrypted-refresh-token',
 		cursor: '2026-01-01T00:00:00Z'
@@ -98,13 +107,16 @@ test('dashboard load never serializes the encrypted refresh token', async () => 
 	expect(JSON.stringify(data)).not.toContain('encrypted-refresh-token');
 });
 
-test('dashboard load shows only the signed-in user\'s channels', async () => {
-	await testDb().db.insert(channels).values({ id: 'UC1', userId: OWNER.id, title: 'Mine', refreshTokenEnc: 'enc' });
-	await testDb().db.insert(channels).values({ id: 'UC2', userId: 'user-2', title: 'Theirs', refreshTokenEnc: 'enc' });
+test('dashboard load shows only the active team\'s channels', async () => {
+	await testDb().db.insert(channels).values({ id: 'UC1', userId: OWNER.id, orgId: 'org-1', title: 'Mine', refreshTokenEnc: 'enc' });
+	// A teammate's connection is the team's channel too — it MUST appear.
+	await testDb().db.insert(channels).values({ id: 'UC2', userId: 'user-2', orgId: 'org-1', title: 'Teammate', refreshTokenEnc: 'enc' });
+	// Another team's channel must not leak in.
+	await testDb().db.insert(channels).values({ id: 'UC3', userId: 'user-2', orgId: 'org-2', title: 'Theirs', refreshTokenEnc: 'enc' });
 
 	const data = await loadDashboard();
 
-	expect(data.chs.map((ch) => ch.id)).toEqual(['UC1']);
+	expect(data.chs.map((ch) => ch.id)).toEqual(['UC1', 'UC2']);
 });
 
 test('dashboard load rejects a signed-out request with 401', async () => {
@@ -195,7 +207,7 @@ test('a revocation failure on one channel does not stop the others', async () =>
 	await seedActiveUser();
 	await testDb()
 		.db.insert(channels)
-		.values({ id: 'UC2', userId: OWNER.id, title: 'Second', refreshTokenEnc: 'enc2', active: 1 });
+		.values({ id: 'UC2', userId: OWNER.id, orgId: 'org-1', title: 'Second', refreshTokenEnc: 'enc2', active: 1 });
 	decryptMock.mockImplementation((enc: string) => (enc === 'enc2' ? 'token-2' : 'token-1'));
 	// Google answers 500 for the first channel's token, 200 for the second.
 	const fetch = vi.fn().mockImplementation((_url: string, init?: RequestInit) =>

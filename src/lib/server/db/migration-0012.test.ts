@@ -185,6 +185,24 @@ test('re-running the backfill statements changes zero rows (idempotency)', async
 	expect(await snapshot()).toBe(before);
 });
 
+test('re-running the backfill repairs a missing owner membership for a user in a shared org', async () => {
+	// PR #48 review (CodeRabbit/Qodo): the membership guard must skip only when
+	// the user is already a member of THEIR personal org — not when they hold
+	// any membership anywhere (shared orgs exist from Phase D on; a manual
+	// backfill re-run after that must still self-repair).
+	const client = await migratedDb(SEED);
+	await client.execute("INSERT INTO organizations (id, name) VALUES ('shared', 'Shared')");
+	await client.execute("INSERT INTO memberships (user_id, org_id, role) VALUES ('user-1', 'shared', 'member')");
+	await client.execute("DELETE FROM memberships WHERE user_id = 'user-1' AND org_id <> 'shared'");
+	for (const statement of backfill) await client.execute(statement);
+	const { rows } = await client.execute(
+		`SELECT m.role FROM memberships m JOIN organizations o ON o.id = m.org_id
+		 WHERE m.user_id = 'user-1' AND o.personal_for = 'user-1'`
+	);
+	expect(rows).toHaveLength(1);
+	expect(rows[0].role).toBe('owner');
+});
+
 test('tenant-scoped channel lookups use the new org index, not a table scan', async () => {
 	// sqlite-engineering rule: every new WHERE shape ships with EXPLAIN QUERY
 	// PLAN evidence. ownedChannel and the dashboard list filter by org_id — a

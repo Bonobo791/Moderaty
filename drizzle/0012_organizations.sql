@@ -37,8 +37,10 @@ ALTER TABLE `sessions` ADD `active_org_id` text;--> statement-breakpoint
 -- Backfill: one personal org per surviving user (tombstoned users get none —
 -- their channels were already erased at deletion time), owner membership,
 -- and channel tenancy. IDs are random hex, generated in SQL. Idempotent by
--- construction: personal_for is UNIQUE, memberships has a composite PK, and
--- the channel UPDATE only touches rows still missing org_id.
+-- construction: personal_for is UNIQUE, the membership guard skips only an
+-- existing (user, personal-org) row — the composite PK's grain, so a re-run
+-- still repairs a missing owner membership for users who joined shared orgs
+-- later — and the channel UPDATE only touches rows still missing org_id.
 INSERT INTO organizations (id, name, plan, personal_for)
 SELECT lower(hex(randomblob(16))), display_name, plan, id
 FROM users
@@ -47,9 +49,12 @@ WHERE google_sub NOT LIKE 'deleted:%'
 --> statement-breakpoint
 INSERT INTO memberships (user_id, org_id, role)
 SELECT personal_for, id, 'owner'
-FROM organizations
+FROM organizations o
 WHERE personal_for IS NOT NULL
-  AND personal_for NOT IN (SELECT user_id FROM memberships);
+  AND NOT EXISTS (
+    SELECT 1 FROM memberships m
+    WHERE m.user_id = o.personal_for AND m.org_id = o.id
+  );
 --> statement-breakpoint
 UPDATE channels
 SET org_id = (SELECT id FROM organizations WHERE organizations.personal_for = channels.user_id)

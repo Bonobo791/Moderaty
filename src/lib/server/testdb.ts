@@ -108,12 +108,14 @@ export async function createTestDb(): Promise<TestDb> {
 		`CREATE TABLE sessions (
 			id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			active_org_id TEXT,
 			expires_at TEXT NOT NULL,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE TABLE channels (
 			id TEXT PRIMARY KEY,
 			user_id TEXT,
+			org_id TEXT,
 			title TEXT NOT NULL,
 			refresh_token_enc TEXT NOT NULL,
 			cursor TEXT,

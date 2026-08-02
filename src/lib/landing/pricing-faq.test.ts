@@ -16,6 +16,7 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { PRICING_FAQ_ENTRIES } from './pricing-faq';
 import {
@@ -42,7 +43,26 @@ const PRICING_COPY = [
  * Lines that can carry a billing claim: answers and ticks. Questions are
  * excluded — a question names a topic ("Can I get a refund?"), the answer
  * makes the claim, and the claim is where the legal anchor must live.
+ *
+ * PR #47 review: the visible billing copy lives in Svelte components too,
+ * not only in the data sources — a plan panel or hero line could introduce
+ * an unsupported claim while this test kept passing. Every component that
+ * renders pricing copy is read and policed line by line as well.
  */
+const COMPONENT_SURFACES = [
+	'../components/landing/PlanSelfHosted.svelte',
+	'../components/landing/PlanHosted.svelte',
+	'../components/landing/PlanLifetime.svelte',
+	'../components/landing/Pricing.svelte',
+	'../components/landing/pricing/PricingHero.svelte',
+	'../components/landing/pricing/CostMath.svelte',
+	'../../routes/pricing/+page.svelte'
+];
+
+const COMPONENT_CLAIM_LINES = COMPONENT_SURFACES.flatMap((path) =>
+	readFileSync(new URL(path, import.meta.url), 'utf8').split('\n')
+);
+
 const CLAIM_LINES = [
 	...PRICING_FAQ_ENTRIES.map((f) => f.a),
 	...TICKS_SELF_HOSTED,
@@ -50,7 +70,8 @@ const CLAIM_LINES = [
 	...TICKS_HOSTED,
 	...TICKS_HOSTED_DETAILED,
 	...TICKS_LIFETIME,
-	...TICKS_LIFETIME_DETAILED
+	...TICKS_LIFETIME_DETAILED,
+	...COMPONENT_CLAIM_LINES
 ];
 
 /**

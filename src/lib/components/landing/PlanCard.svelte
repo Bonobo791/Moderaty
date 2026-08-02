@@ -63,7 +63,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	{#if bestFor}
 		<p class="best-for">{bestFor}</p>
 	{/if}
-	<p class="plan-body">{@render body()}</p>
+	<div class="plan-body">{@render body()}</div>
 	<ul class="ticks">
 		{#each ticks as t}
 			<li class="tick">

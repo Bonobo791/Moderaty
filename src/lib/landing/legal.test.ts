@@ -279,6 +279,31 @@ describe('refund policy consistency (PR #38 review)', () => {
 		expect(terms).toMatch(/not refundable/i);
 	});
 
+// Guard for the PR #47 review findings: §6 introduced subscription, lifetime,
+// and top-up charges, but §1.2 and §7.3 still framed acceptance and
+// post-window finality around "purchasing credits" only, and §6.2-6.3 sent
+// users to an "account settings" page that does not exist. Acceptance,
+// finality, and cancellation must cover every charge type through a mechanism
+// that actually exists today (the Section 21 contact channels).
+describe('Terms billing scope (PR #47 review)', () => {
+	it('acceptance and post-window finality cover every charge type, not credits only', () => {
+		const terms = readComponent('terms');
+		const s12start = terms.indexOf('<strong>1.2</strong>');
+		const s12 = terms.slice(s12start, terms.indexOf('</p>', s12start));
+		expect(s12).not.toMatch(/purchasing credits/i);
+		expect(s12).toMatch(/making a purchase/i);
+		const s73start = terms.indexOf('<strong class="highlight">7.3');
+		const s73 = terms.slice(s73start, terms.indexOf('</strong>', s73start));
+		expect(s73).not.toMatch(/BY PURCHASING CREDITS/);
+		expect(s73).toMatch(/PURCHASES ARE NOT REFUNDABLE/i);
+		expect(s73).toMatch(/SUBSCRIPTION CHARGES, THE LIFETIME PLAN, AND TOP-UP CREDITS/i);
+	});
+
+	it('billing changes use the contact channel, not a settings UI that does not exist', () => {
+		expect(readComponent('terms')).not.toMatch(/in your account settings/i);
+	});
+});
+
 	it('Terms §7.1 carries the statutory no-deductions language', () => {
 		const terms = readComponent('terms');
 		expect(terms).toMatch(/at any title/i);

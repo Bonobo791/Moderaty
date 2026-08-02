@@ -79,6 +79,41 @@ test('migration 0009 adds the email column and backfills it from the owning user
 	});
 });
 
+test('migration 0009 does not backfill the tombstone sentinel from pre-migration deletions', async () => {
+	// PR #42 review: a user deleted BEFORE this migration has users.email =
+	// '[deleted]' (the tombstone sentinel, kept NOT NULL). The backfill must
+	// leave that consent row's email NULL — the sentinel is not evidence.
+	const client = createClient({ url: ':memory:' });
+	await client.executeMultiple(`
+		CREATE TABLE users (
+			id TEXT PRIMARY KEY,
+			google_sub TEXT NOT NULL UNIQUE,
+			email TEXT NOT NULL,
+			display_name TEXT NOT NULL,
+			plan TEXT NOT NULL DEFAULT 'free',
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		);
+		CREATE TABLE consents (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			doc_version TEXT NOT NULL,
+			checkbox_text TEXT NOT NULL,
+			ip TEXT NOT NULL,
+			user_agent TEXT NOT NULL,
+			marketing_opt_in INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		);
+		INSERT INTO users (id, google_sub, email, display_name)
+		VALUES ('gone', 'deleted:gone', '[deleted]', '[deleted]');
+		INSERT INTO consents (user_id, doc_version, checkbox_text, ip, user_agent)
+		VALUES ('gone', 'v1.2', 'I agree', '127.0.0.1', 'test');
+	`);
+	for (const statement of statements) await client.execute(statement);
+	const { rows } = await client.execute('SELECT * FROM consents');
+	expect(rows).toHaveLength(1);
+	expect(rows[0].email).toBeNull();
+});
+
 test('post-migration schema accepts inserts with and without the email column', async () => {
 	const client = await migratedDb();
 	await client.execute({

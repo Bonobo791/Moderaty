@@ -285,9 +285,11 @@ export async function setModerationStatus(
 		const batch = ids.slice(i, i + 50);
 		const params = new URLSearchParams({
 			id: batch.join(','),
-			moderationStatus: status,
-			banAuthor: String(banAuthor)
+			moderationStatus: status
 		});
+		// banAuthor is only valid alongside 'rejected' (and defaults to false) —
+		// sending it with 'heldForReview'/'published' risks a 400 from YouTube.
+		if (banAuthor) params.set('banAuthor', 'true');
 		const res = await ytFetch(
 			`/comments/setModerationStatus?${params}`,
 			accessToken,

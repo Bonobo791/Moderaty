@@ -167,7 +167,8 @@ test('restores a comment by posting moderationStatus=published without banAuthor
 
 	const url = new URL(String(fetch.mock.calls[0]?.[0]));
 	expect(url.searchParams.get('moderationStatus')).toBe('published');
-	expect(url.searchParams.get('banAuthor')).toBe('false');
+	// banAuthor is only valid alongside 'rejected' — a restore must omit it.
+	expect(url.searchParams.get('banAuthor')).toBeNull();
 	expect(url.searchParams.get('id')).toBe('comment');
 });
 

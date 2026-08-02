@@ -79,7 +79,7 @@ export const comments = sqliteTable('comments', {
 	authorName: text('author_name'),
 	text: text('text').notNull(), // truncated to 500 chars on insert
 	publishedAt: text('published_at').notNull(),
-	status: text('status').notNull(), // 'pending' | 'approved' | 'held' | 'rejected' | 'deleted'
+	status: text('status').notNull(), // 'pending' | 'approved' | 'held' | 'rejected' | 'deleted' | 'restoring' (in-flight undo)
 	decidedBy: text('decided_by').notNull(), // 'rule' | 'ai' | 'human' | 'none'
 	matchedRuleId: integer('matched_rule_id'),
 	aiScore: text('ai_score'), // JSON string of the six category scores, or null

@@ -63,6 +63,22 @@ test('load marks only the latest reversible action per comment as undoable', asy
 	expect(byComment.get('c-approve:approve')).toBeNull();
 });
 
+test('tied timestamps still pick the truly latest action (auto-increment id breaks the tie)', async () => {
+	await seedChannel();
+	// Same millisecond: insertion order decides — the restore is inserted after
+	// the hold, so the hold must NOT be undoable despite the tied createdAt.
+	await seedEntries([
+		{ commentId: 'c-tied', action: 'hold', createdAt: '2026-01-01T00:00:01.000Z' },
+		{ commentId: 'c-tied', action: 'restore', createdAt: '2026-01-01T00:00:01.000Z' }
+	]);
+
+	const result = await load({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);
+
+	const byAction = new Map(result!.entries.map((e) => [e.action, e.undoable]));
+	expect(byAction.get('restore')).toBeNull();
+	expect(byAction.get('hold')).toBeNull();
+});
+
 test('load projects only the channel fields the page renders — never the credential', async () => {
 	await testDb()
 		.db.insert(channels)

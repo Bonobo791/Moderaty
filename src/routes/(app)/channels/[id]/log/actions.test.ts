@@ -134,6 +134,35 @@ test('a dry run records a dry-run audit row and makes no YouTube call', async ()
 	);
 });
 
+test('a failed audit insert leaves the undo retryable in a restoring state', async () => {
+	await seedComment('c1', 'rejected', 'reject');
+	// The remote restore succeeds but the audit-row transaction fails.
+	await testDb().client.execute(
+		`CREATE TRIGGER fail_audit_insert BEFORE INSERT ON audit_log
+		 WHEN NEW.action = 'restore' BEGIN SELECT RAISE(ABORT, 'simulated audit insert failure'); END`
+	);
+	try {
+		await expect(undo('c1')).rejects.toThrow(/Failed query|simulated audit insert failure/);
+	} finally {
+		await testDb().client.execute('DROP TRIGGER fail_audit_insert');
+	}
+
+	// Not lost, not half-recorded: the comment parks in 'restoring' with NO
+	// audit row yet, so the undo can be retried instead of 404ing forever.
+	expect(await commentRow('c1')).toMatchObject({ status: 'restoring' });
+	expect((await testDb().db.select().from(auditLog).all()).filter((row) => row.action === 'restore')).toHaveLength(0);
+
+	// The retry re-applies the (idempotent) YouTube call and completes.
+	const res = await undo('c1');
+
+	expect(res).toMatchObject({ success: expect.stringContaining('estored') });
+	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(2);
+	expect(await commentRow('c1')).toMatchObject({ status: 'approved', decidedBy: 'human' });
+	expect(await testDb().db.select().from(auditLog).all()).toContainEqual(
+		expect.objectContaining({ commentId: 'c1', action: 'restore', reason: 'undo of reject', actor: 'user' })
+	);
+});
+
 test('undo rejects a signed-out request with 401', async () => {
 	await expect(undo('c1', 'UC1', null)).rejects.toMatchObject({ status: 401 });
 });

@@ -33,7 +33,9 @@ export async function load({ params, locals }) {
 		.select()
 		.from(auditLog)
 		.where(eq(auditLog.channelId, params.id))
-		.orderBy(desc(auditLog.createdAt))
+		// createdAt ties (same-millisecond batch inserts) are broken by the
+		// auto-increment id, or "latest per comment" is undefined behavior.
+		.orderBy(desc(auditLog.createdAt), desc(auditLog.id))
 		.limit(200)
 		.all();
 	// Newest first: the first entry seen per comment is its latest action, and
@@ -76,17 +78,23 @@ export const actions = {
 			.from(comments)
 			.where(and(eq(comments.id, commentId), eq(comments.channelId, params.id)))
 			.get();
-		if (!comment || (comment.status !== 'held' && comment.status !== 'rejected')) {
+		if (!comment || (comment.status !== 'held' && comment.status !== 'rejected' && comment.status !== 'restoring')) {
 			throw error(404, 'reversible comment not found in this channel');
 		}
-		// Atomically claim the comment BEFORE the external call: the conditional
-		// update makes concurrent undo submissions single-winner (the loser 404s).
-		const claimed = await db
-			.update(comments)
-			.set({ status: 'approved', decidedBy: 'human' })
-			.where(and(eq(comments.id, commentId), eq(comments.status, comment.status)))
-			.returning({ id: comments.id });
-		if (claimed.length === 0) throw error(404, 'reversible comment not found in this channel');
+		// 'restoring' means a previous undo claimed the comment (or restored it
+		// remotely) but crashed before the audit commit: resume it. The YouTube
+		// call is idempotent (I4), so re-applying it is safe.
+		const resuming = comment.status === 'restoring';
+		if (!resuming) {
+			// Atomically claim the comment BEFORE the external call: the conditional
+			// update makes concurrent undo submissions single-winner (the loser 404s).
+			const claimed = await db
+				.update(comments)
+				.set({ status: 'restoring' })
+				.where(and(eq(comments.id, commentId), eq(comments.status, comment.status)))
+				.returning({ id: comments.id });
+			if (claimed.length === 0) throw error(404, 'reversible comment not found in this channel');
+		}
 		const dryRun = env.DRY_RUN === 'true';
 		try {
 			if (!dryRun) {
@@ -94,11 +102,14 @@ export const actions = {
 				await setModerationStatus([commentId], 'published', false, token);
 			}
 		} catch (e) {
-			// Release the claim so a failed restore stays retryable.
-			await db
-				.update(comments)
-				.set({ status: comment.status, decidedBy: comment.decidedBy })
-				.where(eq(comments.id, commentId));
+			// Release a fresh claim so the failed restore stays retryable; a
+			// resumed attempt stays 'restoring' either way.
+			if (!resuming) {
+				await db
+					.update(comments)
+					.set({ status: comment.status, decidedBy: comment.decidedBy })
+					.where(eq(comments.id, commentId));
+			}
 			throw e;
 		}
 		// Name the action being undone — server-side, never from the form.
@@ -109,13 +120,19 @@ export const actions = {
 			.orderBy(desc(auditLog.createdAt), desc(auditLog.id))
 			.limit(1)
 			.get();
-		await db.insert(auditLog).values({
-			channelId: params.id,
-			commentId,
-			action: dryRun ? 'dry-run' : 'restore',
-			reason: `undo of ${prior?.action ?? 'moderation action'}`,
-			actor: 'user',
-			createdAt: new Date().toISOString()
+		// The remote call already landed: the audit row and the final status
+		// commit as one unit. If this transaction fails, the comment stays
+		// 'restoring' — the next undo retries instead of losing the record.
+		await db.transaction(async (tx) => {
+			await tx.insert(auditLog).values({
+				channelId: params.id,
+				commentId,
+				action: dryRun ? 'dry-run' : 'restore',
+				reason: `undo of ${prior?.action ?? 'moderation action'}`,
+				actor: 'user',
+				createdAt: new Date().toISOString()
+			});
+			await tx.update(comments).set({ status: 'approved', decidedBy: 'human' }).where(eq(comments.id, commentId));
 		});
 		return { success: 'Restored — recorded in audit log.' };
 	}

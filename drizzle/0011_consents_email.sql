@@ -37,5 +37,10 @@
 DROP INDEX `users_deleted_at_idx`;--> statement-breakpoint
 ALTER TABLE `users` DROP COLUMN `deleted_at`;--> statement-breakpoint
 ALTER TABLE `consents` ADD `email` text;--> statement-breakpoint
-UPDATE `consents` SET `email` = NULLIF((SELECT `email` FROM `users` WHERE `users`.`id` = `consents`.`user_id`), '[deleted]') WHERE `consents`.`email` IS NULL;--> statement-breakpoint
+UPDATE `consents`
+SET `email` = NULLIF(
+	(SELECT `email` FROM `users` WHERE `users`.`id` = `consents`.`user_id`),
+	'[deleted]'
+)
+WHERE `consents`.`email` IS NULL;--> statement-breakpoint
 CREATE INDEX `consents_email_retention_idx` ON `consents` (`created_at`) WHERE "consents"."email" is not null;

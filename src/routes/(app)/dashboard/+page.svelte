@@ -120,8 +120,10 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <div class="card danger-zone">
 	<h2>Delete account</h2>
 	<p class="muted">
-		Deleting your account is immediate and permanent. It signs you out everywhere, revokes
-		Moderaty's access to your YouTube channels, and erases your channels, rules, and moderation
+		Deleting your account is immediate and permanent. It signs you out everywhere, asks Google to
+		revoke Moderaty's access to your YouTube channels (if a revocation fails, you can remove access
+		anytime in your
+		<a href="https://security.google.com/settings/security/permissions" target="_blank" rel="noreferrer">Google security settings</a>), and erases your channels, rules, and moderation
 		records right away — there is no restore window. Only your consent-acceptance records
 		(including your e-mail) are retained, as Brazilian law requires: blocked from any other use,
 		access-restricted, for up to 10 years.

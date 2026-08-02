@@ -23,7 +23,7 @@ import { channels, sessions, users } from '$lib/server/db/schema';
 
 // decrypt is mocked so seeds can use opaque placeholders; the action must pass
 // each channel's decrypted token to Google's revocation endpoint.
-const decryptMock = vi.hoisted(() => vi.fn(() => 'refresh-token'));
+const decryptMock = vi.hoisted(() => vi.fn((_enc: string) => 'refresh-token'));
 vi.mock('$lib/server/crypto', () => ({ decrypt: decryptMock }));
 
 import { actions, load } from './+page.server';
@@ -180,4 +180,33 @@ test('delete account still deletes when revocation fails, logging loudly', async
 	// The encrypted token is erased either way — the grant is orphaned, not kept.
 	expect(await testDb().db.select().from(channels).all()).toHaveLength(0);
 	expect((await testDb().db.select().from(users).all())[0]).toMatchObject({ googleSub: 'deleted:user-1' });
+});
+
+test('a revocation failure on one channel does not stop the others', async () => {
+	await seedActiveUser();
+	await testDb()
+		.db.insert(channels)
+		.values({ id: 'UC2', userId: OWNER.id, title: 'Second', refreshTokenEnc: 'enc2', active: 1 });
+	decryptMock.mockImplementation((enc: string) => (enc === 'enc2' ? 'token-2' : 'token-1'));
+	// Google answers 500 for the first channel's token, 200 for the second.
+	const fetch = vi.fn().mockImplementation((_url: string, init?: RequestInit) =>
+		Promise.resolve(new Response('', { status: String(init?.body).includes('token=token-1') ? 500 : 200 }))
+	);
+	vi.stubGlobal('fetch', fetch);
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+	try {
+		const { res } = await captureDelete(OWNER, { confirm: 'on' });
+
+		expect(res).toMatchObject({ status: 302, location: '/' });
+		// The failure is logged loudly WITH the channel id…
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('UC1'), expect.anything());
+		// …and the second channel was still revoked afterwards.
+		expect(fetch.mock.calls.some((c) => String(c[1]?.body).includes('token=token-2'))).toBe(true);
+		expect(await testDb().db.select().from(channels).all()).toHaveLength(0);
+		expect((await testDb().db.select().from(users).all())[0]).toMatchObject({ googleSub: 'deleted:user-1' });
+	} finally {
+		// The decrypt mock is module-level — restore the default for other tests.
+		decryptMock.mockImplementation(() => 'refresh-token');
+	}
 });

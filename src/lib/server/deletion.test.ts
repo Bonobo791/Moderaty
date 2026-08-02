@@ -19,7 +19,7 @@
 import { eq } from 'drizzle-orm';
 import { expect, test } from 'vitest';
 
-import { setupTestDb, testDb } from './testdb';
+import { DAY_MS, seedConsent, setupTestDb, testDb } from './testdb';
 import { auditLog, channels, comments, consents, moderationActions, rules, sessions, users } from './db/schema';
 import {
 	CONSENT_EMAIL_RETENTION_MS,
@@ -29,8 +29,6 @@ import {
 } from './deletion';
 
 setupTestDb(['moderation_actions', 'comments', 'audit_log', 'rules', 'channels', 'sessions', 'consents', 'users']);
-
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 async function seedUser(id: string) {
 	await testDb()
@@ -64,18 +62,6 @@ async function seedUser(id: string) {
 		.db.insert(rules)
 		.values({ channelId: `UC-${id}`, type: 'keyword', pattern: 'spam', action: 'delete' });
 	return id;
-}
-
-async function seedConsent(userId: string, createdAt?: string) {
-	await testDb().db.insert(consents).values({
-		userId,
-		email: `${userId}@example.com`,
-		docVersion: 'v1.2',
-		checkboxText: 'I agree',
-		ip: '127.0.0.1',
-		userAgent: 'test',
-		...(createdAt ? { createdAt } : {})
-	});
 }
 
 async function userRow(id: string) {

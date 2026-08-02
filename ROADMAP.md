@@ -5,3 +5,5 @@
 -Add calculator to calculate costs per last 3 months of comment volume on homepage (the user just adds their number of comments and it spits out a number)
 -Add calculator that pulls real data from YouTube to determine costs - should be a forecast that gives a range of potential costs for the next month with a disclaimer that this is a 95% probability of being in the shown range
 -Feature requests and voting
+-Add a revocation outbox: a `pending_revocations` table written inside the account-deletion transaction, drained out-of-band by the cron with retries, so a Google outage during deletion cannot leave a channel revoked-but-undeleted or deleted-but-still-authorized (replaces the current log-and-continue per-channel failure handling in `deleteAccount`; covers PR #42 CodeRabbit #3697285484 and CodeAnt #3697260482)
+-Enable `PRAGMA foreign_keys = ON` in the production db bootstrap (`src/lib/server/db/index.ts`) to match the test harness instead of relying on Turso sqld defaults; no code relies on cascades today, so this is a guardrail for future schema work (PR #42 sqlite-engineering audit)

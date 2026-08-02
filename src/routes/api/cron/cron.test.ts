@@ -17,8 +17,8 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { beforeEach, expect, test, vi } from 'vitest';
-import { setupTestDb, testDb } from '$lib/server/testdb';
-import { channels, consents, users } from '$lib/server/db/schema';
+import { DAY_MS, seedConsent as seedConsentRecord, seedUser, setupTestDb, testDb } from '$lib/server/testdb';
+import { channels, consents } from '$lib/server/db/schema';
 import { CONSENT_EMAIL_RETENTION_MS } from '$lib/server/deletion';
 
 // Synthetic credential fixture — same maintainer-approved exception as
@@ -35,16 +35,10 @@ import { GET } from './+server';
 
 setupTestDb(['channels', 'users', 'consents']);
 
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-/** Seeds a user with a consent record accepted `ageDays` ago, e-mail retained. */
+/** Seeds a user with a consent record accepted at `createdAt`, e-mail retained. */
 async function seedConsent(id: string, createdAt: string) {
-	await testDb()
-		.db.insert(users)
-		.values({ id, googleSub: `sub-${id}`, email: `${id}@example.com`, displayName: id });
-	await testDb()
-		.db.insert(consents)
-		.values({ userId: id, email: `${id}@example.com`, docVersion: '1.0', checkboxText: 'text', ip: '1.2.3.4', userAgent: 'ua', createdAt });
+	await seedUser(id);
+	await seedConsentRecord(id, createdAt, '1.0');
 }
 
 beforeEach(() => {

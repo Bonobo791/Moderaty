@@ -246,6 +246,21 @@ describe('refund policy consistency (PR #38 review)', () => {
 		}
 	});
 
+	// Maintainer-directed: post-window finality is stated ONLY in the Terms
+	// (§7.2-7.3) and other legally required places — consumer surfaces show
+	// the 7-day full refund without the "after that, all sales are final" tail.
+	it('states post-window finality only in the Terms, never on consumer surfaces', () => {
+		const FINALITY = [/sales are final/i, /purchases are final/i, /not refunded/i, /not refundable/i];
+		for (const name of ['hosted plan panel', 'consent refund notice', 'pricing FAQ']) {
+			for (const pattern of FINALITY) {
+				expect(surfaces[name], `${name} states finality: ${pattern}`).not.toMatch(pattern);
+			}
+		}
+		const terms = surfaces['Terms of Service'];
+		expect(terms).toMatch(/purchases are final/i);
+		expect(terms).toMatch(/not refundable/i);
+	});
+
 	it('Terms §7.1 carries the statutory no-deductions language', () => {
 		const terms = readComponent('terms');
 		expect(terms).toMatch(/at any title/i);

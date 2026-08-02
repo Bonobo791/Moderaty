@@ -23,6 +23,7 @@ import { createClient, type Client } from '@libsql/client';
 import { drizzle, type LibSQLDatabase } from 'drizzle-orm/libsql';
 import { beforeAll, beforeEach, vi } from 'vitest';
 import * as schema from './db/schema';
+import { consents, users } from './db/schema';
 
 export interface TestDb {
 	db: LibSQLDatabase<typeof schema>;
@@ -63,6 +64,27 @@ export function postForm(fields: Record<string, string>, url = 'http://localhost
 	const form = new FormData();
 	for (const [key, value] of Object.entries(fields)) form.set(key, value);
 	return new Request(url, { method: 'POST', body: form });
+}
+
+export const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Seeds a bare user row with a synthetic identity. */
+export async function seedUser(id: string): Promise<string> {
+	await testDb().db.insert(users).values({ id, googleSub: `sub-${id}`, email: `${id}@example.com`, displayName: id });
+	return id;
+}
+
+/** Seeds a consent record for an existing user with the e-mail retained (synthetic evidence values). */
+export async function seedConsent(userId: string, createdAt?: string, docVersion = 'v1.2'): Promise<void> {
+	await testDb().db.insert(consents).values({
+		userId,
+		email: `${userId}@example.com`,
+		docVersion,
+		checkboxText: 'I agree',
+		ip: '127.0.0.1',
+		userAgent: 'test',
+		...(createdAt ? { createdAt } : {})
+	});
 }
 
 /**

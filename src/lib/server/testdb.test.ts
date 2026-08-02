@@ -49,17 +49,25 @@ test('tenant round-trip: org + owner membership + invite persist and read back',
 	const org = await testDb().db.select().from(organizations).all();
 	const mem = await testDb().db.select().from(memberships).all();
 	const inv = await testDb().db.select().from(invites).all();
-	expect(org).toHaveLength(1);
+	expect(org).toMatchObject([{ id: 'org-1', name: 'One', plan: 'free', personalFor: 'user-1' }]);
 	expect(mem).toMatchObject([{ userId: 'user-1', orgId: 'org-1', role: 'owner' }]);
-	expect(inv).toHaveLength(1);
+	expect(inv).toMatchObject([
+		{ token: 'tok-1', orgId: 'org-1', role: 'member', createdBy: 'user-1', expiresAt: expect.any(String) }
+	]);
 });
 
 test('personal_for UNIQUE and memberships composite PK are enforced', async () => {
 	await seedUser('user-1');
+	await seedUser('user-2');
 	await testDb().db.insert(organizations).values({ id: 'org-1', name: 'One', personalFor: 'user-1' });
+	await testDb().db.insert(organizations).values({ id: 'org-2', name: 'Two', personalFor: 'user-2' });
 	await testDb().db.insert(memberships).values({ userId: 'user-1', orgId: 'org-1', role: 'owner' });
+	// Positive controls: cross memberships must SUCCEED — a PRIMARY KEY on
+	// user_id alone would reject these, so they prove the key is composite.
+	await testDb().db.insert(memberships).values({ userId: 'user-1', orgId: 'org-2', role: 'member' });
+	await testDb().db.insert(memberships).values({ userId: 'user-2', orgId: 'org-1', role: 'member' });
 	await expect(
-		testDb().db.insert(organizations).values({ id: 'org-2', name: 'Dup', personalFor: 'user-1' })
+		testDb().db.insert(organizations).values({ id: 'org-3', name: 'Dup', personalFor: 'user-1' })
 	).rejects.toThrow();
 	await expect(
 		testDb().db.insert(memberships).values({ userId: 'user-1', orgId: 'org-1', role: 'member' })

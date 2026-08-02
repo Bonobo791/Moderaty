@@ -83,7 +83,6 @@ export const actions: Actions = {
 			marketingOptIn
 		});
 
-		let userId: string;
 		let session: { token: string; expiresAt: string };
 		if (pending.kind === 'new') {
 			// The account is created ONLY now that the contract has formed. The
@@ -118,10 +117,9 @@ export const actions: Actions = {
 					.set({ userId: user.id, orgId })
 					.where(and(isNull(channels.userId), sql`(select count(*) from ${users}) = 1`));
 				await tx.insert(consents).values(consentRecord(user.id, pending.email));
-				return { user, session: await createSession(user.id, tx, orgId) };
+				return createSession(user.id, tx, orgId);
 			});
-			userId = created.user.id;
-			session = created.session;
+			session = created;
 		} else {
 			const user = await db
 				.select({ id: users.id, email: users.email })
@@ -133,7 +131,6 @@ export const actions: Actions = {
 				await tx.insert(consents).values(consentRecord(user.id, user.email));
 				return createSession(user.id, tx);
 			});
-			userId = user.id;
 		}
 
 		const { token, expiresAt } = session;

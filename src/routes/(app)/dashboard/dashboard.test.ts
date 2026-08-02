@@ -47,6 +47,13 @@ async function captureDelete(user: typeof OWNER | null, fields: Record<string, s
 	}
 }
 
+/** The seeded account is fully intact: not deleted, session alive, channel active. */
+async function expectAccountUntouched() {
+	expect((await testDb().db.select().from(users).all())[0].deletedAt).toBeNull();
+	expect(await testDb().db.select().from(sessions).all()).toHaveLength(1);
+	expect((await testDb().db.select().from(channels).all())[0].active).toBe(1);
+}
+
 test('dashboard load never serializes the encrypted refresh token', async () => {
 	await testDb().db.insert(channels).values({
 		id: 'UC1',
@@ -88,9 +95,7 @@ test('delete account without the confirmation checkbox writes nothing', async ()
 	const { res } = await captureDelete(OWNER, {});
 
 	expect(res).toMatchObject({ status: 400 });
-	expect((await testDb().db.select().from(users).all())[0].deletedAt).toBeNull();
-	expect(await testDb().db.select().from(sessions).all()).toHaveLength(1);
-	expect((await testDb().db.select().from(channels).all())[0].active).toBe(1);
+	await expectAccountUntouched();
 });
 
 test('delete account rolls everything back when the session deletion fails', async () => {
@@ -115,9 +120,7 @@ test('delete account rolls everything back when the session deletion fails', asy
 	expect(outcome.res).not.toMatchObject({ status: 302 });
 	expect(outcome.cookies.deleteCalls).toHaveLength(0);
 	// Nothing partial persists: soft delete, session, and channel are untouched.
-	expect((await testDb().db.select().from(users).all())[0].deletedAt).toBeNull();
-	expect(await testDb().db.select().from(sessions).all()).toHaveLength(1);
-	expect((await testDb().db.select().from(channels).all())[0].active).toBe(1);
+	await expectAccountUntouched();
 });
 
 test('delete account soft-deletes, destroys sessions, deactivates channels, and signs out', async () => {

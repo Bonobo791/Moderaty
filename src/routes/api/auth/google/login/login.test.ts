@@ -68,6 +68,19 @@ function stubTokenAndUserinfo(userinfo: object, tokenStatus = 200) {
 	);
 }
 
+/** Stubs a successful token exchange; `onUserinfo` handles the userinfo call. */
+function stubTokenOkThen(onUserinfo: () => Response) {
+	vi.stubGlobal(
+		'fetch',
+		vi.fn(async (input: RequestInfo | URL) => {
+			if (String(input) === 'https://oauth2.googleapis.com/token') {
+				return new Response(JSON.stringify({ access_token: 't' }), { status: 200 });
+			}
+			return onUserinfo();
+		})
+	);
+}
+
 async function expectHttpError(promise: Promise<unknown>, status: number) {
 	await expect(promise).rejects.toMatchObject({ status });
 }
@@ -119,32 +132,16 @@ test('callback returns 502 when the token exchange fails upstream', async () => 
 });
 
 test('callback returns 502 when userinfo fails', async () => {
-	vi.stubGlobal(
-		'fetch',
-		vi.fn(async (input: RequestInfo | URL) => {
-			const url = String(input);
-			if (url === 'https://oauth2.googleapis.com/token') {
-				return new Response(JSON.stringify({ access_token: 't' }), { status: 200 });
-			}
-			return new Response('nope', { status: 500 });
-		})
-	);
+	stubTokenOkThen(() => new Response('nope', { status: 500 }));
 	const cookies = makeCookiesWithState('s');
 	await expectHttpError(loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never), 502);
 });
 
 test('callback returns 502 when the userinfo request itself fails', async () => {
 	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-	vi.stubGlobal(
-		'fetch',
-		vi.fn(async (input: RequestInfo | URL) => {
-			const url = String(input);
-			if (url === 'https://oauth2.googleapis.com/token') {
-				return new Response(JSON.stringify({ access_token: 't' }), { status: 200 });
-			}
-			throw new Error('socket hang up');
-		})
-	);
+	stubTokenOkThen(() => {
+		throw new Error('socket hang up');
+	});
 	const cookies = makeCookiesWithState('s');
 	await expectHttpError(loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never), 502);
 	expect(errorSpy).toHaveBeenCalled();
@@ -172,18 +169,37 @@ async function seedConsentedUser(sub: string, docVersion: string = LEGAL_VERSION
 	return userId;
 }
 
-test('callback with a new identity parks a pending consent and redirects to /consent without creating anything', async () => {
+const userRows = () => testDb().db.select().from(users).all();
+const sessionRows = () => testDb().db.select().from(sessions).all();
+
+/** Stubs Google's token+userinfo for sub-1, runs the login callback, and
+ *  returns the 302 target plus the cookie jar for assertions. */
+async function signIn(state = 's') {
 	stubTokenAndUserinfo({ sub: 'sub-1', email: 'one@example.com', name: 'One' });
-	const cookies = makeCookiesWithState('s');
+	const cookies = makeCookiesWithState(state);
+	const redirect: unknown = await loginCallback({ url: callbackUrl({ state, code: 'x' }), cookies } as never).catch(
+		(e: unknown) => e
+	);
+	expect(redirect).toMatchObject({ status: 302 });
+	return { cookies, location: (redirect as { location: string }).location };
+}
 
-	await expect(loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never)).rejects.toMatchObject({
-		status: 302,
-		location: '/consent?state=s'
-	});
+/** Seeds a consented sub-1 user soft-deleted `daysAgo` days ago (derived from
+ *  the current clock so the 180-day boundary never drifts). */
+async function seedSoftDeletedUser(daysAgo: number, docVersion?: string) {
+	const userId = await seedConsentedUser('sub-1', docVersion);
+	const deletedAt = new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000).toISOString();
+	await testDb().db.update(users).set({ deletedAt }).where(eq(users.id, userId));
+	return { userId, deletedAt };
+}
 
+test('callback with a new identity parks a pending consent and redirects to /consent without creating anything', async () => {
+	const { cookies, location } = await signIn();
+
+	expect(location).toBe('/consent?state=s');
 	// The contract forms at the /consent checkbox — no account, no session yet.
-	expect(await testDb().db.select().from(users).all()).toHaveLength(0);
-	expect(await testDb().db.select().from(sessions).all()).toHaveLength(0);
+	expect(await userRows()).toHaveLength(0);
+	expect(await sessionRows()).toHaveLength(0);
 	const pendingCall = cookies.setCalls.find((c) => c.name === PENDING_CONSENT_COOKIE);
 	expect(pendingCall).toBeTruthy();
 	expect(pendingCall!.opts).toMatchObject({ httpOnly: true, sameSite: 'lax', path: '/' });
@@ -201,15 +217,10 @@ test('callback with a new identity parks a pending consent and redirects to /con
 
 test('callback with a consented existing user creates a session and redirects to the dashboard', async () => {
 	const userId = await seedConsentedUser('sub-1');
-	stubTokenAndUserinfo({ sub: 'sub-1', email: 'one@example.com', name: 'One' });
-	const cookies = makeCookiesWithState('s');
+	const { cookies, location } = await signIn();
 
-	await expect(loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never)).rejects.toMatchObject({
-		status: 302,
-		location: '/dashboard'
-	});
-
-	const createdSessions = await testDb().db.select().from(sessions).all();
+	expect(location).toBe('/dashboard');
+	const createdSessions = await sessionRows();
 	expect(createdSessions).toHaveLength(1);
 	expect(createdSessions[0].userId).toBe(userId);
 	const sessionCall = cookies.setCalls.find((c) => c.name === 'moderaty_session');
@@ -222,90 +233,58 @@ test('callback with a consented existing user creates a session and redirects to
 
 test('callback with an existing user on a stale document version sends them back through /consent', async () => {
 	await seedConsentedUser('sub-1', 'v0.9');
-	stubTokenAndUserinfo({ sub: 'sub-1', email: 'one@example.com', name: 'One' });
-	const cookies = makeCookiesWithState('s');
+	const { location } = await signIn();
 
-	await expect(loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never)).rejects.toMatchObject({
-		status: 302,
-		location: '/consent?state=s'
-	});
-	expect(await testDb().db.select().from(sessions).all()).toHaveLength(0);
+	expect(location).toBe('/consent?state=s');
+	expect(await sessionRows()).toHaveLength(0);
 });
 
 test('a repeat login with the same sub reuses the account', async () => {
 	await seedConsentedUser('sub-1');
-	stubTokenAndUserinfo({ sub: 'sub-1', email: 'one@example.com', name: 'One' });
-	const first = makeCookiesWithState('s1');
-	await expect(loginCallback({ url: callbackUrl({ state: 's1', code: 'x' }), cookies: first } as never)).rejects.toMatchObject({ status: 302, location: '/dashboard' });
+	expect((await signIn('s1')).location).toBe('/dashboard');
+	expect((await signIn('s2')).location).toBe('/dashboard');
 
-	const second = makeCookiesWithState('s2');
-	await expect(loginCallback({ url: callbackUrl({ state: 's2', code: 'y' }), cookies: second } as never)).rejects.toMatchObject({ status: 302, location: '/dashboard' });
-
-	expect(await testDb().db.select().from(users).all()).toHaveLength(1);
-	expect(await testDb().db.select().from(sessions).all()).toHaveLength(2);
+	expect(await userRows()).toHaveLength(1);
+	expect(await sessionRows()).toHaveLength(2);
 });
 
 test('signing back in within the retention window restores a soft-deleted account', async () => {
-	const userId = await seedConsentedUser('sub-1');
-	// Derived from the current clock: a fixed date would silently cross the
-	// 180-day boundary one day and flip this test to the purge path.
-	const inWindow = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-	await testDb().db.update(users).set({ deletedAt: inWindow }).where(eq(users.id, userId));
+	const { userId } = await seedSoftDeletedUser(30); // 30 days: inside the window
 	// Deletion leaves channels inactive; restoration must NOT re-enable them —
 	// moderation never resumes silently.
 	await testDb().db.insert(channels).values({ id: 'UC1', userId, title: 'Mine', refreshTokenEnc: 'enc', active: 0 });
-	stubTokenAndUserinfo({ sub: 'sub-1', email: 'one@example.com', name: 'One' });
-	const cookies = makeCookiesWithState('s');
+	const { location } = await signIn();
 
-	await expect(loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never)).rejects.toMatchObject({
-		status: 302,
-		location: '/dashboard'
-	});
-
-	const restored = await testDb().db.select().from(users).all();
+	expect(location).toBe('/dashboard');
+	const restored = await userRows();
 	expect(restored).toHaveLength(1);
 	expect(restored[0].deletedAt).toBeNull();
-	expect(await testDb().db.select().from(sessions).all()).toHaveLength(1);
+	expect(await sessionRows()).toHaveLength(1);
 	expect((await testDb().db.select().from(channels).all())[0].active).toBe(0);
 });
 
 test('a soft-deleted user routed back through /consent keeps the deletion pending until consent completes', async () => {
-	const userId = await seedConsentedUser('sub-1', 'v0.9'); // stale doc version → /consent
-	const inWindow = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-	await testDb().db.update(users).set({ deletedAt: inWindow }).where(eq(users.id, userId));
-	stubTokenAndUserinfo({ sub: 'sub-1', email: 'one@example.com', name: 'One' });
-	const cookies = makeCookiesWithState('s');
+	const { deletedAt } = await seedSoftDeletedUser(30, 'v0.9'); // stale doc version → /consent
+	const { location } = await signIn();
 
-	await expect(loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never)).rejects.toMatchObject({
-		status: 302,
-		location: '/consent?state=s'
-	});
-
+	expect(location).toBe('/consent?state=s');
 	// Google authentication alone must NOT cancel the deletion: if the user
 	// abandons /consent, the account stays soft-deleted so the retention purge
 	// still fires, and no session exists.
-	const row = (await testDb().db.select().from(users).all())[0];
-	expect(row.deletedAt).toBe(inWindow);
-	expect(await testDb().db.select().from(sessions).all()).toHaveLength(0);
+	expect((await userRows())[0].deletedAt).toBe(deletedAt);
+	expect(await sessionRows()).toHaveLength(0);
 });
 
 test('a sign-in past the retention window purges the account and starts a fresh signup', async () => {
-	const userId = await seedConsentedUser('sub-1');
-	const expired = new Date(Date.now() - 181 * 24 * 60 * 60 * 1000).toISOString();
-	await testDb().db.update(users).set({ deletedAt: expired }).where(eq(users.id, userId));
-	stubTokenAndUserinfo({ sub: 'sub-1', email: 'one@example.com', name: 'One' });
-	const cookies = makeCookiesWithState('s');
+	const { userId } = await seedSoftDeletedUser(181); // past the cutoff
+	const { location } = await signIn();
 
 	// No restore past the cutoff: the account is purged inline and the flow
 	// continues as a brand-new signup through the consent interstitial.
-	await expect(loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never)).rejects.toMatchObject({
-		status: 302,
-		location: '/consent?state=s'
-	});
-
-	const tombstone = (await testDb().db.select().from(users).all())[0];
+	expect(location).toBe('/consent?state=s');
+	const tombstone = (await userRows())[0];
 	expect(tombstone).toMatchObject({ id: userId, googleSub: `deleted:${userId}`, deletedAt: null });
 	// The evidentiary consent log survives the purge; no session was created.
 	expect(await testDb().db.select().from(consents).all()).toHaveLength(1);
-	expect(await testDb().db.select().from(sessions).all()).toHaveLength(0);
+	expect(await sessionRows()).toHaveLength(0);
 });

@@ -83,19 +83,23 @@ function call(secret?: { query?: string; bearer?: string }) {
 	return GET({ url, request: new Request(url, { headers }) } as never);
 }
 
+async function expectUnauthorized(secret?: { query?: string; bearer?: string }) {
+	await expect(call(secret)).rejects.toThrowError(expect.objectContaining({ status: 401 }));
+}
+
 test('rejects a request with no secret at all', async () => {
-	await expect(call()).rejects.toThrowError(expect.objectContaining({ status: 401 }));
+	await expectUnauthorized();
 });
 
 test('rejects a wrong secret in both query and header', async () => {
-	await expect(call({ query: 'wrong' })).rejects.toThrowError(expect.objectContaining({ status: 401 }));
-	await expect(call({ bearer: 'wrong' })).rejects.toThrowError(expect.objectContaining({ status: 401 }));
+	await expectUnauthorized({ query: 'wrong' });
+	await expectUnauthorized({ bearer: 'wrong' });
 });
 
 test('rejects length-mismatched secrets without throwing a 500', async () => {
-	await expect(call({ bearer: 'x' })).rejects.toThrowError(expect.objectContaining({ status: 401 }));
-	await expect(call({ bearer: 'test-secret-but-longer' })).rejects.toThrowError(expect.objectContaining({ status: 401 }));
-	await expect(call({ bearer: 'test-secrex' })).rejects.toThrowError(expect.objectContaining({ status: 401 }));
+	await expectUnauthorized({ bearer: 'x' });
+	await expectUnauthorized({ bearer: 'test-secret-but-longer' });
+	await expectUnauthorized({ bearer: 'test-secrex' });
 });
 
 test('fails loudly when CRON_SECRET is not configured', async () => {
@@ -113,10 +117,12 @@ test('rejects a malformed Authorization header even with a valid query secret', 
 	);
 });
 
-test.each([
+const SECRET_FORMS = [
 	{ label: 'plan-documented query secret for manual triggers', secret: { query: 'test-secret' } },
 	{ label: 'Authorization bearer secret without a query param', secret: { bearer: 'test-secret' } }
-])('accepts the $label', async ({ secret }) => {
+];
+
+test.each(SECRET_FORMS)('accepts the $label', async ({ secret }) => {
 	const res = await call(secret);
 
 	expect(res.status).toBe(200);
@@ -134,8 +140,9 @@ test('runs the channel with a server-side deadline inside the caller abort windo
 		deadline: expect.any(Number)
 	}));
 	const deadline = mocks.runChannel.mock.calls[0][1].deadline;
-	expect(deadline - before).toBeGreaterThanOrEqual(19_000);
-	expect(deadline - before).toBeLessThanOrEqual(21_000);
+	const windowMs = deadline - before;
+	expect(windowMs).toBeGreaterThanOrEqual(19_000);
+	expect(windowMs).toBeLessThanOrEqual(21_000);
 });
 
 test('purges a user whose 6-month retention expired, keeping only the consent log', async () => {

@@ -28,25 +28,9 @@ setupTestDb(['moderation_actions', 'comments', 'audit_log', 'rules', 'channels',
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 async function seedUser(id: string, deletedAt: string | null) {
-	await testDb().db.insert(users).values({
-		id,
-		googleSub: `sub-${id}`,
-		email: `${id}@example.com`,
-		displayName: id,
-		deletedAt
-	});
-	await testDb().db.insert(channels).values({
-		id: `UC-${id}`,
-		userId: id,
-		title: `channel ${id}`,
-		refreshTokenEnc: 'enc',
-		active: 0
-	});
-	await testDb().db.insert(sessions).values({
-		id: `token-${id}`,
-		userId: id,
-		expiresAt: new Date(Date.now() + DAY_MS).toISOString()
-	});
+	await testDb().db.insert(users).values({ id, googleSub: `sub-${id}`, email: `${id}@example.com`, displayName: id, deletedAt });
+	await testDb().db.insert(channels).values({ id: `UC-${id}`, userId: id, title: `channel ${id}`, refreshTokenEnc: 'enc', active: 0 });
+	await testDb().db.insert(sessions).values({ id: `token-${id}`, userId: id, expiresAt: new Date(Date.now() + DAY_MS).toISOString() });
 	return id;
 }
 

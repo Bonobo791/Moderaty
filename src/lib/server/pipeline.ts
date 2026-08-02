@@ -106,7 +106,7 @@ async function assertChannelActive(channelId: string): Promise<void> {
 		.from(channels)
 		.where(eq(channels.id, channelId))
 		.get();
-	if (!row || !row.active) throw new ChannelDeactivatedError(`channel deactivated mid-run: ${channelId}`);
+	if (!row?.active) throw new ChannelDeactivatedError(`channel deactivated mid-run: ${channelId}`);
 }
 
 /**

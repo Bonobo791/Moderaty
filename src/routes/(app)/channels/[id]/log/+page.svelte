@@ -23,12 +23,12 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	import { autoRefresh } from '$lib/auto-refresh.svelte';
 	import { relativeTime } from '$lib/relative-time';
 
-	let { data } = $props();
+	let { data, form } = $props();
 
 	autoRefresh();
 
 	function badgeClass(action: string): string {
-		if (action === 'approve' || action === 'approved') return 'badge ok';
+		if (action === 'approve' || action === 'approved' || action === 'restore') return 'badge ok';
 		if (action === 'queue' || action === 'pending') return 'badge attention';
 		if (action === 'dry-run') return 'badge neutral';
 		if (['rejected', 'deleted', 'reject', 'delete', 'ban'].includes(action))
@@ -42,7 +42,17 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 </svelte:head>
 
 <h1>Audit log — {data.ch?.title}</h1>
-<p class="page-sub">Every moderation action, automatic or manual, newest first.</p>
+<p class="page-sub">
+	Every moderation action, automatic or manual, newest first. Held and rejected comments can be
+	restored here; deletions and author bans are permanent.
+</p>
+
+{#if form?.error}
+	<p class="error-box" role="alert">{form.error}</p>
+{/if}
+{#if form?.success}
+	<p class="flash" role="status">{form.success}</p>
+{/if}
 
 {#if data.entries.length === 0}
 	<EmptyState
@@ -53,7 +63,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	<div class="card">
 		<table class="stack-table">
 			<thead>
-				<tr><th>Time</th><th>Action</th><th>Comment</th><th>Reason</th><th>Actor</th></tr>
+				<tr><th>Time</th><th>Action</th><th>Comment</th><th>Reason</th><th>Actor</th><th>Undo</th></tr>
 			</thead>
 			<tbody>
 				{#each data.entries as e}
@@ -63,6 +73,19 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 						<td class="muted" data-label="Comment">{e.commentId}</td>
 						<td data-label="Reason">{e.reason}</td>
 						<td class="muted" data-label="Actor">{e.actor}</td>
+						<td data-label="Undo">
+							{#if e.undoable === 'full'}
+								<form method="POST" action="?/undo">
+									<input type="hidden" name="commentId" value={e.commentId} />
+									<button class="btn secondary small" type="submit" aria-label="Undo {e.action} on comment {e.commentId}">Undo</button>
+								</form>
+							{:else if e.undoable === 'comment-only'}
+								<form method="POST" action="?/undo" title="Restores the comment — the author ban cannot be lifted via the YouTube API">
+									<input type="hidden" name="commentId" value={e.commentId} />
+									<button class="btn secondary small" type="submit" aria-label="Restore comment {e.commentId} (author ban stays)">Undo comment</button>
+								</form>
+							{/if}
+						</td>
 					</tr>
 				{/each}
 			</tbody>

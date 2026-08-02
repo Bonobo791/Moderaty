@@ -103,7 +103,7 @@ export const auditLog = sqliteTable('audit_log', {
 	id: integer('id').primaryKey({ autoIncrement: true }),
 	channelId: text('channel_id').notNull(),
 	commentId: text('comment_id').notNull(),
-	action: text('action').notNull(), // 'hold' | 'reject' | 'delete' | 'ban' | 'approve' | 'queue' | 'dry-run'
+	action: text('action').notNull(), // 'hold' | 'reject' | 'delete' | 'ban' | 'approve' | 'restore' | 'queue' | 'dry-run'
 	reason: text('reason').notNull(), // human-readable, e.g. "rule #4 (keyword)" or "ai score 0.91"
 	actor: text('actor').notNull(), // 'system' | 'user'
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)

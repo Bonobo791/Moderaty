@@ -54,5 +54,9 @@ export const FAQ_ENTRIES: FaqEntry[] = [
 	{
 		q: 'Can I test Moderaty without changing anything on my channel?',
 		a: 'Yes. Dry-run mode classifies everything and changes nothing. The audit trail shows exactly what would have happened, comment by comment.'
+	},
+	{
+		q: 'Is Moderaty LGPD compliant?',
+		a: 'Yes. Moderaty is built in Brazil around the LGPD: comment text is kept with the verdict record so your review queue works, but comment author identities are never stored from comments. A blocked-user rule stores only the channel ID you enter yourself. No author profiling, no model training on comment data. The Privacy Policy and DPA, linked in the footer, spell it out.'
 	}
 ];

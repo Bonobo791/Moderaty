@@ -115,8 +115,8 @@ export async function createTestDb(): Promise<TestDb> {
 		`CREATE TABLE comments (
 			id TEXT PRIMARY KEY,
 			channel_id TEXT NOT NULL,
-			author_channel_id TEXT NOT NULL,
-			author_name TEXT NOT NULL,
+			author_channel_id TEXT,
+			author_name TEXT,
 			text TEXT NOT NULL,
 			published_at TEXT NOT NULL,
 			status TEXT NOT NULL,

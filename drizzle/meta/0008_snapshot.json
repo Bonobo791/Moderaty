@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "e84ca535-f6c7-436b-b71a-7ebeba51e0e1",
+  "id": "900423b7-a7c1-482c-9b9a-90da36e2749f",
   "prevId": "27c385f7-ac6b-4462-80f1-32f834ba780b",
   "tables": {
     "audit_log": {
@@ -189,14 +189,14 @@
           "name": "author_channel_id",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
+          "notNull": false,
           "autoincrement": false
         },
         "author_name": {
           "name": "author_name",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
+          "notNull": false,
           "autoincrement": false
         },
         "text": {
@@ -574,13 +574,6 @@
           "notNull": true,
           "autoincrement": false,
           "default": "'free'"
-        },
-        "deleted_at": {
-          "name": "deleted_at",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
         },
         "created_at": {
           "name": "created_at",

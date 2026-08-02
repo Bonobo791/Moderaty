@@ -55,6 +55,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				/>
 				<span>Made in Brazil</span>
 			</p>
+			<p class="lgpd-note">
+				LGPD (Lei 13.709/2018) compliant. Comment author identities are never stored from comments.
+			</p>
 			<nav class="footer-links" aria-label="Footer">
 				<a href={GITHUB_URL} target="_blank" rel="noreferrer" class="footer-link">GitHub</a>
 				<a href={AGPL_URL} target="_blank" rel="noreferrer" class="footer-link">AGPL-3.0 License</a>
@@ -124,6 +127,16 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		font-size: 10px;
 		text-transform: uppercase;
 		letter-spacing: 0.16em;
+		color: rgb(244 244 248 / 0.45);
+	}
+	.lgpd-note {
+		margin: 20px 0 0;
+		max-width: 44ch;
+		font-family: var(--font-mono);
+		font-size: 10px;
+		line-height: 1.7;
+		text-transform: uppercase;
+		letter-spacing: 0.14em;
 		color: rgb(244 244 248 / 0.45);
 	}
 	.capy {

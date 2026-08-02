@@ -40,5 +40,9 @@ export const PRICING_FAQ_ENTRIES: { q: string; a: string }[] = [
 	{
 		q: 'Which one should I pick?',
 		a: 'If you have a server and five minutes, self-host. It is free and it is everything. If you would rather click one OAuth button and never think about infrastructure, buy a pack. Same hammer either way.'
+	},
+	{
+		q: 'Can I get a refund?',
+		a: 'Yes, within 7 days. Brazilian consumer law (CDC Art. 49) gives you 7 days from purchase for a full refund of everything you paid, no deductions, no questions, through any contact channel. After that, all sales are final: unused credits are not refunded. Nothing renews, nothing auto-charges.'
 	}
 ];

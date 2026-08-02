@@ -44,6 +44,7 @@ import {
 	CONSENT_CHECKBOX_TEXT,
 	LEGAL_VERSION,
 	PENDING_CONSENT_COOKIE,
+	REFUND_NOTICE_TEXT,
 	parkPendingConsent,
 	type PendingConsent
 } from '$lib/server/legal';
@@ -131,6 +132,22 @@ test('load hands the page the exact consent sentence the log will store', () => 
 		url: new URL('http://localhost/consent?state=state-1')
 	} as never) as Record<string, unknown>;
 	expect(data).toMatchObject({ consentText: CONSENT_CHECKBOX_TEXT, kind: 'new', displayName: 'One' });
+});
+
+test('load also hands the page the refund notice, outside the evidentiary checkbox text', () => {
+	// The refund notice is consumer-rights copy (Terms §7, CDC Art. 49), not
+	// part of the logged consent sentence: CONSENT_CHECKBOX_TEXT must stay
+	// byte-identical so existing consent rows keep matching what was shown.
+	expect(CONSENT_CHECKBOX_TEXT).toBe(
+		'I am at least 18 years old and agree to the Terms of Service, Privacy Policy, and Data Processing Agreement'
+	);
+	expect(REFUND_NOTICE_TEXT).toContain('CDC Art. 49');
+	expect(REFUND_NOTICE_TEXT).not.toContain(CONSENT_CHECKBOX_TEXT);
+	const data = load({
+		cookies: cookiesWithPending(NEW_SUB),
+		url: new URL('http://localhost/consent?state=state-1')
+	} as never) as Record<string, unknown>;
+	expect(data).toMatchObject({ refundText: REFUND_NOTICE_TEXT });
 });
 
 test('load without a pending cookie redirects to /login', () => {

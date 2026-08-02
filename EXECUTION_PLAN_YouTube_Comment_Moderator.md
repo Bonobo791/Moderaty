@@ -1966,9 +1966,38 @@ account exists — never pre-OAuth friction, never browsewrap:
   preserving the evidentiary chain (doc version, exact checkbox text, IP,
   user agent). The tombstone also frees the real Google sub for a future
   fresh signup.
-- Migration 0008 adds nullable `users.deleted_at` (I7). Verify the column
+- Migration 0009 adds nullable `users.deleted_at` (I7; renumbered from 0008
+  after main's comment-PII migration took that number). Verify the column
   exists after `db:migrate` — drizzle-kit can exit 0 without applying when
   the database is unreachable (the 0007 incident).
+
+### 5b-4. Comment storage: text yes, author PII never (branch `feat-comment-pii`)
+
+- **The `comments` table stores comment text (≤500 chars) with the
+  moderation outcome** (status, decidedBy, matchedRuleId, aiScore,
+  timestamps) so the review queue and audit history work.
+- **Author identifiers are never persisted.** Migration 0008 relaxes
+  `author_name` and `author_channel_id` to nullable and wipes the stored
+  values (table rebuild whose INSERT SELECT carries NULL) — the expand
+  phase, so pre- and post-change code coexist during the rollout (Netlify
+  deploys are not atomic). A follow-up contract migration DROPS the columns
+  once 0008 is verified applied. Rule matching still uses the in-memory
+  author channel ID at decision time.
+- **The review queue labels targets by text preview**, not author name
+  ("Approve comment: …", "Ban this comment's author?"), since the author
+  name is no longer known.
+- **Public copy matches the implementation.** The earlier
+  "processed and discarded, never stored" claim contradicted the database;
+  Terms §4.2/§10.2, Privacy §2/§3.2/§3.4/§4.3/§7.1/§10.2, DPA §7/§13.1 and
+  Annexes I–II, the footer LGPD note, and the FAQ now state: comment text is
+  stored with the verdict, author identities are never stored. A consistency
+  guard in `src/lib/landing/legal.test.ts` fails on regression.
+- **Material legal change → `LEGAL_VERSION` bump (1.2);** existing users
+  re-consent at next login via the §5b-2 flow.
+- Migration ritual: run `npm run db:migrate` right after merge AND verify
+  the author columns are nullable with all values NULL (0007 incident —
+  drizzle-kit can exit 0 without applying). The contract migration that
+  DROPS them ships only after that verification.
 
 ## 7. Future features
 

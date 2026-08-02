@@ -36,7 +36,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <p><strong>Moderation Action:</strong> an automated action configured by you (such as holding, hiding, removing, or reporting comments) executed via the YouTube API Services.</p>
 
-<p><strong>Moderation Outcome Data:</strong> the minimal record we keep of each action (comment ID reference, verdict, action, timestamp), without comment bodies.</p>
+<p><strong>Moderation Outcome Data:</strong> the minimal record we keep of each action (comment ID reference, comment text truncated to 500 characters, verdict, action, timestamp), without author identifiers.</p>
 
 <p><strong>Consumer:</strong> a user qualifying as a consumidor under Article 2 of the CDC.</p>
 
@@ -54,7 +54,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <p><strong>4.1</strong> The Service retrieves comments from your connected YouTube channel(s) via the YouTube API Services, classifies them automatically (including detection of hate speech and related abusive content), and executes the Moderation Actions you configure.</p>
 
-<p><strong>4.2</strong> We operate a process-and-discard architecture: comment text and author identifiers are not persistently stored; we retain only Moderation Outcome Data, as described in the DPA and Privacy Policy.</p>
+<p><strong>4.2</strong> We minimize comment data: comment text (truncated to 500 characters) is stored as part of Moderation Outcome Data, and comment author identifiers are processed in memory only and never stored — except identifiers you enter in user rules, which are stored as your own configuration — as described in the DPA and Privacy Policy.</p>
 
 <p><strong>4.3</strong> The Service is a tool. Automated classification may produce false positives or false negatives. You are responsible for reviewing your configuration and its effects on your channel (see Section 9).</p>
 
@@ -74,17 +74,17 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <p><strong>6.2</strong> If you enable auto top-up, you expressly authorize recurring charges of the selected amount each time your balance reaches the threshold you configure (for example, USD 5.00 when the balance falls to USD 2.50). You can change the threshold or disable auto top-up at any time in your account settings, effective for future charges.</p>
 
-<p><strong>6.3</strong> We will give at least 30 days' prior notice of any change to prices or Credit conversion rates, by e-mail and a notice in the Service. Changes apply only to purchases made after the notice period. If you do not agree, you may stop purchasing and request a refund of unconsumed Credits.</p>
+<p><strong>6.3</strong> We will give at least 30 days' prior notice of any change to prices or Credit conversion rates, by e-mail and a notice in the Service. Changes apply only to purchases made after the notice period. If you do not agree, you may stop purchasing; refunds are governed by Section 7.</p>
 
 <p><strong>6.4</strong> You are responsible for applicable taxes. Prices are shown with applicable tax information at checkout.</p>
 
 <h2 id="s7">7. Right of Withdrawal and Refunds</h2>
 
-<p><strong>7.1</strong> If you are a Consumer, you may withdraw from your purchase within 7 (seven) days, counted from acceptance of these Terms or from the purchase, under Article 49 of the CDC, and receive a full refund of amounts paid, without penalty. To exercise this right, contact us through any channel listed in Section 21.</p>
+<p><strong>7.1</strong> If you are a Consumer, you may withdraw from your purchase within 7 (seven) days, counted from acceptance of these Terms or from the purchase, under Article 49 of the CDC, and receive a full refund of all amounts paid, at any title, without deductions of any kind, monetarily updated, and without penalty — even if you have used the Service during that period. To exercise this right, contact us through any channel listed in Section 21.</p>
 
-<p><strong>7.2</strong> Outside the withdrawal period, refunds are issued only: (a) for unconsumed Credits, upon cancellation of your account; and (b) where required by applicable law.</p>
+<p><strong>7.2</strong> Outside the withdrawal period, all purchases are final and no refunds are issued — including for unconsumed Credits and including upon cancellation or closure of your account — except where required by applicable law.</p>
 
-<p><strong class="highlight">7.3 BY PURCHASING CREDITS YOU EXPRESSLY REQUEST IMMEDIATE PERFORMANCE OF THE SERVICE. YOU ACKNOWLEDGE THAT, UNDER BRAZILIAN CASE LAW ON DIGITAL SERVICES, THE RIGHT OF WITHDRAWAL MAY BE LIMITED FOR DIGITAL SERVICES IMMEDIATELY AND FULLY CONSUMED AT YOUR REQUEST, WHERE THIS CONSEQUENCE WAS CLEARLY AND PROMINENTLY DISCLOSED BEFORE PURCHASE — AS IT IS HERE. NOTHING IN THIS CLAUSE LIMITS YOUR RIGHT TO A REFUND OF CREDITS THAT HAVE NOT BEEN CONSUMED.</strong></p>
+<p><strong class="highlight">7.3 BY PURCHASING CREDITS YOU EXPRESSLY REQUEST IMMEDIATE PERFORMANCE OF THE SERVICE. YOU ACKNOWLEDGE THAT, UNDER BRAZILIAN CASE LAW ON DIGITAL SERVICES, THE RIGHT OF WITHDRAWAL MAY BE LIMITED FOR DIGITAL SERVICES IMMEDIATELY AND FULLY CONSUMED AT YOUR REQUEST, WHERE THIS CONSEQUENCE WAS CLEARLY AND PROMINENTLY DISCLOSED BEFORE PURCHASE — AS IT IS HERE. AFTER THE 7-DAY WITHDRAWAL PERIOD, CREDITS ARE NOT REFUNDABLE, USED OR NOT, EXCEPT WHERE REQUIRED BY APPLICABLE LAW.</strong></p>
 
 <h2 id="s8">8. Acceptable Use</h2>
 
@@ -111,9 +111,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <p><strong>10.1</strong> For your account, contact, and billing data, we act as data controller under the LGPD; our <a href="/privacy">Privacy Policy</a> explains that processing and your rights, and our data protection officer (encarregado) is identified in Section 21.</p>
 
-<p><strong>10.2</strong> For Comment Data, you are the controller and we are the operator (processor), under the <a href="/dpa">DPA</a>, which forms part of these Terms. The DPA includes the sensitive-data and minors safeguards, the process-and-discard architecture, the prohibition on model training, and the international transfer mechanisms required by the LGPD.</p>
+<p><strong>10.2</strong> For Comment Data, you are the controller and we are the operator (processor), under the <a href="/dpa">DPA</a>, which forms part of these Terms. The DPA includes the sensitive-data and minors safeguards, the comment-data minimization measures, the prohibition on model training, and the international transfer mechanisms required by the LGPD.</p>
 
-<p><strong>10.3</strong> We retain statutory connection and application-access logs for 6 months under Articles 13 and 15 of the Marco Civil da Internet, kept segregated and under secrecy, as our only retention exception.</p>
+<p><strong>10.3</strong> We retain statutory connection and application-access logs for 6 months under Articles 13 and 15 of the Marco Civil da Internet, kept segregated and under secrecy; these logs and the Moderation Outcome Data described in Section 4.2 are the only records we retain.</p>
 
 <h2 id="s11">11. Intellectual Property</h2>
 
@@ -127,13 +127,13 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <p><strong>12.1</strong> The Service depends on third parties, including YouTube, Google, and our payment and hosting providers. Those third parties may change, suspend, or discontinue their services, APIs, or terms at any time, and may suspend your access to them independently of us.</p>
 
-<p><strong>12.2</strong> We are not liable for acts, omissions, changes, or failures of third-party services. If a third-party change materially prevents us from providing the Service, our obligation is limited to the refund of your unconsumed Credits.</p>
+<p><strong>12.2</strong> We are not liable for acts, omissions, changes, or failures of third-party services. If a third-party change materially prevents us from providing the Service, any refund is governed by Section 7.</p>
 
 <h2 id="s13">13. Service Availability, Changes and Suspension</h2>
 
 <p><strong>13.1</strong> We provide the Service on a best-efforts basis and do not guarantee uninterrupted or error-free operation. Planned maintenance will be announced in advance where feasible.</p>
 
-<p><strong>13.2</strong> We may modify the Service's features, provided we do not reduce the core functionality you purchased without offering you the option to cancel with a refund of unconsumed Credits.</p>
+<p><strong>13.2</strong> We may modify the Service's features, provided we do not reduce the core functionality you purchased without offering you the option to cancel your account; refunds on cancellation are governed by Section 7.</p>
 
 <p><strong>13.3</strong> We may suspend or restrict your access immediately if: (a) you breach these Terms; (b) required by law, court order, or authority; (c) your use poses a security risk or may harm third parties; or (d) your payment fails or is reversed. Where lawful, we will notify you and, for remediable breaches, give a reasonable cure period before termination.</p>
 
@@ -157,9 +157,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <h2 id="s17">17. Term and Termination</h2>
 
-<p><strong>17.1</strong> These Terms take effect on acceptance and remain in force while you use the Service. You may terminate at any time by closing your account; we will refund unconsumed Credits as set out in Section 7.</p>
+<p><strong>17.1</strong> These Terms take effect on acceptance and remain in force while you use the Service. You may terminate at any time by closing your account; Credits are handled as set out in Section 7.</p>
 
-<p><strong>17.2</strong> We may terminate for convenience with 30 days' prior notice, refunding unconsumed Credits. We may terminate immediately for material breach not cured within a reasonable period after notice, or where Section 13.3 applies.</p>
+<p><strong>17.2</strong> We may terminate for convenience with 30 days' prior notice; refunds are governed by Section 7. We may terminate immediately for material breach not cured within a reasonable period after notice, or where Section 13.3 applies.</p>
 
 <p><strong>17.3</strong> Upon termination: your access ends; Comment Data is handled as set out in the DPA (deletion within 30 days, except statutory logs); Sections 11, 14, 15, 16, 19, and 20 survive.</p>
 
@@ -167,7 +167,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <p><strong>18.1</strong> We may update these Terms with at least 30 days' prior notice, sent by e-mail and displayed prominently in the Service, indicating the changes and their effective date. No change will have retroactive effect or reduce rights you have already paid for.</p>
 
-<p><strong>18.2</strong> If you do not agree with a change, you may terminate before its effective date and receive a refund of unconsumed Credits. Continued use after the effective date constitutes acceptance.</p>
+<p><strong>18.2</strong> If you do not agree with a change, you may terminate before its effective date; refunds are governed by Section 7. Continued use after the effective date constitutes acceptance.</p>
 
 <h2 id="s19">19. Governing Law, Forum and Dispute Resolution</h2>
 

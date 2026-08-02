@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "9701eabd-cf72-4b8f-8db4-6e05df06a6d7",
-  "prevId": "900423b7-a7c1-482c-9b9a-90da36e2749f",
+  "id": "9ebad210-2190-4738-8b23-724c4c7730ab",
+  "prevId": "9701eabd-cf72-4b8f-8db4-6e05df06a6d7",
   "tables": {
     "audit_log": {
       "name": "audit_log",
@@ -598,6 +598,13 @@
             "google_sub"
           ],
           "isUnique": true
+        },
+        "users_deleted_at_idx": {
+          "name": "users_deleted_at_idx",
+          "columns": [
+            "deleted_at"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {},

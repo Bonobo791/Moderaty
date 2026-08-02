@@ -139,13 +139,11 @@ for (let i = 0; i < comments.length; i++) {
 	}
 	await client.execute({
 		sql: `INSERT INTO comments
-		      (id, channel_id, author_channel_id, author_name, text, published_at, status, decided_by, matched_rule_id, ai_score)
-		      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		      (id, channel_id, text, published_at, status, decided_by, matched_rule_id, ai_score)
+		      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		args: [
 			`seed-comment-${String(i + 1).padStart(2, '0')}`,
 			CHANNEL_ID,
-			decidedBy === 'rule' && ruleType === 'user' ? 'seed-UC-troll' : `seed-UC-viewer-${(i % 6) + 1}`,
-			['Maya R.', 'j0hn_vids', 'LateNightLurker', 'Priya K', 'the_real_sam', 'quiet_regular'][i % 6],
 			text,
 			iso((i + 1) * 3 * 60 * 60 * 1000),
 			status,

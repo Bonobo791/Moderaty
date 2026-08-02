@@ -74,8 +74,15 @@ export const rules = sqliteTable('rules', {
 export const comments = sqliteTable('comments', {
 	id: text('id').primaryKey(), // YouTube comment ID
 	channelId: text('channel_id').notNull(),
-	authorChannelId: text('author_channel_id').notNull(),
-	authorName: text('author_name').notNull(),
+	// DEPRECATED (author PII): never written since the author-identifier
+	// change — they are processed in memory at decision time only. Relaxed
+	// to nullable + wiped by migration 0008 so old and new code coexist
+	// during rollout; DROPPED by the follow-up contract migration.
+	// Exception: user rules (rules.pattern with type 'user') store an
+	// authorChannelId the channel owner enters as their own configuration;
+	// no identifier is ever taken from a fetched comment and stored.
+	authorChannelId: text('author_channel_id'),
+	authorName: text('author_name'),
 	text: text('text').notNull(), // truncated to 500 chars on insert
 	publishedAt: text('published_at').notNull(),
 	status: text('status').notNull(), // 'pending' | 'approved' | 'held' | 'rejected' | 'deleted'

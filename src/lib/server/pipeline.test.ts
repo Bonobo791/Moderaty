@@ -502,6 +502,18 @@ test('scores full comment text but truncates the stored copy', async () => {
 	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ text: text.slice(0, 500) })]);
 });
 
+test('stores the comment text but never author identifiers', async () => {
+	mocks.scoreComment.mockResolvedValue(moderation(0.1));
+
+	await runChannel('channel');
+
+	expect(mocks.state.insertedComments).toHaveLength(1);
+	const stored = mocks.state.insertedComments[0] as Record<string, unknown>;
+	expect(stored.text).toBe('A comment');
+	expect(stored).not.toHaveProperty('authorName');
+	expect(stored).not.toHaveProperty('authorChannelId');
+});
+
 test('records successful remote actions before a later action fails', async () => {
 	mocks.state.ruleRows = [
 		{ id: 1, type: 'keyword', pattern: 'hold', action: 'hold' },

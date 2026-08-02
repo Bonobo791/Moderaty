@@ -106,6 +106,16 @@ describe('legal page content (PR #35 review)', () => {
 		}
 	});
 
+	it('names Stripe as the user-billing processor, disclosed but outside the comment-data DPA scope', () => {
+		expect(readComponent('privacy')).toMatch(/Stripe, Inc\. \(payment processing/);
+		const dpa = readComponent('dpa');
+		// The Annex III note names Stripe as the processor of user billing data
+		// acting for Moderaty; it must never appear as an Annex III sub-processor
+		// table row, since it handles no Comment Data.
+		expect(dpa).toMatch(/Stripe, Inc\.[\s\S]*outside the scope of this DPA/);
+		expect(dpa).not.toMatch(/<td>\s*Stripe/);
+	});
+
 	it('does not claim a Portuguese version is already published', () => {
 		expect(readComponent('terms')).not.toContain('published in English and Portuguese');
 		expect(readComponent('privacy')).not.toContain('published in English and Portuguese');
@@ -244,6 +254,29 @@ describe('refund policy consistency (PR #38 review)', () => {
 		for (const name of ['hosted plan panel', 'consent refund notice', 'pricing FAQ']) {
 			expect(surfaces[name], name).toMatch(/full refund/i);
 		}
+	});
+
+	// Maintainer-directed: post-window finality is stated ONLY in the Terms
+	// (§7.2-7.3) and other legally required places — consumer surfaces show
+	// the 7-day full refund without the "after that, all sales are final" tail.
+	it('states post-window finality only in the Terms, never on consumer surfaces', () => {
+		const FINALITY = [
+			/sales are final/i,
+			/purchases are final/i,
+			/not refunded/i,
+			/not refundable/i,
+			/no refunds?\b.*\bafter\b/i,
+			/refunds?\b.*\b(?:not available|unavailable|not refundable|not refunded)\b.*\b(?:after|outside)\b/i,
+			/(?:unused|unconsumed) credits?\b.*\b(?:excluded|not refundable|not refunded)\b/i
+		];
+		for (const name of ['hosted plan panel', 'consent refund notice', 'pricing FAQ']) {
+			for (const pattern of FINALITY) {
+				expect(surfaces[name], `${name} states finality: ${pattern}`).not.toMatch(pattern);
+			}
+		}
+		const terms = surfaces['Terms of Service'];
+		expect(terms).toMatch(/purchases are final/i);
+		expect(terms).toMatch(/not refundable/i);
 	});
 
 	it('Terms §7.1 carries the statutory no-deductions language', () => {

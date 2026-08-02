@@ -22,8 +22,8 @@ import { and, asc, eq, isNull, lt, or } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
+import { nullExpiredConsentEmails } from '$lib/server/deletion';
 import { runChannel } from '$lib/server/pipeline';
-import { purgeExpiredUser } from '$lib/server/retention';
 import type { RequestHandler } from './$types';
 
 const LEASE_MS = 10 * 60 * 1000; // exceeds one bounded run; expiry alone re-eligibilizes after a crash
@@ -57,21 +57,21 @@ export const GET: RequestHandler = async ({ url, request }) => {
 	else if (bearer.startsWith('Bearer ')) secret = bearer.slice('Bearer '.length);
 	if (!secretMatches(secret, env.CRON_SECRET)) throw error(401, 'bad secret');
 	const dryRun = env.DRY_RUN === 'true';
-	// Retention purge runs first, while the full budget remains. I8: a dry run
-	// changes nothing durable — the would-be purge is only logged. A purge
-	// failure must not stop scheduled moderation: log it loudly, report it in
-	// the response, and continue with channel work (the failed purge rolled
-	// back, so the next invocation retries it).
-	let purged: string | null = null;
-	let purgeError: string | null = null;
+	// Consent-evidence retention sweep runs first, while the full budget
+	// remains: consent e-mails older than 10 years (CC Art. 205) are erased —
+	// the row stays as anonymized evidence. I8: a dry run changes nothing
+	// durable — the would-be sweep is only logged. A sweep failure must not
+	// stop scheduled moderation: log it loudly, report it, continue.
+	let consentEmailsNulled = 0;
+	let sweepError: string | null = null;
 	if (dryRun) {
-		console.info('dry run: retention purge skipped');
+		console.info('dry run: consent e-mail retention sweep skipped');
 	} else {
 		try {
-			purged = await purgeExpiredUser();
+			consentEmailsNulled = await nullExpiredConsentEmails();
 		} catch (cause) {
-			purgeError = cause instanceof Error ? cause.message : String(cause);
-			console.error('retention purge failed:', cause);
+			sweepError = cause instanceof Error ? cause.message : String(cause);
+			console.error('consent e-mail retention sweep failed:', cause);
 		}
 	}
 	const nowIso = new Date().toISOString();
@@ -82,7 +82,7 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		.where(and(eq(channels.active, 1), claimable))
 		.orderBy(asc(channels.lastRunAt))
 		.limit(1);
-	if (!channel) return json({ ok: true, dryRun, purged, purgeError, results: {} });
+	if (!channel) return json({ ok: true, dryRun, consentEmailsNulled, sweepError, results: {} });
 
 	// Atomic claim: a concurrent claimant's UPDATE matches 0 rows and exits cleanly.
 	const claimed = await db
@@ -90,16 +90,17 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		.set({ leaseExpiresAt: new Date(Date.now() + LEASE_MS).toISOString() })
 		.where(and(eq(channels.id, channel.id), claimable))
 		.returning({ id: channels.id });
-	if (claimed.length === 0) return json({ ok: true, claimed: false, dryRun, purged, purgeError, results: {} });
+	if (claimed.length === 0)
+		return json({ ok: true, claimed: false, dryRun, consentEmailsNulled, sweepError, results: {} });
 
 	try {
 		const result = await runChannel(channel.id, { deadline });
-		return json({ ok: true, dryRun, purged, purgeError, results: { [channel.id]: result } });
+		return json({ ok: true, dryRun, consentEmailsNulled, sweepError, results: { [channel.id]: result } });
 	} catch (cause) {
 		const message = cause instanceof Error ? cause.message : String(cause);
 		console.error(`channel run ${channel.id} failed:`, cause);
 		return json(
-			{ ok: false, dryRun, purged, purgeError, results: { [channel.id]: { error: message } } },
+			{ ok: false, dryRun, consentEmailsNulled, sweepError, results: { [channel.id]: { error: message } } },
 			{ status: 500 } // failure must not look like success to the cron caller
 		);
 	} finally {

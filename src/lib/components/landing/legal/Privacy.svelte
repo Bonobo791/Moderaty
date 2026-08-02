@@ -43,10 +43,10 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				<td>Account registration: name, e-mail, Google account ID, channel ID(s)</td>
 				<td>Create and manage your account; connect your YouTube channel via OAuth; deliver the Service</td>
 				<td>Contract performance (Art. 7, V)</td>
-				<td>Duration of the account; deleted within 30 days of account closure, except legal-retention items below</td>
+				<td>Duration of the account; deleted immediately on account closure, except the consent-acceptance record (Section 7.1)</td>
 			</tr>
 			<tr>
-				<td>Billing: name, e-mail, purchase history, tax ID (if provided). Card data is processed by Stripe; we never see or store full card numbers</td>
+				<td>Billing: name, e-mail, purchase history, tax ID (if provided). Processed by Stripe, Inc. as our payment processor; we never see or store full card numbers</td>
 				<td>Process payments, issue invoices, prevent chargeback fraud</td>
 				<td>Contract performance (Art. 7, V); legal obligation (Art. 7, II — tax and accounting records)</td>
 				<td>Invoices and tax records: 5 years or the period required by Brazilian tax law</td>
@@ -55,7 +55,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				<td>Service operation: moderation configuration, moderation outcome records (comment ID reference, comment text truncated to 500 characters, verdict, action, timestamp — no author identifiers)</td>
 				<td>Execute your moderation instructions; show your activity history</td>
 				<td>Contract performance (Art. 7, V)</td>
-				<td>Duration of the subscription; deleted within 30 days of termination</td>
+				<td>Duration of the subscription; deleted immediately on termination</td>
 			</tr>
 			<tr>
 				<td>Connection and application-access logs: IP, timestamps, session records</td>
@@ -113,7 +113,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <p><strong>6.3</strong> As of the effective date of this Policy, international transfer recipients are: Google LLC (YouTube API Services), Netlify, Inc., OpenAI, LLC, Turso / ChiselStrike, Inc., and Stripe, Inc. (all United States). Database edge replicas, if enabled, operate only in regions recorded in Annex III of the DPA.</p>
 
 <h2 id="s7">7. Retention and Deletion</h2>
-<p><strong>7.1</strong> We keep personal data only for the periods stated in Section 2, after which it is deleted or irreversibly anonymized. Comment author identifiers are never persistently stored (Section 3.2); pseudonymized identifiers (such as hashed usernames) remain personal data and are likewise not retained. Comment text is retained only as part of moderation outcome records, for the periods stated in Section 2.</p>
+<p><strong>7.1</strong> We keep personal data only for the periods stated in Section 2, after which it is deleted or irreversibly anonymized. When you delete your account, your account data, moderation configuration, and moderation outcome records are erased immediately, and we request revocation of your YouTube authorization with Google (you can also revoke it yourself at any time via Google's security settings — Section 4.3). The one exception is the consent-acceptance record (your e-mail, the document versions you accepted, timestamps, IP, and user agent), retained under Article 16, III of the LGPD for the regular exercise of rights in judicial, administrative, or arbitral proceedings: it is blocked from any other use, access-restricted, and kept for up to 10 years, after which the e-mail is erased and the record remains only in anonymized form. Comment author identifiers are never persistently stored (Section 3.2); pseudonymized identifiers (such as hashed usernames) remain personal data and are likewise not retained. Comment text is retained only as part of moderation outcome records, for the periods stated in Section 2.</p>
 <p><strong>7.2</strong> We may retain data beyond the stated periods only where required by law, court order, or for the regular exercise of rights in judicial, administrative, or arbitral proceedings (Art. 16 of the LGPD), restricted to that purpose.</p>
 
 <h2 id="s8">8. Security</h2>

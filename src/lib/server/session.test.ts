@@ -79,15 +79,16 @@ test('destroys a session so it no longer resolves', async () => {
 	expect(await getSessionUser(token)).toBeNull();
 });
 
-test('a session whose user was soft-deleted after creation resolves null and its row is destroyed', async () => {
+test('a session whose user was deleted after creation resolves null and its row is destroyed', async () => {
 	// Regression: a login callback can read the user before the deleteAccount
 	// transaction commits and create a session after it deleted every session.
-	// That orphaned session must never grant access to the deleted account.
+	// That orphaned session must never grant access to the deleted account
+	// (tombstone marker: googleSub = 'deleted:<id>').
 	const userId = await seedUser();
 	const { token } = await createSession(userId);
 	await testDb()
 		.db.update(users)
-		.set({ deletedAt: new Date().toISOString() })
+		.set({ googleSub: `deleted:${userId}`, email: '[deleted]', displayName: '[deleted]' })
 		.where(eq(users.id, userId));
 
 	expect(await getSessionUser(token)).toBeNull();

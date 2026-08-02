@@ -655,8 +655,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 </div>
 <p>
 	Additions or replacements follow the notice-and-objection procedure of Clause 10.1. Billing
-	processors (e.g., Stripe) handle Controller-side billing data for which the Processor is
-	controller and are outside the scope of this DPA.
+	processors (currently Stripe, Inc. — United States) process the Controller's billing data on
+	the Processor's behalf, for which the Processor is the controller (see the Privacy Policy);
+	they receive no Comment Data and are outside the scope of this DPA.
 </p>
 
 <h2 id="annex-4">Annex IV — International Transfer Mechanism (ANPD Standard Contractual Clauses)</h2>

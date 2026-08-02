@@ -1944,32 +1944,52 @@ account exists — never pre-OAuth friction, never browsewrap:
   API scopes only at the separate "Connect YouTube channel" step — no
   comment data can flow before the contract exists.
 
-### 5b-3. Account deletion with 6-month retention (branch `feat-account-deletion`)
+### 5b-3. Account deletion: immediate erasure + statutory retention (branch `feat-account-deletion`)
 
-- **Soft delete, self-service.** The dashboard `deleteAccount` action
-  (required confirmation checkbox, `requireUser`) commits one transaction:
-  set `users.deleted_at`, destroy every session (immediate global sign-out),
-  deactivate the user's channels (`active=0` — moderation stops at once).
-- **Retention window = 6 months, sign-in restores.** A soft-deleted user who
-  authenticates again has `deleted_at` cleared in the login callback;
-  channels stay inactive until manually re-enabled, so moderation never
-  resumes silently. A sign-in AFTER the window instead purges the account
-  inline (`purgeUserById` in `src/lib/server/retention.ts`, shared with cron
-  so both enforce the same cutoff) and continues as a fresh signup.
-- **Bounded purge in cron (I10).** One expired user per invocation, skipped
-  under `DRY_RUN` (I8): sessions, channels, and their rules, comments,
-  moderation actions, and audit rows are deleted explicitly (no FK cascades
-  exist on channel-scoped tables).
-- **The consent log survives (LGPD Art. 16).** The users row is anonymized to
-  a tombstone (`google_sub = 'deleted:<id>'`, email/display name
-  `'[deleted]'`) rather than deleted, keeping `consents.user_id` valid and
-  preserving the evidentiary chain (doc version, exact checkbox text, IP,
-  user agent). The tombstone also frees the real Google sub for a future
-  fresh signup.
-- Migration 0009 adds nullable `users.deleted_at` (I7; renumbered from 0008
-  after main's comment-PII migration took that number). Verify the column
-  exists after `db:migrate` — drizzle-kit can exit 0 without applying when
-  the database is unreachable (the 0007 incident).
+- **Immediate delete, self-service.** The dashboard `deleteAccount` action
+  (required confirmation checkbox, `requireUser`) first revokes each owned
+  channel's YouTube grant at Google (`revokeGoogleToken`, RFC 7009 — a
+  YouTube API ToS requirement). A revocation failure is logged loudly per
+  channel but never blocks deletion: the encrypted token is erased either
+  way, orphaning the grant.
+- **One erase transaction** (`deleteUserRecords` in
+  `src/lib/server/deletion.ts`): moderation actions, comments, audit rows,
+  and rules for the user's channels; the channels themselves; every session
+  (immediate global sign-out). No restore window — signing back in is a
+  brand-new signup through `/consent`, never a restore.
+- **The consent log survives (LGPD Art. 16, III).** The users row is
+  anonymized to a tombstone (`google_sub = 'deleted:<id>'`, email/display
+  name `'[deleted]'`) rather than deleted, keeping `consents.user_id` valid
+  and freeing the real Google sub. The retained evidence is the
+  consent-acceptance record: e-mail, doc version, exact checkbox text, IP,
+  user agent.
+- **The e-mail lives ONLY in `consents` (decision: Option B).** Migration
+  0011 adds nullable `consents.email` and backfills it from `users` (NULLIF
+  keeps the `'[deleted]'` tombstone sentinel out of the evidence); the
+  consent action records it at every acceptance; the tombstone wipes
+  `users.email` entirely. Rationale: LGPD Art. 16 blocking must be
+  architecture, not discipline (no operational table other than `consents`
+  holds a deleted user's e-mail), it avoids re-signup e-mail collisions,
+  and it shrinks the breach blast radius. Known gap, not a bug: accounts
+  deleted before 0011 ships
+  have already wiped `users.email`, so their consent rows stay
+  `email = NULL` after backfill — unrecoverable, and fine. The same
+  migration is the CONTRACT phase for the abandoned soft delete: it drops
+  `users.deleted_at` and its index (0009/0010 stay in the journal forever —
+  applied migrations are immutable history) and creates the partial
+  `consents_email_retention_idx` the sweep queries through.
+- **10-year retention clock (CC Art. 205, conservative over CDC's 5).** A
+  cron sweep (`nullExpiredConsentEmails`, bounded batch per I10, skipped
+  under `DRY_RUN` per I8) nulls `consents.email` on rows older than 10
+  years; the consent row itself is kept as anonymized evidence. The sweep's
+  `WHERE email IS NOT NULL AND created_at < cutoff` shape is served by the
+  partial index above (EXPLAIN QUERY PLAN evidence in
+  `migration-0011.test.ts`).
+- **Transparency, not re-consent.** This clarifies what is retained after
+  deletion rather than changing what users consent to, so `LEGAL_VERSION`
+  is NOT bumped; a small in-app notice on the dashboard points to the
+  updated Privacy Policy (§2 account row, §7.1: "blocked from any other
+  use, access-restricted, up to 10 years").
 
 ### 5b-4. Comment storage: text yes, author PII never (branch `feat-comment-pii`)
 

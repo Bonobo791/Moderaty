@@ -55,13 +55,14 @@ export const MARKETING_CHECKBOX_TEXT =
 /**
  * Refund notice shown on the consent page, below the form. Mirrors Terms §7
  * (maintainer-directed, PR #38 review): CDC Art. 49 withdrawal covers a full
- * refund within 7 days of purchase; outside that window all sales are final,
- * unused credits included. Kept OUT of CONSENT_CHECKBOX_TEXT
+ * refund within 7 days of purchase. The post-window finality (Terms §7.2-7.3)
+ * is deliberately NOT repeated here — it lives only in the Terms and other
+ * legally required places. Kept OUT of CONSENT_CHECKBOX_TEXT
  * on purpose: the checkbox sentence is an evidentiary artifact logged
  * verbatim per consent row and never changes without a doc-version bump.
  */
 export const REFUND_NOTICE_TEXT =
-	'Every purchase is covered by Brazilian consumer law: you have 7 days from purchase to request a full refund of everything you paid, no deductions, no questions asked (CDC Art. 49). After that, all sales are final and unused credits are not refunded.';
+	'Every purchase is covered by Brazilian consumer law: you have 7 days from purchase to request a full refund of everything you paid, no deductions, no questions asked (CDC Art. 49).';
 
 export const PENDING_CONSENT_COOKIE = 'moderaty_consent_pending';
 const PENDING_TTL_MS = 10 * 60 * 1000;

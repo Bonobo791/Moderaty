@@ -175,17 +175,25 @@ never drift from the logged text. On material legal-doc changes bump `LEGAL_VERS
 `src/lib/server/legal.ts`); users whose consent predates it are routed back
 through `/consent` on next login.
 
-Account deletion is **soft with 6-month retention**: the dashboard
-`deleteAccount` action sets `users.deletedAt`, destroys every session, and
-deactivates the user's channels in one transaction. Signing back in within
-the window clears `deletedAt` (channels stay `active=0` until re-enabled);
-signing in AFTER the window purges the account inline (shared helpers in
-`src/lib/server/retention.ts`) and the flow continues as a fresh signup.
-Each cron invocation purges ONE user whose retention expired (I10): sessions,
-channels, and their rules/comments/moderation actions/audit rows are deleted
-and the users row is anonymized to a tombstone (`deleted:<id>`), so the
-`consents` evidentiary log survives (LGPD Art. 16 legal-defense retention).
-The purge never runs under `DRY_RUN=true` (I8).
+Account deletion is **immediate and permanent** (no restore window): the
+dashboard `deleteAccount` action (confirmation checkbox, `requireUser`)
+revokes each owned channel's YouTube grant at Google
+(`revokeGoogleToken` in `src/lib/server/google.ts` — a per-channel failure
+is logged loudly but never blocks deletion, since the encrypted token is
+erased either way), then `deleteUserRecords` (`src/lib/server/deletion.ts`)
+erases in one transaction: moderation actions, comments, audit rows, and
+rules for the user's channels; the channels themselves; every session. The
+users row is anonymized to a tombstone (`google_sub = 'deleted:<id>'`,
+email/display name `'[deleted]'`) rather than deleted, keeping
+`consents.user_id` valid and freeing the real Google sub for a future
+fresh signup (signing back in is a NEW signup through `/consent`, never a
+restore). The statutory exception: the `consents` evidentiary log keeps the
+e-mail, doc version, checkbox text, IP, and user agent under LGPD Art. 16,
+III — the e-mail lives ONLY in `consents` (migration 0011 backfills it from
+`users`), so blocking it from any other use is architectural, not
+discipline. Each cron invocation erases `consents.email` on rows older
+than 10 years (CC Art. 205; bounded batch, skipped under `DRY_RUN=true` per
+I8/I10) — the consent row itself is kept, anonymized.
 
 ## Commands
 

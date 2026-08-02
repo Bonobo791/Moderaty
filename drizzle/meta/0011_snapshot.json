@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "9701eabd-cf72-4b8f-8db4-6e05df06a6d7",
-  "prevId": "900423b7-a7c1-482c-9b9a-90da36e2749f",
+  "id": "aeee1e41-0d7c-4089-bd5d-28a7598e8db2",
+  "prevId": "9ebad210-2190-4738-8b23-724c4c7730ab",
   "tables": {
     "audit_log": {
       "name": "audit_log",
@@ -273,6 +273,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "email": {
+          "name": "email",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "doc_version": {
           "name": "doc_version",
           "type": "text",
@@ -325,6 +332,14 @@
             "user_id"
           ],
           "isUnique": false
+        },
+        "consents_email_retention_idx": {
+          "name": "consents_email_retention_idx",
+          "columns": [
+            "created_at"
+          ],
+          "isUnique": false,
+          "where": "\"consents\".\"email\" is not null"
         }
       },
       "foreignKeys": {
@@ -582,13 +597,6 @@
           "notNull": true,
           "autoincrement": false,
           "default": "(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
-        },
-        "deleted_at": {
-          "name": "deleted_at",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
         }
       },
       "indexes": {

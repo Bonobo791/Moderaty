@@ -76,7 +76,7 @@ export async function getSessionUser(token: string | undefined): Promise<Session
 		.select({
 			session: sessions,
 			user: { id: users.id, email: users.email, displayName: users.displayName, plan: users.plan },
-			userDeletedAt: users.deletedAt
+			userGoogleSub: users.googleSub
 		})
 		.from(sessions)
 		.innerJoin(users, eq(sessions.userId, users.id))
@@ -86,9 +86,10 @@ export async function getSessionUser(token: string | undefined): Promise<Session
 	// A session that outlives account deletion (e.g. a login callback read the
 	// user just before the deletion transaction committed, then created this
 	// session after every session was deleted) must never resolve: destroy it
-	// so a soft-deleted account has no working credentials.
-	if (row.userDeletedAt) {
-		console.info(`session for soft-deleted account ${row.user.id} destroyed on resolution`);
+	// so a deleted account has no working credentials. The tombstone marker is
+	// googleSub = 'deleted:<id>'.
+	if (row.userGoogleSub.startsWith('deleted:')) {
+		console.info(`session for deleted account ${row.user.id} destroyed on resolution`);
 		await db.delete(sessions).where(eq(sessions.id, token));
 		return null;
 	}

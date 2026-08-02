@@ -23,12 +23,13 @@ import { eq } from 'drizzle-orm';
 
 const mocks = vi.hoisted(() => ({
 	env: { DRY_RUN: 'false' } as Record<string, string | undefined>,
-	refreshAccessToken: vi.fn(async () => 'access-token'),
+	decrypt: vi.fn((_enc: string) => 'decrypted-refresh-token'),
+	refreshAccessToken: vi.fn(async (_token: string) => 'access-token'),
 	setModerationStatus: vi.fn(async () => {})
 }));
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
-vi.mock('$lib/server/crypto', () => ({ decrypt: vi.fn(() => 'decrypted-refresh-token') }));
+vi.mock('$lib/server/crypto', () => ({ decrypt: mocks.decrypt }));
 vi.mock('$lib/server/youtube', () => ({
 	refreshAccessToken: mocks.refreshAccessToken,
 	setModerationStatus: mocks.setModerationStatus
@@ -81,6 +82,10 @@ test('undo restores a rejected comment at YouTube and records the restore', asyn
 	const res = await undo('c1');
 
 	expect(res).toMatchObject({ success: expect.stringContaining('estored') });
+	// The restore runs on the OWNED channel's credential, decrypted — a wrong
+	// or skipped token step fails this test.
+	expect(mocks.decrypt).toHaveBeenCalledWith('enc-1');
+	expect(mocks.refreshAccessToken).toHaveBeenCalledWith('decrypted-refresh-token');
 	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token');
 	expect(await commentRow('c1')).toMatchObject({ status: 'approved', decidedBy: 'human' });
 	expect(await testDb().db.select().from(auditLog).all()).toContainEqual(

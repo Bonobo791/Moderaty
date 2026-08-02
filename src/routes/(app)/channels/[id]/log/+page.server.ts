@@ -26,6 +26,18 @@ import { env } from '$env/dynamic/private';
 import { error, fail } from '@sveltejs/kit';
 import { and, eq, desc, inArray } from 'drizzle-orm';
 
+// Newest first: the first entry seen per comment is its latest action, and
+// only that one can be undone. 'hold'/'reject' reverse fully via YouTube;
+// 'ban' restores the comment but the author ban is permanent (no API);
+// everything else ('delete', 'approve', 'queue', 'dry-run', 'restore') is
+// not reversible.
+function undoableFor(latest: boolean, action: string): 'full' | 'comment-only' | null {
+	if (!latest) return null;
+	if (action === 'hold' || action === 'reject') return 'full';
+	if (action === 'ban') return 'comment-only';
+	return null;
+}
+
 export async function load({ params, locals }) {
 	// Ownership-scoped: another user's channel (and its audit log) reads as "not found".
 	const ch = await ownedChannel(params.id, locals);
@@ -38,22 +50,11 @@ export async function load({ params, locals }) {
 		.orderBy(desc(auditLog.createdAt), desc(auditLog.id))
 		.limit(200)
 		.all();
-	// Newest first: the first entry seen per comment is its latest action, and
-	// only that one can be undone. 'hold'/'reject' reverse fully via YouTube;
-	// 'ban' restores the comment but the author ban is permanent (no API);
-	// everything else ('delete', 'approve', 'queue', 'dry-run', 'restore') is
-	// not reversible.
 	const seen = new Set<string>();
 	const entries = rows.map((entry) => {
 		const latest = !seen.has(entry.commentId);
 		seen.add(entry.commentId);
-		const undoable =
-			latest && (entry.action === 'hold' || entry.action === 'reject')
-				? 'full'
-				: latest && entry.action === 'ban'
-					? 'comment-only'
-					: null;
-		return { ...entry, undoable: undoable as 'full' | 'comment-only' | null };
+		return { ...entry, undoable: undoableFor(latest, entry.action) };
 	});
 	// Project only what the page renders — never serialize refreshTokenEnc (or
 	// any future secret column) to the browser.

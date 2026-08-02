@@ -46,7 +46,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				<td>Duration of the account; deleted immediately on account closure, except the consent-acceptance record (Section 7.1)</td>
 			</tr>
 			<tr>
-				<td>Billing: name, e-mail, purchase history, tax ID (if provided). Card data is processed by Stripe; we never see or store full card numbers</td>
+				<td>Billing: name, e-mail, purchase history, tax ID (if provided). Processed by Stripe, Inc. as our payment processor; we never see or store full card numbers</td>
 				<td>Process payments, issue invoices, prevent chargeback fraud</td>
 				<td>Contract performance (Art. 7, V); legal obligation (Art. 7, II — tax and accounting records)</td>
 				<td>Invoices and tax records: 5 years or the period required by Brazilian tax law</td>

@@ -38,14 +38,15 @@ export interface GoogleTokens {
  * checked before any JSON parsing: a non-OK response with a non-JSON body
  * (e.g. a proxy error page) is an upstream failure, not a parse failure.
  *
- * @param url - The Google endpoint URL.
+ * @param url - The Google endpoint URL (compile-time restricted to the known
+ *   endpoints, so no caller-controlled URL can ever reach `fetch`).
  * @param body - The form parameters to POST.
  * @param logPrefix - Server-log prefix identifying the flow.
  * @param makeError - Builds the error thrown on any failure.
  * @returns The raw response text of the OK response.
  */
 async function postGoogleForm(
-	url: string,
+	url: 'https://oauth2.googleapis.com/token' | 'https://oauth2.googleapis.com/revoke',
 	body: URLSearchParams,
 	logPrefix: string,
 	makeError: () => Error

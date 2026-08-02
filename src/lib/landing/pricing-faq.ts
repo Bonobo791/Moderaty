@@ -43,6 +43,6 @@ export const PRICING_FAQ_ENTRIES: { q: string; a: string }[] = [
 	},
 	{
 		q: 'Can I get a refund?',
-		a: 'Yes, within 7 days. Brazilian consumer law (CDC Art. 49) gives you 7 days from purchase for a full refund of everything you paid, no deductions, no questions, through any contact channel. Nothing renews, nothing auto-charges.'
+		a: 'Yes, within 7 days. Brazilian consumer law (CDC Art. 49) gives you 7 days from purchase for a full refund of everything you paid, no deductions, no questions asked, through any contact channel. Nothing renews, nothing auto-charges.'
 	}
 ];

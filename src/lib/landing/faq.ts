@@ -57,6 +57,6 @@ export const FAQ_ENTRIES: FaqEntry[] = [
 	},
 	{
 		q: 'Is Moderaty LGPD compliant?',
-		a: 'Yes. Moderaty is built in Brazil around the LGPD: comments are classified and discarded, never stored, and only the minimal verdict record is kept. No author profiling, no model training on comment data. The Privacy Policy and DPA, linked in the footer, spell it out.'
+		a: 'Yes. Moderaty is built in Brazil around the LGPD: comment text is kept with the verdict record so your review queue works, but comment author identities are never stored from comments. A blocked-user rule stores only the channel ID you enter yourself. No author profiling, no model training on comment data. The Privacy Policy and DPA, linked in the footer, spell it out.'
 	}
 ];

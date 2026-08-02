@@ -29,14 +29,18 @@ import { error, fail } from '@sveltejs/kit';
 export async function load({ params, locals }) {
 	const ch = await ownedChannel(params.id, locals);
 	const pending = await db
-		.select()
+		.select({
+			id: comments.id,
+			text: comments.text,
+			publishedAt: comments.publishedAt
+		})
 		.from(comments)
 		.where(and(eq(comments.channelId, params.id), eq(comments.status, 'pending')))
 		.orderBy(desc(comments.publishedAt))
 		.limit(100)
 		.all();
 	// Project only what the page renders — never serialize refreshTokenEnc (or
-	// any future secret column) to the browser.
+	// any future secret column) or legacy author columns to the browser.
 	return { ch: { id: ch.id, title: ch.title }, pending };
 }
 

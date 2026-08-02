@@ -25,7 +25,12 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	import { relativeTime } from '$lib/relative-time';
 
 	let { data, form } = $props();
-	let confirming = $state<{ id: string; author: string; kind: 'delete' | 'ban' } | null>(null);
+	let confirming = $state<{ id: string; kind: 'delete' | 'ban' } | null>(null);
+
+	// Author identifiers are never stored from fetched comments, so buttons
+	// name their target with a short text preview instead of the (unknown)
+	// author name (I13).
+	const preview = (text: string) => (text.length > 40 ? `${text.slice(0, 40)}…` : text);
 
 	autoRefresh();
 
@@ -53,14 +58,14 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 	{#each data.pending as c}
 		<div class="card">
-			<p style="margin-top:0"><span style="font-weight:600">{c.authorName}</span> <span class="muted" title={c.publishedAt}>{relativeTime(c.publishedAt)}</span></p>
+			<p style="margin-top:0"><span class="muted" title={c.publishedAt}>{relativeTime(c.publishedAt)}</span></p>
 			<blockquote class="quote">{c.text}</blockquote>
 			{#if confirming?.id === c.id}
 				<p style="margin:0 0 8px">
 					{#if confirming.kind === 'delete'}
-						Delete this comment by {confirming.author}? This can't be undone.
+						Delete this comment? This can't be undone.
 					{:else}
-						Ban {confirming.author}? Their comments will be rejected and they'll be blocked.
+						Ban this comment's author? Their comments will be rejected and they'll be blocked.
 					{/if}
 				</p>
 				<div style="display:flex; gap:8px">
@@ -76,23 +81,23 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				<div style="display:flex; gap:8px">
 					<form class="inline" method="POST" action="?/approve">
 						<input type="hidden" name="commentId" value={c.id} />
-						<button class="btn secondary small" aria-label="Approve comment by {c.authorName}">Approve</button>
+						<button class="btn secondary small" aria-label="Approve comment: {preview(c.text)}">Approve</button>
 					</form>
 					<form class="inline" method="POST" action="?/reject">
 						<input type="hidden" name="commentId" value={c.id} />
-						<button class="btn secondary small" aria-label="Reject comment by {c.authorName}">Reject</button>
+						<button class="btn secondary small" aria-label="Reject comment: {preview(c.text)}">Reject</button>
 					</form>
 					<button
 						class="btn danger small"
 						type="button"
-						aria-label="Delete comment by {c.authorName}"
-						onclick={() => (confirming = { id: c.id, author: c.authorName, kind: 'delete' })}
+						aria-label="Delete comment: {preview(c.text)}"
+						onclick={() => (confirming = { id: c.id, kind: 'delete' })}
 					>Delete</button>
 					<button
 						class="btn danger small"
 						type="button"
-						aria-label="Ban author {c.authorName}"
-						onclick={() => (confirming = { id: c.id, author: c.authorName, kind: 'ban' })}
+						aria-label="Ban author of comment: {preview(c.text)}"
+						onclick={() => (confirming = { id: c.id, kind: 'ban' })}
 					>Ban author</button>
 				</div>
 			{/if}

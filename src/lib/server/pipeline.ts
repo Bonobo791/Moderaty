@@ -194,11 +194,12 @@ function auditRows(channelId: string, decisions: Decision[], dryRun: boolean) {
 }
 
 function commentRows(channelId: string, decisions: Decision[]) {
+	// Process-and-discard for author PII: the display name and author channel
+	// ID served their purpose at decision time (rule matching) and are never
+	// persisted. Comment text IS stored (≤500 chars) so the review queue works.
 	return decisions.map((decision) => ({
 		id: decision.comment.id,
 		channelId,
-		authorChannelId: decision.comment.authorChannelId,
-		authorName: decision.comment.authorName,
 		text: decision.comment.text.slice(0, 500),
 		publishedAt: decision.comment.publishedAt,
 		status: decision.status,

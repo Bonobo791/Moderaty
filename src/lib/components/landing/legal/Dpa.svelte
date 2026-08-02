@@ -65,9 +65,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	</li>
 	<li>
 		<strong>(b)</strong> Moderation Outcome Data: the minimal records the Processor retains
-		after a moderation action, limited to the comment identifier reference, the classification
-		verdict, the action taken, and the timestamp. Moderation Outcome Data excludes comment
-		bodies and author profile data.
+		after a moderation action, limited to the comment identifier reference, the comment text
+		(truncated to 500 characters), the classification verdict, the action taken, and the
+		timestamp. Moderation Outcome Data excludes author identifiers and author profile data.
 	</li>
 	<li>
 		<strong>(c)</strong> ECA Digital: Law no 15.211/2025 (Digital Statute of Children and
@@ -164,26 +164,29 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	<li>(g) delete Comment Data as required by Sections 7 and 17.</li>
 </ul>
 
-<h2 id="s7">7. Data Minimization and Process-and-Discard Architecture</h2>
+<h2 id="s7">7. Data Minimization and Author-Identifier Non-Retention</h2>
 <p>
-	<strong>7.1</strong> The Processor operates a process-and-discard architecture: Comment Data
-	is retrieved, classified, and acted upon, and the raw comment content (comment text and
-	author identifiers) is not persistently stored by the Service.
+	<strong>7.1</strong> The Processor minimizes retained Comment Data: comments are retrieved,
+	classified, and acted upon; comment text (truncated to 500 characters) is stored solely as
+	part of Moderation Outcome Data, and author identifiers (display name, author channel
+	identifier) are not persistently stored by the Service.
 </p>
 <p>
-	<strong>7.2</strong> Transient processing occurs in memory or ephemeral storage strictly for
-	the duration required to classify the comment and execute the configured moderation action,
-	and is discarded immediately thereafter.
+	<strong>7.2</strong> Author identifiers are processed transiently, in memory only, strictly
+	for the duration required to classify the comment and execute the configured moderation
+	action, and are discarded immediately thereafter.
 </p>
 <p>
-	<strong>7.3</strong> The Processor retains only Moderation Outcome Data. The Processor shall
-	not reconstruct, reassemble, or maintain archives of comment bodies or author profiles.
+	<strong>7.3</strong> Beyond the comment text stored within Moderation Outcome Data, the
+	Processor shall not reconstruct, reassemble, or maintain archives of comment bodies or
+	author profiles.
 </p>
 <p>
 	<strong>7.4</strong> The Parties acknowledge that pseudonymized identifiers (such as hashed
-	usernames) remain personal data under the LGPD. The Processor shall not retain pseudonymized
-	author identifiers except where strictly necessary as part of Moderation Outcome Data, and
-	never for profiling or enrichment.
+	usernames) remain personal data under the LGPD. The Processor shall not retain author
+	identifiers taken from Comment Data, pseudonymized or otherwise, and never for profiling or
+	enrichment. Channel identifiers entered by the Controller in user rules are Controller
+	configuration, not retained Comment Data.
 </p>
 <p>
 	<strong>7.5</strong> The Processor shall not use Comment Data or Moderation Outcome Data to
@@ -285,8 +288,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <h2 id="s13">13. Data Subject Requests</h2>
 <p>
-	<strong>13.1</strong> Taking into account the process-and-discard architecture (which limits
-	the personal data the Processor holds), the Processor shall provide reasonable assistance so
+	<strong>13.1</strong> Taking into account the data-minimization measures of Section 7 (which
+	limit the personal data the Processor holds), the Processor shall provide reasonable
+	assistance so
 	the Controller can respond to data subject requests within the LGPD deadlines, including the
 	15-day confirmation/access deadline of Article 19.
 </p>
@@ -314,7 +318,8 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <p>
 	<strong>15.1</strong> Notwithstanding Section 7, the Processor retains connection records and
 	records of access to applications for the statutory period of 6 months under Articles 13 and
-	15 of the Marco Civil, as its sole documented retention exception.
+	15 of the Marco Civil; these logs and the Moderation Outcome Data described in Section 7 are
+	the only records the Processor retains.
 </p>
 <p>
 	<strong>15.2</strong> Such logs are stored separately from operational data, kept under
@@ -472,8 +477,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				<td>
 					Retrieval of comments; automated content-level classification (hate speech /
 					abusive content); execution of the Controller-configured moderation action
-					(hold, hide, remove, report); immediate discard of raw comment content;
-					retention of Moderation Outcome Data only.
+					(hold, hide, remove, report); immediate discard of author identifiers after
+					classification and action; retention of Moderation Outcome Data (including
+					truncated comment text).
 				</td>
 			</tr>
 			<tr>
@@ -488,8 +494,8 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				<td>Categories of personal data</td>
 				<td>
 					Comment text; author display name / username; author channel identifier;
-					comment identifier; timestamps. Not persistently stored under the
-					process-and-discard architecture (Section 7).
+					comment identifier; timestamps. Author identifiers are processed transiently
+					and never stored (Section 7).
 				</td>
 			</tr>
 			<tr>
@@ -504,9 +510,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			<tr>
 				<td>Retention and deletion</td>
 				<td>
-					Raw comment content: discarded immediately after classification and action.
-					Moderation Outcome Data: retained for the subscription term, deleted within 30
-					days of termination. Statutory connection/application-access logs: 6 months
+					Author identifiers: discarded immediately after classification and action.
+					Moderation Outcome Data (including comment text truncated to 500 characters):
+					retained for the subscription term, deleted within 30 days of termination. Statutory connection/application-access logs: 6 months
 					(Marco Civil, Arts. 13 and 15), segregated, then auto-deleted.
 				</td>
 			</tr>
@@ -563,8 +569,8 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			<tr>
 				<td>Minimization by design</td>
 				<td>
-					Process-and-discard pipeline (Section 7); no persistent comment-body storage;
-					Moderation Outcome Data schema enforced at the application layer.
+					No persistent storage of comment author identifiers (Section 7); Moderation
+					Outcome Data schema enforced at the application layer.
 				</td>
 			</tr>
 			<tr>

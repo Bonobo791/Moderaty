@@ -33,6 +33,7 @@ import {
 	readPendingConsent
 } from '$lib/server/legal';
 import { cookieSecure } from '$lib/server/oauthState';
+import { ensurePersonalOrg } from '$lib/server/org';
 import { createSession, SESSION_COOKIE } from '$lib/server/session';
 
 import type { Actions, PageServerLoad } from './$types';
@@ -92,9 +93,12 @@ export const actions: Actions = {
 			// itself, so a concurrent first sign-up whose transaction is
 			// serialized after this one sees count=2 and claims nothing. The
 			// conflict-tolerant insert + re-select absorbs a concurrent
-			// same-sub sign-up. User, consent record, and first session commit
-			// as ONE unit — a session-write failure rolls everything back and
-			// the parked cookie lets the same submission retry cleanly.
+			// same-sub sign-up; ensurePersonalOrg makes that race idempotent
+			// too. Every user needs a personal org — session resolution fails
+			// loudly on zero memberships. User, personal org, consent record,
+			// and first session commit as ONE unit — a session-write failure
+			// rolls everything back and the parked cookie lets the same
+			// submission retry cleanly.
 			const created = await db.transaction(async (tx) => {
 				await tx
 					.insert(users)
@@ -107,12 +111,13 @@ export const actions: Actions = {
 					.onConflictDoNothing();
 				const user = await tx.select().from(users).where(eq(users.googleSub, pending.sub)).get();
 				if (!user) throw error(500, 'account creation failed — please retry');
+				const orgId = await ensurePersonalOrg(tx, user);
 				await tx
 					.update(channels)
 					.set({ userId: user.id })
 					.where(and(isNull(channels.userId), sql`(select count(*) from ${users}) = 1`));
 				await tx.insert(consents).values(consentRecord(user.id, pending.email));
-				return { user, session: await createSession(user.id, tx) };
+				return { user, session: await createSession(user.id, tx, orgId) };
 			});
 			userId = created.user.id;
 			session = created.session;

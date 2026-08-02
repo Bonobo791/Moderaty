@@ -30,7 +30,7 @@
 import { and, eq, inArray, isNotNull, lt } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
-import { auditLog, channels, comments, consents, moderationActions, rules, sessions, users } from '$lib/server/db/schema';
+import { auditLog, channels, comments, consents, invites, memberships, moderationActions, organizations, rules, sessions, users } from '$lib/server/db/schema';
 
 export const CONSENT_EMAIL_RETENTION_MS = 10 * 365.25 * 24 * 60 * 60 * 1000; // 10 years
 
@@ -50,8 +50,12 @@ export function consentEmailCutoffIso(now = Date.now()): string {
  * Immediately and permanently erases a user's account data, preserving only the anonymized tombstone and the consent log.
  *
  * One transaction: moderation actions, comments, audit rows, and rules for
- * the user's channels; the channels themselves; every session. The users row
- * is anonymized to a tombstone (`googleSub: 'deleted:<id>'`, e-mail and
+ * the user's channels; the channels themselves; every session; and the
+ * user's tenancy — the personal org (whose name is the user's display name,
+ * i.e. PII), every membership, and every invite they created. Explicit
+ * deletes in child-to-parent order rather than FK reliance: the users row is
+ * only tombstoned, so ON DELETE CASCADE never fires. The users row is
+ * anonymized to a tombstone (`googleSub: 'deleted:<id>'`, e-mail and
  * display name wiped) so the same Google identity can sign up again and the
  * `consents` evidentiary log survives with its foreign key intact. The
  * e-mail survives ONLY in `consents` (statutory retention, Art. 16, III) —
@@ -81,6 +85,22 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 		}
 		await tx.delete(channels).where(eq(channels.userId, userId));
 		await tx.delete(sessions).where(eq(sessions.userId, userId));
+		// Tenancy erasure. The personal org is single-member by definition; a
+		// shared org the user merely belongs to survives (its other members own
+		// it) — only the user's membership row leaves.
+		const personalOrgs = await tx
+			.select({ id: organizations.id })
+			.from(organizations)
+			.where(eq(organizations.personalFor, userId))
+			.all();
+		const orgIds = personalOrgs.map((o) => o.id);
+		if (orgIds.length) {
+			await tx.delete(invites).where(inArray(invites.orgId, orgIds));
+			await tx.delete(memberships).where(inArray(memberships.orgId, orgIds));
+			await tx.delete(organizations).where(inArray(organizations.id, orgIds));
+		}
+		await tx.delete(invites).where(eq(invites.createdBy, userId));
+		await tx.delete(memberships).where(eq(memberships.userId, userId));
 		await tx
 			.update(users)
 			.set({ googleSub: `deleted:${userId}`, email: '[deleted]', displayName: '[deleted]' })

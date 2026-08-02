@@ -20,7 +20,7 @@ import { eq } from 'drizzle-orm';
 import { expect, test } from 'vitest';
 
 import { DAY_MS, seedConsent, setupTestDb, testDb } from './testdb';
-import { auditLog, channels, comments, consents, moderationActions, rules, sessions, users } from './db/schema';
+import { auditLog, channels, comments, consents, invites, memberships, moderationActions, organizations, rules, sessions, users } from './db/schema';
 import {
 	CONSENT_EMAIL_RETENTION_MS,
 	consentEmailCutoffIso,
@@ -28,15 +28,24 @@ import {
 	nullExpiredConsentEmails
 } from './deletion';
 
-setupTestDb(['moderation_actions', 'comments', 'audit_log', 'rules', 'channels', 'sessions', 'consents', 'users']);
+setupTestDb(['moderation_actions', 'comments', 'audit_log', 'rules', 'channels', 'sessions', 'consents', 'invites', 'memberships', 'organizations', 'users']);
 
 async function seedUser(id: string) {
 	await testDb()
 		.db.insert(users)
 		.values({ id, googleSub: `sub-${id}`, email: `${id}@example.com`, displayName: id });
+	// Every real user has a personal org (0012 backfill / signup) — an org row
+	// named after them, an owner membership, and (Phase D shape) an invite.
+	await testDb()
+		.db.insert(organizations)
+		.values({ id: `org-${id}`, name: id, personalFor: id });
+	await testDb().db.insert(memberships).values({ userId: id, orgId: `org-${id}`, role: 'owner' });
+	await testDb()
+		.db.insert(invites)
+		.values({ token: `invite-${id}`, orgId: `org-${id}`, role: 'member', createdBy: id, expiresAt: new Date(Date.now() + DAY_MS).toISOString() });
 	await testDb()
 		.db.insert(channels)
-		.values({ id: `UC-${id}`, userId: id, title: `channel ${id}`, refreshTokenEnc: 'enc' });
+		.values({ id: `UC-${id}`, userId: id, orgId: `org-${id}`, title: `channel ${id}`, refreshTokenEnc: 'enc' });
 	await testDb()
 		.db.insert(sessions)
 		.values({ id: `token-${id}`, userId: id, expiresAt: new Date(Date.now() + DAY_MS).toISOString() });
@@ -80,6 +89,11 @@ test('deleteUserRecords erases every owned record and tombstones the user fully'
 	expect(await testDb().db.select().from(moderationActions).all()).toEqual([]);
 	expect(await testDb().db.select().from(auditLog).all()).toEqual([]);
 	expect(await testDb().db.select().from(rules).all()).toEqual([]);
+	// The user's tenancy goes too: the personal org (its name is the user's
+	// display name — PII), all memberships, and invites they created.
+	expect(await testDb().db.select().from(organizations).all()).toEqual([]);
+	expect(await testDb().db.select().from(memberships).all()).toEqual([]);
+	expect(await testDb().db.select().from(invites).all()).toEqual([]);
 	expect(await userRow(userId)).toMatchObject({
 		googleSub: `deleted:${userId}`,
 		email: '[deleted]',
@@ -102,6 +116,10 @@ test('deleteUserRecords leaves other users and their records alone', async () =>
 	expect((await testDb().db.select().from(channels).all()).map((ch) => ch.id)).toEqual(['UC-stays']);
 	expect(await testDb().db.select().from(sessions).all()).toHaveLength(1);
 	expect(await testDb().db.select().from(consents).all()).toHaveLength(1);
+	// ...including the survivor's tenancy.
+	expect((await testDb().db.select().from(organizations).all()).map((o) => o.id)).toEqual(['org-stays']);
+	expect(await testDb().db.select().from(memberships).all()).toHaveLength(1);
+	expect(await testDb().db.select().from(invites).all()).toHaveLength(1);
 });
 
 test('deleteUserRecords works for a user with no channels', async () => {

@@ -18,10 +18,12 @@
 
 import { redirect } from '@sveltejs/kit';
 
+import { listOrgMemberships } from '$lib/server/org';
+
 import type { LayoutServerLoad } from './$types';
 
 // Everything under (app) requires a signed-in user.
-export const load: LayoutServerLoad = ({ locals }) => {
+export const load: LayoutServerLoad = async ({ locals }) => {
 	if (!locals.user) throw redirect(302, '/login');
-	return { user: locals.user };
+	return { user: locals.user, orgs: await listOrgMemberships(locals.user.id) };
 };

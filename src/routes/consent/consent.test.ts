@@ -39,7 +39,7 @@ vi.mock('$lib/server/session', async (importOriginal) => {
 import { segmentConsentText } from '$lib/consentText';
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { makeCookies } from '$lib/server/testcookies';
-import { channels, consents, sessions, users } from '$lib/server/db/schema';
+import { channels, consents, memberships, organizations, sessions, users } from '$lib/server/db/schema';
 import {
 	CONSENT_CHECKBOX_TEXT,
 	LEGAL_VERSION,
@@ -48,11 +48,11 @@ import {
 	parkPendingConsent,
 	type PendingConsent
 } from '$lib/server/legal';
-import { createSession } from '$lib/server/session';
+import { createSession, getSessionUser } from '$lib/server/session';
 
 import { actions, load } from './+page.server';
 
-setupTestDb(['consents', 'sessions', 'users', 'channels']);
+setupTestDb(['consents', 'sessions', 'users', 'channels', 'organizations', 'memberships']);
 
 const here = dirname(fileURLToPath(import.meta.url));
 const consentPage = readFileSync(join(here, '+page.svelte'), 'utf8');
@@ -107,6 +107,8 @@ function expectLoadRedirectsToLogin(cookies: ReturnType<typeof makeCookies>, url
 async function expectNothingWritten() {
 	expect(await testDb().db.select().from(users).all()).toHaveLength(0);
 	expect(await testDb().db.select().from(consents).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(organizations).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(memberships).all()).toHaveLength(0);
 }
 
 test('page states: the rendered sentence equals the logged text exactly, docs are linked, errors are announced', () => {
@@ -205,6 +207,35 @@ test('a new user is created only at acceptance, with a full evidentiary consent 
 	expect(cookies.setCalls.find((c) => c.name === 'moderaty_session')).toBeTruthy();
 	// The pending cookie is consumed — acceptance cannot be replayed.
 	expect(cookies.get(PENDING_CONSENT_COOKIE)).toBeUndefined();
+});
+
+test('a new signup gets a personal org with owner membership, and its session resolves to that org', async () => {
+	// getSessionUser fails loudly when a user has zero memberships — without a
+	// personal org created in the signup transaction, every new account would
+	// 500 on its very first authenticated request.
+	const thrown = await captureAction(cookiesWithPending(NEW_SUB), { consent: 'on' });
+	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
+
+	const user = (await testDb().db.select().from(users).all())[0];
+	const orgs = await testDb().db.select().from(organizations).all();
+	expect(orgs).toHaveLength(1);
+	expect(orgs[0]).toMatchObject({ name: 'One', personalFor: user.id, plan: 'free' });
+	const rows = await testDb().db.select().from(memberships).all();
+	expect(rows).toHaveLength(1);
+	expect(rows[0]).toMatchObject({ userId: user.id, orgId: orgs[0].id, role: 'owner' });
+
+	// The session the signup just issued must resolve into that org on the
+	// very next request.
+	const session = (await testDb().db.select().from(sessions).all())[0];
+	expect(session.activeOrgId).toBe(orgs[0].id);
+	const resolved = await getSessionUser(session.id);
+	expect(resolved?.user).toMatchObject({
+		id: user.id,
+		orgId: orgs[0].id,
+		orgName: 'One',
+		orgRole: 'owner',
+		plan: 'free'
+	});
 });
 
 test('the marketing opt-in is recorded separately and only when ticked', async () => {

@@ -34,11 +34,11 @@ export async function load({ locals }) {
 	const user = requireUser(locals);
 	// Project only the fields the page renders; never serialize refreshTokenEnc
 	// (or any future secret column) to the browser. Everything below is scoped
-	// to channels the signed-in user owns.
+	// to the active team's channels.
 	const chs = await db
 		.select({ id: channels.id, title: channels.title, cursor: channels.cursor, toneLevel: channels.toneLevel })
 		.from(channels)
-		.where(eq(channels.userId, user.id))
+		.where(eq(channels.orgId, user.orgId))
 		.all();
 	const channelIds = chs.map((ch) => ch.id);
 	const stats = channelIds.length
@@ -75,11 +75,11 @@ export const actions = {
 		if (toneLevel !== 1 && toneLevel !== 2) {
 			return fail(400, { error: 'tone level must be 1 (Edge Lord) or 2 (Edge lord + Ackchyually…)' });
 		}
-		// Ownership-scoped: another user's channel reads as "not found".
+		// Tenancy-scoped: another team's channel reads as "not found".
 		const updated = await db
 			.update(channels)
 			.set({ toneLevel })
-			.where(and(eq(channels.id, channelId), eq(channels.userId, user.id)))
+			.where(and(eq(channels.id, channelId), eq(channels.orgId, user.orgId)))
 			.returning({ id: channels.id });
 		if (updated.length === 0) return fail(404, { error: 'channel not found' });
 		return { ok: true };
@@ -95,6 +95,10 @@ export const actions = {
 		// YouTube grant is revoked at Google first (YouTube API ToS); a
 		// revocation failure is logged loudly but does not block deletion — the
 		// encrypted token is erased either way, orphaning the grant.
+		// Revocation is connector-scoped (channels.userId = the account being
+		// deleted): those Google grants belong to THIS user. Channels in teams
+		// that survive the deletion keep their rows; their dead token will fail
+		// loudly in cron until a teammate reconnects the channel.
 		const owned = await db
 			.select({ id: channels.id, refreshTokenEnc: channels.refreshTokenEnc })
 			.from(channels)

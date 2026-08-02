@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "9701eabd-cf72-4b8f-8db4-6e05df06a6d7",
+  "id": "f2057830-fedf-4fd6-963b-b7be6ac8caac",
   "prevId": "900423b7-a7c1-482c-9b9a-90da36e2749f",
   "tables": {
     "audit_log": {
@@ -271,6 +271,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
+          "autoincrement": false
+        },
+        "email": {
+          "name": "email",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
           "autoincrement": false
         },
         "doc_version": {
@@ -582,13 +589,6 @@
           "notNull": true,
           "autoincrement": false,
           "default": "(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
-        },
-        "deleted_at": {
-          "name": "deleted_at",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
         }
       },
       "indexes": {

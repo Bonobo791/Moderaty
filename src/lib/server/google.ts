@@ -113,3 +113,47 @@ export async function exchangeGoogleCode(
 		refreshToken: typeof tokens.refresh_token === 'string' && tokens.refresh_token ? tokens.refresh_token : undefined
 	};
 }
+
+/**
+ * Revokes a token at Google's revocation endpoint (RFC 7009). Used on account
+ * deletion so the user's YouTube grant dies with the account — a YouTube API
+ * ToS requirement, not just hygiene.
+ *
+ * Throws on any failure (network or non-OK status): account deletion treats
+ * each channel's revocation independently — the caller logs the failure
+ * loudly and still deletes, since the encrypted token is erased either way.
+ * The raw response body is logged server-side only; it never carries tokens.
+ *
+ * @param token - The refresh (or access) token to revoke.
+ * @param logPrefix - Server-log prefix identifying the context (e.g. 'account deletion channel UC...').
+ */
+export async function revokeGoogleToken(token: string, logPrefix: string): Promise<void> {
+	let res: Response;
+	let text: string;
+	try {
+		res = await fetch('https://oauth2.googleapis.com/revoke', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ token }),
+			signal: AbortSignal.timeout(10_000)
+		});
+		text = await res.text();
+	} catch (e) {
+		console.error(`${logPrefix} revocation request failed: ${e instanceof Error ? e.message : e}`);
+		throw new Error('Google token revocation failed');
+	}
+	if (!res.ok) {
+		let detail = 'no error detail';
+		try {
+			const body = JSON.parse(text) as { error?: unknown; error_description?: unknown };
+			if (typeof body?.error === 'string') {
+				const description = typeof body.error_description === 'string' ? `: ${body.error_description}` : '';
+				detail = `${body.error}${description}`;
+			}
+		} catch {
+			// Non-JSON error body — status alone is enough.
+		}
+		console.error(`${logPrefix} revocation failed: ${res.status} ${detail}`);
+		throw new Error('Google token revocation failed');
+	}
+}

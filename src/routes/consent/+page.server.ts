@@ -67,9 +67,14 @@ export const actions: Actions = {
 		const marketingOptIn = form.get('marketing') === 'on' ? 1 : 0;
 
 		// One builder for the evidentiary row so the new-account and
-		// re-acceptance paths cannot drift apart.
-		const consentRecord = (userId: string) => ({
+		// re-acceptance paths cannot drift apart. The e-mail is recorded here
+		// because it is part of the retention evidence: on account deletion the
+		// users row is fully anonymized and the e-mail survives ONLY in this
+		// log (LGPD Art. 16, III — blocked from any other use, erased after 10
+		// years by the cron sweep).
+		const consentRecord = (userId: string, email: string) => ({
 			userId,
+			email,
 			docVersion: LEGAL_VERSION,
 			checkboxText: CONSENT_CHECKBOX_TEXT,
 			ip: getClientAddress(),
@@ -106,27 +111,20 @@ export const actions: Actions = {
 					.update(channels)
 					.set({ userId: user.id })
 					.where(and(isNull(channels.userId), sql`(select count(*) from ${users}) = 1`));
-				await tx.insert(consents).values(consentRecord(user.id));
+				await tx.insert(consents).values(consentRecord(user.id, pending.email));
 				return { user, session: await createSession(user.id, tx) };
 			});
 			userId = created.user.id;
 			session = created.session;
 		} else {
 			const user = await db
-				.select({ id: users.id, deletedAt: users.deletedAt })
+				.select({ id: users.id, email: users.email })
 				.from(users)
 				.where(eq(users.id, pending.userId))
 				.get();
 			if (!user) return fail(400, { error: 'Your sign-in session expired — please sign in again.' });
 			session = await db.transaction(async (tx) => {
-				await tx.insert(consents).values(consentRecord(user.id));
-				// The login callback leaves a soft-deleted account pending while
-				// it is parked here; completing re-acceptance is what cancels
-				// the deletion — atomically with the consent record and session.
-				if (user.deletedAt) {
-					await tx.update(users).set({ deletedAt: null }).where(eq(users.id, user.id));
-					console.info(`account ${user.id} restored by re-consent; pending deletion cancelled`);
-				}
+				await tx.insert(consents).values(consentRecord(user.id, user.email));
 				return createSession(user.id, tx);
 			});
 			userId = user.id;

@@ -81,7 +81,6 @@ export async function createTestDb(): Promise<TestDb> {
 			email TEXT NOT NULL,
 			display_name TEXT NOT NULL,
 			plan TEXT NOT NULL DEFAULT 'free',
-			deleted_at TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE TABLE sessions (
@@ -147,6 +146,7 @@ export async function createTestDb(): Promise<TestDb> {
 		`CREATE TABLE consents (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			email TEXT,
 			doc_version TEXT NOT NULL,
 			checkbox_text TEXT NOT NULL,
 			ip TEXT NOT NULL,

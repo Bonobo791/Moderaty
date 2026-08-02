@@ -46,6 +46,10 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <h1>Channels</h1>
 <p class="page-sub">Connect a channel and track its moderation activity.</p>
 
+<p class="muted" style="font-size:0.9em">
+	We've clarified what we retain after account deletion — see the <a href="/privacy">Privacy Policy</a>.
+</p>
+
 {#each data.chs as ch}
 	{@const pending = count(ch.id, 'pending')}
 	{@const level = ch.toneLevel ?? 1}
@@ -116,10 +120,11 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <div class="card danger-zone">
 	<h2>Delete account</h2>
 	<p class="muted">
-		Deleting your account signs you out everywhere and stops moderation on your channels immediately.
-		Your records are kept for 6 months — signing back in within that window restores your account —
-		then they are permanently erased. Your legal consent records are retained beyond that as required
-		for compliance.
+		Deleting your account is immediate and permanent. It signs you out everywhere, revokes
+		Moderaty's access to your YouTube channels, and erases your channels, rules, and moderation
+		records right away — there is no restore window. Only your consent-acceptance records
+		(including your e-mail) are retained, as Brazilian law requires: blocked from any other use,
+		access-restricted, for up to 10 years.
 	</p>
 	{#if form?.error}
 		<p class="error-box" role="alert">{form.error}</p>

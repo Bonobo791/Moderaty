@@ -108,12 +108,14 @@ export async function createTestDb(): Promise<TestDb> {
 		`CREATE TABLE sessions (
 			id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			active_org_id TEXT,
 			expires_at TEXT NOT NULL,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE TABLE channels (
 			id TEXT PRIMARY KEY,
 			user_id TEXT,
+			org_id TEXT,
 			title TEXT NOT NULL,
 			refresh_token_enc TEXT NOT NULL,
 			cursor TEXT,
@@ -176,7 +178,31 @@ export async function createTestDb(): Promise<TestDb> {
 			marketing_opt_in INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
-		`CREATE INDEX consents_email_retention_idx ON consents (created_at) WHERE email IS NOT NULL`
+		`CREATE INDEX consents_email_retention_idx ON consents (created_at) WHERE email IS NOT NULL`,
+		`CREATE TABLE organizations (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			plan TEXT NOT NULL DEFAULT 'free',
+			personal_for TEXT,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`,
+		`CREATE UNIQUE INDEX organizations_personal_for_unique ON organizations (personal_for)`,
+		`CREATE TABLE memberships (
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+			role TEXT NOT NULL,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+			PRIMARY KEY (user_id, org_id)
+		)`,
+		`CREATE TABLE invites (
+			token TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+			role TEXT NOT NULL,
+			created_by TEXT NOT NULL REFERENCES users(id),
+			expires_at TEXT NOT NULL,
+			accepted_by TEXT,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`
 	]);
 	return { db: drizzle(client, { schema }), client };
 }

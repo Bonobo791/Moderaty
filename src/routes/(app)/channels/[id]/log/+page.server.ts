@@ -24,13 +24,30 @@ import { eq, desc } from 'drizzle-orm';
 export async function load({ params, locals }) {
 	// Ownership-scoped: another user's channel (and its audit log) reads as "not found".
 	const ch = await ownedChannel(params.id, locals);
-	const entries = await db
+	const rows = await db
 		.select()
 		.from(auditLog)
 		.where(eq(auditLog.channelId, params.id))
 		.orderBy(desc(auditLog.createdAt))
 		.limit(200)
 		.all();
+	// Newest first: the first entry seen per comment is its latest action, and
+	// only that one can be undone. 'hold'/'reject' reverse fully via YouTube;
+	// 'ban' restores the comment but the author ban is permanent (no API);
+	// everything else ('delete', 'approve', 'queue', 'dry-run', 'restore') is
+	// not reversible.
+	const seen = new Set<string>();
+	const entries = rows.map((entry) => {
+		const latest = !seen.has(entry.commentId);
+		seen.add(entry.commentId);
+		const undoable =
+			latest && (entry.action === 'hold' || entry.action === 'reject')
+				? 'full'
+				: latest && entry.action === 'ban'
+					? 'comment-only'
+					: null;
+		return { ...entry, undoable: undoable as 'full' | 'comment-only' | null };
+	});
 	// Project only what the page renders — never serialize refreshTokenEnc (or
 	// any future secret column) to the browser.
 	return { ch: { id: ch.id, title: ch.title }, entries };

@@ -266,13 +266,17 @@ export async function fetchNewComments(
 /**
  * Updates the moderation status of comments, optionally banning their authors.
  *
+ * `'published'` restores a held or rejected comment (undo). A deleted comment
+ * is gone for good and an author ban cannot be lifted — YouTube offers no API
+ * for either.
+ *
  * @param ids - The comment IDs to update
  * @param status - The moderation status to apply
  * @param banAuthor - Whether to ban the authors of the comments
  */
 export async function setModerationStatus(
 	ids: string[],
-	status: 'heldForReview' | 'rejected',
+	status: 'heldForReview' | 'rejected' | 'published',
 	banAuthor: boolean,
 	accessToken: string,
 	deadline?: number

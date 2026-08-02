@@ -159,6 +159,18 @@ test('batches moderation-status updates into groups of fifty', async () => {
 	expect(batches).toEqual([ids.slice(0, 50), ids.slice(50, 100), ids.slice(100)]);
 });
 
+test('restores a comment by posting moderationStatus=published without banAuthor', async () => {
+	const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+	vi.stubGlobal('fetch', fetch);
+
+	await setModerationStatus(['comment'], 'published', false, 'token');
+
+	const url = new URL(String(fetch.mock.calls[0]?.[0]));
+	expect(url.searchParams.get('moderationStatus')).toBe('published');
+	expect(url.searchParams.get('banAuthor')).toBe('false');
+	expect(url.searchParams.get('id')).toBe('comment');
+});
+
 test('returns a comment moderation status for recovery verification', async () => {
 	const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
 		items: [{ snippet: { moderationStatus: 'rejected' } }]

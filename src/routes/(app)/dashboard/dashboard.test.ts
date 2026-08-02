@@ -19,7 +19,7 @@
 import { expect, test, vi } from 'vitest';
 import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
 import { makeCookies } from '$lib/server/testcookies';
-import { channels, sessions, users } from '$lib/server/db/schema';
+import { channels, memberships, organizations, sessions, users } from '$lib/server/db/schema';
 
 // decrypt is mocked so seeds can use opaque placeholders; the action must pass
 // each channel's decrypted token to Google's revocation endpoint.
@@ -36,7 +36,10 @@ setupTestDb([
 	'channels',
 	'sessions',
 	'users',
-	'consents'
+	'consents',
+	'invites',
+	'memberships',
+	'organizations'
 ]);
 
 const OWNER = TEST_OWNER;
@@ -49,6 +52,9 @@ async function seedActiveUser() {
 	await testDb()
 		.db.insert(users)
 		.values({ id: OWNER.id, googleSub: 'sub-1', email: OWNER.email, displayName: OWNER.displayName });
+	// Every real user's org-1 is their personal org (signup / 0012 backfill).
+	await testDb().db.insert(organizations).values({ id: 'org-1', name: 'One', personalFor: OWNER.id });
+	await testDb().db.insert(memberships).values({ userId: OWNER.id, orgId: 'org-1', role: 'owner' });
 	await testDb()
 		.db.insert(sessions)
 		.values({ id: 'sess-1', userId: OWNER.id, expiresAt: '2027-01-01T00:00:00.000Z' });

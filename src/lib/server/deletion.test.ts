@@ -105,6 +105,46 @@ test('deleteUserRecords erases every owned record and tombstones the user fully'
 	expect(retained[0]).toMatchObject({ userId, email: 'gone@example.com' });
 });
 
+test('deleteUserRecords keeps team channels the user merely connected, wiping their connector credentials', async () => {
+	// The user is the CONNECTOR (channels.userId) of a channel in a SHARED org
+	// that survives them: the channel and its moderation history belong to the
+	// team, not the departing account (C2 semantics — the dead token fails
+	// loudly in cron until a teammate reconnects).
+	const userId = await seedUser('gone');
+	await testDb().db.insert(organizations).values({ id: 'org-team', name: 'Team' });
+	await testDb().db.insert(channels).values({
+		id: 'UC-team',
+		userId,
+		orgId: 'org-team',
+		title: 'team channel',
+		refreshTokenEnc: 'enc'
+	});
+	await testDb().db.insert(comments).values({
+		id: 'comment-team',
+		channelId: 'UC-team',
+		text: 'hi',
+		publishedAt: '2026-01-01T00:00:00.000Z',
+		status: 'approved',
+		decidedBy: 'ai'
+	});
+	await testDb().db.insert(rules).values({ channelId: 'UC-team', type: 'keyword', pattern: 'spam', action: 'delete' });
+
+	await deleteUserRecords(userId);
+
+	// The team channel survives, detached: connector nulled, token wiped so
+	// cron fails loudly instead of silently moderating with a dead grant.
+	const team = (await testDb().db.select().from(channels).all()).find((c) => c.id === 'UC-team');
+	expect(team).toBeDefined();
+	expect(team?.userId).toBeNull();
+	expect(team?.refreshTokenEnc).not.toBe('enc');
+	// Its moderation history and rules are the team's — untouched.
+	expect((await testDb().db.select().from(comments).all()).map((c) => c.id)).toEqual(['comment-team']);
+	expect(await testDb().db.select().from(rules).all()).toHaveLength(1);
+	// The personal org is still fully erased (channel, org, memberships).
+	expect((await testDb().db.select().from(channels).all()).find((c) => c.id === 'UC-gone')).toBeUndefined();
+	expect(await testDb().db.select().from(organizations).all()).toEqual([expect.objectContaining({ id: 'org-team' })]);
+});
+
 test('deleteUserRecords leaves other users and their records alone', async () => {
 	const userId = await seedUser('gone');
 	await seedUser('stays');

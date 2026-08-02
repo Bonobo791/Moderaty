@@ -36,6 +36,7 @@ vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 import { TEST_OWNER, setupTestDb, testDb } from '$lib/server/testdb';
 import { makeCookiesWithState } from '$lib/server/testcookies';
 import { channels } from '$lib/server/db/schema';
+import type { SessionUser } from '$lib/server/session';
 import { GET as authCallback } from './+server';
 
 setupTestDb(['channels']);
@@ -64,7 +65,7 @@ function stubTokenAndChannel() {
 	);
 }
 
-async function captureCallback(user: typeof OWNER | null = OWNER) {
+async function captureCallback(user: SessionUser | null = OWNER) {
 	try {
 		await authCallback({
 			url: new URL('http://localhost:5173/api/auth/google/callback?code=abc&state=s'),
@@ -76,6 +77,15 @@ async function captureCallback(user: typeof OWNER | null = OWNER) {
 		return e as { status: number; location?: string };
 	}
 }
+
+test('a member cannot connect a channel — 403 before any Google call or write', async () => {
+	const member: SessionUser = { ...OWNER, orgRole: 'member' };
+
+	const thrown = await captureCallback(member);
+
+	expect(thrown).toMatchObject({ status: 403 });
+	expect(await testDb().db.select().from(channels).all()).toHaveLength(0);
+});
 
 test('a new channel is inserted and attached to the caller', async () => {
 	stubTokenAndChannel();

@@ -263,9 +263,13 @@ test('only the first-ever user claims orphaned channels', async () => {
 	);
 
 	// A second, distinct signup while another orphan exists must NOT claim it:
-	// the claim is one-time initialization, not a per-signup action.
+	// the claim is one-time initialization, not a per-signup action. Assert the
+	// signup actually succeeded — a failed signup would leave UC2 unclaimed and
+	// pass this test for the wrong reason.
 	await testDb().db.insert(channels).values({ id: 'UC2', title: 'Late', refreshTokenEnc: 'enc', active: 1, createdAt: '2026-01-01T00:00:00.000Z' });
-	await captureAction(cookiesWithPending({ kind: 'new', sub: 'sub-2', email: 'two@example.com', displayName: 'Two' }), { consent: 'on' });
+	const second = await captureAction(cookiesWithPending({ kind: 'new', sub: 'sub-2', email: 'two@example.com', displayName: 'Two' }), { consent: 'on' });
+	expect(second).toMatchObject({ status: 302, location: '/dashboard' });
+	expect((await testDb().db.select().from(users).all()).map((u) => u.googleSub)).toContain('sub-2');
 
 	const unclaimed = (await testDb().db.select().from(channels).all()).find((c) => c.id === 'UC2')!;
 	expect(unclaimed.userId).toBeNull();

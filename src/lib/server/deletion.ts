@@ -36,6 +36,9 @@ export const CONSENT_EMAIL_RETENTION_MS = 10 * 365.25 * 24 * 60 * 60 * 1000; // 
 
 const CONSENT_SWEEP_BATCH = 50; // bounded per cron invocation (I10)
 
+/** Placeholder for an erased refresh token — never valid ciphertext, so decrypt fails loudly in cron (AGENTS.md). */
+export const WIPED_REFRESH_TOKEN = 'erased:account-deletion';
+
 /**
  * Calculates the cutoff timestamp for consent e-mail retention.
  *
@@ -50,11 +53,15 @@ export function consentEmailCutoffIso(now = Date.now()): string {
  * Immediately and permanently erases a user's account data, preserving only the anonymized tombstone and the consent log.
  *
  * One transaction: moderation actions, comments, audit rows, and rules for
- * the user's channels; the channels themselves; every session; and the
- * user's tenancy — the personal org (whose name is the user's display name,
- * i.e. PII), every membership, and every invite they created. Explicit
+ * the user's PERSONAL-org channels; those channels themselves; every session;
+ * and the user's tenancy — the personal org (whose name is the user's display
+ * name, i.e. PII), every membership, and every invite they created. Explicit
  * deletes in child-to-parent order rather than FK reliance: the users row is
- * only tombstoned, so ON DELETE CASCADE never fires. The users row is
+ * only tombstoned, so ON DELETE CASCADE never fires. A channel the user
+ * merely CONNECTED (channels.userId) in a surviving team org is NOT deleted —
+ * it and its moderation history belong to the team; it is detached instead
+ * (userId NULL, token wiped) so cron fails loudly until a teammate
+ * reconnects. The users row is
  * anonymized to a tombstone (`googleSub: 'deleted:<id>'`, e-mail and
  * display name wiped) so the same Google identity can sign up again and the
  * `consents` evidentiary log survives with its foreign key intact. The
@@ -75,25 +82,35 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 		if (!user || user.googleSub.startsWith('deleted:')) {
 			throw new Error(`deleteUserRecords: user ${userId} not found or already deleted`);
 		}
-		const chs = await tx.select({ id: channels.id }).from(channels).where(eq(channels.userId, userId)).all();
-		const channelIds = chs.map((ch) => ch.id);
-		if (channelIds.length) {
-			await tx.delete(moderationActions).where(inArray(moderationActions.channelId, channelIds));
-			await tx.delete(comments).where(inArray(comments.channelId, channelIds));
-			await tx.delete(auditLog).where(inArray(auditLog.channelId, channelIds));
-			await tx.delete(rules).where(inArray(rules.channelId, channelIds));
-		}
-		await tx.delete(channels).where(eq(channels.userId, userId));
-		await tx.delete(sessions).where(eq(sessions.userId, userId));
-		// Tenancy erasure. The personal org is single-member by definition; a
-		// shared org the user merely belongs to survives (its other members own
-		// it) — only the user's membership row leaves.
+		// Tenancy first: the personal org ids decide which channels die with the
+		// account (personal-org ones) versus detach (team ones the user only
+		// connected). The personal org is single-member by definition; a shared
+		// org the user merely belongs to survives (its other members own it) —
+		// only the user's membership row leaves.
 		const personalOrgs = await tx
 			.select({ id: organizations.id })
 			.from(organizations)
 			.where(eq(organizations.personalFor, userId))
 			.all();
 		const orgIds = personalOrgs.map((o) => o.id);
+		const chs = orgIds.length
+			? await tx.select({ id: channels.id }).from(channels).where(inArray(channels.orgId, orgIds)).all()
+			: [];
+		const channelIds = chs.map((ch) => ch.id);
+		if (channelIds.length) {
+			await tx.delete(moderationActions).where(inArray(moderationActions.channelId, channelIds));
+			await tx.delete(comments).where(inArray(comments.channelId, channelIds));
+			await tx.delete(auditLog).where(inArray(auditLog.channelId, channelIds));
+			await tx.delete(rules).where(inArray(rules.channelId, channelIds));
+			await tx.delete(channels).where(inArray(channels.id, channelIds));
+		}
+		// Detach team channels this account connected: the row and history stay
+		// with the team; the dead grant is wiped so nothing silently moderates.
+		await tx
+			.update(channels)
+			.set({ userId: null, refreshTokenEnc: WIPED_REFRESH_TOKEN })
+			.where(eq(channels.userId, userId));
+		await tx.delete(sessions).where(eq(sessions.userId, userId));
 		if (orgIds.length) {
 			await tx.delete(invites).where(inArray(invites.orgId, orgIds));
 			await tx.delete(memberships).where(inArray(memberships.orgId, orgIds));

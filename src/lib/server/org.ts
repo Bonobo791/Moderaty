@@ -41,9 +41,10 @@ export function asOrgRole(role: string): OrgRole {
 /**
  * Resolves a user's active organization: the session's active_org_id when a
  * membership for it still exists, otherwise the user's OLDEST membership
- * (deterministic fallback). Returns null only when the user has zero
- * memberships — a data bug the caller must treat as fatal, never as
- * signed-out.
+ * (deterministic fallback — timestamp ties break by org id, in SQL). Returns
+ * null only when the user has zero memberships — a data bug the caller must
+ * treat as fatal, never as signed-out. `fellBack` is true only when an
+ * explicit activeOrgId was supplied and no longer has a membership.
  */
 export async function resolveActiveOrg(
 	userId: string,
@@ -60,25 +61,24 @@ export async function resolveActiveOrg(
 		.from(memberships)
 		.innerJoin(organizations, eq(memberships.orgId, organizations.id))
 		.where(eq(memberships.userId, userId))
+		.orderBy(memberships.createdAt, memberships.orgId)
 		.all();
 	if (rows.length === 0) return null;
-	const sorted = [...rows].sort((a, b) => a.membershipCreatedAt.localeCompare(b.membershipCreatedAt));
-	const chosen = sorted.find((r) => r.orgId === activeOrgId) ?? sorted[0];
+	const chosen = rows.find((r) => r.orgId === activeOrgId) ?? rows[0];
 	return {
 		org: { orgId: chosen.orgId, orgName: chosen.orgName, orgRole: asOrgRole(chosen.role), plan: chosen.plan },
-		fellBack: chosen.orgId !== activeOrgId
+		fellBack: activeOrgId !== null && chosen.orgId !== activeOrgId
 	};
 }
 
-/** Every org the user belongs to, oldest membership first — feeds the nav team switcher. */
+/** Every org the user belongs to, oldest membership first (ties by org id) — feeds the nav team switcher. */
 export async function listOrgMemberships(userId: string) {
 	const rows = await db
 		.select({ orgId: organizations.id, name: organizations.name, role: memberships.role, createdAt: memberships.createdAt })
 		.from(memberships)
 		.innerJoin(organizations, eq(memberships.orgId, organizations.id))
 		.where(eq(memberships.userId, userId))
+		.orderBy(memberships.createdAt, memberships.orgId)
 		.all();
-	return [...rows]
-		.sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-		.map(({ orgId, name, role }) => ({ orgId, name, role: asOrgRole(role) }));
+	return rows.map(({ orgId, name, role }) => ({ orgId, name, role: asOrgRole(role) }));
 }

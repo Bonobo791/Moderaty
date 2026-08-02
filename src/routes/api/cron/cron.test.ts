@@ -185,6 +185,48 @@ test('purges only one expired user per invocation, oldest first (I10)', async ()
 	expect(await ownedRowCounts('newer')).toEqual({ sessions: 0, channels: 0, rules: 0, comments: 0, actions: 0, audit: 0, consents: 1 });
 });
 
+test('a mid-purge failure rolls back every delete, leaving the account intact (atomic purge)', async () => {
+	mocks.env.DRY_RUN = 'false';
+	await seedUserWithData('old', new Date(Date.now() - 181 * DAY_MS).toISOString());
+	// Abort the LAST delete of the purge (sessions) so every earlier delete —
+	// moderation_actions, comments, audit_log, rules, channels — must roll back
+	// if the purge is genuinely transactional.
+	await testDb().client.execute(
+		`CREATE TRIGGER fail_session_delete BEFORE DELETE ON sessions
+		 BEGIN SELECT RAISE(ABORT, 'simulated purge failure'); END`
+	);
+	try {
+		// drizzle wraps the libsql trigger error; the purge must fail loudly.
+		await expect(call({ bearer: 'test-secret' })).rejects.toThrowError(/Failed query/);
+	} finally {
+		await testDb().client.execute('DROP TRIGGER fail_session_delete');
+	}
+
+	// Nothing was deleted and the user was not anonymized: the next run retries the full purge.
+	expect((await testDb().db.select().from(users).all())[0].googleSub).toBe('sub-old');
+	expect(await ownedRowCounts('old')).toEqual({ sessions: 1, channels: 1, rules: 1, comments: 1, actions: 1, audit: 1, consents: 1 });
+});
+
+test('purges an expired user with no channels without error', async () => {
+	mocks.env.DRY_RUN = 'false';
+	const id = 'nochan';
+	await testDb().db.insert(users).values({
+		id,
+		googleSub: `sub-${id}`,
+		email: `${id}@example.com`,
+		displayName: id,
+		deletedAt: new Date(Date.now() - 181 * DAY_MS).toISOString()
+	});
+	await testDb().db.insert(sessions).values({ id: `sess-${id}`, userId: id, expiresAt: new Date(Date.now() + DAY_MS).toISOString() });
+	await testDb().db.insert(consents).values({ userId: id, docVersion: '1.0', checkboxText: 'text', ip: '1.2.3.4', userAgent: 'ua' });
+
+	const res = await call({ bearer: 'test-secret' });
+
+	expect(await res.json()).toMatchObject({ ok: true, purged: id });
+	expect(await ownedRowCounts(id)).toEqual({ sessions: 0, channels: 0, rules: 0, comments: 0, actions: 0, audit: 0, consents: 1 });
+	expect((await testDb().db.select().from(users).all())[0]).toMatchObject({ googleSub: `deleted:${id}`, deletedAt: null });
+});
+
 test('a dry run skips the purge entirely (I8)', async () => {
 	await seedUserWithData('old', new Date(Date.now() - 181 * DAY_MS).toISOString());
 

@@ -93,6 +93,33 @@ test('delete account without the confirmation checkbox writes nothing', async ()
 	expect((await testDb().db.select().from(channels).all())[0].active).toBe(1);
 });
 
+test('delete account rolls everything back when the session deletion fails', async () => {
+	await seedActiveUser();
+	// Force the sessions delete to fail after deletedAt is set, proving the
+	// three writes commit as one unit: without the transaction the user would
+	// keep an active session on a "deleted" account.
+	await testDb().client.execute(
+		`CREATE TRIGGER fail_session_delete BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT, 'simulated session deletion failure'); END;`
+	);
+	let outcome: Awaited<ReturnType<typeof captureDelete>>;
+	try {
+		outcome = await captureDelete(OWNER, { confirm: 'on' });
+	} finally {
+		// The test db is shared across tests — never leak the failure trigger.
+		await testDb().client.execute('DROP TRIGGER fail_session_delete');
+	}
+
+	// Fails loudly: the action rejects (SvelteKit turns that into a 500 with a
+	// generic message), it does not redirect, and the session cookie stays.
+	expect(outcome.res).toBeInstanceOf(Error);
+	expect(outcome.res).not.toMatchObject({ status: 302 });
+	expect(outcome.cookies.deleteCalls).toHaveLength(0);
+	// Nothing partial persists: soft delete, session, and channel are untouched.
+	expect((await testDb().db.select().from(users).all())[0].deletedAt).toBeNull();
+	expect(await testDb().db.select().from(sessions).all()).toHaveLength(1);
+	expect((await testDb().db.select().from(channels).all())[0].active).toBe(1);
+});
+
 test('delete account soft-deletes, destroys sessions, deactivates channels, and signs out', async () => {
 	await seedActiveUser();
 

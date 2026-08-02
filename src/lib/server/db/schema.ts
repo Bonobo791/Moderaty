@@ -129,5 +129,8 @@ export const consents = sqliteTable('consents', {
 	marketingOptIn: integer('marketing_opt_in').notNull().default(0), // separate, unbundled LGPD consent
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
-	index('consents_user_id_idx').on(table.userId)
+	index('consents_user_id_idx').on(table.userId),
+	// Serves the 10-year retention sweep (email IS NOT NULL AND created_at <
+	// cutoff): partial, so it indexes only rows that still hold an e-mail.
+	index('consents_email_retention_idx').on(table.createdAt).where(sql`${table.email} is not null`)
 ]);

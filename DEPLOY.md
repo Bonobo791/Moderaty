@@ -31,6 +31,14 @@ The steps below are the one-time manual setup.
 - Create the production Turso database and note its URL and auth token.
 - Apply migrations once from a checkout with the production values sourced:
   `npm run db:migrate` (loads `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN`).
+- **Verify against the actual schema afterwards** — drizzle-kit can exit 0
+  without applying anything (the 0007/0008 incidents). Check the target, not
+  the exit code: `PRAGMA table_info(<new table>);` for the new column,
+  `SELECT COUNT(*) FROM __drizzle_migrations;` for the applied count, and
+  `PRAGMA integrity_check;` + `PRAGMA foreign_key_check;` before declaring
+  success. If the tool no-ops, apply the SQL manually through the same
+  journal bookkeeping (hash = sha256 of the file, `created_at` = journal
+  `when`) inside one transaction.
 
 ## 2. Netlify site
 

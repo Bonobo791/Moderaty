@@ -153,7 +153,8 @@ export async function createTestDb(): Promise<TestDb> {
 			user_agent TEXT NOT NULL,
 			marketing_opt_in INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-		)`
+		)`,
+		`CREATE INDEX consents_email_retention_idx ON consents (created_at) WHERE email IS NOT NULL`
 	]);
 	return { db: drizzle(client, { schema }), client };
 }

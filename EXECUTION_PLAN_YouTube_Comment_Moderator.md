@@ -1964,18 +1964,26 @@ account exists — never pre-OAuth friction, never browsewrap:
   consent-acceptance record: e-mail, doc version, exact checkbox text, IP,
   user agent.
 - **The e-mail lives ONLY in `consents` (decision: Option B).** Migration
-  0009 adds nullable `consents.email` and backfills it from `users`; the
+  0011 adds nullable `consents.email` and backfills it from `users` (NULLIF
+  keeps the `'[deleted]'` tombstone sentinel out of the evidence); the
   consent action records it at every acceptance; the tombstone wipes
   `users.email` entirely. Rationale: LGPD Art. 16 blocking must be
   architecture, not discipline (no live table holds a deleted user's
   e-mail), it avoids re-signup e-mail collisions, and it shrinks the breach
-  blast radius. Known gap, not a bug: accounts deleted before 0009 ships
+  blast radius. Known gap, not a bug: accounts deleted before 0011 ships
   have already wiped `users.email`, so their consent rows stay
-  `email = NULL` after backfill — unrecoverable, and fine.
+  `email = NULL` after backfill — unrecoverable, and fine. The same
+  migration is the CONTRACT phase for the abandoned soft delete: it drops
+  `users.deleted_at` and its index (0009/0010 stay in the journal forever —
+  applied migrations are immutable history) and creates the partial
+  `consents_email_retention_idx` the sweep queries through.
 - **10-year retention clock (CC Art. 205, conservative over CDC's 5).** A
   cron sweep (`nullExpiredConsentEmails`, bounded batch per I10, skipped
   under `DRY_RUN` per I8) nulls `consents.email` on rows older than 10
-  years; the consent row itself is kept as anonymized evidence.
+  years; the consent row itself is kept as anonymized evidence. The sweep's
+  `WHERE email IS NOT NULL AND created_at < cutoff` shape is served by the
+  partial index above (EXPLAIN QUERY PLAN evidence in
+  `migration-0011.test.ts`).
 - **Transparency, not re-consent.** This clarifies what is retained after
   deletion rather than changing what users consent to, so `LEGAL_VERSION`
   is NOT bumped; a small in-app notice on the dashboard points to the

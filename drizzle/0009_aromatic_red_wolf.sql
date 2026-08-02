@@ -16,14 +16,4 @@
 --
 -- Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
--- Consent-evidence e-mail (account deletion v2): the e-mail is statutory
--- retention evidence (LGPD Art. 16, III) and lives ONLY in the consent log,
--- so account deletion can wipe users.email entirely. Expand-only: nullable
--- column + backfill from the owning user. Accounts deleted BEFORE this
--- ships carry the tombstone sentinel users.email = '[deleted]' — NULLIF
--- keeps that sentinel out of the evidence log (their rows keep email NULL;
--- that history is unrecoverable by design, not a bug). The WHERE clause
--- makes the statement idempotent if ever re-run.
-
-ALTER TABLE `consents` ADD `email` text;--> statement-breakpoint
-UPDATE `consents` SET `email` = NULLIF((SELECT `email` FROM `users` WHERE `users`.`id` = `consents`.`user_id`), '[deleted]') WHERE `consents`.`email` IS NULL;
+ALTER TABLE `users` ADD `deleted_at` text;

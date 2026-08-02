@@ -189,7 +189,7 @@ email/display name `'[deleted]'`) rather than deleted, keeping
 fresh signup (signing back in is a NEW signup through `/consent`, never a
 restore). The statutory exception: the `consents` evidentiary log keeps the
 e-mail, doc version, checkbox text, IP, and user agent under LGPD Art. 16,
-III — the e-mail lives ONLY in `consents` (migration 0009 backfills it from
+III — the e-mail lives ONLY in `consents` (migration 0011 backfills it from
 `users`), so blocking it from any other use is architectural, not
 discipline. Each cron invocation erases `consents.email` on rows older
 than 10 years (CC Art. 205; bounded batch, skipped under `DRY_RUN=true` per

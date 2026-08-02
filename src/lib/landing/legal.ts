@@ -34,7 +34,7 @@ export type LegalDoc = {
 };
 
 export const LEGAL_EFFECTIVE_DATE = '1 August 2026';
-export const LEGAL_VERSION = '1.2';
+export const LEGAL_VERSION = '1.3';
 export const LEGAL_KICKER = 'YouTube Comment Moderation Service';
 
 export const TERMS_DOC: LegalDoc = {

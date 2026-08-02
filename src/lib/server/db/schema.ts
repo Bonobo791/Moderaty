@@ -79,7 +79,7 @@ export const comments = sqliteTable('comments', {
 	authorName: text('author_name'),
 	text: text('text').notNull(), // truncated to 500 chars on insert
 	publishedAt: text('published_at').notNull(),
-	status: text('status').notNull(), // 'pending' | 'approved' | 'held' | 'rejected' | 'deleted'
+	status: text('status').notNull(), // 'pending' | 'approved' | 'held' | 'rejected' | 'deleted' | 'restoring' (in-flight undo)
 	decidedBy: text('decided_by').notNull(), // 'rule' | 'ai' | 'human' | 'none'
 	matchedRuleId: integer('matched_rule_id'),
 	aiScore: text('ai_score'), // JSON string of the six category scores, or null
@@ -103,7 +103,7 @@ export const auditLog = sqliteTable('audit_log', {
 	id: integer('id').primaryKey({ autoIncrement: true }),
 	channelId: text('channel_id').notNull(),
 	commentId: text('comment_id').notNull(),
-	action: text('action').notNull(), // 'hold' | 'reject' | 'delete' | 'ban' | 'approve' | 'queue' | 'dry-run'
+	action: text('action').notNull(), // 'hold' | 'reject' | 'delete' | 'ban' | 'approve' | 'restore' | 'queue' | 'dry-run'
 	reason: text('reason').notNull(), // human-readable, e.g. "rule #4 (keyword)" or "ai score 0.91"
 	actor: text('actor').notNull(), // 'system' | 'user'
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)

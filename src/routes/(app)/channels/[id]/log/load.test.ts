@@ -18,13 +18,66 @@
 
 import { expect, test } from 'vitest';
 import { setupTestDb, testDb } from '$lib/server/testdb';
-import { channels } from '$lib/server/db/schema';
+import { auditLog, channels } from '$lib/server/db/schema';
 
 import { load } from './+page.server';
 
 setupTestDb(['audit_log', 'channels']);
 
 const OWNER = { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' };
+
+async function seedChannel() {
+	await testDb()
+		.db.insert(channels)
+		.values({ id: 'UC1', userId: OWNER.id, title: 'Ch', refreshTokenEnc: 'enc-secret' });
+}
+
+async function seedEntries(rows: { commentId: string; action: string; createdAt: string }[]) {
+	await testDb()
+		.db.insert(auditLog)
+		.values(rows.map((row) => ({ channelId: 'UC1', reason: 'test', actor: 'system', ...row })));
+}
+
+test('load marks only the latest reversible action per comment as undoable', async () => {
+	await seedChannel();
+	await seedEntries([
+		{ commentId: 'c-hold', action: 'hold', createdAt: '2026-01-01T00:00:01.000Z' },
+		{ commentId: 'c-reject', action: 'reject', createdAt: '2026-01-01T00:00:02.000Z' },
+		{ commentId: 'c-ban', action: 'ban', createdAt: '2026-01-01T00:00:03.000Z' },
+		{ commentId: 'c-delete', action: 'delete', createdAt: '2026-01-01T00:00:04.000Z' },
+		{ commentId: 'c-restored', action: 'hold', createdAt: '2026-01-01T00:00:05.000Z' },
+		{ commentId: 'c-restored', action: 'restore', createdAt: '2026-01-01T00:00:06.000Z' },
+		{ commentId: 'c-approve', action: 'approve', createdAt: '2026-01-01T00:00:07.000Z' }
+	]);
+
+	const result = await load({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);
+
+	const byComment = new Map(result!.entries.map((e) => [`${e.commentId}:${e.action}`, e.undoable]));
+	expect(byComment.get('c-hold:hold')).toBe('full');
+	expect(byComment.get('c-reject:reject')).toBe('full');
+	expect(byComment.get('c-ban:ban')).toBe('comment-only');
+	expect(byComment.get('c-delete:delete')).toBeNull();
+	// A superseded action and a restore/approve are never undoable.
+	expect(byComment.get('c-restored:hold')).toBeNull();
+	expect(byComment.get('c-restored:restore')).toBeNull();
+	expect(byComment.get('c-approve:approve')).toBeNull();
+});
+
+test('tied timestamps still pick the truly latest action (auto-increment id breaks the tie)', async () => {
+	await seedChannel();
+	// Same millisecond: insertion order decides — the restore is inserted after
+	// the hold, so the hold must NOT be undoable despite the tied createdAt.
+	await seedEntries([
+		{ commentId: 'c-tied', action: 'hold', createdAt: '2026-01-01T00:00:01.000Z' },
+		{ commentId: 'c-tied', action: 'restore', createdAt: '2026-01-01T00:00:01.000Z' }
+	]);
+
+	const result = await load({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);
+
+	const byAction = new Map(result!.entries.map((e) => [e.action, e.undoable]));
+	expect(byAction.get('restore')).toBeNull();
+	expect(byAction.get('hold')).toBeNull();
+});
 
 test('load projects only the channel fields the page renders — never the credential', async () => {
 	await testDb()

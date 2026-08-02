@@ -53,8 +53,8 @@ async function migratedDb() {
 		created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 	)`);
 	await client.execute({
-		sql: `INSERT INTO comments (id, channel_id, author_channel_id, author_name, text, published_at, status, decided_by, ai_score)
-			VALUES ('c1', 'UC1', 'UC-author', 'Ann', 'hello', '2026-01-01T00:00:00Z', 'pending', 'ai', '0.60')`
+		sql: `INSERT INTO comments (id, channel_id, author_channel_id, author_name, text, published_at, status, decided_by, matched_rule_id, ai_score, created_at)
+			VALUES ('c1', 'UC1', 'UC-author', 'Ann', 'hello', '2026-01-01T00:00:00Z', 'pending', 'ai', 7, '0.60', '2025-12-31T23:59:59Z')`
 	});
 	for (const statement of statements) await client.execute(statement);
 	return client;
@@ -68,9 +68,12 @@ test('migration 0008 preserves the comment rows but wipes stored author PII', as
 		id: 'c1',
 		channel_id: 'UC1',
 		text: 'hello',
+		published_at: '2026-01-01T00:00:00Z',
 		status: 'pending',
 		decided_by: 'ai',
+		matched_rule_id: 7,
 		ai_score: '0.60',
+		created_at: '2025-12-31T23:59:59Z',
 		author_channel_id: null,
 		author_name: null
 	});

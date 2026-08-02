@@ -23,6 +23,7 @@ import { describe, expect, it } from 'vitest';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const queuePage = readFileSync(join(here, '+page.svelte'), 'utf8');
+const queueServer = readFileSync(join(here, '+page.server.ts'), 'utf8');
 const rulesPage = readFileSync(join(here, '..', 'rules', '+page.svelte'), 'utf8');
 
 describe('queue page states (I12)', () => {
@@ -52,5 +53,18 @@ describe('queue page states (I12)', () => {
 describe('rules page states (I12)', () => {
 	it('announces form errors to assistive technology', () => {
 		expect(rulesPage).toMatch(/class="error-box"[^>]*role="alert"/);
+	});
+});
+
+// PR #40 review: a bare .select() returns full comment rows, leaking any
+// legacy non-null author identifiers to the browser. The load must project
+// only what the page renders (id, text, publishedAt) — never author columns.
+describe('queue load projection', () => {
+	it('selects explicit fields and never names the deprecated author columns', () => {
+		expect(queueServer).not.toMatch(/\.select\(\)/);
+		expect(queueServer).not.toMatch(/authorChannelId|authorName/);
+		for (const field of ['id', 'text', 'publishedAt']) {
+			expect(queueServer).toMatch(new RegExp(`${field}: comments\\.${field}`));
+		}
 	});
 });

@@ -138,6 +138,8 @@ describe('storage claims match implementation (comment PII)', () => {
 			/processed and discarded/i,
 			/classified and discarded/i,
 			/no comment bodies/i,
+			/without comment bodies/i,
+			/excludes comment bodies/i,
 			/immediate discard of raw comment content/i,
 			/comments are [^.]*never stored/i,
 			/comment (text|content) is never (persistently )?stored/i
@@ -146,6 +148,14 @@ describe('storage claims match implementation (comment PII)', () => {
 			for (const pattern of RETIRED_CLAIMS) {
 				expect(text, `${name} still claims: ${pattern}`).not.toMatch(pattern);
 			}
+		}
+	});
+
+	// PR #40 review: author identifiers are processed in memory only — never
+	// cache, disk, or any "ephemeral storage" a definition could smuggle in.
+	it('no surface authorizes ephemeral storage for author identifiers', () => {
+		for (const [name, text] of Object.entries(surfaces)) {
+			expect(text, name).not.toMatch(/ephemeral\s+storage/i);
 		}
 	});
 

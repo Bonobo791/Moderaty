@@ -65,9 +65,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	</li>
 	<li>
 		<strong>(b)</strong> Moderation Outcome Data: the minimal records the Processor retains
-		after a moderation action, limited to the comment identifier reference, the classification
-		verdict, the action taken, and the timestamp. Moderation Outcome Data excludes comment
-		bodies and author profile data.
+		after a moderation action, limited to the comment identifier reference, the comment text
+		(truncated to 500 characters), the classification verdict, the action taken, and the
+		timestamp. Moderation Outcome Data excludes author identifiers and author profile data.
 	</li>
 	<li>
 		<strong>(c)</strong> ECA Digital: Law no 15.211/2025 (Digital Statute of Children and
@@ -172,9 +172,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	identifier) are not persistently stored by the Service.
 </p>
 <p>
-	<strong>7.2</strong> Author identifiers are processed transiently, in memory or ephemeral
-	storage, strictly for the duration required to classify the comment and execute the
-	configured moderation action, and are discarded immediately thereafter.
+	<strong>7.2</strong> Author identifiers are processed transiently, in memory only, strictly
+	for the duration required to classify the comment and execute the configured moderation
+	action, and are discarded immediately thereafter.
 </p>
 <p>
 	<strong>7.3</strong> Beyond the comment text stored within Moderation Outcome Data, the

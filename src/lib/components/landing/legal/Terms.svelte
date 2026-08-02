@@ -36,7 +36,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <p><strong>Moderation Action:</strong> an automated action configured by you (such as holding, hiding, removing, or reporting comments) executed via the YouTube API Services.</p>
 
-<p><strong>Moderation Outcome Data:</strong> the minimal record we keep of each action (comment ID reference, verdict, action, timestamp), without comment bodies.</p>
+<p><strong>Moderation Outcome Data:</strong> the minimal record we keep of each action (comment ID reference, comment text truncated to 500 characters, verdict, action, timestamp), without author identifiers.</p>
 
 <p><strong>Consumer:</strong> a user qualifying as a consumidor under Article 2 of the CDC.</p>
 

@@ -285,4 +285,13 @@ describe('refund policy consistency (PR #38 review)', () => {
 		expect(terms).toMatch(/without deductions of any kind/i);
 		expect(terms).toMatch(/monetarily updated/i);
 	});
+
+	// The undo feature's honesty guard: the Terms must disclose exactly which
+	// moderation actions cannot be reversed (YouTube offers no API for them).
+	it('Terms §9 discloses which moderation actions are irreversible', () => {
+		const terms = readComponent('terms');
+		expect(terms).toMatch(/audit log/i);
+		expect(terms).toMatch(/deleted comments? cannot be (?:restored|reversed|undone)/i);
+		expect(terms).toMatch(/author bans? cannot be (?:lifted|reversed|undone)/i);
+	});
 });

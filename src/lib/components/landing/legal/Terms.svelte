@@ -107,6 +107,8 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <p><strong>9.3</strong> Actions taken on YouTube (holding, hiding, removing, reporting) are subject to YouTube's own systems, policies, and possible reversals. We do not control and are not responsible for YouTube's treatment of a comment or channel.</p>
 
+<p><strong>9.4</strong> Every Moderation Action, automatic or manual, is recorded in the Service's audit log. Hold and reject actions can be reversed from the audit log, restoring the comment on YouTube. Deleted comments cannot be restored or reversed, and author bans cannot be lifted or reversed — YouTube provides no mechanism to undo either — so both are permanent once executed.</p>
+
 <h2 id="s10">10. Privacy and Data Protection</h2>
 
 <p><strong>10.1</strong> For your account, contact, and billing data, we act as data controller under the LGPD; our <a href="/privacy">Privacy Policy</a> explains that processing and your rights, and our data protection officer (encarregado) is identified in Section 21.</p>

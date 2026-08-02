@@ -32,8 +32,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		<div>
 			<h2 class="section-title">What would your month cost?</h2>
 			<p class="section-body">
-				Open YouTube Studio and check last month's comment count. Divide by 500. That is your
-				entire moderation budget. If the answer rounds to zero, the free tier is waving at you.
+				Open YouTube Studio and check last month's comment count. The first 100 are the $5
+				subscription. Everything past that is a nickel a comment, topped up manually or
+				automatically — your call. If last month rounds to zero, the free tier is waving at you.
 			</p>
 		</div>
 		<div class="brackets terminal">
@@ -43,9 +44,10 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				</div>
 				<div class="terminal-body">
 					<div><span class="t-dim">comments last month</span> <span class="t-lit">see YouTube Studio</span></div>
-					<div><span class="t-dim">packs you need</span> <span class="t-lit">comments / 500</span></div>
+					<div><span class="t-dim">covered by the plan</span> <span class="t-lit">first 100 ($5/mo)</span></div>
+					<div><span class="t-dim">top-up beyond that</span> <span class="t-lit">(comments − 100) × $0.05</span></div>
 					<div><span class="t-dim">nights reading hate</span> <span class="t-mint">0</span></div>
-					<div class="t-note">one pack = $5. no subscription. nothing renews.</div>
+					<div class="t-note">$5/mo renews. automatic top-up is opt-in.</div>
 				</div>
 			</div>
 		</div>

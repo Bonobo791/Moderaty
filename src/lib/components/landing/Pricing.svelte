@@ -33,7 +33,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <section id="pricing" class="section">
 	<Reveal>
-		<h2 class="section-title">Free if you self-host. A cent a comment if you don't.</h2>
+		<h2 class="section-title">Free if you self-host. Five a month if you don't.</h2>
 	</Reveal>
 
 	<div class="split">
@@ -47,6 +47,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 	<Reveal delay={0.1}>
 		<p class="more">
+			<span class="scarcity">First 1,000 users: $49 once for lifetime hosted BYOK.</span>
 			<a href="/pricing" class="more-link">Full pricing breakdown <span class="arrow" aria-hidden="true">→</span></a>
 		</p>
 	</Reveal>
@@ -74,6 +75,17 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	}
 	.more {
 		margin: 40px 0 0;
+		display: flex;
+		flex-wrap: wrap;
+		align-items: baseline;
+		gap: 12px 24px;
+	}
+	.scarcity {
+		font-family: var(--font-mono);
+		font-size: 12px;
+		text-transform: uppercase;
+		letter-spacing: 0.16em;
+		color: var(--mint);
 	}
 	.more-link {
 		font-family: var(--font-mono);

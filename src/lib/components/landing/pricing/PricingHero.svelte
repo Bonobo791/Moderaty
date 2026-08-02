@@ -40,8 +40,8 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 					Moderaty is free and open source when self-hosted: AGPL-3.0, bring your own OpenAI key,
 					and OpenAI's moderation endpoint is
 					<a href={OPENAI_MODERATION_URL} target="_blank" rel="noreferrer" class="inline-link">free to use</a>.
-					The hosted version costs $5 per 500 comments moderated. One cent a comment. No
-					subscription.
+					Hosted costs $5 a month for 100 moderated comments, auto-renewed, with 5¢ top-ups when
+					you run out. The first 1,000 users can instead pay $49 once for lifetime hosted BYOK.
 				</p>
 			</div>
 		</div>

@@ -45,7 +45,7 @@ export const FAQ_ENTRIES: FaqEntry[] = [
 	},
 	{
 		q: 'Is Moderaty really free?',
-		a: 'Yes. Moderaty is free and open source under the AGPL license. Connect your channel and your next 100 comments are protected in about two minutes of setup.'
+		a: 'Self-hosted, yes: free and open source under the AGPL license, forever. If we host it for you, that is $5 a month with 100 comments included, or $49 once for lifetime if you are among the first 1,000 users.'
 	},
 	{
 		q: 'How is Moderaty different from CommentShark or YouTube Studio?',

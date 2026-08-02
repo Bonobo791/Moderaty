@@ -23,26 +23,30 @@
 export const PRICING_FAQ_ENTRIES: { q: string; a: string }[] = [
 	{
 		q: 'Is there a subscription?',
-		a: 'No. $5 buys 500 moderated comments. When they run out, buy another pack or do not. Nothing renews, nothing auto-charges, and the free tier never gets worse to change your mind.'
+		a: 'Yes, exactly one: $5 a month, auto-renewed, with 100 moderated comments included. Everything else is opt-in and off by default: automatic top-up when the monthly 100 run out, and auto-charge when a top-up balance hits $0.'
+	},
+	{
+		q: 'What is the $49 lifetime deal?',
+		a: "First 1,000 users only: one $49 payment, hosted forever, unlimited moderated comments, with your own OpenAI key. OpenAI's moderation endpoint is free to use, so after the $49 your running cost is likely zero. When the 1,000 are gone, the deal is gone."
 	},
 	{
 		q: 'What does BYOK mean?',
-		a: "Bring your own key. Self-hosted Moderaty scores comments with your OpenAI API key, on your account. OpenAI's moderation endpoint is free to use, so for most channels the model cost is zero. We never see the key."
+		a: "Bring your own key. Self-hosted Moderaty and the lifetime deal score comments with your OpenAI API key, on your account. OpenAI's moderation endpoint is free to use, so for most channels the model cost is zero. We never see the key."
 	},
 	{
 		q: 'Why is self-hosting free?',
 		a: 'Moderaty is AGPL-3.0 open source. On your hardware, with your key, there is nothing of ours to meter. We would rather you be protected for free than profitable for us.'
 	},
 	{
-		q: 'What happens when my 500 comments run out?',
-		a: 'You top up another 500 for $5, or switch to self-hosting and bring your own key. Your rules, thresholds, and audit history are yours either way.'
+		q: 'What happens when my 100 comments run out?',
+		a: 'Top up at the same 5 cents a comment, in any amount. Do it manually each time, or switch on automatic top-up and never think about it. Unused monthly comments do not carry over.'
 	},
 	{
 		q: 'Which one should I pick?',
-		a: 'If you have a server and five minutes, self-host. It is free and it is everything. If you would rather click one OAuth button and never think about infrastructure, buy a pack. Same hammer either way.'
+		a: 'If you have a server and five minutes, self-host: it is free and it is everything. If you are early and have an OpenAI key, the $49 lifetime is the best deal we will ever make. Otherwise $5 a month, and if your volume dwarfs that, contact us for custom pricing. Same hammer either way.'
 	},
 	{
 		q: 'Can I get a refund?',
-		a: 'Yes, within 7 days. Brazilian consumer law (CDC Art. 49) gives you 7 days from purchase for a full refund of everything you paid, no deductions, no questions asked, through any contact channel. Nothing renews, nothing auto-charges.'
+		a: 'Yes, within 7 days of any charge. Brazilian consumer law (CDC Art. 49) gives you 7 days from purchase for a full refund of everything you paid, no deductions, no questions asked, through any contact channel.'
 	}
 ];

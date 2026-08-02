@@ -49,13 +49,13 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	<title>Pricing | Moderaty</title>
 	<meta
 		name="description"
-		content="Free and open source when self-hosted (AGPL, bring your own key). Hosted: $5 per 500 comments moderated, one cent a comment, no subscription."
+		content="Free and open source when self-hosted (AGPL, bring your own key). Hosted: $5 a month for 100 moderated comments, auto-renewed, 5¢ top-ups. First 1,000 users: $49 once for lifetime hosted BYOK."
 	/>
 	<meta property="og:type" content="website" />
 	<meta property="og:title" content="Protection, priced like a utility." />
 	<meta
 		property="og:description"
-		content="Free and open source when self-hosted. Hosted: $5 per 500 comments moderated, one cent a comment, no subscription."
+		content="Free and open source when self-hosted. Hosted: $5 a month for 100 comments, or $49 once for lifetime BYOK (first 1,000 users)."
 	/>
 	{@html jsonLd(faqPage)}
 </svelte:head>

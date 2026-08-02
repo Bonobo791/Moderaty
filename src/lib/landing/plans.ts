@@ -19,7 +19,8 @@
 /**
  * Plan panel copy, shared by the homepage pricing section (short lists) and
  * the /pricing page (detailed lists). Billing-policy claims are limited to
- * what the product actually does: nothing renews, nothing auto-charges.
+ * what the product actually does: the hosted plan renews monthly, and all
+ * top-up automation is opt-in and off by default.
  */
 export const TICKS_SELF_HOSTED = [
 	'Full rules engine and 13-category AI scoring',
@@ -37,14 +38,31 @@ export const TICKS_SELF_HOSTED_DETAILED = [
 ];
 
 export const TICKS_HOSTED = [
-	'No subscription, nothing renews',
-	'Same rules, same model, same audit log',
-	'One-click YouTube OAuth'
+	'Auto-renews monthly, 100 comments included',
+	'Top-ups at 5¢ a comment, any amount',
+	'Automatic top-up is opt-in',
+	'Same rules, same model, same audit log'
 ];
 
 export const TICKS_HOSTED_DETAILED = [
 	'Everything in self-hosted',
 	'We run it, patch it, and keep it awake',
 	'One-click YouTube OAuth',
-	'Top up only when you run out'
+	'100 comments a month; top up at 5¢ when you run out',
+	'Automatic top-up and balance auto-charge are opt-in, off by default'
+];
+
+export const TICKS_LIFETIME = [
+	'One payment, hosted forever',
+	'Your OpenAI key, your model cost (usually $0)',
+	'Unlimited moderated comments',
+	'Only the first 1,000 users'
+];
+
+export const TICKS_LIFETIME_DETAILED = [
+	'Everything in hosted, minus the monthly bill',
+	'We run it, patch it, and keep it awake, forever',
+	'Bring your own OpenAI key: moderation stays free to run',
+	'Unlimited moderated comments, no meter',
+	'Capped at the first 1,000 users, then it is gone'
 ];

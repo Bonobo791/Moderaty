@@ -33,26 +33,46 @@ export type LegalDoc = {
 	toc: LegalTocEntry[];
 };
 
-export const LEGAL_EFFECTIVE_DATE = '1 August 2026';
-export const LEGAL_VERSION = '1.3';
+export const LEGAL_EFFECTIVE_DATE = '2 August 2026';
+export const LEGAL_VERSION = '1.4';
 export const LEGAL_KICKER = 'YouTube Comment Moderation Service';
 
-export const TERMS_DOC: LegalDoc = {
-	slug: 'terms',
-	label: 'Terms',
-	kicker: LEGAL_KICKER,
-	title: 'Terms of Service',
-	version: LEGAL_VERSION,
-	effectiveDate: LEGAL_EFFECTIVE_DATE,
-	description:
-		'The binding contract for using Moderaty: eligibility, the service, YouTube API terms, credits and billing, refunds, acceptable use, liability, and governing law (Brazil).',
-	toc: [
+/**
+ * Every published legal doc shares the kicker, version, and effective date;
+ * only the identity and the table of contents differ. One builder keeps the
+ * shared fields in a single place.
+ */
+function defineDoc(
+	slug: string,
+	label: string,
+	title: string,
+	description: string,
+	toc: LegalTocEntry[]
+): LegalDoc {
+	return {
+		slug,
+		label,
+		kicker: LEGAL_KICKER,
+		title,
+		version: LEGAL_VERSION,
+		effectiveDate: LEGAL_EFFECTIVE_DATE,
+		description,
+		toc
+	};
+}
+
+export const TERMS_DOC: LegalDoc = defineDoc(
+	'terms',
+	'Terms',
+	'Terms of Service',
+	'The binding contract for using Moderaty: eligibility, the service, YouTube API terms, plans, billing and auto top-up, refunds, acceptable use, liability, and governing law (Brazil).',
+	[
 		{ id: 's1', label: '1. Agreement and Acceptance' },
 		{ id: 's2', label: '2. Definitions' },
 		{ id: 's3', label: '3. Eligibility and Your Account' },
 		{ id: 's4', label: '4. The Service' },
 		{ id: 's5', label: '5. YouTube API Services and Third-Party Terms' },
-		{ id: 's6', label: '6. Credits, Billing and Auto Top-Up' },
+		{ id: 's6', label: '6. Plans, Billing and Auto Top-Up' },
 		{ id: 's7', label: '7. Right of Withdrawal and Refunds' },
 		{ id: 's8', label: '8. Acceptable Use' },
 		{ id: 's9', label: '9. Moderation Actions and Your Responsibility' },
@@ -69,18 +89,14 @@ export const TERMS_DOC: LegalDoc = {
 		{ id: 's20', label: '20. General Provisions' },
 		{ id: 's21', label: '21. Contact and Data Protection Officer' }
 	]
-};
+);
 
-export const PRIVACY_DOC: LegalDoc = {
-	slug: 'privacy',
-	label: 'Privacy',
-	kicker: LEGAL_KICKER,
-	title: 'Privacy Policy',
-	version: LEGAL_VERSION,
-	effectiveDate: LEGAL_EFFECTIVE_DATE,
-	description:
-		'How Moderaty processes personal data under the LGPD: what we collect, legal bases, retention, YouTube API disclosures, international transfers, and your rights.',
-	toc: [
+export const PRIVACY_DOC: LegalDoc = defineDoc(
+	'privacy',
+	'Privacy',
+	'Privacy Policy',
+	'How Moderaty processes personal data under the LGPD: what we collect, legal bases, retention, YouTube API disclosures, international transfers, and your rights.',
+	[
 		{ id: 's1', label: '1. Who We Are and What This Policy Covers' },
 		{ id: 's2', label: '2. The Data We Process, and Why' },
 		{ id: 's3', label: '3. Comment Data: We Are the Processor, Not the Controller' },
@@ -96,18 +112,14 @@ export const PRIVACY_DOC: LegalDoc = {
 		{ id: 's13', label: '13. Changes to This Policy' },
 		{ id: 's14', label: '14. Language and Governing Law' }
 	]
-};
+);
 
-export const DPA_DOC: LegalDoc = {
-	slug: 'dpa',
-	label: 'DPA',
-	kicker: LEGAL_KICKER,
-	title: 'Data Processing Agreement',
-	version: LEGAL_VERSION,
-	effectiveDate: LEGAL_EFFECTIVE_DATE,
-	description:
-		'The LGPD data processing agreement between you (controller) and Moderaty (processor) for YouTube comment data: comment-data minimization (author identifiers never stored from comments), sub-processors, and ANPD transfer clauses.',
-	toc: [
+export const DPA_DOC: LegalDoc = defineDoc(
+	'dpa',
+	'DPA',
+	'Data Processing Agreement',
+	'The LGPD data processing agreement between you (controller) and Moderaty (processor) for YouTube comment data: comment-data minimization (author identifiers never stored from comments), sub-processors, and ANPD transfer clauses.',
+	[
 		{ id: 's1', label: '1. Purpose and Scope' },
 		{ id: 's2', label: '2. Definitions' },
 		{ id: 's3', label: '3. Roles of the Parties' },
@@ -134,6 +146,6 @@ export const DPA_DOC: LegalDoc = {
 		{ id: 'annex-3', label: 'Annex III — Authorized Sub-processors' },
 		{ id: 'annex-4', label: 'Annex IV — International Transfer Mechanism' }
 	]
-};
+);
 
 export const LEGAL_DOCS: LegalDoc[] = [TERMS_DOC, PRIVACY_DOC, DPA_DOC];

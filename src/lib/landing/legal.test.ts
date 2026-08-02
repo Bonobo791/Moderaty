@@ -106,6 +106,16 @@ describe('legal page content (PR #35 review)', () => {
 		}
 	});
 
+	it('names Stripe as the user-billing processor, disclosed but outside the comment-data DPA scope', () => {
+		expect(readComponent('privacy')).toMatch(/Stripe, Inc\. \(payment processing/);
+		const dpa = readComponent('dpa');
+		// The Annex III note names Stripe as the processor of user billing data
+		// acting for Moderaty; it must never appear as an Annex III sub-processor
+		// table row, since it handles no Comment Data.
+		expect(dpa).toMatch(/Stripe, Inc\.[\s\S]*outside the scope of this DPA/);
+		expect(dpa).not.toMatch(/<td>\s*Stripe/);
+	});
+
 	it('does not claim a Portuguese version is already published', () => {
 		expect(readComponent('terms')).not.toContain('published in English and Portuguese');
 		expect(readComponent('privacy')).not.toContain('published in English and Portuguese');

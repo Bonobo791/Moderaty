@@ -172,9 +172,30 @@ describe('storage claims match implementation (comment PII)', () => {
 	});
 
 	it('the legal documents state that author identifiers are never stored', () => {
-		for (const doc of ['privacy', 'dpa'] as const) {
+		for (const doc of ['privacy', 'dpa', 'terms'] as const) {
 			expect(readComponent(doc), doc).toMatch(/author identifiers?[^.]*never (persistently )?stored|never store[^.]*author identifiers/i);
 		}
+	});
+
+	// PR #40 review: Privacy §3.4 claimed "we cannot identify a comment's
+	// author". That is unsupported — the comments table stores the YouTube
+	// comment ID, and while the channel owner's access remains active that ID
+	// could re-identify the author via YouTube. The defensible claim is
+	// narrower: identifiers are not persistently stored or linked in
+	// Moderaty's own database. Note §3.3's "whose age we cannot identify" is
+	// about age and must NOT trip this guard.
+	it('Privacy §3.4 does not make the absolute no-identification claim', () => {
+		const match = readComponent('privacy').match(/<strong>3\.4<\/strong>([\s\S]*?)<\/p>/);
+		expect(match, 'Privacy §3.4 paragraph not found').not.toBeNull();
+		const s34 = match?.[1] ?? '';
+		expect(s34).not.toMatch(/cannot identify a comment's author/i);
+		expect(s34).not.toMatch(/link stored comment text back/i);
+		// the scoped branch convention is "never stored from comments" (§3.2,
+		// with the user-rule carve-out) — the unscoped absolute is banned here
+		expect(s34).not.toMatch(/never store author identifiers/i);
+		expect(s34).toMatch(/not persistently stored or linked/i);
+		expect(s34).toMatch(/YouTube comment ID/i);
+		expect(s34).toMatch(/5 business days/i);
 	});
 
 	// PR #40 review: rules.pattern with type 'user' persists an owner-entered

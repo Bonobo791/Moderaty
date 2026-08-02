@@ -139,6 +139,21 @@ Approved dependencies only (execution plan v3): `drizzle-orm`,
 frameworks, no zod. UI copy uses the brand **Moderaty** — the string `yt-mod`
 must not appear in `src/`.
 
+## Environments
+
+- **All agent work happens against the Turso DEV database.** Local
+  `npm run dev` and `npm run db:migrate` use the
+  `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN` in the checkout's `.env`, which
+  point at the dev database. Migration verification, seed data, and schema
+  experiments all happen there — it is safe to break.
+- **Production only goes live through Netlify.** The production app is the
+  Netlify deploy of `main`; its env vars (including the production Turso
+  credentials) live in Netlify site settings, never in the repo. Do not point
+  local tooling at the production database — production migrations run per
+  [DEPLOY.md](DEPLOY.md) §1, after the code that needs them has merged.
+- Netlify branch deploys preview feature branches; `APP_URL` and `DRY_RUN`
+  are set per-deploy-context there, not in `.env`.
+
 ## Accounts & Sessions
 
 Moderaty is multi-user. Sign-in is Google identity only

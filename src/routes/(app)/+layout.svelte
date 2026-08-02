@@ -25,6 +25,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <nav class="app-nav" aria-label="App">
 	<a class="brand" href="/dashboard">Moderaty</a>
 	<a href="/dashboard">Dashboard</a>
+	<a href="/help">Help</a>
 	<span class="account">
 		<span class="muted">{data.user.displayName}</span>
 		<form method="POST" action="/logout">

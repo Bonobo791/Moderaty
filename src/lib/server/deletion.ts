@@ -59,9 +59,18 @@ export function consentEmailCutoffIso(now = Date.now()): string {
  * caller, BEFORE this erase (the encrypted tokens die here either way).
  *
  * @param userId - The ID of the user to erase
+ * @throws If the user does not exist or is already tombstoned
  */
 export async function deleteUserRecords(userId: string): Promise<void> {
 	await db.transaction(async (tx) => {
+		const user = await tx
+			.select({ googleSub: users.googleSub })
+			.from(users)
+			.where(eq(users.id, userId))
+			.get();
+		if (!user || user.googleSub.startsWith('deleted:')) {
+			throw new Error(`deleteUserRecords: user ${userId} not found or already deleted`);
+		}
 		const chs = await tx.select({ id: channels.id }).from(channels).where(eq(channels.userId, userId)).all();
 		const channelIds = chs.map((ch) => ch.id);
 		if (channelIds.length) {

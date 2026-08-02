@@ -125,6 +125,29 @@ test('the tombstone frees the Google sub for a fresh signup', async () => {
 	expect(await userRow('new-user')).toMatchObject({ googleSub: 'sub-gone' });
 });
 
+test('deleteUserRecords rejects re-deleting an already tombstoned user', async () => {
+	const userId = await seedUser('gone');
+	await seedConsent(userId);
+
+	await deleteUserRecords(userId);
+
+	await expect(deleteUserRecords(userId)).rejects.toThrow(`deleteUserRecords: user ${userId} not found or already deleted`);
+
+	// The rejected second call must leave the tombstone and consent log untouched.
+	expect(await userRow(userId)).toMatchObject({ googleSub: `deleted:${userId}` });
+	expect(await testDb().db.select().from(users).all()).toHaveLength(1);
+	const retained = await testDb().db.select().from(consents).all();
+	expect(retained).toHaveLength(1);
+	expect(retained[0]).toMatchObject({ userId, email: 'gone@example.com' });
+});
+
+test('deleteUserRecords rejects a nonexistent user id', async () => {
+	await expect(deleteUserRecords('no-such-user')).rejects.toThrow(
+		'deleteUserRecords: user no-such-user not found or already deleted'
+	);
+	expect(await testDb().db.select().from(users).all()).toEqual([]);
+});
+
 test('nullExpiredConsentEmails erases only the e-mail of consents older than 10 years', async () => {
 	await seedUser('old');
 	const oldDate = new Date(Date.now() - CONSENT_EMAIL_RETENTION_MS - DAY_MS).toISOString();

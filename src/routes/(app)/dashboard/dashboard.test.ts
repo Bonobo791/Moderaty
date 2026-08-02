@@ -28,7 +28,16 @@ vi.mock('$lib/server/crypto', () => ({ decrypt: decryptMock }));
 
 import { actions, load } from './+page.server';
 
-setupTestDb(['comments', 'channels', 'users', 'sessions']);
+setupTestDb([
+	'moderation_actions',
+	'comments',
+	'audit_log',
+	'rules',
+	'channels',
+	'sessions',
+	'users',
+	'consents'
+]);
 
 const OWNER = { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' };
 

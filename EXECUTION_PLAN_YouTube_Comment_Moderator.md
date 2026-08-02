@@ -1968,9 +1968,10 @@ account exists — never pre-OAuth friction, never browsewrap:
   keeps the `'[deleted]'` tombstone sentinel out of the evidence); the
   consent action records it at every acceptance; the tombstone wipes
   `users.email` entirely. Rationale: LGPD Art. 16 blocking must be
-  architecture, not discipline (no live table holds a deleted user's
-  e-mail), it avoids re-signup e-mail collisions, and it shrinks the breach
-  blast radius. Known gap, not a bug: accounts deleted before 0011 ships
+  architecture, not discipline (no operational table other than `consents`
+  holds a deleted user's e-mail), it avoids re-signup e-mail collisions,
+  and it shrinks the breach blast radius. Known gap, not a bug: accounts
+  deleted before 0011 ships
   have already wiped `users.email`, so their consent rows stay
   `email = NULL` after backfill — unrecoverable, and fine. The same
   migration is the CONTRACT phase for the abandoned soft delete: it drops

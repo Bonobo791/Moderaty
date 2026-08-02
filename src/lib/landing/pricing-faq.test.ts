@@ -21,6 +21,8 @@ import { PRICING_FAQ_ENTRIES } from './pricing-faq';
 import {
 	TICKS_HOSTED,
 	TICKS_HOSTED_DETAILED,
+	TICKS_LIFETIME,
+	TICKS_LIFETIME_DETAILED,
 	TICKS_SELF_HOSTED,
 	TICKS_SELF_HOSTED_DETAILED
 } from './plans';
@@ -31,7 +33,9 @@ const PRICING_COPY = [
 	...TICKS_SELF_HOSTED,
 	...TICKS_SELF_HOSTED_DETAILED,
 	...TICKS_HOSTED,
-	...TICKS_HOSTED_DETAILED
+	...TICKS_HOSTED_DETAILED,
+	...TICKS_LIFETIME,
+	...TICKS_LIFETIME_DETAILED
 ];
 
 /**
@@ -44,11 +48,16 @@ const CLAIM_LINES = [
 	...TICKS_SELF_HOSTED,
 	...TICKS_SELF_HOSTED_DETAILED,
 	...TICKS_HOSTED,
-	...TICKS_HOSTED_DETAILED
+	...TICKS_HOSTED_DETAILED,
+	...TICKS_LIFETIME,
+	...TICKS_LIFETIME_DETAILED
 ];
 
-/** The one billing policy the product actually has, stated verbatim. */
-const APPROVED_POLICY = 'Nothing renews, nothing auto-charges';
+/**
+ * The automation policy the product actually has, stated verbatim: the hosted
+ * plan renews monthly, and top-up automation is opt-in (Terms §6.2).
+ */
+const APPROVED_POLICY = 'Automatic top-up is opt-in';
 
 /**
  * Policy expansion (feat-consumer-copy, user-directed): now that the Terms of
@@ -66,8 +75,8 @@ const REFUND_CLAIM = /refund|credit|cancel/i;
 const UNSUPPORTED_CLAIM = /expir|rollover|roll over|trial|discount|\bfees?\b/i;
 
 describe('pricing copy guardrails', () => {
-	it('ships exactly the 6 pricing FAQ pairs, each a real question with a real answer', () => {
-		expect(PRICING_FAQ_ENTRIES).toHaveLength(6);
+	it('ships exactly the 7 pricing FAQ pairs, each a real question with a real answer', () => {
+		expect(PRICING_FAQ_ENTRIES).toHaveLength(7);
 		for (const { q, a } of PRICING_FAQ_ENTRIES) {
 			expect(q.endsWith('?')).toBe(true);
 			expect(a.length).toBeGreaterThan(40);
@@ -81,7 +90,7 @@ describe('pricing copy guardrails', () => {
 		}
 	});
 
-	it('makes no billing-policy claims beyond nothing-renews-nothing-auto-charges', () => {
+	it('makes no billing-policy claims beyond opt-in automation', () => {
 		// the approved policy is present, verbatim
 		expect(PRICING_COPY.join(' ')).toContain(APPROVED_POLICY);
 		for (const line of CLAIM_LINES) {

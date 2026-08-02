@@ -33,8 +33,8 @@ export type LegalDoc = {
 	toc: LegalTocEntry[];
 };
 
-export const LEGAL_EFFECTIVE_DATE = '1 August 2026';
-export const LEGAL_VERSION = '1.2';
+export const LEGAL_EFFECTIVE_DATE = '2 August 2026';
+export const LEGAL_VERSION = '1.3';
 export const LEGAL_KICKER = 'YouTube Comment Moderation Service';
 
 export const TERMS_DOC: LegalDoc = {
@@ -45,14 +45,14 @@ export const TERMS_DOC: LegalDoc = {
 	version: LEGAL_VERSION,
 	effectiveDate: LEGAL_EFFECTIVE_DATE,
 	description:
-		'The binding contract for using Moderaty: eligibility, the service, YouTube API terms, credits and billing, refunds, acceptable use, liability, and governing law (Brazil).',
+		'The binding contract for using Moderaty: eligibility, the service, YouTube API terms, plans, billing and auto top-up, refunds, acceptable use, liability, and governing law (Brazil).',
 	toc: [
 		{ id: 's1', label: '1. Agreement and Acceptance' },
 		{ id: 's2', label: '2. Definitions' },
 		{ id: 's3', label: '3. Eligibility and Your Account' },
 		{ id: 's4', label: '4. The Service' },
 		{ id: 's5', label: '5. YouTube API Services and Third-Party Terms' },
-		{ id: 's6', label: '6. Credits, Billing and Auto Top-Up' },
+		{ id: 's6', label: '6. Plans, Billing and Auto Top-Up' },
 		{ id: 's7', label: '7. Right of Withdrawal and Refunds' },
 		{ id: 's8', label: '8. Acceptable Use' },
 		{ id: 's9', label: '9. Moderation Actions and Your Responsibility' },

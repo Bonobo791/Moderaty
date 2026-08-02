@@ -19,32 +19,32 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 -->
 
 <!--
-	The hosted plan panel: same engine, our servers, $5 a month auto-renewed
-	with 100 comments included and opt-in top-up automation. The CTA is the
-	standard "Connect YouTube channel" pill into the OAuth flow. `detailed`
-	swaps in the longer tick list and the "best for" line. Card markup and
+	The lifetime BYOK deal: hosted forever for one $49 payment with the
+	buyer's own OpenAI key, capped at the first 1,000 users. Card markup and
 	styles live in PlanCard.svelte.
 -->
 
 <script lang="ts">
 	import PlanCard from './PlanCard.svelte';
-	import { LOGIN_URL } from '$lib/landing/links';
-	import { TICKS_HOSTED, TICKS_HOSTED_DETAILED } from '$lib/landing/plans';
+	import { LOGIN_URL, OPENAI_MODERATION_URL } from '$lib/landing/links';
+	import { TICKS_LIFETIME, TICKS_LIFETIME_DETAILED } from '$lib/landing/plans';
 
 	let { detailed = false }: { detailed?: boolean } = $props();
 </script>
 
 <PlanCard
-	stamp="Renews monthly"
-	kicker="Hosted"
-	price="$5"
-	priceNote="a month, 100 comments"
-	bestFor={detailed ? 'Best for: creators who want the hammer without the homework.' : ''}
-	ticks={detailed ? TICKS_HOSTED_DETAILED : TICKS_HOSTED}
+	stamp="First 1000 users"
+	mint
+	kicker="Lifetime BYOK"
+	price="$49"
+	priceNote="once, forever"
+	bestFor={detailed ? 'Best for: early believers with their own OpenAI key.' : ''}
+	ticks={detailed ? TICKS_LIFETIME_DETAILED : TICKS_LIFETIME}
 >
 	{#snippet body()}
-		Same engine, our servers. 100 moderated comments every month, renewed automatically. Run out
-		and top up at the same nickel a comment.
+		Hosted forever for one payment. Bring your own OpenAI key — OpenAI's moderation endpoint is
+		<a href={OPENAI_MODERATION_URL} target="_blank" rel="noreferrer" class="inline-link">free to use</a>
+		— so after the $49 your running cost is likely zero. Unlimited comments, no meter.
 	{/snippet}
 	{#snippet cta()}
 		<a href={LOGIN_URL} class="btn-press primary-btn">Connect YouTube channel</a>

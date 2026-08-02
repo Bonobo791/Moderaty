@@ -68,19 +68,19 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <p><strong>5.4</strong> We are not affiliated with, sponsored, or endorsed by YouTube or Google. YouTube and Google are not parties to these Terms and have no obligations to you under them.</p>
 
-<h2 id="s6">6. Credits, Billing and Auto Top-Up</h2>
+<h2 id="s6">6. Plans, Billing and Auto Top-Up</h2>
 
-<p><strong>6.1</strong> The Service is billed through prepaid Credits (for example, a package of 500 moderated comments for USD 5.00, as displayed at checkout). Prices, packages, and any subscription options are those shown at the time of purchase. Payments are processed by our payment provider (currently Stripe); we do not store your full payment card data.</p>
+<p><strong>6.1</strong> The Service is offered as: (a) a free self-hosted version (AGPL-3.0, your own infrastructure and OpenAI key); (b) a hosted subscription at USD 5.00 per month, automatically renewed each billing month until cancelled, including 100 moderated comments per billing month (unused monthly comments do not carry over); (c) a lifetime hosted plan at USD 49.00, one-time, limited to the first 1,000 purchasers, with unlimited moderated comments and your own OpenAI key; and (d) top-up credits at USD 0.05 per moderated comment, in custom amounts. Custom or volume pricing is available on request. Prices are those shown at the time of purchase. Payments are processed by our payment provider (currently Stripe); we do not store your full payment card data.</p>
 
-<p><strong>6.2</strong> If you enable auto top-up, you expressly authorize recurring charges of the selected amount each time your balance reaches the threshold you configure (for example, USD 5.00 when the balance falls to USD 2.50). You can change the threshold or disable auto top-up at any time in your account settings, effective for future charges.</p>
+<p><strong>6.2</strong> Automatic top-up is optional and off by default. If you enable it, you expressly authorize recurring charges at USD 0.05 per moderated comment each time your included monthly comments are exhausted, and, separately, an automatic charge of the amount you configure each time your top-up balance reaches USD 0.00. You can change the configuration or disable either automation at any time in your account settings, effective for future charges.</p>
 
-<p><strong>6.3</strong> We will give at least 30 days' prior notice of any change to prices or Credit conversion rates, by e-mail and a notice in the Service. Changes apply only to purchases made after the notice period. If you do not agree, you may stop purchasing; refunds are governed by Section 7.</p>
+<p><strong>6.3</strong> You may cancel the subscription's renewal at any time in your account settings; cancellation takes effect at the end of the current billing month. We will give at least 30 days' prior notice of any change to prices, comment allowances, or top-up rates, by e-mail and a notice in the Service. Changes apply only to charges made after the notice period. If you do not agree, you may cancel or stop purchasing; refunds are governed by Section 7.</p>
 
 <p><strong>6.4</strong> You are responsible for applicable taxes. Prices are shown with applicable tax information at checkout.</p>
 
 <h2 id="s7">7. Right of Withdrawal and Refunds</h2>
 
-<p><strong>7.1</strong> If you are a Consumer, you may withdraw from your purchase within 7 (seven) days, counted from acceptance of these Terms or from the purchase, under Article 49 of the CDC, and receive a full refund of all amounts paid, at any title, without deductions of any kind, monetarily updated, and without penalty — even if you have used the Service during that period. To exercise this right, contact us through any channel listed in Section 21.</p>
+<p><strong>7.1</strong> If you are a Consumer, you may withdraw from your purchase within 7 (seven) days, counted from acceptance of these Terms or from the purchase, under Article 49 of the CDC, and receive a full refund of all amounts paid, at any title, without deductions of any kind, monetarily updated, and without penalty — even if you have used the Service during that period. This right applies to each charge, including subscription charges, the lifetime plan, and top-ups. To exercise this right, contact us through any channel listed in Section 21.</p>
 
 <p><strong>7.2</strong> Outside the withdrawal period, all purchases are final and no refunds are issued — including for unconsumed Credits and including upon cancellation or closure of your account — except where required by applicable law.</p>
 

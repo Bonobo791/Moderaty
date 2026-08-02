@@ -42,7 +42,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				</p>
 				<p>
 					We sell moderated comments the way a utility sells water, metered and boring. The free
-					tier is the whole product because protection is the product. The hosted tier exists for
+					tier is the whole product because protection is the product. The hosted tiers exist for
 					people who would rather not run a server, not for people who ran out of safety.
 				</p>
 				<p>The day Moderaty profits from your anxiety, you should uninstall it.</p>

@@ -316,7 +316,8 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <p>
 	<strong>15.1</strong> Notwithstanding Section 7, the Processor retains connection records and
 	records of access to applications for the statutory period of 6 months under Articles 13 and
-	15 of the Marco Civil, as its sole documented retention exception.
+	15 of the Marco Civil; these logs and the Moderation Outcome Data described in Section 7 are
+	the only records the Processor retains.
 </p>
 <p>
 	<strong>15.2</strong> Such logs are stored separately from operational data, kept under

@@ -151,6 +151,18 @@ describe('storage claims match implementation (comment PII)', () => {
 		}
 	});
 
+	// PR #40 review: comment text is retained in Moderation Outcome Data, so
+	// statutory connection logs are not the "sole/only retention exception" —
+	// that phrasing contradicts Terms §4.2 / DPA §7 wherever it appears.
+	it('statutory logs are not framed as the sole retention exception', () => {
+		for (const doc of ['terms', 'dpa'] as const) {
+			expect(readComponent(doc), doc).not.toMatch(
+				/sole documented retention exception|only retention exception/i
+			);
+			expect(readComponent(doc), doc).toMatch(/Marco Civil[^.]*Moderation Outcome Data/i);
+		}
+	});
+
 	// PR #40 review: author identifiers are processed in memory only — never
 	// cache, disk, or any "ephemeral storage" a definition could smuggle in.
 	it('no surface authorizes ephemeral storage for author identifiers', () => {

@@ -27,6 +27,7 @@ import { eq, lte } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
 import { sessions, users } from '$lib/server/db/schema';
+import { resolveActiveOrg, type OrgRole } from '$lib/server/org';
 
 export const SESSION_COOKIE = 'moderaty_session';
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -36,7 +37,10 @@ export interface SessionUser {
 	id: string;
 	email: string;
 	displayName: string;
-	plan: string;
+	plan: string; // the ACTIVE ORGANIZATION's plan — billing is per-org; users.plan is legacy
+	orgId: string;
+	orgName: string;
+	orgRole: OrgRole;
 }
 
 export interface SessionResolution {
@@ -52,7 +56,8 @@ export interface SessionResolution {
  */
 export async function createSession(
 	userId: string,
-	handle: Pick<typeof db, 'delete' | 'insert'> = db
+	handle: Pick<typeof db, 'delete' | 'insert'> = db,
+	activeOrgId: string | null = null
 ): Promise<{ token: string; expiresAt: string }> {
 	// Opportunistic cleanup: logins are infrequent, so this bounds the expired-row
 	// buildup for users who never come back (lazy per-token delete can't catch those).
@@ -60,7 +65,7 @@ export async function createSession(
 	await handle.delete(sessions).where(lte(sessions.expiresAt, now.toISOString()));
 	const token = randomBytes(32).toString('hex');
 	const expiresAt = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
-	await handle.insert(sessions).values({ id: token, userId, expiresAt });
+	await handle.insert(sessions).values({ id: token, userId, expiresAt, activeOrgId });
 	return { token, expiresAt };
 }
 
@@ -75,7 +80,7 @@ export async function getSessionUser(token: string | undefined): Promise<Session
 	const row = await db
 		.select({
 			session: sessions,
-			user: { id: users.id, email: users.email, displayName: users.displayName, plan: users.plan },
+			user: { id: users.id, email: users.email, displayName: users.displayName },
 			userGoogleSub: users.googleSub
 		})
 		.from(sessions)
@@ -98,12 +103,25 @@ export async function getSessionUser(token: string | undefined): Promise<Session
 		await db.delete(sessions).where(eq(sessions.id, token));
 		return null;
 	}
+	// Tenant resolution: the session's active org when the membership still
+	// exists, else the user's oldest membership (and the session row is
+	// repaired). Zero memberships is a data bug — fail loudly, never sign out.
+	const resolved = await resolveActiveOrg(row.user.id, row.session.activeOrgId);
+	if (!resolved) {
+		console.error(`user ${row.user.id} has no organization membership`);
+		throw new Error('account has no organization — contact support');
+	}
+	if (resolved.fellBack && row.session.activeOrgId !== null) {
+		console.info(`session for user ${row.user.id}: active org ${row.session.activeOrgId} no longer valid, falling back to ${resolved.org.orgId}`);
+		await db.update(sessions).set({ activeOrgId: resolved.org.orgId }).where(eq(sessions.id, token));
+	}
+	const user = { ...row.user, plan: resolved.org.plan, orgId: resolved.org.orgId, orgName: resolved.org.orgName, orgRole: resolved.org.orgRole };
 	if (expiresMs - Date.now() < RENEW_BELOW_MS) {
 		const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
 		await db.update(sessions).set({ expiresAt }).where(eq(sessions.id, token));
-		return { user: row.user, expiresAt, renewed: true };
+		return { user, expiresAt, renewed: true };
 	}
-	return { user: row.user, expiresAt: row.session.expiresAt, renewed: false };
+	return { user, expiresAt: row.session.expiresAt, renewed: false };
 }
 
 /** Deletes a session (sign-out). Unknown tokens are a no-op. */

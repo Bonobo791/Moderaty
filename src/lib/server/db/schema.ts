@@ -25,14 +25,8 @@ export const users = sqliteTable('users', {
 	email: text('email').notNull(),
 	displayName: text('display_name').notNull(),
 	plan: text('plan').notNull().default('free'), // future Stripe gating hook (hosted plans)
-	// Soft-delete marker: set on self-service deletion, cleared by signing back
-	// in. Rows past the 6-month retention are anonymized by the cron purge.
-	deletedAt: text('deleted_at'),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
-}, (table) => [
-	// The cron retention purge filters/orders by deleted_at every invocation.
-	index('users_deleted_at_idx').on(table.deletedAt)
-]);
+});
 
 export const sessions = sqliteTable('sessions', {
 	id: text('id').primaryKey(), // random 32-byte hex token; also the cookie value
@@ -117,12 +111,17 @@ export const auditLog = sqliteTable('audit_log', {
 
 // Evidentiary consent log (CDC Art. 6º, VIII; LGPD). One row per acceptance
 // event — initial signup and every re-acceptance after a LEGAL_VERSION bump.
-// Records exactly what was agreed to, when, and from where; never updated.
+// Records exactly what was agreed to, when, and from where; never updated
+// (except the cron sweep nulling `email` 10 years after acceptance). The
+// e-mail lives HERE, not in the users row, because this log is the only
+// place its retention is justified (Art. 16, III — blocked from any other
+// use by architecture); account deletion wipes users.email entirely.
 export const consents = sqliteTable('consents', {
 	id: integer('id').primaryKey({ autoIncrement: true }),
 	userId: text('user_id')
 		.notNull()
 		.references(() => users.id, { onDelete: 'cascade' }),
+	email: text('email'), // retained consent evidence; nulled by the 10-year sweep
 	docVersion: text('doc_version').notNull(), // LEGAL_VERSION accepted, e.g. 'v1.0'
 	checkboxText: text('checkbox_text').notNull(), // exact text shown at acceptance
 	ip: text('ip').notNull(), // event.getClientAddress() at acceptance
@@ -130,5 +129,8 @@ export const consents = sqliteTable('consents', {
 	marketingOptIn: integer('marketing_opt_in').notNull().default(0), // separate, unbundled LGPD consent
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
-	index('consents_user_id_idx').on(table.userId)
+	index('consents_user_id_idx').on(table.userId),
+	// Serves the 10-year retention sweep (email IS NOT NULL AND created_at <
+	// cutoff): partial, so it indexes only rows that still hold an e-mail.
+	index('consents_email_retention_idx').on(table.createdAt).where(sql`${table.email} is not null`)
 ]);

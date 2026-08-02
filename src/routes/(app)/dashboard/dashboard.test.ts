@@ -16,14 +16,28 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
 import { postForm, setupTestDb, testDb } from '$lib/server/testdb';
 import { makeCookies } from '$lib/server/testcookies';
 import { channels, sessions, users } from '$lib/server/db/schema';
 
+// decrypt is mocked so seeds can use opaque placeholders; the action must pass
+// each channel's decrypted token to Google's revocation endpoint.
+const decryptMock = vi.hoisted(() => vi.fn((_enc: string) => 'refresh-token'));
+vi.mock('$lib/server/crypto', () => ({ decrypt: decryptMock }));
+
 import { actions, load } from './+page.server';
 
-setupTestDb(['comments', 'channels', 'users', 'sessions']);
+setupTestDb([
+	'moderation_actions',
+	'comments',
+	'audit_log',
+	'rules',
+	'channels',
+	'sessions',
+	'users',
+	'consents'
+]);
 
 const OWNER = { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' };
 
@@ -32,9 +46,22 @@ function loadDashboard(user: typeof OWNER | null = OWNER) {
 }
 
 async function seedActiveUser() {
-	await testDb().db.insert(users).values({ id: OWNER.id, googleSub: 'sub-1', email: OWNER.email, displayName: OWNER.displayName });
-	await testDb().db.insert(sessions).values({ id: 'sess-1', userId: OWNER.id, expiresAt: '2027-01-01T00:00:00.000Z' });
-	await testDb().db.insert(channels).values({ id: 'UC1', userId: OWNER.id, title: 'Mine', refreshTokenEnc: 'enc', active: 1 });
+	await testDb()
+		.db.insert(users)
+		.values({ id: OWNER.id, googleSub: 'sub-1', email: OWNER.email, displayName: OWNER.displayName });
+	await testDb()
+		.db.insert(sessions)
+		.values({ id: 'sess-1', userId: OWNER.id, expiresAt: '2027-01-01T00:00:00.000Z' });
+	await testDb()
+		.db.insert(channels)
+		.values({ id: 'UC1', userId: OWNER.id, title: 'Mine', refreshTokenEnc: 'enc', active: 1 });
+}
+
+/** Token revocation succeeds. Returns the fetch spy for assertions. */
+function stubRevocation(ok = true) {
+	const fetch = vi.fn().mockResolvedValue(new Response('', { status: ok ? 200 : 500 }));
+	vi.stubGlobal('fetch', fetch);
+	return fetch;
 }
 
 async function captureDelete(user: typeof OWNER | null, fields: Record<string, string>) {
@@ -47,11 +74,11 @@ async function captureDelete(user: typeof OWNER | null, fields: Record<string, s
 	}
 }
 
-/** The seeded account is fully intact: not deleted, session alive, channel active. */
+/** The seeded account is fully intact: not tombstoned, session alive, channel present. */
 async function expectAccountUntouched() {
-	expect((await testDb().db.select().from(users).all())[0].deletedAt).toBeNull();
+	expect((await testDb().db.select().from(users).all())[0]).toMatchObject({ googleSub: 'sub-1' });
 	expect(await testDb().db.select().from(sessions).all()).toHaveLength(1);
-	expect((await testDb().db.select().from(channels).all())[0].active).toBe(1);
+	expect(await testDb().db.select().from(channels).all()).toHaveLength(1);
 }
 
 test('dashboard load never serializes the encrypted refresh token', async () => {
@@ -98,11 +125,12 @@ test('delete account without the confirmation checkbox writes nothing', async ()
 	await expectAccountUntouched();
 });
 
-test('delete account rolls everything back when the session deletion fails', async () => {
+test('delete account rolls everything back when the erase transaction fails', async () => {
 	await seedActiveUser();
-	// Force the sessions delete to fail after deletedAt is set, proving the
-	// three writes commit as one unit: without the transaction the user would
-	// keep an active session on a "deleted" account.
+	stubRevocation();
+	// Force a delete inside the transaction to fail, proving the erase commits
+	// as one unit: without the transaction the user would keep a live session
+	// on a tombstoned account.
 	await testDb().client.execute(
 		`CREATE TRIGGER fail_session_delete BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT, 'simulated session deletion failure'); END;`
 	);
@@ -119,20 +147,75 @@ test('delete account rolls everything back when the session deletion fails', asy
 	expect(outcome.res).toBeInstanceOf(Error);
 	expect(outcome.res).not.toMatchObject({ status: 302 });
 	expect(outcome.cookies.deleteCalls).toHaveLength(0);
-	// Nothing partial persists: soft delete, session, and channel are untouched.
+	// Nothing partial persists: no tombstone, session and channel untouched.
 	await expectAccountUntouched();
 });
 
-test('delete account soft-deletes, destroys sessions, deactivates channels, and signs out', async () => {
+test('delete account revokes each channel at Google, erases everything, and signs out', async () => {
 	await seedActiveUser();
+	const fetch = stubRevocation();
 
 	const { res, cookies } = await captureDelete(OWNER, { confirm: 'on' });
 
 	expect(res).toMatchObject({ status: 302, location: '/' });
-	const deleted = await testDb().db.select().from(users).all();
-	expect(deleted).toHaveLength(1);
-	expect(deleted[0].deletedAt).toBeTruthy();
+	// Revocation used the DECRYPTED refresh token of the owned channel.
+	expect(decryptMock).toHaveBeenCalledWith('enc');
+	expect(fetch).toHaveBeenCalledWith(
+		'https://oauth2.googleapis.com/revoke',
+		expect.objectContaining({ method: 'POST' })
+	);
+	expect(String(fetch.mock.calls[0][1].body)).toContain('token=refresh-token');
+	// Immediate deletion: channels and sessions are GONE (not deactivated),
+	// and the user row is a fully anonymized tombstone.
+	expect(await testDb().db.select().from(channels).all()).toHaveLength(0);
 	expect(await testDb().db.select().from(sessions).all()).toHaveLength(0);
-	expect((await testDb().db.select().from(channels).all())[0].active).toBe(0);
+	expect((await testDb().db.select().from(users).all())[0]).toMatchObject({
+		googleSub: 'deleted:user-1',
+		email: '[deleted]',
+		displayName: '[deleted]'
+	});
 	expect(cookies.deleteCalls.some((c) => c.name === 'moderaty_session')).toBe(true);
+});
+
+test('delete account still deletes when revocation fails, logging loudly', async () => {
+	await seedActiveUser();
+	stubRevocation(false); // Google answers 500
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+	const { res } = await captureDelete(OWNER, { confirm: 'on' });
+
+	expect(res).toMatchObject({ status: 302, location: '/' });
+	expect(errorSpy).toHaveBeenCalled();
+	// The encrypted token is erased either way — the grant is orphaned, not kept.
+	expect(await testDb().db.select().from(channels).all()).toHaveLength(0);
+	expect((await testDb().db.select().from(users).all())[0]).toMatchObject({ googleSub: 'deleted:user-1' });
+});
+
+test('a revocation failure on one channel does not stop the others', async () => {
+	await seedActiveUser();
+	await testDb()
+		.db.insert(channels)
+		.values({ id: 'UC2', userId: OWNER.id, title: 'Second', refreshTokenEnc: 'enc2', active: 1 });
+	decryptMock.mockImplementation((enc: string) => (enc === 'enc2' ? 'token-2' : 'token-1'));
+	// Google answers 500 for the first channel's token, 200 for the second.
+	const fetch = vi.fn().mockImplementation((_url: string, init?: RequestInit) =>
+		Promise.resolve(new Response('', { status: String(init?.body).includes('token=token-1') ? 500 : 200 }))
+	);
+	vi.stubGlobal('fetch', fetch);
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+	try {
+		const { res } = await captureDelete(OWNER, { confirm: 'on' });
+
+		expect(res).toMatchObject({ status: 302, location: '/' });
+		// The failure is logged loudly WITH the channel id…
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('UC1'), expect.anything());
+		// …and the second channel was still revoked afterwards.
+		expect(fetch.mock.calls.some((c) => String(c[1]?.body).includes('token=token-2'))).toBe(true);
+		expect(await testDb().db.select().from(channels).all()).toHaveLength(0);
+		expect((await testDb().db.select().from(users).all())[0]).toMatchObject({ googleSub: 'deleted:user-1' });
+	} finally {
+		// The decrypt mock is module-level — restore the default for other tests.
+		decryptMock.mockImplementation(() => 'refresh-token');
+	}
 });

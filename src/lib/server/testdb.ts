@@ -23,6 +23,7 @@ import { createClient, type Client } from '@libsql/client';
 import { drizzle, type LibSQLDatabase } from 'drizzle-orm/libsql';
 import { beforeAll, beforeEach, vi } from 'vitest';
 import * as schema from './db/schema';
+import { consents, users } from './db/schema';
 
 export interface TestDb {
 	db: LibSQLDatabase<typeof schema>;
@@ -65,6 +66,27 @@ export function postForm(fields: Record<string, string>, url = 'http://localhost
 	return new Request(url, { method: 'POST', body: form });
 }
 
+export const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Seeds a bare user row with a synthetic identity. */
+export async function seedUser(id: string): Promise<string> {
+	await testDb().db.insert(users).values({ id, googleSub: `sub-${id}`, email: `${id}@example.com`, displayName: id });
+	return id;
+}
+
+/** Seeds a consent record for an existing user with the e-mail retained (synthetic evidence values). */
+export async function seedConsent(userId: string, createdAt?: string, docVersion = 'v1.2'): Promise<void> {
+	await testDb().db.insert(consents).values({
+		userId,
+		email: `${userId}@example.com`,
+		docVersion,
+		checkboxText: 'I agree',
+		ip: '127.0.0.1',
+		userAgent: 'test',
+		...(createdAt ? { createdAt } : {})
+	});
+}
+
 /**
  * Creates an in-memory test database with the application schema and foreign-key enforcement enabled.
  *
@@ -81,7 +103,6 @@ export async function createTestDb(): Promise<TestDb> {
 			email TEXT NOT NULL,
 			display_name TEXT NOT NULL,
 			plan TEXT NOT NULL DEFAULT 'free',
-			deleted_at TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE TABLE sessions (
@@ -147,13 +168,15 @@ export async function createTestDb(): Promise<TestDb> {
 		`CREATE TABLE consents (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			email TEXT,
 			doc_version TEXT NOT NULL,
 			checkbox_text TEXT NOT NULL,
 			ip TEXT NOT NULL,
 			user_agent TEXT NOT NULL,
 			marketing_opt_in INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-		)`
+		)`,
+		`CREATE INDEX consents_email_retention_idx ON consents (created_at) WHERE email IS NOT NULL`
 	]);
 	return { db: drizzle(client, { schema }), client };
 }

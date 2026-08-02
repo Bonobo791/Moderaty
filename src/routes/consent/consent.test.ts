@@ -191,6 +191,7 @@ test('a new user is created only at acceptance, with a full evidentiary consent 
 	expect(rows).toHaveLength(1);
 	expect(rows[0]).toMatchObject({
 		userId: created[0].id,
+		email: 'one@example.com',
 		docVersion: LEGAL_VERSION,
 		checkboxText: CONSENT_CHECKBOX_TEXT,
 		ip: '203.0.113.7',
@@ -229,11 +230,11 @@ test('only the first-ever user claims orphaned channels', async () => {
 	expect((await testDb().db.select().from(channels).all()).find((c) => c.id === 'UC2')!.userId).toBeNull();
 });
 
-/** Seeds existing sub-1 (optionally soft-deleted) and completes its re-consent. */
-async function seedExistingAndConsent(deletedAt?: string) {
+/** Seeds existing sub-1 and completes its re-consent. */
+async function seedExistingAndConsent() {
 	await testDb()
 		.db.insert(users)
-		.values({ id: 'user-1', googleSub: 'sub-1', email: 'one@example.com', displayName: 'One', deletedAt: deletedAt ?? null });
+		.values({ id: 'user-1', googleSub: 'sub-1', email: 'one@example.com', displayName: 'One' });
 	const thrown = await captureAction(cookiesWithPending({ kind: 'existing', userId: 'user-1' }), { consent: 'on' });
 	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
 }
@@ -250,7 +251,9 @@ test('an existing user re-accepting adds a consent row without duplicating the a
 
 	const rows = await testDb().db.select().from(consents).all();
 	expect(rows).toHaveLength(1);
-	expect(rows[0]).toMatchObject({ userId: 'user-1', docVersion: LEGAL_VERSION });
+	// The e-mail is recorded from the users row — statutory-retention evidence
+	// (Art. 16, III), since account deletion wipes users.email entirely.
+	expect(rows[0]).toMatchObject({ userId: 'user-1', email: 'one@example.com', docVersion: LEGAL_VERSION });
 	await expectOneConsentedAccount();
 });
 
@@ -258,16 +261,6 @@ test('an existing-user pending payload naming an unknown account fails with 400'
 	const res = await captureAction(cookiesWithPending({ kind: 'existing', userId: 'ghost' }), { consent: 'on' });
 	expect(res).toMatchObject({ status: 400 });
 	expect(await testDb().db.select().from(consents).all()).toHaveLength(0);
-});
-
-test('a soft-deleted existing user is restored only when the consent flow completes', async () => {
-	const inWindow = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-	await seedExistingAndConsent(inWindow);
-
-	// The callback left deletedAt set while the user was parked at /consent;
-	// completing re-acceptance is what cancels the pending deletion.
-	expect((await testDb().db.select().from(users).all())[0].deletedAt).toBeNull();
-	await expectOneConsentedAccount();
 });
 
 test('a pending identity parked under a different state is invisible to this flow', async () => {

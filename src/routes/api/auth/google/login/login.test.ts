@@ -29,11 +29,9 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
-import { eq } from 'drizzle-orm';
-
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { makeCookies, makeCookiesWithState } from '$lib/server/testcookies';
-import { channels, consents, sessions, users } from '$lib/server/db/schema';
+import { consents, sessions, users } from '$lib/server/db/schema';
 import { LEGAL_VERSION, PENDING_CONSENT_COOKIE, readPendingConsent } from '$lib/server/legal';
 import { GET as startLogin } from './+server';
 import { GET as loginCallback } from './callback/+server';
@@ -184,15 +182,6 @@ async function signIn(state = 's') {
 	return { cookies, location: (redirect as { location: string }).location };
 }
 
-/** Seeds a consented sub-1 user soft-deleted `daysAgo` days ago (derived from
- *  the current clock so the 180-day boundary never drifts). */
-async function seedSoftDeletedUser(daysAgo: number, docVersion?: string) {
-	const userId = await seedConsentedUser('sub-1', docVersion);
-	const deletedAt = new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000).toISOString();
-	await testDb().db.update(users).set({ deletedAt }).where(eq(users.id, userId));
-	return { userId, deletedAt };
-}
-
 test('callback with a new identity parks a pending consent and redirects to /consent without creating anything', async () => {
 	const { cookies, location } = await signIn();
 
@@ -248,43 +237,17 @@ test('a repeat login with the same sub reuses the account', async () => {
 	expect(await sessionRows()).toHaveLength(2);
 });
 
-test('signing back in within the retention window restores a soft-deleted account', async () => {
-	const { userId } = await seedSoftDeletedUser(30); // 30 days: inside the window
-	// Deletion leaves channels inactive; restoration must NOT re-enable them —
-	// moderation never resumes silently.
-	await testDb().db.insert(channels).values({ id: 'UC1', userId, title: 'Mine', refreshTokenEnc: 'enc', active: 0 });
-	const { location } = await signIn();
-
-	expect(location).toBe('/dashboard');
-	const restored = await userRows();
-	expect(restored).toHaveLength(1);
-	expect(restored[0].deletedAt).toBeNull();
-	expect(await sessionRows()).toHaveLength(1);
-	expect((await testDb().db.select().from(channels).all())[0].active).toBe(0);
-});
-
-test('a soft-deleted user routed back through /consent keeps the deletion pending until consent completes', async () => {
-	const { deletedAt } = await seedSoftDeletedUser(30, 'v0.9'); // stale doc version → /consent
+test('a deleted account\'s freed Google sub starts a fresh signup through /consent', async () => {
+	// Deletion is immediate and permanent: the tombstone keeps
+	// googleSub 'deleted:<id>', so the real sub no longer resolves to anyone.
+	// Signing back in is a brand-new signup, never a restore.
+	await testDb()
+		.db.insert(users)
+		.values({ id: 'old', googleSub: 'deleted:old', email: '[deleted]', displayName: '[deleted]' });
 	const { location } = await signIn();
 
 	expect(location).toBe('/consent?state=s');
-	// Google authentication alone must NOT cancel the deletion: if the user
-	// abandons /consent, the account stays soft-deleted so the retention purge
-	// still fires, and no session exists.
-	expect((await userRows())[0].deletedAt).toBe(deletedAt);
+	// No session, no account created before the /consent checkbox.
 	expect(await sessionRows()).toHaveLength(0);
-});
-
-test('a sign-in past the retention window purges the account and starts a fresh signup', async () => {
-	const { userId } = await seedSoftDeletedUser(181); // past the cutoff
-	const { location } = await signIn();
-
-	// No restore past the cutoff: the account is purged inline and the flow
-	// continues as a brand-new signup through the consent interstitial.
-	expect(location).toBe('/consent?state=s');
-	const tombstone = (await userRows())[0];
-	expect(tombstone).toMatchObject({ id: userId, googleSub: `deleted:${userId}`, deletedAt: null });
-	// The evidentiary consent log survives the purge; no session was created.
-	expect(await testDb().db.select().from(consents).all()).toHaveLength(1);
-	expect(await sessionRows()).toHaveLength(0);
+	expect(await userRows()).toHaveLength(1); // just the untouched tombstone
 });

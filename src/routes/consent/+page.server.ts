@@ -112,9 +112,10 @@ export const actions: Actions = {
 				const user = await tx.select().from(users).where(eq(users.googleSub, pending.sub)).get();
 				if (!user) throw error(500, 'account creation failed — please retry');
 				const orgId = await ensurePersonalOrg(tx, user);
+				// Orphan claim (first user ever): channels land in their personal org.
 				await tx
 					.update(channels)
-					.set({ userId: user.id })
+					.set({ userId: user.id, orgId })
 					.where(and(isNull(channels.userId), sql`(select count(*) from ${users}) = 1`));
 				await tx.insert(consents).values(consentRecord(user.id, pending.email));
 				return { user, session: await createSession(user.id, tx, orgId) };

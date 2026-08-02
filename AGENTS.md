@@ -197,7 +197,12 @@ revokes each owned channel's YouTube grant at Google
 is logged loudly but never blocks deletion, since the encrypted token is
 erased either way), then `deleteUserRecords` (`src/lib/server/deletion.ts`)
 erases in one transaction: moderation actions, comments, audit rows, and
-rules for the user's channels; the channels themselves; every session. The
+rules for the user's PERSONAL-org channels; those channels themselves; the
+personal org, every membership, and invites the user created; every session.
+A channel the user merely CONNECTED (`channels.user_id`) in a surviving team
+org is NOT deleted — it and its moderation history belong to the team; the
+row is detached (`user_id` NULL, refresh token wiped with a non-ciphertext
+sentinel) so cron fails loudly until a teammate reconnects. The
 users row is anonymized to a tombstone (`google_sub = 'deleted:<id>'`,
 email/display name `'[deleted]'`) rather than deleted, keeping
 `consents.user_id` valid and freeing the real Google sub for a future

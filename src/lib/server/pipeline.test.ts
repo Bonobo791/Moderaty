@@ -638,6 +638,43 @@ test('keeps a dispatched action retriable when verification fails transiently', 
 	expectActionState('completed');
 });
 
+test('stops without new writes or YouTube calls when account deletion deactivates the channel mid-run', async () => {
+	mocks.scoreComment.mockImplementation(async () => {
+		// Account deletion commits active = 0 while the run is scoring comments.
+		mocks.state.channel = { ...mocks.state.channel, active: 0 };
+		return moderation(0.95);
+	});
+
+	const result = await runChannel('channel');
+
+	expect(mocks.state.insertedComments).toEqual([]);
+	expect(mocks.state.insertedAudits).toEqual([]);
+	expect(mocks.state.moderationActions).toEqual([]);
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expect(mocks.state.channelUpdates).toEqual([]);
+	expect(result).toMatchObject({ fetched: 1, partial: true, dryRun: false });
+});
+
+test('does not dispatch staged enforcement when the channel is deactivated after decisions are staged', async () => {
+	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'reject' }];
+	// Deletion commits during the staging transaction: the staged rows belong to
+	// the pre-delete run, but no YouTube enforcement may follow.
+	mocks.db.transaction.mockImplementationOnce(async (callback: (value: typeof mocks.db.transactionValue) => Promise<unknown>) => {
+		mocks.state.channel = { ...mocks.state.channel, active: 0 };
+		return callback(mocks.db.transactionValue);
+	});
+
+	const result = await runChannel('channel');
+
+	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'rejected' })]);
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expectActionState('pending');
+	expect(mocks.state.channelUpdates).toEqual([]);
+	expect(result).toMatchObject({ partial: true });
+});
+
 test('skips a pending action already claimed by a concurrent run', async () => {
 	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'reject' }];
 	mocks.state.unclaimedIds = ['comment'];

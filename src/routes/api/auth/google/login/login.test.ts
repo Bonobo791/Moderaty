@@ -269,6 +269,26 @@ test('signing back in within the retention window restores a soft-deleted accoun
 	expect((await testDb().db.select().from(channels).all())[0].active).toBe(0);
 });
 
+test('a soft-deleted user routed back through /consent keeps the deletion pending until consent completes', async () => {
+	const userId = await seedConsentedUser('sub-1', 'v0.9'); // stale doc version → /consent
+	const inWindow = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+	await testDb().db.update(users).set({ deletedAt: inWindow }).where(eq(users.id, userId));
+	stubTokenAndUserinfo({ sub: 'sub-1', email: 'one@example.com', name: 'One' });
+	const cookies = makeCookiesWithState('s');
+
+	await expect(loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never)).rejects.toMatchObject({
+		status: 302,
+		location: '/consent?state=s'
+	});
+
+	// Google authentication alone must NOT cancel the deletion: if the user
+	// abandons /consent, the account stays soft-deleted so the retention purge
+	// still fires, and no session exists.
+	const row = (await testDb().db.select().from(users).all())[0];
+	expect(row.deletedAt).toBe(inWindow);
+	expect(await testDb().db.select().from(sessions).all()).toHaveLength(0);
+});
+
 test('a sign-in past the retention window purges the account and starts a fresh signup', async () => {
 	const userId = await seedConsentedUser('sub-1');
 	const expired = new Date(Date.now() - 181 * 24 * 60 * 60 * 1000).toISOString();

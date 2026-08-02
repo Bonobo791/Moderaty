@@ -112,10 +112,21 @@ export const actions: Actions = {
 			userId = created.user.id;
 			session = created.session;
 		} else {
-			const user = await db.select({ id: users.id }).from(users).where(eq(users.id, pending.userId)).get();
+			const user = await db
+				.select({ id: users.id, deletedAt: users.deletedAt })
+				.from(users)
+				.where(eq(users.id, pending.userId))
+				.get();
 			if (!user) return fail(400, { error: 'Your sign-in session expired — please sign in again.' });
 			session = await db.transaction(async (tx) => {
 				await tx.insert(consents).values(consentRecord(user.id));
+				// The login callback leaves a soft-deleted account pending while
+				// it is parked here; completing re-acceptance is what cancels
+				// the deletion — atomically with the consent record and session.
+				if (user.deletedAt) {
+					await tx.update(users).set({ deletedAt: null }).where(eq(users.id, user.id));
+					console.info(`account ${user.id} restored by re-consent; pending deletion cancelled`);
+				}
 				return createSession(user.id, tx);
 			});
 			userId = user.id;

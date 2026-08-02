@@ -196,8 +196,10 @@ test('a mid-purge failure rolls back every delete, leaving the account intact (a
 		 BEGIN SELECT RAISE(ABORT, 'simulated purge failure'); END`
 	);
 	try {
-		// drizzle wraps the libsql trigger error; the purge must fail loudly.
-		await expect(call({ bearer: 'test-secret' })).rejects.toThrowError(/Failed query/);
+		// The purge failure is isolated: the cron run survives, reports the
+		// failure, and drizzle's wrapped trigger error reaches the response.
+		const res = await call({ bearer: 'test-secret' });
+		expect((await res.json()).purgeError).toEqual(expect.stringContaining('Failed query'));
 	} finally {
 		await testDb().client.execute('DROP TRIGGER fail_session_delete');
 	}
@@ -225,6 +227,32 @@ test('purges an expired user with no channels without error', async () => {
 	expect(await res.json()).toMatchObject({ ok: true, purged: id });
 	expect(await ownedRowCounts(id)).toEqual({ sessions: 0, channels: 0, rules: 0, comments: 0, actions: 0, audit: 0, consents: 1 });
 	expect((await testDb().db.select().from(users).all())[0]).toMatchObject({ googleSub: `deleted:${id}`, deletedAt: null });
+});
+
+test('a purge failure is reported in the response and does not stop the channel run', async () => {
+	mocks.env.DRY_RUN = 'false';
+	await seedUserWithData('old', new Date(Date.now() - 181 * DAY_MS).toISOString());
+	await testDb().db.insert(channels).values({ id: 'UC-live', title: 'Live', refreshTokenEnc: 'enc' });
+	mocks.runChannel.mockResolvedValue({ fetched: 0, acted: 0, queued: 0, partial: false, skipped: false, dryRun: false });
+	await testDb().client.execute(
+		`CREATE TRIGGER fail_session_delete BEFORE DELETE ON sessions
+		 BEGIN SELECT RAISE(ABORT, 'simulated purge failure'); END`
+	);
+	try {
+		const res = await call({ bearer: 'test-secret' });
+
+		expect(res.status).toBe(200);
+		const body = await res.json();
+		expect(body.purgeError).toEqual(expect.stringContaining('Failed query'));
+		expect(body.purged).toBeNull();
+		expect(mocks.runChannel).toHaveBeenCalledWith('UC-live', expect.objectContaining({ deadline: expect.any(Number) }));
+	} finally {
+		await testDb().client.execute('DROP TRIGGER fail_session_delete');
+	}
+
+	// The failed purge rolled back, so the next invocation retries it.
+	expect((await testDb().db.select().from(users).all()).find((u) => u.id === 'old')!.googleSub).toBe('sub-old');
+	expect(await ownedRowCounts('old')).toEqual({ sessions: 1, channels: 1, rules: 1, comments: 1, actions: 1, audit: 1, consents: 1 });
 });
 
 test('a dry run skips the purge entirely (I8)', async () => {

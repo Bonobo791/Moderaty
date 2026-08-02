@@ -249,6 +249,23 @@ test('an existing-user pending payload naming an unknown account fails with 400'
 	expect(await testDb().db.select().from(consents).all()).toHaveLength(0);
 });
 
+test('a soft-deleted existing user is restored only when the consent flow completes', async () => {
+	const inWindow = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+	await testDb()
+		.db.insert(users)
+		.values({ id: 'user-1', googleSub: 'sub-1', email: 'one@example.com', displayName: 'One', deletedAt: inWindow });
+	const cookies = cookiesWithPending({ kind: 'existing', userId: 'user-1' });
+
+	const thrown = await captureAction(cookies, { consent: 'on' });
+
+	// The callback left deletedAt set while the user was parked at /consent;
+	// completing re-acceptance is what cancels the pending deletion.
+	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
+	expect((await testDb().db.select().from(users).all())[0].deletedAt).toBeNull();
+	expect(await testDb().db.select().from(consents).all()).toHaveLength(1);
+	expect(await testDb().db.select().from(sessions).all()).toHaveLength(1);
+});
+
 test('a pending identity parked under a different state is invisible to this flow', async () => {
 	const res = await captureAction(cookiesWithPending(NEW_SUB, 'state-a'), { consent: 'on' }, 'state-b');
 	expect(res).toMatchObject({ status: 400 });

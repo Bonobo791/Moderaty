@@ -100,14 +100,11 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 		storePendingStates(cookies, pending.filter((s) => s !== state));
 		throw redirect(302, `/consent?state=${encodeURIComponent(state)}`);
 	}
-	// Signing back in WITHIN the 6-month retention window cancels a pending
-	// deletion. Channels stay inactive (active=0 from the deletion) until the
-	// user re-enables them — moderation never resumes silently. (Accounts past
-	// the window never reach here — they are purged inline above.)
-	if (user.deletedAt) {
-		await db.update(users).set({ deletedAt: null }).where(eq(users.id, user.id));
-		console.info(`account ${user.id} restored by sign-in; pending deletion cancelled`);
-	}
+	// A pending deletion is NOT cancelled here: if the account's consent is
+	// stale or missing it is parked for /consent with deletedAt still set, so
+	// abandoning the interstitial leaves the retention purge intact. The
+	// restore happens only once the sign-in actually completes (below, or at
+	// consent acceptance).
 	const consent = await db
 		.select({ id: consents.id })
 		.from(consents)
@@ -117,6 +114,16 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 		parkPendingConsent(cookies, state, { kind: 'existing', userId: user.id });
 		storePendingStates(cookies, pending.filter((s) => s !== state));
 		throw redirect(302, `/consent?state=${encodeURIComponent(state)}`);
+	}
+
+	// Signing back in WITHIN the 6-month retention window cancels a pending
+	// deletion — only now that the sign-in completes. Channels stay inactive
+	// (active=0 from the deletion) until the user re-enables them — moderation
+	// never resumes silently. (Accounts past the window never reach here —
+	// they are purged inline above.)
+	if (user.deletedAt) {
+		await db.update(users).set({ deletedAt: null }).where(eq(users.id, user.id));
+		console.info(`account ${user.id} restored by sign-in; pending deletion cancelled`);
 	}
 
 	const { token, expiresAt } = await createSession(user.id);

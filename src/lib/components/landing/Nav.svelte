@@ -20,7 +20,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <script lang="ts">
 	import Icon from './Icon.svelte';
-	import { GITHUB_URL, LOGIN_URL } from '$lib/landing/links';
+	import { FEEDBACK_URL, GITHUB_URL, LOGIN_URL } from '$lib/landing/links';
 
 	const LINKS = [
 		{ label: 'How it works', href: '/#how-it-works' },
@@ -41,6 +41,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				<a href={l.href} class="link">{l.label}</a>
 			{/each}
 			<a href={GITHUB_URL} target="_blank" rel="noreferrer" class="link">GitHub</a>
+			<a href={FEEDBACK_URL} target="_blank" rel="noreferrer" class="link">Feedback</a>
 		</nav>
 		<div class="nav-actions">
 			<a href={LOGIN_URL} class="btn-press cta">Connect YouTube channel</a>
@@ -60,6 +61,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				<a href={l.href} class="mobile-link" onclick={() => (open = false)}>{l.label}</a>
 			{/each}
 			<a href={GITHUB_URL} target="_blank" rel="noreferrer" class="mobile-link">GitHub</a>
+			<a href={FEEDBACK_URL} target="_blank" rel="noreferrer" class="mobile-link">Feedback</a>
 			<a href={LOGIN_URL} class="btn-press cta mobile-cta">Connect YouTube channel</a>
 		</nav>
 	{/if}

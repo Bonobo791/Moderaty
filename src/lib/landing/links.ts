@@ -17,6 +17,8 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 export const GITHUB_URL = 'https://github.com/Bonobo791/Moderaty';
+/** Feature feedback and roadmap voting (Featurebase). */
+export const FEEDBACK_URL = 'https://moderaty.featurebase.app/';
 export const AGPL_URL = 'https://www.gnu.org/licenses/agpl-3.0.html';
 export const CONTACT_URL = 'mailto:contact@marketingprowess.simplelogin.com';
 /** Source for the BYOK pricing claim: OpenAI's moderation endpoint is free to use. */

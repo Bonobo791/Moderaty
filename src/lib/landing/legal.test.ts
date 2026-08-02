@@ -237,8 +237,8 @@ describe('refund policy consistency (PR #38 review)', () => {
 			/refund unconsumed Credits/i
 		];
 		for (const [name, text] of Object.entries(surfaces)) {
-			for (const pattern of CONDITIONING) {
-				expect(text, `${name} conditions the 7-day refund: ${pattern}`).not.toMatch(pattern);
+			for (const pattern of RETIRED_PROMISES) {
+				expect(text, `${name} still carries a retired promise: ${pattern}`).not.toMatch(pattern);
 			}
 		}
 		for (const name of ['hosted plan panel', 'consent refund notice', 'pricing FAQ']) {

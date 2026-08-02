@@ -73,12 +73,25 @@ export async function createSession(
 export async function getSessionUser(token: string | undefined): Promise<SessionResolution | null> {
 	if (!token) return null;
 	const row = await db
-		.select({ session: sessions, user: { id: users.id, email: users.email, displayName: users.displayName, plan: users.plan } })
+		.select({
+			session: sessions,
+			user: { id: users.id, email: users.email, displayName: users.displayName, plan: users.plan },
+			userDeletedAt: users.deletedAt
+		})
 		.from(sessions)
 		.innerJoin(users, eq(sessions.userId, users.id))
 		.where(eq(sessions.id, token))
 		.get();
 	if (!row) return null;
+	// A session that outlives account deletion (e.g. a login callback read the
+	// user just before the deletion transaction committed, then created this
+	// session after every session was deleted) must never resolve: destroy it
+	// so a soft-deleted account has no working credentials.
+	if (row.userDeletedAt) {
+		console.info(`session for soft-deleted account ${row.user.id} destroyed on resolution`);
+		await db.delete(sessions).where(eq(sessions.id, token));
+		return null;
+	}
 	const expiresMs = Date.parse(row.session.expiresAt);
 	if (Number.isNaN(expiresMs) || expiresMs <= Date.now()) {
 		await db.delete(sessions).where(eq(sessions.id, token));

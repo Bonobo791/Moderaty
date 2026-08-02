@@ -25,8 +25,15 @@ import { consents, users } from '$lib/server/db/schema';
 import { exchangeGoogleCode } from '$lib/server/google';
 import { LEGAL_VERSION, parkPendingConsent } from '$lib/server/legal';
 import { cookieSecure, readPendingStates, storePendingStates } from '$lib/server/oauthState';
+import { isRetentionExpired, purgeUserById } from '$lib/server/retention';
 import { createSession, SESSION_COOKIE } from '$lib/server/session';
 
+/**
+ * Handles the Google OAuth login callback, completing authentication or redirecting the user to consent.
+ *
+ * @param url - The callback URL containing the OAuth state and authorization code
+ * @param cookies - The request cookies used to validate OAuth state and manage authentication data
+ */
 export async function GET({ url, cookies }: { url: URL; cookies: import('@sveltejs/kit').Cookies }) {
 	const state = url.searchParams.get('state');
 	const pending = readPendingStates(cookies);
@@ -79,12 +86,25 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 	// before acceptance. An existing account skips the interstitial only when
 	// its latest consent covers the current LEGAL_VERSION; a stale or missing
 	// consent sends it back through /consent (re-acceptance on doc updates).
-	const user = await db.select().from(users).where(eq(users.googleSub, sub)).get();
+	let user = await db.select().from(users).where(eq(users.googleSub, sub)).get();
+	// Past the retention window the account is already due for purge — remove
+	// it now (freeing the Google sub) and let the flow continue as a fresh
+	// signup. Restoring it here would defeat the documented 6-month purge.
+	if (user?.deletedAt && isRetentionExpired(user.deletedAt)) {
+		console.info(`account ${user.id} past the retention window; purging at sign-in`);
+		await purgeUserById(user.id);
+		user = undefined;
+	}
 	if (!user) {
 		parkPendingConsent(cookies, state, { kind: 'new', sub, email, displayName });
 		storePendingStates(cookies, pending.filter((s) => s !== state));
 		throw redirect(302, `/consent?state=${encodeURIComponent(state)}`);
 	}
+	// A pending deletion is NOT cancelled here: if the account's consent is
+	// stale or missing it is parked for /consent with deletedAt still set, so
+	// abandoning the interstitial leaves the retention purge intact. The
+	// restore happens only once the sign-in actually completes (below, or at
+	// consent acceptance).
 	const consent = await db
 		.select({ id: consents.id })
 		.from(consents)
@@ -94,6 +114,16 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 		parkPendingConsent(cookies, state, { kind: 'existing', userId: user.id });
 		storePendingStates(cookies, pending.filter((s) => s !== state));
 		throw redirect(302, `/consent?state=${encodeURIComponent(state)}`);
+	}
+
+	// Signing back in WITHIN the 6-month retention window cancels a pending
+	// deletion — only now that the sign-in completes. Channels stay inactive
+	// (active=0 from the deletion) until the user re-enables them — moderation
+	// never resumes silently. (Accounts past the window never reach here —
+	// they are purged inline above.)
+	if (user.deletedAt) {
+		await db.update(users).set({ deletedAt: null }).where(eq(users.id, user.id));
+		console.info(`account ${user.id} restored by sign-in; pending deletion cancelled`);
 	}
 
 	const { token, expiresAt } = await createSession(user.id);

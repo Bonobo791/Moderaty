@@ -1944,6 +1944,33 @@ account exists — never pre-OAuth friction, never browsewrap:
   API scopes only at the separate "Connect YouTube channel" step — no
   comment data can flow before the contract exists.
 
+### 5b-3. Account deletion with 6-month retention (branch `feat-account-deletion`)
+
+- **Soft delete, self-service.** The dashboard `deleteAccount` action
+  (required confirmation checkbox, `requireUser`) commits one transaction:
+  set `users.deleted_at`, destroy every session (immediate global sign-out),
+  deactivate the user's channels (`active=0` — moderation stops at once).
+- **Retention window = 6 months, sign-in restores.** A soft-deleted user who
+  authenticates again has `deleted_at` cleared in the login callback;
+  channels stay inactive until manually re-enabled, so moderation never
+  resumes silently. A sign-in AFTER the window instead purges the account
+  inline (`purgeUserById` in `src/lib/server/retention.ts`, shared with cron
+  so both enforce the same cutoff) and continues as a fresh signup.
+- **Bounded purge in cron (I10).** One expired user per invocation, skipped
+  under `DRY_RUN` (I8): sessions, channels, and their rules, comments,
+  moderation actions, and audit rows are deleted explicitly (no FK cascades
+  exist on channel-scoped tables).
+- **The consent log survives (LGPD Art. 16).** The users row is anonymized to
+  a tombstone (`google_sub = 'deleted:<id>'`, email/display name
+  `'[deleted]'`) rather than deleted, keeping `consents.user_id` valid and
+  preserving the evidentiary chain (doc version, exact checkbox text, IP,
+  user agent). The tombstone also frees the real Google sub for a future
+  fresh signup.
+- Migration 0009 adds nullable `users.deleted_at` (I7; renumbered from 0008
+  after main's comment-PII migration took that number). Verify the column
+  exists after `db:migrate` — drizzle-kit can exit 0 without applying when
+  the database is unreachable (the 0007 incident).
+
 ### 5b-4. Comment storage: text yes, author PII never (branch `feat-comment-pii`)
 
 - **The `comments` table stores comment text (≤500 chars) with the

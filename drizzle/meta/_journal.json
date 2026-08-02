@@ -64,6 +64,20 @@
       "when": 1785627758830,
       "tag": "0008_relax_comment_author_pii",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1785622824165,
+      "tag": "0009_aromatic_red_wolf",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1785627509871,
+      "tag": "0010_users_deleted_at_idx",
+      "breakpoints": true
     }
   ]
 }

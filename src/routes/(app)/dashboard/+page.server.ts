@@ -17,11 +17,16 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { db } from '$lib/server/db';
-import { channels, comments, moderationActions } from '$lib/server/db/schema';
-import { requireUser } from '$lib/server/session';
+import { channels, comments, moderationActions, sessions, users } from '$lib/server/db/schema';
+import { requireUser, SESSION_COOKIE } from '$lib/server/session';
 import { and, eq, inArray, sql } from 'drizzle-orm';
-import { fail } from '@sveltejs/kit';
+import { fail, redirect } from '@sveltejs/kit';
 
+/**
+ * Loads the authenticated user's channels and moderation statistics for the dashboard.
+ *
+ * @returns The user's channels, comment counts grouped by channel and status, and completed ban counts grouped by channel.
+ */
 export async function load({ locals }) {
 	const user = requireUser(locals);
 	// Project only the fields the page renders; never serialize refreshTokenEnc
@@ -75,5 +80,23 @@ export const actions = {
 			.returning({ id: channels.id });
 		if (updated.length === 0) return fail(404, { error: 'channel not found' });
 		return { ok: true };
+	},
+	deleteAccount: async ({ request, locals, cookies }) => {
+		const user = requireUser(locals);
+		const f = await request.formData();
+		if (f.get('confirm') !== 'on') {
+			return fail(400, { error: 'You must confirm account deletion to continue.' });
+		}
+		// Soft delete: records are retained for 6 months (signing back in within
+		// that window restores the account), then the cron purge removes them —
+		// except the evidentiary consent log, which is kept. Every session is
+		// destroyed now, and the user's channels stop moderating immediately.
+		await db.transaction(async (tx) => {
+			await tx.update(users).set({ deletedAt: new Date().toISOString() }).where(eq(users.id, user.id));
+			await tx.delete(sessions).where(eq(sessions.userId, user.id));
+			await tx.update(channels).set({ active: 0 }).where(eq(channels.userId, user.id));
+		});
+		cookies.delete(SESSION_COOKIE, { path: '/' });
+		throw redirect(302, '/');
 	}
 };

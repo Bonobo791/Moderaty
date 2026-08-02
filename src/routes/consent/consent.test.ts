@@ -229,24 +229,45 @@ test('only the first-ever user claims orphaned channels', async () => {
 	expect((await testDb().db.select().from(channels).all()).find((c) => c.id === 'UC2')!.userId).toBeNull();
 });
 
-test('an existing user re-accepting adds a consent row without duplicating the account', async () => {
-	await testDb().db.insert(users).values({ id: 'user-1', googleSub: 'sub-1', email: 'one@example.com', displayName: 'One' });
-	const cookies = cookiesWithPending({ kind: 'existing', userId: 'user-1' });
-
-	const thrown = await captureAction(cookies, { consent: 'on' });
-
+/** Seeds existing sub-1 (optionally soft-deleted) and completes its re-consent. */
+async function seedExistingAndConsent(deletedAt?: string) {
+	await testDb()
+		.db.insert(users)
+		.values({ id: 'user-1', googleSub: 'sub-1', email: 'one@example.com', displayName: 'One', deletedAt: deletedAt ?? null });
+	const thrown = await captureAction(cookiesWithPending({ kind: 'existing', userId: 'user-1' }), { consent: 'on' });
 	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
+}
+
+/** End state of one completed consent: one user, one consent row, one session. */
+async function expectOneConsentedAccount() {
 	expect(await testDb().db.select().from(users).all()).toHaveLength(1);
+	expect(await testDb().db.select().from(consents).all()).toHaveLength(1);
+	expect(await testDb().db.select().from(sessions).all()).toHaveLength(1);
+}
+
+test('an existing user re-accepting adds a consent row without duplicating the account', async () => {
+	await seedExistingAndConsent();
+
 	const rows = await testDb().db.select().from(consents).all();
 	expect(rows).toHaveLength(1);
 	expect(rows[0]).toMatchObject({ userId: 'user-1', docVersion: LEGAL_VERSION });
-	expect(await testDb().db.select().from(sessions).all()).toHaveLength(1);
+	await expectOneConsentedAccount();
 });
 
 test('an existing-user pending payload naming an unknown account fails with 400', async () => {
 	const res = await captureAction(cookiesWithPending({ kind: 'existing', userId: 'ghost' }), { consent: 'on' });
 	expect(res).toMatchObject({ status: 400 });
 	expect(await testDb().db.select().from(consents).all()).toHaveLength(0);
+});
+
+test('a soft-deleted existing user is restored only when the consent flow completes', async () => {
+	const inWindow = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+	await seedExistingAndConsent(inWindow);
+
+	// The callback left deletedAt set while the user was parked at /consent;
+	// completing re-acceptance is what cancels the pending deletion.
+	expect((await testDb().db.select().from(users).all())[0].deletedAt).toBeNull();
+	await expectOneConsentedAccount();
 });
 
 test('a pending identity parked under a different state is invisible to this flow', async () => {
@@ -268,9 +289,7 @@ test('a session-creation failure rolls back the account and consent, leaving the
 	// The pending cookie was never consumed, so the same submission retries clean.
 	const retried = await captureAction(cookies, { consent: 'on' });
 	expect(retried).toMatchObject({ status: 302, location: '/dashboard' });
-	expect(await testDb().db.select().from(users).all()).toHaveLength(1);
-	expect(await testDb().db.select().from(consents).all()).toHaveLength(1);
-	expect(await testDb().db.select().from(sessions).all()).toHaveLength(1);
+	await expectOneConsentedAccount();
 });
 
 test('concurrent flows are isolated by state — each tab consents its own identity', async () => {

@@ -16,6 +16,7 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
+import { eq } from 'drizzle-orm';
 import { expect, test } from 'vitest';
 
 import { setupTestDb, testDb } from './testdb';
@@ -76,6 +77,21 @@ test('destroys a session so it no longer resolves', async () => {
 	await destroySession(token);
 
 	expect(await getSessionUser(token)).toBeNull();
+});
+
+test('a session whose user was soft-deleted after creation resolves null and its row is destroyed', async () => {
+	// Regression: a login callback can read the user before the deleteAccount
+	// transaction commits and create a session after it deleted every session.
+	// That orphaned session must never grant access to the deleted account.
+	const userId = await seedUser();
+	const { token } = await createSession(userId);
+	await testDb()
+		.db.update(users)
+		.set({ deletedAt: new Date().toISOString() })
+		.where(eq(users.id, userId));
+
+	expect(await getSessionUser(token)).toBeNull();
+	expect(await testDb().db.select().from(sessions).all()).toEqual([]);
 });
 
 test('creating a session purges already-expired rows', async () => {

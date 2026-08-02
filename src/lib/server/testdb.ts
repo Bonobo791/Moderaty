@@ -65,6 +65,11 @@ export function postForm(fields: Record<string, string>, url = 'http://localhost
 	return new Request(url, { method: 'POST', body: form });
 }
 
+/**
+ * Creates an in-memory test database with the application schema and foreign-key enforcement enabled.
+ *
+ * @returns The initialized database and its underlying libSQL client
+ */
 export async function createTestDb(): Promise<TestDb> {
 	const client = createClient({ url: 'file::memory:?cache=shared' });
 	// Match production Turso behavior so FK violations fail in tests too.
@@ -76,6 +81,7 @@ export async function createTestDb(): Promise<TestDb> {
 			email TEXT NOT NULL,
 			display_name TEXT NOT NULL,
 			plan TEXT NOT NULL DEFAULT 'free',
+			deleted_at TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE TABLE sessions (

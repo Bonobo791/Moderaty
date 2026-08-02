@@ -91,6 +91,24 @@ function emptyResult(): ChannelRunResult {
 	return { fetched: 0, acted: 0, queued: 0, partial: false, skipped: true, dryRun: false };
 }
 
+/** Thrown when account deletion deactivates (or removes) the channel mid-run. */
+class ChannelDeactivatedError extends Error {}
+
+/**
+ * Re-checks that the channel is still active before durable writes and YouTube
+ * enforcement. Account deletion commits `active = 0` without waiting for an
+ * in-flight run, so the run must stop at the next boundary instead of writing
+ * rows or moderating comments for a deleted account.
+ */
+async function assertChannelActive(channelId: string): Promise<void> {
+	const row = await db
+		.select({ active: channels.active })
+		.from(channels)
+		.where(eq(channels.id, channelId))
+		.get();
+	if (!row?.active) throw new ChannelDeactivatedError(`channel deactivated mid-run: ${channelId}`);
+}
+
 /**
  * Creates the moderation outcome for a comment that matched a configured rule.
  *
@@ -515,6 +533,9 @@ export async function runChannel(
 		});
 		queued = decisions.filter((decision) => decision.auditAction === 'queue').length;
 
+		// Deletion may have committed during the YouTube/AI calls above: re-check
+		// before any durable write (I3) so a deleted account gets no new rows.
+		await assertChannelActive(channelId);
 		if (dryRun) {
 			acted = decisions.filter((decision) => decision.youtubeAction).length;
 			const audits = auditRows(channelId, decisions, true);
@@ -531,11 +552,17 @@ export async function runChannel(
 			return { fetched, acted, queued, partial: false, skipped: false, dryRun };
 		}
 
+		// ... and again before any YouTube enforcement call.
+		await assertChannelActive(channelId);
 		acted = await processOutstandingActions(channelId, accessToken, deadline);
 		await persistResults(channelId, channel, page);
 		return { fetched, acted, queued, partial: false, skipped: false, dryRun };
 	} catch (error) {
 		if (error instanceof DeadlineExceededError) {
+			return { fetched, acted, queued, partial: true, skipped: false, dryRun };
+		}
+		if (error instanceof ChannelDeactivatedError) {
+			console.info(`stopping run for ${channelId}: ${error.message}`);
 			return { fetched, acted, queued, partial: true, skipped: false, dryRun };
 		}
 		throw error;

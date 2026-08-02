@@ -111,15 +111,21 @@ export async function getSessionUser(token: string | undefined): Promise<Session
 		console.error(`user ${row.user.id} has no organization membership`);
 		throw new Error('account has no organization — contact support');
 	}
+	// Org repair and sliding-expiry renewal are one UPDATE when both apply.
+	const updates: { activeOrgId?: string; expiresAt?: string } = {};
 	if (resolved.fellBack && row.session.activeOrgId !== null) {
 		console.info(`session for user ${row.user.id}: active org ${row.session.activeOrgId} no longer valid, falling back to ${resolved.org.orgId}`);
-		await db.update(sessions).set({ activeOrgId: resolved.org.orgId }).where(eq(sessions.id, token));
+		updates.activeOrgId = resolved.org.orgId;
 	}
 	const user = { ...row.user, plan: resolved.org.plan, orgId: resolved.org.orgId, orgName: resolved.org.orgName, orgRole: resolved.org.orgRole };
 	if (expiresMs - Date.now() < RENEW_BELOW_MS) {
 		const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
-		await db.update(sessions).set({ expiresAt }).where(eq(sessions.id, token));
+		updates.expiresAt = expiresAt;
+		await db.update(sessions).set(updates).where(eq(sessions.id, token));
 		return { user, expiresAt, renewed: true };
+	}
+	if (updates.activeOrgId) {
+		await db.update(sessions).set(updates).where(eq(sessions.id, token));
 	}
 	return { user, expiresAt: row.session.expiresAt, renewed: false };
 }

@@ -61,7 +61,7 @@ export const MARKETING_CHECKBOX_TEXT =
  * verbatim per consent row and never changes without a doc-version bump.
  */
 export const REFUND_NOTICE_TEXT =
-	'Every purchase is covered by Brazilian consumer law: you have 7 days from purchase to request a full refund, no questions asked (CDC Art. 49). After that, all sales are final and unused credits are not refunded.';
+	'Every purchase is covered by Brazilian consumer law: you have 7 days from purchase to request a full refund of everything you paid, no deductions, no questions asked (CDC Art. 49). After that, all sales are final and unused credits are not refunded.';
 
 export const PENDING_CONSENT_COOKIE = 'moderaty_consent_pending';
 const PENDING_TTL_MS = 10 * 60 * 1000;

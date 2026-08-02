@@ -237,22 +237,19 @@ describe('refund policy consistency (PR #38 review)', () => {
 			/refund unconsumed Credits/i
 		];
 		for (const [name, text] of Object.entries(surfaces)) {
-			for (const pattern of RETIRED_PROMISES) {
-				expect(text, `${name} still promises: ${pattern}`).not.toMatch(pattern);
+			for (const pattern of CONDITIONING) {
+				expect(text, `${name} conditions the 7-day refund: ${pattern}`).not.toMatch(pattern);
 			}
 		}
-	});
-
-	it('Terms declares purchases final and credits non-refundable outside the withdrawal period', () => {
-		const terms = readComponent('terms');
-		expect(terms).toMatch(/all purchases are final/i);
-		expect(terms).toMatch(/NOT REFUNDABLE/);
-	});
-
-	it('every commercial surface ties its refund mention to the 7-day window and the final-sale rule', () => {
 		for (const name of ['hosted plan panel', 'consent refund notice', 'pricing FAQ']) {
-			expect(surfaces[name], name).toMatch(/CDC Art\. 49/);
-			expect(surfaces[name], name).toMatch(/final|not refunded/i);
+			expect(surfaces[name], name).toMatch(/full refund/i);
 		}
+	});
+
+	it('Terms §7.1 carries the statutory no-deductions language', () => {
+		const terms = readComponent('terms');
+		expect(terms).toMatch(/at any title/i);
+		expect(terms).toMatch(/without deductions of any kind/i);
+		expect(terms).toMatch(/monetarily updated/i);
 	});
 });

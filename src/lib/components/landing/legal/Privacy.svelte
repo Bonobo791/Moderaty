@@ -100,7 +100,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <h2 id="s5">5. Sharing and Recipients</h2>
 <p>We share personal data only with:</p>
 <ul>
-	<li>(a) Infrastructure and service providers acting as our sub-processors or processors under contract — hosting provider Netlify, Inc. (United States), database provider Turso (ChiselStrike, Inc.), classification provider OpenAI, LLC (transient comment classification only, no retention, no model training), payment processor Stripe, Inc. — limited to what each needs to perform its function;</li>
+	<li>(a) Infrastructure and service providers acting as our sub-processors or processors under contract, each limited to what it needs to perform its function: Netlify, Inc. (application hosting and delivery — United States); Turso / ChiselStrike, Inc. (database hosting — United States, with edge replicas only in regions we disclose and record); OpenAI, LLC (transient comment classification only, no retention, no model training — United States); Stripe, Inc. (payment processing — United States); and [e-mail delivery provider] (transactional e-mail);</li>
 	<li>(b) Google/YouTube, as the platform through which the Service operates and as an independent controller of its own processing;</li>
 	<li>(c) Public authorities, courts, or regulators, only when required by law, court order, or to protect our rights, users, or third parties, and always limited to what is legally required; and</li>
 	<li>(d) A successor entity in the event of a merger, acquisition, or sale of the Service, subject to this Policy and with prior notice to you.</li>
@@ -110,6 +110,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <h2 id="s6">6. International Data Transfers</h2>
 <p><strong>6.1</strong> Some recipients above are located outside Brazil (including the United States). Transfers of personal data abroad occur only under a valid mechanism of Article 33 of the LGPD.</p>
 <p><strong>6.2</strong> Where the mechanism is standard contractual clauses, we use the clauses approved by ANPD Resolution CD/ANPD no 19/2024 — clauses from other jurisdictions (such as EU SCCs) are not used as a substitute. Where a transfer relies on another Article 33 mechanism (for example, an ANPD adequacy decision), that mechanism is recorded in our transfer records, available upon request.</p>
+<p><strong>6.3</strong> As of the effective date of this Policy, international transfer recipients are: Google LLC (YouTube API Services), Netlify, Inc., OpenAI, LLC, Turso / ChiselStrike, Inc., and Stripe, Inc. (all United States). Database edge replicas, if enabled, operate only in regions recorded in Annex III of the DPA.</p>
 
 <h2 id="s7">7. Retention and Deletion</h2>
 <p><strong>7.1</strong> We keep personal data only for the periods stated in Section 2, after which it is deleted or irreversibly anonymized. Comment author identifiers are never persistently stored (Section 3.2); pseudonymized identifiers (such as hashed usernames) remain personal data and are likewise not retained. Comment text is retained only as part of moderation outcome records, for the periods stated in Section 2.</p>

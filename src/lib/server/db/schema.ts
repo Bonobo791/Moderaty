@@ -16,7 +16,7 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { sqliteTable, text, integer, index } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, index, primaryKey } from 'drizzle-orm/sqlite-core';
 import { sql } from 'drizzle-orm';
 
 export const users = sqliteTable('users', {
@@ -24,7 +24,7 @@ export const users = sqliteTable('users', {
 	googleSub: text('google_sub').notNull().unique(), // Google's stable `sub` claim
 	email: text('email').notNull(),
 	displayName: text('display_name').notNull(),
-	plan: text('plan').notNull().default('free'), // future Stripe gating hook (hosted plans)
+	plan: text('plan').notNull().default('free'), // LEGACY — billing hooks live on organizations.plan; read nowhere
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 });
 
@@ -33,15 +33,63 @@ export const sessions = sqliteTable('sessions', {
 	userId: text('user_id')
 		.notNull()
 		.references(() => users.id, { onDelete: 'cascade' }),
+	activeOrgId: text('active_org_id'), // tenant the session is acting in; null = resolve to oldest membership
 	expiresAt: text('expires_at').notNull(), // ISO timestamp; sliding 30-day expiry
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
 	index('sessions_user_id_idx').on(table.userId)
 ]);
 
+// Tenant. Every user owns a personal org (personal_for set, UNIQUE), created
+// in the signup transaction; shared orgs (personal_for NULL) are created from
+// the Team settings page. `plan` is the Stripe gating hook — billing is
+// per-ORGANIZATION (users.plan is legacy and read nowhere).
+export const organizations = sqliteTable('organizations', {
+	id: text('id').primaryKey(), // random hex
+	name: text('name').notNull(),
+	plan: text('plan').notNull().default('free'), // future Stripe gating hook (hosted plans)
+	personalFor: text('personal_for').unique(), // users.id of the user this is the personal org for; null = shared org
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+});
+
+export const memberships = sqliteTable('memberships', {
+	userId: text('user_id')
+		.notNull()
+		.references(() => users.id, { onDelete: 'cascade' }),
+	orgId: text('org_id')
+		.notNull()
+		.references(() => organizations.id, { onDelete: 'cascade' }),
+	role: text('role').notNull(), // 'owner' | 'admin' | 'member'
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+}, (table) => [
+	primaryKey({ columns: [table.userId, table.orgId] }),
+	index('memberships_org_id_idx').on(table.orgId)
+]);
+
+// Single-use invite link: /invite/<token>. Role is fixed at creation and is
+// never 'owner' — ownership changes hands only via role change or deletion
+// succession. acceptedBy null = still open; expired or accepted links are
+// dead. "Anyone signed in with the link joins" is the intended semantic.
+export const invites = sqliteTable('invites', {
+	token: text('token').primaryKey(), // random 32-byte hex; also the URL path segment
+	orgId: text('org_id')
+		.notNull()
+		.references(() => organizations.id, { onDelete: 'cascade' }),
+	role: text('role').notNull(), // 'admin' | 'member'
+	createdBy: text('created_by')
+		.notNull()
+		.references(() => users.id),
+	expiresAt: text('expires_at').notNull(), // ISO timestamp; 7 days from creation
+	acceptedBy: text('accepted_by'), // users.id of the accepter; null = open
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+}, (table) => [
+	index('invites_org_id_idx').on(table.orgId)
+]);
+
 export const channels = sqliteTable('channels', {
 	id: text('id').primaryKey(), // YouTube channel ID (UC...)
-	userId: text('user_id'), // owning user; null = pre-accounts orphan, claimed on first login
+	userId: text('user_id'), // connected-by user (whose Google grant this channel uses); null = pre-accounts orphan, claimed on first login
+	orgId: text('org_id'), // owning TENANT; null only during the expand window / for unclaimed orphans — NOT NULL after the contract migration
 	title: text('title').notNull(),
 	refreshTokenEnc: text('refresh_token_enc').notNull(),
 	cursor: text('cursor'), // ISO timestamp of newest comment seen; null = never polled
@@ -53,7 +101,8 @@ export const channels = sqliteTable('channels', {
 	toneLevel: integer('tone_level'), // moderation sensitivity: null or 1 = omni only, 2 = omni + tone pass
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
-	index('channels_user_id_idx').on(table.userId)
+	index('channels_user_id_idx').on(table.userId),
+	index('channels_org_id_idx').on(table.orgId)
 ]);
 
 export const rules = sqliteTable('rules', {

@@ -32,7 +32,9 @@ const ROLE_RANK = { member: 0, admin: 1, owner: 2 } as const;
  * ownedChannel already enforces).
  */
 export function requireOrgRole(user: SessionUser, minimum: 'admin' | 'owner'): void {
-	if (ROLE_RANK[user.orgRole] < ROLE_RANK[minimum]) {
+	// `?? -1`: an unknown role ranks below every minimum — fail closed, never
+	// open (undefined < N is false, which would silently allow).
+	if ((ROLE_RANK[user.orgRole] ?? -1) < ROLE_RANK[minimum]) {
 		throw error(403, 'your team role does not allow this');
 	}
 }

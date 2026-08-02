@@ -17,22 +17,14 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { expect, test } from 'vitest';
-import { setupTestDb, testDb } from '$lib/server/testdb';
+import { TEST_OWNER, setupTestDb, testDb } from '$lib/server/testdb';
 import { auditLog, channels } from '$lib/server/db/schema';
 
 import { load } from './+page.server';
 
 setupTestDb(['audit_log', 'channels']);
 
-const OWNER = {
-	id: 'user-1',
-	email: 'one@example.com',
-	displayName: 'One',
-	plan: 'free',
-	orgId: 'org-1',
-	orgName: 'One',
-	orgRole: 'owner'
-} as const;
+const OWNER = TEST_OWNER;
 
 async function seedChannel() {
 	await testDb()

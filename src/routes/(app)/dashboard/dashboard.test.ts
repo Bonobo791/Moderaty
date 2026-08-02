@@ -17,7 +17,7 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { expect, test, vi } from 'vitest';
-import { postForm, setupTestDb, testDb } from '$lib/server/testdb';
+import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
 import { makeCookies } from '$lib/server/testcookies';
 import { channels, sessions, users } from '$lib/server/db/schema';
 
@@ -39,15 +39,7 @@ setupTestDb([
 	'consents'
 ]);
 
-const OWNER = {
-	id: 'user-1',
-	email: 'one@example.com',
-	displayName: 'One',
-	plan: 'free',
-	orgId: 'org-1',
-	orgName: 'One',
-	orgRole: 'owner'
-} as const;
+const OWNER = TEST_OWNER;
 
 function loadDashboard(user: typeof OWNER | null = OWNER) {
 	return load({ locals: { user } } as never);

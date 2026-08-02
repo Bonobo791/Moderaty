@@ -68,6 +68,17 @@ export function postForm(fields: Record<string, string>, url = 'http://localhost
 
 export const DAY_MS = 24 * 60 * 60 * 1000;
 
+/** Shared signed-in fixture: the owner of org-1 — the default tenancy context for route tests. */
+export const TEST_OWNER = {
+	id: 'user-1',
+	email: 'one@example.com',
+	displayName: 'One',
+	plan: 'free',
+	orgId: 'org-1',
+	orgName: 'One',
+	orgRole: 'owner'
+} as const satisfies import('./session').SessionUser;
+
 /** Seeds a bare user row with a synthetic identity. */
 export async function seedUser(id: string): Promise<string> {
 	await testDb().db.insert(users).values({ id, googleSub: `sub-${id}`, email: `${id}@example.com`, displayName: id });

@@ -17,7 +17,7 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { beforeEach, expect, test, vi } from 'vitest';
-import { postForm, setupTestDb, testDb } from '$lib/server/testdb';
+import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
 import { auditLog, channels, comments } from '$lib/server/db/schema';
 import { eq } from 'drizzle-orm';
 
@@ -39,15 +39,7 @@ import { actions } from './+page.server';
 
 setupTestDb(['audit_log', 'comments', 'channels']);
 
-const OWNER = {
-	id: 'user-1',
-	email: 'one@example.com',
-	displayName: 'One',
-	plan: 'free',
-	orgId: 'org-1',
-	orgName: 'One',
-	orgRole: 'owner'
-} as const;
+const OWNER = TEST_OWNER;
 const LOG_URL = 'http://localhost/channels/UC1/log';
 
 beforeEach(async () => {

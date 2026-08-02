@@ -26,10 +26,18 @@ const mocks = vi.hoisted(() => ({
 		ENCRYPTION_KEY: 'test-encryption-key'
 	} as Record<string, string | undefined>,
 	upserts: [] as Record<string, unknown>[],
-	existingChannel: undefined as { userId: string | null } | undefined
+	existingChannel: undefined as { orgId: string | null } | undefined
 }));
 
-const OWNER = { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' };
+const OWNER = {
+	id: 'user-1',
+	email: 'one@example.com',
+	displayName: 'One',
+	plan: 'free',
+	orgId: 'org-1',
+	orgName: 'One',
+	orgRole: 'owner'
+} as const;
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
@@ -41,9 +49,9 @@ vi.mock('$lib/server/db', () => ({
 					returning: async () => {
 						mocks.upserts.push({ values, set, setWhere });
 						// The mock can't evaluate the setWhere predicate; simulate the
-						// "owned by another account" case as a skipped (empty) update.
-						// 'user-1' matches OWNER.id below.
-						if (mocks.existingChannel?.userId && mocks.existingChannel.userId !== 'user-1') return [];
+						// "owned by another team" case as a skipped (empty) update.
+						// 'org-1' matches OWNER.orgId below.
+						if (mocks.existingChannel?.orgId && mocks.existingChannel.orgId !== 'org-1') return [];
 						return [{ id: 'UC123' }];
 					}
 				})
@@ -331,7 +339,7 @@ test('callback attaches the connected channel to the signed-in user', async () =
 });
 
 test('callback refuses to reconnect a channel owned by another account with 409', async () => {
-	mocks.existingChannel = { userId: 'user-2' };
+	mocks.existingChannel = { orgId: 'org-2' };
 	stubTokenAndChannelResponses();
 
 	const thrown = await captureCallback(makeCookiesWithState('s'), { code: 'abc', state: 's' });

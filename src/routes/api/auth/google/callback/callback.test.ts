@@ -33,22 +33,14 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
-import { setupTestDb, testDb } from '$lib/server/testdb';
+import { TEST_OWNER, setupTestDb, testDb } from '$lib/server/testdb';
 import { makeCookiesWithState } from '$lib/server/testcookies';
 import { channels } from '$lib/server/db/schema';
 import { GET as authCallback } from './+server';
 
 setupTestDb(['channels']);
 
-const OWNER = {
-	id: 'user-1',
-	email: 'one@example.com',
-	displayName: 'One',
-	plan: 'free',
-	orgId: 'org-1',
-	orgName: 'One',
-	orgRole: 'owner'
-} as const;
+const OWNER = TEST_OWNER;
 
 afterEach(() => {
 	vi.unstubAllGlobals();

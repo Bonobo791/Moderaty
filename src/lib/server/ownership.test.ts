@@ -18,22 +18,23 @@
 
 import { expect, test } from 'vitest';
 
-import { setupTestDb, testDb } from './testdb';
+import { setupTestDb, testDb, TEST_OWNER } from './testdb';
 import { channels } from './db/schema';
 import { ownedChannel, requireOrgRole } from './ownership';
 import type { SessionUser } from './session';
 
 setupTestDb(['channels', 'users']);
 
-const OWNER = {
-	id: 'user-1',
-	email: 'one@example.com',
-	displayName: 'One',
-	plan: 'free',
-	orgId: 'org-1',
-	orgName: 'One',
-	orgRole: 'owner'
-} as const satisfies SessionUser;
+const OWNER = TEST_OWNER;
+
+test('requireOrgRole throws 403 for an unknown role — fail closed, never fail open', () => {
+	// Unreachable today (asOrgRole throws on unknown roles before a SessionUser
+	// can be built), but the comparison itself must fail closed if a bogus
+	// role ever gets through: undefined < N is false, which would ALLOW.
+	const bogus = { ...OWNER, orgRole: 'bogus' } as unknown as SessionUser;
+
+	expect(() => requireOrgRole(bogus, 'admin')).toThrowError(expect.objectContaining({ status: 403 }));
+});
 
 test('requireOrgRole throws 403 for a member below the admin minimum', () => {
 	const member: SessionUser = { ...OWNER, orgRole: 'member' };

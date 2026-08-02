@@ -17,7 +17,7 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { expect, test } from 'vitest';
-import { postForm, setupTestDb, testDb } from '$lib/server/testdb';
+import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
 import { channels } from '$lib/server/db/schema';
 import { eq } from 'drizzle-orm';
 
@@ -25,15 +25,7 @@ import { actions } from './+page.server';
 
 setupTestDb(['channels']);
 
-const OWNER = {
-	id: 'user-1',
-	email: 'one@example.com',
-	displayName: 'One',
-	plan: 'free',
-	orgId: 'org-1',
-	orgName: 'One',
-	orgRole: 'owner'
-} as const;
+const OWNER = TEST_OWNER;
 
 async function seedChannel(id: string, userId: string | null = OWNER.id, orgId: string | null = 'org-1') {
 	await testDb().db.insert(channels).values({ id, userId, orgId, title: `Channel ${id}`, refreshTokenEnc: 'enc' });

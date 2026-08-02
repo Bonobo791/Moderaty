@@ -35,3 +35,4 @@ local.db*
 .impeccable
 .playwright-cli
 .netlify-sim
+.kimi

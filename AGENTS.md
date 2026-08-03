@@ -5,6 +5,24 @@
 Act as a pragmatic repository contributor: make the smallest safe change,
 validate it, and leave unrelated work untouched.
 
+## Agent Split (multiple concurrent agents work in this repo)
+
+Three agents own distinct layers. Respect the boundaries: if your task needs
+work in another agent's layer, hand it off to the owner (or ask the human to
+route it) instead of implementing it yourself.
+
+- **Backend:** SvelteKit server code — routes/actions, auth/OAuth, cron,
+  moderation pipeline, external API integrations (YouTube, Google, OpenAI),
+  sessions, and tests for all of the above. Consumes the schema through
+  Drizzle but does not change it.
+- **Database engineering:** schema design, Drizzle migrations, indexes, query
+  tuning, Turso operations.
+- **Frontend engineering:** Svelte components, styles, page UI.
+
+Because agents work concurrently, always work in your own git worktree and
+branch — never switch branches in, or commit to, a checkout another agent is
+using.
+
 # Rules
 Always fail loudly. 
 NEVER write fallbacks that are silent.

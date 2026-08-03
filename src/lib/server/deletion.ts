@@ -77,6 +77,9 @@ export function consentEmailCutoffIso(now = Date.now()): string {
  * @throws If the user does not exist or is already tombstoned
  */
 export async function deleteUserRecords(userId: string): Promise<void> {
+	// Promotions are logged only AFTER the transaction commits — a pre-commit
+	// log would claim a succession that a rollback erased.
+	const promotions: { orgId: string; successorId: string }[] = [];
 	await db.transaction(async (tx) => {
 		const user = await tx
 			.select({ googleSub: users.googleSub })
@@ -126,13 +129,30 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 			.from(memberships)
 			.where(eq(memberships.userId, userId))
 			.all();
+		// One batched query for every co-member across all the user's orgs —
+		// no per-org roundtrips (N+1) inside the transaction.
+		const memberOrgIds = userMemberships.map((m) => m.orgId);
+		const coMembers = memberOrgIds.length
+			? await tx
+					.select({
+						orgId: memberships.orgId,
+						userId: memberships.userId,
+						role: memberships.role,
+						createdAt: memberships.createdAt
+					})
+					.from(memberships)
+					.where(and(inArray(memberships.orgId, memberOrgIds), ne(memberships.userId, userId)))
+					.all()
+			: [];
+		const coMembersByOrg = new Map<string, typeof coMembers>();
+		for (const row of coMembers) {
+			const list = coMembersByOrg.get(row.orgId) ?? [];
+			list.push(row);
+			coMembersByOrg.set(row.orgId, list);
+		}
 		const dissolveOrgIds: string[] = [];
 		for (const membership of userMemberships) {
-			const others = await tx
-				.select({ userId: memberships.userId, role: memberships.role, createdAt: memberships.createdAt })
-				.from(memberships)
-				.where(and(eq(memberships.orgId, membership.orgId), ne(memberships.userId, userId)))
-				.all();
+			const others = coMembersByOrg.get(membership.orgId) ?? [];
 			if (!others.length) {
 				dissolveOrgIds.push(membership.orgId);
 				continue;
@@ -140,13 +160,19 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 			if (membership.role === 'owner' && !others.some((m) => m.role === 'owner')) {
 				const ranked = [...others].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.userId.localeCompare(b.userId));
 				const successor = ranked.find((m) => m.role === 'admin') ?? ranked[0];
-				await tx
+				const promoted = await tx
 					.update(memberships)
 					.set({ role: 'owner' })
-					.where(and(eq(memberships.orgId, membership.orgId), eq(memberships.userId, successor.userId)));
-				console.info(
-					`account deletion: promoted user ${successor.userId} to owner of org ${membership.orgId} (last owner ${userId} was deleted)`
-				);
+					.where(and(eq(memberships.orgId, membership.orgId), eq(memberships.userId, successor.userId)))
+					.returning({ userId: memberships.userId });
+				// The row was selected in this same transaction; an empty RETURNING
+				// means the data changed underneath us — fail loudly, never log a
+				// promotion that did not persist.
+				if (!promoted.length) {
+					console.error(`account deletion: successor ${successor.userId} vanished from org ${membership.orgId} mid-transaction`);
+					throw new Error('ownership succession failed — contact support');
+				}
+				promotions.push({ orgId: membership.orgId, successorId: successor.userId });
 			}
 		}
 		const chs = dissolveOrgIds.length
@@ -179,6 +205,11 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 			.set({ googleSub: `deleted:${userId}`, email: '[deleted]', displayName: '[deleted]' })
 			.where(eq(users.id, userId));
 	});
+	for (const promotion of promotions) {
+		console.info(
+			`account deletion: promoted user ${promotion.successorId} to owner of org ${promotion.orgId} (last owner ${userId} was deleted)`
+		);
+	}
 }
 
 /**

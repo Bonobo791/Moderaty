@@ -255,6 +255,17 @@ async function teamMemberships(orgId: string) {
 	return await testDb().db.select().from(memberships).where(eq(memberships.orgId, orgId)).all();
 }
 
+/** Runs deleteUserRecords while capturing console.info succession messages, then restores the spy. */
+async function deleteWithSuccessionLogs(userId: string) {
+	const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+	try {
+		await deleteUserRecords(userId);
+		return info.mock.calls.map((call) => String(call[0]));
+	} finally {
+		info.mockRestore();
+	}
+}
+
 test('deleteUserRecords removes only the membership when a plain member of a shared org leaves', async () => {
 	// A plain member (not an owner) of a shared org with other members: the org,
 	// its channels, and everyone else's roles are completely untouched — only
@@ -270,6 +281,11 @@ test('deleteUserRecords removes only the membership when a plain member of a sha
 	await testDb()
 		.db.insert(channels)
 		.values({ id: 'UC-team', userId: 'owner-stays', orgId: 'org-team', title: 'team channel', refreshTokenEnc: 'enc' });
+	// A second team channel the departing user DID connect: the org survives, so
+	// it must be detached (grant wiped), never deleted with the account.
+	await testDb()
+		.db.insert(channels)
+		.values({ id: 'UC-team-connected', userId, orgId: 'org-team', title: 'connected by leaver', refreshTokenEnc: 'enc' });
 
 	await deleteUserRecords(userId);
 
@@ -284,6 +300,9 @@ test('deleteUserRecords removes only the membership when a plain member of a sha
 	// The channel the user did NOT connect is byte-for-byte the team's.
 	const team = (await testDb().db.select().from(channels).all()).find((c) => c.id === 'UC-team');
 	expect(team).toMatchObject({ userId: 'owner-stays', refreshTokenEnc: 'enc' });
+	// The channel the user DID connect stays with the team, grant wiped.
+	const connected = (await testDb().db.select().from(channels).all()).find((c) => c.id === 'UC-team-connected');
+	expect(connected).toMatchObject({ userId: null, refreshTokenEnc: WIPED_REFRESH_TOKEN });
 });
 
 test('deleteUserRecords promotes the oldest admin when the last owner of a shared org deletes their account', async () => {
@@ -303,12 +322,14 @@ test('deleteUserRecords promotes the oldest admin when the last owner of a share
 	await testDb()
 		.db.insert(channels)
 		.values({ id: 'UC-team', userId: 'admin-old', orgId: 'org-team', title: 'team channel', refreshTokenEnc: 'enc' });
-	const info = vi.spyOn(console, 'info').mockImplementation(() => {});
-	await deleteUserRecords(userId);
-	const successionLogged = info.mock.calls.length > 0;
-	info.mockRestore();
 
-	expect(successionLogged).toBe(true);
+	const logs = await deleteWithSuccessionLogs(userId);
+
+	// Exactly one succession, and the log names WHO was promoted WHERE — a bare
+	// "something was logged" assertion would pass on any unrelated info line.
+	expect(logs).toHaveLength(1);
+	expect(logs[0]).toContain('admin-old');
+	expect(logs[0]).toContain('org-team');
 	const remaining = await teamMemberships('org-team');
 	expect(remaining).toHaveLength(3);
 	// The OLDER admin wins — join order, not name order, decides.
@@ -352,10 +373,7 @@ test('deleteUserRecords leaves roles untouched when another owner survives in a 
 		{ userId: 'admin-stays', role: 'admin', joinedAt: '2026-01-03T00:00:00.000Z' },
 		{ userId: 'member-stays', role: 'member', joinedAt: '2026-01-04T00:00:00.000Z' }
 	]);
-	const info = vi.spyOn(console, 'info').mockImplementation(() => {});
-	await deleteUserRecords(userId);
-	const successionLogged = info.mock.calls.length > 0;
-	info.mockRestore();
+	const logs = await deleteWithSuccessionLogs(userId);
 
 	const remaining = await teamMemberships('org-team');
 	expect(remaining).toHaveLength(3);
@@ -367,7 +385,7 @@ test('deleteUserRecords leaves roles untouched when another owner survives in a 
 		])
 	);
 	// No succession happened, so no succession was logged.
-	expect(successionLogged).toBe(false);
+	expect(logs).toEqual([]);
 });
 
 test('deleteUserRecords dissolves a sole-member shared org with its channels and data', async () => {

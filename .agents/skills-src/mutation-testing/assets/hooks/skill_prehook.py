@@ -11,7 +11,8 @@ Kimi Code hooks, generic wrappers). Protocol:
 
   stdin  : JSON object containing the prompt. Keys probed, in order:
            "prompt" (Claude Code), "user_prompt", "message", "text".
-           If stdin is not valid JSON, the raw text is treated as the prompt.
+           A bare JSON string literal is used directly; if stdin is not
+           valid JSON, the raw text is treated as the prompt.
   stdout : text to inject into context (only printed on keyword match).
   exit   : always 0; no-match means silent no-op.
 
@@ -30,17 +31,20 @@ import sys
 
 # Mutation-testing-specific triggers only. Generic test terms (test, spec,
 # coverage) are deliberately excluded: firing on them would inject the full
-# SKILL.md into every testing prompt. Tune for recall within mutation-testing
-# vocabulary, not for testing in general.
+# SKILL.md into every testing prompt. "Mutant(s)" must appear in a
+# mutation-testing phrase (surviving/killed/equivalent/kill) — the bare word
+# also matches fiction and film prompts. Tune for recall within
+# mutation-testing vocabulary, not for testing in general.
 TRIGGERS = [
     r"\bmutation test(s|ing)?\b", r"\bmutation score\b",
     r"\bmutation coverage\b", r"\bmutation[- ]feedback\b",
-    r"\bmutants?\b", r"\bmutat(e|ed|ing) (the )?(code|source|line)\b",
+    r"\bmutat(e|ed|ing) (the )?(code|source|line)\b",
     r"\bstryker(js|\.net)?\b", r"\bmutmut\b", r"\bpitest\b",
     r"\bcosmic[- ]ray\b", r"\bcargo-mutants\b", r"\bgo-mutesting\b",
-    r"\bgremlins\b", r"\binfection php\b", r"\bmuter\b",
-    r"\bsurviving (mutant|mutation)s?\b", r"\bkilled mutant",
-    r"\bequivalent mutant", r"\btest(-| )suite quality\b",
+    r"\binfection php\b", r"\bmuter\b",
+    r"\bsurviving (mutant|mutation)s?\b", r"\bkilled mutants?\b",
+    r"\bequivalent mutants?\b", r"\bkill(ing)? (the |those |these |that )?mutants?\b",
+    r"\btest(-| )suite quality\b",
     r"\bare my tests\b", r"\bweak assertion",
     r"\bdo(es)? (my|the|these) tests? (actually )?(catch|fail)",
 ]
@@ -68,6 +72,9 @@ def read_prompt() -> str:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return raw
+    if isinstance(data, str):
+        # Valid JSON string literal (e.g. harness pre-encodes the prompt).
+        return data
     if isinstance(data, dict):
         for key in ("prompt", "user_prompt", "message", "text"):
             val = data.get(key)

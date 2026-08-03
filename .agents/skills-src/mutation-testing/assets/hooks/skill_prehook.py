@@ -64,7 +64,7 @@ TRIGGERS = [
     r"\bsurviving (mutant|mutation)s?\b", r"\bkilled mutants?\b",
     r"\bequivalent mutants?\b", r"\bkill(ing)? (the |those |these |that )?mutants?\b",
     r"\btest(-| )suite quality\b",
-    r"\bare my tests (actually )?(good|catching|enough|worth|strong)\b", r"\bweak assertion",
+    r"\bare my tests (actually )?(good|catching|enough|worth|strong)\b", r"\bweak assertions?\b",
     r"\bdo(es)? (my|the|these) tests? (actually )?(catch|fail)",
 ]
 
@@ -129,8 +129,8 @@ def main() -> None:
             )
             sys.stdout.write(
                 f"[mutation-testing prehook WARNING: could not read the skill "
-                f"file at {skill_path} ({type(file_error).__name__}); falling "
-                "back to a path directive.]\n"
+                f"file at {skill_path} ({type(file_error).__name__}: {file_error}); "
+                "falling back to a path directive.]\n"
             )
 
     refs_dir = os.path.join(os.path.dirname(skill_path), "references")

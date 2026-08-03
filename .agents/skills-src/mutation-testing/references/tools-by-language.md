@@ -69,7 +69,7 @@ Levers that matter:
 - `coverageAnalysis: "perTest"` — the single biggest speedup; runs only tests covering each mutant. Never `"off"`.
 - `thresholds.break` — score below → exit 1 → CI gate. Set floor = current − buffer, ratchet up.
 - `npx stryker run --since main` — mutate only files changed vs base branch (PR mode).
-- `npx stryker run --incremental` — caches results in `reports/stryker-incremental.json` (the default `incrementalFile`); commit that file for CI reuse. (`.stryker-tmp/` is the scratch sandbox dir, not the cache — do not commit it.)
+- `npx stryker run --incremental` — caches results in `reports/stryker-incremental.json` (the default `incrementalFile`); cache that file in CI for reuse — committing it to the repo just adds bloat and merge noise. (`.stryker-tmp/` is the scratch sandbox dir, not the cache.)
 - `npx stryker run --mutate "src/billing/**/*.ts"` — scope hardening to one module.
 - `ignoreStatic: true` — skip mutants only executed at module load (large perf penalty, low value).
 - `mutator.excludedMutations` — drop noisy operators (e.g. `ObjectLiteral`, `StringLiteral` on logging-heavy files).
@@ -206,4 +206,4 @@ LLVM-IR-level mutants; integrates via `mull-cxx` and compiled test binaries. Str
 
 1. PR pipeline: `git diff` → tool's diff/incremental mode → fail only on new survivors or a low `break` floor. Upload HTML/JSON report as artifact (`if: always()`).
 2. Scheduled pipeline (nightly/weekly): full sweep on the default branch, enforces the real `break` threshold, tracks score over time.
-3. Cache/commit the tool's state file between runs — `reports/stryker-incremental.json` (StrykerJS), `mutants/` (mutmut 3.x), `target/pit-history.xml` (PIT).
+3. Cache the tool's state file in CI between runs (CI cache, not the repo) — `reports/stryker-incremental.json` (StrykerJS), `mutants/` (mutmut 3.x), `target/pit-history.xml` (PIT).

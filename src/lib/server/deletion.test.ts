@@ -19,7 +19,7 @@
 import { and, eq } from 'drizzle-orm';
 import { expect, test, vi } from 'vitest';
 
-import { DAY_MS, seedConsent, setupTestDb, testDb } from './testdb';
+import { DAY_MS, seedConsent, seedUser as seedBareUser, setupTestDb, testDb } from './testdb';
 import { auditLog, channels, comments, consents, invites, memberships, moderationActions, organizations, rules, sessions, users } from './db/schema';
 import {
 	CONSENT_EMAIL_RETENTION_MS,
@@ -54,12 +54,6 @@ async function seedModerationData(channelId: string, key: string) {
 	await testDb()
 		.db.insert(rules)
 		.values({ channelId, type: 'keyword', pattern: 'spam', action: 'delete' });
-}
-
-async function seedBareUser(id: string) {
-	await testDb()
-		.db.insert(users)
-		.values({ id, googleSub: `sub-${id}`, email: `${id}@example.com`, displayName: id });
 }
 
 /** Seeds a channel row with the standard shape (placeholder enc token). */

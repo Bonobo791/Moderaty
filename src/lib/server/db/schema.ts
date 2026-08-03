@@ -16,7 +16,7 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { sqliteTable, text, integer, index, primaryKey } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, index, primaryKey, check } from 'drizzle-orm/sqlite-core';
 import { sql } from 'drizzle-orm';
 
 export const users = sqliteTable('users', {
@@ -89,7 +89,7 @@ export const invites = sqliteTable('invites', {
 export const channels = sqliteTable('channels', {
 	id: text('id').primaryKey(), // YouTube channel ID (UC...)
 	userId: text('user_id'), // connected-by user (whose Google grant this channel uses); null = pre-accounts orphan, claimed on first login
-	orgId: text('org_id'), // owning TENANT; null only during the expand window / for unclaimed orphans — NOT NULL after the contract migration
+	orgId: text('org_id'), // owning TENANT; null only for pre-accounts orphans (user_id IS NULL) awaiting first-login claim
 	title: text('title').notNull(),
 	refreshTokenEnc: text('refresh_token_enc').notNull(),
 	cursor: text('cursor'), // ISO timestamp of newest comment seen; null = never polled
@@ -102,7 +102,8 @@ export const channels = sqliteTable('channels', {
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
 	index('channels_user_id_idx').on(table.userId),
-	index('channels_org_id_idx').on(table.orgId)
+	index('channels_org_id_idx').on(table.orgId),
+	check('channels_org_requires_owner', sql`${table.orgId} IS NOT NULL OR ${table.userId} IS NULL`)
 ]);
 
 export const rules = sqliteTable('rules', {

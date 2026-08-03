@@ -62,6 +62,11 @@ async function seedBareUser(id: string) {
 		.values({ id, googleSub: `sub-${id}`, email: `${id}@example.com`, displayName: id });
 }
 
+/** Seeds a channel row with the standard shape (placeholder enc token). */
+async function seedChannel(id: string, userId: string | null, orgId: string, title: string) {
+	await testDb().db.insert(channels).values({ id, userId, orgId, title, refreshTokenEnc: 'enc' });
+}
+
 async function seedUser(id: string) {
 	await seedBareUser(id);
 	// Every real user has a personal org (0012 backfill / signup) — an org row
@@ -73,9 +78,7 @@ async function seedUser(id: string) {
 	await testDb()
 		.db.insert(invites)
 		.values({ token: `invite-${id}`, orgId: `org-${id}`, role: 'member', createdBy: id, expiresAt: new Date(Date.now() + DAY_MS).toISOString() });
-	await testDb()
-		.db.insert(channels)
-		.values({ id: `UC-${id}`, userId: id, orgId: `org-${id}`, title: `channel ${id}`, refreshTokenEnc: 'enc' });
+	await seedChannel(`UC-${id}`, id, `org-${id}`, `channel ${id}`);
 	await testDb()
 		.db.insert(sessions)
 		.values({ id: `token-${id}`, userId: id, expiresAt: new Date(Date.now() + DAY_MS).toISOString() });
@@ -158,13 +161,7 @@ test('deleteUserRecords keeps team channels the user merely connected, wiping th
 	// loudly in cron until a teammate reconnects).
 	const userId = await seedUser('gone');
 	await testDb().db.insert(organizations).values({ id: 'org-team', name: 'Team' });
-	await testDb().db.insert(channels).values({
-		id: 'UC-team',
-		userId,
-		orgId: 'org-team',
-		title: 'team channel',
-		refreshTokenEnc: 'enc'
-	});
+	await seedChannel('UC-team', userId, 'org-team', 'team channel');
 	await seedModerationData('UC-team', 'team');
 
 	await deleteUserRecords(userId);
@@ -255,6 +252,13 @@ async function teamMemberships(orgId: string) {
 	return await testDb().db.select().from(memberships).where(eq(memberships.orgId, orgId)).all();
 }
 
+/** Asserts the exact membership roster (userId/role pairs, order-insensitive) of an org. */
+async function expectOrgRoles(orgId: string, expected: { userId: string; role: string }[]) {
+	const rows = await teamMemberships(orgId);
+	expect(rows).toHaveLength(expected.length);
+	expect(rows).toEqual(expect.arrayContaining(expected.map((entry) => expect.objectContaining(entry))));
+}
+
 /** Runs deleteUserRecords while capturing console.info succession messages, then restores the spy. */
 async function deleteWithSuccessionLogs(userId: string) {
 	const info = vi.spyOn(console, 'info').mockImplementation(() => {});
@@ -278,25 +282,18 @@ test('deleteUserRecords removes only the membership when a plain member of a sha
 		{ userId: 'member-stays', role: 'member', joinedAt: '2026-01-02T00:00:00.000Z' },
 		{ userId, role: 'member', joinedAt: '2026-01-03T00:00:00.000Z' }
 	]);
-	await testDb()
-		.db.insert(channels)
-		.values({ id: 'UC-team', userId: 'owner-stays', orgId: 'org-team', title: 'team channel', refreshTokenEnc: 'enc' });
+	await seedChannel('UC-team', 'owner-stays', 'org-team', 'team channel');
 	// A second team channel the departing user DID connect: the org survives, so
 	// it must be detached (grant wiped), never deleted with the account.
-	await testDb()
-		.db.insert(channels)
-		.values({ id: 'UC-team-connected', userId, orgId: 'org-team', title: 'connected by leaver', refreshTokenEnc: 'enc' });
+	await seedChannel('UC-team-connected', userId, 'org-team', 'connected by leaver');
 
 	await deleteUserRecords(userId);
 
 	expect(await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-team')).all()).toHaveLength(1);
-	expect(await teamMemberships('org-team')).toEqual(
-		expect.arrayContaining([
-			expect.objectContaining({ userId: 'owner-stays', role: 'owner' }),
-			expect.objectContaining({ userId: 'member-stays', role: 'member' })
-		])
-	);
-	expect(await teamMemberships('org-team')).toHaveLength(2);
+	await expectOrgRoles('org-team', [
+		{ userId: 'owner-stays', role: 'owner' },
+		{ userId: 'member-stays', role: 'member' }
+	]);
 	// The channel the user did NOT connect is byte-for-byte the team's.
 	const team = (await testDb().db.select().from(channels).all()).find((c) => c.id === 'UC-team');
 	expect(team).toMatchObject({ userId: 'owner-stays', refreshTokenEnc: 'enc' });
@@ -319,9 +316,7 @@ test('deleteUserRecords promotes the oldest admin when the last owner of a share
 		{ userId: 'admin-old', role: 'admin', joinedAt: '2026-01-03T00:00:00.000Z' },
 		{ userId: 'admin-new', role: 'admin', joinedAt: '2026-01-04T00:00:00.000Z' }
 	]);
-	await testDb()
-		.db.insert(channels)
-		.values({ id: 'UC-team', userId: 'admin-old', orgId: 'org-team', title: 'team channel', refreshTokenEnc: 'enc' });
+	await seedChannel('UC-team', 'admin-old', 'org-team', 'team channel');
 
 	const logs = await deleteWithSuccessionLogs(userId);
 
@@ -375,15 +370,11 @@ test('deleteUserRecords leaves roles untouched when another owner survives in a 
 	]);
 	const logs = await deleteWithSuccessionLogs(userId);
 
-	const remaining = await teamMemberships('org-team');
-	expect(remaining).toHaveLength(3);
-	expect(remaining).toEqual(
-		expect.arrayContaining([
-			expect.objectContaining({ userId: 'owner-stays', role: 'owner' }),
-			expect.objectContaining({ userId: 'admin-stays', role: 'admin' }),
-			expect.objectContaining({ userId: 'member-stays', role: 'member' })
-		])
-	);
+	await expectOrgRoles('org-team', [
+		{ userId: 'owner-stays', role: 'owner' },
+		{ userId: 'admin-stays', role: 'admin' },
+		{ userId: 'member-stays', role: 'member' }
+	]);
 	// No succession happened, so no succession was logged.
 	expect(logs).toEqual([]);
 });
@@ -397,9 +388,7 @@ test('deleteUserRecords dissolves a sole-member shared org with its channels and
 	await testDb()
 		.db.insert(invites)
 		.values({ token: 'invite-solo', orgId: 'org-solo', role: 'member', createdBy: userId, expiresAt: new Date(Date.now() + DAY_MS).toISOString() });
-	await testDb()
-		.db.insert(channels)
-		.values({ id: 'UC-solo', userId, orgId: 'org-solo', title: 'solo team channel', refreshTokenEnc: 'enc' });
+	await seedChannel('UC-solo', userId, 'org-solo', 'solo team channel');
 	await seedModerationData('UC-solo', 'solo');
 
 	await deleteUserRecords(userId);

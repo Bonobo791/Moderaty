@@ -84,23 +84,22 @@ async function userRow(id: string) {
 	return await testDb().db.select().from(users).where(eq(users.id, id)).get();
 }
 
+/** Asserts every moderation and tenancy table is empty (consents/users asserted separately — they are retained/tombstoned). */
+async function expectAllTablesEmpty() {
+	for (const table of [channels, sessions, comments, moderationActions, auditLog, rules, organizations, memberships, invites]) {
+		expect(await testDb().db.select().from(table).all()).toEqual([]);
+	}
+}
+
 test('deleteUserRecords erases every owned record and tombstones the user fully', async () => {
 	const userId = await seedUser('gone');
 	await seedConsent(userId);
 
 	await deleteUserRecords(userId);
 
-	expect(await testDb().db.select().from(channels).all()).toEqual([]);
-	expect(await testDb().db.select().from(sessions).all()).toEqual([]);
-	expect(await testDb().db.select().from(comments).all()).toEqual([]);
-	expect(await testDb().db.select().from(moderationActions).all()).toEqual([]);
-	expect(await testDb().db.select().from(auditLog).all()).toEqual([]);
-	expect(await testDb().db.select().from(rules).all()).toEqual([]);
 	// The user's tenancy goes too: the personal org (its name is the user's
 	// display name — PII), all memberships, and invites they created.
-	expect(await testDb().db.select().from(organizations).all()).toEqual([]);
-	expect(await testDb().db.select().from(memberships).all()).toEqual([]);
-	expect(await testDb().db.select().from(invites).all()).toEqual([]);
+	await expectAllTablesEmpty();
 	expect(await userRow(userId)).toMatchObject({
 		googleSub: `deleted:${userId}`,
 		email: '[deleted]',
@@ -388,14 +387,7 @@ test('deleteUserRecords dissolves a sole-member shared org with its channels and
 	await deleteUserRecords(userId);
 
 	// Both orgs (personal + sole-member shared) are gone with everything in them.
-	expect(await testDb().db.select().from(organizations).all()).toEqual([]);
-	expect(await testDb().db.select().from(memberships).all()).toEqual([]);
-	expect(await testDb().db.select().from(invites).all()).toEqual([]);
-	expect(await testDb().db.select().from(channels).all()).toEqual([]);
-	expect(await testDb().db.select().from(comments).all()).toEqual([]);
-	expect(await testDb().db.select().from(moderationActions).all()).toEqual([]);
-	expect(await testDb().db.select().from(auditLog).all()).toEqual([]);
-	expect(await testDb().db.select().from(rules).all()).toEqual([]);
+	await expectAllTablesEmpty();
 	expect(await userRow(userId)).toMatchObject({ googleSub: `deleted:${userId}` });
 });
 

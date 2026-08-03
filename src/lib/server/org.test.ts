@@ -397,3 +397,55 @@ test('revokeInvite deletes the invite, admin of its org only', async () => {
 	await revokeInvite('owner-1', 'tok-1');
 	expect(await testDb().db.select().from(invites).where(eq(invites.token, 'tok-1')).get()).toBeUndefined();
 });
+
+test('switchActiveOrg fails loudly when the session token is not the caller\'s', async () => {
+	// PR #52 review (Qodo): session updates must be scoped to the caller AND
+	// verified — an unknown/mismatched token must never silently succeed.
+	await seedUser('user-1');
+	await seedUser('user-2');
+	await seedOrg('org-1');
+	await seedMember('user-1', 'org-1', 'member');
+	await seedMember('user-2', 'org-1', 'member');
+	await seedSession('sess-2', 'user-2');
+
+	await expect(switchActiveOrg('user-1', 'sess-2', 'org-1')).rejects.toMatchObject({ status: 401 });
+	await expect(switchActiveOrg('user-1', 'sess-ghost', 'org-1')).rejects.toMatchObject({ status: 401 });
+	const sess = await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-2')).get();
+	expect(sess?.activeOrgId).toBeNull(); // another user's session untouched
+});
+
+test('acceptInvite with a mismatched session token is 401 and neither burns nor joins', async () => {
+	await seedUser('owner-1');
+	await seedUser('joiner-1');
+	await seedUser('user-2');
+	await seedOrg('org-1');
+	await seedMember('owner-1', 'org-1', 'owner');
+	await seedMember('user-2', 'org-1', 'member');
+	await seedSession('sess-2', 'user-2');
+	const token = await createInvite('owner-1', 'org-1', 'member');
+
+	await expect(acceptInvite('joiner-1', 'sess-2', token)).rejects.toMatchObject({ status: 401 });
+	const inv = await testDb().db.select().from(invites).where(eq(invites.token, token)).get();
+	expect(inv?.acceptedBy).toBeNull(); // not burned
+	expect(await membershipRow('joiner-1', 'org-1')).toHaveLength(0); // not joined
+	const sess = await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-2')).get();
+	expect(sess?.activeOrgId).toBeNull(); // another user's session untouched
+});
+
+test('leaveOrg clears only the caller\'s own session', async () => {
+	await seedUser('owner-1');
+	await seedUser('member-1');
+	await seedUser('member-2');
+	await seedOrg('org-1');
+	await seedMember('owner-1', 'org-1', 'owner');
+	await seedMember('member-1', 'org-1', 'member');
+	await seedMember('member-2', 'org-1', 'member');
+	await seedSession('sess-1', 'member-1', 'org-1');
+	await seedSession('sess-2', 'member-2', 'org-1');
+
+	await leaveOrg('member-1', 'sess-1', 'org-1');
+	const own = await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-1')).get();
+	expect(own?.activeOrgId).toBeNull();
+	const other = await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-2')).get();
+	expect(other?.activeOrgId).toBe('org-1'); // teammate's session untouched
+});

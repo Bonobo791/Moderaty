@@ -21,7 +21,7 @@
 import { randomBytes } from 'node:crypto';
 
 import { error } from '@sveltejs/kit';
-import { and, eq, gt, isNull, ne } from 'drizzle-orm';
+import { and, eq, gt, isNull, ne, sql } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
 import { invites, memberships, organizations, sessions, users } from '$lib/server/db/schema';
@@ -259,11 +259,24 @@ export async function acceptInvite(userId: string, sessionToken: string, token: 
 			.from(memberships)
 			.where(and(eq(memberships.userId, userId), eq(memberships.orgId, inv.orgId)))
 			.get();
+		// Conditional claim: the burn only lands while accepted_by is still NULL,
+		// so even read-skewed concurrent accepts can never both succeed.
+		const claimed = await tx
+			.update(invites)
+			.set({ acceptedBy: userId })
+			.where(and(eq(invites.token, token), isNull(invites.acceptedBy)))
+			.returning({ token: invites.token });
+		if (claimed.length === 0) throw error(410, 'this invite link is no longer valid — ask for a new one');
 		if (!existing) {
 			await tx.insert(memberships).values({ userId, orgId: inv.orgId, role });
 		}
-		await tx.update(invites).set({ acceptedBy: userId }).where(eq(invites.token, token));
-		await tx.update(sessions).set({ activeOrgId: inv.orgId }).where(eq(sessions.id, sessionToken));
+		// Scoped AND verified: the session must be the caller's own (PR #52 review).
+		const switched = await tx
+			.update(sessions)
+			.set({ activeOrgId: inv.orgId })
+			.where(and(eq(sessions.id, sessionToken), eq(sessions.userId, userId)))
+			.returning({ id: sessions.id });
+		if (switched.length === 0) throw error(401, 'sign-in required');
 		return inv.orgId;
 	});
 }
@@ -272,7 +285,14 @@ export async function acceptInvite(userId: string, sessionToken: string, token: 
 export async function switchActiveOrg(userId: string, sessionToken: string, orgId: string): Promise<void> {
 	const m = await membershipOf(userId, orgId);
 	if (!m) throw error(404, 'team not found');
-	await db.update(sessions).set({ activeOrgId: orgId }).where(eq(sessions.id, sessionToken));
+	// Scoped AND verified: an unknown or mismatched session token fails loudly
+	// instead of silently updating nothing (PR #52 review).
+	const updated = await db
+		.update(sessions)
+		.set({ activeOrgId: orgId })
+		.where(and(eq(sessions.id, sessionToken), eq(sessions.userId, userId)))
+		.returning({ id: sessions.id });
+	if (updated.length === 0) throw error(401, 'sign-in required');
 }
 
 export interface OrgMember {
@@ -322,22 +342,24 @@ export async function setMemberRole(callerUserId: string, orgId: string, targetU
 	if (role !== 'owner' && role !== 'admin' && role !== 'member') throw error(400, 'unknown role');
 	const target = await membershipOf(targetUserId, orgId);
 	if (!target) throw error(404, 'member not found');
-	// Owner-count check and role update in ONE transaction: two concurrent
-	// demotions can never strand the org without an owner (PR #52 review).
-	await db.transaction(async (tx) => {
-		if (target.role === 'owner' && role !== 'owner') {
-			const owners = await tx
-				.select({ userId: memberships.userId })
-				.from(memberships)
-				.where(and(eq(memberships.orgId, orgId), eq(memberships.role, 'owner')))
-				.all();
-			if (owners.length <= 1) throw error(400, 'the last owner cannot be demoted — promote a teammate to owner first');
-		}
-		await tx
-			.update(memberships)
-			.set({ role })
-			.where(and(eq(memberships.userId, targetUserId), eq(memberships.orgId, orgId)));
-	});
+	// Demoting an owner is a CONDITIONAL update: the write only lands while
+	// another owner still exists, so concurrent demotions can never strand the
+	// org ownerless — no separate check to race with (PR #52 review).
+	const demotingOwner = target.role === 'owner' && role !== 'owner';
+	const updated = await db
+		.update(memberships)
+		.set({ role })
+		.where(
+			and(
+				eq(memberships.userId, targetUserId),
+				eq(memberships.orgId, orgId),
+				demotingOwner
+					? sql`(SELECT count(*) FROM memberships AS mo WHERE mo.org_id = ${orgId} AND mo.role = 'owner') > 1`
+					: undefined
+			)
+		)
+		.returning({ userId: memberships.userId });
+	if (updated.length === 0) throw error(400, 'the last owner cannot be demoted — promote a teammate to owner first');
 }
 
 /**
@@ -365,8 +387,9 @@ export async function removeMember(callerUserId: string, orgId: string, targetUs
 export async function leaveOrg(userId: string, sessionToken: string, orgId: string): Promise<void> {
 	const m = await membershipOf(userId, orgId);
 	if (!m) throw error(404, 'team not found');
-	// Membership validation and the delete in ONE transaction: concurrent
-	// leaves/removals can never strand the org without members (or owners).
+	// Membership validation and the delete in ONE transaction; the delete is
+	// additionally CONDITIONAL so concurrent leaves can never strand the org
+	// without an owner even under read skew (PR #52 review).
 	await db.transaction(async (tx) => {
 		const others = await tx
 			.select({ userId: memberships.userId, role: memberships.role })
@@ -377,12 +400,23 @@ export async function leaveOrg(userId: string, sessionToken: string, orgId: stri
 		if (m.role === 'owner' && !others.some((o) => o.role === 'owner')) {
 			throw error(400, 'promote a teammate to owner before leaving');
 		}
-		await tx.delete(memberships).where(and(eq(memberships.userId, userId), eq(memberships.orgId, orgId)));
+		const deleted = await tx
+			.delete(memberships)
+			.where(
+				and(
+					eq(memberships.userId, userId),
+					eq(memberships.orgId, orgId),
+					sql`(${memberships.role} != 'owner' OR (SELECT count(*) FROM memberships AS mo WHERE mo.org_id = ${orgId} AND mo.role = 'owner') > 1)`
+				)
+			)
+			.returning({ userId: memberships.userId });
+		if (deleted.length === 0) throw error(400, 'promote a teammate to owner before leaving');
 		// If the session was acting in the org just left, clear active_org_id so
-		// resolution falls back to the oldest remaining membership.
+		// resolution falls back to the oldest remaining membership. Scoped to the
+		// caller's own session (PR #52 review).
 		await tx
 			.update(sessions)
 			.set({ activeOrgId: null })
-			.where(and(eq(sessions.id, sessionToken), eq(sessions.activeOrgId, orgId)));
+			.where(and(eq(sessions.id, sessionToken), eq(sessions.userId, userId), eq(sessions.activeOrgId, orgId)));
 	});
 }

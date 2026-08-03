@@ -39,6 +39,13 @@ The steps below are the one-time manual setup.
   success. If the tool no-ops, apply the SQL manually through the same
   journal bookkeeping (hash = sha256 of the file, `created_at` = journal
   `when`) inside one transaction.
+- For the multi-tenancy contract (migration `0013_channels_org_contract.sql`
+  and later), also run the tenancy Definition-of-Done probe against the
+  production database from a checkout with the production values sourced:
+  `node --env-file=.env scripts/verify-tenancy.mjs`. It is read-only except
+  one self-cleaning probe row, prints PASS/FAIL per invariant, and must end
+  with `ALL CHECKS PASSED` (exit 0) before the tenancy rollout is declared
+  done.
 
 ## 2. Netlify site
 

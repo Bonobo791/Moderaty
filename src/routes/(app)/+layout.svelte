@@ -25,7 +25,19 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <nav class="app-nav" aria-label="App">
 	<a class="brand" href="/dashboard">Moderaty</a>
 	<a href="/dashboard">Dashboard</a>
+	<a href="/org">Team</a>
 	<a href="/help">Help</a>
+	{#if data.orgs.length > 1}
+		<form method="POST" action="/org/switch" class="team-switch">
+			<label for="team-select">Team</label>
+			<select id="team-select" name="orgId">
+				{#each data.orgs as org (org.orgId)}
+					<option value={org.orgId} selected={org.orgId === data.user.orgId}>{org.name}</option>
+				{/each}
+			</select>
+			<button class="btn secondary small" type="submit">Switch team</button>
+		</form>
+	{/if}
 	<span class="account">
 		<span class="muted">{data.user.displayName}</span>
 		<form method="POST" action="/logout">
@@ -36,6 +48,11 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <main class="app-main">{@render children()}</main>
 
 <style>
+	.team-switch {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
 	.account {
 		margin-left: auto;
 		display: flex;

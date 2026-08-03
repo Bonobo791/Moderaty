@@ -356,4 +356,24 @@ describe('OAuth scope and ban claims match implementation', () => {
 		expect(banFaq, 'ban FAQ entry missing').toBeDefined();
 		expect(banFaq?.a).toMatch(/ban rule bans/i);
 	});
+
+	it('the FAQ acknowledges tone-score bans alongside toxicity', () => {
+		// pipeline.ts passes toneScore through the same aiOutcome AUTO_BAN=0.95
+		// threshold, so a 0.95+ tone score also bans automatically; the ban
+		// answer must not present toxicity as the only AI path.
+		const banFaq = FAQ_ENTRIES.find((f) => f.q === 'Will Moderaty ban my real fans?');
+		expect(banFaq, 'ban FAQ entry missing').toBeDefined();
+		expect(banFaq?.a).toMatch(/toxicity or tone/i);
+	});
+
+	it('the access FAQ discloses video title/description reads', () => {
+		// youtube.ts calls videos.list to read video titles/descriptions as
+		// tone-scoring context (pipeline.ts), so "only to read and moderate
+		// comments" understates what the token is used for.
+		const accessFaq = FAQ_ENTRIES.find(
+			(f) => f.q === 'What YouTube account access does Moderaty need?'
+		);
+		expect(accessFaq, 'access FAQ entry missing').toBeDefined();
+		expect(accessFaq?.a).toMatch(/titles? and descriptions?/i);
+	});
 });

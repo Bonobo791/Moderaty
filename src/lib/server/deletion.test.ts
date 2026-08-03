@@ -17,7 +17,7 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { and, eq } from 'drizzle-orm';
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
 
 import { DAY_MS, seedConsent, setupTestDb, testDb } from './testdb';
 import { auditLog, channels, comments, consents, invites, memberships, moderationActions, organizations, rules, sessions, users } from './db/schema';
@@ -246,6 +246,185 @@ test('deleteUserRecords rejects a nonexistent user id', async () => {
 		'deleteUserRecords: user no-such-user not found or already deleted'
 	);
 	expect(await testDb().db.select().from(users).all()).toEqual([]);
+});
+
+async function seedBareUser(id: string) {
+	await testDb()
+		.db.insert(users)
+		.values({ id, googleSub: `sub-${id}`, email: `${id}@example.com`, displayName: id });
+}
+
+/** Seeds a SHARED org (personalFor null) with members in an explicit join order (createdAt drives succession seniority). */
+async function seedSharedOrg(orgId: string, members: { userId: string; role: string; joinedAt: string }[]) {
+	await testDb().db.insert(organizations).values({ id: orgId, name: orgId });
+	for (const member of members) {
+		await testDb().db.insert(memberships).values({ userId: member.userId, orgId, role: member.role, createdAt: member.joinedAt });
+	}
+}
+
+async function teamMemberships(orgId: string) {
+	return await testDb().db.select().from(memberships).where(eq(memberships.orgId, orgId)).all();
+}
+
+test('deleteUserRecords removes only the membership when a plain member of a shared org leaves', async () => {
+	// A plain member (not an owner) of a shared org with other members: the org,
+	// its channels, and everyone else's roles are completely untouched — only
+	// the departing user's membership row (and their personal tenancy) goes.
+	const userId = await seedUser('gone');
+	await seedBareUser('owner-stays');
+	await seedBareUser('member-stays');
+	await seedSharedOrg('org-team', [
+		{ userId: 'owner-stays', role: 'owner', joinedAt: '2026-01-01T00:00:00.000Z' },
+		{ userId: 'member-stays', role: 'member', joinedAt: '2026-01-02T00:00:00.000Z' },
+		{ userId, role: 'member', joinedAt: '2026-01-03T00:00:00.000Z' }
+	]);
+	await testDb()
+		.db.insert(channels)
+		.values({ id: 'UC-team', userId: 'owner-stays', orgId: 'org-team', title: 'team channel', refreshTokenEnc: 'enc' });
+
+	await deleteUserRecords(userId);
+
+	expect(await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-team')).all()).toHaveLength(1);
+	expect(await teamMemberships('org-team')).toEqual(
+		expect.arrayContaining([
+			expect.objectContaining({ userId: 'owner-stays', role: 'owner' }),
+			expect.objectContaining({ userId: 'member-stays', role: 'member' })
+		])
+	);
+	expect(await teamMemberships('org-team')).toHaveLength(2);
+	// The channel the user did NOT connect is byte-for-byte the team's.
+	const team = (await testDb().db.select().from(channels).all()).find((c) => c.id === 'UC-team');
+	expect(team).toMatchObject({ userId: 'owner-stays', refreshTokenEnc: 'enc' });
+});
+
+test('deleteUserRecords promotes the oldest admin when the last owner of a shared org deletes their account', async () => {
+	// Succession: deleting the sole owner must never leave a shared org
+	// ownerless. The oldest ADMIN (by membership seniority) inherits ownership;
+	// the org, its channels, and all other roles survive. Logged loudly.
+	const userId = await seedUser('gone');
+	await seedBareUser('admin-old');
+	await seedBareUser('admin-new');
+	await seedBareUser('member-1');
+	await seedSharedOrg('org-team', [
+		{ userId, role: 'owner', joinedAt: '2026-01-01T00:00:00.000Z' },
+		{ userId: 'member-1', role: 'member', joinedAt: '2026-01-02T00:00:00.000Z' },
+		{ userId: 'admin-old', role: 'admin', joinedAt: '2026-01-03T00:00:00.000Z' },
+		{ userId: 'admin-new', role: 'admin', joinedAt: '2026-01-04T00:00:00.000Z' }
+	]);
+	await testDb()
+		.db.insert(channels)
+		.values({ id: 'UC-team', userId: 'admin-old', orgId: 'org-team', title: 'team channel', refreshTokenEnc: 'enc' });
+	const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+	await deleteUserRecords(userId);
+	const successionLogged = info.mock.calls.length > 0;
+	info.mockRestore();
+
+	expect(successionLogged).toBe(true);
+	const remaining = await teamMemberships('org-team');
+	expect(remaining).toHaveLength(3);
+	// The OLDER admin wins — join order, not name order, decides.
+	expect(remaining.find((m) => m.userId === 'admin-old')).toMatchObject({ role: 'owner' });
+	expect(remaining.find((m) => m.userId === 'admin-new')).toMatchObject({ role: 'admin' });
+	expect(remaining.find((m) => m.userId === 'member-1')).toMatchObject({ role: 'member' });
+	// The org and its channel survive the succession.
+	expect(await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-team')).all()).toHaveLength(1);
+	expect((await testDb().db.select().from(channels).all()).find((c) => c.id === 'UC-team')).toBeDefined();
+});
+
+test('deleteUserRecords promotes the oldest member when a shared org has no admin left', async () => {
+	// Succession fallback: no surviving admin → the oldest plain MEMBER inherits.
+	const userId = await seedUser('gone');
+	await seedBareUser('member-old');
+	await seedBareUser('member-new');
+	await seedSharedOrg('org-team', [
+		{ userId, role: 'owner', joinedAt: '2026-01-01T00:00:00.000Z' },
+		{ userId: 'member-old', role: 'member', joinedAt: '2026-01-02T00:00:00.000Z' },
+		{ userId: 'member-new', role: 'member', joinedAt: '2026-01-03T00:00:00.000Z' }
+	]);
+
+	await deleteUserRecords(userId);
+
+	const remaining = await teamMemberships('org-team');
+	expect(remaining).toHaveLength(2);
+	expect(remaining.find((m) => m.userId === 'member-old')).toMatchObject({ role: 'owner' });
+	expect(remaining.find((m) => m.userId === 'member-new')).toMatchObject({ role: 'member' });
+});
+
+test('deleteUserRecords leaves roles untouched when another owner survives in a shared org', async () => {
+	// No succession needed: a second owner remains, so nobody is promoted and
+	// every surviving role is exactly what it was.
+	const userId = await seedUser('gone');
+	await seedBareUser('owner-stays');
+	await seedBareUser('admin-stays');
+	await seedBareUser('member-stays');
+	await seedSharedOrg('org-team', [
+		{ userId, role: 'owner', joinedAt: '2026-01-01T00:00:00.000Z' },
+		{ userId: 'owner-stays', role: 'owner', joinedAt: '2026-01-02T00:00:00.000Z' },
+		{ userId: 'admin-stays', role: 'admin', joinedAt: '2026-01-03T00:00:00.000Z' },
+		{ userId: 'member-stays', role: 'member', joinedAt: '2026-01-04T00:00:00.000Z' }
+	]);
+	const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+	await deleteUserRecords(userId);
+	const successionLogged = info.mock.calls.length > 0;
+	info.mockRestore();
+
+	const remaining = await teamMemberships('org-team');
+	expect(remaining).toHaveLength(3);
+	expect(remaining).toEqual(
+		expect.arrayContaining([
+			expect.objectContaining({ userId: 'owner-stays', role: 'owner' }),
+			expect.objectContaining({ userId: 'admin-stays', role: 'admin' }),
+			expect.objectContaining({ userId: 'member-stays', role: 'member' })
+		])
+	);
+	// No succession happened, so no succession was logged.
+	expect(successionLogged).toBe(false);
+});
+
+test('deleteUserRecords dissolves a sole-member shared org with its channels and data', async () => {
+	// A SHARED org whose only member is the deleting user has no one to survive
+	// to: succession is impossible, so it dissolves exactly like a personal org —
+	// channels, moderation history, rules, invites, memberships, and the org row.
+	const userId = await seedUser('gone');
+	await seedSharedOrg('org-solo', [{ userId, role: 'owner', joinedAt: '2026-01-01T00:00:00.000Z' }]);
+	await testDb()
+		.db.insert(invites)
+		.values({ token: 'invite-solo', orgId: 'org-solo', role: 'member', createdBy: userId, expiresAt: new Date(Date.now() + DAY_MS).toISOString() });
+	await testDb()
+		.db.insert(channels)
+		.values({ id: 'UC-solo', userId, orgId: 'org-solo', title: 'solo team channel', refreshTokenEnc: 'enc' });
+	await testDb().db.insert(comments).values({
+		id: 'comment-solo',
+		channelId: 'UC-solo',
+		text: 'hi',
+		publishedAt: '2026-01-01T00:00:00.000Z',
+		status: 'approved',
+		decidedBy: 'ai'
+	});
+	await testDb().db.insert(moderationActions).values({
+		commentId: 'comment-solo',
+		channelId: 'UC-solo',
+		action: 'delete',
+		reason: 'test',
+		state: 'completed'
+	});
+	await testDb()
+		.db.insert(auditLog)
+		.values({ channelId: 'UC-solo', commentId: 'comment-solo', action: 'delete', reason: 'test', actor: 'system' });
+	await testDb().db.insert(rules).values({ channelId: 'UC-solo', type: 'keyword', pattern: 'spam', action: 'delete' });
+
+	await deleteUserRecords(userId);
+
+	// Both orgs (personal + sole-member shared) are gone with everything in them.
+	expect(await testDb().db.select().from(organizations).all()).toEqual([]);
+	expect(await testDb().db.select().from(memberships).all()).toEqual([]);
+	expect(await testDb().db.select().from(invites).all()).toEqual([]);
+	expect(await testDb().db.select().from(channels).all()).toEqual([]);
+	expect(await testDb().db.select().from(comments).all()).toEqual([]);
+	expect(await testDb().db.select().from(moderationActions).all()).toEqual([]);
+	expect(await testDb().db.select().from(auditLog).all()).toEqual([]);
+	expect(await testDb().db.select().from(rules).all()).toEqual([]);
+	expect(await userRow(userId)).toMatchObject({ googleSub: `deleted:${userId}` });
 });
 
 test('nullExpiredConsentEmails erases only the e-mail of consents older than 10 years', async () => {

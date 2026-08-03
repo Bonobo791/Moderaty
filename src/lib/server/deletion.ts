@@ -27,7 +27,7 @@
 // acceptance (CC Art. 205, conservative over CDC's 5-year prescription).
 // The consent row itself is kept, anonymized.
 
-import { and, eq, inArray, isNotNull, lt } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, lt, ne } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
 import { auditLog, channels, comments, consents, invites, memberships, moderationActions, organizations, rules, sessions, users } from '$lib/server/db/schema';
@@ -52,10 +52,14 @@ export function consentEmailCutoffIso(now = Date.now()): string {
 /**
  * Immediately and permanently erases a user's account data, preserving only the anonymized tombstone and the consent log.
  *
- * One transaction: moderation actions, comments, audit rows, and rules for
- * the user's PERSONAL-org channels; those channels themselves; every session;
- * and the user's tenancy — the personal org (whose name is the user's display
- * name, i.e. PII), every membership, and every invite they created. Explicit
+ * One transaction: for every org the user belongs to, either dissolve it
+ * (sole-member orgs — always true of the personal org — go with their
+ * channels, moderation actions, comments, audit rows, rules, and invites)
+ * or leave it to its surviving members (shared orgs), promoting the oldest
+ * admin — else the oldest member — to owner when the deleting user was the
+ * last owner, so a surviving org is never left ownerless. Every session;
+ * and the rest of the user's tenancy — every remaining membership and every
+ * invite they created — goes too. Explicit
  * deletes in child-to-parent order rather than FK reliance: the users row is
  * only tombstoned, so ON DELETE CASCADE never fires. A channel the user
  * merely CONNECTED (channels.userId) in a surviving team org is NOT deleted —
@@ -82,8 +86,8 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 		if (!user || user.googleSub.startsWith('deleted:')) {
 			throw new Error(`deleteUserRecords: user ${userId} not found or already deleted`);
 		}
-		// Tenancy first: the personal org ids decide which channels die with the
-		// account (personal-org ones) versus detach (team ones the user only
+		// Tenancy first: per-org fates (dissolve versus survive) decide which
+		// channels die with the account versus detach (team ones the user only
 		// connected). The personal org is single-member by definition; a shared
 		// org the user merely belongs to survives (its other members own it) —
 		// only the user's membership row leaves.
@@ -92,8 +96,8 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 			.from(organizations)
 			.where(eq(organizations.personalFor, userId))
 			.all();
-		const orgIds = personalOrgs.map((o) => o.id);
-		if (orgIds.length) {
+		const personalOrgIds = personalOrgs.map((o) => o.id);
+		if (personalOrgIds.length) {
 			// Data-bug guard: a personal org is single-member by definition, but
 			// the schema cannot enforce that. Require exactly one membership per
 			// personal org, owned by the deleting user — anything else (a second
@@ -103,15 +107,50 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 			const orgMembers = await tx
 				.select({ userId: memberships.userId })
 				.from(memberships)
-				.where(inArray(memberships.orgId, orgIds))
+				.where(inArray(memberships.orgId, personalOrgIds))
 				.all();
-			if (orgMembers.length !== orgIds.length || orgMembers.some((m) => m.userId !== userId)) {
+			if (orgMembers.length !== personalOrgIds.length || orgMembers.some((m) => m.userId !== userId)) {
 				console.error(`user ${userId}'s personal org membership is inconsistent (${orgMembers.length} rows) — refusing account deletion`);
 				throw new Error('personal organization has other members — contact support');
 			}
 		}
-		const chs = orgIds.length
-			? await tx.select({ id: channels.id }).from(channels).where(inArray(channels.orgId, orgIds)).all()
+		// Every org the user belongs to decides its own fate. A sole-member org
+		// (personal or shared — the guard above already proved personal orgs are
+		// sole-member) has no one to survive to, so it dissolves with its
+		// channels and data. A shared org with other members survives; when the
+		// deleting user was its LAST owner, ownership passes to the oldest admin,
+		// else the oldest member (seniority = join order, userId breaking ties),
+		// so a shared org is never left ownerless.
+		const userMemberships = await tx
+			.select({ orgId: memberships.orgId, role: memberships.role })
+			.from(memberships)
+			.where(eq(memberships.userId, userId))
+			.all();
+		const dissolveOrgIds: string[] = [];
+		for (const membership of userMemberships) {
+			const others = await tx
+				.select({ userId: memberships.userId, role: memberships.role, createdAt: memberships.createdAt })
+				.from(memberships)
+				.where(and(eq(memberships.orgId, membership.orgId), ne(memberships.userId, userId)))
+				.all();
+			if (!others.length) {
+				dissolveOrgIds.push(membership.orgId);
+				continue;
+			}
+			if (membership.role === 'owner' && !others.some((m) => m.role === 'owner')) {
+				const ranked = [...others].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.userId.localeCompare(b.userId));
+				const successor = ranked.find((m) => m.role === 'admin') ?? ranked[0];
+				await tx
+					.update(memberships)
+					.set({ role: 'owner' })
+					.where(and(eq(memberships.orgId, membership.orgId), eq(memberships.userId, successor.userId)));
+				console.info(
+					`account deletion: promoted user ${successor.userId} to owner of org ${membership.orgId} (last owner ${userId} was deleted)`
+				);
+			}
+		}
+		const chs = dissolveOrgIds.length
+			? await tx.select({ id: channels.id }).from(channels).where(inArray(channels.orgId, dissolveOrgIds)).all()
 			: [];
 		const channelIds = chs.map((ch) => ch.id);
 		if (channelIds.length) {
@@ -128,10 +167,10 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 			.set({ userId: null, refreshTokenEnc: WIPED_REFRESH_TOKEN })
 			.where(eq(channels.userId, userId));
 		await tx.delete(sessions).where(eq(sessions.userId, userId));
-		if (orgIds.length) {
-			await tx.delete(invites).where(inArray(invites.orgId, orgIds));
-			await tx.delete(memberships).where(inArray(memberships.orgId, orgIds));
-			await tx.delete(organizations).where(inArray(organizations.id, orgIds));
+		if (dissolveOrgIds.length) {
+			await tx.delete(invites).where(inArray(invites.orgId, dissolveOrgIds));
+			await tx.delete(memberships).where(inArray(memberships.orgId, dissolveOrgIds));
+			await tx.delete(organizations).where(inArray(organizations.id, dissolveOrgIds));
 		}
 		await tx.delete(invites).where(eq(invites.createdBy, userId));
 		await tx.delete(memberships).where(eq(memberships.userId, userId));

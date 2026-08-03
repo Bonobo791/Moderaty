@@ -17,7 +17,7 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { beforeEach, expect, test, vi } from 'vitest';
-import { postForm, setupTestDb, testDb } from '$lib/server/testdb';
+import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
 import { auditLog, channels, comments } from '$lib/server/db/schema';
 import { eq } from 'drizzle-orm';
 
@@ -44,8 +44,8 @@ beforeEach(async () => {
 	await testDb()
 		.db.insert(channels)
 		.values([
-			{ id: 'UC1', userId: OWNER.id, title: 'One', refreshTokenEnc: 'enc-1' },
-			{ id: 'UC2', userId: OWNER.id, title: 'Two', refreshTokenEnc: 'enc-2' }
+			{ id: 'UC1', userId: OWNER.id, orgId: 'org-1', title: 'One', refreshTokenEnc: 'enc-1' },
+			{ id: 'UC2', userId: OWNER.id, orgId: 'org-1', title: 'Two', refreshTokenEnc: 'enc-2' }
 		]);
 	mocks.env.DRY_RUN = 'true';
 	vi.clearAllMocks();
@@ -53,7 +53,7 @@ beforeEach(async () => {
 
 const QUEUE_URL = 'http://localhost/channels/UC1/queue';
 
-const OWNER = { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' };
+const OWNER = TEST_OWNER;
 
 const actionNames = ['approve', 'reject', 'del', 'ban'] as const;
 
@@ -187,8 +187,10 @@ test('reject outside DRY_RUN calls YouTube and audits reject', async () => {
 	expect(audits[0]).toMatchObject({ channelId: 'UC1', commentId: 'c1', action: 'reject', actor: 'user' });
 });
 
-test('act fails loudly on a channel owned by another user and changes nothing', async () => {
-	await testDb().db.update(channels).set({ userId: 'user-2' }).where(eq(channels.id, 'UC1'));
+test('act fails loudly on a channel owned by another team and changes nothing', async () => {
+	// The caller personally connected UC1 — under a different team. The org
+	// gate must still 404 it (a per-user check would wrongly pass here).
+	await testDb().db.update(channels).set({ orgId: 'org-2' }).where(eq(channels.id, 'UC1'));
 	await seedComment('c9', 'UC1');
 	for (const name of actionNames) {
 		await expect(act(name, { commentId: 'c9' })).rejects.toThrowError(expect.objectContaining({ status: 404 }));

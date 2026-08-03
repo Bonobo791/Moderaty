@@ -26,11 +26,14 @@ import { encrypt } from '$lib/server/crypto';
 import { exchangeGoogleCode } from '$lib/server/google';
 import { fetchWithRetry } from '$lib/server/http';
 import { readPendingStates, storePendingStates } from '$lib/server/oauthState';
+import { requireOrgRole } from '$lib/server/ownership';
 import { requireUser } from '$lib/server/session';
 
 export async function GET({ url, cookies, locals }: { url: URL; cookies: import('@sveltejs/kit').Cookies; locals: { user: import('$lib/server/session').SessionUser | null } }) {
-	// Connecting a channel requires a signed-in account to attach it to.
+	// Connecting a channel requires a signed-in account to attach it to — and
+	// an admin+ role in the ACTIVE team (members moderate; they don't connect).
 	const user = requireUser(locals);
+	requireOrgRole(user, 'admin');
 
 	const state = url.searchParams.get('state');
 	const pending = readPendingStates(cookies);
@@ -79,15 +82,18 @@ export async function GET({ url, cookies, locals }: { url: URL; cookies: import(
 	}
 	const title = typeof ch.snippet?.title === 'string' ? ch.snippet.title : 'Untitled channel';
 
-	// A channel already owned by another account must not be reattached (or have
-	// its refresh token overwritten) by this one. The conditional upsert keeps
-	// that check atomic with the write — a SELECT-then-upsert would race.
+	// A channel already owned by another team must not be reattached (or have
+	// its refresh token overwritten) by this one; a teammate re-connecting a
+	// channel their team already owns IS allowed (the token-handover path).
+	// The conditional upsert keeps that check atomic with the write — a
+	// SELECT-then-upsert would race.
 	const refreshTokenEnc = encrypt(tokens.refreshToken);
 	const updated = await db
 		.insert(channels)
 		.values({
 			id: ch.id,
 			userId: user.id,
+			orgId: user.orgId,
 			title,
 			refreshTokenEnc,
 			active: 1,
@@ -95,12 +101,12 @@ export async function GET({ url, cookies, locals }: { url: URL; cookies: import(
 		})
 		.onConflictDoUpdate({
 			target: channels.id,
-			set: { userId: user.id, title, refreshTokenEnc, active: 1 },
-			setWhere: or(isNull(channels.userId), eq(channels.userId, user.id))
+			set: { userId: user.id, orgId: user.orgId, title, refreshTokenEnc, active: 1 },
+			setWhere: or(isNull(channels.orgId), eq(channels.orgId, user.orgId))
 		})
 		.returning({ id: channels.id });
 	if (updated.length === 0) {
-		throw error(409, 'this channel is connected to a different Moderaty account');
+		throw error(409, 'this channel is connected to a different Moderaty team');
 	}
 
 	// Consume the state only once the flow has succeeded, so a transient

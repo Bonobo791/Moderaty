@@ -68,6 +68,10 @@ export function postForm(fields: Record<string, string>, url = 'http://localhost
 
 export const DAY_MS = 24 * 60 * 60 * 1000;
 
+// Re-exported so test files can take fixtures and db helpers from one place;
+// the fixture itself lives in the side-effect-free testuser.ts.
+export { TEST_OWNER } from './testuser';
+
 /** Seeds a bare user row with a synthetic identity. */
 export async function seedUser(id: string): Promise<string> {
 	await testDb().db.insert(users).values({ id, googleSub: `sub-${id}`, email: `${id}@example.com`, displayName: id });

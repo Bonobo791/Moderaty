@@ -17,7 +17,7 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { beforeEach, expect, test, vi } from 'vitest';
-import { postForm, setupTestDb, testDb } from '$lib/server/testdb';
+import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
 import { auditLog, channels, comments } from '$lib/server/db/schema';
 import { eq } from 'drizzle-orm';
 
@@ -39,21 +39,21 @@ import { actions } from './+page.server';
 
 setupTestDb(['audit_log', 'comments', 'channels']);
 
-const OWNER = { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' };
+const OWNER = TEST_OWNER;
 const LOG_URL = 'http://localhost/channels/UC1/log';
 
 beforeEach(async () => {
 	await testDb()
 		.db.insert(channels)
-		.values({ id: 'UC1', userId: OWNER.id, title: 'One', refreshTokenEnc: 'enc-1' });
+		.values({ id: 'UC1', userId: OWNER.id, orgId: 'org-1', title: 'One', refreshTokenEnc: 'enc-1' });
 	mocks.env.DRY_RUN = 'false';
 	vi.clearAllMocks();
 });
 
-async function seedComment(id: string, status: string, priorAction: string) {
+async function seedComment(id: string, status: string, priorAction: string, channelId = 'UC1') {
 	await testDb().db.insert(comments).values({
 		id,
-		channelId: 'UC1',
+		channelId,
 		text: 'hello',
 		publishedAt: '2026-01-01T00:00:00Z',
 		status,
@@ -61,7 +61,7 @@ async function seedComment(id: string, status: string, priorAction: string) {
 	});
 	await testDb()
 		.db.insert(auditLog)
-		.values({ channelId: 'UC1', commentId: id, action: priorAction, reason: 'ai score 0.91', actor: 'system' });
+		.values({ channelId, commentId: id, action: priorAction, reason: 'ai score 0.91', actor: 'system' });
 }
 
 function undo(commentId: string | null, channelId = 'UC1', user: typeof OWNER | null = OWNER) {
@@ -172,11 +172,17 @@ test('undo rejects a signed-out request with 401', async () => {
 	await expect(undo('c1', 'UC1', null)).rejects.toMatchObject({ status: 401 });
 });
 
-test('undo on another user\'s channel 404s without leaking existence', async () => {
-	await seedComment('c1', 'rejected', 'reject');
+test('undo on another team\'s channel 404s without leaking existence', async () => {
+	// The caller personally connected UC2 — under a different team. The org
+	// gate must still 404 it (a per-user check would wrongly pass here).
+	await testDb()
+		.db.insert(channels)
+		.values({ id: 'UC2', userId: OWNER.id, orgId: 'org-2', title: 'Two', refreshTokenEnc: 'enc-2' });
+	await seedComment('c9', 'rejected', 'reject', 'UC2');
 
-	await expect(undo('c1', 'UC2')).rejects.toMatchObject({ status: 404 });
-	expect(await commentRow('c1')).toMatchObject({ status: 'rejected' });
+	await expect(undo('c9', 'UC2')).rejects.toMatchObject({ status: 404 });
+	expect(await commentRow('c9')).toMatchObject({ status: 'rejected' });
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
 });
 
 test('undo without a comment id fails with 400', async () => {

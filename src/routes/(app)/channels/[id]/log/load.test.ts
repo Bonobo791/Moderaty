@@ -17,19 +17,19 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { expect, test } from 'vitest';
-import { setupTestDb, testDb } from '$lib/server/testdb';
+import { TEST_OWNER, setupTestDb, testDb } from '$lib/server/testdb';
 import { auditLog, channels } from '$lib/server/db/schema';
 
 import { load } from './+page.server';
 
 setupTestDb(['audit_log', 'channels']);
 
-const OWNER = { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' };
+const OWNER = TEST_OWNER;
 
 async function seedChannel() {
 	await testDb()
 		.db.insert(channels)
-		.values({ id: 'UC1', userId: OWNER.id, title: 'Ch', refreshTokenEnc: 'enc-secret' });
+		.values({ id: 'UC1', userId: OWNER.id, orgId: 'org-1', title: 'Ch', refreshTokenEnc: 'enc-secret' });
 }
 
 async function seedEntries(rows: { commentId: string; action: string; createdAt: string }[]) {
@@ -82,7 +82,7 @@ test('tied timestamps still pick the truly latest action (auto-increment id brea
 test('load projects only the channel fields the page renders — never the credential', async () => {
 	await testDb()
 		.db.insert(channels)
-		.values({ id: 'UC1', userId: OWNER.id, title: 'Ch', refreshTokenEnc: 'enc-secret' });
+		.values({ id: 'UC1', userId: OWNER.id, orgId: 'org-1', title: 'Ch', refreshTokenEnc: 'enc-secret' });
 
 	const result = await load({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);
 
@@ -90,10 +90,24 @@ test('load projects only the channel fields the page renders — never the crede
 	expect(result?.ch).not.toHaveProperty('refreshTokenEnc');
 });
 
-test('load on a channel owned by another user fails with 404', async () => {
+test('load on a same-team channel connected by a teammate succeeds', async () => {
+	// Tenancy is per-ORG: who connected the channel no longer gates access.
 	await testDb()
 		.db.insert(channels)
-		.values({ id: 'UC1', userId: 'user-2', title: 'Ch', refreshTokenEnc: 'enc-secret' });
+		.values({ id: 'UC1', userId: 'user-2', orgId: 'org-1', title: 'Ch', refreshTokenEnc: 'enc-secret' });
+
+	const result = await load({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);
+
+	expect(result?.ch).toEqual({ id: 'UC1', title: 'Ch' });
+});
+
+test('load on a channel owned by another team fails with 404', async () => {
+	// The caller personally connected this channel — under another team. The
+	// org gate, not the connector, decides access (a per-user check would
+	// wrongly pass here).
+	await testDb()
+		.db.insert(channels)
+		.values({ id: 'UC1', userId: OWNER.id, orgId: 'org-2', title: 'Ch', refreshTokenEnc: 'enc-secret' });
 
 	await expect(load({ params: { id: 'UC1' }, locals: { user: OWNER } } as never)).rejects.toMatchObject({ status: 404 });
 });
@@ -101,7 +115,7 @@ test('load on a channel owned by another user fails with 404', async () => {
 test('load rejects a signed-out request with 401', async () => {
 	await testDb()
 		.db.insert(channels)
-		.values({ id: 'UC1', userId: OWNER.id, title: 'Ch', refreshTokenEnc: 'enc-secret' });
+		.values({ id: 'UC1', userId: OWNER.id, orgId: 'org-1', title: 'Ch', refreshTokenEnc: 'enc-secret' });
 
 	await expect(load({ params: { id: 'UC1' }, locals: { user: null } } as never)).rejects.toMatchObject({ status: 401 });
 });

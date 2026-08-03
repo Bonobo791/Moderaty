@@ -28,6 +28,7 @@
 // Exit code 0 = every invariant holds; 1 = at least one failed (each failure
 // prints loudly with the offending rows).
 
+import { randomUUID } from 'node:crypto';
 import { createClient } from '@libsql/client';
 
 const url = process.env.TURSO_DATABASE_URL;
@@ -45,72 +46,116 @@ function report(label, ok, detail) {
 	if (!ok) failures += 1;
 }
 
+const fail = (error) => `unexpected error: ${error instanceof Error ? error.message : String(error)}`;
+
 const scalar = async (sql) => {
 	const result = await client.execute(sql);
-	if (!result.rows.length) throw new Error(`verify-tenancy: count query returned no rows: ${sql}`);
+	if (!result.rows.length) throw new Error(`verify-tenancy: count query returned no rows: ${JSON.stringify(sql)}`);
 	return result.rows[0].n;
 };
 const rows = async (sql) => (await client.execute(sql)).rows;
 
-console.log(`verify-tenancy against ${url}`);
-
-// 1. Structural integrity.
-report('PRAGMA foreign_key_check returns zero rows', (await rows('PRAGMA foreign_key_check')).length === 0, JSON.stringify(await rows('PRAGMA foreign_key_check')));
-const integrity = (await client.execute('PRAGMA integrity_check')).rows[0].integrity_check;
-report('PRAGMA integrity_check is ok', integrity === 'ok', integrity);
-
-// 2. Tenancy contract: the CHECK exists and bites.
-const ddl = (await client.execute("SELECT sql FROM sqlite_master WHERE name = 'channels' AND type = 'table'")).rows[0]?.sql ?? '';
-report('channels DDL contains channels_org_requires_owner', ddl.includes('channels_org_requires_owner'), ddl.slice(0, 200));
-let rejected = false;
-let probeDetail = 'INSERT was allowed';
-try {
-	await client.execute("INSERT INTO channels (id, user_id, title, refresh_token_enc) VALUES ('UCverify-probe', 'probe', 't', 'x')");
-} catch (error) {
-	const message = error instanceof Error ? error.message : String(error);
-	// Only the CONTRACT failing counts as a rejection — anything else (missing
-	// table, connection drop) is a probe failure and must read as FAIL, never
-	// as a false PASS.
-	if (/channels_org_requires_owner|CHECK constraint/i.test(message)) {
-		rejected = true;
-	} else {
-		probeDetail = `unexpected error (not the contract): ${message}`;
+/** Zero-count invariant with per-check containment: a broken query is a loud FAIL, never an abort. */
+async function expectZero(label, countSql, detailSql) {
+	try {
+		const n = await scalar(countSql);
+		report(label, n === 0, JSON.stringify(await rows(detailSql)));
+	} catch (error) {
+		report(label, false, fail(error));
 	}
 }
-report('owned channel with NULL org is rejected', rejected, probeDetail);
-// Cleanup is unconditional: on a pre-contract database the probe INSERT
-// succeeds, and the row must not be left behind in the database being verified.
-await client.execute("DELETE FROM channels WHERE id = 'UCverify-probe'");
-const orphans = await scalar("SELECT count(*) AS n FROM channels WHERE id = 'UCverify-probe'");
-report('probe row is gone after cleanup', orphans === 0, `${orphans} row(s) present`);
 
-// 3. Data invariants.
-report(
-	'zero channels with user_id set and org_id NULL',
-	(await scalar('SELECT count(*) AS n FROM channels WHERE user_id IS NOT NULL AND org_id IS NULL')) === 0,
-	JSON.stringify(await rows('SELECT id FROM channels WHERE user_id IS NOT NULL AND org_id IS NULL'))
-);
-report(
-	'every live user has exactly one personal org',
-	(await scalar(`SELECT count(*) AS n FROM (SELECT u.id FROM users u LEFT JOIN organizations o ON o.personal_for = u.id WHERE u.google_sub NOT LIKE 'deleted:%' GROUP BY u.id HAVING count(o.id) != 1)`)) === 0,
-	JSON.stringify(await rows(`SELECT u.id, count(o.id) AS orgs FROM users u LEFT JOIN organizations o ON o.personal_for = u.id WHERE u.google_sub NOT LIKE 'deleted:%' GROUP BY u.id HAVING orgs != 1`))
-);
-report(
-	'every live user owns their personal org',
-	(await scalar(`SELECT count(*) AS n FROM users u WHERE u.google_sub NOT LIKE 'deleted:%' AND NOT EXISTS (SELECT 1 FROM memberships m JOIN organizations o ON o.id = m.org_id WHERE m.user_id = u.id AND o.personal_for = u.id AND m.role = 'owner')`)) === 0,
-	JSON.stringify(await rows(`SELECT u.id FROM users u WHERE u.google_sub NOT LIKE 'deleted:%' AND NOT EXISTS (SELECT 1 FROM memberships m JOIN organizations o ON o.id = m.org_id WHERE m.user_id = u.id AND o.personal_for = u.id AND m.role = 'owner')`))
-);
-report(
-	'no ownerless orgs',
-	(await scalar(`SELECT count(*) AS n FROM organizations o WHERE NOT EXISTS (SELECT 1 FROM memberships m WHERE m.org_id = o.id AND m.role = 'owner')`)) === 0,
-	JSON.stringify(await rows(`SELECT o.id FROM organizations o WHERE NOT EXISTS (SELECT 1 FROM memberships m WHERE m.org_id = o.id AND m.role = 'owner')`))
-);
-report(
-	'no memberless orgs',
-	(await scalar('SELECT count(*) AS n FROM organizations o WHERE NOT EXISTS (SELECT 1 FROM memberships m WHERE m.org_id = o.id)')) === 0,
-	JSON.stringify(await rows('SELECT o.id FROM organizations o WHERE NOT EXISTS (SELECT 1 FROM memberships m WHERE m.org_id = o.id)'))
-);
+console.log(`verify-tenancy against ${url}`);
+
+try {
+	// 1. Structural integrity.
+	try {
+		const fk = await rows('PRAGMA foreign_key_check');
+		report('PRAGMA foreign_key_check returns zero rows', fk.length === 0, JSON.stringify(fk));
+	} catch (error) {
+		report('PRAGMA foreign_key_check returns zero rows', false, fail(error));
+	}
+	try {
+		const integrity = (await client.execute('PRAGMA integrity_check')).rows[0]?.integrity_check;
+		report('PRAGMA integrity_check is ok', integrity === 'ok', String(integrity));
+	} catch (error) {
+		report('PRAGMA integrity_check is ok', false, fail(error));
+	}
+
+	// 2. Tenancy contract: the CHECK exists and bites.
+	let ddl = '';
+	try {
+		ddl = (await client.execute("SELECT sql FROM sqlite_master WHERE name = 'channels' AND type = 'table'")).rows[0]?.sql ?? '';
+	} catch (error) {
+		report('channels DDL is readable', false, fail(error));
+	}
+	report('channels DDL contains channels_org_requires_owner', ddl.includes('channels_org_requires_owner'), ddl.slice(0, 200));
+	const probeId = `UCverify-${randomUUID()}`;
+	let rejected = false;
+	let inserted = false;
+	let probeDetail = 'INSERT was allowed';
+	try {
+		await client.execute({
+			sql: 'INSERT INTO channels (id, user_id, title, refresh_token_enc) VALUES (?, ?, ?, ?)',
+			args: [probeId, 'probe', 't', 'x']
+		});
+		inserted = true;
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		// Only the CONTRACT failing counts as a rejection — anything else
+		// (missing table, a DIFFERENT constraint, connection drop) is a probe
+		// failure and must read as FAIL, never as a false PASS.
+		if (/channels_org_requires_owner/i.test(message)) {
+			rejected = true;
+		} else {
+			probeDetail = `unexpected error (not the contract): ${message}`;
+		}
+	}
+	report('owned channel with NULL org is rejected', rejected, probeDetail);
+	// Cleanup touches only the row THIS invocation inserted, and only when the
+	// INSERT actually succeeded — a fresh UUID per run can never match
+	// pre-existing data.
+	if (inserted) {
+		try {
+			await client.execute({ sql: 'DELETE FROM channels WHERE id = ?', args: [probeId] });
+			const orphans = await scalar({ sql: 'SELECT count(*) AS n FROM channels WHERE id = ?', args: [probeId] });
+			report('probe row is gone after cleanup', orphans === 0, `${orphans} row(s) present`);
+		} catch (error) {
+			report('probe row is gone after cleanup', false, fail(error));
+		}
+	}
+
+	// 3. Data invariants.
+	await expectZero(
+		'zero channels with user_id set and org_id NULL',
+		'SELECT count(*) AS n FROM channels WHERE user_id IS NOT NULL AND org_id IS NULL',
+		'SELECT id FROM channels WHERE user_id IS NOT NULL AND org_id IS NULL'
+	);
+	await expectZero(
+		'every live user has exactly one personal org',
+		`SELECT count(*) AS n FROM (SELECT u.id FROM users u LEFT JOIN organizations o ON o.personal_for = u.id WHERE u.google_sub NOT LIKE 'deleted:%' GROUP BY u.id HAVING count(o.id) != 1)`,
+		`SELECT u.id, count(o.id) AS orgs FROM users u LEFT JOIN organizations o ON o.personal_for = u.id WHERE u.google_sub NOT LIKE 'deleted:%' GROUP BY u.id HAVING orgs != 1`
+	);
+	await expectZero(
+		'every live user owns their personal org',
+		`SELECT count(*) AS n FROM users u WHERE u.google_sub NOT LIKE 'deleted:%' AND NOT EXISTS (SELECT 1 FROM memberships m JOIN organizations o ON o.id = m.org_id WHERE m.user_id = u.id AND o.personal_for = u.id AND m.role = 'owner')`,
+		`SELECT u.id FROM users u WHERE u.google_sub NOT LIKE 'deleted:%' AND NOT EXISTS (SELECT 1 FROM memberships m JOIN organizations o ON o.id = m.org_id WHERE m.user_id = u.id AND o.personal_for = u.id AND m.role = 'owner')`
+	);
+	await expectZero(
+		'no ownerless orgs',
+		`SELECT count(*) AS n FROM organizations o WHERE NOT EXISTS (SELECT 1 FROM memberships m WHERE m.org_id = o.id AND m.role = 'owner')`,
+		`SELECT o.id FROM organizations o WHERE NOT EXISTS (SELECT 1 FROM memberships m WHERE m.org_id = o.id AND m.role = 'owner')`
+	);
+	await expectZero(
+		'no memberless orgs',
+		'SELECT count(*) AS n FROM organizations o WHERE NOT EXISTS (SELECT 1 FROM memberships m WHERE m.org_id = o.id)',
+		'SELECT o.id FROM organizations o WHERE NOT EXISTS (SELECT 1 FROM memberships m WHERE m.org_id = o.id)'
+	);
+} catch (error) {
+	report('verify-tenancy completed without internal errors', false, fail(error));
+} finally {
+	client.close();
+}
 
 console.log(failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`);
-client.close();
 process.exit(failures === 0 ? 0 : 1);

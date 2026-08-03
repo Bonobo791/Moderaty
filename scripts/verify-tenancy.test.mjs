@@ -94,13 +94,15 @@ INSERT INTO channels (id, user_id, org_id, title, refresh_token_enc) VALUES ('UC
 `;
 
 /** Builds a temp database; withContract toggles the CHECK constraint (the pre-0013 shape). */
-async function buildDb(name, { withContract, withChannels = true, seedSql = '' }) {
+async function buildDb(name, { withContract, withChannels = true, seedSql = '', extraConstraint = '' }) {
 	const url = `file:${join(tmp, name)}`;
 	const client = createClient({ url });
 	const channelsDdl = withChannels
 		? CHANNELS_DDL.replace(
 				'<CONTRACT>',
-				withContract ? ',\n\tCONSTRAINT channels_org_requires_owner CHECK (org_id IS NOT NULL OR user_id IS NULL)' : ''
+				(withContract
+					? ',\n\tCONSTRAINT channels_org_requires_owner CHECK (org_id IS NOT NULL OR user_id IS NULL)'
+					: '') + extraConstraint
 			)
 		: '';
 	for (const statement of (NON_CHANNEL_DDL + channelsDdl + seedSql).split(';')) {
@@ -140,15 +142,71 @@ describe('verify-tenancy', () => {
 		// The probe INSERT succeeds here — it must be deleted, not left behind.
 		expect(stdout).toContain('PASS  probe row is gone after cleanup');
 		const client = createClient({ url });
-		const leftover = await client.execute("SELECT count(*) AS n FROM channels WHERE id = 'UCverify-probe'");
+		const leftover = await client.execute("SELECT count(*) AS n FROM channels WHERE id LIKE 'UCverify-%'");
 		client.close();
 		expect(leftover.rows[0].n).toBe(0);
 	}, 20000);
 
 	it('never false-passes when the probe fails for a non-contract reason (no channels table)', async () => {
 		// A bare catch would report the missing-table error as "rejected" (a
-		// PASS). The probe must read as FAIL with the actual error instead.
+		// PASS). The probe must read as FAIL with the actual error instead, and
+		// the run must still reach its final summary instead of crashing.
 		const url = await buildDb('no-channels.db', { withContract: true, withChannels: false, seedSql: SEED_TENANCY });
+		const { code, stdout } = await runProbe(url);
+		expect(code).toBe(1);
+		expect(stdout).toContain('FAIL  owned channel with NULL org is rejected');
+		expect(stdout).toContain('unexpected error');
+		expect(stdout).toContain('CHECK(S) FAILED');
+	}, 20000);
+
+	it('never deletes a pre-existing row that happens to use the legacy probe id', async () => {
+		// The probe must clean up only the row THIS invocation inserted; a row
+		// that predates the run is data, not probe debris.
+		const url = await buildDb('legacy-probe-row.db', {
+			withContract: false,
+			seedSql:
+				SEED_TENANCY +
+				SEED_CHANNEL +
+				"INSERT INTO channels (id, user_id, org_id, title, refresh_token_enc) VALUES ('UCverify-probe', NULL, 'org-u1', 'Legacy', 'enc');"
+		});
+		const { code, stdout } = await runProbe(url);
+		expect(code).toBe(1); // pre-contract database still fails the contract checks
+		// The probe INSERT itself must succeed (proving the contract really is
+		// absent), which requires an ID that cannot collide with existing data.
+		expect(stdout).toContain('INSERT was allowed');
+		const client = createClient({ url });
+		const legacy = await client.execute("SELECT count(*) AS n FROM channels WHERE id = 'UCverify-probe'");
+		client.close();
+		expect(legacy.rows[0].n).toBe(1);
+	}, 20000);
+
+	it('probe result does not depend on pre-existing rows (contract DB with legacy probe id)', async () => {
+		// Even if a row literally named 'UCverify-probe' exists, the probe must
+		// still prove the contract (PASS) and leave that row untouched.
+		const url = await buildDb('contract-legacy-probe-row.db', {
+			withContract: true,
+			seedSql:
+				SEED_TENANCY +
+				SEED_CHANNEL +
+				"INSERT INTO channels (id, user_id, org_id, title, refresh_token_enc) VALUES ('UCverify-probe', NULL, 'org-u1', 'Legacy', 'enc');"
+		});
+		const { code, stdout } = await runProbe(url);
+		expect(code).toBe(0);
+		expect(stdout).toContain('PASS  owned channel with NULL org is rejected');
+		const client = createClient({ url });
+		const legacy = await client.execute("SELECT count(*) AS n FROM channels WHERE id = 'UCverify-probe'");
+		client.close();
+		expect(legacy.rows[0].n).toBe(1);
+	}, 20000);
+
+	it('never counts a different CHECK constraint as the tenancy contract', async () => {
+		// channels_title_len rejects the probe INSERT (title 't' is too short);
+		// that is NOT proof that channels_org_requires_owner bites.
+		const url = await buildDb('other-check.db', {
+			withContract: false,
+			extraConstraint: ',\n\tCONSTRAINT channels_title_len CHECK (length(title) > 1)',
+			seedSql: SEED_TENANCY + SEED_CHANNEL
+		});
 		const { code, stdout } = await runProbe(url);
 		expect(code).toBe(1);
 		expect(stdout).toContain('FAIL  owned channel with NULL org is rejected');

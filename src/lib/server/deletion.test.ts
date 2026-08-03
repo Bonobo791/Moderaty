@@ -31,10 +31,39 @@ import {
 
 setupTestDb(['moderation_actions', 'comments', 'audit_log', 'rules', 'channels', 'sessions', 'consents', 'invites', 'memberships', 'organizations', 'users']);
 
-async function seedUser(id: string) {
+/** Seeds one comment plus its moderation action, audit row, and keyword rule for a channel. */
+async function seedModerationData(channelId: string, key: string) {
+	await testDb().db.insert(comments).values({
+		id: `comment-${key}`,
+		channelId,
+		text: 'hi',
+		publishedAt: '2026-01-01T00:00:00.000Z',
+		status: 'approved',
+		decidedBy: 'ai'
+	});
+	await testDb().db.insert(moderationActions).values({
+		commentId: `comment-${key}`,
+		channelId,
+		action: 'delete',
+		reason: 'test',
+		state: 'completed'
+	});
+	await testDb()
+		.db.insert(auditLog)
+		.values({ channelId, commentId: `comment-${key}`, action: 'delete', reason: 'test', actor: 'system' });
+	await testDb()
+		.db.insert(rules)
+		.values({ channelId, type: 'keyword', pattern: 'spam', action: 'delete' });
+}
+
+async function seedBareUser(id: string) {
 	await testDb()
 		.db.insert(users)
 		.values({ id, googleSub: `sub-${id}`, email: `${id}@example.com`, displayName: id });
+}
+
+async function seedUser(id: string) {
+	await seedBareUser(id);
 	// Every real user has a personal org (0012 backfill / signup) — an org row
 	// named after them, an owner membership, and (Phase D shape) an invite.
 	await testDb()
@@ -50,27 +79,7 @@ async function seedUser(id: string) {
 	await testDb()
 		.db.insert(sessions)
 		.values({ id: `token-${id}`, userId: id, expiresAt: new Date(Date.now() + DAY_MS).toISOString() });
-	await testDb().db.insert(comments).values({
-		id: `comment-${id}`,
-		channelId: `UC-${id}`,
-		text: 'hi',
-		publishedAt: '2026-01-01T00:00:00.000Z',
-		status: 'approved',
-		decidedBy: 'ai'
-	});
-	await testDb().db.insert(moderationActions).values({
-		commentId: `comment-${id}`,
-		channelId: `UC-${id}`,
-		action: 'delete',
-		reason: 'test',
-		state: 'completed'
-	});
-	await testDb()
-		.db.insert(auditLog)
-		.values({ channelId: `UC-${id}`, commentId: `comment-${id}`, action: 'delete', reason: 'test', actor: 'system' });
-	await testDb()
-		.db.insert(rules)
-		.values({ channelId: `UC-${id}`, type: 'keyword', pattern: 'spam', action: 'delete' });
+	await seedModerationData(`UC-${id}`, id);
 	return id;
 }
 
@@ -112,9 +121,7 @@ test('deleteUserRecords refuses to erase a personal org that somehow has a secon
 	// the org would silently destroy that member's tenancy and channels —
 	// fail loudly instead (deletion aborts, everything rolls back).
 	const userId = await seedUser('gone');
-	await testDb()
-		.db.insert(users)
-		.values({ id: 'member-2', googleSub: 'sub-member-2', email: 'm2@example.com', displayName: 'M2' });
+	await seedBareUser('member-2');
 	await testDb().db.insert(memberships).values({ userId: 'member-2', orgId: 'org-gone', role: 'member' });
 
 	await expect(deleteUserRecords(userId)).rejects.toThrow('personal organization has other members');
@@ -134,9 +141,7 @@ test('deleteUserRecords refuses when the sole personal-org member is someone els
 	await testDb()
 		.db.delete(memberships)
 		.where(and(eq(memberships.userId, userId), eq(memberships.orgId, 'org-gone')));
-	await testDb()
-		.db.insert(users)
-		.values({ id: 'squatter', googleSub: 'sub-squatter', email: 'sq@example.com', displayName: 'Sq' });
+	await seedBareUser('squatter');
 	await testDb().db.insert(memberships).values({ userId: 'squatter', orgId: 'org-gone', role: 'owner' });
 
 	await expect(deleteUserRecords(userId)).rejects.toThrow('personal organization has other members');
@@ -160,15 +165,7 @@ test('deleteUserRecords keeps team channels the user merely connected, wiping th
 		title: 'team channel',
 		refreshTokenEnc: 'enc'
 	});
-	await testDb().db.insert(comments).values({
-		id: 'comment-team',
-		channelId: 'UC-team',
-		text: 'hi',
-		publishedAt: '2026-01-01T00:00:00.000Z',
-		status: 'approved',
-		decidedBy: 'ai'
-	});
-	await testDb().db.insert(rules).values({ channelId: 'UC-team', type: 'keyword', pattern: 'spam', action: 'delete' });
+	await seedModerationData('UC-team', 'team');
 
 	await deleteUserRecords(userId);
 
@@ -205,9 +202,7 @@ test('deleteUserRecords leaves other users and their records alone', async () =>
 });
 
 test('deleteUserRecords works for a user with no channels', async () => {
-	await testDb()
-		.db.insert(users)
-		.values({ id: 'solo', googleSub: 'sub-solo', email: 'solo@example.com', displayName: 'solo' });
+	await seedBareUser('solo');
 
 	await deleteUserRecords('solo');
 
@@ -247,12 +242,6 @@ test('deleteUserRecords rejects a nonexistent user id', async () => {
 	);
 	expect(await testDb().db.select().from(users).all()).toEqual([]);
 });
-
-async function seedBareUser(id: string) {
-	await testDb()
-		.db.insert(users)
-		.values({ id, googleSub: `sub-${id}`, email: `${id}@example.com`, displayName: id });
-}
 
 /** Seeds a SHARED org (personalFor null) with members in an explicit join order (createdAt drives succession seniority). */
 async function seedSharedOrg(orgId: string, members: { userId: string; role: string; joinedAt: string }[]) {
@@ -393,25 +382,7 @@ test('deleteUserRecords dissolves a sole-member shared org with its channels and
 	await testDb()
 		.db.insert(channels)
 		.values({ id: 'UC-solo', userId, orgId: 'org-solo', title: 'solo team channel', refreshTokenEnc: 'enc' });
-	await testDb().db.insert(comments).values({
-		id: 'comment-solo',
-		channelId: 'UC-solo',
-		text: 'hi',
-		publishedAt: '2026-01-01T00:00:00.000Z',
-		status: 'approved',
-		decidedBy: 'ai'
-	});
-	await testDb().db.insert(moderationActions).values({
-		commentId: 'comment-solo',
-		channelId: 'UC-solo',
-		action: 'delete',
-		reason: 'test',
-		state: 'completed'
-	});
-	await testDb()
-		.db.insert(auditLog)
-		.values({ channelId: 'UC-solo', commentId: 'comment-solo', action: 'delete', reason: 'test', actor: 'system' });
-	await testDb().db.insert(rules).values({ channelId: 'UC-solo', type: 'keyword', pattern: 'spam', action: 'delete' });
+	await seedModerationData('UC-solo', 'solo');
 
 	await deleteUserRecords(userId);
 

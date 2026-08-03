@@ -16,7 +16,7 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { fail } from '@sveltejs/kit';
+import { fail, type ActionFailure } from '@sveltejs/kit';
 
 import {
 	createInvite,
@@ -46,7 +46,7 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 };
 
 /** Wraps org.ts errors as form failures so the page shows .error-box (I12). */
-async function guard<T>(fn: () => Promise<T>): Promise<T | ReturnType<typeof fail>> {
+async function guard<T>(fn: () => Promise<T>): Promise<T | ActionFailure<{ error: string }>> {
 	try {
 		return await fn();
 	} catch (e) {

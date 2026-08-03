@@ -24,12 +24,14 @@ branch — never switch branches in, or commit to, a checkout another agent is
 using.
 
 # Rules
-Always fail loudly. 
-NEVER write fallbacks that are silent.
-ALWAYS write fallbacks that are loud, log to the server, and show to the user.
-Always run codacy before committing any work.
-Every test must fail if the real logic is wrong. If a test still passes when the function returns garbage, rewrite the test.
-DO NOT copy and paste code. DO create reusable code.
+- Always fail loudly.
+- NEVER write fallbacks that are silent.
+- ALWAYS write fallbacks that are loud, log to the server, and show to the user.
+- Always run codacy before committing any work.
+- Every test must fail if the real logic is wrong. If a test still passes when the function returns garbage, rewrite the test.
+- DO NOT copy and paste code. DO create reusable code.
+- Review every PR comment for validity. Fix each valid issue. Post a triage comment. Reply to every bot comment, whether or not you make a code change.
+- NEVER develop on the default branch. Always make a new one.
 
 ## Mutation Testing Engineer (role)
 

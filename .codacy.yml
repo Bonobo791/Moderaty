@@ -18,7 +18,7 @@ engines:
   # SQLint lints for ANSI portability (double-quoted identifiers, no PRAGMA);
   # drizzle migrations are generated, SQLite-only SQL where those rules do
   # not apply.
-  sqlint:
+  SQLint:
     exclude_paths:
       - 'drizzle/**'
   # Test files use patterns (mock calls, stringified assertions) that trip

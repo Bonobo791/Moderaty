@@ -521,8 +521,7 @@ tbody tr:last-child td { border-bottom: 0; }
 }
 
 @keyframes shimmer {
-	to { background-position: -200% 0;
-	};
+	to { background-position: -200% 0; }
 }
 
 .error-box {

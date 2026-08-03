@@ -42,7 +42,8 @@ const client = createClient({ url, authToken });
 let failures = 0;
 
 function report(label, ok, detail) {
-	console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}${ok ? '' : ` — ${detail}`}`);
+	const suffix = ok ? '' : ` — ${detail}`;
+	console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}${suffix}`);
 	if (!ok) failures += 1;
 }
 

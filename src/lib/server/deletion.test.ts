@@ -416,6 +416,34 @@ test('deleteUserRecords dissolves a sole-member shared org with its channels and
 	expect(await userRow(userId)).toMatchObject({ googleSub: `deleted:${userId}` });
 });
 
+test('deleteUserRecords logs no succession when the transaction rolls back', async () => {
+	// Rollback boundary: succession is logged only AFTER commit. A trigger
+	// forces the final tombstone UPDATE to abort, so the promotion rolls back
+	// with everything else — if the log lived INSIDE the transaction it would
+	// still fire, and this test would catch it.
+	const userId = await seedUser('gone');
+	await seedBareUser('admin-old');
+	await seedSharedOrg('org-team', [
+		{ userId, role: 'owner', joinedAt: '2026-01-01T00:00:00.000Z' },
+		{ userId: 'admin-old', role: 'admin', joinedAt: '2026-01-02T00:00:00.000Z' }
+	]);
+	await testDb().client.execute("CREATE TRIGGER fail_tombstone BEFORE UPDATE ON users BEGIN SELECT RAISE(ABORT, 'boom'); END");
+	const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+	let logCount = 0;
+	try {
+		await expect(deleteUserRecords(userId)).rejects.toThrow();
+		logCount = info.mock.calls.length;
+	} finally {
+		info.mockRestore();
+		await testDb().client.execute('DROP TRIGGER fail_tombstone');
+	}
+
+	expect(logCount).toBe(0);
+	// Everything rolled back: the promotion never persisted, no tombstone.
+	expect((await teamMemberships('org-team')).find((m) => m.userId === 'admin-old')).toMatchObject({ role: 'admin' });
+	expect(await userRow(userId)).toMatchObject({ googleSub: 'sub-gone' });
+});
+
 test('nullExpiredConsentEmails erases only the e-mail of consents older than 10 years', async () => {
 	await seedUser('old');
 	const oldDate = new Date(Date.now() - CONSENT_EMAIL_RETENTION_MS - DAY_MS).toISOString();

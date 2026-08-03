@@ -21,9 +21,8 @@ import { and, eq } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
+import { requireRole } from '$lib/server/org';
 import { requireUser, type SessionUser } from '$lib/server/session';
-
-const ROLE_RANK = { member: 0, admin: 1, owner: 2 } as const;
 
 /**
  * Throws 403 unless the signed-in user's role in the ACTIVE org meets the
@@ -32,11 +31,7 @@ const ROLE_RANK = { member: 0, admin: 1, owner: 2 } as const;
  * ownedChannel already enforces).
  */
 export function requireOrgRole(user: SessionUser, minimum: 'admin' | 'owner'): void {
-	// `?? -1`: an unknown role ranks below every minimum — fail closed, never
-	// open (undefined < N is false, which would silently allow).
-	if ((ROLE_RANK[user.orgRole] ?? -1) < ROLE_RANK[minimum]) {
-		throw error(403, 'your team role does not allow this');
-	}
+	requireRole(user.orgRole, minimum);
 }
 
 /**

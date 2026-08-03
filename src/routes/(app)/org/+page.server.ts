@@ -16,7 +16,7 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { fail, type ActionFailure } from '@sveltejs/kit';
+import { fail, redirect, type ActionFailure } from '@sveltejs/kit';
 
 import {
 	createInvite,
@@ -100,6 +100,12 @@ export const actions: Actions = {
 		const user = requireUser(locals);
 		const token = cookies.get(SESSION_COOKIE);
 		if (!token) return fail(401, { error: 'sign-in required' });
-		return guard(() => leaveOrg(user.id, token, user.orgId));
+		const result = await guard(() => leaveOrg(user.id, token, user.orgId));
+		// After leaving, this request's locals still point at the org the user
+		// just left — re-rendering /org here would 404. A fresh request
+		// re-resolves the active org (oldest remaining membership). leaveOrg
+		// returns void, so an undefined guard result is success.
+		if (result === undefined) throw redirect(303, '/dashboard');
+		return result;
 	}
 };

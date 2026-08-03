@@ -19,7 +19,7 @@
 import { eq } from 'drizzle-orm';
 import { expect, test } from 'vitest';
 
-import { setupTestDb, testDb } from './testdb';
+import { seedUser, setupTestDb, testDb } from './testdb';
 import { invites, memberships, organizations, sessions, users } from './db/schema';
 import {
 	acceptInvite,
@@ -83,12 +83,6 @@ test('fellBack is false when the session had no explicit active org', async () =
 // ---- Phase D: team management (D1 functions, D7 behaviors) ----
 
 const T0 = '2026-01-01T00:00:00.000Z';
-
-async function seedUser(userId: string) {
-	await testDb()
-		.db.insert(users)
-		.values({ id: userId, googleSub: `sub-${userId}`, email: `${userId}@example.com`, displayName: userId });
-}
 
 async function seedOrg(orgId: string, personalFor: string | null = null) {
 	await testDb().db.insert(organizations).values({ id: orgId, name: orgId, personalFor });
@@ -230,9 +224,12 @@ test('acceptInvite is 410 for expired and unknown tokens, and rejects personal-o
 	expect(await membershipRow('joiner-1', 'org-personal')).toHaveLength(0);
 });
 
-test('acceptInvite by an existing member is idempotent and does not burn the token', async () => {
+test('acceptInvite by an existing member is idempotent, still burns the token', async () => {
+	// PR #52 review (Amazon Q): single-use means EVERY accept burns — an
+	// already-a-member accept must not leave the link usable by someone else.
 	await seedUser('owner-1');
 	await seedUser('member-1');
+	await seedUser('joiner-2');
 	await seedOrg('org-1');
 	await seedMember('owner-1', 'org-1', 'owner');
 	await seedMember('member-1', 'org-1', 'member');
@@ -242,8 +239,15 @@ test('acceptInvite by an existing member is idempotent and does not burn the tok
 	await acceptInvite('member-1', 'sess-1', token);
 	const rows = await membershipRow('member-1', 'org-1');
 	expect(rows).toHaveLength(1); // no duplicate membership
+	expect(rows[0].role).toBe('member'); // and the existing role is kept
+	const burned = await testDb().db.select().from(invites).where(eq(invites.token, token)).get();
+	expect(burned?.acceptedBy).toBe('member-1'); // burned even for an existing member
 	const sess = await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-1')).get();
 	expect(sess?.activeOrgId).toBe('org-1'); // still switches the session
+
+	// The burned link is dead for everyone else, too.
+	await seedSession('sess-2', 'joiner-2');
+	await expect(acceptInvite('joiner-2', 'sess-2', token)).rejects.toMatchObject({ status: 410 });
 });
 
 test('setMemberRole: owner-only, last owner cannot be demoted, promotion to owner works', async () => {

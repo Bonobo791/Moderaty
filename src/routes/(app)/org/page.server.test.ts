@@ -168,3 +168,24 @@ test('leave: missing cookie fails 401; sole member is a wrapped 400', async () =
 	expect(sole.status).toBe(400);
 	expect(sole.data.error).toContain('only member');
 });
+
+test('leave: a successful leave 303s to the dashboard (post-leave /org would 404 on the stale locals)', async () => {
+	// PR #52 review (Codacy): locals are frozen for the request, so rendering
+	// /org after leaving the active team would re-list members of the team the
+	// user just left and 404. Redirect to a fresh request instead.
+	await seedOwnerOrg();
+	// A second owner in org-1, so leaving is permitted.
+	await testDb()
+		.db.insert(users)
+		.values({ id: 'user-2', googleSub: 'sub-user-2', email: 'user-2@example.com', displayName: 'user-2' });
+	await testDb().db.insert(memberships).values({ userId: 'user-2', orgId: 'org-1', role: 'owner' });
+	await testDb()
+		.db.insert(sessions)
+		.values({ id: 'sess-1', userId: TEST_OWNER.id, activeOrgId: 'org-1', expiresAt: '2099-01-01T00:00:00.000Z' });
+
+	await expect(actions.leave(ctx(TEST_OWNER))).rejects.toMatchObject({ status: 303, location: '/dashboard' });
+	const gone = await testDb().db.select().from(memberships).where(eq(memberships.userId, TEST_OWNER.id)).all();
+	expect(gone).toHaveLength(0);
+	const sess = await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-1')).get();
+	expect(sess?.activeOrgId).toBeNull();
+});

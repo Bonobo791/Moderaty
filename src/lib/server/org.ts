@@ -201,14 +201,26 @@ export interface InvitePreview {
 	accepted: boolean;
 }
 
-/** Public preview for /invite/[token] — returns null for unknown tokens (never leak org existence). */
-export async function previewInvite(token: string): Promise<InvitePreview | null> {
-	const row = await db
-		.select({ role: invites.role, expiresAt: invites.expiresAt, acceptedBy: invites.acceptedBy, orgName: organizations.name })
+/** Invite row joined to its org. Shared by previewInvite and acceptInvite; pass a transaction as `handle` for atomic check-and-burn. */
+async function inviteWithOrg(handle: Pick<typeof db, 'select'>, token: string) {
+	return handle
+		.select({
+			orgId: invites.orgId,
+			role: invites.role,
+			expiresAt: invites.expiresAt,
+			acceptedBy: invites.acceptedBy,
+			orgName: organizations.name,
+			personalFor: organizations.personalFor
+		})
 		.from(invites)
 		.innerJoin(organizations, eq(invites.orgId, organizations.id))
 		.where(eq(invites.token, token))
 		.get();
+}
+
+/** Public preview for /invite/[token] — returns null for unknown tokens (never leak org existence). */
+export async function previewInvite(token: string): Promise<InvitePreview | null> {
+	const row = await inviteWithOrg(db, token);
 	if (!row) return null;
 	return {
 		orgName: row.orgName,
@@ -225,31 +237,23 @@ function asInviteRole(token: string, role: string): 'admin' | 'member' {
 }
 
 /**
- * Accepts an invite: adds the membership (idempotent — already-a-member just
- * switches), burns the token, and points the session at the new org. One
- * transaction; a burned token can never join a second user.
+ * Accepts an invite: adds the membership when missing (already-a-member keeps
+ * their role and just switches), burns the token, and points the session at
+ * the new org. Everything happens in ONE transaction: the single-use check
+ * and the burn are atomic, so two concurrent accepts can never both join —
+ * and EVERY accept burns, so an already-a-member accept can never leave the
+ * link usable by someone else (PR #52 review).
  */
 export async function acceptInvite(userId: string, sessionToken: string, token: string): Promise<string> {
-	const inv = await db
-		.select({
-			orgId: invites.orgId,
-			role: invites.role,
-			expiresAt: invites.expiresAt,
-			acceptedBy: invites.acceptedBy,
-			personalFor: organizations.personalFor
-		})
-		.from(invites)
-		.innerJoin(organizations, eq(invites.orgId, organizations.id))
-		.where(eq(invites.token, token))
-		.get();
-	if (!inv || inv.acceptedBy !== null || Date.parse(inv.expiresAt) <= Date.now()) {
-		throw error(410, 'this invite link is no longer valid — ask for a new one');
-	}
-	// createInvite blocks personal-org invites at write time; refuse any legacy
-	// or hand-written row here too — personal teams can never gain members.
-	if (inv.personalFor !== null) throw error(400, 'this invite points at a personal team — ask for a shared-team invite');
-	const role = asInviteRole(token, inv.role);
-	await db.transaction(async (tx) => {
+	return db.transaction(async (tx) => {
+		const inv = await inviteWithOrg(tx, token);
+		if (!inv || inv.acceptedBy !== null || Date.parse(inv.expiresAt) <= Date.now()) {
+			throw error(410, 'this invite link is no longer valid — ask for a new one');
+		}
+		// createInvite blocks personal-org invites at write time; refuse any legacy
+		// or hand-written row here too — personal teams can never gain members.
+		if (inv.personalFor !== null) throw error(400, 'this invite points at a personal team — ask for a shared-team invite');
+		const role = asInviteRole(token, inv.role);
 		const existing = await tx
 			.select({ role: memberships.role })
 			.from(memberships)
@@ -257,11 +261,11 @@ export async function acceptInvite(userId: string, sessionToken: string, token: 
 			.get();
 		if (!existing) {
 			await tx.insert(memberships).values({ userId, orgId: inv.orgId, role });
-			await tx.update(invites).set({ acceptedBy: userId }).where(eq(invites.token, token));
 		}
+		await tx.update(invites).set({ acceptedBy: userId }).where(eq(invites.token, token));
 		await tx.update(sessions).set({ activeOrgId: inv.orgId }).where(eq(sessions.id, sessionToken));
+		return inv.orgId;
 	});
-	return inv.orgId;
 }
 
 /** Switches the session's active org. Membership in the target is required. */
@@ -318,18 +322,22 @@ export async function setMemberRole(callerUserId: string, orgId: string, targetU
 	if (role !== 'owner' && role !== 'admin' && role !== 'member') throw error(400, 'unknown role');
 	const target = await membershipOf(targetUserId, orgId);
 	if (!target) throw error(404, 'member not found');
-	if (target.role === 'owner' && role !== 'owner') {
-		const owners = await db
-			.select({ userId: memberships.userId })
-			.from(memberships)
-			.where(and(eq(memberships.orgId, orgId), eq(memberships.role, 'owner')))
-			.all();
-		if (owners.length <= 1) throw error(400, 'the last owner cannot be demoted — promote a teammate to owner first');
-	}
-	await db
-		.update(memberships)
-		.set({ role })
-		.where(and(eq(memberships.userId, targetUserId), eq(memberships.orgId, orgId)));
+	// Owner-count check and role update in ONE transaction: two concurrent
+	// demotions can never strand the org without an owner (PR #52 review).
+	await db.transaction(async (tx) => {
+		if (target.role === 'owner' && role !== 'owner') {
+			const owners = await tx
+				.select({ userId: memberships.userId })
+				.from(memberships)
+				.where(and(eq(memberships.orgId, orgId), eq(memberships.role, 'owner')))
+				.all();
+			if (owners.length <= 1) throw error(400, 'the last owner cannot be demoted — promote a teammate to owner first');
+		}
+		await tx
+			.update(memberships)
+			.set({ role })
+			.where(and(eq(memberships.userId, targetUserId), eq(memberships.orgId, orgId)));
+	});
 }
 
 /**
@@ -357,16 +365,18 @@ export async function removeMember(callerUserId: string, orgId: string, targetUs
 export async function leaveOrg(userId: string, sessionToken: string, orgId: string): Promise<void> {
 	const m = await membershipOf(userId, orgId);
 	if (!m) throw error(404, 'team not found');
-	const others = await db
-		.select({ userId: memberships.userId, role: memberships.role })
-		.from(memberships)
-		.where(and(eq(memberships.orgId, orgId), ne(memberships.userId, userId)))
-		.all();
-	if (others.length === 0) throw error(400, 'you are the only member — delete your account to remove this team');
-	if (m.role === 'owner' && !others.some((o) => o.role === 'owner')) {
-		throw error(400, 'promote a teammate to owner before leaving');
-	}
+	// Membership validation and the delete in ONE transaction: concurrent
+	// leaves/removals can never strand the org without members (or owners).
 	await db.transaction(async (tx) => {
+		const others = await tx
+			.select({ userId: memberships.userId, role: memberships.role })
+			.from(memberships)
+			.where(and(eq(memberships.orgId, orgId), ne(memberships.userId, userId)))
+			.all();
+		if (others.length === 0) throw error(400, 'you are the only member — delete your account to remove this team');
+		if (m.role === 'owner' && !others.some((o) => o.role === 'owner')) {
+			throw error(400, 'promote a teammate to owner before leaving');
+		}
 		await tx.delete(memberships).where(and(eq(memberships.userId, userId), eq(memberships.orgId, orgId)));
 		// If the session was acting in the org just left, clear active_org_id so
 		// resolution falls back to the oldest remaining membership.

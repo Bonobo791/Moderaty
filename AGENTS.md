@@ -13,6 +13,29 @@ Always run codacy before committing any work.
 Every test must fail if the real logic is wrong. If a test still passes when the function returns garbage, rewrite the test.
 DO NOT copy and paste code. DO create reusable code.
 
+## Mutation Testing Engineer (role)
+
+The mutation testing engineer owns test-suite *quality* — the "Every test
+must fail if the real logic is wrong" rule made measurable. Coverage shows
+what the suite executes; mutation testing shows whether the suite fails when
+the code is wrong. Follow the skill at
+`.agents/skills-src/mutation-testing/SKILL.md` (mental mutation testing for
+review of small diffs; tool runs for whole-module audits). Killing a mutant
+means writing a behavior test that passes on the original and fails under
+the exact mutation — confirm both directions. No mutation runner (e.g.
+Stryker) is installed in this repo yet; adopting one and wiring a ratcheted
+CI threshold is a separate, maintainer-approved step.
+
+## Agent Skills (skills-src)
+
+Repo-local skill sources live in `.agents/skills-src/<name>/` (currently
+`sqlite-engineering`, `drizzle-engineering`, `mutation-testing`). They are
+*installed* by copying to `~/.agents/skills/<name>/` and *pre-hooked* via
+`assets/hooks/skill_prehook.py` inside the skill plus a
+`[[hooks]] event = "UserPromptSubmit"` entry in `~/.kimi-code/config.toml`.
+Hooks always exit 0 (never break the prompt flow) and log failures loudly to
+stderr. Edit the source in the repo, then re-copy to install updates.
+
 ## Git & Review Workflow (execution plan v3, section 0)
 
 Human review happens via pull requests. Executor rules:

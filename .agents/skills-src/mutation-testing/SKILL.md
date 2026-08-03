@@ -1,0 +1,66 @@
+---
+name: mutation-testing
+description: 'Mutation testing engineering — verify that a test suite actually catches bugs, not just executes lines. Use when auditing or hardening test-suite quality, reviewing test coverage claims ("we have 90% coverage"), hunting surviving mutants, writing tests that kill specific mutants, setting up or configuring mutation tools (Stryker/StrykerJS/Stryker.NET, mutmut, Cosmic Ray, PIT/pitest, Infection, cargo-mutants, go-mutesting/Gremlins, mutant, muter, Mull), wiring mutation testing into CI (incremental PR runs, thresholds, --since/--in-diff), interpreting mutation scores, handling equivalent/timeout/no-coverage mutants, or closing the mutation-feedback loop on AI-generated tests. Triggers on: mutation testing, mutation score, surviving mutants, killed mutants, equivalent mutants, are my tests actually good, test suite quality, weak assertions, mutation coverage, mutant.'
+---
+
+# Mutation Testing
+
+## Mental model
+
+Line/branch coverage measures which code the suite *executes*. Mutation testing measures whether the suite *fails when that code is wrong*. A mutant is a one-token change to production code (`>` → `>=`, `+` → `-`, `true` → `false`, deleted call). Run the full suite against each mutant:
+
+- **Killed** — at least one test fails. The suite would catch this bug. Good.
+- **Survived** — all tests pass despite the change. A genuine test gap or an equivalent mutant. Act on it.
+- **Timed out** — mutant caused an infinite loop. Counts as killed in most tools; investigate if frequent (flaky timing or real performance sensitivity).
+- **No coverage** — no test executes the mutated line. Counts as undetected; add a behavior test or exclude the file.
+- **Error/unviable** — mutant does not compile or crashes setup. Excluded from the score.
+
+Mutation score = killed / (total − equivalent). Equivalent mutants change syntax but not behavior (`i <= n-1` vs `i < n`); they can never be killed and detecting them automatically is undecidable — expect to flag them by hand. Research puts ~23% of mutants as equivalent, so 100% is a mathematical ceiling, not a target.
+
+## Score interpretation
+
+| Score | Reading |
+|---|---|
+| < 40% | Critical gaps. Focus on validation, state transitions, error handling first. |
+| 40–60% | Typical first baseline. Fix survivors in core business logic; skip cosmetics. |
+| 60–75% | Solid. Approaching the practical ceiling; pursue only high-value survivors. |
+| 75–85% | Strong. Most survivors are equivalent or cosmetic. |
+| > 85% | Exceptional — or suspicious. Check for tests overfitted to the implementation. |
+
+Benchmark per module, not per repo. 65% on a logging utility is fine; 65% on a payment calculation is not. Target 80–90% only on security-sensitive and money paths.
+
+## Core workflow
+
+1. **Baseline**: full suite green on unmutated code. Never mutation-test a red suite — results are meaningless.
+2. **Scope**: pick critical business logic first (validation, pricing, authz, state machines, serialization boundaries). Exclude tests, generated code, type definitions, barrels, config defaults.
+3. **Run**: use the language tool from [references/tools-by-language.md](references/tools-by-language.md). Enable per-test coverage analysis and parallelism. For PR-scale work, mutate only changed files (`--since`, `--in-diff`, or a git-diff-driven `--mutate` glob).
+4. **Triage survivors** using [references/surviving-mutant-triage.md](references/surviving-mutant-triage.md): genuine gap vs equivalent vs no-coverage. Priority order: boundary conditions → missing assertions on outputs → error classification → everything else.
+5. **Kill mutants**: write a test that passes on the original and fails under the exact mutation. Confirm both directions. A test written to kill one mutant that can't fail on the original is worse than useless.
+6. **Re-run** scoped to survivors; confirm kills; update the threshold.
+7. **Ratchet**: set the CI `break` threshold at current-score-minus-buffer and raise it over time. Never jump to a high threshold in one step — the team (or the agent harness) will route around it.
+
+## Mental mutation testing (no tool required)
+
+For code review or quick verification of a small diff, mutate mentally: for every changed line, ask "would any test fail if I flipped this operator / deleted this call / inverted this condition?" If the answer is no for a behavior-bearing line, that is a surviving mutant — flag it. This is the fastest mode and works in any language; reserve tool runs for whole-module audits and CI.
+
+## Agent mutation-feedback loop
+
+When generating or hardening tests with an LLM/agent (yours or a user's), surviving mutants are the highest-signal feedback available — research (MuTAP, MUTGEN, Meta's ACH) shows feeding survivors back into test generation beats coverage feedback by a wide margin, and LLM-generated suites systematically share the generator's blind spots (the test-homogenization trap). Run the closed loop in [references/agent-mutation-loop.md](references/agent-mutation-loop.md) whenever asked to "make tests better", verify AI-written tests, or use mutation testing for bug detection.
+
+## CI strategy
+
+- **PR gate**: mutate changed files only; target < 2–5 min. Fail the build only on *new* survivors or a `break` floor.
+- **Nightly/weekly**: full sweep on main enforcing the `break` threshold globally; upload the HTML/JSON report as an artifact.
+- Commit or cache the incremental state file so subsequent runs skip unchanged mutants.
+- Tool-specific YAML: [references/tools-by-language.md](references/tools-by-language.md).
+
+## Anti-patterns
+
+- Chasing 100% or setting `break: 100` initially — impossible bar (equivalent mutants); gets the gate disabled.
+- Mutating test files, generated code, migrations, or vendored code.
+- Full-repo mutation run on every PR — 30-minute feedback kills adoption.
+- Ignoring no-coverage mutants — they are uncovered files sitting inside the mutate scope.
+- Treating score as the only quality metric; it complements review, integration, and E2E tests.
+- Writing tests that assert the implementation instead of the behavior — kills mutants today, blocks refactors tomorrow.
+- Flaky suites: surviving mutants then mean nothing. Stabilize determinism (seeded randomness, frozen clocks, no network) before trusting results.
+- Applying a mutant to disk (mutmut `apply`) without the file committed and without reverting immediately after.

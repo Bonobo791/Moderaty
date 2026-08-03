@@ -29,7 +29,7 @@ export const FAQ_ENTRIES: FaqEntry[] = [
 	},
 	{
 		q: 'Will Moderaty ban my real fans?',
-		a: 'Not by default. Your rules act first: a ban rule bans on the spot, whatever the AI would have scored. Without a rule, only comments scoring 0.95 or higher on the AI\'s toxicity scale trigger an automatic ban. Anything uncertain waits in your review queue for a one-click decision, and every action is logged in your audit trail.'
+		a: 'Not by default. Your rules act first: a ban rule bans on the spot, whatever the AI would have scored. Without a rule, only comments scoring 0.95 or higher on the AI\'s toxicity or tone analysis trigger an automatic ban. Anything uncertain waits in your review queue for a one-click decision, and every action is logged in your audit trail.'
 	},
 	{
 		q: "What happens when the AI isn't sure about a comment?",
@@ -41,7 +41,7 @@ export const FAQ_ENTRIES: FaqEntry[] = [
 	},
 	{
 		q: 'What YouTube account access does Moderaty need?',
-		a: 'Google\'s standard YouTube permission, the youtube.force-ssl scope; YouTube offers no comments-only permission. Moderaty uses it only to read and moderate comments on your channel, nothing else. The code is open source under AGPL, so you can verify exactly what it does with that access.'
+		a: 'Google\'s standard YouTube permission, the youtube.force-ssl scope; YouTube offers no comments-only permission. Moderaty uses it only to read and moderate comments on your channel and to read your videos\' titles and descriptions as context for the AI\'s tone analysis, nothing else. The code is open source under AGPL, so you can verify exactly what it does with that access.'
 	},
 	{
 		q: 'Is Moderaty really free?',

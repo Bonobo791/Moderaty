@@ -28,7 +28,9 @@ import sys
 TRIGGERS = [
     r"\bsqlite3?\b", r"\blibsql\b", r"\bturso\b", r"\bbetter-sqlite3\b",
     r"\bcloudflare\s+d1\b", r"\bd1\s+database\b",
-    r"\bdrizzle\b", r"\bdrizzle-kit\b",
+    # drizzle/drizzle-kit are deliberately absent: the drizzle-engineering
+    # pre-hook owns the ORM layer. Keeping them here would inject both full
+    # skills into every Drizzle prompt.
     r"\bdatabase\b", r"\bdb\s+schema\b", r"\bschema\s+design\b",
     r"\bmigration(s)?\b", r"\bbackfill(s|ing)?\b",
     r"\bsql\b", r"\bselect\s+.+\s+from\b", r"\bcreate\s+table\b",

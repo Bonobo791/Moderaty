@@ -50,8 +50,10 @@ DIRECTIVE = (
     "generate (never push) for anything shared or production, read every "
     "generated migration before applying it, DDL in generated files and DML "
     "backfills in --custom files, expand-and-contract for destructive changes, "
-    "applied migrations are immutable, multi-row mutations inside "
-    "db.transaction, and never sql.raw() on user-controlled input. Pair with "
+    "applied migrations are immutable, multi-row mutations stay atomic "
+    "(db.transaction where the driver supports it; on drivers that reject SQL "
+    "transactions like D1, a single atomic statement or db.batch), and never "
+    "sql.raw() on user-controlled input. Pair with "
     "the sqlite-engineering skill for engine-level concerns (STRICT tables, "
     "PRAGMAs, EXPLAIN QUERY PLAN). Full skill:\n\n"
 )

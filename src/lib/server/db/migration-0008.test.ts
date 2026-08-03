@@ -16,25 +16,16 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { readFileSync } from 'node:fs';
 import { createClient } from '@libsql/client';
 import { expect, test } from 'vitest';
+
+import { migrationStatements } from './migrationTestUtils';
 
 // Behavior test for migration 0008 (PR #40 review — expand/contract rollout):
 // applied to a PRE-change database (NOT NULL author columns, stored author
 // PII), it must relax the columns to nullable, wipe the stored identifiers,
 // and preserve every other row and constraint.
-const migration = readFileSync(new URL('../../../../drizzle/0008_relax_comment_author_pii.sql', import.meta.url), 'utf8');
-const statements = migration
-	.split('--> statement-breakpoint')
-	.map((chunk) =>
-		chunk
-			.split('\n')
-			.filter((line) => !line.trimStart().startsWith('--'))
-			.join('\n')
-			.trim()
-	)
-	.filter((chunk) => chunk.length > 0);
+const statements = migrationStatements('0008_relax_comment_author_pii.sql');
 
 async function migratedDb() {
 	const client = createClient({ url: ':memory:' });

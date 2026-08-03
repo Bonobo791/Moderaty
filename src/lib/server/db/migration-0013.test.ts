@@ -16,9 +16,10 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { readFileSync } from 'node:fs';
 import { createClient, type Client } from '@libsql/client';
 import { expect, test } from 'vitest';
+
+import { migrationStatements } from './migrationTestUtils';
 
 // Behavior test for migration 0013 (tenancy contract): applied to a
 // PRE-contract database (channels has org_id but no CHECK), it rebuilds the
@@ -26,17 +27,7 @@ import { expect, test } from 'vitest';
 // while it also lacks an owner (pre-accounts orphans awaiting first-login
 // claim). All rows, columns, and indexes must survive the rebuild, and the
 // constraint must bite on INSERT and UPDATE alike.
-const migration = readFileSync(new URL('../../../../drizzle/0013_channels_org_contract.sql', import.meta.url), 'utf8');
-const statements = migration
-	.split('--> statement-breakpoint')
-	.map((chunk) =>
-		chunk
-			.split('\n')
-			.filter((line) => !line.trimStart().startsWith('--'))
-			.join('\n')
-			.trim()
-	)
-	.filter((chunk) => chunk.length > 0);
+const statements = migrationStatements('0013_channels_org_contract.sql');
 
 // The pre-contract channels table: final 0012 shape (org_id present, no CHECK).
 const PRE_0013_DDL = `

@@ -93,6 +93,21 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 			.where(eq(organizations.personalFor, userId))
 			.all();
 		const orgIds = personalOrgs.map((o) => o.id);
+		if (orgIds.length) {
+			// Data-bug guard: a personal org is single-member by definition, but
+			// the schema cannot enforce that. If one ever gained a second
+			// member, deleting the org would silently destroy that member's
+			// tenancy and channels — fail loudly and abort the whole deletion.
+			const orgMembers = await tx
+				.select({ userId: memberships.userId })
+				.from(memberships)
+				.where(inArray(memberships.orgId, orgIds))
+				.all();
+			if (orgMembers.length > orgIds.length) {
+				console.error(`user ${userId}'s personal org has ${orgMembers.length} members — refusing account deletion`);
+				throw new Error('personal organization has other members — contact support');
+			}
+		}
 		const chs = orgIds.length
 			? await tx.select({ id: channels.id }).from(channels).where(inArray(channels.orgId, orgIds)).all()
 			: [];

@@ -29,15 +29,7 @@ const mocks = vi.hoisted(() => ({
 	existingChannel: undefined as { orgId: string | null } | undefined
 }));
 
-const OWNER = {
-	id: 'user-1',
-	email: 'one@example.com',
-	displayName: 'One',
-	plan: 'free',
-	orgId: 'org-1',
-	orgName: 'One',
-	orgRole: 'owner'
-} as const;
+const OWNER = TEST_OWNER;
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
@@ -61,6 +53,7 @@ vi.mock('$lib/server/db', () => ({
 }));
 
 import { makeCookies, makeCookiesWithState } from '$lib/server/testcookies';
+import { TEST_OWNER } from '$lib/server/testuser';
 import { GET as startAuth } from './+server';
 import { GET as authCallback } from './callback/+server';
 

@@ -23,6 +23,7 @@ import { DAY_MS, seedConsent, setupTestDb, testDb } from './testdb';
 import { auditLog, channels, comments, consents, invites, memberships, moderationActions, organizations, rules, sessions, users } from './db/schema';
 import {
 	CONSENT_EMAIL_RETENTION_MS,
+	WIPED_REFRESH_TOKEN,
 	consentEmailCutoffIso,
 	deleteUserRecords,
 	nullExpiredConsentEmails
@@ -105,6 +106,26 @@ test('deleteUserRecords erases every owned record and tombstones the user fully'
 	expect(retained[0]).toMatchObject({ userId, email: 'gone@example.com' });
 });
 
+test('deleteUserRecords refuses to erase a personal org that somehow has a second member', async () => {
+	// Data-bug guard: a personal org is single-member by definition, but the
+	// schema cannot enforce that. If one ever gains a second member, deleting
+	// the org would silently destroy that member's tenancy and channels —
+	// fail loudly instead (deletion aborts, everything rolls back).
+	const userId = await seedUser('gone');
+	await testDb()
+		.db.insert(users)
+		.values({ id: 'member-2', googleSub: 'sub-member-2', email: 'm2@example.com', displayName: 'M2' });
+	await testDb().db.insert(memberships).values({ userId: 'member-2', orgId: 'org-gone', role: 'member' });
+
+	await expect(deleteUserRecords(userId)).rejects.toThrow('personal organization has other members');
+
+	// Nothing was erased: the tombstone never happened and all rows survive.
+	expect(await userRow(userId)).toMatchObject({ googleSub: 'sub-gone' });
+	expect(await testDb().db.select().from(channels).all()).toHaveLength(1);
+	expect(await testDb().db.select().from(memberships).all()).toHaveLength(2);
+	expect(await testDb().db.select().from(organizations).all()).toHaveLength(1);
+});
+
 test('deleteUserRecords keeps team channels the user merely connected, wiping their connector credentials', async () => {
 	// The user is the CONNECTOR (channels.userId) of a channel in a SHARED org
 	// that survives them: the channel and its moderation history belong to the
@@ -131,12 +152,13 @@ test('deleteUserRecords keeps team channels the user merely connected, wiping th
 
 	await deleteUserRecords(userId);
 
-	// The team channel survives, detached: connector nulled, token wiped so
-	// cron fails loudly instead of silently moderating with a dead grant.
+	// The team channel survives, detached: connector nulled, token wiped with
+	// the exact sentinel so cron fails loudly instead of silently moderating
+	// with a dead grant.
 	const team = (await testDb().db.select().from(channels).all()).find((c) => c.id === 'UC-team');
 	expect(team).toBeDefined();
 	expect(team?.userId).toBeNull();
-	expect(team?.refreshTokenEnc).not.toBe('enc');
+	expect(team?.refreshTokenEnc).toBe(WIPED_REFRESH_TOKEN);
 	// Its moderation history and rules are the team's — untouched.
 	expect((await testDb().db.select().from(comments).all()).map((c) => c.id)).toEqual(['comment-team']);
 	expect(await testDb().db.select().from(rules).all()).toHaveLength(1);

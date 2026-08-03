@@ -93,8 +93,13 @@ def main() -> None:
                 body = fh.read()
             sys.stdout.write(DIRECTIVE + body + "\n")
             return
-        except OSError:
-            pass  # fall through to path directive
+        except OSError as file_error:
+            # Fallback must be loud (repo rule): the path directive below
+            # degrades gracefully, but the read failure itself is logged.
+            sys.stderr.write(
+                f"mutation-testing prehook: skill file not readable: "
+                f"{skill_path} ({type(file_error).__name__}: {file_error})\n"
+            )
 
     refs_dir = os.path.join(os.path.dirname(skill_path), "references")
     sys.stdout.write(

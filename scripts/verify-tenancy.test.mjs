@@ -25,19 +25,20 @@ import { execFile } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { createClient } from '@libsql/client';
 import { afterAll, describe, expect, it } from 'vitest';
 
 const execFileAsync = promisify(execFile);
-const PROBE = new URL('./verify-tenancy.mjs', import.meta.url);
+const PROBE = fileURLToPath(new URL('./verify-tenancy.mjs', import.meta.url));
 
 const tmp = mkdtempSync(join(tmpdir(), 'verify-tenancy-test-'));
 afterAll(() => {
 	rmSync(tmp, { recursive: true, force: true });
 });
 
-const BASE_DDL = `
+const NON_CHANNEL_DDL = `
 CREATE TABLE users (
 	id TEXT PRIMARY KEY,
 	google_sub TEXT NOT NULL UNIQUE,
@@ -60,6 +61,9 @@ CREATE TABLE memberships (
 	created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
 	PRIMARY KEY (user_id, org_id)
 );
+`;
+
+const CHANNELS_DDL = `
 CREATE TABLE channels (
 	id TEXT PRIMARY KEY,
 	user_id TEXT,
@@ -78,20 +82,28 @@ CREATE TABLE channels (
 );
 `;
 
-// One live user with a personal org, an owner membership, and an orged channel.
-const SEED = `
+// One live user with a personal org and an owner membership.
+const SEED_TENANCY = `
 INSERT INTO users (id, google_sub, email, display_name) VALUES ('u1', 'sub-1', 'u1@example.com', 'U1');
 INSERT INTO organizations (id, name, personal_for) VALUES ('org-u1', 'U1', 'u1');
 INSERT INTO memberships (user_id, org_id, role) VALUES ('u1', 'org-u1', 'owner');
+`;
+
+const SEED_CHANNEL = `
 INSERT INTO channels (id, user_id, org_id, title, refresh_token_enc) VALUES ('UC1', 'u1', 'org-u1', 'Chan', 'enc');
 `;
 
 /** Builds a temp database; withContract toggles the CHECK constraint (the pre-0013 shape). */
-async function buildDb(name, { withContract, seedSql = '' }) {
+async function buildDb(name, { withContract, withChannels = true, seedSql = '' }) {
 	const url = `file:${join(tmp, name)}`;
 	const client = createClient({ url });
-	const ddl = BASE_DDL.replace('<CONTRACT>', withContract ? ',\n\tCONSTRAINT channels_org_requires_owner CHECK (org_id IS NOT NULL OR user_id IS NULL)' : '');
-	for (const statement of (ddl + seedSql).split(';')) {
+	const channelsDdl = withChannels
+		? CHANNELS_DDL.replace(
+				'<CONTRACT>',
+				withContract ? ',\n\tCONSTRAINT channels_org_requires_owner CHECK (org_id IS NOT NULL OR user_id IS NULL)' : ''
+			)
+		: '';
+	for (const statement of (NON_CHANNEL_DDL + channelsDdl + seedSql).split(';')) {
 		const trimmed = statement.trim();
 		if (trimmed) await client.execute(trimmed);
 	}
@@ -103,35 +115,52 @@ async function buildDb(name, { withContract, seedSql = '' }) {
 async function runProbe(url) {
 	const { TURSO_AUTH_TOKEN: _token, TURSO_DATABASE_URL: _url, ...rest } = process.env;
 	try {
-		const { stdout } = await execFileAsync('node', [PROBE.pathname], { env: { ...rest, TURSO_DATABASE_URL: url } });
+		const { stdout } = await execFileAsync('node', [PROBE], { env: { ...rest, TURSO_DATABASE_URL: url } });
 		return { code: 0, stdout };
 	} catch (error) {
-		return { code: error.code, stdout: error.stdout ?? '' };
+		return { code: error.code ?? 1, stdout: error.stdout ?? '' };
 	}
 }
 
 describe('verify-tenancy', () => {
 	it('passes every check against a contract database with healthy tenancy', async () => {
-		const url = await buildDb('contract.db', { withContract: true, seedSql: SEED });
+		const url = await buildDb('contract.db', { withContract: true, seedSql: SEED_TENANCY + SEED_CHANNEL });
 		const { code, stdout } = await runProbe(url);
 		expect(stdout).not.toContain('FAIL');
 		expect(stdout).toContain('ALL CHECKS PASSED');
 		expect(code).toBe(0);
 	}, 20000);
 
-	it('fails loudly on a pre-contract database (no CHECK, violating INSERT allowed)', async () => {
-		const url = await buildDb('pre-contract.db', { withContract: false, seedSql: SEED });
+	it('fails loudly on a pre-contract database (no CHECK, violating INSERT allowed but cleaned up)', async () => {
+		const url = await buildDb('pre-contract.db', { withContract: false, seedSql: SEED_TENANCY + SEED_CHANNEL });
 		const { code, stdout } = await runProbe(url);
 		expect(code).toBe(1);
 		expect(stdout).toContain('FAIL  channels DDL contains channels_org_requires_owner');
 		expect(stdout).toContain('FAIL  owned channel with NULL org is rejected');
+		// The probe INSERT succeeds here — it must be deleted, not left behind.
+		expect(stdout).toContain('PASS  probe row is gone after cleanup');
+		const client = createClient({ url });
+		const leftover = await client.execute("SELECT count(*) AS n FROM channels WHERE id = 'UCverify-probe'");
+		client.close();
+		expect(leftover.rows[0].n).toBe(0);
+	}, 20000);
+
+	it('never false-passes when the probe fails for a non-contract reason (no channels table)', async () => {
+		// A bare catch would report the missing-table error as "rejected" (a
+		// PASS). The probe must read as FAIL with the actual error instead.
+		const url = await buildDb('no-channels.db', { withContract: true, withChannels: false, seedSql: SEED_TENANCY });
+		const { code, stdout } = await runProbe(url);
+		expect(code).toBe(1);
+		expect(stdout).toContain('FAIL  owned channel with NULL org is rejected');
+		expect(stdout).toContain('unexpected error');
 	}, 20000);
 
 	it('fails loudly when an org has no owner', async () => {
 		const url = await buildDb('ownerless.db', {
 			withContract: true,
 			seedSql:
-				SEED +
+				SEED_TENANCY +
+				SEED_CHANNEL +
 				"INSERT INTO organizations (id, name) VALUES ('ghost', 'Ghost');" +
 				"INSERT INTO memberships (user_id, org_id, role) VALUES ('u1', 'ghost', 'member');"
 		});

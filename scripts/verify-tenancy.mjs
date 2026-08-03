@@ -45,7 +45,11 @@ function report(label, ok, detail) {
 	if (!ok) failures += 1;
 }
 
-const scalar = async (sql) => (await client.execute(sql)).rows[0].n;
+const scalar = async (sql) => {
+	const result = await client.execute(sql);
+	if (!result.rows.length) throw new Error(`verify-tenancy: count query returned no rows: ${sql}`);
+	return result.rows[0].n;
+};
 const rows = async (sql) => (await client.execute(sql)).rows;
 
 console.log(`verify-tenancy against ${url}`);
@@ -59,14 +63,26 @@ report('PRAGMA integrity_check is ok', integrity === 'ok', integrity);
 const ddl = (await client.execute("SELECT sql FROM sqlite_master WHERE name = 'channels' AND type = 'table'")).rows[0]?.sql ?? '';
 report('channels DDL contains channels_org_requires_owner', ddl.includes('channels_org_requires_owner'), ddl.slice(0, 200));
 let rejected = false;
+let probeDetail = 'INSERT was allowed';
 try {
 	await client.execute("INSERT INTO channels (id, user_id, title, refresh_token_enc) VALUES ('UCverify-probe', 'probe', 't', 'x')");
-} catch {
-	rejected = true;
+} catch (error) {
+	const message = error instanceof Error ? error.message : String(error);
+	// Only the CONTRACT failing counts as a rejection — anything else (missing
+	// table, connection drop) is a probe failure and must read as FAIL, never
+	// as a false PASS.
+	if (/channels_org_requires_owner|CHECK constraint/i.test(message)) {
+		rejected = true;
+	} else {
+		probeDetail = `unexpected error (not the contract): ${message}`;
+	}
 }
-report('owned channel with NULL org is rejected', rejected, 'INSERT was allowed');
+report('owned channel with NULL org is rejected', rejected, probeDetail);
+// Cleanup is unconditional: on a pre-contract database the probe INSERT
+// succeeds, and the row must not be left behind in the database being verified.
+await client.execute("DELETE FROM channels WHERE id = 'UCverify-probe'");
 const orphans = await scalar("SELECT count(*) AS n FROM channels WHERE id = 'UCverify-probe'");
-report('rejected probe left no row', orphans === 0, `${orphans} row(s) present`);
+report('probe row is gone after cleanup', orphans === 0, `${orphans} row(s) present`);
 
 // 3. Data invariants.
 report(

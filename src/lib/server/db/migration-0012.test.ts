@@ -16,9 +16,10 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { readFileSync } from 'node:fs';
 import { createClient, type Client } from '@libsql/client';
 import { expect, test } from 'vitest';
+
+import { migrationStatements } from './migrationTestUtils';
 
 // Behavior test for migration 0012 (multi-tenancy expand + backfill): applied
 // to a PRE-tenancy database (users/sessions/channels only — no org tables, no
@@ -27,17 +28,7 @@ import { expect, test } from 'vitest';
 // owner membership per surviving user (plan copied from users.plan), point
 // every owned channel at its owner's personal org, leave unclaimed orphans
 // org-less, give tombstoned users nothing, and be idempotent on re-run.
-const migration = readFileSync(new URL('../../../../drizzle/0012_organizations.sql', import.meta.url), 'utf8');
-const statements = migration
-	.split('--> statement-breakpoint')
-	.map((chunk) =>
-		chunk
-			.split('\n')
-			.filter((line) => !line.trimStart().startsWith('--'))
-			.join('\n')
-			.trim()
-	)
-	.filter((chunk) => chunk.length > 0);
+const statements = migrationStatements('0012_organizations.sql');
 
 // The three hand-appended backfill statements, for the idempotency re-run.
 const backfill = statements.filter(

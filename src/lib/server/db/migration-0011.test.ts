@@ -16,9 +16,10 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { readFileSync } from 'node:fs';
 import { createClient, type Client } from '@libsql/client';
 import { expect, test } from 'vitest';
+
+import { migrationStatements } from './migrationTestUtils';
 
 // Behavior test for migration 0011 (account deletion v2): applied to a
 // PRE-change database (users WITH the soft-delete deleted_at column and its
@@ -26,17 +27,7 @@ import { expect, test } from 'vitest';
 // remnants, add the nullable consents.email, backfill it from the owning
 // user WITHOUT copying the tombstone sentinel, and create the partial index
 // the 10-year retention sweep queries through.
-const migration = readFileSync(new URL('../../../../drizzle/0011_consents_email.sql', import.meta.url), 'utf8');
-const statements = migration
-	.split('--> statement-breakpoint')
-	.map((chunk) =>
-		chunk
-			.split('\n')
-			.filter((line) => !line.trimStart().startsWith('--'))
-			.join('\n')
-			.trim()
-	)
-	.filter((chunk) => chunk.length > 0);
+const statements = migrationStatements('0011_consents_email.sql');
 
 const PRE_0011_DDL = `
 	CREATE TABLE users (

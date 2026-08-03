@@ -31,7 +31,9 @@ drizzle-engineering decides *how to make Drizzle do it safely*.
 ## Non-negotiable defaults
 
 1. **The TypeScript schema is the source of truth.** Never hand-edit the database out of band; drift
-   between schema and database corrupts every future diff.
+   between schema and database corrupts every future diff. (One exception: manual reconciliation
+   when recovering from a partially applied migration — follow the documented procedure in
+   references/migrations-workflow.md.)
 2. **`generate` for anything shared or production; `push` for local dev only.** Generated migrations
    are reviewed, committed history. `push` bypasses review and can silently produce destructive diffs.
 3. **Read every generated migration before applying it.** drizzle-kit diffs snapshots, not intent.
@@ -43,8 +45,9 @@ drizzle-engineering decides *how to make Drizzle do it safely*.
    writes → backfill → migrate reads → remove old shape. See references/migrations-workflow.md.
 6. **Applied migrations are immutable history.** Never edit a migration or snapshot that any
    environment has applied. Fix forward with a new migration.
-7. **Every mutation that spans more than one row change runs inside `db.transaction`.** A partial
-   write is worse than no write.
+7. **Every mutation that spans more than one row change is atomic.** Use `db.transaction` where the
+   driver supports it; on drivers that reject SQL transactions (D1), use a single atomic statement
+   or the driver's batch API (`db.batch`). A partial write is worse than no write.
 8. **Never `sql.raw()` or interpolate anything user-controlled into SQL.** Values go through
    parameters; identifiers are hardcoded or allowlisted. See references/queries-performance.md.
 9. **Production is written by a controlled process, not by convenience.** Migrations are applied by a
@@ -55,7 +58,7 @@ drizzle-engineering decides *how to make Drizzle do it safely*.
 
 ## The workflow
 
-```
+```text
 declare/change schema (TS) → drizzle-kit generate → REVIEW the SQL → apply (migrate)
 → verify (schema + journal + smoke query) → commit schema + migration + snapshot together
 ```

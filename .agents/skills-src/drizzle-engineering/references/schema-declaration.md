@@ -31,6 +31,9 @@ export default defineConfig({
 });
 ```
 
+Generic SQLite example — this repo (Moderaty) uses `dialect: 'turso'` with
+`@libsql/client` credentials (`url` + `authToken`); see `drizzle.config.ts`.
+
 Rules:
 
 - Commit everything under `out/` — SQL files, `meta/_journal.json`, and every snapshot. The
@@ -123,8 +126,9 @@ Doctrine (details in sqlite-engineering/references/indexing-tuning.md):
 
 ## Self-referencing and standalone foreign keys
 
-Self-references (and circular references between tables) cannot use the inline `.references(() => t.id)`
-form — the column isn't initialized yet. Use a standalone `foreignKey` with a type hint:
+Self-references cannot use the bare inline `.references(() => t.id)` form — the column isn't
+initialized yet, and TypeScript infers `any`. Type the callback's return explicitly as
+`AnySQLiteColumn`:
 
 ```ts
 import { type AnySQLiteColumn } from 'drizzle-orm/sqlite-core';
@@ -135,8 +139,8 @@ export const categories = sqliteTable('categories', {
 });
 ```
 
-The same standalone `foreignKey({ columns, foreignColumns })` form resolves circular references
-between two tables.
+The standalone `foreignKey({ columns, foreignColumns })` form in the table's third argument
+works too, and is the way to resolve circular references between two tables.
 
 ## Relations are not optional
 

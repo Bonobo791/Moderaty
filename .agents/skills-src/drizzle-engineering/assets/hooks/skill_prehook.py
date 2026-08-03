@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-"""UserPromptSubmit prehook: inject the drizzle-engineering skill into the
-agent's context whenever the user prompt touches Drizzle ORM work.
+"""
+UserPromptSubmit prehook: inject the drizzle-engineering skill.
+
+Loads the skill into the agent's context whenever the user prompt touches
+Drizzle ORM work.
 
 Compatible with any harness that runs a command per user prompt and appends
 stdout to context (Claude Code UserPromptSubmit, Cursor hooks, Gemini CLI,
@@ -25,19 +28,18 @@ import os
 import re
 import sys
 
+# Drizzle-specific triggers only. Generic database terms (migration, join,
+# upsert, N+1, ...) are covered by the sqlite-engineering pre-hook; firing this
+# hook on them would inject the full SKILL.md into unrelated database prompts.
 TRIGGERS = [
     r"\bdrizzle\b", r"\bdrizzle-orm\b", r"\bdrizzle-kit\b", r"\bdrizzle-zod\b",
     r"\bdrizzle\.config\b",
     r"\bsqliteTable\b", r"\bpgTable\b", r"\bmysqlTable\b",
-    r"\bonConflictDo(Update|Nothing)\b", r"\bupsert(s|ing)?\b",
-    r"\bdb\.transaction\b", r"\bdb\.query\b", r"\bprepared\s+statement(s)?\b",
-    r"\bsql\.placeholder\b", r"\bsql\.raw\b",
-    r"\borm\b",
-    r"\bselect\s+.+\s+from\b", r"\bjoin(s|ing)?\b", r"\bleftJoin\b", r"\binnerJoin\b",
-    r"\bn\+1\b", r"\brelations\b",
-    r"\bmigration(s)?\b", r"\bbackfill(s|ing)?\b",
-    r"\bexpand[-\s]and[-\s]contract\b", r"\bschema\s+(drift|declaration|design)\b",
-    r"\bcolumn\s+already\s+exists\b",
+    r"\bonConflictDo(Update|Nothing)\b",
+    r"\bdb\.transaction\b", r"\bdb\.query\b", r"\bdb\.batch\b",
+    r"\bsql\.placeholder\b", r"\bsql\.raw\b", r"\bsql\.identifier\b",
+    r"\bleftJoin\b", r"\binnerJoin\b",
+    r"\bgetTableColumns\b", r"\bbuildConflictUpdateColumns\b",
 ]
 
 TRIGGER_RE = re.compile("|".join(TRIGGERS), re.IGNORECASE)
@@ -103,6 +105,8 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
-        pass  # hooks must never break the prompt flow
+    except Exception as exc:
+        # Hooks must never break the prompt flow, but silent failure is not
+        # acceptable either — log to stderr and still exit 0.
+        sys.stderr.write(f"drizzle-engineering prehook failed: {type(exc).__name__}: {exc}\n")
     sys.exit(0)

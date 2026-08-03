@@ -46,7 +46,8 @@ operational layer.
 drizzle-kit diffs snapshots, not intent. Before committing, read the SQL and check:
 
 1. **Drops** — every `DROP TABLE`/`DROP COLUMN` is a data-loss decision. Is it intended? If it
-   appeared because you renamed something, it's wrong: kit can't see renames.
+   appeared because you renamed something, it's wrong: kit can't see renames on its own (with
+   `strict: true` it asks interactively, but non-interactive runs — CI, agents — get drop+add).
 2. **Renames misread as drop+add** — fix by writing the `ALTER TABLE ... RENAME COLUMN` yourself
    in a `--custom` migration (or edit the generated file BEFORE it is applied anywhere).
 3. **`NOT NULL` without `DEFAULT` on an existing table** — fails or corrupts on populated tables.
@@ -59,7 +60,7 @@ drizzle-kit diffs snapshots, not intent. Before committing, read the SQL and che
 
 ## Custom migrations: DDL vs DML
 
-```
+```sh
 npx drizzle-kit generate --custom --name=backfill-user-slugs
 ```
 
@@ -92,7 +93,7 @@ columns, and moving data between tables.
 
 **CLI (default):**
 
-```
+```sh
 npx drizzle-kit migrate    # uses dbCredentials from drizzle.config.ts
 ```
 
@@ -116,7 +117,7 @@ prevent.
 
 **Cloudflare D1:** D1 has its own migration runner; use wrangler, not drizzle's `migrate`:
 
-```
+```sh
 npx drizzle-kit generate
 npx wrangler d1 migrations apply <db-name> --local
 npx wrangler d1 migrations apply <db-name> --remote

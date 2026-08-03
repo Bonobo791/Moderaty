@@ -54,8 +54,8 @@ The canonical Drizzle performance bug:
 
 ```ts
 // BAD: 1 + N queries, N network round trips
-const posts = await db.select().from(posts);
-for (const post of posts) {
+const postRows = await db.select().from(posts);
+for (const post of postRows) {
   post.author = await db.query.users.findFirst({ where: eq(users.id, post.authorId) });
 }
 ```
@@ -86,16 +86,31 @@ await db.insert(users)
   .values({ id, email, name })
   .onConflictDoUpdate({
     target: users.email,                       // the unique column(s)
-    set: { name: excludedName },               // what to update
+    // referencing the proposed row (Postgres/SQLite "excluded" pseudo-table):
+    set: { name: sql.raw(`excluded.${users.name.name}`) },
     // setWhere: sql`...`, targetWhere: sql`...`  — partial-conflict refinements
   });
 
-// referencing the proposed row (Postgres "excluded"):
-set: { name: sql.raw(`excluded.${users.name.name}`) }
+// helper for "update every inserted column" — NOT a drizzle-orm export; it is
+// the user-defined helper from the Drizzle upsert guide. Define it locally:
+import { getTableColumns, sql, type SQL } from 'drizzle-orm';
+import type { SQLiteTable } from 'drizzle-orm/sqlite-core';
 
-// helper for "update every inserted column":
-import { getTableColumns, buildConflictUpdateColumns } from 'drizzle-orm';
-set: buildConflictUpdateColumns(users, getTableColumns(users)),
+const buildConflictUpdateColumns = <T extends SQLiteTable, Q extends keyof T['_']['columns']>(
+  table: T,
+  columns: Q[],
+) => {
+  const cls = getTableColumns(table);
+  return columns.reduce(
+    (acc, column) => {
+      acc[column] = sql.raw(`excluded."${cls[column].name}"`);
+      return acc;
+    },
+    {} as Record<Q, SQL>,
+  );
+};
+
+set: buildConflictUpdateColumns(users, ['name', 'email']),
 ```
 
 `onConflictDoNothing({ target })` for insert-if-absent. `buildConflictUpdateColumns` silently

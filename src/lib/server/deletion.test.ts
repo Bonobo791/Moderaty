@@ -16,7 +16,7 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { expect, test } from 'vitest';
 
 import { DAY_MS, seedConsent, setupTestDb, testDb } from './testdb';
@@ -124,6 +124,26 @@ test('deleteUserRecords refuses to erase a personal org that somehow has a secon
 	expect(await testDb().db.select().from(channels).all()).toHaveLength(1);
 	expect(await testDb().db.select().from(memberships).all()).toHaveLength(2);
 	expect(await testDb().db.select().from(organizations).all()).toHaveLength(1);
+});
+
+test('deleteUserRecords refuses when the sole personal-org member is someone else', async () => {
+	// Sharper edge of the same data bug: the count is 1 (passes a naive count
+	// guard) but the sole membership belongs to a DIFFERENT user — deleting
+	// the org would erase that user's tenancy and channels.
+	const userId = await seedUser('gone');
+	await testDb()
+		.db.delete(memberships)
+		.where(and(eq(memberships.userId, userId), eq(memberships.orgId, 'org-gone')));
+	await testDb()
+		.db.insert(users)
+		.values({ id: 'squatter', googleSub: 'sub-squatter', email: 'sq@example.com', displayName: 'Sq' });
+	await testDb().db.insert(memberships).values({ userId: 'squatter', orgId: 'org-gone', role: 'owner' });
+
+	await expect(deleteUserRecords(userId)).rejects.toThrow('personal organization has other members');
+
+	expect(await userRow(userId)).toMatchObject({ googleSub: 'sub-gone' });
+	expect(await testDb().db.select().from(organizations).all()).toHaveLength(1);
+	expect(await testDb().db.select().from(channels).all()).toHaveLength(1);
 });
 
 test('deleteUserRecords keeps team channels the user merely connected, wiping their connector credentials', async () => {

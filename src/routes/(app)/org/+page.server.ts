@@ -1,0 +1,105 @@
+// Moderaty — YouTube Comment Auto-Moderation Tool
+// Copyright (C) 2026 Andrew Philip Weilbacher
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+//
+// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+
+import { fail } from '@sveltejs/kit';
+
+import {
+	createInvite,
+	createOrg,
+	leaveOrg,
+	listMembers,
+	listOpenInvites,
+	removeMember,
+	renameOrg,
+	revokeInvite,
+	setMemberRole,
+	type OrgRole
+} from '$lib/server/org';
+import { requireOrgRole } from '$lib/server/ownership';
+import { requireUser, SESSION_COOKIE } from '$lib/server/session';
+
+import type { Actions, PageServerLoad } from './$types';
+
+// Team settings for the ACTIVE team. Members see the roster; admin+ see
+// invite management; owners see role controls (enforced server-side in org.ts).
+export const load: PageServerLoad = async ({ locals, url }) => {
+	const user = requireUser(locals);
+	const members = await listMembers(user.id, user.orgId);
+	const invites =
+		user.orgRole === 'admin' || user.orgRole === 'owner' ? await listOpenInvites(user.id, user.orgId) : [];
+	return { user, members, invites, inviteBase: new URL('/invite/', url.origin).toString() };
+};
+
+/** Wraps org.ts errors as form failures so the page shows .error-box (I12). */
+async function guard<T>(fn: () => Promise<T>): Promise<T | ReturnType<typeof fail>> {
+	try {
+		return await fn();
+	} catch (e) {
+		const status = (e as { status?: number }).status;
+		const message = (e as { body?: { message?: string } }).body?.message;
+		if (typeof status === 'number' && message) return fail(status, { error: message });
+		throw e;
+	}
+}
+
+export const actions: Actions = {
+	rename: async ({ request, locals }) => {
+		const user = requireUser(locals);
+		requireOrgRole(user, 'admin');
+		const name = String((await request.formData()).get('name') ?? '');
+		return guard(() => renameOrg(user.id, user.orgId, name));
+	},
+	createTeam: async ({ request, locals }) => {
+		const user = requireUser(locals);
+		const name = String((await request.formData()).get('name') ?? '');
+		return guard(() => createOrg(user.id, name));
+	},
+	invite: async ({ request, locals }) => {
+		const user = requireUser(locals);
+		requireOrgRole(user, 'admin');
+		const form = await request.formData();
+		const role = String(form.get('role') ?? 'member');
+		if (role !== 'admin' && role !== 'member') return fail(400, { error: 'role must be admin or member' });
+		return guard(async () => ({ ok: true as const, inviteToken: await createInvite(user.id, user.orgId, role) }));
+	},
+	revokeInvite: async ({ request, locals }) => {
+		const user = requireUser(locals);
+		requireOrgRole(user, 'admin');
+		const token = String((await request.formData()).get('token') ?? '');
+		return guard(() => revokeInvite(user.id, token));
+	},
+	setRole: async ({ request, locals }) => {
+		const user = requireUser(locals);
+		requireOrgRole(user, 'owner');
+		const form = await request.formData();
+		const targetUserId = String(form.get('userId') ?? '');
+		const role = String(form.get('role') ?? '') as OrgRole;
+		return guard(() => setMemberRole(user.id, user.orgId, targetUserId, role));
+	},
+	remove: async ({ request, locals }) => {
+		const user = requireUser(locals);
+		const targetUserId = String((await request.formData()).get('userId') ?? '');
+		return guard(() => removeMember(user.id, user.orgId, targetUserId));
+	},
+	leave: async ({ locals, cookies }) => {
+		const user = requireUser(locals);
+		const token = cookies.get(SESSION_COOKIE);
+		if (!token) return fail(401, { error: 'sign-in required' });
+		return guard(() => leaveOrg(user.id, token, user.orgId));
+	}
+};

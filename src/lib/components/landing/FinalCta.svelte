@@ -30,7 +30,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		</Reveal>
 		<Reveal delay={0.08}>
 			<a href={LOGIN_URL} class="btn-press cta">Connect YouTube channel</a>
-			<p class="microcopy">Google asks for comment access only. Free and open source (AGPL).</p>
+			<p class="microcopy">Google asks for standard YouTube access, used only on your comments. Free and open source (AGPL).</p>
 		</Reveal>
 	</div>
 </section>

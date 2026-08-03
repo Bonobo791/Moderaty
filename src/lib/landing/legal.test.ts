@@ -322,3 +322,38 @@ describe('Terms billing scope (PR #47 review)', () => {
 		expect(s94).toMatch(/author bans? cannot be (?:lifted|reversed|undone)/i);
 	});
 });
+
+// PR #26 post-merge review triage (codeant findings): the OAuth scope is
+// youtube.force-ssl — YouTube offers no comments-only scope — so copy must
+// not claim Google asks for "comment access only". And user rules act before
+// AI scoring (pipeline: a rule match short-circuits aiDecision), so the FAQ
+// may not claim that ONLY a 0.95+ AI score triggers an automatic ban.
+describe('OAuth scope and ban claims match implementation', () => {
+	it('no surface claims Google asks for comment access only', () => {
+		const scopeSurfaces: Record<string, string> = {
+			FAQ: FAQ_ENTRIES.map((f) => `${f.q} ${f.a}`).join('\n'),
+			FinalCta: readFileSync(
+				new URL('../components/landing/FinalCta.svelte', import.meta.url),
+				'utf8'
+			),
+			TrustBar: readFileSync(
+				new URL('../components/landing/TrustBar.svelte', import.meta.url),
+				'utf8'
+			)
+		};
+		for (const [name, text] of Object.entries(scopeSurfaces)) {
+			expect(text, `${name} still claims comment-only access`).not.toMatch(
+				/comment access only/i
+			);
+		}
+	});
+
+	it('the FAQ acknowledges rule-based bans alongside the AI threshold', () => {
+		// Rules act before AI scoring (pipeline: a rule match short-circuits
+		// aiDecision), so the ban answer must not present 0.95 as the only
+		// path to an automatic ban.
+		const banFaq = FAQ_ENTRIES.find((f) => f.q === 'Will Moderaty ban my real fans?');
+		expect(banFaq, 'ban FAQ entry missing').toBeDefined();
+		expect(banFaq?.a).toMatch(/ban rule bans/i);
+	});
+});

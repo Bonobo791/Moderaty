@@ -30,7 +30,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			{/each}
 		</ul>
 		<p class="microcopy">
-			Google asks for comment access only. Free and open source (AGPL). Dry-run mode proves it
+			Google asks for standard YouTube access, used only on your comments. Free and open source (AGPL). Dry-run mode proves it
 			before anything changes.
 		</p>
 	</div>

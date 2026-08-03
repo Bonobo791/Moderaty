@@ -1,5 +1,20 @@
 # Mutation Testing Tools by Language
 
+<!--
+Moderaty — YouTube Comment Auto-Moderation Tool
+Copyright (C) 2026 Andrew Philip Weilbacher
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version. This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+for more details: <https://www.gnu.org/licenses/>.
+
+Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+-->
+
 Contents: selection table · JS/TS (StrykerJS) · Python (mutmut, Cosmic Ray) · Rust (cargo-mutants) · Java/JVM (PIT) · Go · PHP (Infection) · .NET · Ruby · Swift · C/C++ · universal CI pattern.
 
 ## Selection table
@@ -7,10 +22,10 @@ Contents: selection table · JS/TS (StrykerJS) · Python (mutmut, Cosmic Ray) ·
 | Language | Tool | Install | Notes |
 |---|---|---|---|
 | JS / TS | StrykerJS | `npm i -D @stryker-mutator/core` + runner plugin | De facto standard; Jest/Vitest/Mocha/Karma; `--since`, `--incremental` |
-| Python | mutmut | `pip install mutmut` | Runner-agnostic (exit code); `.mutmut-cache` incremental; `apply` edits files in place |
+| Python | mutmut | `pip install mutmut` | Runner-agnostic (exit code); v3 rewrote config keys and the results CLI — see below |
 | Python | Cosmic Ray | `pip install cosmic-ray` | Plugin distributors spread work across workers; heavier than mutmut |
 | Rust | cargo-mutants | `cargo install cargo-mutants` | `mutants.out/` results dir; `--in-diff` for PRs; `#[mutants::skip]` |
-| Java / JVM | PIT (pitest) | Maven/Gradle plugin | Mutates bytecode (fast, no source view); `scmMutationCoverage` for PR diffs |
+| Java / JVM | PIT (pitest) | Maven/Gradle plugin | Mutates bytecode (fast, no source view); PR-diff runs need Arcmutate's git integration (the old `scmMutationCoverage` goal is removed) |
 | Go | go-mutesting (avito-tech fork) or Gremlins | `go install` | Fork is the maintained one |
 | PHP | Infection | `composer require --dev infection/infection` | AST-based; `--only-covered`, MSI thresholds |
 | C# / .NET | Stryker.NET | `dotnet tool install -g dotnet-stryker` | Run from test project dir |
@@ -20,6 +35,8 @@ Contents: selection table · JS/TS (StrykerJS) · Python (mutmut, Cosmic Ray) ·
 | C / C++ | Mull | binary release | LLVM-level mutants |
 
 Choose by: test-runner integration (drives the existing suite unmodified), changed-file scoping, parallelism, readable HTML/JSON report. All listed tools have these.
+
+**Mutant-status semantics are tool-specific.** The SKILL.md status list (killed / survived / timed out / no coverage / error) is the generic model; check your tool's exact definitions before gating on them. For example, StrykerJS reports `NoCoverage` separately from `Survived`, counts `Timeout` as detected, and excludes compile/runtime errors from the score; other tools bucket these differently. The score formula likewise varies (some tools count timeouts as killed, some exclude them).
 
 ## JavaScript / TypeScript — StrykerJS
 
@@ -52,7 +69,7 @@ Levers that matter:
 - `coverageAnalysis: "perTest"` — the single biggest speedup; runs only tests covering each mutant. Never `"off"`.
 - `thresholds.break` — score below → exit 1 → CI gate. Set floor = current − buffer, ratchet up.
 - `npx stryker run --since main` — mutate only files changed vs base branch (PR mode).
-- `npx stryker run --incremental` — cache results in `.stryker-tmp/`; commit the cache for CI reuse.
+- `npx stryker run --incremental` — caches results in `reports/stryker-incremental.json` (the default `incrementalFile`); cache that file in CI for reuse — committing it to the repo just adds bloat and merge noise. (`.stryker-tmp/` is the scratch sandbox dir, not the cache.)
 - `npx stryker run --mutate "src/billing/**/*.ts"` — scope hardening to one module.
 - `ignoreStatic: true` — skip mutants only executed at module load (large perf penalty, low value).
 - `mutator.excludedMutations` — drop noisy operators (e.g. `ObjectLiteral`, `StringLiteral` on logging-heavy files).
@@ -74,45 +91,39 @@ CI (PR gate + weekly sweep):
 
 ## Python — mutmut
 
-Config (`pyproject.toml` or `setup.cfg`):
+mutmut 3.x (current) rewrote the config keys and the results CLI. If you are pinned to mutmut 2.x, the old keys (`paths_to_mutate`, `tests_dir`) and commands (`mutmut results`, `mutmut show`, `mutmut apply`, `mutmut result-ids`) still apply — pin and label the version either way.
+
+Config (`pyproject.toml` — paths are arrays; `setup.cfg` — strings):
 
 ```toml
 [tool.mutmut]
-paths_to_mutate = "src/"
-runner = "pytest -x -q"
-tests_dir = "tests/"
+source_paths = ["src/"]
+pytest_add_cli_args_test_selection = ["tests/"]
 ```
 
 ```ini
 [mutmut]
-paths_to_mutate=src/
-backup=False
-runner=pytest -x
-tests_dir=tests/
+source_paths=src/
+pytest_add_cli_args_test_selection=tests/
 ```
 
-Workflow:
+Workflow (3.x):
 
 ```bash
-mutmut run                 # resumable; caches in .mutmut-cache (delete for a clean full run)
-mutmut results             # killed / survived / no-tests summary
-mutmut show 7              # diff of one mutant
-mutmut show path/to/file.py
-mutmut apply 7             # writes mutant to disk — file MUST be committed first
-# write a test that fails on the mutant, then:
+mutmut run                 # resumable; state lives in the mutants/ dir (delete for a clean full run)
+mutmut browse              # interactive TUI: killed/survived summary, per-mutant diffs,
+                           # retest individual mutants, write a mutant to disk
+# to validate a kill both directions: write the mutant to disk from `mutmut browse`
+# (the source MUST be committed first), write the failing test, then:
 git checkout -- src/file.py  # revert immediately — never leave applied mutants on disk
-mutmut run 7               # re-test one mutant
-for id in $(mutmut result-ids survived); do mutmut run $id; done   # re-test all survivors
 ```
 
 Quirks and controls:
 
 - `# pragma: no mutate` — whitelist a line (version strings, logging, intentional perf trade-offs like `break`→`continue`).
 - `mutmut_config.py` with `pre_mutation(context)` — skip mutants programmatically (e.g. skip all `log.*` lines, skip a file) or change the test command per mutant.
-- `--disable-mutation-types=string,decorator` / `--enable-mutation-types=...` — operator-level scope (exclusive flags).
 - Only needs an exit code from the runner, so any test command works; `hammett` runner is dramatically faster than pytest if adoptable.
-- `mutmut html` for a browsable report.
-- WARNING for agents: `mutmut apply` physically corrupts the working tree. Always verify `git status` is clean before applying, and revert in the same session.
+- WARNING for agents: writing a mutant to disk (2.x `mutmut apply`, 3.x via `mutmut browse`) physically corrupts the working tree. Always verify `git status` is clean before applying, and revert in the same session.
 
 Cosmic Ray: prefer when mutant volume needs distributing across machines (plugin-based executors); config in a TOML session file, `cosmic-ray exec session.toml`, `cr-report`.
 
@@ -138,14 +149,10 @@ cargo mutants --list          # preview mutants without running
 ```bash
 # Full run
 mvn clean test-compile org.pitest:pitest-maven:mutationCoverage
-
-# PR-diff run (only added/modified code vs main)
-mvn clean test-compile org.pitest:pitest-maven:scmMutationCoverage \
-  -DoriginBranch=origin/feature/x -DdestinationBranch=origin/main \
-  -Dinclude=ADDED,MODIFIED -DtimestampedReports=false
 ```
 
 - Mutates bytecode, not source — fast on large codebases, but no mutated-source view in reports.
+- PR-diff runs: the deprecated `scmMutationCoverage` Maven goal was fully removed from current PIT. Use Arcmutate's Git integration (the commercial successor for diff-scoped runs), or pin and clearly label a pre-removal pitest-maven version if you depend on the old goal.
 - Persist `target/pit-history.xml` as a CI artifact for incremental reuse.
 - Timeouts: infinite-loop detection = `normalTime * timeoutFactor (1.25) + timeoutConstant (4000ms)`. Classloading order causes false timeouts (JAXB/XML-heavy code) — raise `timeoutConstant`.
 - Defaults already skip calls to common logging packages (`avoidCallsTo`); add project logging wrappers to that list.
@@ -199,4 +206,4 @@ LLVM-IR-level mutants; integrates via `mull-cxx` and compiled test binaries. Str
 
 1. PR pipeline: `git diff` → tool's diff/incremental mode → fail only on new survivors or a low `break` floor. Upload HTML/JSON report as artifact (`if: always()`).
 2. Scheduled pipeline (nightly/weekly): full sweep on the default branch, enforces the real `break` threshold, tracks score over time.
-3. Cache/commit the tool's state file (`.stryker-tmp/`, `.mutmut-cache`, `target/pit-history.xml`) between runs.
+3. Cache the tool's state file in CI between runs (CI cache, not the repo) — `reports/stryker-incremental.json` (StrykerJS), `mutants/` (mutmut 3.x), `target/pit-history.xml` (PIT).

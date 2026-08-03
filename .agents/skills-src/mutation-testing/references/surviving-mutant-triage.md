@@ -1,5 +1,20 @@
 # Surviving-Mutant Triage
 
+<!--
+Moderaty — YouTube Comment Auto-Moderation Tool
+Copyright (C) 2026 Andrew Philip Weilbacher
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version. This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+for more details: <https://www.gnu.org/licenses/>.
+
+Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+-->
+
 Contents: classification flow · equivalent-mutant heuristics · operator-to-gap map · priority tiers · kill-test recipe · when to accept a survivor.
 
 ## Classification flow
@@ -21,7 +36,7 @@ Common shapes of unkillable mutants:
 - Logging/observability text: message content, log levels, metric labels — usually no behavioral assertion exists *and none should*; exclude instead of testing.
 - Symmetric operations: `a.union(b)` vs `b.union(a)` where the result is order-independent.
 
-Expect 15–25% of survivors in a mature triage to be equivalent. Flag them in the tool's config (mutmut `# pragma: no mutate`, Stryker `mutator.excludedMutations` or per-file ignores, PIT `<excludedMutations>`, cargo-mutants `#[mutants::skip]`) with a reason, so they never pollute the score again.
+Expect a meaningful share of survivors in a mature triage to be equivalent — a rough working estimate is 15–25%, highly dependent on the operator set and codebase. Flag them in the tool's config (mutmut `# pragma: no mutate`, Stryker `mutator.excludedMutations` or per-file ignores, PIT `<excludedMutations>`, cargo-mutants `#[mutants::skip]`) with a reason, so they never pollute the score again.
 
 ## Operator-to-gap map
 

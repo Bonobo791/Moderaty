@@ -3,6 +3,24 @@ name: mutation-testing
 description: 'Mutation testing engineering — verify that a test suite actually catches bugs, not just executes lines. Use when auditing or hardening test-suite quality, reviewing test coverage claims ("we have 90% coverage"), hunting surviving mutants, writing tests that kill specific mutants, setting up or configuring mutation tools (Stryker/StrykerJS/Stryker.NET, mutmut, Cosmic Ray, PIT/pitest, Infection, cargo-mutants, go-mutesting/Gremlins, mutant, muter, Mull), wiring mutation testing into CI (incremental PR runs, thresholds, --since/--in-diff), interpreting mutation scores, handling equivalent/timeout/no-coverage mutants, or closing the mutation-feedback loop on AI-generated tests. Triggers on: mutation testing, mutation score, surviving mutants, killed mutants, equivalent mutants, are my tests actually good, test suite quality, weak assertions, mutation coverage, mutant.'
 ---
 
+<!--
+Moderaty — YouTube Comment Auto-Moderation Tool
+Copyright (C) 2026 Andrew Philip Weilbacher
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version. This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+for more details: <https://www.gnu.org/licenses/>.
+
+Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+
+(Placed after the front matter, not before it: skill loaders require the
+YAML front matter to start on line 1.)
+-->
+
 # Mutation Testing
 
 ## Mental model
@@ -15,7 +33,7 @@ Line/branch coverage measures which code the suite *executes*. Mutation testing 
 - **No coverage** — no test executes the mutated line. Counts as undetected; add a behavior test or exclude the file.
 - **Error/unviable** — mutant does not compile or crashes setup. Excluded from the score.
 
-Mutation score = killed / (total − equivalent). Equivalent mutants change syntax but not behavior (`i <= n-1` vs `i < n`); they can never be killed and detecting them automatically is undecidable — expect to flag them by hand. Research puts ~23% of mutants as equivalent, so 100% is a mathematical ceiling, not a target.
+Mutation score = killed / (total − equivalent). Equivalent mutants change syntax but not behavior (`i <= n-1` vs `i < n`); they can never be killed and detecting them automatically is undecidable — expect to flag them by hand. Published equivalent-mutant rates vary widely with the operator set and codebase — from under 10% to around a quarter (Yao, Harman & Jia's manual analysis of 4,181 mutants is the classic study) — so 100% is a mathematical ceiling, not a target.
 
 ## Score interpretation
 

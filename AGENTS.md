@@ -33,8 +33,10 @@ Repo-local skill sources live in `.agents/skills-src/<name>/` (currently
 *installed* by copying to `~/.agents/skills/<name>/` and *pre-hooked* via
 `assets/hooks/skill_prehook.py` inside the skill plus a
 `[[hooks]] event = "UserPromptSubmit"` entry in `~/.kimi-code/config.toml`.
-Hooks always exit 0 (never break the prompt flow) and log failures loudly to
-stderr. Edit the source in the repo, then re-copy to install updates.
+Hooks always exit 0 (never break the prompt flow). Failures are loud on both
+channels: logged to stderr for the server log, and written to stdout as a
+WARNING line so the user (and the agent reading injected context) actually
+sees them. Edit the source in the repo, then re-copy to install updates.
 
 ## Git & Review Workflow (execution plan v3, section 0)
 

@@ -1,12 +1,27 @@
 # Agent Mutation-Feedback Loop
 
+<!--
+Moderaty — YouTube Comment Auto-Moderation Tool
+Copyright (C) 2026 Andrew Philip Weilbacher
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version. This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+for more details: <https://www.gnu.org/licenses/>.
+
+Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+-->
+
 Contents: why mutation feedback beats coverage for AI-written tests · the loop · prompt pattern · budget and stopping rules · guardrails · manual adversarial mode.
 
 ## Why mutation feedback for AI-written tests
 
 - LLM-generated tests cluster around the same blind spots as the same model's code — the test-homogenization trap. A green, high-coverage suite from one model is weak evidence of correctness.
 - Coverage feedback ("line X uncovered") produces execution without assertion. Mutation feedback ("this exact behavioral change went unnoticed") forces discriminating assertions.
-- Research support: MuTAP (surviving mutants in the prompt) — removing the mutation-feedback loop caused the largest drop in fault detection (~50 points); MUTGEN reaches ~89.5% mutation score on HumanEval-Java via mutation-feedback prompting, beating EvoSuite and vanilla prompting; Meta's ACH pipeline (LLM fault generator + equivalent-mutant filter + test generator) got 73% of generated tests accepted by engineers at production scale.
+- Research support: MuTAP (Dakhel et al., 2024) augments prompts with surviving mutants and reports substantially better bug detection than coverage-guided generation; MUTGEN applies the same mutation-feedback prompting at benchmark scale; Meta's ACH pipeline (LLM fault generator + equivalent-mutant filter + test generator) runs the loop at production scale.
 
 ## The loop
 
@@ -23,7 +38,7 @@ Contents: why mutation feedback beats coverage for AI-written tests · the loop 
 
 Give the model everything it needs, nothing else:
 
-```
+```text
 The test suite misses this behavioral fault:
 
 File: src/billing/credits.ts:42
@@ -47,7 +62,7 @@ Mutation re-runs and LLM calls both cost. Stop when any of:
 - Two consecutive rounds kill < ~5% of remaining survivors (diminishing returns — remaining survivors likely equivalent or require integration-level tests).
 - Compute/token budget exhausted: defer remaining survivors to a tracked list with the classification attached.
 
-Cost controls: scope to changed files, defer full-suite re-validation to the end of each round rather than after every single generated test (research shows immediate per-test mutation feedback multiplies LLM token use up to ~7× for modest gain), and re-run the tool only on survivor IDs where the tool supports it (`mutmut run <id>`, Stryker `--mutate` glob).
+Cost controls: scope to changed files, defer full-suite re-validation to the end of each round rather than after every single generated test (immediate per-test re-runs multiply LLM and tool cost for modest gain), and re-run the tool only on survivor IDs where the tool supports it (Stryker `--mutate` glob; `mutmut browse` retests individual mutants).
 
 ## Guardrails
 

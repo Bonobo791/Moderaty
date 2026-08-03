@@ -1,4 +1,21 @@
 #!/usr/bin/env python3
+# Moderaty — YouTube Comment Auto-Moderation Tool
+# Copyright (C) 2026 Andrew Philip Weilbacher
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published
+# by the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+#
+# Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 """
 UserPromptSubmit prehook: inject the mutation-testing skill.
 
@@ -13,7 +30,9 @@ Kimi Code hooks, generic wrappers). Protocol:
            "prompt" (Claude Code), "user_prompt", "message", "text".
            A bare JSON string literal is used directly; if stdin is not
            valid JSON, the raw text is treated as the prompt.
-  stdout : text to inject into context (only printed on keyword match).
+  stdout : text to inject into context. Printed on keyword match; a loud
+           WARNING line is also printed on hook failure — fallbacks must be
+           visible to the user (stdout), not only logged (stderr).
   exit   : always 0; no-match means silent no-op.
 
 Skill location: defaults to the SKILL.md two directories up from this script
@@ -45,7 +64,7 @@ TRIGGERS = [
     r"\bsurviving (mutant|mutation)s?\b", r"\bkilled mutants?\b",
     r"\bequivalent mutants?\b", r"\bkill(ing)? (the |those |these |that )?mutants?\b",
     r"\btest(-| )suite quality\b",
-    r"\bare my tests\b", r"\bweak assertion",
+    r"\bare my tests (actually )?(good|catching|enough|worth|strong)\b", r"\bweak assertion",
     r"\bdo(es)? (my|the|these) tests? (actually )?(catch|fail)",
 ]
 
@@ -101,11 +120,17 @@ def main() -> None:
             sys.stdout.write(DIRECTIVE + body + "\n")
             return
         except OSError as file_error:
-            # Fallback must be loud (repo rule): the path directive below
-            # degrades gracefully, but the read failure itself is logged.
+            # Fallback must be loud (repo rule): log server-side AND show the
+            # failure to the user — in stdout-injecting harnesses stderr may
+            # never be seen, so the warning goes to both channels.
             sys.stderr.write(
                 f"mutation-testing prehook: skill file not readable: "
                 f"{skill_path} ({type(file_error).__name__}: {file_error})\n"
+            )
+            sys.stdout.write(
+                f"[mutation-testing prehook WARNING: could not read the skill "
+                f"file at {skill_path} ({type(file_error).__name__}); falling "
+                "back to a path directive.]\n"
             )
 
     refs_dir = os.path.join(os.path.dirname(skill_path), "references")
@@ -123,7 +148,11 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        # Hooks must never break the prompt flow, but silent failure is not
-        # acceptable either — log to stderr and still exit 0.
+        # Hooks must never break the prompt flow, but failure must be loud on
+        # both channels: stderr for the server log, stdout so the user (and
+        # the agent reading injected context) actually sees it.
         sys.stderr.write(f"mutation-testing prehook failed: {type(exc).__name__}: {exc}\n")
+        sys.stdout.write(
+            f"[mutation-testing prehook WARNING: hook failed: {type(exc).__name__}: {exc}]\n"
+        )
     sys.exit(0)

@@ -189,3 +189,23 @@ test('leave: a successful leave 303s to the dashboard (post-leave /org would 404
 	const sess = await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-1')).get();
 	expect(sess?.activeOrgId).toBeNull();
 });
+
+test('setRole: an invalid role from the form is a wrapped 400, never cast through', async () => {
+	// PR #52 review (CodeRabbit): the action passed a raw form string into
+	// setMemberRole; the lib rejects unknown roles, and the route must surface
+	// that as a form failure.
+	await seedOwnerOrg();
+	await seedTeammate('user-2');
+	const bad = failure(await actions.setRole(ctx(TEST_OWNER, { userId: 'user-2', role: 'superadmin' })));
+	expect(bad.status).toBe(400);
+	const kept = await testDb().db.select().from(memberships).where(eq(memberships.userId, 'user-2')).all();
+	expect(kept[0].role).toBe('member');
+});
+
+test('remove: a member caller is 403 at the route, same as the other admin-gated actions', async () => {
+	// PR #52 review (CodeRabbit): remove was the only admin-gated action
+	// without a route-level requireOrgRole.
+	await seedOwnerOrg();
+	await seedTeammate('user-2');
+	await expect(actions.remove(ctx(MEMBER, { userId: 'user-2' }))).rejects.toMatchObject({ status: 403 });
+});

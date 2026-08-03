@@ -20,6 +20,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <script lang="ts">
 	import { enhance } from '$app/forms';
+	import EmptyState from '$lib/EmptyState.svelte';
 
 	let { data, form } = $props();
 
@@ -108,16 +109,17 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		{/if}
 		<h3>Open invite links</h3>
 		{#each data.invites as invite (invite.token)}
+			{@const expires = new Date(invite.expiresAt).toLocaleDateString()}
 			<p>
 				<span class="badge neutral">{invite.role}</span>
-				<span class="muted">expires {new Date(invite.expiresAt).toLocaleDateString()}</span>
+				<span class="muted">expires {expires}</span>
 			</p>
 			<form method="POST" action="?/revokeInvite" use:enhance>
 				<input type="hidden" name="token" value={invite.token} />
-				<button class="btn secondary small" type="submit">Revoke this invite link</button>
+				<button class="btn secondary small" type="submit">Revoke the {invite.role} invite link expiring {expires}</button>
 			</form>
 		{:else}
-			<p class="muted">No open invite links.</p>
+			<EmptyState title="No open invite links" />
 		{/each}
 	</div>
 {/if}

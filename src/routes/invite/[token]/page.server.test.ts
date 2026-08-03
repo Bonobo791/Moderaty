@@ -105,3 +105,11 @@ test('accept: joins the org, burns the token, 303s to the dashboard; reuse is 41
 	expect(preview.invite.accepted).toBe(true);
 	await expect(actions.default(acceptCtx('tok-1'))).rejects.toMatchObject({ status: 410 });
 });
+
+test('accept: the session lands in the joined org (PR #52 review — untested assertion)', async () => {
+	await seedOrgWithInvite('tok-1');
+	await seedJoiner();
+	await expect(actions.default(acceptCtx('tok-1'))).rejects.toMatchObject({ status: 303 });
+	const sess = await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-1')).get();
+	expect(sess?.activeOrgId).toBe('org-1');
+});

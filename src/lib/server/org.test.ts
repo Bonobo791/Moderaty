@@ -449,3 +449,16 @@ test('leaveOrg clears only the caller\'s own session', async () => {
 	const other = await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-2')).get();
 	expect(other?.activeOrgId).toBe('org-1'); // teammate's session untouched
 });
+
+test('setMemberRole rejects an unknown role with 400 (PR #52 review — untested guard)', async () => {
+	await seedUser('owner-1');
+	await seedUser('member-1');
+	await seedOrg('org-1');
+	await seedMember('owner-1', 'org-1', 'owner');
+	await seedMember('member-1', 'org-1', 'member');
+
+	await expect(setMemberRole('owner-1', 'org-1', 'member-1', 'superadmin' as 'member')).rejects.toMatchObject({
+		status: 400
+	});
+	expect((await membershipRow('member-1', 'org-1'))[0].role).toBe('member'); // unchanged
+});

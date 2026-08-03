@@ -93,6 +93,7 @@ export const actions: Actions = {
 	},
 	remove: async ({ request, locals }) => {
 		const user = requireUser(locals);
+		requireOrgRole(user, 'admin');
 		const targetUserId = String((await request.formData()).get('userId') ?? '');
 		return guard(() => removeMember(user.id, user.orgId, targetUserId));
 	},

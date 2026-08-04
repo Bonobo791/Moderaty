@@ -169,6 +169,9 @@ describe('seed-dev multi-channel demo data', () => {
 			expect(ch.rows.length, `channel ${id} must be seeded`).toBe(1);
 			expect(ch.rows[0].user_id).toBeNull();
 			expect(ch.rows[0].org_id).toBeNull();
+			// Inactive: demo rows must render in the UI, but cron must never burn
+			// a run decrypting 'seed-not-a-real-token'.
+			expect(ch.rows[0].active, `channel ${id} must be seeded inactive`).toBe(0);
 			for (const table of ['rules', 'comments', 'moderation_actions', 'audit_log']) {
 				expect(await countFor(client, table, id), `${table} rows for ${id}`).toBeGreaterThan(0);
 			}
@@ -178,7 +181,7 @@ describe('seed-dev multi-channel demo data', () => {
 			'SELECT id FROM comments GROUP BY id HAVING count(*) > 1'
 		);
 		client.close();
-		expect(dupes.rows.length).toBe(0);
+		expect(dupes.rows).toHaveLength(0);
 	}, 20000);
 
 	it('--reset removes every seeded row for BOTH channels and leaves other rows untouched', async () => {

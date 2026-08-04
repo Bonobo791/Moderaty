@@ -59,6 +59,7 @@ for (const table of TABLES) {
 		await client.execute(`SELECT 1 FROM ${table} LIMIT 1`);
 	} catch {
 		console.error(`Table "${table}" is missing. Run migrations first: npm run db:migrate`);
+		client.close();
 		process.exit(1);
 	}
 }
@@ -73,6 +74,7 @@ if (process.argv.includes('--reset')) {
 		await client.execute({ sql: 'DELETE FROM channels WHERE id = ?', args: [id] });
 	}
 	console.log(`Removed all demo rows for ${SEED_CHANNELS.map((c) => c.id).join(', ')}.`);
+	client.close();
 	process.exit(0);
 }
 
@@ -80,6 +82,7 @@ for (const { id } of SEED_CHANNELS) {
 	const existing = await client.execute({ sql: 'SELECT id FROM channels WHERE id = ?', args: [id] });
 	if (existing.rows.length > 0) {
 		console.error(`Demo channel ${id} already exists. Run with --reset first to reseed.`);
+		client.close();
 		process.exit(1);
 	}
 }
@@ -117,9 +120,11 @@ const COMMENTS = [
 ];
 
 async function seedChannel({ id, title, commentPrefix }) {
+	// active = 0: demo rows render in every surface, but cron must never pick a
+	// demo channel and burn a run decrypting 'seed-not-a-real-token'.
 	await client.execute({
 		sql: `INSERT INTO channels (id, title, refresh_token_enc, cursor, active)
-		      VALUES (?, ?, 'seed-not-a-real-token', ?, 1)`,
+		      VALUES (?, ?, 'seed-not-a-real-token', ?, 0)`,
 		args: [id, title, iso(2 * day)]
 	});
 
@@ -145,6 +150,7 @@ async function seedChannel({ id, title, commentPrefix }) {
 		const [status, decidedBy, ruleType, aiScore, text] = COMMENTS[i];
 		if (text.length > 500) {
 			console.error(`Seed comment #${i + 1} exceeds 500 chars — shorten it.`);
+			client.close();
 			process.exit(1);
 		}
 		await client.execute({
@@ -206,3 +212,4 @@ for (const channel of SEED_CHANNELS) {
 	);
 }
 console.log('Undo with: node --env-file=.env scripts/seed-dev.mjs --reset');
+client.close();

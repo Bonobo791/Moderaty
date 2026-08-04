@@ -92,7 +92,7 @@ export const channels = sqliteTable('channels', {
 	orgId: text('org_id'), // owning TENANT; null only for pre-accounts orphans (user_id IS NULL) awaiting first-login claim
 	title: text('title').notNull(),
 	refreshTokenEnc: text('refresh_token_enc').notNull(),
-	cursor: text('cursor'), // ISO timestamp of newest comment seen; null = never polled
+	cursor: text('cursor'), // scan boundary (ISO): comments older than this are never fetched. New connects start at connection time (no history analyzed); "analyze history" moves it back; null = legacy pre-window row (unbounded first scan)
 	nextPageToken: text('next_page_token'), // YouTube continuation token for an incomplete scan
 	scanCursor: text('scan_cursor'), // high-water timestamp to commit once an incomplete scan ends
 	lastRunAt: text('last_run_at'), // ISO timestamp of last cron run; rotation orders by it ASC (NULLs first)

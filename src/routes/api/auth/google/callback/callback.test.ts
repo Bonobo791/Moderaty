@@ -114,6 +114,10 @@ test('a new channel is inserted and attached to the caller', async () => {
 	const row = await testDb().db.select().from(channels).get();
 	expect(row).toMatchObject({ id: 'UC123', userId: OWNER.id, orgId: 'org-1', title: 'My Channel' });
 	expect(row?.refreshTokenEnc).not.toBe('refresh-token');
+	// The scan window starts at connection time: comments published BEFORE the
+	// channel was connected are never moderated.
+	expect(row?.cursor).toBeTruthy();
+	expect(row?.cursor).toBe(row?.createdAt);
 });
 
 test('a channel already owned by the caller is updated', async () => {

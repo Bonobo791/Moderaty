@@ -22,7 +22,7 @@ import { decrypt } from '$lib/server/crypto';
 import { deleteUserRecords } from '$lib/server/deletion';
 import { revokeGoogleToken } from '$lib/server/google';
 import { requireUser, SESSION_COOKIE } from '$lib/server/session';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import { fail, redirect } from '@sveltejs/kit';
 
 /**
@@ -36,7 +36,13 @@ export async function load({ locals }) {
 	// (or any future secret column) to the browser. Everything below is scoped
 	// to the active team's channels.
 	const chs = await db
-		.select({ id: channels.id, title: channels.title, cursor: channels.cursor, toneLevel: channels.toneLevel })
+		.select({
+			id: channels.id,
+			title: channels.title,
+			cursor: channels.cursor,
+			lastRunAt: channels.lastRunAt,
+			toneLevel: channels.toneLevel
+		})
 		.from(channels)
 		.where(eq(channels.orgId, user.orgId))
 		.all();
@@ -83,6 +89,52 @@ export const actions = {
 			.returning({ id: channels.id });
 		if (updated.length === 0) return fail(404, { error: 'channel not found' });
 		return { ok: true };
+	},
+	analyzeHistory: async ({ request, locals }) => {
+		const user = requireUser(locals);
+		const f = await request.formData();
+		const channelId = String(f.get('channelId') ?? '');
+		const months = Number(f.get('months'));
+		// Preset windows only — the scan drains newest-first at 300 comments per
+		// run, so an unbounded window is an unbounded API/AI cost (I10).
+		if (![1, 3, 6, 12, 24].includes(months)) {
+			return fail(400, { scope: 'history', channelId, error: 'history window must be 1, 3, 6, 12, or 24 months' });
+		}
+		// Move the scan boundary back and reset the drain state: cron's next runs
+		// page from the newest comment down to this boundary. Already-seen
+		// comments are skipped before scoring (decideNewComments dedupes by id),
+		// so only the unscanned history costs moderation calls. Tenancy-scoped:
+		// another team's channel reads as "not found".
+		const boundary = new Date(Date.now() - months * 30 * 24 * 60 * 60 * 1000).toISOString();
+		// Coordinate with the cron lease: a run in flight would otherwise persist
+		// its own scan state and silently cancel (or be cancelled by) this reset.
+		// The lease predicate is part of the UPDATE itself, so the check is
+		// atomic with the write (mirrors the claim predicate in api/cron).
+		const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, new Date().toISOString()));
+		const updated = await db
+			.update(channels)
+			.set({ cursor: boundary, nextPageToken: null, scanCursor: null })
+			.where(and(eq(channels.id, channelId), eq(channels.orgId, user.orgId), claimable))
+			.returning({ id: channels.id });
+		if (updated.length === 0) {
+			// Distinguish "not your channel" from "currently scanning": the extra
+			// read only happens on the failure path.
+			const existing = await db
+				.select({ id: channels.id })
+				.from(channels)
+				.where(and(eq(channels.id, channelId), eq(channels.orgId, user.orgId)))
+				.get();
+			if (existing) {
+				return fail(409, {
+					scope: 'history',
+					channelId,
+					error: 'This channel is mid-scan — retry in a minute.'
+				});
+			}
+			return fail(404, { scope: 'history', channelId, error: 'channel not found' });
+		}
+		console.info(`history analysis requested for channel ${channelId}: scanning back to ${boundary}`);
+		return { ok: true, scope: 'history', channelId, months };
 	},
 	deleteAccount: async ({ request, locals, cookies }) => {
 		const user = requireUser(locals);

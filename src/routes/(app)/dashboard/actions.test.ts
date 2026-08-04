@@ -82,3 +82,118 @@ test('rejects a signed-out request with 401', async () => {
 	await expect(setToneLevel('UC1', '2', null)).rejects.toMatchObject({ status: 401 });
 	expect(await toneLevelOf('UC1')).toBeNull();
 });
+
+function analyzeHistory(channelId: string, months: string, user: typeof OWNER | null = OWNER) {
+	return actions.analyzeHistory({ request: postForm({ channelId, months }), locals: { user } } as never);
+}
+
+async function scanWindowOf(id: string) {
+	const row = await testDb().db.select().from(channels).where(eq(channels.id, id)).get();
+	return { cursor: row?.cursor, nextPageToken: row?.nextPageToken, scanCursor: row?.scanCursor };
+}
+
+test('analyze history moves the scan boundary N months back and resets the drain state', async () => {
+	await seedChannel('UC1');
+	await testDb()
+		.db.update(channels)
+		.set({ cursor: '2026-07-30T00:00:00.000Z', nextPageToken: 'tok', scanCursor: '2026-07-29T00:00:00.000Z' })
+		.where(eq(channels.id, 'UC1'));
+
+	const before = Date.now();
+	const res = await analyzeHistory('UC1', '3');
+	const after = Date.now();
+
+	expect(res).toMatchObject({ ok: true });
+	const { cursor, nextPageToken, scanCursor } = await scanWindowOf('UC1');
+	expect(nextPageToken).toBeNull();
+	expect(scanCursor).toBeNull();
+	// 3 months ≈ 90 days back, computed at action time.
+	const expected = 3 * 30 * 24 * 60 * 60 * 1000;
+	expect(Date.parse(cursor ?? '')).toBeGreaterThanOrEqual(before - expected - 1000);
+	expect(Date.parse(cursor ?? '')).toBeLessThanOrEqual(after - expected + 1000);
+});
+
+test.each([{ months: '0' }, { months: '2' }, { months: '25' }, { months: 'x' }, { months: '' }])(
+	'analyze history rejects months "$months" with 400 and changes nothing',
+	async ({ months }) => {
+		await seedChannel('UC1');
+		await testDb()
+			.db.update(channels)
+			.set({ cursor: '2026-07-30T00:00:00.000Z', nextPageToken: 'tok', scanCursor: '2026-07-29T00:00:00.000Z' })
+			.where(eq(channels.id, 'UC1'));
+
+		const res = await analyzeHistory('UC1', months);
+
+		expect(res).toMatchObject({ status: 400 });
+		expect(await scanWindowOf('UC1')).toEqual({
+			cursor: '2026-07-30T00:00:00.000Z',
+			nextPageToken: 'tok',
+			scanCursor: '2026-07-29T00:00:00.000Z'
+		});
+	}
+);
+
+test('analyze history rejects an unknown channel with 404', async () => {
+	const res = await analyzeHistory('UC-missing', '3');
+
+	expect(res).toMatchObject({ status: 404 });
+});
+
+test('analyze history rejects a channel owned by another team with 404 and changes nothing', async () => {
+	await seedChannel('UC1', 'user-2', 'org-2');
+	await testDb()
+		.db.update(channels)
+		.set({ cursor: '2026-07-30T00:00:00.000Z', nextPageToken: 'tok', scanCursor: '2026-07-29T00:00:00.000Z' })
+		.where(eq(channels.id, 'UC1'));
+
+	const res = await analyzeHistory('UC1', '3');
+
+	expect(res).toMatchObject({ status: 404 });
+	expect(await scanWindowOf('UC1')).toEqual({
+		cursor: '2026-07-30T00:00:00.000Z',
+		nextPageToken: 'tok',
+		scanCursor: '2026-07-29T00:00:00.000Z'
+	});
+});
+
+test('analyze history rejects a signed-out request with 401', async () => {
+	await seedChannel('UC1');
+
+	await expect(analyzeHistory('UC1', '3', null)).rejects.toMatchObject({ status: 401 });
+});
+
+test('analyze history returns 409 while the channel is leased to a cron run and changes nothing', async () => {
+	await seedChannel('UC1');
+	await testDb()
+		.db.update(channels)
+		.set({
+			cursor: '2026-07-30T00:00:00.000Z',
+			nextPageToken: 'tok',
+			scanCursor: '2026-07-29T00:00:00.000Z',
+			leaseExpiresAt: new Date(Date.now() + 60_000).toISOString()
+		})
+		.where(eq(channels.id, 'UC1'));
+
+	const res = await analyzeHistory('UC1', '3');
+
+	expect(res).toMatchObject({ status: 409 });
+	// The in-flight run keeps its scan state — the user's boundary is not
+	// half-applied underneath it.
+	expect(await scanWindowOf('UC1')).toEqual({
+		cursor: '2026-07-30T00:00:00.000Z',
+		nextPageToken: 'tok',
+		scanCursor: '2026-07-29T00:00:00.000Z'
+	});
+});
+
+test('analyze history proceeds once the lease has expired', async () => {
+	await seedChannel('UC1');
+	await testDb()
+		.db.update(channels)
+		.set({ leaseExpiresAt: '2020-01-01T00:00:00.000Z' })
+		.where(eq(channels.id, 'UC1'));
+
+	const res = await analyzeHistory('UC1', '3');
+
+	expect(res).toMatchObject({ ok: true });
+});

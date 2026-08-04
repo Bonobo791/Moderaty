@@ -136,6 +136,7 @@ export async function upsertChannelConnection(
 	refreshToken: string
 ): Promise<'ok' | 'conflict'> {
 	const refreshTokenEnc = encrypt(refreshToken);
+	const connectedAt = new Date().toISOString();
 	const updated = await db
 		.insert(channels)
 		.values({
@@ -145,7 +146,11 @@ export async function upsertChannelConnection(
 			title: channel.title,
 			refreshTokenEnc,
 			active: 1,
-			createdAt: new Date().toISOString()
+			// Nothing historical is analyzed on connect: the scan window opens at
+			// connection time. Older comments only enter via the explicit
+			// "analyze history" action on the dashboard.
+			cursor: connectedAt,
+			createdAt: connectedAt
 		})
 		.onConflictDoUpdate({
 			target: channels.id,

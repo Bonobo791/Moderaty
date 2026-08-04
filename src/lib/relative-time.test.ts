@@ -28,6 +28,10 @@ describe('relativeTime', () => {
 		expect(relativeTime('2026-07-30T10:00:00Z', NOW)).toBe('2 hours ago');
 		expect(relativeTime('2026-07-29T12:00:00Z', NOW)).toBe('1 day ago');
 		expect(relativeTime('2026-07-16T12:00:00Z', NOW)).toBe('2 weeks ago');
+		expect(relativeTime('2026-06-30T12:00:00Z', NOW)).toBe('1 month ago');
+		expect(relativeTime('2026-05-31T12:00:00Z', NOW)).toBe('2 months ago');
+		expect(relativeTime('2025-07-30T12:00:00Z', NOW)).toBe('1 year ago');
+		expect(relativeTime('2021-07-30T12:00:00Z', NOW)).toBe('5 years ago');
 	});
 
 	it('returns unparseable input unchanged instead of crashing', () => {

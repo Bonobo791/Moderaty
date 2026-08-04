@@ -372,6 +372,21 @@ function consentLoadWithSession(cookies: ReturnType<typeof makeCookies>, url: st
 	} as never) as Promise<Record<string, unknown>>;
 }
 
+/** The session-based (no parked cookie) counterpart of captureAction. */
+async function captureSessionAction(cookies: ReturnType<typeof makeCookies>, fields: Record<string, string>) {
+	try {
+		return (await actions.default({
+			cookies,
+			request: consentRequest(fields),
+			url: new URL('http://localhost/consent'),
+			getClientAddress: () => '203.0.113.7',
+			locals: { user: TEST_OWNER }
+		} as never)) as { status: number } | undefined;
+	} catch (e) {
+		return e as { status: number; location?: string };
+	}
+}
+
 test('load with a signed-in user and no current consent renders the existing-user flow without a parked cookie', async () => {
 	await seedOwner();
 	const data = await consentLoadWithSession(makeCookies(), 'http://localhost/consent');
@@ -409,18 +424,7 @@ test('a signed-in user re-consents in place: consent row written, NO new session
 	await seedOwner();
 	const cookies = makeCookies();
 
-	let thrown: unknown;
-	try {
-		await actions.default({
-			cookies,
-			request: consentRequest({ consent: 'on' }),
-			url: new URL('http://localhost/consent'),
-			getClientAddress: () => '203.0.113.7',
-			locals: { user: TEST_OWNER }
-		} as never);
-	} catch (e) {
-		thrown = e;
-	}
+	const thrown = await captureSessionAction(cookies, { consent: 'on' });
 
 	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
 	const rows = await testDb().db.select().from(consents).all();
@@ -441,18 +445,7 @@ test('a signed-in user re-consents in place: consent row written, NO new session
 
 test('a signed-in re-consent without the required checkbox fails with 400 and writes nothing', async () => {
 	await seedOwner();
-	let res: unknown;
-	try {
-		res = await actions.default({
-			cookies: makeCookies(),
-			request: consentRequest({}),
-			url: new URL('http://localhost/consent'),
-			getClientAddress: () => '203.0.113.7',
-			locals: { user: TEST_OWNER }
-		} as never);
-	} catch (e) {
-		res = e;
-	}
+	const res = await captureSessionAction(makeCookies(), {});
 	expect(res).toMatchObject({ status: 400 });
 	expect(await testDb().db.select().from(consents).all()).toHaveLength(0);
 });

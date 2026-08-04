@@ -409,6 +409,11 @@ test('a parked identity takes precedence over the signed-in session', async () =
 
 test('a signed-in user re-consents in place: consent row written, NO new session issued', async () => {
 	await seedOwner();
+	// An existing live session must survive re-consent untouched — an empty
+	// table cannot distinguish "no new session" from "session wiped".
+	await testDb()
+		.db.insert(sessions)
+		.values({ id: 'sess-live', userId: TEST_OWNER.id, expiresAt: '2027-01-01T00:00:00.000Z' });
 	const cookies = makeCookies();
 
 	const thrown = await captureSessionAction(cookies, { consent: 'on' });
@@ -424,9 +429,21 @@ test('a signed-in user re-consents in place: consent row written, NO new session
 		userAgent: 'moderaty-test/1.0',
 		marketingOptIn: 0
 	});
-	// The live session keeps sliding — re-consent must not issue another one.
-	expect(await testDb().db.select().from(sessions).all()).toHaveLength(0);
+	// The live session keeps sliding — re-consent must not issue another one,
+	// and the pre-existing session row is untouched.
+	const allSessions = await testDb().db.select().from(sessions).all();
+	expect(allSessions).toHaveLength(1);
+	expect(allSessions[0].id).toBe('sess-live');
 	expect(cookies.setCalls.find((c) => c.name === 'moderaty_session')).toBeUndefined();
+});
+
+test('a signed-in user whose consent is already current adds NO duplicate row on a direct POST', async () => {
+	await seedOwner();
+	await seedConsent(TEST_OWNER.id, undefined, LEGAL_VERSION);
+	const thrown = await captureSessionAction(makeCookies(), { consent: 'on' });
+	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
+	// Still exactly the seeded row — the append-only log gains no duplicate.
+	expect(await testDb().db.select().from(consents).all()).toHaveLength(1);
 });
 
 test('a signed-in re-consent without the required checkbox fails with 400 and writes nothing', async () => {

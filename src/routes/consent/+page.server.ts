@@ -112,6 +112,9 @@ export const actions: Actions = {
 				// never write a consent row without a verified identity.
 				throw error(500, 'consent submitted without a verified identity');
 			}
+			// A direct POST can bypass the load's /dashboard redirect; the log
+			// is one row per acceptance event, never a duplicate.
+			if (await hasCurrentConsent(sessionUser.id)) throw redirect(302, '/dashboard');
 			await db.insert(consents).values(consentRecord(sessionUser.id, sessionUser.email));
 			throw redirect(302, '/dashboard');
 		}

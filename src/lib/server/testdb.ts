@@ -131,6 +131,8 @@ export async function createTestDb(): Promise<TestDb> {
 			lease_expires_at TEXT,
 			active INTEGER NOT NULL DEFAULT 1,
 			tone_level INTEGER,
+			protect_lgbtqia INTEGER NOT NULL DEFAULT 0,
+			protect_women INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
 			CONSTRAINT channels_org_requires_owner CHECK (org_id IS NOT NULL OR user_id IS NULL)
 		)`,

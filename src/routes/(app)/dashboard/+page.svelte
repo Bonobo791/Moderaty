@@ -116,6 +116,15 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			</select>
 			<button class="btn secondary small" type="submit">Analyze history on {ch.title}</button>
 		</form>
+		{#if form?.scope === 'history' && form?.channelId === ch.id}
+			{#if form?.error}
+				<p class="error-box" role="alert">{form.error}</p>
+			{:else if form?.ok}
+				<p class="muted" role="status">
+					History scan started — cron is working back {form.months === 1 ? '1 month' : `${form.months} months`}. New comments keep flowing into the review queue as it drains.
+				</p>
+			{/if}
+		{/if}
 		<p class="muted" style="margin:12px 0 0">
 			last checked {ch.lastRunAt ? relativeTime(ch.lastRunAt) : 'never'} · ID: {ch.id}
 		</p>
@@ -140,7 +149,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		(including your e-mail) are retained, as Brazilian law requires: blocked from any other use,
 		access-restricted, for up to 10 years.
 	</p>
-	{#if form?.error}
+	{#if form?.error && form?.scope !== 'history'}
 		<p class="error-box" role="alert">{form.error}</p>
 	{/if}
 	<form method="POST" action="?/deleteAccount" use:enhance>

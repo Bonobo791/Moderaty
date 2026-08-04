@@ -124,7 +124,7 @@ async function seedChannel({ id, title, commentPrefix }) {
 	// demo channel and burn a run decrypting 'seed-not-a-real-token'.
 	await client.execute({
 		sql: `INSERT INTO channels (id, title, refresh_token_enc, cursor, active)
-		      VALUES (?, ?, 'seed-not-a-real-token', ?, 0)`,
+		VALUES (?, ?, 'seed-not-a-real-token', ?, 0)`,
 		args: [id, title, iso(2 * day)]
 	});
 
@@ -155,8 +155,8 @@ async function seedChannel({ id, title, commentPrefix }) {
 		}
 		await client.execute({
 			sql: `INSERT INTO comments
-			      (id, channel_id, text, published_at, status, decided_by, matched_rule_id, ai_score)
-			      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, channel_id, text, published_at, status, decided_by, matched_rule_id, ai_score)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			args: [
 				commentId(i),
 				id,
@@ -178,7 +178,7 @@ async function seedChannel({ id, title, commentPrefix }) {
 	for (const [cid, action, reason, state] of actions) {
 		await client.execute({
 			sql: `INSERT INTO moderation_actions (comment_id, channel_id, action, reason, state, last_attempt_at)
-			      VALUES (?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?)`,
 			args: [cid, id, action, reason, state, iso(6 * 60 * 60 * 1000)]
 		});
 	}

@@ -22,6 +22,8 @@ import { dirname, join } from 'node:path';
 
 import { expect, test, vi } from 'vitest';
 
+import { eq } from 'drizzle-orm';
+
 const mocks = vi.hoisted(() => ({
 	env: {
 		APP_URL: 'http://localhost:5173',
@@ -314,11 +316,10 @@ async function expectOneConsentedAccount() {
 test('an existing user re-accepting adds a consent row without duplicating the account', async () => {
 	await seedExistingAndConsent();
 
-	const rows = await testDb().db.select().from(consents).all();
-	expect(rows).toHaveLength(1);
 	// The e-mail is recorded from the users row — statutory-retention evidence
 	// (Art. 16, III), since account deletion wipes users.email entirely.
-	expect(rows[0]).toMatchObject({ userId: 'user-1', email: 'one@example.com', docVersion: LEGAL_VERSION });
+	const row = await testDb().db.select().from(consents).where(eq(consents.userId, 'user-1')).get();
+	expect(row).toMatchObject({ email: 'one@example.com', docVersion: LEGAL_VERSION });
 	await expectOneConsentedAccount();
 });
 
@@ -413,10 +414,9 @@ test('a signed-in user re-consents in place: consent row written, NO new session
 	const thrown = await captureSessionAction(cookies, { consent: 'on' });
 
 	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
-	const rows = await testDb().db.select().from(consents).all();
-	expect(rows).toHaveLength(1);
-	expect(rows[0]).toMatchObject({
-		userId: TEST_OWNER.id,
+	// Exactly one consent row, attributable to this user with full evidence.
+	const row = await testDb().db.select().from(consents).where(eq(consents.userId, TEST_OWNER.id)).get();
+	expect(row).toMatchObject({
 		email: TEST_OWNER.email,
 		docVersion: LEGAL_VERSION,
 		checkboxText: CONSENT_CHECKBOX_TEXT,

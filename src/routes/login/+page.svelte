@@ -27,7 +27,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	<div class="card login-card">
 		<h1>Sign in to Moderaty</h1>
 		<p class="muted">
-			Sign in with your Google account, then connect your YouTube channel to start moderating
+			Sign in with your Google account, then connect your YouTube channels to start moderating
 			comments automatically.
 		</p>
 		<a class="btn" href="/api/auth/google/login">Sign in with Google</a>

@@ -25,7 +25,7 @@ export type FaqEntry = { q: string; a: string };
 export const FAQ_ENTRIES: FaqEntry[] = [
 	{
 		q: 'What is Moderaty?',
-		a: "Moderaty is comment protection for YouTube creators. It reads every new comment on your channel, enforces your rules instantly, scores the rest with AI across 13 toxicity categories, and holds anything borderline for your one-click review. It's free and open source under AGPL."
+		a: "Moderaty is comment protection for YouTube creators. It reads every new comment on every channel you connect, enforces your rules instantly, scores the rest with AI across 13 toxicity categories, and holds anything borderline for your one-click review. It's free and open source under AGPL."
 	},
 	{
 		q: 'Will Moderaty ban my real fans?',
@@ -41,7 +41,7 @@ export const FAQ_ENTRIES: FaqEntry[] = [
 	},
 	{
 		q: 'What YouTube account access does Moderaty need?',
-		a: 'Google\'s standard YouTube permission, the youtube.force-ssl scope; YouTube offers no comments-only permission. Moderaty uses it only to read and moderate comments on your channel and to read your videos\' titles and descriptions as context for the AI\'s tone analysis, nothing else. The code is open source under AGPL, so you can verify exactly what it does with that access.'
+		a: 'Google\'s standard YouTube permission, the youtube.force-ssl scope; YouTube offers no comments-only permission. Moderaty uses it only to read and moderate comments on the channels you connect and to read your videos\' titles and descriptions as context for the AI\'s tone analysis, nothing else. The code is open source under AGPL, so you can verify exactly what it does with that access.'
 	},
 	{
 		q: 'Is Moderaty really free?',

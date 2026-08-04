@@ -111,7 +111,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 {:else}
 	<EmptyState
 		title="No channels connected"
-		hint="Connect your YouTube channel to start moderating comments automatically."
+		hint="Connect your YouTube channels to start moderating comments automatically."
 	/>
 {/each}
 

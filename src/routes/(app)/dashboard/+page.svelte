@@ -104,8 +104,20 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		<a class="btn secondary small" href="/channels/{ch.id}/rules">Rules</a>
 		<a class="btn secondary small" href="/channels/{ch.id}/queue">Review queue</a>
 		<a class="btn secondary small" href="/channels/{ch.id}/log">Audit log</a>
+		<form method="POST" action="?/analyzeHistory" class="history-form">
+			<input type="hidden" name="channelId" value={ch.id} />
+			<label for="history-months-{ch.id}">Analyze history</label>
+			<select id="history-months-{ch.id}" name="months" aria-label="How far back to analyze comments on {ch.title}">
+				<option value="1">last month</option>
+				<option value="3" selected>last 3 months</option>
+				<option value="6">last 6 months</option>
+				<option value="12">last 12 months</option>
+				<option value="24">last 24 months</option>
+			</select>
+			<button class="btn secondary small" type="submit">Analyze history on {ch.title}</button>
+		</form>
 		<p class="muted" style="margin:12px 0 0">
-			last checked {ch.cursor ? relativeTime(ch.cursor) : 'never'} · ID: {ch.id}
+			last checked {ch.lastRunAt ? relativeTime(ch.lastRunAt) : 'never'} · ID: {ch.id}
 		</p>
 	</div>
 {:else}
@@ -141,6 +153,13 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 </div>
 
 <style>
+	.history-form {
+		display: flex;
+		gap: 8px;
+		align-items: center;
+		flex-wrap: wrap;
+		margin-top: 10px;
+	}
 	.danger-zone {
 		margin-top: 24px;
 		border-color: var(--danger);

@@ -94,13 +94,19 @@ test('dashboard load never serializes the encrypted refresh token', async () => 
 		orgId: 'org-1',
 		title: 'One',
 		refreshTokenEnc: 'encrypted-refresh-token',
-		cursor: '2026-01-01T00:00:00Z'
+		cursor: '2026-01-01T00:00:00Z',
+		lastRunAt: '2026-07-30T00:00:00Z'
 	});
 
 	const data = await loadDashboard();
 
 	expect(data.chs).toHaveLength(1);
-	expect(data.chs[0]).toMatchObject({ id: 'UC1', title: 'One', cursor: '2026-01-01T00:00:00Z' });
+	expect(data.chs[0]).toMatchObject({
+		id: 'UC1',
+		title: 'One',
+		cursor: '2026-01-01T00:00:00Z',
+		lastRunAt: '2026-07-30T00:00:00Z'
+	});
 	expect(data.chs[0]).not.toHaveProperty('refreshTokenEnc');
 	expect(JSON.stringify(data)).not.toContain('encrypted-refresh-token');
 });

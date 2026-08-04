@@ -32,6 +32,7 @@ using.
 - DO NOT copy and paste code. DO create reusable code.
 - Review every PR comment for validity. Fix each valid issue. Post a triage comment. Reply to every bot comment, whether or not you make a code change.
 - NEVER develop on the default branch. Always make a new one.
+- NEVER make changes to production databases. That is for humans only.
 
 ## Mutation Testing Engineer (role)
 

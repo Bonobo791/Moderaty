@@ -30,6 +30,7 @@ import {
 	MARKETING_CHECKBOX_TEXT,
 	REFUND_NOTICE_TEXT,
 	clearPendingConsent,
+	hasCurrentConsent,
 	readPendingConsent
 } from '$lib/server/legal';
 import { cookieSecure } from '$lib/server/oauthState';
@@ -38,25 +39,45 @@ import { createSession, SESSION_COOKIE } from '$lib/server/session';
 
 import type { Actions, PageServerLoad } from './$types';
 
-export const load: PageServerLoad = ({ cookies, url }) => {
+export const load: PageServerLoad = async ({ cookies, url, locals }) => {
 	const state = url.searchParams.get('state');
 	const pending = state ? readPendingConsent(cookies, state) : null;
+	if (pending) {
+		return {
+			kind: pending.kind,
+			displayName: pending.kind === 'new' ? pending.displayName : null,
+			consentText: CONSENT_CHECKBOX_TEXT,
+			marketingText: MARKETING_CHECKBOX_TEXT,
+			refundText: REFUND_NOTICE_TEXT
+		};
+	}
+	// No parked identity: a signed-in user re-consents in place — the (app)
+	// layout sent them here after a LEGAL_VERSION bump while their session was
+	// still sliding. A user whose consent is already current has nothing to do.
+	if (locals?.user) {
+		if (await hasCurrentConsent(locals.user.id)) throw redirect(302, '/dashboard');
+		return {
+			kind: 'existing',
+			displayName: null,
+			consentText: CONSENT_CHECKBOX_TEXT,
+			marketingText: MARKETING_CHECKBOX_TEXT,
+			refundText: REFUND_NOTICE_TEXT
+		};
+	}
 	// No parked identity for this flow — nothing to consent to; restart sign-in.
-	if (!pending) throw redirect(302, '/login');
-	return {
-		kind: pending.kind,
-		displayName: pending.kind === 'new' ? pending.displayName : null,
-		consentText: CONSENT_CHECKBOX_TEXT,
-		marketingText: MARKETING_CHECKBOX_TEXT,
-		refundText: REFUND_NOTICE_TEXT
-	};
+	throw redirect(302, '/login');
 };
 
 export const actions: Actions = {
-	default: async ({ cookies, request, url, getClientAddress }) => {
+	default: async ({ cookies, request, url, getClientAddress, locals }) => {
 		const state = url.searchParams.get('state');
 		const pending = state ? readPendingConsent(cookies, state) : null;
-		if (!pending) return fail(400, { error: 'Your sign-in session expired — please sign in again.' });
+		const sessionUser = locals?.user ?? null;
+		// Either a parked OAuth identity or a live session must carry this
+		// consent; with neither there is no verified identity to record.
+		if (!pending && !sessionUser) {
+			return fail(400, { error: 'Your sign-in session expired — please sign in again.' });
+		}
 
 		const form = await request.formData();
 		if (form.get('consent') !== 'on') {
@@ -82,6 +103,18 @@ export const actions: Actions = {
 			userAgent: request.headers.get('user-agent') ?? '',
 			marketingOptIn
 		});
+
+		if (!pending) {
+			// Signed-in re-consent after a doc bump: record the acceptance only.
+			// The live session keeps sliding — no new session, no cookie writes.
+			if (!sessionUser) {
+				// Unreachable — the guard above rejected exactly this case — but
+				// never write a consent row without a verified identity.
+				throw error(500, 'consent submitted without a verified identity');
+			}
+			await db.insert(consents).values(consentRecord(sessionUser.id, sessionUser.email));
+			throw redirect(302, '/dashboard');
+		}
 
 		let session: { token: string; expiresAt: string };
 		if (pending.kind === 'new') {

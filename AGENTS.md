@@ -233,7 +233,10 @@ evidentiary log. The visible checkbox sentence is rendered from
 never drift from the logged text. On material legal-doc changes bump `LEGAL_VERSION`
 (declared with the documents in `src/lib/landing/legal.ts`, re-exported from
 `src/lib/server/legal.ts`); users whose consent predates it are routed back
-through `/consent` on next login.
+through `/consent` on next login — and, because sessions slide for 30 days,
+the `(app)` layout gate (`hasCurrentConsent` in `src/lib/server/legal.ts`)
+redirects still-signed-in users to `/consent` at their next page load, where
+they re-accept in place (consent row only, no new session).
 
 Account deletion is **immediate and permanent** (no restore window): the
 dashboard `deleteAccount` action (confirmation checkbox, `requireUser`)

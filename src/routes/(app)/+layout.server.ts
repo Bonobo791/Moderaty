@@ -18,12 +18,17 @@
 
 import { redirect } from '@sveltejs/kit';
 
+import { hasCurrentConsent } from '$lib/server/legal';
 import { listOrgMemberships } from '$lib/server/org';
 
 import type { LayoutServerLoad } from './$types';
 
-// Everything under (app) requires a signed-in user.
+// Everything under (app) requires a signed-in user whose consent covers the
+// current LEGAL_VERSION. Sessions slide for 30 days, so without this gate a
+// legal-doc bump would only reach users at their next login. /consent lives
+// outside (app), so the redirect cannot loop.
 export const load: LayoutServerLoad = async ({ locals }) => {
 	if (!locals.user) throw redirect(302, '/login');
+	if (!(await hasCurrentConsent(locals.user.id))) throw redirect(302, '/consent');
 	return { user: locals.user, orgs: await listOrgMemberships(locals.user.id) };
 };

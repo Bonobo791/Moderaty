@@ -18,12 +18,12 @@
 
 import { redirect, error } from '@sveltejs/kit';
 
-import { and, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
-import { consents, users } from '$lib/server/db/schema';
+import { users } from '$lib/server/db/schema';
 import { exchangeGoogleCode } from '$lib/server/google';
-import { LEGAL_VERSION, parkPendingConsent } from '$lib/server/legal';
+import { hasCurrentConsent, parkPendingConsent } from '$lib/server/legal';
 import { cookieSecure, readPendingStates, storePendingStates } from '$lib/server/oauthState';
 import { createSession, SESSION_COOKIE } from '$lib/server/session';
 
@@ -91,11 +91,7 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 		storePendingStates(cookies, pending.filter((s) => s !== state));
 		throw redirect(302, `/consent?state=${encodeURIComponent(state)}`);
 	}
-	const consent = await db
-		.select({ id: consents.id })
-		.from(consents)
-		.where(and(eq(consents.userId, user.id), eq(consents.docVersion, LEGAL_VERSION)))
-		.get();
+	const consent = await hasCurrentConsent(user.id);
 	if (!consent) {
 		parkPendingConsent(cookies, state, { kind: 'existing', userId: user.id });
 		storePendingStates(cookies, pending.filter((s) => s !== state));

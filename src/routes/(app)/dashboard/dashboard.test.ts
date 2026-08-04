@@ -127,6 +127,22 @@ test('dashboard load rejects a signed-out request with 401', async () => {
 	await expect(loadDashboard(null)).rejects.toMatchObject({ status: 401 });
 });
 
+test('dashboard load projects the protection flags for each channel', async () => {
+	await testDb().db.insert(channels).values({
+		id: 'UC1',
+		userId: OWNER.id,
+		orgId: 'org-1',
+		title: 'Mine',
+		refreshTokenEnc: 'enc',
+		protectLgbtqia: 1,
+		protectWomen: 0
+	});
+
+	const data = await loadDashboard();
+
+	expect(data.chs[0]).toMatchObject({ protectLgbtqia: 1, protectWomen: 0 });
+});
+
 test('delete account rejects a signed-out request with 401', async () => {
 	const { res } = await captureDelete(null, { confirm: 'on' });
 	expect(res).toMatchObject({ status: 401 });

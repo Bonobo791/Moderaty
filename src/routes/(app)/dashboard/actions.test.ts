@@ -197,3 +197,58 @@ test('analyze history proceeds once the lease has expired', async () => {
 
 	expect(res).toMatchObject({ ok: true });
 });
+
+function setProtections(
+	channelId: string,
+	fields: { protectLgbtqia?: 'on'; protectWomen?: 'on' },
+	user: typeof OWNER | null = OWNER
+) {
+	return actions.setProtections({ request: postForm({ channelId, ...fields }), locals: { user } } as never);
+}
+
+async function protectionsOf(id: string) {
+	const row = await testDb().db.select().from(channels).where(eq(channels.id, id)).get();
+	return { protectLgbtqia: row?.protectLgbtqia, protectWomen: row?.protectWomen };
+}
+
+test('set protections persists both flags on', async () => {
+	await seedChannel('UC1');
+
+	const res = await setProtections('UC1', { protectLgbtqia: 'on', protectWomen: 'on' });
+
+	expect(res).toMatchObject({ ok: true });
+	expect(await protectionsOf('UC1')).toEqual({ protectLgbtqia: 1, protectWomen: 1 });
+});
+
+test('set protections persists 0 for an unticked checkbox, clearing a previous 1', async () => {
+	await seedChannel('UC1');
+	await testDb().db.update(channels).set({ protectLgbtqia: 1, protectWomen: 1 }).where(eq(channels.id, 'UC1'));
+
+	// Only women stays ticked; the absent LGBTQIA+ field must persist 0.
+	const res = await setProtections('UC1', { protectWomen: 'on' });
+
+	expect(res).toMatchObject({ ok: true });
+	expect(await protectionsOf('UC1')).toEqual({ protectLgbtqia: 0, protectWomen: 1 });
+});
+
+test('set protections rejects an unknown channel with 404', async () => {
+	const res = await setProtections('UC-missing', { protectLgbtqia: 'on' });
+
+	expect(res).toMatchObject({ status: 404 });
+});
+
+test('set protections rejects a channel owned by another team with 404 and changes nothing', async () => {
+	await seedChannel('UC1', 'user-2', 'org-2');
+
+	const res = await setProtections('UC1', { protectLgbtqia: 'on', protectWomen: 'on' });
+
+	expect(res).toMatchObject({ status: 404 });
+	expect(await protectionsOf('UC1')).toEqual({ protectLgbtqia: 0, protectWomen: 0 });
+});
+
+test('set protections rejects a signed-out request with 401', async () => {
+	await seedChannel('UC1');
+
+	await expect(setProtections('UC1', { protectLgbtqia: 'on' }, null)).rejects.toMatchObject({ status: 401 });
+	expect(await protectionsOf('UC1')).toEqual({ protectLgbtqia: 0, protectWomen: 0 });
+});

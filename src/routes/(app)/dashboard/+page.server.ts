@@ -41,7 +41,9 @@ export async function load({ locals }) {
 			title: channels.title,
 			cursor: channels.cursor,
 			lastRunAt: channels.lastRunAt,
-			toneLevel: channels.toneLevel
+			toneLevel: channels.toneLevel,
+			protectLgbtqia: channels.protectLgbtqia,
+			protectWomen: channels.protectWomen
 		})
 		.from(channels)
 		.where(eq(channels.orgId, user.orgId))
@@ -72,6 +74,22 @@ export async function load({ locals }) {
 	return { chs, stats, bans };
 }
 
+/**
+ * Tenancy-scoped channel update shared by the card actions: another team's
+ * channel reads as "not found" (zero rows updated, never a leak).
+ */
+async function updateOwnChannel(
+	orgId: string,
+	channelId: string,
+	values: Partial<Pick<typeof channels.$inferInsert, 'toneLevel' | 'protectLgbtqia' | 'protectWomen'>>
+) {
+	return db
+		.update(channels)
+		.set(values)
+		.where(and(eq(channels.id, channelId), eq(channels.orgId, orgId)))
+		.returning({ id: channels.id });
+}
+
 export const actions = {
 	setToneLevel: async ({ request, locals }) => {
 		const user = requireUser(locals);
@@ -81,13 +99,20 @@ export const actions = {
 		if (toneLevel !== 1 && toneLevel !== 2) {
 			return fail(400, { error: 'tone level must be 1 (Edge Lord) or 2 (Edge lord + Ackchyually…)' });
 		}
-		// Tenancy-scoped: another team's channel reads as "not found".
-		const updated = await db
-			.update(channels)
-			.set({ toneLevel })
-			.where(and(eq(channels.id, channelId), eq(channels.orgId, user.orgId)))
-			.returning({ id: channels.id });
+		const updated = await updateOwnChannel(user.orgId, channelId, { toneLevel });
 		if (updated.length === 0) return fail(404, { error: 'channel not found' });
+		return { ok: true };
+	},
+	setProtections: async ({ request, locals }) => {
+		const user = requireUser(locals);
+		const f = await request.formData();
+		const channelId = String(f.get('channelId') ?? '');
+		// Checkbox semantics: 'on' when ticked, absent when not — an absent
+		// field persists 0 so unticking clears the flag.
+		const protectLgbtqia = f.get('protectLgbtqia') === 'on' ? 1 : 0;
+		const protectWomen = f.get('protectWomen') === 'on' ? 1 : 0;
+		const updated = await updateOwnChannel(user.orgId, channelId, { protectLgbtqia, protectWomen });
+		if (updated.length === 0) return fail(404, { scope: 'protections', channelId, error: 'channel not found' });
 		return { ok: true };
 	},
 	analyzeHistory: async ({ request, locals }) => {

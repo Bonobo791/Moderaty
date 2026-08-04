@@ -16,10 +16,9 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { createClient, type Client } from '@libsql/client';
 import { afterEach, expect, test } from 'vitest';
 
-import { migrationStatements } from './migrationTestUtils';
+import { applyMigration, closeMigratedDbs, expectTenancyContract } from './migrationTestUtils';
 
 // Behavior test for migration 0015: per-channel protection settings.
 // channels gains protect_lgbtqia and protect_women — off-by-default (0)
@@ -27,7 +26,7 @@ import { migrationStatements } from './migrationTestUtils';
 // Expand-only per I7: existing rows must read 0 without any backfill, new
 // inserts default to 0, explicit 1 is writable, and the tenancy contract is
 // untouched.
-const statements = migrationStatements('0015_channels_protect_flags.sql');
+const MIGRATION = '0015_channels_protect_flags.sql';
 
 // The pre-0015 channels table: final 0014 shape (tenancy contract + history
 // drain state, 15 columns).
@@ -59,23 +58,10 @@ const SEED = `
 	VALUES ('UCexisting', 'user-1', 'org-1', 'Existing', 'enc-e');
 `;
 
-async function migratedDb(seedSql: string): Promise<Client> {
-	const client = createClient({ url: ':memory:' });
-	openClients.push(client);
-	await client.execute('PRAGMA foreign_keys = ON');
-	await client.executeMultiple(PRE_0015_DDL + seedSql);
-	for (const statement of statements) await client.execute(statement);
-	return client;
-}
-
-// Every client a test opens is closed, even when an assertion fails mid-test.
-const openClients: Client[] = [];
-afterEach(() => {
-	for (const client of openClients.splice(0)) client.close();
-});
+afterEach(closeMigratedDbs);
 
 test('migration 0015 adds both protection flags and existing rows read 0', async () => {
-	const client = await migratedDb(SEED);
+	const client = await applyMigration(PRE_0015_DDL, MIGRATION, SEED);
 	const cols = await client.execute('PRAGMA table_info(channels)');
 	const names = cols.rows.map((row) => row.name);
 	expect(names).toContain('protect_lgbtqia');
@@ -91,7 +77,7 @@ test('migration 0015 adds both protection flags and existing rows read 0', async
 });
 
 test('new inserts default both flags to 0 and accept explicit opt-in', async () => {
-	const client = await migratedDb('');
+	const client = await applyMigration(PRE_0015_DDL, MIGRATION);
 	await client.execute(
 		"INSERT INTO channels (id, user_id, org_id, title, refresh_token_enc) VALUES ('UCdefault', 'user-1', 'org-1', 'D', 'enc')"
 	);
@@ -106,8 +92,6 @@ test('new inserts default both flags to 0 and accept explicit opt-in', async () 
 });
 
 test('the tenancy contract still bites after 0015', async () => {
-	const client = await migratedDb(SEED);
-	await expect(
-		client.execute("INSERT INTO channels (id, user_id, title, refresh_token_enc) VALUES ('UCbad', 'user-1', 'Bad', 'enc-b')")
-	).rejects.toThrow(/channels_org_requires_owner/);
+	const client = await applyMigration(PRE_0015_DDL, MIGRATION, SEED);
+	await expectTenancyContract(client);
 });

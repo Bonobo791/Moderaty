@@ -16,10 +16,15 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { createClient, type Client } from '@libsql/client';
-import { expect, test } from 'vitest';
+import { createClient } from '@libsql/client';
+import { afterEach, expect, test } from 'vitest';
 
-import { migrationStatements } from './migrationTestUtils';
+import {
+	applyMigration,
+	closeMigratedDbs,
+	expectTenancyContract,
+	migrationStatements
+} from './migrationTestUtils';
 
 // Behavior test for migration 0013 (tenancy contract): applied to a
 // PRE-contract database (channels has org_id but no CHECK), it rebuilds the
@@ -27,7 +32,8 @@ import { migrationStatements } from './migrationTestUtils';
 // while it also lacks an owner (pre-accounts orphans awaiting first-login
 // claim). All rows, columns, and indexes must survive the rebuild, and the
 // constraint must bite on INSERT and UPDATE alike.
-const statements = migrationStatements('0013_channels_org_contract.sql');
+const MIGRATION = '0013_channels_org_contract.sql';
+const statements = migrationStatements(MIGRATION);
 
 // The pre-contract channels table: final 0012 shape (org_id present, no CHECK).
 const PRE_0013_DDL = `
@@ -61,16 +67,10 @@ const SEED = `
 	VALUES ('UCorphan', NULL, NULL, 'Orphan', 'enc-o', 'cur-o', 'page-o', 'scan-o', 'run-o', 'lease-o', 1, 1, '2026-01-02T00:00:00.000Z');
 `;
 
-async function migratedDb(seedSql: string): Promise<Client> {
-	const client = createClient({ url: ':memory:' });
-	await client.execute('PRAGMA foreign_keys = ON');
-	await client.executeMultiple(PRE_0013_DDL + seedSql);
-	for (const statement of statements) await client.execute(statement);
-	return client;
-}
+afterEach(closeMigratedDbs);
 
 test('migration 0013 adds the contract and preserves rows, columns, and indexes', async () => {
-	const client = await migratedDb(SEED);
+	const client = await applyMigration(PRE_0013_DDL, MIGRATION, SEED);
 	const ddl = await client.execute("SELECT sql FROM sqlite_master WHERE name = 'channels' AND type = 'table'");
 	expect(ddl.rows[0].sql).toContain('channels_org_requires_owner');
 	const { rows } = await client.execute('SELECT * FROM channels ORDER BY id');
@@ -113,10 +113,8 @@ test('migration 0013 adds the contract and preserves rows, columns, and indexes'
 });
 
 test('the contract rejects an owned channel with no org, on INSERT and UPDATE', async () => {
-	const client = await migratedDb(SEED);
-	await expect(
-		client.execute("INSERT INTO channels (id, user_id, title, refresh_token_enc) VALUES ('UCbad', 'user-1', 'Bad', 'enc-b')")
-	).rejects.toThrow(/channels_org_requires_owner/);
+	const client = await applyMigration(PRE_0013_DDL, MIGRATION, SEED);
+	await expectTenancyContract(client);
 	await expect(client.execute("UPDATE channels SET org_id = NULL WHERE id = 'UCowned'")).rejects.toThrow(
 		/channels_org_requires_owner/
 	);
@@ -153,7 +151,7 @@ test('a retry after a contract-aborted run starts clean (no leftover __new_chann
 });
 
 test('the contract still allows unclaimed orphans and fully-owned channels', async () => {
-	const client = await migratedDb('');
+	const client = await applyMigration(PRE_0013_DDL, MIGRATION);
 	await client.execute("INSERT INTO channels (id, user_id, org_id, title, refresh_token_enc) VALUES ('UCo', NULL, NULL, 'o', 'x')");
 	await client.execute(
 		"INSERT INTO channels (id, user_id, org_id, title, refresh_token_enc) VALUES ('UCf', 'user-1', 'org-1', 'f', 'x')"

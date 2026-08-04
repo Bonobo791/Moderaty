@@ -18,6 +18,9 @@
 
 import { readFileSync } from 'node:fs';
 
+import { createClient, type Client } from '@libsql/client';
+import { expect } from 'vitest';
+
 /**
  * Loads a drizzle migration SQL file and splits it into executable
  * statements: split on the `--> statement-breakpoint` marker, strip `--`
@@ -38,4 +41,50 @@ export function migrationStatements(file: string): string[] {
 				.trim()
 		)
 		.filter((chunk) => chunk.length > 0);
+}
+
+// Every client opened via applyMigration is tracked here so
+// closeMigratedDbs can close them all — even when an assertion fails
+// mid-test. Register `afterEach(closeMigratedDbs)` in each test file.
+const openClients: Client[] = [];
+
+/**
+ * Builds an in-memory database at a migration's pre-state (DDL plus optional
+ * seed), applies the named migration's statements in order, and returns the
+ * open client. The client is tracked for closeMigratedDbs.
+ *
+ * @param preDdl - DDL (plus indexes) for the pre-migration schema shape
+ * @param migrationFile - The migration file name inside `drizzle/`
+ * @param seedSql - Optional seed statements executed after the DDL
+ * @returns The open, migrated in-memory client
+ */
+export async function applyMigration(preDdl: string, migrationFile: string, seedSql = ''): Promise<Client> {
+	const client = createClient({ url: ':memory:' });
+	openClients.push(client);
+	await client.execute('PRAGMA foreign_keys = ON');
+	await client.executeMultiple(preDdl + seedSql);
+	for (const statement of migrationStatements(migrationFile)) await client.execute(statement);
+	return client;
+}
+
+/**
+ * Closes every client opened via applyMigration. Pass to vitest's afterEach.
+ */
+export function closeMigratedDbs(): void {
+	for (const client of openClients.splice(0)) client.close();
+}
+
+/**
+ * Asserts the channels_org_requires_owner tenancy contract rejects an owned
+ * channel with no org. Re-run after every channels migration so a rebuild
+ * that drops the CHECK cannot slip through.
+ *
+ * @param client - A migrated in-memory client from applyMigration
+ */
+export async function expectTenancyContract(client: Client): Promise<void> {
+	await expect(
+		client.execute(
+			"INSERT INTO channels (id, user_id, title, refresh_token_enc) VALUES ('UCbad', 'user-1', 'Bad', 'enc-b')"
+		)
+	).rejects.toThrow(/channels_org_requires_owner/);
 }

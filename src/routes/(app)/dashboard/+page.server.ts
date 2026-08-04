@@ -17,7 +17,7 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { db } from '$lib/server/db';
-import { channels, comments, moderationActions } from '$lib/server/db/schema';
+import { auditLog, channels, comments } from '$lib/server/db/schema';
 import { decrypt } from '$lib/server/crypto';
 import { deleteUserRecords } from '$lib/server/deletion';
 import { revokeGoogleToken } from '$lib/server/google';
@@ -55,18 +55,18 @@ export async function load({ locals }) {
 				.groupBy(comments.channelId, comments.status)
 				.all()
 		: [];
+	// Count ban EVENTS from the audit log, not moderation_actions: manual queue
+	// bans never create moderation_actions rows, so counting that table hid
+	// every user-taken ban. Both ban paths write exactly one audit row per ban
+	// (pipeline: completeActions, same transaction as the completed update;
+	// manual: the queue action itself). Bans are irreversible, so ban events
+	// equal ban state; dry-run rows are excluded by the action filter.
 	const bans = channelIds.length
 		? await db
-				.select({ channelId: moderationActions.channelId, n: sql<number>`count(*)` })
-				.from(moderationActions)
-				.where(
-					and(
-						eq(moderationActions.action, 'ban'),
-						eq(moderationActions.state, 'completed'),
-						inArray(moderationActions.channelId, channelIds)
-					)
-				)
-				.groupBy(moderationActions.channelId)
+				.select({ channelId: auditLog.channelId, n: sql<number>`count(*)` })
+				.from(auditLog)
+				.where(and(eq(auditLog.action, 'ban'), inArray(auditLog.channelId, channelIds)))
+				.groupBy(auditLog.channelId)
 				.all()
 		: [];
 	return { chs, stats, bans };

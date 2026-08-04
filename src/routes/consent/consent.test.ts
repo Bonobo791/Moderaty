@@ -431,7 +431,10 @@ test('a signed-in user re-consents in place: consent row written, NO new session
 
 test('a signed-in re-consent without the required checkbox fails with 400 and writes nothing', async () => {
 	await seedOwner();
-	const res = await captureSessionAction(makeCookies(), {});
-	expect(res).toMatchObject({ status: 400 });
+	const res = (await captureSessionAction(makeCookies(), {})) as { status: number; data?: { error?: string } };
+	expect(res.status).toBe(400);
+	// The rejection names the obligation — no silent generic failure.
+	expect(res.data?.error).toContain('at least 18');
 	expect(await testDb().db.select().from(consents).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(sessions).all()).toHaveLength(0);
 });

@@ -63,6 +63,13 @@ function cookiesWithPending(payload: PendingConsent, state = 'state-1') {
 	return cookies;
 }
 
+/** Seeds the users row matching TEST_OWNER. */
+async function seedOwner() {
+	await testDb()
+		.db.insert(users)
+		.values({ id: TEST_OWNER.id, googleSub: 'sub-1', email: TEST_OWNER.email, displayName: TEST_OWNER.displayName });
+}
+
 function consentRequest(fields: Record<string, string>) {
 	const form = new FormData();
 	for (const [key, value] of Object.entries(fields)) form.set(key, value);
@@ -73,18 +80,24 @@ function consentRequest(fields: Record<string, string>) {
 	});
 }
 
+/**
+ * Calls the page action and captures the outcome: fail() returns an
+ * ActionFailure ({ status, data }); redirect/error throw. Parked-cookie
+ * flows pass their state; signed-in session flows pass withSession (no
+ * state — there is no parked cookie).
+ */
 async function captureAction(
 	cookies: ReturnType<typeof makeCookies>,
 	fields: Record<string, string>,
-	state = 'state-1'
+	opts: { state?: string; withSession?: boolean } = {}
 ) {
 	try {
-		// fail() returns an ActionFailure ({ status, data }); redirect/error throw.
 		return (await actions.default({
 			cookies,
 			request: consentRequest(fields),
-			url: new URL(`http://localhost/consent?state=${state}`),
-			getClientAddress: () => '203.0.113.7'
+			url: new URL(`http://localhost/consent${opts.state ? `?state=${opts.state}` : ''}`),
+			getClientAddress: () => '203.0.113.7',
+			...(opts.withSession ? { locals: { user: TEST_OWNER } } : {})
 		} as never)) as
 			| { status: number }
 			| undefined;
@@ -93,11 +106,25 @@ async function captureAction(
 	}
 }
 
+/** The session-based (no parked cookie) counterpart of a parked captureAction call. */
+function captureSessionAction(cookies: ReturnType<typeof makeCookies>, fields: Record<string, string>) {
+	return captureAction(cookies, fields, { withSession: true });
+}
+
+/** Calls the page load; signed-in session flows pass withSession. */
+function loadConsent(cookies: ReturnType<typeof makeCookies>, url: string, withSession = false) {
+	return load({
+		cookies,
+		url: new URL(url),
+		...(withSession ? { locals: { user: TEST_OWNER } } : {})
+	} as never) as Promise<Record<string, unknown>>;
+}
+
 const NEW_SUB: PendingConsent = { kind: 'new', sub: 'sub-1', email: 'one@example.com', displayName: 'One' };
 
 async function expectLoadRedirectsToLogin(cookies: ReturnType<typeof makeCookies>, url: string) {
 	try {
-		await load({ cookies, url: new URL(url) } as never);
+		await loadConsent(cookies, url);
 		expect.unreachable('load should redirect');
 	} catch (e) {
 		expect(e).toMatchObject({ status: 302, location: '/login' });
@@ -129,10 +156,7 @@ test('page states: the rendered sentence equals the logged text exactly, docs ar
 });
 
 test('load hands the page the exact consent sentence the log will store', async () => {
-	const data = (await load({
-		cookies: cookiesWithPending(NEW_SUB),
-		url: new URL('http://localhost/consent?state=state-1')
-	} as never)) as Record<string, unknown>;
+	const data = await loadConsent(cookiesWithPending(NEW_SUB), 'http://localhost/consent?state=state-1');
 	expect(data).toMatchObject({ consentText: CONSENT_CHECKBOX_TEXT, kind: 'new', displayName: 'One' });
 });
 
@@ -145,10 +169,7 @@ test('load also hands the page the refund notice, outside the evidentiary checkb
 	);
 	expect(REFUND_NOTICE_TEXT).toContain('CDC Art. 49');
 	expect(REFUND_NOTICE_TEXT).not.toContain(CONSENT_CHECKBOX_TEXT);
-	const data = (await load({
-		cookies: cookiesWithPending(NEW_SUB),
-		url: new URL('http://localhost/consent?state=state-1')
-	} as never)) as Record<string, unknown>;
+	const data = await loadConsent(cookiesWithPending(NEW_SUB), 'http://localhost/consent?state=state-1');
 	expect(data).toMatchObject({ refundText: REFUND_NOTICE_TEXT });
 });
 
@@ -167,13 +188,13 @@ test('load with a tampered pending cookie redirects to /login', async () => {
 });
 
 test('action without a pending cookie fails with 400 and writes nothing', async () => {
-	const res = await captureAction(makeCookies(), { consent: 'on' });
+	const res = await captureAction(makeCookies(), { consent: 'on' }, { state: 'state-1' });
 	expect(res).toMatchObject({ status: 400 });
 	await expectNothingWritten();
 });
 
 test('action without the required checkbox fails with 400 and writes nothing', async () => {
-	const res = await captureAction(cookiesWithPending(NEW_SUB), {});
+	const res = await captureAction(cookiesWithPending(NEW_SUB), {}, { state: 'state-1' });
 	expect(res).toMatchObject({ status: 400 });
 	await expectNothingWritten();
 	expect(await testDb().db.select().from(sessions).all()).toHaveLength(0);
@@ -182,7 +203,7 @@ test('action without the required checkbox fails with 400 and writes nothing', a
 test('a new user is created only at acceptance, with a full evidentiary consent record', async () => {
 	const cookies = cookiesWithPending(NEW_SUB);
 
-	const thrown = await captureAction(cookies, { consent: 'on' });
+	const thrown = await captureAction(cookies, { consent: 'on' }, { state: 'state-1' });
 
 	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
 	const created = await testDb().db.select().from(users).all();
@@ -213,7 +234,7 @@ test('a new signup gets a personal org with owner membership, and its session re
 	// getSessionUser fails loudly when a user has zero memberships — without a
 	// personal org created in the signup transaction, every new account would
 	// 500 on its very first authenticated request.
-	const thrown = await captureAction(cookiesWithPending(NEW_SUB), { consent: 'on' });
+	const thrown = await captureAction(cookiesWithPending(NEW_SUB), { consent: 'on' }, { state: 'state-1' });
 	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
 
 	const user = (await testDb().db.select().from(users).all())[0];
@@ -239,7 +260,7 @@ test('a new signup gets a personal org with owner membership, and its session re
 });
 
 test('the marketing opt-in is recorded separately and only when ticked', async () => {
-	await captureAction(cookiesWithPending(NEW_SUB), { consent: 'on', marketing: 'on' });
+	await captureAction(cookiesWithPending(NEW_SUB), { consent: 'on', marketing: 'on' }, { state: 'state-1' });
 
 	const rows = await testDb().db.select().from(consents).all();
 	expect(rows).toHaveLength(1);
@@ -248,7 +269,7 @@ test('the marketing opt-in is recorded separately and only when ticked', async (
 
 test('only the first-ever user claims orphaned channels', async () => {
 	await testDb().db.insert(channels).values({ id: 'UC1', title: 'Old', refreshTokenEnc: 'enc', active: 1, createdAt: '2026-01-01T00:00:00.000Z' });
-	await captureAction(cookiesWithPending(NEW_SUB), { consent: 'on' });
+	await captureAction(cookiesWithPending(NEW_SUB), { consent: 'on' }, { state: 'state-1' });
 	const firstUser = (await testDb().db.select().from(users).all())[0];
 	const claimed = (await testDb().db.select().from(channels).all())[0];
 	expect(claimed.userId).toBe(firstUser.id);
@@ -267,7 +288,7 @@ test('only the first-ever user claims orphaned channels', async () => {
 	// signup actually succeeded — a failed signup would leave UC2 unclaimed and
 	// pass this test for the wrong reason.
 	await testDb().db.insert(channels).values({ id: 'UC2', title: 'Late', refreshTokenEnc: 'enc', active: 1, createdAt: '2026-01-01T00:00:00.000Z' });
-	const second = await captureAction(cookiesWithPending({ kind: 'new', sub: 'sub-2', email: 'two@example.com', displayName: 'Two' }), { consent: 'on' });
+	const second = await captureAction(cookiesWithPending({ kind: 'new', sub: 'sub-2', email: 'two@example.com', displayName: 'Two' }), { consent: 'on' }, { state: 'state-1' });
 	expect(second).toMatchObject({ status: 302, location: '/dashboard' });
 	expect((await testDb().db.select().from(users).all()).map((u) => u.googleSub)).toContain('sub-2');
 
@@ -278,10 +299,8 @@ test('only the first-ever user claims orphaned channels', async () => {
 
 /** Seeds existing sub-1 and completes its re-consent. */
 async function seedExistingAndConsent() {
-	await testDb()
-		.db.insert(users)
-		.values({ id: 'user-1', googleSub: 'sub-1', email: 'one@example.com', displayName: 'One' });
-	const thrown = await captureAction(cookiesWithPending({ kind: 'existing', userId: 'user-1' }), { consent: 'on' });
+	await seedOwner();
+	const thrown = await captureAction(cookiesWithPending({ kind: 'existing', userId: 'user-1' }), { consent: 'on' }, { state: 'state-1' });
 	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
 }
 
@@ -304,13 +323,13 @@ test('an existing user re-accepting adds a consent row without duplicating the a
 });
 
 test('an existing-user pending payload naming an unknown account fails with 400', async () => {
-	const res = await captureAction(cookiesWithPending({ kind: 'existing', userId: 'ghost' }), { consent: 'on' });
+	const res = await captureAction(cookiesWithPending({ kind: 'existing', userId: 'ghost' }), { consent: 'on' }, { state: 'state-1' });
 	expect(res).toMatchObject({ status: 400 });
 	expect(await testDb().db.select().from(consents).all()).toHaveLength(0);
 });
 
 test('a pending identity parked under a different state is invisible to this flow', async () => {
-	const res = await captureAction(cookiesWithPending(NEW_SUB, 'state-a'), { consent: 'on' }, 'state-b');
+	const res = await captureAction(cookiesWithPending(NEW_SUB, 'state-a'), { consent: 'on' }, { state: 'state-b' });
 	expect(res).toMatchObject({ status: 400 });
 	await expectNothingWritten();
 });
@@ -319,14 +338,14 @@ test('a session-creation failure rolls back the account and consent, leaving the
 	vi.mocked(createSession).mockRejectedValueOnce(new Error('sessions table unavailable'));
 	const cookies = cookiesWithPending(NEW_SUB);
 
-	const failed = await captureAction(cookies, { consent: 'on' });
+	const failed = await captureAction(cookies, { consent: 'on' }, { state: 'state-1' });
 	expect(failed).toBeInstanceOf(Error);
 	// Nothing committed: the user, consent, and session writes are one unit.
 	await expectNothingWritten();
 	expect(await testDb().db.select().from(sessions).all()).toHaveLength(0);
 
 	// The pending cookie was never consumed, so the same submission retries clean.
-	const retried = await captureAction(cookies, { consent: 'on' });
+	const retried = await captureAction(cookies, { consent: 'on' }, { state: 'state-1' });
 	expect(retried).toMatchObject({ status: 302, location: '/dashboard' });
 	await expectOneConsentedAccount();
 });
@@ -337,7 +356,7 @@ test('concurrent flows are isolated by state — each tab consents its own ident
 	parkPendingConsent(cookies as never, 'state-b', { kind: 'new', sub: 'sub-2', email: 'two@example.com', displayName: 'Two' });
 
 	// Tab B submits first: only sub-2's account is created.
-	const first = await captureAction(cookies, { consent: 'on' }, 'state-b');
+	const first = await captureAction(cookies, { consent: 'on' }, { state: 'state-b' });
 	expect(first).toMatchObject({ status: 302, location: '/dashboard' });
 	const afterFirst = await testDb().db.select().from(users).all();
 	expect(afterFirst).toHaveLength(1);
@@ -345,7 +364,7 @@ test('concurrent flows are isolated by state — each tab consents its own ident
 
 	// Tab A's parked identity survived the overwrite attempt and still
 	// consents its own intended account.
-	const second = await captureAction(cookies, { consent: 'on' }, 'state-a');
+	const second = await captureAction(cookies, { consent: 'on' }, { state: 'state-a' });
 	expect(second).toMatchObject({ status: 302, location: '/dashboard' });
 	const all = await testDb().db.select().from(users).all();
 	expect(all.map((u) => u.googleSub).sort()).toEqual(['sub-1', 'sub-2']);
@@ -357,39 +376,9 @@ test('concurrent flows are isolated by state — each tab consents its own ident
 // --- sliding, so the (app) layout gate sent the user here without a      ---
 // --- parked cookie.                                                      ---
 
-/** Seeds user-1 to match TEST_OWNER. */
-async function seedOwner() {
-	await testDb()
-		.db.insert(users)
-		.values({ id: TEST_OWNER.id, googleSub: 'sub-1', email: TEST_OWNER.email, displayName: TEST_OWNER.displayName });
-}
-
-function consentLoadWithSession(cookies: ReturnType<typeof makeCookies>, url: string) {
-	return load({
-		cookies,
-		url: new URL(url),
-		locals: { user: TEST_OWNER }
-	} as never) as Promise<Record<string, unknown>>;
-}
-
-/** The session-based (no parked cookie) counterpart of captureAction. */
-async function captureSessionAction(cookies: ReturnType<typeof makeCookies>, fields: Record<string, string>) {
-	try {
-		return (await actions.default({
-			cookies,
-			request: consentRequest(fields),
-			url: new URL('http://localhost/consent'),
-			getClientAddress: () => '203.0.113.7',
-			locals: { user: TEST_OWNER }
-		} as never)) as { status: number } | undefined;
-	} catch (e) {
-		return e as { status: number; location?: string };
-	}
-}
-
 test('load with a signed-in user and no current consent renders the existing-user flow without a parked cookie', async () => {
 	await seedOwner();
-	const data = await consentLoadWithSession(makeCookies(), 'http://localhost/consent');
+	const data = await loadConsent(makeCookies(), 'http://localhost/consent', true);
 	expect(data).toMatchObject({
 		kind: 'existing',
 		displayName: null,
@@ -402,7 +391,7 @@ test('load with a signed-in user whose consent is current redirects to /dashboar
 	await seedOwner();
 	await seedConsent(TEST_OWNER.id, undefined, LEGAL_VERSION);
 	try {
-		await consentLoadWithSession(makeCookies(), 'http://localhost/consent');
+		await loadConsent(makeCookies(), 'http://localhost/consent', true);
 		expect.unreachable('load should redirect');
 	} catch (e) {
 		expect(e).toMatchObject({ status: 302, location: '/dashboard' });
@@ -413,10 +402,7 @@ test('a parked identity takes precedence over the signed-in session', async () =
 	await seedOwner();
 	// TEST_OWNER has no consent row — if the session path won, this would
 	// render kind 'existing'. The parked flow must render its own identity.
-	const data = await consentLoadWithSession(
-		cookiesWithPending(NEW_SUB),
-		'http://localhost/consent?state=state-1'
-	);
+	const data = await loadConsent(cookiesWithPending(NEW_SUB), 'http://localhost/consent?state=state-1', true);
 	expect(data).toMatchObject({ kind: 'new', displayName: 'One' });
 });
 

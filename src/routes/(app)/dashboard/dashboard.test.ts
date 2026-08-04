@@ -147,10 +147,10 @@ test('dashboard ban counter counts audit-log bans from BOTH the manual queue and
 
 	const data = await loadDashboard();
 
-	expect(data.bans).toEqual([
-		{ channelId: 'UC1', n: 2 },
-		{ channelId: 'UC2', n: 1 }
-	]);
+	// GROUP BY without ORDER BY does not guarantee row order — compare by key,
+	// not position (Qodo PR #74: order-dependent assertion).
+	expect(data.bans).toHaveLength(2);
+	expect(Object.fromEntries(data.bans.map((b) => [b.channelId, b.n]))).toEqual({ UC1: 2, UC2: 1 });
 });
 
 test('delete account rejects a signed-out request with 401', async () => {

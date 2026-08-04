@@ -263,7 +263,17 @@ async function decideNewComments(
 			: []
 	);
 	const rulesForChannel = prepareRules(await db.select().from(rules).where(eq(rules.channelId, channelId)).all());
-	const newComments = page.comments.filter((comment) => !existingIds.has(comment.id));
+	// Dedupe twice: against already-stored comments AND within this batch.
+	// commentThreads pagination can repeat an item across page boundaries, and
+	// two decisions with one comment id would violate the comments.id PRIMARY
+	// KEY, failing the entire staging transaction (I1: one bad item never
+	// aborts the batch).
+	const seen = new Set<string>();
+	const newComments = page.comments.filter((comment) => {
+		if (existingIds.has(comment.id) || seen.has(comment.id)) return false;
+		seen.add(comment.id);
+		return true;
+	});
 	// Level 2 tone scoring needs each video's title/description as context. One
 	// batched videos.list call per run; videos whose metadata failed validation
 	// (and comments carrying no videoId at all) score with empty context

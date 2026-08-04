@@ -687,3 +687,23 @@ test('skips a pending action already claimed by a concurrent run', async () => {
 	expectActionState('pending');
 	expect(result).toMatchObject({ fetched: 1, acted: 0, skipped: false, dryRun: false });
 });
+
+test('decides a duplicated comment id only once when fetch pages overlap', async () => {
+	// commentThreads pagination can repeat an item across page boundaries; the
+	// dedupe against already-stored comments does not catch a duplicate within
+	// the same batch, and two rows with one id violate the comments.id PRIMARY
+	// KEY — failing the whole staging transaction (prod incident: history drain
+	// 500ing on UNIQUE constraint failed: comments.id).
+	mocks.scoreComment.mockResolvedValue(moderation(0.34));
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment(), newComment({ threadId: 'thread-2' })],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	const result = await runChannel('channel');
+
+	expect(mocks.scoreComment).toHaveBeenCalledTimes(1);
+	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'approved' })]);
+	expect(result).toMatchObject({ fetched: 2, acted: 0, skipped: false, dryRun: false });
+});

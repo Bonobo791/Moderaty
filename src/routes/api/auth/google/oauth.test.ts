@@ -155,7 +155,7 @@ test('auth start sets an HttpOnly oauth_state cookie and redirects with matching
 	expect(pendingStates).toContain(target.searchParams.get('state'));
 	expect(target.searchParams.get('scope')).toBe('https://www.googleapis.com/auth/youtube.force-ssl');
 	expect(target.searchParams.get('access_type')).toBe('offline');
-	expect(target.searchParams.get('prompt')).toBe('consent');
+	expect(target.searchParams.get('prompt')).toBe('consent select_account');
 	expect(target.searchParams.get('redirect_uri')).toBe(
 		'http://localhost:5173/api/auth/google/callback'
 	);

@@ -57,8 +57,9 @@ export default async function cron() {
 
 const TIMEOUT_MS = 25_000; // below Netlify's 26s function limit; the endpoint's own run budget is 20s
 
-// The schedule is every minute while the app is in early single-channel
-// operation; raise to '*/15 * * * *' when user volume grows. The endpoint
-// itself enforces one channel per invocation, so this schedule sets the
-// per-channel scan cadence.
+// The schedule is every minute while the app is in early operation; raise to
+// '*/15 * * * *' when user volume grows. The endpoint itself enforces one
+// channel per invocation (least-recently-run first), so with N connected
+// channels the per-channel scan cadence is N minutes at '* * * * *' — keep
+// the schedule fast enough that N × interval stays an acceptable cadence.
 export const config = { schedule: '* * * * *' };

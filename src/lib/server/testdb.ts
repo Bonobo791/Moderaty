@@ -125,6 +125,8 @@ export async function createTestDb(): Promise<TestDb> {
 			cursor TEXT,
 			next_page_token TEXT,
 			scan_cursor TEXT,
+			history_next_page_token TEXT,
+			history_boundary TEXT,
 			last_run_at TEXT,
 			lease_expires_at TEXT,
 			active INTEGER NOT NULL DEFAULT 1,

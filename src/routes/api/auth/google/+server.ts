@@ -39,7 +39,10 @@ export function GET({ cookies }: { cookies: import('@sveltejs/kit').Cookies }) {
 		response_type: 'code',
 		scope: 'https://www.googleapis.com/auth/youtube.force-ssl',
 		access_type: 'offline',
-		prompt: 'consent',
+		// consent forces a fresh refresh_token on every connect; select_account
+		// lets the user connect a channel that lives under a DIFFERENT Google
+		// account than the one the browser is currently signed into.
+		prompt: 'consent select_account',
 		state
 	});
 	throw redirect(302, `https://accounts.google.com/o/oauth2/v2/auth?${params}`);

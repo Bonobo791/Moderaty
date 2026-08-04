@@ -22,6 +22,8 @@ import { dirname, join } from 'node:path';
 
 import { expect, test, vi } from 'vitest';
 
+import { eq } from 'drizzle-orm';
+
 const mocks = vi.hoisted(() => ({
 	env: {
 		APP_URL: 'http://localhost:5173',
@@ -37,7 +39,7 @@ vi.mock('$lib/server/session', async (importOriginal) => {
 });
 
 import { segmentConsentText } from '$lib/consentText';
-import { setupTestDb, testDb } from '$lib/server/testdb';
+import { TEST_OWNER, seedConsent, setupTestDb, testDb } from '$lib/server/testdb';
 import { makeCookies } from '$lib/server/testcookies';
 import { channels, consents, memberships, organizations, sessions, users } from '$lib/server/db/schema';
 import {
@@ -63,6 +65,13 @@ function cookiesWithPending(payload: PendingConsent, state = 'state-1') {
 	return cookies;
 }
 
+/** Seeds the users row matching TEST_OWNER. */
+async function seedOwner() {
+	await testDb()
+		.db.insert(users)
+		.values({ id: TEST_OWNER.id, googleSub: 'sub-1', email: TEST_OWNER.email, displayName: TEST_OWNER.displayName });
+}
+
 function consentRequest(fields: Record<string, string>) {
 	const form = new FormData();
 	for (const [key, value] of Object.entries(fields)) form.set(key, value);
@@ -73,18 +82,24 @@ function consentRequest(fields: Record<string, string>) {
 	});
 }
 
+/**
+ * Calls the page action and captures the outcome: fail() returns an
+ * ActionFailure ({ status, data }); redirect/error throw. Parked-cookie
+ * flows pass their state; signed-in session flows pass withSession (no
+ * state — there is no parked cookie).
+ */
 async function captureAction(
 	cookies: ReturnType<typeof makeCookies>,
 	fields: Record<string, string>,
-	state = 'state-1'
+	opts: { state?: string; withSession?: boolean } = {}
 ) {
 	try {
-		// fail() returns an ActionFailure ({ status, data }); redirect/error throw.
 		return (await actions.default({
 			cookies,
 			request: consentRequest(fields),
-			url: new URL(`http://localhost/consent?state=${state}`),
-			getClientAddress: () => '203.0.113.7'
+			url: new URL(`http://localhost/consent${opts.state ? `?state=${opts.state}` : ''}`),
+			getClientAddress: () => '203.0.113.7',
+			...(opts.withSession ? { locals: { user: TEST_OWNER } } : {})
 		} as never)) as
 			| { status: number }
 			| undefined;
@@ -93,11 +108,25 @@ async function captureAction(
 	}
 }
 
+/** The session-based (no parked cookie) counterpart of a parked captureAction call. */
+function captureSessionAction(cookies: ReturnType<typeof makeCookies>, fields: Record<string, string>) {
+	return captureAction(cookies, fields, { withSession: true });
+}
+
+/** Calls the page load; signed-in session flows pass withSession. */
+function loadConsent(cookies: ReturnType<typeof makeCookies>, url: string, withSession = false) {
+	return load({
+		cookies,
+		url: new URL(url),
+		...(withSession ? { locals: { user: TEST_OWNER } } : {})
+	} as never) as Promise<Record<string, unknown>>;
+}
+
 const NEW_SUB: PendingConsent = { kind: 'new', sub: 'sub-1', email: 'one@example.com', displayName: 'One' };
 
-function expectLoadRedirectsToLogin(cookies: ReturnType<typeof makeCookies>, url: string) {
+async function expectLoadRedirectsToLogin(cookies: ReturnType<typeof makeCookies>, url: string) {
 	try {
-		load({ cookies, url: new URL(url) } as never);
+		await loadConsent(cookies, url);
 		expect.unreachable('load should redirect');
 	} catch (e) {
 		expect(e).toMatchObject({ status: 302, location: '/login' });
@@ -128,15 +157,12 @@ test('page states: the rendered sentence equals the logged text exactly, docs ar
 	expect(consentPage).not.toMatch(/name="consent"[^>]*checked/);
 });
 
-test('load hands the page the exact consent sentence the log will store', () => {
-	const data = load({
-		cookies: cookiesWithPending(NEW_SUB),
-		url: new URL('http://localhost/consent?state=state-1')
-	} as never) as Record<string, unknown>;
+test('load hands the page the exact consent sentence the log will store', async () => {
+	const data = await loadConsent(cookiesWithPending(NEW_SUB), 'http://localhost/consent?state=state-1');
 	expect(data).toMatchObject({ consentText: CONSENT_CHECKBOX_TEXT, kind: 'new', displayName: 'One' });
 });
 
-test('load also hands the page the refund notice, outside the evidentiary checkbox text', () => {
+test('load also hands the page the refund notice, outside the evidentiary checkbox text', async () => {
 	// The refund notice is consumer-rights copy (Terms §7, CDC Art. 49), not
 	// part of the logged consent sentence: CONSENT_CHECKBOX_TEXT must stay
 	// byte-identical so existing consent rows keep matching what was shown.
@@ -145,35 +171,32 @@ test('load also hands the page the refund notice, outside the evidentiary checkb
 	);
 	expect(REFUND_NOTICE_TEXT).toContain('CDC Art. 49');
 	expect(REFUND_NOTICE_TEXT).not.toContain(CONSENT_CHECKBOX_TEXT);
-	const data = load({
-		cookies: cookiesWithPending(NEW_SUB),
-		url: new URL('http://localhost/consent?state=state-1')
-	} as never) as Record<string, unknown>;
+	const data = await loadConsent(cookiesWithPending(NEW_SUB), 'http://localhost/consent?state=state-1');
 	expect(data).toMatchObject({ refundText: REFUND_NOTICE_TEXT });
 });
 
-test('load without a pending cookie redirects to /login', () => {
-	expectLoadRedirectsToLogin(makeCookies(), 'http://localhost/consent?state=state-1');
+test('load without a pending cookie redirects to /login', async () => {
+	await expectLoadRedirectsToLogin(makeCookies(), 'http://localhost/consent?state=state-1');
 });
 
-test('load without a state param redirects to /login', () => {
-	expectLoadRedirectsToLogin(cookiesWithPending(NEW_SUB), 'http://localhost/consent');
+test('load without a state param redirects to /login', async () => {
+	await expectLoadRedirectsToLogin(cookiesWithPending(NEW_SUB), 'http://localhost/consent');
 });
 
-test('load with a tampered pending cookie redirects to /login', () => {
+test('load with a tampered pending cookie redirects to /login', async () => {
 	const cookies = makeCookies();
 	cookies.set(PENDING_CONSENT_COOKIE, 'forged-ciphertext', { path: '/' });
-	expectLoadRedirectsToLogin(cookies, 'http://localhost/consent?state=state-1');
+	await expectLoadRedirectsToLogin(cookies, 'http://localhost/consent?state=state-1');
 });
 
 test('action without a pending cookie fails with 400 and writes nothing', async () => {
-	const res = await captureAction(makeCookies(), { consent: 'on' });
+	const res = await captureAction(makeCookies(), { consent: 'on' }, { state: 'state-1' });
 	expect(res).toMatchObject({ status: 400 });
 	await expectNothingWritten();
 });
 
 test('action without the required checkbox fails with 400 and writes nothing', async () => {
-	const res = await captureAction(cookiesWithPending(NEW_SUB), {});
+	const res = await captureAction(cookiesWithPending(NEW_SUB), {}, { state: 'state-1' });
 	expect(res).toMatchObject({ status: 400 });
 	await expectNothingWritten();
 	expect(await testDb().db.select().from(sessions).all()).toHaveLength(0);
@@ -182,7 +205,7 @@ test('action without the required checkbox fails with 400 and writes nothing', a
 test('a new user is created only at acceptance, with a full evidentiary consent record', async () => {
 	const cookies = cookiesWithPending(NEW_SUB);
 
-	const thrown = await captureAction(cookies, { consent: 'on' });
+	const thrown = await captureAction(cookies, { consent: 'on' }, { state: 'state-1' });
 
 	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
 	const created = await testDb().db.select().from(users).all();
@@ -213,7 +236,7 @@ test('a new signup gets a personal org with owner membership, and its session re
 	// getSessionUser fails loudly when a user has zero memberships — without a
 	// personal org created in the signup transaction, every new account would
 	// 500 on its very first authenticated request.
-	const thrown = await captureAction(cookiesWithPending(NEW_SUB), { consent: 'on' });
+	const thrown = await captureAction(cookiesWithPending(NEW_SUB), { consent: 'on' }, { state: 'state-1' });
 	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
 
 	const user = (await testDb().db.select().from(users).all())[0];
@@ -239,7 +262,7 @@ test('a new signup gets a personal org with owner membership, and its session re
 });
 
 test('the marketing opt-in is recorded separately and only when ticked', async () => {
-	await captureAction(cookiesWithPending(NEW_SUB), { consent: 'on', marketing: 'on' });
+	await captureAction(cookiesWithPending(NEW_SUB), { consent: 'on', marketing: 'on' }, { state: 'state-1' });
 
 	const rows = await testDb().db.select().from(consents).all();
 	expect(rows).toHaveLength(1);
@@ -248,7 +271,7 @@ test('the marketing opt-in is recorded separately and only when ticked', async (
 
 test('only the first-ever user claims orphaned channels', async () => {
 	await testDb().db.insert(channels).values({ id: 'UC1', title: 'Old', refreshTokenEnc: 'enc', active: 1, createdAt: '2026-01-01T00:00:00.000Z' });
-	await captureAction(cookiesWithPending(NEW_SUB), { consent: 'on' });
+	await captureAction(cookiesWithPending(NEW_SUB), { consent: 'on' }, { state: 'state-1' });
 	const firstUser = (await testDb().db.select().from(users).all())[0];
 	const claimed = (await testDb().db.select().from(channels).all())[0];
 	expect(claimed.userId).toBe(firstUser.id);
@@ -267,7 +290,7 @@ test('only the first-ever user claims orphaned channels', async () => {
 	// signup actually succeeded — a failed signup would leave UC2 unclaimed and
 	// pass this test for the wrong reason.
 	await testDb().db.insert(channels).values({ id: 'UC2', title: 'Late', refreshTokenEnc: 'enc', active: 1, createdAt: '2026-01-01T00:00:00.000Z' });
-	const second = await captureAction(cookiesWithPending({ kind: 'new', sub: 'sub-2', email: 'two@example.com', displayName: 'Two' }), { consent: 'on' });
+	const second = await captureAction(cookiesWithPending({ kind: 'new', sub: 'sub-2', email: 'two@example.com', displayName: 'Two' }), { consent: 'on' }, { state: 'state-1' });
 	expect(second).toMatchObject({ status: 302, location: '/dashboard' });
 	expect((await testDb().db.select().from(users).all()).map((u) => u.googleSub)).toContain('sub-2');
 
@@ -278,10 +301,8 @@ test('only the first-ever user claims orphaned channels', async () => {
 
 /** Seeds existing sub-1 and completes its re-consent. */
 async function seedExistingAndConsent() {
-	await testDb()
-		.db.insert(users)
-		.values({ id: 'user-1', googleSub: 'sub-1', email: 'one@example.com', displayName: 'One' });
-	const thrown = await captureAction(cookiesWithPending({ kind: 'existing', userId: 'user-1' }), { consent: 'on' });
+	await seedOwner();
+	const thrown = await captureAction(cookiesWithPending({ kind: 'existing', userId: 'user-1' }), { consent: 'on' }, { state: 'state-1' });
 	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
 }
 
@@ -295,22 +316,21 @@ async function expectOneConsentedAccount() {
 test('an existing user re-accepting adds a consent row without duplicating the account', async () => {
 	await seedExistingAndConsent();
 
-	const rows = await testDb().db.select().from(consents).all();
-	expect(rows).toHaveLength(1);
 	// The e-mail is recorded from the users row — statutory-retention evidence
 	// (Art. 16, III), since account deletion wipes users.email entirely.
-	expect(rows[0]).toMatchObject({ userId: 'user-1', email: 'one@example.com', docVersion: LEGAL_VERSION });
+	const row = await testDb().db.select().from(consents).where(eq(consents.userId, 'user-1')).get();
+	expect(row).toMatchObject({ email: 'one@example.com', docVersion: LEGAL_VERSION });
 	await expectOneConsentedAccount();
 });
 
 test('an existing-user pending payload naming an unknown account fails with 400', async () => {
-	const res = await captureAction(cookiesWithPending({ kind: 'existing', userId: 'ghost' }), { consent: 'on' });
+	const res = await captureAction(cookiesWithPending({ kind: 'existing', userId: 'ghost' }), { consent: 'on' }, { state: 'state-1' });
 	expect(res).toMatchObject({ status: 400 });
 	expect(await testDb().db.select().from(consents).all()).toHaveLength(0);
 });
 
 test('a pending identity parked under a different state is invisible to this flow', async () => {
-	const res = await captureAction(cookiesWithPending(NEW_SUB, 'state-a'), { consent: 'on' }, 'state-b');
+	const res = await captureAction(cookiesWithPending(NEW_SUB, 'state-a'), { consent: 'on' }, { state: 'state-b' });
 	expect(res).toMatchObject({ status: 400 });
 	await expectNothingWritten();
 });
@@ -319,14 +339,14 @@ test('a session-creation failure rolls back the account and consent, leaving the
 	vi.mocked(createSession).mockRejectedValueOnce(new Error('sessions table unavailable'));
 	const cookies = cookiesWithPending(NEW_SUB);
 
-	const failed = await captureAction(cookies, { consent: 'on' });
+	const failed = await captureAction(cookies, { consent: 'on' }, { state: 'state-1' });
 	expect(failed).toBeInstanceOf(Error);
 	// Nothing committed: the user, consent, and session writes are one unit.
 	await expectNothingWritten();
 	expect(await testDb().db.select().from(sessions).all()).toHaveLength(0);
 
 	// The pending cookie was never consumed, so the same submission retries clean.
-	const retried = await captureAction(cookies, { consent: 'on' });
+	const retried = await captureAction(cookies, { consent: 'on' }, { state: 'state-1' });
 	expect(retried).toMatchObject({ status: 302, location: '/dashboard' });
 	await expectOneConsentedAccount();
 });
@@ -337,7 +357,7 @@ test('concurrent flows are isolated by state — each tab consents its own ident
 	parkPendingConsent(cookies as never, 'state-b', { kind: 'new', sub: 'sub-2', email: 'two@example.com', displayName: 'Two' });
 
 	// Tab B submits first: only sub-2's account is created.
-	const first = await captureAction(cookies, { consent: 'on' }, 'state-b');
+	const first = await captureAction(cookies, { consent: 'on' }, { state: 'state-b' });
 	expect(first).toMatchObject({ status: 302, location: '/dashboard' });
 	const afterFirst = await testDb().db.select().from(users).all();
 	expect(afterFirst).toHaveLength(1);
@@ -345,10 +365,93 @@ test('concurrent flows are isolated by state — each tab consents its own ident
 
 	// Tab A's parked identity survived the overwrite attempt and still
 	// consents its own intended account.
-	const second = await captureAction(cookies, { consent: 'on' }, 'state-a');
+	const second = await captureAction(cookies, { consent: 'on' }, { state: 'state-a' });
 	expect(second).toMatchObject({ status: 302, location: '/dashboard' });
 	const all = await testDb().db.select().from(users).all();
 	expect(all.map((u) => u.googleSub).sort()).toEqual(['sub-1', 'sub-2']);
 	// Both entries consumed — the cookie itself is gone.
 	expect(cookies.get(PENDING_CONSENT_COOKIE)).toBeUndefined();
+});
+
+// --- Signed-in re-consent: legal docs updated while a session was still ---
+// --- sliding, so the (app) layout gate sent the user here without a      ---
+// --- parked cookie.                                                      ---
+
+test('load with a signed-in user and no current consent renders the existing-user flow without a parked cookie', async () => {
+	await seedOwner();
+	const data = await loadConsent(makeCookies(), 'http://localhost/consent', true);
+	expect(data).toMatchObject({
+		kind: 'existing',
+		displayName: null,
+		consentText: CONSENT_CHECKBOX_TEXT,
+		refundText: REFUND_NOTICE_TEXT
+	});
+});
+
+test('load with a signed-in user whose consent is current redirects to /dashboard', async () => {
+	await seedOwner();
+	await seedConsent(TEST_OWNER.id, undefined, LEGAL_VERSION);
+	try {
+		await loadConsent(makeCookies(), 'http://localhost/consent', true);
+		expect.unreachable('load should redirect');
+	} catch (e) {
+		expect(e).toMatchObject({ status: 302, location: '/dashboard' });
+	}
+});
+
+test('a parked identity takes precedence over the signed-in session', async () => {
+	await seedOwner();
+	// TEST_OWNER has no consent row — if the session path won, this would
+	// render kind 'existing'. The parked flow must render its own identity.
+	const data = await loadConsent(cookiesWithPending(NEW_SUB), 'http://localhost/consent?state=state-1', true);
+	expect(data).toMatchObject({ kind: 'new', displayName: 'One' });
+});
+
+test('a signed-in user re-consents in place: consent row written, NO new session issued', async () => {
+	await seedOwner();
+	// An existing live session must survive re-consent untouched — an empty
+	// table cannot distinguish "no new session" from "session wiped".
+	await testDb()
+		.db.insert(sessions)
+		.values({ id: 'sess-live', userId: TEST_OWNER.id, expiresAt: '2027-01-01T00:00:00.000Z' });
+	const cookies = makeCookies();
+
+	const thrown = await captureSessionAction(cookies, { consent: 'on' });
+
+	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
+	// Exactly one consent row, attributable to this user with full evidence.
+	const row = await testDb().db.select().from(consents).where(eq(consents.userId, TEST_OWNER.id)).get();
+	expect(row).toMatchObject({
+		email: TEST_OWNER.email,
+		docVersion: LEGAL_VERSION,
+		checkboxText: CONSENT_CHECKBOX_TEXT,
+		ip: '203.0.113.7',
+		userAgent: 'moderaty-test/1.0',
+		marketingOptIn: 0
+	});
+	// The live session keeps sliding — re-consent must not issue another one,
+	// and the pre-existing session row is untouched.
+	const allSessions = await testDb().db.select().from(sessions).all();
+	expect(allSessions).toHaveLength(1);
+	expect(allSessions[0].id).toBe('sess-live');
+	expect(cookies.setCalls.find((c) => c.name === 'moderaty_session')).toBeUndefined();
+});
+
+test('a signed-in user whose consent is already current adds NO duplicate row on a direct POST', async () => {
+	await seedOwner();
+	await seedConsent(TEST_OWNER.id, undefined, LEGAL_VERSION);
+	const thrown = await captureSessionAction(makeCookies(), { consent: 'on' });
+	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
+	// Still exactly the seeded row — the append-only log gains no duplicate.
+	expect(await testDb().db.select().from(consents).all()).toHaveLength(1);
+});
+
+test('a signed-in re-consent without the required checkbox fails with 400 and writes nothing', async () => {
+	await seedOwner();
+	const res = (await captureSessionAction(makeCookies(), {})) as { status: number; data?: { error?: string } };
+	expect(res.status).toBe(400);
+	// The rejection names the obligation — no silent generic failure.
+	expect(res.data?.error).toContain('at least 18');
+	expect(await testDb().db.select().from(consents).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(sessions).all()).toHaveLength(0);
 });

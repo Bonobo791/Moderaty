@@ -23,7 +23,11 @@
 
 import type { Cookies } from '@sveltejs/kit';
 
+import { and, eq } from 'drizzle-orm';
+
 import { decrypt, encrypt } from '$lib/server/crypto';
+import { db } from '$lib/server/db';
+import { consents } from '$lib/server/db/schema';
 import { cookieSecure } from '$lib/server/oauthState';
 
 /**
@@ -32,9 +36,12 @@ import { cookieSecure } from '$lib/server/oauthState';
  * themselves in src/lib/landing/legal.ts and re-exported here so the consent
  * log names the exact document version the user saw. Bump on ANY material
  * change: every user whose latest consent row predates the new version
- * re-accepts at next login.
+ * re-accepts at next login — and, via the (app) layout gate, at their next
+ * page load if they are still signed in when the bump deploys.
  */
-export { LEGAL_VERSION } from '$lib/landing/legal';
+import { LEGAL_VERSION } from '$lib/landing/legal';
+
+export { LEGAL_VERSION };
 
 /**
  * The exact text of the required consent checkbox, stored verbatim in each
@@ -154,4 +161,19 @@ export function clearPendingConsent(cookies: Cookies, state: string): void {
 		cookies,
 		readEntries(cookies).filter((e) => e.state !== state)
 	);
+}
+
+/**
+ * True when the user has a consent row matching the current LEGAL_VERSION.
+ * One check, three gates: the login callback (park or session), the (app)
+ * layout (re-consent redirect for still-active sessions after a doc bump),
+ * and /consent itself (a current user goes straight to /dashboard).
+ */
+export async function hasCurrentConsent(userId: string): Promise<boolean> {
+	const row = await db
+		.select({ id: consents.id })
+		.from(consents)
+		.where(and(eq(consents.userId, userId), eq(consents.docVersion, LEGAL_VERSION)))
+		.get();
+	return row !== undefined;
 }

@@ -38,6 +38,14 @@ const SEED_CHANNELS = [
 	{ id: 'seed-UC-morning-show', title: 'Morning Show Demo', commentPrefix: 'seed-morning-comment' }
 ];
 
+// Validate the full argument list BEFORE any SQL: unknown or extra arguments
+// are a loud usage error, never a silent fallthrough into seeding.
+const argv = process.argv.slice(2);
+if (argv.length > 1 || (argv.length === 1 && argv[0] !== '--reset')) {
+	console.error('Usage: node --env-file=.env scripts/seed-dev.mjs [--reset]');
+	process.exit(1);
+}
+
 const databaseUrl = process.env.TURSO_DATABASE_URL;
 if (!databaseUrl) {
 	console.error('TURSO_DATABASE_URL is not set. Run with: node --env-file=.env scripts/seed-dev.mjs');
@@ -66,25 +74,25 @@ for (const table of TABLES) {
 
 const CHILD_TABLES = ['audit_log', 'moderation_actions', 'comments', 'rules'];
 
-if (process.argv.includes('--reset')) {
-	for (const { id } of SEED_CHANNELS) {
-		for (const table of CHILD_TABLES) {
-			await client.execute({ sql: `DELETE FROM ${table} WHERE channel_id = ?`, args: [id] });
+if (argv[0] === '--reset') {
+	const tx = await client.transaction('write');
+	try {
+		for (const { id } of SEED_CHANNELS) {
+			for (const table of CHILD_TABLES) {
+				await tx.execute({ sql: `DELETE FROM ${table} WHERE channel_id = ?`, args: [id] });
+			}
+			await tx.execute({ sql: 'DELETE FROM channels WHERE id = ?', args: [id] });
 		}
-		await client.execute({ sql: 'DELETE FROM channels WHERE id = ?', args: [id] });
+		await tx.commit();
+	} catch (error) {
+		await tx.rollback();
+		console.error(`Reset failed, nothing was deleted: ${error instanceof Error ? error.message : String(error)}`);
+		client.close();
+		process.exit(1);
 	}
 	console.log(`Removed all demo rows for ${SEED_CHANNELS.map((c) => c.id).join(', ')}.`);
 	client.close();
 	process.exit(0);
-}
-
-for (const { id } of SEED_CHANNELS) {
-	const existing = await client.execute({ sql: 'SELECT id FROM channels WHERE id = ?', args: [id] });
-	if (existing.rows.length > 0) {
-		console.error(`Demo channel ${id} already exists. Run with --reset first to reseed.`);
-		client.close();
-		process.exit(1);
-	}
 }
 
 const day = 24 * 60 * 60 * 1000;
@@ -119,10 +127,10 @@ const COMMENTS = [
 	['deleted', 'human', null, null, 'spam link farm dot com best prices']
 ];
 
-async function seedChannel({ id, title, commentPrefix }) {
+async function seedChannel(tx, { id, title, commentPrefix }) {
 	// active = 0: demo rows render in every surface, but cron must never pick a
 	// demo channel and burn a run decrypting 'seed-not-a-real-token'.
-	await client.execute({
+	await tx.execute({
 		sql: `INSERT INTO channels (id, title, refresh_token_enc, cursor, active)
 		VALUES (?, ?, 'seed-not-a-real-token', ?, 0)`,
 		args: [id, title, iso(2 * day)]
@@ -134,12 +142,12 @@ async function seedChannel({ id, title, commentPrefix }) {
 		{ type: 'user', pattern: 'seed-UC-troll', action: 'reject' }
 	];
 	for (const r of rules) {
-		await client.execute({
+		await tx.execute({
 			sql: 'INSERT INTO rules (channel_id, type, pattern, action) VALUES (?, ?, ?, ?)',
 			args: [id, r.type, r.pattern, r.action]
 		});
 	}
-	const ruleIds = await client.execute({
+	const ruleIds = await tx.execute({
 		sql: 'SELECT id, type FROM rules WHERE channel_id = ? ORDER BY id',
 		args: [id]
 	});
@@ -149,11 +157,9 @@ async function seedChannel({ id, title, commentPrefix }) {
 	for (let i = 0; i < COMMENTS.length; i++) {
 		const [status, decidedBy, ruleType, aiScore, text] = COMMENTS[i];
 		if (text.length > 500) {
-			console.error(`Seed comment #${i + 1} exceeds 500 chars — shorten it.`);
-			client.close();
-			process.exit(1);
+			throw new Error(`Seed comment #${i + 1} exceeds 500 chars — shorten it.`);
 		}
-		await client.execute({
+		await tx.execute({
 			sql: `INSERT INTO comments
 		(id, channel_id, text, published_at, status, decided_by, matched_rule_id, ai_score)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -176,7 +182,7 @@ async function seedChannel({ id, title, commentPrefix }) {
 		[commentId(10), 'reject', 'ai score 0.91', 'dispatched']
 	];
 	for (const [cid, action, reason, state] of actions) {
-		await client.execute({
+		await tx.execute({
 			sql: `INSERT INTO moderation_actions (comment_id, channel_id, action, reason, state, last_attempt_at)
 		VALUES (?, ?, ?, ?, ?, ?)`,
 			args: [cid, id, action, reason, state, iso(6 * 60 * 60 * 1000)]
@@ -195,7 +201,7 @@ async function seedChannel({ id, title, commentPrefix }) {
 		[commentId(3), 'dry-run', 'would queue (ai unavailable)', 'system']
 	];
 	for (const [cid, action, reason, actor] of logRows) {
-		await client.execute({
+		await tx.execute({
 			sql: 'INSERT INTO audit_log (channel_id, comment_id, action, reason, actor) VALUES (?, ?, ?, ?, ?)',
 			args: [id, cid, action, reason, actor]
 		});
@@ -204,12 +210,32 @@ async function seedChannel({ id, title, commentPrefix }) {
 	return { rules: rules.length, comments: COMMENTS.length, actions: actions.length, logRows: logRows.length };
 }
 
-for (const channel of SEED_CHANNELS) {
-	const counts = await seedChannel(channel);
-	console.log(
-		`Seeded ${channel.id}: 1 channel, ${counts.rules} rules, ${counts.comments} comments, ` +
-			`${counts.actions} moderation actions, ${counts.logRows} audit log rows.`
-	);
+// Duplicate preflight + both channel seeds in ONE write transaction: a failure
+// anywhere leaves the database exactly as it was (no half-seeded demo data).
+const tx = await client.transaction('write');
+const summaries = [];
+try {
+	for (const { id } of SEED_CHANNELS) {
+		const existing = await tx.execute({ sql: 'SELECT id FROM channels WHERE id = ?', args: [id] });
+		if (existing.rows.length > 0) {
+			throw new Error(`Demo channel ${id} already exists. Run with --reset first to reseed.`);
+		}
+	}
+	for (const channel of SEED_CHANNELS) {
+		const counts = await seedChannel(tx, channel);
+		summaries.push(
+			`Seeded ${channel.id}: 1 channel, ${counts.rules} rules, ${counts.comments} comments, ` +
+				`${counts.actions} moderation actions, ${counts.logRows} audit log rows.`
+		);
+	}
+	await tx.commit();
+} catch (error) {
+	await tx.rollback();
+	console.error(error instanceof Error ? error.message : String(error));
+	client.close();
+	process.exit(1);
 }
+
+for (const line of summaries) console.log(line);
 console.log('Undo with: node --env-file=.env scripts/seed-dev.mjs --reset');
 client.close();

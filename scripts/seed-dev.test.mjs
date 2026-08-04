@@ -163,6 +163,9 @@ describe('seed-dev multi-channel demo data', () => {
 		expect(stdout).toContain('seed-UC-morning-show');
 
 		const client = createClient({ url });
+		// Exact per-channel shape — toBeGreaterThan(0) would pass on a seed that
+		// silently writes a third of the demo rows.
+		const EXPECTED = { rules: 3, comments: 14, moderation_actions: 3, audit_log: 9 };
 		for (const id of CHANNEL_IDS) {
 			// Orphans: claimed into the first user's personal org on first login.
 			const ch = await client.execute('SELECT user_id, org_id, active FROM channels WHERE id = ?', [id]);
@@ -173,10 +176,14 @@ describe('seed-dev multi-channel demo data', () => {
 			// a run decrypting 'seed-not-a-real-token'.
 			expect(ch.rows[0].active, `channel ${id} must be seeded inactive`).toBe(0);
 			for (const table of ['rules', 'comments', 'moderation_actions', 'audit_log']) {
-				expect(await countFor(client, table, id), `${table} rows for ${id}`).toBeGreaterThan(0);
+				expect(await countFor(client, table, id), `${table} rows for ${id}`).toBe(EXPECTED[table]);
 			}
 		}
-		// Comment ids are globally unique across both channels (primary key).
+		// Comment ids are per-channel prefixed and globally unique (primary key).
+		const night = await client.execute("SELECT id FROM comments WHERE channel_id = 'seed-UC-night-shift'");
+		const morning = await client.execute("SELECT id FROM comments WHERE channel_id = 'seed-UC-morning-show'");
+		for (const row of night.rows) expect(row.id).toMatch(/^seed-comment-/);
+		for (const row of morning.rows) expect(row.id).toMatch(/^seed-morning-comment-/);
 		const dupes = await client.execute(
 			'SELECT id FROM comments GROUP BY id HAVING count(*) > 1'
 		);
@@ -209,11 +216,57 @@ describe('seed-dev multi-channel demo data', () => {
 	}, 20000);
 
 	it('refuses to reseed over existing demo rows (run --reset first)', async () => {
+		// Only the SECOND channel exists: the guard must catch it before writing
+		// anything, so seed-UC-night-shift must not be inserted either.
 		const url = `file:${join(tmp, 'reseed.db')}`;
 		await applyMigrations(url);
-		await runSeed(url);
+		const pre = createClient({ url });
+		await pre.execute(
+			"INSERT INTO channels (id, title, refresh_token_enc, active) VALUES ('seed-UC-morning-show', 'M', 'enc', 0)"
+		);
+		pre.close();
 		const second = await runSeed(url);
 		expect(second.code).toBe(1);
 		expect(second.stderr).toMatch(/--reset/);
+		const client = createClient({ url });
+		const night = await client.execute("SELECT count(*) AS n FROM channels WHERE id = 'seed-UC-night-shift'");
+		client.close();
+		expect(night.rows[0].n).toBe(0);
+	}, 20000);
+
+	it('rejects unknown arguments loudly instead of seeding', async () => {
+		const url = `file:${join(tmp, 'args.db')}`;
+		await applyMigrations(url);
+		const { code, stderr } = await runSeed(url, ['--bogus']);
+		expect(code).toBe(1);
+		expect(stderr).toMatch(/usage/i);
+		const client = createClient({ url });
+		const n = await client.execute('SELECT count(*) AS n FROM channels');
+		client.close();
+		expect(n.rows[0].n).toBe(0);
+	}, 20000);
+
+	it('rolls back the whole seed when a later channel fails mid-write', async () => {
+		// A colliding comment id makes the SECOND channel's inserts fail after
+		// the first channel is fully written; the transaction must leave the
+		// database as if the seed never ran.
+		const url = `file:${join(tmp, 'rollback.db')}`;
+		await applyMigrations(url);
+		const pre = createClient({ url });
+		await pre.execute(
+			"INSERT INTO comments (id, channel_id, text, published_at, status, decided_by) VALUES ('seed-morning-comment-05', 'other', 't', '2026-01-01T00:00:00Z', 'pending', 'none')"
+		);
+		pre.close();
+		const { code } = await runSeed(url);
+		expect(code).toBe(1);
+		const client = createClient({ url });
+		for (const id of CHANNEL_IDS) {
+			for (const table of ['channels', 'rules', 'moderation_actions', 'audit_log']) {
+				expect(await countFor(client, table, id), `rolled-back ${table} rows for ${id}`).toBe(0);
+			}
+		}
+		const seeded = await client.execute("SELECT count(*) AS n FROM comments WHERE channel_id != 'other'");
+		client.close();
+		expect(seeded.rows[0].n).toBe(0);
 	}, 20000);
 });

@@ -17,7 +17,7 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { createClient, type Client } from '@libsql/client';
-import { expect, test } from 'vitest';
+import { afterEach, expect, test } from 'vitest';
 
 import { migrationStatements } from './migrationTestUtils';
 
@@ -66,11 +66,18 @@ const SEED = `
 
 async function migratedDb(seedSql: string): Promise<Client> {
 	const client = createClient({ url: ':memory:' });
+	openClients.push(client);
 	await client.execute('PRAGMA foreign_keys = ON');
 	await client.executeMultiple(PRE_0014_DDL + seedSql);
 	for (const statement of statements) await client.execute(statement);
 	return client;
 }
+
+// Every client a test opens is closed, even when an assertion fails mid-test.
+const openClients: Client[] = [];
+afterEach(() => {
+	for (const client of openClients.splice(0)) client.close();
+});
 
 test('migration 0014 adds the history columns and preserves every row', async () => {
 	const client = await migratedDb(SEED);
@@ -139,6 +146,23 @@ test('an in-flight drain is backfilled; live-only channels stay NULL; old column
 			history_next_page_token: null,
 			history_boundary: null
 		}
+	]);
+});
+
+test('a drain row without a scan boundary is NOT backfilled', async () => {
+	// next_page_token set but scan_cursor NULL is not a resumable drain — a
+	// continuation token with no boundary has no defined end state. The
+	// backfill must skip it rather than create history state that future code
+	// cannot resume deterministically.
+	const client = await migratedDb(`
+		INSERT INTO channels (id, user_id, org_id, title, refresh_token_enc, next_page_token, scan_cursor)
+		VALUES ('UCpartial', 'user-1', 'org-1', 'Partial', 'enc-p', 'page-orphan', NULL);
+	`);
+	const { rows } = await client.execute(
+		"SELECT next_page_token, scan_cursor, history_next_page_token, history_boundary FROM channels WHERE id = 'UCpartial'"
+	);
+	expect(rows).toEqual([
+		{ next_page_token: 'page-orphan', scan_cursor: null, history_next_page_token: null, history_boundary: null }
 	]);
 });
 

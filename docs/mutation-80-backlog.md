@@ -59,7 +59,7 @@ fully-ignored landing content modules (`src/lib/landing/legal.ts`,
 |---|---|---|---|---|
 | A | `mt-80-schema` | `src/lib/server/db/schema.ts` | 170+0 | **done — 100%** (137 killed, 33 ignored equivalents) |
 | B | `mt-80-auth` | `google.ts`, auth `login/callback/+server.ts`, auth `callback/+server.ts`, `oauthState.ts`, `channelConnect.ts`, `legal.ts` | 235+34 | **done — 100%** (537 killed + 1 timeout, 0 survived, 0 no-cov; 38 ignored equivalents) |
-| C | `mt-80-moderation` | `pipeline.ts`, `rules.ts`, `youtube.ts`, `moderation.ts`, `tone.ts` | 236+65 | **done — 100%** (see triage log) |
+| C | `mt-80-moderation` | `pipeline.ts`, `rules.ts`, `youtube.ts`, `moderation.ts`, `tone.ts` | 231+86 | **done — 100%** (see triage log) |
 | D | `mt-80-tenancy-routes` | `org.ts`, `deletion.ts`, `session.ts`, `crypto.ts`, `ownership.ts`, `hooks.server.ts`, `db/index.ts`, `db/migrationTestUtils.ts`, dashboard/org/queue/log/rules/consent/connect-channel page servers, `api/cron/+server.ts`, `org/switch/+server.ts`, `invite/[token]/+page.server.ts`, `logout/+page.server.ts`, `(app)/+layout.server.ts` | ~200+50 | pending |
 | E | `mt-80-plumbing` | `http.ts`, `consentText.ts`, `migrationGuard.ts`, `testdb.ts`, `testcookies.ts`, `relative-time.ts`, landing `links.ts`/`json-ld.ts`/`queue-script.ts`, `api/health/+server.ts`, auth `+server.ts` pair, `login/+page.server.ts`, `auto-refresh.svelte.ts` | ~75+45 | pending |
 | Final | `mt-80-final` | full re-baseline, this doc updated, AGENTS.md role section updated | — | pending |
@@ -67,6 +67,13 @@ fully-ignored landing content modules (`src/lib/landing/legal.ts`,
 Batch A alone (schema.ts, 170 valid survivors) is worth ~5 points of overall
 score if killed or excluded with justification. Batches are ordered by
 leverage; each is one PR with a full triage of its survivors.
+
+The `Survivors+NoCov` column for done batches is the fresh per-batch baseline
+measured at batch start, which can differ slightly from the Step-1 planning
+figures (Batch C planned 236+65, measured 231+86): the Step-1 numbers came
+from the repo-wide baseline run, while each batch re-runs its files scoped,
+and ignore/directive changes from earlier batches shift a few mutants between
+categories.
 
 ## Per-file baseline
 
@@ -253,16 +260,20 @@ incremental cache each time):
   the cursor-comparison `→ true` mutant; exactly-50-id batching boundaries.
   4 equivalent exclusions (dead re-validation context, JSON.parse primitive
   `.value`, module-private `init.headers`, `Number.isNaN(null)` agreement).
-- `src/lib/server/moderation.ts` 63.79% → 100% (46 killed). Request-shape
+- `src/lib/server/moderation.ts` 63.79% → 100% (52 killed, 6 ignored). Request-shape
   assertions, `null`/numeric bodies → exact "missing required category
-  scores" message, score boundaries 0 and 1 accepted. 2 exclusion sites
-  (JSON.parse can't produce non-finite numbers — `Number.isFinite` subsumes
-  the `typeof` leg; `>` vs `>=` no-op at `v === max`).
-- `src/lib/server/tone.ts` 76.47% → 100% (40 killed, 2 exclusion sites).
+  scores" message, score boundaries 0 and 1 accepted, JSON-overflow score
+  (`1e999` → Infinity) rejected. 2 exclusion sites (the `typeof`/`isFinite`
+  legs always agree and JSON.parse can only produce ±Infinity, which the
+  range check rejects — the predicate was split so only those equivalents
+  sit on the suppressed line; `>` vs `>=` no-op at `v === max`).
+- `src/lib/server/tone.ts` 76.47% → 100% (47 killed, 5 ignored, 2 exclusion sites).
   Missing-key loud failure, exact URL/method/Content-Type, `choices`
-  structure rejects with the exact I1/I11 error, boundary scores 0/1.
-  Equivalents: empty catch leaves `score` undefined either way; `typeof`
-  leg subsumed by `Number.isFinite` over the JSON.parse domain.
+  structure rejects with the exact I1/I11 error, boundary scores 0/1,
+  JSON-overflow score (`1e999` → Infinity) rejected. Equivalents: empty
+  catch leaves `score` undefined either way; the `typeof`/`isFinite` guard
+  legs always agree over the JSON.parse domain (split out as in
+  moderation.ts).
 
 **Process findings (Batch C):**
 

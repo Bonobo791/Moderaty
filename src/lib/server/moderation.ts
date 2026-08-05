@@ -77,8 +77,11 @@ export async function scoreComment(
 	}
 	const data = response as { results?: Array<{ category_scores?: Record<string, unknown> }> };
 	const cat = data.results?.[0]?.category_scores;
-	// Stryker disable next-line LogicalOperator, ConditionalExpression: scores come from JSON.parse, which cannot yield non-finite numbers, and Number.isFinite already rejects every non-number — the typeof clause and ||/&& choice are unobservable
-	const invalid = (v: unknown) => typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1;
+	const invalid = (v: unknown) => {
+		// Stryker disable next-line LogicalOperator, ConditionalExpression: the &&-variant, typeof→false and isFinite→false are equivalent — for every non-number Number.isFinite(v) is false so the legs agree, and JSON.parse can only produce ±Infinity, which the range check below rejects (the killable typeof→true variant shares the line; directives are line-granular and the valid-score tests pin that behavior)
+		if (typeof v !== 'number' || !Number.isFinite(v)) return true;
+		return v < 0 || v > 1;
+	};
 	if (!cat || MODERATION_CATEGORIES.some((category) => invalid(cat[category]))) {
 		throw new Error('moderation response has missing or out-of-range category scores');
 	}

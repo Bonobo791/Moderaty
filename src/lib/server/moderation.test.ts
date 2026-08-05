@@ -87,6 +87,17 @@ test.each([
 	await expect(scoreComment('comment text')).rejects.toThrow('out-of-range');
 });
 
+test('rejects a category score that JSON overflow parses as Infinity', async () => {
+	const scoresJson = JSON.stringify(mockScores()).replace('"violence":0.55', '"violence":1e999');
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+		new Response(`{"results":[{"category_scores":${scoresJson}}]}`, { status: 200 })
+	));
+
+	await expect(scoreComment('comment text')).rejects.toThrow(
+		'moderation response has missing or out-of-range category scores'
+	);
+});
+
 test('rejects a response missing a required category score', async () => {
 	stubScores({
 		harassment: 0.11,

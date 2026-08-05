@@ -71,6 +71,7 @@ async function fetchComments(...pages: Response[]) {
 
 afterEach(() => {
 	vi.unstubAllGlobals();
+	vi.restoreAllMocks();
 });
 
 test('stops pagination after the third page', async () => {

@@ -85,6 +85,7 @@ test.each([
 	['a string score', chatResponse('{"score": "high"}')],
 	['an above-range score', chatResponse('{"score": 2}')],
 	['a below-range score', chatResponse('{"score": -0.5}')],
+	['a score that JSON overflow parses as Infinity', chatResponse('{"score": 1e999}')],
 	['no choices', new Response(JSON.stringify({ choices: [] }), { status: 200 })]
 ])('rejects a tone response with %s', async (_label, response) => {
 	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response));

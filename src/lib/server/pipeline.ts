@@ -351,7 +351,8 @@ async function decideNewComments(
 		}
 		// Stryker disable next-line ConditionalExpression: equivalent — rejection reasons only ever come from the wrapped Error in the catch above, never a DeadlineExceededError
 		if (result.reason instanceof DeadlineExceededError) throw result.reason;
-		failures.push(result.reason instanceof Error ? result.reason.message : String(result.reason));	}
+		failures.push(result.reason instanceof Error ? result.reason.message : String(result.reason));
+	}
 	return { decisions, failures };
 }
 
@@ -381,7 +382,7 @@ function outstandingAction(action: typeof moderationActions.$inferSelect): Outst
 }
 
 async function markDispatched(actions: OutstandingAction[]) {
-	// Stryker disable next-line ConditionalExpression: equivalent — both callers pass a non-empty array (applyModerationAction batches of ≥1, the delete loop a single action); the true-variant stays pinned by the lastAttemptAt assertion in the delete end-to-end test
+	// Stryker disable next-line ConditionalExpression: equivalent — both callers pass a non-empty array (applyModerationAction batches of ≥1, the delete loop a single action), so the empty-array branch is unreachable
 	if (!actions.length) return;
 	await db
 		.update(moderationActions)

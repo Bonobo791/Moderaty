@@ -1129,7 +1129,10 @@ test.each([
 	{ action: 'hold', observed: 'heldForReview', completed: true },
 	{ action: 'hold', observed: 'published', completed: false },
 	{ action: 'reject', observed: 'rejected', completed: true },
-	{ action: 'reject', observed: null, completed: false }
+	{ action: 'reject', observed: null, completed: false },
+	{ action: 'ban', observed: 'rejected', completed: true },
+	{ action: 'ban', observed: null, completed: true },
+	{ action: 'ban', observed: 'published', completed: false }
 ])('verifies a dispatched $action action (observed: $observed, completed: $completed)', async ({ action, observed, completed }) => {
 	mocks.state.existingIds = ['comment'];
 	mocks.state.moderationActions = [dispatchedAction({ action })];
@@ -1147,7 +1150,7 @@ test.each([
 		expect(mocks.setModerationStatus).toHaveBeenCalledWith(
 			['comment'],
 			action === 'hold' ? 'heldForReview' : 'rejected',
-			false,
+			action === 'ban',
 			'access-token',
 			undefined
 		);
@@ -1196,7 +1199,6 @@ test('fetches comments with the stored cursor, page token, and paging options', 
 });
 
 test('a dry run counts only enforceable decisions as acted', async () => {
-	process.env.DRY_RUN = 'true';
 	mocks.state.env.DRY_RUN = 'true';
 	mocks.scoreComment.mockResolvedValue(moderation(0.34));
 
@@ -1208,7 +1210,6 @@ test('a dry run counts only enforceable decisions as acted', async () => {
 });
 
 test('a dry run with no new comments writes nothing at all', async () => {
-	process.env.DRY_RUN = 'true';
 	mocks.state.env.DRY_RUN = 'true';
 	mocks.fetchNewComments.mockResolvedValue({ comments: [], nextPageToken: null, reachedCursor: true });
 
@@ -1308,7 +1309,6 @@ test.each([
 ])('a dry run still writes the audit row for an ai $audit decision', async ({ score }) => {
 	// The dry-run audit covers every decision, including the ones that carry a
 	// YouTube action — the auditAction field is what keeps the row in the set.
-	process.env.DRY_RUN = 'true';
 	mocks.state.env.DRY_RUN = 'true';
 	mocks.scoreComment.mockResolvedValue(moderation(score));
 

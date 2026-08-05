@@ -16,10 +16,9 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { createClient, type Client } from '@libsql/client';
 import { afterEach, expect, test } from 'vitest';
 
-import { migrationStatements } from './migrationTestUtils';
+import { applyMigration, closeMigratedDbs, expectTenancyContract } from './migrationTestUtils';
 
 // Behavior test for migration 0014 (issue #70: live-first scanning during
 // long history drains). Expand-only (I7): two nullable columns on channels
@@ -30,7 +29,7 @@ import { migrationStatements } from './migrationTestUtils';
 // have its continuation state BACKFILLED into the new columns so it keeps
 // walking from where it was; the old columns stay untouched (the backend
 // switches reads over separately).
-const statements = migrationStatements('0014_channels_history_state.sql');
+const MIGRATION = '0014_channels_history_state.sql';
 
 // The pre-0014 channels table: final 0013 shape (tenancy contract live).
 const PRE_0014_DDL = `
@@ -64,23 +63,10 @@ const SEED = `
 	VALUES ('UClive', 'user-1', 'org-1', 'LiveOnly', 'enc-l', 'cur-l', NULL, NULL, 'run-l', NULL, 0, NULL, '2026-01-02T00:00:00.000Z');
 `;
 
-async function migratedDb(seedSql: string): Promise<Client> {
-	const client = createClient({ url: ':memory:' });
-	openClients.push(client);
-	await client.execute('PRAGMA foreign_keys = ON');
-	await client.executeMultiple(PRE_0014_DDL + seedSql);
-	for (const statement of statements) await client.execute(statement);
-	return client;
-}
-
-// Every client a test opens is closed, even when an assertion fails mid-test.
-const openClients: Client[] = [];
-afterEach(() => {
-	for (const client of openClients.splice(0)) client.close();
-});
+afterEach(closeMigratedDbs);
 
 test('migration 0014 adds the history columns and preserves every row', async () => {
-	const client = await migratedDb(SEED);
+	const client = await applyMigration(PRE_0014_DDL, MIGRATION, SEED);
 	const cols = await client.execute('PRAGMA table_info(channels)');
 	expect(cols.rows.map((row) => row.name)).toEqual([
 		'id',
@@ -127,7 +113,7 @@ test('migration 0014 adds the history columns and preserves every row', async ()
 });
 
 test('an in-flight drain is backfilled; live-only channels stay NULL; old columns untouched', async () => {
-	const client = await migratedDb(SEED);
+	const client = await applyMigration(PRE_0014_DDL, MIGRATION, SEED);
 	const { rows } = await client.execute(
 		'SELECT id, next_page_token, scan_cursor, history_next_page_token, history_boundary FROM channels ORDER BY id'
 	);
@@ -154,10 +140,14 @@ test('a drain row without a scan boundary is NOT backfilled', async () => {
 	// continuation token with no boundary has no defined end state. The
 	// backfill must skip it rather than create history state that future code
 	// cannot resume deterministically.
-	const client = await migratedDb(`
+	const client = await applyMigration(
+		PRE_0014_DDL,
+		MIGRATION,
+		`
 		INSERT INTO channels (id, user_id, org_id, title, refresh_token_enc, next_page_token, scan_cursor)
 		VALUES ('UCpartial', 'user-1', 'org-1', 'Partial', 'enc-p', 'page-orphan', NULL);
-	`);
+	`
+	);
 	const { rows } = await client.execute(
 		"SELECT next_page_token, scan_cursor, history_next_page_token, history_boundary FROM channels WHERE id = 'UCpartial'"
 	);
@@ -167,10 +157,8 @@ test('a drain row without a scan boundary is NOT backfilled', async () => {
 });
 
 test('the tenancy contract still bites after 0014', async () => {
-	const client = await migratedDb(SEED);
-	await expect(
-		client.execute("INSERT INTO channels (id, user_id, title, refresh_token_enc) VALUES ('UCbad', 'user-1', 'Bad', 'enc-b')")
-	).rejects.toThrow(/channels_org_requires_owner/);
+	const client = await applyMigration(PRE_0014_DDL, MIGRATION, SEED);
+	await expectTenancyContract(client);
 	// And the new columns accept writes on both legal shapes.
 	await client.execute(
 		"INSERT INTO channels (id, user_id, org_id, title, refresh_token_enc, history_boundary) VALUES ('UCnew', 'user-1', 'org-1', 'New', 'enc-n', '2026-08-01T00:00:00.000Z')"

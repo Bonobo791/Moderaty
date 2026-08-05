@@ -62,6 +62,70 @@ test('expires sessions lazily: an expired token resolves null and its row is del
 	expect(await testDb().db.select().from(sessions).all()).toEqual([]);
 });
 
+test('a session with an unreadable expiry is treated as expired, not valid forever', async () => {
+	// Mutation audit: without the Number.isNaN guard, NaN comparisons (always
+	// false) let a corrupt-expiry session resolve as valid, never renewed,
+	// never purged — fail-open on data corruption.
+	const userId = await seedUser();
+	await testDb().db.insert(sessions).values({ id: 'corrupt-token', userId, expiresAt: 'not-a-date' });
+
+	expect(await getSessionUser('corrupt-token')).toBeNull();
+	expect(await testDb().db.select().from(sessions).all()).toEqual([]);
+});
+
+test('sliding renewal updates only the resolving session, never another user\'s', async () => {
+	// Mutation audit: dropping the WHERE from the renewal UPDATE stayed green
+	// because every test seeds exactly one session row — unscoped, one user's
+	// renewal would slide EVERY session's expiry (cross-tenant).
+	const userId = await seedUser();
+	await seedUser('user-2');
+	const soonExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(); // in the renewal window
+	const bystanderExpiry = new Date(Date.now() + 20 * 24 * 60 * 60 * 1000).toISOString(); // outside it
+	await testDb().db.insert(sessions).values({ id: 'aging-token', userId, expiresAt: soonExpiry });
+	await testDb().db.insert(sessions).values({
+		id: 'bystander-token',
+		userId: 'user-2',
+		expiresAt: bystanderExpiry,
+		activeOrgId: 'org-user-2'
+	});
+
+	const result = await getSessionUser('aging-token');
+	expect(result?.renewed).toBe(true);
+
+	const bystander = await testDb().db.select().from(sessions).where(eq(sessions.id, 'bystander-token')).get();
+	expect(bystander).toMatchObject({ expiresAt: bystanderExpiry, activeOrgId: 'org-user-2' });
+});
+
+test('org repair updates only the resolving session, never another user\'s', async () => {
+	// Same mutant class as the renewal test, on the org-repair UPDATE: one
+	// user's fallback repair must not rewrite every session's active org.
+	const userId = await seedUser();
+	await seedUser('user-2');
+	await testDb().db.insert(organizations).values({ id: 'org-newer', name: 'Newer Team' });
+	await testDb().db.insert(memberships).values({
+		userId,
+		orgId: 'org-newer',
+		role: 'member',
+		createdAt: new Date(Date.now() + 60_000).toISOString()
+	});
+	const { token } = await createSession(userId, undefined, 'org-newer');
+	// The user leaves the session's active org, forcing the repair path.
+	await testDb().db.delete(memberships).where(eq(memberships.orgId, 'org-newer'));
+	const bystanderExpiry = new Date(Date.now() + 20 * 24 * 60 * 60 * 1000).toISOString();
+	await testDb().db.insert(sessions).values({
+		id: 'bystander-token',
+		userId: 'user-2',
+		expiresAt: bystanderExpiry,
+		activeOrgId: 'org-user-2'
+	});
+
+	const result = await getSessionUser(token);
+	expect(result?.user.orgId).toBe('org-user-1');
+
+	const bystander = await testDb().db.select().from(sessions).where(eq(sessions.id, 'bystander-token')).get();
+	expect(bystander).toMatchObject({ expiresAt: bystanderExpiry, activeOrgId: 'org-user-2' });
+});
+
 test('renews a session sliding into its last 15 days', async () => {
 	const userId = await seedUser();
 	const soonExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(); // 1 day left

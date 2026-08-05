@@ -21,7 +21,8 @@ import { error } from '@sveltejs/kit';
 
 const mocks = vi.hoisted(() => ({
 	getSessionUser: vi.fn(),
-	assertMigrationsCurrent: vi.fn()
+	assertMigrationsCurrent: vi.fn(),
+	cookieSecure: vi.fn(() => false)
 }));
 
 vi.mock('$lib/server/session', () => ({
@@ -30,7 +31,7 @@ vi.mock('$lib/server/session', () => ({
 }));
 
 vi.mock('$lib/server/oauthState', () => ({
-	cookieSecure: () => false
+	cookieSecure: mocks.cookieSecure
 }));
 
 vi.mock('$lib/server/migrationGuard', () => ({
@@ -42,6 +43,7 @@ import { handle } from './hooks.server';
 beforeEach(() => {
 	mocks.getSessionUser.mockReset();
 	mocks.assertMigrationsCurrent.mockReset().mockResolvedValue(undefined);
+	mocks.cookieSecure.mockReset().mockReturnValue(false);
 });
 
 function makeEvent() {
@@ -79,6 +81,33 @@ test('a resolved session user populates locals.user', async () => {
 	await handle({ event, resolve } as never);
 
 	expect(event.locals.user).toMatchObject({ id: 'user-1' });
+});
+
+test('a renewed session refreshes the cookie with the new expiry and security attributes', async () => {
+	// Mutation audit: deleting the whole renewal branch stayed green — renewed
+	// in the DB but stale in the browser logs active users out at the original
+	// expiry. Attribute flips (httpOnly/sameSite) were equally invisible, and
+	// hard-coding `secure` instead of calling cookieSecure() passed too — so
+	// the test also asserts the helper is consulted.
+	mocks.cookieSecure.mockReturnValue(true);
+	mocks.getSessionUser.mockResolvedValue({
+		user: { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' },
+		renewed: true,
+		expiresAt: '2026-09-01T00:00:00.000Z'
+	});
+	const event = makeEvent();
+	const resolve = vi.fn(async () => new Response('ok'));
+
+	await handle({ event, resolve } as never);
+
+	expect(mocks.cookieSecure).toHaveBeenCalled();
+	expect(event.cookies.set).toHaveBeenCalledWith('moderaty_session', 'session-token', {
+		path: '/',
+		httpOnly: true,
+		sameSite: 'lax',
+		secure: true,
+		expires: new Date('2026-09-01T00:00:00.000Z')
+	});
 });
 
 test('a database behind the code fails the request with the guard 503 before any session work', async () => {

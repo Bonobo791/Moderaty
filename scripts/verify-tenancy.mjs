@@ -60,7 +60,14 @@ const rows = async (sql) => (await client.execute(sql)).rows;
 async function expectZero(label, countSql, detailSql) {
 	try {
 		const n = await scalar(countSql);
-		report(label, n === 0, JSON.stringify(await rows(detailSql)));
+		// Detail rows only exist to diagnose a violation — never scan them on a
+		// healthy database, and bound the blob when one fires.
+		if (n === 0) {
+			report(label, true);
+			return;
+		}
+		const sample = await rows(`SELECT * FROM (${detailSql}) LIMIT 50`);
+		report(label, false, `${n} row(s), e.g. ${JSON.stringify(sample)}`);
 	} catch (error) {
 		report(label, false, fail(error));
 	}

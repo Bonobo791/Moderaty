@@ -92,27 +92,27 @@ never leaks existence.
 ## Edge notes (not breaches — documented for the record)
 
 1. **Id-only release/commit UPDATEs** (`queue/+page.server.ts:70`,
-   `log/+page.server.ts:109-112,:136`): the WHERE is `comments.id` only, but
-   each is reachable solely after a channel-scoped claim or pair-verifying
-   select succeeded *in the same action invocation*. A second tenant's
-   comment id fails the claim first (its `channelId` doesn't match) and 404s.
-   Pinned by `queue/actions.test.ts:117` and `log/actions.test.ts:175`.
+	`log/+page.server.ts:109-112,:136`): the WHERE is `comments.id` only, but
+	each is reachable solely after a channel-scoped claim or pair-verifying
+	select succeeded *in the same action invocation*. A second tenant's
+	comment id fails the claim first (its `channelId` doesn't match) and 404s.
+	Pinned by `queue/actions.test.ts:117` and `log/actions.test.ts:175`.
 2. **Shared YouTube channel across two Moderaty accounts**: if two tenants
-   connect the SAME YouTube channel, the first run's stored comment ids
-   dedupe-skip the second account's fetch (functional, not a leak — no data
-   crosses; both parties own the underlying channel).
+	connect the SAME YouTube channel, the first run's stored comment ids
+	dedupe-skip the second account's fetch (functional, not a leak — no data
+	crosses; both parties own the underlying channel).
 3. **`org.ts:379` removeMember delete** has no `.returning` — a concurrent
-   membership change is a silent no-op, not a tenant issue.
+	membership change is a silent no-op, not a tenant issue.
 4. **`org.ts:194` revokeInvite** deletes by token alone; authorization is the
-   preceding `membershipOf`+`requireRole` on the looked-up invite's org. A
-   revoke is idempotent, so check-then-act skew is harmless.
+	preceding `membershipOf`+`requireRole` on the looked-up invite's org. A
+	revoke is idempotent, so check-then-act skew is harmless.
 
 ## Runtime invariants added to `scripts/verify-tenancy.mjs`
 
 1. Zero sessions whose `active_org_id` is not an org the session's user
-   belongs to (cross-tenant session state).
+	belongs to (cross-tenant session state).
 2. Zero `comments` / `moderation_actions` / `audit_log` / `rules` rows whose
-   `channel_id` has no parent in `channels` (orphans from a scoping bug).
+	`channel_id` has no parent in `channels` (orphans from a scoping bug).
 3. Zero channels whose `org_id` has zero memberships (unreachable channel).
 
 Runbook: `node --env-file=.env scripts/verify-tenancy.mjs` (dev by default;
@@ -122,7 +122,7 @@ lines on any violation. READ-ONLY, as before.
 ## Recommendations (handoffs, NOT implemented here)
 
 - **DB agent**: consider a real FK `comments.channel_id → channels.id` (and
-  the same for `moderation_actions`/`audit_log`/`rules`) so Layer-3 orphans
-  become impossible structurally instead of probe-detected.
+	the same for `moderation_actions`/`audit_log`/`rules`) so Layer-3 orphans
+	become impossible structurally instead of probe-detected.
 - **Maintainer**: wiring `verify-tenancy.mjs` into CI or a scheduled run is
-  a separate decision; the probe is ready for it.
+	a separate decision; the probe is ready for it.

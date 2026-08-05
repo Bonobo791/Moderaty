@@ -42,12 +42,18 @@ test('a database failure answers 503 with a generic body and logs the real error
 	const originalExecute = client.execute.bind(client);
 	client.execute = (() => Promise.reject(new Error('hrana 502: connect to upstream failed'))) as never;
 	try {
-		await expect(GET({} as never)).rejects.toMatchObject({ status: 503 });
+		await expect(GET({} as never)).rejects.toMatchObject({
+			status: 503,
+			body: { message: 'the service is temporarily unavailable — please retry shortly' }
+		});
 	} finally {
 		client.execute = originalExecute;
 	}
 
-	expect(console.error).toHaveBeenCalled();
+	expect(console.error).toHaveBeenCalledWith(
+		'health check database query failed:',
+		expect.any(Error)
+	);
 	// Drizzle wraps driver errors; the real outage detail rides the cause chain.
 	const loggedError = vi.mocked(console.error).mock.calls[0][1] as Error;
 	expect(loggedError).toBeInstanceOf(Error);

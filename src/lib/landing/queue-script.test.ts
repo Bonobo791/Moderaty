@@ -77,6 +77,10 @@ describe('Bonk Queue counter logic', () => {
 		expect(new Set(state.rows.map((r) => r.key)).size).toBe(4);
 	});
 
+	it('the script is exactly the 8-entry illustrative night (slice(-4) tail equivalence holds)', () => {
+		expect(SCRIPT).toHaveLength(8);
+	});
+
 	it('the script never ships an empty queue or an unstyled verdict', () => {
 		expect(SCRIPT.length).toBeGreaterThanOrEqual(4);
 		for (const item of SCRIPT) {

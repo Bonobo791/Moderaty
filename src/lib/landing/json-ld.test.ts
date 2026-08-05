@@ -31,6 +31,14 @@ describe('jsonLd script-tag safety', () => {
 		expect(out).not.toContain('<!--');
 	});
 
+	it('escapes every "<" as the six characters \\u003c, preserving the data', () => {
+		const out = jsonLd({ name: 'a<b<c' });
+		expect(out).toContain('a\\u003cb\\u003cc');
+		expect(out).not.toContain('a<b<c');
+		const json = out.slice('<script type="application/ld+json">'.length, -'</'.length - 'script>'.length);
+		expect(JSON.parse(json)).toEqual({ name: 'a<b<c' });
+	});
+
 	it('still emits valid JSON inside one script block', () => {
 		const out = jsonLd({ '@type': 'Thing', name: 'Moderaty' });
 		expect(out.startsWith('<script type="application/ld+json">')).toBe(true);

@@ -18,15 +18,15 @@
 
 import { expect, test } from 'vitest';
 
-import { invites, memberships, organizations } from './db/schema';
-import { seedUser, setupTestDb, testDb } from './testdb';
+import { consents, invites, memberships, organizations } from './db/schema';
+import { seedConsent, seedUser, setupTestDb, testDb } from './testdb';
 
 // Harness self-test (PR #48 review): schema.ts exports the tenant tables from
 // Phase A, so createTestDb's hand-written DDL must create them too — every
 // Phase B+ fixture seeds orgs/memberships through this helper. Guards the
 // table presence AND the constraints the app relies on (personal_for UNIQUE,
 // memberships composite PK).
-setupTestDb(['invites', 'memberships', 'organizations', 'users']);
+setupTestDb(['consents', 'invites', 'memberships', 'organizations', 'users']);
 
 test('createTestDb creates the tenant tables', async () => {
 	const tables = await testDb().client.execute(
@@ -72,4 +72,32 @@ test('personal_for UNIQUE and memberships composite PK are enforced', async () =
 	await expect(
 		testDb().db.insert(memberships).values({ userId: 'user-1', orgId: 'org-1', role: 'member' })
 	).rejects.toThrow();
+});
+
+// seedConsent must seed the evidentiary defaults a consent row carries — the
+// exact checkbox text, IP, and user agent are the audit evidence, and the
+// doc version default tracks LEGAL_VERSION-era fixtures.
+test('seedConsent seeds the evidentiary defaults', async () => {
+	await seedUser('user-1');
+	await seedConsent('user-1');
+	const rows = await testDb().db.select().from(consents).all();
+	expect(rows).toMatchObject([
+		{
+			userId: 'user-1',
+			email: 'user-1@example.com',
+			docVersion: 'v1.2',
+			checkboxText: 'I agree',
+			ip: '127.0.0.1',
+			userAgent: 'test',
+			marketingOptIn: 0
+		}
+	]);
+	expect(rows[0].createdAt).toEqual(expect.any(String));
+});
+
+test('seedConsent honors an explicit createdAt and docVersion override', async () => {
+	await seedUser('user-1');
+	await seedConsent('user-1', '2020-01-01T00:00:00.000Z', 'v1.1');
+	const rows = await testDb().db.select().from(consents).all();
+	expect(rows).toMatchObject([{ createdAt: '2020-01-01T00:00:00.000Z', docVersion: 'v1.1' }]);
 });

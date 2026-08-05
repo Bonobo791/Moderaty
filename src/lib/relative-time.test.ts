@@ -34,6 +34,13 @@ describe('relativeTime', () => {
 		expect(relativeTime('2021-07-30T12:00:00Z', NOW)).toBe('5 years ago');
 	});
 
+	it('places exact bucket boundaries in the next bucket up', () => {
+		// diff === HOUR must render hours, not "60 minutes"
+		expect(relativeTime('2026-07-30T11:00:00Z', NOW)).toBe('1 hour ago');
+		// diff === WEEK must render weeks, not "7 days"
+		expect(relativeTime('2026-07-23T12:00:00Z', NOW)).toBe('1 week ago');
+	});
+
 	it('returns unparseable input unchanged instead of crashing', () => {
 		expect(relativeTime('not-a-date', NOW)).toBe('not-a-date');
 	});

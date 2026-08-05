@@ -103,6 +103,8 @@ test('login start sets an HttpOnly oauth_state cookie and redirects with identit
 	const url = new URL(location);
 	const stateCall = cookies.setCalls.find((c) => c.name === 'oauth_state');
 	expect(url.origin + url.pathname).toBe('https://accounts.google.com/o/oauth2/v2/auth');
+	expect(url.searchParams.get('client_id')).toBe('client-id');
+	expect(url.searchParams.get('response_type')).toBe('code');
 	expect(url.searchParams.get('scope')).toBe('openid email profile');
 	expect(url.searchParams.get('redirect_uri')).toBe('http://localhost:5173/api/auth/google/login/callback');
 	expect(url.searchParams.get('state')).toBe(JSON.parse(stateCall!.value)[0]);
@@ -113,10 +115,21 @@ test('login start fails loudly with 500 when GOOGLE_CLIENT_ID is not configured'
 	mocks.env.GOOGLE_CLIENT_ID = undefined;
 	try {
 		expect(() => startLogin({ cookies: makeCookies() } as never)).toThrow(
-			expect.objectContaining({ status: 500 })
+			expect.objectContaining({ status: 500, body: { message: 'GOOGLE_CLIENT_ID is not configured' } })
 		);
 	} finally {
 		mocks.env.GOOGLE_CLIENT_ID = 'client-id';
+	}
+});
+
+test('login start fails loudly with 500 when APP_URL is not configured', () => {
+	mocks.env.APP_URL = undefined;
+	try {
+		expect(() => startLogin({ cookies: makeCookies() } as never)).toThrow(
+			expect.objectContaining({ status: 500, body: { message: 'APP_URL is not configured' } })
+		);
+	} finally {
+		mocks.env.APP_URL = 'http://localhost:5173';
 	}
 });
 

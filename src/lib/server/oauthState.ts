@@ -46,9 +46,11 @@ export function cookieSecure(): boolean {
  */
 export function readPendingStates(cookies: Cookies): string[] {
 	const raw = cookies.get(OAUTH_STATE_COOKIE);
+	// Stryker disable next-line ConditionalExpression: equivalent — a falsy cookie value falls through to JSON.parse(raw), which throws and is caught, returning [] identically
 	if (!raw) return [];
 	try {
 		const parsed: unknown = JSON.parse(raw);
+		// Stryker disable next-line ConditionalExpression: equivalent — JSON.parse output that is not an array has no callable .filter, so the TypeError is caught and returns [] identically
 		if (!Array.isArray(parsed)) return [];
 		return parsed.filter((s): s is string => typeof s === 'string');
 	} catch {

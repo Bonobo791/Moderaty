@@ -173,6 +173,7 @@ describe('organizations', () => {
 			name: { notNull: true },
 			plan: { notNull: true, hasDefault: true },
 			personal_for: { notNull: false },
+			openai_key_enc: { notNull: false },
 			created_at: { notNull: true, hasDefault: true }
 		});
 		expectCreatedAtDefault(organizations);

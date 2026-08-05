@@ -46,6 +46,7 @@ const OWNER = TEST_OWNER;
 
 afterEach(() => {
 	vi.unstubAllGlobals();
+	vi.restoreAllMocks();
 });
 
 function stubTokenAndChannel() {
@@ -92,7 +93,16 @@ async function captureCallback(user: SessionUser | null = OWNER, cookies = makeC
 		} as never);
 		return { thrown: undefined, cookies };
 	} catch (e) {
-		return { thrown: e as { status: number; location?: string }, cookies };
+		return { thrown: e as { status: number; location?: string; body?: { message: string } }, cookies };
+	}
+}
+
+async function captureCallbackWithUrl(url: URL, cookies = makeCookiesWithState('s')) {
+	try {
+		await authCallback({ url, cookies, locals: { user: OWNER } } as never);
+		return { thrown: undefined as undefined | { status: number; location?: string; body?: { message: string } }, cookies };
+	} catch (e) {
+		return { thrown: e as { status: number; location?: string; body?: { message: string } }, cookies };
 	}
 }
 
@@ -159,6 +169,7 @@ test('a channel owned by another team stays unchanged and yields 409', async () 
 	const { thrown } = await captureCallback();
 
 	expect(thrown?.status).toBe(409);
+	expect(thrown?.body?.message).toBe('this channel is connected to a different Moderaty team');
 	const row = await testDb().db.select().from(channels).get();
 	expect(row).toMatchObject({ id: 'UC123', userId: 'user-2', orgId: 'org-2', title: 'Not yours', refreshTokenEnc: 'foreign-enc' });
 });
@@ -235,4 +246,253 @@ test('a malformed channel item is skipped and the single valid channel short-cir
 	// No picker was parked for the single-channel path.
 	expect(readPendingChannelPick(cookies as never, 's')).toBeNull();
 	errSpy.mockRestore();
+});
+
+test('the token exchange uses this flow\'s redirect URI and the channels listing asks for the caller\'s channels', async () => {
+	const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	const calls: Array<{ url: string; init?: RequestInit }> = [];
+	vi.stubGlobal(
+		'fetch',
+		vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = String(input);
+			calls.push({ url, init });
+			if (url === 'https://oauth2.googleapis.com/token') {
+				return new Response(JSON.stringify({ access_token: 'a', refresh_token: 'refresh-token' }), { status: 200 });
+			}
+			if (url.startsWith('https://www.googleapis.com/youtube/v3/channels')) {
+				return new Response(JSON.stringify({ items: [{ id: 'UC123', snippet: { title: 'My Channel' } }] }), {
+					status: 200
+				});
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		})
+	);
+
+	const { thrown } = await captureCallback();
+
+	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
+
+	// The redirect URI must be THIS flow's callback — a wrong path breaks the
+	// exchange against Google's registered-URI check.
+	const tokenCall = calls.find((c) => c.url === 'https://oauth2.googleapis.com/token');
+	const tokenBody = new URLSearchParams(String(tokenCall?.init?.body));
+	expect(tokenBody.get('redirect_uri')).toBe('http://localhost:5173/api/auth/google/callback');
+
+	// The listing must request the caller's own channels, 50 per page, snippet
+	// part, authorized with the fresh access token.
+	const channelCall = calls.find((c) => c.url.startsWith('https://www.googleapis.com/youtube/v3/channels'));
+	const channelUrl = new URL(channelCall?.url ?? '');
+	expect(channelUrl.searchParams.get('part')).toBe('snippet');
+	expect(channelUrl.searchParams.get('mine')).toBe('true');
+	expect(channelUrl.searchParams.get('maxResults')).toBe('50');
+	expect(channelUrl.searchParams.get('pageToken')).toBeNull();
+	expect((channelCall?.init?.headers as Record<string, string>).Authorization).toBe('Bearer a');
+
+	// Zero malformed items → zero skip logging.
+	expect(errSpy.mock.calls.flat().join(' ')).not.toMatch(/skipped/);
+});
+
+test('a non-OK channels status fails loudly with the lookup-failed message', async () => {
+	const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	stubTokenAndChannels(() => new Response('quota exceeded', { status: 403 }));
+
+	const { thrown } = await captureCallback();
+
+	expect(thrown?.status).toBe(502);
+	expect(thrown?.body?.message).toBe('YouTube channel lookup failed — please retry');
+	expect(errSpy.mock.calls.flat().join(' ')).toMatch(/youtube channels lookup failed: 403/);
+});
+
+test('an invalid-JSON channels body fails loudly as an invalid YouTube response', async () => {
+	const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	stubTokenAndChannels(() => new Response('this is not json', { status: 200 }));
+
+	const { thrown } = await captureCallback();
+
+	expect(thrown?.status).toBe(502);
+	expect(thrown?.body?.message).toBe('invalid response from YouTube — please retry');
+	expect(errSpy.mock.calls.flat().join(' ')).toMatch(/youtube channels lookup returned invalid JSON: 200/);
+});
+
+test('a non-object channels body fails loudly as an invalid YouTube response', async () => {
+	const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	stubTokenAndChannels(() => new Response('null', { status: 200 }));
+
+	const { thrown } = await captureCallback();
+
+	expect(thrown?.status).toBe(502);
+	expect(thrown?.body?.message).toBe('invalid response from YouTube — please retry');
+	expect(errSpy.mock.calls.flat().join(' ')).toMatch(/youtube channels lookup returned a non-object body: 200/);
+});
+
+test('a channels body without an items array is an empty account — 400, nothing logged, nothing written', async () => {
+	const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	stubTokenAndChannels(() => new Response(JSON.stringify({}), { status: 200 }));
+
+	const { thrown } = await captureCallback();
+
+	expect(thrown?.status).toBe(400);
+	expect(thrown?.body?.message).toBe('no YouTube channel found for this Google account');
+	// A missing items array is NOT a malformed item — nothing is skipped.
+	expect(errSpy).not.toHaveBeenCalled();
+	expect(await testDb().db.select().from(channels).all()).toHaveLength(0);
+});
+
+test('a channel without a snippet title is stored as Untitled channel', async () => {
+	vi.spyOn(console, 'error').mockImplementation(() => {});
+	stubTokenAndChannels(
+		() => new Response(JSON.stringify({ items: [{ id: 'UC123' }] }), { status: 200 })
+	);
+
+	const { thrown } = await captureCallback();
+
+	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
+	const row = await testDb().db.select().from(channels).get();
+	expect(row).toMatchObject({ id: 'UC123', title: 'Untitled channel' });
+});
+
+test('a null channel item is skipped without crashing the walk', async () => {
+	const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	stubTokenAndChannels(
+		() =>
+			new Response(JSON.stringify({ items: [null, { id: 'UC9', snippet: { title: 'Valid' } }] }), { status: 200 })
+	);
+
+	const { thrown } = await captureCallback();
+
+	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
+	const row = await testDb().db.select().from(channels).get();
+	expect(row).toMatchObject({ id: 'UC9', title: 'Valid' });
+	expect(errSpy.mock.calls.flat().join(' ')).toMatch(/skipped 1 malformed/);
+});
+
+test('a non-string nextPageToken stops the listing walk instead of being followed', async () => {
+	vi.spyOn(console, 'error').mockImplementation(() => {});
+	let channelFetches = 0;
+	stubTokenAndChannels((url) => {
+		channelFetches++;
+		if (!url.searchParams.get('pageToken')) {
+			// I2: a wrong-typed page token is invalid data — never followed.
+			return new Response(
+				JSON.stringify({ items: [{ id: 'UC1', snippet: { title: 'One' } }], nextPageToken: 123 }),
+				{ status: 200 }
+			);
+		}
+		return new Response(JSON.stringify({ items: [{ id: 'UC2', snippet: { title: 'Two' } }] }), { status: 200 });
+	});
+
+	const { thrown } = await captureCallback();
+
+	expect(channelFetches).toBe(1);
+	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
+	const row = await testDb().db.select().from(channels).get();
+	expect(row).toMatchObject({ id: 'UC1', title: 'One' });
+});
+
+test('a pathological pageToken loop stops at the page bound and logs the truncation', async () => {
+	const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	let channelFetches = 0;
+	stubTokenAndChannels(() => {
+		channelFetches++;
+		return new Response(
+			JSON.stringify({ items: [{ id: 'UC1', snippet: { title: 'One' } }], nextPageToken: 'more' }),
+			{ status: 200 }
+		);
+	});
+	const cookies = makeCookiesWithState('s');
+
+	const { thrown } = await captureCallback(OWNER, cookies);
+
+	expect(channelFetches).toBe(10);
+	expect(errSpy.mock.calls.flat().join(' ')).toMatch(/hit the 10-page bound/);
+	expect(thrown).toMatchObject({ status: 302, location: '/connect-channel?state=s' });
+	expect(readPendingChannelPick(cookies as never, 's')?.channels).toHaveLength(10);
+});
+
+test('bad state and missing code reject with descriptive 400 messages', async () => {
+	const cookies = makeCookiesWithState('s');
+
+	const missingState = await captureCallbackWithUrl(
+		new URL('http://localhost:5173/api/auth/google/callback?code=abc'),
+		cookies
+	);
+	expect(missingState.thrown?.status).toBe(400);
+	expect(missingState.thrown?.body?.message).toBe('bad state');
+
+	const forgedState = await captureCallbackWithUrl(
+		new URL('http://localhost:5173/api/auth/google/callback?code=abc&state=forged'),
+		cookies
+	);
+	expect(forgedState.thrown?.status).toBe(400);
+	expect(forgedState.thrown?.body?.message).toBe('bad state');
+
+	const missingCode = await captureCallbackWithUrl(
+		new URL('http://localhost:5173/api/auth/google/callback?state=s'),
+		cookies
+	);
+	expect(missingCode.thrown?.status).toBe(400);
+	expect(missingCode.thrown?.body?.message).toBe('missing code');
+});
+
+test('a failed token exchange surfaces the flow-specific message and log prefix', async () => {
+	const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	vi.stubGlobal(
+		'fetch',
+		vi.fn(
+			async () =>
+				new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'code was already redeemed' }), {
+					status: 400
+				})
+		)
+	);
+
+	const { thrown } = await captureCallback();
+
+	expect(thrown?.status).toBe(502);
+	expect(thrown?.body?.message).toBe('Google token exchange failed — please retry');
+	expect(errSpy.mock.calls.flat().join(' ')).toMatch(/google token exchange failed: 400 invalid_grant: code was already redeemed/);
+});
+
+test('a token exchange without a refresh token rejects before any channels lookup', async () => {
+	vi.spyOn(console, 'error').mockImplementation(() => {});
+	let channelFetches = 0;
+	vi.stubGlobal(
+		'fetch',
+		vi.fn(async (input: RequestInfo | URL) => {
+			const url = String(input);
+			if (url === 'https://oauth2.googleapis.com/token') {
+				// Re-consent case: Google answers 200 without a refresh_token.
+				return new Response(JSON.stringify({ access_token: 'a' }), { status: 200 });
+			}
+			if (url.startsWith('https://www.googleapis.com/youtube/v3/channels')) {
+				channelFetches++;
+				return new Response(JSON.stringify({ items: [{ id: 'UC1', snippet: { title: 'One' } }] }), {
+					status: 200
+				});
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		})
+	);
+
+	const { thrown } = await captureCallback();
+
+	expect(thrown?.status).toBe(400);
+	expect(thrown?.body?.message).toMatch(/^token exchange returned no refresh_token/);
+	// The flow must stop here — no lookup, no write with a missing token.
+	expect(channelFetches).toBe(0);
+	expect(await testDb().db.select().from(channels).all()).toHaveLength(0);
+});
+
+test('a primitive (string) channels body fails loudly as an invalid YouTube response', async () => {
+	const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	// Valid JSON, but a string — not an object with items. I2: wrong-typed
+	// external data means the API call failed, never an empty channel list.
+	stubTokenAndChannels(() => new Response(JSON.stringify('just a string'), { status: 200 }));
+
+	const { thrown } = await captureCallback();
+
+	expect(thrown?.status).toBe(502);
+	expect(thrown?.body?.message).toBe('invalid response from YouTube — please retry');
+	expect(errSpy.mock.calls.flat().join(' ')).toMatch(/youtube channels lookup returned a non-object body: 200/);
+	expect(await testDb().db.select().from(channels).all()).toHaveLength(0);
 });

@@ -69,6 +69,7 @@ async function postGoogleForm(
 		let detail = 'no error detail';
 		try {
 			const parsed = JSON.parse(text) as { error?: unknown; error_description?: unknown };
+			// Stryker disable next-line OptionalChaining: equivalent — JSON.parse never yields undefined; when parsed is null the mutant's TypeError is swallowed by the same catch, leaving detail unchanged
 			if (typeof parsed?.error === 'string') {
 				const description = typeof parsed.error_description === 'string' ? `: ${parsed.error_description}` : '';
 				detail = `${parsed.error}${description}`;

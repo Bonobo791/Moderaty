@@ -24,7 +24,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
-import { cookieSecure, OAUTH_STATE_COOKIE, storePendingStates } from './oauthState';
+import { cookieSecure, OAUTH_STATE_COOKIE, readPendingStates, storePendingStates } from './oauthState';
 
 afterEach(() => {
 	mocks.env.APP_URL = 'https://moderaty.example';
@@ -57,5 +57,64 @@ test('derives Secure from APP_URL and fails loudly when it is missing', () => {
 	expect(cookieSecure()).toBe(false);
 
 	delete mocks.env.APP_URL;
-	expect(() => cookieSecure()).toThrowError(expect.objectContaining({ status: 500 }));
+	expect(() => cookieSecure()).toThrowError(
+		expect.objectContaining({ status: 500, body: { message: 'APP_URL is not configured' } })
+	);
+});
+
+test('reads back the pending states stored in the cookie', () => {
+	const cookies = fakeCookies();
+	cookies.get.mockReturnValue(JSON.stringify(['state-1', 'state-2']));
+
+	expect(readPendingStates(cookies as never)).toEqual(['state-1', 'state-2']);
+	expect(cookies.get).toHaveBeenCalledWith(OAUTH_STATE_COOKIE);
+});
+
+test('reads an absent cookie as no pending states', () => {
+	const cookies = fakeCookies();
+	cookies.get.mockReturnValue(undefined);
+
+	expect(readPendingStates(cookies as never)).toEqual([]);
+});
+
+test('reads a non-array cookie payload as no pending states', () => {
+	const cookies = fakeCookies();
+	cookies.get.mockReturnValue(JSON.stringify({ state: 'state-1' }));
+
+	expect(readPendingStates(cookies as never)).toEqual([]);
+});
+
+test('reads malformed JSON as no pending states', () => {
+	const cookies = fakeCookies();
+	cookies.get.mockReturnValue('{not json');
+
+	expect(readPendingStates(cookies as never)).toEqual([]);
+});
+
+test('drops non-string entries from the stored pending states', () => {
+	const cookies = fakeCookies();
+	cookies.get.mockReturnValue(JSON.stringify(['state-1', 42, null, 'state-2', { s: 1 }, ['state-3']]));
+
+	expect(readPendingStates(cookies as never)).toEqual(['state-1', 'state-2']);
+});
+
+test('deletes the state cookie at path / when no states remain', () => {
+	const cookies = fakeCookies();
+
+	storePendingStates(cookies as never, []);
+
+	expect(cookies.delete).toHaveBeenCalledWith(OAUTH_STATE_COOKIE, { path: '/' });
+	expect(cookies.set).not.toHaveBeenCalled();
+});
+
+test('keeps only the newest MAX_PENDING_STATES states', () => {
+	const cookies = fakeCookies();
+
+	storePendingStates(cookies as never, ['s1', 's2', 's3', 's4', 's5', 's6', 's7']);
+
+	expect(cookies.set).toHaveBeenCalledWith(
+		OAUTH_STATE_COOKIE,
+		JSON.stringify(['s3', 's4', 's5', 's6', 's7']),
+		expect.objectContaining({ path: '/', httpOnly: true, sameSite: 'lax', secure: true, maxAge: 600 })
+	);
 });

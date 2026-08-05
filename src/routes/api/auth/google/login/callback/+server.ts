@@ -72,6 +72,7 @@ export async function GET({ url, cookies }: { url: URL; cookies: import('@svelte
 		throw error(502, 'invalid response from Google — please retry');
 	}
 	// I2: identity claims are validated at the boundary; no sub, no sign-in.
+	// Stryker disable next-line ConditionalExpression: equivalent — info comes from JSON.parse, so any value failing `typeof info !== 'object'` is a primitive whose `.sub` is undefined, making `typeof info.sub !== 'string'` true; the disjunction is unchanged (directive is line-granular: the other three ConditionalExpression mutants on this line ARE killed by login.test.ts)
 	if (typeof info !== 'object' || info === null || typeof info.sub !== 'string' || !info.sub) {
 		console.error('google userinfo returned no usable sub claim');
 		throw error(502, 'invalid response from Google — please retry');

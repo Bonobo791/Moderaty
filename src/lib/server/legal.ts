@@ -98,11 +98,14 @@ type PendingEntry = PendingConsent & { state: string; ts: number };
 
 function readEntries(cookies: Cookies): PendingEntry[] {
 	const raw = cookies.get(PENDING_CONSENT_COOKIE);
+	// Stryker disable next-line ConditionalExpression: equivalent — without the guard, decrypt(undefined/'') throws and the catch below returns the same []
 	if (!raw) return [];
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(decrypt(raw));
-	} catch {
+	}
+	// Stryker disable next-line BlockStatement: equivalent — an empty catch leaves parsed undefined, and the Array.isArray check below returns the same []
+	catch {
 		return [];
 	}
 	if (!Array.isArray(parsed)) return [];

@@ -43,19 +43,29 @@ must fail if the real logic is wrong" rule made measurable. Coverage shows
 what the suite executes; mutation testing shows whether the suite fails when
 the code is wrong. Follow the skill at
 `.agents/skills-src/mutation-testing/SKILL.md` (mental mutation testing for
-review of small diffs; tool runs for whole-module audits). Killing a mutant
-means writing a behavior test that passes on the original and fails under
-the exact mutation — confirm both directions. StrykerJS is installed and
-should be used for tool runs: `@stryker-mutator/core` +
+review-time reasoning; Stryker for every applied mutant). **Stryker applies
+and verifies ALL mutants in this repo** — never hand-edit source to simulate
+a mutation as a workflow step. Killing a mutant means writing a behavior
+test that flips it survived→killed on a scoped re-run; that re-run IS the
+both-directions confirmation (the exception — a mutant Stryker's operator
+set cannot express — is documented in the skill and must be justified in the
+PR). StrykerJS: `@stryker-mutator/core` +
 `@stryker-mutator/vitest-runner`, configured by `stryker.config.json` at the
-repo root (`npx stryker run` for whole-module audits,
-`npx stryker run --since main` or a scoped `--mutate` glob for PR-scale
-work, `npx stryker run --incremental` to reuse the cache). In a fresh
-checkout or worktree run `npx svelte-kit sync` first — Stryker's vitest
-runner needs the generated `.svelte-kit/tsconfig.json`. Verify survivors
-by hand before writing kill tests — the score is a lead, not a verdict.
-Wiring a ratcheted CI threshold (`thresholds.break`) remains a separate,
-maintainer-approved step.
+repo root (`npx stryker run` for whole-module audits, a scoped `--mutate`
+glob or `node scripts/stryker-pr-scope.mjs` for PR-scale work — StrykerJS
+has no `--since` flag, that is Stryker.NET; the script prints the changed
+src files as a `--mutate` scope, filtered like the config, and an empty
+result means skip the run),
+`npx stryker run --incremental` to reuse the cache; the `json`
+reporter in config gives machine-readable survivors for the agent loop). In
+a fresh checkout or worktree run `npx svelte-kit sync` first — Stryker's
+vitest runner needs the generated `.svelte-kit/tsconfig.json`. Verify
+survivors by hand before writing kill tests — the score is a lead, not a
+verdict. CI runs a report-only Stryker pass over the PR's changed source
+files on every PR
+(`.github/workflows/mutation.yml`, report uploaded as an artifact); wiring a
+ratcheted `thresholds.break` gate remains a separate, maintainer-approved
+step.
 
 ## Agent Skills (skills-src)
 

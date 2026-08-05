@@ -10,9 +10,16 @@
     "!src/routes/dpa/+page.ts"
   ],
   "testRunner": "vitest",
+  "coverageAnalysis": "perTest",
+  "incremental": true,
+  "ignoreStatic": true,
   "reporters": [
     "progress",
     "clear-text",
-    "html"
-  ]
+    "html",
+    "json"
+  ],
+  "timeoutMS": 10000,
+  "timeoutFactor": 1.5,
+  "concurrency": 4
 }

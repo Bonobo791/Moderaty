@@ -409,12 +409,11 @@ describe('OAuth scope and ban claims match implementation', () => {
 	});
 });
 
-// AI-cost claims match implementation: toxicity scoring rides OpenAI's FREE
-// moderation endpoint (moderation.ts → /v1/moderations), but tone analysis
-// runs on gpt-4.1-nano via chat/completions (tone.ts) — a paid model, just
-// dirt cheap ($0.10/1M input tokens). No surface may claim the AI or the
-// model cost is free/zero; the free endpoint may never be cited without the
-// paid tone model alongside.
+// AI-cost claims match implementation, take two: the maintainer pulled the
+// mechanism detail (free moderation endpoint, gpt-4.1-nano pricing) from the
+// site entirely — public copy says "AI", nothing more. No surface may claim
+// the AI or the model cost is free/zero, and no surface may name the
+// endpoint, the model, or per-token prices.
 describe('AI-cost claims match implementation', () => {
 	const aiCostSurfaces: Record<string, string> = {
 		'plan ticks': readFileSync(new URL('./plans.ts', import.meta.url), 'utf8'),
@@ -453,12 +452,11 @@ describe('AI-cost claims match implementation', () => {
 		}
 	});
 
-	it('the free moderation endpoint is never cited without the paid tone model', () => {
+	it('no surface names the moderation endpoint, the model, or token pricing', () => {
+		const MECHANISM = [/moderation endpoint/i, /gpt-4\.1-nano/i, /v1\/moderations/i, /fractions of a cent/i];
 		for (const [name, text] of Object.entries(aiCostSurfaces)) {
-			if (/moderation endpoint/i.test(text)) {
-				expect(text, `${name} cites the free endpoint without the tone-model caveat`).toMatch(
-					/gpt-4\.1-nano|tone/i
-				);
+			for (const pattern of MECHANISM) {
+				expect(text, `${name} still names AI internals: ${pattern}`).not.toMatch(pattern);
 			}
 		}
 	});

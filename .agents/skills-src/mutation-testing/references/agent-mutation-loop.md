@@ -15,7 +15,7 @@ for more details: <https://www.gnu.org/licenses/>.
 Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 -->
 
-Contents: why mutation feedback beats coverage for AI-written tests · the loop · prompt pattern · budget and stopping rules · guardrails · manual adversarial mode.
+Contents: why mutation feedback beats coverage for AI-written tests · the loop · prompt pattern · budget and stopping rules · guardrails · hand-applied mutants (exception only).
 
 ## Why mutation feedback for AI-written tests
 
@@ -30,7 +30,7 @@ Contents: why mutation feedback beats coverage for AI-written tests · the loop 
 3. **Run** the mutation tool scoped to the target module (see tools-by-language.md).
 4. **Classify** every survivor: genuine gap vs equivalent vs no-coverage (see surviving-mutant-triage.md). Discard equivalents before prompting — they poison the loop.
 5. **Prompt with the survivors**: for each genuine survivor, describe the mutant concretely and require a test that fails under it and passes on the original.
-6. **Validate generated tests** before adding them: syntax/compile clean, passes on the original code, and (sampled) fails under its target mutant. Discard tests that only pass in both worlds — they assert nothing about the mutation.
+6. **Validate generated tests** before adding them: syntax/compile clean, passes on the original code, and flips its target mutant survived→killed on a scoped Stryker re-run (`--mutate` the touched file; sample across rounds rather than re-running per test). Discard tests that only pass in both worlds — they assert nothing about the mutation.
 7. **Re-run** the tool scoped to survivors; record score delta.
 8. Repeat until a stopping rule fires.
 
@@ -72,13 +72,20 @@ Cost controls: scope to changed files, defer full-suite re-validation to the end
 - **Score is a means, not a KPI**: a suite at 85% with behavior-level assertions beats one at 95% asserting implementation details.
 - **Keep humans in the loop for threshold changes**: ratcheting a CI `break` threshold or accepting a survivor belongs in review, not in an unattended agent run.
 
-## Manual adversarial mode (no tool available)
+## Hand-applied mutants: exception only (Moderaty has the tool)
 
-When no mutation tool is installed or the language lacks one, run the loop by hand:
+In this repo Stryker is always available, so the physical apply-run-revert
+loop is NOT a workflow. The only legitimate use is a mutant Stryker's
+operator set cannot express (rare — e.g. a specific literal value no
+operator produces):
 
-1. Pick the 5–10 highest-risk lines in the diff (validation, arithmetic, branching).
-2. Apply one mental mutation per line (operator flip, negation removal, off-by-one, deleted call).
-3. For each, ask: which test fails? Name it. If none — that's a survivor; write the killing test.
-4. Optionally apply the mutation physically, run the suite, confirm red, revert — a poor man's mutation run for a handful of mutants.
+1. Commit the target file first so the revert is clean.
+2. Apply the one mutation by hand, run the suite, confirm the intended test
+   goes red.
+3. Revert immediately in the same session (`git checkout -- <file>`); never
+   leave an applied mutant on disk.
+4. Justify the exception in the PR — which mutant, and why Stryker cannot
+   generate it.
 
-This covers the critical path of a PR in minutes and is the default mode for code review.
+For everything else, mental review (SKILL.md) plus a scoped
+`npx stryker run --mutate` covers the critical path of a PR in minutes.

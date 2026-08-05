@@ -57,20 +57,23 @@ Benchmark per module, not per repo. 65% on a logging utility is fine; 65% on a p
 6. **Re-run** scoped to survivors; confirm kills; update the threshold.
 7. **Ratchet**: set the CI `break` threshold at current-score-minus-buffer and raise it over time. Never jump to a high threshold in one step — the team (or the agent harness) will route around it.
 
-## In the Moderaty repo — use Stryker
+## In the Moderaty repo — Stryker runs ALL mutants
 
-StrykerJS is installed and is the tool for every mutation run in this repo: `@stryker-mutator/core` + `@stryker-mutator/vitest-runner`, configured by `stryker.config.json` at the repo root. That config is bare `stryker init` output (vitest runner, `progress`/`clear-text`/`html` reporters) — no `mutate` globs and no thresholds — so always pass an explicit scope rather than running the whole repo.
+StrykerJS is the tool for every mutation run in this repo: `@stryker-mutator/core` + `@stryker-mutator/vitest-runner`, configured by `stryker.config.json` at the repo root (vitest runner, `mutate` globs covering `src/**/*.ts` minus tests/dev-seed/legal pages, `coverageAnalysis: perTest`, `incremental`, `progress`/`clear-text`/`html`/`json` reporters — the `json` report at `reports/mutation/mutation.json` is the machine-readable survivor list for the agent loop).
+
+**Never hand-edit source to simulate a mutation as a workflow step.** Stryker applies and verifies every mutant. The both-directions discipline (passes on original, fails under mutation) is satisfied by the re-run: a kill test is proven when the mutant flips survived→killed on a scoped Stryker re-run — not by applying the mutation by hand, running vitest, and reverting. The single exception: a mutant Stryker's operator set cannot express (rare). Then, and only then, apply it by hand with the file committed, confirm red, revert immediately, and justify it in the PR.
 
 - Fresh checkout or worktree: run `npx svelte-kit sync` first. Stryker's vitest runner needs the generated `.svelte-kit/tsconfig.json`; without it the run crashes with a rolldown "Tsconfig not found" error.
 - Scoped audit: `npx stryker run --mutate "src/lib/server/<module>.ts"` (plus `--reporters clear-text` for terminal-only output).
 - PR-scale: `npx stryker run --since main` or a git-diff-driven `--mutate` glob.
-- Repeat runs: `npx stryker run --incremental` reuses the cache.
+- Repeat runs: the config's `incremental: true` already caches; `--incremental` forces it on the CLI.
+- CI: `.github/workflows/mutation.yml` runs a report-only `--since main` pass on every PR and uploads the HTML/JSON report as an artifact. It never fails on survivors.
 - Verify survivors by hand before writing kill tests — the score is a lead, not a verdict.
 - Wiring a ratcheted `thresholds.break` CI gate is a separate, maintainer-approved step; do not add it ad hoc.
 
-## Mental mutation testing (no tool required)
+## Mental mutation testing (review-time reasoning)
 
-For code review or quick verification of a small diff, mutate mentally: for every changed line, ask "would any test fail if I flipped this operator / deleted this call / inverted this condition?" If the answer is no for a behavior-bearing line, that is a surviving mutant — flag it. This is the fastest mode and works in any language; reserve tool runs for whole-module audits and CI.
+For code review or quick reasoning about a small diff, mutate mentally: for every changed line, ask "would any test fail if I flipped this operator / deleted this call / inverted this condition?" If the answer is no for a behavior-bearing line, that is a suspected surviving mutant — do NOT reach for a hand-applied mutation to confirm it. Run `npx stryker run --mutate "<that file>"` and read the survivor report; if the line's mutant survives, write the kill test and re-run until it flips killed.
 
 ## Agent mutation-feedback loop
 

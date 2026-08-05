@@ -61,11 +61,10 @@ reporter in config gives machine-readable survivors for the agent loop). In
 a fresh checkout or worktree run `npx svelte-kit sync` first — Stryker's
 vitest runner needs the generated `.svelte-kit/tsconfig.json`. Verify
 survivors by hand before writing kill tests — the score is a lead, not a
-verdict. CI runs a report-only Stryker pass over the PR's changed source
-files on every PR
-(`.github/workflows/mutation.yml`, report uploaded as an artifact); wiring a
-ratcheted `thresholds.break` gate remains a separate, maintainer-approved
-step.
+verdict. CI does not run Stryker (the report-only
+`.github/workflows/mutation.yml` pass was removed by maintainer decision —
+runs are local/agent-driven); wiring any CI gate, including a ratcheted
+`thresholds.break`, remains a separate, maintainer-approved step.
 
 ## Agent Skills (skills-src)
 

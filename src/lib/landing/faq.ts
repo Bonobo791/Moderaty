@@ -41,7 +41,7 @@ export const FAQ_ENTRIES: FaqEntry[] = [
 	},
 	{
 		q: 'What YouTube account access does Moderaty need?',
-		a: 'Google\'s standard YouTube permission, the youtube.force-ssl scope; YouTube offers no comments-only permission. Moderaty uses it only to read and moderate comments on the channels you connect and to read your videos\' titles and descriptions as context for the AI\'s tone analysis, nothing else. The code is open source under AGPL, so you can verify exactly what it does with that access.'
+		a: 'Google\'s standard YouTube permission, the youtube.force-ssl scope; YouTube offers no comments-only permission. Moderaty uses it only to read and moderate comments on the channels you connect, to read your videos\' titles and descriptions as context for the AI\'s tone analysis, and to read your channel\'s own title and details when you connect it, nothing else. The code is open source under AGPL, so you can verify exactly what it does with that access.'
 	},
 	{
 		q: 'Is Moderaty really free?',

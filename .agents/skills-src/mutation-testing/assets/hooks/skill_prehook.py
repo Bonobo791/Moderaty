@@ -150,9 +150,18 @@ if __name__ == "__main__":
     except Exception as exc:
         # Hooks must never break the prompt flow, but failure must be loud on
         # both channels: stderr for the server log, stdout so the user (and
-        # the agent reading injected context) actually sees it.
-        sys.stderr.write(f"mutation-testing prehook failed: {type(exc).__name__}: {exc}\n")
-        sys.stdout.write(
-            f"[mutation-testing prehook WARNING: hook failed: {type(exc).__name__}: {exc}]\n"
-        )
+        # the agent reading injected context) actually sees it. Each write is
+        # guarded: when the original error came from a broken output stream,
+        # writing to that stream raises again, and an unguarded handler would
+        # exit non-zero, breaking the always-exit-0 contract.
+        try:
+            sys.stderr.write(f"mutation-testing prehook failed: {type(exc).__name__}: {exc}\n")
+        except Exception:
+            pass
+        try:
+            sys.stdout.write(
+                f"[mutation-testing prehook WARNING: hook failed: {type(exc).__name__}: {exc}]\n"
+            )
+        except Exception:
+            pass
     sys.exit(0)

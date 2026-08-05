@@ -376,4 +376,16 @@ describe('OAuth scope and ban claims match implementation', () => {
 		expect(accessFaq, 'access FAQ entry missing').toBeDefined();
 		expect(accessFaq?.a).toMatch(/titles? and descriptions?/i);
 	});
+
+	it('the access FAQ discloses reading the channel itself when connecting', () => {
+		// callback/+server.ts fetchOwnedChannels calls channels.list
+		// (part=snippet, mine=true) to read the connected channel's own id
+		// and title, so "read and moderate comments ... nothing else"
+		// understates what the token is used for.
+		const accessFaq = FAQ_ENTRIES.find(
+			(f) => f.q === 'What YouTube account access does Moderaty need?'
+		);
+		expect(accessFaq, 'access FAQ entry missing').toBeDefined();
+		expect(accessFaq?.a).toMatch(/channel'?s own (title|name|details)/i);
+	});
 });

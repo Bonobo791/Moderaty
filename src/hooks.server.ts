@@ -18,9 +18,10 @@
 
 import type { Handle } from '@sveltejs/kit';
 
-import { error } from '@sveltejs/kit';
+import { error, isHttpError } from '@sveltejs/kit';
 
 import { cookieSecure } from '$lib/server/oauthState';
+import { assertMigrationsCurrent } from '$lib/server/migrationGuard';
 import { getSessionUser, SESSION_COOKIE } from '$lib/server/session';
 
 // Resolves the session cookie into locals.user for every request. When the
@@ -29,6 +30,18 @@ import { getSessionUser, SESSION_COOKIE } from '$lib/server/session';
 // loudly (AGENTS.md): a valid user must see a server error, not a silent
 // downgrade to signed-out.
 export const handle: Handle = async ({ event, resolve }) => {
+	// Deploy-ordering boundary (issue #81): if the database is behind the
+	// deployed code's migration journal, every DB query would fail with
+	// scattered "no such column" errors — fail the request here with one clear
+	// 503 instead. The guard's deliberate HttpError passes through; a database
+	// failure INSIDE the check gets the same loud 500 as any other DB failure.
+	try {
+		await assertMigrationsCurrent();
+	} catch (e) {
+		if (isHttpError(e)) throw e;
+		console.error('migration guard query failed:', e);
+		throw error(500, 'something went wrong on our side — please retry');
+	}
 	const token = event.cookies.get(SESSION_COOKIE);
 	try {
 		const resolution = await getSessionUser(token);

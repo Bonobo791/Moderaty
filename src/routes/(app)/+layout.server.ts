@@ -27,8 +27,12 @@ import type { LayoutServerLoad } from './$types';
 // current LEGAL_VERSION. Sessions slide for 30 days, so without this gate a
 // legal-doc bump would only reach users at their next login. /consent lives
 // outside (app), so the redirect cannot loop.
+// During a database outage (locals.dbDown) none of these queries can run:
+// return the maintenance payload so the shell renders an overlay instead of
+// bouncing the user to /login (which would look like a logout) or 500ing.
 export const load: LayoutServerLoad = async ({ locals }) => {
+	if (locals.dbDown) return { user: locals.user, orgs: [], maintenance: true };
 	if (!locals.user) throw redirect(302, '/login');
 	if (!(await hasCurrentConsent(locals.user.id))) throw redirect(302, '/consent');
-	return { user: locals.user, orgs: await listOrgMemberships(locals.user.id) };
+	return { user: locals.user, orgs: await listOrgMemberships(locals.user.id), maintenance: false };
 };

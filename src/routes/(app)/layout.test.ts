@@ -70,3 +70,28 @@ test('a signed-out visitor is still redirected to /login', async () => {
 	const res = await captureLoad(null);
 	expect(res).toMatchObject({ status: 302, location: '/login' });
 });
+
+test('a database outage returns the maintenance payload instead of redirecting to /login', async () => {
+	// dbDown with a null user is the normal outage shape: the session lookup
+	// failed in hooks, so identity is unknown — but bouncing to /login would
+	// look like a logout. The maintenance shell is the honest state.
+	const data = (await load({ locals: { user: null, dbDown: true } } as never)) as {
+		maintenance: boolean;
+		orgs: unknown[];
+	};
+	expect(data.maintenance).toBe(true);
+	expect(data.orgs).toEqual([]);
+});
+
+test('a database outage with a verified user short-circuits before the consent query', async () => {
+	// No consent row seeded: reaching hasCurrentConsent would not redirect but
+	// the maintenance path must skip it entirely and return the payload.
+	const data = (await load({ locals: { user: TEST_OWNER, dbDown: true } } as never)) as {
+		maintenance: boolean;
+		user: unknown;
+		orgs: unknown[];
+	};
+	expect(data.maintenance).toBe(true);
+	expect(data.user).toMatchObject({ id: TEST_OWNER.id });
+	expect(data.orgs).toEqual([]);
+});

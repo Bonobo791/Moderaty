@@ -47,19 +47,24 @@ beforeEach(() => {
 function makeEvent() {
 	return {
 		cookies: { get: () => 'session-token', set: vi.fn() },
-		locals: {} as { user: unknown },
+		locals: {} as { user: unknown; dbDown?: boolean },
 		url: new URL('http://localhost/')
 	};
 }
 
-test('a database failure during session lookup fails loudly with a user-visible 500', async () => {
+test('a database failure during session lookup degrades to maintenance mode, never a bare 500', async () => {
 	mocks.getSessionUser.mockRejectedValue(new Error('database is locked'));
 	vi.spyOn(console, 'error').mockImplementation(() => {});
 	const event = makeEvent();
 	const resolve = vi.fn(async () => new Response('ok'));
 
-	await expect(handle({ event, resolve } as never)).rejects.toMatchObject({ status: 500 });
-	expect(resolve).not.toHaveBeenCalled();
+	await handle({ event, resolve } as never);
+
+	expect(resolve).toHaveBeenCalled();
+	expect(event.locals.user).toBeNull();
+	expect(event.locals.dbDown).toBe(true);
+	// Loud on the server even though the user gets a maintenance page.
+	expect(console.error).toHaveBeenCalled();
 });
 
 test('a resolved session user populates locals.user', async () => {
@@ -94,15 +99,33 @@ test('a database behind the code fails the request with the guard 503 before any
 	expect(resolve).not.toHaveBeenCalled();
 });
 
-test('a database failure inside the guard check fails loudly with a user-visible 500', async () => {
+test('a database failure inside the guard check degrades to maintenance mode, never a bare 500', async () => {
 	mocks.assertMigrationsCurrent.mockRejectedValue(new Error('database is locked'));
 	vi.spyOn(console, 'error').mockImplementation(() => {});
 	const event = makeEvent();
 	const resolve = vi.fn(async () => new Response('ok'));
 
-	await expect(handle({ event, resolve } as never)).rejects.toMatchObject({ status: 500 });
+	await handle({ event, resolve } as never);
+
+	expect(resolve).toHaveBeenCalled();
+	// The session lookup is skipped — it would fail the same way.
 	expect(mocks.getSessionUser).not.toHaveBeenCalled();
-	expect(resolve).not.toHaveBeenCalled();
+	expect(event.locals.user).toBeNull();
+	expect(event.locals.dbDown).toBe(true);
+	expect(console.error).toHaveBeenCalled();
+});
+
+test('/login still renders during a database outage (signed-out view, maintenance flagged)', async () => {
+	mocks.getSessionUser.mockRejectedValue(new Error('database is locked'));
+	vi.spyOn(console, 'error').mockImplementation(() => {});
+	const event = { ...makeEvent(), url: new URL('http://localhost/login') };
+	const resolve = vi.fn(async () => new Response('ok'));
+
+	await handle({ event, resolve } as never);
+
+	expect(resolve).toHaveBeenCalled();
+	expect(event.locals.user).toBeNull();
+	expect(event.locals.dbDown).toBe(true);
 });
 
 test('/api/health bypasses the guard and session so a database outage still reaches the probe', async () => {

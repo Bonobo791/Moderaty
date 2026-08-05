@@ -32,14 +32,14 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			<label for="team-select">Team</label>
 			<select id="team-select" name="orgId">
 				{#each data.orgs as org (org.orgId)}
-					<option value={org.orgId} selected={org.orgId === data.user.orgId}>{org.name}</option>
+					<option value={org.orgId} selected={org.orgId === data.user?.orgId}>{org.name}</option>
 				{/each}
 			</select>
 			<button class="btn secondary small" type="submit">Switch team</button>
 		</form>
 	{/if}
 	<span class="account">
-		<span class="muted">{data.user.displayName}</span>
+		<span class="muted">{data.user?.displayName ?? 'Account'}</span>
 		<form method="POST" action="/logout">
 			<button class="btn secondary small" type="submit">Sign out</button>
 		</form>

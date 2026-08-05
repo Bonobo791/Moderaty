@@ -31,47 +31,58 @@ import { fail, redirect } from '@sveltejs/kit';
  * @returns The user's channels, comment counts grouped by channel and status, and completed ban counts grouped by channel.
  */
 export async function load({ locals }) {
+	// Database outage: the overlay replaces the dashboard. Checked before
+	// requireUser because an outage means the session lookup failed and
+	// locals.user is null — the maintenance page IS the signed-in state.
+	if (locals.dbDown) return { chs: [], stats: [], bans: [], maintenance: true };
 	const user = requireUser(locals);
-	// Project only the fields the page renders; never serialize refreshTokenEnc
-	// (or any future secret column) to the browser. Everything below is scoped
-	// to the active team's channels.
-	const chs = await db
-		.select({
-			id: channels.id,
-			title: channels.title,
-			cursor: channels.cursor,
-			lastRunAt: channels.lastRunAt,
-			toneLevel: channels.toneLevel,
-			protectLgbtqia: channels.protectLgbtqia,
-			protectWomen: channels.protectWomen
-		})
-		.from(channels)
-		.where(eq(channels.orgId, user.orgId))
-		.all();
-	const channelIds = chs.map((ch) => ch.id);
-	const stats = channelIds.length
-		? await db
-				.select({ channelId: comments.channelId, status: comments.status, n: sql<number>`count(*)` })
-				.from(comments)
-				.where(inArray(comments.channelId, channelIds))
-				.groupBy(comments.channelId, comments.status)
-				.all()
-		: [];
-	// Count ban EVENTS from the audit log, not moderation_actions: manual queue
-	// bans never create moderation_actions rows, so counting that table hid
-	// every user-taken ban. Both ban paths write exactly one audit row per ban
-	// (pipeline: completeActions, same transaction as the completed update;
-	// manual: the queue action itself). Bans are irreversible, so ban events
-	// equal ban state; dry-run rows are excluded by the action filter.
-	const bans = channelIds.length
-		? await db
-				.select({ channelId: auditLog.channelId, n: sql<number>`count(*)` })
-				.from(auditLog)
-				.where(and(eq(auditLog.action, 'ban'), inArray(auditLog.channelId, channelIds)))
-				.groupBy(auditLog.channelId)
-				.all()
-		: [];
-	return { chs, stats, bans };
+	try {
+		// Project only the fields the page renders; never serialize refreshTokenEnc
+		// (or any future secret column) to the browser. Everything below is scoped
+		// to the active team's channels.
+		const chs = await db
+			.select({
+				id: channels.id,
+				title: channels.title,
+				cursor: channels.cursor,
+				lastRunAt: channels.lastRunAt,
+				toneLevel: channels.toneLevel,
+				protectLgbtqia: channels.protectLgbtqia,
+				protectWomen: channels.protectWomen
+			})
+			.from(channels)
+			.where(eq(channels.orgId, user.orgId))
+			.all();
+		const channelIds = chs.map((ch) => ch.id);
+		const stats = channelIds.length
+			? await db
+					.select({ channelId: comments.channelId, status: comments.status, n: sql<number>`count(*)` })
+					.from(comments)
+					.where(inArray(comments.channelId, channelIds))
+					.groupBy(comments.channelId, comments.status)
+					.all()
+			: [];
+		// Count ban EVENTS from the audit log, not moderation_actions: manual queue
+		// bans never create moderation_actions rows, so counting that table hid
+		// every user-taken ban. Both ban paths write exactly one audit row per ban
+		// (pipeline: completeActions, same transaction as the completed update;
+		// manual: the queue action itself). Bans are irreversible, so ban events
+		// equal ban state; dry-run rows are excluded by the action filter.
+		const bans = channelIds.length
+			? await db
+					.select({ channelId: auditLog.channelId, n: sql<number>`count(*)` })
+					.from(auditLog)
+					.where(and(eq(auditLog.action, 'ban'), inArray(auditLog.channelId, channelIds)))
+					.groupBy(auditLog.channelId)
+					.all()
+			: [];
+		return { chs, stats, bans, maintenance: false };
+	} catch (e) {
+		// Intermittent outage: the hook queries succeeded but these didn't.
+		// Loud on the server, a maintenance overlay for the user — never a 500.
+		console.error('dashboard load failed:', e);
+		return { chs: [], stats: [], bans: [], maintenance: true };
+	}
 }
 
 /**

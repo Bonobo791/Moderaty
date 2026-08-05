@@ -408,3 +408,58 @@ describe('OAuth scope and ban claims match implementation', () => {
 		expect(accessFaq?.a).toMatch(/list.*channels.*(Google account|account owns).*(pick|choose)/i);
 	});
 });
+
+// AI-cost claims match implementation: toxicity scoring rides OpenAI's FREE
+// moderation endpoint (moderation.ts → /v1/moderations), but tone analysis
+// runs on gpt-4.1-nano via chat/completions (tone.ts) — a paid model, just
+// dirt cheap ($0.10/1M input tokens). No surface may claim the AI or the
+// model cost is free/zero; the free endpoint may never be cited without the
+// paid tone model alongside.
+describe('AI-cost claims match implementation', () => {
+	const aiCostSurfaces: Record<string, string> = {
+		'plan ticks': readFileSync(new URL('./plans.ts', import.meta.url), 'utf8'),
+		'pricing FAQ': PRICING_FAQ_ENTRIES.map((f) => `${f.q} ${f.a}`).join('\n'),
+		PricingHero: readFileSync(
+			new URL('../components/landing/pricing/PricingHero.svelte', import.meta.url),
+			'utf8'
+		),
+		PlanSelfHosted: readFileSync(
+			new URL('../components/landing/PlanSelfHosted.svelte', import.meta.url),
+			'utf8'
+		),
+		PlanLifetime: readFileSync(
+			new URL('../components/landing/PlanLifetime.svelte', import.meta.url),
+			'utf8'
+		),
+		CostMath: readFileSync(
+			new URL('../components/landing/pricing/CostMath.svelte', import.meta.url),
+			'utf8'
+		)
+	};
+
+	it('no surface claims the AI or the model cost is free or zero', () => {
+		const RETIRED = [
+			/the AI is free/i,
+			/model cost is zero/i,
+			/nothing but electricity/i,
+			/usually \$0/i,
+			/stays free to run/i,
+			/running cost is likely zero/i
+		];
+		for (const [name, text] of Object.entries(aiCostSurfaces)) {
+			for (const pattern of RETIRED) {
+				expect(text, `${name} still claims free AI: ${pattern}`).not.toMatch(pattern);
+			}
+		}
+	});
+
+	it('the free moderation endpoint is never cited without the paid tone model', () => {
+		for (const [name, text] of Object.entries(aiCostSurfaces)) {
+			if (/moderation endpoint/i.test(text)) {
+				expect(text, `${name} cites the free endpoint without the tone-model caveat`).toMatch(
+					/gpt-4\.1-nano|tone/i
+				);
+			}
+		}
+	});
+});

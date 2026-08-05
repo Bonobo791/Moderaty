@@ -20,13 +20,14 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <!--
 	Pricing hero: a bracketed quick-answer block (written for AI engines and
-	skimmers) above the H1. The linked "free to use" citation is the strongest
-	fact on the page: the BYOK tier costs nothing but electricity.
+	skimmers) above the H1. The linked citation is the strongest fact on the
+	page: toxicity scoring rides OpenAI's free moderation endpoint, and the
+	tone model (gpt-4.1-nano) costs fractions of a cent per comment.
 -->
 
 <script lang="ts">
 	import Reveal from '../Reveal.svelte';
-	import { OPENAI_MODERATION_URL } from '$lib/landing/links';
+	import { OPENAI_MODERATION_URL, OPENAI_PRICING_URL } from '$lib/landing/links';
 </script>
 
 <section class="hero">
@@ -37,9 +38,10 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 					<span class="qa-label">Quick answer</span>
 				</div>
 				<p class="qa-body">
-					Moderaty is free and open source when self-hosted: AGPL-3.0, bring your own OpenAI key,
-					and OpenAI's moderation endpoint is
-					<a href={OPENAI_MODERATION_URL} target="_blank" rel="noreferrer" class="inline-link">free to use</a>.
+					Moderaty is free and open source when self-hosted: AGPL-3.0, bring your own OpenAI key.
+					Toxicity scoring rides OpenAI's moderation endpoint,
+					<a href={OPENAI_MODERATION_URL} target="_blank" rel="noreferrer" class="inline-link">free to use</a>,
+					and tone analysis runs on <a href={OPENAI_PRICING_URL} target="_blank" rel="noreferrer" class="inline-link">gpt-4.1-nano</a>, fractions of a cent per comment.
 					Hosted costs $5 a month for 100 moderated comments, auto-renewed, with 5¢ top-ups when
 					you run out. The first 1,000 users can instead pay $49 once for lifetime hosted BYOK.
 				</p>
@@ -49,7 +51,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	<Reveal delay={0.08}>
 		<h1 class="hero-title">Protection, priced like a <span class="marker">utility.</span></h1>
 		<p class="hero-sub">
-			The AI is free. The software is free. What you can buy is not having to run it.
+			The software is free. The AI might as well be. What you can buy is not having to run it.
 		</p>
 	</Reveal>
 </section>

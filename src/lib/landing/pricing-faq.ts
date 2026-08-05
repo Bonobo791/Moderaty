@@ -27,11 +27,11 @@ export const PRICING_FAQ_ENTRIES: { q: string; a: string }[] = [
 	},
 	{
 		q: 'What is the $49 lifetime deal?',
-		a: "First 1,000 users only: one $49 payment, hosted forever, unlimited moderated comments, with your own OpenAI key. OpenAI's moderation endpoint is free to use, so after the $49 your running cost is likely zero. When the 1,000 are gone, the deal is gone."
+		a: "First 1,000 users only: one $49 payment, hosted forever, unlimited moderated comments, with your own OpenAI key. Toxicity scoring rides OpenAI's free moderation endpoint and tone analysis runs on gpt-4.1-nano, fractions of a cent per comment, so after the $49 your running cost is near zero. When the 1,000 are gone, the deal is gone."
 	},
 	{
 		q: 'What does BYOK mean?',
-		a: "Bring your own key. Self-hosted Moderaty and the lifetime deal score comments with your OpenAI API key, on your account. OpenAI's moderation endpoint is free to use, so for most channels the model cost is zero. We never see the key."
+		a: "Bring your own key. Self-hosted Moderaty and the lifetime deal score comments with your OpenAI API key, on your account. Toxicity scoring rides OpenAI's free moderation endpoint and tone analysis runs on gpt-4.1-nano, so for most channels the model cost is pennies a month. We never see the key."
 	},
 	{
 		q: 'Why is self-hosting free?',

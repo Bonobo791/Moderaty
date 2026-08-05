@@ -707,3 +707,125 @@ test('decides a duplicated comment id only once when fetch pages overlap', async
 	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'approved' })]);
 	expect(result).toMatchObject({ fetched: 2, acted: 0, skipped: false, dryRun: false });
 });
+
+test('rule delete action enforces deleteComment end-to-end', async () => {
+	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'delete' }];
+
+	const result = await runChannel('channel');
+
+	expect(mocks.state.moderationActions).toEqual([
+		expect.objectContaining({ commentId: 'comment', action: 'delete', state: 'completed' })
+	]);
+	expect(mocks.deleteComment).toHaveBeenCalledWith('comment', 'access-token', undefined);
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	expect(result).toMatchObject({ fetched: 1, acted: 1, dryRun: false });
+});
+
+test('rule ban action rejects the comment with banAuthor set', async () => {
+	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'ban' }];
+
+	const result = await runChannel('channel');
+
+	expect(mocks.state.moderationActions).toEqual([
+		expect.objectContaining({ commentId: 'comment', action: 'ban', state: 'completed' })
+	]);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', true, 'access-token', undefined);
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expect(result).toMatchObject({ fetched: 1, acted: 1, dryRun: false });
+});
+
+test('rule hold action dispatches heldForReview to YouTube', async () => {
+	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'hold' }];
+
+	const result = await runChannel('channel');
+
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'heldForReview', false, 'access-token', undefined);
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expect(result).toMatchObject({ fetched: 1, acted: 1, dryRun: false });
+});
+
+test('skips an inactive channel without fetching or scoring', async () => {
+	mocks.state.channel = { ...mocks.state.channel, active: 0 };
+
+	const result = await runChannel('channel');
+
+	expect(result).toEqual({ fetched: 0, acted: 0, queued: 0, partial: false, skipped: true, dryRun: false });
+	expect(mocks.refreshAccessToken).not.toHaveBeenCalled();
+	expect(mocks.fetchNewComments).not.toHaveBeenCalled();
+	expect(mocks.scoreComment).not.toHaveBeenCalled();
+});
+
+test('fails loudly when DRY_RUN is not true or false', async () => {
+	process.env.DRY_RUN = 'ture';
+	mocks.state.env.DRY_RUN = 'ture';
+
+	await expect(runChannel('channel')).rejects.toThrow('DRY_RUN must be true or false');
+
+	expect(mocks.fetchNewComments).not.toHaveBeenCalled();
+});
+
+test('fails the run after staging when a comment decision throws, without advancing the cursor', async () => {
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ id: 'bad', text: 'bad' }), newComment({ id: 'good', text: 'good' })],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+	mocks.scoreComment.mockImplementation(async (text: string) => moderation(text === 'bad' ? 0.7 : 0.3));
+	mocks.serializeScores.mockImplementation((scores: Record<string, number>) => {
+		if (scores.harassment === 0.7) throw new Error('scores failed to serialize');
+		return '{}';
+	});
+
+	await expect(runChannel('channel')).rejects.toThrow('moderation decision failed for 1 comment(s)');
+
+	expect(mocks.state.insertedComments).toEqual([
+		expect.objectContaining({ id: 'good', status: 'approved' })
+	]);
+	expect(mocks.state.channelUpdates).toEqual([]);
+});
+
+test('persists the next page token when the scan is incomplete', async () => {
+	mocks.scoreComment.mockResolvedValue(moderation(0.34));
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment()],
+		nextPageToken: 'next-page',
+		reachedCursor: false
+	});
+
+	await runChannel('channel');
+
+	expect(mocks.state.channelUpdates).toContainEqual(
+		expect.objectContaining({ nextPageToken: 'next-page' })
+	);
+});
+
+test('keeps the existing cursor when the fetched page is empty', async () => {
+	mocks.state.channel = { ...mocks.state.channel, cursor: '2026-01-01T00:00:00.000Z' };
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	const result = await runChannel('channel');
+
+	expect(mocks.state.channelUpdates).toContainEqual(
+		expect.objectContaining({ cursor: '2026-01-01T00:00:00.000Z' })
+	);
+	expect(result).toMatchObject({ fetched: 0, skipped: false });
+});
+
+test('completes the scan when the cursor is reached even if a page token remains', async () => {
+	mocks.scoreComment.mockResolvedValue(moderation(0.34));
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment()],
+		nextPageToken: 'next-page',
+		reachedCursor: true
+	});
+
+	await runChannel('channel');
+
+	expect(mocks.state.channelUpdates).toContainEqual(
+		expect.objectContaining({ cursor: '2026-01-04T00:00:00.000Z', nextPageToken: null, scanCursor: null })
+	);
+});

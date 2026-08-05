@@ -108,4 +108,17 @@ describe('backup-db.mjs', () => {
 		});
 		expect(() => readdirSync(outDir)).toThrow();
 	});
+
+	it('fails loudly with a clear message when the output path cannot be created', async () => {
+		// A regular file where the output directory should be: mkdirSync must
+		// fail. The script must report a clear write failure (exit 1), not die
+		// with a raw stack trace, and must not leave a partial dump behind.
+		const blocker = join(tmp, 'blocker');
+		writeFileSync(blocker, 'x');
+		await expect(runBackup(['good', blocker])).rejects.toMatchObject({
+			code: 1,
+			stderr: expect.stringContaining('Failed to write backup')
+		});
+		expect(readdirSync(tmp).filter((f) => f.endsWith('.sql.gz'))).toEqual([]);
+	});
 });

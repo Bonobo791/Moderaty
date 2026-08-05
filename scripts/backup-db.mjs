@@ -29,7 +29,7 @@
 //   node scripts/backup-db.mjs moderaty backups
 
 import { execFile } from 'node:child_process';
-import { mkdirSync, createWriteStream, statSync } from 'node:fs';
+import { mkdirSync, rmSync, createWriteStream, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { promisify } from 'node:util';
@@ -72,8 +72,21 @@ if (!dump.includes('CREATE TABLE')) {
 }
 
 const stamp = new Date().toISOString().replace(/[-:]|\.\d{3}/g, '');
-mkdirSync(outDir, { recursive: true });
 const file = join(outDir, `${dbName}-${stamp}.sql.gz`);
-await pipeline(Readable.from([dump]), createGzip(), createWriteStream(file));
-
-console.log(`Wrote ${file} (${statSync(file).size} bytes gzipped, ${dump.length} bytes SQL).`);
+try {
+	mkdirSync(outDir, { recursive: true });
+	await pipeline(Readable.from([dump]), createGzip(), createWriteStream(file));
+	console.log(`Wrote ${file} (${statSync(file).size} bytes gzipped, ${dump.length} bytes SQL).`);
+} catch (err) {
+	// Never leave a partial file behind: a truncated gzip looks like a valid
+	// backup until the day a restore is attempted. Best-effort — when the
+	// output path itself is the problem (e.g. ENOTDIR) there is nothing to
+	// clean, and the loud error below is what matters.
+	try {
+		rmSync(file, { force: true });
+	} catch {
+		// Nothing to remove or nothing removable; the failure is reported below.
+	}
+	console.error(`Failed to write backup to ${file}: ${err.message}`);
+	process.exit(1);
+}

@@ -19,7 +19,7 @@
 import { expect, test, vi } from 'vitest';
 import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
 import { makeCookies } from '$lib/server/testcookies';
-import { channels, memberships, organizations, sessions, users } from '$lib/server/db/schema';
+import { auditLog, channels, memberships, organizations, sessions, users } from '$lib/server/db/schema';
 
 // decrypt is mocked so seeds can use opaque placeholders; the action must pass
 // each channel's decrypted token to Google's revocation endpoint.

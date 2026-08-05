@@ -68,19 +68,32 @@ Levers that matter:
 
 - `coverageAnalysis: "perTest"` — the single biggest speedup; runs only tests covering each mutant. Never `"off"`.
 - `thresholds.break` — score below → exit 1 → CI gate. Set floor = current − buffer, ratchet up.
-- PR mode (changed files only): StrykerJS has NO `--since` flag (that is Stryker.NET) — drive `--mutate` from git: `npx stryker run --mutate "$(git diff --name-only main...HEAD | grep -E '^src/.+\.ts$' | grep -v '\.test\.ts$' | paste -sd, -)"`. Filter the diff to your mutate set (CLI `--mutate` OVERRIDES config globs) and skip the run when the scope comes back empty.
+- PR mode (changed files only): StrykerJS has NO `--since` flag (that is Stryker.NET) — drive `--mutate` from git. **In the Moderaty repo, always use the shared script** (it applies the same exclusions as `stryker.config.json`, which a CLI `--mutate` OVERRIDES, and its empty output means skip):
+
+  ```sh
+  SCOPE=$(node scripts/stryker-pr-scope.mjs)
+  if [ -n "$SCOPE" ]; then
+    npx stryker run --mutate "$SCOPE"
+  else
+    echo "No mutable source files changed; skipping Stryker."
+  fi
+  ```
+
+  In repos without such a script the generic pattern is `--mutate "$(git diff --name-only main...HEAD | grep -E '^src/.+\.ts$' | grep -v '\.test\.ts$' | paste -sd, -)"` — illustrative only: it must be filtered to the repo's mutate set and guarded against an empty result, and it must NOT be used verbatim in Moderaty.
 - `npx stryker run --incremental` — caches results in `reports/stryker-incremental.json` (the default `incrementalFile`); cache that file in CI for reuse — committing it to the repo just adds bloat and merge noise. (`.stryker-tmp/` is the scratch sandbox dir, not the cache.)
 - `npx stryker run --mutate "src/billing/**/*.ts"` — scope hardening to one module.
 - `ignoreStatic: true` — skip mutants only executed at module load (large perf penalty, low value).
 - `mutator.excludedMutations` — drop noisy operators (e.g. `ObjectLiteral`, `StringLiteral` on logging-heavy files).
 - Jest: `enableFindRelatedTests: true` compounds with `perTest`.
 
-CI (PR gate + weekly sweep):
+CI (PR gate + weekly sweep) — illustrative; in Moderaty use the shared
+`scripts/stryker-pr-scope.mjs` as in `.github/workflows/mutation.yml`:
 
 ```yaml
 - name: Mutation test changed files
   if: github.event_name == 'pull_request'
-  # StrykerJS has no --since; scope --mutate from the git diff instead.
+  # StrykerJS has no --since; scope --mutate from the git diff instead,
+  # filtered to the repo's mutate set, and skip when the scope is empty.
   run: npx stryker run --mutate "$(git diff --name-only origin/main...HEAD | grep -E '^src/.+\.ts$' | grep -v '\.test\.ts$' | paste -sd, -)"
 - name: Full mutation sweep
   if: github.event_name == 'schedule'

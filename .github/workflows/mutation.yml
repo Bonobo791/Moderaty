@@ -50,11 +50,16 @@ jobs:
           node-version: 24
           cache: npm
 
-      - run: npm ci
+      # --ignore-scripts: no dependency needs its lifecycle script here
+      # (esbuild's binaries arrive via optionalDependencies; fsevents is
+      # macOS-only) — don't give the registry a code-execution path in CI.
+      - run: npm ci --ignore-scripts
 
       # Stryker's vitest runner needs the generated .svelte-kit/tsconfig.json;
       # without it the run crashes with a rolldown "Tsconfig not found" error.
-      - run: npx svelte-kit sync
+      # Invoke the local binary directly — npx can fetch and execute
+      # unverified packages on demand.
+      - run: ./node_modules/.bin/svelte-kit sync
 
       - uses: actions/cache@v4
         with:
@@ -78,7 +83,7 @@ jobs:
 
       - name: Stryker mutation report
         if: steps.scope.outputs.mutate != ''
-        run: npx stryker run --mutate "${{ steps.scope.outputs.mutate }}" --incremental --reporters html,json,clear-text
+        run: ./node_modules/.bin/stryker run --mutate "${{ steps.scope.outputs.mutate }}" --incremental --reporters html,json,clear-text
 
       - name: Skip notice when nothing mutable changed
         if: steps.scope.outputs.mutate == ''

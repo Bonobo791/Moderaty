@@ -505,6 +505,45 @@ test('reads DRY_RUN from private runtime environment variables', async () => {
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
 });
 
+test('forceDryRun previews a live deployment: dry-run audit rows carry the comment text and nothing durable changes', async () => {
+	// The dashboard's on-demand preview runs against a LIVE deployment
+	// (env DRY_RUN=false): same I8 guarantees as an env dry run, plus the
+	// comment text on the audit row (comments rows are never written, so the
+	// audit row is the only place the text survives). Text is capped at 500.
+	mocks.state.env.DRY_RUN = 'false';
+	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'delete' }];
+	const text = `comment ${'x'.repeat(600)}`;
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ text })],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	const result = await runChannel('channel', { forceDryRun: true });
+
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	expect(mocks.db.transaction).not.toHaveBeenCalled();
+	expect(mocks.state.insertedComments).toEqual([]);
+	expect(mocks.state.channelUpdates).toEqual([]);
+	expect(mocks.state.insertedAudits).toEqual([expect.objectContaining({
+		commentId: 'comment',
+		action: 'dry-run',
+		text: text.slice(0, 500)
+	})]);
+	expect(result).toMatchObject({ fetched: 1, acted: 1, queued: 0, partial: false, skipped: false, dryRun: true });
+});
+
+test('forceDryRun can only turn dry-run on — it never flips an env-dry deployment live', async () => {
+	mocks.state.env.DRY_RUN = 'true';
+	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'delete' }];
+
+	const result = await runChannel('channel', { forceDryRun: false });
+
+	expect(result.dryRun).toBe(true);
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
+});
+
 test('writes an approval audit entry for a low-risk AI decision', async () => {
 	mocks.scoreComment.mockResolvedValue(moderation(0.34));
 

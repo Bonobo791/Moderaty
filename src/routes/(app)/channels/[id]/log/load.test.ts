@@ -126,3 +126,22 @@ test('load rejects a signed-out request with 401', async () => {
 
 	await expect(load({ params: { id: 'UC1' }, locals: { user: null } } as never)).rejects.toMatchObject({ status: 401 });
 });
+
+test('a dry-run audit row surfaces its stored comment text to the page', async () => {
+	// Dry runs never insert into comments (I8); the text on the audit row is
+	// what the log page renders for dry-run entries.
+	await seedChannel();
+	await testDb().db.insert(auditLog).values({
+		channelId: 'UC1',
+		commentId: 'c-dry',
+		action: 'dry-run',
+		reason: 'ai score 0.91',
+		actor: 'system',
+		text: 'previewed comment text',
+		createdAt: '2026-01-01T00:00:01.000Z'
+	});
+
+	const result = await load({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);
+
+	expect(result!.entries[0]).toMatchObject({ commentId: 'c-dry', action: 'dry-run', text: 'previewed comment text' });
+});

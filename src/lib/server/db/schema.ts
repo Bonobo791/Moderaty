@@ -199,6 +199,10 @@ export const auditLog = sqliteTable('audit_log', {
 	reason: text('reason').notNull(), // human-readable, e.g. "rule #4 (keyword)" or "ai score 0.91"
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	actor: text('actor').notNull(), // 'system' | 'user'
+	// Comment text (≤500 chars) on dry-run rows only: a dry run never inserts
+	// into comments (I8), so the audit row is the only place its text survives.
+	// Null for every real-run action — that text lives in comments.text.
+	text: text('text'),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
 	// Dashboard ban counts (action='ban' + channel_id IN, issue #77) and the

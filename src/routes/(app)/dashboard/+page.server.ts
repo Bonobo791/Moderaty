@@ -21,6 +21,7 @@ import { auditLog, channels, comments } from '$lib/server/db/schema';
 import { decrypt } from '$lib/server/crypto';
 import { deleteUserRecords } from '$lib/server/deletion';
 import { revokeGoogleToken } from '$lib/server/google';
+import { runChannel } from '$lib/server/pipeline';
 import { requireUser, SESSION_COOKIE } from '$lib/server/session';
 import { and, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import { fail, isHttpError, redirect } from '@sveltejs/kit';
@@ -173,6 +174,39 @@ export const actions = {
 		}
 		console.info(`history analysis requested for channel ${channelId}: scanning back to ${boundary}`);
 		return { ok: true, scope: 'history', channelId, months };
+	},
+	dryRun: async ({ request, locals }) => {
+		const user = requireUser(locals);
+		const f = await request.formData();
+		const channelId = String(f.get('channelId') ?? '');
+		// Org-scoped: another team's channel reads as "not found" (never leak).
+		const channel = await db
+			.select({ id: channels.id, leaseExpiresAt: channels.leaseExpiresAt })
+			.from(channels)
+			.where(and(eq(channels.id, channelId), eq(channels.orgId, user.orgId)))
+			.get();
+		if (!channel) return fail(404, { scope: 'dryRun', channelId, error: 'channel not found' });
+		// A cron run in flight would race the preview (double AI spend,
+		// interleaved audit rows) — same lease coordination as analyzeHistory.
+		if (channel.leaseExpiresAt && channel.leaseExpiresAt > new Date().toISOString()) {
+			return fail(409, { scope: 'dryRun', channelId, error: 'This channel is mid-scan — retry in a minute.' });
+		}
+		// One page, hard 20 s ceiling: scoring is concurrent, so this fits the
+		// serverless window; a partial result is surfaced honestly. The run
+		// writes nothing durable except dry-run audit rows (I8).
+		try {
+			const result = await runChannel(channelId, {
+				maxPages: 1,
+				deadline: Date.now() + 20_000,
+				forceDryRun: true
+			});
+			return { ok: true as const, scope: 'dryRun', channelId, ...result };
+		} catch (e) {
+			// Loud server-side, generic client-side — never return raw
+			// YouTube/OpenAI error detail to the browser.
+			console.error(`dry run failed for channel ${channelId}:`, e);
+			return fail(502, { scope: 'dryRun', channelId, error: 'The dry run failed — check the server log and try again.' });
+		}
 	},
 	deleteAccount: async ({ request, locals, cookies }) => {
 		const user = requireUser(locals);

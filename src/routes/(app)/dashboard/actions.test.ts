@@ -16,16 +16,23 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { expect, test } from 'vitest';
+import { beforeEach, expect, test, vi } from 'vitest';
 import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
 import { channels } from '$lib/server/db/schema';
 import { eq } from 'drizzle-orm';
+
+const mocks = vi.hoisted(() => ({ runChannel: vi.fn() }));
+vi.mock('$lib/server/pipeline', () => ({ runChannel: mocks.runChannel }));
 
 import { actions } from './+page.server';
 
 setupTestDb(['channels']);
 
 const OWNER = TEST_OWNER;
+
+beforeEach(() => {
+	mocks.runChannel.mockReset();
+});
 
 async function seedChannel(id: string, userId: string | null = OWNER.id, orgId: string | null = 'org-1') {
 	await testDb().db.insert(channels).values({ id, userId, orgId, title: `Channel ${id}`, refreshTokenEnc: 'enc' });
@@ -251,4 +258,60 @@ test('set protections rejects a signed-out request with 401', async () => {
 
 	await expect(setProtections('UC1', { protectLgbtqia: 'on' }, null)).rejects.toMatchObject({ status: 401 });
 	expect(await protectionsOf('UC1')).toEqual({ protectLgbtqia: 0, protectWomen: 0 });
+});
+
+function dryRun(channelId: string, user: typeof OWNER | null = OWNER) {
+	return actions.dryRun({ request: postForm({ channelId }), locals: { user } } as never);
+}
+
+test('dry run previews a live deployment through runChannel and echoes the counts', async () => {
+	await seedChannel('UC1');
+	mocks.runChannel.mockResolvedValue({ fetched: 3, acted: 1, queued: 1, partial: false, skipped: false, dryRun: true });
+
+	const res = await dryRun('UC1');
+
+	expect(mocks.runChannel).toHaveBeenCalledWith('UC1', {
+		maxPages: 1,
+		deadline: expect.any(Number),
+		forceDryRun: true
+	});
+	expect(res).toMatchObject({ ok: true, channelId: 'UC1', fetched: 3, acted: 1, queued: 1, dryRun: true });
+});
+
+test('dry run rejects a signed-out request with 401 and never runs', async () => {
+	await seedChannel('UC1');
+
+	await expect(dryRun('UC1', null)).rejects.toMatchObject({ status: 401 });
+	expect(mocks.runChannel).not.toHaveBeenCalled();
+});
+
+test('dry run rejects a channel owned by another team with 404 and never runs', async () => {
+	await seedChannel('UC1', 'user-2', 'org-2');
+
+	const res = await dryRun('UC1');
+
+	expect(res).toMatchObject({ status: 404 });
+	expect(mocks.runChannel).not.toHaveBeenCalled();
+});
+
+test('dry run refuses to race a cron run holding the channel lease (409)', async () => {
+	await seedChannel('UC1');
+	await testDb().db.update(channels).set({ leaseExpiresAt: '2099-01-01T00:00:00.000Z' }).where(eq(channels.id, 'UC1'));
+
+	const res = await dryRun('UC1');
+
+	expect(res).toMatchObject({ status: 409 });
+	expect(mocks.runChannel).not.toHaveBeenCalled();
+});
+
+test('a failed dry run is loud on the server and a generic 502 to the client', async () => {
+	await seedChannel('UC1');
+	mocks.runChannel.mockRejectedValue(new Error('raw upstream detail: invalid_grant abc123'));
+	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+	const res = (await dryRun('UC1')) as { status: number; data: { error: string } };
+
+	expect(res.status).toBe(502);
+	expect(res.data.error).not.toContain('invalid_grant');
+	expect(spy).toHaveBeenCalled();
 });

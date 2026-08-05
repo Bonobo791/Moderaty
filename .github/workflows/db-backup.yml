@@ -1,0 +1,61 @@
+# Moderaty — YouTube Comment Auto-Moderation Tool
+# Copyright (C) 2026 Andrew Philip Weilbacher
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published
+# by the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+#
+# Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+#
+# Daily production database backup. Dumps the `moderaty` Turso database with
+# scripts/backup-db.mjs and keeps the gzipped dump as a workflow artifact for
+# 30 days. Requires a TURSO_API_TOKEN repository secret (a Turso platform API
+# token — mint one with `turso auth api-tokens mint`); without it the dump
+# step fails loudly, which is the intended behavior. Restore instructions
+# live in DEPLOY.md §6.
+
+name: db-backup
+
+on:
+  schedule:
+    # Daily at 03:23 UTC — off the top-of-hour herd.
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install Turso CLI
+        run: |
+          curl -sSfL https://get.tur.so/install.sh | bash
+          echo "$HOME/.turso" >> "$GITHUB_PATH"
+
+      - name: Dump production database
+        env:
+          TURSO_API_TOKEN: ${{ secrets.TURSO_API_TOKEN }}
+        run: node scripts/backup-db.mjs moderaty backups
+
+      - name: Upload dump artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: moderaty-dump-${{ github.run_id }}
+          path: backups/*.sql.gz
+          retention-days: 30
+          # A backup run that produced no file is a failure, not a success.
+          if-no-files-found: error

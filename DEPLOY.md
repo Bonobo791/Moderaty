@@ -100,3 +100,50 @@ The steps below are the one-time manual setup.
 - Set `DRY_RUN=false`, redeploy/restart env, trigger again; confirm held
   comments appear in YouTube Studio → Comments → Held for review.
 - Watch the next scheduled invocation succeed in the Netlify function logs.
+
+## 6. Backups
+
+- **Automated:** `.github/workflows/db-backup.yml` dumps the production
+  database daily at 03:23 UTC and keeps the gzipped SQL dump as a workflow
+  artifact for 30 days. One-time setup: mint a Turso platform API token
+  (`turso auth api-tokens mint <name>`) and add it to the repo as the
+  `TURSO_API_TOKEN` secret (Settings → Secrets and variables → Actions).
+  A run without the secret, or one that produces no dump, fails loudly.
+- **Manual:** with the turso CLI logged in,
+  `node scripts/backup-db.mjs moderaty backups` writes
+  `backups/moderaty-<timestamp>.sql.gz` (the `backups/` dir is gitignored).
+  The script is read-only against the database and refuses to write an empty
+  or schema-less dump.
+- **Restore:** create a fresh Turso database, then load the dump:
+  `gunzip -c backups/moderaty-<timestamp>.sql.gz | turso db shell <new-db>`.
+  Point `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN` at the new database in
+  Netlify env vars, redeploy, and re-run `npm run db:migrate` only if the
+  dump predates a newer migration (the dump includes `__drizzle_migrations`,
+  so drizzle-kit applies just the gap). Verify per §1 afterwards.
+
+## 7. Database outage runbook
+
+Turso outages (e.g. HTTP 502 "connect to upstream failed") are Turso-side;
+nothing in the app causes or can prevent them. When one happens:
+
+1. Confirm it is Turso, not you: `turso db shell moderaty "SELECT 1;"`.
+   `turso db show moderaty` succeeding while queries fail means
+   control-plane up / data-plane down. Per-host stalls do NOT appear on
+   status.turso.tech — a green status page proves nothing.
+2. Do nothing destructive. A 502 fails before any write, so nothing is
+   corrupted; cron simply misses runs and reconciles on the next successful
+   invocation (invariants I3/I4). Expected impact: the dashboard errors
+   loudly, moderation pauses, no data is lost and no wrong moderation
+   actions occur.
+3. Wait 15–30 minutes and retry. Past ~60 minutes, open a Turso support
+   ticket with the database URL.
+4. After recovery, re-verify any `db:migrate` that ran during the outage —
+   drizzle-kit can exit 0 without applying anything (§1). Check
+   `__drizzle_migrations` and the actual schema, never the exit code.
+
+**Failure isolation (optional, human-only):** keep production and dev in
+separate Turso groups or locations so one location-level stall cannot take
+both down. Embedded replicas are not worth it on Netlify serverless
+(ephemeral filesystem). If availability ever needs to exceed what Turso
+single-primary offers, that is a re-platforming decision — do not paper
+over it with silent fallbacks in app code.

@@ -18,7 +18,7 @@
 
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { REFUND_NOTICE_TEXT } from '../server/legal';
+import { PRIVACY_NOTICE_TEXT, REFUND_NOTICE_TEXT } from '../server/legal';
 import { FAQ_ENTRIES } from './faq';
 import { LEGAL_DOCS, LEGAL_EFFECTIVE_DATE, LEGAL_VERSION } from './legal';
 import { PRICING_FAQ_ENTRIES } from './pricing-faq';
@@ -218,6 +218,23 @@ describe('storage claims match implementation (comment PII)', () => {
 		expect(readComponent('dpa')).toMatch(/user rules?/i);
 		const schema = readFileSync(new URL('../server/db/schema.ts', import.meta.url), 'utf8');
 		expect(schema).toMatch(/user rules?/i);
+	});
+
+	// Privacy marketing claims (homepage TrustBar, the LGPD FAQ answer, and the
+	// consent-page privacy notice) must be scoped to "what your account needs
+	// to run": account data IS stored while the account exists (Privacy §2), so
+	// an absolute zero-data claim would contradict the Policy.
+	it('user-data privacy claims are scoped to account needs, never absolute', () => {
+		const trustBar = readFileSync(new URL('../components/landing/TrustBar.svelte', import.meta.url), 'utf8');
+		const lgpdFaq = FAQ_ENTRIES.find((f) => f.q === 'Is Moderaty LGPD compliant?');
+		expect(lgpdFaq, 'LGPD FAQ entry missing').toBeDefined();
+		const ABSOLUTE = [/we (do not|don't) store/i, /stores? nothing about you\b(?![^.]*beyond)/i];
+		for (const text of [trustBar, lgpdFaq?.a ?? '', PRIVACY_NOTICE_TEXT]) {
+			expect(text).toMatch(/account needs to run/i);
+			for (const pattern of ABSOLUTE) {
+				expect(text).not.toMatch(pattern);
+			}
+		}
 	});
 });
 

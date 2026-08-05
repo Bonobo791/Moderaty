@@ -71,6 +71,16 @@ export const MARKETING_CHECKBOX_TEXT =
 export const REFUND_NOTICE_TEXT =
 	'Every purchase is covered by Brazilian consumer law: you have 7 days from purchase to request a full refund of everything you paid, no deductions, no questions asked (CDC Art. 49).';
 
+/**
+ * Privacy notice shown beside REFUND_NOTICE_TEXT on the consent page. The
+ * claim is scoped on purpose — account data IS stored while the account
+ * exists (Privacy Policy §2) — so the honest line is "nothing beyond what
+ * your account needs to run" plus the one statutory keep (LGPD Art. 16, III).
+ * Scoping is enforced by the consistency guard in src/lib/landing/legal.test.ts.
+ */
+export const PRIVACY_NOTICE_TEXT =
+	'Privacy, in one sentence: Moderaty stores nothing about you beyond what your account needs to run, and we never sell or profile your data. The one record we keep by law is this consent acceptance itself (LGPD Art. 16, III).';
+
 export const PENDING_CONSENT_COOKIE = 'moderaty_consent_pending';
 const PENDING_TTL_MS = 10 * 60 * 1000;
 // Bounds the cookie; a user realistically has one or two tabs mid-flow. Same

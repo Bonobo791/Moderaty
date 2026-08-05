@@ -16,10 +16,12 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { expect, test, vi } from 'vitest';
+import { beforeEach, expect, test, vi } from 'vitest';
+import { error } from '@sveltejs/kit';
 
 const mocks = vi.hoisted(() => ({
-	getSessionUser: vi.fn()
+	getSessionUser: vi.fn(),
+	assertMigrationsCurrent: vi.fn()
 }));
 
 vi.mock('$lib/server/session', () => ({
@@ -31,7 +33,16 @@ vi.mock('$lib/server/oauthState', () => ({
 	cookieSecure: () => false
 }));
 
+vi.mock('$lib/server/migrationGuard', () => ({
+	assertMigrationsCurrent: mocks.assertMigrationsCurrent
+}));
+
 import { handle } from './hooks.server';
+
+beforeEach(() => {
+	mocks.getSessionUser.mockReset();
+	mocks.assertMigrationsCurrent.mockReset().mockResolvedValue(undefined);
+});
 
 function makeEvent() {
 	return {
@@ -63,4 +74,33 @@ test('a resolved session user populates locals.user', async () => {
 	await handle({ event, resolve } as never);
 
 	expect(event.locals.user).toMatchObject({ id: 'user-1' });
+});
+
+test('a database behind the code fails the request with the guard 503 before any session work', async () => {
+	// error() throws by design — capture the HttpError it produces so the mock
+	// rejects with the same instanceof the real guard throws.
+	let guardError: unknown;
+	try {
+		error(503, 'the service is being upgraded — please retry in a few minutes');
+	} catch (e) {
+		guardError = e;
+	}
+	mocks.assertMigrationsCurrent.mockRejectedValue(guardError);
+	const event = makeEvent();
+	const resolve = vi.fn(async () => new Response('ok'));
+
+	await expect(handle({ event, resolve } as never)).rejects.toMatchObject({ status: 503 });
+	expect(mocks.getSessionUser).not.toHaveBeenCalled();
+	expect(resolve).not.toHaveBeenCalled();
+});
+
+test('a database failure inside the guard check fails loudly with a user-visible 500', async () => {
+	mocks.assertMigrationsCurrent.mockRejectedValue(new Error('database is locked'));
+	vi.spyOn(console, 'error').mockImplementation(() => {});
+	const event = makeEvent();
+	const resolve = vi.fn(async () => new Response('ok'));
+
+	await expect(handle({ event, resolve } as never)).rejects.toMatchObject({ status: 500 });
+	expect(mocks.getSessionUser).not.toHaveBeenCalled();
+	expect(resolve).not.toHaveBeenCalled();
 });

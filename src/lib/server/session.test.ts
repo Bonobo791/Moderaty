@@ -170,11 +170,16 @@ test('a session whose active org membership vanished falls back to the oldest me
 
 test('a user with zero memberships makes getSessionUser throw, never sign out', async () => {
 	// Zero memberships is a data bug (Phase A backfill guarantees one) — fail
-	// loudly rather than improvise access or read as signed-out.
+	// loudly rather than improvise access or read as signed-out. The throw is a
+	// deliberate HttpError so hooks propagates it instead of degrading to
+	// maintenance mode.
 	await testDb()
 		.db.insert(users)
 		.values({ id: 'bare', googleSub: 'sub-bare', email: 'bare@example.com', displayName: 'bare' });
 	const { token } = await createSession('bare');
 
-	await expect(getSessionUser(token)).rejects.toThrow('account has no organization');
+	await expect(getSessionUser(token)).rejects.toMatchObject({
+		status: 500,
+		body: { message: expect.stringContaining('account has no organization') }
+	});
 });

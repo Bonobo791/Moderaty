@@ -109,7 +109,9 @@ export async function getSessionUser(token: string | undefined): Promise<Session
 	const resolved = await resolveActiveOrg(row.user.id, row.session.activeOrgId);
 	if (!resolved) {
 		console.error(`user ${row.user.id} has no organization membership`);
-		throw new Error('account has no organization — contact support');
+		// HttpError, not a plain Error: hooks rethrows deliberate HttpErrors so
+		// this data bug fails loudly instead of degrading to maintenance mode.
+		throw error(500, 'account has no organization — contact support');
 	}
 	// Org repair and sliding-expiry renewal are one UPDATE when both apply.
 	const updates: { activeOrgId?: string; expiresAt?: string } = {};

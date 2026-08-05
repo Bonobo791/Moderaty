@@ -48,6 +48,13 @@ async function ruleRows() {
 	return testDb().db.select().from(rules).all();
 }
 
+test('load returns the maintenance payload during a database outage instead of a 401', async () => {
+	// The layout renders the overlay; the child load must not throw on the
+	// null-user outage shape.
+	const result = await load({ params: { id: 'UC1' }, locals: { user: null, dbDown: true } } as never);
+	expect(result).toMatchObject({ maintenance: true, rs: [] });
+});
+
 test('load projects only the channel fields the page renders — never the credential', async () => {
 	await seedChannel('UC1');
 	const result = await load({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);

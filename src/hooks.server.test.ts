@@ -142,3 +142,22 @@ test('/api/health bypasses the guard and session so a database outage still reac
 	expect(mocks.assertMigrationsCurrent).not.toHaveBeenCalled();
 	expect(mocks.getSessionUser).not.toHaveBeenCalled();
 });
+
+test('a deliberate HttpError from session resolution propagates — integrity failures are not outages', async () => {
+	// getSessionUser throws error(500) for data-integrity failures (an account
+	// with no organization). Degrading those to maintenance would mask
+	// corruption as an outage and sign the user out; they must fail loudly.
+	let integrity: unknown;
+	try {
+		error(500, 'account has no organization — contact support');
+	} catch (e) {
+		integrity = e;
+	}
+	mocks.getSessionUser.mockRejectedValue(integrity);
+	const event = makeEvent();
+	const resolve = vi.fn(async () => new Response('ok'));
+
+	await expect(handle({ event, resolve } as never)).rejects.toMatchObject({ status: 500 });
+	expect(event.locals.dbDown).toBeUndefined();
+	expect(resolve).not.toHaveBeenCalled();
+});

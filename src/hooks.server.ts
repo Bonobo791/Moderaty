@@ -70,6 +70,10 @@ export const handle: Handle = async ({ event, resolve }) => {
 			});
 		}
 	} catch (e) {
+		// A deliberate HttpError (e.g. the account-has-no-org integrity failure)
+		// is NOT an outage: let it fail loudly instead of masking it as
+		// maintenance and signing the user out.
+		if (isHttpError(e)) throw e;
 		console.error('session lookup failed:', e);
 		event.locals.dbDown = true;
 		event.locals.user = null;

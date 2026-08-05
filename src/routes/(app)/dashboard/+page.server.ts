@@ -23,7 +23,7 @@ import { deleteUserRecords } from '$lib/server/deletion';
 import { revokeGoogleToken } from '$lib/server/google';
 import { requireUser, SESSION_COOKIE } from '$lib/server/session';
 import { and, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
-import { fail, redirect } from '@sveltejs/kit';
+import { fail, isHttpError, redirect } from '@sveltejs/kit';
 
 /**
  * Loads the authenticated user's channels and moderation statistics for the dashboard.
@@ -78,6 +78,8 @@ export async function load({ locals }) {
 			: [];
 		return { chs, stats, bans, maintenance: false };
 	} catch (e) {
+		// A deliberate HttpError is NOT an outage — fail loudly, same as hooks.
+		if (isHttpError(e)) throw e;
 		// Intermittent outage: the hook queries succeeded but these didn't.
 		// Loud on the server, a maintenance overlay for the user — never a 500.
 		console.error('dashboard load failed:', e);

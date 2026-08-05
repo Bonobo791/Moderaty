@@ -121,3 +121,72 @@ Calibration examples (note how the same words flip bands with context):
 Stay conservative: over-scoring leads to real bans on real people. Scores
 above 0.75 need concrete textual evidence, and 0.95 or above should almost
 never be used.`;
+
+// Optional strict-protection addendum, enabled per channel. Same contract as
+// the base rubric: identity-based harassment is condemned WITHOUT slurs or
+// verbal abuse (those are the omni classifier's job), legitimate discussion
+// stays acceptable, and 0.95+ stays rare. Appended verbatim by
+// buildTonePrompt so the base calibration never drifts.
+export const LGBTQIA_PROTECTION_SECTION = `Identity protection — LGBTQIA+ people: the channel owner has enabled
+strict protection against harassment targeting people for their sexual
+orientation or gender identity. Score 0.76 or higher any comment that mocks,
+demeans, dehumanizes, or shows contempt for gay, lesbian, bisexual,
+transgender, queer, intersex, or asexual people AS people — sneering at
+pride or identity, stereotypes deployed as insults, disgust framed as a
+joke, telling them they are not welcome, or demeaning generalizations about
+the group — even when the comment contains no slurs and no verbal abuse.
+Genuine attempts to cause harm — coordinated harassment or dogpiling
+against LGBTQIA+ people, deadnaming or humiliation campaigns, calls to
+drive them off the platform — score 0.95-1.00.
+
+This protection condemns only identity-based attacks. Keep in the
+acceptable band: support and allyship, earnest questions about LGBTQIA+
+topics, good-faith disagreement about policy, law, or religion that argues
+a position without demeaning people, criticism of a specific person's
+actions or arguments that is not based on their identity, and quoting a
+hateful statement in order to condemn it.
+
+Calibration examples:
+- "Nobody wants to see two guys kissing, keep that away from normal people." -> 0.88
+- "Trans people are delusional, stop shoving it down our throats." -> 0.90
+- "Happy pride! Love this channel." -> 0.05
+- "I disagree with the new policy, but that's a legal question, not a personal one." -> 0.35
+- "His carburetor take is still wrong, orientation has nothing to do with it." -> 0.30
+- "Everyone mass-report this deviant and get him banned." -> 0.97`;
+
+export const WOMEN_PROTECTION_SECTION = `Identity protection — women: the channel owner has enabled strict
+protection against harassment targeting women. Score 0.76 or higher any
+comment that mocks, demeans, or shows contempt for women as a group, or
+attacks a woman AS a woman — misogynistic generalizations about women's
+place, abilities, or worth, sexual humiliation, demeaning comments about
+her body or appearance meant to degrade her, dismissing her competence or
+her right to speak because she is a woman — even when the comment contains
+no slurs and no verbal abuse. Genuine attempts to cause harm — coordinated
+harassment, humiliation, or intimidation campaigns against a woman — score
+0.95-1.00.
+
+This protection condemns only identity-based attacks. Keep in the
+acceptable band: criticism of a woman's content, ideas, or actions that is
+not based on her being a woman, blunt disagreement with her take, and
+earnest discussion of gender topics argued without demeaning anyone.
+
+Calibration examples:
+- "Of course a woman got the spec wrong, stick to makeup tutorials." -> 0.90
+- "Women have no business teaching engine work." -> 0.88
+- "Her editing in this one is sloppy." -> 0.30
+- "She skipped the prep step, so the method fails — reshoot it." -> 0.35
+- "Everyone spam her comments until she quits the platform." -> 0.97`;
+
+/**
+ * Builds the system prompt for the tone pass from the base rubric plus any
+ * per-channel strict-protection sections.
+ *
+ * @param {{ protectLgbtqia?: number|null, protectWomen?: number|null }} [protections] - Enabled protection flags (1/0 or null).
+ * @returns The prompt to send; exactly TONE_PROMPT when nothing is enabled.
+ */
+export function buildTonePrompt({ protectLgbtqia, protectWomen } = {}) {
+	const sections = [TONE_PROMPT];
+	if (protectLgbtqia) sections.push(LGBTQIA_PROTECTION_SECTION);
+	if (protectWomen) sections.push(WOMEN_PROTECTION_SECTION);
+	return sections.join('\n\n');
+}

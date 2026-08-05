@@ -57,7 +57,7 @@ fully-ignored landing content modules (`src/lib/landing/legal.ts`,
 | Batch | Branch | Files | Survivors+NoCov | Status |
 |---|---|---|---|---|
 | A | `mt-80-schema` | `src/lib/server/db/schema.ts` | 170+0 | **done — 100%** (137 killed, 33 ignored equivalents) |
-| B | `mt-80-auth` | `google.ts`, auth `login/callback/+server.ts`, auth `callback/+server.ts`, `oauthState.ts`, `channelConnect.ts`, `legal.ts` | 235+34 | **done — ~100%** (see triage log) |
+| B | `mt-80-auth` | `google.ts`, auth `login/callback/+server.ts`, auth `callback/+server.ts`, `oauthState.ts`, `channelConnect.ts`, `legal.ts` | 235+34 | **done — 100%** (537 killed + 1 timeout, 0 survived, 0 no-cov; 38 ignored equivalents) |
 | C | `mt-80-moderation` | `pipeline.ts`, `rules.ts`, `youtube.ts`, `moderation.ts`, `tone.ts` | 236+65 | pending |
 | D | `mt-80-tenancy-routes` | `org.ts`, `deletion.ts`, `session.ts`, `crypto.ts`, `ownership.ts`, `hooks.server.ts`, `db/index.ts`, `db/migrationTestUtils.ts`, dashboard/org/queue/log/rules/consent/connect-channel page servers, `api/cron/+server.ts`, `org/switch/+server.ts`, `invite/[token]/+page.server.ts`, `logout/+page.server.ts`, `(app)/+layout.server.ts` | ~200+50 | pending |
 | E | `mt-80-plumbing` | `http.ts`, `consentText.ts`, `migrationGuard.ts`, `testdb.ts`, `testcookies.ts`, `relative-time.ts`, landing `links.ts`/`json-ld.ts`/`queue-script.ts`, `api/health/+server.ts`, auth `+server.ts` pair, `login/+page.server.ts`, `auto-refresh.svelte.ts` | ~75+45 | pending |
@@ -162,41 +162,45 @@ justification; no-coverage → coverage test) is recorded here as batches land.
 
 ### Batch B — auth/OAuth surface (PR mt-80-auth)
 
-Six security-critical files, ~269 survivors+no-coverage at baseline. All six
-ended at or near 100% on scoped runs (final numbers in the PR body):
+Six security-critical files, ~269 survivors+no-coverage at baseline. Final
+scoped verification (`--ignoreStatic --concurrency 1`, fresh incremental
+cache): **100.00% on every file — 537 killed + 1 timeout, 0 survived, 0
+no-coverage, 38 ignored** (exclusions below + same-line sweeps noted):
 
-- `src/lib/server/google.ts` 52.7% → 100% (new `google.test.ts`, 24 tests —
-  env validation, token-exchange plumbing, error-detail parsing, 502 paths,
-  revoke). 1 exclusion: OptionalChaining on `parsed?.error` — `JSON.parse`
-  never yields undefined; the null case's TypeError is swallowed by the same
-  catch (equivalence pinned by a behavior test).
-- `src/lib/server/oauthState.ts` 71.05% → 100% (extended `oauthState.test.ts`
-  to 9 tests). 2 exclusions: falsy-cookie guard and non-array `.filter` guard
-  — both throw into the same catch → same `[]`. Line-granular directives also
-  ignore the `→true` variants on those lines; those stay pinned by tests.
-- `src/lib/server/legal.ts` 62.7% → 100% (new `legal.test.ts`, 26 tests —
-  pending-consent cookie read/write/park/clear, TTL boundaries with fake
-  timers, forgery guards, exact cookie options). 2 exclusions: same
-  guard/catch equivalence pattern as oauthState.
-- `src/lib/server/channelConnect.ts` 58.0% → ~100% (new
-  `channelConnect.test.ts`, 23 tests — encrypted pick-cookie read/park/clear,
-  TTL boundary, tamper/malformed entries, `upsertChannelConnection`
-  ok/conflict/handover/orphan on in-memory libsql). 2 exclusions: the
-  guard/catch pattern, plus `typeof c === 'object'` → true in the channel
-  validation — JSON.parse never yields undefined, a primitive's `.id` is
-  undefined so the conjunction stays false, null fails `c !== null` either
-  way.
-- `src/routes/api/auth/google/callback/+server.ts` 63.9% → 100% (extended
-  `callback.test.ts` 8 → 21 tests — token exchange shape, channels-listing
-  pagination incl. pathological-loop cap, invalid-JSON/null/primitive bodies,
-  missing-refresh-token reject before any DB write, exact error messages).
-  Zero exclusions.
-- `src/routes/api/auth/google/login/callback/+server.ts` 57.3% → 100%
-  (extended `login/login.test.ts`, +236 lines — userinfo guards, placeholder
-  email fallback, parked-payload kinds, per-flow state consumption). 1
-  exclusion: `typeof info !== 'object'` in the userinfo guard — JSON.parse
-  primitives make the `.sub` disjunct true anyway (6 same-line mutants swept
-  into Ignored stay pinned by tests).
+- `src/lib/server/google.ts` 52.7% → 100% (82 killed, 1 ignored) (new
+  `google.test.ts`, 24 tests — env validation, token-exchange plumbing,
+  error-detail parsing, 502 paths, revoke). 1 exclusion: OptionalChaining on
+  `parsed?.error` — `JSON.parse` never yields undefined; the null case's
+  TypeError is swallowed by the same catch (equivalence pinned by a behavior
+  test).
+- `src/lib/server/oauthState.ts` 71.05% → 100% (34 killed, 5 ignored)
+  (extended `oauthState.test.ts` to 9 tests). 2 exclusions: falsy-cookie
+  guard and non-array `.filter` guard — both throw into the same catch →
+  same `[]`. Line-granular directives also ignore the `→true` variants on
+  those lines; those stay pinned by tests.
+- `src/lib/server/legal.ts` 62.7% → 100% (107 killed, 10 ignored) (new
+  `legal.test.ts`, 26 tests — pending-consent cookie read/write/park/clear,
+  TTL boundaries with fake timers, forgery guards, exact cookie options). 2
+  exclusions: same guard/catch equivalence pattern as oauthState.
+- `src/lib/server/channelConnect.ts` 58.0% → 100% (100 killed, 15 ignored)
+  (new `channelConnect.test.ts`, 23 tests — encrypted pick-cookie
+  read/park/clear, TTL boundary, tamper/malformed entries,
+  `upsertChannelConnection` ok/conflict/handover/orphan on in-memory
+  libsql). 2 exclusions: the guard/catch pattern, plus
+  `typeof c === 'object'` → true in the channel validation — JSON.parse
+  never yields undefined, a primitive's `.id` is undefined so the
+  conjunction stays false, null fails `c !== null` either way.
+- `src/routes/api/auth/google/callback/+server.ts` 63.9% → 100% (121
+  killed, 0 ignored) (extended `callback.test.ts` 8 → 21 tests — token
+  exchange shape, channels-listing pagination incl. pathological-loop cap,
+  invalid-JSON/null/primitive bodies, missing-refresh-token reject before
+  any DB write, exact error messages). Zero exclusions.
+- `src/routes/api/auth/google/login/callback/+server.ts` 57.3% → 100% (93
+  killed, 7 ignored) (extended `login/login.test.ts`, +236 lines — userinfo
+  guards, placeholder email fallback, parked-payload kinds, per-flow state
+  consumption). 1 exclusion: `typeof info !== 'object'` in the userinfo
+  guard — JSON.parse primitives make the `.sub` disjunct true anyway (6
+  same-line mutants swept into Ignored stay pinned by tests).
 
 **Process findings (apply to all later batches and Step 7):**
 

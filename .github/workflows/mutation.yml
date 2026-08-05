@@ -1,0 +1,70 @@
+# Moderaty — YouTube Comment Auto-Moderation Tool
+# Copyright (C) 2026 Andrew Philip Weilbacher
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published
+# by the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version. This program is distributed in the hope
+# that it will be useful, but WITHOUT ANY WARRANTY; without even the implied
+# warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+#
+# Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+
+# Report-only mutation testing on every PR: Stryker mutates the files changed
+# vs main (`--since main`) and uploads the HTML/JSON report as an artifact.
+# This NEVER fails on surviving mutants — there is deliberately no
+# thresholds.break (ratcheting a gate is a separate, maintainer-approved step
+# per AGENTS.md). The check only goes red if Stryker itself errors, which is a
+# real signal (broken config, broken suite, missing tsconfig).
+
+name: Mutation report
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  stryker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # --since main diffs against the merge base; the default shallow
+          # clone has no history to diff against.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      # Stryker's vitest runner needs the generated .svelte-kit/tsconfig.json;
+      # without it the run crashes with a rolldown "Tsconfig not found" error.
+      - run: npx svelte-kit sync
+
+      - uses: actions/cache@v4
+        with:
+          path: reports/stryker-incremental.json
+          key: stryker-incremental-${{ github.head_ref }}
+          restore-keys: |
+            stryker-incremental-${{ github.head_ref }}
+            stryker-incremental-main
+            stryker-incremental-
+
+      - run: npx stryker run --since main --incremental --reporters html,json,clear-text
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stryker-report
+          path: reports/mutation/
+          if-no-files-found: warn

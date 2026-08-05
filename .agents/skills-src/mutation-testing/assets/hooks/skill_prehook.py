@@ -150,18 +150,29 @@ if __name__ == "__main__":
     except Exception as exc:
         # Hooks must never break the prompt flow, but failure must be loud on
         # both channels: stderr for the server log, stdout so the user (and
-        # the agent reading injected context) actually sees it. Each write is
-        # guarded: when the original error came from a broken output stream,
-        # writing to that stream raises again, and an unguarded handler would
-        # exit non-zero, breaking the always-exit-0 contract.
+        # the agent reading injected context) actually sees it. When a write
+        # fails the harness's swapped-in stream is dead, so fall back to the
+        # interpreter's original stream AND reassign sys.stderr/sys.stdout to
+        # it — otherwise interpreter shutdown flushes the dead object and the
+        # process exits 120 despite sys.exit(0). Only a double failure is
+        # swallowed: with no channel left there is nothing to write to, and
+        # the always-exit-0 contract still holds.
+        err_msg = f"mutation-testing prehook failed: {type(exc).__name__}: {exc}\n"
         try:
-            sys.stderr.write(f"mutation-testing prehook failed: {type(exc).__name__}: {exc}\n")
+            sys.stderr.write(err_msg)
         except Exception:
-            pass
+            sys.stderr = sys.__stderr__
+            try:
+                sys.stderr.write(err_msg)
+            except Exception:
+                pass
+        warn_msg = f"[mutation-testing prehook WARNING: hook failed: {type(exc).__name__}: {exc}]\n"
         try:
-            sys.stdout.write(
-                f"[mutation-testing prehook WARNING: hook failed: {type(exc).__name__}: {exc}]\n"
-            )
+            sys.stdout.write(warn_msg)
         except Exception:
-            pass
+            sys.stdout = sys.__stdout__
+            try:
+                sys.stdout.write(warn_msg)
+            except Exception:
+                pass
     sys.exit(0)

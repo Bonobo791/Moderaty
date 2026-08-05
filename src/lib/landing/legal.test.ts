@@ -377,15 +377,17 @@ describe('OAuth scope and ban claims match implementation', () => {
 		expect(accessFaq?.a).toMatch(/read.*titles? and descriptions?.*context.*tone analysis/i);
 	});
 
-	it('the access FAQ discloses reading the channel itself when connecting', () => {
-		// callback/+server.ts fetchOwnedChannels calls channels.list
-		// (part=snippet, mine=true) to read the connected channel's own id
-		// and title, so "read and moderate comments ... nothing else"
-		// understates what the token is used for.
+	it('the access FAQ discloses listing the account channels when connecting', () => {
+		// callback/+server.ts fetchOwnedChannels paginates channels.list
+		// (part=snippet, mine=true) over EVERY channel the Google account owns
+		// (brand accounts included) so the picker can list them, and parks that
+		// list in an encrypted state-keyed cookie while the user picks — so
+		// "read and moderate comments ... nothing else" understates what the
+		// token is used for.
 		const accessFaq = FAQ_ENTRIES.find(
 			(f) => f.q === 'What YouTube account access does Moderaty need?'
 		);
 		expect(accessFaq, 'access FAQ entry missing').toBeDefined();
-		expect(accessFaq?.a).toMatch(/channel'?s own (title|name|details)/i);
+		expect(accessFaq?.a).toMatch(/list.*channels.*(Google account|account owns).*(pick|choose)/i);
 	});
 });

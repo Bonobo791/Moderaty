@@ -43,7 +43,7 @@ export const PRICING_FAQ_ENTRIES: { q: string; a: string }[] = [
 	},
 	{
 		q: 'Which one should I pick?',
-		a: 'If you have a server and five minutes, self-host: it is free and it is everything. If you are early and have an OpenAI key, the $49 lifetime is the best deal we will ever make. Otherwise $5 a month, and if your volume dwarfs that, contact us for custom pricing. Same hammer either way.'
+		a: 'If you have a server, self-host: it is free and it is everything. If you are early and have an OpenAI key, the $49 lifetime is the best deal we will ever make. Otherwise $5 a month, and if your volume dwarfs that, contact us for custom pricing. Same hammer either way.'
 	},
 	{
 		q: 'Can I get a refund?',

@@ -38,6 +38,13 @@ async function seedEntries(rows: { commentId: string; action: string; createdAt:
 		.values(rows.map((row) => ({ channelId: 'UC1', reason: 'test', actor: 'system', ...row })));
 }
 
+test('load returns the maintenance payload during a database outage instead of a 401', async () => {
+	// The layout renders the overlay; the child load must not throw on the
+	// null-user outage shape.
+	const result = await load({ params: { id: 'UC1' }, locals: { user: null, dbDown: true } } as never);
+	expect(result).toMatchObject({ maintenance: true, entries: [] });
+});
+
 test('load marks only the latest reversible action per comment as undoable', async () => {
 	await seedChannel();
 	await seedEntries([

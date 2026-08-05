@@ -91,6 +91,17 @@ describe('queue load projection (behavior)', () => {
 	const event = () =>
 		({ params: { id: 'UCchan' }, locals: { user: { id: 'user-1' } } }) as unknown as Parameters<typeof load>[0];
 
+	it('returns the maintenance payload during a database outage instead of throwing', async () => {
+		const result = await load({
+			params: { id: 'UCchan' },
+			locals: { user: null, dbDown: true }
+		} as unknown as Parameters<typeof load>[0]);
+
+		expect(result).toMatchObject({ maintenance: true, pending: [] });
+		// The outage short-circuit runs before any ownership or DB work.
+		expect(mocks.ownedChannel).not.toHaveBeenCalled();
+	});
+
 	it('returns only the projected fields — never author identifiers', async () => {
 		const result = await load(event());
 

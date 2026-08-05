@@ -38,6 +38,10 @@ import type { Actions, PageServerLoad } from './$types';
 // Team settings for the ACTIVE team. Members see the roster; admin+ see
 // invite management; owners see role controls (enforced server-side in org.ts).
 export const load: PageServerLoad = async ({ locals, url }) => {
+	// Database outage: the layout renders the overlay; this load must not 401
+	// on the null-user outage shape.
+	if (locals.dbDown)
+		return { user: null, members: [], invites: [], inviteBase: new URL('/invite/', url.origin).toString(), maintenance: true };
 	const user = requireUser(locals);
 	const members = await listMembers(user.id, user.orgId);
 	const invites =

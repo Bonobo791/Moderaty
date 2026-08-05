@@ -24,8 +24,8 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 	let { data, form } = $props();
 
-	const isOwner = $derived(data.user.orgRole === 'owner');
-	const isAdminUp = $derived(data.user.orgRole === 'owner' || data.user.orgRole === 'admin');
+	const isOwner = $derived(data.user?.orgRole === 'owner');
+	const isAdminUp = $derived(data.user?.orgRole === 'owner' || data.user?.orgRole === 'admin');
 </script>
 
 <svelte:head>
@@ -34,7 +34,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <h1>Team</h1>
 <p class="page-sub">
-	{data.user.orgName} — your role: <span class="badge neutral">{data.user.orgRole}</span>
+	{data.user?.orgName} — your role: <span class="badge neutral">{data.user?.orgRole}</span>
 </p>
 
 {#if form?.error}
@@ -46,7 +46,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		<h2 style="margin-top:0">Rename team</h2>
 		<form method="POST" action="?/rename" use:enhance>
 			<label for="team-name">Team name</label>
-			<input id="team-name" type="text" name="name" value={data.user.orgName} maxlength="80" required />
+			<input id="team-name" type="text" name="name" value={data.user?.orgName} maxlength="80" required />
 			<button class="btn secondary small" type="submit">Rename team</button>
 		</form>
 	</div>
@@ -79,7 +79,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 								<button class="btn secondary small" type="submit">Change role for {member.displayName}</button>
 							</form>
 						{/if}
-						{#if !member.isYou && member.role !== 'owner' && (isOwner || (data.user.orgRole === 'admin' && member.role === 'member'))}
+						{#if !member.isYou && member.role !== 'owner' && (isOwner || (data.user?.orgRole === 'admin' && member.role === 'member'))}
 							<form method="POST" action="?/remove" use:enhance>
 								<input type="hidden" name="userId" value={member.userId} />
 								<button class="btn secondary small" type="submit">Remove {member.displayName} from team</button>

@@ -27,6 +27,9 @@ import { env } from '$env/dynamic/private';
 import { error, fail } from '@sveltejs/kit';
 
 export async function load({ params, locals }) {
+	// Database outage: the layout renders the overlay; this load must not 401
+	// on the null-user outage shape.
+	if (locals.dbDown) return { ch: { id: params.id, title: '' }, pending: [], maintenance: true };
 	const ch = await ownedChannel(params.id, locals);
 	const pending = await db
 		.select({

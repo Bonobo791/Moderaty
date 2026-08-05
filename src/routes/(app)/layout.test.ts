@@ -23,6 +23,8 @@ import { expect, test } from 'vitest';
 import { TEST_OWNER, seedConsent, seedUser, setupTestDb, testDb } from '$lib/server/testdb';
 import { memberships, organizations } from '$lib/server/db/schema';
 import { LEGAL_VERSION } from '$lib/server/legal';
+import { SESSION_COOKIE } from '$lib/server/session';
+import { makeCookies } from '$lib/server/testcookies';
 
 import { load } from './+layout.server';
 
@@ -38,9 +40,9 @@ async function seedOwnerOrg() {
 		.values({ userId: TEST_OWNER.id, orgId: TEST_OWNER.orgId, role: 'owner' });
 }
 
-async function captureLoad(user: typeof TEST_OWNER | null) {
+async function captureLoad(user: typeof TEST_OWNER | null, dbDown = false, cookies = makeCookies()) {
 	try {
-		return await load({ locals: { user } } as never);
+		return await load({ locals: { user, dbDown }, cookies } as never);
 	} catch (e) {
 		return e as { status: number; location?: string };
 	}
@@ -69,4 +71,41 @@ test('a signed-in user with a current consent row loads normally', async () => {
 test('a signed-out visitor is still redirected to /login', async () => {
 	const res = await captureLoad(null);
 	expect(res).toMatchObject({ status: 302, location: '/login' });
+});
+
+test('a database outage returns the maintenance payload instead of redirecting to /login', async () => {
+	// dbDown WITH a session cookie is a signed-in user whose session lookup
+	// failed in hooks, so identity is unknown — but bouncing to /login would
+	// look like a logout. The maintenance shell is the honest state.
+	const cookies = makeCookies();
+	cookies.set(SESSION_COOKIE, 'token', { path: '/' });
+	const data = (await captureLoad(null, true, cookies)) as {
+		maintenance: boolean;
+		orgs: unknown[];
+	};
+	expect(data.maintenance).toBe(true);
+	expect(data.orgs).toEqual([]);
+});
+
+test('a database outage without a session cookie still redirects to /login', async () => {
+	// No cookie means a signed-out visitor: there is no session to protect and
+	// the /login redirect costs no database query, so the auth gate must not be
+	// bypassed by the outage path.
+	const res = await captureLoad(null, true);
+	expect(res).toMatchObject({ status: 302, location: '/login' });
+});
+
+test('a database outage with a verified user short-circuits before the consent query', async () => {
+	// No consent row seeded: reaching hasCurrentConsent would not redirect but
+	// the maintenance path must skip it entirely and return the payload.
+	const cookies = makeCookies();
+	cookies.set(SESSION_COOKIE, 'token', { path: '/' });
+	const data = (await captureLoad(TEST_OWNER, true, cookies)) as {
+		maintenance: boolean;
+		user: unknown;
+		orgs: unknown[];
+	};
+	expect(data.maintenance).toBe(true);
+	expect(data.user).toMatchObject({ id: TEST_OWNER.id });
+	expect(data.orgs).toEqual([]);
 });

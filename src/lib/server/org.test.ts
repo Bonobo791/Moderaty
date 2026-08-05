@@ -311,7 +311,7 @@ test('removeMember: a plain member cannot remove another member', async () => {
 	expect(await membershipRow('member-2', 'org-1')).toHaveLength(1);
 });
 
-test('ensurePersonalOrg is idempotent for a raced same-sub signup', async () => {
+test('ensurePersonalOrg is idempotent when called repeatedly for the same signup', async () => {
 	// Mutation audit: deleting the existence check stayed green because no test
 	// consents the same new sub twice — the loser of the user-insert race must
 	// find the org the winner already made (I4), not duplicate it.

@@ -25,6 +25,7 @@ import {
 	acceptInvite,
 	createInvite,
 	createOrg,
+	ensurePersonalOrg,
 	leaveOrg,
 	listMembers,
 	listOpenInvites,
@@ -294,6 +295,38 @@ test('removeMember: hierarchy enforced, owners never removed, no self-removal', 
 	expect(await membershipRow('member-1', 'org-1')).toHaveLength(0);
 	await removeMember('owner-1', 'org-1', 'admin-2'); // owner removes admin
 	expect(await membershipRow('admin-2', 'org-1')).toHaveLength(0);
+});
+
+test('removeMember: a plain member cannot remove another member', async () => {
+	// Mutation audit: deleting the admin gate stayed green because no test had
+	// a member caller removing SOMEONE ELSE — every caller above was admin/owner
+	// or tripped an earlier guard. A member caller must 403, never escalate.
+	await seedUser('member-1');
+	await seedUser('member-2');
+	await seedOrg('org-1');
+	await seedMember('member-1', 'org-1', 'member');
+	await seedMember('member-2', 'org-1', 'member');
+
+	await expect(removeMember('member-1', 'org-1', 'member-2')).rejects.toMatchObject({ status: 403 });
+	expect(await membershipRow('member-2', 'org-1')).toHaveLength(1);
+});
+
+test('ensurePersonalOrg is idempotent for a raced same-sub signup', async () => {
+	// Mutation audit: deleting the existence check stayed green because no test
+	// consents the same new sub twice — the loser of the user-insert race must
+	// find the org the winner already made (I4), not duplicate it.
+	await seedUser('user-1');
+
+	const first = await ensurePersonalOrg(testDb().db, { id: 'user-1', displayName: 'user-1' });
+	const second = await ensurePersonalOrg(testDb().db, { id: 'user-1', displayName: 'user-1' });
+
+	expect(second).toBe(first);
+	expect(
+		await testDb().db.select().from(organizations).where(eq(organizations.personalFor, 'user-1')).all()
+	).toHaveLength(1);
+	expect(
+		await testDb().db.select().from(memberships).where(eq(memberships.userId, 'user-1')).all()
+	).toHaveLength(1);
 });
 
 test('leaveOrg: sole member and last-owner-with-members blocked; member leaves, active org cleared', async () => {

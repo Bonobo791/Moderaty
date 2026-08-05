@@ -76,6 +76,29 @@ test('a resolved session user populates locals.user', async () => {
 	expect(event.locals.user).toMatchObject({ id: 'user-1' });
 });
 
+test('a renewed session refreshes the cookie with the new expiry and security attributes', async () => {
+	// Mutation audit: deleting the whole renewal branch stayed green — renewed
+	// in the DB but stale in the browser logs active users out at the original
+	// expiry. Attribute flips (httpOnly/sameSite) were equally invisible.
+	mocks.getSessionUser.mockResolvedValue({
+		user: { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' },
+		renewed: true,
+		expiresAt: '2026-09-01T00:00:00.000Z'
+	});
+	const event = makeEvent();
+	const resolve = vi.fn(async () => new Response('ok'));
+
+	await handle({ event, resolve } as never);
+
+	expect(event.cookies.set).toHaveBeenCalledWith('moderaty_session', 'session-token', {
+		path: '/',
+		httpOnly: true,
+		sameSite: 'lax',
+		secure: false, // cookieSecure() is mocked false here; production flips it via APP_URL
+		expires: new Date('2026-09-01T00:00:00.000Z')
+	});
+});
+
 test('a database behind the code fails the request with the guard 503 before any session work', async () => {
 	// error() throws by design — capture the HttpError it produces so the mock
 	// rejects with the same instanceof the real guard throws.

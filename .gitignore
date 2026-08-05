@@ -36,3 +36,6 @@ local.db*
 .playwright-cli
 .netlify-sim
 backups/
+
+# stryker temp files
+.stryker-tmp

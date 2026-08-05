@@ -237,6 +237,12 @@ existence). Pre-accounts "orphan" channels (`user_id IS NULL`) are claimed by
 the first user ever to complete account creation. Self-hosted instances use
 the same code path; BYOK is via env (`GOOGLE_CLIENT_ID/SECRET`,
 `OPENAI_API_KEY`, Turso), so self-hosters never cost the hosted operator.
+Hosted accounts can additionally set a per-account OpenAI key on the Team
+page (`organizations.openai_key_enc`, owner-only, live-validated against
+OpenAI, AES-256-GCM encrypted at rest; `resolveOpenAiKey` in
+`src/lib/server/openaiKey.ts` prefers it over the env key at scoring time —
+the env key stays the default and the only self-host path). Never serialize
+the key or ciphertext to the client; the page gets a boolean.
 `users.plan` is the hook for the future Stripe integration (hosted plans;
 free tier = self-hosted only).
 

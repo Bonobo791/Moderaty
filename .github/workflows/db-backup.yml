@@ -25,6 +25,9 @@
 
 name: db-backup
 
+permissions:
+  contents: read
+
 on:
   schedule:
     # Daily at 03:23 UTC — off the top-of-hour herd.

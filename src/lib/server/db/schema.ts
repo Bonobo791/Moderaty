@@ -19,16 +19,28 @@
 import { sqliteTable, text, integer, index, primaryKey, check } from 'drizzle-orm/sqlite-core';
 import { sql } from 'drizzle-orm';
 
+// Stryker note: StringLiteral "" mutants on a column db name that equals the
+// property key are equivalent — drizzle treats an empty name as falsy and
+// falls back to the property key (verified against drizzle-orm 0.45.2;
+// getTableConfig reports the property name either way). Those lines carry a
+// `Stryker disable next-line StringLiteral` directive. On lines with a second
+// string literal (`.default('free')`) the directive also ignores that mutant;
+// the default value itself is still pinned by schema.test.ts.
+
 export const users = sqliteTable('users', {
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	id: text('id').primaryKey(), // random hex
 	googleSub: text('google_sub').notNull().unique(), // Google's stable `sub` claim
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	email: text('email').notNull(),
 	displayName: text('display_name').notNull(),
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	plan: text('plan').notNull().default('free'), // LEGACY — billing hooks live on organizations.plan; read nowhere
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 });
 
 export const sessions = sqliteTable('sessions', {
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	id: text('id').primaryKey(), // random 32-byte hex token; also the cookie value
 	userId: text('user_id')
 		.notNull()
@@ -45,8 +57,11 @@ export const sessions = sqliteTable('sessions', {
 // the Team settings page. `plan` is the Stripe gating hook — billing is
 // per-ORGANIZATION (users.plan is legacy and read nowhere).
 export const organizations = sqliteTable('organizations', {
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	id: text('id').primaryKey(), // random hex
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	name: text('name').notNull(),
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	plan: text('plan').notNull().default('free'), // future Stripe gating hook (hosted plans)
 	personalFor: text('personal_for').unique(), // users.id of the user this is the personal org for; null = shared org
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
@@ -59,6 +74,7 @@ export const memberships = sqliteTable('memberships', {
 	orgId: text('org_id')
 		.notNull()
 		.references(() => organizations.id, { onDelete: 'cascade' }),
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	role: text('role').notNull(), // 'owner' | 'admin' | 'member'
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
@@ -71,10 +87,12 @@ export const memberships = sqliteTable('memberships', {
 // succession. acceptedBy null = still open; expired or accepted links are
 // dead. "Anyone signed in with the link joins" is the intended semantic.
 export const invites = sqliteTable('invites', {
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	token: text('token').primaryKey(), // random 32-byte hex; also the URL path segment
 	orgId: text('org_id')
 		.notNull()
 		.references(() => organizations.id, { onDelete: 'cascade' }),
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	role: text('role').notNull(), // 'admin' | 'member'
 	createdBy: text('created_by')
 		.notNull()
@@ -87,11 +105,14 @@ export const invites = sqliteTable('invites', {
 ]);
 
 export const channels = sqliteTable('channels', {
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	id: text('id').primaryKey(), // YouTube channel ID (UC...)
 	userId: text('user_id'), // connected-by user (whose Google grant this channel uses); null = pre-accounts orphan, claimed on first login
 	orgId: text('org_id'), // owning TENANT; null only for pre-accounts orphans (user_id IS NULL) awaiting first-login claim
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	title: text('title').notNull(),
 	refreshTokenEnc: text('refresh_token_enc').notNull(),
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	cursor: text('cursor'), // scan boundary (ISO): comments older than this are never fetched. New connects start at connection time (no history analyzed); "analyze history" moves it back; null = legacy pre-window row (unbounded first scan)
 	nextPageToken: text('next_page_token'), // YouTube continuation token for an incomplete scan
 	scanCursor: text('scan_cursor'), // high-water timestamp to commit once an incomplete scan ends
@@ -99,6 +120,7 @@ export const channels = sqliteTable('channels', {
 	historyBoundary: text('history_boundary'), // ISO timestamp the history drain started walking back from (its eventual end state: cursor = boundary)
 	lastRunAt: text('last_run_at'), // ISO timestamp of last cron run; rotation orders by it ASC (NULLs first)
 	leaseExpiresAt: text('lease_expires_at'), // expiring cron claim; null or past = claimable
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	active: integer('active').notNull().default(1),
 	toneLevel: integer('tone_level'), // moderation sensitivity: null or 1 = omni only, 2 = omni + tone pass
 	protectLgbtqia: integer('protect_lgbtqia').notNull().default(0), // protection setting: 1 = heightened protection for comments targeting LGBTQIA+ people
@@ -111,15 +133,20 @@ export const channels = sqliteTable('channels', {
 ]);
 
 export const rules = sqliteTable('rules', {
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	id: integer('id').primaryKey({ autoIncrement: true }),
 	channelId: text('channel_id').notNull(),
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	type: text('type').notNull(), // 'keyword' | 'regex' | 'user'
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	pattern: text('pattern').notNull(), // keyword string | regex source | authorChannelId
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	action: text('action').notNull(), // 'hold' | 'reject' | 'delete' | 'ban'
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 });
 
 export const comments = sqliteTable('comments', {
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	id: text('id').primaryKey(), // YouTube comment ID
 	channelId: text('channel_id').notNull(),
 	// DEPRECATED (author PII): never written since the author-identifier
@@ -131,8 +158,10 @@ export const comments = sqliteTable('comments', {
 	// no identifier is ever taken from a fetched comment and stored.
 	authorChannelId: text('author_channel_id'),
 	authorName: text('author_name'),
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	text: text('text').notNull(), // truncated to 500 chars on insert
 	publishedAt: text('published_at').notNull(),
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	status: text('status').notNull(), // 'pending' | 'approved' | 'held' | 'rejected' | 'deleted' | 'restoring' (in-flight undo)
 	decidedBy: text('decided_by').notNull(), // 'rule' | 'ai' | 'human' | 'none'
 	matchedRuleId: integer('matched_rule_id'),
@@ -143,8 +172,11 @@ export const comments = sqliteTable('comments', {
 export const moderationActions = sqliteTable('moderation_actions', {
 	commentId: text('comment_id').primaryKey(),
 	channelId: text('channel_id').notNull(),
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	action: text('action').notNull(), // 'hold' | 'reject' | 'delete' | 'ban'
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	reason: text('reason').notNull(),
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	state: text('state').notNull(), // 'pending' | 'dispatched' | 'completed' ('manual_review' legacy)
 	lastAttemptAt: text('last_attempt_at'),
 	lastManualRetryAt: text('last_manual_retry_at'),
@@ -154,11 +186,15 @@ export const moderationActions = sqliteTable('moderation_actions', {
 ]);
 
 export const auditLog = sqliteTable('audit_log', {
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	id: integer('id').primaryKey({ autoIncrement: true }),
 	channelId: text('channel_id').notNull(),
 	commentId: text('comment_id').notNull(),
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	action: text('action').notNull(), // 'hold' | 'reject' | 'delete' | 'ban' | 'approve' | 'restore' | 'queue' | 'dry-run'
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	reason: text('reason').notNull(), // human-readable, e.g. "rule #4 (keyword)" or "ai score 0.91"
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	actor: text('actor').notNull(), // 'system' | 'user'
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
@@ -176,13 +212,16 @@ export const auditLog = sqliteTable('audit_log', {
 // place its retention is justified (Art. 16, III — blocked from any other
 // use by architecture); account deletion wipes users.email entirely.
 export const consents = sqliteTable('consents', {
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	id: integer('id').primaryKey({ autoIncrement: true }),
 	userId: text('user_id')
 		.notNull()
 		.references(() => users.id, { onDelete: 'cascade' }),
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	email: text('email'), // retained consent evidence; nulled by the 10-year sweep
 	docVersion: text('doc_version').notNull(), // LEGAL_VERSION accepted, e.g. 'v1.0'
 	checkboxText: text('checkbox_text').notNull(), // exact text shown at acceptance
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	ip: text('ip').notNull(), // event.getClientAddress() at acceptance
 	userAgent: text('user_agent').notNull(),
 	marketingOptIn: integer('marketing_opt_in').notNull().default(0), // separate, unbundled LGPD consent

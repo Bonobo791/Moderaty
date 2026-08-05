@@ -56,7 +56,7 @@ fully-ignored landing content modules (`src/lib/landing/legal.ts`,
 
 | Batch | Branch | Files | Survivors+NoCov | Status |
 |---|---|---|---|---|
-| A | `mt-80-schema` | `src/lib/server/db/schema.ts` | 170+0 | pending |
+| A | `mt-80-schema` | `src/lib/server/db/schema.ts` | 170+0 | **done — 100%** (137 killed, 33 ignored equivalents) |
 | B | `mt-80-auth` | `google.ts`, auth `login/callback/+server.ts`, auth `callback/+server.ts`, `oauthState.ts`, `channelConnect.ts`, `legal.ts` | 235+34 | pending |
 | C | `mt-80-moderation` | `pipeline.ts`, `rules.ts`, `youtube.ts`, `moderation.ts`, `tone.ts` | 236+65 | pending |
 | D | `mt-80-tenancy-routes` | `org.ts`, `deletion.ts`, `session.ts`, `crypto.ts`, `ownership.ts`, `hooks.server.ts`, `db/index.ts`, `db/migrationTestUtils.ts`, dashboard/org/queue/log/rules/consent/connect-channel page servers, `api/cron/+server.ts`, `org/switch/+server.ts`, `invite/[token]/+page.server.ts`, `logout/+page.server.ts`, `(app)/+layout.server.ts` | ~200+50 | pending |
@@ -129,7 +129,36 @@ Sorted by survived + no-coverage, descending. `Score` = detected / valid.
 Per-batch survivor triage (genuine gap → kill test; equivalent → exclusion +
 justification; no-coverage → coverage test) is recorded here as batches land.
 
-_(empty — Batch A not started)_
+### Batch A — `src/lib/server/db/schema.ts` (PR mt-80-schema)
+
+170 survivors → **137 killed, 0 survived, 33 ignored** (100.00%).
+
+- **Kill test:** `src/lib/server/db/schema.test.ts` (18 tests) asserts the
+  full table shape through drizzle metadata (`getTableConfig`): table/column
+  names, notNull, primary keys (incl. composite + autoincrement), FKs with
+  `onDelete`, unique constraints, indexes (incl. the partial consents
+  retention index), the tenancy CHECK, and the exact `created_at` default SQL
+  via `SQLiteSyncDialect.sqlToQuery`.
+- **Coverage-attribution gotcha:** Stryker's `perTest` coverage attributes
+  module-top-level mutants only to tests that execute the module body. A
+  static import attributes every mutant to whichever test loads the module
+  first (initial run: 21 killed / 149 survived). Re-importing the schema per
+  test with `vi.resetModules()` + dynamic `import()` — the idiom from
+  `index.test.ts` — fixed attribution (139 killed / 31 survived). This quirk
+  also means the full-suite baseline undercounts kills for declarative,
+  module-scope code.
+- **Equivalents (31 + 2 shared-line):** StringLiteral `""` on a column db
+  name that equals the property key is a no-op — drizzle treats an empty name
+  as falsy and falls back to the property key (verified on drizzle-orm
+  0.45.2: `getTableConfig` reports the property name either way). Excluded
+  with per-line `// Stryker disable next-line StringLiteral` directives in
+  `schema.ts`, reason in the file header comment. Two directives sit on
+  `.default('free')` lines and also ignore the `'free' → ''` mutant; the
+  default is still pinned by the shape test.
+- **Note for later batches:** `--coverageAnalysis all` is incompatible with
+  the repo-mandated `--ignoreStatic` (Stryker config validation rejects the
+  combination), so scoped verification runs keep `perTest` and rely on the
+  re-import idiom for module-scope coverage attribution.
 
 ## Working rules for every batch
 

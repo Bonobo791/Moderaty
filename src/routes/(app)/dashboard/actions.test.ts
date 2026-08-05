@@ -276,6 +276,11 @@ test('dry run previews a live deployment through runChannel and echoes the count
 		forceDryRun: true
 	});
 	expect(res).toMatchObject({ ok: true, channelId: 'UC1', fetched: 3, acted: 1, queued: 1, dryRun: true });
+	// The preview takes the cron lease atomically and releases it afterwards;
+	// a preview is not a run, so lastRunAt is never touched.
+	const ch = await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get();
+	expect(ch?.leaseExpiresAt).toBeNull();
+	expect(ch?.lastRunAt).toBeNull();
 });
 
 test('dry run rejects a signed-out request with 401 and never runs', async () => {
@@ -308,10 +313,16 @@ test('a failed dry run is loud on the server and a generic 502 to the client', a
 	await seedChannel('UC1');
 	mocks.runChannel.mockRejectedValue(new Error('raw upstream detail: invalid_grant abc123'));
 	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		const res = (await dryRun('UC1')) as { status: number; data: { error: string } };
 
-	const res = (await dryRun('UC1')) as { status: number; data: { error: string } };
-
-	expect(res.status).toBe(502);
-	expect(res.data.error).not.toContain('invalid_grant');
-	expect(spy).toHaveBeenCalled();
+		expect(res.status).toBe(502);
+		expect(res.data.error).not.toContain('invalid_grant');
+		expect(spy).toHaveBeenCalled();
+		// The lease is released even on failure so cron is never blocked.
+		const ch = await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get();
+		expect(ch?.leaseExpiresAt).toBeNull();
+	} finally {
+		spy.mockRestore();
+	}
 });

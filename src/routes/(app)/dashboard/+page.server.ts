@@ -179,17 +179,30 @@ export const actions = {
 		const user = requireUser(locals);
 		const f = await request.formData();
 		const channelId = String(f.get('channelId') ?? '');
-		// Org-scoped: another team's channel reads as "not found" (never leak).
-		const channel = await db
-			.select({ id: channels.id, leaseExpiresAt: channels.leaseExpiresAt })
-			.from(channels)
-			.where(and(eq(channels.id, channelId), eq(channels.orgId, user.orgId)))
-			.get();
-		if (!channel) return fail(404, { scope: 'dryRun', channelId, error: 'channel not found' });
-		// A cron run in flight would race the preview (double AI spend,
-		// interleaved audit rows) — same lease coordination as analyzeHistory.
-		if (channel.leaseExpiresAt && channel.leaseExpiresAt > new Date().toISOString()) {
-			return fail(409, { scope: 'dryRun', channelId, error: 'This channel is mid-scan — retry in a minute.' });
+		// Atomic lease claim, same protocol as cron/analyzeHistory: the UPDATE's
+		// predicate makes concurrent claimants single-winner (TOCTOU-safe), and
+		// it doubles as the tenancy check — another team's channel matches 0
+		// rows and reads as "not found". The lease self-expires if this request
+		// dies mid-preview.
+		const myLease = new Date(Date.now() + 60_000).toISOString();
+		const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, new Date().toISOString()));
+		const claimed = await db
+			.update(channels)
+			.set({ leaseExpiresAt: myLease })
+			.where(and(eq(channels.id, channelId), eq(channels.orgId, user.orgId), claimable))
+			.returning({ id: channels.id });
+		if (claimed.length === 0) {
+			// Distinguish "not your channel" from "currently scanning": the extra
+			// read only happens on the failure path.
+			const existing = await db
+				.select({ id: channels.id })
+				.from(channels)
+				.where(and(eq(channels.id, channelId), eq(channels.orgId, user.orgId)))
+				.get();
+			if (existing) {
+				return fail(409, { scope: 'dryRun', channelId, error: 'This channel is mid-scan — retry in a minute.' });
+			}
+			return fail(404, { scope: 'dryRun', channelId, error: 'channel not found' });
 		}
 		// One page, hard 20 s ceiling: scoring is concurrent, so this fits the
 		// serverless window; a partial result is surfaced honestly. The run
@@ -204,8 +217,16 @@ export const actions = {
 		} catch (e) {
 			// Loud server-side, generic client-side — never return raw
 			// YouTube/OpenAI error detail to the browser.
-			console.error(`dry run failed for channel ${channelId}:`, e);
+			console.error('dry run failed for channel:', channelId, e);
 			return fail(502, { scope: 'dryRun', channelId, error: 'The dry run failed — check the server log and try again.' });
+		} finally {
+			// Release only OUR lease: if the preview overran it and cron claimed
+			// the channel in between, that lease is untouched. lastRunAt is
+			// deliberately not set — a preview is not a run.
+			await db
+				.update(channels)
+				.set({ leaseExpiresAt: null })
+				.where(and(eq(channels.id, channelId), eq(channels.leaseExpiresAt, myLease)));
 		}
 	},
 	deleteAccount: async ({ request, locals, cookies }) => {

@@ -173,6 +173,7 @@ describe('organizations', () => {
 			name: { notNull: true },
 			plan: { notNull: true, hasDefault: true },
 			personal_for: { notNull: false },
+			openai_key_enc: { notNull: false },
 			created_at: { notNull: true, hasDefault: true }
 		});
 		expectCreatedAtDefault(organizations);
@@ -337,6 +338,7 @@ describe('audit_log', () => {
 			action: { notNull: true },
 			reason: { notNull: true },
 			actor: { notNull: true },
+			text: { notNull: false },
 			created_at: { notNull: true, hasDefault: true }
 		});
 		expectIndex(auditLog, 'audit_log_channel_action_idx', ['channel_id', 'action']);

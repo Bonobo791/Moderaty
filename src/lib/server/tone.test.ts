@@ -23,7 +23,7 @@ vi.mock('$env/dynamic/private', () => ({
 }));
 
 import { scoreTone } from './tone';
-import { LGBTQIA_PROTECTION_SECTION, TONE_PROMPT } from './tonePrompt.js';
+import { LGBTQIA_PROTECTION_SECTION, TONE_PROMPT } from '$lib/server/tonePrompt.js';
 
 const CONTEXT = { videoTitle: 'My video', videoDescription: 'A video about things' };
 

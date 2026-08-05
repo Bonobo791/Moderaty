@@ -161,7 +161,12 @@ export const auditLog = sqliteTable('audit_log', {
 	reason: text('reason').notNull(), // human-readable, e.g. "rule #4 (keyword)" or "ai score 0.91"
 	actor: text('actor').notNull(), // 'system' | 'user'
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
-});
+}, (table) => [
+	// Dashboard ban counts (action='ban' + channel_id IN, issue #77) and the
+	// per-channel log page both filter by channel_id; the composite serves
+	// the ban query and its leftmost column serves channel-only reads.
+	index('audit_log_channel_action_idx').on(table.channelId, table.action)
+]);
 
 // Evidentiary consent log (CDC Art. 6º, VIII; LGPD). One row per acceptance
 // event — initial signup and every re-acceptance after a LEGAL_VERSION bump.

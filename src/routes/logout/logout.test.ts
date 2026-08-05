@@ -29,9 +29,9 @@ setupTestDb(['sessions', 'users']);
 
 const OWNER = { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' };
 
-async function captureLogout(cookies: ReturnType<typeof makeCookies>, user: typeof OWNER | null) {
+async function captureLogout(cookies: ReturnType<typeof makeCookies>, user: typeof OWNER | null, dbDown = false) {
 	try {
-		await actions.default({ cookies, locals: { user } } as never);
+		await actions.default({ cookies, locals: { user, dbDown } } as never);
 		return undefined;
 	} catch (e) {
 		return e as { status: number; location?: string };
@@ -45,6 +45,20 @@ test('logout rejects a signed-out request with 401 and leaves cookies alone', as
 
 	expect(thrown?.status).toBe(401);
 	expect(cookies.deleteCalls).toHaveLength(0);
+});
+
+test('logout during a database outage clears the cookie and redirects — never a 401', async () => {
+	// The session lookup failed in hooks, so locals.user is null; requiring a
+	// user here would 401 and strand the session cookie with no recovery path.
+	// The UI offers logout precisely so the browser can forget the session
+	// while the DB is down.
+	const cookies = makeCookies();
+	cookies.set(SESSION_COOKIE, 'stale-token', { path: '/' });
+
+	const thrown = await captureLogout(cookies, null, true);
+
+	expect(thrown).toMatchObject({ status: 302, location: '/login' });
+	expect(cookies.deleteCalls).toEqual([{ name: SESSION_COOKIE, opts: { path: '/' } }]);
 });
 
 test('logout destroys the session row and clears the cookie', async () => {

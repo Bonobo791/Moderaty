@@ -39,6 +39,9 @@ function undoableFor(latest: boolean, action: string): 'full' | 'comment-only' |
 }
 
 export async function load({ params, locals }) {
+	// Database outage: the layout renders the overlay; this load must not 401
+	// on the null-user outage shape.
+	if (locals.dbDown) return { ch: { id: params.id, title: '' }, entries: [], maintenance: true };
 	// Ownership-scoped: another user's channel (and its audit log) reads as "not found".
 	const ch = await ownedChannel(params.id, locals);
 	const rows = await db

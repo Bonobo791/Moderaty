@@ -445,6 +445,37 @@ test('nullExpiredConsentEmails is idempotent and returns 0 with nothing to do', 
 	expect(await nullExpiredConsentEmails()).toBe(0);
 });
 
+test('nullExpiredConsentEmails skips already-erased rows instead of re-selecting them', async () => {
+	// Mutation audit: dropping the isNotNull filter stayed green because no
+	// test seeds an already-null expired row — no-op re-selections would fill
+	// the bounded batch, delaying genuinely expired rows (retention compliance).
+	const expired = new Date(Date.now() - CONSENT_EMAIL_RETENTION_MS - DAY_MS).toISOString();
+	await seedBareUser('erased');
+	await seedBareUser('pending');
+	await seedConsent('erased', expired);
+	await seedConsent('pending', expired);
+	await testDb().db.update(consents).set({ email: null }).where(eq(consents.userId, 'erased'));
+
+	expect(await nullExpiredConsentEmails()).toBe(1);
+	expect((await testDb().db.select().from(consents).all()).find((row) => row.userId === 'pending')).toMatchObject({
+		email: null
+	});
+});
+
+test('nullExpiredConsentEmails is bounded to one batch per call (I10)', async () => {
+	// Mutation audit: dropping .limit(CONSENT_SWEEP_BATCH) stayed green — an
+	// unbounded sweep would blow the 20-second cron budget on a large backlog.
+	const expired = new Date(Date.now() - CONSENT_EMAIL_RETENTION_MS - DAY_MS).toISOString();
+	for (let index = 0; index < 51; index++) {
+		await seedBareUser(`bulk-${index}`);
+		await seedConsent(`bulk-${index}`, expired);
+	}
+
+	expect(await nullExpiredConsentEmails()).toBe(50); // CONSENT_SWEEP_BATCH
+	// The remainder waits for the next cron invocation.
+	expect(await nullExpiredConsentEmails()).toBe(1);
+});
+
 test('consentEmailCutoffIso lands 10 years back', () => {
 	const now = Date.now();
 	expect(Date.parse(consentEmailCutoffIso(now))).toBe(now - CONSENT_EMAIL_RETENTION_MS);

@@ -8,6 +8,8 @@ declare global {
 		// interface Error {}
 		interface Locals {
 			user: SessionUser | null;
+			/** Set by hooks when the database is unreachable: pages render a maintenance state instead of a 500. */
+			dbDown?: boolean;
 		}
 		// interface PageData {}
 		// interface PageState {}

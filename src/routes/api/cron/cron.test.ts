@@ -17,6 +17,7 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { beforeEach, expect, test, vi } from 'vitest';
+import { eq } from 'drizzle-orm';
 import { DAY_MS, seedConsent as seedConsentRecord, seedUser, setupTestDb, testDb } from '$lib/server/testdb';
 import { channels, consents } from '$lib/server/db/schema';
 import { CONSENT_EMAIL_RETENTION_MS } from '$lib/server/deletion';
@@ -115,6 +116,80 @@ test('runs the channel with a server-side deadline inside the caller abort windo
 	const windowMs = deadline - before;
 	expect(windowMs).toBeGreaterThanOrEqual(19_000);
 	expect(windowMs).toBeLessThanOrEqual(21_000);
+});
+
+test('does not select or claim a channel whose lease is still held', async () => {
+	// Mutation audit: flipping the lease comparison (lt→gt) stayed green
+	// because no test ever set leaseExpiresAt — the lease would become an
+	// anti-lock, letting concurrent invocations process the same channel.
+	const futureLease = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+	await testDb().db.insert(channels).values({ id: 'UC-leased', title: 'Leased', refreshTokenEnc: 'enc', leaseExpiresAt: futureLease });
+
+	const res = await call({ bearer: 'test-secret' });
+
+	expect(await res.json()).toMatchObject({ ok: true, results: {} });
+	expect(mocks.runChannel).not.toHaveBeenCalled();
+});
+
+test('does not select a paused (inactive) channel', async () => {
+	// Mutation audit: dropping the active=1 filter stayed green because every
+	// seeded channel defaults to active — a channel the user paused would be
+	// moderated anyway, against explicit user intent.
+	await testDb().db.insert(channels).values({ id: 'UC-paused', title: 'Paused', refreshTokenEnc: 'enc', active: 0 });
+
+	const res = await call({ bearer: 'test-secret' });
+
+	expect(await res.json()).toMatchObject({ ok: true, results: {} });
+	expect(mocks.runChannel).not.toHaveBeenCalled();
+});
+
+test('selects the least-recently-run channel first', async () => {
+	// Mutation audit: asc→desc on lastRunAt stayed green with single-channel
+	// fixtures — newest-first lets one hot channel starve the rest (I10).
+	await testDb().db.insert(channels).values({ id: 'UC-old', title: 'Old', refreshTokenEnc: 'enc', lastRunAt: '2026-01-01T00:00:00.000Z' });
+	await testDb().db.insert(channels).values({ id: 'UC-new', title: 'New', refreshTokenEnc: 'enc', lastRunAt: '2026-08-01T00:00:00.000Z' });
+	mocks.runChannel.mockResolvedValue({ fetched: 0, acted: 0, queued: 0, partial: false, skipped: false, dryRun: true });
+
+	await call({ bearer: 'test-secret' });
+
+	expect(mocks.runChannel).toHaveBeenCalledWith('UC-old', expect.anything());
+});
+
+test('records the run afterwards: lastRunAt is set and the lease is cleared', async () => {
+	// Mutation audit: dropping lastRunAt from the finally-update stayed green —
+	// the just-run channel would keep sorting first (SQLite ASC, NULLs first)
+	// and starve every other channel.
+	await testDb().db.insert(channels).values({ id: 'UC1', title: 'One', refreshTokenEnc: 'enc' });
+	mocks.runChannel.mockResolvedValue({ fetched: 0, acted: 0, queued: 0, partial: false, skipped: false, dryRun: true });
+
+	await call({ bearer: 'test-secret' });
+
+	const row = await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get();
+	expect(row?.lastRunAt).not.toBeNull();
+	expect(row?.leaseExpiresAt).toBeNull();
+});
+
+test('a failing channel run reports failure, never success', async () => {
+	// Mutation audit: no test made runChannel reject, so the failure path
+	// returning ok:true / 200 stayed green — monitoring would see a failing
+	// channel as healthy (the code comment's exact warning).
+	await testDb().db.insert(channels).values({ id: 'UC-bad', title: 'Bad', refreshTokenEnc: 'enc' });
+	mocks.runChannel.mockRejectedValue(new Error('youtube quota exhausted'));
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+	try {
+		const res = await call({ bearer: 'test-secret' });
+
+		expect(res.status).toBe(500);
+		expect(await res.json()).toMatchObject({ ok: false, results: { 'UC-bad': { error: 'youtube quota exhausted' } } });
+		// The run is still recorded, so a failing channel cannot starve the others.
+		const row = await testDb().db.select().from(channels).where(eq(channels.id, 'UC-bad')).get();
+		expect(row?.lastRunAt).not.toBeNull();
+		expect(row?.leaseExpiresAt).toBeNull();
+	} finally {
+		// Restore the spy — a lingering console.error mock leaks into later tests.
+		errorSpy.mockRestore();
+	}
 });
 
 test('erases consent e-mails older than 10 years, keeping the anonymized row', async () => {

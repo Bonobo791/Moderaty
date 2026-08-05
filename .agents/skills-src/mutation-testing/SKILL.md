@@ -57,6 +57,17 @@ Benchmark per module, not per repo. 65% on a logging utility is fine; 65% on a p
 6. **Re-run** scoped to survivors; confirm kills; update the threshold.
 7. **Ratchet**: set the CI `break` threshold at current-score-minus-buffer and raise it over time. Never jump to a high threshold in one step — the team (or the agent harness) will route around it.
 
+## In the Moderaty repo — use Stryker
+
+StrykerJS is installed and is the tool for every mutation run in this repo: `@stryker-mutator/core` + `@stryker-mutator/vitest-runner`, configured by `stryker.config.json` at the repo root. That config is bare `stryker init` output (vitest runner, `progress`/`clear-text`/`html` reporters) — no `mutate` globs and no thresholds — so always pass an explicit scope rather than running the whole repo.
+
+- Fresh checkout or worktree: run `npx svelte-kit sync` first. Stryker's vitest runner needs the generated `.svelte-kit/tsconfig.json`; without it the run crashes with a rolldown "Tsconfig not found" error.
+- Scoped audit: `npx stryker run --mutate "src/lib/server/<module>.ts"` (plus `--reporters clear-text` for terminal-only output).
+- PR-scale: `npx stryker run --since main` or a git-diff-driven `--mutate` glob.
+- Repeat runs: `npx stryker run --incremental` reuses the cache.
+- Verify survivors by hand before writing kill tests — the score is a lead, not a verdict.
+- Wiring a ratcheted `thresholds.break` CI gate is a separate, maintainer-approved step; do not add it ad hoc.
+
 ## Mental mutation testing (no tool required)
 
 For code review or quick verification of a small diff, mutate mentally: for every changed line, ask "would any test fail if I flipped this operator / deleted this call / inverted this condition?" If the answer is no for a behavior-bearing line, that is a surviving mutant — flag it. This is the fastest mode and works in any language; reserve tool runs for whole-module audits and CI.

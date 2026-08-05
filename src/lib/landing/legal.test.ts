@@ -363,7 +363,7 @@ describe('OAuth scope and ban claims match implementation', () => {
 		// answer must not present toxicity as the only AI path.
 		const banFaq = FAQ_ENTRIES.find((f) => f.q === 'Will Moderaty ban my real fans?');
 		expect(banFaq, 'ban FAQ entry missing').toBeDefined();
-		expect(banFaq?.a).toMatch(/toxicity or tone/i);
+		expect(banFaq?.a).toMatch(/0\.95 or higher.*toxicity or tone analysis.*trigger an automatic ban/i);
 	});
 
 	it('the access FAQ discloses video title/description reads', () => {
@@ -374,6 +374,20 @@ describe('OAuth scope and ban claims match implementation', () => {
 			(f) => f.q === 'What YouTube account access does Moderaty need?'
 		);
 		expect(accessFaq, 'access FAQ entry missing').toBeDefined();
-		expect(accessFaq?.a).toMatch(/titles? and descriptions?/i);
+		expect(accessFaq?.a).toMatch(/read.*titles? and descriptions?.*context.*tone analysis/i);
+	});
+
+	it('the access FAQ discloses listing the account channels when connecting', () => {
+		// callback/+server.ts fetchOwnedChannels paginates channels.list
+		// (part=snippet, mine=true) over EVERY channel the Google account owns
+		// (brand accounts included) so the picker can list them, and parks that
+		// list in an encrypted state-keyed cookie while the user picks — so
+		// "read and moderate comments ... nothing else" understates what the
+		// token is used for.
+		const accessFaq = FAQ_ENTRIES.find(
+			(f) => f.q === 'What YouTube account access does Moderaty need?'
+		);
+		expect(accessFaq, 'access FAQ entry missing').toBeDefined();
+		expect(accessFaq?.a).toMatch(/list.*channels.*(Google account|account owns).*(pick|choose)/i);
 	});
 });

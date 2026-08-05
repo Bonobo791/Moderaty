@@ -17,7 +17,7 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { afterEach, expect, test, vi } from 'vitest';
-import { fetchNewComments, fetchVideoMetadata, getCommentModerationStatus, setModerationStatus } from './youtube';
+import { deleteComment, fetchNewComments, fetchVideoMetadata, getCommentModerationStatus, setModerationStatus } from './youtube';
 
 function comment(id: string, publishedAt: string, text = `Comment ${id}`) {
 	return {
@@ -170,6 +170,64 @@ test('restores a comment by posting moderationStatus=published without banAuthor
 	// banAuthor is only valid alongside 'rejected' — a restore must omit it.
 	expect(url.searchParams.get('banAuthor')).toBeNull();
 	expect(url.searchParams.get('id')).toBe('comment');
+});
+
+test('sends banAuthor=true when banning a comment author', async () => {
+	const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+	vi.stubGlobal('fetch', fetch);
+
+	await setModerationStatus(['comment'], 'rejected', true, 'token');
+
+	const url = new URL(String(fetch.mock.calls[0]?.[0]));
+	// Dropping this parameter silently degrades every ban to a plain reject.
+	expect(url.searchParams.get('banAuthor')).toBe('true');
+	expect(url.searchParams.get('moderationStatus')).toBe('rejected');
+});
+
+test('posts the moderation update and fails loudly on a non-OK response', async () => {
+	const fetch = vi.fn().mockResolvedValue(new Response('forbidden', { status: 403 }));
+	vi.stubGlobal('fetch', fetch);
+
+	// A failed write must throw — otherwise the pipeline confirms an action
+	// YouTube never enforced (I3).
+	await expect(setModerationStatus(['comment'], 'rejected', false, 'token')).rejects.toThrow(
+		'setModerationStatus failed: 403 forbidden'
+	);
+	expect(fetch.mock.calls[0]?.[1]).toMatchObject({ method: 'POST' });
+});
+
+test('deletes a comment with a DELETE request and tolerates an already-deleted comment', async () => {
+	const fetch = vi.fn()
+		.mockResolvedValueOnce(new Response(null, { status: 204 }))
+		.mockResolvedValueOnce(new Response(null, { status: 404 }));
+	vi.stubGlobal('fetch', fetch);
+
+	await expect(deleteComment('comment id/with+chars', 'token')).resolves.toBeUndefined();
+	expect(String(fetch.mock.calls[0]?.[0])).toContain(`id=${encodeURIComponent('comment id/with+chars')}`);
+	expect(fetch.mock.calls[0]?.[1]).toMatchObject({ method: 'DELETE' });
+
+	// 404 means the comment is already gone — that IS a successful delete (I4).
+	await expect(deleteComment('gone', 'token')).resolves.toBeUndefined();
+});
+
+test('fails loudly when a comment delete is rejected', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('quota exceeded', { status: 403 })));
+
+	await expect(deleteComment('comment', 'token')).rejects.toThrow('comments.delete failed: 403');
+});
+
+test('requests new comments in time order for the watched channel', async () => {
+	const fetch = vi.fn().mockResolvedValue(page([comment('1', '2026-01-04T00:00:00.000Z')]));
+	vi.stubGlobal('fetch', fetch);
+
+	await fetchNewComments('channel', 'token', null);
+
+	const url = new URL(String(fetch.mock.calls[0]?.[0]));
+	// The cursor logic assumes time ordering; relevance ordering silently
+	// skips comments on every run.
+	expect(url.searchParams.get('order')).toBe('time');
+	expect(url.searchParams.get('allThreadsRelatedToChannelId')).toBe('channel');
+	expect(url.searchParams.get('maxResults')).toBe('100');
 });
 
 test('returns a comment moderation status for recovery verification', async () => {

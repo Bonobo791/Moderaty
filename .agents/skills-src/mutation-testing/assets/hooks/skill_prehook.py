@@ -64,7 +64,7 @@ TRIGGERS = [
     r"\bsurviving (mutant|mutation)s?\b", r"\bkilled mutants?\b",
     r"\bequivalent mutants?\b", r"\bkill(ing)? (the |those |these |that )?mutants?\b",
     r"\btest(-| )suite quality\b",
-    r"\bare my tests (actually )?(good|catching|enough|worth|strong)\b", r"\bweak assertions?\b",
+    r"\b(is|are) my tests? (actually )?(good|catching|enough|worth|strong)\b", r"\bweak assertions?\b",
     r"\bdo(es)? (my|the|these) tests? (actually )?(catch|fail)",
 ]
 
@@ -150,9 +150,29 @@ if __name__ == "__main__":
     except Exception as exc:
         # Hooks must never break the prompt flow, but failure must be loud on
         # both channels: stderr for the server log, stdout so the user (and
-        # the agent reading injected context) actually sees it.
-        sys.stderr.write(f"mutation-testing prehook failed: {type(exc).__name__}: {exc}\n")
-        sys.stdout.write(
-            f"[mutation-testing prehook WARNING: hook failed: {type(exc).__name__}: {exc}]\n"
-        )
+        # the agent reading injected context) actually sees it. When a write
+        # fails the harness's swapped-in stream is dead, so fall back to the
+        # interpreter's original stream AND reassign sys.stderr/sys.stdout to
+        # it — otherwise interpreter shutdown flushes the dead object and the
+        # process exits 120 despite sys.exit(0). Only a double failure is
+        # swallowed: with no channel left there is nothing to write to, and
+        # the always-exit-0 contract still holds.
+        err_msg = f"mutation-testing prehook failed: {type(exc).__name__}: {exc}\n"
+        try:
+            sys.stderr.write(err_msg)
+        except Exception:
+            sys.stderr = sys.__stderr__
+            try:
+                sys.stderr.write(err_msg)
+            except Exception:
+                pass
+        warn_msg = f"[mutation-testing prehook WARNING: hook failed: {type(exc).__name__}: {exc}]\n"
+        try:
+            sys.stdout.write(warn_msg)
+        except Exception:
+            sys.stdout = sys.__stdout__
+            try:
+                sys.stdout.write(warn_msg)
+            except Exception:
+                pass
     sys.exit(0)

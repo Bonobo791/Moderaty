@@ -39,3 +39,4 @@ backups/
 
 # stryker temp files
 .stryker-tmp
+stryker.log

@@ -67,6 +67,13 @@ test('validates malformed rows before touching their pattern during ordering', (
 	expect(() => matchRule('text', 'author', [malformed, valid])).toThrow(/rule #12 has an empty pattern/);
 });
 
+test('matches keyword rules case-insensitively on the stored pattern too', () => {
+	// A stored uppercase pattern must still match lowercase comment text —
+	// dropping the pattern-side lowercase silently disables the rule.
+	const upper = { id: 20, type: 'keyword', pattern: 'SPAM', action: 'hold' };
+	expect(matchRule('this is spam', 'author', [upper])).toBe(upper);
+});
+
 test('most specific pattern wins regardless of stored order', () => {
 	const broad = { id: 10, type: 'keyword', pattern: 'fuck', action: 'hold' };
 	const specific = { id: 11, type: 'keyword', pattern: 'fuck you', action: 'reject' };

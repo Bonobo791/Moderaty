@@ -21,7 +21,8 @@ import { error } from '@sveltejs/kit';
 
 const mocks = vi.hoisted(() => ({
 	getSessionUser: vi.fn(),
-	assertMigrationsCurrent: vi.fn()
+	assertMigrationsCurrent: vi.fn(),
+	cookieSecure: vi.fn(() => false)
 }));
 
 vi.mock('$lib/server/session', () => ({
@@ -30,7 +31,7 @@ vi.mock('$lib/server/session', () => ({
 }));
 
 vi.mock('$lib/server/oauthState', () => ({
-	cookieSecure: () => false
+	cookieSecure: mocks.cookieSecure
 }));
 
 vi.mock('$lib/server/migrationGuard', () => ({
@@ -42,24 +43,30 @@ import { handle } from './hooks.server';
 beforeEach(() => {
 	mocks.getSessionUser.mockReset();
 	mocks.assertMigrationsCurrent.mockReset().mockResolvedValue(undefined);
+	mocks.cookieSecure.mockReset().mockReturnValue(false);
 });
 
 function makeEvent() {
 	return {
 		cookies: { get: () => 'session-token', set: vi.fn() },
-		locals: {} as { user: unknown },
+		locals: {} as { user: unknown; dbDown?: boolean },
 		url: new URL('http://localhost/')
 	};
 }
 
-test('a database failure during session lookup fails loudly with a user-visible 500', async () => {
+test('a database failure during session lookup degrades to maintenance mode, never a bare 500', async () => {
 	mocks.getSessionUser.mockRejectedValue(new Error('database is locked'));
 	vi.spyOn(console, 'error').mockImplementation(() => {});
 	const event = makeEvent();
 	const resolve = vi.fn(async () => new Response('ok'));
 
-	await expect(handle({ event, resolve } as never)).rejects.toMatchObject({ status: 500 });
-	expect(resolve).not.toHaveBeenCalled();
+	await handle({ event, resolve } as never);
+
+	expect(resolve).toHaveBeenCalled();
+	expect(event.locals.user).toBeNull();
+	expect(event.locals.dbDown).toBe(true);
+	// Loud on the server even though the user gets a maintenance page.
+	expect(console.error).toHaveBeenCalled();
 });
 
 test('a resolved session user populates locals.user', async () => {
@@ -74,6 +81,33 @@ test('a resolved session user populates locals.user', async () => {
 	await handle({ event, resolve } as never);
 
 	expect(event.locals.user).toMatchObject({ id: 'user-1' });
+});
+
+test('a renewed session refreshes the cookie with the new expiry and security attributes', async () => {
+	// Mutation audit: deleting the whole renewal branch stayed green — renewed
+	// in the DB but stale in the browser logs active users out at the original
+	// expiry. Attribute flips (httpOnly/sameSite) were equally invisible, and
+	// hard-coding `secure` instead of calling cookieSecure() passed too — so
+	// the test also asserts the helper is consulted.
+	mocks.cookieSecure.mockReturnValue(true);
+	mocks.getSessionUser.mockResolvedValue({
+		user: { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' },
+		renewed: true,
+		expiresAt: '2026-09-01T00:00:00.000Z'
+	});
+	const event = makeEvent();
+	const resolve = vi.fn(async () => new Response('ok'));
+
+	await handle({ event, resolve } as never);
+
+	expect(mocks.cookieSecure).toHaveBeenCalled();
+	expect(event.cookies.set).toHaveBeenCalledWith('moderaty_session', 'session-token', {
+		path: '/',
+		httpOnly: true,
+		sameSite: 'lax',
+		secure: true,
+		expires: new Date('2026-09-01T00:00:00.000Z')
+	});
 });
 
 test('a database behind the code fails the request with the guard 503 before any session work', async () => {
@@ -94,15 +128,33 @@ test('a database behind the code fails the request with the guard 503 before any
 	expect(resolve).not.toHaveBeenCalled();
 });
 
-test('a database failure inside the guard check fails loudly with a user-visible 500', async () => {
+test('a database failure inside the guard check degrades to maintenance mode, never a bare 500', async () => {
 	mocks.assertMigrationsCurrent.mockRejectedValue(new Error('database is locked'));
 	vi.spyOn(console, 'error').mockImplementation(() => {});
 	const event = makeEvent();
 	const resolve = vi.fn(async () => new Response('ok'));
 
-	await expect(handle({ event, resolve } as never)).rejects.toMatchObject({ status: 500 });
+	await handle({ event, resolve } as never);
+
+	expect(resolve).toHaveBeenCalled();
+	// The session lookup is skipped — it would fail the same way.
 	expect(mocks.getSessionUser).not.toHaveBeenCalled();
-	expect(resolve).not.toHaveBeenCalled();
+	expect(event.locals.user).toBeNull();
+	expect(event.locals.dbDown).toBe(true);
+	expect(console.error).toHaveBeenCalled();
+});
+
+test('/login still renders during a database outage (signed-out view, maintenance flagged)', async () => {
+	mocks.getSessionUser.mockRejectedValue(new Error('database is locked'));
+	vi.spyOn(console, 'error').mockImplementation(() => {});
+	const event = { ...makeEvent(), url: new URL('http://localhost/login') };
+	const resolve = vi.fn(async () => new Response('ok'));
+
+	await handle({ event, resolve } as never);
+
+	expect(resolve).toHaveBeenCalled();
+	expect(event.locals.user).toBeNull();
+	expect(event.locals.dbDown).toBe(true);
 });
 
 test('/api/health bypasses the guard and session so a database outage still reaches the probe', async () => {
@@ -118,4 +170,23 @@ test('/api/health bypasses the guard and session so a database outage still reac
 	expect(resolve).toHaveBeenCalled();
 	expect(mocks.assertMigrationsCurrent).not.toHaveBeenCalled();
 	expect(mocks.getSessionUser).not.toHaveBeenCalled();
+});
+
+test('a deliberate HttpError from session resolution propagates — integrity failures are not outages', async () => {
+	// getSessionUser throws error(500) for data-integrity failures (an account
+	// with no organization). Degrading those to maintenance would mask
+	// corruption as an outage and sign the user out; they must fail loudly.
+	let integrity: unknown;
+	try {
+		error(500, 'account has no organization — contact support');
+	} catch (e) {
+		integrity = e;
+	}
+	mocks.getSessionUser.mockRejectedValue(integrity);
+	const event = makeEvent();
+	const resolve = vi.fn(async () => new Response('ok'));
+
+	await expect(handle({ event, resolve } as never)).rejects.toMatchObject({ status: 500 });
+	expect(event.locals.dbDown).toBeUndefined();
+	expect(resolve).not.toHaveBeenCalled();
 });

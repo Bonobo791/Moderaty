@@ -22,6 +22,7 @@ vi.mock('$env/dynamic/private', () => ({
 	env: { ENCRYPTION_KEY: 'test-encryption-key' }
 }));
 
+import { env } from '$env/dynamic/private';
 import { decrypt, encrypt } from './crypto';
 
 test('round trips plaintext through AES-256-GCM encryption', () => {
@@ -31,4 +32,24 @@ test('round trips plaintext through AES-256-GCM encryption', () => {
 	expect(payload).not.toBe(plaintext);
 	expect(Buffer.from(payload, 'base64').length).toBeGreaterThan(28);
 	expect(decrypt(payload)).toBe(plaintext);
+});
+
+test('encrypts the same plaintext to a different payload every time', () => {
+	// Mutation audit: a fixed IV still round-trips (encrypt and decrypt share
+	// it), but AES-GCM nonce reuse destroys confidentiality of every stored
+	// YouTube token and enables tag forgery on the consent-pending cookie.
+	expect(encrypt('same plaintext')).not.toBe(encrypt('same plaintext'));
+});
+
+test('derives the encryption key from ENCRYPTION_KEY, so a wrong key cannot decrypt', () => {
+	// Mutation audit: substituting a constant key source still round-trips
+	// (encrypt and decrypt share key()), hiding key-rotation breakage and a
+	// shipped-constant exposure.
+	const payload = encrypt('stored refresh token');
+	(env as Record<string, string>).ENCRYPTION_KEY = 'rotated-key';
+	try {
+		expect(() => decrypt(payload)).toThrow();
+	} finally {
+		(env as Record<string, string>).ENCRYPTION_KEY = 'test-encryption-key';
+	}
 });

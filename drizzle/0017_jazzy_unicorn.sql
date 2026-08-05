@@ -1,0 +1,1 @@
+ALTER TABLE `organizations` ADD `openai_key_enc` text;

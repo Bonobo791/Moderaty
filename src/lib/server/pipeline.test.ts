@@ -117,6 +117,7 @@ const mocks = vi.hoisted(() => {
 		scoreComment: vi.fn(),
 		serializeScores: vi.fn(),
 		scoreTone: vi.fn(),
+		resolveOpenAiKey: vi.fn(),
 		checkSync: vi.fn(() => ({ status: 'safe' })),
 		DeadlineExceededError: class DeadlineExceededError extends Error {}
 	};
@@ -136,6 +137,9 @@ vi.mock('$lib/server/moderation', () => ({
 }));
 vi.mock('$lib/server/tone', () => ({
 	scoreTone: mocks.scoreTone
+}));
+vi.mock('$lib/server/openaiKey', () => ({
+	resolveOpenAiKey: mocks.resolveOpenAiKey
 }));
 vi.mock('$lib/server/youtube', () => ({
 	refreshAccessToken: mocks.refreshAccessToken,
@@ -241,6 +245,7 @@ beforeEach(() => {
 	mocks.getCommentModerationStatus.mockResolvedValue('rejected');
 	mocks.serializeScores.mockReturnValue('{}');
 	mocks.scoreTone.mockResolvedValue({ score: 0 });
+	mocks.resolveOpenAiKey.mockResolvedValue('sk-resolved-key');
 	mocks.fetchVideoMetadata.mockResolvedValue(new Map([
 		['video', { title: 'Video title', description: 'Video description' }]
 	]));
@@ -295,6 +300,25 @@ test('validates and compiles each regex rule once per run, not per comment', asy
 	expect(mocks.checkSync).toHaveBeenCalledTimes(1);
 });
 
+test('scores with the org-resolved OpenAI key (BYOK), threaded to both scorers', async () => {
+	mocks.state.channel.orgId = 'org-1';
+	mocks.state.channel.toneLevel = 2;
+	mocks.scoreComment.mockResolvedValue(moderation(0.1));
+	mocks.scoreTone.mockResolvedValue({ score: 0.2 });
+
+	await runChannel('channel');
+
+	expect(mocks.resolveOpenAiKey).toHaveBeenCalledWith('org-1');
+	expect(mocks.scoreComment).toHaveBeenCalledWith('A comment', undefined, 'sk-resolved-key');
+	expect(mocks.scoreTone).toHaveBeenCalledWith(
+		'A comment',
+		{ videoTitle: 'Video title', videoDescription: 'Video description' },
+		undefined,
+		{ protectLgbtqia: 0, protectWomen: 0 },
+		'sk-resolved-key'
+	);
+});
+
 test('routes AI scoring failures to the review queue instead of failing the run (I11)', async () => {
 	mocks.scoreComment.mockRejectedValue(new Error('moderation response has missing or out-of-range category scores'));
 
@@ -328,7 +352,8 @@ test('rejects a demeaning comment the omni score alone would approve', async () 
 		'A comment',
 		{ videoTitle: 'Video title', videoDescription: 'Video description' },
 		undefined,
-		{ protectLgbtqia: 0, protectWomen: 0 }
+		{ protectLgbtqia: 0, protectWomen: 0 },
+		'sk-resolved-key'
 	);
 	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'rejected' })]);
 	expect(mocks.state.insertedAudits).toEqual([
@@ -427,7 +452,8 @@ test('scores tone with empty context when a comment has no video ID', async () =
 		'A comment',
 		{ videoTitle: '', videoDescription: '' },
 		undefined,
-		{ protectLgbtqia: 0, protectWomen: 0 }
+		{ protectLgbtqia: 0, protectWomen: 0 },
+		'sk-resolved-key'
 	);
 });
 
@@ -502,7 +528,7 @@ test('scores full comment text but truncates the stored copy', async () => {
 
 	await runChannel('channel');
 
-	expect(mocks.scoreComment).toHaveBeenCalledWith(text, undefined);
+	expect(mocks.scoreComment).toHaveBeenCalledWith(text, undefined, 'sk-resolved-key');
 	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ text: text.slice(0, 500) })]);
 });
 
@@ -849,7 +875,8 @@ test('a ticked protection flag forces the tone pass even below sensitivity level
 		'A comment',
 		{ videoTitle: 'Video title', videoDescription: 'Video description' },
 		undefined,
-		{ protectLgbtqia: 0, protectWomen: 1 }
+		{ protectLgbtqia: 0, protectWomen: 1 },
+		'sk-resolved-key'
 	);
 	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'rejected' })]);
 	expect(mocks.state.insertedAudits).toEqual([
@@ -871,7 +898,8 @@ test('level 2 passes the persisted protection flags through to the scorer', asyn
 		'A comment',
 		{ videoTitle: 'Video title', videoDescription: 'Video description' },
 		undefined,
-		{ protectLgbtqia: 1, protectWomen: 1 }
+		{ protectLgbtqia: 1, protectWomen: 1 },
+		'sk-resolved-key'
 	);
 });
 

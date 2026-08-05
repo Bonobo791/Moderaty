@@ -23,6 +23,7 @@ import { db } from '$lib/server/db';
 import { auditLog, channels, comments, moderationActions, rules } from '$lib/server/db/schema';
 import { assertBeforeDeadline, DeadlineExceededError } from '$lib/server/http';
 import { scoreComment, serializeScores } from '$lib/server/moderation';
+import { resolveOpenAiKey } from '$lib/server/openaiKey';
 import { matchPreparedRule, prepareRules, type PreparedRule, type RuleAction } from '$lib/server/rules';
 import { scoreTone, type ToneContext, type ToneProtections } from '$lib/server/tone';
 import {
@@ -162,11 +163,12 @@ async function aiDecision(
 	comment: NewComment,
 	tone: { context: ToneContext } | null,
 	deadline: number | undefined,
-	protections: ToneProtections
+	protections: ToneProtections,
+	openAiKey: string | undefined
 ): Promise<Decision> {
 	let moderation: Awaited<ReturnType<typeof scoreComment>>;
 	try {
-		moderation = await scoreComment(comment.text, deadline);
+		moderation = await scoreComment(comment.text, deadline, openAiKey);
 	} catch (error) {
 		return aiUnavailable(comment, error);
 	}
@@ -182,7 +184,7 @@ async function aiDecision(
 	if (tone) {
 		let toneScore: number;
 		try {
-			toneScore = Math.round((await scoreTone(comment.text, tone.context, deadline, protections)).score * 100) / 100;
+			toneScore = Math.round((await scoreTone(comment.text, tone.context, deadline, protections, openAiKey)).score * 100) / 100;
 		} catch (error) {
 			return aiUnavailable(comment, error);
 		}
@@ -196,10 +198,11 @@ async function decide(
 	rules: PreparedRule[],
 	tone: { context: ToneContext } | null,
 	deadline: number | undefined,
-	protections: ToneProtections
+	protections: ToneProtections,
+	openAiKey: string | undefined
 ): Promise<Decision> {
 	const rule = matchPreparedRule(comment.text, comment.authorChannelId, rules);
-	return rule ? ruleDecision(comment, rule) : aiDecision(comment, tone, deadline, protections);
+	return rule ? ruleDecision(comment, rule) : aiDecision(comment, tone, deadline, protections, openAiKey);
 }
 
 function auditRows(channelId: string, decisions: Decision[], dryRun: boolean) {
@@ -259,8 +262,9 @@ async function decideNewComments(
 		accessToken,
 		toneLevel,
 		protections,
+		openAiKey,
 		deadline
-	}: { accessToken: string; toneLevel: number; protections: ToneProtections; deadline?: number }
+	}: { accessToken: string; toneLevel: number; protections: ToneProtections; openAiKey?: string; deadline?: number }
 ): Promise<{ decisions: Decision[]; failures: string[] }> {
 	const existingIds = new Set(
 		page.comments.length
@@ -316,7 +320,7 @@ async function decideNewComments(
 				const tone = videoContext
 					? { context: { videoTitle: meta?.title ?? '', videoDescription: meta?.description ?? '' } }
 					: null;
-				return await decide(comment, rulesForChannel, tone, deadline, protections);
+				return await decide(comment, rulesForChannel, tone, deadline, protections, openAiKey);
 			} catch (error) {
 				if (error instanceof DeadlineExceededError) throw error;
 				throw new Error(`comment ${comment.id}: ${error instanceof Error ? error.message : String(error)}`);
@@ -557,6 +561,9 @@ export async function runChannel(
 				protectLgbtqia: channel.protectLgbtqia ?? 0,
 				protectWomen: channel.protectWomen ?? 0
 			},
+			// Per-org BYOK (hosted plans): the org's own OpenAI key when stored,
+			// the deployment's env key otherwise (openaiKey.ts).
+			openAiKey: await resolveOpenAiKey(channel.orgId),
 			deadline
 		});
 		queued = decisions.filter((decision) => decision.auditAction === 'queue').length;

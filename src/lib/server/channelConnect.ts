@@ -54,11 +54,14 @@ type PickEntry = PendingChannelPick & { state: string; ts: number };
 
 function readEntries(cookies: Cookies): PickEntry[] {
 	const raw = cookies.get(CHANNEL_PICK_COOKIE);
+	// Stryker disable next-line ConditionalExpression: equivalent — with the guard forced false, decrypt(undefined) throws and the catch below returns the same []
 	if (!raw) return [];
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(decrypt(raw));
-	} catch {
+	}
+	// Stryker disable next-line BlockStatement: equivalent — an empty catch leaves parsed undefined, and the Array.isArray check below returns the same []
+	catch {
 		return [];
 	}
 	if (!Array.isArray(parsed)) return [];
@@ -108,6 +111,7 @@ export function readPendingChannelPick(cookies: Cookies, state: string): Pending
 	if (typeof entry.refreshToken !== 'string' || !entry.refreshToken) return null;
 	if (!Array.isArray(entry.channels) || entry.channels.length === 0) return null;
 	const valid = entry.channels.every(
+		// Stryker disable next-line ConditionalExpression: equivalent — channels come from JSON.parse, which never yields undefined; a primitive's .id is undefined so typeof c.id !== 'string' keeps the conjunction false, and null fails c !== null either way
 		(c) => typeof c === 'object' && c !== null && typeof c.id === 'string' && c.id && typeof c.title === 'string'
 	);
 	if (!valid) return null;

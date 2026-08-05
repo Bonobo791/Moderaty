@@ -79,8 +79,15 @@ function stubTokenOkThen(onUserinfo: () => Response) {
 	);
 }
 
-async function expectHttpError(promise: Promise<unknown>, status: number) {
-	await expect(promise).rejects.toMatchObject({ status });
+async function expectHttpError(promise: Promise<unknown>, status: number, message?: string) {
+	const matcher: Record<string, unknown> = { status };
+	if (message !== undefined) matcher.body = { message };
+	await expect(promise).rejects.toMatchObject(matcher);
+}
+
+/** The fetch mock installed by the stubs, for inspecting outgoing calls. */
+function fetchMock() {
+	return fetch as unknown as ReturnType<typeof vi.fn>;
 }
 
 test('login start sets an HttpOnly oauth_state cookie and redirects with identity scopes and matching state', () => {
@@ -115,18 +122,67 @@ test('login start fails loudly with 500 when GOOGLE_CLIENT_ID is not configured'
 
 test('callback rejects a missing or mismatched state with 400', async () => {
 	const cookies = makeCookiesWithState('known-state');
-	await expectHttpError(loginCallback({ url: callbackUrl({ state: 'wrong', code: 'x' }), cookies } as never), 400);
+	await expectHttpError(
+		loginCallback({ url: callbackUrl({ state: 'wrong', code: 'x' }), cookies } as never),
+		400,
+		'bad state'
+	);
+	await expectHttpError(
+		loginCallback({ url: callbackUrl({ code: 'x' }), cookies } as never),
+		400,
+		'bad state'
+	);
 });
 
 test('callback rejects a missing code with 400', async () => {
 	const cookies = makeCookiesWithState('known-state');
-	await expectHttpError(loginCallback({ url: callbackUrl({ state: 'known-state' }), cookies } as never), 400);
+	await expectHttpError(
+		loginCallback({ url: callbackUrl({ state: 'known-state' }), cookies } as never),
+		400,
+		'missing code'
+	);
 });
 
 test('callback returns 502 when the token exchange fails upstream', async () => {
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 	stubTokenAndUserinfo({}, 400);
 	const cookies = makeCookiesWithState('s');
-	await expectHttpError(loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never), 502);
+	await expectHttpError(
+		loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never),
+		502,
+		'Google sign-in failed — please retry'
+	);
+	expect(errorSpy.mock.calls.map((call) => call.join(' ')).join('\n')).toContain(
+		'google login token exchange'
+	);
+});
+
+test('callback exchanges the code against the registered login callback redirect_uri', async () => {
+	stubTokenAndUserinfo({ sub: 'sub-1' });
+	const cookies = makeCookiesWithState('s');
+	await loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never).catch(
+		() => {}
+	);
+	const tokenCall = fetchMock().mock.calls.find(
+		([input]) => String(input) === 'https://oauth2.googleapis.com/token'
+	);
+	expect(tokenCall, 'token exchange must be called').toBeDefined();
+	const body = new URLSearchParams(String((tokenCall![1] as { body: unknown }).body));
+	expect(body.get('redirect_uri')).toBe('http://localhost:5173/api/auth/google/login/callback');
+});
+
+test('callback authorizes the userinfo lookup with the exchanged access token', async () => {
+	stubTokenAndUserinfo({ sub: 'sub-1' });
+	const cookies = makeCookiesWithState('s');
+	await loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never).catch(
+		() => {}
+	);
+	const userinfoCall = fetchMock().mock.calls.find(
+		([input]) => String(input) === 'https://openidconnect.googleapis.com/v1/userinfo'
+	);
+	expect(userinfoCall, 'userinfo lookup must be called').toBeDefined();
+	const init = userinfoCall![1] as { headers: Record<string, string> };
+	expect(init.headers.Authorization).toBe('Bearer google-access-token');
 });
 
 test('callback returns 502 when userinfo fails', async () => {
@@ -141,18 +197,142 @@ test('callback returns 502 when the userinfo request itself fails', async () => 
 		throw new Error('socket hang up');
 	});
 	const cookies = makeCookiesWithState('s');
-	await expectHttpError(loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never), 502);
-	expect(errorSpy).toHaveBeenCalled();
+	await expectHttpError(
+		loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never),
+		502,
+		'Google sign-in failed — please retry'
+	);
+	expect(errorSpy.mock.calls.map((call) => call.join(' ')).join('\n')).toContain(
+		'google userinfo request failed'
+	);
 	// The state is not consumed on a transient failure — the only oauth_state
 	// write is the initial seed, so the callback stays retryable.
 	expect(cookies.setCalls.filter((c) => c.name === 'oauth_state')).toHaveLength(1);
 });
 
+test('callback rejects a non-OK userinfo response even when its body is valid JSON', async () => {
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	stubTokenOkThen(
+		() =>
+			new Response(JSON.stringify({ sub: 'sub-1', email: 'one@example.com', name: 'One' }), {
+				status: 500
+			})
+	);
+	const cookies = makeCookiesWithState('s');
+	await expectHttpError(
+		loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never),
+		502,
+		'Google sign-in failed — please retry'
+	);
+	expect(errorSpy.mock.calls.map((call) => call.join(' ')).join('\n')).toContain(
+		'google userinfo lookup failed: 500'
+	);
+	// The identity is never trusted: no session, no parked consent.
+	expect(await sessionRows()).toHaveLength(0);
+	expect(cookies.get(PENDING_CONSENT_COOKIE)).toBeUndefined();
+});
+
+test('callback returns 502 when the userinfo body is not valid JSON', async () => {
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	stubTokenOkThen(() => new Response('this is not json', { status: 200 }));
+	const cookies = makeCookiesWithState('s');
+	await expectHttpError(
+		loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never),
+		502,
+		'invalid response from Google — please retry'
+	);
+	expect(errorSpy.mock.calls.map((call) => call.join(' ')).join('\n')).toContain(
+		'google userinfo returned invalid JSON'
+	);
+});
+
+test('callback returns 502 when the userinfo JSON is null', async () => {
+	stubTokenOkThen(() => new Response('null', { status: 200 }));
+	const cookies = makeCookiesWithState('s');
+	await expectHttpError(
+		loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never),
+		502,
+		'invalid response from Google — please retry'
+	);
+});
+
+test('callback returns 502 when the sub claim is an empty string', async () => {
+	stubTokenAndUserinfo({ sub: '', email: 'a@example.com' });
+	const cookies = makeCookiesWithState('s');
+	await expectHttpError(
+		loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never),
+		502,
+		'invalid response from Google — please retry'
+	);
+});
+
+test('callback returns 502 when the sub claim is not a string', async () => {
+	stubTokenAndUserinfo({ sub: 123, email: 'a@example.com' });
+	const cookies = makeCookiesWithState('s');
+	await expectHttpError(
+		loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never),
+		502,
+		'invalid response from Google — please retry'
+	);
+});
+
 test('callback returns 502 when userinfo has no usable sub claim', async () => {
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 	stubTokenAndUserinfo({ email: 'a@example.com' });
 	const cookies = makeCookiesWithState('s');
-	await expectHttpError(loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never), 502);
+	await expectHttpError(
+		loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never),
+		502,
+		'invalid response from Google — please retry'
+	);
+	expect(errorSpy.mock.calls.map((call) => call.join(' ')).join('\n')).toContain(
+		'google userinfo returned no usable sub claim'
+	);
 });
+
+test.each([
+	{ name: 'missing', userinfo: { sub: 'sub-1', name: 'One' } },
+	{ name: 'empty', userinfo: { sub: 'sub-1', email: '', name: 'One' } },
+	{ name: 'non-string', userinfo: { sub: 'sub-1', email: 123, name: 'One' } }
+])(
+	'callback synthesizes a placeholder email when Google sends no usable one ($name)',
+	async ({ userinfo }) => {
+		stubTokenAndUserinfo(userinfo);
+		const cookies = makeCookiesWithState('s');
+		await expectHttpError(
+			loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never),
+			302
+		);
+		expect(readPendingConsent(cookies as never, 's')).toEqual({
+			kind: 'new',
+			sub: 'sub-1',
+			email: 'sub-1@accounts.google.com',
+			displayName: 'One'
+		});
+	}
+);
+
+test.each([
+	{ name: 'missing', userinfo: { sub: 'sub-1', email: 'one@example.com' } },
+	{ name: 'empty', userinfo: { sub: 'sub-1', email: 'one@example.com', name: '' } },
+	{ name: 'non-string', userinfo: { sub: 'sub-1', email: 'one@example.com', name: 42 } }
+])(
+	'callback falls back to the email as display name when Google sends no usable name ($name)',
+	async ({ userinfo }) => {
+		stubTokenAndUserinfo(userinfo);
+		const cookies = makeCookiesWithState('s');
+		await expectHttpError(
+			loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never),
+			302
+		);
+		expect(readPendingConsent(cookies as never, 's')).toEqual({
+			kind: 'new',
+			sub: 'sub-1',
+			email: 'one@example.com',
+			displayName: 'one@example.com'
+		});
+	}
+);
 
 async function seedConsentedUser(sub: string, docVersion: string = LEGAL_VERSION) {
 	const userId = `user-${sub}`;
@@ -221,11 +401,47 @@ test('callback with a consented existing user creates a session and redirects to
 });
 
 test('callback with an existing user on a stale document version sends them back through /consent', async () => {
-	await seedConsentedUser('sub-1', 'v0.9');
-	const { location } = await signIn();
+	const userId = await seedConsentedUser('sub-1', 'v0.9');
+	const { cookies, location } = await signIn();
 
 	expect(location).toBe('/consent?state=s');
 	expect(await sessionRows()).toHaveLength(0);
+	// The re-acceptance flow is keyed to this account, not a fresh signup.
+	expect(readPendingConsent(cookies as never, 's')).toEqual({ kind: 'existing', userId });
+});
+
+// The callback consumes exactly the state it validated; a second tab's pending
+// state must survive every success path (new signup, re-consent, session).
+test('a new-identity sign-in consumes only its own state, leaving other tabs valid', async () => {
+	stubTokenAndUserinfo({ sub: 'sub-1', email: 'one@example.com', name: 'One' });
+	const cookies = makeCookiesWithState('other-tab', 's');
+	await expectHttpError(
+		loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never),
+		302
+	);
+	expect(JSON.parse(cookies.get('oauth_state') ?? 'null')).toEqual(['other-tab']);
+});
+
+test('a stale-consent sign-in consumes only its own state, leaving other tabs valid', async () => {
+	await seedConsentedUser('sub-1', 'v0.9');
+	stubTokenAndUserinfo({ sub: 'sub-1', email: 'one@example.com', name: 'One' });
+	const cookies = makeCookiesWithState('other-tab', 's');
+	await expectHttpError(
+		loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never),
+		302
+	);
+	expect(JSON.parse(cookies.get('oauth_state') ?? 'null')).toEqual(['other-tab']);
+});
+
+test('a successful sign-in consumes only its own state, leaving other tabs valid', async () => {
+	await seedConsentedUser('sub-1');
+	stubTokenAndUserinfo({ sub: 'sub-1', email: 'one@example.com', name: 'One' });
+	const cookies = makeCookiesWithState('other-tab', 's');
+	await expectHttpError(
+		loginCallback({ url: callbackUrl({ state: 's', code: 'x' }), cookies } as never),
+		302
+	);
+	expect(JSON.parse(cookies.get('oauth_state') ?? 'null')).toEqual(['other-tab']);
 });
 
 test('a repeat login with the same sub reuses the account', async () => {

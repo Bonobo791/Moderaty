@@ -115,6 +115,16 @@ never leaks existence.
 	`channel_id` has no parent in `channels` (orphans from a scoping bug).
 3. Zero channels whose `org_id` has zero memberships (unreachable channel).
 
+Scope note: checks 2–3 are referential-integrity invariants — they prove a
+row's `channel_id` resolves to a real channel and, for channels with
+`org_id` set, one whose org is reachable (has memberships). Pre-account
+orphan channels (`org_id` NULL, awaiting first signup) are intentionally
+outside the org guarantee. None of this asserts the acting tenant owns the
+channel — that guarantee lives one layer up, at the handler boundary
+(`ownedChannel` → 404 on org mismatch), which is what the inventory above
+audits. The probe exists to catch rows that bypassed the handlers entirely
+(bugs, manual edits, partial failures).
+
 Runbook: `node --env-file=.env scripts/verify-tenancy.mjs` (dev by default;
 point `TURSO_DATABASE_URL` at prod after migrations). Exit 1 with loud FAIL
 lines on any violation. READ-ONLY, as before.

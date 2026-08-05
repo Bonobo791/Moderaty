@@ -281,12 +281,13 @@ test('the token exchange uses this flow\'s redirect URI and the channels listing
 	// The listing must request the caller's own channels, 50 per page, snippet
 	// part, authorized with the fresh access token.
 	const channelCall = calls.find((c) => c.url.startsWith('https://www.googleapis.com/youtube/v3/channels'));
-	const channelUrl = new URL(channelCall?.url ?? '');
+	expect(channelCall, 'channels listing request captured').toBeDefined();
+	const channelUrl = new URL(channelCall!.url);
 	expect(channelUrl.searchParams.get('part')).toBe('snippet');
 	expect(channelUrl.searchParams.get('mine')).toBe('true');
 	expect(channelUrl.searchParams.get('maxResults')).toBe('50');
 	expect(channelUrl.searchParams.get('pageToken')).toBeNull();
-	expect((channelCall?.init?.headers as Record<string, string>).Authorization).toBe('Bearer a');
+	expect((channelCall!.init?.headers as Record<string, string>).Authorization).toBe('Bearer a');
 
 	// Zero malformed items → zero skip logging.
 	expect(errSpy.mock.calls.flat().join(' ')).not.toMatch(/skipped/);

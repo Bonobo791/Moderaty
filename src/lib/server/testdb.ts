@@ -193,6 +193,7 @@ export async function createTestDb(): Promise<TestDb> {
 			name TEXT NOT NULL,
 			plan TEXT NOT NULL DEFAULT 'free',
 			personal_for TEXT,
+			openai_key_enc TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE UNIQUE INDEX organizations_personal_for_unique ON organizations (personal_for)`,

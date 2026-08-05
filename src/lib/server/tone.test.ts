@@ -165,3 +165,12 @@ test('no protections sends the byte-identical base prompt (no calibration drift)
 	expect(system.startsWith(TONE_PROMPT)).toBe(true);
 	expect(system).not.toContain('Identity protection');
 });
+
+test('an explicit apiKey overrides the env key in the Authorization header', async () => {
+	const fetch = vi.fn().mockResolvedValue(chatResponse('{"score": 0.5}'));
+	vi.stubGlobal('fetch', fetch);
+
+	await scoreTone('a comment', CONTEXT, undefined, {}, 'sk-org-key');
+
+	expect(fetch.mock.calls[0]?.[1]?.headers).toMatchObject({ Authorization: 'Bearer sk-org-key' });
+});

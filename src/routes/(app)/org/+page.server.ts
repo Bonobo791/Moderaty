@@ -17,7 +17,12 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { fail, redirect, type ActionFailure } from '@sveltejs/kit';
+import { eq } from 'drizzle-orm';
 
+import { encrypt } from '$lib/server/crypto';
+import { db } from '$lib/server/db';
+import { organizations } from '$lib/server/db/schema';
+import { fetchWithRetry } from '$lib/server/http';
 import {
 	createInvite,
 	createOrg,
@@ -41,12 +46,31 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 	// Database outage: the layout renders the overlay; this load must not 401
 	// on the null-user outage shape.
 	if (locals.dbDown)
-		return { user: null, members: [], invites: [], inviteBase: new URL('/invite/', url.origin).toString(), maintenance: true };
+		return {
+			user: null,
+			members: [],
+			invites: [],
+			inviteBase: new URL('/invite/', url.origin).toString(),
+			maintenance: true,
+			hasOpenAiKey: false
+		};
 	const user = requireUser(locals);
 	const members = await listMembers(user.id, user.orgId);
 	const invites =
 		user.orgRole === 'admin' || user.orgRole === 'owner' ? await listOpenInvites(user.id, user.orgId) : [];
-	return { user, members, invites, inviteBase: new URL('/invite/', url.origin).toString() };
+	// Never serialize secrets to the client: the page gets a boolean only.
+	const keyRow = await db
+		.select({ openaiKeyEnc: organizations.openaiKeyEnc })
+		.from(organizations)
+		.where(eq(organizations.id, user.orgId))
+		.get();
+	return {
+		user,
+		members,
+		invites,
+		inviteBase: new URL('/invite/', url.origin).toString(),
+		hasOpenAiKey: Boolean(keyRow?.openaiKeyEnc)
+	};
 };
 
 /** Wraps org.ts errors as form failures so the page shows .error-box (I12). */
@@ -112,5 +136,42 @@ export const actions: Actions = {
 		// returns void, so an undefined guard result is success.
 		if (result === undefined) throw redirect(303, '/dashboard');
 		return result;
+	},
+	setOpenAiKey: async ({ request, locals }) => {
+		const user = requireUser(locals);
+		requireOrgRole(user, 'owner');
+		const key = String((await request.formData()).get('openAiKey') ?? '').trim();
+		if (!key.startsWith('sk-') || key.length > 200)
+			return fail(400, { error: 'Enter a valid OpenAI API key (it starts with sk-).' });
+		// Validate live against OpenAI before storing anything: a typo'd or
+		// revoked key must not silently degrade scoring onto the review queue.
+		let res: Response;
+		try {
+			res = await fetchWithRetry('https://api.openai.com/v1/models', {
+				headers: { authorization: `Bearer ${key}` }
+			});
+		} catch (error) {
+			// CWE-532: log only the failure message — dumping the raw error
+			// object risks request detail (and the candidate key) in the log.
+			console.error(
+				'OpenAI key validation request failed:',
+				error instanceof Error ? error.message : String(error)
+			);
+			return fail(502, { error: 'Could not reach OpenAI to validate the key — try again in a moment.' });
+		}
+		if (res.status === 401 || res.status === 403)
+			return fail(400, { error: 'OpenAI rejected that key — check it and try again.' });
+		if (!res.ok) {
+			console.error('OpenAI key validation returned a non-OK status:', res.status);
+			return fail(502, { error: 'OpenAI could not validate the key right now — try again in a moment.' });
+		}
+		await db.update(organizations).set({ openaiKeyEnc: encrypt(key) }).where(eq(organizations.id, user.orgId));
+		return { ok: true as const };
+	},
+	clearOpenAiKey: async ({ locals }) => {
+		const user = requireUser(locals);
+		requireOrgRole(user, 'owner');
+		await db.update(organizations).set({ openaiKeyEnc: null }).where(eq(organizations.id, user.orgId));
+		return { ok: true as const };
 	}
 };

@@ -17,12 +17,19 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { eq } from 'drizzle-orm';
-import { expect, test } from 'vitest';
+import { afterEach, expect, test, vi } from 'vitest';
+
+const mocks = vi.hoisted(() => ({
+	env: { ENCRYPTION_KEY: 'test-encryption-key' } as Record<string, string | undefined>
+}));
+
+vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
 // testdb must be the first app import: it registers the $lib/server/db mock
 // before any module that binds the real database (see its header comment).
 import { postForm, setupTestDb, TEST_OWNER, testDb } from '$lib/server/testdb';
 import { invites, memberships, organizations, sessions, users } from '$lib/server/db/schema';
+import { decrypt } from '$lib/server/crypto';
 import { SESSION_COOKIE, type SessionUser } from '$lib/server/session';
 import { makeCookies } from '$lib/server/testcookies';
 
@@ -218,4 +225,110 @@ test('remove: a member caller is 403 at the route, same as the other admin-gated
 	await seedOwnerOrg();
 	await seedTeammate('user-2');
 	await expect(actions.remove(ctx(MEMBER, { userId: 'user-2' }))).rejects.toMatchObject({ status: 403 });
+});
+
+afterEach(() => {
+	vi.unstubAllGlobals();
+});
+
+/** Stubs global fetch (the live OpenAI key check) and records each call. */
+function stubOpenAi(status: number) {
+	const calls: { url: unknown; init: RequestInit | undefined }[] = [];
+	vi.stubGlobal('fetch', async (url: unknown, init?: RequestInit) => {
+		calls.push({ url, init });
+		return new Response('{}', { status });
+	});
+	return calls;
+}
+
+async function storedKey(orgId = 'org-1') {
+	const org = await testDb().db.select().from(organizations).where(eq(organizations.id, orgId)).get();
+	return org?.openaiKeyEnc ?? null;
+}
+
+test('setOpenAiKey: owner stores an encrypted key after live validation; the page only ever exposes a boolean', async () => {
+	await seedOwnerOrg();
+	const calls = stubOpenAi(200);
+
+	const res = await actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: 'sk-test-org-key' }));
+	expect(res).toMatchObject({ ok: true });
+
+	const ciphertext = await storedKey();
+	expect(ciphertext).toBeTruthy();
+	expect(ciphertext).not.toContain('sk-test-org-key');
+	expect(decrypt(ciphertext!)).toBe('sk-test-org-key');
+	expect(calls[0].url).toBe('https://api.openai.com/v1/models');
+	expect(calls[0].init?.headers).toMatchObject({ authorization: 'Bearer sk-test-org-key' });
+
+	// Never serialize secrets to the client: only the boolean leaves the server.
+	const view = (await load(ctx(TEST_OWNER))) as Record<string, unknown>;
+	expect(view.hasOpenAiKey).toBe(true);
+	const serialized = JSON.stringify(view);
+	expect(serialized).not.toContain('sk-test-org-key');
+	expect(serialized).not.toContain(ciphertext!);
+});
+
+test('setOpenAiKey: non-owner is 403 and nothing is stored or validated', async () => {
+	await seedOwnerOrg();
+	const calls = stubOpenAi(200);
+	await expect(actions.setOpenAiKey(ctx(MEMBER, { openAiKey: 'sk-x' }))).rejects.toMatchObject({ status: 403 });
+	expect(await storedKey()).toBeNull();
+	expect(calls).toHaveLength(0);
+});
+
+test('setOpenAiKey: a key without the sk- prefix fails 400 before any OpenAI call', async () => {
+	await seedOwnerOrg();
+	const calls = stubOpenAi(200);
+	const bad = failure(await actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: 'not-a-key' })));
+	expect(bad.status).toBe(400);
+	expect(await storedKey()).toBeNull();
+	expect(calls).toHaveLength(0);
+});
+
+test('setOpenAiKey: OpenAI rejecting the key fails 400 and stores nothing', async () => {
+	await seedOwnerOrg();
+	stubOpenAi(401);
+	const bad = failure(await actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: 'sk-bad-key' })));
+	expect(bad.status).toBe(400);
+	expect(await storedKey()).toBeNull();
+});
+
+test('setOpenAiKey: an unreachable OpenAI fails 502 and logs only a message, never the key or a raw error object', async () => {
+	// CWE-532: the caught fetch error is an object whose dump can carry request
+	// detail; the log must be a plain message string so the key can never leak.
+	await seedOwnerOrg();
+	vi.stubGlobal('fetch', async () => {
+		throw new Error('fetch failed');
+	});
+	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	vi.useFakeTimers();
+	try {
+		const pending = actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: 'sk-secret-key' }));
+		await vi.advanceTimersByTimeAsync(20_000); // fetchWithRetry backoff
+		const bad = failure(await pending);
+		expect(bad.status).toBe(502);
+	} finally {
+		vi.useRealTimers();
+	}
+	expect(await storedKey()).toBeNull();
+	expect(spy).toHaveBeenCalled();
+	for (const call of spy.mock.calls) {
+		for (const arg of call) expect(arg).not.toBeInstanceOf(Error);
+		expect(JSON.stringify(call)).not.toContain('sk-secret-key');
+	}
+});
+
+test('clearOpenAiKey: owner wipes the stored key; non-owner is 403', async () => {
+	await seedOwnerOrg();
+	stubOpenAi(200);
+	await actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: 'sk-test-org-key' }));
+	expect(await storedKey()).toBeTruthy();
+
+	await expect(actions.clearOpenAiKey(ctx(MEMBER))).rejects.toMatchObject({ status: 403 });
+	expect(await storedKey()).toBeTruthy();
+
+	await actions.clearOpenAiKey(ctx(TEST_OWNER));
+	expect(await storedKey()).toBeNull();
+	const view = (await load(ctx(TEST_OWNER))) as { hasOpenAiKey: boolean };
+	expect(view.hasOpenAiKey).toBe(false);
 });

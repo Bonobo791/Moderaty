@@ -152,6 +152,30 @@ try {
 		'SELECT count(*) AS n FROM organizations o WHERE NOT EXISTS (SELECT 1 FROM memberships m WHERE m.org_id = o.id)',
 		'SELECT o.id FROM organizations o WHERE NOT EXISTS (SELECT 1 FROM memberships m WHERE m.org_id = o.id)'
 	);
+
+	// 4. Cross-tenant invariants (tenancy audit — docs/tenancy-audit.md). A
+	// session may only act in an org its user belongs to; every channel-scoped
+	// row must resolve to a real channel; every channel must sit in an org
+	// somebody can actually sign into. NULL active_org_id is legitimate
+	// (resolved to the oldest membership at request time), as is a NULL org_id
+	// on a pre-account orphan channel — both are excluded explicitly.
+	await expectZero(
+		'zero sessions acting in an org the user is not a member of',
+		`SELECT count(*) AS n FROM sessions s WHERE s.active_org_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM memberships m WHERE m.org_id = s.active_org_id AND m.user_id = s.user_id)`,
+		`SELECT s.id, s.user_id, s.active_org_id FROM sessions s WHERE s.active_org_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM memberships m WHERE m.org_id = s.active_org_id AND m.user_id = s.user_id)`
+	);
+	for (const table of ['comments', 'moderation_actions', 'audit_log', 'rules']) {
+		await expectZero(
+			`zero ${table} with channel_id missing from channels`,
+			`SELECT count(*) AS n FROM ${table} t WHERE NOT EXISTS (SELECT 1 FROM channels c WHERE c.id = t.channel_id)`,
+			`SELECT t.channel_id FROM ${table} t WHERE NOT EXISTS (SELECT 1 FROM channels c WHERE c.id = t.channel_id)`
+		);
+	}
+	await expectZero(
+		'zero channels in orgs with no memberships',
+		'SELECT count(*) AS n FROM channels ch WHERE ch.org_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM memberships m WHERE m.org_id = ch.org_id)',
+		'SELECT ch.id, ch.org_id FROM channels ch WHERE ch.org_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM memberships m WHERE m.org_id = ch.org_id)'
+	);
 } catch (error) {
 	report('verify-tenancy completed without internal errors', false, fail(error));
 } finally {

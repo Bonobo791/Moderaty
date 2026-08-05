@@ -61,6 +61,43 @@ CREATE TABLE memberships (
 	created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
 	PRIMARY KEY (user_id, org_id)
 );
+CREATE TABLE sessions (
+	id TEXT PRIMARY KEY,
+	user_id TEXT NOT NULL,
+	active_org_id TEXT,
+	expires_at TEXT NOT NULL,
+	created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE TABLE comments (
+	id TEXT PRIMARY KEY,
+	channel_id TEXT NOT NULL,
+	text TEXT NOT NULL,
+	published_at TEXT NOT NULL,
+	status TEXT NOT NULL,
+	decided_by TEXT NOT NULL
+);
+CREATE TABLE moderation_actions (
+	comment_id TEXT PRIMARY KEY,
+	channel_id TEXT NOT NULL,
+	action TEXT NOT NULL,
+	reason TEXT NOT NULL,
+	state TEXT NOT NULL
+);
+CREATE TABLE audit_log (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	channel_id TEXT NOT NULL,
+	comment_id TEXT NOT NULL,
+	action TEXT NOT NULL,
+	reason TEXT NOT NULL,
+	actor TEXT NOT NULL
+);
+CREATE TABLE rules (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	channel_id TEXT NOT NULL,
+	type TEXT NOT NULL,
+	pattern TEXT NOT NULL,
+	action TEXT NOT NULL
+);
 `;
 
 const CHANNELS_DDL = `
@@ -225,5 +262,73 @@ describe('verify-tenancy', () => {
 		const { code, stdout } = await runProbe(url);
 		expect(code).toBe(1);
 		expect(stdout).toContain('FAIL  no ownerless orgs');
+	}, 20000);
+
+	it('passes the cross-tenant checks on healthy sessions and channel-scoped rows', async () => {
+		const url = await buildDb('cross-tenant-healthy.db', {
+			withContract: true,
+			seedSql:
+				SEED_TENANCY +
+				SEED_CHANNEL +
+				"INSERT INTO sessions (id, user_id, active_org_id, expires_at) VALUES ('s1', 'u1', 'org-u1', '2099-01-01T00:00:00Z');" +
+				"INSERT INTO sessions (id, user_id, active_org_id, expires_at) VALUES ('s2', 'u1', NULL, '2099-01-01T00:00:00Z');" +
+				"INSERT INTO comments (id, channel_id, text, published_at, status, decided_by) VALUES ('c1', 'UC1', 'hi', '2026-01-01T00:00:00Z', 'approved', 'ai');" +
+				"INSERT INTO moderation_actions (comment_id, channel_id, action, reason, state) VALUES ('c1', 'UC1', 'hold', 'r', 'completed');" +
+				"INSERT INTO audit_log (channel_id, comment_id, action, reason, actor) VALUES ('UC1', 'c1', 'approve', 'r', 'user');" +
+				"INSERT INTO rules (channel_id, type, pattern, action) VALUES ('UC1', 'keyword', 'spam', 'hold');"
+		});
+		const { code, stdout } = await runProbe(url);
+		expect(stdout).not.toContain('FAIL');
+		expect(stdout).toContain('ALL CHECKS PASSED');
+		expect(code).toBe(0);
+	}, 20000);
+
+	it('fails loudly when a session acts in an org the user is not a member of', async () => {
+		const url = await buildDb('session-cross-tenant.db', {
+			withContract: true,
+			seedSql:
+				SEED_TENANCY +
+				SEED_CHANNEL +
+				"INSERT INTO organizations (id, name) VALUES ('other', 'Other');" +
+				"INSERT INTO memberships (user_id, org_id, role) VALUES ('u1', 'other', 'owner');" +
+				"INSERT INTO sessions (id, user_id, active_org_id, expires_at) VALUES ('s1', 'u1', 'other', '2099-01-01T00:00:00Z');" +
+				// u1 leaves 'other' but the session keeps pointing at it.
+				"DELETE FROM memberships WHERE user_id = 'u1' AND org_id = 'other';"
+		});
+		const { code, stdout } = await runProbe(url);
+		expect(code).toBe(1);
+		expect(stdout).toContain('FAIL  zero sessions acting in an org the user is not a member of');
+	}, 20000);
+
+	it('fails loudly when channel-scoped rows are orphaned from their channel', async () => {
+		const url = await buildDb('orphaned-rows.db', {
+			withContract: true,
+			seedSql:
+				SEED_TENANCY +
+				SEED_CHANNEL +
+				"INSERT INTO comments (id, channel_id, text, published_at, status, decided_by) VALUES ('c1', 'UCgone', 'hi', '2026-01-01T00:00:00Z', 'approved', 'ai');" +
+				"INSERT INTO moderation_actions (comment_id, channel_id, action, reason, state) VALUES ('c1', 'UCgone', 'hold', 'r', 'completed');" +
+				"INSERT INTO audit_log (channel_id, comment_id, action, reason, actor) VALUES ('UCgone', 'c1', 'approve', 'r', 'user');" +
+				"INSERT INTO rules (channel_id, type, pattern, action) VALUES ('UCgone', 'keyword', 'spam', 'hold');"
+		});
+		const { code, stdout } = await runProbe(url);
+		expect(code).toBe(1);
+		expect(stdout).toContain('FAIL  zero comments with channel_id missing from channels');
+		expect(stdout).toContain('FAIL  zero moderation_actions with channel_id missing from channels');
+		expect(stdout).toContain('FAIL  zero audit_log with channel_id missing from channels');
+		expect(stdout).toContain('FAIL  zero rules with channel_id missing from channels');
+	}, 20000);
+
+	it('fails loudly when a channel sits in an org with no memberships', async () => {
+		const url = await buildDb('channel-memberless-org.db', {
+			withContract: true,
+			seedSql:
+				SEED_TENANCY +
+				"INSERT INTO organizations (id, name) VALUES ('empty-org', 'Empty');" +
+				"INSERT INTO channels (id, user_id, org_id, title, refresh_token_enc) VALUES ('UC2', NULL, 'empty-org', 'Chan2', 'enc');"
+		});
+		const { code, stdout } = await runProbe(url);
+		expect(code).toBe(1);
+		expect(stdout).toContain('FAIL  zero channels in orgs with no memberships');
 	}, 20000);
 });

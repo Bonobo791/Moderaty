@@ -44,6 +44,10 @@ const QUEUE = 0.51;
 export interface RunChannelOptions {
 	maxPages?: number;
 	deadline?: number;
+	/** On-demand preview (dashboard button): forces dry-run semantics for this
+	 * call. Can only turn dry-run ON — an env-dry deployment is never flipped
+	 * live by a caller. */
+	forceDryRun?: boolean;
 }
 
 export interface ChannelRunResult {
@@ -216,6 +220,10 @@ function auditRows(channelId: string, decisions: Decision[], dryRun: boolean) {
 			action: dryRun ? 'dry-run' : decision.auditAction,
 			reason: decision.reason,
 			actor: 'system',
+			// Dry run never inserts into comments (I8), so the audit row is the
+			// only place the comment text survives — capped at 500 chars like
+			// comments.text. Real runs leave it null (text lives in comments).
+			...(dryRun ? { text: decision.comment.text.slice(0, 500) } : {}),
 			createdAt: new Date().toISOString()
 		}));
 }
@@ -532,7 +540,7 @@ async function persistResults(
  */
 export async function runChannel(
 	channelId: string,
-	{ maxPages = 3, deadline }: RunChannelOptions = {}
+	{ maxPages = 3, deadline, forceDryRun }: RunChannelOptions = {}
 ): Promise<ChannelRunResult> {
 	let fetched = 0;
 	let acted = 0;
@@ -545,7 +553,7 @@ export async function runChannel(
 		if (env.DRY_RUN !== 'true' && env.DRY_RUN !== 'false') {
 			throw new Error('DRY_RUN must be true or false');
 		}
-		dryRun = env.DRY_RUN === 'true';
+		dryRun = forceDryRun === true || env.DRY_RUN === 'true';
 		const accessToken = await refreshAccessToken(decrypt(channel.refreshTokenEnc), deadline);
 		const page = await fetchNewComments(channelId, accessToken, channel.cursor, {
 			maxPages,

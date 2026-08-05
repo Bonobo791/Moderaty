@@ -67,7 +67,7 @@ StrykerJS is the tool for every mutation run in this repo: `@stryker-mutator/cor
 - Scoped audit: `npx stryker run --mutate "src/lib/server/<module>.ts" --ignoreStatic` (plus `--reporters clear-text` for terminal-only output).
 - PR-scale: a git-diff-driven `--mutate` scope — StrykerJS has NO `--since` flag (that is Stryker.NET). Use the shared scope script (same filter as CI — CLI `--mutate` OVERRIDES the config's mutate globs): `SCOPE=$(node scripts/stryker-pr-scope.mjs)` then `npx stryker run --mutate "$SCOPE" --ignoreStatic`. An empty `$SCOPE` means no mutable src files changed — skip the run, never pass `--mutate ""`. Every CLI Stryker invocation passes `--ignoreStatic` explicitly (repo invocation policy; the config setting alone does not satisfy it).
 - Repeat runs: the config's `incremental: true` already caches; `--incremental` forces it on the CLI.
-- CI: `.github/workflows/mutation.yml` runs a report-only pass over the PR's changed source files and uploads the HTML/JSON report as an artifact. It never fails on survivors.
+- CI: none. The report-only `.github/workflows/mutation.yml` pass was removed by maintainer decision — Stryker runs are local/agent-driven. It never failed on survivors when it existed.
 - Verify survivors by hand before writing kill tests — the score is a lead, not a verdict.
 - Wiring a ratcheted `thresholds.break` CI gate is a separate, maintainer-approved step; do not add it ad hoc.
 

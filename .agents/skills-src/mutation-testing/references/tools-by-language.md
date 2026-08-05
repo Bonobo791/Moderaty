@@ -86,8 +86,9 @@ Levers that matter:
 - `mutator.excludedMutations` — drop noisy operators (e.g. `ObjectLiteral`, `StringLiteral` on logging-heavy files).
 - Jest: `enableFindRelatedTests: true` compounds with `perTest`.
 
-CI (PR gate + weekly sweep) — illustrative; in Moderaty use the shared
-`scripts/stryker-pr-scope.mjs` as in `.github/workflows/mutation.yml`:
+CI (PR gate + weekly sweep) — illustrative; in Moderaty scope the run with
+the shared `scripts/stryker-pr-scope.mjs` (note: Moderaty itself keeps
+Stryker out of CI — runs are local/agent-driven):
 
 ```yaml
 - name: Mutation test changed files

@@ -104,3 +104,18 @@ test('a database failure inside the guard check fails loudly with a user-visible
 	expect(mocks.getSessionUser).not.toHaveBeenCalled();
 	expect(resolve).not.toHaveBeenCalled();
 });
+
+test('/api/health bypasses the guard and session so a database outage still reaches the probe', async () => {
+	// The probe's whole job is to report database health itself (issue #82):
+	// the guard or the session lookup would convert an outage into a 500
+	// before the endpoint could answer with its documented 503.
+	mocks.assertMigrationsCurrent.mockRejectedValue(new Error('database is locked'));
+	const event = { ...makeEvent(), url: new URL('http://localhost/api/health') };
+	const resolve = vi.fn(async () => new Response('ok'));
+
+	await handle({ event, resolve } as never);
+
+	expect(resolve).toHaveBeenCalled();
+	expect(mocks.assertMigrationsCurrent).not.toHaveBeenCalled();
+	expect(mocks.getSessionUser).not.toHaveBeenCalled();
+});

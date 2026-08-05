@@ -363,7 +363,7 @@ describe('OAuth scope and ban claims match implementation', () => {
 		// answer must not present toxicity as the only AI path.
 		const banFaq = FAQ_ENTRIES.find((f) => f.q === 'Will Moderaty ban my real fans?');
 		expect(banFaq, 'ban FAQ entry missing').toBeDefined();
-		expect(banFaq?.a).toMatch(/toxicity or tone/i);
+		expect(banFaq?.a).toMatch(/0\.95 or higher.*toxicity or tone analysis.*trigger an automatic ban/i);
 	});
 
 	it('the access FAQ discloses video title/description reads', () => {
@@ -374,7 +374,7 @@ describe('OAuth scope and ban claims match implementation', () => {
 			(f) => f.q === 'What YouTube account access does Moderaty need?'
 		);
 		expect(accessFaq, 'access FAQ entry missing').toBeDefined();
-		expect(accessFaq?.a).toMatch(/titles? and descriptions?/i);
+		expect(accessFaq?.a).toMatch(/read.*titles? and descriptions?.*context.*tone analysis/i);
 	});
 
 	it('the access FAQ discloses reading the channel itself when connecting', () => {

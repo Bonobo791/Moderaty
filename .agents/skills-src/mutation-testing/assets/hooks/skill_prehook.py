@@ -64,7 +64,7 @@ TRIGGERS = [
     r"\bsurviving (mutant|mutation)s?\b", r"\bkilled mutants?\b",
     r"\bequivalent mutants?\b", r"\bkill(ing)? (the |those |these |that )?mutants?\b",
     r"\btest(-| )suite quality\b",
-    r"\bare my tests (actually )?(good|catching|enough|worth|strong)\b", r"\bweak assertions?\b",
+    r"\b(is|are) my tests? (actually )?(good|catching|enough|worth|strong)\b", r"\bweak assertions?\b",
     r"\bdo(es)? (my|the|these) tests? (actually )?(catch|fail)",
 ]
 

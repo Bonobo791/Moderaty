@@ -34,6 +34,7 @@ using.
 - NEVER develop on the default branch. Always make a new one.
 - NEVER make changes to production databases. That is for humans only.
 - When I say "clean up", that means to clean your worktrees and branches.
+- Stryker runs must ALWAYS use the --ignoreStatic flag.
 
 ## Mutation Testing Engineer (role)
 

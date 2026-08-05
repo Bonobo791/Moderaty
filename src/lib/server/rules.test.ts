@@ -40,7 +40,7 @@ test('rejects invalid stored rules', () => {
 	expect(() => matchRule('text', 'author', [{ id: 4, type: 'keyword', pattern: 'text', action: 'archive' }])).toThrow(
 		/rule #4 has an unsupported action/
 	);
-	expect(() => matchRule('text', 'author', [{ id: 5, type: 'regex', pattern: '^(a+)+$', action: 'hold' }])).toThrow(
+	expect(() => matchRule('text', 'author', [{ id: 5, type: 'regex', pattern: '(a|a)+', action: 'hold' }])).toThrow(
 		/rule #5 has an unsafe regex/
 	);
 	expect(() => matchRule('aa', 'author', [{ id: 6, type: 'regex', pattern: '(?<word>a+)\\k<word>', action: 'hold' }])).toThrow(

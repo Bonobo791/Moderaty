@@ -225,19 +225,15 @@ describe('storage claims match implementation (comment PII)', () => {
 	// to run": account data IS stored while the account exists (Privacy §2), so
 	// an absolute zero-data claim would contradict the Policy.
 	it('user-data privacy claims are scoped to account needs, never absolute', () => {
-		const scopedSurfaces: Record<string, string> = {
-			TrustBar: readFileSync(new URL('../components/landing/TrustBar.svelte', import.meta.url), 'utf8'),
-			'FAQ LGPD answer': FAQ_ENTRIES.find((f) => f.q === 'Is Moderaty LGPD compliant?')?.a ?? '',
-			'consent privacy notice': PRIVACY_NOTICE_TEXT
-		};
-		for (const [name, text] of Object.entries(scopedSurfaces)) {
-			expect(text, `${name} must scope the claim to account needs`).toMatch(/account needs to run/i);
-			expect(text, `${name} makes an absolute zero-data claim`).not.toMatch(
-				/we (do not|don't) store/i
-			);
-			expect(text, `${name} makes an unqualified stores-nothing claim`).not.toMatch(
-				/stores? nothing about you\b(?![^.]*beyond)/i
-			);
+		const trustBar = readFileSync(new URL('../components/landing/TrustBar.svelte', import.meta.url), 'utf8');
+		const lgpdFaq = FAQ_ENTRIES.find((f) => f.q === 'Is Moderaty LGPD compliant?');
+		expect(lgpdFaq, 'LGPD FAQ entry missing').toBeDefined();
+		const ABSOLUTE = [/we (do not|don't) store/i, /stores? nothing about you\b(?![^.]*beyond)/i];
+		for (const text of [trustBar, lgpdFaq?.a ?? '', PRIVACY_NOTICE_TEXT]) {
+			expect(text).toMatch(/account needs to run/i);
+			for (const pattern of ABSOLUTE) {
+				expect(text).not.toMatch(pattern);
+			}
 		}
 	});
 });

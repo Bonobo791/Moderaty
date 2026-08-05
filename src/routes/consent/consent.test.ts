@@ -163,26 +163,22 @@ test('load hands the page the exact consent sentence the log will store', async 
 	expect(data).toMatchObject({ consentText: CONSENT_CHECKBOX_TEXT, kind: 'new', displayName: 'One' });
 });
 
-test('load also hands the page the refund notice, outside the evidentiary checkbox text', async () => {
-	// The refund notice is consumer-rights copy (Terms §7, CDC Art. 49), not
-	// part of the logged consent sentence: CONSENT_CHECKBOX_TEXT must stay
-	// byte-identical so existing consent rows keep matching what was shown.
+test('load also hands every flow the refund and privacy notices, outside the evidentiary checkbox text', async () => {
+	// The refund notice is consumer-rights copy (Terms §7, CDC Art. 49) and the
+	// privacy notice is consumer-trust copy (Privacy Policy §2, LGPD Art. 16,
+	// III) — neither is part of the logged consent sentence:
+	// CONSENT_CHECKBOX_TEXT must stay byte-identical so existing consent rows
+	// keep matching what was shown.
 	expect(CONSENT_CHECKBOX_TEXT).toBe(
 		'I am at least 18 years old and agree to the Terms of Service, Privacy Policy, and Data Processing Agreement'
 	);
+	for (const notice of [REFUND_NOTICE_TEXT, PRIVACY_NOTICE_TEXT]) {
+		expect(notice).not.toContain(CONSENT_CHECKBOX_TEXT);
+	}
 	expect(REFUND_NOTICE_TEXT).toContain('CDC Art. 49');
-	expect(REFUND_NOTICE_TEXT).not.toContain(CONSENT_CHECKBOX_TEXT);
-	const data = await loadConsent(cookiesWithPending(NEW_SUB), 'http://localhost/consent?state=state-1');
-	expect(data).toMatchObject({ refundText: REFUND_NOTICE_TEXT });
-});
-
-test('load hands every flow the privacy notice, and the page renders it', async () => {
-	// Same pattern as the refund notice: consumer-trust copy, kept OUT of
-	// CONSENT_CHECKBOX_TEXT so the evidentiary sentence never drifts.
 	expect(PRIVACY_NOTICE_TEXT).toContain('LGPD');
-	expect(PRIVACY_NOTICE_TEXT).not.toContain(CONSENT_CHECKBOX_TEXT);
 	const parked = await loadConsent(cookiesWithPending(NEW_SUB), 'http://localhost/consent?state=state-1');
-	expect(parked).toMatchObject({ privacyText: PRIVACY_NOTICE_TEXT });
+	expect(parked).toMatchObject({ refundText: REFUND_NOTICE_TEXT, privacyText: PRIVACY_NOTICE_TEXT });
 	await seedOwner();
 	const session = await loadConsent(makeCookies(), 'http://localhost/consent', true);
 	expect(session).toMatchObject({ privacyText: PRIVACY_NOTICE_TEXT });

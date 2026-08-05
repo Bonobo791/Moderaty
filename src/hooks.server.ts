@@ -35,6 +35,9 @@ export const handle: Handle = async ({ event, resolve }) => {
 	// scattered "no such column" errors — fail the request here with one clear
 	// 503 instead. The guard's deliberate HttpError passes through; a database
 	// failure INSIDE the check gets the same loud 500 as any other DB failure.
+	// The site-wide coupling is intentional: the public pages are prerendered
+	// and served statically (handle never runs for them), so every request that
+	// reaches this point is DB-backed and would fail downstream anyway.
 	try {
 		await assertMigrationsCurrent();
 	} catch (e) {

@@ -103,3 +103,24 @@ test('a database ahead of the code passes (expand-migrate-contract is safe that 
 	await expect(guard.assertMigrationsCurrent()).resolves.toBeUndefined();
 	expect(console.error).not.toHaveBeenCalled();
 });
+
+test('concurrent cold-start requests share a single migration check', async () => {
+	await seedAppliedMigrations(expected);
+	const guard = await freshGuard();
+
+	// Count the queries that actually reach libsql: eight concurrent calls
+	// racing a cold cache must collapse into ONE check, not eight.
+	const client = testDb().client;
+	const originalExecute = client.execute.bind(client);
+	let queries = 0;
+	client.execute = ((...args: Parameters<typeof client.execute>) => {
+		queries++;
+		return originalExecute(...args);
+	}) as typeof client.execute;
+	try {
+		await Promise.all(Array.from({ length: 8 }, () => guard.assertMigrationsCurrent()));
+	} finally {
+		client.execute = originalExecute;
+	}
+	expect(queries).toBe(1);
+});

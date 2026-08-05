@@ -38,8 +38,11 @@ const expected = (journal as { entries: unknown[] }).entries.length;
 
 // Cached on success only: a warm instance never re-checks, but an instance
 // that saw the gap re-checks on every request and recovers the moment the
-// human applies the migration — no redeploy needed.
-let verified = false;
+// human applies the migration — no redeploy needed. The in-flight check is
+// memoized as a promise so a cold-start request burst collapses into one
+// query; the cache is cleared on ANY rejection (503 or raw database error)
+// so the next request retries instead of pinning to a stale failure.
+let verificationPromise: Promise<void> | null = null;
 
 /**
  * Fails the request loudly (503) when the database is behind the deployed
@@ -52,7 +55,14 @@ export async function assertMigrationsCurrent(): Promise<void> {
 	// Prerendered pages also run handle, and the build has no database —
 	// the guard is a runtime deploy-ordering concern, not a build-time one.
 	if (building) return;
-	if (verified) return;
+	verificationPromise ??= checkMigrations().catch((e: unknown) => {
+		verificationPromise = null;
+		throw e;
+	});
+	return verificationPromise;
+}
+
+async function checkMigrations(): Promise<void> {
 	const row = await db.get<{ n: number }>(sql`SELECT COUNT(*) AS n FROM __drizzle_migrations`);
 	const applied = row?.n ?? 0;
 	if (applied < expected) {
@@ -61,5 +71,4 @@ export async function assertMigrationsCurrent(): Promise<void> {
 		);
 		throw error(503, 'the service is being upgraded — please retry in a few minutes');
 	}
-	verified = true;
 }

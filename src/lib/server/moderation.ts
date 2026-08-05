@@ -51,15 +51,22 @@ export function serializeScores(scores: ToxicityScores): string {
  * Scores a comment for toxicity across the supported moderation categories.
  *
  * @param text - The comment text to evaluate
+ * @param deadline - Optional abort deadline for the request.
+ * @param apiKey - The OpenAI key to bill (org BYOK key when the pipeline
+ * resolved one); defaults to the deployment's `OPENAI_API_KEY`.
  * @returns The maximum toxicity score and the score for each category
  * @throws If the OpenAI API key is missing, the moderation request fails, or required scores are absent or outside [0, 1]
  */
-export async function scoreComment(text: string, deadline?: number): Promise<ModerationResult> {
-	if (!env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY is required');
+export async function scoreComment(
+	text: string,
+	deadline?: number,
+	apiKey: string | undefined = env.OPENAI_API_KEY
+): Promise<ModerationResult> {
+	if (!apiKey) throw new Error('OPENAI_API_KEY is required');
 	const res = await fetchWithRetry('https://api.openai.com/v1/moderations', {
 		method: 'POST',
 		headers: {
-			Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+			Authorization: `Bearer ${apiKey}`,
 			'Content-Type': 'application/json'
 		},
 		body: JSON.stringify({ model: 'omni-moderation-latest', input: text })

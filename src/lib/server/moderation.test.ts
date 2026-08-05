@@ -99,3 +99,25 @@ test('rejects a response missing a required category score', async () => {
 
 	await expect(scoreComment('comment text')).rejects.toThrow('missing or out-of-range');
 });
+
+test('an explicit apiKey overrides the env key in the Authorization header', async () => {
+	const fetch = vi.fn().mockResolvedValue(
+		new Response(JSON.stringify({ results: [{ category_scores: mockScores() }] }), { status: 200 })
+	);
+	vi.stubGlobal('fetch', fetch);
+
+	await scoreComment('comment text', undefined, 'sk-org-key');
+
+	expect(fetch.mock.calls[0]?.[1]?.headers).toMatchObject({ Authorization: 'Bearer sk-org-key' });
+});
+
+test('the env key is the default when no explicit key is passed', async () => {
+	const fetch = vi.fn().mockResolvedValue(
+		new Response(JSON.stringify({ results: [{ category_scores: mockScores() }] }), { status: 200 })
+	);
+	vi.stubGlobal('fetch', fetch);
+
+	await scoreComment('comment text');
+
+	expect(fetch.mock.calls[0]?.[1]?.headers).toMatchObject({ Authorization: 'Bearer test-openai-key' });
+});

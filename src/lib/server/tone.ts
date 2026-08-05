@@ -42,6 +42,8 @@ export interface ToneResult {
  * @param context - The video's title and (truncated) description.
  * @param deadline - Optional abort deadline for the request.
  * @param protections - Per-channel strict-protection flags appended to the rubric.
+ * @param apiKey - The OpenAI key to bill (org BYOK key when the pipeline
+ * resolved one); defaults to the deployment's `OPENAI_API_KEY`.
  * @returns The calibrated tone score.
  * @throws If the OpenAI API key is missing, the request fails, or the score is absent or outside [0, 1].
  */
@@ -49,9 +51,10 @@ export async function scoreTone(
 	text: string,
 	context: ToneContext,
 	deadline?: number,
-	protections: ToneProtections = {}
+	protections: ToneProtections = {},
+	apiKey: string | undefined = env.OPENAI_API_KEY
 ): Promise<ToneResult> {
-	if (!env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY is required');
+	if (!apiKey) throw new Error('OPENAI_API_KEY is required');
 	// Prompt-injection guard: comment text and video metadata are attacker-controlled,
 	// so they travel inside a per-request random delimiter the model is told to treat
 	// as untrusted data — never instructions. The strict JSON validation below is the
@@ -61,7 +64,7 @@ export async function scoreTone(
 	const res = await fetchWithRetry('https://api.openai.com/v1/chat/completions', {
 		method: 'POST',
 		headers: {
-			Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+			Authorization: `Bearer ${apiKey}`,
 			'Content-Type': 'application/json'
 		},
 		body: JSON.stringify({

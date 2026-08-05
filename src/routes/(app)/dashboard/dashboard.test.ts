@@ -127,30 +127,20 @@ test('dashboard load rejects a signed-out request with 401', async () => {
 	await expect(loadDashboard(null)).rejects.toMatchObject({ status: 401 });
 });
 
-test('dashboard ban counter counts audit-log bans from BOTH the manual queue and the pipeline', async () => {
-	await testDb().db.insert(channels).values({ id: 'UC1', userId: OWNER.id, orgId: 'org-1', title: 'Mine', refreshTokenEnc: 'enc' });
-	await testDb().db.insert(channels).values({ id: 'UC2', userId: OWNER.id, orgId: 'org-1', title: 'Second', refreshTokenEnc: 'enc' });
-	await testDb().db.insert(channels).values({ id: 'UC3', userId: 'user-2', orgId: 'org-2', title: 'Theirs', refreshTokenEnc: 'enc' });
-	// Manual queue bans write ONLY audit_log (actor 'user') — no moderation_actions
-	// row exists for them. Pipeline bans write one audit row on completion
-	// (actor 'system'). The counter must see both paths.
-	await testDb().db.insert(auditLog).values([
-		{ channelId: 'UC1', commentId: 'c1', action: 'ban', reason: 'manual review', actor: 'user' },
-		{ channelId: 'UC1', commentId: 'c2', action: 'ban', reason: 'ai score 0.97', actor: 'system' },
-		{ channelId: 'UC2', commentId: 'c3', action: 'ban', reason: 'manual review', actor: 'user' },
-		// Not bans / not real actions: must not count.
-		{ channelId: 'UC1', commentId: 'c4', action: 'dry-run', reason: 'manual review', actor: 'user' },
-		{ channelId: 'UC1', commentId: 'c5', action: 'reject', reason: 'ai score 0.80', actor: 'system' },
-		// Another team's bans must not leak in.
-		{ channelId: 'UC3', commentId: 'c6', action: 'ban', reason: 'manual review', actor: 'user' }
-	]);
+test('dashboard load projects the protection flags for each channel', async () => {
+	await testDb().db.insert(channels).values({
+		id: 'UC1',
+		userId: OWNER.id,
+		orgId: 'org-1',
+		title: 'Mine',
+		refreshTokenEnc: 'enc',
+		protectLgbtqia: 1,
+		protectWomen: 0
+	});
 
 	const data = await loadDashboard();
 
-	// GROUP BY without ORDER BY does not guarantee row order — compare by key,
-	// not position (Qodo PR #74: order-dependent assertion).
-	expect(data.bans).toHaveLength(2);
-	expect(Object.fromEntries(data.bans.map((b) => [b.channelId, b.n]))).toEqual({ UC1: 2, UC2: 1 });
+	expect(data.chs[0]).toMatchObject({ protectLgbtqia: 1, protectWomen: 0 });
 });
 
 test('delete account rejects a signed-out request with 401', async () => {

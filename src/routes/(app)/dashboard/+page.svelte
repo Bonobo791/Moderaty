@@ -101,6 +101,36 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 					: 'Only hateful and abusive comments are moderated.'}
 			</p>
 		</form>
+		<form class="protections" method="POST" action="?/setProtections" use:enhance>
+			<input type="hidden" name="channelId" value={ch.id} />
+			<span class="sensitivity-title">Strict protection</span>
+			<label class="protection-toggle" for="protect-lgbtqia-{ch.id}">
+				<input
+					id="protect-lgbtqia-{ch.id}"
+					type="checkbox"
+					name="protectLgbtqia"
+					checked={ch.protectLgbtqia === 1}
+					onchange={(event) => event.currentTarget.form?.requestSubmit()}
+				/>
+				Harassment targeting LGBTQIA+ people
+			</label>
+			<label class="protection-toggle" for="protect-women-{ch.id}">
+				<input
+					id="protect-women-{ch.id}"
+					type="checkbox"
+					name="protectWomen"
+					checked={ch.protectWomen === 1}
+					onchange={(event) => event.currentTarget.form?.requestSubmit()}
+				/>
+				Harassment targeting women
+			</label>
+			<p class="muted" style="margin:6px 0 0">
+				Heightened AI scrutiny for these comments, at any sensitivity level.
+			</p>
+		</form>
+		{#if form?.scope === 'protections' && form?.channelId === ch.id && form?.error}
+			<p class="error-box" role="alert">{form.error}</p>
+		{/if}
 		<a class="btn secondary small" href="/channels/{ch.id}/rules">Rules</a>
 		<a class="btn secondary small" href="/channels/{ch.id}/queue">Review queue</a>
 		<a class="btn secondary small" href="/channels/{ch.id}/log">Audit log</a>
@@ -149,7 +179,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		(including your e-mail) are retained, as Brazilian law requires: blocked from any other use,
 		access-restricted, for up to 10 years.
 	</p>
-	{#if form?.error && form?.scope !== 'history'}
+	{#if form?.error && !form?.scope}
 		<p class="error-box" role="alert">{form.error}</p>
 	{/if}
 	<form method="POST" action="?/deleteAccount" use:enhance>
@@ -200,6 +230,25 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		border: 1px solid var(--border);
 		border-radius: 8px;
 		background: var(--bg);
+	}
+	.protections {
+		margin: 10px 0 14px;
+		padding: 10px 12px;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		background: var(--bg);
+	}
+	.protection-toggle {
+		display: flex;
+		gap: 10px;
+		align-items: flex-start;
+		font-size: 0.9rem;
+		margin: 8px 0;
+	}
+	.protection-toggle input {
+		margin-top: 3px;
+		flex-shrink: 0;
+		accent-color: var(--brand);
 	}
 	.sensitivity-title {
 		display: block;

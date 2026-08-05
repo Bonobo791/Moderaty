@@ -87,6 +87,7 @@ function parseComment(item: unknown, index: number): NewComment | null {
 	const threadId = optionalString(thread.id);
 	const publishedAt = optionalString(snippet.publishedAt);
 	const text = optionalString(snippet.textDisplay);
+	// Stryker disable next-line StringLiteral: equivalent — object() already validated thread.snippet above, so this context string belongs to an unreachable throw
 	const videoId = optionalString(snippet.videoId) ?? optionalString(object(thread.snippet, `${context}.snippet`).videoId);
 	if (!id || !threadId || !text || !publishedAt || Number.isNaN(Date.parse(publishedAt))) {
 		console.warn(`${context} is malformed (missing id, text, or a valid publishedAt); skipping it`);
@@ -99,6 +100,7 @@ function parseComment(item: unknown, index: number): NewComment | null {
 	}
 	const channelIdObject = snippet.authorChannelId;
 	const authorChannelId =
+		// Stryker disable next-line ConditionalExpression: equivalent — authorChannelId comes from JSON.parse, so a truthy non-object is a string/number/boolean primitive, whose .value is always undefined, matching the null branch
 		channelIdObject && typeof channelIdObject === 'object' && !Array.isArray(channelIdObject)
 			? optionalString((channelIdObject as JsonObject).value)
 			: null;
@@ -203,6 +205,7 @@ async function ytFetch(
 ): Promise<Response> {
 	const res = await fetchWithRetry(`${YT}${path}`, {
 		...init,
+		// Stryker disable next-line LogicalOperator: equivalent — no ytFetch caller passes init.headers, so `init?.headers` is always undefined and spreading `?? {}` vs `&& {}` yields identical headers
 		headers: { Authorization: `Bearer ${accessToken}`, ...(init?.headers ?? {}) }
 	}, deadline);
 	return res;
@@ -229,6 +232,7 @@ export async function fetchNewComments(
 	const out: NewComment[] = [];
 	let pageToken = initialPageToken;
 	const cursorMs = cursor === null ? null : Date.parse(cursor);
+	// Stryker disable next-line ConditionalExpression: equivalent — cursorMs is null only when cursor is null, and Number.isNaN(null) is false, so replacing the null check with `true` cannot change the outcome
 	if (cursorMs !== null && Number.isNaN(cursorMs)) {
 		throw new Error(`fetchNewComments cursor is invalid: ${cursor}`);
 	}

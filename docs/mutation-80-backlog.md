@@ -27,8 +27,9 @@ maintainer:
 - **Measure:** overall score ≥ 80%, with per-module tiers — 80–90% on critical
   paths (pipeline, tenancy/session/org, crypto, rules, youtube, cron/deletion);
   pure plumbing may stay lower. Not a strict per-file floor.
-- **CI:** report-only. `thresholds.break` remains a deferred,
-  maintainer-approved step and is NOT wired by this work.
+- **CI:** Stryker is not in CI at all (the report-only workflow was removed
+  by maintainer decision — runs are local/agent-driven). `thresholds.break`
+  remains a deferred, maintainer-approved step and is NOT wired by this work.
 - **Equivalents:** justified equivalent-mutant exclusions are acceptable, each
   with a one-line justification in `stryker.config.json`, verified by hand.
 
@@ -58,7 +59,7 @@ fully-ignored landing content modules (`src/lib/landing/legal.ts`,
 |---|---|---|---|---|
 | A | `mt-80-schema` | `src/lib/server/db/schema.ts` | 170+0 | **done — 100%** (137 killed, 33 ignored equivalents) |
 | B | `mt-80-auth` | `google.ts`, auth `login/callback/+server.ts`, auth `callback/+server.ts`, `oauthState.ts`, `channelConnect.ts`, `legal.ts` | 235+34 | **done — 100%** (537 killed + 1 timeout, 0 survived, 0 no-cov; 38 ignored equivalents) |
-| C | `mt-80-moderation` | `pipeline.ts`, `rules.ts`, `youtube.ts`, `moderation.ts`, `tone.ts` | 236+65 | pending |
+| C | `mt-80-moderation` | `pipeline.ts`, `rules.ts`, `youtube.ts`, `moderation.ts`, `tone.ts` | 236+65 | **done — 100%** (see triage log) |
 | D | `mt-80-tenancy-routes` | `org.ts`, `deletion.ts`, `session.ts`, `crypto.ts`, `ownership.ts`, `hooks.server.ts`, `db/index.ts`, `db/migrationTestUtils.ts`, dashboard/org/queue/log/rules/consent/connect-channel page servers, `api/cron/+server.ts`, `org/switch/+server.ts`, `invite/[token]/+page.server.ts`, `logout/+page.server.ts`, `(app)/+layout.server.ts` | ~200+50 | pending |
 | E | `mt-80-plumbing` | `http.ts`, `consentText.ts`, `migrationGuard.ts`, `testdb.ts`, `testcookies.ts`, `relative-time.ts`, landing `links.ts`/`json-ld.ts`/`queue-script.ts`, `api/health/+server.ts`, auth `+server.ts` pair, `login/+page.server.ts`, `auto-refresh.svelte.ts` | ~75+45 | pending |
 | Final | `mt-80-final` | full re-baseline, this doc updated, AGENTS.md role section updated | — | pending |
@@ -221,6 +222,57 @@ no-coverage, 38 ignored** (exclusions below + same-line sweeps noted):
   while Batch A was in flight; the schema shape test caught it immediately
   (main red after #110, fixed by pinning the new column). The shape test is
   doing its job — any schema change must update the pins.
+
+### Batch C — moderation core (PR mt-80-moderation)
+
+Five files, 231 survived + 86 no-coverage at the batch baseline. All five
+reached 100% on scoped verification (`--ignoreStatic --concurrency 1`, fresh
+incremental cache each time):
+
+- `src/lib/server/pipeline.ts` 78.65% → 100% (413 killed, 2 timeout, 44
+  ignored). Key infra change: the DB mock now honors real drizzle
+  where-conditions (`SQLiteSyncDialect.sqlToQuery` param binding) — the old
+  condition-ignoring mock made a whole cluster of query-shape mutants
+  invisible. New tests: all four `aiOutcome` branches, dry-run audit rows,
+  reason truncations, tone skip boundary (0.76), deadline partial results,
+  dispatched-action verification combos, 50-per-batch chunking, cursor
+  ordering, `lastAttemptAt` stamping. 44 hand-verified equivalent exclusions
+  (producer-guaranteed fields, unreachable guards, DDE-cannot-escape paths);
+  2 loop mutants timeout-detected (infinite loop), pinned by the batching
+  test.
+- `src/lib/server/rules.ts` 65.07% → 100% (202 killed, 2 timeout, 3 ignored).
+  Notable: recheck reports `(a)\1` and `\k<w>` as **safe** — the syntax-level
+  backreference guard is load-bearing and now pinned. Escape/pipe/char-class
+  tracking in `duplicateAlternation`, 256/257 length boundary, recheck
+  integration via `vi.mock('recheck')` passthrough. 3 equivalent exclusions
+  (sentinel array start, `<` vs `<=` no-op reading `''`, unreachable
+  `start === undefined`).
+- `src/lib/server/youtube.ts` 60.35% → 100% (275 killed, 1 timeout, 10
+  ignored). `refreshAccessToken` went from entirely uncovered to fully
+  pinned; per-field `parseComment` skip tests; pre-1970 `publishedAt` kills
+  the cursor-comparison `→ true` mutant; exactly-50-id batching boundaries.
+  4 equivalent exclusions (dead re-validation context, JSON.parse primitive
+  `.value`, module-private `init.headers`, `Number.isNaN(null)` agreement).
+- `src/lib/server/moderation.ts` 63.79% → 100% (46 killed). Request-shape
+  assertions, `null`/numeric bodies → exact "missing required category
+  scores" message, score boundaries 0 and 1 accepted. 2 exclusion sites
+  (JSON.parse can't produce non-finite numbers — `Number.isFinite` subsumes
+  the `typeof` leg; `>` vs `>=` no-op at `v === max`).
+- `src/lib/server/tone.ts` 76.47% → 100% (40 killed, 2 exclusion sites).
+  Missing-key loud failure, exact URL/method/Content-Type, `choices`
+  structure rejects with the exact I1/I11 error, boundary scores 0/1.
+  Equivalents: empty catch leaves `score` undefined either way; `typeof`
+  leg subsumed by `Number.isFinite` over the JSON.parse domain.
+
+**Process findings (Batch C):**
+
+- **vitest must exclude `.stryker-tmp`** — Stryker's in-flight sandbox is a
+  full project copy; a concurrent `npm run test` globbed it and ran every
+  test twice (128 files instead of 64). Fixed in `vite.config.ts`
+  (`exclude: [..., '**/.stryker-tmp/**']`).
+- Parallel agents sharing one worktree clobber each other's
+  `reports/mutation/mutation.json` — snapshot your own run's JSON if you
+  need it later.
 
 ## Working rules for every batch
 

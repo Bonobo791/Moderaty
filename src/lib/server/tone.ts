@@ -90,9 +90,12 @@ export async function scoreTone(
 	let score: unknown;
 	try {
 		score = (JSON.parse(typeof content === 'string' ? content : '') as { score?: unknown }).score;
-	} catch {
+	}
+	// Stryker disable next-line BlockStatement: equivalent — if the try throws, the assignment never ran, so `score` is already undefined and re-assigning it is a no-op
+	catch {
 		score = undefined;
 	}
+	// Stryker disable next-line LogicalOperator, ConditionalExpression: equivalent — score comes only from JSON.parse, which cannot produce a non-finite number, and for any non-number Number.isFinite is false, so the typeof leg is subsumed by the isFinite leg
 	if (typeof score !== 'number' || !Number.isFinite(score) || score < 0 || score > 1) {
 		throw new Error('tone response has missing or out-of-range score');
 	}

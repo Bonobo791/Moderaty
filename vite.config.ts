@@ -24,6 +24,9 @@ export default defineConfig({
 	test: {
 		environment: 'node',
 		// Local git worktrees (e.g. parallel agent work) run their own suites.
-		exclude: ['**/node_modules/**', '**/.worktrees/**']
+		// .stryker-tmp holds Stryker's in-flight sandbox (a full project copy,
+		// tests included) — exclude it or a concurrent Stryker run makes vitest
+		// execute every test twice (128 files instead of 64).
+		exclude: ['**/node_modules/**', '**/.worktrees/**', '**/.stryker-tmp/**']
 	}
 });

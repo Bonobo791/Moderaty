@@ -163,6 +163,7 @@ export async function renameOrg(userId: string, orgId: string, name: string): Pr
 		.set({ name: trimmed })
 		.where(eq(organizations.id, orgId))
 		.returning({ id: organizations.id });
+	// Stryker disable next-line ConditionalExpression, StringLiteral: unreachable guard — memberships.org_id REFERENCES organizations(id) ON DELETE CASCADE, so an existing membership implies the org row exists and the update always matches; empty result needs a cross-statement delete race.
 	if (updated.length === 0) throw error(404, 'team not found');
 }
 
@@ -266,6 +267,7 @@ export async function acceptInvite(userId: string, sessionToken: string, token: 
 			.set({ acceptedBy: userId })
 			.where(and(eq(invites.token, token), isNull(invites.acceptedBy)))
 			.returning({ token: invites.token });
+		// Stryker disable next-line ConditionalExpression, StringLiteral: reachable only via a concurrent accept committing between the check above and this conditional claim — single-connection tests serialize transactions, so the zero-claim path cannot fire without a real race.
 		if (claimed.length === 0) throw error(410, 'this invite link is no longer valid — ask for a new one');
 		if (!existing) {
 			await tx.insert(memberships).values({ userId, orgId: inv.orgId, role });
@@ -397,6 +399,7 @@ export async function leaveOrg(userId: string, sessionToken: string, orgId: stri
 			.where(and(eq(memberships.orgId, orgId), ne(memberships.userId, userId)))
 			.all();
 		if (others.length === 0) throw error(400, 'you are the only member — delete your account to remove this team');
+		// Stryker disable next-line ConditionalExpression, StringLiteral, BlockStatement: equivalent by design — the conditional DELETE below re-enforces the identical invariant atomically (role != 'owner' OR owner count > 1) and its empty-result throw carries the same 400 and message, so mutating this guard's condition or body is unobservable single-threaded; the guard is defense-in-depth so the error fires before the write attempt. (Also sweeps the predicate 'owner' StringLiteral, which the two-owner leave test kills.)
 		if (m.role === 'owner' && !others.some((o) => o.role === 'owner')) {
 			throw error(400, 'promote a teammate to owner before leaving');
 		}
@@ -410,6 +413,7 @@ export async function leaveOrg(userId: string, sessionToken: string, orgId: stri
 				)
 			)
 			.returning({ userId: memberships.userId });
+		// Stryker disable next-line ConditionalExpression, StringLiteral: race-only guard — the in-transaction owner check above plus this conditional delete cover every single-threaded path; an empty result needs a concurrent leave/demotion committing mid-transaction.
 		if (deleted.length === 0) throw error(400, 'promote a teammate to owner before leaving');
 		// If the session was acting in the org just left, clear active_org_id so
 		// resolution falls back to the oldest remaining membership. Scoped to the

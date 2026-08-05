@@ -94,6 +94,7 @@ export async function getSessionUser(token: string | undefined): Promise<Session
 	// so a deleted account has no working credentials. The tombstone marker is
 	// googleSub = 'deleted:<id>'.
 	if (row.userGoogleSub.startsWith('deleted:')) {
+		// Stryker disable next-line StringLiteral: log-only message — mutating it changes no observable behavior
 		console.info(`session for deleted account ${row.user.id} destroyed on resolution`);
 		await db.delete(sessions).where(eq(sessions.id, token));
 		return null;
@@ -108,6 +109,7 @@ export async function getSessionUser(token: string | undefined): Promise<Session
 	// repaired). Zero memberships is a data bug — fail loudly, never sign out.
 	const resolved = await resolveActiveOrg(row.user.id, row.session.activeOrgId);
 	if (!resolved) {
+		// Stryker disable next-line StringLiteral: log-only message — mutating it changes no observable behavior
 		console.error(`user ${row.user.id} has no organization membership`);
 		// HttpError, not a plain Error: hooks rethrows deliberate HttpErrors so
 		// this data bug fails loudly instead of degrading to maintenance mode.
@@ -115,7 +117,9 @@ export async function getSessionUser(token: string | undefined): Promise<Session
 	}
 	// Org repair and sliding-expiry renewal are one UPDATE when both apply.
 	const updates: { activeOrgId?: string; expiresAt?: string } = {};
+	// Stryker disable next-line ConditionalExpression: equivalent — resolveActiveOrg (org.ts) only reports fellBack when activeOrgId !== null, so the second conjunct is redundant defense-in-depth; the LogicalOperator on this line is killed by the no-fallback-log test
 	if (resolved.fellBack && row.session.activeOrgId !== null) {
+		// Stryker disable next-line StringLiteral: log-only message — mutating it changes no observable behavior
 		console.info(`session for user ${row.user.id}: active org ${row.session.activeOrgId} no longer valid, falling back to ${resolved.org.orgId}`);
 		updates.activeOrgId = resolved.org.orgId;
 	}

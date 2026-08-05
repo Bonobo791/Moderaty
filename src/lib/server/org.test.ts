@@ -17,7 +17,7 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { eq } from 'drizzle-orm';
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
 
 import { seedUser, setupTestDb, testDb } from './testdb';
 import { invites, memberships, organizations, sessions, users } from './db/schema';
@@ -491,7 +491,399 @@ test('setMemberRole rejects an unknown role with 400 (PR #52 review — untested
 	await seedMember('member-1', 'org-1', 'member');
 
 	await expect(setMemberRole('owner-1', 'org-1', 'member-1', 'superadmin' as 'member')).rejects.toMatchObject({
-		status: 400
+		status: 400,
+		body: { message: 'unknown role' }
 	});
 	expect((await membershipRow('member-1', 'org-1'))[0].role).toBe('member'); // unchanged
+});
+
+// ---- Mutation-audit hardening: loud failures, exact messages, boundaries ----
+
+test('asOrgRole throws on an unknown membership role instead of returning it', async () => {
+	// A corrupt role must fail loudly (fail-closed), never pass through as a role.
+	await seedUser('user-1');
+	await seedOrg('org-1');
+	await seedMember('user-1', 'org-1', 'bogus' as 'member');
+
+	await expect(resolveActiveOrg('user-1', null)).rejects.toThrow('unknown membership role: bogus');
+	await expect(listOrgMemberships('user-1')).rejects.toThrow('unknown membership role: bogus');
+});
+
+test('asInviteRole throws on an unknown invite role instead of returning it', async () => {
+	await seedUser('owner-1');
+	await seedOrg('org-1');
+	await seedMember('owner-1', 'org-1', 'owner');
+	await seedInvite('tok-bogus', 'org-1', 'owner-1', { role: 'bogus' });
+
+	await expect(previewInvite('tok-bogus')).rejects.toThrow('invite tok-bogus has unknown role: bogus');
+	await expect(listOpenInvites('owner-1', 'org-1')).rejects.toThrow('invite tok-bogus has unknown role: bogus');
+});
+
+test('resolveActiveOrg picks the explicit active org even when it is not the oldest membership', async () => {
+	// Mutation audit: rows.find(...) degraded to rows[0] (or the ?? flipped)
+	// silently dropped the session's org choice whenever it was not the oldest,
+	// and forcing the fellBack expression true misreported a valid pick.
+	await seedUserWithOrgs('user-1', ['org-a', 'org-b'], T0);
+
+	const resolved = await resolveActiveOrg('user-1', 'org-b');
+	expect(resolved?.org).toEqual({ orgId: 'org-b', orgName: 'org-b', orgRole: 'member', plan: 'free' });
+	expect(resolved?.fellBack).toBe(false);
+});
+
+test('team names accept exactly 80 characters and reject 81 (create and rename)', async () => {
+	// Mutation audit: `trimmed.length > 80` flipped to >= rejected the longest
+	// legal name; only a boundary-length name catches it.
+	await seedUser('owner-1');
+	await seedOrg('org-1');
+	await seedMember('owner-1', 'org-1', 'owner');
+
+	const exact = 'x'.repeat(80);
+	const orgId = await createOrg('owner-1', `  ${exact}  `); // padding is trimmed before measuring
+	const created = await testDb().db.select().from(organizations).where(eq(organizations.id, orgId)).get();
+	expect(created?.name).toBe(exact);
+
+	await renameOrg('owner-1', 'org-1', exact);
+	const renamed = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+	expect(renamed?.name).toBe(exact);
+
+	await expect(createOrg('owner-1', 'x'.repeat(81))).rejects.toMatchObject({
+		status: 400,
+		body: { message: 'team name must be 1–80 characters' }
+	});
+	await expect(renameOrg('owner-1', 'org-1', 'x'.repeat(81))).rejects.toMatchObject({
+		status: 400,
+		body: { message: 'team name must be 1–80 characters' }
+	});
+});
+
+test('renameOrg stores the trimmed name, and whitespace-only is 400', async () => {
+	// Mutation audit: dropping .trim() stored padded names and let padded
+	// whitespace through the emptiness check.
+	await seedUser('owner-1');
+	await seedOrg('org-1');
+	await seedMember('owner-1', 'org-1', 'owner');
+
+	await renameOrg('owner-1', 'org-1', '  Padded Name  ');
+	const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+	expect(org?.name).toBe('Padded Name');
+
+	await expect(renameOrg('owner-1', 'org-1', '   ')).rejects.toMatchObject({
+		status: 400,
+		body: { message: 'team name must be 1–80 characters' }
+	});
+});
+
+test('renameOrg guard messages: 404 for outsiders, 403 for plain members', async () => {
+	await seedUser('owner-1');
+	await seedUser('member-1');
+	await seedUser('outsider');
+	await seedOrg('org-1');
+	await seedMember('owner-1', 'org-1', 'owner');
+	await seedMember('member-1', 'org-1', 'member');
+
+	await expect(renameOrg('outsider', 'org-1', 'New')).rejects.toMatchObject({
+		status: 404,
+		body: { message: 'team not found' }
+	});
+	await expect(renameOrg('member-1', 'org-1', 'New')).rejects.toMatchObject({
+		status: 403,
+		body: { message: 'your team role does not allow this' }
+	});
+});
+
+test('createInvite guard messages: 404 outsider, 403 member, 400 personal, 400 bad role', async () => {
+	await seedUser('owner-1');
+	await seedUser('member-1');
+	await seedUser('outsider');
+	await seedOrg('org-1');
+	await seedOrg('org-personal', 'owner-1');
+	await seedMember('owner-1', 'org-1', 'owner');
+	await seedMember('member-1', 'org-1', 'member');
+	await seedMember('owner-1', 'org-personal', 'owner');
+
+	await expect(createInvite('outsider', 'org-1', 'member')).rejects.toMatchObject({
+		status: 404,
+		body: { message: 'team not found' }
+	});
+	await expect(createInvite('member-1', 'org-1', 'member')).rejects.toMatchObject({
+		status: 403,
+		body: { message: 'your team role does not allow this' }
+	});
+	await expect(createInvite('owner-1', 'org-personal', 'member')).rejects.toMatchObject({
+		status: 400,
+		body: { message: "personal teams can't have members — create a shared team to collaborate" }
+	});
+	await expect(createInvite('owner-1', 'org-1', 'owner' as 'member')).rejects.toMatchObject({
+		status: 400,
+		body: { message: 'invite role must be admin or member' }
+	});
+});
+
+test('an invite expiring exactly now counts as expired in preview and accept', async () => {
+	// Mutation audit: `<= Date.now()` flipped to `<` resurrected invites at their
+	// exact expiry instant; only a boundary-timestamp invite catches it.
+	vi.useFakeTimers({ toFake: ['Date'] });
+	vi.setSystemTime(new Date('2026-06-01T12:00:00.000Z'));
+	try {
+		await seedUser('owner-1');
+		await seedUser('joiner-1');
+		await seedOrg('org-1');
+		await seedMember('owner-1', 'org-1', 'owner');
+		await seedSession('sess-1', 'joiner-1');
+		await seedInvite('tok-now', 'org-1', 'owner-1', { expiresAt: '2026-06-01T12:00:00.000Z' });
+
+		expect((await previewInvite('tok-now'))?.expired).toBe(true);
+		await expect(acceptInvite('joiner-1', 'sess-1', 'tok-now')).rejects.toMatchObject({
+			status: 410,
+			body: { message: 'this invite link is no longer valid — ask for a new one' }
+		});
+		expect(await membershipRow('joiner-1', 'org-1')).toHaveLength(0);
+	} finally {
+		vi.useRealTimers();
+	}
+});
+
+test('acceptInvite guard messages: expired/unknown 410, personal 400, mismatched session 401', async () => {
+	await seedUser('owner-1');
+	await seedUser('joiner-1');
+	await seedUser('user-2');
+	await seedOrg('org-1');
+	await seedOrg('org-personal', 'owner-1');
+	await seedMember('owner-1', 'org-1', 'owner');
+	await seedSession('sess-1', 'joiner-1');
+	await seedSession('sess-2', 'user-2');
+	await seedInvite('tok-expired', 'org-1', 'owner-1', { expiresAt: '2020-01-01T00:00:00.000Z' });
+	await seedInvite('tok-personal', 'org-personal', 'owner-1');
+	await seedInvite('tok-open', 'org-1', 'owner-1');
+
+	await expect(acceptInvite('joiner-1', 'sess-1', 'tok-expired')).rejects.toMatchObject({
+		status: 410,
+		body: { message: 'this invite link is no longer valid — ask for a new one' }
+	});
+	await expect(acceptInvite('joiner-1', 'sess-1', 'tok-personal')).rejects.toMatchObject({
+		status: 400,
+		body: { message: 'this invite points at a personal team — ask for a shared-team invite' }
+	});
+	await expect(acceptInvite('joiner-1', 'sess-2', 'tok-open')).rejects.toMatchObject({
+		status: 401,
+		body: { message: 'sign-in required' }
+	});
+});
+
+test('switchActiveOrg guard messages: 404 without membership, 401 for another session', async () => {
+	await seedUser('user-1');
+	await seedUser('user-2');
+	await seedOrg('org-1');
+	await seedOrg('org-2');
+	await seedMember('user-1', 'org-1', 'member');
+	await seedSession('sess-1', 'user-1');
+	await seedSession('sess-2', 'user-2');
+
+	await expect(switchActiveOrg('user-1', 'sess-1', 'org-2')).rejects.toMatchObject({
+		status: 404,
+		body: { message: 'team not found' }
+	});
+	await expect(switchActiveOrg('user-1', 'sess-2', 'org-1')).rejects.toMatchObject({
+		status: 401,
+		body: { message: 'sign-in required' }
+	});
+});
+
+test('listMembers and listOpenInvites read outsiders as 404 with the guard message', async () => {
+	await seedUser('owner-1');
+	await seedUser('member-1');
+	await seedUser('outsider');
+	await seedOrg('org-1');
+	await seedMember('owner-1', 'org-1', 'owner');
+	await seedMember('member-1', 'org-1', 'member');
+
+	await expect(listMembers('outsider', 'org-1')).rejects.toMatchObject({
+		status: 404,
+		body: { message: 'team not found' }
+	});
+	await expect(listOpenInvites('outsider', 'org-1')).rejects.toMatchObject({
+		status: 404,
+		body: { message: 'team not found' }
+	});
+	await expect(listOpenInvites('member-1', 'org-1')).rejects.toMatchObject({
+		status: 403,
+		body: { message: 'your team role does not allow this' }
+	});
+});
+
+test('revokeInvite guard messages: 404 unknown token, 404 foreign admin, 403 member', async () => {
+	await seedUser('owner-1');
+	await seedUser('member-1');
+	await seedUser('other-owner');
+	await seedOrg('org-1');
+	await seedOrg('org-2');
+	await seedMember('owner-1', 'org-1', 'owner');
+	await seedMember('member-1', 'org-1', 'member');
+	await seedMember('other-owner', 'org-2', 'owner');
+	await seedInvite('tok-1', 'org-1', 'owner-1');
+
+	await expect(revokeInvite('owner-1', 'tok-nope')).rejects.toMatchObject({
+		status: 404,
+		body: { message: 'invite not found' }
+	});
+	await expect(revokeInvite('other-owner', 'tok-1')).rejects.toMatchObject({
+		status: 404,
+		body: { message: 'invite not found' }
+	});
+	await expect(revokeInvite('member-1', 'tok-1')).rejects.toMatchObject({
+		status: 403,
+		body: { message: 'your team role does not allow this' }
+	});
+});
+
+test('setMemberRole promotes a member to admin with a sole owner, and re-setting owner is a no-op', async () => {
+	// Mutation audit: `target.role === 'owner' && role !== 'owner'` flipped to ||
+	// routed EVERY non-owner promotion through the demotion guard, blocking it
+	// without a second owner; `'owner' !== role` blanked treated re-setting an
+	// owner as a demotion. Both must behave as plain updates.
+	await seedUser('owner-1');
+	await seedUser('member-1');
+	await seedOrg('org-1');
+	await seedMember('owner-1', 'org-1', 'owner');
+	await seedMember('member-1', 'org-1', 'member');
+
+	await setMemberRole('owner-1', 'org-1', 'member-1', 'admin');
+	expect((await membershipRow('member-1', 'org-1'))[0].role).toBe('admin');
+
+	await setMemberRole('owner-1', 'org-1', 'owner-1', 'owner'); // no-op, must not trip the demotion guard
+	expect((await membershipRow('owner-1', 'org-1'))[0].role).toBe('owner');
+});
+
+test('setMemberRole guard messages: 404 outsider caller, 404 ghost target, 400 last owner', async () => {
+	await seedUser('owner-1');
+	await seedUser('member-1');
+	await seedUser('outsider');
+	await seedOrg('org-1');
+	await seedMember('owner-1', 'org-1', 'owner');
+	await seedMember('member-1', 'org-1', 'member');
+
+	await expect(setMemberRole('outsider', 'org-1', 'member-1', 'admin')).rejects.toMatchObject({
+		status: 404,
+		body: { message: 'team not found' }
+	});
+	await expect(setMemberRole('owner-1', 'org-1', 'ghost', 'member')).rejects.toMatchObject({
+		status: 404,
+		body: { message: 'member not found' }
+	});
+	await expect(setMemberRole('owner-1', 'org-1', 'owner-1', 'admin')).rejects.toMatchObject({
+		status: 400,
+		body: { message: 'the last owner cannot be demoted — promote a teammate to owner first' }
+	});
+});
+
+test('removeMember guard messages: self 400, outsider 404, ghost 404, owner/admin 403', async () => {
+	await seedUser('owner-1');
+	await seedUser('admin-1');
+	await seedUser('member-1');
+	await seedUser('outsider');
+	await seedOrg('org-1');
+	await seedMember('owner-1', 'org-1', 'owner');
+	await seedMember('admin-1', 'org-1', 'admin');
+	await seedMember('member-1', 'org-1', 'member');
+
+	await expect(removeMember('member-1', 'org-1', 'member-1')).rejects.toMatchObject({
+		status: 400,
+		body: { message: 'use Leave team to remove yourself' }
+	});
+	await expect(removeMember('outsider', 'org-1', 'member-1')).rejects.toMatchObject({
+		status: 404,
+		body: { message: 'team not found' }
+	});
+	await expect(removeMember('owner-1', 'org-1', 'ghost')).rejects.toMatchObject({
+		status: 404,
+		body: { message: 'member not found' }
+	});
+	await expect(removeMember('admin-1', 'org-1', 'owner-1')).rejects.toMatchObject({
+		status: 403,
+		body: { message: 'owners cannot be removed' }
+	});
+	await expect(removeMember('admin-1', 'org-1', 'admin-1')).rejects.toMatchObject({
+		status: 400,
+		body: { message: 'use Leave team to remove yourself' }
+	});
+	await seedUser('admin-2');
+	await seedMember('admin-2', 'org-1', 'admin');
+	await expect(removeMember('admin-1', 'org-1', 'admin-2')).rejects.toMatchObject({
+		status: 403,
+		body: { message: 'only an owner can remove an admin' }
+	});
+	expect(await membershipRow('member-1', 'org-1')).toHaveLength(1); // nothing was removed
+});
+
+test('leaveOrg guard messages: outsider 404, sole member 400, last owner 400', async () => {
+	await seedUser('owner-1');
+	await seedUser('member-1');
+	await seedOrg('org-1');
+	await seedOrg('org-solo');
+	await seedMember('owner-1', 'org-1', 'owner');
+	await seedMember('member-1', 'org-1', 'member');
+	await seedMember('owner-1', 'org-solo', 'owner');
+	await seedSession('sess-1', 'owner-1', 'org-solo');
+
+	await expect(leaveOrg('ghost', 'sess-1', 'org-1')).rejects.toMatchObject({
+		status: 404,
+		body: { message: 'team not found' }
+	});
+	await expect(leaveOrg('owner-1', 'sess-1', 'org-solo')).rejects.toMatchObject({
+		status: 400,
+		body: { message: 'you are the only member — delete your account to remove this team' }
+	});
+	await expect(leaveOrg('owner-1', 'sess-1', 'org-1')).rejects.toMatchObject({
+		status: 400,
+		body: { message: 'promote a teammate to owner before leaving' }
+	});
+});
+
+test('leaveOrg lets an owner leave when another owner remains', async () => {
+	// Mutation audit: `others.some(o => o.role === 'owner')` mutated to every()
+	// blocked an owner from leaving whenever a non-owner teammate existed.
+	await seedUser('owner-1');
+	await seedUser('owner-2');
+	await seedUser('member-1');
+	await seedOrg('org-1');
+	await seedMember('owner-1', 'org-1', 'owner');
+	await seedMember('owner-2', 'org-1', 'owner');
+	await seedMember('member-1', 'org-1', 'member');
+	await seedSession('sess-1', 'owner-1', 'org-1');
+
+	await leaveOrg('owner-1', 'sess-1', 'org-1');
+	expect(await membershipRow('owner-1', 'org-1')).toHaveLength(0);
+	const sess = await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-1')).get();
+	expect(sess?.activeOrgId).toBeNull();
+});
+
+test('acceptInvite answers 410, not 400, for an already-used invite even into a personal team', async () => {
+	// Mutation audit: blanking `inv.acceptedBy !== null` let a burned invite fall
+	// through to the personal-team guard, leaking 400 where single-use semantics
+	// demand 410 for every dead link.
+	await seedUser('owner-1');
+	await seedUser('joiner-1');
+	await seedOrg('org-personal', 'owner-1');
+	await seedSession('sess-1', 'joiner-1');
+	await seedInvite('tok-used-personal', 'org-personal', 'owner-1', { acceptedBy: 'owner-1' });
+
+	await expect(acceptInvite('joiner-1', 'sess-1', 'tok-used-personal')).rejects.toMatchObject({
+		status: 410,
+		body: { message: 'this invite link is no longer valid — ask for a new one' }
+	});
+});
+
+test('leaveOrg lets a member leave a team whose remaining members include no owner', async () => {
+	// Mutation audit: forcing `m.role === 'owner' && ...` true blocked ANY leaver
+	// whose remaining teammates had no owner — a member must still walk free.
+	await seedUser('member-1');
+	await seedUser('member-2');
+	await seedOrg('org-1');
+	await seedMember('member-1', 'org-1', 'member');
+	await seedMember('member-2', 'org-1', 'member');
+	await seedSession('sess-1', 'member-1', 'org-1');
+
+	await leaveOrg('member-1', 'sess-1', 'org-1');
+	expect(await membershipRow('member-1', 'org-1')).toHaveLength(0);
+	expect(await membershipRow('member-2', 'org-1')).toHaveLength(1);
 });

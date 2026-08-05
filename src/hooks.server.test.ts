@@ -41,6 +41,8 @@ vi.mock('$lib/server/migrationGuard', () => ({
 import { handle } from './hooks.server';
 
 beforeEach(() => {
+	// Drop lingering console.error spies so per-test call assertions are clean.
+	vi.restoreAllMocks();
 	mocks.getSessionUser.mockReset();
 	mocks.assertMigrationsCurrent.mockReset().mockResolvedValue(undefined);
 	mocks.cookieSecure.mockReset().mockReturnValue(false);
@@ -189,4 +191,86 @@ test('a deliberate HttpError from session resolution propagates — integrity fa
 	await expect(handle({ event, resolve } as never)).rejects.toMatchObject({ status: 500 });
 	expect(event.locals.dbDown).toBeUndefined();
 	expect(resolve).not.toHaveBeenCalled();
+});
+
+test('no session resolves to signed-out without tripping the maintenance flag', async () => {
+	// Mutation audit: dropping the optional chaining on `resolution?.user` /
+	// `resolution?.renewed` turns a signed-out visitor into a TypeError that
+	// the catch swallows as dbDown — every signed-out page would render the
+	// maintenance overlay. Assert dbDown stays unset for the null resolution.
+	mocks.getSessionUser.mockResolvedValue(null);
+	const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	const event = makeEvent();
+	const resolve = vi.fn(async () => new Response('ok'));
+
+	await handle({ event, resolve } as never);
+
+	expect(resolve).toHaveBeenCalled();
+	expect(event.locals.user).toBeNull();
+	expect(event.locals.dbDown).toBeUndefined();
+	expect(errSpy).not.toHaveBeenCalled();
+	expect(event.cookies.set).not.toHaveBeenCalled();
+});
+
+test('a non-renewed session does not rewrite the cookie', async () => {
+	// Mutation audit: forcing the renewal condition true (or swapping && for
+	// ||) re-sets the cookie on every request — harmless-looking but it
+	// defeats the renewal-window design and hides real expiry behavior.
+	mocks.getSessionUser.mockResolvedValue({
+		user: { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' },
+		renewed: false,
+		expiresAt: '2026-08-01T00:00:00.000Z'
+	});
+	const event = makeEvent();
+	const resolve = vi.fn(async () => new Response('ok'));
+
+	await handle({ event, resolve } as never);
+
+	expect(resolve).toHaveBeenCalled();
+	expect(event.cookies.set).not.toHaveBeenCalled();
+});
+
+test('a renewed session without a cookie token does not rewrite the cookie', async () => {
+	// The renewal branch must also require a token to write back — without a
+	// cookie there is nothing to refresh.
+	mocks.getSessionUser.mockResolvedValue({
+		user: { id: 'user-1', email: 'one@example.com', displayName: 'One', plan: 'free' },
+		renewed: true,
+		expiresAt: '2026-09-01T00:00:00.000Z'
+	});
+	const event = {
+		cookies: { get: () => undefined, set: vi.fn() },
+		locals: {} as { user: unknown; dbDown?: boolean },
+		url: new URL('http://localhost/')
+	};
+	const resolve = vi.fn(async () => new Response('ok'));
+
+	await handle({ event, resolve } as never);
+
+	expect(resolve).toHaveBeenCalled();
+	expect(event.cookies.set).not.toHaveBeenCalled();
+});
+
+test('a guard-check outage is logged with its identifiable message', async () => {
+	// Mutation audit: blanking the log prefix makes ops pages ungreppable —
+	// assert the exact loud message, not just that something was logged.
+	mocks.assertMigrationsCurrent.mockRejectedValue(new Error('database is locked'));
+	const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	const event = makeEvent();
+	const resolve = vi.fn(async () => new Response('ok'));
+
+	await handle({ event, resolve } as never);
+
+	expect(errSpy).toHaveBeenCalledWith('migration guard query failed:', expect.any(Error));
+});
+
+test('a session-lookup outage is logged with its identifiable message', async () => {
+	mocks.getSessionUser.mockRejectedValue(new Error('database is locked'));
+	const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	const event = makeEvent();
+	const resolve = vi.fn(async () => new Response('ok'));
+
+	await handle({ event, resolve } as never);
+
+	expect(errSpy).toHaveBeenCalledWith('session lookup failed:', expect.any(Error));
 });

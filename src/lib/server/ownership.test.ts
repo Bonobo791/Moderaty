@@ -83,7 +83,17 @@ test('ownedChannel throws 404 for another org\'s channel without leaking existen
 		.db.insert(channels)
 		.values({ id: 'UC1', userId: OWNER.id, orgId: 'org-2', title: 'Ch', refreshTokenEnc: 'enc' });
 
-	await expect(ownedChannel('UC1', { user: OWNER })).rejects.toMatchObject({ status: 404 });
+	await expect(ownedChannel('UC1', { user: OWNER })).rejects.toMatchObject({
+		status: 404,
+		body: { message: 'channel not found' }
+	});
+});
+
+test('ownedChannel 404 message is non-empty for a missing channel id', async () => {
+	await expect(ownedChannel('UC-missing', { user: OWNER })).rejects.toMatchObject({
+		status: 404,
+		body: { message: 'channel not found' }
+	});
 });
 
 test('ownedChannel throws 401 when signed out', async () => {

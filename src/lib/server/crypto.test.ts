@@ -41,6 +41,34 @@ test('encrypts the same plaintext to a different payload every time', () => {
 	expect(encrypt('same plaintext')).not.toBe(encrypt('same plaintext'));
 });
 
+test('encrypt fails loudly with the exact error when ENCRYPTION_KEY is not configured', () => {
+	// Mutation audit: removing the missing-key guard encrypts with an undefined
+	// secret instead of failing at the boundary; the exact message is the
+	// operable signal in server logs.
+	const envRecord = env as Record<string, string | undefined>;
+	const original = envRecord.ENCRYPTION_KEY;
+	delete envRecord.ENCRYPTION_KEY;
+	try {
+		expect(() => encrypt('plaintext')).toThrow(/^ENCRYPTION_KEY is required$/);
+	} finally {
+		envRecord.ENCRYPTION_KEY = original;
+	}
+});
+
+test('decrypt fails loudly with the exact error when ENCRYPTION_KEY is not configured', () => {
+	// Mutation audit: both entry points share the key guard; each must be
+	// exercised so a guard removed on one path cannot survive.
+	const envRecord = env as Record<string, string | undefined>;
+	const original = envRecord.ENCRYPTION_KEY;
+	delete envRecord.ENCRYPTION_KEY;
+	try {
+		const dummyPayload = Buffer.from('x'.repeat(40)).toString('base64');
+		expect(() => decrypt(dummyPayload)).toThrow(/^ENCRYPTION_KEY is required$/);
+	} finally {
+		envRecord.ENCRYPTION_KEY = original;
+	}
+});
+
 test('derives the encryption key from ENCRYPTION_KEY, so a wrong key cannot decrypt', () => {
 	// Mutation audit: substituting a constant key source still round-trips
 	// (encrypt and decrypt share key()), hiding key-rotation breakage and a

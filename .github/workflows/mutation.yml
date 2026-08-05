@@ -83,7 +83,9 @@ jobs:
 
       - name: Stryker mutation report
         if: steps.scope.outputs.mutate != ''
-        run: ./node_modules/.bin/stryker run --mutate "${{ steps.scope.outputs.mutate }}" --incremental --reporters html,json,clear-text
+        # --ignoreStatic is passed explicitly (not only via config) so every
+        # CLI Stryker invocation satisfies the repo's invocation policy.
+        run: ./node_modules/.bin/stryker run --mutate "${{ steps.scope.outputs.mutate }}" --ignoreStatic --incremental --reporters html,json,clear-text
 
       - name: Skip notice when nothing mutable changed
         if: steps.scope.outputs.mutate == ''

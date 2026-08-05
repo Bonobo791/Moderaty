@@ -73,7 +73,7 @@ Levers that matter:
   ```sh
   SCOPE=$(node scripts/stryker-pr-scope.mjs)
   if [ -n "$SCOPE" ]; then
-    npx stryker run --mutate "$SCOPE"
+    npx stryker run --mutate "$SCOPE" --ignoreStatic
   else
     echo "No mutable source files changed; skipping Stryker."
   fi

@@ -47,7 +47,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 	<Reveal delay={0.1}>
 		<p class="more">
-			<span class="scarcity">First 1,000 users: $49 once for lifetime hosted BYOK.</span>
+			<span class="scarcity">First 1,000 users: $49 once for lifetime hosting.</span>
 			<a href="/pricing" class="more-link">Full pricing breakdown <span class="arrow" aria-hidden="true">→</span></a>
 		</p>
 	</Reveal>

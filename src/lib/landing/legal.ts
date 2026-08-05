@@ -33,8 +33,11 @@ export type LegalDoc = {
 	toc: LegalTocEntry[];
 };
 
-export const LEGAL_EFFECTIVE_DATE = '2 August 2026';
-export const LEGAL_VERSION = '1.4';
+export const LEGAL_EFFECTIVE_DATE = '5 August 2026';
+// 1.5: Terms §6.1(c) corrected — the lifetime hosted plan has no per-account
+// key flow (hosted scoring runs on the deployment's OPENAI_API_KEY), so the
+// "your own OpenAI key" promise was removed from the lifetime clause.
+export const LEGAL_VERSION = '1.5';
 export const LEGAL_KICKER = 'YouTube Comment Moderation Service';
 
 /**

@@ -19,9 +19,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 -->
 
 <!--
-	The lifetime BYOK deal: hosted forever for one $49 payment with the
-	buyer's own OpenAI key, capped at the first 1,000 users. Card markup and
-	styles live in PlanCard.svelte.
+	The lifetime deal: hosted forever for one $49 payment, capped at the
+	first 1,000 users. We run the AI — buyers never touch a key. Card markup
+	and styles live in PlanCard.svelte.
 -->
 
 <script lang="ts">
@@ -35,15 +35,15 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <PlanCard
 	stamp="First 1000 users"
 	mint
-	kicker="Lifetime BYOK"
+	kicker="Lifetime"
 	price="$49"
 	priceNote="once, forever"
-	bestFor={detailed ? 'Best for: early believers with their own OpenAI key.' : ''}
+	bestFor={detailed ? 'Best for: early believers.' : ''}
 	ticks={detailed ? TICKS_LIFETIME_DETAILED : TICKS_LIFETIME}
 >
 	{#snippet body()}
-		Hosted forever for one payment. Bring your own OpenAI key for the AI scoring. After the $49
-		your running cost is near zero. Unlimited comments, no meter.
+		Hosted forever for one payment. We run the AI for you — no key to manage, nothing to
+		configure. Unlimited comments, no meter.
 	{/snippet}
 	{#snippet cta()}
 		<a href={LOGIN_URL} class="btn-press primary-btn">Connect YouTube channel</a>

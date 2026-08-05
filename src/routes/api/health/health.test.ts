@@ -16,7 +16,7 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { beforeEach, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { GET } from './+server';
 
@@ -24,6 +24,10 @@ setupTestDb([]);
 
 beforeEach(() => {
 	vi.spyOn(console, 'error').mockImplementation(() => {}).mockClear();
+});
+
+afterEach(() => {
+	vi.restoreAllMocks();
 });
 
 test('a healthy database answers 200 with a bare ok status', async () => {

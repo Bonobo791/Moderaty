@@ -30,6 +30,11 @@ import { getSessionUser, SESSION_COOKIE } from '$lib/server/session';
 // loudly (AGENTS.md): a valid user must see a server error, not a silent
 // downgrade to signed-out.
 export const handle: Handle = async ({ event, resolve }) => {
+	// /api/health is the uptime probe (issue #82): its whole job is to report
+	// database health itself, so it bypasses the migration guard and session
+	// resolution — either one would convert a database outage into a 500
+	// before the endpoint could answer with its documented 503.
+	if (event.url.pathname === '/api/health') return resolve(event);
 	// Deploy-ordering boundary (issue #81): if the database is behind the
 	// deployed code's migration journal, every DB query would fail with
 	// scattered "no such column" errors — fail the request here with one clear

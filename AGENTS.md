@@ -50,14 +50,17 @@ both-directions confirmation (the exception — a mutant Stryker's operator
 set cannot express — is documented in the skill and must be justified in the
 PR). StrykerJS: `@stryker-mutator/core` +
 `@stryker-mutator/vitest-runner`, configured by `stryker.config.json` at the
-repo root (`npx stryker run` for whole-module audits,
-`npx stryker run --since main` or a scoped `--mutate` glob for PR-scale
-work, `npx stryker run --incremental` to reuse the cache; the `json`
+repo root (`npx stryker run` for whole-module audits, a scoped `--mutate`
+glob or a git-diff-driven scope for PR-scale work — StrykerJS has no
+`--since` flag, that is Stryker.NET; scope PR work with
+`git diff --name-only main...HEAD` piped into `--mutate`,
+`npx stryker run --incremental` to reuse the cache; the `json`
 reporter in config gives machine-readable survivors for the agent loop). In
 a fresh checkout or worktree run `npx svelte-kit sync` first — Stryker's
 vitest runner needs the generated `.svelte-kit/tsconfig.json`. Verify
 survivors by hand before writing kill tests — the score is a lead, not a
-verdict. CI runs a report-only `--since main` Stryker pass on every PR
+verdict. CI runs a report-only Stryker pass over the PR's changed source
+files on every PR
 (`.github/workflows/mutation.yml`, report uploaded as an artifact); wiring a
 ratcheted `thresholds.break` gate remains a separate, maintainer-approved
 step.

@@ -14,8 +14,9 @@
 #
 # Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-# Report-only mutation testing on every PR: Stryker mutates the files changed
-# vs main (`--since main`) and uploads the HTML/JSON report as an artifact.
+# Report-only mutation testing on every PR: Stryker mutates the src files
+# changed vs main (git-diff-driven --mutate scope; StrykerJS has no --since
+# flag) and uploads the HTML/JSON report as an artifact.
 # This NEVER fails on surviving mutants — there is deliberately no
 # thresholds.break (ratcheting a gate is a separate, maintainer-approved step
 # per AGENTS.md). The check only goes red if Stryker itself errors, which is a
@@ -36,9 +37,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # --since main diffs against the merge base; the default shallow
-          # clone has no history to diff against.
+          # The mutate scope diffs against the merge base; the default
+          # shallow clone has no history to diff against.
           fetch-depth: 0
+
+      # PR checkouts are detached HEAD with only origin/* refs; the diff
+      # needs a LOCAL main ref to compare against, so create it explicitly.
+      - run: git fetch origin main:main
 
       - uses: actions/setup-node@v4
         with:
@@ -60,7 +65,23 @@ jobs:
             stryker-incremental-main
             stryker-incremental-
 
-      - run: npx stryker run --since main --incremental --reporters html,json,clear-text
+      # Scope the run to the src files this PR changes, filtered to the same
+      # set as the config's mutate globs (no tests, dev-seed, or legal pages).
+      # A docs-only PR produces an empty scope and the run is skipped loudly.
+      - name: Compute changed source files
+        id: scope
+        run: |
+          FILES=$(git diff --name-only main...HEAD | grep -E '^src/.+\.ts$' | grep -vE '(\.test\.ts$|^src/lib/server/testuser\.ts$|^src/routes/(terms|privacy|dpa)/\+page\.ts$)' | paste -sd, - || true)
+          echo "mutate=$FILES" >> "$GITHUB_OUTPUT"
+          echo "Changed source files to mutate: ${FILES:-<none>}"
+
+      - name: Stryker mutation report
+        if: steps.scope.outputs.mutate != ''
+        run: npx stryker run --mutate "${{ steps.scope.outputs.mutate }}" --incremental --reporters html,json,clear-text
+
+      - name: Skip notice when nothing mutable changed
+        if: steps.scope.outputs.mutate == ''
+        run: echo "::notice::No mutable src files changed vs main; mutation run skipped."
 
       - uses: actions/upload-artifact@v4
         if: always()

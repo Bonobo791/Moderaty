@@ -12,6 +12,7 @@
   "testRunner": "vitest",
   "coverageAnalysis": "perTest",
   "incremental": true,
+  "ignoreStatic": true,
   "reporters": [
     "progress",
     "clear-text",

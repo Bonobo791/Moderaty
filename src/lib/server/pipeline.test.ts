@@ -81,7 +81,9 @@ const mocks = vi.hoisted(() => {
 						// concurrent run that claimed the row first.
 						const claimed = state.moderationActions.filter((item) =>
 							item.state === 'pending' && !state.unclaimedIds.includes(String(item.commentId)));
-						claimed.forEach((item) => Object.assign(item, values));
+						claimed.forEach((item) => {
+							Object.assign(item, values);
+						});
 						return { returning: async () => claimed.map((item) => ({ commentId: item.commentId })) };
 					}
 					const action = state.moderationActions.find((item) => {

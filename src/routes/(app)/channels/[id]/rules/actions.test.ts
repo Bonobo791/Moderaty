@@ -52,7 +52,7 @@ test('load returns the maintenance payload during a database outage instead of a
 	// The layout renders the overlay; the child load must not throw on the
 	// null-user outage shape.
 	const result = await load({ params: { id: 'UC1' }, locals: { user: null, dbDown: true } } as never);
-	expect(result).toMatchObject({ maintenance: true, rs: [] });
+	expect(result).toEqual({ ch: { id: 'UC1', title: '' }, rs: [], maintenance: true });
 });
 
 test('load projects only the channel fields the page renders — never the credential', async () => {
@@ -75,7 +75,7 @@ test('remove cannot delete another channel rule', async () => {
 	await seedChannel('UC2');
 	const otherId = await seedRule('UC2');
 	const res = await remove('UC1', String(otherId));
-	expect(res).toMatchObject({ status: 404 });
+	expect(res).toMatchObject({ status: 404, data: { error: 'rule not found' } });
 	expect(await ruleRows()).toHaveLength(1);
 });
 
@@ -84,7 +84,7 @@ test('remove rejects a malformed ruleId with 400', async () => {
 	const id = await seedRule('UC1');
 	for (const ruleId of ['abc', '', '0', '-3']) {
 		const res = await remove('UC1', ruleId);
-		expect(res).toMatchObject({ status: 400 });
+		expect(res).toMatchObject({ status: 400, data: { error: 'Invalid rule ID' } });
 	}
 	const rows = await ruleRows();
 	expect(rows).toHaveLength(1);
@@ -126,5 +126,93 @@ test('add rejects a signed-out request with 401 and inserts nothing', async () =
 	await seedChannel('UC1');
 
 	await expect(add('UC1', null)).rejects.toMatchObject({ status: 401 });
+	expect(await ruleRows()).toHaveLength(0);
+});
+
+test('load returns only this channel rules with the projected channel', async () => {
+	await seedChannel('UC1');
+	await seedChannel('UC2');
+	const id = await seedRule('UC1');
+	await seedRule('UC2');
+
+	const result = await load({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);
+	expect(result).toEqual({
+		ch: { id: 'UC1', title: 'Ch' },
+		rs: [expect.objectContaining({ id, channelId: 'UC1', type: 'keyword', pattern: 'spam', action: 'hold' })]
+	});
+});
+
+test('load on a channel owned by another team fails with 404', async () => {
+	await seedChannel('UC1', 'user-2', 'org-2');
+
+	await expect(load({ params: { id: 'UC1' }, locals: { user: OWNER } } as never)).rejects.toMatchObject({
+		status: 404
+	});
+});
+
+function addForm(channelId: string, fields: Record<string, string>, user: typeof OWNER | null = OWNER) {
+	return actions.add({
+		params: { id: channelId },
+		request: postForm(fields, 'http://localhost/channels/UC1/rules?/add'),
+		locals: { user }
+	} as never);
+}
+
+test('add validates, trims the pattern, and inserts the rule', async () => {
+	await seedChannel('UC1');
+
+	const res = await addForm('UC1', { type: 'keyword', pattern: '  spam  ', action: 'hold' });
+	expect(res).toEqual({ ok: true });
+
+	const rows = await ruleRows();
+	expect(rows).toHaveLength(1);
+	expect(rows[0]).toMatchObject({ channelId: 'UC1', type: 'keyword', pattern: 'spam', action: 'hold' });
+	expect(rows[0].createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+});
+
+test('add rejects an unsupported rule type with the validator message and inserts nothing', async () => {
+	await seedChannel('UC1');
+
+	const res = await addForm('UC1', { type: 'banana', pattern: 'spam', action: 'hold' });
+	expect(res).toMatchObject({ status: 400, data: { error: 'rule #0 has an unsupported type: banana' } });
+	expect(await ruleRows()).toHaveLength(0);
+});
+
+test('add rejects an unsupported rule action with the validator message and inserts nothing', async () => {
+	await seedChannel('UC1');
+
+	const res = await addForm('UC1', { type: 'keyword', pattern: 'spam', action: 'nuke' });
+	expect(res).toMatchObject({ status: 400, data: { error: 'rule #0 has an unsupported action: nuke' } });
+	expect(await ruleRows()).toHaveLength(0);
+});
+
+test('add rejects an unsafe regex with the validator message and inserts nothing', async () => {
+	await seedChannel('UC1');
+
+	const res = await addForm('UC1', { type: 'regex', pattern: '(a|a)+', action: 'hold' });
+	expect(res).toMatchObject({ status: 400, data: { error: 'rule #0 has an unsafe regex' } });
+	expect(await ruleRows()).toHaveLength(0);
+});
+
+test('add rejects a whitespace-only pattern as empty and inserts nothing', async () => {
+	await seedChannel('UC1');
+
+	const res = await addForm('UC1', { type: 'keyword', pattern: '   ', action: 'hold' });
+	expect(res).toMatchObject({ status: 400, data: { error: 'rule #0 has an empty pattern' } });
+	expect(await ruleRows()).toHaveLength(0);
+});
+
+test('add rejects missing form fields with the validator message and inserts nothing', async () => {
+	await seedChannel('UC1');
+
+	const noType = await addForm('UC1', { pattern: 'spam', action: 'hold' });
+	expect(noType).toMatchObject({ status: 400, data: { error: 'rule #0 has an unsupported type: ' } });
+
+	const noAction = await addForm('UC1', { type: 'keyword', pattern: 'spam' });
+	expect(noAction).toMatchObject({ status: 400, data: { error: 'rule #0 has an unsupported action: ' } });
+
+	const noPattern = await addForm('UC1', { type: 'keyword', action: 'hold' });
+	expect(noPattern).toMatchObject({ status: 400, data: { error: 'rule #0 has an empty pattern' } });
+
 	expect(await ruleRows()).toHaveLength(0);
 });

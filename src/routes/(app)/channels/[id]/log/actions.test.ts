@@ -108,7 +108,10 @@ test('undo of a ban restores the comment and names the original action', async (
 test('undo on a deleted comment 404s and changes nothing', async () => {
 	await seedComment('c1', 'deleted', 'delete');
 
-	await expect(undo('c1')).rejects.toMatchObject({ status: 404 });
+	await expect(undo('c1')).rejects.toMatchObject({
+		status: 404,
+		body: { message: 'reversible comment not found in this channel' }
+	});
 
 	expect(await commentRow('c1')).toMatchObject({ status: 'deleted' });
 	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
@@ -135,7 +138,7 @@ test('a dry run records a dry-run audit row and makes no YouTube call', async ()
 	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
 	expect(await commentRow('c1')).toMatchObject({ status: 'approved', decidedBy: 'human' });
 	expect(await testDb().db.select().from(auditLog).all()).toContainEqual(
-		expect.objectContaining({ commentId: 'c1', action: 'dry-run', actor: 'user' })
+		expect.objectContaining({ commentId: 'c1', action: 'dry-run', reason: 'undo of hold', actor: 'user' })
 	);
 });
 
@@ -187,5 +190,52 @@ test('undo on another team\'s channel 404s without leaking existence', async () 
 
 test('undo without a comment id fails with 400', async () => {
 	const res = await undo(null);
-	expect(res).toMatchObject({ status: 400 });
+	expect(res).toMatchObject({ status: 400, data: { error: 'Invalid comment ID' } });
+});
+
+test('a whitespace-only comment id is trimmed away and fails with 400', async () => {
+	const res = await undo('   ');
+	expect(res).toMatchObject({ status: 400, data: { error: 'Invalid comment ID' } });
+});
+
+test('undo with no prior audit row still restores and names the generic action', async () => {
+	// A comment can be held without any hold/reject/ban audit row (e.g. history
+	// predating the log); the undo must still land with a sensible reason.
+	await testDb().db.insert(comments).values({
+		id: 'c1',
+		channelId: 'UC1',
+		text: 'hello',
+		publishedAt: '2026-01-01T00:00:00Z',
+		status: 'held',
+		decidedBy: 'ai'
+	});
+
+	const res = await undo('c1');
+
+	expect(res).toMatchObject({ success: expect.stringContaining('estored') });
+	expect(await commentRow('c1')).toMatchObject({ status: 'approved', decidedBy: 'human' });
+	expect(await testDb().db.select().from(auditLog).all()).toContainEqual(
+		expect.objectContaining({ commentId: 'c1', action: 'restore', reason: 'undo of moderation action', actor: 'user' })
+	);
+});
+
+test('a concurrent undo that loses the atomic claim 404s instead of double-restoring', async () => {
+	await seedComment('c1', 'rejected', 'reject');
+
+	// Both submissions read status='rejected' before either claims; the
+	// conditional claim update makes exactly one winner (I3/I4).
+	const [first, second] = await Promise.allSettled([undo('c1'), undo('c1')]);
+
+	const outcomes = [first, second];
+	expect(outcomes.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+	const losers = outcomes.filter((r) => r.status === 'rejected');
+	expect(losers).toHaveLength(1);
+	expect((losers[0] as PromiseRejectedResult).reason).toMatchObject({
+		status: 404,
+		body: { message: 'reversible comment not found in this channel' }
+	});
+	// One remote restore, one audit row, final state approved.
+	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
+	expect(await commentRow('c1')).toMatchObject({ status: 'approved', decidedBy: 'human' });
+	expect((await testDb().db.select().from(auditLog).all()).filter((row) => row.action === 'restore')).toHaveLength(1);
 });

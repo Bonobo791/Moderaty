@@ -109,15 +109,28 @@ test('every action rejects a missing commentId with 400 and mutates nothing', as
 	await seedComment('c1', 'UC1');
 	for (const name of actionNames) {
 		const res = await act(name, {});
-		expect(res).toMatchObject({ status: 400 });
+		expect(res).toMatchObject({ status: 400, data: { error: 'Invalid comment ID' } });
 	}
 	await expectNothingDecided('c1', 'pending');
+});
+
+test('a whitespace-padded commentId is trimmed before lookup', async () => {
+	await seedComment('c1', 'UC1');
+	const res = await act('approve', { commentId: '  c1\t' });
+	expect(res).toMatchObject({ success: 'Approved — recorded in audit log.' });
+	expect((await commentRow('c1'))?.status).toBe('approved');
 });
 
 test('act fails loudly on another channel comment and changes nothing', async () => {
 	await seedComment('c2', 'UC2');
 	await expectAllActions404({ commentId: 'c2' });
 	await expectNothingDecided('c2', 'pending');
+});
+
+test('a 404 on an unknown pending comment names the problem', async () => {
+	await expect(act('approve', { commentId: 'nope' })).rejects.toThrowError(
+		expect.objectContaining({ status: 404, body: { message: 'pending comment not found in this channel' } })
+	);
 });
 
 test('act fails loudly on a comment that is no longer pending', async () => {
@@ -179,12 +192,74 @@ test('reject outside DRY_RUN calls YouTube and audits reject', async () => {
 	expect(res).toMatchObject({ success: 'Rejected — recorded in audit log.' });
 
 	expect(mocks.refreshAccessToken).toHaveBeenCalledWith('decrypted-refresh-token');
+	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
 	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'rejected', false, 'access-token');
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
 	expect((await commentRow('c1'))?.status).toBe('rejected');
 
 	const audits = await auditRows();
 	expect(audits).toHaveLength(1);
-	expect(audits[0]).toMatchObject({ channelId: 'UC1', commentId: 'c1', action: 'reject', actor: 'user' });
+	expect(audits[0]).toMatchObject({ channelId: 'UC1', commentId: 'c1', action: 'reject', reason: 'manual review', actor: 'user' });
+});
+
+test('approve outside DRY_RUN skips YouTube entirely and audits approve', async () => {
+	mocks.env.DRY_RUN = 'false';
+	await seedComment('c1', 'UC1');
+	const res = await act('approve', { commentId: 'c1' });
+	expect(res).toMatchObject({ success: 'Approved — recorded in audit log.' });
+
+	expect(mocks.refreshAccessToken).not.toHaveBeenCalled();
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expect((await commentRow('c1'))?.status).toBe('approved');
+
+	const audits = await auditRows();
+	expect(audits).toHaveLength(1);
+	expect(audits[0]).toMatchObject({ channelId: 'UC1', commentId: 'c1', action: 'approve', reason: 'manual review', actor: 'user' });
+});
+
+test('del outside DRY_RUN deletes on YouTube, marks deleted, and audits delete', async () => {
+	mocks.env.DRY_RUN = 'false';
+	await seedComment('c1', 'UC1');
+	const res = await act('del', { commentId: 'c1' });
+	expect(res).toMatchObject({ success: 'Deleted — recorded in audit log.' });
+
+	expect(mocks.refreshAccessToken).toHaveBeenCalledWith('decrypted-refresh-token');
+	expect(mocks.deleteComment).toHaveBeenCalledTimes(1);
+	expect(mocks.deleteComment).toHaveBeenCalledWith('c1', 'access-token');
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	expect((await commentRow('c1'))?.status).toBe('deleted');
+
+	const audits = await auditRows();
+	expect(audits).toHaveLength(1);
+	expect(audits[0]).toMatchObject({ channelId: 'UC1', commentId: 'c1', action: 'delete', reason: 'manual review', actor: 'user' });
+});
+
+test('ban outside DRY_RUN rejects with the author ban on YouTube and audits ban', async () => {
+	mocks.env.DRY_RUN = 'false';
+	await seedComment('c1', 'UC1');
+	const res = await act('ban', { commentId: 'c1' });
+	expect(res).toMatchObject({ success: 'Author banned — recorded in audit log.' });
+
+	expect(mocks.refreshAccessToken).toHaveBeenCalledWith('decrypted-refresh-token');
+	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'rejected', true, 'access-token');
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expect((await commentRow('c1'))?.status).toBe('rejected');
+
+	const audits = await auditRows();
+	expect(audits).toHaveLength(1);
+	expect(audits[0]).toMatchObject({ channelId: 'UC1', commentId: 'c1', action: 'ban', reason: 'manual review', actor: 'user' });
+});
+
+test('load returns only this channel’s pending comments', async () => {
+	await seedComment('c-pending', 'UC1', 'pending');
+	await seedComment('c-approved', 'UC1', 'approved');
+	await seedComment('c-other', 'UC2', 'pending');
+
+	const result = await load({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);
+
+	expect(result?.pending.map((row) => row.id)).toEqual(['c-pending']);
 });
 
 test('act fails loudly on a channel owned by another team and changes nothing', async () => {

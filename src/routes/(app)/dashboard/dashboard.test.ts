@@ -17,9 +17,10 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { expect, test, vi } from 'vitest';
+import { error } from '@sveltejs/kit';
 import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
 import { makeCookies } from '$lib/server/testcookies';
-import { auditLog, channels, memberships, organizations, sessions, users } from '$lib/server/db/schema';
+import { auditLog, channels, comments, memberships, organizations, sessions, users } from '$lib/server/db/schema';
 
 // decrypt is mocked so seeds can use opaque placeholders; the action must pass
 // each channel's decrypted token to Google's revocation endpoint.
@@ -121,6 +122,45 @@ test('dashboard load shows only the active team\'s channels', async () => {
 	const data = await loadDashboard();
 
 	expect(data.chs.map((ch) => ch.id)).toEqual(['UC1', 'UC2']);
+	// A healthy load is explicitly NOT the maintenance overlay.
+	expect(data.maintenance).toBe(false);
+});
+
+test('dashboard load returns empty stats and bans when the team has no channels', async () => {
+	const data = await loadDashboard();
+
+	expect(data.chs).toEqual([]);
+	expect(data.stats).toEqual([]);
+	expect(data.bans).toEqual([]);
+});
+
+test('dashboard load counts comments by status and ban events only, scoped to the team', async () => {
+	await testDb().db.insert(channels).values({ id: 'UC1', userId: OWNER.id, orgId: 'org-1', title: 'Mine', refreshTokenEnc: 'enc' });
+	await testDb().db.insert(channels).values({ id: 'UC3', userId: 'user-2', orgId: 'org-2', title: 'Theirs', refreshTokenEnc: 'enc' });
+	const comment = (id: string, channelId: string, status: string) =>
+		testDb().db.insert(comments).values({ id, channelId, text: 'hi', publishedAt: '2026-07-01T00:00:00Z', status, decidedBy: 'ai' });
+	await comment('c1', 'UC1', 'approved');
+	await comment('c2', 'UC1', 'approved');
+	await comment('c3', 'UC1', 'held');
+	// Another team's comments must not leak into the counts.
+	await comment('c4', 'UC3', 'approved');
+	await comment('c5', 'UC3', 'approved');
+	const audit = (channelId: string, commentId: string, action: string) =>
+		testDb().db.insert(auditLog).values({ channelId, commentId, action, reason: 'r', actor: 'system' });
+	await audit('UC1', 'c1', 'ban');
+	await audit('UC1', 'c2', 'ban');
+	// Non-ban actions — including dry-run rows — are never ban events.
+	await audit('UC1', 'c3', 'dry-run');
+	await audit('UC1', 'c3', 'reject');
+	// Another team's bans must not leak into the counts.
+	await audit('UC3', 'c4', 'ban');
+
+	const data = await loadDashboard();
+
+	expect(data.stats).toHaveLength(2);
+	expect(data.stats).toContainEqual({ channelId: 'UC1', status: 'approved', n: 2 });
+	expect(data.stats).toContainEqual({ channelId: 'UC1', status: 'held', n: 1 });
+	expect(data.bans).toEqual([{ channelId: 'UC1', n: 2 }]);
 });
 
 test('dashboard load rejects a signed-out request with 401', async () => {
@@ -153,7 +193,10 @@ test('delete account without the confirmation checkbox writes nothing', async ()
 
 	const { res } = await captureDelete(OWNER, {});
 
-	expect(res).toMatchObject({ status: 400 });
+	expect(res).toMatchObject({
+		status: 400,
+		data: { error: 'You must confirm account deletion to continue.' }
+	});
 	await expectAccountUntouched();
 });
 
@@ -206,7 +249,7 @@ test('delete account revokes each channel at Google, erases everything, and sign
 		email: '[deleted]',
 		displayName: '[deleted]'
 	});
-	expect(cookies.deleteCalls.some((c) => c.name === 'moderaty_session')).toBe(true);
+	expect(cookies.deleteCalls).toContainEqual({ name: 'moderaty_session', opts: { path: '/' } });
 });
 
 test('delete account still deletes when revocation fails, logging loudly', async () => {
@@ -218,6 +261,11 @@ test('delete account still deletes when revocation fails, logging loudly', async
 
 	expect(res).toMatchObject({ status: 302, location: '/' });
 	expect(errorSpy).toHaveBeenCalled();
+	// The revocation request is logged with its channel-scoped prefix so the
+	// orphaned grant can be traced.
+	expect(errorSpy).toHaveBeenCalledWith(
+		expect.stringContaining('account deletion channel UC1 revocation failed')
+	);
 	// The encrypted token is erased either way — the grant is orphaned, not kept.
 	expect(await testDb().db.select().from(channels).all()).toHaveLength(0);
 	expect((await testDb().db.select().from(users).all())[0]).toMatchObject({ googleSub: 'deleted:user-1' });
@@ -272,5 +320,30 @@ test('a database failure mid-load degrades to the maintenance payload and logs l
 		client.execute = originalExecute;
 	}
 	expect(data).toEqual({ chs: [], stats: [], bans: [], maintenance: true });
-	expect(console.error).toHaveBeenCalled();
+	expect(console.error).toHaveBeenCalledWith('dashboard load failed:', expect.any(Error));
+});
+
+test('a deliberate HttpError mid-load propagates instead of degrading to maintenance', async () => {
+	await seedActiveUser();
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	// Capture a real HttpError (what a downstream helper throws on purpose).
+	let httpError: unknown;
+	try {
+		error(418, 'teapot');
+	} catch (e) {
+		httpError = e;
+	}
+	// A direct throw from the db layer is NOT wrapped by drizzle (unlike a
+	// rejected client promise, which surfaces as DrizzleQueryError).
+	const selectSpy = vi.spyOn(testDb().db, 'select').mockImplementation(() => {
+		throw httpError;
+	});
+	try {
+		await expect(load({ locals: { user: OWNER } } as never)).rejects.toBe(httpError);
+	} finally {
+		selectSpy.mockRestore();
+		errorSpy.mockRestore();
+	}
+	// Not swallowed, not logged as an outage.
+	expect(errorSpy).not.toHaveBeenCalled();
 });

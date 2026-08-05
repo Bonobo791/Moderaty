@@ -42,7 +42,8 @@ test('load returns the maintenance payload during a database outage instead of a
 	// The layout renders the overlay; the child load must not throw on the
 	// null-user outage shape.
 	const result = await load({ params: { id: 'UC1' }, locals: { user: null, dbDown: true } } as never);
-	expect(result).toMatchObject({ maintenance: true, entries: [] });
+	// Exact payload: the page renders ch.id/title even in the outage shape.
+	expect(result).toEqual({ ch: { id: 'UC1', title: '' }, entries: [], maintenance: true });
 });
 
 test('load marks only the latest reversible action per comment as undoable', async () => {

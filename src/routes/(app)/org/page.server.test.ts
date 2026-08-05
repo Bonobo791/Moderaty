@@ -38,6 +38,7 @@ import { actions, load } from './+page.server';
 setupTestDb(['sessions', 'invites', 'memberships', 'organizations', 'users']);
 
 const MEMBER: SessionUser = { ...TEST_OWNER, orgRole: 'member' };
+const ADMIN: SessionUser = { ...TEST_OWNER, orgRole: 'admin' };
 
 async function seedOwnerOrg() {
 	await testDb()
@@ -74,10 +75,20 @@ test('load: a database outage returns the maintenance payload instead of a 401',
 	// The layout renders the overlay; the org load must not throw on the
 	// null-user outage shape.
 	const outageCtx = { locals: { user: null, dbDown: true }, url: new URL('http://localhost/org') } as never;
-	const data = (await load(outageCtx)) as { maintenance: boolean; members: unknown[]; invites: unknown[] };
+	const data = (await load(outageCtx)) as {
+		maintenance: boolean;
+		members: unknown[];
+		invites: unknown[];
+		user: unknown;
+		inviteBase: string;
+		hasOpenAiKey: boolean;
+	};
 	expect(data.maintenance).toBe(true);
+	expect(data.user).toBeNull();
 	expect(data.members).toEqual([]);
 	expect(data.invites).toEqual([]);
+	expect(data.inviteBase).toBe('http://localhost/invite/');
+	expect(data.hasOpenAiKey).toBe(false);
 });
 
 test('load: 401 signed out; members get the roster but no invites; admins get open invites', async () => {
@@ -101,6 +112,25 @@ test('load: 401 signed out; members get the roster but no invites; admins get op
 	const memberView = (await load(ctx(MEMBER))) as { members: unknown[]; invites: unknown[] };
 	expect(memberView.members).toHaveLength(2);
 	expect(memberView.invites).toEqual([]); // member role never sees invite management
+
+	const adminView = (await load(ctx(ADMIN))) as { members: unknown[]; invites: unknown[] };
+	expect(adminView.members).toHaveLength(2);
+	expect(adminView.invites).toHaveLength(1); // admins see invite management, same as owners
+});
+
+test('load: a membership whose org row vanished still renders with hasOpenAiKey false instead of throwing', async () => {
+	// The key lookup is a separate query from the roster; a missing org row
+	// (data bug) must degrade to the boolean, never crash the page.
+	await seedOwnerOrg();
+	await testDb().client.execute('PRAGMA foreign_keys = OFF');
+	try {
+		await testDb().db.delete(organizations).where(eq(organizations.id, 'org-1'));
+	} finally {
+		await testDb().client.execute('PRAGMA foreign_keys = ON');
+	}
+	const view = (await load(ctx(TEST_OWNER))) as { members: unknown[]; hasOpenAiKey: boolean };
+	expect(view.members).toHaveLength(1);
+	expect(view.hasOpenAiKey).toBe(false);
 });
 
 test('rename: member is a raw 403; owner errors are wrapped as form failures', async () => {
@@ -111,6 +141,9 @@ test('rename: member is a raw 403; owner errors are wrapped as form failures', a
 	expect(bad.status).toBe(400);
 	expect(bad.data.error).toContain('1–80');
 
+	const missing = failure(await actions.rename(ctx(TEST_OWNER, {})));
+	expect(missing.status).toBe(400);
+
 	await actions.rename(ctx(TEST_OWNER, { name: 'Renamed' }));
 	const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
 	expect(org?.name).toBe('Renamed');
@@ -120,6 +153,9 @@ test('createTeam: bad name fails loudly; success creates a shared org the user o
 	await seedOwnerOrg();
 	const bad = failure(await actions.createTeam(ctx(TEST_OWNER, { name: '   ' })));
 	expect(bad.status).toBe(400);
+
+	const missing = failure(await actions.createTeam(ctx(TEST_OWNER, {})));
+	expect(missing.status).toBe(400);
 
 	await actions.createTeam(ctx(TEST_OWNER, { name: 'Second Team' }));
 	const mine = await testDb().db.select().from(memberships).where(eq(memberships.userId, TEST_OWNER.id)).all();
@@ -136,11 +172,39 @@ test('invite: member is 403; bad role is a 400 failure; success returns the toke
 
 	const badRole = failure(await actions.invite(ctx(TEST_OWNER, { role: 'owner' })));
 	expect(badRole.status).toBe(400);
+	expect(badRole.data.error).toBe('role must be admin or member');
 
 	const good = (await actions.invite(ctx(TEST_OWNER, { role: 'admin' }))) as { ok: true; inviteToken: string };
 	expect(good.ok).toBe(true);
 	const row = await testDb().db.select().from(invites).where(eq(invites.token, good.inviteToken)).get();
 	expect(row?.role).toBe('admin');
+
+	// A member invite is valid too, and a missing role field defaults to member.
+	const memberInvite = (await actions.invite(ctx(TEST_OWNER, { role: 'member' }))) as {
+		ok: true;
+		inviteToken: string;
+	};
+	const memberRow = await testDb().db.select().from(invites).where(eq(invites.token, memberInvite.inviteToken)).get();
+	expect(memberRow?.role).toBe('member');
+
+	const defaulted = (await actions.invite(ctx(TEST_OWNER, {}))) as { ok: true; inviteToken: string };
+	const defaultedRow = await testDb().db.select().from(invites).where(eq(invites.token, defaulted.inviteToken)).get();
+	expect(defaultedRow?.role).toBe('member');
+});
+
+test('invite: a corrupted membership role rethrows raw through guard instead of a fake form failure', async () => {
+	// memberships.role has no CHECK constraint; a corrupt value is a data bug
+	// and must propagate (asOrgRole's plain Error), not be swallowed into a
+	// status-less ActionFailure.
+	await seedOwnerOrg();
+	await testDb()
+		.db.insert(users)
+		.values({ id: 'user-9', googleSub: 'sub-user-9', email: 'user-9@example.com', displayName: 'user-9' });
+	await testDb().db.insert(memberships).values({ userId: 'user-9', orgId: 'org-1', role: 'bogus' });
+	const corrupted: SessionUser = { ...TEST_OWNER, id: 'user-9' };
+	await expect(actions.invite(ctx(corrupted, { role: 'member' }))).rejects.toThrow(
+		'unknown membership role: bogus'
+	);
 });
 
 test('revokeInvite: member is 403; unknown token is a wrapped 404', async () => {
@@ -148,6 +212,24 @@ test('revokeInvite: member is 403; unknown token is a wrapped 404', async () => 
 	await expect(actions.revokeInvite(ctx(MEMBER, { token: 'tok-1' }))).rejects.toMatchObject({ status: 403 });
 	const gone = failure(await actions.revokeInvite(ctx(TEST_OWNER, { token: 'tok-nope' })));
 	expect(gone.status).toBe(404);
+
+	// A missing token field takes the same 404 path as any nonexistent token.
+	const noField = failure(await actions.revokeInvite(ctx(TEST_OWNER, {})));
+	expect(noField.status).toBe(404);
+});
+
+test('revokeInvite: owner revokes an open invite by token', async () => {
+	await seedOwnerOrg();
+	await testDb().db.insert(invites).values({
+		token: 'tok-1',
+		orgId: 'org-1',
+		role: 'member',
+		createdBy: TEST_OWNER.id,
+		expiresAt: '2099-01-01T00:00:00.000Z'
+	});
+	await actions.revokeInvite(ctx(TEST_OWNER, { token: 'tok-1' }));
+	const gone = await testDb().db.select().from(invites).where(eq(invites.token, 'tok-1')).get();
+	expect(gone).toBeUndefined();
 });
 
 test('setRole: non-owner is 403; last-owner demotion is a wrapped 400', async () => {
@@ -158,6 +240,10 @@ test('setRole: non-owner is 403; last-owner demotion is a wrapped 400', async ()
 	const demote = failure(await actions.setRole(ctx(TEST_OWNER, { userId: TEST_OWNER.id, role: 'member' })));
 	expect(demote.status).toBe(400);
 	expect(demote.data.error).toContain('last owner');
+
+	// A missing userId field is a wrapped 404, never cast through.
+	const noTarget = failure(await actions.setRole(ctx(TEST_OWNER, { role: 'admin' })));
+	expect(noTarget.status).toBe(404);
 });
 
 test('remove: self-removal is a wrapped 400 pointing at Leave team', async () => {
@@ -165,6 +251,10 @@ test('remove: self-removal is a wrapped 400 pointing at Leave team', async () =>
 	const self = failure(await actions.remove(ctx(TEST_OWNER, { userId: TEST_OWNER.id })));
 	expect(self.status).toBe(400);
 	expect(self.data.error).toContain('Leave team');
+
+	// A missing userId field is a wrapped 404, never cast through.
+	const noTarget = failure(await actions.remove(ctx(TEST_OWNER, {})));
+	expect(noTarget.status).toBe(404);
 
 	await seedTeammate('user-2');
 	await actions.remove(ctx(TEST_OWNER, { userId: 'user-2' }));
@@ -180,6 +270,7 @@ test('leave: missing cookie fails 401; sole member is a wrapped 400', async () =
 	await seedOwnerOrg();
 	const noCookie = failure(await actions.leave(ctx(TEST_OWNER, {}, false)));
 	expect(noCookie.status).toBe(401);
+	expect(noCookie.data.error).toBe('sign-in required');
 
 	const sole = failure(await actions.leave(ctx(TEST_OWNER)));
 	expect(sole.status).toBe(400);
@@ -281,8 +372,38 @@ test('setOpenAiKey: a key without the sk- prefix fails 400 before any OpenAI cal
 	const calls = stubOpenAi(200);
 	const bad = failure(await actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: 'not-a-key' })));
 	expect(bad.status).toBe(400);
+	expect(bad.data.error).toBe('Enter a valid OpenAI API key (it starts with sk-).');
 	expect(await storedKey()).toBeNull();
 	expect(calls).toHaveLength(0);
+
+	// A missing field fails the same way.
+	const missing = failure(await actions.setOpenAiKey(ctx(TEST_OWNER, {})));
+	expect(missing.status).toBe(400);
+	expect(missing.data.error).toBe('Enter a valid OpenAI API key (it starts with sk-).');
+});
+
+test('setOpenAiKey: surrounding whitespace is trimmed before validation and storage', async () => {
+	await seedOwnerOrg();
+	const calls = stubOpenAi(200);
+	const res = await actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: '  sk-trimmed-key  ' }));
+	expect(res).toMatchObject({ ok: true });
+	expect(decrypt((await storedKey())!)).toBe('sk-trimmed-key');
+	expect(calls[0].init?.headers).toMatchObject({ authorization: 'Bearer sk-trimmed-key' });
+});
+
+test('setOpenAiKey: keys over 200 characters are rejected; exactly 200 is accepted', async () => {
+	await seedOwnerOrg();
+	const calls = stubOpenAi(200);
+	const tooLong = failure(await actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: `sk-${'x'.repeat(198)}` })));
+	expect(tooLong.status).toBe(400);
+	expect(tooLong.data.error).toBe('Enter a valid OpenAI API key (it starts with sk-).');
+	expect(await storedKey()).toBeNull();
+
+	const boundary = await actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: `sk-${'x'.repeat(197)}` }));
+	expect(boundary).toMatchObject({ ok: true });
+	expect(decrypt((await storedKey())!)).toBe(`sk-${'x'.repeat(197)}`);
+	// Only the boundary key reached OpenAI; the over-long key never left the server.
+	expect(calls).toHaveLength(1);
 });
 
 test('setOpenAiKey: OpenAI rejecting the key fails 400 and stores nothing', async () => {
@@ -290,7 +411,35 @@ test('setOpenAiKey: OpenAI rejecting the key fails 400 and stores nothing', asyn
 	stubOpenAi(401);
 	const bad = failure(await actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: 'sk-bad-key' })));
 	expect(bad.status).toBe(400);
+	expect(bad.data.error).toBe('OpenAI rejected that key — check it and try again.');
 	expect(await storedKey()).toBeNull();
+});
+
+test('setOpenAiKey: OpenAI forbidding the key (403) fails 400 and stores nothing', async () => {
+	await seedOwnerOrg();
+	stubOpenAi(403);
+	const bad = failure(await actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: 'sk-forbidden' })));
+	expect(bad.status).toBe(400);
+	expect(bad.data.error).toBe('OpenAI rejected that key — check it and try again.');
+	expect(await storedKey()).toBeNull();
+});
+
+test('setOpenAiKey: an OpenAI server error fails 502, logs the status, and stores nothing', async () => {
+	await seedOwnerOrg();
+	stubOpenAi(500);
+	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	vi.useFakeTimers();
+	try {
+		const pending = actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: 'sk-server-error' }));
+		await vi.advanceTimersByTimeAsync(20_000); // fetchWithRetry backoff on 5xx
+		const bad = failure(await pending);
+		expect(bad.status).toBe(502);
+		expect(bad.data.error).toBe('OpenAI could not validate the key right now — try again in a moment.');
+	} finally {
+		vi.useRealTimers();
+	}
+	expect(await storedKey()).toBeNull();
+	expect(spy).toHaveBeenCalledWith('OpenAI key validation returned a non-OK status:', 500);
 });
 
 test('setOpenAiKey: an unreachable OpenAI fails 502 and logs only a message, never the key or a raw error object', async () => {
@@ -307,11 +456,13 @@ test('setOpenAiKey: an unreachable OpenAI fails 502 and logs only a message, nev
 		await vi.advanceTimersByTimeAsync(20_000); // fetchWithRetry backoff
 		const bad = failure(await pending);
 		expect(bad.status).toBe(502);
+		expect(bad.data.error).toBe('Could not reach OpenAI to validate the key — try again in a moment.');
 	} finally {
 		vi.useRealTimers();
 	}
 	expect(await storedKey()).toBeNull();
 	expect(spy).toHaveBeenCalled();
+	expect(spy).toHaveBeenCalledWith('OpenAI key validation request failed:', 'fetch failed');
 	for (const call of spy.mock.calls) {
 		for (const arg of call) expect(arg).not.toBeInstanceOf(Error);
 		expect(JSON.stringify(call)).not.toContain('sk-secret-key');
@@ -327,7 +478,8 @@ test('clearOpenAiKey: owner wipes the stored key; non-owner is 403', async () =>
 	await expect(actions.clearOpenAiKey(ctx(MEMBER))).rejects.toMatchObject({ status: 403 });
 	expect(await storedKey()).toBeTruthy();
 
-	await actions.clearOpenAiKey(ctx(TEST_OWNER));
+	const cleared = await actions.clearOpenAiKey(ctx(TEST_OWNER));
+	expect(cleared).toMatchObject({ ok: true });
 	expect(await storedKey()).toBeNull();
 	const view = (await load(ctx(TEST_OWNER))) as { hasOpenAiKey: boolean };
 	expect(view.hasOpenAiKey).toBe(false);

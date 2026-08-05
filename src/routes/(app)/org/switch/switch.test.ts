@@ -55,13 +55,19 @@ function call(fields: Record<string, string>, opts: { signedIn?: boolean; cookie
 
 test('rejects signed-out callers and missing session cookies with 401', async () => {
 	await seedTwoOrgs();
-	await expect(call({ orgId: 'org-1' }, { signedIn: false })).rejects.toMatchObject({ status: 401 });
-	await expect(call({ orgId: 'org-1' }, { cookie: false })).rejects.toMatchObject({ status: 401 });
+	await expect(call({ orgId: 'org-1' }, { signedIn: false })).rejects.toMatchObject({
+		status: 401,
+		body: { message: 'sign-in required' }
+	});
+	await expect(call({ orgId: 'org-1' }, { cookie: false })).rejects.toMatchObject({
+		status: 401,
+		body: { message: 'sign-in required' }
+	});
 });
 
 test('rejects a missing orgId with 400', async () => {
 	await seedTwoOrgs();
-	await expect(call({})).rejects.toMatchObject({ status: 400 });
+	await expect(call({})).rejects.toMatchObject({ status: 400, body: { message: 'missing team' } });
 });
 
 test('switching to an org the user does not belong to is 404', async () => {

@@ -200,8 +200,13 @@ test('load with a tampered pending cookie redirects to /login', async () => {
 });
 
 test('action without a pending cookie fails with 400 and writes nothing', async () => {
-	const res = await captureAction(makeCookies(), { consent: 'on' }, { state: 'state-1' });
-	expect(res).toMatchObject({ status: 400 });
+	const res = (await captureAction(makeCookies(), { consent: 'on' }, { state: 'state-1' })) as {
+		status: number;
+		data?: { error?: string };
+	};
+	expect(res.status).toBe(400);
+	// The rejection tells the user exactly how to recover — sign in again.
+	expect(res.data?.error).toBe('Your sign-in session expired — please sign in again.');
 	await expectNothingWritten();
 });
 
@@ -334,9 +339,65 @@ test('an existing user re-accepting adds a consent row without duplicating the a
 });
 
 test('an existing-user pending payload naming an unknown account fails with 400', async () => {
-	const res = await captureAction(cookiesWithPending({ kind: 'existing', userId: 'ghost' }), { consent: 'on' }, { state: 'state-1' });
-	expect(res).toMatchObject({ status: 400 });
+	const res = (await captureAction(cookiesWithPending({ kind: 'existing', userId: 'ghost' }), { consent: 'on' }, { state: 'state-1' })) as {
+		status: number;
+		data?: { error?: string };
+	};
+	expect(res.status).toBe(400);
+	expect(res.data?.error).toBe('Your sign-in session expired — please sign in again.');
 	expect(await testDb().db.select().from(consents).all()).toHaveLength(0);
+});
+
+test('a parked existing identity renders the existing flow with no display name', async () => {
+	// Only the new-account payload carries a Google display name; the
+	// re-acceptance flow must render displayName null, not leak undefined.
+	const data = await loadConsent(
+		cookiesWithPending({ kind: 'existing', userId: 'user-1' }),
+		'http://localhost/consent?state=state-1'
+	);
+	expect(data.kind).toBe('existing');
+	expect(data.displayName).toBeNull();
+});
+
+test('acceptance writes the session cookie httpOnly, lax, path-scoped, and expiring with the session', async () => {
+	const cookies = cookiesWithPending(NEW_SUB);
+	const thrown = await captureAction(cookies, { consent: 'on' }, { state: 'state-1' });
+	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
+
+	const session = (await testDb().db.select().from(sessions).all())[0];
+	const call = cookies.setCalls.find((c) => c.name === 'moderaty_session');
+	expect(call).toBeTruthy();
+	expect(call!.value).toBe(session.id);
+	// APP_URL is http in tests, so Secure is off; the rest are hard requirements.
+	expect(call!.opts).toEqual({
+		path: '/',
+		httpOnly: true,
+		sameSite: 'lax',
+		secure: false,
+		expires: new Date(session.expiresAt)
+	});
+});
+
+test('a request without a user-agent header records an empty user-agent string', async () => {
+	// The evidentiary row must not store null/undefined when the header is
+	// absent — it records the empty string.
+	const form = new FormData();
+	form.set('consent', 'on');
+	let thrown: unknown;
+	try {
+		await actions.default({
+			cookies: cookiesWithPending(NEW_SUB),
+			request: new Request('http://localhost/consent', { method: 'POST', body: form }),
+			url: new URL('http://localhost/consent?state=state-1'),
+			getClientAddress: () => '203.0.113.7'
+		} as never);
+	} catch (e) {
+		thrown = e;
+	}
+	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
+	const rows = await testDb().db.select().from(consents).all();
+	expect(rows).toHaveLength(1);
+	expect(rows[0].userAgent).toBe('');
 });
 
 test('a pending identity parked under a different state is invisible to this flow', async () => {

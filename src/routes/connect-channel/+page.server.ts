@@ -60,6 +60,7 @@ export const actions: Actions = {
 		const chosen = form.get('channel');
 		// The choice must be one of the channels Google's callback parked —
 		// anything else is tampering and fails loudly.
+		// Stryker disable next-line ConditionalExpression: equivalent when the condition is forced true — readPendingChannelPick validated every pending.channels id as a string, so for a non-string `chosen` (null/File) `c.id === chosen` is always false and find yields the same undefined as the `: undefined` branch; note this directive also sweeps the same-line ConditionalExpression→false sibling, which the 'choosing a parked channel connects it' test kills when not ignored
 		const channel = typeof chosen === 'string' ? pending.channels.find((c) => c.id === chosen) : undefined;
 		if (!channel) {
 			return fail(400, { error: 'Unknown channel — pick one of the listed channels.' });

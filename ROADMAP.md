@@ -6,4 +6,3 @@
 -Add calculator that pulls real data from YouTube to determine costs - should be a forecast that gives a range of potential costs for the next month with a disclaimer that this is a 95% probability of being in the shown range
 -every action is logged and reversible functionality.
 -Create auto-recharge functionality and update website language
--Remove language of how long it takes to set up the free, self-hosted version across the site.

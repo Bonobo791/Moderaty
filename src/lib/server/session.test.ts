@@ -234,11 +234,54 @@ test('a session whose active org membership vanished falls back to the oldest me
 
 test('a user with zero memberships makes getSessionUser throw, never sign out', async () => {
 	// Zero memberships is a data bug (Phase A backfill guarantees one) — fail
-	// loudly rather than improvise access or read as signed-out.
+	// loudly rather than improvise access or read as signed-out. The throw is a
+	// deliberate HttpError so hooks propagates it instead of degrading to
+	// maintenance mode.
 	await testDb()
 		.db.insert(users)
 		.values({ id: 'bare', googleSub: 'sub-bare', email: 'bare@example.com', displayName: 'bare' });
 	const { token } = await createSession('bare');
 
-	await expect(getSessionUser(token)).rejects.toThrow('account has no organization');
+	await expect(getSessionUser(token)).rejects.toMatchObject({
+		status: 500,
+		body: { message: expect.stringContaining('account has no organization') }
+	});
+});
+
+test('tenancy audit seed: renewing and repairing user A\'s session never touches user B\'s row', async () => {
+	// Verdict test for the reported "session renewal/repair UPDATEs without
+	// their WHERE (cross-tenant session rewrite)". Both UPDATE paths in
+	// getSessionUser must stay scoped to the caller's token: user B's session
+	// row comes out byte-identical.
+	const userA = await seedUser('user-a');
+	const userB = await seedUser('user-b');
+	// A: session due for BOTH renewal (1 day left) and org repair (active org
+	// membership vanished).
+	await testDb().db.insert(organizations).values({ id: 'org-a-team', name: 'A Team' });
+	await testDb().db.insert(memberships).values({ userId: userA, orgId: 'org-a-team', role: 'member' });
+	const soonExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+	await testDb()
+		.db.insert(sessions)
+		.values({ id: 'token-a', userId: userA, expiresAt: soonExpiry, activeOrgId: 'org-a-team' });
+	await testDb().db.delete(memberships).where(eq(memberships.orgId, 'org-a-team'));
+	// B: a plain live session that must be untouched.
+	const bRow = {
+		id: 'token-b',
+		userId: userB,
+		expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+		activeOrgId: 'org-user-b'
+	};
+	await testDb().db.insert(sessions).values(bRow);
+
+	const result = await getSessionUser('token-a');
+
+	// A's renewal + repair actually ran (the test is vacuous otherwise).
+	expect(result?.renewed).toBe(true);
+	expect(result?.user.orgId).toBe('org-user-a');
+	const aAfter = await testDb().db.select().from(sessions).where(eq(sessions.id, 'token-a')).get();
+	expect(aAfter?.activeOrgId).toBe('org-user-a');
+	expect(Date.parse(aAfter!.expiresAt)).toBeGreaterThan(Date.parse(soonExpiry));
+	// B's row: byte-identical.
+	const bAfter = await testDb().db.select().from(sessions).where(eq(sessions.id, 'token-b')).get();
+	expect({ id: bAfter?.id, userId: bAfter?.userId, expiresAt: bAfter?.expiresAt, activeOrgId: bAfter?.activeOrgId }).toEqual(bRow);
 });

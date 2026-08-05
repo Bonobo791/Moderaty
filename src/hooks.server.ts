@@ -18,7 +18,7 @@
 
 import type { Handle } from '@sveltejs/kit';
 
-import { error, isHttpError } from '@sveltejs/kit';
+import { isHttpError } from '@sveltejs/kit';
 
 import { cookieSecure } from '$lib/server/oauthState';
 import { assertMigrationsCurrent } from '$lib/server/migrationGuard';
@@ -26,15 +26,24 @@ import { getSessionUser, SESSION_COOKIE } from '$lib/server/session';
 
 // Resolves the session cookie into locals.user for every request. When the
 // session slid into its renewal window, the cookie is refreshed with the new
-// expiry so active users never get logged out. A database failure here fails
-// loudly (AGENTS.md): a valid user must see a server error, not a silent
-// downgrade to signed-out.
+// expiry so active users never get logged out. A database failure here does
+// NOT produce a bare 500 (maintainer decision): the request degrades to
+// maintenance mode — locals.dbDown is set, the failure is logged loudly on
+// the server, and the (app) layout/dashboard render a user-visible
+// maintenance overlay. A valid user sees a loud maintenance state, never a
+// silent downgrade to signed-out.
 export const handle: Handle = async ({ event, resolve }) => {
+	// /api/health is the uptime probe (issue #82): its whole job is to report
+	// database health itself, so it bypasses the migration guard and session
+	// resolution — either one would convert a database outage into a 500
+	// before the endpoint could answer with its documented 503.
+	if (event.url.pathname === '/api/health') return resolve(event);
 	// Deploy-ordering boundary (issue #81): if the database is behind the
 	// deployed code's migration journal, every DB query would fail with
 	// scattered "no such column" errors — fail the request here with one clear
-	// 503 instead. The guard's deliberate HttpError passes through; a database
-	// failure INSIDE the check gets the same loud 500 as any other DB failure.
+	// 503 instead. The guard's deliberate HttpError passes through (a
+	// deploy-ordering condition, NOT an outage — never degrades). A database
+	// failure INSIDE the check is an outage: degrade to maintenance mode.
 	// The site-wide coupling is intentional: the public pages are prerendered
 	// and served statically (handle never runs for them), so every request that
 	// reaches this point is DB-backed and would fail downstream anyway.
@@ -43,7 +52,9 @@ export const handle: Handle = async ({ event, resolve }) => {
 	} catch (e) {
 		if (isHttpError(e)) throw e;
 		console.error('migration guard query failed:', e);
-		throw error(500, 'something went wrong on our side — please retry');
+		event.locals.dbDown = true;
+		event.locals.user = null;
+		return resolve(event);
 	}
 	const token = event.cookies.get(SESSION_COOKIE);
 	try {
@@ -59,8 +70,13 @@ export const handle: Handle = async ({ event, resolve }) => {
 			});
 		}
 	} catch (e) {
+		// A deliberate HttpError (e.g. the account-has-no-org integrity failure)
+		// is NOT an outage: let it fail loudly instead of masking it as
+		// maintenance and signing the user out.
+		if (isHttpError(e)) throw e;
 		console.error('session lookup failed:', e);
-		throw error(500, 'something went wrong on our side — please retry');
+		event.locals.dbDown = true;
+		event.locals.user = null;
 	}
 	return resolve(event);
 };

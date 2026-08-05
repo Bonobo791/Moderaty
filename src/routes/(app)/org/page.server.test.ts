@@ -63,6 +63,16 @@ function failure(result: unknown): { status: number; data: { error: string } } {
 	return result as { status: number; data: { error: string } };
 }
 
+test('load: a database outage returns the maintenance payload instead of a 401', async () => {
+	// The layout renders the overlay; the org load must not throw on the
+	// null-user outage shape.
+	const outageCtx = { locals: { user: null, dbDown: true }, url: new URL('http://localhost/org') } as never;
+	const data = (await load(outageCtx)) as { maintenance: boolean; members: unknown[]; invites: unknown[] };
+	expect(data.maintenance).toBe(true);
+	expect(data.members).toEqual([]);
+	expect(data.invites).toEqual([]);
+});
+
 test('load: 401 signed out; members get the roster but no invites; admins get open invites', async () => {
 	await seedOwnerOrg();
 	await seedTeammate('user-2');

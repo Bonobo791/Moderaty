@@ -1,0 +1,24 @@
+-- Moderaty — YouTube Comment Auto-Moderation Tool
+-- Copyright (C) 2026 Andrew Philip Weilbacher
+--
+-- This program is free software: you can redistribute it and/or modify
+-- it under the terms of the GNU Affero General Public License as published
+-- by the Free Software Foundation, either version 3 of the License, or
+-- (at your option) any later version.
+--
+-- This program is distributed in the hope that it will be useful,
+-- but WITHOUT ANY WARRANTY; without even the implied warranty of
+-- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+-- GNU Affero General Public License for more details.
+--
+-- You should have received a copy of the GNU Affero General Public License
+-- along with this program. If not, see <https://www.gnu.org/licenses/>.
+--
+-- Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+
+-- Issue #77: the dashboard ban counter (action='ban' + channel_id IN,
+-- GROUP BY channel_id) and the per-channel log page (channel_id =) both
+-- full-scan audit_log, which grows with every moderation decision. The
+-- composite serves the ban query; its leftmost column serves channel-only
+-- reads. Expand-only (I7): index creation touches no rows.
+CREATE INDEX `audit_log_channel_action_idx` ON `audit_log` (`channel_id`,`action`);

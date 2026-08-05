@@ -327,7 +327,8 @@ test('rejects a demeaning comment the omni score alone would approve', async () 
 	expect(mocks.scoreTone).toHaveBeenCalledWith(
 		'A comment',
 		{ videoTitle: 'Video title', videoDescription: 'Video description' },
-		undefined
+		undefined,
+		{ protectLgbtqia: 0, protectWomen: 0 }
 	);
 	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'rejected' })]);
 	expect(mocks.state.insertedAudits).toEqual([
@@ -425,7 +426,8 @@ test('scores tone with empty context when a comment has no video ID', async () =
 	expect(mocks.scoreTone).toHaveBeenCalledWith(
 		'A comment',
 		{ videoTitle: '', videoDescription: '' },
-		undefined
+		undefined,
+		{ protectLgbtqia: 0, protectWomen: 0 }
 	);
 });
 
@@ -830,4 +832,58 @@ test('completes the scan when the cursor is reached even if a page token remains
 	expect(mocks.state.channelUpdates).toContainEqual(
 		expect.objectContaining({ cursor: '2026-01-04T00:00:00.000Z', nextPageToken: null, scanCursor: null })
 	);
+});
+
+test('a ticked protection flag forces the tone pass even below sensitivity level 2', async () => {
+	mocks.state.channel.toneLevel = 1;
+	mocks.state.channel.protectLgbtqia = 0;
+	mocks.state.channel.protectWomen = 1;
+	mocks.scoreComment.mockResolvedValue(moderation(0.1));
+	mocks.scoreTone.mockResolvedValue({ score: 0.9 });
+
+	const result = await runChannel('channel');
+
+	// Video context is fetched and the persisted flags reach the scorer.
+	expect(mocks.fetchVideoMetadata).toHaveBeenCalled();
+	expect(mocks.scoreTone).toHaveBeenCalledWith(
+		'A comment',
+		{ videoTitle: 'Video title', videoDescription: 'Video description' },
+		undefined,
+		{ protectLgbtqia: 0, protectWomen: 1 }
+	);
+	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'rejected' })]);
+	expect(mocks.state.insertedAudits).toEqual([
+		expect.objectContaining({ commentId: 'comment', action: 'reject', reason: 'tone score 0.90' })
+	]);
+	expect(result).toMatchObject({ acted: 1, queued: 0 });
+});
+
+test('level 2 passes the persisted protection flags through to the scorer', async () => {
+	mocks.state.channel.toneLevel = 2;
+	mocks.state.channel.protectLgbtqia = 1;
+	mocks.state.channel.protectWomen = 1;
+	mocks.scoreComment.mockResolvedValue(moderation(0.1));
+	mocks.scoreTone.mockResolvedValue({ score: 0.2 });
+
+	await runChannel('channel');
+
+	expect(mocks.scoreTone).toHaveBeenCalledWith(
+		'A comment',
+		{ videoTitle: 'Video title', videoDescription: 'Video description' },
+		undefined,
+		{ protectLgbtqia: 1, protectWomen: 1 }
+	);
+});
+
+test('no flags and sensitivity below 2 keeps the tone pass off (no extra AI spend)', async () => {
+	mocks.state.channel.toneLevel = 1;
+	mocks.state.channel.protectLgbtqia = 0;
+	mocks.state.channel.protectWomen = 0;
+	mocks.scoreComment.mockResolvedValue(moderation(0.1));
+
+	await runChannel('channel');
+
+	expect(mocks.fetchVideoMetadata).not.toHaveBeenCalled();
+	expect(mocks.scoreTone).not.toHaveBeenCalled();
+	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'approved' })]);
 });

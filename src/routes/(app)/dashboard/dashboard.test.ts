@@ -251,3 +251,26 @@ test('a revocation failure on one channel does not stop the others', async () =>
 		decryptMock.mockImplementation(() => 'refresh-token');
 	}
 });
+
+test('a database outage returns the maintenance payload without requiring a user', async () => {
+	// dbDown with a null user is the normal outage shape: requireUser must not
+	// trip — the overlay replaces the dashboard, not the error page.
+	const data = (await load({ locals: { user: null, dbDown: true } } as never)) as Record<string, unknown>;
+	expect(data).toEqual({ chs: [], stats: [], bans: [], maintenance: true });
+});
+
+test('a database failure mid-load degrades to the maintenance payload and logs loudly', async () => {
+	await seedActiveUser();
+	vi.spyOn(console, 'error').mockImplementation(() => {});
+	const client = testDb().client;
+	const originalExecute = client.execute.bind(client);
+	client.execute = (() => Promise.reject(new Error('hrana 502: connect to upstream failed'))) as never;
+	let data: Record<string, unknown>;
+	try {
+		data = (await load({ locals: { user: OWNER } } as never)) as Record<string, unknown>;
+	} finally {
+		client.execute = originalExecute;
+	}
+	expect(data).toEqual({ chs: [], stats: [], bans: [], maintenance: true });
+	expect(console.error).toHaveBeenCalled();
+});

@@ -43,9 +43,17 @@ the code is wrong. Follow the skill at
 `.agents/skills-src/mutation-testing/SKILL.md` (mental mutation testing for
 review of small diffs; tool runs for whole-module audits). Killing a mutant
 means writing a behavior test that passes on the original and fails under
-the exact mutation — confirm both directions. No mutation runner (e.g.
-Stryker) is installed in this repo yet; adopting one and wiring a ratcheted
-CI threshold is a separate, maintainer-approved step.
+the exact mutation — confirm both directions. StrykerJS is installed and
+should be used for tool runs: `@stryker-mutator/core` +
+`@stryker-mutator/vitest-runner`, configured by `stryker.config.json` at the
+repo root (`npx stryker run` for whole-module audits,
+`npx stryker run --since main` or a scoped `--mutate` glob for PR-scale
+work, `npx stryker run --incremental` to reuse the cache). In a fresh
+checkout or worktree run `npx svelte-kit sync` first — Stryker's vitest
+runner needs the generated `.svelte-kit/tsconfig.json`. Verify survivors
+by hand before writing kill tests — the score is a lead, not a verdict.
+Wiring a ratcheted CI threshold (`thresholds.break`) remains a separate,
+maintainer-approved step.
 
 ## Agent Skills (skills-src)
 
@@ -181,7 +189,8 @@ steps live in [DEPLOY.md](DEPLOY.md).
 
 Approved dependencies only (execution plan v3): `drizzle-orm`,
 `@libsql/client`, the SvelteKit adapter, `recheck` (runtime); `drizzle-kit`,
-`vitest` (dev). No auth libraries, no googleapis SDK, no OpenAI SDK, no CSS
+`vitest`, `@stryker-mutator/core`, `@stryker-mutator/vitest-runner` (dev).
+No auth libraries, no googleapis SDK, no OpenAI SDK, no CSS
 frameworks, no zod. UI copy uses the brand **Moderaty** — the string `yt-mod`
 must not appear in `src/`.
 

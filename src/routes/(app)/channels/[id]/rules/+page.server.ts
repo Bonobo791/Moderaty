@@ -24,6 +24,9 @@ import { and, eq } from 'drizzle-orm';
 import { fail } from '@sveltejs/kit';
 
 export async function load({ params, locals }) {
+	// Database outage: the layout renders the overlay; this load must not 401
+	// on the null-user outage shape.
+	if (locals.dbDown) return { ch: { id: params.id, title: '' }, rs: [], maintenance: true };
 	const ch = await ownedChannel(params.id, locals);
 	const rs = await db.select().from(rules).where(eq(rules.channelId, params.id)).all();
 	// Project only what the page renders — never serialize refreshTokenEnc (or

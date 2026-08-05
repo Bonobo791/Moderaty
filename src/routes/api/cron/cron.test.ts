@@ -175,16 +175,21 @@ test('a failing channel run reports failure, never success', async () => {
 	// channel as healthy (the code comment's exact warning).
 	await testDb().db.insert(channels).values({ id: 'UC-bad', title: 'Bad', refreshTokenEnc: 'enc' });
 	mocks.runChannel.mockRejectedValue(new Error('youtube quota exhausted'));
-	vi.spyOn(console, 'error').mockImplementation(() => {});
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-	const res = await call({ bearer: 'test-secret' });
+	try {
+		const res = await call({ bearer: 'test-secret' });
 
-	expect(res.status).toBe(500);
-	expect(await res.json()).toMatchObject({ ok: false, results: { 'UC-bad': { error: 'youtube quota exhausted' } } });
-	// The run is still recorded, so a failing channel cannot starve the others.
-	const row = await testDb().db.select().from(channels).where(eq(channels.id, 'UC-bad')).get();
-	expect(row?.lastRunAt).not.toBeNull();
-	expect(row?.leaseExpiresAt).toBeNull();
+		expect(res.status).toBe(500);
+		expect(await res.json()).toMatchObject({ ok: false, results: { 'UC-bad': { error: 'youtube quota exhausted' } } });
+		// The run is still recorded, so a failing channel cannot starve the others.
+		const row = await testDb().db.select().from(channels).where(eq(channels.id, 'UC-bad')).get();
+		expect(row?.lastRunAt).not.toBeNull();
+		expect(row?.leaseExpiresAt).toBeNull();
+	} finally {
+		// Restore the spy — a lingering console.error mock leaks into later tests.
+		errorSpy.mockRestore();
+	}
 });
 
 test('erases consent e-mails older than 10 years, keeping the anonymized row', async () => {

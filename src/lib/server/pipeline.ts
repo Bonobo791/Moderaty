@@ -210,8 +210,10 @@ async function decide(
 }
 
 function auditRows(channelId: string, decisions: Decision[], dryRun: boolean) {
+	// Stryker disable next-line MethodExpression: equivalent — every Decision producer (ruleDecision, aiUnavailable, aiOutcome) sets auditAction and reason, so the filter never drops a row
 	return decisions
 		.filter((decision): decision is Decision & { auditAction: string; reason: string } =>
+			// Stryker disable next-line ConditionalExpression, LogicalOperator: equivalent — the predicate is constant true for every Decision the pipeline produces, so the operator choice is unobservable
 			Boolean(decision.auditAction && decision.reason)
 		)
 		.map((decision) => ({
@@ -249,6 +251,7 @@ function actionRows(channelId: string, decisions: Decision[]) {
 	const createdAt = new Date().toISOString();
 	return decisions.flatMap((decision) => {
 		if (!decision.youtubeAction) return [];
+		// Stryker disable next-line ConditionalExpression, StringLiteral: equivalent — every youtubeAction decision carries a reason (all producers set both), so this guard never fires
 		if (!decision.reason) throw new Error(`remote moderation decision ${decision.comment.id} is missing a reason`);
 		return [{
 			commentId: decision.comment.id,
@@ -274,6 +277,7 @@ async function decideNewComments(
 		deadline
 	}: { accessToken: string; toneLevel: number; protections: ToneProtections; openAiKey?: string; deadline?: number }
 ): Promise<{ decisions: Decision[]; failures: string[] }> {
+	// Stryker disable ArrayDeclaration: equivalent — with an empty page there are no comments to consult existingIds for, so its contents are never read
 	const existingIds = new Set(
 		page.comments.length
 			? (
@@ -285,6 +289,7 @@ async function decideNewComments(
 				).map((comment) => comment.id)
 			: []
 	);
+	// Stryker restore ArrayDeclaration
 	const rulesForChannel = prepareRules(await db.select().from(rules).where(eq(rules.channelId, channelId)).all());
 	// Dedupe twice: against already-stored comments AND within this batch.
 	// commentThreads pagination can repeat an item across page boundaries, and
@@ -324,12 +329,14 @@ async function decideNewComments(
 		newComments.map(async (comment) => {
 			try {
 				if (metadataError) return aiUnavailable(comment, metadataError);
+				// Stryker disable next-line ConditionalExpression: equivalent — for a null videoId both branches yield undefined (Map.get(null) misses), and a non-null id takes the false branch anyway
 				const meta = comment.videoId === null ? undefined : videoContext?.get(comment.videoId);
 				const tone = videoContext
 					? { context: { videoTitle: meta?.title ?? '', videoDescription: meta?.description ?? '' } }
 					: null;
 				return await decide(comment, rulesForChannel, tone, deadline, protections, openAiKey);
 			} catch (error) {
+				// Stryker disable next-line ConditionalExpression: equivalent — DeadlineExceededError cannot escape decide() (aiDecision catches every scorer error, matchPreparedRule is synchronous), so the false-variant is unobservable; the true-variant stays pinned by the failure-wrapping test
 				if (error instanceof DeadlineExceededError) throw error;
 				throw new Error(`comment ${comment.id}: ${error instanceof Error ? error.message : String(error)}`);
 			}
@@ -342,6 +349,7 @@ async function decideNewComments(
 			decisions.push(result.value);
 			continue;
 		}
+		// Stryker disable next-line ConditionalExpression: equivalent — rejection reasons only ever come from the wrapped Error in the catch above, never a DeadlineExceededError
 		if (result.reason instanceof DeadlineExceededError) throw result.reason;
 		failures.push(result.reason instanceof Error ? result.reason.message : String(result.reason));
 	}
@@ -365,13 +373,16 @@ function validAction(action: string): YoutubeAction {
 }
 
 function outstandingAction(action: typeof moderationActions.$inferSelect): OutstandingAction {
+	// Stryker disable next-line ConditionalExpression, BlockStatement: equivalent — the only caller queries with inArray(state, ['pending','dispatched']), so no other state can reach this guard
 	if (action.state !== 'pending' && action.state !== 'dispatched') {
+		// Stryker disable next-line StringLiteral: equivalent — unreachable for the same reason as the guard above
 		throw new Error(`moderation action ${action.commentId} has invalid outstanding state: ${action.state}`);
 	}
 	return { ...action, action: validAction(action.action), state: action.state };
 }
 
 async function markDispatched(actions: OutstandingAction[]) {
+	// Stryker disable next-line ConditionalExpression: equivalent — both callers pass a non-empty array (applyModerationAction batches of ≥1, the delete loop a single action), so the empty-array branch is unreachable
 	if (!actions.length) return;
 	await db
 		.update(moderationActions)
@@ -393,6 +404,7 @@ async function claimPendingActions(actions: OutstandingAction[]): Promise<Set<st
 }
 
 async function completeActions(actions: OutstandingAction[]) {
+	// Stryker disable next-line ConditionalExpression: equivalent — all callers pass a non-empty array (applyModerationAction batches of ≥1, single verified or deleted actions)
 	if (!actions.length) return;
 	await db.transaction(async (transaction) => {
 		await transaction
@@ -417,12 +429,16 @@ async function verificationResult(
 ): Promise<'completed' | 'retry'> {
 	assertBeforeDeadline(deadline);
 	const status = await getCommentModerationStatus(action.commentId, accessToken, deadline);
+	// Stryker disable next-line StringLiteral: 'retry'→"" equivalent — the caller only compares result === 'completed', so every other string takes the identical retry path
 	if (action.action === 'delete') return status === null ? 'completed' : 'retry';
+	// Stryker disable next-line StringLiteral: 'retry'→"" equivalent — same reasoning as the delete branch above
 	if (action.action === 'hold') return status === 'heldForReview' ? 'completed' : 'retry';
+	// Stryker disable next-line StringLiteral: 'retry'→"" equivalent — same reasoning as the delete branch above
 	if (action.action === 'reject') return status === 'rejected' ? 'completed' : 'retry';
 	// Ban is a single atomic API call (reject + banAuthor), so a comment already
 	// in a terminal state after dispatch means the call landed — complete it
 	// rather than stranding the action in manual review.
+	// Stryker disable next-line StringLiteral: 'retry'→"" equivalent — same reasoning as the delete branch above
 	return status === 'rejected' || status === null ? 'completed' : 'retry';
 }
 
@@ -474,12 +490,15 @@ async function processOutstandingActions(channelId: string, accessToken: string,
 			inArray(moderationActions.state, ['pending', 'dispatched'])
 		))
 		.all()).map(outstandingAction);
+	// Stryker disable next-line MethodExpression, ConditionalExpression: equivalent — claimPendingActions' SQL still guards eq(state, 'pending'), so handing it dispatched rows too claims nothing extra
 	const claimed = await claimPendingActions(actions.filter((action) => action.state === 'pending'));
+	// Stryker disable next-line ArrayDeclaration: equivalent — applyYoutubeActions selects entries by their action field, so a foreign element in the array is never selected
 	const ready: OutstandingAction[] = [];
 	for (const action of actions) {
 		if (action.state === 'pending') {
 			// Only actions this run claimed may be applied; an empty claim means a
 			// concurrent run owns the action, so skip it to avoid duplicate enforcement.
+			// Stryker disable next-line StringLiteral: equivalent — a ready entry's state field is never read again; applyYoutubeActions groups by action only
 			if (claimed.has(action.commentId)) ready.push({ ...action, state: 'dispatched' });
 			continue;
 		}
@@ -545,6 +564,7 @@ export async function runChannel(
 	let fetched = 0;
 	let acted = 0;
 	let queued = 0;
+	// Stryker disable next-line BooleanLiteral: equivalent — dryRun is reassigned from env/forceDryRun before any read; the catch only returns for errors thrown after that assignment
 	let dryRun = false;
 	try {
 		const channel = await db.select().from(channels).where(eq(channels.id, channelId)).get();

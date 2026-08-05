@@ -22,7 +22,7 @@ vi.mock('$env/dynamic/private', () => ({
 	env: { OPENAI_API_KEY: 'test-openai-key' }
 }));
 
-import { scoreComment } from './moderation';
+import { scoreComment, serializeScores } from './moderation';
 
 const BASE_SCORES = {
 	harassment: 0.11,
@@ -87,6 +87,17 @@ test.each([
 	await expect(scoreComment('comment text')).rejects.toThrow('out-of-range');
 });
 
+test('rejects a category score that JSON overflow parses as Infinity', async () => {
+	const scoresJson = JSON.stringify(mockScores()).replace('"violence":0.55', '"violence":1e999');
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+		new Response(`{"results":[{"category_scores":${scoresJson}}]}`, { status: 200 })
+	));
+
+	await expect(scoreComment('comment text')).rejects.toThrow(
+		'moderation response has missing or out-of-range category scores'
+	);
+});
+
 test('rejects a response missing a required category score', async () => {
 	stubScores({
 		harassment: 0.11,
@@ -120,4 +131,87 @@ test('the env key is the default when no explicit key is passed', async () => {
 	await scoreComment('comment text');
 
 	expect(fetch.mock.calls[0]?.[1]?.headers).toMatchObject({ Authorization: 'Bearer test-openai-key' });
+});
+
+test('serializeScores returns the JSON encoding of every category score', () => {
+	const scores = mockScores();
+
+	const serialized = serializeScores(scores as Parameters<typeof serializeScores>[0]);
+
+	expect(serialized).toBe(JSON.stringify(scores));
+	expect(JSON.parse(serialized)).toEqual(scores);
+});
+
+test('rejects when the API key is empty', async () => {
+	const fetch = vi.fn();
+	vi.stubGlobal('fetch', fetch);
+
+	await expect(scoreComment('comment text', undefined, '')).rejects.toThrow('OPENAI_API_KEY is required');
+	expect(fetch).not.toHaveBeenCalled();
+});
+
+test('posts the comment to the OpenAI moderations endpoint as JSON', async () => {
+	const fetch = vi.fn().mockResolvedValue(
+		new Response(JSON.stringify({ results: [{ category_scores: mockScores() }] }), { status: 200 })
+	);
+	vi.stubGlobal('fetch', fetch);
+
+	await scoreComment('comment text');
+
+	const [url, init] = fetch.mock.calls[0] as unknown as [string, { method: string; headers: Record<string, string>; body: string }];
+	expect(url).toBe('https://api.openai.com/v1/moderations');
+	expect(init.method).toBe('POST');
+	expect(init.headers['Content-Type']).toBe('application/json');
+	expect(JSON.parse(init.body)).toEqual({ model: 'omni-moderation-latest', input: 'comment text' });
+});
+
+test('rejects a non-OK moderation response with the moderation label and status', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('bad request', { status: 400 })));
+
+	await expect(scoreComment('comment text')).rejects.toThrow('moderation failed: 400');
+});
+
+test('rejects a null moderation response body as missing category scores', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('null', { status: 200 })));
+
+	await expect(scoreComment('comment text')).rejects.toThrow(
+		'moderation response is missing required category scores'
+	);
+});
+
+test('rejects a non-object moderation response body as missing category scores', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('5', { status: 200 })));
+
+	await expect(scoreComment('comment text')).rejects.toThrow(
+		'moderation response is missing required category scores'
+	);
+});
+
+test('rejects a moderation response without a results array', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })));
+
+	await expect(scoreComment('comment text')).rejects.toThrow('missing or out-of-range');
+});
+
+test('rejects a moderation response with an empty results array', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{"results": []}', { status: 200 })));
+
+	await expect(scoreComment('comment text')).rejects.toThrow('missing or out-of-range');
+});
+
+test('accepts a category score of exactly 0', async () => {
+	stubScores(Object.fromEntries(Object.keys(BASE_SCORES).map((category) => [category, 0])));
+
+	const result = await scoreComment('comment text');
+
+	expect(result.score).toBe(0);
+});
+
+test('accepts a category score of exactly 1', async () => {
+	stubScores(mockScores({ violence: 1 }));
+
+	const result = await scoreComment('comment text');
+
+	expect(result.score).toBe(1);
+	expect(result.scores.violence).toBe(1);
 });

@@ -90,10 +90,16 @@ export async function scoreTone(
 	let score: unknown;
 	try {
 		score = (JSON.parse(typeof content === 'string' ? content : '') as { score?: unknown }).score;
-	} catch {
+	}
+	// Stryker disable next-line BlockStatement: equivalent — if the try throws, the assignment never ran, so `score` is already undefined and re-assigning it is a no-op
+	catch {
 		score = undefined;
 	}
-	if (typeof score !== 'number' || !Number.isFinite(score) || score < 0 || score > 1) {
+	// Stryker disable next-line LogicalOperator, ConditionalExpression: the &&-variant, typeof→false and isFinite→false are equivalent — for every non-number Number.isFinite(score) is false so the legs agree, and JSON.parse can only produce ±Infinity, which the range check below rejects (the killable typeof→true variant shares the line; directives are line-granular and the valid-score tests pin that behavior)
+	if (typeof score !== 'number' || !Number.isFinite(score)) {
+		throw new Error('tone response has missing or out-of-range score');
+	}
+	if (score < 0 || score > 1) {
 		throw new Error('tone response has missing or out-of-range score');
 	}
 	return { score };

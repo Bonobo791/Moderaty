@@ -85,6 +85,7 @@ test.each([
 	['a string score', chatResponse('{"score": "high"}')],
 	['an above-range score', chatResponse('{"score": 2}')],
 	['a below-range score', chatResponse('{"score": -0.5}')],
+	['a score that JSON overflow parses as Infinity', chatResponse('{"score": 1e999}')],
 	['no choices', new Response(JSON.stringify({ choices: [] }), { status: 200 })]
 ])('rejects a tone response with %s', async (_label, response) => {
 	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response));
@@ -164,6 +165,52 @@ test('no protections sends the byte-identical base prompt (no calibration drift)
 	const system = body.messages.find((message: { role: string }) => message.role === 'system')?.content;
 	expect(system.startsWith(TONE_PROMPT)).toBe(true);
 	expect(system).not.toContain('Identity protection');
+});
+
+test('fails loudly when no OpenAI key is configured', async () => {
+	vi.resetModules();
+	vi.doMock('$env/dynamic/private', () => ({ env: {} }));
+	try {
+		const { scoreTone: scoreToneNoKey } = await import('./tone');
+		await expect(scoreToneNoKey('text', CONTEXT)).rejects.toThrow('OPENAI_API_KEY is required');
+	} finally {
+		vi.doMock('$env/dynamic/private', () => ({ env: { OPENAI_API_KEY: 'test-openai-key' } }));
+		vi.resetModules();
+	}
+});
+
+test('posts to the chat completions endpoint with JSON content type', async () => {
+	const fetch = vi.fn().mockResolvedValue(chatResponse('{"score": 0.5}'));
+	vi.stubGlobal('fetch', fetch);
+
+	await scoreTone('a comment', CONTEXT);
+
+	expect(fetch.mock.calls[0]?.[0]).toBe('https://api.openai.com/v1/chat/completions');
+	expect(fetch.mock.calls[0]?.[1]?.method).toBe('POST');
+	expect(fetch.mock.calls[0]?.[1]?.headers).toMatchObject({ 'Content-Type': 'application/json' });
+});
+
+test.each([
+	['the whole choices array', {}],
+	['a null choice', { choices: [null] }],
+	['a choice without a message', { choices: [{}] }],
+	['a message without content', { choices: [{ message: {} }] }]
+])('rejects a tone response missing %s', async (_label, payload) => {
+	vi.stubGlobal(
+		'fetch',
+		vi.fn().mockResolvedValue(new Response(JSON.stringify(payload), { status: 200 }))
+	);
+
+	await expect(scoreTone('text', CONTEXT)).rejects.toThrow('tone response has missing or out-of-range score');
+});
+
+test.each([
+	['zero (fully respectful)', 0],
+	['one (genuine harm)', 1]
+])('accepts the boundary score %s', async (_label, score) => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(chatResponse(JSON.stringify({ score }))));
+
+	await expect(scoreTone('text', CONTEXT)).resolves.toEqual({ score });
 });
 
 test('an explicit apiKey overrides the env key in the Authorization header', async () => {

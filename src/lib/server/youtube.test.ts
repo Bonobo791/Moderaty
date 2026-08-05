@@ -16,8 +16,23 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { afterEach, expect, test, vi } from 'vitest';
-import { deleteComment, fetchNewComments, fetchVideoMetadata, getCommentModerationStatus, setModerationStatus } from './youtube';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+
+const mocks = vi.hoisted(() => ({
+	env: {
+		GOOGLE_CLIENT_ID: 'client-id',
+		GOOGLE_CLIENT_SECRET: 'client-secret'
+	} as Record<string, string | undefined>
+}));
+
+vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
+
+import { deleteComment, fetchNewComments, fetchVideoMetadata, getCommentModerationStatus, refreshAccessToken, setModerationStatus } from './youtube';
+
+beforeEach(() => {
+	mocks.env.GOOGLE_CLIENT_ID = 'client-id';
+	mocks.env.GOOGLE_CLIENT_SECRET = 'client-secret';
+});
 
 function comment(id: string, publishedAt: string, text = `Comment ${id}`) {
 	return {
@@ -56,6 +71,7 @@ async function fetchComments(...pages: Response[]) {
 
 afterEach(() => {
 	vi.unstubAllGlobals();
+	vi.restoreAllMocks();
 });
 
 test('stops pagination after the third page', async () => {
@@ -292,6 +308,8 @@ test('fetches video metadata in batches of fifty', async () => {
 
 	expect(fetch).toHaveBeenCalledTimes(2);
 	expect(String(fetch.mock.calls[0]?.[0])).toContain('part=snippet');
+	const batches = fetch.mock.calls.map(([url]) => new URL(String(url)).searchParams.get('id')!.split(','));
+	expect(batches).toEqual([ids.slice(0, 50), ['video-51']]);
 	expect(result.get('video-1')).toEqual({ title: 'Title video-1', description: 'Description video-1' });
 	expect(result.get('video-51')).toEqual({ title: 'Title video-51', description: 'Description video-51' });
 });
@@ -325,4 +343,423 @@ test('fails loudly when the videos.list request fails', async () => {
 	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('quota exceeded', { status: 403 })));
 
 	await expect(fetchVideoMetadata(['video-1'], 'token')).rejects.toThrow('videos.list failed: 403');
+});
+
+function rawPage(payload: unknown) {
+	return new Response(JSON.stringify(payload), { status: 200 });
+}
+
+test('does not warn for a fully-populated comment', async () => {
+	const fetch = vi.fn().mockResolvedValue(page([comment('1', '2026-01-04T00:00:00.000Z')]));
+	vi.stubGlobal('fetch', fetch);
+	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+	// The spy may be shared with earlier tests in this file — start from zero.
+	warn.mockClear();
+
+	const result = await fetchNewComments('channel', 'token', null);
+
+	expect(result.comments[0]).toMatchObject({
+		id: '1',
+		threadId: 'thread-1',
+		videoId: 'video-1',
+		authorChannelId: 'author-1',
+		authorName: 'Author 1',
+		publishedAt: '2026-01-04T00:00:00.000Z'
+	});
+	expect(warn).not.toHaveBeenCalled();
+});
+
+test('rejects a commentThreads response without an items array', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rawPage({})));
+
+	await expect(fetchNewComments('channel', 'token', null)).rejects.toThrow(
+		'commentThreads.list response items is missing or invalid'
+	);
+});
+
+test.each([
+	[null, 'commentThreads.list response item 0 is missing or invalid'],
+	[42, 'commentThreads.list response item 0 is missing or invalid'],
+	[[], 'commentThreads.list response item 0 is missing or invalid'],
+	[{ snippet: null }, 'commentThreads.list response item 0.snippet is missing or invalid'],
+	[{ snippet: 42 }, 'commentThreads.list response item 0.snippet is missing or invalid'],
+	[{ snippet: [] }, 'commentThreads.list response item 0.snippet is missing or invalid'],
+	[{ snippet: {} }, 'commentThreads.list response item 0.topLevelComment is missing or invalid'],
+	[
+		{ snippet: { topLevelComment: {} } },
+		'commentThreads.list response item 0.topLevelComment.snippet is missing or invalid'
+	]
+])('rejects a structurally malformed comment thread %j', async (item, message) => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rawPage({ items: [item] })));
+
+	// A malformed response fails loudly (I1) — the cron run must not treat a
+	// garbled page as "no new comments".
+	await expect(fetchNewComments('channel', 'token', null)).rejects.toThrow(message);
+});
+
+function brokenComment(missing: 'id' | 'threadId' | 'publishedAt' | 'validDate') {
+	const broken = comment('broken', '2026-01-04T00:00:00.000Z');
+	if (missing === 'id') delete (broken.snippet.topLevelComment as Record<string, unknown>).id;
+	if (missing === 'threadId') delete (broken as Record<string, unknown>).id;
+	if (missing === 'publishedAt') {
+		delete (broken.snippet.topLevelComment.snippet as Record<string, unknown>).publishedAt;
+	}
+	if (missing === 'validDate') broken.snippet.topLevelComment.snippet.publishedAt = 'not-a-date';
+	return broken;
+}
+
+test.each(['id', 'threadId', 'publishedAt', 'validDate'] as const)(
+	'skips a comment with a missing or invalid %s without failing the page',
+	async (missing) => {
+		const { result, warn } = await fetchComments(page([
+			brokenComment(missing),
+			comment('normal', '2026-01-03T00:00:00.000Z')
+		]));
+
+		expect(result.comments.map((item) => item.id)).toEqual(['normal']);
+		expect(warn).toHaveBeenCalledWith(
+			expect.stringContaining('commentThreads.list response item 0 is malformed')
+		);
+	}
+);
+
+test.each([
+	['an empty string', ''],
+	['a number', 42]
+])('normalizes %s videoId to null and warns', async (_label, videoId) => {
+	const weird = comment('weird', '2026-01-04T00:00:00.000Z');
+	(weird.snippet.topLevelComment.snippet as Record<string, unknown>).videoId = videoId;
+
+	const { result, warn } = await fetchComments(page([weird]));
+
+	expect(result.comments[0]?.videoId).toBeNull();
+	expect(warn).toHaveBeenCalledWith(expect.stringContaining('has no videoId'));
+});
+
+test('does not trip the cursor boundary on a pre-1970 comment when no cursor is set', async () => {
+	const { result } = await fetchComments(page([comment('ancient', '1965-06-01T00:00:00.000Z')]));
+
+	expect(result.comments.map((item) => item.id)).toEqual(['ancient']);
+	expect(result.reachedCursor).toBe(false);
+});
+
+test.each([
+	['a string', 'plain-string'],
+	['a number', 7],
+	['an array', [{ value: 'x' }]],
+	['an explicit null', null]
+])('normalizes %s authorChannelId to empty and warns', async (_label, authorChannelId) => {
+	const weird = comment('weird', '2026-01-04T00:00:00.000Z');
+	(weird.snippet.topLevelComment.snippet as Record<string, unknown>).authorChannelId = authorChannelId;
+
+	const { result, warn } = await fetchComments(page([weird]));
+
+	expect(result.comments[0]?.authorChannelId).toBe('');
+	expect(warn).toHaveBeenCalledWith(expect.stringContaining('has no authorChannelId'));
+});
+
+test('warns loudly for each missing author field', async () => {
+	const deleted = comment('deleted', '2026-01-04T00:00:00.000Z');
+	delete (deleted.snippet.topLevelComment.snippet as Record<string, unknown>).authorChannelId;
+	delete (deleted.snippet.topLevelComment.snippet as Record<string, unknown>).authorDisplayName;
+
+	const { result, warn } = await fetchComments(page([deleted]));
+
+	expect(result.comments[0]).toMatchObject({ authorChannelId: '', authorName: '[unavailable author]' });
+	expect(warn).toHaveBeenCalledWith(expect.stringContaining('has no authorChannelId'));
+	expect(warn).toHaveBeenCalledWith(expect.stringContaining('has no authorDisplayName'));
+});
+
+test('sends an authenticated request without a page token by default', async () => {
+	const fetch = vi.fn().mockResolvedValue(page([comment('1', '2026-01-04T00:00:00.000Z')]));
+	vi.stubGlobal('fetch', fetch);
+
+	await fetchNewComments('channel', 'token', null);
+
+	const url = new URL(String(fetch.mock.calls[0]?.[0]));
+	expect(url.searchParams.get('part')).toBe('snippet');
+	expect(url.searchParams.get('textFormat')).toBe('plainText');
+	expect(url.searchParams.has('pageToken')).toBe(false);
+	// A dropped Authorization header turns every call into a 401 quota failure.
+	expect(fetch.mock.calls[0]?.[1]?.headers).toMatchObject({ Authorization: 'Bearer token' });
+});
+
+test('sends the provided page token for checkpoint resumes', async () => {
+	const fetch = vi.fn().mockResolvedValue(page([comment('1', '2026-01-04T00:00:00.000Z')]));
+	vi.stubGlobal('fetch', fetch);
+
+	await fetchNewComments('channel', 'token', null, { pageToken: 'checkpoint' });
+
+	const url = new URL(String(fetch.mock.calls[0]?.[0]));
+	expect(url.searchParams.get('pageToken')).toBe('checkpoint');
+});
+
+test('treats an explicit null nextPageToken as the end of the list', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rawPage({ items: [], nextPageToken: null })));
+
+	const result = await fetchNewComments('channel', 'token', null);
+
+	expect(result).toEqual({ comments: [], nextPageToken: null, reachedCursor: false });
+});
+
+test('rejects a non-string nextPageToken instead of echoing it back to YouTube', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rawPage({ items: [], nextPageToken: 42 })));
+
+	await expect(fetchNewComments('channel', 'token', null)).rejects.toThrow(
+		'commentThreads.list response nextPageToken is missing or invalid'
+	);
+});
+
+test('rejects a commentThreads response that is not a JSON object', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('[]', { status: 200 })));
+
+	await expect(fetchNewComments('channel', 'token', null)).rejects.toThrow(
+		'commentThreads.list response is missing or invalid'
+	);
+});
+
+test('requests exactly one videos.list batch for fifty IDs', async () => {
+	const ids = Array.from({ length: 50 }, (_, index) => `video-${index + 1}`);
+	const fetch = vi.fn().mockResolvedValue(rawPage({ items: [] }));
+	vi.stubGlobal('fetch', fetch);
+
+	await fetchVideoMetadata(ids, 'token');
+
+	// An off-by-one here sends an empty batch (id=) to YouTube on every run.
+	expect(fetch).toHaveBeenCalledTimes(1);
+	const url = new URL(String(fetch.mock.calls[0]?.[0]));
+	expect(url.searchParams.get('part')).toBe('snippet');
+	expect(url.searchParams.get('id')?.split(',')).toEqual(ids);
+});
+
+test('rejects a videos.list response without an items array', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rawPage({})));
+
+	await expect(fetchVideoMetadata(['video-1'], 'token')).rejects.toThrow(
+		'videos.list response items is missing or invalid'
+	);
+});
+
+test('rejects a videos.list response that is not a JSON object', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('[]', { status: 200 })));
+
+	await expect(fetchVideoMetadata(['video-1'], 'token')).rejects.toThrow(
+		'videos.list response is missing or invalid'
+	);
+});
+
+test('defaults a missing or non-string video description to empty', async () => {
+	const fetch = vi.fn().mockResolvedValue(rawPage({
+		items: [
+			{ id: 'missing', snippet: { title: 'Title missing' } },
+			{ id: 'numeric', snippet: { title: 'Title numeric', description: 42 } }
+		]
+	}));
+	vi.stubGlobal('fetch', fetch);
+
+	const result = await fetchVideoMetadata(['missing', 'numeric'], 'token');
+
+	expect(result.get('missing')).toEqual({ title: 'Title missing', description: '' });
+	expect(result.get('numeric')).toEqual({ title: 'Title numeric', description: '' });
+});
+
+test.each([
+	['missing', undefined],
+	['empty', ''],
+	['non-string', 42]
+])('skips a video item with a %s title and logs the failing field', async (_label, title) => {
+	const fetch = vi.fn().mockResolvedValue(rawPage({
+		items: [{ id: 'bad', snippet: { title, description: 'd' } }]
+	}));
+	vi.stubGlobal('fetch', fetch);
+	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+	const result = await fetchVideoMetadata(['bad'], 'token');
+
+	expect(result.has('bad')).toBe(false);
+	expect(warn).toHaveBeenCalledWith(
+		'videos.list response item is malformed; skipping it:',
+		'videos.list response item 0',
+		expect.objectContaining({
+			message: expect.stringContaining('videos.list response item 0.snippet.title is missing or invalid')
+		})
+	);
+});
+
+test.each([
+	[{ snippet: { title: 'T' } }, 'videos.list response item 0.id is missing or invalid'],
+	[{ id: 'x' }, 'videos.list response item 0.snippet is missing or invalid']
+])('skips a malformed video item %j and logs the failing field', async (item, message) => {
+	const fetch = vi.fn().mockResolvedValue(rawPage({ items: [item] }));
+	vi.stubGlobal('fetch', fetch);
+	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+	const result = await fetchVideoMetadata(['x'], 'token');
+
+	expect(result.has('x')).toBe(false);
+	expect(warn).toHaveBeenCalledWith(
+		'videos.list response item is malformed; skipping it:',
+		'videos.list response item 0',
+		expect.objectContaining({ message: expect.stringContaining(message) })
+	);
+});
+
+test('posts exactly one moderation batch for fifty comment IDs', async () => {
+	const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+	vi.stubGlobal('fetch', fetch);
+	const ids = Array.from({ length: 50 }, (_, index) => `comment-${index + 1}`);
+
+	await setModerationStatus(ids, 'heldForReview', false, 'token');
+
+	expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+test.each(['heldForReview', 'published', 'likelySpam', 'rejected'] as const)(
+	'returns the %s moderation status during recovery verification',
+	async (status) => {
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rawPage({
+			items: [{ snippet: { moderationStatus: status } }]
+		})));
+
+		await expect(getCommentModerationStatus('comment', 'token')).resolves.toBe(status);
+	}
+);
+
+test('fails loudly on an unsupported moderation status', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rawPage({
+		items: [{ snippet: { moderationStatus: 'spam' } }]
+	})));
+
+	// An unknown status must never be silently treated as a confirmed action (I2).
+	await expect(getCommentModerationStatus('comment', 'token')).rejects.toThrow(
+		'comments.list response moderationStatus is unsupported: spam'
+	);
+});
+
+test('returns null when the comment is absent from the list', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rawPage({ items: [] })));
+
+	await expect(getCommentModerationStatus('comment', 'token')).resolves.toBeNull();
+});
+
+test('fails loudly when comments.list returns multiple comments', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rawPage({
+		items: [{ snippet: { moderationStatus: 'rejected' } }, { snippet: { moderationStatus: 'rejected' } }]
+	})));
+
+	await expect(getCommentModerationStatus('comment', 'token')).rejects.toThrow(
+		'comments.list response returned multiple comments'
+	);
+});
+
+test('fails loudly when comments.list items is missing', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rawPage({})));
+
+	await expect(getCommentModerationStatus('comment', 'token')).rejects.toThrow(
+		'comments.list response items is missing or invalid'
+	);
+});
+
+test('fails loudly when a comments.list response is not a JSON object', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('[]', { status: 200 })));
+
+	await expect(getCommentModerationStatus('comment', 'token')).rejects.toThrow(
+		'comments.list response is missing or invalid'
+	);
+});
+
+test('fails loudly when moderationStatus is missing from the comment', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rawPage({ items: [{ snippet: {} }] })));
+
+	await expect(getCommentModerationStatus('comment', 'token')).rejects.toThrow(
+		'comments.list response moderationStatus is missing or invalid'
+	);
+});
+
+test.each([
+	[[null], 'comments.list response item is missing or invalid'],
+	[[{}], 'comments.list response item snippet is missing or invalid']
+])('fails loudly when the comment entry is malformed: %j', async (items, message) => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rawPage({ items })));
+
+	await expect(getCommentModerationStatus('comment', 'token')).rejects.toThrow(message);
+});
+
+test('fails loudly when the comments.list request fails', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('bad request', { status: 400 })));
+
+	await expect(getCommentModerationStatus('comment', 'token')).rejects.toThrow(
+		'comments.list failed: 400 bad request'
+	);
+});
+
+test('fails loudly when a commentThreads page is not valid JSON', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('not json', { status: 200 })));
+
+	await expect(fetchNewComments('channel', 'token', null)).rejects.toThrow(
+		'commentThreads.list returned invalid JSON'
+	);
+});
+
+test.each(['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'both'] as const)(
+	'refreshAccessToken fails loudly when %s is not configured',
+	async (which) => {
+		if (which !== 'GOOGLE_CLIENT_SECRET') mocks.env.GOOGLE_CLIENT_ID = undefined;
+		if (which !== 'GOOGLE_CLIENT_ID') mocks.env.GOOGLE_CLIENT_SECRET = undefined;
+		const fetch = vi.fn();
+		vi.stubGlobal('fetch', fetch);
+
+		await expect(refreshAccessToken('refresh-token')).rejects.toThrow(
+			'GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are required'
+		);
+		expect(fetch).not.toHaveBeenCalled();
+	}
+);
+
+test('refreshAccessToken posts the refresh grant to the Google token endpoint', async () => {
+	const fetch = vi.fn().mockResolvedValue(rawPage({ access_token: 'fresh-token' }));
+	vi.stubGlobal('fetch', fetch);
+
+	await expect(refreshAccessToken('refresh-token')).resolves.toBe('fresh-token');
+
+	expect(fetch).toHaveBeenCalledTimes(1);
+	const [url, init] = fetch.mock.calls[0] as [string, RequestInit];
+	expect(url).toBe('https://oauth2.googleapis.com/token');
+	expect(init.method).toBe('POST');
+	expect(init.headers).toEqual({ 'Content-Type': 'application/x-www-form-urlencoded' });
+	const body = String(init.body);
+	expect(body).toContain('client_id=client-id');
+	expect(body).toContain('client_secret=client-secret');
+	expect(body).toContain('refresh_token=refresh-token');
+	expect(body).toContain('grant_type=refresh_token');
+});
+
+test('refreshAccessToken fails loudly when the token endpoint rejects the grant', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('invalid_grant', { status: 400 })));
+
+	await expect(refreshAccessToken('refresh-token')).rejects.toThrow(
+		'token refresh failed: 400 invalid_grant'
+	);
+});
+
+test('refreshAccessToken fails loudly when the token response is not JSON', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('not json', { status: 200 })));
+
+	await expect(refreshAccessToken('refresh-token')).rejects.toThrow('token refresh returned invalid JSON');
+});
+
+test('refreshAccessToken fails loudly when the token response is not a JSON object', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('[]', { status: 200 })));
+
+	await expect(refreshAccessToken('refresh-token')).rejects.toThrow(
+		'token refresh response is missing or invalid'
+	);
+});
+
+test('refreshAccessToken fails loudly when the token response lacks an access token', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rawPage({})));
+
+	await expect(refreshAccessToken('refresh-token')).rejects.toThrow(
+		'token refresh response access_token is missing or invalid'
+	);
 });

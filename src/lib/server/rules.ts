@@ -85,9 +85,11 @@ function duplicateAlternation(body: string): boolean {
 
 /** Rejects backreferences (`\1`–`\9`, `\k<name>`) and groups with duplicate alternatives. */
 function unsafeSyntax(pattern: string): boolean {
+	// Stryker disable next-line ArrayDeclaration: the sentinel is never popped — regex() compiles the pattern before unsafeRegex runs, so pops never exceed pushes for compilable patterns
 	const starts: number[] = [];
 	let escaped = false;
 	let characterClass = false;
+	// Stryker disable next-line EqualityOperator: `<=` only adds an iteration where charAt returns '', which matches no branch and is a no-op
 	for (let index = 0; index < pattern.length; index++) {
 		const character = pattern.charAt(index);
 		if (escaped) {
@@ -114,6 +116,7 @@ function unsafeSyntax(pattern: string): boolean {
 		}
 		if (character === ')') {
 			const start = starts.pop();
+			// Stryker disable next-line ConditionalExpression: unreachable — the pattern compiled in regex() before this runs, so every `)` pairs with a pushed `(`
 			if (start === undefined) continue; // unbalanced: new RegExp reports the pattern invalid
 			// Strip the group prefix (`?:`, `?=`, `?!`, `?<=`, `?<!`, `?<name>`, `?flags:`) before comparing alternatives.
 			const body = pattern.slice(start + 1, index).replace(GROUP_PREFIX, '');

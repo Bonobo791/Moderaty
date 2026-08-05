@@ -16,9 +16,18 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { beforeAll, beforeEach, expect, test, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest';
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import journal from '../../../drizzle/meta/_journal.json';
+
+// Flippable so one test can run the guard as it behaves during `vite build`
+// (prerender has no database) while every other test runs it as runtime code.
+const environmentMock = vi.hoisted(() => ({ building: false }));
+vi.mock('$app/environment', () => ({
+	get building() {
+		return environmentMock.building;
+	}
+}));
 
 // The expected count must come from the real journal — never hardcode it,
 // or this test silently rots the next time a migration lands.
@@ -39,6 +48,10 @@ beforeEach(() => {
 	// spyOn re-uses the existing spy, so clear the accumulated call history
 	// or "not.toHaveBeenCalled" sees earlier tests' logs.
 	vi.spyOn(console, 'error').mockImplementation(() => {}).mockClear();
+});
+
+afterEach(() => {
+	environmentMock.building = false;
 });
 
 async function freshGuard(): Promise<{ assertMigrationsCurrent: () => Promise<void> }> {
@@ -80,9 +93,46 @@ test('a database behind the code fails loudly with a 503 and logs the actionable
 	await seedAppliedMigrations(expected - 1);
 	const guard = await freshGuard();
 
-	await expect(guard.assertMigrationsCurrent()).rejects.toMatchObject({ status: 503 });
+	// The client-facing message is part of the contract: generic retry copy,
+	// never the operational detail (that goes to the server log only).
+	await expect(guard.assertMigrationsCurrent()).rejects.toMatchObject({
+		status: 503,
+		body: { message: 'the service is being upgraded — please retry in a few minutes' }
+	});
 	expect(loggedCounts()).toContain(`${expected - 1}/${expected}`);
 	expect(loggedCounts()).toContain('db:migrate');
+});
+
+test('during prerendering the guard is a no-op — the build has no database', async () => {
+	environmentMock.building = true;
+	// Behind the code AND unqueryable: any check at all would fail here.
+	const getSpy = vi.spyOn(testDb().db, 'get');
+	const guard = await freshGuard();
+
+	await expect(guard.assertMigrationsCurrent()).resolves.toBeUndefined();
+
+	expect(getSpy).not.toHaveBeenCalled();
+	expect(console.error).not.toHaveBeenCalled();
+	getSpy.mockRestore();
+});
+
+test('an empty migration count result reads as 0 applied, not a crash', async () => {
+	// db.get resolves undefined when the query yields no row (drizzle
+	// contract); the guard must treat that as 0/expected, i.e. a loud 503,
+	// not a TypeError leaking out of the request boundary.
+	const getSpy = vi
+		.spyOn(testDb().db, 'get')
+		.mockResolvedValue(undefined as unknown as { n: number });
+	const guard = await freshGuard();
+	try {
+		await expect(guard.assertMigrationsCurrent()).rejects.toMatchObject({
+			status: 503,
+			body: { message: 'the service is being upgraded — please retry in a few minutes' }
+		});
+		expect(loggedCounts()).toContain(`0/${expected}`);
+	} finally {
+		getSpy.mockRestore();
+	}
 });
 
 test('the failure is not cached — the guard recovers as soon as the human migrates', async () => {

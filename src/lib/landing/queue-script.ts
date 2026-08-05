@@ -87,6 +87,7 @@ export function applyVerdict(counts: Counts, verdict: Verdict): Counts {
  */
 export function initialQueueState(): { rows: QueueRow[]; counts: Counts } {
 	return {
+		// Stryker disable next-line UnaryOperator: SCRIPT has exactly 8 entries, so slice(+4) and slice(-4) return the identical tail rows — the mutant is equivalent while the 8-entry script stands.
 		rows: SCRIPT.slice(-4).map((item, i) => ({ key: i, item, state: 'settled' })),
 		counts: FINAL_COUNTS
 	};

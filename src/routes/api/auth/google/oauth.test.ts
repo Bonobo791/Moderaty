@@ -153,6 +153,8 @@ test('auth start sets an HttpOnly oauth_state cookie and redirects with matching
 	const pendingStates: unknown = JSON.parse(stateCall?.value ?? '[]');
 	expect(target.origin + target.pathname).toBe('https://accounts.google.com/o/oauth2/v2/auth');
 	expect(pendingStates).toContain(target.searchParams.get('state'));
+	expect(target.searchParams.get('client_id')).toBe('client-id');
+	expect(target.searchParams.get('response_type')).toBe('code');
 	expect(target.searchParams.get('scope')).toBe('https://www.googleapis.com/auth/youtube.force-ssl');
 	expect(target.searchParams.get('access_type')).toBe('offline');
 	expect(target.searchParams.get('prompt')).toBe('consent select_account');
@@ -164,7 +166,20 @@ test('auth start sets an HttpOnly oauth_state cookie and redirects with matching
 test('auth start fails loudly with 500 when GOOGLE_CLIENT_ID is not configured', () => {
 	mocks.env.GOOGLE_CLIENT_ID = undefined;
 	expect(() => startAuth({ cookies: makeCookies() } as never)).toThrowError(
-		expect.objectContaining({ status: 500 })
+		expect.objectContaining({
+			status: 500,
+			body: { message: 'GOOGLE_CLIENT_ID is not configured' }
+		})
+	);
+});
+
+test('auth start fails loudly with 500 when APP_URL is not configured', () => {
+	mocks.env.APP_URL = undefined;
+	expect(() => startAuth({ cookies: makeCookies() } as never)).toThrowError(
+		expect.objectContaining({
+			status: 500,
+			body: { message: 'APP_URL is not configured' }
+		})
 	);
 });
 

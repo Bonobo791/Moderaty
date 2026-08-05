@@ -164,6 +164,7 @@ export async function createTestDb(): Promise<TestDb> {
 			action TEXT NOT NULL,
 			reason TEXT NOT NULL,
 			actor TEXT NOT NULL,
+			text TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE TABLE moderation_actions (

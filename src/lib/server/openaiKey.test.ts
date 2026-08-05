@@ -64,6 +64,21 @@ test('corrupt ciphertext falls back to the env key and logs loudly', async () =>
 	expect(spy).toHaveBeenCalled();
 });
 
+test('a database failure falls back to the env key and logs loudly instead of crashing the run', async () => {
+	// resolveOpenAiKey must never throw: a mid-run DB hiccup degrades to the
+	// deployment key (loudly), not to an aborted moderation batch.
+	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	const dbSpy = vi.spyOn(testDb().db, 'select').mockImplementation(() => {
+		throw new Error('database is down');
+	});
+	try {
+		expect(await resolveOpenAiKey('org-1')).toBe('env-openai-key');
+		expect(spy).toHaveBeenCalled();
+	} finally {
+		dbSpy.mockRestore();
+	}
+});
+
 test('no stored key and no env key resolves to undefined (the scorer throws loudly)', async () => {
 	mocks.env.OPENAI_API_KEY = undefined;
 	await seedOrg('org-4', null);

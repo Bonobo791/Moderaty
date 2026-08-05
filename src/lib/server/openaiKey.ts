@@ -35,18 +35,27 @@ import { organizations } from '$lib/server/db/schema';
  */
 export async function resolveOpenAiKey(orgId: string | null): Promise<string | undefined> {
 	if (!orgId) return env.OPENAI_API_KEY;
-	const row = await db
-		.select({ openaiKeyEnc: organizations.openaiKeyEnc })
-		.from(organizations)
-		.where(eq(organizations.id, orgId))
-		.get();
-	if (!row?.openaiKeyEnc) return env.OPENAI_API_KEY;
+	let enc: string | null | undefined;
 	try {
-		return decrypt(row.openaiKeyEnc);
+		const row = await db
+			.select({ openaiKeyEnc: organizations.openaiKeyEnc })
+			.from(organizations)
+			.where(eq(organizations.id, orgId))
+			.get();
+		enc = row?.openaiKeyEnc;
+	} catch (error) {
+		// Loud fallback: a mid-run DB hiccup must neither abort the batch nor
+		// go unnoticed — degrade to the deployment key and log it.
+		console.error('failed to read the stored OpenAI key — falling back to the deployment key', { orgId, error });
+		return env.OPENAI_API_KEY;
+	}
+	if (!enc) return env.OPENAI_API_KEY;
+	try {
+		return decrypt(enc);
 	} catch (error) {
 		// Loud fallback: a corrupt stored key must not abort the run, but it
 		// must never be silent either.
-		console.error(`stored OpenAI key for org ${orgId} failed to decrypt — falling back to the deployment key:`, error);
+		console.error('stored OpenAI key failed to decrypt — falling back to the deployment key', { orgId, error });
 		return env.OPENAI_API_KEY;
 	}
 }

@@ -293,6 +293,31 @@ test('setOpenAiKey: OpenAI rejecting the key fails 400 and stores nothing', asyn
 	expect(await storedKey()).toBeNull();
 });
 
+test('setOpenAiKey: an unreachable OpenAI fails 502 and logs only a message, never the key or a raw error object', async () => {
+	// CWE-532: the caught fetch error is an object whose dump can carry request
+	// detail; the log must be a plain message string so the key can never leak.
+	await seedOwnerOrg();
+	vi.stubGlobal('fetch', async () => {
+		throw new Error('fetch failed');
+	});
+	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	vi.useFakeTimers();
+	try {
+		const pending = actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: 'sk-secret-key' }));
+		await vi.advanceTimersByTimeAsync(20_000); // fetchWithRetry backoff
+		const bad = failure(await pending);
+		expect(bad.status).toBe(502);
+	} finally {
+		vi.useRealTimers();
+	}
+	expect(await storedKey()).toBeNull();
+	expect(spy).toHaveBeenCalled();
+	for (const call of spy.mock.calls) {
+		for (const arg of call) expect(arg).not.toBeInstanceOf(Error);
+		expect(JSON.stringify(call)).not.toContain('sk-secret-key');
+	}
+});
+
 test('clearOpenAiKey: owner wipes the stored key; non-owner is 403', async () => {
 	await seedOwnerOrg();
 	stubOpenAi(200);

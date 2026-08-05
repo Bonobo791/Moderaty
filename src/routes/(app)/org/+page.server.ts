@@ -151,13 +151,18 @@ export const actions: Actions = {
 				headers: { authorization: `Bearer ${key}` }
 			});
 		} catch (error) {
-			console.error('OpenAI key validation request failed:', error);
+			// CWE-532: log only the failure message — dumping the raw error
+			// object risks request detail (and the candidate key) in the log.
+			console.error(
+				'OpenAI key validation request failed:',
+				error instanceof Error ? error.message : String(error)
+			);
 			return fail(502, { error: 'Could not reach OpenAI to validate the key — try again in a moment.' });
 		}
 		if (res.status === 401 || res.status === 403)
 			return fail(400, { error: 'OpenAI rejected that key — check it and try again.' });
 		if (!res.ok) {
-			console.error(`OpenAI key validation returned HTTP ${res.status}`);
+			console.error('OpenAI key validation returned a non-OK status:', res.status);
 			return fail(502, { error: 'OpenAI could not validate the key right now — try again in a moment.' });
 		}
 		await db.update(organizations).set({ openaiKeyEnc: encrypt(key) }).where(eq(organizations.id, user.orgId));

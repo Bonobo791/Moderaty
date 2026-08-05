@@ -100,6 +100,7 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 			.where(eq(organizations.personalFor, userId))
 			.all();
 		const personalOrgIds = personalOrgs.map((o) => o.id);
+		// Stryker disable next-line ConditionalExpression: true equivalent — with zero personal orgs the guard queries inArray([]), which drizzle compiles to `false`; 0 !== 0 and [].some() are both false, so the guard body can never fire either way.
 		if (personalOrgIds.length) {
 			// Data-bug guard: a personal org is single-member by definition, but
 			// the schema cannot enforce that. Require exactly one membership per
@@ -112,6 +113,7 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 				.from(memberships)
 				.where(inArray(memberships.orgId, personalOrgIds))
 				.all();
+			// Stryker disable next-line MethodExpression: every equivalent — organizations.personalFor is UNIQUE (at most one personal org per user), so a mixed-owner member list with a matching count is schema-impossible; with zero or one rows some ≡ every here.
 			if (orgMembers.length !== personalOrgIds.length || orgMembers.some((m) => m.userId !== userId)) {
 				console.error(`user ${userId}'s personal org membership is inconsistent (${orgMembers.length} rows) — refusing account deletion`);
 				throw new Error('personal organization has other members — contact support');
@@ -143,13 +145,16 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 					.from(memberships)
 					.where(and(inArray(memberships.orgId, memberOrgIds), ne(memberships.userId, userId)))
 					.all()
-			: [];
+			: // Stryker disable next-line ArrayDeclaration: sentinel equivalent — this branch means userMemberships is empty, and the only reader of coMembersByOrg loops over userMemberships, so the injected row is never read.
+				[];
 		const coMembersByOrg = new Map<string, typeof coMembers>();
 		for (const row of coMembers) {
+			// Stryker disable next-line ArrayDeclaration: sentinel equivalent — the injected string's .createdAt is undefined, which localeCompare coerces to "undefined"; ISO dates start with digits ('2' < 'u'), so it always sorts last, find(role==='admin') skips it (role undefined), and ranked[0] is always a real row.
 			const list = coMembersByOrg.get(row.orgId) ?? [];
 			list.push(row);
 			coMembersByOrg.set(row.orgId, list);
 		}
+		// Stryker disable next-line ArrayDeclaration: sentinel equivalent — org ids are randomBytes(16) hex (ensurePersonalOrg in org.ts), never "Stryker was here", so the extra inArray element matches no row and deletes nothing.
 		const dissolveOrgIds: string[] = [];
 		for (const membership of userMemberships) {
 			const others = coMembersByOrg.get(membership.orgId) ?? [];
@@ -179,6 +184,7 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 			? await tx.select({ id: channels.id }).from(channels).where(inArray(channels.orgId, dissolveOrgIds)).all()
 			: [];
 		const channelIds = chs.map((ch) => ch.id);
+		// Stryker disable next-line ConditionalExpression: true equivalent — with zero channels the deletes run inArray([]), which drizzle compiles to `false`: no rows match, nothing is deleted.
 		if (channelIds.length) {
 			await tx.delete(moderationActions).where(inArray(moderationActions.channelId, channelIds));
 			await tx.delete(comments).where(inArray(comments.channelId, channelIds));
@@ -193,6 +199,7 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 			.set({ userId: null, refreshTokenEnc: WIPED_REFRESH_TOKEN })
 			.where(eq(channels.userId, userId));
 		await tx.delete(sessions).where(eq(sessions.userId, userId));
+		// Stryker disable next-line ConditionalExpression: true equivalent — with zero dissolved orgs the deletes run inArray([]), which drizzle compiles to `false`: no rows match, nothing is deleted.
 		if (dissolveOrgIds.length) {
 			await tx.delete(invites).where(inArray(invites.orgId, dissolveOrgIds));
 			await tx.delete(memberships).where(inArray(memberships.orgId, dissolveOrgIds));
@@ -229,6 +236,7 @@ export async function nullExpiredConsentEmails(): Promise<number> {
 		.where(and(isNotNull(consents.email), lt(consents.createdAt, consentEmailCutoffIso())))
 		.limit(CONSENT_SWEEP_BATCH)
 		.all();
+	// Stryker disable next-line ConditionalExpression: false equivalent — with zero expired rows the update runs inArray([]) (drizzle compiles to `false`, no rows updated) and expired.length is 0, so the skipped early return returns the same 0.
 	if (!expired.length) return 0;
 	await db
 		.update(consents)

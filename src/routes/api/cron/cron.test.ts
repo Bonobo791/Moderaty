@@ -57,7 +57,9 @@ function call(secret?: { query?: string; bearer?: string }) {
 }
 
 async function expectUnauthorized(secret?: { query?: string; bearer?: string }) {
-	await expect(call(secret)).rejects.toThrowError(expect.objectContaining({ status: 401 }));
+	// Exact message: a 401 with an empty or wrong message stayed green in the
+	// mutation audit (StringLiteral '' on 'bad secret').
+	await expect(call(secret)).rejects.toMatchObject({ status: 401, body: { message: 'bad secret' } });
 }
 
 test('rejects a request with no secret at all', async () => {
@@ -78,16 +80,37 @@ test('rejects length-mismatched secrets without throwing a 500', async () => {
 test('fails loudly when CRON_SECRET is not configured', async () => {
 	delete mocks.env.CRON_SECRET;
 
-	await expect(call({ bearer: 'anything' })).rejects.toThrowError(expect.objectContaining({ status: 500 }));
+	// Exact message: an emptied message stayed green in the mutation audit —
+	// "fail loudly" means a clear message, not just any 500.
+	await expect(call({ bearer: 'anything' })).rejects.toMatchObject({
+		status: 500,
+		body: { message: 'CRON_SECRET is not configured' }
+	});
 });
 
 test('rejects a malformed Authorization header even with a valid query secret', async () => {
 	const url = new URL('http://localhost/api/cron?secret=test-secret');
 	const request = new Request(url, { headers: { authorization: 'Basic anything' } });
 
-	await expect(GET({ url, request } as never)).rejects.toThrowError(
-		expect.objectContaining({ status: 401 })
-	);
+	await expect(GET({ url, request } as never)).rejects.toMatchObject({
+		status: 401,
+		body: { message: 'bad secret' }
+	});
+});
+
+test('rejects a non-Bearer scheme even when its tail is the secret', async () => {
+	// Mutation audit: dropping the 'Bearer ' scheme check (startsWith→true or
+	// the literal→'') stayed green because every malformed header happened to
+	// slice to a wrong secret. A 7-character scheme prefix ('Digest ', same
+	// length as 'Bearer ') whose tail IS the secret must still fail closed —
+	// only the Bearer scheme authenticates.
+	const url = new URL('http://localhost/api/cron');
+	const request = new Request(url, { headers: { authorization: 'Digest test-secret' } });
+
+	await expect(GET({ url, request } as never)).rejects.toMatchObject({
+		status: 401,
+		body: { message: 'bad secret' }
+	});
 });
 
 const SECRET_FORMS = [
@@ -116,6 +139,56 @@ test('runs the channel with a server-side deadline inside the caller abort windo
 	const windowMs = deadline - before;
 	expect(windowMs).toBeGreaterThanOrEqual(19_000);
 	expect(windowMs).toBeLessThanOrEqual(21_000);
+});
+
+test('holds a 10-minute lease during the run and reports the result under the channel id', async () => {
+	// Mutation audit: the claim's lease timestamp and the success body's
+	// results map were never asserted — flipping `Date.now() + LEASE_MS` to
+	// `-` (an already-expired lease, defeating the crash-recovery window) and
+	// emptying `results` both stayed green.
+	await testDb().db.insert(channels).values({ id: 'UC1', title: 'One', refreshTokenEnc: 'enc' });
+	const result = { fetched: 0, acted: 0, queued: 0, partial: false, skipped: false, dryRun: true };
+	let leaseDuringRun: string | null = null;
+	mocks.runChannel.mockImplementation(async () => {
+		leaseDuringRun =
+			(await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())
+				?.leaseExpiresAt ?? null;
+		return result;
+	});
+	const before = Date.now();
+
+	const res = await call({ bearer: 'test-secret' });
+	const after = Date.now();
+
+	expect(await res.json()).toMatchObject({ ok: true, results: { UC1: result } });
+	// The lease must be held for the whole run and expire ~10 minutes out —
+	// long enough to outlast one bounded run, self-expiring after a crash.
+	const leaseMs = Date.parse(leaseDuringRun ?? '');
+	const TEN_MIN_MS = 10 * 60 * 1000;
+	expect(leaseMs).toBeGreaterThanOrEqual(before + TEN_MIN_MS - 1000);
+	expect(leaseMs).toBeLessThanOrEqual(after + TEN_MIN_MS + 1000);
+});
+
+test('exits cleanly when the atomic claim matches 0 rows (concurrent claimant)', async () => {
+	// Mutation audit: the claimed:false early return was never executed, so
+	// forcing `claimed.length === 0` to false survived — a losing claimant
+	// would run the channel anyway, duplicating moderation work.
+	// A BEFORE UPDATE trigger with RAISE(IGNORE) silently skips the claim row
+	// (0 rows updated, no error) — the exact post-select race outcome.
+	await testDb().db.insert(channels).values({ id: 'UC-race', title: 'Race', refreshTokenEnc: 'enc' });
+	await testDb().client.execute(
+		`CREATE TRIGGER ignore_channel_claim BEFORE UPDATE ON channels
+		 WHEN NEW.lease_expires_at IS NOT NULL
+		 BEGIN SELECT RAISE(IGNORE); END`
+	);
+	try {
+		const res = await call({ bearer: 'test-secret' });
+
+		expect(await res.json()).toMatchObject({ ok: true, claimed: false, results: {} });
+		expect(mocks.runChannel).not.toHaveBeenCalled();
+	} finally {
+		await testDb().client.execute('DROP TRIGGER ignore_channel_claim');
+	}
 });
 
 test('does not select or claim a channel whose lease is still held', async () => {
@@ -182,6 +255,9 @@ test('a failing channel run reports failure, never success', async () => {
 
 		expect(res.status).toBe(500);
 		expect(await res.json()).toMatchObject({ ok: false, results: { 'UC-bad': { error: 'youtube quota exhausted' } } });
+		// The failure is logged loudly with the channel id (an emptied log
+		// message stayed green in the mutation audit).
+		expect(errorSpy).toHaveBeenCalledWith('channel run UC-bad failed:', expect.any(Error));
 		// The run is still recorded, so a failing channel cannot starve the others.
 		const row = await testDb().db.select().from(channels).where(eq(channels.id, 'UC-bad')).get();
 		expect(row?.lastRunAt).not.toBeNull();
@@ -219,6 +295,7 @@ test('a sweep failure is reported and does not stop the channel run', async () =
 		`CREATE TRIGGER fail_consent_update BEFORE UPDATE ON consents
 		 BEGIN SELECT RAISE(ABORT, 'simulated sweep failure'); END`
 	);
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 	try {
 		const res = await call({ bearer: 'test-secret' });
 
@@ -227,7 +304,11 @@ test('a sweep failure is reported and does not stop the channel run', async () =
 		expect(body.sweepError).toEqual(expect.stringContaining('Failed query'));
 		expect(body.consentEmailsNulled).toBe(0);
 		expect(mocks.runChannel).toHaveBeenCalledWith('UC-live', expect.objectContaining({ deadline: expect.any(Number) }));
+		// The sweep failure is logged loudly (an emptied log message stayed
+		// green in the mutation audit).
+		expect(errorSpy).toHaveBeenCalledWith('consent e-mail retention sweep failed:', expect.any(Error));
 	} finally {
+		errorSpy.mockRestore();
 		await testDb().client.execute('DROP TRIGGER fail_consent_update');
 	}
 
@@ -238,9 +319,17 @@ test('a sweep failure is reported and does not stop the channel run', async () =
 test('a dry run skips the consent e-mail sweep entirely (I8)', async () => {
 	const oldDate = new Date(Date.now() - CONSENT_EMAIL_RETENTION_MS - DAY_MS).toISOString();
 	await seedConsent('old', oldDate);
+	// The skipped sweep is announced loudly (an emptied/removed notice stayed
+	// green in the mutation audit).
+	const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 
-	const res = await call({ bearer: 'test-secret' });
+	try {
+		const res = await call({ bearer: 'test-secret' });
 
-	expect(await res.json()).toMatchObject({ ok: true, dryRun: true, consentEmailsNulled: 0 });
+		expect(await res.json()).toMatchObject({ ok: true, dryRun: true, consentEmailsNulled: 0 });
+		expect(infoSpy).toHaveBeenCalledWith('dry run: consent e-mail retention sweep skipped');
+	} finally {
+		infoSpy.mockRestore();
+	}
 	expect((await testDb().db.select().from(consents).all())[0].email).toBe('old@example.com');
 });

@@ -97,7 +97,7 @@ describe('queue load projection (behavior)', () => {
 			locals: { user: null, dbDown: true }
 		} as unknown as Parameters<typeof load>[0]);
 
-		expect(result).toMatchObject({ maintenance: true, pending: [] });
+		expect(result).toEqual({ ch: { id: 'UCchan', title: '' }, pending: [], maintenance: true });
 		// The outage short-circuit runs before any ownership or DB work.
 		expect(mocks.ownedChannel).not.toHaveBeenCalled();
 	});

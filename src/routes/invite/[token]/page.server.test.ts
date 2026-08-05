@@ -72,7 +72,7 @@ function acceptCtx(token: string, opts: { signedIn?: boolean; cookie?: boolean }
 }
 
 test('load: unknown token is a plain 404', async () => {
-	await expect(load(loadCtx('tok-nope'))).rejects.toMatchObject({ status: 404 });
+	await expect(load(loadCtx('tok-nope'))).rejects.toMatchObject({ status: 404, body: { message: 'invite not found' } });
 });
 
 test('load: known token returns the preview and the signed-in flag', async () => {
@@ -85,8 +85,14 @@ test('load: known token returns the preview and the signed-in flag', async () =>
 
 test('accept: signed-out is 401, missing session cookie is 401', async () => {
 	await seedOrgWithInvite('tok-1');
-	await expect(actions.default(acceptCtx('tok-1', { signedIn: false }))).rejects.toMatchObject({ status: 401 });
-	await expect(actions.default(acceptCtx('tok-1', { cookie: false }))).rejects.toMatchObject({ status: 401 });
+	await expect(actions.default(acceptCtx('tok-1', { signedIn: false }))).rejects.toMatchObject({
+		status: 401,
+		body: { message: 'sign-in required' }
+	});
+	await expect(actions.default(acceptCtx('tok-1', { cookie: false }))).rejects.toMatchObject({
+		status: 401,
+		body: { message: 'sign-in required' }
+	});
 });
 
 test('accept: joins the org, burns the token, 303s to the dashboard; reuse is 410', async () => {

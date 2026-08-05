@@ -110,9 +110,11 @@ export const actions: Actions = {
 		if (!pending) {
 			// Signed-in re-consent after a doc bump: record the acceptance only.
 			// The live session keeps sliding — no new session, no cookie writes.
+			// Stryker disable next-line ConditionalExpression, BlockStatement: unreachable — the guard above already returned fail(400) for exactly (!pending && !sessionUser), so inside this block sessionUser is always truthy
 			if (!sessionUser) {
 				// Unreachable — the guard above rejected exactly this case — but
 				// never write a consent row without a verified identity.
+				// Stryker disable next-line StringLiteral: unreachable — the enclosing guard can never execute (see above)
 				throw error(500, 'consent submitted without a verified identity');
 			}
 			// A direct POST can bypass the load's /dashboard redirect; the log
@@ -148,6 +150,7 @@ export const actions: Actions = {
 					})
 					.onConflictDoNothing();
 				const user = await tx.select().from(users).where(eq(users.googleSub, pending.sub)).get();
+				// Stryker disable next-line ConditionalExpression, StringLiteral: unreachable — the onConflictDoNothing insert above guarantees a row with this googleSub exists, so the select in the same transaction always returns it
 				if (!user) throw error(500, 'account creation failed — please retry');
 				const orgId = await ensurePersonalOrg(tx, user);
 				// Orphan claim (first user ever): channels land in their personal org.

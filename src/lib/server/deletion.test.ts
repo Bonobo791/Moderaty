@@ -419,6 +419,119 @@ test('deleteUserRecords logs no succession when the transaction rolls back', asy
 	expect(await userRow(userId)).toMatchObject({ googleSub: 'sub-gone' });
 });
 
+test('deleteUserRecords logs the inconsistent personal-org membership loudly before aborting', async () => {
+	// The guard's console.error is part of the contract (fail loudly, AGENTS.md):
+	// it must name the user and the exact inconsistent row count — an emptied
+	// message would leave operators with a bare throw and no diagnosis.
+	const userId = await seedUser('gone');
+	await seedBareUser('member-2');
+	await testDb().db.insert(memberships).values({ userId: 'member-2', orgId: 'org-gone', role: 'member' });
+	const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		await expect(deleteUserRecords(userId)).rejects.toThrow('personal organization has other members');
+		expect(error.mock.calls.map((call) => String(call[0]))).toEqual([
+			expect.stringContaining(`user ${userId}'s personal org membership is inconsistent (2 rows)`)
+		]);
+	} finally {
+		error.mockRestore();
+	}
+	// Full rollback: the org, both memberships, and the user's identity survive.
+	expect(await userRow(userId)).toMatchObject({ googleSub: 'sub-gone' });
+	expect(await testDb().db.select().from(organizations).all()).toHaveLength(1);
+	expect(await testDb().db.select().from(memberships).all()).toHaveLength(2);
+});
+
+test('deleteUserRecords breaks succession seniority ties by userId, not insertion order', async () => {
+	// Both surviving members joined in the SAME instant: createdAt ties, so the
+	// userId tie-break decides. Seeded in adversarial insertion order (zz first)
+	// so a dropped sort, a no-op comparator, or a constant comparator all crown
+	// the wrong successor.
+	const userId = await seedUser('gone');
+	await seedBareUser('zz-member');
+	await seedBareUser('aa-member');
+	await seedSharedOrg('org-team', [
+		{ userId, role: 'owner', joinedAt: '2026-01-01T00:00:00.000Z' },
+		{ userId: 'zz-member', role: 'member', joinedAt: '2026-01-02T00:00:00.000Z' },
+		{ userId: 'aa-member', role: 'member', joinedAt: '2026-01-02T00:00:00.000Z' }
+	]);
+
+	const logs = await deleteWithSuccessionLogs(userId);
+
+	expect(logs).toHaveLength(1);
+	expect(logs[0]).toContain('aa-member');
+	await expectOrgRoles('org-team', [
+		{ userId: 'aa-member', role: 'owner' },
+		{ userId: 'zz-member', role: 'member' }
+	]);
+});
+
+test('deleteUserRecords fails loudly when the succession update matches no row', async () => {
+	// The RETURNING-empty guard: the successor row was selected in this same
+	// transaction, so an empty RETURNING means the data changed underneath —
+	// simulated with a trigger that silently swallows the promotion UPDATE
+	// (RAISE(IGNORE) skips the row action without erroring).
+	const userId = await seedUser('gone');
+	await seedBareUser('admin-old');
+	await seedSharedOrg('org-team', [
+		{ userId, role: 'owner', joinedAt: '2026-01-01T00:00:00.000Z' },
+		{ userId: 'admin-old', role: 'admin', joinedAt: '2026-01-02T00:00:00.000Z' }
+	]);
+	await testDb().client.execute('CREATE TRIGGER swallow_promotion BEFORE UPDATE ON memberships BEGIN SELECT RAISE(IGNORE); END');
+	const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		await expect(deleteUserRecords(userId)).rejects.toThrow('ownership succession failed — contact support');
+		// The loud log names the vanished successor and the org.
+		expect(error.mock.calls.map((call) => String(call[0]))).toEqual([
+			expect.stringContaining('successor admin-old vanished from org org-team')
+		]);
+	} finally {
+		error.mockRestore();
+		await testDb().client.execute('DROP TRIGGER swallow_promotion');
+	}
+	// Everything rolled back: no promotion, no tombstone, org intact.
+	expect((await teamMemberships('org-team')).find((m) => m.userId === 'admin-old')).toMatchObject({ role: 'admin' });
+	expect(await userRow(userId)).toMatchObject({ googleSub: 'sub-gone' });
+});
+
+test('deleteUserRecords refuses when the personal org has no membership row at all', async () => {
+	// The COUNT half of the guard: personal_for points at an org the user has
+	// NO membership in — deleting would orphan the org. `.some()` on an EMPTY
+	// member list is vacuously false, so only the length mismatch catches this.
+	const userId = await seedUser('gone');
+	await testDb()
+		.db.delete(memberships)
+		.where(and(eq(memberships.userId, userId), eq(memberships.orgId, 'org-gone')));
+
+	await expect(deleteUserRecords(userId)).rejects.toThrow('personal organization has other members');
+
+	// Nothing was erased: no tombstone, the org and its channel survive.
+	expect(await userRow(userId)).toMatchObject({ googleSub: 'sub-gone' });
+	expect(await testDb().db.select().from(organizations).all()).toHaveLength(1);
+	expect(await testDb().db.select().from(channels).all()).toHaveLength(1);
+});
+
+test('deleteUserRecords never promotes a successor when the departing user was not an owner', async () => {
+	// Succession is owner-triggered ONLY: a plain member leaving an org that has
+	// no owner (data bug) must change nothing but their own membership — never
+	// crown a successor they had no authority to name.
+	const userId = await seedUser('gone');
+	await seedBareUser('alice');
+	await seedBareUser('bob');
+	await seedSharedOrg('org-team', [
+		{ userId: 'alice', role: 'member', joinedAt: '2026-01-01T00:00:00.000Z' },
+		{ userId: 'bob', role: 'member', joinedAt: '2026-01-02T00:00:00.000Z' },
+		{ userId, role: 'member', joinedAt: '2026-01-03T00:00:00.000Z' }
+	]);
+
+	const logs = await deleteWithSuccessionLogs(userId);
+
+	await expectOrgRoles('org-team', [
+		{ userId: 'alice', role: 'member' },
+		{ userId: 'bob', role: 'member' }
+	]);
+	expect(logs).toEqual([]);
+});
+
 test('nullExpiredConsentEmails erases only the e-mail of consents older than 10 years', async () => {
 	await seedUser('old');
 	const oldDate = new Date(Date.now() - CONSENT_EMAIL_RETENTION_MS - DAY_MS).toISOString();

@@ -16,14 +16,14 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { makeCookies } from '$lib/server/testcookies';
 import { sessions, users } from '$lib/server/db/schema';
 import { createSession, SESSION_COOKIE } from '$lib/server/session';
 
-import { actions } from './+page.server';
+import { actions, load } from './+page.server';
 
 setupTestDb(['sessions', 'users']);
 
@@ -74,4 +74,88 @@ test('logout destroys the session row and clears the cookie', async () => {
 	expect(cookies.get(SESSION_COOKIE)).toBeUndefined();
 	const remaining = await testDb().db.select().from(sessions);
 	expect(remaining).toHaveLength(0);
+});
+
+test('GET /logout always redirects to the login page', () => {
+	// Logout is a form post; a plain GET (bookmark, prefetch, history nav) must
+	// never render a page — it bounces to /login.
+	let thrown: unknown;
+	try {
+		load({} as Parameters<typeof load>[0]);
+	} catch (e) {
+		thrown = e;
+	}
+	expect(thrown).toMatchObject({ status: 302, location: '/login' });
+});
+
+test('logout with no session cookie clears and redirects without a session sweep', async () => {
+	// Nothing in the jar means destroySession must not run at all — an
+	// unconditional sweep would hit the database with an undefined token and
+	// the logout would fail instead of redirecting.
+	const cookies = makeCookies();
+
+	const thrown = await captureLogout(cookies, OWNER);
+
+	expect(thrown).toMatchObject({ status: 302, location: '/login' });
+	expect(cookies.deleteCalls).toEqual([{ name: SESSION_COOKIE, opts: { path: '/' } }]);
+});
+
+/** Makes the next (and every) session-row DELETE fail until restored. */
+async function breakSessionDeletes() {
+	await testDb().client.execute(
+		`CREATE TRIGGER mt_fail_session_delete BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT, 'simulated session store outage'); END`
+	);
+}
+
+async function restoreSessionDeletes() {
+	await testDb().client.execute('DROP TRIGGER mt_fail_session_delete');
+}
+
+test('logout rethrows a session sweep failure outside an outage — cookie stays, no redirect', async () => {
+	await testDb().db.insert(users).values({ id: OWNER.id, googleSub: 'sub-1', email: OWNER.email, displayName: OWNER.displayName });
+	const { token } = await createSession(OWNER.id);
+	const cookies = makeCookies();
+	cookies.set(SESSION_COOKIE, token, { path: '/' });
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	await breakSessionDeletes();
+	try {
+		const thrown = await captureLogout(cookies, OWNER);
+
+		expect(thrown).toBeInstanceOf(Error);
+		expect((thrown as unknown as Error).message).toContain('Failed query');
+		expect(thrown).not.toMatchObject({ status: 302 });
+		expect(cookies.deleteCalls).toHaveLength(0);
+		expect(cookies.get(SESSION_COOKIE)).toBe(token);
+		expect(errorSpy).not.toHaveBeenCalled();
+		const remaining = await testDb().db.select().from(sessions);
+		expect(remaining).toHaveLength(1);
+	} finally {
+		errorSpy.mockRestore();
+		await restoreSessionDeletes();
+	}
+});
+
+test('logout during an outage swallows a session sweep failure — loudly — and still signs out', async () => {
+	// A real session row is needed so the failing sweep actually runs — a
+	// DELETE that matches zero rows never touches the broken store.
+	await testDb().db.insert(users).values({ id: OWNER.id, googleSub: 'sub-1', email: OWNER.email, displayName: OWNER.displayName });
+	const { token } = await createSession(OWNER.id);
+	const cookies = makeCookies();
+	cookies.set(SESSION_COOKIE, token, { path: '/' });
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	await breakSessionDeletes();
+	try {
+		const thrown = await captureLogout(cookies, null, true);
+
+		expect(thrown).toMatchObject({ status: 302, location: '/login' });
+		expect(cookies.deleteCalls).toEqual([{ name: SESSION_COOKIE, opts: { path: '/' } }]);
+		expect(errorSpy).toHaveBeenCalledTimes(1);
+		expect(errorSpy).toHaveBeenCalledWith(
+			'logout during outage could not destroy the session row:',
+			expect.any(Error)
+		);
+	} finally {
+		errorSpy.mockRestore();
+		await restoreSessionDeletes();
+	}
 });

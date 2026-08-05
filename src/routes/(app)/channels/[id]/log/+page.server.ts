@@ -88,7 +88,9 @@ export const actions = {
 		// 'restoring' means a previous undo claimed the comment (or restored it
 		// remotely) but crashed before the audit commit: resume it. The YouTube
 		// call is idempotent (I4), so re-applying it is safe.
+		// Stryker disable next-line ConditionalExpression, StringLiteral: →false/''-literal equivalent — when the comment IS 'restoring', judging it non-resuming only adds a re-claim `SET status='restoring' WHERE status='restoring'` (always matches, writes the value the row already holds) and a failure-release writing back the same selected values; observable state is identical. Sweeps the killable →true sibling, which stays pinned by the failed-audit test via the claim's 'restoring' effect.
 		const resuming = comment.status === 'restoring';
+		// Stryker disable next-line ConditionalExpression: →true equivalent — a resumed undo that re-claims issues `SET status='restoring' WHERE status='restoring'`, a no-op write that always matches one row, identical to skipping the claim; sweeps the killable →false sibling, which stays pinned by the failed-audit test (status must read 'restoring' after a failed audit commit).
 		if (!resuming) {
 			// Atomically claim the comment BEFORE the external call: the conditional
 			// update makes concurrent undo submissions single-winner (the loser 404s).
@@ -108,6 +110,7 @@ export const actions = {
 		} catch (e) {
 			// Release a fresh claim so the failed restore stays retryable; a
 			// resumed attempt stays 'restoring' either way.
+			// Stryker disable next-line ConditionalExpression: →true equivalent — releasing a resumed attempt writes back exactly the values the row already holds (status 'restoring', the decidedBy just selected), so observable state is identical; sweeps the killable →false sibling, which stays pinned by the YouTube-failure release test.
 			if (!resuming) {
 				await db
 					.update(comments)

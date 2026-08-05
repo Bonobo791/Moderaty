@@ -79,21 +79,23 @@ async function captureAction(cookies: ReturnType<typeof makeCookies>, channelId:
 }
 
 test('load without a state param fails loudly with 400', async () => {
-	try {
-		await loadWith(cookiesWithPick(), null);
-		expect.unreachable('load should fail');
-	} catch (e) {
-		expect(e).toMatchObject({ status: 400 });
-	}
+	await expect(loadWith(cookiesWithPick(), null)).rejects.toMatchObject({
+		status: 400,
+		body: { message: 'missing state — restart the channel connection from the dashboard' }
+	});
 });
 
 test('load without a parked pick fails loudly with 400', async () => {
-	try {
-		await loadWith(makeCookies());
-		expect.unreachable('load should fail');
-	} catch (e) {
-		expect(e).toMatchObject({ status: 400 });
-	}
+	await expect(loadWith(makeCookies())).rejects.toMatchObject({
+		status: 400,
+		body: { message: 'this channel selection expired — reconnect the channel from the dashboard' }
+	});
+});
+
+test('load rejects a team member — connecting channels is admin+ only', async () => {
+	await expect(
+		loadWith(cookiesWithPick(), 's', { ...OWNER, orgRole: 'member' })
+	).rejects.toMatchObject({ status: 403 });
 });
 
 test('load returns the parked channels without ever exposing the refresh token', async () => {
@@ -131,7 +133,10 @@ test('choosing a parked channel connects it, encrypts the token, and consumes th
 test('a channel id that was never parked fails loudly with 400 and writes nothing', async () => {
 	const res = await captureAction(cookiesWithPick(), 'UC-FORGED');
 
-	expect(res).toMatchObject({ status: 400 });
+	expect(res).toMatchObject({
+		status: 400,
+		data: { error: 'Unknown channel — pick one of the listed channels.' }
+	});
 	expect(await testDb().db.select().from(channels).all()).toHaveLength(0);
 });
 
@@ -141,7 +146,10 @@ test('a replayed state after a successful pick fails loudly with 400', async () 
 
 	const res = await captureAction(cookies, 'UC2');
 
-	expect(res).toMatchObject({ status: 400 });
+	expect(res).toMatchObject({
+		status: 400,
+		data: { error: 'This channel selection expired — reconnect the channel from the dashboard.' }
+	});
 	expect(await testDb().db.select().from(channels).all()).toHaveLength(1);
 });
 
@@ -152,7 +160,10 @@ test('a parked channel owned by another team yields 409 and stays unchanged', as
 
 	const res = await captureAction(cookiesWithPick(), 'UC2');
 
-	expect(res).toMatchObject({ status: 409 });
+	expect(res).toMatchObject({
+		status: 409,
+		data: { error: 'This channel is connected to a different Moderaty team.' }
+	});
 	const row = await testDb().db.select().from(channels).get();
 	expect(row).toMatchObject({ id: 'UC2', userId: 'user-2', orgId: 'org-2', refreshTokenEnc: 'foreign-enc' });
 });

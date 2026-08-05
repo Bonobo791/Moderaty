@@ -80,6 +80,7 @@ async function guard<T>(fn: () => Promise<T>): Promise<T | ActionFailure<{ error
 	} catch (e) {
 		const status = (e as { status?: number }).status;
 		const message = (e as { body?: { message?: string } }).body?.message;
+		// Stryker disable next-line LogicalOperator, ConditionalExpression: guard wraps only org.ts calls, which throw SvelteKit HttpError (numeric status and non-empty body.message always travel together) or raw errors carrying neither — so &&→|| and a dropped typeof check agree with the real condition on every reachable error. NOTE: also sweeps this line's two whole-condition true/false mutants; that behavior is pinned by the guard-rethrow and wrapped-failure tests (verified killed pre-exclusion).
 		if (typeof status === 'number' && message) return fail(status, { error: message });
 		throw e;
 	}
@@ -108,6 +109,7 @@ export const actions: Actions = {
 	revokeInvite: async ({ request, locals }) => {
 		const user = requireUser(locals);
 		requireOrgRole(user, 'admin');
+		// Stryker disable next-line StringLiteral: '' is never a stored invite token (randomBytes(32) hex), so a missing token field and any nonexistent token take the identical 404 'invite not found' path. NOTE: also sweeps the 'token' field-name mutant on this line (pinned by the owner-revokes test, verified killed pre-exclusion).
 		const token = String((await request.formData()).get('token') ?? '');
 		return guard(() => revokeInvite(user.id, token));
 	},
@@ -115,6 +117,7 @@ export const actions: Actions = {
 		const user = requireUser(locals);
 		requireOrgRole(user, 'owner');
 		const form = await request.formData();
+		// Stryker disable next-line StringLiteral: '' is never a users.id (generated non-empty), so a missing userId field and any nonexistent id miss the membership lookup identically (404 'member not found'). NOTE: also sweeps the 'userId' field-name mutant on this line (pinned by the setRole tests, verified killed pre-exclusion).
 		const targetUserId = String(form.get('userId') ?? '');
 		const role = String(form.get('role') ?? '') as OrgRole;
 		return guard(() => setMemberRole(user.id, user.orgId, targetUserId, role));
@@ -122,6 +125,7 @@ export const actions: Actions = {
 	remove: async ({ request, locals }) => {
 		const user = requireUser(locals);
 		requireOrgRole(user, 'admin');
+		// Stryker disable next-line StringLiteral: '' is never a users.id (generated non-empty), so a missing userId field and any nonexistent id miss the membership lookup identically (404 'member not found'). NOTE: also sweeps the 'userId' field-name mutant on this line (pinned by the remove tests, verified killed pre-exclusion).
 		const targetUserId = String((await request.formData()).get('userId') ?? '');
 		return guard(() => removeMember(user.id, user.orgId, targetUserId));
 	},
@@ -140,6 +144,7 @@ export const actions: Actions = {
 	setOpenAiKey: async ({ request, locals }) => {
 		const user = requireUser(locals);
 		requireOrgRole(user, 'owner');
+		// Stryker disable next-line StringLiteral: a missing openAiKey field ('') and any placeholder without the sk- prefix fail the identical startsWith('sk-') 400 check. NOTE: also sweeps the 'openAiKey' field-name mutant on this line (pinned by the setOpenAiKey tests, verified killed pre-exclusion).
 		const key = String((await request.formData()).get('openAiKey') ?? '').trim();
 		if (!key.startsWith('sk-') || key.length > 200)
 			return fail(400, { error: 'Enter a valid OpenAI API key (it starts with sk-).' });

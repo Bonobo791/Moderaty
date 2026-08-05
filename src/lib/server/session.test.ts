@@ -17,13 +17,18 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { eq } from 'drizzle-orm';
-import { expect, test } from 'vitest';
+import { afterEach, expect, test, vi } from 'vitest';
 
 import { setupTestDb, testDb } from './testdb';
 import { memberships, organizations, sessions, users } from './db/schema';
-import { createSession, destroySession, getSessionUser, SESSION_TTL_MS } from './session';
+import { createSession, destroySession, getSessionUser, requireUser, SESSION_TTL_MS } from './session';
 
 setupTestDb(['sessions', 'memberships', 'organizations', 'users']);
+
+afterEach(() => {
+	vi.useRealTimers();
+	vi.restoreAllMocks();
+});
 
 async function seedUser(id = 'user-1') {
 	await testDb().db.insert(users).values({ id, googleSub: `sub-${id}`, email: `${id}@example.com`, displayName: id });
@@ -284,4 +289,90 @@ test('tenancy audit seed: renewing and repairing user A\'s session never touches
 	// B's row: byte-identical.
 	const bAfter = await testDb().db.select().from(sessions).where(eq(sessions.id, 'token-b')).get();
 	expect({ id: bAfter?.id, userId: bAfter?.userId, expiresAt: bAfter?.expiresAt, activeOrgId: bAfter?.activeOrgId }).toEqual(bRow);
+});
+
+test('a session expiring at exactly now is already expired', async () => {
+	// Boundary audit (expiresMs <= Date.now()): at expiresMs == Date.now() the
+	// session is dead. A `<` here would let a zero-lifetime session resolve and
+	// immediately renew itself back to a full 30 days — fail-open at the edge.
+	vi.useFakeTimers({ toFake: ['Date'] });
+	const userId = await seedUser();
+	await testDb().db.insert(sessions).values({ id: 'edge-token', userId, expiresAt: new Date(Date.now()).toISOString() });
+
+	expect(await getSessionUser('edge-token')).toBeNull();
+	expect(await testDb().db.select().from(sessions).all()).toEqual([]);
+});
+
+test('a session with exactly 15 days remaining is NOT yet renewed', async () => {
+	// Boundary audit (remaining < RENEW_BELOW_MS): exactly half the TTL left is
+	// still outside the renewal window. A `<=` here renews a day-15 session on
+	// every read, sliding its expiry on every single request.
+	vi.useFakeTimers({ toFake: ['Date'] });
+	const userId = await seedUser();
+	const halfTtlExpiry = new Date(Date.now() + SESSION_TTL_MS / 2).toISOString();
+	await testDb().db.insert(sessions).values({ id: 'half-token', userId, expiresAt: halfTtlExpiry });
+
+	const result = await getSessionUser('half-token');
+
+	expect(result?.renewed).toBe(false);
+	expect(result?.expiresAt).toBe(halfTtlExpiry);
+	const row = await testDb().db.select().from(sessions).where(eq(sessions.id, 'half-token')).get();
+	expect(row?.expiresAt).toBe(halfTtlExpiry);
+});
+
+test('resolving a session with active_org_id NULL never writes an org onto the row', async () => {
+	// Mutation audit (the L118 repair guard): the repair UPDATE must run only
+	// when the session HAD an active org that fell back. A session created
+	// org-less must stay org-less — an unconditional repair would pin every
+	// NULL-active-org session to the oldest org, freezing the team's ability
+	// to leave the session "unset" after leaveOrg clears it.
+	const userId = await seedUser();
+	const { token } = await createSession(userId); // activeOrgId null
+
+	const result = await getSessionUser(token);
+	expect(result?.user.orgId).toBe('org-user-1');
+
+	const row = await testDb().db.select().from(sessions).where(eq(sessions.id, token)).get();
+	expect(row?.activeOrgId).toBeNull();
+});
+
+test('an intact active org triggers no fallback repair and no repair log', async () => {
+	// Mutation audit (`&&` → `||` on the repair guard): when the session's
+	// active org still has the user's membership there is no fallback, so no
+	// repair log may fire and the row must come out untouched.
+	const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+	const userId = await seedUser();
+	const { token } = await createSession(userId, undefined, 'org-user-1');
+
+	const result = await getSessionUser(token);
+	expect(result?.user.orgId).toBe('org-user-1');
+
+	expect(infoSpy).not.toHaveBeenCalled();
+	const row = await testDb().db.select().from(sessions).where(eq(sessions.id, token)).get();
+	expect(row?.activeOrgId).toBe('org-user-1');
+});
+
+test('requireUser returns the signed-in user unchanged', () => {
+	const user = {
+		id: 'user-1',
+		email: 'user-1@example.com',
+		displayName: 'user-1',
+		plan: 'pro',
+		orgId: 'org-user-1',
+		orgName: 'user-1',
+		orgRole: 'owner' as const
+	};
+
+	expect(requireUser({ user })).toBe(user);
+});
+
+test('requireUser throws a 401 with the exact sign-in message when signed out', () => {
+	// The message is user-facing (hooks renders HttpError bodies); a blanked
+	// message would ship an empty 401 page.
+	try {
+		requireUser({ user: null });
+		expect.unreachable('requireUser must throw when locals.user is null');
+	} catch (e) {
+		expect(e).toMatchObject({ status: 401, body: { message: 'sign-in required' } });
+	}
 });

@@ -64,8 +64,14 @@ test('a signed-in user whose consent predates the current LEGAL_VERSION is sent 
 test('a signed-in user with a current consent row loads normally', async () => {
 	await seedOwnerOrg();
 	await seedConsent(TEST_OWNER.id, undefined, LEGAL_VERSION);
-	const data = (await captureLoad(TEST_OWNER)) as { orgs: unknown[] };
+	const data = (await captureLoad(TEST_OWNER)) as {
+		orgs: unknown[];
+		maintenance: boolean;
+		user: unknown;
+	};
 	expect(data.orgs).toHaveLength(1);
+	expect(data.maintenance).toBe(false);
+	expect(data.user).toMatchObject({ id: TEST_OWNER.id });
 });
 
 test('a signed-out visitor is still redirected to /login', async () => {

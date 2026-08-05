@@ -23,6 +23,7 @@ vi.mock('$env/dynamic/private', () => ({
 }));
 
 import { scoreTone } from './tone';
+import { LGBTQIA_PROTECTION_SECTION, TONE_PROMPT } from './tonePrompt.js';
 
 const CONTEXT = { videoTitle: 'My video', videoDescription: 'A video about things' };
 
@@ -123,4 +124,44 @@ test('wraps user content in unique per-request delimiters marked as untrusted (p
 	expect(open).toBeGreaterThanOrEqual(0);
 	expect(injected).toBeGreaterThan(open);
 	expect(injected).toBeLessThan(close);
+});
+
+test('an enabled LGBTQIA+ protection appends that section only; the base rubric stays byte-identical', async () => {
+	const fetch = vi.fn().mockResolvedValue(chatResponse('{"score": 0.5}'));
+	vi.stubGlobal('fetch', fetch);
+
+	await scoreTone('a comment', CONTEXT, undefined, { protectLgbtqia: 1, protectWomen: 0 });
+
+	const body = JSON.parse(String(fetch.mock.calls[0]?.[1]?.body));
+	const system = body.messages.find((message: { role: string }) => message.role === 'system')?.content;
+	expect(system).toContain('Identity protection — LGBTQIA+ people');
+	expect(system).not.toContain('Identity protection — women');
+	// No calibration drift: the prompt is the base rubric plus exactly one
+	// appended section, never a rewritten rubric.
+	expect(system.startsWith(TONE_PROMPT)).toBe(true);
+	expect(system).toContain(`${TONE_PROMPT}\n\n${LGBTQIA_PROTECTION_SECTION}`);
+});
+
+test('both protections enabled append both sections', async () => {
+	const fetch = vi.fn().mockResolvedValue(chatResponse('{"score": 0.5}'));
+	vi.stubGlobal('fetch', fetch);
+
+	await scoreTone('a comment', CONTEXT, undefined, { protectLgbtqia: 1, protectWomen: 1 });
+
+	const body = JSON.parse(String(fetch.mock.calls[0]?.[1]?.body));
+	const system = body.messages.find((message: { role: string }) => message.role === 'system')?.content;
+	expect(system).toContain('Identity protection — LGBTQIA+ people');
+	expect(system).toContain('Identity protection — women');
+});
+
+test('no protections sends the byte-identical base prompt (no calibration drift)', async () => {
+	const fetch = vi.fn().mockResolvedValue(chatResponse('{"score": 0.5}'));
+	vi.stubGlobal('fetch', fetch);
+
+	await scoreTone('a comment', CONTEXT);
+
+	const body = JSON.parse(String(fetch.mock.calls[0]?.[1]?.body));
+	const system = body.messages.find((message: { role: string }) => message.role === 'system')?.content;
+	expect(system.startsWith(TONE_PROMPT)).toBe(true);
+	expect(system).not.toContain('Identity protection');
 });

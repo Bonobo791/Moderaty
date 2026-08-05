@@ -62,7 +62,7 @@ test('the tone rubric lives in one shared module imported by both tone.ts and th
 	expect(TONE_PROMPT).toContain('0.76-0.94');
 	expect(TONE_PROMPT).toContain('lol are you kidding? This is it? Not a great video.');
 	const toneSource = readFileSync(new URL('../src/lib/server/tone.ts', import.meta.url), 'utf8');
-	expect(toneSource).toMatch(/import \{ TONE_PROMPT \} from '\$lib\/server\/tonePrompt'/);
+	expect(toneSource).toMatch(/import \{ (TONE_PROMPT|buildTonePrompt) \} from '\$lib\/server\/tonePrompt'/);
 	expect(toneSource).not.toContain('const TONE_PROMPT');
 	const scriptSource = readFileSync(new URL('./tone-eval.mjs', import.meta.url), 'utf8');
 	expect(scriptSource).toMatch(/from '\.\.\/src\/lib\/server\/tonePrompt\.js'/);

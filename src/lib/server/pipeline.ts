@@ -24,7 +24,7 @@ import { auditLog, channels, comments, moderationActions, rules } from '$lib/ser
 import { assertBeforeDeadline, DeadlineExceededError } from '$lib/server/http';
 import { scoreComment, serializeScores } from '$lib/server/moderation';
 import { matchPreparedRule, prepareRules, type PreparedRule, type RuleAction } from '$lib/server/rules';
-import { scoreTone, type ToneContext } from '$lib/server/tone';
+import { scoreTone, type ToneContext, type ToneProtections } from '$lib/server/tone';
 import {
 	deleteComment,
 	fetchNewComments,
@@ -158,7 +158,12 @@ function aiOutcome(comment: NewComment, aiScore: string | null, signal: 'ai' | '
 	return { comment, status: 'approved', decidedBy: 'ai', matchedRuleId: null, aiScore, auditAction: 'approve', reason, youtubeAction: null };
 }
 
-async function aiDecision(comment: NewComment, tone: { context: ToneContext } | null, deadline?: number): Promise<Decision> {
+async function aiDecision(
+	comment: NewComment,
+	tone: { context: ToneContext } | null,
+	deadline: number | undefined,
+	protections: ToneProtections
+): Promise<Decision> {
 	let moderation: Awaited<ReturnType<typeof scoreComment>>;
 	try {
 		moderation = await scoreComment(comment.text, deadline);
@@ -177,7 +182,7 @@ async function aiDecision(comment: NewComment, tone: { context: ToneContext } | 
 	if (tone) {
 		let toneScore: number;
 		try {
-			toneScore = Math.round((await scoreTone(comment.text, tone.context, deadline)).score * 100) / 100;
+			toneScore = Math.round((await scoreTone(comment.text, tone.context, deadline, protections)).score * 100) / 100;
 		} catch (error) {
 			return aiUnavailable(comment, error);
 		}
@@ -190,10 +195,11 @@ async function decide(
 	comment: NewComment,
 	rules: PreparedRule[],
 	tone: { context: ToneContext } | null,
-	deadline?: number
+	deadline: number | undefined,
+	protections: ToneProtections
 ): Promise<Decision> {
 	const rule = matchPreparedRule(comment.text, comment.authorChannelId, rules);
-	return rule ? ruleDecision(comment, rule) : aiDecision(comment, tone, deadline);
+	return rule ? ruleDecision(comment, rule) : aiDecision(comment, tone, deadline, protections);
 }
 
 function auditRows(channelId: string, decisions: Decision[], dryRun: boolean) {
@@ -249,7 +255,12 @@ function actionRows(channelId: string, decisions: Decision[]) {
 async function decideNewComments(
 	channelId: string,
 	page: CommentPage,
-	{ accessToken, toneLevel, deadline }: { accessToken: string; toneLevel: number; deadline?: number }
+	{
+		accessToken,
+		toneLevel,
+		protections,
+		deadline
+	}: { accessToken: string; toneLevel: number; protections: ToneProtections; deadline?: number }
 ): Promise<{ decisions: Decision[]; failures: string[] }> {
 	const existingIds = new Set(
 		page.comments.length
@@ -279,10 +290,13 @@ async function decideNewComments(
 	// (and comments carrying no videoId at all) score with empty context
 	// (best-effort). If the videos.list call itself fails, the tone pass cannot
 	// run — every new comment lands in the human queue (I11) rather than
-	// aborting the batch or silently scoring omni-only.
+	// aborting the batch or silently scoring omni-only. A ticked protection
+	// flag forces the tone pass on even below level 2: the channel owner asked
+	// for heightened scrutiny, so the checkbox must never be a silent no-op.
+	const toneEnabled = toneLevel >= 2 || Boolean(protections.protectLgbtqia) || Boolean(protections.protectWomen);
 	let videoContext: Awaited<ReturnType<typeof fetchVideoMetadata>> | null = null;
 	let metadataError: unknown = null;
-	if (toneLevel >= 2 && newComments.length) {
+	if (toneEnabled && newComments.length) {
 		videoContext = new Map();
 		const videoIds = [...new Set(newComments.map((comment) => comment.videoId).filter((id): id is string => id !== null))];
 		if (videoIds.length) {
@@ -302,7 +316,7 @@ async function decideNewComments(
 				const tone = videoContext
 					? { context: { videoTitle: meta?.title ?? '', videoDescription: meta?.description ?? '' } }
 					: null;
-				return await decide(comment, rulesForChannel, tone, deadline);
+				return await decide(comment, rulesForChannel, tone, deadline, protections);
 			} catch (error) {
 				if (error instanceof DeadlineExceededError) throw error;
 				throw new Error(`comment ${comment.id}: ${error instanceof Error ? error.message : String(error)}`);
@@ -539,6 +553,10 @@ export async function runChannel(
 		const { decisions, failures } = await decideNewComments(channelId, page, {
 			accessToken,
 			toneLevel: channel.toneLevel ?? 1,
+			protections: {
+				protectLgbtqia: channel.protectLgbtqia ?? 0,
+				protectWomen: channel.protectWomen ?? 0
+			},
 			deadline
 		});
 		queued = decisions.filter((decision) => decision.auditAction === 'queue').length;

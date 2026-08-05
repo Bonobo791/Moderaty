@@ -461,3 +461,49 @@ describe('AI-cost claims match implementation', () => {
 		}
 	});
 });
+
+// Lifetime BYOK claims removed: there is no per-account key flow — hosted
+// scoring (lifetime included) runs on the deployment's env.OPENAI_API_KEY
+// (moderation.ts, tone.ts), so "lifetime buyers score on their own account"
+// and "we never see the key" were false for hosted buyers. BYOK claims may
+// only appear where they are true: the self-hosted tier. Restore the lifetime
+// claims only when the per-account key flow ships.
+describe('lifetime BYOK claims match the missing key flow', () => {
+	const lifetimeSurfaces: Record<string, string> = {
+		PlanLifetime: readFileSync(
+			new URL('../components/landing/PlanLifetime.svelte', import.meta.url),
+			'utf8'
+		),
+		'homepage pricing section': readFileSync(
+			new URL('../components/landing/Pricing.svelte', import.meta.url),
+			'utf8'
+		),
+		'pricing page meta': readRoute('pricing', '+page.svelte')
+	};
+
+	it('no surface ties the lifetime plan to BYOK or a buyer-owned key', () => {
+		const RETIRED = [/lifetime[^.]*BYOK|BYOK[^.]*lifetime/i, /lifetime[^.;]*own OpenAI key/i];
+		for (const [name, text] of Object.entries(lifetimeSurfaces)) {
+			for (const pattern of RETIRED) {
+				expect(text, `${name} still sells lifetime BYOK: ${pattern}`).not.toMatch(pattern);
+			}
+		}
+		const lifetimeTicks = readFileSync(new URL('./plans.ts', import.meta.url), 'utf8');
+		expect(lifetimeTicks).not.toMatch(/Your OpenAI key, your model cost/);
+		const lifetimeFaq = PRICING_FAQ_ENTRIES.find((f) => f.q === 'What is the $49 lifetime deal?');
+		expect(lifetimeFaq?.a).not.toMatch(/own OpenAI key/i);
+	});
+
+	it('Terms §6.1 clause (c) no longer promises lifetime buyers their own key', () => {
+		const terms = readComponent('terms');
+		const s61 = terms.slice(terms.indexOf('<strong>6.1</strong>'));
+		expect(s61.slice(0, s61.indexOf('</p>'))).not.toMatch(/\(c\)[^;]*OpenAI key/i);
+	});
+
+	it('the BYOK FAQ answer is scoped to self-hosting, where the claim is true', () => {
+		const byok = PRICING_FAQ_ENTRIES.find((f) => f.q === 'What does BYOK mean?');
+		expect(byok, 'BYOK FAQ entry missing').toBeDefined();
+		expect(byok?.a).toMatch(/self-host/i);
+		expect(byok?.a).not.toMatch(/lifetime/i);
+	});
+});

@@ -51,9 +51,10 @@ set cannot express — is documented in the skill and must be justified in the
 PR). StrykerJS: `@stryker-mutator/core` +
 `@stryker-mutator/vitest-runner`, configured by `stryker.config.json` at the
 repo root (`npx stryker run` for whole-module audits, a scoped `--mutate`
-glob or a git-diff-driven scope for PR-scale work — StrykerJS has no
-`--since` flag, that is Stryker.NET; scope PR work with
-`git diff --name-only main...HEAD` piped into `--mutate`,
+glob or `node scripts/stryker-pr-scope.mjs` for PR-scale work — StrykerJS
+has no `--since` flag, that is Stryker.NET; the script prints the changed
+src files as a `--mutate` scope, filtered like the config, and an empty
+result means skip the run),
 `npx stryker run --incremental` to reuse the cache; the `json`
 reporter in config gives machine-readable survivors for the agent loop). In
 a fresh checkout or worktree run `npx svelte-kit sync` first — Stryker's

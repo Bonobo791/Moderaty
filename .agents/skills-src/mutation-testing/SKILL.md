@@ -65,7 +65,7 @@ StrykerJS is the tool for every mutation run in this repo: `@stryker-mutator/cor
 
 - Fresh checkout or worktree: run `npx svelte-kit sync` first. Stryker's vitest runner needs the generated `.svelte-kit/tsconfig.json`; without it the run crashes with a rolldown "Tsconfig not found" error.
 - Scoped audit: `npx stryker run --mutate "src/lib/server/<module>.ts"` (plus `--reporters clear-text` for terminal-only output).
-- PR-scale: a git-diff-driven `--mutate` scope — StrykerJS has NO `--since` flag (that is Stryker.NET): `npx stryker run --mutate "$(git diff --name-only main...HEAD | grep -E '^src/.+\.ts$' | grep -v '\.test\.ts$' | paste -sd, -)"`.
+- PR-scale: a git-diff-driven `--mutate` scope — StrykerJS has NO `--since` flag (that is Stryker.NET). Use the shared scope script (same filter as CI — CLI `--mutate` OVERRIDES the config's mutate globs): `SCOPE=$(node scripts/stryker-pr-scope.mjs)` then `npx stryker run --mutate "$SCOPE"`. An empty `$SCOPE` means no mutable src files changed — skip the run, never pass `--mutate ""`.
 - Repeat runs: the config's `incremental: true` already caches; `--incremental` forces it on the CLI.
 - CI: `.github/workflows/mutation.yml` runs a report-only pass over the PR's changed source files and uploads the HTML/JSON report as an artifact. It never fails on survivors.
 - Verify survivors by hand before writing kill tests — the score is a lead, not a verdict.

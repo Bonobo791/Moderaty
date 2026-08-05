@@ -65,15 +65,16 @@ jobs:
             stryker-incremental-main
             stryker-incremental-
 
-      # Scope the run to the src files this PR changes, filtered to the same
-      # set as the config's mutate globs (no tests, dev-seed, or legal pages).
-      # A docs-only PR produces an empty scope and the run is skipped loudly.
+      # Scope the run to the src files this PR changes, computed by the
+      # shared script so CI and the documented local commands cannot drift
+      # (CLI --mutate OVERRIDES the config's mutate globs). A docs-only PR
+      # produces an empty scope and the run is skipped loudly.
       - name: Compute changed source files
         id: scope
         run: |
-          FILES=$(git diff --name-only main...HEAD | grep -E '^src/.+\.ts$' | grep -vE '(\.test\.ts$|^src/lib/server/testuser\.ts$|^src/routes/(terms|privacy|dpa)/\+page\.ts$)' | paste -sd, - || true)
-          echo "mutate=$FILES" >> "$GITHUB_OUTPUT"
-          echo "Changed source files to mutate: ${FILES:-<none>}"
+          SCOPE=$(node scripts/stryker-pr-scope.mjs)
+          echo "mutate=$SCOPE" >> "$GITHUB_OUTPUT"
+          echo "Changed source files to mutate: ${SCOPE:-<none>}"
 
       - name: Stryker mutation report
         if: steps.scope.outputs.mutate != ''

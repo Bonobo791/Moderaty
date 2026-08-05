@@ -68,7 +68,7 @@ Levers that matter:
 
 - `coverageAnalysis: "perTest"` — the single biggest speedup; runs only tests covering each mutant. Never `"off"`.
 - `thresholds.break` — score below → exit 1 → CI gate. Set floor = current − buffer, ratchet up.
-- PR mode (changed files only): StrykerJS has NO `--since` flag (that is Stryker.NET) — drive `--mutate` from git: `npx stryker run --mutate "$(git diff --name-only main...HEAD | grep -E '^src/.+\.ts$' | grep -v '\.test\.ts$' | paste -sd, -)"`.
+- PR mode (changed files only): StrykerJS has NO `--since` flag (that is Stryker.NET) — drive `--mutate` from git: `npx stryker run --mutate "$(git diff --name-only main...HEAD | grep -E '^src/.+\.ts$' | grep -v '\.test\.ts$' | paste -sd, -)"`. Filter the diff to your mutate set (CLI `--mutate` OVERRIDES config globs) and skip the run when the scope comes back empty.
 - `npx stryker run --incremental` — caches results in `reports/stryker-incremental.json` (the default `incrementalFile`); cache that file in CI for reuse — committing it to the repo just adds bloat and merge noise. (`.stryker-tmp/` is the scratch sandbox dir, not the cache.)
 - `npx stryker run --mutate "src/billing/**/*.ts"` — scope hardening to one module.
 - `ignoreStatic: true` — skip mutants only executed at module load (large perf penalty, low value).

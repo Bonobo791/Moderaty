@@ -18,7 +18,7 @@
 
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { REFUND_NOTICE_TEXT } from '../server/legal';
+import { PRIVACY_NOTICE_TEXT, REFUND_NOTICE_TEXT } from '../server/legal';
 import { FAQ_ENTRIES } from './faq';
 import { LEGAL_DOCS, LEGAL_EFFECTIVE_DATE, LEGAL_VERSION } from './legal';
 import { PRICING_FAQ_ENTRIES } from './pricing-faq';
@@ -218,6 +218,27 @@ describe('storage claims match implementation (comment PII)', () => {
 		expect(readComponent('dpa')).toMatch(/user rules?/i);
 		const schema = readFileSync(new URL('../server/db/schema.ts', import.meta.url), 'utf8');
 		expect(schema).toMatch(/user rules?/i);
+	});
+
+	// Privacy marketing claims (homepage TrustBar, the LGPD FAQ answer, and the
+	// consent-page privacy notice) must be scoped to "what your account needs
+	// to run": account data IS stored while the account exists (Privacy §2), so
+	// an absolute zero-data claim would contradict the Policy.
+	it('user-data privacy claims are scoped to account needs, never absolute', () => {
+		const scopedSurfaces: Record<string, string> = {
+			TrustBar: readFileSync(new URL('../components/landing/TrustBar.svelte', import.meta.url), 'utf8'),
+			'FAQ LGPD answer': FAQ_ENTRIES.find((f) => f.q === 'Is Moderaty LGPD compliant?')?.a ?? '',
+			'consent privacy notice': PRIVACY_NOTICE_TEXT
+		};
+		for (const [name, text] of Object.entries(scopedSurfaces)) {
+			expect(text, `${name} must scope the claim to account needs`).toMatch(/account needs to run/i);
+			expect(text, `${name} makes an absolute zero-data claim`).not.toMatch(
+				/we (do not|don't) store/i
+			);
+			expect(text, `${name} makes an unqualified stores-nothing claim`).not.toMatch(
+				/stores? nothing about you\b(?![^.]*beyond)/i
+			);
+		}
 	});
 });
 

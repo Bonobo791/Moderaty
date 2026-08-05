@@ -31,7 +31,8 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		</ul>
 		<p class="microcopy">
 			Google asks for standard YouTube access, used only on your comments. Free and open source (AGPL). Dry-run mode proves it
-			before anything changes.
+			before anything changes. We keep no data on you beyond what your account needs to run, and nothing after you leave that
+			the LGPD does not require.
 		</p>
 	</div>
 </section>

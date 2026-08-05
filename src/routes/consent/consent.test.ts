@@ -46,6 +46,7 @@ import {
 	CONSENT_CHECKBOX_TEXT,
 	LEGAL_VERSION,
 	PENDING_CONSENT_COOKIE,
+	PRIVACY_NOTICE_TEXT,
 	REFUND_NOTICE_TEXT,
 	parkPendingConsent,
 	type PendingConsent
@@ -173,6 +174,19 @@ test('load also hands the page the refund notice, outside the evidentiary checkb
 	expect(REFUND_NOTICE_TEXT).not.toContain(CONSENT_CHECKBOX_TEXT);
 	const data = await loadConsent(cookiesWithPending(NEW_SUB), 'http://localhost/consent?state=state-1');
 	expect(data).toMatchObject({ refundText: REFUND_NOTICE_TEXT });
+});
+
+test('load hands every flow the privacy notice, and the page renders it', async () => {
+	// Same pattern as the refund notice: consumer-trust copy, kept OUT of
+	// CONSENT_CHECKBOX_TEXT so the evidentiary sentence never drifts.
+	expect(PRIVACY_NOTICE_TEXT).toContain('LGPD');
+	expect(PRIVACY_NOTICE_TEXT).not.toContain(CONSENT_CHECKBOX_TEXT);
+	const parked = await loadConsent(cookiesWithPending(NEW_SUB), 'http://localhost/consent?state=state-1');
+	expect(parked).toMatchObject({ privacyText: PRIVACY_NOTICE_TEXT });
+	await seedOwner();
+	const session = await loadConsent(makeCookies(), 'http://localhost/consent', true);
+	expect(session).toMatchObject({ privacyText: PRIVACY_NOTICE_TEXT });
+	expect(consentPage).toContain('data.privacyText');
 });
 
 test('load without a pending cookie redirects to /login', async () => {

@@ -28,6 +28,7 @@ import {
 	CONSENT_CHECKBOX_TEXT,
 	LEGAL_VERSION,
 	MARKETING_CHECKBOX_TEXT,
+	PRIVACY_NOTICE_TEXT,
 	REFUND_NOTICE_TEXT,
 	clearPendingConsent,
 	hasCurrentConsent,
@@ -48,7 +49,8 @@ export const load: PageServerLoad = async ({ cookies, url, locals }) => {
 			displayName: pending.kind === 'new' ? pending.displayName : null,
 			consentText: CONSENT_CHECKBOX_TEXT,
 			marketingText: MARKETING_CHECKBOX_TEXT,
-			refundText: REFUND_NOTICE_TEXT
+			refundText: REFUND_NOTICE_TEXT,
+			privacyText: PRIVACY_NOTICE_TEXT
 		};
 	}
 	// No parked identity: a signed-in user re-consents in place — the (app)
@@ -61,7 +63,8 @@ export const load: PageServerLoad = async ({ cookies, url, locals }) => {
 			displayName: null,
 			consentText: CONSENT_CHECKBOX_TEXT,
 			marketingText: MARKETING_CHECKBOX_TEXT,
-			refundText: REFUND_NOTICE_TEXT
+			refundText: REFUND_NOTICE_TEXT,
+			privacyText: PRIVACY_NOTICE_TEXT
 		};
 	}
 	// No parked identity for this flow — nothing to consent to; restart sign-in.

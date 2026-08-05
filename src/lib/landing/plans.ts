@@ -54,7 +54,7 @@ export const TICKS_HOSTED_DETAILED = [
 
 export const TICKS_LIFETIME = [
 	'One payment, hosted forever',
-	'Your OpenAI key, your model cost (usually $0)',
+	'Your OpenAI key, your model cost (near zero)',
 	'Unlimited moderated comments',
 	'Only the first 1,000 users'
 ];
@@ -62,7 +62,7 @@ export const TICKS_LIFETIME = [
 export const TICKS_LIFETIME_DETAILED = [
 	'Everything in hosted, minus the monthly bill',
 	'We run it, patch it, and keep it awake, forever',
-	'Bring your own OpenAI key: moderation stays free to run',
+	'Bring your own OpenAI key: moderation stays nearly free to run',
 	'Unlimited moderated comments, no meter',
 	'Capped at the first 1,000 users, then it is gone'
 ];

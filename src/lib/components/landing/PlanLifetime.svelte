@@ -26,7 +26,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <script lang="ts">
 	import PlanCard from './PlanCard.svelte';
-	import { LOGIN_URL, OPENAI_MODERATION_URL } from '$lib/landing/links';
+	import { LOGIN_URL, OPENAI_MODERATION_URL, OPENAI_PRICING_URL } from '$lib/landing/links';
 	import { TICKS_LIFETIME, TICKS_LIFETIME_DETAILED } from '$lib/landing/plans';
 
 	let { detailed = false }: { detailed?: boolean } = $props();
@@ -42,9 +42,10 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	ticks={detailed ? TICKS_LIFETIME_DETAILED : TICKS_LIFETIME}
 >
 	{#snippet body()}
-		Hosted forever for one payment. Bring your own OpenAI key — OpenAI's moderation endpoint is
-		<a href={OPENAI_MODERATION_URL} target="_blank" rel="noreferrer" class="inline-link">free to use</a>
-		— so after the $49 your running cost is likely zero. Unlimited comments, no meter.
+		Hosted forever for one payment. Bring your own OpenAI key: toxicity scoring rides OpenAI's
+		moderation endpoint, <a href={OPENAI_MODERATION_URL} target="_blank" rel="noreferrer" class="inline-link">free to use</a>,
+		and tone analysis runs on <a href={OPENAI_PRICING_URL} target="_blank" rel="noreferrer" class="inline-link">gpt-4.1-nano</a>, fractions of a cent per comment — so after the $49
+		your running cost is near zero. Unlimited comments, no meter.
 	{/snippet}
 	{#snippet cta()}
 		<a href={LOGIN_URL} class="btn-press primary-btn">Connect YouTube channel</a>

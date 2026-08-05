@@ -27,7 +27,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <script lang="ts">
 	import PlanCard from './PlanCard.svelte';
-	import { GITHUB_URL, OPENAI_MODERATION_URL } from '$lib/landing/links';
+	import { GITHUB_URL, OPENAI_MODERATION_URL, OPENAI_PRICING_URL } from '$lib/landing/links';
 	import { TICKS_SELF_HOSTED, TICKS_SELF_HOSTED_DETAILED } from '$lib/landing/plans';
 
 	let { detailed = false }: { detailed?: boolean } = $props();
@@ -43,9 +43,10 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	ticks={detailed ? TICKS_SELF_HOSTED_DETAILED : TICKS_SELF_HOSTED}
 >
 	{#snippet body()}
-		The whole product, AGPL-3.0. Bring your own OpenAI key. OpenAI's moderation endpoint is
-		<a href={OPENAI_MODERATION_URL} target="_blank" rel="noreferrer" class="inline-link">free to use</a>,
-		so protection runs on your hardware for nothing but electricity.
+		The whole product, AGPL-3.0. Bring your own OpenAI key: toxicity scoring rides OpenAI's
+		moderation endpoint, <a href={OPENAI_MODERATION_URL} target="_blank" rel="noreferrer" class="inline-link">free to use</a>,
+		and tone analysis runs on <a href={OPENAI_PRICING_URL} target="_blank" rel="noreferrer" class="inline-link">gpt-4.1-nano</a>, fractions of a cent per comment. Protection on your
+		hardware for electricity and pennies.
 	{/snippet}
 	{#snippet cta()}
 		<a href={GITHUB_URL} target="_blank" rel="noreferrer" class="btn-press ghost-btn">Self-host on GitHub</a>

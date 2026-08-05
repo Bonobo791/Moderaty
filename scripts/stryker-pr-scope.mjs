@@ -35,6 +35,8 @@
 //     npx stryker run --mutate "$SCOPE"
 
 import { execFile } from 'node:child_process';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -60,7 +62,10 @@ async function changedFiles(base) {
 	return stdout.split('\n').filter((line) => line.length > 0);
 }
 
-const isMain = process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href;
+// Filesystem-path comparison: building a URL from argv[1] by string
+// interpolation breaks on paths needing encoding ('#', spaces), silently
+// disabling the main block.
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1]);
 
 if (isMain) {
 	const base = process.argv[2] ?? 'main';

@@ -20,9 +20,19 @@
 // passing --mutate on the CLI OVERRIDES the config, so any file the filter
 // lets through gets mutated even if the config excludes it (PR #103 review).
 
+import { execFile } from 'node:child_process';
+import { copyFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+
 import { describe, expect, it } from 'vitest';
 
 import { scopeFromChangedFiles } from './stryker-pr-scope.mjs';
+
+const execFileAsync = promisify(execFile);
+const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 
 describe('scopeFromChangedFiles', () => {
 	it('keeps production TypeScript under src', () => {
@@ -63,5 +73,43 @@ describe('scopeFromChangedFiles', () => {
 	it('returns an empty scope for empty or fully-filtered diffs', () => {
 		expect(scopeFromChangedFiles([])).toBe('');
 		expect(scopeFromChangedFiles(['src/routes/terms/+page.ts', 'README.md'])).toBe('');
+	});
+});
+
+describe('CLI entry point', () => {
+	it('prints the scope when invoked with a relative path, as documented', async () => {
+		const { stdout: diff } = await execFileAsync('git', ['diff', '--name-only', 'HEAD~5...HEAD'], {
+			cwd: repoRoot
+		});
+		const expected = scopeFromChangedFiles(diff.split('\n').filter((line) => line.length > 0));
+
+		const { stdout } = await execFileAsync('node', ['scripts/stryker-pr-scope.mjs', 'HEAD~5'], {
+			cwd: repoRoot
+		});
+
+		expect(stdout).toBe(`${expected}\n`);
+	});
+
+	it('prints the scope even when its own path breaks naive URL construction', async () => {
+		// PR #103 review: the entry-point check compared import.meta.url against
+		// new URL(`file://${process.argv[1]}`) — a path containing '#' makes that
+		// URL parse the rest as a fragment, so the comparison failed and the
+		// script silently printed nothing.
+		const dir = mkdtempSync(join(tmpdir(), 'mt-scope-#'));
+		try {
+			const scriptPath = join(dir, 'stryker-pr-scope.mjs');
+			copyFileSync(fileURLToPath(new URL('./stryker-pr-scope.mjs', import.meta.url)), scriptPath);
+
+			const { stdout: diff } = await execFileAsync('git', ['diff', '--name-only', 'HEAD~5...HEAD'], {
+				cwd: repoRoot
+			});
+			const expected = scopeFromChangedFiles(diff.split('\n').filter((line) => line.length > 0));
+
+			const { stdout } = await execFileAsync('node', [scriptPath, 'HEAD~5'], { cwd: repoRoot });
+
+			expect(stdout).toBe(`${expected}\n`);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

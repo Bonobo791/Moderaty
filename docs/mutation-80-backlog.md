@@ -294,7 +294,11 @@ incremental cache each time):
 
 Full run of record: `npx stryker run --ignoreStatic --concurrency 1` (fresh
 incremental cache; concurrency 1 because batch C showed concurrency 4
-produces false survivors). Raw log: `reports/step7-final-run.log`.
+produces false survivors). The tracked evidence is
+`reports/mutation/mutation.html` (Stryker's HTML report of that run); the
+raw console log stays local — `reports/` is gitignored generated output,
+and the log also embeds workstation-absolute `file://` paths that do not
+belong in history (PR #118 review).
 
 **Outcome: every file in the mutate scope is at 100%** — 3366 mutants: 3359
 killed, 7 timed out, 0 survived, 0 no-coverage (score 100.00; run 21m33s).
@@ -330,7 +334,7 @@ Also in this batch:
 
 The program goal — ≥80% overall with 80–90%+ on critical paths — is met with
 headroom: the score of record is **100%** across the scope (see the per-file
-table in the run log; every row reads 100.00).
+table in `reports/mutation/mutation.html`; every row reads 100.00).
 
 ## Working rules for every batch
 

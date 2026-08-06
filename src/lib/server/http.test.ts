@@ -28,19 +28,47 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
-test('retries transient responses but not client errors', async () => {
-
+// Stubs fetch to respond with `first` once, then 200: the request must
+// succeed after exactly one retry. Returns the fetch call count.
+async function expectSingleRetry(first: Response): Promise<number> {
 	let calls = 0;
 	vi.stubGlobal('fetch', async () => {
 		calls++;
-		return calls === 1
-			? new Response('', { status: 429, headers: { 'Retry-After': '0' } })
-			: new Response('', { status: 200 });
+		return calls === 1 ? first : new Response('', { status: 200 });
 	});
 	expect((await fetchWithRetry('https://example.test')).status).toBe(200);
-	expect(calls).toBe(2);
+	return calls;
+}
 
-	calls = 0;
+// Stubs fetch to respond with `responses` in order, then 200; runs
+// fetchWithRetry under fake timers, advancing `advances` ms per step, and
+// returns the delays setTimeout was called with.
+async function retryDelays(
+	responses: Response[],
+	advances: number[],
+	setup?: () => void
+): Promise<unknown[]> {
+	vi.useFakeTimers();
+	setup?.();
+	const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+	const fetch = vi.fn();
+	for (const response of responses) fetch.mockResolvedValueOnce(response);
+	fetch.mockResolvedValue(new Response('', { status: 200 }));
+	vi.stubGlobal('fetch', fetch);
+
+	const promise = fetchWithRetry('https://example.test');
+	for (const ms of advances) await vi.advanceTimersByTimeAsync(ms);
+	expect((await promise).status).toBe(200);
+
+	return setTimeoutSpy.mock.calls.map((call) => call[1]);
+}
+
+test('retries transient responses but not client errors', async () => {
+	expect(
+		await expectSingleRetry(new Response('', { status: 429, headers: { 'Retry-After': '0' } }))
+	).toBe(2);
+
+	let calls = 0;
 	vi.stubGlobal('fetch', async () => {
 		calls++;
 		return new Response('', { status: 400 });
@@ -112,17 +140,11 @@ test('honours Retry-After in seconds', async () => {
 });
 
 test('retries server errors and network failures', async () => {
-	let calls = 0;
-	vi.stubGlobal('fetch', async () => {
-		calls++;
-		return calls === 1
-			? new Response('', { status: 500, headers: { 'Retry-After': '0' } })
-			: new Response('', { status: 200 });
-	});
-	expect((await fetchWithRetry('https://example.test')).status).toBe(200);
-	expect(calls).toBe(2);
+	expect(
+		await expectSingleRetry(new Response('', { status: 500, headers: { 'Retry-After': '0' } }))
+	).toBe(2);
 
-	calls = 0;
+	let calls = 0;
 	vi.stubGlobal('fetch', async () => {
 		calls++;
 		if (calls === 1) throw new TypeError('fetch failed');
@@ -149,47 +171,36 @@ test('assertBeforeDeadline throws once the deadline is reached', () => {
 });
 
 test('backs off exponentially when a retryable response has no Retry-After header', async () => {
-	vi.useFakeTimers();
-	const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
-	vi.stubGlobal('fetch', vi.fn()
-		.mockResolvedValueOnce(new Response('', { status: 429 }))
-		.mockResolvedValueOnce(new Response('', { status: 429 }))
-		.mockResolvedValue(new Response('', { status: 200 })));
-
-	const promise = fetchWithRetry('https://example.test');
-	await vi.advanceTimersByTimeAsync(1_000);
-	await vi.advanceTimersByTimeAsync(2_000);
-	expect((await promise).status).toBe(200);
+	const delays = await retryDelays(
+		[new Response('', { status: 429 }), new Response('', { status: 429 })],
+		[1_000, 2_000]
+	);
 
 	// 1s then 2s: a missing header must fall back to exponential backoff
 	// (doubling per attempt), not to zero delay or a flat 1s.
-	expect(setTimeoutSpy.mock.calls.map((call) => call[1])).toEqual([1_000, 2_000]);
+	expect(delays).toEqual([1_000, 2_000]);
 });
 
 test('honours Retry-After as an HTTP date and ignores an unparseable value', async () => {
-	vi.useFakeTimers();
-	vi.setSystemTime(1_000_000);
-	const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
-	vi.stubGlobal('fetch', vi.fn()
-		.mockResolvedValueOnce(new Response('', {
-			status: 429,
-			headers: { 'Retry-After': new Date(1_000_000 + 2_000).toUTCString() }
-		}))
-		.mockResolvedValueOnce(new Response('', {
-			status: 429,
-			headers: { 'Retry-After': 'not-a-date' }
-		}))
-		.mockResolvedValue(new Response('', { status: 200 })));
-
-	const promise = fetchWithRetry('https://example.test');
-	await vi.advanceTimersByTimeAsync(2_000);
-	await vi.advanceTimersByTimeAsync(2_000);
-	expect((await promise).status).toBe(200);
+	const delays = await retryDelays(
+		[
+			new Response('', {
+				status: 429,
+				headers: { 'Retry-After': new Date(1_000_000 + 2_000).toUTCString() }
+			}),
+			new Response('', {
+				status: 429,
+				headers: { 'Retry-After': 'not-a-date' }
+			})
+		],
+		[2_000, 2_000],
+		() => vi.setSystemTime(1_000_000)
+	);
 
 	// A valid HTTP date waits until that date; a value that is neither a
 	// number nor a parseable date must fall back to exponential backoff
 	// (2s for the second attempt), never to a NaN/0 delay.
-	expect(setTimeoutSpy.mock.calls.map((call) => call[1])).toEqual([2_000, 2_000]);
+	expect(delays).toEqual([2_000, 2_000]);
 });
 
 test('fails immediately without a retry sleep when an error surfaces at the deadline', async () => {

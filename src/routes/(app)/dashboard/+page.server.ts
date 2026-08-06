@@ -315,7 +315,7 @@ export const actions = {
 			console.error(`token revocation failed for channel ${channel.id}; disconnecting anyway:`, cause);
 		}
 		await db.transaction(async (tx) => {
-			await deleteChannelRecords(tx, [channel.id]);
+			await deleteChannelRecords(tx, [channel.id], { expectedOrgId: user.orgId });
 		});
 		// The channel's own audit rows die with it — the server log is the record.
 		console.info(`channel ${channel.id} disconnected and erased by user ${user.id}`);

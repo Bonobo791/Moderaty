@@ -44,9 +44,35 @@ export const WIPED_REFRESH_TOKEN = 'erased:account-deletion';
  * moderation actions, comments, audit rows, rules, then the channel rows
  * themselves. Shared by account deletion (every channel in dissolved orgs)
  * and the dashboard's per-channel disconnect. Call inside a transaction.
+ *
+ * With `expectedOrgId` (the disconnect path, which authorized via a SELECT
+ * BEFORE this transaction), the channel rows are deleted FIRST with the org
+ * as a delete predicate: if a channel was reconnected under a different org
+ * in between, the predicate matches nothing and the whole transaction aborts
+ * loudly instead of erasing another tenant's channel (TOCTOU). The first
+ * DELETE also takes the write lock, so no reconnect can interleave before
+ * the child rows go.
  */
-export async function deleteChannelRecords(tx: Pick<typeof db, 'delete'>, channelIds: string[]): Promise<void> {
+export async function deleteChannelRecords(
+	tx: Pick<typeof db, 'delete'>,
+	channelIds: string[],
+	options?: { expectedOrgId?: string }
+): Promise<void> {
 	if (!channelIds.length) return;
+	if (options?.expectedOrgId) {
+		const removed = await tx
+			.delete(channels)
+			.where(and(inArray(channels.id, channelIds), eq(channels.orgId, options.expectedOrgId)))
+			.returning({ id: channels.id });
+		if (removed.length !== channelIds.length) {
+			throw new Error('deleteChannelRecords: channel tenancy changed mid-request — aborting');
+		}
+		await tx.delete(moderationActions).where(inArray(moderationActions.channelId, channelIds));
+		await tx.delete(comments).where(inArray(comments.channelId, channelIds));
+		await tx.delete(auditLog).where(inArray(auditLog.channelId, channelIds));
+		await tx.delete(rules).where(inArray(rules.channelId, channelIds));
+		return;
+	}
 	await tx.delete(moderationActions).where(inArray(moderationActions.channelId, channelIds));
 	await tx.delete(comments).where(inArray(comments.channelId, channelIds));
 	await tx.delete(auditLog).where(inArray(auditLog.channelId, channelIds));

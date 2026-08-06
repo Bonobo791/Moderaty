@@ -47,6 +47,15 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	<title>Moderaty — Dashboard</title>
 </svelte:head>
 
+{#if data.maintenance}
+	<!-- The layout's overlay only triggers on LAYOUT data; when the layout was
+	healthy but a dashboard query failed mid-load, the page must render its own
+	state instead of an empty shell with destructive controls (I12). -->
+	<div class="error-box" role="alert">
+		<strong>Maintenance</strong> — Moderaty is temporarily unable to reach its database.
+		Nothing on this page will work right now; try again in a minute.
+	</div>
+{:else}
 <h1>Channels</h1>
 <p class="page-sub">Connect a channel and track its moderation activity.</p>
 
@@ -250,6 +259,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		<button class="btn danger" type="submit">Delete my account</button>
 	</form>
 </div>
+{/if}
 
 <style>
 	.history-form {

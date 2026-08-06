@@ -9,13 +9,14 @@ validate it, and leave unrelated work untouched.
 
 One agent works the full stack. There are no per-layer agent boundaries.
 
-- **`dev` is the integration branch.** All work happens on short-lived
-  feature branches off `dev` (PRs target `dev`), or directly on `dev` for
-  small changes. Work in the `.worktrees/dev` worktree — never switch
-  branches in a checkout in use elsewhere.
+- **`dev` is the integration branch and the working branch.** Commit
+  directly to `dev` in `.worktrees/dev` — no per-feature branches or PRs.
+  A PR is still useful for large or risky work (it triggers the review
+  bots); the agent may merge its own PRs. Work in the `.worktrees/dev`
+  worktree — never switch branches in a checkout in use elsewhere.
 - **`main` is production.** Only the human merges `dev → main`, batched, to
-  control Netlify production-deploy credit spend. Never open a PR from a
-  feature branch to `main`, never push to `main` directly.
+  control Netlify production-deploy credit spend. Never push to `main`
+  directly; the human's review gate is the `dev → main` merge.
 - Keep `dev` releasable: `npm run check`, `npm run build`, and
   `npm run test` green at all times so the human can batch-merge at any
   point. 
@@ -90,24 +91,21 @@ sees them. Edit the source in the repo, then re-copy to install updates.
 
 ## Git & Review Workflow (execution plan v3, section 0)
 
-Human review happens via pull requests. Executor rules:
+Day-to-day work commits directly to `dev`; pull requests are optional
+(large/risky work, or to trigger the review bots). Executor rules:
 
-- **One branch per phase**, created from an up-to-date `dev`:
-  `phase-a-scaffold`, `phase-b-database`, `phase-c-server-libs`,
-  `phase-d-tests`, `phase-e-auth-cron`, `phase-f-ui`, `phase-g-design`,
-  `phase-h-e2e`.
 - **Commit after every step** with message `step <N>: <step name>`.
-- **Never open a PR while `npm run check`, `npm run build`, or `npm run test`
-  is red.** The PR is the proof of green, not the place to discover red.
-- After a phase's last step passes its Verify: push, open the PR to `dev`,
-  then **STOP** until the human confirms the merge. Resume with
-  `git checkout dev && git pull` and the next phase branch.
-- **Never** push to `main` directly, never merge your own PR, never `--force`.
+- **Never commit or open a PR while `npm run check`, `npm run build`, or
+  `npm run test` is red.** Green is proven locally, not discovered in CI.
+- When a PR is used: target `dev`, and the agent may merge it once checks
+  are green and review findings are resolved. Resume with
+  `git checkout dev && git pull`.
+- **Never** push to `main` directly, never `--force`.
   `dev → main` is the human's batched release, not an executor step.
 - **Every review finding (human or bot) gets a failing test BEFORE its fix.**
-  Add the reproducing test to the phase branch, watch it fail, then fix, watch
-  it pass, commit both together (`fix: phase <X> review — <what>`), push, stop
-  for re-review. A fix without its reproducing test is not done.
+  Add the reproducing test, watch it fail, then fix, watch it pass, commit
+  both together (`fix: review — <what>`). A fix without its reproducing
+  test is not done.
 
 ## Invariants (execution plan v3, section 4.1 — re-read before every step)
 

@@ -552,6 +552,9 @@ async function rowsOf(channelId: string) {
 	return { channel: ch.length, rules: r.length, comments: c.length, audit: a.length, actions: m.length };
 }
 
+const INTACT = { channel: 1, rules: 1, comments: 1, audit: 1, actions: 1 };
+const ERASED = { channel: 0, rules: 0, comments: 0, audit: 0, actions: 0 };
+
 function stubRevoke(status = 200) {
 	const spy = vi.fn(async () => new Response('', { status }));
 	vi.stubGlobal('fetch', spy);
@@ -573,7 +576,7 @@ test('disconnect requires the confirmation checkbox — 400, nothing deleted, no
 		const res = await disconnectChannel('UC1', false);
 
 		expect(res).toMatchObject({ status: 400, data: { scope: 'disconnect', channelId: 'UC1' } });
-		expect(await rowsOf('UC1')).toEqual({ channel: 1, rules: 1, comments: 1, audit: 1, actions: 1 });
+		expect(await rowsOf('UC1')).toEqual(INTACT);
 		expect(fetchSpy).not.toHaveBeenCalled();
 	} finally {
 		vi.unstubAllGlobals();
@@ -585,7 +588,7 @@ test('disconnect rejects a non-admin with 403 and deletes nothing', async () => 
 	await seedChannelData('UC1');
 
 	await expect(disconnectChannel('UC1', true, MEMBER)).rejects.toMatchObject({ status: 403 });
-	expect(await rowsOf('UC1')).toEqual({ channel: 1, rules: 1, comments: 1, audit: 1, actions: 1 });
+	expect(await rowsOf('UC1')).toEqual(INTACT);
 });
 
 test('disconnect rejects a signed-out request with 401', async () => {
@@ -602,7 +605,7 @@ test('disconnect reads another team\'s channel as 404 and touches nothing', asyn
 	const res = await disconnectChannel('UC1', true);
 
 	expect(res).toMatchObject({ status: 404, data: { scope: 'disconnect', error: 'channel not found' } });
-	expect(await rowsOf('UC1')).toEqual({ channel: 1, rules: 1, comments: 1, audit: 1, actions: 1 });
+	expect(await rowsOf('UC1')).toEqual(INTACT);
 });
 
 test('disconnect treats an absent channelId as empty — 404, never a match', async () => {
@@ -631,10 +634,11 @@ test('disconnect revokes the grant at Google, then erases the channel and every 
 		expect(url).toBe('https://oauth2.googleapis.com/revoke');
 		expect((init.body as URLSearchParams).get('token')).toBe('google-refresh-token');
 		// Everything UC1 owned is gone; the sibling channel is untouched.
-		expect(await rowsOf('UC1')).toEqual({ channel: 0, rules: 0, comments: 0, audit: 0, actions: 0 });
+		expect(await rowsOf('UC1')).toEqual(ERASED);
 		expect(await rowsOf('UC2')).toEqual({ channel: 1, rules: 1, comments: 1, audit: 1, actions: 1 });
 		expect(infoSpy).toHaveBeenCalledWith('channel UC1 disconnected and erased by user user-1');
 	} finally {
+		infoSpy.mockRestore();
 		vi.unstubAllGlobals();
 	}
 });
@@ -648,9 +652,10 @@ test('a failed revocation is logged loudly and never blocks the erase', async ()
 		const res = await disconnectChannel('UC1', true);
 
 		expect(res).toMatchObject({ ok: true, scope: 'disconnect', channelId: 'UC1' });
-		expect(await rowsOf('UC1')).toEqual({ channel: 0, rules: 0, comments: 0, audit: 0, actions: 0 });
+		expect(await rowsOf('UC1')).toEqual(ERASED);
 		expect(errorSpy).toHaveBeenCalledWith('token revocation failed for channel UC1; disconnecting anyway:', expect.any(Error));
 	} finally {
+		errorSpy.mockRestore();
 		vi.unstubAllGlobals();
 	}
 });
@@ -664,10 +669,18 @@ test('an undecryptable stored token is logged loudly and the erase still happens
 		const res = await disconnectChannel('UC1', true);
 
 		expect(res).toMatchObject({ ok: true, scope: 'disconnect', channelId: 'UC1' });
-		expect(await rowsOf('UC1')).toEqual({ channel: 0, rules: 0, comments: 0, audit: 0, actions: 0 });
+		expect(await rowsOf('UC1')).toEqual(ERASED);
 		expect(fetchSpy).not.toHaveBeenCalled();
 		expect(errorSpy).toHaveBeenCalledWith('token revocation failed for channel UC1; disconnecting anyway:', expect.any(Error));
 	} finally {
+		errorSpy.mockRestore();
 		vi.unstubAllGlobals();
 	}
+});
+
+// PR #123 review (qodo): vi.spyOn mocks are NOT restored by unstubAllGlobals —
+// a leaked console spy makes later tests order-dependent (the PR #111 lesson).
+test('disconnect tests leave no console spies behind', () => {
+	expect(vi.isMockFunction(console.info)).toBe(false);
+	expect(vi.isMockFunction(console.error)).toBe(false);
 });

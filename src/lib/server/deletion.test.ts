@@ -25,6 +25,7 @@ import {
 	CONSENT_EMAIL_RETENTION_MS,
 	WIPED_REFRESH_TOKEN,
 	consentEmailCutoffIso,
+	deleteChannelRecords,
 	deleteUserRecords,
 	nullExpiredConsentEmails
 } from './deletion';
@@ -60,6 +61,38 @@ async function seedModerationData(channelId: string, key: string) {
 async function seedChannel(id: string, userId: string | null, orgId: string, title: string) {
 	await testDb().db.insert(channels).values({ id, userId, orgId, title, refreshTokenEnc: 'enc' });
 }
+
+// PR #123 review (codeant): the disconnect action authorizes with a SELECT,
+// then deletes in a separate transaction — a channel reconnected under a
+// DIFFERENT org in between must not be erased across the tenancy boundary.
+test('deleteChannelRecords with an expected org aborts loudly when the channel changed tenancy mid-request', async () => {
+	await seedChannel('UC1', 'user-9', 'org-2', 'foreign channel');
+	await seedModerationData('UC1', 'race');
+
+	await expect(
+		testDb().db.transaction(async (tx) => {
+			await deleteChannelRecords(tx, ['UC1'], { expectedOrgId: 'org-1' });
+		})
+	).rejects.toThrow('deleteChannelRecords: channel tenancy changed mid-request — aborting');
+
+	// The transaction rolled back: the channel and every row it owns survive.
+	expect(await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).all()).toHaveLength(1);
+	expect(await testDb().db.select().from(comments).where(eq(comments.channelId, 'UC1')).all()).toHaveLength(1);
+	expect(await testDb().db.select().from(rules).where(eq(rules.channelId, 'UC1')).all()).toHaveLength(1);
+});
+
+test('deleteChannelRecords with a matching expected org erases the channel and its data', async () => {
+	await seedChannel('UC1', 'user-9', 'org-1', 'ours');
+	await seedModerationData('UC1', 'match');
+
+	await testDb().db.transaction(async (tx) => {
+		await deleteChannelRecords(tx, ['UC1'], { expectedOrgId: 'org-1' });
+	});
+
+	expect(await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(comments).where(eq(comments.channelId, 'UC1')).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(rules).where(eq(rules.channelId, 'UC1')).all()).toHaveLength(0);
+});
 
 async function seedUser(id: string) {
 	await seedBareUser(id);

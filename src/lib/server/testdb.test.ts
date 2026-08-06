@@ -18,8 +18,8 @@
 
 import { expect, test } from 'vitest';
 
-import { consents, invites, memberships, organizations } from './db/schema';
-import { seedConsent, seedUser, setupTestDb, testDb } from './testdb';
+import { consents, invites, memberships, organizations, users } from './db/schema';
+import { seedConsent, seedUser, setupTestDb, testDb, wipeTables } from './testdb';
 
 // Harness self-test (PR #48 review): schema.ts exports the tenant tables from
 // Phase A, so createTestDb's hand-written DDL must create them too — every
@@ -27,6 +27,13 @@ import { seedConsent, seedUser, setupTestDb, testDb } from './testdb';
 // table presence AND the constraints the app relies on (personal_for UNIQUE,
 // memberships composite PK).
 setupTestDb(['consents', 'invites', 'memberships', 'organizations', 'users']);
+
+test('wipeTables empties the given tables on demand (per-property-run freshness)', async () => {
+	await seedUser('wipe-me');
+	expect(await testDb().db.select().from(users).all()).toHaveLength(1);
+	await wipeTables(['users']);
+	expect(await testDb().db.select().from(users).all()).toHaveLength(0);
+});
 
 test('createTestDb creates the tenant tables', async () => {
 	const tables = await testDb().client.execute(

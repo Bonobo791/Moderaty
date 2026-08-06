@@ -73,6 +73,11 @@ verdict. CI does not run Stryker (the report-only
 runs are local/agent-driven); wiring any CI gate, including a ratcheted
 `thresholds.break`, remains a separate, maintainer-approved step.
 
+Property-based testing (fast-check) runs under the fast-check-testing
+skill; repo conventions live in `docs/property-testing.md` and shared
+arbitraries in `src/lib/server/testarbitraries.ts`. Properties complement
+example tests and never count toward Stryker kill claims.
+
 ## Agent Skills (skills-src)
 
 Repo-local skill sources live in `.agents/skills-src/<name>/` (currently

@@ -121,6 +121,8 @@ export const channels = sqliteTable('channels', {
 	scanCursor: text('scan_cursor'), // high-water timestamp to commit once an incomplete scan ends
 	historyNextPageToken: text('history_next_page_token'), // history-drain continuation token (issue #70): the drain walks history independently so the live cursor keeps advancing on newest comments every run; null = no drain in flight
 	historyBoundary: text('history_boundary'), // ISO timestamp the history drain started walking back from (its eventual end state: cursor = boundary)
+	dryRunBoundary: text('dry_run_boundary'), // on-demand dry-run window (ISO): the drain rescores comments down to this timestamp; null = no dry-run drain in flight
+	dryRunPageToken: text('dry_run_page_token'), // YouTube continuation token for the dry-run drain's next page
 	lastRunAt: text('last_run_at'), // ISO timestamp of last cron run; rotation orders by it ASC (NULLs first)
 	leaseExpiresAt: text('lease_expires_at'), // expiring cron claim; null or past = claimable
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)

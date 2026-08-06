@@ -52,6 +52,10 @@ describe('scopeFromChangedFiles', () => {
 		expect(scopeFromChangedFiles(['src/routes/dpa/+page.ts'])).toBe('');
 	});
 
+	it('drops the SSR-untestable $effect wrapper', () => {
+		expect(scopeFromChangedFiles(['src/lib/auto-refresh.svelte.ts'])).toBe('');
+	});
+
 	it('drops files outside src and non-TypeScript files', () => {
 		expect(scopeFromChangedFiles(['AGENTS.md'])).toBe('');
 		expect(scopeFromChangedFiles(['.github/workflows/mutation.yml'])).toBe('');

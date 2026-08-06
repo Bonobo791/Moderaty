@@ -52,6 +52,11 @@ Full run: `npx stryker run --ignoreStatic` (6m54s, config with
 Ignored mutants include the static mutants suppressed by `ignoreStatic` and the
 fully-ignored landing content modules (`src/lib/landing/legal.ts`,
 `faq.ts`, `plans.ts`, `pricing-faq.ts` — pure copy/data, excluded by policy).
+As of Step 7, `src/lib/auto-refresh.svelte.ts` is also excluded by policy:
+vitest compiles `.svelte.ts` for SSR, where `$effect` is a no-op, so its
+interval/invalidate/cleanup mutants are unreachable in this harness (no
+jsdom/happy-dom dependency is approved). Its SSR no-op contract is pinned by
+`src/lib/auto-refresh.svelte.test.ts`; the client behavior is e2e territory.
 
 ## Batch plan
 
@@ -60,9 +65,9 @@ fully-ignored landing content modules (`src/lib/landing/legal.ts`,
 | A | `mt-80-schema` | `src/lib/server/db/schema.ts` | 170+0 | **done — 100%** (137 killed, 33 ignored equivalents) |
 | B | `mt-80-auth` | `google.ts`, auth `login/callback/+server.ts`, auth `callback/+server.ts`, `oauthState.ts`, `channelConnect.ts`, `legal.ts` | 235+34 | **done — 100%** (537 killed + 1 timeout, 0 survived, 0 no-cov; 38 ignored equivalents) |
 | C | `mt-80-moderation` | `pipeline.ts`, `rules.ts`, `youtube.ts`, `moderation.ts`, `tone.ts` | 231+86 | **done — 100%** (see triage log) |
-| D | `mt-80-tenancy-routes` | `org.ts`, `deletion.ts`, `session.ts`, `crypto.ts`, `ownership.ts`, `hooks.server.ts`, `db/index.ts`, `db/migrationTestUtils.ts`, dashboard/org/queue/log/rules/consent/connect-channel page servers, `api/cron/+server.ts`, `org/switch/+server.ts`, `invite/[token]/+page.server.ts`, `logout/+page.server.ts`, `(app)/+layout.server.ts` | ~200+50 | pending |
-| E | `mt-80-plumbing` | `http.ts`, `consentText.ts`, `migrationGuard.ts`, `testdb.ts`, `testcookies.ts`, `relative-time.ts`, landing `links.ts`/`json-ld.ts`/`queue-script.ts`, `api/health/+server.ts`, auth `+server.ts` pair, `login/+page.server.ts`, `auto-refresh.svelte.ts` | ~75+45 | pending |
-| Final | `mt-80-final` | full re-baseline, this doc updated, AGENTS.md role section updated | — | pending |
+| D | `mt-80-tenancy-routes` | `org.ts`, `deletion.ts`, `session.ts`, `crypto.ts`, `ownership.ts`, `hooks.server.ts`, `db/index.ts`, `db/migrationTestUtils.ts`, dashboard/org/queue/log/rules/consent/connect-channel page servers, `api/cron/+server.ts`, `org/switch/+server.ts`, `invite/[token]/+page.server.ts`, `logout/+page.server.ts`, `(app)/+layout.server.ts` | ~200+50 | **done — 100%** (D1 server-libs + D2 routes, PRs merged as #115; per-file numbers in the PR body) |
+| E | `mt-80-plumbing` | `http.ts`, `consentText.ts`, `migrationGuard.ts`, `testdb.ts`, `testcookies.ts`, `relative-time.ts`, landing `links.ts`/`json-ld.ts`/`queue-script.ts`, `api/health/+server.ts`, auth `+server.ts` pair, `login/+page.server.ts`, `auto-refresh.svelte.ts` | ~75+45 | **done — 100%** (11 files in PR #116; `http.ts` verified in the final batch; `auto-refresh.svelte.ts` excluded — see below) |
+| Final | `mt-80-final` | full re-baseline, this doc updated, AGENTS.md role section updated | — | **done — see the Step-7 section** |
 
 Batch A alone (schema.ts, 170 valid survivors) is worth ~5 points of overall
 score if killed or excluded with justification. Batches are ordered by
@@ -284,6 +289,52 @@ incremental cache each time):
 - Parallel agents sharing one worktree clobber each other's
   `reports/mutation/mutation.json` — snapshot your own run's JSON if you
   need it later.
+
+## Step 7 — final re-baseline (2026-08-05, branch `mt-80-final`)
+
+Full run of record: `npx stryker run --ignoreStatic --concurrency 1` (fresh
+incremental cache; concurrency 1 because batch C showed concurrency 4
+produces false survivors). The tracked evidence is
+`reports/mutation/mutation.html` (Stryker's HTML report of that run); the
+raw console log stays local — `reports/` is gitignored generated output,
+and the log also embeds workstation-absolute `file://` paths that do not
+belong in history (PR #118 review).
+
+**Outcome: every file in the mutate scope is at 100%** — 3366 mutants: 3359
+killed, 7 timed out, 0 survived, 0 no-coverage (score 100.00; run 21m33s).
+The 7 timeouts are infinite-loop equivalents — six loop-counter/condition
+mutants (`index--`, `i -= 50`, `page--`, `index >= length`, …) plus the
+`http.ts:135` retry-loop `BlockStatement` removal — all counted as detected.
+The only other non-kills are the hand-justified equivalent/policy `Ignored`
+set.
+
+What the re-baseline caught (the value of a full re-run):
+
+- `src/lib/server/openaiKey.ts` (58.82%, 7 survivors) — added by PR #109
+  mid-program, after the batch plan's file lists were written, so no batch
+  ever covered it. Hardened by strengthening its 7 existing behavior tests:
+  the null-org path now asserts the database is never queried, the keyless
+  and unknown-org fallbacks assert *no* error is logged (quiet by design),
+  and the DB-failure / corrupt-ciphertext fallbacks assert the exact loud
+  log args. All 17 mutants killed, no exclusions needed — re-verified scoped
+  against the final tests (17/17 killed).
+- `src/lib/server/db/schema.ts:205` (`audit_log.text` column, also from the
+  post-Batch-A window) — same `StringLiteral→""` equivalent class as the
+  neighboring columns; excluded with the same drizzle-falls-back-to-property-
+  key justification.
+
+Also in this batch:
+
+- `src/lib/server/http.ts` verified at 100% (90 killed, 1 timeout; started in
+  Batch E, completed here).
+- `src/lib/auto-refresh.svelte.ts` excluded from the mutate scope by policy
+  (SSR-untestable `$effect` — see the exclusion note at the top); exclusion
+  mirrored in `scripts/stryker-pr-scope.mjs` with a pinning test, and an SSR
+  no-op contract test added for the file itself.
+
+The program goal — ≥80% overall with 80–90%+ on critical paths — is met with
+headroom: the score of record is **100%** across the scope (see the per-file
+table in `reports/mutation/mutation.html`; every row reads 100.00).
 
 ## Working rules for every batch
 

@@ -202,6 +202,7 @@ export const auditLog = sqliteTable('audit_log', {
 	// Comment text (≤500 chars) on dry-run rows only: a dry run never inserts
 	// into comments (I8), so the audit row is the only place its text survives.
 	// Null for every real-run action — that text lives in comments.text.
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	text: text('text'),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [

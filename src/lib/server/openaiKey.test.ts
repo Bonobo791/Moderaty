@@ -33,6 +33,7 @@ setupTestDb(['organizations']);
 
 afterEach(() => {
 	mocks.env.OPENAI_API_KEY = 'env-openai-key';
+	vi.restoreAllMocks();
 });
 
 async function seedOrg(id: string, openaiKeyEnc: string | null) {
@@ -44,24 +45,38 @@ test('a stored org key beats the env key', async () => {
 	expect(await resolveOpenAiKey('org-1')).toBe('sk-org-key');
 });
 
-test('no stored key falls back to the env key', async () => {
+test('no stored key falls back to the env key — quietly', async () => {
 	await seedOrg('org-2', null);
+	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
 	expect(await resolveOpenAiKey('org-2')).toBe('env-openai-key');
+	// A NULL stored key is the normal default, not an error: no loud log.
+	expect(spy).not.toHaveBeenCalled();
 });
 
-test('a null org (pre-account channel) uses the env key', async () => {
+test('a null org (pre-account channel) uses the env key — without touching the database', async () => {
+	const select = vi.spyOn(testDb().db, 'select');
+	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
 	expect(await resolveOpenAiKey(null)).toBe('env-openai-key');
+	// A null org short-circuits to the deployment key before any query.
+	expect(select).not.toHaveBeenCalled();
+	expect(spy).not.toHaveBeenCalled();
 });
 
-test('an unknown org uses the env key', async () => {
+test('an unknown org uses the env key — quietly', async () => {
+	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
 	expect(await resolveOpenAiKey('org-missing')).toBe('env-openai-key');
+	// No stored row is a normal state, not an error: no loud log.
+	expect(spy).not.toHaveBeenCalled();
 });
 
 test('corrupt ciphertext falls back to the env key and logs loudly', async () => {
 	await seedOrg('org-3', 'not-valid-ciphertext');
 	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
 	expect(await resolveOpenAiKey('org-3')).toBe('env-openai-key');
-	expect(spy).toHaveBeenCalled();
+	expect(spy).toHaveBeenCalledWith(
+		'stored OpenAI key failed to decrypt — falling back to the deployment key',
+		{ orgId: 'org-3', error: expect.any(Error) }
+	);
 });
 
 test('a database failure falls back to the env key and logs loudly instead of crashing the run', async () => {
@@ -73,7 +88,10 @@ test('a database failure falls back to the env key and logs loudly instead of cr
 	});
 	try {
 		expect(await resolveOpenAiKey('org-1')).toBe('env-openai-key');
-		expect(spy).toHaveBeenCalled();
+		expect(spy).toHaveBeenCalledWith(
+			'failed to read the stored OpenAI key — falling back to the deployment key',
+			{ orgId: 'org-1', error: expect.any(Error) }
+		);
 	} finally {
 		dbSpy.mockRestore();
 	}

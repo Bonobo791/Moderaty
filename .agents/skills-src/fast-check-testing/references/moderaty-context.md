@@ -18,9 +18,10 @@ Turso, Stryker mutation testing, Netlify deploy. Read this when writing property
 ## Adoption gate: approved dependencies
 
 The execution plan restricts dependencies: runtime = `drizzle-orm`, `@libsql/client`,
-adapter, `recheck`; dev = `drizzle-kit`, `vitest`, Stryker packages. **`fast-check` (and
-`@fast-check/vitest`) are not on the list — propose them to the maintainer as dev-only
-deps before writing code that imports them.** Note also: no zod in the repo, so
+adapter, `recheck`; dev = `drizzle-kit`, `vitest`, Stryker packages. **`fast-check` is
+maintainer-approved as a dev-only dep** (installed, plain `fc.assert` in vitest tests is
+the house style); the `@fast-check/vitest` connector is NOT approved — stay with the
+plain API unless the maintainer says otherwise. Note also: no zod in the repo, so
 schema-derived generators (zod-fast-check) are unavailable; build arbitraries by hand from
 the drizzle schema shapes (see arbitraries-cookbook.md — `fc.record` per table row type is
 usually enough).

@@ -575,19 +575,21 @@ test('forceDryRun can only turn dry-run on — it never flips an env-dry deploym
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
 });
 
+/** One dry-run window page over a single fetched comment (live env). */
+function runWindowPage({ pageToken = null, nextPageToken = null, reachedCursor = true }: { pageToken?: string | null; nextPageToken?: string | null; reachedCursor?: boolean } = {}) {
+	mocks.state.env.DRY_RUN = 'false';
+	mocks.scoreComment.mockResolvedValue(moderation(0.34));
+	mocks.fetchNewComments.mockResolvedValue({ comments: [newComment()], nextPageToken, reachedCursor });
+	return runChannel('channel', { forceDryRun: true, window: { boundary: '2026-05-01T00:00:00.000Z', pageToken } });
+}
+
 test('window mode fetches one page bounded by the window, ignoring the live cursor and checkpoint', async () => {
 	// The dry-run drain walks the window independently: the live cursor keeps
 	// advancing on real runs, and a drain in flight never disturbs it.
-	mocks.state.env.DRY_RUN = 'false';
 	mocks.state.channel.cursor = '2026-06-01T00:00:00.000Z';
 	mocks.state.channel.nextPageToken = 'live-token';
-	mocks.scoreComment.mockResolvedValue(moderation(0.34));
-	mocks.fetchNewComments.mockResolvedValue({ comments: [newComment()], nextPageToken: null, reachedCursor: true });
 
-	const result = await runChannel('channel', {
-		forceDryRun: true,
-		window: { boundary: '2026-05-01T00:00:00.000Z', pageToken: 'window-token' }
-	});
+	const result = await runWindowPage({ pageToken: 'window-token' });
 
 	expect(mocks.fetchNewComments).toHaveBeenCalledWith('channel', 'access-token', '2026-05-01T00:00:00.000Z', {
 		maxPages: 1,
@@ -601,15 +603,9 @@ test('window mode fetches one page bounded by the window, ignoring the live curs
 test('window mode rescores comments already stored by real runs', async () => {
 	// Re-scoring moderated comments is the entire point of the preview; the
 	// stored-IDs dedupe would suppress every one of them.
-	mocks.state.env.DRY_RUN = 'false';
 	mocks.state.existingIds = ['comment'];
-	mocks.scoreComment.mockResolvedValue(moderation(0.34));
-	mocks.fetchNewComments.mockResolvedValue({ comments: [newComment()], nextPageToken: null, reachedCursor: true });
 
-	const result = await runChannel('channel', {
-		forceDryRun: true,
-		window: { boundary: '2026-05-01T00:00:00.000Z', pageToken: null }
-	});
+	const result = await runWindowPage();
 
 	expect(mocks.scoreComment).toHaveBeenCalled();
 	expect(result.fetched).toBe(1);
@@ -619,14 +615,7 @@ test('window mode rescores comments already stored by real runs', async () => {
 });
 
 test('window mode reports continuation when the window has more pages, and persists nothing itself', async () => {
-	mocks.state.env.DRY_RUN = 'false';
-	mocks.scoreComment.mockResolvedValue(moderation(0.34));
-	mocks.fetchNewComments.mockResolvedValue({ comments: [newComment()], nextPageToken: 'page-2', reachedCursor: false });
-
-	const result = await runChannel('channel', {
-		forceDryRun: true,
-		window: { boundary: '2026-05-01T00:00:00.000Z', pageToken: null }
-	});
+	const result = await runWindowPage({ nextPageToken: 'page-2', reachedCursor: false });
 
 	expect(result).toMatchObject({ windowComplete: false, windowNextPageToken: 'page-2' });
 	expect(mocks.state.channelUpdates).toEqual([]);

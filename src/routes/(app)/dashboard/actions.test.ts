@@ -306,6 +306,29 @@ function dryRun(channelId: string, user: typeof OWNER | null = OWNER, months?: s
 	} as never);
 }
 
+/** A runChannel dry-run result; override only what the test asserts on. */
+function dryRunResult(overrides: Record<string, unknown> = {}) {
+	return { fetched: 0, acted: 0, queued: 0, partial: false, skipped: false, dryRun: true, ...overrides };
+}
+
+/** Gives a channel an in-flight drain from a previous, abandoned preview. */
+async function seedStaleDrain(id: string) {
+	await testDb()
+		.db.update(channels)
+		.set({ dryRunBoundary: '2026-01-01T00:00:00.000Z', dryRunPageToken: 'old-token' })
+		.where(eq(channels.id, id));
+}
+
+function channelById(id: string) {
+	return testDb().db.select().from(channels).where(eq(channels.id, id)).get();
+}
+
+function expectBoundaryMonthsAgo(boundary: string | null | undefined, months: number) {
+	const ms = months * 30 * 24 * 60 * 60 * 1000;
+	expect(Date.parse(boundary ?? '')).toBeLessThan(Date.now() - ms + 60_000);
+	expect(Date.parse(boundary ?? '')).toBeGreaterThan(Date.now() - ms - 60_000);
+}
+
 test('dry run previews a live deployment through runChannel and echoes the counts', async () => {
 	await seedChannel('UC1');
 	let leaseDuringRun: string | null | undefined;
@@ -314,7 +337,7 @@ test('dry run previews a live deployment through runChannel and echoes the count
 		// cannot claim it underneath the run.
 		const ch = await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get();
 		leaseDuringRun = ch?.leaseExpiresAt;
-		return { fetched: 3, acted: 1, queued: 1, partial: false, skipped: false, dryRun: true, windowComplete: true, windowNextPageToken: null };
+		return dryRunResult({ fetched: 3, acted: 1, queued: 1, windowComplete: true, windowNextPageToken: null });
 	});
 
 	const before = Date.now();
@@ -417,48 +440,25 @@ test('dry run rejects an unsupported months preset with 400 and never runs', asy
 
 test('an incomplete window persists the drain state for cron and reports background work', async () => {
 	await seedChannel('UC1');
-	mocks.runChannel.mockResolvedValue({
-		fetched: 100,
-		acted: 5,
-		queued: 2,
-		partial: false,
-		skipped: false,
-		dryRun: true,
-		windowComplete: false,
-		windowNextPageToken: 'page-2'
-	});
+	mocks.runChannel.mockResolvedValue(dryRunResult({ fetched: 100, acted: 5, queued: 2, windowComplete: false, windowNextPageToken: 'page-2' }));
 
 	const res = await dryRun('UC1', OWNER, '6');
 
 	expect(res).toMatchObject({ ok: true, months: 6, background: true });
-	const ch = await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get();
+	const ch = await channelById('UC1');
 	expect(ch?.dryRunPageToken).toBe('page-2');
-	// 6-month window: boundary ≈ now − 180 days.
-	expect(Date.parse(ch?.dryRunBoundary ?? '')).toBeLessThan(Date.now() - 180 * 24 * 60 * 60 * 1000 + 60_000);
-	expect(Date.parse(ch?.dryRunBoundary ?? '')).toBeGreaterThan(Date.now() - 180 * 24 * 60 * 60 * 1000 - 60_000);
+	expectBoundaryMonthsAgo(ch?.dryRunBoundary, 6);
 });
 
 test('a completed window clears the drain state, resetting any older drain', async () => {
 	await seedChannel('UC1');
-	await testDb()
-		.db.update(channels)
-		.set({ dryRunBoundary: '2026-01-01T00:00:00.000Z', dryRunPageToken: 'old-token' })
-		.where(eq(channels.id, 'UC1'));
-	mocks.runChannel.mockResolvedValue({
-		fetched: 10,
-		acted: 0,
-		queued: 0,
-		partial: false,
-		skipped: false,
-		dryRun: true,
-		windowComplete: true,
-		windowNextPageToken: null
-	});
+	await seedStaleDrain('UC1');
+	mocks.runChannel.mockResolvedValue(dryRunResult({ fetched: 10, windowComplete: true, windowNextPageToken: null }));
 
 	const res = await dryRun('UC1', OWNER, '1');
 
 	expect(res).toMatchObject({ ok: true, months: 1, background: false });
-	const ch = await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get();
+	const ch = await channelById('UC1');
 	expect(ch?.dryRunBoundary).toBeNull();
 	expect(ch?.dryRunPageToken).toBeNull();
 });
@@ -505,17 +505,13 @@ test('a deadline-partial preview replaces a stale in-flight drain with the new w
 	// in place would keep cron draining the window the user just abandoned.
 	// The new window restarts from the top in the background instead.
 	await seedChannel('UC1');
-	await testDb()
-		.db.update(channels)
-		.set({ dryRunBoundary: '2026-01-01T00:00:00.000Z', dryRunPageToken: 'old-token' })
-		.where(eq(channels.id, 'UC1'));
-	mocks.runChannel.mockResolvedValue({ fetched: 50, acted: 0, queued: 0, partial: true, skipped: false, dryRun: true });
+	await seedStaleDrain('UC1');
+	mocks.runChannel.mockResolvedValue(dryRunResult({ fetched: 50, partial: true }));
 
 	const res = await dryRun('UC1', OWNER, '6');
 
 	expect(res).toMatchObject({ ok: true, months: 6, partial: true, background: true });
-	const ch = await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get();
+	const ch = await channelById('UC1');
 	expect(ch?.dryRunPageToken).toBeNull();
-	expect(Date.parse(ch?.dryRunBoundary ?? '')).toBeGreaterThan(Date.now() - 180 * 24 * 60 * 60 * 1000 - 60_000);
-	expect(Date.parse(ch?.dryRunBoundary ?? '')).toBeLessThan(Date.now() - 180 * 24 * 60 * 60 * 1000 + 60_000);
+	expectBoundaryMonthsAgo(ch?.dryRunBoundary, 6);
 });

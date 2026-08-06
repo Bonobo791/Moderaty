@@ -70,3 +70,14 @@ test('normal render hides the disconnect danger block from a member (the action 
 	expect(body).not.toContain('Disconnect channel');
 	expect(body).toContain('Delete my account');
 });
+
+// The dry-run backend has always accepted `months` (default 3); the select was
+// the deferred #119 frontend follow-up. A 3-month-only button reads as "0
+// scanned" on any channel whose comments are older than the window.
+test('the dry-run form offers the window presets with a labeled select, defaulting to 3 months', () => {
+	const body = renderPage(NORMAL_DATA);
+	expect(body).toContain('id="dryrun-months-UC1"');
+	expect(body).toContain('name="months"');
+	expect(body).toContain('aria-label="How far back the dry run covers on My Channel"');
+	expect(body).toContain('>last 24 months</option>');
+});

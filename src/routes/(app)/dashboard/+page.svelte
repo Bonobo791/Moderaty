@@ -171,6 +171,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		<form
 			method="POST"
 			action="?/dryRun"
+			class="history-form"
 			use:enhance={() => {
 				dryRunPending = ch.id;
 				return async ({ update }) => {
@@ -180,6 +181,14 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			}}
 		>
 			<input type="hidden" name="channelId" value={ch.id} />
+			<label for="dryrun-months-{ch.id}">Dry run</label>
+			<select id="dryrun-months-{ch.id}" name="months" aria-label="How far back the dry run covers on {ch.title}">
+				<option value="1">last month</option>
+				<option value="3" selected>last 3 months</option>
+				<option value="6">last 6 months</option>
+				<option value="12">last 12 months</option>
+				<option value="24">last 24 months</option>
+			</select>
 			<button
 				class="btn secondary small"
 				type="submit"
@@ -196,7 +205,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				<p class="muted" role="status">Dry run preview: nothing new to preview right now.</p>
 			{:else if form?.ok}
 				<p class="muted" role="status">
-					Dry run preview: {form.fetched} comment{form.fetched === 1 ? '' : 's'} scanned —
+					Dry run preview (last {form.months === 1 ? 'month' : `${form.months} months`}): {form.fetched} comment{form.fetched === 1 ? '' : 's'} scanned —
 					{form.acted} would be acted on, {form.queued} would go to the review queue.
 					{#if form.partial}Partial — the 20 s preview limit was hit; see the audit log for what completed. {/if}
 					<a href="/channels/{ch.id}/log">See the audit log</a>.

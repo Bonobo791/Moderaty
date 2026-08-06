@@ -18,7 +18,7 @@
 
 import { timingSafeEqual } from 'node:crypto';
 import { error, json } from '@sveltejs/kit';
-import { and, asc, eq, isNull, lt, or } from 'drizzle-orm';
+import { and, asc, desc, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
@@ -80,7 +80,9 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		.select()
 		.from(channels)
 		.where(and(eq(channels.active, 1), claimable))
-		.orderBy(asc(channels.lastRunAt))
+		// Channels with a dry-run drain in flight first — a preview the user is
+		// actively waiting on must not starve behind the ordinary rotation.
+		.orderBy(desc(sql`${channels.dryRunBoundary} is not null`), asc(channels.lastRunAt))
 		.limit(1);
 	if (!channel) return json({ ok: true, dryRun, consentEmailsNulled, sweepError, results: {} });
 
@@ -95,7 +97,38 @@ export const GET: RequestHandler = async ({ url, request }) => {
 
 	try {
 		const result = await runChannel(channel.id, { deadline });
-		return json({ ok: true, dryRun, consentEmailsNulled, sweepError, results: { [channel.id]: result } });
+		// Dry-run window drain: one more page per invocation while a preview is
+		// in flight (I10 — bounded, same lease). runChannel enforces the shared
+		// deadline internally; a partial result leaves the state untouched and
+		// the next invocation continues.
+		let dryRunWindow: unknown;
+		if (channel.dryRunBoundary) {
+			try {
+				const drain = await runChannel(channel.id, {
+					deadline,
+					forceDryRun: true,
+					window: { boundary: channel.dryRunBoundary, pageToken: channel.dryRunPageToken ?? null }
+				});
+				if (drain.windowComplete === true) {
+					await db
+						.update(channels)
+						.set({ dryRunBoundary: null, dryRunPageToken: null })
+						.where(eq(channels.id, channel.id));
+				} else if (drain.windowComplete === false) {
+					await db
+						.update(channels)
+						.set({ dryRunPageToken: drain.windowNextPageToken ?? null })
+						.where(eq(channels.id, channel.id));
+				}
+				dryRunWindow = drain;
+			} catch (cause) {
+				// A drain failure must never mask the normal run — loud on the
+				// server, surfaced in the payload, retried next invocation.
+				console.error('dry-run window drain failed for channel:', channel.id, cause);
+				dryRunWindow = { error: cause instanceof Error ? cause.message : String(cause) };
+			}
+		}
+		return json({ ok: true, dryRun, consentEmailsNulled, sweepError, results: { [channel.id]: result }, dryRunWindow });
 	} catch (cause) {
 		const message = cause instanceof Error ? cause.message : String(cause);
 		console.error(`channel run ${channel.id} failed:`, cause);

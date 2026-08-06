@@ -333,3 +333,104 @@ test('a dry run skips the consent e-mail sweep entirely (I8)', async () => {
 	}
 	expect((await testDb().db.select().from(consents).all())[0].email).toBe('old@example.com');
 });
+
+test('drains one dry-run window page after the normal run and persists the continuation', async () => {
+	await testDb().db.insert(channels).values({
+		id: 'UC1',
+		title: 'One',
+		refreshTokenEnc: 'enc',
+		dryRunBoundary: '2026-05-01T00:00:00.000Z',
+		dryRunPageToken: 'tok-1'
+	});
+	const normal = { fetched: 2, acted: 1, queued: 0, partial: false, skipped: false, dryRun: true };
+	const drain = { fetched: 100, acted: 4, queued: 1, partial: false, skipped: false, dryRun: true, windowComplete: false, windowNextPageToken: 'tok-2' };
+	mocks.runChannel.mockResolvedValueOnce(normal).mockResolvedValueOnce(drain);
+
+	const res = await call({ bearer: 'test-secret' });
+
+	expect(mocks.runChannel).toHaveBeenCalledTimes(2);
+	expect(mocks.runChannel).toHaveBeenNthCalledWith(2, 'UC1', {
+		deadline: expect.any(Number),
+		forceDryRun: true,
+		window: { boundary: '2026-05-01T00:00:00.000Z', pageToken: 'tok-1' }
+	});
+	expect(await res.json()).toMatchObject({ ok: true, results: { UC1: normal }, dryRunWindow: drain });
+	const row = await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get();
+	expect(row?.dryRunPageToken).toBe('tok-2');
+	expect(row?.dryRunBoundary).toBe('2026-05-01T00:00:00.000Z'); // boundary stays until the window completes
+});
+
+test('clears the drain state when the dry-run window completes', async () => {
+	await testDb().db.insert(channels).values({
+		id: 'UC1',
+		title: 'One',
+		refreshTokenEnc: 'enc',
+		dryRunBoundary: '2026-05-01T00:00:00.000Z',
+		dryRunPageToken: 'tok-9'
+	});
+	mocks.runChannel
+		.mockResolvedValueOnce({ fetched: 0, acted: 0, queued: 0, partial: false, skipped: false, dryRun: true })
+		.mockResolvedValueOnce({ fetched: 40, acted: 1, queued: 0, partial: false, skipped: false, dryRun: true, windowComplete: true, windowNextPageToken: null });
+
+	await call({ bearer: 'test-secret' });
+
+	const row = await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get();
+	expect(row?.dryRunBoundary).toBeNull();
+	expect(row?.dryRunPageToken).toBeNull();
+});
+
+test('a channel with a drain in flight is selected before older ordinary channels', async () => {
+	// Otherwise a busy rotation would starve the drain (a preview the user is
+	// actively waiting on) behind every ordinary channel.
+	await testDb().db.insert(channels).values({ id: 'UC-old', title: 'Old', refreshTokenEnc: 'enc', lastRunAt: '2026-01-01T00:00:00.000Z' });
+	await testDb().db.insert(channels).values({
+		id: 'UC-drain',
+		title: 'Drain',
+		refreshTokenEnc: 'enc',
+		lastRunAt: '2026-08-01T00:00:00.000Z',
+		dryRunBoundary: '2026-05-01T00:00:00.000Z'
+	});
+	mocks.runChannel.mockResolvedValue({ fetched: 0, acted: 0, queued: 0, partial: false, skipped: false, dryRun: true, windowComplete: true, windowNextPageToken: null });
+
+	await call({ bearer: 'test-secret' });
+
+	expect(mocks.runChannel.mock.calls[0][0]).toBe('UC-drain');
+});
+
+test('a drain failure is loud, surfaced in the payload, and never masks the normal run', async () => {
+	await testDb().db.insert(channels).values({
+		id: 'UC1',
+		title: 'One',
+		refreshTokenEnc: 'enc',
+		dryRunBoundary: '2026-05-01T00:00:00.000Z',
+		dryRunPageToken: 'tok-1'
+	});
+	const normal = { fetched: 2, acted: 1, queued: 0, partial: false, skipped: false, dryRun: true };
+	mocks.runChannel.mockResolvedValueOnce(normal).mockRejectedValueOnce(new Error('drain exploded'));
+	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+	try {
+		const res = await call({ bearer: 'test-secret' });
+
+		expect(res.status).toBe(200);
+		expect(await res.json()).toMatchObject({ ok: true, results: { UC1: normal }, dryRunWindow: { error: 'drain exploded' } });
+		expect(spy).toHaveBeenCalled();
+		// The drain state is untouched so the next invocation retries it.
+		const row = await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get();
+		expect(row?.dryRunBoundary).toBe('2026-05-01T00:00:00.000Z');
+		expect(row?.dryRunPageToken).toBe('tok-1');
+	} finally {
+		spy.mockRestore();
+	}
+});
+
+test('a channel without a drain runs once and reports no window work', async () => {
+	await testDb().db.insert(channels).values({ id: 'UC1', title: 'One', refreshTokenEnc: 'enc' });
+	mocks.runChannel.mockResolvedValue({ fetched: 0, acted: 0, queued: 0, partial: false, skipped: false, dryRun: true });
+
+	const res = await call({ bearer: 'test-secret' });
+
+	expect(mocks.runChannel).toHaveBeenCalledTimes(1);
+	const body = await res.json();
+	expect(body.dryRunWindow).toBeUndefined();
+});

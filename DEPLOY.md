@@ -24,6 +24,10 @@ The repo is deploy-ready: `netlify.toml` pins the build (`npm run build`,
 publish `build`, Node 24) and `netlify/functions/cron.mjs` is a Netlify
 Scheduled Function that triggers one bounded moderation run every minute
 (during early operation; raise to `*/15 * * * *` when user volume grows).
+Scheduled functions only fire on the published production deploy — branch
+deploys and Deploy Previews never trigger them — so non-production
+environments drain via `node --env-file=.env scripts/dev-cron.mjs`
+(see AGENTS.md, Project Structure).
 The steps below are the one-time manual setup.
 
 ## 1. Database (Turso)

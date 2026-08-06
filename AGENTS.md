@@ -216,7 +216,13 @@ The cron trigger is a Netlify Scheduled Function in
 `*/15 * * * *` when user volume grows; calls `GET $APP_URL/api/cron`
 with the secret in an `Authorization: Bearer` header; the endpoint also keeps
 the plan-documented `?secret=` query form for manual triggers). Deployment
-steps live in [DEPLOY.md](DEPLOY.md).
+steps live in [DEPLOY.md](DEPLOY.md). **Scheduled functions only fire on the
+published production deploy** — branch deploys (including `dev`) and
+Deploy Previews never trigger them, and nothing fires against `npm run dev`.
+In every non-production environment the pipeline only advances when something
+calls `GET /api/cron`: use `node --env-file=.env scripts/dev-cron.mjs`
+(`--once` for a single tick) alongside the dev server, pointing `APP_URL` at
+whichever instance should drain.
 
 Approved dependencies only (execution plan v3): `drizzle-orm`,
 `@libsql/client`, the SvelteKit adapter, `recheck` (runtime); `drizzle-kit`,
@@ -335,6 +341,9 @@ I8/I10) — the consent row itself is kept, anonymized.
 Use Node 24 and npm 11.
 
 - `npm run dev` — start local development.
+- `npm run dev:cron` — tick `GET /api/cron` every 60s against `APP_URL`
+  (default localhost) so history scans and dry-run windows actually drain
+  outside production; run it alongside `npm run dev`.
 - `npm run check` — run SvelteKit sync and strict diagnostics.
 - `npm run build` — create the Netlify deployment build.
 - `npm run preview` — serve the production build locally.

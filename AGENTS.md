@@ -5,23 +5,20 @@
 Act as a pragmatic repository contributor: make the smallest safe change,
 validate it, and leave unrelated work untouched.
 
-## Agent Split (multiple concurrent agents work in this repo)
+## Branching Model (sole full-stack dev + `dev` branch)
 
-Three agents own distinct layers. Respect the boundaries: if your task needs
-work in another agent's layer, hand it off to the owner (or ask the human to
-route it) instead of implementing it yourself.
+One agent works the full stack. There are no per-layer agent boundaries.
 
-- **Backend:** SvelteKit server code — routes/actions, auth/OAuth, cron,
-  moderation pipeline, external API integrations (YouTube, Google, OpenAI),
-  sessions, and tests for all of the above. Consumes the schema through
-  Drizzle but does not change it.
-- **Database engineering:** schema design, Drizzle migrations, indexes, query
-  tuning, Turso operations.
-- **Frontend engineering:** Svelte components, styles, page UI.
-
-Because agents work concurrently, always work in your own git worktree and
-branch — never switch branches in, or commit to, a checkout another agent is
-using.
+- **`dev` is the integration branch.** All work happens on short-lived
+  feature branches off `dev` (PRs target `dev`), or directly on `dev` for
+  small changes. Work in the `.worktrees/dev` worktree — never switch
+  branches in a checkout in use elsewhere.
+- **`main` is production.** Only the human merges `dev → main`, batched, to
+  control Netlify production-deploy credit spend. Never open a PR from a
+  feature branch to `main`, never push to `main` directly.
+- Keep `dev` releasable: `npm run check`, `npm run build`, and
+  `npm run test` green at all times so the human can batch-merge at any
+  point.
 
 # Rules
 - Always fail loudly.
@@ -95,17 +92,18 @@ sees them. Edit the source in the repo, then re-copy to install updates.
 
 Human review happens via pull requests. Executor rules:
 
-- **One branch per phase**, created from an up-to-date `main`:
+- **One branch per phase**, created from an up-to-date `dev`:
   `phase-a-scaffold`, `phase-b-database`, `phase-c-server-libs`,
   `phase-d-tests`, `phase-e-auth-cron`, `phase-f-ui`, `phase-g-design`,
   `phase-h-e2e`.
 - **Commit after every step** with message `step <N>: <step name>`.
 - **Never open a PR while `npm run check`, `npm run build`, or `npm run test`
   is red.** The PR is the proof of green, not the place to discover red.
-- After a phase's last step passes its Verify: push, open the PR to `main`,
+- After a phase's last step passes its Verify: push, open the PR to `dev`,
   then **STOP** until the human confirms the merge. Resume with
-  `git checkout main && git pull` and the next phase branch.
+  `git checkout dev && git pull` and the next phase branch.
 - **Never** push to `main` directly, never merge your own PR, never `--force`.
+  `dev → main` is the human's batched release, not an executor step.
 - **Every review finding (human or bot) gets a failing test BEFORE its fix.**
   Add the reproducing test to the phase branch, watch it fail, then fix, watch
   it pass, commit both together (`fix: phase <X> review — <what>`), push, stop

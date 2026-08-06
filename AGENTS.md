@@ -141,7 +141,13 @@ Human review happens via pull requests. Executor rules:
   has the same guarantees against a live deployment; because `comments` rows
   are never written, dry-run audit rows carry the comment text themselves
   (`audit_log.text`, ≤500 chars). `forceDryRun` can only turn dry-run ON —
-  never flip an env-dry deployment live.
+  never flip an env-dry deployment live. The preview covers a selected month
+  window (1/3/6/12/24, default 3): the first page scores synchronously, then
+  cron drains one page per invocation (drain state in
+  `channels.dry_run_boundary`/`dry_run_page_token`, independent of the live
+  cursor; draining channels sort first in the rotation). Window mode
+  deliberately re-scores comments real runs already moderated — that
+  re-scoring is the point of the preview.
 - **I9 — Tests are the spec.** No PR opens while checks/tests are red.
 - **I10 — Bounded runs.** One channel per cron invocation (least-recently-run
   first), one page (≤100 comments) per run. Bursts drain across runs via the

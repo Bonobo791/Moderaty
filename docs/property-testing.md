@@ -89,7 +89,7 @@ replace either, and **property tests never count toward Stryker kill claims**
 | Batch | Branch / PR | Scope | Outcome |
 |---|---|---|---|
 | Infrastructure | `pbt-infra` | `testarbitraries.ts` + meta-tests (27), `wipeTables` extraction, this doc | 27/27 meta-tests green; scoped Stryker on `testarbitraries.ts` + `testdb.ts` **100%** — 49+27 killed, 0 survived, 1 justified exclusion (response `kind` string never read by the parser) |
-| P1 (planned) | `pbt-batch-1` | crypto round-trip + tamper, oauthState round-trip/bounds, session uniqueness + sliding cap | — |
+| P1 | `dev` | crypto round-trip + tamper + wrong-key (3 properties), oauthState store/read round-trip & cap + read totality (2), session token uniqueness/format + sliding-cap dichotomy (2) — `crypto.pbt.test.ts`, `oauthState.pbt.test.ts`, `session.pbt.test.ts` | 7/7 properties green (default 100 runs each; full suite 1041 tests green). Burn-in at FC_NUM_RUNS=1000 caught one under-constrained arbitrary: the tamper index could land on a base64 char carrying padding bits ("XX==" quantum), leaving decoded bytes unchanged — counterexample `["",74357335,1]` fixed by excluding the last three chars, pinned as an `examples:` entry. Mental-mutation check per property documented in `// Property audit:` comments (tag-ignored decrypt, uncapped store, missing lazy delete, flipped renewal guard all go red). No source bugs found |
 
 First-contact lesson (infra batch): three meta-tests failed on values that
 should pass — single-expression arrow predicates returned vitest's `Assertion`

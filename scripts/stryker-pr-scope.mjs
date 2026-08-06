@@ -44,6 +44,7 @@ const execFileAsync = promisify(execFile);
 // Mirrors the exclusions in stryker.config.json's mutate globs.
 const EXCLUDED_FILES = new Set([
 	'src/lib/server/testuser.ts',
+	'src/lib/auto-refresh.svelte.ts',
 	'src/routes/terms/+page.ts',
 	'src/routes/privacy/+page.ts',
 	'src/routes/dpa/+page.ts'

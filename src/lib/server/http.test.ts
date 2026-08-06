@@ -17,7 +17,7 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { afterEach, expect, test, vi } from 'vitest';
-import { fetchWithRetry } from './http';
+import { assertBeforeDeadline, DeadlineExceededError, fetchWithRetry } from './http';
 
 afterEach(() => {
 	vi.unstubAllGlobals();
@@ -131,4 +131,87 @@ test('retries server errors and network failures', async () => {
 	// The deadline bounds the exponential sleep while leaving room for the retry.
 	expect((await fetchWithRetry('https://example.test', {}, Date.now() + 1100)).status).toBe(200);
 	expect(calls).toBe(2);
+});
+
+test('assertBeforeDeadline passes with no deadline or a future one', () => {
+	expect(() => assertBeforeDeadline()).not.toThrow();
+	expect(() => assertBeforeDeadline(Date.now() + 60_000)).not.toThrow();
+});
+
+test('assertBeforeDeadline throws once the deadline is reached', () => {
+	expect(() => assertBeforeDeadline(Date.now() - 1)).toThrow(DeadlineExceededError);
+	expect(() => assertBeforeDeadline(Date.now() - 1)).toThrow('request deadline exceeded');
+
+	vi.useFakeTimers();
+	vi.setSystemTime(1_000);
+	// At the exact deadline the request is already too late (>=, not >).
+	expect(() => assertBeforeDeadline(1_000)).toThrow(DeadlineExceededError);
+});
+
+test('backs off exponentially when a retryable response has no Retry-After header', async () => {
+	vi.useFakeTimers();
+	const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+	vi.stubGlobal('fetch', vi.fn()
+		.mockResolvedValueOnce(new Response('', { status: 429 }))
+		.mockResolvedValueOnce(new Response('', { status: 429 }))
+		.mockResolvedValue(new Response('', { status: 200 })));
+
+	const promise = fetchWithRetry('https://example.test');
+	await vi.advanceTimersByTimeAsync(1_000);
+	await vi.advanceTimersByTimeAsync(2_000);
+	expect((await promise).status).toBe(200);
+
+	// 1s then 2s: a missing header must fall back to exponential backoff
+	// (doubling per attempt), not to zero delay or a flat 1s.
+	expect(setTimeoutSpy.mock.calls.map((call) => call[1])).toEqual([1_000, 2_000]);
+});
+
+test('honours Retry-After as an HTTP date and ignores an unparseable value', async () => {
+	vi.useFakeTimers();
+	vi.setSystemTime(1_000_000);
+	const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+	vi.stubGlobal('fetch', vi.fn()
+		.mockResolvedValueOnce(new Response('', {
+			status: 429,
+			headers: { 'Retry-After': new Date(1_000_000 + 2_000).toUTCString() }
+		}))
+		.mockResolvedValueOnce(new Response('', {
+			status: 429,
+			headers: { 'Retry-After': 'not-a-date' }
+		}))
+		.mockResolvedValue(new Response('', { status: 200 })));
+
+	const promise = fetchWithRetry('https://example.test');
+	await vi.advanceTimersByTimeAsync(2_000);
+	await vi.advanceTimersByTimeAsync(2_000);
+	expect((await promise).status).toBe(200);
+
+	// A valid HTTP date waits until that date; a value that is neither a
+	// number nor a parseable date must fall back to exponential backoff
+	// (2s for the second attempt), never to a NaN/0 delay.
+	expect(setTimeoutSpy.mock.calls.map((call) => call[1])).toEqual([2_000, 2_000]);
+});
+
+test('fails immediately without a retry sleep when an error surfaces at the deadline', async () => {
+	vi.useFakeTimers();
+	vi.setSystemTime(1_000);
+	const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+	const fetch = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+	vi.stubGlobal('fetch', fetch);
+
+	let caught: unknown;
+	const promise = fetchWithRetry('https://example.test', {}, 1_000).catch((error: unknown) => {
+		caught = error;
+	});
+	// advanceTimersByTimeAsync(0) drains any zero-delay retry sleeps: if the
+	// error were (wrongly) retried instead of failing fast, the loop would
+	// burn through its remaining attempts here and `caught` would still be
+	// set — but only after scheduling sleeps, which the spy must never see.
+	await vi.advanceTimersByTimeAsync(0);
+	await promise;
+
+	expect(caught).toBeInstanceOf(DeadlineExceededError);
+	expect((caught as Error).message).toBe('request deadline exceeded');
+	expect(setTimeoutSpy).not.toHaveBeenCalled();
+	expect(fetch).not.toHaveBeenCalled();
 });

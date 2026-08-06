@@ -56,9 +56,15 @@ repo root (`npx stryker run` for whole-module audits, a scoped `--mutate`
 glob or `node scripts/stryker-pr-scope.mjs` for PR-scale work — StrykerJS
 has no `--since` flag, that is Stryker.NET; the script prints the changed
 src files as a `--mutate` scope, filtered like the config, and an empty
-result means skip the run),
+result means skip the run — the script's `EXCLUDED_FILES` must mirror the
+config's mutate globs whenever the policy exclusions change),
 `npx stryker run --incremental` to reuse the cache; the `json`
-reporter in config gives machine-readable survivors for the agent loop). In
+reporter in config gives machine-readable survivors for the agent loop). The
+mutate scope covers `src/**/*.ts` minus tests, the dev-seed helper, the
+static legal page loaders, and `src/lib/auto-refresh.svelte.ts` (policy
+exclusion: vitest compiles `.svelte.ts` for SSR, where `$effect` is a no-op,
+so its mutants are unreachable in this harness; its SSR no-op contract is
+test-pinned and the client behavior is e2e territory). In
 a fresh checkout or worktree run `npx svelte-kit sync` first — Stryker's
 vitest runner needs the generated `.svelte-kit/tsconfig.json`. Verify
 survivors by hand before writing kill tests — the score is a lead, not a

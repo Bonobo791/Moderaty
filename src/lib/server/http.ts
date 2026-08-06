@@ -50,7 +50,11 @@ export async function jsonResponse(response: Response, label: string): Promise<u
  * @throws DeadlineExceededError if the deadline has been reached or passed.
  */
 export function assertBeforeDeadline(deadline?: number) {
-	if (deadline !== undefined && Date.now() >= deadline) throw new DeadlineExceededError();
+	if (
+		// Stryker disable next-line ConditionalExpression: `deadline !== undefined` -> `true` is equivalent — `Date.now() >= undefined` is always false, so the && result is unchanged; the directive also sweeps the killable whole-condition siblings that start on the same line
+		deadline !== undefined &&
+		Date.now() >= deadline
+	) throw new DeadlineExceededError();
 }
 
 /**
@@ -78,7 +82,12 @@ function retryDelay(response: Response | undefined, retry: number): number {
  * @returns `true` if no response was received or the status indicates throttling or a server error, `false` otherwise
  */
 function retryable(response: Response | undefined): boolean {
-	return response === undefined || response.status === 429 || response.status >= 500;
+	return (
+		// Stryker disable next-line ConditionalExpression: the only call site (fetchWithRetry) guards with `response &&` before invoking retryable, so `response === undefined` can never be observed here; the directive also sweeps the killable whole-chain and sub-chain siblings that start on the same line
+		response === undefined ||
+		response.status === 429 ||
+		response.status >= 500
+	);
 }
 
 function requestTimeout(deadline?: number): number {
@@ -96,7 +105,11 @@ async function fetchAttempt(input: RequestInfo | URL, init: RequestInit, deadlin
 		return { response: await fetch(input, { ...init, signal }) };
 	} catch (error) {
 		if (init.signal?.aborted) throw error;
-		if (deadline !== undefined && Date.now() >= deadline) throw new DeadlineExceededError();
+		if (
+			// Stryker disable next-line ConditionalExpression: `deadline !== undefined` -> `true` is equivalent — `Date.now() >= undefined` is always false, so the && result is unchanged; the directive also sweeps the killable whole-condition siblings that start on the same line
+			deadline !== undefined &&
+			Date.now() >= deadline
+		) throw new DeadlineExceededError();
 		return { error };
 	}
 }

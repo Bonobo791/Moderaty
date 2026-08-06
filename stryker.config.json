@@ -5,6 +5,7 @@
     "src/**/*.ts",
     "!src/**/*.test.ts",
     "!src/lib/server/testuser.ts",
+    "!src/lib/auto-refresh.svelte.ts",
     "!src/routes/terms/+page.ts",
     "!src/routes/privacy/+page.ts",
     "!src/routes/dpa/+page.ts"

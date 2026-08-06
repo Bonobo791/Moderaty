@@ -232,18 +232,35 @@ must not appear in `src/`.
 
 ## Environments
 
-- **All agent work happens against the Turso DEV database.** Local
-  `npm run dev` and `npm run db:migrate` use the
-  `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN` in the checkout's `.env`, which
-  point at the dev database. Migration verification, seed data, and schema
-  experiments all happen there — it is safe to break.
-- **Production only goes live through Netlify.** The production app is the
-  Netlify deploy of `main`; its env vars (including the production Turso
-  credentials) live in Netlify site settings, never in the repo. Do not point
-  local tooling at the production database — production migrations run per
-  [DEPLOY.md](DEPLOY.md) §1, after the code that needs them has merged.
-- Netlify branch deploys preview feature branches; `APP_URL` and `DRY_RUN`
-  are set per-deploy-context there, not in `.env`.
+Dev and production are **fully isolated**, each with its own Google OAuth
+client and its own Turso database:
+
+| | Google OAuth client | Turso database | Netlify env context |
+|---|---|---|---|
+| **Dev** | `880114106606-kmn2b9p…` | `dev-2-bonobo791` | `branch-deploys` |
+| **Production** | `880114106606-1t4edg0…` | `moderaty-bonobo791` | `production` |
+
+- **All agent work uses the dev credentials**, which live in the dev
+  worktree's `.env` (`.worktrees/dev/.env`). Migration verification, seed
+  data, and schema experiments all happen against `dev-2` — it is safe to
+  break.
+- **The main checkout's `.env` holds PRODUCTION credentials** (Google client
+  `1t4edg0…`, Turso `moderaty-bonobo791`) so the human can run production
+  operations locally (migrations per [DEPLOY.md](DEPLOY.md) §1, backups).
+  It is NOT a dev config: never `npm run dev` against it, never copy its
+  values into a dev `.env`, and never point any dev tooling at the
+  production database. Production database changes are human-only.
+- **Netlify carries both environments**: the `production` deploy context
+  (serves `main`) has the production client + database, the
+  `branch-deploys` context (the `dev` branch and PR previews) has the dev
+  client + database. Both contexts set the same ten keys; `APP_URL` and
+  `DRY_RUN` differ per context, not in `.env`.
+- **OAuth grants are per-client.** A channel connected in one environment
+  cannot be token-refreshed in the other — Google answers
+  `401 unauthorized_client`, which surfaces as a failed dry run / cron run.
+  Restoring a production backup into the dev database copies channel rows
+  whose grants are useless there; reconnect the channel inside the dev
+  deployment to mint a dev-client grant.
 
 ## Accounts & Sessions
 

@@ -57,7 +57,9 @@ export async function tickOnce(fetchImpl = fetch) {
 		throw new Error(`cron endpoint answered ${res.status}: ${(await res.text()).slice(0, 200)}`);
 	}
 	const payload = await res.json();
-	console.log(`[${new Date().toISOString()}] tick → ${JSON.stringify(payload)}`);
+	// Strip CR/LF before logging: the payload is remote content and a raw
+	// newline in it would let a response forge extra log lines (S5145).
+	console.log(`[${new Date().toISOString()}] tick → ${JSON.stringify(payload).replaceAll(/[\r\n]+/g, ' ')}`);
 	return payload;
 }
 

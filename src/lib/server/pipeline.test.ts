@@ -621,6 +621,16 @@ test('window mode reports continuation when the window has more pages, and persi
 	expect(mocks.state.channelUpdates).toEqual([]);
 });
 
+test('window mode is complete when the listing ends without hitting the boundary', async () => {
+	// fetchNewComments clears nextPageToken whenever the listing is exhausted.
+	// For an all-time window nothing ever trips the boundary, so THIS is the
+	// only completion signal — reporting incomplete would hand cron a null
+	// pageToken and restart the window from the top, rescoring it forever.
+	const result = await runWindowPage({ nextPageToken: null, reachedCursor: false });
+
+	expect(result).toMatchObject({ windowComplete: true, windowNextPageToken: null });
+});
+
 test('writes an approval audit entry for a low-risk AI decision', async () => {
 	mocks.scoreComment.mockResolvedValue(moderation(0.34));
 

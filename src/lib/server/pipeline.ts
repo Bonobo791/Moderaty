@@ -290,22 +290,21 @@ async function decideNewComments(
 ): Promise<{ decisions: Decision[]; failures: string[] }> {
 	// Dry-run window mode (rescore: true) skips the stored-IDs dedupe entirely:
 	// re-scoring comments a real run already moderated is the point of the
-	// preview. The within-batch dedupe below still applies.
+	// preview. The within-batch dedupe below still applies. The DB query is
+	// skipped in both no-consult cases (rescore, empty page).
 	// Stryker disable ArrayDeclaration: equivalent — with an empty page there are no comments to consult existingIds for, so its contents are never read
-	const existingIds = rescore
-		? new Set<string>()
-		: new Set(
-				page.comments.length
-					? (
-							await db
-								.select({ id: comments.id })
-								.from(comments)
-								.where(inArray(comments.id, page.comments.map((comment) => comment.id)))
-								.all()
-						).map((comment) => comment.id)
-					: []
-			);
+	const storedIds =
+		!rescore && page.comments.length
+			? (
+					await db
+						.select({ id: comments.id })
+						.from(comments)
+						.where(inArray(comments.id, page.comments.map((comment) => comment.id)))
+						.all()
+				).map((comment) => comment.id)
+			: [];
 	// Stryker restore ArrayDeclaration
+	const existingIds = new Set(storedIds);
 	const rulesForChannel = prepareRules(await db.select().from(rules).where(eq(rules.channelId, channelId)).all());
 	// Dedupe twice: against already-stored comments AND within this batch.
 	// commentThreads pagination can repeat an item across page boundaries, and

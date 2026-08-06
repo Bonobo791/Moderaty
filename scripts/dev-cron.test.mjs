@@ -58,6 +58,10 @@ describe('dev cron tick', () => {
 		const [url, init] = fetch.mock.calls[0];
 		expect(url).toBe('http://localhost:5173/api/cron');
 		expect(init.headers.Authorization).toBe('Bearer test-secret');
+		// The logged line must never carry a raw newline from the payload —
+		// that is how a response forges log lines (S5145).
+		expect(console.log).toHaveBeenCalledTimes(1);
+		expect(console.log.mock.calls[0][0]).not.toMatch(/[\r\n]/);
 	});
 
 	it('throws on a non-OK response instead of swallowing the failure', async () => {

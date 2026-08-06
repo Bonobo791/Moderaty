@@ -299,8 +299,11 @@ test('set protections rejects a signed-out request with 401', async () => {
 	expect(await protectionsOf('UC1')).toEqual({ protectLgbtqia: 0, protectWomen: 0 });
 });
 
-function dryRun(channelId: string, user: typeof OWNER | null = OWNER) {
-	return actions.dryRun({ request: postForm({ channelId }), locals: { user } } as never);
+function dryRun(channelId: string, user: typeof OWNER | null = OWNER, months?: string) {
+	return actions.dryRun({
+		request: postForm(months === undefined ? { channelId } : { channelId, months }),
+		locals: { user }
+	} as never);
 }
 
 test('dry run previews a live deployment through runChannel and echoes the counts', async () => {
@@ -311,7 +314,7 @@ test('dry run previews a live deployment through runChannel and echoes the count
 		// cannot claim it underneath the run.
 		const ch = await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get();
 		leaseDuringRun = ch?.leaseExpiresAt;
-		return { fetched: 3, acted: 1, queued: 1, partial: false, skipped: false, dryRun: true };
+		return { fetched: 3, acted: 1, queued: 1, partial: false, skipped: false, dryRun: true, windowComplete: true, windowNextPageToken: null };
 	});
 
 	const before = Date.now();
@@ -319,9 +322,11 @@ test('dry run previews a live deployment through runChannel and echoes the count
 	const after = Date.now();
 
 	expect(mocks.runChannel).toHaveBeenCalledWith('UC1', {
-		maxPages: 1,
 		deadline: expect.any(Number),
-		forceDryRun: true
+		forceDryRun: true,
+		// Default window: last 3 months (same preset default as Analyze history).
+		// One page per drain step is forced by window mode inside runChannel.
+		window: { boundary: expect.any(String), pageToken: null }
 	});
 	// One page with a hard 20s ceiling so the preview fits the serverless window.
 	const deadline = mocks.runChannel.mock.calls[0][1].deadline as number;
@@ -332,12 +337,18 @@ test('dry run previews a live deployment through runChannel and echoes the count
 	// request dies mid-preview.
 	expect(Date.parse(leaseDuringRun ?? '')).toBeGreaterThanOrEqual(before + 59_000);
 	expect(Date.parse(leaseDuringRun ?? '')).toBeLessThanOrEqual(after + 60_000);
-	expect(res).toMatchObject({ ok: true, scope: 'dryRun', channelId: 'UC1', fetched: 3, acted: 1, queued: 1, dryRun: true });
+	// Default 3-month window: boundary ≈ now − 90 days.
+	const boundary = Date.parse(mocks.runChannel.mock.calls[0][1].window.boundary as string);
+	expect(boundary).toBeLessThanOrEqual(before - 90 * 24 * 60 * 60 * 1000 + 5_000);
+	expect(boundary).toBeGreaterThanOrEqual(after - 90 * 24 * 60 * 60 * 1000 - 5_000);
+	expect(res).toMatchObject({ ok: true, scope: 'dryRun', channelId: 'UC1', months: 3, fetched: 3, acted: 1, queued: 1, dryRun: true, background: false });
 	// The preview takes the cron lease atomically and releases it afterwards;
 	// a preview is not a run, so lastRunAt is never touched.
 	const ch = await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get();
 	expect(ch?.leaseExpiresAt).toBeNull();
 	expect(ch?.lastRunAt).toBeNull();
+	expect(ch?.dryRunBoundary).toBeNull();
+	expect(ch?.dryRunPageToken).toBeNull();
 });
 
 test('dry run rejects a signed-out request with 401 and never runs', async () => {
@@ -393,6 +404,63 @@ test('a failed dry run is loud on the server and a generic 502 to the client', a
 	} finally {
 		spy.mockRestore();
 	}
+});
+
+test('dry run rejects an unsupported months preset with 400 and never runs', async () => {
+	await seedChannel('UC1');
+
+	const res = await dryRun('UC1', OWNER, '7');
+
+	expect(res).toMatchObject({ status: 400, data: { scope: 'dryRun', channelId: 'UC1' } });
+	expect(mocks.runChannel).not.toHaveBeenCalled();
+});
+
+test('an incomplete window persists the drain state for cron and reports background work', async () => {
+	await seedChannel('UC1');
+	mocks.runChannel.mockResolvedValue({
+		fetched: 100,
+		acted: 5,
+		queued: 2,
+		partial: false,
+		skipped: false,
+		dryRun: true,
+		windowComplete: false,
+		windowNextPageToken: 'page-2'
+	});
+
+	const res = await dryRun('UC1', OWNER, '6');
+
+	expect(res).toMatchObject({ ok: true, months: 6, background: true });
+	const ch = await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get();
+	expect(ch?.dryRunPageToken).toBe('page-2');
+	// 6-month window: boundary ≈ now − 180 days.
+	expect(Date.parse(ch?.dryRunBoundary ?? '')).toBeLessThan(Date.now() - 180 * 24 * 60 * 60 * 1000 + 60_000);
+	expect(Date.parse(ch?.dryRunBoundary ?? '')).toBeGreaterThan(Date.now() - 180 * 24 * 60 * 60 * 1000 - 60_000);
+});
+
+test('a completed window clears the drain state, resetting any older drain', async () => {
+	await seedChannel('UC1');
+	await testDb()
+		.db.update(channels)
+		.set({ dryRunBoundary: '2026-01-01T00:00:00.000Z', dryRunPageToken: 'old-token' })
+		.where(eq(channels.id, 'UC1'));
+	mocks.runChannel.mockResolvedValue({
+		fetched: 10,
+		acted: 0,
+		queued: 0,
+		partial: false,
+		skipped: false,
+		dryRun: true,
+		windowComplete: true,
+		windowNextPageToken: null
+	});
+
+	const res = await dryRun('UC1', OWNER, '1');
+
+	expect(res).toMatchObject({ ok: true, months: 1, background: false });
+	const ch = await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get();
+	expect(ch?.dryRunBoundary).toBeNull();
+	expect(ch?.dryRunPageToken).toBeNull();
 });
 
 test.each([

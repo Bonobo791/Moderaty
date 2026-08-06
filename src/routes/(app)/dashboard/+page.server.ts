@@ -179,6 +179,12 @@ export const actions = {
 		const user = requireUser(locals);
 		const f = await request.formData();
 		const channelId = String(f.get('channelId') ?? '');
+		// Same presets as Analyze history; absent → 3 (the UI default).
+		const months = f.has('months') ? Number(f.get('months')) : 3;
+		if (![1, 3, 6, 12, 24].includes(months)) {
+			return fail(400, { scope: 'dryRun', channelId, error: 'dry-run window must be 1, 3, 6, 12, or 24 months' });
+		}
+		const boundary = new Date(Date.now() - months * 30 * 24 * 60 * 60 * 1000).toISOString();
 		// Atomic lease claim, same protocol as cron/analyzeHistory: the UPDATE's
 		// predicate makes concurrent claimants single-winner (TOCTOU-safe), and
 		// it doubles as the tenancy check — another team's channel matches 0
@@ -204,16 +210,31 @@ export const actions = {
 			}
 			return fail(404, { scope: 'dryRun', channelId, error: 'channel not found' });
 		}
-		// One page, hard 20 s ceiling: scoring is concurrent, so this fits the
-		// serverless window; a partial result is surfaced honestly. The run
+		// First page synchronously (one page, hard 20 s ceiling); a window with
+		// more pages drains one page per cron invocation afterwards. The run
 		// writes nothing durable except dry-run audit rows (I8).
 		try {
 			const result = await runChannel(channelId, {
-				maxPages: 1,
 				deadline: Date.now() + 20_000,
-				forceDryRun: true
+				forceDryRun: true,
+				window: { boundary, pageToken: null }
 			});
-			return { ok: true as const, scope: 'dryRun', channelId, ...result };
+			// Persist the drain state under the held lease: incomplete windows
+			// hand cron the continuation; complete ones clear any older drain.
+			// A deadline-partial result has no continuation — nothing is stored,
+			// the next click starts fresh.
+			if (result.windowComplete === true) {
+				await db
+					.update(channels)
+					.set({ dryRunBoundary: null, dryRunPageToken: null })
+					.where(eq(channels.id, channelId));
+			} else if (result.windowComplete === false) {
+				await db
+					.update(channels)
+					.set({ dryRunBoundary: boundary, dryRunPageToken: result.windowNextPageToken ?? null })
+					.where(eq(channels.id, channelId));
+			}
+			return { ok: true as const, scope: 'dryRun', channelId, months, ...result, background: result.windowComplete === false };
 		} catch (e) {
 			// Loud server-side, generic client-side — never return raw
 			// YouTube/OpenAI error detail to the browser.

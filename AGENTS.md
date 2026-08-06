@@ -26,7 +26,7 @@ One agent works the full stack. There are no per-layer agent boundaries.
 - ALWAYS write fallbacks that are loud, log to the server, and show to the user.
 - Every test must fail if the real logic is wrong. If a test still passes when the function returns garbage, rewrite the test.
 - DO NOT copy and paste code. DO create reusable code.
-- Review every PR comment for validity. Fix each valid issue. Post a triage comment. Reply to every bot comment, whether or not you make a code change.
+- When I say "triage", review every PR comment for validity. Fix each valid issue. Post a triage comment. Reply to every bot comment, whether or not you make a code change.
 - NEVER develop on the default branch. Always make a new one.
 - NEVER make changes to production databases. That is for humans only.
 - When I say "clean up", that means to clean your worktrees and branches.

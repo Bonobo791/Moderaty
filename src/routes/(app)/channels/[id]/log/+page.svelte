@@ -98,4 +98,14 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			</tbody>
 		</table>
 	</div>
+	{#if data.hasPrev || data.nextCursor}
+		<nav class="pager" aria-label="Audit log pages">
+			{#if data.hasPrev}
+				<a class="btn secondary small" href="/channels/{data.ch.id}/log">← Newest</a>
+			{/if}
+			{#if data.nextCursor}
+				<a class="btn secondary small" href="/channels/{data.ch.id}/log?before={encodeURIComponent(data.nextCursor)}">Older →</a>
+			{/if}
+		</nav>
+	{/if}
 {/if}

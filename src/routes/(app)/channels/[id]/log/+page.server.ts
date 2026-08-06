@@ -24,7 +24,24 @@ import { refreshAccessToken, setModerationStatus } from '$lib/server/youtube';
 import { decrypt } from '$lib/server/crypto';
 import { env } from '$env/dynamic/private';
 import { error, fail } from '@sveltejs/kit';
-import { and, eq, desc, inArray } from 'drizzle-orm';
+import { and, eq, desc, inArray, lt, or, sql } from 'drizzle-orm';
+
+/** Audit-log page size; the load fetches one extra row to detect a next page. */
+const PAGE_SIZE = 200;
+
+// Keyset cursor for a streaming log: offset paging would skip/duplicate rows
+// as cron keeps inserting. The cursor is the (createdAt, id) pair of the last
+// row on the current page — the same pair the ORDER BY sorts on.
+function parseCursor(raw: string | null): { ts: string; id: number } | null {
+	if (raw === null) return null;
+	const sep = raw.lastIndexOf('|');
+	const ts = sep === -1 ? '' : raw.slice(0, sep);
+	const idRaw = sep === -1 ? '' : raw.slice(sep + 1);
+	if (sep === -1 || Number.isNaN(Date.parse(ts)) || !/^\d{1,15}$/.test(idRaw)) {
+		throw error(400, 'invalid audit-log cursor');
+	}
+	return { ts, id: Number(idRaw) };
+}
 
 // Newest first: the first entry seen per comment is its latest action, and
 // only that one can be undone. 'hold'/'reject' reverse fully via YouTube;
@@ -38,30 +55,54 @@ function undoableFor(latest: boolean, action: string): 'full' | 'comment-only' |
 	return null;
 }
 
-export async function load({ params, locals }) {
+export async function load({ params, locals, url }) {
 	// Database outage: the layout renders the overlay; this load must not 401
 	// on the null-user outage shape.
 	if (locals.dbDown) return { ch: { id: params.id, title: '' }, entries: [], maintenance: true };
 	// Ownership-scoped: another user's channel (and its audit log) reads as "not found".
 	const ch = await ownedChannel(params.id, locals);
+	const cursor = parseCursor(url.searchParams.get('before'));
 	const rows = await db
 		.select()
 		.from(auditLog)
-		.where(eq(auditLog.channelId, params.id))
+		.where(
+			and(
+				eq(auditLog.channelId, params.id),
+				cursor
+					? or(lt(auditLog.createdAt, cursor.ts), and(eq(auditLog.createdAt, cursor.ts), lt(auditLog.id, cursor.id)))
+					: undefined
+			)
+		)
 		// createdAt ties (same-millisecond batch inserts) are broken by the
 		// auto-increment id, or "latest per comment" is undefined behavior.
 		.orderBy(desc(auditLog.createdAt), desc(auditLog.id))
-		.limit(200)
+		.limit(PAGE_SIZE + 1)
 		.all();
-	const seen = new Set<string>();
-	const entries = rows.map((entry) => {
-		const latest = !seen.has(entry.commentId);
-		seen.add(entry.commentId);
-		return { ...entry, undoable: undoableFor(latest, entry.action) };
-	});
+	const hasMore = rows.length > PAGE_SIZE;
+	const page = hasMore ? rows.slice(0, PAGE_SIZE) : rows;
+	// "Latest per comment" must be judged against the WHOLE log, not the page —
+	// a per-page window would mark a superseded action as latest and offer a
+	// bogus Undo. max(id) IS the latest row under the (createdAt, id) ordering,
+	// ties included. Bounded by the page's comment ids.
+	const latestIds = new Map<string, number>();
+	if (page.length) {
+		const latest = await db
+			.select({ commentId: auditLog.commentId, latestId: sql<number>`max(${auditLog.id})` })
+			.from(auditLog)
+			.where(and(eq(auditLog.channelId, params.id), inArray(auditLog.commentId, [...new Set(page.map((row) => row.commentId))])))
+			.groupBy(auditLog.commentId)
+			.all();
+		for (const row of latest) latestIds.set(row.commentId, row.latestId);
+	}
+	const entries = page.map((entry) => ({
+		...entry,
+		undoable: undoableFor(entry.id === latestIds.get(entry.commentId), entry.action)
+	}));
+	const last = page.at(-1);
+	const nextCursor = hasMore && last ? `${last.createdAt}|${last.id}` : null;
 	// Project only what the page renders — never serialize refreshTokenEnc (or
 	// any future secret column) to the browser.
-	return { ch: { id: ch.id, title: ch.title }, entries };
+	return { ch: { id: ch.id, title: ch.title }, entries, nextCursor, hasPrev: cursor !== null };
 }
 
 export const actions = {

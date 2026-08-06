@@ -1376,3 +1376,16 @@ test.each([
 	]);
 	expect(result).toMatchObject({ fetched: 1, acted: 1, dryRun: true });
 });
+
+test('window mode without dry-run semantics fails loudly — it can never go live', async () => {
+	// The window rescore skips the stored-IDs dedupe, so a live window run
+	// would stage duplicate decisions and enforce on re-fetched comments. The
+	// combination must be structurally impossible, not just undocumented.
+	mocks.state.env.DRY_RUN = 'false';
+
+	await expect(
+		runChannel('channel', { window: { boundary: '2026-05-01T00:00:00.000Z', pageToken: null } })
+	).rejects.toThrow('window mode requires dry-run');
+	expect(mocks.fetchNewComments).not.toHaveBeenCalled();
+	expect(mocks.state.insertedAudits).toEqual([]);
+});

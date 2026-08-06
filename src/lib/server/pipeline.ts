@@ -590,6 +590,10 @@ export async function runChannel(
 			throw new Error('DRY_RUN must be true or false');
 		}
 		dryRun = forceDryRun === true || env.DRY_RUN === 'true';
+		// The window rescore skips the stored-IDs dedupe, so a live window run
+		// would stage duplicate decisions and enforce on re-fetched comments —
+		// the combination is refused loudly, before any fetch or write.
+		if (window && !dryRun) throw new Error('window mode requires dry-run semantics (pass forceDryRun)');
 		const accessToken = await refreshAccessToken(decrypt(channel.refreshTokenEnc), deadline);
 		// Window mode (on-demand dry-run drain): one page bounded by the window,
 		// independent of the live cursor/checkpoint — real runs keep advancing

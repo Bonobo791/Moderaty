@@ -499,3 +499,23 @@ test.each([
 	expect(await protectionsOf('Stryker was here!')).toEqual({ protectLgbtqia: 0, protectWomen: 0 });
 	expect(mocks.runChannel).not.toHaveBeenCalled();
 });
+
+test('a deadline-partial preview replaces a stale in-flight drain with the new window', async () => {
+	// A partial result carries no continuation token, but leaving an OLD drain
+	// in place would keep cron draining the window the user just abandoned.
+	// The new window restarts from the top in the background instead.
+	await seedChannel('UC1');
+	await testDb()
+		.db.update(channels)
+		.set({ dryRunBoundary: '2026-01-01T00:00:00.000Z', dryRunPageToken: 'old-token' })
+		.where(eq(channels.id, 'UC1'));
+	mocks.runChannel.mockResolvedValue({ fetched: 50, acted: 0, queued: 0, partial: true, skipped: false, dryRun: true });
+
+	const res = await dryRun('UC1', OWNER, '6');
+
+	expect(res).toMatchObject({ ok: true, months: 6, partial: true, background: true });
+	const ch = await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get();
+	expect(ch?.dryRunPageToken).toBeNull();
+	expect(Date.parse(ch?.dryRunBoundary ?? '')).toBeGreaterThan(Date.now() - 180 * 24 * 60 * 60 * 1000 - 60_000);
+	expect(Date.parse(ch?.dryRunBoundary ?? '')).toBeLessThan(Date.now() - 180 * 24 * 60 * 60 * 1000 + 60_000);
+});

@@ -221,20 +221,24 @@ export const actions = {
 			});
 			// Persist the drain state under the held lease: incomplete windows
 			// hand cron the continuation; complete ones clear any older drain.
-			// A deadline-partial result has no continuation — nothing is stored,
-			// the next click starts fresh.
+			// A deadline-partial result has no continuation token, but leaving an
+			// OLD drain in place would keep cron draining the window the user
+			// just abandoned — so any non-skipped, non-complete result restarts
+			// the NEW window from the top in the background. A skipped run
+			// (channel paused) touches nothing.
+			const background = !result.skipped && result.windowComplete !== true;
 			if (result.windowComplete === true) {
 				await db
 					.update(channels)
 					.set({ dryRunBoundary: null, dryRunPageToken: null })
 					.where(eq(channels.id, channelId));
-			} else if (result.windowComplete === false) {
+			} else if (!result.skipped) {
 				await db
 					.update(channels)
 					.set({ dryRunBoundary: boundary, dryRunPageToken: result.windowNextPageToken ?? null })
 					.where(eq(channels.id, channelId));
 			}
-			return { ok: true as const, scope: 'dryRun', channelId, months, ...result, background: result.windowComplete === false };
+			return { ok: true as const, scope: 'dryRun', channelId, months, ...result, background };
 		} catch (e) {
 			// Loud server-side, generic client-side — never return raw
 			// YouTube/OpenAI error detail to the browser.

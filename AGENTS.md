@@ -21,7 +21,7 @@ One agent works the full stack. There are no per-layer agent boundaries.
   point. 
 
 # Rules
-- Always fail loudly.
+- Always fail loudly. 
 - NEVER write fallbacks that are silent.
 - ALWAYS write fallbacks that are loud, log to the server, and show to the user.
 - Every test must fail if the real logic is wrong. If a test still passes when the function returns garbage, rewrite the test.

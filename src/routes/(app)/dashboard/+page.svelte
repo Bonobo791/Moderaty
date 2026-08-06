@@ -29,6 +29,10 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	// Counts change with every cron run; revalidate like the queue and log pages.
 	autoRefresh();
 
+	// Channel whose dry-run preview is in flight; the button is disabled while
+	// it runs (the action's lease claim also 409s a server-side race).
+	let dryRunPending = $state<string | null>(null);
+
 	function count(channelId: string, status: string): number {
 		const row = data.stats.find((s: any) => s.channelId === channelId && s.status === status);
 		return row ? row.n : 0;
@@ -152,6 +156,41 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			{:else if form?.ok}
 				<p class="muted" role="status">
 					History scan started — cron is working back {form.months === 1 ? '1 month' : `${form.months} months`}. New comments keep flowing into the review queue as it drains.
+				</p>
+			{/if}
+		{/if}
+		<form
+			method="POST"
+			action="?/dryRun"
+			use:enhance={() => {
+				dryRunPending = ch.id;
+				return async ({ update }) => {
+					await update();
+					dryRunPending = null;
+				};
+			}}
+		>
+			<input type="hidden" name="channelId" value={ch.id} />
+			<button
+				class="btn secondary small"
+				type="submit"
+				disabled={dryRunPending === ch.id}
+				aria-label="Run a dry-run preview on {ch.title}"
+			>
+				{dryRunPending === ch.id ? 'Running dry run…' : 'Dry run'}
+			</button>
+		</form>
+		{#if form?.scope === 'dryRun' && form?.channelId === ch.id}
+			{#if form?.error}
+				<p class="error-box" role="alert">{form.error}</p>
+			{:else if form?.skipped}
+				<p class="muted" role="status">Dry run preview: nothing new to preview right now.</p>
+			{:else if form?.ok}
+				<p class="muted" role="status">
+					Dry run preview: {form.fetched} comment{form.fetched === 1 ? '' : 's'} scanned —
+					{form.acted} would be acted on, {form.queued} would go to the review queue.
+					{#if form.partial}Partial — the 20 s preview limit was hit; see the audit log for what completed. {/if}
+					<a href="/channels/{ch.id}/log">See the audit log</a>.
 				</p>
 			{/if}
 		{/if}

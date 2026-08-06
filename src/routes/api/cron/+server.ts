@@ -109,16 +109,21 @@ export const GET: RequestHandler = async ({ url, request }) => {
 					forceDryRun: true,
 					window: { boundary: channel.dryRunBoundary, pageToken: channel.dryRunPageToken ?? null }
 				});
+				// Both writes are predicated on the boundary actually drained: the
+				// row was read BEFORE the atomic claim, so a dashboard preview can
+				// have replanted a new window in between — a stale drain must never
+				// clear or overwrite the replacement state (0-row update = no-op).
+				const drainedBoundary = eq(channels.dryRunBoundary, channel.dryRunBoundary);
 				if (drain.windowComplete === true) {
 					await db
 						.update(channels)
 						.set({ dryRunBoundary: null, dryRunPageToken: null })
-						.where(eq(channels.id, channel.id));
+						.where(and(eq(channels.id, channel.id), drainedBoundary));
 				} else if (drain.windowComplete === false) {
 					await db
 						.update(channels)
 						.set({ dryRunPageToken: drain.windowNextPageToken ?? null })
-						.where(eq(channels.id, channel.id));
+						.where(and(eq(channels.id, channel.id), drainedBoundary));
 				}
 				dryRunWindow = drain;
 			} catch (cause) {

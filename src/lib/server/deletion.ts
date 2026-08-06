@@ -40,6 +40,21 @@ const CONSENT_SWEEP_BATCH = 50; // bounded per cron invocation (I10)
 export const WIPED_REFRESH_TOKEN = 'erased:account-deletion';
 
 /**
+ * Deletes a set of channels and every row they own, child-to-parent:
+ * moderation actions, comments, audit rows, rules, then the channel rows
+ * themselves. Shared by account deletion (every channel in dissolved orgs)
+ * and the dashboard's per-channel disconnect. Call inside a transaction.
+ */
+export async function deleteChannelRecords(tx: Pick<typeof db, 'delete'>, channelIds: string[]): Promise<void> {
+	if (!channelIds.length) return;
+	await tx.delete(moderationActions).where(inArray(moderationActions.channelId, channelIds));
+	await tx.delete(comments).where(inArray(comments.channelId, channelIds));
+	await tx.delete(auditLog).where(inArray(auditLog.channelId, channelIds));
+	await tx.delete(rules).where(inArray(rules.channelId, channelIds));
+	await tx.delete(channels).where(inArray(channels.id, channelIds));
+}
+
+/**
  * Calculates the cutoff timestamp for consent e-mail retention.
  *
  * @param now - The reference time in milliseconds since the Unix epoch
@@ -184,14 +199,8 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 			? await tx.select({ id: channels.id }).from(channels).where(inArray(channels.orgId, dissolveOrgIds)).all()
 			: [];
 		const channelIds = chs.map((ch) => ch.id);
-		// Stryker disable next-line ConditionalExpression: true equivalent — with zero channels the deletes run inArray([]), which drizzle compiles to `false`: no rows match, nothing is deleted.
-		if (channelIds.length) {
-			await tx.delete(moderationActions).where(inArray(moderationActions.channelId, channelIds));
-			await tx.delete(comments).where(inArray(comments.channelId, channelIds));
-			await tx.delete(auditLog).where(inArray(auditLog.channelId, channelIds));
-			await tx.delete(rules).where(inArray(rules.channelId, channelIds));
-			await tx.delete(channels).where(inArray(channels.id, channelIds));
-		}
+		// Every channel in a dissolved org dies with it, history included.
+		await deleteChannelRecords(tx, channelIds);
 		// Detach team channels this account connected: the row and history stay
 		// with the team; the dead grant is wiped so nothing silently moderates.
 		await tx

@@ -19,8 +19,9 @@
 import { db } from '$lib/server/db';
 import { auditLog, channels, comments } from '$lib/server/db/schema';
 import { decrypt } from '$lib/server/crypto';
-import { deleteUserRecords } from '$lib/server/deletion';
+import { deleteChannelRecords, deleteUserRecords } from '$lib/server/deletion';
 import { revokeGoogleToken } from '$lib/server/google';
+import { requireOrgRole } from '$lib/server/ownership';
 import { runChannel } from '$lib/server/pipeline';
 import { requireUser, SESSION_COOKIE } from '$lib/server/session';
 import { and, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
@@ -35,7 +36,7 @@ export async function load({ locals }) {
 	// Database outage: the overlay replaces the dashboard. Checked before
 	// requireUser because an outage means the session lookup failed and
 	// locals.user is null — the maintenance page IS the signed-in state.
-	if (locals.dbDown) return { chs: [], stats: [], bans: [], maintenance: true };
+	if (locals.dbDown) return { chs: [], stats: [], bans: [], maintenance: true, orgRole: null };
 	const user = requireUser(locals);
 	try {
 		// Project only the fields the page renders; never serialize refreshTokenEnc
@@ -77,14 +78,14 @@ export async function load({ locals }) {
 					.groupBy(auditLog.channelId)
 					.all()
 			: [];
-		return { chs, stats, bans, maintenance: false };
+		return { chs, stats, bans, maintenance: false, orgRole: user.orgRole };
 	} catch (e) {
 		// A deliberate HttpError is NOT an outage — fail loudly, same as hooks.
 		if (isHttpError(e)) throw e;
 		// Intermittent outage: the hook queries succeeded but these didn't.
 		// Loud on the server, a maintenance overlay for the user — never a 500.
 		console.error('dashboard load failed:', e);
-		return { chs: [], stats: [], bans: [], maintenance: true };
+		return { chs: [], stats: [], bans: [], maintenance: true, orgRole: null };
 	}
 }
 
@@ -284,5 +285,40 @@ export const actions = {
 		await deleteUserRecords(user.id);
 		cookies.delete(SESSION_COOKIE, { path: '/' });
 		throw redirect(302, '/');
+	},
+	disconnectChannel: async ({ request, locals }) => {
+		const user = requireUser(locals);
+		// Same gate as connecting a channel: members moderate, admins manage.
+		requireOrgRole(user, 'admin');
+		const f = await request.formData();
+		const channelId = String(f.get('channelId') ?? '');
+		if (f.get('confirm') !== 'on') {
+			return fail(400, { scope: 'disconnect', channelId, error: 'You must confirm the disconnect to continue.' });
+		}
+		// Tenancy check doubles as the existence check: another team's channel
+		// matches 0 rows and reads as "not found" — never leak existence.
+		const channel = await db
+			.select({ id: channels.id, refreshTokenEnc: channels.refreshTokenEnc })
+			.from(channels)
+			.where(and(eq(channels.id, channelId), eq(channels.orgId, user.orgId)))
+			.get();
+		if (!channel) {
+			return fail(404, { scope: 'disconnect', channelId, error: 'channel not found' });
+		}
+		// Best-effort revoke BEFORE the erase (YouTube API ToS); a failure —
+		// including a grant minted by another environment's OAuth client, or an
+		// already-wiped token — is logged loudly but never blocks, since the
+		// ciphertext dies either way.
+		try {
+			await revokeGoogleToken(decrypt(channel.refreshTokenEnc), `channel disconnect ${channel.id}`);
+		} catch (cause) {
+			console.error(`token revocation failed for channel ${channel.id}; disconnecting anyway:`, cause);
+		}
+		await db.transaction(async (tx) => {
+			await deleteChannelRecords(tx, [channel.id]);
+		});
+		// The channel's own audit rows die with it — the server log is the record.
+		console.info(`channel ${channel.id} disconnected and erased by user ${user.id}`);
+		return { ok: true as const, scope: 'disconnect', channelId };
 	}
 };

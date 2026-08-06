@@ -304,7 +304,7 @@ test('a database outage returns the maintenance payload without requiring a user
 	// dbDown with a null user is the normal outage shape: requireUser must not
 	// trip — the overlay replaces the dashboard, not the error page.
 	const data = (await load({ locals: { user: null, dbDown: true } } as never)) as Record<string, unknown>;
-	expect(data).toEqual({ chs: [], stats: [], bans: [], maintenance: true });
+	expect(data).toEqual({ chs: [], stats: [], bans: [], maintenance: true, orgRole: null });
 });
 
 test('a database failure mid-load degrades to the maintenance payload and logs loudly', async () => {
@@ -319,7 +319,7 @@ test('a database failure mid-load degrades to the maintenance payload and logs l
 	} finally {
 		client.execute = originalExecute;
 	}
-	expect(data).toEqual({ chs: [], stats: [], bans: [], maintenance: true });
+	expect(data).toEqual({ chs: [], stats: [], bans: [], maintenance: true, orgRole: null });
 	expect(console.error).toHaveBeenCalledWith('dashboard load failed:', expect.any(Error));
 });
 

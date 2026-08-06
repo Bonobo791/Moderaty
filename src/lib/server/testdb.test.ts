@@ -46,24 +46,51 @@ test('wipeTables rejects tables outside the app schema loudly', async () => {
 
 // PR #121 review (qodo): caller-ordered deletes break the moment a non-cascade
 // FK lands in the schema. The wipe must suspend FK enforcement itself, and the
-// OFF must precede every DELETE and the ON must follow (pinned by statement
-// position, since libsql's batch() runs transactionally — where the pragma is
-// a no-op — executeMultiple is the only harness that honors it).
+// OFF must precede every DELETE. The ON travels in a SEPARATE execute after
+// the multiple: executeMultiple stops at the first failing statement, so an ON
+// inside the same batch would be skipped by a failed DELETE (PR #122 review,
+// coderabbit) — and libsql's batch() runs transactionally, where the pragma is
+// a no-op, so executeMultiple remains the only harness that honors the OFF.
 test('wipeTables suspends FK enforcement around the deletes', async () => {
-	const spy = vi.spyOn(testDb().client, 'executeMultiple');
+	const multiSpy = vi.spyOn(testDb().client, 'executeMultiple');
+	const execSpy = vi.spyOn(testDb().client, 'execute');
 	try {
 		await wipeTables(['users']);
-		expect(spy).toHaveBeenCalledTimes(1);
-		const sql = spy.mock.calls[0][0] as string;
+		expect(multiSpy).toHaveBeenCalledTimes(1);
+		const sql = multiSpy.mock.calls[0][0] as string;
 		const off = sql.indexOf('PRAGMA foreign_keys = OFF');
 		const del = sql.indexOf('DELETE FROM users');
-		const on = sql.indexOf('PRAGMA foreign_keys = ON');
 		expect(off).toBeGreaterThanOrEqual(0);
 		expect(off).toBeLessThan(del);
-		expect(del).toBeLessThan(on);
+		expect(sql).not.toContain('PRAGMA foreign_keys = ON');
+		expect(execSpy).toHaveBeenCalledWith('PRAGMA foreign_keys = ON');
+		// The ON must be issued after the multiple, never before.
+		expect(execSpy.mock.invocationCallOrder[0]).toBeGreaterThan(multiSpy.mock.invocationCallOrder[0]);
+	} finally {
+		multiSpy.mockRestore();
+		execSpy.mockRestore();
+	}
+});
+
+// PR #122 review (coderabbit): a failed DELETE must not leave the shared
+// in-memory connection with FK enforcement OFF — later tests would silently
+// lose the FK violations the harness exists to catch.
+test('wipeTables restores FK enforcement even when a delete fails', async () => {
+	const client = testDb().client;
+	// Simulate executeMultiple stopping mid-batch: the OFF has already taken
+	// effect when the DELETE fails — exactly how the real failure mode leaves
+	// the connection (a blanket rejection would never turn FK off at all).
+	const spy = vi.spyOn(client, 'executeMultiple').mockImplementation(async () => {
+		await client.execute('PRAGMA foreign_keys = OFF');
+		throw new Error('disk I/O error');
+	});
+	try {
+		await expect(wipeTables(['users'])).rejects.toThrow('disk I/O error');
 	} finally {
 		spy.mockRestore();
 	}
+	const { rows } = await client.execute('PRAGMA foreign_keys');
+	expect(Number(rows[0][0])).toBe(1);
 });
 
 test('createTestDb creates the tenant tables', async () => {

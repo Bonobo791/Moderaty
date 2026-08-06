@@ -61,12 +61,15 @@ export async function wipeTables(tables: string[]): Promise<void> {
 			throw new Error(`wipeTables: unknown table "${table}" (not in the app schema)`);
 		}
 	}
-	const statements = [
-		'PRAGMA foreign_keys = OFF',
-		...tables.map((table) => `DELETE FROM ${table}`),
-		'PRAGMA foreign_keys = ON'
-	];
-	await testDb().client.executeMultiple(statements.join(';\n'));
+	const statements = ['PRAGMA foreign_keys = OFF', ...tables.map((table) => `DELETE FROM ${table}`)];
+	try {
+		await testDb().client.executeMultiple(statements.join(';\n'));
+	} finally {
+		// The ON cannot travel inside the multiple: executeMultiple stops at the
+		// first failing statement, so a failed DELETE would leave the shared
+		// connection with FK enforcement OFF for every later test.
+		await testDb().client.execute('PRAGMA foreign_keys = ON');
+	}
 }
 
 // Derived from the Drizzle schema so the allowlist can never drift from the

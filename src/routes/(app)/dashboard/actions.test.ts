@@ -439,7 +439,14 @@ test('dry run rejects an unsupported months preset with 400 and never runs', asy
 
 	const res = await dryRun('UC1', OWNER, '7');
 
-	expect(res).toMatchObject({ status: 400, data: { scope: 'dryRun', channelId: 'UC1' } });
+	expect(res).toMatchObject({
+		status: 400,
+		data: {
+			scope: 'dryRun',
+			channelId: 'UC1',
+			error: 'dry-run window must be 1, 3, 6, 12, or 24 months, or all time'
+		}
+	});
 	expect(mocks.runChannel).not.toHaveBeenCalled();
 });
 
@@ -501,6 +508,48 @@ test('a completed window clears the drain state, resetting any older drain', asy
 	const res = await dryRun('UC1', OWNER, '1');
 
 	expect(res).toMatchObject({ ok: true, months: 1, background: false });
+	expect(await drainStateOf('UC1')).toEqual({ boundary: null, pageToken: null });
+});
+
+// PR #122 review (coderabbit): the post-run drain-state writes matched on the
+// channel id alone. A preview that overran its 60s lease could lose the
+// channel to cron mid-run and then clobber the drain state cron now owns.
+test.each([
+	{
+		name: 'a completed preview that lost its lease does not clear the drain cron owns',
+		result: { fetched: 10, windowComplete: true, windowNextPageToken: null },
+		expected: { boundary: '2026-01-01T00:00:00.000Z', pageToken: 'old-token' }
+	},
+	{
+		name: 'an incomplete preview that lost its lease does not replant over the drain cron owns',
+		result: { fetched: 100, windowComplete: false, windowNextPageToken: 'page-2' },
+		expected: { boundary: '2026-01-01T00:00:00.000Z', pageToken: 'old-token' }
+	}
+])('$name', async ({ result, expected }) => {
+	await seedChannel('UC1');
+	await seedStaleDrain('UC1');
+	mocks.runChannel.mockImplementation(async () => {
+		// The preview overran its lease; cron claimed the channel underneath it.
+		await testDb()
+			.db.update(channels)
+			.set({ leaseExpiresAt: '2099-01-01T00:00:00.000Z' })
+			.where(eq(channels.id, 'UC1'));
+		return dryRunResult(result);
+	});
+
+	const res = await dryRun('UC1');
+
+	expect(res).toMatchObject({ ok: true });
+	expect(await drainStateOf('UC1')).toEqual(expected);
+});
+
+test('a skipped preview (channel paused) writes no drain state and reports no background work', async () => {
+	await seedChannel('UC1');
+	mocks.runChannel.mockResolvedValue(dryRunResult({ skipped: true }));
+
+	const res = await dryRun('UC1', OWNER, '6');
+
+	expect(res).toMatchObject({ ok: true, skipped: true, background: false });
 	expect(await drainStateOf('UC1')).toEqual({ boundary: null, pageToken: null });
 });
 
@@ -596,7 +645,10 @@ test('disconnect requires the confirmation checkbox — 400, nothing deleted, no
 	try {
 		const res = await disconnectChannel('UC1', false);
 
-		expect(res).toMatchObject({ status: 400, data: { scope: 'disconnect', channelId: 'UC1' } });
+		expect(res).toMatchObject({
+			status: 400,
+			data: { scope: 'disconnect', channelId: 'UC1', error: 'You must confirm the disconnect to continue.' }
+		});
 		expect(await rowsOf('UC1')).toEqual(INTACT);
 		expect(fetchSpy).not.toHaveBeenCalled();
 	} finally {
@@ -675,6 +727,9 @@ test('a failed revocation is logged loudly and never blocks the erase', async ()
 		expect(res).toMatchObject({ ok: true, scope: 'disconnect', channelId: 'UC1' });
 		expect(await rowsOf('UC1')).toEqual(ERASED);
 		expect(errorSpy).toHaveBeenCalledWith('token revocation failed for channel, disconnecting anyway:', 'UC1', expect.any(Error));
+		// The channel-scoped context travels into revokeGoogleToken's own log so
+		// the orphaned grant can be traced (pins the context template string).
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('channel disconnect UC1 revocation failed'));
 	} finally {
 		errorSpy.mockRestore();
 		vi.unstubAllGlobals();
@@ -695,6 +750,31 @@ test('an undecryptable stored token is logged loudly and the erase still happens
 		expect(errorSpy).toHaveBeenCalledWith('token revocation failed for channel, disconnecting anyway:', 'UC1', expect.any(Error));
 	} finally {
 		errorSpy.mockRestore();
+		vi.unstubAllGlobals();
+	}
+});
+
+// Stryker kill (ObjectLiteral on the delete options): mutating
+// { expectedOrgId } to {} drops the tenancy predicate, and only this race
+// distinguishes it — a channel re-homed to another team between the tenancy
+// SELECT and the delete transaction must abort loudly, never be erased.
+test('a channel re-homed to another team mid-disconnect aborts instead of erasing it', async () => {
+	await seedChannelWithToken('UC1', 'google-refresh-token');
+	await seedChannelData('UC1');
+	// The interleave point is the revoke fetch: re-home happens AFTER the
+	// action's tenancy SELECT but BEFORE the delete transaction.
+	vi.stubGlobal(
+		'fetch',
+		vi.fn(async () => {
+			await testDb().db.update(channels).set({ orgId: 'org-2' }).where(eq(channels.id, 'UC1'));
+			return new Response('', { status: 200 });
+		})
+	);
+	try {
+		await expect(disconnectChannel('UC1', true)).rejects.toThrow(/tenancy changed/);
+		// Another tenant's channel and all its rows survive untouched.
+		expect(await rowsOf('UC1')).toEqual(INTACT);
+	} finally {
 		vi.unstubAllGlobals();
 	}
 });

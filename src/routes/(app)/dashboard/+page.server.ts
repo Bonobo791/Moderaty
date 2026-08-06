@@ -95,6 +95,14 @@ export async function load({ locals }) {
 	}
 }
 
+/** Window presets shared by Analyze history and the dry-run preview (months). */
+const HISTORY_MONTH_PRESETS: readonly number[] = [1, 3, 6, 12, 24];
+
+/** Boundary instant for a months window: now − months × 30 days. */
+function monthsAgoBoundary(months: number): string {
+	return new Date(Date.now() - months * 30 * 24 * 60 * 60 * 1000).toISOString();
+}
+
 /**
  * Tenancy-scoped channel update shared by the card actions: another team's
  * channel reads as "not found" (zero rows updated, never a leak).
@@ -103,8 +111,7 @@ async function updateOwnChannel(
 	orgId: string,
 	channelId: string,
 	values: Partial<Pick<typeof channels.$inferInsert, 'toneLevel' | 'protectLgbtqia' | 'protectWomen'>>
-) {
-	return db
+) {	return db
 		.update(channels)
 		.set(values)
 		.where(and(eq(channels.id, channelId), eq(channels.orgId, orgId)))
@@ -143,7 +150,7 @@ export const actions = {
 		const months = Number(f.get('months'));
 		// Preset windows only — the scan drains newest-first at 300 comments per
 		// run, so an unbounded window is an unbounded API/AI cost (I10).
-		if (![1, 3, 6, 12, 24].includes(months)) {
+		if (!HISTORY_MONTH_PRESETS.includes(months)) {
 			return fail(400, { scope: 'history', channelId, error: 'history window must be 1, 3, 6, 12, or 24 months' });
 		}
 		// Move the scan boundary back and reset the drain state: cron's next runs
@@ -151,7 +158,7 @@ export const actions = {
 		// comments are skipped before scoring (decideNewComments dedupes by id),
 		// so only the unscanned history costs moderation calls. Tenancy-scoped:
 		// another team's channel reads as "not found".
-		const boundary = new Date(Date.now() - months * 30 * 24 * 60 * 60 * 1000).toISOString();
+		const boundary = monthsAgoBoundary(months);
 		// Coordinate with the cron lease: a run in flight would otherwise persist
 		// its own scan state and silently cancel (or be cancelled by) this reset.
 		// The lease predicate is part of the UPDATE itself, so the check is
@@ -189,16 +196,13 @@ export const actions = {
 		// Same presets as Analyze history; absent → 3 (the UI default). 'all'
 		// covers channels whose entire history predates every months preset.
 		const rawMonths = f.has('months') ? String(f.get('months')) : '3';
-		if (rawMonths !== 'all' && ![1, 3, 6, 12, 24].includes(Number(rawMonths))) {
+		if (rawMonths !== 'all' && !HISTORY_MONTH_PRESETS.includes(Number(rawMonths))) {
 			return fail(400, { scope: 'dryRun', channelId, error: 'dry-run window must be 1, 3, 6, 12, or 24 months, or all time' });
 		}
 		const months = rawMonths === 'all' ? ('all' as const) : Number(rawMonths);
 		// 'all' maps to the epoch boundary: no comment is ever older than it, and
 		// the non-null drain state keeps cron paging until YouTube runs out of pages.
-		const boundary =
-			months === 'all'
-				? '1970-01-01T00:00:00.000Z'
-				: new Date(Date.now() - months * 30 * 24 * 60 * 60 * 1000).toISOString();
+		const boundary = months === 'all' ? '1970-01-01T00:00:00.000Z' : monthsAgoBoundary(months);
 		// Atomic lease claim, same protocol as cron/analyzeHistory: the UPDATE's
 		// predicate makes concurrent claimants single-winner (TOCTOU-safe), and
 		// it doubles as the tenancy check — another team's channel matches 0
@@ -239,18 +243,22 @@ export const actions = {
 			// OLD drain in place would keep cron draining the window the user
 			// just abandoned — so any non-skipped, non-complete result restarts
 			// the NEW window from the top in the background. A skipped run
-			// (channel paused) touches nothing.
+			// (channel paused) touches nothing. Every write is predicated on
+			// STILL holding our lease: if the preview overran it and cron
+			// claimed the channel mid-run, the drain state belongs to cron now
+			// and a 0-row update leaves it untouched.
+			const stillOurs = and(eq(channels.id, channelId), eq(channels.leaseExpiresAt, myLease));
 			const background = !result.skipped && result.windowComplete !== true;
 			if (result.windowComplete === true) {
 				await db
 					.update(channels)
 					.set({ dryRunBoundary: null, dryRunPageToken: null })
-					.where(eq(channels.id, channelId));
+					.where(stillOurs);
 			} else if (!result.skipped) {
 				await db
 					.update(channels)
 					.set({ dryRunBoundary: boundary, dryRunPageToken: result.windowNextPageToken ?? null })
-					.where(eq(channels.id, channelId));
+					.where(stillOurs);
 			}
 			return { ok: true as const, scope: 'dryRun', channelId, months, ...result, background };
 		} catch (e) {

@@ -90,6 +90,7 @@ replace either, and **property tests never count toward Stryker kill claims**
 |---|---|---|---|
 | Infrastructure | `pbt-infra` | `testarbitraries.ts` + meta-tests (27), `wipeTables` extraction, this doc | 27/27 meta-tests green; scoped Stryker on `testarbitraries.ts` + `testdb.ts` **100%** — 49+27 killed, 0 survived, 1 justified exclusion (response `kind` string never read by the parser) |
 | P1 | `dev` | crypto round-trip + tamper + wrong-key (3 properties), oauthState store/read round-trip & cap + read totality (2), session token uniqueness/format + sliding-cap dichotomy (2) — `crypto.pbt.test.ts`, `oauthState.pbt.test.ts`, `session.pbt.test.ts` | 7/7 properties green (default 100 runs each; full suite 1041 tests green). Burn-in at FC_NUM_RUNS=1000 caught one under-constrained arbitrary: the tamper index could land on a base64 char carrying padding bits ("XX==" quantum), leaving decoded bytes unchanged — counterexample `["",74357335,1]` fixed by excluding the last three chars, pinned as an `examples:` entry. Mental-mutation check per property documented in `// Property audit:` comments (tag-ignored decrypt, uncapped store, missing lazy delete, flipped renewal guard all go red). No source bugs found |
+| P2 | `dev` | tenant 404-never-403 across generated tenant pairs and channel shapes (1 property) — `ownership.pbt.test.ts`; `deleteUserRecords` whole-database conservation over generated org graphs (1), `nullExpiredConsentEmails` cutoff-zone sweep + idempotency (1) and 50-row batch bound with generated backlog size (1) — `deletion.pbt.test.ts` | 4/4 properties green (default 100 runs each; full suite 1045 tests green). FC_NUM_RUNS=1000 burn-in green, no counterexamples. Conservation property compares the ENTIRE post-deletion database against an oracle computed from a before-snapshot (tombstone, dissolve/detach, succession with generated join times, other-tenant byte-identity, consents never touched). Lessons: orgGraphArb membership pairs need dedupe before insert (composite PK — documented on the arbitrary); distinct tenants built by prefixing generated hex ids with a non-hex char (constrain by construction, no `.filter`); batched `insert().values([...])` keeps a 1000-run burn-in of an 11-table graph at ~4s. Mental-mutation audits in `// Property audit:` comments (dropped orgId conjunct, 403 leak, skipped detach/tombstone/succession, flipped cutoff predicate, dropped sweep limit all go red). No source bugs found |
 
 First-contact lesson (infra batch): three meta-tests failed on values that
 should pass — single-expression arrow predicates returned vitest's `Assertion`
@@ -98,10 +99,6 @@ returning false"). Convention 1 exists because of this.
 
 ## Roadmap (catalog details in the skill reference)
 
-- **P2 — isolation & deletion (testdb):** tenant 404-never-403 across generated
-  users and generated access paths; `deleteUserRecords` conservation
-  (personal data gone, team channels detached, tombstone, consent e-mail only
-  in `consents`).
 - **P3 — pipeline fuzz:** I1 malformed item/response handling, I4 idempotent
   ingest, I11 scoring failure → review queue, comment storage ≤500 / no
   author PII persisted.

@@ -168,6 +168,11 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				</p>
 			{/if}
 		{/if}
+		{#if ch.scanning}
+			<p class="muted" role="status">
+				History scan in progress — cron is working through the backlog and new comments flow into the review queue as it drains. This runs in the background: refreshing or leaving this page won't stop it.
+			</p>
+		{/if}
 		<form
 			method="POST"
 			action="?/dryRun"

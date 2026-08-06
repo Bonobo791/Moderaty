@@ -94,3 +94,17 @@ test('an all-time dry-run result names the window in the success line', () => {
 	}).body;
 	expect(body).toContain('Dry run preview (all time): 6 comments scanned');
 });
+
+// The "History scan started" action message dies with the form result on
+// refresh, but the drain keeps running server-side — a mid-drain channel
+// must show a persistent in-progress status instead.
+test('a mid-drain channel shows a persistent scan-in-progress status', () => {
+	const body = renderPage({ ...NORMAL_DATA, chs: [{ ...NORMAL_DATA.chs[0], scanning: true }] });
+	expect(body).toContain('History scan in progress');
+	expect(body).toContain('in the background');
+});
+
+test('an idle channel does not show the scan-in-progress status', () => {
+	const body = renderPage(NORMAL_DATA);
+	expect(body).not.toContain('History scan in progress');
+});

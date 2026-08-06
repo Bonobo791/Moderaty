@@ -42,7 +42,7 @@ export async function load({ locals }) {
 		// Project only the fields the page renders; never serialize refreshTokenEnc
 		// (or any future secret column) to the browser. Everything below is scoped
 		// to the active team's channels.
-		const chs = await db
+		const rows = await db
 			.select({
 				id: channels.id,
 				title: channels.title,
@@ -50,11 +50,17 @@ export async function load({ locals }) {
 				lastRunAt: channels.lastRunAt,
 				toneLevel: channels.toneLevel,
 				protectLgbtqia: channels.protectLgbtqia,
-				protectWomen: channels.protectWomen
+				protectWomen: channels.protectWomen,
+				nextPageToken: channels.nextPageToken
 			})
 			.from(channels)
 			.where(eq(channels.orgId, user.orgId))
 			.all();
+		// A non-null continuation token means a history drain is in flight (the
+		// pipeline clears it on completion) — flag it so the dashboard can keep
+		// the "scan in progress" status up across refreshes. The token itself is
+		// internal drain state and is never sent to the browser.
+		const chs = rows.map(({ nextPageToken, ...ch }) => ({ ...ch, scanning: nextPageToken !== null }));
 		const channelIds = chs.map((ch) => ch.id);
 		const stats = channelIds.length
 			? await db

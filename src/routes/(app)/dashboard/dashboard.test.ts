@@ -112,6 +112,31 @@ test('dashboard load never serializes the encrypted refresh token', async () => 
 	expect(JSON.stringify(data)).not.toContain('encrypted-refresh-token');
 });
 
+// A history drain in flight is exactly `nextPageToken IS NOT NULL` (the
+// pipeline clears it on completion). The dashboard flags it so the "scan
+// started" message survives a refresh — the drain is server-side cron work.
+test('dashboard load flags a mid-drain channel as scanning without leaking the page token', async () => {
+	await testDb().db.insert(channels).values({
+		id: 'UC1',
+		userId: OWNER.id,
+		orgId: 'org-1',
+		title: 'Draining',
+		refreshTokenEnc: 'enc',
+		nextPageToken: 'secret-page-token'
+	});
+	await testDb().db
+		.insert(channels)
+		.values({ id: 'UC2', userId: OWNER.id, orgId: 'org-1', title: 'Idle', refreshTokenEnc: 'enc' });
+
+	const data = await loadDashboard();
+
+	expect(data.chs.find((ch) => ch.id === 'UC1')).toMatchObject({ scanning: true });
+	expect(data.chs.find((ch) => ch.id === 'UC2')).toMatchObject({ scanning: false });
+	// The continuation token is internal drain state — never serialized.
+	expect(data.chs.find((ch) => ch.id === 'UC1')).not.toHaveProperty('nextPageToken');
+	expect(JSON.stringify(data)).not.toContain('secret-page-token');
+});
+
 test('dashboard load shows only the active team\'s channels', async () => {
 	await testDb().db.insert(channels).values({ id: 'UC1', userId: OWNER.id, orgId: 'org-1', title: 'Mine', refreshTokenEnc: 'enc' });
 	// A teammate's connection is the team's channel too — it MUST appear.

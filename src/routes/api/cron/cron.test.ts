@@ -16,7 +16,7 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { beforeEach, expect, test, vi } from 'vitest';
+import { beforeEach, expect, onTestFinished, test, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { DAY_MS, seedConsent as seedConsentRecord, seedUser, setupTestDb, testDb } from '$lib/server/testdb';
 import { channels, consents } from '$lib/server/db/schema';
@@ -62,18 +62,16 @@ async function expectUnauthorized(secret?: { query?: string; bearer?: string }) 
 	await expect(call(secret)).rejects.toMatchObject({ status: 401, body: { message: 'bad secret' } });
 }
 
-/** Seeds a channel with an in-flight dry-run window drain. */
-async function seedDrainChannel(id: string, pageToken: string | null, extra: Record<string, unknown> = {}) {
+/** Seeds a minimal active channel; override any column via `extra`. */
+async function seedChannel(id: string, extra: Record<string, unknown> = {}) {
 	await testDb()
 		.db.insert(channels)
-		.values({
-			id,
-			title: `Channel ${id}`,
-			refreshTokenEnc: 'enc',
-			dryRunBoundary: '2026-05-01T00:00:00.000Z',
-			dryRunPageToken: pageToken,
-			...extra
-		});
+		.values({ id, title: `Channel ${id}`, refreshTokenEnc: 'enc', ...extra });
+}
+
+/** Seeds a channel with an in-flight dry-run window drain. */
+async function seedDrainChannel(id: string, pageToken: string | null, extra: Record<string, unknown> = {}) {
+	await seedChannel(id, { dryRunBoundary: '2026-05-01T00:00:00.000Z', dryRunPageToken: pageToken, ...extra });
 }
 
 /** A runChannel result; override only the fields the test asserts on. */
@@ -149,7 +147,7 @@ test.each(SECRET_FORMS)('accepts the $label', async ({ secret }) => {
 });
 
 test('runs the channel with a server-side deadline inside the caller abort window', async () => {
-	await testDb().db.insert(channels).values({ id: 'UC1', title: 'One', refreshTokenEnc: 'enc' });
+	await seedChannel('UC1');
 	const before = Date.now();
 
 	await call({ bearer: 'test-secret' });
@@ -169,7 +167,7 @@ test('holds a 10-minute lease during the run and reports the result under the ch
 	// results map were never asserted — flipping `Date.now() + LEASE_MS` to
 	// `-` (an already-expired lease, defeating the crash-recovery window) and
 	// emptying `results` both stayed green.
-	await testDb().db.insert(channels).values({ id: 'UC1', title: 'One', refreshTokenEnc: 'enc' });
+	await seedChannel('UC1');
 	const result = { fetched: 0, acted: 0, queued: 0, partial: false, skipped: false, dryRun: true };
 	let leaseDuringRun: string | null = null;
 	mocks.runChannel.mockImplementation(async () => {
@@ -198,7 +196,7 @@ test('exits cleanly when the atomic claim matches 0 rows (concurrent claimant)',
 	// would run the channel anyway, duplicating moderation work.
 	// A BEFORE UPDATE trigger with RAISE(IGNORE) silently skips the claim row
 	// (0 rows updated, no error) — the exact post-select race outcome.
-	await testDb().db.insert(channels).values({ id: 'UC-race', title: 'Race', refreshTokenEnc: 'enc' });
+	await seedChannel('UC-race');
 	await testDb().client.execute(
 		`CREATE TRIGGER ignore_channel_claim BEFORE UPDATE ON channels
 		 WHEN NEW.lease_expires_at IS NOT NULL
@@ -219,7 +217,7 @@ test('does not select or claim a channel whose lease is still held', async () =>
 	// because no test ever set leaseExpiresAt — the lease would become an
 	// anti-lock, letting concurrent invocations process the same channel.
 	const futureLease = new Date(Date.now() + 10 * 60 * 1000).toISOString();
-	await testDb().db.insert(channels).values({ id: 'UC-leased', title: 'Leased', refreshTokenEnc: 'enc', leaseExpiresAt: futureLease });
+	await seedChannel('UC-leased', { leaseExpiresAt: futureLease });
 
 	const res = await call({ bearer: 'test-secret' });
 
@@ -231,7 +229,7 @@ test('does not select a paused (inactive) channel', async () => {
 	// Mutation audit: dropping the active=1 filter stayed green because every
 	// seeded channel defaults to active — a channel the user paused would be
 	// moderated anyway, against explicit user intent.
-	await testDb().db.insert(channels).values({ id: 'UC-paused', title: 'Paused', refreshTokenEnc: 'enc', active: 0 });
+	await seedChannel('UC-paused', { active: 0 });
 
 	const res = await call({ bearer: 'test-secret' });
 
@@ -242,8 +240,8 @@ test('does not select a paused (inactive) channel', async () => {
 test('selects the least-recently-run channel first', async () => {
 	// Mutation audit: asc→desc on lastRunAt stayed green with single-channel
 	// fixtures — newest-first lets one hot channel starve the rest (I10).
-	await testDb().db.insert(channels).values({ id: 'UC-old', title: 'Old', refreshTokenEnc: 'enc', lastRunAt: '2026-01-01T00:00:00.000Z' });
-	await testDb().db.insert(channels).values({ id: 'UC-new', title: 'New', refreshTokenEnc: 'enc', lastRunAt: '2026-08-01T00:00:00.000Z' });
+	await seedChannel('UC-old', { lastRunAt: '2026-01-01T00:00:00.000Z' });
+	await seedChannel('UC-new', { lastRunAt: '2026-08-01T00:00:00.000Z' });
 	mocks.runChannel.mockResolvedValue({ fetched: 0, acted: 0, queued: 0, partial: false, skipped: false, dryRun: true });
 
 	await call({ bearer: 'test-secret' });
@@ -255,7 +253,7 @@ test('records the run afterwards: lastRunAt is set and the lease is cleared', as
 	// Mutation audit: dropping lastRunAt from the finally-update stayed green —
 	// the just-run channel would keep sorting first (SQLite ASC, NULLs first)
 	// and starve every other channel.
-	await testDb().db.insert(channels).values({ id: 'UC1', title: 'One', refreshTokenEnc: 'enc' });
+	await seedChannel('UC1');
 	mocks.runChannel.mockResolvedValue({ fetched: 0, acted: 0, queued: 0, partial: false, skipped: false, dryRun: true });
 
 	await call({ bearer: 'test-secret' });
@@ -269,7 +267,7 @@ test('a failing channel run reports failure, never success', async () => {
 	// Mutation audit: no test made runChannel reject, so the failure path
 	// returning ok:true / 200 stayed green — monitoring would see a failing
 	// channel as healthy (the code comment's exact warning).
-	await testDb().db.insert(channels).values({ id: 'UC-bad', title: 'Bad', refreshTokenEnc: 'enc' });
+	await seedChannel('UC-bad');
 	mocks.runChannel.mockRejectedValue(new Error('youtube quota exhausted'));
 	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
@@ -312,7 +310,7 @@ test('a sweep failure is reported and does not stop the channel run', async () =
 	mocks.env.DRY_RUN = 'false';
 	const oldDate = new Date(Date.now() - CONSENT_EMAIL_RETENTION_MS - DAY_MS).toISOString();
 	await seedConsent('old', oldDate);
-	await testDb().db.insert(channels).values({ id: 'UC-live', title: 'Live', refreshTokenEnc: 'enc' });
+	await seedChannel('UC-live');
 	mocks.runChannel.mockResolvedValue({ fetched: 0, acted: 0, queued: 0, partial: false, skipped: false, dryRun: false });
 	await testDb().client.execute(
 		`CREATE TRIGGER fail_consent_update BEFORE UPDATE ON consents
@@ -393,7 +391,7 @@ test('clears the drain state when the dry-run window completes', async () => {
 test('a channel with a drain in flight is selected before older ordinary channels', async () => {
 	// Otherwise a busy rotation would starve the drain (a preview the user is
 	// actively waiting on) behind every ordinary channel.
-	await testDb().db.insert(channels).values({ id: 'UC-old', title: 'Old', refreshTokenEnc: 'enc', lastRunAt: '2026-01-01T00:00:00.000Z' });
+	await seedChannel('UC-old', { lastRunAt: '2026-01-01T00:00:00.000Z' });
 	await seedDrainChannel('UC-drain', null, { lastRunAt: '2026-08-01T00:00:00.000Z' });
 	mocks.runChannel.mockResolvedValue(runResult({ windowComplete: true, windowNextPageToken: null }));
 
@@ -407,24 +405,22 @@ test('a drain failure is loud, surfaced in the payload, and never masks the norm
 	const normal = runResult({ fetched: 2, acted: 1 });
 	mocks.runChannel.mockResolvedValueOnce(normal).mockRejectedValueOnce(new Error('drain exploded'));
 	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	onTestFinished(() => spy.mockRestore());
 
-	try {
-		const res = await call({ bearer: 'test-secret' });
+	const res = await call({ bearer: 'test-secret' });
 
-		expect(res.status).toBe(200);
-		expect(await res.json()).toMatchObject({ ok: true, results: { UC1: normal }, dryRunWindow: { error: 'drain exploded' } });
-		expect(spy).toHaveBeenCalled();
-		// The drain state is untouched so the next invocation retries it.
-		const row = await channelRow('UC1');
-		expect(row?.dryRunBoundary).toBe('2026-05-01T00:00:00.000Z');
-		expect(row?.dryRunPageToken).toBe('tok-1');
-	} finally {
-		spy.mockRestore();
-	}
+	expect(res.status).toBe(200);
+	expect(await res.json()).toMatchObject({ ok: true, results: { UC1: normal }, dryRunWindow: { error: 'drain exploded' } });
+	// Exact message: an emptied or altered log line must fail this test.
+	expect(spy).toHaveBeenCalledWith('dry-run window drain failed for channel:', 'UC1', expect.any(Error));
+	// The drain state is untouched so the next invocation retries it.
+	const row = await channelRow('UC1');
+	expect(row?.dryRunBoundary).toBe('2026-05-01T00:00:00.000Z');
+	expect(row?.dryRunPageToken).toBe('tok-1');
 });
 
 test('a channel without a drain runs once and reports no window work', async () => {
-	await testDb().db.insert(channels).values({ id: 'UC1', title: 'One', refreshTokenEnc: 'enc' });
+	await seedChannel('UC1');
 	mocks.runChannel.mockResolvedValue(runResult());
 
 	const res = await call({ bearer: 'test-secret' });
@@ -432,4 +428,47 @@ test('a channel without a drain runs once and reports no window work', async () 
 	expect(mocks.runChannel).toHaveBeenCalledTimes(1);
 	const body = await res.json();
 	expect(body.dryRunWindow).toBeUndefined();
+});
+
+test('a preview replanted mid-invocation survives a stale drain completing', async () => {
+	// Cron reads the channel row BEFORE the atomic claim; a dashboard preview
+	// can claim, replant a NEW window, and release in between. The stale
+	// drain's cleanup must not wipe the replacement state.
+	await seedDrainChannel('UC1', 'tok-1');
+	mocks.runChannel
+		.mockResolvedValueOnce(runResult({ fetched: 1 }))
+		.mockImplementationOnce(async () => {
+			await testDb()
+				.db.update(channels)
+				.set({ dryRunBoundary: '2026-06-01T00:00:00.000Z', dryRunPageToken: 'fresh-token' })
+				.where(eq(channels.id, 'UC1'));
+			return runResult({ windowComplete: true, windowNextPageToken: null });
+		});
+
+	await call({ bearer: 'test-secret' });
+
+	const row = await channelRow('UC1');
+	expect(row?.dryRunBoundary).toBe('2026-06-01T00:00:00.000Z');
+	expect(row?.dryRunPageToken).toBe('fresh-token');
+});
+
+test('a preview replanted mid-invocation survives a stale drain continuation write', async () => {
+	// Same race, incomplete drain: the OLD window's next-page token must not be
+	// written over the NEW window's state.
+	await seedDrainChannel('UC1', 'tok-1');
+	mocks.runChannel
+		.mockResolvedValueOnce(runResult({ fetched: 1 }))
+		.mockImplementationOnce(async () => {
+			await testDb()
+				.db.update(channels)
+				.set({ dryRunBoundary: '2026-06-01T00:00:00.000Z', dryRunPageToken: 'fresh-token' })
+				.where(eq(channels.id, 'UC1'));
+			return runResult({ windowComplete: false, windowNextPageToken: 'tok-2' });
+		});
+
+	await call({ bearer: 'test-secret' });
+
+	const row = await channelRow('UC1');
+	expect(row?.dryRunBoundary).toBe('2026-06-01T00:00:00.000Z');
+	expect(row?.dryRunPageToken).toBe('fresh-token');
 });

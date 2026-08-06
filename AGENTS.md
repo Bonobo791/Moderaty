@@ -213,7 +213,10 @@ steps live in [DEPLOY.md](DEPLOY.md).
 
 Approved dependencies only (execution plan v3): `drizzle-orm`,
 `@libsql/client`, the SvelteKit adapter, `recheck` (runtime); `drizzle-kit`,
-`vitest`, `@stryker-mutator/core`, `@stryker-mutator/vitest-runner` (dev).
+`vitest`, `@stryker-mutator/core`, `@stryker-mutator/vitest-runner`,
+`fast-check` (dev — property-based testing, maintainer-approved; the
+`@fast-check/vitest` connector stays optional, plain `fc.assert` in vitest
+tests is the house style).
 No auth libraries, no googleapis SDK, no OpenAI SDK, no CSS
 frameworks, no zod. UI copy uses the brand **Moderaty** — the string `yt-mod`
 must not appear in `src/`.

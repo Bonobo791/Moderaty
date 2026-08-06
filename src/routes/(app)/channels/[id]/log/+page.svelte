@@ -70,7 +70,14 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 					<tr>
 						<td class="muted" data-label="Time" title={e.createdAt}>{relativeTime(e.createdAt)}</td>
 						<td data-label="Action"><span class={badgeClass(e.action)}>{e.action}</span></td>
-						<td class="muted" data-label="Comment">{e.commentId}</td>
+						<td class="muted" data-label="Comment">
+							{#if e.text}
+								{e.text}
+								<br /><small>{e.commentId}</small>
+							{:else}
+								{e.commentId}
+							{/if}
+						</td>
 						<td data-label="Reason">{e.reason}</td>
 						<td class="muted" data-label="Actor">{e.actor}</td>
 						<td data-label="Undo">

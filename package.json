@@ -10,6 +10,7 @@
 	"scripts": {
 		"db:migrate": "drizzle-kit migrate",
 		"dev": "vite dev",
+		"dev:cron": "node --env-file=.env scripts/dev-cron.mjs",
 		"build": "vite build",
 		"preview": "vite preview",
 		"test": "vitest run",
@@ -39,6 +40,9 @@
 	"overrides": {
 		"@esbuild-kit/core-utils": {
 			"esbuild": "^0.25.12"
+		},
+		"typed-rest-client": {
+			"qs": "^6.15.3"
 		}
 	},
 	"allowScripts": {

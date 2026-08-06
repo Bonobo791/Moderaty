@@ -5,31 +5,29 @@
 Act as a pragmatic repository contributor: make the smallest safe change,
 validate it, and leave unrelated work untouched.
 
-## Agent Split (multiple concurrent agents work in this repo)
+## Branching Model (sole full-stack dev + `dev` branch)
 
-Three agents own distinct layers. Respect the boundaries: if your task needs
-work in another agent's layer, hand it off to the owner (or ask the human to
-route it) instead of implementing it yourself.
+One agent works the full stack. There are no per-layer agent boundaries.
 
-- **Backend:** SvelteKit server code — routes/actions, auth/OAuth, cron,
-  moderation pipeline, external API integrations (YouTube, Google, OpenAI),
-  sessions, and tests for all of the above. Consumes the schema through
-  Drizzle but does not change it.
-- **Database engineering:** schema design, Drizzle migrations, indexes, query
-  tuning, Turso operations.
-- **Frontend engineering:** Svelte components, styles, page UI.
-
-Because agents work concurrently, always work in your own git worktree and
-branch — never switch branches in, or commit to, a checkout another agent is
-using.
+- **`dev` is the integration branch and the working branch.** Commit
+  directly to `dev` in `.worktrees/dev` — no per-feature branches or PRs.
+  A PR is still useful for large or risky work (it triggers the review
+  bots); the agent may merge its own PRs. Work in the `.worktrees/dev`
+  worktree — never switch branches in a checkout in use elsewhere.
+- **`main` is production.** Only the human merges `dev → main`, batched, to
+  control Netlify production-deploy credit spend. Never push to `main`
+  directly; the human's review gate is the `dev → main` merge.
+- Keep `dev` releasable: `npm run check`, `npm run build`, and
+  `npm run test` green at all times so the human can batch-merge at any
+  point. 
 
 # Rules
-- Always fail loudly.
+- Always fail loudly. 
 - NEVER write fallbacks that are silent.
 - ALWAYS write fallbacks that are loud, log to the server, and show to the user.
 - Every test must fail if the real logic is wrong. If a test still passes when the function returns garbage, rewrite the test.
 - DO NOT copy and paste code. DO create reusable code.
-- Review every PR comment for validity. Fix each valid issue. Post a triage comment. Reply to every bot comment, whether or not you make a code change.
+- When I say "triage", review every PR comment for validity. Fix each valid issue. Post a triage comment. Reply to every bot comment, whether or not you make a code change.
 - NEVER develop on the default branch. Always make a new one.
 - NEVER make changes to production databases. That is for humans only.
 - When I say "clean up", that means to clean your worktrees and branches.
@@ -73,6 +71,11 @@ verdict. CI does not run Stryker (the report-only
 runs are local/agent-driven); wiring any CI gate, including a ratcheted
 `thresholds.break`, remains a separate, maintainer-approved step.
 
+Property-based testing (fast-check) runs under the fast-check-testing
+skill; repo conventions live in `docs/property-testing.md` and shared
+arbitraries in `src/lib/server/testarbitraries.ts`. Properties complement
+example tests and never count toward Stryker kill claims.
+
 ## Agent Skills (skills-src)
 
 Repo-local skill sources live in `.agents/skills-src/<name>/` (currently
@@ -88,23 +91,21 @@ sees them. Edit the source in the repo, then re-copy to install updates.
 
 ## Git & Review Workflow (execution plan v3, section 0)
 
-Human review happens via pull requests. Executor rules:
+Day-to-day work commits directly to `dev`; pull requests are optional
+(large/risky work, or to trigger the review bots). Executor rules:
 
-- **One branch per phase**, created from an up-to-date `main`:
-  `phase-a-scaffold`, `phase-b-database`, `phase-c-server-libs`,
-  `phase-d-tests`, `phase-e-auth-cron`, `phase-f-ui`, `phase-g-design`,
-  `phase-h-e2e`.
 - **Commit after every step** with message `step <N>: <step name>`.
-- **Never open a PR while `npm run check`, `npm run build`, or `npm run test`
-  is red.** The PR is the proof of green, not the place to discover red.
-- After a phase's last step passes its Verify: push, open the PR to `main`,
-  then **STOP** until the human confirms the merge. Resume with
-  `git checkout main && git pull` and the next phase branch.
-- **Never** push to `main` directly, never merge your own PR, never `--force`.
+- **Never commit or open a PR while `npm run check`, `npm run build`, or
+  `npm run test` is red.** Green is proven locally, not discovered in CI.
+- When a PR is used: target `dev`, and the agent may merge it once checks
+  are green and review findings are resolved. Resume with
+  `git checkout dev && git pull`.
+- **Never** push to `main` directly, never `--force`.
+  `dev → main` is the human's batched release, not an executor step.
 - **Every review finding (human or bot) gets a failing test BEFORE its fix.**
-  Add the reproducing test to the phase branch, watch it fail, then fix, watch
-  it pass, commit both together (`fix: phase <X> review — <what>`), push, stop
-  for re-review. A fix without its reproducing test is not done.
+  Add the reproducing test, watch it fail, then fix, watch it pass, commit
+  both together (`fix: review — <what>`). A fix without its reproducing
+  test is not done.
 
 ## Invariants (execution plan v3, section 4.1 — re-read before every step)
 
@@ -141,7 +142,13 @@ Human review happens via pull requests. Executor rules:
   has the same guarantees against a live deployment; because `comments` rows
   are never written, dry-run audit rows carry the comment text themselves
   (`audit_log.text`, ≤500 chars). `forceDryRun` can only turn dry-run ON —
-  never flip an env-dry deployment live.
+  never flip an env-dry deployment live. The preview covers a selected month
+  window (1/3/6/12/24, default 3): the first page scores synchronously, then
+  cron drains one page per invocation (drain state in
+  `channels.dry_run_boundary`/`dry_run_page_token`, independent of the live
+  cursor; draining channels sort first in the rotation). Window mode
+  deliberately re-scores comments real runs already moderated — that
+  re-scoring is the point of the preview.
 - **I9 — Tests are the spec.** No PR opens while checks/tests are red.
 - **I10 — Bounded runs.** One channel per cron invocation (least-recently-run
   first), one page (≤100 comments) per run. Bursts drain across runs via the
@@ -209,7 +216,13 @@ The cron trigger is a Netlify Scheduled Function in
 `*/15 * * * *` when user volume grows; calls `GET $APP_URL/api/cron`
 with the secret in an `Authorization: Bearer` header; the endpoint also keeps
 the plan-documented `?secret=` query form for manual triggers). Deployment
-steps live in [DEPLOY.md](DEPLOY.md).
+steps live in [DEPLOY.md](DEPLOY.md). **Scheduled functions only fire on the
+published production deploy** — branch deploys (including `dev`) and
+Deploy Previews never trigger them, and nothing fires against `npm run dev`.
+In every non-production environment the pipeline only advances when something
+calls `GET /api/cron`: use `node --env-file=.env scripts/dev-cron.mjs`
+(`--once` for a single tick) alongside the dev server, pointing `APP_URL` at
+whichever instance should drain.
 
 Approved dependencies only (execution plan v3): `drizzle-orm`,
 `@libsql/client`, the SvelteKit adapter, `recheck` (runtime); `drizzle-kit`,
@@ -223,18 +236,35 @@ must not appear in `src/`.
 
 ## Environments
 
-- **All agent work happens against the Turso DEV database.** Local
-  `npm run dev` and `npm run db:migrate` use the
-  `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN` in the checkout's `.env`, which
-  point at the dev database. Migration verification, seed data, and schema
-  experiments all happen there — it is safe to break.
-- **Production only goes live through Netlify.** The production app is the
-  Netlify deploy of `main`; its env vars (including the production Turso
-  credentials) live in Netlify site settings, never in the repo. Do not point
-  local tooling at the production database — production migrations run per
-  [DEPLOY.md](DEPLOY.md) §1, after the code that needs them has merged.
-- Netlify branch deploys preview feature branches; `APP_URL` and `DRY_RUN`
-  are set per-deploy-context there, not in `.env`.
+Dev and production are **fully isolated**, each with its own Google OAuth
+client and its own Turso database:
+
+| | Google OAuth client | Turso database | Netlify env context |
+|---|---|---|---|
+| **Dev** | `880114106606-kmn2b9p…` | `dev-2-bonobo791` | `branch-deploys` |
+| **Production** | `880114106606-1t4edg0…` | `moderaty-bonobo791` | `production` |
+
+- **All agent work uses the dev credentials**, which live in the dev
+  worktree's `.env` (`.worktrees/dev/.env`). Migration verification, seed
+  data, and schema experiments all happen against `dev-2` — it is safe to
+  break.
+- **The main checkout's `.env` holds PRODUCTION credentials** (Google client
+  `1t4edg0…`, Turso `moderaty-bonobo791`) so the human can run production
+  operations locally (migrations per [DEPLOY.md](DEPLOY.md) §1, backups).
+  It is NOT a dev config: never `npm run dev` against it, never copy its
+  values into a dev `.env`, and never point any dev tooling at the
+  production database. Production database changes are human-only.
+- **Netlify carries both environments**: the `production` deploy context
+  (serves `main`) has the production client + database, the
+  `branch-deploys` context (the `dev` branch and PR previews) has the dev
+  client + database. Both contexts set the same ten keys; `APP_URL` and
+  `DRY_RUN` differ per context, not in `.env`.
+- **OAuth grants are per-client.** A channel connected in one environment
+  cannot be token-refreshed in the other — Google answers
+  `401 unauthorized_client`, which surfaces as a failed dry run / cron run.
+  Restoring a production backup into the dev database copies channel rows
+  whose grants are useless there; reconnect the channel inside the dev
+  deployment to mint a dev-client grant.
 
 ## Accounts & Sessions
 
@@ -311,6 +341,9 @@ I8/I10) — the consent row itself is kept, anonymized.
 Use Node 24 and npm 11.
 
 - `npm run dev` — start local development.
+- `npm run dev:cron` — tick `GET /api/cron` every 60s against `APP_URL`
+  (default localhost) so history scans and dry-run windows actually drain
+  outside production; run it alongside `npm run dev`.
 - `npm run check` — run SvelteKit sync and strict diagnostics.
 - `npm run build` — create the Netlify deployment build.
 - `npm run preview` — serve the production build locally.

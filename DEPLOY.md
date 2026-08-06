@@ -24,6 +24,10 @@ The repo is deploy-ready: `netlify.toml` pins the build (`npm run build`,
 publish `build`, Node 24) and `netlify/functions/cron.mjs` is a Netlify
 Scheduled Function that triggers one bounded moderation run every minute
 (during early operation; raise to `*/15 * * * *` when user volume grows).
+Scheduled functions only fire on the published production deploy — branch
+deploys and Deploy Previews never trigger them — so non-production
+environments drain via `node --env-file=.env scripts/dev-cron.mjs`
+(see AGENTS.md, Project Structure).
 The steps below are the one-time manual setup.
 
 ## 1. Database (Turso)
@@ -63,10 +67,24 @@ The steps below are the one-time manual setup.
   | `APP_URL` | the deployed site URL, e.g. `https://moderaty.netlify.app` |
   | `DRY_RUN` | start with `true`; flip to `false` after verifying a dry run |
 
+- **Two environments, two deploy contexts.** Set the same keys twice:
+  the **production** context (`main` deploys) gets the production Google
+  OAuth client and the production Turso database; the **branch-deploys**
+  context (the `dev` branch and PR previews) gets the dev Google OAuth
+  client and the dev Turso database. This is what keeps dev from touching
+  production — do not point either context at the other's resources.
+
 ## 3. Google Cloud Console
 
 - Add the production redirect URI to the OAuth client:
   `https://<your-site>/api/auth/google/callback`
+- The dev OAuth client additionally needs the dev redirect URIs:
+  `https://dev--<your-site>.netlify.app/api/auth/google/callback` (the `dev`
+  branch deploy) and `http://localhost:5173/api/auth/google/callback` for
+  local development. Keep both clients in the same Google Cloud project.
+- OAuth grants are per-client: a channel connected through one environment
+  cannot be token-refreshed through the other (`401 unauthorized_client`).
+  Connect channels separately in each environment.
 - Consent screen: app name **Moderaty**, scope
   `https://www.googleapis.com/auth/youtube.force-ssl`; while unverified, add
   each channel owner's Gmail as a test user.

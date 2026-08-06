@@ -112,6 +112,31 @@ test('dashboard load never serializes the encrypted refresh token', async () => 
 	expect(JSON.stringify(data)).not.toContain('encrypted-refresh-token');
 });
 
+// A history drain in flight is exactly `nextPageToken IS NOT NULL` (the
+// pipeline clears it on completion). The dashboard flags it so the "scan
+// started" message survives a refresh — the drain is server-side cron work.
+test('dashboard load flags a mid-drain channel as scanning without leaking the page token', async () => {
+	await testDb().db.insert(channels).values({
+		id: 'UC1',
+		userId: OWNER.id,
+		orgId: 'org-1',
+		title: 'Draining',
+		refreshTokenEnc: 'enc',
+		nextPageToken: 'secret-page-token'
+	});
+	await testDb().db
+		.insert(channels)
+		.values({ id: 'UC2', userId: OWNER.id, orgId: 'org-1', title: 'Idle', refreshTokenEnc: 'enc' });
+
+	const data = await loadDashboard();
+
+	expect(data.chs.find((ch) => ch.id === 'UC1')).toMatchObject({ scanning: true });
+	expect(data.chs.find((ch) => ch.id === 'UC2')).toMatchObject({ scanning: false });
+	// The continuation token is internal drain state — never serialized.
+	expect(data.chs.find((ch) => ch.id === 'UC1')).not.toHaveProperty('nextPageToken');
+	expect(JSON.stringify(data)).not.toContain('secret-page-token');
+});
+
 test('dashboard load shows only the active team\'s channels', async () => {
 	await testDb().db.insert(channels).values({ id: 'UC1', userId: OWNER.id, orgId: 'org-1', title: 'Mine', refreshTokenEnc: 'enc' });
 	// A teammate's connection is the team's channel too — it MUST appear.
@@ -266,6 +291,9 @@ test('delete account still deletes when revocation fails, logging loudly', async
 	expect(errorSpy).toHaveBeenCalledWith(
 		expect.stringContaining('account deletion channel UC1 revocation failed')
 	);
+	// The per-channel failure log carries the channel id as a separate
+	// argument (never interpolated — Semgrep unsafe-formatstring).
+	expect(errorSpy).toHaveBeenCalledWith('token revocation failed for channel, deleting anyway:', 'UC1', expect.any(Error));
 	// The encrypted token is erased either way — the grant is orphaned, not kept.
 	expect(await testDb().db.select().from(channels).all()).toHaveLength(0);
 	expect((await testDb().db.select().from(users).all())[0]).toMatchObject({ googleSub: 'deleted:user-1' });
@@ -288,8 +316,9 @@ test('a revocation failure on one channel does not stop the others', async () =>
 		const { res } = await captureDelete(OWNER, { confirm: 'on' });
 
 		expect(res).toMatchObject({ status: 302, location: '/' });
-		// The failure is logged loudly WITH the channel id…
-		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('UC1'), expect.anything());
+		// The failure is logged loudly WITH the channel id (as a separate
+		// argument — never interpolated)…
+		expect(errorSpy).toHaveBeenCalledWith('token revocation failed for channel, deleting anyway:', 'UC1', expect.any(Error));
 		// …and the second channel was still revoked afterwards.
 		expect(fetch.mock.calls.some((c) => String(c[1]?.body).includes('token=token-2'))).toBe(true);
 		expect(await testDb().db.select().from(channels).all()).toHaveLength(0);
@@ -304,7 +333,7 @@ test('a database outage returns the maintenance payload without requiring a user
 	// dbDown with a null user is the normal outage shape: requireUser must not
 	// trip — the overlay replaces the dashboard, not the error page.
 	const data = (await load({ locals: { user: null, dbDown: true } } as never)) as Record<string, unknown>;
-	expect(data).toEqual({ chs: [], stats: [], bans: [], maintenance: true });
+	expect(data).toEqual({ chs: [], stats: [], bans: [], maintenance: true, orgRole: null });
 });
 
 test('a database failure mid-load degrades to the maintenance payload and logs loudly', async () => {
@@ -319,7 +348,7 @@ test('a database failure mid-load degrades to the maintenance payload and logs l
 	} finally {
 		client.execute = originalExecute;
 	}
-	expect(data).toEqual({ chs: [], stats: [], bans: [], maintenance: true });
+	expect(data).toEqual({ chs: [], stats: [], bans: [], maintenance: true, orgRole: null });
 	expect(console.error).toHaveBeenCalledWith('dashboard load failed:', expect.any(Error));
 });
 

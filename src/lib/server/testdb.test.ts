@@ -16,10 +16,10 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
 
-import { consents, invites, memberships, organizations } from './db/schema';
-import { seedConsent, seedUser, setupTestDb, testDb } from './testdb';
+import { consents, invites, memberships, organizations, users } from './db/schema';
+import { seedConsent, seedUser, setupTestDb, testDb, wipeTables } from './testdb';
 
 // Harness self-test (PR #48 review): schema.ts exports the tenant tables from
 // Phase A, so createTestDb's hand-written DDL must create them too — every
@@ -27,6 +27,71 @@ import { seedConsent, seedUser, setupTestDb, testDb } from './testdb';
 // table presence AND the constraints the app relies on (personal_for UNIQUE,
 // memberships composite PK).
 setupTestDb(['consents', 'invites', 'memberships', 'organizations', 'users']);
+
+test('wipeTables empties the given tables on demand (per-property-run freshness)', async () => {
+	await seedUser('wipe-me');
+	expect(await testDb().db.select().from(users).all()).toHaveLength(1);
+	await wipeTables(['users']);
+	expect(await testDb().db.select().from(users).all()).toHaveLength(0);
+});
+
+// PR #121 review (amazon-q, qodo): caller-provided names are interpolated into
+// SQL, so anything that is not an app-schema table must be rejected loudly —
+// including names that exist in SQLite but are not ours (a silent
+// `DELETE FROM sqlite_sequence` resets every AUTOINCREMENT counter).
+test('wipeTables rejects tables outside the app schema loudly', async () => {
+	await expect(wipeTables(['sqlite_sequence'])).rejects.toThrow(/unknown table/);
+	await expect(wipeTables(['usrers'])).rejects.toThrow(/unknown table/);
+});
+
+// PR #121 review (qodo): caller-ordered deletes break the moment a non-cascade
+// FK lands in the schema. The wipe must suspend FK enforcement itself, and the
+// OFF must precede every DELETE. The ON travels in a SEPARATE execute after
+// the multiple: executeMultiple stops at the first failing statement, so an ON
+// inside the same batch would be skipped by a failed DELETE (PR #122 review,
+// coderabbit) — and libsql's batch() runs transactionally, where the pragma is
+// a no-op, so executeMultiple remains the only harness that honors the OFF.
+test('wipeTables suspends FK enforcement around the deletes', async () => {
+	const multiSpy = vi.spyOn(testDb().client, 'executeMultiple');
+	const execSpy = vi.spyOn(testDb().client, 'execute');
+	try {
+		await wipeTables(['users']);
+		expect(multiSpy).toHaveBeenCalledTimes(1);
+		const sql = multiSpy.mock.calls[0][0] as string;
+		const off = sql.indexOf('PRAGMA foreign_keys = OFF');
+		const del = sql.indexOf('DELETE FROM users');
+		expect(off).toBeGreaterThanOrEqual(0);
+		expect(off).toBeLessThan(del);
+		expect(sql).not.toContain('PRAGMA foreign_keys = ON');
+		expect(execSpy).toHaveBeenCalledWith('PRAGMA foreign_keys = ON');
+		// The ON must be issued after the multiple, never before.
+		expect(execSpy.mock.invocationCallOrder[0]).toBeGreaterThan(multiSpy.mock.invocationCallOrder[0]);
+	} finally {
+		multiSpy.mockRestore();
+		execSpy.mockRestore();
+	}
+});
+
+// PR #122 review (coderabbit): a failed DELETE must not leave the shared
+// in-memory connection with FK enforcement OFF — later tests would silently
+// lose the FK violations the harness exists to catch.
+test('wipeTables restores FK enforcement even when a delete fails', async () => {
+	const client = testDb().client;
+	// Simulate executeMultiple stopping mid-batch: the OFF has already taken
+	// effect when the DELETE fails — exactly how the real failure mode leaves
+	// the connection (a blanket rejection would never turn FK off at all).
+	const spy = vi.spyOn(client, 'executeMultiple').mockImplementation(async () => {
+		await client.execute('PRAGMA foreign_keys = OFF');
+		throw new Error('disk I/O error');
+	});
+	try {
+		await expect(wipeTables(['users'])).rejects.toThrow('disk I/O error');
+	} finally {
+		spy.mockRestore();
+	}
+	const { rows } = await client.execute('PRAGMA foreign_keys');
+	expect(Number(rows[0][0])).toBe(1);
+});
 
 test('createTestDb creates the tenant tables', async () => {
 	const tables = await testDb().client.execute(

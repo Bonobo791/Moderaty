@@ -47,6 +47,15 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	<title>Moderaty — Dashboard</title>
 </svelte:head>
 
+{#if data.maintenance}
+	<!-- The layout's overlay only triggers on LAYOUT data; when the layout was
+	healthy but a dashboard query failed mid-load, the page must render its own
+	state instead of an empty shell with destructive controls (I12). -->
+	<div class="error-box" role="alert">
+		<strong>Maintenance</strong> — Moderaty is temporarily unable to reach its database.
+		Nothing on this page will work right now; try again in a minute.
+	</div>
+{:else}
 <h1>Channels</h1>
 <p class="page-sub">Connect a channel and track its moderation activity.</p>
 
@@ -159,9 +168,15 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				</p>
 			{/if}
 		{/if}
+		{#if ch.scanning}
+			<p class="muted" role="status">
+				History scan in progress — cron is working through the backlog and new comments flow into the review queue as it drains. This runs in the background: refreshing or leaving this page won't stop it.
+			</p>
+		{/if}
 		<form
 			method="POST"
 			action="?/dryRun"
+			class="history-form"
 			use:enhance={() => {
 				dryRunPending = ch.id;
 				return async ({ update }) => {
@@ -171,6 +186,15 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			}}
 		>
 			<input type="hidden" name="channelId" value={ch.id} />
+			<label for="dryrun-months-{ch.id}">Dry run</label>
+			<select id="dryrun-months-{ch.id}" name="months" aria-label="How far back the dry run covers on {ch.title}">
+				<option value="1">last month</option>
+				<option value="3" selected>last 3 months</option>
+				<option value="6">last 6 months</option>
+				<option value="12">last 12 months</option>
+				<option value="24">last 24 months</option>
+				<option value="all">all time</option>
+			</select>
 			<button
 				class="btn secondary small"
 				type="submit"
@@ -187,7 +211,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				<p class="muted" role="status">Dry run preview: nothing new to preview right now.</p>
 			{:else if form?.ok}
 				<p class="muted" role="status">
-					Dry run preview: {form.fetched} comment{form.fetched === 1 ? '' : 's'} scanned —
+					Dry run preview ({form.months === 'all' ? 'all time' : form.months === 1 ? 'last month' : `last ${form.months} months`}): {form.fetched} comment{form.fetched === 1 ? '' : 's'} scanned —
 					{form.acted} would be acted on, {form.queued} would go to the review queue.
 					{#if form.partial}Partial — the 20 s preview limit was hit; see the audit log for what completed. {/if}
 					<a href="/channels/{ch.id}/log">See the audit log</a>.
@@ -197,6 +221,27 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		<p class="muted" style="margin:12px 0 0">
 			last checked {ch.lastRunAt ? relativeTime(ch.lastRunAt) : 'never'} · ID: {ch.id}
 		</p>
+		{#if data.orgRole === 'owner' || data.orgRole === 'admin'}
+			<details class="channel-disconnect">
+				<summary>Danger zone — disconnect channel</summary>
+				<p class="muted">
+					Disconnecting asks Google to revoke Moderaty's access to {ch.title} and immediately
+					erases the channel with all its rules, comments, and moderation history — there is no
+					restore. You can reconnect the channel afterwards, which starts it fresh.
+				</p>
+				{#if form?.scope === 'disconnect' && form?.channelId === ch.id && form?.error}
+					<p class="error-box" role="alert">{form.error}</p>
+				{/if}
+				<form method="POST" action="?/disconnectChannel" use:enhance>
+					<input type="hidden" name="channelId" value={ch.id} />
+					<label class="confirm-delete" for="confirm-disconnect-{ch.id}">
+						<input id="confirm-disconnect-{ch.id}" type="checkbox" name="confirm" />
+						I understand — disconnect {ch.title} and erase its data
+					</label>
+					<button class="btn danger small" type="submit">Disconnect channel {ch.title}</button>
+				</form>
+			</details>
+		{/if}
 	</div>
 {:else}
 	<EmptyState
@@ -229,6 +274,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		<button class="btn danger" type="submit">Delete my account</button>
 	</form>
 </div>
+{/if}
 
 <style>
 	.history-form {
@@ -243,6 +289,17 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		border-color: var(--danger);
 	}
 	.danger-zone h2 {
+		color: var(--danger);
+	}
+	.channel-disconnect {
+		margin-top: 14px;
+		padding-top: 10px;
+		border-top: 1px dashed var(--danger);
+	}
+	.channel-disconnect summary {
+		cursor: pointer;
+		font-size: 0.9rem;
+		font-weight: 600;
 		color: var(--danger);
 	}
 	.confirm-delete {

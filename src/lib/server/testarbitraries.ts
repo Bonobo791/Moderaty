@@ -436,9 +436,9 @@ const SAFE_REGEX_FRAGMENTS = [
 	'[0-9]+',
 	'https?://',
 	'(buy|sell)',
-	'\\bclick\\b',
+	String.raw`\bclick\b`,
 	'[aeiou]{2}',
-	'win\\d*'
+	String.raw`win\d*`
 ] as const;
 
 /** Regex sources that always pass validateRule (type 'regex'). */
@@ -453,6 +453,6 @@ export const safeRegexArb: fc.Arbitrary<string> = fc
  * content).
  */
 export const unsafeRegexArb: fc.Arbitrary<string> = fc.oneof(
-	fc.constantFrom('(spam)\\1', '(?<g>free)\\k<g>', '(foo|foo)', '(a+)+$'),
+	fc.constantFrom(String.raw`(spam)\1`, String.raw`(?<g>free)\k<g>`, '(foo|foo)', '(a+)+$'),
 	fc.string({ minLength: 257, maxLength: 280 })
 );

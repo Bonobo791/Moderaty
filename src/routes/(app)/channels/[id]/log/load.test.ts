@@ -162,7 +162,8 @@ function manyEntries(n: number, offsetMs = 0) {
 }
 
 function loadPage(before?: string) {
-	const url = before !== undefined ? new URL(`${LOG_URL}?before=${encodeURIComponent(before)}`) : LOG_URL;
+	const url = new URL(LOG_URL);
+	if (before !== undefined) url.searchParams.set('before', before);
 	return load({ params: { id: 'UC1' }, locals: { user: OWNER }, url } as never);
 }
 
@@ -222,6 +223,36 @@ test.each([
 	await seedChannel();
 
 	await expect(loadPage(before)).rejects.toMatchObject({ status: 400 });
+});
+
+test.each([
+	// Date.parse accepts both, but neither is the canonical toISOString()
+	// form created_at is stored and compared as — lexicographic keyset
+	// paging against a non-canonical cursor silently selects the wrong window.
+	{ before: '2026-01-01|5' },
+	{ before: '2026-01-01T00:00:00+02:00|5' }
+])('a parseable but non-canonical cursor "$before" fails loudly with 400', async ({ before }) => {
+	await seedChannel();
+
+	await expect(loadPage(before)).rejects.toMatchObject({ status: 400 });
+});
+
+test('a page of tied timestamps pages via the id tie-break: page 2 holds exactly the remaining row', async () => {
+	await seedChannel();
+	// Every row shares one createdAt: without the `id < cursor.id` tie-break
+	// the next page's predicate (`createdAt < cursor.ts`) matches nothing.
+	const TIED = '2026-01-01T00:00:00.000Z';
+	await seedEntries(manyEntries(PAGE_SIZE + 1).map((row) => ({ ...row, createdAt: TIED })));
+
+	const page1 = (await loadPage())!;
+	expect(page1.entries).toHaveLength(PAGE_SIZE);
+	expect(page1.nextCursor).toBe(`${TIED}|${page1.entries[PAGE_SIZE - 1].id}`);
+
+	const page2 = (await loadPage(page1.nextCursor!))!;
+	expect(page2.entries).toHaveLength(1);
+	expect(page2.nextCursor).toBeNull();
+	const page1Ids = new Set(page1.entries.map((e) => e.id));
+	expect(page1Ids.has(page2.entries[0].id)).toBe(false);
 });
 
 test('undoable is judged against the whole log, not the page: a superseded action on page 2 offers no undo', async () => {

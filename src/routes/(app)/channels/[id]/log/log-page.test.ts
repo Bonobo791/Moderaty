@@ -53,20 +53,20 @@ function renderLog(overrides: Record<string, unknown> = {}) {
 
 test('a single page of entries renders no pagination nav', () => {
 	const body = renderLog();
+	expect(body).not.toContain('<nav class="pager"');
 	expect(body).not.toContain('Older');
 	expect(body).not.toContain('Newest');
 });
 
-test('a continuation cursor renders an Older link carrying the cursor', () => {
+test('a continuation cursor renders an Older link whose href carries the encoded cursor', () => {
 	const body = renderLog({ nextCursor: '2026-01-01T00:00:00.000Z|7' });
-	expect(body).toContain('Older');
-	expect(body).toContain('before=2026-01-01T00%3A00%3A00.000Z%7C7');
+	expect(body).toContain('href="/channels/UC1/log?before=2026-01-01T00%3A00%3A00.000Z%7C7"');
 	// Still on page 1 — no way "back" to newest.
-	expect(body).not.toContain('Newest');
+	expect(body).not.toContain('href="/channels/UC1/log"');
 });
 
-test('a deep page renders a Newest link back to the bare log URL', () => {
+test('a deep page renders a Newest link whose href is exactly the bare log URL', () => {
 	const body = renderLog({ hasPrev: true, nextCursor: '2026-01-01T00:00:00.000Z|7' });
-	expect(body).toContain('Newest');
-	expect(body).toContain('Older');
+	expect(body).toContain('href="/channels/UC1/log"');
+	expect(body).toContain('href="/channels/UC1/log?before=2026-01-01T00%3A00%3A00.000Z%7C7"');
 });

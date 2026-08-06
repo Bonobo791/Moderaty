@@ -37,7 +37,7 @@ function parseCursor(raw: string | null): { ts: string; id: number } | null {
 	const sep = raw.lastIndexOf('|');
 	const ts = sep === -1 ? '' : raw.slice(0, sep);
 	const idRaw = sep === -1 ? '' : raw.slice(sep + 1);
-	if (sep === -1 || Number.isNaN(Date.parse(ts)) || !/^\d{1,15}$/.test(idRaw)) {
+	if (sep === -1 || Number.isNaN(Date.parse(ts)) || new Date(ts).toISOString() !== ts || !/^\d{1,15}$/.test(idRaw)) {
 		throw error(400, 'invalid audit-log cursor');
 	}
 	return { ts, id: Number(idRaw) };

@@ -42,6 +42,15 @@ vi.mock('$lib/server/db', () => ({
 }));
 
 /**
+ * Deletes every row from the given tables. Used per-test by setupTestDb and
+ * per-property-run by property tests (a single property runs ~100 predicates
+ * inside one test, so state must be wiped inside the predicate too).
+ */
+export async function wipeTables(tables: string[]): Promise<void> {
+	await testDb().client.batch(tables.map((table) => `DELETE FROM ${table}`));
+}
+
+/**
  * Registers beforeAll/beforeEach hooks that create the in-memory db and wipe
  * the given tables before each test. File-local beforeEach hooks registered
  * after this call run after the cleanup.
@@ -51,7 +60,7 @@ export function setupTestDb(tables: string[]): void {
 		holder.current = await createTestDb();
 	});
 	beforeEach(async () => {
-		await testDb().client.batch(tables.map((table) => `DELETE FROM ${table}`));
+		await wipeTables(tables);
 	});
 }
 

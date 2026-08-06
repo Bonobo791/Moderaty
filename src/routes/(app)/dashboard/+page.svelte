@@ -188,6 +188,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				<option value="6">last 6 months</option>
 				<option value="12">last 12 months</option>
 				<option value="24">last 24 months</option>
+				<option value="all">all time</option>
 			</select>
 			<button
 				class="btn secondary small"
@@ -205,7 +206,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				<p class="muted" role="status">Dry run preview: nothing new to preview right now.</p>
 			{:else if form?.ok}
 				<p class="muted" role="status">
-					Dry run preview (last {form.months === 1 ? 'month' : `${form.months} months`}): {form.fetched} comment{form.fetched === 1 ? '' : 's'} scanned —
+					Dry run preview ({form.months === 'all' ? 'all time' : form.months === 1 ? 'last month' : `last ${form.months} months`}): {form.fetched} comment{form.fetched === 1 ? '' : 's'} scanned —
 					{form.acted} would be acted on, {form.queued} would go to the review queue.
 					{#if form.partial}Partial — the 20 s preview limit was hit; see the audit log for what completed. {/if}
 					<a href="/channels/{ch.id}/log">See the audit log</a>.

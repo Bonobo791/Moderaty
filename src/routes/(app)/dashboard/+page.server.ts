@@ -180,12 +180,19 @@ export const actions = {
 		const user = requireUser(locals);
 		const f = await request.formData();
 		const channelId = String(f.get('channelId') ?? '');
-		// Same presets as Analyze history; absent → 3 (the UI default).
-		const months = f.has('months') ? Number(f.get('months')) : 3;
-		if (![1, 3, 6, 12, 24].includes(months)) {
-			return fail(400, { scope: 'dryRun', channelId, error: 'dry-run window must be 1, 3, 6, 12, or 24 months' });
+		// Same presets as Analyze history; absent → 3 (the UI default). 'all'
+		// covers channels whose entire history predates every months preset.
+		const rawMonths = f.has('months') ? String(f.get('months')) : '3';
+		if (rawMonths !== 'all' && ![1, 3, 6, 12, 24].includes(Number(rawMonths))) {
+			return fail(400, { scope: 'dryRun', channelId, error: 'dry-run window must be 1, 3, 6, 12, or 24 months, or all time' });
 		}
-		const boundary = new Date(Date.now() - months * 30 * 24 * 60 * 60 * 1000).toISOString();
+		const months = rawMonths === 'all' ? ('all' as const) : Number(rawMonths);
+		// 'all' maps to the epoch boundary: no comment is ever older than it, and
+		// the non-null drain state keeps cron paging until YouTube runs out of pages.
+		const boundary =
+			months === 'all'
+				? '1970-01-01T00:00:00.000Z'
+				: new Date(Date.now() - months * 30 * 24 * 60 * 60 * 1000).toISOString();
 		// Atomic lease claim, same protocol as cron/analyzeHistory: the UPDATE's
 		// predicate makes concurrent claimants single-winner (TOCTOU-safe), and
 		// it doubles as the tenancy check — another team's channel matches 0

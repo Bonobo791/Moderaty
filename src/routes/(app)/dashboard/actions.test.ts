@@ -443,6 +443,27 @@ test('dry run rejects an unsupported months preset with 400 and never runs', asy
 	expect(mocks.runChannel).not.toHaveBeenCalled();
 });
 
+// "All time" exists for channels whose entire comment history predates every
+// months preset (a channel whose newest comment is from 2021 can never be
+// previewed otherwise). It maps to the epoch boundary: every YouTube comment
+// is in scope, and the drain state stays non-null so cron keeps paging.
+test('dry run with months "all" scopes the window to the epoch boundary', async () => {
+	await seedChannel('UC1');
+	mocks.runChannel.mockResolvedValue(dryRunResult({ fetched: 100, windowComplete: false, windowNextPageToken: 'page-2' }));
+
+	const res = await dryRun('UC1', OWNER, 'all');
+
+	expect(mocks.runChannel).toHaveBeenCalledWith('UC1', {
+		deadline: expect.any(Number),
+		forceDryRun: true,
+		window: { boundary: '1970-01-01T00:00:00.000Z', pageToken: null }
+	});
+	expect(res).toMatchObject({ ok: true, months: 'all', background: true });
+	// The persisted drain boundary must be the epoch, not null — null would
+	// read as "no drain in flight" and cron would never continue the window.
+	expect(await drainStateOf('UC1')).toEqual({ boundary: '1970-01-01T00:00:00.000Z', pageToken: 'page-2' });
+});
+
 test.each([
 	{
 		name: 'an incomplete window persists the drain state for cron and reports background work',

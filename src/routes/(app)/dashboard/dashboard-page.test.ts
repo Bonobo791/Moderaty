@@ -80,4 +80,17 @@ test('the dry-run form offers the window presets with a labeled select, defaulti
 	expect(body).toContain('name="months"');
 	expect(body).toContain('aria-label="How far back the dry run covers on My Channel"');
 	expect(body).toContain('>last 24 months</option>');
+	// "All time" covers channels whose comments predate every months preset.
+	expect(body).toContain('value="all"');
+	expect(body).toContain('>all time</option>');
+});
+
+test('an all-time dry-run result names the window in the success line', () => {
+	const body = render(Page, {
+		props: {
+			data: NORMAL_DATA,
+			form: { ok: true, scope: 'dryRun', channelId: 'UC1', months: 'all', fetched: 6, acted: 0, queued: 0, partial: false }
+		} as never
+	}).body;
+	expect(body).toContain('Dry run preview (all time): 6 comments scanned');
 });

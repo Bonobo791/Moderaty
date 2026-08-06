@@ -16,7 +16,7 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
 
 import { consents, invites, memberships, organizations, users } from './db/schema';
 import { seedConsent, seedUser, setupTestDb, testDb, wipeTables } from './testdb';
@@ -33,6 +33,37 @@ test('wipeTables empties the given tables on demand (per-property-run freshness)
 	expect(await testDb().db.select().from(users).all()).toHaveLength(1);
 	await wipeTables(['users']);
 	expect(await testDb().db.select().from(users).all()).toHaveLength(0);
+});
+
+// PR #121 review (amazon-q, qodo): caller-provided names are interpolated into
+// SQL, so anything that is not an app-schema table must be rejected loudly —
+// including names that exist in SQLite but are not ours (a silent
+// `DELETE FROM sqlite_sequence` resets every AUTOINCREMENT counter).
+test('wipeTables rejects tables outside the app schema loudly', async () => {
+	await expect(wipeTables(['sqlite_sequence'])).rejects.toThrow(/unknown table/);
+	await expect(wipeTables(['usrers'])).rejects.toThrow(/unknown table/);
+});
+
+// PR #121 review (qodo): caller-ordered deletes break the moment a non-cascade
+// FK lands in the schema. The wipe must suspend FK enforcement itself, and the
+// OFF must precede every DELETE and the ON must follow (pinned by statement
+// position, since libsql's batch() runs transactionally — where the pragma is
+// a no-op — executeMultiple is the only harness that honors it).
+test('wipeTables suspends FK enforcement around the deletes', async () => {
+	const spy = vi.spyOn(testDb().client, 'executeMultiple');
+	try {
+		await wipeTables(['users']);
+		expect(spy).toHaveBeenCalledTimes(1);
+		const sql = spy.mock.calls[0][0] as string;
+		const off = sql.indexOf('PRAGMA foreign_keys = OFF');
+		const del = sql.indexOf('DELETE FROM users');
+		const on = sql.indexOf('PRAGMA foreign_keys = ON');
+		expect(off).toBeGreaterThanOrEqual(0);
+		expect(off).toBeLessThan(del);
+		expect(del).toBeLessThan(on);
+	} finally {
+		spy.mockRestore();
+	}
 });
 
 test('createTestDb creates the tenant tables', async () => {

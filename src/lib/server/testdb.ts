@@ -20,7 +20,9 @@
 // Never imported by app code — tests only.
 
 import { createClient, type Client } from '@libsql/client';
+import { getTableName, is } from 'drizzle-orm';
 import { drizzle, type LibSQLDatabase } from 'drizzle-orm/libsql';
+import { SQLiteTable } from 'drizzle-orm/sqlite-core';
 import { beforeAll, beforeEach, vi } from 'vitest';
 import * as schema from './db/schema';
 import { consents, users } from './db/schema';
@@ -45,10 +47,38 @@ vi.mock('$lib/server/db', () => ({
  * Deletes every row from the given tables. Used per-test by setupTestDb and
  * per-property-run by property tests (a single property runs ~100 predicates
  * inside one test, so state must be wiped inside the predicate too).
+ *
+ * Table names are interpolated into SQL, so they are validated against the
+ * app schema first — a typo or a non-app table (e.g. sqlite_sequence) fails
+ * loudly instead of wiping the wrong thing. FK enforcement is suspended for
+ * the wipe so callers never have to order tables around FK dependencies;
+ * the pragma only takes effect outside a transaction, which is why this
+ * uses executeMultiple rather than the transactional batch().
  */
 export async function wipeTables(tables: string[]): Promise<void> {
-	await testDb().client.batch(tables.map((table) => `DELETE FROM ${table}`));
+	for (const table of tables) {
+		if (!WIPEABLE_TABLES.has(table)) {
+			throw new Error(`wipeTables: unknown table "${table}" (not in the app schema)`);
+		}
+	}
+	const statements = [
+		'PRAGMA foreign_keys = OFF',
+		...tables.map((table) => `DELETE FROM ${table}`),
+		'PRAGMA foreign_keys = ON'
+	];
+	await testDb().client.executeMultiple(statements.join(';\n'));
 }
+
+// Derived from the Drizzle schema so the allowlist can never drift from the
+// real table set (relations and type exports are filtered out).
+// __drizzle_migrations is not in the schema — drizzle-kit owns it — but the
+// migration guard reads it, so its tests must be able to wipe it.
+const WIPEABLE_TABLES: Set<string> = new Set([
+	...Object.values(schema)
+		.filter((value) => is(value, SQLiteTable))
+		.map((table) => getTableName(table)),
+	'__drizzle_migrations'
+]);
 
 /**
  * Registers beforeAll/beforeEach hooks that create the in-memory db and wipe

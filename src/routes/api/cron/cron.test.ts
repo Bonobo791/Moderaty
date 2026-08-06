@@ -83,6 +83,11 @@ function channelRow(id: string) {
 	return testDb().db.select().from(channels).where(eq(channels.id, id)).get();
 }
 
+function expectDrainState(row: Awaited<ReturnType<typeof channelRow>>, boundary: string | null, pageToken: string | null) {
+	expect(row?.dryRunBoundary).toBe(boundary);
+	expect(row?.dryRunPageToken).toBe(pageToken);
+}
+
 test('rejects a request with no secret at all', async () => {
 	await expectUnauthorized();
 });
@@ -370,9 +375,8 @@ test('drains one dry-run window page after the normal run and persists the conti
 		window: { boundary: '2026-05-01T00:00:00.000Z', pageToken: 'tok-1' }
 	});
 	expect(await res.json()).toMatchObject({ ok: true, results: { UC1: normal }, dryRunWindow: drain });
-	const row = await channelRow('UC1');
-	expect(row?.dryRunPageToken).toBe('tok-2');
-	expect(row?.dryRunBoundary).toBe('2026-05-01T00:00:00.000Z'); // boundary stays until the window completes
+	// Boundary stays until the window completes; only the token advances.
+	expectDrainState(await channelRow('UC1'), '2026-05-01T00:00:00.000Z', 'tok-2');
 });
 
 test('clears the drain state when the dry-run window completes', async () => {
@@ -383,9 +387,7 @@ test('clears the drain state when the dry-run window completes', async () => {
 
 	await call({ bearer: 'test-secret' });
 
-	const row = await channelRow('UC1');
-	expect(row?.dryRunBoundary).toBeNull();
-	expect(row?.dryRunPageToken).toBeNull();
+	expectDrainState(await channelRow('UC1'), null, null);
 });
 
 test('a channel with a drain in flight is selected before older ordinary channels', async () => {
@@ -410,13 +412,13 @@ test('a drain failure is loud, surfaced in the payload, and never masks the norm
 	const res = await call({ bearer: 'test-secret' });
 
 	expect(res.status).toBe(200);
-	expect(await res.json()).toMatchObject({ ok: true, results: { UC1: normal }, dryRunWindow: { error: 'drain exploded' } });
+	const body = await res.json();
+	expect(body).toMatchObject({ ok: true, results: { UC1: normal } });
+	expect(body.dryRunWindow).toEqual({ error: 'drain exploded' });
 	// Exact message: an emptied or altered log line must fail this test.
 	expect(spy).toHaveBeenCalledWith('dry-run window drain failed for channel:', 'UC1', expect.any(Error));
 	// The drain state is untouched so the next invocation retries it.
-	const row = await channelRow('UC1');
-	expect(row?.dryRunBoundary).toBe('2026-05-01T00:00:00.000Z');
-	expect(row?.dryRunPageToken).toBe('tok-1');
+	expectDrainState(await channelRow('UC1'), '2026-05-01T00:00:00.000Z', 'tok-1');
 });
 
 test('a channel without a drain runs once and reports no window work', async () => {
@@ -430,10 +432,13 @@ test('a channel without a drain runs once and reports no window work', async () 
 	expect(body.dryRunWindow).toBeUndefined();
 });
 
-test('a preview replanted mid-invocation survives a stale drain completing', async () => {
+test.each([
+	{ phase: 'completing', drain: { windowComplete: true, windowNextPageToken: null } },
+	{ phase: 'continuation write', drain: { windowComplete: false, windowNextPageToken: 'tok-2' } }
+])('a preview replanted mid-invocation survives a stale drain $phase', async ({ drain }) => {
 	// Cron reads the channel row BEFORE the atomic claim; a dashboard preview
-	// can claim, replant a NEW window, and release in between. The stale
-	// drain's cleanup must not wipe the replacement state.
+	// can claim, replant a NEW window, and release in between. Neither drain
+	// write may touch the replacement state (the boundary predicate no-ops).
 	await seedDrainChannel('UC1', 'tok-1');
 	mocks.runChannel
 		.mockResolvedValueOnce(runResult({ fetched: 1 }))
@@ -442,33 +447,10 @@ test('a preview replanted mid-invocation survives a stale drain completing', asy
 				.db.update(channels)
 				.set({ dryRunBoundary: '2026-06-01T00:00:00.000Z', dryRunPageToken: 'fresh-token' })
 				.where(eq(channels.id, 'UC1'));
-			return runResult({ windowComplete: true, windowNextPageToken: null });
+			return runResult(drain);
 		});
 
 	await call({ bearer: 'test-secret' });
 
-	const row = await channelRow('UC1');
-	expect(row?.dryRunBoundary).toBe('2026-06-01T00:00:00.000Z');
-	expect(row?.dryRunPageToken).toBe('fresh-token');
-});
-
-test('a preview replanted mid-invocation survives a stale drain continuation write', async () => {
-	// Same race, incomplete drain: the OLD window's next-page token must not be
-	// written over the NEW window's state.
-	await seedDrainChannel('UC1', 'tok-1');
-	mocks.runChannel
-		.mockResolvedValueOnce(runResult({ fetched: 1 }))
-		.mockImplementationOnce(async () => {
-			await testDb()
-				.db.update(channels)
-				.set({ dryRunBoundary: '2026-06-01T00:00:00.000Z', dryRunPageToken: 'fresh-token' })
-				.where(eq(channels.id, 'UC1'));
-			return runResult({ windowComplete: false, windowNextPageToken: 'tok-2' });
-		});
-
-	await call({ bearer: 'test-secret' });
-
-	const row = await channelRow('UC1');
-	expect(row?.dryRunBoundary).toBe('2026-06-01T00:00:00.000Z');
-	expect(row?.dryRunPageToken).toBe('fresh-token');
+	expectDrainState(await channelRow('UC1'), '2026-06-01T00:00:00.000Z', 'fresh-token');
 });

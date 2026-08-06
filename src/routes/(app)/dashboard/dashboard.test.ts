@@ -266,6 +266,9 @@ test('delete account still deletes when revocation fails, logging loudly', async
 	expect(errorSpy).toHaveBeenCalledWith(
 		expect.stringContaining('account deletion channel UC1 revocation failed')
 	);
+	// The per-channel failure log carries the channel id as a separate
+	// argument (never interpolated — Semgrep unsafe-formatstring).
+	expect(errorSpy).toHaveBeenCalledWith('token revocation failed for channel, deleting anyway:', 'UC1', expect.any(Error));
 	// The encrypted token is erased either way — the grant is orphaned, not kept.
 	expect(await testDb().db.select().from(channels).all()).toHaveLength(0);
 	expect((await testDb().db.select().from(users).all())[0]).toMatchObject({ googleSub: 'deleted:user-1' });
@@ -288,8 +291,9 @@ test('a revocation failure on one channel does not stop the others', async () =>
 		const { res } = await captureDelete(OWNER, { confirm: 'on' });
 
 		expect(res).toMatchObject({ status: 302, location: '/' });
-		// The failure is logged loudly WITH the channel id…
-		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('UC1'), expect.anything());
+		// The failure is logged loudly WITH the channel id (as a separate
+		// argument — never interpolated)…
+		expect(errorSpy).toHaveBeenCalledWith('token revocation failed for channel, deleting anyway:', 'UC1', expect.any(Error));
 		// …and the second channel was still revoked afterwards.
 		expect(fetch.mock.calls.some((c) => String(c[1]?.body).includes('token=token-2'))).toBe(true);
 		expect(await testDb().db.select().from(channels).all()).toHaveLength(0);

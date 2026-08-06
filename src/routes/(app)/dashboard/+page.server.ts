@@ -286,7 +286,7 @@ export const actions = {
 			try {
 				await revokeGoogleToken(decrypt(ch.refreshTokenEnc), `account deletion channel ${ch.id}`);
 			} catch (cause) {
-				console.error(`token revocation failed for channel ${ch.id}; deleting anyway:`, cause);
+				console.error('token revocation failed for channel, deleting anyway:', ch.id, cause);
 			}
 		}
 		await deleteUserRecords(user.id);
@@ -319,7 +319,7 @@ export const actions = {
 		try {
 			await revokeGoogleToken(decrypt(channel.refreshTokenEnc), `channel disconnect ${channel.id}`);
 		} catch (cause) {
-			console.error(`token revocation failed for channel ${channel.id}; disconnecting anyway:`, cause);
+			console.error('token revocation failed for channel, disconnecting anyway:', channel.id, cause);
 		}
 		await db.transaction(async (tx) => {
 			await deleteChannelRecords(tx, [channel.id], { expectedOrgId: user.orgId });

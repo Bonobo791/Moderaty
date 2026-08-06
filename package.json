@@ -39,6 +39,9 @@
 	"overrides": {
 		"@esbuild-kit/core-utils": {
 			"esbuild": "^0.25.12"
+		},
+		"typed-rest-client": {
+			"qs": "^6.15.3"
 		}
 	},
 	"allowScripts": {

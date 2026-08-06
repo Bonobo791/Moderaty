@@ -674,7 +674,7 @@ test('a failed revocation is logged loudly and never blocks the erase', async ()
 
 		expect(res).toMatchObject({ ok: true, scope: 'disconnect', channelId: 'UC1' });
 		expect(await rowsOf('UC1')).toEqual(ERASED);
-		expect(errorSpy).toHaveBeenCalledWith('token revocation failed for channel UC1; disconnecting anyway:', expect.any(Error));
+		expect(errorSpy).toHaveBeenCalledWith('token revocation failed for channel, disconnecting anyway:', 'UC1', expect.any(Error));
 	} finally {
 		errorSpy.mockRestore();
 		vi.unstubAllGlobals();
@@ -692,7 +692,7 @@ test('an undecryptable stored token is logged loudly and the erase still happens
 		expect(res).toMatchObject({ ok: true, scope: 'disconnect', channelId: 'UC1' });
 		expect(await rowsOf('UC1')).toEqual(ERASED);
 		expect(fetchSpy).not.toHaveBeenCalled();
-		expect(errorSpy).toHaveBeenCalledWith('token revocation failed for channel UC1; disconnecting anyway:', expect.any(Error));
+		expect(errorSpy).toHaveBeenCalledWith('token revocation failed for channel, disconnecting anyway:', 'UC1', expect.any(Error));
 	} finally {
 		errorSpy.mockRestore();
 		vi.unstubAllGlobals();

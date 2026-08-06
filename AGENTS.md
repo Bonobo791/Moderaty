@@ -18,7 +18,7 @@ One agent works the full stack. There are no per-layer agent boundaries.
   feature branch to `main`, never push to `main` directly.
 - Keep `dev` releasable: `npm run check`, `npm run build`, and
   `npm run test` green at all times so the human can batch-merge at any
-  point.
+  point. 
 
 # Rules
 - Always fail loudly.

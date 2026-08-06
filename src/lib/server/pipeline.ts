@@ -48,6 +48,11 @@ export interface RunChannelOptions {
 	 * call. Can only turn dry-run ON — an env-dry deployment is never flipped
 	 * live by a caller. */
 	forceDryRun?: boolean;
+	/** Dry-run drain over a time window: fetch one page bounded by `boundary`
+	 * (ignoring the live cursor/checkpoint) and rescore even comments stored by
+	 * real runs — re-scoring them is the point of the preview. Only meaningful
+	 * with forceDryRun. The caller persists any continuation state. */
+	window?: { boundary: string; pageToken: string | null };
 }
 
 export interface ChannelRunResult {
@@ -57,6 +62,11 @@ export interface ChannelRunResult {
 	partial: boolean;
 	skipped: boolean;
 	dryRun: boolean;
+	/** Window-mode continuation: token for the next drain page (null when the
+	 * window is exhausted) and whether the drain reached its boundary. Absent
+	 * outside window mode. */
+	windowNextPageToken?: string | null;
+	windowComplete?: boolean;
 }
 
 interface Decision {
@@ -274,21 +284,27 @@ async function decideNewComments(
 		toneLevel,
 		protections,
 		openAiKey,
-		deadline
-	}: { accessToken: string; toneLevel: number; protections: ToneProtections; openAiKey?: string; deadline?: number }
+		deadline,
+		rescore
+	}: { accessToken: string; toneLevel: number; protections: ToneProtections; openAiKey?: string; deadline?: number; rescore?: boolean }
 ): Promise<{ decisions: Decision[]; failures: string[] }> {
+	// Dry-run window mode (rescore: true) skips the stored-IDs dedupe entirely:
+	// re-scoring comments a real run already moderated is the point of the
+	// preview. The within-batch dedupe below still applies.
 	// Stryker disable ArrayDeclaration: equivalent — with an empty page there are no comments to consult existingIds for, so its contents are never read
-	const existingIds = new Set(
-		page.comments.length
-			? (
-					await db
-						.select({ id: comments.id })
-						.from(comments)
-						.where(inArray(comments.id, page.comments.map((comment) => comment.id)))
-						.all()
-				).map((comment) => comment.id)
-			: []
-	);
+	const existingIds = rescore
+		? new Set<string>()
+		: new Set(
+				page.comments.length
+					? (
+							await db
+								.select({ id: comments.id })
+								.from(comments)
+								.where(inArray(comments.id, page.comments.map((comment) => comment.id)))
+								.all()
+						).map((comment) => comment.id)
+					: []
+			);
 	// Stryker restore ArrayDeclaration
 	const rulesForChannel = prepareRules(await db.select().from(rules).where(eq(rules.channelId, channelId)).all());
 	// Dedupe twice: against already-stored comments AND within this batch.
@@ -559,7 +575,7 @@ async function persistResults(
  */
 export async function runChannel(
 	channelId: string,
-	{ maxPages = 3, deadline, forceDryRun }: RunChannelOptions = {}
+	{ maxPages = 3, deadline, forceDryRun, window }: RunChannelOptions = {}
 ): Promise<ChannelRunResult> {
 	let fetched = 0;
 	let acted = 0;
@@ -575,9 +591,12 @@ export async function runChannel(
 		}
 		dryRun = forceDryRun === true || env.DRY_RUN === 'true';
 		const accessToken = await refreshAccessToken(decrypt(channel.refreshTokenEnc), deadline);
-		const page = await fetchNewComments(channelId, accessToken, channel.cursor, {
-			maxPages,
-			pageToken: channel.nextPageToken,
+		// Window mode (on-demand dry-run drain): one page bounded by the window,
+		// independent of the live cursor/checkpoint — real runs keep advancing
+		// those undisturbed.
+		const page = await fetchNewComments(channelId, accessToken, window ? window.boundary : channel.cursor, {
+			maxPages: window ? 1 : maxPages,
+			pageToken: window ? window.pageToken : channel.nextPageToken,
 			deadline
 		});
 		fetched = page.comments.length;
@@ -592,7 +611,8 @@ export async function runChannel(
 			// Per-org BYOK (hosted plans): the org's own OpenAI key when stored,
 			// the deployment's env key otherwise (openaiKey.ts).
 			openAiKey: await resolveOpenAiKey(channel.orgId),
-			deadline
+			deadline,
+			rescore: window !== undefined
 		});
 		queued = decisions.filter((decision) => decision.auditAction === 'queue').length;
 
@@ -612,7 +632,15 @@ export async function runChannel(
 			throw new Error(`moderation decision failed for ${failures.length} comment(s): ${failures.join('; ')}`);
 		}
 		if (dryRun) {
-			return { fetched, acted, queued, partial: false, skipped: false, dryRun };
+			// Window-mode continuation is reported, never persisted here — the
+			// caller owns the drain state (I8: a dry run touches no checkpoint).
+			const windowState = window
+				? {
+						windowComplete: page.reachedCursor || !page.nextPageToken,
+						windowNextPageToken: page.reachedCursor ? null : page.nextPageToken
+					}
+				: {};
+			return { fetched, acted, queued, partial: false, skipped: false, dryRun, ...windowState };
 		}
 
 		// ... and again before any YouTube enforcement call.

@@ -289,7 +289,7 @@ test('valid commentThreads responses: every generated item is processed by the r
 			// Strip any page token so the fetch is exactly one page.
 			const body = { ...(response as { items: unknown[]; nextPageToken?: string }) };
 			// An omitted page token is `undefined`, matching YouTube's JSON — never null.
-			expect(body.nextPageToken === null).toBe(false);
+			expect(body.nextPageToken).not.toBeNull();
 			body.nextPageToken = undefined;
 			stubYouTube(body);
 			const page = await fetchNewComments('UCchan', 'token', null, { maxPages: 1 });

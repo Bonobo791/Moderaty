@@ -27,7 +27,6 @@ using.
 - Always fail loudly.
 - NEVER write fallbacks that are silent.
 - ALWAYS write fallbacks that are loud, log to the server, and show to the user.
-- Always run codacy before committing any work.
 - Every test must fail if the real logic is wrong. If a test still passes when the function returns garbage, rewrite the test.
 - DO NOT copy and paste code. DO create reusable code.
 - Review every PR comment for validity. Fix each valid issue. Post a triage comment. Reply to every bot comment, whether or not you make a code change.
@@ -36,6 +35,7 @@ using.
 - When I say "clean up", that means to clean your worktrees and branches.
 - Stryker runs must ALWAYS use the --ignoreStatic flag.
 - Do not use swarm.
+- You are never to change Stryker or Fast Check tests unless specifically assigned to do so.
 
 ## Mutation Testing Engineer (role)
 
@@ -76,7 +76,8 @@ runs are local/agent-driven); wiring any CI gate, including a ratcheted
 ## Agent Skills (skills-src)
 
 Repo-local skill sources live in `.agents/skills-src/<name>/` (currently
-`sqlite-engineering`, `drizzle-engineering`, `mutation-testing`). They are
+`sqlite-engineering`, `drizzle-engineering`, `mutation-testing`,
+`fast-check-testing`). They are
 *installed* by copying to `~/.agents/skills/<name>/` and *pre-hooked* via
 `assets/hooks/skill_prehook.py` inside the skill plus a
 `[[hooks]] event = "UserPromptSubmit"` entry in `~/.kimi-code/config.toml`.

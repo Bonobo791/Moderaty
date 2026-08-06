@@ -2,3 +2,4 @@
 -Add calculator to calculate costs per last 3 months of comment volume on homepage (the user just adds their number of comments and it spits out a number)
 -Add calculator that pulls real data from YouTube to determine costs - should be a forecast that gives a range of potential costs for the next month with a disclaimer that this is a 95% probability of being in the shown range
 -Create auto-recharge functionality and update website language
+-Add channel disconnect button and functionality

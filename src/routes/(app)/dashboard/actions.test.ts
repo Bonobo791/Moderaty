@@ -18,7 +18,8 @@
 
 import { beforeEach, expect, test, vi } from 'vitest';
 import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
-import { channels } from '$lib/server/db/schema';
+import { encrypt } from '$lib/server/crypto';
+import { auditLog, channels, comments, moderationActions, rules } from '$lib/server/db/schema';
 import { eq } from 'drizzle-orm';
 
 const mocks = vi.hoisted(() => ({ runChannel: vi.fn() }));
@@ -26,7 +27,7 @@ vi.mock('$lib/server/pipeline', () => ({ runChannel: mocks.runChannel }));
 
 import { actions } from './+page.server';
 
-setupTestDb(['channels']);
+setupTestDb(['moderation_actions', 'comments', 'audit_log', 'rules', 'channels']);
 
 const OWNER = TEST_OWNER;
 
@@ -517,4 +518,156 @@ test.each([
 	expect(await scanWindowOf('Stryker was here!')).toEqual({ cursor: null, nextPageToken: null, scanCursor: null });
 	expect(await protectionsOf('Stryker was here!')).toEqual({ protectLgbtqia: 0, protectWomen: 0 });
 	expect(mocks.runChannel).not.toHaveBeenCalled();
+});
+
+// --- disconnectChannel: full removal of a channel and all its data ---------
+
+const MEMBER = { ...OWNER, orgRole: 'member' } as const;
+
+async function seedChannelWithToken(id: string, plaintextToken: string, userId: string | null = OWNER.id, orgId: string | null = 'org-1') {
+	await testDb().db.insert(channels).values({ id, userId, orgId, title: `Channel ${id}`, refreshTokenEnc: encrypt(plaintextToken) });
+}
+
+/** One row per channel-owned table, so a partial delete cannot pass silently. */
+async function seedChannelData(channelId: string) {
+	await testDb().db.insert(rules).values({ channelId, type: 'regex', pattern: 'spam', action: 'reject' });
+	await testDb().db.insert(comments).values({
+		id: `c-${channelId}`,
+		channelId,
+		text: 'hello',
+		publishedAt: '2026-01-01T00:00:00.000Z',
+		status: 'rejected',
+		decidedBy: 'rule'
+	});
+	await testDb().db.insert(auditLog).values({ channelId, commentId: `c-${channelId}`, action: 'reject', reason: 'spam', actor: 'auto' });
+	await testDb().db.insert(moderationActions).values({ commentId: `c-${channelId}`, channelId, action: 'reject', reason: 'spam', state: 'completed' });
+}
+
+async function rowsOf(channelId: string) {
+	const ch = await testDb().db.select().from(channels).where(eq(channels.id, channelId)).all();
+	const r = await testDb().db.select().from(rules).where(eq(rules.channelId, channelId)).all();
+	const c = await testDb().db.select().from(comments).where(eq(comments.channelId, channelId)).all();
+	const a = await testDb().db.select().from(auditLog).where(eq(auditLog.channelId, channelId)).all();
+	const m = await testDb().db.select().from(moderationActions).where(eq(moderationActions.channelId, channelId)).all();
+	return { channel: ch.length, rules: r.length, comments: c.length, audit: a.length, actions: m.length };
+}
+
+function stubRevoke(status = 200) {
+	const spy = vi.fn(async () => new Response('', { status }));
+	vi.stubGlobal('fetch', spy);
+	return spy;
+}
+
+function disconnectChannel(channelId: string | null, confirm: boolean, user: typeof OWNER | typeof MEMBER | null = OWNER) {
+	const fields: Record<string, string> = {};
+	if (channelId !== null) fields.channelId = channelId;
+	if (confirm) fields.confirm = 'on';
+	return actions.disconnectChannel({ request: postForm(fields), locals: { user } } as never);
+}
+
+test('disconnect requires the confirmation checkbox — 400, nothing deleted, no revoke', async () => {
+	await seedChannel('UC1');
+	await seedChannelData('UC1');
+	const fetchSpy = stubRevoke();
+	try {
+		const res = await disconnectChannel('UC1', false);
+
+		expect(res).toMatchObject({ status: 400, data: { scope: 'disconnect', channelId: 'UC1' } });
+		expect(await rowsOf('UC1')).toEqual({ channel: 1, rules: 1, comments: 1, audit: 1, actions: 1 });
+		expect(fetchSpy).not.toHaveBeenCalled();
+	} finally {
+		vi.unstubAllGlobals();
+	}
+});
+
+test('disconnect rejects a non-admin with 403 and deletes nothing', async () => {
+	await seedChannel('UC1');
+	await seedChannelData('UC1');
+
+	await expect(disconnectChannel('UC1', true, MEMBER)).rejects.toMatchObject({ status: 403 });
+	expect(await rowsOf('UC1')).toEqual({ channel: 1, rules: 1, comments: 1, audit: 1, actions: 1 });
+});
+
+test('disconnect rejects a signed-out request with 401', async () => {
+	await seedChannel('UC1');
+
+	await expect(disconnectChannel('UC1', true, null)).rejects.toMatchObject({ status: 401 });
+	expect((await rowsOf('UC1')).channel).toBe(1);
+});
+
+test('disconnect reads another team\'s channel as 404 and touches nothing', async () => {
+	await seedChannel('UC1', 'user-2', 'org-2');
+	await seedChannelData('UC1');
+
+	const res = await disconnectChannel('UC1', true);
+
+	expect(res).toMatchObject({ status: 404, data: { scope: 'disconnect', error: 'channel not found' } });
+	expect(await rowsOf('UC1')).toEqual({ channel: 1, rules: 1, comments: 1, audit: 1, actions: 1 });
+});
+
+test('disconnect treats an absent channelId as empty — 404, never a match', async () => {
+	await seedChannel('Stryker was here!');
+
+	const res = await disconnectChannel(null, true);
+
+	expect(res).toMatchObject({ status: 404, data: { scope: 'disconnect', channelId: '' } });
+	expect((await rowsOf('Stryker was here!')).channel).toBe(1);
+});
+
+test('disconnect revokes the grant at Google, then erases the channel and every row it owns', async () => {
+	await seedChannelWithToken('UC1', 'google-refresh-token');
+	await seedChannelData('UC1');
+	await seedChannelWithToken('UC2', 'other-token');
+	await seedChannelData('UC2');
+	const fetchSpy = stubRevoke(200);
+	const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+	try {
+		const res = await disconnectChannel('UC1', true);
+
+		expect(res).toMatchObject({ ok: true, scope: 'disconnect', channelId: 'UC1' });
+		// The decrypted token went to Google's revocation endpoint.
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
+		expect(url).toBe('https://oauth2.googleapis.com/revoke');
+		expect((init.body as URLSearchParams).get('token')).toBe('google-refresh-token');
+		// Everything UC1 owned is gone; the sibling channel is untouched.
+		expect(await rowsOf('UC1')).toEqual({ channel: 0, rules: 0, comments: 0, audit: 0, actions: 0 });
+		expect(await rowsOf('UC2')).toEqual({ channel: 1, rules: 1, comments: 1, audit: 1, actions: 1 });
+		expect(infoSpy).toHaveBeenCalledWith('channel UC1 disconnected and erased by user user-1');
+	} finally {
+		vi.unstubAllGlobals();
+	}
+});
+
+test('a failed revocation is logged loudly and never blocks the erase', async () => {
+	await seedChannelWithToken('UC1', 'google-refresh-token');
+	await seedChannelData('UC1');
+	stubRevoke(400);
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		const res = await disconnectChannel('UC1', true);
+
+		expect(res).toMatchObject({ ok: true, scope: 'disconnect', channelId: 'UC1' });
+		expect(await rowsOf('UC1')).toEqual({ channel: 0, rules: 0, comments: 0, audit: 0, actions: 0 });
+		expect(errorSpy).toHaveBeenCalledWith('token revocation failed for channel UC1; disconnecting anyway:', expect.any(Error));
+	} finally {
+		vi.unstubAllGlobals();
+	}
+});
+
+test('an undecryptable stored token is logged loudly and the erase still happens (no revoke call)', async () => {
+	await seedChannel('UC1'); // refreshTokenEnc: 'enc' — not real ciphertext
+	await seedChannelData('UC1');
+	const fetchSpy = stubRevoke();
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		const res = await disconnectChannel('UC1', true);
+
+		expect(res).toMatchObject({ ok: true, scope: 'disconnect', channelId: 'UC1' });
+		expect(await rowsOf('UC1')).toEqual({ channel: 0, rules: 0, comments: 0, audit: 0, actions: 0 });
+		expect(fetchSpy).not.toHaveBeenCalled();
+		expect(errorSpy).toHaveBeenCalledWith('token revocation failed for channel UC1; disconnecting anyway:', expect.any(Error));
+	} finally {
+		vi.unstubAllGlobals();
+	}
 });

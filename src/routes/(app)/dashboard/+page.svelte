@@ -197,6 +197,27 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		<p class="muted" style="margin:12px 0 0">
 			last checked {ch.lastRunAt ? relativeTime(ch.lastRunAt) : 'never'} · ID: {ch.id}
 		</p>
+		{#if data.orgRole === 'owner' || data.orgRole === 'admin'}
+			<details class="channel-disconnect">
+				<summary>Danger zone — disconnect channel</summary>
+				<p class="muted">
+					Disconnecting asks Google to revoke Moderaty's access to {ch.title} and immediately
+					erases the channel with all its rules, comments, and moderation history — there is no
+					restore. You can reconnect the channel afterwards, which starts it fresh.
+				</p>
+				{#if form?.scope === 'disconnect' && form?.channelId === ch.id && form?.error}
+					<p class="error-box" role="alert">{form.error}</p>
+				{/if}
+				<form method="POST" action="?/disconnectChannel" use:enhance>
+					<input type="hidden" name="channelId" value={ch.id} />
+					<label class="confirm-delete" for="confirm-disconnect-{ch.id}">
+						<input id="confirm-disconnect-{ch.id}" type="checkbox" name="confirm" />
+						I understand — disconnect {ch.title} and erase its data
+					</label>
+					<button class="btn danger small" type="submit">Disconnect channel {ch.title}</button>
+				</form>
+			</details>
+		{/if}
 	</div>
 {:else}
 	<EmptyState
@@ -243,6 +264,17 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		border-color: var(--danger);
 	}
 	.danger-zone h2 {
+		color: var(--danger);
+	}
+	.channel-disconnect {
+		margin-top: 14px;
+		padding-top: 10px;
+		border-top: 1px dashed var(--danger);
+	}
+	.channel-disconnect summary {
+		cursor: pointer;
+		font-size: 0.9rem;
+		font-weight: 600;
 		color: var(--danger);
 	}
 	.confirm-delete {

@@ -241,6 +241,8 @@ describe('channels', () => {
 			scan_cursor: { notNull: false },
 			history_next_page_token: { notNull: false },
 			history_boundary: { notNull: false },
+			dry_run_boundary: { notNull: false },
+			dry_run_page_token: { notNull: false },
 			last_run_at: { notNull: false },
 			lease_expires_at: { notNull: false },
 			active: { notNull: true, hasDefault: true },

@@ -54,6 +54,7 @@ vi.mock('$lib/server/db', () => ({
 
 import { makeCookies, makeCookiesWithState } from '$lib/server/testcookies';
 import { TEST_OWNER } from '$lib/server/testuser';
+import { CHANNEL_STATE_COOKIE, parkChannelState } from '$lib/server/channelConnect';
 import { GET as startAuth } from './+server';
 import { GET as authCallback } from './callback/+server';
 
@@ -104,7 +105,7 @@ type Cookies = ReturnType<typeof makeCookies>;
 
 function captureStartAuth(cookies: Cookies): { status: number; location: string } | undefined {
 	try {
-		startAuth({ cookies } as never);
+		startAuth({ cookies, locals: { user: OWNER } } as never);
 		return undefined;
 	} catch (e) {
 		return e as { status: number; location: string };
@@ -117,6 +118,9 @@ async function captureCallback(
 	user: typeof OWNER | null = OWNER
 ): Promise<{ status: number; location?: string; body?: { message: string } } | undefined> {
 	try {
+		// Simulate the channel-connect start for the flow: the shared state AND
+		// its user binding (the callback rejects unbound states).
+		if (user) parkChannelState(cookies as never, params.state ?? 's', user.id);
 		await authCallback({ url: callbackUrl(params), cookies, locals: { user } } as never);
 		return undefined;
 	} catch (e) {
@@ -150,6 +154,16 @@ test('auth start sets an HttpOnly oauth_state cookie and redirects with matching
 	expect(stateCall?.opts.httpOnly).toBe(true);
 
 	const target = new URL(thrown?.location ?? '');
+
+	// The channel-connect state is bound to the signed-in user who started it,
+	// so the callback rejects a completion by a different user (shared browser).
+	const stateBinding = cookies.setCalls.find((c) => c.name === CHANNEL_STATE_COOKIE);
+	expect(stateBinding, 'channel-state binding cookie must be set').toBeDefined();
+	const binding: unknown = JSON.parse(stateBinding?.value ?? '[]');
+	expect(binding).toEqual([
+		{ state: target.searchParams.get('state'), userId: OWNER.id, ts: expect.any(Number) }
+	]);
+
 	const pendingStates: unknown = JSON.parse(stateCall?.value ?? '[]');
 	expect(target.origin + target.pathname).toBe('https://accounts.google.com/o/oauth2/v2/auth');
 	expect(pendingStates).toContain(target.searchParams.get('state'));

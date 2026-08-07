@@ -73,6 +73,10 @@ function forgedEntry(overrides: Record<string, unknown> = {}) {
 	return {
 		state: 's',
 		ts: Date.now(),
+		// Baseline matches the parker's binding so the forged tests below
+		// exercise their TARGETED field validation instead of failing at the
+		// ownership check (CodeRabbit 3738037958).
+		userId: 'user-1',
 		refreshToken: 'refresh-token',
 		channels: [{ id: 'UC1', title: 'One' }],
 		...overrides

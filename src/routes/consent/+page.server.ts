@@ -44,6 +44,13 @@ import type { Actions, PageServerLoad } from './$types';
 export const load: PageServerLoad = async ({ cookies, url, locals }) => {
 	const state = url.searchParams.get('state');
 	const pending = state ? readPendingConsent(cookies, state) : null;
+	// Shared-browser hardening (mirrors the action): a parked flow belongs to
+	// whoever Google parked it for — never render (or expose the displayName
+	// of) a parked identity to a DIFFERENT signed-in user (CodeRabbit
+	// 3738037988).
+	if (parkedForAnotherUser(pending, locals?.user ?? null)) {
+		throw error(400, 'This sign-in is for a different account — sign out and start again.');
+	}
 	if (pending) {
 		return {
 			kind: pending.kind,

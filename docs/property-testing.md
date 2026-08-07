@@ -134,12 +134,6 @@ failing-test-first and delete this entry:
    generator — semantically identical, but it changes the property-test
    generation surface, so it is gated the same way as the entries above.
 
-Open verification item: Codacy's third "high" on PR #125 (category Security)
-is not itemized in its GitHub comment; believed to be the synthetic
-`ENCRYPTION_KEY` fixture in `crypto.pbt.test.ts` (non-secret, consistent with
-the repo's documented synthetic-test-value exception). Maintainer to confirm
-on the Codacy dashboard.
-
 _Resolved 2026-08-07 triage:_ the maintainer pasted Codacy's itemization — the
 Security high was **not** the test key but `dotenv-cli: ^11.0.0` in
 `package.json` (rule: "package dependencies with variant versions may lead to

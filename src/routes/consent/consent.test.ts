@@ -470,12 +470,32 @@ test('load with a signed-in user whose consent is current redirects to /dashboar
 	}
 });
 
-test('a parked identity takes precedence over the signed-in session', async () => {
+test('a parked new-identity flow is NOT rendered to a different signed-in user (CodeRabbit 3738037988)', async () => {
 	await seedOwner();
-	// TEST_OWNER has no consent row — if the session path won, this would
-	// render kind 'existing'. The parked flow must render its own identity.
-	const data = await loadConsent(cookiesWithPending(NEW_SUB), 'http://localhost/consent?state=state-1', true);
-	expect(data).toMatchObject({ kind: 'new', displayName: 'One' });
+	// Shared browser: TEST_OWNER is signed in, but the parked 'new' flow
+	// belongs to a Google account that does not exist yet — never render (or
+	// leak the displayName of) someone else's parked identity.
+	try {
+		await loadConsent(cookiesWithPending(NEW_SUB), 'http://localhost/consent?state=state-1', true);
+		expect.unreachable('load must reject a parked flow owned by a different user');
+	} catch (e) {
+		expect(e).toMatchObject({
+			status: 400,
+			body: { message: 'This sign-in is for a different account — sign out and start again.' }
+		});
+	}
+});
+
+test('a parked identity is rendered to its OWN signed-in user', async () => {
+	await seedOwner();
+	// Control: the same user who parked the flow sees it — the load guard must
+	// only fire on a mismatch.
+	const data = await loadConsent(
+		cookiesWithPending({ kind: 'existing', userId: TEST_OWNER.id }),
+		'http://localhost/consent?state=state-1',
+		true
+	);
+	expect(data).toMatchObject({ kind: 'existing' });
 });
 
 test('a signed-in user re-consents in place: consent row written, NO new session issued', async () => {

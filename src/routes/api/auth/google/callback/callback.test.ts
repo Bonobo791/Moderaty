@@ -35,7 +35,7 @@ vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
 import { TEST_OWNER, setupTestDb, testDb } from '$lib/server/testdb';
 import { makeCookiesWithState } from '$lib/server/testcookies';
-import { readPendingChannelPick } from '$lib/server/channelConnect';
+import { parkChannelState, readPendingChannelPick } from '$lib/server/channelConnect';
 import { channels } from '$lib/server/db/schema';
 import type { SessionUser } from '$lib/server/session';
 import { GET as authCallback } from './+server';
@@ -84,7 +84,16 @@ function stubTokenAndChannels(listChannels: (url: URL) => Response) {
 	);
 }
 
-async function captureCallback(user: SessionUser | null = OWNER, cookies = makeCookiesWithState('s')) {
+/** Simulates the channel-connect start: the shared state AND its user binding. */
+function withChannelState(cookies: ReturnType<typeof makeCookiesWithState>, userId: string) {
+	parkChannelState(cookies as never, 's', userId);
+	return cookies;
+}
+
+async function captureCallback(
+	user: SessionUser | null = OWNER,
+	cookies: ReturnType<typeof makeCookiesWithState> = withChannelState(makeCookiesWithState('s'), OWNER.id)
+) {
 	try {
 		await authCallback({
 			url: new URL('http://localhost:5173/api/auth/google/callback?code=abc&state=s'),
@@ -97,7 +106,10 @@ async function captureCallback(user: SessionUser | null = OWNER, cookies = makeC
 	}
 }
 
-async function captureCallbackWithUrl(url: URL, cookies = makeCookiesWithState('s')) {
+async function captureCallbackWithUrl(
+	url: URL,
+	cookies: ReturnType<typeof makeCookiesWithState> = withChannelState(makeCookiesWithState('s'), OWNER.id)
+) {
 	try {
 		await authCallback({ url, cookies, locals: { user: OWNER } } as never);
 		return { thrown: undefined as undefined | { status: number; location?: string; body?: { message: string } }, cookies };
@@ -113,6 +125,26 @@ test('a member cannot connect a channel — 403 before any Google call or write'
 
 	expect(thrown).toMatchObject({ status: 403 });
 	expect(await testDb().db.select().from(channels).all()).toHaveLength(0);
+});
+
+test('rejects a state started by a DIFFERENT user — the code is never exchanged (CodeRabbit 3738037981)', async () => {
+	stubTokenAndChannel();
+	// A's flow (state bound to user-a), but B (OWNER) is the signed-in user when
+	// the callback lands — a shared-browser completion attempt. The callback
+	// must reject BEFORE exchanging the code, so A's grant can never be parked
+	// (or connected) under B.
+	const cookies = makeCookiesWithState('s');
+	parkChannelState(cookies as never, 's', 'user-a');
+
+	const { thrown } = await captureCallback(OWNER, cookies);
+
+	expect(thrown).toMatchObject({ status: 400 });
+	expect(thrown?.body?.message).toContain('different account');
+	// The authorization code was never exchanged — no Google call happened.
+	expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+	// Nothing was parked or written under B.
+	expect(await testDb().db.select().from(channels).all()).toHaveLength(0);
+	expect(readPendingChannelPick(cookies as never, 's', OWNER.id)).toBeNull();
 });
 
 test('a new channel is inserted and attached to the caller', async () => {
@@ -188,6 +220,7 @@ test('a multi-channel account parks the channels and redirects to the picker wit
 			)
 	);
 	const cookies = makeCookiesWithState('s');
+	parkChannelState(cookies as never, 's', OWNER.id);
 
 	const { thrown } = await captureCallback(OWNER, cookies);
 
@@ -216,6 +249,7 @@ test('the channel listing paginates and every valid channel reaches the picker',
 		return new Response(JSON.stringify({ items: [{ id: 'UC2', snippet: { title: 'Two' } }] }), { status: 200 });
 	});
 	const cookies = makeCookiesWithState('s');
+	parkChannelState(cookies as never, 's', OWNER.id);
 
 	const { thrown } = await captureCallback(OWNER, cookies);
 
@@ -401,6 +435,7 @@ test('a pathological pageToken loop stops at the page bound and logs the truncat
 		);
 	});
 	const cookies = makeCookiesWithState('s');
+	parkChannelState(cookies as never, 's', OWNER.id);
 
 	const { thrown } = await captureCallback(OWNER, cookies);
 
@@ -412,6 +447,7 @@ test('a pathological pageToken loop stops at the page bound and logs the truncat
 
 test('bad state and missing code reject with descriptive 400 messages', async () => {
 	const cookies = makeCookiesWithState('s');
+	parkChannelState(cookies as never, 's', OWNER.id);
 
 	const missingState = await captureCallbackWithUrl(
 		new URL('http://localhost:5173/api/auth/google/callback?code=abc'),

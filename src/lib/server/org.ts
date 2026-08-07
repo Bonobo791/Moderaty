@@ -351,29 +351,34 @@ export async function setMemberRole(callerUserId: string, orgId: string, targetU
 	// another owner still exists, so concurrent demotions can never strand the
 	// org ownerless — no separate check to race with (PR #52 review).
 	const demotingOwner = target.role === 'owner' && role !== 'owner';
-	const updated = await db
-		.update(memberships)
-		.set({ role })
-		.where(
-			and(
-				eq(memberships.userId, targetUserId),
-				eq(memberships.orgId, orgId),
-				demotingOwner
-					? sql`(SELECT count(*) FROM memberships AS mo WHERE mo.org_id = ${orgId} AND mo.role = 'owner') > 1`
-					: undefined
+	// The role update and the session invalidation commit TOGETHER (CodeRabbit
+	// 3738037976): a failure deleting the target's sessions rolls the role
+	// change back, so no pre-change token can outlive a promotion that never
+	// landed. A same-role write is not a change and leaves sessions alone.
+	await db.transaction(async (tx) => {
+		const updated = await tx
+			.update(memberships)
+			.set({ role })
+			.where(
+				and(
+					eq(memberships.userId, targetUserId),
+					eq(memberships.orgId, orgId),
+					demotingOwner
+						? sql`(SELECT count(*) FROM memberships AS mo WHERE mo.org_id = ${orgId} AND mo.role = 'owner') > 1`
+						: undefined
+				)
 			)
-		)
-		.returning({ userId: memberships.userId });
-	if (updated.length === 0) throw error(400, 'the last owner cannot be demoted — promote a teammate to owner first');
-	// A role change must invalidate the target's sessions: roles resolve live
-	// from memberships, so a token minted before the change would instantly
-	// gain the new privilege. We cannot rotate tokens we do not hold, so the
-	// target's rows are deleted — the next page load asks them to sign in
-	// again (re-authentication on privilege change). A same-role write is not
-	// a change and leaves sessions alone.
-	if (target.role !== role) {
-		await db.delete(sessions).where(eq(sessions.userId, targetUserId));
-	}
+			.returning({ userId: memberships.userId });
+		if (updated.length === 0) throw error(400, 'the last owner cannot be demoted — promote a teammate to owner first');
+		// A role change must invalidate the target's sessions: roles resolve
+		// live from memberships, so a token minted before the change would
+		// instantly gain the new privilege. We cannot rotate tokens we do not
+		// hold, so the target's rows are deleted — the next page load asks
+		// them to sign in again (re-authentication on privilege change).
+		if (target.role !== role) {
+			await tx.delete(sessions).where(eq(sessions.userId, targetUserId));
+		}
+	});
 }
 
 /**

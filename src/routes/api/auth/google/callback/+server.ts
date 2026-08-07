@@ -18,7 +18,12 @@
 
 import { redirect, error } from '@sveltejs/kit';
 
-import { parkPendingChannelPick, upsertChannelConnection } from '$lib/server/channelConnect';
+import {
+	clearChannelState,
+	parkPendingChannelPick,
+	readChannelState,
+	upsertChannelConnection
+} from '$lib/server/channelConnect';
 import { exchangeGoogleCode } from '$lib/server/google';
 import { fetchWithRetry } from '$lib/server/http';
 import { readPendingStates, storePendingStates } from '$lib/server/oauthState';
@@ -104,6 +109,16 @@ export async function GET({ url, cookies, locals }: { url: URL; cookies: import(
 	const pending = readPendingStates(cookies);
 	if (!state || !pending.includes(state)) throw error(400, 'bad state');
 
+	// The state must have been STARTED by this user: a flow begun on a shared
+	// machine by someone else must never exchange its authorization code under
+	// this session — that would park (or connect) the starter's grant here
+	// (CodeRabbit 3738037981). A login-flow state (never bound) is rejected
+	// too, before any Google call.
+	const startedBy = readChannelState(cookies, state);
+	if (!startedBy || startedBy.userId !== user.id) {
+		throw error(400, 'this connection was started by a different account — sign out and start again from the dashboard');
+	}
+
 	const code = url.searchParams.get('code');
 	if (!code) throw error(400, 'missing code');
 
@@ -128,6 +143,7 @@ export async function GET({ url, cookies, locals }: { url: URL; cookies: import(
 	// Consume the state only once the flow has succeeded, so a transient
 	// failure leaves the callback retryable while a success cannot be replayed.
 	storePendingStates(cookies, pending.filter((s) => s !== state));
+	clearChannelState(cookies, state);
 
 	if (owned.length > 1) {
 		// Several channels (brand accounts): the user picks ONE at the picker.

@@ -21,9 +21,17 @@ import { error, redirect } from '@sveltejs/kit';
 import { randomBytes } from 'node:crypto';
 
 import { env } from '$env/dynamic/private';
+import { parkChannelState } from '$lib/server/channelConnect';
 import { readPendingStates, storePendingStates } from '$lib/server/oauthState';
+import type { SessionUser } from '$lib/server/session';
 
-export function GET({ cookies }: { cookies: import('@sveltejs/kit').Cookies }) {
+export function GET({
+	cookies,
+	locals
+}: {
+	cookies: import('@sveltejs/kit').Cookies;
+	locals: { user: SessionUser | null };
+}) {
 	if (!env.GOOGLE_CLIENT_ID) throw error(500, 'GOOGLE_CLIENT_ID is not configured');
 	// Stryker disable next-line ConditionalExpression: equivalent — with this check removed, an unset APP_URL still throws the identical 500 'APP_URL is not configured' from cookieSecure() inside storePendingStates below, before any cookie write or redirect; the StringLiteral sibling on this line is NOT swept (directive is scoped to ConditionalExpression)
 	if (!env.APP_URL) throw error(500, 'APP_URL is not configured');
@@ -33,6 +41,12 @@ export function GET({ cookies }: { cookies: import('@sveltejs/kit').Cookies }) {
 	// multiple tabs stay valid.
 	const state = randomBytes(16).toString('hex');
 	storePendingStates(cookies, [...readPendingStates(cookies), state]);
+	// Bind the state to the signed-in user who started the connect (the hooks
+	// layout resolves the session for every request). The callback rejects a
+	// completion by a DIFFERENT user before the authorization code is used —
+	// a signed-out start parks no binding and dies at the callback (CodeRabbit
+	// 3738037981).
+	if (locals.user) parkChannelState(cookies, state, locals.user.id);
 
 	const params = new URLSearchParams({
 		client_id: env.GOOGLE_CLIENT_ID,

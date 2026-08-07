@@ -44,6 +44,79 @@ const PICK_TTL_MS = 10 * 60 * 1000;
 // different accounts never overwrite one another.
 const MAX_PENDING_PICKS = 5;
 
+/**
+ * The channel-connect OAuth state, bound to the user who STARTED the flow.
+ * The shared `oauth_state` cookie holds only the opaque state strings (login
+ * and channel flows share it); this cookie records who started a channel
+ * connect so the callback can reject a completion attempt by a DIFFERENT
+ * signed-in user on a shared machine BEFORE the authorization code is
+ * exchanged (CodeRabbit 3738037981). Plaintext — the userId is not secret.
+ */
+export const CHANNEL_STATE_COOKIE = 'moderaty_channel_state';
+const CHANNEL_STATE_TTL_MS = 10 * 60 * 1000;
+const MAX_PENDING_CHANNEL_STATES = 5;
+
+type ChannelStateEntry = { state: string; userId: string; ts: number };
+
+function readChannelStateEntries(cookies: Cookies): ChannelStateEntry[] {
+	const raw = cookies.get(CHANNEL_STATE_COOKIE);
+	if (!raw) return [];
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		return [];
+	}
+	if (!Array.isArray(parsed)) return [];
+	return parsed.filter(
+		(e): e is ChannelStateEntry =>
+			typeof e === 'object' && e !== null && typeof (e as ChannelStateEntry).state === 'string'
+	);
+}
+
+function writeChannelStateEntries(cookies: Cookies, entries: ChannelStateEntry[]): void {
+	if (entries.length === 0) {
+		cookies.delete(CHANNEL_STATE_COOKIE, { path: '/' });
+		return;
+	}
+	cookies.set(CHANNEL_STATE_COOKIE, JSON.stringify(entries), {
+		path: '/',
+		httpOnly: true,
+		sameSite: 'lax',
+		secure: cookieSecure(),
+		maxAge: CHANNEL_STATE_TTL_MS / 1000
+	});
+}
+
+/** Records that `state` was started by `userId` (channel-connect flows only). */
+export function parkChannelState(cookies: Cookies, state: string, userId: string): void {
+	const now = Date.now();
+	const entries = readChannelStateEntries(cookies).filter(
+		(e) => e.state !== state && now - e.ts <= CHANNEL_STATE_TTL_MS
+	);
+	entries.push({ state, userId, ts: now });
+	writeChannelStateEntries(cookies, entries.slice(-MAX_PENDING_CHANNEL_STATES));
+}
+
+/**
+ * Returns the user who started `state`, or null when the state has no binding
+ * (a login-flow state, a stale/expired entry, or a forged cookie).
+ */
+export function readChannelState(cookies: Cookies, state: string): { userId: string } | null {
+	const entry = readChannelStateEntries(cookies).find((e) => e.state === state);
+	if (!entry || typeof entry.ts !== 'number' || Date.now() - entry.ts > CHANNEL_STATE_TTL_MS) return null;
+	if (typeof entry.userId !== 'string' || !entry.userId) return null;
+	return { userId: entry.userId };
+}
+
+/** Clears this flow's binding once the callback has consumed the state. */
+export function clearChannelState(cookies: Cookies, state: string): void {
+	writeChannelStateEntries(
+		cookies,
+		readChannelStateEntries(cookies).filter((e) => e.state !== state)
+	);
+}
+
 /** What the OAuth callback parks for the picker: the grant plus its channels. */
 export type PendingChannelPick = {
 	refreshToken: string;

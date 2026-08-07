@@ -794,6 +794,31 @@ test('setMemberRole leaves the target\'s sessions alone when the role does not c
 	expect((await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-a')).get())?.userId).toBe('member-1');
 });
 
+test('setMemberRole rolls the role change back when session invalidation fails (atomic, CodeRabbit 3738037976)', async () => {
+	// A failure between the role update and the session delete would leave a
+	// pre-change token valid at the NEW role — the update and the invalidation
+	// must commit together. Simulate the delete failing with a trigger; the
+	// role change must not land.
+	await seedUser('owner-1');
+	await seedUser('member-1');
+	await seedOrg('org-1');
+	await seedMember('owner-1', 'org-1', 'owner');
+	await seedMember('member-1', 'org-1', 'member');
+	await seedSession('sess-a', 'member-1');
+	await testDb().client.execute(
+		`CREATE TRIGGER fail_session_delete BEFORE DELETE ON sessions
+		 BEGIN SELECT RAISE(ABORT, 'simulated session delete failure'); END`
+	);
+	try {
+		await expect(setMemberRole('owner-1', 'org-1', 'member-1', 'admin')).rejects.toThrow();
+		// The promotion must NOT have landed — the next run retries a clean state.
+		expect((await membershipRow('member-1', 'org-1'))[0].role).toBe('member');
+		expect(await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-a')).get()).toBeDefined();
+	} finally {
+		await testDb().client.execute('DROP TRIGGER fail_session_delete');
+	}
+});
+
 test('setMemberRole guard messages: 404 outsider caller, 404 ghost target, 400 last owner', async () => {
 	await seedUser('owner-1');
 	await seedUser('member-1');

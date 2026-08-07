@@ -78,6 +78,14 @@ test('fails loudly when APP_URL is http in the production deployment — auth co
 	mocks.env.APP_URL = 'http://localhost:5173';
 	expect(cookieSecure()).toBe(false);
 
+	// NODE_ENV=production is the self-hosted fallback discriminator — the same
+	// http APP_URL must fail loudly there too (CodeRabbit 3738037962).
+	mocks.env.NODE_ENV = 'production';
+	expect(() => cookieSecure()).toThrowError(
+		expect.objectContaining({ status: 500, body: { message: 'APP_URL must be https in the production deployment' } })
+	);
+	delete mocks.env.NODE_ENV;
+
 	// https is fine in production.
 	mocks.env.APP_URL = 'https://moderaty.example';
 	mocks.env.CONTEXT = 'production';

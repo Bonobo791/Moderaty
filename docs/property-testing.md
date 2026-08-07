@@ -126,6 +126,13 @@ failing-test-first and delete this entry:
    `expect(after.auditLog).toHaveLength(before.auditLog.length + expectedDecisions.length)`
    over the generic `expect(...).toBe(...)` numeric assertion for better
    failure reporting. Fast-check file — same gate as the entries above.
+5. `src/lib/server/testarbitraries.ts` (Codacy duplication) — two clone pairs:
+   the three `channelArb`-style records (~lines 151–166) repeat the
+   id/orgId/title/refreshTokenEnc shape, and `orgGraphArb`'s user field
+   (~lines 293–298) mirrors `userRowArb` (~lines 116–121). Deduping would
+   reuse `userRowArb`/a shared channel-shape builder inside the arbitrary
+   generator — semantically identical, but it changes the property-test
+   generation surface, so it is gated the same way as the entries above.
 
 Open verification item: Codacy's third "high" on PR #125 (category Security)
 is not itemized in its GitHub comment; believed to be the synthetic

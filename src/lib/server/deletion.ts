@@ -59,6 +59,15 @@ export async function deleteChannelRecords(
 	options?: { expectedOrgId?: string }
 ): Promise<void> {
 	if (!channelIds.length) return;
+	// Child rows of the channels, child-to-parent, identical in both branches.
+	// (Codacy duplication: the four-delete sequence was copy-pasted in each
+	// branch — extracted so the child-delete list lives once.)
+	const deleteChildren = async () => {
+		await tx.delete(moderationActions).where(inArray(moderationActions.channelId, channelIds));
+		await tx.delete(comments).where(inArray(comments.channelId, channelIds));
+		await tx.delete(auditLog).where(inArray(auditLog.channelId, channelIds));
+		await tx.delete(rules).where(inArray(rules.channelId, channelIds));
+	};
 	if (options?.expectedOrgId) {
 		const removed = await tx
 			.delete(channels)
@@ -67,16 +76,10 @@ export async function deleteChannelRecords(
 		if (removed.length !== channelIds.length) {
 			throw new Error('deleteChannelRecords: channel tenancy changed mid-request — aborting');
 		}
-		await tx.delete(moderationActions).where(inArray(moderationActions.channelId, channelIds));
-		await tx.delete(comments).where(inArray(comments.channelId, channelIds));
-		await tx.delete(auditLog).where(inArray(auditLog.channelId, channelIds));
-		await tx.delete(rules).where(inArray(rules.channelId, channelIds));
+		await deleteChildren();
 		return;
 	}
-	await tx.delete(moderationActions).where(inArray(moderationActions.channelId, channelIds));
-	await tx.delete(comments).where(inArray(comments.channelId, channelIds));
-	await tx.delete(auditLog).where(inArray(auditLog.channelId, channelIds));
-	await tx.delete(rules).where(inArray(rules.channelId, channelIds));
+	await deleteChildren();
 	await tx.delete(channels).where(inArray(channels.id, channelIds));
 }
 

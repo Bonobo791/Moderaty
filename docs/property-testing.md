@@ -121,6 +121,11 @@ failing-test-first and delete this entry:
    `session.ts` and import it instead, so the test cannot drift from the
    production threshold. (Requires the source export — a source change riding
    with the test change, which is why it is maintainer-gated twice over.)
+4. `src/lib/server/pipeline.reconciliation.pbt.test.ts` (~line 579) —
+   SonarCloud `typescript:S5906` (minor): prefer
+   `expect(after.auditLog).toHaveLength(before.auditLog.length + expectedDecisions.length)`
+   over the generic `expect(...).toBe(...)` numeric assertion for better
+   failure reporting. Fast-check file — same gate as the entries above.
 
 Open verification item: Codacy's third "high" on PR #125 (category Security)
 is not itemized in its GitHub comment; believed to be the synthetic

@@ -184,6 +184,10 @@ async function aiDecision(
 	try {
 		moderation = await scoreComment(comment.text, deadline, openAiKey);
 	} catch (error) {
+		// A deadline-expired score is a bounded-run abort (I10), not an AI
+		// failure to queue (I11): rethrow so the run reports partial:true with
+		// no durable writes, and the next invocation retries the batch.
+		if (error instanceof DeadlineExceededError) throw error;
 		return aiUnavailable(comment, error);
 	}
 	// Round to the displayed precision before comparing so a score that reads
@@ -200,6 +204,7 @@ async function aiDecision(
 		try {
 			toneScore = Math.round((await scoreTone(comment.text, tone.context, deadline, protections, openAiKey)).score * 100) / 100;
 		} catch (error) {
+			if (error instanceof DeadlineExceededError) throw error;
 			return aiUnavailable(comment, error);
 		}
 		if (toneScore > score) return aiOutcome(comment, aiScore, 'tone', toneScore);
@@ -351,7 +356,9 @@ async function decideNewComments(
 					: null;
 				return await decide(comment, rulesForChannel, tone, deadline, protections, openAiKey);
 			} catch (error) {
-				// Stryker disable next-line ConditionalExpression: equivalent — DeadlineExceededError cannot escape decide() (aiDecision catches every scorer error, matchPreparedRule is synchronous), so the false-variant is unobservable; the true-variant stays pinned by the failure-wrapping test
+				// DeadlineExceededError escapes decide() by design (aiDecision
+				// rethrows it) so the run aborts partial:true with no durable
+				// writes — pinned by the omni/tone deadline-scoring tests.
 				if (error instanceof DeadlineExceededError) throw error;
 				throw new Error(`comment ${comment.id}: ${error instanceof Error ? error.message : String(error)}`);
 			}
@@ -364,7 +371,8 @@ async function decideNewComments(
 			decisions.push(result.value);
 			continue;
 		}
-		// Stryker disable next-line ConditionalExpression: equivalent — rejection reasons only ever come from the wrapped Error in the catch above, never a DeadlineExceededError
+		// A rejected promise whose reason is a DeadlineExceededError (rethrown
+		// from aiDecision via the wrapper above) aborts the whole batch.
 		if (result.reason instanceof DeadlineExceededError) throw result.reason;
 		failures.push(result.reason instanceof Error ? result.reason.message : String(result.reason));
 	}

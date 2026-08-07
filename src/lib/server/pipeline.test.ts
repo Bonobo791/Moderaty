@@ -1179,6 +1179,34 @@ test('returns a partial result when the deadline hits during dispatched-action v
 	expectActionState('dispatched');
 });
 
+test('returns a partial result when the deadline hits during omni scoring — nothing is queued or staged', async () => {
+	// The scoring path must abort like the fetch/metadata/verification paths:
+	// a deadline-expired score is NOT an AI failure to queue (I11), it is a
+	// bounded-run abort (I10). Queuing it would dump the whole unprocessed
+	// tail of a burst into the review queue and advance the cursor past it.
+	mocks.scoreComment.mockRejectedValue(new mocks.DeadlineExceededError('out of time'));
+
+	const result = await runChannel('channel');
+
+	expect(result).toEqual({ fetched: 1, acted: 0, queued: 0, partial: true, skipped: false, dryRun: false });
+	expect(mocks.state.insertedComments).toEqual([]);
+	expect(mocks.state.insertedAudits).toEqual([]);
+	expect(mocks.state.channelUpdates).toEqual([]);
+});
+
+test('returns a partial result when the deadline hits during tone scoring — nothing is queued or staged', async () => {
+	mocks.state.channel.toneLevel = 2;
+	mocks.scoreComment.mockResolvedValue(moderation(0.1));
+	mocks.scoreTone.mockRejectedValue(new mocks.DeadlineExceededError('out of time'));
+
+	const result = await runChannel('channel');
+
+	expect(result).toEqual({ fetched: 1, acted: 0, queued: 0, partial: true, skipped: false, dryRun: false });
+	expect(mocks.state.insertedComments).toEqual([]);
+	expect(mocks.state.insertedAudits).toEqual([]);
+	expect(mocks.state.channelUpdates).toEqual([]);
+});
+
 test.each([
 	{ action: 'delete', observed: null, completed: true },
 	{ action: 'delete', observed: 'rejected', completed: false },

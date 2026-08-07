@@ -113,12 +113,19 @@ export interface UserRow {
 	displayName: string;
 }
 
-export const userRowArb: fc.Arbitrary<UserRow> = fc.record({
+/**
+ * Shared user-field arbitraries (id/sub/email/displayName) — reused by
+ * userRowArb and orgGraphArb so the entity-graph user shape cannot drift from
+ * the standalone row arbitrary (review deferral #5).
+ */
+const userFields = {
 	id: idArb,
 	googleSub: idArb.map((id) => `sub-${id}`),
 	email: idArb.map((id) => `${id}@example.com`),
 	displayName: fc.string({ maxLength: 30 })
-});
+};
+
+export const userRowArb: fc.Arbitrary<UserRow> = fc.record(userFields);
 
 export interface OrgRow {
 	id: string;
@@ -143,30 +150,27 @@ export interface ChannelRow {
 /**
  * Channel rows honoring the channels_org_requires_owner CHECK (a connected
  * user implies an owning org): claimed (user+org), detached (org-owned, user
- * wiped by account deletion), orphan (pre-accounts, both null).
+ * wiped by account deletion), orphan (pre-accounts, both null). The three
+ * variants share every field except the userId/orgId pair, so the shape is
+ * built once (review deferral #5).
  */
+function channelRowFields(
+	userId: fc.Arbitrary<string | null>,
+	orgId: fc.Arbitrary<string | null>
+) {
+	return {
+		id: channelIdArb,
+		userId,
+		orgId,
+		title: fc.string({ maxLength: 60 }),
+		refreshTokenEnc: idArb
+	};
+}
+
 export const channelRowArb: fc.Arbitrary<ChannelRow> = fc.oneof(
-	fc.record({
-		id: channelIdArb,
-		userId: idArb,
-		orgId: idArb,
-		title: fc.string({ maxLength: 60 }),
-		refreshTokenEnc: idArb
-	}),
-	fc.record({
-		id: channelIdArb,
-		userId: fc.constant(null),
-		orgId: idArb,
-		title: fc.string({ maxLength: 60 }),
-		refreshTokenEnc: idArb
-	}),
-	fc.record({
-		id: channelIdArb,
-		userId: fc.constant(null),
-		orgId: fc.constant(null),
-		title: fc.string({ maxLength: 60 }),
-		refreshTokenEnc: idArb
-	})
+	fc.record(channelRowFields(idArb, idArb)),
+	fc.record(channelRowFields(fc.constant(null), idArb)),
+	fc.record(channelRowFields(fc.constant(null), fc.constant(null)))
 );
 
 // Status/decider vocabularies mirror the column comments in db/schema.ts —
@@ -290,12 +294,9 @@ type OrgGraphRelations = {
 // resolve to entities inside the graph' pins the shape.
 export const orgGraphArb = fc.entityGraph<OrgGraphFields, OrgGraphRelations>(
 	{
-		user: {
-			id: idArb,
-			googleSub: idArb.map((id) => `sub-${id}`),
-			email: idArb.map((id) => `${id}@example.com`),
-			displayName: fc.string({ maxLength: 30 })
-		},
+		// userFields is shared with userRowArb so the graph user shape cannot
+		// drift from the standalone row arbitrary (review deferral #5).
+		user: userFields,
 		org: { id: idArb, name: fc.string({ maxLength: 40 }) },
 		channel: { id: channelIdArb, title: fc.string({ maxLength: 60 }), refreshTokenEnc: idArb },
 		membership: { role: fc.constantFrom(...MEMBERSHIP_ROLES) }

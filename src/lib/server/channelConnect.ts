@@ -50,7 +50,10 @@ const MAX_PENDING_PICKS = 5;
  * and channel flows share it); this cookie records who started a channel
  * connect so the callback can reject a completion attempt by a DIFFERENT
  * signed-in user on a shared machine BEFORE the authorization code is
- * exchanged (CodeRabbit 3738037981). Plaintext — the userId is not secret.
+ * exchanged. The payload is AES-256-GCM ENCRYPTED like the picker cookie —
+ * the binding is part of an authorization decision, so a client who edits
+ * their own cookie must not be able to re-sign it for another user's state
+ * (a hand-crafted or tampered value fails to decrypt and reads as unbound).
  */
 export const CHANNEL_STATE_COOKIE = 'moderaty_channel_state';
 const CHANNEL_STATE_TTL_MS = 10 * 60 * 1000;
@@ -61,17 +64,20 @@ type ChannelStateEntry = { state: string; userId: string; ts: number };
 function readChannelStateEntries(cookies: Cookies): ChannelStateEntry[] {
 	const raw = cookies.get(CHANNEL_STATE_COOKIE);
 	if (!raw) return [];
-	let parsed: unknown;
 	try {
-		parsed = JSON.parse(raw);
+		// decrypt returns null for anything that isn't valid ciphertext — a
+		// tampered or forged cookie reads as an empty list (fail-closed).
+		const plain = decrypt(raw);
+		if (plain === null) return [];
+		const parsed: unknown = JSON.parse(plain);
+		if (!Array.isArray(parsed)) return [];
+		return parsed.filter(
+			(e): e is ChannelStateEntry =>
+				typeof e === 'object' && e !== null && typeof (e as ChannelStateEntry).state === 'string'
+		);
 	} catch {
 		return [];
 	}
-	if (!Array.isArray(parsed)) return [];
-	return parsed.filter(
-		(e): e is ChannelStateEntry =>
-			typeof e === 'object' && e !== null && typeof (e as ChannelStateEntry).state === 'string'
-	);
 }
 
 function writeChannelStateEntries(cookies: Cookies, entries: ChannelStateEntry[]): void {
@@ -79,7 +85,7 @@ function writeChannelStateEntries(cookies: Cookies, entries: ChannelStateEntry[]
 		cookies.delete(CHANNEL_STATE_COOKIE, { path: '/' });
 		return;
 	}
-	cookies.set(CHANNEL_STATE_COOKIE, JSON.stringify(entries), {
+	cookies.set(CHANNEL_STATE_COOKIE, encrypt(JSON.stringify(entries)), {
 		path: '/',
 		httpOnly: true,
 		sameSite: 'lax',
@@ -191,6 +197,10 @@ export function readPendingChannelPick(cookies: Cookies, state: string, userId: 
 	if (!entry || typeof entry.ts !== 'number' || Date.now() - entry.ts > PICK_TTL_MS) return null;
 	// Bound to the parker: a pick is only readable by the signed-in user who
 	// parked it, so another user on a shared machine can never complete it.
+	// Entries parked BEFORE this binding shipped have no userId and read as
+	// null — deliberate fail-closed invalidation (the picker tells the user
+	// the selection expired and to reconnect), not a migration path that would
+	// reopen the cross-user hole for the pre-binding window.
 	if (entry.userId !== userId) return null;
 	if (typeof entry.refreshToken !== 'string' || !entry.refreshToken) return null;
 	if (!Array.isArray(entry.channels) || entry.channels.length === 0) return null;

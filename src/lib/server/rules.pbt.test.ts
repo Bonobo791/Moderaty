@@ -30,9 +30,7 @@ test('I6 dichotomy: validateRule never accepts a pattern recheck cannot prove sa
 	// Property audit: dropping the recheck guard (accepting checkSync status
 	// !== 'safe') accepts generated unsafe patterns — the accepted ⇒ 'safe'
 	// assertion goes red. Accepting an over-length pattern breaks the ≤256
-	// assertion; swallowing a compile error breaks the RegExp assertion. The
-	// reverse assertion (recheck not-safe/unknown/error ⇒ must have thrown)
-	// pins that an accepted-unsafe verdict can never slip through either guard.
+	// assertion; swallowing a compile error breaks the RegExp assertion.
 	const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {}); // loud channel, silenced for burn-in readability
 	try {
 		fc.assert(
@@ -65,8 +63,9 @@ test('I6 dichotomy: validateRule never accepts a pattern recheck cannot prove sa
 				} else {
 					// Rejection while recheck-safe is legitimate (the syntax guards —
 					// backreferences, duplicate alternation — are stricter than
-					// recheck), so nothing is asserted on that side.
-					if (recheckStatus !== 'safe') expect(accepted).toBe(false);
+					// recheck), so nothing is asserted on that side. (The old
+					// `expect(accepted).toBe(false)` here was vacuous — the branch
+					// already implies it.)
 				}
 			})
 		);

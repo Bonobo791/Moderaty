@@ -54,7 +54,7 @@ vi.mock('$lib/server/db', () => ({
 
 import { makeCookies, makeCookiesWithState } from '$lib/server/testcookies';
 import { TEST_OWNER } from '$lib/server/testuser';
-import { CHANNEL_STATE_COOKIE, parkChannelState } from '$lib/server/channelConnect';
+import { CHANNEL_STATE_COOKIE, parkChannelState, readChannelState } from '$lib/server/channelConnect';
 import { GET as startAuth } from './+server';
 import { GET as authCallback } from './callback/+server';
 
@@ -157,16 +157,18 @@ test('auth start sets an HttpOnly oauth_state cookie and redirects with matching
 
 	// The channel-connect state is bound to the signed-in user who started it,
 	// so the callback rejects a completion by a different user (shared browser).
+	// The binding is AES-256-GCM encrypted: opaque to the client and
+	// tamper-proof (a forged plaintext entry cannot decrypt to a userId).
 	const stateBinding = cookies.setCalls.find((c) => c.name === CHANNEL_STATE_COOKIE);
 	expect(stateBinding, 'channel-state binding cookie must be set').toBeDefined();
-	const binding: unknown = JSON.parse(stateBinding?.value ?? '[]');
-	expect(binding).toEqual([
-		{ state: target.searchParams.get('state'), userId: OWNER.id, ts: expect.any(Number) }
-	]);
+	expect(stateBinding?.value).not.toContain(OWNER.id);
+	const redirectState = target.searchParams.get('state');
+	expect(redirectState).toBeTruthy();
+	expect(readChannelState(cookies as never, redirectState ?? '')).toEqual({ userId: OWNER.id });
 
 	const pendingStates: unknown = JSON.parse(stateCall?.value ?? '[]');
 	expect(target.origin + target.pathname).toBe('https://accounts.google.com/o/oauth2/v2/auth');
-	expect(pendingStates).toContain(target.searchParams.get('state'));
+	expect(pendingStates).toContain(redirectState);
 	expect(target.searchParams.get('client_id')).toBe('client-id');
 	expect(target.searchParams.get('response_type')).toBe('code');
 	expect(target.searchParams.get('scope')).toBe('https://www.googleapis.com/auth/youtube.force-ssl');

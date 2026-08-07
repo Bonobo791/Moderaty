@@ -99,40 +99,15 @@ should pass — single-expression arrow predicates returned vitest's `Assertion`
 object, which fast-check reads as a failing verdict ("Property failed by
 returning false"). Convention 1 exists because of this.
 
-## Review deferrals (PR #125 triage, 2026-08-06)
 
-Valid bot findings on `*.pbt.test.ts` files, held for explicit maintainer
-assignment per the AGENTS.md rule ("never change Stryker or Fast Check tests
-unless specifically assigned"). When assigned, make each change
-failing-test-first and delete this entry:
+## Review deferrals (PR #125 triage, 2026-08-06) — ALL RESOLVED 2026-08-07
 
-1. `src/lib/server/pipeline.reconciliation.pbt.test.ts` (~lines 197–211) —
-   `SeededAction` and `PassPlan` interfaces are unused; `reconciliationArb`
-   declares the same shapes inline (lines ~238–268). Either delete the
-   interfaces or annotate the arbitraries with them so the shapes stay pinned.
-   (Also 2 of Codacy's 3 "high" findings on PR #125.)
-2. `src/lib/server/rules.pbt.test.ts` (~line 69) —
-   `expect(accepted).toBe(false)` in the rejection branch is vacuous (the
-   branch already implies `accepted === false`). Delete it and drop the stale
-   reverse-direction claim from the `// Property audit:` comment (~lines
-   34–35). The accepted-branch `expect(recheckStatus).toBe('safe')` stays.
-3. `src/lib/server/session.pbt.test.ts` (~line 38) — the renewal boundary is
-   re-derived as `SESSION_TTL_MS / 2`; export `RENEW_BELOW_MS` from
-   `session.ts` and import it instead, so the test cannot drift from the
-   production threshold. (Requires the source export — a source change riding
-   with the test change, which is why it is maintainer-gated twice over.)
-4. `src/lib/server/pipeline.reconciliation.pbt.test.ts` (~line 579) —
-   SonarCloud `typescript:S5906` (minor): prefer
-   `expect(after.auditLog).toHaveLength(before.auditLog.length + expectedDecisions.length)`
-   over the generic `expect(...).toBe(...)` numeric assertion for better
-   failure reporting. Fast-check file — same gate as the entries above.
-5. `src/lib/server/testarbitraries.ts` (Codacy duplication) — two clone pairs:
-   the three `channelArb`-style records (~lines 151–166) repeat the
-   id/orgId/title/refreshTokenEnc shape, and `orgGraphArb`'s user field
-   (~lines 293–298) mirrors `userRowArb` (~lines 116–121). Deduping would
-   reuse `userRowArb`/a shared channel-shape builder inside the arbitrary
-   generator — semantically identical, but it changes the property-test
-   generation surface, so it is gated the same way as the entries above.
+The five maintainer-gated fast-check findings were all assigned and fixed in
+the 2026-08-07 triage round: (1) unused `SeededAction`/`PassPlan` interfaces
+deleted, (2) vacuous `rules.pbt.test.ts` assertion removed, (3) `RENEW_BELOW_MS`
+exported from `session.ts` and imported by `session.pbt.test.ts`, (4) S5906
+`toHaveLength` assertion adopted, (5) `testarbitraries.ts` channel/user shapes
+deduped with identical generation semantics.
 
 _Resolved 2026-08-07 triage:_ the maintainer pasted Codacy's itemization — the
 Security high was **not** the test key but `dotenv-cli: ^11.0.0` in

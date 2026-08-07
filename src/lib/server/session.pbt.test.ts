@@ -22,7 +22,7 @@ import { expect, test } from 'vitest';
 
 import { DAY_MS, setupTestDb, testDb, wipeTables } from './testdb';
 import { memberships, organizations, sessions, users } from './db/schema';
-import { createSession, getSessionUser, SESSION_TTL_MS } from './session';
+import { createSession, getSessionUser, RENEW_BELOW_MS, SESSION_TTL_MS } from './session';
 // Side-effect import: configures fast-check numRuns globally (FC_NUM_RUNS).
 import './testarbitraries';
 
@@ -30,7 +30,8 @@ const WIPE = ['sessions', 'memberships', 'organizations', 'users'];
 
 setupTestDb(WIPE);
 
-const RENEW_BELOW_MS = SESSION_TTL_MS / 2; // renew when under 15 days remain
+// Imported from the source (not re-derived as SESSION_TTL_MS / 2) so the
+// renewal boundary cannot drift from the production threshold (deferral #3).
 // Guard band around the zone edges: the milliseconds that pass between row
 // insert and resolution can never flip a run into a neighboring zone. The
 // exact boundaries (expiresAt == now, remaining == 15d) are pinned by the

@@ -31,7 +31,10 @@ import { resolveActiveOrg, type OrgRole } from '$lib/server/org';
 
 export const SESSION_COOKIE = 'moderaty_session';
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
-const RENEW_BELOW_MS = SESSION_TTL_MS / 2; // renew when under 15 days remain
+// Renew when under 15 days remain. Exported so the property tests can pin the
+// sliding-expiry boundary against the production threshold instead of
+// re-deriving it (review deferral #3).
+export const RENEW_BELOW_MS = SESSION_TTL_MS / 2;
 
 export interface SessionUser {
 	id: string;

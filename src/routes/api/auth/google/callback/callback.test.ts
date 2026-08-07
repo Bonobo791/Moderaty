@@ -35,7 +35,14 @@ vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
 import { TEST_OWNER, setupTestDb, testDb } from '$lib/server/testdb';
 import { makeCookiesWithState } from '$lib/server/testcookies';
-import { parkChannelState, readPendingChannelPick } from '$lib/server/channelConnect';
+import {
+	CHANNEL_STATE_COOKIE,
+	parkChannelState,
+	readChannelState,
+	readPendingChannelPick
+} from '$lib/server/channelConnect';
+import * as channelConnect from '$lib/server/channelConnect';
+import { readPendingStates } from '$lib/server/oauthState';
 import { channels } from '$lib/server/db/schema';
 import type { SessionUser } from '$lib/server/session';
 import { GET as authCallback } from './+server';
@@ -145,6 +152,46 @@ test('rejects a state started by a DIFFERENT user — the code is never exchange
 	// Nothing was parked or written under B.
 	expect(await testDb().db.select().from(channels).all()).toHaveLength(0);
 	expect(readPendingChannelPick(cookies as never, 's', OWNER.id)).toBeNull();
+});
+
+test('a forged (client-edited) channel-state binding cannot pass the different-user check', async () => {
+	stubTokenAndChannel();
+	// An attacker edits their own browser cookie to claim the target state for
+	// their own user id. The binding must be integrity-protected, so a
+	// hand-crafted plaintext entry decrypts to nothing and the callback
+	// rejects BEFORE the exchange.
+	const cookies = makeCookiesWithState('s');
+	cookies.set(
+		CHANNEL_STATE_COOKIE,
+		JSON.stringify([{ state: 's', userId: OWNER.id, ts: Date.now() }]),
+		{ path: '/', httpOnly: true, sameSite: 'lax' }
+	);
+
+	const { thrown } = await captureCallback(OWNER, cookies);
+
+	expect(thrown).toMatchObject({ status: 400 });
+	expect(thrown?.body?.message).toContain('different account');
+	// The authorization code was never exchanged — no Google call happened.
+	expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+});
+
+test('a persistence failure keeps the state consumable — the callback stays retryable (state/lifecycle)', async () => {
+	stubTokenAndChannel();
+	const cookies = withChannelState(makeCookiesWithState('s'), OWNER.id);
+	// Simulate the picker-cookie/upsert persistence failing AFTER validation:
+	// the OAuth state and its binding must NOT already be consumed.
+	const spy = vi.spyOn(channelConnect, 'upsertChannelConnection').mockRejectedValue(new Error('db down'));
+
+	try {
+		const { thrown } = await captureCallback(OWNER, cookies);
+		expect(thrown).toBeDefined();
+	} finally {
+		spy.mockRestore();
+	}
+
+	// Retrying with the same state works instead of forcing a full restart.
+	expect(readPendingStates(cookies as never)).toContain('s');
+	expect(readChannelState(cookies as never, 's')).toEqual({ userId: OWNER.id });
 });
 
 test('a new channel is inserted and attached to the caller', async () => {

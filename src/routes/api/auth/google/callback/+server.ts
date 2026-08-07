@@ -140,10 +140,14 @@ export async function GET({ url, cookies, locals }: { url: URL; cookies: import(
 		throw error(400, 'no YouTube channel found for this Google account');
 	}
 
-	// Consume the state only once the flow has succeeded, so a transient
-	// failure leaves the callback retryable while a success cannot be replayed.
-	storePendingStates(cookies, pending.filter((s) => s !== state));
-	clearChannelState(cookies, state);
+	// State consumption happens ONLY after the persistence below has
+	// succeeded, so a transient post-exchange failure (a throwing picker write
+	// or upsert) leaves the callback retryable with the same state — matching
+	// the comment's own retryability intent.
+	const consumeState = () => {
+		storePendingStates(cookies, pending.filter((s) => s !== state));
+		clearChannelState(cookies, state);
+	};
 
 	if (owned.length > 1) {
 		// Several channels (brand accounts): the user picks ONE at the picker.
@@ -151,12 +155,15 @@ export async function GET({ url, cookies, locals }: { url: URL; cookies: import(
 		// bound to the signed-in user who parked it — and never persisted until
 		// a channel is chosen.
 		parkPendingChannelPick(cookies, state, { refreshToken: tokens.refreshToken, channels: owned }, user.id);
+		consumeState();
 		throw redirect(302, `/connect-channel?state=${encodeURIComponent(state)}`);
 	}
 
 	if ((await upsertChannelConnection(user, owned[0], tokens.refreshToken)) === 'conflict') {
+		consumeState();
 		throw error(409, 'this channel is connected to a different Moderaty team');
 	}
+	consumeState();
 
 	throw redirect(302, '/dashboard');
 }

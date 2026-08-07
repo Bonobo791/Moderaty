@@ -194,22 +194,6 @@ function resetSeamDefaults(): void {
 // I3 — reconciliation convergence
 // ---------------------------------------------------------------------------
 
-interface SeededAction {
-	commentId: string;
-	action: ActionType;
-	state: 'pending' | 'dispatched';
-	reason: string;
-	lastAttemptAt: string | null;
-}
-
-interface PassPlan {
-	verifyThrows: boolean;
-	setFails: boolean;
-	deleteFails: boolean;
-	observed: CommentModerationStatus | null;
-	seamMessage: string;
-}
-
 /** Comment status left by the original decision for each action type (the
  * reconciler never rewrites it — stageDecisions owns comments.status). */
 const COMMENT_STATUS_BY_ACTION: Record<ActionType, string> = {
@@ -576,7 +560,7 @@ test('I8: a forced dry run changes nothing durable except dry-run audit rows (te
 			// new decision (pre-stored comments are deduped, never re-audited).
 			const preStoredIds = new Set(run.preStored.map((comment) => comment.id));
 			const expectedDecisions = run.set.filter((comment) => !preStoredIds.has(comment.id));
-			expect(after.auditLog.length).toBe(before.auditLog.length + expectedDecisions.length);
+			expect(after.auditLog).toHaveLength(before.auditLog.length + expectedDecisions.length);
 			expect(after.auditLog.slice(0, before.auditLog.length)).toEqual(before.auditLog);
 			const gained = after.auditLog.slice(before.auditLog.length);
 			const sourceById = new Map(run.set.map((comment) => [comment.id, comment]));

@@ -50,7 +50,7 @@ export type PendingChannelPick = {
 	channels: Array<{ id: string; title: string }>;
 };
 
-type PickEntry = PendingChannelPick & { state: string; ts: number };
+type PickEntry = PendingChannelPick & { state: string; ts: number; userId: string };
 
 function readEntries(cookies: Cookies): PickEntry[] {
 	const raw = cookies.get(CHANNEL_PICK_COOKIE);
@@ -87,27 +87,38 @@ function writeEntries(cookies: Cookies, entries: PickEntry[]): void {
 
 /**
  * Parks a granted YouTube refresh token and its candidate channels, keyed by
- * the OAuth state of the flow, in a short-lived encrypted httpOnly cookie.
- * AES-GCM makes the payload tamper-proof and confidential, so the picker can
- * trust that both the token and the channel list came from Google's callback.
+ * the OAuth state of the flow and BOUND TO THE USER who parked it, in a
+ * short-lived encrypted httpOnly cookie. AES-GCM makes the payload tamper-proof
+ * and confidential, so the picker can trust that both the token and the channel
+ * list came from Google's callback — and that only the same signed-in user can
+ * complete the pick on a shared machine.
  */
-export function parkPendingChannelPick(cookies: Cookies, state: string, payload: PendingChannelPick): void {
+export function parkPendingChannelPick(
+	cookies: Cookies,
+	state: string,
+	payload: PendingChannelPick,
+	userId: string
+): void {
 	const now = Date.now();
 	const entries = readEntries(cookies).filter(
 		(e) => e.state !== state && now - e.ts <= PICK_TTL_MS
 	);
-	entries.push({ ...payload, state, ts: now });
+	entries.push({ ...payload, state, ts: now, userId });
 	writeEntries(cookies, entries.slice(-MAX_PENDING_PICKS));
 }
 
 /**
  * Reads and validates the parked pick for ONE flow. Returns null when the
- * entry is missing, tampered, malformed, or expired — the caller fails loudly
- * so the user reconnects. Other flows' entries are untouched.
+ * entry is missing, tampered, malformed, expired, or parked by a DIFFERENT
+ * user — the caller fails loudly so the user reconnects. Other flows' entries
+ * are untouched.
  */
-export function readPendingChannelPick(cookies: Cookies, state: string): PendingChannelPick | null {
+export function readPendingChannelPick(cookies: Cookies, state: string, userId: string): PendingChannelPick | null {
 	const entry = readEntries(cookies).find((e) => e.state === state);
 	if (!entry || typeof entry.ts !== 'number' || Date.now() - entry.ts > PICK_TTL_MS) return null;
+	// Bound to the parker: a pick is only readable by the signed-in user who
+	// parked it, so another user on a shared machine can never complete it.
+	if (entry.userId !== userId) return null;
 	if (typeof entry.refreshToken !== 'string' || !entry.refreshToken) return null;
 	if (!Array.isArray(entry.channels) || entry.channels.length === 0) return null;
 	const valid = entry.channels.every(

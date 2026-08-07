@@ -131,9 +131,10 @@ export async function GET({ url, cookies, locals }: { url: URL; cookies: import(
 
 	if (owned.length > 1) {
 		// Several channels (brand accounts): the user picks ONE at the picker.
-		// The refresh token is parked — encrypted, state-keyed, 10-minute TTL —
-		// and never persisted until a channel is chosen.
-		parkPendingChannelPick(cookies, state, { refreshToken: tokens.refreshToken, channels: owned });
+		// The refresh token is parked — encrypted, state-keyed, 10-minute TTL,
+		// bound to the signed-in user who parked it — and never persisted until
+		// a channel is chosen.
+		parkPendingChannelPick(cookies, state, { refreshToken: tokens.refreshToken, channels: owned }, user.id);
 		throw redirect(302, `/connect-channel?state=${encodeURIComponent(state)}`);
 	}
 

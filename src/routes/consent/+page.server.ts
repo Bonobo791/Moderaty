@@ -81,6 +81,19 @@ export const actions: Actions = {
 		if (!pending && !sessionUser) {
 			return fail(400, { error: 'Your sign-in session expired — please sign in again.' });
 		}
+		// Shared-browser hardening: a parked flow belongs to whoever Google
+		// parked it for. Completing someone else's parked flow while signed in
+		// as a different user would mint a session (or account) as THEM in this
+		// browser — reject loudly so the flow restarts for the right account.
+		// (A parked 'new' identity is a Google account that does not exist yet,
+		// so a live session can never be the same account.)
+		if (
+			pending &&
+			sessionUser &&
+			(pending.kind === 'new' || sessionUser.id !== pending.userId)
+		) {
+			return fail(400, { error: 'This sign-in is for a different account — sign out and start again.' });
+		}
 
 		const form = await request.formData();
 		if (form.get('consent') !== 'on') {

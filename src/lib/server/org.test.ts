@@ -21,6 +21,7 @@ import { expect, test, vi } from 'vitest';
 
 import { seedUser, setupTestDb, testDb } from './testdb';
 import { invites, memberships, organizations, sessions, users } from './db/schema';
+import { getSessionUser } from './session';
 import {
 	acceptInvite,
 	createInvite,
@@ -190,16 +191,18 @@ test('acceptInvite joins with the invite role, burns the token, and a second acc
 	await seedSession('sess-1', 'joiner-1');
 	const token = await createInvite('owner-1', 'org-1', 'admin');
 
-	const orgId = await acceptInvite('joiner-1', 'sess-1', token);
-	expect(orgId).toBe('org-1');
+	const result = await acceptInvite('joiner-1', 'sess-1', token);
+	expect(result.orgId).toBe('org-1');
 	const joined = await membershipRow('joiner-1', 'org-1');
 	expect(joined).toHaveLength(1);
 	expect(joined[0].role).toBe('admin');
 	const burned = await testDb().db.select().from(invites).where(eq(invites.token, token)).get();
 	expect(burned?.acceptedBy).toBe('joiner-1');
-	// Session now points at the joined org.
-	const sess = await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-1')).get();
-	expect(sess?.activeOrgId).toBe('org-1');
+	// Rotation: the old token dies; the replacement resolves at the joined org.
+	expect(await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-1')).get()).toBeUndefined();
+	expect(await getSessionUser(result.session.token)).toMatchObject({
+		user: { id: 'joiner-1', orgId: 'org-1', orgRole: 'admin' }
+	});
 
 	// Single-use: a different user can never ride the same link.
 	await seedSession('sess-2', 'joiner-2');
@@ -237,14 +240,15 @@ test('acceptInvite by an existing member is idempotent, still burns the token', 
 	await seedSession('sess-1', 'member-1');
 	const token = await createInvite('owner-1', 'org-1', 'admin');
 
-	await acceptInvite('member-1', 'sess-1', token);
+	const result = await acceptInvite('member-1', 'sess-1', token);
 	const rows = await membershipRow('member-1', 'org-1');
 	expect(rows).toHaveLength(1); // no duplicate membership
 	expect(rows[0].role).toBe('member'); // and the existing role is kept
 	const burned = await testDb().db.select().from(invites).where(eq(invites.token, token)).get();
 	expect(burned?.acceptedBy).toBe('member-1'); // burned even for an existing member
-	const sess = await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-1')).get();
-	expect(sess?.activeOrgId).toBe('org-1'); // still switches the session
+	// Rotation: the old token dies and the replacement still switches the org.
+	expect(await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-1')).get()).toBeUndefined();
+	expect(await getSessionUser(result.session.token)).toMatchObject({ user: { id: 'member-1', orgId: 'org-1' } });
 
 	// The burned link is dead for everyone else, too.
 	await seedSession('sess-2', 'joiner-2');
@@ -361,9 +365,10 @@ test('switchActiveOrg requires membership and updates sessions.active_org_id', a
 	await expect(switchActiveOrg('user-1', 'sess-1', 'org-gone')).rejects.toMatchObject({ status: 404 });
 
 	await seedMember('user-1', 'org-2', 'admin');
-	await switchActiveOrg('user-1', 'sess-1', 'org-2');
-	const sess = await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-1')).get();
-	expect(sess?.activeOrgId).toBe('org-2');
+	const rotated = await switchActiveOrg('user-1', 'sess-1', 'org-2');
+	// Rotation: the old token dies; the replacement resolves at the target org.
+	expect(await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-1')).get()).toBeUndefined();
+	expect(await getSessionUser(rotated.token)).toMatchObject({ user: { id: 'user-1', orgId: 'org-2', orgRole: 'admin' } });
 });
 
 test('previewInvite returns null for unknown tokens and flags expired/accepted', async () => {
@@ -752,6 +757,41 @@ test('setMemberRole promotes a member to admin with a sole owner, and re-setting
 
 	await setMemberRole('owner-1', 'org-1', 'owner-1', 'owner'); // no-op, must not trip the demotion guard
 	expect((await membershipRow('owner-1', 'org-1'))[0].role).toBe('owner');
+});
+
+test('setMemberRole invalidates the target\'s sessions when the role actually changes', async () => {
+	// Roles resolve live from memberships, so a token minted before a role
+	// change would instantly gain the new privilege. We cannot rotate tokens we
+	// do not hold, so the target's rows are deleted — their next page load asks
+	// them to sign in again (re-authentication on privilege change).
+	await seedUser('owner-1');
+	await seedUser('member-1');
+	await seedOrg('org-1');
+	await seedMember('owner-1', 'org-1', 'owner');
+	await seedMember('member-1', 'org-1', 'member');
+	await seedSession('sess-a', 'member-1');
+	await seedSession('sess-b', 'member-1');
+	await seedSession('sess-owner', 'owner-1');
+
+	await setMemberRole('owner-1', 'org-1', 'member-1', 'admin');
+
+	// Every pre-change token of the promoted member is dead.
+	expect(await testDb().db.select().from(sessions).where(eq(sessions.userId, 'member-1')).all()).toEqual([]);
+	// The caller's own sessions are untouched.
+	expect((await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-owner')).get())?.userId).toBe('owner-1');
+});
+
+test('setMemberRole leaves the target\'s sessions alone when the role does not change', async () => {
+	await seedUser('owner-1');
+	await seedUser('member-1');
+	await seedOrg('org-1');
+	await seedMember('owner-1', 'org-1', 'owner');
+	await seedMember('member-1', 'org-1', 'member');
+	await seedSession('sess-a', 'member-1');
+
+	await setMemberRole('owner-1', 'org-1', 'member-1', 'member'); // same role — a plain no-op write
+
+	expect((await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-a')).get())?.userId).toBe('member-1');
 });
 
 test('setMemberRole guard messages: 404 outsider caller, 404 ghost target, 400 last owner', async () => {

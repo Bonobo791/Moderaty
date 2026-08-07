@@ -62,6 +62,29 @@ test('derives Secure from APP_URL and fails loudly when it is missing', () => {
 	);
 });
 
+test('fails loudly when APP_URL is http in the production deployment — auth cookies must never ship insecure', () => {
+	// The Secure flag derives from APP_URL; a misconfigured production APP_URL
+	// would otherwise silently drop Secure from every session/consent/pick
+	// cookie. Production is detected from the Netlify CONTEXT (set only on the
+	// production deploy) or NODE_ENV — dev and previews keep http allowed.
+	mocks.env.APP_URL = 'http://moderaty.example';
+	mocks.env.CONTEXT = 'production';
+	expect(() => cookieSecure()).toThrowError(
+		expect.objectContaining({ status: 500, body: { message: 'APP_URL must be https in the production deployment' } })
+	);
+
+	// Same http APP_URL outside production stays allowed (local dev needs it).
+	delete mocks.env.CONTEXT;
+	mocks.env.APP_URL = 'http://localhost:5173';
+	expect(cookieSecure()).toBe(false);
+
+	// https is fine in production.
+	mocks.env.APP_URL = 'https://moderaty.example';
+	mocks.env.CONTEXT = 'production';
+	expect(cookieSecure()).toBe(true);
+	delete mocks.env.CONTEXT;
+});
+
 test('reads back the pending states stored in the cookie', () => {
 	const cookies = fakeCookies();
 	cookies.get.mockReturnValue(JSON.stringify(['state-1', 'state-2']));

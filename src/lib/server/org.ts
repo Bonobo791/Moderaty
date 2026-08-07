@@ -25,6 +25,7 @@ import { and, eq, gt, isNull, ne, sql } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
 import { invites, memberships, organizations, sessions, users } from '$lib/server/db/schema';
+import { rotateSession } from '$lib/server/session';
 
 export type OrgRole = 'owner' | 'admin' | 'member';
 
@@ -245,7 +246,11 @@ function asInviteRole(token: string, role: string): 'admin' | 'member' {
  * and EVERY accept burns, so an already-a-member accept can never leave the
  * link usable by someone else (PR #52 review).
  */
-export async function acceptInvite(userId: string, sessionToken: string, token: string): Promise<string> {
+export async function acceptInvite(
+	userId: string,
+	sessionToken: string,
+	token: string
+): Promise<{ orgId: string; session: { token: string; expiresAt: string } }> {
 	return db.transaction(async (tx) => {
 		const inv = await inviteWithOrg(tx, token);
 		if (!inv || inv.acceptedBy !== null || Date.parse(inv.expiresAt) <= Date.now()) {
@@ -272,29 +277,27 @@ export async function acceptInvite(userId: string, sessionToken: string, token: 
 		if (!existing) {
 			await tx.insert(memberships).values({ userId, orgId: inv.orgId, role });
 		}
-		// Scoped AND verified: the session must be the caller's own (PR #52 review).
-		const switched = await tx
-			.update(sessions)
-			.set({ activeOrgId: inv.orgId })
-			.where(and(eq(sessions.id, sessionToken), eq(sessions.userId, userId)))
-			.returning({ id: sessions.id });
-		if (switched.length === 0) throw error(401, 'sign-in required');
-		return inv.orgId;
+		// Rotate the session ATOMICALLY with the burn: the pre-accept token dies
+		// so it can never resolve at the joined org. Scoped AND verified — a
+		// mismatched token rolls the whole accept back (the invite stays open).
+		const session = await rotateSession(sessionToken, userId, inv.orgId, tx);
+		return { orgId: inv.orgId, session };
 	});
 }
 
 /** Switches the session's active org. Membership in the target is required. */
-export async function switchActiveOrg(userId: string, sessionToken: string, orgId: string): Promise<void> {
+export async function switchActiveOrg(
+	userId: string,
+	sessionToken: string,
+	orgId: string
+): Promise<{ token: string; expiresAt: string }> {
 	const m = await membershipOf(userId, orgId);
 	if (!m) throw error(404, 'team not found');
-	// Scoped AND verified: an unknown or mismatched session token fails loudly
-	// instead of silently updating nothing (PR #52 review).
-	const updated = await db
-		.update(sessions)
-		.set({ activeOrgId: orgId })
-		.where(and(eq(sessions.id, sessionToken), eq(sessions.userId, userId)))
-		.returning({ id: sessions.id });
-	if (updated.length === 0) throw error(401, 'sign-in required');
+	// Scoped AND verified (PR #52 review): rotateSession throws 401 for an
+	// unknown or mismatched token instead of silently updating nothing — and
+	// the rotation kills tokens minted before the switch so they can never
+	// resolve at the target org.
+	return rotateSession(sessionToken, userId, orgId);
 }
 
 export interface OrgMember {
@@ -362,6 +365,15 @@ export async function setMemberRole(callerUserId: string, orgId: string, targetU
 		)
 		.returning({ userId: memberships.userId });
 	if (updated.length === 0) throw error(400, 'the last owner cannot be demoted — promote a teammate to owner first');
+	// A role change must invalidate the target's sessions: roles resolve live
+	// from memberships, so a token minted before the change would instantly
+	// gain the new privilege. We cannot rotate tokens we do not hold, so the
+	// target's rows are deleted — the next page load asks them to sign in
+	// again (re-authentication on privilege change). A same-role write is not
+	// a change and leaves sessions alone.
+	if (target.role !== role) {
+		await db.delete(sessions).where(eq(sessions.userId, targetUserId));
+	}
 }
 
 /**

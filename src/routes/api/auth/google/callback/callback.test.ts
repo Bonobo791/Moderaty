@@ -195,7 +195,7 @@ test('a multi-channel account parks the channels and redirects to the picker wit
 	// Nothing is connected — the refresh token must not be persisted until a
 	// channel is chosen.
 	expect(await testDb().db.select().from(channels).all()).toHaveLength(0);
-	const parked = readPendingChannelPick(cookies as never, 's');
+	const parked = readPendingChannelPick(cookies as never, 's', OWNER.id);
 	expect(parked?.channels).toEqual([
 		{ id: 'UC1', title: 'One' },
 		{ id: 'UC2', title: 'Two' }
@@ -221,7 +221,7 @@ test('the channel listing paginates and every valid channel reaches the picker',
 
 	expect(seenPageTokens).toEqual([null, 'p2']);
 	expect(thrown).toMatchObject({ status: 302, location: '/connect-channel?state=s' });
-	expect(readPendingChannelPick(cookies as never, 's')?.channels).toHaveLength(2);
+	expect(readPendingChannelPick(cookies as never, 's', OWNER.id)?.channels).toHaveLength(2);
 });
 
 test('a malformed channel item is skipped and the single valid channel short-circuits to the connect', async () => {
@@ -244,7 +244,7 @@ test('a malformed channel item is skipped and the single valid channel short-cir
 	// The skip is counted and loud, never silent (I1).
 	expect(errSpy.mock.calls.flat().join(' ')).toMatch(/skipped 1 malformed/);
 	// No picker was parked for the single-channel path.
-	expect(readPendingChannelPick(cookies as never, 's')).toBeNull();
+	expect(readPendingChannelPick(cookies as never, 's', OWNER.id)).toBeNull();
 	errSpy.mockRestore();
 });
 
@@ -407,7 +407,7 @@ test('a pathological pageToken loop stops at the page bound and logs the truncat
 	expect(channelFetches).toBe(10);
 	expect(errSpy.mock.calls.flat().join(' ')).toMatch(/hit the 10-page bound/);
 	expect(thrown).toMatchObject({ status: 302, location: '/connect-channel?state=s' });
-	expect(readPendingChannelPick(cookies as never, 's')?.channels).toHaveLength(10);
+	expect(readPendingChannelPick(cookies as never, 's', OWNER.id)?.channels).toHaveLength(10);
 });
 
 test('bad state and missing code reject with descriptive 400 messages', async () => {

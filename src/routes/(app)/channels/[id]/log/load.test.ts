@@ -89,6 +89,25 @@ test('tied timestamps still pick the truly latest action (auto-increment id brea
 	expect(byAction.get('hold')).toBeNull();
 });
 
+test('latest per comment follows the (createdAt, id) order, not insertion order: a skewed-clock row must not steal Undo', async () => {
+	await seedChannel();
+	// Audit writers stamp createdAt from the app clock; on serverless the
+	// SECOND insert (larger id) can carry an EARLIER createdAt than the first.
+	// The page sorts createdAt DESC, id DESC, so the first-inserted reject is
+	// the displayed latest — and the only undoable row — even though max(id)
+	// would crown the later insert.
+	await seedEntries([
+		{ commentId: 'c-skew', action: 'reject', createdAt: '2026-01-02T00:00:00.000Z' },
+		{ commentId: 'c-skew', action: 'hold', createdAt: '2026-01-01T00:00:00.000Z' }
+	]);
+
+	const result = await load({ params: { id: 'UC1' }, locals: { user: OWNER }, url: LOG_URL } as never);
+
+	const byCreatedAt = new Map(result!.entries.map((e) => [e.createdAt, e.undoable]));
+	expect(byCreatedAt.get('2026-01-02T00:00:00.000Z')).toBe('full');
+	expect(byCreatedAt.get('2026-01-01T00:00:00.000Z')).toBeNull();
+});
+
 test('load projects only the channel fields the page renders — never the credential', async () => {
 	await testDb()
 		.db.insert(channels)

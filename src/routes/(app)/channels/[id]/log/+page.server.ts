@@ -82,16 +82,22 @@ export async function load({ params, locals, url }) {
 	const page = hasMore ? rows.slice(0, PAGE_SIZE) : rows;
 	// "Latest per comment" must be judged against the WHOLE log, not the page —
 	// a per-page window would mark a superseded action as latest and offer a
-	// bogus Undo. max(id) IS the latest row under the (createdAt, id) ordering,
-	// ties included. Bounded by the page's comment ids.
+	// bogus Undo. Latest means the same (createdAt, id) ordering the page and
+	// the undo handler sort by: audit writers stamp createdAt from app clocks
+	// that can skew across serverless instances, so id order alone is NOT the
+	// display order. Bounded by the page's comment ids.
 	const latestIds = new Map<string, number>();
 	if (page.length) {
-		const latest = await db
-			.select({ commentId: auditLog.commentId, latestId: sql<number>`max(${auditLog.id})` })
-			.from(auditLog)
-			.where(and(eq(auditLog.channelId, params.id), inArray(auditLog.commentId, [...new Set(page.map((row) => row.commentId))])))
-			.groupBy(auditLog.commentId)
-			.all();
+		const commentIds = [...new Set(page.map((row) => row.commentId))];
+		const latest = await db.all<{ commentId: string; latestId: number }>(sql`
+			SELECT comment_id AS commentId, id AS latestId FROM (
+				SELECT comment_id, id,
+					ROW_NUMBER() OVER (PARTITION BY comment_id ORDER BY created_at DESC, id DESC) AS rn
+				FROM ${auditLog}
+				WHERE ${auditLog.channelId} = ${params.id}
+					AND ${auditLog.commentId} IN (${sql.join(commentIds.map((commentId) => sql`${commentId}`), sql`, `)})
+			) WHERE rn = 1
+		`);
 		for (const row of latest) latestIds.set(row.commentId, row.latestId);
 	}
 	const entries = page.map((entry) => ({

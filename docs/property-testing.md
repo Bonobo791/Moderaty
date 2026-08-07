@@ -133,6 +133,14 @@ is not itemized in its GitHub comment; believed to be the synthetic
 the repo's documented synthetic-test-value exception). Maintainer to confirm
 on the Codacy dashboard.
 
+_Resolved 2026-08-07 triage:_ the maintainer pasted Codacy's itemization — the
+Security high was **not** the test key but `dotenv-cli: ^11.0.0` in
+`package.json` (rule: "package dependencies with variant versions may lead to
+dependency hijack"). The dependency was added by the "package update" commit
+(be0793d) with no script or code using it, so it was **removed** outright
+(package.json + package-lock.json) rather than pinned — eliminating both the
+variant-version surface and an unused dependency outside the approved list.
+
 ## Roadmap (catalog details in the skill reference)
 
 - **Future:** burn-in job with high `FC_NUM_RUNS` — same posture as Stryker

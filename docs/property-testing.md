@@ -99,6 +99,35 @@ should pass — single-expression arrow predicates returned vitest's `Assertion`
 object, which fast-check reads as a failing verdict ("Property failed by
 returning false"). Convention 1 exists because of this.
 
+## Review deferrals (PR #125 triage, 2026-08-06)
+
+Valid bot findings on `*.pbt.test.ts` files, held for explicit maintainer
+assignment per the AGENTS.md rule ("never change Stryker or Fast Check tests
+unless specifically assigned"). When assigned, make each change
+failing-test-first and delete this entry:
+
+1. `src/lib/server/pipeline.reconciliation.pbt.test.ts` (~lines 197–211) —
+   `SeededAction` and `PassPlan` interfaces are unused; `reconciliationArb`
+   declares the same shapes inline (lines ~238–268). Either delete the
+   interfaces or annotate the arbitraries with them so the shapes stay pinned.
+   (Also 2 of Codacy's 3 "high" findings on PR #125.)
+2. `src/lib/server/rules.pbt.test.ts` (~line 69) —
+   `expect(accepted).toBe(false)` in the rejection branch is vacuous (the
+   branch already implies `accepted === false`). Delete it and drop the stale
+   reverse-direction claim from the `// Property audit:` comment (~lines
+   34–35). The accepted-branch `expect(recheckStatus).toBe('safe')` stays.
+3. `src/lib/server/session.pbt.test.ts` (~line 38) — the renewal boundary is
+   re-derived as `SESSION_TTL_MS / 2`; export `RENEW_BELOW_MS` from
+   `session.ts` and import it instead, so the test cannot drift from the
+   production threshold. (Requires the source export — a source change riding
+   with the test change, which is why it is maintainer-gated twice over.)
+
+Open verification item: Codacy's third "high" on PR #125 (category Security)
+is not itemized in its GitHub comment; believed to be the synthetic
+`ENCRYPTION_KEY` fixture in `crypto.pbt.test.ts` (non-secret, consistent with
+the repo's documented synthetic-test-value exception). Maintainer to confirm
+on the Codacy dashboard.
+
 ## Roadmap (catalog details in the skill reference)
 
 - **Future:** burn-in job with high `FC_NUM_RUNS` — same posture as Stryker

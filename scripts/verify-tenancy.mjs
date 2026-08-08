@@ -18,7 +18,7 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 //
 // Tenancy Definition-of-Done probe: verifies the multi-tenancy invariants of
-// whichever Turso database TURSO_DATABASE_URL points at (dev `db` by default;
+// whichever Turso database TURSO_DATABASE_URL points at (dev `dev-2` by default;
 // point it at production `moderaty` after applying a migration there). READ
 // ONLY except the contract probes, which clean up after themselves.
 //

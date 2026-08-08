@@ -19,8 +19,8 @@
 import { beforeEach, expect, onTestFinished, test, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { DAY_MS, seedConsent as seedConsentRecord, seedUser, setupTestDb, testDb } from '$lib/server/testdb';
-import { channels, consents } from '$lib/server/db/schema';
-import { CONSENT_EMAIL_RETENTION_MS } from '$lib/server/deletion';
+import { auditLog, channels, consents } from '$lib/server/db/schema';
+import { AUDIT_HANDLE_RETENTION_MS, CONSENT_EMAIL_RETENTION_MS } from '$lib/server/deletion';
 
 // Synthetic credential fixture — same maintainer-approved exception as
 // netlify/cron.test.mjs (2026-07-30, PR #13 review, per AGENTS.md).
@@ -34,12 +34,25 @@ vi.mock('$lib/server/pipeline', () => ({ runChannel: mocks.runChannel }));
 
 import { GET } from './+server';
 
-setupTestDb(['channels', 'users', 'consents']);
+setupTestDb(['channels', 'users', 'consents', 'audit_log']);
 
 /** Seeds a user with a consent record accepted at `createdAt`, e-mail retained. */
 async function seedConsent(id: string, createdAt: string) {
 	await seedUser(id);
 	await seedConsentRecord(id, createdAt, '1.0');
+}
+
+/** Seeds one audit row with a stored commenter handle at `createdAt`. */
+async function seedHandledAuditRow(commentId: string, createdAt: string) {
+	await testDb().db.insert(auditLog).values({
+		channelId: 'UC-log',
+		commentId,
+		action: 'reject',
+		reason: 'ai score 0.91',
+		actor: 'system',
+		authorHandle: '@some.user',
+		createdAt
+	});
 }
 
 beforeEach(() => {
@@ -358,6 +371,70 @@ test('a dry run skips the consent e-mail sweep entirely (I8)', async () => {
 		infoSpy.mockRestore();
 	}
 	expect((await testDb().db.select().from(consents).all())[0].email).toBe('old@example.com');
+});
+
+test('erases audit-log handles older than 30 days, keeping the row', async () => {
+	mocks.env.DRY_RUN = 'false';
+	const oldDate = new Date(Date.now() - AUDIT_HANDLE_RETENTION_MS - DAY_MS).toISOString();
+	const recentDate = new Date(Date.now() - DAY_MS).toISOString();
+	await seedHandledAuditRow('old', oldDate);
+	await seedHandledAuditRow('recent', recentDate);
+
+	const res = await call({ bearer: 'test-secret' });
+
+	expect(await res.json()).toMatchObject({ ok: true, auditHandlesNulled: 1 });
+	const rows = await testDb().db.select().from(auditLog).all();
+	expect(rows).toHaveLength(2);
+	// The ROW is kept (action, reason, timestamps) — only the identifier goes.
+	expect(rows.find((row) => row.commentId === 'old')).toMatchObject({ authorHandle: null, action: 'reject' });
+	expect(rows.find((row) => row.commentId === 'recent')).toMatchObject({ authorHandle: '@some.user' });
+});
+
+test('a handle sweep failure is reported and does not stop the channel run', async () => {
+	mocks.env.DRY_RUN = 'false';
+	const oldDate = new Date(Date.now() - AUDIT_HANDLE_RETENTION_MS - DAY_MS).toISOString();
+	await seedHandledAuditRow('old', oldDate);
+	await seedChannel('UC-live');
+	mocks.runChannel.mockResolvedValue({ fetched: 0, acted: 0, queued: 0, partial: false, skipped: false, dryRun: false });
+	await testDb().client.execute(
+		`CREATE TRIGGER fail_audit_handle_update BEFORE UPDATE ON audit_log
+		 BEGIN SELECT RAISE(ABORT, 'simulated handle sweep failure'); END`
+	);
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		const res = await call({ bearer: 'test-secret' });
+
+		expect(res.status).toBe(200);
+		const body = await res.json();
+		expect(body.handleSweepError).toEqual(expect.stringContaining('Failed query'));
+		expect(body.auditHandlesNulled).toBe(0);
+		expect(mocks.runChannel).toHaveBeenCalledWith('UC-live', expect.objectContaining({ deadline: expect.any(Number) }));
+		// The sweep failure is logged loudly.
+		expect(errorSpy).toHaveBeenCalledWith('audit-log handle retention sweep failed:', expect.any(Error));
+	} finally {
+		errorSpy.mockRestore();
+		await testDb().client.execute('DROP TRIGGER fail_audit_handle_update');
+	}
+
+	// The failed sweep changed nothing, so the next invocation retries it.
+	expect((await testDb().db.select().from(auditLog).all())[0].authorHandle).toBe('@some.user');
+});
+
+test('a dry run skips the audit-log handle sweep entirely (I8)', async () => {
+	const oldDate = new Date(Date.now() - AUDIT_HANDLE_RETENTION_MS - DAY_MS).toISOString();
+	await seedHandledAuditRow('old', oldDate);
+	// The skipped sweep is announced loudly.
+	const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+
+	try {
+		const res = await call({ bearer: 'test-secret' });
+
+		expect(await res.json()).toMatchObject({ ok: true, dryRun: true, auditHandlesNulled: 0 });
+		expect(infoSpy).toHaveBeenCalledWith('dry run: audit-log handle retention sweep skipped');
+	} finally {
+		infoSpy.mockRestore();
+	}
+	expect((await testDb().db.select().from(auditLog).all())[0].authorHandle).toBe('@some.user');
 });
 
 test('drains one dry-run window page after the normal run and persists the continuation', async () => {

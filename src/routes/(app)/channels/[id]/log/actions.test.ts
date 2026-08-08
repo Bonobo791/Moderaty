@@ -241,3 +241,65 @@ test('a concurrent undo that loses the atomic claim 404s instead of double-resto
 	expect(await commentRow('c1')).toMatchObject({ status: 'approved', decidedBy: 'human' });
 	expect((await testDb().db.select().from(auditLog).all()).filter((row) => row.action === 'restore')).toHaveLength(1);
 });
+
+/** Seeds one audit row with a stored commenter handle (no comment row needed). */
+async function seedHandledAuditRow(commentId: string, handle: string | null, channelId = 'UC1') {
+	await testDb().db.insert(auditLog).values({
+		channelId,
+		commentId,
+		action: 'reject',
+		reason: 'ai score 0.91',
+		actor: 'system',
+		authorHandle: handle
+	});
+}
+
+function eraseHandles(channelId = 'UC1', user: typeof OWNER | null = OWNER) {
+	return actions.eraseHandles({
+		params: { id: channelId },
+		request: postForm({}, LOG_URL),
+		locals: { user }
+	} as never);
+}
+
+test('eraseHandles nulls every stored handle for the channel, leaving rows and other channels intact', async () => {
+	await seedHandledAuditRow('c1', '@first.user');
+	await seedHandledAuditRow('c2', '@second.user');
+	await seedHandledAuditRow('c3', null);
+	await testDb()
+		.db.insert(channels)
+		.values({ id: 'UC2', userId: OWNER.id, orgId: 'org-1', title: 'Two', refreshTokenEnc: 'enc-2' });
+	await seedHandledAuditRow('c9', '@other.channel', 'UC2');
+
+	const res = await eraseHandles();
+
+	expect(res).toMatchObject({ success: 'Stored handles erased for this channel.' });
+	const rows = await testDb().db.select().from(auditLog).all();
+	// Only the handle goes — action, reason, and actor stay byte-identical.
+	const mine = rows.filter((row) => row.channelId === 'UC1');
+	expect(mine).toHaveLength(3);
+	for (const row of mine) {
+		expect(row).toMatchObject({ authorHandle: null, action: 'reject', reason: 'ai score 0.91', actor: 'system' });
+	}
+	// Another channel's stored handles are untouched.
+	expect(rows.find((row) => row.channelId === 'UC2')).toMatchObject({ authorHandle: '@other.channel' });
+});
+
+test('eraseHandles on another team\'s channel 404s without touching its rows', async () => {
+	await testDb()
+		.db.insert(channels)
+		.values({ id: 'UC2', userId: OWNER.id, orgId: 'org-2', title: 'Two', refreshTokenEnc: 'enc-2' });
+	await seedHandledAuditRow('c9', '@their.user', 'UC2');
+
+	await expect(eraseHandles('UC2')).rejects.toMatchObject({ status: 404 });
+
+	expect((await testDb().db.select().from(auditLog).all())[0]).toMatchObject({ authorHandle: '@their.user' });
+});
+
+test('eraseHandles rejects a signed-out request with 401 and erases nothing', async () => {
+	await seedHandledAuditRow('c1', '@some.user');
+
+	await expect(eraseHandles('UC1', null)).rejects.toMatchObject({ status: 401 });
+
+	expect((await testDb().db.select().from(auditLog).all())[0]).toMatchObject({ authorHandle: '@some.user' });
+});

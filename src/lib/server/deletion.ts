@@ -16,7 +16,8 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-// Account deletion (immediate) and the consent-evidence retention sweep.
+// Account deletion (immediate) and the retention sweeps (consent-evidence
+// e-mail, audit-log commenter handles).
 //
 // Policy: account deletion erases everything immediately EXCEPT the
 // statutory-retention items — the `consents` evidentiary log, which keeps
@@ -25,7 +26,9 @@
 // blocked from any other use by architecture: it exists ONLY in the
 // write-once consent log, and a cron sweep erases it 10 years after
 // acceptance (CC Art. 205, conservative over CDC's 5-year prescription).
-// The consent row itself is kept, anonymized.
+// The consent row itself is kept, anonymized. Commenter handles on audit
+// rows get a much shorter TTL: a cron sweep erases them after 30 days,
+// keeping the row (and its moderation outcome) as the record.
 
 import { and, eq, inArray, isNotNull, lt, ne } from 'drizzle-orm';
 
@@ -33,8 +36,10 @@ import { db } from '$lib/server/db';
 import { auditLog, channelAllowedHandles, channels, comments, consents, invites, memberships, moderationActions, organizations, rules, sessions, users } from '$lib/server/db/schema';
 
 export const CONSENT_EMAIL_RETENTION_MS = 10 * 365.25 * 24 * 60 * 60 * 1000; // 10 years
+export const AUDIT_HANDLE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 const CONSENT_SWEEP_BATCH = 50; // bounded per cron invocation (I10)
+const AUDIT_HANDLE_SWEEP_BATCH = 50; // same drain-across-runs bound as the consent sweep (I10)
 
 /** Placeholder for an erased refresh token — never valid ciphertext, so decrypt fails loudly in cron (AGENTS.md). */
 export const WIPED_REFRESH_TOKEN = 'erased:account-deletion';
@@ -287,4 +292,56 @@ export async function nullExpiredConsentEmails(): Promise<number> {
 			)
 		);
 	return expired.length;
+}
+
+/**
+ * Calculates the cutoff timestamp for commenter-handle retention on audit rows.
+ *
+ * @param now - The reference time in milliseconds since the Unix epoch
+ * @returns The ISO timestamp 30 days before `now`
+ */
+export function auditHandleCutoffIso(now = Date.now()): string {
+	return new Date(now - AUDIT_HANDLE_RETENTION_MS).toISOString();
+}
+
+/**
+ * One bounded handle-retention batch: select up to one batch of ids whose
+ * handle is still stored and whose row predates the cutoff, null the handle,
+ * return the erased count. Parameterized on the two queries so adding a
+ * second handle-bearing table (a future moderation_actions sweep) is a thin
+ * wrapper calling this helper — that extension is deliberately NOT
+ * implemented yet (step-4 scope).
+ */
+async function nullExpiredHandlesBatch(
+	selectExpiredIds: (cutoffIso: string) => Promise<{ id: number }[]>,
+	nullHandlesByIds: (ids: number[]) => Promise<unknown>
+): Promise<number> {
+	const expired = await selectExpiredIds(auditHandleCutoffIso());
+	// Stryker disable next-line ConditionalExpression: false equivalent — with zero expired rows the update runs inArray([]) (drizzle compiles to `false`, no rows updated) and expired.length is 0, so the skipped early return returns the same 0.
+	if (!expired.length) return 0;
+	await nullHandlesByIds(expired.map((row) => row.id));
+	return expired.length;
+}
+
+/**
+ * Erases stored commenter handles from audit rows older than the 30-day
+ * retention period.
+ *
+ * The audit ROW is kept (action, reason, text, actor, timestamps stay as the
+ * moderation record); only the personal identifier is erased. Bounded to one
+ * small batch per call (I10) — repeated cron invocations drain the backlog.
+ *
+ * @returns The number of audit rows whose handle was erased
+ */
+export async function nullExpiredAuditLogHandles(): Promise<number> {
+	return nullExpiredHandlesBatch(
+		(cutoffIso) =>
+			db
+				.select({ id: auditLog.id })
+				.from(auditLog)
+				.where(and(isNotNull(auditLog.authorHandle), lt(auditLog.createdAt, cutoffIso)))
+				.limit(AUDIT_HANDLE_SWEEP_BATCH)
+				.all(),
+		(ids) => db.update(auditLog).set({ authorHandle: null }).where(inArray(auditLog.id, ids))
+	);
 }

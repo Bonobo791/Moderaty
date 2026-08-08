@@ -110,3 +110,16 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		</nav>
 	{/if}
 {/if}
+
+<div class="card danger-zone">
+	<h2>Erase stored commenter handles</h2>
+	<p class="muted">
+		Commenter handles in this log are kept for 30 days, then erased automatically. Erase them all now.
+	</p>
+	<form method="POST" action="?/eraseHandles">
+		<button
+			class="btn danger small"
+			type="submit"
+			aria-label="Erase all stored commenter handles for this channel now">Erase handles now</button>
+	</form>
+</div>

@@ -284,13 +284,6 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		flex-wrap: wrap;
 		margin-top: 10px;
 	}
-	.danger-zone {
-		margin-top: 24px;
-		border-color: var(--danger);
-	}
-	.danger-zone h2 {
-		color: var(--danger);
-	}
 	.channel-disconnect {
 		margin-top: 14px;
 		padding-top: 10px;

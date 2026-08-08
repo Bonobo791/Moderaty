@@ -22,7 +22,7 @@ import { and, asc, desc, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
-import { nullExpiredConsentEmails } from '$lib/server/deletion';
+import { nullExpiredAuditLogHandles, nullExpiredConsentEmails } from '$lib/server/deletion';
 import { runChannel } from '$lib/server/pipeline';
 import type { RequestHandler } from './$types';
 
@@ -74,6 +74,23 @@ export const GET: RequestHandler = async ({ url, request }) => {
 			console.error('consent e-mail retention sweep failed:', cause);
 		}
 	}
+	// Commenter-handle retention sweep: handles on audit rows older than 30
+	// days are erased (the row and its outcome stay as the moderation record).
+	// Same rules as the consent sweep above: nothing durable under DRY_RUN
+	// (I8), and a failure is logged loudly, reported, and never stops
+	// scheduled moderation.
+	let auditHandlesNulled = 0;
+	let handleSweepError: string | null = null;
+	if (dryRun) {
+		console.info('dry run: audit-log handle retention sweep skipped');
+	} else {
+		try {
+			auditHandlesNulled = await nullExpiredAuditLogHandles();
+		} catch (cause) {
+			handleSweepError = cause instanceof Error ? cause.message : String(cause);
+			console.error('audit-log handle retention sweep failed:', cause);
+		}
+	}
 	const nowIso = new Date().toISOString();
 	const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, nowIso));
 	const [channel] = await db
@@ -84,7 +101,7 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		// actively waiting on must not starve behind the ordinary rotation.
 		.orderBy(desc(sql`${channels.dryRunBoundary} is not null`), asc(channels.lastRunAt))
 		.limit(1);
-	if (!channel) return json({ ok: true, dryRun, consentEmailsNulled, sweepError, results: {} });
+	if (!channel) return json({ ok: true, dryRun, consentEmailsNulled, sweepError, auditHandlesNulled, handleSweepError, results: {} });
 
 	// Atomic claim: a concurrent claimant's UPDATE matches 0 rows and exits cleanly.
 	const claimed = await db
@@ -93,7 +110,7 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		.where(and(eq(channels.id, channel.id), claimable))
 		.returning({ id: channels.id });
 	if (claimed.length === 0)
-		return json({ ok: true, claimed: false, dryRun, consentEmailsNulled, sweepError, results: {} });
+		return json({ ok: true, claimed: false, dryRun, consentEmailsNulled, sweepError, auditHandlesNulled, handleSweepError, results: {} });
 
 	try {
 		const result = await runChannel(channel.id, { deadline });
@@ -133,12 +150,12 @@ export const GET: RequestHandler = async ({ url, request }) => {
 				dryRunWindow = { error: cause instanceof Error ? cause.message : String(cause) };
 			}
 		}
-		return json({ ok: true, dryRun, consentEmailsNulled, sweepError, results: { [channel.id]: result }, dryRunWindow });
+		return json({ ok: true, dryRun, consentEmailsNulled, sweepError, auditHandlesNulled, handleSweepError, results: { [channel.id]: result }, dryRunWindow });
 	} catch (cause) {
 		const message = cause instanceof Error ? cause.message : String(cause);
 		console.error(`channel run ${channel.id} failed:`, cause);
 		return json(
-			{ ok: false, dryRun, consentEmailsNulled, sweepError, results: { [channel.id]: { error: message } } },
+			{ ok: false, dryRun, consentEmailsNulled, sweepError, auditHandlesNulled, handleSweepError, results: { [channel.id]: { error: message } } },
 			{ status: 500 } // failure must not look like success to the cron caller
 		);
 	} finally {

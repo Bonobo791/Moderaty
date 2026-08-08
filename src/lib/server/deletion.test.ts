@@ -22,11 +22,14 @@ import { expect, test, vi } from 'vitest';
 import { DAY_MS, seedConsent, seedUser as seedBareUser, setupTestDb, testDb } from './testdb';
 import { auditLog, channelAllowedHandles, channels, comments, consents, invites, memberships, moderationActions, organizations, rules, sessions, users } from './db/schema';
 import {
+	AUDIT_HANDLE_RETENTION_MS,
 	CONSENT_EMAIL_RETENTION_MS,
 	WIPED_REFRESH_TOKEN,
+	auditHandleCutoffIso,
 	consentEmailCutoffIso,
 	deleteChannelRecords,
 	deleteUserRecords,
+	nullExpiredAuditLogHandles,
 	nullExpiredConsentEmails
 } from './deletion';
 
@@ -651,4 +654,92 @@ test('nullExpiredConsentEmails is bounded to one batch per call (I10)', async ()
 test('consentEmailCutoffIso lands 10 years back', () => {
 	const now = Date.now();
 	expect(Date.parse(consentEmailCutoffIso(now))).toBe(now - CONSENT_EMAIL_RETENTION_MS);
+});
+
+/** Seeds one audit row with a stored commenter handle at `createdAt`. */
+async function seedHandledAuditRow(commentId: string, createdAt: string, authorHandle: string | null = '@some.user') {
+	await testDb().db.insert(auditLog).values({
+		channelId: 'UC1',
+		commentId,
+		action: 'reject',
+		reason: 'ai score 0.91',
+		actor: 'system',
+		authorHandle,
+		createdAt
+	});
+}
+
+test('nullExpiredAuditLogHandles erases only the handle of audit rows older than 30 days', async () => {
+	const oldDate = new Date(Date.now() - AUDIT_HANDLE_RETENTION_MS - DAY_MS).toISOString();
+	const recentDate = new Date(Date.now() - DAY_MS).toISOString();
+	await seedHandledAuditRow('old', oldDate, '@old.user');
+	await seedHandledAuditRow('recent', recentDate, '@recent.user');
+
+	expect(await nullExpiredAuditLogHandles()).toBe(1);
+
+	const rows = await testDb().db.select().from(auditLog).all();
+	expect(rows).toHaveLength(2);
+	// The ROW is kept as the moderation record; only the identifier is erased.
+	expect(rows.find((row) => row.commentId === 'old')).toMatchObject({ authorHandle: null, action: 'reject' });
+	expect(rows.find((row) => row.commentId === 'recent')).toMatchObject({ authorHandle: '@recent.user' });
+});
+
+test('nullExpiredAuditLogHandles leaves every other column byte-identical', async () => {
+	const oldDate = new Date(Date.now() - AUDIT_HANDLE_RETENTION_MS - DAY_MS).toISOString();
+	await seedHandledAuditRow('c1', oldDate, '@some.user');
+	const before = (await testDb().db.select().from(auditLog).all())[0];
+
+	await nullExpiredAuditLogHandles();
+
+	const after = (await testDb().db.select().from(auditLog).all())[0];
+	expect(after.authorHandle).toBeNull();
+	// Restoring the handle must reproduce the pre-sweep row exactly.
+	expect({ ...after, authorHandle: before.authorHandle }).toEqual(before);
+});
+
+test('nullExpiredAuditLogHandles skips rows whose handle is already erased', async () => {
+	// Mirror of the consent-sweep pin: dropping the isNotNull filter lets
+	// already-erased rows fill the bounded batch, delaying genuinely expired
+	// rows (retention compliance).
+	const expired = new Date(Date.now() - AUDIT_HANDLE_RETENTION_MS - DAY_MS).toISOString();
+	await seedHandledAuditRow('erased', expired, null);
+	await seedHandledAuditRow('pending', expired, '@pending.user');
+
+	expect(await nullExpiredAuditLogHandles()).toBe(1);
+	expect((await testDb().db.select().from(auditLog).all()).find((row) => row.commentId === 'pending')).toMatchObject({
+		authorHandle: null
+	});
+});
+
+test('nullExpiredAuditLogHandles is bounded to one batch per call (I10)', async () => {
+	// Mirror of the consent-sweep pin: an unbounded sweep would blow the
+	// 20-second cron budget on a large backlog.
+	const expired = new Date(Date.now() - AUDIT_HANDLE_RETENTION_MS - DAY_MS).toISOString();
+	for (let index = 0; index < 51; index++) {
+		await seedHandledAuditRow(`bulk-${index}`, expired, `@user${index}`);
+	}
+
+	expect(await nullExpiredAuditLogHandles()).toBe(50);
+	// The remainder waits for the next cron invocation.
+	expect(await nullExpiredAuditLogHandles()).toBe(1);
+});
+
+test('nullExpiredAuditLogHandles is idempotent: a second call after a full drain nulls nothing', async () => {
+	const expired = new Date(Date.now() - AUDIT_HANDLE_RETENTION_MS - DAY_MS).toISOString();
+	await seedHandledAuditRow('a', expired);
+	await seedHandledAuditRow('b', expired);
+
+	expect(await nullExpiredAuditLogHandles()).toBe(2);
+	expect(await nullExpiredAuditLogHandles()).toBe(0);
+});
+
+test('nullExpiredAuditLogHandles returns 0 with nothing to do', async () => {
+	await seedHandledAuditRow('recent', new Date().toISOString());
+
+	expect(await nullExpiredAuditLogHandles()).toBe(0);
+});
+
+test('auditHandleCutoffIso lands 30 days back', () => {
+	const now = Date.now();
+	expect(Date.parse(auditHandleCutoffIso(now))).toBe(now - AUDIT_HANDLE_RETENTION_MS);
 });

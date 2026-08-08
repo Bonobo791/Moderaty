@@ -90,3 +90,15 @@ test('a row without an author handle renders the em-dash fallback', () => {
 	const body = renderLog({ entries: [{ ...ENTRY, authorHandle: null }] });
 	expect(body).toContain('data-label="Handle">—</td>');
 });
+
+test('the danger zone renders the erase-handles explanation and a labeled button', () => {
+	const body = renderLog();
+	expect(body).toContain('kept for 30 days, then erased automatically');
+	expect(body).toContain('action="?/eraseHandles"');
+	expect(body).toContain('aria-label="Erase all stored commenter handles for this channel now"');
+});
+
+test('the danger zone renders even with an empty log', () => {
+	const body = renderLog({ entries: [] });
+	expect(body).toContain('aria-label="Erase all stored commenter handles for this channel now"');
+});

@@ -301,6 +301,15 @@ h1 {
 	margin-bottom: 14px;
 }
 
+/* Danger zone: a card holding a destructive, irreversible action. */
+.danger-zone {
+	margin-top: 24px;
+	border-color: var(--danger);
+}
+.danger-zone h2 {
+	color: var(--danger);
+}
+
 /* ── controls ───────────────────────────────────────────── */
 .btn {
 	display: inline-block;

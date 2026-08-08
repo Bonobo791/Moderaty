@@ -24,7 +24,7 @@ import { refreshAccessToken, setModerationStatus } from '$lib/server/youtube';
 import { decrypt } from '$lib/server/crypto';
 import { env } from '$env/dynamic/private';
 import { error, fail } from '@sveltejs/kit';
-import { and, eq, desc, inArray, lt, or, sql } from 'drizzle-orm';
+import { and, eq, desc, inArray, isNotNull, lt, or, sql } from 'drizzle-orm';
 
 /** Audit-log page size; the load fetches one extra row to detect a next page. */
 const PAGE_SIZE = 200;
@@ -191,5 +191,21 @@ export const actions = {
 			await tx.update(comments).set({ status: 'approved', decidedBy: 'human' }).where(eq(comments.id, commentId));
 		});
 		return { success: 'Restored — recorded in audit log.' };
+	},
+	/**
+	 * Erases every stored commenter handle on this channel's audit log
+	 * immediately, ahead of the automatic 30-day retention sweep. Handles
+	 * only — the rows, their text, and their outcomes stay as the moderation
+	 * record.
+	 */
+	eraseHandles: async ({ params, locals }) => {
+		requireUser(locals);
+		// Ownership-scoped: another org's channel reads as "not found".
+		await ownedChannel(params.id, locals);
+		await db
+			.update(auditLog)
+			.set({ authorHandle: null })
+			.where(and(eq(auditLog.channelId, params.id), isNotNull(auditLog.authorHandle)));
+		return { success: 'Stored handles erased for this channel.' };
 	}
 };

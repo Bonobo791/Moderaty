@@ -38,6 +38,8 @@ import { decrypt, encrypt } from '$lib/server/crypto';
 import {
 	CHANNEL_PICK_COOKIE,
 	clearPendingChannelPick,
+	createChannelState,
+	decodeChannelState,
 	parkPendingChannelPick,
 	readPendingChannelPick,
 	upsertChannelConnection
@@ -352,4 +354,30 @@ test('an orphan channel is claimed by the connecting team', async () => {
 	expect(result).toBe('ok');
 	const row = await testDb().db.select().from(channels).get();
 	expect(row).toMatchObject({ id: 'UC1', userId: OWNER.id, orgId: OWNER.orgId });
+});
+
+test('channel state: round-trips the starter userId and is opaque to the client', () => {
+	const state = createChannelState('user-1');
+	expect(state).not.toContain('user-1');
+	expect(decodeChannelState(state)).toEqual({ userId: 'user-1' });
+	expect(decodeChannelState(state)).toEqual({ userId: 'user-1' }); // deterministic, repeatable reads
+});
+
+test('channel state: tampered or forged values decode to null (fail-closed)', () => {
+	expect(decodeChannelState('garbage')).toBeNull();
+	expect(decodeChannelState(encrypt('not-json'))).toBeNull();
+	// A state encrypted for a different user still decodes — to THAT user; the
+	// callback compares the decoded starter against the signed-in session.
+	expect(decodeChannelState(createChannelState('someone-else'))).toEqual({ userId: 'someone-else' });
+});
+
+test('channel state: an expired state decodes to null', () => {
+	vi.useFakeTimers();
+	try {
+		const state = createChannelState('user-1');
+		vi.setSystemTime(Date.now() + 11 * 60 * 1000);
+		expect(decodeChannelState(state)).toBeNull();
+	} finally {
+		vi.useRealTimers();
+	}
 });

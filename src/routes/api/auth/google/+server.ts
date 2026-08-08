@@ -21,7 +21,7 @@ import { error, redirect } from '@sveltejs/kit';
 import { randomBytes } from 'node:crypto';
 
 import { env } from '$env/dynamic/private';
-import { parkChannelState } from '$lib/server/channelConnect';
+import { createChannelState } from '$lib/server/channelConnect';
 import { readPendingStates, storePendingStates } from '$lib/server/oauthState';
 import type { SessionUser } from '$lib/server/session';
 
@@ -39,14 +39,15 @@ export function GET({
 	// CSRF guard: bind the auth request to this browser session. The new state
 	// is appended rather than replacing the cookie so overlapping starts in
 	// multiple tabs stay valid.
-	const state = randomBytes(16).toString('hex');
+	// A signed-in connect uses a SELF-AUTHENTICATING state: the state value is
+	// the AES-256-GCM-encrypted `{ userId, ts }` of the starter, so the callback
+	// derives the starter from the state itself. That makes the binding
+	// unforgeable AND immune to the shared-cookie read-modify-write race
+	// (a concurrent tab's write may drop this flow's cookie entry, but the
+	// state's own signature remains the authority). A signed-out start parks no
+	// binding and dies at the callback.
+	const state = locals.user ? createChannelState(locals.user.id) : randomBytes(16).toString('hex');
 	storePendingStates(cookies, [...readPendingStates(cookies), state]);
-	// Bind the state to the signed-in user who started the connect (the hooks
-	// layout resolves the session for every request). The callback rejects a
-	// completion by a DIFFERENT user before the authorization code is used —
-	// a signed-out start parks no binding and dies at the callback (CodeRabbit
-	// 3738037981).
-	if (locals.user) parkChannelState(cookies, state, locals.user.id);
 
 	const params = new URLSearchParams({
 		client_id: env.GOOGLE_CLIENT_ID,

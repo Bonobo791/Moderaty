@@ -45,82 +45,34 @@ const PICK_TTL_MS = 10 * 60 * 1000;
 const MAX_PENDING_PICKS = 5;
 
 /**
- * The channel-connect OAuth state, bound to the user who STARTED the flow.
- * The shared `oauth_state` cookie holds only the opaque state strings (login
- * and channel flows share it); this cookie records who started a channel
- * connect so the callback can reject a completion attempt by a DIFFERENT
- * signed-in user on a shared machine BEFORE the authorization code is
- * exchanged. The payload is AES-256-GCM ENCRYPTED like the picker cookie —
- * the binding is part of an authorization decision, so a client who edits
- * their own cookie must not be able to re-sign it for another user's state
- * (a hand-crafted or tampered value fails to decrypt and reads as unbound).
+ * The channel-connect OAuth state is SELF-AUTHENTICATING: the state value is
+ * the AES-256-GCM-encrypted `{ userId, ts }` of the flow's starter (see
+ * createChannelState/decodeChannelState below), so the callback derives the
+ * starter from the state itself. The shared `oauth_state` cookie holds the
+ * opaque state strings (login and channel flows share it) and remains the CSRF
+ * layer; the binding cookie it used to pair with is gone.
  */
-export const CHANNEL_STATE_COOKIE = 'moderaty_channel_state';
 const CHANNEL_STATE_TTL_MS = 10 * 60 * 1000;
-const MAX_PENDING_CHANNEL_STATES = 5;
 
-type ChannelStateEntry = { state: string; userId: string; ts: number };
+export function createChannelState(userId: string): string {
+	return encrypt(JSON.stringify({ userId, ts: Date.now() }));
+}
 
-function readChannelStateEntries(cookies: Cookies): ChannelStateEntry[] {
-	const raw = cookies.get(CHANNEL_STATE_COOKIE);
-	if (!raw) return [];
+/** Decodes a channel-connect state; null when forged, tampered, or expired. */
+export function decodeChannelState(state: string): { userId: string } | null {
 	try {
-		// decrypt returns null for anything that isn't valid ciphertext — a
-		// tampered or forged cookie reads as an empty list (fail-closed).
-		const plain = decrypt(raw);
-		if (plain === null) return [];
-		const parsed: unknown = JSON.parse(plain);
-		if (!Array.isArray(parsed)) return [];
-		return parsed.filter(
-			(e): e is ChannelStateEntry =>
-				typeof e === 'object' && e !== null && typeof (e as ChannelStateEntry).state === 'string'
-		);
+		const plain = decrypt(state);
+		if (plain === null) return null;
+		const payload: unknown = JSON.parse(plain);
+		if (typeof payload !== 'object' || payload === null) return null;
+		const p = payload as { userId?: unknown; ts?: unknown };
+		if (typeof p.userId !== 'string' || !p.userId) return null;
+		// TTL + a future-ts guard (clock skew must not mint a fresh lease).
+		if (typeof p.ts !== 'number' || p.ts > Date.now() || Date.now() - p.ts > CHANNEL_STATE_TTL_MS) return null;
+		return { userId: p.userId };
 	} catch {
-		return [];
+		return null;
 	}
-}
-
-function writeChannelStateEntries(cookies: Cookies, entries: ChannelStateEntry[]): void {
-	if (entries.length === 0) {
-		cookies.delete(CHANNEL_STATE_COOKIE, { path: '/' });
-		return;
-	}
-	cookies.set(CHANNEL_STATE_COOKIE, encrypt(JSON.stringify(entries)), {
-		path: '/',
-		httpOnly: true,
-		sameSite: 'lax',
-		secure: cookieSecure(),
-		maxAge: CHANNEL_STATE_TTL_MS / 1000
-	});
-}
-
-/** Records that `state` was started by `userId` (channel-connect flows only). */
-export function parkChannelState(cookies: Cookies, state: string, userId: string): void {
-	const now = Date.now();
-	const entries = readChannelStateEntries(cookies).filter(
-		(e) => e.state !== state && now - e.ts <= CHANNEL_STATE_TTL_MS
-	);
-	entries.push({ state, userId, ts: now });
-	writeChannelStateEntries(cookies, entries.slice(-MAX_PENDING_CHANNEL_STATES));
-}
-
-/**
- * Returns the user who started `state`, or null when the state has no binding
- * (a login-flow state, a stale/expired entry, or a forged cookie).
- */
-export function readChannelState(cookies: Cookies, state: string): { userId: string } | null {
-	const entry = readChannelStateEntries(cookies).find((e) => e.state === state);
-	if (!entry || typeof entry.ts !== 'number' || Date.now() - entry.ts > CHANNEL_STATE_TTL_MS) return null;
-	if (typeof entry.userId !== 'string' || !entry.userId) return null;
-	return { userId: entry.userId };
-}
-
-/** Clears this flow's binding once the callback has consumed the state. */
-export function clearChannelState(cookies: Cookies, state: string): void {
-	writeChannelStateEntries(
-		cookies,
-		readChannelStateEntries(cookies).filter((e) => e.state !== state)
-	);
 }
 
 /** What the OAuth callback parks for the picker: the grant plus its channels. */

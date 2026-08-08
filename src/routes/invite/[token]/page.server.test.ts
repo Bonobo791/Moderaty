@@ -120,6 +120,27 @@ test('accept: joins the org, burns the token, 303s to the dashboard; reuse is 41
 	await expect(actions.default(acceptCtx('tok-1'))).rejects.toMatchObject({ status: 410 });
 });
 
+test('accept: a misconfigured production APP_URL fails WITHOUT destroying the session or burning the invite', async () => {
+	// cookieSecure() throws on http APP_URL in production. It must run BEFORE
+	// acceptInvite, so a misconfigured deploy can never burn the invite and
+	// delete the old token, then fail to issue the replacement (signed-out).
+	await seedOrgWithInvite('tok-1');
+	await seedJoiner();
+	mocks.env.APP_URL = 'http://moderaty.example';
+	mocks.env.CONTEXT = 'production';
+	try {
+		await expect(actions.default(acceptCtx('tok-1'))).rejects.toMatchObject({ status: 500 });
+		// Nothing was changed: the old session still resolves and the invite
+		// is still open.
+		expect(await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-1')).get()).toBeDefined();
+		const row = await testDb().db.select().from(invites).where(eq(invites.token, 'tok-1')).get();
+		expect(row?.acceptedBy).toBeNull();
+	} finally {
+		mocks.env.APP_URL = 'http://localhost:5173';
+		delete mocks.env.CONTEXT;
+	}
+});
+
 test('accept: the session lands in the joined org (rotated: the old token dies, a fresh cookie is issued)', async () => {
 	// PR #52 review — untested assertion, now rotation: the pre-accept token
 	// must die so it can never resolve at the joined org.

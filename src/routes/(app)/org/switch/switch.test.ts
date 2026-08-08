@@ -98,6 +98,24 @@ test('a member switch rotates the session: the old token dies, a new cookie land
 	expect(rows[0].activeOrgId).toBe('org-2');
 });
 
+test('a misconfigured production APP_URL fails the switch WITHOUT destroying the old session', async () => {
+	// cookieSecure() throws on http APP_URL in production. It must run BEFORE
+	// the rotation, so a misconfigured deploy can never delete the user's
+	// working token and then fail to issue the replacement (signed-out).
+	await seedTwoOrgs();
+	await testDb().db.insert(memberships).values({ userId: TEST_OWNER.id, orgId: 'org-2', role: 'member' });
+	mocks.env.APP_URL = 'http://moderaty.example';
+	mocks.env.CONTEXT = 'production';
+	try {
+		await expect(call({ orgId: 'org-2' })).rejects.toMatchObject({ status: 500 });
+		// The old session is untouched — the user is still signed in.
+		expect(await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-1')).get()).toBeDefined();
+	} finally {
+		mocks.env.APP_URL = 'http://localhost:5173';
+		delete mocks.env.CONTEXT;
+	}
+});
+
 test('the switch response writes the rotated session cookie (httpOnly, secure per APP_URL)', async () => {
 	await seedTwoOrgs();
 	await testDb().db.insert(memberships).values({ userId: TEST_OWNER.id, orgId: 'org-2', role: 'member' });

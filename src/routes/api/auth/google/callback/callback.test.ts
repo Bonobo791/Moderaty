@@ -36,9 +36,8 @@ vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 import { TEST_OWNER, setupTestDb, testDb } from '$lib/server/testdb';
 import { makeCookiesWithState } from '$lib/server/testcookies';
 import {
-	CHANNEL_STATE_COOKIE,
-	parkChannelState,
-	readChannelState,
+	createChannelState,
+	decodeChannelState,
 	readPendingChannelPick
 } from '$lib/server/channelConnect';
 import * as channelConnect from '$lib/server/channelConnect';
@@ -91,37 +90,42 @@ function stubTokenAndChannels(listChannels: (url: URL) => Response) {
 	);
 }
 
-/** Simulates the channel-connect start: the shared state AND its user binding. */
-function withChannelState(cookies: ReturnType<typeof makeCookiesWithState>, userId: string) {
-	parkChannelState(cookies as never, 's', userId);
-	return cookies;
+/** A fresh channel-connect flow: a server-signed state bound to userId, parked in the cookie. */
+function channelFlow(userId: string = OWNER.id) {
+	const state = createChannelState(userId);
+	const cookies = makeCookiesWithState(state);
+	return { state, cookies };
 }
 
 async function captureCallback(
 	user: SessionUser | null = OWNER,
-	cookies: ReturnType<typeof makeCookiesWithState> = withChannelState(makeCookiesWithState('s'), OWNER.id)
+	flow: ReturnType<typeof channelFlow> = channelFlow()
 ) {
 	try {
 		await authCallback({
-			url: new URL('http://localhost:5173/api/auth/google/callback?code=abc&state=s'),
-			cookies,
+			url: new URL(`http://localhost:5173/api/auth/google/callback?code=abc&state=${encodeURIComponent(flow.state)}`),
+			cookies: flow.cookies,
 			locals: { user }
 		} as never);
-		return { thrown: undefined, cookies };
+		return { thrown: undefined, cookies: flow.cookies, state: flow.state };
 	} catch (e) {
-		return { thrown: e as { status: number; location?: string; body?: { message: string } }, cookies };
+		return { thrown: e as { status: number; location?: string; body?: { message: string } }, cookies: flow.cookies, state: flow.state };
 	}
 }
 
 async function captureCallbackWithUrl(
 	url: URL,
-	cookies: ReturnType<typeof makeCookiesWithState> = withChannelState(makeCookiesWithState('s'), OWNER.id)
+	flow: ReturnType<typeof channelFlow> = channelFlow()
 ) {
 	try {
-		await authCallback({ url, cookies, locals: { user: OWNER } } as never);
-		return { thrown: undefined as undefined | { status: number; location?: string; body?: { message: string } }, cookies };
+		await authCallback({ url, cookies: flow.cookies, locals: { user: OWNER } } as never);
+		return {
+			thrown: undefined as undefined | { status: number; location?: string; body?: { message: string } },
+			cookies: flow.cookies,
+			state: flow.state
+		};
 	} catch (e) {
-		return { thrown: e as { status: number; location?: string; body?: { message: string } }, cookies };
+		return { thrown: e as { status: number; location?: string; body?: { message: string } }, cookies: flow.cookies, state: flow.state };
 	}
 }
 
@@ -134,16 +138,32 @@ test('a member cannot connect a channel — 403 before any Google call or write'
 	expect(await testDb().db.select().from(channels).all()).toHaveLength(0);
 });
 
+test('a concurrent-start lost cookie update cannot invalidate a valid flow (self-authenticating state)', async () => {
+	stubTokenAndChannel();
+	// Two tabs started flows concurrently; the read-modify-write on the shared
+	// oauth_state cookie dropped THIS flow's entry (the other tab's write won).
+	// The channel-connect state is server-encrypted, so the callback must still
+	// complete the flow without the cookie entry — the state's signature is the
+	// authority, not the cookie.
+	const state = createChannelState(OWNER.id);
+	const cookies = makeCookiesWithState(); // NO entries — the race dropped it
+
+	const { thrown } = await captureCallback(OWNER, { state, cookies });
+
+	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
+	const row = await testDb().db.select().from(channels).get();
+	expect(row).toMatchObject({ id: 'UC123', userId: OWNER.id });
+});
+
 test('rejects a state started by a DIFFERENT user — the code is never exchanged (CodeRabbit 3738037981)', async () => {
 	stubTokenAndChannel();
-	// A's flow (state bound to user-a), but B (OWNER) is the signed-in user when
-	// the callback lands — a shared-browser completion attempt. The callback
+	// A's flow (state signed for user-a), but B (OWNER) is the signed-in user
+	// when the callback lands — a shared-browser completion attempt. The callback
 	// must reject BEFORE exchanging the code, so A's grant can never be parked
 	// (or connected) under B.
-	const cookies = makeCookiesWithState('s');
-	parkChannelState(cookies as never, 's', 'user-a');
+	const flow = channelFlow('user-a');
 
-	const { thrown } = await captureCallback(OWNER, cookies);
+	const { thrown } = await captureCallback(OWNER, flow);
 
 	expect(thrown).toMatchObject({ status: 400 });
 	expect(thrown?.body?.message).toContain('different account');
@@ -151,47 +171,54 @@ test('rejects a state started by a DIFFERENT user — the code is never exchange
 	expect(vi.mocked(fetch)).not.toHaveBeenCalled();
 	// Nothing was parked or written under B.
 	expect(await testDb().db.select().from(channels).all()).toHaveLength(0);
-	expect(readPendingChannelPick(cookies as never, 's', OWNER.id)).toBeNull();
+	expect(readPendingChannelPick(flow.cookies as never, flow.state, OWNER.id)).toBeNull();
 });
 
-test('a forged (client-edited) channel-state binding cannot pass the different-user check', async () => {
+test('a post-exchange persistence failure leaves the state in place — but the code is spent, so a retry needs a NEW flow', async () => {
 	stubTokenAndChannel();
-	// An attacker edits their own browser cookie to claim the target state for
-	// their own user id. The binding must be integrity-protected, so a
-	// hand-crafted plaintext entry decrypts to nothing and the callback
-	// rejects BEFORE the exchange.
-	const cookies = makeCookiesWithState('s');
-	cookies.set(
-		CHANNEL_STATE_COOKIE,
-		JSON.stringify([{ state: 's', userId: OWNER.id, ts: Date.now() }]),
-		{ path: '/', httpOnly: true, sameSite: 'lax' }
-	);
-
-	const { thrown } = await captureCallback(OWNER, cookies);
-
-	expect(thrown).toMatchObject({ status: 400 });
-	expect(thrown?.body?.message).toContain('different account');
-	// The authorization code was never exchanged — no Google call happened.
-	expect(vi.mocked(fetch)).not.toHaveBeenCalled();
-});
-
-test('a persistence failure keeps the state consumable — the callback stays retryable (state/lifecycle)', async () => {
-	stubTokenAndChannel();
-	const cookies = withChannelState(makeCookiesWithState('s'), OWNER.id);
-	// Simulate the picker-cookie/upsert persistence failing AFTER validation:
-	// the OAuth state and its binding must NOT already be consumed.
+	const flow = channelFlow();
+	// Simulate the picker-cookie/upsert persistence failing AFTER validation.
 	const spy = vi.spyOn(channelConnect, 'upsertChannelConnection').mockRejectedValue(new Error('db down'));
 
 	try {
-		const { thrown } = await captureCallback(OWNER, cookies);
+		const { thrown } = await captureCallback(OWNER, flow);
 		expect(thrown).toBeDefined();
 	} finally {
 		spy.mockRestore();
 	}
 
-	// Retrying with the same state works instead of forcing a full restart.
-	expect(readPendingStates(cookies as never)).toContain('s');
-	expect(readChannelState(cookies as never, 's')).toEqual({ userId: OWNER.id });
+	// Factual: the failed write does NOT consume the state or its binding.
+	// But the authorization code was already exchanged and codes are
+	// single-use, so retrying THIS callback cannot succeed — the honest
+	// recovery is a fresh flow, not a same-state retry.
+	expect(readPendingStates(flow.cookies as never)).toContain(flow.state);
+	expect(decodeChannelState(flow.state)).toEqual({ userId: OWNER.id });
+});
+
+test('a pre-exchange (network) failure is genuinely retryable: the same state completes on retry', async () => {
+	// Google codes are single-use, so only a failure BEFORE the exchange leaves
+	// the flow retryable. An exchange-network failure must not consume the
+	// state/binding, and the callback must then succeed on retry.
+	const flow = channelFlow();
+
+	vi.stubGlobal(
+		'fetch',
+		vi.fn(async () => {
+			throw new TypeError('network down');
+		})
+	);
+	const first = await captureCallback(OWNER, flow);
+	expect(first.thrown).toBeDefined(); // the exchange failed
+	expect(readPendingStates(flow.cookies as never)).toContain(flow.state);
+	expect(decodeChannelState(flow.state)).toEqual({ userId: OWNER.id });
+
+	// Retry with the SAME state: the exchange now works and the flow completes.
+	vi.unstubAllGlobals();
+	stubTokenAndChannel();
+	const second = await captureCallback(OWNER, flow);
+	expect(second.thrown).toMatchObject({ status: 302, location: '/dashboard' });
+	const row = await testDb().db.select().from(channels).get();
+	expect(row).toMatchObject({ id: 'UC123', userId: OWNER.id });
 });
 
 test('a new channel is inserted and attached to the caller', async () => {
@@ -266,16 +293,15 @@ test('a multi-channel account parks the channels and redirects to the picker wit
 				{ status: 200 }
 			)
 	);
-	const cookies = makeCookiesWithState('s');
-	parkChannelState(cookies as never, 's', OWNER.id);
+	const flow = channelFlow();
 
-	const { thrown } = await captureCallback(OWNER, cookies);
+	const { thrown } = await captureCallback(OWNER, flow);
 
-	expect(thrown).toMatchObject({ status: 302, location: '/connect-channel?state=s' });
+	expect(thrown).toMatchObject({ status: 302, location: `/connect-channel?state=${encodeURIComponent(flow.state)}` });
 	// Nothing is connected — the refresh token must not be persisted until a
 	// channel is chosen.
 	expect(await testDb().db.select().from(channels).all()).toHaveLength(0);
-	const parked = readPendingChannelPick(cookies as never, 's', OWNER.id);
+	const parked = readPendingChannelPick(flow.cookies as never, flow.state, OWNER.id);
 	expect(parked?.channels).toEqual([
 		{ id: 'UC1', title: 'One' },
 		{ id: 'UC2', title: 'Two' }
@@ -295,14 +321,13 @@ test('the channel listing paginates and every valid channel reaches the picker',
 		}
 		return new Response(JSON.stringify({ items: [{ id: 'UC2', snippet: { title: 'Two' } }] }), { status: 200 });
 	});
-	const cookies = makeCookiesWithState('s');
-	parkChannelState(cookies as never, 's', OWNER.id);
+	const flow = channelFlow();
 
-	const { thrown } = await captureCallback(OWNER, cookies);
+	const { thrown } = await captureCallback(OWNER, flow);
 
 	expect(seenPageTokens).toEqual([null, 'p2']);
-	expect(thrown).toMatchObject({ status: 302, location: '/connect-channel?state=s' });
-	expect(readPendingChannelPick(cookies as never, 's', OWNER.id)?.channels).toHaveLength(2);
+	expect(thrown).toMatchObject({ status: 302, location: `/connect-channel?state=${encodeURIComponent(flow.state)}` });
+	expect(readPendingChannelPick(flow.cookies as never, flow.state, OWNER.id)?.channels).toHaveLength(2);
 });
 
 test('a malformed channel item is skipped and the single valid channel short-circuits to the connect', async () => {
@@ -317,7 +342,7 @@ test('a malformed channel item is skipped and the single valid channel short-cir
 			)
 	);
 
-	const { thrown, cookies } = await captureCallback();
+	const { thrown, cookies, state } = await captureCallback();
 
 	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
 	const row = await testDb().db.select().from(channels).get();
@@ -325,7 +350,7 @@ test('a malformed channel item is skipped and the single valid channel short-cir
 	// The skip is counted and loud, never silent (I1).
 	expect(errSpy.mock.calls.flat().join(' ')).toMatch(/skipped 1 malformed/);
 	// No picker was parked for the single-channel path.
-	expect(readPendingChannelPick(cookies as never, 's', OWNER.id)).toBeNull();
+	expect(readPendingChannelPick(cookies as never, state, OWNER.id)).toBeNull();
 	errSpy.mockRestore();
 });
 
@@ -481,38 +506,36 @@ test('a pathological pageToken loop stops at the page bound and logs the truncat
 			{ status: 200 }
 		);
 	});
-	const cookies = makeCookiesWithState('s');
-	parkChannelState(cookies as never, 's', OWNER.id);
+	const flow = channelFlow();
 
-	const { thrown } = await captureCallback(OWNER, cookies);
+	const { thrown } = await captureCallback(OWNER, flow);
 
 	expect(channelFetches).toBe(10);
 	expect(errSpy.mock.calls.flat().join(' ')).toMatch(/hit the 10-page bound/);
-	expect(thrown).toMatchObject({ status: 302, location: '/connect-channel?state=s' });
-	expect(readPendingChannelPick(cookies as never, 's', OWNER.id)?.channels).toHaveLength(10);
+	expect(thrown).toMatchObject({ status: 302, location: `/connect-channel?state=${encodeURIComponent(flow.state)}` });
+	expect(readPendingChannelPick(flow.cookies as never, flow.state, OWNER.id)?.channels).toHaveLength(10);
 });
 
 test('bad state and missing code reject with descriptive 400 messages', async () => {
-	const cookies = makeCookiesWithState('s');
-	parkChannelState(cookies as never, 's', OWNER.id);
+	const flow = channelFlow();
 
 	const missingState = await captureCallbackWithUrl(
 		new URL('http://localhost:5173/api/auth/google/callback?code=abc'),
-		cookies
+		flow
 	);
 	expect(missingState.thrown?.status).toBe(400);
 	expect(missingState.thrown?.body?.message).toBe('bad state');
 
 	const forgedState = await captureCallbackWithUrl(
 		new URL('http://localhost:5173/api/auth/google/callback?code=abc&state=forged'),
-		cookies
+		flow
 	);
 	expect(forgedState.thrown?.status).toBe(400);
 	expect(forgedState.thrown?.body?.message).toBe('bad state');
 
 	const missingCode = await captureCallbackWithUrl(
-		new URL('http://localhost:5173/api/auth/google/callback?state=s'),
-		cookies
+		new URL(`http://localhost:5173/api/auth/google/callback?state=${encodeURIComponent(flow.state)}`),
+		flow
 	);
 	expect(missingCode.thrown?.status).toBe(400);
 	expect(missingCode.thrown?.body?.message).toBe('missing code');

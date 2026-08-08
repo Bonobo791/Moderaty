@@ -138,14 +138,20 @@ post-deployment verification.
 
 ## License
 
-Moderaty is dual-licensed:
+Moderaty is source-available under a dual-license model:
 
-- **Source-available:** [PolyForm Noncommercial 1.0.0](LICENSE) — free to use,
-  modify, self-host, and redistribute for permitted noncommercial purposes.
-- **Commercial license:** required for commercial use, including paid products,
-  hosted services, client deployments, white-label use, OEM use, or other
-  revenue-generating use. Contact
-  [contact@AdvancedDigitalMarketingLTDA.com](mailto:contact@AdvancedDigitalMarketingLTDA.com).
-  See [COMMERCIAL.md](COMMERCIAL.md).
+- **PolyForm Shield 1.0.0:** [LICENSE](LICENSE) — free to use, self-host,
+  modify, and distribute, including for commercial purposes, provided that
+  you do not use Moderaty to provide a product or service that competes with
+  Moderaty or another product or service provided by Advanced Digital
+  Marketing LTDA using Moderaty.
+- **Commercial license:** available for competing hosted services,
+  competing white-label products, competing SaaS offerings, or other uses
+  not permitted by the PolyForm Shield License.
+
+For commercial licensing, contact
+[contact@AdvancedDigitalMarketingLTDA.com](mailto:contact@AdvancedDigitalMarketingLTDA.com).
+
+See [COMMERCIAL.md](COMMERCIAL.md).
 
 Copyright (C) 2026 Advanced Digital Marketing LTDA.

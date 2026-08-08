@@ -140,21 +140,32 @@ test('a mid-load outage renders a maintenance state instead of the header and ta
 
 // ── overview page: moved channel controls ─────────────────────────────
 
-test('the sensitivity control renders the labeled slider and both meme endpoints', () => {
+test('the sensitivity control renders the two-stop switch with both meme endpoints', () => {
 	const body = renderPage(LAYOUT_DATA);
-	expect(body).toContain('type="range"');
+	expect(body).not.toContain('type="range"');
+	expect(body).toContain('role="slider"');
 	expect(body).toContain('aria-label="Moderation sensitivity for My Channel"');
-	expect(body).toContain('name="toneLevel"');
+	expect(body).toContain('aria-label="Set sensitivity to Chill Pepe"');
+	expect(body).toContain('aria-label="Set sensitivity to Edge Lord plus Ackchyually"');
 	expect(body).toContain('src="/edge-lord.jpg"');
 	expect(body).toContain('src="/ackchyually.gif"');
 	expect(body).toContain('EDGE LORD');
 	expect(body).toContain('EDGE LORD + ACKCHYUALLY');
-	expect(body).toContain('Only hateful and abusive comments are moderated.');
+	expect(body).toContain('Only clear hate speech and spam get bounced. Snark survives.');
 });
 
-test('the sensitivity description switches copy at the strict level', () => {
+test('the sensitivity readout switches copy at the strict level', () => {
 	const body = renderPage({ ...LAYOUT_DATA, ch: { ...LAYOUT_DATA.ch, toneLevel: 2 } });
+	expect(body).toContain('STRICT');
 	expect(body).toContain('Hateful comments and demeaning, condescending, or sarcastic tone are moderated.');
+});
+
+test('the switch persists through the setToneLevel action with the hidden fields the action requires', () => {
+	const body = renderPage(LAYOUT_DATA);
+	expect(body).toContain('action="?/setToneLevel"');
+	expect(body).toContain('name="toneLevel" value="1"');
+	const strict = renderPage({ ...LAYOUT_DATA, ch: { ...LAYOUT_DATA.ch, toneLevel: 2 } });
+	expect(strict).toContain('name="toneLevel" value="2"');
 });
 
 test('strict protection renders both labeled checkboxes with their persisted state', () => {

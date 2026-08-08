@@ -21,6 +21,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import { autoRefresh } from '$lib/auto-refresh.svelte';
+	import SensitivitySwitch from '$lib/SensitivitySwitch.svelte';
 
 	let { data, form } = $props();
 
@@ -28,7 +29,6 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	autoRefresh();
 
 	const ch = $derived(data.ch);
-	const level = $derived(ch.toneLevel ?? 1);
 
 	// True while the dry-run preview is in flight; the button is disabled
 	// while it runs (the action's lease claim also 409s a server-side race).
@@ -39,36 +39,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	<title>Moderaty — {ch.title}</title>
 </svelte:head>
 
-<form class="sensitivity" method="POST" action="?/setToneLevel" use:enhance>
-	<input type="hidden" name="channelId" value={ch.id} />
-	<label class="sensitivity-title" for="tone-{ch.id}">Moderation sensitivity</label>
-	<input
-		id="tone-{ch.id}"
-		type="range"
-		name="toneLevel"
-		min="1"
-		max="2"
-		step="1"
-		value={level}
-		aria-label="Moderation sensitivity for {ch.title}"
-		onchange={(event) => event.currentTarget.form?.requestSubmit()}
-	/>
-	<div class="sensitivity-options">
-		<span class="banner" class:chosen={level === 1}>
-			<img src="/edge-lord.jpg" alt="Smug Pepe, the Edge Lord" width="44" height="44" />
-			EDGE LORD
-		</span>
-		<span class="banner" class:chosen={level === 2}>
-			<img src="/ackchyually.gif" alt="The Ackchyually meme guy" width="44" height="44" />
-			EDGE LORD + ACKCHYUALLY&hellip;
-		</span>
-	</div>
-	<p class="muted" style="margin:6px 0 0">
-		{level === 2
-			? 'Hateful comments and demeaning, condescending, or sarcastic tone are moderated.'
-			: 'Only hateful and abusive comments are moderated.'}
-	</p>
-</form>
+<SensitivitySwitch channelId={ch.id} channelTitle={ch.title} level={ch.toneLevel ?? 1} />
 <form class="protections" method="POST" action="?/setProtections" use:enhance>
 	<input type="hidden" name="channelId" value={ch.id} />
 	<span class="sensitivity-title">Strict protection</span>
@@ -222,13 +193,6 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		margin-top: 3px;
 		flex-shrink: 0;
 	}
-	.sensitivity {
-		margin: 10px 0 14px;
-		padding: 10px 12px;
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		background: var(--bg);
-	}
 	.protections {
 		margin: 10px 0 14px;
 		padding: 10px 12px;
@@ -253,39 +217,5 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		font-size: 0.85rem;
 		font-weight: 600;
 		margin-bottom: 6px;
-	}
-	.sensitivity input[type='range'] {
-		width: 100%;
-		accent-color: var(--brand);
-	}
-	.sensitivity-options {
-		display: flex;
-		justify-content: space-between;
-		gap: 8px;
-		margin-top: 4px;
-	}
-	.banner {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		padding: 3px 8px;
-		border-radius: 6px;
-		font-size: 0.78rem;
-		font-weight: 700;
-		letter-spacing: 0.03em;
-		color: var(--ink);
-		opacity: 0.45;
-	}
-	.banner img {
-		border-radius: 6px;
-		filter: grayscale(1);
-	}
-	.banner.chosen {
-		opacity: 1;
-		background: var(--danger-soft);
-		color: var(--danger);
-	}
-	.banner.chosen img {
-		filter: none;
 	}
 </style>

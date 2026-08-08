@@ -31,6 +31,21 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		{ key: 'queue', label: `Review queue (${data.pending})`, href: `${base}/queue` },
 		{ key: 'log', label: 'Audit log', href: `${base}/log` }
 	]);
+
+	// ARIA tablist keyboard pattern: Arrow keys move focus between tabs
+	// (manual activation — Enter follows the link, since tabs are routes).
+	function onTabKeydown(event: KeyboardEvent) {
+		if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
+		const current = event.currentTarget as HTMLAnchorElement;
+		const links = Array.from(
+			current.closest('[role="tablist"]')!.querySelectorAll<HTMLAnchorElement>('[role="tab"]')
+		);
+		const index = links.indexOf(current);
+		if (index === -1) return;
+		event.preventDefault();
+		const next = event.key === 'ArrowRight' ? index + 1 : index - 1;
+		links[(next + links.length) % links.length].focus();
+	}
 </script>
 
 {#if data.maintenance}
@@ -77,7 +92,8 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				class:active={data.tab === tab.key}
 				role="tab"
 				aria-selected={data.tab === tab.key}
-				href={tab.href}>{tab.label}</a
+				href={tab.href}
+				onkeydown={onTabKeydown}>{tab.label}</a
 			>
 		{/each}
 	</div>

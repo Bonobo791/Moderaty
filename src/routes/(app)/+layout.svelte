@@ -89,7 +89,12 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		</div>
 	</main>
 {:else}
-	<main class="app-main">{@render children()}</main>
+	<!-- Route transition (redesign spec §Phase 6): every pathname change
+		remounts main with a 200ms fade/rise; reduced-motion kills it in
+		app.css. -->
+	{#key path}
+		<main class="app-main route-enter">{@render children()}</main>
+	{/key}
 {/if}
 
 <style>
@@ -114,6 +119,24 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		display: flex;
 		align-items: center;
 		gap: 10px;
+	}
+	.route-enter {
+		animation: route-in 200ms var(--ease-out);
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.route-enter {
+			animation: none;
+		}
+	}
+	@keyframes route-in {
+		from {
+			opacity: 0;
+			transform: translateY(8px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
 	}
 	.maintenance {
 		display: grid;

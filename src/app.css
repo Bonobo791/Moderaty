@@ -390,7 +390,7 @@ h1 {
 	font-size: 11px;
 }
 
-.btn:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
+.btn:focus-visible, a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
 	outline: 1px solid var(--accent);
 	outline-offset: 2px;
 }
@@ -464,6 +464,21 @@ form.inline { display: inline; }
 	.btn.secondary:hover { border-color: var(--line-strong); background: transparent; }
 }
 
+/* visually-hidden but accessible (subroute section headings deduped
+   against the shared channel header) */
+.sr-only {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	margin: -1px;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	clip-path: inset(50%);
+	white-space: nowrap;
+	border: 0;
+}
+
 /* ── text & badges ──────────────────────────────────────── */
 .muted {
 	color: var(--ink-2);
@@ -507,16 +522,6 @@ code {
 .badge.attention {
 	background: var(--danger-soft);
 	color: var(--danger);
-}
-
-/* per-channel stat row (dashboard) */
-.stats {
-	list-style: none;
-	margin: 0 0 12px;
-	padding: 0;
-	display: flex;
-	flex-wrap: wrap;
-	gap: 8px;
 }
 
 /* ── quote (review queue) ───────────────────────────────── */
@@ -637,6 +642,8 @@ tbody tr:last-child td { border-bottom: 0; }
 @media (prefers-reduced-motion: reduce) {
 	html { scroll-behavior: auto; }
 	.live-dot, .rogue-card:hover .stamp, .stamp-punch { animation: none; }
+	.route-enter { animation: none; }
 	.btn-press, .faq-plus, .rogue-card, .btn, .btn.secondary, .link-u, .row-action { transition: none; }
+	.row-wrap, .queue-row { transition: none; }
 	.skeleton { animation: none; }
 }

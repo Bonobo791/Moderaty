@@ -41,7 +41,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	<title>Moderaty — Audit log</title>
 </svelte:head>
 
-<h1>Audit log — {data.ch?.title}</h1>
+<!-- Accessible heading only: the shared channel header (h1) and the active
+	 tab already identify this section visually. -->
+<h2 class="sr-only">Audit log</h2>
 <p class="page-sub">
 	Every moderation action, automatic or manual, newest first. Held and rejected comments can be
 	restored here; deletions and author bans are permanent.

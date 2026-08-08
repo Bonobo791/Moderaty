@@ -28,7 +28,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	<title>Moderaty — Rules</title>
 </svelte:head>
 
-<h1>Rules — {data.ch?.title}</h1>
+<!-- Accessible heading only: the shared channel header (h1) and the active
+	 tab already identify this section visually. -->
+<h2 class="sr-only">Rules</h2>
 <p class="page-sub">Keyword, regex, and blocked-user rules that act before AI scoring.</p>
 
 {#if form?.error}<div class="error-box" role="alert">{form.error}</div>{/if}

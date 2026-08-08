@@ -93,3 +93,11 @@ test('the brand wordmark never carries the active state', () => {
 	expect(brand).not.toContain('active');
 	expect(brand).not.toContain('aria-current');
 });
+
+// Route transition (redesign Commit 6): page content renders inside the
+// pathname-keyed wrapper that runs the 200ms fade/rise on navigation.
+test('page content renders inside the route-transition wrapper', () => {
+	const body = renderShell('/dashboard');
+	expect(body).toMatch(/<main class="app-main route-enter[^"]*">/);
+	expect(body).toContain('CHILD_PAGE_CONTENT');
+});

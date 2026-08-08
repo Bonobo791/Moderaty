@@ -184,6 +184,8 @@ export const actions = {
 				action: dryRun ? 'dry-run' : 'restore',
 				reason: `undo of ${prior?.action ?? 'moderation action'}`,
 				actor: 'user',
+				// No handle source at manual-action time: comments.author_name is never persisted by design.
+				authorHandle: null,
 				createdAt: new Date().toISOString()
 			});
 			await tx.update(comments).set({ status: 'approved', decidedBy: 'human' }).where(eq(comments.id, commentId));

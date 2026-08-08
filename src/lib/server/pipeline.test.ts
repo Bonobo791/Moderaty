@@ -748,6 +748,73 @@ test('a dry run counts the protected comment as implicit approved and audits the
 	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
 });
 
+test.each([
+	{ score: 0.34, audit: 'approve' },
+	{ score: 0.6, audit: 'queue' }
+])('an auto-action ($audit) audit row carries the comment author’s normalized handle', async ({ score, audit }) => {
+	// The audit row records WHO was moderated, normalized exactly the way the
+	// allowlist stores handles: lowercase, trimmed, one leading '@' stripped.
+	// (Rows for decisions WITH a YouTube action — ban/reject/delete/hold — are
+	// written later by completeActions from moderation_actions, where no author
+	// data survives; the dry-run test below covers the ban path through
+	// auditRows.)
+	mocks.scoreComment.mockResolvedValue(moderation(score));
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ authorName: '@Some.User' })],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	await runChannel('channel');
+
+	expect(mocks.state.insertedAudits).toEqual([
+		expect.objectContaining({ commentId: 'comment', action: audit, authorHandle: 'some.user' })
+	]);
+});
+
+test('a dry-run audit row carries the normalized handle alongside the capped text', async () => {
+	// Ban-intent score: the dry run writes EVERY decision through auditRows,
+	// so even ban rows carry the handle. The handle is a separate field — the
+	// ≤500-char text contract is untouched.
+	mocks.state.env.DRY_RUN = 'false';
+	mocks.scoreComment.mockResolvedValue(moderation(0.95));
+	const text = `comment ${'x'.repeat(600)}`;
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ authorName: '@Mixed.Case', text })],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	await runChannel('channel', { forceDryRun: true });
+
+	expect(mocks.state.insertedAudits).toEqual([
+		expect.objectContaining({
+			commentId: 'comment',
+			action: 'dry-run',
+			authorHandle: 'mixed.case',
+			text: text.slice(0, 500)
+		})
+	]);
+});
+
+test('an author name that normalizes to empty stores authorHandle null, not an empty string', async () => {
+	// normalizeHandle('@') trims to ''. A blank handle is meaningless, so the
+	// audit row stores NULL — a handle is either meaningful or absent.
+	mocks.scoreComment.mockResolvedValue(moderation(0.34));
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ authorName: '@' })],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	await runChannel('channel');
+
+	expect(mocks.state.insertedAudits).toEqual([
+		expect.objectContaining({ commentId: 'comment', action: 'approve', authorHandle: null })
+	]);
+	expect(mocks.state.insertedAudits[0].authorHandle).toBeNull();
+});
+
 test('scores full comment text but truncates the stored copy', async () => {
 	const text = 'x'.repeat(501);
 	mocks.scoreComment.mockResolvedValue(moderation(0.34));

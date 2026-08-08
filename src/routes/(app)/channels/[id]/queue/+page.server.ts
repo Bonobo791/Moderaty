@@ -79,6 +79,8 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
 		action: dryRun ? 'dry-run' : action,
 		reason: 'manual review',
 		actor: 'user',
+		// No handle source at manual-action time: comments.author_name is never persisted by design.
+		authorHandle: null,
 		createdAt: new Date().toISOString()
 	});
 }

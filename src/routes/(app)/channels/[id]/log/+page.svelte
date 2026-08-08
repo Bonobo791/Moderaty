@@ -63,7 +63,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	<div class="card">
 		<table class="stack-table">
 			<thead>
-				<tr><th>Time</th><th>Action</th><th>Comment</th><th>Reason</th><th>Actor</th><th>Undo</th></tr>
+				<tr><th>Time</th><th>Action</th><th>Comment</th><th>Handle</th><th>Reason</th><th>Actor</th><th>Undo</th></tr>
 			</thead>
 			<tbody>
 				{#each data.entries as e}
@@ -78,6 +78,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 								{e.commentId}
 							{/if}
 						</td>
+						<td class="muted" data-label="Handle">{e.authorHandle ?? '—'}</td>
 						<td data-label="Reason">{e.reason}</td>
 						<td class="muted" data-label="Actor">{e.actor}</td>
 						<td data-label="Undo">

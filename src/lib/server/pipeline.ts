@@ -247,18 +247,27 @@ function auditRows(channelId: string, decisions: Decision[], dryRun: boolean) {
 			// Stryker disable next-line ConditionalExpression, LogicalOperator: equivalent — the predicate is constant true for every Decision the pipeline produces, so the operator choice is unobservable
 			Boolean(decision.auditAction && decision.reason)
 		)
-		.map((decision) => ({
-			channelId,
-			commentId: decision.comment.id,
-			action: dryRun ? 'dry-run' : decision.auditAction,
-			reason: decision.reason,
-			actor: 'system',
-			// Dry run never inserts into comments (I8), so the audit row is the
-			// only place the comment text survives — capped at 500 chars like
-			// comments.text. Real runs leave it null (text lives in comments).
-			...(dryRun ? { text: decision.comment.text.slice(0, 500) } : {}),
-			createdAt: new Date().toISOString()
-		}));
+		.map((decision) => {
+			// The commenter's normalized handle — the same normalization the
+			// allowlist compares against, so a log row reads exactly like a
+			// protected-handles entry. normalizeHandle never throws, but a
+			// blank/lone-'@' author name trims to '' — store NULL in that case:
+			// a handle is either meaningful or absent, never an empty string.
+			const authorHandle = normalizeHandle(decision.comment.authorName) || null;
+			return {
+				channelId,
+				commentId: decision.comment.id,
+				action: dryRun ? 'dry-run' : decision.auditAction,
+				reason: decision.reason,
+				actor: 'system',
+				authorHandle,
+				// Dry run never inserts into comments (I8), so the audit row is the
+				// only place the comment text survives — capped at 500 chars like
+				// comments.text. Real runs leave it null (text lives in comments).
+				...(dryRun ? { text: decision.comment.text.slice(0, 500) } : {}),
+				createdAt: new Date().toISOString()
+			};
+		});
 }
 
 function commentRows(channelId: string, decisions: Decision[]) {

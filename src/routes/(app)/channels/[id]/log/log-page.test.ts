@@ -32,6 +32,7 @@ const ENTRY = {
 	reason: 'test',
 	actor: 'system',
 	text: null,
+	authorHandle: null,
 	createdAt: '2026-01-01T00:00:00.000Z',
 	undoable: null
 };
@@ -69,4 +70,23 @@ test('a deep page renders a Newest link whose href is exactly the bare log URL',
 	const body = renderLog({ hasPrev: true, nextCursor: '2026-01-01T00:00:00.000Z|7' });
 	expect(body).toContain('href="/channels/UC1/log"');
 	expect(body).toContain('href="/channels/UC1/log?before=2026-01-01T00%3A00%3A00.000Z%7C7"');
+});
+
+test('the table head has a Handle column between Comment and Reason', () => {
+	const body = renderLog();
+	expect(body).toContain('<th>Handle</th>');
+	expect(body.indexOf('<th>Comment</th>')).toBeLessThan(body.indexOf('<th>Handle</th>'));
+	expect(body.indexOf('<th>Handle</th>')).toBeLessThan(body.indexOf('<th>Reason</th>'));
+});
+
+test('a row with an author handle renders it in the Handle cell', () => {
+	const body = renderLog({ entries: [{ ...ENTRY, authorHandle: 'some.user' }] });
+	expect(body).toContain('data-label="Handle"');
+	expect(body).toContain('some.user');
+});
+
+test('a row without an author handle renders the em-dash fallback', () => {
+	// Manual/pre-migration rows carry no handle — the cell shows '—', not blank.
+	const body = renderLog({ entries: [{ ...ENTRY, authorHandle: null }] });
+	expect(body).toContain('data-label="Handle">—</td>');
 });

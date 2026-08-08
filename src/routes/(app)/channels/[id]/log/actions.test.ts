@@ -89,7 +89,9 @@ test('undo restores a rejected comment at YouTube and records the restore', asyn
 	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token');
 	expect(await commentRow('c1')).toMatchObject({ status: 'approved', decidedBy: 'human' });
 	expect(await testDb().db.select().from(auditLog).all()).toContainEqual(
-		expect.objectContaining({ commentId: 'c1', action: 'restore', reason: 'undo of reject', actor: 'user' })
+		// authorHandle is null: manual actions have no handle source (the
+		// author's name is never persisted on the comment row by design).
+		expect.objectContaining({ commentId: 'c1', action: 'restore', reason: 'undo of reject', actor: 'user', authorHandle: null })
 	);
 });
 

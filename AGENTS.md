@@ -349,29 +349,4 @@ Public copy (landing, FAQ, legal docs) must match actual storage: comment
 text is stored with the moderation outcome, the commenter handle is kept 30
 days then erased; the consistency guard in `src/lib/landing/legal.test.ts`
 pins the 30-day retention promise across those surfaces.
-
-## License Headers
-
-Add this notice to new comment-capable source and documentation files, using
-the file's native comment syntax. Do not add comment headers to JSON or other
-data formats.
-
-```text
-# Moderaty — YouTube Comment Auto-Moderation Tool
-# Copyright (C) 2026 Andrew Philip Weilbacher
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Affero General Public License as published
-# by the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU Affero General Public License for more details.
-#
-# You should have received a copy of the GNU Affero General Public License
-# along with this program. If not, see <https://www.gnu.org/licenses/>.
-#
-# Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 ```

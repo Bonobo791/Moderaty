@@ -1,37 +1,31 @@
-# Commercial Licensing
+# License
 
-Moderaty is dual-licensed: [GNU AGPLv3](LICENSE) or a commercial license.
+This software is available under the PolyForm Noncommercial License 1.0.0:
 
-## Which license applies to you?
+https://polyformproject.org/licenses/noncommercial/1.0.0
 
-**Use AGPLv3 (free) if you:**
-- Self-host Moderaty for your own channel(s), unmodified
-- Modify it and are willing to publish your complete modified source
-  code under AGPLv3 — including if you offer it to users over a network
-- Contribute back to the project
+Required Notice: Copyright © 2026 Advanced Digital Marketing LTDA.
 
-**You need a commercial license if you:**
-- Offer Moderaty (modified or not) as a hosted/paid service without
-  publishing your source
-- Embed Moderaty in a proprietary product
-- Cannot comply with AGPLv3 for policy or legal reasons (many
-  companies ban AGPL outright — this is normal, talk to us)
-- Want a warranty, indemnification, or support SLA
+## Commercial Licensing
 
-## What a commercial license includes
+The PolyForm Noncommercial License does not grant rights for commercial use.
 
-- Use of Moderaty in proprietary/closed-source products and services
-- No copyleft obligation — your code stays yours
-- Private modifications, no publication requirement
-- [Optional: priority support, warranty, indemnification]
+Commercial licenses are available from Advanced Digital Marketing LTDA.
 
-## What it does NOT include
+A commercial license may permit, depending on the applicable agreement:
 
-- The right to sell or sublicense Moderaty itself as a standalone product
-- The right to remove copyright notices from distributed copies
+- commercial business use;
+- use in providing services to clients;
+- hosted or SaaS deployments;
+- modification for commercial purposes;
+- proprietary modifications;
+- white-label deployments;
+- OEM or embedded use;
+- resale or redistribution; and
+- removal of Advanced Digital Marketing branding.
+- removal of Moderaty branding.
 
-## Pricing and contact
+Commercial licensing inquiries:
 
-Commercial licenses are priced per organization. Email
-contact@marketingprowess.simplelogin.com with a sentence about your use case for a quote. Use the subject line Moderaty License Request.
-Typical turnaround: 2 business days.
+contact@AvancedDigitalMarketingLTDA.com
+AvancedDigitalMarketingLTDA.com/licensing

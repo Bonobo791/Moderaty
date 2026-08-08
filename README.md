@@ -140,10 +140,12 @@ post-deployment verification.
 
 Moderaty is dual-licensed:
 
-- **Open source:** [GNU AGPLv3](LICENSE) — free to use, modify, and self-host,
-  including commercially, as long as you comply with the AGPLv3.
-- **Commercial license:** for proprietary products or hosted services without
-  AGPL obligations, contact contact@marketingprowess.simplelogin.com. See
-  [COMMERCIAL.md](COMMERCIAL.md).
+- **Source-available:** [PolyForm Noncommercial 1.0.0](LICENSE) — free to use,
+  modify, self-host, and redistribute for permitted noncommercial purposes.
+- **Commercial license:** required for commercial use, including paid products,
+  hosted services, client deployments, white-label use, OEM use, or other
+  revenue-generating use. Contact
+  [contact@AdvancedDigitalMarketingLTDA.com](mailto:contact@AdvancedDigitalMarketingLTDA.com).
+  See [COMMERCIAL.md](COMMERCIAL.md).
 
-Copyright (C) 2026 Andrew Philip Weilbacher.
+Copyright (C) 2026 Advanced Digital Marketing LTDA.

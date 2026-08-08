@@ -20,8 +20,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 # Deploying Moderaty to Netlify
 
-The repo is deploy-ready: `netlify.toml` pins the build (`npm run build`,
-publish `build`, Node 24) and `netlify/functions/cron.mjs` is a Netlify
+The repo is deploy-ready: `netlify.toml` pins the build
+(`node scripts/netlify-migrate.mjs && npm run build`, publish `build`,
+Node 24) and `netlify/functions/cron.mjs` is a Netlify
 Scheduled Function that triggers one bounded moderation run every minute
 (during early operation; raise to `*/15 * * * *` when user volume grows).
 Scheduled functions only fire on the published production deploy — branch
@@ -31,6 +32,16 @@ environments drain via `node --env-file=.env scripts/dev-cron.mjs`
 The steps below are the one-time manual setup.
 
 ## 1. Database (Turso)
+
+**Migrations run automatically at deploy time.** The Netlify build command
+starts with `scripts/netlify-migrate.mjs`, which runs `npm run db:migrate`
+then `npm run db:verify` before the app builds — so a deploy is blocked
+until the database it will serve is actually migrated AND verified.
+Production and `dev`-branch deploys both migrate (each against its own
+per-context database); Deploy Previews skip the step loudly, because previews
+execute untrusted PR code that must never run SQL against a shared database.
+The manual `npm run db:migrate` below remains for initial DB setup (before
+the site exists), local work, and outage recovery.
 
 - Create the production Turso database and note its URL and auth token.
 - Apply migrations once from a checkout with the production values sourced:
@@ -42,7 +53,21 @@ The steps below are the one-time manual setup.
   `PRAGMA integrity_check;` + `PRAGMA foreign_key_check;` before declaring
   success. If the tool no-ops, apply the SQL manually through the same
   journal bookkeeping (hash = sha256 of the file, `created_at` = journal
-  `when`) inside one transaction.
+  `when`) inside one transaction. `npm run db:verify` automates the
+  applied-count check: it recomputes each journal entry's sha256 and compares
+  against `__drizzle_migrations`, failing loudly on any missing or extra
+  hash — the deploy gate runs it on every build.
+- **Historical drift repair (0003 only, likely already done):** migration
+  `0003_wide_impossible_man.sql` had its AGPL header added ~30 minutes after
+  it was applied, changing its recorded hash. If the first gated deploy
+  reports `MISSING 0003_wide_impossible_man` + an `EXTRA applied hash
+  4cb16c12…`, the production database still holds the pre-header hash; the
+  only difference is the header (verify with
+  `git diff 4c11b2f 33428fb -- drizzle/0003_wide_impossible_man.sql`), so
+  backfill the journal row instead of re-running the migration:
+  `UPDATE __drizzle_migrations SET hash = 'effa15e51ca99fd0acf8556c1f1a9bc3abd097bc84dac09f6b05eff27c4f2130' WHERE hash = '4cb16c12ec9d828ba5d32b31f85a55d70af231d310f3904eb149e039822301c6';`
+  (one row), then re-run `npm run db:verify`. If production reports no drift
+  at all, nothing to do — it was migrated after the header commit.
 - For the multi-tenancy contract (migration `0013_channels_org_contract.sql`
   and later), also run the tenancy Definition-of-Done probe against the
   production database from a checkout with the production values sourced:
@@ -73,6 +98,9 @@ The steps below are the one-time manual setup.
   context (the `dev` branch and PR previews) gets the dev Google OAuth
   client and the dev Turso database. This is what keeps dev from touching
   production — do not point either context at the other's resources.
+  The build command migrates + verifies against whichever database the
+  context points at, so every production and `dev` deploy is gated on its
+  own schema being current (Deploy Previews skip the migration step).
 
 ## 3. Google Cloud Console
 
@@ -152,7 +180,10 @@ nothing in the app causes or can prevent them. When one happens:
    corrupted; cron simply misses runs and reconciles on the next successful
    invocation (invariants I3/I4). Expected impact: the dashboard errors
    loudly, moderation pauses, no data is lost and no wrong moderation
-   actions occur.
+   actions occur. A deploy attempted during the outage now fails loudly at
+   the build step (`db:migrate`/`db:verify` cannot reach the database) and
+   Netlify does not publish — the old deploy keeps serving, which is the
+   correct outcome. Retry the deploy after recovery.
 3. Wait 15–30 minutes and retry. Past ~60 minutes, open a Turso support
    ticket with the database URL.
 4. After recovery, re-verify any `db:migrate` that ran during the outage —

@@ -88,13 +88,17 @@ function migrationHash(sql) {
  */
 export function findMissingMigrations(journalEntries, appliedHashes) {
 	const applied = new Set(appliedHashes);
+	const expected = new Set(journalEntries.map((entry) => entry.hash));
 	const missing = [];
 	for (const entry of journalEntries) {
 		if (!applied.has(entry.hash)) missing.push(entry.tag);
 	}
+	// Set.has() lookups only — no string comparison operators on hash values,
+	// so the comparison cannot leak anything even in theory (the hashes are
+	// non-secret integrity values anyway, but the shape stays clean).
 	const extra = [];
 	for (const hash of applied) {
-		if (!journalEntries.some((entry) => entry.hash === hash)) extra.push(hash);
+		if (!expected.has(hash)) extra.push(hash);
 	}
 	return { missing, extra };
 }

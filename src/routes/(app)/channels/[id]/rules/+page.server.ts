@@ -89,7 +89,7 @@ export const actions = {
 	removeHandle: async ({ params, request, locals }) => {
 		await ownedChannel(params.id, locals);
 		const f = await request.formData();
-		let removed;
+		let removed: Awaited<ReturnType<typeof removeAllowedHandle>>;
 		try {
 			// Channel-scoped: a request here cannot delete another channel's handle.
 			removed = await removeAllowedHandle(params.id, Number(f.get('handleId')));

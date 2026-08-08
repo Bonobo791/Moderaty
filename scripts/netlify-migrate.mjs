@@ -17,12 +17,12 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 //
-// Netlify build gate: runs the database migration (npm run db:migrate) and
-// then the schema verification (npm run db:verify) at the START of every
-// Netlify build, so a deploy is blocked until the database the deploy will
-// serve is actually migrated and verified — never serving new code on an
-// un-migrated schema. Netlify runs the build before publishing, so this step
-// is strictly ordered against "hitting production".
+// Netlify build gate: runs the database migration (drizzle-kit migrate) and
+// then the schema verification (scripts/verify-migrations.mjs) at the START
+// of every Netlify build, so a deploy is blocked until the database the
+// deploy will serve is actually migrated and verified — never serving new
+// code on an un-migrated schema. Netlify runs the build before publishing,
+// so this step is strictly ordered against "hitting production".
 //
 // Deploy-preview builds (CONTEXT=deploy-preview) are the one exception: they
 // execute untrusted PR code, and running the PR's own migration SQL against
@@ -31,12 +31,23 @@
 // (and any unrecognized or unset CONTEXT — the conservative default) always
 // migrate + verify, failing the build loudly if either step fails.
 //
+// Security: every command is spawned via process.execPath (the absolute node
+// binary already running this script) with a fixed, repo-absolute script
+// path — nothing is resolved through PATH (javascript:S4036), so an attacker
+// who can write to a PATH directory can never redirect the migration or the
+// verification to their own code. The MODERATY_DRIZZLE_KIT_BIN /
+// MODERATY_VERIFY_BIN env overrides exist ONLY for the test suite to
+// substitute fake scripts; production always uses the defaults below.
+//
 // Runs only from the netlify.toml build command; it needs the per-context
 // Netlify env vars (TURSO_DATABASE_URL / TURSO_AUTH_TOKEN), which drizzle-kit
 // and the verification script read from the environment.
 
 import { spawnSync } from 'node:child_process';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
+const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const context = process.env.CONTEXT ?? '(unset)';
 console.log(`netlify-migrate: CONTEXT=${context}`);
 
@@ -47,15 +58,26 @@ if (context === 'deploy-preview') {
 	process.exit(0);
 }
 
-for (const script of ['db:migrate', 'db:verify']) {
-	const result = spawnSync('npm', ['run', script], { stdio: 'inherit' });
+const steps = [
+	{
+		name: 'db:migrate',
+		args: [process.env.MODERATY_DRIZZLE_KIT_BIN ?? join(repoRoot, 'node_modules', 'drizzle-kit', 'bin.cjs'), 'migrate']
+	},
+	{
+		name: 'db:verify',
+		args: [process.env.MODERATY_VERIFY_BIN ?? join(repoRoot, 'scripts', 'verify-migrations.mjs')]
+	}
+];
+
+for (const step of steps) {
+	const result = spawnSync(process.execPath, step.args, { stdio: 'inherit' });
 	if (result.error) {
-		console.error(`netlify-migrate: could not run npm run ${script}: ${result.error.message} — blocking the deploy`);
+		console.error(`netlify-migrate: could not run ${step.name}: ${result.error.message} — blocking the deploy`);
 		process.exit(1);
 	}
 	if (result.status !== 0) {
 		console.error(
-			`netlify-migrate: npm run ${script} failed (exit ${result.status}) — blocking the deploy. ` +
+			`netlify-migrate: ${step.name} failed (exit ${result.status}) — blocking the deploy. ` +
 				'A failed migration or an unverified schema must never ship.'
 		);
 		process.exit(result.status ?? 1);

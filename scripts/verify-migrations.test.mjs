@@ -25,7 +25,7 @@
 
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -134,7 +134,7 @@ describe('verify-migrations', () => {
 		// migrate would leave behind. The entry must read as MISSING.
 		const metaDir = join(tmp, 'edited', 'meta');
 		writeJournal(metaDir);
-		const url = await buildDb('edited.db', [hashOf(SQL_0000), hashOf(SQL_0001 + '-- old\n')]);
+		const url = await buildDb('edited.db', [hashOf(SQL_0000), hashOf(`${SQL_0001}-- old\n`)]);
 		const { code, stdout } = await runVerify(url, metaDir);
 		expect(code).toBe(1);
 		expect(stdout).toContain('MISSING 0001_second');

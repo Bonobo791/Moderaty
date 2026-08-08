@@ -18,10 +18,19 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 -->
 
+<!-- Dashboard: aggregate door-status header + channel ledger (redesign
+	 spec §7 Phase 2). All counters are computed client-side from the
+	 existing load payload (data.stats / data.bans — spec §6.3, no backend
+	 change). The per-channel controls live on the channel detail page;
+	 ledger rows navigate there. -->
+
 <script lang="ts">
 	import { enhance } from '$app/forms';
+	import { goto } from '$app/navigation';
 	import EmptyState from '$lib/EmptyState.svelte';
+	import Ticker from '$lib/Ticker.svelte';
 	import { autoRefresh } from '$lib/auto-refresh.svelte';
+	import { relativeTime } from '$lib/relative-time';
 
 	let { data, form } = $props();
 
@@ -33,8 +42,26 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		return row ? row.n : 0;
 	}
 
-	function bans(channelId: string): number {
-		return data.bans.find((b: any) => b.channelId === channelId)?.n ?? 0;
+	// Aggregate door-status counters: plain sums across every channel (§6.3).
+	function sum(status: string): number {
+		return data.stats.reduce(
+			(total: number, s: any) => total + (s.status === status ? s.n : 0),
+			0
+		);
+	}
+	const pendingSum = $derived(sum('pending'));
+	const rejectedSum = $derived(sum('rejected'));
+	const approvedSum = $derived(sum('approved'));
+	const bannedSum = $derived(
+		data.bans.reduce((total: number, b: any) => total + b.n, 0)
+	);
+
+	function openChannel(channelId: string) {
+		goto(`/channels/${channelId}`);
+	}
+
+	function onRowKeydown(event: KeyboardEvent, channelId: string) {
+		if (event.key === 'Enter') openChannel(channelId);
 	}
 </script>
 
@@ -44,53 +71,126 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 {#if data.maintenance}
 	<!-- The layout's overlay only triggers on LAYOUT data; when the layout was
-	healthy but a dashboard query failed mid-load, the page must render its own
-	state instead of an empty shell with destructive controls (I12). -->
+		healthy but a dashboard query failed mid-load, the page must render its own
+		state instead of an empty shell with destructive controls (I12). -->
 	<div class="error-box" role="alert">
 		<strong>Maintenance</strong> — Moderaty is temporarily unable to reach its database.
 		Nothing on this page will work right now; try again in a minute.
 	</div>
 {:else}
-<h1>Channels</h1>
-<p class="page-sub">Connect a channel and track its moderation activity.</p>
+<section class="door-status" aria-labelledby="door-status-label">
+	<span class="caps-label" id="door-status-label">Door status</span>
+	{#if pendingSum > 0}
+		<h1 class="door-headline">{pendingSum} at the rope.</h1>
+		<p class="door-subline">
+			{pendingSum} comments are waiting for a decision. The rope only works if someone checks it.
+		</p>
+	{:else}
+		<h1 class="door-headline">The door is quiet.</h1>
+		<p class="door-subline">
+			{data.chs.length} channels protected. The queue is clear. Nothing slipped past.
+		</p>
+	{/if}
+	<div class="door-stats">
+		<div class="stat">
+			<span class="stat-value" class:accent={pendingSum > 0}><Ticker value={pendingSum} /></span>
+			<span class="caps-label">Pending</span>
+		</div>
+		<div class="stat">
+			<span class="stat-value"><Ticker value={rejectedSum} /></span>
+			<span class="caps-label">Rejected</span>
+		</div>
+		<div class="stat">
+			<span class="stat-value ok"><Ticker value={approvedSum} /></span>
+			<span class="caps-label">Approved</span>
+		</div>
+		<div class="stat">
+			<span class="stat-value accent"><Ticker value={bannedSum} /></span>
+			<span class="caps-label">Edge lords banned</span>
+		</div>
+	</div>
+</section>
 
-<p class="muted" style="font-size:0.9em">
+<section class="ledger" aria-labelledby="ledger-label">
+	<div class="ledger-head">
+		<h2 id="ledger-label">Channels</h2>
+		<span class="caps-label">{data.chs.length} connected</span>
+	</div>
+	{#if data.chs.length === 0}
+		<EmptyState
+			title="No channels connected"
+			hint="Connect your YouTube channels to start moderating comments automatically."
+		/>
+	{:else}
+		<table class="ledger-table">
+			<thead>
+				<tr>
+					<th>Channel</th>
+					<th>Status</th>
+					<th class="num">Pending</th>
+					<th class="num col-rejected">Rejected</th>
+					<th class="num col-approved">Approved</th>
+					<th class="col-sensitivity">Sensitivity</th>
+					<th class="col-last">Last checked</th>
+				</tr>
+			</thead>
+			<tbody>
+				{#each data.chs as ch (ch.id)}
+					{@const pending = count(ch.id, 'pending')}
+					{@const strict = ch.toneLevel === 2}
+					<!-- The row itself is a keyboard-focusable link (Enter navigates);
+						the name cell keeps a real anchor for href semantics. -->
+					<tr
+						class="ledger-row"
+						role="link"
+						tabindex="0"
+						aria-label="Open {ch.title}"
+						onclick={() => openChannel(ch.id)}
+						onkeydown={(event) => onRowKeydown(event, ch.id)}
+					>
+						<td>
+							<a class="channel-name" href="/channels/{ch.id}">{ch.title}</a>
+							<span class="mono channel-id col-id">ID: {ch.id}</span>
+						</td>
+						<td>
+							<span class="caps-label protected-label">Protected</span>
+							{#if pending > 0}
+								<a class="status-sub pending-link" href="/channels/{ch.id}/queue">
+									{pending} comment{pending === 1 ? '' : 's'} waiting for review
+								</a>
+							{:else}
+								<span class="status-sub">queue is clear</span>
+							{/if}
+						</td>
+						<td class="mono num">{pending}</td>
+						<td class="mono num col-rejected">{count(ch.id, 'rejected')}</td>
+						<td class="mono num col-approved">{count(ch.id, 'approved')}</td>
+						<td class="col-sensitivity">
+							<div class="mini-track">
+								<span class="mini-rail"></span>
+								<span class="mini-fill" class:strict></span>
+								<span class="mini-tick" class:strict></span>
+							</div>
+							<span class="caps-label mini-label">{strict ? 'Strict' : 'Chill'}</span>
+						</td>
+						<td class="mono col-last">
+							{ch.lastRunAt ? relativeTime(ch.lastRunAt) : 'never'}
+						</td>
+					</tr>
+				{/each}
+			</tbody>
+		</table>
+	{/if}
+</section>
+
+<div class="connect-block">
+	<a class="btn" href="/api/auth/google">Connect YouTube channel</a>
+	<p class="connect-helper">Google sign-in required. Access is revocable anytime.</p>
+</div>
+
+<p class="muted privacy-note">
 	We've clarified what we retain after account deletion — see the <a href="/privacy">Privacy Policy</a>.
 </p>
-
-{#each data.chs as ch}
-	{@const pending = count(ch.id, 'pending')}
-	{@const banned = bans(ch.id)}
-	<div class="card">
-		<h2 style="margin-top:0"><a href="/channels/{ch.id}">{ch.title}</a></h2>
-		<p style="margin-top:0">
-			protected —
-			{#if pending > 0}
-				<a style="color: var(--danger); font-weight: 600" href="/channels/{ch.id}/queue">{pending} comment{pending === 1 ? '' : 's'} waiting for review</a>
-			{:else}
-				queue is clear
-			{/if}
-		</p>
-		<ul class="stats">
-			<li><span class="badge attention">pending: {pending}</span></li>
-			<li><span class="badge neutral">rejected: {count(ch.id, 'rejected')}</span></li>
-			<li><span class="badge neutral">deleted: {count(ch.id, 'deleted')}</span></li>
-			<li><span class="badge ok">approved: {count(ch.id, 'approved')}</span></li>
-		</ul>
-		<p class="edge-lords">{banned} Edge Lord{banned === 1 ? '' : 's'} Banned</p>
-		<a class="btn secondary small" href="/channels/{ch.id}">Overview</a>
-		<a class="btn secondary small" href="/channels/{ch.id}/rules">Rules</a>
-		<a class="btn secondary small" href="/channels/{ch.id}/queue">Review queue</a>
-		<a class="btn secondary small" href="/channels/{ch.id}/log">Audit log</a>
-	</div>
-{:else}
-	<EmptyState
-		title="No channels connected"
-		hint="Connect your YouTube channels to start moderating comments automatically."
-	/>
-{/each}
-
-<a class="btn" href="/api/auth/google">Connect YouTube channel</a>
 
 <div class="card danger-zone">
 	<h2>Delete account</h2>
@@ -117,6 +217,192 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 {/if}
 
 <style>
+	/* ── door status (spec §7 Step 2.1) ─────────────────────── */
+	.door-status {
+		margin-bottom: 48px;
+	}
+	.door-headline {
+		font-size: 44px;
+		font-weight: 600;
+		line-height: 1.05;
+		margin: 14px 0 10px;
+	}
+	.door-subline {
+		margin: 0 0 32px;
+		font-size: 14px;
+		color: var(--text-2);
+	}
+	.door-stats {
+		display: flex;
+		gap: 48px;
+		flex-wrap: wrap;
+	}
+	.stat {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+	.stat-value {
+		font-size: 32px;
+		line-height: 1;
+	}
+	.stat-value.accent {
+		color: var(--accent);
+	}
+	.stat-value.ok {
+		color: var(--ok);
+	}
+
+	/* ── ledger (spec §7 Step 2.2) ──────────────────────────── */
+	.ledger {
+		margin-bottom: 40px;
+	}
+	.ledger-head {
+		display: flex;
+		justify-content: space-between;
+		align-items: baseline;
+		gap: 16px;
+		margin-bottom: 16px;
+	}
+	.ledger-head h2 {
+		margin: 0;
+		font-size: 22px;
+		font-weight: 600;
+	}
+	.ledger-table {
+		width: 100%;
+		border-collapse: collapse;
+	}
+	.ledger-table th {
+		text-align: left;
+		font-size: 11px;
+		font-weight: 500;
+		letter-spacing: 0.14em;
+		text-transform: uppercase;
+		color: var(--text-3);
+		padding: 0 20px 12px 0;
+		border-bottom: 1px solid var(--line);
+	}
+	.ledger-table td {
+		padding: 16px 20px 16px 0;
+		border-bottom: 1px solid var(--line);
+		vertical-align: middle;
+	}
+	.ledger-row {
+		cursor: pointer;
+		transition: background 150ms var(--ease-out);
+	}
+	.ledger-row:hover {
+		background: var(--surface);
+	}
+	.ledger-row:focus-visible {
+		outline: 1px solid var(--accent);
+		outline-offset: -1px;
+	}
+	.channel-name {
+		display: block;
+		font-weight: 600;
+		color: var(--text);
+		text-decoration: none;
+	}
+	.channel-name:hover {
+		text-decoration: underline;
+		text-underline-offset: 3px;
+	}
+	.channel-id {
+		display: block;
+		margin-top: 4px;
+		font-size: 12px;
+		color: var(--text-3);
+	}
+	.protected-label {
+		color: var(--ok);
+	}
+	.status-sub {
+		display: block;
+		margin-top: 4px;
+		font-size: 13px;
+		color: var(--text-2);
+	}
+	.pending-link {
+		color: var(--accent);
+	}
+	.num {
+		text-align: left;
+	}
+
+	/* sensitivity mini-track: 64px, 3px rail, accent fill at the
+	   Strict stop, 2px white tick at the active end (spec §7) */
+	.mini-track {
+		position: relative;
+		width: 64px;
+		height: 12px;
+		margin-bottom: 6px;
+	}
+	.mini-rail {
+		position: absolute;
+		left: 0;
+		right: 0;
+		top: 50%;
+		height: 3px;
+		transform: translateY(-50%);
+		background: var(--line);
+	}
+	.mini-fill {
+		position: absolute;
+		left: 0;
+		top: 50%;
+		width: 0;
+		height: 3px;
+		transform: translateY(-50%);
+		background: var(--accent);
+	}
+	.mini-fill.strict {
+		width: 100%;
+	}
+	.mini-tick {
+		position: absolute;
+		left: 0;
+		top: 50%;
+		width: 2px;
+		height: 12px;
+		transform: translateY(-50%);
+		background: var(--text);
+	}
+	.mini-tick.strict {
+		left: auto;
+		right: 0;
+	}
+
+	/* responsive column collapse (spec §7): display:none, no width tricks */
+	@media (max-width: 767px) {
+		.col-id,
+		.col-rejected,
+		.col-sensitivity,
+		.col-last {
+			display: none;
+		}
+	}
+	@media (max-width: 639px) {
+		.col-approved {
+			display: none;
+		}
+	}
+
+	/* ── connect + privacy note ─────────────────────────────── */
+	.connect-block {
+		margin-bottom: 12px;
+	}
+	.connect-helper {
+		margin: 10px 0 0;
+		font-size: 13px;
+		color: var(--text-2);
+	}
+	.privacy-note {
+		font-size: 0.9em;
+	}
+
+	/* ── delete account (moves to /account in Commit 5) ─────── */
 	.confirm-delete {
 		display: flex;
 		gap: 10px;
@@ -128,11 +414,10 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		margin-top: 3px;
 		flex-shrink: 0;
 	}
-	.edge-lords {
-		margin: 10px 0 0;
-		font-weight: 700;
-		letter-spacing: 0.04em;
-		text-transform: uppercase;
-		color: var(--danger);
+
+	@media (prefers-reduced-motion: reduce) {
+		.ledger-row {
+			transition: none;
+		}
 	}
 </style>

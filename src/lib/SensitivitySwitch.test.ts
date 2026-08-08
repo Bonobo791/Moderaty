@@ -36,7 +36,7 @@ function renderSwitch(level: number) {
 
 test('both meme endpoints render as labeled buttons with their images', () => {
 	const body = renderSwitch(1);
-	expect(body).toContain('aria-label="Set sensitivity to Chill Pepe"');
+	expect(body).toContain('aria-label="Set sensitivity to Edge Lord"');
 	expect(body).toContain('aria-label="Set sensitivity to Edge Lord plus Ackchyually"');
 	expect(body).toContain('src="/edge-lord.jpg"');
 	expect(body).toContain('src="/ackchyually.gif"');
@@ -65,7 +65,7 @@ test('the track is a focusable slider with the full ARIA value contract', () => 
 	expect(body).toContain('aria-valuemin="0"');
 	expect(body).toContain('aria-valuemax="100"');
 	expect(body).toContain('aria-valuenow="0"');
-	expect(body).toContain('aria-valuetext="CHILL PEPE"');
+	expect(body).toContain('aria-valuetext="EDGE LORD"');
 });
 
 test('the strict stop reports 100 and the Ackchyually mode name to screen readers', () => {
@@ -76,18 +76,17 @@ test('the strict stop reports 100 and the Ackchyually mode name to screen reader
 
 // ── readout ────────────────────────────────────────────────────────────
 
-test('the chill readout renders the CHILL stop label and the verbatim Chill Pepe copy', () => {
+test('the edge lord readout renders the EDGE LORD stop label and the verbatim chill copy', () => {
 	const body = renderSwitch(1);
-	expect(body).toContain('>CHILL</span>');
-	expect(body).toContain('CHILL PEPE');
-	expect(body).toContain('Only clear hate speech and spam get bounced. Snark survives.');
-	expect(body).not.toContain('Hateful comments and demeaning, condescending, or sarcastic tone are moderated.');
+	expect(body).toContain('>EDGE LORD</span>');
+	expect(body).toContain('Only clear hate speech and spam get yeeted. Snark survives.');
+	expect(body).not.toContain('Hateful comments and demeaning, condescending, or sarcastic tone get moderated. The edge lord has entered the chat.');
 });
 
 test('the strict readout renders the STRICT stop label and the verbatim strict copy', () => {
 	const body = renderSwitch(2);
 	expect(body).toContain('>STRICT</span>');
-	expect(body).toContain('Hateful comments and demeaning, condescending, or sarcastic tone are moderated.');
+	expect(body).toContain('Hateful comments and demeaning, condescending, or sarcastic tone get moderated. The edge lord has entered the chat.');
 });
 
 test('only the strict stop label carries the accent class', () => {

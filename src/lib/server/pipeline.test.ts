@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => {
 			channels: undefined as unknown,
 			comments: undefined as unknown,
 			rules: undefined as unknown,
+			channelAllowedHandles: undefined as unknown,
 			auditLog: undefined as unknown,
 			moderationActions: undefined as unknown
 		},
@@ -33,6 +34,7 @@ const mocks = vi.hoisted(() => {
 		existingIds: [] as string[],
 		unclaimedIds: [] as string[],
 		ruleRows: [] as unknown[],
+		handleRows: [] as Record<string, unknown>[],
 		insertedComments: [] as Record<string, unknown>[],
 		insertedAudits: [] as Record<string, unknown>[],
 		moderationActions: [] as Record<string, unknown>[]
@@ -60,6 +62,11 @@ const mocks = vi.hoisted(() => {
 					])].filter((id) => params.includes(id)).map((id) => ({ id }));
 				}
 				if (table === state.tables.rules) return state.ruleRows;
+				if (table === state.tables.channelAllowedHandles) {
+					// Honor eq(channelId, ...): only rows for the queried channel come back.
+					const params = queryParams(condition);
+					return state.handleRows.filter((row) => params.includes(String(row.channelId)));
+				}
 				if (table === state.tables.moderationActions) {
 					// Honor eq(channelId, ...) + inArray(state, [...]): only rows whose
 					// channel and state the query actually selects come back.
@@ -169,7 +176,7 @@ vi.mock('$lib/server/youtube', () => ({
 	deleteComment: mocks.deleteComment
 }));
 
-import { auditLog, channels, comments, moderationActions, rules } from '$lib/server/db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, moderationActions, rules } from '$lib/server/db/schema';
 import { SQLiteSyncDialect } from 'drizzle-orm/sqlite-core';
 import { runChannel } from './pipeline';
 import type { NewComment } from './youtube';
@@ -242,7 +249,7 @@ function expectAiUnavailableQueued(result: unknown, extra: Record<string, unknow
 
 beforeEach(() => {
 	vi.clearAllMocks();
-	mocks.state.tables = { channels, comments, rules, auditLog, moderationActions };
+	mocks.state.tables = { channels, comments, rules, channelAllowedHandles, auditLog, moderationActions };
 	mocks.state.env.DRY_RUN = 'false';
 	mocks.state.channel = {
 		id: 'channel',
@@ -259,6 +266,7 @@ beforeEach(() => {
 	mocks.state.existingIds = [];
 	mocks.state.unclaimedIds = [];
 	mocks.state.ruleRows = [];
+	mocks.state.handleRows = [];
 	mocks.state.insertedComments = [];
 	mocks.state.insertedAudits = [];
 	mocks.state.moderationActions = [];
@@ -644,6 +652,100 @@ test('writes an approval audit entry for a low-risk AI decision', async () => {
 	})]);
 	// An approved comment has no YouTube action, so no moderation action row at all.
 	expect(mocks.state.moderationActions).toEqual([]);
+});
+
+function protectHandle(handle: string) {
+	mocks.state.handleRows = [{ id: 1, channelId: 'channel', handle, createdAt: '2026-01-01T00:00:00.000Z' }];
+}
+
+test('a protected handle is approved without rules, scoring, or enforcement — identity beats text', async () => {
+	// A ban rule matches the comment text, but the protected handle decides
+	// first: no rule decision, no AI call, no YouTube enforcement.
+	protectHandle('author'); // newComment's default authorName is 'Author'
+	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'toxic', action: 'ban' }];
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ text: 'this is toxic' })],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	const result = await runChannel('channel');
+
+	expect(mocks.state.insertedComments).toEqual([
+		expect.objectContaining({ id: 'comment', status: 'approved', decidedBy: 'allowlist', matchedRuleId: null, aiScore: null })
+	]);
+	expect(mocks.state.insertedAudits).toEqual([
+		expect.objectContaining({ commentId: 'comment', action: 'approve', reason: 'protected handle', actor: 'system' })
+	]);
+	expect(mocks.state.moderationActions).toEqual([]);
+	expect(mocks.scoreComment).not.toHaveBeenCalled();
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expect(result).toMatchObject({ fetched: 1, acted: 0, queued: 0, dryRun: false });
+});
+
+test('only the protected identity is exempt — the same toxic text still bans another commenter in the same run', async () => {
+	protectHandle('author');
+	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'toxic', action: 'ban' }];
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [
+			newComment({ id: 'protected', text: 'this is toxic' }),
+			newComment({ id: 'troll', authorName: 'Troll', authorChannelId: 'troll-id', text: 'this is toxic' })
+		],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	const result = await runChannel('channel');
+
+	expect(mocks.state.insertedComments).toEqual(expect.arrayContaining([
+		expect.objectContaining({ id: 'protected', status: 'approved', decidedBy: 'allowlist' }),
+		expect.objectContaining({ id: 'troll', status: 'rejected', decidedBy: 'rule', matchedRuleId: 1 })
+	]));
+	expect(mocks.state.moderationActions).toEqual([
+		expect.objectContaining({ commentId: 'troll', action: 'ban', state: 'completed' })
+	]);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['troll'], 'rejected', true, 'access-token', undefined);
+	expect(mocks.scoreComment).not.toHaveBeenCalled();
+	expect(result).toMatchObject({ fetched: 2, acted: 1, queued: 0 });
+});
+
+test('an @-prefixed, mixed-case author name matches the normalized stored handle', async () => {
+	protectHandle('some.user');
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ authorName: '@Some.User' })],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	await runChannel('channel');
+
+	expect(mocks.state.insertedComments).toEqual([
+		expect.objectContaining({ id: 'comment', status: 'approved', decidedBy: 'allowlist' })
+	]);
+	expect(mocks.scoreComment).not.toHaveBeenCalled();
+});
+
+test('a dry run counts the protected comment as implicit approved and audits the approve intent', async () => {
+	protectHandle('author');
+	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'toxic', action: 'ban' }];
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ text: 'this is toxic' })],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	const result = await runChannel('channel', { forceDryRun: true });
+
+	// Neither acted nor queued: the implicit approved bucket (fetched − acted − queued).
+	expect(result).toMatchObject({ fetched: 1, acted: 0, queued: 0, dryRun: true });
+	expect(mocks.state.insertedComments).toEqual([]);
+	expect(mocks.state.insertedAudits).toEqual([
+		expect.objectContaining({ commentId: 'comment', action: 'dry-run', reason: 'protected handle', text: 'this is toxic' })
+	]);
+	expect(mocks.db.transaction).not.toHaveBeenCalled();
+	expect(mocks.scoreComment).not.toHaveBeenCalled();
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
 });
 
 test('scores full comment text but truncates the stored copy', async () => {

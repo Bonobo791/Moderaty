@@ -219,6 +219,9 @@ test('channelRowArb generates all three ownership variants', () => {
 });
 
 test('commentRowArb stays inside the status/decider vocabularies and the text cap', () => {
+	// Pinned to the decided_by column comment in db/schema.ts — the arbitraries
+	// can never drift from the storage contract ('allowlist' included).
+	expect(COMMENT_DECIDERS).toEqual(['rule', 'ai', 'human', 'none', 'allowlist']);
 	fc.assert(
 		fc.property(commentRowArb, (row) => {
 			expect(COMMENT_STATUSES).toContain(row.status);

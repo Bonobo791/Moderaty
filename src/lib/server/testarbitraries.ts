@@ -176,7 +176,7 @@ export const channelRowArb: fc.Arbitrary<ChannelRow> = fc.oneof(
 // Status/decider vocabularies mirror the column comments in db/schema.ts —
 // no exported constant exists app-side to import.
 export const COMMENT_STATUSES = ['pending', 'approved', 'held', 'rejected', 'deleted', 'restoring'] as const;
-export const COMMENT_DECIDERS = ['rule', 'ai', 'human', 'none'] as const;
+export const COMMENT_DECIDERS = ['rule', 'ai', 'human', 'none', 'allowlist'] as const;
 
 export interface CommentRow {
 	id: string;

@@ -18,6 +18,7 @@
 
 import { and, eq, inArray } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
+import { loadHandleSet, normalizeHandle } from '$lib/server/allowlist';
 import { decrypt } from '$lib/server/crypto';
 import { db } from '$lib/server/db';
 import { auditLog, channels, comments, moderationActions, rules } from '$lib/server/db/schema';
@@ -215,11 +216,26 @@ async function aiDecision(
 async function decide(
 	comment: NewComment,
 	rules: PreparedRule[],
+	allowlist: Set<string>,
 	tone: { context: ToneContext } | null,
 	deadline: number | undefined,
 	protections: ToneProtections,
 	openAiKey: string | undefined
 ): Promise<Decision> {
+	// Protected handles skip rules and scoring by design: identity beats text,
+	// so even a matching ban rule loses to the allowlist.
+	if (allowlist.has(normalizeHandle(comment.authorName))) {
+		return {
+			comment,
+			status: 'approved',
+			decidedBy: 'allowlist',
+			matchedRuleId: null,
+			aiScore: null,
+			auditAction: 'approve',
+			reason: 'protected handle',
+			youtubeAction: null
+		};
+	}
 	const rule = matchPreparedRule(comment.text, comment.authorChannelId, rules);
 	return rule ? ruleDecision(comment, rule) : aiDecision(comment, tone, deadline, protections, openAiKey);
 }
@@ -311,6 +327,8 @@ async function decideNewComments(
 	// Stryker restore ArrayDeclaration
 	const existingIds = new Set(storedIds);
 	const rulesForChannel = prepareRules(await db.select().from(rules).where(eq(rules.channelId, channelId)).all());
+	// One allowlist read per run; decide() checks it before any rule or scoring.
+	const allowlist = await loadHandleSet(channelId);
 	// Dedupe twice: against already-stored comments AND within this batch.
 	// commentThreads pagination can repeat an item across page boundaries, and
 	// two decisions with one comment id would violate the comments.id PRIMARY
@@ -354,7 +372,7 @@ async function decideNewComments(
 				const tone = videoContext
 					? { context: { videoTitle: meta?.title ?? '', videoDescription: meta?.description ?? '' } }
 					: null;
-				return await decide(comment, rulesForChannel, tone, deadline, protections, openAiKey);
+				return await decide(comment, rulesForChannel, allowlist, tone, deadline, protections, openAiKey);
 			} catch (error) {
 				// DeadlineExceededError escapes decide() by design (aiDecision
 				// rethrows it) so the run aborts partial:true with no durable

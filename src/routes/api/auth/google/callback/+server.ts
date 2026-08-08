@@ -18,7 +18,11 @@
 
 import { redirect, error } from '@sveltejs/kit';
 
-import { parkPendingChannelPick, upsertChannelConnection } from '$lib/server/channelConnect';
+import {
+	decodeChannelState,
+	parkPendingChannelPick,
+	upsertChannelConnection
+} from '$lib/server/channelConnect';
 import { exchangeGoogleCode } from '$lib/server/google';
 import { fetchWithRetry } from '$lib/server/http';
 import { readPendingStates, storePendingStates } from '$lib/server/oauthState';
@@ -102,7 +106,26 @@ export async function GET({ url, cookies, locals }: { url: URL; cookies: import(
 
 	const state = url.searchParams.get('state');
 	const pending = readPendingStates(cookies);
-	if (!state || !pending.includes(state)) throw error(400, 'bad state');
+	// The channel-connect state is SELF-AUTHENTICATING: its AES-GCM ciphertext
+	// embeds the starter's userId, so the starter is derived from the state
+	// itself. Two consequences:
+	//  1. The binding is unforgeable (no ENCRYPTION_KEY) — a hand-crafted or
+	//     tampered state fails to decode and is rejected below.
+	//  2. A concurrent-start lost-update of the shared oauth_state cookie can
+	//     no longer invalidate a valid flow: the state's own signature is the
+	//     authority, the cookie entry is only the CSRF layer. A state that
+	//     decodes correctly is accepted even if its cookie entry was dropped.
+	const startedBy = state ? decodeChannelState(state) : null;
+	if (!state || (!pending.includes(state) && !startedBy)) throw error(400, 'bad state');
+
+	// The state must have been STARTED by this user: a flow begun on a shared
+	// machine by someone else must never exchange its authorization code under
+	// this session — that would park (or connect) the starter's grant here
+	// (CodeRabbit 3738037981). A login-flow state (never bound) is rejected
+	// too, before any Google call.
+	if (!startedBy || startedBy.userId !== user.id) {
+		throw error(400, 'this connection was started by a different account — sign out and start again from the dashboard');
+	}
 
 	const code = url.searchParams.get('code');
 	if (!code) throw error(400, 'missing code');
@@ -125,21 +148,30 @@ export async function GET({ url, cookies, locals }: { url: URL; cookies: import(
 		throw error(400, 'no YouTube channel found for this Google account');
 	}
 
-	// Consume the state only once the flow has succeeded, so a transient
-	// failure leaves the callback retryable while a success cannot be replayed.
-	storePendingStates(cookies, pending.filter((s) => s !== state));
+	// State consumption runs ONLY after the persistence below has succeeded,
+	// so a transient post-exchange failure (a throwing picker write or upsert)
+	// leaves the state in place. Note the boundary this is honest about: the
+	// authorization CODE is single-use, so a post-exchange failure still needs
+	// a fresh flow — only a PRE-exchange failure is retryable with this state.
+	const consumeState = () => {
+		storePendingStates(cookies, pending.filter((s) => s !== state));
+	};
 
 	if (owned.length > 1) {
 		// Several channels (brand accounts): the user picks ONE at the picker.
-		// The refresh token is parked — encrypted, state-keyed, 10-minute TTL —
-		// and never persisted until a channel is chosen.
-		parkPendingChannelPick(cookies, state, { refreshToken: tokens.refreshToken, channels: owned });
+		// The refresh token is parked — encrypted, state-keyed, 10-minute TTL,
+		// bound to the signed-in user who parked it — and never persisted until
+		// a channel is chosen.
+		parkPendingChannelPick(cookies, state, { refreshToken: tokens.refreshToken, channels: owned }, user.id);
+		consumeState();
 		throw redirect(302, `/connect-channel?state=${encodeURIComponent(state)}`);
 	}
 
 	if ((await upsertChannelConnection(user, owned[0], tokens.refreshToken)) === 'conflict') {
+		consumeState();
 		throw error(409, 'this channel is connected to a different Moderaty team');
 	}
+	consumeState();
 
 	throw redirect(302, '/dashboard');
 }

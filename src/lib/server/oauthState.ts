@@ -36,7 +36,17 @@ const MAX_PENDING_STATES = 5;
 export function cookieSecure(): boolean {
 	const appUrl = env.APP_URL;
 	if (!appUrl) throw error(500, 'APP_URL is not configured');
-	return appUrl.startsWith('https://');
+	if (appUrl.startsWith('https://')) return true;
+	// An http APP_URL ships every auth cookie (session, consent, channel-pick,
+	// OAuth state) WITHOUT Secure. That is fine for local dev and previews —
+	// but a production deployment misconfigured this way would silently drop
+	// Secure from real users' cookies. Fail loudly instead. Netlify sets
+	// CONTEXT=production only on the production deploy; NODE_ENV=production
+	// covers self-hosted production builds.
+	if (env.CONTEXT === 'production' || env.NODE_ENV === 'production') {
+		throw error(500, 'APP_URL must be https in the production deployment');
+	}
+	return false;
 }
 
 /**

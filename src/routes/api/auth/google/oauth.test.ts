@@ -54,6 +54,7 @@ vi.mock('$lib/server/db', () => ({
 
 import { makeCookies, makeCookiesWithState } from '$lib/server/testcookies';
 import { TEST_OWNER } from '$lib/server/testuser';
+import { createChannelState, decodeChannelState } from '$lib/server/channelConnect';
 import { GET as startAuth } from './+server';
 import { GET as authCallback } from './callback/+server';
 
@@ -104,7 +105,7 @@ type Cookies = ReturnType<typeof makeCookies>;
 
 function captureStartAuth(cookies: Cookies): { status: number; location: string } | undefined {
 	try {
-		startAuth({ cookies } as never);
+		startAuth({ cookies, locals: { user: OWNER } } as never);
 		return undefined;
 	} catch (e) {
 		return e as { status: number; location: string };
@@ -117,7 +118,14 @@ async function captureCallback(
 	user: typeof OWNER | null = OWNER
 ): Promise<{ status: number; location?: string; body?: { message: string } } | undefined> {
 	try {
-		await authCallback({ url: callbackUrl(params), cookies, locals: { user } } as never);
+		// Simulate the channel-connect start for the flow. A signed-in start
+		// issues a SELF-AUTHENTICATING state (the starter rides inside the
+		// ciphertext), so tests that don't pin a specific state get a real one;
+		// tests that pass an explicit state (bad-state coverage) keep it
+		// verbatim. The callback accepts a state that decodes for this user
+		// even when its cookie entry is absent.
+		const state = params.state ?? (user ? createChannelState(user.id) : 's');
+		await authCallback({ url: callbackUrl({ ...params, state }), cookies, locals: { user } } as never);
 		return undefined;
 	} catch (e) {
 		return e as { status: number; location?: string; body?: { message: string } };
@@ -125,7 +133,7 @@ async function captureCallback(
 }
 
 async function expectCallbackThrows(status: number) {
-	const thrown = await captureCallback(makeCookiesWithState('s'), { code: 'abc', state: 's' });
+	const thrown = await captureCallback(makeCookiesWithState(), { code: 'abc' });
 	expect(thrown?.status).toBe(status);
 	return thrown;
 }
@@ -150,9 +158,18 @@ test('auth start sets an HttpOnly oauth_state cookie and redirects with matching
 	expect(stateCall?.opts.httpOnly).toBe(true);
 
 	const target = new URL(thrown?.location ?? '');
+
+	// A signed-in connect issues a SELF-AUTHENTICATING state: the starter's
+	// userId rides inside the AES-256-GCM ciphertext, so the callback derives
+	// it from the state itself — unforgeable (no ENCRYPTION_KEY) and immune to
+	// the shared-cookie read-modify-write race.
+	const redirectState = target.searchParams.get('state');
+	expect(redirectState).toBeTruthy();
+	expect(decodeChannelState(redirectState ?? '')).toEqual({ userId: OWNER.id });
+
 	const pendingStates: unknown = JSON.parse(stateCall?.value ?? '[]');
 	expect(target.origin + target.pathname).toBe('https://accounts.google.com/o/oauth2/v2/auth');
-	expect(pendingStates).toContain(target.searchParams.get('state'));
+	expect(pendingStates).toContain(redirectState);
 	expect(target.searchParams.get('client_id')).toBe('client-id');
 	expect(target.searchParams.get('response_type')).toBe('code');
 	expect(target.searchParams.get('scope')).toBe('https://www.googleapis.com/auth/youtube.force-ssl');
@@ -184,14 +201,23 @@ test('auth start fails loudly with 500 when APP_URL is not configured', () => {
 });
 
 test('callback rejects a missing or mismatched state with 400', async () => {
-	const cookies = makeCookiesWithState('the-real-state');
-	expect((await captureCallback(cookies, { code: 'abc' }))?.status).toBe(400);
+	const state = createChannelState(OWNER.id);
+	const cookies = makeCookiesWithState(state);
+	// Missing state param — the URL is used verbatim (no auto-created state).
+	const missing = await authCallback({
+		url: callbackUrl({ code: 'abc' }),
+		cookies,
+		locals: { user: OWNER }
+	} as never).catch((e: { status: number }) => e);
+	expect(missing?.status).toBe(400);
+	// A mismatched/forged state is neither in the cookie nor decodable.
 	expect((await captureCallback(cookies, { code: 'abc', state: 'forged' }))?.status).toBe(400);
 });
 
 test('callback rejects a missing code with 400', async () => {
-	const cookies = makeCookiesWithState('s');
-	expect((await captureCallback(cookies, { state: 's' }))?.status).toBe(400);
+	const state = createChannelState(OWNER.id);
+	const cookies = makeCookiesWithState(state);
+	expect((await captureCallback(cookies, { state }))?.status).toBe(400);
 });
 
 test.each([
@@ -222,7 +248,7 @@ test.each([
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status })));
 
-		const thrown = await captureCallback(makeCookiesWithState('s'), { code: 'abc', state: 's' });
+		const thrown = await captureCallback(makeCookiesWithState(), { code: 'abc' });
 		expect(thrown?.status).toBe(expectedStatus);
 		expect(errorSpy.mock.calls.length > 0).toBe(logged);
 		assertNoTokenLeak(thrown, errorSpy);
@@ -239,7 +265,7 @@ test('callback fails loudly when the channels lookup returns a non-OK status', a
 test('callback upserts the channel and redirects home on the happy path', async () => {
 	stubTokenAndChannelResponses();
 
-	const thrown = await captureCallback(makeCookiesWithState('s'), { code: 'abc', state: 's' });
+	const thrown = await captureCallback(makeCookiesWithState(), { code: 'abc' });
 	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
 
 	expect(mocks.upserts).toHaveLength(1);
@@ -262,16 +288,34 @@ test('overlapping OAuth starts in two tabs both stay valid', async () => {
 	expect(states[0]).not.toBe(states[1]);
 
 	// Tab 1's callback must succeed even though tab 2's start wrote the cookie
-	// after it — and vice versa. Each state is consumed exactly once.
+	// after it — and vice versa. The self-authenticating states are valid even
+	// if a concurrent write dropped a cookie entry (the signature is the
+	// authority), and each upsert is idempotent.
 	for (const state of states) {
 		const thrown = await captureCallback(cookies, { code: 'abc', state });
 		expect(thrown?.status).toBe(302);
 	}
 	expect(mocks.upserts).toHaveLength(2);
 
-	// A consumed state cannot be replayed.
+	// The state is not single-use by itself: it stays a valid 10-minute
+	// capability after consumption, and OUR gate still passes it. Replay
+	// protection for the authorization CODE lives at Google (single-use,
+	// client+redirect-bound): a replayed callback URL fails at the exchange —
+	// modeled here by the token endpoint rejecting the already-spent code.
+	vi.unstubAllGlobals();
+	vi.stubGlobal(
+		'fetch',
+		vi.fn(async (input: RequestInfo | URL) => {
+			if (String(input) === 'https://oauth2.googleapis.com/token') {
+				return new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 });
+			}
+			throw new Error(`unexpected fetch: ${String(input)}`);
+		})
+	);
 	const replay = await captureCallback(cookies, { code: 'abc', state: states[0] });
-	expect(replay?.status).toBe(400);
+	expect(replay?.status).toBe(502);
+	// No third upsert — the spent code never produced a grant.
+	expect(mocks.upserts).toHaveLength(2);
 });
 
 test('callback returns 502 when the token request itself fails', async () => {
@@ -301,17 +345,17 @@ test('callback returns 502 when the channels response is valid JSON but not an o
 
 test('state survives a failed token exchange so the callback can be retried', async () => {
 	vi.spyOn(console, 'error').mockImplementation(() => {});
-	const cookies = makeCookiesWithState('s');
+	const cookies = makeCookiesWithState();
 	vi.stubGlobal(
 		'fetch',
 		vi.fn(async () => new Response(JSON.stringify({ error: 'temporarily_unavailable' }), { status: 503 }))
 	);
 
-	const first = await captureCallback(cookies, { code: 'abc', state: 's' });
+	const first = await captureCallback(cookies, { code: 'abc' });
 	expect(first?.status).toBe(502);
 
 	stubTokenAndChannelResponses();
-	const second = await captureCallback(cookies, { code: 'abc', state: 's' });
+	const second = await captureCallback(cookies, { code: 'abc' });
 	expect(second).toMatchObject({ status: 302, location: '/dashboard' });
 	expect(mocks.upserts).toHaveLength(1);
 });
@@ -330,7 +374,7 @@ test('youtube lookup failure logs do not include the upstream response body', as
 test('callback rejects a signed-out request with 401', async () => {
 	stubTokenAndChannelResponses();
 
-	const thrown = await captureCallback(makeCookiesWithState('s'), { code: 'abc', state: 's' }, null);
+	const thrown = await captureCallback(makeCookiesWithState(), { code: 'abc' }, null);
 
 	expect(thrown?.status).toBe(401);
 	expect(mocks.upserts).toHaveLength(0);
@@ -339,7 +383,7 @@ test('callback rejects a signed-out request with 401', async () => {
 test('callback attaches the connected channel to the signed-in user', async () => {
 	stubTokenAndChannelResponses();
 
-	const thrown = await captureCallback(makeCookiesWithState('s'), { code: 'abc', state: 's' });
+	const thrown = await captureCallback(makeCookiesWithState(), { code: 'abc' });
 
 	expect(thrown).toMatchObject({ status: 302 });
 	expect(mocks.upserts).toHaveLength(1);
@@ -350,7 +394,7 @@ test('callback refuses to reconnect a channel owned by another account with 409'
 	mocks.existingChannel = { orgId: 'org-2' };
 	stubTokenAndChannelResponses();
 
-	const thrown = await captureCallback(makeCookiesWithState('s'), { code: 'abc', state: 's' });
+	const thrown = await captureCallback(makeCookiesWithState(), { code: 'abc' });
 
 	expect(thrown?.status).toBe(409);
 	// The write is attempted — the conditional upsert predicate is what blocks

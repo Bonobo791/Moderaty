@@ -36,7 +36,9 @@ export const load: PageServerLoad = async ({ cookies, url, locals }) => {
 
 	const state = url.searchParams.get('state');
 	if (!state) throw error(400, 'missing state — restart the channel connection from the dashboard');
-	const pending = readPendingChannelPick(cookies, state);
+	// The pick is bound to the signed-in user who parked it: on a shared
+	// machine, a different user reading it sees "expired" and reconnects.
+	const pending = readPendingChannelPick(cookies, state, user.id);
 	if (!pending) {
 		throw error(400, 'this channel selection expired — reconnect the channel from the dashboard');
 	}
@@ -51,7 +53,7 @@ export const actions: Actions = {
 		requireOrgRole(user, 'admin');
 
 		const state = url.searchParams.get('state');
-		const pending = state ? readPendingChannelPick(cookies, state) : null;
+		const pending = state ? readPendingChannelPick(cookies, state, user.id) : null;
 		if (!pending) {
 			return fail(400, { error: 'This channel selection expired — reconnect the channel from the dashboard.' });
 		}

@@ -19,6 +19,11 @@
 import { db } from '$lib/server/db';
 import { channels, rules } from '$lib/server/db/schema';
 import { validateRule } from '$lib/server/rules';
+import {
+	addHandle as addAllowedHandle,
+	listHandles,
+	removeHandle as removeAllowedHandle
+} from '$lib/server/allowlist';
 import { ownedChannel } from '$lib/server/ownership';
 import { and, eq } from 'drizzle-orm';
 import { fail } from '@sveltejs/kit';
@@ -26,12 +31,13 @@ import { fail } from '@sveltejs/kit';
 export async function load({ params, locals }) {
 	// Database outage: the layout renders the overlay; this load must not 401
 	// on the null-user outage shape.
-	if (locals.dbDown) return { ch: { id: params.id, title: '' }, rs: [], maintenance: true };
+	if (locals.dbDown) return { ch: { id: params.id, title: '' }, rs: [], handles: [], maintenance: true };
 	const ch = await ownedChannel(params.id, locals);
 	const rs = await db.select().from(rules).where(eq(rules.channelId, params.id)).all();
+	const handles = await listHandles(params.id);
 	// Project only what the page renders — never serialize refreshTokenEnc (or
 	// any future secret column) to the browser.
-	return { ch: { id: ch.id, title: ch.title }, rs };
+	return { ch: { id: ch.id, title: ch.title }, rs, handles };
 }
 
 export const actions = {
@@ -68,6 +74,29 @@ export const actions = {
 			.where(and(eq(rules.id, ruleId), eq(rules.channelId, params.id)))
 			.returning({ id: rules.id });
 		if (deleted.length === 0) return fail(404, { error: 'rule not found' });
+		return { ok: true };
+	},
+	addHandle: async ({ params, request, locals }) => {
+		await ownedChannel(params.id, locals);
+		const f = await request.formData();
+		try {
+			await addAllowedHandle(params.id, String(f.get('handle') ?? ''));
+		} catch (e) {
+			return fail(400, { error: e instanceof Error ? e.message : String(e) });
+		}
+		return { ok: true };
+	},
+	removeHandle: async ({ params, request, locals }) => {
+		await ownedChannel(params.id, locals);
+		const f = await request.formData();
+		let removed: Awaited<ReturnType<typeof removeAllowedHandle>>;
+		try {
+			// Channel-scoped: a request here cannot delete another channel's handle.
+			removed = await removeAllowedHandle(params.id, Number(f.get('handleId')));
+		} catch (e) {
+			return fail(400, { error: e instanceof Error ? e.message : String(e) });
+		}
+		if (!removed) return fail(404, { error: 'protected handle not found' });
 		return { ok: true };
 	}
 };

@@ -20,17 +20,22 @@ import { and, eq } from 'drizzle-orm';
 import { expect, test, vi } from 'vitest';
 
 import { DAY_MS, seedConsent, seedUser as seedBareUser, setupTestDb, testDb } from './testdb';
-import { auditLog, channels, comments, consents, invites, memberships, moderationActions, organizations, rules, sessions, users } from './db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, consents, invites, memberships, moderationActions, organizations, rules, sessions, users } from './db/schema';
 import {
+	AUDIT_HANDLE_RETENTION_MS,
 	CONSENT_EMAIL_RETENTION_MS,
 	WIPED_REFRESH_TOKEN,
+	auditHandleCutoffIso,
 	consentEmailCutoffIso,
 	deleteChannelRecords,
 	deleteUserRecords,
-	nullExpiredConsentEmails
+	nullExpiredAuditLogHandles,
+	nullExpiredConsentEmails,
+	nullExpiredHandles,
+	nullExpiredModerationActionHandles
 } from './deletion';
 
-setupTestDb(['moderation_actions', 'comments', 'audit_log', 'rules', 'channels', 'sessions', 'consents', 'invites', 'memberships', 'organizations', 'users']);
+setupTestDb(['moderation_actions', 'comments', 'audit_log', 'channel_allowed_handles', 'rules', 'channels', 'sessions', 'consents', 'invites', 'memberships', 'organizations', 'users']);
 
 /** Seeds one comment plus its moderation action, audit row, and keyword rule for a channel. */
 async function seedModerationData(channelId: string, key: string) {
@@ -56,6 +61,32 @@ async function seedModerationData(channelId: string, key: string) {
 		.db.insert(rules)
 		.values({ channelId, type: 'keyword', pattern: 'spam', action: 'delete' });
 }
+
+test('deleteUserRecords erases protected handles on deleted channels but keeps other channels\' handles', async () => {
+	// channel_allowed_handles rows are channel children: they die with the
+	// deleted account's channels and survive on unrelated channels.
+	const userId = await seedUser('gone');
+	await seedUser('stays');
+	await testDb().db.insert(channelAllowedHandles).values({ channelId: 'UC-gone', handle: '@friend' });
+	await testDb().db.insert(channelAllowedHandles).values({ channelId: 'UC-stays', handle: '@mod' });
+
+	await deleteUserRecords(userId);
+
+	const surviving = await testDb().db.select().from(channelAllowedHandles).all();
+	expect(surviving).toHaveLength(1);
+	expect(surviving[0]).toMatchObject({ channelId: 'UC-stays', handle: '@mod' });
+});
+
+test('deleteChannelRecords erases protected handles with the channel', async () => {
+	await seedChannel('UC1', 'user-9', 'org-1', 'ours');
+	await testDb().db.insert(channelAllowedHandles).values({ channelId: 'UC1', handle: '@friend' });
+
+	await testDb().db.transaction(async (tx) => {
+		await deleteChannelRecords(tx, ['UC1'], { expectedOrgId: 'org-1' });
+	});
+
+	expect(await testDb().db.select().from(channelAllowedHandles).all()).toHaveLength(0);
+});
 
 /** Seeds a channel row with the standard shape (placeholder enc token). */
 async function seedChannel(id: string, userId: string | null, orgId: string, title: string) {
@@ -625,4 +656,191 @@ test('nullExpiredConsentEmails is bounded to one batch per call (I10)', async ()
 test('consentEmailCutoffIso lands 10 years back', () => {
 	const now = Date.now();
 	expect(Date.parse(consentEmailCutoffIso(now))).toBe(now - CONSENT_EMAIL_RETENTION_MS);
+});
+
+/** Seeds one audit row with a stored commenter handle at `createdAt`. */
+async function seedHandledAuditRow(commentId: string, createdAt: string, authorHandle: string | null = '@some.user') {
+	await testDb().db.insert(auditLog).values({
+		channelId: 'UC1',
+		commentId,
+		action: 'reject',
+		reason: 'ai score 0.91',
+		actor: 'system',
+		authorHandle,
+		createdAt
+	});
+}
+
+test('nullExpiredAuditLogHandles erases only the handle of audit rows older than 30 days', async () => {
+	const oldDate = new Date(Date.now() - AUDIT_HANDLE_RETENTION_MS - DAY_MS).toISOString();
+	const recentDate = new Date(Date.now() - DAY_MS).toISOString();
+	await seedHandledAuditRow('old', oldDate, '@old.user');
+	await seedHandledAuditRow('recent', recentDate, '@recent.user');
+
+	expect(await nullExpiredAuditLogHandles()).toBe(1);
+
+	const rows = await testDb().db.select().from(auditLog).all();
+	expect(rows).toHaveLength(2);
+	// The ROW is kept as the moderation record; only the identifier is erased.
+	expect(rows.find((row) => row.commentId === 'old')).toMatchObject({ authorHandle: null, action: 'reject' });
+	expect(rows.find((row) => row.commentId === 'recent')).toMatchObject({ authorHandle: '@recent.user' });
+});
+
+test('nullExpiredAuditLogHandles leaves every other column byte-identical', async () => {
+	const oldDate = new Date(Date.now() - AUDIT_HANDLE_RETENTION_MS - DAY_MS).toISOString();
+	await seedHandledAuditRow('c1', oldDate, '@some.user');
+	const before = (await testDb().db.select().from(auditLog).all())[0];
+
+	await nullExpiredAuditLogHandles();
+
+	const after = (await testDb().db.select().from(auditLog).all())[0];
+	expect(after.authorHandle).toBeNull();
+	// Restoring the handle must reproduce the pre-sweep row exactly.
+	expect({ ...after, authorHandle: before.authorHandle }).toEqual(before);
+});
+
+test('nullExpiredAuditLogHandles skips rows whose handle is already erased', async () => {
+	// Mirror of the consent-sweep pin: dropping the isNotNull filter lets
+	// already-erased rows fill the bounded batch, delaying genuinely expired
+	// rows (retention compliance).
+	const expired = new Date(Date.now() - AUDIT_HANDLE_RETENTION_MS - DAY_MS).toISOString();
+	await seedHandledAuditRow('erased', expired, null);
+	await seedHandledAuditRow('pending', expired, '@pending.user');
+
+	expect(await nullExpiredAuditLogHandles()).toBe(1);
+	expect((await testDb().db.select().from(auditLog).all()).find((row) => row.commentId === 'pending')).toMatchObject({
+		authorHandle: null
+	});
+});
+
+test('nullExpiredAuditLogHandles is bounded to one batch per call (I10)', async () => {
+	// Mirror of the consent-sweep pin: an unbounded sweep would blow the
+	// 20-second cron budget on a large backlog.
+	const expired = new Date(Date.now() - AUDIT_HANDLE_RETENTION_MS - DAY_MS).toISOString();
+	for (let index = 0; index < 51; index++) {
+		await seedHandledAuditRow(`bulk-${index}`, expired, `@user${index}`);
+	}
+
+	expect(await nullExpiredAuditLogHandles()).toBe(50);
+	// The remainder waits for the next cron invocation.
+	expect(await nullExpiredAuditLogHandles()).toBe(1);
+});
+
+test('nullExpiredAuditLogHandles is idempotent: a second call after a full drain nulls nothing', async () => {
+	const expired = new Date(Date.now() - AUDIT_HANDLE_RETENTION_MS - DAY_MS).toISOString();
+	await seedHandledAuditRow('a', expired);
+	await seedHandledAuditRow('b', expired);
+
+	expect(await nullExpiredAuditLogHandles()).toBe(2);
+	expect(await nullExpiredAuditLogHandles()).toBe(0);
+});
+
+test('nullExpiredAuditLogHandles returns 0 with nothing to do', async () => {
+	await seedHandledAuditRow('recent', new Date().toISOString());
+
+	expect(await nullExpiredAuditLogHandles()).toBe(0);
+});
+
+test('auditHandleCutoffIso lands 30 days back', () => {
+	const now = Date.now();
+	expect(Date.parse(auditHandleCutoffIso(now))).toBe(now - AUDIT_HANDLE_RETENTION_MS);
+});
+
+/** Seeds one moderation action row with a stored commenter handle at `createdAt`. */
+async function seedHandledActionRow(commentId: string, createdAt: string, authorHandle: string | null = '@some.user') {
+	await testDb().db.insert(moderationActions).values({
+		commentId,
+		channelId: 'UC1',
+		action: 'ban',
+		reason: 'rule #1 (user: troll)',
+		state: 'completed',
+		authorHandle,
+		createdAt
+	});
+}
+
+test('nullExpiredModerationActionHandles erases only the handle of action rows older than 30 days', async () => {
+	const oldDate = new Date(Date.now() - AUDIT_HANDLE_RETENTION_MS - DAY_MS).toISOString();
+	const recentDate = new Date(Date.now() - DAY_MS).toISOString();
+	await seedHandledActionRow('old', oldDate, '@old.user');
+	await seedHandledActionRow('recent', recentDate, '@recent.user');
+
+	expect(await nullExpiredModerationActionHandles()).toBe(1);
+
+	const rows = await testDb().db.select().from(moderationActions).all();
+	expect(rows).toHaveLength(2);
+	// The ROW is kept as the enforcement record; only the identifier is erased.
+	expect(rows.find((row) => row.commentId === 'old')).toMatchObject({ authorHandle: null, action: 'ban' });
+	expect(rows.find((row) => row.commentId === 'recent')).toMatchObject({ authorHandle: '@recent.user' });
+});
+
+test('nullExpiredModerationActionHandles leaves every other column byte-identical', async () => {
+	const oldDate = new Date(Date.now() - AUDIT_HANDLE_RETENTION_MS - DAY_MS).toISOString();
+	await seedHandledActionRow('c1', oldDate, '@some.user');
+	const before = (await testDb().db.select().from(moderationActions).all())[0];
+
+	await nullExpiredModerationActionHandles();
+
+	const after = (await testDb().db.select().from(moderationActions).all())[0];
+	expect(after.authorHandle).toBeNull();
+	// Restoring the handle must reproduce the pre-sweep row exactly.
+	expect({ ...after, authorHandle: before.authorHandle }).toEqual(before);
+});
+
+test('nullExpiredModerationActionHandles skips rows whose handle is already erased', async () => {
+	// Mirror of the audit-log pin: dropping the isNotNull filter lets
+	// already-erased rows fill the bounded batch, delaying genuinely expired
+	// rows (retention compliance).
+	const expired = new Date(Date.now() - AUDIT_HANDLE_RETENTION_MS - DAY_MS).toISOString();
+	await seedHandledActionRow('erased', expired, null);
+	await seedHandledActionRow('pending', expired, '@pending.user');
+
+	expect(await nullExpiredModerationActionHandles()).toBe(1);
+	expect((await testDb().db.select().from(moderationActions).all()).find((row) => row.commentId === 'pending')).toMatchObject({
+		authorHandle: null
+	});
+});
+
+test('nullExpiredModerationActionHandles is bounded to one batch per call (I10)', async () => {
+	// Mirror of the audit-log pin: an unbounded sweep would blow the
+	// 20-second cron budget on a large backlog.
+	const expired = new Date(Date.now() - AUDIT_HANDLE_RETENTION_MS - DAY_MS).toISOString();
+	for (let index = 0; index < 51; index++) {
+		await seedHandledActionRow(`bulk-${index}`, expired, `@user${index}`);
+	}
+
+	expect(await nullExpiredModerationActionHandles()).toBe(50);
+	// The remainder waits for the next cron invocation.
+	expect(await nullExpiredModerationActionHandles()).toBe(1);
+});
+
+test('nullExpiredModerationActionHandles is idempotent: a second call after a full drain nulls nothing', async () => {
+	const expired = new Date(Date.now() - AUDIT_HANDLE_RETENTION_MS - DAY_MS).toISOString();
+	await seedHandledActionRow('a', expired);
+	await seedHandledActionRow('b', expired);
+
+	expect(await nullExpiredModerationActionHandles()).toBe(2);
+	expect(await nullExpiredModerationActionHandles()).toBe(0);
+});
+
+test('nullExpiredModerationActionHandles returns 0 with nothing to do', async () => {
+	await seedHandledActionRow('recent', new Date().toISOString());
+
+	expect(await nullExpiredModerationActionHandles()).toBe(0);
+});
+
+test('nullExpiredHandles sweeps both handle-bearing tables and reports each count', async () => {
+	const expired = new Date(Date.now() - AUDIT_HANDLE_RETENTION_MS - DAY_MS).toISOString();
+	await seedHandledAuditRow('audit-old', expired);
+	await seedHandledAuditRow('audit-recent', new Date().toISOString());
+	await seedHandledActionRow('action-old-1', expired);
+	await seedHandledActionRow('action-old-2', expired);
+
+	expect(await nullExpiredHandles()).toEqual({ auditLog: 1, moderationActions: 2 });
+
+	expect((await testDb().db.select().from(auditLog).all()).find((row) => row.commentId === 'audit-old')).toMatchObject({
+		authorHandle: null
+	});
+	const actions = await testDb().db.select().from(moderationActions).all();
+	expect(actions.every((row) => row.authorHandle === null)).toBe(true);
 });

@@ -38,6 +38,8 @@ import { decrypt, encrypt } from '$lib/server/crypto';
 import {
 	CHANNEL_PICK_COOKIE,
 	clearPendingChannelPick,
+	createChannelState,
+	decodeChannelState,
 	parkPendingChannelPick,
 	readPendingChannelPick,
 	upsertChannelConnection
@@ -73,6 +75,10 @@ function forgedEntry(overrides: Record<string, unknown> = {}) {
 	return {
 		state: 's',
 		ts: Date.now(),
+		// Baseline matches the parker's binding so the forged tests below
+		// exercise their TARGETED field validation instead of failing at the
+		// ownership check (CodeRabbit 3738037958).
+		userId: 'user-1',
 		refreshToken: 'refresh-token',
 		channels: [{ id: 'UC1', title: 'One' }],
 		...overrides
@@ -82,40 +88,55 @@ function forgedEntry(overrides: Record<string, unknown> = {}) {
 // --- readPendingChannelPick ------------------------------------------------
 
 test('read returns null when no pick cookie exists', () => {
-	expect(readPendingChannelPick(makeCookies() as never, 's')).toBeNull();
+	expect(readPendingChannelPick(makeCookies() as never, 's', 'user-1')).toBeNull();
 });
 
 test('read returns null for an unknown state', () => {
 	const cookies = makeCookies();
-	parkPendingChannelPick(cookies as never, 'other', { refreshToken: 'tok', channels: [{ id: 'UC1', title: 'One' }] });
+	parkPendingChannelPick(cookies as never, 'other', { refreshToken: 'tok', channels: [{ id: 'UC1', title: 'One' }] }, 'user-1');
 
-	expect(readPendingChannelPick(cookies as never, 's')).toBeNull();
+	expect(readPendingChannelPick(cookies as never, 's', 'user-1')).toBeNull();
 });
 
 test('read returns null for a tampered cookie', () => {
 	const cookies = makeCookies();
 	cookies.set(CHANNEL_PICK_COOKIE, 'not-valid-ciphertext', { path: '/' });
 
-	expect(readPendingChannelPick(cookies as never, 's')).toBeNull();
+	expect(readPendingChannelPick(cookies as never, 's', 'user-1')).toBeNull();
 });
 
 test('read returns null when the decrypted payload is not an array', () => {
 	const cookies = forgedCookies('just-a-string');
 
-	expect(readPendingChannelPick(cookies as never, 's')).toBeNull();
+	expect(readPendingChannelPick(cookies as never, 's', 'user-1')).toBeNull();
 });
 
 test('read returns the grant parked for the matching state only', () => {
 	const cookies = makeCookies();
-	parkPendingChannelPick(cookies as never, 'a', { refreshToken: 'token-a', channels: [{ id: 'UC1', title: 'One' }] });
-	parkPendingChannelPick(cookies as never, 'b', { refreshToken: 'token-b', channels: [{ id: 'UC2', title: 'Two' }] });
+	parkPendingChannelPick(cookies as never, 'a', { refreshToken: 'token-a', channels: [{ id: 'UC1', title: 'One' }] }, 'user-1');
+	parkPendingChannelPick(cookies as never, 'b', { refreshToken: 'token-b', channels: [{ id: 'UC2', title: 'Two' }] }, 'user-1');
 
-	expect(readPendingChannelPick(cookies as never, 'b')).toEqual({
+	expect(readPendingChannelPick(cookies as never, 'b', 'user-1')).toEqual({
 		refreshToken: 'token-b',
 		channels: [{ id: 'UC2', title: 'Two' }]
 	});
-	expect(readPendingChannelPick(cookies as never, 'a')).toEqual({
+	expect(readPendingChannelPick(cookies as never, 'a', 'user-1')).toEqual({
 		refreshToken: 'token-a',
+		channels: [{ id: 'UC1', title: 'One' }]
+	});
+});
+
+test('a pick parked by one user is unreadable by another (shared-browser binding)', () => {
+	// Hardening: user B, signed in on a shared machine, must never complete
+	// user A's in-flight pick — the parked refresh token belongs to A's Google
+	// grant and attaching it to B's org would leak it cross-tenant.
+	const cookies = makeCookies();
+	parkPendingChannelPick(cookies as never, 's', { refreshToken: 'tok-a', channels: [{ id: 'UC1', title: 'One' }] }, 'user-a');
+
+	expect(readPendingChannelPick(cookies as never, 's', 'user-b')).toBeNull();
+	// The parker themselves still reads it — a legitimate completion works.
+	expect(readPendingChannelPick(cookies as never, 's', 'user-a')).toEqual({
+		refreshToken: 'tok-a',
 		channels: [{ id: 'UC1', title: 'One' }]
 	});
 });
@@ -125,32 +146,32 @@ test('read honors the TTL boundary: valid at exactly ten minutes, null one milli
 	const t0 = new Date('2026-01-01T00:00:00Z').getTime();
 	vi.setSystemTime(t0);
 	const cookies = makeCookies();
-	parkPendingChannelPick(cookies as never, 's', { refreshToken: 'tok', channels: [{ id: 'UC1', title: 'One' }] });
+	parkPendingChannelPick(cookies as never, 's', { refreshToken: 'tok', channels: [{ id: 'UC1', title: 'One' }] }, 'user-1');
 
 	vi.setSystemTime(t0 + TTL_MS);
-	expect(readPendingChannelPick(cookies as never, 's')).toEqual({
+	expect(readPendingChannelPick(cookies as never, 's', 'user-1')).toEqual({
 		refreshToken: 'tok',
 		channels: [{ id: 'UC1', title: 'One' }]
 	});
 
 	vi.setSystemTime(t0 + TTL_MS + 1);
-	expect(readPendingChannelPick(cookies as never, 's')).toBeNull();
+	expect(readPendingChannelPick(cookies as never, 's', 'user-1')).toBeNull();
 });
 
 test('read returns null for a forged entry whose timestamp is not a number', () => {
 	const cookies = forgedCookies([forgedEntry({ ts: 'soon' })]);
 
-	expect(readPendingChannelPick(cookies as never, 's')).toBeNull();
+	expect(readPendingChannelPick(cookies as never, 's', 'user-1')).toBeNull();
 });
 
 test('read returns null for a forged entry with a non-string or empty refresh token', () => {
-	expect(readPendingChannelPick(forgedCookies([forgedEntry({ refreshToken: 42 })]) as never, 's')).toBeNull();
-	expect(readPendingChannelPick(forgedCookies([forgedEntry({ refreshToken: '' })]) as never, 's')).toBeNull();
+	expect(readPendingChannelPick(forgedCookies([forgedEntry({ refreshToken: 42 })]) as never, 's', 'user-1')).toBeNull();
+	expect(readPendingChannelPick(forgedCookies([forgedEntry({ refreshToken: '' })]) as never, 's', 'user-1')).toBeNull();
 });
 
 test('read returns null for a forged entry whose channels are not a non-empty array', () => {
-	expect(readPendingChannelPick(forgedCookies([forgedEntry({ channels: {} })]) as never, 's')).toBeNull();
-	expect(readPendingChannelPick(forgedCookies([forgedEntry({ channels: [] })]) as never, 's')).toBeNull();
+	expect(readPendingChannelPick(forgedCookies([forgedEntry({ channels: {} })]) as never, 's', 'user-1')).toBeNull();
+	expect(readPendingChannelPick(forgedCookies([forgedEntry({ channels: [] })]) as never, 's', 'user-1')).toBeNull();
 });
 
 test('read returns null when any parked channel is malformed', () => {
@@ -164,7 +185,7 @@ test('read returns null when any parked channel is malformed', () => {
 	];
 	for (const channel of malformed) {
 		const cookies = forgedCookies([forgedEntry({ channels: [channel] })]);
-		expect(readPendingChannelPick(cookies as never, 's'), `channels: [${JSON.stringify(channel)}]`).toBeNull();
+		expect(readPendingChannelPick(cookies as never, 's', 'user-1'), `channels: [${JSON.stringify(channel)}]`).toBeNull();
 	}
 });
 
@@ -173,14 +194,14 @@ test('read returns null when even one of several parked channels is malformed', 
 		forgedEntry({ channels: [{ id: 'UC1', title: 'One' }, { id: 42, title: 'Bad' }] })
 	]);
 
-	expect(readPendingChannelPick(cookies as never, 's')).toBeNull();
+	expect(readPendingChannelPick(cookies as never, 's', 'user-1')).toBeNull();
 });
 
 // --- parkPendingChannelPick ------------------------------------------------
 
 test('parking writes an encrypted httpOnly lax cookie with a ten-minute maxAge', () => {
 	const cookies = makeCookies();
-	parkPendingChannelPick(cookies as never, 's', { refreshToken: 'refresh-token', channels: [{ id: 'UC1', title: 'One' }] });
+	parkPendingChannelPick(cookies as never, 's', { refreshToken: 'refresh-token', channels: [{ id: 'UC1', title: 'One' }] }, 'user-1');
 
 	expect(cookies.setCalls).toHaveLength(1);
 	const call = cookies.setCalls[0];
@@ -189,14 +210,14 @@ test('parking writes an encrypted httpOnly lax cookie with a ten-minute maxAge',
 	// The refresh token never travels in plaintext.
 	expect(call.value).not.toContain('refresh-token');
 	expect(JSON.parse(decrypt(call.value))).toEqual([
-		{ state: 's', ts: expect.any(Number), refreshToken: 'refresh-token', channels: [{ id: 'UC1', title: 'One' }] }
+		{ state: 's', ts: expect.any(Number), userId: 'user-1', refreshToken: 'refresh-token', channels: [{ id: 'UC1', title: 'One' }] }
 	]);
 });
 
 test('parking twice under one state keeps only the newest grant', () => {
 	const cookies = makeCookies();
-	parkPendingChannelPick(cookies as never, 's', { refreshToken: 'old-token', channels: [{ id: 'UC1', title: 'One' }] });
-	parkPendingChannelPick(cookies as never, 's', { refreshToken: 'new-token', channels: [{ id: 'UC2', title: 'Two' }] });
+	parkPendingChannelPick(cookies as never, 's', { refreshToken: 'old-token', channels: [{ id: 'UC1', title: 'One' }] }, 'user-1');
+	parkPendingChannelPick(cookies as never, 's', { refreshToken: 'new-token', channels: [{ id: 'UC2', title: 'Two' }] }, 'user-1');
 
 	const entries = parkedEntries(cookies);
 	expect(entries).toHaveLength(1);
@@ -205,8 +226,8 @@ test('parking twice under one state keeps only the newest grant', () => {
 
 test('parking under a second state keeps both flows', () => {
 	const cookies = makeCookies();
-	parkPendingChannelPick(cookies as never, 'a', { refreshToken: 'token-a', channels: [{ id: 'UC1', title: 'One' }] });
-	parkPendingChannelPick(cookies as never, 'b', { refreshToken: 'token-b', channels: [{ id: 'UC2', title: 'Two' }] });
+	parkPendingChannelPick(cookies as never, 'a', { refreshToken: 'token-a', channels: [{ id: 'UC1', title: 'One' }] }, 'user-1');
+	parkPendingChannelPick(cookies as never, 'b', { refreshToken: 'token-b', channels: [{ id: 'UC2', title: 'Two' }] }, 'user-1');
 
 	expect(parkedEntries(cookies).map((e) => e.state)).toEqual(['a', 'b']);
 });
@@ -216,23 +237,23 @@ test('parking drops entries at the TTL boundary and keeps fresh ones', () => {
 	const t0 = new Date('2026-01-01T00:00:00Z').getTime();
 	vi.setSystemTime(t0);
 	const cookies = makeCookies();
-	parkPendingChannelPick(cookies as never, 'a', { refreshToken: 'token-a', channels: [{ id: 'UC1', title: 'One' }] });
+	parkPendingChannelPick(cookies as never, 'a', { refreshToken: 'token-a', channels: [{ id: 'UC1', title: 'One' }] }, 'user-1');
 
 	// Exactly at the boundary the older entry is still fresh.
 	vi.setSystemTime(t0 + TTL_MS);
-	parkPendingChannelPick(cookies as never, 'b', { refreshToken: 'token-b', channels: [{ id: 'UC2', title: 'Two' }] });
+	parkPendingChannelPick(cookies as never, 'b', { refreshToken: 'token-b', channels: [{ id: 'UC2', title: 'Two' }] }, 'user-1');
 	expect(parkedEntries(cookies).map((e) => e.state)).toEqual(['a', 'b']);
 
 	// One millisecond past it, the oldest entry is dropped on the next park.
 	vi.setSystemTime(t0 + TTL_MS + 1);
-	parkPendingChannelPick(cookies as never, 'c', { refreshToken: 'token-c', channels: [{ id: 'UC3', title: 'Three' }] });
+	parkPendingChannelPick(cookies as never, 'c', { refreshToken: 'token-c', channels: [{ id: 'UC3', title: 'Three' }] }, 'user-1');
 	expect(parkedEntries(cookies).map((e) => e.state)).toEqual(['b', 'c']);
 });
 
 test('the cookie is bounded to the five newest pending picks', () => {
 	const cookies = makeCookies();
 	for (const state of ['a', 'b', 'c', 'd', 'e', 'f']) {
-		parkPendingChannelPick(cookies as never, state, { refreshToken: `token-${state}`, channels: [{ id: 'UC1', title: 'One' }] });
+		parkPendingChannelPick(cookies as never, state, { refreshToken: `token-${state}`, channels: [{ id: 'UC1', title: 'One' }] }, 'user-1');
 	}
 
 	const entries = parkedEntries(cookies);
@@ -244,13 +265,13 @@ test('the cookie is bounded to the five newest pending picks', () => {
 
 test('clear removes only the matching flow and keeps the others', () => {
 	const cookies = makeCookies();
-	parkPendingChannelPick(cookies as never, 'a', { refreshToken: 'token-a', channels: [{ id: 'UC1', title: 'One' }] });
-	parkPendingChannelPick(cookies as never, 'b', { refreshToken: 'token-b', channels: [{ id: 'UC2', title: 'Two' }] });
+	parkPendingChannelPick(cookies as never, 'a', { refreshToken: 'token-a', channels: [{ id: 'UC1', title: 'One' }] }, 'user-1');
+	parkPendingChannelPick(cookies as never, 'b', { refreshToken: 'token-b', channels: [{ id: 'UC2', title: 'Two' }] }, 'user-1');
 
 	clearPendingChannelPick(cookies as never, 'a');
 
-	expect(readPendingChannelPick(cookies as never, 'a')).toBeNull();
-	expect(readPendingChannelPick(cookies as never, 'b')).toEqual({
+	expect(readPendingChannelPick(cookies as never, 'a', 'user-1')).toBeNull();
+	expect(readPendingChannelPick(cookies as never, 'b', 'user-1')).toEqual({
 		refreshToken: 'token-b',
 		channels: [{ id: 'UC2', title: 'Two' }]
 	});
@@ -259,7 +280,7 @@ test('clear removes only the matching flow and keeps the others', () => {
 
 test('clear deletes the cookie at path / when the last entry is removed', () => {
 	const cookies = makeCookies();
-	parkPendingChannelPick(cookies as never, 's', { refreshToken: 'tok', channels: [{ id: 'UC1', title: 'One' }] });
+	parkPendingChannelPick(cookies as never, 's', { refreshToken: 'tok', channels: [{ id: 'UC1', title: 'One' }] }, 'user-1');
 	cookies.setCalls.length = 0;
 
 	clearPendingChannelPick(cookies as never, 's');
@@ -333,4 +354,30 @@ test('an orphan channel is claimed by the connecting team', async () => {
 	expect(result).toBe('ok');
 	const row = await testDb().db.select().from(channels).get();
 	expect(row).toMatchObject({ id: 'UC1', userId: OWNER.id, orgId: OWNER.orgId });
+});
+
+test('channel state: round-trips the starter userId and is opaque to the client', () => {
+	const state = createChannelState('user-1');
+	expect(state).not.toContain('user-1');
+	expect(decodeChannelState(state)).toEqual({ userId: 'user-1' });
+	expect(decodeChannelState(state)).toEqual({ userId: 'user-1' }); // deterministic, repeatable reads
+});
+
+test('channel state: tampered or forged values decode to null (fail-closed)', () => {
+	expect(decodeChannelState('garbage')).toBeNull();
+	expect(decodeChannelState(encrypt('not-json'))).toBeNull();
+	// A state encrypted for a different user still decodes — to THAT user; the
+	// callback compares the decoded starter against the signed-in session.
+	expect(decodeChannelState(createChannelState('someone-else'))).toEqual({ userId: 'someone-else' });
+});
+
+test('channel state: an expired state decodes to null', () => {
+	vi.useFakeTimers();
+	try {
+		const state = createChannelState('user-1');
+		vi.setSystemTime(Date.now() + 11 * 60 * 1000);
+		expect(decodeChannelState(state)).toBeNull();
+	} finally {
+		vi.useRealTimers();
+	}
 });

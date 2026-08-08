@@ -36,7 +36,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <p><strong>Moderation Action:</strong> an automated action configured by you (such as holding, hiding, removing, or reporting comments) executed via the YouTube API Services.</p>
 
-<p><strong>Moderation Outcome Data:</strong> the minimal record we keep of each action (comment ID reference, comment text truncated to 500 characters, verdict, action, timestamp), without author identifiers.</p>
+<p><strong>Moderation Outcome Data:</strong> the minimal record we keep of each action (comment ID reference, comment text truncated to 500 characters, verdict, action, timestamp, and the commenter's public handle — shown in the activity log for up to 30 days, then erased automatically, and erasable on demand at any time). No other author identifiers are included.</p>
 
 <p><strong>Consumer:</strong> a user qualifying as a consumidor under Article 2 of the CDC.</p>
 
@@ -54,7 +54,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <p><strong>4.1</strong> The Service retrieves comments from your connected YouTube channel(s) via the YouTube API Services, classifies them automatically (including detection of hate speech and related abusive content), and executes the Moderation Actions you configure.</p>
 
-<p><strong>4.2</strong> We minimize comment data: comment text (truncated to 500 characters) is stored as part of Moderation Outcome Data, and comment author identifiers are processed in memory only and never stored — except identifiers you enter in user rules, which are stored as your own configuration — as described in the DPA and Privacy Policy.</p>
+<p><strong>4.2</strong> We minimize comment data: comment text (truncated to 500 characters) is stored as part of Moderation Outcome Data, and the commenter's public handle appears with it in the activity log for up to 30 days, is then erased automatically, and can be erased on demand at any time. Other comment author identifiers are processed in memory only and never retained — no author channel IDs are kept and no author profiles are built — except identifiers you enter in user rules or the protected-handles list, which are stored as your own configuration — as described in the DPA and Privacy Policy.</p>
 
 <p><strong>4.3</strong> The Service is a tool. Automated classification may produce false positives or false negatives. You are responsible for reviewing your configuration and its effects on your channel (see Section 9).</p>
 

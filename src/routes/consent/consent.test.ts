@@ -51,7 +51,7 @@ import {
 	parkPendingConsent,
 	type PendingConsent
 } from '$lib/server/legal';
-import { createSession, getSessionUser } from '$lib/server/session';
+import { createSession, getSessionUser, type SessionUser } from '$lib/server/session';
 
 import { actions, load } from './+page.server';
 
@@ -92,7 +92,7 @@ function consentRequest(fields: Record<string, string>) {
 async function captureAction(
 	cookies: ReturnType<typeof makeCookies>,
 	fields: Record<string, string>,
-	opts: { state?: string; withSession?: boolean } = {}
+	opts: { state?: string; withSession?: boolean; user?: SessionUser } = {}
 ) {
 	try {
 		return (await actions.default({
@@ -100,7 +100,7 @@ async function captureAction(
 			request: consentRequest(fields),
 			url: new URL(`http://localhost/consent${opts.state ? `?state=${opts.state}` : ''}`),
 			getClientAddress: () => '203.0.113.7',
-			...(opts.withSession ? { locals: { user: TEST_OWNER } } : {})
+			...(opts.withSession ? { locals: { user: opts.user ?? TEST_OWNER } } : {})
 		} as never)) as
 			| { status: number }
 			| undefined;
@@ -470,12 +470,32 @@ test('load with a signed-in user whose consent is current redirects to /dashboar
 	}
 });
 
-test('a parked identity takes precedence over the signed-in session', async () => {
+test('a parked new-identity flow is NOT rendered to a different signed-in user (CodeRabbit 3738037988)', async () => {
 	await seedOwner();
-	// TEST_OWNER has no consent row — if the session path won, this would
-	// render kind 'existing'. The parked flow must render its own identity.
-	const data = await loadConsent(cookiesWithPending(NEW_SUB), 'http://localhost/consent?state=state-1', true);
-	expect(data).toMatchObject({ kind: 'new', displayName: 'One' });
+	// Shared browser: TEST_OWNER is signed in, but the parked 'new' flow
+	// belongs to a Google account that does not exist yet — never render (or
+	// leak the displayName of) someone else's parked identity.
+	try {
+		await loadConsent(cookiesWithPending(NEW_SUB), 'http://localhost/consent?state=state-1', true);
+		expect.unreachable('load must reject a parked flow owned by a different user');
+	} catch (e) {
+		expect(e).toMatchObject({
+			status: 400,
+			body: { message: 'This sign-in is for a different account — sign out and start again.' }
+		});
+	}
+});
+
+test('a parked identity is rendered to its OWN signed-in user', async () => {
+	await seedOwner();
+	// Control: the same user who parked the flow sees it — the load guard must
+	// only fire on a mismatch.
+	const data = await loadConsent(
+		cookiesWithPending({ kind: 'existing', userId: TEST_OWNER.id }),
+		'http://localhost/consent?state=state-1',
+		true
+	);
+	expect(data).toMatchObject({ kind: 'existing' });
 });
 
 test('a signed-in user re-consents in place: consent row written, NO new session issued', async () => {
@@ -525,4 +545,54 @@ test('a signed-in re-consent without the required checkbox fails with 400 and wr
 	expect(res.data?.error).toContain('at least 18');
 	expect(await testDb().db.select().from(consents).all()).toHaveLength(0);
 	expect(await testDb().db.select().from(sessions).all()).toHaveLength(0);
+});
+
+test('a parked existing-identity flow is rejected when a DIFFERENT user is signed in (shared browser)', async () => {
+	// Hardening: user B, signed in on a shared machine, must not complete user
+	// A's parked consent — doing so would mint a session AS A in B's browser.
+	await seedOwner();
+	const other: SessionUser = { ...TEST_OWNER, id: 'user-b', email: 'b@example.com' };
+	const cookies = cookiesWithPending({ kind: 'existing', userId: TEST_OWNER.id });
+
+	const res = (await captureAction(cookies, { consent: 'on' }, { state: 'state-1', withSession: true, user: other })) as {
+		status: number;
+		data?: { error?: string };
+	};
+
+	expect(res.status).toBe(400);
+	expect(res.data?.error).toContain('different account');
+	// Nothing was written — no consent row for A, no session minted as A.
+	expect(await testDb().db.select().from(consents).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(sessions).all()).toHaveLength(0);
+});
+
+test('a parked new-identity flow is rejected while ANY user is signed in (shared browser)', async () => {
+	await seedOwner();
+	const cookies = cookiesWithPending({ kind: 'new', sub: 'sub-new', email: 'new@example.com', displayName: 'New' });
+
+	const res = (await captureAction(cookies, { consent: 'on' }, { state: 'state-1', withSession: true })) as {
+		status: number;
+		data?: { error?: string };
+	};
+
+	expect(res.status).toBe(400);
+	expect(res.data?.error).toContain('different account');
+	// A parked 'new' identity is a Google account that does not exist yet — a
+	// signed-in session can never be the same account, so no account is created.
+	expect(await testDb().db.select().from(users).where(eq(users.googleSub, 'sub-new')).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(consents).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(sessions).all()).toHaveLength(0);
+});
+
+test('a parked identity completed by its OWN signed-in user is still accepted', async () => {
+	// Control: the same user who parked the flow may complete it while signed
+	// in (their session id matches the parked userId) — the shared-browser
+	// guard must not reject the legitimate owner.
+	await seedOwner();
+	const cookies = cookiesWithPending({ kind: 'existing', userId: TEST_OWNER.id });
+
+	const thrown = await captureAction(cookies, { consent: 'on' }, { state: 'state-1', withSession: true });
+
+	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
+	expect(await testDb().db.select().from(consents).all()).toHaveLength(1);
 });

@@ -24,6 +24,7 @@ import { describe, expect, it } from 'vitest';
 const here = dirname(fileURLToPath(import.meta.url));
 const queuePage = readFileSync(join(here, '+page.svelte'), 'utf8');
 const rulesPage = readFileSync(join(here, '..', 'rules', '+page.svelte'), 'utf8');
+const logPage = readFileSync(join(here, '..', 'log', '+page.svelte'), 'utf8');
 
 describe('queue page states (I12)', () => {
 	it('renders action failures in an error-box', () => {
@@ -52,6 +53,20 @@ describe('queue page states (I12)', () => {
 describe('rules page states (I12)', () => {
 	it('announces form errors to assistive technology', () => {
 		expect(rulesPage).toMatch(/class="error-box"[^>]*role="alert"/);
+	});
+});
+
+// Subroute visual dedup (redesign Commit 6): the shared channel header owns
+// the visible h1; each subroute keeps only a visually-hidden h2 naming its
+// section for assistive technology.
+describe('subroute heading dedup', () => {
+	it.each([
+		['queue', queuePage, 'Review queue'],
+		['rules', rulesPage, 'Rules'],
+		['log', logPage, 'Audit log']
+	])('%s keeps an sr-only section heading and no visible h1', (_name, page, heading) => {
+		expect(page).toContain(`<h2 class="sr-only">${heading}</h2>`);
+		expect(page).not.toContain('<h1');
 	});
 });
 

@@ -21,7 +21,7 @@ import { afterEach, expect, test, vi } from 'vitest';
 
 import { setupTestDb, testDb } from './testdb';
 import { memberships, organizations, sessions, users } from './db/schema';
-import { createSession, destroySession, getSessionUser, requireUser, SESSION_TTL_MS } from './session';
+import { createSession, destroySession, getSessionUser, requireUser, rotateSession, SESSION_TTL_MS } from './session';
 
 setupTestDb(['sessions', 'memberships', 'organizations', 'users']);
 
@@ -375,4 +375,50 @@ test('requireUser throws a 401 with the exact sign-in message when signed out', 
 	} catch (e) {
 		expect(e).toMatchObject({ status: 401, body: { message: 'sign-in required' } });
 	}
+});
+
+test('rotateSession replaces the token in place: the old token dies, the new one resolves', async () => {
+	// Privilege-context changes (org switch, invite accept) must invalidate the
+	// old token: a token minted under the weaker context would otherwise keep
+	// working at the new privileges until it slides away.
+	const userId = await seedUser();
+	const original = await createSession(userId);
+
+	const rotated = await rotateSession(original.token, userId, null);
+
+	expect(rotated.token).toMatch(/^[0-9a-f]{64}$/);
+	expect(rotated.token).not.toBe(original.token);
+	// The stolen pre-change token can never resolve again.
+	expect(await getSessionUser(original.token)).toBeNull();
+	// The replacement resolves to the same user and keeps the remaining expiry
+	// (rotation must not extend the session's lifetime).
+	expect(rotated.expiresAt).toBe(original.expiresAt);
+	const resolution = await getSessionUser(rotated.token);
+	expect(resolution).toMatchObject({ user: { id: userId }, expiresAt: original.expiresAt, renewed: false });
+});
+
+test('rotateSession carries the new active org onto the replacement token', async () => {
+	const userId = await seedUser();
+	// A real switch target: the rotated session must resolve at an org the user
+	// actually belongs to (resolveActiveOrg falls back otherwise).
+	await testDb().db.insert(organizations).values({ id: 'org-target', name: 'target' });
+	await testDb().db.insert(memberships).values({ userId, orgId: 'org-target', role: 'admin' });
+	const original = await createSession(userId);
+
+	const rotated = await rotateSession(original.token, userId, 'org-target');
+
+	const row = await testDb().db.select().from(sessions).where(eq(sessions.id, rotated.token)).get();
+	expect(row).toMatchObject({ userId, activeOrgId: 'org-target' });
+	expect(await getSessionUser(rotated.token)).toMatchObject({ user: { orgId: 'org-target', orgRole: 'admin' } });
+});
+
+test('rotateSession rejects tokens that are not the caller\'s own and leaves them alone', async () => {
+	// PR #52 pattern: session mutations are scoped to the caller AND verified —
+	// a mismatched token must fail loudly, not silently mint a replacement.
+	await seedUser('user-1');
+	await seedUser('user-2');
+	const { token } = await createSession('user-2');
+
+	await expect(rotateSession(token, 'user-1', null)).rejects.toMatchObject({ status: 401 });
+	expect(await getSessionUser(token)).not.toBeNull(); // untouched
 });

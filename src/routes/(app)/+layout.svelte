@@ -20,8 +20,13 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <script lang="ts">
 	import { invalidateAll } from '$app/navigation';
+	import { page } from '$app/state';
 
 	let { children, data } = $props();
+
+	// Active nav underline (redesign Commit 5): the link matching the current
+	// pathname gets the 2px --accent underline + aria-current="page".
+	const path = $derived(page.url.pathname);
 
 	// While the database is unreachable the layout load returns
 	// { maintenance: true, orgs: [] } and possibly a null user. Poll gently so
@@ -36,9 +41,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <nav class="app-nav" aria-label="App">
 	<a class="brand" href="/dashboard">Moderaty</a>
-	<a href="/dashboard">Dashboard</a>
-	<a href="/org">Team</a>
-	<a href="/help">Help</a>
+	<a href="/dashboard" class:active={path === '/dashboard'} aria-current={path === '/dashboard' ? 'page' : undefined}>Dashboard</a>
+	<a href="/org" class:active={path === '/org'} aria-current={path === '/org' ? 'page' : undefined}>Team</a>
+	<a href="/help" class:active={path === '/help'} aria-current={path === '/help' ? 'page' : undefined}>Help</a>
 	{#if !data.maintenance && data.user}
 		<!-- Identity UI is hidden during an outage: the session lookup failed,
 			so identity is unknown, and sign-out's write cannot succeed anyway.
@@ -56,7 +61,12 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			</form>
 		{/if}
 		<span class="account">
-			<span class="muted">{data.user.displayName}</span>
+			<a
+				class="account-link"
+				href="/account"
+				class:active={path === '/account'}
+				aria-current={path === '/account' ? 'page' : undefined}>{data.user.displayName}</a
+			>
 			<form method="POST" action="/logout">
 				<button class="btn secondary small" type="submit">Sign out</button>
 			</form>
@@ -79,10 +89,26 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		</div>
 	</main>
 {:else}
-	<main class="app-main">{@render children()}</main>
+	<!-- Route transition (redesign spec §Phase 6): every pathname change
+		remounts main with a 200ms fade/rise; reduced-motion kills it in
+		app.css. -->
+	{#key path}
+		<main class="app-main route-enter">{@render children()}</main>
+	{/key}
 {/if}
 
 <style>
+	.app-nav a {
+		border-bottom: 2px solid transparent;
+		padding-bottom: 2px;
+		transition:
+			color 150ms var(--ease-out),
+			border-color 150ms var(--ease-out);
+	}
+	.app-nav a.active {
+		color: var(--paper);
+		border-bottom-color: var(--accent);
+	}
 	.team-switch {
 		display: flex;
 		align-items: center;
@@ -93,6 +119,24 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		display: flex;
 		align-items: center;
 		gap: 10px;
+	}
+	.route-enter {
+		animation: route-in 200ms var(--ease-out);
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.route-enter {
+			animation: none;
+		}
+	}
+	@keyframes route-in {
+		from {
+			opacity: 0;
+			transform: translateY(8px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
 	}
 	.maintenance {
 		display: grid;

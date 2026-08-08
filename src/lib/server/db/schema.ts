@@ -150,6 +150,20 @@ export const rules = sqliteTable('rules', {
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 });
 
+// Per-channel allowlist of protected commenter handles. Plain-text channelId
+// like every channel-child table (no FKs — orphan protection is deletion.ts +
+// the verify-tenancy probe). `handle` stores the normalized lowercase form.
+export const channelAllowedHandles = sqliteTable('channel_allowed_handles', {
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	channelId: text('channel_id').notNull(),
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	handle: text('handle').notNull(), // normalized lowercase commenter handle
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+}, (table) => [
+	index('channel_allowed_handles_channel_idx').on(table.channelId)
+]);
+
 export const comments = sqliteTable('comments', {
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	id: text('id').primaryKey(), // YouTube comment ID
@@ -168,7 +182,7 @@ export const comments = sqliteTable('comments', {
 	publishedAt: text('published_at').notNull(),
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	status: text('status').notNull(), // 'pending' | 'approved' | 'held' | 'rejected' | 'deleted' | 'restoring' (in-flight undo)
-	decidedBy: text('decided_by').notNull(), // 'rule' | 'ai' | 'human' | 'none'
+	decidedBy: text('decided_by').notNull(), // 'rule' | 'ai' | 'human' | 'none' | 'allowlist'
 	matchedRuleId: integer('matched_rule_id'),
 	aiScore: text('ai_score'), // JSON string of the six category scores, or null
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
@@ -185,6 +199,9 @@ export const moderationActions = sqliteTable('moderation_actions', {
 	state: text('state').notNull(), // 'pending' | 'dispatched' | 'completed' ('manual_review' legacy)
 	lastAttemptAt: text('last_attempt_at'),
 	lastManualRetryAt: text('last_manual_retry_at'),
+	// Normalized commenter handle, 30-day TTL (same retention as audit_log):
+	// staged with the decision and carried to the completion audit row.
+	authorHandle: text('author_handle'),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
 	index('moderation_actions_channel_state_idx').on(table.channelId, table.state)
@@ -206,12 +223,19 @@ export const auditLog = sqliteTable('audit_log', {
 	// Null for every real-run action — that text lives in comments.text.
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	text: text('text'),
+	// Normalized commenter handle (lowercase @handle), 30-day TTL, null on
+	// manual rows (actor 'user' actions taken from the dashboard).
+	authorHandle: text('author_handle'),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
 	// Dashboard ban counts (action='ban' + channel_id IN, issue #77) and the
 	// per-channel log page both filter by channel_id; the composite serves
 	// the ban query and its leftmost column serves channel-only reads.
-	index('audit_log_channel_action_idx').on(table.channelId, table.action)
+	index('audit_log_channel_action_idx').on(table.channelId, table.action),
+	// The log page's latest-per-comment query filters
+	// channel_id = ? AND comment_id IN (page ids) (qodo review on PR #125);
+	// without this, the page load would scan every audit row of the channel.
+	index('audit_log_channel_comment_idx').on(table.channelId, table.commentId)
 ]);
 
 // Evidentiary consent log (CDC Art. 6º, VIII; LGPD). One row per acceptance

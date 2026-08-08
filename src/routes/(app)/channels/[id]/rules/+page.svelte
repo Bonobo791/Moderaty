@@ -28,7 +28,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	<title>Moderaty — Rules</title>
 </svelte:head>
 
-<h1>Rules — {data.ch?.title}</h1>
+<!-- Accessible heading only: the shared channel header (h1) and the active
+	 tab already identify this section visually. -->
+<h2 class="sr-only">Rules</h2>
 <p class="page-sub">Keyword, regex, and blocked-user rules that act before AI scoring.</p>
 
 {#if form?.error}<div class="error-box" role="alert">{form.error}</div>{/if}
@@ -65,5 +67,39 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	<EmptyState
 		title="No rules yet"
 		hint="AI moderation still applies to every comment — rules add your own keywords, patterns, and blocked users."
+	/>
+{/each}
+
+<h2>Protected handles</h2>
+<p class="page-sub">Comments from these handles are always approved — they skip rules and AI scanning.</p>
+<p class="page-sub">{data.handles.length}/100 protected handles</p>
+
+<div class="card">
+	<form method="POST" action="?/addHandle" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+		<label for="new-handle">Handle</label>
+		<input
+			id="new-handle"
+			name="handle"
+			placeholder="@handle"
+			aria-label="Protected handle"
+			style="flex:1; min-width:220px"
+			required
+		/>
+		<button class="btn" type="submit">Add handle</button>
+	</form>
+</div>
+
+{#each data.handles as h}
+	<div class="card" style="display:flex; justify-content:space-between; align-items:center">
+		<div><code>@{h.handle}</code></div>
+		<form class="inline" method="POST" action="?/removeHandle">
+			<input type="hidden" name="handleId" value={h.id} />
+			<button class="btn danger small" type="submit" aria-label="Remove protected handle {h.handle}">Remove</button>
+		</form>
+	</div>
+{:else}
+	<EmptyState
+		title="No protected handles"
+		hint="Add a handle whose comments should always be approved, skipping rules and AI scanning."
 	/>
 {/each}

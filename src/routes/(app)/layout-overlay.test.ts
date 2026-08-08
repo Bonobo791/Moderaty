@@ -18,7 +18,12 @@
 
 import { createRawSnippet } from 'svelte';
 import { render } from 'svelte/server';
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
+
+// The layout reads page.url for the nav active state; standalone SSR has no
+// request context, so $app/state is mocked (see layout-nav.test.ts for the
+// active-state pins).
+vi.mock('$app/state', () => ({ page: { url: new URL('http://localhost/dashboard') } }));
 
 import { TEST_OWNER } from '$lib/server/testdb';
 

@@ -18,28 +18,49 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 -->
 
+<!-- Dashboard: aggregate door-status header + channel ledger (redesign
+	 spec §7 Phase 2). All counters are computed client-side from the
+	 existing load payload (data.stats / data.bans — spec §6.3, no backend
+	 change). The per-channel controls live on the channel detail page;
+	 ledger rows navigate there. -->
+
 <script lang="ts">
-	import { enhance } from '$app/forms';
+	import { goto } from '$app/navigation';
 	import EmptyState from '$lib/EmptyState.svelte';
+	import Ticker from '$lib/Ticker.svelte';
 	import { autoRefresh } from '$lib/auto-refresh.svelte';
 	import { relativeTime } from '$lib/relative-time';
 
-	let { data, form } = $props();
+	let { data } = $props();
 
 	// Counts change with every cron run; revalidate like the queue and log pages.
 	autoRefresh();
-
-	// Channel whose dry-run preview is in flight; the button is disabled while
-	// it runs (the action's lease claim also 409s a server-side race).
-	let dryRunPending = $state<string | null>(null);
 
 	function count(channelId: string, status: string): number {
 		const row = data.stats.find((s: any) => s.channelId === channelId && s.status === status);
 		return row ? row.n : 0;
 	}
 
-	function bans(channelId: string): number {
-		return data.bans.find((b: any) => b.channelId === channelId)?.n ?? 0;
+	// Aggregate door-status counters: plain sums across every channel (§6.3).
+	function sum(status: string): number {
+		return data.stats.reduce(
+			(total: number, s: any) => total + (s.status === status ? s.n : 0),
+			0
+		);
+	}
+	const pendingSum = $derived(sum('pending'));
+	const rejectedSum = $derived(sum('rejected'));
+	const approvedSum = $derived(sum('approved'));
+	const bannedSum = $derived(
+		data.bans.reduce((total: number, b: any) => total + b.n, 0)
+	);
+
+	function openChannel(channelId: string) {
+		goto(`/channels/${channelId}`);
+	}
+
+	function onRowKeydown(event: KeyboardEvent, channelId: string) {
+		if (event.key === 'Enter') openChannel(channelId);
 	}
 </script>
 
@@ -49,341 +70,317 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 {#if data.maintenance}
 	<!-- The layout's overlay only triggers on LAYOUT data; when the layout was
-	healthy but a dashboard query failed mid-load, the page must render its own
-	state instead of an empty shell with destructive controls (I12). -->
+		healthy but a dashboard query failed mid-load, the page must render its own
+		state instead of an empty shell with destructive controls (I12). -->
 	<div class="error-box" role="alert">
 		<strong>Maintenance</strong> — Moderaty is temporarily unable to reach its database.
 		Nothing on this page will work right now; try again in a minute.
 	</div>
 {:else}
-<h1>Channels</h1>
-<p class="page-sub">Connect a channel and track its moderation activity.</p>
+<section class="door-status" aria-labelledby="door-status-label">
+	<span class="caps-label" id="door-status-label">Door status</span>
+	{#if pendingSum > 0}
+		<h1 class="door-headline">{pendingSum} at the rope.</h1>
+		<p class="door-subline">
+			{pendingSum} comments are waiting for a decision. The rope only works if someone checks it.
+		</p>
+	{:else}
+		<h1 class="door-headline">The door is quiet.</h1>
+		<p class="door-subline">
+			{data.chs.length} channels protected. The queue is clear. Nothing slipped past.
+		</p>
+	{/if}
+	<div class="door-stats">
+		<div class="stat">
+			<span class="stat-value" class:accent={pendingSum > 0}><Ticker value={pendingSum} /></span>
+			<span class="caps-label">Pending</span>
+		</div>
+		<div class="stat">
+			<span class="stat-value"><Ticker value={rejectedSum} /></span>
+			<span class="caps-label">Rejected</span>
+		</div>
+		<div class="stat">
+			<span class="stat-value ok"><Ticker value={approvedSum} /></span>
+			<span class="caps-label">Approved</span>
+		</div>
+		<div class="stat">
+			<span class="stat-value accent"><Ticker value={bannedSum} /></span>
+			<span class="caps-label">Edge lords banned</span>
+		</div>
+	</div>
+</section>
 
-<p class="muted" style="font-size:0.9em">
+<section class="ledger" aria-labelledby="ledger-label">
+	<div class="ledger-head">
+		<h2 id="ledger-label">Channels</h2>
+		<span class="caps-label">{data.chs.length} connected</span>
+	</div>
+	{#if data.chs.length === 0}
+		<EmptyState
+			title="No channels connected"
+			hint="Connect your YouTube channels to start moderating comments automatically."
+		/>
+	{:else}
+		<table class="ledger-table">
+			<thead>
+				<tr>
+					<th>Channel</th>
+					<th>Status</th>
+					<th class="num">Pending</th>
+					<th class="num col-rejected">Rejected</th>
+					<th class="num col-approved">Approved</th>
+					<th class="col-sensitivity">Sensitivity</th>
+					<th class="col-last">Last checked</th>
+				</tr>
+			</thead>
+			<tbody>
+				{#each data.chs as ch (ch.id)}
+					{@const pending = count(ch.id, 'pending')}
+					{@const strict = ch.toneLevel === 2}
+					<!-- The row itself is a keyboard-focusable link (Enter navigates);
+						the name cell keeps a real anchor for href semantics. -->
+					<tr
+						class="ledger-row"
+						role="link"
+						tabindex="0"
+						aria-label="Open {ch.title}"
+						onclick={() => openChannel(ch.id)}
+						onkeydown={(event) => onRowKeydown(event, ch.id)}
+					>
+						<td>
+							<a class="channel-name" href="/channels/{ch.id}">{ch.title}</a>
+							<span class="mono channel-id col-id">ID: {ch.id}</span>
+						</td>
+						<td>
+							<span class="caps-label protected-label">Protected</span>
+							{#if pending > 0}
+								<a class="status-sub pending-link" href="/channels/{ch.id}/queue">
+									{pending} comment{pending === 1 ? '' : 's'} waiting for review
+								</a>
+							{:else}
+								<span class="status-sub">queue is clear</span>
+							{/if}
+						</td>
+						<td class="mono num">{pending}</td>
+						<td class="mono num col-rejected">{count(ch.id, 'rejected')}</td>
+						<td class="mono num col-approved">{count(ch.id, 'approved')}</td>
+						<td class="col-sensitivity">
+							<div class="mini-track">
+								<span class="mini-rail"></span>
+								<span class="mini-fill" class:strict></span>
+								<span class="mini-tick" class:strict></span>
+							</div>
+							<span class="caps-label mini-label">{strict ? 'Strict' : 'Chill'}</span>
+						</td>
+						<td class="mono col-last">
+							{ch.lastRunAt ? relativeTime(ch.lastRunAt) : 'never'}
+						</td>
+					</tr>
+				{/each}
+			</tbody>
+		</table>
+	{/if}
+</section>
+
+<div class="connect-block">
+	<a class="btn" href="/api/auth/google">Connect YouTube channel</a>
+	<p class="connect-helper">Google sign-in required. Access is revocable anytime.</p>
+</div>
+
+<p class="muted privacy-note">
 	We've clarified what we retain after account deletion — see the <a href="/privacy">Privacy Policy</a>.
 </p>
-
-{#each data.chs as ch}
-	{@const pending = count(ch.id, 'pending')}
-	{@const level = ch.toneLevel ?? 1}
-	{@const banned = bans(ch.id)}
-	<div class="card">
-		<h2 style="margin-top:0">{ch.title}</h2>
-		<p style="margin-top:0">
-			protected —
-			{#if pending > 0}
-				<a style="color: var(--danger); font-weight: 600" href="/channels/{ch.id}/queue">{pending} comment{pending === 1 ? '' : 's'} waiting for review</a>
-			{:else}
-				queue is clear
-			{/if}
-		</p>
-		<ul class="stats">
-			<li><span class="badge attention">pending: {pending}</span></li>
-			<li><span class="badge neutral">rejected: {count(ch.id, 'rejected')}</span></li>
-			<li><span class="badge neutral">deleted: {count(ch.id, 'deleted')}</span></li>
-			<li><span class="badge ok">approved: {count(ch.id, 'approved')}</span></li>
-		</ul>
-		<p class="edge-lords">{banned} Edge Lord{banned === 1 ? '' : 's'} Banned</p>
-		<form class="sensitivity" method="POST" action="?/setToneLevel" use:enhance>
-			<input type="hidden" name="channelId" value={ch.id} />
-			<label class="sensitivity-title" for="tone-{ch.id}">Moderation sensitivity</label>
-			<input
-				id="tone-{ch.id}"
-				type="range"
-				name="toneLevel"
-				min="1"
-				max="2"
-				step="1"
-				value={level}
-				aria-label="Moderation sensitivity for {ch.title}"
-				onchange={(event) => event.currentTarget.form?.requestSubmit()}
-			/>
-			<div class="sensitivity-options">
-				<span class="banner" class:chosen={level === 1}>
-					<img src="/edge-lord.jpg" alt="Smug Pepe, the Edge Lord" width="44" height="44" />
-					EDGE LORD
-				</span>
-				<span class="banner" class:chosen={level === 2}>
-					<img src="/ackchyually.gif" alt="The Ackchyually meme guy" width="44" height="44" />
-					EDGE LORD + ACKCHYUALLY&hellip;
-				</span>
-			</div>
-			<p class="muted" style="margin:6px 0 0">
-				{level === 2
-					? 'Hateful comments and demeaning, condescending, or sarcastic tone are moderated.'
-					: 'Only hateful and abusive comments are moderated.'}
-			</p>
-		</form>
-		<form class="protections" method="POST" action="?/setProtections" use:enhance>
-			<input type="hidden" name="channelId" value={ch.id} />
-			<span class="sensitivity-title">Strict protection</span>
-			<label class="protection-toggle" for="protect-lgbtqia-{ch.id}">
-				<input
-					id="protect-lgbtqia-{ch.id}"
-					type="checkbox"
-					name="protectLgbtqia"
-					checked={ch.protectLgbtqia === 1}
-					onchange={(event) => event.currentTarget.form?.requestSubmit()}
-				/>
-				Harassment targeting LGBTQIA+ people
-			</label>
-			<label class="protection-toggle" for="protect-women-{ch.id}">
-				<input
-					id="protect-women-{ch.id}"
-					type="checkbox"
-					name="protectWomen"
-					checked={ch.protectWomen === 1}
-					onchange={(event) => event.currentTarget.form?.requestSubmit()}
-				/>
-				Harassment targeting women
-			</label>
-			<p class="muted" style="margin:6px 0 0">
-				Heightened AI scrutiny for these comments, at any sensitivity level.
-			</p>
-		</form>
-		{#if form?.scope === 'protections' && form?.channelId === ch.id && form?.error}
-			<p class="error-box" role="alert">{form.error}</p>
-		{/if}
-		<a class="btn secondary small" href="/channels/{ch.id}/rules">Rules</a>
-		<a class="btn secondary small" href="/channels/{ch.id}/queue">Review queue</a>
-		<a class="btn secondary small" href="/channels/{ch.id}/log">Audit log</a>
-		<form method="POST" action="?/analyzeHistory" class="history-form">
-			<input type="hidden" name="channelId" value={ch.id} />
-			<label for="history-months-{ch.id}">Analyze history</label>
-			<select id="history-months-{ch.id}" name="months" aria-label="How far back to analyze comments on {ch.title}">
-				<option value="1">last month</option>
-				<option value="3" selected>last 3 months</option>
-				<option value="6">last 6 months</option>
-				<option value="12">last 12 months</option>
-				<option value="24">last 24 months</option>
-			</select>
-			<button class="btn secondary small" type="submit">Analyze history on {ch.title}</button>
-		</form>
-		{#if form?.scope === 'history' && form?.channelId === ch.id}
-			{#if form?.error}
-				<p class="error-box" role="alert">{form.error}</p>
-			{:else if form?.ok}
-				<p class="muted" role="status">
-					History scan started — cron is working back {form.months === 1 ? '1 month' : `${form.months} months`}. New comments keep flowing into the review queue as it drains.
-				</p>
-			{/if}
-		{/if}
-		{#if ch.scanning}
-			<p class="muted" role="status">
-				History scan in progress — cron is working through the backlog and new comments flow into the review queue as it drains. This runs in the background: refreshing or leaving this page won't stop it.
-			</p>
-		{/if}
-		<form
-			method="POST"
-			action="?/dryRun"
-			class="history-form"
-			use:enhance={() => {
-				dryRunPending = ch.id;
-				return async ({ update }) => {
-					await update();
-					dryRunPending = null;
-				};
-			}}
-		>
-			<input type="hidden" name="channelId" value={ch.id} />
-			<label for="dryrun-months-{ch.id}">Dry run</label>
-			<select id="dryrun-months-{ch.id}" name="months" aria-label="How far back the dry run covers on {ch.title}">
-				<option value="1">last month</option>
-				<option value="3" selected>last 3 months</option>
-				<option value="6">last 6 months</option>
-				<option value="12">last 12 months</option>
-				<option value="24">last 24 months</option>
-				<option value="all">all time</option>
-			</select>
-			<button
-				class="btn secondary small"
-				type="submit"
-				disabled={dryRunPending === ch.id}
-				aria-label="Run a dry-run preview on {ch.title}"
-			>
-				{dryRunPending === ch.id ? 'Running dry run…' : 'Dry run'}
-			</button>
-		</form>
-		{#if form?.scope === 'dryRun' && form?.channelId === ch.id}
-			{#if form?.error}
-				<p class="error-box" role="alert">{form.error}</p>
-			{:else if form?.skipped}
-				<p class="muted" role="status">Dry run preview: nothing new to preview right now.</p>
-			{:else if form?.ok}
-				<p class="muted" role="status">
-					Dry run preview ({form.months === 'all' ? 'all time' : form.months === 1 ? 'last month' : `last ${form.months} months`}): {form.fetched} comment{form.fetched === 1 ? '' : 's'} scanned —
-					{form.acted} would be acted on, {form.queued} would go to the review queue.
-					{#if form.partial}Partial — the 20 s preview limit was hit; see the audit log for what completed. {/if}
-					<a href="/channels/{ch.id}/log">See the audit log</a>.
-				</p>
-			{/if}
-		{/if}
-		<p class="muted" style="margin:12px 0 0">
-			last checked {ch.lastRunAt ? relativeTime(ch.lastRunAt) : 'never'} · ID: {ch.id}
-		</p>
-		{#if data.orgRole === 'owner' || data.orgRole === 'admin'}
-			<details class="channel-disconnect">
-				<summary>Danger zone — disconnect channel</summary>
-				<p class="muted">
-					Disconnecting asks Google to revoke Moderaty's access to {ch.title} and immediately
-					erases the channel with all its rules, comments, and moderation history — there is no
-					restore. You can reconnect the channel afterwards, which starts it fresh.
-				</p>
-				{#if form?.scope === 'disconnect' && form?.channelId === ch.id && form?.error}
-					<p class="error-box" role="alert">{form.error}</p>
-				{/if}
-				<form method="POST" action="?/disconnectChannel" use:enhance>
-					<input type="hidden" name="channelId" value={ch.id} />
-					<label class="confirm-delete" for="confirm-disconnect-{ch.id}">
-						<input id="confirm-disconnect-{ch.id}" type="checkbox" name="confirm" />
-						I understand — disconnect {ch.title} and erase its data
-					</label>
-					<button class="btn danger small" type="submit">Disconnect channel {ch.title}</button>
-				</form>
-			</details>
-		{/if}
-	</div>
-{:else}
-	<EmptyState
-		title="No channels connected"
-		hint="Connect your YouTube channels to start moderating comments automatically."
-	/>
-{/each}
-
-<a class="btn" href="/api/auth/google">Connect YouTube channel</a>
-
-<div class="card danger-zone">
-	<h2>Delete account</h2>
-	<p class="muted">
-		Deleting your account is immediate and permanent. It signs you out everywhere, asks Google to
-		revoke Moderaty's access to your YouTube channels (if a revocation fails, you can remove access
-		anytime in your
-		<a href="https://security.google.com/settings/security/permissions" target="_blank" rel="noreferrer">Google security settings</a>), and erases your channels, rules, and moderation
-		records right away — there is no restore window. Only your consent-acceptance records
-		(including your e-mail) are retained, as Brazilian law requires: blocked from any other use,
-		access-restricted, for up to 10 years.
-	</p>
-	{#if form?.error && !form?.scope}
-		<p class="error-box" role="alert">{form.error}</p>
-	{/if}
-	<form method="POST" action="?/deleteAccount" use:enhance>
-		<label class="confirm-delete" for="confirm-delete">
-			<input id="confirm-delete" type="checkbox" name="confirm" />
-			I understand and want to delete my Moderaty account
-		</label>
-		<button class="btn danger" type="submit">Delete my account</button>
-	</form>
-</div>
 {/if}
 
 <style>
-	.history-form {
+	/* ── door status (spec §7 Step 2.1) ─────────────────────── */
+	.door-status {
+		margin-bottom: 48px;
+	}
+	.door-headline {
+		font-size: 44px;
+		font-weight: 600;
+		line-height: 1.05;
+		margin: 14px 0 10px;
+	}
+	.door-subline {
+		margin: 0 0 32px;
+		font-size: 14px;
+		color: var(--text-2);
+	}
+	.door-stats {
 		display: flex;
-		gap: 8px;
-		align-items: center;
+		gap: 48px;
 		flex-wrap: wrap;
-		margin-top: 10px;
 	}
-	.danger-zone {
-		margin-top: 24px;
-		border-color: var(--danger);
-	}
-	.danger-zone h2 {
-		color: var(--danger);
-	}
-	.channel-disconnect {
-		margin-top: 14px;
-		padding-top: 10px;
-		border-top: 1px dashed var(--danger);
-	}
-	.channel-disconnect summary {
-		cursor: pointer;
-		font-size: 0.9rem;
-		font-weight: 600;
-		color: var(--danger);
-	}
-	.confirm-delete {
+	.stat {
 		display: flex;
-		gap: 10px;
-		align-items: flex-start;
-		font-size: 0.9rem;
-		margin: 12px 0;
+		flex-direction: column;
+		gap: 8px;
 	}
-	.confirm-delete input {
-		margin-top: 3px;
-		flex-shrink: 0;
+	.stat-value {
+		font-size: 32px;
+		line-height: 1;
 	}
-	.edge-lords {
-		margin: 10px 0 0;
-		font-weight: 700;
-		letter-spacing: 0.04em;
-		text-transform: uppercase;
-		color: var(--danger);
+	.stat-value.accent {
+		color: var(--accent);
 	}
-	.sensitivity {
-		margin: 10px 0 14px;
-		padding: 10px 12px;
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		background: var(--bg);
+	.stat-value.ok {
+		color: var(--ok);
 	}
-	.protections {
-		margin: 10px 0 14px;
-		padding: 10px 12px;
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		background: var(--bg);
+
+	/* ── ledger (spec §7 Step 2.2) ──────────────────────────── */
+	.ledger {
+		margin-bottom: 40px;
 	}
-	.protection-toggle {
-		display: flex;
-		gap: 10px;
-		align-items: flex-start;
-		font-size: 0.9rem;
-		margin: 8px 0;
-	}
-	.protection-toggle input {
-		margin-top: 3px;
-		flex-shrink: 0;
-		accent-color: var(--brand);
-	}
-	.sensitivity-title {
-		display: block;
-		font-size: 0.85rem;
-		font-weight: 600;
-		margin-bottom: 6px;
-	}
-	.sensitivity input[type='range'] {
-		width: 100%;
-		accent-color: var(--brand);
-	}
-	.sensitivity-options {
+	.ledger-head {
 		display: flex;
 		justify-content: space-between;
-		gap: 8px;
+		align-items: baseline;
+		gap: 16px;
+		margin-bottom: 16px;
+	}
+	.ledger-head h2 {
+		margin: 0;
+		font-size: 22px;
+		font-weight: 600;
+	}
+	.ledger-table {
+		width: 100%;
+		border-collapse: collapse;
+	}
+	.ledger-table th {
+		text-align: left;
+		font-size: 11px;
+		font-weight: 500;
+		letter-spacing: 0.14em;
+		text-transform: uppercase;
+		color: var(--text-3);
+		padding: 0 20px 12px 0;
+		border-bottom: 1px solid var(--line);
+	}
+	.ledger-table td {
+		padding: 16px 20px 16px 0;
+		border-bottom: 1px solid var(--line);
+		vertical-align: middle;
+	}
+	.ledger-row {
+		cursor: pointer;
+		transition: background 150ms var(--ease-out);
+	}
+	.ledger-row:hover {
+		background: var(--surface);
+	}
+	.ledger-row:focus-visible {
+		outline: 1px solid var(--accent);
+		outline-offset: -1px;
+	}
+	.channel-name {
+		display: block;
+		font-weight: 600;
+		color: var(--text);
+		text-decoration: none;
+	}
+	.channel-name:hover {
+		text-decoration: underline;
+		text-underline-offset: 3px;
+	}
+	.channel-id {
+		display: block;
 		margin-top: 4px;
+		font-size: 12px;
+		color: var(--text-3);
 	}
-	.banner {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		padding: 3px 8px;
-		border-radius: 6px;
-		font-size: 0.78rem;
-		font-weight: 700;
-		letter-spacing: 0.03em;
-		color: var(--ink);
-		opacity: 0.45;
+	.protected-label {
+		color: var(--ok);
 	}
-	.banner img {
-		border-radius: 6px;
-		filter: grayscale(1);
+	.status-sub {
+		display: block;
+		margin-top: 4px;
+		font-size: 13px;
+		color: var(--text-2);
 	}
-	.banner.chosen {
-		opacity: 1;
-		background: var(--danger-soft);
-		color: var(--danger);
+	.pending-link {
+		color: var(--accent);
 	}
-	.banner.chosen img {
-		filter: none;
+	.num {
+		text-align: left;
+	}
+
+	/* sensitivity mini-track: 64px, 3px rail, accent fill at the
+	   Strict stop, 2px white tick at the active end (spec §7) */
+	.mini-track {
+		position: relative;
+		width: 64px;
+		height: 12px;
+		margin-bottom: 6px;
+	}
+	.mini-rail {
+		position: absolute;
+		left: 0;
+		right: 0;
+		top: 50%;
+		height: 3px;
+		transform: translateY(-50%);
+		background: var(--line);
+	}
+	.mini-fill {
+		position: absolute;
+		left: 0;
+		top: 50%;
+		width: 0;
+		height: 3px;
+		transform: translateY(-50%);
+		background: var(--accent);
+	}
+	.mini-fill.strict {
+		width: 100%;
+	}
+	.mini-tick {
+		position: absolute;
+		left: 0;
+		top: 50%;
+		width: 2px;
+		height: 12px;
+		transform: translateY(-50%);
+		background: var(--text);
+	}
+	.mini-tick.strict {
+		left: auto;
+		right: 0;
+	}
+
+	/* responsive column collapse (spec §7): display:none, no width tricks */
+	@media (max-width: 767px) {
+		.col-id,
+		.col-rejected,
+		.col-sensitivity,
+		.col-last {
+			display: none;
+		}
+	}
+	@media (max-width: 639px) {
+		.col-approved {
+			display: none;
+		}
+	}
+
+	/* ── connect + privacy note ─────────────────────────────── */
+	.connect-block {
+		margin-bottom: 12px;
+	}
+	.connect-helper {
+		margin: 10px 0 0;
+		font-size: 13px;
+		color: var(--text-2);
+	}
+	.privacy-note {
+		font-size: 0.9em;
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.ledger-row {
+			transition: none;
+		}
 	}
 </style>

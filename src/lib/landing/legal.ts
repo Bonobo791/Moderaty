@@ -34,10 +34,14 @@ export type LegalDoc = {
 };
 
 export const LEGAL_EFFECTIVE_DATE = '5 August 2026';
+// 1.6: commenter handles are now retained in the activity log for up to 30
+// days (automatic + on-demand erasure), so the "author identifiers never
+// stored from comments" promise was rewritten across the Privacy Policy,
+// Terms, DPA, footer, and FAQ.
 // 1.5: Terms §6.1(c) corrected — the lifetime hosted plan has no per-account
 // key flow (hosted scoring runs on the deployment's OPENAI_API_KEY), so the
 // "your own OpenAI key" promise was removed from the lifetime clause.
-export const LEGAL_VERSION = '1.5';
+export const LEGAL_VERSION = '1.6';
 export const LEGAL_KICKER = 'YouTube Comment Moderation Service';
 
 /**
@@ -121,7 +125,7 @@ export const DPA_DOC: LegalDoc = defineDoc(
 	'dpa',
 	'DPA',
 	'Data Processing Agreement',
-	'The LGPD data processing agreement between you (controller) and Moderaty (processor) for YouTube comment data: comment-data minimization (author identifiers never stored from comments), sub-processors, and ANPD transfer clauses.',
+	'The LGPD data processing agreement between you (controller) and Moderaty (processor) for YouTube comment data: comment-data minimization (commenter handles appear in the activity log for up to 30 days, then are erased automatically, and can be erased on demand; no other author identifiers stored), sub-processors, and ANPD transfer clauses.',
 	[
 		{ id: 's1', label: '1. Purpose and Scope' },
 		{ id: 's2', label: '2. Definitions' },
@@ -129,7 +133,7 @@ export const DPA_DOC: LegalDoc = defineDoc(
 		{ id: 's4', label: '4. Subject Matter, Duration, Nature and Purpose' },
 		{ id: 's5', label: '5. Controller Obligations and Lawful Basis' },
 		{ id: 's6', label: '6. Processor Obligations' },
-		{ id: 's7', label: '7. Data Minimization and Author-Identifier Non-Retention' },
+		{ id: 's7', label: '7. Data Minimization and Author-Identifier Retention Limits' },
 		{ id: 's8', label: '8. Sensitive Personal Data' },
 		{ id: 's9', label: '9. Data of Children and Adolescents' },
 		{ id: 's10', label: '10. Sub-processors' },

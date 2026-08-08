@@ -47,9 +47,9 @@ const PICK = {
 	]
 };
 
-function cookiesWithPick(state = 's') {
+function cookiesWithPick(state = 's', userId = OWNER.id) {
 	const cookies = makeCookies();
-	parkPendingChannelPick(cookies as never, state, PICK);
+	parkPendingChannelPick(cookies as never, state, PICK, userId);
 	return cookies;
 }
 
@@ -127,7 +127,7 @@ test('choosing a parked channel connects it, encrypts the token, and consumes th
 	expect(row).toMatchObject({ id: 'UC2', userId: OWNER.id, orgId: OWNER.orgId, title: 'Two', active: 1 });
 	expect(row?.refreshTokenEnc).not.toBe('refresh-token');
 	// The parked pick for this flow is gone — no replay.
-	expect(readPendingChannelPick(cookies as never, 's')).toBeNull();
+	expect(readPendingChannelPick(cookies as never, 's', OWNER.id)).toBeNull();
 });
 
 test('a channel id that was never parked fails loudly with 400 and writes nothing', async () => {
@@ -166,4 +166,25 @@ test('a parked channel owned by another team yields 409 and stays unchanged', as
 	});
 	const row = await testDb().db.select().from(channels).get();
 	expect(row).toMatchObject({ id: 'UC2', userId: 'user-2', orgId: 'org-2', refreshTokenEnc: 'foreign-enc' });
+});
+
+test('a pick parked by another user reads as expired — no cross-user completion (shared browser)', async () => {
+	// Hardening: user B, signed in on a shared machine with user A's pick URL,
+	// must not complete A's pick — the parked refresh token would be attached
+	// to B's org. Both the load and the action must reject.
+	const other: SessionUser = { ...OWNER, id: 'user-b', email: 'b@example.com' };
+	const cookies = cookiesWithPick('s', OWNER.id); // parked by A
+
+	await expect(loadWith(cookies, 's', other)).rejects.toMatchObject({
+		status: 400,
+		body: { message: 'this channel selection expired — reconnect the channel from the dashboard' }
+	});
+	const res = await captureAction(cookies, 'UC1', 's', other);
+	expect(res).toMatchObject({
+		status: 400,
+		data: { error: 'This channel selection expired — reconnect the channel from the dashboard.' }
+	});
+	// Nothing was connected and the parked pick is still readable by its owner.
+	expect(await testDb().db.select().from(channels).all()).toHaveLength(0);
+	expect(readPendingChannelPick(cookies as never, 's', OWNER.id)).toEqual(PICK);
 });

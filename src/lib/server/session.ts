@@ -23,7 +23,7 @@
 import { randomBytes } from 'node:crypto';
 
 import { error } from '@sveltejs/kit';
-import { eq, lte } from 'drizzle-orm';
+import { and, eq, lte } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
 import { sessions, users } from '$lib/server/db/schema';
@@ -31,7 +31,10 @@ import { resolveActiveOrg, type OrgRole } from '$lib/server/org';
 
 export const SESSION_COOKIE = 'moderaty_session';
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
-const RENEW_BELOW_MS = SESSION_TTL_MS / 2; // renew when under 15 days remain
+// Renew when under 15 days remain. Exported so the property tests can pin the
+// sliding-expiry boundary against the production threshold instead of
+// re-deriving it (review deferral #3).
+export const RENEW_BELOW_MS = SESSION_TTL_MS / 2;
 
 export interface SessionUser {
 	id: string;
@@ -139,6 +142,35 @@ export async function getSessionUser(token: string | undefined): Promise<Session
 /** Deletes a session (sign-out). Unknown tokens are a no-op. */
 export async function destroySession(token: string): Promise<void> {
 	await db.delete(sessions).where(eq(sessions.id, token));
+}
+
+/**
+ * Rotates a session after a privilege-context change (org switch, invite
+ * accept): the old token dies and a fresh one is issued for the same user and
+ * expiry, so a token minted under the weaker context stops working the moment
+ * the change lands. The caller must write the new token into the response
+ * cookie. Scoped to the caller's own session (PR #52 pattern): an unknown or
+ * mismatched token throws 401 instead of silently minting a replacement.
+ */
+export async function rotateSession(
+	oldToken: string,
+	userId: string,
+	activeOrgId: string | null,
+	handle: Pick<typeof db, 'select' | 'delete' | 'insert'> = db
+): Promise<{ token: string; expiresAt: string }> {
+	const row = await handle
+		.select({ expiresAt: sessions.expiresAt })
+		.from(sessions)
+		.where(and(eq(sessions.id, oldToken), eq(sessions.userId, userId)))
+		.get();
+	if (!row) throw error(401, 'sign-in required');
+	const token = randomBytes(32).toString('hex');
+	// Delete + insert: the stolen old token is dead even if this call crashes
+	// before the insert lands (fail-closed — the user re-signs-in). Rotation
+	// preserves the remaining expiry — it must not extend the session.
+	await handle.delete(sessions).where(eq(sessions.id, oldToken));
+	await handle.insert(sessions).values({ id: token, userId, expiresAt: row.expiresAt, activeOrgId });
+	return { token, expiresAt: row.expiresAt };
 }
 
 /**

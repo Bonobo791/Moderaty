@@ -42,3 +42,4 @@ backups/
 stryker.log
 reports/
 reasonix.toml
+.reasonix

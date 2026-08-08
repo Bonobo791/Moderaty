@@ -22,7 +22,9 @@
 // page must render its own maintenance state instead of destructive controls
 // (PR #123 review — codeant). The per-channel controls (sensitivity,
 // protections, history, dry run, disconnect) moved to the channel detail
-// page — their pins live in channels/[id]/channel-page.test.ts.
+// page — their pins live in channels/[id]/channel-page.test.ts; the
+// delete-account flow moved to /account (Commit 5) — its pins live in
+// account/account-page.test.ts.
 //
 // Gotchas: Svelte SSR inserts scoped-class hashes between class names, so
 // class pins match a name inside the class attribute via regex; SSR can emit
@@ -97,7 +99,7 @@ const QUIET_DATA = {
 const EMPTY_DATA = { chs: [], stats: [], bans: [], maintenance: false, orgRole: 'owner' };
 
 function renderPage(data: unknown) {
-	return render(Page, { props: { data, form: null } as never }).body;
+	return render(Page, { props: { data } as never }).body;
 }
 
 /** The four door-status readouts, cut out so per-channel cells can't satisfy a pin. */
@@ -224,10 +226,14 @@ test('the connect button and its helper copy render', () => {
 	expect(body).toContain('Privacy Policy');
 });
 
-test('normal render shows the delete-account card below the ledger', () => {
+test('the delete-account flow moved to /account — the dashboard renders none of it', () => {
 	const body = renderPage(PENDING_DATA);
-	expect(body).toContain('Delete my account');
-	expect(body.indexOf('Delete my account')).toBeGreaterThan(body.indexOf('ledger-head'));
+	expect(body).not.toContain('Delete my account');
+	expect(body).not.toContain('deleteAccount');
+	expect(body).not.toContain('danger-zone');
+	expect(body).not.toContain('name="confirm"');
+	// The page ends after the privacy note: nothing follows it.
+	expect(body.indexOf('Privacy Policy')).toBeGreaterThan(body.indexOf('ledger-head'));
 });
 
 test('the channel controls moved to the detail page — the dashboard renders none of them', () => {

@@ -25,14 +25,13 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	 ledger rows navigate there. -->
 
 <script lang="ts">
-	import { enhance } from '$app/forms';
 	import { goto } from '$app/navigation';
 	import EmptyState from '$lib/EmptyState.svelte';
 	import Ticker from '$lib/Ticker.svelte';
 	import { autoRefresh } from '$lib/auto-refresh.svelte';
 	import { relativeTime } from '$lib/relative-time';
 
-	let { data, form } = $props();
+	let { data } = $props();
 
 	// Counts change with every cron run; revalidate like the queue and log pages.
 	autoRefresh();
@@ -191,29 +190,6 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <p class="muted privacy-note">
 	We've clarified what we retain after account deletion — see the <a href="/privacy">Privacy Policy</a>.
 </p>
-
-<div class="card danger-zone">
-	<h2>Delete account</h2>
-	<p class="muted">
-		Deleting your account is immediate and permanent. It signs you out everywhere, asks Google to
-		revoke Moderaty's access to your YouTube channels (if a revocation fails, you can remove access
-		anytime in your
-		<a href="https://security.google.com/settings/security/permissions" target="_blank" rel="noreferrer">Google security settings</a>), and erases your channels, rules, and moderation
-		records right away — there is no restore window. Only your consent-acceptance records
-		(including your e-mail) are retained, as Brazilian law requires: blocked from any other use,
-		access-restricted, for up to 10 years.
-	</p>
-	{#if form?.error}
-		<p class="error-box" role="alert">{form.error}</p>
-	{/if}
-	<form method="POST" action="?/deleteAccount" use:enhance>
-		<label class="confirm-delete" for="confirm-delete">
-			<input id="confirm-delete" type="checkbox" name="confirm" />
-			I understand and want to delete my Moderaty account
-		</label>
-		<button class="btn danger" type="submit">Delete my account</button>
-	</form>
-</div>
 {/if}
 
 <style>
@@ -400,19 +376,6 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	}
 	.privacy-note {
 		font-size: 0.9em;
-	}
-
-	/* ── delete account (moves to /account in Commit 5) ─────── */
-	.confirm-delete {
-		display: flex;
-		gap: 10px;
-		align-items: flex-start;
-		font-size: 0.9rem;
-		margin: 12px 0;
-	}
-	.confirm-delete input {
-		margin-top: 3px;
-		flex-shrink: 0;
 	}
 
 	@media (prefers-reduced-motion: reduce) {

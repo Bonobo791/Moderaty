@@ -19,12 +19,9 @@
 import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
 import { banCountsByChannel, commentCountsByChannel } from '$lib/server/channelStats';
-import { decrypt } from '$lib/server/crypto';
-import { deleteUserRecords } from '$lib/server/deletion';
-import { revokeGoogleToken } from '$lib/server/google';
-import { requireUser, SESSION_COOKIE } from '$lib/server/session';
+import { requireUser } from '$lib/server/session';
 import { eq } from 'drizzle-orm';
-import { fail, isHttpError, redirect } from '@sveltejs/kit';
+import { isHttpError } from '@sveltejs/kit';
 
 /**
  * Loads the authenticated user's channels and moderation statistics for the dashboard.
@@ -73,37 +70,3 @@ export async function load({ locals }) {
 		return { chs: [], stats: [], bans: [], maintenance: true, orgRole: null };
 	}
 }
-
-export const actions = {
-	deleteAccount: async ({ request, locals, cookies }) => {
-		const user = requireUser(locals);
-		const f = await request.formData();
-		if (f.get('confirm') !== 'on') {
-			return fail(400, { error: 'You must confirm account deletion to continue.' });
-		}
-		// Immediate deletion: everything is erased NOW except the evidentiary
-		// consent log (statutory retention, LGPD Art. 16, III). Each channel's
-		// YouTube grant is revoked at Google first (YouTube API ToS); a
-		// revocation failure is logged loudly but does not block deletion — the
-		// encrypted token is erased either way, orphaning the grant.
-		// Revocation is connector-scoped (channels.userId = the account being
-		// deleted): those Google grants belong to THIS user. Channels in teams
-		// that survive the deletion keep their rows; their dead token will fail
-		// loudly in cron until a teammate reconnects the channel.
-		const owned = await db
-			.select({ id: channels.id, refreshTokenEnc: channels.refreshTokenEnc })
-			.from(channels)
-			.where(eq(channels.userId, user.id))
-			.all();
-		for (const ch of owned) {
-			try {
-				await revokeGoogleToken(decrypt(ch.refreshTokenEnc), `account deletion channel ${ch.id}`);
-			} catch (cause) {
-				console.error('token revocation failed for channel, deleting anyway:', ch.id, cause);
-			}
-		}
-		await deleteUserRecords(user.id);
-		cookies.delete(SESSION_COOKIE, { path: '/' });
-		throw redirect(302, '/');
-	}
-};

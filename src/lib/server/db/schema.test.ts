@@ -341,10 +341,29 @@ describe('audit_log', () => {
 			reason: { notNull: true },
 			actor: { notNull: true },
 			text: { notNull: false },
+			author_handle: { notNull: false },
 			created_at: { notNull: true, hasDefault: true }
 		});
 		expectIndex(auditLog, 'audit_log_channel_action_idx', ['channel_id', 'action']);
 		expectCreatedAtDefault(auditLog);
+	});
+});
+
+describe('channel_allowed_handles', () => {
+	test('table shape with autoincrement id and channel index, no FKs', async () => {
+		const { channelAllowedHandles } = await loadSchema();
+		expect(getTableConfig(channelAllowedHandles).name).toBe('channel_allowed_handles');
+		expectColumns(channelAllowedHandles, {
+			id: { notNull: true, primary: true, autoIncrement: true },
+			channel_id: { notNull: true },
+			handle: { notNull: true },
+			created_at: { notNull: true, hasDefault: true }
+		});
+		// Channel-child tables deliberately carry no .references() — orphan
+		// protection is deletion.ts + the verify-tenancy probe.
+		expect(getTableConfig(channelAllowedHandles).foreignKeys).toEqual([]);
+		expectIndex(channelAllowedHandles, 'channel_allowed_handles_channel_idx', ['channel_id']);
+		expectCreatedAtDefault(channelAllowedHandles);
 	});
 });
 

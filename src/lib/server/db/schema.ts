@@ -150,6 +150,20 @@ export const rules = sqliteTable('rules', {
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 });
 
+// Per-channel allowlist of protected commenter handles. Plain-text channelId
+// like every channel-child table (no FKs — orphan protection is deletion.ts +
+// the verify-tenancy probe). `handle` stores the normalized lowercase form.
+export const channelAllowedHandles = sqliteTable('channel_allowed_handles', {
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	channelId: text('channel_id').notNull(),
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	handle: text('handle').notNull(), // normalized lowercase commenter handle
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+}, (table) => [
+	index('channel_allowed_handles_channel_idx').on(table.channelId)
+]);
+
 export const comments = sqliteTable('comments', {
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	id: text('id').primaryKey(), // YouTube comment ID
@@ -168,7 +182,7 @@ export const comments = sqliteTable('comments', {
 	publishedAt: text('published_at').notNull(),
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	status: text('status').notNull(), // 'pending' | 'approved' | 'held' | 'rejected' | 'deleted' | 'restoring' (in-flight undo)
-	decidedBy: text('decided_by').notNull(), // 'rule' | 'ai' | 'human' | 'none'
+	decidedBy: text('decided_by').notNull(), // 'rule' | 'ai' | 'human' | 'none' | 'allowlist'
 	matchedRuleId: integer('matched_rule_id'),
 	aiScore: text('ai_score'), // JSON string of the six category scores, or null
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
@@ -206,6 +220,9 @@ export const auditLog = sqliteTable('audit_log', {
 	// Null for every real-run action — that text lives in comments.text.
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	text: text('text'),
+	// Normalized commenter handle (lowercase @handle), 30-day TTL, null on
+	// manual rows (actor 'user' actions taken from the dashboard).
+	authorHandle: text('author_handle'),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
 	// Dashboard ban counts (action='ban' + channel_id IN, issue #77) and the

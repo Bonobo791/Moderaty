@@ -30,7 +30,7 @@
 import { and, eq, inArray, isNotNull, lt, ne } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
-import { auditLog, channels, comments, consents, invites, memberships, moderationActions, organizations, rules, sessions, users } from '$lib/server/db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, consents, invites, memberships, moderationActions, organizations, rules, sessions, users } from '$lib/server/db/schema';
 
 export const CONSENT_EMAIL_RETENTION_MS = 10 * 365.25 * 24 * 60 * 60 * 1000; // 10 years
 
@@ -63,6 +63,7 @@ export async function deleteChannelRecords(
 	// (Codacy duplication: the four-delete sequence was copy-pasted in each
 	// branch — extracted so the child-delete list lives once.)
 	const deleteChildren = async () => {
+		await tx.delete(channelAllowedHandles).where(inArray(channelAllowedHandles.channelId, channelIds));
 		await tx.delete(moderationActions).where(inArray(moderationActions.channelId, channelIds));
 		await tx.delete(comments).where(inArray(comments.channelId, channelIds));
 		await tx.delete(auditLog).where(inArray(auditLog.channelId, channelIds));

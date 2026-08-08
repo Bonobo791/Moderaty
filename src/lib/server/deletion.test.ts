@@ -20,7 +20,7 @@ import { and, eq } from 'drizzle-orm';
 import { expect, test, vi } from 'vitest';
 
 import { DAY_MS, seedConsent, seedUser as seedBareUser, setupTestDb, testDb } from './testdb';
-import { auditLog, channels, comments, consents, invites, memberships, moderationActions, organizations, rules, sessions, users } from './db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, consents, invites, memberships, moderationActions, organizations, rules, sessions, users } from './db/schema';
 import {
 	CONSENT_EMAIL_RETENTION_MS,
 	WIPED_REFRESH_TOKEN,
@@ -30,7 +30,7 @@ import {
 	nullExpiredConsentEmails
 } from './deletion';
 
-setupTestDb(['moderation_actions', 'comments', 'audit_log', 'rules', 'channels', 'sessions', 'consents', 'invites', 'memberships', 'organizations', 'users']);
+setupTestDb(['moderation_actions', 'comments', 'audit_log', 'channel_allowed_handles', 'rules', 'channels', 'sessions', 'consents', 'invites', 'memberships', 'organizations', 'users']);
 
 /** Seeds one comment plus its moderation action, audit row, and keyword rule for a channel. */
 async function seedModerationData(channelId: string, key: string) {
@@ -56,6 +56,32 @@ async function seedModerationData(channelId: string, key: string) {
 		.db.insert(rules)
 		.values({ channelId, type: 'keyword', pattern: 'spam', action: 'delete' });
 }
+
+test('deleteUserRecords erases protected handles on deleted channels but keeps other channels\' handles', async () => {
+	// channel_allowed_handles rows are channel children: they die with the
+	// deleted account's channels and survive on unrelated channels.
+	const userId = await seedUser('gone');
+	await seedUser('stays');
+	await testDb().db.insert(channelAllowedHandles).values({ channelId: 'UC-gone', handle: '@friend' });
+	await testDb().db.insert(channelAllowedHandles).values({ channelId: 'UC-stays', handle: '@mod' });
+
+	await deleteUserRecords(userId);
+
+	const surviving = await testDb().db.select().from(channelAllowedHandles).all();
+	expect(surviving).toHaveLength(1);
+	expect(surviving[0]).toMatchObject({ channelId: 'UC-stays', handle: '@mod' });
+});
+
+test('deleteChannelRecords erases protected handles with the channel', async () => {
+	await seedChannel('UC1', 'user-9', 'org-1', 'ours');
+	await testDb().db.insert(channelAllowedHandles).values({ channelId: 'UC1', handle: '@friend' });
+
+	await testDb().db.transaction(async (tx) => {
+		await deleteChannelRecords(tx, ['UC1'], { expectedOrgId: 'org-1' });
+	});
+
+	expect(await testDb().db.select().from(channelAllowedHandles).all()).toHaveLength(0);
+});
 
 /** Seeds a channel row with the standard shape (placeholder enc token). */
 async function seedChannel(id: string, userId: string | null, orgId: string, title: string) {

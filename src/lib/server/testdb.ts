@@ -188,6 +188,13 @@ export async function createTestDb(): Promise<TestDb> {
 			action TEXT NOT NULL,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
+		`CREATE TABLE channel_allowed_handles (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			channel_id TEXT NOT NULL,
+			handle TEXT NOT NULL,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`,
+		`CREATE INDEX channel_allowed_handles_channel_idx ON channel_allowed_handles (channel_id)`,
 		`CREATE TABLE comments (
 			id TEXT PRIMARY KEY,
 			channel_id TEXT NOT NULL,
@@ -209,6 +216,7 @@ export async function createTestDb(): Promise<TestDb> {
 			reason TEXT NOT NULL,
 			actor TEXT NOT NULL,
 			text TEXT,
+			author_handle TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE TABLE moderation_actions (

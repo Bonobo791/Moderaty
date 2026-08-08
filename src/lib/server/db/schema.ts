@@ -199,6 +199,9 @@ export const moderationActions = sqliteTable('moderation_actions', {
 	state: text('state').notNull(), // 'pending' | 'dispatched' | 'completed' ('manual_review' legacy)
 	lastAttemptAt: text('last_attempt_at'),
 	lastManualRetryAt: text('last_manual_retry_at'),
+	// Normalized commenter handle, 30-day TTL (same retention as audit_log):
+	// staged with the decision and carried to the completion audit row.
+	authorHandle: text('author_handle'),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
 	index('moderation_actions_channel_state_idx').on(table.channelId, table.state)

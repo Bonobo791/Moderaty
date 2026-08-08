@@ -815,6 +815,63 @@ test('an author name that normalizes to empty stores authorHandle null, not an e
 	expect(mocks.state.insertedAudits[0].authorHandle).toBeNull();
 });
 
+test('a real-run enforcement decision stages its normalized handle, and the completion audit row carries it', async () => {
+	// The ban path skips auditRows at staging: its audit row is written later
+	// by completeActions from the moderation_actions row, so the normalized
+	// handle must ride the staged action row to reach the log.
+	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'toxic', action: 'ban' }];
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ authorName: '@Some.User', text: 'this is toxic' })],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	const result = await runChannel('channel');
+
+	expect(mocks.state.moderationActions).toEqual([
+		expect.objectContaining({ commentId: 'comment', action: 'ban', state: 'completed', authorHandle: 'some.user' })
+	]);
+	expect(mocks.state.insertedAudits).toEqual([
+		expect.objectContaining({ commentId: 'comment', action: 'ban', authorHandle: 'some.user' })
+	]);
+	expect(result).toMatchObject({ acted: 1, queued: 0 });
+});
+
+test('a staged action whose handle normalized to empty completes with authorHandle null, not an empty string', async () => {
+	// normalizeHandle('@') trims to '', which staging stores as NULL; the
+	// completion audit row must carry NULL through, never ''.
+	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'toxic', action: 'ban' }];
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ authorName: '@', text: 'this is toxic' })],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	await runChannel('channel');
+
+	expect(mocks.state.moderationActions).toEqual([
+		expect.objectContaining({ commentId: 'comment', action: 'ban', authorHandle: null })
+	]);
+	expect(mocks.state.insertedAudits).toEqual([
+		expect.objectContaining({ commentId: 'comment', action: 'ban', authorHandle: null })
+	]);
+	expect(mocks.state.insertedAudits[0].authorHandle).toBeNull();
+});
+
+test('a completion audit row for a legacy action row with no stored handle stores null', async () => {
+	// Rows staged before migration 0021 (or nulled by the retention sweep)
+	// carry no handle — completion must write NULL, never crash or invent one.
+	mocks.state.existingIds = ['comment'];
+	mocks.state.moderationActions = [dispatchedAction({ authorHandle: null })];
+
+	await runChannel('channel');
+
+	expect(mocks.state.insertedAudits).toEqual([
+		expect.objectContaining({ commentId: 'comment', action: 'ban', authorHandle: null })
+	]);
+	expect(mocks.state.insertedAudits[0].authorHandle).toBeNull();
+});
+
 test('scores full comment text but truncates the stored copy', async () => {
 	const text = 'x'.repeat(501);
 	mocks.scoreComment.mockResolvedValue(moderation(0.34));

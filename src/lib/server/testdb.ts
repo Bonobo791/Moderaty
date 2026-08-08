@@ -227,6 +227,7 @@ export async function createTestDb(): Promise<TestDb> {
 			state TEXT NOT NULL,
 			last_attempt_at TEXT,
 			last_manual_retry_at TEXT,
+			author_handle TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE TABLE consents (

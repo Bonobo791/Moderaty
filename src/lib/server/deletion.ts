@@ -27,8 +27,9 @@
 // write-once consent log, and a cron sweep erases it 10 years after
 // acceptance (CC Art. 205, conservative over CDC's 5-year prescription).
 // The consent row itself is kept, anonymized. Commenter handles on audit
-// rows get a much shorter TTL: a cron sweep erases them after 30 days,
-// keeping the row (and its moderation outcome) as the record.
+// rows and staged moderation actions get a much shorter TTL: a cron sweep
+// erases them after 30 days, keeping the row (and its moderation outcome)
+// as the record.
 
 import { and, eq, inArray, isNotNull, lt, ne } from 'drizzle-orm';
 
@@ -307,14 +308,13 @@ export function auditHandleCutoffIso(now = Date.now()): string {
 /**
  * One bounded handle-retention batch: select up to one batch of ids whose
  * handle is still stored and whose row predates the cutoff, null the handle,
- * return the erased count. Parameterized on the two queries so adding a
- * second handle-bearing table (a future moderation_actions sweep) is a thin
- * wrapper calling this helper — that extension is deliberately NOT
- * implemented yet (step-4 scope).
+ * return the erased count. Parameterized on the two queries and the id type
+ * (audit_log's INTEGER id, moderation_actions' TEXT commentId) so each
+ * handle-bearing table is a thin wrapper calling this helper.
  */
-async function nullExpiredHandlesBatch(
-	selectExpiredIds: (cutoffIso: string) => Promise<{ id: number }[]>,
-	nullHandlesByIds: (ids: number[]) => Promise<unknown>
+async function nullExpiredHandlesBatch<Id>(
+	selectExpiredIds: (cutoffIso: string) => Promise<{ id: Id }[]>,
+	nullHandlesByIds: (ids: Id[]) => Promise<unknown>
 ): Promise<number> {
 	const expired = await selectExpiredIds(auditHandleCutoffIso());
 	// Stryker disable next-line ConditionalExpression: false equivalent — with zero expired rows the update runs inArray([]) (drizzle compiles to `false`, no rows updated) and expired.length is 0, so the skipped early return returns the same 0.
@@ -344,4 +344,42 @@ export async function nullExpiredAuditLogHandles(): Promise<number> {
 				.all(),
 		(ids) => db.update(auditLog).set({ authorHandle: null }).where(inArray(auditLog.id, ids))
 	);
+}
+
+/**
+ * Erases stored commenter handles from moderation action rows older than the
+ * 30-day retention period.
+ *
+ * Same contract as the audit-log sweep: the action ROW is kept (comment id,
+ * action, reason, state stay as the enforcement record); only the personal
+ * identifier is erased. Bounded to one small batch per call (I10). Keyed by
+ * the TEXT commentId primary key, not an integer id.
+ *
+ * @returns The number of moderation action rows whose handle was erased
+ */
+export async function nullExpiredModerationActionHandles(): Promise<number> {
+	return nullExpiredHandlesBatch(
+		(cutoffIso) =>
+			db
+				.select({ id: moderationActions.commentId })
+				.from(moderationActions)
+				.where(and(isNotNull(moderationActions.authorHandle), lt(moderationActions.createdAt, cutoffIso)))
+				.limit(AUDIT_HANDLE_SWEEP_BATCH)
+				.all(),
+		(ids) => db.update(moderationActions).set({ authorHandle: null }).where(inArray(moderationActions.commentId, ids))
+	);
+}
+
+/**
+ * The cron-facing commenter-handle retention sweep: one bounded batch per
+ * handle-bearing table (audit_log and moderation_actions), same 30-day TTL.
+ * A failure in either table's sweep throws — the cron logs it loudly and
+ * retries next invocation; the unswept table simply waits.
+ *
+ * @returns The erased count per table
+ */
+export async function nullExpiredHandles(): Promise<{ auditLog: number; moderationActions: number }> {
+	const auditLogCount = await nullExpiredAuditLogHandles();
+	const moderationActionsCount = await nullExpiredModerationActionHandles();
+	return { auditLog: auditLogCount, moderationActions: moderationActionsCount };
 }

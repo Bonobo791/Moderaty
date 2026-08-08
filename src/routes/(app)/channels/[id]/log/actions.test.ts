@@ -18,7 +18,7 @@
 
 import { beforeEach, expect, test, vi } from 'vitest';
 import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
-import { auditLog, channels, comments } from '$lib/server/db/schema';
+import { auditLog, channels, comments, moderationActions } from '$lib/server/db/schema';
 import { eq } from 'drizzle-orm';
 
 const mocks = vi.hoisted(() => ({
@@ -37,7 +37,7 @@ vi.mock('$lib/server/youtube', () => ({
 
 import { actions } from './+page.server';
 
-setupTestDb(['audit_log', 'comments', 'channels']);
+setupTestDb(['audit_log', 'comments', 'channels', 'moderation_actions']);
 
 const OWNER = TEST_OWNER;
 const LOG_URL = 'http://localhost/channels/UC1/log';
@@ -254,6 +254,18 @@ async function seedHandledAuditRow(commentId: string, handle: string | null, cha
 	});
 }
 
+/** Seeds one moderation action row with a stored commenter handle. */
+async function seedHandledActionRow(commentId: string, handle: string | null, channelId = 'UC1') {
+	await testDb().db.insert(moderationActions).values({
+		commentId,
+		channelId,
+		action: 'ban',
+		reason: 'rule #1 (user: troll)',
+		state: 'completed',
+		authorHandle: handle
+	});
+}
+
 function eraseHandles(channelId = 'UC1', user: typeof OWNER | null = OWNER) {
 	return actions.eraseHandles({
 		params: { id: channelId },
@@ -262,14 +274,17 @@ function eraseHandles(channelId = 'UC1', user: typeof OWNER | null = OWNER) {
 	} as never);
 }
 
-test('eraseHandles nulls every stored handle for the channel, leaving rows and other channels intact', async () => {
+test('eraseHandles nulls every stored handle for the channel in BOTH tables, leaving rows and other channels intact', async () => {
 	await seedHandledAuditRow('c1', '@first.user');
 	await seedHandledAuditRow('c2', '@second.user');
 	await seedHandledAuditRow('c3', null);
+	await seedHandledActionRow('a1', '@first.user');
+	await seedHandledActionRow('a2', null);
 	await testDb()
 		.db.insert(channels)
 		.values({ id: 'UC2', userId: OWNER.id, orgId: 'org-1', title: 'Two', refreshTokenEnc: 'enc-2' });
 	await seedHandledAuditRow('c9', '@other.channel', 'UC2');
+	await seedHandledActionRow('a9', '@other.channel', 'UC2');
 
 	const res = await eraseHandles();
 
@@ -281,8 +296,35 @@ test('eraseHandles nulls every stored handle for the channel, leaving rows and o
 	for (const row of mine) {
 		expect(row).toMatchObject({ authorHandle: null, action: 'reject', reason: 'ai score 0.91', actor: 'system' });
 	}
-	// Another channel's stored handles are untouched.
+	const actionRows = await testDb().db.select().from(moderationActions).all();
+	const myActions = actionRows.filter((row) => row.channelId === 'UC1');
+	expect(myActions).toHaveLength(2);
+	for (const row of myActions) {
+		expect(row).toMatchObject({ authorHandle: null, action: 'ban', reason: 'rule #1 (user: troll)' });
+	}
+	// Another channel's stored handles are untouched in both tables.
 	expect(rows.find((row) => row.channelId === 'UC2')).toMatchObject({ authorHandle: '@other.channel' });
+	expect(actionRows.find((row) => row.channelId === 'UC2')).toMatchObject({ authorHandle: '@other.channel' });
+});
+
+test('eraseHandles is atomic: a failure on one table leaves both tables untouched', async () => {
+	// The two updates run in one transaction: if the moderation_actions wipe
+	// fails, the audit_log wipe must roll back with it — a half-erased channel
+	// would lie to the user about what was erased.
+	await seedHandledAuditRow('c1', '@some.user');
+	await seedHandledActionRow('a1', '@some.user');
+	await testDb().client.execute(
+		`CREATE TRIGGER fail_action_handle_update BEFORE UPDATE ON moderation_actions
+		 BEGIN SELECT RAISE(ABORT, 'simulated erase failure'); END`
+	);
+	try {
+		await expect(eraseHandles()).rejects.toThrow();
+	} finally {
+		await testDb().client.execute('DROP TRIGGER fail_action_handle_update');
+	}
+
+	expect((await testDb().db.select().from(auditLog).all())[0]).toMatchObject({ authorHandle: '@some.user' });
+	expect((await testDb().db.select().from(moderationActions).all())[0]).toMatchObject({ authorHandle: '@some.user' });
 });
 
 test('eraseHandles on another team\'s channel 404s without touching its rows', async () => {

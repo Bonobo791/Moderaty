@@ -322,6 +322,7 @@ describe('moderation_actions', () => {
 			state: { notNull: true },
 			last_attempt_at: { notNull: false },
 			last_manual_retry_at: { notNull: false },
+			author_handle: { notNull: false },
 			created_at: { notNull: true, hasDefault: true }
 		});
 		expectIndex(moderationActions, 'moderation_actions_channel_state_idx', ['channel_id', 'state']);

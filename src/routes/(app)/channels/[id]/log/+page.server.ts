@@ -17,7 +17,7 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { db } from '$lib/server/db';
-import { auditLog, comments } from '$lib/server/db/schema';
+import { auditLog, comments, moderationActions } from '$lib/server/db/schema';
 import { ownedChannel } from '$lib/server/ownership';
 import { requireUser } from '$lib/server/session';
 import { refreshAccessToken, setModerationStatus } from '$lib/server/youtube';
@@ -193,19 +193,27 @@ export const actions = {
 		return { success: 'Restored — recorded in audit log.' };
 	},
 	/**
-	 * Erases every stored commenter handle on this channel's audit log
-	 * immediately, ahead of the automatic 30-day retention sweep. Handles
-	 * only — the rows, their text, and their outcomes stay as the moderation
-	 * record.
+	 * Erases every stored commenter handle on this channel immediately, ahead
+	 * of the automatic 30-day retention sweep — audit rows AND staged
+	 * moderation actions. Handles only: the rows, their text, and their
+	 * outcomes stay as the moderation record. One transaction so the erase is
+	 * atomic per channel — a failure on either table leaves both untouched
+	 * rather than lying about what was erased.
 	 */
 	eraseHandles: async ({ params, locals }) => {
 		requireUser(locals);
 		// Ownership-scoped: another org's channel reads as "not found".
 		await ownedChannel(params.id, locals);
-		await db
-			.update(auditLog)
-			.set({ authorHandle: null })
-			.where(and(eq(auditLog.channelId, params.id), isNotNull(auditLog.authorHandle)));
+		await db.transaction(async (tx) => {
+			await tx
+				.update(auditLog)
+				.set({ authorHandle: null })
+				.where(and(eq(auditLog.channelId, params.id), isNotNull(auditLog.authorHandle)));
+			await tx
+				.update(moderationActions)
+				.set({ authorHandle: null })
+				.where(and(eq(moderationActions.channelId, params.id), isNotNull(moderationActions.authorHandle)));
+		});
 		return { success: 'Stored handles erased for this channel.' };
 	}
 };

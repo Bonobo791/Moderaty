@@ -298,6 +298,11 @@ function actionRows(channelId: string, decisions: Decision[]) {
 			channelId,
 			action: decision.youtubeAction,
 			reason: decision.reason,
+			// The normalized handle rides the staged row so the completion audit
+			// row (written later by completeActions, long after the comment's
+			// in-memory author data is gone) can still say WHO was moderated.
+			// Same contract as auditRows: NULL when the name normalizes to ''.
+			authorHandle: normalizeHandle(decision.comment.authorName) || null,
 			state: 'pending',
 			lastAttemptAt: null,
 			lastManualRetryAt: null,
@@ -467,6 +472,9 @@ async function completeActions(actions: OutstandingAction[]) {
 			action: action.action,
 			reason: action.reason,
 			actor: 'system',
+			// Staged at decision time (rows predating migration 0021, or erased
+			// by the retention sweep, carry NULL — written through as NULL).
+			authorHandle: action.authorHandle ?? null,
 			createdAt: new Date().toISOString()
 		})));
 	});

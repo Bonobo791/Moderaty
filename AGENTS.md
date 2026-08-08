@@ -293,7 +293,9 @@ III — the e-mail lives ONLY in `consents` (migration 0011 backfills it from
 `users`), so blocking it from any other use is architectural, not
 discipline. Each cron invocation erases `consents.email` on rows older
 than 10 years (CC Art. 205; bounded batch, skipped under `DRY_RUN=true` per
-I8/I10) — the consent row itself is kept, anonymized.
+I8/I10) — the consent row itself is kept, anonymized. The same cron sweep
+also erases `audit_log`/`moderation_actions` `author_handle` older than 30
+days.
 
 ## Commands
 
@@ -338,10 +340,15 @@ documented exception. Preserve [LICENSE](LICENSE) and [COMMERCIAL.md](COMMERCIAL
 Do not store comment text longer than 500 characters. Never persist
 comment-author identifiers (`author_name`, `author_channel_id`) — they are
 processed in memory at decision time only (the columns linger, nullable and
-wiped, until the contract migration drops them; never write to them).
+wiped, until the contract migration drops them; never write to them). The
+normalized commenter HANDLE is stored on `audit_log.author_handle` /
+`moderation_actions.author_handle` with a strict 30-day TTL (cron sweep,
+bounded batches, skipped under `DRY_RUN`) plus on-demand per-channel erasure
+from the log page's danger zone; manual-action rows store NULL.
 Public copy (landing, FAQ, legal docs) must match actual storage: comment
-text is stored with the moderation outcome, author identities are never
-stored; the consistency guard lives in `src/lib/landing/legal.test.ts`.
+text is stored with the moderation outcome, the commenter handle is kept 30
+days then erased; the consistency guard in `src/lib/landing/legal.test.ts`
+pins the 30-day retention promise across those surfaces.
 
 ## License Headers
 

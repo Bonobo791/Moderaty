@@ -128,10 +128,14 @@ describe('legal page content (PR #35 review)', () => {
 	});
 });
 
-// Guard for the comment-PII change: the app stores comment text (≤500 chars)
-// with the moderation outcome but never persists author identifiers. Public
-// copy must say exactly that — the earlier "processed and discarded, never
-// stored" claim contradicted the database and had to be corrected everywhere.
+// Guard for the comment-PII storage reality: the app stores comment text
+// (≤500 chars) with the moderation outcome, plus the commenter's normalized
+// public handle on the audit-log/moderation-action record for a strict 30
+// days (cron sweep) with on-demand per-channel erasure from the log page.
+// Other author identifiers (display name, author channel ID) are still never
+// persisted. Public copy must say exactly that — the earlier absolute
+// "author identifiers never stored from comments" claim became false when
+// handle retention shipped and is banned below.
 describe('storage claims match implementation (comment PII)', () => {
 	const surfaces: Record<string, string> = {
 		'Terms of Service': readComponent('terms'),
@@ -181,9 +185,49 @@ describe('storage claims match implementation (comment PII)', () => {
 		}
 	});
 
-	it('the legal documents state that author identifiers are never stored', () => {
+	// The current promise: the commenter's normalized public handle appears in
+	// the activity log for up to 30 days, is erased automatically by the cron
+	// sweep, and can be erased on demand at any time. Every surface that makes
+	// the storage promise must carry the full mechanism — a partial or
+	// absolute claim is drift.
+	it('every surface states the 30-day handle retention promise', () => {
+		const HANDLE_PROMISE =
+			/handle[\s\S]{0,160}activity log[\s\S]{0,160}30 days[\s\S]{0,160}automatically[\s\S]{0,160}on demand/i;
+		for (const [name, text] of Object.entries(surfaces)) {
+			expect(text, `${name} is missing the 30-day handle retention promise`).toMatch(
+				HANDLE_PROMISE
+			);
+		}
+	});
+
+	// The retired absolute claim: author identifiers were said to be never
+	// stored from comments. False since handle retention shipped — these
+	// phrasings must never silently return.
+	it('no surface repeats the retired never-stored author-identifier claim', () => {
+		const RETIRED_AUTHOR_CLAIMS = [
+			/never stored from comments/i,
+			/processed in memory at decision time and are never stored/i,
+			/author identifiers? are processed in memory only and never stored/i,
+			/comment author (identities|identifiers) are never (persistently )?stored/i,
+			/author identities are never stored/i,
+			/author identifiers? were never stored/i,
+			/excludes author identifiers/i,
+			/processed transiently and never stored/i
+		];
+		for (const [name, text] of Object.entries(surfaces)) {
+			for (const pattern of RETIRED_AUTHOR_CLAIMS) {
+				expect(text, `${name} still claims: ${pattern}`).not.toMatch(pattern);
+			}
+		}
+	});
+
+	// The companion minimization claim: handles aside, no author channel IDs
+	// and no author profiles are kept anywhere.
+	it('the legal documents state no author channel IDs or profiles are kept', () => {
 		for (const doc of ['privacy', 'dpa', 'terms'] as const) {
-			expect(readComponent(doc), doc).toMatch(/author identifiers?[^.]*never (persistently )?stored|never store[^.]*author identifiers/i);
+			expect(readComponent(doc), doc).toMatch(
+				/no author channel\s+(IDs?|identifiers?)[^.]{0,30}(kept|retained|stored)/i
+			);
 		}
 	});
 
@@ -191,27 +235,29 @@ describe('storage claims match implementation (comment PII)', () => {
 	// author". That is unsupported — the comments table stores the YouTube
 	// comment ID, and while the channel owner's access remains active that ID
 	// could re-identify the author via YouTube. The defensible claim is
-	// narrower: identifiers are not persistently stored or linked in
-	// Moderaty's own database. Note §3.3's "whose age we cannot identify" is
-	// about age and must NOT trip this guard.
+	// narrower: beyond the 30-day activity-log handle, identifiers are not
+	// persistently stored or linked in Moderaty's own database. Note §3.3's
+	// "whose age we cannot identify" is about age and must NOT trip this guard.
 	it('Privacy §3.4 does not make the absolute no-identification claim', () => {
 		const match = readComponent('privacy').match(/<strong>3\.4<\/strong>([\s\S]*?)<\/p>/);
 		expect(match, 'Privacy §3.4 paragraph not found').not.toBeNull();
 		const s34 = match?.[1] ?? '';
 		expect(s34).not.toMatch(/cannot identify a comment's author/i);
 		expect(s34).not.toMatch(/link stored comment text back/i);
-		// the scoped branch convention is "never stored from comments" (§3.2,
-		// with the user-rule carve-out) — the unscoped absolute is banned here
 		expect(s34).not.toMatch(/never store author identifiers/i);
+		// the claim must be scoped by the handle exception, not absolute
+		expect(s34).toMatch(/public handle/i);
 		expect(s34).toMatch(/not persistently stored or linked/i);
 		expect(s34).toMatch(/YouTube comment ID/i);
 		expect(s34).toMatch(/5 business days/i);
 	});
 
 	// PR #40 review: rules.pattern with type 'user' persists an owner-entered
-	// authorChannelId (matched in memory by rules.ts). The "never stored" claim
-	// covers identifiers taken FROM comments; the owner-configured blocklist is
-	// a documented exception and every authoritative surface must say so.
+	// authorChannelId (matched in memory by rules.ts), and the rules page's
+	// protected handles are likewise owner-entered configuration. The handle
+	// retention promise covers identifiers taken FROM comments; the
+	// owner-configured identifiers are a documented exception and every
+	// authoritative surface must say so.
 	it('scopes the claim: identifiers entered in user rules are carved out', () => {
 		expect(readComponent('privacy')).toMatch(/blocked-user|user rules?[^.]*configuration/i);
 		expect(readComponent('terms')).toMatch(/user rules?/i);

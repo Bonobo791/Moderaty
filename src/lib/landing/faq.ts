@@ -57,6 +57,6 @@ export const FAQ_ENTRIES: FaqEntry[] = [
 	},
 	{
 		q: 'Is Moderaty LGPD compliant?',
-		a: 'Yes. Moderaty is built in Brazil around the LGPD: comment text is kept with the verdict record so your review queue works, but comment author identities are never stored from comments. A blocked-user rule stores only the channel ID you enter yourself. No author profiling, no model training on comment data. About you, we keep only what your account needs to run. Delete your account and it is all erased on the spot, except the consent record the LGPD requires us to keep. No selling data, no ad profiling, no training models on you. The Privacy Policy and DPA, linked in the footer, spell it out.'
+		a: 'Yes. Moderaty is built in Brazil around the LGPD: comment text is kept with the verdict record so your review queue works, and the commenter\'s public handle appears with it in the activity log for up to 30 days, is then erased automatically, and can be erased on demand at any time. No other author identifiers are kept from comments: no channel IDs, no profiles. A blocked-user rule or protected handle stores only the identifier you enter yourself. No author profiling, no model training on comment data. About you, we keep only what your account needs to run. Delete your account and it is all erased on the spot, except the consent record the LGPD requires us to keep. No selling data, no ad profiling, no training models on you. The Privacy Policy and DPA, linked in the footer, spell it out.'
 	}
 ];

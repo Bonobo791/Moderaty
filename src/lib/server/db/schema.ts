@@ -231,7 +231,11 @@ export const auditLog = sqliteTable('audit_log', {
 	// Dashboard ban counts (action='ban' + channel_id IN, issue #77) and the
 	// per-channel log page both filter by channel_id; the composite serves
 	// the ban query and its leftmost column serves channel-only reads.
-	index('audit_log_channel_action_idx').on(table.channelId, table.action)
+	index('audit_log_channel_action_idx').on(table.channelId, table.action),
+	// The log page's latest-per-comment query filters
+	// channel_id = ? AND comment_id IN (page ids) (qodo review on PR #125);
+	// without this, the page load would scan every audit row of the channel.
+	index('audit_log_channel_comment_idx').on(table.channelId, table.commentId)
 ]);
 
 // Evidentiary consent log (CDC Art. 6º, VIII; LGPD). One row per acceptance

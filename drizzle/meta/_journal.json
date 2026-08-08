@@ -155,6 +155,13 @@
       "when": 1786153938837,
       "tag": "0021_gifted_bullseye",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "6",
+      "when": 1786202600653,
+      "tag": "0022_audit_log_channel_comment_idx",
+      "breakpoints": true
     }
   ]
 }

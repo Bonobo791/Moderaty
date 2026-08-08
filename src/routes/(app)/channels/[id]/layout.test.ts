@@ -23,6 +23,9 @@ import { auditLog, channels, comments } from '$lib/server/db/schema';
 
 import { load } from './+layout.server';
 
+/** The layout load's resolved payload — pins the test data instead of `Record<string, any>`. */
+type LayoutData = Awaited<ReturnType<typeof load>>;
+
 setupTestDb(['moderation_actions', 'comments', 'audit_log', 'rules', 'channels']);
 
 const OWNER = TEST_OWNER;
@@ -57,7 +60,7 @@ test('loads the channel with pending and banned counts for the header and tab la
 	// Dry-run rows are never ban events.
 	await audit('c3', 'dry-run');
 
-	const data = (await loadLayout('UC1')) as Record<string, any>;
+	const data = (await loadLayout('UC1')) as LayoutData;
 
 	expect(data.ch).toMatchObject({ id: 'UC1', title: 'Channel UC1' });
 	expect(data.pending).toBe(2);
@@ -77,7 +80,7 @@ test('never serializes the encrypted refresh token or the drain continuation tok
 		nextPageToken: 'secret-page-token'
 	});
 
-	const data = (await loadLayout('UC1')) as Record<string, any>;
+	const data = (await loadLayout('UC1')) as LayoutData;
 
 	// A mid-drain channel is flagged scanning without leaking the token itself.
 	expect(data.ch.scanning).toBe(true);
@@ -90,7 +93,7 @@ test('never serializes the encrypted refresh token or the drain continuation tok
 test('an idle channel is flagged as not scanning', async () => {
 	await seedChannel('UC1');
 
-	const data = (await loadLayout('UC1')) as Record<string, any>;
+	const data = (await loadLayout('UC1')) as LayoutData;
 
 	expect(data.ch.scanning).toBe(false);
 });
@@ -108,7 +111,7 @@ test('projects the tone and protection flags the overview page renders', async (
 		lastRunAt: '2026-07-30T00:00:00Z'
 	});
 
-	const data = (await loadLayout('UC1')) as Record<string, any>;
+	const data = (await loadLayout('UC1')) as LayoutData;
 
 	expect(data.ch).toMatchObject({ toneLevel: 2, protectLgbtqia: 1, protectWomen: 0, lastRunAt: '2026-07-30T00:00:00Z' });
 });
@@ -137,13 +140,13 @@ test.each([
 ])('derives the active tab "$tab" from $path', async ({ path, tab }) => {
 	await seedChannel('UC1');
 
-	const data = (await loadLayout('UC1', OWNER, path)) as Record<string, any>;
+	const data = (await loadLayout('UC1', OWNER, path)) as LayoutData;
 
 	expect(data.tab).toBe(tab);
 });
 
 test('a database outage returns the maintenance payload without requiring a user', async () => {
-	const data = (await loadLayout('UC1', null, '/channels/UC1/queue', true)) as Record<string, any>;
+	const data = (await loadLayout('UC1', null, '/channels/UC1/queue', true)) as LayoutData;
 
 	expect(data.maintenance).toBe(true);
 	expect(data.ch).toMatchObject({ id: 'UC1', title: '', scanning: false });
@@ -160,9 +163,9 @@ test('a database failure mid-load degrades to the maintenance payload and logs l
 	const client = testDb().client;
 	const originalExecute = client.execute.bind(client);
 	client.execute = (() => Promise.reject(new Error('hrana 502: connect to upstream failed'))) as never;
-	let data: Record<string, any>;
+	let data: LayoutData;
 	try {
-		data = (await loadLayout('UC1')) as Record<string, any>;
+		data = (await loadLayout('UC1')) as LayoutData;
 		expect(errorSpy).toHaveBeenCalledWith('channel layout load failed:', expect.any(Error));
 	} finally {
 		client.execute = originalExecute;

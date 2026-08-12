@@ -9,7 +9,7 @@
 	},
 	"scripts": {
 		"db:migrate": "drizzle-kit migrate",
-	"db:verify": "node scripts/verify-migrations.mjs",
+		"db:verify": "node scripts/verify-migrations.mjs",
 		"dev": "vite dev",
 		"dev:cron": "node --env-file=.env scripts/dev-cron.mjs",
 		"build": "vite build",
@@ -36,7 +36,8 @@
 	"dependencies": {
 		"@libsql/client": "^0.17.4",
 		"drizzle-orm": "^0.45.2",
-		"recheck": "^4.5.0"
+		"recheck": "^4.5.0",
+		"stripe": "^22.5.0"
 	},
 	"overrides": {
 		"@esbuild-kit/core-utils": {

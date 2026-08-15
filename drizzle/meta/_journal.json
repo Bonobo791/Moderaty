@@ -162,6 +162,13 @@
       "when": 1786202600653,
       "tag": "0022_audit_log_channel_comment_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1786572014665,
+      "tag": "0023_stripe_billing",
+      "breakpoints": true
     }
   ]
 }

@@ -18,7 +18,7 @@
 
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { PRIVACY_NOTICE_TEXT, REFUND_NOTICE_TEXT } from '../server/legal';
+import { PRIVACY_NOTICE_TEXT, REFUND_NOTICE_TEXT, AUTO_TOPUP_CONSENT_TEXT } from '../server/legal';
 import { FAQ_ENTRIES } from './faq';
 import { LEGAL_DOCS, LEGAL_EFFECTIVE_DATE, LEGAL_VERSION } from './legal';
 import { PRICING_FAQ_ENTRIES } from './pricing-faq';
@@ -341,6 +341,19 @@ describe('refund policy consistency (PR #38 review)', () => {
 		expect(terms).toMatch(/purchases are final/i);
 		expect(terms).toMatch(/not refundable/i);
 	});
+
+// Guard for the billing integration: the Usage page's auto top-up consent
+// checkbox (Stripe's unscheduled-top-ups compliance requirement) must be
+// grounded verbatim in the Terms — the form can never drift from the logged
+// contract sentence.
+describe('auto top-up consent (billing integration)', () => {
+	it('the consent checkbox sentence appears verbatim in Terms §6.2', () => {
+		const terms = readComponent('terms');
+		const s62Start = terms.indexOf('<strong>6.2</strong>');
+		const s62 = terms.slice(s62Start, terms.indexOf('</p>', s62Start));
+		expect(s62).toContain(AUTO_TOPUP_CONSENT_TEXT);
+	});
+});
 
 // Guard for the PR #47 review findings: §6 introduced subscription, lifetime,
 // and top-up charges, but §1.2 and §7.3 still framed acceptance and

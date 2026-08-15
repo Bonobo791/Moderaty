@@ -23,6 +23,7 @@ import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
 import { nullExpiredConsentEmails, nullExpiredHandles } from '$lib/server/deletion';
+import { sweepAutoTopUp } from '$lib/server/billing/autotopup';
 import { runChannel } from '$lib/server/pipeline';
 import type { RequestHandler } from './$types';
 
@@ -95,6 +96,22 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		}
 	}
 	const nowIso = new Date().toISOString();
+	// Auto top-up sweep: the backstop for orgs whose balance dropped below
+	// their threshold without an on-consume trigger (missed trigger, refund,
+	// adjustment). Bounded per invocation (I10). Under DRY_RUN nothing is
+	// charged — a real money movement is the definition of a durable change.
+	let autoTopupsTriggered = 0;
+	let autoTopupSweepError: string | null = null;
+	if (dryRun) {
+		console.info('dry run: auto top-up sweep skipped');
+	} else {
+		try {
+			autoTopupsTriggered = await sweepAutoTopUp(5);
+		} catch (cause) {
+			autoTopupSweepError = cause instanceof Error ? cause.message : String(cause);
+			console.error('auto top-up sweep failed:', cause);
+		}
+	}
 	const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, nowIso));
 	const [channel] = await db
 		.select()
@@ -104,7 +121,7 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		// actively waiting on must not starve behind the ordinary rotation.
 		.orderBy(desc(sql`${channels.dryRunBoundary} is not null`), asc(channels.lastRunAt))
 		.limit(1);
-	if (!channel) return json({ ok: true, dryRun, consentEmailsNulled, sweepError, auditHandlesNulled, actionHandlesNulled, handleSweepError, results: {} });
+	if (!channel) return json({ ok: true, dryRun, consentEmailsNulled, sweepError, auditHandlesNulled, actionHandlesNulled, handleSweepError, autoTopupsTriggered, autoTopupSweepError, results: {} });
 
 	// Atomic claim: a concurrent claimant's UPDATE matches 0 rows and exits cleanly.
 	const claimed = await db
@@ -113,7 +130,7 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		.where(and(eq(channels.id, channel.id), claimable))
 		.returning({ id: channels.id });
 	if (claimed.length === 0)
-		return json({ ok: true, claimed: false, dryRun, consentEmailsNulled, sweepError, auditHandlesNulled, actionHandlesNulled, handleSweepError, results: {} });
+		return json({ ok: true, claimed: false, dryRun, consentEmailsNulled, sweepError, auditHandlesNulled, actionHandlesNulled, handleSweepError, autoTopupsTriggered, autoTopupSweepError, results: {} });
 
 	try {
 		const result = await runChannel(channel.id, { deadline });
@@ -153,12 +170,12 @@ export const GET: RequestHandler = async ({ url, request }) => {
 				dryRunWindow = { error: cause instanceof Error ? cause.message : String(cause) };
 			}
 		}
-		return json({ ok: true, dryRun, consentEmailsNulled, sweepError, auditHandlesNulled, actionHandlesNulled, handleSweepError, results: { [channel.id]: result }, dryRunWindow });
+		return json({ ok: true, dryRun, consentEmailsNulled, sweepError, auditHandlesNulled, actionHandlesNulled, handleSweepError, autoTopupsTriggered, autoTopupSweepError, results: { [channel.id]: result }, dryRunWindow });
 	} catch (cause) {
 		const message = cause instanceof Error ? cause.message : String(cause);
 		console.error(`channel run ${channel.id} failed:`, cause);
 		return json(
-			{ ok: false, dryRun, consentEmailsNulled, sweepError, auditHandlesNulled, actionHandlesNulled, handleSweepError, results: { [channel.id]: { error: message } } },
+			{ ok: false, dryRun, consentEmailsNulled, sweepError, auditHandlesNulled, actionHandlesNulled, handleSweepError, autoTopupsTriggered, autoTopupSweepError, results: { [channel.id]: { error: message } } },
 			{ status: 500 } // failure must not look like success to the cron caller
 		);
 	} finally {

@@ -1,0 +1,197 @@
+// Moderaty — YouTube Comment Auto-Moderation Tool
+// Copyright (C) 2026 Andrew Philip Weilbacher
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+//
+// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+
+import { eq } from 'drizzle-orm';
+import { beforeEach, describe, expect, test, vi } from 'vitest';
+
+import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
+import { organizations } from '$lib/server/db/schema';
+import type { SessionUser } from '$lib/server/session';
+import { applyLedgerDelta, consumeCredit } from '$lib/server/billing/ledger';
+
+const mocks = vi.hoisted(() => ({
+	sessionsCreate: vi.fn(),
+	customersCreate: vi.fn()
+}));
+
+vi.mock('$lib/server/stripe/client', () => ({
+	getStripe: () => ({
+		checkout: { sessions: { create: mocks.sessionsCreate } },
+		customers: { create: mocks.customersCreate }
+	})
+}));
+vi.mock('$env/dynamic/private', () => ({
+	env: {
+		APP_URL: 'http://localhost:5173',
+		STRIPE_PRICE_CREDITS_100: 'price_100',
+		STRIPE_PRICE_CREDITS_500: 'price_500',
+		STRIPE_PRICE_CREDITS_2000: 'price_2000'
+	}
+}));
+
+import { actions, load } from './+page.server';
+
+setupTestDb(['organizations', 'credit_transactions', 'stripe_events']);
+
+const OWNER = TEST_OWNER;
+
+async function seedOrg(overrides: Record<string, unknown> = {}): Promise<void> {
+	await testDb().db.insert(organizations).values({
+		id: 'org-1',
+		name: 'One',
+		creditsRemaining: 0,
+		...overrides
+	});
+}
+
+function buy(bundle: string, user: SessionUser | null = OWNER) {
+	return actions.buy({ request: postForm({ bundle }), locals: { user } } as never);
+}
+
+function setAutoTopup(fields: Record<string, string>, user: SessionUser | null = OWNER) {
+	return actions.setAutoTopup({ request: postForm(fields), locals: { user } } as never);
+}
+
+beforeEach(() => {
+	vi.clearAllMocks();
+	mocks.sessionsCreate.mockResolvedValue({ id: 'cs_new', url: 'https://checkout.stripe.com/pay/test_123' });
+	mocks.customersCreate.mockResolvedValue({ id: 'cus_new' });
+});
+
+describe('usage load', () => {
+	test('reports the org balance, consumption, bundles and auto top-up state', async () => {
+		await seedOrg({ creditsRemaining: 120, autoTopupEnabled: 1, autoTopupThreshold: 100, autoTopupState: 'idle', stripeDefaultPmId: 'pm_1' });
+		await applyLedgerDelta(testDb().db as never, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1' });
+		await consumeCredit(testDb().db as never, 'org-1', 'comment-1');
+
+		const data = (await load({ locals: { user: OWNER } } as never)) as {
+			summary: { remaining: number; usedLifetime: number; usedThisMonth: number };
+			bundles: { id: string }[];
+			autoTopup: { enabled: boolean; threshold: number; state: string; hasCard: boolean };
+			history: unknown[];
+		};
+
+		expect(data.summary).toMatchObject({ remaining: 619, usedLifetime: 1, usedThisMonth: 1 });
+		expect(data.bundles.map((bundle) => bundle.id)).toEqual(['credits_100', 'credits_500', 'credits_2000']);
+		expect(data.autoTopup).toMatchObject({ enabled: true, threshold: 100, state: 'idle', hasCard: true });
+		expect(data.history).toHaveLength(2);
+	});
+});
+
+describe('usage buy action', () => {
+	test('an owner starts a Stripe Checkout for the bundle and redirects to it', async () => {
+		await seedOrg();
+
+		await expect(buy('credits_500')).rejects.toMatchObject({ status: 303, location: 'https://checkout.stripe.com/pay/test_123' });
+
+		expect(mocks.customersCreate).toHaveBeenCalledWith({ name: 'One', email: 'one@example.com', metadata: { org_id: 'org-1' } });
+		const [params] = mocks.sessionsCreate.mock.calls[0];
+		expect(params).toMatchObject({
+			mode: 'payment',
+			line_items: [{ price: 'price_500', quantity: 1 }],
+			customer: 'cus_new',
+			client_reference_id: 'org-1',
+			metadata: { org_id: 'org-1', bundle: 'credits_500', credits: '500' },
+			payment_intent_data: { setup_future_usage: 'off_session' },
+			success_url: 'http://localhost:5173/usage/success?session_id={CHECKOUT_SESSION_ID}'
+		});
+		// The org's Stripe customer id is persisted for reuse.
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeCustomerId).toBe('cus_new');
+	});
+
+	test('a second purchase reuses the saved customer', async () => {
+		await seedOrg({ stripeCustomerId: 'cus_existing' });
+
+		await expect(buy('credits_100')).rejects.toMatchObject({ status: 303 });
+
+		expect(mocks.customersCreate).not.toHaveBeenCalled();
+		expect(mocks.sessionsCreate.mock.calls[0][0].customer).toBe('cus_existing');
+	});
+
+	test('non-owners cannot buy (403)', async () => {
+		await seedOrg();
+		const member = { ...OWNER, orgRole: 'member' as const };
+
+		await expect(buy('credits_100', member)).rejects.toMatchObject({ status: 403 });
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test('an unknown bundle fails loudly with a 400', async () => {
+		await seedOrg();
+		const result = await buy('credits_999999');
+		expect(result).toMatchObject({ status: 400 });
+		expect(JSON.stringify(result)).toContain('unknown credit bundle');
+	});
+
+	test('an unconfigured bundle price fails loudly', async () => {
+		await seedOrg();
+		mocks.sessionsCreate.mockRejectedValue(new Error('STRIPE_PRICE_CREDITS_500 is not configured'));
+		const result = await buy('credits_500');
+		expect(result).toMatchObject({ status: 400 });
+		expect(JSON.stringify(result)).toContain('Could not start checkout');
+	});
+});
+
+describe('usage setAutoTopup action', () => {
+	test('enabling requires the consent checkbox and saves threshold + state', async () => {
+		await seedOrg();
+
+		const result = await setAutoTopup({ enabled: 'on', threshold: '250', consent: 'on' });
+
+		expect(result).toMatchObject({ ok: true });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.autoTopupEnabled).toBe(1);
+		expect(org?.autoTopupThreshold).toBe(250);
+		expect(org?.autoTopupState).toBe('idle');
+		expect(org?.autoTopupFailures).toBe(0);
+	});
+
+	test('enabling without consent fails loudly', async () => {
+		await seedOrg();
+
+		const result = await setAutoTopup({ enabled: 'on', threshold: '250' });
+
+		expect(result).toMatchObject({ status: 400 });
+		expect(JSON.stringify(result)).toContain('consent');
+	});
+
+	test('a non-integer threshold fails loudly', async () => {
+		await seedOrg();
+
+		expect(await setAutoTopup({ enabled: 'on', threshold: 'abc', consent: 'on' })).toMatchObject({ status: 400 });
+		expect(await setAutoTopup({ enabled: 'on', threshold: '-5', consent: 'on' })).toMatchObject({ status: 400 });
+	});
+
+	test('disabling clears the automation but keeps the threshold', async () => {
+		await seedOrg({ autoTopupEnabled: 1, autoTopupThreshold: 250, autoTopupState: 'disabled' });
+
+		const result = await setAutoTopup({ threshold: '250' });
+
+		expect(result).toMatchObject({ ok: true });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.autoTopupEnabled).toBe(0);
+		expect(org?.autoTopupThreshold).toBe(250);
+	});
+
+	test('non-owners cannot change auto top-up (403)', async () => {
+		await seedOrg();
+		const member = { ...OWNER, orgRole: 'member' as const };
+		await expect(setAutoTopup({ enabled: 'on', threshold: '250', consent: 'on' }, member)).rejects.toMatchObject({ status: 403 });
+	});
+});

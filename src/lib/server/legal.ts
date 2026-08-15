@@ -53,6 +53,16 @@ export const CONSENT_CHECKBOX_TEXT =
 	'I am at least 18 years old and agree to the Terms of Service, Privacy Policy, and Data Processing Agreement';
 
 /**
+ * Auto top-up consent (Terms §6.2). Stripe's compliance requirements for
+ * off-session charging demand explicit consent for "unscheduled top-ups" —
+ * this exact sentence is the unticked checkbox on the Usage page, and
+ * legal.test.ts pins it against Terms §6.2 so the form can never drift from
+ * the logged terms.
+ */
+export const AUTO_TOPUP_CONSENT_TEXT =
+	'I authorize Moderaty to charge my saved payment method for comment-credit bundles automatically whenever my balance drops below the threshold I set (unscheduled top-ups, per Section 6 of the Terms of Service).';
+
+/**
  * Marketing e-mail opt-in. Must stay its own unticked box — an LGPD consent
  * bundled into the contract checkbox is invalid.
  */

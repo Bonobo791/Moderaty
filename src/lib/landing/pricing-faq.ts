@@ -23,7 +23,7 @@
 export const PRICING_FAQ_ENTRIES: { q: string; a: string }[] = [
 	{
 		q: 'Is there a subscription?',
-		a: 'Yes, exactly one: $5 a month, auto-renewed, with 100 moderated comments included. Everything else is opt-in and off by default: automatic top-up when the monthly 100 run out, and auto-charge when a top-up balance hits $0.'
+		a: 'Yes, exactly one: $5 a month, auto-renewed, with 100 moderated comments included. Everything else is opt-in and off by default: automatic top-up that charges your saved card for a comment bundle whenever your balance drops below the threshold you set.'
 	},
 	{
 		q: 'What is the $49 lifetime deal?',
@@ -39,7 +39,7 @@ export const PRICING_FAQ_ENTRIES: { q: string; a: string }[] = [
 	},
 	{
 		q: 'What happens when my 100 comments run out?',
-		a: 'Top up at the same 5 cents a comment, in any amount. Do it manually each time, or switch on automatic top-up and never think about it. Unused monthly comments do not carry over.'
+		a: 'Buy a bundle of 100, 500, or 2,000 comments; every comment your channel processes consumes one from your balance, and the Usage tab shows exactly how many are left. Top up manually any time, or switch on automatic top-up and we charge your saved card for the smallest bundle whenever your balance drops below the threshold you set.'
 	},
 	{
 		q: 'Which one should I pick?',

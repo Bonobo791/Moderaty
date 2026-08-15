@@ -64,7 +64,7 @@ vi.mock('$lib/server/youtube', () => ({
 }));
 
 import { setupTestDb, testDb, wipeTables } from './testdb';
-import { auditLog, channels, comments, moderationActions } from './db/schema';
+import { auditLog, channels, comments, creditTransactions, moderationActions, organizations } from './db/schema';
 import { runChannel } from './pipeline';
 import type { ToxicityScores } from './moderation';
 import type { CommentPage, NewComment } from './youtube';
@@ -78,7 +78,7 @@ import {
 	type ChannelRow
 } from './testarbitraries';
 
-const WIPE = ['moderation_actions', 'comments', 'audit_log', 'rules', 'channels'];
+const WIPE = ['moderation_actions', 'comments', 'audit_log', 'rules', 'channels', 'organizations', 'credit_transactions'];
 
 setupTestDb(WIPE);
 
@@ -165,6 +165,17 @@ async function seedChannel(channel: ChannelRow): Promise<void> {
 		title: channel.title,
 		refreshTokenEnc: channel.refreshTokenEnc
 	});
+	// A channel carrying an orgId needs its org row: the ledger gates AI
+	// scoring on the balance and fails loudly for a missing org (never a
+	// silent "no credits"). A huge balance keeps consumption irrelevant to
+	// the ingest properties under test.
+	if (channel.orgId !== null) {
+		await testDb().db.insert(organizations).values({
+			id: channel.orgId,
+			name: `Org ${channel.orgId}`,
+			creditsRemaining: 1_000_000
+		});
+	}
 }
 
 function by<T>(rows: T[], key: (row: T) => string | number): T[] {
@@ -182,7 +193,9 @@ async function snapshot() {
 		comments: by(await db.select().from(comments).all(), (row) => row.id),
 		moderationActions: by(await db.select().from(moderationActions).all(), (row) => row.commentId),
 		auditLog: by(await db.select().from(auditLog).all(), (row) => row.id),
-		channels: by(await db.select().from(channels).all(), (row) => row.id)
+		channels: by(await db.select().from(channels).all(), (row) => row.id),
+		creditTransactions: by(await db.select().from(creditTransactions).all(), (row) => row.id),
+		organizations: by(await db.select().from(organizations).all(), (row) => row.id)
 	};
 }
 

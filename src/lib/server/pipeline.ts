@@ -19,6 +19,8 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { loadHandleSet, normalizeHandle } from '$lib/server/allowlist';
+import { consumeCredit, getCredits, type LedgerHandle } from '$lib/server/billing/ledger';
+import { maybeTriggerAutoTopUp } from '$lib/server/billing/autotopup';
 import { decrypt } from '$lib/server/crypto';
 import { db } from '$lib/server/db';
 import { auditLog, channels, comments, moderationActions, rules } from '$lib/server/db/schema';
@@ -68,6 +70,10 @@ export interface ChannelRunResult {
 	 * outside window mode. */
 	windowNextPageToken?: string | null;
 	windowComplete?: boolean;
+	/** True when AI scoring was paused mid-run because the org's credit balance
+	 * hit zero: rule/allowlist decisions still staged, AI-dependent comments
+	 * deferred, the cursor parked so they are retried after a top-up. */
+	outOfCredits?: boolean;
 }
 
 interface Decision {
@@ -79,6 +85,10 @@ interface Decision {
 	auditAction: string | null;
 	reason: string | null;
 	youtubeAction: 'hold' | 'reject' | 'delete' | 'ban' | null;
+	/** Out-of-credits marker: AI scoring was skipped for this comment. Deferred
+	 * decisions are never staged — they stay unprocessed so a later run (after
+	 * a top-up) re-fetches and scores them. */
+	deferred?: boolean;
 }
 
 type YoutubeAction = Exclude<Decision['youtubeAction'], null>;
@@ -220,7 +230,8 @@ async function decide(
 	tone: { context: ToneContext } | null,
 	deadline: number | undefined,
 	protections: ToneProtections,
-	openAiKey: string | undefined
+	openAiKey: string | undefined,
+	aiBudget: { remaining: number }
 ): Promise<Decision> {
 	// Protected handles skip rules and scoring by design: identity beats text,
 	// so even a matching ban rule loses to the allowlist.
@@ -237,7 +248,31 @@ async function decide(
 		};
 	}
 	const rule = matchPreparedRule(comment.text, comment.authorChannelId, rules);
-	return rule ? ruleDecision(comment, rule) : aiDecision(comment, tone, deadline, protections, openAiKey);
+	if (rule) return ruleDecision(comment, rule);
+	// Metered AI: claim one credit of the batch's AI budget SYNCHRONOUSLY —
+	// before any await — so the concurrent decide() workers in Promise.allSettled
+	// can never over-spend it. Rules/allowlist above never consume budget.
+	// Out of credits: rules/allowlist already had their say — only the AI step
+	// is paused (product choice). The comment stays unprocessed and the cursor
+	// parks so a later run scores it once credits are topped up.
+	if (!(aiBudget.remaining > 0)) return deferredDecision(comment);
+	aiBudget.remaining -= 1;
+	return aiDecision(comment, tone, deadline, protections, openAiKey);
+}
+
+/** Out-of-credits decision: never staged, never consumed, never queued. */
+function deferredDecision(comment: NewComment): Decision {
+	return {
+		comment,
+		status: 'pending',
+		decidedBy: 'none',
+		matchedRuleId: null,
+		aiScore: null,
+		auditAction: null,
+		reason: null,
+		youtubeAction: null,
+		deferred: true
+	};
 }
 
 function auditRows(channelId: string, decisions: Decision[], dryRun: boolean) {
@@ -320,9 +355,28 @@ async function decideNewComments(
 		protections,
 		openAiKey,
 		deadline,
-		rescore
-	}: { accessToken: string; toneLevel: number; protections: ToneProtections; openAiKey?: string; deadline?: number; rescore?: boolean }
-): Promise<{ decisions: Decision[]; failures: string[] }> {
+		rescore,
+		orgId,
+		consumeCredits
+	}: {
+		accessToken: string;
+		toneLevel: number;
+		protections: ToneProtections;
+		openAiKey?: string;
+		deadline?: number;
+		rescore?: boolean;
+		orgId?: string | null;
+		/** True for live runs: credits gate AI scoring and consumption applies.
+		 * Dry runs (previews, window rescore) always score and never consume. */
+		consumeCredits?: boolean;
+	}
+): Promise<{ decisions: Decision[]; failures: string[]; deferred: number }> {
+	// Credits gate AI scoring for live runs only (I8: a dry run changes nothing
+	// durable). Orphan channels (no org) predate the billing model — they score
+	// until claimed (infinite budget). The budget is the org's balance: each AI
+	// decision claims one credit of it, so an org with N credits scores at most
+	// N AI comments per batch — the rest defer for a post-top-up retry.
+	const aiBudget = { remaining: consumeCredits && orgId ? await getCredits(orgId) : Number.POSITIVE_INFINITY };
 	// Dry-run window mode (rescore: true) skips the stored-IDs dedupe entirely:
 	// re-scoring comments a real run already moderated is the point of the
 	// preview. The within-batch dedupe below still applies. The DB query is
@@ -386,7 +440,7 @@ async function decideNewComments(
 				const tone = videoContext
 					? { context: { videoTitle: meta?.title ?? '', videoDescription: meta?.description ?? '' } }
 					: null;
-				return await decide(comment, rulesForChannel, allowlist, tone, deadline, protections, openAiKey);
+				return await decide(comment, rulesForChannel, allowlist, tone, deadline, protections, openAiKey, aiBudget);
 			} catch (error) {
 				// DeadlineExceededError escapes decide() by design (aiDecision
 				// rethrows it) so the run aborts partial:true with no durable
@@ -398,8 +452,15 @@ async function decideNewComments(
 	);
 	const decisions: Decision[] = [];
 	const failures: string[] = [];
+	let deferred = 0;
 	for (const result of settled) {
 		if (result.status === 'fulfilled') {
+			// Deferred decisions are never staged: they stay unprocessed so a
+			// later run (after a top-up) re-fetches and scores them.
+			if (result.value.deferred) {
+				deferred += 1;
+				continue;
+			}
 			decisions.push(result.value);
 			continue;
 		}
@@ -408,10 +469,10 @@ async function decideNewComments(
 		if (result.reason instanceof DeadlineExceededError) throw result.reason;
 		failures.push(result.reason instanceof Error ? result.reason.message : String(result.reason));
 	}
-	return { decisions, failures };
+	return { decisions, failures, deferred };
 }
 
-async function stageDecisions(channelId: string, decisions: Decision[]) {
+async function stageDecisions(channelId: string, decisions: Decision[], orgId?: string | null) {
 	if (!decisions.length) return;
 	const actions = actionRows(channelId, decisions);
 	await db.transaction(async (transaction) => {
@@ -419,6 +480,15 @@ async function stageDecisions(channelId: string, decisions: Decision[]) {
 		if (actions.length) await transaction.insert(moderationActions).values(actions);
 		const audits = auditRows(channelId, decisions.filter((decision) => !decision.youtubeAction), false);
 		if (audits.length) await transaction.insert(auditLog).values(audits);
+		// One credit per staged comment, in the SAME transaction as the staging:
+		// a crash rolls both back and a re-run can never double-charge (the
+		// ledger's UNIQUE(org_id, ref_type, ref_id) anchor is the backstop). A
+		// comment whose charge fails (balance hit 0 mid-batch) stages free.
+		if (orgId) {
+			for (const decision of decisions) {
+				await consumeCredit(transaction as LedgerHandle, orgId, decision.comment.id);
+			}
+		}
 	});
 }
 
@@ -647,7 +717,7 @@ export async function runChannel(
 		});
 		fetched = page.comments.length;
 
-		const { decisions, failures } = await decideNewComments(channelId, page, {
+		const { decisions, failures, deferred } = await decideNewComments(channelId, page, {
 			accessToken,
 			toneLevel: channel.toneLevel ?? 1,
 			protections: {
@@ -658,7 +728,10 @@ export async function runChannel(
 			// the deployment's env key otherwise (openaiKey.ts).
 			openAiKey: await resolveOpenAiKey(channel.orgId),
 			deadline,
-			rescore: window !== undefined
+			rescore: window !== undefined,
+			orgId: channel.orgId,
+			// Live runs consume credits (and gate AI on them); dry runs never do.
+			consumeCredits: !dryRun
 		});
 		queued = decisions.filter((decision) => decision.auditAction === 'queue').length;
 
@@ -670,7 +743,7 @@ export async function runChannel(
 			const audits = auditRows(channelId, decisions, true);
 			if (audits.length) await db.insert(auditLog).values(audits);
 		} else {
-			await stageDecisions(channelId, decisions);
+			await stageDecisions(channelId, decisions, channel.orgId);
 		}
 		// Fail loudly only after successful decisions are staged, and before the
 		// cursor advances, so the next run retries just the failed comments.
@@ -692,6 +765,26 @@ export async function runChannel(
 		// ... and again before any YouTube enforcement call.
 		await assertChannelActive(channelId);
 		acted = await processOutstandingActions(channelId, accessToken, deadline);
+		// Auto top-up trigger: after consumption, when the balance sits below
+		// the org's threshold a saved-card charge is initiated. Best-effort by
+		// design — a payment failure must never fail the moderation run (it is
+		// recorded loudly here and the daily cron sweep is the backstop).
+		if (!dryRun && channel.orgId) {
+			try {
+				await maybeTriggerAutoTopUp(channel.orgId);
+			} catch (error) {
+				console.error(`auto top-up trigger failed for org ${channel.orgId}: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+		// Enforcement ran, but AI was deferred by an empty credit balance: park
+		// the cursor (no persistResults) so the SAME comments are re-fetched next
+		// run — staged decisions dedupe, deferred ones get scored after a top-up.
+		if (deferred > 0) {
+			console.error(
+				`out of credits for org ${channel.orgId ?? '(none)'}: ${deferred} comment(s) deferred — AI scoring paused until credits are topped up`
+			);
+			return { fetched, acted, queued, partial: false, skipped: false, dryRun, outOfCredits: true };
+		}
 		await persistResults(channelId, channel, page);
 		return { fetched, acted, queued, partial: false, skipped: false, dryRun };
 	} catch (error) {

@@ -70,7 +70,7 @@ vi.mock('$lib/server/youtube', () => ({
 }));
 
 import { setupTestDb, testDb, wipeTables } from './testdb';
-import { auditLog, channels, comments, moderationActions, rules } from './db/schema';
+import { auditLog, channels, comments, moderationActions, organizations, rules } from './db/schema';
 import { runChannel, type ChannelRunResult } from './pipeline';
 import type { ToxicityScores } from './moderation';
 import type { CommentModerationStatus, CommentPage, FetchCommentsOptions, NewComment } from './youtube';
@@ -87,7 +87,7 @@ import {
 	type ChannelRow
 } from './testarbitraries';
 
-const WIPE = ['moderation_actions', 'comments', 'audit_log', 'rules', 'channels'];
+const WIPE = ['moderation_actions', 'comments', 'audit_log', 'rules', 'channels', 'organizations', 'credit_transactions'];
 
 // Each property is ONE vitest test running pbtNumRuns() predicates; a
 // FC_NUM_RUNS=1000 burn-in of multi-pass runChannel predicates blows past
@@ -162,6 +162,16 @@ async function seedChannel(channel: ChannelRow): Promise<void> {
 		title: channel.title,
 		refreshTokenEnc: channel.refreshTokenEnc
 	});
+	// The ledger gates AI on the org's balance and fails loudly for a missing
+	// org — generated channels carrying an orgId get a seeded org with a huge
+	// balance so consumption never perturbs the properties under test.
+	if (channel.orgId !== null) {
+		await testDb().db.insert(organizations).values({
+			id: channel.orgId,
+			name: `Org ${channel.orgId}`,
+			creditsRemaining: 1_000_000
+		});
+	}
 }
 
 function by<T>(rows: T[], key: (row: T) => string | number): T[] {
@@ -673,6 +683,13 @@ test('I10: a run fetches at most maxPages, the cursor never regresses, and the n
 				refreshTokenEnc: run.channel.refreshTokenEnc,
 				cursor: run.cursor
 			});
+			if (run.channel.orgId !== null) {
+				await testDb().db.insert(organizations).values({
+					id: run.channel.orgId,
+					name: `Org ${run.channel.orgId}`,
+					creditsRemaining: 1_000_000
+				});
+			}
 			const db = testDb().db;
 
 			// Paginated fetchNewComments seam: mirrors the real one (walks up to

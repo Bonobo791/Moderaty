@@ -184,7 +184,9 @@ calls `GET /api/cron`: use `node --env-file=.env scripts/dev-cron.mjs`
 whichever instance should drain.
 
 Approved dependencies only (execution plan v3): `drizzle-orm`,
-`@libsql/client`, the SvelteKit adapter, `recheck` (runtime); `drizzle-kit`,
+`@libsql/client`, the SvelteKit adapter, `recheck` (runtime); `stripe`
+(runtime — server-only payment SDK, maintainer-approved for the billing
+integration; never import it into client code); `drizzle-kit`,
 `vitest`, `@stryker-mutator/core`, `@stryker-mutator/vitest-runner`,
 `fast-check` (dev — property-based testing, maintainer-approved; the
 `@fast-check/vitest` connector stays optional, plain `fc.assert` in vitest

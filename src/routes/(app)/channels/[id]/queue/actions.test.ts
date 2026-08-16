@@ -199,7 +199,9 @@ test('reject outside DRY_RUN calls YouTube and audits reject', async () => {
 
 	const audits = await auditRows();
 	expect(audits).toHaveLength(1);
-	expect(audits[0]).toMatchObject({ channelId: 'UC1', commentId: 'c1', action: 'reject', reason: 'manual review', actor: 'user' });
+	// authorHandle is null: manual actions have no handle source (the author's
+	// name is never persisted on the comment row by design).
+	expect(audits[0]).toMatchObject({ channelId: 'UC1', commentId: 'c1', action: 'reject', reason: 'manual review', actor: 'user', authorHandle: null });
 });
 
 test('approve outside DRY_RUN skips YouTube entirely and audits approve', async () => {

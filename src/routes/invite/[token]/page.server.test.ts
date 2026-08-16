@@ -17,7 +17,15 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { eq } from 'drizzle-orm';
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
+
+const mocks = vi.hoisted(() => ({
+	env: {
+		APP_URL: 'http://localhost:5173'
+	} as Record<string, string | undefined>
+}));
+
+vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
 // testdb must be the first app import: it registers the $lib/server/db mock
 // before any module that binds the real database (see its header comment).
@@ -112,10 +120,43 @@ test('accept: joins the org, burns the token, 303s to the dashboard; reuse is 41
 	await expect(actions.default(acceptCtx('tok-1'))).rejects.toMatchObject({ status: 410 });
 });
 
-test('accept: the session lands in the joined org (PR #52 review — untested assertion)', async () => {
+test('accept: a misconfigured production APP_URL fails WITHOUT destroying the session or burning the invite', async () => {
+	// cookieSecure() throws on http APP_URL in production. It must run BEFORE
+	// acceptInvite, so a misconfigured deploy can never burn the invite and
+	// delete the old token, then fail to issue the replacement (signed-out).
 	await seedOrgWithInvite('tok-1');
 	await seedJoiner();
-	await expect(actions.default(acceptCtx('tok-1'))).rejects.toMatchObject({ status: 303 });
-	const sess = await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-1')).get();
-	expect(sess?.activeOrgId).toBe('org-1');
+	mocks.env.APP_URL = 'http://moderaty.example';
+	mocks.env.CONTEXT = 'production';
+	try {
+		await expect(actions.default(acceptCtx('tok-1'))).rejects.toMatchObject({ status: 500 });
+		// Nothing was changed: the old session still resolves and the invite
+		// is still open.
+		expect(await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-1')).get()).toBeDefined();
+		const row = await testDb().db.select().from(invites).where(eq(invites.token, 'tok-1')).get();
+		expect(row?.acceptedBy).toBeNull();
+	} finally {
+		mocks.env.APP_URL = 'http://localhost:5173';
+		delete mocks.env.CONTEXT;
+	}
+});
+
+test('accept: the session lands in the joined org (rotated: the old token dies, a fresh cookie is issued)', async () => {
+	// PR #52 review — untested assertion, now rotation: the pre-accept token
+	// must die so it can never resolve at the joined org.
+	await seedOrgWithInvite('tok-1');
+	await seedJoiner();
+	const cookies = makeCookies();
+	cookies.set(SESSION_COOKIE, 'sess-1', { path: '/' });
+
+	await expect(
+		actions.default({ params: { token: 'tok-1' }, locals: { user: TEST_OWNER }, cookies } as never)
+	).rejects.toMatchObject({ status: 303, location: '/dashboard' });
+
+	expect(await testDb().db.select().from(sessions).where(eq(sessions.id, 'sess-1')).get()).toBeUndefined();
+	const set = cookies.setCalls.filter((c) => c.name === SESSION_COOKIE).at(-1);
+	expect(set).toBeDefined();
+	expect(set!.value).toMatch(/^[0-9a-f]{64}$/);
+	const newRow = await testDb().db.select().from(sessions).where(eq(sessions.id, set!.value)).get();
+	expect(newRow).toMatchObject({ userId: TEST_OWNER.id, activeOrgId: 'org-1' });
 });

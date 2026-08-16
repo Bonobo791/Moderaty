@@ -41,7 +41,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	<title>Moderaty — Audit log</title>
 </svelte:head>
 
-<h1>Audit log — {data.ch?.title}</h1>
+<!-- Accessible heading only: the shared channel header (h1) and the active
+	 tab already identify this section visually. -->
+<h2 class="sr-only">Audit log</h2>
 <p class="page-sub">
 	Every moderation action, automatic or manual, newest first. Held and rejected comments can be
 	restored here; deletions and author bans are permanent.
@@ -63,7 +65,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	<div class="card">
 		<table class="stack-table">
 			<thead>
-				<tr><th>Time</th><th>Action</th><th>Comment</th><th>Reason</th><th>Actor</th><th>Undo</th></tr>
+				<tr><th>Time</th><th>Action</th><th>Comment</th><th>Handle</th><th>Reason</th><th>Actor</th><th>Undo</th></tr>
 			</thead>
 			<tbody>
 				{#each data.entries as e}
@@ -78,6 +80,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 								{e.commentId}
 							{/if}
 						</td>
+						<td class="muted" data-label="Handle">{e.authorHandle ?? '—'}</td>
 						<td data-label="Reason">{e.reason}</td>
 						<td class="muted" data-label="Actor">{e.actor}</td>
 						<td data-label="Undo">
@@ -98,4 +101,27 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			</tbody>
 		</table>
 	</div>
+	{#if data.hasPrev || data.nextCursor}
+		<nav class="pager" aria-label="Audit log pages">
+			{#if data.hasPrev}
+				<a class="btn secondary small" href="/channels/{data.ch.id}/log">← Newest</a>
+			{/if}
+			{#if data.nextCursor}
+				<a class="btn secondary small" href="/channels/{data.ch.id}/log?before={encodeURIComponent(data.nextCursor)}">Older →</a>
+			{/if}
+		</nav>
+	{/if}
 {/if}
+
+<div class="card danger-zone">
+	<h2>Erase stored commenter handles</h2>
+	<p class="muted">
+		Commenter handles in this log are kept for 30 days, then erased automatically. Erase them all now.
+	</p>
+	<form method="POST" action="?/eraseHandles">
+		<button
+			class="btn danger small"
+			type="submit"
+			aria-label="Erase all stored commenter handles for this channel now">Erase handles now</button>
+	</form>
+</div>

@@ -44,13 +44,44 @@ const PICK_TTL_MS = 10 * 60 * 1000;
 // different accounts never overwrite one another.
 const MAX_PENDING_PICKS = 5;
 
+/**
+ * The channel-connect OAuth state is SELF-AUTHENTICATING: the state value is
+ * the AES-256-GCM-encrypted `{ userId, ts }` of the flow's starter (see
+ * createChannelState/decodeChannelState below), so the callback derives the
+ * starter from the state itself. The shared `oauth_state` cookie holds the
+ * opaque state strings (login and channel flows share it) and remains the CSRF
+ * layer; the binding cookie it used to pair with is gone.
+ */
+const CHANNEL_STATE_TTL_MS = 10 * 60 * 1000;
+
+export function createChannelState(userId: string): string {
+	return encrypt(JSON.stringify({ userId, ts: Date.now() }));
+}
+
+/** Decodes a channel-connect state; null when forged, tampered, or expired. */
+export function decodeChannelState(state: string): { userId: string } | null {
+	try {
+		const plain = decrypt(state);
+		if (plain === null) return null;
+		const payload: unknown = JSON.parse(plain);
+		if (typeof payload !== 'object' || payload === null) return null;
+		const p = payload as { userId?: unknown; ts?: unknown };
+		if (typeof p.userId !== 'string' || !p.userId) return null;
+		// TTL + a future-ts guard (clock skew must not mint a fresh lease).
+		if (typeof p.ts !== 'number' || p.ts > Date.now() || Date.now() - p.ts > CHANNEL_STATE_TTL_MS) return null;
+		return { userId: p.userId };
+	} catch {
+		return null;
+	}
+}
+
 /** What the OAuth callback parks for the picker: the grant plus its channels. */
 export type PendingChannelPick = {
 	refreshToken: string;
 	channels: Array<{ id: string; title: string }>;
 };
 
-type PickEntry = PendingChannelPick & { state: string; ts: number };
+type PickEntry = PendingChannelPick & { state: string; ts: number; userId: string };
 
 function readEntries(cookies: Cookies): PickEntry[] {
 	const raw = cookies.get(CHANNEL_PICK_COOKIE);
@@ -87,27 +118,42 @@ function writeEntries(cookies: Cookies, entries: PickEntry[]): void {
 
 /**
  * Parks a granted YouTube refresh token and its candidate channels, keyed by
- * the OAuth state of the flow, in a short-lived encrypted httpOnly cookie.
- * AES-GCM makes the payload tamper-proof and confidential, so the picker can
- * trust that both the token and the channel list came from Google's callback.
+ * the OAuth state of the flow and BOUND TO THE USER who parked it, in a
+ * short-lived encrypted httpOnly cookie. AES-GCM makes the payload tamper-proof
+ * and confidential, so the picker can trust that both the token and the channel
+ * list came from Google's callback — and that only the same signed-in user can
+ * complete the pick on a shared machine.
  */
-export function parkPendingChannelPick(cookies: Cookies, state: string, payload: PendingChannelPick): void {
+export function parkPendingChannelPick(
+	cookies: Cookies,
+	state: string,
+	payload: PendingChannelPick,
+	userId: string
+): void {
 	const now = Date.now();
 	const entries = readEntries(cookies).filter(
 		(e) => e.state !== state && now - e.ts <= PICK_TTL_MS
 	);
-	entries.push({ ...payload, state, ts: now });
+	entries.push({ ...payload, state, ts: now, userId });
 	writeEntries(cookies, entries.slice(-MAX_PENDING_PICKS));
 }
 
 /**
  * Reads and validates the parked pick for ONE flow. Returns null when the
- * entry is missing, tampered, malformed, or expired — the caller fails loudly
- * so the user reconnects. Other flows' entries are untouched.
+ * entry is missing, tampered, malformed, expired, or parked by a DIFFERENT
+ * user — the caller fails loudly so the user reconnects. Other flows' entries
+ * are untouched.
  */
-export function readPendingChannelPick(cookies: Cookies, state: string): PendingChannelPick | null {
+export function readPendingChannelPick(cookies: Cookies, state: string, userId: string): PendingChannelPick | null {
 	const entry = readEntries(cookies).find((e) => e.state === state);
 	if (!entry || typeof entry.ts !== 'number' || Date.now() - entry.ts > PICK_TTL_MS) return null;
+	// Bound to the parker: a pick is only readable by the signed-in user who
+	// parked it, so another user on a shared machine can never complete it.
+	// Entries parked BEFORE this binding shipped have no userId and read as
+	// null — deliberate fail-closed invalidation (the picker tells the user
+	// the selection expired and to reconnect), not a migration path that would
+	// reopen the cross-user hole for the pre-binding window.
+	if (entry.userId !== userId) return null;
 	if (typeof entry.refreshToken !== 'string' || !entry.refreshToken) return null;
 	if (!Array.isArray(entry.channels) || entry.channels.length === 0) return null;
 	const valid = entry.channels.every(

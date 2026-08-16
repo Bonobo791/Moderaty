@@ -66,8 +66,11 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	<li>
 		<strong>(b)</strong> Moderation Outcome Data: the minimal records the Processor retains
 		after a moderation action, limited to the comment identifier reference, the comment text
-		(truncated to 500 characters), the classification verdict, the action taken, and the
-		timestamp. Moderation Outcome Data excludes author identifiers and author profile data.
+		(truncated to 500 characters), the classification verdict, the action taken, the
+		timestamp, and the commenter's public handle, which appears in the activity log for up
+		to 30 days, is then erased automatically, and may be erased by the Controller on demand
+		at any time. Moderation Outcome Data excludes all other author identifiers and author
+		profile data.
 	</li>
 	<li>
 		<strong>(c)</strong> ECA Digital: Law no 15.211/2025 (Digital Statute of Children and
@@ -164,17 +167,21 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	<li>(g) delete Comment Data as required by Sections 7 and 17.</li>
 </ul>
 
-<h2 id="s7">7. Data Minimization and Author-Identifier Non-Retention</h2>
+<h2 id="s7">7. Data Minimization and Author-Identifier Retention Limits</h2>
 <p>
 	<strong>7.1</strong> The Processor minimizes retained Comment Data: comments are retrieved,
 	classified, and acted upon; comment text (truncated to 500 characters) is stored solely as
-	part of Moderation Outcome Data, and author identifiers (display name, author channel
-	identifier) are not persistently stored by the Service.
+	part of Moderation Outcome Data. The commenter's public handle is stored with the record and
+	shown in the activity log for up to 30 days, is then erased automatically, and may be erased
+	by the Controller on demand at any time; all other author identifiers (display name, author
+	channel identifier) are not persistently stored by the Service, and no author channel
+	identifiers are retained.
 </p>
 <p>
-	<strong>7.2</strong> Author identifiers are processed transiently, in memory only, strictly
-	for the duration required to classify the comment and execute the configured moderation
-	action, and are discarded immediately thereafter.
+	<strong>7.2</strong> Author identifiers other than the public handle are processed
+	transiently, in memory only, strictly for the duration required to classify the comment and
+	execute the configured moderation action, and are discarded immediately thereafter. The
+	public handle is retained only as described in Clause 7.1.
 </p>
 <p>
 	<strong>7.3</strong> Beyond the comment text stored within Moderation Outcome Data, the
@@ -183,10 +190,12 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 </p>
 <p>
 	<strong>7.4</strong> The Parties acknowledge that pseudonymized identifiers (such as hashed
-	usernames) remain personal data under the LGPD. The Processor shall not retain author
-	identifiers taken from Comment Data, pseudonymized or otherwise, and never for profiling or
-	enrichment. Channel identifiers entered by the Controller in user rules are Controller
-	configuration, not retained Comment Data.
+	usernames) remain personal data under the LGPD. Other than the plain public handle retained
+	under Clause 7.1, the Processor shall not retain author identifiers taken from Comment Data,
+	pseudonymized or otherwise, and never for profiling or enrichment; it builds no pseudonymous
+	profiles and performs no cross-service tracking of commenters. Channel identifiers and
+	protected handles entered by the Controller in user rules are Controller configuration, not
+	retained Comment Data.
 </p>
 <p>
 	<strong>7.5</strong> The Processor shall not use Comment Data or Moderation Outcome Data to
@@ -477,9 +486,11 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				<td>
 					Retrieval of comments; automated content-level classification (hate speech /
 					abusive content); execution of the Controller-configured moderation action
-					(hold, hide, remove, report); immediate discard of author identifiers after
-					classification and action; retention of Moderation Outcome Data (including
-					truncated comment text).
+					(hold, hide, remove, report); retention of the commenter's public handle in
+					the activity log for up to 30 days (erased automatically thereafter, erasable
+					by the Controller on demand); immediate discard of all other author
+					identifiers after classification and action; retention of Moderation Outcome
+					Data (including truncated comment text).
 				</td>
 			</tr>
 			<tr>
@@ -494,8 +505,8 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				<td>Categories of personal data</td>
 				<td>
 					Comment text; author display name / username; author channel identifier;
-					comment identifier; timestamps. Author identifiers are processed transiently
-					and never stored (Section 7).
+					comment identifier; timestamps. Author identifiers other than the public
+					handle are processed transiently and not retained (Section 7).
 				</td>
 			</tr>
 			<tr>
@@ -510,7 +521,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			<tr>
 				<td>Retention and deletion</td>
 				<td>
-					Author identifiers: discarded immediately after classification and action.
+					Public handle: erased automatically 30 days after the record, or earlier on
+					the Controller's demand. Other author identifiers: discarded immediately after
+					classification and action.
 					Moderation Outcome Data (including comment text truncated to 500 characters):
 					retained for the subscription term, deleted within 30 days of termination. Statutory connection/application-access logs: 6 months
 					(Marco Civil, Arts. 13 and 15), segregated, then auto-deleted.
@@ -569,8 +582,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			<tr>
 				<td>Minimization by design</td>
 				<td>
-					No persistent storage of comment author identifiers (Section 7); Moderation
-					Outcome Data schema enforced at the application layer.
+					No persistent storage of comment author identifiers beyond the public
+					handle's 30-day activity-log retention (Section 7); Moderation Outcome Data
+					schema enforced at the application layer.
 				</td>
 			</tr>
 			<tr>

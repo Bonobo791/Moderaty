@@ -1,37 +1,71 @@
-# Commercial Licensing
+# Moderaty Commercial Licensing
 
-Moderaty is dual-licensed: [GNU AGPLv3](LICENSE) or a commercial license.
+Moderaty is source-available under the
+[PolyForm Shield License 1.0.0](LICENSE).
 
-## Which license applies to you?
+## Free Use
 
-**Use AGPLv3 (free) if you:**
-- Self-host Moderaty for your own channel(s), unmodified
-- Modify it and are willing to publish your complete modified source
-  code under AGPLv3 — including if you offer it to users over a network
-- Contribute back to the project
+You may use Moderaty under the PolyForm Shield License, including for
+commercial purposes, provided your use complies with that license.
 
-**You need a commercial license if you:**
-- Offer Moderaty (modified or not) as a hosted/paid service without
-  publishing your source
-- Embed Moderaty in a proprietary product
-- Cannot comply with AGPLv3 for policy or legal reasons (many
-  companies ban AGPL outright — this is normal, talk to us)
-- Want a warranty, indemnification, or support SLA
+Examples of uses that generally do not require a separate commercial
+license include:
 
-## What a commercial license includes
+- self-hosting Moderaty for yourself;
+- self-hosting Moderaty for your business;
+- modifying Moderaty for your own use;
+- using Moderaty internally in a commercial organization; and
+- using Moderaty in connection with products or services that do not
+  compete with Moderaty or products or services offered by
+  Advanced Digital Marketing LTDA using Moderaty.
 
-- Use of Moderaty in proprietary/closed-source products and services
-- No copyleft obligation — your code stays yours
-- Private modifications, no publication requirement
-- [Optional: priority support, warranty, indemnification]
+## Competing Products and Services
 
-## What it does NOT include
+PolyForm Shield does not grant permission to use Moderaty to provide a
+product that competes with Moderaty or with a product or service provided
+by Advanced Digital Marketing LTDA using Moderaty.
 
-- The right to sell or sublicense Moderaty itself as a standalone product
-- The right to remove copyright notices from distributed copies
+This can include, depending on the circumstances:
 
-## Pricing and contact
+- offering a competing hosted Moderaty service;
+- launching a competing SaaS product based on Moderaty;
+- providing Moderaty under another brand as a competing product;
+- selling a competing content-moderation platform based on Moderaty; or
+- otherwise offering Moderaty as a practical substitute for our products
+  or services.
 
-Commercial licenses are priced per organization. Email
-contact@marketingprowess.simplelogin.com with a sentence about your use case for a quote. Use the subject line Moderaty License Request.
-Typical turnaround: 2 business days.
+PolyForm Shield treats products as potentially competing even when they
+use different interfaces, platforms, or technologies, and even when the
+competing product is provided free of charge.
+
+## Commercial License
+
+If your intended use is not permitted under PolyForm Shield, Advanced
+Digital Marketing LTDA may grant those rights under a separate commercial
+license.
+
+Commercial licenses may permit:
+
+- competing hosted services;
+- white-label competing products;
+- SaaS offerings;
+- OEM arrangements;
+- reseller arrangements;
+- proprietary commercial deployments; or
+- other uses specifically agreed to in writing.
+
+Commercial licensing:
+
+contact@AdvancedDigitalMarketingLTDA.com
+
+## Official Hosted Service
+
+Advanced Digital Marketing LTDA may offer an official hosted version of
+Moderaty.
+
+You may therefore choose between:
+
+1. **Self-hosting** Moderaty under PolyForm Shield; or
+2. **Using our hosted service** under the applicable subscription terms.
+
+Copyright (C) 2026 Advanced Digital Marketing LTDA.

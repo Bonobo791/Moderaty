@@ -35,47 +35,6 @@ One agent works the full stack. There are no per-layer agent boundaries.
 - Do not use swarm.
 - You are never to change Stryker or Fast Check tests unless specifically assigned to do so.
 
-## Mutation Testing Engineer (role)
-
-The mutation testing engineer owns test-suite *quality* — the "Every test
-must fail if the real logic is wrong" rule made measurable. Coverage shows
-what the suite executes; mutation testing shows whether the suite fails when
-the code is wrong. Follow the skill at
-`.agents/skills-src/mutation-testing/SKILL.md` (mental mutation testing for
-review-time reasoning; Stryker for every applied mutant). **Stryker applies
-and verifies ALL mutants in this repo** — never hand-edit source to simulate
-a mutation as a workflow step. Killing a mutant means writing a behavior
-test that flips it survived→killed on a scoped re-run; that re-run IS the
-both-directions confirmation (the exception — a mutant Stryker's operator
-set cannot express — is documented in the skill and must be justified in the
-PR). StrykerJS: `@stryker-mutator/core` +
-`@stryker-mutator/vitest-runner`, configured by `stryker.config.json` at the
-repo root (`npx stryker run` for whole-module audits, a scoped `--mutate`
-glob or `node scripts/stryker-pr-scope.mjs` for PR-scale work — StrykerJS
-has no `--since` flag, that is Stryker.NET; the script prints the changed
-src files as a `--mutate` scope, filtered like the config, and an empty
-result means skip the run — the script's `EXCLUDED_FILES` must mirror the
-config's mutate globs whenever the policy exclusions change),
-`npx stryker run --incremental` to reuse the cache; the `json`
-reporter in config gives machine-readable survivors for the agent loop). The
-mutate scope covers `src/**/*.ts` minus tests, the dev-seed helper, the
-static legal page loaders, and `src/lib/auto-refresh.svelte.ts` (policy
-exclusion: vitest compiles `.svelte.ts` for SSR, where `$effect` is a no-op,
-so its mutants are unreachable in this harness; its SSR no-op contract is
-test-pinned and the client behavior is e2e territory). In
-a fresh checkout or worktree run `npx svelte-kit sync` first — Stryker's
-vitest runner needs the generated `.svelte-kit/tsconfig.json`. Verify
-survivors by hand before writing kill tests — the score is a lead, not a
-verdict. CI does not run Stryker (the report-only
-`.github/workflows/mutation.yml` pass was removed by maintainer decision —
-runs are local/agent-driven); wiring any CI gate, including a ratcheted
-`thresholds.break`, remains a separate, maintainer-approved step.
-
-Property-based testing (fast-check) runs under the fast-check-testing
-skill; repo conventions live in `docs/property-testing.md` and shared
-arbitraries in `src/lib/server/testarbitraries.ts`. Properties complement
-example tests and never count toward Stryker kill claims.
-
 ## Agent Skills (skills-src)
 
 Repo-local skill sources live in `.agents/skills-src/<name>/` (currently
@@ -334,7 +293,9 @@ III — the e-mail lives ONLY in `consents` (migration 0011 backfills it from
 `users`), so blocking it from any other use is architectural, not
 discipline. Each cron invocation erases `consents.email` on rows older
 than 10 years (CC Art. 205; bounded batch, skipped under `DRY_RUN=true` per
-I8/I10) — the consent row itself is kept, anonymized.
+I8/I10) — the consent row itself is kept, anonymized. The same cron sweep
+also erases `audit_log`/`moderation_actions` `author_handle` older than 30
+days.
 
 ## Commands
 
@@ -379,33 +340,340 @@ documented exception. Preserve [LICENSE](LICENSE) and [COMMERCIAL.md](COMMERCIAL
 Do not store comment text longer than 500 characters. Never persist
 comment-author identifiers (`author_name`, `author_channel_id`) — they are
 processed in memory at decision time only (the columns linger, nullable and
-wiped, until the contract migration drops them; never write to them).
+wiped, until the contract migration drops them; never write to them). The
+normalized commenter HANDLE is stored on `audit_log.author_handle` /
+`moderation_actions.author_handle` with a strict 30-day TTL (cron sweep,
+bounded batches, skipped under `DRY_RUN`) plus on-demand per-channel erasure
+from the log page's danger zone; manual-action rows store NULL.
 Public copy (landing, FAQ, legal docs) must match actual storage: comment
-text is stored with the moderation outcome, author identities are never
-stored; the consistency guard lives in `src/lib/landing/legal.test.ts`.
-
-## License Headers
-
-Add this notice to new comment-capable source and documentation files, using
-the file's native comment syntax. Do not add comment headers to JSON or other
-data formats.
-
-```text
-# Moderaty — YouTube Comment Auto-Moderation Tool
-# Copyright (C) 2026 Andrew Philip Weilbacher
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Affero General Public License as published
-# by the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU Affero General Public License for more details.
-#
-# You should have received a copy of the GNU Affero General Public License
-# along with this program. If not, see <https://www.gnu.org/licenses/>.
-#
-# Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+text is stored with the moderation outcome, the commenter handle is kept 30
+days then erased; the consistency guard in `src/lib/landing/legal.test.ts`
+pins the 30-day retention promise across those surfaces.
 ```
+
+<!-- >>> aimax:reasonix >>> -->
+# AI MAX Reasonix 集成
+本项目的 AI MAX 工作流已适配 Reasonix。Reasonix 是模型无关的宿主，模型由 `reasonix.toml` 或 `--model` 选择；不要在项目文件中写入 API key。
+
+## 使用边界
+- Reasonix 会自动读取本文件；需要专门工作流时，从 `.agents/skills/aimax-*` 中选择对应技能。
+- 不得输出或调用 Claude Code 的 `/aimax:*` 斜杠命令；应直接使用 `aimax-command-*` 技能。
+- 使用 `aimax-command-auto` 时，选中目标命令后必须读取对应的 `.agents/skills/aimax-command-<命令名>/SKILL.md`，并在当前轮执行完整流程，不得只报告路由结果。
+- 执行任何 Git 命令前必须先确认当前项目或其父目录存在 `.git`；如果不存在，跳过所有 Git 命令并继续非 Git 工作流，不得将其视为失败。
+- AI MAX 的 agent 和 command 已转换为 Reasonix 技能，原始副本保存在 `.aimax/reasonix` 供审阅。
+- 下方只内嵌宿主无关的通用规则；Claude 专属的 agent 和 hook 配置不会注入 Reasonix。
+
+### AI MAX 规则: coding-style.md
+
+# 编码风格
+
+## 不可变性（关键）
+
+始终创建新对象，绝不修改原对象：
+
+```javascript
+// 错误: 可变操作
+function updateUser(user, name) {
+  user.name = name  // 可变操作！
+  return user
+}
+
+// 正确: 不可变操作
+function updateUser(user, name) {
+  return {
+    ...user,
+    name
+  }
+}
+```
+
+## 文件组织
+
+多个小文件 > 少量大文件：
+- 高内聚，低耦合
+- 通常 200-400 行，最多 800 行
+- 从大型组件中提取工具函数
+- 按功能/领域组织，而非按类型组织
+
+## 错误处理
+
+始终全面处理错误：
+
+```typescript
+try {
+  const result = await riskyOperation()
+  return result
+} catch (error) {
+  console.error('Operation failed:', error)
+  throw new Error('Detailed user-friendly message')
+}
+```
+
+## 输入验证
+
+始终验证用户输入：
+
+```typescript
+import { z } from 'zod'
+
+const schema = z.object({
+  email: z.string().email(),
+  age: z.number().int().min(0).max(150)
+})
+
+const validated = schema.parse(input)
+```
+
+## 代码质量检查清单
+
+在标记工作完成前：
+- [ ] 代码可读性好且命名规范
+- [ ] 函数简短（<50 行）
+- [ ] 文件聚焦（<800 行）
+- [ ] 无深层嵌套（>4 层）
+- [ ] 正确的错误处理
+- [ ] 无 console.log 语句
+- [ ] 无硬编码值
+- [ ] 无可变操作（使用不可变模式）
+
+
+### AI MAX 规则: git-workflow.md
+
+# Git 工作流
+
+## 提交信息格式
+
+```
+<type>: <description>
+
+<optional body>
+```
+
+类型: feat, fix, refactor, docs, test, chore, perf, ci
+
+## Pull Request 工作流
+
+创建 PR 时：
+1. 分析完整的提交历史（不仅仅是最新的提交）
+2. 使用 `git diff [base-branch]...HEAD` 查看所有变更
+3. 撰写全面的 PR 摘要
+4. 包含带 TODO 的测试计划
+5. 如果是新分支，推送时使用 `-u` 标志
+
+## 功能实现工作流
+
+1. **先规划**
+   - 使用 **planner** agent 创建实现计划
+   - 识别依赖和风险
+   - 分解为多个阶段
+
+2. **TDD 方法**
+   - 使用 **tdd-guide** agent
+   - 先编写测试（红灯）
+   - 实现代码使测试通过（绿灯）
+   - 重构（改进）
+   - 验证 80%+ 覆盖率
+
+3. **代码审查**
+   - 编写代码后立即使用 **code-reviewer** agent
+   - 解决关键和高优先级问题
+   - 尽可能修复中等优先级问题
+
+4. **提交和推送**
+   - 详细的提交信息
+   - 遵循约定式提交格式
+
+## 输出规则
+- 只输出提交信息本身，不要添加任何签名、标记或元信息
+- 不要包含 "Generated with Claude Code"、"Co-Authored-By" 等署名内容
+- 不要使用 emoji 表情符号
+- 保持简洁专业的风格
+
+
+### AI MAX 规则: patterns.md
+
+# 常用模式
+
+## API 响应格式
+
+```typescript
+interface ApiResponse<T> {
+  success: boolean
+  data?: T
+  error?: string
+  meta?: {
+    total: number
+    page: number
+    limit: number
+  }
+}
+```
+
+## 自定义 Hook 模式
+
+```typescript
+export function useDebounce<T>(value: T, delay: number): T {
+  const [debouncedValue, setDebouncedValue] = useState<T>(value)
+
+  useEffect(() => {
+    const handler = setTimeout(() => setDebouncedValue(value), delay)
+    return () => clearTimeout(handler)
+  }, [value, delay])
+
+  return debouncedValue
+}
+```
+
+## 仓储模式（Repository Pattern）
+
+```typescript
+interface Repository<T> {
+  findAll(filters?: Filters): Promise<T[]>
+  findById(id: string): Promise<T | null>
+  create(data: CreateDto): Promise<T>
+  update(id: string, data: UpdateDto): Promise<T>
+  delete(id: string): Promise<void>
+}
+```
+
+## 骨架项目
+
+实现新功能时：
+1. 搜索经过实战检验的骨架项目
+2. 使用并行 agent 评估选项：
+   - 安全评估
+   - 可扩展性分析
+   - 相关性评分
+   - 实现规划
+3. 克隆最佳匹配作为基础
+4. 在经过验证的结构中迭代
+
+
+### AI MAX 规则: performance.md
+
+# 性能优化
+
+## 模型选择策略
+
+**Haiku 4.5**（Sonnet 90% 能力，节省 3 倍成本）：
+- 频繁调用的轻量级 agent
+- 结对编程和代码生成
+- 多 agent 系统中的工作 agent
+
+**Sonnet 4.5**（最佳编码模型）：
+- 主要开发工作
+- 编排多 agent 工作流
+- 复杂编码任务
+
+**Opus 4.5**（最深度推理）：
+- 复杂架构决策
+- 最高推理需求
+- 研究和分析任务
+
+## 上下文窗口管理
+
+在上下文窗口的最后 20% 避免：
+- 大规模重构
+- 跨多文件的功能实现
+- 调试复杂交互
+
+对上下文敏感度较低的任务：
+- 单文件编辑
+- 独立工具函数创建
+- 文档更新
+- 简单 Bug 修复
+
+## Ultrathink + Plan 模式
+
+对于需要深度推理的复杂任务：
+1. 使用 `ultrathink` 增强思考
+2. 启用 **Plan 模式** 进行结构化方法
+3. 通过多轮批评"预热引擎"
+4. 使用分角色子 agent 进行多样化分析
+
+## 构建故障排除
+
+如果构建失败：
+1. 使用 **build-error-resolver** agent
+2. 分析错误信息
+3. 增量修复
+4. 每次修复后验证
+
+
+### AI MAX 规则: security.md
+
+# 安全指南
+
+## 强制安全检查
+
+每次提交前：
+- [ ] 无硬编码密钥（API 密钥、密码、令牌）
+- [ ] 所有用户输入已验证
+- [ ] SQL 注入防护（参数化查询）
+- [ ] XSS 防护（HTML 净化）
+- [ ] CSRF 保护已启用
+- [ ] 身份验证/授权已验证
+- [ ] 所有端点已启用速率限制
+- [ ] 错误信息不泄露敏感数据
+
+## 密钥管理
+
+```typescript
+// 绝不: 硬编码密钥
+const apiKey = "sk-proj-xxxxx"
+
+// 始终: 使用环境变量
+const apiKey = process.env.OPENAI_API_KEY
+
+if (!apiKey) {
+  throw new Error('OPENAI_API_KEY not configured')
+}
+```
+
+## 安全响应协议
+
+如果发现安全问题：
+1. 立即停止
+2. 使用 **security-reviewer** agent
+3. 继续之前修复关键问题
+4. 轮换任何泄露的密钥
+5. 审查整个代码库是否存在类似问题
+
+
+### AI MAX 规则: testing.md
+
+# 测试要求
+
+## 最低测试覆盖率：80%
+
+测试类型（全部必需）：
+1. **单元测试** - 单个函数、工具函数、组件
+2. **集成测试** - API 端点、数据库操作
+3. **E2E 测试** - 关键用户流程（Playwright）
+
+## 测试驱动开发
+
+强制工作流：
+1. 先编写测试（红灯）
+2. 运行测试 - 应该失败
+3. 编写最小实现（绿灯）
+4. 运行测试 - 应该通过
+5. 重构（改进）
+6. 验证覆盖率（80%+）
+
+## 测试失败故障排除
+
+1. 使用 **tdd-guide** agent
+2. 检查测试隔离性
+3. 验证 mock 是否正确
+4. 修复实现，而非测试（除非测试有误）
+
+## Agent 支持
+
+- **tdd-guide** - 主动用于新功能，强制先写测试
+- **e2e-runner** - Playwright E2E 测试专家
+
+
+## Reasonix 模型配置
+本机可使用 `reasonix --model deepseek/deepseek-v4-flash` 或在 Reasonix 全局配置中设置 `default_model`。模型接入和凭据由 Reasonix 管理，AI MAX 不复制或修改凭据。
+<!-- <<< aimax:reasonix <<< -->

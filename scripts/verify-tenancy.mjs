@@ -171,7 +171,7 @@ try {
 		`SELECT count(*) AS n FROM sessions s WHERE s.active_org_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM memberships m WHERE m.org_id = s.active_org_id AND m.user_id = s.user_id)`,
 		`SELECT s.id, s.user_id, s.active_org_id FROM sessions s WHERE s.active_org_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM memberships m WHERE m.org_id = s.active_org_id AND m.user_id = s.user_id)`
 	);
-	for (const table of ['comments', 'moderation_actions', 'audit_log', 'rules']) {
+	for (const table of ['comments', 'moderation_actions', 'audit_log', 'rules', 'channel_allowed_handles']) {
 		await expectZero(
 			`zero ${table} with channel_id missing from channels`,
 			`SELECT count(*) AS n FROM ${table} t WHERE NOT EXISTS (SELECT 1 FROM channels c WHERE c.id = t.channel_id)`,

@@ -56,7 +56,8 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				<span>Made in Brazil</span>
 			</p>
 			<p class="lgpd-note">
-				LGPD (Lei 13.709/2018) compliant. Comment author identities are never stored from comments.
+				LGPD (Lei 13.709/2018) compliant. Commenter handles appear in the activity log for up
+				to 30 days, then are erased automatically — erase them on demand at any time.
 			</p>
 			<nav class="footer-links" aria-label="Footer">
 				<a href={GITHUB_URL} target="_blank" rel="noreferrer" class="footer-link">GitHub</a>

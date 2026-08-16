@@ -98,6 +98,12 @@ CREATE TABLE rules (
 	pattern TEXT NOT NULL,
 	action TEXT NOT NULL
 );
+CREATE TABLE channel_allowed_handles (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	channel_id TEXT NOT NULL,
+	handle TEXT NOT NULL,
+	created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
 `;
 
 const CHANNELS_DDL = `
@@ -275,7 +281,8 @@ describe('verify-tenancy', () => {
 				"INSERT INTO comments (id, channel_id, text, published_at, status, decided_by) VALUES ('c1', 'UC1', 'hi', '2026-01-01T00:00:00Z', 'approved', 'ai');" +
 				"INSERT INTO moderation_actions (comment_id, channel_id, action, reason, state) VALUES ('c1', 'UC1', 'hold', 'r', 'completed');" +
 				"INSERT INTO audit_log (channel_id, comment_id, action, reason, actor) VALUES ('UC1', 'c1', 'approve', 'r', 'user');" +
-				"INSERT INTO rules (channel_id, type, pattern, action) VALUES ('UC1', 'keyword', 'spam', 'hold');"
+				"INSERT INTO rules (channel_id, type, pattern, action) VALUES ('UC1', 'keyword', 'spam', 'hold');" +
+				"INSERT INTO channel_allowed_handles (channel_id, handle) VALUES ('UC1', '@friend');"
 		});
 		const { code, stdout } = await runProbe(url);
 		expect(stdout).not.toContain('FAIL');
@@ -309,7 +316,8 @@ describe('verify-tenancy', () => {
 				"INSERT INTO comments (id, channel_id, text, published_at, status, decided_by) VALUES ('c1', 'UCgone', 'hi', '2026-01-01T00:00:00Z', 'approved', 'ai');" +
 				"INSERT INTO moderation_actions (comment_id, channel_id, action, reason, state) VALUES ('c1', 'UCgone', 'hold', 'r', 'completed');" +
 				"INSERT INTO audit_log (channel_id, comment_id, action, reason, actor) VALUES ('UCgone', 'c1', 'approve', 'r', 'user');" +
-				"INSERT INTO rules (channel_id, type, pattern, action) VALUES ('UCgone', 'keyword', 'spam', 'hold');"
+				"INSERT INTO rules (channel_id, type, pattern, action) VALUES ('UCgone', 'keyword', 'spam', 'hold');" +
+				"INSERT INTO channel_allowed_handles (channel_id, handle) VALUES ('UCgone', '@friend');"
 		});
 		const { code, stdout } = await runProbe(url);
 		expect(code).toBe(1);
@@ -317,6 +325,7 @@ describe('verify-tenancy', () => {
 		expect(stdout).toContain('FAIL  zero moderation_actions with channel_id missing from channels');
 		expect(stdout).toContain('FAIL  zero audit_log with channel_id missing from channels');
 		expect(stdout).toContain('FAIL  zero rules with channel_id missing from channels');
+		expect(stdout).toContain('FAIL  zero channel_allowed_handles with channel_id missing from channels');
 	}, 20000);
 
 	it('fails loudly when a channel sits in an org with no memberships', async () => {

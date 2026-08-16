@@ -18,10 +18,10 @@
  * Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
  */
 
-/* ── The Night Shift, in terminal ink — world tokens ────────
-   Dark mono-driven system: near-black blue canvas, one hot
-   banhammer-pink accent, verdict semantics derived from it.
-   Theme lock: dark only. Spacing scale: 4/8/16/24/32/48/64/96. */
+/* ── Redesign tokens — dark-only, zero radius, one red accent ──
+   Canonical tokens are the spec §7 set (--bg/--surface/--line/--text/
+   --accent/--ok/--ease-out); legacy aliases below remap onto them so
+   landing/org/help keep rendering unedited. Spacing scale: 4/8/16/24/32/48/64/96. */
 
 /* self-hosted faces (Archivo is variable: weight + width axes, one file) */
 @font-face {
@@ -57,43 +57,67 @@
 	font-display: swap;
 }
 
-:root {
-	/* world palette */
-	--ink: #0b0b14;
-	--surface: #12121e;
-	--line: #23233a;
-	--paper: #f4f4f8;
-
-	/* one accent: banhammer pink — the hammer, verdict stamps, primary CTA */
-	--ban: #ef2d5e;
-
-	/* verdict semantics, same saturation family as the accent */
-	--mint: #3ecf8e;
-	--amber: #f5b84c;
-
-	/* shape system: sharp-ish. radius 0 on stamps/labels, 8px on cards
-	   and panels, full pill ONLY on the primary CTA. */
-	--radius: 8px;
-	--radius-sm: 4px;
-	--font-display: 'Archivo', system-ui, -apple-system, 'Segoe UI', sans-serif;
-	--font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', menlo, monospace;
-	--font-body: var(--font-display);
-
-	/* app-register aliases (kept so route markup is untouched) */
-	--bg: var(--ink);
-	--border: var(--line);
-	--ink-2: rgb(244 244 248 / 55%);
-	--brand: var(--ban);
-	--brand-soft: rgb(239 45 94 / 14%);
-	--danger: var(--ban);
-	--danger-soft: rgb(239 45 94 / 12%);
-	--held: var(--amber);
-	--held-soft: rgb(245 184 76 / 12%);
-	--shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 6px 16px rgb(0 0 0 / 30%);
-	--shadow-raise: 0 2px 4px rgb(0 0 0 / 50%), 0 10px 24px rgb(239 45 94 / 18%);
+@font-face {
+	font-family: 'JetBrains Mono';
+	src: url('/fonts/JetBrainsMono-400.woff2') format('woff2');
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
 }
 
-* { box-sizing: border-box; }
+@font-face {
+	font-family: 'JetBrains Mono';
+	src: url('/fonts/JetBrainsMono-500.woff2') format('woff2');
+	font-weight: 500;
+	font-style: normal;
+	font-display: swap;
+}
+
+:root {
+	/* redesign tokens (spec §7, verbatim) — dark-only, zero radius, one red accent */
+	--bg: #0a0a0c;
+	--surface: #101014;
+	--surface-2: #16161b;
+	--line: rgba(255, 255, 255, 0.09);
+	--line-strong: rgba(255, 255, 255, 0.16);
+	--text: #f4f4f2;
+	--text-2: #9b9ba4;
+	--text-3: #5c5c66;
+	--accent: #ff3131;
+	--accent-press: #e02b2b;
+	--ok: #3ddc84;
+	--ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+
+	/* shape system: zero radius everywhere (spec §7) */
+	--radius: 0;
+	--radius-sm: 0;
+	--font-display: 'Archivo', system-ui, -apple-system, 'Segoe UI', sans-serif;
+	--font-mono: 'JetBrains Mono', ui-monospace, monospace;
+	--font-body: var(--font-display);
+
+	/* legacy aliases remapped onto the redesign tokens so landing/org/help
+	   keep rendering without edits (shadows are gone by spec) */
+	--ink: var(--bg);
+	--paper: var(--text);
+	--border: var(--line);
+	--ink-2: var(--text-2);
+	--brand: var(--accent);
+	--brand-soft: rgb(255 49 49 / 14%);
+	--ban: var(--accent);
+	--danger: var(--accent);
+	--danger-soft: rgb(255 49 49 / 12%);
+	--mint: var(--ok);
+	--amber: #f5b84c;
+	--held: var(--amber);
+	--held-soft: rgb(245 184 76 / 12%);
+	--shadow: none;
+	--shadow-raise: none;
+}
+
+* {
+	box-sizing: border-box;
+	border-radius: 0;
+}
 
 html {
 	-webkit-font-smoothing: antialiased;
@@ -186,7 +210,7 @@ body {
 }
 
 /* press feedback on all pressables */
-.btn-press { transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1); }
+.btn-press { transition: transform 160ms var(--ease-out); }
 .btn-press:active { transform: scale(0.97); }
 
 /* live indicator pulse (semantic only) */
@@ -222,7 +246,7 @@ body {
 @media (hover: hover) and (pointer: fine) {
 	.rogue-card {
 		transition:
-			transform 200ms cubic-bezier(0.23, 1, 0.32, 1),
+			transform 200ms var(--ease-out),
 			border-color 200ms ease;
 	}
 
@@ -230,7 +254,7 @@ body {
 		transform: translateY(-4px) rotate(0deg);
 		border-color: rgb(244 244 248 / 25%);
 	}
-	.rogue-card:hover .stamp { animation: restamp 300ms cubic-bezier(0.23, 1, 0.32, 1); }
+	.rogue-card:hover .stamp { animation: restamp 300ms var(--ease-out); }
 }
 
 @keyframes restamp {
@@ -242,7 +266,7 @@ body {
 details > summary { list-style: none; }
 details > summary::-webkit-details-marker { display: none; }
 details[open] .faq-plus { transform: rotate(45deg); }
-.faq-plus { transition: transform 200ms cubic-bezier(0.23, 1, 0.32, 1); }
+.faq-plus { transition: transform 200ms var(--ease-out); }
 
 /* ── app chrome (operate register, dark) ────────────────── */
 .app-nav {
@@ -296,57 +320,78 @@ h1 {
 .card {
 	background: var(--surface);
 	border: 1px solid var(--line);
-	border-radius: var(--radius);
 	padding: 20px;
 	margin-bottom: 14px;
 }
 
+/* Danger zone: a card holding a destructive, irreversible action. */
+.danger-zone {
+	margin-top: 24px;
+	border-color: var(--danger);
+}
+.danger-zone h2 {
+	color: var(--danger);
+}
+
 /* ── controls ───────────────────────────────────────────── */
+/* .btn family restyled onto the spec's btn-primary/btn-secondary
+   (48px, caps, press scale 0.97, --ease-out; spec §7/Step 1.3) */
 .btn {
-	display: inline-block;
-	background: var(--ban);
-	color: var(--ink);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 10px;
+	height: 48px;
+	padding: 0 32px;
+	background: var(--accent);
+	color: var(--bg);
 	border: 1px solid transparent;
-	border-radius: 999px;
-	padding: 8px 20px;
-	font-size: 14px;
-	font-weight: 600;
+	font-size: 12px;
+	font-weight: 700;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
 	font-family: var(--font-body);
 	cursor: pointer;
 	text-decoration: none;
-	transition: transform 140ms ease, box-shadow 140ms ease, filter 140ms ease;
+	white-space: nowrap;
+	transition:
+		transform 150ms var(--ease-out),
+		background 150ms var(--ease-out);
 }
 
-.btn:hover {
-	filter: brightness(1.12);
-	transform: translateY(-1px);
-	box-shadow: var(--shadow-raise);
+.btn:hover { background: #ff4747; }
+.btn:active {
+	transform: scale(0.97);
+	background: var(--accent-press);
 }
-.btn:active { transform: translateY(0); }
 
 .btn.secondary {
 	background: transparent;
-	color: var(--paper);
-	border-color: var(--line);
-	border-radius: var(--radius);
-	font-weight: 500;
+	color: var(--text);
+	border-color: var(--line-strong);
+	font-weight: 600;
+	transition:
+		transform 150ms var(--ease-out),
+		border-color 150ms var(--ease-out),
+		background 150ms var(--ease-out);
 }
 
 .btn.secondary:hover {
-	background: var(--surface);
-	filter: none;
-	box-shadow: none;
+	border-color: rgb(255 255 255 / 32%);
+	background: var(--surface-2);
 }
-.btn.danger { background: var(--ban); }
-.btn.danger:hover { filter: brightness(0.9); }
+.btn.secondary:active { transform: scale(0.97); }
+
+.btn.danger { background: var(--accent); }
 
 .btn.small {
-	padding: 5px 12px;
-	font-size: 13px;
+	height: 36px;
+	padding: 0 16px;
+	font-size: 11px;
 }
 
-.btn:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
-	outline: 2px solid var(--ban);
+.btn:focus-visible, a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
+	outline: 1px solid var(--accent);
 	outline-offset: 2px;
 }
 
@@ -354,7 +399,6 @@ h1 {
 input, select {
 	padding: 8px 10px;
 	border: 1px solid var(--line);
-	border-radius: var(--radius-sm);
 	font-size: 14px;
 	font-family: var(--font-body);
 	background: var(--surface);
@@ -362,12 +406,78 @@ input, select {
 }
 
 input:focus, select:focus {
-	border-color: var(--ban);
+	border-color: var(--accent);
 	outline: none;
-	box-shadow: 0 0 0 3px var(--brand-soft);
 }
 input::placeholder { color: rgb(244 244 248 / 35%); }
 form.inline { display: inline; }
+
+/* ── redesign primitives (spec §7 / Step 1.3) ───────────── */
+/* mono: ALL numerals, IDs, timestamps */
+.mono {
+	font-family: var(--font-mono);
+	font-feature-settings: 'tnum' on;
+}
+
+/* caps label: 11px uppercase, tracked, faint */
+.caps-label {
+	font-size: 11px;
+	letter-spacing: 0.14em;
+	text-transform: uppercase;
+	font-weight: 500;
+	color: var(--text-3);
+}
+
+/* underlined text link */
+.link-u {
+	color: var(--text-2);
+	text-decoration: underline;
+	text-underline-offset: 3px;
+	text-decoration-color: var(--line-strong);
+	transition:
+		color 150ms var(--ease-out),
+		text-decoration-color 150ms var(--ease-out);
+	cursor: pointer;
+}
+.link-u:hover {
+	color: var(--text);
+	text-decoration-color: var(--text-2);
+}
+
+/* underlined row action (queue approve/reject) */
+.row-action {
+	font-size: 12px;
+	font-weight: 600;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	text-decoration: underline;
+	text-underline-offset: 3px;
+	cursor: pointer;
+	transition:
+		color 150ms var(--ease-out),
+		opacity 100ms var(--ease-out);
+}
+.row-action:active { opacity: 0.55; }
+
+@media (hover: none) {
+	.btn:hover { background: var(--accent); }
+	.btn.secondary:hover { border-color: var(--line-strong); background: transparent; }
+}
+
+/* visually-hidden but accessible (subroute section headings deduped
+   against the shared channel header) */
+.sr-only {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	margin: -1px;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	clip-path: inset(50%);
+	white-space: nowrap;
+	border: 0;
+}
 
 /* ── text & badges ──────────────────────────────────────── */
 .muted {
@@ -379,14 +489,12 @@ code {
 	background: var(--surface);
 	border: 1px solid var(--line);
 	padding: 1px 6px;
-	border-radius: 4px;
 	font-family: var(--font-mono);
 	font-size: 0.92em;
 }
 
 .badge {
 	display: inline-block;
-	border-radius: 999px;
 	padding: 2px 10px;
 	font-size: 12px;
 	font-weight: 500;
@@ -416,23 +524,12 @@ code {
 	color: var(--danger);
 }
 
-/* per-channel stat row (dashboard) */
-.stats {
-	list-style: none;
-	margin: 0 0 12px;
-	padding: 0;
-	display: flex;
-	flex-wrap: wrap;
-	gap: 8px;
-}
-
 /* ── quote (review queue) ───────────────────────────────── */
 .quote {
 	margin: 8px 0;
 	padding: 10px 14px;
 	background: var(--ink);
 	border: 1px solid var(--line);
-	border-radius: var(--radius-sm);
 	color: rgb(244 244 248 / 85%);
 }
 
@@ -501,7 +598,6 @@ tbody tr:last-child td { border-bottom: 0; }
 	color: var(--ink-2);
 	background: var(--surface);
 	border: 1px dashed var(--line);
-	border-radius: var(--radius);
 }
 
 .empty p {
@@ -513,7 +609,6 @@ tbody tr:last-child td { border-bottom: 0; }
 .empty .muted { font-size: 14px; }
 
 .skeleton {
-	border-radius: var(--radius-sm);
 	background: linear-gradient(90deg, var(--surface) 25%, #1a1a2b 50%, var(--surface) 75%);
 	background-size: 200% 100%;
 	animation: shimmer 1.2s infinite linear;
@@ -526,9 +621,8 @@ tbody tr:last-child td { border-bottom: 0; }
 
 .error-box {
 	background: var(--danger-soft);
-	border: 1px solid rgb(239 45 94 / 40%);
+	border: 1px solid rgb(255 49 49 / 40%);
 	color: var(--danger);
-	border-radius: var(--radius-sm);
 	padding: 12px 16px;
 	font-size: 14px;
 	margin-bottom: 14px;
@@ -536,18 +630,20 @@ tbody tr:last-child td { border-bottom: 0; }
 
 .flash {
 	background: var(--brand-soft);
-	border: 1px solid rgb(239 45 94 / 35%);
+	border: 1px solid rgb(255 49 49 / 35%);
 	color: var(--paper);
-	border-radius: var(--radius-sm);
 	padding: 10px 16px;
 	font-size: 14px;
 	margin-bottom: 14px;
 }
 
-/* reduced motion: collapse everything animated to calm */
+/* reduced motion: collapse everything animated to calm — all transitions,
+   the ticker (handled in-component), route fades, and presses go instant */
 @media (prefers-reduced-motion: reduce) {
 	html { scroll-behavior: auto; }
 	.live-dot, .rogue-card:hover .stamp, .stamp-punch { animation: none; }
-	.btn-press, .faq-plus, .rogue-card, .btn { transition: none; }
+	.route-enter { animation: none; }
+	.btn-press, .faq-plus, .rogue-card, .btn, .btn.secondary, .link-u, .row-action { transition: none; }
+	.row-wrap, .queue-row { transition: none; }
 	.skeleton { animation: none; }
 }

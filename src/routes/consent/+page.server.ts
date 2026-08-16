@@ -32,17 +32,25 @@ import {
 	REFUND_NOTICE_TEXT,
 	clearPendingConsent,
 	hasCurrentConsent,
-	readPendingConsent
+	readPendingConsent,
+	type PendingConsent
 } from '$lib/server/legal';
 import { cookieSecure } from '$lib/server/oauthState';
 import { ensurePersonalOrg } from '$lib/server/org';
-import { createSession, SESSION_COOKIE } from '$lib/server/session';
+import { createSession, SESSION_COOKIE, type SessionUser } from '$lib/server/session';
 
 import type { Actions, PageServerLoad } from './$types';
 
 export const load: PageServerLoad = async ({ cookies, url, locals }) => {
 	const state = url.searchParams.get('state');
 	const pending = state ? readPendingConsent(cookies, state) : null;
+	// Shared-browser hardening (mirrors the action): a parked flow belongs to
+	// whoever Google parked it for — never render (or expose the displayName
+	// of) a parked identity to a DIFFERENT signed-in user (CodeRabbit
+	// 3738037988).
+	if (parkedForAnotherUser(pending, locals?.user ?? null)) {
+		throw error(400, 'This sign-in is for a different account — sign out and start again.');
+	}
 	if (pending) {
 		return {
 			kind: pending.kind,
@@ -71,6 +79,17 @@ export const load: PageServerLoad = async ({ cookies, url, locals }) => {
 	throw redirect(302, '/login');
 };
 
+/**
+ * True when a parked flow is being completed by a DIFFERENT signed-in user —
+ * or by ANY signed-in user, for a parked 'new' identity (a Google account that
+ * does not exist yet, so a live session can never be the same account).
+ * Shared-browser hardening: completing someone else's parked flow would mint a
+ * session (or account) as THEM in this browser.
+ */
+function parkedForAnotherUser(pending: PendingConsent | null, sessionUser: SessionUser | null): boolean {
+	return pending !== null && sessionUser !== null && (pending.kind === 'new' || sessionUser.id !== pending.userId);
+}
+
 export const actions: Actions = {
 	default: async ({ cookies, request, url, getClientAddress, locals }) => {
 		const state = url.searchParams.get('state');
@@ -80,6 +99,9 @@ export const actions: Actions = {
 		// consent; with neither there is no verified identity to record.
 		if (!pending && !sessionUser) {
 			return fail(400, { error: 'Your sign-in session expired — please sign in again.' });
+		}
+		if (parkedForAnotherUser(pending, sessionUser)) {
+			return fail(400, { error: 'This sign-in is for a different account — sign out and start again.' });
 		}
 
 		const form = await request.formData();

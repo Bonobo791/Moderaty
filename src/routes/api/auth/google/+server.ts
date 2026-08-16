@@ -21,9 +21,17 @@ import { error, redirect } from '@sveltejs/kit';
 import { randomBytes } from 'node:crypto';
 
 import { env } from '$env/dynamic/private';
+import { createChannelState } from '$lib/server/channelConnect';
 import { readPendingStates, storePendingStates } from '$lib/server/oauthState';
+import type { SessionUser } from '$lib/server/session';
 
-export function GET({ cookies }: { cookies: import('@sveltejs/kit').Cookies }) {
+export function GET({
+	cookies,
+	locals
+}: {
+	cookies: import('@sveltejs/kit').Cookies;
+	locals: { user: SessionUser | null };
+}) {
 	if (!env.GOOGLE_CLIENT_ID) throw error(500, 'GOOGLE_CLIENT_ID is not configured');
 	// Stryker disable next-line ConditionalExpression: equivalent — with this check removed, an unset APP_URL still throws the identical 500 'APP_URL is not configured' from cookieSecure() inside storePendingStates below, before any cookie write or redirect; the StringLiteral sibling on this line is NOT swept (directive is scoped to ConditionalExpression)
 	if (!env.APP_URL) throw error(500, 'APP_URL is not configured');
@@ -31,7 +39,14 @@ export function GET({ cookies }: { cookies: import('@sveltejs/kit').Cookies }) {
 	// CSRF guard: bind the auth request to this browser session. The new state
 	// is appended rather than replacing the cookie so overlapping starts in
 	// multiple tabs stay valid.
-	const state = randomBytes(16).toString('hex');
+	// A signed-in connect uses a SELF-AUTHENTICATING state: the state value is
+	// the AES-256-GCM-encrypted `{ userId, ts }` of the starter, so the callback
+	// derives the starter from the state itself. That makes the binding
+	// unforgeable AND immune to the shared-cookie read-modify-write race
+	// (a concurrent tab's write may drop this flow's cookie entry, but the
+	// state's own signature remains the authority). A signed-out start parks no
+	// binding and dies at the callback.
+	const state = locals.user ? createChannelState(locals.user.id) : randomBytes(16).toString('hex');
 	storePendingStates(cookies, [...readPendingStates(cookies), state]);
 
 	const params = new URLSearchParams({

@@ -19,14 +19,14 @@
 import { and, eq } from 'drizzle-orm';
 import { expect, test, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ customersDel: vi.fn() }));
+const mocks = vi.hoisted(() => ({ customersDel: vi.fn(), customersUpdate: vi.fn() }));
 
 vi.mock('$lib/server/stripe/client', () => ({
-	getStripe: () => ({ customers: { del: mocks.customersDel } })
+	getStripe: () => ({ customers: { del: mocks.customersDel, update: mocks.customersUpdate } })
 }));
 
 import { DAY_MS, seedConsent, seedUser as seedBareUser, setupTestDb, testDb } from './testdb';
-import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, invites, memberships, moderationActions, organizations, rules, sessions, users } from './db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, users } from './db/schema';
 import {
 	AUDIT_HANDLE_RETENTION_MS,
 	CONSENT_EMAIL_RETENTION_MS,
@@ -35,13 +35,14 @@ import {
 	consentEmailCutoffIso,
 	deleteChannelRecords,
 	deleteUserRecords,
+	retryStripeCustomerDeletions,
 	nullExpiredAuditLogHandles,
 	nullExpiredConsentEmails,
 	nullExpiredHandles,
 	nullExpiredModerationActionHandles
 } from './deletion';
 
-setupTestDb(['moderation_actions', 'comments', 'audit_log', 'channel_allowed_handles', 'rules', 'channels', 'sessions', 'consents', 'invites', 'memberships', 'organizations', 'users', 'credit_transactions']);
+setupTestDb(['moderation_actions', 'comments', 'audit_log', 'channel_allowed_handles', 'rules', 'channels', 'sessions', 'consents', 'invites', 'memberships', 'organizations', 'users', 'credit_transactions', 'stripe_deletion_outbox']);
 
 /** Seeds one comment plus its moderation action, audit row, and keyword rule for a channel. */
 async function seedModerationData(channelId: string, key: string) {
@@ -172,6 +173,9 @@ async function expectAllTablesEmpty() {
 		await deleteUserRecords(userId);
 
 		expect(mocks.customersDel).toHaveBeenCalledWith('cus_gone');
+		// The outbox row existed only for the retry path — a confirmed deletion
+		// clears it, so the cron never re-deletes a gone customer.
+		expect(await testDb().db.select().from(stripeDeletionOutbox).all()).toEqual([]);
 	});
 
 	test('a Stripe customer deletion failure is loud but never blocks the account deletion', async () => {
@@ -187,6 +191,54 @@ async function expectAllTablesEmpty() {
 		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('cus_gone'));
 		errorSpy.mockRestore();
 	});
+
+test('a failed Stripe customer deletion is persisted to the outbox for cron retry', async () => {
+	// "Immediate and permanent" deletion must not lose the erasure to a
+	// transient Stripe outage: the outbox row carries the obligation and the
+	// cron retries it until Stripe confirms (coderabbit).
+	const userId = await seedUser('gone');
+	await testDb().db.update(organizations).set({ stripeCustomerId: 'cus_gone' }).where(eq(organizations.id, 'org-gone'));
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	mocks.customersDel.mockRejectedValue(new Error('stripe is down'));
+	try {
+		await deleteUserRecords(userId);
+
+		// The deletion completed locally; the erasure obligation survives.
+		expect(await userRow(userId)).toMatchObject({ googleSub: `deleted:${userId}` });
+		const outbox = await testDb().db.select().from(stripeDeletionOutbox).all();
+		expect(outbox).toHaveLength(1);
+		expect(outbox[0]).toMatchObject({ customerId: 'cus_gone', attempts: 0 });
+
+		// The cron retry succeeds and clears the row.
+		mocks.customersDel.mockResolvedValue({ id: 'cus_gone', deleted: true });
+		expect(await retryStripeCustomerDeletions()).toBe(1);
+		expect(await testDb().db.select().from(stripeDeletionOutbox).all()).toEqual([]);
+	} finally {
+		errorSpy.mockRestore();
+	}
+});
+
+test('deleteUserRecords anonymizes the Stripe customer of a surviving team org whose last owner leaves', async () => {
+	// The org survives (a co-member is promoted to owner), but its Stripe
+	// Customer was created with the DEPARTING user's e-mail and holds their
+	// saved payment method — that PII must not outlive the account
+	// (codex 6151). The customer itself stays: the org keeps billing.
+	const userId = await seedUser('departing');
+	const coMember = await seedBareUser('staying');
+	await testDb().db.insert(organizations).values({ id: 'org-shared', name: 'Shared', stripeCustomerId: 'cus_shared', stripeDefaultPmId: 'pm_shared' });
+	await testDb().db.insert(memberships).values({ userId, orgId: 'org-shared', role: 'owner' });
+	await testDb().db.insert(memberships).values({ userId: coMember, orgId: 'org-shared', role: 'member' });
+	mocks.customersUpdate.mockResolvedValue({ id: 'cus_shared' });
+
+	await deleteUserRecords(userId);
+
+	expect(mocks.customersUpdate).toHaveBeenCalledWith('cus_shared', expect.objectContaining({ email: '' }));
+	// The org and its customer survive for the promoted successor.
+	const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-shared')).get();
+	expect(org?.stripeCustomerId).toBe('cus_shared');
+	// The surviving org's customer is never deleted.
+	expect(mocks.customersDel).not.toHaveBeenCalledWith('cus_shared');
+});
 
 test('deleteUserRecords erases the dissolved orgs\' credit ledger rows', async () => {
 	const userId = await seedUser('gone');

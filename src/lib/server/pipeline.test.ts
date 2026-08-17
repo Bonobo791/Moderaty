@@ -1779,26 +1779,28 @@ describe('credit consumption (billing)', () => {
 		expect(mocks.state.channelUpdates.some((update) => 'cursor' in update || 'scanCursor' in update)).toBe(true);
 	});
 
-	test('an org with a Stripe customer but no balance is still metered: AI defers', async () => {
-		// Metering means billing ENGAGED — a saved customer is engagement even
-		// with a NULL balance, so the gate must hold.
+	test('an org with only a Stripe customer (checkout opened, never purchased) is UNmetered: AI scores unlimited', async () => {
+		// Metering means a successful credit PURCHASE (non-null balance). A
+		// customer alone only proves a Checkout was opened — it must never flip
+		// a pre-billing org into the credit gate (codex 6133).
 		mocks.state.channel.orgId = 'org-1';
 		mocks.state.credits = null;
 		mocks.state.customerId = 'cus_1';
-		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		mocks.scoreComment.mockResolvedValue(moderation(0.5));
 
 		const result = await runChannel('channel');
 
-		expect(result.outOfCredits).toBe(true);
-		expect(mocks.state.insertedComments).toEqual([]);
-		expect(mocks.scoreComment).not.toHaveBeenCalled();
-		errorSpy.mockRestore();
+		expect(result.outOfCredits).toBeUndefined();
+		expect(mocks.scoreComment).toHaveBeenCalled();
+		expect(mocks.state.insertedCredits).toEqual([]);
 	});
 
-	test('at zero credits rule decisions still stage, free of charge', async () => {
+	test('rule decisions stage, free of charge', async () => {
+		// A POSITIVE balance makes the assertion meaningful: if stageDecisions
+		// charged rule decisions, a consume row would land here and the test
+		// would fail (codex 6167 / coderabbit).
 		mocks.state.channel.orgId = 'org-1';
-		mocks.state.credits = 0;
+		mocks.state.credits = 5;
 		mocks.state.ruleRows = [{ id: 1, type: 'regex', pattern: 'spam', action: 'hold' }];
 		mocks.fetchNewComments.mockResolvedValue({
 			comments: [newComment({ id: 'a', text: 'spam one' })],
@@ -1812,6 +1814,26 @@ describe('credit consumption (billing)', () => {
 		expect(mocks.state.insertedCredits).toEqual([]);
 		expect(result.outOfCredits).toBeUndefined();
 		expect(mocks.state.channelUpdates.some((update) => 'cursor' in update || 'scanCursor' in update)).toBe(true);
+	});
+
+	test('with credits available, only AI decisions consume credits — rule matches are free', async () => {
+		mocks.state.channel.orgId = 'org-1';
+		mocks.state.credits = 1;
+		mocks.state.ruleRows = [{ id: 1, type: 'regex', pattern: 'spam', action: 'hold' }];
+		mocks.scoreComment.mockResolvedValue(moderation(0.9));
+		mocks.fetchNewComments.mockResolvedValue({
+			comments: [newComment({ id: 'a', text: 'spam one' }), newComment({ id: 'b', text: 'free text' })],
+			nextPageToken: null,
+			reachedCursor: true
+		});
+
+		const result = await runChannel('channel');
+
+		expect(result.outOfCredits).toBeUndefined();
+		// Only the AI-scored comment 'b' may consume the sole credit; the rule
+		// match 'a' must stage free.
+		expect(mocks.state.insertedCredits).toEqual([expect.objectContaining({ refId: 'b' })]);
+		expect(mocks.state.insertedCredits).not.toEqual([expect.objectContaining({ refId: 'a' })]);
 	});
 
 	test('a dry run at zero credits still scores with AI and consumes nothing', async () => {

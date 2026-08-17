@@ -89,6 +89,12 @@ interface Decision {
 	 * decisions are never staged — they stay unprocessed so a later run (after
 	 * a top-up) re-fetches and scores them. */
 	deferred?: boolean;
+	/** True when this decision consumed AI budget — the ONLY decisions that
+	 * may be charged a credit. Rule/allowlist decisions never reach AI and
+	 * must stage free (codex 6167); the marker is set where the budget is
+	 * decremented (decide), so a decision that never claimed budget (e.g.
+	 * the metadataError queue path) can never be billed. */
+	billable?: boolean;
 }
 
 type YoutubeAction = Exclude<Decision['youtubeAction'], null>;
@@ -274,7 +280,9 @@ async function decide(
 	// parks so a later run scores it once credits are topped up.
 	if (!(aiBudget.remaining > 0)) return deferredDecision(comment);
 	aiBudget.remaining -= 1;
-	return aiDecision(comment, tone, deadline, protections, openAiKey);
+	// The budget claim IS the billing marker: this decision consumed an AI
+	// call, so stageDecisions may charge it exactly one credit.
+	return { ...(await aiDecision(comment, tone, deadline, protections, openAiKey)), billable: true };
 }
 
 /**
@@ -533,12 +541,16 @@ async function stageDecisions(channelId: string, decisions: Decision[], orgId?: 
 		if (actions.length) await transaction.insert(moderationActions).values(actions);
 		const audits = auditRows(channelId, decisions.filter((decision) => !decision.youtubeAction), false);
 		if (audits.length) await transaction.insert(auditLog).values(audits);
-		// One credit per staged comment, in the SAME transaction as the staging:
-		// a crash rolls both back and a re-run can never double-charge (the
-		// ledger's UNIQUE(org_id, ref_type, ref_id) anchor is the backstop). A
-		// comment whose charge fails (balance hit 0 mid-batch) stages free.
+		// One credit per BILLABLE decision (AI budget was claimed for it), in
+		// the SAME transaction as the staging: a crash rolls both back and a
+		// re-run can never double-charge (the ledger's UNIQUE(org_id, ref_type,
+		// ref_id) anchor is the backstop). Rule/allowlist decisions are never
+		// billed (billable is set only where decide() decrements the AI
+		// budget); a comment whose charge fails (balance hit 0 mid-batch)
+		// stages free.
 		if (orgId) {
 			for (const decision of decisions) {
+				if (!decision.billable) continue;
 				await consumeCredit(transaction as LedgerHandle, orgId, decision.comment.id);
 			}
 		}

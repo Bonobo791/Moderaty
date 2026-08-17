@@ -153,6 +153,18 @@ async function scoreDeterministically(text: string) {
 	return { score, scores: scoresFor(score) };
 }
 
+/** Seeds the high-credit org row the ledger gate needs (a huge balance keeps
+ * consumption irrelevant to the reconciliation properties under test). No-op
+ * for org-less channels. Shared by every property so the fixture lives once. */
+async function seedOrgFor(orgId: string | null): Promise<void> {
+	if (orgId === null) return;
+	await testDb().db.insert(organizations).values({
+		id: orgId,
+		name: `Org ${orgId}`,
+		creditsRemaining: 1_000_000
+	});
+}
+
 /** Seeds the generated channel row, bare (tone level 1, no cursor fields). */
 async function seedChannel(channel: ChannelRow): Promise<void> {
 	await testDb().db.insert(channels).values({
@@ -165,13 +177,7 @@ async function seedChannel(channel: ChannelRow): Promise<void> {
 	// The ledger gates AI on the org's balance and fails loudly for a missing
 	// org — generated channels carrying an orgId get a seeded org with a huge
 	// balance so consumption never perturbs the properties under test.
-	if (channel.orgId !== null) {
-		await testDb().db.insert(organizations).values({
-			id: channel.orgId,
-			name: `Org ${channel.orgId}`,
-			creditsRemaining: 1_000_000
-		});
-	}
+	await seedOrgFor(channel.orgId);
 }
 
 function by<T>(rows: T[], key: (row: T) => string | number): T[] {
@@ -683,13 +689,7 @@ test('I10: a run fetches at most maxPages, the cursor never regresses, and the n
 				refreshTokenEnc: run.channel.refreshTokenEnc,
 				cursor: run.cursor
 			});
-			if (run.channel.orgId !== null) {
-				await testDb().db.insert(organizations).values({
-					id: run.channel.orgId,
-					name: `Org ${run.channel.orgId}`,
-					creditsRemaining: 1_000_000
-				});
-			}
+			await seedOrgFor(run.channel.orgId);
 			const db = testDb().db;
 
 			// Paginated fetchNewComments seam: mirrors the real one (walks up to

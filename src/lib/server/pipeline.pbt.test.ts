@@ -156,6 +156,18 @@ function scoresFor(score: number): ToxicityScores {
 	return Object.fromEntries(SCORE_CATEGORIES.map((category) => [category, score])) as ToxicityScores;
 }
 
+/** Seeds the high-credit org row the ledger gate needs (a huge balance keeps
+ * consumption irrelevant to the ingest properties under test). No-op for
+ * org-less channels. Shared by every property so the fixture lives once. */
+async function seedOrgFor(orgId: string | null): Promise<void> {
+	if (orgId === null) return;
+	await testDb().db.insert(organizations).values({
+		id: orgId,
+		name: `Org ${orgId}`,
+		creditsRemaining: 1_000_000
+	});
+}
+
 /** Seeds the generated channel row (tone level 1 — no tone pass, no video metadata call). */
 async function seedChannel(channel: ChannelRow): Promise<void> {
 	await testDb().db.insert(channels).values({
@@ -167,15 +179,8 @@ async function seedChannel(channel: ChannelRow): Promise<void> {
 	});
 	// A channel carrying an orgId needs its org row: the ledger gates AI
 	// scoring on the balance and fails loudly for a missing org (never a
-	// silent "no credits"). A huge balance keeps consumption irrelevant to
-	// the ingest properties under test.
-	if (channel.orgId !== null) {
-		await testDb().db.insert(organizations).values({
-			id: channel.orgId,
-			name: `Org ${channel.orgId}`,
-			creditsRemaining: 1_000_000
-		});
-	}
+	// silent "no credits").
+	await seedOrgFor(channel.orgId);
 }
 
 function by<T>(rows: T[], key: (row: T) => string | number): T[] {

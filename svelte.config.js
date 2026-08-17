@@ -16,7 +16,15 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import adapter from '@sveltejs/adapter-netlify';
+import adapterNetlify from '@sveltejs/adapter-netlify';
+import adapterNode from '@sveltejs/adapter-node';
+
+// Two supported deployment targets (docs/COOLIFY_BUNNY.md):
+// - Netlify (default): no env needed — every existing Netlify build is
+//   unchanged.
+// - Coolify (self-hosted): the Dockerfile builds with ADAPTER=node.
+// The choice is made at BUILD time, so a single repo serves both targets.
+const useNode = process.env.ADAPTER === 'node';
 
 export default {
 	compilerOptions: {
@@ -27,6 +35,6 @@ export default {
 		preserveComments: true
 	},
 	kit: {
-		adapter: adapter()
+		adapter: useNode ? adapterNode() : adapterNetlify()
 	}
 };

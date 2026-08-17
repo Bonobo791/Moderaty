@@ -18,9 +18,10 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 //
 // Bunny CDN cache purge (docs/COOLIFY_BUNNY.md). Bunny never auto-detects
-// origin changes, so every Coolify deploy must purge the pull zone after the
-// new container is healthy — Coolify's "Post Deployment Command" runs this
-// script in the fresh container after each successful deployment.
+// origin changes, so every PRODUCTION deploy must purge the pull zone — the
+// GitHub Actions workflow `.github/workflows/bunny-purge.yml` runs this
+// script on push to `main`, OUTSIDE the container, with a zone-scoped key
+// from repository secrets (never in the app runtime).
 //
 // Purges the WHOLE site: POST https://api.bunny.net/purge?url=<site>/*&async=true
 // with the account API key in an AccessKey header. The wildcard URL pattern

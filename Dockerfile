@@ -58,8 +58,9 @@ ENV NODE_ENV=production \
 	PORT=3000
 COPY --from=builder /app/build build/
 # scripts/ ships so the in-container commands work: the Coolify Scheduled
-# Task cron ticker and the post-deployment Bunny purge both run
-# `node scripts/...` inside this image.
+# Task cron ticker runs `node scripts/...` inside this image. (The Bunny CDN
+# purge is NOT in-container — it runs from .github/workflows/bunny-purge.yml
+# with a zone-scoped key, so no purge credential ever ships in the image.)
 COPY --from=builder /app/scripts scripts/
 COPY --from=builder /app/package.json package.json
 COPY --from=builder /app/node_modules node_modules/

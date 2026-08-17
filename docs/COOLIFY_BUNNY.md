@@ -141,11 +141,7 @@ One-time setup (human, in the Coolify dashboard):
    One task replaces the Netlify Scheduled Function; N channels ⇒ each
    channel scanned every N minutes, exactly as on Netlify. Failures appear as
    failed tasks — loud, never silent.
-6. **Post Deployment Command** (Advanced menu, runs with `sh -c` in the new
-   container after each successful deployment):
-   `node scripts/bunny-purge.mjs`. A failed purge fails the post-deployment
-   step loudly.
-7. **Domain**: the app's fqdn is the *origin* hostname (e.g.
+6. **Domain**: the app's fqdn is the *origin* hostname (e.g.
    `moderaty-prod.<server>`); the public domain points at Bunny (§5), not at
    the app.
 
@@ -198,10 +194,11 @@ instance doubles as the live branch-deploy that Netlify used to provide.
      (edge bypass) — keeps the dashboard, consent, and auth flows uncached.
    - Smart Cache (never caches `text/html`/`application/json`) may stay on;
      the rules above are the guarantee regardless.
-5. **Purge wiring** is the prod app's post-deployment command (§3.6). Rate
-   limits (~30 wildcard purges/min) are irrelevant at one purge per deploy.
-   If the account key ever becomes a concern, the alternative is the per-zone
-   `POST /pullzone/{id}/purgeCache` endpoint.
+5. **Purge wiring** is the GitHub Actions workflow on push to `main` (§3.5) —
+   it runs OUTSIDE the container with a zone-scoped key from repository
+   secrets. Rate limits (~30 wildcard purges/min) are irrelevant at one purge
+   per deploy. If the zone-scoped key ever becomes a concern, the alternative
+   is the per-zone `POST /pullzone/{id}/purgeCache` endpoint.
 
 ## 6. Google OAuth
 
@@ -257,7 +254,7 @@ Each step has a verify gate; do not proceed past a failed gate.
   and are application-level — locate them in your Coolify version).
 - **Alternative purge trigger**: Coolify Notifications → Webhook channel on
   `deployment_success` (payload carries `fqdn`/`application_uuid`) if the
-  post-deployment command ever proves insufficient.
+  GitHub Actions workflow ever proves insufficient.
 - `X-Forwarded-Proto` behind Bunny was not verified; `ORIGIN` (§3.4) removes
   the dependency, so confirm at gate 3 rather than assume.
 - Turso embedded replicas on the Coolify server are a possible future

@@ -24,12 +24,12 @@
 // The stripe_events row and the ledger mutation land in ONE transaction; a
 // crash rolls both back and Stripe's retry re-runs the whole thing safely.
 
-import { and, eq } from 'drizzle-orm';
+import { and, eq, or } from 'drizzle-orm';
 import type Stripe from 'stripe';
 
 import { db } from '$lib/server/db';
 import { organizations, creditTransactions, stripeEvents } from '$lib/server/db/schema';
-import { applyLedgerDelta, findGrantForStripe } from '$lib/server/billing/ledger';
+import { applyLedgerDelta, drainPendingReversals, findGrantForStripe, queuePendingReversal } from '$lib/server/billing/ledger';
 import { grantAutoTopupCredits, handleAutoTopupFailure } from '$lib/server/billing/autotopup';
 import { bundleById, type CreditBundle } from '$lib/server/stripe/bundles';
 import { getStripe } from '$lib/server/stripe/client';
@@ -72,22 +72,43 @@ function creditsForBundle(bundle: CreditBundle): number {
  * Only payment_status 'paid' grants: 'processing' (delayed-notification
  * methods) must wait for async_payment_succeeded, and no_payment_required
  * (a $0 session) grants nothing.
+ *
+ * The result is a three-way verdict, not a boolean (coderabbit): 'granted'
+ * (this call applied the credits), 'already' (a previous delivery did — the
+ * success page must still read success), and 'rejected' (the session cannot
+ * or did not grant — never report success for it).
+ *
+ * @throws A card-persistence failure propagates (after a loud log) so the
+ * webhook route answers 500 and Stripe redelivers — the idempotent retry
+ * saves the card without double-granting (codex 6141). The grant itself is
+ * already committed and never rolled back.
  */
-export async function fulfillCheckout(sessionId: string): Promise<boolean> {
+export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'already' | 'rejected'> {
 	const session = await getStripe().checkout.sessions.retrieve(sessionId, {
 		expand: ['payment_intent']
 	});
-	if (session.payment_status !== 'paid') return false;
+	if (session.payment_status !== 'paid') return 'rejected';
 	const orgId = session.metadata?.org_id;
 	const bundleId = session.metadata?.bundle;
 	if (!orgId || !bundleId) {
 		console.error(`stripe: checkout session ${sessionId} has no org_id/bundle metadata — cannot credit`);
-		return false;
+		return 'rejected';
 	}
-	const bundle = bundleById(bundleId);
+	// An unknown bundle id is an operator config bug, not a transient failure:
+	// acknowledge loudly and reject (the credits can never be granted — a
+	// retry storm would only produce three days of 500s). bundleById throws
+	// for a missing id; catch and convert to the loud rejection.
+	let bundle: CreditBundle;
+	try {
+		bundle = bundleById(bundleId);
+	} catch (bundleError) {
+		console.error(`stripe: checkout session ${sessionId} references unknown bundle ${bundleId} — credits cannot be granted`);
+		return 'rejected';
+	}
 	// expand: ['payment_intent'] returns the full object; the type stays a
 	// string-union, so narrow before touching nested fields.
 	const paymentIntent = typeof session.payment_intent === 'string' ? null : session.payment_intent;
+	const chargeId = typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : undefined;
 	const applied = await applyLedgerDelta(db, {
 		orgId,
 		delta: creditsForBundle(bundle),
@@ -95,8 +116,17 @@ export async function fulfillCheckout(sessionId: string): Promise<boolean> {
 		refType: 'checkout_session',
 		refId: sessionId,
 		paymentIntentId: paymentIntent?.id,
-		chargeId: typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : undefined
+		chargeId
 	});
+	// A refund/dispute event may have arrived BEFORE this grant (Stripe does
+	// not order deliveries): apply the queued reversal now, in the same
+	// breath as the grant, so the customer never keeps credits for money that
+	// already left (codex 6153). Runs only when THIS call granted — an
+	// 'already' delivery drained on its own first run.
+	if (applied && chargeId) {
+		const drained = await drainPendingReversals(chargeId);
+		if (drained > 0) console.error(`stripe: checkout grant ${sessionId} immediately drained ${drained} pending reversal(s) for ${chargeId}`);
+	}
 	// Save the card used for this payment as the customer's default, so a
 	// later auto top-up can charge it off-session. This runs even when the
 	// grant was already applied (duplicate delivery): a transient first-
@@ -117,12 +147,16 @@ export async function fulfillCheckout(sessionId: string): Promise<boolean> {
 				.set({ stripeCustomerId: customer, stripeDefaultPmId: paymentMethodId })
 				.where(eq(organizations.id, orgId));
 		} catch (error) {
-			// The credits are already granted; failing to save the card only
-			// disables future auto top-up — never fail the fulfillment for it.
+			// The credits are already granted, but a swallowed failure would
+			// make the webhook answer 200 and Stripe would never redeliver —
+			// the org would permanently have no top-up card. Throw (after the
+			// loud log): the route 500s, Stripe retries, and the idempotent
+			// retry saves the card without double-granting (codex 6141).
 			console.error(`stripe: could not save payment method for ${orgId}: ${error instanceof Error ? error.message : String(error)}`);
+			throw new Error(`stripe: could not save payment method for org ${orgId} — webhook will retry`);
 		}
 	}
-	return applied;
+	return applied ? 'granted' : 'already';
 }
 
 /**
@@ -178,7 +212,14 @@ export async function reverseCharge(chargeId: string, reason: 'refund' | 'disput
 	}
 	const match = await findGrantForStripe(db, { chargeId, paymentIntentId });
 	if (!match) {
-		console.error(`stripe: ${reason} for ${chargeId} matched no credit grant — nothing to reverse`);
+		// No grant YET — Stripe does not guarantee delivery order, so the
+		// charge.refunded/dispute.created can precede the checkout event that
+		// granted the money. Queue the reversal durably: when the grant lands,
+		// fulfillCheckout/fulfillAutoTopup drains it and the credits come back
+		// (codex 6153). A charge that never grants leaves a stale row the cron
+		// sweep drops after the webhook-retry horizon.
+		await queuePendingReversal(chargeId, reason);
+		console.error(`stripe: ${reason} for ${chargeId} matched no credit grant — queued as pending reversal for when the grant lands`);
 		return false;
 	}
 	// The grant may already have been reversed — each path's own anchor
@@ -265,12 +306,41 @@ export async function restoreWonDispute(disputeId: string): Promise<boolean> {
 }
 
 /**
- * Dispatches a Stripe event to the appropriate handler and records the event for deduplication.
+ * The object id a receipt is anchored on (the payload object's own id —
+ * cs_..., pi_..., ch_..., du_...).
+ */
+function eventObjectId(event: Stripe.Event): string {
+	const object = event.data.object;
+	return typeof object === 'object' && object !== null && 'id' in object ? String(object.id) : String(object);
+}
+
+/**
+ * Dispatches a Stripe event to the appropriate handler. The receipt gate
+ * short-circuits duplicate deliveries BEFORE the handler; the receipt is
+ * committed only after successful handling so Stripe's retry re-runs a
+ * failed delivery.
  *
  * @param event - The Stripe event to process
  * @returns `true` if the event type is supported, `false` otherwise
  */
 export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
+	// Receipt gate BEFORE dispatch (coderabbit): an event already processed is
+	// a duplicate delivery (same event id) or Stripe's two-Event-objects case
+	// (same type+object, new id) — skip the handler entirely instead of
+	// re-running Stripe calls. The receipt is committed only AFTER successful
+	// handling: a thrown handler leaves no receipt, so the route's 500 makes
+	// Stripe redeliver and the handler re-runs (all handlers are idempotent).
+	const alreadyRecorded = await db
+		.select({ id: stripeEvents.id })
+		.from(stripeEvents)
+		.where(
+			or(
+				eq(stripeEvents.eventId, event.id),
+				and(eq(stripeEvents.eventType, event.type), eq(stripeEvents.objectId, eventObjectId(event)))
+			)
+		)
+		.get();
+	if (alreadyRecorded) return true;
 	let handled: boolean;
 	switch (event.type) {
 		case 'checkout.session.completed':

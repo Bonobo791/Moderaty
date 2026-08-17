@@ -21,7 +21,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { db } from '$lib/server/db';
-import { organizations } from '$lib/server/db/schema';
+import { organizations, stripeEvents, stripePendingReversals } from '$lib/server/db/schema';
 import { applyLedgerDelta, getCredits } from '$lib/server/billing/ledger';
 import { fulfillAutoTopup, fulfillCheckout, handleStripeEvent, restoreWonDispute, reverseCharge, reverseDispute } from './webhooks';
 
@@ -46,7 +46,7 @@ vi.mock('$lib/server/stripe/client', () => ({
 }));
 vi.mock('$env/dynamic/private', () => ({ env: {} }));
 
-setupTestDb(['organizations', 'credit_transactions', 'stripe_events']);
+setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_pending_reversals']);
 
 function session(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 	return {
@@ -74,7 +74,7 @@ describe('fulfillCheckout', () => {
 
 		const applied = await fulfillCheckout('cs_123');
 
-		expect(applied).toBe(true);
+		expect(applied).toBe('granted');
 		expect(await getCredits('org-1')).toBe(500);
 		// Checkout returns the payment_method as an ID string (not expanded):
 		// no attach call, the default_payment_method is set directly.
@@ -89,8 +89,8 @@ describe('fulfillCheckout', () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		mocks.sessionsRetrieve.mockResolvedValue(session());
 
-		expect(await fulfillCheckout('cs_123')).toBe(true);
-		expect(await fulfillCheckout('cs_123')).toBe(false);
+		expect(await fulfillCheckout('cs_123')).toBe('granted');
+		expect(await fulfillCheckout('cs_123')).toBe('already');
 		expect(await getCredits('org-1')).toBe(500);
 	});
 
@@ -98,7 +98,7 @@ describe('fulfillCheckout', () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		mocks.sessionsRetrieve.mockResolvedValue(session({ payment_status: 'unpaid' }));
 
-		expect(await fulfillCheckout('cs_123')).toBe(false);
+		expect(await fulfillCheckout('cs_123')).toBe('rejected');
 		expect(await getCredits('org-1')).toBe(0);
 	});
 
@@ -106,39 +106,37 @@ describe('fulfillCheckout', () => {
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		mocks.sessionsRetrieve.mockResolvedValue(session({ metadata: {} }));
 
-		expect(await fulfillCheckout('cs_123')).toBe(false);
+		expect(await fulfillCheckout('cs_123')).toBe('rejected');
 		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('no org_id/bundle metadata'));
 		errorSpy.mockRestore();
 	});
 
-	test('an unknown bundle id fails loudly', async () => {
+	test('an unknown bundle id is a loud rejection — never a fake grant, never a retry storm', async () => {
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		mocks.sessionsRetrieve.mockResolvedValue(session({ metadata: { org_id: 'org-1', bundle: 'credits_999999' } }));
-		await expect(fulfillCheckout('cs_123')).rejects.toThrow('unknown credit bundle');
+		expect(await fulfillCheckout('cs_123')).toBe('rejected');
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('unknown bundle'));
+		errorSpy.mockRestore();
 	});
 
-	test('a duplicate delivery still retries the card save after a transient first-delivery failure', async () => {
+	test('a transient card-save failure PROPAGATES so the webhook retry saves the card', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		mocks.sessionsRetrieve.mockResolvedValue(session());
 		// First delivery: the grant lands, but the card save fails transiently.
+		// The failure must THROW (the webhook route answers 500) so Stripe
+		// redelivers — otherwise the org permanently has no top-up card
+		// (codex 6141). The grant stays applied (idempotent).
 		mocks.customersUpdate.mockRejectedValueOnce(new Error('network blip'));
-		expect(await fulfillCheckout('cs_123')).toBe(true);
+		await expect(fulfillCheckout('cs_123')).rejects.toThrow('could not save payment method');
+		expect(await getCredits('org-1')).toBe(500);
 		let org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
 		expect(org?.stripeDefaultPmId).toBeNull();
-		// Duplicate delivery: the grant is skipped (applied=false) but the card
-		// save MUST retry — otherwise the org permanently has no top-up card.
-		expect(await fulfillCheckout('cs_123')).toBe(false);
+		// The retry delivery: the grant is already applied ('already') but the
+		// card save MUST run — otherwise the org permanently has no top-up card.
+		expect(await fulfillCheckout('cs_123')).toBe('already');
 		org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
 		expect(org?.stripeCustomerId).toBe('cus_1');
 		expect(org?.stripeDefaultPmId).toBe('pm_1');
-	});
-
-	test('a card-save failure never blocks the grant', async () => {
-		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
-		mocks.sessionsRetrieve.mockResolvedValue(session());
-		mocks.customersUpdate.mockRejectedValue(new Error('rate limited'));
-
-		expect(await fulfillCheckout('cs_123')).toBe(true);
-		expect(await getCredits('org-1')).toBe(500);
 	});
 });
 
@@ -290,28 +288,35 @@ describe('reverseCharge / reverseDispute', () => {
 		expect(await getCredits('org-1')).toBe(2000);
 	});
 
-	test('a refund matching no grant logs loudly and reverses nothing', async () => {
+	test('a refund matching no grant queues a pending reversal for when the grant lands', async () => {
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_none', payment_intent: 'pi_none', amount: 50000, amount_refunded: 50000 });
 		expect(await reverseCharge('ch_none', 'refund')).toBe(false);
 		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('matched no credit grant'));
+		// The obligation is durable: when the checkout grant arrives later, the
+		// money that left must still take its credits.
+		const pending = await testDb().db.select().from(stripePendingReversals).where(eq(stripePendingReversals.chargeId, 'ch_none')).get();
+		expect(pending?.reason).toBe('refund');
 		errorSpy.mockRestore();
 	});
 });
 
 describe('handleStripeEvent', () => {
-	test('dispatches checkout.session.completed and dedupes the delivery', async () => {
+	test('dispatches checkout.session.completed and dedupes the delivery AT THE DISPATCHER', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		mocks.sessionsRetrieve.mockResolvedValue(session());
 
 		const evt = event('checkout.session.completed', 'evt_1', session());
 		expect(await handleStripeEvent(evt as never)).toBe(true);
 		expect(await getCredits('org-1')).toBe(500);
-		// Same event id delivered again: the handler re-runs (idempotent via the
-		// ledger anchor) and the event is then recorded — no double grant.
+		// Same event id delivered again: the receipt gate short-circuits BEFORE
+		// the handler — no session retrieval, no double grant, and the receipt
+		// is persisted (coderabbit: the dispatcher must actually dedupe).
 		expect(await handleStripeEvent(evt as never)).toBe(true);
 		expect(await getCredits('org-1')).toBe(500);
-		expect(mocks.sessionsRetrieve).toHaveBeenCalledTimes(2);
+		expect(mocks.sessionsRetrieve).toHaveBeenCalledTimes(1);
+		const receipt = await testDb().db.select().from(stripeEvents).where(eq(stripeEvents.eventId, 'evt_1')).get();
+		expect(receipt?.eventId).toBe('evt_1');
 	});
 
 	test('a NEW event id for the SAME object still dedupes (two-Event-objects case)', async () => {
@@ -321,7 +326,67 @@ describe('handleStripeEvent', () => {
 		await handleStripeEvent(event('checkout.session.completed', 'evt_1', session()) as never);
 		await handleStripeEvent(event('checkout.session.completed', 'evt_2', session()) as never);
 		expect(await getCredits('org-1')).toBe(500);
-		expect(mocks.sessionsRetrieve).toHaveBeenCalledTimes(2);
+		// The (event_type, object_id) anchor gates the second Event-object too.
+		expect(mocks.sessionsRetrieve).toHaveBeenCalledTimes(1);
+	});
+
+	test('a refund arriving BEFORE the grant is applied when the grant lands', async () => {
+		// Stripe does not guarantee webhook delivery order: charge.refunded can
+		// arrive before the checkout.session.completed that granted the money.
+		// The refund must not be acked-and-forgotten — it is queued and the
+		// later grant is drained so the customer never keeps credits after the
+		// money left (codex 6153).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1', amount: 50000, amount_refunded: 50000 });
+		expect(await handleStripeEvent(event('charge.refunded', 'evt_refund', { id: 'ch_1' }) as never)).toBe(true);
+		expect(await getCredits('org-1')).toBe(0);
+		const pending = await testDb().db.select().from(stripePendingReversals).where(eq(stripePendingReversals.chargeId, 'ch_1')).get();
+		expect(pending?.reason).toBe('refund');
+
+		// The grant arrives on the next delivery: 500 in, 500 out — net zero.
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_1', payment_intent: { id: 'pi_1', latest_charge: 'ch_1', payment_method: 'pm_1' } }));
+		expect(await handleStripeEvent(event('checkout.session.completed', 'evt_grant', session({ id: 'cs_1', payment_intent: { id: 'pi_1', latest_charge: 'ch_1', payment_method: 'pm_1' } })) as never)).toBe(true);
+		expect(await getCredits('org-1')).toBe(0);
+		// The obligation is satisfied and gone.
+		const drained = await testDb().db.select().from(stripePendingReversals).where(eq(stripePendingReversals.chargeId, 'ch_1')).get();
+		expect(drained).toBeUndefined();
+	});
+
+	test('a dispute arriving BEFORE the grant disables auto top-up when the grant lands', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1' });
+		mocks.disputesRetrieve.mockResolvedValue({ id: 'du_1', charge: 'ch_1' });
+		expect(await handleStripeEvent(event('charge.dispute.created', 'evt_dispute', { id: 'du_1' }) as never)).toBe(true);
+
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_1', payment_intent: { id: 'pi_1', latest_charge: 'ch_1', payment_method: 'pm_1' } }));
+		expect(await handleStripeEvent(event('checkout.session.completed', 'evt_grant', session({ id: 'cs_1', payment_intent: { id: 'pi_1', latest_charge: 'ch_1', payment_method: 'pm_1' } })) as never)).toBe(true);
+		// 2000 granted, 2000 reversed; a disputed customer is never re-charged.
+		expect(await getCredits('org-1')).toBe(0);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.autoTopupEnabled).toBe(0);
+		expect(org?.autoTopupState).toBe('disabled');
+	});
+
+	test('a card-persistence failure propagates: the event is NOT recorded and the retry completes', async () => {
+		// The webhook route 500s on a thrown handler, so Stripe redelivers; the
+		// receipt is only written on success. The retry must save the card
+		// without double-granting (codex 6141 + coderabbit receipt gate).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.sessionsRetrieve.mockResolvedValue(session());
+		mocks.customersUpdate.mockRejectedValueOnce(new Error('network blip'));
+
+		const evt = event('checkout.session.completed', 'evt_1', session());
+		await expect(handleStripeEvent(evt as never)).rejects.toThrow('could not save payment method');
+		expect(await getCredits('org-1')).toBe(500);
+		let receipt = await testDb().db.select().from(stripeEvents).where(eq(stripeEvents.eventId, 'evt_1')).get();
+		expect(receipt).toBeUndefined();
+
+		expect(await handleStripeEvent(evt as never)).toBe(true);
+		expect(await getCredits('org-1')).toBe(500);
+		receipt = await testDb().db.select().from(stripeEvents).where(eq(stripeEvents.eventId, 'evt_1')).get();
+		expect(receipt?.eventId).toBe('evt_1');
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeDefaultPmId).toBe('pm_1');
 	});
 
 	test('unknown event types are logged and ignored', async () => {

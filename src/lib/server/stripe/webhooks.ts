@@ -186,7 +186,11 @@ export async function reverseCharge(chargeId: string, reason: 'refund' | 'disput
 }
 
 /**
- * Reverses credits associated with a disputed charge.
+ * Reverses credits associated with a disputed charge, and disables the org's
+ * automatic top-up: a customer who disputed a charge must never be re-charged
+ * off-session by the sweep (docs/stripe-auto-topup.md §7 — "mark the customer's
+ * auto top-up disabled pending review"). Re-enabling is a fresh, explicit owner
+ * action on the Usage page.
  *
  * @param disputeId - The Stripe dispute identifier
  * @returns `true` if the credit reversal was applied, `false` otherwise
@@ -197,6 +201,15 @@ export async function reverseDispute(disputeId: string): Promise<boolean> {
 	if (!chargeId) {
 		console.error(`stripe: dispute ${disputeId} has no charge`);
 		return false;
+	}
+	// The org is identified through the grant (a dispute on a charge that
+	// never granted credits has no org to disable — logged by reverseCharge).
+	const match = await findGrantForStripe(db, { chargeId });
+	if (match) {
+		await db
+			.update(organizations)
+			.set({ autoTopupEnabled: 0, autoTopupState: 'disabled' })
+			.where(eq(organizations.id, match.orgId));
 	}
 	return reverseCharge(chargeId, 'dispute');
 }

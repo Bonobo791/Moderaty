@@ -225,6 +225,22 @@ describe('reverseCharge / reverseDispute', () => {
 		expect(await getCredits('org-1')).toBe(0);
 	});
 
+	test('a dispute disables automatic top-up for the org', async () => {
+		// Docs §7: on charge.dispute.created, mark the customer's auto top-up
+		// disabled pending review — the sweep must never re-charge someone who
+		// just disputed a charge.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: 2000, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+		mocks.disputesRetrieve.mockResolvedValue({ id: 'du_1', charge: 'ch_1' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1' });
+
+		expect(await reverseDispute('du_1')).toBe(true);
+		expect(await getCredits('org-1')).toBe(0);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.autoTopupEnabled).toBe(0);
+		expect(org?.autoTopupState).toBe('disabled');
+	});
+
 	test('a won dispute re-grants the reversed credits, once', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		await applyLedgerDelta(db, { orgId: 'org-1', delta: 2000, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });

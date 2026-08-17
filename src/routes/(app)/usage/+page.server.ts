@@ -106,9 +106,19 @@ export const actions: Actions = {
 			// (HttpError) pass through too — a 403 must stay a 403, never be
 			// flattened into a 400 checkout failure.
 			if (isRedirect(error) || isHttpError(error)) throw error;
+			// Never surface RAW Stripe error text to the client (it can leak
+			// card/bank details): a Stripe SDK error always carries a `type`,
+			// and those get a generic message. Internal validation failures
+			// (unknown bundle, missing APP_URL…) keep their specific, safe
+			// message so the user can act on them. Full details go to the
+			// server log either way.
 			const message = error instanceof Error ? error.message : String(error);
 			console.error(`usage: checkout failed for org ${user.orgId}: ${message}`);
-			return fail(400, { error: `Could not start checkout: ${message}` });
+			const isStripeError =
+				error !== null && typeof error === 'object' && typeof (error as { type?: unknown }).type === 'string';
+			return fail(400, {
+				error: isStripeError ? 'Could not start checkout — please try again.' : `Could not start checkout: ${message}`
+			});
 		}
 	},
 	/**

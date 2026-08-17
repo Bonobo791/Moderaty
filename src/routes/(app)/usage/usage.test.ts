@@ -125,6 +125,23 @@ describe('usage buy action', () => {
 		expect(mocks.sessionsCreate.mock.calls[0][0].customer).toBe('cus_existing');
 	});
 
+	test('a checkout failure returns a generic message, never the raw Stripe error', async () => {
+		// Raw third-party error text must never reach the client (it can leak
+		// card/bank details) — full details go to the server log only.
+		await seedOrg();
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		mocks.sessionsCreate.mockRejectedValue(Object.assign(new Error('Your card number is incomplete. (card_error)'), { type: 'card_error' }));
+
+		const result = await buy('credits_500');
+
+		expect(result).toMatchObject({ status: 400 });
+		const serialized = JSON.stringify(result);
+		expect(serialized).not.toContain('Your card number is incomplete');
+		expect(serialized).toContain('try again');
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Your card number is incomplete'));
+		errorSpy.mockRestore();
+	});
+
 	test('non-owners cannot buy (403)', async () => {
 		await seedOrg();
 		const member = { ...OWNER, orgRole: 'member' as const };

@@ -22,8 +22,9 @@ import { and, asc, desc, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
-import { nullExpiredConsentEmails, nullExpiredHandles } from '$lib/server/deletion';
+import { nullExpiredConsentEmails, nullExpiredHandles, retryStripeCustomerDeletions } from '$lib/server/deletion';
 import { sweepAutoTopUp } from '$lib/server/billing/autotopup';
+import { sweepStalePendingReversals } from '$lib/server/billing/ledger';
 import { runChannel } from '$lib/server/pipeline';
 import type { RequestHandler } from './$types';
 
@@ -112,6 +113,37 @@ export const GET: RequestHandler = async ({ url, request }) => {
 			console.error('auto top-up sweep failed:', cause);
 		}
 	}
+	// Stripe deletion outbox retry: customers owed erasure from account
+	// teardown whose first attempt hit a Stripe outage. Bounded per
+	// invocation (I10); a row is removed only after Stripe confirms, so an
+	// outage never loses the erasure. DRY_RUN: nothing durable.
+	let stripeCustomersDeleted = 0;
+	let stripeDeletionSweepError: string | null = null;
+	if (dryRun) {
+		console.info('dry run: stripe deletion outbox retry skipped');
+	} else {
+		try {
+			stripeCustomersDeleted = await retryStripeCustomerDeletions();
+		} catch (cause) {
+			stripeDeletionSweepError = cause instanceof Error ? cause.message : String(cause);
+			console.error('stripe deletion outbox retry failed:', cause);
+		}
+	}
+	// Stale pending-reversal sweep: refund/dispute obligations whose grant
+	// never arrived within 14 days (past Stripe's webhook retry horizon) are
+	// dead weight — dropped loudly, bounded per invocation (I10).
+	let pendingReversalsDropped = 0;
+	let pendingReversalSweepError: string | null = null;
+	if (dryRun) {
+		console.info('dry run: pending-reversal sweep skipped');
+	} else {
+		try {
+			pendingReversalsDropped = await sweepStalePendingReversals();
+		} catch (cause) {
+			pendingReversalSweepError = cause instanceof Error ? cause.message : String(cause);
+			console.error('pending-reversal sweep failed:', cause);
+		}
+	}
 	const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, nowIso));
 	const [channel] = await db
 		.select()
@@ -121,7 +153,7 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		// actively waiting on must not starve behind the ordinary rotation.
 		.orderBy(desc(sql`${channels.dryRunBoundary} is not null`), asc(channels.lastRunAt))
 		.limit(1);
-	if (!channel) return json({ ok: true, dryRun, consentEmailsNulled, sweepError, auditHandlesNulled, actionHandlesNulled, handleSweepError, autoTopupsTriggered, autoTopupSweepError, results: {} });
+	if (!channel) return json({ ok: true, dryRun, consentEmailsNulled, sweepError, auditHandlesNulled, actionHandlesNulled, handleSweepError, autoTopupsTriggered, autoTopupSweepError, stripeCustomersDeleted, stripeDeletionSweepError, pendingReversalsDropped, pendingReversalSweepError, results: {} });
 
 	// Atomic claim: a concurrent claimant's UPDATE matches 0 rows and exits cleanly.
 	const claimed = await db
@@ -130,7 +162,7 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		.where(and(eq(channels.id, channel.id), claimable))
 		.returning({ id: channels.id });
 	if (claimed.length === 0)
-		return json({ ok: true, claimed: false, dryRun, consentEmailsNulled, sweepError, auditHandlesNulled, actionHandlesNulled, handleSweepError, autoTopupsTriggered, autoTopupSweepError, results: {} });
+		return json({ ok: true, claimed: false, dryRun, consentEmailsNulled, sweepError, auditHandlesNulled, actionHandlesNulled, handleSweepError, autoTopupsTriggered, autoTopupSweepError, stripeCustomersDeleted, stripeDeletionSweepError, pendingReversalsDropped, pendingReversalSweepError, results: {} });
 
 	try {
 		const result = await runChannel(channel.id, { deadline });
@@ -170,12 +202,12 @@ export const GET: RequestHandler = async ({ url, request }) => {
 				dryRunWindow = { error: cause instanceof Error ? cause.message : String(cause) };
 			}
 		}
-		return json({ ok: true, dryRun, consentEmailsNulled, sweepError, auditHandlesNulled, actionHandlesNulled, handleSweepError, autoTopupsTriggered, autoTopupSweepError, results: { [channel.id]: result }, dryRunWindow });
+		return json({ ok: true, dryRun, consentEmailsNulled, sweepError, auditHandlesNulled, actionHandlesNulled, handleSweepError, autoTopupsTriggered, autoTopupSweepError, stripeCustomersDeleted, stripeDeletionSweepError, pendingReversalsDropped, pendingReversalSweepError, results: { [channel.id]: result }, dryRunWindow });
 	} catch (cause) {
 		const message = cause instanceof Error ? cause.message : String(cause);
 		console.error(`channel run ${channel.id} failed:`, cause);
 		return json(
-			{ ok: false, dryRun, consentEmailsNulled, sweepError, auditHandlesNulled, actionHandlesNulled, handleSweepError, autoTopupsTriggered, autoTopupSweepError, results: { [channel.id]: { error: message } } },
+			{ ok: false, dryRun, consentEmailsNulled, sweepError, auditHandlesNulled, actionHandlesNulled, handleSweepError, autoTopupsTriggered, autoTopupSweepError, stripeCustomersDeleted, stripeDeletionSweepError, pendingReversalsDropped, pendingReversalSweepError, results: { [channel.id]: { error: message } } },
 			{ status: 500 } // failure must not look like success to the cron caller
 		);
 	} finally {

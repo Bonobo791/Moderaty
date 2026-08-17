@@ -30,10 +30,10 @@
 //    state flips to 'disabled' and the customer must re-authenticate via a
 //    fresh Checkout. Other declines disable after 2 consecutive failures.
 
-import { and, asc, eq, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, count, eq, gte, isNotNull, isNull, or, sql } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
-import { applyLedgerDelta } from '$lib/server/billing/ledger';
+import { applyLedgerDelta, drainPendingReversals } from '$lib/server/billing/ledger';
 import { creditTransactions, organizations } from '$lib/server/db/schema';
 import { autoTopupBundle, bundleById, priceIdFor } from '$lib/server/stripe/bundles';
 import { getStripe } from '$lib/server/stripe/client';
@@ -108,12 +108,15 @@ function startOfUtcDayIso(offsetMs: number): string {
  * @returns The number of matching automatic top-up transactions
  */
 async function topupCountsSince(orgId: string, sinceIso: string): Promise<number> {
-	const rows = await db
-		.select({ createdAt: creditTransactions.createdAt })
+	// COUNT in SQL with the createdAt predicate pushed down: the cap check runs
+	// twice per trigger and the ledger grows without bound, so loading every
+	// auto_topup row into memory to filter in JS would be unbounded work.
+	const row = await db
+		.select({ n: count() })
 		.from(creditTransactions)
-		.where(and(eq(creditTransactions.orgId, orgId), eq(creditTransactions.reason, 'auto_topup')))
-		.all();
-	return rows.filter((row) => row.createdAt >= sinceIso).length;
+		.where(and(eq(creditTransactions.orgId, orgId), eq(creditTransactions.reason, 'auto_topup'), gte(creditTransactions.createdAt, sinceIso)))
+		.get();
+	return row?.n ?? 0;
 }
 
 /**
@@ -145,7 +148,14 @@ export function stripeErrorCode(error: unknown): string {
 function isCardFailure(error: unknown): boolean {
 	if (error && typeof error === 'object') {
 		const type = (error as { type?: unknown }).type;
-		if (type === 'card_error') return true;
+		// stripe-node surfaces ordinary declines as type 'StripeCardError'
+		// (the API's raw error carries type 'card_error' on error.raw); the
+		// SDK's own type field never equals the raw API type. Accept both so
+		// a plain card_declined is counted as a card failure, not an
+		// infrastructure blip (codex 6156).
+		if (type === 'card_error' || type === 'StripeCardError') return true;
+		const rawType = (error as { raw?: { type?: unknown } }).raw?.type;
+		if (rawType === 'card_error') return true;
 		// Auth codes are card failures even when the type field is absent.
 		const code = stripeErrorCode(error);
 		return (
@@ -246,12 +256,16 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 			// must disable auto top-up, and messages are locale-dependent).
 			await recordAutoTopupFailure(orgId, stripeErrorCode(error));
 		} else {
+			// The attempt timestamp clears with the claim: the failure was not
+			// the customer's card, so the 24h cooldown must not stall the next
+			// sweep. A declined card keeps its timestamp (don't hammer a bad
+			// card for a day); an outage must be retried as soon as it clears.
 			await db
 				.update(organizations)
-				.set({ autoTopupState: 'idle' })
+				.set({ autoTopupState: 'idle', autoTopupLastAttemptAt: null })
 				.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight')));
 			console.error(
-				`auto top-up infra failure for org ${orgId}: ${error instanceof Error ? error.message : String(error)} — claim released, no decline counted`
+				`auto top-up infra failure for org ${orgId}: ${error instanceof Error ? error.message : String(error)} — claim released, no decline counted, no cooldown`
 			);
 		}
 		return false;
@@ -359,6 +373,13 @@ export async function grantAutoTopupCredits(
 		chargeId: typeof pi.latest_charge === 'string' ? pi.latest_charge : undefined
 	});
 	if (!applied) return false; // duplicate delivery — already granted
+	// A refund/dispute may have beaten this grant's delivery: drain the
+	// queued reversal in the same breath as the grant (codex 6153).
+	const chargeId = typeof pi.latest_charge === 'string' ? pi.latest_charge : undefined;
+	if (chargeId) {
+		const drained = await drainPendingReversals(chargeId);
+		if (drained > 0) console.error(`stripe: auto-topup grant ${pi.id} immediately drained ${drained} pending reversal(s) for ${chargeId}`);
+	}
 	// The charge succeeded: release the in-flight claim, reset the failure
 	// counter (last_attempt_at stays — it is the cooldown anchor).
 	await db

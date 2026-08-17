@@ -23,9 +23,9 @@
 // idempotent (a comment is consumed once, a checkout session granted once —
 // webhooks and retries can never double-apply).
 
-import { and, eq, gte, lt, ne, or, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, lt, ne, or, sql } from 'drizzle-orm';
 import { db } from '$lib/server/db';
-import { creditTransactions, organizations } from '$lib/server/db/schema';
+import { creditTransactions, organizations, stripePendingReversals } from '$lib/server/db/schema';
 
 export type CreditReason = 'consume' | 'purchase' | 'auto_topup' | 'refund' | 'dispute' | 'adjust';
 // 'refund' and 'dispute' are reversal refTypes anchored on the charge id —
@@ -86,21 +86,25 @@ export async function getCredits(orgId: string): Promise<number> {
 }
 
 /**
- * True when the org has ENGAGED billing — a non-null balance or a Stripe
- * customer. Metering (the credit gate + per-comment consumption) applies
- * only to metered orgs: pre-billing orgs (self-hosted installs, lifetime
- * plans, fresh hosted signups) carry NULL credits_remaining and no customer
- * and must keep scoring unlimited AI (AGENTS.md: the free tier is
- * self-hosted only — billing is opt-in, never a surprise gate).
+ * True when the org has PURCHASED credits — a non-null balance. Metering
+ * (the credit gate + per-comment consumption) applies only to metered orgs.
+ * A non-null balance is the one reliable "billing engaged" signal: it is
+ * written only by a successful credit grant (applyLedgerDelta COALESCEs
+ * NULL → 0 on the FIRST purchase), survives spending down to 0, and is
+ * never set by merely OPENING a Checkout. A Stripe customer alone is NOT
+ * metering evidence — getOrCreateStripeCustomer provisions one at session
+ * creation, so a cancelled/failed checkout would otherwise flip an
+ * unlimited org (self-hosted, lifetime, fresh signup) into the credit gate
+ * and defer every AI-scored comment for a purchase that never happened.
  */
 export async function orgIsMetered(orgId: string): Promise<boolean> {
 	const row = await db
-		.select({ creditsRemaining: organizations.creditsRemaining, stripeCustomerId: organizations.stripeCustomerId })
+		.select({ creditsRemaining: organizations.creditsRemaining })
 		.from(organizations)
 		.where(eq(organizations.id, orgId))
 		.get();
 	if (!row) throw new Error(`org not found: ${orgId}`);
-	return row.creditsRemaining !== null || row.stripeCustomerId !== null;
+	return row.creditsRemaining !== null;
 }
 
 /**
@@ -113,6 +117,16 @@ export async function applyLedgerDelta(
 	{ orgId, delta, reason, refType, refId, paymentIntentId, chargeId }: LedgerDelta
 ): Promise<boolean> {
 	return inLedgerTx(handle, async (tx) => {
+		// Existence check first (mirrors consumeCredit): an unknown org is a
+		// data bug and must fail loudly with the SAME message everywhere —
+		// never surface the FK constraint error instead (the org FK is
+		// defense-in-depth, not the primary guard).
+		const org = await tx
+			.select({ id: organizations.id })
+			.from(organizations)
+			.where(eq(organizations.id, orgId))
+			.get();
+		if (!org) throw new Error(`org not found: ${orgId}`);
 		const inserted = await tx
 			.insert(creditTransactions)
 			.values({
@@ -301,4 +315,83 @@ export async function listCreditTransactions(orgId: string, limit = 50) {
 		.orderBy(sql`${creditTransactions.createdAt} desc, ${creditTransactions.id} desc`)
 		.limit(limit)
 		.all();
+}
+
+/**
+ * Records that a refund/dispute reversal is owed for a charge whose credit
+ * grant had not yet arrived (Stripe webhook delivery order is not
+ * guaranteed). charge_id UNIQUE: one reversal per charge, first event wins.
+ */
+export async function queuePendingReversal(chargeId: string, reason: 'refund' | 'dispute'): Promise<void> {
+	await db.insert(stripePendingReversals).values({ chargeId, reason }).onConflictDoNothing();
+}
+
+/**
+ * Applies every pending reversal whose grant has now landed. Called right
+ * after a grant for the charge (checkout fulfillment and auto top-up), so a
+ * reversal that beat its grant still takes the credits exactly once.
+ *
+ * @param chargeId - The charge whose pending reversals should be drained
+ * @returns The number of reversals applied
+ */
+export async function drainPendingReversals(chargeId: string): Promise<number> {
+	const pending = await db
+		.select()
+		.from(stripePendingReversals)
+		.where(eq(stripePendingReversals.chargeId, chargeId))
+		.all();
+	let drained = 0;
+	for (const row of pending) {
+		const match = await findGrantForStripe(db, { chargeId });
+		// The grant still has not landed — keep the obligation for the next
+		// grant (the sweep drops rows whose grant never arrives).
+		if (!match) continue;
+		// A disputed customer must never be re-charged off-session — same
+		// policy as reverseDispute, applied at drain time (the dispute event
+		// found no org to disable when it arrived).
+		if (row.reason === 'dispute') {
+			await db
+				.update(organizations)
+				.set({ autoTopupEnabled: 0, autoTopupState: 'disabled' })
+				.where(eq(organizations.id, match.orgId));
+		}
+		// Same anchors as reverseCharge: refType 'refund'/'dispute', refId =
+		// charge id — a later won-dispute restore still finds the 'dispute'
+		// reversal, and a later full refund applies on its own anchor.
+		await applyLedgerDelta(db, {
+			orgId: match.orgId,
+			delta: -match.credits,
+			// The table only ever holds 'refund' | 'dispute' (queuePendingReversal
+			// types it), but the DB column reads back as string — narrow it.
+			reason: row.reason === 'dispute' ? 'dispute' : 'refund',
+			refType: row.reason === 'refund' ? 'refund' : 'dispute',
+			refId: chargeId,
+			chargeId
+		});
+		// Satisfied (whether applied now or by a concurrent path): the anchor
+		// makes double-application impossible, so the obligation is done.
+		await db.delete(stripePendingReversals).where(eq(stripePendingReversals.chargeId, chargeId));
+		drained += 1;
+	}
+	return drained;
+}
+
+/** Stale pending reversals are dropped after Stripe's webhook retry horizon
+ * plus a margin: a grant that has not landed within 14 days never will (a
+ * lost grant event is itself retried for only 3 days), so the row is dead
+ * weight. Bounded per invocation (I10); loud when anything is dropped. */
+export async function sweepStalePendingReversals(limit = 20): Promise<number> {
+	const cutoff = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+	const stale = await db
+		.select({ id: stripePendingReversals.id, chargeId: stripePendingReversals.chargeId })
+		.from(stripePendingReversals)
+		.where(lt(stripePendingReversals.createdAt, cutoff))
+		.limit(limit)
+		.all();
+	if (!stale.length) return 0;
+	await db.delete(stripePendingReversals).where(inArray(stripePendingReversals.id, stale.map((row) => row.id)));
+	console.error(
+		`stripe: dropped ${stale.length} stale pending reversal(s) (grant never arrived within 14 days): ${stale.map((row) => row.chargeId).join(', ')}`
+	);
+	return stale.length;
 }

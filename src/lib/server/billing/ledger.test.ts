@@ -52,9 +52,13 @@ describe('orgIsMetered', () => {
 		expect(await orgIsMetered('org-1')).toBe(true);
 	});
 
-	test('an org with a Stripe customer is metered even with a null balance', async () => {
+	test('an org with only a Stripe customer is unmetered (checkout opened, never purchased)', async () => {
+		// A customer is created when Checkout OPENS — before any purchase.
+		// Metering must be based on a successful credit purchase (a non-null
+		// balance), never on customer existence: a cancelled/failed checkout
+		// must not flip an unlimited org into the credit gate.
 		await seedOrg('org-1', null, 'cus_1');
-		expect(await orgIsMetered('org-1')).toBe(true);
+		expect(await orgIsMetered('org-1')).toBe(false);
 	});
 
 	test('fails loudly for an unknown org', async () => {

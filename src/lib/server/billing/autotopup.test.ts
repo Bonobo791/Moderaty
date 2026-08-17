@@ -143,9 +143,95 @@ describe('maybeTriggerAutoTopUp', () => {
 	});
 
 	test('loses the atomic claim race without charging', async () => {
-		await seedOrg({ autoTopupState: 'in_flight' });
+		// The org starts IDLE and is flipped to in_flight AFTER the initial
+		// state read but BEFORE the conditional claim UPDATE — so the test
+		// actually exercises the UPDATE ... WHERE state='idle' predicate.
+		// Seeding in_flight directly returns at the early state guard and
+		// would pass even if the claim predicate were removed (coderabbit).
+		await seedOrg();
+		mocks.pricesRetrieve.mockImplementation(async () => {
+			await testDb().db
+				.update(organizations)
+				.set({ autoTopupState: 'in_flight' })
+				.where(eq(organizations.id, 'org-1'));
+			return { id: 'price_100', unit_amount: 500, active: true, currency: 'usd', type: 'one_time' };
+		});
 		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
 		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+	});
+
+	test('a StripeCardError (card_declined) counts as a card failure', async () => {
+		// stripe-node exposes ordinary card declines as type
+		// 'StripeCardError' (the API's `card_error` value lives on
+		// error.raw.type). Missing that type sent declines down the
+		// infrastructure path — never counted, retried indefinitely instead
+		// of disabling after two failures (codex 6156).
+		await seedOrg();
+		mocks.paymentIntentsCreate.mockRejectedValue(
+			Object.assign(new Error('Your card was declined.'), { type: 'StripeCardError', code: 'card_declined', decline_code: 'generic_decline' })
+		);
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+		const row = await orgRow();
+		expect(row.autoTopupFailures).toBe(1);
+		expect(row.autoTopupState).toBe('idle');
+		errorSpy.mockRestore();
+	});
+
+	test('an infrastructure failure releases the claim WITHOUT the 24h cooldown', async () => {
+		// A transport/API failure is not the customer's card: the claim goes
+		// back to idle AND the attempt timestamp clears, so the next sweep can
+		// retry immediately. Leaving the timestamp set would stall the org a
+		// full day at the cooldown check (codex 6136).
+		await seedOrg();
+		mocks.paymentIntentsCreate.mockRejectedValue(
+			Object.assign(new Error('stripe api timeout'), { type: 'StripeAPIError' })
+		);
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+		const row = await orgRow();
+		expect(row.autoTopupState).toBe('idle');
+		expect(row.autoTopupFailures).toBe(0);
+		expect(row.autoTopupLastAttemptAt).toBeNull();
+		errorSpy.mockRestore();
+	});
+
+	test('counts top-ups in SQL — never loads every auto_topup row to filter in JS', async () => {
+		// The cap check must push the createdAt predicate into SQL: a count
+		// over the (org_id, created_at) index, never a full-row fetch plus a
+		// JS filter that grows without bound (coderabbit).
+		await seedOrg();
+		await testDb().db.insert(creditTransactions).values({
+			orgId: 'org-1',
+			delta: 100,
+			reason: 'auto_topup',
+			refType: 'payment_intent',
+			refId: 'pi_old',
+			createdAt: '2000-01-15T12:00:00.000Z'
+		});
+		mocks.paymentIntentsCreate.mockRejectedValue(
+			Object.assign(new Error('declined'), { type: 'StripeCardError', code: 'card_declined' })
+		);
+		const statements: string[] = [];
+		const client = testDb().client;
+		const originalExecute = client.execute.bind(client);
+		client.execute = ((stmt: unknown) => {
+			const sqlText = String((stmt as { sql?: string }).sql ?? stmt);
+			statements.push(sqlText);
+			return originalExecute(stmt as never);
+		}) as never;
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			await maybeTriggerAutoTopUp('org-1');
+		} finally {
+			client.execute = originalExecute;
+		}
+		errorSpy.mockRestore();
+		// The cap checks must come from count() queries over the ledger, and
+		// NO query may fetch credit_transactions rows without aggregating (the
+		// 'auto_topup' reason is parameterized out of the SQL text).
+		expect(statements.some((s) => /count\(/i.test(s))).toBe(true);
+		expect(statements.some((s) => /from `credit_transactions`/.test(s) && !/count\(/i.test(s))).toBe(false);
 	});
 
 	test('skips when the configured Price is archived', async () => {

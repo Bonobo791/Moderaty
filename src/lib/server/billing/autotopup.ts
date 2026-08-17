@@ -124,10 +124,13 @@ async function topupCountsSince(orgId: string, sinceIso: string): Promise<number
  */
 export function stripeErrorCode(error: unknown): string {
 	if (error && typeof error === 'object') {
-		const code = (error as { code?: unknown }).code;
-		if (typeof code === 'string') return code;
+		// Prefer decline_code: a card decline's generic `code` is
+		// 'card_declined', while decline_code carries the SPECIFIC reason
+		// (e.g. 'authentication_required') that decides the failure path.
 		const declineCode = (error as { decline_code?: unknown }).decline_code;
 		if (typeof declineCode === 'string') return declineCode;
+		const code = (error as { code?: unknown }).code;
+		if (typeof code === 'string') return code;
 	}
 	return error instanceof Error ? error.message : String(error);
 }
@@ -268,7 +271,9 @@ export async function handleAutoTopupFailure(paymentIntentId: string): Promise<v
 		console.error(`auto top-up PI ${paymentIntentId} has no org_id metadata`);
 		return;
 	}
-	const code = pi.last_payment_error?.code ?? pi.last_payment_error?.decline_code ?? 'payment_failed';
+	// decline_code first: it carries the SPECIFIC reason (authentication_required),
+	// while `code` on a card decline is the generic 'card_declined'.
+	const code = pi.last_payment_error?.decline_code ?? pi.last_payment_error?.code ?? 'payment_failed';
 	// The PI's creation time correlates the failure to the claim it belongs to.
 	await recordAutoTopupFailure(orgId, code, pi.created ? pi.created * 1000 : undefined);
 }

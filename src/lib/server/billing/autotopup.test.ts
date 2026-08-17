@@ -22,7 +22,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { creditTransactions, organizations } from '$lib/server/db/schema';
 import { getCredits } from '$lib/server/billing/ledger';
-import { handleAutoTopupFailure, maybeTriggerAutoTopUp, recordAutoTopupFailure, sweepAutoTopUp } from './autotopup';
+import { handleAutoTopupFailure, maybeTriggerAutoTopUp, recordAutoTopupFailure, stripeErrorCode, sweepAutoTopUp } from './autotopup';
 
 const mocks = vi.hoisted(() => ({
 	paymentIntentsCreate: vi.fn(),
@@ -232,7 +232,37 @@ describe('recordAutoTopupFailure', () => {
 	});
 });
 
+describe('stripeErrorCode', () => {
+	test('prefers the specific decline_code over the generic code', () => {
+		// A card decline carries code='card_declined' PLUS the specific
+		// decline_code — authentication_required must win, or an SCA-required
+		// charge is misrouted to the ordinary-decline path.
+		expect(stripeErrorCode({ code: 'card_declined', decline_code: 'authentication_required' })).toBe('authentication_required');
+	});
+
+	test('falls back to the code when no decline_code exists', () => {
+		expect(stripeErrorCode({ code: 'card_declined' })).toBe('card_declined');
+	});
+
+	test('falls back to the message for non-object errors', () => {
+		expect(stripeErrorCode(new Error('network down'))).toBe('network down');
+	});
+});
+
 describe('handleAutoTopupFailure (webhook)', () => {
+	test('an authentication_required DECLINE_CODE disables auto top-up even when the generic code is card_declined', async () => {
+		await seedOrg({ autoTopupState: 'in_flight' });
+		mocks.paymentIntentsRetrieve.mockResolvedValue({
+			id: 'pi_9',
+			metadata: { type: 'auto_topup', org_id: 'org-1' },
+			created: Math.floor(Date.now() / 1000),
+			last_payment_error: { code: 'card_declined', decline_code: 'authentication_required' }
+		});
+		await handleAutoTopupFailure('pi_9');
+		expect((await orgRow()).autoTopupState).toBe('disabled');
+		expect((await orgRow()).autoTopupFailures).toBe(1);
+	});
+
 	test('records the failure for our auto-topup PIs', async () => {
 		await seedOrg({ autoTopupState: 'in_flight' });
 		mocks.paymentIntentsRetrieve.mockResolvedValue({

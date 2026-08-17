@@ -82,6 +82,16 @@ test('the account link is the active one on /account', () => {
 	}
 });
 
+test('the Usage link stays active on nested usage routes (e.g. /usage/success)', () => {
+	// /usage/success is a child of /usage; the checkout redirect lands there,
+	// and the nav must not silently drop the active state (coderabbit).
+	const body = renderShell('/usage/success');
+	const usage = navLink(body, '/usage', 'Usage');
+	expect(usage).toContain('active');
+	expect(usage).toContain('aria-current="page"');
+	expect(navLink(body, '/dashboard', 'Dashboard')).not.toContain('active');
+});
+
 test('Team and Help light up on their own routes', () => {
 	expect(navLink(renderShell('/org'), '/org', 'Team')).toContain('active');
 	expect(navLink(renderShell('/help'), '/help', 'Help')).toContain('active');

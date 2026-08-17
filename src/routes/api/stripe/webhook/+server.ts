@@ -28,6 +28,7 @@ import { error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 
 import { env } from '$env/dynamic/private';
+import type Stripe from 'stripe';
 import { handleStripeEvent } from '$lib/server/stripe/webhooks';
 import { getStripe } from '$lib/server/stripe/client';
 
@@ -43,7 +44,7 @@ export const POST: RequestHandler = async ({ request }) => {
 		console.error('stripe webhook: missing stripe-signature header');
 		throw error(400, 'missing signature');
 	}
-	let event;
+	let event: Stripe.Event;
 	try {
 		event = getStripe().webhooks.constructEvent(rawBody, signature, secret);
 	} catch (verifyError) {

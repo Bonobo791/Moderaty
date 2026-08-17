@@ -64,6 +64,13 @@ export interface AutoTopupState {
 	creditsRemaining: number | null;
 }
 
+/**
+ * Retrieves an organization's auto-top-up configuration and billing state.
+ *
+ * @param orgId - The organization's identifier
+ * @returns The organization's auto-top-up settings, Stripe payment details, and remaining credits
+ * @throws Error if the organization does not exist
+ */
 export async function readAutoTopupState(orgId: string): Promise<AutoTopupState> {
 	const org = await db
 		.select({
@@ -83,10 +90,23 @@ export async function readAutoTopupState(orgId: string): Promise<AutoTopupState>
 	return org;
 }
 
+/**
+ * Computes the UTC calendar date after applying a time offset.
+ *
+ * @param offsetMs - The offset from the current time, in milliseconds
+ * @returns The resulting date in `YYYY-MM-DD` format
+ */
 function startOfUtcDayIso(offsetMs: number): string {
 	return new Date(Date.now() + offsetMs).toISOString().slice(0, 10);
 }
 
+/**
+ * Counts automatic top-up credit transactions recorded since a timestamp.
+ *
+ * @param orgId - The organization whose transactions are counted
+ * @param sinceIso - The ISO timestamp from which transactions are included
+ * @returns The number of matching automatic top-up transactions
+ */
 async function topupCountsSince(orgId: string, sinceIso: string): Promise<number> {
 	const rows = await db
 		.select({ createdAt: creditTransactions.createdAt })
@@ -96,7 +116,12 @@ async function topupCountsSince(orgId: string, sinceIso: string): Promise<number
 	return rows.filter((row) => row.createdAt >= sinceIso).length;
 }
 
-/** Extracts a Stripe error code (decline/SCA codes live on the error object, never the message). */
+/**
+ * Extracts a Stripe error code or a fallback representation of the error.
+ *
+ * @param error - The error from which to extract a code.
+ * @returns The `code`, `decline_code`, error message, or string representation, in that order of precedence.
+ */
 export function stripeErrorCode(error: unknown): string {
 	if (error && typeof error === 'object') {
 		const code = (error as { code?: unknown }).code;
@@ -108,9 +133,13 @@ export function stripeErrorCode(error: unknown): string {
 }
 
 /**
- * Triggers an off-session auto top-up when every guard passes. Returns true
- * when a charge was initiated. Never throws for payment errors — failures
- * are recorded loudly and the daily sweep is the backstop.
+ * Attempts to initiate an off-session Stripe auto-top-up when the organization is eligible.
+ *
+ * Payment failures are recorded and result in `false`; setup and configuration errors may
+ * propagate before a top-up is claimed.
+ *
+ * @param orgId - The organization to charge
+ * @returns `true` if a payment was initiated, `false` if the organization was ineligible or payment initiation failed
  */
 export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 	const org = await readAutoTopupState(orgId);
@@ -177,7 +206,15 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 	}
 }
 
-/** Records a failed auto top-up: cooldown starts, repeated failures disable. */
+/**
+ * Records a failed auto-top-up attempt and updates the organization’s auto-top-up state.
+ *
+ * Authentication failures or repeated consecutive failures disable auto-top-up; otherwise, the organization returns to the idle state. Stale or duplicate failures are ignored.
+ *
+ * @param orgId - The organization associated with the failed payment
+ * @param code - The Stripe failure or decline code
+ * @param piCreatedMs - The PaymentIntent creation time in milliseconds, when available
+ */
 export async function recordAutoTopupFailure(orgId: string, code: string, piCreatedMs?: number): Promise<void> {
 	const org = await readAutoTopupState(orgId);
 	// Correlation: a payment_failed webhook carries the PI it belongs to, and
@@ -237,9 +274,11 @@ export async function handleAutoTopupFailure(paymentIntentId: string): Promise<v
 }
 
 /**
- * Grants the credits for a succeeded auto-top-up PaymentIntent and resets
- * the org's claim state. Idempotent per PI (ledger anchor). Shared by the
- * webhook path (fulfillAutoTopup) and the sweep's reconciliation.
+ * Applies credits for a valid succeeded auto-top-up PaymentIntent and releases the organization claim.
+ *
+ * @param orgId - The organization receiving the credits
+ * @param pi - The PaymentIntent to validate and fulfill
+ * @returns `true` if credits were applied, `false` if the PaymentIntent is invalid or was already fulfilled
  */
 export async function grantAutoTopupCredits(
 	orgId: string,
@@ -276,11 +315,9 @@ export async function grantAutoTopupCredits(
 }
 
 /**
- * Reconciliation: grants credits for succeeded auto-top-up PIs whose webhook
- * was lost (Stripe retries 3 days; past that the delivery is gone). Called by
- * the sweep BEFORE re-triggering, so an unstuck claim never charges twice —
- * the customer gets the credits they already paid for, and only then is a
- * new charge considered.
+ * Recovers credits for recent successful auto-top-up payments whose webhook processing may have been missed.
+ *
+ * @returns The number of recovered payments
  */
 export async function reconcileAutoTopup(orgId: string): Promise<number> {
 	const org = await readAutoTopupState(orgId);
@@ -303,8 +340,10 @@ export async function reconcileAutoTopup(orgId: string): Promise<number> {
 }
 
 /**
- * Cron backstop: triggers auto top-up for every enabled org sitting below its
- * threshold with no charge in flight. Bounded per invocation (I10).
+ * Processes a bounded batch of organizations eligible for automatic credit top-up.
+ *
+ * @param limit - Maximum number of organizations to process in this invocation
+ * @returns The number of newly initiated top-ups
  */
 export async function sweepAutoTopUp(limit = 5): Promise<number> {
 	// Unstick stale in-flight claims first: a webhook delivery lost past

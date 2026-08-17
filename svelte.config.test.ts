@@ -33,9 +33,18 @@ afterEach(() => {
 
 describe('svelte.config.js adapter selection', () => {
 	it('defaults to the Netlify adapter when MODERATY_ADAPTER is unset (existing Netlify builds unchanged)', async () => {
-		vi.stubEnv('MODERATY_ADAPTER', '');
-		const config = await loadConfig('netlify-default');
-		expect(config.kit.adapter.name).toBe('@sveltejs/adapter-netlify');
+		// Genuinely UNSET, not stubbed to '' — a regression that only treats
+		// '' as Netlify but mishandles undefined must fail this test
+		// (coderabbit).
+		const original = process.env.MODERATY_ADAPTER;
+		delete process.env.MODERATY_ADAPTER;
+		try {
+			const config = await loadConfig('netlify-default');
+			expect(config.kit.adapter.name).toBe('@sveltejs/adapter-netlify');
+		} finally {
+			if (original === undefined) delete process.env.MODERATY_ADAPTER;
+			else process.env.MODERATY_ADAPTER = original;
+		}
 	});
 
 	it('selects the node adapter when MODERATY_ADAPTER=node (Coolify Docker build)', async () => {

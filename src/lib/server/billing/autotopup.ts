@@ -136,6 +136,29 @@ export function stripeErrorCode(error: unknown): string {
 }
 
 /**
+ * True when a paymentIntents.create failure is a CARD failure (decline,
+ * expired card, SCA-required) rather than an infrastructure failure (network
+ * outage, timeout, rate limit, invalid request, Stripe API error). Only card
+ * failures count against the org's consecutive-failure counter — two
+ * unrelated API outages must never disable auto top-up.
+ */
+function isCardFailure(error: unknown): boolean {
+	if (error && typeof error === 'object') {
+		const type = (error as { type?: unknown }).type;
+		if (type === 'card_error') return true;
+		// Auth codes are card failures even when the type field is absent.
+		const code = stripeErrorCode(error);
+		return (
+			code === 'authentication_required' ||
+			code === 'authentication_not_handled' ||
+			code === 'requires_action' ||
+			code.includes('authentication_required') // legacy message-shaped callers
+		);
+	}
+	return false;
+}
+
+/**
  * Attempts to initiate an off-session Stripe auto-top-up when the organization is eligible.
  *
  * Payment failures are recorded and result in `false`; setup and configuration errors may
@@ -200,11 +223,27 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 		console.info(`auto top-up initiated for org ${orgId}: bundle ${bundle.id} (${idempotencyKey})`);
 		return true;
 	} catch (error) {
-		// A create-time confirmation failure (decline, expired card...) never
-		// fires payment_failed — record it here with the real Stripe error
-		// CODE (never the message: SCA codes like authentication_required
-		// must disable auto top-up, and messages are locale-dependent).
-		await recordAutoTopupFailure(orgId, stripeErrorCode(error));
+		// Classification matters: a CARD failure (decline/SCA) records against
+		// the org — repeated failures disable auto top-up. An infrastructure
+		// failure (timeout, outage, rate limit, invalid request) is not the
+		// customer's card: release the claim back to idle WITHOUT counting it,
+		// so the next sweep retries normally and auto top-up is never disabled
+		// by two unrelated API outages. Either way the failure is loud.
+		if (isCardFailure(error)) {
+			// A create-time confirmation failure (decline, expired card...) never
+			// fires payment_failed — record it here with the real Stripe error
+			// CODE (never the message: SCA codes like authentication_required
+			// must disable auto top-up, and messages are locale-dependent).
+			await recordAutoTopupFailure(orgId, stripeErrorCode(error));
+		} else {
+			await db
+				.update(organizations)
+				.set({ autoTopupState: 'idle' })
+				.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight')));
+			console.error(
+				`auto top-up infra failure for org ${orgId}: ${error instanceof Error ? error.message : String(error)} — claim released, no decline counted`
+			);
+		}
 		return false;
 	}
 }

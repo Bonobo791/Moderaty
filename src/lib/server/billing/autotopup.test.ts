@@ -163,7 +163,9 @@ describe('maybeTriggerAutoTopUp', () => {
 	test('a create-time failure is recorded loudly and never retried immediately', async () => {
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		await seedOrg();
-		mocks.paymentIntentsCreate.mockRejectedValue(new Error('Your card was declined'));
+		// Stripe card failures carry type='card_error' + code on the error
+		// object (never in the message).
+		mocks.paymentIntentsCreate.mockRejectedValue({ type: 'card_error', code: 'card_declined', message: 'Your card was declined' });
 
 		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
 		const org = await orgRow();
@@ -171,6 +173,20 @@ describe('maybeTriggerAutoTopUp', () => {
 		expect(org.autoTopupFailures).toBe(1); // ...but the cooldown started
 		expect(org.autoTopupLastAttemptAt).not.toBeNull();
 		expect(errorSpy).toHaveBeenCalled();
+		errorSpy.mockRestore();
+	});
+
+	test('a Stripe transport failure releases the claim WITHOUT counting as a decline', async () => {
+		// Timeouts, outages, and rate limits are infrastructure problems, not
+		// the customer's card — two of them must never disable auto top-up.
+		await seedOrg();
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		mocks.paymentIntentsCreate.mockRejectedValue({ type: 'api_error', code: 'api_error' });
+
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+		const org = await orgRow();
+		expect(org.autoTopupState).toBe('idle'); // claim released for the next sweep
+		expect(org.autoTopupFailures).toBe(0);
 		errorSpy.mockRestore();
 	});
 

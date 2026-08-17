@@ -447,6 +447,45 @@ describe('sweepAutoTopUp', () => {
 		expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(1);
 	});
 
+	test('an already-expired deadline stops the sweep before charging anyone', async () => {
+		// The cron captures a shared deadline for moderation; a sweep that
+		// ignored it could eat the whole serverless window.
+		await seedOrg();
+		const triggered = await sweepAutoTopUp(5, Date.now() - 1000);
+		expect(triggered).toBe(0);
+		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+	});
+
+	test('a deadline expiring mid-sweep stops after the current org', async () => {
+		vi.useFakeTimers();
+		try {
+			await seedOrg(); // org-1 — eligible, with card
+			await testDb().db.insert(organizations).values({
+				id: 'org-2',
+				name: 'Org 2',
+				creditsRemaining: 10,
+				autoTopupEnabled: 1,
+				autoTopupThreshold: 100,
+				autoTopupState: 'idle',
+				stripeCustomerId: 'cus_2',
+				stripeDefaultPmId: 'pm_2'
+			});
+			// The deadline expires while org-1 is being reconciled — the sweep
+			// finishes org-1 and must NOT start org-2.
+			mocks.paymentIntentsList.mockImplementation(async () => {
+				vi.advanceTimersByTime(100_000);
+				return { data: [] };
+			});
+
+			const triggered = await sweepAutoTopUp(5, Date.now() + 60_000);
+
+			expect(triggered).toBe(1);
+			expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	test('a NULL balance (pre-billing org) is swept like a zero balance', async () => {
 		await seedOrg({ creditsRemaining: null });
 

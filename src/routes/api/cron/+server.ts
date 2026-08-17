@@ -106,7 +106,7 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		console.info('dry run: auto top-up sweep skipped');
 	} else {
 		try {
-			autoTopupsTriggered = await sweepAutoTopUp(5);
+			autoTopupsTriggered = await sweepAutoTopUp(5, deadline);
 		} catch (cause) {
 			autoTopupSweepError = cause instanceof Error ? cause.message : String(cause);
 			console.error('auto top-up sweep failed:', cause);

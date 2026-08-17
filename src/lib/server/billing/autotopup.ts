@@ -397,9 +397,14 @@ export async function reconcileAutoTopup(orgId: string): Promise<number> {
  * Processes a bounded batch of organizations eligible for automatic credit top-up.
  *
  * @param limit - Maximum number of organizations to process in this invocation
+ * @param deadline - Optional epoch-ms deadline shared with the caller (the cron
+ *   budget): checked before every org — each one may perform Stripe list/price/
+ *   create calls with SDK retries, and the sweep must never eat the whole
+ *   serverless window; an expired deadline stops the sweep early (the next
+ *   cron invocation continues).
  * @returns The number of newly initiated top-ups
  */
-export async function sweepAutoTopUp(limit = 5): Promise<number> {
+export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<number> {
 	// Unstick stale in-flight claims first: a webhook delivery lost past
 	// Stripe's 3-day retry horizon would otherwise wedge auto top-up forever.
 	await db
@@ -439,6 +444,13 @@ export async function sweepAutoTopUp(limit = 5): Promise<number> {
 		.all();
 	let triggered = 0;
 	for (const row of rows) {
+		// Deadline guard: the sweep shares the cron's budget with moderation —
+		// Stripe calls with SDK retries must never consume the whole window.
+		// The remaining orgs wait for the next invocation (bounded, I10).
+		if (deadline !== undefined && Date.now() >= deadline) {
+			console.error(`auto top-up sweep stopped early for org ${row.id}: shared deadline expired — remaining orgs deferred to the next invocation`);
+			break;
+		}
 		try {
 			// Reconcile first: a lost webhook for a SUCCEEDED charge must grant
 			// its credits before any new charge is considered (no double charge,

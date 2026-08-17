@@ -35,6 +35,7 @@ import { and, eq, inArray, isNotNull, lt, ne } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
 import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, invites, memberships, moderationActions, organizations, rules, sessions, users } from '$lib/server/db/schema';
+import { getStripe } from '$lib/server/stripe/client';
 
 export const CONSENT_EMAIL_RETENTION_MS = 10 * 365.25 * 24 * 60 * 60 * 1000; // 10 years
 export const AUDIT_HANDLE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -128,6 +129,11 @@ export function consentEmailCutoffIso(now = Date.now()): string {
  * @throws If the user does not exist or is already tombstoned
  */
 export async function deleteUserRecords(userId: string): Promise<void> {
+	// Stripe customers of dissolved orgs are erased AFTER the transaction
+	// (best-effort, never blocking the deletion — same pattern as
+	// revokeGoogleToken). The customer id must be captured before the org row
+	// is deleted.
+	const stripeCustomerIds: string[] = [];
 	// Promotions are logged only AFTER the transaction commits — a pre-commit
 	// log would claim a succession that a rollback erased.
 	const promotions: { orgId: string; successorId: string }[] = [];
@@ -246,6 +252,16 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 		await tx.delete(sessions).where(eq(sessions.userId, userId));
 		// Stryker disable next-line ConditionalExpression: true equivalent — with zero dissolved orgs the deletes run inArray([]), which drizzle compiles to `false`: no rows match, nothing is deleted.
 		if (dissolveOrgIds.length) {
+			// Capture the Stripe customers BEFORE the org rows die — the id is
+			// needed for the post-transaction erasure.
+			const dissolvedOrgs = await tx
+				.select({ stripeCustomerId: organizations.stripeCustomerId })
+				.from(organizations)
+				.where(inArray(organizations.id, dissolveOrgIds))
+				.all();
+			for (const org of dissolvedOrgs) {
+				if (org.stripeCustomerId) stripeCustomerIds.push(org.stripeCustomerId);
+			}
 			await tx.delete(invites).where(inArray(invites.orgId, dissolveOrgIds));
 			await tx.delete(memberships).where(inArray(memberships.orgId, dissolveOrgIds));
 			// The credit ledger is part of the org's records: comment ids,
@@ -265,6 +281,20 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 		console.info(
 			`account deletion: promoted user ${promotion.successorId} to owner of org ${promotion.orgId} (last owner ${userId} was deleted)`
 		);
+	}
+	// Best-effort Stripe customer erasure: the customer holds the org name and
+	// the saved card used for off-session auto top-up. A failure is loud but
+	// never blocks the deletion — the local records are already gone and
+	// privacy must not be held hostage by Stripe availability (the same
+	// contract as revokeGoogleToken on channel grants).
+	for (const customerId of stripeCustomerIds) {
+		try {
+			await getStripe().customers.del(customerId);
+		} catch (error) {
+			console.error(
+				`account deletion: could not delete Stripe customer ${customerId}: ${error instanceof Error ? error.message : String(error)}`
+			);
+		}
 	}
 }
 

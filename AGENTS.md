@@ -175,7 +175,11 @@ The cron trigger is a Netlify Scheduled Function in
 `*/15 * * * *` when user volume grows; calls `GET $APP_URL/api/cron`
 with the secret in an `Authorization: Bearer` header; the endpoint also keeps
 the plan-documented `?secret=` query form for manual triggers). Deployment
-steps live in [DEPLOY.md](DEPLOY.md). **Scheduled functions only fire on the
+steps live in [DEPLOY.md](DEPLOY.md); the alternative self-hosted target
+(Coolify dev/prod apps, Dockerfile build, Bunny CDN pull zone, post-deploy
+cache purges) is documented in [docs/COOLIFY_BUNNY.md](docs/COOLIFY_BUNNY.md),
+and `scripts/dev-cron.mjs --once` doubles as that target's in-container cron
+ticker. **Scheduled functions only fire on the
 published production deploy** — branch deploys (including `dev`) and
 Deploy Previews never trigger them, and nothing fires against `npm run dev`.
 In every non-production environment the pipeline only advances when something

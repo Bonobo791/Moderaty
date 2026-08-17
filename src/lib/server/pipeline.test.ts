@@ -32,7 +32,10 @@ const mocks = vi.hoisted(() => {
 			creditTransactions: undefined as unknown
 		},
 		// Org credit balance the fake organizations select reports (ledger gate).
-		credits: 5,
+		credits: 5 as number | null,
+		// Org Stripe customer the fake organizations select reports (metering
+		// gate: an org with a customer but no balance is still metered).
+		customerId: null as string | null,
 		insertedCredits: [] as Record<string, unknown>[],
 		channel: {} as Record<string, unknown>,
 		channelUpdates: [] as Record<string, unknown>[],
@@ -55,8 +58,11 @@ const mocks = vi.hoisted(() => {
 		where: (condition?: unknown) => ({
 			get: async () => {
 				if (table === state.tables.channels) return state.channel;
-				// Ledger balance lookup (consumeCredit's org existence check).
-				if (table === state.tables.organizations) return { creditsRemaining: state.credits };
+				// Ledger balance + metering lookup (consumeCredit's org existence
+				// check and the orgIsMetered gate).
+				if (table === state.tables.organizations) {
+					return { creditsRemaining: state.credits, stripeCustomerId: state.customerId };
+				}
 				throw new Error('unexpected get query');
 			},
 			all: async () => {
@@ -1747,6 +1753,46 @@ describe('credit consumption (billing)', () => {
 		// The two unpaid comments defer and the cursor parks for a post-top-up retry.
 		expect(result.outOfCredits).toBe(true);
 		expect(mocks.state.channelUpdates).toEqual([]);
+		errorSpy.mockRestore();
+	});
+
+	test('an org that never engaged billing (NULL balance, no Stripe customer) scores AI unlimited and consumes nothing', async () => {
+		// Self-hosted and lifetime-plan orgs are unmetered: no balance and no
+		// Stripe customer means the credit gate must not engage at all.
+		mocks.state.channel.orgId = 'org-1';
+		mocks.state.credits = null;
+		mocks.state.customerId = null;
+		mocks.scoreComment.mockResolvedValue(moderation(0.1));
+		mocks.fetchNewComments.mockResolvedValue({
+			comments: [newComment({ id: 'a' }), newComment({ id: 'b' })],
+			nextPageToken: null,
+			reachedCursor: true
+		});
+
+		const result = await runChannel('channel');
+
+		expect(mocks.scoreComment).toHaveBeenCalledTimes(2);
+		expect(mocks.state.insertedComments).toHaveLength(2);
+		// NULL balance: consumeCredit's guard rejects every charge — no ledger rows.
+		expect(mocks.state.insertedCredits).toEqual([]);
+		expect(result.outOfCredits).toBeUndefined();
+		expect(mocks.state.channelUpdates.some((update) => 'cursor' in update || 'scanCursor' in update)).toBe(true);
+	});
+
+	test('an org with a Stripe customer but no balance is still metered: AI defers', async () => {
+		// Metering means billing ENGAGED — a saved customer is engagement even
+		// with a NULL balance, so the gate must hold.
+		mocks.state.channel.orgId = 'org-1';
+		mocks.state.credits = null;
+		mocks.state.customerId = 'cus_1';
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		mocks.scoreComment.mockResolvedValue(moderation(0.5));
+
+		const result = await runChannel('channel');
+
+		expect(result.outOfCredits).toBe(true);
+		expect(mocks.state.insertedComments).toEqual([]);
+		expect(mocks.scoreComment).not.toHaveBeenCalled();
 		errorSpy.mockRestore();
 	});
 

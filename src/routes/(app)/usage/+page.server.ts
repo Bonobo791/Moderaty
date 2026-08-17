@@ -29,7 +29,7 @@ import { createCreditCheckout } from '$lib/server/billing/checkout';
 import { listCreditTransactions, usageSummary } from '$lib/server/billing/ledger';
 import { db } from '$lib/server/db';
 import { organizations } from '$lib/server/db/schema';
-import { AUTO_TOPUP_CONSENT_TEXT } from '$lib/server/legal';
+import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
 import { configuredBundles } from '$lib/server/stripe/bundles';
 import { requireOrgRole } from '$lib/server/ownership';
 import { requireUser } from '$lib/server/session';
@@ -49,47 +49,63 @@ export const load: PageServerLoad = async ({ locals }) => {
 		};
 	}
 	const user = requireUser(locals);
-	const [summary, history, org] = await Promise.all([
-		usageSummary(user.orgId),
-		listCreditTransactions(user.orgId, 30),
-		db
-			.select({
-				autoTopupEnabled: organizations.autoTopupEnabled,
-				autoTopupThreshold: organizations.autoTopupThreshold,
-				autoTopupState: organizations.autoTopupState,
-				autoTopupFailures: organizations.autoTopupFailures,
-				autoTopupLastAttemptAt: organizations.autoTopupLastAttemptAt,
-				stripeDefaultPmId: organizations.stripeDefaultPmId,
-				creditsRemaining: organizations.creditsRemaining
-			})
-			.from(organizations)
-			.where(eq(organizations.id, user.orgId))
-			.get()
-	]);
-	if (!org) throw new Error(`org not found: ${user.orgId}`);
-	return {
-		maintenance: false,
-		user,
-		summary,
-		history: history.map((row) => ({
-			id: row.id,
-			delta: row.delta,
-			reason: row.reason,
-			refType: row.refType,
-			refId: row.refId,
-			createdAt: row.createdAt
-		})),
-		bundles: configuredBundles(),
-		autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
-		autoTopup: {
-			enabled: org.autoTopupEnabled === 1,
-			threshold: org.autoTopupThreshold ?? AUTO_TOPUP_DEFAULT_THRESHOLD,
-			state: org.autoTopupState ?? 'idle',
-			failures: org.autoTopupFailures ?? 0,
-			lastAttemptAt: org.autoTopupLastAttemptAt,
-			hasCard: Boolean(org.stripeDefaultPmId)
-		}
-	};
+	try {
+		const [summary, history, org] = await Promise.all([
+			usageSummary(user.orgId),
+			listCreditTransactions(user.orgId, 30),
+			db
+				.select({
+					autoTopupEnabled: organizations.autoTopupEnabled,
+					autoTopupThreshold: organizations.autoTopupThreshold,
+					autoTopupState: organizations.autoTopupState,
+					autoTopupFailures: organizations.autoTopupFailures,
+					autoTopupLastAttemptAt: organizations.autoTopupLastAttemptAt,
+					stripeDefaultPmId: organizations.stripeDefaultPmId,
+					creditsRemaining: organizations.creditsRemaining
+				})
+				.from(organizations)
+				.where(eq(organizations.id, user.orgId))
+				.get()
+		]);
+		if (!org) throw new Error(`org not found: ${user.orgId}`);
+		return {
+			maintenance: false,
+			user,
+			summary,
+			history: history.map((row) => ({
+				id: row.id,
+				delta: row.delta,
+				reason: row.reason,
+				refType: row.refType,
+				refId: row.refId,
+				createdAt: row.createdAt
+			})),
+			bundles: configuredBundles(),
+			autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
+			autoTopup: {
+				enabled: org.autoTopupEnabled === 1,
+				threshold: org.autoTopupThreshold ?? AUTO_TOPUP_DEFAULT_THRESHOLD,
+				state: org.autoTopupState ?? 'idle',
+				failures: org.autoTopupFailures ?? 0,
+				lastAttemptAt: org.autoTopupLastAttemptAt,
+				hasCard: Boolean(org.stripeDefaultPmId)
+			}
+		};
+	} catch (error) {
+		// Loud on the server, a maintenance overlay for the user — never a 500
+		// (I12: the (app) layout renders the overlay for this payload instead
+		// of SvelteKit's unstyled error page). Mirrors the dashboard load.
+		console.error(`usage: load failed for org ${user.orgId}: ${error instanceof Error ? error.message : String(error)}`);
+		return {
+			maintenance: true,
+			user: null,
+			summary: null,
+			history: [],
+			bundles: [],
+			autoTopup: null,
+			autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT
+		};
+	}
 };
 
 export const actions: Actions = {
@@ -106,9 +122,19 @@ export const actions: Actions = {
 			// (HttpError) pass through too — a 403 must stay a 403, never be
 			// flattened into a 400 checkout failure.
 			if (isRedirect(error) || isHttpError(error)) throw error;
+			// Never surface RAW Stripe error text to the client (it can leak
+			// card/bank details): a Stripe SDK error always carries a `type`,
+			// and those get a generic message. Internal validation failures
+			// (unknown bundle, missing APP_URL…) keep their specific, safe
+			// message so the user can act on them. Full details go to the
+			// server log either way.
 			const message = error instanceof Error ? error.message : String(error);
 			console.error(`usage: checkout failed for org ${user.orgId}: ${message}`);
-			return fail(400, { error: `Could not start checkout: ${message}` });
+			const isStripeError =
+				error !== null && typeof error === 'object' && typeof (error as { type?: unknown }).type === 'string';
+			return fail(400, {
+				error: isStripeError ? 'Could not start checkout — please try again.' : `Could not start checkout: ${message}`
+			});
 		}
 	},
 	/**
@@ -127,14 +153,47 @@ export const actions: Actions = {
 		if (!Number.isInteger(threshold) || threshold < 0 || threshold > 1_000_000) {
 			return fail(400, { error: 'Auto top-up threshold must be a whole number of credits between 0 and 1,000,000.' });
 		}
-		if (enabled && form.get('consent') !== 'on') {
+		// Consent is required only on the disabled→enabled TRANSITION: the page
+		// hides the checkbox once enabled, so an already-enabled org updating
+		// its threshold submits enabled=on without consent and must never 400.
+		// The evidence is also written once, on that same transition — a
+		// threshold tweak must not rewrite the original authorization record.
+		const current = await db
+			.select({ autoTopupEnabled: organizations.autoTopupEnabled })
+			.from(organizations)
+			.where(eq(organizations.id, user.orgId))
+			.get();
+		const wasEnabled = current?.autoTopupEnabled === 1;
+		if (enabled && !wasEnabled && form.get('consent') !== 'on') {
 			return fail(400, { error: 'You must tick the consent checkbox to enable automatic top-up.' });
 		}
 		if (enabled) {
+			// Consent evidence — Stripe's save-and-reuse compliance: keep a
+			// record of the written agreement. The exact checkbox sentence
+			// (rendered from AUTO_TOPUP_CONSENT_TEXT itself so the form can
+			// never drift), the legal version it was rendered under, the user
+			// who ticked it, and when. Written on the enable transition and
+			// NEVER cleared by disabling — the authorization record survives
+			// for dispute defense.
 			// Re-enabling after SCA/decline failures starts from a clean slate.
+			const evidence =
+				!wasEnabled
+					? {
+							autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
+							autoTopupConsentVersion: LEGAL_VERSION,
+							autoTopupConsentedBy: user.id,
+							autoTopupConsentedAt: new Date().toISOString()
+						}
+					: {};
 			await db
 				.update(organizations)
-				.set({ autoTopupEnabled: 1, autoTopupThreshold: threshold, autoTopupState: 'idle', autoTopupFailures: 0 })
+				.set({
+					autoTopupEnabled: 1,
+					autoTopupThreshold: threshold,
+					autoTopupState: 'idle',
+					autoTopupFailures: 0,
+					...evidence
+				})
 				.where(eq(organizations.id, user.orgId));
 		} else {
 			await db

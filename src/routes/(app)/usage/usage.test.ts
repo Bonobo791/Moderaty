@@ -23,6 +23,7 @@ import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
 import { organizations } from '$lib/server/db/schema';
 import type { SessionUser } from '$lib/server/session';
 import { applyLedgerDelta, consumeCredit } from '$lib/server/billing/ledger';
+import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
 
 const mocks = vi.hoisted(() => ({
 	sessionsCreate: vi.fn(),
@@ -74,6 +75,25 @@ beforeEach(() => {
 });
 
 describe('usage load', () => {
+	test('a database failure mid-load degrades to the maintenance payload and logs loudly', async () => {
+		// The layout renders the maintenance overlay for this shape — the page
+		// must never surface SvelteKit's unstyled 500 for a mid-load DB error.
+		await seedOrg({ creditsRemaining: 120, autoTopupEnabled: 1, autoTopupThreshold: 100, autoTopupState: 'idle', stripeDefaultPmId: 'pm_1' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const client = testDb().client;
+		const originalExecute = client.execute.bind(client);
+		client.execute = (() => Promise.reject(new Error('hrana 502: connect to upstream failed'))) as never;
+		let data: Record<string, unknown>;
+		try {
+			data = (await load({ locals: { user: OWNER } } as never)) as Record<string, unknown>;
+		} finally {
+			client.execute = originalExecute;
+		}
+		expect(data).toMatchObject({ maintenance: true, user: null, summary: null });
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('usage: load failed'));
+		errorSpy.mockRestore();
+	});
+
 	test('reports the org balance, consumption, bundles and auto top-up state', async () => {
 		await seedOrg({ creditsRemaining: 120, autoTopupEnabled: 1, autoTopupThreshold: 100, autoTopupState: 'idle', stripeDefaultPmId: 'pm_1' });
 		await applyLedgerDelta(testDb().db as never, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1' });
@@ -124,6 +144,23 @@ describe('usage buy action', () => {
 		expect(mocks.sessionsCreate.mock.calls[0][0].customer).toBe('cus_existing');
 	});
 
+	test('a checkout failure returns a generic message, never the raw Stripe error', async () => {
+		// Raw third-party error text must never reach the client (it can leak
+		// card/bank details) — full details go to the server log only.
+		await seedOrg();
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		mocks.sessionsCreate.mockRejectedValue(Object.assign(new Error('Your card number is incomplete. (card_error)'), { type: 'card_error' }));
+
+		const result = await buy('credits_500');
+
+		expect(result).toMatchObject({ status: 400 });
+		const serialized = JSON.stringify(result);
+		expect(serialized).not.toContain('Your card number is incomplete');
+		expect(serialized).toContain('try again');
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Your card number is incomplete'));
+		errorSpy.mockRestore();
+	});
+
 	test('non-owners cannot buy (403)', async () => {
 		await seedOrg();
 		const member = { ...OWNER, orgRole: 'member' as const };
@@ -160,6 +197,56 @@ describe('usage setAutoTopup action', () => {
 		expect(org?.autoTopupThreshold).toBe(250);
 		expect(org?.autoTopupState).toBe('idle');
 		expect(org?.autoTopupFailures).toBe(0);
+	});
+
+	test('enabling persists the consent evidence (exact checkbox text, version, user, timestamp)', async () => {
+		// Stripe's save-and-reuse compliance requires a record of the written
+		// agreement — who ticked which sentence under which legal version, when.
+		await seedOrg();
+
+		const result = await setAutoTopup({ enabled: 'on', threshold: '250', consent: 'on' });
+
+		expect(result).toMatchObject({ ok: true });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.autoTopupConsentText).toBe(AUTO_TOPUP_CONSENT_TEXT);
+		expect(org?.autoTopupConsentVersion).toBe(LEGAL_VERSION);
+		expect(org?.autoTopupConsentedBy).toBe(OWNER.id);
+		expect(org?.autoTopupConsentedAt).toBeTruthy();
+	});
+
+	test('disabling keeps the consent evidence on record', async () => {
+		// The authorization record survives re-enabling cycles — it documents
+		// that consent WAS given, and must never be wiped by turning the
+		// automation off.
+		await seedOrg({
+			autoTopupEnabled: 1,
+			autoTopupState: 'idle',
+			autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
+			autoTopupConsentVersion: LEGAL_VERSION,
+			autoTopupConsentedBy: OWNER.id,
+			autoTopupConsentedAt: '2026-08-17T00:00:00.000Z'
+		});
+
+		const result = await setAutoTopup({ threshold: '250' });
+
+		expect(result).toMatchObject({ ok: true });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.autoTopupConsentText).toBe(AUTO_TOPUP_CONSENT_TEXT);
+		expect(org?.autoTopupConsentVersion).toBe(LEGAL_VERSION);
+	});
+
+	test('updating the threshold while ALREADY enabled needs no consent checkbox (it is hidden)', async () => {
+		// The page only renders the consent checkbox when auto top-up is
+		// disabled — an already-enabled org updating its threshold submits
+		// enabled=on without consent, and must not 400 on every save.
+		await seedOrg({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupThreshold: 250 });
+
+		const result = await setAutoTopup({ enabled: 'on', threshold: '500' });
+
+		expect(result).toMatchObject({ ok: true });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.autoTopupEnabled).toBe(1);
+		expect(org?.autoTopupThreshold).toBe(500);
 	});
 
 	test('enabling without consent fails loudly', async () => {

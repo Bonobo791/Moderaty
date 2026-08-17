@@ -19,8 +19,14 @@
 import { and, eq } from 'drizzle-orm';
 import { expect, test, vi } from 'vitest';
 
+const mocks = vi.hoisted(() => ({ customersDel: vi.fn() }));
+
+vi.mock('$lib/server/stripe/client', () => ({
+	getStripe: () => ({ customers: { del: mocks.customersDel } })
+}));
+
 import { DAY_MS, seedConsent, seedUser as seedBareUser, setupTestDb, testDb } from './testdb';
-import { auditLog, channelAllowedHandles, channels, comments, consents, invites, memberships, moderationActions, organizations, rules, sessions, users } from './db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, invites, memberships, moderationActions, organizations, rules, sessions, users } from './db/schema';
 import {
 	AUDIT_HANDLE_RETENTION_MS,
 	CONSENT_EMAIL_RETENTION_MS,
@@ -35,7 +41,7 @@ import {
 	nullExpiredModerationActionHandles
 } from './deletion';
 
-setupTestDb(['moderation_actions', 'comments', 'audit_log', 'channel_allowed_handles', 'rules', 'channels', 'sessions', 'consents', 'invites', 'memberships', 'organizations', 'users']);
+setupTestDb(['moderation_actions', 'comments', 'audit_log', 'channel_allowed_handles', 'rules', 'channels', 'sessions', 'consents', 'invites', 'memberships', 'organizations', 'users', 'credit_transactions']);
 
 /** Seeds one comment plus its moderation action, audit row, and keyword rule for a channel. */
 async function seedModerationData(channelId: string, key: string) {
@@ -154,6 +160,49 @@ async function expectAllTablesEmpty() {
 		expect(await testDb().db.select().from(table).all()).toEqual([]);
 	}
 }
+
+	test('deleteUserRecords erases the dissolved orgs\' Stripe customers', async () => {
+		// The Stripe Customer holds the org's name and the saved card used for
+		// off-session auto top-up — "immediate and permanent" deletion must
+		// erase it at Stripe too, not just the local row.
+		const userId = await seedUser('gone');
+		await testDb().db.update(organizations).set({ stripeCustomerId: 'cus_gone', stripeDefaultPmId: 'pm_gone' }).where(eq(organizations.id, 'org-gone'));
+		mocks.customersDel.mockResolvedValue({ id: 'cus_gone', deleted: true });
+
+		await deleteUserRecords(userId);
+
+		expect(mocks.customersDel).toHaveBeenCalledWith('cus_gone');
+	});
+
+	test('a Stripe customer deletion failure is loud but never blocks the account deletion', async () => {
+		const userId = await seedUser('gone');
+		await testDb().db.update(organizations).set({ stripeCustomerId: 'cus_gone' }).where(eq(organizations.id, 'org-gone'));
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		mocks.customersDel.mockRejectedValue(new Error('stripe is down'));
+
+		await expect(deleteUserRecords(userId)).resolves.toBeUndefined();
+		// The deletion completed: the tombstone is written even though the
+		// Stripe erasure failed (privacy is not held hostage by Stripe uptime).
+		expect(await userRow(userId)).toMatchObject({ googleSub: `deleted:${userId}` });
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('cus_gone'));
+		errorSpy.mockRestore();
+	});
+
+test('deleteUserRecords erases the dissolved orgs\' credit ledger rows', async () => {
+	const userId = await seedUser('gone');
+	// The org bought credits (purchase + consumption rows) — the ledger is
+	// part of the org's records and must die with it: an account deletion
+	// declared "immediate and permanent" cannot leave comment/checkout/PI ids
+	// behind in orphaned credit_transactions rows.
+	await testDb().db.insert(creditTransactions).values([
+		{ orgId: 'org-gone', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' },
+		{ orgId: 'org-gone', delta: -1, reason: 'consume', refType: 'comment', refId: 'comment-1' }
+	]);
+
+	await deleteUserRecords(userId);
+
+	expect(await testDb().db.select().from(creditTransactions).all()).toEqual([]);
+});
 
 test('deleteUserRecords erases every owned record and tombstones the user fully', async () => {
 	const userId = await seedUser('gone');

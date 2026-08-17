@@ -23,12 +23,15 @@
 // idempotent (a comment is consumed once, a checkout session granted once —
 // webhooks and retries can never double-apply).
 
-import { and, eq, lt, or, sql } from 'drizzle-orm';
+import { and, eq, gte, lt, ne, or, sql } from 'drizzle-orm';
 import { db } from '$lib/server/db';
 import { creditTransactions, organizations } from '$lib/server/db/schema';
 
 export type CreditReason = 'consume' | 'purchase' | 'auto_topup' | 'refund' | 'dispute' | 'adjust';
-export type CreditRefType = 'comment' | 'checkout_session' | 'payment_intent' | 'charge' | 'dispute' | 'admin';
+// 'refund' and 'dispute' are reversal refTypes anchored on the charge id —
+// DISTINCT anchors on purpose: a dispute reversal, a won-dispute restore, and
+// a later full refund each apply exactly once without blocking one another.
+export type CreditRefType = 'comment' | 'checkout_session' | 'payment_intent' | 'charge' | 'refund' | 'dispute' | 'admin';
 
 /** The DB surface the ledger needs; both `db` and a transaction satisfy it. */
 export type LedgerHandle = Pick<typeof db, 'insert' | 'update' | 'select' | 'delete'>;
@@ -80,6 +83,24 @@ export async function getCredits(orgId: string): Promise<number> {
 		.get();
 	if (!row) throw new Error(`org not found: ${orgId}`);
 	return row.creditsRemaining ?? 0;
+}
+
+/**
+ * True when the org has ENGAGED billing — a non-null balance or a Stripe
+ * customer. Metering (the credit gate + per-comment consumption) applies
+ * only to metered orgs: pre-billing orgs (self-hosted installs, lifetime
+ * plans, fresh hosted signups) carry NULL credits_remaining and no customer
+ * and must keep scoring unlimited AI (AGENTS.md: the free tier is
+ * self-hosted only — billing is opt-in, never a surprise gate).
+ */
+export async function orgIsMetered(orgId: string): Promise<boolean> {
+	const row = await db
+		.select({ creditsRemaining: organizations.creditsRemaining, stripeCustomerId: organizations.stripeCustomerId })
+		.from(organizations)
+		.where(eq(organizations.id, orgId))
+		.get();
+	if (!row) throw new Error(`org not found: ${orgId}`);
+	return row.creditsRemaining !== null || row.stripeCustomerId !== null;
 }
 
 /**
@@ -181,7 +202,9 @@ export interface GrantMatch {
 }
 
 /**
- * Locates credits granted for a Stripe payment intent or charge.
+ * Locates credits granted for a Stripe payment intent or charge. Won-dispute
+ * restores (reason 'adjust') are excluded: a refund reverses what the charge
+ * ORIGINALLY granted, never money that came back via a dispute ruling.
  *
  * @param identifiers - Optional Stripe payment intent and charge identifiers used to match grant transactions.
  * @returns The organization ID and total granted credits, or `null` when no matching grant exists.
@@ -197,7 +220,7 @@ export async function findGrantForStripe(
 	const rows = await handle
 		.select({ orgId: creditTransactions.orgId, delta: creditTransactions.delta })
 		.from(creditTransactions)
-		.where(and(match, sql`${creditTransactions.delta} > 0`))
+		.where(and(match, sql`${creditTransactions.delta} > 0`, ne(creditTransactions.reason, 'adjust')))
 		.all();
 	if (rows.length === 0) return null;
 	const orgId = rows[0].orgId;
@@ -225,23 +248,27 @@ export async function usageSummary(orgId: string): Promise<UsageSummary> {
 	// "Used" means moderation consumption only: refund/dispute reversals are
 	// also negative-delta rows, but they are money leaving the ledger, not
 	// comments scored — summing every negative row would inflate the stats.
-	const rows = await db
-		.select({ delta: creditTransactions.delta, createdAt: creditTransactions.createdAt })
-		.from(creditTransactions)
-		.where(
-			and(
-				eq(creditTransactions.orgId, orgId),
-				eq(creditTransactions.reason, 'consume'),
-				lt(creditTransactions.delta, 0)
-			)
-		)
-		.all();
-	const lifetimeTotal = rows.reduce((sum, row) => sum + row.delta, 0);
-	// `0 - total` (not unary minus) so an empty ledger reports 0, not -0.
-	const usedLifetime = 0 - lifetimeTotal;
-	const monthTotal = rows.filter((row) => gteIso(row.createdAt, monthStart)).reduce((sum, row) => sum + row.delta, 0);
-	const usedThisMonth = 0 - monthTotal;
-	return { remaining, usedLifetime, usedThisMonth };
+	// Aggregated in SQL over the (org_id, created_at) index: the usage page
+	// must stay bounded as the ledger grows, never fetch every consume row
+	// into memory just to add it up in JS.
+	const consume = and(
+		eq(creditTransactions.orgId, orgId),
+		eq(creditTransactions.reason, 'consume'),
+		lt(creditTransactions.delta, 0)
+	);
+	const [lifetime, month] = await Promise.all([
+		db
+			.select({ used: sql<number>`COALESCE(SUM(ABS(${creditTransactions.delta})), 0)` })
+			.from(creditTransactions)
+			.where(consume)
+			.get(),
+		db
+			.select({ used: sql<number>`COALESCE(SUM(ABS(${creditTransactions.delta})), 0)` })
+			.from(creditTransactions)
+			.where(and(consume, gte(creditTransactions.createdAt, monthStart)))
+			.get()
+	]);
+	return { remaining, usedLifetime: lifetime?.used ?? 0, usedThisMonth: month?.used ?? 0 };
 }
 
 /**

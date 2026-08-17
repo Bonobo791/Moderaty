@@ -97,9 +97,12 @@ export async function fulfillCheckout(sessionId: string): Promise<boolean> {
 		paymentIntentId: paymentIntent?.id,
 		chargeId: typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : undefined
 	});
-	if (!applied) return false; // already credited — duplicate delivery
 	// Save the card used for this payment as the customer's default, so a
-	// later auto top-up can charge it off-session.
+	// later auto top-up can charge it off-session. This runs even when the
+	// grant was already applied (duplicate delivery): a transient first-
+	// delivery failure must be retried by the next delivery or success-page
+	// refresh, or the org would permanently have no top-up card. Every step
+	// is idempotent (attach, default-payment-method update, org row update).
 	const paymentMethod = paymentIntent?.payment_method;
 	const customer = typeof session.customer === 'string' ? session.customer : session.customer?.id;
 	if (paymentMethod && customer) {
@@ -119,7 +122,7 @@ export async function fulfillCheckout(sessionId: string): Promise<boolean> {
 			console.error(`stripe: could not save payment method for ${orgId}: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
-	return true;
+	return applied;
 }
 
 /**
@@ -141,7 +144,13 @@ export async function fulfillAutoTopup(paymentIntentId: string): Promise<boolean
 }
 
 /**
- * Reverses credits granted for a refunded or disputed charge.
+ * Reverses credits granted for a refunded or disputed charge. Each path
+ * anchors on its OWN refType — 'refund' for refunds, 'dispute' for disputes
+ * (refId = charge id) — so the full lifecycle applies exactly once per step:
+ * a dispute reversal, a won-dispute restore (refType 'dispute', refId =
+ * dispute id), and a later legitimate full refund each clear their own anchor
+ * and can never block or double-apply one another. The reason field
+ * ('refund' vs 'dispute') keeps the ledger legible.
  *
  * @param chargeId - The Stripe charge identifier
  * @param reason - Whether the reversal is for a refund or dispute
@@ -150,18 +159,36 @@ export async function fulfillAutoTopup(paymentIntentId: string): Promise<boolean
 export async function reverseCharge(chargeId: string, reason: 'refund' | 'dispute'): Promise<boolean> {
 	const charge = await getStripe().charges.retrieve(chargeId, { expand: ['payment_intent'] });
 	const paymentIntentId = typeof charge.payment_intent === 'string' ? charge.payment_intent : charge.payment_intent?.id;
+	// v1 policy (docs/stripe-checkout-webhooks.md §7): credits are reversed
+	// only on a FULL refund. Stripe's charge.refunded fires for partial
+	// refunds too — compare the refunded and original amounts, and treat a
+	// charge without usable amounts as NOT fully refunded (never take credits
+	// away on ambiguous data; log loudly instead).
+	if (reason === 'refund') {
+		const fullyRefunded =
+			typeof charge.amount_refunded === 'number' &&
+			typeof charge.amount === 'number' &&
+			charge.amount_refunded >= charge.amount;
+		if (!fullyRefunded) {
+			console.error(
+				`stripe: refund for ${chargeId} is not a full refund (refunded ${charge.amount_refunded ?? 'unknown'} of ${charge.amount ?? 'unknown'}) — credits kept (v1 reverses only full refunds)`
+			);
+			return false;
+		}
+	}
 	const match = await findGrantForStripe(db, { chargeId, paymentIntentId });
 	if (!match) {
 		console.error(`stripe: ${reason} for ${chargeId} matched no credit grant — nothing to reverse`);
 		return false;
 	}
-	// The grant may already have been reversed — the charge-id anchor makes
-	// the reversal apply at most once, across refund AND dispute paths.
+	// The grant may already have been reversed — each path's own anchor
+	// (refType 'refund' or 'dispute', refId = charge id) makes the reversal
+	// apply at most once per path.
 	return applyLedgerDelta(db, {
 		orgId: match.orgId,
 		delta: -match.credits,
 		reason,
-		refType: 'charge',
+		refType: reason === 'refund' ? 'refund' : 'dispute',
 		refId: chargeId,
 		chargeId,
 		paymentIntentId
@@ -169,7 +196,11 @@ export async function reverseCharge(chargeId: string, reason: 'refund' | 'disput
 }
 
 /**
- * Reverses credits associated with a disputed charge.
+ * Reverses credits associated with a disputed charge, and disables the org's
+ * automatic top-up: a customer who disputed a charge must never be re-charged
+ * off-session by the sweep (docs/stripe-auto-topup.md §7 — "mark the customer's
+ * auto top-up disabled pending review"). Re-enabling is a fresh, explicit owner
+ * action on the Usage page.
  *
  * @param disputeId - The Stripe dispute identifier
  * @returns `true` if the credit reversal was applied, `false` otherwise
@@ -180,6 +211,15 @@ export async function reverseDispute(disputeId: string): Promise<boolean> {
 	if (!chargeId) {
 		console.error(`stripe: dispute ${disputeId} has no charge`);
 		return false;
+	}
+	// The org is identified through the grant (a dispute on a charge that
+	// never granted credits has no org to disable — logged by reverseCharge).
+	const match = await findGrantForStripe(db, { chargeId });
+	if (match) {
+		await db
+			.update(organizations)
+			.set({ autoTopupEnabled: 0, autoTopupState: 'disabled' })
+			.where(eq(organizations.id, match.orgId));
 	}
 	return reverseCharge(chargeId, 'dispute');
 }
@@ -254,10 +294,11 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
 			handled = true;
 			break;
 		case 'charge.refunded':
-			// v1 reverses only FULL refunds: charge.refunded fires when a charge
-			// is fully refunded, and reverseCharge reverses the whole grant. Partial
-			// refunds (refund.created/refund.updated) are intentionally unhandled,
-			// and reversing after the credits are spent can leave a negative balance
+			// Stripe's charge.refunded fires for partial refunds too, so
+			// reverseCharge verifies the charge is FULLY refunded (amounts
+			// compared) before reversing the grant. Partial refunds
+			// (refund.created/refund.updated) are intentionally unhandled, and
+			// reversing after the credits are spent can leave a negative balance
 			// — both documented v1 limitations (docs/stripe-checkout-webhooks.md §7).
 			await reverseCharge(event.data.object.id, 'refund');
 			handled = true;

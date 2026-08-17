@@ -30,7 +30,7 @@
 //    state flips to 'disabled' and the customer must re-authenticate via a
 //    fresh Checkout. Other declines disable after 2 consecutive failures.
 
-import { and, eq, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, eq, isNotNull, isNull, or, sql } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
 import { applyLedgerDelta } from '$lib/server/billing/ledger';
@@ -124,12 +124,38 @@ async function topupCountsSince(orgId: string, sinceIso: string): Promise<number
  */
 export function stripeErrorCode(error: unknown): string {
 	if (error && typeof error === 'object') {
-		const code = (error as { code?: unknown }).code;
-		if (typeof code === 'string') return code;
+		// Prefer decline_code: a card decline's generic `code` is
+		// 'card_declined', while decline_code carries the SPECIFIC reason
+		// (e.g. 'authentication_required') that decides the failure path.
 		const declineCode = (error as { decline_code?: unknown }).decline_code;
 		if (typeof declineCode === 'string') return declineCode;
+		const code = (error as { code?: unknown }).code;
+		if (typeof code === 'string') return code;
 	}
 	return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * True when a paymentIntents.create failure is a CARD failure (decline,
+ * expired card, SCA-required) rather than an infrastructure failure (network
+ * outage, timeout, rate limit, invalid request, Stripe API error). Only card
+ * failures count against the org's consecutive-failure counter — two
+ * unrelated API outages must never disable auto top-up.
+ */
+function isCardFailure(error: unknown): boolean {
+	if (error && typeof error === 'object') {
+		const type = (error as { type?: unknown }).type;
+		if (type === 'card_error') return true;
+		// Auth codes are card failures even when the type field is absent.
+		const code = stripeErrorCode(error);
+		return (
+			code === 'authentication_required' ||
+			code === 'authentication_not_handled' ||
+			code === 'requires_action' ||
+			code.includes('authentication_required') // legacy message-shaped callers
+		);
+	}
+	return false;
 }
 
 /**
@@ -166,6 +192,16 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 	// attempted, so a failure here leaves the org idle for the next sweep.
 	const bundle = autoTopupBundle();
 	const price = await getStripe().prices.retrieve(priceIdFor(bundle));
+	// Validate the configured Price BEFORE claiming: manual Checkout rejects
+	// archived prices at session creation, but the auto-charge path copies
+	// unit_amount and charges USD unconditionally — an archived, non-USD, or
+	// recurring Price must never fund a differently denominated charge.
+	if (!price.active || price.currency !== 'usd' || price.type !== 'one_time') {
+		console.error(
+			`auto top-up skipped for org ${orgId}: bundle ${bundle.id} price ${price.id} is not an active one-time USD price (active=${price.active}, currency=${price.currency}, type=${price.type})`
+		);
+		return false;
+	}
 	const amount = price.unit_amount ?? 0;
 	if (!amount) {
 		console.error(`auto top-up skipped for org ${orgId}: bundle ${bundle.id} price has no unit_amount`);
@@ -197,11 +233,27 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 		console.info(`auto top-up initiated for org ${orgId}: bundle ${bundle.id} (${idempotencyKey})`);
 		return true;
 	} catch (error) {
-		// A create-time confirmation failure (decline, expired card...) never
-		// fires payment_failed — record it here with the real Stripe error
-		// CODE (never the message: SCA codes like authentication_required
-		// must disable auto top-up, and messages are locale-dependent).
-		await recordAutoTopupFailure(orgId, stripeErrorCode(error));
+		// Classification matters: a CARD failure (decline/SCA) records against
+		// the org — repeated failures disable auto top-up. An infrastructure
+		// failure (timeout, outage, rate limit, invalid request) is not the
+		// customer's card: release the claim back to idle WITHOUT counting it,
+		// so the next sweep retries normally and auto top-up is never disabled
+		// by two unrelated API outages. Either way the failure is loud.
+		if (isCardFailure(error)) {
+			// A create-time confirmation failure (decline, expired card...) never
+			// fires payment_failed — record it here with the real Stripe error
+			// CODE (never the message: SCA codes like authentication_required
+			// must disable auto top-up, and messages are locale-dependent).
+			await recordAutoTopupFailure(orgId, stripeErrorCode(error));
+		} else {
+			await db
+				.update(organizations)
+				.set({ autoTopupState: 'idle' })
+				.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight')));
+			console.error(
+				`auto top-up infra failure for org ${orgId}: ${error instanceof Error ? error.message : String(error)} — claim released, no decline counted`
+			);
+		}
 		return false;
 	}
 }
@@ -268,7 +320,9 @@ export async function handleAutoTopupFailure(paymentIntentId: string): Promise<v
 		console.error(`auto top-up PI ${paymentIntentId} has no org_id metadata`);
 		return;
 	}
-	const code = pi.last_payment_error?.code ?? pi.last_payment_error?.decline_code ?? 'payment_failed';
+	// decline_code first: it carries the SPECIFIC reason (authentication_required),
+	// while `code` on a card decline is the generic 'card_declined'.
+	const code = pi.last_payment_error?.decline_code ?? pi.last_payment_error?.code ?? 'payment_failed';
 	// The PI's creation time correlates the failure to the claim it belongs to.
 	await recordAutoTopupFailure(orgId, code, pi.created ? pi.created * 1000 : undefined);
 }
@@ -343,9 +397,14 @@ export async function reconcileAutoTopup(orgId: string): Promise<number> {
  * Processes a bounded batch of organizations eligible for automatic credit top-up.
  *
  * @param limit - Maximum number of organizations to process in this invocation
+ * @param deadline - Optional epoch-ms deadline shared with the caller (the cron
+ *   budget): checked before every org — each one may perform Stripe list/price/
+ *   create calls with SDK retries, and the sweep must never eat the whole
+ *   serverless window; an expired deadline stops the sweep early (the next
+ *   cron invocation continues).
  * @returns The number of newly initiated top-ups
  */
-export async function sweepAutoTopUp(limit = 5): Promise<number> {
+export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<number> {
 	// Unstick stale in-flight claims first: a webhook delivery lost past
 	// Stripe's 3-day retry horizon would otherwise wedge auto top-up forever.
 	await db
@@ -369,13 +428,29 @@ export async function sweepAutoTopUp(limit = 5): Promise<number> {
 				eq(organizations.autoTopupState, 'idle'),
 				// COALESCE both sides: a NULL balance (pre-billing org) must read
 				// as 0 here, or SQL NULL comparison silently drops the org.
-				sql`COALESCE(${organizations.creditsRemaining}, 0) < COALESCE(${organizations.autoTopupThreshold}, ${AUTO_TOPUP_DEFAULT_THRESHOLD})`
+				sql`COALESCE(${organizations.creditsRemaining}, 0) < COALESCE(${organizations.autoTopupThreshold}, ${AUTO_TOPUP_DEFAULT_THRESHOLD})`,
+				// A cardless org can never be charged (maybeTriggerAutoTopUp
+				// returns false) — excluding it here keeps the bounded batch
+				// full of chargeable orgs: otherwise N ineligible rows could
+				// occupy the whole limit every invocation and starve everyone
+				// else (I10 fairness). Never-attempted orgs sort first (SQLite
+				// NULLs first in ASC), a natural fair rotation.
+				isNotNull(organizations.stripeCustomerId),
+				isNotNull(organizations.stripeDefaultPmId)
 			)
 		)
+		.orderBy(asc(organizations.autoTopupLastAttemptAt), asc(organizations.id))
 		.limit(limit)
 		.all();
 	let triggered = 0;
 	for (const row of rows) {
+		// Deadline guard: the sweep shares the cron's budget with moderation —
+		// Stripe calls with SDK retries must never consume the whole window.
+		// The remaining orgs wait for the next invocation (bounded, I10).
+		if (deadline !== undefined && Date.now() >= deadline) {
+			console.error(`auto top-up sweep stopped early for org ${row.id}: shared deadline expired — remaining orgs deferred to the next invocation`);
+			break;
+		}
 		try {
 			// Reconcile first: a lost webhook for a SUCCEEDED charge must grant
 			// its credits before any new charge is considered (no double charge,

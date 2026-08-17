@@ -29,14 +29,39 @@ import {
 	getCredits,
 	listCreditTransactions,
 	monthStartIso,
+	orgIsMetered,
 	usageSummary
 } from './ledger';
 
 setupTestDb(['organizations', 'credit_transactions', 'stripe_events']);
 
-async function seedOrg(orgId = 'org-1', credits: number | null = null): Promise<void> {
-	await testDb().db.insert(organizations).values({ id: orgId, name: 'Test org', creditsRemaining: credits });
+async function seedOrg(orgId = 'org-1', credits: number | null = null, stripeCustomerId: string | null = null): Promise<void> {
+	await testDb().db
+		.insert(organizations)
+		.values({ id: orgId, name: 'Test org', creditsRemaining: credits, stripeCustomerId });
 }
+
+describe('orgIsMetered', () => {
+	test('an org with neither balance nor customer is unmetered (self-hosted / pre-billing)', async () => {
+		await seedOrg('org-1', null, null);
+		expect(await orgIsMetered('org-1')).toBe(false);
+	});
+
+	test('an org with a balance is metered even with no customer', async () => {
+		await seedOrg('org-1', 500, null);
+		expect(await orgIsMetered('org-1')).toBe(true);
+	});
+
+	test('an org with a Stripe customer is metered even with a null balance', async () => {
+		await seedOrg('org-1', null, 'cus_1');
+		expect(await orgIsMetered('org-1')).toBe(true);
+	});
+
+	test('fails loudly for an unknown org', async () => {
+		await expect(orgIsMetered('missing')).rejects.toThrow('org not found');
+	});
+});
+
 
 describe('consumeCredit', () => {
 	test('charges one credit and records the row with the new balance', async () => {
@@ -129,6 +154,16 @@ describe('findGrantForStripe', () => {
 		expect(match).toEqual({ orgId: 'org-1', credits: 100 });
 	});
 
+	test('never counts won-dispute restores (adjust) as part of the charge grant', async () => {
+		// A refund must reverse what the charge ORIGINALLY granted — a restore
+		// row (money that came back after a won dispute) is not part of it.
+		await seedOrg('org-1', 0);
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: 2000, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: 2000, reason: 'adjust', refType: 'dispute', refId: 'du_1', chargeId: 'ch_1' });
+		const match = await findGrantForStripe(db, { chargeId: 'ch_1' });
+		expect(match).toEqual({ orgId: 'org-1', credits: 2000 });
+	});
+
 	test('returns null when nothing matches', async () => {
 		expect(await findGrantForStripe(db, { chargeId: 'ch_none' })).toBeNull();
 	});
@@ -163,6 +198,41 @@ describe('usageSummary', () => {
 		expect(summary.remaining).toBe(2);
 		expect(summary.usedLifetime).toBe(3);
 		expect(summary.usedThisMonth).toBe(2);
+	});
+
+	test('aggregates in SQL — never fetches every consume row into memory', async () => {
+		// The usage page must stay bounded as the ledger grows: SUM over the
+		// (org_id, created_at) index, not a lifetime row fetch + JS reduce.
+		await seedOrg('org-1', 100);
+		await consumeCredit(db, 'org-1', 'c1');
+		await testDb().db.insert(creditTransactions).values({
+			orgId: 'org-1',
+			delta: -7,
+			reason: 'consume',
+			refType: 'comment',
+			refId: 'c-old',
+			createdAt: '2000-01-15T12:00:00.000Z'
+		});
+		const statements: string[] = [];
+		const client = testDb().client;
+		const originalExecute = client.execute.bind(client);
+		client.execute = ((stmt: unknown) => {
+			const sqlText = String((stmt as { sql?: string }).sql ?? stmt);
+			statements.push(sqlText);
+			return originalExecute(stmt as never);
+		}) as never;
+		let summary: { remaining: number; usedLifetime: number; usedThisMonth: number };
+		try {
+			summary = await usageSummary('org-1');
+		} finally {
+			client.execute = originalExecute;
+		}
+
+		expect(summary).toEqual({ remaining: 99, usedLifetime: 8, usedThisMonth: 1 });
+		// The consumption totals must come from SUM() queries, and NO query may
+		// fetch the full consume rows just to add them up.
+		expect(statements.some((s) => s.includes('SUM('))).toBe(true);
+		expect(statements.some((s) => s.includes('from `credit_transactions`') && !s.includes('SUM('))).toBe(false);
 	});
 
 	test('a refund/dispute reversal never inflates used credits', async () => {

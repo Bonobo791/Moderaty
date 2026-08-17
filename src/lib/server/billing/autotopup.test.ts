@@ -22,7 +22,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { creditTransactions, organizations } from '$lib/server/db/schema';
 import { getCredits } from '$lib/server/billing/ledger';
-import { handleAutoTopupFailure, maybeTriggerAutoTopUp, recordAutoTopupFailure, sweepAutoTopUp } from './autotopup';
+import { handleAutoTopupFailure, maybeTriggerAutoTopUp, recordAutoTopupFailure, stripeErrorCode, sweepAutoTopUp } from './autotopup';
 
 const mocks = vi.hoisted(() => ({
 	paymentIntentsCreate: vi.fn(),
@@ -68,7 +68,7 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.paymentIntentsCreate.mockResolvedValue({ id: 'pi_new' });
 	mocks.paymentIntentsList.mockResolvedValue({ data: [] });
-	mocks.pricesRetrieve.mockResolvedValue({ unit_amount: 500 });
+	mocks.pricesRetrieve.mockResolvedValue({ id: 'price_100', unit_amount: 500, active: true, currency: 'usd', type: 'one_time' });
 });
 
 describe('maybeTriggerAutoTopUp', () => {
@@ -148,6 +148,38 @@ describe('maybeTriggerAutoTopUp', () => {
 		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
 	});
 
+	test('skips when the configured Price is archived', async () => {
+		// Manual Checkout rejects archived prices; the auto-charge path copies
+		// unit_amount blindly — it must not charge against a dead price.
+		await seedOrg();
+		mocks.pricesRetrieve.mockResolvedValue({ id: 'price_100', unit_amount: 500, active: false, currency: 'usd', type: 'one_time' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+		expect((await orgRow()).autoTopupState).toBe('idle');
+		errorSpy.mockRestore();
+	});
+
+	test('skips when the configured Price is not USD', async () => {
+		// The charge is created in USD unconditionally — a non-USD price must
+		// never be charged as if it were USD.
+		await seedOrg();
+		mocks.pricesRetrieve.mockResolvedValue({ id: 'price_100', unit_amount: 500, active: true, currency: 'brl', type: 'one_time' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+		errorSpy.mockRestore();
+	});
+
+	test('skips when the configured Price is recurring', async () => {
+		await seedOrg();
+		mocks.pricesRetrieve.mockResolvedValue({ id: 'price_100', unit_amount: 500, active: true, currency: 'usd', type: 'recurring' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+		errorSpy.mockRestore();
+	});
+
 	test('a price lookup failure never leaves the org wedged in in_flight', async () => {
 		await seedOrg();
 		mocks.pricesRetrieve.mockRejectedValue(new Error('stripe is down'));
@@ -163,7 +195,9 @@ describe('maybeTriggerAutoTopUp', () => {
 	test('a create-time failure is recorded loudly and never retried immediately', async () => {
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		await seedOrg();
-		mocks.paymentIntentsCreate.mockRejectedValue(new Error('Your card was declined'));
+		// Stripe card failures carry type='card_error' + code on the error
+		// object (never in the message).
+		mocks.paymentIntentsCreate.mockRejectedValue({ type: 'card_error', code: 'card_declined', message: 'Your card was declined' });
 
 		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
 		const org = await orgRow();
@@ -171,6 +205,20 @@ describe('maybeTriggerAutoTopUp', () => {
 		expect(org.autoTopupFailures).toBe(1); // ...but the cooldown started
 		expect(org.autoTopupLastAttemptAt).not.toBeNull();
 		expect(errorSpy).toHaveBeenCalled();
+		errorSpy.mockRestore();
+	});
+
+	test('a Stripe transport failure releases the claim WITHOUT counting as a decline', async () => {
+		// Timeouts, outages, and rate limits are infrastructure problems, not
+		// the customer's card — two of them must never disable auto top-up.
+		await seedOrg();
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		mocks.paymentIntentsCreate.mockRejectedValue({ type: 'api_error', code: 'api_error' });
+
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+		const org = await orgRow();
+		expect(org.autoTopupState).toBe('idle'); // claim released for the next sweep
+		expect(org.autoTopupFailures).toBe(0);
 		errorSpy.mockRestore();
 	});
 
@@ -232,7 +280,37 @@ describe('recordAutoTopupFailure', () => {
 	});
 });
 
+describe('stripeErrorCode', () => {
+	test('prefers the specific decline_code over the generic code', () => {
+		// A card decline carries code='card_declined' PLUS the specific
+		// decline_code — authentication_required must win, or an SCA-required
+		// charge is misrouted to the ordinary-decline path.
+		expect(stripeErrorCode({ code: 'card_declined', decline_code: 'authentication_required' })).toBe('authentication_required');
+	});
+
+	test('falls back to the code when no decline_code exists', () => {
+		expect(stripeErrorCode({ code: 'card_declined' })).toBe('card_declined');
+	});
+
+	test('falls back to the message for non-object errors', () => {
+		expect(stripeErrorCode(new Error('network down'))).toBe('network down');
+	});
+});
+
 describe('handleAutoTopupFailure (webhook)', () => {
+	test('an authentication_required DECLINE_CODE disables auto top-up even when the generic code is card_declined', async () => {
+		await seedOrg({ autoTopupState: 'in_flight' });
+		mocks.paymentIntentsRetrieve.mockResolvedValue({
+			id: 'pi_9',
+			metadata: { type: 'auto_topup', org_id: 'org-1' },
+			created: Math.floor(Date.now() / 1000),
+			last_payment_error: { code: 'card_declined', decline_code: 'authentication_required' }
+		});
+		await handleAutoTopupFailure('pi_9');
+		expect((await orgRow()).autoTopupState).toBe('disabled');
+		expect((await orgRow()).autoTopupFailures).toBe(1);
+	});
+
 	test('records the failure for our auto-topup PIs', async () => {
 		await seedOrg({ autoTopupState: 'in_flight' });
 		mocks.paymentIntentsRetrieve.mockResolvedValue({
@@ -335,6 +413,77 @@ describe('sweepAutoTopUp', () => {
 
 		expect(triggered).toBe(0);
 		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+	});
+
+	test('cardless enabled orgs never starve the sweep — eligible orgs are still reached', async () => {
+		// 6 permanently ineligible orgs (enabled, below threshold, but no saved
+		// card — maybeTriggerAutoTopUp returns false for them) plus ONE eligible
+		// org. Without the card filters, a limit-5 sweep can select only
+		// ineligible rows every invocation and never reach the chargeable one.
+		for (let i = 2; i <= 7; i++) {
+			await testDb().db.insert(organizations).values({
+				id: `org-${i}`,
+				name: `Org ${i}`,
+				creditsRemaining: 10,
+				autoTopupEnabled: 1,
+				autoTopupThreshold: 100,
+				autoTopupState: 'idle'
+			});
+		}
+		await testDb().db.insert(organizations).values({
+			id: 'org-8',
+			name: 'Org 8',
+			creditsRemaining: 10,
+			autoTopupEnabled: 1,
+			autoTopupThreshold: 100,
+			autoTopupState: 'idle',
+			stripeCustomerId: 'cus_8',
+			stripeDefaultPmId: 'pm_8'
+		});
+
+		const triggered = await sweepAutoTopUp(5);
+
+		expect(triggered).toBe(1);
+		expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(1);
+	});
+
+	test('an already-expired deadline stops the sweep before charging anyone', async () => {
+		// The cron captures a shared deadline for moderation; a sweep that
+		// ignored it could eat the whole serverless window.
+		await seedOrg();
+		const triggered = await sweepAutoTopUp(5, Date.now() - 1000);
+		expect(triggered).toBe(0);
+		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+	});
+
+	test('a deadline expiring mid-sweep stops after the current org', async () => {
+		vi.useFakeTimers();
+		try {
+			await seedOrg(); // org-1 — eligible, with card
+			await testDb().db.insert(organizations).values({
+				id: 'org-2',
+				name: 'Org 2',
+				creditsRemaining: 10,
+				autoTopupEnabled: 1,
+				autoTopupThreshold: 100,
+				autoTopupState: 'idle',
+				stripeCustomerId: 'cus_2',
+				stripeDefaultPmId: 'pm_2'
+			});
+			// The deadline expires while org-1 is being reconciled — the sweep
+			// finishes org-1 and must NOT start org-2.
+			mocks.paymentIntentsList.mockImplementation(async () => {
+				vi.advanceTimersByTime(100_000);
+				return { data: [] };
+			});
+
+			const triggered = await sweepAutoTopUp(5, Date.now() + 60_000);
+
+			expect(triggered).toBe(1);
+			expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(1);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	test('a NULL balance (pre-billing org) is swept like a zero balance', async () => {

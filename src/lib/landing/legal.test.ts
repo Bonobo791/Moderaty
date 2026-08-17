@@ -20,8 +20,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { PRIVACY_NOTICE_TEXT, REFUND_NOTICE_TEXT, AUTO_TOPUP_CONSENT_TEXT } from '../server/legal';
 import { FAQ_ENTRIES } from './faq';
-import { LEGAL_DOCS, LEGAL_EFFECTIVE_DATE, LEGAL_VERSION } from './legal';
-import { PRICING_FAQ_ENTRIES } from './pricing-faq';
+import { LEGAL_DOCS, LEGAL_EFFECTIVE_DATE, LEGAL_VERSION } from './legal';import { PRICING_FAQ_ENTRIES } from './pricing-faq';
 
 const COMPONENTS: Record<string, string> = {
 	terms: 'Terms.svelte',
@@ -41,6 +40,15 @@ function readRoute(slug: string, file: string): string {
 }
 
 describe('LEGAL_DOCS', () => {
+	it('the billing terms (auto top-up authorization, bundle refunds) shipped under a NEW legal version', () => {
+		// The STRIPE BILLING commit rewrote Terms §6.1/§6.2 materially (bundle
+		// model, unscheduled auto top-up authorization) — that is exactly the
+		// "material legal-doc change" that must bump LEGAL_VERSION so the
+		// re-consent gate (hasCurrentConsent) routes every user back through
+		// /consent. Never let billing terms ride along under an old version.
+		expect(LEGAL_VERSION).toBe('1.7');
+	});
+
 	it('lists exactly the three published legal documents', () => {
 		expect(LEGAL_DOCS.map((d) => d.slug)).toEqual(['terms', 'privacy', 'dpa']);
 		expect(LEGAL_DOCS.map((d) => d.label)).toEqual(['Terms', 'Privacy', 'DPA']);

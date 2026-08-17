@@ -21,7 +21,7 @@
 // success-page redirect is not reliable, the webhook is authoritative); both
 // are idempotent, so instant UX and eventual delivery never double-grant.
 
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 
 import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
@@ -48,15 +48,37 @@ export async function getOrCreateStripeCustomer(orgId: string, user: SessionUser
 		.get();
 	if (!org) throw new Error(`org not found: ${orgId}`);
 	if (org.stripeCustomerId) return org.stripeCustomerId;
-	const customer = await getStripe().customers.create({
-		name: user.orgName,
-		email: user.email,
-		metadata: { org_id: orgId }
-	});
-	await db
+	// Stable per-org idempotency key: two concurrent Checkout requests that
+	// both read a missing customer id collapse into ONE Stripe customer
+	// (coderabbit — without it each request would mint a different customer).
+	const customer = await getStripe().customers.create(
+		{
+			name: user.orgName,
+			email: user.email,
+			metadata: { org_id: orgId }
+		},
+		{ idempotencyKey: `customer:${orgId}` }
+	);
+	// Conditional claim: only the first caller to land stores its customer.
+	// A losing claim re-reads the org row and returns the STORED id — Checkout
+	// Sessions and saved payment methods must attach to the org's real
+	// customer, never a concurrent orphan.
+	const stored = await db
 		.update(organizations)
 		.set({ stripeCustomerId: customer.id })
-		.where(eq(organizations.id, orgId));
+		.where(and(eq(organizations.id, orgId), isNull(organizations.stripeCustomerId)))
+		.returning({ id: organizations.id });
+	if (stored.length === 0) {
+		const current = await db
+			.select({ stripeCustomerId: organizations.stripeCustomerId })
+			.from(organizations)
+			.where(eq(organizations.id, orgId))
+			.get();
+		if (current?.stripeCustomerId) return current.stripeCustomerId;
+		// The org row vanished mid-flight (account deleted concurrently) —
+		// fail loudly instead of handing out an unowned customer.
+		throw new Error(`org not found: ${orgId}`);
+	}
 	return customer.id;
 }
 
@@ -81,8 +103,10 @@ export async function createCreditCheckout(orgId: string, user: SessionUser, bun
 		client_reference_id: orgId,
 		metadata: { org_id: orgId, bundle: bundle.id, credits: String(bundle.credits) },
 		payment_intent_data: { setup_future_usage: 'off_session' },
-		success_url: `${appUrl}/usage/success?session_id={CHECKOUT_SESSION_ID}`,
-		cancel_url: `${appUrl}/usage`
+		// new URL(path, base) per the repo URL-construction guideline — the
+		// literal {CHECKOUT_SESSION_ID} placeholder must survive verbatim.
+		success_url: new URL('/usage/success?session_id={CHECKOUT_SESSION_ID}', appUrl).toString(),
+		cancel_url: new URL('/usage', appUrl).toString()
 	});
 	if (!session.url) throw new Error(`stripe returned no Checkout URL for session ${session.id}`);
 	return session.url;

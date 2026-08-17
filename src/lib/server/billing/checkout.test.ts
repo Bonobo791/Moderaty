@@ -1,0 +1,158 @@
+// Moderaty — YouTube Comment Auto-Moderation Tool
+// Copyright (C) 2026 Andrew Philip Weilbacher
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+//
+// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+
+import { eq } from 'drizzle-orm';
+import { beforeEach, describe, expect, test, vi } from 'vitest';
+
+import { setupTestDb, testDb } from '$lib/server/testdb';
+import { organizations } from '$lib/server/db/schema';
+import { createCreditCheckout, getOrCreateStripeCustomer } from './checkout';
+import type { SessionUser } from '$lib/server/session';
+
+const mocks = vi.hoisted(() => ({
+	customersCreate: vi.fn(),
+	sessionsCreate: vi.fn()
+}));
+
+vi.mock('$lib/server/stripe/client', () => ({
+	getStripe: () => ({
+		customers: { create: mocks.customersCreate },
+		checkout: { sessions: { create: mocks.sessionsCreate } }
+	})
+}));
+vi.mock('$env/dynamic/private', () => ({
+	env: { APP_URL: 'https://app.example', STRIPE_PRICE_CREDITS_100: 'price_100', STRIPE_PRICE_CREDITS_500: 'price_500', STRIPE_PRICE_CREDITS_2000: 'price_2000' }
+}));
+
+setupTestDb(['organizations']);
+
+function owner(overrides: Partial<SessionUser> = {}): SessionUser {
+	return {
+		id: 'user-1',
+		email: 'owner@example.com',
+		displayName: 'Owner',
+		plan: 'free',
+		orgId: 'org-1',
+		orgName: 'Org',
+		orgRole: 'owner',
+		...overrides
+	};
+}
+
+beforeEach(() => {
+	vi.clearAllMocks();
+	mocks.customersCreate.mockResolvedValue({ id: 'cus_1' });
+	mocks.sessionsCreate.mockResolvedValue({ id: 'cs_1', url: 'https://checkout.stripe.com/c/pay/cs_1' });
+});
+
+describe('getOrCreateStripeCustomer', () => {
+	test('creates and stores the customer on first use', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+
+		const customerId = await getOrCreateStripeCustomer('org-1', owner());
+
+		expect(customerId).toBe('cus_1');
+		expect(mocks.customersCreate).toHaveBeenCalledWith(
+			expect.objectContaining({ name: 'Org', email: 'owner@example.com', metadata: { org_id: 'org-1' } }),
+			expect.objectContaining({ idempotencyKey: 'customer:org-1' })
+		);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeCustomerId).toBe('cus_1');
+	});
+
+	test('returns the stored customer without creating another', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_existing' });
+
+		const customerId = await getOrCreateStripeCustomer('org-1', owner());
+
+		expect(customerId).toBe('cus_existing');
+		expect(mocks.customersCreate).not.toHaveBeenCalled();
+	});
+
+	test('concurrent provisioning stores ONE customer and both callers get the stored id', async () => {
+		// Two Checkout requests can race on a missing customer id. Each create
+		// would mint a DIFFERENT customer; the losing claim must re-read the
+		// stored id instead of returning its own orphan — or sessions and
+		// saved payment methods attach to a customer the org does not own
+		// (coderabbit).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		// Deferred per call, so BOTH requests reach customers.create (the race
+		// window) before either result lands.
+		const resolvers: ((value: unknown) => void)[] = [];
+		mocks.customersCreate.mockImplementation(() => new Promise((resolve) => { resolvers.push(resolve); }));
+		const first = getOrCreateStripeCustomer('org-1', owner());
+		const second = getOrCreateStripeCustomer('org-1', owner());
+		await vi.waitFor(() => expect(resolvers).toHaveLength(2));
+		// What really happens without a shared idempotency key: two DISTINCT
+		// customers minted concurrently.
+		resolvers[0]({ id: 'cus_1' });
+		resolvers[1]({ id: 'cus_2' });
+		const [idA, idB] = await Promise.all([first, second]);
+
+		// The invariant: every caller returns the ONE stored customer — a
+		// losing claim must re-read the org row, never hand out its orphan
+		// (or sessions and saved payment methods attach to a customer the org
+		// does not own).
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(['cus_1', 'cus_2']).toContain(org?.stripeCustomerId);
+		expect(idA).toBe(org?.stripeCustomerId);
+		expect(idB).toBe(org?.stripeCustomerId);
+		expect(mocks.customersCreate).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe('createCreditCheckout', () => {
+	test('creates the session for the org with bundle metadata and new-URL-built redirects', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+
+		const url = await createCreditCheckout('org-1', owner(), 'credits_500');
+
+		expect(url).toBe('https://checkout.stripe.com/c/pay/cs_1');
+		expect(mocks.sessionsCreate).toHaveBeenCalledWith(
+			expect.objectContaining({
+				mode: 'payment',
+				customer: 'cus_1',
+				metadata: { org_id: 'org-1', bundle: 'credits_500', credits: '500' },
+				success_url: 'https://app.example/usage/success?session_id={CHECKOUT_SESSION_ID}',
+				cancel_url: 'https://app.example/usage'
+			})
+		);
+	});
+
+	test('builds the redirect URLs with new URL(path, APP_URL) — never string interpolation', async () => {
+		// Coding guideline: src/**/*.ts builds URLs with new URL(path, base).
+		// Spy on the URL constructor so the CONSTRUCTION METHOD is pinned, not
+		// just the resulting value (coderabbit).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		const OriginalUrl = URL;
+		const constructed: [string, string | undefined][] = [];
+		vi.stubGlobal('URL', class extends OriginalUrl {
+			constructor(input: string, base?: string) {
+				super(input, base);
+				constructed.push([input, base]);
+			}
+		});
+		try {
+			await createCreditCheckout('org-1', owner(), 'credits_500');
+		} finally {
+			vi.unstubAllGlobals();
+		}
+		expect(constructed.some(([input, base]) => input === '/usage/success?session_id={CHECKOUT_SESSION_ID}' && base === 'https://app.example')).toBe(true);
+		expect(constructed.some(([input, base]) => input === '/usage' && base === 'https://app.example')).toBe(true);
+	});
+});

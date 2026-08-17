@@ -200,6 +200,41 @@ describe('usageSummary', () => {
 		expect(summary.usedThisMonth).toBe(2);
 	});
 
+	test('aggregates in SQL — never fetches every consume row into memory', async () => {
+		// The usage page must stay bounded as the ledger grows: SUM over the
+		// (org_id, created_at) index, not a lifetime row fetch + JS reduce.
+		await seedOrg('org-1', 100);
+		await consumeCredit(db, 'org-1', 'c1');
+		await testDb().db.insert(creditTransactions).values({
+			orgId: 'org-1',
+			delta: -7,
+			reason: 'consume',
+			refType: 'comment',
+			refId: 'c-old',
+			createdAt: '2000-01-15T12:00:00.000Z'
+		});
+		const statements: string[] = [];
+		const client = testDb().client;
+		const originalExecute = client.execute.bind(client);
+		client.execute = ((stmt: unknown) => {
+			const sqlText = String((stmt as { sql?: string }).sql ?? stmt);
+			statements.push(sqlText);
+			return originalExecute(stmt as never);
+		}) as never;
+		let summary: { remaining: number; usedLifetime: number; usedThisMonth: number };
+		try {
+			summary = await usageSummary('org-1');
+		} finally {
+			client.execute = originalExecute;
+		}
+
+		expect(summary).toEqual({ remaining: 99, usedLifetime: 8, usedThisMonth: 1 });
+		// The consumption totals must come from SUM() queries, and NO query may
+		// fetch the full consume rows just to add them up.
+		expect(statements.some((s) => s.includes('SUM('))).toBe(true);
+		expect(statements.some((s) => s.includes('from `credit_transactions`') && !s.includes('SUM('))).toBe(false);
+	});
+
 	test('a refund/dispute reversal never inflates used credits', async () => {
 		await seedOrg('org-1', 0);
 		// 100 purchased, 2 consumed, then fully refunded (the -100 reversal).

@@ -23,7 +23,7 @@
 // idempotent (a comment is consumed once, a checkout session granted once —
 // webhooks and retries can never double-apply).
 
-import { and, eq, lt, ne, or, sql } from 'drizzle-orm';
+import { and, eq, gte, lt, ne, or, sql } from 'drizzle-orm';
 import { db } from '$lib/server/db';
 import { creditTransactions, organizations } from '$lib/server/db/schema';
 
@@ -248,23 +248,27 @@ export async function usageSummary(orgId: string): Promise<UsageSummary> {
 	// "Used" means moderation consumption only: refund/dispute reversals are
 	// also negative-delta rows, but they are money leaving the ledger, not
 	// comments scored — summing every negative row would inflate the stats.
-	const rows = await db
-		.select({ delta: creditTransactions.delta, createdAt: creditTransactions.createdAt })
-		.from(creditTransactions)
-		.where(
-			and(
-				eq(creditTransactions.orgId, orgId),
-				eq(creditTransactions.reason, 'consume'),
-				lt(creditTransactions.delta, 0)
-			)
-		)
-		.all();
-	const lifetimeTotal = rows.reduce((sum, row) => sum + row.delta, 0);
-	// `0 - total` (not unary minus) so an empty ledger reports 0, not -0.
-	const usedLifetime = 0 - lifetimeTotal;
-	const monthTotal = rows.filter((row) => gteIso(row.createdAt, monthStart)).reduce((sum, row) => sum + row.delta, 0);
-	const usedThisMonth = 0 - monthTotal;
-	return { remaining, usedLifetime, usedThisMonth };
+	// Aggregated in SQL over the (org_id, created_at) index: the usage page
+	// must stay bounded as the ledger grows, never fetch every consume row
+	// into memory just to add it up in JS.
+	const consume = and(
+		eq(creditTransactions.orgId, orgId),
+		eq(creditTransactions.reason, 'consume'),
+		lt(creditTransactions.delta, 0)
+	);
+	const [lifetime, month] = await Promise.all([
+		db
+			.select({ used: sql<number>`COALESCE(SUM(ABS(${creditTransactions.delta})), 0)` })
+			.from(creditTransactions)
+			.where(consume)
+			.get(),
+		db
+			.select({ used: sql<number>`COALESCE(SUM(ABS(${creditTransactions.delta})), 0)` })
+			.from(creditTransactions)
+			.where(and(consume, gte(creditTransactions.createdAt, monthStart)))
+			.get()
+	]);
+	return { remaining, usedLifetime: lifetime?.used ?? 0, usedThisMonth: month?.used ?? 0 };
 }
 
 /**

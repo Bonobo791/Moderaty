@@ -110,6 +110,7 @@ One-time setup (human, in the Coolify dashboard):
    | `ORIGIN` | `https://<public-domain>` | `https://<dev-domain>` | adapter-node URL generation — pins origin behind the CDN |
    | `DRY_RUN` | `true` → `false` after verification | `true` | I8 |
    | `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | production | dev | Stripe is live on this branch |
+   | `STRIPE_PRICE_CREDITS_100` / `STRIPE_PRICE_CREDITS_500` / `STRIPE_PRICE_CREDITS_2000` | production Prices | dev Prices | one-time USD Price IDs for the 100/500/2,000-credit bundles; auto top-up validates active/currency/type |
    | `BUNNY_ACCESS_KEY` | account API key | *(omit)* | used by the purge script; dev has no Bunny zone |
 
    Do not set `MODERATY_ADAPTER` at runtime — it is build-time only (the

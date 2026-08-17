@@ -264,7 +264,7 @@ export async function createTestDb(): Promise<TestDb> {
 		)`,
 		`CREATE TABLE credit_transactions (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			org_id TEXT NOT NULL,
+			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
 			delta INTEGER NOT NULL,
 			reason TEXT NOT NULL,
 			ref_type TEXT NOT NULL,
@@ -278,6 +278,19 @@ export async function createTestDb(): Promise<TestDb> {
 		`CREATE INDEX credit_transactions_org_created_idx ON credit_transactions (org_id, created_at)`,
 		`CREATE INDEX credit_transactions_pi_idx ON credit_transactions (payment_intent_id)`,
 		`CREATE INDEX credit_transactions_charge_idx ON credit_transactions (charge_id)`,
+		`CREATE TABLE stripe_pending_reversals (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			charge_id TEXT NOT NULL UNIQUE,
+			reason TEXT NOT NULL,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`,
+		`CREATE TABLE stripe_deletion_outbox (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			customer_id TEXT NOT NULL UNIQUE,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			last_attempt_at TEXT,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`,
 		`CREATE TABLE stripe_events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			event_id TEXT NOT NULL UNIQUE,

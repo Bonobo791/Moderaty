@@ -299,7 +299,13 @@ export const consents = sqliteTable('consents', {
 export const creditTransactions = sqliteTable('credit_transactions', {
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	id: integer('id').primaryKey({ autoIncrement: true }),
-	orgId: text('org_id').notNull(),
+	// Org FK with cascade (coderabbit): account deletion already deletes the
+	// ledger rows explicitly, but the constraint makes an orphaned financial
+	// row impossible even for a direct write. SQLite requires the table
+	// rebuild migration (0025).
+	orgId: text('org_id')
+		.notNull()
+		.references(() => organizations.id, { onDelete: 'cascade' }),
 	// +N grant, -N consume/reverse
 	delta: integer('delta').notNull(),
 	// 'consume' | 'purchase' | 'auto_topup' | 'refund' | 'dispute' | 'adjust'
@@ -327,6 +333,34 @@ export const creditTransactions = sqliteTable('credit_transactions', {
 // UNIQUE stops duplicate deliveries; UNIQUE(event_type, object_id) catches
 // Stripe's two-Event-objects duplicate case. Rows land in the same
 // transaction as the ledger mutation they drive.
+// Stripe reversal obligations whose grant had NOT yet arrived when the
+// refund/dispute event was delivered (Stripe webhook order is not
+// guaranteed — a charge.refunded can precede the checkout.session.completed
+// that granted it). charge_id UNIQUE: one reversal per charge, first event
+// wins. A grant that lands later drains the row (drainPendingReversals);
+// the cron sweep drops rows whose grant never arrived.
+export const stripePendingReversals = sqliteTable('stripe_pending_reversals', {
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	chargeId: text('charge_id').notNull().unique(), // ch_...
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	reason: text('reason').notNull(), // 'refund' | 'dispute'
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+});
+
+// Stripe customers still owed deletion after account teardown (the Stripe
+// erase is best-effort post-commit; a transient Stripe outage must not lose
+// the erasure). The cron retries the batch until Stripe confirms.
+export const stripeDeletionOutbox = sqliteTable('stripe_deletion_outbox', {
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	customerId: text('customer_id').notNull().unique(), // cus_...
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	attempts: integer('attempts').notNull().default(0),
+	lastAttemptAt: text('last_attempt_at'),
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+});
+
 export const stripeEvents = sqliteTable('stripe_events', {
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	id: integer('id').primaryKey({ autoIncrement: true }),

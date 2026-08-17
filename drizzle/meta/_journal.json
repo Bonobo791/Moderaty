@@ -176,6 +176,13 @@
       "when": 1787000044645,
       "tag": "0024_auto_topup_consent_evidence",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "6",
+      "when": 1787006217435,
+      "tag": "0025_stripe_reversal_outbox_and_ledger_fk",
+      "breakpoints": true
     }
   ]
 }

@@ -46,7 +46,8 @@
 		},
 		"typed-rest-client": {
 			"qs": "^6.15.3"
-		}
+		},
+		"cookie": "0.7.0"
 	},
 	"allowScripts": {
 		"esbuild@0.25.12": true,

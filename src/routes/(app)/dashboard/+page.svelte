@@ -80,14 +80,14 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <section class="door-status" aria-labelledby="door-status-label">
 	<span class="caps-label" id="door-status-label">Door status</span>
 	{#if pendingSum > 0}
-		<h1 class="door-headline">{pendingSum} at the rope.</h1>
+		<h1 class="door-headline">{pendingSum} caught lacking at the door.</h1>
 		<p class="door-subline">
-			{pendingSum} comments are waiting for a decision. The rope only works if someone checks it.
+			{pendingSum} comments are waiting for a decision. The rope isn't going to check itself.
 		</p>
 	{:else}
-		<h1 class="door-headline">The door is quiet.</h1>
+		<h1 class="door-headline">The door is quiet. Too quiet.</h1>
 		<p class="door-subline">
-			{data.chs.length} channels protected. The queue is clear. Nothing slipped past.
+			{data.chs.length} channels protected. Queue's clear. Not a single main character slipped past.
 		</p>
 	{/if}
 	<div class="door-stats">
@@ -118,7 +118,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	{#if data.chs.length === 0}
 		<EmptyState
 			title="No channels connected"
-			hint="Connect your YouTube channels to start moderating comments automatically."
+			hint="Connect your YouTube channels and start yeeting edge lords."
 		/>
 	{:else}
 		<table class="ledger-table">
@@ -170,7 +170,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 								<span class="mini-fill" class:strict></span>
 								<span class="mini-tick" class:strict></span>
 							</div>
-							<span class="caps-label mini-label">{strict ? 'Strict' : 'Chill'}</span>
+							<span class="caps-label mini-label">{strict ? 'Ackchyually' : 'Edge Lord'}</span>
 						</td>
 						<td class="mono col-last">
 							{ch.lastRunAt ? relativeTime(ch.lastRunAt) : 'never'}

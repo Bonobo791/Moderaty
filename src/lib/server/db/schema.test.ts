@@ -174,6 +174,18 @@ describe('organizations', () => {
 			plan: { notNull: true, hasDefault: true },
 			personal_for: { notNull: false },
 			openai_key_enc: { notNull: false },
+			credits_remaining: { notNull: false },
+			stripe_customer_id: { notNull: false },
+			stripe_default_pm_id: { notNull: false },
+			auto_topup_enabled: { notNull: false },
+			auto_topup_threshold: { notNull: false },
+			auto_topup_state: { notNull: false },
+			auto_topup_last_attempt_at: { notNull: false },
+			auto_topup_failures: { notNull: false },
+			auto_topup_consent_text: { notNull: false },
+			auto_topup_consent_version: { notNull: false },
+			auto_topup_consented_by: { notNull: false },
+			auto_topup_consented_at: { notNull: false },
 			created_at: { notNull: true, hasDefault: true }
 		});
 		expectCreatedAtDefault(organizations);

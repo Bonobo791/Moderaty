@@ -16,7 +16,7 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { sqliteTable, text, integer, index, primaryKey, check } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, index, primaryKey, check, uniqueIndex } from 'drizzle-orm/sqlite-core';
 import { sql } from 'drizzle-orm';
 
 // Stryker note: StringLiteral "" mutants on a column db name that equals the
@@ -67,6 +67,30 @@ export const organizations = sqliteTable('organizations', {
 	// Per-org BYOK OpenAI key (hosted plans), AES-256-GCM via crypto.ts —
 	// owner-managed from the Team page; never serialized to the client.
 	openaiKeyEnc: text('openai_key_enc'),
+	// Billing — prepaid comment credits, per-ORGANIZATION (the tenant grain).
+	// credits_remaining is authoritative: every consume/grant/reverse mutates
+	// it transactionally with a credit_transactions row. Stripe is the payment
+	// rail; the ledger itself is provider-agnostic (a future MercadoPago
+	// provider reuses it). Columns are nullable until the contract migration.
+	creditsRemaining: integer('credits_remaining'),
+	stripeCustomerId: text('stripe_customer_id'), // Stripe Customer for this org
+	stripeDefaultPmId: text('stripe_default_pm_id'), // card saved for off-session auto top-up
+	autoTopupEnabled: integer('auto_topup_enabled'),
+	autoTopupThreshold: integer('auto_topup_threshold'), // top up when credits < threshold
+	// 'idle' | 'in_flight' | 'disabled' — in_flight is the atomic claim against
+	// concurrent triggers; disabled after SCA/decline failures until the
+	// customer re-authenticates (never blind-retried off-session).
+	autoTopupState: text('auto_topup_state'),
+	autoTopupLastAttemptAt: text('auto_topup_last_attempt_at'),
+	autoTopupFailures: integer('auto_topup_failures'),
+	// Auto top-up authorization evidence (Stripe save-and-reuse compliance:
+	// keep a record of the written agreement). Written once on the
+	// disabled→enabled transition and NEVER cleared by disabling — the record
+	// that authorization was given must survive for dispute defense.
+	autoTopupConsentText: text('auto_topup_consent_text'), // exact checkbox sentence
+	autoTopupConsentVersion: text('auto_topup_consent_version'), // LEGAL_VERSION at consent
+	autoTopupConsentedBy: text('auto_topup_consented_by'), // users.id who ticked the box
+	autoTopupConsentedAt: text('auto_topup_consented_at'),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 });
 
@@ -265,4 +289,88 @@ export const consents = sqliteTable('consents', {
 	// Serves the 10-year retention sweep (email IS NOT NULL AND created_at <
 	// cutoff): partial, so it indexes only rows that still hold an e-mail.
 	index('consents_email_retention_idx').on(table.createdAt).where(sql`${table.email} is not null`)
+]);
+
+// Immutable credit ledger — the usage tab's source of truth. One row per
+// credit event; `organizations.credits_remaining` is the authoritative
+// balance and every row here is written in the same transaction as its
+// balance mutation. UNIQUE(org_id, ref_type, ref_id) is the idempotency
+// anchor (a comment is consumed once, a checkout session granted once).
+export const creditTransactions = sqliteTable('credit_transactions', {
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	// Org FK with cascade (coderabbit): account deletion already deletes the
+	// ledger rows explicitly, but the constraint makes an orphaned financial
+	// row impossible even for a direct write. SQLite requires the table
+	// rebuild migration (0025).
+	orgId: text('org_id')
+		.notNull()
+		.references(() => organizations.id, { onDelete: 'cascade' }),
+	// +N grant, -N consume/reverse
+	delta: integer('delta').notNull(),
+	// 'consume' | 'purchase' | 'auto_topup' | 'refund' | 'dispute' | 'adjust'
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	reason: text('reason').notNull(),
+	// 'comment' | 'checkout_session' | 'payment_intent' | 'charge' | 'dispute' | 'admin'
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	refType: text('ref_type').notNull(),
+	refId: text('ref_id').notNull(),
+	// Stripe reconciliation anchors — a refund/dispute arrives with a charge
+	// or payment-intent id and must find the grant(s) it reverses.
+	paymentIntentId: text('payment_intent_id'),
+	chargeId: text('charge_id'),
+	// Balance after this row applied; null for legacy/edge rows.
+	balanceAfter: integer('balance_after'),
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+}, (table) => [
+	uniqueIndex('credit_transactions_org_ref_idx').on(table.orgId, table.refType, table.refId),
+	index('credit_transactions_org_created_idx').on(table.orgId, table.createdAt),
+	index('credit_transactions_pi_idx').on(table.paymentIntentId),
+	index('credit_transactions_charge_idx').on(table.chargeId)
+]);
+
+// Stripe webhook event receipt — the webhook dedupe anchor. The event_id
+// UNIQUE stops duplicate deliveries; UNIQUE(event_type, object_id) catches
+// Stripe's two-Event-objects duplicate case. Rows land in the same
+// transaction as the ledger mutation they drive.
+// Stripe reversal obligations whose grant had NOT yet arrived when the
+// refund/dispute event was delivered (Stripe webhook order is not
+// guaranteed — a charge.refunded can precede the checkout.session.completed
+// that granted it). charge_id UNIQUE: one reversal per charge, first event
+// wins. A grant that lands later drains the row (drainPendingReversals);
+// the cron sweep drops rows whose grant never arrived.
+export const stripePendingReversals = sqliteTable('stripe_pending_reversals', {
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	chargeId: text('charge_id').notNull().unique(), // ch_...
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	reason: text('reason').notNull(), // 'refund' | 'dispute'
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+});
+
+// Stripe customers still owed deletion after account teardown (the Stripe
+// erase is best-effort post-commit; a transient Stripe outage must not lose
+// the erasure). The cron retries the batch until Stripe confirms.
+export const stripeDeletionOutbox = sqliteTable('stripe_deletion_outbox', {
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	customerId: text('customer_id').notNull().unique(), // cus_...
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	attempts: integer('attempts').notNull().default(0),
+	lastAttemptAt: text('last_attempt_at'),
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+});
+
+export const stripeEvents = sqliteTable('stripe_events', {
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	eventId: text('event_id').notNull().unique(), // evt_...
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	eventType: text('event_type').notNull(),
+	objectId: text('object_id').notNull(), // cs_... | pi_... | ch_... | du_...
+	objectType: text('object_type').notNull(),
+	receivedAt: text('received_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+	processedAt: text('processed_at')
+}, (table) => [
+	uniqueIndex('stripe_events_type_object_idx').on(table.eventType, table.objectId)
 ]);

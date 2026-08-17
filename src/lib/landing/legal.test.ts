@@ -18,10 +18,9 @@
 
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { PRIVACY_NOTICE_TEXT, REFUND_NOTICE_TEXT } from '../server/legal';
+import { PRIVACY_NOTICE_TEXT, REFUND_NOTICE_TEXT, AUTO_TOPUP_CONSENT_TEXT } from '../server/legal';
 import { FAQ_ENTRIES } from './faq';
-import { LEGAL_DOCS, LEGAL_EFFECTIVE_DATE, LEGAL_VERSION } from './legal';
-import { PRICING_FAQ_ENTRIES } from './pricing-faq';
+import { LEGAL_DOCS, LEGAL_EFFECTIVE_DATE, LEGAL_VERSION } from './legal';import { PRICING_FAQ_ENTRIES } from './pricing-faq';
 
 const COMPONENTS: Record<string, string> = {
 	terms: 'Terms.svelte',
@@ -29,11 +28,12 @@ const COMPONENTS: Record<string, string> = {
 	dpa: 'Dpa.svelte'
 };
 
+// new URL(path, base) per the repo guideline: resolve each component against
+// the fixed components directory URL (coderabbit).
+const LEGAL_COMPONENTS_DIR = new URL('../components/landing/legal/', import.meta.url);
+
 function readComponent(slug: string): string {
-	return readFileSync(
-		new URL(`../components/landing/legal/${COMPONENTS[slug]}`, import.meta.url),
-		'utf8'
-	);
+	return readFileSync(new URL(COMPONENTS[slug], LEGAL_COMPONENTS_DIR), 'utf8');
 }
 
 function readRoute(slug: string, file: string): string {
@@ -41,6 +41,17 @@ function readRoute(slug: string, file: string): string {
 }
 
 describe('LEGAL_DOCS', () => {
+	it('the billing terms (auto top-up authorization, bundle refunds, billable scope) shipped under a NEW legal version', () => {
+		// The STRIPE BILLING commit rewrote Terms §6.1/§6.2 materially (bundle
+		// model, unscheduled auto top-up authorization), and the billable-scope
+		// correction rewrote §6.1(d) (credits consumed by live AI-scored
+		// comments only) — exactly the "material legal-doc change" that must
+		// bump LEGAL_VERSION so the re-consent gate (hasCurrentConsent) routes
+		// every user back through /consent. Never let billing terms ride along
+		// under an old version.
+		expect(LEGAL_VERSION).toBe('1.8');
+	});
+
 	it('lists exactly the three published legal documents', () => {
 		expect(LEGAL_DOCS.map((d) => d.slug)).toEqual(['terms', 'privacy', 'dpa']);
 		expect(LEGAL_DOCS.map((d) => d.label)).toEqual(['Terms', 'Privacy', 'DPA']);
@@ -341,6 +352,19 @@ describe('refund policy consistency (PR #38 review)', () => {
 		expect(terms).toMatch(/purchases are final/i);
 		expect(terms).toMatch(/not refundable/i);
 	});
+
+// Guard for the billing integration: the Usage page's auto top-up consent
+// checkbox (Stripe's unscheduled-top-ups compliance requirement) must be
+// grounded verbatim in the Terms — the form can never drift from the logged
+// contract sentence.
+describe('auto top-up consent (billing integration)', () => {
+	it('the consent checkbox sentence appears verbatim in Terms §6.2', () => {
+		const terms = readComponent('terms');
+		const s62Start = terms.indexOf('<strong>6.2</strong>');
+		const s62 = terms.slice(s62Start, terms.indexOf('</p>', s62Start));
+		expect(s62).toContain(AUTO_TOPUP_CONSENT_TEXT);
+	});
+});
 
 // Guard for the PR #47 review findings: §6 introduced subscription, lifetime,
 // and top-up charges, but §1.2 and §7.3 still framed acceptance and

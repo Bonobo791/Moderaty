@@ -9,7 +9,7 @@
 	},
 	"scripts": {
 		"db:migrate": "drizzle-kit migrate",
-	"db:verify": "node scripts/verify-migrations.mjs",
+		"db:verify": "node scripts/verify-migrations.mjs",
 		"dev": "vite dev",
 		"dev:cron": "node --env-file=.env scripts/dev-cron.mjs",
 		"build": "vite build",
@@ -23,6 +23,7 @@
 		"@stryker-mutator/core": "^9.6.1",
 		"@stryker-mutator/vitest-runner": "^9.6.1",
 		"@sveltejs/adapter-netlify": "^6.0.4",
+		"@sveltejs/adapter-node": "^5.5.7",
 		"@sveltejs/kit": "^2.63.0",
 		"@sveltejs/vite-plugin-svelte": "^7.1.2",
 		"dotenv-cli": "^11.0.0",
@@ -37,7 +38,8 @@
 	"dependencies": {
 		"@libsql/client": "^0.17.4",
 		"drizzle-orm": "^0.45.2",
-		"recheck": "^4.5.0"
+		"recheck": "4.5.0",
+		"stripe": "22.5.0"
 	},
 	"overrides": {
 		"@esbuild-kit/core-utils": {
@@ -45,7 +47,8 @@
 		},
 		"typed-rest-client": {
 			"qs": "^6.15.3"
-		}
+		},
+		"cookie": "0.7.0"
 	},
 	"allowScripts": {
 		"esbuild@0.25.12": true,

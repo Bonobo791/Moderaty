@@ -20,6 +20,15 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 # Deploying Moderaty to Netlify
 
+> **Two supported deploy targets.** This file documents the Netlify target.
+> The **Coolify + Bunny CDN** target — self-hosted dev/prod apps with
+> push-to-deploy on `main` and `dev`, a Bunny pull zone in front of
+> production, and automatic cache purges after every PRODUCTION deploy (the
+> dev app has no CDN and never purges) — is documented
+> in [`docs/COOLIFY_BUNNY.md`](docs/COOLIFY_BUNNY.md). The codebase serves
+> both targets: Netlify builds are unchanged (default adapter), Coolify
+> builds via the Dockerfile with `MODERATY_ADAPTER=node`.
+
 The repo is deploy-ready: `netlify.toml` pins the build
 (`node scripts/netlify-migrate.mjs && npm run build`, publish `build`,
 Node 24) and `netlify/functions/cron.mjs` is a Netlify
@@ -87,6 +96,9 @@ the site exists), local work, and outage recovery.
   | `TURSO_AUTH_TOKEN` | from step 1 |
   | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google Cloud OAuth client (Web) |
   | `OPENAI_API_KEY` | for AI scoring |
+  | `STRIPE_SECRET_KEY` | Stripe API secret key (live mode) |
+  | `STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret |
+  | `STRIPE_PRICE_CREDITS_100` / `STRIPE_PRICE_CREDITS_500` / `STRIPE_PRICE_CREDITS_2000` | Stripe Price IDs for the three credit bundles (active, one-time, USD — auto top-up validates all three) |
   | `ENCRYPTION_KEY` | `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
   | `CRON_SECRET` | any long random string; also used to trigger cron manually |
   | `APP_URL` | the deployed site URL, e.g. `https://moderaty.netlify.app` |

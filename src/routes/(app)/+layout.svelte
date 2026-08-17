@@ -42,6 +42,11 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <nav class="app-nav" aria-label="App">
 	<a class="brand" href="/dashboard">Moderaty</a>
 	<a href="/dashboard" class:active={path === '/dashboard'} aria-current={path === '/dashboard' ? 'page' : undefined}>Dashboard</a>
+	<a
+		href="/usage"
+		class:active={path === '/usage' || path.startsWith('/usage/')}
+		aria-current={path === '/usage' || path.startsWith('/usage/') ? 'page' : undefined}
+	>Usage</a>
 	<a href="/org" class:active={path === '/org'} aria-current={path === '/org' ? 'page' : undefined}>Team</a>
 	<a href="/help" class:active={path === '/help'} aria-current={path === '/help' ? 'page' : undefined}>Help</a>
 	{#if !data.maintenance && data.user}

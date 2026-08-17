@@ -295,16 +295,6 @@ export function monthStartIso(): string {
 	return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-01T00:00:00.000Z`;
 }
 
-/**
- * Determines whether an ISO timestamp is at or after a threshold.
- *
- * @param value - The timestamp to compare
- * @param threshold - The comparison threshold
- * @returns `true` if `value` is at or after `threshold`, `false` otherwise.
- */
-function gteIso(value: string, threshold: string): boolean {
-	return value >= threshold;
-}
 
 /** Recent ledger rows for the usage page's history list. */
 export async function listCreditTransactions(orgId: string, limit = 50) {

@@ -28,11 +28,12 @@ const COMPONENTS: Record<string, string> = {
 	dpa: 'Dpa.svelte'
 };
 
+// new URL(path, base) per the repo guideline: resolve each component against
+// the fixed components directory URL (coderabbit).
+const LEGAL_COMPONENTS_DIR = new URL('../components/landing/legal/', import.meta.url);
+
 function readComponent(slug: string): string {
-	return readFileSync(
-		new URL(`../components/landing/legal/${COMPONENTS[slug]}`, import.meta.url),
-		'utf8'
-	);
+	return readFileSync(new URL(COMPONENTS[slug], LEGAL_COMPONENTS_DIR), 'utf8');
 }
 
 function readRoute(slug: string, file: string): string {

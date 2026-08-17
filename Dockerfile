@@ -18,23 +18,32 @@
 # Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 #
 # Coolify deployment image (docs/COOLIFY_BUNNY.md). Coolify's Dockerfile
-# build pack passes environment variables flagged as build variables as
-# --build-arg, so the TURSO_* ARGs below reach the build stage.
+# build pack passes environment variables flagged as build variables to the
+# build; with "Use Docker Build Secrets" enabled they arrive as BuildKit
+# secrets (`--secret id=KEY,env=KEY`), which the migrate gate below mounts
+# for its single RUN.
 
 FROM node:24-alpine AS builder
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci
+# --ignore-scripts: never run third-party lifecycle scripts during install
+# (docker:S6505). Safe here: esbuild's binary ships as a platform
+# optionalDependency (its install script is only a validator) and fsevents is
+# macOS-only; the root `prepare` (svelte-kit sync) is skipped too, but the
+# SvelteKit vite plugin regenerates .svelte-kit itself during `vite build`.
+RUN npm ci --ignore-scripts
 COPY . .
 # Same deploy gate as Netlify (scripts/netlify-migrate.mjs): migrate + verify
 # the database BEFORE building, so an image can never be built against an
 # un-migrated or unverified schema. CONTEXT is unset here (the conservative
 # default), so the gate always runs — failing the image build loudly.
-# The TURSO_* values are set for this single RUN only (inline env), so the
-# credentials never become baked ENV in the image.
-ARG TURSO_DATABASE_URL
-ARG TURSO_AUTH_TOKEN
-RUN TURSO_DATABASE_URL=$TURSO_DATABASE_URL TURSO_AUTH_TOKEN=$TURSO_AUTH_TOKEN \
+# The TURSO_* values arrive ONLY as BuildKit secret mounts scoped to this
+# single RUN (docker:S6472 — never ARG/ENV, so they never appear in build
+# args, image history, or baked layers). Coolify passes them as
+# `--secret id=KEY,env=KEY` when "Use Docker Build Secrets" is enabled (see
+# docs/COOLIFY_BUNNY.md); a build without the secrets fails loudly here.
+RUN --mount=type=secret,id=TURSO_DATABASE_URL,env=TURSO_DATABASE_URL \
+	--mount=type=secret,id=TURSO_AUTH_TOKEN,env=TURSO_AUTH_TOKEN \
 	node scripts/netlify-migrate.mjs
 # Coolify target builds the standalone node server (adapter-node); Netlify
 # builds leave MODERATY_ADAPTER unset and keep adapter-netlify.

@@ -73,7 +73,7 @@ Requirements met by this design:
 | File | Purpose |
 | --- | --- |
 | `svelte.config.js` | Dual adapter: `MODERATY_ADAPTER=node` → adapter-node; unset → adapter-netlify; any other value fails the build loudly. Netlify builds unchanged. Guarded by `svelte.config.test.ts`. |
-| `Dockerfile` | Multi-stage (node:24-alpine): `npm ci` → migrate+verify gate (`ARG TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN`, which Coolify passes as build args; inline RUN env, never baked ENV) → `MODERATY_ADAPTER=node` build → runtime stage with prod deps only, `scripts/` included for the in-container cron/purge commands, unprivileged `app` user, `PORT=3000`, `HEALTHCHECK /api/health`. |
+| `Dockerfile` | Multi-stage (node:24-alpine): `npm ci --ignore-scripts` (docker:S6505) → migrate+verify gate (TURSO_* arrive as **BuildKit secret mounts** — `--secret id=KEY,env=KEY` with Coolify's "Use Docker Build Secrets", never ARG/ENV, docker:S6472) → `MODERATY_ADAPTER=node` build → runtime stage with prod deps only, `scripts/` included for the in-container cron/purge commands, unprivileged `app` user, `PORT=3000`, `HEALTHCHECK /api/health`. |
 | `.dockerignore` | Keeps `drizzle/` + `scripts/` in the build context (migrations run in-build); excludes `.env`, `node_modules`, `build`, worktrees. |
 | `scripts/bunny-purge.mjs` | Whole-site wildcard purge with `BUNNY_ACCESS_KEY`; wildcard pattern from `BUNNY_PURGE_URL` (defaults to `APP_URL`); non-OK answers throw; CLI exits non-zero. Tested in `scripts/bunny-purge.test.mjs`. |
 | `scripts/dev-cron.mjs` | Now also the container scheduler: Coolify Scheduled Task runs `APP_URL=http://127.0.0.1:3000 node scripts/dev-cron.mjs --once` every minute (localhost, so the tick never traverses the CDN). |
@@ -100,8 +100,8 @@ One-time setup (human, in the Coolify dashboard):
 
    | Variable | prod | dev app | Notes |
    | --- | --- | --- | --- |
-   | `TURSO_DATABASE_URL` | production DB | `dev-2` DB | **Build Variable ON** (becomes the Docker ARG) + runtime |
-   | `TURSO_AUTH_TOKEN` | production | dev | Build Variable ON + runtime |
+   | `TURSO_DATABASE_URL` | production DB | `dev-2` DB | **Build Variable ON** + runtime; delivered to the build as a BuildKit secret |
+   | `TURSO_AUTH_TOKEN` | production | dev | Build Variable ON + runtime; delivered to the build as a BuildKit secret |
    | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | production client | dev client | keep the existing clients — grants survive |
    | `OPENAI_API_KEY` | production | dev | |
    | `ENCRYPTION_KEY` | production value | dev value | `crypto.randomBytes(32).toString('hex')` per env |
@@ -115,6 +115,14 @@ One-time setup (human, in the Coolify dashboard):
    Do not set `MODERATY_ADAPTER` at runtime — it is build-time only (the
    Dockerfile sets it). Do not set `CONTEXT` — unset is the always-migrate
    default.
+
+   **Critical build setting**: in the application's **Advanced** menu enable
+   **Use Docker Build Secrets**. The Dockerfile's migrate+verify gate reads
+   the TURSO_* build variables exclusively as BuildKit secret mounts
+   (`--secret id=KEY,env=KEY`, docker:S6472 — never as `--build-arg`), so a
+   build without this setting fails loudly at the gate with a BuildKit
+   "secret not found" error. This is by design: the credentials must never
+   appear in build args, image history, or baked layers.
 
 5. **Scheduled Task** (Scheduled Tasks → application): expression `* * * * *`,
    command `APP_URL=http://127.0.0.1:3000 node scripts/dev-cron.mjs --once`.
@@ -134,7 +142,10 @@ One-time setup (human, in the Coolify dashboard):
 Same as §3 with these deltas: branch `dev`; the **dev** Turso database, dev
 Google OAuth client, dev Stripe keys; `DRY_RUN=true`; its own domain; no
 `BUNNY_ACCESS_KEY` and no post-deployment purge (no CDN in front of dev — add
-a second Bunny zone later if edge behavior needs staging). Scheduled Task
+a second Bunny zone later if edge behavior needs staging). The **Use Docker
+Build Secrets** build setting (§3.4) applies here exactly as on prod — the
+dev TURSO_* build variables reach the migrate gate as secret mounts, never
+as build args. Scheduled Task
 identical (ticks the dev DB). Every push to `dev` auto-deploys here, so this
 instance doubles as the live branch-deploy that Netlify used to provide.
 

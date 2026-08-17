@@ -83,6 +83,7 @@ Stripe's official fulfillment/"payment success" guide: https://docs.stripe.com/p
 **Events to subscribe**: `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed` (optional), `charge.refunded`, `charge.dispute.created` (+ optionally `charge.dispute.closed`, `charge.dispute.funds_withdrawn`, `charge.dispute.funds_reinstated`). Route: `src/routes/api/stripe/webhook/+server.ts` — verify raw body (`await request.text()` + `constructEvent`), return 2xx fast, run `fulfill_checkout(session.id)` idempotently.
 
 **Dedupe tables**:
+
 ```sql
 CREATE TABLE stripe_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,6 +107,7 @@ CREATE TABLE credit_transactions (
   UNIQUE (org_id, ref_type, ref_id)       -- idempotency anchor
 );
 ```
+
 Insert `stripe_events` in the same transaction as the grant; the UNIQUE constraints make concurrent/duplicate deliveries safe (https://docs.stripe.com/webhooks — "record the event IDs you've processed", "use the object ID in data.object along with the event.type").
 
 **Env vars** (Netlify, per branch/context): `STRIPE_SECRET_KEY` (`sk_test_`/`sk_live_`), `STRIPE_WEBHOOK_SECRET` (`whsec_...` per mode endpoint), `STRIPE_PRICE_<BUNDLE>` (per bundle, mode-scoped `price_1...`), optional `PUBLIC_STRIPE_PUBLISHABLE_KEY` (`pk_*`, client-safe). Read via `$env/dynamic/private` server-side only.

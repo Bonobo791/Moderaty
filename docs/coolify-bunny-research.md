@@ -90,7 +90,7 @@ All claims verified against the cited pages; anything not verifiable is marked U
 ## Suggested wiring (per findings)
 
 1. Coolify: GitHub App source → branch auto-detect/select, Auto Deploy on (default). Webhook endpoint of the GitHub App must be reachable.
-2. Dockerfile build pack with `ARG TURSO_DATABASE_URL` — works (Build Variable flag default on).
-3. Coolify Notifications → Webhook channel → your endpoint → events "Deployment Success" (payload `event: "deployment_success"`).
-4. On `deployment_success`, call `POST https://api.bunny.net/purge?url=https%3A%2F%2F<your-domain>%2F*&async=true` with account `AccessKey` (mind ~30 wildcard purges/min; alternatively full-zone `POST /pullzone/{id}/purgeCache`).
+2. Dockerfile build pack: the TURSO_* build variables arrive as **BuildKit secret mounts** (`--mount=type=secret,id=TURSO_DATABASE_URL,env=TURSO_DATABASE_URL` — Coolify's "Use Docker Build Secrets" passes them as `--secret id=KEY,env=KEY`). Never `ARG`/`--build-arg`: build args are visible in build history and can leak into baked layers (docker:S6472).
+3. Purge on production deploy via a GitHub Actions workflow on push to `main` (the same event that deploys both targets): `node scripts/bunny-purge.mjs` with `BUNNY_ACCESS_KEY` as a repo secret.
+4. `POST https://api.bunny.net/purge?url=https%3A%2F%2F<your-domain>%2F*&async=true` with a **zone-scoped** key (mind ~30 wildcard purges/min; alternatively full-zone `POST /pullzone/{id}/purgeCache`). The purge runs OUTSIDE the production container, so account-level credentials never ship in the runtime environment.
 5. Bunny pull zone: Origin URL = Coolify app FQDN; set Host header explicitly if needed (default = hostname from Origin URL); CNAME your domain to `<name>.b-cdn.net`.

@@ -23,7 +23,8 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 > **Two supported deploy targets.** This file documents the Netlify target.
 > The **Coolify + Bunny CDN** target — self-hosted dev/prod apps with
 > push-to-deploy on `main` and `dev`, a Bunny pull zone in front of
-> production, and automatic cache purges after every deploy — is documented
+> production, and automatic cache purges after every PRODUCTION deploy (the
+> dev app has no CDN and never purges) — is documented
 > in [`docs/COOLIFY_BUNNY.md`](docs/COOLIFY_BUNNY.md). The codebase serves
 > both targets: Netlify builds are unchanged (default adapter), Coolify
 > builds via the Dockerfile with `MODERATY_ADAPTER=node`.

@@ -16,6 +16,8 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { purgeSite } from './bunny-purge.mjs';
 
@@ -95,5 +97,21 @@ describe('bunny purge', () => {
 		vi.stubGlobal('fetch', vi.fn(async () => new Response('AccessKey was rejected', { status: 401 })));
 
 		await expect(purgeSite()).rejects.toThrow('401');
+	});
+
+	it('the CLI actually runs when invoked directly — a relative argv[1] must enter the purge flow', () => {
+		// Coolify / GitHub Actions invoke `node scripts/bunny-purge.mjs` with a
+		// RELATIVE argv[1]; a naive import.meta.url comparison never matches
+		// and the script exits 0 without purging (coderabbit). With the key
+		// missing the CLI must fail loudly (exit non-zero) — a silent exit 0
+		// means the guard never fired.
+		const scriptPath = fileURLToPath(new URL('./bunny-purge.mjs', import.meta.url));
+		expect(() =>
+			execFileSync(process.execPath, [scriptPath], {
+				encoding: 'utf8',
+				env: { ...process.env, BUNNY_ACCESS_KEY: '', APP_URL: 'https://moderaty.example' },
+				stdio: ['ignore', 'pipe', 'pipe']
+			})
+		).toThrow(/BUNNY_ACCESS_KEY is not set/);
 	});
 });

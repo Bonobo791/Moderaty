@@ -67,7 +67,13 @@ export async function purgeSite(fetchImpl = fetch) {
 }
 
 // Only run the purge when executed directly, not when imported by tests.
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Compare NORMALIZED absolute paths: `node scripts/bunny-purge.mjs` (the
+// Coolify/GitHub-Actions invocation) passes a RELATIVE argv[1] from most
+// cwds, which would never equal the absolute file:// URL (coderabbit).
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const invokedPath = process.argv[1];
+if (invokedPath && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
 	try {
 		await purgeSite();
 	} catch (cause) {

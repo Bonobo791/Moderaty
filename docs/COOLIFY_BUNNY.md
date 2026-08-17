@@ -36,7 +36,7 @@ else differs.
 GitHub ──push──▶ Coolify (self-hosted server)
                    ├─ app "moderaty-prod"  branch main   ──▶ Bunny CDN pull zone ──▶ users (public domain)
                    │    · scheduled task every minute → /api/cron (localhost)
-                   │    · post-deployment command → bunny-purge.mjs
+                   │    · GitHub Actions on push to main → bunny-purge.mjs (outside the container)
                    └─ app "moderaty-dev"   branch dev    ──▶ users (dev domain, no CDN)
                         · scheduled task every minute → /api/cron (localhost)
 
@@ -55,11 +55,16 @@ Requirements met by this design:
   fixed per app at resource creation). The App's webhook endpoint
   (`https://<coolify>/webhooks/source/github/events`) must be reachable from
   GitHub or auto-deploys silently stop — verify with a test push.
-- **Every deploy updates Bunny CDN.** The prod app's Post Deployment Command
-  runs `node scripts/bunny-purge.mjs` inside the freshly deployed container:
-  `POST https://api.bunny.net/purge?url=<public-domain>/*&async=true` with the
-  account API key. Bunny never watches the origin, so the purge is what makes
-  a deploy visible. A failed purge fails the post-deployment command loudly.
+- **Every PRODUCTION deploy updates Bunny CDN.** A GitHub Actions workflow
+  (`.github/workflows/bunny-purge.yml`) runs `node scripts/bunny-purge.mjs`
+  on every push to `main` — the same event that deploys production on both
+  targets — purging `https://<public-domain>/*` from outside the container.
+  Bunny never watches the origin, so the purge is what makes a deploy
+  visible. The dev app has no CDN and never purges. A failed purge fails the
+  workflow loudly. The purge key is a **least-privilege Bunny API key scoped
+  to the production zone** (never the account-level key), stored as a GitHub
+  Actions secret — it never ships in the application runtime environment, so
+  a compromised container cannot purge other zones.
 - **Fail-loud, bounded, idempotent — the same invariants as Netlify.**
   The image build is gated by `scripts/netlify-migrate.mjs` (migrate + verify
   before build; `CONTEXT` unset = the conservative always-run default); the
@@ -75,7 +80,9 @@ Requirements met by this design:
 | `svelte.config.js` | Dual adapter: `MODERATY_ADAPTER=node` → adapter-node; unset → adapter-netlify; any other value fails the build loudly. Netlify builds unchanged. Guarded by `svelte.config.test.ts`. |
 | `Dockerfile` | Multi-stage (node:24-alpine): `npm ci --ignore-scripts` (docker:S6505) → migrate+verify gate (TURSO_* arrive as **BuildKit secret mounts** — `--secret id=KEY,env=KEY` with Coolify's "Use Docker Build Secrets", never ARG/ENV, docker:S6472) → `MODERATY_ADAPTER=node` build → runtime stage with prod deps only, `scripts/` included for the in-container cron/purge commands, unprivileged `app` user, `PORT=3000`, `HEALTHCHECK /api/health`. |
 | `.dockerignore` | Keeps `drizzle/` + `scripts/` in the build context (migrations run in-build); excludes `.env`, `node_modules`, `build`, worktrees. |
-| `scripts/bunny-purge.mjs` | Whole-site wildcard purge with `BUNNY_ACCESS_KEY`; wildcard pattern from `BUNNY_PURGE_URL` (defaults to `APP_URL`); non-OK answers throw; CLI exits non-zero. Tested in `scripts/bunny-purge.test.mjs`. |
+| `scripts/bunny-purge.mjs` | Whole-site wildcard purge with `BUNNY_ACCESS_KEY` (a zone-scoped key; the script never runs inside the app container); wildcard pattern from `BUNNY_PURGE_URL` (defaults to `APP_URL`); non-OK answers throw; CLI exits non-zero. Tested in `scripts/bunny-purge.test.mjs`. |
+| `.github/workflows/bunny-purge.yml` | Runs the purge on every push to `main` (= every production deploy), with `BUNNY_ACCESS_KEY`/`BUNNY_PURGE_URL` from repository secrets. |
+| `scripts/bunny-purge.mjs` CLI guard | Normalized-path direct-execution check — `node scripts/bunny-purge.mjs` from any cwd enters the purge flow; imports (tests) never do. |
 | `scripts/dev-cron.mjs` | Now also the container scheduler: Coolify Scheduled Task runs `APP_URL=http://127.0.0.1:3000 node scripts/dev-cron.mjs --once` every minute (localhost, so the tick never traverses the CDN). |
 | `docs/coolify-bunny-research.md` | Platform research with doc citations (kept for audit). |
 
@@ -111,7 +118,11 @@ One-time setup (human, in the Coolify dashboard):
    | `DRY_RUN` | `true` → `false` after verification | `true` | I8 |
    | `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | production | dev | Stripe is live on this branch |
    | `STRIPE_PRICE_CREDITS_100` / `STRIPE_PRICE_CREDITS_500` / `STRIPE_PRICE_CREDITS_2000` | production Prices | dev Prices | one-time USD Price IDs for the 100/500/2,000-credit bundles; auto top-up validates active/currency/type |
-   | `BUNNY_ACCESS_KEY` | account API key | *(omit)* | used by the purge script; dev has no Bunny zone |
+   Do not set `BUNNY_ACCESS_KEY` in the application environment — the purge
+   runs OUTSIDE the container (`.github/workflows/bunny-purge.yml`), with a
+   least-privilege zone-scoped Bunny key stored as a GitHub Actions secret.
+   An account-level key inside the production container could purge every
+   zone in the account if the container were compromised (coderabbit).
 
    Do not set `MODERATY_ADAPTER` at runtime — it is build-time only (the
    Dockerfile sets it). Do not set `CONTEXT` — unset is the always-migrate
@@ -138,12 +149,29 @@ One-time setup (human, in the Coolify dashboard):
    `moderaty-prod.<server>`); the public domain points at Bunny (§5), not at
    the app.
 
+### 3.5 CDN cache purge (production only)
+
+After every production deploy (a push to `main` — the trigger for both the
+Netlify and the Coolify production apps), the
+[`bunny-purge.yml`](../.github/workflows/bunny-purge.yml) workflow runs
+`node scripts/bunny-purge.mjs` with the **repository secrets**:
+
+| Secret | Value |
+| --- | --- |
+| `BUNNY_ACCESS_KEY` | a Bunny API key **scoped to the production pull zone** (least privilege — never the account-level key) |
+| `BUNNY_PURGE_URL` | the production public domain (defaults to `APP_URL`) |
+
+The key never enters the container's runtime environment; the purge never
+runs inside production with account-level credentials. The dev app has no
+CDN and never purges.
+
 ## 4. Coolify — dev app (`moderaty-dev`, branch `dev`)
 
 Same as §3 with these deltas: branch `dev`; the **dev** Turso database, dev
 Google OAuth client, dev Stripe keys; `DRY_RUN=true`; its own domain; no
-`BUNNY_ACCESS_KEY` and no post-deployment purge (no CDN in front of dev — add
-a second Bunny zone later if edge behavior needs staging). The **Use Docker
+`BUNNY_ACCESS_KEY` and no purge at all (no CDN in front of dev — add a
+second Bunny zone later if edge behavior needs staging; the
+bunny-purge workflow fires only on pushes to `main`). The **Use Docker
 Build Secrets** build setting (§3.4) applies here exactly as on prod — the
 dev TURSO_* build variables reach the migrate gate as secret mounts, never
 as build args. Scheduled Task

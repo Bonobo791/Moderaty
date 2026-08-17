@@ -45,6 +45,9 @@ vi.mock('$env/dynamic/private', () => ({
 	}
 }));
 
+import { render } from 'svelte/server';
+
+import Page from './+page.svelte';
 import { actions, load } from './+page.server';
 
 setupTestDb(['organizations', 'credit_transactions', 'stripe_events']);
@@ -110,6 +113,46 @@ describe('usage load', () => {
 		expect(data.bundles.map((bundle) => bundle.id)).toEqual(['credits_100', 'credits_500', 'credits_2000']);
 		expect(data.autoTopup).toMatchObject({ enabled: true, threshold: 100, state: 'idle', hasCard: true });
 		expect(data.history).toHaveLength(2);
+		// The history contract: every row carries the full record — id, delta,
+		// reason, refType, refId (coderabbit: a loader returning garbage rows
+		// must fail this test, not just the count).
+		const history = data.history as { id: number; delta: number; reason: string; refType: string; refId: string }[];
+		const purchase = history.find((row) => row.reason === 'purchase');
+		expect(purchase).toMatchObject({ delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1' });
+		expect(purchase?.id).toEqual(expect.any(Number));
+		const consume = history.find((row) => row.reason === 'consume');
+		expect(consume).toMatchObject({ delta: -1, reason: 'consume', refType: 'comment', refId: 'comment-1' });
+		expect(consume?.id).toEqual(expect.any(Number));
+	});
+
+	test('a missing organization is a loud 500, never a maintenance payload', async () => {
+		// The user's session points at an org row that no longer exists — an
+		// account-integrity failure that must reach the user with the support
+		// instruction, not masquerade as a database outage (coderabbit).
+		await expect(load({ locals: { user: OWNER } } as never)).rejects.toMatchObject({ status: 500 });
+	});
+
+	test('a mid-load maintenance payload renders the maintenance state, never zero-credit stats', async () => {
+		// The layout overlay only triggers on LAYOUT data; when the layout was
+		// healthy but the usage queries failed mid-load, the page must render
+		// its own maintenance state instead of a misleading all-zero page
+		// (codex 6145, I12).
+		const { body } = render(Page, {
+			props: {
+				data: {
+					maintenance: true,
+					user: null,
+					summary: null,
+					history: [],
+					bundles: [],
+					autoTopup: null,
+					autoTopupConsentText: 'consent'
+				},
+				form: {}
+			} as never
+		});
+		expect(body).toContain('Moderaty is temporarily unable to reach its database');
+		expect(body).not.toContain('Credits left');
 	});
 });
 
@@ -119,7 +162,10 @@ describe('usage buy action', () => {
 
 		await expect(buy('credits_500')).rejects.toMatchObject({ status: 303, location: 'https://checkout.stripe.com/pay/test_123' });
 
-		expect(mocks.customersCreate).toHaveBeenCalledWith({ name: 'One', email: 'one@example.com', metadata: { org_id: 'org-1' } });
+		expect(mocks.customersCreate).toHaveBeenCalledWith(
+			{ name: 'One', email: 'one@example.com', metadata: { org_id: 'org-1' } },
+			{ idempotencyKey: 'customer:org-1' }
+		);
 		const [params] = mocks.sessionsCreate.mock.calls[0];
 		expect(params).toMatchObject({
 			mode: 'payment',
@@ -274,6 +320,48 @@ describe('usage setAutoTopup action', () => {
 		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
 		expect(org?.autoTopupEnabled).toBe(0);
 		expect(org?.autoTopupThreshold).toBe(250);
+	});
+
+	test('a MISSING threshold is rejected — Number("") must not silently become 0', async () => {
+		// A malformed/stale submission without the threshold field converts to
+		// '' → Number('') === 0, which would pass validation and set "top up
+		// below zero" — silently stopping replenishment (codex 6161).
+		await seedOrg({ autoTopupEnabled: 1, autoTopupThreshold: 100, autoTopupState: 'idle' });
+
+		const result = await setAutoTopup({ enabled: 'on' });
+
+		expect(result).toMatchObject({ status: 400 });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.autoTopupThreshold).toBe(100);
+	});
+
+	test('a threshold-only update preserves an in-flight top-up claim', async () => {
+		// The sweep may hold an in_flight claim (an off-session charge is
+		// pending) while the owner tweaks the threshold — resetting the claim
+		// here would let a later sweep create a SECOND PaymentIntent
+		// (coderabbit).
+		await seedOrg({ autoTopupEnabled: 1, autoTopupThreshold: 100, autoTopupState: 'in_flight', autoTopupFailures: 2 });
+
+		const result = await setAutoTopup({ enabled: 'on', threshold: '150' });
+
+		expect(result).toMatchObject({ ok: true });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.autoTopupThreshold).toBe(150);
+		expect(org?.autoTopupState).toBe('in_flight');
+		expect(org?.autoTopupFailures).toBe(2);
+	});
+
+	test('an update while disabled recovers the claim (clean slate)', async () => {
+		// SCA/decline failures leave the org enabled but 'disabled' — the
+		// owner's update is the recovery action and must reset the state.
+		await seedOrg({ autoTopupEnabled: 1, autoTopupThreshold: 100, autoTopupState: 'disabled', autoTopupFailures: 2 });
+
+		const result = await setAutoTopup({ enabled: 'on', threshold: '150' });
+
+		expect(result).toMatchObject({ ok: true });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.autoTopupState).toBe('idle');
+		expect(org?.autoTopupFailures).toBe(0);
 	});
 
 	test('non-owners cannot change auto top-up (403)', async () => {

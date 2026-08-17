@@ -21,7 +21,7 @@
 // in credit_transactions; the page just reads the same ledger the pipeline
 // consumes — so a top-up (manual or auto) always moves the counter.
 
-import { fail, isHttpError, isRedirect, redirect } from '@sveltejs/kit';
+import { error, fail, isHttpError, isRedirect, redirect } from '@sveltejs/kit';
 import { eq } from 'drizzle-orm';
 
 import { AUTO_TOPUP_DEFAULT_THRESHOLD } from '$lib/server/billing/autotopup';
@@ -50,24 +50,30 @@ export const load: PageServerLoad = async ({ locals }) => {
 	}
 	const user = requireUser(locals);
 	try {
-		const [summary, history, org] = await Promise.all([
+		// The org existence check runs FIRST: an account-integrity failure
+		// (session pointing at a vanished org) must surface the support
+		// instruction, not fall through to maintenance — and not be masked by
+		// a ledger 'org not found' from the summary query (coderabbit).
+		const org = await db
+			.select({
+				autoTopupEnabled: organizations.autoTopupEnabled,
+				autoTopupThreshold: organizations.autoTopupThreshold,
+				autoTopupState: organizations.autoTopupState,
+				autoTopupFailures: organizations.autoTopupFailures,
+				autoTopupLastAttemptAt: organizations.autoTopupLastAttemptAt,
+				stripeDefaultPmId: organizations.stripeDefaultPmId,
+				creditsRemaining: organizations.creditsRemaining
+			})
+			.from(organizations)
+			.where(eq(organizations.id, user.orgId))
+			.get();
+		if (!org) {
+			throw error(500, 'account has no organization — contact support');
+		}
+		const [summary, history] = await Promise.all([
 			usageSummary(user.orgId),
-			listCreditTransactions(user.orgId, 30),
-			db
-				.select({
-					autoTopupEnabled: organizations.autoTopupEnabled,
-					autoTopupThreshold: organizations.autoTopupThreshold,
-					autoTopupState: organizations.autoTopupState,
-					autoTopupFailures: organizations.autoTopupFailures,
-					autoTopupLastAttemptAt: organizations.autoTopupLastAttemptAt,
-					stripeDefaultPmId: organizations.stripeDefaultPmId,
-					creditsRemaining: organizations.creditsRemaining
-				})
-				.from(organizations)
-				.where(eq(organizations.id, user.orgId))
-				.get()
+			listCreditTransactions(user.orgId, 30)
 		]);
-		if (!org) throw new Error(`org not found: ${user.orgId}`);
 		return {
 			maintenance: false,
 			user,
@@ -92,6 +98,9 @@ export const load: PageServerLoad = async ({ locals }) => {
 			}
 		};
 	} catch (error) {
+		// Deliberate HttpErrors (the missing-org 500 above) must pass through
+		// untouched — only genuine database failures degrade to maintenance.
+		if (isHttpError(error)) throw error;
 		// Loud on the server, a maintenance overlay for the user — never a 500
 		// (I12: the (app) layout renders the overlay for this payload instead
 		// of SvelteKit's unstyled error page). Mirrors the dashboard load.
@@ -149,6 +158,12 @@ export const actions: Actions = {
 		const form = await request.formData();
 		const enabled = form.get('enabled') === 'on';
 		const thresholdRaw = String(form.get('threshold') ?? '');
+		// An ABSENT threshold field must fail, not silently become 0:
+		// Number('') === 0 passes every check below and would set "top up
+		// below zero", stopping replenishment (codex 6161).
+		if (thresholdRaw.trim() === '') {
+			return fail(400, { error: 'Auto top-up threshold must be a whole number of credits between 0 and 1,000,000.' });
+		}
 		const threshold = Number(thresholdRaw);
 		if (!Number.isInteger(threshold) || threshold < 0 || threshold > 1_000_000) {
 			return fail(400, { error: 'Auto top-up threshold must be a whole number of credits between 0 and 1,000,000.' });
@@ -159,7 +174,10 @@ export const actions: Actions = {
 		// The evidence is also written once, on that same transition — a
 		// threshold tweak must not rewrite the original authorization record.
 		const current = await db
-			.select({ autoTopupEnabled: organizations.autoTopupEnabled })
+			.select({
+				autoTopupEnabled: organizations.autoTopupEnabled,
+				autoTopupState: organizations.autoTopupState
+			})
 			.from(organizations)
 			.where(eq(organizations.id, user.orgId))
 			.get();
@@ -185,13 +203,18 @@ export const actions: Actions = {
 							autoTopupConsentedAt: new Date().toISOString()
 						}
 					: {};
+			// The claim reset is scoped: the enable TRANSITION (and the
+			// recovery of a failure-disabled org) starts from a clean slate,
+			// but a threshold-only update while a charge is IN FLIGHT must
+			// preserve the claim — resetting it would let the sweep create a
+			// second PaymentIntent for the same shortage (coderabbit).
+			const resetClaim = !wasEnabled || current?.autoTopupState === 'disabled';
 			await db
 				.update(organizations)
 				.set({
 					autoTopupEnabled: 1,
 					autoTopupThreshold: threshold,
-					autoTopupState: 'idle',
-					autoTopupFailures: 0,
+					...(resetClaim ? { autoTopupState: 'idle', autoTopupFailures: 0 } : {}),
 					...evidence
 				})
 				.where(eq(organizations.id, user.orgId));

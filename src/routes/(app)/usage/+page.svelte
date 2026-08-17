@@ -45,6 +45,15 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	<title>Moderaty — Usage</title>
 </svelte:head>
 
+{#if data.maintenance}
+	<!-- The layout overlay only triggers on LAYOUT data; when the layout was
+		healthy but the usage queries failed mid-load, the page renders its own
+		state instead of a misleading all-zero shell (I12, codex 6145). -->
+	<div class="error-box" role="alert">
+		<strong>Maintenance</strong> — Moderaty is temporarily unable to reach its database.
+		Nothing on this page will work right now; try again in a minute.
+	</div>
+{:else}
 <h1>Usage</h1>
 <p class="page-sub">
 	{data.user?.orgName} — comment credits
@@ -94,8 +103,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 					</form>
 				{/each}
 			</div>
-			<p class="muted">Each comment your channel processes consumes one credit. Payment is
-				processed by Stripe; your card is saved so auto top-up can work if you enable it.</p>
+			<p class="muted">Each comment your channel processes with AI scoring on a live run consumes one
+				credit — rule matches and protected handles are never charged. Payment is processed by
+				Stripe; your card is saved so auto top-up can work if you enable it.</p>
 		{/if}
 	</div>
 
@@ -178,6 +188,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		</table>
 	{/if}
 </div>
+{/if}
 
 <style>
 	.stats-row {

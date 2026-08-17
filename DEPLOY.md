@@ -26,7 +26,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 > production, and automatic cache purges after every deploy — is documented
 > in [`docs/COOLIFY_BUNNY.md`](docs/COOLIFY_BUNNY.md). The codebase serves
 > both targets: Netlify builds are unchanged (default adapter), Coolify
-> builds via the Dockerfile with `ADAPTER=node`.
+> builds via the Dockerfile with `MODERATY_ADAPTER=node`.
 
 The repo is deploy-ready: `netlify.toml` pins the build
 (`node scripts/netlify-migrate.mjs && npm run build`, publish `build`,

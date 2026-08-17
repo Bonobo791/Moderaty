@@ -27,7 +27,7 @@ The repo supports **two deploy targets**. Netlify (unchanged, see
 [`DEPLOY.md`](../DEPLOY.md)) stays as the managed option; **Coolify + Bunny CDN
 is the operator's self-hosted dev/prod environment**, and Netlify is retired
 for the operator after a verified cutover (§8). A deployer picks either
-target — the choice is the build-time `ADAPTER` env (`node` vs unset), nothing
+target — the choice is the build-time `MODERATY_ADAPTER` env (`node` vs unset), nothing
 else differs.
 
 ## 1. Architecture
@@ -72,8 +72,8 @@ Requirements met by this design:
 
 | File | Purpose |
 | --- | --- |
-| `svelte.config.js` | Dual adapter: `ADAPTER=node` → adapter-node, unset/other → adapter-netlify (Netlify builds byte-for-byte unchanged). Guarded by `svelte.config.test.ts`. |
-| `Dockerfile` | Multi-stage (node:24-alpine): `npm ci` → migrate+verify gate (`ARG TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN`, which Coolify passes as build args) → `ADAPTER=node` build → runtime stage with prod deps only, unprivileged `app` user, `PORT=3000`, `HEALTHCHECK /api/health`. |
+| `svelte.config.js` | Dual adapter: `MODERATY_ADAPTER=node` → adapter-node; unset → adapter-netlify; any other value fails the build loudly. Netlify builds unchanged. Guarded by `svelte.config.test.ts`. |
+| `Dockerfile` | Multi-stage (node:24-alpine): `npm ci` → migrate+verify gate (`ARG TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN`, which Coolify passes as build args; inline RUN env, never baked ENV) → `MODERATY_ADAPTER=node` build → runtime stage with prod deps only, `scripts/` included for the in-container cron/purge commands, unprivileged `app` user, `PORT=3000`, `HEALTHCHECK /api/health`. |
 | `.dockerignore` | Keeps `drizzle/` + `scripts/` in the build context (migrations run in-build); excludes `.env`, `node_modules`, `build`, worktrees. |
 | `scripts/bunny-purge.mjs` | Whole-site wildcard purge with `BUNNY_ACCESS_KEY`; wildcard pattern from `BUNNY_PURGE_URL` (defaults to `APP_URL`); non-OK answers throw; CLI exits non-zero. Tested in `scripts/bunny-purge.test.mjs`. |
 | `scripts/dev-cron.mjs` | Now also the container scheduler: Coolify Scheduled Task runs `APP_URL=http://127.0.0.1:3000 node scripts/dev-cron.mjs --once` every minute (localhost, so the tick never traverses the CDN). |
@@ -112,8 +112,9 @@ One-time setup (human, in the Coolify dashboard):
    | `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | production | dev | Stripe is live on this branch |
    | `BUNNY_ACCESS_KEY` | account API key | *(omit)* | used by the purge script; dev has no Bunny zone |
 
-   Do not set `ADAPTER` at runtime — it is build-time only (the Dockerfile
-   sets it). Do not set `CONTEXT` — unset is the always-migrate default.
+   Do not set `MODERATY_ADAPTER` at runtime — it is build-time only (the
+   Dockerfile sets it). Do not set `CONTEXT` — unset is the always-migrate
+   default.
 
 5. **Scheduled Task** (Scheduled Tasks → application): expression `* * * * *`,
    command `APP_URL=http://127.0.0.1:3000 node scripts/dev-cron.mjs --once`.

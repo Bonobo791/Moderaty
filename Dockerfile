@@ -30,14 +30,15 @@ COPY . .
 # the database BEFORE building, so an image can never be built against an
 # un-migrated or unverified schema. CONTEXT is unset here (the conservative
 # default), so the gate always runs — failing the image build loudly.
+# The TURSO_* values are set for this single RUN only (inline env), so the
+# credentials never become baked ENV in the image.
 ARG TURSO_DATABASE_URL
 ARG TURSO_AUTH_TOKEN
-ENV TURSO_DATABASE_URL=$TURSO_DATABASE_URL \
-	TURSO_AUTH_TOKEN=$TURSO_AUTH_TOKEN
-RUN node scripts/netlify-migrate.mjs
+RUN TURSO_DATABASE_URL=$TURSO_DATABASE_URL TURSO_AUTH_TOKEN=$TURSO_AUTH_TOKEN \
+	node scripts/netlify-migrate.mjs
 # Coolify target builds the standalone node server (adapter-node); Netlify
-# builds leave ADAPTER unset and keep adapter-netlify.
-ENV ADAPTER=node
+# builds leave MODERATY_ADAPTER unset and keep adapter-netlify.
+ENV MODERATY_ADAPTER=node
 RUN npm run build
 RUN npm prune --omit=dev
 
@@ -47,6 +48,10 @@ ENV NODE_ENV=production \
 	HOST=0.0.0.0 \
 	PORT=3000
 COPY --from=builder /app/build build/
+# scripts/ ships so the in-container commands work: the Coolify Scheduled
+# Task cron ticker and the post-deployment Bunny purge both run
+# `node scripts/...` inside this image.
+COPY --from=builder /app/scripts scripts/
 COPY --from=builder /app/package.json package.json
 COPY --from=builder /app/node_modules node_modules/
 # Run as an unprivileged user; Coolify healthchecks hit /api/health.

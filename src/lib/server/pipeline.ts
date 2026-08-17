@@ -19,7 +19,7 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { loadHandleSet, normalizeHandle } from '$lib/server/allowlist';
-import { consumeCredit, getCredits, type LedgerHandle } from '$lib/server/billing/ledger';
+import { consumeCredit, getCredits, orgIsMetered, type LedgerHandle } from '$lib/server/billing/ledger';
 import { maybeTriggerAutoTopUp } from '$lib/server/billing/autotopup';
 import { decrypt } from '$lib/server/crypto';
 import { db } from '$lib/server/db';
@@ -409,11 +409,20 @@ async function decideNewComments(
 	}
 ): Promise<{ decisions: Decision[]; failures: string[]; deferred: number }> {
 	// Credits gate AI scoring for live runs only (I8: a dry run changes nothing
-	// durable). Orphan channels (no org) predate the billing model — they score
-	// until claimed (infinite budget). The budget is the org's balance: each AI
-	// decision claims one credit of it, so an org with N credits scores at most
-	// N AI comments per batch — the rest defer for a post-top-up retry.
-	const aiBudget = { remaining: consumeCredits && orgId ? await getCredits(orgId) : Number.POSITIVE_INFINITY };
+	// durable) — and only for METERED orgs. An org that never engaged billing
+	// (NULL balance, no Stripe customer) is unmetered: self-hosted and
+	// lifetime-plan orgs score unlimited (the free tier is self-hosted only).
+	// Consumption for an unmetered org is naturally a no-op (consumeCredit's
+	// NULL-balance guard rejects the charge), so the gate is the whole story.
+	// Orphan channels (no org) predate the billing model — they score until
+	// claimed (infinite budget). The budget is the org's balance: each AI
+	// decision claims one credit of it, so an org with N credits scores at
+	// most N AI comments per batch — the rest defer for a post-top-up retry.
+	let metered = false;
+	if (consumeCredits && orgId) {
+		metered = await orgIsMetered(orgId);
+	}
+	const aiBudget = { remaining: metered && orgId ? await getCredits(orgId) : Number.POSITIVE_INFINITY };
 	// Dry-run window mode (rescore: true) skips the stored-IDs dedupe entirely:
 	// re-scoring comments a real run already moderated is the point of the
 	// preview. The within-batch dedupe below still applies. The DB query is

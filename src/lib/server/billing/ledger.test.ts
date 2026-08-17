@@ -29,14 +29,39 @@ import {
 	getCredits,
 	listCreditTransactions,
 	monthStartIso,
+	orgIsMetered,
 	usageSummary
 } from './ledger';
 
 setupTestDb(['organizations', 'credit_transactions', 'stripe_events']);
 
-async function seedOrg(orgId = 'org-1', credits: number | null = null): Promise<void> {
-	await testDb().db.insert(organizations).values({ id: orgId, name: 'Test org', creditsRemaining: credits });
+async function seedOrg(orgId = 'org-1', credits: number | null = null, stripeCustomerId: string | null = null): Promise<void> {
+	await testDb().db
+		.insert(organizations)
+		.values({ id: orgId, name: 'Test org', creditsRemaining: credits, stripeCustomerId });
 }
+
+describe('orgIsMetered', () => {
+	test('an org with neither balance nor customer is unmetered (self-hosted / pre-billing)', async () => {
+		await seedOrg('org-1', null, null);
+		expect(await orgIsMetered('org-1')).toBe(false);
+	});
+
+	test('an org with a balance is metered even with no customer', async () => {
+		await seedOrg('org-1', 500, null);
+		expect(await orgIsMetered('org-1')).toBe(true);
+	});
+
+	test('an org with a Stripe customer is metered even with a null balance', async () => {
+		await seedOrg('org-1', null, 'cus_1');
+		expect(await orgIsMetered('org-1')).toBe(true);
+	});
+
+	test('fails loudly for an unknown org', async () => {
+		await expect(orgIsMetered('missing')).rejects.toThrow('org not found');
+	});
+});
+
 
 describe('consumeCredit', () => {
 	test('charges one credit and records the row with the new balance', async () => {

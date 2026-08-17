@@ -83,6 +83,24 @@ export async function getCredits(orgId: string): Promise<number> {
 }
 
 /**
+ * True when the org has ENGAGED billing — a non-null balance or a Stripe
+ * customer. Metering (the credit gate + per-comment consumption) applies
+ * only to metered orgs: pre-billing orgs (self-hosted installs, lifetime
+ * plans, fresh hosted signups) carry NULL credits_remaining and no customer
+ * and must keep scoring unlimited AI (AGENTS.md: the free tier is
+ * self-hosted only — billing is opt-in, never a surprise gate).
+ */
+export async function orgIsMetered(orgId: string): Promise<boolean> {
+	const row = await db
+		.select({ creditsRemaining: organizations.creditsRemaining, stripeCustomerId: organizations.stripeCustomerId })
+		.from(organizations)
+		.where(eq(organizations.id, orgId))
+		.get();
+	if (!row) throw new Error(`org not found: ${orgId}`);
+	return row.creditsRemaining !== null || row.stripeCustomerId !== null;
+}
+
+/**
  * Applies a credit ledger adjustment exactly once.
  *
  * @returns `true` if this call applied the adjustment, `false` if it was already applied.

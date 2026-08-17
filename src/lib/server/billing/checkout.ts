@@ -31,7 +31,14 @@ import { getStripe } from '$lib/server/stripe/client';
 import { requireOrgRole } from '$lib/server/ownership';
 import type { SessionUser } from '$lib/server/session';
 
-/** Reuses the org's Stripe customer (creating it on first purchase). */
+/**
+ * Retrieves the organization's Stripe customer ID, creating and storing one when needed.
+ *
+ * @param orgId - The organization identifier
+ * @param user - The authenticated organization owner
+ * @returns The organization's Stripe customer ID
+ * @throws If the organization does not exist
+ */
 export async function getOrCreateStripeCustomer(orgId: string, user: SessionUser): Promise<string> {
 	requireOrgRole(user, 'owner');
 	const org = await db
@@ -54,9 +61,12 @@ export async function getOrCreateStripeCustomer(orgId: string, user: SessionUser
 }
 
 /**
- * Creates a Checkout Session for one credit bundle and returns its URL.
- * The payment saves the card off-session (auto top-up); the org travels in
- * client_reference_id + metadata so fulfillment never trusts the return URL.
+ * Creates a Stripe Checkout Session for a credit bundle.
+ *
+ * @param orgId - The organization receiving the credits
+ * @param bundleId - The identifier of the credit bundle to purchase
+ * @returns The Checkout Session URL
+ * @throws If the application URL is not configured or Stripe does not provide a Checkout URL
  */
 export async function createCreditCheckout(orgId: string, user: SessionUser, bundleId: string): Promise<string> {
 	requireOrgRole(user, 'owner');

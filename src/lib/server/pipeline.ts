@@ -223,6 +223,23 @@ async function aiDecision(
 	return aiOutcome(comment, aiScore, 'ai', score);
 }
 
+/**
+ * Determines a moderation outcome using allowlist protection, matching rules, or AI scoring.
+ *
+ * Allowlisted handles take precedence over rules and scoring. Comments without an allowlist
+ * entry or matching rule consume one AI budget unit; comments with no remaining budget are
+ * deferred.
+ *
+ * @param comment - The comment to evaluate
+ * @param rules - The prepared moderation rules
+ * @param allowlist - Protected author handles
+ * @param tone - Optional tone-scoring context
+ * @param deadline - Optional processing deadline
+ * @param protections - Tone-scoring protections and thresholds
+ * @param openAiKey - Optional key for AI scoring
+ * @param aiBudget - Remaining AI budget for the current batch
+ * @returns The moderation decision for the comment
+ */
 async function decide(
 	comment: NewComment,
 	rules: PreparedRule[],
@@ -260,7 +277,11 @@ async function decide(
 	return aiDecision(comment, tone, deadline, protections, openAiKey);
 }
 
-/** Out-of-credits decision: never staged, never consumed, never queued. */
+/**
+ * Defers moderation for a comment when no AI credit is available.
+ *
+ * @returns A pending decision marked as deferred and requiring no action.
+ */
 function deferredDecision(comment: NewComment): Decision {
 	return {
 		comment,
@@ -275,6 +296,12 @@ function deferredDecision(comment: NewComment): Decision {
 	};
 }
 
+/**
+ * Builds audit records for moderation decisions.
+ *
+ * @param dryRun - Whether to mark records as dry-run entries and retain truncated comment text
+ * @returns Audit records for decisions with an audit action and reason
+ */
 function auditRows(channelId: string, decisions: Decision[], dryRun: boolean) {
 	// Stryker disable next-line MethodExpression: equivalent — every Decision producer (ruleDecision, aiUnavailable, aiOutcome) sets auditAction and reason, so the filter never drops a row
 	return decisions
@@ -346,6 +373,16 @@ function actionRows(channelId: string, decisions: Decision[]) {
 	});
 }
 
+/**
+ * Evaluates new comments for moderation and reports decisions, failures, and credit-deferred comments.
+ *
+ * @param channelId - The channel whose rules and allowlist apply.
+ * @param page - The fetched comment page to evaluate.
+ * @param rescore - Whether to evaluate comments without checking stored comment IDs.
+ * @param consumeCredits - Whether AI evaluations consume organization credits.
+ * @returns The moderation decisions, failure messages, and number of deferred comments.
+ * @throws DeadlineExceededError If the evaluation deadline is exceeded.
+ */
 async function decideNewComments(
 	channelId: string,
 	page: CommentPage,
@@ -472,6 +509,13 @@ async function decideNewComments(
 	return { decisions, failures, deferred };
 }
 
+/**
+ * Persists moderation decisions and their associated comments, actions, and audit records.
+ *
+ * @param channelId - The channel whose comments are being staged
+ * @param decisions - Moderation decisions to persist
+ * @param orgId - Organization whose credits are charged for staged comments
+ */
 async function stageDecisions(channelId: string, decisions: Decision[], orgId?: string | null) {
 	if (!decisions.length) return;
 	const actions = actionRows(channelId, decisions);
@@ -677,13 +721,13 @@ async function persistResults(
 }
 
 /**
- * Processes new comments for an active channel and records moderation outcomes.
+ * Runs moderation for newly fetched comments on a channel.
  *
- * @param channelId - The channel to scan and moderate
- * @param maxPages - The maximum number of comment pages to fetch
+ * @param channelId - The channel to moderate
+ * @param maxPages - Maximum number of comment pages to process
  * @param deadline - Optional execution deadline
- * @returns Counts and explicit state for completed, simulated, skipped, or deadline-limited work
- * @throws If the channel, configuration, or stored rules are invalid
+ * @returns Counts and execution state, including whether the run was partial, simulated, skipped, or stopped by insufficient credits
+ * @throws When the channel or dry-run configuration is invalid, or when comment processing or staging fails
  */
 export async function runChannel(
 	channelId: string,

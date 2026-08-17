@@ -36,12 +36,10 @@
 const PURGE_TIMEOUT_MS = 30_000;
 
 /**
- * Purges the Bunny CDN cache for the whole site, loudly.
+ * Purges the entire site cache through Bunny CDN.
  *
- * @param {typeof fetch} [fetchImpl] - fetch implementation (tests inject a stub)
- * @returns {Promise<object>} The Bunny purge API JSON payload
- * @throws If BUNNY_ACCESS_KEY is unset, neither BUNNY_PURGE_URL nor APP_URL
- *   is set, or the API answers non-OK.
+ * @returns {Promise<object>} The Bunny purge API JSON payload.
+ * @throws {Error} If required configuration is missing or the API responds with a non-OK status.
  */
 export async function purgeSite(fetchImpl = fetch) {
 	const accessKey = process.env.BUNNY_ACCESS_KEY;

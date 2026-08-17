@@ -34,13 +34,11 @@ export type CreditRefType = 'comment' | 'checkout_session' | 'payment_intent' | 
 export type LedgerHandle = Pick<typeof db, 'insert' | 'update' | 'select' | 'delete'>;
 
 /**
- * Runs ledger mutations inside a transaction when the caller passed the bare
- * `db` (webhook paths): the insert + balance update must commit atomically or
- * a crash between them leaves the idempotency anchor committed with no
- * balance change — the retry would see "already applied" and lose the money.
- * When the caller already holds a transaction (the pipeline's staging tx),
- * the wrapper nests via libsql savepoints — supported, correct, and the
- * transaction's own rollback covers the nested statements.
+ * Executes a ledger mutation within the available transaction context.
+ *
+ * @param handle - The database or transaction handle used for the mutation
+ * @param run - The mutation callback to execute
+ * @returns The value produced by the mutation callback
  */
 async function inLedgerTx<T>(handle: LedgerHandle, run: (tx: LedgerHandle) => Promise<T>): Promise<T> {
 	const withTx = (handle as { transaction?: (cb: (tx: LedgerHandle) => Promise<T>) => Promise<T> }).transaction;
@@ -68,7 +66,12 @@ const UNIQUE_TARGET: [typeof creditTransactions.orgId, typeof creditTransactions
 	creditTransactions.refId
 ];
 
-/** Current credit balance of an org (0 when never seeded). */
+/**
+ * Retrieves an organization's current credit balance.
+ *
+ * @param orgId - The organization identifier
+ * @returns The remaining credit balance, treating a missing balance as zero
+ */
 export async function getCredits(orgId: string): Promise<number> {
 	const row = await db
 		.select({ creditsRemaining: organizations.creditsRemaining })
@@ -80,13 +83,9 @@ export async function getCredits(orgId: string): Promise<number> {
 }
 
 /**
- * Applies a ledger delta idempotently: inserts the transaction row first
- * (conflict = already applied → no-op), then mutates the balance in the same
- * transaction. Returns true when THIS call applied the delta.
+ * Applies a credit ledger adjustment exactly once.
  *
- * Ordering note: for grants the insert-first order is the safe one — a
- * duplicate delivery must never add credits twice, and a failed balance
- * update rolls the whole transaction back (the row dies with it).
+ * @returns `true` if this call applied the adjustment, `false` if it was already applied.
  */
 export async function applyLedgerDelta(
 	handle: LedgerHandle,
@@ -125,11 +124,12 @@ export async function applyLedgerDelta(
 }
 
 /**
- * Consumes one credit for a staged comment, atomically and idempotently.
- * Returns true when THIS call charged the comment. When the balance is 0 the
- * comment stages free (rule decisions keep running at zero per product
- * choice) and no ledger row survives — the row is rolled back so the ledger
- * never records a delta the balance did not absorb.
+ * Charges one available credit for a comment.
+ *
+ * @param orgId - The organization whose credits are charged
+ * @param commentId - The comment associated with the charge
+ * @returns `true` if this call charged the comment, `false` if it was already charged or no credit was available
+ * @throws Error if the organization does not exist
  */
 export async function consumeCredit(handle: LedgerHandle, orgId: string, commentId: string): Promise<boolean> {
 	return inLedgerTx(handle, async (tx) => {
@@ -181,9 +181,10 @@ export interface GrantMatch {
 }
 
 /**
- * Finds the positive grant(s) a Stripe charge or payment intent maps to —
- * the reversal anchor for refunds and disputes. Returns the total granted
- * credits for the org, or null when no grant matches.
+ * Locates credits granted for a Stripe payment intent or charge.
+ *
+ * @param identifiers - Optional Stripe payment intent and charge identifiers used to match grant transactions.
+ * @returns The organization ID and total granted credits, or `null` when no matching grant exists.
  */
 export async function findGrantForStripe(
 	handle: LedgerHandle,
@@ -212,7 +213,12 @@ export interface UsageSummary {
 	usedThisMonth: number;
 }
 
-/** The usage tab's headline numbers. */
+/**
+ * Summarizes remaining and consumed moderation credits for an organization.
+ *
+ * @param orgId - The organization whose credit usage is summarized
+ * @returns The remaining credits, lifetime consumed credits, and credits consumed during the current UTC month
+ */
 export async function usageSummary(orgId: string): Promise<UsageSummary> {
 	const remaining = await getCredits(orgId);
 	const monthStart = monthStartIso();
@@ -238,12 +244,23 @@ export async function usageSummary(orgId: string): Promise<UsageSummary> {
 	return { remaining, usedLifetime, usedThisMonth };
 }
 
-/** `YYYY-MM-01T00:00:00.000Z` for the current UTC month — ISO strings compare lexicographically. */
+/**
+ * Determines the start of the current UTC month.
+ *
+ * @returns An ISO timestamp for the first day of the current UTC month at midnight
+ */
 export function monthStartIso(): string {
 	const now = new Date();
 	return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-01T00:00:00.000Z`;
 }
 
+/**
+ * Determines whether an ISO timestamp is at or after a threshold.
+ *
+ * @param value - The timestamp to compare
+ * @param threshold - The comparison threshold
+ * @returns `true` if `value` is at or after `threshold`, `false` otherwise.
+ */
 function gteIso(value: string, threshold: string): boolean {
 	return value >= threshold;
 }

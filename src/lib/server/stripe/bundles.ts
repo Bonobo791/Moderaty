@@ -41,7 +41,12 @@ export const CREDIT_BUNDLES: CreditBundle[] = [
 	{ id: 'credits_2000', credits: 2000, label: '2,000 comments', priceEnv: 'STRIPE_PRICE_CREDITS_2000' }
 ];
 
-/** The smallest configured bundle — the one auto top-up charges. */
+/**
+ * Selects the smallest configured credit bundle for automatic top-ups.
+ *
+ * @returns The configured bundle with the fewest credits
+ * @throws {Error} If no credit bundle is configured
+ */
 export function autoTopupBundle(): CreditBundle {
 	const configured = CREDIT_BUNDLES.filter((bundle) => env[bundle.priceEnv]);
 	const smallest = configured.reduce<CreditBundle | null>(
@@ -52,14 +57,26 @@ export function autoTopupBundle(): CreditBundle {
 	return smallest;
 }
 
-/** Looks up a bundle by id, throwing a loud 400-style error for unknown ids. */
+/**
+ * Finds a credit bundle by its stable ID.
+ *
+ * @param id - The stable ID of the bundle to find
+ * @returns The matching credit bundle
+ * @throws An error if no bundle has the specified ID
+ */
 export function bundleById(id: string): CreditBundle {
 	const bundle = CREDIT_BUNDLES.find((candidate) => candidate.id === id);
 	if (!bundle) throw new Error(`unknown credit bundle: ${id}`);
 	return bundle;
 }
 
-/** The Stripe Price id for a bundle, from env — missing config fails loudly. */
+/**
+ * Resolves and validates the Stripe Price ID configured for a credit bundle.
+ *
+ * @param bundle - The credit bundle whose configured Stripe Price ID to retrieve
+ * @returns The configured Stripe Price ID
+ * @throws If the price is not configured or does not start with `price_`
+ */
 export function priceIdFor(bundle: CreditBundle): string {
 	const priceId = env[bundle.priceEnv];
 	if (!priceId) throw new Error(`${bundle.priceEnv} is not configured`);
@@ -67,7 +84,11 @@ export function priceIdFor(bundle: CreditBundle): string {
 	return priceId;
 }
 
-/** Bundles the usage page can offer right now (price env configured). */
+/**
+ * Lists credit bundles with configured Stripe Price IDs.
+ *
+ * @returns The bundles whose Stripe Price environment variables are set
+ */
 export function configuredBundles(): CreditBundle[] {
 	return CREDIT_BUNDLES.filter((bundle) => env[bundle.priceEnv]);
 }

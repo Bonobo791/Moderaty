@@ -34,7 +34,12 @@ import { grantAutoTopupCredits, handleAutoTopupFailure } from '$lib/server/billi
 import { bundleById, type CreditBundle } from '$lib/server/stripe/bundles';
 import { getStripe } from '$lib/server/stripe/client';
 
-/** Returns 1 when the event was newly recorded (dedupe miss), 0 when seen. */
+/**
+ * Records a Stripe event when it has not already been recorded.
+ *
+ * @param event - The Stripe event to record
+ * @returns `true` if the event was newly recorded, `false` if it was already recorded
+ */
 async function recordEvent(event: Stripe.Event): Promise<boolean> {
 	const object = event.data.object;
 	const objectId = typeof object === 'object' && object !== null && 'id' in object ? String(object.id) : String(object);
@@ -50,6 +55,12 @@ async function recordEvent(event: Stripe.Event): Promise<boolean> {
 	return inserted.length === 1;
 }
 
+/**
+ * Gets the credit amount defined by a bundle.
+ *
+ * @param bundle - The credit bundle
+ * @returns The bundle's credit amount
+ */
 function creditsForBundle(bundle: CreditBundle): number {
 	return bundle.credits;
 }
@@ -112,10 +123,10 @@ export async function fulfillCheckout(sessionId: string): Promise<boolean> {
 }
 
 /**
- * Grants the credits for a succeeded auto-top-up PaymentIntent. Only PIs we
- * created for auto top-up (metadata.type === 'auto_topup') are credited.
- * Delegates the grant + claim-state reset to the auto-topup module so the
- * sweep's reconciliation path shares the exact same logic.
+ * Grants credits for a successful auto-top-up payment.
+ *
+ * @param paymentIntentId - The Stripe PaymentIntent identifier
+ * @returns `true` if credits were granted, `false` if the payment was ineligible
  */
 export async function fulfillAutoTopup(paymentIntentId: string): Promise<boolean> {
 	const pi = await getStripe().paymentIntents.retrieve(paymentIntentId);
@@ -130,11 +141,11 @@ export async function fulfillAutoTopup(paymentIntentId: string): Promise<boolean
 }
 
 /**
- * Reverses the credits granted for a refunded or disputed charge. BOTH paths
- * anchor on the CHARGE id (refType 'charge'): a lost dispute that later also
- * emits charge.refunded can never reverse the same grant twice — whichever
- * event arrives first wins, the second conflicts on the ledger anchor. The
- * reason field ('refund' vs 'dispute') keeps the ledger legible.
+ * Reverses credits granted for a refunded or disputed charge.
+ *
+ * @param chargeId - The Stripe charge identifier
+ * @param reason - Whether the reversal is for a refund or dispute
+ * @returns `true` if a reversal was applied, `false` if no matching credit grant was found or the reversal was already recorded
  */
 export async function reverseCharge(chargeId: string, reason: 'refund' | 'dispute'): Promise<boolean> {
 	const charge = await getStripe().charges.retrieve(chargeId, { expand: ['payment_intent'] });
@@ -158,8 +169,10 @@ export async function reverseCharge(chargeId: string, reason: 'refund' | 'disput
 }
 
 /**
- * Reverses the credits granted for a disputed charge. A dispute means the
- * money is (likely) leaving the account — never fund moderation with it.
+ * Reverses credits associated with a disputed charge.
+ *
+ * @param disputeId - The Stripe dispute identifier
+ * @returns `true` if the credit reversal was applied, `false` otherwise
  */
 export async function reverseDispute(disputeId: string): Promise<boolean> {
 	const dispute = await getStripe().disputes.retrieve(disputeId);
@@ -172,11 +185,10 @@ export async function reverseDispute(disputeId: string): Promise<boolean> {
 }
 
 /**
- * Re-grants the credits a WON dispute had reversed (funds_reinstated). A lost
- * dispute leaves the reversal in place. Only re-grants when a dispute
- * reversal row actually exists — a won-dispute event without a preceding
- * reversal must not double the grant. Anchored on the dispute id so the
- * re-grant applies exactly once across duplicate deliveries.
+ * Restores credits reversed for a charge when its dispute is won.
+ *
+ * @param disputeId - The Stripe dispute identifier
+ * @returns `true` if credits were restored, `false` if the dispute is not won, no matching grant or reversal exists, or the restoration was already applied
  */
 export async function restoreWonDispute(disputeId: string): Promise<boolean> {
 	const dispute = await getStripe().disputes.retrieve(disputeId);
@@ -213,12 +225,10 @@ export async function restoreWonDispute(disputeId: string): Promise<boolean> {
 }
 
 /**
- * Dispatches a verified Stripe event. Order matters: the handler runs FIRST
- * (every handler is idempotent via its ledger anchor, so a crash or a
- * duplicate delivery re-running it is safe), THEN the event is recorded as
- * the dedupe anchor for future deliveries. Recording before handling would
- * let a crash between the two lose a payment forever — the retry would hit
- * the dedupe and return "handled" without ever granting.
+ * Dispatches a Stripe event to the appropriate handler and records the event for deduplication.
+ *
+ * @param event - The Stripe event to process
+ * @returns `true` if the event type is supported, `false` otherwise
  */
 export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
 	let handled: boolean;
@@ -276,7 +286,12 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
 	return handled;
 }
 
-/** Reverses the grant of a checkout session whose delayed payment failed. */
+/**
+ * Reverses credits granted for a Checkout Session whose delayed payment failed.
+ *
+ * @param sessionId - The Stripe Checkout Session identifier
+ * @returns `true` if a grant was reversed, `false` if the session lacks organization metadata or no matching grant exists
+ */
 async function reverseSessionGrant(sessionId: string): Promise<boolean> {
 	const session = await getStripe().checkout.sessions.retrieve(sessionId, { expand: ['payment_intent'] });
 	const paymentIntent = typeof session.payment_intent === 'string' ? null : session.payment_intent;

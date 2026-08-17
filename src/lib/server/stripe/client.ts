@@ -30,6 +30,12 @@ import Stripe from 'stripe';
 
 let instance: Stripe | undefined;
 
+/**
+ * Provides the configured Stripe client.
+ *
+ * @returns The initialized Stripe client
+ * @throws If `STRIPE_SECRET_KEY` is not configured
+ */
 export function getStripe(): Stripe {
 	if (!instance) {
 		const key = env.STRIPE_SECRET_KEY;

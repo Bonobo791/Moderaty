@@ -38,7 +38,6 @@
 // `--ignore-scripts` to "fix" a broken build).
 
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const dockerfile = readFileSync(new URL('../Dockerfile', import.meta.url), 'utf8');

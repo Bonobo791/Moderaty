@@ -116,6 +116,22 @@ describe('fulfillCheckout', () => {
 		await expect(fulfillCheckout('cs_123')).rejects.toThrow('unknown credit bundle');
 	});
 
+	test('a duplicate delivery still retries the card save after a transient first-delivery failure', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.sessionsRetrieve.mockResolvedValue(session());
+		// First delivery: the grant lands, but the card save fails transiently.
+		mocks.customersUpdate.mockRejectedValueOnce(new Error('network blip'));
+		expect(await fulfillCheckout('cs_123')).toBe(true);
+		let org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeDefaultPmId).toBeNull();
+		// Duplicate delivery: the grant is skipped (applied=false) but the card
+		// save MUST retry — otherwise the org permanently has no top-up card.
+		expect(await fulfillCheckout('cs_123')).toBe(false);
+		org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeCustomerId).toBe('cus_1');
+		expect(org?.stripeDefaultPmId).toBe('pm_1');
+	});
+
 	test('a card-save failure never blocks the grant', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		mocks.sessionsRetrieve.mockResolvedValue(session());

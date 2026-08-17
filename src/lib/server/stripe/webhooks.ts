@@ -97,9 +97,12 @@ export async function fulfillCheckout(sessionId: string): Promise<boolean> {
 		paymentIntentId: paymentIntent?.id,
 		chargeId: typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : undefined
 	});
-	if (!applied) return false; // already credited — duplicate delivery
 	// Save the card used for this payment as the customer's default, so a
-	// later auto top-up can charge it off-session.
+	// later auto top-up can charge it off-session. This runs even when the
+	// grant was already applied (duplicate delivery): a transient first-
+	// delivery failure must be retried by the next delivery or success-page
+	// refresh, or the org would permanently have no top-up card. Every step
+	// is idempotent (attach, default-payment-method update, org row update).
 	const paymentMethod = paymentIntent?.payment_method;
 	const customer = typeof session.customer === 'string' ? session.customer : session.customer?.id;
 	if (paymentMethod && customer) {
@@ -119,7 +122,7 @@ export async function fulfillCheckout(sessionId: string): Promise<boolean> {
 			console.error(`stripe: could not save payment method for ${orgId}: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
-	return true;
+	return applied;
 }
 
 /**

@@ -41,7 +41,6 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const dockerfile = readFileSync(new URL('../Dockerfile', import.meta.url), 'utf8');
 const runbook = readFileSync(new URL('../docs/COOLIFY_BUNNY.md', import.meta.url), 'utf8');
 
@@ -76,7 +75,7 @@ describe('Dockerfile (docker:S6472 — no secrets via ARG/ENV)', () => {
 		// The secret mount and the migrate gate must be the same RUN — the
 		// credential is visible only for that single command.
 		expect(dockerfile).toMatch(
-			/--mount=type=secret,id=TURSO_AUTH_TOKEN,env=TURSO_AUTH_TOKEN[^]*?node scripts\/netlify-migrate\.mjs/
+			/--mount=type=secret,id=TURSO_AUTH_TOKEN,env=TURSO_AUTH_TOKEN[\s\S]*?node scripts\/netlify-migrate\.mjs/
 		);
 	});
 
@@ -91,6 +90,6 @@ describe('Coolify runbook (operator setting that makes the secret mounts work)',
 	});
 
 	it('marks the TURSO_* build variables as secret mounts, not plain build args', () => {
-		expect(runbook).toMatch(/TURSO_AUTH_TOKEN[^]*?Use Docker Build Secrets/s);
+		expect(runbook).toMatch(/TURSO_AUTH_TOKEN[\s\S]*?Use Docker Build Secrets/s);
 	});
 });

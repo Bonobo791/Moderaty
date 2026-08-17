@@ -101,7 +101,7 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 	let bundle: CreditBundle;
 	try {
 		bundle = bundleById(bundleId);
-	} catch (bundleError) {
+	} catch {
 		console.error(`stripe: checkout session ${sessionId} references unknown bundle ${bundleId} — credits cannot be granted`);
 		return 'rejected';
 	}

@@ -56,7 +56,7 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 			const result = await fulfillCheckout(sessionId);
 			granted = result === 'granted' || result === 'already';
 		}
-	} catch (retrieveError) {
+	} catch {
 		// The webhook remains the source of truth; log loudly and show pending.
 		// The session id is query-controlled and the provider error can carry
 		// payment details — the log stays restricted: a fixed failure category

@@ -20,7 +20,7 @@ import { and, eq } from 'drizzle-orm';
 import { expect, test, vi } from 'vitest';
 
 import { DAY_MS, seedConsent, seedUser as seedBareUser, setupTestDb, testDb } from './testdb';
-import { auditLog, channelAllowedHandles, channels, comments, consents, invites, memberships, moderationActions, organizations, rules, sessions, users } from './db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, invites, memberships, moderationActions, organizations, rules, sessions, users } from './db/schema';
 import {
 	AUDIT_HANDLE_RETENTION_MS,
 	CONSENT_EMAIL_RETENTION_MS,
@@ -35,7 +35,7 @@ import {
 	nullExpiredModerationActionHandles
 } from './deletion';
 
-setupTestDb(['moderation_actions', 'comments', 'audit_log', 'channel_allowed_handles', 'rules', 'channels', 'sessions', 'consents', 'invites', 'memberships', 'organizations', 'users']);
+setupTestDb(['moderation_actions', 'comments', 'audit_log', 'channel_allowed_handles', 'rules', 'channels', 'sessions', 'consents', 'invites', 'memberships', 'organizations', 'users', 'credit_transactions']);
 
 /** Seeds one comment plus its moderation action, audit row, and keyword rule for a channel. */
 async function seedModerationData(channelId: string, key: string) {
@@ -154,6 +154,22 @@ async function expectAllTablesEmpty() {
 		expect(await testDb().db.select().from(table).all()).toEqual([]);
 	}
 }
+
+test('deleteUserRecords erases the dissolved orgs\' credit ledger rows', async () => {
+	const userId = await seedUser('gone');
+	// The org bought credits (purchase + consumption rows) — the ledger is
+	// part of the org's records and must die with it: an account deletion
+	// declared "immediate and permanent" cannot leave comment/checkout/PI ids
+	// behind in orphaned credit_transactions rows.
+	await testDb().db.insert(creditTransactions).values([
+		{ orgId: 'org-gone', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' },
+		{ orgId: 'org-gone', delta: -1, reason: 'consume', refType: 'comment', refId: 'comment-1' }
+	]);
+
+	await deleteUserRecords(userId);
+
+	expect(await testDb().db.select().from(creditTransactions).all()).toEqual([]);
+});
 
 test('deleteUserRecords erases every owned record and tombstones the user fully', async () => {
 	const userId = await seedUser('gone');

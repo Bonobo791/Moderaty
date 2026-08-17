@@ -34,7 +34,7 @@
 import { and, eq, inArray, isNotNull, lt, ne } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
-import { auditLog, channelAllowedHandles, channels, comments, consents, invites, memberships, moderationActions, organizations, rules, sessions, users } from '$lib/server/db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, invites, memberships, moderationActions, organizations, rules, sessions, users } from '$lib/server/db/schema';
 
 export const CONSENT_EMAIL_RETENTION_MS = 10 * 365.25 * 24 * 60 * 60 * 1000; // 10 years
 export const AUDIT_HANDLE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -248,6 +248,10 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 		if (dissolveOrgIds.length) {
 			await tx.delete(invites).where(inArray(invites.orgId, dissolveOrgIds));
 			await tx.delete(memberships).where(inArray(memberships.orgId, dissolveOrgIds));
+			// The credit ledger is part of the org's records: comment ids,
+			// Checkout Session ids, PaymentIntent ids, and charge ids must not
+			// survive an "immediate and permanent" deletion as orphans.
+			await tx.delete(creditTransactions).where(inArray(creditTransactions.orgId, dissolveOrgIds));
 			await tx.delete(organizations).where(inArray(organizations.id, dissolveOrgIds));
 		}
 		await tx.delete(invites).where(eq(invites.createdBy, userId));

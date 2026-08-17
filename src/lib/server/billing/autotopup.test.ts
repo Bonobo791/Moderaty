@@ -68,7 +68,7 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.paymentIntentsCreate.mockResolvedValue({ id: 'pi_new' });
 	mocks.paymentIntentsList.mockResolvedValue({ data: [] });
-	mocks.pricesRetrieve.mockResolvedValue({ unit_amount: 500 });
+	mocks.pricesRetrieve.mockResolvedValue({ id: 'price_100', unit_amount: 500, active: true, currency: 'usd', type: 'one_time' });
 });
 
 describe('maybeTriggerAutoTopUp', () => {
@@ -146,6 +146,38 @@ describe('maybeTriggerAutoTopUp', () => {
 		await seedOrg({ autoTopupState: 'in_flight' });
 		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
 		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+	});
+
+	test('skips when the configured Price is archived', async () => {
+		// Manual Checkout rejects archived prices; the auto-charge path copies
+		// unit_amount blindly — it must not charge against a dead price.
+		await seedOrg();
+		mocks.pricesRetrieve.mockResolvedValue({ id: 'price_100', unit_amount: 500, active: false, currency: 'usd', type: 'one_time' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+		expect((await orgRow()).autoTopupState).toBe('idle');
+		errorSpy.mockRestore();
+	});
+
+	test('skips when the configured Price is not USD', async () => {
+		// The charge is created in USD unconditionally — a non-USD price must
+		// never be charged as if it were USD.
+		await seedOrg();
+		mocks.pricesRetrieve.mockResolvedValue({ id: 'price_100', unit_amount: 500, active: true, currency: 'brl', type: 'one_time' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+		errorSpy.mockRestore();
+	});
+
+	test('skips when the configured Price is recurring', async () => {
+		await seedOrg();
+		mocks.pricesRetrieve.mockResolvedValue({ id: 'price_100', unit_amount: 500, active: true, currency: 'usd', type: 'recurring' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+		errorSpy.mockRestore();
 	});
 
 	test('a price lookup failure never leaves the org wedged in in_flight', async () => {

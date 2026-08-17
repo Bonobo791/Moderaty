@@ -192,6 +192,16 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 	// attempted, so a failure here leaves the org idle for the next sweep.
 	const bundle = autoTopupBundle();
 	const price = await getStripe().prices.retrieve(priceIdFor(bundle));
+	// Validate the configured Price BEFORE claiming: manual Checkout rejects
+	// archived prices at session creation, but the auto-charge path copies
+	// unit_amount and charges USD unconditionally — an archived, non-USD, or
+	// recurring Price must never fund a differently denominated charge.
+	if (!price.active || price.currency !== 'usd' || price.type !== 'one_time') {
+		console.error(
+			`auto top-up skipped for org ${orgId}: bundle ${bundle.id} price ${price.id} is not an active one-time USD price (active=${price.active}, currency=${price.currency}, type=${price.type})`
+		);
+		return false;
+	}
 	const amount = price.unit_amount ?? 0;
 	if (!amount) {
 		console.error(`auto top-up skipped for org ${orgId}: bundle ${bundle.id} price has no unit_amount`);

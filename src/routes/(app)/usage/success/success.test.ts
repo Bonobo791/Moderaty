@@ -49,7 +49,11 @@ function paidSession(overrides: Record<string, unknown> = {}): Record<string, un
 }
 
 function loadWith(sessionId: string | null) {
-	return load({ locals: { user: OWNER } as never, url: new URL(`http://localhost/usage/success${sessionId ? `?session_id=${sessionId}` : ''}`) } as never);
+	// Build from a fixed base URL; the query value goes through searchParams
+	// (repo guideline: new URL(path, base), never interpolation — coderabbit).
+	const url = new URL('/usage/success', 'http://localhost');
+	if (sessionId !== null) url.searchParams.set('session_id', sessionId);
+	return load({ locals: { user: OWNER } as never, url } as never);
 }
 
 beforeEach(() => {
@@ -93,6 +97,47 @@ describe('usage/success load', () => {
 		expect(data.granted).toBe(false);
 		expect(data.pending).toBe(true);
 		expect(data.failed).toBe(false);
+	});
+
+	test('a paid session with missing/invalid bundle metadata FAILS — never a fake success', async () => {
+		// fulfillCheckout returns 'rejected' for a paid session whose bundle
+		// metadata is unusable: the page must NOT report success for credits
+		// that were never granted (coderabbit — the old boolean fallback
+		// `fulfillCheckout() || payment_status === 'paid'` showed success for
+		// any paid session, even when nothing was credited).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.sessionsRetrieve.mockResolvedValue(paidSession({ metadata: { org_id: 'org-1', bundle: 'credits_999999' } }));
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+		const data = (await loadWith('cs_1')) as { granted: boolean; pending: boolean; failed: boolean };
+
+		expect(data.granted).toBe(false);
+		expect(data.pending).toBe(false);
+		expect(data.failed).toBe(true);
+		expect(await getCredits('org-1')).toBe(0);
+		errorSpy.mockRestore();
+	});
+
+	test('a retrieval failure logs a fixed category and a truncated id — never the raw error or full session id', async () => {
+		// The session id is query-controlled and the provider error can carry
+		// payment details — the log must stay restricted (coderabbit).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.sessionsRetrieve.mockRejectedValue(new Error('No such checkout session: cs_1 (card data redacted)'));
+
+		const logged: string[] = [];
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+			logged.push(String(args[0]));
+		});
+		try {
+			const data = (await loadWith('cs_1')) as { granted: boolean; pending: boolean; failed: boolean };
+			expect(data.pending).toBe(true);
+		} finally {
+			errorSpy.mockRestore();
+		}
+		expect(logged).toHaveLength(1);
+		expect(logged[0]).toContain('could not fulfill checkout');
+		expect(logged[0]).not.toContain('cs_1');
+		expect(logged[0]).not.toContain('card data redacted');
 	});
 
 	test('a session for ANOTHER org is never fulfilled here', async () => {

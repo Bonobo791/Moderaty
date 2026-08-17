@@ -23,6 +23,8 @@
 // user's OWN org — a session id belonging to another org is never fulfilled
 // here, and any retrieval failure is logged loudly and left to the webhook.
 
+import { createHash } from 'node:crypto';
+
 import { requireUser } from '$lib/server/session';
 import { getStripe } from '$lib/server/stripe/client';
 import { fulfillCheckout } from '$lib/server/stripe/webhooks';
@@ -47,15 +49,22 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 		if (session.payment_status === 'unpaid') {
 			pending = true;
 		} else {
-			// fulfillCheckout returns false when the grant was ALREADY applied
-			// (the webhook beat the redirect — the common case). A paid session
-			// for this org is a completed purchase either way: never show
-			// "No purchase found" for a payment that succeeded.
-			granted = (await fulfillCheckout(sessionId)) || session.payment_status === 'paid';
+			// 'granted' (this call applied the credits) and 'already' (the
+			// webhook beat the redirect — the common case) are both success; a
+			// 'rejected' paid session (unusable bundle metadata) must NEVER
+			// report success for credits that were not granted (coderabbit).
+			const result = await fulfillCheckout(sessionId);
+			granted = result === 'granted' || result === 'already';
 		}
 	} catch (retrieveError) {
 		// The webhook remains the source of truth; log loudly and show pending.
-		console.error(`usage/success: could not fulfill ${sessionId}: ${retrieveError instanceof Error ? retrieveError.message : String(retrieveError)}`);
+		// The session id is query-controlled and the provider error can carry
+		// payment details — the log stays restricted: a fixed failure category
+		// and a short hash of the id for correlation, never the raw error
+		// text (coderabbit).
+		console.error(
+			`usage/success: could not fulfill checkout (session ${createHash('sha256').update(sessionId).digest('hex').slice(0, 12)}…) — see the stripe webhook logs`
+		);
 		pending = true;
 	}
 	return { maintenance: false, user, sessionId, granted, pending, failed: !granted && !pending };

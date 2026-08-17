@@ -49,47 +49,63 @@ export const load: PageServerLoad = async ({ locals }) => {
 		};
 	}
 	const user = requireUser(locals);
-	const [summary, history, org] = await Promise.all([
-		usageSummary(user.orgId),
-		listCreditTransactions(user.orgId, 30),
-		db
-			.select({
-				autoTopupEnabled: organizations.autoTopupEnabled,
-				autoTopupThreshold: organizations.autoTopupThreshold,
-				autoTopupState: organizations.autoTopupState,
-				autoTopupFailures: organizations.autoTopupFailures,
-				autoTopupLastAttemptAt: organizations.autoTopupLastAttemptAt,
-				stripeDefaultPmId: organizations.stripeDefaultPmId,
-				creditsRemaining: organizations.creditsRemaining
-			})
-			.from(organizations)
-			.where(eq(organizations.id, user.orgId))
-			.get()
-	]);
-	if (!org) throw new Error(`org not found: ${user.orgId}`);
-	return {
-		maintenance: false,
-		user,
-		summary,
-		history: history.map((row) => ({
-			id: row.id,
-			delta: row.delta,
-			reason: row.reason,
-			refType: row.refType,
-			refId: row.refId,
-			createdAt: row.createdAt
-		})),
-		bundles: configuredBundles(),
-		autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
-		autoTopup: {
-			enabled: org.autoTopupEnabled === 1,
-			threshold: org.autoTopupThreshold ?? AUTO_TOPUP_DEFAULT_THRESHOLD,
-			state: org.autoTopupState ?? 'idle',
-			failures: org.autoTopupFailures ?? 0,
-			lastAttemptAt: org.autoTopupLastAttemptAt,
-			hasCard: Boolean(org.stripeDefaultPmId)
-		}
-	};
+	try {
+		const [summary, history, org] = await Promise.all([
+			usageSummary(user.orgId),
+			listCreditTransactions(user.orgId, 30),
+			db
+				.select({
+					autoTopupEnabled: organizations.autoTopupEnabled,
+					autoTopupThreshold: organizations.autoTopupThreshold,
+					autoTopupState: organizations.autoTopupState,
+					autoTopupFailures: organizations.autoTopupFailures,
+					autoTopupLastAttemptAt: organizations.autoTopupLastAttemptAt,
+					stripeDefaultPmId: organizations.stripeDefaultPmId,
+					creditsRemaining: organizations.creditsRemaining
+				})
+				.from(organizations)
+				.where(eq(organizations.id, user.orgId))
+				.get()
+		]);
+		if (!org) throw new Error(`org not found: ${user.orgId}`);
+		return {
+			maintenance: false,
+			user,
+			summary,
+			history: history.map((row) => ({
+				id: row.id,
+				delta: row.delta,
+				reason: row.reason,
+				refType: row.refType,
+				refId: row.refId,
+				createdAt: row.createdAt
+			})),
+			bundles: configuredBundles(),
+			autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
+			autoTopup: {
+				enabled: org.autoTopupEnabled === 1,
+				threshold: org.autoTopupThreshold ?? AUTO_TOPUP_DEFAULT_THRESHOLD,
+				state: org.autoTopupState ?? 'idle',
+				failures: org.autoTopupFailures ?? 0,
+				lastAttemptAt: org.autoTopupLastAttemptAt,
+				hasCard: Boolean(org.stripeDefaultPmId)
+			}
+		};
+	} catch (error) {
+		// Loud on the server, a maintenance overlay for the user — never a 500
+		// (I12: the (app) layout renders the overlay for this payload instead
+		// of SvelteKit's unstyled error page). Mirrors the dashboard load.
+		console.error(`usage: load failed for org ${user.orgId}: ${error instanceof Error ? error.message : String(error)}`);
+		return {
+			maintenance: true,
+			user: null,
+			summary: null,
+			history: [],
+			bundles: [],
+			autoTopup: null,
+			autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT
+		};
+	}
 };
 
 export const actions: Actions = {

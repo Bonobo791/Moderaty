@@ -75,6 +75,25 @@ beforeEach(() => {
 });
 
 describe('usage load', () => {
+	test('a database failure mid-load degrades to the maintenance payload and logs loudly', async () => {
+		// The layout renders the maintenance overlay for this shape — the page
+		// must never surface SvelteKit's unstyled 500 for a mid-load DB error.
+		await seedOrg({ creditsRemaining: 120, autoTopupEnabled: 1, autoTopupThreshold: 100, autoTopupState: 'idle', stripeDefaultPmId: 'pm_1' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const client = testDb().client;
+		const originalExecute = client.execute.bind(client);
+		client.execute = (() => Promise.reject(new Error('hrana 502: connect to upstream failed'))) as never;
+		let data: Record<string, unknown>;
+		try {
+			data = (await load({ locals: { user: OWNER } } as never)) as Record<string, unknown>;
+		} finally {
+			client.execute = originalExecute;
+		}
+		expect(data).toMatchObject({ maintenance: true, user: null, summary: null });
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('usage: load failed'));
+		errorSpy.mockRestore();
+	});
+
 	test('reports the org balance, consumption, bundles and auto top-up state', async () => {
 		await seedOrg({ creditsRemaining: 120, autoTopupEnabled: 1, autoTopupThreshold: 100, autoTopupState: 'idle', stripeDefaultPmId: 'pm_1' });
 		await applyLedgerDelta(testDb().db as never, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1' });

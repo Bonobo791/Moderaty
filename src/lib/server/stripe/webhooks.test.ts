@@ -167,12 +167,38 @@ describe('reverseCharge / reverseDispute', () => {
 	test('a refund reverses the grant it maps to, once', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		await applyLedgerDelta(db, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
-		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1', amount: 50000, amount_refunded: 50000 });
 
 		expect(await reverseCharge('ch_1', 'refund')).toBe(true);
 		expect(await getCredits('org-1')).toBe(0);
 		expect(await reverseCharge('ch_1', 'refund')).toBe(false); // idempotent
 		expect(await getCredits('org-1')).toBe(0);
+	});
+
+	test('a PARTIAL refund reverses nothing — v1 reverses only full refunds', async () => {
+		// Stripe's charge.refunded fires for partial refunds too; the amounts
+		// prove this one is partial, so the full grant must stay put.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1', amount: 50000, amount_refunded: 10000 });
+
+		expect(await reverseCharge('ch_1', 'refund')).toBe(false);
+		expect(await getCredits('org-1')).toBe(500);
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('not a full refund'));
+		errorSpy.mockRestore();
+	});
+
+	test('a refund whose amounts are missing reverses nothing and logs loudly', async () => {
+		// Malformed/partial-shaped charge data must never take credits away.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1' });
+
+		expect(await reverseCharge('ch_1', 'refund')).toBe(false);
+		expect(await getCredits('org-1')).toBe(500);
+		errorSpy.mockRestore();
 	});
 
 	test('a dispute reverses the grant it maps to, once', async () => {
@@ -224,7 +250,7 @@ describe('reverseCharge / reverseDispute', () => {
 
 	test('a refund matching no grant logs loudly and reverses nothing', async () => {
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_none', payment_intent: 'pi_none' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_none', payment_intent: 'pi_none', amount: 50000, amount_refunded: 50000 });
 		expect(await reverseCharge('ch_none', 'refund')).toBe(false);
 		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('matched no credit grant'));
 		errorSpy.mockRestore();
@@ -266,7 +292,7 @@ describe('handleStripeEvent', () => {
 	test('dispatches charge.refunded and dispute.created', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		await applyLedgerDelta(db, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
-		mocks.chargesRetrieve.mockImplementation((id: string) => Promise.resolve({ id, payment_intent: id === 'ch_1' ? 'pi_1' : 'pi_2' }));
+		mocks.chargesRetrieve.mockImplementation((id: string) => Promise.resolve({ id, payment_intent: id === 'ch_1' ? 'pi_1' : 'pi_2', amount: 50000, amount_refunded: 50000 }));
 		mocks.disputesRetrieve.mockResolvedValue({ id: 'du_1', charge: 'ch_2' });
 
 		expect(await handleStripeEvent(event('charge.refunded', 'evt_4', { id: 'ch_1' }) as never)).toBe(true);

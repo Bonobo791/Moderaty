@@ -150,6 +150,23 @@ export async function fulfillAutoTopup(paymentIntentId: string): Promise<boolean
 export async function reverseCharge(chargeId: string, reason: 'refund' | 'dispute'): Promise<boolean> {
 	const charge = await getStripe().charges.retrieve(chargeId, { expand: ['payment_intent'] });
 	const paymentIntentId = typeof charge.payment_intent === 'string' ? charge.payment_intent : charge.payment_intent?.id;
+	// v1 policy (docs/stripe-checkout-webhooks.md §7): credits are reversed
+	// only on a FULL refund. Stripe's charge.refunded fires for partial
+	// refunds too — compare the refunded and original amounts, and treat a
+	// charge without usable amounts as NOT fully refunded (never take credits
+	// away on ambiguous data; log loudly instead).
+	if (reason === 'refund') {
+		const fullyRefunded =
+			typeof charge.amount_refunded === 'number' &&
+			typeof charge.amount === 'number' &&
+			charge.amount_refunded >= charge.amount;
+		if (!fullyRefunded) {
+			console.error(
+				`stripe: refund for ${chargeId} is not a full refund (refunded ${charge.amount_refunded ?? 'unknown'} of ${charge.amount ?? 'unknown'}) — credits kept (v1 reverses only full refunds)`
+			);
+			return false;
+		}
+	}
 	const match = await findGrantForStripe(db, { chargeId, paymentIntentId });
 	if (!match) {
 		console.error(`stripe: ${reason} for ${chargeId} matched no credit grant — nothing to reverse`);
@@ -254,10 +271,11 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
 			handled = true;
 			break;
 		case 'charge.refunded':
-			// v1 reverses only FULL refunds: charge.refunded fires when a charge
-			// is fully refunded, and reverseCharge reverses the whole grant. Partial
-			// refunds (refund.created/refund.updated) are intentionally unhandled,
-			// and reversing after the credits are spent can leave a negative balance
+			// Stripe's charge.refunded fires for partial refunds too, so
+			// reverseCharge verifies the charge is FULLY refunded (amounts
+			// compared) before reversing the grant. Partial refunds
+			// (refund.created/refund.updated) are intentionally unhandled, and
+			// reversing after the credits are spent can leave a negative balance
 			// — both documented v1 limitations (docs/stripe-checkout-webhooks.md §7).
 			await reverseCharge(event.data.object.id, 'refund');
 			handled = true;

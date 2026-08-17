@@ -23,6 +23,7 @@ import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
 import { organizations } from '$lib/server/db/schema';
 import type { SessionUser } from '$lib/server/session';
 import { applyLedgerDelta, consumeCredit } from '$lib/server/billing/ledger';
+import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
 
 const mocks = vi.hoisted(() => ({
 	sessionsCreate: vi.fn(),
@@ -160,6 +161,42 @@ describe('usage setAutoTopup action', () => {
 		expect(org?.autoTopupThreshold).toBe(250);
 		expect(org?.autoTopupState).toBe('idle');
 		expect(org?.autoTopupFailures).toBe(0);
+	});
+
+	test('enabling persists the consent evidence (exact checkbox text, version, user, timestamp)', async () => {
+		// Stripe's save-and-reuse compliance requires a record of the written
+		// agreement — who ticked which sentence under which legal version, when.
+		await seedOrg();
+
+		const result = await setAutoTopup({ enabled: 'on', threshold: '250', consent: 'on' });
+
+		expect(result).toMatchObject({ ok: true });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.autoTopupConsentText).toBe(AUTO_TOPUP_CONSENT_TEXT);
+		expect(org?.autoTopupConsentVersion).toBe(LEGAL_VERSION);
+		expect(org?.autoTopupConsentedBy).toBe(OWNER.id);
+		expect(org?.autoTopupConsentedAt).toBeTruthy();
+	});
+
+	test('disabling keeps the consent evidence on record', async () => {
+		// The authorization record survives re-enabling cycles — it documents
+		// that consent WAS given, and must never be wiped by turning the
+		// automation off.
+		await seedOrg({
+			autoTopupEnabled: 1,
+			autoTopupState: 'idle',
+			autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
+			autoTopupConsentVersion: LEGAL_VERSION,
+			autoTopupConsentedBy: OWNER.id,
+			autoTopupConsentedAt: '2026-08-17T00:00:00.000Z'
+		});
+
+		const result = await setAutoTopup({ threshold: '250' });
+
+		expect(result).toMatchObject({ ok: true });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.autoTopupConsentText).toBe(AUTO_TOPUP_CONSENT_TEXT);
+		expect(org?.autoTopupConsentVersion).toBe(LEGAL_VERSION);
 	});
 
 	test('enabling without consent fails loudly', async () => {

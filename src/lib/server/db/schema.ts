@@ -83,6 +83,14 @@ export const organizations = sqliteTable('organizations', {
 	autoTopupState: text('auto_topup_state'),
 	autoTopupLastAttemptAt: text('auto_topup_last_attempt_at'),
 	autoTopupFailures: integer('auto_topup_failures'),
+	// Auto top-up authorization evidence (Stripe save-and-reuse compliance:
+	// keep a record of the written agreement). Written once on the
+	// disabled→enabled transition and NEVER cleared by disabling — the record
+	// that authorization was given must survive for dispute defense.
+	autoTopupConsentText: text('auto_topup_consent_text'), // exact checkbox sentence
+	autoTopupConsentVersion: text('auto_topup_consent_version'), // LEGAL_VERSION at consent
+	autoTopupConsentedBy: text('auto_topup_consented_by'), // users.id who ticked the box
+	autoTopupConsentedAt: text('auto_topup_consented_at'),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 });
 

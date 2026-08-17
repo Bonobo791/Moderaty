@@ -29,7 +29,7 @@ import { createCreditCheckout } from '$lib/server/billing/checkout';
 import { listCreditTransactions, usageSummary } from '$lib/server/billing/ledger';
 import { db } from '$lib/server/db';
 import { organizations } from '$lib/server/db/schema';
-import { AUTO_TOPUP_CONSENT_TEXT } from '$lib/server/legal';
+import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
 import { configuredBundles } from '$lib/server/stripe/bundles';
 import { requireOrgRole } from '$lib/server/ownership';
 import { requireUser } from '$lib/server/session';
@@ -131,10 +131,26 @@ export const actions: Actions = {
 			return fail(400, { error: 'You must tick the consent checkbox to enable automatic top-up.' });
 		}
 		if (enabled) {
+			// Consent evidence — Stripe's save-and-reuse compliance: keep a
+			// record of the written agreement. The exact checkbox sentence
+			// (rendered from AUTO_TOPUP_CONSENT_TEXT itself so the form can
+			// never drift), the legal version it was rendered under, the user
+			// who ticked it, and when. Written on the enable transition and
+			// NEVER cleared by disabling — the authorization record survives
+			// for dispute defense.
 			// Re-enabling after SCA/decline failures starts from a clean slate.
 			await db
 				.update(organizations)
-				.set({ autoTopupEnabled: 1, autoTopupThreshold: threshold, autoTopupState: 'idle', autoTopupFailures: 0 })
+				.set({
+					autoTopupEnabled: 1,
+					autoTopupThreshold: threshold,
+					autoTopupState: 'idle',
+					autoTopupFailures: 0,
+					autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
+					autoTopupConsentVersion: LEGAL_VERSION,
+					autoTopupConsentedBy: user.id,
+					autoTopupConsentedAt: new Date().toISOString()
+				})
 				.where(eq(organizations.id, user.orgId));
 		} else {
 			await db

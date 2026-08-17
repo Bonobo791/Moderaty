@@ -256,6 +256,10 @@ export async function createTestDb(): Promise<TestDb> {
 			auto_topup_state TEXT,
 			auto_topup_last_attempt_at TEXT,
 			auto_topup_failures INTEGER,
+			auto_topup_consent_text TEXT,
+			auto_topup_consent_version TEXT,
+			auto_topup_consented_by TEXT,
+			auto_topup_consented_at TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE TABLE credit_transactions (

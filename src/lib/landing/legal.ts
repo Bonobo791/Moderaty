@@ -34,6 +34,10 @@ export type LegalDoc = {
 };
 
 export const LEGAL_EFFECTIVE_DATE = '17 August 2026';
+// 1.8: BILLABLE SCOPE — Terms §6.1(d) corrected to match the product: a
+// credit is consumed only by AI-scored comments on live runs; rule matches
+// and protected handles are never charged (the previous "every comment the
+// Service processes" wording was broader than the implementation).
 // 1.7: STRIPE BILLING — Terms §6.1/§6.2 rewritten (prepaid credit bundles
 // replace the subscription model; §6.2 authorizes UNSCHEDULED automatic
 // top-ups charged to the saved card; §7 refund policy: credits reverse only
@@ -46,7 +50,7 @@ export const LEGAL_EFFECTIVE_DATE = '17 August 2026';
 // 1.5: Terms §6.1(c) corrected — the lifetime hosted plan has no per-account
 // key flow (hosted scoring runs on the deployment's OPENAI_API_KEY), so the
 // "your own OpenAI key" promise was removed from the lifetime clause.
-export const LEGAL_VERSION = '1.7';
+export const LEGAL_VERSION = '1.8';
 export const LEGAL_KICKER = 'YouTube Comment Moderation Service';
 
 /**

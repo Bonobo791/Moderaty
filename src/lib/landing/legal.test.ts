@@ -40,13 +40,15 @@ function readRoute(slug: string, file: string): string {
 }
 
 describe('LEGAL_DOCS', () => {
-	it('the billing terms (auto top-up authorization, bundle refunds) shipped under a NEW legal version', () => {
+	it('the billing terms (auto top-up authorization, bundle refunds, billable scope) shipped under a NEW legal version', () => {
 		// The STRIPE BILLING commit rewrote Terms §6.1/§6.2 materially (bundle
-		// model, unscheduled auto top-up authorization) — that is exactly the
-		// "material legal-doc change" that must bump LEGAL_VERSION so the
-		// re-consent gate (hasCurrentConsent) routes every user back through
-		// /consent. Never let billing terms ride along under an old version.
-		expect(LEGAL_VERSION).toBe('1.7');
+		// model, unscheduled auto top-up authorization), and the billable-scope
+		// correction rewrote §6.1(d) (credits consumed by live AI-scored
+		// comments only) — exactly the "material legal-doc change" that must
+		// bump LEGAL_VERSION so the re-consent gate (hasCurrentConsent) routes
+		// every user back through /consent. Never let billing terms ride along
+		// under an old version.
+		expect(LEGAL_VERSION).toBe('1.8');
 	});
 
 	it('lists exactly the three published legal documents', () => {

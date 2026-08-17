@@ -154,6 +154,16 @@ describe('findGrantForStripe', () => {
 		expect(match).toEqual({ orgId: 'org-1', credits: 100 });
 	});
 
+	test('never counts won-dispute restores (adjust) as part of the charge grant', async () => {
+		// A refund must reverse what the charge ORIGINALLY granted — a restore
+		// row (money that came back after a won dispute) is not part of it.
+		await seedOrg('org-1', 0);
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: 2000, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: 2000, reason: 'adjust', refType: 'dispute', refId: 'du_1', chargeId: 'ch_1' });
+		const match = await findGrantForStripe(db, { chargeId: 'ch_1' });
+		expect(match).toEqual({ orgId: 'org-1', credits: 2000 });
+	});
+
 	test('returns null when nothing matches', async () => {
 		expect(await findGrantForStripe(db, { chargeId: 'ch_none' })).toBeNull();
 	});

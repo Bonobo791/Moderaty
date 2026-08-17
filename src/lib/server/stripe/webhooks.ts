@@ -141,7 +141,13 @@ export async function fulfillAutoTopup(paymentIntentId: string): Promise<boolean
 }
 
 /**
- * Reverses credits granted for a refunded or disputed charge.
+ * Reverses credits granted for a refunded or disputed charge. Each path
+ * anchors on its OWN refType — 'refund' for refunds, 'dispute' for disputes
+ * (refId = charge id) — so the full lifecycle applies exactly once per step:
+ * a dispute reversal, a won-dispute restore (refType 'dispute', refId =
+ * dispute id), and a later legitimate full refund each clear their own anchor
+ * and can never block or double-apply one another. The reason field
+ * ('refund' vs 'dispute') keeps the ledger legible.
  *
  * @param chargeId - The Stripe charge identifier
  * @param reason - Whether the reversal is for a refund or dispute
@@ -172,13 +178,14 @@ export async function reverseCharge(chargeId: string, reason: 'refund' | 'disput
 		console.error(`stripe: ${reason} for ${chargeId} matched no credit grant — nothing to reverse`);
 		return false;
 	}
-	// The grant may already have been reversed — the charge-id anchor makes
-	// the reversal apply at most once, across refund AND dispute paths.
+	// The grant may already have been reversed — each path's own anchor
+	// (refType 'refund' or 'dispute', refId = charge id) makes the reversal
+	// apply at most once per path.
 	return applyLedgerDelta(db, {
 		orgId: match.orgId,
 		delta: -match.credits,
 		reason,
-		refType: 'charge',
+		refType: reason === 'refund' ? 'refund' : 'dispute',
 		refId: chargeId,
 		chargeId,
 		paymentIntentId

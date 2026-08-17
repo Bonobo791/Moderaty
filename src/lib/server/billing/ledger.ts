@@ -23,12 +23,15 @@
 // idempotent (a comment is consumed once, a checkout session granted once —
 // webhooks and retries can never double-apply).
 
-import { and, eq, lt, or, sql } from 'drizzle-orm';
+import { and, eq, lt, ne, or, sql } from 'drizzle-orm';
 import { db } from '$lib/server/db';
 import { creditTransactions, organizations } from '$lib/server/db/schema';
 
 export type CreditReason = 'consume' | 'purchase' | 'auto_topup' | 'refund' | 'dispute' | 'adjust';
-export type CreditRefType = 'comment' | 'checkout_session' | 'payment_intent' | 'charge' | 'dispute' | 'admin';
+// 'refund' and 'dispute' are reversal refTypes anchored on the charge id —
+// DISTINCT anchors on purpose: a dispute reversal, a won-dispute restore, and
+// a later full refund each apply exactly once without blocking one another.
+export type CreditRefType = 'comment' | 'checkout_session' | 'payment_intent' | 'charge' | 'refund' | 'dispute' | 'admin';
 
 /** The DB surface the ledger needs; both `db` and a transaction satisfy it. */
 export type LedgerHandle = Pick<typeof db, 'insert' | 'update' | 'select' | 'delete'>;
@@ -199,7 +202,9 @@ export interface GrantMatch {
 }
 
 /**
- * Locates credits granted for a Stripe payment intent or charge.
+ * Locates credits granted for a Stripe payment intent or charge. Won-dispute
+ * restores (reason 'adjust') are excluded: a refund reverses what the charge
+ * ORIGINALLY granted, never money that came back via a dispute ruling.
  *
  * @param identifiers - Optional Stripe payment intent and charge identifiers used to match grant transactions.
  * @returns The organization ID and total granted credits, or `null` when no matching grant exists.
@@ -215,7 +220,7 @@ export async function findGrantForStripe(
 	const rows = await handle
 		.select({ orgId: creditTransactions.orgId, delta: creditTransactions.delta })
 		.from(creditTransactions)
-		.where(and(match, sql`${creditTransactions.delta} > 0`))
+		.where(and(match, sql`${creditTransactions.delta} > 0`, ne(creditTransactions.reason, 'adjust')))
 		.all();
 	if (rows.length === 0) return null;
 	const orgId = rows[0].orgId;

@@ -212,15 +212,25 @@ describe('reverseCharge / reverseDispute', () => {
 		expect(await reverseDispute('du_1')).toBe(false);
 	});
 
-	test('a dispute reversal and a later refund can never reverse twice (shared charge anchor)', async () => {
+	test('a refund after a WON dispute is restored reverses the re-grant once (distinct anchors)', async () => {
+		// The full lifecycle: grant → dispute.created reversal → dispute closed
+		// won → restore → legitimate full refund. The refund reversal must
+		// apply even though the dispute reversal row sits on the same charge —
+		// distinct anchors per reason (refType 'refund' vs 'dispute') make both
+		// apply exactly once, so the customer never keeps credits after the
+		// money is refunded, and never loses credits twice.
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		await applyLedgerDelta(db, { orgId: 'org-1', delta: 2000, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
-		mocks.disputesRetrieve.mockResolvedValue({ id: 'du_1', charge: 'ch_1' });
-		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1' });
+		mocks.disputesRetrieve.mockResolvedValue({ id: 'du_1', charge: 'ch_1', status: 'won' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1', amount: 200000, amount_refunded: 200000 });
 
 		expect(await reverseDispute('du_1')).toBe(true);
-		// The refund arrives after the dispute reversal: the grant is already
-		// gone, so nothing more can be reversed — the balance never goes negative.
+		expect(await getCredits('org-1')).toBe(0);
+		expect(await restoreWonDispute('du_1')).toBe(true);
+		expect(await getCredits('org-1')).toBe(2000);
+		expect(await reverseCharge('ch_1', 'refund')).toBe(true);
+		expect(await getCredits('org-1')).toBe(0);
+		// A duplicate refund delivery never reverses twice.
 		expect(await reverseCharge('ch_1', 'refund')).toBe(false);
 		expect(await getCredits('org-1')).toBe(0);
 	});

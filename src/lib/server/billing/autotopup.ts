@@ -30,7 +30,7 @@
 //    state flips to 'disabled' and the customer must re-authenticate via a
 //    fresh Checkout. Other declines disable after 2 consecutive failures.
 
-import { and, eq, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, eq, isNotNull, isNull, or, sql } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
 import { applyLedgerDelta } from '$lib/server/billing/ledger';
@@ -423,9 +423,18 @@ export async function sweepAutoTopUp(limit = 5): Promise<number> {
 				eq(organizations.autoTopupState, 'idle'),
 				// COALESCE both sides: a NULL balance (pre-billing org) must read
 				// as 0 here, or SQL NULL comparison silently drops the org.
-				sql`COALESCE(${organizations.creditsRemaining}, 0) < COALESCE(${organizations.autoTopupThreshold}, ${AUTO_TOPUP_DEFAULT_THRESHOLD})`
+				sql`COALESCE(${organizations.creditsRemaining}, 0) < COALESCE(${organizations.autoTopupThreshold}, ${AUTO_TOPUP_DEFAULT_THRESHOLD})`,
+				// A cardless org can never be charged (maybeTriggerAutoTopUp
+				// returns false) — excluding it here keeps the bounded batch
+				// full of chargeable orgs: otherwise N ineligible rows could
+				// occupy the whole limit every invocation and starve everyone
+				// else (I10 fairness). Never-attempted orgs sort first (SQLite
+				// NULLs first in ASC), a natural fair rotation.
+				isNotNull(organizations.stripeCustomerId),
+				isNotNull(organizations.stripeDefaultPmId)
 			)
 		)
+		.orderBy(asc(organizations.autoTopupLastAttemptAt), asc(organizations.id))
 		.limit(limit)
 		.all();
 	let triggered = 0;

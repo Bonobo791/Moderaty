@@ -415,6 +415,38 @@ describe('sweepAutoTopUp', () => {
 		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
 	});
 
+	test('cardless enabled orgs never starve the sweep — eligible orgs are still reached', async () => {
+		// 6 permanently ineligible orgs (enabled, below threshold, but no saved
+		// card — maybeTriggerAutoTopUp returns false for them) plus ONE eligible
+		// org. Without the card filters, a limit-5 sweep can select only
+		// ineligible rows every invocation and never reach the chargeable one.
+		for (let i = 2; i <= 7; i++) {
+			await testDb().db.insert(organizations).values({
+				id: `org-${i}`,
+				name: `Org ${i}`,
+				creditsRemaining: 10,
+				autoTopupEnabled: 1,
+				autoTopupThreshold: 100,
+				autoTopupState: 'idle'
+			});
+		}
+		await testDb().db.insert(organizations).values({
+			id: 'org-8',
+			name: 'Org 8',
+			creditsRemaining: 10,
+			autoTopupEnabled: 1,
+			autoTopupThreshold: 100,
+			autoTopupState: 'idle',
+			stripeCustomerId: 'cus_8',
+			stripeDefaultPmId: 'pm_8'
+		});
+
+		const triggered = await sweepAutoTopUp(5);
+
+		expect(triggered).toBe(1);
+		expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(1);
+	});
+
 	test('a NULL balance (pre-billing org) is swept like a zero balance', async () => {
 		await seedOrg({ creditsRemaining: null });
 

@@ -127,7 +127,18 @@ export const actions: Actions = {
 		if (!Number.isInteger(threshold) || threshold < 0 || threshold > 1_000_000) {
 			return fail(400, { error: 'Auto top-up threshold must be a whole number of credits between 0 and 1,000,000.' });
 		}
-		if (enabled && form.get('consent') !== 'on') {
+		// Consent is required only on the disabled→enabled TRANSITION: the page
+		// hides the checkbox once enabled, so an already-enabled org updating
+		// its threshold submits enabled=on without consent and must never 400.
+		// The evidence is also written once, on that same transition — a
+		// threshold tweak must not rewrite the original authorization record.
+		const current = await db
+			.select({ autoTopupEnabled: organizations.autoTopupEnabled })
+			.from(organizations)
+			.where(eq(organizations.id, user.orgId))
+			.get();
+		const wasEnabled = current?.autoTopupEnabled === 1;
+		if (enabled && !wasEnabled && form.get('consent') !== 'on') {
 			return fail(400, { error: 'You must tick the consent checkbox to enable automatic top-up.' });
 		}
 		if (enabled) {
@@ -139,6 +150,15 @@ export const actions: Actions = {
 			// NEVER cleared by disabling — the authorization record survives
 			// for dispute defense.
 			// Re-enabling after SCA/decline failures starts from a clean slate.
+			const evidence =
+				!wasEnabled
+					? {
+							autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
+							autoTopupConsentVersion: LEGAL_VERSION,
+							autoTopupConsentedBy: user.id,
+							autoTopupConsentedAt: new Date().toISOString()
+						}
+					: {};
 			await db
 				.update(organizations)
 				.set({
@@ -146,10 +166,7 @@ export const actions: Actions = {
 					autoTopupThreshold: threshold,
 					autoTopupState: 'idle',
 					autoTopupFailures: 0,
-					autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
-					autoTopupConsentVersion: LEGAL_VERSION,
-					autoTopupConsentedBy: user.id,
-					autoTopupConsentedAt: new Date().toISOString()
+					...evidence
 				})
 				.where(eq(organizations.id, user.orgId));
 		} else {

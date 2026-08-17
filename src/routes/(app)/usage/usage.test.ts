@@ -199,6 +199,20 @@ describe('usage setAutoTopup action', () => {
 		expect(org?.autoTopupConsentVersion).toBe(LEGAL_VERSION);
 	});
 
+	test('updating the threshold while ALREADY enabled needs no consent checkbox (it is hidden)', async () => {
+		// The page only renders the consent checkbox when auto top-up is
+		// disabled — an already-enabled org updating its threshold submits
+		// enabled=on without consent, and must not 400 on every save.
+		await seedOrg({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupThreshold: 250 });
+
+		const result = await setAutoTopup({ enabled: 'on', threshold: '500' });
+
+		expect(result).toMatchObject({ ok: true });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.autoTopupEnabled).toBe(1);
+		expect(org?.autoTopupThreshold).toBe(500);
+	});
+
 	test('enabling without consent fails loudly', async () => {
 		await seedOrg();
 

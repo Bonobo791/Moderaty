@@ -2,18 +2,15 @@
 # Moderaty — YouTube Comment Auto-Moderation Tool
 # Copyright (C) 2026 Andrew Philip Weilbacher
 
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published
-by the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
+Licensed under the PolyForm Shield License 1.0.0; you may not use
+this file except in compliance with the License. You may obtain a
+copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
 
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License
-along with this program. If not, see <https://www.gnu.org/licenses/>.
+The software is provided "as is", without warranty or condition of
+any kind, express or implied. See the License for the specific
+language governing permissions and limitations under the License.
+A copy of the License is included in the LICENSE file at the
+repository root.
 
 Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 -->
@@ -70,7 +67,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <h2 id="s6">6. Plans, Billing and Auto Top-Up</h2>
 
-<p><strong>6.1</strong> The Service is offered as: (a) a free self-hosted version (AGPL-3.0, your own infrastructure and OpenAI key); (b) a hosted subscription at USD 5.00 per month, automatically renewed each billing month until cancelled, including 100 moderated comments per billing month (unused monthly comments do not carry over); (c) a lifetime hosted plan at USD 49.00, one-time, limited to the first 1,000 purchasers, with unlimited moderated comments, with AI scoring run by us; and (d) comment credits, bought in bundles of 100, 500, or 2,000 comments at the prices shown at checkout — each comment your channel processes with AI scoring on a live run consumes one credit from your balance (rule matches and protected handles are never charged). Custom or volume pricing is available on request. Prices are those shown at the time of purchase. Payments are processed by our payment provider (currently Stripe); we do not store your full payment card data.</p>
+<p><strong>6.1</strong> The Service is offered as: (a) a free self-hosted version (PolyForm Shield 1.0.0, your own infrastructure and OpenAI key); (b) a hosted subscription at USD 5.00 per month, automatically renewed each billing month until cancelled, including 100 moderated comments per billing month (unused monthly comments do not carry over); (c) a lifetime hosted plan at USD 49.00, one-time, limited to the first 1,000 purchasers, with unlimited moderated comments, with AI scoring run by us; and (d) comment credits, bought in bundles of 100, 500, or 2,000 comments at the prices shown at checkout — each comment your channel processes with AI scoring on a live run consumes one credit from your balance (rule matches and protected handles are never charged). Custom or volume pricing is available on request. Prices are those shown at the time of purchase. Payments are processed by our payment provider (currently Stripe); we do not store your full payment card data.</p>
 
 <p><strong>6.2</strong> Automatic top-up is optional and off by default. If you enable it, you expressly authorize unscheduled charges: each time your credit balance drops below the threshold you configure, we charge the payment method you saved with our payment provider for the smallest credit bundle available (100, 500, or 2,000 comments), and the credits are added to your balance. Enabling auto top-up requires ticking the consent checkbox on the Usage page, whose sentence reads: "I authorize Moderaty to charge my saved payment method for comment-credit bundles automatically whenever my balance drops below the threshold I set (unscheduled top-ups, per Section 6 of the Terms of Service)." You can change the configuration or disable the automation at any time by contacting us through any channel listed in Section 21, effective for future charges.</p>
 

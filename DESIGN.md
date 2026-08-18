@@ -2,18 +2,15 @@
 # Moderaty — YouTube Comment Auto-Moderation Tool
 # Copyright (C) 2026 Andrew Philip Weilbacher
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Affero General Public License as published
-# by the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# Licensed under the PolyForm Shield License 1.0.0; you may not use
+# this file except in compliance with the License. You may obtain a
+# copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU Affero General Public License for more details.
-#
-# You should have received a copy of the GNU Affero General Public License
-# along with this program. If not, see <https://www.gnu.org/licenses/>.
+# The software is provided "as is", without warranty or condition of
+# any kind, express or implied. See the License for the specific
+# language governing permissions and limitations under the License.
+# A copy of the License is included in the LICENSE file at the
+# repository root.
 #
 # Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 -->
@@ -225,7 +222,7 @@ gradient sky translates behind transparent sections, and without JS or under
 reduced-motion each section's own static horizon band carries the same story —
 the composition is never allowed to depend on the animation. The cues sit in a
 `<main>` landmark; the footer is a top-level `contentinfo` on day white after
-it (AGPL / self-host / commercial-licensing links in rose), stacked above the
+it (PolyForm / self-host / commercial-licensing links in rose), stacked above the
 fixed sky (`z-index: 1`) like every cue.
 
 The operate register is a single 900px column (`margin: 32px auto`, 20px side

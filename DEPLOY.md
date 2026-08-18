@@ -2,18 +2,15 @@
 # Moderaty — YouTube Comment Auto-Moderation Tool
 # Copyright (C) 2026 Andrew Philip Weilbacher
 
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published
-by the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
+Licensed under the PolyForm Shield License 1.0.0; you may not use
+this file except in compliance with the License. You may obtain a
+copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
 
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License
-along with this program. If not, see <https://www.gnu.org/licenses/>.
+The software is provided "as is", without warranty or condition of
+any kind, express or implied. See the License for the specific
+language governing permissions and limitations under the License.
+A copy of the License is included in the LICENSE file at the
+repository root.
 
 Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 -->
@@ -67,7 +64,7 @@ the site exists), local work, and outage recovery.
   against `__drizzle_migrations`, failing loudly on any missing or extra
   hash — the deploy gate runs it on every build.
 - **Historical drift repair (0003 only, likely already done):** migration
-  `0003_wide_impossible_man.sql` had its AGPL header added ~30 minutes after
+  `0003_wide_impossible_man.sql` had its license header added ~30 minutes after
   it was applied, changing its recorded hash. If the first gated deploy
   reports `MISSING 0003_wide_impossible_man` + an `EXTRA applied hash
   4cb16c12…`, the production database still holds the pre-header hash; the
@@ -77,6 +74,19 @@ the site exists), local work, and outage recovery.
   `UPDATE __drizzle_migrations SET hash = 'effa15e51ca99fd0acf8556c1f1a9bc3abd097bc84dac09f6b05eff27c4f2130' WHERE hash = '4cb16c12ec9d828ba5d32b31f85a55d70af231d310f3904eb149e039822301c6';`
   (one row), then re-run `npm run db:verify`. If production reports no drift
   at all, nothing to do — it was migrated after the header commit.
+- **License-header swap (PolyForm, every header-carrying migration):** the
+  AGPL header on each of `0000`–`0016` (except `0012`) was replaced by the
+  PolyForm Shield notice, which changes the sha256 recorded for any database
+  where those migrations are already applied. The dev database has been
+  repaired; **production must be repaired by a human before its next deploy**:
+  after merging this change, run the deploy gate once (it will report
+  `MISSING`/`EXTRA` for exactly the 16 header-carrying migrations), then
+  backfill each row instead of re-running the migration:
+  `UPDATE __drizzle_migrations SET hash = '<new sha256 from scripts/verify-migrations.mjs output>' WHERE hash = '<old sha256>';`
+  (16 rows, one per migration; only the comment header differs — the SQL
+  statements are byte-identical), then re-run `npm run db:verify`. A
+  convenience is to compute old/new pairs from the pre- and post-merge file
+  hashes (`sha256sum drizzle/<tag>.sql`) and update by exact old-hash match.
 - For the multi-tenancy contract (migration `0013_channels_org_contract.sql`
   and later), also run the tenancy Definition-of-Done probe against the
   production database from a checkout with the production values sourced:

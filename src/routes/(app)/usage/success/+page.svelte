@@ -2,18 +2,15 @@
 # Moderaty — YouTube Comment Auto-Moderation Tool
 # Copyright (C) 2026 Andrew Philip Weilbacher
 
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published
-by the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
+Licensed under the PolyForm Shield License 1.0.0; you may not use
+this file except in compliance with the License. You may obtain a
+copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
 
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License
-along with this program. If not, see <https://www.gnu.org/licenses/>.
+The software is provided "as is", without warranty or condition of
+any kind, express or implied. See the License for the specific
+language governing permissions and limitations under the License.
+A copy of the License is included in the LICENSE file at the
+repository root.
 
 Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 -->

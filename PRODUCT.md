@@ -29,7 +29,7 @@ Moderaty exists to protect the creator: it enforces the community's own norms
 asks before acting when unsure, and guarantees enforcement durability —
 DB-before-remote action recording, bounded checkpointed cron runs, and crash
 reconciliation mean no enforcement action is ever lost or doubled. It is
-open-source (AGPL / commercial dual license) and self-hostable, with a dry-run
+open-source (PolyForm Shield / commercial dual license) and self-hostable, with a dry-run
 mode and full audit log instead of a black box.
 
 Category line: "Comment protection for YouTube creators."
@@ -85,7 +85,7 @@ Category line: "Comment protection for YouTube creators."
 - Disengagement-fighter line (top of funnel): "'Just don't read the comments'
   is not a strategy. It's a surrender."
 - Voice: protective, plain-English, on the creator's side.
-- License: AGPL-3.0-or-later with commercial licensing option
+- License: PolyForm Shield 1.0.0 with commercial licensing option
   (contact@marketingprowess.simplelogin.com — see COMMERCIAL.md); copyright
   Andrew Philip Weilbacher; license header required on new source/doc files.
 

@@ -27,9 +27,12 @@ and reconciles unfinished actions on a later run.
 
 ## Repository overview
 
-Moderaty is a SvelteKit 2 application using Svelte 5, TypeScript, and the
-Netlify adapter. Server code calls the Google and OpenAI HTTP APIs directly;
-there are no auth, Google, or OpenAI SDKs in the dependency tree.
+Moderaty is a SvelteKit 2 application using Svelte 5, TypeScript, and a
+**dual deploy adapter** (the choice is the build-time `MODERATY_ADAPTER` env):
+the default Netlify adapter, or adapter-node for the self-hosted Coolify +
+Bunny CDN target (see `DEPLOY.md` and `docs/COOLIFY_BUNNY.md`). Server code
+calls the Google and OpenAI HTTP APIs directly; there are no auth, Google, or
+OpenAI SDKs in the dependency tree.
 
 | Path | Purpose |
 | --- | --- |
@@ -38,9 +41,13 @@ there are no auth, Google, or OpenAI SDKs in the dependency tree.
 | `src/lib/server/` | Sessions, OAuth, encryption, rules, moderation, pipeline, and database access |
 | `drizzle/` | Database migrations for libSQL/SQLite and Turso |
 | `netlify/functions/cron.mjs` | Scheduled Netlify function that invokes the cron endpoint |
-| `scripts/` | Local demo-data seeding and live tone calibration tools |
-| `docs/` | Manual end-to-end verification notes |
+| `Dockerfile` | Coolify image: migrate+verify gate, node build, non-root runtime (see `docs/COOLIFY_BUNNY.md`) |
+| `scripts/bunny-purge.mjs` | Bunny CDN cache purge, run from `.github/workflows/bunny-purge.yml` after production deploys |
+| `scripts/dev-cron.mjs` | Cron ticker: local dev loop, or Coolify's in-container scheduled task (`--once`) |
+| `scripts/` | Local demo-data seeding, live tone calibration, and deploy helpers |
+| `docs/` | Manual end-to-end verification notes and the Coolify runbook (`docs/COOLIFY_BUNNY.md`) |
 | `DEPLOY.md` | Netlify, Turso, Google OAuth, and cron deployment instructions |
+| `docs/COOLIFY_BUNNY.md` | Coolify + Bunny CDN target: implementation plan and operator runbook |
 | `EXECUTION_PLAN_YouTube_Comment_Moderator.md` | Implementation plan and system invariants |
 
 The app uses local SQLite through `file:local.db` during development and Turso
@@ -115,7 +122,7 @@ covered by [DEPLOY.md](DEPLOY.md).
 npm run dev          # Start the development server
 npm run check        # Run SvelteKit sync and strict TypeScript diagnostics
 npm run test         # Run the Vitest suite
-npm run build        # Build the Netlify deployment
+npm run build        # Build (default Netlify adapter; MODERATY_ADAPTER=node for Coolify)
 npm run preview      # Serve the production build locally
 npm run db:migrate   # Apply Drizzle migrations
 ```
@@ -132,9 +139,11 @@ node scripts/tone-eval.mjs
 Users sign in with Google identity (`openid email profile`) and then grant a
 separate `youtube.force-ssl` consent to connect a channel. Self-hosted
 instances use the same code path and bring their own Google, OpenAI, and Turso
-credentials. Moderaty is designed for Netlify Functions with Turso as the
-production database; see [DEPLOY.md](DEPLOY.md) for the scheduled function and
-post-deployment verification.
+credentials. Moderaty supports two deploy targets: the managed **Netlify**
+target (Scheduled Function, see [DEPLOY.md](DEPLOY.md)) and the self-hosted
+**Coolify + Bunny CDN** target (Dockerfile + in-container scheduled task, see
+[docs/COOLIFY_BUNNY.md](docs/COOLIFY_BUNNY.md)); both use Turso as the
+production database and share the same `DRY_RUN`-first verification flow.
 
 ## License
 

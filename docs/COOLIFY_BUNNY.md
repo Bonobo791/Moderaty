@@ -20,7 +20,10 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 # Moderaty on Coolify + Bunny CDN (implementation plan & operator runbook)
 
-Status: planned, scaffolding implemented · Date: 2026-08-17
+Status: scaffolding implemented and repo-side verified (2026-08-18:
+adapter builds, migrate gate against dev Turso, node-server smoke test, and
+the §9 doc/`ORIGIN` claims all confirmed); cutover (§8) is pending and
+human-only.
 Sources for every platform claim: [`docs/coolify-bunny-research.md`](coolify-bunny-research.md).
 
 The repo supports **two deploy targets**. Netlify (unchanged, see
@@ -253,11 +256,25 @@ Each step has a verify gate; do not proceed past a failed gate.
 - Exact current-UI location of Coolify **Scheduled Tasks** and the
   per-application webhook tab (research could not confirm; the features exist
   and are application-level — locate them in your Coolify version).
-- **Alternative purge trigger**: Coolify Notifications → Webhook channel on
-  `deployment_success` (payload carries `fqdn`/`application_uuid`) if the
-  GitHub Actions workflow ever proves insufficient.
+  **Verified 2026-08-18 against current Coolify docs** (llms-full.txt):
+  application-level tasks exist and are scoped per application
+  (`application_uuid` is included in `task_success`/`task_failed` webhook
+  payloads; the API lists "Scheduled tasks on app/service") — only the exact
+  dashboard tab location is undocumented, so locate it in your Coolify
+  version at setup.
+- **Alternative purge trigger** — **verified 2026-08-18 against current
+  Coolify docs** (llms-full.txt): the Notifications → Webhook channel sends
+  `deployment_success` events whose payload carries `fqdn`,
+  `application_uuid`, `deployment_uuid`, and `deployment_url` — exactly what
+  a purger needs. Kept as an alternative to the GitHub Actions workflow;
+  the workflow (§3.5) remains primary because it needs no Coolify-side
+  configuration and fires on the same push event that deploys.
 - `X-Forwarded-Proto` behind Bunny was not verified; `ORIGIN` (§3.4) removes
-  the dependency, so confirm at gate 3 rather than assume.
+  the dependency. **Verified 2026-08-18 against adapter-node source**: the
+  built handler calls `parse_origin(env('ORIGIN', undefined))` at startup —
+  a set `ORIGIN` is validated and used verbatim for URL generation, and an
+  invalid value throws at boot (fail-loud). Confirm at gate 3 rather than
+  assume.
 - Turso embedded replicas on the Coolify server are a possible future
   optimization (persistent disk) — out of scope; do not paper over
   availability with silent fallbacks (DEPLOY.md §7).

@@ -49,7 +49,7 @@ describe('LEGAL_DOCS', () => {
 		// bump LEGAL_VERSION so the re-consent gate (hasCurrentConsent) routes
 		// every user back through /consent. Never let billing terms ride along
 		// under an old version.
-		expect(LEGAL_VERSION).toBe('1.8');
+		expect(LEGAL_VERSION).toBe('1.9');
 	});
 
 	it('lists exactly the three published legal documents', () => {

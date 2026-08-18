@@ -34,6 +34,13 @@ export type LegalDoc = {
 };
 
 export const LEGAL_EFFECTIVE_DATE = '17 August 2026';
+// 1.9: CONTACT FORM — the Privacy Policy documents the opt-in contact form
+// (name, e-mail, opt-in consent recorded with the exact checkbox sentence;
+// verification e-mail via Mailjet) and names Mailjet as the transactional
+// e-mail provider in the sharing list; DPA Annex III replaces the e-mail
+// provider placeholder; Terms §21 adds the /contact form as a contact
+// channel. Material change: users without a 1.9 consent row are routed
+// back through /consent.
 // 1.8: BILLABLE SCOPE — Terms §6.1(d) corrected to match the product: a
 // credit is consumed only by AI-scored comments on live runs; rule matches
 // and protected handles are never charged (the previous "every comment the
@@ -50,7 +57,7 @@ export const LEGAL_EFFECTIVE_DATE = '17 August 2026';
 // 1.5: Terms §6.1(c) corrected — the lifetime hosted plan has no per-account
 // key flow (hosted scoring runs on the deployment's OPENAI_API_KEY), so the
 // "your own OpenAI key" promise was removed from the lifetime clause.
-export const LEGAL_VERSION = '1.8';
+export const LEGAL_VERSION = '1.9';
 export const LEGAL_KICKER = 'YouTube Comment Moderation Service';
 
 /**

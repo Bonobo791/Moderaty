@@ -195,6 +195,6 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <p>Service operator: [legal name], sole proprietorship, CNPJ [number], registered address [address], Brazil.</p>
 
-<p>Support and notices: <a href="mailto:contact@marketingprowess.simplelogin.com">contact@marketingprowess.simplelogin.com</a>.</p>
+<p>Support and notices: <a href="mailto:contact@marketingprowess.simplelogin.com">contact@marketingprowess.simplelogin.com</a>, or the <a href="/contact">contact form</a> on our site.</p>
 
 <p>Data Protection Officer (Encarregado de Proteção de Dados): Andrew Philip Weilbacher, <a href="mailto:contact@marketingprowess.simplelogin.com">contact@marketingprowess.simplelogin.com</a>.</p>

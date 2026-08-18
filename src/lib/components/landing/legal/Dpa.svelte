@@ -659,9 +659,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				<td>ANPD SCCs (Annex IV)</td>
 			</tr>
 			<tr>
-				<td>[E-mail delivery provider]</td>
-				<td>Transactional e-mail (notices, receipts, security alerts)</td>
-				<td>[Region]</td>
+				<td>Mailjet (Mailjet SAS)</td>
+				<td>Transactional e-mail (notices, receipts, security alerts, contact-form verification)</td>
+				<td>European Union (France)</td>
 				<td>ANPD SCCs (Annex IV) if outside Brazil</td>
 			</tr>
 		</tbody>

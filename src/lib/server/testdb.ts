@@ -309,6 +309,20 @@ export async function createTestDb(): Promise<TestDb> {
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
 			PRIMARY KEY (user_id, org_id)
 		)`,
+		`CREATE TABLE contact_submissions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			email TEXT NOT NULL,
+			name TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			verification_token TEXT NOT NULL UNIQUE,
+			expires_at TEXT NOT NULL,
+			verified_at TEXT,
+			consent_text TEXT NOT NULL,
+			ip TEXT NOT NULL,
+			user_agent TEXT NOT NULL,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`,
+		`CREATE INDEX contact_submissions_status_email_idx ON contact_submissions (status, email)`,
 		`CREATE TABLE invites (
 			token TEXT PRIMARY KEY,
 			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,

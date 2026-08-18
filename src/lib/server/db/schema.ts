@@ -374,3 +374,33 @@ export const stripeEvents = sqliteTable('stripe_events', {
 }, (table) => [
 	uniqueIndex('stripe_events_type_object_idx').on(table.eventType, table.objectId)
 ]);
+
+// Opt-in contact requests from the public /contact form. A row is created
+// PENDING when the form is submitted (name + e-mail + the explicit opt-in
+// checkbox, whose exact sentence is stored verbatim on the row so the form
+// can never drift from what the visitor agreed to), the verification e-mail
+// is sent to the address, and the row flips to VERIFIED when the link in
+// that e-mail is opened. No user account is involved. The e-mail is stored
+// ONLY after the opt-in box was ticked — the whole point of the flow.
+export const contactSubmissions = sqliteTable('contact_submissions', {
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	email: text('email').notNull(), // submitted address, normalized to lowercase
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	name: text('name').notNull(), // submitted display name
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	status: text('status').notNull().default('pending'), // 'pending' | 'verified'
+	verificationToken: text('verification_token').notNull().unique(), // random 32-byte hex; the URL token
+	expiresAt: text('expires_at').notNull(), // ISO timestamp; verification link TTL (7 days, like invites)
+	verifiedAt: text('verified_at'), // ISO timestamp of successful verification; null = not yet verified
+	consentText: text('consent_text').notNull(), // exact opt-in checkbox sentence at submission
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	ip: text('ip').notNull(), // event.getClientAddress() at submission
+	userAgent: text('user_agent').notNull(),
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+}, (table) => [
+	// Resubmission dedupe (unexpired pending per e-mail) filters
+	// status='pending' AND email=?; the status leftmost serves it.
+	index('contact_submissions_status_email_idx').on(table.status, table.email)
+]);

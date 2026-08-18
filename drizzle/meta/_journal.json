@@ -183,6 +183,13 @@
       "when": 1787006217435,
       "tag": "0025_stripe_reversal_outbox_and_ledger_fk",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "6",
+      "when": 1787063204149,
+      "tag": "0026_contact_form_opt_in",
+      "breakpoints": true
     }
   ]
 }

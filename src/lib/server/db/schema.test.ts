@@ -410,3 +410,27 @@ describe('consents', () => {
 		expect(sqlText(retention!.config.where)).toBe('"consents"."email" is not null');
 	});
 });
+
+describe('contact_submissions', () => {
+	test('table shape with unique verification token and status+email index', async () => {
+		const { contactSubmissions } = await loadSchema();
+		expect(getTableConfig(contactSubmissions).name).toBe('contact_submissions');
+		expectColumns(contactSubmissions, {
+			id: { notNull: true, primary: true, autoIncrement: true },
+			email: { notNull: true },
+			name: { notNull: true },
+			status: { notNull: true, hasDefault: true },
+			verification_token: { notNull: true },
+			expires_at: { notNull: true },
+			verified_at: { notNull: false },
+			consent_text: { notNull: true },
+			ip: { notNull: true },
+			user_agent: { notNull: true },
+			created_at: { notNull: true, hasDefault: true }
+		});
+		expectUnique(contactSubmissions, 'verification_token', 'contact_submissions_verification_token_unique');
+		expect(getTableConfig(contactSubmissions).columns.find((c) => c.name === 'status')!.default).toBe('pending');
+		expectIndex(contactSubmissions, 'contact_submissions_status_email_idx', ['status', 'email']);
+		expectCreatedAtDefault(contactSubmissions);
+	});
+});

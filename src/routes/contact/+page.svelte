@@ -26,6 +26,11 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	// verbatim on the submission row, so the visible box can never drift from
 	// what was agreed. form.values re-populates the fields after a validation
 	// error (I12: the error state renders the form, never a blank page).
+	//
+	// I12 exception (same as the static marketing routes): this page has no
+	// client-side data loading — SSR renders the populated form (or the
+	// ?sent=1 success state) and validation failures re-render the form with
+	// the .error-box, so loading/empty skeletons cannot occur.
 	let { data, form } = $props();
 </script>
 

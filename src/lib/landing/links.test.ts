@@ -32,8 +32,8 @@ describe('landing links', () => {
 		expect(AGPL_URL).toBe('https://www.gnu.org/licenses/agpl-3.0.html');
 	});
 
-	it('points the contact link at the commercial-licensing mailbox', () => {
-		expect(CONTACT_URL).toBe('mailto:contact@marketingprowess.simplelogin.com');
+	it('routes the contact link into the opt-in contact form page', () => {
+		expect(CONTACT_URL).toBe('/contact');
 	});
 
 	it('routes every Connect CTA into the real OAuth login flow', () => {

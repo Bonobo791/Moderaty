@@ -1,0 +1,265 @@
+// Moderaty — YouTube Comment Auto-Moderation Tool
+// Copyright (C) 2026 Andrew Philip Weilbacher
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+//
+// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+
+import { eq } from 'drizzle-orm';
+
+const mocks = vi.hoisted(() => ({
+	env: {
+		APP_URL: 'https://moderaty.app',
+		MJ_APIKEY_PUBLIC: 'api-key',
+		MJ_APIKEY_PRIVATE: 'secret-key',
+		MAILJET_FROM_EMAIL: 'no-reply@moderaty.app'
+	} as Record<string, string | undefined>,
+	sendMailjetMessage: vi.fn()
+}));
+
+vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
+
+vi.mock('./mailjet', () => ({
+	sendMailjetMessage: mocks.sendMailjetMessage
+}));
+
+import { setupTestDb, testDb } from './testdb';
+import { contactSubmissions } from './db/schema';
+import {
+	CONTACT_OPT_IN_TEXT,
+	buildVerificationEmail,
+	createOrReusePendingSubmission,
+	parseContactForm,
+	submitContactRequest,
+	verifyContactToken
+} from './contact';
+
+setupTestDb(['contact_submissions']);
+
+const SUBMIT = { name: 'Fan', email: 'Fan@Example.com', consentText: CONTACT_OPT_IN_TEXT, ip: '127.0.0.1', userAgent: 'test' };
+
+async function rows() {
+	return testDb().db.select().from(contactSubmissions);
+}
+
+beforeEach(() => {
+	mocks.env.APP_URL = 'https://moderaty.app';
+	mocks.sendMailjetMessage.mockReset();
+	mocks.sendMailjetMessage.mockResolvedValue({ messageId: 1, messageUuid: 'uuid-1' });
+});
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
+describe('parseContactForm', () => {
+	test('accepts name, e-mail, and the ticked opt-in box; normalizes case and whitespace', () => {
+		const form = new FormData();
+		form.set('name', '  Fan  ');
+		form.set('email', '  Fan@Example.com ');
+		form.set('opt_in', 'on');
+		expect(parseContactForm(form)).toEqual({ ok: true, name: 'Fan', email: 'fan@example.com' });
+	});
+
+	test('rejects an unticked opt-in box even with valid name and e-mail', () => {
+		const form = new FormData();
+		form.set('name', 'Fan');
+		form.set('email', 'fan@example.com');
+		const result = parseContactForm(form);
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error).toMatch(/opt-in/);
+	});
+
+	test('rejects an empty name', () => {
+		const form = new FormData();
+		form.set('name', '   ');
+		form.set('email', 'fan@example.com');
+		form.set('opt_in', 'on');
+		const result = parseContactForm(form);
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error).toMatch(/name/i);
+	});
+
+	test('rejects an over-long name', () => {
+		const form = new FormData();
+		form.set('name', 'x'.repeat(201));
+		form.set('email', 'fan@example.com');
+		form.set('opt_in', 'on');
+		const result = parseContactForm(form);
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error).toMatch(/201|characters/);
+	});
+
+	test.each(['not-an-email', 'a@b', 'a b@example.com', '@example.com', 'a@'])(
+		'rejects invalid e-mail %s',
+		(email) => {
+			const form = new FormData();
+			form.set('name', 'Fan');
+			form.set('email', email);
+			form.set('opt_in', 'on');
+			const result = parseContactForm(form);
+			expect(result.ok).toBe(false);
+			if (!result.ok) expect(result.error).toMatch(/e-mail/i);
+		}
+	);
+
+	test('keeps submitted values on error so the form can re-render them', () => {
+		const form = new FormData();
+		form.set('name', 'Fan');
+		form.set('email', 'bad-address');
+		form.set('opt_in', 'on');
+		const result = parseContactForm(form);
+		expect(result).toEqual({ ok: false, error: expect.any(String), name: 'Fan', email: 'bad-address' });
+	});
+});
+
+describe('createOrReusePendingSubmission', () => {
+	test('inserts a pending row with a random token and 7-day expiry', async () => {
+		const submission = await createOrReusePendingSubmission(SUBMIT);
+		expect(submission.reused).toBe(false);
+		expect(submission.verificationToken).toMatch(/^[0-9a-f]{64}$/);
+		const stored = await rows();
+		expect(stored).toHaveLength(1);
+		expect(stored[0]).toMatchObject({
+			email: 'fan@example.com',
+			name: 'Fan',
+			status: 'pending',
+			consentText: CONTACT_OPT_IN_TEXT,
+			ip: '127.0.0.1',
+			userAgent: 'test'
+		});
+		const ttl = Date.parse(stored[0].expiresAt) - Date.now();
+		expect(ttl).toBeGreaterThan(6.9 * 24 * 60 * 60 * 1000);
+		expect(ttl).toBeLessThanOrEqual(7 * 24 * 60 * 60 * 1000);
+	});
+
+	test('reuses the unexpired pending row for the same e-mail (same token) and refreshes it', async () => {
+		const first = await createOrReusePendingSubmission(SUBMIT);
+		const second = await createOrReusePendingSubmission({ ...SUBMIT, name: 'Fan Updated' });
+		expect(second.reused).toBe(true);
+		expect(second.verificationToken).toBe(first.verificationToken);
+		expect(second.id).toBe(first.id);
+		const stored = await rows();
+		expect(stored).toHaveLength(1);
+		expect(stored[0].name).toBe('Fan Updated');
+	});
+
+	test('creates a NEW row (fresh token) after the pending one expired', async () => {
+		const first = await createOrReusePendingSubmission(SUBMIT);
+		await testDb()
+			.db.update(contactSubmissions)
+			.set({ expiresAt: new Date(Date.now() - 1000).toISOString() })
+			.where(eq(contactSubmissions.id, first.id));
+		const second = await createOrReusePendingSubmission(SUBMIT);
+		expect(second.reused).toBe(false);
+		expect(second.verificationToken).not.toBe(first.verificationToken);
+		expect(await rows()).toHaveLength(2);
+	});
+
+	test('creates a NEW row after the previous one was verified', async () => {
+		const first = await createOrReusePendingSubmission(SUBMIT);
+		await testDb()
+			.db.update(contactSubmissions)
+			.set({ status: 'verified', verifiedAt: new Date().toISOString() })
+			.where(eq(contactSubmissions.id, first.id));
+		const second = await createOrReusePendingSubmission(SUBMIT);
+		expect(second.reused).toBe(false);
+		expect(await rows()).toHaveLength(2);
+	});
+});
+
+describe('verifyContactToken', () => {
+	async function seedPending(token: string, overrides: Partial<typeof SUBMIT> = {}) {
+		// The fixture e-mail is deliberately mixed-case; the domain normalizes
+		// it to lowercase, so queries must use the canonical form.
+		await createOrReusePendingSubmission({ ...SUBMIT, ...overrides });
+		await testDb().db.update(contactSubmissions).set({ verificationToken: token }).where(eq(contactSubmissions.email, 'fan@example.com'));
+		return testDb().db.select().from(contactSubmissions).where(eq(contactSubmissions.verificationToken, token)).get();
+	}
+
+	test('marks a valid unexpired token verified and stamps verified_at', async () => {
+		const row = await seedPending('tok-valid');
+		const result = await verifyContactToken('tok-valid');
+		expect(result).toEqual({ status: 'verified', email: 'fan@example.com' });
+		const stored = await testDb().db.select().from(contactSubmissions).where(eq(contactSubmissions.id, row!.id)).get();
+		expect(stored!.status).toBe('verified');
+		expect(stored!.verifiedAt).toEqual(expect.any(String));
+	});
+
+	test('re-verifying an already verified token reports already_verified (idempotent)', async () => {
+		await seedPending('tok-done');
+		await verifyContactToken('tok-done');
+		const result = await verifyContactToken('tok-done');
+		expect(result).toEqual({ status: 'already_verified', email: 'fan@example.com' });
+	});
+
+	test('reports expired for an unverified token past its expiry', async () => {
+		const row = await seedPending('tok-old');
+		await testDb().db.update(contactSubmissions).set({ expiresAt: new Date(Date.now() - 1000).toISOString() }).where(eq(contactSubmissions.id, row!.id));
+		const result = await verifyContactToken('tok-old');
+		expect(result).toEqual({ status: 'expired', email: 'fan@example.com' });
+		// Expired verification must not flip the row.
+		const stored = await testDb().db.select().from(contactSubmissions).where(eq(contactSubmissions.id, row!.id)).get();
+		expect(stored!.status).toBe('pending');
+	});
+
+	test('reports invalid for an unknown token', async () => {
+		expect(await verifyContactToken('nope')).toEqual({ status: 'invalid' });
+	});
+});
+
+describe('submitContactRequest', () => {
+	test('records the pending row FIRST, then sends the verification e-mail with the APP_URL link', async () => {
+		const result = await submitContactRequest(SUBMIT);
+
+		expect(mocks.sendMailjetMessage).toHaveBeenCalledTimes(1);
+		const sent = mocks.sendMailjetMessage.mock.calls[0][0];
+		expect(sent.toEmail).toBe('fan@example.com');
+		expect(sent.toName).toBe('Fan');
+		expect(sent.subject).toContain('Confirm');
+		const expectedUrl = `https://moderaty.app/contact/verify?token=${result.verificationToken}`;
+		expect(sent.textPart).toContain(expectedUrl);
+		expect(sent.htmlPart).toContain(expectedUrl);
+		expect(result.verifyUrl).toBe(expectedUrl);
+		expect((await rows())[0].status).toBe('pending');
+	});
+
+	test('propagates a send failure loudly and leaves the pending row for retry', async () => {
+		mocks.sendMailjetMessage.mockRejectedValue(new Error('verification e-mail could not be sent (HTTP 500)'));
+		await expect(submitContactRequest(SUBMIT)).rejects.toThrow(/could not be sent/);
+		const stored = await rows();
+		expect(stored).toHaveLength(1);
+		expect(stored[0].status).toBe('pending');
+	});
+
+	test('fails loudly when APP_URL is not configured, before touching the database', async () => {
+		mocks.env.APP_URL = undefined;
+		await expect(submitContactRequest(SUBMIT)).rejects.toThrow(/APP_URL is not configured/);
+		expect(await rows()).toHaveLength(0);
+		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+	});
+});
+
+describe('buildVerificationEmail', () => {
+	test('embeds the link in subject-agnostic text and HTML parts', () => {
+		const email = buildVerificationEmail({ name: 'A & B', verifyUrl: 'https://moderaty.app/contact/verify?token=t' });
+		expect(email.textPart).toContain('https://moderaty.app/contact/verify?token=t');
+		expect(email.htmlPart).toContain('https://moderaty.app/contact/verify?token=t');
+		// HTML-escaped name in the HTML part, raw name in the text part.
+		expect(email.htmlPart).toContain('A &amp; B');
+		expect(email.textPart).toContain('A & B');
+	});
+});

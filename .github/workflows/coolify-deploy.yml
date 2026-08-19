@@ -65,12 +65,16 @@ jobs:
           else
             APP_UUID="$COOLIFY_APP_UUID_DEV"
           fi
-          # --since: ignore deployments created before this push (a force-push
-          # back to a previously deployed commit must still redeploy — codex P2).
-          # For manual dispatch there is no push timestamp, so 'now' forces a
-          # fresh deployment, which is the dispatch's purpose.
+          # --since: ignore deployments created before THIS PUSH (a force-push
+          # back to a previously deployed commit must still redeploy). Anchor to
+          # repository.pushed_at — the push occurrence time — NOT
+          # head_commit.timestamp, which is the COMMIT's own time: a previous
+          # deployment of the same SHA was created after the commit timestamp
+          # but before this push, and would wrongly satisfy the poll (human
+          # review). For manual dispatch there is no push timestamp, so 'now'
+          # forces a fresh deployment, which is the dispatch's purpose.
           if [ "${{ github.event_name }}" = "push" ]; then
-            SINCE="${{ github.event.head_commit.timestamp }}"
+            SINCE="${{ github.event.repository.pushed_at }}"
           else
             SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           fi

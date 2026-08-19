@@ -139,6 +139,12 @@ describe('coolify deploy guarantee', () => {
 		expect(init.headers.Authorization).toBe('Bearer test-token');
 	});
 
+	it('fails loudly with the secret hint when the app UUID is empty', async () => {
+		vi.stubGlobal('fetch', vi.fn());
+		await expect(main(['', COMMIT])).rejects.toThrow(/COOLIFY_APP_UUID_DEV|app-uuid is empty/);
+		expect(fetch).not.toHaveBeenCalled();
+	});
+
 	it('fails loudly on a non-numeric --timeout-sec value instead of silently returning NaN', async () => {
 		vi.stubGlobal('fetch', vi.fn(async () => new Response('[]', { status: 200 })));
 		await expect(main(['--timeout-sec', 'abc', 'app-1', COMMIT])).rejects.toThrow(/--timeout-sec|timeout-sec/);

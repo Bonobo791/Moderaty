@@ -205,8 +205,11 @@ function parseArgs(argv) {
 export async function main(argv = process.argv.slice(2)) {
 	const { fallback, timeoutMs, pollMs, sinceMs, positional } = parseArgs(argv);
 	const [appUuid, expectedCommit] = positional;
-	if (!appUuid || !expectedCommit) {
-		throw new Error('usage: node scripts/coolify-deploy.mjs <app-uuid> <expected-commit> [--fallback] [--timeout-sec N] [--poll-sec N] [--since ISO-8601-or-epoch-seconds]');
+	if (!appUuid) {
+		throw new Error('app-uuid is empty — set the COOLIFY_APP_UUID_DEV / COOLIFY_APP_UUID_PROD repository secret (or pass the application UUID). Usage: node scripts/coolify-deploy.mjs <app-uuid> <expected-commit> [--fallback] [--since ISO-8601-or-epoch-seconds]');
+	}
+	if (!expectedCommit) {
+		throw new Error('expected-commit is empty — pass the pushed commit SHA (github.sha). Usage: node scripts/coolify-deploy.mjs <app-uuid> <expected-commit> [--fallback] [--since ISO-8601-or-epoch-seconds]');
 	}
 	const short = expectedCommit.slice(0, 12);
 	const queued = await verifyDeploymentQueued(appUuid, expectedCommit, { timeoutMs, pollMs, sinceMs });

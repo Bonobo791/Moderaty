@@ -1,1372 +1,1366 @@
 {
-  "version": 1,
-  "metadata": {
-    "source": "auto",
-    "provider": null,
-    "organization": null,
-    "autoFilters": "Critical,High,Warning,Minor,AllSecurity,ErrorProne,Performance,BestPractice,UnusedCode,Compatibility,Complexity,Comprehensibility,CodeStyle,Documentation",
-    "repositoryId": null,
-    "repositoryName": null,
-    "createdAt": "2026-07-29T20:06:34.398Z",
-    "updatedAt": "2026-07-29T20:06:34.398Z",
-    "languages": [
-      "HTML",
-      "JSON",
-      "Javascript",
-      "Markdown",
-      "SQL",
-      "TypeScript",
-      "YAML"
-    ]
-  },
-  "tools": [
-    {
-      "toolId": "Trivy",
-      "patterns": [
-        {
-          "patternId": "Trivy_malicious_packages"
-        },
-        {
-          "patternId": "Trivy_secret"
-        },
-        {
-          "patternId": "Trivy_vulnerability_critical"
-        },
-        {
-          "patternId": "Trivy_vulnerability_high"
-        },
-        {
-          "patternId": "Trivy_vulnerability_medium"
-        },
-        {
-          "patternId": "Trivy_vulnerability_minor"
-        }
-      ]
-    },
-    {
-      "toolId": "Semgrep",
-      "patterns": [
-        {
-          "patternId": "Semgrep_codacy.generic.security.detect-invisible-unicode"
-        },
-        {
-          "patternId": "Semgrep_codacy.generic.sql.from-all-without-orgid"
-        },
-        {
-          "patternId": "Semgrep_codacy.generic.sql.grant-all"
-        },
-        {
-          "patternId": "Semgrep_codacy.generic.sql.grant-select-no-role"
-        },
-        {
-          "patternId": "Semgrep_codacy.generic.sql.lookup-type-without-language-or-apps-fnd"
-        },
-        {
-          "patternId": "Semgrep_codacy.javascript.security.hard-coded-password"
-        },
-        {
-          "patternId": "Semgrep_generic.gradle.security.build-gradle-password-hardcoded.build-gradle-password-hardcoded"
-        },
-        {
-          "patternId": "Semgrep_generic_injection_rule-BiDiTrojanSource"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.adafruit-api-key.adafruit-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.adobe-client-id.adobe-client-id"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.adobe-client-secret.adobe-client-secret"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.age-secret-key.age-secret-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.airtable-api-key.airtable-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.algolia-api-key.algolia-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.alibaba-access-key-id.alibaba-access-key-id"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.alibaba-secret-key.alibaba-secret-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.asana-client-id.asana-client-id"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.asana-client-secret.asana-client-secret"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.atlassian-api-token.atlassian-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.authress-service-client-access-key.authress-service-client-access-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.aws-access-token.aws-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.beamer-api-token.beamer-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.bitbucket-client-id.bitbucket-client-id"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.bitbucket-client-secret.bitbucket-client-secret"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.bittrex-access-key.bittrex-access-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.bittrex-secret-key.bittrex-secret-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.clojars-api-token.clojars-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.cloudflare-api-key.cloudflare-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.cloudflare-global-api-key.cloudflare-global-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.cloudflare-origin-ca-key.cloudflare-origin-ca-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.codecov-access-token.codecov-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.coinbase-access-token.coinbase-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.confluent-access-token.confluent-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.confluent-secret-key.confluent-secret-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.contentful-delivery-api-token.contentful-delivery-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.databricks-api-token.databricks-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.datadog-access-token.datadog-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.defined-networking-api-token.defined-networking-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.digitalocean-access-token.digitalocean-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.digitalocean-pat.digitalocean-pat"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.digitalocean-refresh-token.digitalocean-refresh-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.discord-api-token.discord-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.discord-client-id.discord-client-id"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.discord-client-secret.discord-client-secret"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.doppler-api-token.doppler-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.droneci-access-token.droneci-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.dropbox-api-token.dropbox-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.dropbox-long-lived-api-token.dropbox-long-lived-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.dropbox-short-lived-api-token.dropbox-short-lived-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.duffel-api-token.duffel-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.dynatrace-api-token.dynatrace-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.easypost-api-token.easypost-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.easypost-test-api-token.easypost-test-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.etsy-access-token.etsy-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.facebook-access-token.facebook-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.facebook.facebook"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.facebook-page-access-token.facebook-page-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.facebook-secret.facebook-secret"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.fastly-api-token.fastly-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.finicity-api-token.finicity-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.finicity-client-secret.finicity-client-secret"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.finnhub-access-token.finnhub-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.flickr-access-token.flickr-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.flutterwave-encryption-key.flutterwave-encryption-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.flutterwave-public-key.flutterwave-public-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.flutterwave-secret-key.flutterwave-secret-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.frameio-api-token.frameio-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.freshbooks-access-token.freshbooks-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.gcp-api-key.gcp-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.generic-api-key.generic-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.github-app-token.github-app-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.github-fine-grained-pat.github-fine-grained-pat"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.github-oauth.github-oauth"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.github-pat.github-pat"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.github-refresh-token.github-refresh-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.gitlab-pat.gitlab-pat"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.gitlab-ptt.gitlab-ptt"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.gitlab-rrt.gitlab-rrt"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.gitter-access-token.gitter-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.gocardless-api-token.gocardless-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.grafana-api-key.grafana-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.grafana-cloud-api-token.grafana-cloud-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.grafana-service-account-token.grafana-service-account-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.harness-api-key.harness-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.hashicorp-tf-api-token.hashicorp-tf-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.hashicorp-tf-password.hashicorp-tf-password"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.heroku-api-key.heroku-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.hubspot-api-key.hubspot-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.huggingface-access-token.huggingface-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.huggingface-organization-api-token.huggingface-organization-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.infracost-api-token.infracost-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.intercom-api-key.intercom-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.intra42-client-secret.intra42-client-secret"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.jfrog-api-key.jfrog-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.jfrog-identity-token.jfrog-identity-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.jwt-base64.jwt-base64"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.jwt.jwt"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.kraken-access-token.kraken-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.kucoin-access-token.kucoin-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.kucoin-secret-key.kucoin-secret-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.launchdarkly-access-token.launchdarkly-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.linear-api-key.linear-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.linear-client-secret.linear-client-secret"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.linkedin-client-id.linkedin-client-id"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.linkedin-client-secret.linkedin-client-secret"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.lob-api-key.lob-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.lob-pub-api-key.lob-pub-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.mailchimp-api-key.mailchimp-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.mailgun-private-api-token.mailgun-private-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.mailgun-pub-key.mailgun-pub-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.mailgun-signing-key.mailgun-signing-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.mapbox-api-token.mapbox-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.mattermost-access-token.mattermost-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.messagebird-api-token.messagebird-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.messagebird-client-id.messagebird-client-id"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.microsoft-teams-webhook.microsoft-teams-webhook"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.netlify-access-token.netlify-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.new-relic-browser-api-token.new-relic-browser-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.new-relic-insert-key.new-relic-insert-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.new-relic-user-api-id.new-relic-user-api-id"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.new-relic-user-api-key.new-relic-user-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.npm-access-token.npm-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.nytimes-access-token.nytimes-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.okta-access-token.okta-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.openai-api-key.openai-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.plaid-api-token.plaid-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.plaid-client-id.plaid-client-id"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.plaid-secret-key.plaid-secret-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.planetscale-api-token.planetscale-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.planetscale-oauth-token.planetscale-oauth-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.planetscale-password.planetscale-password"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.postman-api-token.postman-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.prefect-api-token.prefect-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.private-key.private-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.pulumi-api-token.pulumi-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.pypi-upload-token.pypi-upload-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.rapidapi-access-token.rapidapi-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.readme-api-token.readme-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.rubygems-api-token.rubygems-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.scalingo-api-token.scalingo-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.sendbird-access-id.sendbird-access-id"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.sendbird-access-token.sendbird-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.sendgrid-api-token.sendgrid-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.sendinblue-api-token.sendinblue-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.sentry-access-token.sentry-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.shippo-api-token.shippo-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.shopify-access-token.shopify-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.shopify-custom-access-token.shopify-custom-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.shopify-private-app-access-token.shopify-private-app-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.shopify-shared-secret.shopify-shared-secret"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.sidekiq-secret.sidekiq-secret"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.sidekiq-sensitive-url.sidekiq-sensitive-url"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.slack-app-token.slack-app-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.slack-bot-token.slack-bot-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.slack-config-access-token.slack-config-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.slack-config-refresh-token.slack-config-refresh-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.slack-legacy-bot-token.slack-legacy-bot-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.slack-legacy-token.slack-legacy-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.slack-legacy-workspace-token.slack-legacy-workspace-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.slack-user-token.slack-user-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.slack-webhook-url.slack-webhook-url"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.snyk-api-token.snyk-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.square-access-token.square-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.squarespace-access-token.squarespace-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.stripe-access-token.stripe-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.sumologic-access-id.sumologic-access-id"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.sumologic-access-token.sumologic-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.telegram-bot-api-token.telegram-bot-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.travisci-access-token.travisci-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.twilio-api-key.twilio-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.twitch-api-token.twitch-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.twitter-access-secret.twitter-access-secret"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.twitter-access-token.twitter-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.twitter-api-key.twitter-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.twitter-api-secret.twitter-api-secret"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.twitter-bearer-token.twitter-bearer-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.typeform-api-token.typeform-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.vault-batch-token.vault-batch-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.vault-service-token.vault-service-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.yandex-access-token.yandex-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.yandex-api-key.yandex-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.yandex-aws-access-token.yandex-aws-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.gitleaks.zendesk-secret-key.zendesk-secret-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-amazon-mws-auth-token.detected-amazon-mws-auth-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-artifactory-password.detected-artifactory-password"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-artifactory-token.detected-artifactory-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-aws-access-key-id-value.detected-aws-access-key-id-value"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-aws-account-id.detected-aws-account-id"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-aws-appsync-graphql-key.detected-aws-appsync-graphql-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-aws-secret-access-key.detected-aws-secret-access-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-aws-session-token.detected-aws-session-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-bcrypt-hash.detected-bcrypt-hash"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-codeclimate.detected-codeclimate"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-etc-shadow.detected-etc-shadow"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-facebook-access-token.detected-facebook-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-facebook-oauth.detected-facebook-oauth"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-generic-api-key.detected-generic-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-generic-secret.detected-generic-secret"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-github-token.detected-github-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-google-api-key.detected-google-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-google-cloud-api-key.detected-google-cloud-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-google-gcm-service-account.detected-google-gcm-service-account"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-google-oauth-access-token.detected-google-oauth-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-google-oauth.detected-google-oauth-url"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-heroku-api-key.detected-heroku-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-hockeyapp.detected-hockeyapp"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-jwt-token.detected-jwt-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-kolide-api-key.detected-kolide-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-mailchimp-api-key.detected-mailchimp-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-mailgun-api-key.detected-mailgun-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-npm-registry-auth-token.detected-npm-registry-auth-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-onfido-live-api-token.detected-onfido-live-api-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-outlook-team.detected-outlook-team"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-paypal-braintree-access-token.detected-paypal-braintree-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-pgp-private-key-block.detected-pgp-private-key-block"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-picatic-api-key.detected-picatic-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-private-key.detected-private-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-sauce-token.detected-sauce-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-sendgrid-api-key.detected-sendgrid-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-slack-token.detected-slack-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-slack-webhook.detected-slack-webhook"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-snyk-api-key.detected-snyk-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-softlayer-api-key.detected-softlayer-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-sonarqube-docs-api-key.detected-sonarqube-docs-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-square-access-token.detected-square-access-token"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-square-oauth-secret.detected-square-oauth-secret"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-ssh-password.detected-ssh-password"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-stripe-api-key.detected-stripe-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-stripe-restricted-api-key.detected-stripe-restricted-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-telegram-bot-api-key.detected-telegram-bot-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-twilio-api-key.detected-twilio-api-key"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.detected-username-and-password-in-uri.detected-username-and-password-in-uri"
-        },
-        {
-          "patternId": "Semgrep_generic.secrets.security.google-maps-apikeyleak.google-maps-apikeyleak"
-        },
-        {
-          "patternId": "Semgrep_generic.unicode.security.bidi.contains-bidirectional-characters"
-        },
-        {
-          "patternId": "Semgrep_javascript.ajv.security.audit.ajv-allerrors-true.ajv-allerrors-true"
-        },
-        {
-          "patternId": "Semgrep_javascript.apollo.security.apollo-axios-ssrf.apollo-axios-ssrf"
-        },
-        {
-          "patternId": "Semgrep_javascript.argon2.security.unsafe-argon2-config.unsafe-argon2-config"
-        },
-        {
-          "patternId": "Semgrep_javascript.audit.detect-replaceall-sanitization.detect-replaceall-sanitization"
-        },
-        {
-          "patternId": "Semgrep_javascript.aws-lambda.security.detect-child-process.detect-child-process"
-        },
-        {
-          "patternId": "Semgrep_javascript.aws-lambda.security.dynamodb-request-object.dynamodb-request-object"
-        },
-        {
-          "patternId": "Semgrep_javascript.aws-lambda.security.knex-sqli.knex-sqli"
-        },
-        {
-          "patternId": "Semgrep_javascript.aws-lambda.security.mysql-sqli.mysql-sqli"
-        },
-        {
-          "patternId": "Semgrep_javascript.aws-lambda.security.pg-sqli.pg-sqli"
-        },
-        {
-          "patternId": "Semgrep_javascript.aws-lambda.security.sequelize-sqli.sequelize-sqli"
-        },
-        {
-          "patternId": "Semgrep_javascript.aws-lambda.security.tainted-eval.tainted-eval"
-        },
-        {
-          "patternId": "Semgrep_javascript.aws-lambda.security.tainted-html-response.tainted-html-response"
-        },
-        {
-          "patternId": "Semgrep_javascript.aws-lambda.security.tainted-html-string.tainted-html-string"
-        },
-        {
-          "patternId": "Semgrep_javascript.aws-lambda.security.tainted-sql-string.tainted-sql-string"
-        },
-        {
-          "patternId": "Semgrep_javascript.aws-lambda.security.vm-runincontext-injection.vm-runincontext-injection"
-        },
-        {
-          "patternId": "Semgrep_javascript.bluebird.security.audit.tofastproperties-code-execution.tofastproperties-code-execution"
-        },
-        {
-          "patternId": "Semgrep_javascript.browser.security.dom-based-xss.dom-based-xss"
-        },
-        {
-          "patternId": "Semgrep_javascript.browser.security.eval-detected.eval-detected"
-        },
-        {
-          "patternId": "Semgrep_javascript.browser.security.insecure-document-method.insecure-document-method"
-        },
-        {
-          "patternId": "Semgrep_javascript.browser.security.insecure-innerhtml.insecure-innerhtml"
-        },
-        {
-          "patternId": "Semgrep_javascript.browser.security.insufficient-postmessage-origin-validation.insufficient-postmessage-origin-validation"
-        },
-        {
-          "patternId": "Semgrep_javascript.browser.security.open-redirect-from-function.js-open-redirect-from-function"
-        },
-        {
-          "patternId": "Semgrep_javascript.browser.security.open-redirect.js-open-redirect"
-        },
-        {
-          "patternId": "Semgrep_javascript.browser.security.raw-html-concat.raw-html-concat"
-        },
-        {
-          "patternId": "Semgrep_javascript.browser.security.raw-html-join.raw-html-join"
-        },
-        {
-          "patternId": "Semgrep_javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration"
-        },
-        {
-          "patternId": "Semgrep_javascript_buf_rule-buffer-noassert-read"
-        },
-        {
-          "patternId": "Semgrep_javascript_buf_rule-buffer-noassert-write"
-        },
-        {
-          "patternId": "Semgrep_javascript_buf_rule-detect-new-buffer"
-        },
-        {
-          "patternId": "Semgrep_javascript.chrome-remote-interface.security.audit.chrome-remote-interface-compilescript-injection.chrome-remote-interface-compilescript-injection"
-        },
-        {
-          "patternId": "Semgrep_javascript_crypto_rule-NodeLibcurlSSLVerificationDisable"
-        },
-        {
-          "patternId": "Semgrep_javascript.deno.security.audit.deno-dangerous-run.deno-dangerous-run"
-        },
-        {
-          "patternId": "Semgrep_javascript_dos_rule-non-literal-regexp"
-        },
-        {
-          "patternId": "Semgrep_javascript_eval_rule-eval-with-expression"
-        },
-        {
-          "patternId": "Semgrep_javascript_exec_rule-child-process"
-        },
-        {
-          "patternId": "Semgrep_javascript.fbjs.security.audit.insecure-createnodesfrommarkup.insecure-createnodesfrommarkup"
-        },
-        {
-          "patternId": "Semgrep_javascript.grpc.security.grpc-nodejs-insecure-connection.grpc-nodejs-insecure-connection"
-        },
-        {
-          "patternId": "Semgrep_javascript.intercom.security.audit.intercom-settings-user-identifier-without-user-hash.intercom-settings-user-identifier-without-user-hash"
-        },
-        {
-          "patternId": "Semgrep_javascript.jose.security.audit.jose-exposed-data.jose-exposed-data"
-        },
-        {
-          "patternId": "Semgrep_javascript.jose.security.jwt-hardcode.hardcoded-jwt-secret"
-        },
-        {
-          "patternId": "Semgrep_javascript.jose.security.jwt-none-alg.jwt-none-alg"
-        },
-        {
-          "patternId": "Semgrep_javascript.jsonwebtoken.security.audit.jwt-decode-without-verify.jwt-decode-without-verify"
-        },
-        {
-          "patternId": "Semgrep_javascript.jsonwebtoken.security.audit.jwt-exposed-data.jwt-exposed-data"
-        },
-        {
-          "patternId": "Semgrep_javascript.jsonwebtoken.security.jwt-hardcode.hardcoded-jwt-secret"
-        },
-        {
-          "patternId": "Semgrep_javascript.jsonwebtoken.security.jwt-none-alg.jwt-none-alg"
-        },
-        {
-          "patternId": "Semgrep_javascript.jwt-simple.security.jwt-simple-noverify.jwt-simple-noverify"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.audit.code-string-concat.code-string-concat"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.audit.dangerous-spawn-shell.dangerous-spawn-shell"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.audit.detect-non-literal-fs-filename.detect-non-literal-fs-filename"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.audit.detect-non-literal-require.detect-non-literal-require"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.audit.detect-redos.detect-redos"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.audit.hardcoded-hmac-key.hardcoded-hmac-key"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.audit.incomplete-sanitization.incomplete-sanitization"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.audit.md5-used-as-password.md5-used-as-password"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.audit.prototype-pollution.prototype-pollution-assignment.prototype-pollution-assignment"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.audit.prototype-pollution.prototype-pollution-loop.prototype-pollution-loop"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.audit.spawn-shell-true.spawn-shell-true"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.audit.sqli.node-knex-sqli.node-knex-sqli"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.audit.sqli.node-mssql-sqli.node-mssql-sqli"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.audit.sqli.node-mysql-sqli.node-mysql-sqli"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.audit.sqli.node-postgres-sqli.node-postgres-sqli"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.audit.unknown-value-with-script-tag.unknown-value-with-script-tag"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.audit.unsafe-dynamic-method.unsafe-dynamic-method"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.audit.unsafe-formatstring.unsafe-formatstring"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.detect-buffer-noassert.detect-buffer-noassert"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.detect-child-process.detect-child-process"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.detect-disable-mustache-escape.detect-disable-mustache-escape"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.detect-eval-with-expression.detect-eval-with-expression"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.detect-no-csrf-before-method-override.detect-no-csrf-before-method-override"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.detect-pseudorandombytes.detect-pseudorandombytes"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.html-in-template-string.html-in-template-string"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.insecure-object-assign.insecure-object-assign"
-        },
-        {
-          "patternId": "Semgrep_javascript.lang.security.spawn-git-clone.spawn-git-clone"
-        },
-        {
-          "patternId": "Semgrep_javascript.monaco-editor.security.audit.monaco-hover-htmlsupport.monaco-hover-htmlsupport"
-        },
-        {
-          "patternId": "Semgrep_javascript.node-crypto.security.aead-no-final.aead-no-final"
-        },
-        {
-          "patternId": "Semgrep_javascript.node-crypto.security.create-de-cipher-no-iv.create-de-cipher-no-iv"
-        },
-        {
-          "patternId": "Semgrep_javascript.node-crypto.security.gcm-no-tag-length.gcm-no-tag-length"
-        },
-        {
-          "patternId": "Semgrep_javascript.node-expat.security.audit.expat-xxe.expat-xxe"
-        },
-        {
-          "patternId": "Semgrep_javascript.passport-jwt.security.passport-hardcode.hardcoded-passport-secret"
-        },
-        {
-          "patternId": "Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename"
-        },
-        {
-          "patternId": "Semgrep_javascript.phantom.security.audit.phantom-injection.phantom-injection"
-        },
-        {
-          "patternId": "Semgrep_javascript.puppeteer.security.audit.puppeteer-evaluate-arg-injection.puppeteer-evaluate-arg-injection"
-        },
-        {
-          "patternId": "Semgrep_javascript.puppeteer.security.audit.puppeteer-evaluate-code-injection.puppeteer-evaluate-code-injection"
-        },
-        {
-          "patternId": "Semgrep_javascript.puppeteer.security.audit.puppeteer-exposed-chrome-devtools.puppeteer-exposed-chrome-devtools"
-        },
-        {
-          "patternId": "Semgrep_javascript.puppeteer.security.audit.puppeteer-goto-injection.puppeteer-goto-injection"
-        },
-        {
-          "patternId": "Semgrep_javascript.puppeteer.security.audit.puppeteer-setcontent-injection.puppeteer-setcontent-injection"
-        },
-        {
-          "patternId": "Semgrep_javascript_random_rule-pseudo-random-bytes"
-        },
-        {
-          "patternId": "Semgrep_javascript_react_rule-dangerouslysetinnerhtml"
-        },
-        {
-          "patternId": "Semgrep_javascript_require_rule-non-literal-require"
-        },
-        {
-          "patternId": "Semgrep_javascript.sandbox.security.audit.sandbox-code-injection.sandbox-code-injection"
-        },
-        {
-          "patternId": "Semgrep_javascript.sax.security.audit.sax-xxe.sax-xxe"
-        },
-        {
-          "patternId": "Semgrep_javascript.sequelize.security.audit.sequelize-enforce-tls.sequelize-enforce-tls"
-        },
-        {
-          "patternId": "Semgrep_javascript.sequelize.security.audit.sequelize-injection-express.express-sequelize-injection"
-        },
-        {
-          "patternId": "Semgrep_javascript.sequelize.security.audit.sequelize-raw-query.sequelize-raw-query"
-        },
-        {
-          "patternId": "Semgrep_javascript.sequelize.security.audit.sequelize-tls-disabled-cert-validation.sequelize-tls-disabled-cert-validation"
-        },
-        {
-          "patternId": "Semgrep_javascript.sequelize.security.audit.sequelize-weak-tls-version.sequelize-weak-tls-version"
-        },
-        {
-          "patternId": "Semgrep_javascript.serialize-javascript.security.audit.unsafe-serialize-javascript.unsafe-serialize-javascript"
-        },
-        {
-          "patternId": "Semgrep_javascript.shelljs.security.shelljs-exec-injection.shelljs-exec-injection"
-        },
-        {
-          "patternId": "Semgrep_javascript.thenify.security.audit.multiargs-code-execution.multiargs-code-execution"
-        },
-        {
-          "patternId": "Semgrep_javascript_timing_rule-possible-timing-attacks"
-        },
-        {
-          "patternId": "Semgrep_javascript.vm2.security.audit.vm2-code-injection.vm2-code-injection"
-        },
-        {
-          "patternId": "Semgrep_javascript.vm2.security.audit.vm2-context-injection.vm2-context-injection"
-        },
-        {
-          "patternId": "Semgrep_javascript.wkhtmltoimage.security.audit.wkhtmltoimage-injection.wkhtmltoimage-injection"
-        },
-        {
-          "patternId": "Semgrep_javascript.wkhtmltopdf.security.audit.wkhtmltopdf-injection.wkhtmltopdf-injection"
-        },
-        {
-          "patternId": "Semgrep_javascript.xml2json.security.audit.xml2json-xxe.xml2json-xxe"
-        },
-        {
-          "patternId": "Semgrep_javascript_xss_rule-mustache-escape"
-        },
-        {
-          "patternId": "Semgrep_json.aws.security.public-s3-bucket.public-s3-bucket"
-        },
-        {
-          "patternId": "Semgrep_json.aws.security.public-s3-policy-statement.public-s3-policy-statement"
-        },
-        {
-          "patternId": "Semgrep_json.aws.security.wildcard-assume-role.wildcard-assume-role"
-        },
-        {
-          "patternId": "Semgrep_json.npm.security.package-dependencies-check.package-dependencies-check"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_crypto_rule-node-aes-ecb"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_crypto_rule-node-aes-noiv"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_crypto_rule-node-insecure-random-generator"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_crypto_rule-node-md5"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_crypto_rule-node-sha1"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_crypto_rule-node-timing-attack"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_crypto_rule-node-tls-reject"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_crypto_rule-node-weak-crypto"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_database_rule-node-knex-sqli-injection"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_database_rule-node-nosqli-injection"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_database_rule-node-nosqli-js-injection"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_database_rule-node-sqli-injection"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_database_rule-sequelize-tls"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_database_rule-sequelize-tls-cert-validation"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_database_rule-sequelize-weak-tls"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_dos_rule-layer7-object-dos"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_dos_rule-regex-dos"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_electronjs_rule-electron-allow-http"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_electronjs_rule-electron-blink-integration"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_electronjs_rule-electron-context-isolation"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_electronjs_rule-electron-disable-websecurity"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_electronjs_rule-electron-nodejs-integration"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-eval-nodejs"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-eval-require"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-grpc-insecure-connection"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-node-deserialize"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-sandbox-code-injection"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-serializetojs-deserialize"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-server-side-template-injection"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-vm2-code-injection"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-vm2-context-injection"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-vm-code-injection"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-vm-compilefunction-injection"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-vm-runincontext-injection"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-vm-runinnewcontext-injection"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-yaml-deserialize"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_exec_rule-shelljs-os-command-exec"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-cookie-session-default"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-cookie-session-no-domain"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-cookie-session-no-httponly"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-cookie-session-no-maxage"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-cookie-session-no-path"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-cookie-session-no-samesite"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-cookie-session-no-secure"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-express-cors"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-generic-cors"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-generic-header-injection"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-header-xss-generic"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-header-xss-lusca"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-helmet-feature-disabled"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-host-header-injection"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_jwt_rule-hardcoded-jwt-secret"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_jwt_rule-jwt-exposed-credentials"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_jwt_rule-jwt-exposed-data"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_jwt_rule-jwt-express-hardcoded"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_jwt_rule-jwt-not-revoked"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_jwt_rule-node-jwt-none-algorithm"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_redirect_rule-express-open-redirect"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_redirect_rule-express-open-redirect2"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_ssrf_rule-node-ssrf"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_ssrf_rule-phantom-ssrf"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_ssrf_rule-playwright-ssrf"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_ssrf_rule-puppeteer-ssrf"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_ssrf_rule-wkhtmltoimage-ssrf"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_ssrf_rule-wkhtmltopdf-ssrf"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_traversal_rule-admzip-path-overwrite"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_traversal_rule-express-lfr"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_traversal_rule-express-lfr-warning"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_traversal_rule-generic-path-traversal"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_traversal_rule-join-resolve-path-traversal"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_traversal_rule-tar-path-overwrite"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_traversal_rule-zip-path-overwrite"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_xml_rule-node-entity-expansion"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_xml_rule-node-xpath-injection"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_xml_rule-node-xxe"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_xml_rule-xxe-expat"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_xss_rule-express-xss"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_xss_rule-handlebars-noescape"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_xss_rule-handlebars-safestring"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_xss_rule-squirrelly-autoescape"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_xss_rule-xss-disable-mustache-escape"
-        },
-        {
-          "patternId": "Semgrep_rules_lgpl_javascript_xss_rule-xss-serialize-javascript"
-        },
-        {
-          "patternId": "Semgrep_typescript.aws-cdk.security.audit.awscdk-bucket-encryption.awscdk-bucket-encryption"
-        },
-        {
-          "patternId": "Semgrep_typescript.aws-cdk.security.audit.awscdk-bucket-enforcessl.aws-cdk-bucket-enforcessl"
-        },
-        {
-          "patternId": "Semgrep_typescript.aws-cdk.security.audit.awscdk-sqs-unencryptedqueue.awscdk-sqs-unencryptedqueue"
-        },
-        {
-          "patternId": "Semgrep_typescript.aws-cdk.security.awscdk-bucket-grantpublicaccessmethod.awscdk-bucket-grantpublicaccessmethod"
-        },
-        {
-          "patternId": "Semgrep_typescript.aws-cdk.security.awscdk-codebuild-project-public.awscdk-codebuild-project-public"
-        },
-        {
-          "patternId": "Semgrep_typescript.lang.security.audit.cors-regex-wildcard.cors-regex-wildcard"
-        }
-      ],
-      "exclude": [
-        "**/*.test.ts"
-      ]
-    },
-    {
-      "toolId": "Biome",
-      "localConfigurationFile": "biome.json",
-      "useLocalConfigurationFile": true,
-      "patterns": []
-    }
-  ],
-  "exclude": [
-    "svelte.config.js",
-    ".svelte-kit/**",
-    "build/**",
-    "node_modules/**"
+ "version": 1,
+ "metadata": {
+  "source": "auto",
+  "provider": null,
+  "organization": null,
+  "autoFilters": "Critical,High,Warning,Minor,AllSecurity,ErrorProne,Performance,BestPractice,UnusedCode,Compatibility,Complexity,Comprehensibility,CodeStyle,Documentation",
+  "repositoryId": null,
+  "repositoryName": null,
+  "createdAt": "2026-07-29T20:06:34.398Z",
+  "updatedAt": "2026-07-29T20:06:34.398Z",
+  "languages": [
+   "HTML",
+   "JSON",
+   "Javascript",
+   "Markdown",
+   "SQL",
+   "TypeScript",
+   "YAML"
   ]
+ },
+ "tools": [
+  {
+   "toolId": "Trivy",
+   "patterns": [
+    {
+     "patternId": "Trivy_malicious_packages"
+    },
+    {
+     "patternId": "Trivy_secret"
+    },
+    {
+     "patternId": "Trivy_vulnerability_critical"
+    },
+    {
+     "patternId": "Trivy_vulnerability_high"
+    },
+    {
+     "patternId": "Trivy_vulnerability_medium"
+    },
+    {
+     "patternId": "Trivy_vulnerability_minor"
+    }
+   ]
+  },
+  {
+   "toolId": "Semgrep",
+   "patterns": [
+    {
+     "patternId": "Semgrep_codacy.generic.security.detect-invisible-unicode"
+    },
+    {
+     "patternId": "Semgrep_codacy.generic.sql.from-all-without-orgid"
+    },
+    {
+     "patternId": "Semgrep_codacy.generic.sql.grant-all"
+    },
+    {
+     "patternId": "Semgrep_codacy.generic.sql.grant-select-no-role"
+    },
+    {
+     "patternId": "Semgrep_codacy.generic.sql.lookup-type-without-language-or-apps-fnd"
+    },
+    {
+     "patternId": "Semgrep_codacy.javascript.security.hard-coded-password"
+    },
+    {
+     "patternId": "Semgrep_generic.gradle.security.build-gradle-password-hardcoded.build-gradle-password-hardcoded"
+    },
+    {
+     "patternId": "Semgrep_generic_injection_rule-BiDiTrojanSource"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.adafruit-api-key.adafruit-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.adobe-client-id.adobe-client-id"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.adobe-client-secret.adobe-client-secret"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.age-secret-key.age-secret-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.airtable-api-key.airtable-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.algolia-api-key.algolia-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.alibaba-access-key-id.alibaba-access-key-id"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.alibaba-secret-key.alibaba-secret-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.asana-client-id.asana-client-id"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.asana-client-secret.asana-client-secret"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.atlassian-api-token.atlassian-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.authress-service-client-access-key.authress-service-client-access-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.aws-access-token.aws-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.beamer-api-token.beamer-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.bitbucket-client-id.bitbucket-client-id"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.bitbucket-client-secret.bitbucket-client-secret"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.bittrex-access-key.bittrex-access-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.bittrex-secret-key.bittrex-secret-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.clojars-api-token.clojars-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.cloudflare-api-key.cloudflare-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.cloudflare-global-api-key.cloudflare-global-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.cloudflare-origin-ca-key.cloudflare-origin-ca-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.codecov-access-token.codecov-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.coinbase-access-token.coinbase-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.confluent-access-token.confluent-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.confluent-secret-key.confluent-secret-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.contentful-delivery-api-token.contentful-delivery-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.databricks-api-token.databricks-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.datadog-access-token.datadog-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.defined-networking-api-token.defined-networking-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.digitalocean-access-token.digitalocean-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.digitalocean-pat.digitalocean-pat"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.digitalocean-refresh-token.digitalocean-refresh-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.discord-api-token.discord-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.discord-client-id.discord-client-id"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.discord-client-secret.discord-client-secret"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.doppler-api-token.doppler-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.droneci-access-token.droneci-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.dropbox-api-token.dropbox-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.dropbox-long-lived-api-token.dropbox-long-lived-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.dropbox-short-lived-api-token.dropbox-short-lived-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.duffel-api-token.duffel-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.dynatrace-api-token.dynatrace-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.easypost-api-token.easypost-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.easypost-test-api-token.easypost-test-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.etsy-access-token.etsy-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.facebook-access-token.facebook-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.facebook.facebook"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.facebook-page-access-token.facebook-page-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.facebook-secret.facebook-secret"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.fastly-api-token.fastly-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.finicity-api-token.finicity-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.finicity-client-secret.finicity-client-secret"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.finnhub-access-token.finnhub-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.flickr-access-token.flickr-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.flutterwave-encryption-key.flutterwave-encryption-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.flutterwave-public-key.flutterwave-public-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.flutterwave-secret-key.flutterwave-secret-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.frameio-api-token.frameio-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.freshbooks-access-token.freshbooks-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.gcp-api-key.gcp-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.generic-api-key.generic-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.github-app-token.github-app-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.github-fine-grained-pat.github-fine-grained-pat"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.github-oauth.github-oauth"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.github-pat.github-pat"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.github-refresh-token.github-refresh-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.gitlab-pat.gitlab-pat"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.gitlab-ptt.gitlab-ptt"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.gitlab-rrt.gitlab-rrt"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.gitter-access-token.gitter-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.gocardless-api-token.gocardless-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.grafana-api-key.grafana-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.grafana-cloud-api-token.grafana-cloud-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.grafana-service-account-token.grafana-service-account-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.harness-api-key.harness-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.hashicorp-tf-api-token.hashicorp-tf-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.hashicorp-tf-password.hashicorp-tf-password"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.heroku-api-key.heroku-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.hubspot-api-key.hubspot-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.huggingface-access-token.huggingface-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.huggingface-organization-api-token.huggingface-organization-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.infracost-api-token.infracost-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.intercom-api-key.intercom-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.intra42-client-secret.intra42-client-secret"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.jfrog-api-key.jfrog-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.jfrog-identity-token.jfrog-identity-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.jwt-base64.jwt-base64"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.jwt.jwt"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.kraken-access-token.kraken-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.kucoin-access-token.kucoin-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.kucoin-secret-key.kucoin-secret-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.launchdarkly-access-token.launchdarkly-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.linear-api-key.linear-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.linear-client-secret.linear-client-secret"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.linkedin-client-id.linkedin-client-id"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.linkedin-client-secret.linkedin-client-secret"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.lob-api-key.lob-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.lob-pub-api-key.lob-pub-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.mailchimp-api-key.mailchimp-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.mailgun-private-api-token.mailgun-private-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.mailgun-pub-key.mailgun-pub-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.mailgun-signing-key.mailgun-signing-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.mapbox-api-token.mapbox-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.mattermost-access-token.mattermost-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.messagebird-api-token.messagebird-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.messagebird-client-id.messagebird-client-id"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.microsoft-teams-webhook.microsoft-teams-webhook"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.netlify-access-token.netlify-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.new-relic-browser-api-token.new-relic-browser-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.new-relic-insert-key.new-relic-insert-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.new-relic-user-api-id.new-relic-user-api-id"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.new-relic-user-api-key.new-relic-user-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.npm-access-token.npm-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.nytimes-access-token.nytimes-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.okta-access-token.okta-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.openai-api-key.openai-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.plaid-api-token.plaid-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.plaid-client-id.plaid-client-id"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.plaid-secret-key.plaid-secret-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.planetscale-api-token.planetscale-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.planetscale-oauth-token.planetscale-oauth-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.planetscale-password.planetscale-password"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.postman-api-token.postman-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.prefect-api-token.prefect-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.private-key.private-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.pulumi-api-token.pulumi-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.pypi-upload-token.pypi-upload-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.rapidapi-access-token.rapidapi-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.readme-api-token.readme-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.rubygems-api-token.rubygems-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.scalingo-api-token.scalingo-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.sendbird-access-id.sendbird-access-id"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.sendbird-access-token.sendbird-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.sendgrid-api-token.sendgrid-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.sendinblue-api-token.sendinblue-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.sentry-access-token.sentry-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.shippo-api-token.shippo-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.shopify-access-token.shopify-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.shopify-custom-access-token.shopify-custom-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.shopify-private-app-access-token.shopify-private-app-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.shopify-shared-secret.shopify-shared-secret"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.sidekiq-secret.sidekiq-secret"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.sidekiq-sensitive-url.sidekiq-sensitive-url"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.slack-app-token.slack-app-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.slack-bot-token.slack-bot-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.slack-config-access-token.slack-config-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.slack-config-refresh-token.slack-config-refresh-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.slack-legacy-bot-token.slack-legacy-bot-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.slack-legacy-token.slack-legacy-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.slack-legacy-workspace-token.slack-legacy-workspace-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.slack-user-token.slack-user-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.slack-webhook-url.slack-webhook-url"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.snyk-api-token.snyk-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.square-access-token.square-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.squarespace-access-token.squarespace-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.stripe-access-token.stripe-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.sumologic-access-id.sumologic-access-id"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.sumologic-access-token.sumologic-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.telegram-bot-api-token.telegram-bot-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.travisci-access-token.travisci-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.twilio-api-key.twilio-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.twitch-api-token.twitch-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.twitter-access-secret.twitter-access-secret"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.twitter-access-token.twitter-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.twitter-api-key.twitter-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.twitter-api-secret.twitter-api-secret"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.twitter-bearer-token.twitter-bearer-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.typeform-api-token.typeform-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.vault-batch-token.vault-batch-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.vault-service-token.vault-service-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.yandex-access-token.yandex-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.yandex-api-key.yandex-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.yandex-aws-access-token.yandex-aws-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.gitleaks.zendesk-secret-key.zendesk-secret-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-amazon-mws-auth-token.detected-amazon-mws-auth-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-artifactory-password.detected-artifactory-password"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-artifactory-token.detected-artifactory-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-aws-access-key-id-value.detected-aws-access-key-id-value"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-aws-account-id.detected-aws-account-id"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-aws-appsync-graphql-key.detected-aws-appsync-graphql-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-aws-secret-access-key.detected-aws-secret-access-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-aws-session-token.detected-aws-session-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-bcrypt-hash.detected-bcrypt-hash"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-codeclimate.detected-codeclimate"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-etc-shadow.detected-etc-shadow"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-facebook-access-token.detected-facebook-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-facebook-oauth.detected-facebook-oauth"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-generic-api-key.detected-generic-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-generic-secret.detected-generic-secret"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-github-token.detected-github-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-google-api-key.detected-google-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-google-cloud-api-key.detected-google-cloud-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-google-gcm-service-account.detected-google-gcm-service-account"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-google-oauth-access-token.detected-google-oauth-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-google-oauth.detected-google-oauth-url"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-heroku-api-key.detected-heroku-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-hockeyapp.detected-hockeyapp"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-jwt-token.detected-jwt-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-kolide-api-key.detected-kolide-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-mailchimp-api-key.detected-mailchimp-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-mailgun-api-key.detected-mailgun-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-npm-registry-auth-token.detected-npm-registry-auth-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-onfido-live-api-token.detected-onfido-live-api-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-outlook-team.detected-outlook-team"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-paypal-braintree-access-token.detected-paypal-braintree-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-pgp-private-key-block.detected-pgp-private-key-block"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-picatic-api-key.detected-picatic-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-private-key.detected-private-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-sauce-token.detected-sauce-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-sendgrid-api-key.detected-sendgrid-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-slack-token.detected-slack-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-slack-webhook.detected-slack-webhook"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-snyk-api-key.detected-snyk-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-softlayer-api-key.detected-softlayer-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-sonarqube-docs-api-key.detected-sonarqube-docs-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-square-access-token.detected-square-access-token"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-square-oauth-secret.detected-square-oauth-secret"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-ssh-password.detected-ssh-password"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-stripe-api-key.detected-stripe-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-stripe-restricted-api-key.detected-stripe-restricted-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-telegram-bot-api-key.detected-telegram-bot-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-twilio-api-key.detected-twilio-api-key"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.detected-username-and-password-in-uri.detected-username-and-password-in-uri"
+    },
+    {
+     "patternId": "Semgrep_generic.secrets.security.google-maps-apikeyleak.google-maps-apikeyleak"
+    },
+    {
+     "patternId": "Semgrep_generic.unicode.security.bidi.contains-bidirectional-characters"
+    },
+    {
+     "patternId": "Semgrep_javascript.ajv.security.audit.ajv-allerrors-true.ajv-allerrors-true"
+    },
+    {
+     "patternId": "Semgrep_javascript.apollo.security.apollo-axios-ssrf.apollo-axios-ssrf"
+    },
+    {
+     "patternId": "Semgrep_javascript.argon2.security.unsafe-argon2-config.unsafe-argon2-config"
+    },
+    {
+     "patternId": "Semgrep_javascript.audit.detect-replaceall-sanitization.detect-replaceall-sanitization"
+    },
+    {
+     "patternId": "Semgrep_javascript.aws-lambda.security.detect-child-process.detect-child-process"
+    },
+    {
+     "patternId": "Semgrep_javascript.aws-lambda.security.dynamodb-request-object.dynamodb-request-object"
+    },
+    {
+     "patternId": "Semgrep_javascript.aws-lambda.security.knex-sqli.knex-sqli"
+    },
+    {
+     "patternId": "Semgrep_javascript.aws-lambda.security.mysql-sqli.mysql-sqli"
+    },
+    {
+     "patternId": "Semgrep_javascript.aws-lambda.security.pg-sqli.pg-sqli"
+    },
+    {
+     "patternId": "Semgrep_javascript.aws-lambda.security.sequelize-sqli.sequelize-sqli"
+    },
+    {
+     "patternId": "Semgrep_javascript.aws-lambda.security.tainted-eval.tainted-eval"
+    },
+    {
+     "patternId": "Semgrep_javascript.aws-lambda.security.tainted-html-response.tainted-html-response"
+    },
+    {
+     "patternId": "Semgrep_javascript.aws-lambda.security.tainted-html-string.tainted-html-string"
+    },
+    {
+     "patternId": "Semgrep_javascript.aws-lambda.security.tainted-sql-string.tainted-sql-string"
+    },
+    {
+     "patternId": "Semgrep_javascript.aws-lambda.security.vm-runincontext-injection.vm-runincontext-injection"
+    },
+    {
+     "patternId": "Semgrep_javascript.bluebird.security.audit.tofastproperties-code-execution.tofastproperties-code-execution"
+    },
+    {
+     "patternId": "Semgrep_javascript.browser.security.dom-based-xss.dom-based-xss"
+    },
+    {
+     "patternId": "Semgrep_javascript.browser.security.eval-detected.eval-detected"
+    },
+    {
+     "patternId": "Semgrep_javascript.browser.security.insecure-document-method.insecure-document-method"
+    },
+    {
+     "patternId": "Semgrep_javascript.browser.security.insecure-innerhtml.insecure-innerhtml"
+    },
+    {
+     "patternId": "Semgrep_javascript.browser.security.insufficient-postmessage-origin-validation.insufficient-postmessage-origin-validation"
+    },
+    {
+     "patternId": "Semgrep_javascript.browser.security.open-redirect-from-function.js-open-redirect-from-function"
+    },
+    {
+     "patternId": "Semgrep_javascript.browser.security.open-redirect.js-open-redirect"
+    },
+    {
+     "patternId": "Semgrep_javascript.browser.security.raw-html-concat.raw-html-concat"
+    },
+    {
+     "patternId": "Semgrep_javascript.browser.security.raw-html-join.raw-html-join"
+    },
+    {
+     "patternId": "Semgrep_javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration"
+    },
+    {
+     "patternId": "Semgrep_javascript_buf_rule-buffer-noassert-read"
+    },
+    {
+     "patternId": "Semgrep_javascript_buf_rule-buffer-noassert-write"
+    },
+    {
+     "patternId": "Semgrep_javascript_buf_rule-detect-new-buffer"
+    },
+    {
+     "patternId": "Semgrep_javascript.chrome-remote-interface.security.audit.chrome-remote-interface-compilescript-injection.chrome-remote-interface-compilescript-injection"
+    },
+    {
+     "patternId": "Semgrep_javascript_crypto_rule-NodeLibcurlSSLVerificationDisable"
+    },
+    {
+     "patternId": "Semgrep_javascript.deno.security.audit.deno-dangerous-run.deno-dangerous-run"
+    },
+    {
+     "patternId": "Semgrep_javascript_eval_rule-eval-with-expression"
+    },
+    {
+     "patternId": "Semgrep_javascript_exec_rule-child-process"
+    },
+    {
+     "patternId": "Semgrep_javascript.fbjs.security.audit.insecure-createnodesfrommarkup.insecure-createnodesfrommarkup"
+    },
+    {
+     "patternId": "Semgrep_javascript.grpc.security.grpc-nodejs-insecure-connection.grpc-nodejs-insecure-connection"
+    },
+    {
+     "patternId": "Semgrep_javascript.intercom.security.audit.intercom-settings-user-identifier-without-user-hash.intercom-settings-user-identifier-without-user-hash"
+    },
+    {
+     "patternId": "Semgrep_javascript.jose.security.audit.jose-exposed-data.jose-exposed-data"
+    },
+    {
+     "patternId": "Semgrep_javascript.jose.security.jwt-hardcode.hardcoded-jwt-secret"
+    },
+    {
+     "patternId": "Semgrep_javascript.jose.security.jwt-none-alg.jwt-none-alg"
+    },
+    {
+     "patternId": "Semgrep_javascript.jsonwebtoken.security.audit.jwt-decode-without-verify.jwt-decode-without-verify"
+    },
+    {
+     "patternId": "Semgrep_javascript.jsonwebtoken.security.audit.jwt-exposed-data.jwt-exposed-data"
+    },
+    {
+     "patternId": "Semgrep_javascript.jsonwebtoken.security.jwt-hardcode.hardcoded-jwt-secret"
+    },
+    {
+     "patternId": "Semgrep_javascript.jsonwebtoken.security.jwt-none-alg.jwt-none-alg"
+    },
+    {
+     "patternId": "Semgrep_javascript.jwt-simple.security.jwt-simple-noverify.jwt-simple-noverify"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.audit.code-string-concat.code-string-concat"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.audit.dangerous-spawn-shell.dangerous-spawn-shell"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.audit.detect-non-literal-fs-filename.detect-non-literal-fs-filename"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.audit.detect-non-literal-require.detect-non-literal-require"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.audit.detect-redos.detect-redos"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.audit.hardcoded-hmac-key.hardcoded-hmac-key"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.audit.incomplete-sanitization.incomplete-sanitization"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.audit.md5-used-as-password.md5-used-as-password"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.audit.prototype-pollution.prototype-pollution-assignment.prototype-pollution-assignment"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.audit.prototype-pollution.prototype-pollution-loop.prototype-pollution-loop"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.audit.spawn-shell-true.spawn-shell-true"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.audit.sqli.node-knex-sqli.node-knex-sqli"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.audit.sqli.node-mssql-sqli.node-mssql-sqli"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.audit.sqli.node-mysql-sqli.node-mysql-sqli"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.audit.sqli.node-postgres-sqli.node-postgres-sqli"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.audit.unknown-value-with-script-tag.unknown-value-with-script-tag"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.audit.unsafe-dynamic-method.unsafe-dynamic-method"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.audit.unsafe-formatstring.unsafe-formatstring"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.detect-buffer-noassert.detect-buffer-noassert"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.detect-child-process.detect-child-process"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.detect-disable-mustache-escape.detect-disable-mustache-escape"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.detect-eval-with-expression.detect-eval-with-expression"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.detect-no-csrf-before-method-override.detect-no-csrf-before-method-override"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.detect-pseudorandombytes.detect-pseudorandombytes"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.html-in-template-string.html-in-template-string"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.insecure-object-assign.insecure-object-assign"
+    },
+    {
+     "patternId": "Semgrep_javascript.lang.security.spawn-git-clone.spawn-git-clone"
+    },
+    {
+     "patternId": "Semgrep_javascript.monaco-editor.security.audit.monaco-hover-htmlsupport.monaco-hover-htmlsupport"
+    },
+    {
+     "patternId": "Semgrep_javascript.node-crypto.security.aead-no-final.aead-no-final"
+    },
+    {
+     "patternId": "Semgrep_javascript.node-crypto.security.create-de-cipher-no-iv.create-de-cipher-no-iv"
+    },
+    {
+     "patternId": "Semgrep_javascript.node-crypto.security.gcm-no-tag-length.gcm-no-tag-length"
+    },
+    {
+     "patternId": "Semgrep_javascript.node-expat.security.audit.expat-xxe.expat-xxe"
+    },
+    {
+     "patternId": "Semgrep_javascript.passport-jwt.security.passport-hardcode.hardcoded-passport-secret"
+    },
+    {
+     "patternId": "Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename"
+    },
+    {
+     "patternId": "Semgrep_javascript.phantom.security.audit.phantom-injection.phantom-injection"
+    },
+    {
+     "patternId": "Semgrep_javascript.puppeteer.security.audit.puppeteer-evaluate-arg-injection.puppeteer-evaluate-arg-injection"
+    },
+    {
+     "patternId": "Semgrep_javascript.puppeteer.security.audit.puppeteer-evaluate-code-injection.puppeteer-evaluate-code-injection"
+    },
+    {
+     "patternId": "Semgrep_javascript.puppeteer.security.audit.puppeteer-exposed-chrome-devtools.puppeteer-exposed-chrome-devtools"
+    },
+    {
+     "patternId": "Semgrep_javascript.puppeteer.security.audit.puppeteer-goto-injection.puppeteer-goto-injection"
+    },
+    {
+     "patternId": "Semgrep_javascript.puppeteer.security.audit.puppeteer-setcontent-injection.puppeteer-setcontent-injection"
+    },
+    {
+     "patternId": "Semgrep_javascript_random_rule-pseudo-random-bytes"
+    },
+    {
+     "patternId": "Semgrep_javascript_react_rule-dangerouslysetinnerhtml"
+    },
+    {
+     "patternId": "Semgrep_javascript_require_rule-non-literal-require"
+    },
+    {
+     "patternId": "Semgrep_javascript.sandbox.security.audit.sandbox-code-injection.sandbox-code-injection"
+    },
+    {
+     "patternId": "Semgrep_javascript.sax.security.audit.sax-xxe.sax-xxe"
+    },
+    {
+     "patternId": "Semgrep_javascript.sequelize.security.audit.sequelize-enforce-tls.sequelize-enforce-tls"
+    },
+    {
+     "patternId": "Semgrep_javascript.sequelize.security.audit.sequelize-injection-express.express-sequelize-injection"
+    },
+    {
+     "patternId": "Semgrep_javascript.sequelize.security.audit.sequelize-raw-query.sequelize-raw-query"
+    },
+    {
+     "patternId": "Semgrep_javascript.sequelize.security.audit.sequelize-tls-disabled-cert-validation.sequelize-tls-disabled-cert-validation"
+    },
+    {
+     "patternId": "Semgrep_javascript.sequelize.security.audit.sequelize-weak-tls-version.sequelize-weak-tls-version"
+    },
+    {
+     "patternId": "Semgrep_javascript.serialize-javascript.security.audit.unsafe-serialize-javascript.unsafe-serialize-javascript"
+    },
+    {
+     "patternId": "Semgrep_javascript.shelljs.security.shelljs-exec-injection.shelljs-exec-injection"
+    },
+    {
+     "patternId": "Semgrep_javascript.thenify.security.audit.multiargs-code-execution.multiargs-code-execution"
+    },
+    {
+     "patternId": "Semgrep_javascript_timing_rule-possible-timing-attacks"
+    },
+    {
+     "patternId": "Semgrep_javascript.vm2.security.audit.vm2-code-injection.vm2-code-injection"
+    },
+    {
+     "patternId": "Semgrep_javascript.vm2.security.audit.vm2-context-injection.vm2-context-injection"
+    },
+    {
+     "patternId": "Semgrep_javascript.wkhtmltoimage.security.audit.wkhtmltoimage-injection.wkhtmltoimage-injection"
+    },
+    {
+     "patternId": "Semgrep_javascript.wkhtmltopdf.security.audit.wkhtmltopdf-injection.wkhtmltopdf-injection"
+    },
+    {
+     "patternId": "Semgrep_javascript.xml2json.security.audit.xml2json-xxe.xml2json-xxe"
+    },
+    {
+     "patternId": "Semgrep_javascript_xss_rule-mustache-escape"
+    },
+    {
+     "patternId": "Semgrep_json.aws.security.public-s3-bucket.public-s3-bucket"
+    },
+    {
+     "patternId": "Semgrep_json.aws.security.public-s3-policy-statement.public-s3-policy-statement"
+    },
+    {
+     "patternId": "Semgrep_json.aws.security.wildcard-assume-role.wildcard-assume-role"
+    },
+    {
+     "patternId": "Semgrep_json.npm.security.package-dependencies-check.package-dependencies-check"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_crypto_rule-node-aes-ecb"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_crypto_rule-node-aes-noiv"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_crypto_rule-node-insecure-random-generator"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_crypto_rule-node-md5"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_crypto_rule-node-sha1"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_crypto_rule-node-timing-attack"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_crypto_rule-node-tls-reject"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_crypto_rule-node-weak-crypto"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_database_rule-node-knex-sqli-injection"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_database_rule-node-nosqli-injection"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_database_rule-node-nosqli-js-injection"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_database_rule-node-sqli-injection"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_database_rule-sequelize-tls"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_database_rule-sequelize-tls-cert-validation"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_database_rule-sequelize-weak-tls"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_dos_rule-layer7-object-dos"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_dos_rule-regex-dos"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_electronjs_rule-electron-allow-http"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_electronjs_rule-electron-blink-integration"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_electronjs_rule-electron-context-isolation"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_electronjs_rule-electron-disable-websecurity"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_electronjs_rule-electron-nodejs-integration"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-eval-nodejs"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-eval-require"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-grpc-insecure-connection"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-node-deserialize"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-sandbox-code-injection"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-serializetojs-deserialize"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-server-side-template-injection"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-vm2-code-injection"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-vm2-context-injection"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-vm-code-injection"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-vm-compilefunction-injection"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-vm-runincontext-injection"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-vm-runinnewcontext-injection"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_eval_rule-yaml-deserialize"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_exec_rule-shelljs-os-command-exec"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-cookie-session-default"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-cookie-session-no-domain"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-cookie-session-no-httponly"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-cookie-session-no-maxage"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-cookie-session-no-path"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-cookie-session-no-samesite"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-cookie-session-no-secure"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-express-cors"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-generic-cors"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-generic-header-injection"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-header-xss-generic"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-header-xss-lusca"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-helmet-feature-disabled"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_headers_rule-host-header-injection"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_jwt_rule-hardcoded-jwt-secret"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_jwt_rule-jwt-exposed-credentials"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_jwt_rule-jwt-exposed-data"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_jwt_rule-jwt-express-hardcoded"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_jwt_rule-jwt-not-revoked"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_jwt_rule-node-jwt-none-algorithm"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_redirect_rule-express-open-redirect"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_redirect_rule-express-open-redirect2"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_ssrf_rule-node-ssrf"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_ssrf_rule-phantom-ssrf"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_ssrf_rule-playwright-ssrf"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_ssrf_rule-puppeteer-ssrf"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_ssrf_rule-wkhtmltoimage-ssrf"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_ssrf_rule-wkhtmltopdf-ssrf"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_traversal_rule-admzip-path-overwrite"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_traversal_rule-express-lfr"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_traversal_rule-express-lfr-warning"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_traversal_rule-generic-path-traversal"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_traversal_rule-join-resolve-path-traversal"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_traversal_rule-tar-path-overwrite"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_traversal_rule-zip-path-overwrite"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_xml_rule-node-entity-expansion"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_xml_rule-node-xpath-injection"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_xml_rule-node-xxe"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_xml_rule-xxe-expat"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_xss_rule-express-xss"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_xss_rule-handlebars-noescape"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_xss_rule-handlebars-safestring"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_xss_rule-squirrelly-autoescape"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_xss_rule-xss-disable-mustache-escape"
+    },
+    {
+     "patternId": "Semgrep_rules_lgpl_javascript_xss_rule-xss-serialize-javascript"
+    },
+    {
+     "patternId": "Semgrep_typescript.aws-cdk.security.audit.awscdk-bucket-encryption.awscdk-bucket-encryption"
+    },
+    {
+     "patternId": "Semgrep_typescript.aws-cdk.security.audit.awscdk-bucket-enforcessl.aws-cdk-bucket-enforcessl"
+    },
+    {
+     "patternId": "Semgrep_typescript.aws-cdk.security.audit.awscdk-sqs-unencryptedqueue.awscdk-sqs-unencryptedqueue"
+    },
+    {
+     "patternId": "Semgrep_typescript.aws-cdk.security.awscdk-bucket-grantpublicaccessmethod.awscdk-bucket-grantpublicaccessmethod"
+    },
+    {
+     "patternId": "Semgrep_typescript.aws-cdk.security.awscdk-codebuild-project-public.awscdk-codebuild-project-public"
+    },
+    {
+     "patternId": "Semgrep_typescript.lang.security.audit.cors-regex-wildcard.cors-regex-wildcard"
+    }
+   ],
+   "exclude": [
+    "**/*.test.ts"
+   ]
+  },
+  {
+   "toolId": "Biome",
+   "localConfigurationFile": "biome.json",
+   "useLocalConfigurationFile": true,
+   "patterns": []
+  }
+ ],
+ "exclude": [
+  "svelte.config.js",
+  ".svelte-kit/**",
+  "build/**",
+  "node_modules/**"
+ ]
 }

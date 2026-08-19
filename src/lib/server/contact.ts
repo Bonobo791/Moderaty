@@ -46,7 +46,7 @@ export const MAX_NAME_LENGTH = 200;
 // real gate is the verification e-mail itself — a wrong address simply never
 // confirms. The /^[^\s@]+@[^\s@]+\.[^\s@]+$/ check rejects whitespace,
 // missing @, missing domain dot, and empty parts.
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+(?:\.[^\s@]+)+$/;
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export type ContactParse =
 	| { ok: true; name: string; email: string }
@@ -264,7 +264,7 @@ export function buildVerificationEmail(input: { name: string; verifyUrl: string 
 	const htmlPart = [
 		`<p>Hi ${escapeHtml(input.name)},</p>`,
 		'<p>Someone (hopefully you) asked Moderaty to contact them using this e-mail address.</p>',
-		`<p>Confirm your e-mail address by opening this link: <a href="${input.verifyUrl}">${input.verifyUrl}</a></p>`,
+		`<p>Confirm your e-mail address by opening this link: <a href="${escapeHtml(input.verifyUrl)}">${escapeHtml(input.verifyUrl)}</a></p>`,
 		'<p>The link is valid for 7 days. If you did not submit this request, ignore this e-mail.</p>',
 		'<p>— Moderaty</p>'
 	].join('');

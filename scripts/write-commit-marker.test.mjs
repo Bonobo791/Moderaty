@@ -13,7 +13,7 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
@@ -54,6 +54,56 @@ describe('resolveCommit', () => {
 
 	test('never falls back silently to a truncated or empty value', () => {
 		expect(resolveCommit({})).not.toBe('');
+	});
+});
+
+describe('resolveCommit without a git subprocess (S4036)', () => {
+	// A synthetic repo root: resolveCommit must read HEAD straight from .git —
+	// the old `git rev-parse HEAD` implementation ignored the root and spawned
+	// git in the test process cwd, so these all fail against the real repo.
+	const SHA = 'a'.repeat(40);
+
+	test('reads HEAD from a plain repo .git (branch ref)', () => {
+		const root = mkdtempSync(join(tmpdir(), 'moderaty-git-plain-'));
+		tempDirs.push(root);
+		mkdirSync(join(root, '.git/refs/heads'), { recursive: true });
+		writeFileSync(join(root, '.git/HEAD'), 'ref: refs/heads/main\n');
+		writeFileSync(join(root, '.git/refs/heads/main'), SHA + '\n');
+		expect(resolveCommit({}, root)).toBe(SHA);
+	});
+
+	test('reads HEAD through a worktree .git gitdir file', () => {
+		const root = mkdtempSync(join(tmpdir(), 'moderaty-git-wt-'));
+		tempDirs.push(root);
+		const gitDir = join(root, 'actual-git');
+		mkdirSync(join(gitDir, 'refs/heads'), { recursive: true });
+		writeFileSync(join(root, '.git'), `gitdir: ${gitDir}\n`);
+		writeFileSync(join(gitDir, 'HEAD'), 'ref: refs/heads/dev\n');
+		writeFileSync(join(gitDir, 'refs/heads/dev'), SHA + '\n');
+		expect(resolveCommit({}, root)).toBe(SHA);
+	});
+
+	test('reads a detached HEAD SHA', () => {
+		const root = mkdtempSync(join(tmpdir(), 'moderaty-git-detached-'));
+		tempDirs.push(root);
+		mkdirSync(join(root, '.git'), { recursive: true });
+		writeFileSync(join(root, '.git/HEAD'), SHA + '\n');
+		expect(resolveCommit({}, root)).toBe(SHA);
+	});
+
+	test('reads a packed ref when the loose ref file is absent', () => {
+		const root = mkdtempSync(join(tmpdir(), 'moderaty-git-packed-'));
+		tempDirs.push(root);
+		mkdirSync(join(root, '.git'), { recursive: true });
+		writeFileSync(join(root, '.git/HEAD'), 'ref: refs/heads/main\n');
+		writeFileSync(join(root, '.git/packed-refs'), `# pack-refs with: peeled fully-peeled sorted\n${SHA} refs/heads/main\n`);
+		expect(resolveCommit({}, root)).toBe(SHA);
+	});
+
+	test("returns 'unknown' when the root has no .git instead of resolving git from PATH", () => {
+		const root = mkdtempSync(join(tmpdir(), 'moderaty-git-none-'));
+		tempDirs.push(root);
+		expect(resolveCommit({}, root)).toBe('unknown');
 	});
 });
 

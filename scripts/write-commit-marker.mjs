@@ -32,30 +32,76 @@
 // SOURCE_COMMIT_SHA is kept only as a legacy/custom fallback — Coolify has
 // never defined that name.
 
-import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const MARKER_FILE = '__moderaty_commit.txt';
 
+const COMMIT_SHA_RE = /^[0-9a-f]{40}$/i;
+
+/**
+ * Reads the HEAD commit straight from the repository's .git directory — no
+ * `git` subprocess (S4036: OS commands must not rely on PATH resolution).
+ * Handles plain repos (.git dir), worktrees (.git file with `gitdir: …`),
+ * branch refs, detached HEAD, and packed refs. Any failure returns 'unknown'.
+ *
+ * @param root - The repository root (must contain .git)
+ * @returns The full commit SHA, or 'unknown'
+ */
+export function readGitHeadCommit(root) {
+	try {
+		const dotGit = resolve(root, '.git');
+		let gitDir = dotGit;
+		if (!existsSync(resolve(dotGit, 'HEAD'))) {
+			// .git is a FILE (worktree/submodule): `gitdir: <path>`.
+			const m = readFileSync(dotGit, 'utf8').match(/^gitdir:\s*(.+?)\s*$/m);
+			if (!m) return 'unknown';
+			gitDir = resolve(dirname(dotGit), m[1].trim());
+		}
+		const head = readFileSync(resolve(gitDir, 'HEAD'), 'utf8').trim();
+		// Worktrees keep branch refs in the COMMON git dir; follow `commondir`.
+		let refsBase = gitDir;
+		const commonFile = resolve(gitDir, 'commondir');
+		if (existsSync(commonFile)) {
+			refsBase = resolve(gitDir, readFileSync(commonFile, 'utf8').trim());
+		}
+		const ref = head.match(/^ref:\s*(.+)$/)?.[1]?.trim();
+		if (ref) {
+			const refPath = resolve(refsBase, ref);
+			if (existsSync(refPath)) {
+				const sha = readFileSync(refPath, 'utf8').trim();
+				if (COMMIT_SHA_RE.test(sha)) return sha;
+			}
+			const packed = resolve(refsBase, 'packed-refs');
+			if (existsSync(packed)) {
+				for (const line of readFileSync(packed, 'utf8').split(/\r?\n/)) {
+					const m = line.match(/^([0-9a-f]{40})\s+(\S+)$/);
+					if (m && m[2] === ref) return m[1];
+				}
+			}
+			return 'unknown';
+		}
+		return COMMIT_SHA_RE.test(head) ? head : 'unknown';
+	} catch {
+		return 'unknown';
+	}
+}
+
 /**
  * Resolves the commit this build is deploying.
  *
  * @param env - The environment (defaults to process.env)
- * @returns The full commit SHA, or 'unknown' when no provider variable exists and git is unavailable
+ * @param root - The repository root used for the local .git fallback (defaults to process.cwd())
+ * @returns The full commit SHA, or 'unknown' when no provider variable exists and no commit is readable
  */
-export function resolveCommit(env = process.env) {
+export function resolveCommit(env = process.env, root = process.cwd()) {
 	// Full SHAs from the deploy platforms (both are 40-char; never truncate —
 	// the workflow compares against $GITHUB_SHA verbatim).
 	if (env.SOURCE_COMMIT_SHA) return env.SOURCE_COMMIT_SHA;
 	if (env.SOURCE_COMMIT) return env.SOURCE_COMMIT;
 	if (env.COMMIT_REF) return env.COMMIT_REF;
-	try {
-		return execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-	} catch {
-		return 'unknown';
-	}
+	return readGitHeadCommit(root);
 }
 
 /**

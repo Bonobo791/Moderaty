@@ -304,6 +304,20 @@ Each step has a verify gate; do not proceed past a failed gate.
   a purger needs. Kept as an alternative to the GitHub Actions workflow;
   the workflow (§3.5) remains primary because it needs no Coolify-side
   configuration and fires on the same push event that deploys.
+- **Optional in-container purge (opt-in only)** — `scripts/bunny/` ships a
+  per-URL/full-zone purge CLI (`purge-bunny-cache.mjs`, with its shared URL
+  normalizer `bunny-url.mjs`) and a `docker-entrypoint.sh` that purges once
+  the new container passes the same `/api/health` readiness probe the
+  HEALTHCHECK uses. Both are OFF by default (no credentials configured = no
+  purge, nothing extra ships in the image; the Dockerfile still uses plain
+  `CMD ["node", "build/index.js"]` and is untouched). They exist for an
+  operator who cannot run the GitHub Actions workflow. **Security caveat —
+  read before opting in**: the entrypoint runs the purge INSIDE the app
+  container, so the key must be injected into the app runtime environment —
+  the exact thing §3.5 forbids with the account-level key (a compromised
+  container could purge every zone in the account). Prefer a zone-scoped key
+  if you opt in, and prefer the GitHub Actions workflow (§3.5) over this
+  path whenever you can run it.
 - `X-Forwarded-Proto` behind Bunny was not verified; `ORIGIN` (§3.4) removes
   the dependency. **Verified 2026-08-18 against adapter-node source**: the
   built handler calls `parse_origin(env('ORIGIN', undefined))` at startup —

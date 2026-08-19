@@ -32,8 +32,15 @@ afterEach(() => {
 });
 
 describe('resolveCommit', () => {
-	test('prefers the Coolify SOURCE_COMMIT_SHA over everything', () => {
-		expect(resolveCommit({ SOURCE_COMMIT_SHA: 'abc123', COMMIT_REF: 'def456' })).toBe('abc123');
+	test('prefers a custom SOURCE_COMMIT_SHA over everything (legacy/custom setups)', () => {
+		expect(resolveCommit({ SOURCE_COMMIT_SHA: 'abc123', SOURCE_COMMIT: 'cdef', COMMIT_REF: 'def456' })).toBe('abc123');
+	});
+
+	test('uses Coolify\'s real build-time variable SOURCE_COMMIT', () => {
+		// Coolify passes the deployed commit as SOURCE_COMMIT (its predefined
+		// build variable) — as a BuildKit secret with "Use Docker Build
+		// Secrets" on, or as --build-arg SOURCE_COMMIT otherwise.
+		expect(resolveCommit({ SOURCE_COMMIT: 'c0ffee'.padEnd(40, '0'), COMMIT_REF: 'def456' })).toBe('c0ffee'.padEnd(40, '0'));
 	});
 
 	test('falls back to the Netlify COMMIT_REF', () => {

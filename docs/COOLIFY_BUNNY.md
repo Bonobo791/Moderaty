@@ -155,6 +155,13 @@ One-time setup (human, in the Coolify dashboard):
       `docker build --help | grep -q secret` and, if it fails, **silently
       falls back to `--build-arg`** even with the setting on, failing the
       gate with the same symptom. Requires Docker 18.09+ with BuildKit.
+   4. **Include Source Commit in Build** is ON (app settings) — Coolify
+      excludes `SOURCE_COMMIT` from builds by default (cache preservation).
+      The Dockerfile bakes it into `static/__moderaty_commit.txt` (via a
+      BuildKit secret mount in secrets mode, `--build-arg SOURCE_COMMIT`
+      otherwise) so the bunny-purge workflow can wait for the deploy to
+      serve the pushed commit before purging; without it the marker reads
+      `unknown` and the wait always times out.
 
    **Build Variable flags — only the two TURSO_* variables need them.**
    Coolify injects an `ARG` statement into the Dockerfile for every env var

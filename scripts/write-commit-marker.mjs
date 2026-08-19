@@ -23,10 +23,14 @@
 // The marker is a static asset: both the Netlify and adapter-node builds copy
 // static/ into the deployable output, and the file is served at
 // /__moderaty_commit.txt. Deploy platforms inject the commit:
-//   - Coolify: SOURCE_COMMIT_SHA (build environment)
+//   - Coolify: SOURCE_COMMIT (Coolify's predefined build-time variable; the
+//     Dockerfile exposes it to this script either as a BuildKit secret mount
+//     — "Use Docker Build Secrets" on — or via ARG/--build-arg otherwise).
 //   - Netlify: COMMIT_REF (build environment)
 //   - local/other: git rev-parse HEAD, falling back to 'unknown' (the purge
 //     wait simply times out and purges anyway — best effort, never silent).
+// SOURCE_COMMIT_SHA is kept only as a legacy/custom fallback — Coolify has
+// never defined that name.
 
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -45,6 +49,7 @@ export function resolveCommit(env = process.env) {
 	// Full SHAs from the deploy platforms (both are 40-char; never truncate —
 	// the workflow compares against $GITHUB_SHA verbatim).
 	if (env.SOURCE_COMMIT_SHA) return env.SOURCE_COMMIT_SHA;
+	if (env.SOURCE_COMMIT) return env.SOURCE_COMMIT;
 	if (env.COMMIT_REF) return env.COMMIT_REF;
 	try {
 		return execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();

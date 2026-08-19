@@ -78,6 +78,21 @@ describe('Dockerfile (docker:S6472 — no secrets via ARG/ENV)', () => {
 	it('keeps the BuildKit syntax directive (required for secret mounts)', () => {
 		expect(dockerfile).toMatch(/^# syntax=docker\/dockerfile:1$/m);
 	});
+
+	it('feeds the commit marker from Coolify\'s SOURCE_COMMIT variable (secret mount + ARG fallback)', () => {
+		// Coolify's predefined build-time commit variable is SOURCE_COMMIT
+		// (never SOURCE_COMMIT_SHA); with "Use Docker Build Secrets" on it
+		// arrives as --secret id=SOURCE_COMMIT,env=SOURCE_COMMIT, so the
+		// marker RUN must mount it exactly like the TURSO_* credentials.
+		expect(dockerfile).toMatch(
+			/--mount=type=secret,id=SOURCE_COMMIT,env=SOURCE_COMMIT[\s\S]*?node scripts\/write-commit-marker\.mjs/
+		);
+		expect(dockerfile).toMatch(/^ARG SOURCE_COMMIT$/m);
+	});
+
+	it('declares no SOURCE_COMMIT_SHA ARG/ENV (the name Coolify never defined)', () => {
+		expect(dockerfile).not.toMatch(/SOURCE_COMMIT_SHA/);
+	});
 });
 
 describe('Coolify runbook (operator setting that makes the secret mounts work)', () => {

@@ -50,12 +50,16 @@ RUN --mount=type=secret,id=TURSO_DATABASE_URL,env=TURSO_DATABASE_URL \
 ENV MODERATY_ADAPTER=node
 # Bake the deployed commit into a static marker BEFORE the build so the
 # bunny-purge workflow can wait for this deploy to serve the pushed commit.
-# SOURCE_COMMIT_SHA is Coolify's build-time commit (git is NOT installed in
-# the alpine builder, so the ARG/ENV passthrough is the only reliable source
-# in the Dockerfile path; the script falls back to 'unknown' when absent).
-ARG SOURCE_COMMIT_SHA
-ENV SOURCE_COMMIT_SHA=${SOURCE_COMMIT_SHA}
-RUN node scripts/write-commit-marker.mjs
+# SOURCE_COMMIT is Coolify's predefined build-time variable (git is NOT
+# installed in the alpine builder). With "Use Docker Build Secrets" on,
+# Coolify delivers it as `--secret id=SOURCE_COMMIT,env=SOURCE_COMMIT`, so it
+# is mounted here like the TURSO_* credentials; otherwise it arrives as
+# `--build-arg SOURCE_COMMIT` (the ARG below). The script falls back to
+# 'unknown' when absent. Requires Coolify's "Include Source Commit in Build"
+# app setting (docs/COOLIFY_BUNNY.md §3.4).
+ARG SOURCE_COMMIT
+RUN --mount=type=secret,id=SOURCE_COMMIT,env=SOURCE_COMMIT \
+	node scripts/write-commit-marker.mjs
 RUN npm run build
 RUN npm prune --omit=dev
 

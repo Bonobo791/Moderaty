@@ -41,7 +41,8 @@ export function coolifyBase() {
 	if (!serverUrl) {
 		throw new Error('COOLIFY_SERVER_URL is not set — cannot reach the Coolify API');
 	}
-	return serverUrl.replace(/\/+$/, '') + '/api/v1';
+	const trimmed = serverUrl.endsWith('/') ? serverUrl.slice(0, -1) : serverUrl;
+	return `${trimmed}/api/v1`;
 }
 
 /** Coolify API token (COOLIFY_API_TOKEN; the local .env's COOLIFY value also works). */
@@ -62,11 +63,16 @@ export function coolifyToken() {
  * @returns {Promise<unknown>} Parsed JSON payload.
  */
 export async function coolifyRequest(path, { method = 'GET', fetchImpl = fetch, timeoutMs = API_TIMEOUT_MS } = {}) {
-	const res = await fetchImpl(`${coolifyBase()}${path}`, {
-		method,
-		headers: { Authorization: `Bearer ${coolifyToken()}` },
-		signal: AbortSignal.timeout(timeoutMs)
-	});
+	let res;
+	try {
+		res = await fetchImpl(`${coolifyBase()}${path}`, {
+			method,
+			headers: { Authorization: `Bearer ${coolifyToken()}` },
+			signal: AbortSignal.timeout(timeoutMs)
+		});
+	} catch (cause) {
+		throw new Error(`Coolify API ${method} ${path} failed: ${cause.message}`, { cause });
+	}
 	if (!res.ok) {
 		throw new Error(`Coolify API ${method} ${path} answered ${res.status}: ${(await res.text()).slice(0, 200)}`);
 	}
@@ -81,8 +87,8 @@ export async function coolifyRequest(path, { method = 'GET', fetchImpl = fetch, 
  * @returns {boolean}
  */
 export function commitMatches(deploymentCommit, expectedCommit) {
-	if (!deploymentCommit || !expectedCommit) return false;
-	const actual = String(deploymentCommit).trim();
+	if (typeof deploymentCommit !== 'string' || !expectedCommit) return false;
+	const actual = deploymentCommit.trim();
 	const expected = String(expectedCommit).trim();
 	return actual === expected || actual === expected.slice(0, 12) || actual === expected.slice(0, 7);
 }
@@ -135,13 +141,24 @@ export async function triggerDeploy(appUuid, { fetchImpl = fetch } = {}) {
 	return payload?.deployments ?? [];
 }
 
+function parsePositiveSeconds(value, flag) {
+	if (value === undefined) {
+		throw new Error(`${flag} requires a value — e.g. ${flag} 180`);
+	}
+	const seconds = Number(value);
+	if (!Number.isFinite(seconds) || seconds <= 0) {
+		throw new Error(`${flag} must be a positive number, got: ${value}`);
+	}
+	return seconds;
+}
+
 function parseArgs(argv) {
 	const args = { fallback: false, timeoutMs: DEPLOY_VERIFY_TIMEOUT_MS, pollMs: DEPLOY_VERIFY_POLL_MS, positional: [] };
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i];
 		if (a === '--fallback') args.fallback = true;
-		else if (a === '--timeout-sec') args.timeoutMs = Number(argv[++i]) * 1000;
-		else if (a === '--poll-sec') args.pollMs = Number(argv[++i]) * 1000;
+		else if (a === '--timeout-sec') args.timeoutMs = parsePositiveSeconds(argv[++i], '--timeout-sec') * 1000;
+		else if (a === '--poll-sec') args.pollMs = parsePositiveSeconds(argv[++i], '--poll-sec') * 1000;
 		else if (a.startsWith('-')) throw new Error(`unknown flag: ${a}`);
 		else args.positional.push(a);
 	}

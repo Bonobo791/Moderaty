@@ -16,7 +16,7 @@
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { commitMatches, findDeploymentForCommit, triggerDeploy, verifyDeploymentQueued } from './coolify-deploy.mjs';
+import { commitMatches, findDeploymentForCommit, main, triggerDeploy, verifyDeploymentQueued } from './coolify-deploy.mjs';
 
 // 'test-token' is a synthetic credential fixture — maintainer-approved
 // documented exception per AGENTS.md (approved 2026-07-30, PR #13 review).
@@ -137,6 +137,25 @@ describe('coolify deploy guarantee', () => {
 		expect(url).toBe('https://coolify.example.com/api/v1/deploy?uuid=app-1');
 		expect(init.method).toBe('POST');
 		expect(init.headers.Authorization).toBe('Bearer test-token');
+	});
+
+	it('fails loudly on a non-numeric --timeout-sec value instead of silently returning NaN', async () => {
+		vi.stubGlobal('fetch', vi.fn(async () => new Response('[]', { status: 200 })));
+		await expect(main(['--timeout-sec', 'abc', 'app-1', COMMIT])).rejects.toThrow(/--timeout-sec|timeout-sec/);
+		expect(fetch).not.toHaveBeenCalled();
+	});
+
+	it('fails loudly when --poll-sec is the last argument (missing value)', async () => {
+		vi.stubGlobal('fetch', vi.fn(async () => new Response('[]', { status: 200 })));
+		await expect(main(['app-1', COMMIT, '--poll-sec'])).rejects.toThrow(/--poll-sec/);
+		expect(fetch).not.toHaveBeenCalled();
+	});
+
+	it('wraps a fetch network/timeout failure with the endpoint path (actionable context)', async () => {
+		vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('The operation was aborted due to timeout'); }));
+
+		await expect(verifyDeploymentQueued('app-1', COMMIT, { timeoutMs: 50, pollMs: 10 }))
+			.rejects.toThrow(/deployments\/applications\/app-1/);
 	});
 
 	it('the CLI actually runs when invoked directly — a relative argv[1] must enter the flow', () => {

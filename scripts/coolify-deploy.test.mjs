@@ -16,7 +16,7 @@
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { commitMatches, findDeploymentForCommit, main, triggerDeploy, verifyDeploymentQueued } from './coolify-deploy.mjs';
+import { commitMatches, findDeploymentForCommit, main, parseSince, triggerDeploy, verifyDeploymentQueued } from './coolify-deploy.mjs';
 
 // 'test-token' is a synthetic credential fixture — maintainer-approved
 // documented exception per AGENTS.md (approved 2026-07-30, PR #13 review).
@@ -149,6 +149,18 @@ describe('coolify deploy guarantee', () => {
 		vi.stubGlobal('fetch', vi.fn(async () => new Response('[]', { status: 200 })));
 		await expect(main(['app-1', COMMIT, '--poll-sec'])).rejects.toThrow(/--poll-sec/);
 		expect(fetch).not.toHaveBeenCalled();
+	});
+
+	it('parseSince accepts ISO-8601 and a Unix epoch (GitHub push repository.pushed_at)', () => {
+		expect(parseSince(undefined)).toBeUndefined();
+		expect(parseSince('2026-08-19T21:22:34Z')).toBe(Date.parse('2026-08-19T21:22:34Z'));
+		// 1787174554 seconds == 2026-08-19T21:22:34Z. The push event delivers
+		// repository.pushed_at as this epoch integer, not ISO-8601.
+		expect(parseSince('1787174554')).toBe(1787174554 * 1000);
+	});
+
+	it('parseSince fails loudly on an unparseable --since value', () => {
+		expect(() => parseSince('not-a-date')).toThrow(/--since/);
 	});
 
 	it('fails loudly when the matched deployment ended in a terminal failure state', async () => {

@@ -162,11 +162,22 @@ function parsePositiveSeconds(value, flag) {
 	return seconds;
 }
 
-function parseSince(value) {
+/**
+ * Parses the `--since` value into epoch milliseconds. Accepts an ISO-8601
+ * timestamp OR a Unix epoch in SECONDS: GitHub's push event exposes
+ * `repository.pushed_at` as an epoch integer (not ISO-8601 like
+ * `head_commit.timestamp`), so the workflow passes it through unchanged.
+ */
+export function parseSince(value) {
 	if (value === undefined) return undefined;
+	// A 9+ digit integer is an epoch in seconds, which Date.parse() rejects.
+	if (/^\d{9,}$/.test(value)) {
+		const epochMs = Number(value) * 1000;
+		if (Number.isFinite(epochMs)) return epochMs;
+	}
 	const ms = Date.parse(value);
 	if (!Number.isFinite(ms)) {
-		throw new TypeError(`--since must be an ISO-8601 timestamp, got: ${value}`);
+		throw new TypeError(`--since must be an ISO-8601 timestamp or Unix epoch (seconds), got: ${value}`);
 	}
 	return ms;
 }
@@ -195,7 +206,7 @@ export async function main(argv = process.argv.slice(2)) {
 	const { fallback, timeoutMs, pollMs, sinceMs, positional } = parseArgs(argv);
 	const [appUuid, expectedCommit] = positional;
 	if (!appUuid || !expectedCommit) {
-		throw new Error('usage: node scripts/coolify-deploy.mjs <app-uuid> <expected-commit> [--fallback] [--timeout-sec N] [--poll-sec N] [--since ISO-8601]');
+		throw new Error('usage: node scripts/coolify-deploy.mjs <app-uuid> <expected-commit> [--fallback] [--timeout-sec N] [--poll-sec N] [--since ISO-8601-or-epoch-seconds]');
 	}
 	const short = expectedCommit.slice(0, 12);
 	const queued = await verifyDeploymentQueued(appUuid, expectedCommit, { timeoutMs, pollMs, sinceMs });

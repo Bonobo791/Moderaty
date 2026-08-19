@@ -2,15 +2,25 @@ name: Bunny CDN cache purge
 
 # Purges the production Bunny pull zone after EVERY production deploy. Both
 # supported targets (Netlify production and Coolify moderaty-prod) deploy on
-# pushes to `main`, so this workflow fires exactly when a production deploy
-# happens. The purge runs OUTSIDE the application container: the zone-scoped
-# key lives only in repository secrets and never ships in the runtime
-# environment (coderabbit — an account-level key inside the container could
-# purge every zone in the account).
+# pushes to `main`. The purge runs OUTSIDE the application container: the
+# zone-scoped key lives only in repository secrets and never ships in the
+# runtime environment (coderabbit — an account-level key inside the container
+# could purge every zone in the account).
+#
+# Deploy-timing (codex review): a push merely STARTS the deployments, and a
+# purge that races them would clear the OLD origin's cache and then be stale
+# again — the new deploy never purges. The wait step below polls the
+# production origin for the pushed commit (baked into the deploy at build
+# time as /__moderaty_commit.txt) and only then purges. The wait is
+# best-effort (continue-on-error): a poll timeout still purges rather than
+# leaving the CDN stale forever, but it fails loudly in the run log.
 
 on:
   push:
     branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   purge:
@@ -21,8 +31,32 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - name: Wait for the production deploy to serve this commit
+        continue-on-error: true
+        env:
+          PURGE_URL: ${{ secrets.BUNNY_PURGE_URL }}
+          EXPECTED: ${{ github.sha }}
+        run: |
+          if [ -z "$PURGE_URL" ]; then
+            echo "WARNING: BUNNY_PURGE_URL secret is not set — cannot wait for the deploy; the purge step below will fail loudly if it is unset too" >&2
+            exit 0
+          fi
+          # Query-bust each poll (the query string is part of Bunny's cache
+          # key by default), so every attempt reads the ORIGIN, not the CDN.
+          for i in $(seq 1 60); do
+            body="$(curl -fsS --max-time 10 "${PURGE_URL}/__moderaty_commit.txt?t=$RANDOM" 2>/dev/null || true)"
+            if [ "$body" = "$EXPECTED" ]; then
+              echo "production deploy is live ($EXPECTED)"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "WARNING: production did not serve $EXPECTED within 10 minutes — purging anyway (best effort; check the deploy logs)" >&2
       - name: Purge the production Bunny zone
         env:
           BUNNY_ACCESS_KEY: ${{ secrets.BUNNY_ACCESS_KEY }}
-          BUNNY_PURGE_URL: ${{ vars.BUNNY_PURGE_URL }}
+          # Documented as a repository SECRET (docs/COOLIFY_BUNNY.md §3.5);
+          # reading it from vars would silently supply an empty URL and every
+          # purge would fail (codex review).
+          BUNNY_PURGE_URL: ${{ secrets.BUNNY_PURGE_URL }}
         run: node scripts/bunny-purge.mjs

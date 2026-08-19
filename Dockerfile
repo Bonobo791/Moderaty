@@ -45,6 +45,14 @@ RUN --mount=type=secret,id=TURSO_DATABASE_URL,env=TURSO_DATABASE_URL \
 # Coolify target builds the standalone node server (adapter-node); Netlify
 # builds leave MODERATY_ADAPTER unset and keep adapter-netlify.
 ENV MODERATY_ADAPTER=node
+# Bake the deployed commit into a static marker BEFORE the build so the
+# bunny-purge workflow can wait for this deploy to serve the pushed commit.
+# SOURCE_COMMIT_SHA is Coolify's build-time commit (git is NOT installed in
+# the alpine builder, so the ARG/ENV passthrough is the only reliable source
+# in the Dockerfile path; the script falls back to 'unknown' when absent).
+ARG SOURCE_COMMIT_SHA
+ENV SOURCE_COMMIT_SHA=${SOURCE_COMMIT_SHA}
+RUN node scripts/write-commit-marker.mjs
 RUN npm run build
 RUN npm prune --omit=dev
 

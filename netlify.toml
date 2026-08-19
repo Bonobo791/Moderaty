@@ -18,7 +18,7 @@
   # failed migration or an unverified schema blocks the build, so a deploy
   # never serves new code on an un-migrated database. Deploy-preview builds
   # skip the migration step (untrusted PR code must never run SQL).
-  command = "node scripts/netlify-migrate.mjs && npm run build"
+  command = "node scripts/netlify-migrate.mjs && node scripts/write-commit-marker.mjs && npm run build"
   publish = "build"
 
 [build.environment]

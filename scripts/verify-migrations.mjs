@@ -147,7 +147,7 @@ for (const hash of extra) {
 
 if (missing.length === 0 && extra.length === 0) {
 	const first = expected[0]?.tag ?? '(none)';
-	const last = expected[expected.length - 1]?.tag ?? '(none)';
+	const last = expected.at(-1)?.tag ?? '(none)';
 	console.log(
 		expected.length === 0
 			? 'verify-migrations: PASS — journal has no entries to verify'

@@ -203,7 +203,7 @@ async function ytFetch(
 	const res = await fetchWithRetry(`${YT}${path}`, {
 		...init,
 		// Stryker disable next-line LogicalOperator: equivalent — no ytFetch caller passes init.headers, so `init?.headers` is always undefined and spreading `?? {}` vs `&& {}` yields identical headers
-		headers: { Authorization: `Bearer ${accessToken}`, ...(init?.headers ?? {}) }
+		headers: { Authorization: `Bearer ${accessToken}`, ...init?.headers }
 	}, deadline);
 	return res;
 }
@@ -234,34 +234,46 @@ export async function fetchNewComments(
 		throw new Error(`fetchNewComments cursor is invalid: ${cursor}`);
 	}
 	for (let page = 0; page < maxPages; page++) {
-		const params = new URLSearchParams({
-			part: 'snippet',
-			allThreadsRelatedToChannelId: channelId,
-			order: 'time',
-			maxResults: '100',
-			textFormat: 'plainText'
-		});
-		if (pageToken) params.set('pageToken', pageToken);
-		const res = await ytFetch(`/commentThreads?${params}`, accessToken, undefined, deadline);
-		const data = object(await jsonResponse(res, 'commentThreads.list'), 'commentThreads.list response');
-		if (!Array.isArray(data.items)) throw new Error('commentThreads.list response items is missing or invalid');
-		const nextPageToken = optionalPageToken(data.nextPageToken);
-		let reachedCursor = false;
-		for (const [index, item] of data.items.entries()) {
-			const comment = parseComment(item, index);
-			if (!comment) continue;
-			if (cursorMs !== null && Date.parse(comment.publishedAt) < cursorMs) {
-				reachedCursor = true;
-				break;
-			}
-			out.push(comment);
-		}
+		const { items, nextPageToken } = await fetchCommentPage(channelId, accessToken, pageToken, deadline);
+		const reachedCursor = collectUntilCursor(items, cursorMs, out);
 		if (reachedCursor || !nextPageToken) {
 			return { comments: out, nextPageToken: null, reachedCursor };
 		}
 		pageToken = nextPageToken;
 	}
 	return { comments: out, nextPageToken: pageToken, reachedCursor: false };
+}
+
+/** Fetches one page of comment threads for the channel (≤100 comments, I10). */
+async function fetchCommentPage(
+	channelId: string,
+	accessToken: string,
+	pageToken: string | null,
+	deadline: number | undefined
+): Promise<{ items: unknown[]; nextPageToken: string | null }> {
+	const params = new URLSearchParams({
+		part: 'snippet',
+		allThreadsRelatedToChannelId: channelId,
+		order: 'time',
+		maxResults: '100',
+		textFormat: 'plainText'
+	});
+	if (pageToken) params.set('pageToken', pageToken);
+	const res = await ytFetch(`/commentThreads?${params}`, accessToken, undefined, deadline);
+	const data = object(await jsonResponse(res, 'commentThreads.list'), 'commentThreads.list response');
+	if (!Array.isArray(data.items)) throw new Error('commentThreads.list response items is missing or invalid');
+	return { items: data.items as unknown[], nextPageToken: optionalPageToken(data.nextPageToken) };
+}
+
+/** Pushes parsed comments into out until the cursor boundary, returning whether it was reached. */
+function collectUntilCursor(items: unknown[], cursorMs: number | null, out: NewComment[]): boolean {
+	for (const [index, item] of items.entries()) {
+		const comment = parseComment(item, index);
+		if (!comment) continue;
+		if (cursorMs !== null && Date.parse(comment.publishedAt) < cursorMs) return true;
+		out.push(comment);
+	}
+	return false;
 }
 
 /**

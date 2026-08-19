@@ -132,7 +132,7 @@ export function stripeErrorCode(error: unknown): string {
 		const code = (error as { code?: unknown }).code;
 		if (typeof code === 'string') return code;
 	}
-	return error instanceof Error ? error.message : String(error);
+	return error instanceof Error ? error.message : JSON.stringify(error);
 }
 
 /**
@@ -174,24 +174,34 @@ function isCardFailure(error: unknown): boolean {
  * @param orgId - The organization to charge
  * @returns `true` if a payment was initiated, `false` if the organization was ineligible or payment initiation failed
  */
-export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
-	const org = await readAutoTopupState(orgId);
+/** True when the org passes the cheap eligibility checks (no DB counts yet). */
+function basicEligibility(org: AutoTopupState): boolean {
 	if (org.enabled !== 1) return false;
-	const threshold = org.threshold ?? AUTO_TOPUP_DEFAULT_THRESHOLD;
-	if ((org.creditsRemaining ?? 0) >= threshold) return false;
+	if ((org.creditsRemaining ?? 0) >= (org.threshold ?? AUTO_TOPUP_DEFAULT_THRESHOLD)) return false;
 	if (org.state === 'disabled') {
-		console.error(`auto top-up skipped for org ${orgId}: disabled (re-authentication or repeated failures)`);
+		console.error(`auto top-up skipped for org ${org.customerId ?? org.defaultPmId ?? 'unknown'}: disabled (re-authentication or repeated failures)`);
 		return false;
 	}
 	if (org.state === 'in_flight') return false; // a charge is already pending
 	if (!org.customerId || !org.defaultPmId) return false; // no saved card
 	const lastAttempt = org.lastAttemptAt ? Date.parse(org.lastAttemptAt) : 0;
 	if (lastAttempt && Date.now() - lastAttempt < COOLDOWN_MS) return false;
+	return true;
+}
+
+/** True when the daily/monthly top-up limits are exhausted. */
+function rateLimited(dayCount: number, monthCount: number): boolean {
+	return dayCount >= MAX_PER_DAY || monthCount >= MAX_PER_MONTH;
+}
+
+export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
+	const org = await readAutoTopupState(orgId);
+	if (!basicEligibility(org)) return false;
 	const dayStart = `${startOfUtcDayIso(0)}T00:00:00.000Z`;
 	const monthStart = `${startOfUtcDayIso(0).slice(0, 8)}01T00:00:00.000Z`;
 	const dayCount = await topupCountsSince(orgId, dayStart);
 	const monthCount = await topupCountsSince(orgId, monthStart);
-	if (dayCount >= MAX_PER_DAY || monthCount >= MAX_PER_MONTH) return false;
+	if (rateLimited(dayCount, monthCount)) return false;
 
 	// Resolve the bundle and price BEFORE the atomic claim: a throw here
 	// (missing env config, Stripe network/API error) must never leave the org
@@ -237,14 +247,20 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 		.returning({ id: organizations.id });
 	if (claimed.length === 0) return false; // lost the race (or became ineligible mid-flight)
 
-	const idempotencyKey = `autotopup:${org.customerId}:${startOfUtcDayIso(0)}:${dayCount + 1}`;
+	// Re-narrow after basicEligibility() moved the guard into a helper (TS
+	// control-flow narrowing does not cross the function boundary).
+	const customerId = org.customerId;
+	const defaultPmId = org.defaultPmId;
+	if (!customerId || !defaultPmId) return false;
+
+	const idempotencyKey = `autotopup:${customerId}:${startOfUtcDayIso(0)}:${dayCount + 1}`;
 	try {
 		await getStripe().paymentIntents.create(
 			{
 				amount,
 				currency: 'usd',
-				customer: org.customerId,
-				payment_method: org.defaultPmId,
+				customer: customerId,
+				payment_method: defaultPmId,
 				off_session: true,
 				confirm: true,
 				metadata: { type: 'auto_topup', org_id: orgId, bundle: bundle.id }

@@ -14,7 +14,7 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { db } from '$lib/server/db';
-import { channels, rules } from '$lib/server/db/schema';
+import { rules } from '$lib/server/db/schema';
 import { validateRule } from '$lib/server/rules';
 import {
 	addHandle as addAllowedHandle,

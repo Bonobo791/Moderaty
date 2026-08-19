@@ -20,6 +20,6 @@
  * open an HTML comment (<!--) from inside a string value.
  */
 export function jsonLd(data: object): string {
-	const json = JSON.stringify(data).replace(/</g, '\\u003c');
+	const json = JSON.stringify(data).replaceAll('<', String.raw`\u003c`);
 	return '<' + 'script type="application/ld+json">' + json + '</' + 'script>';
 }

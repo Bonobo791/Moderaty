@@ -176,7 +176,7 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 				.from(organizations)
 				.where(eq(organizations.id, orgId))
 				.get();
-			if (prior && prior.autoTopupEnabled === 1 && prior.stripeDefaultPmId && prior.stripeDefaultPmId !== paymentMethodId) {
+			if (prior?.autoTopupEnabled === 1 && prior?.stripeDefaultPmId && prior?.stripeDefaultPmId !== paymentMethodId) {
 				await db
 					.update(organizations)
 					.set({ autoTopupEnabled: 0, autoTopupState: 'disabled' })

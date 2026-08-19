@@ -18,10 +18,9 @@
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, copyFileSync, rmSync, mkdirSync } from 'node:fs';
 import os from 'node:os';
-import path from 'node:path';
+import path, { resolve as resolvePath } from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { resolve as resolvePath } from 'node:path';
 
 /**
  * Resolves the npm global prefix WITHOUT spawning npm or resolving anything
@@ -43,7 +42,7 @@ export function npmPrefix(env = process.env, home = os.homedir(), execPath = pro
 		const npmrc = path.join(home, '.npmrc');
 		if (existsSync(npmrc)) {
 			for (const line of readFileSync(npmrc, 'utf8').split(/\r?\n/)) {
-				const m = line.match(/^\s*prefix\s*=\s*(.+?)\s*$/);
+				const m = line.match(/^\s*prefix\s*=\s*(.+)$/);
 				const prefix = m?.[1]?.trim();
 				if (prefix) return prefix.replace(/^["']|["']$/g, '');
 			}
@@ -58,46 +57,15 @@ export function npmPrefix(env = process.env, home = os.homedir(), execPath = pro
  * @param argv - [repo-root, changed-file...] (defaults to process.argv.slice(2))
  * @returns {Promise<number>} Exit code
  */
-export async function main(argv = process.argv.slice(2)) {
-	const ROOT = argv[0];
-	const changed = new Set((argv.slice(1) || []).map((f) => f.replace(/^\.\//, '')));
-	const log = (...a) => console.error('[codacy-gate]', ...a);
-
-	if (!ROOT || !existsSync(path.join(ROOT, '.git'))) {
-		log('no repo root given; skipping gate');
-		return 0;
-	}
-	if (changed.size === 0) {
-		log('no changed files; skipping gate');
-		return 0;
-	}
-
-	// --- resolve the global Codacy MCP server binary -----------------------------
-	// S4036: never resolve executables through PATH — no `npm` subprocess.
-	// npmPrefix() derives the prefix from env/.npmrc/Node layout, and the
-	// server binary is then an absolute path under <prefix>/bin.
-	const serverBin = path.join(npmPrefix(), 'bin', 'codacy-mcp-server');
-	if (!existsSync(serverBin)) {
-		log('@codacy/codacy-mcp is not installed globally; skipping Codacy gate');
-		log('  install with: npm install -g @codacy/codacy-mcp');
-		return 0;
-	}
-
-	// --- optional token from the agent config (keeps analysis cloud-synced) ------
-	const env = { ...process.env };
-	try {
-		const envFile = path.join(os.homedir(), '.prime', 'agent', 'codacy', 'server.env');
-		if (existsSync(envFile)) {
-			for (const line of readFileSync(envFile, 'utf8').split(/\r?\n/)) {
-				const m = line.match(/^CODACY_ACCOUNT_TOKEN=(.*)$/);
-				const token = m?.[1]?.trim();
-				if (token) env.CODACY_ACCOUNT_TOKEN = token.replace(/^["']|["']$/g, '');
-			}
-		}
-	} catch { /* token is optional */ }
-
-	// --- preserve committed .codacy config (the runner regenerates it) -----------
-	const codacyDir = path.join(ROOT, '.codacy');
+/**
+ * Copies the committed .codacy config aside so the runner can regenerate it,
+ * and returns the restore function that puts it back afterwards.
+ *
+ * @param repoRoot - Repository root containing .codacy
+ * @returns restore function (idempotent; failures are swallowed)
+ */
+function backupCodacyConfig(repoRoot) {
+	const codacyDir = path.join(repoRoot, '.codacy');
 	const configFiles = ['codacy.config.json', 'codacy.config.baseline.json', 'configure-codacy-summary.json'];
 	const backupDir = path.join(os.tmpdir(), `codacy-gate-${process.pid}`);
 	const backedUp = [];
@@ -109,14 +77,46 @@ export async function main(argv = process.argv.slice(2)) {
 			backedUp.push(name);
 		}
 	}
-	const restoreConfig = () => {
+	return () => {
 		for (const name of backedUp) {
 			try { copyFileSync(path.join(backupDir, name), path.join(codacyDir, name)); } catch { /* ignore */ }
 		}
 		try { rmSync(backupDir, { recursive: true, force: true }); } catch { /* ignore */ }
 	};
+}
 
-	// --- minimal MCP stdio client (JSON-RPC 2.0, newline-delimited) ---------------
+/**
+ * Environment for the MCP server: the process env plus the optional agent
+ * CODACY_ACCOUNT_TOKEN (keeps analysis cloud-synced; token is optional).
+ */
+function mcpEnv() {
+	const env = { ...process.env };
+	try {
+		const envFile = path.join(os.homedir(), '.prime', 'agent', 'codacy', 'server.env');
+		if (existsSync(envFile)) {
+			for (const line of readFileSync(envFile, 'utf8').split(/\r?\n/)) {
+				const match = line.match(/^CODACY_ACCOUNT_TOKEN=(.*)$/);
+				const token = match?.[1]?.trim();
+				if (token) env.CODACY_ACCOUNT_TOKEN = token.replace(/^["']|["']$/g, '');
+			}
+		}
+	} catch { /* token is optional */ }
+	return env;
+}
+
+/**
+ * Runs the Codacy MCP server over stdio and requests a repository analysis.
+ *
+ * @param serverBin - Absolute path to the codacy-mcp-server binary
+ * @param env - Environment for the spawned server
+ * @param repoRoot - Repository root to analyze
+ * @returns The parsed analysis payload (or a { success:false } marker) plus any error
+ */
+async function analyzeRepository(serverBin, env, repoRoot) {
+	let payload = null;
+	let analysisError = null;
+	const proc = spawn(serverBin, [], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+	// Minimal MCP stdio client (JSON-RPC 2.0, newline-delimited).
 	function rpc(rl, id, method, params) {
 		return new Promise((resolve, reject) => {
 			const onLine = (line) => {
@@ -132,10 +132,6 @@ export async function main(argv = process.argv.slice(2)) {
 			proc.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
 		});
 	}
-
-	let payload = null;
-	let analysisError = null;
-	const proc = spawn(serverBin, [], { env, stdio: ['pipe', 'pipe', 'pipe'] });
 	// The analysis runner streams a lot of per-tool progress to stderr; collapse
 	// consecutive repeats so a 40s analysis doesn't bury the gate's verdict.
 	let lastLine = null;
@@ -162,10 +158,10 @@ export async function main(argv = process.argv.slice(2)) {
 			clientInfo: { name: 'codacy-pre-push-gate', version: '1.0.0' },
 		});
 		proc.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`);
-		log('analyzing repository (first run may download tool runtimes) ...');
+		console.error('[codacy-gate] analyzing repository (first run may download tool runtimes) ...');
 		const result = await rpc(rl, 2, 'tools/call', {
 			name: 'codacy_cli_analyze',
-			arguments: { rootPath: ROOT },
+			arguments: { rootPath: repoRoot },
 		});
 		const text = result?.content?.[0]?.text;
 		payload = text ? JSON.parse(text) : { success: false, output: 'empty response' };
@@ -173,8 +169,39 @@ export async function main(argv = process.argv.slice(2)) {
 		analysisError = err;
 	} finally {
 		try { proc.kill(); } catch { /* ignore */ }
-		restoreConfig();
 	}
+	return { payload, analysisError };
+}
+
+export async function main(argv = process.argv.slice(2)) {
+	const ROOT = argv[0];
+	const changed = new Set((argv.slice(1) || []).map((f) => f.replace(/^\.\//, '')));
+	const log = (...a) => console.error('[codacy-gate]', ...a);
+
+	if (!ROOT || !existsSync(path.join(ROOT, '.git'))) {
+		log('no repo root given; skipping gate');
+		return 0;
+	}
+	if (changed.size === 0) {
+		log('no changed files; skipping gate');
+		return 0;
+	}
+
+	// --- resolve the global Codacy MCP server binary -----------------------------
+	// S4036: never resolve executables through PATH — no `npm` subprocess.
+	// npmPrefix() derives the prefix from env/.npmrc/Node layout, and the
+	// server binary is then an absolute path under <prefix>/bin.
+	const serverBin = path.join(npmPrefix(), 'bin', 'codacy-mcp-server');
+	if (!existsSync(serverBin)) {
+		log('@codacy/codacy-mcp is not installed globally; skipping Codacy gate');
+		log('  install with: npm install -g @codacy/codacy-mcp');
+		return 0;
+	}
+
+	// --- preserve committed .codacy config (the runner regenerates it) -----------
+	const restoreConfig = backupCodacyConfig(ROOT);
+	const { payload, analysisError } = await analyzeRepository(serverBin, mcpEnv(), ROOT);
+	restoreConfig();
 	if (analysisError) {
 		log('analysis failed (%s); allowing push (tooling error, not a finding)', analysisError?.message || analysisError);
 		return 0;

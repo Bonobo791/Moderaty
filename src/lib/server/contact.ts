@@ -46,7 +46,7 @@ export const MAX_NAME_LENGTH = 200;
 // real gate is the verification e-mail itself — a wrong address simply never
 // confirms. The /^[^\s@]+@[^\s@]+\.[^\s@]+$/ check rejects whitespace,
 // missing @, missing domain dot, and empty parts.
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+(?:\.[^\s@]+)+$/;
 
 export type ContactParse =
 	| { ok: true; name: string; email: string }

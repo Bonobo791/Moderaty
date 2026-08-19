@@ -49,52 +49,69 @@ const COMMIT_SHA_RE = /^[0-9a-f]{40}$/i;
  * @param root - The repository root (must contain .git)
  * @returns The full commit SHA, or 'unknown'
  */
+/**
+ * Resolves the repository's git directory, following a worktree `.git` FILE
+ * (`gitdir: <path>`) when present.
+ *
+ * @param root - Repository root
+ * @returns The git dir path, or null when `.git` is unreadable/malformed
+ */
+function gitDirFor(root) {
+	const dotGit = resolve(root, '.git');
+	if (existsSync(resolve(dotGit, 'HEAD'))) return dotGit;
+	const match = readFileSync(dotGit, 'utf8').match(/^gitdir:\s*(.+)$/m);
+	if (!match) return null;
+	return resolve(dirname(dotGit), match[1].trim());
+}
+
+/**
+ * Resolves the directory holding branch refs: worktrees keep them in the
+ * COMMON git dir, reached via the `commondir` redirect.
+ *
+ * @param gitDir - The (worktree) git directory
+ * @returns The refs base directory (gitDir itself when no redirect exists)
+ */
+function refsBaseFor(gitDir) {
+	const commonFile = resolve(gitDir, 'commondir');
+	if (!existsSync(commonFile)) return gitDir;
+	return resolve(gitDir, readFileSync(commonFile, 'utf8').trim());
+}
+
+/**
+ * Reads the commit SHA for a ref from the loose ref file, then packed-refs.
+ *
+ * @param refsBase - The refs base directory
+ * @param ref - The ref name (e.g. refs/heads/main)
+ * @returns The full commit SHA, or null when the ref is absent
+ */
+function commitForRef(refsBase, ref) {
+	const refPath = resolve(refsBase, ref);
+	if (existsSync(refPath)) {
+		const sha = readFileSync(refPath, 'utf8').trim();
+		if (COMMIT_SHA_RE.test(sha)) return sha;
+	}
+	const packed = resolve(refsBase, 'packed-refs');
+	if (!existsSync(packed)) return null;
+	for (const line of readFileSync(packed, 'utf8').split(/\r?\n/)) {
+		const match = line.match(/^([0-9a-f]{40})\s+(\S+)$/);
+		if (match && match[2] === ref) return match[1];
+	}
+	return null;
+}
+
 export function readGitHeadCommit(root) {
 	try {
-		const dotGit = resolve(root, '.git');
-		let gitDir = dotGit;
-		if (!existsSync(resolve(dotGit, 'HEAD'))) {
-			// .git is a FILE (worktree/submodule): `gitdir: <path>`.
-			const m = readFileSync(dotGit, 'utf8').match(/^gitdir:\s*(.+?)\s*$/m);
-			if (!m) return 'unknown';
-			gitDir = resolve(dirname(dotGit), m[1].trim());
-		}
+		const gitDir = gitDirFor(root);
+		if (!gitDir) return 'unknown';
 		const head = readFileSync(resolve(gitDir, 'HEAD'), 'utf8').trim();
-		// Worktrees keep branch refs in the COMMON git dir; follow `commondir`.
-		let refsBase = gitDir;
-		const commonFile = resolve(gitDir, 'commondir');
-		if (existsSync(commonFile)) {
-			refsBase = resolve(gitDir, readFileSync(commonFile, 'utf8').trim());
-		}
 		const ref = head.match(/^ref:\s*(.+)$/)?.[1]?.trim();
-		if (ref) {
-			const refPath = resolve(refsBase, ref);
-			if (existsSync(refPath)) {
-				const sha = readFileSync(refPath, 'utf8').trim();
-				if (COMMIT_SHA_RE.test(sha)) return sha;
-			}
-			const packed = resolve(refsBase, 'packed-refs');
-			if (existsSync(packed)) {
-				for (const line of readFileSync(packed, 'utf8').split(/\r?\n/)) {
-					const m = line.match(/^([0-9a-f]{40})\s+(\S+)$/);
-					if (m && m[2] === ref) return m[1];
-				}
-			}
-			return 'unknown';
-		}
+		if (ref) return commitForRef(refsBaseFor(gitDir), ref) ?? 'unknown';
 		return COMMIT_SHA_RE.test(head) ? head : 'unknown';
 	} catch {
 		return 'unknown';
 	}
 }
 
-/**
- * Resolves the commit this build is deploying.
- *
- * @param env - The environment (defaults to process.env)
- * @param root - The repository root used for the local .git fallback (defaults to process.cwd())
- * @returns The full commit SHA, or 'unknown' when no provider variable exists and no commit is readable
- */
 export function resolveCommit(env = process.env, root = process.cwd()) {
 	// Full SHAs from the deploy platforms (both are 40-char; never truncate —
 	// the workflow compares against $GITHUB_SHA verbatim).

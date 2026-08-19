@@ -325,7 +325,7 @@ test('callback returns 502 when the token request itself fails', async () => {
 	);
 
 	await expectCallbackThrows(502);
-	expect(errorSpy.mock.calls.length > 0).toBe(true);
+	expect(errorSpy.mock.calls.length).toBeGreaterThan(0);
 });
 
 test('callback returns 502 when the token response is valid JSON but not an object', async () => {
@@ -362,7 +362,7 @@ test('youtube lookup failure logs do not include the upstream response body', as
 	stubTokenAndChannelResponses(new Response('quota exceeded', { status: 403 }));
 
 	await expectCallbackThrows(502);
-	expect(errorSpy.mock.calls.length > 0).toBe(true);
+	expect(errorSpy.mock.calls.length).toBeGreaterThan(0);
 	for (const call of errorSpy.mock.calls) {
 		expect(call.join(' ')).not.toContain('quota exceeded');
 	}

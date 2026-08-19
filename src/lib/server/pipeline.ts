@@ -168,7 +168,7 @@ function aiUnavailable(comment: NewComment, error: unknown): Decision {
 		matchedRuleId: null,
 		aiScore: null,
 		auditAction: 'queue',
-		reason: `ai unavailable: ${error instanceof Error ? error.message : String(error)}`.slice(0, 200),
+		reason: `ai unavailable: ${error instanceof Error ? error.message : JSON.stringify(error)}`.slice(0, 200),
 		youtubeAction: null
 	};
 }
@@ -243,16 +243,11 @@ async function aiDecision(
  * @param aiBudget - Remaining AI budget for the current batch
  * @returns The moderation decision for the comment
  */
-async function decide(
-	comment: NewComment,
-	rules: PreparedRule[],
-	allowlist: Set<string>,
-	tone: { context: ToneContext } | null,
-	deadline: number | undefined,
-	protections: ToneProtections,
-	openAiKey: string | undefined,
-	aiBudget: { remaining: number }
-): Promise<Decision> {
+/**
+ * Allowlist and rule outcomes, decided BEFORE any AI budget is touched.
+ * Returns null when neither applies, so decide() can fall through to AI.
+ */
+function preAiDecision(comment: NewComment, rules: PreparedRule[], allowlist: Set<string>): Decision | null {
 	// Protected handles skip rules and scoring by design: identity beats text,
 	// so even a matching ban rule loses to the allowlist.
 	if (allowlist.has(normalizeHandle(comment.authorName))) {
@@ -269,6 +264,26 @@ async function decide(
 	}
 	const rule = matchPreparedRule(comment.text, comment.authorChannelId, rules);
 	if (rule) return ruleDecision(comment, rule);
+	return null;
+}
+
+/** AI-scoring options for decide(), grouped to keep the parameter count low. */
+interface AiOptions {
+	deadline: number | undefined;
+	protections: ToneProtections;
+	openAiKey: string | undefined;
+}
+
+async function decide(
+	comment: NewComment,
+	rules: PreparedRule[],
+	allowlist: Set<string>,
+	tone: { context: ToneContext } | null,
+	aiBudget: { remaining: number },
+	options: AiOptions
+): Promise<Decision> {
+	const preAi = preAiDecision(comment, rules, allowlist);
+	if (preAi) return preAi;
 	// Metered AI: claim one credit of the batch's AI budget SYNCHRONOUSLY —
 	// before any await — so the concurrent decide() workers in Promise.allSettled
 	// can never over-spend it. Rules/allowlist above never consume budget.
@@ -279,7 +294,7 @@ async function decide(
 	aiBudget.remaining -= 1;
 	// The budget claim IS the billing marker: this decision consumed an AI
 	// call, so stageDecisions may charge it exactly one credit.
-	return { ...(await aiDecision(comment, tone, deadline, protections, openAiKey)), billable: true };
+	return { ...(await aiDecision(comment, tone, options.deadline, options.protections, options.openAiKey)), billable: true };
 }
 
 /**
@@ -491,7 +506,7 @@ async function decideNewComments(
 				const tone = videoContext
 					? { context: { videoTitle: meta?.title ?? '', videoDescription: meta?.description ?? '' } }
 					: null;
-				return await decide(comment, rulesForChannel, allowlist, tone, deadline, protections, openAiKey, aiBudget);
+				return await decide(comment, rulesForChannel, allowlist, tone, aiBudget, { deadline, protections, openAiKey });
 			} catch (error) {
 				// DeadlineExceededError escapes decide() by design (aiDecision
 				// rethrows it) so the run aborts partial:true with no durable
@@ -678,7 +693,14 @@ async function applyYoutubeActions(
 	acted += await applyModerationAction(selected('hold'), 'heldForReview', false, accessToken, deadline);
 	acted += await applyModerationAction(selected('reject'), 'rejected', false, accessToken, deadline);
 	acted += await applyModerationAction(selected('ban'), 'rejected', true, accessToken, deadline);
-	for (const action of selected('delete')) {
+	acted += await applyDeletes(selected('delete'), accessToken, deadline);
+	return acted;
+}
+
+/** Dispatches, deletes, and completes a batch of delete actions (I3/I4-safe). */
+async function applyDeletes(actions: OutstandingAction[], accessToken: string, deadline: number | undefined): Promise<number> {
+	let acted = 0;
+	for (const action of actions) {
 		await markDispatched([action]);
 		assertBeforeDeadline(deadline);
 		await deleteComment(action.commentId, accessToken, deadline);

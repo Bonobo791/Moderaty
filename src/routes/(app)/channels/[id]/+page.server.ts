@@ -25,7 +25,7 @@ import { and, eq, isNull, lt, or } from 'drizzle-orm';
 import { fail } from '@sveltejs/kit';
 
 /** Window presets shared by Analyze history and the dry-run preview (months). */
-const HISTORY_MONTH_PRESETS: readonly number[] = [1, 3, 6, 12, 24];
+const HISTORY_MONTH_PRESETS: ReadonlySet<number> = new Set([1, 3, 6, 12, 24]);
 
 /** Boundary instant for a months window: now − months × 30 days. */
 function monthsAgoBoundary(months: number): string {
@@ -79,7 +79,7 @@ export const actions = {
 		const months = Number(f.get('months'));
 		// Preset windows only — the scan drains newest-first at 300 comments per
 		// run, so an unbounded window is an unbounded API/AI cost (I10).
-		if (!HISTORY_MONTH_PRESETS.includes(months)) {
+		if (!HISTORY_MONTH_PRESETS.has(months)) {
 			return fail(400, { scope: 'history', channelId, error: 'history window must be 1, 3, 6, 12, or 24 months' });
 		}
 		// Move the scan boundary back and reset the drain state: cron's next runs
@@ -125,7 +125,7 @@ export const actions = {
 		// Same presets as Analyze history; absent → 3 (the UI default). 'all'
 		// covers channels whose entire history predates every months preset.
 		const rawMonths = f.has('months') ? String(f.get('months')) : '3';
-		if (rawMonths !== 'all' && !HISTORY_MONTH_PRESETS.includes(Number(rawMonths))) {
+		if (rawMonths !== 'all' && !HISTORY_MONTH_PRESETS.has(Number(rawMonths))) {
 			return fail(400, { scope: 'dryRun', channelId, error: 'dry-run window must be 1, 3, 6, 12, or 24 months, or all time' });
 		}
 		const months = rawMonths === 'all' ? ('all' as const) : Number(rawMonths);

@@ -82,7 +82,9 @@ function creditsForBundle(bundle: CreditBundle): number {
  */
 export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'already' | 'rejected'> {
 	const session = await getStripe().checkout.sessions.retrieve(sessionId, {
-		expand: ['payment_intent']
+		// latest_charge expanded so a LATE grant can revalidate the charge's
+		// current refund/dispute state (codex review) without a second call.
+		expand: ['payment_intent', 'payment_intent.latest_charge']
 	});
 	if (session.payment_status !== 'paid') return 'rejected';
 	const orgId = session.metadata?.org_id;
@@ -90,6 +92,27 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 	if (!orgId || !bundleId) {
 		console.error(`stripe: checkout session ${sessionId} has no org_id/bundle metadata — cannot credit`);
 		return 'rejected';
+	}
+	// Late-grant revalidation: the success page can fulfill an OLD paid
+	// session at any time — potentially long after the 14-day pending-reversal
+	// sweep dropped a queued reversal. Granting would hand credits back for
+	// money that already left (fully refunded or disputed), so the charge's
+	// CURRENT state is checked before the ledger mutation. The webhook path
+	// (fresh fulfillment) is unaffected: a refunded charge never grants here,
+	// and the drain handles the ordering race for the reverse case.
+	const paymentIntent = typeof session.payment_intent === 'string' ? null : session.payment_intent;
+	const charge = paymentIntent && typeof paymentIntent.latest_charge !== 'string' ? paymentIntent.latest_charge : undefined;
+	if (charge) {
+		const fullyRefunded =
+			typeof charge.amount_refunded === 'number' &&
+			typeof charge.amount === 'number' &&
+			charge.amount_refunded >= charge.amount;
+		if (charge.disputed || fullyRefunded) {
+			console.error(
+				`stripe: checkout session ${sessionId} charge ${charge.id} is ${charge.disputed ? 'disputed' : 'fully refunded'} — late grant refused`
+			);
+			return 'rejected';
+		}
 	}
 	// An unknown bundle id is an operator config bug, not a transient failure:
 	// acknowledge loudly and reject (the credits can never be granted — a
@@ -102,10 +125,10 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 		console.error(`stripe: checkout session ${sessionId} references unknown bundle ${bundleId} — credits cannot be granted`);
 		return 'rejected';
 	}
-	// expand: ['payment_intent'] returns the full object; the type stays a
-	// string-union, so narrow before touching nested fields.
-	const paymentIntent = typeof session.payment_intent === 'string' ? null : session.payment_intent;
-	const chargeId = typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : undefined;
+	// Narrow the expanded object: the type stays a string-union, so touch
+	// nested fields only after the check. chargeId prefers the expanded
+	// object's id (it is the same id either way).
+	const chargeId = typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : charge?.id;
 	const applied = await applyLedgerDelta(db, {
 		orgId,
 		delta: creditsForBundle(bundle),
@@ -139,6 +162,29 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 			}
 			const paymentMethodId = typeof paymentMethod === 'string' ? paymentMethod : paymentMethod.id;
 			await getStripe().customers.update(customer, { invoice_settings: { default_payment_method: paymentMethodId } });
+			// A NEW saved card is a NEW billing instrument: the consent
+			// evidence on file covered the OLD card. Unscheduled off-session
+			// charges must not move to a card the cardholder never authorized —
+			// disable auto top-up whenever the default payment method CHANGES
+			// (codex review). The consent evidence row is kept (the record that
+			// authorization was once given must survive for dispute defense);
+			// re-enabling is a fresh explicit owner action on the Usage page.
+			// Checked BEFORE the PM update below so the comparison sees the old
+			// card.
+			const prior = await db
+				.select({ autoTopupEnabled: organizations.autoTopupEnabled, stripeDefaultPmId: organizations.stripeDefaultPmId })
+				.from(organizations)
+				.where(eq(organizations.id, orgId))
+				.get();
+			if (prior && prior.autoTopupEnabled === 1 && prior.stripeDefaultPmId && prior.stripeDefaultPmId !== paymentMethodId) {
+				await db
+					.update(organizations)
+					.set({ autoTopupEnabled: 0, autoTopupState: 'disabled' })
+					.where(eq(organizations.id, orgId));
+				console.error(
+					`stripe: saved payment method changed for org ${orgId} (${prior.stripeDefaultPmId} -> ${paymentMethodId}) — auto top-up DISABLED, fresh consent required`
+				);
+			}
 			await db
 				.update(organizations)
 				.set({ stripeCustomerId: customer, stripeDefaultPmId: paymentMethodId })

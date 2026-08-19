@@ -82,6 +82,42 @@ describe('fulfillCheckout', () => {
 		expect(org?.stripeDefaultPmId).toBe('pm_1');
 	});
 
+	test('refuses a LATE grant when the charge was since fully refunded or disputed', async () => {
+		// The success page can call fulfillCheckout for an old paid session at
+		// ANY time — long after the 14-day pending-reversal sweep dropped a
+		// queued reversal. Granting then would hand credits back for money that
+		// already left; the charge's CURRENT state must be revalidated before
+		// any late grant (codex review).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+
+		// Fully refunded charge: reject, never grant.
+		mocks.sessionsRetrieve.mockResolvedValue(
+			session({
+				payment_intent: { id: 'pi_1', latest_charge: { id: 'ch_1', disputed: false, amount: 50000, amount_refunded: 50000 }, payment_method: 'pm_1' }
+			})
+		);
+		expect(await fulfillCheckout('cs_1')).toBe('rejected');
+		expect(await getCredits('org-1')).toBe(0);
+
+		// Disputed charge: reject, never grant.
+		mocks.sessionsRetrieve.mockResolvedValue(
+			session({
+				payment_intent: { id: 'pi_1', latest_charge: { id: 'ch_1', disputed: true, amount: 50000, amount_refunded: 0 }, payment_method: 'pm_1' }
+			})
+		);
+		expect(await fulfillCheckout('cs_1')).toBe('rejected');
+		expect(await getCredits('org-1')).toBe(0);
+
+		// A healthy charge still grants (the common case is unchanged).
+		mocks.sessionsRetrieve.mockResolvedValue(
+			session({
+				payment_intent: { id: 'pi_1', latest_charge: { id: 'ch_1', disputed: false, amount: 50000, amount_refunded: 0 }, payment_method: 'pm_1' }
+			})
+		);
+		expect(await fulfillCheckout('cs_1')).toBe('granted');
+		expect(await getCredits('org-1')).toBe(500);
+	});
+
 	test('is idempotent: a duplicate delivery never double-grants', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		mocks.sessionsRetrieve.mockResolvedValue(session());
@@ -89,6 +125,54 @@ describe('fulfillCheckout', () => {
 		expect(await fulfillCheckout('cs_123')).toBe('granted');
 		expect(await fulfillCheckout('cs_123')).toBe('already');
 		expect(await getCredits('org-1')).toBe(500);
+	});
+
+	test('a NEW saved payment method disables auto top-up — the old consent does not cover the new card', async () => {
+		// In a team org with auto top-up already enabled, another owner can buy
+		// a manual bundle with a DIFFERENT card. The new cardholder consented
+		// only to the one manual Checkout payment — the next low-balance sweep
+		// must not charge their card off-session on the strength of the
+		// previous owner's consent (codex review).
+		await testDb().db.insert(organizations).values({
+			id: 'org-1',
+			name: 'Org',
+			autoTopupEnabled: 1,
+			autoTopupState: 'idle',
+			autoTopupThreshold: 100,
+			stripeCustomerId: 'cus_1',
+			stripeDefaultPmId: 'pm_old'
+		});
+		mocks.sessionsRetrieve.mockResolvedValue(
+			session({ customer: 'cus_1', payment_intent: { id: 'pi_1', latest_charge: { id: 'ch_1', disputed: false, amount: 50000, amount_refunded: 0 }, payment_method: { id: 'pm_new' } } })
+		);
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+		expect(await fulfillCheckout('cs_1')).toBe('granted');
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeDefaultPmId).toBe('pm_new');
+		expect(org?.autoTopupEnabled).toBe(0); // disabled — fresh consent required
+		expect(org?.autoTopupState).toBe('disabled');
+		errorSpy.mockRestore();
+	});
+
+	test('re-using the SAME saved card keeps auto top-up enabled', async () => {
+		// The consent evidence covers the stored card; a purchase with that
+		// same card changes nothing and must not disable anything.
+		await testDb().db.insert(organizations).values({
+			id: 'org-1',
+			name: 'Org',
+			autoTopupEnabled: 1,
+			autoTopupState: 'idle',
+			autoTopupThreshold: 100,
+			stripeCustomerId: 'cus_1',
+			stripeDefaultPmId: 'pm_1'
+		});
+		mocks.sessionsRetrieve.mockResolvedValue(session({ customer: 'cus_1' }));
+
+		expect(await fulfillCheckout('cs_1')).toBe('granted');
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.autoTopupEnabled).toBe(1);
+		expect(org?.autoTopupState).toBe('idle');
 	});
 
 	test('never credits an unpaid session', async () => {

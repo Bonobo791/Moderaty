@@ -68,9 +68,10 @@ test('verifies the signature and answers 200 for a valid delivery', async () => 
 	expect(mocks.constructEvent).toHaveBeenCalledWith('{"payload":true}', 't=1,v1=sig', 'whsec_test');
 });
 
-/** Calls the handler and returns the thrown HttpError instead of letting it escape. */
-async function postCatching(): Promise<{ status: number; body?: { message?: string } }> {
-	return POST({ request: webhookRequest() } as never).catch((e: { status: number; body?: { message?: string } }) => e);
+/** Calls the handler, returning the Response or the thrown HttpError. */
+type ErrorLike = { status: number; body?: { message?: string } };
+function postCatching(): Promise<Response | ErrorLike> {
+	return (POST({ request: webhookRequest() } as never) as Promise<Response>).catch((e: ErrorLike) => e);
 }
 
 test('a missing STRIPE_SECRET_KEY answers 500 (server config), never 400 invalid signature', async () => {

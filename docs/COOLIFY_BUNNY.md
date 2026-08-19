@@ -37,6 +37,7 @@ GitHub ──push──▶ Coolify (self-hosted server)
                    ├─ app "moderaty-prod"  branch main   ──▶ Bunny CDN pull zone ──▶ users (public domain)
                    │    · scheduled task every minute → /api/cron (localhost)
                    │    · GitHub Actions on push to main → bunny-purge.mjs (outside the container)
+                   │    · GitHub Actions on push to dev/main → coolify-deploy.mjs (verify + fallback trigger, §3.6)
                    └─ app "moderaty-dev"   branch dev    ──▶ users (dev domain, no CDN)
                         · scheduled task every minute → /api/cron (localhost)
 
@@ -199,6 +200,40 @@ Netlify and the Coolify production apps), the
 The key never enters the container's runtime environment; the purge never
 runs inside production with account-level credentials. The dev app has no
 CDN and never purges.
+
+### 3.6 Deploy guarantee — every push to `dev`/`main` redeploys
+
+The push-to-deploy trigger is Coolify's **GitHub App** auto-deploy (§1): push
+to `main` → `moderaty-prod`, push to `dev` → `moderaty-dev`. Its single point
+of failure is the App's webhook endpoint
+(`https://<coolify>/webhooks/source/github/events`) becoming unreachable from
+GitHub — deploys then silently stop. The
+[`coolify-deploy.yml`](../.github/workflows/coolify-deploy.yml) workflow makes
+that guarantee **observable and self-healing** on every push to `dev`/`main`:
+
+1. `node scripts/coolify-deploy.mjs <app-uuid> <commit> --fallback` polls
+   `GET /api/v1/deployments/applications/{uuid}?take=20` for a deployment
+   whose `commit` matches the pushed SHA (full, 12-char, or 7-char forms).
+2. If the GitHub App webhook fired, the deployment is found → the run logs
+   the `deployment_uuid` + `status` and passes — **no double deploy**.
+3. If no deployment appeared within the 180 s grace window, the script
+   triggers one directly: `POST /api/v1/deploy?uuid=<app>` (the `--fallback`
+   path), logging a loud WARNING that the webhook may be unreachable.
+4. Missing secrets or a failed API call fail the run loudly (exit non-zero,
+   same contract as `bunny-purge`).
+
+Secrets (repository → Settings → Secrets and variables → Actions):
+
+| Secret | Value |
+| --- | --- |
+| `COOLIFY_SERVER_URL` | the Coolify server, e.g. `https://coolify.example.com` |
+| `COOLIFY_API_TOKEN` | Coolify API token (Tokens → API tokens; local `.env`'s `COOLIFY` value is the same format) |
+| `COOLIFY_APP_UUID_DEV` | `moderaty-dev` application UUID (from the app's URL) |
+| `COOLIFY_APP_UUID_PROD` | `moderaty-prod` application UUID |
+
+API shapes are pinned to the Coolify OpenAPI spec
+(`raw.githubusercontent.com/coollabsio/coolify/main/openapi.yaml`) and
+covered by `scripts/coolify-deploy.test.mjs`.
 
 ## 4. Coolify — dev app (`moderaty-dev`, branch `dev`)
 

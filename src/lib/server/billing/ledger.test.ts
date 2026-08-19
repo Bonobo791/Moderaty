@@ -58,6 +58,22 @@ describe('orgIsMetered', () => {
 		expect(await orgIsMetered('org-1')).toBe(false);
 	});
 
+	test('a LIFETIME org is unmetered even after a credit purchase', async () => {
+		// The lifetime hosted plan promises unlimited moderated comments (Terms
+		// §6.1(c)). The Usage page lets any owner buy credit bundles, and the
+		// first grant flips creditsRemaining from null to a number — metering
+		// must consult the plan, or a lifetime org silently becomes a finite
+		// balance that pauses AI scoring (codex review).
+		await testDb().db.insert(organizations).values({
+			id: 'org-1',
+			name: 'Test org',
+			plan: 'lifetime',
+			creditsRemaining: 500,
+			stripeCustomerId: 'cus_1'
+		});
+		expect(await orgIsMetered('org-1')).toBe(false);
+	});
+
 	test('fails loudly for an unknown org', async () => {
 		await expect(orgIsMetered('missing')).rejects.toThrow('org not found');
 	});

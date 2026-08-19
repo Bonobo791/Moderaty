@@ -546,9 +546,26 @@ async function stageDecisions(channelId: string, decisions: Decision[], orgId?: 
 		// budget); a comment whose charge fails (balance hit 0 mid-batch)
 		// stages free.
 		if (orgId) {
+			// Unmetered orgs (NULL balance — self-hosted, lifetime, pre-billing)
+			// are unlimited: their consumeCredit attempts are DESIGNED no-ops
+			// (the NULL-balance guard rejects the charge), so only a METERED
+			// org's failed charge is an anomaly worth aborting for.
+			const metered = await orgIsMetered(orgId);
 			for (const decision of decisions) {
 				if (!decision.billable) continue;
-				await consumeCredit(transaction as LedgerHandle, orgId, decision.comment.id);
+				const charged = await consumeCredit(transaction as LedgerHandle, orgId, decision.comment.id);
+				if (!charged && metered) {
+					// The balance was exhausted CONCURRENTLY (another run of the
+					// same org spent the credits between this run's budget read
+					// and the atomic charge). The decision must NEVER stage free:
+					// abort the staging transaction — the rollback leaves the
+					// comments unprocessed, so the next run re-fetches them once
+					// the org tops up (codex review). Loud: the caller sees the
+					// run fail and the cron answers 500.
+					throw new Error(
+						`credit charge failed for comment ${decision.comment.id} (org ${orgId}) — staging aborted, balance exhausted concurrently`
+					);
+				}
 			}
 		}
 	});

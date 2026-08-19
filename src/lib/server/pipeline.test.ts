@@ -30,6 +30,10 @@ const mocks = vi.hoisted(() => {
 		},
 		// Org credit balance the fake organizations select reports (ledger gate).
 		credits: 5 as number | null,
+		// When true, the fake organizations UPDATE rejects every charge (simulates
+		// the balance being exhausted CONCURRENTLY by another run — the in-memory
+		// AI budget read N, but by charge time the atomic guard finds 0).
+		failCharges: false,
 		// Org Stripe customer the fake organizations select reports (metering
 		// gate: an org with a customer but no balance is still metered).
 		customerId: null as string | null,
@@ -121,7 +125,10 @@ const mocks = vi.hoisted(() => {
 						// Ledger balance decrement simulates the real guard: at balance 0
 						// the UPDATE matches nothing (comment stages free — consumeCredit
 						// deletes its row and returns false); otherwise one credit lower.
-						if ((state.credits ?? 0) <= 0) return { returning: async () => [] as Record<string, unknown>[] };
+						// failCharges forces the same rejection regardless of the balance:
+						// another run exhausted the credits between the budget read and
+						// the atomic charge.
+						if (state.failCharges || (state.credits ?? 0) <= 0) return { returning: async () => [] as Record<string, unknown>[] };
 						return { returning: async () => [{ creditsRemaining: Math.max(0, (state.credits ?? 0) - 1) }] };
 					}
 					if (table === state.tables.channels) {
@@ -291,6 +298,7 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.state.tables = { channels, comments, rules, channelAllowedHandles, auditLog, moderationActions, organizations, creditTransactions };
 	mocks.state.credits = 5;
+	mocks.state.failCharges = false;
 	mocks.state.insertedCredits = [];
 	mocks.state.env.DRY_RUN = 'false';
 	mocks.state.channel = {
@@ -1790,6 +1798,32 @@ describe('credit consumption (billing)', () => {
 		expect(result.outOfCredits).toBeUndefined();
 		expect(mocks.scoreComment).toHaveBeenCalled();
 		expect(mocks.state.insertedCredits).toEqual([]);
+	});
+
+	test('a comment whose credit charge FAILS (balance exhausted concurrently) aborts the staging — never stages free', async () => {
+		// Two concurrent cron invocations on different channels of the same
+		// metered org can both read the same balance into their in-memory AI
+		// budget. Once one transaction exhausts the balance, the other's
+		// consumeCredit returns false — and that decision must NOT stage for
+		// free: the batch aborts loudly (nothing durable), the comments stay
+		// unprocessed, and the next run retries them once the org tops up
+		// (codex review).
+		mocks.state.channel.orgId = 'org-1';
+		mocks.state.credits = 5; // the in-memory AI budget reads 5...
+		mocks.state.failCharges = true; // ...but the atomic charge finds 0
+		mocks.scoreComment.mockResolvedValue(moderation(0.1));
+		mocks.fetchNewComments.mockResolvedValue({
+			comments: [newComment({ id: 'a' }), newComment({ id: 'b' })],
+			nextPageToken: null,
+			reachedCursor: true
+		});
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+		await expect(runChannel('channel')).rejects.toThrow(/credit charge failed/);
+
+		// No ledger consumption rows were committed; the run did not advance.
+		expect(mocks.state.insertedCredits).toEqual([]);
+		errorSpy.mockRestore();
 	});
 
 	test('rule decisions stage, free of charge', async () => {

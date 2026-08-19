@@ -94,13 +94,20 @@ export async function getCredits(orgId: string): Promise<number> {
  * unlimited org (self-hosted, lifetime, fresh signup) into the credit gate
  * and defer every AI-scored comment for a purchase that never happened.
  */
+/** Plans that promise UNLIMITED moderated comments — never metered, even
+ * after a credit purchase (Terms §6.1(c): the lifetime hosted plan). A
+ * lifetime org buying a bundle must not silently convert its unlimited
+ * account into a finite balance that pauses AI scoring (codex review). */
+const UNMETERED_PLANS = new Set(['lifetime']);
+
 export async function orgIsMetered(orgId: string): Promise<boolean> {
 	const row = await db
-		.select({ creditsRemaining: organizations.creditsRemaining })
+		.select({ creditsRemaining: organizations.creditsRemaining, plan: organizations.plan })
 		.from(organizations)
 		.where(eq(organizations.id, orgId))
 		.get();
 	if (!row) throw new Error(`org not found: ${orgId}`);
+	if (UNMETERED_PLANS.has(row.plan)) return false;
 	return row.creditsRemaining !== null;
 }
 

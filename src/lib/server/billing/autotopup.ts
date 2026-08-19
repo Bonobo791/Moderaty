@@ -215,13 +215,27 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 		return false;
 	}
 
-	// Atomic claim: exactly one concurrent caller wins the transition.
+	// Atomic claim: exactly one concurrent caller wins the transition. The
+	// claim RE-CHECKS eligibility (enabled flag, balance below threshold,
+	// saved card) because the eligibility read above happened BEFORE the
+	// price lookup: a manual Checkout grant or a disable can land in between,
+	// and the claim must never charge a card the org no longer needs or has
+	// just disabled (codex review).
 	const claimed = await db
 		.update(organizations)
 		.set({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: new Date().toISOString() })
-		.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'idle')))
+		.where(
+			and(
+				eq(organizations.id, orgId),
+				eq(organizations.autoTopupState, 'idle'),
+				eq(organizations.autoTopupEnabled, 1),
+				sql`COALESCE(${organizations.creditsRemaining}, 0) < COALESCE(${organizations.autoTopupThreshold}, ${AUTO_TOPUP_DEFAULT_THRESHOLD})`,
+				isNotNull(organizations.stripeCustomerId),
+				isNotNull(organizations.stripeDefaultPmId)
+			)
+		)
 		.returning({ id: organizations.id });
-	if (claimed.length === 0) return false; // lost the race
+	if (claimed.length === 0) return false; // lost the race (or became ineligible mid-flight)
 
 	const idempotencyKey = `autotopup:${org.customerId}:${startOfUtcDayIso(0)}:${dayCount + 1}`;
 	try {
@@ -347,7 +361,14 @@ export async function handleAutoTopupFailure(paymentIntentId: string): Promise<v
  */
 export async function grantAutoTopupCredits(
 	orgId: string,
-	pi: { id: string; status?: string | null; latest_charge?: string | { id: string } | null; metadata: Record<string, string> | null }
+	pi: {
+		id: string;
+		status?: string | null;
+		latest_charge?: string | { id: string } | null;
+		/** Unix seconds — correlates a duplicate delivery to the claim it belongs to. */
+		created?: number | null;
+		metadata: Record<string, string> | null;
+	}
 ): Promise<boolean> {
 	// The contract lives HERE, not with the callers: only a succeeded charge
 	// of ours can be granted.
@@ -369,7 +390,17 @@ export async function grantAutoTopupCredits(
 		paymentIntentId: pi.id,
 		chargeId: typeof pi.latest_charge === 'string' ? pi.latest_charge : undefined
 	});
-	if (!applied) return false; // duplicate delivery — already granted
+	if (!applied) {
+		// Duplicate delivery — the grant already committed on the FIRST
+		// delivery. That delivery's org-state reset may have failed (a crash
+		// between the ledger commit and the state update), which would leave
+		// the claim in_flight until the 72h stale-claim sweep and block auto
+		// top-up for three days. Release the claim now — but ONLY when the
+		// in-flight claim belongs to THIS PI (drift guard): a late duplicate
+		// delivery of an older PI must never clear a NEWER claim (codex).
+		await releaseClaimForPi(orgId, pi);
+		return false;
+	}
 	// A refund/dispute may have beaten this grant's delivery: drain the
 	// queued reversal in the same breath as the grant (codex 6153).
 	const chargeId = typeof pi.latest_charge === 'string' ? pi.latest_charge : undefined;
@@ -384,6 +415,30 @@ export async function grantAutoTopupCredits(
 		.set({ autoTopupState: 'idle', autoTopupFailures: 0 })
 		.where(eq(organizations.id, orgId));
 	return true;
+}
+
+/**
+ * Releases an in-flight auto top-up claim when a SUCCEEDED charge's duplicate
+ * delivery proves the grant already committed (see grantAutoTopupCredits).
+ * The claim is anchored to its PaymentIntent via the drift guard: the claim
+ * stamps last_attempt_at at charge time, so a delivery whose PI creation
+ * does not match the current claim (a newer charge is in flight) is left
+ * untouched — the stale-claim sweep owns it.
+ */
+async function releaseClaimForPi(
+	orgId: string,
+	pi: { id: string; created?: number | null }
+): Promise<void> {
+	if (!pi.created) return; // cannot correlate — leave it for the stale sweep
+	const org = await readAutoTopupState(orgId);
+	if (org.state !== 'in_flight') return;
+	if (!org.lastAttemptAt) return;
+	const drift = Math.abs(pi.created * 1000 - Date.parse(org.lastAttemptAt));
+	if (drift > 60_000) return; // a different (newer) claim owns in_flight
+	await db
+		.update(organizations)
+		.set({ autoTopupState: 'idle', autoTopupFailures: 0 })
+		.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight')));
 }
 
 /**

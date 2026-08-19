@@ -151,6 +151,35 @@ describe('coolify deploy guarantee', () => {
 		expect(fetch).not.toHaveBeenCalled();
 	});
 
+	it('fails loudly when the matched deployment ended in a terminal failure state', async () => {
+		vi.stubGlobal('fetch', vi.fn(async () => new Response(
+			JSON.stringify([{ deployment_uuid: 'dep-bad', commit: COMMIT, status: 'failed' }]), { status: 200 })));
+
+		await expect(main(['app-1', COMMIT])).resolves.toBe(1);
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining('did not succeed'));
+	});
+
+	it('does not race a delayed webhook: a deployment found in the final recheck skips the API trigger', async () => {
+		// With --timeout-sec 1 --poll-sec 1 the grace window is exactly one
+		// poll (call 1 → []), and the final recheck before the fallback POST is
+		// exactly call 2. If the delayed webhook's deployment appears there, the
+		// script must NOT also POST /deploy (codeant — duplicate deploys).
+		let calls = 0;
+		vi.stubGlobal('fetch', vi.fn(async () => {
+			calls += 1;
+			if (calls >= 2) {
+				return new Response(JSON.stringify([{ deployment_uuid: 'dep-late', commit: COMMIT, status: 'queued' }]), { status: 200 });
+			}
+			return new Response('[]', { status: 200 });
+		}));
+
+		const code = await main(['app-1', COMMIT, '--fallback', '--timeout-sec', '1', '--poll-sec', '1']);
+
+		expect(code).toBe(0);
+		const urls = fetch.mock.calls.map(([u]) => String(u));
+		expect(urls.some((u) => u.includes('/deploy?uuid='))).toBe(false);
+	});
+
 	it('wraps a fetch network/timeout failure with the endpoint path (actionable context)', async () => {
 		vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('The operation was aborted due to timeout'); }));
 

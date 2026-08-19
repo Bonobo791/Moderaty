@@ -181,13 +181,29 @@ export async function main(argv = process.argv.slice(2)) {
 	const queued = await verifyDeploymentQueued(appUuid, expectedCommit, { timeoutMs, pollMs });
 	if (queued) {
 		console.log(`[${new Date().toISOString()}] coolify deploy confirmed for ${short}: deployment ${queued.deploymentUuid} (${queued.status})`);
+		// A terminal failure means the redeploy did NOT succeed — the guarantee
+		// must fail loudly, not pass with a warning (codeant).
 		if (['failed', 'error', 'cancelled'].includes(queued.status)) {
-			console.error(`WARNING: deployment ${queued.deploymentUuid} ended ${queued.status} — the redeploy did not succeed; check the Coolify logs`);
+			console.error(`ERROR: deployment ${queued.deploymentUuid} ended ${queued.status} — the redeploy did not succeed; check the Coolify logs`);
+			return 1;
 		}
 		return 0;
 	}
 	if (fallback) {
 		console.error(`[${new Date().toISOString()}] WARNING: no Coolify deployment for ${short} within ${Math.round(timeoutMs / 1000)}s — the GitHub App webhook may be unreachable; triggering via the API`);
+		// Final recheck: a delayed GitHub App webhook deployment can become
+		// visible after the last poll but before this POST. Triggering anyway
+		// would race it into a duplicate deployment, so recheck once and skip
+		// the API trigger when the commit just appeared (codeant).
+		const late = await verifyDeploymentQueued(appUuid, expectedCommit, { timeoutMs: pollMs, pollMs });
+		if (late) {
+			console.log(`[${new Date().toISOString()}] coolify deploy confirmed (late webhook) for ${short}: deployment ${late.deploymentUuid} (${late.status})`);
+			if (['failed', 'error', 'cancelled'].includes(late.status)) {
+				console.error(`ERROR: deployment ${late.deploymentUuid} ended ${late.status} — the redeploy did not succeed; check the Coolify logs`);
+				return 1;
+			}
+			return 0;
+		}
 		const triggered = await triggerDeploy(appUuid);
 		for (const t of triggered) {
 			console.log(`[${new Date().toISOString()}] coolify deploy triggered: ${t.deployment_uuid} (${t.resource_uuid})`);

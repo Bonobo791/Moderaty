@@ -71,8 +71,11 @@ if (!databaseUrl) {
 		'netlify-migrate: TURSO_DATABASE_URL is not set — the database credentials never reached this build.\n' +
 			'  - Netlify: set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in the site/deploy-context environment.\n' +
 			'  - Coolify Docker build: the Dockerfile reads them ONLY as BuildKit secret mounts. Enable\n' +
-			'    "Use Docker Build Secrets" in the application Advanced menu and keep the Build Variable\n' +
-			'    flag ON for TURSO_DATABASE_URL and TURSO_AUTH_TOKEN (docs/COOLIFY_BUNNY.md §3.4).\n' +
+			'    "Use Docker Build Secrets" in the application Environment Variables settings and keep\n' +
+			'    the Build Variable flag ON for TURSO_DATABASE_URL and TURSO_AUTH_TOKEN\n' +
+			'    (docs/COOLIFY_BUNNY.md §3.4). If both are set and it still fails, the Coolify server\n' +
+			'    may lack BuildKit secret support (it then silently falls back to build args) — check\n' +
+			'    "docker build --help | grep secret" on the server.\n' +
 			'  - Local: source .env (node --env-file=.env scripts/netlify-migrate.mjs).' +
 			'\nblocking the deploy — a build without the credentials must never reach drizzle-kit.'
 	);

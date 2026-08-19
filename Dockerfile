@@ -37,10 +37,11 @@ COPY . .
 # The TURSO_* values arrive ONLY as BuildKit secret mounts scoped to this
 # single RUN (docker:S6472 — never ARG/ENV, so they never appear in build
 # args, image history, or baked layers). Coolify passes them as
-# `--secret id=KEY,env=KEY` when "Use Docker Build Secrets" is enabled (see
-# docs/COOLIFY_BUNNY.md); without it the mounts are empty and the gate's
-# preflight aborts with an actionable `TURSO_DATABASE_URL is not set` error —
-# a build without the secrets always fails loudly here.
+# `--secret id=KEY,env=KEY` when "Use Docker Build Secrets" is enabled in the
+# app's Environment Variables settings (see docs/COOLIFY_BUNNY.md §3.4);
+# without it the mounts are empty and the gate's preflight aborts with an
+# actionable `TURSO_DATABASE_URL is not set` error — a build without the
+# secrets always fails loudly here.
 RUN --mount=type=secret,id=TURSO_DATABASE_URL,env=TURSO_DATABASE_URL \
 	--mount=type=secret,id=TURSO_AUTH_TOKEN,env=TURSO_AUTH_TOKEN \
 	node scripts/netlify-migrate.mjs

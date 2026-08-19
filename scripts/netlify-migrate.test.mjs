@@ -157,6 +157,7 @@ describe('netlify-migrate', () => {
 			const out = `${error.stdout ?? ''}${error.stderr ?? ''}`;
 			expect(out).toContain('TURSO_DATABASE_URL is not set');
 			expect(out).toContain('Use Docker Build Secrets');
+			expect(out).toContain('Environment Variables');
 			expect(out).toContain('blocking the deploy');
 		}
 	});

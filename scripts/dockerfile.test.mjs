@@ -88,4 +88,12 @@ describe('Coolify runbook (operator setting that makes the secret mounts work)',
 	it('marks the TURSO_* build variables as secret mounts, not plain build args', () => {
 		expect(runbook).toMatch(/TURSO_AUTH_TOKEN[\s\S]*?Use Docker Build Secrets/s);
 	});
+
+	it('pins the toggle location (Environment Variables settings, not the Advanced menu)', () => {
+		expect(runbook).toMatch(/Use Docker Build Secrets[\s\S]*?Environment Variables/);
+	});
+
+	it('documents the Build-Variable-ON requirement for the TURSO_* variables', () => {
+		expect(runbook).toMatch(/Build Variable ON for `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`/);
+	});
 });

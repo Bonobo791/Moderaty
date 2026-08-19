@@ -129,17 +129,32 @@ One-time setup (human, in the Coolify dashboard):
    Dockerfile sets it). Do not set `CONTEXT` — unset is the always-migrate
    default.
 
-   **Critical build setting**: in the application's **Advanced** menu enable
-   **Use Docker Build Secrets**. The Dockerfile's migrate+verify gate reads
-   the TURSO_* build variables exclusively as BuildKit secret mounts
-   (`--secret id=KEY,env=KEY`, docker:S6472 — never as `--build-arg`).
-   Without this setting the secret mounts are **empty**, the env vars never
-   reach the build, and the gate aborts loudly: the 2026-08-19 production
-   symptom was `netlify-migrate: TURSO_DATABASE_URL is not set` (drizzle-kit
-   dying with `TURSO_DATABASE_URL is required` from `drizzle.config.ts` is
-   the same root cause one step later). The gate's preflight error names this
-   setting and the fix. This is by design: the credentials must never appear
-   in build args, image history, or baked layers.
+   **Critical build setting**: enable **Use Docker Build Secrets** for the
+   application — in current Coolify it lives on the application's
+   **Environment Variables** settings page (not the Advanced menu). The
+   Dockerfile's migrate+verify gate reads the TURSO_* build variables
+   exclusively as BuildKit secret mounts (`--secret id=KEY,env=KEY`,
+   docker:S6472 — never as `--build-arg`). Without the setting (or without
+   the Build Variable flags, or without BuildKit secret support on the build
+   server) the secret mounts are **empty**, the env vars never reach the
+   build, and the gate aborts loudly: the 2026-08-19 production symptom was
+   `netlify-migrate: TURSO_DATABASE_URL is not set` (drizzle-kit dying with
+   `TURSO_DATABASE_URL is required` from `drizzle.config.ts` is the same root
+   cause one step later). The gate's preflight error names the fix. This is
+   by design: the credentials must never appear in build args, image history,
+   or baked layers.
+
+   **Operator checklist (all three, then redeploy):**
+   1. **Use Docker Build Secrets** is ON (Environment Variables settings).
+   2. **Build Variable ON for `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`
+      only** — Coolify passes exactly the build-flagged variables as secrets
+      (`is_buildtime`); a variable with Build Variable OFF never reaches the
+      gate. The 2026-08-19 14:16 retry failed for exactly this reason: every
+      variable had Build Variable OFF, so no secret arrived.
+   3. The build server's Docker supports BuildKit secrets — Coolify probes
+      `docker build --help | grep -q secret` and, if it fails, **silently
+      falls back to `--build-arg`** even with the setting on, failing the
+      gate with the same symptom. Requires Docker 18.09+ with BuildKit.
 
    **Build Variable flags — only the two TURSO_* variables need them.**
    Coolify injects an `ARG` statement into the Dockerfile for every env var

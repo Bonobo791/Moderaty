@@ -132,10 +132,26 @@ One-time setup (human, in the Coolify dashboard):
    **Critical build setting**: in the application's **Advanced** menu enable
    **Use Docker Build Secrets**. The Dockerfile's migrate+verify gate reads
    the TURSO_* build variables exclusively as BuildKit secret mounts
-   (`--secret id=KEY,env=KEY`, docker:S6472 — never as `--build-arg`), so a
-   build without this setting fails loudly at the gate with a BuildKit
-   "secret not found" error. This is by design: the credentials must never
-   appear in build args, image history, or baked layers.
+   (`--secret id=KEY,env=KEY`, docker:S6472 — never as `--build-arg`).
+   Without this setting the secret mounts are **empty**, the env vars never
+   reach the build, and the gate aborts loudly: the 2026-08-19 production
+   symptom was `netlify-migrate: TURSO_DATABASE_URL is not set` (drizzle-kit
+   dying with `TURSO_DATABASE_URL is required` from `drizzle.config.ts` is
+   the same root cause one step later). The gate's preflight error names this
+   setting and the fix. This is by design: the credentials must never appear
+   in build args, image history, or baked layers.
+
+   **Build Variable flags — only the two TURSO_* variables need them.**
+   Coolify injects an `ARG` statement into the Dockerfile for every env var
+   with Build Variable ON (a misconfigured app logs hadolint
+   `SecretsUsedInArgOrEnv` warnings for `ARG CRON_SECRET`, `ARG
+   ENCRYPTION_KEY`, `ARG TURSO_AUTH_TOKEN` — those injected ARGs are exactly
+   why the runtime secrets must be Runtime-only). Keep Build Variable ON only
+   for `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`; every other secret
+   (`CRON_SECRET`, `ENCRYPTION_KEY`, `GOOGLE_CLIENT_SECRET`, `OPENAI_API_KEY`,
+   `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `MJ_APIKEY_PRIVATE`, …)
+   should be **Runtime Variable only**, so they never travel as build args
+   and no injected `ARG` block appears.
 
 5. **Scheduled Task** (Scheduled Tasks → application): expression `* * * * *`,
    command `APP_URL=http://127.0.0.1:3000 node scripts/dev-cron.mjs --once`.

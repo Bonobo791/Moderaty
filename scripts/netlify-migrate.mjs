@@ -55,6 +55,38 @@ if (context === 'deploy-preview') {
 	process.exit(0);
 }
 
+// Preflight the database credentials BEFORE spawning anything: drizzle-kit
+// loads drizzle.config.ts, which dies with a bare "TURSO_DATABASE_URL is
+// required" when the variable never reached the build. That is exactly the
+// 2026-08-19 Coolify prod-deploy symptom — "Use Docker Build Secrets" was
+// off, so the Dockerfile's secret mounts (--mount=type=secret,id=KEY,env=KEY)
+// were empty and the env var was unset. Fail with an actionable message
+// instead of a config-file stack trace. Netlify supplies the same variables
+// per deploy context; the Coolify build supplies them ONLY as BuildKit secret
+// mounts (never ARG/ENV, docker:S6472). file: URLs (local development) need
+// no token, mirroring drizzle.config.ts and verify-migrations.mjs.
+const databaseUrl = process.env.TURSO_DATABASE_URL;
+if (!databaseUrl) {
+	console.error(
+		'netlify-migrate: TURSO_DATABASE_URL is not set — the database credentials never reached this build.\n' +
+			'  - Netlify: set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in the site/deploy-context environment.\n' +
+			'  - Coolify Docker build: the Dockerfile reads them ONLY as BuildKit secret mounts. Enable\n' +
+			'    "Use Docker Build Secrets" in the application Advanced menu and keep the Build Variable\n' +
+			'    flag ON for TURSO_DATABASE_URL and TURSO_AUTH_TOKEN (docs/COOLIFY_BUNNY.md §3.4).\n' +
+			'  - Local: source .env (node --env-file=.env scripts/netlify-migrate.mjs).' +
+			'\nblocking the deploy — a build without the credentials must never reach drizzle-kit.'
+	);
+	process.exit(1);
+}
+if (!databaseUrl.startsWith('file:') && !process.env.TURSO_AUTH_TOKEN) {
+	console.error(
+		'netlify-migrate: TURSO_AUTH_TOKEN is not set for a remote database — the credentials never reached this build.\n' +
+			'  Configure it the same way as TURSO_DATABASE_URL (see the message above); never bake a token\n' +
+			'  into the image — blocking the deploy.'
+	);
+	process.exit(1);
+}
+
 const steps = [
 	{
 		name: 'db:migrate',

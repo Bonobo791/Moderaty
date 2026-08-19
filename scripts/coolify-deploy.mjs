@@ -166,7 +166,7 @@ function parseSince(value) {
 	if (value === undefined) return undefined;
 	const ms = Date.parse(value);
 	if (!Number.isFinite(ms)) {
-		throw new Error(`--since must be an ISO-8601 timestamp, got: ${value}`);
+		throw new TypeError(`--since must be an ISO-8601 timestamp, got: ${value}`);
 	}
 	return ms;
 }

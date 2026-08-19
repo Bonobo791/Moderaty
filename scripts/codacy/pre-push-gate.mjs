@@ -44,7 +44,8 @@ export function npmPrefix(env = process.env, home = os.homedir(), execPath = pro
 		if (existsSync(npmrc)) {
 			for (const line of readFileSync(npmrc, 'utf8').split(/\r?\n/)) {
 				const m = line.match(/^\s*prefix\s*=\s*(.+?)\s*$/);
-				if (m && m[1].trim()) return m[1].trim().replace(/^["']|["']$/g, '');
+				const prefix = m?.[1]?.trim();
+				if (prefix) return prefix.replace(/^["']|["']$/g, '');
 			}
 		}
 	} catch { /* fall through to the Node-layout derivation */ }
@@ -89,7 +90,8 @@ export async function main(argv = process.argv.slice(2)) {
 		if (existsSync(envFile)) {
 			for (const line of readFileSync(envFile, 'utf8').split(/\r?\n/)) {
 				const m = line.match(/^CODACY_ACCOUNT_TOKEN=(.*)$/);
-				if (m && m[1].trim()) env.CODACY_ACCOUNT_TOKEN = m[1].trim().replace(/^["']|["']$/g, '');
+				const token = m?.[1]?.trim();
+				if (token) env.CODACY_ACCOUNT_TOKEN = token.replace(/^["']|["']$/g, '');
 			}
 		}
 	} catch { /* token is optional */ }
@@ -127,7 +129,7 @@ export async function main(argv = process.argv.slice(2)) {
 				}
 			};
 			rl.on('line', onLine);
-			proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+			proc.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
 		});
 	}
 
@@ -159,7 +161,7 @@ export async function main(argv = process.argv.slice(2)) {
 			capabilities: {},
 			clientInfo: { name: 'codacy-pre-push-gate', version: '1.0.0' },
 		});
-		proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
+		proc.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`);
 		log('analyzing repository (first run may download tool runtimes) ...');
 		const result = await rpc(rl, 2, 'tools/call', {
 			name: 'codacy_cli_analyze',
@@ -196,9 +198,8 @@ export async function main(argv = process.argv.slice(2)) {
 	console.error('');
 	console.error('Codacy gate: push blocked — %d error-level finding(s) in changed files:', blockers.length);
 	for (const f of blockers) {
-		const at = f.region
-			? `${f.filePath}:${f.region.startLine ?? '?'}${f.region.startColumn ? ':' + f.region.startColumn : ''}`
-			: f.filePath;
+		const column = f.region?.startColumn ? `:${f.region.startColumn}` : '';
+		const at = f.region ? `${f.filePath}:${f.region.startLine ?? '?'}${column}` : f.filePath;
 		console.error(`  [${f.tool}] ${f.rule?.name || f.rule?.id || '?'}  ${at}`);
 		console.error(`      ${f.message}`);
 	}

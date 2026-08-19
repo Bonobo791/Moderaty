@@ -256,6 +256,22 @@ test('the deletion outbox retry respects a shared cron deadline', async () => {
 	expect(mocks.customersDel).not.toHaveBeenCalled();
 });
 
+test('each Stripe deletion request is capped to the remaining cron deadline', async () => {
+	// The pre-request guard alone does not constrain the remote call: the
+	// shared Stripe client performs up to two network retries, so a hanging
+	// request can blow past the 20s cron budget and get killed before
+	// lastAttemptAt is recorded (human review). Each customers.del must carry
+	// a timeout derived from the remaining deadline.
+	await testDb().db.insert(stripeDeletionOutbox).values({ customerId: 'cus_deadline' });
+	mocks.customersDel.mockClear();
+	mocks.customersDel.mockResolvedValue({ id: 'cus_deadline', deleted: true });
+
+	await retryStripeCustomerDeletions(10, Date.now() + 10_000);
+
+	expect(mocks.customersDel).toHaveBeenCalledWith('cus_deadline', { timeout: expect.any(Number) });
+});
+
+
 test('a failed Stripe customer deletion is persisted to the outbox for cron retry', async () => {
 	// "Immediate and permanent" deletion must not lose the erasure to a
 	// transient Stripe outage: the outbox row carries the obligation and the

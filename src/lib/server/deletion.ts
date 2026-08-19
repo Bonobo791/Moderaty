@@ -380,7 +380,19 @@ export async function retryStripeCustomerDeletions(limit = 10, deadline?: number
 			break;
 		}
 		try {
-			await getStripe().customers.del(row.customerId);
+			// Deadline on the REQUEST itself, not just before it (human review):
+			// the shared Stripe client retries up to twice, so a hanging call
+			// can blow past the cron budget and be killed before lastAttemptAt
+			// is recorded — the row would then be selected again immediately
+			// and starve moderation. A per-request timeout derived from the
+			// remaining deadline makes a timeout fail loudly (and records
+			// lastAttemptAt, so the row backs off for the next hour).
+			const remainingMs = deadline === undefined ? undefined : deadline - Date.now();
+			if (remainingMs !== undefined && remainingMs > 0) {
+				await getStripe().customers.del(row.customerId, { timeout: remainingMs });
+			} else {
+				await getStripe().customers.del(row.customerId);
+			}
 			await db.delete(stripeDeletionOutbox).where(eq(stripeDeletionOutbox.id, row.id));
 			deleted += 1;
 		} catch (error) {

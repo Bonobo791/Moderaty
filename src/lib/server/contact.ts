@@ -136,27 +136,74 @@ export async function createOrReusePendingSubmission(input: {
 		};
 	}
 	const token = randomBytes(32).toString('hex');
-	const inserted = await db
-		.insert(contactSubmissions)
-		.values({
-			email,
-			name: input.name,
-			status: 'pending',
+	try {
+		const inserted = await db
+			.insert(contactSubmissions)
+			.values({
+				email,
+				name: input.name,
+				status: 'pending',
+				verificationToken: token,
+				expiresAt,
+				consentText: input.consentText,
+				ip: input.ip,
+				userAgent: input.userAgent
+			})
+			.returning();
+		return {
+			id: inserted[0].id,
+			email: inserted[0].email,
+			name: inserted[0].name,
 			verificationToken: token,
 			expiresAt,
-			consentText: input.consentText,
-			ip: input.ip,
-			userAgent: input.userAgent
-		})
-		.returning();
-	return {
-		id: inserted[0].id,
-		email: inserted[0].email,
-		name: inserted[0].name,
-		verificationToken: token,
-		expiresAt,
-		reused: false
-	};
+			reused: false
+		};
+	} catch (error) {
+		// Idempotency (human review): the partial unique index on
+		// (email) WHERE status='pending' makes a concurrent submission's insert
+		// conflict instead of silently creating a second row with a different
+		// token (two verification e-mails). Converge on the one pending row —
+		// an expired one is fine: submitContactRequest re-sends the e-mail and
+		// the expiry below slides, so the resubmission gets a working link.
+		if (!isUniqueViolation(error)) throw error;
+		const existing = await db
+			.select()
+			.from(contactSubmissions)
+			.where(and(eq(contactSubmissions.email, email), eq(contactSubmissions.status, 'pending')))
+			.get();
+		if (!existing) throw error; // constraint fired without a matching row — surface it
+		const updated = await db
+			.update(contactSubmissions)
+			.set({ name: input.name, consentText: input.consentText, ip: input.ip, userAgent: input.userAgent, expiresAt })
+			.where(eq(contactSubmissions.id, existing.id))
+			.returning();
+		return {
+			id: updated[0].id,
+			email: updated[0].email,
+			name: updated[0].name,
+			verificationToken: updated[0].verificationToken,
+			expiresAt,
+			reused: true
+		};
+	}
+}
+
+/** Whether an insert error is the partial-unique-index violation (SQLite). */
+function isUniqueViolation(error: unknown): boolean {
+	// The libsql client wraps the constraint error: the drizzle statement
+	// error's message is 'Failed query: …' with the LibsqlError (code
+	// SQLITE_CONSTRAINT*, message 'UNIQUE constraint failed: …') on the
+	// cause chain. Walk the chain and match either surface.
+	let current: unknown = error;
+	while (current) {
+		const record = current as { code?: unknown; message?: unknown };
+		if (typeof record.code === 'string' && /SQLITE_CONSTRAINT/i.test(record.code)) return true;
+		const message = record instanceof Error ? record.message : String(record);
+		if (/UNIQUE constraint failed/i.test(message)) return true;
+		current = (current as { cause?: unknown }).cause;
+		if (current === error) break; // cyclic cause — never spin
+	}
+	return false;
 }
 
 export type ContactVerificationResult =

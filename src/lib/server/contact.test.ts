@@ -124,6 +124,59 @@ describe('parseContactForm', () => {
 });
 
 describe('createOrReusePendingSubmission', () => {
+	test('the database enforces at most one pending row per e-mail (partial unique index)', async () => {
+		const future = new Date(Date.now() + 86_400_000).toISOString();
+		await testDb().db.insert(contactSubmissions).values({
+			email: 'fan@example.com',
+			name: 'A',
+			status: 'pending',
+			verificationToken: 'a'.repeat(64),
+			expiresAt: future,
+			consentText: 'x',
+			ip: '1.1.1.1',
+			userAgent: 'test'
+		});
+		// A second pending row for the same address must be rejected — without
+		// the partial unique index this insert succeeds and the check-then-act
+		// race yields two rows with two tokens (human review).
+		await expect(
+			testDb().db.insert(contactSubmissions).values({
+				email: 'fan@example.com',
+				name: 'B',
+				status: 'pending',
+				verificationToken: 'b'.repeat(64),
+				expiresAt: future,
+				consentText: 'x',
+				ip: '2.2.2.2',
+				userAgent: 'test'
+			})
+		).rejects.toThrow();
+	});
+
+	test('two concurrent submissions for the same address converge on one row and one token', async () => {
+		const [first, second] = await Promise.all([
+			createOrReusePendingSubmission(SUBMIT),
+			createOrReusePendingSubmission(SUBMIT)
+		]);
+		const stored = await rows();
+		expect(stored).toHaveLength(1);
+		expect(first.id).toBe(second.id);
+		expect(first.verificationToken).toBe(second.verificationToken);
+		expect(first.reused || second.reused).toBe(true);
+	});
+
+	test('a verified submission frees the pending slot for a fresh one', async () => {
+		const first = await createOrReusePendingSubmission(SUBMIT);
+		await verifyContactToken(first.verificationToken);
+		const second = await createOrReusePendingSubmission(SUBMIT);
+		expect(second.reused).toBe(false);
+		expect(second.verificationToken).not.toBe(first.verificationToken);
+		const stored = await rows();
+		expect(stored).toHaveLength(2);
+		expect(stored.filter((r) => r.status === 'pending')).toHaveLength(1);
+		expect(stored.filter((r) => r.status === 'verified')).toHaveLength(1);
+	});
+
 	test('inserts a pending row with a random token and 7-day expiry', async () => {
 		const submission = await createOrReusePendingSubmission(SUBMIT);
 		expect(submission.reused).toBe(false);
@@ -154,16 +207,22 @@ describe('createOrReusePendingSubmission', () => {
 		expect(stored[0].name).toBe('Fan Updated');
 	});
 
-	test('creates a NEW row (fresh token) after the pending one expired', async () => {
+	test('reuses the pending row after expiry (slides the expiry) — one pending row per e-mail', async () => {
+		// Partial-unique-index contract (human review): an expired pending row
+		// still holds the slot; the resubmission refreshes it (the e-mail is
+		// re-sent with the same link) instead of creating a second pending row.
 		const first = await createOrReusePendingSubmission(SUBMIT);
 		await testDb()
 			.db.update(contactSubmissions)
 			.set({ expiresAt: new Date(Date.now() - 1000).toISOString() })
 			.where(eq(contactSubmissions.id, first.id));
 		const second = await createOrReusePendingSubmission(SUBMIT);
-		expect(second.reused).toBe(false);
-		expect(second.verificationToken).not.toBe(first.verificationToken);
-		expect(await rows()).toHaveLength(2);
+		expect(second.reused).toBe(true);
+		expect(second.id).toBe(first.id);
+		expect(second.verificationToken).toBe(first.verificationToken);
+		const stored = await rows();
+		expect(stored).toHaveLength(1);
+		expect(new Date(stored[0].expiresAt).getTime()).toBeGreaterThan(Date.now());
 	});
 
 	test('creates a NEW row after the previous one was verified', async () => {

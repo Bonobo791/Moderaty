@@ -321,6 +321,9 @@ export async function createTestDb(): Promise<TestDb> {
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE INDEX contact_submissions_status_email_idx ON contact_submissions (status, email)`,
+		// Partial unique index (human review): at most one pending row per
+		// e-mail; verified rows free the slot. Mirrors the drizzle schema.
+		`CREATE UNIQUE INDEX contact_submissions_pending_email_unique ON contact_submissions (email) WHERE status = 'pending'`,
 		`CREATE TABLE invites (
 			token TEXT PRIMARY KEY,
 			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,

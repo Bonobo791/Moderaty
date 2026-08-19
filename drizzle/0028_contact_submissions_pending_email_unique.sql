@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `contact_submissions_pending_email_unique` ON `contact_submissions` (`email`) WHERE "contact_submissions"."status" = 'pending';

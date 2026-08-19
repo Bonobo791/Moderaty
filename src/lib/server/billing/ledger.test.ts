@@ -14,29 +14,113 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { eq } from 'drizzle-orm';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { db } from '$lib/server/db';
-import { creditTransactions, organizations } from '$lib/server/db/schema';
+import { creditTransactions, organizations, stripePendingReversals } from '$lib/server/db/schema';
 import {
 	applyLedgerDelta,
 	consumeCredit,
+	drainPendingReversals,
 	findGrantForStripe,
 	getCredits,
 	listCreditTransactions,
 	monthStartIso,
 	orgIsMetered,
+	queuePendingReversal,
 	usageSummary
 } from './ledger';
 
-setupTestDb(['organizations', 'credit_transactions', 'stripe_events']);
+setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_pending_reversals']);
 
 async function seedOrg(orgId = 'org-1', credits: number | null = null, stripeCustomerId: string | null = null): Promise<void> {
 	await testDb().db
 		.insert(organizations)
 		.values({ id: orgId, name: 'Test org', creditsRemaining: credits, stripeCustomerId });
 }
+
+/** Seeds a credit grant for a Stripe charge so findGrantForStripe matches it. */
+async function seedChargeGrant(chargeId: string, orgId = 'org-1', credits = 100): Promise<void> {
+	await testDb().db.insert(creditTransactions).values({
+		orgId,
+		delta: credits,
+		reason: 'purchase',
+		refType: 'charge',
+		refId: chargeId,
+		chargeId,
+		balanceAfter: credits
+	});
+}
+
+describe('drainPendingReversals crash-consistency', () => {
+	test('a stop between the first and second reversal keeps the second obligation durable for a retry', async () => {
+		// Both a refund AND a dispute can be pending for one charge (delayed
+		// grant). The old code deleted EVERY pending row for the charge right
+		// after the FIRST row's ledger mutation — a crash before the second
+		// mutation erased its obligation. Each row must be deleted by its own
+		// id inside the SAME transaction as its ledger mutation.
+		//
+		// Row order is NOT guaranteed (SQLite serves WHERE charge_id from the
+		// UNIQUE(charge_id, reason) index — 'dispute' sorts before 'refund'),
+		// so the assertions are order-independent: exactly one reversal is
+		// applied, exactly one obligation survives, and they are different
+		// reasons — nothing is lost.
+		await seedOrg('org-1', 100);
+		await seedChargeGrant('ch_1');
+		await queuePendingReversal('ch_1', 'refund');
+		await queuePendingReversal('ch_1', 'dispute');
+
+		const realTx = testDb().db.transaction.bind(testDb().db);
+		let calls = 0;
+		const txSpy = vi.spyOn(testDb().db, 'transaction').mockImplementation(async (cb: any) => {
+			calls += 1;
+			if (calls === 1) return realTx(cb); // first row commits normally
+			throw new Error('simulated process stop before row 2');
+		});
+
+		try {
+			await expect(drainPendingReversals('ch_1')).rejects.toThrow('simulated process stop');
+		} finally {
+			txSpy.mockRestore();
+		}
+
+		const remaining = await testDb().db.select().from(stripePendingReversals).all();
+		expect(remaining).toHaveLength(1); // the unprocessed obligation survives for a retry
+
+		// Exactly ONE reversal was applied; the surviving obligation is the
+		// OTHER reason — the crash lost nothing.
+		const applied = await testDb()
+			.db.select({ refType: creditTransactions.refType })
+			.from(creditTransactions)
+			.where(eq(creditTransactions.chargeId, 'ch_1'))
+			.all();
+		const appliedReasons = applied.filter((r) => r.refType === 'refund' || r.refType === 'dispute').map((r) => r.refType);
+		expect(appliedReasons).toHaveLength(1);
+		expect(appliedReasons[0]).not.toBe(remaining[0].reason);
+		expect(await getCredits('org-1')).toBe(0);
+	});
+
+	test('deletes each applied row by its own id inside a transaction — never a bare db.delete of the whole charge', async () => {
+		await seedOrg('org-1', 100);
+		await seedChargeGrant('ch_1');
+		await queuePendingReversal('ch_1', 'refund');
+		await queuePendingReversal('ch_1', 'dispute');
+
+		const deleteSpy = vi.spyOn(testDb().db, 'delete');
+		try {
+			await drainPendingReversals('ch_1');
+		} finally {
+			deleteSpy.mockRestore();
+		}
+
+		// All deletes must go through the per-row transactions (crash-safe);
+		// a bare db.delete would have wiped both rows before both mutations.
+		expect(deleteSpy).not.toHaveBeenCalled();
+		expect(await testDb().db.select().from(stripePendingReversals).all()).toHaveLength(0);
+		expect(await getCredits('org-1')).toBe(-100);
+	});
+});
 
 describe('orgIsMetered', () => {
 	test('an org with neither balance nor customer is unmetered (self-hosted / pre-billing)', async () => {

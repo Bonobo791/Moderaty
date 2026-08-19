@@ -349,31 +349,38 @@ export async function drainPendingReversals(chargeId: string): Promise<number> {
 		// The grant still has not landed — keep the obligation for the next
 		// grant (the sweep drops rows whose grant never arrives).
 		if (!match) continue;
-		// A disputed customer must never be re-charged off-session — same
-		// policy as reverseDispute, applied at drain time (the dispute event
-		// found no org to disable when it arrived).
-		if (row.reason === 'dispute') {
-			await db
-				.update(organizations)
-				.set({ autoTopupEnabled: 0, autoTopupState: 'disabled' })
-				.where(eq(organizations.id, match.orgId));
-		}
-		// Same anchors as reverseCharge: refType 'refund'/'dispute', refId =
-		// charge id — a later won-dispute restore still finds the 'dispute'
-		// reversal, and a later full refund applies on its own anchor.
-		await applyLedgerDelta(db, {
-			orgId: match.orgId,
-			delta: -match.credits,
-			// The table only ever holds 'refund' | 'dispute' (queuePendingReversal
-			// types it), but the DB column reads back as string — narrow it.
-			reason: row.reason === 'dispute' ? 'dispute' : 'refund',
-			refType: row.reason === 'refund' ? 'refund' : 'dispute',
-			refId: chargeId,
-			chargeId
+		// Crash-consistency (human review): each row's ledger mutation and its
+		// delete must be ONE transaction, and the delete must target the row's
+		// own id. Deleting by chargeId after the first row would erase the
+		// second (refund + dispute) obligation before its mutation runs — a
+		// crash in between would make the retry unable to reconcile it.
+		await db.transaction(async (tx) => {
+			// A disputed customer must never be re-charged off-session — same
+			// policy as reverseDispute, applied at drain time (the dispute event
+			// found no org to disable when it arrived).
+			if (row.reason === 'dispute') {
+				await tx
+					.update(organizations)
+					.set({ autoTopupEnabled: 0, autoTopupState: 'disabled' })
+					.where(eq(organizations.id, match.orgId));
+			}
+			// Same anchors as reverseCharge: refType 'refund'/'dispute', refId =
+			// charge id — a later won-dispute restore still finds the 'dispute'
+			// reversal, and a later full refund applies on its own anchor.
+			await applyLedgerDelta(tx, {
+				orgId: match.orgId,
+				delta: -match.credits,
+				// The table only ever holds 'refund' | 'dispute' (queuePendingReversal
+				// types it), but the DB column reads back as string — narrow it.
+				reason: row.reason === 'dispute' ? 'dispute' : 'refund',
+				refType: row.reason === 'refund' ? 'refund' : 'dispute',
+				refId: chargeId,
+				chargeId
+			});
+			// Satisfied (whether applied now or by a concurrent path): the anchor
+			// makes double-application impossible, so the obligation is done.
+			await tx.delete(stripePendingReversals).where(eq(stripePendingReversals.id, row.id));
 		});
-		// Satisfied (whether applied now or by a concurrent path): the anchor
-		// makes double-application impossible, so the obligation is done.
-		await db.delete(stripePendingReversals).where(eq(stripePendingReversals.chargeId, chargeId));
 		drained += 1;
 	}
 	return drained;

@@ -39,6 +39,7 @@ import {
 	CONTACT_OPT_IN_TEXT,
 	buildVerificationEmail,
 	createOrReusePendingSubmission,
+	isUniqueViolation,
 	parseContactForm,
 	submitContactRequest,
 	verifyContactToken
@@ -225,6 +226,28 @@ describe('createOrReusePendingSubmission', () => {
 		expect(new Date(stored[0].expiresAt).getTime()).toBeGreaterThan(Date.now());
 	});
 
+	test('logs the conflict and reuses the pending row when a concurrent insert collides', async () => {
+		// The conflict path is the recovery for the partial unique index: an
+		// expired row still holds the pending slot, so the fast path misses it,
+		// the insert collides, and the winner is refreshed. That recovery is a
+		// real server event and must be logged, never silent.
+		const first = await createOrReusePendingSubmission(SUBMIT);
+		await testDb()
+			.db.update(contactSubmissions)
+			.set({ expiresAt: new Date(Date.now() - 1000).toISOString() })
+			.where(eq(contactSubmissions.id, first.id));
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const second = await createOrReusePendingSubmission(SUBMIT);
+			expect(second.reused).toBe(true);
+			expect(second.id).toBe(first.id);
+			expect(second.verificationToken).toBe(first.verificationToken);
+			expect(warn).toHaveBeenCalledWith(expect.stringContaining('conflicted'));
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
 	test('creates a NEW row after the previous one was verified', async () => {
 		const first = await createOrReusePendingSubmission(SUBMIT);
 		await testDb()
@@ -234,6 +257,35 @@ describe('createOrReusePendingSubmission', () => {
 		const second = await createOrReusePendingSubmission(SUBMIT);
 		expect(second.reused).toBe(false);
 		expect(await rows()).toHaveLength(2);
+	});
+});
+
+describe('isUniqueViolation', () => {
+	test('detects a SQLITE_CONSTRAINT code or UNIQUE message at any depth of the cause chain', () => {
+		expect(isUniqueViolation({ code: 'SQLITE_CONSTRAINT_UNIQUE' })).toBe(true);
+		expect(isUniqueViolation({ message: 'UNIQUE constraint failed: contact_submissions.email' })).toBe(true);
+		const nested = new Error('Failed query');
+		(nested as { cause?: unknown }).cause = new Error('UNIQUE constraint failed: contact_submissions.email');
+		expect(isUniqueViolation(nested)).toBe(true);
+	});
+
+	test('returns false for unrelated errors and non-string messages', () => {
+		expect(isUniqueViolation(new Error('boom'))).toBe(false);
+		expect(isUniqueViolation({ message: 123 })).toBe(false);
+		expect(isUniqueViolation({})).toBe(false);
+	});
+
+	test('terminates on a cause cycle that does not include the original error', () => {
+		// b.cause = c and c.cause = b form a cycle that never returns to the
+		// first error; the bounded walk must stop instead of spinning a request
+		// thread forever (a plain `current === error` guard cannot see it).
+		const first = new Error('first');
+		const b = new Error('b');
+		const c = new Error('c');
+		(b as { cause?: unknown }).cause = c;
+		(c as { cause?: unknown }).cause = b;
+		(first as { cause?: unknown }).cause = b;
+		expect(isUniqueViolation(first)).toBe(false);
 	});
 });
 

@@ -25,5 +25,13 @@ describe('app shell', () => {
 		const html = readFileSync(new URL('./app.html', import.meta.url), 'utf8');
 		expect(html).toMatch(/<title[^>]*>[^<]+<\/title>/);
 		expect(html).toMatch(/<title[^>]*>Moderaty<\/title>/);
+
+		// The fallback must come AFTER %sveltekit.head%: a page's own
+		// <svelte:head><title> is injected at that placeholder, and the browser
+		// uses the FIRST <title> in the document — a fallback placed before the
+		// placeholder would shadow every route-specific title.
+		const fallbackTitle = html.indexOf('<title>Moderaty</title>');
+		const svelteKitHead = html.indexOf('%sveltekit.head%');
+		expect(fallbackTitle).toBeGreaterThan(svelteKitHead);
 	});
 });

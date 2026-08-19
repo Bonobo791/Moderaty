@@ -42,8 +42,11 @@ export function npmPrefix(env = process.env, home = os.homedir(), execPath = pro
 		const npmrc = path.join(home, '.npmrc');
 		if (existsSync(npmrc)) {
 			for (const line of readFileSync(npmrc, 'utf8').split(/\r?\n/)) {
-				const m = line.match(/^\s*prefix\s*=\s*(.+)$/);
-				const prefix = m?.[1]?.trim();
+				// Parse `prefix=value` (or `prefix = value`) directly instead of
+				// with `\s*(.+)` (sonarcloud: super-linear backtracking).
+				const equals = line.indexOf('=');
+				if (equals === -1 || line.slice(0, equals).trim() !== 'prefix') continue;
+				const prefix = line.slice(equals + 1).trim();
 				if (prefix) return prefix.replace(/^["']|["']$/g, '');
 			}
 		}

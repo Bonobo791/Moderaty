@@ -374,7 +374,8 @@ export async function retryStripeCustomerDeletions(limit = 10, deadline?: number
 		// moderation — each deletion may carry SDK network retries, so the
 		// sweep must never consume the whole serverless window. Remaining rows
 		// wait for the next invocation (bounded, I10).
-		if (deadline !== undefined && Date.now() >= deadline) {
+		const remainingMs = deadline === undefined ? undefined : deadline - Date.now();
+		if (remainingMs !== undefined && remainingMs <= 0) {
 			const remaining = rows.length - rows.indexOf(row) - 1;
 			console.error(`stripe deletion outbox stopped early: shared deadline expired — ${remaining} row(s) deferred to the next invocation`);
 			break;
@@ -384,14 +385,14 @@ export async function retryStripeCustomerDeletions(limit = 10, deadline?: number
 			// the shared Stripe client retries up to twice, so a hanging call
 			// can blow past the cron budget and be killed before lastAttemptAt
 			// is recorded — the row would then be selected again immediately
-			// and starve moderation. A per-request timeout derived from the
-			// remaining deadline makes a timeout fail loudly (and records
-			// lastAttemptAt, so the row backs off for the next hour).
-			const remainingMs = deadline === undefined ? undefined : deadline - Date.now();
-			if (remainingMs !== undefined && remainingMs > 0) {
-				await getStripe().customers.del(row.customerId, { timeout: remainingMs });
-			} else {
+			// and starve moderation. customers.del's timeout is per ATTEMPT, so
+			// disable network retries (maxNetworkRetries: 0) to keep the whole
+			// operation within the remaining deadline; a timeout fails loudly
+			// (and records lastAttemptAt, so the row backs off for the next hour).
+			if (remainingMs === undefined) {
 				await getStripe().customers.del(row.customerId);
+			} else {
+				await getStripe().customers.del(row.customerId, undefined, { timeout: remainingMs, maxNetworkRetries: 0 });
 			}
 			await db.delete(stripeDeletionOutbox).where(eq(stripeDeletionOutbox.id, row.id));
 			deleted += 1;

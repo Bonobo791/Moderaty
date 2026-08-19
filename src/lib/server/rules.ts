@@ -19,7 +19,7 @@ const RULE_TYPES = ['keyword', 'regex', 'user'] as const;
 const RULE_ACTIONS = ['hold', 'reject', 'delete', 'ban'] as const;
 const MAX_REGEX_PATTERN_LENGTH = 256;
 const BACKREFERENCE_DIGIT = /[1-9]/;
-const GROUP_PREFIX = /^\?(?:<[a-z][^>]*>|<?[=!:]|[-a-z]*:)/i;
+const GROUP_PREFIX = /^\?(?:<[^=!>][^>]*>|<?[=!:]|[-a-z]*:)/i;
 
 export type RuleAction = (typeof RULE_ACTIONS)[number];
 

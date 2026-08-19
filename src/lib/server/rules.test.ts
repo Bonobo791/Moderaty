@@ -219,6 +219,19 @@ test('group prefixes are stripped before comparing alternatives', () => {
 	);
 });
 
+test('named-group prefixes are stripped regardless of the identifier start character', () => {
+	// recheck dedupes the identical `a|a` branches and reports them safe, so
+	// duplicate-alternation detection is the only guard. The named-group prefix
+	// must be stripped even when the name starts with `_`, `$`, or a non-ASCII
+	// letter, or `(?<_a>a|a)+` slips past as "safe".
+	for (const [index, name] of ['_a', '$a', 'é'].entries()) {
+		const id = 70 + index;
+		expect(() =>
+			matchRule('text', 'author', [{ id, type: 'regex', pattern: `(?<${name}>a|a)+`, action: 'hold' }])
+		).toThrow(new RegExp(`rule #${id} has an unsafe regex`));
+	}
+});
+
 test('rejects patterns over the maximum length but accepts the boundary', () => {
 	expect(() =>
 		matchRule('text', 'author', [{ id: 44, type: 'regex', pattern: 'a'.repeat(257), action: 'hold' }])

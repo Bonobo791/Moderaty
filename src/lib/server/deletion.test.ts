@@ -261,14 +261,25 @@ test('each Stripe deletion request is capped to the remaining cron deadline', as
 	// shared Stripe client performs up to two network retries, so a hanging
 	// request can blow past the 20s cron budget and get killed before
 	// lastAttemptAt is recorded (human review). Each customers.del must carry
-	// a timeout derived from the remaining deadline.
+	// a timeout derived from the remaining deadline — passed as RequestOptions
+	// (the THIRD argument, after the params slot) with network retries disabled
+	// so the timeout bounds the whole operation rather than a single attempt.
 	await testDb().db.insert(stripeDeletionOutbox).values({ customerId: 'cus_deadline' });
 	mocks.customersDel.mockClear();
 	mocks.customersDel.mockResolvedValue({ id: 'cus_deadline', deleted: true });
 
-	await retryStripeCustomerDeletions(10, Date.now() + 10_000);
+	const now = Date.now();
+	const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+	try {
+		await retryStripeCustomerDeletions(10, now + 10_000);
 
-	expect(mocks.customersDel).toHaveBeenCalledWith('cus_deadline', { timeout: expect.any(Number) });
+		expect(mocks.customersDel).toHaveBeenCalledWith('cus_deadline', undefined, {
+			timeout: 10_000,
+			maxNetworkRetries: 0
+		});
+	} finally {
+		nowSpy.mockRestore();
+	}
 });
 
 

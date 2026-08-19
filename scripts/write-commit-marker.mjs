@@ -59,9 +59,11 @@ const COMMIT_SHA_RE = /^[0-9a-f]{40}$/i;
 function gitDirFor(root) {
 	const dotGit = resolve(root, '.git');
 	if (existsSync(resolve(dotGit, 'HEAD'))) return dotGit;
-	const match = readFileSync(dotGit, 'utf8').match(/^gitdir:\s*(.+)$/m);
-	if (!match) return null;
-	return resolve(dirname(dotGit), match[1].trim());
+	// A worktree/submodule `.git` is a FILE: `gitdir: <path>`. Parse the line
+	// directly instead of with `\s*(.+)` (sonarcloud: super-linear backtracking).
+	const line = readFileSync(dotGit, 'utf8').split('\n').find((candidate) => candidate.startsWith('gitdir:'));
+	if (!line) return null;
+	return resolve(dirname(dotGit), line.slice('gitdir:'.length).trim());
 }
 
 /**

@@ -107,101 +107,119 @@ export async function createOrReusePendingSubmission(input: {
 	userAgent: string;
 }): Promise<ContactSubmission> {
 	const email = input.email.trim().toLowerCase();
-	const now = new Date();
-	const expiresAt = new Date(now.getTime() + CONTACT_VERIFICATION_TTL_MS).toISOString();
-	const existing = await db
-		.select()
-		.from(contactSubmissions)
-		.where(
-			and(
-				eq(contactSubmissions.email, email),
-				eq(contactSubmissions.status, 'pending'),
-				gt(contactSubmissions.expiresAt, now.toISOString())
-			)
-		)
-		.get();
-	if (existing) {
-		const updated = await db
-			.update(contactSubmissions)
-			.set({ name: input.name, consentText: input.consentText, ip: input.ip, userAgent: input.userAgent, expiresAt })
-			.where(eq(contactSubmissions.id, existing.id))
-			.returning();
-		return {
-			id: updated[0].id,
-			email: updated[0].email,
-			name: updated[0].name,
-			verificationToken: updated[0].verificationToken,
-			expiresAt,
-			reused: true
-		};
-	}
+	const expiresAt = new Date(Date.now() + CONTACT_VERIFICATION_TTL_MS).toISOString();
 	const token = randomBytes(32).toString('hex');
-	try {
-		const inserted = await db
-			.insert(contactSubmissions)
-			.values({
-				email,
-				name: input.name,
-				status: 'pending',
-				verificationToken: token,
-				expiresAt,
-				consentText: input.consentText,
-				ip: input.ip,
-				userAgent: input.userAgent
-			})
-			.returning();
-		return {
-			id: inserted[0].id,
-			email: inserted[0].email,
-			name: inserted[0].name,
-			verificationToken: token,
-			expiresAt,
-			reused: false
-		};
-	} catch (error) {
-		// Idempotency (human review): the partial unique index on
-		// (email) WHERE status='pending' makes a concurrent submission's insert
-		// conflict instead of silently creating a second row with a different
-		// token (two verification e-mails). Converge on the one pending row —
-		// an expired one is fine: submitContactRequest re-sends the e-mail and
-		// the expiry below slides, so the resubmission gets a working link.
-		if (!isUniqueViolation(error)) throw error;
+
+	// Bounded retry (human review): reusing the pending row can lose a race to
+	// a concurrent verification (the winner stops being pending between the
+	// read and the update), in which case the next pass inserts a fresh row.
+	// The partial unique index keeps at most one pending row per e-mail, so
+	// only a few genuine conflicts can ever occur.
+	for (let attempt = 0; attempt < 3; attempt += 1) {
+		const now = new Date();
 		const existing = await db
 			.select()
 			.from(contactSubmissions)
-			.where(and(eq(contactSubmissions.email, email), eq(contactSubmissions.status, 'pending')))
+			.where(
+				and(
+					eq(contactSubmissions.email, email),
+					eq(contactSubmissions.status, 'pending'),
+					gt(contactSubmissions.expiresAt, now.toISOString())
+				)
+			)
 			.get();
-		if (!existing) throw error; // constraint fired without a matching row — surface it
-		const updated = await db
-			.update(contactSubmissions)
-			.set({ name: input.name, consentText: input.consentText, ip: input.ip, userAgent: input.userAgent, expiresAt })
-			.where(eq(contactSubmissions.id, existing.id))
-			.returning();
-		return {
-			id: updated[0].id,
-			email: updated[0].email,
-			name: updated[0].name,
-			verificationToken: updated[0].verificationToken,
-			expiresAt,
-			reused: true
-		};
+		if (existing) {
+			const reused = await refreshPendingSubmission(email, input, expiresAt);
+			if (reused) return reused;
+			continue; // verified between the read and the update — retry fresh
+		}
+		try {
+			const inserted = await db
+				.insert(contactSubmissions)
+				.values({
+					email,
+					name: input.name,
+					status: 'pending',
+					verificationToken: token,
+					expiresAt,
+					consentText: input.consentText,
+					ip: input.ip,
+					userAgent: input.userAgent
+				})
+				.returning();
+			return {
+				id: inserted[0].id,
+				email: inserted[0].email,
+				name: inserted[0].name,
+				verificationToken: token,
+				expiresAt,
+				reused: false
+			};
+		} catch (error) {
+			// Idempotency (human review): the partial unique index on
+			// (email) WHERE status='pending' makes a concurrent submission's insert
+			// conflict instead of silently creating a second row with a different
+			// token (two verification e-mails). Converge on the one pending row —
+			// an expired one is fine: submitContactRequest re-sends the e-mail and
+			// the expiry below slides, so the resubmission gets a working link.
+			if (!isUniqueViolation(error)) throw error;
+			const reused = await refreshPendingSubmission(email, input, expiresAt);
+			if (reused) {
+				// A concurrent-insert conflict is a real server event: log the
+				// race so operators can see it (never a silent fallback).
+				console.warn(`[contact] pending submission insert for ${email} conflicted; reusing row ${reused.id}`);
+				return reused;
+			}
+			// The winner was verified between the conflict and the reuse update —
+			// loop to create a fresh pending row instead of returning a used token.
+		}
 	}
+	throw new Error(`could not create a pending contact submission for ${email} after repeated conflicts`);
+}
+
+/**
+ * Refreshes and returns the still-pending row for an e-mail atomically: the
+ * update only matches `status = 'pending'`, so a row verified (or removed)
+ * between the caller's read and this update matches nothing and null is
+ * returned — the caller then creates a fresh pending row instead of reusing a
+ * verification token that is no longer usable.
+ */
+async function refreshPendingSubmission(
+	email: string,
+	input: { name: string; consentText: string; ip: string; userAgent: string },
+	expiresAt: string
+): Promise<ContactSubmission | null> {
+	const updated = await db
+		.update(contactSubmissions)
+		.set({ name: input.name, consentText: input.consentText, ip: input.ip, userAgent: input.userAgent, expiresAt })
+		.where(and(eq(contactSubmissions.email, email), eq(contactSubmissions.status, 'pending')))
+		.returning();
+	const row = updated[0];
+	if (!row) return null;
+	return {
+		id: row.id,
+		email: row.email,
+		name: row.name,
+		verificationToken: row.verificationToken,
+		expiresAt,
+		reused: true
+	};
 }
 
 /** Whether an insert error is the partial-unique-index violation (SQLite). */
-function isUniqueViolation(error: unknown): boolean {
+export function isUniqueViolation(error: unknown): boolean {
 	// The libsql client wraps the constraint error: the drizzle statement
 	// error's message is 'Failed query: …' with the LibsqlError (code
 	// SQLITE_CONSTRAINT*, message 'UNIQUE constraint failed: …') on the
-	// cause chain. Walk the chain and match either surface.
+	// cause chain. Walk the chain and match either surface. The walk is
+	// bounded so a cause cycle that does not include the original error
+	// (b.cause = c, c.cause = b) cannot spin a request thread forever.
 	let current: unknown = error;
-	while (current) {
+	for (let depth = 0; current && depth < 10; depth += 1) {
 		const record = current as { code?: unknown; message?: unknown };
 		if (typeof record.code === 'string' && /SQLITE_CONSTRAINT/i.test(record.code)) return true;
-		const message = record instanceof Error ? record.message : String(record);
-		if (/UNIQUE constraint failed/i.test(message)) return true;
+		if (typeof record.message === 'string' && /UNIQUE constraint failed/i.test(record.message)) return true;
 		current = (current as { cause?: unknown }).cause;
-		if (current === error) break; // cyclic cause — never spin
 	}
 	return false;
 }

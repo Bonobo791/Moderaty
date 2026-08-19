@@ -180,6 +180,51 @@ describe('coolify deploy guarantee', () => {
 		expect(urls.some((u) => u.includes('/deploy?uuid='))).toBe(false);
 	});
 
+	it('does not confirm a malformed deployment item that lacks deployment_uuid', async () => {
+		// Codex P2: a matching item missing deployment_uuid must not count as
+		// confirmation — keep looking (I2: validate at every boundary).
+		const malformed = [{ commit: COMMIT }];
+		vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(malformed), { status: 200 })));
+
+		const hit = await verifyDeploymentQueued('app-1', COMMIT, { timeoutMs: 40, pollMs: 10 });
+		expect(hit).toBeNull();
+	});
+
+	it('skips a malformed item and confirms a later well-formed one', async () => {
+		const list = [{ commit: COMMIT }, { deployment_uuid: 'dep-ok', commit: COMMIT, status: 'queued' }];
+		vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(list), { status: 200 })));
+
+		const hit = await verifyDeploymentQueued('app-1', COMMIT, { timeoutMs: 200, pollMs: 10 });
+		expect(hit?.deploymentUuid).toBe('dep-ok');
+	});
+
+	it('ignores deployments created before --since (a pre-push record must not confirm a new push)', async () => {
+		const old_ = { deployment_uuid: 'dep-old', commit: COMMIT, status: 'finished', created_at: '2026-08-19T00:00:00Z' };
+		const fresh = { deployment_uuid: 'dep-new', commit: COMMIT, status: 'queued', created_at: '2026-08-19T17:00:00Z' };
+		// First call returns only the OLD record (pre-push) -> not a confirmation.
+		// Second call returns the FRESH record -> confirmation.
+		let calls = 0;
+		vi.stubGlobal('fetch', vi.fn(async () => {
+			calls += 1;
+			return new Response(JSON.stringify(calls === 1 ? [old_] : [fresh]), { status: 200 });
+		}));
+
+		const sinceMs = Date.parse('2026-08-19T12:00:00Z');
+		const hit = await verifyDeploymentQueued('app-1', COMMIT, { timeoutMs: 200, pollMs: 10, sinceMs });
+		expect(hit?.deploymentUuid).toBe('dep-new');
+	});
+
+	it('falls back to the documented COOLIFY token when COOLIFY_API_TOKEN is an empty placeholder', async () => {
+		process.env.COOLIFY_API_TOKEN = '';
+		process.env.COOLIFY = 'local-token';
+		vi.stubGlobal('fetch', vi.fn(async () => new Response('[]', { status: 200 })));
+
+		await verifyDeploymentQueued('app-1', COMMIT, { timeoutMs: 30, pollMs: 10 });
+
+		const [, init] = fetch.mock.calls[0];
+		expect(init.headers.Authorization).toBe('Bearer local-token');
+	});
+
 	it('wraps a fetch network/timeout failure with the endpoint path (actionable context)', async () => {
 		vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('The operation was aborted due to timeout'); }));
 

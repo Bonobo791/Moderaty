@@ -45,6 +45,14 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      # A manual dispatch may target any ref; only dev/main map to a real app
+      # (anything else would wait for a SHA the app's branch never deploys —
+      # codex P2). Fail loudly instead of silently verifying nothing.
+      - name: Reject manual dispatch on unsupported refs
+        if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/dev' && github.ref != 'refs/heads/main'
+        run: |
+          echo "ERROR: workflow_dispatch is only supported on dev or main (got ${{ github.ref }})" >&2
+          exit 1
       - name: Verify (or trigger) the Coolify deployment for this push
         env:
           COOLIFY_SERVER_URL: ${{ secrets.COOLIFY_SERVER_URL }}
@@ -57,4 +65,13 @@ jobs:
           else
             APP_UUID="$COOLIFY_APP_UUID_DEV"
           fi
-          node scripts/coolify-deploy.mjs "$APP_UUID" "${{ github.sha }}" --fallback
+          # --since: ignore deployments created before this push (a force-push
+          # back to a previously deployed commit must still redeploy — codex P2).
+          # For manual dispatch there is no push timestamp, so 'now' forces a
+          # fresh deployment, which is the dispatch's purpose.
+          if [ "${{ github.event_name }}" = "push" ]; then
+            SINCE="${{ github.event.head_commit.timestamp }}"
+          else
+            SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          fi
+          node scripts/coolify-deploy.mjs "$APP_UUID" "${{ github.sha }}" --fallback --since "$SINCE"

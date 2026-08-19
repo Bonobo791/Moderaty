@@ -47,7 +47,7 @@ export function coolifyBase() {
 
 /** Coolify API token (COOLIFY_API_TOKEN; the local .env's COOLIFY value also works). */
 export function coolifyToken() {
-	const token = process.env.COOLIFY_API_TOKEN ?? process.env.COOLIFY;
+	const token = process.env.COOLIFY_API_TOKEN || process.env.COOLIFY;
 	if (!token) {
 		throw new Error('COOLIFY_API_TOKEN is not set — the Coolify API cannot be authenticated');
 	}
@@ -99,8 +99,18 @@ export function commitMatches(deploymentCommit, expectedCommit) {
  * @param {string} expectedCommit
  * @returns {object|null}
  */
-export function findDeploymentForCommit(deployments, expectedCommit) {
-	return (deployments ?? []).find((d) => commitMatches(d?.commit, expectedCommit)) ?? null;
+export function findDeploymentForCommit(deployments, expectedCommit, sinceMs) {
+	return (deployments ?? []).find((d) => {
+		if (!commitMatches(d?.commit, expectedCommit)) return false;
+		// I2: a matching item without a deployment_uuid is malformed — never a
+		// confirmation (codex P2). Missing/invalid created_at counts as old.
+		if (typeof d?.deployment_uuid !== 'string' || !d.deployment_uuid) return false;
+		if (sinceMs !== undefined) {
+			const createdMs = Date.parse(d?.created_at);
+			if (!Number.isFinite(createdMs) || createdMs < sinceMs) return false;
+		}
+		return true;
+	}) ?? null;
 }
 
 /**
@@ -114,11 +124,11 @@ export function findDeploymentForCommit(deployments, expectedCommit) {
  * @param {typeof fetch} [options.fetchImpl=fetch]
  * @returns {Promise<{deploymentUuid: string, status: string, commit: string}|null>}
  */
-export async function verifyDeploymentQueued(appUuid, expectedCommit, { timeoutMs = DEPLOY_VERIFY_TIMEOUT_MS, pollMs = DEPLOY_VERIFY_POLL_MS, fetchImpl = fetch } = {}) {
+export async function verifyDeploymentQueued(appUuid, expectedCommit, { timeoutMs = DEPLOY_VERIFY_TIMEOUT_MS, pollMs = DEPLOY_VERIFY_POLL_MS, sinceMs, fetchImpl = fetch } = {}) {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
 		const deployments = await coolifyRequest(`/deployments/applications/${encodeURIComponent(appUuid)}?take=20`, { fetchImpl });
-		const hit = findDeploymentForCommit(deployments, expectedCommit);
+		const hit = findDeploymentForCommit(deployments, expectedCommit, sinceMs);
 		if (hit) {
 			return { deploymentUuid: hit.deployment_uuid, status: hit.status, commit: hit.commit };
 		}
@@ -152,13 +162,23 @@ function parsePositiveSeconds(value, flag) {
 	return seconds;
 }
 
+function parseSince(value) {
+	if (value === undefined) return undefined;
+	const ms = Date.parse(value);
+	if (!Number.isFinite(ms)) {
+		throw new Error(`--since must be an ISO-8601 timestamp, got: ${value}`);
+	}
+	return ms;
+}
+
 function parseArgs(argv) {
-	const args = { fallback: false, timeoutMs: DEPLOY_VERIFY_TIMEOUT_MS, pollMs: DEPLOY_VERIFY_POLL_MS, positional: [] };
+	const args = { fallback: false, timeoutMs: DEPLOY_VERIFY_TIMEOUT_MS, pollMs: DEPLOY_VERIFY_POLL_MS, sinceMs: undefined, positional: [] };
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i];
 		if (a === '--fallback') args.fallback = true;
 		else if (a === '--timeout-sec') args.timeoutMs = parsePositiveSeconds(argv[++i], '--timeout-sec') * 1000;
 		else if (a === '--poll-sec') args.pollMs = parsePositiveSeconds(argv[++i], '--poll-sec') * 1000;
+		else if (a === '--since') args.sinceMs = parseSince(argv[++i]);
 		else if (a.startsWith('-')) throw new Error(`unknown flag: ${a}`);
 		else args.positional.push(a);
 	}
@@ -172,13 +192,13 @@ function parseArgs(argv) {
  * @returns {Promise<number>} Process exit code (0 verified/triggered, 1 not deployed).
  */
 export async function main(argv = process.argv.slice(2)) {
-	const { fallback, timeoutMs, pollMs, positional } = parseArgs(argv);
+	const { fallback, timeoutMs, pollMs, sinceMs, positional } = parseArgs(argv);
 	const [appUuid, expectedCommit] = positional;
 	if (!appUuid || !expectedCommit) {
-		throw new Error('usage: node scripts/coolify-deploy.mjs <app-uuid> <expected-commit> [--fallback] [--timeout-sec N] [--poll-sec N]');
+		throw new Error('usage: node scripts/coolify-deploy.mjs <app-uuid> <expected-commit> [--fallback] [--timeout-sec N] [--poll-sec N] [--since ISO-8601]');
 	}
 	const short = expectedCommit.slice(0, 12);
-	const queued = await verifyDeploymentQueued(appUuid, expectedCommit, { timeoutMs, pollMs });
+	const queued = await verifyDeploymentQueued(appUuid, expectedCommit, { timeoutMs, pollMs, sinceMs });
 	if (queued) {
 		console.log(`[${new Date().toISOString()}] coolify deploy confirmed for ${short}: deployment ${queued.deploymentUuid} (${queued.status})`);
 		// A terminal failure means the redeploy did NOT succeed — the guarantee
@@ -195,7 +215,7 @@ export async function main(argv = process.argv.slice(2)) {
 		// visible after the last poll but before this POST. Triggering anyway
 		// would race it into a duplicate deployment, so recheck once and skip
 		// the API trigger when the commit just appeared (codeant).
-		const late = await verifyDeploymentQueued(appUuid, expectedCommit, { timeoutMs: pollMs, pollMs });
+		const late = await verifyDeploymentQueued(appUuid, expectedCommit, { timeoutMs: pollMs, pollMs, sinceMs });
 		if (late) {
 			console.log(`[${new Date().toISOString()}] coolify deploy confirmed (late webhook) for ${short}: deployment ${late.deploymentUuid} (${late.status})`);
 			if (['failed', 'error', 'cancelled'].includes(late.status)) {

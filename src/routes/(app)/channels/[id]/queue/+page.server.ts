@@ -92,8 +92,7 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
 function commentIdFrom(formData: FormData): string | null {
 	const raw = formData.get('commentId');
 	if (typeof raw !== 'string') return null;
-	const id = raw.trim();
-	return id ?? null;
+	return raw.trim();
 }
 
 export const actions = {

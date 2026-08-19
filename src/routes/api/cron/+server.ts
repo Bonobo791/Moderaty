@@ -113,14 +113,17 @@ export const GET: RequestHandler = async ({ url, request }) => {
 	// Stripe deletion outbox retry: customers owed erasure from account
 	// teardown whose first attempt hit a Stripe outage. Bounded per
 	// invocation (I10); a row is removed only after Stripe confirms, so an
-	// outage never loses the erasure. DRY_RUN: nothing durable.
+	// outage never loses the erasure. Shares the cron deadline: each deletion
+	// may carry SDK network retries, and the sweep must never eat the whole
+	// serverless window before a channel is claimed (codex review). DRY_RUN:
+	// nothing durable.
 	let stripeCustomersDeleted = 0;
 	let stripeDeletionSweepError: string | null = null;
 	if (dryRun) {
 		console.info('dry run: stripe deletion outbox retry skipped');
 	} else {
 		try {
-			stripeCustomersDeleted = await retryStripeCustomerDeletions();
+			stripeCustomersDeleted = await retryStripeCustomerDeletions(10, deadline);
 		} catch (cause) {
 			stripeDeletionSweepError = cause instanceof Error ? cause.message : String(cause);
 			console.error('stripe deletion outbox retry failed:', cause);

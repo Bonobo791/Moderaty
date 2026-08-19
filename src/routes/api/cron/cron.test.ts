@@ -23,11 +23,18 @@ import { AUDIT_HANDLE_RETENTION_MS, CONSENT_EMAIL_RETENTION_MS } from '$lib/serv
 // netlify/cron.test.mjs (2026-07-30, PR #13 review, per AGENTS.md).
 const mocks = vi.hoisted(() => ({
 	env: { CRON_SECRET: 'test-secret', DRY_RUN: 'true' } as Record<string, string | undefined>,
-	runChannel: vi.fn()
+	runChannel: vi.fn(),
+	retryStripeCustomerDeletions: vi.fn(async () => 0)
 }));
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 vi.mock('$lib/server/pipeline', () => ({ runChannel: mocks.runChannel }));
+vi.mock('$lib/server/deletion', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('$lib/server/deletion')>();
+	// Spy on just the outbox retry (the other deletion sweeps stay real) so a
+	// test can pin the shared deadline the route hands it.
+	return { ...actual, retryStripeCustomerDeletions: mocks.retryStripeCustomerDeletions };
+});
 
 import { GET } from './+server';
 
@@ -113,6 +120,22 @@ function expectDrainState(row: Awaited<ReturnType<typeof channelRow>>, boundary:
 
 test('rejects a request with no secret at all', async () => {
 	await expectUnauthorized();
+});
+
+test('the stripe deletion outbox retry shares the cron deadline (bounded, never eats the moderation window)', async () => {
+	// Each outbox deletion can carry SDK network retries; a sweep without the
+	// shared deadline could consume the whole serverless window before a
+	// channel is even claimed, repeatedly starving moderation (codex review).
+	mocks.env.DRY_RUN = 'false';
+	mocks.retryStripeCustomerDeletions.mockClear();
+
+	await call({ query: 'test-secret' });
+
+	expect(mocks.retryStripeCustomerDeletions).toHaveBeenCalledTimes(1);
+	const [limit, deadline] = mocks.retryStripeCustomerDeletions.mock.calls[0] as [number, number];
+	expect(limit).toBe(10);
+	expect(typeof deadline).toBe('number');
+	expect(deadline).toBeGreaterThan(Date.now() - 30_000); // a live budget, not the past
 });
 
 test('rejects a wrong secret in both query and header', async () => {

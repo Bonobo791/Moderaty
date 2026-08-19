@@ -28,7 +28,7 @@
 // erases them after 30 days, keeping the row (and its moderation outcome)
 // as the record.
 
-import { and, asc, eq, inArray, isNotNull, lt, ne } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNotNull, isNull, lt, ne, or } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
 import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, users } from '$lib/server/db/schema';
@@ -137,6 +137,13 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 	// the transaction: a transient Stripe outage must not lose the erasure —
 	// the cron retries the outbox until Stripe confirms (coderabbit).
 	const stripeCustomerIds: string[] = [];
+	// Surviving orgs the departing user belonged to (shared orgs with other
+	// members). Their Stripe customers stay (the team still bills), but the
+	// customer may have been created by the DEPARTING user — any owner can
+	// open Checkout — so the e-mail scrub below must cover them ALL, not just
+	// the promoted ones: "last owner leaves" is an unreliable proxy for whose
+	// PII the customer holds (codex review).
+	const survivingOrgIds: string[] = [];
 	await db.transaction(async (tx) => {
 		const user = await tx
 			.select({ googleSub: users.googleSub })
@@ -237,6 +244,12 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 				promotions.push({ orgId: membership.orgId, successorId: successor.userId });
 			}
 		}
+		// Surviving = every org the user belonged to minus the dissolved ones.
+		// Computed inside the transaction so the post-commit scrub covers the
+		// same membership snapshot the deletion decided on.
+		for (const membership of userMemberships) {
+			if (!dissolveOrgIds.includes(membership.orgId)) survivingOrgIds.push(membership.orgId);
+		}
 		const chs = dissolveOrgIds.length
 			? await tx.select({ id: channels.id }).from(channels).where(inArray(channels.orgId, dissolveOrgIds)).all()
 			: [];
@@ -287,14 +300,16 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 		);
 	}
 	// Surviving orgs keep their Stripe customer (the team still bills), but
-	// the customer was created with the DEPARTING user's e-mail — the last
-	// owner's PII must not outlive the account. Anonymize best-effort: the
-	// e-mail is scrubbed, the org name and saved card stay for the successor.
-	for (const promotion of promotions) {
+	// the customer may have been created by the DEPARTING user (any owner can
+	// open Checkout) with their e-mail — that PII must not outlive the
+	// account. Anonymize best-effort for EVERY surviving org the user belonged
+	// to (not just promoted ones — codex review): the e-mail is scrubbed, the
+	// org name and saved card stay for the successor.
+	for (const orgId of survivingOrgIds) {
 		const org = await db
 			.select({ stripeCustomerId: organizations.stripeCustomerId })
 			.from(organizations)
-			.where(eq(organizations.id, promotion.orgId))
+			.where(eq(organizations.id, orgId))
 			.get();
 		if (!org?.stripeCustomerId) continue;
 		try {
@@ -304,7 +319,7 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 			await getStripe().customers.update(org.stripeCustomerId, { email: '' });
 		} catch (error) {
 			console.error(
-				`account deletion: could not anonymize Stripe customer ${org.stripeCustomerId} for surviving org ${promotion.orgId}: ${error instanceof Error ? error.message : String(error)}`
+				`account deletion: could not anonymize Stripe customer ${org.stripeCustomerId} for surviving org ${orgId}: ${error instanceof Error ? error.message : String(error)}`
 			);
 		}
 	}
@@ -334,15 +349,36 @@ export async function deleteUserRecords(userId: string): Promise<void> {
  *
  * @returns The number of customers confirmed deleted
  */
-export async function retryStripeCustomerDeletions(limit = 10): Promise<number> {
+// A failed row is retried at most once per hour — a permanently failing row
+// (wrong Stripe mode, already-deleted customer) must not occupy the bounded
+// batch on every invocation and starve newer obligations.
+const DELETION_RETRY_BACKOFF_MS = 60 * 60 * 1000;
+
+export async function retryStripeCustomerDeletions(limit = 10, deadline?: number): Promise<number> {
+	// Fair rotation (codex): never-attempted rows first (NULL lastAttemptAt —
+	// SQLite sorts NULLs first in ASC), then oldest attempt first, with a
+	// backoff so a row retried within the last hour waits its turn. The
+	// permanently failing batch rotates behind newer work instead of blocking
+	// the whole bounded batch forever.
+	const backoffCutoff = new Date(Date.now() - DELETION_RETRY_BACKOFF_MS).toISOString();
 	const rows = await db
 		.select()
 		.from(stripeDeletionOutbox)
-		.orderBy(asc(stripeDeletionOutbox.createdAt), asc(stripeDeletionOutbox.id))
+		.where(or(isNull(stripeDeletionOutbox.lastAttemptAt), lt(stripeDeletionOutbox.lastAttemptAt, backoffCutoff)))
+		.orderBy(asc(stripeDeletionOutbox.lastAttemptAt), asc(stripeDeletionOutbox.id))
 		.limit(limit)
 		.all();
 	let deleted = 0;
 	for (const row of rows) {
+		// Deadline guard (codex): the sweep shares the cron's budget with
+		// moderation — each deletion may carry SDK network retries, so the
+		// sweep must never consume the whole serverless window. Remaining rows
+		// wait for the next invocation (bounded, I10).
+		if (deadline !== undefined && Date.now() >= deadline) {
+			const remaining = rows.length - rows.indexOf(row) - 1;
+			console.error(`stripe deletion outbox stopped early: shared deadline expired — ${remaining} row(s) deferred to the next invocation`);
+			break;
+		}
 		try {
 			await getStripe().customers.del(row.customerId);
 			await db.delete(stripeDeletionOutbox).where(eq(stripeDeletionOutbox.id, row.id));

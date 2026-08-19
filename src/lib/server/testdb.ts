@@ -1,18 +1,15 @@
 // Moderaty — YouTube Comment Auto-Moderation Tool
 // Copyright (C) 2026 Andrew Philip Weilbacher
 //
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Licensed under the PolyForm Shield License 1.0.0; you may not use
+// this file except in compliance with the License. You may obtain a
+// copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
 //
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// The software is provided "as is", without warranty or condition of
+// any kind, express or implied. See the License for the specific
+// language governing permissions and limitations under the License.
+// A copy of the License is included in the LICENSE file at the
+// repository root.
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
@@ -280,10 +277,11 @@ export async function createTestDb(): Promise<TestDb> {
 		`CREATE INDEX credit_transactions_charge_idx ON credit_transactions (charge_id)`,
 		`CREATE TABLE stripe_pending_reversals (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			charge_id TEXT NOT NULL UNIQUE,
+			charge_id TEXT NOT NULL,
 			reason TEXT NOT NULL,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
+		`CREATE UNIQUE INDEX stripe_pending_reversals_charge_reason_idx ON stripe_pending_reversals (charge_id, reason)`,
 		`CREATE TABLE stripe_deletion_outbox (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			customer_id TEXT NOT NULL UNIQUE,
@@ -300,7 +298,7 @@ export async function createTestDb(): Promise<TestDb> {
 			received_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
 			processed_at TEXT
 		)`,
-		`CREATE UNIQUE INDEX stripe_events_type_object_idx ON stripe_events (event_type, object_id)`,
+		`CREATE INDEX stripe_events_type_object_idx ON stripe_events (event_type, object_id)`,
 		`CREATE UNIQUE INDEX organizations_personal_for_unique ON organizations (personal_for)`,
 		`CREATE TABLE memberships (
 			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -309,6 +307,20 @@ export async function createTestDb(): Promise<TestDb> {
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
 			PRIMARY KEY (user_id, org_id)
 		)`,
+		`CREATE TABLE contact_submissions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			email TEXT NOT NULL,
+			name TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			verification_token TEXT NOT NULL UNIQUE,
+			expires_at TEXT NOT NULL,
+			verified_at TEXT,
+			consent_text TEXT NOT NULL,
+			ip TEXT NOT NULL,
+			user_agent TEXT NOT NULL,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`,
+		`CREATE INDEX contact_submissions_status_email_idx ON contact_submissions (status, email)`,
 		`CREATE TABLE invites (
 			token TEXT PRIMARY KEY,
 			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,

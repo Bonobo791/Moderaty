@@ -2,25 +2,25 @@
 # Moderaty — YouTube Comment Auto-Moderation Tool
 # Copyright (C) 2026 Andrew Philip Weilbacher
 
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published
-by the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
+Licensed under the PolyForm Shield License 1.0.0; you may not use
+this file except in compliance with the License. You may obtain a
+copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
 
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License
-along with this program. If not, see <https://www.gnu.org/licenses/>.
+The software is provided "as is", without warranty or condition of
+any kind, express or implied. See the License for the specific
+language governing permissions and limitations under the License.
+A copy of the License is included in the LICENSE file at the
+repository root.
 
 Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 -->
 
 # Moderaty on Coolify + Bunny CDN (implementation plan & operator runbook)
 
-Status: planned, scaffolding implemented · Date: 2026-08-17
+Status: scaffolding implemented and repo-side verified (2026-08-18:
+adapter builds, migrate gate against dev Turso, node-server smoke test, and
+the §9 doc/`ORIGIN` claims all confirmed); cutover (§8) is pending and
+human-only.
 Sources for every platform claim: [`docs/coolify-bunny-research.md`](coolify-bunny-research.md).
 
 The repo supports **two deploy targets**. Netlify (unchanged, see
@@ -37,6 +37,7 @@ GitHub ──push──▶ Coolify (self-hosted server)
                    ├─ app "moderaty-prod"  branch main   ──▶ Bunny CDN pull zone ──▶ users (public domain)
                    │    · scheduled task every minute → /api/cron (localhost)
                    │    · GitHub Actions on push to main → bunny-purge.mjs (outside the container)
+                   │    · GitHub Actions on push to dev/main → coolify-deploy.mjs (verify + fallback trigger, §3.6)
                    └─ app "moderaty-dev"   branch dev    ──▶ users (dev domain, no CDN)
                         · scheduled task every minute → /api/cron (localhost)
 
@@ -118,6 +119,7 @@ One-time setup (human, in the Coolify dashboard):
    | `DRY_RUN` | `true` → `false` after verification | `true` | I8 |
    | `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | production | dev | Stripe is live on this branch |
    | `STRIPE_PRICE_CREDITS_100` / `STRIPE_PRICE_CREDITS_500` / `STRIPE_PRICE_CREDITS_2000` | production Prices | dev Prices | one-time USD Price IDs for the 100/500/2,000-credit bundles; auto top-up validates active/currency/type |
+   | `MJ_APIKEY_PUBLIC` / `MJ_APIKEY_PRIVATE` / `MAILJET_FROM_EMAIL` / `MAILJET_FROM_NAME` | production | dev | MailJet credentials for the contact form's verification e-mails (`MAILJET_FROM_EMAIL` must be a sender verified in the Mailjet account) |
    Do not set `BUNNY_ACCESS_KEY` in the application environment — the purge
    runs OUTSIDE the container (`.github/workflows/bunny-purge.yml`), with a
    least-privilege zone-scoped Bunny key stored as a GitHub Actions secret.
@@ -128,13 +130,51 @@ One-time setup (human, in the Coolify dashboard):
    Dockerfile sets it). Do not set `CONTEXT` — unset is the always-migrate
    default.
 
-   **Critical build setting**: in the application's **Advanced** menu enable
-   **Use Docker Build Secrets**. The Dockerfile's migrate+verify gate reads
-   the TURSO_* build variables exclusively as BuildKit secret mounts
-   (`--secret id=KEY,env=KEY`, docker:S6472 — never as `--build-arg`), so a
-   build without this setting fails loudly at the gate with a BuildKit
-   "secret not found" error. This is by design: the credentials must never
-   appear in build args, image history, or baked layers.
+   **Critical build setting**: enable **Use Docker Build Secrets** for the
+   application — in current Coolify it lives on the application's
+   **Environment Variables** settings page (not the Advanced menu). The
+   Dockerfile's migrate+verify gate reads the TURSO_* build variables
+   exclusively as BuildKit secret mounts (`--secret id=KEY,env=KEY`,
+   docker:S6472 — never as `--build-arg`). Without the setting (or without
+   the Build Variable flags, or without BuildKit secret support on the build
+   server) the secret mounts are **empty**, the env vars never reach the
+   build, and the gate aborts loudly: the 2026-08-19 production symptom was
+   `netlify-migrate: TURSO_DATABASE_URL is not set` (drizzle-kit dying with
+   `TURSO_DATABASE_URL is required` from `drizzle.config.ts` is the same root
+   cause one step later). The gate's preflight error names the fix. This is
+   by design: the credentials must never appear in build args, image history,
+   or baked layers.
+
+   **Operator checklist (all three, then redeploy):**
+   1. **Use Docker Build Secrets** is ON (Environment Variables settings).
+   2. **Build Variable ON for `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`
+      only** — Coolify passes exactly the build-flagged variables as secrets
+      (`is_buildtime`); a variable with Build Variable OFF never reaches the
+      gate. The 2026-08-19 14:16 retry failed for exactly this reason: every
+      variable had Build Variable OFF, so no secret arrived.
+   3. The build server's Docker supports BuildKit secrets — Coolify probes
+      `docker build --help | grep -q secret` and, if it fails, **silently
+      falls back to `--build-arg`** even with the setting on, failing the
+      gate with the same symptom. Requires Docker 18.09+ with BuildKit.
+   4. **Include Source Commit in Build** is ON (app settings) — Coolify
+      excludes `SOURCE_COMMIT` from builds by default (cache preservation).
+      The Dockerfile bakes it into `static/__moderaty_commit.txt` (via a
+      BuildKit secret mount in secrets mode, `--build-arg SOURCE_COMMIT`
+      otherwise) so the bunny-purge workflow can wait for the deploy to
+      serve the pushed commit before purging; without it the marker reads
+      `unknown` and the wait always times out.
+
+   **Build Variable flags — only the two TURSO_* variables need them.**
+   Coolify injects an `ARG` statement into the Dockerfile for every env var
+   with Build Variable ON (a misconfigured app logs hadolint
+   `SecretsUsedInArgOrEnv` warnings for `ARG CRON_SECRET`, `ARG
+   ENCRYPTION_KEY`, `ARG TURSO_AUTH_TOKEN` — those injected ARGs are exactly
+   why the runtime secrets must be Runtime-only). Keep Build Variable ON only
+   for `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`; every other secret
+   (`CRON_SECRET`, `ENCRYPTION_KEY`, `GOOGLE_CLIENT_SECRET`, `OPENAI_API_KEY`,
+   `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `MJ_APIKEY_PRIVATE`, …)
+   should be **Runtime Variable only**, so they never travel as build args
+   and no injected `ARG` block appears.
 
 5. **Scheduled Task** (Scheduled Tasks → application): expression `* * * * *`,
    command `APP_URL=http://127.0.0.1:3000 node scripts/dev-cron.mjs --once`.
@@ -160,6 +200,40 @@ Netlify and the Coolify production apps), the
 The key never enters the container's runtime environment; the purge never
 runs inside production with account-level credentials. The dev app has no
 CDN and never purges.
+
+### 3.6 Deploy guarantee — every push to `dev`/`main` redeploys
+
+The push-to-deploy trigger is Coolify's **GitHub App** auto-deploy (§1): push
+to `main` → `moderaty-prod`, push to `dev` → `moderaty-dev`. Its single point
+of failure is the App's webhook endpoint
+(`https://<coolify>/webhooks/source/github/events`) becoming unreachable from
+GitHub — deploys then silently stop. The
+[`coolify-deploy.yml`](../.github/workflows/coolify-deploy.yml) workflow makes
+that guarantee **observable and self-healing** on every push to `dev`/`main`:
+
+1. `node scripts/coolify-deploy.mjs <app-uuid> <commit> --fallback` polls
+   `GET /api/v1/deployments/applications/{uuid}?take=20` for a deployment
+   whose `commit` matches the pushed SHA (full, 12-char, or 7-char forms).
+2. If the GitHub App webhook fired, the deployment is found → the run logs
+   the `deployment_uuid` + `status` and passes — **no double deploy**.
+3. If no deployment appeared within the 180 s grace window, the script
+   triggers one directly: `POST /api/v1/deploy?uuid=<app>` (the `--fallback`
+   path), logging a loud WARNING that the webhook may be unreachable.
+4. Missing secrets or a failed API call fail the run loudly (exit non-zero,
+   same contract as `bunny-purge`).
+
+Secrets (repository → Settings → Secrets and variables → Actions):
+
+| Secret | Value |
+| --- | --- |
+| `COOLIFY_SERVER_URL` | the Coolify server, e.g. `https://coolify.example.com` |
+| `COOLIFY_API_TOKEN` | Coolify API token (Tokens → API tokens; local `.env`'s `COOLIFY` value is the same format) |
+| `COOLIFY_APP_UUID_DEV` | `moderaty-dev` application UUID (from the app's URL) |
+| `COOLIFY_APP_UUID_PROD` | `moderaty-prod` application UUID |
+
+API shapes are pinned to the Coolify OpenAPI spec
+(`raw.githubusercontent.com/coollabsio/coolify/main/openapi.yaml`) and
+covered by `scripts/coolify-deploy.test.mjs`.
 
 ## 4. Coolify — dev app (`moderaty-dev`, branch `dev`)
 
@@ -252,11 +326,25 @@ Each step has a verify gate; do not proceed past a failed gate.
 - Exact current-UI location of Coolify **Scheduled Tasks** and the
   per-application webhook tab (research could not confirm; the features exist
   and are application-level — locate them in your Coolify version).
-- **Alternative purge trigger**: Coolify Notifications → Webhook channel on
-  `deployment_success` (payload carries `fqdn`/`application_uuid`) if the
-  GitHub Actions workflow ever proves insufficient.
+  **Verified 2026-08-18 against current Coolify docs** (llms-full.txt):
+  application-level tasks exist and are scoped per application
+  (`application_uuid` is included in `task_success`/`task_failed` webhook
+  payloads; the API lists "Scheduled tasks on app/service") — only the exact
+  dashboard tab location is undocumented, so locate it in your Coolify
+  version at setup.
+- **Alternative purge trigger** — **verified 2026-08-18 against current
+  Coolify docs** (llms-full.txt): the Notifications → Webhook channel sends
+  `deployment_success` events whose payload carries `fqdn`,
+  `application_uuid`, `deployment_uuid`, and `deployment_url` — exactly what
+  a purger needs. Kept as an alternative to the GitHub Actions workflow;
+  the workflow (§3.5) remains primary because it needs no Coolify-side
+  configuration and fires on the same push event that deploys.
 - `X-Forwarded-Proto` behind Bunny was not verified; `ORIGIN` (§3.4) removes
-  the dependency, so confirm at gate 3 rather than assume.
+  the dependency. **Verified 2026-08-18 against adapter-node source**: the
+  built handler calls `parse_origin(env('ORIGIN', undefined))` at startup —
+  a set `ORIGIN` is validated and used verbatim for URL generation, and an
+  invalid value throws at boot (fail-loud). Confirm at gate 3 rather than
+  assume.
 - Turso embedded replicas on the Coolify server are a possible future
   optimization (persistent disk) — out of scope; do not paper over
   availability with silent fallbacks (DEPLOY.md §7).

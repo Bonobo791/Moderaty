@@ -1,18 +1,15 @@
 // Moderaty — YouTube Comment Auto-Moderation Tool
 // Copyright (C) 2026 Andrew Philip Weilbacher
 //
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Licensed under the PolyForm Shield License 1.0.0; you may not use
+// this file except in compliance with the License. You may obtain a
+// copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
 //
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// The software is provided "as is", without warranty or condition of
+// any kind, express or implied. See the License for the specific
+// language governing permissions and limitations under the License.
+// A copy of the License is included in the LICENSE file at the
+// repository root.
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
@@ -116,14 +113,17 @@ export const GET: RequestHandler = async ({ url, request }) => {
 	// Stripe deletion outbox retry: customers owed erasure from account
 	// teardown whose first attempt hit a Stripe outage. Bounded per
 	// invocation (I10); a row is removed only after Stripe confirms, so an
-	// outage never loses the erasure. DRY_RUN: nothing durable.
+	// outage never loses the erasure. Shares the cron deadline: each deletion
+	// may carry SDK network retries, and the sweep must never eat the whole
+	// serverless window before a channel is claimed (codex review). DRY_RUN:
+	// nothing durable.
 	let stripeCustomersDeleted = 0;
 	let stripeDeletionSweepError: string | null = null;
 	if (dryRun) {
 		console.info('dry run: stripe deletion outbox retry skipped');
 	} else {
 		try {
-			stripeCustomersDeleted = await retryStripeCustomerDeletions();
+			stripeCustomersDeleted = await retryStripeCustomerDeletions(10, deadline);
 		} catch (cause) {
 			stripeDeletionSweepError = cause instanceof Error ? cause.message : String(cause);
 			console.error('stripe deletion outbox retry failed:', cause);

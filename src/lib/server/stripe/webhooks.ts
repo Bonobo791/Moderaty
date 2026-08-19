@@ -1,18 +1,15 @@
 // Moderaty — YouTube Comment Auto-Moderation Tool
 // Copyright (C) 2026 Andrew Philip Weilbacher
 //
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Licensed under the PolyForm Shield License 1.0.0; you may not use
+// this file except in compliance with the License. You may obtain a
+// copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
 //
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// The software is provided "as is", without warranty or condition of
+// any kind, express or implied. See the License for the specific
+// language governing permissions and limitations under the License.
+// A copy of the License is included in the LICENSE file at the
+// repository root.
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
@@ -24,7 +21,7 @@
 // The stripe_events row and the ledger mutation land in ONE transaction; a
 // crash rolls both back and Stripe's retry re-runs the whole thing safely.
 
-import { and, eq, or } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import type Stripe from 'stripe';
 
 import { db } from '$lib/server/db';
@@ -85,7 +82,9 @@ function creditsForBundle(bundle: CreditBundle): number {
  */
 export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'already' | 'rejected'> {
 	const session = await getStripe().checkout.sessions.retrieve(sessionId, {
-		expand: ['payment_intent']
+		// latest_charge expanded so a LATE grant can revalidate the charge's
+		// current refund/dispute state (codex review) without a second call.
+		expand: ['payment_intent', 'payment_intent.latest_charge']
 	});
 	if (session.payment_status !== 'paid') return 'rejected';
 	const orgId = session.metadata?.org_id;
@@ -93,6 +92,27 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 	if (!orgId || !bundleId) {
 		console.error(`stripe: checkout session ${sessionId} has no org_id/bundle metadata — cannot credit`);
 		return 'rejected';
+	}
+	// Late-grant revalidation: the success page can fulfill an OLD paid
+	// session at any time — potentially long after the 14-day pending-reversal
+	// sweep dropped a queued reversal. Granting would hand credits back for
+	// money that already left (fully refunded or disputed), so the charge's
+	// CURRENT state is checked before the ledger mutation. The webhook path
+	// (fresh fulfillment) is unaffected: a refunded charge never grants here,
+	// and the drain handles the ordering race for the reverse case.
+	const paymentIntent = typeof session.payment_intent === 'string' ? null : session.payment_intent;
+	const charge = paymentIntent && typeof paymentIntent.latest_charge !== 'string' ? paymentIntent.latest_charge : undefined;
+	if (charge) {
+		const fullyRefunded =
+			typeof charge.amount_refunded === 'number' &&
+			typeof charge.amount === 'number' &&
+			charge.amount_refunded >= charge.amount;
+		if (charge.disputed || fullyRefunded) {
+			console.error(
+				`stripe: checkout session ${sessionId} charge ${charge.id} is ${charge.disputed ? 'disputed' : 'fully refunded'} — late grant refused`
+			);
+			return 'rejected';
+		}
 	}
 	// An unknown bundle id is an operator config bug, not a transient failure:
 	// acknowledge loudly and reject (the credits can never be granted — a
@@ -105,10 +125,10 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 		console.error(`stripe: checkout session ${sessionId} references unknown bundle ${bundleId} — credits cannot be granted`);
 		return 'rejected';
 	}
-	// expand: ['payment_intent'] returns the full object; the type stays a
-	// string-union, so narrow before touching nested fields.
-	const paymentIntent = typeof session.payment_intent === 'string' ? null : session.payment_intent;
-	const chargeId = typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : undefined;
+	// Narrow the expanded object: the type stays a string-union, so touch
+	// nested fields only after the check. chargeId prefers the expanded
+	// object's id (it is the same id either way).
+	const chargeId = typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : charge?.id;
 	const applied = await applyLedgerDelta(db, {
 		orgId,
 		delta: creditsForBundle(bundle),
@@ -142,6 +162,29 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 			}
 			const paymentMethodId = typeof paymentMethod === 'string' ? paymentMethod : paymentMethod.id;
 			await getStripe().customers.update(customer, { invoice_settings: { default_payment_method: paymentMethodId } });
+			// A NEW saved card is a NEW billing instrument: the consent
+			// evidence on file covered the OLD card. Unscheduled off-session
+			// charges must not move to a card the cardholder never authorized —
+			// disable auto top-up whenever the default payment method CHANGES
+			// (codex review). The consent evidence row is kept (the record that
+			// authorization was once given must survive for dispute defense);
+			// re-enabling is a fresh explicit owner action on the Usage page.
+			// Checked BEFORE the PM update below so the comparison sees the old
+			// card.
+			const prior = await db
+				.select({ autoTopupEnabled: organizations.autoTopupEnabled, stripeDefaultPmId: organizations.stripeDefaultPmId })
+				.from(organizations)
+				.where(eq(organizations.id, orgId))
+				.get();
+			if (prior && prior.autoTopupEnabled === 1 && prior.stripeDefaultPmId && prior.stripeDefaultPmId !== paymentMethodId) {
+				await db
+					.update(organizations)
+					.set({ autoTopupEnabled: 0, autoTopupState: 'disabled' })
+					.where(eq(organizations.id, orgId));
+				console.error(
+					`stripe: saved payment method changed for org ${orgId} (${prior.stripeDefaultPmId} -> ${paymentMethodId}) — auto top-up DISABLED, fresh consent required`
+				);
+			}
 			await db
 				.update(organizations)
 				.set({ stripeCustomerId: customer, stripeDefaultPmId: paymentMethodId })
@@ -306,15 +349,6 @@ export async function restoreWonDispute(disputeId: string): Promise<boolean> {
 }
 
 /**
- * The object id a receipt is anchored on (the payload object's own id —
- * cs_..., pi_..., ch_..., du_...).
- */
-function eventObjectId(event: Stripe.Event): string {
-	const object = event.data.object;
-	return typeof object === 'object' && object !== null && 'id' in object ? String(object.id) : String(object);
-}
-
-/**
  * Dispatches a Stripe event to the appropriate handler. The receipt gate
  * short-circuits duplicate deliveries BEFORE the handler; the receipt is
  * committed only after successful handling so Stripe's retry re-runs a
@@ -330,15 +364,18 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
 	// re-running Stripe calls. The receipt is committed only AFTER successful
 	// handling: a thrown handler leaves no receipt, so the route's 500 makes
 	// Stripe redeliver and the handler re-runs (all handlers are idempotent).
+	// Dedupe by EXACT EVENT ID only (codex review): Stripe re-emits events
+	// for the same object — a charge.refunded first arrives partial, then
+	// full — and each distinct delivery must reach its handler. The
+	// (event_type, object_id) pair is deliberately NOT a dedupe anchor:
+	// suppressing every later same-type event for an object would leave a
+	// partial→full refund progression unreversed. Repeated processing is made
+	// idempotent by the ledger's own UNIQUE anchors, so re-running a handler
+	// can never double-apply.
 	const alreadyRecorded = await db
 		.select({ id: stripeEvents.id })
 		.from(stripeEvents)
-		.where(
-			or(
-				eq(stripeEvents.eventId, event.id),
-				and(eq(stripeEvents.eventType, event.type), eq(stripeEvents.objectId, eventObjectId(event)))
-			)
-		)
+		.where(eq(stripeEvents.eventId, event.id))
 		.get();
 	if (alreadyRecorded) return true;
 	let handled: boolean;

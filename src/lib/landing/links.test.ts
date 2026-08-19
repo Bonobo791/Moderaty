@@ -1,23 +1,20 @@
 // Moderaty — YouTube Comment Auto-Moderation Tool
 // Copyright (C) 2026 Andrew Philip Weilbacher
 //
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Licensed under the PolyForm Shield License 1.0.0; you may not use
+// this file except in compliance with the License. You may obtain a
+// copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
 //
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// The software is provided "as is", without warranty or condition of
+// any kind, express or implied. See the License for the specific
+// language governing permissions and limitations under the License.
+// A copy of the License is included in the LICENSE file at the
+// repository root.
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { describe, expect, it } from 'vitest';
-import { AGPL_URL, CONTACT_URL, FEEDBACK_URL, GITHUB_URL, LOGIN_URL } from './links';
+import { POLYFORM_URL, CONTACT_URL, FEEDBACK_URL, GITHUB_URL, LOGIN_URL } from './links';
 
 describe('landing links', () => {
 	it('points at the Moderaty GitHub repository', () => {
@@ -28,12 +25,12 @@ describe('landing links', () => {
 		expect(FEEDBACK_URL).toBe('https://moderaty.featurebase.app/');
 	});
 
-	it('points at the AGPL license text', () => {
-		expect(AGPL_URL).toBe('https://www.gnu.org/licenses/agpl-3.0.html');
+	it('points at the PolyForm Shield license text', () => {
+		expect(POLYFORM_URL).toBe('https://polyformproject.org/licenses/shield/1.0.0');
 	});
 
-	it('points the contact link at the commercial-licensing mailbox', () => {
-		expect(CONTACT_URL).toBe('mailto:contact@marketingprowess.simplelogin.com');
+	it('routes the contact link into the opt-in contact form page', () => {
+		expect(CONTACT_URL).toBe('/contact');
 	});
 
 	it('routes every Connect CTA into the real OAuth login flow', () => {

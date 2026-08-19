@@ -1,18 +1,15 @@
 // Moderaty — YouTube Comment Auto-Moderation Tool
 // Copyright (C) 2026 Andrew Philip Weilbacher
 //
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Licensed under the PolyForm Shield License 1.0.0; you may not use
+// this file except in compliance with the License. You may obtain a
+// copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
 //
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// The software is provided "as is", without warranty or condition of
+// any kind, express or implied. See the License for the specific
+// language governing permissions and limitations under the License.
+// A copy of the License is included in the LICENSE file at the
+// repository root.
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
@@ -34,6 +31,17 @@ export type LegalDoc = {
 };
 
 export const LEGAL_EFFECTIVE_DATE = '17 August 2026';
+// 1.10: LICENSE SWAP — the self-hosted grant changed from AGPL-3.0 to the
+// PolyForm Shield License 1.0.0 (Terms §6.1(a); footer, FAQ, pricing, and
+// the license link updated to match the LICENSE file). Material change:
+// users without a 1.10 consent row are routed back through /consent.
+// 1.9: CONTACT FORM — the Privacy Policy documents the opt-in contact form
+// (name, e-mail, opt-in consent recorded with the exact checkbox sentence;
+// verification e-mail via Mailjet) and names Mailjet as the transactional
+// e-mail provider in the sharing list; DPA Annex III replaces the e-mail
+// provider placeholder; Terms §21 adds the /contact form as a contact
+// channel. Material change: users without a 1.9 consent row are routed
+// back through /consent.
 // 1.8: BILLABLE SCOPE — Terms §6.1(d) corrected to match the product: a
 // credit is consumed only by AI-scored comments on live runs; rule matches
 // and protected handles are never charged (the previous "every comment the
@@ -50,7 +58,7 @@ export const LEGAL_EFFECTIVE_DATE = '17 August 2026';
 // 1.5: Terms §6.1(c) corrected — the lifetime hosted plan has no per-account
 // key flow (hosted scoring runs on the deployment's OPENAI_API_KEY), so the
 // "your own OpenAI key" promise was removed from the lifetime clause.
-export const LEGAL_VERSION = '1.8';
+export const LEGAL_VERSION = '1.10';
 export const LEGAL_KICKER = 'YouTube Comment Moderation Service';
 
 /**

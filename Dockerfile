@@ -2,18 +2,15 @@
 # Moderaty — YouTube Comment Auto-Moderation Tool
 # Copyright (C) 2026 Andrew Philip Weilbacher
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Affero General Public License as published
-# by the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# Licensed under the PolyForm Shield License 1.0.0; you may not use
+# this file except in compliance with the License. You may obtain a
+# copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU Affero General Public License for more details.
-#
-# You should have received a copy of the GNU Affero General Public License
-# along with this program. If not, see <https://www.gnu.org/licenses/>.
+# The software is provided "as is", without warranty or condition of
+# any kind, express or implied. See the License for the specific
+# language governing permissions and limitations under the License.
+# A copy of the License is included in the LICENSE file at the
+# repository root.
 #
 # Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 #
@@ -40,14 +37,29 @@ COPY . .
 # The TURSO_* values arrive ONLY as BuildKit secret mounts scoped to this
 # single RUN (docker:S6472 — never ARG/ENV, so they never appear in build
 # args, image history, or baked layers). Coolify passes them as
-# `--secret id=KEY,env=KEY` when "Use Docker Build Secrets" is enabled (see
-# docs/COOLIFY_BUNNY.md); a build without the secrets fails loudly here.
+# `--secret id=KEY,env=KEY` when "Use Docker Build Secrets" is enabled in the
+# app's Environment Variables settings (see docs/COOLIFY_BUNNY.md §3.4);
+# without it the mounts are empty and the gate's preflight aborts with an
+# actionable `TURSO_DATABASE_URL is not set` error — a build without the
+# secrets always fails loudly here.
 RUN --mount=type=secret,id=TURSO_DATABASE_URL,env=TURSO_DATABASE_URL \
 	--mount=type=secret,id=TURSO_AUTH_TOKEN,env=TURSO_AUTH_TOKEN \
 	node scripts/netlify-migrate.mjs
 # Coolify target builds the standalone node server (adapter-node); Netlify
 # builds leave MODERATY_ADAPTER unset and keep adapter-netlify.
 ENV MODERATY_ADAPTER=node
+# Bake the deployed commit into a static marker BEFORE the build so the
+# bunny-purge workflow can wait for this deploy to serve the pushed commit.
+# SOURCE_COMMIT is Coolify's predefined build-time variable (git is NOT
+# installed in the alpine builder). With "Use Docker Build Secrets" on,
+# Coolify delivers it as `--secret id=SOURCE_COMMIT,env=SOURCE_COMMIT`, so it
+# is mounted here like the TURSO_* credentials; otherwise it arrives as
+# `--build-arg SOURCE_COMMIT` (the ARG below). The script falls back to
+# 'unknown' when absent. Requires Coolify's "Include Source Commit in Build"
+# app setting (docs/COOLIFY_BUNNY.md §3.4).
+ARG SOURCE_COMMIT
+RUN --mount=type=secret,id=SOURCE_COMMIT,env=SOURCE_COMMIT \
+	node scripts/write-commit-marker.mjs
 RUN npm run build
 RUN npm prune --omit=dev
 

@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Moderaty — YouTube Comment Auto-Moderation Tool
+# Copyright (C) 2026 Andrew Philip Weilbacher
+#
+# Licensed under the PolyForm Shield License 1.0.0; you may not use
+# this file except in compliance with the License. You may obtain a
+# copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
+#
+# The software is provided "as is", without warranty or condition of
+# any kind, express or implied. See the License for the specific
+# language governing permissions and limitations under the License.
+# A copy of the License is included in the LICENSE file at the
+# repository root.
+#
+# Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+#
+# Codacy pre-push gate (wired via `git config core.hooksPath scripts/hooks`).
+#
+# Runs Codacy local analysis on the files about to be pushed and blocks pushes
+# that introduce error-level (critical/major) findings. Escape hatches:
+#   git push --no-verify        (standard git override)
+#   CODACY_GATE_OFF=1 git push  (environment override)
+set -uo pipefail
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[[ -n "$ROOT" ]] || exit 0
+[[ "${CODACY_GATE_OFF:-0}" != "1" ]] || exit 0
+
+# Only files that could plausibly carry static-analysis findings.
+CODE_RE='\.(ts|tsx|js|mjs|cjs|jsx|astro|css|py|rb|go|java|php|sh|vue|svelte)$'
+SKIP_RE='^(node_modules/|dist/|dist-server/|\.svelte-kit/|\.codacy/)'
+
+declare -A FILES
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [[ -n "$local_sha" && "$local_sha" != "0000000000000000000000000000000000000000" ]] || continue
+  if [[ "$remote_sha" == "0000000000000000000000000000000000000000" ]]; then
+    # New branch: diff against origin/<branch> if known locally, else last commit.
+    remote_branch="${remote_ref#refs/heads/}"
+    if git rev-parse --verify -q "refs/remotes/origin/$remote_branch" >/dev/null 2>&1; then
+      base="refs/remotes/origin/$remote_branch"
+    else
+      base="$local_sha^"
+    fi
+  else
+    base="$remote_sha"
+  fi
+  while IFS= read -r f; do
+    [[ -n "$f" ]] && FILES["$f"]=1
+  done < <(git diff --name-only --diff-filter=ACMR "$base" "$local_sha" 2>/dev/null || true)
+done
+
+[[ ${#FILES[@]} -gt 0 ]] || exit 0
+
+CHANGED=()
+for f in "${!FILES[@]}"; do
+  [[ "$f" =~ $CODE_RE ]] || continue
+  [[ "$f" =~ $SKIP_RE ]] && continue
+  CHANGED+=("$f")
+done
+[[ ${#CHANGED[@]} -gt 0 ]] || exit 0
+
+echo "[codacy] analyzing ${#CHANGED[@]} changed file(s) ..."
+node "$ROOT/scripts/codacy/pre-push-gate.mjs" "$ROOT" "${CHANGED[@]}"
+status=$?
+if [[ $status -ne 0 ]]; then
+  echo "[codacy] push blocked by Codacy gate (fix findings, or 'git push --no-verify' to override)" >&2
+fi
+exit $status

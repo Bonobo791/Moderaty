@@ -1,18 +1,15 @@
 // Moderaty — YouTube Comment Auto-Moderation Tool
 // Copyright (C) 2026 Andrew Philip Weilbacher
 //
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Licensed under the PolyForm Shield License 1.0.0; you may not use
+// this file except in compliance with the License. You may obtain a
+// copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
 //
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// The software is provided "as is", without warranty or condition of
+// any kind, express or implied. See the License for the specific
+// language governing permissions and limitations under the License.
+// A copy of the License is included in the LICENSE file at the
+// repository root.
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
@@ -192,6 +189,73 @@ async function expectAllTablesEmpty() {
 		errorSpy.mockRestore();
 	});
 
+test('permanently failing deletion rows rotate behind newer work — never starve later obligations', async () => {
+	// The outbox always selected the OLDEST ten rows: ten permanently failing
+	// rows (e.g. an object from the wrong Stripe mode after a credential
+	// change) would occupy the whole bounded batch forever and every later
+	// account-deletion obligation would never be attempted (codex review).
+	const now = Date.now();
+	for (let i = 1; i <= 10; i++) {
+		await testDb().db.insert(stripeDeletionOutbox).values({
+			customerId: `cus_fail_${i}`,
+			createdAt: new Date(now - (11 - i) * 1000).toISOString()
+		});
+	}
+	await testDb().db.insert(stripeDeletionOutbox).values({ customerId: 'cus_new_1', createdAt: new Date(now).toISOString() });
+	await testDb().db.insert(stripeDeletionOutbox).values({ customerId: 'cus_new_2', createdAt: new Date(now + 1000).toISOString() });
+
+	const attempted: string[] = [];
+	mocks.customersDel.mockImplementation(async (id: string) => {
+		attempted.push(id);
+		if (id.startsWith('cus_fail_')) throw new Error('stripe: no such customer (wrong mode)');
+		return { id, deleted: true };
+	});
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		await retryStripeCustomerDeletions(10);
+		await retryStripeCustomerDeletions(10);
+
+		// The two NEVER-attempted newer obligations were reached on the second
+		// run — the failing batch rotated behind them.
+		expect(attempted).toContain('cus_new_1');
+		expect(attempted).toContain('cus_new_2');
+	} finally {
+		errorSpy.mockRestore();
+	}
+});
+
+test('a recently-retried failing row waits out the backoff before its next attempt', async () => {
+	// Backoff: a row retried one minute ago is not hammered again this run —
+	// the bounded batch stays available for rows that are actually due.
+	await testDb().db.insert(stripeDeletionOutbox).values({
+		customerId: 'cus_warm',
+		attempts: 1,
+		lastAttemptAt: new Date(Date.now() - 60 * 1000).toISOString()
+	});
+	await testDb().db.insert(stripeDeletionOutbox).values({ customerId: 'cus_due', createdAt: new Date(Date.now() - 5000).toISOString() });
+	mocks.customersDel.mockResolvedValue({ id: 'x', deleted: true });
+	mocks.customersDel.mockClear();
+
+	const deleted = await retryStripeCustomerDeletions(10);
+
+	expect(deleted).toBe(1); // only the due row
+	expect(mocks.customersDel).toHaveBeenCalledWith('cus_due');
+	expect(mocks.customersDel).not.toHaveBeenCalledWith('cus_warm');
+});
+
+test('the deletion outbox retry respects a shared cron deadline', async () => {
+	// The cron budget is shared with moderation: ten sequential Stripe
+	// deletions with SDK retries can eat the whole serverless window before a
+	// channel is even claimed (codex review).
+	await testDb().db.insert(stripeDeletionOutbox).values({ customerId: 'cus_1' });
+	mocks.customersDel.mockClear();
+
+	const deleted = await retryStripeCustomerDeletions(10, Date.now() - 1000);
+
+	expect(deleted).toBe(0);
+	expect(mocks.customersDel).not.toHaveBeenCalled();
+});
+
 test('a failed Stripe customer deletion is persisted to the outbox for cron retry', async () => {
 	// "Immediate and permanent" deletion must not lose the erasure to a
 	// transient Stripe outage: the outbox row carries the obligation and the
@@ -240,6 +304,29 @@ test('deleteUserRecords anonymizes the Stripe customer of a surviving team org w
 	expect(mocks.customersDel).not.toHaveBeenCalledWith('cus_shared');
 });
 
+test('deleteUserRecords scrubs the Stripe email even when the departing user was NOT the last owner (no promotion)', async () => {
+	// The checkout flow lets ANY owner create the team's Stripe customer —
+	// "last owner leaves" (promotion) is an unreliable proxy for whose PII the
+	// customer holds. A departing owner whose co-owner stays must still have
+	// their e-mail scrubbed from the surviving org's customer (codex review).
+	const userId = await seedUser('departing');
+	const coOwner = await seedBareUser('staying');
+	await testDb().db.insert(organizations).values({ id: 'org-shared', name: 'Shared', stripeCustomerId: 'cus_shared', stripeDefaultPmId: 'pm_shared' });
+	await testDb().db.insert(memberships).values({ userId, orgId: 'org-shared', role: 'owner' });
+	await testDb().db.insert(memberships).values({ userId: coOwner, orgId: 'org-shared', role: 'owner' });
+	// This file has no per-test mock reset — clear so the assertion is local.
+	mocks.customersUpdate.mockClear();
+	mocks.customersDel.mockClear();
+	mocks.customersUpdate.mockResolvedValue({ id: 'cus_shared' });
+
+	await deleteUserRecords(userId);
+
+	expect(mocks.customersUpdate).toHaveBeenCalledWith('cus_shared', expect.objectContaining({ email: '' }));
+	// The org (with another owner) survives; its customer is never deleted.
+	const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-shared')).get();
+	expect(org?.stripeCustomerId).toBe('cus_shared');
+	expect(mocks.customersDel).not.toHaveBeenCalledWith('cus_shared');
+});
 test('deleteUserRecords erases the dissolved orgs\' credit ledger rows', async () => {
 	const userId = await seedUser('gone');
 	// The org bought credits (purchase + consumption rows) — the ledger is

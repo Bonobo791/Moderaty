@@ -1,18 +1,15 @@
 // Moderaty — YouTube Comment Auto-Moderation Tool
 // Copyright (C) 2026 Andrew Philip Weilbacher
 //
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Licensed under the PolyForm Shield License 1.0.0; you may not use
+// this file except in compliance with the License. You may obtain a
+// copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
 //
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// The software is provided "as is", without warranty or condition of
+// any kind, express or implied. See the License for the specific
+// language governing permissions and limitations under the License.
+// A copy of the License is included in the LICENSE file at the
+// repository root.
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
@@ -81,6 +78,21 @@ describe('Dockerfile (docker:S6472 — no secrets via ARG/ENV)', () => {
 	it('keeps the BuildKit syntax directive (required for secret mounts)', () => {
 		expect(dockerfile).toMatch(/^# syntax=docker\/dockerfile:1$/m);
 	});
+
+	it('feeds the commit marker from Coolify\'s SOURCE_COMMIT variable (secret mount + ARG fallback)', () => {
+		// Coolify's predefined build-time commit variable is SOURCE_COMMIT
+		// (never SOURCE_COMMIT_SHA); with "Use Docker Build Secrets" on it
+		// arrives as --secret id=SOURCE_COMMIT,env=SOURCE_COMMIT, so the
+		// marker RUN must mount it exactly like the TURSO_* credentials.
+		expect(dockerfile).toMatch(
+			/--mount=type=secret,id=SOURCE_COMMIT,env=SOURCE_COMMIT[\s\S]*?node scripts\/write-commit-marker\.mjs/
+		);
+		expect(dockerfile).toMatch(/^ARG SOURCE_COMMIT$/m);
+	});
+
+	it('declares no SOURCE_COMMIT_SHA ARG/ENV (the name Coolify never defined)', () => {
+		expect(dockerfile).not.toMatch(/SOURCE_COMMIT_SHA/);
+	});
 });
 
 describe('Coolify runbook (operator setting that makes the secret mounts work)', () => {
@@ -90,5 +102,13 @@ describe('Coolify runbook (operator setting that makes the secret mounts work)',
 
 	it('marks the TURSO_* build variables as secret mounts, not plain build args', () => {
 		expect(runbook).toMatch(/TURSO_AUTH_TOKEN[\s\S]*?Use Docker Build Secrets/s);
+	});
+
+	it('pins the toggle location (Environment Variables settings, not the Advanced menu)', () => {
+		expect(runbook).toMatch(/Use Docker Build Secrets[\s\S]*?Environment Variables/);
+	});
+
+	it('documents the Build-Variable-ON requirement for the TURSO_* variables', () => {
+		expect(runbook).toMatch(/Build Variable ON for `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`/);
 	});
 });

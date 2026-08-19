@@ -1,18 +1,15 @@
 // Moderaty — YouTube Comment Auto-Moderation Tool
 // Copyright (C) 2026 Andrew Philip Weilbacher
 //
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Licensed under the PolyForm Shield License 1.0.0; you may not use
+// this file except in compliance with the License. You may obtain a
+// copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
 //
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// The software is provided "as is", without warranty or condition of
+// any kind, express or implied. See the License for the specific
+// language governing permissions and limitations under the License.
+// A copy of the License is included in the LICENSE file at the
+// repository root.
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
@@ -85,6 +82,42 @@ describe('fulfillCheckout', () => {
 		expect(org?.stripeDefaultPmId).toBe('pm_1');
 	});
 
+	test('refuses a LATE grant when the charge was since fully refunded or disputed', async () => {
+		// The success page can call fulfillCheckout for an old paid session at
+		// ANY time — long after the 14-day pending-reversal sweep dropped a
+		// queued reversal. Granting then would hand credits back for money that
+		// already left; the charge's CURRENT state must be revalidated before
+		// any late grant (codex review).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+
+		// Fully refunded charge: reject, never grant.
+		mocks.sessionsRetrieve.mockResolvedValue(
+			session({
+				payment_intent: { id: 'pi_1', latest_charge: { id: 'ch_1', disputed: false, amount: 50000, amount_refunded: 50000 }, payment_method: 'pm_1' }
+			})
+		);
+		expect(await fulfillCheckout('cs_1')).toBe('rejected');
+		expect(await getCredits('org-1')).toBe(0);
+
+		// Disputed charge: reject, never grant.
+		mocks.sessionsRetrieve.mockResolvedValue(
+			session({
+				payment_intent: { id: 'pi_1', latest_charge: { id: 'ch_1', disputed: true, amount: 50000, amount_refunded: 0 }, payment_method: 'pm_1' }
+			})
+		);
+		expect(await fulfillCheckout('cs_1')).toBe('rejected');
+		expect(await getCredits('org-1')).toBe(0);
+
+		// A healthy charge still grants (the common case is unchanged).
+		mocks.sessionsRetrieve.mockResolvedValue(
+			session({
+				payment_intent: { id: 'pi_1', latest_charge: { id: 'ch_1', disputed: false, amount: 50000, amount_refunded: 0 }, payment_method: 'pm_1' }
+			})
+		);
+		expect(await fulfillCheckout('cs_1')).toBe('granted');
+		expect(await getCredits('org-1')).toBe(500);
+	});
+
 	test('is idempotent: a duplicate delivery never double-grants', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		mocks.sessionsRetrieve.mockResolvedValue(session());
@@ -92,6 +125,54 @@ describe('fulfillCheckout', () => {
 		expect(await fulfillCheckout('cs_123')).toBe('granted');
 		expect(await fulfillCheckout('cs_123')).toBe('already');
 		expect(await getCredits('org-1')).toBe(500);
+	});
+
+	test('a NEW saved payment method disables auto top-up — the old consent does not cover the new card', async () => {
+		// In a team org with auto top-up already enabled, another owner can buy
+		// a manual bundle with a DIFFERENT card. The new cardholder consented
+		// only to the one manual Checkout payment — the next low-balance sweep
+		// must not charge their card off-session on the strength of the
+		// previous owner's consent (codex review).
+		await testDb().db.insert(organizations).values({
+			id: 'org-1',
+			name: 'Org',
+			autoTopupEnabled: 1,
+			autoTopupState: 'idle',
+			autoTopupThreshold: 100,
+			stripeCustomerId: 'cus_1',
+			stripeDefaultPmId: 'pm_old'
+		});
+		mocks.sessionsRetrieve.mockResolvedValue(
+			session({ customer: 'cus_1', payment_intent: { id: 'pi_1', latest_charge: { id: 'ch_1', disputed: false, amount: 50000, amount_refunded: 0 }, payment_method: { id: 'pm_new' } } })
+		);
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+		expect(await fulfillCheckout('cs_1')).toBe('granted');
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeDefaultPmId).toBe('pm_new');
+		expect(org?.autoTopupEnabled).toBe(0); // disabled — fresh consent required
+		expect(org?.autoTopupState).toBe('disabled');
+		errorSpy.mockRestore();
+	});
+
+	test('re-using the SAME saved card keeps auto top-up enabled', async () => {
+		// The consent evidence covers the stored card; a purchase with that
+		// same card changes nothing and must not disable anything.
+		await testDb().db.insert(organizations).values({
+			id: 'org-1',
+			name: 'Org',
+			autoTopupEnabled: 1,
+			autoTopupState: 'idle',
+			autoTopupThreshold: 100,
+			stripeCustomerId: 'cus_1',
+			stripeDefaultPmId: 'pm_1'
+		});
+		mocks.sessionsRetrieve.mockResolvedValue(session({ customer: 'cus_1' }));
+
+		expect(await fulfillCheckout('cs_1')).toBe('granted');
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.autoTopupEnabled).toBe(1);
+		expect(org?.autoTopupState).toBe('idle');
 	});
 
 	test('never credits an unpaid session', async () => {
@@ -319,15 +400,64 @@ describe('handleStripeEvent', () => {
 		expect(receipt?.eventId).toBe('evt_1');
 	});
 
-	test('a NEW event id for the SAME object still dedupes (two-Event-objects case)', async () => {
+	test('a NEW event id for the SAME object re-runs the handler IDEMPOTENTLY (no double grant)', async () => {
+		// Stripe can re-emit the same logical event with a new event id. The
+		// receipt gate dedupes by EVENT ID only, so the second Event-object
+		// reaches the handler — which is safe because the ledger's
+		// UNIQUE(org, ref_type, ref_id) anchor makes fulfillment idempotent
+		// (codex review: the old (type, object) gate suppressed LATER events
+		// for the same object, which broke the partial→full refund path).
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		mocks.sessionsRetrieve.mockResolvedValue(session());
 
 		await handleStripeEvent(event('checkout.session.completed', 'evt_1', session()) as never);
 		await handleStripeEvent(event('checkout.session.completed', 'evt_2', session()) as never);
+		expect(await getCredits('org-1')).toBe(500); // never double-granted
+		expect(mocks.sessionsRetrieve).toHaveBeenCalledTimes(2); // both delivered
+	});
+
+	test('a PARTIAL refund followed by a FULL refund for the same charge reverses the credits', async () => {
+		// Stripe emits charge.refunded for partial refunds too, and each is a
+		// DISTINCT event id. The old (event_type, object_id) dedupe suppressed
+		// the later full-refund event, leaving the grant unreversed forever.
+		// Dedupe by event id only, and reverseCharge itself compares amounts:
+		// partial keeps the credits, the later full refund takes them (codex).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+		mocks.chargesRetrieve.mockImplementation((id: string) => Promise.resolve({ id, payment_intent: 'pi_1', amount: 50000, amount_refunded: 20000 }));
+
+		// First event: a PARTIAL refund — v1 keeps the credits.
+		expect(await handleStripeEvent(event('charge.refunded', 'evt_partial', { id: 'ch_1' }) as never)).toBe(true);
 		expect(await getCredits('org-1')).toBe(500);
-		// The (event_type, object_id) anchor gates the second Event-object too.
-		expect(mocks.sessionsRetrieve).toHaveBeenCalledTimes(1);
+
+		// Second event: the refund now covers the FULL amount — credits go.
+		mocks.chargesRetrieve.mockImplementation((id: string) => Promise.resolve({ id, payment_intent: 'pi_1', amount: 50000, amount_refunded: 50000 }));
+		expect(await handleStripeEvent(event('charge.refunded', 'evt_full', { id: 'ch_1' }) as never)).toBe(true);
+		expect(await getCredits('org-1')).toBe(0);
+	});
+
+	test('a dispute AND a later full refund both queue before the grant — both drain', async () => {
+		// Both obligations can precede the delayed grant. The old charge-only
+		// UNIQUE on stripe_pending_reversals dropped whichever arrived second;
+		// with UNIQUE(charge_id, reason) both survive, and the drain applies
+		// each on its own ledger anchor (codex review).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1', amount: 50000, amount_refunded: 50000 });
+		mocks.disputesRetrieve.mockResolvedValue({ id: 'du_1', charge: 'ch_1' });
+
+		expect(await handleStripeEvent(event('charge.dispute.created', 'evt_dispute', { id: 'du_1' }) as never)).toBe(true);
+		expect(await handleStripeEvent(event('charge.refunded', 'evt_refund', { id: 'ch_1' }) as never)).toBe(true);
+
+		const pending = await testDb().db.select().from(stripePendingReversals).where(eq(stripePendingReversals.chargeId, 'ch_1')).all();
+		expect(pending.map((row) => row.reason).sort()).toEqual(['dispute', 'refund']);
+
+		// The grant lands: both obligations drain — 500 in, 1000 out (net -500;
+		// a negative balance is the documented v1 consequence of reversing
+		// credits the customer already spent).
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_1', payment_intent: { id: 'pi_1', latest_charge: 'ch_1', payment_method: 'pm_1' } }));
+		expect(await handleStripeEvent(event('checkout.session.completed', 'evt_grant', session({ id: 'cs_1', payment_intent: { id: 'pi_1', latest_charge: 'ch_1', payment_method: 'pm_1' } })) as never)).toBe(true);
+		expect(await getCredits('org-1')).toBe(-500);
+		expect(await testDb().db.select().from(stripePendingReversals).where(eq(stripePendingReversals.chargeId, 'ch_1')).all()).toEqual([]);
 	});
 
 	test('a refund arriving BEFORE the grant is applied when the grant lands', async () => {

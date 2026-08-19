@@ -2,18 +2,15 @@
 # Moderaty — YouTube Comment Auto-Moderation Tool
 # Copyright (C) 2026 Andrew Philip Weilbacher
 
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published
-by the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
+Licensed under the PolyForm Shield License 1.0.0; you may not use
+this file except in compliance with the License. You may obtain a
+copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
 
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License
-along with this program. If not, see <https://www.gnu.org/licenses/>.
+The software is provided "as is", without warranty or condition of
+any kind, express or implied. See the License for the specific
+language governing permissions and limitations under the License.
+A copy of the License is included in the LICENSE file at the
+repository root.
 
 Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 -->
@@ -70,6 +67,12 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				<td>Up to 2 years after the last interaction</td>
 			</tr>
 			<tr>
+				<td>Contact form: name, e-mail, and your opt-in consent (the exact checkbox sentence, timestamp, IP, user agent)</td>
+				<td>Respond to your contact request; verify your e-mail address before we reply</td>
+				<td>Consent (Art. 7, I) for the opt-in; legitimate interest (Art. 7, IX) to respond</td>
+				<td>Until the request is resolved; up to 2 years after the last interaction</td>
+			</tr>
+			<tr>
 				<td>Security and abuse prevention: access patterns, error logs</td>
 				<td>Protect the Service, detect and prevent fraud and attacks</td>
 				<td>Legitimate interest (Art. 7, IX) — balancing test documented; you may object (Section 10)</td>
@@ -100,7 +103,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <h2 id="s5">5. Sharing and Recipients</h2>
 <p>We share personal data only with:</p>
 <ul>
-	<li>(a) Infrastructure and service providers acting as our sub-processors or processors under contract, each limited to what it needs to perform its function: Netlify, Inc. (application hosting and delivery — United States); Turso / ChiselStrike, Inc. (database hosting — United States, with edge replicas only in regions we disclose and record); OpenAI, LLC (transient comment classification only, no retention, no model training — United States); Stripe, Inc. (payment processing — United States); and [e-mail delivery provider] (transactional e-mail);</li>
+	<li>(a) Infrastructure and service providers acting as our sub-processors or processors under contract, each limited to what it needs to perform its function: Netlify, Inc. (application hosting and delivery — United States); Turso / ChiselStrike, Inc. (database hosting — United States, with edge replicas only in regions we disclose and record); OpenAI, LLC (transient comment classification only, no retention, no model training — United States); Stripe, Inc. (payment processing — United States); and Mailjet, Inc. (transactional e-mail — contact-form verification and service notices);</li>
 	<li>(b) Google/YouTube, as the platform through which the Service operates and as an independent controller of its own processing;</li>
 	<li>(c) Public authorities, courts, or regulators, only when required by law, court order, or to protect our rights, users, or third parties, and always limited to what is legally required; and</li>
 	<li>(d) A successor entity in the event of a merger, acquisition, or sale of the Service, subject to this Policy and with prior notice to you.</li>

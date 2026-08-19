@@ -1,18 +1,15 @@
 // Moderaty — YouTube Comment Auto-Moderation Tool
 // Copyright (C) 2026 Andrew Philip Weilbacher
 //
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Licensed under the PolyForm Shield License 1.0.0; you may not use
+// this file except in compliance with the License. You may obtain a
+// copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
 //
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// The software is provided "as is", without warranty or condition of
+// any kind, express or implied. See the License for the specific
+// language governing permissions and limitations under the License.
+// A copy of the License is included in the LICENSE file at the
+// repository root.
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
@@ -22,7 +19,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { creditTransactions, organizations } from '$lib/server/db/schema';
 import { getCredits } from '$lib/server/billing/ledger';
-import { handleAutoTopupFailure, maybeTriggerAutoTopUp, recordAutoTopupFailure, stripeErrorCode, sweepAutoTopUp } from './autotopup';
+import { grantAutoTopupCredits, handleAutoTopupFailure, maybeTriggerAutoTopUp, recordAutoTopupFailure, stripeErrorCode, sweepAutoTopUp } from './autotopup';
 
 const mocks = vi.hoisted(() => ({
 	paymentIntentsCreate: vi.fn(),
@@ -140,6 +137,47 @@ describe('maybeTriggerAutoTopUp', () => {
 			createdAt: new Date().toISOString()
 		});
 		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+	});
+
+	test('re-checks eligibility in the atomic claim: a manual grant above threshold mid-flight never charges', async () => {
+		// The eligibility read (balance 50 < threshold 100) happens BEFORE the
+		// price lookup. If a manual Checkout grant lands while prices.retrieve
+		// is awaiting, the claim must NOT go through — the org no longer needs
+		// the top-up (codex review).
+		await seedOrg();
+		mocks.pricesRetrieve.mockImplementation(async () => {
+			await testDb().db
+				.update(organizations)
+				.set({ creditsRemaining: 5000 })
+				.where(eq(organizations.id, 'org-1'));
+			return { id: 'price_100', unit_amount: 500, active: true, currency: 'usd', type: 'one_time' };
+		});
+
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+		expect((await orgRow()).autoTopupState).toBe('idle'); // claim never taken
+	});
+
+	test('re-checks eligibility in the atomic claim: disabling auto top-up mid-flight never charges', async () => {
+		// The owner turns auto top-up off while the price lookup is pending —
+		// the claim must not charge a card the owner just disabled (codex
+		// review).
+		await seedOrg();
+		mocks.pricesRetrieve.mockImplementation(async () => {
+			// The UI's disable clears ONLY the flag (state stays 'idle' — the
+			// claim's existing WHERE state='idle' check alone cannot catch it).
+			await testDb().db
+				.update(organizations)
+				.set({ autoTopupEnabled: 0 })
+				.where(eq(organizations.id, 'org-1'));
+			return { id: 'price_100', unit_amount: 500, active: true, currency: 'usd', type: 'one_time' };
+		});
+
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+		// The disable won the race; the claim never overwrote it.
+		expect((await orgRow()).autoTopupEnabled).toBe(0);
+		expect((await orgRow()).autoTopupState).toBe('idle');
 	});
 
 	test('loses the atomic claim race without charging', async () => {
@@ -595,5 +633,82 @@ describe('sweepAutoTopUp', () => {
 		expect(await getCredits('org-1')).toBe(150);
 		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
 		expect(triggered).toBe(0);
+	});
+});
+
+
+describe('grantAutoTopupCredits', () => {
+	/** A succeeded auto-topup PI with a creation time near the claim. */
+	function succeededPi(overrides: Partial<Parameters<typeof grantAutoTopupCredits>[1]> = {}): Parameters<typeof grantAutoTopupCredits>[1] {
+		return {
+			id: 'pi_1',
+			status: 'succeeded',
+			latest_charge: 'ch_1',
+			created: Math.floor(Date.now() / 1000),
+			metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_100' },
+			...overrides
+		};
+	}
+
+	test('a duplicate delivery releases the successful claim even when the grant already exists', async () => {
+		// First delivery: the ledger grant committed, but the org-state update
+		// crashed AFTER the commit. Stripe retries the delivery; applyLedgerDelta
+		// returns false (already granted) and — without the release — the claim
+		// would stay in_flight until the 72h stale-claim sweep, blocking auto
+		// top-up for three days (codex review).
+		await seedOrg({
+			autoTopupState: 'in_flight',
+			autoTopupFailures: 1,
+			creditsRemaining: 150,
+			// The claim was stamped at charge time — correlates with pi.created.
+			autoTopupLastAttemptAt: new Date().toISOString()
+		});
+		// The grant already exists (first delivery committed it).
+		await testDb().db.insert(creditTransactions).values({
+			orgId: 'org-1',
+			delta: 100,
+			reason: 'auto_topup',
+			refType: 'payment_intent',
+			refId: 'pi_1',
+			paymentIntentId: 'pi_1',
+			chargeId: 'ch_1',
+			balanceAfter: 150
+		});
+
+		const applied = await grantAutoTopupCredits('org-1', succeededPi());
+
+		expect(applied).toBe(false); // duplicate — no double grant
+		const org = await orgRow();
+		expect(org.autoTopupState).toBe('idle'); // claim released for the next sweep
+		expect(org.autoTopupFailures).toBe(0);
+		expect(org.creditsRemaining).toBe(150); // credits untouched
+	});
+
+	test('a late duplicate of an OLD PI never clears a NEWER in-flight claim', async () => {
+		// Stripe retries for up to 3 days; a duplicate delivery of a previous
+		// PI can therefore arrive while a NEWER charge's claim is in flight.
+		// The release must be anchored to the claim it belongs to (drift
+		// guard) — clearing the newer claim would let two charges race.
+		await seedOrg({ autoTopupState: 'in_flight', autoTopupFailures: 1 });
+		await testDb().db.insert(creditTransactions).values({
+			orgId: 'org-1',
+			delta: 100,
+			reason: 'auto_topup',
+			refType: 'payment_intent',
+			refId: 'pi_old',
+			paymentIntentId: 'pi_old',
+			chargeId: 'ch_old',
+			balanceAfter: 150
+		});
+		// The OLD PI was created 2 days ago; the current claim is fresh.
+		const oldPi = succeededPi({ id: 'pi_old', latest_charge: 'ch_old', created: Math.floor((Date.now() - 2 * 24 * 60 * 60 * 1000) / 1000) });
+
+		const applied = await grantAutoTopupCredits('org-1', oldPi);
+
+		expect(applied).toBe(false);
+		// The NEWER claim stays in_flight — untouched by the stale duplicate.
+		const org = await orgRow();
+		expect(org.autoTopupState).toBe('in_flight');
+		expect(org.autoTopupFailures).toBe(1);
 	});
 });

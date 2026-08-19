@@ -2,24 +2,21 @@
 # Moderaty — YouTube Comment Auto-Moderation Tool
 # Copyright (C) 2026 Andrew Philip Weilbacher
 
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published
-by the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
+Licensed under the PolyForm Shield License 1.0.0; you may not use
+this file except in compliance with the License. You may obtain a
+copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
 
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License
-along with this program. If not, see <https://www.gnu.org/licenses/>.
+The software is provided "as is", without warranty or condition of
+any kind, express or implied. See the License for the specific
+language governing permissions and limitations under the License.
+A copy of the License is included in the LICENSE file at the
+repository root.
 
 Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 -->
 
 <script lang="ts">
-	import { GITHUB_URL, AGPL_URL, CONTACT_URL } from '$lib/landing/links';
+	import { GITHUB_URL, POLYFORM_URL, CONTACT_URL } from '$lib/landing/links';
 	import { LEGAL_DOCS } from '$lib/landing/legal';
 
 	// Illustrative "quiet night": 24 hourly bars, comments handled while the
@@ -61,7 +58,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			</p>
 			<nav class="footer-links" aria-label="Footer">
 				<a href={GITHUB_URL} target="_blank" rel="noreferrer" class="footer-link">GitHub</a>
-				<a href={AGPL_URL} target="_blank" rel="noreferrer" class="footer-link">AGPL-3.0 License</a>
+				<a href={POLYFORM_URL} target="_blank" rel="noreferrer" class="footer-link">PolyForm Shield License</a>
 				<a href="/pricing" class="footer-link">Pricing</a>
 				<a href="/#faq" class="footer-link">FAQ</a>
 				{#each LEGAL_DOCS as doc (doc.slug)}

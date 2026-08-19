@@ -1,18 +1,15 @@
 // Moderaty — YouTube Comment Auto-Moderation Tool
 // Copyright (C) 2026 Andrew Philip Weilbacher
 //
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Licensed under the PolyForm Shield License 1.0.0; you may not use
+// this file except in compliance with the License. You may obtain a
+// copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
 //
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// The software is provided "as is", without warranty or condition of
+// any kind, express or implied. See the License for the specific
+// language governing permissions and limitations under the License.
+// A copy of the License is included in the LICENSE file at the
+// repository root.
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
@@ -74,6 +71,9 @@ function runGate(env) {
 			GATE_LOG: gateLog,
 			MODERATY_DRIZZLE_KIT_BIN: fakeDrizzle,
 			MODERATY_VERIFY_BIN: fakeVerify,
+			// Preflight needs database credentials; explicit `env` overrides win.
+			TURSO_DATABASE_URL: 'https://db.example.turso.io',
+			TURSO_AUTH_TOKEN: 'test-token',
 			...env
 		}
 	});
@@ -141,5 +141,47 @@ describe('netlify-migrate', () => {
 		// Covers a regression where verification could be skipped or reordered.
 		await runGate({ CONTEXT: 'production' });
 		expect(logLines()).toEqual(['db:migrate', 'db:verify']);
+	});
+
+	it('blocks the build with an actionable message when TURSO_DATABASE_URL never reached the build', async () => {
+		// Coolify symptom (2026-08-19 prod deploy): "Use Docker Build Secrets"
+		// off => the secret mounts are empty => drizzle.config.ts throws a bare
+		// "TURSO_DATABASE_URL is required". The gate must preflight with a
+		// message that names the operator fix, and must NOT run any command.
+		try {
+			await runGate({ CONTEXT: 'production', TURSO_DATABASE_URL: '', TURSO_AUTH_TOKEN: '' });
+			expect.unreachable('a build without TURSO_DATABASE_URL must be blocked');
+		} catch (error) {
+			expect(error.code).toBe(1);
+			expect(logLines()).toEqual([]);
+			const out = `${error.stdout ?? ''}${error.stderr ?? ''}`;
+			expect(out).toContain('TURSO_DATABASE_URL is not set');
+			expect(out).toContain('Use Docker Build Secrets');
+			expect(out).toContain('Environment Variables');
+			expect(out).toContain('blocking the deploy');
+		}
+	});
+
+	it('blocks the build when TURSO_AUTH_TOKEN is missing for a remote database', async () => {
+		try {
+			await runGate({ CONTEXT: 'production', TURSO_AUTH_TOKEN: '' });
+			expect.unreachable('a remote database without a token must be blocked');
+		} catch (error) {
+			expect(error.code).toBe(1);
+			expect(logLines()).toEqual([]);
+			expect(`${error.stdout ?? ''}${error.stderr ?? ''}`).toContain('TURSO_AUTH_TOKEN is not set');
+		}
+	});
+
+	it('allows file: database URLs without a token (local development)', async () => {
+		const { stdout } = await runGate({ CONTEXT: 'production', TURSO_DATABASE_URL: 'file:./local.db', TURSO_AUTH_TOKEN: '' });
+		expect(logLines()).toEqual(['db:migrate', 'db:verify']);
+		expect(stdout).toContain('migrations applied and verified');
+	});
+
+	it('never applies the env preflight to deploy-preview builds (they skip SQL entirely)', async () => {
+		const { stdout } = await runGate({ CONTEXT: 'deploy-preview', TURSO_DATABASE_URL: '', TURSO_AUTH_TOKEN: '' });
+		expect(stdout).toContain('skipping migrations');
+		expect(logLines()).toEqual([]);
 	});
 });

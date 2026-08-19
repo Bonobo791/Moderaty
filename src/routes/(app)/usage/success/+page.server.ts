@@ -1,18 +1,15 @@
 // Moderaty — YouTube Comment Auto-Moderation Tool
 // Copyright (C) 2026 Andrew Philip Weilbacher
 //
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Licensed under the PolyForm Shield License 1.0.0; you may not use
+// this file except in compliance with the License. You may obtain a
+// copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
 //
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// The software is provided "as is", without warranty or condition of
+// any kind, express or implied. See the License for the specific
+// language governing permissions and limitations under the License.
+// A copy of the License is included in the LICENSE file at the
+// repository root.
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
@@ -56,12 +53,29 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 			const result = await fulfillCheckout(sessionId);
 			granted = result === 'granted' || result === 'already';
 		}
-	} catch {
-		// The webhook remains the source of truth; log loudly and show pending.
-		// The session id is query-controlled and the provider error can carry
-		// payment details — the log stays restricted: a fixed failure category
-		// and a short hash of the id for correlation, never the raw error
-		// text (coderabbit).
+	} catch (cause) {
+		// A session id that does not EXIST is a definitive no-purchase, not a
+		// pending payment: Stripe answers an StripeInvalidRequestError with
+		// code resource_missing for unknown ids, and the webhook will never
+		// fulfill it either — the page must show the failed/no-purchase state
+		// instead of claiming "Payment received" for a session that never was
+		// (codex review).
+		const isMissingSession =
+			cause !== null &&
+			typeof cause === 'object' &&
+			(cause as { type?: unknown }).type === 'StripeInvalidRequestError' &&
+			(cause as { code?: unknown }).code === 'resource_missing';
+		if (isMissingSession) {
+			console.error(
+				`usage/success: checkout session ${createHash('sha256').update(sessionId).digest('hex').slice(0, 12)}… does not exist — no purchase to show`
+			);
+			return { maintenance: false, user, sessionId, granted: false, pending: false, failed: true };
+		}
+		// A TRANSIENT retrieval failure is different: the webhook remains the
+		// source of truth; log loudly and show pending. The session id is
+		// query-controlled and the provider error can carry payment details —
+		// the log stays restricted: a fixed failure category and a short hash
+		// of the id for correlation, never the raw error text (coderabbit).
 		console.error(
 			`usage/success: could not fulfill checkout (session ${createHash('sha256').update(sessionId).digest('hex').slice(0, 12)}…) — see the stripe webhook logs`
 		);

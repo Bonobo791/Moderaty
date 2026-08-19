@@ -2,18 +2,15 @@
 // Moderaty — YouTube Comment Auto-Moderation Tool
 // Copyright (C) 2026 Andrew Philip Weilbacher
 //
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Licensed under the PolyForm Shield License 1.0.0; you may not use
+// this file except in compliance with the License. You may obtain a
+// copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
 //
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// The software is provided "as is", without warranty or condition of
+// any kind, express or implied. See the License for the specific
+// language governing permissions and limitations under the License.
+// A copy of the License is included in the LICENSE file at the
+// repository root.
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 //
@@ -56,6 +53,41 @@ if (context === 'deploy-preview') {
 		'netlify-migrate: deploy-preview — skipping migrations (untrusted PR code must never run SQL against a shared database). Build continues.'
 	);
 	process.exit(0);
+}
+
+// Preflight the database credentials BEFORE spawning anything: drizzle-kit
+// loads drizzle.config.ts, which dies with a bare "TURSO_DATABASE_URL is
+// required" when the variable never reached the build. That is exactly the
+// 2026-08-19 Coolify prod-deploy symptom — "Use Docker Build Secrets" was
+// off, so the Dockerfile's secret mounts (--mount=type=secret,id=KEY,env=KEY)
+// were empty and the env var was unset. Fail with an actionable message
+// instead of a config-file stack trace. Netlify supplies the same variables
+// per deploy context; the Coolify build supplies them ONLY as BuildKit secret
+// mounts (never ARG/ENV, docker:S6472). file: URLs (local development) need
+// no token, mirroring drizzle.config.ts and verify-migrations.mjs.
+const databaseUrl = process.env.TURSO_DATABASE_URL;
+if (!databaseUrl) {
+	console.error(
+		'netlify-migrate: TURSO_DATABASE_URL is not set — the database credentials never reached this build.\n' +
+			'  - Netlify: set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in the site/deploy-context environment.\n' +
+			'  - Coolify Docker build: the Dockerfile reads them ONLY as BuildKit secret mounts. Enable\n' +
+			'    "Use Docker Build Secrets" in the application Environment Variables settings and keep\n' +
+			'    the Build Variable flag ON for TURSO_DATABASE_URL and TURSO_AUTH_TOKEN\n' +
+			'    (docs/COOLIFY_BUNNY.md §3.4). If both are set and it still fails, the Coolify server\n' +
+			'    may lack BuildKit secret support (it then silently falls back to build args) — check\n' +
+			'    "docker build --help | grep secret" on the server.\n' +
+			'  - Local: source .env (node --env-file=.env scripts/netlify-migrate.mjs).' +
+			'\nblocking the deploy — a build without the credentials must never reach drizzle-kit.'
+	);
+	process.exit(1);
+}
+if (!databaseUrl.startsWith('file:') && !process.env.TURSO_AUTH_TOKEN) {
+	console.error(
+		'netlify-migrate: TURSO_AUTH_TOKEN is not set for a remote database — the credentials never reached this build.\n' +
+			'  Configure it the same way as TURSO_DATABASE_URL (see the message above); never bake a token\n' +
+			'  into the image — blocking the deploy.'
+	);
+	process.exit(1);
 }
 
 const steps = [

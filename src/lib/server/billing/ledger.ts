@@ -1,18 +1,15 @@
 // Moderaty — YouTube Comment Auto-Moderation Tool
 // Copyright (C) 2026 Andrew Philip Weilbacher
 //
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Licensed under the PolyForm Shield License 1.0.0; you may not use
+// this file except in compliance with the License. You may obtain a
+// copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
 //
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// The software is provided "as is", without warranty or condition of
+// any kind, express or implied. See the License for the specific
+// language governing permissions and limitations under the License.
+// A copy of the License is included in the LICENSE file at the
+// repository root.
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
@@ -97,13 +94,20 @@ export async function getCredits(orgId: string): Promise<number> {
  * unlimited org (self-hosted, lifetime, fresh signup) into the credit gate
  * and defer every AI-scored comment for a purchase that never happened.
  */
+/** Plans that promise UNLIMITED moderated comments — never metered, even
+ * after a credit purchase (Terms §6.1(c): the lifetime hosted plan). A
+ * lifetime org buying a bundle must not silently convert its unlimited
+ * account into a finite balance that pauses AI scoring (codex review). */
+const UNMETERED_PLANS = new Set(['lifetime']);
+
 export async function orgIsMetered(orgId: string): Promise<boolean> {
 	const row = await db
-		.select({ creditsRemaining: organizations.creditsRemaining })
+		.select({ creditsRemaining: organizations.creditsRemaining, plan: organizations.plan })
 		.from(organizations)
 		.where(eq(organizations.id, orgId))
 		.get();
 	if (!row) throw new Error(`org not found: ${orgId}`);
+	if (UNMETERED_PLANS.has(row.plan)) return false;
 	return row.creditsRemaining !== null;
 }
 
@@ -313,7 +317,16 @@ export async function listCreditTransactions(orgId: string, limit = 50) {
  * guaranteed). charge_id UNIQUE: one reversal per charge, first event wins.
  */
 export async function queuePendingReversal(chargeId: string, reason: 'refund' | 'dispute'): Promise<void> {
-	await db.insert(stripePendingReversals).values({ chargeId, reason }).onConflictDoNothing();
+	// UNIQUE(charge_id, reason) — NOT charge_id alone: a dispute AND a later
+	// full refund can both arrive before the delayed grant, and each
+	// obligation must survive to drain on its own ledger anchor (a won-dispute
+	// restore must not leave credits in place for a charge that was also fully
+	// refunded). The charge-only key silently dropped whichever reason arrived
+	// second (codex review).
+	await db
+		.insert(stripePendingReversals)
+		.values({ chargeId, reason })
+		.onConflictDoNothing({ target: [stripePendingReversals.chargeId, stripePendingReversals.reason] });
 }
 
 /**

@@ -1,18 +1,15 @@
 // Moderaty — YouTube Comment Auto-Moderation Tool
 // Copyright (C) 2026 Andrew Philip Weilbacher
 //
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published
-// by the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Licensed under the PolyForm Shield License 1.0.0; you may not use
+// this file except in compliance with the License. You may obtain a
+// copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
 //
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// The software is provided "as is", without warranty or condition of
+// any kind, express or implied. See the License for the specific
+// language governing permissions and limitations under the License.
+// A copy of the License is included in the LICENSE file at the
+// repository root.
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
@@ -122,7 +119,7 @@ describe('usage/success load', () => {
 		// The session id is query-controlled and the provider error can carry
 		// payment details — the log must stay restricted (coderabbit).
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
-		mocks.sessionsRetrieve.mockRejectedValue(new Error('No such checkout session: cs_1 (card data redacted)'));
+		mocks.sessionsRetrieve.mockRejectedValue(new Error('Connection reset by peer while retrieving session (transient)'));
 
 		const logged: string[] = [];
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
@@ -137,7 +134,28 @@ describe('usage/success load', () => {
 		expect(logged).toHaveLength(1);
 		expect(logged[0]).toContain('could not fulfill checkout');
 		expect(logged[0]).not.toContain('cs_1');
-		expect(logged[0]).not.toContain('card data redacted');
+		expect(logged[0]).not.toContain('transient');
+	});
+
+	test('a MISSING checkout session shows the failed state — never a false "payment received"', async () => {
+		// The session id is query-controlled: a bogus id must not be presented
+		// as a pending/successful payment. Stripe answers an
+		// StripeInvalidRequestError with code resource_missing for an unknown
+		// session — that is a definitive no-purchase, not a transient
+		// fulfillment failure (codex review).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.sessionsRetrieve.mockRejectedValue({
+			type: 'StripeInvalidRequestError',
+			code: 'resource_missing',
+			message: 'No such checkout session: cs_does_not_exist'
+		});
+
+		const data = (await loadWith('cs_does_not_exist')) as { granted: boolean; pending: boolean; failed: boolean };
+
+		expect(data.granted).toBe(false);
+		expect(data.pending).toBe(false);
+		expect(data.failed).toBe(true);
+		expect(await getCredits('org-1')).toBe(0);
 	});
 
 	test('a session for ANOTHER org is never fulfilled here', async () => {

@@ -16,7 +16,7 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => {
 	const state = {
@@ -27,8 +27,16 @@ const mocks = vi.hoisted(() => {
 			rules: undefined as unknown,
 			channelAllowedHandles: undefined as unknown,
 			auditLog: undefined as unknown,
-			moderationActions: undefined as unknown
+			moderationActions: undefined as unknown,
+			organizations: undefined as unknown,
+			creditTransactions: undefined as unknown
 		},
+		// Org credit balance the fake organizations select reports (ledger gate).
+		credits: 5 as number | null,
+		// Org Stripe customer the fake organizations select reports (metering
+		// gate: an org with a customer but no balance is still metered).
+		customerId: null as string | null,
+		insertedCredits: [] as Record<string, unknown>[],
 		channel: {} as Record<string, unknown>,
 		channelUpdates: [] as Record<string, unknown>[],
 		existingIds: [] as string[],
@@ -44,11 +52,17 @@ const mocks = vi.hoisted(() => {
 		if (table === state.tables.comments) state.insertedComments.push(...rows);
 		if (table === state.tables.auditLog) state.insertedAudits.push(...rows);
 		if (table === state.tables.moderationActions) state.moderationActions.push(...rows);
+		if (table === state.tables.creditTransactions) state.insertedCredits.push(...rows);
 	};
 	const query = (table: unknown) => ({
 		where: (condition?: unknown) => ({
 			get: async () => {
 				if (table === state.tables.channels) return state.channel;
+				// Ledger balance + metering lookup (consumeCredit's org existence
+				// check and the orgIsMetered gate).
+				if (table === state.tables.organizations) {
+					return { creditsRemaining: state.credits, stripeCustomerId: state.customerId };
+				}
 				throw new Error('unexpected get query');
 			},
 			all: async () => {
@@ -79,11 +93,40 @@ const mocks = vi.hoisted(() => {
 		})
 	});
 	const transaction = {
-		insert: vi.fn((table: unknown) => ({ values: async (values: unknown) => store(table, values) })),
+		insert: vi.fn((table: unknown) => ({
+			values: (values: unknown) => {
+				// Real drizzle values() is SYNC and returns the query builder — the
+				// chain must be returned synchronously or onConflictDoNothing lands
+				// on a Promise.
+				store(table, values);
+				// Ledger inserts chain onConflictDoNothing().returning() — simulate a
+				// fresh insert (never a conflict) so consumeCredit sees a charge.
+				return { onConflictDoNothing: () => ({ returning: async () => [{ id: 1 }] }) };
+			}
+		})),
+		select: vi.fn(() => ({ from: (table: unknown) => query(table) })),
+		delete: vi.fn((table: unknown) => ({
+			where: async () => {
+				if (table === state.tables.creditTransactions) {
+					// consumeCredit deletes its just-inserted row when the balance
+					// guard rejects the charge — mirror that by un-recording it.
+					state.insertedCredits.pop();
+					return undefined;
+				}
+				throw new Error('unexpected delete query');
+			}
+		})),
 		update: (table: unknown) => ({
 			set: (values: Record<string, unknown>) => ({
 				where: (condition?: unknown) => {
 					const none = { returning: async () => [] as Record<string, unknown>[] };
+					if (table === state.tables.organizations) {
+						// Ledger balance decrement simulates the real guard: at balance 0
+						// the UPDATE matches nothing (comment stages free — consumeCredit
+						// deletes its row and returns false); otherwise one credit lower.
+						if ((state.credits ?? 0) <= 0) return { returning: async () => [] as Record<string, unknown>[] };
+						return { returning: async () => [{ creditsRemaining: Math.max(0, (state.credits ?? 0) - 1) }] };
+					}
 					if (table === state.tables.channels) {
 						state.channelUpdates.push(values);
 						return none;
@@ -176,7 +219,7 @@ vi.mock('$lib/server/youtube', () => ({
 	deleteComment: mocks.deleteComment
 }));
 
-import { auditLog, channelAllowedHandles, channels, comments, moderationActions, rules } from '$lib/server/db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, creditTransactions, moderationActions, organizations, rules } from '$lib/server/db/schema';
 import { SQLiteSyncDialect } from 'drizzle-orm/sqlite-core';
 import { runChannel } from './pipeline';
 import type { NewComment } from './youtube';
@@ -249,7 +292,9 @@ function expectAiUnavailableQueued(result: unknown, extra: Record<string, unknow
 
 beforeEach(() => {
 	vi.clearAllMocks();
-	mocks.state.tables = { channels, comments, rules, channelAllowedHandles, auditLog, moderationActions };
+	mocks.state.tables = { channels, comments, rules, channelAllowedHandles, auditLog, moderationActions, organizations, creditTransactions };
+	mocks.state.credits = 5;
+	mocks.state.insertedCredits = [];
 	mocks.state.env.DRY_RUN = 'false';
 	mocks.state.channel = {
 		id: 'channel',
@@ -1641,4 +1686,170 @@ test('window mode without dry-run semantics fails loudly — it can never go liv
 	).rejects.toThrow('window mode requires dry-run');
 	expect(mocks.fetchNewComments).not.toHaveBeenCalled();
 	expect(mocks.state.insertedAudits).toEqual([]);
+});
+
+describe('credit consumption (billing)', () => {
+	test('consumes one credit per staged comment on a live run and advances the cursor', async () => {
+		mocks.state.channel.orgId = 'org-1';
+		mocks.state.credits = 5;
+		mocks.scoreComment.mockResolvedValue(moderation(0.1));
+		mocks.fetchNewComments.mockResolvedValue({
+			comments: [newComment({ id: 'a' }), newComment({ id: 'b' })],
+			nextPageToken: null,
+			reachedCursor: true
+		});
+
+		const result = await runChannel('channel');
+
+		expect(mocks.state.insertedComments).toHaveLength(2);
+		expect(mocks.state.insertedCredits).toEqual([
+			expect.objectContaining({ orgId: 'org-1', delta: -1, reason: 'consume', refType: 'comment', refId: 'a' }),
+			expect.objectContaining({ orgId: 'org-1', delta: -1, reason: 'consume', refType: 'comment', refId: 'b' })
+		]);
+		// Cursor advanced (persistResults ran) and no out-of-credits flag.
+		expect(mocks.state.channelUpdates.some((update) => 'cursor' in update || 'scanCursor' in update)).toBe(true);
+		expect(result).toMatchObject({ fetched: 2, dryRun: false });
+		expect(result.outOfCredits).toBeUndefined();
+	});
+
+	test('at zero credits AI comments are deferred, nothing stages, and the cursor parks', async () => {
+		mocks.state.channel.orgId = 'org-1';
+		mocks.state.credits = 0;
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		mocks.scoreComment.mockResolvedValue(moderation(0.5));
+
+		const result = await runChannel('channel');
+
+		expect(result.outOfCredits).toBe(true);
+		// No decision staged, no AI call made, no audit row, no cursor update.
+		expect(mocks.state.insertedComments).toEqual([]);
+		expect(mocks.state.insertedAudits).toEqual([]);
+		expect(mocks.state.insertedCredits).toEqual([]);
+		expect(mocks.scoreComment).not.toHaveBeenCalled();
+		expect(mocks.state.channelUpdates).toEqual([]);
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('out of credits for org org-1'));
+		errorSpy.mockRestore();
+	});
+
+	test('meters AI per comment: with 1 credit only the first AI comment is scored, the rest defer', async () => {
+		mocks.state.channel.orgId = 'org-1';
+		mocks.state.credits = 1;
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		mocks.scoreComment.mockResolvedValue(moderation(0.1));
+		mocks.fetchNewComments.mockResolvedValue({
+			comments: [newComment({ id: 'a' }), newComment({ id: 'b' }), newComment({ id: 'c' })],
+			nextPageToken: null,
+			reachedCursor: true
+		});
+
+		const result = await runChannel('channel');
+
+		// AI ran for exactly one comment (the budget), not the whole page.
+		expect(mocks.scoreComment).toHaveBeenCalledTimes(1);
+		expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'a' })]);
+		expect(mocks.state.insertedCredits).toEqual([
+			expect.objectContaining({ orgId: 'org-1', delta: -1, reason: 'consume', refType: 'comment', refId: 'a' })
+		]);
+		// The two unpaid comments defer and the cursor parks for a post-top-up retry.
+		expect(result.outOfCredits).toBe(true);
+		expect(mocks.state.channelUpdates).toEqual([]);
+		errorSpy.mockRestore();
+	});
+
+	test('an org that never engaged billing (NULL balance, no Stripe customer) scores AI unlimited and consumes nothing', async () => {
+		// Self-hosted and lifetime-plan orgs are unmetered: no balance and no
+		// Stripe customer means the credit gate must not engage at all.
+		mocks.state.channel.orgId = 'org-1';
+		mocks.state.credits = null;
+		mocks.state.customerId = null;
+		mocks.scoreComment.mockResolvedValue(moderation(0.1));
+		mocks.fetchNewComments.mockResolvedValue({
+			comments: [newComment({ id: 'a' }), newComment({ id: 'b' })],
+			nextPageToken: null,
+			reachedCursor: true
+		});
+
+		const result = await runChannel('channel');
+
+		expect(mocks.scoreComment).toHaveBeenCalledTimes(2);
+		expect(mocks.state.insertedComments).toHaveLength(2);
+		// NULL balance: consumeCredit's guard rejects every charge — no ledger rows.
+		expect(mocks.state.insertedCredits).toEqual([]);
+		expect(result.outOfCredits).toBeUndefined();
+		expect(mocks.state.channelUpdates.some((update) => 'cursor' in update || 'scanCursor' in update)).toBe(true);
+	});
+
+	test('an org with only a Stripe customer (checkout opened, never purchased) is UNmetered: AI scores unlimited', async () => {
+		// Metering means a successful credit PURCHASE (non-null balance). A
+		// customer alone only proves a Checkout was opened — it must never flip
+		// a pre-billing org into the credit gate (codex 6133).
+		mocks.state.channel.orgId = 'org-1';
+		mocks.state.credits = null;
+		mocks.state.customerId = 'cus_1';
+		mocks.scoreComment.mockResolvedValue(moderation(0.5));
+
+		const result = await runChannel('channel');
+
+		expect(result.outOfCredits).toBeUndefined();
+		expect(mocks.scoreComment).toHaveBeenCalled();
+		expect(mocks.state.insertedCredits).toEqual([]);
+	});
+
+	test('rule decisions stage, free of charge', async () => {
+		// A POSITIVE balance makes the assertion meaningful: if stageDecisions
+		// charged rule decisions, a consume row would land here and the test
+		// would fail (codex 6167 / coderabbit).
+		mocks.state.channel.orgId = 'org-1';
+		mocks.state.credits = 5;
+		mocks.state.ruleRows = [{ id: 1, type: 'regex', pattern: 'spam', action: 'hold' }];
+		mocks.fetchNewComments.mockResolvedValue({
+			comments: [newComment({ id: 'a', text: 'spam one' })],
+			nextPageToken: null,
+			reachedCursor: true
+		});
+
+		const result = await runChannel('channel');
+
+		expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'a', decidedBy: 'rule', status: 'held' })]);
+		expect(mocks.state.insertedCredits).toEqual([]);
+		expect(result.outOfCredits).toBeUndefined();
+		expect(mocks.state.channelUpdates.some((update) => 'cursor' in update || 'scanCursor' in update)).toBe(true);
+	});
+
+	test('with credits available, only AI decisions consume credits — rule matches are free', async () => {
+		mocks.state.channel.orgId = 'org-1';
+		mocks.state.credits = 1;
+		mocks.state.ruleRows = [{ id: 1, type: 'regex', pattern: 'spam', action: 'hold' }];
+		mocks.scoreComment.mockResolvedValue(moderation(0.9));
+		mocks.fetchNewComments.mockResolvedValue({
+			comments: [newComment({ id: 'a', text: 'spam one' }), newComment({ id: 'b', text: 'free text' })],
+			nextPageToken: null,
+			reachedCursor: true
+		});
+
+		const result = await runChannel('channel');
+
+		expect(result.outOfCredits).toBeUndefined();
+		// Only the AI-scored comment 'b' may consume the sole credit; the rule
+		// match 'a' must stage free.
+		expect(mocks.state.insertedCredits).toEqual([expect.objectContaining({ refId: 'b' })]);
+		expect(mocks.state.insertedCredits).not.toEqual([expect.objectContaining({ refId: 'a' })]);
+	});
+
+	test('a dry run at zero credits still scores with AI and consumes nothing', async () => {
+		mocks.state.channel.orgId = 'org-1';
+		mocks.state.credits = 0;
+		mocks.state.env.DRY_RUN = 'true';
+		mocks.scoreComment.mockResolvedValue(moderation(0.1));
+
+		const result = await runChannel('channel', { forceDryRun: true });
+
+		expect(mocks.scoreComment).toHaveBeenCalled();
+		expect(mocks.state.insertedAudits).toEqual([
+			expect.objectContaining({ commentId: 'comment', action: 'dry-run' })
+		]);
+		expect(mocks.state.insertedCredits).toEqual([]);
+		expect(result).toMatchObject({ dryRun: true });
+		expect(result.outOfCredits).toBeUndefined();
+	});
 });

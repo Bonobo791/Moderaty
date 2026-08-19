@@ -20,7 +20,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <!-- SensitivitySwitch: the two-stop moderation-sensitivity control
 	 (redesign spec §7/Step 3.2). Two meme endpoints, a 4px track with end
-	 notches, and a 40px knob that snaps to CHILL (1) or STRICT (2). Changes
+	 notches, and a 40px knob that snaps to EDGE LORD (1) or STRICT (2). Changes
 	 persist through the same ?/setToneLevel action the old range slider
 	 used: an 800ms debounce (restarted on every re-flip, so a rapid
 	 double-flip fires exactly one request with the final value) submits the
@@ -42,14 +42,15 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 	const MODES = {
 		1: {
-			stop: 'CHILL',
-			name: 'CHILL PEPE',
-			description: 'Only clear hate speech and spam get bounced. Snark survives.'
+			stop: 'EDGE LORD',
+			name: 'EDGE LORD',
+			description: 'Only clear hate speech and spam get yeeted. Snark survives.'
 		},
 		2: {
 			stop: 'STRICT',
 			name: 'EDGE LORD + ACKCHYUALLY...',
-			description: 'Hateful comments and demeaning, condescending, or sarcastic tone are moderated.'
+			description:
+				'Hateful comments and demeaning, condescending, or sarcastic tone get moderated. The edge lord has entered the chat.'
 		}
 	} as const;
 
@@ -163,7 +164,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			type="button"
 			class="endpoint chill"
 			class:inactive={selected !== 1}
-			aria-label="Set sensitivity to Chill Pepe"
+			aria-label="Set sensitivity to Edge Lord"
 			onclick={() => choose(1)}
 		>
 			<img src="/edge-lord.jpg" alt="" width="44" height="44" />
@@ -215,7 +216,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		<div class="readout">
 			<span class="mode-stop mono" class:strict={selected === 2}>{mode.stop}</span>
 			<div class="mode-copy">
-				<span class="caps-label mode-name">{mode.name}</span>
+				{#if mode.name !== mode.stop}
+					<span class="caps-label mode-name">{mode.name}</span>
+				{/if}
 				<p class="mode-desc">{mode.description}</p>
 			</div>
 		</div>
@@ -365,6 +368,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	.readout {
 		display: flex;
 		align-items: center;
+		flex-wrap: wrap;
 		gap: 24px;
 		margin-top: 20px;
 		animation: readout-in 150ms var(--ease-out);

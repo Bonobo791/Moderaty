@@ -64,7 +64,7 @@ vi.mock('$lib/server/youtube', () => ({
 }));
 
 import { setupTestDb, testDb, wipeTables } from './testdb';
-import { auditLog, channels, comments, moderationActions } from './db/schema';
+import { auditLog, channels, comments, creditTransactions, moderationActions, organizations } from './db/schema';
 import { runChannel } from './pipeline';
 import type { ToxicityScores } from './moderation';
 import type { CommentPage, NewComment } from './youtube';
@@ -78,7 +78,7 @@ import {
 	type ChannelRow
 } from './testarbitraries';
 
-const WIPE = ['moderation_actions', 'comments', 'audit_log', 'rules', 'channels'];
+const WIPE = ['moderation_actions', 'comments', 'audit_log', 'rules', 'channels', 'organizations', 'credit_transactions'];
 
 setupTestDb(WIPE);
 
@@ -156,6 +156,18 @@ function scoresFor(score: number): ToxicityScores {
 	return Object.fromEntries(SCORE_CATEGORIES.map((category) => [category, score])) as ToxicityScores;
 }
 
+/** Seeds the high-credit org row the ledger gate needs (a huge balance keeps
+ * consumption irrelevant to the ingest properties under test). No-op for
+ * org-less channels. Shared by every property so the fixture lives once. */
+async function seedOrgFor(orgId: string | null): Promise<void> {
+	if (orgId === null) return;
+	await testDb().db.insert(organizations).values({
+		id: orgId,
+		name: `Org ${orgId}`,
+		creditsRemaining: 1_000_000
+	});
+}
+
 /** Seeds the generated channel row (tone level 1 — no tone pass, no video metadata call). */
 async function seedChannel(channel: ChannelRow): Promise<void> {
 	await testDb().db.insert(channels).values({
@@ -165,6 +177,10 @@ async function seedChannel(channel: ChannelRow): Promise<void> {
 		title: channel.title,
 		refreshTokenEnc: channel.refreshTokenEnc
 	});
+	// A channel carrying an orgId needs its org row: the ledger gates AI
+	// scoring on the balance and fails loudly for a missing org (never a
+	// silent "no credits").
+	await seedOrgFor(channel.orgId);
 }
 
 function by<T>(rows: T[], key: (row: T) => string | number): T[] {
@@ -182,7 +198,9 @@ async function snapshot() {
 		comments: by(await db.select().from(comments).all(), (row) => row.id),
 		moderationActions: by(await db.select().from(moderationActions).all(), (row) => row.commentId),
 		auditLog: by(await db.select().from(auditLog).all(), (row) => row.id),
-		channels: by(await db.select().from(channels).all(), (row) => row.id)
+		channels: by(await db.select().from(channels).all(), (row) => row.id),
+		creditTransactions: by(await db.select().from(creditTransactions).all(), (row) => row.id),
+		organizations: by(await db.select().from(organizations).all(), (row) => row.id)
 	};
 }
 

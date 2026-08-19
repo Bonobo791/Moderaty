@@ -1,0 +1,28 @@
+name: Bunny CDN cache purge
+
+# Purges the production Bunny pull zone after EVERY production deploy. Both
+# supported targets (Netlify production and Coolify moderaty-prod) deploy on
+# pushes to `main`, so this workflow fires exactly when a production deploy
+# happens. The purge runs OUTSIDE the application container: the zone-scoped
+# key lives only in repository secrets and never ships in the runtime
+# environment (coderabbit — an account-level key inside the container could
+# purge every zone in the account).
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Purge the production Bunny zone
+        env:
+          BUNNY_ACCESS_KEY: ${{ secrets.BUNNY_ACCESS_KEY }}
+          BUNNY_PURGE_URL: ${{ vars.BUNNY_PURGE_URL }}
+        run: node scripts/bunny-purge.mjs

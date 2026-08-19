@@ -145,19 +145,19 @@ test('the sensitivity control renders the two-stop switch with both meme endpoin
 	expect(body).not.toContain('type="range"');
 	expect(body).toContain('role="slider"');
 	expect(body).toContain('aria-label="Moderation sensitivity for My Channel"');
-	expect(body).toContain('aria-label="Set sensitivity to Chill Pepe"');
+	expect(body).toContain('aria-label="Set sensitivity to Edge Lord"');
 	expect(body).toContain('aria-label="Set sensitivity to Edge Lord plus Ackchyually"');
 	expect(body).toContain('src="/edge-lord.jpg"');
 	expect(body).toContain('src="/ackchyually.gif"');
 	expect(body).toContain('EDGE LORD');
 	expect(body).toContain('EDGE LORD + ACKCHYUALLY');
-	expect(body).toContain('Only clear hate speech and spam get bounced. Snark survives.');
+	expect(body).toContain('Only clear hate speech and spam get yeeted. Snark survives.');
 });
 
 test('the sensitivity readout switches copy at the strict level', () => {
 	const body = renderPage({ ...LAYOUT_DATA, ch: { ...LAYOUT_DATA.ch, toneLevel: 2 } });
 	expect(body).toContain('STRICT');
-	expect(body).toContain('Hateful comments and demeaning, condescending, or sarcastic tone are moderated.');
+	expect(body).toContain('Hateful comments and demeaning, condescending, or sarcastic tone get moderated. The edge lord has entered the chat.');
 });
 
 test('the switch persists through the setToneLevel action with the hidden fields the action requires', () => {

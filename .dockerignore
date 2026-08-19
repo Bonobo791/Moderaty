@@ -1,0 +1,31 @@
+# Docker build context excludes: checkout metadata, build artifacts, local
+# secrets, and scratch output. Keep drizzle/ (migration SQL runs during the
+# image build) and scripts/ (netlify-migrate.mjs, dev-cron.mjs,
+# bunny-purge.mjs) in the context.
+
+.git
+.worktrees
+node_modules
+build
+.svelte-kit
+.netlify
+.stryker-tmp
+.tokensave
+.idea
+.vscode
+.reasonix
+.agents
+.playwright-cli
+.impeccable
+.serena
+.codacy
+.codex
+
+.env
+.env.*
+!.env.example
+
+local.db
+backups
+reports
+stryker.log

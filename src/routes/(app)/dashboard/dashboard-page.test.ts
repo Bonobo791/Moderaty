@@ -116,15 +116,15 @@ test('a mid-load outage renders a maintenance state and hides every destructive 
 
 test('the all-clear headline and subline render when nothing is pending', () => {
 	const body = renderPage(QUIET_DATA);
-	expect(body).toContain('The door is quiet.');
-	expect(body).toContain('3 channels protected. The queue is clear. Nothing slipped past.');
+	expect(body).toContain('The door is quiet. Too quiet.');
+	expect(body).toContain('3 channels protected. Queue\'s clear. Not a single main character slipped past.');
 });
 
 test('the pending headline and subline render with the summed count', () => {
 	const body = renderPage(PENDING_DATA);
-	expect(body).toContain('5 at the rope.');
+	expect(body).toContain('5 caught lacking at the door.');
 	expect(body).toContain(
-		'5 comments are waiting for a decision. The rope only works if someone checks it.'
+		'5 comments are waiting for a decision. The rope isn\'t going to check itself.'
 	);
 });
 
@@ -197,13 +197,27 @@ test('the status cell shows PROTECTED, queue is clear, or a pending-queue link',
 	expect(body).toContain('href="/channels/UC1/queue"');
 });
 
+/** The markup of ONE ledger row, cut out so a sensitivity pin can never be
+ * satisfied by another channel's cell. */
+function rowFor(body: string, title: string): string {
+	const start = body.indexOf(`aria-label="Open ${title}"`);
+	expect(start, `ledger row for ${title} present`).toBeGreaterThanOrEqual(0);
+	return body.slice(start, body.indexOf('</tr>', start));
+}
+
 test('the sensitivity cell renders the mini-track and the stop label', () => {
 	const body = renderPage(PENDING_DATA);
 	expect(body).toMatch(/class="[^"]*\bmini-track\b[^"]*"/);
 	expect(body).toMatch(/class="[^"]*\bmini-fill\b[^"]*\bstrict\b[^"]*"|class="[^"]*\bstrict\b[^"]*\bmini-fill\b[^"]*"/);
-	// UC1 is Chill; UC2 and UC3 are Strict.
-	expect(body).toContain('Chill');
-	expect(body).toContain('Strict');
+	// ROW-SCOPED: UC1 is Edge Lord, UC2 and UC3 are Ackchyually — a wrong
+	// row mapping must fail these pins, not just page-wide presence
+	// (coderabbit).
+	expect(rowFor(body, 'My Channel')).toContain('Edge Lord');
+	expect(rowFor(body, 'My Channel')).not.toContain('Ackchyually');
+	for (const title of ['Second Channel', 'Third Channel']) {
+		expect(rowFor(body, title)).toContain('Ackchyually');
+		expect(rowFor(body, title)).not.toContain('Edge Lord');
+	}
 });
 
 test('the last-checked cell falls back to never and relativizes timestamps', () => {
@@ -249,6 +263,6 @@ test('no channels renders the empty state and the quiet zero-count header', () =
 	const body = renderPage(EMPTY_DATA);
 	expect(body).toContain('No channels connected');
 	expect(body).toContain('0 connected');
-	expect(body).toContain('The door is quiet.');
-	expect(body).toContain('0 channels protected. The queue is clear. Nothing slipped past.');
+	expect(body).toContain('The door is quiet. Too quiet.');
+	expect(body).toContain('0 channels protected. Queue\'s clear. Not a single main character slipped past.');
 });

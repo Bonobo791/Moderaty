@@ -316,15 +316,64 @@ describe('handleStripeEvent', () => {
 		expect(receipt?.eventId).toBe('evt_1');
 	});
 
-	test('a NEW event id for the SAME object still dedupes (two-Event-objects case)', async () => {
+	test('a NEW event id for the SAME object re-runs the handler IDEMPOTENTLY (no double grant)', async () => {
+		// Stripe can re-emit the same logical event with a new event id. The
+		// receipt gate dedupes by EVENT ID only, so the second Event-object
+		// reaches the handler — which is safe because the ledger's
+		// UNIQUE(org, ref_type, ref_id) anchor makes fulfillment idempotent
+		// (codex review: the old (type, object) gate suppressed LATER events
+		// for the same object, which broke the partial→full refund path).
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		mocks.sessionsRetrieve.mockResolvedValue(session());
 
 		await handleStripeEvent(event('checkout.session.completed', 'evt_1', session()) as never);
 		await handleStripeEvent(event('checkout.session.completed', 'evt_2', session()) as never);
+		expect(await getCredits('org-1')).toBe(500); // never double-granted
+		expect(mocks.sessionsRetrieve).toHaveBeenCalledTimes(2); // both delivered
+	});
+
+	test('a PARTIAL refund followed by a FULL refund for the same charge reverses the credits', async () => {
+		// Stripe emits charge.refunded for partial refunds too, and each is a
+		// DISTINCT event id. The old (event_type, object_id) dedupe suppressed
+		// the later full-refund event, leaving the grant unreversed forever.
+		// Dedupe by event id only, and reverseCharge itself compares amounts:
+		// partial keeps the credits, the later full refund takes them (codex).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+		mocks.chargesRetrieve.mockImplementation((id: string) => Promise.resolve({ id, payment_intent: 'pi_1', amount: 50000, amount_refunded: 20000 }));
+
+		// First event: a PARTIAL refund — v1 keeps the credits.
+		expect(await handleStripeEvent(event('charge.refunded', 'evt_partial', { id: 'ch_1' }) as never)).toBe(true);
 		expect(await getCredits('org-1')).toBe(500);
-		// The (event_type, object_id) anchor gates the second Event-object too.
-		expect(mocks.sessionsRetrieve).toHaveBeenCalledTimes(1);
+
+		// Second event: the refund now covers the FULL amount — credits go.
+		mocks.chargesRetrieve.mockImplementation((id: string) => Promise.resolve({ id, payment_intent: 'pi_1', amount: 50000, amount_refunded: 50000 }));
+		expect(await handleStripeEvent(event('charge.refunded', 'evt_full', { id: 'ch_1' }) as never)).toBe(true);
+		expect(await getCredits('org-1')).toBe(0);
+	});
+
+	test('a dispute AND a later full refund both queue before the grant — both drain', async () => {
+		// Both obligations can precede the delayed grant. The old charge-only
+		// UNIQUE on stripe_pending_reversals dropped whichever arrived second;
+		// with UNIQUE(charge_id, reason) both survive, and the drain applies
+		// each on its own ledger anchor (codex review).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1', amount: 50000, amount_refunded: 50000 });
+		mocks.disputesRetrieve.mockResolvedValue({ id: 'du_1', charge: 'ch_1' });
+
+		expect(await handleStripeEvent(event('charge.dispute.created', 'evt_dispute', { id: 'du_1' }) as never)).toBe(true);
+		expect(await handleStripeEvent(event('charge.refunded', 'evt_refund', { id: 'ch_1' }) as never)).toBe(true);
+
+		const pending = await testDb().db.select().from(stripePendingReversals).where(eq(stripePendingReversals.chargeId, 'ch_1')).all();
+		expect(pending.map((row) => row.reason).sort()).toEqual(['dispute', 'refund']);
+
+		// The grant lands: both obligations drain — 500 in, 1000 out (net -500;
+		// a negative balance is the documented v1 consequence of reversing
+		// credits the customer already spent).
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_1', payment_intent: { id: 'pi_1', latest_charge: 'ch_1', payment_method: 'pm_1' } }));
+		expect(await handleStripeEvent(event('checkout.session.completed', 'evt_grant', session({ id: 'cs_1', payment_intent: { id: 'pi_1', latest_charge: 'ch_1', payment_method: 'pm_1' } })) as never)).toBe(true);
+		expect(await getCredits('org-1')).toBe(-500);
+		expect(await testDb().db.select().from(stripePendingReversals).where(eq(stripePendingReversals.chargeId, 'ch_1')).all()).toEqual([]);
 	});
 
 	test('a refund arriving BEFORE the grant is applied when the grant lands', async () => {

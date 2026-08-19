@@ -326,24 +326,35 @@ export const creditTransactions = sqliteTable('credit_transactions', {
 	index('credit_transactions_charge_idx').on(table.chargeId)
 ]);
 
-// Stripe webhook event receipt — the webhook dedupe anchor. The event_id
-// UNIQUE stops duplicate deliveries; UNIQUE(event_type, object_id) catches
-// Stripe's two-Event-objects duplicate case. Rows land in the same
-// transaction as the ledger mutation they drive.
+// Stripe webhook event receipt — the webhook dedupe anchor. Dedupe is by
+// EVENT ID only: a later event for the same object (e.g. a charge.refunded
+// that first arrives partial and then full) must be processed, and repeated
+// processing is made idempotent by the ledger's own anchors. The
+// (event_type, object_id) index is audit-only, NOT unique (codex review).
+// Rows land in the same transaction as the ledger mutation they drive.
 // Stripe reversal obligations whose grant had NOT yet arrived when the
 // refund/dispute event was delivered (Stripe webhook order is not
 // guaranteed — a charge.refunded can precede the checkout.session.completed
 // that granted it). charge_id UNIQUE: one reversal per charge, first event
 // wins. A grant that lands later drains the row (drainPendingReversals);
 // the cron sweep drops rows whose grant never arrived.
-export const stripePendingReversals = sqliteTable('stripe_pending_reversals', {
-	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
-	id: integer('id').primaryKey({ autoIncrement: true }),
-	chargeId: text('charge_id').notNull().unique(), // ch_...
-	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
-	reason: text('reason').notNull(), // 'refund' | 'dispute'
-	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
-});
+export const stripePendingReversals = sqliteTable(
+	'stripe_pending_reversals',
+	{
+		// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+		id: integer('id').primaryKey({ autoIncrement: true }),
+		chargeId: text('charge_id').notNull(), // ch_...
+		// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+		reason: text('reason').notNull(), // 'refund' | 'dispute'
+		createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+	},
+	// UNIQUE(charge_id, reason), NOT charge_id alone: a dispute AND a later
+	// full refund can both queue before the delayed grant lands, and each
+	// obligation must survive to drain on its own ledger anchor — the
+	// charge-only key silently dropped whichever reason arrived second
+	// (codex review).
+	(table) => [uniqueIndex('stripe_pending_reversals_charge_reason_idx').on(table.chargeId, table.reason)]
+);
 
 // Stripe customers still owed deletion after account teardown (the Stripe
 // erase is best-effort post-commit; a transient Stripe outage must not lose
@@ -369,7 +380,7 @@ export const stripeEvents = sqliteTable('stripe_events', {
 	receivedAt: text('received_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
 	processedAt: text('processed_at')
 }, (table) => [
-	uniqueIndex('stripe_events_type_object_idx').on(table.eventType, table.objectId)
+	index('stripe_events_type_object_idx').on(table.eventType, table.objectId)
 ]);
 
 // Opt-in contact requests from the public /contact form. A row is created

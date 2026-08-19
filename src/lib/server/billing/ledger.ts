@@ -317,7 +317,16 @@ export async function listCreditTransactions(orgId: string, limit = 50) {
  * guaranteed). charge_id UNIQUE: one reversal per charge, first event wins.
  */
 export async function queuePendingReversal(chargeId: string, reason: 'refund' | 'dispute'): Promise<void> {
-	await db.insert(stripePendingReversals).values({ chargeId, reason }).onConflictDoNothing();
+	// UNIQUE(charge_id, reason) — NOT charge_id alone: a dispute AND a later
+	// full refund can both arrive before the delayed grant, and each
+	// obligation must survive to drain on its own ledger anchor (a won-dispute
+	// restore must not leave credits in place for a charge that was also fully
+	// refunded). The charge-only key silently dropped whichever reason arrived
+	// second (codex review).
+	await db
+		.insert(stripePendingReversals)
+		.values({ chargeId, reason })
+		.onConflictDoNothing({ target: [stripePendingReversals.chargeId, stripePendingReversals.reason] });
 }
 
 /**

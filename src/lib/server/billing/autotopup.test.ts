@@ -639,7 +639,7 @@ describe('sweepAutoTopUp', () => {
 
 describe('grantAutoTopupCredits', () => {
 	/** A succeeded auto-topup PI with a creation time near the claim. */
-	function succeededPi(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+	function succeededPi(overrides: Partial<Parameters<typeof grantAutoTopupCredits>[1]> = {}): Parameters<typeof grantAutoTopupCredits>[1] {
 		return {
 			id: 'pi_1',
 			status: 'succeeded',

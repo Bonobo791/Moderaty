@@ -21,7 +21,7 @@
 // The stripe_events row and the ledger mutation land in ONE transaction; a
 // crash rolls both back and Stripe's retry re-runs the whole thing safely.
 
-import { and, eq, or } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import type Stripe from 'stripe';
 
 import { db } from '$lib/server/db';
@@ -303,15 +303,6 @@ export async function restoreWonDispute(disputeId: string): Promise<boolean> {
 }
 
 /**
- * The object id a receipt is anchored on (the payload object's own id —
- * cs_..., pi_..., ch_..., du_...).
- */
-function eventObjectId(event: Stripe.Event): string {
-	const object = event.data.object;
-	return typeof object === 'object' && object !== null && 'id' in object ? String(object.id) : String(object);
-}
-
-/**
  * Dispatches a Stripe event to the appropriate handler. The receipt gate
  * short-circuits duplicate deliveries BEFORE the handler; the receipt is
  * committed only after successful handling so Stripe's retry re-runs a
@@ -327,15 +318,18 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
 	// re-running Stripe calls. The receipt is committed only AFTER successful
 	// handling: a thrown handler leaves no receipt, so the route's 500 makes
 	// Stripe redeliver and the handler re-runs (all handlers are idempotent).
+	// Dedupe by EXACT EVENT ID only (codex review): Stripe re-emits events
+	// for the same object — a charge.refunded first arrives partial, then
+	// full — and each distinct delivery must reach its handler. The
+	// (event_type, object_id) pair is deliberately NOT a dedupe anchor:
+	// suppressing every later same-type event for an object would leave a
+	// partial→full refund progression unreversed. Repeated processing is made
+	// idempotent by the ledger's own UNIQUE anchors, so re-running a handler
+	// can never double-apply.
 	const alreadyRecorded = await db
 		.select({ id: stripeEvents.id })
 		.from(stripeEvents)
-		.where(
-			or(
-				eq(stripeEvents.eventId, event.id),
-				and(eq(stripeEvents.eventType, event.type), eq(stripeEvents.objectId, eventObjectId(event)))
-			)
-		)
+		.where(eq(stripeEvents.eventId, event.id))
 		.get();
 	if (alreadyRecorded) return true;
 	let handled: boolean;

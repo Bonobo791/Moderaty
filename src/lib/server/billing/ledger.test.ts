@@ -73,7 +73,7 @@ describe('drainPendingReversals crash-consistency', () => {
 
 		const realTx = testDb().db.transaction.bind(testDb().db);
 		let calls = 0;
-		const txSpy = vi.spyOn(testDb().db, 'transaction').mockImplementation(async (cb: any) => {
+		const txSpy = vi.spyOn(testDb().db, 'transaction').mockImplementation(async (cb) => {
 			calls += 1;
 			if (calls === 1) return realTx(cb); // first row commits normally
 			throw new Error('simulated process stop before row 2');

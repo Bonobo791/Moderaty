@@ -36,41 +36,68 @@ export interface RuleRow {
  * such as `(a|a)+` safe, even though backtracking engines explore both branches
  * exponentially, so this blind spot is covered here.
  */
+type ScanAction =
+	| 'escape' // backslash: the NEXT character is escaped
+	| 'escape-end' // a character following a backslash (handled by the caller)
+	| 'class-open'
+	| 'class-close'
+	| 'class-body'
+	| 'group-open'
+	| 'group-close'
+	| 'split' // a top-level `|`
+	| 'ordinary';
+
+function scanAction(character: string, state: { escaped: boolean; inClass: boolean }): ScanAction {
+	if (state.escaped) return 'escape-end';
+	if (character === '\\') return 'escape';
+	if (character === '[') return 'class-open';
+	if (character === ']') return 'class-close';
+	if (state.inClass) return 'class-body';
+	if (character === '(') return 'group-open';
+	if (character === ')') return 'group-close';
+	if (character === '|') return 'split';
+	return 'ordinary';
+}
+
 function duplicateAlternation(body: string): boolean {
 	const alternatives = new Set<string>();
 	let depth = 0;
 	let escaped = false;
-	let characterClass = false;
+	let inClass = false;
 	let start = 0;
 	for (let index = 0; index <= body.length; index++) {
 		const character = body[index];
+		let splitHere = index === body.length;
 		if (index < body.length) {
-			if (escaped) {
-				escaped = false;
-				continue;
+			const action = scanAction(character, { escaped, inClass });
+			switch (action) {
+				case 'escape':
+					escaped = true;
+					continue;
+				case 'escape-end':
+					escaped = false;
+					continue;
+				case 'class-open':
+					inClass = true;
+					continue;
+				case 'class-close':
+					inClass = false;
+					continue;
+				case 'class-body':
+					continue;
+				case 'group-open':
+					depth++;
+					continue;
+				case 'group-close':
+					depth--;
+					continue;
+				case 'split':
+					splitHere = depth === 0;
+					if (!splitHere) continue;
+					break;
+				default:
+					continue;
 			}
-			if (character === '\\') {
-				escaped = true;
-				continue;
-			}
-			if (character === '[') {
-				characterClass = true;
-				continue;
-			}
-			if (character === ']') {
-				characterClass = false;
-				continue;
-			}
-			if (characterClass) continue;
-			if (character === '(') {
-				depth++;
-				continue;
-			}
-			if (character === ')') {
-				depth--;
-				continue;
-			}
-			if (character !== '|' || depth > 0) continue;
 		}
 		const alternative = body.slice(start, index);
 		if (alternatives.has(alternative)) return true;
@@ -80,48 +107,57 @@ function duplicateAlternation(body: string): boolean {
 	return false;
 }
 
-/** Rejects backreferences (`\1`–`\9`, `\k<name>`) and groups with duplicate alternatives. */
+/** True when an escaped character is a numeric backreference or a `\\k<name>` start. */
+function isBackreference(character: string, next: string | undefined): boolean {
+	return BACKREFERENCE_DIGIT.test(character) || (character === 'k' && next === '<');
+}
+
+/** Rejects backreferences (`\\1`–`\\9`, `\\k<name>`) and groups with duplicate alternatives. */
 function unsafeSyntax(pattern: string): boolean {
 	// Stryker disable next-line ArrayDeclaration: the sentinel is never popped — regex() compiles the pattern before unsafeRegex runs, so pops never exceed pushes for compilable patterns
 	const starts: number[] = [];
 	let escaped = false;
-	let characterClass = false;
-	// Stryker disable next-line EqualityOperator: `<=` only adds an iteration where charAt returns '', which matches no branch and is a no-op
+	let inClass = false;
 	for (let index = 0; index < pattern.length; index++) {
 		const character = pattern.charAt(index);
-		if (escaped) {
-			if (BACKREFERENCE_DIGIT.test(character) || (character === 'k' && pattern[index + 1] === '<')) return true;
-			escaped = false;
-			continue;
-		}
-		if (character === '\\') {
-			escaped = true;
-			continue;
-		}
-		if (character === '[') {
-			characterClass = true;
-			continue;
-		}
-		if (character === ']') {
-			characterClass = false;
-			continue;
-		}
-		if (characterClass) continue;
-		if (character === '(') {
-			starts.push(index);
-			continue;
-		}
-		if (character === ')') {
-			const start = starts.pop();
-			// Stryker disable next-line ConditionalExpression: unreachable — the pattern compiled in regex() before this runs, so every `)` pairs with a pushed `(`
-			if (start === undefined) continue; // unbalanced: new RegExp reports the pattern invalid
-			// Strip the group prefix (`?:`, `?=`, `?!`, `?<=`, `?<!`, `?<name>`, `?flags:`) before comparing alternatives.
-			const body = pattern.slice(start + 1, index).replace(GROUP_PREFIX, '');
-			if (duplicateAlternation(body)) return true;
+		const action = scanAction(character, { escaped, inClass });
+		switch (action) {
+			case 'escape':
+				escaped = true;
+				continue;
+			case 'escape-end':
+				escaped = false;
+				// Inside a character class `\1` is an octal escape (a literal
+				// char), NOT a backreference — only check outside classes.
+				if (!inClass && isBackreference(character, pattern.charAt(index + 1))) return true;
+				continue;
+			case 'class-open':
+				inClass = true;
+				continue;
+			case 'class-close':
+				inClass = false;
+				continue;
+			case 'class-body':
+				continue;
+			case 'group-open':
+				starts.push(index);
+				continue;
+			case 'group-close': {
+				const start = starts.pop();
+				// Stryker disable next-line ConditionalExpression: unreachable — the pattern compiled in regex() before this runs, so every `)` pairs with a pushed `(`
+				if (start === undefined) continue; // unbalanced: new RegExp reports the pattern invalid
+				// Strip the group prefix (`?:`, `?=`, `?!`, `?<=`, `?<!`, `?<name>`, `?flags:`) before comparing alternatives.
+				const body = pattern.slice(start + 1, index).replace(GROUP_PREFIX, '');
+				if (duplicateAlternation(body)) return true;
+				continue;
+			}
+			default:
+				continue;
 		}
 	}
 	return false;
 }
+
 
 function unsafeRegex(pattern: string): boolean {
 	if (pattern.length > MAX_REGEX_PATTERN_LENGTH) return true;

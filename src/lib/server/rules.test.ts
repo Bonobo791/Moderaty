@@ -169,6 +169,13 @@ test('escaped character classes are not backreferences', () => {
 	expect(matchRule('a 5< here', 'author', [digitLt])).toBe(digitLt);
 });
 
+test('a numeric escape INSIDE a character class is an octal literal, not a backreference', () => {
+	// `[\1]` is a character class containing the octal escape for char 1 —
+	// harmless and linear; the backreference detector must not flag it.
+	const inClass = { id: 64, type: 'regex', pattern: '[\\1]', action: 'hold' };
+	expect(() => matchRule('\u0001', 'author', [inClass])).not.toThrow(/unsafe regex/);
+});
+
 test('an escaped k without a following < is not a backreference', () => {
 	// `\k` alone is a literal `k` (Annex B identity escape); only `\k<` starts
 	// a named backreference.

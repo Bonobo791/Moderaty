@@ -60,8 +60,7 @@ ENV MODERATY_ADAPTER=node
 ARG SOURCE_COMMIT
 RUN --mount=type=secret,id=SOURCE_COMMIT,env=SOURCE_COMMIT \
 	node scripts/write-commit-marker.mjs
-RUN npm run build
-RUN npm prune --omit=dev
+RUN npm run build && npm prune --omit=dev
 
 FROM node:24-alpine
 WORKDIR /app

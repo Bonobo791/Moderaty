@@ -22,7 +22,7 @@ import { channels } from '$lib/server/db/schema';
 import { nullExpiredConsentEmails, nullExpiredHandles, retryStripeCustomerDeletions } from '$lib/server/deletion';
 import { sweepAutoTopUp } from '$lib/server/billing/autotopup';
 import { sweepStalePendingReversals } from '$lib/server/billing/ledger';
-import { runChannel } from '$lib/server/pipeline';
+import { runChannel, type ChannelRunResult } from '$lib/server/pipeline';
 import type { RequestHandler } from './$types';
 
 const LEASE_MS = 10 * 60 * 1000; // exceeds one bounded run; expiry alone re-eligibilizes after a crash
@@ -42,9 +42,8 @@ function secretMatches(provided: string | null, expected: string): boolean {
  * The channel is claimed atomically with an expiring lease before runChannel,
  * so concurrent cron invocations cannot process the same channel.
  */
-export const GET: RequestHandler = async ({ url, request }) => {
-	// Captured at handler start so the DB prelude consumes the same budget.
-	const deadline = Date.now() + RUN_BUDGET_MS;
+/** Verifies the cron caller: CRON_SECRET configured, then the bearer header or query secret. */
+function authorizeCron(url: URL, request: Request): void {
 	if (!env.CRON_SECRET) throw error(500, 'CRON_SECRET is not configured');
 	// Bearer header is the preferred path (used by the Netlify scheduled
 	// function); the query param stays for the plan-documented manual curl.
@@ -55,95 +54,119 @@ export const GET: RequestHandler = async ({ url, request }) => {
 	if (bearer === null) secret = url.searchParams.get('secret');
 	else if (bearer.startsWith('Bearer ')) secret = bearer.slice('Bearer '.length);
 	if (!secretMatches(secret, env.CRON_SECRET)) throw error(401, 'bad secret');
+}
+
+/**
+ * Runs one retention/top-up/outbox sweep. I8: a dry run changes nothing
+ * durable (the would-be sweep is only logged). A sweep failure must never stop
+ * scheduled moderation: it is logged loudly, reported in the payload, and
+ * skipped — the handler continues.
+ */
+async function runSweep<T>(dryRun: boolean, label: string, run: () => Promise<T>): Promise<{ value: T | null; error: string | null }> {
+	if (dryRun) {
+		console.info(`dry run: ${label} skipped`);
+		return { value: null, error: null };
+	}
+	try {
+		return { value: await run(), error: null };
+	} catch (cause) {
+		console.error(`${label} failed:`, cause);
+		return { value: null, error: cause instanceof Error ? cause.message : String(cause) };
+	}
+}
+
+/**
+ * Runs the claimed channel (one page), then the dry-run window drain while a
+ * preview is in flight (I10 — bounded, same lease). A drain failure must never
+ * mask the normal run — loud, surfaced in the payload, retried next
+ * invocation.
+ */
+async function runClaimedChannel(
+	channel: typeof channels.$inferSelect,
+	deadline: number
+): Promise<{ result: ChannelRunResult; dryRunWindow: unknown }> {
+	const result = await runChannel(channel.id, { deadline });
+	let dryRunWindow: unknown;
+	if (channel.dryRunBoundary) {
+		try {
+			const drain = await runChannel(channel.id, {
+				deadline,
+				forceDryRun: true,
+				window: { boundary: channel.dryRunBoundary, pageToken: channel.dryRunPageToken ?? null }
+			});
+			// Both writes are predicated on the boundary actually drained: the
+			// row was read BEFORE the atomic claim, so a dashboard preview can
+			// have replanted a new window in between — a stale drain must never
+			// clear or overwrite the replacement state (0-row update = no-op).
+			const drainedBoundary = eq(channels.dryRunBoundary, channel.dryRunBoundary);
+			if (drain.windowComplete === true) {
+				await db
+					.update(channels)
+					.set({ dryRunBoundary: null, dryRunPageToken: null })
+					.where(and(eq(channels.id, channel.id), drainedBoundary));
+			} else if (drain.windowComplete === false) {
+				await db
+					.update(channels)
+					.set({ dryRunPageToken: drain.windowNextPageToken ?? null })
+					.where(and(eq(channels.id, channel.id), drainedBoundary));
+			}
+			dryRunWindow = drain;
+		} catch (cause) {
+			console.error('dry-run window drain failed for channel:', channel.id, cause);
+			dryRunWindow = { error: cause instanceof Error ? cause.message : String(cause) };
+		}
+	}
+	return { result, dryRunWindow };
+}
+
+export const GET: RequestHandler = async ({ url, request }) => {
+	// Captured at handler start so the DB prelude consumes the same budget.
+	const deadline = Date.now() + RUN_BUDGET_MS;
+	authorizeCron(url, request);
 	const dryRun = env.DRY_RUN === 'true';
+
 	// Consent-evidence retention sweep runs first, while the full budget
 	// remains: consent e-mails older than 10 years (CC Art. 205) are erased —
-	// the row stays as anonymized evidence. I8: a dry run changes nothing
-	// durable — the would-be sweep is only logged. A sweep failure must not
-	// stop scheduled moderation: log it loudly, report it, continue.
-	let consentEmailsNulled = 0;
-	let sweepError: string | null = null;
-	if (dryRun) {
-		console.info('dry run: consent e-mail retention sweep skipped');
-	} else {
-		try {
-			consentEmailsNulled = await nullExpiredConsentEmails();
-		} catch (cause) {
-			sweepError = cause instanceof Error ? cause.message : String(cause);
-			console.error('consent e-mail retention sweep failed:', cause);
-		}
-	}
+	// the row stays as anonymized evidence.
+	const consent = await runSweep(dryRun, 'consent e-mail retention sweep', () => nullExpiredConsentEmails());
 	// Commenter-handle retention sweep: handles on audit rows and staged
 	// moderation actions older than 30 days are erased (the row and its
-	// outcome stay as the moderation record). Same rules as the consent sweep
-	// above: nothing durable under DRY_RUN (I8), and a failure is logged
-	// loudly, reported, and never stops scheduled moderation.
-	let auditHandlesNulled = 0;
-	let actionHandlesNulled = 0;
-	let handleSweepError: string | null = null;
-	if (dryRun) {
-		console.info('dry run: commenter-handle retention sweep skipped');
-	} else {
-		try {
-			const nulled = await nullExpiredHandles();
-			auditHandlesNulled = nulled.auditLog;
-			actionHandlesNulled = nulled.moderationActions;
-		} catch (cause) {
-			handleSweepError = cause instanceof Error ? cause.message : String(cause);
-			console.error('commenter-handle retention sweep failed:', cause);
-		}
-	}
+	// outcome stay as the moderation record).
+	const handles = await runSweep(dryRun, 'commenter-handle retention sweep', () => nullExpiredHandles());
 	const nowIso = new Date().toISOString();
 	// Auto top-up sweep: the backstop for orgs whose balance dropped below
-	// their threshold without an on-consume trigger (missed trigger, refund,
-	// adjustment). Bounded per invocation (I10). Under DRY_RUN nothing is
-	// charged — a real money movement is the definition of a durable change.
-	let autoTopupsTriggered = 0;
-	let autoTopupSweepError: string | null = null;
-	if (dryRun) {
-		console.info('dry run: auto top-up sweep skipped');
-	} else {
-		try {
-			autoTopupsTriggered = await sweepAutoTopUp(5, deadline);
-		} catch (cause) {
-			autoTopupSweepError = cause instanceof Error ? cause.message : String(cause);
-			console.error('auto top-up sweep failed:', cause);
-		}
-	}
+	// their threshold without an on-consume trigger. Bounded per invocation
+	// (I10); under DRY_RUN nothing is charged.
+	const autoTopup = await runSweep(dryRun, 'auto top-up sweep', () => sweepAutoTopUp(5, deadline));
 	// Stripe deletion outbox retry: customers owed erasure from account
 	// teardown whose first attempt hit a Stripe outage. Bounded per
-	// invocation (I10); a row is removed only after Stripe confirms, so an
-	// outage never loses the erasure. Shares the cron deadline: each deletion
-	// may carry SDK network retries, and the sweep must never eat the whole
-	// serverless window before a channel is claimed (codex review). DRY_RUN:
-	// nothing durable.
-	let stripeCustomersDeleted = 0;
-	let stripeDeletionSweepError: string | null = null;
-	if (dryRun) {
-		console.info('dry run: stripe deletion outbox retry skipped');
-	} else {
-		try {
-			stripeCustomersDeleted = await retryStripeCustomerDeletions(10, deadline);
-		} catch (cause) {
-			stripeDeletionSweepError = cause instanceof Error ? cause.message : String(cause);
-			console.error('stripe deletion outbox retry failed:', cause);
-		}
-	}
+	// invocation (I10); a row is removed only after Stripe confirms.
+	const stripeDeletions = await runSweep(dryRun, 'stripe deletion outbox retry', () => retryStripeCustomerDeletions(10, deadline));
 	// Stale pending-reversal sweep: refund/dispute obligations whose grant
-	// never arrived within 14 days (past Stripe's webhook retry horizon) are
-	// dead weight — dropped loudly, bounded per invocation (I10).
-	let pendingReversalsDropped = 0;
-	let pendingReversalSweepError: string | null = null;
-	if (dryRun) {
-		console.info('dry run: pending-reversal sweep skipped');
-	} else {
-		try {
-			pendingReversalsDropped = await sweepStalePendingReversals();
-		} catch (cause) {
-			pendingReversalSweepError = cause instanceof Error ? cause.message : String(cause);
-			console.error('pending-reversal sweep failed:', cause);
-		}
-	}
+	// never arrived within 14 days are dead weight — dropped loudly, bounded.
+	const reversals = await runSweep(dryRun, 'pending-reversal sweep', () => sweepStalePendingReversals());
+
+	// A failed sweep must never tick as success: ok reflects every sweep's
+	// outcome (each failure is also surfaced in its own *Error field and logged).
+	const base = {
+		ok: !consent.error && !handles.error && !autoTopup.error && !stripeDeletions.error && !reversals.error,
+		dryRun,
+		consentEmailsNulled: consent.value ?? 0,
+		sweepError: consent.error,
+		auditHandlesNulled: handles.value?.auditLog ?? 0,
+		actionHandlesNulled: handles.value?.moderationActions ?? 0,
+		handleSweepError: handles.error,
+		autoTopupsTriggered: autoTopup.value ?? 0,
+		autoTopupSweepError: autoTopup.error,
+		stripeCustomersDeleted: stripeDeletions.value ?? 0,
+		stripeDeletionSweepError: stripeDeletions.error,
+		pendingReversalsDropped: reversals.value ?? 0,
+		pendingReversalSweepError: reversals.error
+	};
+
+	// The sweeps above consumed the budget; a channel run would abort
+	// immediately on the expired deadline — report the sweeps, skip the claim.
+	if (Date.now() >= deadline) return json({ ...base, results: {} });
 	const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, nowIso));
 	const [channel] = await db
 		.select()
@@ -153,7 +176,7 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		// actively waiting on must not starve behind the ordinary rotation.
 		.orderBy(desc(sql`${channels.dryRunBoundary} is not null`), asc(channels.lastRunAt))
 		.limit(1);
-	if (!channel) return json({ ok: true, dryRun, consentEmailsNulled, sweepError, auditHandlesNulled, actionHandlesNulled, handleSweepError, autoTopupsTriggered, autoTopupSweepError, stripeCustomersDeleted, stripeDeletionSweepError, pendingReversalsDropped, pendingReversalSweepError, results: {} });
+	if (!channel) return json({ ...base, results: {} });
 
 	// Atomic claim: a concurrent claimant's UPDATE matches 0 rows and exits cleanly.
 	const claimed = await db
@@ -161,53 +184,16 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		.set({ leaseExpiresAt: new Date(Date.now() + LEASE_MS).toISOString() })
 		.where(and(eq(channels.id, channel.id), claimable))
 		.returning({ id: channels.id });
-	if (claimed.length === 0)
-		return json({ ok: true, claimed: false, dryRun, consentEmailsNulled, sweepError, auditHandlesNulled, actionHandlesNulled, handleSweepError, autoTopupsTriggered, autoTopupSweepError, stripeCustomersDeleted, stripeDeletionSweepError, pendingReversalsDropped, pendingReversalSweepError, results: {} });
+	if (claimed.length === 0) return json({ ...base, claimed: false, results: {} });
 
 	try {
-		const result = await runChannel(channel.id, { deadline });
-		// Dry-run window drain: one more page per invocation while a preview is
-		// in flight (I10 — bounded, same lease). runChannel enforces the shared
-		// deadline internally; a partial result leaves the state untouched and
-		// the next invocation continues.
-		let dryRunWindow: unknown;
-		if (channel.dryRunBoundary) {
-			try {
-				const drain = await runChannel(channel.id, {
-					deadline,
-					forceDryRun: true,
-					window: { boundary: channel.dryRunBoundary, pageToken: channel.dryRunPageToken ?? null }
-				});
-				// Both writes are predicated on the boundary actually drained: the
-				// row was read BEFORE the atomic claim, so a dashboard preview can
-				// have replanted a new window in between — a stale drain must never
-				// clear or overwrite the replacement state (0-row update = no-op).
-				const drainedBoundary = eq(channels.dryRunBoundary, channel.dryRunBoundary);
-				if (drain.windowComplete === true) {
-					await db
-						.update(channels)
-						.set({ dryRunBoundary: null, dryRunPageToken: null })
-						.where(and(eq(channels.id, channel.id), drainedBoundary));
-				} else if (drain.windowComplete === false) {
-					await db
-						.update(channels)
-						.set({ dryRunPageToken: drain.windowNextPageToken ?? null })
-						.where(and(eq(channels.id, channel.id), drainedBoundary));
-				}
-				dryRunWindow = drain;
-			} catch (cause) {
-				// A drain failure must never mask the normal run — loud on the
-				// server, surfaced in the payload, retried next invocation.
-				console.error('dry-run window drain failed for channel:', channel.id, cause);
-				dryRunWindow = { error: cause instanceof Error ? cause.message : String(cause) };
-			}
-		}
-		return json({ ok: true, dryRun, consentEmailsNulled, sweepError, auditHandlesNulled, actionHandlesNulled, handleSweepError, autoTopupsTriggered, autoTopupSweepError, stripeCustomersDeleted, stripeDeletionSweepError, pendingReversalsDropped, pendingReversalSweepError, results: { [channel.id]: result }, dryRunWindow });
+		const { result, dryRunWindow } = await runClaimedChannel(channel, deadline);
+		return json({ ...base, results: { [channel.id]: result }, dryRunWindow });
 	} catch (cause) {
 		const message = cause instanceof Error ? cause.message : String(cause);
 		console.error(`channel run ${channel.id} failed:`, cause);
 		return json(
-			{ ok: false, dryRun, consentEmailsNulled, sweepError, auditHandlesNulled, actionHandlesNulled, handleSweepError, autoTopupsTriggered, autoTopupSweepError, stripeCustomersDeleted, stripeDeletionSweepError, pendingReversalsDropped, pendingReversalSweepError, results: { [channel.id]: { error: message } } },
+			{ ...base, ok: false, results: { [channel.id]: { error: message } } },
 			{ status: 500 } // failure must not look like success to the cron caller
 		);
 	} finally {

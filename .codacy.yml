@@ -26,3 +26,10 @@ engines:
   opengrep:
     exclude_paths:
       - '**/*.test.ts'
+  # The org's custom "Enforce Access to RAC_* Tables in SQL Queries" Semgrep
+  # pattern is a leftover from another project: this repo has no RAC_* tables
+  # and the rule fires on every generated drizzle migration SQL. Excluded here
+  # until the pattern is deleted in the Codacy dashboard (see TODO.md).
+  Semgrep:
+    exclude_paths:
+      - 'drizzle/**'

@@ -116,7 +116,7 @@ export const stripeSubscriptionPeriods = sqliteTable('stripe_subscription_period
 	periodEnd: text('period_end').notNull(),
 	includedCredits: integer('included_credits').notNull().default(100),
 	consumedCredits: integer('consumed_credits').notNull().default(0),
-	status: text('status').notNull().default('paid'), // paid | refunded | void
+	status: text('status').notNull().default('paid'), // paid | disputed | refunded | void
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
 	uniqueIndex('stripe_subscription_periods_subscription_period_unique').on(table.subscriptionId, table.periodKey),
@@ -141,7 +141,7 @@ export const stripeLifetimeEntitlements = sqliteTable('stripe_lifetime_entitleme
 	checkoutSessionId: text('checkout_session_id').notNull().unique(),
 	paymentIntentId: text('payment_intent_id'),
 	chargeId: text('charge_id'),
-	status: text('status').notNull().default('active'), // active | released
+	status: text('status').notNull().default('active'), // active | disputed | released
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
 	releasedAt: text('released_at')
 }, (table) => [
@@ -406,6 +406,7 @@ export const stripePendingReversals = sqliteTable(
 		chargeId: text('charge_id').notNull(), // ch_...
 		// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 		reason: text('reason').notNull(), // 'refund' | 'dispute'
+		disputeId: text('dispute_id'),
 		createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 	},
 	// UNIQUE(charge_id, reason), NOT charge_id alone: a dispute AND a later
@@ -415,6 +416,21 @@ export const stripePendingReversals = sqliteTable(
 	// (codex review).
 	(table) => [uniqueIndex('stripe_pending_reversals_charge_reason_idx').on(table.chargeId, table.reason)]
 );
+
+
+// One durable row per dispute lets a won-dispute event restore only the
+// entitlement that this exact dispute revoked. A pending row is resolved when
+// the payment grant arrives after the dispute event.
+export const stripeDisputeReversals = sqliteTable('stripe_dispute_reversals', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	disputeId: text('dispute_id').notNull().unique(),
+	chargeId: text('charge_id').notNull(),
+	paymentIntentId: text('payment_intent_id'),
+	status: text('status').notNull().default('pending'), // pending | reversed | won | restored
+	source: text('source').notNull().default('unknown'), // credits | lifetime | subscription | unknown
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+	restoredAt: text('restored_at')
+}, (table) => [index('stripe_dispute_reversals_charge_idx').on(table.chargeId)]);
 
 // Stripe customers still owed deletion after account teardown (the Stripe
 // erase is best-effort post-commit; a transient Stripe outage must not lose

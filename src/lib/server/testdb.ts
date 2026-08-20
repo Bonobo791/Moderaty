@@ -293,9 +293,21 @@ export async function createTestDb(): Promise<TestDb> {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			charge_id TEXT NOT NULL,
 			reason TEXT NOT NULL,
+			dispute_id TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE UNIQUE INDEX stripe_pending_reversals_charge_reason_idx ON stripe_pending_reversals (charge_id, reason)`,
+		`CREATE TABLE stripe_dispute_reversals (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			dispute_id TEXT NOT NULL UNIQUE,
+			charge_id TEXT NOT NULL,
+			payment_intent_id TEXT,
+			status TEXT NOT NULL DEFAULT 'pending',
+			source TEXT NOT NULL DEFAULT 'unknown',
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+			restored_at TEXT
+		)`,
+		`CREATE INDEX stripe_dispute_reversals_charge_idx ON stripe_dispute_reversals (charge_id)`,
 		`CREATE TABLE stripe_deletion_outbox (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			customer_id TEXT NOT NULL UNIQUE,

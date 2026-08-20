@@ -225,6 +225,13 @@
       "when": 1787256708911,
       "tag": "0031_stripe_event_leases",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "6",
+      "when": 1787257938854,
+      "tag": "0032_dispute_reversals",
+      "breakpoints": true
     }
   ]
 }

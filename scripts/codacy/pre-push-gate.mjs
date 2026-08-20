@@ -67,22 +67,33 @@ export function npmPrefix(env = process.env, home = os.homedir(), execPath = pro
  * @param repoRoot - Repository root containing .codacy
  * @returns restore function (idempotent; failures are swallowed)
  */
-function backupCodacyConfig(repoRoot) {
+export function backupCodacyConfig(repoRoot) {
 	const codacyDir = path.join(repoRoot, '.codacy');
 	const configFiles = ['codacy.config.json', 'codacy.config.baseline.json', 'configure-codacy-summary.json'];
 	const backupDir = path.join(os.tmpdir(), `codacy-gate-${process.pid}`);
 	const backedUp = [];
+	const initiallyAbsent = [];
 	mkdirSync(backupDir, { recursive: true });
 	for (const name of configFiles) {
 		const target = path.join(codacyDir, name);
 		if (existsSync(target)) {
 			copyFileSync(target, path.join(backupDir, name));
 			backedUp.push(name);
+		} else {
+			// The runner may GENERATE this file during analysis; a file that was
+			// absent before must not survive the gate as a repo change.
+			initiallyAbsent.push(name);
 		}
 	}
 	return () => {
+		// Restore the originals, then remove anything the runner generated that
+		// was not committed. Remove the backup directory only AFTER both steps
+		// so a failed restore never loses the only copy.
 		for (const name of backedUp) {
 			try { copyFileSync(path.join(backupDir, name), path.join(codacyDir, name)); } catch { /* ignore */ }
+		}
+		for (const name of initiallyAbsent) {
+			try { rmSync(path.join(codacyDir, name), { force: true }); } catch { /* ignore */ }
 		}
 		try { rmSync(backupDir, { recursive: true, force: true }); } catch { /* ignore */ }
 	};
@@ -203,8 +214,13 @@ export async function main(argv = process.argv.slice(2)) {
 
 	// --- preserve committed .codacy config (the runner regenerates it) -----------
 	const restoreConfig = backupCodacyConfig(ROOT);
-	const { payload, analysisError } = await analyzeRepository(serverBin, mcpEnv(), ROOT);
-	restoreConfig();
+	let payload;
+	let analysisError;
+	try {
+		({ payload, analysisError } = await analyzeRepository(serverBin, mcpEnv(), ROOT));
+	} finally {
+		restoreConfig(); // restore the initial .codacy state on EVERY exit path
+	}
 	if (analysisError) {
 		log('analysis failed (%s); allowing push (tooling error, not a finding)', analysisError?.message || analysisError);
 		return 0;

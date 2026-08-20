@@ -202,10 +202,21 @@ async function ytFetch(
 ): Promise<Response> {
 	const res = await fetchWithRetry(`${YT}${path}`, {
 		...init,
-		// Stryker disable next-line LogicalOperator: equivalent — no ytFetch caller passes init.headers, so `init?.headers` is always undefined and spreading `?? {}` vs `&& {}` yields identical headers
-		headers: { Authorization: `Bearer ${accessToken}`, ...init?.headers }
+		// Normalize the caller's headers into a plain object before spreading:
+		// spreading a Headers instance (or tuple array) yields an empty object,
+		// silently dropping the caller's headers. Authorization is set LAST so
+		// it always wins.
+		headers: { ...callerHeaders(init), Authorization: `Bearer ${accessToken}` }
 	}, deadline);
 	return res;
+}
+
+/** Normalizes RequestInit.headers (Headers | tuples | record | undefined) to a plain record. */
+function callerHeaders(init?: RequestInit): Record<string, string> {
+	if (!init?.headers) return {};
+	if (init.headers instanceof Headers) return Object.fromEntries(init.headers.entries());
+	if (Array.isArray(init.headers)) return Object.fromEntries(init.headers);
+	return init.headers as Record<string, string>;
 }
 
 /**

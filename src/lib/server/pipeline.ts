@@ -158,6 +158,16 @@ function ruleDecision(comment: NewComment, rule: PreparedRule['rule']): Decision
 }
 
 /** Queues a comment for human review when AI scoring is unavailable (I11). */
+/** Non-throwing error text for unknown values (JSON.stringify throws on circular/BigInt). */
+function errorText(error: unknown): string {
+	if (error instanceof Error) return error.message;
+	try {
+		return JSON.stringify(error) ?? String(error);
+	} catch {
+		return String(error);
+	}
+}
+
 function aiUnavailable(comment: NewComment, error: unknown): Decision {
 	// I11: a scoring failure never auto-approves, never auto-rejects, and
 	// never aborts the batch — the comment lands in the human review queue.
@@ -168,7 +178,7 @@ function aiUnavailable(comment: NewComment, error: unknown): Decision {
 		matchedRuleId: null,
 		aiScore: null,
 		auditAction: 'queue',
-		reason: `ai unavailable: ${error instanceof Error ? error.message : JSON.stringify(error)}`.slice(0, 200),
+		reason: `ai unavailable: ${errorText(error)}`.slice(0, 200),
 		youtubeAction: null
 	};
 }

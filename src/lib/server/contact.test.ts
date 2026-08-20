@@ -243,6 +243,8 @@ describe('createOrReusePendingSubmission', () => {
 			expect(second.id).toBe(first.id);
 			expect(second.verificationToken).toBe(first.verificationToken);
 			expect(warn).toHaveBeenCalledWith(expect.stringContaining('conflicted'));
+			// The submitter e-mail is PII — the conflict log must never include it.
+			expect(warn).not.toHaveBeenCalledWith(expect.stringContaining(SUBMIT.email));
 		} finally {
 			warn.mockRestore();
 		}
@@ -273,6 +275,15 @@ describe('isUniqueViolation', () => {
 		expect(isUniqueViolation(new Error('boom'))).toBe(false);
 		expect(isUniqueViolation({ message: 123 })).toBe(false);
 		expect(isUniqueViolation({})).toBe(false);
+	});
+
+	test('does not treat non-unique SQLite constraints as unique violations', () => {
+		// Only a UNIQUE conflict enters the reuse path; foreign-key, check, and
+		// not-null violations must propagate instead of being retried as
+		// idempotency conflicts.
+		expect(isUniqueViolation({ code: 'SQLITE_CONSTRAINT_FOREIGNKEY' })).toBe(false);
+		expect(isUniqueViolation({ code: 'SQLITE_CONSTRAINT_CHECK' })).toBe(false);
+		expect(isUniqueViolation({ code: 'SQLITE_CONSTRAINT_NOTNULL' })).toBe(false);
 	});
 
 	test('terminates on a cause cycle that does not include the original error', () => {

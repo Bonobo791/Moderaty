@@ -176,7 +176,11 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 				.from(organizations)
 				.where(eq(organizations.id, orgId))
 				.get();
-			if (prior?.autoTopupEnabled === 1 && prior?.stripeDefaultPmId && prior?.stripeDefaultPmId !== paymentMethodId) {
+			// The grant step already verified the org exists, so a missing row
+			// here is a concurrent-deletion bug: fail loudly instead of
+			// acknowledging the event while updating zero rows.
+			if (!prior) throw new Error(`stripe: organization ${orgId} is missing while saving a payment method`);
+			if (prior.autoTopupEnabled === 1 && prior.stripeDefaultPmId && prior.stripeDefaultPmId !== paymentMethodId) {
 				await db
 					.update(organizations)
 					.set({ autoTopupEnabled: 0, autoTopupState: 'disabled' })

@@ -13,11 +13,11 @@
 //
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
-import { npmPrefix } from './pre-push-gate.mjs';
+import { backupCodacyConfig, npmPrefix } from './pre-push-gate.mjs';
 
 const tempDirs = [];
 
@@ -48,5 +48,28 @@ describe('npmPrefix — no npm subprocess, no PATH resolution (S4036)', () => {
 
 	test('derives the prefix from the node installation layout when no config exists', () => {
 		expect(npmPrefix({}, tempHome(), '/opt/node/bin/node', 'linux')).toBe('/opt/node');
+	});
+});
+
+
+describe('backupCodacyConfig', () => {
+	test('restores committed files and removes files the runner generated', () => {
+		const root = mkdtempSync(join(tmpdir(), 'codacy-gate-root-'));
+		tempDirs.push(root);
+		const codacyDir = join(root, '.codacy');
+		mkdirSync(codacyDir, { recursive: true });
+		// committed before the run:
+		writeFileSync(join(codacyDir, 'codacy.config.json'), '{"committed":true}');
+
+		const restore = backupCodacyConfig(root);
+		// the runner regenerates the committed file and creates a NEW one:
+		writeFileSync(join(codacyDir, 'codacy.config.json'), '{"regenerated":true}');
+		writeFileSync(join(codacyDir, 'configure-codacy-summary.json'), '{"generated":true}');
+
+		restore();
+
+		// committed file restored, generated file removed, nothing else created:
+		expect(readFileSync(join(codacyDir, 'codacy.config.json'), 'utf8')).toBe('{"committed":true}');
+		expect(existsSync(join(codacyDir, 'configure-codacy-summary.json'))).toBe(false);
 	});
 });

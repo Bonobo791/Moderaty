@@ -132,7 +132,15 @@ export function stripeErrorCode(error: unknown): string {
 		const code = (error as { code?: unknown }).code;
 		if (typeof code === 'string') return code;
 	}
-	return error instanceof Error ? error.message : JSON.stringify(error);
+	if (error instanceof Error) return error.message;
+	// Never throw on serialization (circular / BigInt values): a card-decline
+	// failure must still record and release the claim. 'unknown_error' is a
+	// stable, non-throwing fallback.
+	try {
+		return JSON.stringify(error) ?? 'unknown_error';
+	} catch {
+		return 'unknown_error';
+	}
 }
 
 /**
@@ -244,14 +252,28 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 				isNotNull(organizations.stripeDefaultPmId)
 			)
 		)
-		.returning({ id: organizations.id });
+		.returning({
+			id: organizations.id,
+			customerId: organizations.stripeCustomerId,
+			defaultPmId: organizations.stripeDefaultPmId
+		});
 	if (claimed.length === 0) return false; // lost the race (or became ineligible mid-flight)
 
-	// Re-narrow after basicEligibility() moved the guard into a helper (TS
-	// control-flow narrowing does not cross the function boundary).
-	const customerId = org.customerId;
-	const defaultPmId = org.defaultPmId;
-	if (!customerId || !defaultPmId) return false;
+	// Use the identifiers captured BY THE CLAIM, not the earlier org read: a
+	// payment method changed between the eligibility read and the claim must
+	// never charge the stale pair (the claim re-checked isNotNull in SQL).
+	const claim = claimed[0];
+	const customerId = claim.customerId;
+	const defaultPmId = claim.defaultPmId;
+	if (!customerId || !defaultPmId) {
+		// The claim re-checked isNotNull, so missing identifiers here is a bug:
+		// release the in-flight claim and fail loudly instead of charging wrong.
+		await db
+			.update(organizations)
+			.set({ autoTopupState: 'idle', autoTopupLastAttemptAt: null })
+			.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight')));
+		throw new Error('auto top-up claim returned incomplete payment identifiers');
+	}
 
 	const idempotencyKey = `autotopup:${customerId}:${startOfUtcDayIso(0)}:${dayCount + 1}`;
 	try {

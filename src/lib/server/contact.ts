@@ -167,14 +167,14 @@ export async function createOrReusePendingSubmission(input: {
 			if (reused) {
 				// A concurrent-insert conflict is a real server event: log the
 				// race so operators can see it (never a silent fallback).
-				console.warn(`[contact] pending submission insert for ${email} conflicted; reusing row ${reused.id}`);
+				console.warn('[contact] pending submission insert conflicted; reusing the existing pending row');
 				return reused;
 			}
 			// The winner was verified between the conflict and the reuse update —
 			// loop to create a fresh pending row instead of returning a used token.
 		}
 	}
-	throw new Error(`could not create a pending contact submission for ${email} after repeated conflicts`);
+	throw new Error('could not create a pending contact submission after repeated conflicts');
 }
 
 /**
@@ -217,7 +217,7 @@ export function isUniqueViolation(error: unknown): boolean {
 	let current: unknown = error;
 	for (let depth = 0; current && depth < 10; depth += 1) {
 		const record = current as { code?: unknown; message?: unknown };
-		if (typeof record.code === 'string' && /SQLITE_CONSTRAINT/i.test(record.code)) return true;
+		if (typeof record.code === 'string' && /SQLITE_CONSTRAINT_UNIQUE/i.test(record.code)) return true;
 		if (typeof record.message === 'string' && /UNIQUE constraint failed/i.test(record.message)) return true;
 		current = (current as { cause?: unknown }).cause;
 	}

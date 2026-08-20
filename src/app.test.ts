@@ -32,6 +32,7 @@ describe('app shell', () => {
 		// placeholder would shadow every route-specific title.
 		const fallbackTitle = html.indexOf('<title>Moderaty</title>');
 		const svelteKitHead = html.indexOf('%sveltekit.head%');
+		expect(svelteKitHead).toBeGreaterThanOrEqual(0); // placeholder must exist (indexOf -1 would silently pass the comparison)
 		expect(fallbackTitle).toBeGreaterThan(svelteKitHead);
 	});
 });

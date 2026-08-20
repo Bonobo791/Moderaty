@@ -240,6 +240,15 @@ test('rejects patterns over the maximum length but accepts the boundary', () => 
 	expect(matchRule('a'.repeat(300), 'author', [atMax])).toBe(atMax);
 });
 
+test('rejects an oversized INVALID pattern as unsafe before the RegExp constructor runs', () => {
+	// Length-first (I6): a 257-char pattern that is also syntactically invalid
+	// must be rejected by the LENGTH guard, not by the compile step.
+	const oversizedInvalid = '(' + 'a'.repeat(256);
+	expect(() =>
+		matchRule('text', 'author', [{ id: 48, type: 'regex', pattern: oversizedInvalid, action: 'hold' }])
+	).toThrow(/rule #48 has an unsafe regex/);
+});
+
 test('recheck analyzes patterns with the case-insensitive flag', async () => {
 	const { checkSync: mockedCheckSync } = await import('recheck');
 	vi.mocked(mockedCheckSync).mockClear();

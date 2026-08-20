@@ -135,20 +135,19 @@ function unsafeRegex(pattern: string): boolean {
 	}
 }
 
-/**
- * Classifies a user pattern BEFORE it is compiled (I6: recheck + syntax
- * guards precede every compile, so the RegExp constructor below can never
- * receive an unsafe or syntactically invalid pattern).
- */
+/** Compiles a user regex only after the length and recheck/syntax guards (I6). */
 function regex(rule: RuleRow): RegExp {
+	// Length guard FIRST: an oversized pattern is rejected before the
+	// RegExp constructor ever sees it (I6 — validate before compile).
+	if (rule.pattern.length > MAX_REGEX_PATTERN_LENGTH) throw new Error(`rule #${rule.id} has an unsafe regex`);
 	let compiled: RegExp;
 	try {
 		// nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp, Semgrep_javascript_dos_rule-non-literal-regexp
 		// I6: the pattern passes recheck + syntax guards before it is EVER
-		// executed — unsafeRegex() below rejects overly long, backreferencing,
-		// duplicate-alternation, and ReDoS-prone patterns, and only a proven-safe
-		// pattern reaches .test(). Compilation never EXECUTES the pattern, so
-		// this non-literal constructor is not a ReDoS surface.
+		// executed — unsafeRegex() below rejects backreferencing,
+		// duplicate-alternation, and ReDoS-prone patterns, and only a
+		// proven-safe pattern reaches .test(). Compilation never EXECUTES the
+		// pattern, so this non-literal constructor is not a ReDoS surface.
 		compiled = new RegExp(rule.pattern, 'i');
 	} catch (error) {
 		throw new Error(`rule #${rule.id} has an invalid regex: ${error instanceof Error ? error.message : String(error)}`);

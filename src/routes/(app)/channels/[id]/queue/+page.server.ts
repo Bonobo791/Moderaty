@@ -48,7 +48,9 @@ export async function load({ params, locals }) {
 function statusForAction(action: 'approve' | 'reject' | 'delete' | 'ban'): 'approved' | 'deleted' | 'rejected' {
 	if (action === 'approve') return 'approved';
 	if (action === 'delete') return 'deleted';
-	return 'rejected';
+	if (action === 'reject' || action === 'ban') return 'rejected';
+	// Unsupported runtime values must never silently map to a moderation status.
+	throw error(500, 'Unsupported moderation action');
 }
 
 async function act(paramsId: string, commentId: string, action: 'approve' | 'reject' | 'delete' | 'ban', locals: App.Locals) {

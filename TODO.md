@@ -4,6 +4,29 @@
 -Create auto-recharge functionality and update website language
 -Add channel disconnect button and functionality
 
+## Codacy triage round 2026-08-20 (main-branch 111-issue list)
+
+Re-validated the full dashboard list against `dev`:
+
+- **Fixed on dev:** Dockerfile consecutive `RUN`s consolidated (build + prune);
+  `json-ld.ts` `replaceAll` → regex replace (compat); `.codacy.yml` excludes
+  `drizzle/**` from Semgrep (the RAC_\* false positives).
+- **Already fixed on dev (main analysis stale):** `cron/+server.ts` non-format-
+  string error log.
+- **False positives (confirmed, no change):** `google.ts:54` SSRF (URL is a
+  compile-time restricted endpoint union — cannot be caller-controlled);
+  `moderation.ts:82` / `tone.ts:84` / `tone-eval.mjs:269` / `mailjet.ts:141`
+  "JSON.stringify key ordering" (pattern misfires — no stringify-to-keys on
+  those lines); `contact.ts:285` XSS (values are `escapeHtml`-escaped);
+  `youtube.ts:377` SQLi (error message interpolation, not SQL); the
+  `.agents/skills-src/*/skill_prehook.py` broad-`except`/`pass` (hooks must
+  exit 0 — by design); `app.css` unknown rules, `tsconfig.json` JSONC parse
+  artifact, `package-lock.json` file-length, `netlify-migrate.test.mjs` /
+  `pre-push-gate.mjs` / `tonePrompt.js` "looks like JS template string".
+- **Deferred (already listed below):** every complexity/line-count finding
+  (pipeline, cron, deletion, stripe/webhooks, rules, youtube, route loaders,
+  test helpers, seed-dev) — keep the suite green; refactor test-guarded.
+
 ## Deferred lint/quality refactors (Codacy/SonarCloud, triaged 2026-08-19)
 
 Real maintainability findings — each is a focused, test-guarded refactor (no
@@ -26,15 +49,11 @@ security/correctness impact; the suite must stay green: `npm run test` /
 - [ ] `src/routes/(app)/channels/[id]/+page.server.ts:121` — `dryRun` action: cyclomatic 16, 58 lines.
 - [ ] `src/lib/server/contact.ts:102` — `createOrReusePendingSubmission`: 61 lines. Extract the fresh-row builder (conflict loop stays).
 
-### Minor / low value (can be left)
-- [ ] `src/lib/server/billing/autotopup.ts:205` — `maybeTriggerAutoTopUp`: 81 lines (cyclomatic already reduced); `src/routes/(app)/usage/+page.server.ts` `load`/`setAutoTopup` lengths; `scripts/seed-dev.mjs:127` `seedChannel` 75 lines; `src/lib/server/pipeline.ts` 610 non-comment lines (file split).
-- [ ] Test-file lengths (pipeline.test.ts 1468, org.test.ts 754, etc.) — acceptable for fixture-heavy suites; split only when a test file needs a new concern.
-- [ ] `Dockerfile:64` — consecutive `RUN`s (`npm prune --omit=dev`): cosmetic layer consolidation.
-
 ## Codacy dashboard cleanups (no code — settings clicks)
 
-- [ ] Delete the custom **"Enforce Access to RAC_\* Tables in SQL Queries"** pattern in Codacy → Code patterns (leftover from another project; 26 false positives on drizzle migrations).
+- [ ] Delete the custom **"Enforce Access to RAC_\* Tables in SQL Queries"** pattern in Codacy → Code patterns (leftover from another project; 26 false positives on drizzle migrations — repo-side guard added: `.codacy.yml` excludes `drizzle/**` from Semgrep).
 - [ ] Mark "won't fix" (per-issue) for the remaining false positives: XSS on `app.test.ts` HTML assertions, `contact.ts:285` escaped email template, `rules.ts:151` I6-gated `new RegExp`, package.json variant versions, `skill_prehook.py` broad-`except`/`pass` (hooks must exit 0).
+- [ ] Suppress the engine-noise findings: `app.css` "unknown rule" (`scss_no-unused-private-members`, `no-obsolete-attribute`), `tsconfig.json` JSONC parse artifact, `package-lock.json` file-length, `google.ts:54` SSRF (compile-time restricted endpoint union), `moderation.ts:82`/`tone.ts:84`/`tone-eval.mjs:269`/`mailjet.ts:141` "JSON.stringify key ordering" (pattern misfires), `youtube.ts:377` SQLi-in-error-message, `netlify-migrate.test.mjs`/`pre-push-gate.mjs`/`tonePrompt.js` "looks like JS template string" (all FPs).
 
 ## Operational (human, at the dev → main release)
 

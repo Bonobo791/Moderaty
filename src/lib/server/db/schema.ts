@@ -426,7 +426,7 @@ export const stripeDisputeReversals = sqliteTable('stripe_dispute_reversals', {
 	disputeId: text('dispute_id').notNull().unique(),
 	chargeId: text('charge_id').notNull(),
 	paymentIntentId: text('payment_intent_id'),
-	status: text('status').notNull().default('pending'), // pending | reversed | won | restored
+	status: text('status').notNull().default('pending'), // pending | reversed | ignored | won | restored
 	source: text('source').notNull().default('unknown'), // credits | lifetime | subscription | unknown
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
 	restoredAt: text('restored_at')

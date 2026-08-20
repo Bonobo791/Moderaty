@@ -22,7 +22,7 @@
 
 import { and, asc, desc, eq, gt, gte, inArray, lt, ne, or, sql } from 'drizzle-orm';
 import { db } from '$lib/server/db';
-import { creditTransactions, organizations, stripePendingReversals, stripeSubscriptionPeriods } from '$lib/server/db/schema';
+import { creditTransactions, organizations, stripePendingReversals, stripeSubscriptionPeriods, stripeDisputeReversals } from '$lib/server/db/schema';
 
 export type CreditReason = 'consume' | 'purchase' | 'auto_topup' | 'refund' | 'dispute' | 'adjust';
 // 'refund' and 'dispute' are reversal refTypes anchored on the charge id —
@@ -347,7 +347,7 @@ export async function listCreditTransactions(orgId: string, limit = 50) {
  * grant had not yet arrived (Stripe webhook delivery order is not
  * guaranteed). charge_id UNIQUE: one reversal per charge, first event wins.
  */
-export async function queuePendingReversal(chargeId: string, reason: 'refund' | 'dispute'): Promise<void> {
+export async function queuePendingReversal(chargeId: string, reason: 'refund' | 'dispute', disputeId?: string): Promise<void> {
 	// UNIQUE(charge_id, reason) — NOT charge_id alone: a dispute AND a later
 	// full refund can both arrive before the delayed grant, and each
 	// obligation must survive to drain on its own ledger anchor (a won-dispute
@@ -356,7 +356,7 @@ export async function queuePendingReversal(chargeId: string, reason: 'refund' | 
 	// second (codex review).
 	await db
 		.insert(stripePendingReversals)
-		.values({ chargeId, reason })
+		.values({ chargeId, reason, disputeId })
 		.onConflictDoNothing({ target: [stripePendingReversals.chargeId, stripePendingReversals.reason] });
 }
 
@@ -386,6 +386,14 @@ export async function drainPendingReversals(chargeId: string): Promise<number> {
 		// second (refund + dispute) obligation before its mutation runs — a
 		// crash in between would make the retry unable to reconcile it.
 		await db.transaction(async (tx) => {
+			if (row.reason === 'dispute' && row.disputeId) {
+				const dispute = await tx.select({ status: stripeDisputeReversals.status }).from(stripeDisputeReversals).where(eq(stripeDisputeReversals.disputeId, row.disputeId)).get();
+				if (dispute?.status === 'won') {
+					await tx.update(stripeDisputeReversals).set({ source: 'credits', status: 'restored' }).where(eq(stripeDisputeReversals.disputeId, row.disputeId));
+					await tx.delete(stripePendingReversals).where(eq(stripePendingReversals.id, row.id));
+					return;
+				}
+			}
 			// A disputed customer must never be re-charged off-session — same
 			// policy as reverseDispute, applied at drain time (the dispute event
 			// found no org to disable when it arrived).
@@ -408,6 +416,7 @@ export async function drainPendingReversals(chargeId: string): Promise<number> {
 				refId: chargeId,
 				chargeId
 			});
+			if (row.reason === 'dispute' && row.disputeId) await tx.update(stripeDisputeReversals).set({ source: 'credits', status: 'reversed' }).where(eq(stripeDisputeReversals.disputeId, row.disputeId));
 			// Satisfied (whether applied now or by a concurrent path): the anchor
 			// makes double-application impossible, so the obligation is done.
 			await tx.delete(stripePendingReversals).where(eq(stripePendingReversals.id, row.id));

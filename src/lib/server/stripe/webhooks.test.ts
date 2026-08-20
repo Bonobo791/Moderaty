@@ -18,7 +18,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { db } from '$lib/server/db';
-import { organizations, stripeEvents, stripePendingReversals, stripeLifetimeEntitlements, stripeSubscriptionPeriods } from '$lib/server/db/schema';
+import { organizations, stripeEvents, stripePendingReversals, stripeLifetimeEntitlements, stripeLifetimeSlots, stripeSubscriptionPeriods, stripeDisputeReversals } from '$lib/server/db/schema';
 import { applyLedgerDelta, getCredits } from '$lib/server/billing/ledger';
 import { fulfillAutoTopup, fulfillCheckout, handleStripeEvent, restoreWonDispute, reverseCharge, reverseDispute } from './webhooks';
 
@@ -43,7 +43,7 @@ vi.mock('$lib/server/stripe/client', () => ({
 }));
 vi.mock('$env/dynamic/private', () => ({ env: {} }));
 
-setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_pending_reversals', 'stripe_lifetime_entitlements', 'stripe_subscription_periods', 'stripe_lifetime_slots']);
+setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_pending_reversals', 'stripe_lifetime_entitlements', 'stripe_subscription_periods', 'stripe_lifetime_slots', 'stripe_dispute_reversals']);
 
 function session(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 	return {
@@ -68,6 +68,21 @@ beforeEach(() => {
 
 
 describe('paid hosted products', () => {
+	test('rejects a lifetime fulfillment while a hosted subscription is active', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lifetime', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		expect(await fulfillCheckout('cs_lifetime')).toBe('rejected');
+		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toHaveLength(0);
+	});
+
+	test('rejects a hosted fulfillment while lifetime access is active', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1', activeEntitlementId: 1 }).where(eq(stripeLifetimeSlots.slot, 1));
+		await testDb().db.insert(stripeLifetimeEntitlements).values({ id: 1, orgId: 'org-1', slot: 1, checkoutSessionId: 'cs_old' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_hosted', mode: 'subscription', subscription: 'sub_1', metadata: { org_id: 'org-1', product: 'hosted' }, payment_intent: null }));
+		expect(await fulfillCheckout('cs_hosted')).toBe('rejected');
+	});
+
 	test('checkout completion records the subscription but does not grant monthly allowance', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		mocks.sessionsRetrieve.mockResolvedValue(session({ mode: 'subscription', subscription: 'sub_1', metadata: { org_id: 'org-1', product: 'hosted' }, payment_intent: null }));
@@ -111,6 +126,42 @@ describe('subscription lifecycle webhooks', () => {
 		expect(org?.plan).toBe('hosted');
 		expect(org?.stripeSubscriptionStatus).toBe('active');
 	});
+	test('a won dispute restores a subscription period allowance', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
+		await handleStripeEvent(event('invoice.paid', 'in_1', { id: 'in_1', subscription: 'sub_1', payment_intent: 'pi_1', charge: 'ch_1', period_start: 1798848000, period_end: 1801526400, lines: { data: [{ period: { start: 1798848000, end: 1801526400 } }] } }) as never);
+		mocks.disputesRetrieve.mockResolvedValueOnce({ id: 'disp_sub', charge: 'ch_1', status: 'lost' }).mockResolvedValueOnce({ id: 'disp_sub', charge: 'ch_1', status: 'won' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1', amount: 500, amount_refunded: 0 });
+		await reverseDispute('disp_sub');
+		expect(await restoreWonDispute('disp_sub')).toBe(true);
+		expect((await testDb().db.select().from(stripeSubscriptionPeriods).where(eq(stripeSubscriptionPeriods.invoiceId, 'in_1')).get())?.status).toBe('paid');
+	});
+
+	test('a won dispute restores the lifetime entitlement that the dispute revoked', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lifetime', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		expect(await fulfillCheckout('cs_lifetime')).toBe('granted');
+		mocks.disputesRetrieve.mockResolvedValueOnce({ id: 'disp_1', charge: 'ch_1', status: 'lost' }).mockResolvedValueOnce({ id: 'disp_1', charge: 'ch_1', status: 'won' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1', amount: 4900, amount_refunded: 0 });
+		expect(await reverseDispute('disp_1')).toBe(true);
+		expect(await restoreWonDispute('disp_1')).toBe(true);
+		expect((await testDb().db.select().from(stripeLifetimeEntitlements).where(eq(stripeLifetimeEntitlements.checkoutSessionId, 'cs_lifetime')).get())?.status).toBe('active');
+	});
+
+	test('two disputes on one charge cannot each restore the same credit reversal', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await applyLedgerDelta(testDb().db as never, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+		let won = false;
+		mocks.disputesRetrieve.mockImplementation(async (id: string) => ({ id, charge: 'ch_1', status: won ? 'won' : 'lost' }));
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1', amount: 5000, amount_refunded: 0 });
+		await reverseDispute('disp_1');
+		await reverseDispute('disp_2');
+		won = true;
+		await restoreWonDispute('disp_1');
+		await restoreWonDispute('disp_2');
+		expect(await getCredits('org-1')).toBe(500);
+		expect(await testDb().db.select().from(stripeDisputeReversals)).toHaveLength(2);
+	});
+
 	test('concurrent delivery claims one inbox lease and rejects the competing worker', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		let releaseSession!: (value: Record<string, unknown>) => void;
@@ -130,7 +181,7 @@ describe('subscription lifecycle webhooks', () => {
 		mocks.disputesRetrieve.mockResolvedValue({ id: 'disp_1', charge: 'ch_1' });
 		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1', amount: 4900, amount_refunded: 0 });
 		expect(await handleStripeEvent(event('charge.dispute.created', 'disp_1', { id: 'ch_1', object: 'dispute' }) as never)).toBe(true);
-		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toMatchObject([{ status: 'released' }]);
+		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toMatchObject([{ status: 'disputed' }]);
 		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.plan).toBe('free');
 	});
 
@@ -388,7 +439,7 @@ describe('reverseCharge / reverseDispute', () => {
 		// money is refunded, and never loses credits twice.
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		await applyLedgerDelta(db, { orgId: 'org-1', delta: 2000, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
-		mocks.disputesRetrieve.mockResolvedValue({ id: 'du_1', charge: 'ch_1', status: 'won' });
+		mocks.disputesRetrieve.mockResolvedValueOnce({ id: 'du_1', charge: 'ch_1', status: 'lost' }).mockResolvedValueOnce({ id: 'du_1', charge: 'ch_1', status: 'won' });
 		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1', amount: 200000, amount_refunded: 200000 });
 
 		expect(await reverseDispute('du_1')).toBe(true);
@@ -421,7 +472,7 @@ describe('reverseCharge / reverseDispute', () => {
 	test('a won dispute re-grants the reversed credits, once', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		await applyLedgerDelta(db, { orgId: 'org-1', delta: 2000, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
-		mocks.disputesRetrieve.mockResolvedValue({ id: 'du_1', charge: 'ch_1', status: 'won' });
+		mocks.disputesRetrieve.mockResolvedValueOnce({ id: 'du_1', charge: 'ch_1', status: 'lost' }).mockResolvedValueOnce({ id: 'du_1', charge: 'ch_1', status: 'won' });
 		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1' });
 		await reverseDispute('du_1');
 

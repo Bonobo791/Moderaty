@@ -25,10 +25,10 @@ import { and, eq, isNull, lt, or } from 'drizzle-orm';
 import type Stripe from 'stripe';
 
 import { db } from '$lib/server/db';
-import { organizations, creditTransactions, stripeEvents, stripeLifetimeEntitlements } from '$lib/server/db/schema';
+import { organizations, creditTransactions, stripeEvents, stripeLifetimeEntitlements, stripeDisputeReversals } from '$lib/server/db/schema';
 import { applyLedgerDelta, drainPendingReversals, findGrantForStripe, queuePendingReversal } from '$lib/server/billing/ledger';
 import { grantAutoTopupCredits, handleAutoTopupFailure } from '$lib/server/billing/autotopup';
-import { claimLifetimeSlot, grantSubscriptionPeriod, refundSubscriptionPeriod, disputeSubscriptionPeriod, releaseLifetimeForPayment, applySubscriptionSnapshot } from '$lib/server/billing/entitlements';
+import { claimLifetimeSlot, grantSubscriptionPeriod, refundSubscriptionPeriod, disputeSubscriptionPeriod, releaseLifetimeForPayment, applySubscriptionSnapshot, revokeLifetimeForDispute, restoreLifetimeForDispute, restoreDisputedSubscriptionPeriod } from '$lib/server/billing/entitlements';
 import { bundleById, type CreditBundle } from '$lib/server/stripe/bundles';
 import { getStripe } from '$lib/server/stripe/client';
 
@@ -153,8 +153,17 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 				return 'rejected';
 			}
 			const customerId = typeof session.customer === 'string' ? session.customer : session.customer?.id;
-			const existing = await db.select({ stripeSubscriptionId: organizations.stripeSubscriptionId, stripeCustomerId: organizations.stripeCustomerId }).from(organizations).where(eq(organizations.id, orgId)).get();
+			const existing = await db.select({ stripeSubscriptionId: organizations.stripeSubscriptionId, stripeSubscriptionStatus: organizations.stripeSubscriptionStatus, stripeCustomerId: organizations.stripeCustomerId }).from(organizations).where(eq(organizations.id, orgId)).get();
 			if (!existing) throw new Error(`org not found: ${orgId}`);
+			const lifetime = await db.select({ id: stripeLifetimeEntitlements.id }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
+			if (lifetime) {
+				console.error(`stripe: hosted checkout ${sessionId} would overlap lifetime access for ${orgId}`);
+				return 'rejected';
+			}
+			if (existing.stripeSubscriptionId && existing.stripeSubscriptionId !== subscriptionId && ['active', 'trialing', 'past_due', 'unpaid'].includes(existing.stripeSubscriptionStatus ?? '')) {
+				console.error(`stripe: hosted checkout ${sessionId} would replace an active subscription for ${orgId}`);
+				return 'rejected';
+			}
 			if (existing.stripeCustomerId && customerId && existing.stripeCustomerId !== customerId) {
 				console.error(`stripe: hosted checkout ${sessionId} customer does not belong to org ${orgId}`);
 				return 'rejected';
@@ -169,6 +178,14 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 		}
 		const existing = await db.select({ id: stripeLifetimeEntitlements.id }).from(stripeLifetimeEntitlements).where(eq(stripeLifetimeEntitlements.checkoutSessionId, sessionId)).get();
 		if (existing) return 'already';
+		const org = await db.select({ stripeSubscriptionId: organizations.stripeSubscriptionId, stripeSubscriptionStatus: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, orgId)).get();
+		if (!org) throw new Error(`org not found: ${orgId}`);
+		if (org.stripeSubscriptionId && ['active', 'trialing', 'past_due', 'unpaid'].includes(org.stripeSubscriptionStatus ?? '')) {
+			console.error(`stripe: lifetime checkout ${sessionId} would overlap hosted access for ${orgId}`);
+			return 'rejected';
+		}
+		const activeLifetime = await db.select({ id: stripeLifetimeEntitlements.id }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
+		if (activeLifetime) return 'already';
 		const result = await claimLifetimeSlot({
 			orgId,
 			checkoutSessionId: sessionId,
@@ -329,6 +346,14 @@ export async function fulfillAutoTopup(paymentIntentId: string): Promise<boolean
 	return grantAutoTopupCredits(orgId, pi);
 }
 
+async function recordDisputeReversal(input: { disputeId: string; chargeId: string; paymentIntentId?: string; status: string; source: string }): Promise<void> {
+	await db.insert(stripeDisputeReversals).values(input).onConflictDoNothing({ target: stripeDisputeReversals.disputeId });
+}
+
+async function updateDisputeReversal(disputeId: string, values: { status?: string; source?: string }): Promise<void> {
+	await db.update(stripeDisputeReversals).set(values).where(eq(stripeDisputeReversals.disputeId, disputeId));
+}
+
 /**
  * Reverses credits granted for a refunded or disputed charge. Each path
  * anchors on its OWN refType — 'refund' for refunds, 'dispute' for disputes
@@ -342,7 +367,7 @@ export async function fulfillAutoTopup(paymentIntentId: string): Promise<boolean
  * @param reason - Whether the reversal is for a refund or dispute
  * @returns `true` if a reversal was applied, `false` if no matching credit grant was found or the reversal was already recorded
  */
-export async function reverseCharge(chargeId: string, reason: 'refund' | 'dispute'): Promise<boolean> {
+export async function reverseCharge(chargeId: string, reason: 'refund' | 'dispute', disputeId?: string): Promise<boolean> {
 	const charge = await getStripe().charges.retrieve(chargeId, { expand: ['payment_intent'] });
 	const paymentIntentId = typeof charge.payment_intent === 'string' ? charge.payment_intent : charge.payment_intent?.id;
 	// v1 policy (docs/stripe-checkout-webhooks.md §7): credits are reversed
@@ -362,10 +387,19 @@ export async function reverseCharge(chargeId: string, reason: 'refund' | 'disput
 			return false;
 		}
 	}
+	if (reason === 'dispute' && !disputeId) throw new Error(`dispute reversal for ${chargeId} is missing dispute id`);
+	if (reason === 'dispute' && disputeId) await recordDisputeReversal({ disputeId, chargeId, paymentIntentId, status: 'pending', source: 'unknown' });
 	if (reason === 'refund' || reason === 'dispute') {
-		const lifetimeReleased = await releaseLifetimeForPayment({ paymentIntentId, chargeId });
-		const periodRevoked = reason === 'refund' ? await refundSubscriptionPeriod({ paymentIntentId, chargeId }) : await disputeSubscriptionPeriod({ paymentIntentId, chargeId });
-		if (lifetimeReleased || periodRevoked) return true;
+		const lifetimeChanged = reason === 'refund' ? await releaseLifetimeForPayment({ paymentIntentId, chargeId }) : await revokeLifetimeForDispute({ paymentIntentId, chargeId });
+		if (lifetimeChanged) {
+			if (disputeId) await updateDisputeReversal(disputeId, { status: 'reversed', source: 'lifetime' });
+			return true;
+		}
+		const periodChanged = reason === 'refund' ? await refundSubscriptionPeriod({ paymentIntentId, chargeId }) : await disputeSubscriptionPeriod({ paymentIntentId, chargeId });
+		if (periodChanged) {
+			if (disputeId) await updateDisputeReversal(disputeId, { status: 'reversed', source: 'subscription' });
+			return true;
+		}
 	}
 	const match = await findGrantForStripe(db, { chargeId, paymentIntentId });
 	if (!match) {
@@ -375,14 +409,14 @@ export async function reverseCharge(chargeId: string, reason: 'refund' | 'disput
 		// fulfillCheckout/fulfillAutoTopup drains it and the credits come back
 		// (codex 6153). A charge that never grants leaves a stale row the cron
 		// sweep drops after the webhook-retry horizon.
-		await queuePendingReversal(chargeId, reason);
+		await queuePendingReversal(chargeId, reason, disputeId);
 		console.error(`stripe: ${reason} for ${chargeId} matched no credit grant — queued as pending reversal for when the grant lands`);
 		return false;
 	}
 	// The grant may already have been reversed — each path's own anchor
 	// (refType 'refund' or 'dispute', refId = charge id) makes the reversal
 	// apply at most once per path.
-	return applyLedgerDelta(db, {
+	const applied = await applyLedgerDelta(db, {
 		orgId: match.orgId,
 		delta: -match.credits,
 		reason,
@@ -391,6 +425,8 @@ export async function reverseCharge(chargeId: string, reason: 'refund' | 'disput
 		chargeId,
 		paymentIntentId
 	});
+	if (disputeId) await updateDisputeReversal(disputeId, { status: applied ? 'reversed' : 'ignored', source: 'credits' });
+	return applied;
 }
 
 /**
@@ -410,6 +446,7 @@ export async function reverseDispute(disputeId: string): Promise<boolean> {
 		console.error(`stripe: dispute ${disputeId} has no charge`);
 		return false;
 	}
+	if (dispute.status === 'won') return restoreWonDispute(disputeId);
 	// The org is identified through the grant (a dispute on a charge that
 	// never granted credits has no org to disable — logged by reverseCharge).
 	const match = await findGrantForStripe(db, { chargeId });
@@ -419,7 +456,7 @@ export async function reverseDispute(disputeId: string): Promise<boolean> {
 			.set({ autoTopupEnabled: 0, autoTopupState: 'disabled' })
 			.where(eq(organizations.id, match.orgId));
 	}
-	return reverseCharge(chargeId, 'dispute');
+	return reverseCharge(chargeId, 'dispute', disputeId);
 }
 
 /**
@@ -431,35 +468,26 @@ export async function reverseDispute(disputeId: string): Promise<boolean> {
 export async function restoreWonDispute(disputeId: string): Promise<boolean> {
 	const dispute = await getStripe().disputes.retrieve(disputeId);
 	if (dispute.status !== 'won') return false;
-	const chargeId = typeof dispute.charge === 'string' ? dispute.charge : dispute.charge?.id;
-	if (!chargeId) return false;
-	const match = await findGrantForStripe(db, { chargeId });
-	if (!match) {
-		console.error(`stripe: won dispute ${disputeId} matched no grant — nothing to restore`);
+	const reversal = await db.select().from(stripeDisputeReversals).where(eq(stripeDisputeReversals.disputeId, disputeId)).get();
+	if (!reversal || reversal.status === 'ignored' || reversal.status === 'restored') return false;
+	if (reversal.status === 'pending') {
+		await db.update(stripeDisputeReversals).set({ status: 'won' }).where(eq(stripeDisputeReversals.disputeId, disputeId));
 		return false;
 	}
-	// Only restore when this dispute actually reversed credits: a lost
-	// dispute.created delivery must not turn a won event into a double grant.
-	const reversal = await db
-		.select({ id: creditTransactions.id })
-		.from(creditTransactions)
-		.where(
-			and(
-				eq(creditTransactions.orgId, match.orgId),
-				eq(creditTransactions.reason, 'dispute'),
-				eq(creditTransactions.chargeId, chargeId)
-			)
-		)
-		.get();
-	if (!reversal) return false;
-	return applyLedgerDelta(db, {
-		orgId: match.orgId,
-		delta: match.credits,
-		reason: 'adjust',
-		refType: 'dispute',
-		refId: disputeId,
-		chargeId
-	});
+	const identifiers = { paymentIntentId: reversal.paymentIntentId ?? undefined, chargeId: reversal.chargeId };
+	let restored = false;
+	if (reversal.source === 'lifetime') restored = await restoreLifetimeForDispute(identifiers);
+	else if (reversal.source === 'subscription') restored = await restoreDisputedSubscriptionPeriod(identifiers);
+	else if (reversal.source === 'credits') {
+		const match = await findGrantForStripe(db, identifiers);
+		if (match) {
+			const disputeReversal = await db.select({ id: creditTransactions.id }).from(creditTransactions).where(and(eq(creditTransactions.orgId, match.orgId), eq(creditTransactions.reason, 'dispute'), eq(creditTransactions.chargeId, reversal.chargeId))).get();
+			if (disputeReversal) restored = await applyLedgerDelta(db, { orgId: match.orgId, delta: match.credits, reason: 'adjust', refType: 'dispute', refId: disputeId, chargeId: reversal.chargeId });
+		}
+	}
+	if (!restored) return false;
+	await db.update(stripeDisputeReversals).set({ status: 'restored', restoredAt: new Date().toISOString() }).where(eq(stripeDisputeReversals.disputeId, disputeId));
+	return true;
 }
 
 

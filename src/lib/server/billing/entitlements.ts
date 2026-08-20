@@ -5,7 +5,8 @@ import {
 	stripeLifetimeEntitlements,
 	stripeLifetimeSlots,
 	stripeSubscriptionPeriods,
-	stripePendingReversals
+	stripePendingReversals,
+	stripeDisputeReversals
 } from '$lib/server/db/schema';
 import { HOSTED_INCLUDED_CREDITS } from './plans';
 
@@ -96,9 +97,12 @@ export async function grantSubscriptionPeriod(input: SubscriptionPeriodGrant): P
 		const org = await tx.select({ id: organizations.id }).from(organizations).where(eq(organizations.id, input.orgId)).get();
 		if (!org) throw new Error(`org not found: ${input.orgId}`);
 		const pending = input.chargeId
-			? await tx.select({ reason: stripePendingReversals.reason }).from(stripePendingReversals).where(eq(stripePendingReversals.chargeId, input.chargeId)).all()
+			? await tx.select({ reason: stripePendingReversals.reason, disputeId: stripePendingReversals.disputeId }).from(stripePendingReversals).where(eq(stripePendingReversals.chargeId, input.chargeId)).all()
 			: [];
-		const periodStatus = pending.some((row) => row.reason === 'dispute') ? 'disputed' : pending.length ? 'refunded' : 'paid';
+		const hasRefund = pending.some((row) => row.reason === 'refund');
+		const dispute = pending.find((row) => row.reason === 'dispute' && row.disputeId);
+		const wonDispute = !hasRefund && dispute?.disputeId ? await tx.select({ id: stripeDisputeReversals.id }).from(stripeDisputeReversals).where(and(eq(stripeDisputeReversals.status, 'won'), eq(stripeDisputeReversals.disputeId, dispute.disputeId))).get() : undefined;
+		const periodStatus = hasRefund ? 'refunded' : wonDispute ? 'paid' : pending.some((row) => row.reason === 'dispute') ? 'disputed' : 'paid';
 		const inserted = await tx
 			.insert(stripeSubscriptionPeriods)
 			.values({
@@ -117,6 +121,7 @@ export async function grantSubscriptionPeriod(input: SubscriptionPeriodGrant): P
 			.onConflictDoNothing()
 			.returning({ id: stripeSubscriptionPeriods.id });
 		if (pending.length && input.chargeId) await tx.delete(stripePendingReversals).where(eq(stripePendingReversals.chargeId, input.chargeId));
+		if (dispute?.disputeId) await tx.update(stripeDisputeReversals).set({ source: 'subscription', status: hasRefund ? 'ignored' : wonDispute ? 'restored' : 'reversed' }).where(eq(stripeDisputeReversals.disputeId, dispute.disputeId));
 		await applySubscriptionSnapshotTx(tx, {
 			orgId: input.orgId,
 			subscriptionId: input.subscriptionId,
@@ -151,7 +156,7 @@ export async function claimLifetimeSlot(input: LifetimeClaim): Promise<LifetimeC
 			.from(stripeLifetimeEntitlements)
 			.where(eq(stripeLifetimeEntitlements.checkoutSessionId, input.checkoutSessionId))
 			.get();
-		if (existing) return { slot: existing.slot, status: existing.status as 'active' | 'released' };
+		if (existing) return { slot: existing.slot, status: existing.status === 'released' ? 'released' : 'active' };
 		const org = await tx.select({ id: organizations.id }).from(organizations).where(eq(organizations.id, input.orgId)).get();
 		if (!org) throw new Error(`org not found: ${input.orgId}`);
 		const slot = await tx
@@ -181,16 +186,25 @@ export async function claimLifetimeSlot(input: LifetimeClaim): Promise<LifetimeC
 			.returning({ slot: stripeLifetimeSlots.slot });
 		if (claimed.length !== 1) throw new Error('lifetime slot claim lost its race');
 		const pending = input.chargeId
-			? await tx.select({ reason: stripePendingReversals.reason }).from(stripePendingReversals).where(eq(stripePendingReversals.chargeId, input.chargeId)).all()
+			? await tx.select({ reason: stripePendingReversals.reason, disputeId: stripePendingReversals.disputeId }).from(stripePendingReversals).where(eq(stripePendingReversals.chargeId, input.chargeId)).all()
 			: [];
-		if (pending.length && input.chargeId) {
-			await tx.update(stripeLifetimeEntitlements).set({ status: 'released', releasedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` }).where(eq(stripeLifetimeEntitlements.id, inserted[0].id));
-			await tx.update(stripeLifetimeSlots).set({ activeOrgId: null, activeEntitlementId: null, releasedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` }).where(eq(stripeLifetimeSlots.slot, slot.slot));
+		const dispute = pending.find((row) => row.reason === 'dispute' && row.disputeId);
+		const hasRefund = pending.some((row) => row.reason === 'refund');
+		const wonDispute = !hasRefund && dispute?.disputeId ? await tx.select({ id: stripeDisputeReversals.id }).from(stripeDisputeReversals).where(and(eq(stripeDisputeReversals.status, 'won'), eq(stripeDisputeReversals.disputeId, dispute.disputeId))).get() : undefined;
+		if (pending.length && input.chargeId && !wonDispute) {
+			const pendingStatus = dispute && !hasRefund ? 'disputed' : 'released';
+			await tx.update(stripeLifetimeEntitlements).set({ status: pendingStatus, releasedAt: pendingStatus === 'released' ? sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` : null }).where(eq(stripeLifetimeEntitlements.id, inserted[0].id));
+			if (!dispute) await tx.update(stripeLifetimeSlots).set({ activeOrgId: null, activeEntitlementId: null, releasedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` }).where(eq(stripeLifetimeSlots.slot, slot.slot));
 			await tx.delete(stripePendingReversals).where(eq(stripePendingReversals.chargeId, input.chargeId));
+			if (dispute?.disputeId) await tx.update(stripeDisputeReversals).set({ source: 'lifetime', status: hasRefund ? 'ignored' : 'reversed' }).where(eq(stripeDisputeReversals.disputeId, dispute.disputeId));
 			const subscription = await tx.select({ id: organizations.stripeSubscriptionId, status: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, input.orgId)).get();
 			const nextPlan = subscription?.id && subscription.status && ACTIVE_SUBSCRIPTION_STATUSES.has(subscription.status) ? 'hosted' : 'free';
 			await tx.update(organizations).set({ plan: nextPlan }).where(eq(organizations.id, input.orgId));
-			return { slot: slot.slot, status: 'released' };
+			return { slot: slot.slot, status: pendingStatus === 'disputed' ? 'active' : 'released' };
+		}
+		if (wonDispute) {
+			if (dispute?.disputeId) await tx.update(stripeDisputeReversals).set({ source: 'lifetime', status: 'restored' }).where(eq(stripeDisputeReversals.disputeId, dispute.disputeId));
+			await tx.delete(stripePendingReversals).where(eq(stripePendingReversals.chargeId, input.chargeId ?? ''));
 		}
 		await tx.update(organizations).set({ plan: 'lifetime' }).where(eq(organizations.id, input.orgId));
 		return { slot: slot.slot, status: 'active' };
@@ -210,7 +224,8 @@ export async function releaseLifetimeForPayment(input: { paymentIntentId?: strin
 			.where(or(...matches))
 			.get();
 		if (!entitlement) return false;
-		if (entitlement.status !== 'active') return true;
+		if (entitlement.status === 'released') return true;
+		if (entitlement.status !== 'active' && entitlement.status !== 'disputed') return true;
 		await tx.update(stripeLifetimeEntitlements).set({ status: 'released', releasedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` }).where(eq(stripeLifetimeEntitlements.id, entitlement.id));
 		await tx.update(stripeLifetimeSlots).set({ activeOrgId: null, activeEntitlementId: null, releasedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` }).where(and(eq(stripeLifetimeSlots.slot, entitlement.slot), eq(stripeLifetimeSlots.activeOrgId, entitlement.orgId)));
 		const sub = await tx.select({ id: organizations.stripeSubscriptionId, status: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, entitlement.orgId)).get();
@@ -218,6 +233,51 @@ export async function releaseLifetimeForPayment(input: { paymentIntentId?: strin
 		await tx.update(organizations).set({ plan: nextPlan }).where(eq(organizations.id, entitlement.orgId));
 		return true;
 	});
+}
+
+
+export async function revokeLifetimeForDispute(input: { paymentIntentId?: string; chargeId?: string }): Promise<boolean> {
+	const matches = [
+		input.paymentIntentId ? eq(stripeLifetimeEntitlements.paymentIntentId, input.paymentIntentId) : undefined,
+		input.chargeId ? eq(stripeLifetimeEntitlements.chargeId, input.chargeId) : undefined
+	].filter((condition): condition is NonNullable<typeof condition> => Boolean(condition));
+	if (matches.length === 0) throw new Error('payment intent or charge id is required');
+	return db.transaction(async (tx) => {
+		const entitlement = await tx.select({ id: stripeLifetimeEntitlements.id, orgId: stripeLifetimeEntitlements.orgId, status: stripeLifetimeEntitlements.status }).from(stripeLifetimeEntitlements).where(or(...matches)).get();
+		if (!entitlement) return false;
+		if (entitlement.status === 'disputed') return true;
+		if (entitlement.status !== 'active') return false;
+		await tx.update(stripeLifetimeEntitlements).set({ status: 'disputed' }).where(eq(stripeLifetimeEntitlements.id, entitlement.id));
+		const sub = await tx.select({ id: organizations.stripeSubscriptionId, status: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, entitlement.orgId)).get();
+		const nextPlan = sub?.id && sub.status && ACTIVE_SUBSCRIPTION_STATUSES.has(sub.status) ? 'hosted' : 'free';
+		await tx.update(organizations).set({ plan: nextPlan }).where(eq(organizations.id, entitlement.orgId));
+		return true;
+	});
+}
+
+export async function restoreLifetimeForDispute(input: { paymentIntentId?: string; chargeId?: string }): Promise<boolean> {
+	const matches = [
+		input.paymentIntentId ? eq(stripeLifetimeEntitlements.paymentIntentId, input.paymentIntentId) : undefined,
+		input.chargeId ? eq(stripeLifetimeEntitlements.chargeId, input.chargeId) : undefined
+	].filter((condition): condition is NonNullable<typeof condition> => Boolean(condition));
+	if (matches.length === 0) throw new Error('payment intent or charge id is required');
+	return db.transaction(async (tx) => {
+		const entitlement = await tx.select({ id: stripeLifetimeEntitlements.id, orgId: stripeLifetimeEntitlements.orgId }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.status, 'disputed'), or(...matches))).get();
+		if (!entitlement) return false;
+		await tx.update(stripeLifetimeEntitlements).set({ status: 'active', releasedAt: null }).where(eq(stripeLifetimeEntitlements.id, entitlement.id));
+		await tx.update(organizations).set({ plan: 'lifetime' }).where(eq(organizations.id, entitlement.orgId));
+		return true;
+	});
+}
+
+export async function restoreDisputedSubscriptionPeriod(input: { paymentIntentId?: string; chargeId?: string }): Promise<boolean> {
+	const matches = [
+		input.paymentIntentId ? eq(stripeSubscriptionPeriods.paymentIntentId, input.paymentIntentId) : undefined,
+		input.chargeId ? eq(stripeSubscriptionPeriods.chargeId, input.chargeId) : undefined
+	].filter((condition): condition is NonNullable<typeof condition> => Boolean(condition));
+	if (matches.length === 0) throw new Error('payment intent or charge id is required');
+	const changed = await db.update(stripeSubscriptionPeriods).set({ status: 'paid' }).where(and(eq(stripeSubscriptionPeriods.status, 'disputed'), or(...matches))).returning({ id: stripeSubscriptionPeriods.id });
+	return changed.length > 0;
 }
 
 
@@ -229,11 +289,12 @@ export async function refundSubscriptionPeriod(input: { paymentIntentId?: string
 	].filter((condition): condition is NonNullable<typeof condition> => Boolean(condition));
 	if (matches.length === 0) throw new Error('payment intent or charge id is required');
 	const existing = await db.select({ status: stripeSubscriptionPeriods.status }).from(stripeSubscriptionPeriods).where(or(...matches)).get();
-	if (existing && existing.status !== 'paid') return true;
+	if (!existing) return false;
+	if (existing.status !== 'paid' && existing.status !== 'disputed') return true;
 	const changed = await db
 		.update(stripeSubscriptionPeriods)
 		.set({ status: 'refunded' })
-		.where(and(eq(stripeSubscriptionPeriods.status, 'paid'), or(...matches)))
+		.where(and(or(eq(stripeSubscriptionPeriods.status, 'paid'), eq(stripeSubscriptionPeriods.status, 'disputed')), or(...matches)))
 		.returning({ id: stripeSubscriptionPeriods.id });
 	return changed.length > 0;
 }

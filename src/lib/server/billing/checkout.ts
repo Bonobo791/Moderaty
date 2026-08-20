@@ -131,11 +131,13 @@ export async function createPlanCheckout(orgId: string, user: SessionUser, plan:
 		.where(eq(organizations.id, orgId))
 		.get();
 	if (!org) throw new Error(`org not found: ${orgId}`);
-	if (plan === 'hosted' && org.stripeSubscriptionId && ['active', 'trialing', 'past_due', 'unpaid'].includes(org.stripeSubscriptionStatus ?? '')) {
-		throw new Error('organization already has a hosted subscription');
-	}
+	const hasActiveHosted = Boolean(org.stripeSubscriptionId && ['active', 'trialing', 'past_due', 'unpaid'].includes(org.stripeSubscriptionStatus ?? ''));
+	const lifetime = await db.select({ id: stripeLifetimeEntitlements.id }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
+	if (plan === 'hosted' && hasActiveHosted) throw new Error('organization already has a hosted subscription');
+	if (plan === 'hosted' && (org.plan === 'lifetime' || lifetime)) throw new Error('organization already has the lifetime plan');
 	if (plan === 'lifetime') {
-		if (org.plan === 'lifetime') throw new Error('organization already has the lifetime plan');
+		if (hasActiveHosted) throw new Error('organization already has an active hosted subscription');
+		if (org.plan === 'lifetime' || lifetime) throw new Error('organization already has the lifetime plan');
 		const available = await db
 			.select({ slot: stripeLifetimeSlots.slot })
 			.from(stripeLifetimeSlots)

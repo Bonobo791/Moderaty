@@ -131,6 +131,18 @@ describe('createPlanCheckout', () => {
 		}), { idempotencyKey: 'checkout:org-1:hosted' });
 	});
 
+	test('rejects a lifetime checkout while a hosted subscription is active', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
+		await expect(createPlanCheckout('org-1', owner(), 'lifetime')).rejects.toThrow('already has an active hosted subscription');
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+	test('rejects a hosted checkout while the organization has lifetime access', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'lifetime' });
+		await expect(createPlanCheckout('org-1', owner(), 'hosted')).rejects.toThrow('already has the lifetime plan');
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+
+
 	test('creates the lifetime payment with a validated one-time price', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		await createPlanCheckout('org-1', owner(), 'lifetime');

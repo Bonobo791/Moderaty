@@ -46,8 +46,8 @@ function createDb(): LibSQLDatabase<typeof schema> {
 
 export const db = new Proxy({} as LibSQLDatabase<typeof schema>, {
 	get(_target, property) {
-		const real = (instance ??= createDb());
-		const value = Reflect.get(real, property);
-		return typeof value === 'function' ? value.bind(real) : value;
+		if (!instance) instance = createDb();
+		const value = Reflect.get(instance, property);
+		return typeof value === 'function' ? value.bind(instance) : value;
 	}
 });

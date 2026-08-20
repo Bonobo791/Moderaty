@@ -19,7 +19,7 @@ const RULE_TYPES = ['keyword', 'regex', 'user'] as const;
 const RULE_ACTIONS = ['hold', 'reject', 'delete', 'ban'] as const;
 const MAX_REGEX_PATTERN_LENGTH = 256;
 const BACKREFERENCE_DIGIT = /[1-9]/;
-const GROUP_PREFIX = /^\?(?:<[a-zA-Z][^>]*>|<?[=!:]|[-a-z]*:)/i;
+const GROUP_PREFIX = /^\?(?:<[^=!>][^>]*>|<?[=!:]|[-a-z]*:)/i;
 
 export type RuleAction = (typeof RULE_ACTIONS)[number];
 
@@ -135,10 +135,19 @@ function unsafeRegex(pattern: string): boolean {
 	}
 }
 
+/** Compiles a user regex after the LENGTH guard; recheck + syntax guards run after compilation and before any matching (I6). */
 function regex(rule: RuleRow): RegExp {
+	// Length guard FIRST: an oversized pattern is rejected before the
+	// RegExp constructor ever sees it (I6 — validate before compile).
+	if (rule.pattern.length > MAX_REGEX_PATTERN_LENGTH) throw new Error(`rule #${rule.id} has an unsafe regex`);
 	let compiled: RegExp;
 	try {
-		// nosemgrep: unsafeRegex below rejects overly long, backreferencing, duplicate-alternation, and ReDoS-prone patterns.
+		// nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp, Semgrep_javascript_dos_rule-non-literal-regexp
+		// I6: the pattern passes recheck + syntax guards before it is EVER
+		// executed — unsafeRegex() below rejects backreferencing,
+		// duplicate-alternation, and ReDoS-prone patterns, and only a
+		// proven-safe pattern reaches .test(). Compilation never EXECUTES the
+		// pattern, so this non-literal constructor is not a ReDoS surface.
 		compiled = new RegExp(rule.pattern, 'i');
 	} catch (error) {
 		throw new Error(`rule #${rule.id} has an invalid regex: ${error instanceof Error ? error.message : String(error)}`);

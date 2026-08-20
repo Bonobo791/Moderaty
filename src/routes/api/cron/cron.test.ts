@@ -24,7 +24,7 @@ import { AUDIT_HANDLE_RETENTION_MS, CONSENT_EMAIL_RETENTION_MS } from '$lib/serv
 const mocks = vi.hoisted(() => ({
 	env: { CRON_SECRET: 'test-secret', DRY_RUN: 'true' } as Record<string, string | undefined>,
 	runChannel: vi.fn(),
-	retryStripeCustomerDeletions: vi.fn(async (limit: number, deadline: number) => 0)
+	retryStripeCustomerDeletions: vi.fn(async (_limit: number, _deadline: number) => 0)
 }));
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));

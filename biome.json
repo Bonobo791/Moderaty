@@ -1,5 +1,5 @@
 {
-	"$schema": "https://biomejs.dev/schemas/2.0.0/schema.json",
+	"$schema": "https://biomejs.dev/schemas/2.4.10/schema.json",
 	"linter": {
 		"rules": {
 			"correctness": {
@@ -10,6 +10,13 @@
 			"performance": {
 				"noAwaitInLoops": "off",
 				"noNamespaceImport": "off"
+			},
+			"style": {
+				// `useTemplate` is off: the dynamic-import cache-buster and the
+				// `</script>` source split are deliberate concatenations.
+				"useTemplate": "off",
+				// CSS cascade order is intentional; reordering risks visual regressions.
+				"noDescendingSpecificity": "off"
 			}
 		}
 	},

@@ -416,6 +416,25 @@ test('routes AI scoring failures to the review queue instead of failing the run 
 	expectAiUnavailableQueued(result, { fetched: 1, partial: false, skipped: false });
 });
 
+test('never serializes a non-Error rejection into the audit reason (credentials stay out of the log)', async () => {
+	// SDK/fetch rejections can carry enumerable credentials (Authorization
+	// headers, response bodies). errorText must persist a safe scalar, never
+	// JSON.stringify the object graph into the channel-visible reason.
+	mocks.scoreComment.mockRejectedValue({
+		code: 'ETIMEDOUT',
+		request: { headers: { authorization: 'Bearer sk-secret-token' } }
+	});
+
+	const result = await runChannel('channel');
+
+	expectAiUnavailableQueued(result, { fetched: 1, partial: false, skipped: false });
+	const audit = mocks.state.insertedAudits[0];
+	expect(JSON.stringify(audit)).not.toContain('sk-secret-token');
+	expect(JSON.stringify(audit)).not.toContain('Bearer');
+	// The safe scalar is still present.
+	expect(audit.reason).toBe('ai unavailable: unknown error');
+});
+
 test.each([
 	{ toneLevel: null },
 	{ toneLevel: 1 }

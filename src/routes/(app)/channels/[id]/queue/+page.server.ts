@@ -14,7 +14,7 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { db } from '$lib/server/db';
-import { channels, comments, auditLog } from '$lib/server/db/schema';
+import { comments, auditLog } from '$lib/server/db/schema';
 import { and, eq, desc } from 'drizzle-orm';
 import { refreshAccessToken, setModerationStatus, deleteComment } from '$lib/server/youtube';
 import { decrypt } from '$lib/server/crypto';
@@ -44,9 +44,18 @@ export async function load({ params, locals }) {
 	return { ch: { id: ch.id, title: ch.title }, pending };
 }
 
+/** DB status for a human review action (no nested ternary — sonarcloud S3358). */
+function statusForAction(action: string): 'approved' | 'deleted' | 'rejected' {
+	if (action === 'approve') return 'approved';
+	if (action === 'delete') return 'deleted';
+	if (action === 'reject' || action === 'ban') return 'rejected';
+	// Unsupported runtime values must never silently map to a moderation status.
+	throw error(500, 'Unsupported moderation action');
+}
+
 async function act(paramsId: string, commentId: string, action: 'approve' | 'reject' | 'delete' | 'ban', locals: App.Locals) {
 	const ch = await ownedChannel(paramsId, locals);
-	const status = action === 'approve' ? 'approved' : action === 'delete' ? 'deleted' : 'rejected';
+	const status = statusForAction(action);
 	// Atomically claim the still-pending comment BEFORE any external call.
 	// Concurrent submissions otherwise both pass the pending check and issue
 	// duplicate YouTube actions and duplicate audit rows; with the conditional
@@ -85,8 +94,7 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
 function commentIdFrom(formData: FormData): string | null {
 	const raw = formData.get('commentId');
 	if (typeof raw !== 'string') return null;
-	const id = raw.trim();
-	return id ? id : null;
+	return raw.trim();
 }
 
 export const actions = {

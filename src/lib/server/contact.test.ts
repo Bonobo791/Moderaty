@@ -39,6 +39,7 @@ import {
 	CONTACT_OPT_IN_TEXT,
 	buildVerificationEmail,
 	createOrReusePendingSubmission,
+	isUniqueViolation,
 	parseContactForm,
 	submitContactRequest,
 	verifyContactToken
@@ -124,6 +125,59 @@ describe('parseContactForm', () => {
 });
 
 describe('createOrReusePendingSubmission', () => {
+	test('the database enforces at most one pending row per e-mail (partial unique index)', async () => {
+		const future = new Date(Date.now() + 86_400_000).toISOString();
+		await testDb().db.insert(contactSubmissions).values({
+			email: 'fan@example.com',
+			name: 'A',
+			status: 'pending',
+			verificationToken: 'a'.repeat(64),
+			expiresAt: future,
+			consentText: 'x',
+			ip: '1.1.1.1',
+			userAgent: 'test'
+		});
+		// A second pending row for the same address must be rejected — without
+		// the partial unique index this insert succeeds and the check-then-act
+		// race yields two rows with two tokens (human review).
+		await expect(
+			testDb().db.insert(contactSubmissions).values({
+				email: 'fan@example.com',
+				name: 'B',
+				status: 'pending',
+				verificationToken: 'b'.repeat(64),
+				expiresAt: future,
+				consentText: 'x',
+				ip: '2.2.2.2',
+				userAgent: 'test'
+			})
+		).rejects.toThrow();
+	});
+
+	test('two concurrent submissions for the same address converge on one row and one token', async () => {
+		const [first, second] = await Promise.all([
+			createOrReusePendingSubmission(SUBMIT),
+			createOrReusePendingSubmission(SUBMIT)
+		]);
+		const stored = await rows();
+		expect(stored).toHaveLength(1);
+		expect(first.id).toBe(second.id);
+		expect(first.verificationToken).toBe(second.verificationToken);
+		expect(first.reused || second.reused).toBe(true);
+	});
+
+	test('a verified submission frees the pending slot for a fresh one', async () => {
+		const first = await createOrReusePendingSubmission(SUBMIT);
+		await verifyContactToken(first.verificationToken);
+		const second = await createOrReusePendingSubmission(SUBMIT);
+		expect(second.reused).toBe(false);
+		expect(second.verificationToken).not.toBe(first.verificationToken);
+		const stored = await rows();
+		expect(stored).toHaveLength(2);
+		expect(stored.filter((r) => r.status === 'pending')).toHaveLength(1);
+		expect(stored.filter((r) => r.status === 'verified')).toHaveLength(1);
+	});
+
 	test('inserts a pending row with a random token and 7-day expiry', async () => {
 		const submission = await createOrReusePendingSubmission(SUBMIT);
 		expect(submission.reused).toBe(false);
@@ -154,16 +208,46 @@ describe('createOrReusePendingSubmission', () => {
 		expect(stored[0].name).toBe('Fan Updated');
 	});
 
-	test('creates a NEW row (fresh token) after the pending one expired', async () => {
+	test('reuses the pending row after expiry (slides the expiry) — one pending row per e-mail', async () => {
+		// Partial-unique-index contract (human review): an expired pending row
+		// still holds the slot; the resubmission refreshes it (the e-mail is
+		// re-sent with the same link) instead of creating a second pending row.
 		const first = await createOrReusePendingSubmission(SUBMIT);
 		await testDb()
 			.db.update(contactSubmissions)
 			.set({ expiresAt: new Date(Date.now() - 1000).toISOString() })
 			.where(eq(contactSubmissions.id, first.id));
 		const second = await createOrReusePendingSubmission(SUBMIT);
-		expect(second.reused).toBe(false);
-		expect(second.verificationToken).not.toBe(first.verificationToken);
-		expect(await rows()).toHaveLength(2);
+		expect(second.reused).toBe(true);
+		expect(second.id).toBe(first.id);
+		expect(second.verificationToken).toBe(first.verificationToken);
+		const stored = await rows();
+		expect(stored).toHaveLength(1);
+		expect(new Date(stored[0].expiresAt).getTime()).toBeGreaterThan(Date.now());
+	});
+
+	test('logs the conflict and reuses the pending row when a concurrent insert collides', async () => {
+		// The conflict path is the recovery for the partial unique index: an
+		// expired row still holds the pending slot, so the fast path misses it,
+		// the insert collides, and the winner is refreshed. That recovery is a
+		// real server event and must be logged, never silent.
+		const first = await createOrReusePendingSubmission(SUBMIT);
+		await testDb()
+			.db.update(contactSubmissions)
+			.set({ expiresAt: new Date(Date.now() - 1000).toISOString() })
+			.where(eq(contactSubmissions.id, first.id));
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const second = await createOrReusePendingSubmission(SUBMIT);
+			expect(second.reused).toBe(true);
+			expect(second.id).toBe(first.id);
+			expect(second.verificationToken).toBe(first.verificationToken);
+			expect(warn).toHaveBeenCalledWith('[contact] pending submission insert conflicted; reusing the existing pending row');
+			// The submitter e-mail is PII — the conflict log must never include it.
+			expect(warn).not.toHaveBeenCalledWith(expect.stringContaining(SUBMIT.email));
+		} finally {
+			warn.mockRestore();
+		}
 	});
 
 	test('creates a NEW row after the previous one was verified', async () => {
@@ -175,6 +259,44 @@ describe('createOrReusePendingSubmission', () => {
 		const second = await createOrReusePendingSubmission(SUBMIT);
 		expect(second.reused).toBe(false);
 		expect(await rows()).toHaveLength(2);
+	});
+});
+
+describe('isUniqueViolation', () => {
+	test('detects a SQLITE_CONSTRAINT code or UNIQUE message at any depth of the cause chain', () => {
+		expect(isUniqueViolation({ code: 'SQLITE_CONSTRAINT_UNIQUE' })).toBe(true);
+		expect(isUniqueViolation({ message: 'UNIQUE constraint failed: contact_submissions.email' })).toBe(true);
+		const nested = new Error('Failed query');
+		(nested as { cause?: unknown }).cause = new Error('UNIQUE constraint failed: contact_submissions.email');
+		expect(isUniqueViolation(nested)).toBe(true);
+	});
+
+	test('returns false for unrelated errors and non-string messages', () => {
+		expect(isUniqueViolation(new Error('boom'))).toBe(false);
+		expect(isUniqueViolation({ message: 123 })).toBe(false);
+		expect(isUniqueViolation({})).toBe(false);
+	});
+
+	test('does not treat non-unique SQLite constraints as unique violations', () => {
+		// Only a UNIQUE conflict enters the reuse path; foreign-key, check, and
+		// not-null violations must propagate instead of being retried as
+		// idempotency conflicts.
+		expect(isUniqueViolation({ code: 'SQLITE_CONSTRAINT_FOREIGNKEY' })).toBe(false);
+		expect(isUniqueViolation({ code: 'SQLITE_CONSTRAINT_CHECK' })).toBe(false);
+		expect(isUniqueViolation({ code: 'SQLITE_CONSTRAINT_NOTNULL' })).toBe(false);
+	});
+
+	test('terminates on a cause cycle that does not include the original error', () => {
+		// b.cause = c and c.cause = b form a cycle that never returns to the
+		// first error; the bounded walk must stop instead of spinning a request
+		// thread forever (a plain `current === error` guard cannot see it).
+		const first = new Error('first');
+		const b = new Error('b');
+		const c = new Error('c');
+		(b as { cause?: unknown }).cause = c;
+		(c as { cause?: unknown }).cause = b;
+		(first as { cause?: unknown }).cause = b;
+		expect(isUniqueViolation(first)).toBe(false);
 	});
 });
 

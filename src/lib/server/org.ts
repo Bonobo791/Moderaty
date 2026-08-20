@@ -250,7 +250,7 @@ export async function acceptInvite(
 ): Promise<{ orgId: string; session: { token: string; expiresAt: string } }> {
 	return db.transaction(async (tx) => {
 		const inv = await inviteWithOrg(tx, token);
-		if (!inv || inv.acceptedBy !== null || Date.parse(inv.expiresAt) <= Date.now()) {
+		if (!inv || inv?.acceptedBy !== null || Date.parse(inv.expiresAt) <= Date.now()) {
 			throw error(410, 'this invite link is no longer valid — ask for a new one');
 		}
 		// createInvite blocks personal-org invites at write time; refuse any legacy

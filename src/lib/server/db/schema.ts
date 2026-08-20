@@ -410,5 +410,13 @@ export const contactSubmissions = sqliteTable('contact_submissions', {
 }, (table) => [
 	// Resubmission dedupe (unexpired pending per e-mail) filters
 	// status='pending' AND email=?; the status leftmost serves it.
-	index('contact_submissions_status_email_idx').on(table.status, table.email)
+	index('contact_submissions_status_email_idx').on(table.status, table.email),
+	// Idempotency backstop (human review): at most ONE pending submission per
+	// e-mail. createOrReusePendingSubmission is check-then-act — two
+	// concurrent submissions can both miss the lookup and insert two rows with
+	// different tokens (two verification e-mails). The partial unique index
+	// makes the second insert conflict, so the function's conflict path can
+	// converge on the winner's row. status='pending' ONLY: a verified row
+	// frees the slot for a fresh submission.
+	uniqueIndex('contact_submissions_pending_email_unique').on(table.email).where(sql`${table.status} = 'pending'`)
 ]);

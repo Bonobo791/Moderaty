@@ -45,12 +45,28 @@ async function seededDb(dbPath, hashes) {
 	}
 	client.close();
 }
-function reconcile(dbPath) {
+function reconcile(dbPath, { expectedHashes } = {}) {
 	return execFileSync(process.execPath, [join(ROOT, 'scripts', 'reconcile-migrations.mjs'), metaDir], {
 		encoding: 'utf8',
-		env: { ...process.env, TURSO_DATABASE_URL: `file:${dbPath}`, TURSO_AUTH_TOKEN: '' },
+		env: {
+			...process.env,
+			TURSO_DATABASE_URL: `file:${dbPath}`,
+			TURSO_AUTH_TOKEN: '',
+			...(expectedHashes ? { RECONCILE_EXPECTED_HASHES: JSON.stringify(expectedHashes) } : {})
+		},
 		stdio: ['ignore', 'pipe', 'pipe']
 	});
+}
+function expectRefusal(dbPath, { expectedHashes, pattern = /REFUSING/ } = {}) {
+	try {
+		reconcile(dbPath, { expectedHashes });
+		throw new Error('expected reconcile to refuse but it exited 0');
+	} catch (e) {
+		if (!(e instanceof Error) || e.message === 'expected reconcile to refuse but it exited 0') throw e;
+		if (!pattern.test(`${e.stdout ?? ''}${e.stderr ?? ''}`))
+			throw new Error(`refusal message did not match ${pattern}: ${e.stdout ?? ''}${e.stderr ?? ''}`);
+		return e;
+	}
 }
 async function appliedHashes(dbPath) {
 	const client = createClient({ url: `file:${dbPath}` });
@@ -65,13 +81,15 @@ afterEach(() => {
 });
 
 describe('reconcile-migrations', () => {
-	test('rewrites drifted hashes to the journal and leaves matched ones alone', async () => {
+	test('rewrites drifted hashes to the journal when the operator attests the predecessors, and leaves matched ones alone', async () => {
 		const db = tempDb();
 		// Simulate the license-header drift: first 16 rows have wrong hashes.
 		const drifted = realHashes.map((h, i) => (i < 16 ? createHash('sha256').update(`old-content-${i}`).digest('hex') : h));
 		await seededDb(db, drifted);
 
-		const out = reconcile(db);
+		// The attestation is exactly what the operator dumps from the DB: the
+		// current row hashes in rowid order.
+		const out = reconcile(db, { expectedHashes: drifted });
 
 		expect(out).toMatch(/16 hash\(es\) updated/);
 		expect(await appliedHashes(db)).toEqual(realHashes);
@@ -80,6 +98,30 @@ describe('reconcile-migrations', () => {
 	test('refuses to run when the applied count differs from the journal', async () => {
 		const db = tempDb();
 		await seededDb(db, realHashes.slice(0, 20));
-		expect(() => reconcile(db)).toThrow(/REFUSING/);
+		expectRefusal(db);
+	});
+
+	test('refuses same-count drift with no attestation: unrelated hashes must not be overwritten', async () => {
+		const db = tempDb();
+		// Same count as the journal, but hashes that match nothing (a different
+		// migration sequence applied). Equal counts are NOT identity.
+		const unrelated = realHashes.map((h, i) => createHash('sha256').update(`unrelated-${i}`).digest('hex'));
+		await seededDb(db, unrelated);
+
+		expectRefusal(db, { pattern: /RECONCILE_EXPECTED_HASHES/ });
+		expect(await appliedHashes(db)).toEqual(unrelated); // evidence untouched
+	});
+
+	test('refuses when a row does not match its attested predecessor — nothing is changed', async () => {
+		const db = tempDb();
+		// One genuine drift (row 0) plus one unrelated hash (row 1): the
+		// attestation for row 1 is wrong, so the whole run must refuse and
+		// must not have applied the (valid) row-0 update either.
+		const drifted = realHashes.map((h, i) => (i === 0 ? createHash('sha256').update('old-content-0').digest('hex') : i === 1 ? createHash('sha256').update('unrelated-1').digest('hex') : h));
+		await seededDb(db, drifted);
+		const attestation = realHashes.map((h, i) => (i === 1 ? createHash('sha256').update('wrong-attestation-1').digest('hex') : drifted[i]));
+
+		expectRefusal(db, { expectedHashes: attestation, pattern: /does not match the approved predecessor/ });
+		expect(await appliedHashes(db)).toEqual(drifted); // NO partial writes
 	});
 });

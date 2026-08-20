@@ -183,6 +183,11 @@ describe('organizations', () => {
 			auto_topup_consent_version: { notNull: false },
 			auto_topup_consented_by: { notNull: false },
 			auto_topup_consented_at: { notNull: false },
+			stripe_subscription_id: { notNull: false },
+			stripe_subscription_status: { notNull: false },
+			stripe_subscription_period_start: { notNull: false },
+			stripe_subscription_period_end: { notNull: false },
+			stripe_subscription_cancel_at_period_end: { notNull: false },
 			created_at: { notNull: true, hasDefault: true }
 		});
 		expectCreatedAtDefault(organizations);
@@ -191,7 +196,74 @@ describe('organizations', () => {
 	test('personal_for is unique and plan defaults to free', async () => {
 		const { organizations } = await loadSchema();
 		expectUnique(organizations, 'personal_for', 'organizations_personal_for_unique');
+		expectIndex(organizations, 'organizations_stripe_customer_id_unique', ['stripe_customer_id']);
+		expectIndex(organizations, 'organizations_stripe_subscription_id_unique', ['stripe_subscription_id']);
 		expect(getTableConfig(organizations).columns.find((c) => c.name === 'plan')!.default).toBe('free');
+	});
+});
+
+
+
+describe('stripeSubscriptionPeriods', () => {
+	test('table shape and period uniqueness', async () => {
+		const { stripeSubscriptionPeriods, organizations } = await loadSchema();
+		expect(getTableConfig(stripeSubscriptionPeriods).name).toBe('stripe_subscription_periods');
+		expectColumns(stripeSubscriptionPeriods, {
+			id: { notNull: true, primary: true, autoIncrement: true },
+			org_id: { notNull: true },
+			subscription_id: { notNull: true },
+			invoice_id: { notNull: true },
+			payment_intent_id: { notNull: false },
+			charge_id: { notNull: false },
+			period_key: { notNull: true },
+			period_start: { notNull: true },
+			period_end: { notNull: true },
+			included_credits: { notNull: true, hasDefault: true },
+			consumed_credits: { notNull: true, hasDefault: true },
+			status: { notNull: true, hasDefault: true },
+			created_at: { notNull: true, hasDefault: true }
+		});
+		expectForeignKey(stripeSubscriptionPeriods, 'org_id', organizations, 'id', 'cascade');
+		expectUnique(stripeSubscriptionPeriods, 'invoice_id', 'stripe_subscription_periods_invoice_id_unique');
+		expectIndex(stripeSubscriptionPeriods, 'stripe_subscription_periods_subscription_period_unique', ['subscription_id', 'period_key']);
+	});
+});
+
+describe('stripeLifetimeSlots', () => {
+	test('table shape and slot key', async () => {
+		const { stripeLifetimeSlots, organizations } = await loadSchema();
+		expect(getTableConfig(stripeLifetimeSlots).name).toBe('stripe_lifetime_slots');
+		expectColumns(stripeLifetimeSlots, {
+			slot: { notNull: true, primary: true },
+			active_org_id: { notNull: false },
+			active_entitlement_id: { notNull: false },
+			claimed_at: { notNull: false },
+			released_at: { notNull: false }
+		});
+		expectForeignKey(stripeLifetimeSlots, 'active_org_id', organizations, 'id', 'set null');
+	});
+});
+
+describe('stripeLifetimeEntitlements', () => {
+	test('table shape, active uniqueness, and payment indexes', async () => {
+		const { stripeLifetimeEntitlements, stripeLifetimeSlots, organizations } = await loadSchema();
+		expect(getTableConfig(stripeLifetimeEntitlements).name).toBe('stripe_lifetime_entitlements');
+		expectColumns(stripeLifetimeEntitlements, {
+			id: { notNull: true, primary: true, autoIncrement: true },
+			org_id: { notNull: true },
+			slot: { notNull: true },
+			checkout_session_id: { notNull: true },
+			payment_intent_id: { notNull: false },
+			charge_id: { notNull: false },
+			status: { notNull: true, hasDefault: true },
+			created_at: { notNull: true, hasDefault: true },
+			released_at: { notNull: false }
+		});
+		expectForeignKey(stripeLifetimeEntitlements, 'org_id', organizations, 'id', 'cascade');
+		expectForeignKey(stripeLifetimeEntitlements, 'slot', stripeLifetimeSlots, 'slot');
+		expectUnique(stripeLifetimeEntitlements, 'checkout_session_id', 'stripe_lifetime_entitlements_checkout_session_id_unique');
+		expectIndex(stripeLifetimeEntitlements, 'stripe_lifetime_entitlements_payment_intent_idx', ['payment_intent_id']);
+		expectIndex(stripeLifetimeEntitlements, 'stripe_lifetime_entitlements_charge_idx', ['charge_id']);
 	});
 });
 

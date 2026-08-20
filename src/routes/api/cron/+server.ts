@@ -146,8 +146,10 @@ export const GET: RequestHandler = async ({ url, request }) => {
 	// never arrived within 14 days are dead weight — dropped loudly, bounded.
 	const reversals = await runSweep(dryRun, 'pending-reversal sweep', () => sweepStalePendingReversals());
 
+	// A failed sweep must never tick as success: ok reflects every sweep's
+	// outcome (each failure is also surfaced in its own *Error field and logged).
 	const base = {
-		ok: true,
+		ok: !consent.error && !handles.error && !autoTopup.error && !stripeDeletions.error && !reversals.error,
 		dryRun,
 		consentEmailsNulled: consent.value ?? 0,
 		sweepError: consent.error,

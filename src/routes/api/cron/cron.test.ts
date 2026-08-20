@@ -374,6 +374,7 @@ test('a sweep failure is reported and does not stop the channel run', async () =
 		expect(res.status).toBe(200);
 		const body = await res.json();
 		expect(body.sweepError).toEqual(expect.stringContaining('Failed query'));
+		expect(body.ok).toBe(false); // a failed sweep must not tick as success (codeant)
 		expect(body.consentEmailsNulled).toBe(0);
 		expect(mocks.runChannel).toHaveBeenCalledWith('UC-live', expect.objectContaining({ deadline: expect.any(Number) }));
 		// The sweep failure is logged loudly (an emptied log message stayed

@@ -43,19 +43,24 @@ import { fileURLToPath } from 'node:url';
 import { createClient } from '@libsql/client';
 
 const argv = process.argv.slice(2);
+const USAGE_ERROR = 'Usage: node scripts/reconcile-migrations.mjs [meta-dir]';
+
 if (argv.length > 1) {
-	console.error('Usage: node scripts/reconcile-migrations.mjs [meta-dir]');
+	console.error(USAGE_ERROR);
 	process.exit(1);
 }
 const metaDir = argv[0] ?? fileURLToPath(new URL('../drizzle/meta', import.meta.url));
+const URL_MISSING_ERROR = 'reconcile-migrations: TURSO_DATABASE_URL is not set (source .env first)';
+const TOKEN_MISSING_ERROR = 'reconcile-migrations: TURSO_AUTH_TOKEN is required for remote databases';
+
 const url = process.env.TURSO_DATABASE_URL;
 if (!url) {
-	console.error('reconcile-migrations: TURSO_DATABASE_URL is not set (source .env first)');
+	console.error(URL_MISSING_ERROR);
 	process.exit(1);
 }
 const authToken = process.env.TURSO_AUTH_TOKEN;
 if (!url.startsWith('file:') && !authToken) {
-	console.error('reconcile-migrations: TURSO_AUTH_TOKEN is required for remote databases');
+	console.error(TOKEN_MISSING_ERROR);
 	process.exit(1);
 }
 

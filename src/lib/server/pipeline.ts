@@ -417,6 +417,179 @@ function actionRows(channelId: string, decisions: Decision[]) {
  * @returns The moderation decisions, failure messages, and number of deferred comments.
  * @throws DeadlineExceededError If the evaluation deadline is exceeded.
  */
+type DecisionBatchOptions = {
+	accessToken: string;
+	toneLevel: number;
+	protections: ToneProtections;
+	openAiKey?: string;
+	deadline?: number;
+	rescore?: boolean;
+	orgId?: string | null;
+	consumeCredits?: boolean;
+};
+
+/**
+ * Fetches video titles/descriptions for level-2 tone scoring. Best-effort:
+ * a videos.list failure (or missing metadata) scores comments with empty
+ * context; the tone pass falling back to the human queue is I11, never a
+ * batch abort (DeadlineExceededError still escapes).
+ */
+async function loadVideoContext(
+	toneEnabled: boolean,
+	newComments: Array<CommentPage['comments'][number]>,
+	accessToken: string,
+	deadline: number | undefined
+): Promise<{ videoContext: Awaited<ReturnType<typeof fetchVideoMetadata>> | null; metadataError: unknown }> {
+	let videoContext: Awaited<ReturnType<typeof fetchVideoMetadata>> | null = null;
+	let metadataError: unknown = null;
+	if (toneEnabled && newComments.length) {
+		videoContext = new Map();
+		const videoIds = [...new Set(newComments.map((comment) => comment.videoId).filter((id): id is string => id !== null))];
+		if (videoIds.length) {
+			try {
+				videoContext = await fetchVideoMetadata(videoIds, accessToken, deadline);
+			} catch (error) {
+				if (error instanceof DeadlineExceededError) throw error;
+				metadataError = error;
+			}
+		}
+	}
+	return { videoContext, metadataError };
+}
+
+async function prepareDecisionBatch(
+	channelId: string,
+	page: CommentPage,
+	options: DecisionBatchOptions
+): Promise<{
+	newComments: Array<CommentPage['comments'][number]>;
+	rulesForChannel: ReturnType<typeof prepareRules>;
+	allowlist: Awaited<ReturnType<typeof loadHandleSet>>;
+	aiBudget: { remaining: number };
+	videoContext: Awaited<ReturnType<typeof fetchVideoMetadata>> | null;
+	metadataError: unknown;
+}> {
+// Credits gate AI scoring for live runs only (I8: a dry run changes nothing
+// durable) — and only for METERED orgs. An org that never engaged billing
+// (NULL balance, no Stripe customer) is unmetered: self-hosted and
+// lifetime-plan orgs score unlimited (the free tier is self-hosted only).
+// Consumption for an unmetered org is naturally a no-op (consumeCredit's
+// NULL-balance guard rejects the charge), so the gate is the whole story.
+// Orphan channels (no org) predate the billing model — they score until
+// claimed (infinite budget). The budget is the org's balance: each AI
+// decision claims one credit of it, so an org with N credits scores at
+// most N AI comments per batch — the rest defer for a post-top-up retry.
+let metered = false;
+if (options.consumeCredits && options.orgId) {
+	metered = await orgIsMetered(options.orgId);
+}
+const aiBudget = {
+	remaining: metered && options.orgId ? await getCredits(options.orgId) : Number.POSITIVE_INFINITY
+};
+// Dry-run window mode (rescore: true) skips the stored-IDs dedupe entirely:
+// re-scoring comments a real run already moderated is the point of the
+// preview. The within-batch dedupe below still applies. The DB query is
+// skipped in both no-consult cases (rescore, empty page).
+// Stryker disable ArrayDeclaration: equivalent — with an empty page there are no comments to consult existingIds for, so its contents are never read
+const storedIds =
+	!options.rescore && page.comments.length
+		? (
+				await db
+					.select({ id: comments.id })
+					.from(comments)
+					.where(inArray(comments.id, page.comments.map((comment) => comment.id)))
+					.all()
+			).map((comment) => comment.id)
+		: [];
+// Stryker restore ArrayDeclaration
+const existingIds = new Set(storedIds);
+const rulesForChannel = prepareRules(await db.select().from(rules).where(eq(rules.channelId, channelId)).all());
+// One allowlist read per run; decide() checks it before any rule or scoring.
+const allowlist = await loadHandleSet(channelId);
+// Dedupe twice: against already-stored comments AND within this batch.
+// commentThreads pagination can repeat an item across page boundaries, and
+// two decisions with one comment id would violate the comments.id PRIMARY
+// KEY, failing the entire staging transaction (I1: one bad item never
+// aborts the batch).
+const seen = new Set<string>();
+const newComments = page.comments.filter((comment) => {
+	if (existingIds.has(comment.id) || seen.has(comment.id)) return false;
+	seen.add(comment.id);
+	return true;
+});
+// A ticked protection flag forces the tone pass on even below level 2: the
+// channel owner asked for heightened scrutiny, so the checkbox must never
+// be a silent no-op.
+const toneEnabled =
+	options.toneLevel >= 2 || Boolean(options.protections.protectLgbtqia) || Boolean(options.protections.protectWomen);
+const { videoContext, metadataError } = await loadVideoContext(
+	toneEnabled,
+	newComments,
+	options.accessToken,
+	options.deadline
+);
+return { newComments, rulesForChannel, allowlist, aiBudget, videoContext, metadataError };
+}
+type ScoreOutcome = PromiseSettledResult<Decision>;
+
+async function scoreComments(
+	newComments: Array<CommentPage['comments'][number]>,
+	options: {
+		rulesForChannel: ReturnType<typeof prepareRules>;
+		allowlist: Awaited<ReturnType<typeof loadHandleSet>>;
+		aiBudget: { remaining: number };
+		videoContext: Awaited<ReturnType<typeof fetchVideoMetadata>> | null;
+		metadataError: unknown;
+		deadline: number | undefined;
+		protections: ToneProtections;
+		openAiKey: string | undefined;
+	}
+): Promise<ScoreOutcome[]> {
+	const { rulesForChannel, allowlist, aiBudget, videoContext, metadataError, deadline, protections, openAiKey } = options;
+const settled = await Promise.allSettled(
+	newComments.map(async (comment) => {
+		try {
+			if (metadataError) return aiUnavailable(comment, metadataError);
+			// Stryker disable next-line ConditionalExpression: equivalent — for a null videoId both branches yield undefined (Map.get(null) misses), and a non-null id takes the false branch anyway
+			const meta = comment.videoId === null ? undefined : videoContext?.get(comment.videoId);
+			const tone = videoContext
+				? { context: { videoTitle: meta?.title ?? '', videoDescription: meta?.description ?? '' } }
+				: null;
+			return await decide(comment, rulesForChannel, allowlist, tone, aiBudget, { deadline, protections, openAiKey });
+		} catch (error) {
+			// DeadlineExceededError escapes decide() by design (aiDecision
+			// rethrows it) so the run aborts partial:true with no durable
+			// writes — pinned by the omni/tone deadline-scoring tests.
+			if (error instanceof DeadlineExceededError) throw error;
+			throw new Error(`comment ${comment.id}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	})
+);
+
+	return settled;
+}
+function foldDecisions(settled: ScoreOutcome[]): { decisions: Decision[]; failures: string[]; deferred: number } {
+const decisions: Decision[] = [];
+const failures: string[] = [];
+let deferred = 0;
+for (const result of settled) {
+	if (result.status === 'fulfilled') {
+		// Deferred decisions are never staged: they stay unprocessed so a
+		// later run (after a top-up) re-fetches and scores them.
+		if (result.value.deferred) {
+			deferred += 1;
+			continue;
+		}
+		decisions.push(result.value);
+		continue;
+	}
+	// A rejected promise whose reason is a DeadlineExceededError (rethrown
+	// from aiDecision via the wrapper above) aborts the whole batch.
+	if (result.reason instanceof DeadlineExceededError) throw result.reason;
+	failures.push(result.reason instanceof Error ? result.reason.message : String(result.reason));
+}
+return { decisions, failures, deferred };
+}
 async function decideNewComments(
 	channelId: string,
 	page: CommentPage,
@@ -442,114 +615,27 @@ async function decideNewComments(
 		consumeCredits?: boolean;
 	}
 ): Promise<{ decisions: Decision[]; failures: string[]; deferred: number }> {
-	// Credits gate AI scoring for live runs only (I8: a dry run changes nothing
-	// durable) — and only for METERED orgs. An org that never engaged billing
-	// (NULL balance, no Stripe customer) is unmetered: self-hosted and
-	// lifetime-plan orgs score unlimited (the free tier is self-hosted only).
-	// Consumption for an unmetered org is naturally a no-op (consumeCredit's
-	// NULL-balance guard rejects the charge), so the gate is the whole story.
-	// Orphan channels (no org) predate the billing model — they score until
-	// claimed (infinite budget). The budget is the org's balance: each AI
-	// decision claims one credit of it, so an org with N credits scores at
-	// most N AI comments per batch — the rest defer for a post-top-up retry.
-	let metered = false;
-	if (consumeCredits && orgId) {
-		metered = await orgIsMetered(orgId);
-	}
-	const aiBudget = { remaining: metered && orgId ? await getCredits(orgId) : Number.POSITIVE_INFINITY };
-	// Dry-run window mode (rescore: true) skips the stored-IDs dedupe entirely:
-	// re-scoring comments a real run already moderated is the point of the
-	// preview. The within-batch dedupe below still applies. The DB query is
-	// skipped in both no-consult cases (rescore, empty page).
-	// Stryker disable ArrayDeclaration: equivalent — with an empty page there are no comments to consult existingIds for, so its contents are never read
-	const storedIds =
-		!rescore && page.comments.length
-			? (
-					await db
-						.select({ id: comments.id })
-						.from(comments)
-						.where(inArray(comments.id, page.comments.map((comment) => comment.id)))
-						.all()
-				).map((comment) => comment.id)
-			: [];
-	// Stryker restore ArrayDeclaration
-	const existingIds = new Set(storedIds);
-	const rulesForChannel = prepareRules(await db.select().from(rules).where(eq(rules.channelId, channelId)).all());
-	// One allowlist read per run; decide() checks it before any rule or scoring.
-	const allowlist = await loadHandleSet(channelId);
-	// Dedupe twice: against already-stored comments AND within this batch.
-	// commentThreads pagination can repeat an item across page boundaries, and
-	// two decisions with one comment id would violate the comments.id PRIMARY
-	// KEY, failing the entire staging transaction (I1: one bad item never
-	// aborts the batch).
-	const seen = new Set<string>();
-	const newComments = page.comments.filter((comment) => {
-		if (existingIds.has(comment.id) || seen.has(comment.id)) return false;
-		seen.add(comment.id);
-		return true;
+	const batch = await prepareDecisionBatch(channelId, page, {
+		accessToken,
+		toneLevel,
+		protections,
+		openAiKey,
+		deadline,
+		rescore,
+		orgId,
+		consumeCredits
 	});
-	// Level 2 tone scoring needs each video's title/description as context. One
-	// batched videos.list call per run; videos whose metadata failed validation
-	// (and comments carrying no videoId at all) score with empty context
-	// (best-effort). If the videos.list call itself fails, the tone pass cannot
-	// run — every new comment lands in the human queue (I11) rather than
-	// aborting the batch or silently scoring omni-only. A ticked protection
-	// flag forces the tone pass on even below level 2: the channel owner asked
-	// for heightened scrutiny, so the checkbox must never be a silent no-op.
-	const toneEnabled = toneLevel >= 2 || Boolean(protections.protectLgbtqia) || Boolean(protections.protectWomen);
-	let videoContext: Awaited<ReturnType<typeof fetchVideoMetadata>> | null = null;
-	let metadataError: unknown = null;
-	if (toneEnabled && newComments.length) {
-		videoContext = new Map();
-		const videoIds = [...new Set(newComments.map((comment) => comment.videoId).filter((id): id is string => id !== null))];
-		if (videoIds.length) {
-			try {
-				videoContext = await fetchVideoMetadata(videoIds, accessToken, deadline);
-			} catch (error) {
-				if (error instanceof DeadlineExceededError) throw error;
-				metadataError = error;
-			}
-		}
-	}
-	const settled = await Promise.allSettled(
-		newComments.map(async (comment) => {
-			try {
-				if (metadataError) return aiUnavailable(comment, metadataError);
-				// Stryker disable next-line ConditionalExpression: equivalent — for a null videoId both branches yield undefined (Map.get(null) misses), and a non-null id takes the false branch anyway
-				const meta = comment.videoId === null ? undefined : videoContext?.get(comment.videoId);
-				const tone = videoContext
-					? { context: { videoTitle: meta?.title ?? '', videoDescription: meta?.description ?? '' } }
-					: null;
-				return await decide(comment, rulesForChannel, allowlist, tone, aiBudget, { deadline, protections, openAiKey });
-			} catch (error) {
-				// DeadlineExceededError escapes decide() by design (aiDecision
-				// rethrows it) so the run aborts partial:true with no durable
-				// writes — pinned by the omni/tone deadline-scoring tests.
-				if (error instanceof DeadlineExceededError) throw error;
-				throw new Error(`comment ${comment.id}: ${error instanceof Error ? error.message : String(error)}`);
-			}
-		})
-	);
-	const decisions: Decision[] = [];
-	const failures: string[] = [];
-	let deferred = 0;
-	for (const result of settled) {
-		if (result.status === 'fulfilled') {
-			// Deferred decisions are never staged: they stay unprocessed so a
-			// later run (after a top-up) re-fetches and scores them.
-			if (result.value.deferred) {
-				deferred += 1;
-				continue;
-			}
-			decisions.push(result.value);
-			continue;
-		}
-		// A rejected promise whose reason is a DeadlineExceededError (rethrown
-		// from aiDecision via the wrapper above) aborts the whole batch.
-		if (result.reason instanceof DeadlineExceededError) throw result.reason;
-		failures.push(result.reason instanceof Error ? result.reason.message : String(result.reason));
-	}
-	return { decisions, failures, deferred };
+	const settled = await scoreComments(batch.newComments, {
+		rulesForChannel: batch.rulesForChannel,
+		allowlist: batch.allowlist,
+		aiBudget: batch.aiBudget,
+		videoContext: batch.videoContext,
+		metadataError: batch.metadataError,
+		deadline,
+		protections,
+		openAiKey
+	});
+	return foldDecisions(settled);
 }
 
 /**
@@ -745,24 +831,29 @@ async function processOutstandingActions(channelId: string, accessToken: string,
 			if (claimed.has(action.commentId)) ready.push({ ...action, state: 'dispatched' });
 			continue;
 		}
-		let result: 'completed' | 'retry';
-		try {
-			result = await verificationResult(action, accessToken, deadline);
-		} catch (error) {
-			// Transient verification failures must not strand the action: leave it
-			// 'dispatched' so the next run re-verifies, and fail loudly.
-			if (error instanceof DeadlineExceededError) throw error;
-			throw new Error(
-				`moderation action ${action.commentId} verification failed: ${error instanceof Error ? error.message : String(error)}`
-			);
-		}
-		if (result === 'completed') {
+		if ((await verifyDispatchedAction(action, accessToken, deadline)) === 'completed') {
 			await completeActions([action]);
 			continue;
 		}
 		ready.push(action);
 	}
 	return applyYoutubeActions(ready, accessToken, deadline);
+}
+
+/**
+ * Re-verifies a previously-dispatched action. Transient verification failures
+ * must not strand the action: leave it 'dispatched' so the next run
+ * re-verifies, and fail loudly (DeadlineExceededError still escapes).
+ */
+async function verifyDispatchedAction(action: OutstandingAction, accessToken: string, deadline: number | undefined): Promise<'completed' | 'retry'> {
+	try {
+		return await verificationResult(action, accessToken, deadline);
+	} catch (error) {
+		if (error instanceof DeadlineExceededError) throw error;
+		throw new Error(
+			`moderation action ${action.commentId} verification failed: ${error instanceof Error ? error.message : String(error)}`
+		);
+	}
 }
 
 async function persistResults(
@@ -792,6 +883,95 @@ async function persistResults(
 }
 
 /**
+ * Stages decisions (live) or writes the audit trail (dry run) once the
+ * channel is confirmed still active. Returns the acted count.
+ */
+async function stageOrAuditDecisions(
+	channelId: string,
+	decisions: Decision[],
+	dryRun: boolean,
+	orgId: string | null | undefined
+): Promise<number> {
+	if (dryRun) {
+		const acted = decisions.filter((decision) => decision.youtubeAction).length;
+		const audits = auditRows(channelId, decisions, true);
+		if (audits.length) await db.insert(auditLog).values(audits);
+		return acted;
+	}
+	await stageDecisions(channelId, decisions, orgId);
+	return decisions.filter((decision) => decision.youtubeAction).length;
+}
+
+/** Window-mode dry-run finish: reported, never persisted (I8 — the caller owns the drain state). */
+function finishDryRun(
+	window: RunChannelOptions['window'],
+	page: CommentPage,
+	{ fetched, acted, queued }: { fetched: number; acted: number; queued: number }
+): ChannelRunResult {
+	const windowState = window
+		? {
+				windowComplete: page.reachedCursor || !page.nextPageToken,
+				windowNextPageToken: page.reachedCursor ? null : page.nextPageToken
+			}
+		: {};
+	return { fetched, acted, queued, partial: false, skipped: false, dryRun: true, ...windowState };
+}
+
+/**
+ * Applies outstanding YouTube actions and triggers the auto top-up (best-effort
+ * — a payment failure never fails the moderation run; the daily cron sweep is
+ * the backstop). Returns outOfCredits when AI was deferred by an empty balance,
+ * which parks the cursor so the same comments re-fetch after a top-up.
+ */
+async function runEnforcement(
+	channelId: string,
+	accessToken: string,
+	deadline: number | undefined,
+	orgId: string | null | undefined,
+	deferred: number
+): Promise<{ acted: number; outOfCredits: boolean }> {
+	// ... and again before any YouTube enforcement call.
+	await assertChannelActive(channelId);
+	const acted = await processOutstandingActions(channelId, accessToken, deadline);
+	if (orgId) {
+		try {
+			await maybeTriggerAutoTopUp(orgId);
+		} catch (error) {
+			console.error(`auto top-up trigger failed for org ${orgId}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+	if (deferred > 0) {
+		console.error(
+			`out of credits for org ${orgId ?? '(none)'}: ${deferred} comment(s) deferred — AI scoring paused until credits are topped up`
+		);
+		return { acted, outOfCredits: true };
+	}
+	return { acted, outOfCredits: false };
+}
+
+/**
+ * Loads and validates a channel for a run: not-found and invalid DRY_RUN throw
+ * loudly; an inactive channel is a skip (empty result); window mode requires
+ * dry-run semantics (the rescore skips the stored-IDs dedupe, so a live window
+ * run would stage duplicates and re-enforce).
+ */
+async function loadChannelForRun(
+	channelId: string,
+	forceDryRun: boolean | undefined,
+	window: RunChannelOptions['window']
+): Promise<{ kind: 'run'; channel: typeof channels.$inferSelect; dryRun: boolean } | { kind: 'skip'; result: ChannelRunResult }> {
+	const channel = await db.select().from(channels).where(eq(channels.id, channelId)).get();
+	if (!channel) throw new Error(`channel not found: ${channelId}`);
+	if (!channel.active) return { kind: 'skip', result: emptyResult() };
+	if (env.DRY_RUN !== 'true' && env.DRY_RUN !== 'false') {
+		throw new Error('DRY_RUN must be true or false');
+	}
+	const dryRun = forceDryRun === true || env.DRY_RUN === 'true';
+	if (window && !dryRun) throw new Error('window mode requires dry-run semantics (pass forceDryRun)');
+	return { kind: 'run', channel, dryRun };
+}
+
+/**
  * Runs moderation for newly fetched comments on a channel.
  *
  * @param channelId - The channel to moderate
@@ -810,17 +990,10 @@ export async function runChannel(
 	// Stryker disable next-line BooleanLiteral: equivalent — dryRun is reassigned from env/forceDryRun before any read; the catch only returns for errors thrown after that assignment
 	let dryRun = false;
 	try {
-		const channel = await db.select().from(channels).where(eq(channels.id, channelId)).get();
-		if (!channel) throw new Error(`channel not found: ${channelId}`);
-		if (!channel.active) return emptyResult();
-		if (env.DRY_RUN !== 'true' && env.DRY_RUN !== 'false') {
-			throw new Error('DRY_RUN must be true or false');
-		}
-		dryRun = forceDryRun === true || env.DRY_RUN === 'true';
-		// The window rescore skips the stored-IDs dedupe, so a live window run
-		// would stage duplicate decisions and enforce on re-fetched comments —
-		// the combination is refused loudly, before any fetch or write.
-		if (window && !dryRun) throw new Error('window mode requires dry-run semantics (pass forceDryRun)');
+		const loaded = await loadChannelForRun(channelId, forceDryRun, window);
+		if (loaded.kind === 'skip') return loaded.result;
+		const { channel } = loaded;
+		dryRun = loaded.dryRun;
 		const accessToken = await refreshAccessToken(decrypt(channel.refreshTokenEnc), deadline);
 		// Window mode (on-demand dry-run drain): one page bounded by the window,
 		// independent of the live cursor/checkpoint — real runs keep advancing
@@ -853,51 +1026,19 @@ export async function runChannel(
 		// Deletion may have committed during the YouTube/AI calls above: re-check
 		// before any durable write (I3) so a deleted account gets no new rows.
 		await assertChannelActive(channelId);
-		if (dryRun) {
-			acted = decisions.filter((decision) => decision.youtubeAction).length;
-			const audits = auditRows(channelId, decisions, true);
-			if (audits.length) await db.insert(auditLog).values(audits);
-		} else {
-			await stageDecisions(channelId, decisions, channel.orgId);
-		}
+		acted = await stageOrAuditDecisions(channelId, decisions, dryRun, channel.orgId);
 		// Fail loudly only after successful decisions are staged, and before the
 		// cursor advances, so the next run retries just the failed comments.
 		if (failures.length) {
 			throw new Error(`moderation decision failed for ${failures.length} comment(s): ${failures.join('; ')}`);
 		}
 		if (dryRun) {
-			// Window-mode continuation is reported, never persisted here — the
-			// caller owns the drain state (I8: a dry run touches no checkpoint).
-			const windowState = window
-				? {
-						windowComplete: page.reachedCursor || !page.nextPageToken,
-						windowNextPageToken: page.reachedCursor ? null : page.nextPageToken
-					}
-				: {};
-			return { fetched, acted, queued, partial: false, skipped: false, dryRun, ...windowState };
+			return finishDryRun(window, page, { fetched, acted, queued });
 		}
 
-		// ... and again before any YouTube enforcement call.
-		await assertChannelActive(channelId);
-		acted = await processOutstandingActions(channelId, accessToken, deadline);
-		// Auto top-up trigger: after consumption, when the balance sits below
-		// the org's threshold a saved-card charge is initiated. Best-effort by
-		// design — a payment failure must never fail the moderation run (it is
-		// recorded loudly here and the daily cron sweep is the backstop).
-		if (!dryRun && channel.orgId) {
-			try {
-				await maybeTriggerAutoTopUp(channel.orgId);
-			} catch (error) {
-				console.error(`auto top-up trigger failed for org ${channel.orgId}: ${error instanceof Error ? error.message : String(error)}`);
-			}
-		}
-		// Enforcement ran, but AI was deferred by an empty credit balance: park
-		// the cursor (no persistResults) so the SAME comments are re-fetched next
-		// run — staged decisions dedupe, deferred ones get scored after a top-up.
-		if (deferred > 0) {
-			console.error(
-				`out of credits for org ${channel.orgId ?? '(none)'}: ${deferred} comment(s) deferred — AI scoring paused until credits are topped up`
-			);
+		const enforcement = await runEnforcement(channelId, accessToken, deadline, channel.orgId, deferred);
+		acted = enforcement.acted;
+		if (enforcement.outOfCredits) {
 			return { fetched, acted, queued, partial: false, skipped: false, dryRun, outOfCredits: true };
 		}
 		await persistResults(channelId, channel, page);

@@ -58,15 +58,16 @@ function reconcile(dbPath, { expectedHashes } = {}) {
 	});
 }
 function expectRefusal(dbPath, { expectedHashes, pattern = /REFUSING/ } = {}) {
+	let error;
 	try {
 		reconcile(dbPath, { expectedHashes });
-		throw new Error('expected reconcile to refuse but it exited 0');
 	} catch (e) {
-		if (!(e instanceof Error) || e.message === 'expected reconcile to refuse but it exited 0') throw e;
-		if (!pattern.test(`${e.stdout ?? ''}${e.stderr ?? ''}`))
-			throw new Error(`refusal message did not match ${pattern}: ${e.stdout ?? ''}${e.stderr ?? ''}`);
-		return e;
+		error = e;
 	}
+	// Real framework assertions so every refusal test is counted (SonarCloud
+	// S2699): the script must exit non-zero AND print the expected refusal.
+	expect(error).toBeDefined();
+	expect(`${error.stdout ?? ''}${error.stderr ?? ''}`).toMatch(pattern);
 }
 async function appliedHashes(dbPath) {
 	const client = createClient({ url: `file:${dbPath}` });
@@ -98,7 +99,9 @@ describe('reconcile-migrations', () => {
 	test('refuses to run when the applied count differs from the journal', async () => {
 		const db = tempDb();
 		await seededDb(db, realHashes.slice(0, 20));
-		expectRefusal(db);
+		const before = await appliedHashes(db);
+		expectRefusal(db, { pattern: /database has 20 applied migrations but the journal has/ });
+		expect(await appliedHashes(db)).toEqual(before); // refusal preserves the evidence
 	});
 
 	test('refuses same-count drift with no attestation: unrelated hashes must not be overwritten', async () => {
@@ -110,6 +113,18 @@ describe('reconcile-migrations', () => {
 
 		expectRefusal(db, { pattern: /RECONCILE_EXPECTED_HASHES/ });
 		expect(await appliedHashes(db)).toEqual(unrelated); // evidence untouched
+	});
+
+	test('rolls back earlier updates when a later update fails', async () => {
+		const db = tempDb();
+		const drifted = realHashes.map((h, i) => (i < 2 ? createHash('sha256').update(`old-content-${i}`).digest('hex') : h));
+		await seededDb(db, drifted);
+		const client = createClient({ url: `file:${db}` });
+		await client.execute(`CREATE TRIGGER fail_reconcile_second BEFORE UPDATE OF hash ON __drizzle_migrations WHEN OLD.rowid = 2 BEGIN SELECT RAISE(ABORT, 'forced reconcile failure'); END`);
+		client.close();
+
+		expectRefusal(db, { expectedHashes: drifted, pattern: /rolled back/ });
+		expect(await appliedHashes(db)).toEqual(drifted);
 	});
 
 	test('refuses when a row does not match its attested predecessor — nothing is changed', async () => {

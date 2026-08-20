@@ -29,9 +29,10 @@
 // as the record.
 
 import { and, asc, eq, inArray, isNotNull, isNull, lt, ne, or } from 'drizzle-orm';
+import type Stripe from 'stripe';
 
 import { db } from '$lib/server/db';
-import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, users } from '$lib/server/db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, stripeLifetimeSlots, users } from '$lib/server/db/schema';
 import { getStripe } from '$lib/server/stripe/client';
 
 export const CONSENT_EMAIL_RETENTION_MS = 10 * 365.25 * 24 * 60 * 60 * 1000; // 10 years
@@ -42,6 +43,24 @@ const AUDIT_HANDLE_SWEEP_BATCH = 50; // same drain-across-runs bound as the cons
 
 /** Placeholder for an erased refresh token — never valid ciphertext, so decrypt fails loudly in cron (AGENTS.md). */
 export const WIPED_REFRESH_TOKEN = 'erased:account-deletion';
+
+
+type StripeRequestOptionsFactory = () => Stripe.RequestOptions | undefined;
+
+/** Cancels every live subscription before Stripe customer deletion can proceed. */
+async function cancelCustomerSubscriptions(customerId: string, options?: StripeRequestOptionsFactory): Promise<void> {
+	const response = await getStripe().subscriptions.list({ customer: customerId, status: 'all', limit: 100 }, options?.());
+	if (!response || !Array.isArray(response.data) || typeof response.has_more !== 'boolean') {
+		throw new Error(`Stripe returned a malformed subscription list for ${customerId}`);
+	}
+	if (response.has_more) throw new Error(`Stripe customer ${customerId} has more than 100 subscriptions; manual cancellation is required`);
+	for (const subscription of response.data) {
+		if (!subscription || typeof subscription.id !== 'string' || typeof subscription.status !== 'string') {
+			throw new Error(`Stripe returned a malformed subscription for ${customerId}`);
+		}
+		if (subscription.status !== 'canceled' && subscription.status !== 'incomplete_expired') await getStripe().subscriptions.cancel(subscription.id, undefined, options?.());
+	}
+}
 
 /**
  * Deletes a set of channels and every row they own, child-to-parent:
@@ -261,6 +280,7 @@ async function dissolveOrgs(tx: DeletionTx, dissolveOrgIds: string[]): Promise<s
 		await tx.insert(stripeDeletionOutbox).values({ customerId: org.stripeCustomerId }).onConflictDoNothing();
 	}
 	await tx.delete(invites).where(inArray(invites.orgId, dissolveOrgIds));
+	await tx.update(stripeLifetimeSlots).set({ activeOrgId: null, activeEntitlementId: null }).where(inArray(stripeLifetimeSlots.activeOrgId, dissolveOrgIds));
 	await tx.delete(memberships).where(inArray(memberships.orgId, dissolveOrgIds));
 	// The credit ledger is part of the org's records: comment ids,
 	// Checkout Session ids, PaymentIntent ids, and charge ids must not
@@ -366,6 +386,7 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 	// the obligation durable: the cron retry erases it once Stripe confirms.
 	for (const customerId of stripeCustomerIds) {
 		try {
+			await cancelCustomerSubscriptions(customerId);
 			await getStripe().customers.del(customerId);
 			await db.delete(stripeDeletionOutbox).where(eq(stripeDeletionOutbox.customerId, customerId));
 		} catch (error) {
@@ -424,10 +445,17 @@ export async function retryStripeCustomerDeletions(limit = 10, deadline?: number
 			// disable network retries (maxNetworkRetries: 0) to keep the whole
 			// operation within the remaining deadline; a timeout fails loudly
 			// (and records lastAttemptAt, so the row backs off for the next hour).
-			if (remainingMs === undefined) {
+			const requestOptions: StripeRequestOptionsFactory | undefined =
+				deadline === undefined ? undefined : () => {
+					const remaining = deadline - Date.now();
+					if (remaining <= 0) throw new Error('stripe deletion shared deadline expired');
+					return { timeout: remaining, maxNetworkRetries: 0 };
+				};
+			await cancelCustomerSubscriptions(row.customerId, requestOptions);
+			if (deadline === undefined) {
 				await getStripe().customers.del(row.customerId);
 			} else {
-				await getStripe().customers.del(row.customerId, undefined, { timeout: remainingMs, maxNetworkRetries: 0 });
+				await getStripe().customers.del(row.customerId, undefined, requestOptions?.());
 			}
 			await db.delete(stripeDeletionOutbox).where(eq(stripeDeletionOutbox.id, row.id));
 			deleted += 1;

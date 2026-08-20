@@ -14,16 +14,16 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { and, eq } from 'drizzle-orm';
-import { expect, test, vi } from 'vitest';
+import { afterEach, expect, test, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ customersDel: vi.fn(), customersUpdate: vi.fn() }));
+const mocks = vi.hoisted(() => ({ customersDel: vi.fn(), customersUpdate: vi.fn(), subscriptionsList: vi.fn().mockResolvedValue({ data: [], has_more: false }), subscriptionsCancel: vi.fn().mockResolvedValue({}) }));
 
 vi.mock('$lib/server/stripe/client', () => ({
-	getStripe: () => ({ customers: { del: mocks.customersDel, update: mocks.customersUpdate } })
+	getStripe: () => ({ customers: { del: mocks.customersDel, update: mocks.customersUpdate }, subscriptions: { list: mocks.subscriptionsList, cancel: mocks.subscriptionsCancel } })
 }));
 
 import { DAY_MS, seedConsent, seedUser as seedBareUser, setupTestDb, testDb } from './testdb';
-import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, users } from './db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, stripeLifetimeEntitlements, stripeLifetimeSlots, users } from './db/schema';
 import {
 	AUDIT_HANDLE_RETENTION_MS,
 	CONSENT_EMAIL_RETENTION_MS,
@@ -39,7 +39,13 @@ import {
 	nullExpiredModerationActionHandles
 } from './deletion';
 
-setupTestDb(['moderation_actions', 'comments', 'audit_log', 'channel_allowed_handles', 'rules', 'channels', 'sessions', 'consents', 'invites', 'memberships', 'organizations', 'users', 'credit_transactions', 'stripe_deletion_outbox']);
+setupTestDb(['moderation_actions', 'comments', 'audit_log', 'channel_allowed_handles', 'rules', 'channels', 'sessions', 'consents', 'invites', 'memberships', 'organizations', 'users', 'credit_transactions', 'stripe_deletion_outbox', 'stripe_lifetime_slots', 'stripe_lifetime_entitlements']);
+
+afterEach(() => {
+	vi.clearAllMocks();
+	mocks.subscriptionsList.mockResolvedValue({ data: [], has_more: false });
+	mocks.subscriptionsCancel.mockResolvedValue({});
+});
 
 /** Seeds one comment plus its moderation action, audit row, and keyword rule for a channel. */
 async function seedModerationData(channelId: string, key: string) {
@@ -175,6 +181,31 @@ async function expectAllTablesEmpty() {
 		expect(await testDb().db.select().from(stripeDeletionOutbox).all()).toEqual([]);
 	});
 
+
+	test('account deletion clears both lifetime slot references', async () => {
+		const userId = await seedUser('gone');
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-gone', activeEntitlementId: 1 }).where(eq(stripeLifetimeSlots.slot, 1));
+		await testDb().db.insert(stripeLifetimeEntitlements).values({ id: 1, orgId: 'org-gone', slot: 1, checkoutSessionId: 'cs_gone' });
+		await deleteUserRecords(userId);
+		const slot = await testDb().db.select().from(stripeLifetimeSlots).where(eq(stripeLifetimeSlots.slot, 1)).get();
+		expect(slot?.activeOrgId).toBeNull();
+		expect(slot?.activeEntitlementId).toBeNull();
+	});
+
+	test('account deletion cancels active subscriptions before deleting the Stripe customer', async () => {
+		const userId = await seedUser('gone');
+		await testDb().db.update(organizations).set({ stripeCustomerId: 'cus_gone' }).where(eq(organizations.id, 'org-gone'));
+		mocks.subscriptionsList.mockResolvedValue({ data: [{ id: 'sub_gone', status: 'active' }, { id: 'sub_canceled', status: 'canceled' }, { id: 'sub_expired', status: 'incomplete_expired' }], has_more: false });
+		mocks.customersDel.mockResolvedValue({ id: 'cus_gone', deleted: true });
+		await deleteUserRecords(userId);
+		expect(mocks.subscriptionsList).toHaveBeenCalledWith({ customer: 'cus_gone', status: 'all', limit: 100 }, undefined);
+		expect(mocks.subscriptionsCancel).toHaveBeenCalledWith('sub_gone', undefined, undefined);
+		expect(mocks.customersDel).toHaveBeenCalledWith('cus_gone');
+		expect(mocks.subscriptionsCancel.mock.invocationCallOrder[0]).toBeLessThan(mocks.customersDel.mock.invocationCallOrder[0]);
+		expect(mocks.subscriptionsCancel).not.toHaveBeenCalledWith('sub_canceled', undefined, undefined);
+		expect(mocks.subscriptionsCancel).not.toHaveBeenCalledWith('sub_expired', undefined, undefined);
+	});
+
 	test('a Stripe customer deletion failure is loud but never blocks the account deletion', async () => {
 		const userId = await seedUser('gone');
 		await testDb().db.update(organizations).set({ stripeCustomerId: 'cus_gone' }).where(eq(organizations.id, 'org-gone'));
@@ -254,6 +285,30 @@ test('the deletion outbox retry respects a shared cron deadline', async () => {
 
 	expect(deleted).toBe(0);
 	expect(mocks.customersDel).not.toHaveBeenCalled();
+});
+
+
+test('each Stripe request recomputes the remaining shared deadline', async () => {
+	await testDb().db.insert(stripeDeletionOutbox).values({ customerId: 'cus_recompute' });
+	let clock = Date.now();
+	mocks.subscriptionsList.mockImplementation(async () => {
+		clock += 4_000;
+		return { data: [{ id: 'sub_recompute', status: 'active' }], has_more: false };
+	});
+	mocks.subscriptionsCancel.mockImplementation(async () => {
+		clock += 2_000;
+	});
+	mocks.customersDel.mockResolvedValue({ id: 'cus_recompute', deleted: true });
+	const now = clock;
+	const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+	try {
+		await retryStripeCustomerDeletions(10, now + 10_000);
+		expect(mocks.subscriptionsList).toHaveBeenCalledWith({ customer: 'cus_recompute', status: 'all', limit: 100 }, { timeout: 10_000, maxNetworkRetries: 0 });
+		expect(mocks.subscriptionsCancel).toHaveBeenCalledWith('sub_recompute', undefined, { timeout: 6_000, maxNetworkRetries: 0 });
+		expect(mocks.customersDel).toHaveBeenCalledWith('cus_recompute', undefined, { timeout: 4_000, maxNetworkRetries: 0 });
+	} finally {
+		nowSpy.mockRestore();
+	}
 });
 
 test('each Stripe deletion request is capped to the remaining cron deadline', async () => {

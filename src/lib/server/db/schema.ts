@@ -88,8 +88,83 @@ export const organizations = sqliteTable('organizations', {
 	autoTopupConsentVersion: text('auto_topup_consent_version'), // LEGAL_VERSION at consent
 	autoTopupConsentedBy: text('auto_topup_consented_by'), // users.id who ticked the box
 	autoTopupConsentedAt: text('auto_topup_consented_at'),
+	// Hosted subscription entitlement cache. The period table below is the
+	// source of truth for the 100-comment allowance; these fields make
+	// organization lookup and access checks bounded.
+	stripeSubscriptionId: text('stripe_subscription_id'),
+	stripeSubscriptionStatus: text('stripe_subscription_status'),
+	stripeSubscriptionPeriodStart: text('stripe_subscription_period_start'),
+	stripeSubscriptionPeriodEnd: text('stripe_subscription_period_end'),
+	stripeSubscriptionCancelAtPeriodEnd: integer('stripe_subscription_cancel_at_period_end'),
+	stripeSubscriptionLastEventCreated: integer('stripe_subscription_last_event_created'),
+	stripeSubscriptionLastEventId: text('stripe_subscription_last_event_id'),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
-});
+}, (table) => [
+	uniqueIndex('organizations_stripe_customer_id_unique').on(table.stripeCustomerId).where(sql`${table.stripeCustomerId} IS NOT NULL`),
+	uniqueIndex('organizations_stripe_subscription_id_unique').on(table.stripeSubscriptionId).where(sql`${table.stripeSubscriptionId} IS NOT NULL`)
+]);
+
+export const stripeSubscriptionPeriods = sqliteTable('stripe_subscription_periods', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	orgId: text('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+	subscriptionId: text('subscription_id').notNull(),
+	invoiceId: text('invoice_id').notNull().unique(),
+	paymentIntentId: text('payment_intent_id'),
+	chargeId: text('charge_id'),
+	periodKey: text('period_key').notNull(),
+	periodStart: text('period_start').notNull(),
+	periodEnd: text('period_end').notNull(),
+	includedCredits: integer('included_credits').notNull().default(100),
+	consumedCredits: integer('consumed_credits').notNull().default(0),
+	status: text('status').notNull().default('paid'), // paid | disputed | refunded | void
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+}, (table) => [
+	uniqueIndex('stripe_subscription_periods_subscription_period_unique').on(table.subscriptionId, table.periodKey),
+	index('stripe_subscription_periods_org_period_idx').on(table.orgId, table.periodStart),
+	index('stripe_subscription_periods_payment_intent_idx').on(table.paymentIntentId),
+	index('stripe_subscription_periods_charge_idx').on(table.chargeId)
+]);
+
+/** Pre-created slots make the first-1,000 lifetime cap transactional. */
+export const stripeLifetimeSlots = sqliteTable('stripe_lifetime_slots', {
+	slot: integer('slot').primaryKey(),
+	activeOrgId: text('active_org_id').references(() => organizations.id, { onDelete: 'set null' }),
+	activeEntitlementId: integer('active_entitlement_id'),
+	claimedAt: text('claimed_at'),
+	releasedAt: text('released_at')
+}, (table) => [index('stripe_lifetime_slots_active_org_idx').on(table.activeOrgId)]);
+
+export const stripeLifetimeEntitlements = sqliteTable('stripe_lifetime_entitlements', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	orgId: text('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+	slot: integer('slot').notNull().references(() => stripeLifetimeSlots.slot),
+	checkoutSessionId: text('checkout_session_id').notNull().unique(),
+	paymentIntentId: text('payment_intent_id'),
+	chargeId: text('charge_id'),
+	status: text('status').notNull().default('active'), // active | disputed | released
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+	releasedAt: text('released_at')
+}, (table) => [
+	uniqueIndex('stripe_lifetime_entitlements_active_org_idx').on(table.orgId).where(sql`${table.status} = 'active'`),
+	uniqueIndex('stripe_lifetime_entitlements_active_slot_idx').on(table.slot).where(sql`${table.status} = 'active'`),
+	index('stripe_lifetime_entitlements_payment_intent_idx').on(table.paymentIntentId),
+	index('stripe_lifetime_entitlements_charge_idx').on(table.chargeId)
+]);
+
+/** Durable local state for a Checkout request, including a retry-safe Stripe key. */
+export const stripeCheckoutAttempts = sqliteTable('stripe_checkout_attempts', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	attemptId: text('attempt_id').notNull().unique(),
+	orgId: text('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+	product: text('product').notNull(),
+	idempotencyKey: text('idempotency_key').notNull().unique(),
+	stripeSessionId: text('stripe_session_id').unique(),
+	status: text('status').notNull().default('pending'), // pending | open | fulfilled | expired
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+	updatedAt: text('updated_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+}, (table) => [
+	index('stripe_checkout_attempts_org_status_idx').on(table.orgId, table.status)
+]);
 
 export const memberships = sqliteTable('memberships', {
 	userId: text('user_id')
@@ -346,6 +421,7 @@ export const stripePendingReversals = sqliteTable(
 		chargeId: text('charge_id').notNull(), // ch_...
 		// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 		reason: text('reason').notNull(), // 'refund' | 'dispute'
+		disputeId: text('dispute_id'),
 		createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 	},
 	// UNIQUE(charge_id, reason), NOT charge_id alone: a dispute AND a later
@@ -355,6 +431,21 @@ export const stripePendingReversals = sqliteTable(
 	// (codex review).
 	(table) => [uniqueIndex('stripe_pending_reversals_charge_reason_idx').on(table.chargeId, table.reason)]
 );
+
+
+// One durable row per dispute lets a won-dispute event restore only the
+// entitlement that this exact dispute revoked. A pending row is resolved when
+// the payment grant arrives after the dispute event.
+export const stripeDisputeReversals = sqliteTable('stripe_dispute_reversals', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	disputeId: text('dispute_id').notNull().unique(),
+	chargeId: text('charge_id').notNull(),
+	paymentIntentId: text('payment_intent_id'),
+	status: text('status').notNull().default('pending'), // pending | reversed | ignored | won | restored
+	source: text('source').notNull().default('unknown'), // credits | lifetime | subscription | unknown
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+	restoredAt: text('restored_at')
+}, (table) => [index('stripe_dispute_reversals_charge_idx').on(table.chargeId)]);
 
 // Stripe customers still owed deletion after account teardown (the Stripe
 // erase is best-effort post-commit; a transient Stripe outage must not lose
@@ -378,7 +469,10 @@ export const stripeEvents = sqliteTable('stripe_events', {
 	objectId: text('object_id').notNull(), // cs_... | pi_... | ch_... | du_...
 	objectType: text('object_type').notNull(),
 	receivedAt: text('received_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
-	processedAt: text('processed_at')
+	processedAt: text('processed_at'),
+	processingStartedAt: text('processing_started_at'),
+	processingLeaseToken: text('processing_lease_token'),
+	processingAttempts: integer('processing_attempts').notNull().default(0)
 }, (table) => [
 	index('stripe_events_type_object_idx').on(table.eventType, table.objectId)
 ]);

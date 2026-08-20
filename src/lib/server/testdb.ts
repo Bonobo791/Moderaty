@@ -23,6 +23,7 @@ import { SQLiteTable } from 'drizzle-orm/sqlite-core';
 import { beforeAll, beforeEach, vi } from 'vitest';
 import * as schema from './db/schema';
 import { consents, users } from './db/schema';
+import { LIFETIME_SLOT_LIMIT } from './billing/plans';
 
 export interface TestDb {
 	db: LibSQLDatabase<typeof schema>;
@@ -30,6 +31,8 @@ export interface TestDb {
 }
 
 const holder: { current: TestDb | null } = { current: null };
+
+const SEED_LIFETIME_SLOTS = `WITH RECURSIVE slots(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM slots WHERE n < ${LIFETIME_SLOT_LIMIT}) INSERT INTO stripe_lifetime_slots (slot) SELECT n FROM slots`;
 
 // Every test file that imports this helper gets the app db mocked onto the
 // shared in-memory instance. This module is always imported before the
@@ -59,6 +62,9 @@ export async function wipeTables(tables: string[]): Promise<void> {
 		}
 	}
 	const statements = ['PRAGMA foreign_keys = OFF', ...tables.map((table) => `DELETE FROM ${table}`)];
+	if (tables.includes('stripe_lifetime_slots')) {
+		statements.push(SEED_LIFETIME_SLOTS);
+	}
 	try {
 		await testDb().client.executeMultiple(statements.join(';\n'));
 	} finally {
@@ -257,8 +263,17 @@ export async function createTestDb(): Promise<TestDb> {
 			auto_topup_consent_version TEXT,
 			auto_topup_consented_by TEXT,
 			auto_topup_consented_at TEXT,
+			stripe_subscription_id TEXT,
+			stripe_subscription_status TEXT,
+			stripe_subscription_period_start TEXT,
+			stripe_subscription_period_end TEXT,
+			stripe_subscription_cancel_at_period_end INTEGER,
+			stripe_subscription_last_event_created INTEGER,
+			stripe_subscription_last_event_id TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
+		`CREATE UNIQUE INDEX organizations_stripe_customer_id_unique ON organizations (stripe_customer_id) WHERE stripe_customer_id IS NOT NULL`,
+		`CREATE UNIQUE INDEX organizations_stripe_subscription_id_unique ON organizations (stripe_subscription_id) WHERE stripe_subscription_id IS NOT NULL`,
 		`CREATE TABLE credit_transactions (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
@@ -279,9 +294,21 @@ export async function createTestDb(): Promise<TestDb> {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			charge_id TEXT NOT NULL,
 			reason TEXT NOT NULL,
+			dispute_id TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE UNIQUE INDEX stripe_pending_reversals_charge_reason_idx ON stripe_pending_reversals (charge_id, reason)`,
+		`CREATE TABLE stripe_dispute_reversals (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			dispute_id TEXT NOT NULL UNIQUE,
+			charge_id TEXT NOT NULL,
+			payment_intent_id TEXT,
+			status TEXT NOT NULL DEFAULT 'pending',
+			source TEXT NOT NULL DEFAULT 'unknown',
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+			restored_at TEXT
+		)`,
+		`CREATE INDEX stripe_dispute_reversals_charge_idx ON stripe_dispute_reversals (charge_id)`,
 		`CREATE TABLE stripe_deletion_outbox (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			customer_id TEXT NOT NULL UNIQUE,
@@ -296,10 +323,68 @@ export async function createTestDb(): Promise<TestDb> {
 			object_id TEXT NOT NULL,
 			object_type TEXT NOT NULL,
 			received_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-			processed_at TEXT
+			processed_at TEXT,
+			processing_started_at TEXT,
+			processing_lease_token TEXT,
+			processing_attempts INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE INDEX stripe_events_type_object_idx ON stripe_events (event_type, object_id)`,
 		`CREATE UNIQUE INDEX organizations_personal_for_unique ON organizations (personal_for)`,
+		`CREATE TABLE stripe_subscription_periods (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+			subscription_id TEXT NOT NULL,
+			invoice_id TEXT NOT NULL UNIQUE,
+			payment_intent_id TEXT,
+			charge_id TEXT,
+			period_key TEXT NOT NULL,
+			period_start TEXT NOT NULL,
+			period_end TEXT NOT NULL,
+			included_credits INTEGER NOT NULL DEFAULT 100,
+			consumed_credits INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT 'paid',
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`,
+		`CREATE UNIQUE INDEX stripe_subscription_periods_subscription_period_unique ON stripe_subscription_periods (subscription_id, period_key)`,
+		`CREATE INDEX stripe_subscription_periods_org_period_idx ON stripe_subscription_periods (org_id, period_start)`,
+		`CREATE INDEX stripe_subscription_periods_payment_intent_idx ON stripe_subscription_periods (payment_intent_id)`,
+		`CREATE INDEX stripe_subscription_periods_charge_idx ON stripe_subscription_periods (charge_id)`,
+		`CREATE TABLE stripe_lifetime_slots (
+			slot INTEGER PRIMARY KEY,
+			active_org_id TEXT REFERENCES organizations(id) ON DELETE SET NULL,
+			active_entitlement_id INTEGER,
+			claimed_at TEXT,
+			released_at TEXT
+		)`,
+		`CREATE INDEX stripe_lifetime_slots_active_org_idx ON stripe_lifetime_slots (active_org_id)`,
+		`CREATE TABLE stripe_lifetime_entitlements (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+			slot INTEGER NOT NULL REFERENCES stripe_lifetime_slots(slot),
+			checkout_session_id TEXT NOT NULL UNIQUE,
+			payment_intent_id TEXT,
+			charge_id TEXT,
+			status TEXT NOT NULL DEFAULT 'active',
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+			released_at TEXT
+		)`,
+		`CREATE UNIQUE INDEX stripe_lifetime_entitlements_active_org_idx ON stripe_lifetime_entitlements (org_id) WHERE status = 'active'`,
+		`CREATE UNIQUE INDEX stripe_lifetime_entitlements_active_slot_idx ON stripe_lifetime_entitlements (slot) WHERE status = 'active'`,
+		`CREATE INDEX stripe_lifetime_entitlements_payment_intent_idx ON stripe_lifetime_entitlements (payment_intent_id)`,
+		`CREATE INDEX stripe_lifetime_entitlements_charge_idx ON stripe_lifetime_entitlements (charge_id)`,
+		`CREATE TABLE stripe_checkout_attempts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			attempt_id TEXT NOT NULL UNIQUE,
+			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+			product TEXT NOT NULL,
+			idempotency_key TEXT NOT NULL UNIQUE,
+			stripe_session_id TEXT UNIQUE,
+			status TEXT NOT NULL DEFAULT 'pending',
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`,
+		`CREATE INDEX stripe_checkout_attempts_org_status_idx ON stripe_checkout_attempts (org_id, status)`,
+		SEED_LIFETIME_SLOTS,
 		`CREATE TABLE memberships (
 			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,

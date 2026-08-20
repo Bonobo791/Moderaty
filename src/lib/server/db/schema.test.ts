@@ -76,11 +76,15 @@ function expectCreatedAtDefault(table: SQLiteTable): void {
 	expect(sqlText(createdAt!.default)).toBe(`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`);
 }
 
-function expectIndex(table: SQLiteTable, name: string, columns: string[]): void {
+function expectIndex(table: SQLiteTable, name: string, columns: string[], expected: { unique?: boolean; where?: string } = {}): void {
 	const config = getTableConfig(table);
 	const found = config.indexes.find((i) => i.config.name === name);
 	expect(found, `${config.name} index ${name}`).toBeDefined();
 	expect(found!.config.columns.map((c) => (c as { name: string }).name)).toEqual(columns);
+	expect(found!.config.unique, `${config.name} index ${name} unique`).toBe(expected.unique ?? false);
+	const where = found!.config.where;
+	if (expected.where === undefined) expect(where, `${config.name} index ${name} where`).toBeUndefined();
+	else expect(sqlText(where), `${config.name} index ${name} where`).toBe(expected.where);
 }
 
 function expectForeignKey(
@@ -183,6 +187,13 @@ describe('organizations', () => {
 			auto_topup_consent_version: { notNull: false },
 			auto_topup_consented_by: { notNull: false },
 			auto_topup_consented_at: { notNull: false },
+			stripe_subscription_id: { notNull: false },
+			stripe_subscription_status: { notNull: false },
+			stripe_subscription_period_start: { notNull: false },
+			stripe_subscription_period_end: { notNull: false },
+			stripe_subscription_cancel_at_period_end: { notNull: false },
+			stripe_subscription_last_event_created: { notNull: false },
+			stripe_subscription_last_event_id: { notNull: false },
 			created_at: { notNull: true, hasDefault: true }
 		});
 		expectCreatedAtDefault(organizations);
@@ -191,7 +202,99 @@ describe('organizations', () => {
 	test('personal_for is unique and plan defaults to free', async () => {
 		const { organizations } = await loadSchema();
 		expectUnique(organizations, 'personal_for', 'organizations_personal_for_unique');
+		expectIndex(organizations, 'organizations_stripe_customer_id_unique', ['stripe_customer_id'], { unique: true, where: '"organizations"."stripe_customer_id" IS NOT NULL' });
+		expectIndex(organizations, 'organizations_stripe_subscription_id_unique', ['stripe_subscription_id'], { unique: true, where: '"organizations"."stripe_subscription_id" IS NOT NULL' });
 		expect(getTableConfig(organizations).columns.find((c) => c.name === 'plan')!.default).toBe('free');
+	});
+});
+
+
+
+describe('stripeSubscriptionPeriods', () => {
+	test('table shape and period uniqueness', async () => {
+		const { stripeSubscriptionPeriods, organizations } = await loadSchema();
+		expect(getTableConfig(stripeSubscriptionPeriods).name).toBe('stripe_subscription_periods');
+		expectColumns(stripeSubscriptionPeriods, {
+			id: { notNull: true, primary: true, autoIncrement: true },
+			org_id: { notNull: true },
+			subscription_id: { notNull: true },
+			invoice_id: { notNull: true },
+			payment_intent_id: { notNull: false },
+			charge_id: { notNull: false },
+			period_key: { notNull: true },
+			period_start: { notNull: true },
+			period_end: { notNull: true },
+			included_credits: { notNull: true, hasDefault: true },
+			consumed_credits: { notNull: true, hasDefault: true },
+			status: { notNull: true, hasDefault: true },
+			created_at: { notNull: true, hasDefault: true }
+		});
+		expectForeignKey(stripeSubscriptionPeriods, 'org_id', organizations, 'id', 'cascade');
+		expectUnique(stripeSubscriptionPeriods, 'invoice_id', 'stripe_subscription_periods_invoice_id_unique');
+		expectIndex(stripeSubscriptionPeriods, 'stripe_subscription_periods_subscription_period_unique', ['subscription_id', 'period_key'], { unique: true });
+	});
+});
+
+describe('stripeLifetimeSlots', () => {
+	test('table shape and slot key', async () => {
+		const { stripeLifetimeSlots, organizations } = await loadSchema();
+		expect(getTableConfig(stripeLifetimeSlots).name).toBe('stripe_lifetime_slots');
+		expectColumns(stripeLifetimeSlots, {
+			slot: { notNull: true, primary: true },
+			active_org_id: { notNull: false },
+			active_entitlement_id: { notNull: false },
+			claimed_at: { notNull: false },
+			released_at: { notNull: false }
+		});
+		expectForeignKey(stripeLifetimeSlots, 'active_org_id', organizations, 'id', 'set null');
+	});
+});
+
+describe('stripeLifetimeEntitlements', () => {
+	test('table shape, active uniqueness, and payment indexes', async () => {
+		const { stripeLifetimeEntitlements, stripeLifetimeSlots, organizations } = await loadSchema();
+		expect(getTableConfig(stripeLifetimeEntitlements).name).toBe('stripe_lifetime_entitlements');
+		expectColumns(stripeLifetimeEntitlements, {
+			id: { notNull: true, primary: true, autoIncrement: true },
+			org_id: { notNull: true },
+			slot: { notNull: true },
+			checkout_session_id: { notNull: true },
+			payment_intent_id: { notNull: false },
+			charge_id: { notNull: false },
+			status: { notNull: true, hasDefault: true },
+			created_at: { notNull: true, hasDefault: true },
+			released_at: { notNull: false }
+		});
+		expectForeignKey(stripeLifetimeEntitlements, 'org_id', organizations, 'id', 'cascade');
+		expectForeignKey(stripeLifetimeEntitlements, 'slot', stripeLifetimeSlots, 'slot');
+		expectUnique(stripeLifetimeEntitlements, 'checkout_session_id', 'stripe_lifetime_entitlements_checkout_session_id_unique');
+		expectIndex(stripeLifetimeEntitlements, 'stripe_lifetime_entitlements_payment_intent_idx', ['payment_intent_id']);
+		expectIndex(stripeLifetimeEntitlements, 'stripe_lifetime_entitlements_charge_idx', ['charge_id']);
+		expectIndex(stripeLifetimeEntitlements, 'stripe_lifetime_entitlements_active_org_idx', ['org_id'], { unique: true, where: `"stripe_lifetime_entitlements"."status" = 'active'` });
+		expectIndex(stripeLifetimeEntitlements, 'stripe_lifetime_entitlements_active_slot_idx', ['slot'], { unique: true, where: `"stripe_lifetime_entitlements"."status" = 'active'` });
+	});
+});
+
+describe('stripeCheckoutAttempts', () => {
+	test('durable attempt identity and Stripe session uniqueness', async () => {
+		const { stripeCheckoutAttempts, organizations } = await loadSchema();
+		expect(getTableConfig(stripeCheckoutAttempts).name).toBe('stripe_checkout_attempts');
+		expectColumns(stripeCheckoutAttempts, {
+			id: { notNull: true, primary: true, autoIncrement: true },
+			attempt_id: { notNull: true },
+			org_id: { notNull: true },
+			product: { notNull: true },
+			idempotency_key: { notNull: true },
+			stripe_session_id: { notNull: false },
+			status: { notNull: true, hasDefault: true },
+			created_at: { notNull: true, hasDefault: true },
+			updated_at: { notNull: true, hasDefault: true }
+		});
+		expectForeignKey(stripeCheckoutAttempts, 'org_id', organizations, 'id', 'cascade');
+		expectUnique(stripeCheckoutAttempts, 'attempt_id', 'stripe_checkout_attempts_attempt_id_unique');
+		expectUnique(stripeCheckoutAttempts, 'idempotency_key', 'stripe_checkout_attempts_idempotency_key_unique');
+		expectUnique(stripeCheckoutAttempts, 'stripe_session_id', 'stripe_checkout_attempts_stripe_session_id_unique');
+		expectIndex(stripeCheckoutAttempts, 'stripe_checkout_attempts_org_status_idx', ['org_id', 'status']);
 	});
 });
 

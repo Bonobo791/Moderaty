@@ -18,9 +18,9 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { db } from '$lib/server/db';
-import { organizations, stripeEvents, stripePendingReversals } from '$lib/server/db/schema';
+import { organizations, stripeEvents, stripePendingReversals, stripeLifetimeEntitlements, stripeLifetimeSlots, stripeSubscriptionPeriods, stripeDisputeReversals } from '$lib/server/db/schema';
 import { applyLedgerDelta, getCredits } from '$lib/server/billing/ledger';
-import { fulfillAutoTopup, fulfillCheckout, handleStripeEvent, restoreWonDispute, reverseCharge, reverseDispute } from './webhooks';
+import { claimEvent, fulfillAutoTopup, fulfillCheckout, handleStripeEvent, markEventProcessed, restoreWonDispute, reverseCharge, reverseDispute } from './webhooks';
 
 const mocks = vi.hoisted(() => ({
 	sessionsRetrieve: vi.fn(),
@@ -43,11 +43,13 @@ vi.mock('$lib/server/stripe/client', () => ({
 }));
 vi.mock('$env/dynamic/private', () => ({ env: {} }));
 
-setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_pending_reversals']);
+setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_pending_reversals', 'stripe_lifetime_entitlements', 'stripe_subscription_periods', 'stripe_lifetime_slots', 'stripe_dispute_reversals']);
 
 function session(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 	return {
 		id: 'cs_123',
+		mode: 'payment',
+		status: 'complete',
 		payment_status: 'paid',
 		metadata: { org_id: 'org-1', bundle: 'credits_500' },
 		customer: 'cus_1',
@@ -62,6 +64,243 @@ function event(type: string, id: string, object: Record<string, unknown>): { id:
 
 beforeEach(() => {
 	vi.clearAllMocks();
+});
+
+
+
+describe('fenced Stripe event leases', () => {
+	test('a stale worker cannot complete an event after its lease is reclaimed', async () => {
+		const evt = event('checkout.session.completed', 'evt_fenced', { id: 'cs_fenced', object: 'checkout.session' });
+		const firstLease = await claimEvent(evt as never);
+		expect(firstLease).toEqual(expect.any(String));
+		await testDb().db.update(stripeEvents).set({ processingStartedAt: new Date(0).toISOString() }).where(eq(stripeEvents.eventId, evt.id));
+		const secondLease = await claimEvent(evt as never);
+		expect(secondLease).toEqual(expect.any(String));
+		expect(secondLease).not.toBe(firstLease);
+		expect(await markEventProcessed(evt.id, firstLease as string)).toBe(false);
+		expect((await testDb().db.select().from(stripeEvents).where(eq(stripeEvents.eventId, evt.id)).get())?.processedAt).toBeNull();
+		expect(await markEventProcessed(evt.id, secondLease as string)).toBe(true);
+	});
+});
+
+describe('paid hosted products', () => {
+	test('rejects a lifetime fulfillment while a hosted subscription is active', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lifetime', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		expect(await fulfillCheckout('cs_lifetime')).toBe('rejected');
+		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toHaveLength(0);
+	});
+
+	test('rejects a hosted fulfillment while lifetime access is active', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1', activeEntitlementId: 1 }).where(eq(stripeLifetimeSlots.slot, 1));
+		await testDb().db.insert(stripeLifetimeEntitlements).values({ id: 1, orgId: 'org-1', slot: 1, checkoutSessionId: 'cs_old' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_hosted', mode: 'subscription', subscription: 'sub_1', metadata: { org_id: 'org-1', product: 'hosted' }, payment_intent: null }));
+		expect(await fulfillCheckout('cs_hosted')).toBe('rejected');
+	});
+
+	test('checkout completion records the subscription but does not grant monthly allowance', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ mode: 'subscription', subscription: 'sub_1', metadata: { org_id: 'org-1', product: 'hosted' }, payment_intent: null }));
+		expect(await fulfillCheckout('cs_hosted')).toBe('granted');
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeSubscriptionId).toBe('sub_1');
+		expect(org?.plan).toBe('free');
+		expect(await testDb().db.select().from(stripeSubscriptionPeriods)).toHaveLength(0);
+	});
+
+	test('lifetime completion claims one slot and is replay-safe', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		expect((await testDb().db.select().from(stripeLifetimeEntitlements)).length).toBe(0);
+		mocks.sessionsRetrieve.mockResolvedValue(session({ metadata: { org_id: 'org-1', product: 'lifetime' } }));
+		expect(await fulfillCheckout('cs_lifetime')).toBe('granted');
+		expect(await fulfillCheckout('cs_lifetime')).toBe('already');
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.plan).toBe('lifetime');
+		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toHaveLength(1);
+	});
+
+	test('logs a paid lifetime checkout that cannot claim a slot', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.insert(stripePendingReversals).values({ chargeId: 'ch_1', reason: 'refund' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_sold', metadata: { org_id: 'org-1', product: 'lifetime' } }));
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			expect(await fulfillCheckout('cs_sold')).toBe('rejected');
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('PAID but claimed no slot'));
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+});
+
+
+describe('subscription lifecycle webhooks', () => {
+
+	test('invoice.paid accepts the current parent subscription payload', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
+		const invoice = { parent: { type: 'subscription_details', subscription_details: { subscription: 'sub_1' } }, customer: 'cus_1', payment_intent: 'pi_1', lines: { data: [{ subscription: 'sub_1', period: { start: 1_800_000_000, end: 1_802_678_400 } }] } };
+		expect(await handleStripeEvent(event('invoice.paid', 'in_current', invoice) as never)).toBe(true);
+		expect(await testDb().db.select().from(stripeSubscriptionPeriods).where(eq(stripeSubscriptionPeriods.invoiceId, 'in_current'))).toHaveLength(1);
+	});
+
+	test('invoice.paid selects the matching non-proration subscription line and current payment reference', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
+		const invoice = {
+			subscription: 'sub_1',
+			customer: 'cus_1',
+			payments: { data: [{ payment: { type: 'payment_intent', payment_intent: 'pi_current' } }] },
+			lines: {
+				data: [
+					{ subscription: 'sub_1', proration: true, period: { start: 1_700_000_000, end: 1_700_086_400 } },
+					{ subscription: 'sub_1', proration: false, period: { start: 1_800_000_000, end: 1_802_678_400 } }
+				]
+			}
+		};
+		expect(await handleStripeEvent(event('invoice.paid', 'in_current_payment', invoice) as never)).toBe(true);
+		const period = await testDb().db.select().from(stripeSubscriptionPeriods).where(eq(stripeSubscriptionPeriods.invoiceId, 'in_current_payment')).get();
+		expect(period).toMatchObject({ paymentIntentId: 'pi_current', periodStart: new Date(1_800_000_000 * 1000).toISOString(), periodEnd: new Date(1_802_678_400 * 1000).toISOString() });
+	});
+
+	test('invoice.paid rejects when no line belongs to the invoice subscription', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
+		const invoice = {
+			subscription: 'sub_1',
+			customer: 'cus_1',
+			lines: { data: [{ subscription: 'sub_other', period: { start: 1_800_000_000, end: 1_802_678_400 } }] }
+		};
+		await expect(handleStripeEvent(event('invoice.paid', 'in_missing_line', invoice) as never)).rejects.toThrow('no matching non-proration subscription line');
+	});
+
+	test('invoice.paid rejects a malformed current payments payload instead of using a legacy fallback', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
+		const invoice = {
+			subscription: 'sub_1',
+			customer: 'cus_1',
+			payments: 'not-a-payments-list',
+			payment_intent: 'pi_legacy',
+			lines: { data: [{ subscription: 'sub_1', period: { start: 1_800_000_000, end: 1_802_678_400 } }] }
+		};
+		await expect(handleStripeEvent(event('invoice.paid', 'in_malformed_payments', invoice) as never)).rejects.toThrow('malformed object');
+	});
+
+	test('invoice.payment_failed falls back to the invoice period before a period is stored', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
+		const invoice = {
+			subscription: 'sub_1',
+			customer: 'cus_1',
+			lines: { data: [{ subscription: 'sub_1', proration: false, period: { start: 1_800_000_000, end: 1_802_678_400 } }] }
+		};
+		expect(await handleStripeEvent(event('invoice.payment_failed', 'in_payment_failed', invoice) as never)).toBe(true);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org).toMatchObject({ stripeSubscriptionStatus: 'past_due', stripeSubscriptionPeriodStart: new Date(1_800_000_000 * 1000).toISOString(), stripeSubscriptionPeriodEnd: new Date(1_802_678_400 * 1000).toISOString() });
+	});
+
+	test('ignores an invoice for a superseded subscription', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_current' });
+		const invoice = { id: 'in_stale', subscription: 'sub_old', customer: 'cus_1', payment_intent: 'pi_1', lines: { data: [{ subscription: 'sub_1', period: { start: 1_800_000_000, end: 1_802_678_400 } }] } };
+		expect(await handleStripeEvent(event('invoice.paid', 'evt_stale_invoice', invoice) as never)).toBe(true);
+		expect(await testDb().db.select().from(stripeSubscriptionPeriods)).toHaveLength(0);
+	});
+
+	test('subscription events read billing periods from subscription items', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
+		const subscription = { id: 'sub_1', customer: 'cus_1', status: 'active', cancel_at_period_end: false, items: { data: [{ current_period_start: 1_800_000_000, current_period_end: 1_802_678_400 }] } };
+		expect(await handleStripeEvent(event('customer.subscription.updated', 'sub_current', subscription) as never)).toBe(true);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeSubscriptionPeriodStart).toBe(new Date(1_800_000_000 * 1000).toISOString());
+	});
+	test('invoice.paid creates one period allowance and replay does not create another', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
+		const invoice = { subscription: 'sub_1', customer: 'cus_1', payment_intent: 'pi_1', lines: { data: [{ subscription: 'sub_1', period: { start: 1_800_000_000, end: 1_802_678_400 } }] } };
+		const paid = event('invoice.paid', 'in_1', invoice);
+		expect(await handleStripeEvent(paid as never)).toBe(true);
+		expect(await handleStripeEvent(paid as never)).toBe(true);
+		expect(await testDb().db.select().from(stripeSubscriptionPeriods)).toHaveLength(1);
+	});
+
+	test('subscription updates are versioned so an older cancellation cannot downgrade active state', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
+		const newer = { ...event('customer.subscription.updated', 'evt_new', { id: 'sub_1', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false }), created: 200 };
+		const older = { ...event('customer.subscription.deleted', 'evt_old', { id: 'sub_1', customer: 'cus_1', status: 'canceled', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false }), created: 100 };
+		expect(await handleStripeEvent(newer as never)).toBe(true);
+		expect(await handleStripeEvent(older as never)).toBe(true);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.plan).toBe('hosted');
+		expect(org?.stripeSubscriptionStatus).toBe('active');
+	});
+	test('a won dispute restores a subscription period allowance', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
+		await handleStripeEvent(event('invoice.paid', 'in_1', { id: 'in_1', subscription: 'sub_1', payment_intent: 'pi_1', charge: 'ch_1', period_start: 1798848000, period_end: 1801526400, lines: { data: [{ subscription: 'sub_1', period: { start: 1798848000, end: 1801526400 } }] } }) as never);
+		mocks.disputesRetrieve.mockResolvedValueOnce({ id: 'disp_sub', charge: 'ch_1', status: 'lost' }).mockResolvedValueOnce({ id: 'disp_sub', charge: 'ch_1', status: 'won' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1', amount: 500, amount_refunded: 0 });
+		await reverseDispute('disp_sub');
+		expect(await restoreWonDispute('disp_sub')).toBe(true);
+		expect((await testDb().db.select().from(stripeSubscriptionPeriods).where(eq(stripeSubscriptionPeriods.invoiceId, 'in_1')).get())?.status).toBe('paid');
+	});
+
+	test('a won dispute restores the lifetime entitlement that the dispute revoked', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lifetime', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		expect(await fulfillCheckout('cs_lifetime')).toBe('granted');
+		mocks.disputesRetrieve.mockResolvedValueOnce({ id: 'disp_1', charge: 'ch_1', status: 'lost' }).mockResolvedValueOnce({ id: 'disp_1', charge: 'ch_1', status: 'won' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1', amount: 4900, amount_refunded: 0 });
+		expect(await reverseDispute('disp_1')).toBe(true);
+		expect(await restoreWonDispute('disp_1')).toBe(true);
+		expect((await testDb().db.select().from(stripeLifetimeEntitlements).where(eq(stripeLifetimeEntitlements.checkoutSessionId, 'cs_lifetime')).get())?.status).toBe('active');
+	});
+
+	test('retries a dispute after a crash keeps a prior ledger reversal restorable', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: -500, reason: 'dispute', refType: 'dispute', refId: 'ch_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+		await testDb().db.insert(stripeDisputeReversals).values({ disputeId: 'disp_retry', chargeId: 'ch_1', paymentIntentId: 'pi_1', status: 'pending', source: 'unknown' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1' });
+		mocks.disputesRetrieve.mockResolvedValue({ id: 'disp_retry', charge: 'ch_1', status: 'won' });
+		expect(await reverseCharge('ch_1', 'dispute', 'disp_retry')).toBe(false);
+		expect((await testDb().db.select().from(stripeDisputeReversals).where(eq(stripeDisputeReversals.disputeId, 'disp_retry')).get())?.status).toBe('reversed');
+		expect(await restoreWonDispute('disp_retry')).toBe(true);
+		expect(await getCredits('org-1')).toBe(500);
+	});
+
+	test('two disputes on one charge cannot each restore the same credit reversal', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await applyLedgerDelta(testDb().db as never, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+		let won = false;
+		mocks.disputesRetrieve.mockImplementation(async (id: string) => ({ id, charge: 'ch_1', status: won ? 'won' : 'lost' }));
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1', amount: 5000, amount_refunded: 0 });
+		await reverseDispute('disp_1');
+		await reverseDispute('disp_2');
+		won = true;
+		await restoreWonDispute('disp_1');
+		await restoreWonDispute('disp_2');
+		expect(await getCredits('org-1')).toBe(500);
+		expect(await testDb().db.select().from(stripeDisputeReversals)).toHaveLength(2);
+	});
+
+	test('concurrent delivery claims one inbox lease and rejects the competing worker', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		let releaseSession!: (value: Record<string, unknown>) => void;
+		mocks.sessionsRetrieve.mockImplementation(() => new Promise((resolve) => { releaseSession = resolve; }));
+		const evt = event('checkout.session.completed', 'evt_concurrent', { id: 'cs_concurrent', object: 'checkout.session' });
+		const first = handleStripeEvent(evt as never);
+		await vi.waitFor(async () => expect(await testDb().db.select().from(stripeEvents).where(eq(stripeEvents.eventId, 'evt_concurrent')).get()).toMatchObject({ processedAt: null, processingStartedAt: expect.any(String) }));
+		await expect(handleStripeEvent(evt as never)).rejects.toThrow('already being processed');
+		releaseSession(session({ id: 'cs_concurrent', metadata: { org_id: 'org-1', bundle: 'credits_500' } }));
+		expect(await first).toBe(true);
+	});
+
+	test('a lifetime dispute releases the entitlement and frees its slot', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lifetime', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		expect(await fulfillCheckout('cs_lifetime')).toBe('granted');
+		mocks.disputesRetrieve.mockResolvedValue({ id: 'disp_1', charge: 'ch_1' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1', amount: 4900, amount_refunded: 0 });
+		expect(await handleStripeEvent(event('charge.dispute.created', 'disp_1', { id: 'ch_1', object: 'dispute' }) as never)).toBe(true);
+		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toMatchObject([{ status: 'disputed' }]);
+		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.plan).toBe('free');
+	});
+
 });
 
 describe('fulfillCheckout', () => {
@@ -316,7 +555,7 @@ describe('reverseCharge / reverseDispute', () => {
 		// money is refunded, and never loses credits twice.
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		await applyLedgerDelta(db, { orgId: 'org-1', delta: 2000, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
-		mocks.disputesRetrieve.mockResolvedValue({ id: 'du_1', charge: 'ch_1', status: 'won' });
+		mocks.disputesRetrieve.mockResolvedValueOnce({ id: 'du_1', charge: 'ch_1', status: 'lost' }).mockResolvedValueOnce({ id: 'du_1', charge: 'ch_1', status: 'won' });
 		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1', amount: 200000, amount_refunded: 200000 });
 
 		expect(await reverseDispute('du_1')).toBe(true);
@@ -349,7 +588,7 @@ describe('reverseCharge / reverseDispute', () => {
 	test('a won dispute re-grants the reversed credits, once', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		await applyLedgerDelta(db, { orgId: 'org-1', delta: 2000, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
-		mocks.disputesRetrieve.mockResolvedValue({ id: 'du_1', charge: 'ch_1', status: 'won' });
+		mocks.disputesRetrieve.mockResolvedValueOnce({ id: 'du_1', charge: 'ch_1', status: 'lost' }).mockResolvedValueOnce({ id: 'du_1', charge: 'ch_1', status: 'won' });
 		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1' });
 		await reverseDispute('du_1');
 
@@ -509,7 +748,7 @@ describe('handleStripeEvent', () => {
 		await expect(handleStripeEvent(evt as never)).rejects.toThrow('could not save payment method');
 		expect(await getCredits('org-1')).toBe(500);
 		let receipt = await testDb().db.select().from(stripeEvents).where(eq(stripeEvents.eventId, 'evt_1')).get();
-		expect(receipt).toBeUndefined();
+		expect(receipt).toMatchObject({ eventId: 'evt_1', processedAt: null, processingStartedAt: null, processingAttempts: 1 });
 
 		expect(await handleStripeEvent(evt as never)).toBe(true);
 		expect(await getCredits('org-1')).toBe(500);

@@ -41,6 +41,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createClient } from '@libsql/client';
 import { loadMigrationConfig, readJournal } from './migration-config.mjs';
+import { applyReconciliationTransaction } from './reconcile-transaction.mjs';
 
 const { metaDir, url, authToken, journalPath } = loadMigrationConfig({ scriptName: 'reconcile-migrations' });
 const journal = readJournal(journalPath, 'reconcile-migrations');
@@ -134,38 +135,28 @@ for (const change of changes) {
 	console.log(`reconcile-migrations: ${change.tag}: ${change.dbHash.slice(0, 12)}… -> ${change.journalHash.slice(0, 12)}…`);
 }
 
-// Apply ALL updates and their read-back verifications in ONE atomic batch
-// (CodeRabbit #131): any statement failure rolls the whole run back, so a
-// mid-run error can never leave a partial reconciliation. The read-backs
-// prove each update staged correctly; with a read-only token the UPDATEs
-// fail inside the 'write' transaction and the batch is rolled back.
+// Apply ALL updates and read-back checks in ONE explicit write transaction,
+// committing only after every persisted validation succeeds (CodeRabbit #131):
+// any statement error or failed read-back rolls the whole run back, so a
+// mid-run failure can never leave a partial reconciliation — and the exit-1
+// "nothing was changed" claim is only ever made after a real rollback, never
+// after an implicit batch commit.
 const writer = createClient({ url, authToken });
-const statements = changes.flatMap((change) => [
-	{ sql: 'UPDATE __drizzle_migrations SET hash = ? WHERE rowid = ?', args: [change.journalHash, change.rowid] },
-	{ sql: 'SELECT hash FROM __drizzle_migrations WHERE rowid = ?', args: [change.rowid] }
-]);
-let batchResult;
+let tx;
 try {
-	batchResult = await writer.batch(statements, 'write');
+	tx = await writer.transaction('write');
 } catch (error) {
 	writer.close();
-	console.error(`reconcile-migrations: batch failed and was rolled back (${error.message}) — nothing was changed.`);
+	console.error(`reconcile-migrations: could not open a write transaction (${error.message}) — nothing was changed.`);
+	process.exit(1);
+}
+try {
+	await applyReconciliationTransaction(tx, changes);
+} catch (error) {
+	writer.close();
+	console.error(`reconcile-migrations: ${error.message}`);
 	process.exit(1);
 }
 writer.close();
-for (let k = 0; k < changes.length; k++) {
-	const change = changes[k];
-	const update = batchResult[k * 2];
-	const readback = batchResult[k * 2 + 1];
-	const persisted =
-		Number(update.rowsAffected) === 1 && readback.rows.length === 1 && String(readback.rows[0].hash) === change.journalHash;
-	if (!persisted) {
-		console.error(
-			`reconcile-migrations: WRITE DID NOT PERSIST for rowid ${change.rowid} (${change.tag}) — rows affected: ${update.rowsAffected}. ` +
-				'The token appears to be READ-ONLY for this database, or the writes are rejected — nothing was changed.'
-		);
-		process.exit(1);
-	}
-}
 console.log(`reconcile-migrations: ${changes.length} hash(es) updated AND verified against ${url}.`);
 process.exit(0);

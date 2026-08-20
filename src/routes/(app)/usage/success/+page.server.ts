@@ -22,6 +22,7 @@
 
 import { createHash } from 'node:crypto';
 
+import { markCheckoutAttemptFulfilled } from '$lib/server/billing/checkout';
 import { requireUser } from '$lib/server/session';
 import { getStripe } from '$lib/server/stripe/client';
 import { fulfillCheckout } from '$lib/server/stripe/webhooks';
@@ -52,6 +53,7 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 			// report success for credits that were not granted (coderabbit).
 			const result = await fulfillCheckout(sessionId);
 			granted = result === 'granted' || result === 'already';
+			if (granted) await markCheckoutAttemptFulfilled(sessionId);
 		}
 	} catch (cause) {
 		// A session id that does not EXIST is a definitive no-purchase, not a

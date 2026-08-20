@@ -20,9 +20,9 @@
 // idempotent (a comment is consumed once, a checkout session granted once —
 // webhooks and retries can never double-apply).
 
-import { and, eq, gte, inArray, lt, ne, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, lt, ne, or, sql } from 'drizzle-orm';
 import { db } from '$lib/server/db';
-import { creditTransactions, organizations, stripePendingReversals } from '$lib/server/db/schema';
+import { creditTransactions, organizations, stripePendingReversals, stripeSubscriptionPeriods, stripeDisputeReversals } from '$lib/server/db/schema';
 
 export type CreditReason = 'consume' | 'purchase' | 'auto_topup' | 'refund' | 'dispute' | 'adjust';
 // 'refund' and 'dispute' are reversal refTypes anchored on the charge id —
@@ -66,6 +66,10 @@ const UNIQUE_TARGET: [typeof creditTransactions.orgId, typeof creditTransactions
 	creditTransactions.refId
 ];
 
+export function hasHostedEntitlement(input: { plan: string; stripeSubscriptionId: string | null }): boolean {
+	return input.plan === 'hosted' || (input.plan !== 'lifetime' && typeof input.stripeSubscriptionId === 'string');
+}
+
 /**
  * Retrieves an organization's current credit balance.
  *
@@ -74,12 +78,19 @@ const UNIQUE_TARGET: [typeof creditTransactions.orgId, typeof creditTransactions
  */
 export async function getCredits(orgId: string): Promise<number> {
 	const row = await db
-		.select({ creditsRemaining: organizations.creditsRemaining })
+		.select({ creditsRemaining: organizations.creditsRemaining, plan: organizations.plan, stripeSubscriptionId: organizations.stripeSubscriptionId })
 		.from(organizations)
 		.where(eq(organizations.id, orgId))
 		.get();
 	if (!row) throw new Error(`org not found: ${orgId}`);
-	return row.creditsRemaining ?? 0;
+	if (!hasHostedEntitlement(row)) return row.creditsRemaining ?? 0;
+	const now = new Date().toISOString();
+	const period = await db
+		.select({ remaining: sql<number>`COALESCE(SUM(${stripeSubscriptionPeriods.includedCredits} - ${stripeSubscriptionPeriods.consumedCredits}), 0)` })
+		.from(stripeSubscriptionPeriods)
+		.where(and(eq(stripeSubscriptionPeriods.orgId, orgId), eq(stripeSubscriptionPeriods.status, 'paid'), sql`${stripeSubscriptionPeriods.periodStart} <= ${now}`, gt(stripeSubscriptionPeriods.periodEnd, now)))
+		.get();
+	return (row.creditsRemaining ?? 0) + (period?.remaining ?? 0);
 }
 
 /**
@@ -102,13 +113,13 @@ const UNMETERED_PLANS = new Set(['lifetime']);
 
 export async function orgIsMetered(orgId: string): Promise<boolean> {
 	const row = await db
-		.select({ creditsRemaining: organizations.creditsRemaining, plan: organizations.plan })
+		.select({ creditsRemaining: organizations.creditsRemaining, plan: organizations.plan, stripeSubscriptionId: organizations.stripeSubscriptionId })
 		.from(organizations)
 		.where(eq(organizations.id, orgId))
 		.get();
 	if (!row) throw new Error(`org not found: ${orgId}`);
 	if (UNMETERED_PLANS.has(row.plan)) return false;
-	return row.creditsRemaining !== null;
+	return hasHostedEntitlement(row) || row.creditsRemaining !== null;
 }
 
 /**
@@ -175,7 +186,7 @@ export async function consumeCredit(handle: LedgerHandle, orgId: string, comment
 		// Existence check first: an unknown org is a data bug and must fail loudly,
 		// not silently stage comments free.
 		const org = await tx
-			.select({ creditsRemaining: organizations.creditsRemaining })
+			.select({ creditsRemaining: organizations.creditsRemaining, plan: organizations.plan, stripeSubscriptionId: organizations.stripeSubscriptionId })
 			.from(organizations)
 			.where(eq(organizations.id, orgId))
 			.get();
@@ -193,23 +204,45 @@ export async function consumeCredit(handle: LedgerHandle, orgId: string, comment
 			.onConflictDoNothing({ target: UNIQUE_TARGET })
 			.returning({ id: creditTransactions.id });
 		if (inserted.length === 0) return false; // already consumed — duplicate delivery
+
+		const now = new Date().toISOString();
+		const period = hasHostedEntitlement(org) ? await (tx
+			.select({ id: stripeSubscriptionPeriods.id })
+			.from(stripeSubscriptionPeriods)
+			.where(and(
+				eq(stripeSubscriptionPeriods.orgId, orgId),
+				eq(stripeSubscriptionPeriods.status, 'paid'),
+				sql`${stripeSubscriptionPeriods.periodStart} <= ${now}`,
+				gt(stripeSubscriptionPeriods.periodEnd, now),
+				sql`${stripeSubscriptionPeriods.consumedCredits} < ${stripeSubscriptionPeriods.includedCredits}`
+			))
+			.orderBy(desc(stripeSubscriptionPeriods.periodStart), asc(stripeSubscriptionPeriods.id))
+			.limit(1)
+			.get()) : undefined;
+		if (period) {
+			const consumed = await tx
+				.update(stripeSubscriptionPeriods)
+				.set({ consumedCredits: sql`${stripeSubscriptionPeriods.consumedCredits} + 1` })
+				.where(and(eq(stripeSubscriptionPeriods.id, period.id), sql`${stripeSubscriptionPeriods.consumedCredits} < ${stripeSubscriptionPeriods.includedCredits}`))
+				.returning({ id: stripeSubscriptionPeriods.id });
+			if (consumed.length === 1) {
+				await tx.update(creditTransactions).set({ balanceAfter: org.creditsRemaining }).where(eq(creditTransactions.id, inserted[0].id));
+				return true;
+			}
+		}
+
+		// Once the paid monthly allowance is exhausted, consume purchased
+		// overage atomically. Hosted orgs without a paid period remain metered.
 		const updated = await tx
 			.update(organizations)
-			.set({ creditsRemaining: sql`COALESCE(${organizations.creditsRemaining}, 0) - 1` })
-			.where(and(eq(organizations.id, orgId), sql`COALESCE(${organizations.creditsRemaining}, 0) > 0`))
+			.set({ creditsRemaining: sql`${organizations.creditsRemaining} - 1` })
+			.where(and(eq(organizations.id, orgId), sql`${organizations.creditsRemaining} > 0`))
 			.returning({ balance: organizations.creditsRemaining });
 		if (updated.length === 0) {
-			// Balance hit 0 concurrently — the comment stages free. Remove the row
-			// so the ledger never shows a delta the balance did not absorb.
-			await tx
-				.delete(creditTransactions)
-				.where(and(eq(creditTransactions.orgId, orgId), eq(creditTransactions.refType, 'comment'), eq(creditTransactions.refId, commentId)));
+			await tx.delete(creditTransactions).where(and(eq(creditTransactions.orgId, orgId), eq(creditTransactions.refType, 'comment'), eq(creditTransactions.refId, commentId)));
 			return false;
 		}
-		await tx
-			.update(creditTransactions)
-			.set({ balanceAfter: updated[0].balance })
-			.where(eq(creditTransactions.id, inserted[0].id));
+		await tx.update(creditTransactions).set({ balanceAfter: updated[0].balance }).where(eq(creditTransactions.id, inserted[0].id));
 		return true;
 	});
 }
@@ -316,7 +349,7 @@ export async function listCreditTransactions(orgId: string, limit = 50) {
  * grant had not yet arrived (Stripe webhook delivery order is not
  * guaranteed). charge_id UNIQUE: one reversal per charge, first event wins.
  */
-export async function queuePendingReversal(chargeId: string, reason: 'refund' | 'dispute'): Promise<void> {
+export async function queuePendingReversal(chargeId: string, reason: 'refund' | 'dispute', disputeId?: string): Promise<void> {
 	// UNIQUE(charge_id, reason) — NOT charge_id alone: a dispute AND a later
 	// full refund can both arrive before the delayed grant, and each
 	// obligation must survive to drain on its own ledger anchor (a won-dispute
@@ -325,8 +358,11 @@ export async function queuePendingReversal(chargeId: string, reason: 'refund' | 
 	// second (codex review).
 	await db
 		.insert(stripePendingReversals)
-		.values({ chargeId, reason })
-		.onConflictDoNothing({ target: [stripePendingReversals.chargeId, stripePendingReversals.reason] });
+		.values({ chargeId, reason, disputeId })
+		.onConflictDoUpdate({
+			target: [stripePendingReversals.chargeId, stripePendingReversals.reason],
+			set: { disputeId: sql`COALESCE(${stripePendingReversals.disputeId}, excluded.dispute_id)` }
+		});
 }
 
 /**
@@ -355,6 +391,14 @@ export async function drainPendingReversals(chargeId: string): Promise<number> {
 		// second (refund + dispute) obligation before its mutation runs — a
 		// crash in between would make the retry unable to reconcile it.
 		await db.transaction(async (tx) => {
+			if (row.reason === 'dispute' && row.disputeId) {
+				const dispute = await tx.select({ status: stripeDisputeReversals.status }).from(stripeDisputeReversals).where(eq(stripeDisputeReversals.disputeId, row.disputeId)).get();
+				if (dispute?.status === 'won') {
+					await tx.update(stripeDisputeReversals).set({ source: 'credits', status: 'restored' }).where(eq(stripeDisputeReversals.disputeId, row.disputeId));
+					await tx.delete(stripePendingReversals).where(eq(stripePendingReversals.id, row.id));
+					return;
+				}
+			}
 			// A disputed customer must never be re-charged off-session — same
 			// policy as reverseDispute, applied at drain time (the dispute event
 			// found no org to disable when it arrived).
@@ -377,6 +421,7 @@ export async function drainPendingReversals(chargeId: string): Promise<number> {
 				refId: chargeId,
 				chargeId
 			});
+			if (row.reason === 'dispute' && row.disputeId) await tx.update(stripeDisputeReversals).set({ source: 'credits', status: 'reversed' }).where(eq(stripeDisputeReversals.disputeId, row.disputeId));
 			// Satisfied (whether applied now or by a concurrent path): the anchor
 			// makes double-application impossible, so the obligation is done.
 			await tx.delete(stripePendingReversals).where(eq(stripePendingReversals.id, row.id));

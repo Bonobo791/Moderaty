@@ -17,6 +17,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <script lang="ts">
 	import { enhance } from '$app/forms';
+	import { onMount } from 'svelte';
 	import EmptyState from '$lib/EmptyState.svelte';
 
 	let { data, form } = $props();
@@ -26,6 +27,12 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	const autoTopupState = $derived(data.autoTopup?.state ?? 'idle');
 	// Svelte 5 runes: a reassigned $state variable must be declared with `let`.
 	let pending = $state(false);
+	let checkoutAttempts = $state<Record<string, string>>({});
+
+	onMount(() => {
+		const keys = ['hosted', 'lifetime', ...data.bundles.map((bundle: { id: string }) => bundle.id)];
+		checkoutAttempts = Object.fromEntries(keys.map((key) => [key, crypto.randomUUID()]));
+	});
 
 	// Mirrors the page's async form submission so buy/enable buttons disable
 	// while the request is in flight (I12 loading affordance).
@@ -78,11 +85,36 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	</div>
 </div>
 
-{#if data.summary && data.summary.remaining <= 0}
+{#if data.metered && data.summary && data.summary.remaining <= 0}
 	<p class="error-box" role="alert">
 		You are out of credits. AI scoring is paused on your channels (your rules and protected
 		handles still run); it resumes automatically as soon as credits arrive.
 	</p>
+{/if}
+
+{#if isOwner && (data.plans.hosted || data.plans.lifetime)}
+	<div class="card">
+		<h2 style="margin-top:0">Plans</h2>
+		<p class="muted">Current plan: <strong>{data.billing?.plan ?? 'free'}</strong>{#if data.billing?.periodEnd} · period ends {new Date(data.billing.periodEnd).toLocaleDateString()}{/if}</p>
+		<div class="plan-actions">
+			{#if data.plans.hosted}
+				<form method="POST" action="?/buyPlan" use:enhance={submitting}>
+					<input type="hidden" name="plan" value="hosted" />
+					<input type="hidden" name="attempt_id" value={checkoutAttempts.hosted ?? ''} />
+					<button class="btn secondary" type="submit" disabled={pending}>Start hosted · $5/month</button>
+				</form>
+				<p class="muted">100 included comments per billing period. Unused comments do not roll over; prepaid credits cover overage.</p>
+			{/if}
+			{#if data.plans.lifetime}
+				<form method="POST" action="?/buyPlan" use:enhance={submitting}>
+					<input type="hidden" name="plan" value="lifetime" />
+					<input type="hidden" name="attempt_id" value={checkoutAttempts.lifetime ?? ''} />
+					<button class="btn secondary" type="submit" disabled={pending}>Buy lifetime · $49</button>
+				</form>
+				<p class="muted">Unlimited comments while the lifetime plan is available. Limited to 1,000 purchasers.</p>
+			{/if}
+		</div>
+	</div>
 {/if}
 
 {#if isOwner}
@@ -96,6 +128,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 				{#each data.bundles as bundle (bundle.id)}
 					<form method="POST" action="?/buy" use:enhance={submitting}>
 						<input type="hidden" name="bundle" value={bundle.id} />
+						<input type="hidden" name="attempt_id" value={checkoutAttempts[bundle.id] ?? ''} />
 						<button class="btn primary" type="submit" disabled={pending}>Buy {bundle.label}</button>
 					</form>
 				{/each}
@@ -213,6 +246,15 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	.stat-value {
 		font-size: 28px;
 		font-weight: 600;
+	}
+	.plan-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 10px;
+		align-items: center;
+	}
+	.plan-actions form {
+		flex: 0 0 auto;
 	}
 	.bundle-grid {
 		display: flex;

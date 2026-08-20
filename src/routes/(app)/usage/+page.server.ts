@@ -19,11 +19,12 @@
 // consumes — so a top-up (manual or auto) always moves the counter.
 
 import { error, fail, isHttpError, isRedirect, redirect } from '@sveltejs/kit';
+import { env } from '$env/dynamic/private';
 import { eq } from 'drizzle-orm';
 
 import { AUTO_TOPUP_DEFAULT_THRESHOLD } from '$lib/server/billing/autotopup';
-import { createCreditCheckout } from '$lib/server/billing/checkout';
-import { listCreditTransactions, usageSummary } from '$lib/server/billing/ledger';
+import { createCreditCheckout, createPlanCheckout } from '$lib/server/billing/checkout';
+import { listCreditTransactions, orgIsMetered, usageSummary } from '$lib/server/billing/ledger';
 import { db } from '$lib/server/db';
 import { organizations } from '$lib/server/db/schema';
 import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
@@ -33,16 +34,29 @@ import { requireUser } from '$lib/server/session';
 
 import type { Actions, PageServerLoad } from './$types';
 
+function isStripeCheckoutError(error: unknown): boolean {
+	return error !== null && typeof error === 'object' && typeof (error as { type?: unknown }).type === 'string';
+}
+
+function checkoutFailure(error: unknown, orgId: string) {
+	const message = error instanceof Error ? error.message : String(error);
+	console.error(`usage: checkout failed for org ${orgId}: ${message}`);
+	return fail(400, { error: isStripeCheckoutError(error) ? 'Could not start checkout — please try again.' : `Could not start checkout: ${message}` });
+}
+
+
 export const load: PageServerLoad = async ({ locals }) => {
 	if (locals.dbDown) {
 		return {
 			maintenance: true,
 			user: null,
 			summary: null,
+			metered: false,
 			history: [],
 			bundles: [],
 			autoTopup: null,
-			autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT
+			autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
+			plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) }
 		};
 	}
 	const user = requireUser(locals);
@@ -59,7 +73,10 @@ export const load: PageServerLoad = async ({ locals }) => {
 				autoTopupFailures: organizations.autoTopupFailures,
 				autoTopupLastAttemptAt: organizations.autoTopupLastAttemptAt,
 				stripeDefaultPmId: organizations.stripeDefaultPmId,
-				creditsRemaining: organizations.creditsRemaining
+				creditsRemaining: organizations.creditsRemaining,
+				plan: organizations.plan,
+				stripeSubscriptionStatus: organizations.stripeSubscriptionStatus,
+				stripeSubscriptionPeriodEnd: organizations.stripeSubscriptionPeriodEnd
 			})
 			.from(organizations)
 			.where(eq(organizations.id, user.orgId))
@@ -67,14 +84,16 @@ export const load: PageServerLoad = async ({ locals }) => {
 		if (!org) {
 			throw error(500, 'account has no organization — contact support');
 		}
-		const [summary, history] = await Promise.all([
+		const [summary, history, metered] = await Promise.all([
 			usageSummary(user.orgId),
-			listCreditTransactions(user.orgId, 30)
+			listCreditTransactions(user.orgId, 30),
+			orgIsMetered(user.orgId)
 		]);
 		return {
 			maintenance: false,
 			user,
 			summary,
+			metered,
 			history: history.map((row) => ({
 				id: row.id,
 				delta: row.delta,
@@ -92,7 +111,13 @@ export const load: PageServerLoad = async ({ locals }) => {
 				failures: org.autoTopupFailures ?? 0,
 				lastAttemptAt: org.autoTopupLastAttemptAt,
 				hasCard: Boolean(org.stripeDefaultPmId)
-			}
+			},
+			billing: {
+				plan: org.plan,
+				subscriptionStatus: org.stripeSubscriptionStatus,
+				periodEnd: org.stripeSubscriptionPeriodEnd
+			},
+			plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) }
 		};
 	} catch (error) {
 		// Deliberate HttpErrors (the missing-org 500 above) must pass through
@@ -106,10 +131,12 @@ export const load: PageServerLoad = async ({ locals }) => {
 			maintenance: true,
 			user: null,
 			summary: null,
+			metered: false,
 			history: [],
 			bundles: [],
 			autoTopup: null,
-			autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT
+			autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
+			plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) }
 		};
 	}
 };
@@ -118,9 +145,11 @@ export const actions: Actions = {
 	/** Owner-only: creates a Stripe Checkout for one credit bundle. */
 	buy: async ({ request, locals }) => {
 		const user = requireUser(locals);
-		const bundleId = String((await request.formData()).get('bundle') ?? '');
+		const form = await request.formData();
+		const bundleId = String(form.get('bundle') ?? '');
+		const attemptId = String(form.get('attempt_id') ?? '');
 		try {
-			const url = await createCreditCheckout(user.orgId, user, bundleId);
+			const url = await createCreditCheckout(user.orgId, user, bundleId, attemptId);
 			throw redirect(303, url);
 		} catch (error) {
 			// SvelteKit's redirect() is a function that THROWS a Redirect —
@@ -134,13 +163,22 @@ export const actions: Actions = {
 			// (unknown bundle, missing APP_URL…) keep their specific, safe
 			// message so the user can act on them. Full details go to the
 			// server log either way.
-			const message = error instanceof Error ? error.message : String(error);
-			console.error(`usage: checkout failed for org ${user.orgId}: ${message}`);
-			const isStripeError =
-				error !== null && typeof error === 'object' && typeof (error as { type?: unknown }).type === 'string';
-			return fail(400, {
-				error: isStripeError ? 'Could not start checkout — please try again.' : `Could not start checkout: ${message}`
-			});
+			return checkoutFailure(error, user.orgId);
+		}
+	},
+	/** Owner-only: creates a hosted subscription or lifetime Checkout. */
+	buyPlan: async ({ request, locals }) => {
+		const user = requireUser(locals);
+		const form = await request.formData();
+		const plan = String(form.get('plan') ?? '');
+		const attemptId = String(form.get('attempt_id') ?? '');
+		if (plan !== 'hosted' && plan !== 'lifetime') return fail(400, { error: 'Unknown billing plan.' });
+		try {
+			const url = await createPlanCheckout(user.orgId, user, plan, attemptId);
+			throw redirect(303, url);
+		} catch (error) {
+			if (isRedirect(error) || isHttpError(error)) throw error;
+			return checkoutFailure(error, user.orgId);
 		}
 	},
 	/**

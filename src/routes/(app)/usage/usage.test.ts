@@ -24,12 +24,13 @@ import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
 
 const mocks = vi.hoisted(() => ({
 	sessionsCreate: vi.fn(),
-	customersCreate: vi.fn()
+	customersCreate: vi.fn(), pricesRetrieve: vi.fn()
 }));
 
 vi.mock('$lib/server/stripe/client', () => ({
 	getStripe: () => ({
 		checkout: { sessions: { create: mocks.sessionsCreate } },
+		prices: { retrieve: mocks.pricesRetrieve },
 		customers: { create: mocks.customersCreate }
 	})
 }));
@@ -38,7 +39,9 @@ vi.mock('$env/dynamic/private', () => ({
 		APP_URL: 'http://localhost:5173',
 		STRIPE_PRICE_CREDITS_100: 'price_100',
 		STRIPE_PRICE_CREDITS_500: 'price_500',
-		STRIPE_PRICE_CREDITS_2000: 'price_2000'
+		STRIPE_PRICE_CREDITS_2000: 'price_2000',
+		STRIPE_PRICE_HOSTED_MONTHLY: 'price_hosted',
+		STRIPE_PRICE_LIFETIME: 'price_lifetime'
 	}
 }));
 
@@ -47,7 +50,7 @@ import { render } from 'svelte/server';
 import Page from './+page.svelte';
 import { actions, load } from './+page.server';
 
-setupTestDb(['organizations', 'credit_transactions', 'stripe_events']);
+setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_checkout_attempts']);
 
 const OWNER = TEST_OWNER;
 
@@ -64,6 +67,10 @@ function buy(bundle: string, user: SessionUser | null = OWNER) {
 	return actions.buy({ request: postForm({ bundle }), locals: { user } } as never);
 }
 
+function buyPlan(plan: string, user: SessionUser | null = OWNER) {
+	return actions.buyPlan({ request: postForm({ plan }), locals: { user } } as never);
+}
+
 function setAutoTopup(fields: Record<string, string>, user: SessionUser | null = OWNER) {
 	return actions.setAutoTopup({ request: postForm(fields), locals: { user } } as never);
 }
@@ -72,6 +79,7 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.sessionsCreate.mockResolvedValue({ id: 'cs_new', url: 'https://checkout.stripe.com/pay/test_123' });
 	mocks.customersCreate.mockResolvedValue({ id: 'cus_new' });
+	mocks.pricesRetrieve.mockImplementation(async (id: string) => id === 'price_hosted' ? { id, active: true, currency: 'usd', type: 'recurring', unit_amount: 500, recurring: { interval: 'month', interval_count: 1 } } : { id, active: true, currency: 'usd', type: 'one_time', unit_amount: 4900 });
 });
 
 describe('usage load', () => {
@@ -92,6 +100,13 @@ describe('usage load', () => {
 		expect(data).toMatchObject({ maintenance: true, user: null, summary: null });
 		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('usage: load failed'));
 		errorSpy.mockRestore();
+	});
+
+	test('does not mark a NULL-balance unlimited org as out of credits', async () => {
+		await seedOrg({ creditsRemaining: null });
+		const data = (await load({ locals: { user: OWNER } } as never)) as { metered: boolean; summary: { remaining: number } };
+		expect(data.metered).toBe(false);
+		expect(data.summary.remaining).toBe(0);
 	});
 
 	test('reports the org balance, consumption, bundles and auto top-up state', async () => {
@@ -365,5 +380,34 @@ describe('usage setAutoTopup action', () => {
 		await seedOrg();
 		const member = { ...OWNER, orgRole: 'member' as const };
 		await expect(setAutoTopup({ enabled: 'on', threshold: '250', consent: 'on' }, member)).rejects.toMatchObject({ status: 403 });
+	});
+});
+
+
+describe('usage plan checkout action', () => {
+	test('owner can start hosted checkout', async () => {
+		await seedOrg();
+		await expect(buyPlan('hosted')).rejects.toMatchObject({ status: 303, location: 'https://checkout.stripe.com/pay/test_123' });
+		expect(mocks.pricesRetrieve).toHaveBeenCalledWith('price_hosted');
+		expect(mocks.sessionsCreate).toHaveBeenCalledWith(expect.objectContaining({
+			mode: 'subscription',
+			line_items: [{ price: 'price_hosted', quantity: 1 }],
+			metadata: { org_id: 'org-1', product: 'hosted' },
+			subscription_data: { metadata: { org_id: 'org-1', product: 'hosted' } }
+		}), expect.objectContaining({ idempotencyKey: expect.stringMatching(/^checkout:/) }));
+	});
+
+	test('non-owners cannot start a hosted checkout', async () => {
+		await seedOrg();
+		const member = { ...OWNER, orgRole: 'member' as const };
+		await expect(buyPlan('hosted', member)).rejects.toMatchObject({ status: 403 });
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test('unknown plan is rejected before Stripe', async () => {
+		await seedOrg();
+		const result = await buyPlan('not-a-plan');
+		expect(result).toMatchObject({ status: 400, data: { error: 'Unknown billing plan.' } });
+		expect(mocks.pricesRetrieve).not.toHaveBeenCalled();
 	});
 });

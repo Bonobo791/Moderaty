@@ -18,7 +18,7 @@ import { describe, expect, test, vi } from 'vitest';
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { db } from '$lib/server/db';
-import { creditTransactions, organizations, stripePendingReversals } from '$lib/server/db/schema';
+import { creditTransactions, organizations, stripePendingReversals, stripeSubscriptionPeriods } from '$lib/server/db/schema';
 import {
 	applyLedgerDelta,
 	consumeCredit,
@@ -32,7 +32,7 @@ import {
 	usageSummary
 } from './ledger';
 
-setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_pending_reversals']);
+setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_pending_reversals', 'stripe_subscription_periods']);
 
 async function seedOrg(orgId = 'org-1', credits: number | null = null, stripeCustomerId: string | null = null): Promise<void> {
 	await testDb().db
@@ -99,6 +99,15 @@ describe('drainPendingReversals crash-consistency', () => {
 		expect(appliedReasons).toHaveLength(1);
 		expect(appliedReasons[0]).not.toBe(remaining[0].reason);
 		expect(await getCredits('org-1')).toBe(0);
+	});
+
+
+	test('preserves a later dispute ID when the pending row already exists', async () => {
+		await queuePendingReversal('ch_1', 'dispute');
+		await queuePendingReversal('ch_1', 'dispute', 'disp_1');
+		expect((await testDb().db.select().from(stripePendingReversals).get())?.disputeId).toBe('disp_1');
+		await queuePendingReversal('ch_1', 'dispute', 'disp_2');
+		expect((await testDb().db.select().from(stripePendingReversals).get())?.disputeId).toBe('disp_1');
 	});
 
 	test('deletes each applied row by its own id inside a transaction — never a bare db.delete of the whole charge', async () => {
@@ -349,6 +358,44 @@ describe('usageSummary', () => {
 		// reversal is money leaving the ledger, not moderation usage.
 		expect(summary.usedLifetime).toBe(2);
 		expect(summary.usedThisMonth).toBe(2);
+	});
+
+
+	test('hosted consumption atomically uses the paid period before purchased overage', async () => {
+		const periodStart = new Date(Date.now() - 60_000).toISOString();
+		const periodEnd = new Date(Date.now() + 60_000).toISOString();
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Hosted', plan: 'hosted', creditsRemaining: 2 });
+		await testDb().db.insert(stripeSubscriptionPeriods).values({
+			orgId: 'org-1', subscriptionId: 'sub-1', invoiceId: 'in-1', periodKey: 'period-1',
+			periodStart, periodEnd, includedCredits: 100, consumedCredits: 0, status: 'paid'
+		});
+		expect(await consumeCredit(testDb().db as never, 'org-1', 'comment-1')).toBe(true);
+		const period = await testDb().db.select().from(stripeSubscriptionPeriods).where(eq(stripeSubscriptionPeriods.invoiceId, 'in-1')).get();
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(period?.consumedCredits).toBe(1);
+		expect(org?.creditsRemaining).toBe(2);
+		expect(await getCredits('org-1')).toBe(101);
+	});
+
+	test('an exhausted hosted period falls back to purchased overage', async () => {
+		const periodStart = new Date(Date.now() - 60_000).toISOString();
+		const periodEnd = new Date(Date.now() + 60_000).toISOString();
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Hosted', plan: 'hosted', creditsRemaining: 1 });
+		await testDb().db.insert(stripeSubscriptionPeriods).values({ orgId: 'org-1', subscriptionId: 'sub-1', invoiceId: 'in-1', periodKey: 'period-1', periodStart, periodEnd, includedCredits: 1, consumedCredits: 1, status: 'paid' });
+		expect(await consumeCredit(testDb().db, 'org-1', 'comment-1')).toBe(true);
+		const period = await testDb().db.select().from(stripeSubscriptionPeriods).where(eq(stripeSubscriptionPeriods.invoiceId, 'in-1')).get();
+		expect(period?.consumedCredits).toBe(1);
+		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBe(0);
+		expect(await consumeCredit(testDb().db, 'org-1', 'comment-2')).toBe(false);
+	});
+	test('a canceled hosted subscription remains metered instead of becoming free unlimited access', async () => {
+		const periodStart = new Date(Date.now() - 60_000).toISOString();
+		const periodEnd = new Date(Date.now() + 60_000).toISOString();
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Canceled', plan: 'free', stripeSubscriptionId: 'sub-1', stripeSubscriptionStatus: 'canceled' });
+		await testDb().db.insert(stripeSubscriptionPeriods).values({ orgId: 'org-1', subscriptionId: 'sub-1', invoiceId: 'in-1', periodKey: 'period-1', periodStart, periodEnd, includedCredits: 100, consumedCredits: 0, status: 'paid' });
+		expect(await orgIsMetered('org-1')).toBe(true);
+		expect(await consumeCredit(testDb().db as never, 'org-1', 'comment-1')).toBe(true);
+		expect(await getCredits('org-1')).toBe(99);
 	});
 
 	test('monthStartIso is the first of the current UTC month', () => {

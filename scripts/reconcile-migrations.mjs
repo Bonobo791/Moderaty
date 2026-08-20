@@ -63,9 +63,14 @@ const journalHashes = entries.map((e) => {
 	return createHash('sha256').update(readFileSync(file)).digest('hex');
 });
 
+// Print the target BEFORE any write so a run against the wrong database is
+// obvious (the 2026-08-20 incident: an earlier run reconciled a dev DB while
+// production kept its drifted hashes).
+console.log(`reconcile-migrations: target ${url}`);
 const client = createClient({ url, authToken });
 const rows = (await client.execute('SELECT id, hash FROM __drizzle_migrations ORDER BY id')).rows;
 client.close();
+console.log(`reconcile-migrations: ${rows.length} applied rows, ${journalHashes.length} journal entries`);
 
 if (rows.length !== journalHashes.length) {
 	console.error(

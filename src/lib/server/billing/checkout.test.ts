@@ -166,6 +166,13 @@ describe('createPlanCheckout', () => {
 	});
 
 
+	test('rejects a hosted checkout when the catalog price is not the configured amount', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.pricesRetrieve.mockResolvedValueOnce({ id: 'price_hosted', active: true, currency: 'usd', type: 'recurring', unit_amount: 900, recurring: { interval: 'month', interval_count: 1 } });
+		await expect(createPlanCheckout('org-1', owner(), 'hosted')).rejects.toThrow('must be 500 cents');
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+
 	test('rejects lifetime checkout when every lifetime slot is occupied', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1' });

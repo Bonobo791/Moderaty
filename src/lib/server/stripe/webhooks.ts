@@ -31,6 +31,7 @@ import { applyLedgerDelta, drainPendingReversals, findGrantForStripe, queuePendi
 import { grantAutoTopupCredits, handleAutoTopupFailure } from '$lib/server/billing/autotopup';
 import { claimLifetimeSlot, grantSubscriptionPeriod, refundSubscriptionPeriod, disputeSubscriptionPeriod, releaseLifetimeForPayment, applySubscriptionSnapshot, revokeLifetimeForDispute, restoreLifetimeForDispute, restoreDisputedSubscriptionPeriod } from '$lib/server/billing/entitlements';
 import { bundleById, type CreditBundle } from '$lib/server/stripe/bundles';
+import { isActiveSubscriptionStatus } from '$lib/server/billing/plans';
 import { markCheckoutAttemptFulfilled } from '$lib/server/billing/checkout';
 import { getStripe } from '$lib/server/stripe/client';
 
@@ -176,7 +177,7 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 				console.error(`stripe: hosted checkout ${sessionId} would overlap lifetime access for ${orgId}`);
 				return 'rejected';
 			}
-			if (existing.stripeSubscriptionId && existing.stripeSubscriptionId !== subscriptionId && ['active', 'trialing', 'past_due', 'unpaid'].includes(existing.stripeSubscriptionStatus ?? '')) {
+			if (existing.stripeSubscriptionId && existing.stripeSubscriptionId !== subscriptionId && isActiveSubscriptionStatus(existing.stripeSubscriptionStatus)) {
 				console.error(`stripe: hosted checkout ${sessionId} would replace an active subscription for ${orgId}`);
 				return 'rejected';
 			}
@@ -196,7 +197,7 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 		if (existing) return 'already';
 		const org = await db.select({ stripeSubscriptionId: organizations.stripeSubscriptionId, stripeSubscriptionStatus: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, orgId)).get();
 		if (!org) throw new Error(`org not found: ${orgId}`);
-		if (org.stripeSubscriptionId && ['active', 'trialing', 'past_due', 'unpaid'].includes(org.stripeSubscriptionStatus ?? '')) {
+		if (org.stripeSubscriptionId && isActiveSubscriptionStatus(org.stripeSubscriptionStatus)) {
 			console.error(`stripe: lifetime checkout ${sessionId} would overlap hosted access for ${orgId}`);
 			return 'rejected';
 		}

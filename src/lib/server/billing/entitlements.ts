@@ -8,11 +8,10 @@ import {
 	stripePendingReversals,
 	stripeDisputeReversals
 } from '$lib/server/db/schema';
-import { HOSTED_INCLUDED_CREDITS } from './plans';
+import { HOSTED_INCLUDED_CREDITS, isActiveSubscriptionStatus } from './plans';
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
-const ACTIVE_SUBSCRIPTION_STATUSES = new Set(['active', 'trialing', 'past_due', 'unpaid']);
 const LIFETIME_SOLD_OUT_ERROR = 'lifetime plan is sold out';
 const LIFETIME_ENTITLEMENT_RECORD_ERROR = 'lifetime entitlement was not recorded';
 const LIFETIME_SLOT_RACE_ERROR = 'lifetime slot claim lost its race';
@@ -71,7 +70,7 @@ async function applySubscriptionSnapshotTx(tx: Tx, snapshot: SubscriptionSnapsho
 	if (!org) throw new Error(`org not found: ${snapshot.orgId}`);
 	if (!isNewerEvent(org.lastCreated, org.lastId, snapshot.eventCreated, snapshot.eventId)) return false;
 	const lifetime = await hasActiveLifetime(tx, snapshot.orgId);
-	const cachedPlan = lifetime ? 'lifetime' : ACTIVE_SUBSCRIPTION_STATUSES.has(snapshot.status) ? 'hosted' : 'free';
+	const cachedPlan = lifetime ? 'lifetime' : isActiveSubscriptionStatus(snapshot.status) ? 'hosted' : 'free';
 	await tx
 		.update(organizations)
 		.set({
@@ -160,7 +159,7 @@ async function applyPendingLifetimeReversal(tx: Tx, input: LifetimeClaim, slot: 
 	await tx.delete(stripePendingReversals).where(eq(stripePendingReversals.chargeId, input.chargeId));
 	if (reversal.disputeId) await tx.update(stripeDisputeReversals).set({ source: 'lifetime', status: reversal.hasRefund ? 'ignored' : 'reversed' }).where(eq(stripeDisputeReversals.disputeId, reversal.disputeId));
 	const subscription = await tx.select({ id: organizations.stripeSubscriptionId, status: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, input.orgId)).get();
-	const nextPlan = subscription?.id && subscription.status && ACTIVE_SUBSCRIPTION_STATUSES.has(subscription.status) ? 'hosted' : 'free';
+	const nextPlan = subscription?.id && subscription.status && isActiveSubscriptionStatus(subscription.status) ? 'hosted' : 'free';
 	await tx.update(organizations).set({ plan: nextPlan }).where(eq(organizations.id, input.orgId));
 	return { slot, status: pendingStatus === 'disputed' ? 'active' : 'released' };
 }
@@ -227,7 +226,7 @@ export async function releaseLifetimeForPayment(input: StripeIdentifiers): Promi
 		await tx.update(stripeLifetimeEntitlements).set({ status: 'released', releasedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` }).where(eq(stripeLifetimeEntitlements.id, entitlement.id));
 		await tx.update(stripeLifetimeSlots).set({ activeOrgId: null, activeEntitlementId: null, releasedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` }).where(and(eq(stripeLifetimeSlots.slot, entitlement.slot), eq(stripeLifetimeSlots.activeOrgId, entitlement.orgId)));
 		const sub = await tx.select({ id: organizations.stripeSubscriptionId, status: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, entitlement.orgId)).get();
-		const nextPlan = sub?.id && sub.status && ACTIVE_SUBSCRIPTION_STATUSES.has(sub.status) ? 'hosted' : 'free';
+		const nextPlan = sub?.id && sub.status && isActiveSubscriptionStatus(sub.status) ? 'hosted' : 'free';
 		await tx.update(organizations).set({ plan: nextPlan }).where(eq(organizations.id, entitlement.orgId));
 		return true;
 	});
@@ -244,7 +243,7 @@ export async function revokeLifetimeForDispute(input: StripeIdentifiers): Promis
 		if (entitlement.status !== 'active') return false;
 		await tx.update(stripeLifetimeEntitlements).set({ status: 'disputed' }).where(eq(stripeLifetimeEntitlements.id, entitlement.id));
 		const sub = await tx.select({ id: organizations.stripeSubscriptionId, status: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, entitlement.orgId)).get();
-		const nextPlan = sub?.id && sub.status && ACTIVE_SUBSCRIPTION_STATUSES.has(sub.status) ? 'hosted' : 'free';
+		const nextPlan = sub?.id && sub.status && isActiveSubscriptionStatus(sub.status) ? 'hosted' : 'free';
 		await tx.update(organizations).set({ plan: nextPlan }).where(eq(organizations.id, entitlement.orgId));
 		return true;
 	});

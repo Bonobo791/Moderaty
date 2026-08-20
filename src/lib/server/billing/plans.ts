@@ -1,5 +1,10 @@
 export const HOSTED_INCLUDED_CREDITS = 100;
 export const LIFETIME_SLOT_LIMIT = 1000;
+export const ACTIVE_SUBSCRIPTION_STATUSES = ['active', 'trialing', 'past_due', 'unpaid'] as const;
+
+export function isActiveSubscriptionStatus(status: unknown): boolean {
+	return typeof status === 'string' && ACTIVE_SUBSCRIPTION_STATUSES.includes(status as (typeof ACTIVE_SUBSCRIPTION_STATUSES)[number]);
+}
 
 const HOSTED_PRICE_RECURRING_ERROR = 'hosted Stripe Price must be monthly recurring';
 const LIFETIME_PRICE_ONE_TIME_ERROR = 'lifetime Stripe Price must be one-time';

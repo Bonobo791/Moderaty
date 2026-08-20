@@ -25,7 +25,7 @@ import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { organizations, stripeCheckoutAttempts, stripeLifetimeEntitlements, stripeLifetimeSlots } from '$lib/server/db/schema';
 import { bundleById, priceIdFor, type CreditBundle } from '$lib/server/stripe/bundles';
-import { planPriceEnv, validatePlanPrice, type PaidPlan } from './plans';
+import { isActiveSubscriptionStatus, planPriceEnv, validatePlanPrice, type PaidPlan } from './plans';
 import { getStripe } from '$lib/server/stripe/client';
 import { requireOrgRole } from '$lib/server/ownership';
 import type { SessionUser } from '$lib/server/session';
@@ -86,6 +86,13 @@ export async function getOrCreateStripeCustomer(orgId: string, user: SessionUser
 	return customer.id;
 }
 
+function checkoutRedirectUrls(appUrl: string): { success_url: string; cancel_url: string } {
+	return {
+		success_url: new URL('/usage/success?session_id={CHECKOUT_SESSION_ID}', appUrl).toString(),
+		cancel_url: new URL('/usage', appUrl).toString()
+	};
+}
+
 /**
  * Creates a Stripe Checkout Session for a credit bundle.
  *
@@ -110,8 +117,7 @@ export async function createCreditCheckout(orgId: string, user: SessionUser, bun
 			payment_intent_data: { setup_future_usage: 'off_session' },
 			// new URL(path, base) per the repo URL-construction guideline — the
 			// literal {CHECKOUT_SESSION_ID} placeholder must survive verbatim.
-			success_url: new URL('/usage/success?session_id={CHECKOUT_SESSION_ID}', appUrl).toString(),
-			cancel_url: new URL('/usage', appUrl).toString()
+			...checkoutRedirectUrls(appUrl)
 		}, { idempotencyKey });
 	});
 }
@@ -194,7 +200,7 @@ export async function markCheckoutAttemptFulfilled(sessionId: string): Promise<v
 async function assertPlanAvailable(orgId: string, plan: PaidPlan): Promise<void> {
 	const org = await db.select({ plan: organizations.plan, stripeSubscriptionId: organizations.stripeSubscriptionId, stripeSubscriptionStatus: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, orgId)).get();
 	if (!org) throw new Error(`org not found: ${orgId}`);
-	const hasActiveHosted = Boolean(org.stripeSubscriptionId && ['active', 'trialing', 'past_due', 'unpaid'].includes(org.stripeSubscriptionStatus ?? ''));
+	const hasActiveHosted = Boolean(org.stripeSubscriptionId && isActiveSubscriptionStatus(org.stripeSubscriptionStatus));
 	const lifetime = await db.select({ id: stripeLifetimeEntitlements.id }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
 	if (plan === 'hosted') {
 		if (hasActiveHosted) throw new Error(HOSTED_PLAN_EXISTS_ERROR);
@@ -239,8 +245,7 @@ export async function createPlanCheckout(orgId: string, user: SessionUser, plan:
 				client_reference_id: orgId,
 				metadata,
 				...(plan === 'hosted' ? { subscription_data: { metadata } } : {}),
-				success_url: new URL('/usage/success?session_id={CHECKOUT_SESSION_ID}', appUrl).toString(),
-				cancel_url: new URL('/usage', appUrl).toString()
+				...checkoutRedirectUrls(appUrl)
 			},
 			{ idempotencyKey }
 		);

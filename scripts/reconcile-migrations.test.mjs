@@ -54,7 +54,7 @@ function reconcile(dbPath) {
 }
 async function appliedHashes(dbPath) {
 	const client = createClient({ url: `file:${dbPath}` });
-	const { rows } = await client.execute('SELECT hash FROM __drizzle_migrations ORDER BY id');
+	const { rows } = await client.execute('SELECT hash FROM __drizzle_migrations ORDER BY rowid');
 	client.close();
 	return rows.map((r) => String(r.hash));
 }

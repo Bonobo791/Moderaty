@@ -40,10 +40,10 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createClient } from '@libsql/client';
-import { loadMigrationConfig } from './migration-config.mjs';
+import { loadMigrationConfig, readJournal } from './migration-config.mjs';
 
 const { metaDir, url, authToken, journalPath } = loadMigrationConfig({ scriptName: 'reconcile-migrations' });
-const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
+const journal = readJournal(journalPath, 'reconcile-migrations');
 const entries = journal.entries ?? [];
 const journalHashes = entries.map((e) => {
 	const file = join(metaDir, '..', `${e.tag}.sql`);

@@ -18,6 +18,7 @@
 // Turso URL/token checks. Single source of truth — the scripts used to
 // copy-paste this block (AGENTS.md: DO NOT copy and paste code).
 
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 
@@ -47,4 +48,26 @@ export function loadMigrationConfig({ argv = process.argv.slice(2), env = proces
 		process.exit(1);
 	}
 	return { metaDir, journalPath: join(metaDir, '_journal.json'), url, authToken };
+}
+
+/**
+ * Reads and parses the drizzle journal, exiting 1 with a loud message when the
+ * file is missing or malformed (a raw ENOENT/SyntaxError stack is unhelpful
+ * for the deploy-gate and incident-recovery tools that call this).
+ *
+ * @param journalPath - Absolute path to `_journal.json`
+ * @param scriptName - Script name for the error messages
+ * @returns {object} Parsed journal
+ */
+export function readJournal(journalPath, scriptName = 'migration') {
+	if (!existsSync(journalPath)) {
+		console.error(`${scriptName}: no journal at ${journalPath} — cannot proceed`);
+		process.exit(1);
+	}
+	try {
+		return JSON.parse(readFileSync(journalPath, 'utf8'));
+	} catch (error) {
+		console.error(`${scriptName}: cannot read journal ${journalPath}: ${error.message}`);
+		process.exit(1);
+	}
 }

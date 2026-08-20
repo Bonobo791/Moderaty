@@ -36,23 +36,12 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createClient } from '@libsql/client';
-import { loadMigrationConfig } from './migration-config.mjs';
+import { loadMigrationConfig, readJournal } from './migration-config.mjs';
 
 // Validate the full argument list BEFORE any work: unknown or extra arguments
 // are a loud usage error, never a silent fallthrough.
 const { metaDir, url, authToken, journalPath } = loadMigrationConfig({ scriptName: 'verify-migrations' });
-if (!existsSync(journalPath)) {
-	console.error(`verify-migrations: no journal at ${journalPath} — cannot verify what should be applied`);
-	process.exit(1);
-}
-
-let journalEntries;
-try {
-	journalEntries = JSON.parse(readFileSync(journalPath, 'utf8')).entries ?? [];
-} catch (error) {
-	console.error(`verify-migrations: cannot read journal ${journalPath}: ${error.message}`);
-	process.exit(1);
-}
+const journalEntries = readJournal(journalPath, 'verify-migrations').entries ?? [];
 
 /** sha256 hex of a migration file's contents — exactly what drizzle-kit stores. */
 function migrationHash(sql) {

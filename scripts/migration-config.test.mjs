@@ -14,6 +14,8 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 import { execFile } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -39,6 +41,31 @@ describe('loadMigrationConfig (shared by the migration CLI scripts)', () => {
 	test('the CLI exits 1 with a loud message when TURSO_DATABASE_URL is missing', async () => {
 		const { TURSO_DATABASE_URL: _u, TURSO_AUTH_TOKEN: _t, ...rest } = process.env;
 		await expect(execFileAsync('node', [SCRIPT], { env: rest })).rejects.toThrow(/TURSO_DATABASE_URL is not set/);
+	});
+
+	test('the CLI exits 1 with a loud message when the journal is missing', async () => {
+		const { TURSO_DATABASE_URL: _u, TURSO_AUTH_TOKEN: _t, ...rest } = process.env;
+		const tmp = mkdtempSync(join(tmpdir(), 'reconcile-no-journal-'));
+		try {
+			await expect(
+				execFileAsync('node', [SCRIPT, tmp], { env: { ...rest, TURSO_DATABASE_URL: 'file:local.db' } })
+			).rejects.toThrow(/no journal at/);
+		} finally {
+			rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	test('the CLI exits 1 with a loud message when the journal is malformed', async () => {
+		const { TURSO_DATABASE_URL: _u, TURSO_AUTH_TOKEN: _t, ...rest } = process.env;
+		const tmp = mkdtempSync(join(tmpdir(), 'reconcile-bad-journal-'));
+		try {
+			writeFileSync(join(tmp, '_journal.json'), '{ not json');
+			await expect(
+				execFileAsync('node', [SCRIPT, tmp], { env: { ...rest, TURSO_DATABASE_URL: 'file:local.db' } })
+			).rejects.toThrow(/cannot read journal/);
+		} finally {
+			rmSync(tmp, { recursive: true, force: true });
+		}
 	});
 
 	test('the CLI exits 1 when more than one argv is supplied', async () => {

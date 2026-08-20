@@ -125,6 +125,151 @@ export function consentEmailCutoffIso(now = Date.now()): string {
  * @param userId - The ID of the user to erase
  * @throws If the user does not exist or is already tombstoned
  */
+
+type DeletionTx = Pick<typeof db, 'select' | 'insert' | 'update' | 'delete'>;
+
+/**
+ * Data-bug guard: a personal org is single-member by definition, but the schema
+ * cannot enforce that. Requires exactly one membership per personal org, owned
+ * by the deleting user.
+ */
+async function assertPersonalOrgSoleOwned(tx: DeletionTx, userId: string, personalOrgIds: string[]): Promise<void> {
+	// Stryker disable next-line ConditionalExpression: true equivalent — with zero personal orgs the guard queries inArray([]), which drizzle compiles to `false`; 0 !== 0 and [].some() are both false, so the guard body can never fire either way.
+	if (personalOrgIds.length) {
+		// Data-bug guard: a personal org is single-member by definition, but
+		// the schema cannot enforce that. Require exactly one membership per
+		// personal org, owned by the deleting user — anything else (a second
+		// member, or a sole member who ISN'T this user) means deleting the
+		// org would destroy someone else's tenancy and channels. Fail loudly
+		// and abort the whole deletion.
+		const orgMembers = await tx
+			.select({ userId: memberships.userId })
+			.from(memberships)
+			.where(inArray(memberships.orgId, personalOrgIds))
+			.all();
+		// Stryker disable next-line MethodExpression: every equivalent — organizations.personalFor is UNIQUE (at most one personal org per user), so a mixed-owner member list with a matching count is schema-impossible; with zero or one rows some ≡ every here.
+		if (orgMembers.length !== personalOrgIds.length || orgMembers.some((m) => m.userId !== userId)) {
+			console.error(`user ${userId}'s personal org membership is inconsistent (${orgMembers.length} rows) — refusing account deletion`);
+			throw new Error('personal organization has other members — contact support');
+		}
+	}
+}
+
+/**
+ * Loads the user's membership snapshot in ONE batched query (no per-org
+ * roundtrips inside the transaction).
+ */
+async function loadMembershipSnapshot(tx: DeletionTx, userId: string): Promise<{
+	userMemberships: { orgId: string; role: string }[];
+	coMembersByOrg: Map<string, { orgId: string; userId: string; role: string; createdAt: string }[]>;
+}> {
+	// (personal or shared — the guard above already proved personal orgs are
+	// sole-member) has no one to survive to, so it dissolves with its
+	// channels and data. A shared org with other members survives; when the
+	// deleting user was its LAST owner, ownership passes to the oldest admin,
+	// else the oldest member (seniority = join order, userId breaking ties),
+	// so a shared org is never left ownerless.
+	const userMemberships = await tx
+		.select({ orgId: memberships.orgId, role: memberships.role })
+		.from(memberships)
+		.where(eq(memberships.userId, userId))
+		.all();
+	// One batched query for every co-member across all the user's orgs —
+	// no per-org roundtrips (N+1) inside the transaction.
+	const memberOrgIds = userMemberships.map((m) => m.orgId);
+	const coMembers = memberOrgIds.length
+		? await tx
+				.select({
+					orgId: memberships.orgId,
+					userId: memberships.userId,
+					role: memberships.role,
+					createdAt: memberships.createdAt
+				})
+				.from(memberships)
+				.where(and(inArray(memberships.orgId, memberOrgIds), ne(memberships.userId, userId)))
+				.all()
+		: // Stryker disable next-line ArrayDeclaration: sentinel equivalent — this branch means userMemberships is empty, and the only reader of coMembersByOrg loops over userMemberships, so the injected row is never read.
+			[];
+	const coMembersByOrg = new Map<string, typeof coMembers>();
+	for (const row of coMembers) {
+		// Stryker disable next-line ArrayDeclaration: sentinel equivalent — the injected string's .createdAt is undefined, which localeCompare coerces to "undefined"; ISO dates start with digits ('2' < 'u'), so it always sorts last, find(role==='admin') skips it (role undefined), and ranked[0] is always a real row.
+		const list = coMembersByOrg.get(row.orgId) ?? [];
+		list.push(row);
+		coMembersByOrg.set(row.orgId, list);
+	}
+	return { userMemberships, coMembersByOrg };
+}
+
+/**
+ * Decides each org's fate: sole-member orgs dissolve; shared orgs survive, with
+ * ownership passing to the oldest admin (or oldest member) when the departing
+ * user was the last owner. Promotions are recorded (post-commit logging).
+ */
+async function planOrgFates(
+	tx: DeletionTx,
+	userId: string,
+	userMemberships: { orgId: string; role: string }[],
+	coMembersByOrg: Map<string, { orgId: string; userId: string; role: string; createdAt: string }[]>
+): Promise<{ dissolveOrgIds: string[]; promotions: { orgId: string; successorId: string }[] }> {
+	const dissolveOrgIds: string[] = [];
+	const promotions: { orgId: string; successorId: string }[] = [];
+	for (const membership of userMemberships) {
+		const others = coMembersByOrg.get(membership.orgId) ?? [];
+		if (!others.length) {
+			dissolveOrgIds.push(membership.orgId);
+			continue;
+		}
+		if (membership.role === 'owner' && !others.some((m) => m.role === 'owner')) {
+			const ranked = [...others].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.userId.localeCompare(b.userId));
+			const successor = ranked.find((m) => m.role === 'admin') ?? ranked[0];
+			const promoted = await tx
+				.update(memberships)
+				.set({ role: 'owner' })
+				.where(and(eq(memberships.orgId, membership.orgId), eq(memberships.userId, successor.userId)))
+				.returning({ userId: memberships.userId });
+			// The row was selected in this same transaction; an empty RETURNING
+			// means the data changed underneath us — fail loudly, never log a
+			// promotion that did not persist.
+			if (!promoted.length) {
+				console.error(`account deletion: successor ${successor.userId} vanished from org ${membership.orgId} mid-transaction`);
+				throw new Error('ownership succession failed — contact support');
+			}
+			promotions.push({ orgId: membership.orgId, successorId: successor.userId });
+		}
+	}
+	return { dissolveOrgIds, promotions };
+}
+
+/**
+ * Captures the dissolved orgs' Stripe customers (before the rows die), records
+ * the durable erasure obligation in the outbox, then deletes the org records.
+ */
+async function dissolveOrgs(tx: DeletionTx, dissolveOrgIds: string[]): Promise<string[]> {
+	const stripeCustomerIds: string[] = [];
+	// Capture the Stripe customers BEFORE the org rows die — the id is
+	// needed for the post-transaction erasure.
+	const dissolvedOrgs = await tx
+		.select({ stripeCustomerId: organizations.stripeCustomerId })
+		.from(organizations)
+		.where(inArray(organizations.id, dissolveOrgIds))
+		.all();
+	for (const org of dissolvedOrgs) {
+		if (!org.stripeCustomerId) continue;
+		stripeCustomerIds.push(org.stripeCustomerId);
+		// The outbox row is the durable obligation; it is deleted once
+		// Stripe confirms (below or by the cron retry).
+		await tx.insert(stripeDeletionOutbox).values({ customerId: org.stripeCustomerId }).onConflictDoNothing();
+	}
+	await tx.delete(invites).where(inArray(invites.orgId, dissolveOrgIds));
+	await tx.delete(memberships).where(inArray(memberships.orgId, dissolveOrgIds));
+	// The credit ledger is part of the org's records: comment ids,
+	// Checkout Session ids, PaymentIntent ids, and charge ids must not
+	// survive an "immediate and permanent" deletion as orphans.
+	await tx.delete(creditTransactions).where(inArray(creditTransactions.orgId, dissolveOrgIds));
+	await tx.delete(organizations).where(inArray(organizations.id, dissolveOrgIds));
+	return stripeCustomerIds;
+}
+
 export async function deleteUserRecords(userId: string): Promise<void> {
 	// Promotions are logged only AFTER the transaction commits — a pre-commit
 	// log would claim a succession that a rollback erased. The promoted org's
@@ -153,108 +298,21 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 		if (!user || user.googleSub.startsWith('deleted:')) {
 			throw new Error(`deleteUserRecords: user ${userId} not found or already deleted`);
 		}
-		// Tenancy first: per-org fates (dissolve versus survive) decide which
-		// channels die with the account versus detach (team ones the user only
-		// connected). The personal org is single-member by definition; a shared
-		// org the user merely belongs to survives (its other members own it) —
-		// only the user's membership row leaves.
-		const personalOrgs = await tx
-			.select({ id: organizations.id })
-			.from(organizations)
-			.where(eq(organizations.personalFor, userId))
-			.all();
-		const personalOrgIds = personalOrgs.map((o) => o.id);
-		// Stryker disable next-line ConditionalExpression: true equivalent — with zero personal orgs the guard queries inArray([]), which drizzle compiles to `false`; 0 !== 0 and [].some() are both false, so the guard body can never fire either way.
-		if (personalOrgIds.length) {
-			// Data-bug guard: a personal org is single-member by definition, but
-			// the schema cannot enforce that. Require exactly one membership per
-			// personal org, owned by the deleting user — anything else (a second
-			// member, or a sole member who ISN'T this user) means deleting the
-			// org would destroy someone else's tenancy and channels. Fail loudly
-			// and abort the whole deletion.
-			const orgMembers = await tx
-				.select({ userId: memberships.userId })
-				.from(memberships)
-				.where(inArray(memberships.orgId, personalOrgIds))
-				.all();
-			// Stryker disable next-line MethodExpression: every equivalent — organizations.personalFor is UNIQUE (at most one personal org per user), so a mixed-owner member list with a matching count is schema-impossible; with zero or one rows some ≡ every here.
-			if (orgMembers.length !== personalOrgIds.length || orgMembers.some((m) => m.userId !== userId)) {
-				console.error(`user ${userId}'s personal org membership is inconsistent (${orgMembers.length} rows) — refusing account deletion`);
-				throw new Error('personal organization has other members — contact support');
-			}
-		}
-		// Every org the user belongs to decides its own fate. A sole-member org
-		// (personal or shared — the guard above already proved personal orgs are
-		// sole-member) has no one to survive to, so it dissolves with its
-		// channels and data. A shared org with other members survives; when the
-		// deleting user was its LAST owner, ownership passes to the oldest admin,
-		// else the oldest member (seniority = join order, userId breaking ties),
-		// so a shared org is never left ownerless.
-		const userMemberships = await tx
-			.select({ orgId: memberships.orgId, role: memberships.role })
-			.from(memberships)
-			.where(eq(memberships.userId, userId))
-			.all();
-		// One batched query for every co-member across all the user's orgs —
-		// no per-org roundtrips (N+1) inside the transaction.
-		const memberOrgIds = userMemberships.map((m) => m.orgId);
-		const coMembers = memberOrgIds.length
-			? await tx
-					.select({
-						orgId: memberships.orgId,
-						userId: memberships.userId,
-						role: memberships.role,
-						createdAt: memberships.createdAt
-					})
-					.from(memberships)
-					.where(and(inArray(memberships.orgId, memberOrgIds), ne(memberships.userId, userId)))
-					.all()
-			: // Stryker disable next-line ArrayDeclaration: sentinel equivalent — this branch means userMemberships is empty, and the only reader of coMembersByOrg loops over userMemberships, so the injected row is never read.
-				[];
-		const coMembersByOrg = new Map<string, typeof coMembers>();
-		for (const row of coMembers) {
-			// Stryker disable next-line ArrayDeclaration: sentinel equivalent — the injected string's .createdAt is undefined, which localeCompare coerces to "undefined"; ISO dates start with digits ('2' < 'u'), so it always sorts last, find(role==='admin') skips it (role undefined), and ranked[0] is always a real row.
-			const list = coMembersByOrg.get(row.orgId) ?? [];
-			list.push(row);
-			coMembersByOrg.set(row.orgId, list);
-		}
-		// Stryker disable next-line ArrayDeclaration: sentinel equivalent — org ids are randomBytes(16) hex (ensurePersonalOrg in org.ts), never "Stryker was here", so the extra inArray element matches no row and deletes nothing.
-		const dissolveOrgIds: string[] = [];
-		for (const membership of userMemberships) {
-			const others = coMembersByOrg.get(membership.orgId) ?? [];
-			if (!others.length) {
-				dissolveOrgIds.push(membership.orgId);
-				continue;
-			}
-			if (membership.role === 'owner' && !others.some((m) => m.role === 'owner')) {
-				const ranked = [...others].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.userId.localeCompare(b.userId));
-				const successor = ranked.find((m) => m.role === 'admin') ?? ranked[0];
-				const promoted = await tx
-					.update(memberships)
-					.set({ role: 'owner' })
-					.where(and(eq(memberships.orgId, membership.orgId), eq(memberships.userId, successor.userId)))
-					.returning({ userId: memberships.userId });
-				// The row was selected in this same transaction; an empty RETURNING
-				// means the data changed underneath us — fail loudly, never log a
-				// promotion that did not persist.
-				if (!promoted.length) {
-					console.error(`account deletion: successor ${successor.userId} vanished from org ${membership.orgId} mid-transaction`);
-					throw new Error('ownership succession failed — contact support');
-				}
-				promotions.push({ orgId: membership.orgId, successorId: successor.userId });
-			}
-		}
-		// Surviving = every org the user belonged to minus the dissolved ones.
-		// Computed inside the transaction so the post-commit scrub covers the
-		// same membership snapshot the deletion decided on.
+		const personalOrgIds = (
+			await tx.select({ id: organizations.id }).from(organizations).where(eq(organizations.personalFor, userId)).all()
+		).map((o) => o.id);
+		if (personalOrgIds.length) await assertPersonalOrgSoleOwned(tx, userId, personalOrgIds);
+		const { userMemberships, coMembersByOrg } = await loadMembershipSnapshot(tx, userId);
+		const { dissolveOrgIds, promotions: planned } = await planOrgFates(tx, userId, userMemberships, coMembersByOrg);
+		promotions.push(...planned);
 		for (const membership of userMemberships) {
 			if (!dissolveOrgIds.includes(membership.orgId)) survivingOrgIds.push(membership.orgId);
 		}
-		const chs = dissolveOrgIds.length
-			? await tx.select({ id: channels.id }).from(channels).where(inArray(channels.orgId, dissolveOrgIds)).all()
+		const channelIds = dissolveOrgIds.length
+			? (
+					await tx.select({ id: channels.id }).from(channels).where(inArray(channels.orgId, dissolveOrgIds)).all()
+				).map((ch) => ch.id)
 			: [];
-		const channelIds = chs.map((ch) => ch.id);
-		// Every channel in a dissolved org dies with it, history included.
 		await deleteChannelRecords(tx, channelIds);
 		// Detach team channels this account connected: the row and history stay
 		// with the team; the dead grant is wiped so nothing silently moderates.
@@ -263,30 +321,7 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 			.set({ userId: null, refreshTokenEnc: WIPED_REFRESH_TOKEN })
 			.where(eq(channels.userId, userId));
 		await tx.delete(sessions).where(eq(sessions.userId, userId));
-		// Stryker disable next-line ConditionalExpression: true equivalent — with zero dissolved orgs the deletes run inArray([]), which drizzle compiles to `false`: no rows match, nothing is deleted.
-		if (dissolveOrgIds.length) {
-			// Capture the Stripe customers BEFORE the org rows die — the id is
-			// needed for the post-transaction erasure.
-			const dissolvedOrgs = await tx
-				.select({ stripeCustomerId: organizations.stripeCustomerId })
-				.from(organizations)
-				.where(inArray(organizations.id, dissolveOrgIds))
-				.all();
-			for (const org of dissolvedOrgs) {
-				if (!org.stripeCustomerId) continue;
-				stripeCustomerIds.push(org.stripeCustomerId);
-				// The outbox row is the durable obligation; it is deleted once
-				// Stripe confirms (below or by the cron retry).
-				await tx.insert(stripeDeletionOutbox).values({ customerId: org.stripeCustomerId }).onConflictDoNothing();
-			}
-			await tx.delete(invites).where(inArray(invites.orgId, dissolveOrgIds));
-			await tx.delete(memberships).where(inArray(memberships.orgId, dissolveOrgIds));
-			// The credit ledger is part of the org's records: comment ids,
-			// Checkout Session ids, PaymentIntent ids, and charge ids must not
-			// survive an "immediate and permanent" deletion as orphans.
-			await tx.delete(creditTransactions).where(inArray(creditTransactions.orgId, dissolveOrgIds));
-			await tx.delete(organizations).where(inArray(organizations.id, dissolveOrgIds));
-		}
+		if (dissolveOrgIds.length) stripeCustomerIds.push(...(await dissolveOrgs(tx, dissolveOrgIds)));
 		await tx.delete(invites).where(eq(invites.createdBy, userId));
 		await tx.delete(memberships).where(eq(memberships.userId, userId));
 		await tx

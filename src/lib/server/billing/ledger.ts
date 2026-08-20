@@ -66,6 +66,10 @@ const UNIQUE_TARGET: [typeof creditTransactions.orgId, typeof creditTransactions
 	creditTransactions.refId
 ];
 
+export function hasHostedEntitlement(input: { plan: string; stripeSubscriptionId: string | null }): boolean {
+	return input.plan === 'hosted' || (input.plan !== 'lifetime' && typeof input.stripeSubscriptionId === 'string');
+}
+
 /**
  * Retrieves an organization's current credit balance.
  *
@@ -79,8 +83,7 @@ export async function getCredits(orgId: string): Promise<number> {
 		.where(eq(organizations.id, orgId))
 		.get();
 	if (!row) throw new Error(`org not found: ${orgId}`);
-	const hasHostedEntitlement = row.plan === 'hosted' || (row.plan !== 'lifetime' && typeof row.stripeSubscriptionId === 'string');
-	if (!hasHostedEntitlement) return row.creditsRemaining ?? 0;
+	if (!hasHostedEntitlement(row)) return row.creditsRemaining ?? 0;
 	const now = new Date().toISOString();
 	const period = await db
 		.select({ remaining: sql<number>`COALESCE(SUM(${stripeSubscriptionPeriods.includedCredits} - ${stripeSubscriptionPeriods.consumedCredits}), 0)` })
@@ -116,7 +119,7 @@ export async function orgIsMetered(orgId: string): Promise<boolean> {
 		.get();
 	if (!row) throw new Error(`org not found: ${orgId}`);
 	if (UNMETERED_PLANS.has(row.plan)) return false;
-	return row.plan === 'hosted' || typeof row.stripeSubscriptionId === 'string' || row.creditsRemaining !== null;
+	return hasHostedEntitlement(row) || row.creditsRemaining !== null;
 }
 
 /**
@@ -203,8 +206,7 @@ export async function consumeCredit(handle: LedgerHandle, orgId: string, comment
 		if (inserted.length === 0) return false; // already consumed — duplicate delivery
 
 		const now = new Date().toISOString();
-		const hasHostedEntitlement = org.plan === 'hosted' || (org.plan !== 'lifetime' && typeof org.stripeSubscriptionId === 'string');
-		const period = hasHostedEntitlement ? await (tx
+		const period = hasHostedEntitlement(org) ? await (tx
 			.select({ id: stripeSubscriptionPeriods.id })
 			.from(stripeSubscriptionPeriods)
 			.where(and(
@@ -357,7 +359,10 @@ export async function queuePendingReversal(chargeId: string, reason: 'refund' | 
 	await db
 		.insert(stripePendingReversals)
 		.values({ chargeId, reason, disputeId })
-		.onConflictDoNothing({ target: [stripePendingReversals.chargeId, stripePendingReversals.reason] });
+		.onConflictDoUpdate({
+			target: [stripePendingReversals.chargeId, stripePendingReversals.reason],
+			set: { disputeId: sql`COALESCE(${stripePendingReversals.disputeId}, excluded.dispute_id)` }
+		});
 }
 
 /**

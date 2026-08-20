@@ -101,6 +101,15 @@ describe('drainPendingReversals crash-consistency', () => {
 		expect(await getCredits('org-1')).toBe(0);
 	});
 
+
+	test('preserves a later dispute ID when the pending row already exists', async () => {
+		await queuePendingReversal('ch_1', 'dispute');
+		await queuePendingReversal('ch_1', 'dispute', 'disp_1');
+		expect((await testDb().db.select().from(stripePendingReversals).get())?.disputeId).toBe('disp_1');
+		await queuePendingReversal('ch_1', 'dispute', 'disp_2');
+		expect((await testDb().db.select().from(stripePendingReversals).get())?.disputeId).toBe('disp_1');
+	});
+
 	test('deletes each applied row by its own id inside a transaction — never a bare db.delete of the whole charge', async () => {
 		await seedOrg('org-1', 100);
 		await seedChargeGrant('ch_1');
@@ -366,6 +375,18 @@ describe('usageSummary', () => {
 		expect(period?.consumedCredits).toBe(1);
 		expect(org?.creditsRemaining).toBe(2);
 		expect(await getCredits('org-1')).toBe(101);
+	});
+
+	test('an exhausted hosted period falls back to purchased overage', async () => {
+		const periodStart = new Date(Date.now() - 60_000).toISOString();
+		const periodEnd = new Date(Date.now() + 60_000).toISOString();
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Hosted', plan: 'hosted', creditsRemaining: 1 });
+		await testDb().db.insert(stripeSubscriptionPeriods).values({ orgId: 'org-1', subscriptionId: 'sub-1', invoiceId: 'in-1', periodKey: 'period-1', periodStart, periodEnd, includedCredits: 1, consumedCredits: 1, status: 'paid' });
+		expect(await consumeCredit(testDb().db, 'org-1', 'comment-1')).toBe(true);
+		const period = await testDb().db.select().from(stripeSubscriptionPeriods).where(eq(stripeSubscriptionPeriods.invoiceId, 'in-1')).get();
+		expect(period?.consumedCredits).toBe(1);
+		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBe(0);
+		expect(await consumeCredit(testDb().db, 'org-1', 'comment-2')).toBe(false);
 	});
 	test('a canceled hosted subscription remains metered instead of becoming free unlimited access', async () => {
 		const periodStart = new Date(Date.now() - 60_000).toISOString();

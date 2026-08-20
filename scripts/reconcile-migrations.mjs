@@ -86,11 +86,23 @@ for (let i = 0; i < journalHashes.length; i++) {
 	const dbHash = String(row.hash);
 	const journalHash = journalHashes[i];
 	if (dbHash === journalHash) continue;
-	console.log(`reconcile-migrations: ${entries[i].tag}: ${dbHash.slice(0, 12)}… -> ${journalHash.slice(0, 12)}… (recorded hash updated; DDL already applied)`);
-	const client2 = createClient({ url, authToken });
-	await client2.execute({ sql: 'UPDATE __drizzle_migrations SET hash = ? WHERE id = ?', args: [journalHash, Number(row.id)] });
-	client2.close();
+	console.log(`reconcile-migrations: ${entries[i].tag}: ${dbHash.slice(0, 12)}… -> ${journalHash.slice(0, 12)}…`);
+	const writer = createClient({ url, authToken });
+	const result = await writer.execute({ sql: 'UPDATE __drizzle_migrations SET hash = ? WHERE id = ?', args: [journalHash, Number(row.id)] });
+	// Prove the write stuck: a read-back must show the new hash. A silent
+	// no-op (0 rows affected / old hash still there) means the token cannot
+	// write this database — fail loudly instead of reporting success.
+	const check = await writer.execute('SELECT hash FROM __drizzle_migrations WHERE id = ' + Number(row.id));
+	writer.close();
+	const persisted = check.rows.length === 1 && String(check.rows[0].hash) === journalHash;
+	if (!persisted) {
+		console.error(
+			`reconcile-migrations: WRITE DID NOT PERSIST for id ${row.id} (rows changed: ${JSON.stringify(result.rows ?? [])}). ` +
+				'The token appears to be READ-ONLY for this database, or the writes are rejected — nothing was changed.'
+		);
+		process.exit(1);
+	}
 	changed++;
 }
-console.log(`reconcile-migrations: ${changed} hash(es) updated to match the current journal.`);
+console.log(`reconcile-migrations: ${changed} hash(es) updated AND verified against ${url}.`);
 process.exit(0);

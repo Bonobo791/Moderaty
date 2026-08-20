@@ -97,37 +97,20 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 	// session at any time — potentially long after the 14-day pending-reversal
 	// sweep dropped a queued reversal. Granting would hand credits back for
 	// money that already left (fully refunded or disputed), so the charge's
-	// CURRENT state is checked before the ledger mutation. The webhook path
-	// (fresh fulfillment) is unaffected: a refunded charge never grants here,
-	// and the drain handles the ordering race for the reverse case.
-	const paymentIntent = typeof session.payment_intent === 'string' ? null : session.payment_intent;
-	const charge = paymentIntent && typeof paymentIntent.latest_charge !== 'string' ? paymentIntent.latest_charge : undefined;
-	if (charge) {
-		const fullyRefunded =
-			typeof charge.amount_refunded === 'number' &&
-			typeof charge.amount === 'number' &&
-			charge.amount_refunded >= charge.amount;
-		if (charge.disputed || fullyRefunded) {
-			console.error(
-				`stripe: checkout session ${sessionId} charge ${charge.id} is ${charge.disputed ? 'disputed' : 'fully refunded'} — late grant refused`
-			);
-			return 'rejected';
-		}
-	}
+	// CURRENT state is checked before the ledger mutation.
+	if (rejectLateGrant(session, sessionId)) return 'rejected';
+
 	// An unknown bundle id is an operator config bug, not a transient failure:
 	// acknowledge loudly and reject (the credits can never be granted — a
-	// retry storm would only produce three days of 500s). bundleById throws
-	// for a missing id; catch and convert to the loud rejection.
-	let bundle: CreditBundle;
-	try {
-		bundle = bundleById(bundleId);
-	} catch {
-		console.error(`stripe: checkout session ${sessionId} references unknown bundle ${bundleId} — credits cannot be granted`);
-		return 'rejected';
-	}
+	// retry storm would only produce three days of 500s).
+	const bundle = loadBundle(bundleId, sessionId);
+	if (!bundle) return 'rejected';
+
 	// Narrow the expanded object: the type stays a string-union, so touch
 	// nested fields only after the check. chargeId prefers the expanded
 	// object's id (it is the same id either way).
+	const paymentIntent = typeof session.payment_intent === 'string' ? null : session.payment_intent;
+	const charge = paymentIntent && typeof paymentIntent.latest_charge !== 'string' ? paymentIntent.latest_charge : undefined;
 	const chargeId = typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : charge?.id;
 	const applied = await applyLedgerDelta(db, {
 		orgId,
@@ -147,68 +130,100 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 		const drained = await drainPendingReversals(chargeId);
 		if (drained > 0) console.error(`stripe: checkout grant ${sessionId} immediately drained ${drained} pending reversal(s) for ${chargeId}`);
 	}
+
 	// Save the card used for this payment as the customer's default, so a
-	// later auto top-up can charge it off-session. This runs even when the
-	// grant was already applied (duplicate delivery): a transient first-
-	// delivery failure must be retried by the next delivery or success-page
-	// refresh, or the org would permanently have no top-up card. Every step
-	// is idempotent (attach, default-payment-method update, org row update).
+	// later auto top-up can charge it off-session. Runs even when the grant
+	// was already applied (duplicate delivery) so a transient first-delivery
+	// failure is retried instead of leaving the org with no top-up card.
+	await savePaymentMethod(session, orgId, paymentIntent, charge);
+	return applied ? 'granted' : 'already';
+}
+
+/** True when the charge backing this session is disputed or fully refunded — a late grant must be refused. */
+function rejectLateGrant(session: Stripe.Checkout.Session, sessionId: string): boolean {
+	const paymentIntent = typeof session.payment_intent === 'string' ? null : session.payment_intent;
+	const charge = paymentIntent && typeof paymentIntent.latest_charge !== 'string' ? paymentIntent.latest_charge : undefined;
+	if (!charge) return false;
+	const fullyRefunded =
+		typeof charge.amount_refunded === 'number' &&
+		typeof charge.amount === 'number' &&
+		charge.amount_refunded >= charge.amount;
+	if (charge.disputed || fullyRefunded) {
+		console.error(
+			`stripe: checkout session ${sessionId} charge ${charge.id} is ${charge.disputed ? 'disputed' : 'fully refunded'} — late grant refused`
+		);
+		return true;
+	}
+	return false;
+}
+
+/** Resolves the bundle id or returns null (unknown bundle — loud rejection). */
+function loadBundle(bundleId: string, sessionId: string): CreditBundle | null {
+	try {
+		return bundleById(bundleId);
+	} catch {
+		console.error(`stripe: checkout session ${sessionId} references unknown bundle ${bundleId} — credits cannot be granted`);
+		return null;
+	}
+}
+
+/**
+ * Saves the card used for this payment as the customer's default for future
+ * auto top-ups. Every step is idempotent (attach, default-payment-method
+ * update, org row update). A NEW saved card is a NEW billing instrument: the
+ * consent evidence on file covered the OLD card, so auto top-up is disabled
+ * whenever the default payment method CHANGES (fresh explicit owner action
+ * needed; the consent row is kept for dispute defense). Failures THROW (after
+ * a loud log) so the webhook answers 500 and Stripe redelivers — a swallowed
+ * failure would permanently leave the org with no top-up card (codex 6141).
+ */
+async function savePaymentMethod(
+	session: Stripe.Checkout.Session,
+	orgId: string,
+	paymentIntent: Stripe.PaymentIntent | null | undefined,
+	charge: Stripe.Charge | null | undefined
+): Promise<void> {
 	const paymentMethod = paymentIntent?.payment_method;
 	const customer = typeof session.customer === 'string' ? session.customer : session.customer?.id;
-	if (paymentMethod && customer) {
-		try {
-			if (typeof paymentMethod !== 'string') {
-				await getStripe().paymentMethods.attach(paymentMethod.id, { customer });
-			}
-			const paymentMethodId = typeof paymentMethod === 'string' ? paymentMethod : paymentMethod.id;
-			await getStripe().customers.update(customer, { invoice_settings: { default_payment_method: paymentMethodId } });
-			// A NEW saved card is a NEW billing instrument: the consent
-			// evidence on file covered the OLD card. Unscheduled off-session
-			// charges must not move to a card the cardholder never authorized —
-			// disable auto top-up whenever the default payment method CHANGES
-			// (codex review). The consent evidence row is kept (the record that
-			// authorization was once given must survive for dispute defense);
-			// re-enabling is a fresh explicit owner action on the Usage page.
-			// Checked BEFORE the PM update below so the comparison sees the old
-			// card.
-			const prior = await db
-				.select({ autoTopupEnabled: organizations.autoTopupEnabled, stripeDefaultPmId: organizations.stripeDefaultPmId })
-				.from(organizations)
-				.where(eq(organizations.id, orgId))
-				.get();
-			// The grant step already verified the org exists, so a missing row
-			// here is a concurrent-deletion bug: fail loudly instead of
-			// acknowledging the event while updating zero rows.
-			if (!prior) throw new Error(`stripe: organization ${orgId} is missing while saving a payment method`);
-			if (prior.autoTopupEnabled === 1 && prior.stripeDefaultPmId && prior.stripeDefaultPmId !== paymentMethodId) {
-				await db
-					.update(organizations)
-					.set({ autoTopupEnabled: 0, autoTopupState: 'disabled' })
-					.where(eq(organizations.id, orgId));
-				console.error(
-					`stripe: saved payment method changed for org ${orgId} (${prior.stripeDefaultPmId} -> ${paymentMethodId}) — auto top-up DISABLED, fresh consent required`
-				);
-			}
-			const saved = await db
-				.update(organizations)
-				.set({ stripeCustomerId: customer, stripeDefaultPmId: paymentMethodId })
-				.where(eq(organizations.id, orgId))
-				.returning({ id: organizations.id });
-			// The prior read proved the org existed; a zero-row update means it
-			// was deleted in between. Fail loudly so the webhook retries instead
-			// of acknowledging a grant whose payment method was never saved.
-			if (saved.length === 0) throw new Error(`stripe: organization ${orgId} disappeared while saving a payment method`);
-		} catch (error) {
-			// The credits are already granted, but a swallowed failure would
-			// make the webhook answer 200 and Stripe would never redeliver —
-			// the org would permanently have no top-up card. Throw (after the
-			// loud log): the route 500s, Stripe retries, and the idempotent
-			// retry saves the card without double-granting (codex 6141).
-			console.error(`stripe: could not save payment method for ${orgId}: ${error instanceof Error ? error.message : String(error)}`);
-			throw new Error(`stripe: could not save payment method for org ${orgId} — webhook will retry`);
+	if (!paymentMethod || !customer) return;
+	try {
+		if (typeof paymentMethod !== 'string') {
+			await getStripe().paymentMethods.attach(paymentMethod.id, { customer });
 		}
+		const paymentMethodId = typeof paymentMethod === 'string' ? paymentMethod : paymentMethod.id;
+		await getStripe().customers.update(customer, { invoice_settings: { default_payment_method: paymentMethodId } });
+		// Checked BEFORE the PM update below so the comparison sees the old card.
+		const prior = await db
+			.select({ autoTopupEnabled: organizations.autoTopupEnabled, stripeDefaultPmId: organizations.stripeDefaultPmId })
+			.from(organizations)
+			.where(eq(organizations.id, orgId))
+			.get();
+		// The grant step already verified the org exists, so a missing row
+		// here is a concurrent-deletion bug: fail loudly instead of
+		// acknowledging the event while updating zero rows.
+		if (!prior) throw new Error(`stripe: organization ${orgId} is missing while saving a payment method`);
+		if (prior.autoTopupEnabled === 1 && prior.stripeDefaultPmId && prior.stripeDefaultPmId !== paymentMethodId) {
+			await db
+				.update(organizations)
+				.set({ autoTopupEnabled: 0, autoTopupState: 'disabled' })
+				.where(eq(organizations.id, orgId));
+			console.error(
+				`stripe: saved payment method changed for org ${orgId} (${prior.stripeDefaultPmId} -> ${paymentMethodId}) — auto top-up DISABLED, fresh consent required`
+			);
+		}
+		const saved = await db
+			.update(organizations)
+			.set({ stripeCustomerId: customer, stripeDefaultPmId: paymentMethodId })
+			.where(eq(organizations.id, orgId))
+			.returning({ id: organizations.id });
+		// The prior read proved the org existed; a zero-row update means it
+		// was deleted in between. Fail loudly so the webhook retries instead
+		// of acknowledging a grant whose payment method was never saved.
+		if (saved.length === 0) throw new Error(`stripe: organization ${orgId} disappeared while saving a payment method`);
+	} catch (error) {
+		console.error(`stripe: could not save payment method for ${orgId}: ${error instanceof Error ? error.message : String(error)}`);
+		throw new Error(`stripe: could not save payment method for org ${orgId} — webhook will retry`);
 	}
-	return applied ? 'granted' : 'already';
 }
 
 /**

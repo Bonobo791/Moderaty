@@ -39,7 +39,7 @@ function tempDb() {
 }
 async function seededDb(dbPath, hashes) {
 	const client = createClient({ url: `file:${dbPath}` });
-	await client.execute('CREATE TABLE __drizzle_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL)');
+	await client.execute("CREATE TABLE __drizzle_migrations (\n\t\t\tid SERIAL PRIMARY KEY,\n\t\t\thash text NOT NULL,\n\t\t\tcreated_at numeric\n\t\t)");
 	for (let i = 0; i < hashes.length; i++) {
 		await client.execute({ sql: 'INSERT INTO __drizzle_migrations (hash, created_at) VALUES (?, ?)', args: [hashes[i], String(1785326400000 + i)] });
 	}

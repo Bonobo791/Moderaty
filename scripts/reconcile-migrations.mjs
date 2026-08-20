@@ -20,6 +20,11 @@
 // __drizzle_migrations still records the pre-swap hashes, so verify-migrations
 // reports "16 missing, 16 extra" and the deploy gate fails.
 //
+// Writes key on rowid, NOT `id`: drizzle's migrator creates `id SERIAL PRIMARY
+// KEY`, which SQLite does NOT auto-increment (only INTEGER PRIMARY KEY aliases
+// the rowid) and allows NULLs in — so every row's id is NULL on real databases
+// and `WHERE id = ?` silently matches nothing (the 2026-08-20 incident).
+//
 // This script rewrites ONLY the __drizzle_migrations bookkeeping rows so their
 // hashes match the current journal — it never runs DDL and never touches the
 // schema. It is intentionally strict: it refuses to run unless the journal and
@@ -68,7 +73,7 @@ const journalHashes = entries.map((e) => {
 // production kept its drifted hashes).
 console.log(`reconcile-migrations: target ${url}`);
 const client = createClient({ url, authToken });
-const rows = (await client.execute('SELECT id, hash FROM __drizzle_migrations ORDER BY id')).rows;
+const rows = (await client.execute('SELECT rowid, hash FROM __drizzle_migrations ORDER BY rowid')).rows;
 client.close();
 console.log(`reconcile-migrations: ${rows.length} applied rows, ${journalHashes.length} journal entries`);
 
@@ -88,16 +93,16 @@ for (let i = 0; i < journalHashes.length; i++) {
 	if (dbHash === journalHash) continue;
 	console.log(`reconcile-migrations: ${entries[i].tag}: ${dbHash.slice(0, 12)}… -> ${journalHash.slice(0, 12)}…`);
 	const writer = createClient({ url, authToken });
-	const result = await writer.execute({ sql: 'UPDATE __drizzle_migrations SET hash = ? WHERE id = ?', args: [journalHash, Number(row.id)] });
+	const result = await writer.execute({ sql: 'UPDATE __drizzle_migrations SET hash = ? WHERE rowid = ?', args: [journalHash, Number(row.rowid)] });
 	// Prove the write stuck: a read-back must show the new hash. A silent
 	// no-op (0 rows affected / old hash still there) means the token cannot
 	// write this database — fail loudly instead of reporting success.
-	const check = await writer.execute('SELECT hash FROM __drizzle_migrations WHERE id = ' + Number(row.id));
+	const check = await writer.execute({ sql: 'SELECT hash FROM __drizzle_migrations WHERE rowid = ?', args: [Number(row.rowid)] });
 	writer.close();
 	const persisted = check.rows.length === 1 && String(check.rows[0].hash) === journalHash;
 	if (!persisted) {
 		console.error(
-			`reconcile-migrations: WRITE DID NOT PERSIST for id ${row.id} (rows changed: ${JSON.stringify(result.rows ?? [])}). ` +
+			`reconcile-migrations: WRITE DID NOT PERSIST for rowid ${row.rowid} (rows changed: ${JSON.stringify(result.rows ?? [])}). ` +
 				'The token appears to be READ-ONLY for this database, or the writes are rejected — nothing was changed.'
 		);
 		process.exit(1);

@@ -39,32 +39,10 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { createClient } from '@libsql/client';
+import { loadMigrationConfig } from './migration-config.mjs';
 
-const argv = process.argv.slice(2);
-const USAGE_ERROR = 'Usage: node scripts/reconcile-migrations.mjs [meta-dir]';
-
-if (argv.length > 1) {
-	console.error(USAGE_ERROR);
-	process.exit(1);
-}
-const metaDir = argv[0] ?? fileURLToPath(new URL('../drizzle/meta', import.meta.url));
-const URL_MISSING_ERROR = 'reconcile-migrations: TURSO_DATABASE_URL is not set (source .env first)';
-const TOKEN_MISSING_ERROR = 'reconcile-migrations: TURSO_AUTH_TOKEN is required for remote databases';
-
-const url = process.env.TURSO_DATABASE_URL;
-if (!url) {
-	console.error(URL_MISSING_ERROR);
-	process.exit(1);
-}
-const authToken = process.env.TURSO_AUTH_TOKEN;
-if (!url.startsWith('file:') && !authToken) {
-	console.error(TOKEN_MISSING_ERROR);
-	process.exit(1);
-}
-
-const journalPath = join(metaDir, '_journal.json');
+const { metaDir, url, authToken, journalPath } = loadMigrationConfig({ scriptName: 'reconcile-migrations' });
 const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
 const entries = journal.entries ?? [];
 const journalHashes = entries.map((e) => {

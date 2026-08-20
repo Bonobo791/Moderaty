@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, eq, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { db } from '$lib/server/db';
 import {
 	organizations,
@@ -24,6 +24,20 @@ type PendingReversalState = {
 	disputeId?: string;
 	wonDispute: boolean;
 };
+
+type StripeIdentifiers = { paymentIntentId?: string; chargeId?: string };
+
+function stripeIdentifierPredicate(input: StripeIdentifiers, paymentIntentColumn: Parameters<typeof eq>[0], chargeColumn: Parameters<typeof eq>[0]): SQL<unknown> {
+	if (input.paymentIntentId && input.chargeId) return and(eq(paymentIntentColumn, input.paymentIntentId), eq(chargeColumn, input.chargeId)) as SQL<unknown>;
+	if (input.paymentIntentId) return eq(paymentIntentColumn, input.paymentIntentId);
+	if (input.chargeId) return eq(chargeColumn, input.chargeId);
+	throw new Error(PAYMENT_REFERENCE_REQUIRED_ERROR);
+}
+
+function assertUnambiguous(matches: readonly unknown[], input: StripeIdentifiers): void {
+	if (matches.length > 1 && !(input.paymentIntentId && input.chargeId)) throw new Error('ambiguous Stripe payment identifiers matched multiple entitlements');
+}
+
 
 function isNewerEvent(
 	currentCreated: number | null | undefined,
@@ -142,7 +156,7 @@ async function applyPendingLifetimeReversal(tx: Tx, input: LifetimeClaim, slot: 
 	if (!input.chargeId || reversal.pending.length === 0 || reversal.wonDispute) return undefined;
 	const pendingStatus: 'disputed' | 'released' = reversal.disputeId && !reversal.hasRefund ? 'disputed' : 'released';
 	await tx.update(stripeLifetimeEntitlements).set({ status: pendingStatus, releasedAt: pendingStatus === 'released' ? sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` : null }).where(eq(stripeLifetimeEntitlements.id, entitlementId));
-	if (!reversal.disputeId) await tx.update(stripeLifetimeSlots).set({ activeOrgId: null, activeEntitlementId: null, releasedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` }).where(eq(stripeLifetimeSlots.slot, slot));
+	if (pendingStatus === 'released') await tx.update(stripeLifetimeSlots).set({ activeOrgId: null, activeEntitlementId: null, releasedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` }).where(eq(stripeLifetimeSlots.slot, slot));
 	await tx.delete(stripePendingReversals).where(eq(stripePendingReversals.chargeId, input.chargeId));
 	if (reversal.disputeId) await tx.update(stripeDisputeReversals).set({ source: 'lifetime', status: reversal.hasRefund ? 'ignored' : 'reversed' }).where(eq(stripeDisputeReversals.disputeId, reversal.disputeId));
 	const subscription = await tx.select({ id: organizations.stripeSubscriptionId, status: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, input.orgId)).get();
@@ -193,25 +207,20 @@ export async function claimLifetimeSlot(input: LifetimeClaim): Promise<LifetimeC
 		if (pendingResult) return pendingResult;
 		if (reversal.wonDispute) {
 			if (reversal.disputeId) await tx.update(stripeDisputeReversals).set({ source: 'lifetime', status: 'restored' }).where(eq(stripeDisputeReversals.disputeId, reversal.disputeId));
-			if (input.chargeId) await tx.delete(stripePendingReversals).where(eq(stripePendingReversals.chargeId, input.chargeId));
+			if (!input.chargeId) throw new Error('won dispute reconciliation requires a charge id');
+			await tx.delete(stripePendingReversals).where(eq(stripePendingReversals.chargeId, input.chargeId));
 		}
 		await tx.update(organizations).set({ plan: 'lifetime' }).where(eq(organizations.id, input.orgId));
 		return { slot: slot.slot, status: 'active' };
 	});
 }
 
-export async function releaseLifetimeForPayment(input: { paymentIntentId?: string; chargeId?: string }): Promise<boolean> {
-	const matches = [
-		input.paymentIntentId ? eq(stripeLifetimeEntitlements.paymentIntentId, input.paymentIntentId) : undefined,
-		input.chargeId ? eq(stripeLifetimeEntitlements.chargeId, input.chargeId) : undefined
-	].filter((condition): condition is NonNullable<typeof condition> => Boolean(condition));
-	if (matches.length === 0) throw new Error(PAYMENT_REFERENCE_REQUIRED_ERROR);
+export async function releaseLifetimeForPayment(input: StripeIdentifiers): Promise<boolean> {
+	const predicate = stripeIdentifierPredicate(input, stripeLifetimeEntitlements.paymentIntentId, stripeLifetimeEntitlements.chargeId);
 	return db.transaction(async (tx) => {
-		const entitlement = await tx
-			.select({ id: stripeLifetimeEntitlements.id, orgId: stripeLifetimeEntitlements.orgId, slot: stripeLifetimeEntitlements.slot, status: stripeLifetimeEntitlements.status })
-			.from(stripeLifetimeEntitlements)
-			.where(or(...matches))
-			.get();
+		const matches = await tx.select({ id: stripeLifetimeEntitlements.id, orgId: stripeLifetimeEntitlements.orgId, slot: stripeLifetimeEntitlements.slot, status: stripeLifetimeEntitlements.status }).from(stripeLifetimeEntitlements).where(predicate).limit(2).all();
+		assertUnambiguous(matches, input);
+		const entitlement = matches[0];
 		if (!entitlement) return false;
 		if (entitlement.status === 'released') return true;
 		if (entitlement.status !== 'active' && entitlement.status !== 'disputed') return true;
@@ -224,15 +233,12 @@ export async function releaseLifetimeForPayment(input: { paymentIntentId?: strin
 	});
 }
 
-
-export async function revokeLifetimeForDispute(input: { paymentIntentId?: string; chargeId?: string }): Promise<boolean> {
-	const matches = [
-		input.paymentIntentId ? eq(stripeLifetimeEntitlements.paymentIntentId, input.paymentIntentId) : undefined,
-		input.chargeId ? eq(stripeLifetimeEntitlements.chargeId, input.chargeId) : undefined
-	].filter((condition): condition is NonNullable<typeof condition> => Boolean(condition));
-	if (matches.length === 0) throw new Error(PAYMENT_REFERENCE_REQUIRED_ERROR);
+export async function revokeLifetimeForDispute(input: StripeIdentifiers): Promise<boolean> {
+	const predicate = stripeIdentifierPredicate(input, stripeLifetimeEntitlements.paymentIntentId, stripeLifetimeEntitlements.chargeId);
 	return db.transaction(async (tx) => {
-		const entitlement = await tx.select({ id: stripeLifetimeEntitlements.id, orgId: stripeLifetimeEntitlements.orgId, status: stripeLifetimeEntitlements.status }).from(stripeLifetimeEntitlements).where(or(...matches)).get();
+		const matches = await tx.select({ id: stripeLifetimeEntitlements.id, orgId: stripeLifetimeEntitlements.orgId, status: stripeLifetimeEntitlements.status }).from(stripeLifetimeEntitlements).where(predicate).limit(2).all();
+		assertUnambiguous(matches, input);
+		const entitlement = matches[0];
 		if (!entitlement) return false;
 		if (entitlement.status === 'disputed') return true;
 		if (entitlement.status !== 'active') return false;
@@ -244,14 +250,12 @@ export async function revokeLifetimeForDispute(input: { paymentIntentId?: string
 	});
 }
 
-export async function restoreLifetimeForDispute(input: { paymentIntentId?: string; chargeId?: string }): Promise<boolean> {
-	const matches = [
-		input.paymentIntentId ? eq(stripeLifetimeEntitlements.paymentIntentId, input.paymentIntentId) : undefined,
-		input.chargeId ? eq(stripeLifetimeEntitlements.chargeId, input.chargeId) : undefined
-	].filter((condition): condition is NonNullable<typeof condition> => Boolean(condition));
-	if (matches.length === 0) throw new Error(PAYMENT_REFERENCE_REQUIRED_ERROR);
+export async function restoreLifetimeForDispute(input: StripeIdentifiers): Promise<boolean> {
+	const predicate = stripeIdentifierPredicate(input, stripeLifetimeEntitlements.paymentIntentId, stripeLifetimeEntitlements.chargeId);
 	return db.transaction(async (tx) => {
-		const entitlement = await tx.select({ id: stripeLifetimeEntitlements.id, orgId: stripeLifetimeEntitlements.orgId }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.status, 'disputed'), or(...matches))).get();
+		const matches = await tx.select({ id: stripeLifetimeEntitlements.id, orgId: stripeLifetimeEntitlements.orgId }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.status, 'disputed'), predicate)).limit(2).all();
+		assertUnambiguous(matches, input);
+		const entitlement = matches[0];
 		if (!entitlement) return false;
 		await tx.update(stripeLifetimeEntitlements).set({ status: 'active', releasedAt: null }).where(eq(stripeLifetimeEntitlements.id, entitlement.id));
 		await tx.update(organizations).set({ plan: 'lifetime' }).where(eq(organizations.id, entitlement.orgId));
@@ -259,49 +263,36 @@ export async function restoreLifetimeForDispute(input: { paymentIntentId?: strin
 	});
 }
 
-export async function restoreDisputedSubscriptionPeriod(input: { paymentIntentId?: string; chargeId?: string }): Promise<boolean> {
-	const matches = [
-		input.paymentIntentId ? eq(stripeSubscriptionPeriods.paymentIntentId, input.paymentIntentId) : undefined,
-		input.chargeId ? eq(stripeSubscriptionPeriods.chargeId, input.chargeId) : undefined
-	].filter((condition): condition is NonNullable<typeof condition> => Boolean(condition));
-	if (matches.length === 0) throw new Error(PAYMENT_REFERENCE_REQUIRED_ERROR);
-	const changed = await db.update(stripeSubscriptionPeriods).set({ status: 'paid' }).where(and(eq(stripeSubscriptionPeriods.status, 'disputed'), or(...matches))).returning({ id: stripeSubscriptionPeriods.id });
+export async function restoreDisputedSubscriptionPeriod(input: StripeIdentifiers): Promise<boolean> {
+	const predicate = stripeIdentifierPredicate(input, stripeSubscriptionPeriods.paymentIntentId, stripeSubscriptionPeriods.chargeId);
+	const matches = await db.select({ id: stripeSubscriptionPeriods.id }).from(stripeSubscriptionPeriods).where(and(eq(stripeSubscriptionPeriods.status, 'disputed'), predicate)).limit(2).all();
+	assertUnambiguous(matches, input);
+	if (!matches[0]) return false;
+	const changed = await db.update(stripeSubscriptionPeriods).set({ status: 'paid' }).where(eq(stripeSubscriptionPeriods.id, matches[0].id)).returning({ id: stripeSubscriptionPeriods.id });
 	return changed.length > 0;
 }
-
 
 /** Marks the paid subscription period behind a full refund unusable. */
-export async function refundSubscriptionPeriod(input: { paymentIntentId?: string; chargeId?: string }): Promise<boolean> {
-	const matches = [
-		input.paymentIntentId ? eq(stripeSubscriptionPeriods.paymentIntentId, input.paymentIntentId) : undefined,
-		input.chargeId ? eq(stripeSubscriptionPeriods.chargeId, input.chargeId) : undefined
-	].filter((condition): condition is NonNullable<typeof condition> => Boolean(condition));
-	if (matches.length === 0) throw new Error(PAYMENT_REFERENCE_REQUIRED_ERROR);
-	const existing = await db.select({ status: stripeSubscriptionPeriods.status }).from(stripeSubscriptionPeriods).where(or(...matches)).get();
+export async function refundSubscriptionPeriod(input: StripeIdentifiers): Promise<boolean> {
+	const predicate = stripeIdentifierPredicate(input, stripeSubscriptionPeriods.paymentIntentId, stripeSubscriptionPeriods.chargeId);
+	const matches = await db.select({ id: stripeSubscriptionPeriods.id, status: stripeSubscriptionPeriods.status }).from(stripeSubscriptionPeriods).where(predicate).limit(2).all();
+	assertUnambiguous(matches, input);
+	const existing = matches[0];
 	if (!existing) return false;
 	if (existing.status !== 'paid' && existing.status !== 'disputed') return true;
-	const changed = await db
-		.update(stripeSubscriptionPeriods)
-		.set({ status: 'refunded' })
-		.where(and(or(eq(stripeSubscriptionPeriods.status, 'paid'), eq(stripeSubscriptionPeriods.status, 'disputed')), or(...matches)))
-		.returning({ id: stripeSubscriptionPeriods.id });
+	const changed = await db.update(stripeSubscriptionPeriods).set({ status: 'refunded' }).where(and(eq(stripeSubscriptionPeriods.id, existing.id), or(eq(stripeSubscriptionPeriods.status, 'paid'), eq(stripeSubscriptionPeriods.status, 'disputed')))).returning({ id: stripeSubscriptionPeriods.id });
 	return changed.length > 0;
 }
-
 
 /** Marks a paid subscription period unusable after a card dispute. */
-export async function disputeSubscriptionPeriod(input: { paymentIntentId?: string; chargeId?: string }): Promise<boolean> {
-	const matches = [
-		input.paymentIntentId ? eq(stripeSubscriptionPeriods.paymentIntentId, input.paymentIntentId) : undefined,
-		input.chargeId ? eq(stripeSubscriptionPeriods.chargeId, input.chargeId) : undefined
-	].filter((condition): condition is NonNullable<typeof condition> => Boolean(condition));
-	if (matches.length === 0) throw new Error(PAYMENT_REFERENCE_REQUIRED_ERROR);
-	const existing = await db.select({ status: stripeSubscriptionPeriods.status }).from(stripeSubscriptionPeriods).where(or(...matches)).get();
+export async function disputeSubscriptionPeriod(input: StripeIdentifiers): Promise<boolean> {
+	const predicate = stripeIdentifierPredicate(input, stripeSubscriptionPeriods.paymentIntentId, stripeSubscriptionPeriods.chargeId);
+	const matches = await db.select({ id: stripeSubscriptionPeriods.id, status: stripeSubscriptionPeriods.status }).from(stripeSubscriptionPeriods).where(predicate).limit(2).all();
+	assertUnambiguous(matches, input);
+	const existing = matches[0];
 	if (existing && existing.status !== 'paid') return true;
-	const changed = await db
-		.update(stripeSubscriptionPeriods)
-		.set({ status: 'disputed' })
-		.where(and(eq(stripeSubscriptionPeriods.status, 'paid'), or(...matches)))
-		.returning({ id: stripeSubscriptionPeriods.id });
+	if (!existing) return false;
+	const changed = await db.update(stripeSubscriptionPeriods).set({ status: 'disputed' }).where(and(eq(stripeSubscriptionPeriods.id, existing.id), eq(stripeSubscriptionPeriods.status, 'paid'))).returning({ id: stripeSubscriptionPeriods.id });
 	return changed.length > 0;
 }
+

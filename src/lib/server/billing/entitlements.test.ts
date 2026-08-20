@@ -106,6 +106,34 @@ describe('lifetime entitlements', () => {
 		expect(slot?.activeOrgId).toBeNull();
 	});
 
+
+	test('a refund plus dispute releases the lifetime slot and entitlement', async () => {
+		await testDb().db.insert(stripePendingReversals).values([{ chargeId: 'ch-1', reason: 'refund' }, { chargeId: 'ch-1', reason: 'dispute', disputeId: 'disp-1' }]);
+		await testDb().db.insert(stripeDisputeReversals).values({ disputeId: 'disp-1', chargeId: 'ch-1', status: 'pending', source: 'unknown' });
+		const result = await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-mixed', paymentIntentId: 'pi-1', chargeId: 'ch-1' });
+		expect(result).toEqual({ slot: 1, status: 'released' });
+		const slot = await testDb().db.select().from(stripeLifetimeSlots).where(eq(stripeLifetimeSlots.slot, 1)).get();
+		const entitlement = await testDb().db.select().from(stripeLifetimeEntitlements).where(eq(stripeLifetimeEntitlements.checkoutSessionId, 'cs-mixed')).get();
+		expect(slot?.activeOrgId).toBeNull();
+		expect(slot?.activeEntitlementId).toBeNull();
+		expect(entitlement?.status).toBe('released');
+	});
+
+	test('lifetime reversal requires matching payment and charge identifiers', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-2', name: 'org-2' });
+		await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-a', paymentIntentId: 'pi-a', chargeId: 'ch-a' });
+		await claimLifetimeSlot({ orgId: 'org-2', checkoutSessionId: 'cs-b', paymentIntentId: 'pi-b', chargeId: 'ch-b' });
+		expect(await releaseLifetimeForPayment({ paymentIntentId: 'pi-a', chargeId: 'ch-b' })).toBe(false);
+		const first = await testDb().db.select().from(stripeLifetimeEntitlements).where(eq(stripeLifetimeEntitlements.checkoutSessionId, 'cs-a')).get();
+		expect(first?.status).toBe('active');
+	});
+
+	test('lifetime reversal rejects an ambiguous single identifier', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-2', name: 'org-2' });
+		await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-a', paymentIntentId: 'pi-a', chargeId: 'ch-same' });
+		await claimLifetimeSlot({ orgId: 'org-2', checkoutSessionId: 'cs-b', paymentIntentId: 'pi-b', chargeId: 'ch-same' });
+		await expect(releaseLifetimeForPayment({ chargeId: 'ch-same' })).rejects.toThrow('ambiguous');
+	});
 	test('a won dispute restores a disputed lifetime entitlement without releasing its slot', async () => {
 		await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-1', paymentIntentId: 'pi-1', chargeId: 'ch-1' });
 		expect(await revokeLifetimeForDispute({ paymentIntentId: 'pi-1', chargeId: 'ch-1' })).toBe(true);

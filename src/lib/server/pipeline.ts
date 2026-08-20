@@ -174,7 +174,7 @@ function aiUnavailable(comment: NewComment, error: unknown): Decision {
 	// never aborts the batch — the comment lands in the human review queue.
 	// Full diagnostics go to the server log; the persisted reason is a safe
 	// scalar (errorText) so credentials on SDK errors never reach the log page.
-	console.error(`ai unavailable for comment ${comment.id}:`, error);
+	console.error('[pipeline] ai unavailable for comment', comment.id, error);
 	return {
 		comment,
 		status: 'pending',

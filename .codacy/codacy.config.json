@@ -890,9 +890,6 @@
      "patternId": "Semgrep_javascript.lang.security.audit.dangerous-spawn-shell.dangerous-spawn-shell"
     },
     {
-     "patternId": "Semgrep_javascript.lang.security.audit.detect-non-literal-fs-filename.detect-non-literal-fs-filename"
-    },
-    {
      "patternId": "Semgrep_javascript.lang.security.audit.detect-non-literal-require.detect-non-literal-require"
     },
     {
@@ -981,9 +978,6 @@
     },
     {
      "patternId": "Semgrep_javascript.passport-jwt.security.passport-hardcode.hardcoded-passport-secret"
-    },
-    {
-     "patternId": "Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename"
     },
     {
      "patternId": "Semgrep_javascript.phantom.security.audit.phantom-injection.phantom-injection"

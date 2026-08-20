@@ -45,7 +45,7 @@ export async function load({ params, locals }) {
 }
 
 /** DB status for a human review action (no nested ternary — sonarcloud S3358). */
-function statusForAction(action: 'approve' | 'reject' | 'delete' | 'ban'): 'approved' | 'deleted' | 'rejected' {
+function statusForAction(action: string): 'approved' | 'deleted' | 'rejected' {
 	if (action === 'approve') return 'approved';
 	if (action === 'delete') return 'deleted';
 	if (action === 'reject' || action === 'ban') return 'rejected';

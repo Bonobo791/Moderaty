@@ -76,11 +76,15 @@ function expectCreatedAtDefault(table: SQLiteTable): void {
 	expect(sqlText(createdAt!.default)).toBe(`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`);
 }
 
-function expectIndex(table: SQLiteTable, name: string, columns: string[]): void {
+function expectIndex(table: SQLiteTable, name: string, columns: string[], expected: { unique?: boolean; where?: string } = {}): void {
 	const config = getTableConfig(table);
 	const found = config.indexes.find((i) => i.config.name === name);
 	expect(found, `${config.name} index ${name}`).toBeDefined();
 	expect(found!.config.columns.map((c) => (c as { name: string }).name)).toEqual(columns);
+	expect(found!.config.unique, `${config.name} index ${name} unique`).toBe(expected.unique ?? false);
+	const where = found!.config.where;
+	if (expected.where === undefined) expect(where, `${config.name} index ${name} where`).toBeUndefined();
+	else expect(sqlText(where), `${config.name} index ${name} where`).toBe(expected.where);
 }
 
 function expectForeignKey(
@@ -198,8 +202,8 @@ describe('organizations', () => {
 	test('personal_for is unique and plan defaults to free', async () => {
 		const { organizations } = await loadSchema();
 		expectUnique(organizations, 'personal_for', 'organizations_personal_for_unique');
-		expectIndex(organizations, 'organizations_stripe_customer_id_unique', ['stripe_customer_id']);
-		expectIndex(organizations, 'organizations_stripe_subscription_id_unique', ['stripe_subscription_id']);
+		expectIndex(organizations, 'organizations_stripe_customer_id_unique', ['stripe_customer_id'], { unique: true, where: '"organizations"."stripe_customer_id" IS NOT NULL' });
+		expectIndex(organizations, 'organizations_stripe_subscription_id_unique', ['stripe_subscription_id'], { unique: true, where: '"organizations"."stripe_subscription_id" IS NOT NULL' });
 		expect(getTableConfig(organizations).columns.find((c) => c.name === 'plan')!.default).toBe('free');
 	});
 });
@@ -227,7 +231,7 @@ describe('stripeSubscriptionPeriods', () => {
 		});
 		expectForeignKey(stripeSubscriptionPeriods, 'org_id', organizations, 'id', 'cascade');
 		expectUnique(stripeSubscriptionPeriods, 'invoice_id', 'stripe_subscription_periods_invoice_id_unique');
-		expectIndex(stripeSubscriptionPeriods, 'stripe_subscription_periods_subscription_period_unique', ['subscription_id', 'period_key']);
+		expectIndex(stripeSubscriptionPeriods, 'stripe_subscription_periods_subscription_period_unique', ['subscription_id', 'period_key'], { unique: true });
 	});
 });
 
@@ -266,6 +270,8 @@ describe('stripeLifetimeEntitlements', () => {
 		expectUnique(stripeLifetimeEntitlements, 'checkout_session_id', 'stripe_lifetime_entitlements_checkout_session_id_unique');
 		expectIndex(stripeLifetimeEntitlements, 'stripe_lifetime_entitlements_payment_intent_idx', ['payment_intent_id']);
 		expectIndex(stripeLifetimeEntitlements, 'stripe_lifetime_entitlements_charge_idx', ['charge_id']);
+		expectIndex(stripeLifetimeEntitlements, 'stripe_lifetime_entitlements_active_org_idx', ['org_id'], { unique: true, where: `"stripe_lifetime_entitlements"."status" = 'active'` });
+		expectIndex(stripeLifetimeEntitlements, 'stripe_lifetime_entitlements_active_slot_idx', ['slot'], { unique: true, where: `"stripe_lifetime_entitlements"."status" = 'active'` });
 	});
 });
 

@@ -438,7 +438,9 @@ export const stripeEvents = sqliteTable('stripe_events', {
 	objectId: text('object_id').notNull(), // cs_... | pi_... | ch_... | du_...
 	objectType: text('object_type').notNull(),
 	receivedAt: text('received_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
-	processedAt: text('processed_at')
+	processedAt: text('processed_at'),
+	processingStartedAt: text('processing_started_at'),
+	processingAttempts: integer('processing_attempts').notNull().default(0)
 }, (table) => [
 	index('stripe_events_type_object_idx').on(table.eventType, table.objectId)
 ]);

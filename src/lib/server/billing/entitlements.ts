@@ -200,3 +200,35 @@ export async function releaseLifetimeForPayment(input: { paymentIntentId?: strin
 		return true;
 	});
 }
+
+
+/** Marks the paid subscription period behind a full refund unusable. */
+export async function refundSubscriptionPeriod(input: { paymentIntentId?: string; chargeId?: string }): Promise<boolean> {
+	const matches = [
+		input.paymentIntentId ? eq(stripeSubscriptionPeriods.paymentIntentId, input.paymentIntentId) : undefined,
+		input.chargeId ? eq(stripeSubscriptionPeriods.chargeId, input.chargeId) : undefined
+	].filter((condition): condition is NonNullable<typeof condition> => Boolean(condition));
+	if (matches.length === 0) throw new Error('payment intent or charge id is required');
+	const changed = await db
+		.update(stripeSubscriptionPeriods)
+		.set({ status: 'refunded' })
+		.where(and(eq(stripeSubscriptionPeriods.status, 'paid'), or(...matches)))
+		.returning({ id: stripeSubscriptionPeriods.id });
+	return changed.length > 0;
+}
+
+
+/** Marks a paid subscription period unusable after a card dispute. */
+export async function disputeSubscriptionPeriod(input: { paymentIntentId?: string; chargeId?: string }): Promise<boolean> {
+	const matches = [
+		input.paymentIntentId ? eq(stripeSubscriptionPeriods.paymentIntentId, input.paymentIntentId) : undefined,
+		input.chargeId ? eq(stripeSubscriptionPeriods.chargeId, input.chargeId) : undefined
+	].filter((condition): condition is NonNullable<typeof condition> => Boolean(condition));
+	if (matches.length === 0) throw new Error('payment intent or charge id is required');
+	const changed = await db
+		.update(stripeSubscriptionPeriods)
+		.set({ status: 'disputed' })
+		.where(and(eq(stripeSubscriptionPeriods.status, 'paid'), or(...matches)))
+		.returning({ id: stripeSubscriptionPeriods.id });
+	return changed.length > 0;
+}

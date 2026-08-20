@@ -43,6 +43,24 @@ const AUDIT_HANDLE_SWEEP_BATCH = 50; // same drain-across-runs bound as the cons
 /** Placeholder for an erased refresh token — never valid ciphertext, so decrypt fails loudly in cron (AGENTS.md). */
 export const WIPED_REFRESH_TOKEN = 'erased:account-deletion';
 
+
+type StripeRequestOptions = { timeout?: number; maxNetworkRetries?: number };
+
+/** Cancels every live subscription before Stripe customer deletion can proceed. */
+async function cancelCustomerSubscriptions(customerId: string, options?: StripeRequestOptions): Promise<void> {
+	const response = await getStripe().subscriptions.list({ customer: customerId, status: 'all', limit: 100 }, options);
+	if (!response || !Array.isArray(response.data) || typeof response.has_more !== 'boolean') {
+		throw new Error(`Stripe returned a malformed subscription list for ${customerId}`);
+	}
+	if (response.has_more) throw new Error(`Stripe customer ${customerId} has more than 100 subscriptions; manual cancellation is required`);
+	for (const subscription of response.data) {
+		if (!subscription || typeof subscription.id !== 'string' || typeof subscription.status !== 'string') {
+			throw new Error(`Stripe returned a malformed subscription for ${customerId}`);
+		}
+		if (subscription.status !== 'canceled') await getStripe().subscriptions.cancel(subscription.id, undefined, options);
+	}
+}
+
 /**
  * Deletes a set of channels and every row they own, child-to-parent:
  * moderation actions, comments, audit rows, rules, then the channel rows
@@ -366,6 +384,7 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 	// the obligation durable: the cron retry erases it once Stripe confirms.
 	for (const customerId of stripeCustomerIds) {
 		try {
+			await cancelCustomerSubscriptions(customerId);
 			await getStripe().customers.del(customerId);
 			await db.delete(stripeDeletionOutbox).where(eq(stripeDeletionOutbox.customerId, customerId));
 		} catch (error) {
@@ -424,10 +443,12 @@ export async function retryStripeCustomerDeletions(limit = 10, deadline?: number
 			// disable network retries (maxNetworkRetries: 0) to keep the whole
 			// operation within the remaining deadline; a timeout fails loudly
 			// (and records lastAttemptAt, so the row backs off for the next hour).
+			const requestOptions = remainingMs === undefined ? undefined : { timeout: remainingMs, maxNetworkRetries: 0 };
+			await cancelCustomerSubscriptions(row.customerId, requestOptions);
 			if (remainingMs === undefined) {
 				await getStripe().customers.del(row.customerId);
 			} else {
-				await getStripe().customers.del(row.customerId, undefined, { timeout: remainingMs, maxNetworkRetries: 0 });
+				await getStripe().customers.del(row.customerId, undefined, requestOptions);
 			}
 			await db.delete(stripeDeletionOutbox).where(eq(stripeDeletionOutbox.id, row.id));
 			deleted += 1;

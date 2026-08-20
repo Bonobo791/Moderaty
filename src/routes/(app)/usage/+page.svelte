@@ -85,6 +85,29 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	</p>
 {/if}
 
+{#if isOwner && (data.plans.hosted || data.plans.lifetime)}
+	<div class="card">
+		<h2 style="margin-top:0">Plans</h2>
+		<p class="muted">Current plan: <strong>{data.billing?.plan ?? 'free'}</strong>{#if data.billing?.periodEnd} · period ends {new Date(data.billing.periodEnd).toLocaleDateString()}{/if}</p>
+		<div class="plan-actions">
+			{#if data.plans.hosted}
+				<form method="POST" action="?/buyPlan" use:enhance={submitting}>
+					<input type="hidden" name="plan" value="hosted" />
+					<button class="btn secondary" type="submit" disabled={pending}>Start hosted · $5/month</button>
+				</form>
+				<p class="muted">100 included comments per billing period. Unused comments do not roll over; prepaid credits cover overage.</p>
+			{/if}
+			{#if data.plans.lifetime}
+				<form method="POST" action="?/buyPlan" use:enhance={submitting}>
+					<input type="hidden" name="plan" value="lifetime" />
+					<button class="btn secondary" type="submit" disabled={pending}>Buy lifetime · $49</button>
+				</form>
+				<p class="muted">Unlimited comments while the lifetime plan is available. Limited to 1,000 purchasers.</p>
+			{/if}
+		</div>
+	</div>
+{/if}
+
 {#if isOwner}
 	<div class="card">
 		<h2 style="margin-top:0">Buy credits</h2>
@@ -213,6 +236,15 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	.stat-value {
 		font-size: 28px;
 		font-weight: 600;
+	}
+	.plan-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 10px;
+		align-items: center;
+	}
+	.plan-actions form {
+		flex: 0 0 auto;
 	}
 	.bundle-grid {
 		display: flex;

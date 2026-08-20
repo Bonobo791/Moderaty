@@ -1,6 +1,6 @@
-# Stripe Checkout + Webhooks for Prepaid Comment Credits — Research Note
+# Stripe Checkout + Webhooks for Moderaty Billing — Research Note
 
-> Implementation-ready reference for Moderaty (SvelteKit 2 + Netlify Functions, one-time credit purchases). Verified against primary sources (docs.stripe.com API reference + guides, stripe-node SDK README, SvelteKit docs, Netlify docs); each claim cites its source URL.
+> Implementation-ready reference for Moderaty (SvelteKit 2 + Netlify Functions, hosted monthly, lifetime, and prepaid credit purchases). Verified against primary sources (docs.stripe.com API reference + guides, stripe-node SDK README, SvelteKit docs, Netlify docs); each claim cites its source URL.
 
 ## 1. Checkout Sessions (`mode=payment`) — server-side creation
 
@@ -32,10 +32,23 @@ Stripe's official fulfillment/"payment success" guide: https://docs.stripe.com/p
 - **`fulfill_checkout` must be idempotent** — "might be called multiple times, possibly concurrently, for the same Checkout Session." It must: accept a session ID; retrieve the session with `line_items` expanded; check `payment_status` ≠ `unpaid`; fulfill line items; **record fulfillment status for the session** (your DB is the dedupe anchor).
 - **Events**: handle `checkout.session.completed` **and** `checkout.session.async_payment_succeeded` → both call `fulfill_checkout(event.data.object.id)`; optionally `checkout.session.async_payment_failed` to notify the customer.
 - **Delayed-notification methods** (ACH, SEPA, Bacs, bank transfers, vouchers): "the funds will not be immediately available when Checkout is completed... generate a `checkout.session.async_payment_succeeded` event when the payment succeeds later. The status of the object remains `processing` until... succeeded or failed." Official definitions (https://docs.stripe.com/api/events/types): `checkout.session.completed` = "Occurs when a Checkout Session has been successfully completed"; `async_payment_succeeded` = "...using a delayed payment method finally succeeds"; `async_payment_failed` = "...fails"; `checkout.session.expired` = "Occurs when a Checkout Session is expired." Cards-only → `checkout.session.completed` alone suffices; subscribing to async events is cheap insurance.
-- **Duplicates**: "webhook endpoints can receive the same event more than once... record the event IDs you've processed and don't process already recorded events." In some cases **two Event objects** are generated — dedupe on `data.object.id` + `event.type` (https://docs.stripe.com/webhooks).
+- **Duplicates**: "webhook endpoints can receive the same event more than once... record the event IDs you've processed and don't process already recorded events." Moderaty dedupes on the exact `event.id`; distinct events for the same object must still run because a partial refund can be followed by a full refund (https://docs.stripe.com/webhooks).
 - **Retries**: production up to 3 days exponential backoff; sandbox 3 retries within a few hours; manual resend via Dashboard (≤15 days) or `stripe events resend <event_id> --webhook-endpoint=<id>` (≤30 days). Event ordering is **not guaranteed**. Retries arrive with fresh timestamps/signatures → dedupe on event `id`, never on request fingerprints (https://docs.stripe.com/webhooks).
 - **Timing**: with `success_url` + webhook endpoint, "Checkout waits up to 10 seconds for your server to respond to the webhook event delivery before redirecting your customer" — respond fast; also trigger fulfillment from the success page (extract `session_id`) for instant UX (https://docs.stripe.com/payments/checkout/fulfillment).
 - Digital-goods note: you *may* grant access speculatively on `processing`, but must revoke if `payment_intent.payment_failed` arrives later (https://docs.stripe.com/testing).
+
+
+## 3. Hosted and lifetime entitlement rules
+
+Moderaty keeps billing state in its database; Stripe is the payment evidence and event source.
+
+- Hosted checkout uses the configured recurring USD 5 Price. Checkout completion records the subscription and grants no allowance. `invoice.paid` creates one period row with 100 included comments. The period key and invoice ID are unique, and consumption updates the period counter atomically before purchased-credit overage.
+- Lifetime checkout uses the configured one-time USD 49 Price. A transaction claims the lowest free slot from the pre-created 1,000-slot pool. Replaying the same Checkout Session returns the existing entitlement without claiming another slot.
+- Subscription snapshots are applied only when `(event.created, event.id)` is newer than the stored snapshot. Active lifetime access takes precedence over hosted access; the organization plan field is only a derived cache.
+- Full refunds release lifetime slots and revoke unused subscription-period allowance. Disputes release lifetime slots and revoke the matching period. Partial refunds do not revoke credits.
+- `stripe_events` is an inbox keyed by the exact Stripe event ID. A short processing lease rejects concurrent deliveries for retry, records attempts, and marks the event complete only after the handler succeeds.
+- Account deletion stores a durable customer obligation, cancels every live subscription, then deletes the Stripe customer. Cron retries the complete sequence after transient Stripe failures.
+
 
 ## 3. Webhook security
 

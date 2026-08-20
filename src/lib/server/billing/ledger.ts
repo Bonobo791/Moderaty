@@ -73,20 +73,19 @@ const UNIQUE_TARGET: [typeof creditTransactions.orgId, typeof creditTransactions
  * @returns The remaining credit balance, treating a missing balance as zero
  */
 export async function getCredits(orgId: string): Promise<number> {
-	const now = new Date().toISOString();
-	const [row, period] = await Promise.all([
-		db
-			.select({ creditsRemaining: organizations.creditsRemaining })
-			.from(organizations)
-			.where(eq(organizations.id, orgId))
-			.get(),
-		db
-			.select({ remaining: sql<number>`COALESCE(SUM(${stripeSubscriptionPeriods.includedCredits} - ${stripeSubscriptionPeriods.consumedCredits}), 0)` })
-			.from(stripeSubscriptionPeriods)
-			.where(and(eq(stripeSubscriptionPeriods.orgId, orgId), eq(stripeSubscriptionPeriods.status, 'paid'), sql`${stripeSubscriptionPeriods.periodStart} <= ${now}`, gt(stripeSubscriptionPeriods.periodEnd, now)))
-			.get()
-	]);
+	const row = await db
+		.select({ creditsRemaining: organizations.creditsRemaining, plan: organizations.plan })
+		.from(organizations)
+		.where(eq(organizations.id, orgId))
+		.get();
 	if (!row) throw new Error(`org not found: ${orgId}`);
+	if (row.plan !== 'hosted') return row.creditsRemaining ?? 0;
+	const now = new Date().toISOString();
+	const period = await db
+		.select({ remaining: sql<number>`COALESCE(SUM(${stripeSubscriptionPeriods.includedCredits} - ${stripeSubscriptionPeriods.consumedCredits}), 0)` })
+		.from(stripeSubscriptionPeriods)
+		.where(and(eq(stripeSubscriptionPeriods.orgId, orgId), eq(stripeSubscriptionPeriods.status, 'paid'), sql`${stripeSubscriptionPeriods.periodStart} <= ${now}`, gt(stripeSubscriptionPeriods.periodEnd, now)))
+		.get();
 	return (row.creditsRemaining ?? 0) + (period?.remaining ?? 0);
 }
 
@@ -203,7 +202,7 @@ export async function consumeCredit(handle: LedgerHandle, orgId: string, comment
 		if (inserted.length === 0) return false; // already consumed — duplicate delivery
 
 		const now = new Date().toISOString();
-		const period = await tx
+		const period = org.plan === 'hosted' ? await (tx
 			.select({ id: stripeSubscriptionPeriods.id })
 			.from(stripeSubscriptionPeriods)
 			.where(and(
@@ -215,7 +214,7 @@ export async function consumeCredit(handle: LedgerHandle, orgId: string, comment
 			))
 			.orderBy(desc(stripeSubscriptionPeriods.periodStart), asc(stripeSubscriptionPeriods.id))
 			.limit(1)
-			.get();
+			.get()) : undefined;
 		if (period) {
 			const consumed = await tx
 				.update(stripeSubscriptionPeriods)

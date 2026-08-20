@@ -16,10 +16,10 @@
 import { and, eq } from 'drizzle-orm';
 import { expect, test, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ customersDel: vi.fn(), customersUpdate: vi.fn() }));
+const mocks = vi.hoisted(() => ({ customersDel: vi.fn(), customersUpdate: vi.fn(), subscriptionsList: vi.fn().mockResolvedValue({ data: [], has_more: false }), subscriptionsCancel: vi.fn().mockResolvedValue({}) }));
 
 vi.mock('$lib/server/stripe/client', () => ({
-	getStripe: () => ({ customers: { del: mocks.customersDel, update: mocks.customersUpdate } })
+	getStripe: () => ({ customers: { del: mocks.customersDel, update: mocks.customersUpdate }, subscriptions: { list: mocks.subscriptionsList, cancel: mocks.subscriptionsCancel } })
 }));
 
 import { DAY_MS, seedConsent, seedUser as seedBareUser, setupTestDb, testDb } from './testdb';
@@ -173,6 +173,18 @@ async function expectAllTablesEmpty() {
 		// The outbox row existed only for the retry path — a confirmed deletion
 		// clears it, so the cron never re-deletes a gone customer.
 		expect(await testDb().db.select().from(stripeDeletionOutbox).all()).toEqual([]);
+	});
+
+	test('account deletion cancels active subscriptions before deleting the Stripe customer', async () => {
+		const userId = await seedUser('gone');
+		await testDb().db.update(organizations).set({ stripeCustomerId: 'cus_gone' }).where(eq(organizations.id, 'org-gone'));
+		mocks.subscriptionsList.mockResolvedValue({ data: [{ id: 'sub_gone', status: 'active' }], has_more: false });
+		mocks.customersDel.mockResolvedValue({ id: 'cus_gone', deleted: true });
+		await deleteUserRecords(userId);
+		expect(mocks.subscriptionsList).toHaveBeenCalledWith({ customer: 'cus_gone', status: 'all', limit: 100 }, undefined);
+		expect(mocks.subscriptionsCancel).toHaveBeenCalledWith('sub_gone', undefined, undefined);
+		expect(mocks.customersDel).toHaveBeenCalledWith('cus_gone');
+		mocks.subscriptionsList.mockResolvedValue({ data: [], has_more: false });
 	});
 
 	test('a Stripe customer deletion failure is loud but never blocks the account deletion', async () => {

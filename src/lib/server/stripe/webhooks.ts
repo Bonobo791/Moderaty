@@ -18,16 +18,17 @@
 //     UNIQUE(event_type, object_id) for Stripe's two-Event-objects case).
 //  2. credit grants are anchored on UNIQUE(org_id, ref_type, ref_id) in the
 //     ledger, so even a dedupe miss cannot double-credit.
-// The stripe_events row and the ledger mutation land in ONE transaction; a
-// crash rolls both back and Stripe's retry re-runs the whole thing safely.
+// The inbox lease is claimed before side effects and marked complete only after
+// successful handling; failed handlers release the lease for Stripe's retry.
 
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull, lt, or } from 'drizzle-orm';
 import type Stripe from 'stripe';
 
 import { db } from '$lib/server/db';
-import { organizations, creditTransactions, stripeEvents } from '$lib/server/db/schema';
+import { organizations, creditTransactions, stripeEvents, stripeLifetimeEntitlements } from '$lib/server/db/schema';
 import { applyLedgerDelta, drainPendingReversals, findGrantForStripe, queuePendingReversal } from '$lib/server/billing/ledger';
 import { grantAutoTopupCredits, handleAutoTopupFailure } from '$lib/server/billing/autotopup';
+import { claimLifetimeSlot, grantSubscriptionPeriod, refundSubscriptionPeriod, disputeSubscriptionPeriod, releaseLifetimeForPayment, applySubscriptionSnapshot } from '$lib/server/billing/entitlements';
 import { bundleById, type CreditBundle } from '$lib/server/stripe/bundles';
 import { getStripe } from '$lib/server/stripe/client';
 
@@ -37,19 +38,57 @@ import { getStripe } from '$lib/server/stripe/client';
  * @param event - The Stripe event to record
  * @returns `true` if the event was newly recorded, `false` if it was already recorded
  */
-async function recordEvent(event: Stripe.Event): Promise<boolean> {
+const EVENT_LEASE_MS = 5 * 60 * 1000;
+
+function eventObjectIdentity(event: Stripe.Event): { objectId: string; objectType: string } {
 	const object = event.data.object;
-	const objectId = typeof object === 'object' && object !== null && 'id' in object ? String(object.id) : String(object);
-	const objectType = typeof object === 'object' && object !== null && 'object' in object ? String(object.object) : 'unknown';
-	// ON CONFLICT DO NOTHING without a target covers BOTH unique anchors: the
-	// event id (duplicate delivery) and the (event_type, object_id) pair
-	// (Stripe's two-Event-objects case).
+	if (!object || typeof object !== 'object') throw new Error(`Stripe event ${event.id} has no object id`);
+	const record = object as unknown as { id?: unknown; object?: unknown };
+	if (typeof record.id !== 'string' || record.id.length === 0) throw new Error(`Stripe event ${event.id} has no object id`);
+	return { objectId: record.id, objectType: typeof record.object === 'string' ? record.object : 'unknown' };
+}
+
+async function claimEvent(event: Stripe.Event): Promise<boolean> {
+	const now = new Date();
+	const nowIso = now.toISOString();
+	const identity = eventObjectIdentity(event);
 	const inserted = await db
 		.insert(stripeEvents)
-		.values({ eventId: event.id, eventType: event.type, objectId, objectType })
+		.values({
+			eventId: event.id,
+			eventType: event.type,
+			objectId: identity.objectId,
+			objectType: identity.objectType,
+			processingStartedAt: nowIso,
+			processingAttempts: 1
+		})
 		.onConflictDoNothing()
 		.returning({ id: stripeEvents.id });
-	return inserted.length === 1;
+	if (inserted.length === 1) return true;
+	const existing = await db.select({ processedAt: stripeEvents.processedAt, processingStartedAt: stripeEvents.processingStartedAt }).from(stripeEvents).where(eq(stripeEvents.eventId, event.id)).get();
+	if (!existing) throw new Error(`Stripe event ${event.id} disappeared while claiming`);
+	if (existing.processedAt) return false;
+	const startedAt = existing.processingStartedAt ? Date.parse(existing.processingStartedAt) : 0;
+	const stale = !Number.isFinite(startedAt) || now.getTime() - startedAt >= EVENT_LEASE_MS;
+	if (!stale) throw new Error(`Stripe event ${event.id} is already being processed`);
+	const attempts = (await db.select({ attempts: stripeEvents.processingAttempts }).from(stripeEvents).where(eq(stripeEvents.eventId, event.id)).get())?.attempts ?? 0;
+	const reclaimed = await db
+		.update(stripeEvents)
+		.set({ processingStartedAt: nowIso, processingAttempts: attempts + 1 })
+		.where(and(eq(stripeEvents.eventId, event.id), isNull(stripeEvents.processedAt), or(isNull(stripeEvents.processingStartedAt), lt(stripeEvents.processingStartedAt, new Date(now.getTime() - EVENT_LEASE_MS).toISOString()))))
+		.returning({ id: stripeEvents.id });
+	if (reclaimed.length === 1) return true;
+	const afterRace = await db.select({ processedAt: stripeEvents.processedAt }).from(stripeEvents).where(eq(stripeEvents.eventId, event.id)).get();
+	if (afterRace?.processedAt) return false;
+	throw new Error(`Stripe event ${event.id} is already being processed`);
+}
+
+async function markEventProcessed(eventId: string): Promise<void> {
+	await db.update(stripeEvents).set({ processedAt: new Date().toISOString(), processingStartedAt: null }).where(eq(stripeEvents.eventId, eventId));
+}
+
+async function releaseEventClaim(eventId: string): Promise<void> {
+	await db.update(stripeEvents).set({ processingStartedAt: null }).where(and(eq(stripeEvents.eventId, eventId), isNull(stripeEvents.processedAt)));
 }
 
 /**
@@ -88,9 +127,14 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 	});
 	if (session.payment_status !== 'paid') return 'rejected';
 	const orgId = session.metadata?.org_id;
+	const product = session.metadata?.product;
 	const bundleId = session.metadata?.bundle;
-	if (!orgId || !bundleId) {
+	if (!orgId) {
 		console.error(`stripe: checkout session ${sessionId} has no org_id/bundle metadata — cannot credit`);
+		return 'rejected';
+	}
+	if ((product && bundleId) || (!product && !bundleId)) {
+		console.error(`stripe: checkout session ${sessionId} has invalid product metadata — cannot fulfill`);
 		return 'rejected';
 	}
 	// Late-grant revalidation: the success page can fulfill an OLD paid
@@ -100,15 +144,49 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 	// CURRENT state is checked before the ledger mutation.
 	if (rejectLateGrant(session, sessionId)) return 'rejected';
 
+	const { paymentIntent, charge } = getPaymentIntentAndCharge(session);
+	if (product === 'hosted' || product === 'lifetime') {
+		if (product === 'hosted') {
+			const subscriptionId = typeof session.subscription === 'string' ? session.subscription : session.subscription?.id;
+			if (session.mode !== 'subscription' || !subscriptionId) {
+				console.error(`stripe: hosted checkout ${sessionId} is not a subscription session`);
+				return 'rejected';
+			}
+			const customerId = typeof session.customer === 'string' ? session.customer : session.customer?.id;
+			const existing = await db.select({ stripeSubscriptionId: organizations.stripeSubscriptionId, stripeCustomerId: organizations.stripeCustomerId }).from(organizations).where(eq(organizations.id, orgId)).get();
+			if (!existing) throw new Error(`org not found: ${orgId}`);
+			if (existing.stripeCustomerId && customerId && existing.stripeCustomerId !== customerId) {
+				console.error(`stripe: hosted checkout ${sessionId} customer does not belong to org ${orgId}`);
+				return 'rejected';
+			}
+			if (existing.stripeSubscriptionId === subscriptionId) return 'already';
+			await db.update(organizations).set({ stripeSubscriptionId: subscriptionId, stripeCustomerId: customerId ?? existing.stripeCustomerId }).where(eq(organizations.id, orgId));
+			return 'granted';
+		}
+		if (session.mode !== 'payment') {
+			console.error(`stripe: lifetime checkout ${sessionId} is not a one-time payment session`);
+			return 'rejected';
+		}
+		const existing = await db.select({ id: stripeLifetimeEntitlements.id }).from(stripeLifetimeEntitlements).where(eq(stripeLifetimeEntitlements.checkoutSessionId, sessionId)).get();
+		if (existing) return 'already';
+		const result = await claimLifetimeSlot({
+			orgId,
+			checkoutSessionId: sessionId,
+			paymentIntentId: paymentIntent?.id,
+			chargeId: typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : charge?.id
+		});
+		return result.status === 'active' && result.slot > 0 ? 'granted' : 'rejected';
+	}
+
 	// An unknown bundle id is an operator config bug, not a transient failure:
 	// acknowledge loudly and reject (the credits can never be granted — a
 	// retry storm would only produce three days of 500s).
+	if (!bundleId) return 'rejected';
 	const bundle = loadBundle(bundleId, sessionId);
 	if (!bundle) return 'rejected';
 
 	// Narrow the expanded object once (chargeId prefers the expanded
 	// object's id — it is the same id either way).
-	const { paymentIntent, charge } = getPaymentIntentAndCharge(session);
 	const chargeId = typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : charge?.id;
 	const applied = await applyLedgerDelta(db, {
 		orgId,
@@ -284,6 +362,11 @@ export async function reverseCharge(chargeId: string, reason: 'refund' | 'disput
 			return false;
 		}
 	}
+	if (reason === 'refund' || reason === 'dispute') {
+		const lifetimeReleased = await releaseLifetimeForPayment({ paymentIntentId, chargeId });
+		const periodRevoked = reason === 'refund' ? await refundSubscriptionPeriod({ paymentIntentId, chargeId }) : await disputeSubscriptionPeriod({ paymentIntentId, chargeId });
+		if (lifetimeReleased || periodRevoked) return true;
+	}
 	const match = await findGrantForStripe(db, { chargeId, paymentIntentId });
 	if (!match) {
 		// No grant YET — Stripe does not guarantee delivery order, so the
@@ -379,6 +462,118 @@ export async function restoreWonDispute(disputeId: string): Promise<boolean> {
 	});
 }
 
+
+type StripeRecord = Record<string, unknown>;
+
+function asRecord(value: unknown): StripeRecord {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Stripe returned a malformed object');
+	return value as StripeRecord;
+}
+
+function stripeId(value: unknown): string | undefined {
+	if (typeof value === 'string' && value.length > 0) return value;
+	if (value && typeof value === 'object' && !Array.isArray(value) && typeof (value as { id?: unknown }).id === 'string') return (value as { id: string }).id;
+	return undefined;
+}
+
+function isoSeconds(value: unknown, field: string): string {
+	if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) throw new Error(`Stripe invoice field ${field} is invalid`);
+	return new Date(value * 1000).toISOString();
+}
+
+async function findOrgForStripe(subscriptionId?: string, customerId?: string) {
+	if (subscriptionId) {
+		const bySubscription = await db.select().from(organizations).where(eq(organizations.stripeSubscriptionId, subscriptionId)).get();
+		if (bySubscription) return bySubscription;
+	}
+	if (customerId) return db.select().from(organizations).where(eq(organizations.stripeCustomerId, customerId)).get();
+	return undefined;
+}
+
+async function handleInvoicePaid(event: Stripe.Event): Promise<void> {
+	const invoice = asRecord(event.data.object);
+	const invoiceId = stripeId(invoice.id);
+	const subscriptionId = stripeId(invoice.subscription);
+	const customerId = stripeId(invoice.customer);
+	if (!invoiceId || !subscriptionId) throw new Error(`invoice.paid ${event.id} is missing invoice or subscription id`);
+	const org = await findOrgForStripe(subscriptionId, customerId);
+	if (!org) {
+		console.error(`stripe: invoice.paid ${invoiceId} has no mapped organization`);
+		return;
+	}
+	const lines = asRecord(invoice.lines);
+	const data = lines.data;
+	if (!Array.isArray(data) || data.length === 0) throw new Error(`invoice.paid ${invoiceId} has no line items`);
+	const line = asRecord(data[0]);
+	const period = asRecord(line.period);
+	const periodStart = isoSeconds(period.start, 'lines.data[0].period.start');
+	const periodEnd = isoSeconds(period.end, 'lines.data[0].period.end');
+	await grantSubscriptionPeriod({
+		orgId: org.id,
+		subscriptionId,
+		invoiceId,
+		paymentIntentId: stripeId(invoice.payment_intent),
+		chargeId: stripeId(invoice.charge),
+		periodKey: `${periodStart}/${periodEnd}`,
+		periodStart,
+		periodEnd,
+		eventCreated: event.created,
+		eventId: event.id
+	});
+}
+
+async function handleInvoicePaymentFailed(event: Stripe.Event): Promise<void> {
+	const invoice = asRecord(event.data.object);
+	const subscriptionId = stripeId(invoice.subscription);
+	const customerId = stripeId(invoice.customer);
+	if (!subscriptionId && !customerId) throw new Error(`invoice.payment_failed ${event.id} is missing subscription and customer`);
+	const org = await findOrgForStripe(subscriptionId, customerId);
+	if (!org) {
+		console.error(`stripe: invoice.payment_failed ${stripeId(invoice.id) ?? event.id} has no mapped organization`);
+		return;
+	}
+	if (!org.stripeSubscriptionId || !org.stripeSubscriptionPeriodStart || !org.stripeSubscriptionPeriodEnd) {
+		throw new Error(`invoice.payment_failed ${event.id} has no stored subscription period for ${org.id}`);
+	}
+	await applySubscriptionSnapshot({
+		orgId: org.id,
+		subscriptionId: org.stripeSubscriptionId,
+		status: 'past_due',
+		periodStart: org.stripeSubscriptionPeriodStart,
+		periodEnd: org.stripeSubscriptionPeriodEnd,
+		cancelAtPeriodEnd: org.stripeSubscriptionCancelAtPeriodEnd === 1,
+		eventCreated: event.created,
+		eventId: event.id
+	});
+}
+
+async function handleSubscriptionEvent(event: Stripe.Event): Promise<void> {
+	const subscription = asRecord(event.data.object);
+	const subscriptionId = stripeId(subscription.id);
+	const customerId = stripeId(subscription.customer);
+	const status = typeof subscription.status === 'string' ? subscription.status : undefined;
+	if (!subscriptionId || !status) throw new Error(`Stripe ${event.type} ${event.id} is missing subscription id or status`);
+	const org = await findOrgForStripe(subscriptionId, customerId);
+	if (!org) {
+		console.error(`stripe: ${event.type} ${subscriptionId} has no mapped organization`);
+		return;
+	}
+	const periodStart = subscription.current_period_start === undefined ? org.stripeSubscriptionPeriodStart : isoSeconds(subscription.current_period_start, 'current_period_start');
+	const periodEnd = subscription.current_period_end === undefined ? org.stripeSubscriptionPeriodEnd : isoSeconds(subscription.current_period_end, 'current_period_end');
+	if (!periodStart || !periodEnd) throw new Error(`Stripe ${event.type} ${event.id} has no subscription period`);
+	if (typeof subscription.cancel_at_period_end !== 'boolean') throw new Error(`Stripe ${event.type} ${event.id} has invalid cancel_at_period_end`);
+	await applySubscriptionSnapshot({
+		orgId: org.id,
+		subscriptionId,
+		status,
+		periodStart,
+		periodEnd,
+		cancelAtPeriodEnd: subscription.cancel_at_period_end,
+		eventCreated: event.created,
+		eventId: event.id
+	});
+}
+
 /**
  * Dispatches a Stripe event to the appropriate handler. The receipt gate
  * short-circuits duplicate deliveries BEFORE the handler; the receipt is
@@ -389,12 +584,8 @@ export async function restoreWonDispute(disputeId: string): Promise<boolean> {
  * @returns `true` if the event type is supported, `false` otherwise
  */
 export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
-	// Receipt gate BEFORE dispatch (coderabbit): an event already processed is
-	// a duplicate delivery (same event id) or Stripe's two-Event-objects case
-	// (same type+object, new id) — skip the handler entirely instead of
-	// re-running Stripe calls. The receipt is committed only AFTER successful
-	// handling: a thrown handler leaves no receipt, so the route's 500 makes
-	// Stripe redeliver and the handler re-runs (all handlers are idempotent).
+	// Claim a durable inbox lease before dispatch. Completed event IDs are
+	// skipped; a competing live worker fails loudly so Stripe retries it.
 	// Dedupe by EXACT EVENT ID only (codex review): Stripe re-emits events
 	// for the same object — a charge.refunded first arrives partial, then
 	// full — and each distinct delivery must reach its handler. The
@@ -403,14 +594,10 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
 	// partial→full refund progression unreversed. Repeated processing is made
 	// idempotent by the ledger's own UNIQUE anchors, so re-running a handler
 	// can never double-apply.
-	const alreadyRecorded = await db
-		.select({ id: stripeEvents.id })
-		.from(stripeEvents)
-		.where(eq(stripeEvents.eventId, event.id))
-		.get();
-	if (alreadyRecorded) return true;
+	if (!(await claimEvent(event))) return true;
 	let handled: boolean;
-	switch (event.type) {
+	try {
+		switch (event.type) {
 		case 'checkout.session.completed':
 		case 'checkout.session.async_payment_succeeded':
 			await fulfillCheckout(event.data.object.id);
@@ -420,6 +607,20 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
 			// A delayed-notification method finally failed: reverse whatever the
 			// session may have granted (idempotent — see reverseCharge).
 			await reverseSessionGrant(event.data.object.id);
+			handled = true;
+			break;
+		case 'invoice.paid':
+			await handleInvoicePaid(event);
+			handled = true;
+			break;
+		case 'invoice.payment_failed':
+			await handleInvoicePaymentFailed(event);
+			handled = true;
+			break;
+		case 'customer.subscription.created':
+		case 'customer.subscription.updated':
+		case 'customer.subscription.deleted':
+			await handleSubscriptionEvent(event);
 			handled = true;
 			break;
 		case 'payment_intent.succeeded':
@@ -454,15 +655,16 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
 			console.error(`stripe: dispute lifecycle event ${event.type} for ${event.data.object.id} — funds_* events need manual review`);
 			handled = true;
 			break;
-		default:
-			console.error(`stripe: ignoring unhandled event type ${event.type}`);
-			handled = false;
+			default:
+				console.error(`stripe: ignoring unhandled event type ${event.type}`);
+				handled = false;
+		}
+		await markEventProcessed(event.id);
+		return handled;
+	} catch (error) {
+		await releaseEventClaim(event.id);
+		throw error;
 	}
-	// Dedupe anchor for FUTURE deliveries. Recorded even for ignored types so
-	// the receipt is the audit trail; ON CONFLICT DO NOTHING covers both the
-	// event-id and (type, object) uniqueness anchors.
-	await recordEvent(event);
-	return handled;
 }
 
 /**

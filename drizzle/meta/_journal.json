@@ -218,6 +218,13 @@
       "when": 1787253167207,
       "tag": "0030_volatile_apocalypse",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "6",
+      "when": 1787256708911,
+      "tag": "0031_stripe_event_leases",
+      "breakpoints": true
     }
   ]
 }

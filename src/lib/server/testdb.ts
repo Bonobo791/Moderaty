@@ -310,7 +310,9 @@ export async function createTestDb(): Promise<TestDb> {
 			object_id TEXT NOT NULL,
 			object_type TEXT NOT NULL,
 			received_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-			processed_at TEXT
+			processed_at TEXT,
+			processing_started_at TEXT,
+			processing_attempts INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE INDEX stripe_events_type_object_idx ON stripe_events (event_type, object_id)`,
 		`CREATE UNIQUE INDEX organizations_personal_for_unique ON organizations (personal_for)`,

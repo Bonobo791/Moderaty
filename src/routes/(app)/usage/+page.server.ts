@@ -19,10 +19,11 @@
 // consumes — so a top-up (manual or auto) always moves the counter.
 
 import { error, fail, isHttpError, isRedirect, redirect } from '@sveltejs/kit';
+import { env } from '$env/dynamic/private';
 import { eq } from 'drizzle-orm';
 
 import { AUTO_TOPUP_DEFAULT_THRESHOLD } from '$lib/server/billing/autotopup';
-import { createCreditCheckout } from '$lib/server/billing/checkout';
+import { createCreditCheckout, createPlanCheckout } from '$lib/server/billing/checkout';
 import { listCreditTransactions, usageSummary } from '$lib/server/billing/ledger';
 import { db } from '$lib/server/db';
 import { organizations } from '$lib/server/db/schema';
@@ -42,7 +43,8 @@ export const load: PageServerLoad = async ({ locals }) => {
 			history: [],
 			bundles: [],
 			autoTopup: null,
-			autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT
+			autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
+			plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) }
 		};
 	}
 	const user = requireUser(locals);
@@ -59,7 +61,10 @@ export const load: PageServerLoad = async ({ locals }) => {
 				autoTopupFailures: organizations.autoTopupFailures,
 				autoTopupLastAttemptAt: organizations.autoTopupLastAttemptAt,
 				stripeDefaultPmId: organizations.stripeDefaultPmId,
-				creditsRemaining: organizations.creditsRemaining
+				creditsRemaining: organizations.creditsRemaining,
+				plan: organizations.plan,
+				stripeSubscriptionStatus: organizations.stripeSubscriptionStatus,
+				stripeSubscriptionPeriodEnd: organizations.stripeSubscriptionPeriodEnd
 			})
 			.from(organizations)
 			.where(eq(organizations.id, user.orgId))
@@ -92,7 +97,13 @@ export const load: PageServerLoad = async ({ locals }) => {
 				failures: org.autoTopupFailures ?? 0,
 				lastAttemptAt: org.autoTopupLastAttemptAt,
 				hasCard: Boolean(org.stripeDefaultPmId)
-			}
+			},
+			billing: {
+				plan: org.plan,
+				subscriptionStatus: org.stripeSubscriptionStatus,
+				periodEnd: org.stripeSubscriptionPeriodEnd
+			},
+			plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) }
 		};
 	} catch (error) {
 		// Deliberate HttpErrors (the missing-org 500 above) must pass through
@@ -109,7 +120,8 @@ export const load: PageServerLoad = async ({ locals }) => {
 			history: [],
 			bundles: [],
 			autoTopup: null,
-			autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT
+			autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
+			plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) }
 		};
 	}
 };
@@ -141,6 +153,22 @@ export const actions: Actions = {
 			return fail(400, {
 				error: isStripeError ? 'Could not start checkout — please try again.' : `Could not start checkout: ${message}`
 			});
+		}
+	},
+	/** Owner-only: creates a hosted subscription or lifetime Checkout. */
+	buyPlan: async ({ request, locals }) => {
+		const user = requireUser(locals);
+		const plan = String((await request.formData()).get('plan') ?? '');
+		if (plan !== 'hosted' && plan !== 'lifetime') return fail(400, { error: 'Unknown billing plan.' });
+		try {
+			const url = await createPlanCheckout(user.orgId, user, plan);
+			throw redirect(303, url);
+		} catch (error) {
+			if (isRedirect(error) || isHttpError(error)) throw error;
+			const message = error instanceof Error ? error.message : String(error);
+			console.error(`usage: plan checkout failed for org ${user.orgId}: ${message}`);
+			const isStripeError = error !== null && typeof error === 'object' && typeof (error as { type?: unknown }).type === 'string';
+			return fail(400, { error: isStripeError ? 'Could not start checkout — please try again.' : `Could not start checkout: ${message}` });
 		}
 	},
 	/**

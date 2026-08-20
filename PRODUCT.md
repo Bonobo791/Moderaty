@@ -70,7 +70,7 @@ Category line: "Comment protection for YouTube creators."
 - Stack: SvelteKit 2 + Svelte 5 + TypeScript, adapter-netlify, Drizzle ORM over
   libSQL (`file:local.db` dev, Turso prod). Approved dependencies only; no auth
   libraries, no googleapis/OpenAI SDKs, no CSS frameworks, no zod.
-- Non-goals: Stripe/billing, multi-platform moderation, live chat, real-time
+- Non-goals: multi-platform moderation, live chat, real-time
   scanning, LLM-as-judge for borderline comments.
 - Open decision: none outstanding from init.
 

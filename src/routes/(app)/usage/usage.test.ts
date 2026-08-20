@@ -389,6 +389,19 @@ describe('usage plan checkout action', () => {
 		await seedOrg();
 		await expect(buyPlan('hosted')).rejects.toMatchObject({ status: 303, location: 'https://checkout.stripe.com/pay/test_123' });
 		expect(mocks.pricesRetrieve).toHaveBeenCalledWith('price_hosted');
+		expect(mocks.sessionsCreate).toHaveBeenCalledWith(expect.objectContaining({
+			mode: 'subscription',
+			line_items: [{ price: 'price_hosted', quantity: 1 }],
+			metadata: { org_id: 'org-1', product: 'hosted' },
+			subscription_data: { metadata: { org_id: 'org-1', product: 'hosted' } }
+		}), expect.objectContaining({ idempotencyKey: expect.stringMatching(/^checkout:/) }));
+	});
+
+	test('non-owners cannot start a hosted checkout', async () => {
+		await seedOrg();
+		const member = { ...OWNER, orgRole: 'member' as const };
+		await expect(buyPlan('hosted', member)).rejects.toMatchObject({ status: 403 });
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
 	});
 
 	test('unknown plan is rejected before Stripe', async () => {

@@ -115,6 +115,18 @@ describe('reconcile-migrations', () => {
 		expect(await appliedHashes(db)).toEqual(unrelated); // evidence untouched
 	});
 
+	test('rolls back earlier updates when a later update fails', async () => {
+		const db = tempDb();
+		const drifted = realHashes.map((h, i) => (i < 2 ? createHash('sha256').update(`old-content-${i}`).digest('hex') : h));
+		await seededDb(db, drifted);
+		const client = createClient({ url: `file:${db}` });
+		await client.execute(`CREATE TRIGGER fail_reconcile_second BEFORE UPDATE OF hash ON __drizzle_migrations WHEN OLD.rowid = 2 BEGIN SELECT RAISE(ABORT, 'forced reconcile failure'); END`);
+		client.close();
+
+		expectRefusal(db, { expectedHashes: drifted, pattern: /rolled back/ });
+		expect(await appliedHashes(db)).toEqual(drifted);
+	});
+
 	test('refuses when a row does not match its attested predecessor — nothing is changed', async () => {
 		const db = tempDb();
 		// One genuine drift (row 0) plus one unrelated hash (row 1): the

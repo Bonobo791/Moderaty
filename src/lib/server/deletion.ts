@@ -29,6 +29,7 @@
 // as the record.
 
 import { and, asc, eq, inArray, isNotNull, isNull, lt, ne, or } from 'drizzle-orm';
+import type Stripe from 'stripe';
 
 import { db } from '$lib/server/db';
 import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, stripeLifetimeSlots, users } from '$lib/server/db/schema';
@@ -44,8 +45,7 @@ const AUDIT_HANDLE_SWEEP_BATCH = 50; // same drain-across-runs bound as the cons
 export const WIPED_REFRESH_TOKEN = 'erased:account-deletion';
 
 
-type StripeRequestOptions = { timeout?: number; maxNetworkRetries?: number };
-type StripeRequestOptionsFactory = () => StripeRequestOptions | undefined;
+type StripeRequestOptionsFactory = () => Stripe.RequestOptions | undefined;
 
 /** Cancels every live subscription before Stripe customer deletion can proceed. */
 async function cancelCustomerSubscriptions(customerId: string, options?: StripeRequestOptionsFactory): Promise<void> {

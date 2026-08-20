@@ -518,10 +518,16 @@ export async function restoreWonDispute(disputeId: string): Promise<boolean> {
 
 type StripeRecord = Record<string, unknown>;
 const MALFORMED_STRIPE_OBJECT_ERROR = 'Stripe returned a malformed object';
+const INVOICE_LINE_REQUIRED_ERROR = 'Stripe invoice has no matching non-proration subscription line';
+const INVOICE_PAYMENT_REQUIRED_ERROR = 'Stripe invoice has no usable payment reference';
 
 function asRecord(value: unknown): StripeRecord {
 	if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(MALFORMED_STRIPE_OBJECT_ERROR);
 	return value as StripeRecord;
+}
+
+function optionalRecord(value: unknown): StripeRecord | undefined {
+	return value && typeof value === 'object' && !Array.isArray(value) ? (value as StripeRecord) : undefined;
 }
 
 function stripeId(value: unknown): string | undefined {
@@ -561,12 +567,47 @@ function isoSeconds(value: unknown, field: string): string {
 	return new Date(value * 1000).toISOString();
 }
 
-function invoicePeriod(invoice: StripeRecord): { periodStart: string; periodEnd: string } {
+function invoiceLineSubscriptionId(line: StripeRecord): string | undefined {
+	const direct = stripeId(line.subscription);
+	if (direct) return direct;
+	const parent = optionalRecord(line.parent);
+	if (parent?.type !== 'subscription_item_details') return undefined;
+	return stripeId(optionalRecord(parent.subscription_item_details)?.subscription);
+}
+
+function invoiceLineIsProration(line: StripeRecord): boolean {
+	if (line.proration === true) return true;
+	const parent = optionalRecord(line.parent);
+	return optionalRecord(parent?.subscription_item_details)?.proration === true;
+}
+
+function invoicePeriod(invoice: StripeRecord, subscriptionId: string): { periodStart: string; periodEnd: string } {
 	const lines = asRecord(invoice.lines);
 	const data = lines.data;
 	if (!Array.isArray(data) || data.length === 0) throw new Error('Stripe invoice has no line items');
-	const period = asRecord(asRecord(data[0]).period);
-	return { periodStart: isoSeconds(period.start, 'lines.data[0].period.start'), periodEnd: isoSeconds(period.end, 'lines.data[0].period.end') };
+	const line = data
+		.map(optionalRecord)
+		.find((item) => item && !invoiceLineIsProration(item) && invoiceLineSubscriptionId(item) === subscriptionId);
+	if (!line) throw new Error(INVOICE_LINE_REQUIRED_ERROR);
+	const period = asRecord(line.period);
+	return { periodStart: isoSeconds(period.start, 'subscription line period.start'), periodEnd: isoSeconds(period.end, 'subscription line period.end') };
+}
+
+function invoicePaymentReferences(invoice: StripeRecord): { paymentIntentId?: string; chargeId?: string } {
+	const payments = optionalRecord(invoice.payments);
+	const data = payments?.data;
+	if (payments && !Array.isArray(data)) throw new Error('Stripe invoice payments is malformed');
+	if (Array.isArray(data)) {
+		for (const item of data) {
+			const payment = optionalRecord(optionalRecord(item)?.payment);
+			const paymentIntentId = stripeId(payment?.payment_intent);
+			const chargeId = stripeId(payment?.charge);
+			if (paymentIntentId || chargeId) return { paymentIntentId, chargeId };
+		}
+	}
+	const legacy = { paymentIntentId: stripeId(invoice.payment_intent), chargeId: stripeId(invoice.charge) };
+	if (legacy.paymentIntentId || legacy.chargeId) return legacy;
+	throw new Error(INVOICE_PAYMENT_REQUIRED_ERROR);
 }
 
 function storedSubscriptionPeriod(org: Awaited<ReturnType<typeof findOrgForStripe>>, eventId: string): { subscriptionId: string; periodStart: string; periodEnd: string } {
@@ -601,8 +642,9 @@ async function handleInvoicePaid(event: Stripe.Event): Promise<void> {
 		return;
 	}
 	if (isSupersededSubscription(org, subscriptionId, 'invoice.paid')) return;
-	const { periodStart, periodEnd } = invoicePeriod(invoice);
-	await grantSubscriptionPeriod({ orgId: org.id, subscriptionId, invoiceId, paymentIntentId: stripeId(invoice.payment_intent), chargeId: stripeId(invoice.charge), periodKey: `${periodStart}/${periodEnd}`, periodStart, periodEnd, eventCreated: event.created, eventId: event.id });
+	const { periodStart, periodEnd } = invoicePeriod(invoice, subscriptionId);
+	const payment = invoicePaymentReferences(invoice);
+	await grantSubscriptionPeriod({ orgId: org.id, subscriptionId, invoiceId, ...payment, periodKey: `${periodStart}/${periodEnd}`, periodStart, periodEnd, eventCreated: event.created, eventId: event.id });
 }
 
 async function handleInvoicePaymentFailed(event: Stripe.Event): Promise<void> {
@@ -616,7 +658,11 @@ async function handleInvoicePaymentFailed(event: Stripe.Event): Promise<void> {
 		return;
 	}
 	if (subscriptionId && isSupersededSubscription(org, subscriptionId, 'invoice.payment_failed')) return;
-	const period = storedSubscriptionPeriod(org, event.id);
+	const period = org?.stripeSubscriptionPeriodStart && org.stripeSubscriptionPeriodEnd
+		? storedSubscriptionPeriod(org, event.id)
+		: subscriptionId
+			? { subscriptionId, ...invoicePeriod(invoice, subscriptionId) }
+			: (() => { throw new Error(`Stripe invoice.payment_failed ${event.id} has no subscription period`); })();
 	await applySubscriptionSnapshot({ orgId: org.id, status: 'past_due', ...period, cancelAtPeriodEnd: org.stripeSubscriptionCancelAtPeriodEnd === 1, eventCreated: event.created, eventId: event.id });
 }
 

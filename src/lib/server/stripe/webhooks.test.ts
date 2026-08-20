@@ -139,14 +139,54 @@ describe('subscription lifecycle webhooks', () => {
 
 	test('invoice.paid accepts the current parent subscription payload', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
-		const invoice = { parent: { type: 'subscription_details', subscription_details: { subscription: 'sub_1' } }, customer: 'cus_1', payment_intent: 'pi_1', lines: { data: [{ period: { start: 1_800_000_000, end: 1_802_678_400 } }] } };
+		const invoice = { parent: { type: 'subscription_details', subscription_details: { subscription: 'sub_1' } }, customer: 'cus_1', payment_intent: 'pi_1', lines: { data: [{ subscription: 'sub_1', period: { start: 1_800_000_000, end: 1_802_678_400 } }] } };
 		expect(await handleStripeEvent(event('invoice.paid', 'in_current', invoice) as never)).toBe(true);
 		expect(await testDb().db.select().from(stripeSubscriptionPeriods).where(eq(stripeSubscriptionPeriods.invoiceId, 'in_current'))).toHaveLength(1);
 	});
 
+	test('invoice.paid selects the matching non-proration subscription line and current payment reference', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
+		const invoice = {
+			subscription: 'sub_1',
+			customer: 'cus_1',
+			payments: { data: [{ payment: { type: 'payment_intent', payment_intent: 'pi_current' } }] },
+			lines: {
+				data: [
+					{ subscription: 'sub_1', proration: true, period: { start: 1_700_000_000, end: 1_700_086_400 } },
+					{ subscription: 'sub_1', proration: false, period: { start: 1_800_000_000, end: 1_802_678_400 } }
+				]
+			}
+		};
+		expect(await handleStripeEvent(event('invoice.paid', 'in_current_payment', invoice) as never)).toBe(true);
+		const period = await testDb().db.select().from(stripeSubscriptionPeriods).where(eq(stripeSubscriptionPeriods.invoiceId, 'in_current_payment')).get();
+		expect(period).toMatchObject({ paymentIntentId: 'pi_current', periodStart: new Date(1_800_000_000 * 1000).toISOString(), periodEnd: new Date(1_802_678_400 * 1000).toISOString() });
+	});
+
+	test('invoice.paid rejects when no line belongs to the invoice subscription', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
+		const invoice = {
+			subscription: 'sub_1',
+			customer: 'cus_1',
+			lines: { data: [{ subscription: 'sub_other', period: { start: 1_800_000_000, end: 1_802_678_400 } }] }
+		};
+		await expect(handleStripeEvent(event('invoice.paid', 'in_missing_line', invoice) as never)).rejects.toThrow('no matching non-proration subscription line');
+	});
+
+	test('invoice.payment_failed falls back to the invoice period before a period is stored', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
+		const invoice = {
+			subscription: 'sub_1',
+			customer: 'cus_1',
+			lines: { data: [{ subscription: 'sub_1', proration: false, period: { start: 1_800_000_000, end: 1_802_678_400 } }] }
+		};
+		expect(await handleStripeEvent(event('invoice.payment_failed', 'in_payment_failed', invoice) as never)).toBe(true);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org).toMatchObject({ stripeSubscriptionStatus: 'past_due', stripeSubscriptionPeriodStart: new Date(1_800_000_000 * 1000).toISOString(), stripeSubscriptionPeriodEnd: new Date(1_802_678_400 * 1000).toISOString() });
+	});
+
 	test('ignores an invoice for a superseded subscription', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_current' });
-		const invoice = { id: 'in_stale', subscription: 'sub_old', customer: 'cus_1', payment_intent: 'pi_1', lines: { data: [{ period: { start: 1_800_000_000, end: 1_802_678_400 } }] } };
+		const invoice = { id: 'in_stale', subscription: 'sub_old', customer: 'cus_1', payment_intent: 'pi_1', lines: { data: [{ subscription: 'sub_1', period: { start: 1_800_000_000, end: 1_802_678_400 } }] } };
 		expect(await handleStripeEvent(event('invoice.paid', 'evt_stale_invoice', invoice) as never)).toBe(true);
 		expect(await testDb().db.select().from(stripeSubscriptionPeriods)).toHaveLength(0);
 	});
@@ -160,7 +200,7 @@ describe('subscription lifecycle webhooks', () => {
 	});
 	test('invoice.paid creates one period allowance and replay does not create another', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
-		const invoice = { subscription: 'sub_1', customer: 'cus_1', payment_intent: 'pi_1', lines: { data: [{ period: { start: 1_800_000_000, end: 1_802_678_400 } }] } };
+		const invoice = { subscription: 'sub_1', customer: 'cus_1', payment_intent: 'pi_1', lines: { data: [{ subscription: 'sub_1', period: { start: 1_800_000_000, end: 1_802_678_400 } }] } };
 		const paid = event('invoice.paid', 'in_1', invoice);
 		expect(await handleStripeEvent(paid as never)).toBe(true);
 		expect(await handleStripeEvent(paid as never)).toBe(true);
@@ -179,7 +219,7 @@ describe('subscription lifecycle webhooks', () => {
 	});
 	test('a won dispute restores a subscription period allowance', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
-		await handleStripeEvent(event('invoice.paid', 'in_1', { id: 'in_1', subscription: 'sub_1', payment_intent: 'pi_1', charge: 'ch_1', period_start: 1798848000, period_end: 1801526400, lines: { data: [{ period: { start: 1798848000, end: 1801526400 } }] } }) as never);
+		await handleStripeEvent(event('invoice.paid', 'in_1', { id: 'in_1', subscription: 'sub_1', payment_intent: 'pi_1', charge: 'ch_1', period_start: 1798848000, period_end: 1801526400, lines: { data: [{ subscription: 'sub_1', period: { start: 1798848000, end: 1801526400 } }] } }) as never);
 		mocks.disputesRetrieve.mockResolvedValueOnce({ id: 'disp_sub', charge: 'ch_1', status: 'lost' }).mockResolvedValueOnce({ id: 'disp_sub', charge: 'ch_1', status: 'won' });
 		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1', amount: 500, amount_refunded: 0 });
 		await reverseDispute('disp_sub');

@@ -20,9 +20,9 @@
 // idempotent (a comment is consumed once, a checkout session granted once —
 // webhooks and retries can never double-apply).
 
-import { and, eq, gte, inArray, lt, ne, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, lt, ne, or, sql } from 'drizzle-orm';
 import { db } from '$lib/server/db';
-import { creditTransactions, organizations, stripePendingReversals } from '$lib/server/db/schema';
+import { creditTransactions, organizations, stripePendingReversals, stripeSubscriptionPeriods } from '$lib/server/db/schema';
 
 export type CreditReason = 'consume' | 'purchase' | 'auto_topup' | 'refund' | 'dispute' | 'adjust';
 // 'refund' and 'dispute' are reversal refTypes anchored on the charge id —
@@ -73,13 +73,21 @@ const UNIQUE_TARGET: [typeof creditTransactions.orgId, typeof creditTransactions
  * @returns The remaining credit balance, treating a missing balance as zero
  */
 export async function getCredits(orgId: string): Promise<number> {
-	const row = await db
-		.select({ creditsRemaining: organizations.creditsRemaining })
-		.from(organizations)
-		.where(eq(organizations.id, orgId))
-		.get();
+	const now = new Date().toISOString();
+	const [row, period] = await Promise.all([
+		db
+			.select({ creditsRemaining: organizations.creditsRemaining })
+			.from(organizations)
+			.where(eq(organizations.id, orgId))
+			.get(),
+		db
+			.select({ remaining: sql<number>`COALESCE(SUM(${stripeSubscriptionPeriods.includedCredits} - ${stripeSubscriptionPeriods.consumedCredits}), 0)` })
+			.from(stripeSubscriptionPeriods)
+			.where(and(eq(stripeSubscriptionPeriods.orgId, orgId), eq(stripeSubscriptionPeriods.status, 'paid'), sql`${stripeSubscriptionPeriods.periodStart} <= ${now}`, gt(stripeSubscriptionPeriods.periodEnd, now)))
+			.get()
+	]);
 	if (!row) throw new Error(`org not found: ${orgId}`);
-	return row.creditsRemaining ?? 0;
+	return (row.creditsRemaining ?? 0) + (period?.remaining ?? 0);
 }
 
 /**
@@ -108,7 +116,7 @@ export async function orgIsMetered(orgId: string): Promise<boolean> {
 		.get();
 	if (!row) throw new Error(`org not found: ${orgId}`);
 	if (UNMETERED_PLANS.has(row.plan)) return false;
-	return row.creditsRemaining !== null;
+	return row.plan === 'hosted' || row.creditsRemaining !== null;
 }
 
 /**
@@ -175,7 +183,7 @@ export async function consumeCredit(handle: LedgerHandle, orgId: string, comment
 		// Existence check first: an unknown org is a data bug and must fail loudly,
 		// not silently stage comments free.
 		const org = await tx
-			.select({ creditsRemaining: organizations.creditsRemaining })
+			.select({ creditsRemaining: organizations.creditsRemaining, plan: organizations.plan })
 			.from(organizations)
 			.where(eq(organizations.id, orgId))
 			.get();
@@ -193,23 +201,45 @@ export async function consumeCredit(handle: LedgerHandle, orgId: string, comment
 			.onConflictDoNothing({ target: UNIQUE_TARGET })
 			.returning({ id: creditTransactions.id });
 		if (inserted.length === 0) return false; // already consumed — duplicate delivery
+
+		const now = new Date().toISOString();
+		const period = await tx
+			.select({ id: stripeSubscriptionPeriods.id })
+			.from(stripeSubscriptionPeriods)
+			.where(and(
+				eq(stripeSubscriptionPeriods.orgId, orgId),
+				eq(stripeSubscriptionPeriods.status, 'paid'),
+				sql`${stripeSubscriptionPeriods.periodStart} <= ${now}`,
+				gt(stripeSubscriptionPeriods.periodEnd, now),
+				sql`${stripeSubscriptionPeriods.consumedCredits} < ${stripeSubscriptionPeriods.includedCredits}`
+			))
+			.orderBy(desc(stripeSubscriptionPeriods.periodStart), asc(stripeSubscriptionPeriods.id))
+			.limit(1)
+			.get();
+		if (period) {
+			const consumed = await tx
+				.update(stripeSubscriptionPeriods)
+				.set({ consumedCredits: sql`${stripeSubscriptionPeriods.consumedCredits} + 1` })
+				.where(and(eq(stripeSubscriptionPeriods.id, period.id), sql`${stripeSubscriptionPeriods.consumedCredits} < ${stripeSubscriptionPeriods.includedCredits}`))
+				.returning({ id: stripeSubscriptionPeriods.id });
+			if (consumed.length === 1) {
+				await tx.update(creditTransactions).set({ balanceAfter: org.creditsRemaining }).where(eq(creditTransactions.id, inserted[0].id));
+				return true;
+			}
+		}
+
+		// Once the paid monthly allowance is exhausted, consume purchased
+		// overage atomically. Hosted orgs without a paid period remain metered.
 		const updated = await tx
 			.update(organizations)
-			.set({ creditsRemaining: sql`COALESCE(${organizations.creditsRemaining}, 0) - 1` })
-			.where(and(eq(organizations.id, orgId), sql`COALESCE(${organizations.creditsRemaining}, 0) > 0`))
+			.set({ creditsRemaining: sql`${organizations.creditsRemaining} - 1` })
+			.where(and(eq(organizations.id, orgId), sql`${organizations.creditsRemaining} > 0`))
 			.returning({ balance: organizations.creditsRemaining });
 		if (updated.length === 0) {
-			// Balance hit 0 concurrently — the comment stages free. Remove the row
-			// so the ledger never shows a delta the balance did not absorb.
-			await tx
-				.delete(creditTransactions)
-				.where(and(eq(creditTransactions.orgId, orgId), eq(creditTransactions.refType, 'comment'), eq(creditTransactions.refId, commentId)));
+			await tx.delete(creditTransactions).where(and(eq(creditTransactions.orgId, orgId), eq(creditTransactions.refType, 'comment'), eq(creditTransactions.refId, commentId)));
 			return false;
 		}
-		await tx
-			.update(creditTransactions)
-			.set({ balanceAfter: updated[0].balance })
-			.where(eq(creditTransactions.id, inserted[0].id));
+		await tx.update(creditTransactions).set({ balanceAfter: updated[0].balance }).where(eq(creditTransactions.id, inserted[0].id));
 		return true;
 	});
 }

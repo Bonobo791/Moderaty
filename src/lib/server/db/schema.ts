@@ -96,6 +96,8 @@ export const organizations = sqliteTable('organizations', {
 	stripeSubscriptionPeriodStart: text('stripe_subscription_period_start'),
 	stripeSubscriptionPeriodEnd: text('stripe_subscription_period_end'),
 	stripeSubscriptionCancelAtPeriodEnd: integer('stripe_subscription_cancel_at_period_end'),
+	stripeSubscriptionLastEventCreated: integer('stripe_subscription_last_event_created'),
+	stripeSubscriptionLastEventId: text('stripe_subscription_last_event_id'),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
 	uniqueIndex('organizations_stripe_customer_id_unique').on(table.stripeCustomerId).where(sql`${table.stripeCustomerId} IS NOT NULL`),

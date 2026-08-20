@@ -2,11 +2,11 @@ import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, test } from 'vitest';
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
-import { organizations, stripeLifetimeEntitlements, stripeLifetimeSlots, stripeSubscriptionPeriods } from '$lib/server/db/schema';
+import { organizations, stripeLifetimeEntitlements, stripeLifetimeSlots, stripeSubscriptionPeriods, stripePendingReversals } from '$lib/server/db/schema';
 import { claimLifetimeSlot, grantSubscriptionPeriod, releaseLifetimeForPayment, applySubscriptionSnapshot } from './entitlements';
 import { consumeCredit, getCredits } from './ledger';
 
-setupTestDb(['organizations', 'stripe_subscription_periods', 'stripe_lifetime_entitlements', 'stripe_lifetime_slots']);
+setupTestDb(['organizations', 'stripe_subscription_periods', 'stripe_lifetime_entitlements', 'stripe_lifetime_slots', 'stripe_pending_reversals']);
 
 async function seedOrg(id = 'org-1') {
 	await testDb().db.insert(organizations).values({ id, name: id });
@@ -54,6 +54,18 @@ describe('subscription period entitlements', () => {
 	});
 });
 
+	test('a refund queued before invoice fulfillment marks that period unusable', async () => {
+		await seedOrg();
+		await testDb().db.insert(stripePendingReversals).values({ chargeId: 'ch-1', reason: 'refund' });
+		await grantSubscriptionPeriod({
+			orgId: 'org-1', subscriptionId: 'sub-1', invoiceId: 'in-1', paymentIntentId: 'pi-1', chargeId: 'ch-1',
+			periodKey: 'period-1', periodStart: '2026-09-01T00:00:00.000Z', periodEnd: '2026-10-01T00:00:00.000Z', eventCreated: 100, eventId: 'evt-1'
+		});
+		const period = await testDb().db.select().from(stripeSubscriptionPeriods).where(eq(stripeSubscriptionPeriods.invoiceId, 'in-1')).get();
+		expect(period?.status).toBe('refunded');
+		expect(await testDb().db.select().from(stripePendingReversals)).toHaveLength(0);
+	});
+
 describe('lifetime entitlements', () => {
 	beforeEach(async () => seedOrg());
 
@@ -64,6 +76,16 @@ describe('lifetime entitlements', () => {
 		expect(second).toEqual(first);
 		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
 		expect(org?.plan).toBe('lifetime');
+	});
+
+	test('a dispute queued before lifetime fulfillment releases the claimed slot', async () => {
+		await testDb().db.insert(stripePendingReversals).values({ chargeId: 'ch-1', reason: 'dispute' });
+		const result = await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-1', paymentIntentId: 'pi-1', chargeId: 'ch-1' });
+		expect(result).toEqual({ slot: 1, status: 'released' });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		const slot = await testDb().db.select().from(stripeLifetimeSlots).where(eq(stripeLifetimeSlots.slot, 1)).get();
+		expect(org?.plan).toBe('free');
+		expect(slot?.activeOrgId).toBeNull();
 	});
 
 	test('releases a full-refunded lifetime payment and reuses its slot', async () => {

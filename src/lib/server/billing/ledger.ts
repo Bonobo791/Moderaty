@@ -74,12 +74,13 @@ const UNIQUE_TARGET: [typeof creditTransactions.orgId, typeof creditTransactions
  */
 export async function getCredits(orgId: string): Promise<number> {
 	const row = await db
-		.select({ creditsRemaining: organizations.creditsRemaining, plan: organizations.plan })
+		.select({ creditsRemaining: organizations.creditsRemaining, plan: organizations.plan, stripeSubscriptionId: organizations.stripeSubscriptionId })
 		.from(organizations)
 		.where(eq(organizations.id, orgId))
 		.get();
 	if (!row) throw new Error(`org not found: ${orgId}`);
-	if (row.plan !== 'hosted') return row.creditsRemaining ?? 0;
+	const hasHostedEntitlement = row.plan === 'hosted' || (row.plan !== 'lifetime' && typeof row.stripeSubscriptionId === 'string');
+	if (!hasHostedEntitlement) return row.creditsRemaining ?? 0;
 	const now = new Date().toISOString();
 	const period = await db
 		.select({ remaining: sql<number>`COALESCE(SUM(${stripeSubscriptionPeriods.includedCredits} - ${stripeSubscriptionPeriods.consumedCredits}), 0)` })
@@ -109,13 +110,13 @@ const UNMETERED_PLANS = new Set(['lifetime']);
 
 export async function orgIsMetered(orgId: string): Promise<boolean> {
 	const row = await db
-		.select({ creditsRemaining: organizations.creditsRemaining, plan: organizations.plan })
+		.select({ creditsRemaining: organizations.creditsRemaining, plan: organizations.plan, stripeSubscriptionId: organizations.stripeSubscriptionId })
 		.from(organizations)
 		.where(eq(organizations.id, orgId))
 		.get();
 	if (!row) throw new Error(`org not found: ${orgId}`);
 	if (UNMETERED_PLANS.has(row.plan)) return false;
-	return row.plan === 'hosted' || row.creditsRemaining !== null;
+	return row.plan === 'hosted' || typeof row.stripeSubscriptionId === 'string' || row.creditsRemaining !== null;
 }
 
 /**
@@ -182,7 +183,7 @@ export async function consumeCredit(handle: LedgerHandle, orgId: string, comment
 		// Existence check first: an unknown org is a data bug and must fail loudly,
 		// not silently stage comments free.
 		const org = await tx
-			.select({ creditsRemaining: organizations.creditsRemaining, plan: organizations.plan })
+			.select({ creditsRemaining: organizations.creditsRemaining, plan: organizations.plan, stripeSubscriptionId: organizations.stripeSubscriptionId })
 			.from(organizations)
 			.where(eq(organizations.id, orgId))
 			.get();
@@ -202,7 +203,8 @@ export async function consumeCredit(handle: LedgerHandle, orgId: string, comment
 		if (inserted.length === 0) return false; // already consumed — duplicate delivery
 
 		const now = new Date().toISOString();
-		const period = org.plan === 'hosted' ? await (tx
+		const hasHostedEntitlement = org.plan === 'hosted' || (org.plan !== 'lifetime' && typeof org.stripeSubscriptionId === 'string');
+		const period = hasHostedEntitlement ? await (tx
 			.select({ id: stripeSubscriptionPeriods.id })
 			.from(stripeSubscriptionPeriods)
 			.where(and(

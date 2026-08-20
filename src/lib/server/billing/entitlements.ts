@@ -4,7 +4,8 @@ import {
 	organizations,
 	stripeLifetimeEntitlements,
 	stripeLifetimeSlots,
-	stripeSubscriptionPeriods
+	stripeSubscriptionPeriods,
+	stripePendingReversals
 } from '$lib/server/db/schema';
 import { HOSTED_INCLUDED_CREDITS } from './plans';
 
@@ -94,6 +95,10 @@ export async function grantSubscriptionPeriod(input: SubscriptionPeriodGrant): P
 	return db.transaction(async (tx) => {
 		const org = await tx.select({ id: organizations.id }).from(organizations).where(eq(organizations.id, input.orgId)).get();
 		if (!org) throw new Error(`org not found: ${input.orgId}`);
+		const pending = input.chargeId
+			? await tx.select({ reason: stripePendingReversals.reason }).from(stripePendingReversals).where(eq(stripePendingReversals.chargeId, input.chargeId)).all()
+			: [];
+		const periodStatus = pending.some((row) => row.reason === 'dispute') ? 'disputed' : pending.length ? 'refunded' : 'paid';
 		const inserted = await tx
 			.insert(stripeSubscriptionPeriods)
 			.values({
@@ -107,10 +112,11 @@ export async function grantSubscriptionPeriod(input: SubscriptionPeriodGrant): P
 				periodEnd: input.periodEnd,
 				includedCredits: HOSTED_INCLUDED_CREDITS,
 				consumedCredits: 0,
-				status: 'paid'
+				status: periodStatus
 			})
 			.onConflictDoNothing()
 			.returning({ id: stripeSubscriptionPeriods.id });
+		if (pending.length && input.chargeId) await tx.delete(stripePendingReversals).where(eq(stripePendingReversals.chargeId, input.chargeId));
 		await applySubscriptionSnapshotTx(tx, {
 			orgId: input.orgId,
 			subscriptionId: input.subscriptionId,
@@ -174,6 +180,18 @@ export async function claimLifetimeSlot(input: LifetimeClaim): Promise<LifetimeC
 			.where(and(eq(stripeLifetimeSlots.slot, slot.slot), isNull(stripeLifetimeSlots.activeOrgId)))
 			.returning({ slot: stripeLifetimeSlots.slot });
 		if (claimed.length !== 1) throw new Error('lifetime slot claim lost its race');
+		const pending = input.chargeId
+			? await tx.select({ reason: stripePendingReversals.reason }).from(stripePendingReversals).where(eq(stripePendingReversals.chargeId, input.chargeId)).all()
+			: [];
+		if (pending.length && input.chargeId) {
+			await tx.update(stripeLifetimeEntitlements).set({ status: 'released', releasedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` }).where(eq(stripeLifetimeEntitlements.id, inserted[0].id));
+			await tx.update(stripeLifetimeSlots).set({ activeOrgId: null, activeEntitlementId: null, releasedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` }).where(eq(stripeLifetimeSlots.slot, slot.slot));
+			await tx.delete(stripePendingReversals).where(eq(stripePendingReversals.chargeId, input.chargeId));
+			const subscription = await tx.select({ id: organizations.stripeSubscriptionId, status: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, input.orgId)).get();
+			const nextPlan = subscription?.id && subscription.status && ACTIVE_SUBSCRIPTION_STATUSES.has(subscription.status) ? 'hosted' : 'free';
+			await tx.update(organizations).set({ plan: nextPlan }).where(eq(organizations.id, input.orgId));
+			return { slot: slot.slot, status: 'released' };
+		}
 		await tx.update(organizations).set({ plan: 'lifetime' }).where(eq(organizations.id, input.orgId));
 		return { slot: slot.slot, status: 'active' };
 	});

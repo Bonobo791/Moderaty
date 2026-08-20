@@ -367,6 +367,16 @@ describe('usageSummary', () => {
 		expect(org?.creditsRemaining).toBe(2);
 		expect(await getCredits('org-1')).toBe(101);
 	});
+	test('a canceled hosted subscription remains metered instead of becoming free unlimited access', async () => {
+		const periodStart = new Date(Date.now() - 60_000).toISOString();
+		const periodEnd = new Date(Date.now() + 60_000).toISOString();
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Canceled', plan: 'free', stripeSubscriptionId: 'sub-1', stripeSubscriptionStatus: 'canceled' });
+		await testDb().db.insert(stripeSubscriptionPeriods).values({ orgId: 'org-1', subscriptionId: 'sub-1', invoiceId: 'in-1', periodKey: 'period-1', periodStart, periodEnd, includedCredits: 100, consumedCredits: 0, status: 'paid' });
+		expect(await orgIsMetered('org-1')).toBe(true);
+		expect(await consumeCredit(testDb().db as never, 'org-1', 'comment-1')).toBe(true);
+		expect(await getCredits('org-1')).toBe(99);
+	});
+
 	test('monthStartIso is the first of the current UTC month', () => {
 		expect(monthStartIso()).toMatch(/^\d{4}-\d{2}-01T00:00:00\.000Z$/);
 	});

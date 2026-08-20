@@ -35,42 +35,13 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { createClient } from '@libsql/client';
+import { loadMigrationConfig, readJournal } from './migration-config.mjs';
 
 // Validate the full argument list BEFORE any work: unknown or extra arguments
 // are a loud usage error, never a silent fallthrough.
-const argv = process.argv.slice(2);
-if (argv.length > 1) {
-	console.error('Usage: node scripts/verify-migrations.mjs [meta-dir]');
-	process.exit(1);
-}
-const metaDir = argv[0] ?? fileURLToPath(new URL('../drizzle/meta', import.meta.url));
-
-const url = process.env.TURSO_DATABASE_URL;
-if (!url) {
-	console.error('verify-migrations: TURSO_DATABASE_URL is not set (use --env-file=.env)');
-	process.exit(1);
-}
-const authToken = process.env.TURSO_AUTH_TOKEN;
-if (!url.startsWith('file:') && !authToken) {
-	console.error('verify-migrations: TURSO_AUTH_TOKEN is required for remote databases');
-	process.exit(1);
-}
-
-const journalPath = join(metaDir, '_journal.json');
-if (!existsSync(journalPath)) {
-	console.error(`verify-migrations: no journal at ${journalPath} — cannot verify what should be applied`);
-	process.exit(1);
-}
-
-let journalEntries;
-try {
-	journalEntries = JSON.parse(readFileSync(journalPath, 'utf8')).entries ?? [];
-} catch (error) {
-	console.error(`verify-migrations: cannot read journal ${journalPath}: ${error.message}`);
-	process.exit(1);
-}
+const { metaDir, url, authToken, journalPath } = loadMigrationConfig({ scriptName: 'verify-migrations' });
+const journalEntries = readJournal(journalPath, 'verify-migrations').entries ?? [];
 
 /** sha256 hex of a migration file's contents — exactly what drizzle-kit stores. */
 function migrationHash(sql) {

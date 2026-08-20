@@ -938,9 +938,6 @@
      "patternId": "Semgrep_javascript.lang.security.audit.unsafe-dynamic-method.unsafe-dynamic-method"
     },
     {
-     "patternId": "Semgrep_javascript.lang.security.audit.unsafe-formatstring.unsafe-formatstring"
-    },
-    {
      "patternId": "Semgrep_javascript.lang.security.detect-buffer-noassert.detect-buffer-noassert"
     },
     {
@@ -960,9 +957,6 @@
     },
     {
      "patternId": "Semgrep_javascript.lang.security.detect-pseudorandombytes.detect-pseudorandombytes"
-    },
-    {
-     "patternId": "Semgrep_javascript.lang.security.html-in-template-string.html-in-template-string"
     },
     {
      "patternId": "Semgrep_javascript.lang.security.insecure-object-assign.insecure-object-assign"
@@ -1077,9 +1071,6 @@
     },
     {
      "patternId": "Semgrep_json.aws.security.wildcard-assume-role.wildcard-assume-role"
-    },
-    {
-     "patternId": "Semgrep_json.npm.security.package-dependencies-check.package-dependencies-check"
     },
     {
      "patternId": "Semgrep_rules_lgpl_javascript_crypto_rule-node-aes-ecb"

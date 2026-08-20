@@ -135,7 +135,7 @@ function unsafeRegex(pattern: string): boolean {
 	}
 }
 
-/** Compiles a user regex only after the length and recheck/syntax guards (I6). */
+/** Compiles a user regex after the LENGTH guard; recheck + syntax guards run after compilation and before any matching (I6). */
 function regex(rule: RuleRow): RegExp {
 	// Length guard FIRST: an oversized pattern is rejected before the
 	// RegExp constructor ever sees it (I6 — validate before compile).

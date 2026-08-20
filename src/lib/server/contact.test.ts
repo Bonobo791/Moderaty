@@ -242,7 +242,7 @@ describe('createOrReusePendingSubmission', () => {
 			expect(second.reused).toBe(true);
 			expect(second.id).toBe(first.id);
 			expect(second.verificationToken).toBe(first.verificationToken);
-			expect(warn).toHaveBeenCalledWith(expect.stringContaining('conflicted'));
+			expect(warn).toHaveBeenCalledWith('[contact] pending submission insert conflicted; reusing the existing pending row');
 			// The submitter e-mail is PII — the conflict log must never include it.
 			expect(warn).not.toHaveBeenCalledWith(expect.stringContaining(SUBMIT.email));
 		} finally {

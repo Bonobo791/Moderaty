@@ -189,10 +189,15 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 					`stripe: saved payment method changed for org ${orgId} (${prior.stripeDefaultPmId} -> ${paymentMethodId}) — auto top-up DISABLED, fresh consent required`
 				);
 			}
-			await db
+			const saved = await db
 				.update(organizations)
 				.set({ stripeCustomerId: customer, stripeDefaultPmId: paymentMethodId })
-				.where(eq(organizations.id, orgId));
+				.where(eq(organizations.id, orgId))
+				.returning({ id: organizations.id });
+			// The prior read proved the org existed; a zero-row update means it
+			// was deleted in between. Fail loudly so the webhook retries instead
+			// of acknowledging a grant whose payment method was never saved.
+			if (saved.length === 0) throw new Error(`stripe: organization ${orgId} disappeared while saving a payment method`);
 		} catch (error) {
 			// The credits are already granted, but a swallowed failure would
 			// make the webhook answer 200 and Stripe would never redeliver —

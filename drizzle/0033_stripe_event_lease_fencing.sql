@@ -1,0 +1,1 @@
+ALTER TABLE `stripe_events` ADD `processing_lease_token` text;

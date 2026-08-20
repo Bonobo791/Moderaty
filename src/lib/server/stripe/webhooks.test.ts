@@ -20,7 +20,7 @@ import { setupTestDb, testDb } from '$lib/server/testdb';
 import { db } from '$lib/server/db';
 import { organizations, stripeEvents, stripePendingReversals, stripeLifetimeEntitlements, stripeLifetimeSlots, stripeSubscriptionPeriods, stripeDisputeReversals } from '$lib/server/db/schema';
 import { applyLedgerDelta, getCredits } from '$lib/server/billing/ledger';
-import { fulfillAutoTopup, fulfillCheckout, handleStripeEvent, restoreWonDispute, reverseCharge, reverseDispute } from './webhooks';
+import { claimEvent, fulfillAutoTopup, fulfillCheckout, handleStripeEvent, markEventProcessed, restoreWonDispute, reverseCharge, reverseDispute } from './webhooks';
 
 const mocks = vi.hoisted(() => ({
 	sessionsRetrieve: vi.fn(),
@@ -66,6 +66,22 @@ beforeEach(() => {
 	vi.clearAllMocks();
 });
 
+
+
+describe('fenced Stripe event leases', () => {
+	test('a stale worker cannot complete an event after its lease is reclaimed', async () => {
+		const evt = event('checkout.session.completed', 'evt_fenced', { id: 'cs_fenced', object: 'checkout.session' });
+		const firstLease = await claimEvent(evt as never);
+		expect(firstLease).toEqual(expect.any(String));
+		await testDb().db.update(stripeEvents).set({ processingStartedAt: new Date(0).toISOString() }).where(eq(stripeEvents.eventId, evt.id));
+		const secondLease = await claimEvent(evt as never);
+		expect(secondLease).toEqual(expect.any(String));
+		expect(secondLease).not.toBe(firstLease);
+		expect(await markEventProcessed(evt.id, firstLease as string)).toBe(false);
+		expect((await testDb().db.select().from(stripeEvents).where(eq(stripeEvents.eventId, evt.id)).get())?.processedAt).toBeNull();
+		expect(await markEventProcessed(evt.id, secondLease as string)).toBe(true);
+	});
+});
 
 describe('paid hosted products', () => {
 	test('rejects a lifetime fulfillment while a hosted subscription is active', async () => {
@@ -145,6 +161,19 @@ describe('subscription lifecycle webhooks', () => {
 		expect(await reverseDispute('disp_1')).toBe(true);
 		expect(await restoreWonDispute('disp_1')).toBe(true);
 		expect((await testDb().db.select().from(stripeLifetimeEntitlements).where(eq(stripeLifetimeEntitlements.checkoutSessionId, 'cs_lifetime')).get())?.status).toBe('active');
+	});
+
+	test('retries a dispute after a crash keeps a prior ledger reversal restorable', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: -500, reason: 'dispute', refType: 'dispute', refId: 'ch_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+		await testDb().db.insert(stripeDisputeReversals).values({ disputeId: 'disp_retry', chargeId: 'ch_1', paymentIntentId: 'pi_1', status: 'pending', source: 'unknown' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1' });
+		mocks.disputesRetrieve.mockResolvedValue({ id: 'disp_retry', charge: 'ch_1', status: 'won' });
+		expect(await reverseCharge('ch_1', 'dispute', 'disp_retry')).toBe(false);
+		expect((await testDb().db.select().from(stripeDisputeReversals).where(eq(stripeDisputeReversals.disputeId, 'disp_retry')).get())?.status).toBe('reversed');
+		expect(await restoreWonDispute('disp_retry')).toBe(true);
+		expect(await getCredits('org-1')).toBe(500);
 	});
 
 	test('two disputes on one charge cannot each restore the same credit reversal', async () => {

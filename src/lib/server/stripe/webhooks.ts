@@ -21,8 +21,9 @@
 // The inbox lease is claimed before side effects and marked complete only after
 // successful handling; failed handlers release the lease for Stripe's retry.
 
-import { and, eq, isNull, lt, or } from 'drizzle-orm';
+import { and, eq, isNull, lt, ne, or } from 'drizzle-orm';
 import type Stripe from 'stripe';
+import { randomUUID } from 'node:crypto';
 
 import { db } from '$lib/server/db';
 import { organizations, creditTransactions, stripeEvents, stripeLifetimeEntitlements, stripeDisputeReversals } from '$lib/server/db/schema';
@@ -48,9 +49,10 @@ function eventObjectIdentity(event: Stripe.Event): { objectId: string; objectTyp
 	return { objectId: record.id, objectType: typeof record.object === 'string' ? record.object : 'unknown' };
 }
 
-async function claimEvent(event: Stripe.Event): Promise<boolean> {
+export async function claimEvent(event: Stripe.Event): Promise<string | false> {
 	const now = new Date();
 	const nowIso = now.toISOString();
+	const leaseToken = randomUUID();
 	const identity = eventObjectIdentity(event);
 	const inserted = await db
 		.insert(stripeEvents)
@@ -60,11 +62,12 @@ async function claimEvent(event: Stripe.Event): Promise<boolean> {
 			objectId: identity.objectId,
 			objectType: identity.objectType,
 			processingStartedAt: nowIso,
+			processingLeaseToken: leaseToken,
 			processingAttempts: 1
 		})
 		.onConflictDoNothing()
 		.returning({ id: stripeEvents.id });
-	if (inserted.length === 1) return true;
+	if (inserted.length === 1) return leaseToken;
 	const existing = await db.select({ processedAt: stripeEvents.processedAt, processingStartedAt: stripeEvents.processingStartedAt }).from(stripeEvents).where(eq(stripeEvents.eventId, event.id)).get();
 	if (!existing) throw new Error(`Stripe event ${event.id} disappeared while claiming`);
 	if (existing.processedAt) return false;
@@ -74,21 +77,33 @@ async function claimEvent(event: Stripe.Event): Promise<boolean> {
 	const attempts = (await db.select({ attempts: stripeEvents.processingAttempts }).from(stripeEvents).where(eq(stripeEvents.eventId, event.id)).get())?.attempts ?? 0;
 	const reclaimed = await db
 		.update(stripeEvents)
-		.set({ processingStartedAt: nowIso, processingAttempts: attempts + 1 })
+		.set({ processingStartedAt: nowIso, processingLeaseToken: leaseToken, processingAttempts: attempts + 1 })
 		.where(and(eq(stripeEvents.eventId, event.id), isNull(stripeEvents.processedAt), or(isNull(stripeEvents.processingStartedAt), lt(stripeEvents.processingStartedAt, new Date(now.getTime() - EVENT_LEASE_MS).toISOString()))))
 		.returning({ id: stripeEvents.id });
-	if (reclaimed.length === 1) return true;
+	if (reclaimed.length === 1) return leaseToken;
 	const afterRace = await db.select({ processedAt: stripeEvents.processedAt }).from(stripeEvents).where(eq(stripeEvents.eventId, event.id)).get();
 	if (afterRace?.processedAt) return false;
 	throw new Error(`Stripe event ${event.id} is already being processed`);
 }
 
-async function markEventProcessed(eventId: string): Promise<void> {
-	await db.update(stripeEvents).set({ processedAt: new Date().toISOString(), processingStartedAt: null }).where(eq(stripeEvents.eventId, eventId));
+export async function markEventProcessed(eventId: string, leaseToken: string): Promise<boolean> {
+	const updated = await db
+		.update(stripeEvents)
+		.set({ processedAt: new Date().toISOString(), processingStartedAt: null, processingLeaseToken: null })
+		.where(and(eq(stripeEvents.eventId, eventId), eq(stripeEvents.processingLeaseToken, leaseToken), isNull(stripeEvents.processedAt)))
+		.returning({ id: stripeEvents.id });
+	if (updated.length === 1) return true;
+	console.error(`stripe: lease for event ${eventId} was fenced before completion`);
+	return false;
 }
 
-async function releaseEventClaim(eventId: string): Promise<void> {
-	await db.update(stripeEvents).set({ processingStartedAt: null }).where(and(eq(stripeEvents.eventId, eventId), isNull(stripeEvents.processedAt)));
+export async function releaseEventClaim(eventId: string, leaseToken: string): Promise<boolean> {
+	const updated = await db
+		.update(stripeEvents)
+		.set({ processingStartedAt: null, processingLeaseToken: null })
+		.where(and(eq(stripeEvents.eventId, eventId), eq(stripeEvents.processingLeaseToken, leaseToken), isNull(stripeEvents.processedAt)))
+		.returning({ id: stripeEvents.id });
+	return updated.length === 1;
 }
 
 /**
@@ -425,7 +440,15 @@ export async function reverseCharge(chargeId: string, reason: 'refund' | 'disput
 		chargeId,
 		paymentIntentId
 	});
-	if (disputeId) await updateDisputeReversal(disputeId, { status: applied ? 'reversed' : 'ignored', source: 'credits' });
+	if (disputeId) {
+		let status = applied ? 'reversed' : 'ignored';
+		if (!applied) {
+			const existingLedgerReversal = await db.select({ id: creditTransactions.id }).from(creditTransactions).where(and(eq(creditTransactions.orgId, match.orgId), eq(creditTransactions.reason, 'dispute'), eq(creditTransactions.chargeId, chargeId))).get();
+			const otherDispute = await db.select({ id: stripeDisputeReversals.id }).from(stripeDisputeReversals).where(and(eq(stripeDisputeReversals.chargeId, chargeId), ne(stripeDisputeReversals.disputeId, disputeId), eq(stripeDisputeReversals.source, 'credits'), or(eq(stripeDisputeReversals.status, 'reversed'), eq(stripeDisputeReversals.status, 'restored')))).get();
+			if (existingLedgerReversal && !otherDispute) status = 'reversed';
+		}
+		await updateDisputeReversal(disputeId, { status, source: 'credits' });
+	}
 	return applied;
 }
 
@@ -622,7 +645,8 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
 	// partial→full refund progression unreversed. Repeated processing is made
 	// idempotent by the ledger's own UNIQUE anchors, so re-running a handler
 	// can never double-apply.
-	if (!(await claimEvent(event))) return true;
+	const leaseToken = await claimEvent(event);
+	if (!leaseToken) return true;
 	let handled: boolean;
 	try {
 		switch (event.type) {
@@ -687,10 +711,10 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
 				console.error(`stripe: ignoring unhandled event type ${event.type}`);
 				handled = false;
 		}
-		await markEventProcessed(event.id);
+		await markEventProcessed(event.id, leaseToken);
 		return handled;
 	} catch (error) {
-		await releaseEventClaim(event.id);
+		await releaseEventClaim(event.id, leaseToken);
 		throw error;
 	}
 }

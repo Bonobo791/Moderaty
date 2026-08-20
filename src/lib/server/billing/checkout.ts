@@ -22,8 +22,9 @@ import { and, eq, isNull } from 'drizzle-orm';
 
 import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
-import { organizations } from '$lib/server/db/schema';
+import { organizations, stripeLifetimeEntitlements, stripeLifetimeSlots } from '$lib/server/db/schema';
 import { bundleById, priceIdFor, type CreditBundle } from '$lib/server/stripe/bundles';
+import { planPriceEnv, validatePlanPrice, type PaidPlan } from './plans';
 import { getStripe } from '$lib/server/stripe/client';
 import { requireOrgRole } from '$lib/server/ownership';
 import type { SessionUser } from '$lib/server/session';
@@ -105,6 +106,64 @@ export async function createCreditCheckout(orgId: string, user: SessionUser, bun
 		success_url: new URL('/usage/success?session_id={CHECKOUT_SESSION_ID}', appUrl).toString(),
 		cancel_url: new URL('/usage', appUrl).toString()
 	});
+	if (!session.url) throw new Error(`stripe returned no Checkout URL for session ${session.id}`);
+	return session.url;
+}
+
+
+/**
+ * Creates a Checkout Session for one of the hosted products. The application
+ * owns the catalog: Stripe's configured Price is retrieved and checked before
+ * any Checkout session is created, and fulfillment rechecks the metadata and
+ * mode in the webhook.
+ */
+export async function createPlanCheckout(orgId: string, user: SessionUser, plan: PaidPlan): Promise<string> {
+	requireOrgRole(user, 'owner');
+	const appUrl = env.APP_URL;
+	if (!appUrl) throw new Error('APP_URL is not configured');
+	const org = await db
+		.select({
+			plan: organizations.plan,
+			stripeSubscriptionId: organizations.stripeSubscriptionId,
+			stripeSubscriptionStatus: organizations.stripeSubscriptionStatus
+		})
+		.from(organizations)
+		.where(eq(organizations.id, orgId))
+		.get();
+	if (!org) throw new Error(`org not found: ${orgId}`);
+	if (plan === 'hosted' && org.stripeSubscriptionId && ['active', 'trialing', 'past_due', 'unpaid'].includes(org.stripeSubscriptionStatus ?? '')) {
+		throw new Error('organization already has a hosted subscription');
+	}
+	if (plan === 'lifetime') {
+		if (org.plan === 'lifetime') throw new Error('organization already has the lifetime plan');
+		const available = await db
+			.select({ slot: stripeLifetimeSlots.slot })
+			.from(stripeLifetimeSlots)
+			.where(isNull(stripeLifetimeSlots.activeOrgId))
+			.limit(1)
+			.get();
+		if (!available) throw new Error('lifetime plan is sold out');
+	}
+	const priceId = env[planPriceEnv(plan)];
+	if (!priceId) throw new Error(`${planPriceEnv(plan)} is not configured`);
+	if (!priceId.startsWith('price_')) throw new Error(`${planPriceEnv(plan)} must be a Stripe Price id (price_...)`);
+	const price = await getStripe().prices.retrieve(priceId);
+	validatePlanPrice(plan, price);
+	const customer = await getOrCreateStripeCustomer(orgId, user);
+	const metadata = { org_id: orgId, product: plan };
+	const session = await getStripe().checkout.sessions.create(
+		{
+			mode: plan === 'hosted' ? 'subscription' : 'payment',
+			line_items: [{ price: priceId, quantity: 1 }],
+			customer,
+			client_reference_id: orgId,
+			metadata,
+			...(plan === 'hosted' ? { subscription_data: { metadata } } : { payment_intent_data: { setup_future_usage: 'off_session' } }),
+			success_url: new URL('/usage/success?session_id={CHECKOUT_SESSION_ID}', appUrl).toString(),
+			cancel_url: new URL('/usage', appUrl).toString()
+		},
+		{ idempotencyKey: `checkout:${orgId}:${plan}` }
+	);
 	if (!session.url) throw new Error(`stripe returned no Checkout URL for session ${session.id}`);
 	return session.url;
 }

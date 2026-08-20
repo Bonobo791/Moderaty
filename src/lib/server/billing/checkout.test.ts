@@ -18,22 +18,24 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { organizations } from '$lib/server/db/schema';
-import { createCreditCheckout, getOrCreateStripeCustomer } from './checkout';
+import { createCreditCheckout, createPlanCheckout, getOrCreateStripeCustomer } from './checkout';
 import type { SessionUser } from '$lib/server/session';
 
 const mocks = vi.hoisted(() => ({
 	customersCreate: vi.fn(),
-	sessionsCreate: vi.fn()
+	sessionsCreate: vi.fn(),
+	pricesRetrieve: vi.fn()
 }));
 
 vi.mock('$lib/server/stripe/client', () => ({
 	getStripe: () => ({
 		customers: { create: mocks.customersCreate },
-		checkout: { sessions: { create: mocks.sessionsCreate } }
+		checkout: { sessions: { create: mocks.sessionsCreate } },
+		prices: { retrieve: mocks.pricesRetrieve }
 	})
 }));
 vi.mock('$env/dynamic/private', () => ({
-	env: { APP_URL: 'https://app.example', STRIPE_PRICE_CREDITS_100: 'price_100', STRIPE_PRICE_CREDITS_500: 'price_500', STRIPE_PRICE_CREDITS_2000: 'price_2000' }
+	env: { APP_URL: 'https://app.example', STRIPE_PRICE_CREDITS_100: 'price_100', STRIPE_PRICE_CREDITS_500: 'price_500', STRIPE_PRICE_CREDITS_2000: 'price_2000', STRIPE_PRICE_HOSTED_MONTHLY: 'price_hosted', STRIPE_PRICE_LIFETIME: 'price_lifetime' }
 }));
 
 setupTestDb(['organizations']);
@@ -55,6 +57,7 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.customersCreate.mockResolvedValue({ id: 'cus_1' });
 	mocks.sessionsCreate.mockResolvedValue({ id: 'cs_1', url: 'https://checkout.stripe.com/c/pay/cs_1' });
+	mocks.pricesRetrieve.mockImplementation(async (id: string) => id === 'price_hosted' ? { id, active: true, currency: 'usd', type: 'recurring', unit_amount: 500, recurring: { interval: 'month', interval_count: 1 } } : { id, active: true, currency: 'usd', type: 'one_time', unit_amount: 4900 });
 });
 
 describe('getOrCreateStripeCustomer', () => {
@@ -110,6 +113,33 @@ describe('getOrCreateStripeCustomer', () => {
 		expect(idA).toBe(org?.stripeCustomerId);
 		expect(idB).toBe(org?.stripeCustomerId);
 		expect(mocks.customersCreate).toHaveBeenCalledTimes(2);
+	});
+});
+
+
+describe('createPlanCheckout', () => {
+	test('creates the hosted monthly subscription with a validated server catalog price', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		const url = await createPlanCheckout('org-1', owner(), 'hosted');
+		expect(url).toBe('https://checkout.stripe.com/c/pay/cs_1');
+		expect(mocks.pricesRetrieve).toHaveBeenCalledWith('price_hosted');
+		expect(mocks.sessionsCreate).toHaveBeenCalledWith(expect.objectContaining({
+			mode: 'subscription',
+			line_items: [{ price: 'price_hosted', quantity: 1 }],
+			metadata: { org_id: 'org-1', product: 'hosted' },
+			subscription_data: { metadata: { org_id: 'org-1', product: 'hosted' } }
+		}), { idempotencyKey: 'checkout:org-1:hosted' });
+	});
+
+	test('creates the lifetime payment with a validated one-time price', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await createPlanCheckout('org-1', owner(), 'lifetime');
+		expect(mocks.pricesRetrieve).toHaveBeenCalledWith('price_lifetime');
+		expect(mocks.sessionsCreate).toHaveBeenCalledWith(expect.objectContaining({
+			mode: 'payment',
+			line_items: [{ price: 'price_lifetime', quantity: 1 }],
+			metadata: { org_id: 'org-1', product: 'lifetime' }
+		}), { idempotencyKey: 'checkout:org-1:lifetime' });
 	});
 });
 

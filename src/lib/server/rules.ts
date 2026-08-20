@@ -127,7 +127,9 @@ function unsafeSyntax(pattern: string): boolean {
 				continue;
 			case 'escape-end':
 				escaped = false;
-				if (isBackreference(character, pattern.charAt(index + 1))) return true;
+				// Inside a character class `\1` is an octal escape (a literal
+				// char), NOT a backreference — only check outside classes.
+				if (!inClass && isBackreference(character, pattern.charAt(index + 1))) return true;
 				continue;
 			case 'class-open':
 				inClass = true;

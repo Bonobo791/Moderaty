@@ -425,6 +425,8 @@ type DecisionBatchOptions = {
 	deadline?: number;
 	rescore?: boolean;
 	orgId?: string | null;
+	/** True for live runs: credits gate AI scoring and consumption applies.
+	 * Dry runs (previews, window rescore) always score and never consume. */
 	consumeCredits?: boolean;
 };
 
@@ -602,18 +604,7 @@ async function decideNewComments(
 		rescore,
 		orgId,
 		consumeCredits
-	}: {
-		accessToken: string;
-		toneLevel: number;
-		protections: ToneProtections;
-		openAiKey?: string;
-		deadline?: number;
-		rescore?: boolean;
-		orgId?: string | null;
-		/** True for live runs: credits gate AI scoring and consumption applies.
-		 * Dry runs (previews, window rescore) always score and never consume. */
-		consumeCredits?: boolean;
-	}
+	}: DecisionBatchOptions
 ): Promise<{ decisions: Decision[]; failures: string[]; deferred: number }> {
 	const batch = await prepareDecisionBatch(channelId, page, {
 		accessToken,

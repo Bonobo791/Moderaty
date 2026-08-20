@@ -106,11 +106,9 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 	const bundle = loadBundle(bundleId, sessionId);
 	if (!bundle) return 'rejected';
 
-	// Narrow the expanded object: the type stays a string-union, so touch
-	// nested fields only after the check. chargeId prefers the expanded
-	// object's id (it is the same id either way).
-	const paymentIntent = typeof session.payment_intent === 'string' ? null : session.payment_intent;
-	const charge = paymentIntent && typeof paymentIntent.latest_charge !== 'string' ? paymentIntent.latest_charge : undefined;
+	// Narrow the expanded object once (chargeId prefers the expanded
+	// object's id — it is the same id either way).
+	const { paymentIntent, charge } = getPaymentIntentAndCharge(session);
 	const chargeId = typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : charge?.id;
 	const applied = await applyLedgerDelta(db, {
 		orgId,
@@ -139,10 +137,19 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 	return applied ? 'granted' : 'already';
 }
 
-/** True when the charge backing this session is disputed or fully refunded — a late grant must be refused. */
-function rejectLateGrant(session: Stripe.Checkout.Session, sessionId: string): boolean {
+/** Narrows the expanded Checkout session to the payment_intent and its latest_charge (both stay a string-union). */
+function getPaymentIntentAndCharge(session: Stripe.Checkout.Session): {
+	paymentIntent: Stripe.PaymentIntent | null;
+	charge: Stripe.Charge | null | undefined;
+} {
 	const paymentIntent = typeof session.payment_intent === 'string' ? null : session.payment_intent;
 	const charge = paymentIntent && typeof paymentIntent.latest_charge !== 'string' ? paymentIntent.latest_charge : undefined;
+	return { paymentIntent, charge };
+}
+
+/** True when the charge backing this session is disputed or fully refunded — a late grant must be refused. */
+function rejectLateGrant(session: Stripe.Checkout.Session, sessionId: string): boolean {
+	const { charge } = getPaymentIntentAndCharge(session);
 	if (!charge) return false;
 	const fullyRefunded =
 		typeof charge.amount_refunded === 'number' &&

@@ -429,6 +429,21 @@ test('a non-object channels body fails loudly as an invalid YouTube response', a
 	expect(errSpy.mock.calls.flat().join(' ')).toMatch(/youtube channels lookup returned a non-object body: 200/);
 });
 
+test('a PRESENT but non-array items field is a malformed response — 502, never an empty picker', async () => {
+	// I2: absent items = legitimately empty account; present-but-wrong-type =
+	// a malformed response and must fail loudly instead of rendering nothing.
+	const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	stubTokenAndChannels(() => new Response(JSON.stringify({ items: 'not-an-array' }), { status: 200 }));
+
+	const { thrown } = await captureCallback();
+
+	expect(thrown?.status).toBe(502);
+	expect(thrown?.body?.message).toBe('invalid response from YouTube — please retry');
+	expect(errSpy).toHaveBeenCalledWith('youtube channels lookup returned a non-array items field: 200');
+	expect(await testDb().db.select().from(channels).all()).toHaveLength(0);
+	errSpy.mockRestore();
+});
+
 test('a channels body without an items array is an empty account — 400, nothing logged, nothing written', async () => {
 	const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 	stubTokenAndChannels(() => new Response(JSON.stringify({}), { status: 200 }));

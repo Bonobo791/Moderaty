@@ -72,7 +72,14 @@ async function fetchChannelPage(accessToken: string, pageToken: string | undefin
 		console.error(`youtube channels lookup returned a non-object body: ${chRes.status}`);
 		throw error(502, 'invalid response from YouTube — please retry');
 	}
-	return { items: Array.isArray(chData.items) ? chData.items : [], nextPageToken: chData.nextPageToken };
+	// Absent items is a legitimate empty account (YouTube omits the field);
+	// a PRESENT but non-array items is a malformed response (I2) — throw.
+	if (chData.items === undefined) return { items: [], nextPageToken: chData.nextPageToken };
+	if (!Array.isArray(chData.items)) {
+		console.error(`youtube channels lookup returned a non-array items field: ${chRes.status}`);
+		throw error(502, 'invalid response from YouTube — please retry');
+	}
+	return { items: chData.items, nextPageToken: chData.nextPageToken };
 }
 
 /** Appends the valid channels from one page; returns how many malformed items were skipped. */

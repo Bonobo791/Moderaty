@@ -2,7 +2,6 @@
 -Add calculator to calculate costs per last 3 months of comment volume on homepage (the user just adds their number of comments and it spits out a number)
 -Add calculator that pulls real data from YouTube to determine costs - should be a forecast that gives a range of potential costs for the next month with a disclaimer that this is a 95% probability of being in the shown range
 -Create auto-recharge functionality and update website language
--Add channel disconnect button and functionality
 
 ## Codacy triage round 2026-08-20 (main-branch 111-issue list)
 
@@ -27,28 +26,34 @@ Re-validated the full dashboard list against `dev`:
   (pipeline, cron, deletion, stripe/webhooks, rules, youtube, route loaders,
   test helpers, seed-dev) — keep the suite green; refactor test-guarded.
 
-## Deferred lint/quality refactors (Codacy/SonarCloud, triaged 2026-08-19)
+## Deferred lint/quality refactors (Codacy/SonarCloud)
 
 Real maintainability findings — each is a focused, test-guarded refactor (no
 security/correctness impact; the suite must stay green: `npm run test` /
 `npm run check` / `npm run build`). Priority = severity, then lines.
 
 ### Critical
-- [ ] `src/routes/api/cron/+server.ts:45` — `GET` handler: cyclomatic 33, 131 lines. Extract the per-sweep blocks (consent sweep, handle sweep, deletion outbox, auto top-up, dry-run window) into helpers; the shared `deadline` must keep flowing through.
-- [ ] `src/lib/server/stripe/webhooks.ts:83` — `fulfillCheckout`: cyclomatic 29, 83 lines. Split the grant/credit step from the card-save step; keep the loud-failure paths.
-- [ ] `src/lib/server/pipeline.ts:420` — `decideNewComments`: cyclomatic 19, 78 lines, **10 params** (S107, limit 8). Package trailing params into an options object (pattern already used for `decide`).
-- [ ] `src/lib/server/pipeline.ts:803` — `runChannel`: cyclomatic 31, 86 lines. Extract per-phase helpers (claims, decisions, staging, enforcement).
-- [ ] `src/lib/server/deletion.ts:147` — `deleteUserRecords` tx callback: cyclomatic 25, 96 lines. Extract the per-org deletion helper.
+
+- [ ] `src/lib/server/pipeline.ts` — `runChannel`: cyclomatic still over the
+      limit after the phase helpers; finish extracting claims/enforcement.
 
 ### Major
-- [ ] `src/routes/api/auth/google/callback/+server.ts:42` — handler cyclomatic 27. Extract token-exchange + user-creation steps.
-- [ ] `src/lib/server/rules.ts:39` — `duplicateAlternation`: cyclomatic 29. Simplify the scan (it is already covered by property tests).
-- [ ] `src/lib/server/rules.ts:84` — `unsafeSyntax`: cyclomatic 25. Split the backreference check from the group-stack scan.
-- [ ] `src/routes/(app)/channels/[id]/log/+page.server.ts:55` — `load`: cyclomatic 20, 100 lines. Split the query-building from the page assembly.
-- [ ] `src/lib/server/youtube.ts:78` — `parseComment`: cyclomatic 18. Extract the per-field validators.
-- [ ] `src/routes/(app)/channels/[id]/+page.server.ts:121` — `dryRun` action: cyclomatic 16, 58 lines.
-- [ ] `src/lib/server/contact.ts:102` — `createOrReusePendingSubmission`: 61 lines. Extract the fresh-row builder (conflict loop stays).
 
+- [ ] `src/routes/(app)/channels/[id]/log/+page.server.ts:55` — `load`:
+      cyclomatic 20, 100 lines. Split the query-building from the page assembly.
+- [ ] `src/lib/server/youtube.ts:78` — `parseComment`: cyclomatic 18. Extract
+      the per-field validators.
+- [ ] `src/routes/(app)/channels/[id]/+page.server.ts:121` — `dryRun` action:
+      cyclomatic 16, 58 lines.
+- [ ] `src/lib/server/contact.ts:102` — `createOrReusePendingSubmission`:
+      61 lines. Extract the fresh-row builder (conflict loop stays).
+
+### Completed in PR #130 (removed from this list)
+
+cron `GET` sweeps extraction · `fulfillCheckout` card-save split ·
+`decideNewComments` options object (S107) · `deleteUserRecords` per-org helpers ·
+OAuth callback channel-picker refactor · `rules` scanAction-based
+`duplicateAlternation`/`unsafeSyntax`.
 ## Codacy dashboard cleanups (no code — settings clicks)
 
 - [ ] Delete the custom **"Enforce Access to RAC_\* Tables in SQL Queries"** pattern in Codacy → Code patterns (leftover from another project; 26 false positives on drizzle migrations — repo-side guard added: `.codacy.yml` excludes `drizzle/**` from Semgrep).
@@ -57,4 +62,8 @@ security/correctness impact; the suite must stay green: `npm run test` /
 
 ## Operational (human, at the dev → main release)
 
-- [ ] Apply migration **0028** (`contact_submissions_pending_email_unique` partial index) to the production DB per DEPLOY.md §1 — committed and dev-verified.
+- [ ] **RELEASE GATE:** before merging dev → main, verify migration **0028**
+      (`contact_submissions_pending_email_unique` partial index) is applied to
+      the PRODUCTION DB per DEPLOY.md §1 (query `sqlite_master` for the index,
+      or check `__drizzle_migrations`). An unchecked TODO must never release a
+      schema without the index.

@@ -164,6 +164,9 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		pendingReversalSweepError: reversals.error
 	};
 
+	// The sweeps above consumed the budget; a channel run would abort
+	// immediately on the expired deadline — report the sweeps, skip the claim.
+	if (Date.now() >= deadline) return json({ ...base, results: {} });
 	const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, nowIso));
 	const [channel] = await db
 		.select()

@@ -31,7 +31,7 @@ export type LegalDoc = {
 };
 
 export const LEGAL_EFFECTIVE_DATE = '17 August 2026';
-// 1.10: LICENSE SWAP — the self-hosted grant changed from AGPL-3.0 to the
+// 1.10: LICENSE SWAP — the self-hosted grant changed to the
 // PolyForm Shield License 1.0.0 (Terms §6.1(a); footer, FAQ, pricing, and
 // the license link updated to match the LICENSE file). Material change:
 // users without a 1.10 consent row are routed back through /consent.

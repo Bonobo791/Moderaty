@@ -35,9 +35,12 @@ jobs:
   dump:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Supply-chain pinning (codeql): immutable commit SHA, not the mutable v4 tag.
+      # actions/checkout@v4 == 11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
-      - uses: actions/setup-node@v4
+      # actions/setup-node@v4 == 49933ea5288caeca8642d1e84afbd3f7d6820020
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 24
 
@@ -65,7 +68,8 @@ jobs:
         run: node scripts/backup-db.mjs moderaty backups
 
       - name: Upload dump artifact
-        uses: actions/upload-artifact@v4
+        # actions/upload-artifact@v4 == ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: moderaty-dump-${{ github.run_id }}
           path: backups/*.sql.gz

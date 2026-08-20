@@ -34,6 +34,17 @@ import { requireUser } from '$lib/server/session';
 
 import type { Actions, PageServerLoad } from './$types';
 
+function isStripeCheckoutError(error: unknown): boolean {
+	return error !== null && typeof error === 'object' && typeof (error as { type?: unknown }).type === 'string';
+}
+
+function checkoutFailure(error: unknown, orgId: string) {
+	const message = error instanceof Error ? error.message : String(error);
+	console.error(`usage: checkout failed for org ${orgId}: ${message}`);
+	return fail(400, { error: isStripeCheckoutError(error) ? 'Could not start checkout — please try again.' : `Could not start checkout: ${message}` });
+}
+
+
 export const load: PageServerLoad = async ({ locals }) => {
 	if (locals.dbDown) {
 		return {
@@ -146,13 +157,7 @@ export const actions: Actions = {
 			// (unknown bundle, missing APP_URL…) keep their specific, safe
 			// message so the user can act on them. Full details go to the
 			// server log either way.
-			const message = error instanceof Error ? error.message : String(error);
-			console.error(`usage: checkout failed for org ${user.orgId}: ${message}`);
-			const isStripeError =
-				error !== null && typeof error === 'object' && typeof (error as { type?: unknown }).type === 'string';
-			return fail(400, {
-				error: isStripeError ? 'Could not start checkout — please try again.' : `Could not start checkout: ${message}`
-			});
+			return checkoutFailure(error, user.orgId);
 		}
 	},
 	/** Owner-only: creates a hosted subscription or lifetime Checkout. */
@@ -165,10 +170,7 @@ export const actions: Actions = {
 			throw redirect(303, url);
 		} catch (error) {
 			if (isRedirect(error) || isHttpError(error)) throw error;
-			const message = error instanceof Error ? error.message : String(error);
-			console.error(`usage: plan checkout failed for org ${user.orgId}: ${message}`);
-			const isStripeError = error !== null && typeof error === 'object' && typeof (error as { type?: unknown }).type === 'string';
-			return fail(400, { error: isStripeError ? 'Could not start checkout — please try again.' : `Could not start checkout: ${message}` });
+			return checkoutFailure(error, user.orgId);
 		}
 	},
 	/**

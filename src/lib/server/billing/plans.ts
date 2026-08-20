@@ -1,6 +1,9 @@
 export const HOSTED_INCLUDED_CREDITS = 100;
 export const LIFETIME_SLOT_LIMIT = 1000;
 
+const HOSTED_PRICE_RECURRING_ERROR = 'hosted Stripe Price must be monthly recurring';
+const LIFETIME_PRICE_ONE_TIME_ERROR = 'lifetime Stripe Price must be one-time';
+
 export type PaidPlan = 'hosted' | 'lifetime';
 
 type PriceLike = {
@@ -24,9 +27,9 @@ export function validatePlanPrice(plan: PaidPlan, price: PriceLike): void {
 	}
 	if (plan === 'hosted') {
 		if (price.type !== 'recurring' || price.recurring?.interval !== 'month' || price.recurring.interval_count !== 1) {
-			throw new Error('hosted Stripe Price must be monthly recurring');
+			throw new Error(HOSTED_PRICE_RECURRING_ERROR);
 		}
 		return;
 	}
-	if (price.type !== 'one_time') throw new Error('lifetime Stripe Price must be one-time');
+	if (price.type !== 'one_time') throw new Error(LIFETIME_PRICE_ONE_TIME_ERROR);
 }

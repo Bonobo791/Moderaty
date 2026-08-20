@@ -119,10 +119,38 @@ describe('paid hosted products', () => {
 		expect(org?.plan).toBe('lifetime');
 		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toHaveLength(1);
 	});
+
+	test('logs a paid lifetime checkout that cannot claim a slot', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.insert(stripePendingReversals).values({ chargeId: 'ch_1', reason: 'refund' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_sold', metadata: { org_id: 'org-1', product: 'lifetime' } }));
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			expect(await fulfillCheckout('cs_sold')).toBe('rejected');
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('PAID but claimed no slot'));
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
 });
 
 
 describe('subscription lifecycle webhooks', () => {
+
+	test('invoice.paid accepts the current parent subscription payload', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
+		const invoice = { parent: { type: 'subscription_details', subscription_details: { subscription: 'sub_1' } }, customer: 'cus_1', payment_intent: 'pi_1', lines: { data: [{ period: { start: 1_800_000_000, end: 1_802_678_400 } }] } };
+		expect(await handleStripeEvent(event('invoice.paid', 'in_current', invoice) as never)).toBe(true);
+		expect(await testDb().db.select().from(stripeSubscriptionPeriods).where(eq(stripeSubscriptionPeriods.invoiceId, 'in_current'))).toHaveLength(1);
+	});
+
+	test('subscription events read billing periods from subscription items', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
+		const subscription = { id: 'sub_1', customer: 'cus_1', status: 'active', cancel_at_period_end: false, items: { data: [{ current_period_start: 1_800_000_000, current_period_end: 1_802_678_400 }] } };
+		expect(await handleStripeEvent(event('customer.subscription.updated', 'sub_current', subscription) as never)).toBe(true);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeSubscriptionPeriodStart).toBe(new Date(1_800_000_000 * 1000).toISOString());
+	});
 	test('invoice.paid creates one period allowance and replay does not create another', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
 		const invoice = { subscription: 'sub_1', customer: 'cus_1', payment_intent: 'pi_1', lines: { data: [{ period: { start: 1_800_000_000, end: 1_802_678_400 } }] } };

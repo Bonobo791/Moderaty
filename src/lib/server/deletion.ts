@@ -31,7 +31,7 @@
 import { and, asc, eq, inArray, isNotNull, isNull, lt, ne, or } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
-import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, users } from '$lib/server/db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, stripeLifetimeSlots, users } from '$lib/server/db/schema';
 import { getStripe } from '$lib/server/stripe/client';
 
 export const CONSENT_EMAIL_RETENTION_MS = 10 * 365.25 * 24 * 60 * 60 * 1000; // 10 years
@@ -45,10 +45,11 @@ export const WIPED_REFRESH_TOKEN = 'erased:account-deletion';
 
 
 type StripeRequestOptions = { timeout?: number; maxNetworkRetries?: number };
+type StripeRequestOptionsFactory = () => StripeRequestOptions | undefined;
 
 /** Cancels every live subscription before Stripe customer deletion can proceed. */
-async function cancelCustomerSubscriptions(customerId: string, options?: StripeRequestOptions): Promise<void> {
-	const response = await getStripe().subscriptions.list({ customer: customerId, status: 'all', limit: 100 }, options);
+async function cancelCustomerSubscriptions(customerId: string, options?: StripeRequestOptionsFactory): Promise<void> {
+	const response = await getStripe().subscriptions.list({ customer: customerId, status: 'all', limit: 100 }, options?.());
 	if (!response || !Array.isArray(response.data) || typeof response.has_more !== 'boolean') {
 		throw new Error(`Stripe returned a malformed subscription list for ${customerId}`);
 	}
@@ -57,7 +58,7 @@ async function cancelCustomerSubscriptions(customerId: string, options?: StripeR
 		if (!subscription || typeof subscription.id !== 'string' || typeof subscription.status !== 'string') {
 			throw new Error(`Stripe returned a malformed subscription for ${customerId}`);
 		}
-		if (subscription.status !== 'canceled') await getStripe().subscriptions.cancel(subscription.id, undefined, options);
+		if (subscription.status !== 'canceled' && subscription.status !== 'incomplete_expired') await getStripe().subscriptions.cancel(subscription.id, undefined, options?.());
 	}
 }
 
@@ -279,6 +280,7 @@ async function dissolveOrgs(tx: DeletionTx, dissolveOrgIds: string[]): Promise<s
 		await tx.insert(stripeDeletionOutbox).values({ customerId: org.stripeCustomerId }).onConflictDoNothing();
 	}
 	await tx.delete(invites).where(inArray(invites.orgId, dissolveOrgIds));
+	await tx.update(stripeLifetimeSlots).set({ activeOrgId: null, activeEntitlementId: null }).where(inArray(stripeLifetimeSlots.activeOrgId, dissolveOrgIds));
 	await tx.delete(memberships).where(inArray(memberships.orgId, dissolveOrgIds));
 	// The credit ledger is part of the org's records: comment ids,
 	// Checkout Session ids, PaymentIntent ids, and charge ids must not
@@ -443,12 +445,17 @@ export async function retryStripeCustomerDeletions(limit = 10, deadline?: number
 			// disable network retries (maxNetworkRetries: 0) to keep the whole
 			// operation within the remaining deadline; a timeout fails loudly
 			// (and records lastAttemptAt, so the row backs off for the next hour).
-			const requestOptions = remainingMs === undefined ? undefined : { timeout: remainingMs, maxNetworkRetries: 0 };
+			const requestOptions: StripeRequestOptionsFactory | undefined =
+				deadline === undefined ? undefined : () => {
+					const remaining = deadline - Date.now();
+					if (remaining <= 0) throw new Error('stripe deletion shared deadline expired');
+					return { timeout: remaining, maxNetworkRetries: 0 };
+				};
 			await cancelCustomerSubscriptions(row.customerId, requestOptions);
-			if (remainingMs === undefined) {
+			if (deadline === undefined) {
 				await getStripe().customers.del(row.customerId);
 			} else {
-				await getStripe().customers.del(row.customerId, undefined, requestOptions);
+				await getStripe().customers.del(row.customerId, undefined, requestOptions?.());
 			}
 			await db.delete(stripeDeletionOutbox).where(eq(stripeDeletionOutbox.id, row.id));
 			deleted += 1;

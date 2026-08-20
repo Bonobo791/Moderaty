@@ -23,6 +23,7 @@ import { SQLiteTable } from 'drizzle-orm/sqlite-core';
 import { beforeAll, beforeEach, vi } from 'vitest';
 import * as schema from './db/schema';
 import { consents, users } from './db/schema';
+import { LIFETIME_SLOT_LIMIT } from './billing/plans';
 
 export interface TestDb {
 	db: LibSQLDatabase<typeof schema>;
@@ -30,6 +31,8 @@ export interface TestDb {
 }
 
 const holder: { current: TestDb | null } = { current: null };
+
+const SEED_LIFETIME_SLOTS = `WITH RECURSIVE slots(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM slots WHERE n < ${LIFETIME_SLOT_LIMIT}) INSERT INTO stripe_lifetime_slots (slot) SELECT n FROM slots`;
 
 // Every test file that imports this helper gets the app db mocked onto the
 // shared in-memory instance. This module is always imported before the
@@ -60,9 +63,7 @@ export async function wipeTables(tables: string[]): Promise<void> {
 	}
 	const statements = ['PRAGMA foreign_keys = OFF', ...tables.map((table) => `DELETE FROM ${table}`)];
 	if (tables.includes('stripe_lifetime_slots')) {
-		statements.push(
-			'WITH RECURSIVE slots(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM slots WHERE n < 1000) INSERT INTO stripe_lifetime_slots (slot) SELECT n FROM slots'
-		);
+		statements.push(SEED_LIFETIME_SLOTS);
 	}
 	try {
 		await testDb().client.executeMultiple(statements.join(';\n'));
@@ -371,7 +372,7 @@ export async function createTestDb(): Promise<TestDb> {
 		`CREATE UNIQUE INDEX stripe_lifetime_entitlements_active_slot_idx ON stripe_lifetime_entitlements (slot) WHERE status = 'active'`,
 		`CREATE INDEX stripe_lifetime_entitlements_payment_intent_idx ON stripe_lifetime_entitlements (payment_intent_id)`,
 		`CREATE INDEX stripe_lifetime_entitlements_charge_idx ON stripe_lifetime_entitlements (charge_id)`,
-		`WITH RECURSIVE slots(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM slots WHERE n < 1000) INSERT INTO stripe_lifetime_slots (slot) SELECT n FROM slots`,
+		SEED_LIFETIME_SLOTS,
 		`CREATE TABLE memberships (
 			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,

@@ -207,7 +207,9 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 			paymentIntentId: paymentIntent?.id,
 			chargeId: typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : charge?.id
 		});
-		return result.status === 'active' && result.slot > 0 ? 'granted' : 'rejected';
+		if (result.status === 'active' && result.slot > 0) return 'granted';
+		console.error(`stripe: lifetime checkout ${sessionId} for org ${orgId} was PAID but claimed no slot (status ${result.status}, slot ${result.slot}) — manual refund required`);
+		return 'rejected';
 	}
 
 	// An unknown bundle id is an operator config bug, not a transient failure:
@@ -361,12 +363,67 @@ export async function fulfillAutoTopup(paymentIntentId: string): Promise<boolean
 	return grantAutoTopupCredits(orgId, pi);
 }
 
-async function recordDisputeReversal(input: { disputeId: string; chargeId: string; paymentIntentId?: string; status: string; source: string }): Promise<void> {
+type DisputeReversalStatus = 'pending' | 'reversed' | 'ignored' | 'won' | 'restored';
+type DisputeReversalSource = 'unknown' | 'lifetime' | 'subscription' | 'credits';
+
+async function recordDisputeReversal(input: { disputeId: string; chargeId: string; paymentIntentId?: string; status: DisputeReversalStatus; source: DisputeReversalSource }): Promise<void> {
 	await db.insert(stripeDisputeReversals).values(input).onConflictDoNothing({ target: stripeDisputeReversals.disputeId });
 }
 
-async function updateDisputeReversal(disputeId: string, values: { status?: string; source?: string }): Promise<void> {
+async function updateDisputeReversal(disputeId: string, values: { status?: DisputeReversalStatus; source?: DisputeReversalSource }): Promise<void> {
 	await db.update(stripeDisputeReversals).set(values).where(eq(stripeDisputeReversals.disputeId, disputeId));
+}
+
+/**
+ * Reverses credits granted for a refunded or disputed charge. Each path
+ * anchors on its OWN refType — 'refund' for refunds, 'dispute' for disputes
+ * (refId = charge id) — so the full lifecycle applies exactly once per step:
+ * a dispute reversal, a won-dispute restore (refType 'dispute', refId =
+ * dispute id), and a later legitimate full refund each clear their own anchor
+ * and can never block or double-apply one another. The reason field
+ * ('refund' vs 'dispute') keeps the ledger legible.
+ *
+ * @param chargeId - The Stripe charge identifier
+ * @param reason - Whether the reversal is for a refund or dispute
+ * @returns `true` if a reversal was applied, `false` if no matching credit grant was found or the reversal was already recorded
+ */
+async function reverseEntitlements(chargeId: string, reason: 'refund' | 'dispute', paymentIntentId?: string, disputeId?: string): Promise<boolean> {
+	const lifetimeChanged = reason === 'refund' ? await releaseLifetimeForPayment({ paymentIntentId, chargeId }) : await revokeLifetimeForDispute({ paymentIntentId, chargeId });
+	if (lifetimeChanged) {
+		if (disputeId) await updateDisputeReversal(disputeId, { status: 'reversed', source: 'lifetime' });
+		return true;
+	}
+	const periodChanged = reason === 'refund' ? await refundSubscriptionPeriod({ paymentIntentId, chargeId }) : await disputeSubscriptionPeriod({ paymentIntentId, chargeId });
+	if (periodChanged && disputeId) await updateDisputeReversal(disputeId, { status: 'reversed', source: 'subscription' });
+	return periodChanged;
+}
+
+async function reverseCreditGrant(chargeId: string, reason: 'refund' | 'dispute', disputeId: string | undefined, paymentIntentId: string | undefined): Promise<boolean> {
+	const match = await findGrantForStripe(db, { chargeId, paymentIntentId });
+	if (!match) {
+		await queuePendingReversal(chargeId, reason, disputeId);
+		console.error(`stripe: ${reason} for ${chargeId} matched no credit grant — queued as pending reversal for when the grant lands`);
+		return false;
+	}
+	const applied = await applyLedgerDelta(db, {
+		orgId: match.orgId,
+		delta: -match.credits,
+		reason,
+		refType: reason === 'refund' ? 'refund' : 'dispute',
+		refId: chargeId,
+		chargeId,
+		paymentIntentId
+	});
+	if (disputeId) {
+		let status: DisputeReversalStatus = applied ? 'reversed' : 'ignored';
+		if (!applied) {
+			const existingLedgerReversal = await db.select({ id: creditTransactions.id }).from(creditTransactions).where(and(eq(creditTransactions.orgId, match.orgId), eq(creditTransactions.reason, 'dispute'), eq(creditTransactions.chargeId, chargeId))).get();
+			const otherDispute = await db.select({ id: stripeDisputeReversals.id }).from(stripeDisputeReversals).where(and(eq(stripeDisputeReversals.chargeId, chargeId), ne(stripeDisputeReversals.disputeId, disputeId), eq(stripeDisputeReversals.source, 'credits'), or(eq(stripeDisputeReversals.status, 'reversed'), eq(stripeDisputeReversals.status, 'restored')))).get();
+			if (existingLedgerReversal && !otherDispute) status = 'reversed';
+		}
+		await updateDisputeReversal(disputeId, { status, source: 'credits' });
+	}
+	return applied;
 }
 
 /**
@@ -385,71 +442,14 @@ async function updateDisputeReversal(disputeId: string, values: { status?: strin
 export async function reverseCharge(chargeId: string, reason: 'refund' | 'dispute', disputeId?: string): Promise<boolean> {
 	const charge = await getStripe().charges.retrieve(chargeId, { expand: ['payment_intent'] });
 	const paymentIntentId = typeof charge.payment_intent === 'string' ? charge.payment_intent : charge.payment_intent?.id;
-	// v1 policy (docs/stripe-checkout-webhooks.md §7): credits are reversed
-	// only on a FULL refund. Stripe's charge.refunded fires for partial
-	// refunds too — compare the refunded and original amounts, and treat a
-	// charge without usable amounts as NOT fully refunded (never take credits
-	// away on ambiguous data; log loudly instead).
-	if (reason === 'refund') {
-		const fullyRefunded =
-			typeof charge.amount_refunded === 'number' &&
-			typeof charge.amount === 'number' &&
-			charge.amount_refunded >= charge.amount;
-		if (!fullyRefunded) {
-			console.error(
-				`stripe: refund for ${chargeId} is not a full refund (refunded ${charge.amount_refunded ?? 'unknown'} of ${charge.amount ?? 'unknown'}) — credits kept (v1 reverses only full refunds)`
-			);
-			return false;
-		}
-	}
-	if (reason === 'dispute' && !disputeId) throw new Error(`dispute reversal for ${chargeId} is missing dispute id`);
-	if (reason === 'dispute' && disputeId) await recordDisputeReversal({ disputeId, chargeId, paymentIntentId, status: 'pending', source: 'unknown' });
-	if (reason === 'refund' || reason === 'dispute') {
-		const lifetimeChanged = reason === 'refund' ? await releaseLifetimeForPayment({ paymentIntentId, chargeId }) : await revokeLifetimeForDispute({ paymentIntentId, chargeId });
-		if (lifetimeChanged) {
-			if (disputeId) await updateDisputeReversal(disputeId, { status: 'reversed', source: 'lifetime' });
-			return true;
-		}
-		const periodChanged = reason === 'refund' ? await refundSubscriptionPeriod({ paymentIntentId, chargeId }) : await disputeSubscriptionPeriod({ paymentIntentId, chargeId });
-		if (periodChanged) {
-			if (disputeId) await updateDisputeReversal(disputeId, { status: 'reversed', source: 'subscription' });
-			return true;
-		}
-	}
-	const match = await findGrantForStripe(db, { chargeId, paymentIntentId });
-	if (!match) {
-		// No grant YET — Stripe does not guarantee delivery order, so the
-		// charge.refunded/dispute.created can precede the checkout event that
-		// granted the money. Queue the reversal durably: when the grant lands,
-		// fulfillCheckout/fulfillAutoTopup drains it and the credits come back
-		// (codex 6153). A charge that never grants leaves a stale row the cron
-		// sweep drops after the webhook-retry horizon.
-		await queuePendingReversal(chargeId, reason, disputeId);
-		console.error(`stripe: ${reason} for ${chargeId} matched no credit grant — queued as pending reversal for when the grant lands`);
+	if (reason === 'refund' && (typeof charge.amount_refunded !== 'number' || typeof charge.amount !== 'number' || charge.amount_refunded < charge.amount)) {
+		console.error(`stripe: refund for ${chargeId} is not a full refund (refunded ${charge.amount_refunded ?? 'unknown'} of ${charge.amount ?? 'unknown'}) — credits kept (v1 reverses only full refunds)`);
 		return false;
 	}
-	// The grant may already have been reversed — each path's own anchor
-	// (refType 'refund' or 'dispute', refId = charge id) makes the reversal
-	// apply at most once per path.
-	const applied = await applyLedgerDelta(db, {
-		orgId: match.orgId,
-		delta: -match.credits,
-		reason,
-		refType: reason === 'refund' ? 'refund' : 'dispute',
-		refId: chargeId,
-		chargeId,
-		paymentIntentId
-	});
-	if (disputeId) {
-		let status = applied ? 'reversed' : 'ignored';
-		if (!applied) {
-			const existingLedgerReversal = await db.select({ id: creditTransactions.id }).from(creditTransactions).where(and(eq(creditTransactions.orgId, match.orgId), eq(creditTransactions.reason, 'dispute'), eq(creditTransactions.chargeId, chargeId))).get();
-			const otherDispute = await db.select({ id: stripeDisputeReversals.id }).from(stripeDisputeReversals).where(and(eq(stripeDisputeReversals.chargeId, chargeId), ne(stripeDisputeReversals.disputeId, disputeId), eq(stripeDisputeReversals.source, 'credits'), or(eq(stripeDisputeReversals.status, 'reversed'), eq(stripeDisputeReversals.status, 'restored')))).get();
-			if (existingLedgerReversal && !otherDispute) status = 'reversed';
-		}
-		await updateDisputeReversal(disputeId, { status, source: 'credits' });
-	}
-	return applied;
+	if (reason === 'dispute' && !disputeId) throw new Error(`dispute reversal for ${chargeId} is missing dispute id`);
+	if (disputeId) await recordDisputeReversal({ disputeId, chargeId, paymentIntentId, status: 'pending', source: 'unknown' });
+	if (await reverseEntitlements(chargeId, reason, paymentIntentId, disputeId)) return true;
+	return reverseCreditGrant(chargeId, reason, disputeId, paymentIntentId);
 }
 
 /**
@@ -515,9 +515,10 @@ export async function restoreWonDispute(disputeId: string): Promise<boolean> {
 
 
 type StripeRecord = Record<string, unknown>;
+const MALFORMED_STRIPE_OBJECT_ERROR = 'Stripe returned a malformed object';
 
 function asRecord(value: unknown): StripeRecord {
-	if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Stripe returned a malformed object');
+	if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(MALFORMED_STRIPE_OBJECT_ERROR);
 	return value as StripeRecord;
 }
 
@@ -527,9 +528,48 @@ function stripeId(value: unknown): string | undefined {
 	return undefined;
 }
 
+function invoiceSubscriptionId(invoice: StripeRecord): string | undefined {
+	const legacy = stripeId(invoice.subscription);
+	if (legacy) return legacy;
+	const parent = invoice.parent;
+	if (!parent || typeof parent !== 'object' || Array.isArray(parent)) return undefined;
+	const parentRecord = parent as StripeRecord;
+	if (parentRecord.type !== 'subscription_details') return undefined;
+	const details = parentRecord.subscription_details;
+	if (!details || typeof details !== 'object' || Array.isArray(details)) return undefined;
+	return stripeId((details as StripeRecord).subscription);
+}
+
+function subscriptionPeriod(subscription: StripeRecord, eventId: string): { periodStart: string; periodEnd: string } {
+	let start = subscription.current_period_start;
+	let end = subscription.current_period_end;
+	if (start === undefined || end === undefined) {
+		const items = asRecord(subscription.items);
+		const data = items.data;
+		if (!Array.isArray(data) || data.length === 0) throw new Error(`Stripe subscription event ${eventId} has no subscription items`);
+		const item = asRecord(data[0]);
+		start ??= item.current_period_start;
+		end ??= item.current_period_end;
+	}
+	return { periodStart: isoSeconds(start, 'current_period_start'), periodEnd: isoSeconds(end, 'current_period_end') };
+}
+
 function isoSeconds(value: unknown, field: string): string {
 	if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) throw new Error(`Stripe invoice field ${field} is invalid`);
 	return new Date(value * 1000).toISOString();
+}
+
+function invoicePeriod(invoice: StripeRecord): { periodStart: string; periodEnd: string } {
+	const lines = asRecord(invoice.lines);
+	const data = lines.data;
+	if (!Array.isArray(data) || data.length === 0) throw new Error('Stripe invoice has no line items');
+	const period = asRecord(asRecord(data[0]).period);
+	return { periodStart: isoSeconds(period.start, 'lines.data[0].period.start'), periodEnd: isoSeconds(period.end, 'lines.data[0].period.end') };
+}
+
+function storedSubscriptionPeriod(org: Awaited<ReturnType<typeof findOrgForStripe>>, eventId: string): { subscriptionId: string; periodStart: string; periodEnd: string } {
+	if (!org?.stripeSubscriptionId || !org.stripeSubscriptionPeriodStart || !org.stripeSubscriptionPeriodEnd) throw new Error(`Stripe invoice.payment_failed ${eventId} has no stored subscription period`);
+	return { subscriptionId: org.stripeSubscriptionId, periodStart: org.stripeSubscriptionPeriodStart, periodEnd: org.stripeSubscriptionPeriodEnd };
 }
 
 async function findOrgForStripe(subscriptionId?: string, customerId?: string) {
@@ -544,7 +584,7 @@ async function findOrgForStripe(subscriptionId?: string, customerId?: string) {
 async function handleInvoicePaid(event: Stripe.Event): Promise<void> {
 	const invoice = asRecord(event.data.object);
 	const invoiceId = stripeId(invoice.id);
-	const subscriptionId = stripeId(invoice.subscription);
+	const subscriptionId = invoiceSubscriptionId(invoice);
 	const customerId = stripeId(invoice.customer);
 	if (!invoiceId || !subscriptionId) throw new Error(`invoice.paid ${event.id} is missing invoice or subscription id`);
 	const org = await findOrgForStripe(subscriptionId, customerId);
@@ -552,30 +592,13 @@ async function handleInvoicePaid(event: Stripe.Event): Promise<void> {
 		console.error(`stripe: invoice.paid ${invoiceId} has no mapped organization`);
 		return;
 	}
-	const lines = asRecord(invoice.lines);
-	const data = lines.data;
-	if (!Array.isArray(data) || data.length === 0) throw new Error(`invoice.paid ${invoiceId} has no line items`);
-	const line = asRecord(data[0]);
-	const period = asRecord(line.period);
-	const periodStart = isoSeconds(period.start, 'lines.data[0].period.start');
-	const periodEnd = isoSeconds(period.end, 'lines.data[0].period.end');
-	await grantSubscriptionPeriod({
-		orgId: org.id,
-		subscriptionId,
-		invoiceId,
-		paymentIntentId: stripeId(invoice.payment_intent),
-		chargeId: stripeId(invoice.charge),
-		periodKey: `${periodStart}/${periodEnd}`,
-		periodStart,
-		periodEnd,
-		eventCreated: event.created,
-		eventId: event.id
-	});
+	const { periodStart, periodEnd } = invoicePeriod(invoice);
+	await grantSubscriptionPeriod({ orgId: org.id, subscriptionId, invoiceId, paymentIntentId: stripeId(invoice.payment_intent), chargeId: stripeId(invoice.charge), periodKey: `${periodStart}/${periodEnd}`, periodStart, periodEnd, eventCreated: event.created, eventId: event.id });
 }
 
 async function handleInvoicePaymentFailed(event: Stripe.Event): Promise<void> {
 	const invoice = asRecord(event.data.object);
-	const subscriptionId = stripeId(invoice.subscription);
+	const subscriptionId = invoiceSubscriptionId(invoice);
 	const customerId = stripeId(invoice.customer);
 	if (!subscriptionId && !customerId) throw new Error(`invoice.payment_failed ${event.id} is missing subscription and customer`);
 	const org = await findOrgForStripe(subscriptionId, customerId);
@@ -583,19 +606,8 @@ async function handleInvoicePaymentFailed(event: Stripe.Event): Promise<void> {
 		console.error(`stripe: invoice.payment_failed ${stripeId(invoice.id) ?? event.id} has no mapped organization`);
 		return;
 	}
-	if (!org.stripeSubscriptionId || !org.stripeSubscriptionPeriodStart || !org.stripeSubscriptionPeriodEnd) {
-		throw new Error(`invoice.payment_failed ${event.id} has no stored subscription period for ${org.id}`);
-	}
-	await applySubscriptionSnapshot({
-		orgId: org.id,
-		subscriptionId: org.stripeSubscriptionId,
-		status: 'past_due',
-		periodStart: org.stripeSubscriptionPeriodStart,
-		periodEnd: org.stripeSubscriptionPeriodEnd,
-		cancelAtPeriodEnd: org.stripeSubscriptionCancelAtPeriodEnd === 1,
-		eventCreated: event.created,
-		eventId: event.id
-	});
+	const period = storedSubscriptionPeriod(org, event.id);
+	await applySubscriptionSnapshot({ orgId: org.id, status: 'past_due', ...period, cancelAtPeriodEnd: org.stripeSubscriptionCancelAtPeriodEnd === 1, eventCreated: event.created, eventId: event.id });
 }
 
 async function handleSubscriptionEvent(event: Stripe.Event): Promise<void> {
@@ -609,9 +621,7 @@ async function handleSubscriptionEvent(event: Stripe.Event): Promise<void> {
 		console.error(`stripe: ${event.type} ${subscriptionId} has no mapped organization`);
 		return;
 	}
-	const periodStart = subscription.current_period_start === undefined ? org.stripeSubscriptionPeriodStart : isoSeconds(subscription.current_period_start, 'current_period_start');
-	const periodEnd = subscription.current_period_end === undefined ? org.stripeSubscriptionPeriodEnd : isoSeconds(subscription.current_period_end, 'current_period_end');
-	if (!periodStart || !periodEnd) throw new Error(`Stripe ${event.type} ${event.id} has no subscription period`);
+	const { periodStart, periodEnd } = subscriptionPeriod(subscription, event.id);
 	if (typeof subscription.cancel_at_period_end !== 'boolean') throw new Error(`Stripe ${event.type} ${event.id} has invalid cancel_at_period_end`);
 	await applySubscriptionSnapshot({
 		orgId: org.id,

@@ -29,6 +29,11 @@ import { getStripe } from '$lib/server/stripe/client';
 import { requireOrgRole } from '$lib/server/ownership';
 import type { SessionUser } from '$lib/server/session';
 
+const HOSTED_PLAN_EXISTS_ERROR = 'organization already has a hosted subscription';
+const ACTIVE_HOSTED_PLAN_ERROR = 'organization already has an active hosted subscription';
+const LIFETIME_PLAN_EXISTS_ERROR = 'organization already has the lifetime plan';
+const LIFETIME_SOLD_OUT_ERROR = 'lifetime plan is sold out';
+
 /**
  * Retrieves the organization's Stripe customer ID, creating and storing one when needed.
  *
@@ -111,6 +116,29 @@ export async function createCreditCheckout(orgId: string, user: SessionUser, bun
 }
 
 
+async function assertPlanAvailable(orgId: string, plan: PaidPlan): Promise<void> {
+	const org = await db.select({ plan: organizations.plan, stripeSubscriptionId: organizations.stripeSubscriptionId, stripeSubscriptionStatus: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, orgId)).get();
+	if (!org) throw new Error(`org not found: ${orgId}`);
+	const hasActiveHosted = Boolean(org.stripeSubscriptionId && ['active', 'trialing', 'past_due', 'unpaid'].includes(org.stripeSubscriptionStatus ?? ''));
+	const lifetime = await db.select({ id: stripeLifetimeEntitlements.id }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
+	if (plan === 'hosted') {
+		if (hasActiveHosted) throw new Error(HOSTED_PLAN_EXISTS_ERROR);
+		if (org.plan === 'lifetime' || lifetime) throw new Error(LIFETIME_PLAN_EXISTS_ERROR);
+		return;
+	}
+	if (hasActiveHosted) throw new Error(ACTIVE_HOSTED_PLAN_ERROR);
+	if (org.plan === 'lifetime' || lifetime) throw new Error(LIFETIME_PLAN_EXISTS_ERROR);
+	const available = await db.select({ slot: stripeLifetimeSlots.slot }).from(stripeLifetimeSlots).where(isNull(stripeLifetimeSlots.activeOrgId)).limit(1).get();
+	if (!available) throw new Error(LIFETIME_SOLD_OUT_ERROR);
+}
+
+function configuredPlanPriceId(plan: PaidPlan): string {
+	const priceId = env[planPriceEnv(plan)];
+	if (!priceId) throw new Error(`${planPriceEnv(plan)} is not configured`);
+	if (!priceId.startsWith('price_')) throw new Error(`${planPriceEnv(plan)} must be a Stripe Price id (price_...)`);
+	return priceId;
+}
+
 /**
  * Creates a Checkout Session for one of the hosted products. The application
  * owns the catalog: Stripe's configured Price is retrieved and checked before
@@ -121,34 +149,8 @@ export async function createPlanCheckout(orgId: string, user: SessionUser, plan:
 	requireOrgRole(user, 'owner');
 	const appUrl = env.APP_URL;
 	if (!appUrl) throw new Error('APP_URL is not configured');
-	const org = await db
-		.select({
-			plan: organizations.plan,
-			stripeSubscriptionId: organizations.stripeSubscriptionId,
-			stripeSubscriptionStatus: organizations.stripeSubscriptionStatus
-		})
-		.from(organizations)
-		.where(eq(organizations.id, orgId))
-		.get();
-	if (!org) throw new Error(`org not found: ${orgId}`);
-	const hasActiveHosted = Boolean(org.stripeSubscriptionId && ['active', 'trialing', 'past_due', 'unpaid'].includes(org.stripeSubscriptionStatus ?? ''));
-	const lifetime = await db.select({ id: stripeLifetimeEntitlements.id }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
-	if (plan === 'hosted' && hasActiveHosted) throw new Error('organization already has a hosted subscription');
-	if (plan === 'hosted' && (org.plan === 'lifetime' || lifetime)) throw new Error('organization already has the lifetime plan');
-	if (plan === 'lifetime') {
-		if (hasActiveHosted) throw new Error('organization already has an active hosted subscription');
-		if (org.plan === 'lifetime' || lifetime) throw new Error('organization already has the lifetime plan');
-		const available = await db
-			.select({ slot: stripeLifetimeSlots.slot })
-			.from(stripeLifetimeSlots)
-			.where(isNull(stripeLifetimeSlots.activeOrgId))
-			.limit(1)
-			.get();
-		if (!available) throw new Error('lifetime plan is sold out');
-	}
-	const priceId = env[planPriceEnv(plan)];
-	if (!priceId) throw new Error(`${planPriceEnv(plan)} is not configured`);
-	if (!priceId.startsWith('price_')) throw new Error(`${planPriceEnv(plan)} must be a Stripe Price id (price_...)`);
+	await assertPlanAvailable(orgId, plan);
+	const priceId = configuredPlanPriceId(plan);
 	const price = await getStripe().prices.retrieve(priceId);
 	validatePlanPrice(plan, price);
 	const customer = await getOrCreateStripeCustomer(orgId, user);

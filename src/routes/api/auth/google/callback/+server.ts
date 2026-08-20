@@ -39,51 +39,69 @@ type ListedChannel = { id: string; title: string };
  * skipped and counted loudly; a malformed RESPONSE (non-OK, bad JSON,
  * non-object body) throws 502 and aborts the connect.
  */
+type ChannelPage = { items: unknown[]; nextPageToken: unknown };
+
+/**
+ * Fetches ONE page of the YouTube channels listing. I1/I2: a non-OK response,
+ * malformed JSON, or a non-object body throws 502 and aborts the connect;
+ * a malformed ITEM is skipped and counted by the caller.
+ */
+async function fetchChannelPage(accessToken: string, pageToken: string | undefined): Promise<ChannelPage> {
+	const endpoint = new URL('https://www.googleapis.com/youtube/v3/channels');
+	endpoint.searchParams.set('part', 'snippet');
+	endpoint.searchParams.set('mine', 'true');
+	endpoint.searchParams.set('maxResults', '50');
+	if (pageToken) endpoint.searchParams.set('pageToken', pageToken);
+
+	const chRes = await fetchWithRetry(endpoint.toString(), {
+		headers: { Authorization: `Bearer ${accessToken}` }
+	});
+	const chText = await chRes.text();
+	if (!chRes.ok) {
+		console.error(`youtube channels lookup failed: ${chRes.status}`);
+		throw error(502, 'YouTube channel lookup failed — please retry');
+	}
+	let chData: { items?: unknown; nextPageToken?: unknown };
+	try {
+		chData = JSON.parse(chText) as typeof chData;
+	} catch {
+		console.error(`youtube channels lookup returned invalid JSON: ${chRes.status}`);
+		throw error(502, 'invalid response from YouTube — please retry');
+	}
+	if (typeof chData !== 'object' || chData === null) {
+		console.error(`youtube channels lookup returned a non-object body: ${chRes.status}`);
+		throw error(502, 'invalid response from YouTube — please retry');
+	}
+	return { items: Array.isArray(chData.items) ? chData.items : [], nextPageToken: chData.nextPageToken };
+}
+
+/** Appends the valid channels from one page; returns how many malformed items were skipped. */
+function collectChannelItems(items: unknown[], found: ListedChannel[]): number {
+	let skipped = 0;
+	for (const item of items as Array<{ id?: unknown; snippet?: { title?: unknown } }>) {
+		if (typeof item?.id === 'string' && item.id) {
+			found.push({
+				id: item.id,
+				title: typeof item.snippet?.title === 'string' ? item.snippet.title : 'Untitled channel'
+			});
+		} else {
+			skipped++;
+		}
+	}
+	return skipped;
+}
+
 async function fetchOwnedChannels(accessToken: string): Promise<ListedChannel[]> {
 	const found: ListedChannel[] = [];
 	let skipped = 0;
 	let pageToken: string | undefined;
 	for (let page = 0; page < MAX_CHANNEL_PAGES; page++) {
-		const endpoint = new URL('https://www.googleapis.com/youtube/v3/channels');
-		endpoint.searchParams.set('part', 'snippet');
-		endpoint.searchParams.set('mine', 'true');
-		endpoint.searchParams.set('maxResults', '50');
-		if (pageToken) endpoint.searchParams.set('pageToken', pageToken);
-
-		const chRes = await fetchWithRetry(endpoint.toString(), {
-			headers: { Authorization: `Bearer ${accessToken}` }
-		});
-		const chText = await chRes.text();
-		if (!chRes.ok) {
-			console.error(`youtube channels lookup failed: ${chRes.status}`);
-			throw error(502, 'YouTube channel lookup failed — please retry');
-		}
-		let chData: { items?: unknown; nextPageToken?: unknown };
-		try {
-			chData = JSON.parse(chText) as typeof chData;
-		} catch {
-			console.error(`youtube channels lookup returned invalid JSON: ${chRes.status}`);
-			throw error(502, 'invalid response from YouTube — please retry');
-		}
-		if (typeof chData !== 'object' || chData === null) {
-			console.error(`youtube channels lookup returned a non-object body: ${chRes.status}`);
-			throw error(502, 'invalid response from YouTube — please retry');
-		}
-
-		const items = Array.isArray(chData.items) ? chData.items : [];
-		for (const item of items as Array<{ id?: unknown; snippet?: { title?: unknown } }>) {
-			if (typeof item?.id === 'string' && item.id) {
-				found.push({
-					id: item.id,
-					title: typeof item.snippet?.title === 'string' ? item.snippet.title : 'Untitled channel'
-				});
-			} else {
-				skipped++;
-			}
-		}
-
+		const pageData = await fetchChannelPage(accessToken, pageToken);
+		skipped += collectChannelItems(pageData.items, found);
 		pageToken =
-			typeof chData.nextPageToken === 'string' && chData.nextPageToken ? chData.nextPageToken : undefined;
+			typeof pageData.nextPageToken === 'string' && pageData.nextPageToken
+				? pageData.nextPageToken
+				: undefined;
 		if (!pageToken) return finish(found, skipped);
 	}
 	console.error(`youtube channels lookup hit the ${MAX_CHANNEL_PAGES}-page bound — listing truncated`);

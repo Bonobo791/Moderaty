@@ -1,0 +1,91 @@
+#!/usr/bin/env node
+// Moderaty — YouTube Comment Auto-Moderation Tool
+// Copyright (C) 2026 Andrew Philip Weilbacher
+//
+// Licensed under the PolyForm Shield License 1.0.0; you may not use
+// this file except in compliance with the License. You may obtain a
+// copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
+//
+// The software is provided "as is", without warranty or condition of
+// any kind, express or implied. See the License for the specific
+// language governing permissions and limitations under the License.
+// A copy of the License is included in the LICENSE file at the
+// repository root.
+//
+// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+//
+// Migration bookkeeping reconciliation (2026-08-20 incident): commit b28a45f
+// swapped the license header inside the 16 older drizzle migration SQL files,
+// which changed their sha256. The DDL was ALREADY applied to the database, but
+// __drizzle_migrations still records the pre-swap hashes, so verify-migrations
+// reports "16 missing, 16 extra" and the deploy gate fails.
+//
+// This script rewrites ONLY the __drizzle_migrations bookkeeping rows so their
+// hashes match the current journal — it never runs DDL and never touches the
+// schema. It is intentionally strict: it refuses to run unless the journal and
+// the database agree on the NUMBER of applied migrations (positional alignment
+// is only safe for a same-count drift, which is exactly what a content-only
+// edit produces).
+//
+// Usage (run with the target environment's .env sourced):
+//   node scripts/reconcile-migrations.mjs [meta-dir]
+// Exit 0 = reconciled (or nothing to do); 1 = cannot safely reconcile.
+
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createClient } from '@libsql/client';
+
+const argv = process.argv.slice(2);
+if (argv.length > 1) {
+	console.error('Usage: node scripts/reconcile-migrations.mjs [meta-dir]');
+	process.exit(1);
+}
+const metaDir = argv[0] ?? fileURLToPath(new URL('../drizzle/meta', import.meta.url));
+const url = process.env.TURSO_DATABASE_URL;
+if (!url) {
+	console.error('reconcile-migrations: TURSO_DATABASE_URL is not set (source .env first)');
+	process.exit(1);
+}
+const authToken = process.env.TURSO_AUTH_TOKEN;
+if (!url.startsWith('file:') && !authToken) {
+	console.error('reconcile-migrations: TURSO_AUTH_TOKEN is required for remote databases');
+	process.exit(1);
+}
+
+const journalPath = join(metaDir, '_journal.json');
+const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
+const entries = journal.entries ?? [];
+const journalHashes = entries.map((e) => {
+	const file = join(metaDir, '..', `${e.tag}.sql`);
+	if (!existsSync(file)) throw new Error(`reconcile-migrations: migration file missing: ${file}`);
+	return createHash('sha256').update(readFileSync(file)).digest('hex');
+});
+
+const client = createClient({ url, authToken });
+const rows = (await client.execute('SELECT id, hash FROM __drizzle_migrations ORDER BY id')).rows;
+client.close();
+
+if (rows.length !== journalHashes.length) {
+	console.error(
+		`reconcile-migrations: REFUSING — database has ${rows.length} applied migrations but the journal has ${journalHashes.length}. ` +
+			'Only a same-count hash drift can be reconciled positionally; a genuine add/missing migration needs a human (DEPLOY.md §1).'
+	);
+	process.exit(1);
+}
+
+let changed = 0;
+for (let i = 0; i < journalHashes.length; i++) {
+	const row = rows[i];
+	const dbHash = String(row.hash);
+	const journalHash = journalHashes[i];
+	if (dbHash === journalHash) continue;
+	console.log(`reconcile-migrations: ${entries[i].tag}: ${dbHash.slice(0, 12)}… -> ${journalHash.slice(0, 12)}… (recorded hash updated; DDL already applied)`);
+	const client2 = createClient({ url, authToken });
+	await client2.execute({ sql: 'UPDATE __drizzle_migrations SET hash = ? WHERE id = ?', args: [journalHash, Number(row.id)] });
+	client2.close();
+	changed++;
+}
+console.log(`reconcile-migrations: ${changed} hash(es) updated to match the current journal.`);
+process.exit(0);

@@ -205,11 +205,12 @@ export async function releaseLifetimeForPayment(input: { paymentIntentId?: strin
 	if (matches.length === 0) throw new Error('payment intent or charge id is required');
 	return db.transaction(async (tx) => {
 		const entitlement = await tx
-			.select({ id: stripeLifetimeEntitlements.id, orgId: stripeLifetimeEntitlements.orgId, slot: stripeLifetimeEntitlements.slot })
+			.select({ id: stripeLifetimeEntitlements.id, orgId: stripeLifetimeEntitlements.orgId, slot: stripeLifetimeEntitlements.slot, status: stripeLifetimeEntitlements.status })
 			.from(stripeLifetimeEntitlements)
-			.where(and(eq(stripeLifetimeEntitlements.status, 'active'), or(...matches)))
+			.where(or(...matches))
 			.get();
 		if (!entitlement) return false;
+		if (entitlement.status !== 'active') return true;
 		await tx.update(stripeLifetimeEntitlements).set({ status: 'released', releasedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` }).where(eq(stripeLifetimeEntitlements.id, entitlement.id));
 		await tx.update(stripeLifetimeSlots).set({ activeOrgId: null, activeEntitlementId: null, releasedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` }).where(and(eq(stripeLifetimeSlots.slot, entitlement.slot), eq(stripeLifetimeSlots.activeOrgId, entitlement.orgId)));
 		const sub = await tx.select({ id: organizations.stripeSubscriptionId, status: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, entitlement.orgId)).get();
@@ -227,6 +228,8 @@ export async function refundSubscriptionPeriod(input: { paymentIntentId?: string
 		input.chargeId ? eq(stripeSubscriptionPeriods.chargeId, input.chargeId) : undefined
 	].filter((condition): condition is NonNullable<typeof condition> => Boolean(condition));
 	if (matches.length === 0) throw new Error('payment intent or charge id is required');
+	const existing = await db.select({ status: stripeSubscriptionPeriods.status }).from(stripeSubscriptionPeriods).where(or(...matches)).get();
+	if (existing && existing.status !== 'paid') return true;
 	const changed = await db
 		.update(stripeSubscriptionPeriods)
 		.set({ status: 'refunded' })
@@ -243,6 +246,8 @@ export async function disputeSubscriptionPeriod(input: { paymentIntentId?: strin
 		input.chargeId ? eq(stripeSubscriptionPeriods.chargeId, input.chargeId) : undefined
 	].filter((condition): condition is NonNullable<typeof condition> => Boolean(condition));
 	if (matches.length === 0) throw new Error('payment intent or charge id is required');
+	const existing = await db.select({ status: stripeSubscriptionPeriods.status }).from(stripeSubscriptionPeriods).where(or(...matches)).get();
+	if (existing && existing.status !== 'paid') return true;
 	const changed = await db
 		.update(stripeSubscriptionPeriods)
 		.set({ status: 'disputed' })

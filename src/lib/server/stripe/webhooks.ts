@@ -594,7 +594,7 @@ function invoicePeriod(invoice: StripeRecord, subscriptionId: string): { periodS
 }
 
 function invoicePaymentReferences(invoice: StripeRecord): { paymentIntentId?: string; chargeId?: string } {
-	const payments = optionalRecord(invoice.payments);
+	const payments = invoice.payments === undefined || invoice.payments === null ? undefined : asRecord(invoice.payments);
 	const data = payments?.data;
 	if (payments && !Array.isArray(data)) throw new Error('Stripe invoice payments is malformed');
 	if (Array.isArray(data)) {

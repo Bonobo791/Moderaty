@@ -172,6 +172,18 @@ describe('subscription lifecycle webhooks', () => {
 		await expect(handleStripeEvent(event('invoice.paid', 'in_missing_line', invoice) as never)).rejects.toThrow('no matching non-proration subscription line');
 	});
 
+	test('invoice.paid rejects a malformed current payments payload instead of using a legacy fallback', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
+		const invoice = {
+			subscription: 'sub_1',
+			customer: 'cus_1',
+			payments: 'not-a-payments-list',
+			payment_intent: 'pi_legacy',
+			lines: { data: [{ subscription: 'sub_1', period: { start: 1_800_000_000, end: 1_802_678_400 } }] }
+		};
+		await expect(handleStripeEvent(event('invoice.paid', 'in_malformed_payments', invoice) as never)).rejects.toThrow('malformed object');
+	});
+
 	test('invoice.payment_failed falls back to the invoice period before a period is stored', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
 		const invoice = {

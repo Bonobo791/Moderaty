@@ -140,6 +140,7 @@ describe('createPlanCheckout', () => {
 			line_items: [{ price: 'price_lifetime', quantity: 1 }],
 			metadata: { org_id: 'org-1', product: 'lifetime' }
 		}), { idempotencyKey: 'checkout:org-1:lifetime' });
+		expect(mocks.sessionsCreate.mock.calls[0][0].payment_intent_data).toBeUndefined();
 	});
 });
 

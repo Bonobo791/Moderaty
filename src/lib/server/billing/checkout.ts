@@ -158,7 +158,7 @@ export async function createPlanCheckout(orgId: string, user: SessionUser, plan:
 			customer,
 			client_reference_id: orgId,
 			metadata,
-			...(plan === 'hosted' ? { subscription_data: { metadata } } : { payment_intent_data: { setup_future_usage: 'off_session' } }),
+			...(plan === 'hosted' ? { subscription_data: { metadata } } : {}),
 			success_url: new URL('/usage/success?session_id={CHECKOUT_SESSION_ID}', appUrl).toString(),
 			cancel_url: new URL('/usage', appUrl).toString()
 		},

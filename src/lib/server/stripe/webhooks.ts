@@ -14,8 +14,8 @@
 // Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
 
 // Stripe webhook event handling. Every handler is idempotent:
-//  1. stripe_events dedupes the delivery (event_id UNIQUE, plus
-//     UNIQUE(event_type, object_id) for Stripe's two-Event-objects case).
+//  1. stripe_events dedupes the delivery by exact event_id; the
+//     event_type/object_id index is observational only, not a dedupe key.
 //  2. credit grants are anchored on UNIQUE(org_id, ref_type, ref_id) in the
 //     ledger, so even a dedupe miss cannot double-credit.
 // The inbox lease is claimed before side effects and marked complete only after
@@ -133,7 +133,7 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 		console.error(`stripe: checkout session ${sessionId} has no org_id/bundle metadata — cannot credit`);
 		return 'rejected';
 	}
-	if ((product && bundleId) || (!product && !bundleId)) {
+	if ((product && bundleId) || (!product && !bundleId) || (product && product !== 'hosted' && product !== 'lifetime')) {
 		console.error(`stripe: checkout session ${sessionId} has invalid product metadata — cannot fulfill`);
 		return 'rejected';
 	}

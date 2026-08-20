@@ -41,6 +41,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createClient } from '@libsql/client';
 import { loadMigrationConfig, readJournal } from './migration-config.mjs';
+import { applyReconciliationTransaction } from './reconcile-transaction.mjs';
 
 const { metaDir, url, authToken, journalPath } = loadMigrationConfig({ scriptName: 'reconcile-migrations' });
 const journal = readJournal(journalPath, 'reconcile-migrations');
@@ -150,32 +151,10 @@ try {
 	process.exit(1);
 }
 try {
-	for (const change of changes) {
-		const result = await tx.execute({
-			sql: 'UPDATE __drizzle_migrations SET hash = ? WHERE rowid = ?',
-			args: [change.journalHash, change.rowid]
-		});
-		if (Number(result.rowsAffected) !== 1) {
-			throw new Error(`UPDATE for rowid ${change.rowid} (${change.tag}) affected ${result.rowsAffected} rows`);
-		}
-		// Read back inside the transaction: the staged update must already
-		// show the new hash before we will commit it.
-		const check = await tx.execute({
-			sql: 'SELECT hash FROM __drizzle_migrations WHERE rowid = ?',
-			args: [change.rowid]
-		});
-		if (check.rows.length !== 1 || String(check.rows[0].hash) !== change.journalHash) {
-			throw new Error(`read-back for rowid ${change.rowid} (${change.tag}) did not show the new hash`);
-		}
-	}
-	await tx.commit();
+	await applyReconciliationTransaction(tx, changes);
 } catch (error) {
-	await tx.rollback().catch(() => {});
 	writer.close();
-	console.error(
-		`reconcile-migrations: update failed and was rolled back (${error.message}) — nothing was changed. ` +
-			'The token may be READ-ONLY for this database, or the writes are rejected.'
-	);
+	console.error(`reconcile-migrations: ${error.message}`);
 	process.exit(1);
 }
 writer.close();

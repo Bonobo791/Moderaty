@@ -275,6 +275,29 @@ describe('stripeLifetimeEntitlements', () => {
 	});
 });
 
+describe('stripeCheckoutAttempts', () => {
+	test('durable attempt identity and Stripe session uniqueness', async () => {
+		const { stripeCheckoutAttempts, organizations } = await loadSchema();
+		expect(getTableConfig(stripeCheckoutAttempts).name).toBe('stripe_checkout_attempts');
+		expectColumns(stripeCheckoutAttempts, {
+			id: { notNull: true, primary: true, autoIncrement: true },
+			attempt_id: { notNull: true },
+			org_id: { notNull: true },
+			product: { notNull: true },
+			idempotency_key: { notNull: true },
+			stripe_session_id: { notNull: false },
+			status: { notNull: true, hasDefault: true },
+			created_at: { notNull: true, hasDefault: true },
+			updated_at: { notNull: true, hasDefault: true }
+		});
+		expectForeignKey(stripeCheckoutAttempts, 'org_id', organizations, 'id', 'cascade');
+		expectUnique(stripeCheckoutAttempts, 'attempt_id', 'stripe_checkout_attempts_attempt_id_unique');
+		expectUnique(stripeCheckoutAttempts, 'idempotency_key', 'stripe_checkout_attempts_idempotency_key_unique');
+		expectUnique(stripeCheckoutAttempts, 'stripe_session_id', 'stripe_checkout_attempts_stripe_session_id_unique');
+		expectIndex(stripeCheckoutAttempts, 'stripe_checkout_attempts_org_status_idx', ['org_id', 'status']);
+	});
+});
+
 describe('memberships', () => {
 	test('composite primary key and cascading FKs', async () => {
 		const { memberships, users, organizations } = await loadSchema();

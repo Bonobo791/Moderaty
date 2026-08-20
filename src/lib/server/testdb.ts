@@ -372,6 +372,18 @@ export async function createTestDb(): Promise<TestDb> {
 		`CREATE UNIQUE INDEX stripe_lifetime_entitlements_active_slot_idx ON stripe_lifetime_entitlements (slot) WHERE status = 'active'`,
 		`CREATE INDEX stripe_lifetime_entitlements_payment_intent_idx ON stripe_lifetime_entitlements (payment_intent_id)`,
 		`CREATE INDEX stripe_lifetime_entitlements_charge_idx ON stripe_lifetime_entitlements (charge_id)`,
+		`CREATE TABLE stripe_checkout_attempts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			attempt_id TEXT NOT NULL UNIQUE,
+			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+			product TEXT NOT NULL,
+			idempotency_key TEXT NOT NULL UNIQUE,
+			stripe_session_id TEXT UNIQUE,
+			status TEXT NOT NULL DEFAULT 'pending',
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`,
+		`CREATE INDEX stripe_checkout_attempts_org_status_idx ON stripe_checkout_attempts (org_id, status)`,
 		SEED_LIFETIME_SLOTS,
 		`CREATE TABLE memberships (
 			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

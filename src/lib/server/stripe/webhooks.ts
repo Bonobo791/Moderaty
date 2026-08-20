@@ -31,6 +31,7 @@ import { applyLedgerDelta, drainPendingReversals, findGrantForStripe, queuePendi
 import { grantAutoTopupCredits, handleAutoTopupFailure } from '$lib/server/billing/autotopup';
 import { claimLifetimeSlot, grantSubscriptionPeriod, refundSubscriptionPeriod, disputeSubscriptionPeriod, releaseLifetimeForPayment, applySubscriptionSnapshot, revokeLifetimeForDispute, restoreLifetimeForDispute, restoreDisputedSubscriptionPeriod } from '$lib/server/billing/entitlements';
 import { bundleById, type CreditBundle } from '$lib/server/stripe/bundles';
+import { markCheckoutAttemptFulfilled } from '$lib/server/billing/checkout';
 import { getStripe } from '$lib/server/stripe/client';
 
 /**
@@ -581,6 +582,12 @@ async function findOrgForStripe(subscriptionId?: string, customerId?: string) {
 	return undefined;
 }
 
+function isSupersededSubscription(org: Awaited<ReturnType<typeof findOrgForStripe>>, subscriptionId: string, eventType: string): boolean {
+	if (!org?.stripeSubscriptionId || org.stripeSubscriptionId === subscriptionId) return false;
+	console.error(`stripe: ignoring stale ${eventType} for superseded subscription ${subscriptionId}; current subscription is ${org.stripeSubscriptionId}`);
+	return true;
+}
+
 async function handleInvoicePaid(event: Stripe.Event): Promise<void> {
 	const invoice = asRecord(event.data.object);
 	const invoiceId = stripeId(invoice.id);
@@ -592,6 +599,7 @@ async function handleInvoicePaid(event: Stripe.Event): Promise<void> {
 		console.error(`stripe: invoice.paid ${invoiceId} has no mapped organization`);
 		return;
 	}
+	if (isSupersededSubscription(org, subscriptionId, 'invoice.paid')) return;
 	const { periodStart, periodEnd } = invoicePeriod(invoice);
 	await grantSubscriptionPeriod({ orgId: org.id, subscriptionId, invoiceId, paymentIntentId: stripeId(invoice.payment_intent), chargeId: stripeId(invoice.charge), periodKey: `${periodStart}/${periodEnd}`, periodStart, periodEnd, eventCreated: event.created, eventId: event.id });
 }
@@ -606,6 +614,7 @@ async function handleInvoicePaymentFailed(event: Stripe.Event): Promise<void> {
 		console.error(`stripe: invoice.payment_failed ${stripeId(invoice.id) ?? event.id} has no mapped organization`);
 		return;
 	}
+	if (subscriptionId && isSupersededSubscription(org, subscriptionId, 'invoice.payment_failed')) return;
 	const period = storedSubscriptionPeriod(org, event.id);
 	await applySubscriptionSnapshot({ orgId: org.id, status: 'past_due', ...period, cancelAtPeriodEnd: org.stripeSubscriptionCancelAtPeriodEnd === 1, eventCreated: event.created, eventId: event.id });
 }
@@ -661,10 +670,12 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
 	try {
 		switch (event.type) {
 		case 'checkout.session.completed':
-		case 'checkout.session.async_payment_succeeded':
-			await fulfillCheckout(event.data.object.id);
+		case 'checkout.session.async_payment_succeeded': {
+			const result = await fulfillCheckout(event.data.object.id);
+			if (result === 'granted' || result === 'already') await markCheckoutAttemptFulfilled(event.data.object.id);
 			handled = true;
 			break;
+		}
 		case 'checkout.session.async_payment_failed':
 			// A delayed-notification method finally failed: reverse whatever the
 			// session may have granted (idempotent — see reverseCharge).

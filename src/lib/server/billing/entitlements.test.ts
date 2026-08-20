@@ -52,10 +52,8 @@ describe('subscription period entitlements', () => {
 		const period = await testDb().db.select().from(stripeSubscriptionPeriods).where(eq(stripeSubscriptionPeriods.invoiceId, 'in-1')).get();
 		expect(period?.consumedCredits).toBe(2);
 	});
-});
 
 	test('a refund queued before invoice fulfillment marks that period unusable', async () => {
-		await seedOrg();
 		await testDb().db.insert(stripePendingReversals).values({ chargeId: 'ch-1', reason: 'refund' });
 		await grantSubscriptionPeriod({
 			orgId: 'org-1', subscriptionId: 'sub-1', invoiceId: 'in-1', paymentIntentId: 'pi-1', chargeId: 'ch-1',
@@ -67,7 +65,6 @@ describe('subscription period entitlements', () => {
 	});
 
 	test('a won dispute restores the subscription period allowance', async () => {
-		await seedOrg();
 		await grantSubscriptionPeriod({ orgId: 'org-1', subscriptionId: 'sub-1', invoiceId: 'in-1', paymentIntentId: 'pi-1', chargeId: 'ch-1', periodKey: 'period-1', periodStart: '2026-09-01T00:00:00.000Z', periodEnd: '2026-10-01T00:00:00.000Z', eventCreated: 100, eventId: 'evt-1' });
 		expect(await disputeSubscriptionPeriod({ paymentIntentId: 'pi-1', chargeId: 'ch-1' })).toBe(true);
 		expect(await restoreDisputedSubscriptionPeriod({ paymentIntentId: 'pi-1', chargeId: 'ch-1' })).toBe(true);
@@ -77,12 +74,12 @@ describe('subscription period entitlements', () => {
 
 
 	test('a won dispute recorded before invoice fulfillment keeps the period paid', async () => {
-		await seedOrg();
 		await testDb().db.insert(stripePendingReversals).values({ chargeId: 'ch-1', reason: 'dispute', disputeId: 'disp-1' });
 		await testDb().db.insert(stripeDisputeReversals).values({ disputeId: 'disp-1', chargeId: 'ch-1', paymentIntentId: 'pi-1', status: 'won', source: 'unknown' });
 		await grantSubscriptionPeriod({ orgId: 'org-1', subscriptionId: 'sub-1', invoiceId: 'in-1', paymentIntentId: 'pi-1', chargeId: 'ch-1', periodKey: 'period-1', periodStart: '2026-09-01T00:00:00.000Z', periodEnd: '2026-10-01T00:00:00.000Z', eventCreated: 100, eventId: 'evt-1' });
 		expect((await testDb().db.select().from(stripeSubscriptionPeriods).where(eq(stripeSubscriptionPeriods.invoiceId, 'in-1')).get())?.status).toBe('paid');
 	});
+});
 
 describe('lifetime entitlements', () => {
 	beforeEach(async () => seedOrg());

@@ -17,20 +17,21 @@ import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
-import { organizations } from '$lib/server/db/schema';
+import { organizations, stripeLifetimeSlots } from '$lib/server/db/schema';
 import { createCreditCheckout, createPlanCheckout, getOrCreateStripeCustomer } from './checkout';
 import type { SessionUser } from '$lib/server/session';
 
 const mocks = vi.hoisted(() => ({
 	customersCreate: vi.fn(),
 	sessionsCreate: vi.fn(),
-	pricesRetrieve: vi.fn()
+	pricesRetrieve: vi.fn(),
+	sessionsRetrieve: vi.fn()
 }));
 
 vi.mock('$lib/server/stripe/client', () => ({
 	getStripe: () => ({
 		customers: { create: mocks.customersCreate },
-		checkout: { sessions: { create: mocks.sessionsCreate } },
+		checkout: { sessions: { create: mocks.sessionsCreate, retrieve: mocks.sessionsRetrieve } },
 		prices: { retrieve: mocks.pricesRetrieve }
 	})
 }));
@@ -38,7 +39,7 @@ vi.mock('$env/dynamic/private', () => ({
 	env: { APP_URL: 'https://app.example', STRIPE_PRICE_CREDITS_100: 'price_100', STRIPE_PRICE_CREDITS_500: 'price_500', STRIPE_PRICE_CREDITS_2000: 'price_2000', STRIPE_PRICE_HOSTED_MONTHLY: 'price_hosted', STRIPE_PRICE_LIFETIME: 'price_lifetime' }
 }));
 
-setupTestDb(['organizations']);
+setupTestDb(['organizations', 'stripe_lifetime_slots', 'stripe_checkout_attempts']);
 
 function owner(overrides: Partial<SessionUser> = {}): SessionUser {
 	return {
@@ -120,7 +121,7 @@ describe('getOrCreateStripeCustomer', () => {
 describe('createPlanCheckout', () => {
 	test('creates the hosted monthly subscription with a validated server catalog price', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
-		const url = await createPlanCheckout('org-1', owner(), 'hosted');
+		const url = await createPlanCheckout('org-1', owner(), 'hosted', 'attempt-hosted');
 		expect(url).toBe('https://checkout.stripe.com/c/pay/cs_1');
 		expect(mocks.pricesRetrieve).toHaveBeenCalledWith('price_hosted');
 		expect(mocks.sessionsCreate).toHaveBeenCalledWith(expect.objectContaining({
@@ -128,7 +129,29 @@ describe('createPlanCheckout', () => {
 			line_items: [{ price: 'price_hosted', quantity: 1 }],
 			metadata: { org_id: 'org-1', product: 'hosted' },
 			subscription_data: { metadata: { org_id: 'org-1', product: 'hosted' } }
-		}), { idempotencyKey: 'checkout:org-1:hosted' });
+		}), { idempotencyKey: expect.stringMatching(/^checkout:attempt-hosted:/) });
+	});
+
+	test('reuses an open attempt instead of creating a second Checkout Session', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		const first = await createPlanCheckout('org-1', owner(), 'hosted', 'attempt-retry');
+		mocks.sessionsRetrieve.mockResolvedValue({ id: 'cs_1', status: 'open', url: first });
+		const second = await createPlanCheckout('org-1', owner(), 'hosted', 'attempt-retry');
+		expect(second).toBe(first);
+		expect(mocks.sessionsCreate).toHaveBeenCalledTimes(1);
+		expect(mocks.sessionsRetrieve).toHaveBeenCalledWith('cs_1');
+	});
+
+	test('uses a fresh Stripe idempotency key after an expired attempt', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await createPlanCheckout('org-1', owner(), 'hosted', 'attempt-expired');
+		const firstKey = mocks.sessionsCreate.mock.calls[0][1].idempotencyKey as string;
+		mocks.sessionsRetrieve.mockResolvedValue({ id: 'cs_1', status: 'expired', url: null });
+		mocks.sessionsCreate.mockResolvedValueOnce({ id: 'cs_2', url: 'https://checkout.stripe.com/c/pay/cs_2' });
+		await createPlanCheckout('org-1', owner(), 'hosted', 'attempt-expired');
+		const secondKey = mocks.sessionsCreate.mock.calls[1][1].idempotencyKey as string;
+		expect(secondKey).not.toBe(firstKey);
+		expect(mocks.sessionsCreate).toHaveBeenCalledTimes(2);
 	});
 
 	test('rejects a lifetime checkout while a hosted subscription is active', async () => {
@@ -143,15 +166,23 @@ describe('createPlanCheckout', () => {
 	});
 
 
+	test('rejects lifetime checkout when every lifetime slot is occupied', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1' });
+		await expect(createPlanCheckout('org-1', owner(), 'lifetime')).rejects.toThrow('lifetime plan is sold out');
+		expect(mocks.pricesRetrieve).not.toHaveBeenCalled();
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+
 	test('creates the lifetime payment with a validated one-time price', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
-		await createPlanCheckout('org-1', owner(), 'lifetime');
+		await createPlanCheckout('org-1', owner(), 'lifetime', 'attempt-lifetime');
 		expect(mocks.pricesRetrieve).toHaveBeenCalledWith('price_lifetime');
 		expect(mocks.sessionsCreate).toHaveBeenCalledWith(expect.objectContaining({
 			mode: 'payment',
 			line_items: [{ price: 'price_lifetime', quantity: 1 }],
 			metadata: { org_id: 'org-1', product: 'lifetime' }
-		}), { idempotencyKey: 'checkout:org-1:lifetime' });
+		}), { idempotencyKey: expect.stringMatching(/^checkout:attempt-lifetime:/) });
 		expect(mocks.sessionsCreate.mock.calls[0][0].payment_intent_data).toBeUndefined();
 	});
 });
@@ -170,7 +201,8 @@ describe('createCreditCheckout', () => {
 				metadata: { org_id: 'org-1', bundle: 'credits_500', credits: '500' },
 				success_url: 'https://app.example/usage/success?session_id={CHECKOUT_SESSION_ID}',
 				cancel_url: 'https://app.example/usage'
-			})
+			}),
+			expect.objectContaining({ idempotencyKey: expect.stringMatching(/^checkout:/) })
 		);
 	});
 

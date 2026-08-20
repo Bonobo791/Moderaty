@@ -50,7 +50,7 @@ import { render } from 'svelte/server';
 import Page from './+page.svelte';
 import { actions, load } from './+page.server';
 
-setupTestDb(['organizations', 'credit_transactions', 'stripe_events']);
+setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_checkout_attempts']);
 
 const OWNER = TEST_OWNER;
 
@@ -100,6 +100,13 @@ describe('usage load', () => {
 		expect(data).toMatchObject({ maintenance: true, user: null, summary: null });
 		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('usage: load failed'));
 		errorSpy.mockRestore();
+	});
+
+	test('does not mark a NULL-balance unlimited org as out of credits', async () => {
+		await seedOrg({ creditsRemaining: null });
+		const data = (await load({ locals: { user: OWNER } } as never)) as { metered: boolean; summary: { remaining: number } };
+		expect(data.metered).toBe(false);
+		expect(data.summary.remaining).toBe(0);
 	});
 
 	test('reports the org balance, consumption, bundles and auto top-up state', async () => {

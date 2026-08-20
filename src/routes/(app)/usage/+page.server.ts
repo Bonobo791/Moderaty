@@ -24,7 +24,7 @@ import { eq } from 'drizzle-orm';
 
 import { AUTO_TOPUP_DEFAULT_THRESHOLD } from '$lib/server/billing/autotopup';
 import { createCreditCheckout, createPlanCheckout } from '$lib/server/billing/checkout';
-import { listCreditTransactions, usageSummary } from '$lib/server/billing/ledger';
+import { listCreditTransactions, orgIsMetered, usageSummary } from '$lib/server/billing/ledger';
 import { db } from '$lib/server/db';
 import { organizations } from '$lib/server/db/schema';
 import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
@@ -51,6 +51,7 @@ export const load: PageServerLoad = async ({ locals }) => {
 			maintenance: true,
 			user: null,
 			summary: null,
+			metered: false,
 			history: [],
 			bundles: [],
 			autoTopup: null,
@@ -83,14 +84,16 @@ export const load: PageServerLoad = async ({ locals }) => {
 		if (!org) {
 			throw error(500, 'account has no organization — contact support');
 		}
-		const [summary, history] = await Promise.all([
+		const [summary, history, metered] = await Promise.all([
 			usageSummary(user.orgId),
-			listCreditTransactions(user.orgId, 30)
+			listCreditTransactions(user.orgId, 30),
+			orgIsMetered(user.orgId)
 		]);
 		return {
 			maintenance: false,
 			user,
 			summary,
+			metered,
 			history: history.map((row) => ({
 				id: row.id,
 				delta: row.delta,
@@ -128,6 +131,7 @@ export const load: PageServerLoad = async ({ locals }) => {
 			maintenance: true,
 			user: null,
 			summary: null,
+			metered: false,
 			history: [],
 			bundles: [],
 			autoTopup: null,
@@ -141,9 +145,11 @@ export const actions: Actions = {
 	/** Owner-only: creates a Stripe Checkout for one credit bundle. */
 	buy: async ({ request, locals }) => {
 		const user = requireUser(locals);
-		const bundleId = String((await request.formData()).get('bundle') ?? '');
+		const form = await request.formData();
+		const bundleId = String(form.get('bundle') ?? '');
+		const attemptId = String(form.get('attempt_id') ?? '');
 		try {
-			const url = await createCreditCheckout(user.orgId, user, bundleId);
+			const url = await createCreditCheckout(user.orgId, user, bundleId, attemptId);
 			throw redirect(303, url);
 		} catch (error) {
 			// SvelteKit's redirect() is a function that THROWS a Redirect —
@@ -163,10 +169,12 @@ export const actions: Actions = {
 	/** Owner-only: creates a hosted subscription or lifetime Checkout. */
 	buyPlan: async ({ request, locals }) => {
 		const user = requireUser(locals);
-		const plan = String((await request.formData()).get('plan') ?? '');
+		const form = await request.formData();
+		const plan = String(form.get('plan') ?? '');
+		const attemptId = String(form.get('attempt_id') ?? '');
 		if (plan !== 'hosted' && plan !== 'lifetime') return fail(400, { error: 'Unknown billing plan.' });
 		try {
-			const url = await createPlanCheckout(user.orgId, user, plan);
+			const url = await createPlanCheckout(user.orgId, user, plan, attemptId);
 			throw redirect(303, url);
 		} catch (error) {
 			if (isRedirect(error) || isHttpError(error)) throw error;

@@ -151,6 +151,21 @@ export const stripeLifetimeEntitlements = sqliteTable('stripe_lifetime_entitleme
 	index('stripe_lifetime_entitlements_charge_idx').on(table.chargeId)
 ]);
 
+/** Durable local state for a Checkout request, including a retry-safe Stripe key. */
+export const stripeCheckoutAttempts = sqliteTable('stripe_checkout_attempts', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	attemptId: text('attempt_id').notNull().unique(),
+	orgId: text('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+	product: text('product').notNull(),
+	idempotencyKey: text('idempotency_key').notNull().unique(),
+	stripeSessionId: text('stripe_session_id').unique(),
+	status: text('status').notNull().default('pending'), // pending | open | fulfilled | expired
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+	updatedAt: text('updated_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+}, (table) => [
+	index('stripe_checkout_attempts_org_status_idx').on(table.orgId, table.status)
+]);
+
 export const memberships = sqliteTable('memberships', {
 	userId: text('user_id')
 		.notNull()

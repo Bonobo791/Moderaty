@@ -144,6 +144,13 @@ describe('subscription lifecycle webhooks', () => {
 		expect(await testDb().db.select().from(stripeSubscriptionPeriods).where(eq(stripeSubscriptionPeriods.invoiceId, 'in_current'))).toHaveLength(1);
 	});
 
+	test('ignores an invoice for a superseded subscription', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_current' });
+		const invoice = { id: 'in_stale', subscription: 'sub_old', customer: 'cus_1', payment_intent: 'pi_1', lines: { data: [{ period: { start: 1_800_000_000, end: 1_802_678_400 } }] } };
+		expect(await handleStripeEvent(event('invoice.paid', 'evt_stale_invoice', invoice) as never)).toBe(true);
+		expect(await testDb().db.select().from(stripeSubscriptionPeriods)).toHaveLength(0);
+	});
+
 	test('subscription events read billing periods from subscription items', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
 		const subscription = { id: 'sub_1', customer: 'cus_1', status: 'active', cancel_at_period_end: false, items: { data: [{ current_period_start: 1_800_000_000, current_period_end: 1_802_678_400 }] } };

@@ -295,4 +295,3 @@ export async function disputeSubscriptionPeriod(input: StripeIdentifiers): Promi
 	const changed = await db.update(stripeSubscriptionPeriods).set({ status: 'disputed' }).where(and(eq(stripeSubscriptionPeriods.id, existing.id), eq(stripeSubscriptionPeriods.status, 'paid'))).returning({ id: stripeSubscriptionPeriods.id });
 	return changed.length > 0;
 }
-

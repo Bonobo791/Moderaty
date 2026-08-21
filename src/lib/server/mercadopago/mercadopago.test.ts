@@ -19,6 +19,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { organizations, mercadoPagoCheckoutAttempts, creditTransactions } from '$lib/server/db/schema';
 import { setupTestDb, testDb } from '$lib/server/testdb';
+import { providerLedgerRef } from '$lib/server/billing/providers';
 
 const mocks = vi.hoisted(() => ({
 	env: {
@@ -36,7 +37,7 @@ vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
 import { createCreditPreference } from './client';
 import { configuredMercadoPagoBundles } from './bundles';
-import { fulfillMercadoPagoPayment, verifyWebhookSignature } from './webhooks';
+import { fulfillMercadoPagoPayment, processMercadoPagoPayment, verifyWebhookSignature } from './webhooks';
 
 setupTestDb(['organizations', 'credit_transactions', 'mercado_pago_checkout_attempts']);
 
@@ -45,6 +46,7 @@ const payment = {
 	status: 'approved',
 	externalReference: 'org-1:attempt_1',
 	transactionAmount: 5,
+	refundedAmount: 0,
 	currencyId: 'BRL'
 };
 
@@ -58,6 +60,11 @@ beforeEach(async () => {
 		idempotencyKey: 'mp-key',
 		amountCents: 500
 	});
+});
+
+test('uses a provider-prefixed ledger reference and rejects unsafe payment ids', () => {
+	expect(providerLedgerRef('mercadopago', 'pay-1')).toBe('mercadopago:pay-1');
+	expect(() => providerLedgerRef('mercadopago', 'pay:1')).toThrow(/payment id is invalid/);
 });
 
 test('lists only configured BRL bundles with whole-cent prices', () => {
@@ -115,4 +122,20 @@ test('rejects a payment whose amount does not match the persisted attempt', asyn
 	await expect(fulfillMercadoPagoPayment({ ...payment, transactionAmount: 4.99 })).rejects.toThrow(/amount does not match/);
 	const org = await testDb().db.select({ creditsRemaining: organizations.creditsRemaining }).from(organizations).where(eq(organizations.id, 'org-1')).get();
 	expect(org?.creditsRemaining).toBe(0);
+});
+
+test('reverses a full Mercado Pago refund exactly once after the approved grant', async () => {
+	expect(await processMercadoPagoPayment(payment)).toBe(true);
+	expect(await processMercadoPagoPayment({ ...payment, status: 'refunded', refundedAmount: 5 })).toBe(true);
+	expect(await processMercadoPagoPayment({ ...payment, status: 'refunded', refundedAmount: 5 })).toBe(false);
+	const org = await testDb().db.select({ creditsRemaining: organizations.creditsRemaining }).from(organizations).where(eq(organizations.id, 'org-1')).get();
+	const rows = await testDb().db.select().from(creditTransactions).where(and(eq(creditTransactions.orgId, 'org-1'), eq(creditTransactions.reason, 'refund')));
+	expect(org?.creditsRemaining).toBe(0);
+	expect(rows).toHaveLength(1);
+	expect(rows[0].delta).toBe(-100);
+});
+
+test('does not reverse a partial Mercado Pago refund', async () => {
+	await processMercadoPagoPayment(payment);
+	await expect(processMercadoPagoPayment({ ...payment, status: 'refunded', refundedAmount: 4 })).rejects.toThrow(/full refund/);
 });

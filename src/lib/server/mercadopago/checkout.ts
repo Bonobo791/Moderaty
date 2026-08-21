@@ -21,7 +21,7 @@ import { db } from '$lib/server/db';
 import { mercadoPagoCheckoutAttempts } from '$lib/server/db/schema';
 import { requireOrgRole } from '$lib/server/ownership';
 import type { SessionUser } from '$lib/server/session';
-import { createCreditPreference } from './client';
+import { mercadoPagoProvider } from './client';
 import { mercadoPagoBundleById, type MercadoPagoBundle } from './bundles';
 
 const ATTEMPT_ID = /^[A-Za-z0-9_-]{8,128}$/;
@@ -100,7 +100,7 @@ export async function createMercadoPagoCreditCheckout(
 	const attempt = await loadOrCreateAttempt(orgId, bundle, attemptId);
 	if (attempt.status === 'fulfilled') throw new Error('Mercado Pago checkout attempt has already completed');
 	if (attempt.initPoint) return attempt.initPoint;
-	const preference = await createCreditPreference({
+	const preference = await mercadoPagoProvider.createCheckout({
 		orgId,
 		attemptId: attempt.attemptId,
 		bundleId: bundle.id,
@@ -111,7 +111,7 @@ export async function createMercadoPagoCreditCheckout(
 	});
 	const updated = await db
 		.update(mercadoPagoCheckoutAttempts)
-		.set({ preferenceId: preference.id, initPoint: preference.initPoint, status: 'open', updatedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` })
+		.set({ preferenceId: preference.providerCheckoutId, initPoint: preference.checkoutUrl, status: 'open', updatedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` })
 		.where(and(eq(mercadoPagoCheckoutAttempts.attemptId, attempt.attemptId), isNull(mercadoPagoCheckoutAttempts.preferenceId)))
 		.returning({ initPoint: mercadoPagoCheckoutAttempts.initPoint });
 	if (updated.length === 1 && updated[0].initPoint) return updated[0].initPoint;

@@ -16,7 +16,7 @@
 import { json } from '@sveltejs/kit';
 
 import { retrievePayment } from '$lib/server/mercadopago/client';
-import { fulfillMercadoPagoPayment, verifyWebhookSignature } from '$lib/server/mercadopago/webhooks';
+import { processMercadoPagoPayment, verifyWebhookSignature } from '$lib/server/mercadopago/webhooks';
 
 export async function POST({ request }) {
 	let payload: unknown;
@@ -37,7 +37,7 @@ export async function POST({ request }) {
 	try {
 		verifyWebhookSignature(request.headers, paymentId);
 		const payment = await retrievePayment(paymentId);
-		const applied = await fulfillMercadoPagoPayment(payment);
+		const applied = await processMercadoPagoPayment(payment);
 		return json({ ok: true, applied });
 	} catch (cause) {
 		console.error(`Mercado Pago webhook failed for payment ${paymentId}:`, cause);

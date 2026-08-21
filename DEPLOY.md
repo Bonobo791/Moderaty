@@ -138,6 +138,10 @@ the site exists), local work, and outage recovery.
   the signed webhook fetches the payment from Mercado Pago before crediting.
 - Run a sandbox payment first. Confirm the credit ledger has one purchase row
   and that replaying the same webhook does not add credits twice.
+- Exercise a full refund and, where the Mercado Pago account exposes it, a
+  chargeback. Confirm a refund/dispute ledger reversal is created once, a
+  partial refund is rejected for manual review, and a repeated notification
+  does not reverse credits twice.
 - Mercado Pago currently covers manual prepaid credits only. Stripe remains the
   provider for hosted plans and automatic top-up until separate mandate and
   refund/dispute behavior is implemented and reviewed.

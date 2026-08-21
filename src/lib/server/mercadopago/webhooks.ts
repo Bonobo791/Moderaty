@@ -14,12 +14,13 @@
 // Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { and, eq, isNull, or, sql } from 'drizzle-orm';
+import { and, eq, gt, isNull, or, sql } from 'drizzle-orm';
 
 import { env } from '$env/dynamic/private';
 import { applyLedgerDelta } from '$lib/server/billing/ledger';
+import { providerLedgerRef } from '$lib/server/billing/providers';
 import { db } from '$lib/server/db';
-import { mercadoPagoCheckoutAttempts } from '$lib/server/db/schema';
+import { creditTransactions, mercadoPagoCheckoutAttempts, organizations } from '$lib/server/db/schema';
 import { mercadoPagoBundleById } from './bundles';
 import type { MercadoPagoPayment } from './client';
 
@@ -89,7 +90,7 @@ export async function fulfillMercadoPagoPayment(payment: MercadoPagoPayment): Pr
 			delta: bundle.credits,
 			reason: 'purchase',
 			refType: 'checkout_session',
-			refId: `mercadopago:${payment.id}`
+			refId: providerLedgerRef('mercadopago', payment.id)
 		});
 		const updated = await tx
 			.update(mercadoPagoCheckoutAttempts)
@@ -99,4 +100,46 @@ export async function fulfillMercadoPagoPayment(payment: MercadoPagoPayment): Pr
 		if (updated.length !== 1) throw new Error('Mercado Pago checkout attempt changed while fulfilling');
 		return applied;
 	});
+}
+
+async function reverseMercadoPagoPayment(payment: MercadoPagoPayment, reason: 'refund' | 'dispute'): Promise<boolean> {
+	if (payment.refundedAmount !== payment.transactionAmount) {
+		throw new Error('Mercado Pago payment is not a full refund');
+	}
+	const { orgId, attemptId } = externalReference(payment.externalReference);
+	const attempt = await db
+		.select({ orgId: mercadoPagoCheckoutAttempts.orgId, paymentId: mercadoPagoCheckoutAttempts.paymentId })
+		.from(mercadoPagoCheckoutAttempts)
+		.where(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId))
+		.get();
+	if (!attempt || attempt.orgId !== orgId) throw new Error('Mercado Pago checkout attempt was not found');
+	if (attempt.paymentId && attempt.paymentId !== payment.id) throw new Error('Mercado Pago checkout attempt has a different payment');
+	const grant = await db
+		.select({ orgId: creditTransactions.orgId, delta: creditTransactions.delta })
+		.from(creditTransactions)
+		.where(and(eq(creditTransactions.orgId, orgId), eq(creditTransactions.refType, 'checkout_session'), eq(creditTransactions.refId, providerLedgerRef('mercadopago', payment.id)), eq(creditTransactions.reason, 'purchase'), gt(creditTransactions.delta, 0)))
+		.get();
+	if (!grant) throw new Error('Mercado Pago refund arrived before its credit grant; retry is required');
+	if (reason === 'dispute') {
+		await db.update(organizations).set({ autoTopupEnabled: 0, autoTopupState: 'disabled' }).where(eq(organizations.id, orgId));
+	}
+	const reversed = await applyLedgerDelta(db, {
+		orgId,
+		delta: -grant.delta,
+		reason,
+		refType: reason,
+		refId: providerLedgerRef('mercadopago', payment.id)
+	});
+	await db
+		.update(mercadoPagoCheckoutAttempts)
+		.set({ paymentId: payment.id, status: reason === 'refund' ? 'refunded' : 'disputed', updatedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` })
+		.where(and(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId), or(isNull(mercadoPagoCheckoutAttempts.paymentId), eq(mercadoPagoCheckoutAttempts.paymentId, payment.id))));
+	return reversed;
+}
+
+export async function processMercadoPagoPayment(payment: MercadoPagoPayment): Promise<boolean> {
+	if (payment.status === 'approved') return fulfillMercadoPagoPayment(payment);
+	if (payment.status === 'refunded') return reverseMercadoPagoPayment(payment, 'refund');
+	if (payment.status === 'charged_back') return reverseMercadoPagoPayment(payment, 'dispute');
+	return false;
 }

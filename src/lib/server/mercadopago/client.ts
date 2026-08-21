@@ -16,6 +16,7 @@
 import { env } from '$env/dynamic/private';
 
 import { fetchWithRetry, jsonResponse } from '$lib/server/http';
+import type { PrepaidCheckoutInput, PrepaidCreditProvider } from '$lib/server/billing/providers';
 
 const API_BASE = 'https://api.mercadopago.com';
 
@@ -29,6 +30,7 @@ export type MercadoPagoPayment = {
 	status: string;
 	externalReference: string;
 	transactionAmount: number;
+	refundedAmount: number;
 	currencyId: string;
 };
 
@@ -100,6 +102,14 @@ export async function createCreditPreference(input: {
 	return { id: body.id, initPoint };
 }
 
+export const mercadoPagoProvider: PrepaidCreditProvider = {
+	id: 'mercadopago',
+	async createCheckout(input: PrepaidCheckoutInput) {
+		const preference = await createCreditPreference(input);
+		return { providerCheckoutId: preference.id, checkoutUrl: preference.initPoint };
+	}
+};
+
 export async function retrievePayment(paymentId: string): Promise<MercadoPagoPayment> {
 	if (!/^[A-Za-z0-9_-]{1,128}$/.test(paymentId)) throw new Error('Mercado Pago payment id is invalid');
 	const response = await fetchWithRetry(apiUrl(`/v1/payments/${encodeURIComponent(paymentId)}`), {
@@ -110,11 +120,14 @@ export async function retrievePayment(paymentId: string): Promise<MercadoPagoPay
 	if (typeof body.status !== 'string' || typeof body.external_reference !== 'string') throw new Error('Mercado Pago payment has invalid status or reference');
 	if (typeof body.transaction_amount !== 'number' || !Number.isFinite(body.transaction_amount) || body.transaction_amount <= 0) throw new Error('Mercado Pago payment has invalid amount');
 	if (typeof body.currency_id !== 'string') throw new Error('Mercado Pago payment has invalid currency');
+	const refundedAmount = body.transaction_amount_refunded;
+	if (refundedAmount !== undefined && (typeof refundedAmount !== 'number' || !Number.isFinite(refundedAmount) || refundedAmount < 0)) throw new Error('Mercado Pago payment has invalid refunded amount');
 	return {
 		id: String(body.id),
 		status: body.status,
 		externalReference: body.external_reference,
 		transactionAmount: body.transaction_amount,
+		refundedAmount: refundedAmount ?? 0,
 		currencyId: body.currency_id
 	};
 }

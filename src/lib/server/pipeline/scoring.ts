@@ -13,7 +13,7 @@ import { prepareRules } from '$lib/server/rules';
 import type { ToneProtections } from '$lib/server/tone';
 import { fetchVideoMetadata, type CommentPage } from '$lib/server/youtube';
 import { aiUnavailable, decide } from './decisions';
-import type { Decision, DecisionBatch, DecisionBatchOptions, ScoreOutcome } from './types';
+import type { Decision, DecisionBatchOptions, ScoreOutcome } from './types';
 
 /**
  * Fetches video titles/descriptions for level-2 tone scoring. Best-effort:

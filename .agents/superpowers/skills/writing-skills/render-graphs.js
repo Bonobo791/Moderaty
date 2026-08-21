@@ -15,7 +15,24 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
+
+const SKILLS_ROOT = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
+
+export function resolveSkillDirectory(input) {
+  const skillName = path.basename(input);
+  if (!/^[A-Za-z0-9_-]+$/.test(skillName)) {
+    throw new Error('skill directory name contains unsupported characters');
+  }
+  const knownSkill = fs.readdirSync(SKILLS_ROOT, { withFileTypes: true }).some(
+    entry => entry.isDirectory() && entry.name === skillName
+  );
+  if (!knownSkill) {
+    throw new Error(`skill directory is not a vendored skill: ${skillName}`);
+  }
+  return `${SKILLS_ROOT}/${skillName}`;
+}
 
 function extractDotBlocks(markdown) {
   const blocks = [];
@@ -81,8 +98,7 @@ function renderToSvg(dotContent) {
   }
 }
 
-function main() {
-  const args = process.argv.slice(2);
+export function main(args = process.argv.slice(2)) {
   const combine = args.includes('--combine');
   const skillDirArg = args.find(a => !a.startsWith('--'));
 
@@ -98,8 +114,8 @@ function main() {
     process.exit(1);
   }
 
-  const skillDir = path.resolve(skillDirArg);
-  const skillFile = path.join(skillDir, 'SKILL.md');
+  const skillDir = resolveSkillDirectory(skillDirArg);
+  const skillFile = `${skillDir}/SKILL.md`;
   const skillName = path.basename(skillDir).replace(/-/g, '_');
 
   if (!fs.existsSync(skillFile)) {
@@ -128,7 +144,7 @@ function main() {
 
   console.log(`Found ${blocks.length} diagram(s) in ${path.basename(skillDir)}/SKILL.md`);
 
-  const outputDir = path.join(skillDir, 'diagrams');
+  const outputDir = `${skillDir}/diagrams`;
   if (!fs.existsSync(outputDir)) {
     fs.mkdirSync(outputDir);
   }
@@ -138,12 +154,12 @@ function main() {
     const combined = combineGraphs(blocks, skillName);
     const svg = renderToSvg(combined);
     if (svg) {
-      const outputPath = path.join(outputDir, `${skillName}_combined.svg`);
+      const outputPath = `${outputDir}/${skillName}_combined.svg`;
       fs.writeFileSync(outputPath, svg);
       console.log(`  Rendered: ${skillName}_combined.svg`);
 
       // Also write the dot source for debugging
-      const dotPath = path.join(outputDir, `${skillName}_combined.dot`);
+      const dotPath = `${outputDir}/${skillName}_combined.dot`;
       fs.writeFileSync(dotPath, combined);
       console.log(`  Source: ${skillName}_combined.dot`);
     } else {
@@ -154,7 +170,7 @@ function main() {
     for (const block of blocks) {
       const svg = renderToSvg(block.content);
       if (svg) {
-        const outputPath = path.join(outputDir, `${block.name}.svg`);
+        const outputPath = `${outputDir}/${block.name}.svg`;
         fs.writeFileSync(outputPath, svg);
         console.log(`  Rendered: ${block.name}.svg`);
       } else {
@@ -166,4 +182,7 @@ function main() {
   console.log(`\nOutput: ${outputDir}/`);
 }
 
-main();
+
+if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
+  main();
+}

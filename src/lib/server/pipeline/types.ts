@@ -5,7 +5,7 @@
 
 import type { loadHandleSet } from '$lib/server/allowlist';
 import type { moderationActions } from '$lib/server/db/schema';
-import type { prepareRules, PreparedRule } from '$lib/server/rules';
+import type { prepareRules } from '$lib/server/rules';
 import type { CommentPage, NewComment, fetchVideoMetadata } from '$lib/server/youtube';
 import type { ToneContext, ToneProtections } from '$lib/server/tone';
 

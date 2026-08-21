@@ -5,7 +5,7 @@
 
 set -e
 
-if [ $# -ne 2 ]; then
+if [[ $# -ne 2 ]]; then
   echo "Usage: $0 <file_to_check> <test_pattern>"
   echo "Example: $0 '.git' 'src/**/*.test.ts'"
   exit 1
@@ -25,7 +25,7 @@ TEST_PATTERN="${TEST_PATTERN#./}"
 # like src/**/*.test.ts would skip src/top.test.ts; also try the pattern
 # with '**/' collapsed to cover files directly under the base directory.
 TEST_FILES=$(find . \( -path "./$TEST_PATTERN" -o -path "./${TEST_PATTERN//\*\*\//}" \) | sort -u)
-if [ -z "$TEST_FILES" ]; then
+if [[ -z "$TEST_FILES" ]]; then
   TOTAL=0
 else
   TOTAL=$(printf '%s\n' "$TEST_FILES" | wc -l | tr -d ' ')
@@ -39,7 +39,7 @@ for TEST_FILE in $TEST_FILES; do
   COUNT=$((COUNT + 1))
 
   # Skip if pollution already exists
-  if [ -e "$POLLUTION_CHECK" ]; then
+  if [[ -e "$POLLUTION_CHECK" ]]; then
     echo "⚠️  Pollution already exists before test $COUNT/$TOTAL"
     echo "   Skipping: $TEST_FILE"
     continue
@@ -51,7 +51,7 @@ for TEST_FILE in $TEST_FILES; do
   npm test "$TEST_FILE" > /dev/null 2>&1 || true
 
   # Check if pollution appeared
-  if [ -e "$POLLUTION_CHECK" ]; then
+  if [[ -e "$POLLUTION_CHECK" ]]; then
     echo ""
     echo "🎯 FOUND POLLUTER!"
     echo "   Test: $TEST_FILE"

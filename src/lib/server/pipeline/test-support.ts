@@ -59,21 +59,21 @@ const mocks = vi.hoisted(() => {
 					const params = queryParams(condition);
 					return [...new Set([
 						...state.existingIds,
-						...state.insertedComments.map((comment) => String(comment.id))
+						...state.insertedComments.map((comment) => queryKey(comment.id))
 					])].filter((id) => params.includes(id)).map((id) => ({ id }));
 				}
 				if (table === state.tables.rules) return state.ruleRows;
 				if (table === state.tables.channelAllowedHandles) {
 					// Honor eq(channelId, ...): only rows for the queried channel come back.
 					const params = queryParams(condition);
-					return state.handleRows.filter((row) => params.includes(String(row.channelId)));
+					return state.handleRows.filter((row) => params.includes(queryKey(row.channelId)));
 				}
 				if (table === state.tables.moderationActions) {
 					// Honor eq(channelId, ...) + inArray(state, [...]): only rows whose
 					// channel and state the query actually selects come back.
 					const params = queryParams(condition);
 					return state.moderationActions.filter((action) =>
-						params.includes(String(action.channelId)) && params.includes(String(action.state)));
+						params.includes(queryKey(action.channelId)) && params.includes(queryKey(action.state)));
 				}
 				throw new Error('unexpected all query');
 			}
@@ -132,23 +132,21 @@ const mocks = vi.hoisted(() => {
 						if (!params.includes('pending')) return { returning: async () => [] as Record<string, unknown>[] };
 						const claimed = state.moderationActions.filter((item) =>
 							item.state === 'pending' &&
-							params.includes(String(item.commentId)) &&
-							!state.unclaimedIds.includes(String(item.commentId)));
+							params.includes(queryKey(item.commentId)) &&
+							!state.unclaimedIds.includes(queryKey(item.commentId)));
 						claimed.forEach((item) => {
 							Object.assign(item, values);
 						});
-						return {
-							returning: async (fields: unknown) =>
-								fields && typeof fields === 'object' && 'commentId' in fields
-									? claimed.map((item) => ({ commentId: item.commentId }))
-									: []
-						};
+						const claimedCommentIds = claimed.map((item) => ({ commentId: item.commentId }));
+						const returningClaimedIds = async (fields: unknown) =>
+							fields && typeof fields === 'object' && 'commentId' in fields ? claimedCommentIds : [];
+						return { returning: returningClaimedIds };
 					}
 					// markDispatched / completeActions: honor inArray(commentId, ...) —
 					// only rows whose id the query selects are updated.
 					const params = queryParams(condition);
 					state.moderationActions.forEach((item) => {
-						if (params.includes(String(item.commentId))) Object.assign(item, values);
+						if (params.includes(queryKey(item.commentId))) Object.assign(item, values);
 					});
 					return none;
 				}
@@ -222,6 +220,11 @@ const dialect = new SQLiteSyncDialect();
 function queryParams(condition: unknown): unknown[] {
 	if (!condition) return [];
 	return dialect.sqlToQuery(condition as Parameters<typeof dialect.sqlToQuery>[0]).params;
+}
+
+function queryKey(value: unknown): string {
+	if (typeof value !== 'string') throw new Error('mock query key must be a string');
+	return value;
 }
 
 const originalDryRun = process.env.DRY_RUN;

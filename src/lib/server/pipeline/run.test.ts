@@ -437,6 +437,18 @@ describe('credit consumption (billing)', () => {
 		errorSpy.mockRestore();
 	});
 
+	test('treats an invalid AI budget as exhausted instead of spending it', async () => {
+		mocks.state.channel.orgId = 'org-1';
+		mocks.state.customerId = 'cus-1';
+		mocks.state.credits = Number.NaN;
+		mocks.scoreComment.mockResolvedValue(moderation(0.1));
+
+		const result = await runChannel('channel');
+
+		expect(mocks.scoreComment).not.toHaveBeenCalled();
+		expect(result).toMatchObject({ acted: 0, queued: 0, outOfCredits: true });
+	});
+
 	test('meters AI per comment: with 1 credit only the first AI comment is scored, the rest defer', async () => {
 		mocks.state.channel.orgId = 'org-1';
 		mocks.state.credits = 1;

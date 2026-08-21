@@ -1,0 +1,23 @@
+runtimes:
+    - node@22.2.0
+tools:
+    - biome@2.5.6
+    - opengrep@1.16.4
+    - trivy@0.69.3
+
+exclude_patterns:
+    - "**/node_modules/**"
+    - "**/.git/**"
+    - "**/.svelte-kit/**"
+    - "**/.output/**"
+    - "**/build/**"
+    - "**/dist/**"
+    - "**/.netlify/**"
+    - "**/.vercel/**"
+    - "**/.wrangler/**"
+    - "**/coverage/**"
+    - "**/reports/**"
+    - "**/.stryker-tmp/**"
+    - "**/.worktrees/**"
+    - "**/.codacy/**"
+    - ".agents/superpowers/**"

@@ -43,3 +43,5 @@ stryker.log
 reports/
 reasonix.toml
 .reasonix
+.aimax
+.codacy

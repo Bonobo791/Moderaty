@@ -25,6 +25,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	import Regulars from '$lib/components/landing/Regulars.svelte';
 	import Manifesto from '$lib/components/landing/Manifesto.svelte';
 	import Pricing from '$lib/components/landing/Pricing.svelte';
+	import CostMath from '$lib/components/landing/pricing/CostMath.svelte';
 	import Faq from '$lib/components/landing/Faq.svelte';
 	import FinalCta from '$lib/components/landing/FinalCta.svelte';
 	import Footer from '$lib/components/landing/Footer.svelte';
@@ -84,6 +85,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	<Regulars />
 	<Manifesto />
 	<Pricing />
+	<CostMath />
 	<Faq />
 	<FinalCta />
 </main>

@@ -1,12 +1,13 @@
 <!-- Moderaty — YouTube Comment Auto-Moderation Tool -->
 
 <script lang="ts">
+	import { browser } from '$app/environment';
 	import { page } from '$app/state';
 	import type { Locale } from '$lib/i18n/locale';
 	import { t } from '$lib/i18n/messages';
 
 	let { locale }: { locale: Locale } = $props();
-	const returnTo = $derived(`${page.url.pathname}${page.url.search}`);
+	const returnTo = $derived(`${page.url.pathname}${browser ? page.url.search : ''}`);
 </script>
 
 <form class="language-switcher" method="POST" action="/api/locale">

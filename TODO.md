@@ -9,9 +9,9 @@ re-evaluate on the next `dev → main` merge.
 
 - [x] Contact page with company name and email — implemented in
       `src/routes/contact/` and covered by route/server tests.
-- [ ] Add calculator to calculate costs per last 3 months of comment volume on
-      homepage (the user adds their number of comments and it returns a
-      projection).
+- [x] Add manual cost calculators to the homepage and Pricing page; users can
+      enter last-month volume or three months of volume for a low/high range
+      (`src/lib/landing/cost.ts`, `CostMath.svelte`).
 - [ ] Add calculator that pulls real data from YouTube to determine costs —
       a forecast that gives a range of potential costs for the next month with
       a disclaimer that this is a 95% probability of being in the shown range.
@@ -21,8 +21,9 @@ re-evaluate on the next `dev → main` merge.
       detail route, not the old dashboard design location.
 - [ ] Publish the Portuguese (`pt-BR`) product and legal translation with
       locale handling, deterministic formatting, and consent-version updates.
-- [ ] Add Mercado Pago as a second billing provider without changing Stripe
-      behavior; begin with BRL prepaid checkout and idempotent webhooks.
+- [x] Add Mercado Pago as a second billing provider without changing Stripe
+      behavior; the first slice is BRL prepaid checkout with idempotent signed
+      webhooks. Refund/dispute reconciliation and auto top-up remain deferred.
 - [ ] Replace legal operator placeholders (`[legal name]`, CNPJ, and address)
       in Terms and Privacy before production launch.
 

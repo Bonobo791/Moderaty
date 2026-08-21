@@ -210,4 +210,3 @@ function deferredDecision(comment: NewComment): Decision {
 		deferred: true
 	};
 }
-

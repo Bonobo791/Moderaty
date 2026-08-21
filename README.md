@@ -5,6 +5,7 @@ protection platform for creators. It applies the creator's rules first, uses AI
 as a second opinion, and sends uncertain decisions to a human review queue.
 
 [![Codacy Badge](https://app.codacy.com/project/badge/Grade/a971fb52cb6142efab9a17572f3e3f57)](https://app.codacy.com/gh/Bonobo791/Moderaty/dashboard?utm_source=github&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
+
 [![Quality gate status](https://sonarcloud.io/api/project_badges/measure?project=Bonobo791_Moderaty&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=Bonobo791_Moderaty)
 [![Bugs](https://sonarcloud.io/api/project_badges/measure?project=Bonobo791_Moderaty&metric=bugs)](https://sonarcloud.io/summary/new_code?id=Bonobo791_Moderaty)
 [![Code Smells](https://sonarcloud.io/api/project_badges/measure?project=Bonobo791_Moderaty&metric=code_smells)](https://sonarcloud.io/summary/new_code?id=Bonobo791_Moderaty)
@@ -15,6 +16,12 @@ as a second opinion, and sends uncertain decisions to a human review queue.
 [![Technical Debt](https://sonarcloud.io/api/project_badges/measure?project=Bonobo791_Moderaty&metric=sqale_index)](https://sonarcloud.io/summary/new_code?id=Bonobo791_Moderaty)
 [![Maintainability Rating](https://sonarcloud.io/api/project_badges/measure?project=Bonobo791_Moderaty&metric=sqale_rating)](https://sonarcloud.io/summary/new_code?id=Bonobo791_Moderaty)
 [![Vulnerabilities](https://sonarcloud.io/api/project_badges/measure?project=Bonobo791_Moderaty&metric=vulnerabilities)](https://sonarcloud.io/summary/new_code?id=Bonobo791_Moderaty)
+
+[![CodeScene general](https://codescene.io/images/analyzed-by-codescene-badge.svg)](https://codescene.io/projects/83771)
+[![CodeScene Average Code Health](https://codescene.io/projects/83771/status-badges/average-code-health)](https://codescene.io/projects/83771)
+[![CodeScene Hotspot Code Health](https://codescene.io/projects/83771/status-badges/hotspot-code-health)](https://codescene.io/projects/83771)
+[![CodeScene Missed Goals](https://codescene.io/projects/83771/status-badges/missed-goals)](https://codescene.io/projects/83771)
+[![CodeScene System Mastery](https://codescene.io/projects/83771/status-badges/system-mastery)](https://codescene.io/projects/83771)
 
 ## What it does
 

@@ -31,8 +31,10 @@ jobs:
       - name: Validate PR branch ref for the refactoring action
         shell: bash
         env:
-          HEAD_REF: ${{ github.event.issue.pull_request.head.ref }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.issue.number }}
         run: |
+          HEAD_REF=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.ref')
           case "$HEAD_REF" in
             ''|*[!A-Za-z0-9._/-]*)
               echo "Refusing unsafe PR branch name: $HEAD_REF" >&2

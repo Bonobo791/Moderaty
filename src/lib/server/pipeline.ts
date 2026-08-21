@@ -26,6 +26,7 @@ import { scoreComment, serializeScores } from '$lib/server/moderation';
 import { resolveOpenAiKey } from '$lib/server/openaiKey';
 import { matchPreparedRule, prepareRules, type PreparedRule, type RuleAction } from '$lib/server/rules';
 import { scoreTone, type ToneContext, type ToneProtections } from '$lib/server/tone';
+import { assertChannelActive, ChannelDeactivatedError, runEnforcement } from './pipeline/enforcement';
 import type {
 	AiOptions,
 	ChannelRunResult,
@@ -71,24 +72,6 @@ const RULE_ACTIONS: Record<RuleAction, {
  */
 function emptyResult(): ChannelRunResult {
 	return { fetched: 0, acted: 0, queued: 0, partial: false, skipped: true, dryRun: false };
-}
-
-/** Thrown when account deletion deactivates (or removes) the channel mid-run. */
-class ChannelDeactivatedError extends Error {}
-
-/**
- * Re-checks that the channel is still active before durable writes and YouTube
- * enforcement. Account deletion commits `active = 0` without waiting for an
- * in-flight run, so the run must stop at the next boundary instead of writing
- * rows or moderating comments for a deleted account.
- */
-async function assertChannelActive(channelId: string): Promise<void> {
-	const row = await db
-		.select({ active: channels.active })
-		.from(channels)
-		.where(eq(channels.id, channelId))
-		.get();
-	if (!row?.active) throw new ChannelDeactivatedError(`channel deactivated mid-run: ${channelId}`);
 }
 
 /**
@@ -598,176 +581,6 @@ async function stageDecisions(channelId: string, decisions: Decision[], orgId?: 
 	});
 }
 
-function validAction(action: string): YoutubeAction {
-	if (action === 'hold' || action === 'reject' || action === 'delete' || action === 'ban') return action;
-	throw new Error(`moderation action is invalid: ${action}`);
-}
-
-function outstandingAction(action: typeof moderationActions.$inferSelect): OutstandingAction {
-	// Stryker disable next-line ConditionalExpression, BlockStatement: equivalent — the only caller queries with inArray(state, ['pending','dispatched']), so no other state can reach this guard
-	if (action.state !== 'pending' && action.state !== 'dispatched') {
-		// Stryker disable next-line StringLiteral: equivalent — unreachable for the same reason as the guard above
-		throw new Error(`moderation action ${action.commentId} has invalid outstanding state: ${action.state}`);
-	}
-	return { ...action, action: validAction(action.action), state: action.state };
-}
-
-async function markDispatched(actions: OutstandingAction[]) {
-	// Stryker disable next-line ConditionalExpression: equivalent — both callers pass a non-empty array (applyModerationAction batches of ≥1, the delete loop a single action), so the empty-array branch is unreachable
-	if (!actions.length) return;
-	await db
-		.update(moderationActions)
-		.set({ state: 'dispatched', lastAttemptAt: new Date().toISOString() })
-		.where(inArray(moderationActions.commentId, actions.map((action) => action.commentId)));
-}
-
-async function claimPendingActions(actions: OutstandingAction[]): Promise<Set<string>> {
-	if (!actions.length) return new Set();
-	const claimed = await db
-		.update(moderationActions)
-		.set({ state: 'dispatched' })
-		.where(and(
-			inArray(moderationActions.commentId, actions.map((action) => action.commentId)),
-			eq(moderationActions.state, 'pending')
-		))
-		.returning({ commentId: moderationActions.commentId });
-	return new Set(claimed.map((row) => row.commentId));
-}
-
-async function completeActions(actions: OutstandingAction[]) {
-	// Stryker disable next-line ConditionalExpression: equivalent — all callers pass a non-empty array (applyModerationAction batches of ≥1, single verified or deleted actions)
-	if (!actions.length) return;
-	await db.transaction(async (transaction) => {
-		await transaction
-			.update(moderationActions)
-			.set({ state: 'completed' })
-			.where(inArray(moderationActions.commentId, actions.map((action) => action.commentId)));
-		await transaction.insert(auditLog).values(actions.map((action) => ({
-			channelId: action.channelId,
-			commentId: action.commentId,
-			action: action.action,
-			reason: action.reason,
-			actor: 'system',
-			// Staged at decision time (rows predating migration 0021, or erased
-			// by the retention sweep, carry NULL — written through as NULL).
-			authorHandle: action.authorHandle ?? null,
-			createdAt: new Date().toISOString()
-		})));
-	});
-}
-
-async function verificationResult(
-	action: OutstandingAction,
-	accessToken: string,
-	deadline: number | undefined
-): Promise<'completed' | 'retry'> {
-	assertBeforeDeadline(deadline);
-	const status = await getCommentModerationStatus(action.commentId, accessToken, deadline);
-	// Stryker disable next-line StringLiteral: 'retry'→"" equivalent — the caller only compares result === 'completed', so every other string takes the identical retry path
-	if (action.action === 'delete') return status === null ? 'completed' : 'retry';
-	// Stryker disable next-line StringLiteral: 'retry'→"" equivalent — same reasoning as the delete branch above
-	if (action.action === 'hold') return status === 'heldForReview' ? 'completed' : 'retry';
-	// Stryker disable next-line StringLiteral: 'retry'→"" equivalent — same reasoning as the delete branch above
-	if (action.action === 'reject') return status === 'rejected' ? 'completed' : 'retry';
-	// Ban is a single atomic API call (reject + banAuthor), so a comment already
-	// in a terminal state after dispatch means the call landed — complete it
-	// rather than stranding the action in manual review.
-	// Stryker disable next-line StringLiteral: 'retry'→"" equivalent — same reasoning as the delete branch above
-	return status === 'rejected' || status === null ? 'completed' : 'retry';
-}
-
-async function applyModerationAction(
-	actions: OutstandingAction[],
-	status: 'heldForReview' | 'rejected',
-	banAuthor: boolean,
-	accessToken: string,
-	deadline: number | undefined
-): Promise<number> {
-	let acted = 0;
-	for (let index = 0; index < actions.length; index += 50) {
-		const batch = actions.slice(index, index + 50);
-		await markDispatched(batch);
-		assertBeforeDeadline(deadline);
-		await setModerationStatus(batch.map((action) => action.commentId), status, banAuthor, accessToken, deadline);
-		await completeActions(batch);
-		acted += batch.length;
-	}
-	return acted;
-}
-
-async function applyYoutubeActions(
-	actions: OutstandingAction[],
-	accessToken: string,
-	deadline: number | undefined
-): Promise<number> {
-	const selected = (action: YoutubeAction) => actions.filter((item) => item.action === action);
-	let acted = 0;
-	acted += await applyModerationAction(selected('hold'), 'heldForReview', false, accessToken, deadline);
-	acted += await applyModerationAction(selected('reject'), 'rejected', false, accessToken, deadline);
-	acted += await applyModerationAction(selected('ban'), 'rejected', true, accessToken, deadline);
-	acted += await applyDeletes(selected('delete'), accessToken, deadline);
-	return acted;
-}
-
-/** Dispatches, deletes, and completes a batch of delete actions (I3/I4-safe). */
-async function applyDeletes(actions: OutstandingAction[], accessToken: string, deadline: number | undefined): Promise<number> {
-	let acted = 0;
-	for (const action of actions) {
-		await markDispatched([action]);
-		assertBeforeDeadline(deadline);
-		await deleteComment(action.commentId, accessToken, deadline);
-		await completeActions([action]);
-		acted += 1;
-	}
-	return acted;
-}
-
-async function processOutstandingActions(channelId: string, accessToken: string, deadline?: number): Promise<number> {
-	const actions = (await db
-		.select()
-		.from(moderationActions)
-		.where(and(
-			eq(moderationActions.channelId, channelId),
-			inArray(moderationActions.state, ['pending', 'dispatched'])
-		))
-		.all()).map(outstandingAction);
-	// Stryker disable next-line MethodExpression, ConditionalExpression: equivalent — claimPendingActions' SQL still guards eq(state, 'pending'), so handing it dispatched rows too claims nothing extra
-	const claimed = await claimPendingActions(actions.filter((action) => action.state === 'pending'));
-	// Stryker disable next-line ArrayDeclaration: equivalent — applyYoutubeActions selects entries by their action field, so a foreign element in the array is never selected
-	const ready: OutstandingAction[] = [];
-	for (const action of actions) {
-		if (action.state === 'pending') {
-			// Only actions this run claimed may be applied; an empty claim means a
-			// concurrent run owns the action, so skip it to avoid duplicate enforcement.
-			// Stryker disable next-line StringLiteral: equivalent — a ready entry's state field is never read again; applyYoutubeActions groups by action only
-			if (claimed.has(action.commentId)) ready.push({ ...action, state: 'dispatched' });
-			continue;
-		}
-		if ((await verifyDispatchedAction(action, accessToken, deadline)) === 'completed') {
-			await completeActions([action]);
-			continue;
-		}
-		ready.push(action);
-	}
-	return applyYoutubeActions(ready, accessToken, deadline);
-}
-
-/**
- * Re-verifies a previously-dispatched action. Transient verification failures
- * must not strand the action: leave it 'dispatched' so the next run
- * re-verifies, and fail loudly (DeadlineExceededError still escapes).
- */
-async function verifyDispatchedAction(action: OutstandingAction, accessToken: string, deadline: number | undefined): Promise<'completed' | 'retry'> {
-	try {
-		return await verificationResult(action, accessToken, deadline);
-	} catch (error) {
-		if (error instanceof DeadlineExceededError) throw error;
-		throw new Error(
-			`moderation action ${action.commentId} verification failed: ${error instanceof Error ? error.message : String(error)}`
-		);
-	}
-}
-
 async function persistResults(
 	channelId: string,
 	channel: typeof channels.$inferSelect,
@@ -835,32 +648,6 @@ function finishDryRun(
  * the backstop). Returns outOfCredits when AI was deferred by an empty balance,
  * which parks the cursor so the same comments re-fetch after a top-up.
  */
-async function runEnforcement(
-	channelId: string,
-	accessToken: string,
-	deadline: number | undefined,
-	orgId: string | null | undefined,
-	deferred: number
-): Promise<{ acted: number; outOfCredits: boolean }> {
-	// ... and again before any YouTube enforcement call.
-	await assertChannelActive(channelId);
-	const acted = await processOutstandingActions(channelId, accessToken, deadline);
-	if (orgId) {
-		try {
-			await maybeTriggerAutoTopUp(orgId);
-		} catch (error) {
-			console.error(`auto top-up trigger failed for org ${orgId}: ${error instanceof Error ? error.message : String(error)}`);
-		}
-	}
-	if (deferred > 0) {
-		console.error(
-			`out of credits for org ${orgId ?? '(none)'}: ${deferred} comment(s) deferred — AI scoring paused until credits are topped up`
-		);
-		return { acted, outOfCredits: true };
-	}
-	return { acted, outOfCredits: false };
-}
-
 /**
  * Loads and validates a channel for a run: not-found and invalid DRY_RUN throw
  * loudly; an inactive channel is a skip (empty result); window mode requires

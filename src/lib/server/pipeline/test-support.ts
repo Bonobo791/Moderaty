@@ -267,6 +267,23 @@ export function dispatchedAction(overrides: Record<string, unknown> = {}) {
 	};
 }
 
+
+/** One dry-run window page over a single fetched comment (live env). */
+export function runWindowPage({
+	pageToken = null,
+	nextPageToken = null,
+	reachedCursor = true
+}: { pageToken?: string | null; nextPageToken?: string | null; reachedCursor?: boolean } = {}) {
+	mocks.state.env.DRY_RUN = 'false';
+	mocks.scoreComment.mockResolvedValue(moderation(0.34));
+	mocks.fetchNewComments.mockResolvedValue({ comments: [newComment()], nextPageToken, reachedCursor });
+	return runChannel('channel', { forceDryRun: true, window: { boundary: '2026-05-01T00:00:00.000Z', pageToken } });
+}
+
+export function protectHandle(handle: string) {
+	mocks.state.handleRows = [{ id: 1, channelId: 'channel', handle, createdAt: '2026-01-01T00:00:00.000Z' }];
+}
+
 export function expectActionState(state: string) {
 	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({ commentId: 'comment', state })]);
 }

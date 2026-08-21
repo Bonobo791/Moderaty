@@ -30,7 +30,7 @@ ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 CODE_RE='\.(ts|tsx|js|mjs|cjs|jsx|astro|css|py|rb|go|java|php|sh|vue|svelte)$'
 SKIP_RE='^(node_modules/|dist/|dist-server/|\.svelte-kit/|\.codacy/)'
 
-declare -A FILES
+declare -A FILES=()
 while read -r local_ref local_sha remote_ref remote_sha; do
   [[ -n "$local_sha" && "$local_sha" != "0000000000000000000000000000000000000000" ]] || continue
   if [[ "$remote_sha" == "0000000000000000000000000000000000000000" ]]; then

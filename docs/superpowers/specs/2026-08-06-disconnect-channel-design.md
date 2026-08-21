@@ -17,7 +17,11 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 
 # Disconnect channel (full removal) — design
 
-Date: 2026-08-06. Status: approved by maintainer (approach A).
+Date: 2026-08-06. Status: implemented on `dev` (approach A).
+
+> The implementation lives in `src/routes/(app)/channels/[id]/+page.server.ts`
+> and the channel detail page. This historical design originally described a
+> dashboard action; the channel detail location is now authoritative.
 
 ## Purpose
 

@@ -24,6 +24,8 @@ import { eq } from 'drizzle-orm';
 
 import { AUTO_TOPUP_DEFAULT_THRESHOLD } from '$lib/server/billing/autotopup';
 import { createCreditCheckout, createPlanCheckout } from '$lib/server/billing/checkout';
+import { createMercadoPagoCreditCheckout } from '$lib/server/mercadopago/checkout';
+import { configuredMercadoPagoBundles } from '$lib/server/mercadopago/bundles';
 import { listCreditTransactions, orgIsMetered, usageSummary } from '$lib/server/billing/ledger';
 import { db } from '$lib/server/db';
 import { organizations } from '$lib/server/db/schema';
@@ -51,6 +53,7 @@ export const load: PageServerLoad = async ({ locals }) => {
 			maintenance: true,
 			user: null,
 			summary: null,
+			mercadoPagoBundles: [],
 			metered: false,
 			history: [],
 			bundles: [],
@@ -92,6 +95,7 @@ export const load: PageServerLoad = async ({ locals }) => {
 		return {
 			maintenance: false,
 			user,
+			mercadoPagoBundles: configuredMercadoPagoBundles(),
 			summary,
 			metered,
 			history: history.map((row) => ({
@@ -131,6 +135,7 @@ export const load: PageServerLoad = async ({ locals }) => {
 			maintenance: true,
 			user: null,
 			summary: null,
+			mercadoPagoBundles: [],
 			metered: false,
 			history: [],
 			bundles: [],
@@ -164,6 +169,21 @@ export const actions: Actions = {
 			// message so the user can act on them. Full details go to the
 			// server log either way.
 			return checkoutFailure(error, user.orgId);
+		}
+	},
+	/** Owner-only: creates a Mercado Pago BRL prepaid credit checkout. */
+	buyMercadoPago: async ({ request, locals }) => {
+		const user = requireUser(locals);
+		const form = await request.formData();
+		const bundleId = String(form.get('bundle') ?? '');
+		const attemptId = String(form.get('attempt_id') ?? '');
+		try {
+			const url = await createMercadoPagoCreditCheckout(user.orgId, user, bundleId, attemptId);
+			throw redirect(303, url);
+		} catch (cause) {
+			if (isRedirect(cause) || isHttpError(cause)) throw cause;
+			console.error(`usage: Mercado Pago checkout failed for org ${user.orgId}:`, cause);
+			return fail(400, { error: 'Could not start Mercado Pago checkout — please try again.' });
 		}
 	},
 	/** Owner-only: creates a hosted subscription or lifetime Checkout. */

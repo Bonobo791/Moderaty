@@ -1,0 +1,102 @@
+// Moderaty — YouTube Comment Auto-Moderation Tool
+// Copyright (C) 2026 Advanced Digital Marketing LTDA
+//
+// Licensed under the PolyForm Shield License 1.0.0; you may not use
+// this file except in compliance with the License. You may obtain a
+// copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
+//
+// The software is provided "as is", without warranty or condition of
+// any kind, express or implied. See the License for the specific
+// language governing permissions and limitations under the License.
+// A copy of the License is included in the LICENSE file at the
+// repository root.
+//
+// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
+
+import { createHmac, timingSafeEqual } from 'node:crypto';
+import { and, eq, isNull, or, sql } from 'drizzle-orm';
+
+import { env } from '$env/dynamic/private';
+import { applyLedgerDelta } from '$lib/server/billing/ledger';
+import { db } from '$lib/server/db';
+import { mercadoPagoCheckoutAttempts } from '$lib/server/db/schema';
+import { mercadoPagoBundleById } from './bundles';
+import type { MercadoPagoPayment } from './client';
+
+const MAX_SIGNATURE_AGE_MS = 5 * 60 * 1000;
+
+function webhookSecret(): string {
+	const secret = env.MERCADOPAGO_WEBHOOK_SECRET;
+	if (!secret) throw new Error('MERCADOPAGO_WEBHOOK_SECRET is not configured');
+	return secret;
+}
+
+function signaturePart(signature: string, name: string): string | null {
+	const part = signature.split(',').find((item) => item.trim().startsWith(`${name}=`));
+	return part ? part.trim().slice(name.length + 1) : null;
+}
+
+export function verifyWebhookSignature(headers: Headers, paymentId: string, now = Date.now()): void {
+	const signature = headers.get('x-signature');
+	const requestId = headers.get('x-request-id');
+	if (!signature || !requestId) throw new Error('Mercado Pago webhook signature headers are missing');
+	const timestamp = signaturePart(signature, 'ts');
+	const provided = signaturePart(signature, 'v1');
+	const timestampNumber = Number(timestamp);
+	if (!timestamp || !provided || !Number.isSafeInteger(timestampNumber)) throw new Error('Mercado Pago webhook signature is malformed');
+	if (Math.abs(now - timestampNumber * 1000) > MAX_SIGNATURE_AGE_MS) throw new Error('Mercado Pago webhook signature is expired');
+	const manifest = `id:${paymentId};request-id:${requestId};ts:${timestamp};`;
+	const expected = createHmac('sha256', webhookSecret()).update(manifest).digest('hex');
+	const expectedBytes = Buffer.from(expected, 'utf8');
+	const providedBytes = Buffer.from(provided, 'utf8');
+	if (expectedBytes.length !== providedBytes.length || !timingSafeEqual(expectedBytes, providedBytes)) {
+		throw new Error('Mercado Pago webhook signature is invalid');
+	}
+}
+
+function externalReference(value: string): { orgId: string; attemptId: string } {
+	const separator = value.lastIndexOf(':');
+	const orgId = value.slice(0, separator);
+	const attemptId = value.slice(separator + 1);
+	if (!/^[A-Za-z0-9_-]{8,128}$/.test(attemptId) || orgId.length === 0 || separator <= 0) {
+		throw new Error('Mercado Pago payment has an invalid external reference');
+	}
+	return { orgId, attemptId };
+}
+
+export async function fulfillMercadoPagoPayment(payment: MercadoPagoPayment): Promise<boolean> {
+	if (payment.status !== 'approved') return false;
+	if (payment.currencyId !== 'BRL') throw new Error('Mercado Pago payment currency is not BRL');
+	const { orgId, attemptId } = externalReference(payment.externalReference);
+	const attempt = await db
+		.select({
+			orgId: mercadoPagoCheckoutAttempts.orgId,
+			bundleId: mercadoPagoCheckoutAttempts.bundleId,
+			amountCents: mercadoPagoCheckoutAttempts.amountCents,
+			paymentId: mercadoPagoCheckoutAttempts.paymentId
+		})
+		.from(mercadoPagoCheckoutAttempts)
+		.where(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId))
+		.get();
+	if (!attempt || attempt.orgId !== orgId) throw new Error('Mercado Pago checkout attempt was not found');
+	if (attempt.paymentId && attempt.paymentId !== payment.id) throw new Error('Mercado Pago checkout attempt has a different payment');
+	const bundle = mercadoPagoBundleById(attempt.bundleId);
+	if (bundle.amountCents !== attempt.amountCents) throw new Error('Mercado Pago checkout amount no longer matches the configured catalog');
+	if (Math.round(payment.transactionAmount * 100) !== attempt.amountCents) throw new Error('Mercado Pago payment amount does not match the checkout');
+	return db.transaction(async (tx) => {
+		const applied = await applyLedgerDelta(tx, {
+			orgId,
+			delta: bundle.credits,
+			reason: 'purchase',
+			refType: 'checkout_session',
+			refId: `mercadopago:${payment.id}`
+		});
+		const updated = await tx
+			.update(mercadoPagoCheckoutAttempts)
+			.set({ paymentId: payment.id, status: 'fulfilled', paidAt: new Date().toISOString(), updatedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` })
+			.where(and(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId), or(isNull(mercadoPagoCheckoutAttempts.paymentId), eq(mercadoPagoCheckoutAttempts.paymentId, payment.id))))
+			.returning({ id: mercadoPagoCheckoutAttempts.id });
+		if (updated.length !== 1) throw new Error('Mercado Pago checkout attempt changed while fulfilling');
+		return applied;
+	});
+}

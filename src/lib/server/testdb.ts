@@ -384,6 +384,24 @@ export async function createTestDb(): Promise<TestDb> {
 			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE INDEX stripe_checkout_attempts_org_status_idx ON stripe_checkout_attempts (org_id, status)`,
+		`CREATE TABLE mercado_pago_checkout_attempts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			attempt_id TEXT NOT NULL UNIQUE,
+			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+			bundle_id TEXT NOT NULL,
+			idempotency_key TEXT NOT NULL UNIQUE,
+			preference_id TEXT UNIQUE,
+			init_point TEXT,
+			status TEXT NOT NULL DEFAULT 'pending',
+			currency TEXT NOT NULL DEFAULT 'BRL',
+			amount_cents INTEGER NOT NULL,
+			payment_id TEXT UNIQUE,
+			paid_at TEXT,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`,
+		`CREATE INDEX mercado_pago_attempts_org_status_idx ON mercado_pago_checkout_attempts (org_id, status)`,
+		`CREATE INDEX mercado_pago_attempts_payment_idx ON mercado_pago_checkout_attempts (payment_id)`,
 		SEED_LIFETIME_SLOTS,
 		`CREATE TABLE memberships (
 			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

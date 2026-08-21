@@ -166,6 +166,30 @@ export const stripeCheckoutAttempts = sqliteTable('stripe_checkout_attempts', {
 	index('stripe_checkout_attempts_org_status_idx').on(table.orgId, table.status)
 ]);
 
+// Mercado Pago prepaid-credit checkout attempts. This is deliberately separate
+// from Stripe's attempt table: provider identifiers and lifecycle states are
+// not interchangeable, while both providers ultimately fulfill through the
+// provider-neutral credit ledger.
+export const mercadoPagoCheckoutAttempts = sqliteTable('mercado_pago_checkout_attempts', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	attemptId: text('attempt_id').notNull().unique(),
+	orgId: text('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+	bundleId: text('bundle_id').notNull(),
+	idempotencyKey: text('idempotency_key').notNull().unique(),
+	preferenceId: text('preference_id').unique(),
+	initPoint: text('init_point'),
+	status: text('status').notNull().default('pending'), // pending | open | fulfilled
+	currency: text('currency').notNull().default('BRL'),
+	amountCents: integer('amount_cents').notNull(),
+	paymentId: text('payment_id').unique(),
+	paidAt: text('paid_at'),
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
+	updatedAt: text('updated_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+}, (table) => [
+	index('mercado_pago_attempts_org_status_idx').on(table.orgId, table.status),
+	index('mercado_pago_attempts_payment_idx').on(table.paymentId)
+]);
+
 export const memberships = sqliteTable('memberships', {
 	userId: text('user_id')
 		.notNull()

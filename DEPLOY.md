@@ -127,7 +127,22 @@ the site exists), local work, and outage recovery.
   context points at, so every production and `dev` deploy is gated on its
   own schema being current (Deploy Previews skip the migration step).
 
-## 3. Google Cloud Console
+## 3. Mercado Pago (optional BRL prepaid credits)
+
+- Create a Mercado Pago application for the target account and keep its
+  access token and webhook secret only in the matching Netlify/Coolify context.
+- Configure the `MERCADOPAGO_PRICE_*_BRL_CENTS` values and the exact BRL
+  catalog used by the account; the app rejects missing or invalid amounts.
+- Register `https://<your-site>/api/mercadopago/webhook` as the payment webhook
+  URL and select payment notifications. The return URL is not authoritative;
+  the signed webhook fetches the payment from Mercado Pago before crediting.
+- Run a sandbox payment first. Confirm the credit ledger has one purchase row
+  and that replaying the same webhook does not add credits twice.
+- Mercado Pago currently covers manual prepaid credits only. Stripe remains the
+  provider for hosted plans and automatic top-up until separate mandate and
+  refund/dispute behavior is implemented and reviewed.
+
+## 4. Google Cloud Console
 
 - Add the production redirect URI to the OAuth client:
   `https://<your-site>/api/auth/google/callback`
@@ -142,7 +157,7 @@ the site exists), local work, and outage recovery.
   `https://www.googleapis.com/auth/youtube.force-ssl`; while unverified, add
   each channel owner's Gmail as a test user.
 
-## 4. Cron
+## 5. Cron
 
 - `netlify/functions/cron.mjs` runs on a `* * * * *` schedule and calls
   `GET $APP_URL/api/cron` with the secret in an `Authorization: Bearer` header
@@ -163,7 +178,7 @@ the site exists), local work, and outage recovery.
   (the endpoint also accepts the plan-documented `?secret=` query form as a
   fallback)
 
-## 5. Post-launch verification
+## 6. Post-launch verification
 
 - Deploy, then open the site and connect a channel via Google OAuth.
 - Trigger cron manually (above) with `DRY_RUN=true`; expect `dryRun: true`
@@ -172,7 +187,7 @@ the site exists), local work, and outage recovery.
   comments appear in YouTube Studio → Comments → Held for review.
 - Watch the next scheduled invocation succeed in the Netlify function logs.
 
-## 6. Backups
+## 7. Backups
 
 - **Automated:** `.github/workflows/db-backup.yml` dumps the production
   database daily at 03:23 UTC and keeps the gzipped SQL dump as a workflow
@@ -192,7 +207,7 @@ the site exists), local work, and outage recovery.
   dump predates a newer migration (the dump includes `__drizzle_migrations`,
   so drizzle-kit applies just the gap). Verify per §1 afterwards.
 
-## 7. Database outage runbook
+## 8. Database outage runbook
 
 Turso outages (e.g. HTTP 502 "connect to upstream failed") are Turso-side;
 nothing in the app causes or can prevent them. When one happens:

@@ -22,6 +22,13 @@
 
 import { createHash } from 'node:crypto';
 
+import { and, eq } from 'drizzle-orm';
+
+import { db } from '$lib/server/db';
+import { mercadoPagoCheckoutAttempts } from '$lib/server/db/schema';
+import { retrievePayment } from '$lib/server/mercadopago/client';
+import { fulfillMercadoPagoPayment } from '$lib/server/mercadopago/webhooks';
+
 import { markCheckoutAttemptFulfilled } from '$lib/server/billing/checkout';
 import { requireUser } from '$lib/server/session';
 import { getStripe } from '$lib/server/stripe/client';
@@ -35,6 +42,26 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 	}
 	const user = requireUser(locals);
 	const sessionId = url.searchParams.get('session_id');
+	const provider = url.searchParams.get('provider');
+	const mercadoPagoAttemptId = url.searchParams.get('attempt_id');
+	if (provider === 'mercadopago' && mercadoPagoAttemptId) {
+		const attempt = await db
+			.select({ status: mercadoPagoCheckoutAttempts.status, paymentId: mercadoPagoCheckoutAttempts.paymentId })
+			.from(mercadoPagoCheckoutAttempts)
+			.where(and(eq(mercadoPagoCheckoutAttempts.attemptId, mercadoPagoAttemptId), eq(mercadoPagoCheckoutAttempts.orgId, user.orgId)))
+			.get();
+		if (!attempt) return { maintenance: false, user, sessionId: mercadoPagoAttemptId, granted: false, pending: false, failed: true };
+		if (attempt.status === 'fulfilled') return { maintenance: false, user, sessionId: mercadoPagoAttemptId, granted: true, pending: false, failed: false };
+		if (attempt.paymentId) {
+			try {
+				const applied = await fulfillMercadoPagoPayment(await retrievePayment(attempt.paymentId));
+				return { maintenance: false, user, sessionId: mercadoPagoAttemptId, granted: applied || attempt.status === 'fulfilled', pending: !applied, failed: false };
+			} catch (cause) {
+				console.error('usage/success: Mercado Pago fulfillment retry failed:', cause);
+			}
+		}
+		return { maintenance: false, user, sessionId: mercadoPagoAttemptId, granted: false, pending: true, failed: false };
+	}
 	if (!sessionId) return { maintenance: false, user, sessionId: null, granted: false, pending: false, failed: false };
 	let granted = false;
 	let pending = false;

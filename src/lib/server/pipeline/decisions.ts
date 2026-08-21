@@ -185,7 +185,7 @@ export async function decide(
 	// Out of credits: rules/allowlist already had their say — only the AI step
 	// is paused (product choice). The comment stays unprocessed and the cursor
 	// parks so a later run scores it once credits are topped up.
-	if (!(aiBudget.remaining > 0)) return deferredDecision(comment);
+	if (aiBudget.remaining <= 0 || Number.isNaN(aiBudget.remaining)) return deferredDecision(comment);
 	aiBudget.remaining -= 1;
 	// The budget claim IS the billing marker: this decision consumed an AI
 	// call, so stageDecisions may charge it exactly one credit.

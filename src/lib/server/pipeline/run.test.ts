@@ -68,7 +68,7 @@ test('persists the chronologically newest timestamp when UTC offsets differ', as
 });
 
 test('does not call YouTube moderation or deletion APIs during a dry run', async () => {
-	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'delete' }];
+	mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'keyword', pattern: 'comment', action: 'delete' }];
 	process.env.DRY_RUN = 'true';
 	mocks.state.env.DRY_RUN = 'true';
 
@@ -88,7 +88,7 @@ test('does not call YouTube moderation or deletion APIs during a dry run', async
 test('reads DRY_RUN from private runtime environment variables', async () => {
 	delete process.env.DRY_RUN;
 	mocks.state.env.DRY_RUN = 'true';
-	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'delete' }];
+	mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'keyword', pattern: 'comment', action: 'delete' }];
 
 	const result = await runChannel('channel');
 
@@ -102,7 +102,7 @@ test('forceDryRun previews a live deployment: dry-run audit rows carry the comme
 	// comment text on the audit row (comments rows are never written, so the
 	// audit row is the only place the text survives). Text is capped at 500.
 	mocks.state.env.DRY_RUN = 'false';
-	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'delete' }];
+	mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'keyword', pattern: 'comment', action: 'delete' }];
 	const text = `comment ${'x'.repeat(600)}`;
 	mocks.fetchNewComments.mockResolvedValue({
 		comments: [newComment({ text })],
@@ -127,7 +127,7 @@ test('forceDryRun previews a live deployment: dry-run audit rows carry the comme
 
 test('forceDryRun can only turn dry-run on — it never flips an env-dry deployment live', async () => {
 	mocks.state.env.DRY_RUN = 'true';
-	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'delete' }];
+	mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'keyword', pattern: 'comment', action: 'delete' }];
 
 	const result = await runChannel('channel', { forceDryRun: false });
 
@@ -577,7 +577,7 @@ describe('credit consumption (billing)', () => {
 		// would fail (codex 6167 / coderabbit).
 		mocks.state.channel.orgId = 'org-1';
 		mocks.state.credits = 5;
-		mocks.state.ruleRows = [{ id: 1, type: 'regex', pattern: 'spam', action: 'hold' }];
+		mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'regex', pattern: 'spam', action: 'hold' }];
 		mocks.fetchNewComments.mockResolvedValue({
 			comments: [newComment({ id: 'a', text: 'spam one' })],
 			nextPageToken: null,
@@ -595,7 +595,7 @@ describe('credit consumption (billing)', () => {
 	test('with credits available, only AI decisions consume credits — rule matches are free', async () => {
 		mocks.state.channel.orgId = 'org-1';
 		mocks.state.credits = 1;
-		mocks.state.ruleRows = [{ id: 1, type: 'regex', pattern: 'spam', action: 'hold' }];
+		mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'regex', pattern: 'spam', action: 'hold' }];
 		mocks.scoreComment.mockResolvedValue(moderation(0.9));
 		mocks.fetchNewComments.mockResolvedValue({
 			comments: [newComment({ id: 'a', text: 'spam one' }), newComment({ id: 'b', text: 'free text' })],

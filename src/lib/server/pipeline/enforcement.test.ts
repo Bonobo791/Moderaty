@@ -21,8 +21,8 @@ afterEach(restoreDryRun);
 
 test('records successful remote actions before a later action fails', async () => {
 	mocks.state.ruleRows = [
-		{ id: 1, type: 'keyword', pattern: 'hold', action: 'hold' },
-		{ id: 2, type: 'keyword', pattern: 'reject', action: 'reject' }
+		{ id: 1, channelId: 'channel', type: 'keyword', pattern: 'hold', action: 'hold' },
+		{ id: 2, channelId: 'channel', type: 'keyword', pattern: 'reject', action: 'reject' }
 	];
 	mocks.fetchNewComments.mockResolvedValue({
 		comments: [newComment({ id: 'held', text: 'hold this' }), newComment({ id: 'rejected', text: 'reject this' })],
@@ -43,7 +43,7 @@ test('records successful remote actions before a later action fails', async () =
 });
 
 test('verifies a dispatched action after its completion transaction fails', async () => {
-	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'reject' }];
+	mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'keyword', pattern: 'comment', action: 'reject' }];
 	mocks.db.transaction
 		.mockImplementationOnce(async (callback: (value: typeof mocks.db.transactionValue) => Promise<unknown>) => callback(mocks.db.transactionValue))
 		.mockImplementationOnce(async (callback: (value: typeof mocks.db.transactionValue) => Promise<unknown>) => callback(mocks.db.transactionValue))
@@ -149,7 +149,7 @@ test('stops when account deletion replaces the shared-channel connector identity
 });
 
 test('does not dispatch staged enforcement when the channel is deactivated after decisions are staged', async () => {
-	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'reject' }];
+	mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'keyword', pattern: 'comment', action: 'reject' }];
 	// Deletion commits during the staging transaction: the staged rows belong to
 	// the pre-delete run, but no YouTube enforcement may follow.
 	mocks.db.transaction.mockImplementationOnce(async (callback: (value: typeof mocks.db.transactionValue) => Promise<unknown>) => {
@@ -169,7 +169,7 @@ test('does not dispatch staged enforcement when the channel is deactivated after
 });
 
 test('skips a pending action already claimed by a concurrent run', async () => {
-	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'reject' }];
+	mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'keyword', pattern: 'comment', action: 'reject' }];
 	mocks.state.unclaimedIds = ['comment'];
 
 	const result = await runChannel('channel');
@@ -182,7 +182,7 @@ test('skips a pending action already claimed by a concurrent run', async () => {
 });
 
 test('rule delete action enforces deleteComment end-to-end', async () => {
-	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'delete' }];
+	mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'keyword', pattern: 'comment', action: 'delete' }];
 
 	const result = await runChannel('channel');
 
@@ -197,7 +197,7 @@ test('rule delete action enforces deleteComment end-to-end', async () => {
 });
 
 test('rule ban action rejects the comment with banAuthor set', async () => {
-	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'ban' }];
+	mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'keyword', pattern: 'comment', action: 'ban' }];
 
 	const result = await runChannel('channel');
 
@@ -210,7 +210,7 @@ test('rule ban action rejects the comment with banAuthor set', async () => {
 });
 
 test('rule hold action dispatches heldForReview to YouTube', async () => {
-	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'hold' }];
+	mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'keyword', pattern: 'comment', action: 'hold' }];
 
 	const result = await runChannel('channel');
 
@@ -288,7 +288,7 @@ test('does not run the claim update when there is nothing pending to claim', asy
 });
 
 test('applies YouTube moderation in batches of 50', async () => {
-	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'spam', action: 'reject' }];
+	mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'keyword', pattern: 'spam', action: 'reject' }];
 	mocks.fetchNewComments.mockResolvedValue({
 		comments: Array.from({ length: 51 }, (_, index) => newComment({ id: `c${index}`, text: `spam ${index}` })),
 		nextPageToken: null,

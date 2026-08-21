@@ -63,7 +63,7 @@ test('does not apply another channel’s rules', async () => {
 });
 
 test('validates and compiles each regex rule once per run, not per comment', async () => {
-	mocks.state.ruleRows = [{ id: 1, type: 'regex', pattern: 'spam', action: 'hold' }];
+	mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'regex', pattern: 'spam', action: 'hold' }];
 	mocks.fetchNewComments.mockResolvedValue({
 		comments: [newComment({ id: 'a', text: 'spam one' }), newComment({ id: 'b', text: 'spam two' })],
 		nextPageToken: null,
@@ -282,7 +282,7 @@ test('a protected handle is approved without rules, scoring, or enforcement — 
 	// A ban rule matches the comment text, but the protected handle decides
 	// first: no rule decision, no AI call, no YouTube enforcement.
 	protectHandle('author'); // newComment's default authorName is 'Author'
-	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'toxic', action: 'ban' }];
+	mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'keyword', pattern: 'toxic', action: 'ban' }];
 	mocks.fetchNewComments.mockResolvedValue({
 		comments: [newComment({ text: 'this is toxic' })],
 		nextPageToken: null,
@@ -306,7 +306,7 @@ test('a protected handle is approved without rules, scoring, or enforcement — 
 
 test('only the protected identity is exempt — the same toxic text still bans another commenter in the same run', async () => {
 	protectHandle('author');
-	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'toxic', action: 'ban' }];
+	mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'keyword', pattern: 'toxic', action: 'ban' }];
 	mocks.fetchNewComments.mockResolvedValue({
 		comments: [
 			newComment({ id: 'protected', text: 'this is toxic' }),

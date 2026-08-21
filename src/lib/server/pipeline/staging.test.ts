@@ -36,7 +36,7 @@ test('writes an approval audit entry for a low-risk AI decision', async () => {
 
 test('a dry run counts the protected comment as implicit approved and audits the approve intent', async () => {
 	protectHandle('author');
-	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'toxic', action: 'ban' }];
+	mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'keyword', pattern: 'toxic', action: 'ban' }];
 	mocks.fetchNewComments.mockResolvedValue({
 		comments: [newComment({ text: 'this is toxic' })],
 		nextPageToken: null,
@@ -127,7 +127,7 @@ test('a real-run enforcement decision stages its normalized handle, and the comp
 	// The ban path skips auditRows at staging: its audit row is written later
 	// by completeActions from the moderation_actions row, so the normalized
 	// handle must ride the staged action row to reach the log.
-	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'toxic', action: 'ban' }];
+	mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'keyword', pattern: 'toxic', action: 'ban' }];
 	mocks.fetchNewComments.mockResolvedValue({
 		comments: [newComment({ authorName: '@Some.User', text: 'this is toxic' })],
 		nextPageToken: null,
@@ -148,7 +148,7 @@ test('a real-run enforcement decision stages its normalized handle, and the comp
 test('a staged action whose handle normalized to empty completes with authorHandle null, not an empty string', async () => {
 	// normalizeHandle('@') trims to '', which staging stores as NULL; the
 	// completion audit row must carry NULL through, never ''.
-	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'toxic', action: 'ban' }];
+	mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'keyword', pattern: 'toxic', action: 'ban' }];
 	mocks.fetchNewComments.mockResolvedValue({
 		comments: [newComment({ authorName: '@', text: 'this is toxic' })],
 		nextPageToken: null,
@@ -229,7 +229,7 @@ test('decides a duplicated comment id only once when fetch pages overlap', async
 
 test('truncates the rule pattern in the stored reason at 80 characters', async () => {
 	const pattern = 'p'.repeat(100);
-	mocks.state.ruleRows = [{ id: 7, type: 'keyword', pattern, action: 'reject' }];
+	mocks.state.ruleRows = [{ id: 7, channelId: 'channel', type: 'keyword', pattern, action: 'reject' }];
 	mocks.fetchNewComments.mockResolvedValue({
 		comments: [newComment({ text: `prefix ${pattern}` })],
 		nextPageToken: null,

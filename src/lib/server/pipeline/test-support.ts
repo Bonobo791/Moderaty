@@ -71,7 +71,9 @@ const mocks = vi.hoisted(() => {
 				if (table === state.tables.rules) {
 					const params = queryParams(condition);
 					return state.ruleRows.filter((row) => {
-						if (!row || typeof row !== 'object' || !('channelId' in row)) return true;
+						if (!row || typeof row !== 'object' || !('channelId' in row)) {
+							throw new Error('rule mock row is missing channelId');
+						}
 						return params.includes(queryKey((row as { channelId: unknown }).channelId));
 					});
 				}

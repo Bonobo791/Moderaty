@@ -18,11 +18,13 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 <script lang="ts">
 	import { invalidateAll } from '$app/navigation';
 	import { page } from '$app/state';
+	import { t } from '$lib/i18n/messages';
 
 	let { children, data } = $props();
 
 	// Active nav underline (redesign Commit 5): the link matching the current
 	// pathname gets the 2px --accent underline + aria-current="page".
+	const locale = $derived(data.locale ?? 'en');
 	const path = $derived(page.url.pathname);
 
 	// While the database is unreachable the layout load returns
@@ -36,16 +38,16 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	});
 </script>
 
-<nav class="app-nav" aria-label="App">
+<nav class="app-nav" aria-label={t(locale, 'app')}>
 	<a class="brand" href="/dashboard">Moderaty</a>
-	<a href="/dashboard" class:active={path === '/dashboard'} aria-current={path === '/dashboard' ? 'page' : undefined}>Dashboard</a>
+	<a href="/dashboard" class:active={path === '/dashboard'} aria-current={path === '/dashboard' ? 'page' : undefined}>{t(locale, 'dashboard')}</a>
 	<a
 		href="/usage"
 		class:active={path === '/usage' || path.startsWith('/usage/')}
 		aria-current={path === '/usage' || path.startsWith('/usage/') ? 'page' : undefined}
-	>Usage</a>
-	<a href="/org" class:active={path === '/org'} aria-current={path === '/org' ? 'page' : undefined}>Team</a>
-	<a href="/help" class:active={path === '/help'} aria-current={path === '/help' ? 'page' : undefined}>Help</a>
+	>{t(locale, 'usage')}</a>
+	<a href="/org" class:active={path === '/org'} aria-current={path === '/org' ? 'page' : undefined}>{t(locale, 'team')}</a>
+	<a href="/help" class:active={path === '/help'} aria-current={path === '/help' ? 'page' : undefined}>{t(locale, 'help')}</a>
 	{#if !data.maintenance && data.user}
 		<!-- Identity UI is hidden during an outage: the session lookup failed,
 			so identity is unknown, and sign-out's write cannot succeed anyway.
@@ -53,13 +55,13 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 			otherwise); the data.user half of this guard is for the type system. -->
 		{#if data.orgs.length > 1}
 			<form method="POST" action="/org/switch" class="team-switch">
-				<label for="team-select">Team</label>
+				<label for="team-select">{t(locale, 'team')}</label>
 				<select id="team-select" name="orgId">
 					{#each data.orgs as org (org.orgId)}
 						<option value={org.orgId} selected={org.orgId === data.user.orgId}>{org.name}</option>
 					{/each}
 				</select>
-				<button class="btn secondary small" type="submit">Switch team</button>
+				<button class="btn secondary small" type="submit">{t(locale, 'switchTeam')}</button>
 			</form>
 		{/if}
 		<span class="account">
@@ -70,7 +72,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 				aria-current={path === '/account' ? 'page' : undefined}>{data.user.displayName}</a
 			>
 			<form method="POST" action="/logout">
-				<button class="btn secondary small" type="submit">Sign out</button>
+				<button class="btn secondary small" type="submit">{t(locale, 'signOut')}</button>
 			</form>
 		</span>
 	{/if}
@@ -81,13 +83,9 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		render as children here and are uniformly replaced. -->
 	<main class="app-main maintenance" role="alert">
 		<div class="maintenance-panel">
-			<p class="maintenance-kicker">Maintenance</p>
-			<h1>Moderation is paused.</h1>
-			<p class="maintenance-desc">
-				Moderaty is temporarily unable to reach its database — moderation is paused and
-				your settings are safe. The page will work again automatically; nothing is
-				required of you.
-			</p>
+			<p class="maintenance-kicker">{t(locale, 'maintenance')}</p>
+			<h1>{t(locale, 'moderationPaused')}</h1>
+			<p class="maintenance-desc">{t(locale, 'databaseUnavailable')}</p>
 		</div>
 	</main>
 {:else}

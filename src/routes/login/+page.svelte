@@ -15,19 +15,24 @@ repository root.
 Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 -->
 
+<script lang="ts">
+	import { t } from '$lib/i18n/messages';
+
+	let { data } = $props();
+</script>
+
 <svelte:head>
-	<title>Moderaty — Sign in</title>
+	<title>{t(data.locale, 'signInTitle')}</title>
 </svelte:head>
 
 <!-- Static sign-in prompt; the guard redirect lives in +page.server.ts. -->
 <main class="login-main">
 	<div class="card login-card">
-		<h1>Sign in to Moderaty</h1>
+		<h1>{t(data.locale, 'signInTitle')}</h1>
 		<p class="muted">
-			Sign in with your Google account, then connect your YouTube channels to start moderating
-			comments automatically.
+			{t(data.locale, 'signInDescription')}
 		</p>
-		<a class="btn" href="/api/auth/google/login">Sign in with Google</a>
+		<a class="btn" href="/api/auth/google/login">{t(data.locale, 'signInGoogle')}</a>
 	</div>
 </main>
 

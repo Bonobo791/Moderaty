@@ -46,6 +46,8 @@ test('verifies a dispatched action after its completion transaction fails', asyn
 	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'reject' }];
 	mocks.db.transaction
 		.mockImplementationOnce(async (callback: (value: typeof mocks.db.transactionValue) => Promise<unknown>) => callback(mocks.db.transactionValue))
+		.mockImplementationOnce(async (callback: (value: typeof mocks.db.transactionValue) => Promise<unknown>) => callback(mocks.db.transactionValue))
+		.mockImplementationOnce(async (callback: (value: typeof mocks.db.transactionValue) => Promise<unknown>) => callback(mocks.db.transactionValue))
 		.mockRejectedValueOnce(new Error('database write failed'));
 
 	await expect(runChannel('channel')).rejects.toThrow('database write failed');
@@ -132,6 +134,20 @@ test('stops without new writes or YouTube calls when account deletion deactivate
 	expect(result).toMatchObject({ fetched: 1, partial: true, dryRun: false });
 });
 
+test('stops when account deletion replaces the shared-channel connector identity', async () => {
+	mocks.scoreComment.mockImplementation(async () => {
+		mocks.state.channel = { ...mocks.state.channel, userId: null, refreshTokenEnc: 'erased:account-deletion' };
+		return moderation(0.95);
+	});
+
+	const result = await runChannel('channel');
+
+	expect(result).toMatchObject({ partial: true, skipped: false });
+	expect(mocks.state.insertedComments).toEqual([]);
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
+});
+
 test('does not dispatch staged enforcement when the channel is deactivated after decisions are staged', async () => {
 	mocks.state.ruleRows = [{ id: 1, type: 'keyword', pattern: 'comment', action: 'reject' }];
 	// Deletion commits during the staging transaction: the staged rows belong to
@@ -143,10 +159,11 @@ test('does not dispatch staged enforcement when the channel is deactivated after
 
 	const result = await runChannel('channel');
 
-	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'rejected' })]);
+	expect(mocks.state.insertedComments).toEqual([]);
+	expect(mocks.state.insertedAudits).toEqual([]);
+	expect(mocks.state.moderationActions).toEqual([]);
 	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
-	expectActionState('pending');
 	expect(mocks.state.channelUpdates).toEqual([]);
 	expect(result).toMatchObject({ partial: true });
 });
@@ -266,9 +283,8 @@ test('does not run the claim update when there is nothing pending to claim', asy
 	await runChannel('channel');
 
 	expectActionState('completed');
-	// Only the cursor update touches the database — the empty claim short-circuits.
-	expect(mocks.db.update).toHaveBeenCalledTimes(1);
-	expect(mocks.db.update).toHaveBeenCalledWith(channels);
+	// The empty claim short-circuits; the run still persists its cursor.
+	expect(mocks.state.channelUpdates).toContainEqual(expect.objectContaining({ cursor: expect.anything() }));
 });
 
 test('applies YouTube moderation in batches of 50', async () => {

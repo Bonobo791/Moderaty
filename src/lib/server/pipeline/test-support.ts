@@ -20,8 +20,10 @@ const mocks = vi.hoisted(() => {
 		// the balance being exhausted CONCURRENTLY by another run — the in-memory
 		// AI budget read N, but by charge time the atomic guard finds 0).
 		failCharges: false,
-		// Org Stripe customer the fake organizations select reports (metering
-		// gate: an org with a customer but no balance is still metered).
+		// Org billing fields the fake organizations select reports.
+		plan: 'free' as string,
+		stripeSubscriptionId: null as string | null,
+		// Stripe customer alone must not enable metering.
 		customerId: null as string | null,
 		insertedCredits: [] as Record<string, unknown>[],
 		channel: {} as Record<string, unknown>,
@@ -44,11 +46,15 @@ const mocks = vi.hoisted(() => {
 	const query = (table: unknown) => ({
 		where: (condition?: unknown) => ({
 			get: async () => {
-				if (table === state.tables.channels) return state.channel;
+				if (table === state.tables.channels) {
+					const params = queryParams(condition);
+					const channelId = state.channel && typeof state.channel.id === 'string' ? state.channel.id : null;
+					return channelId && (!params.length || params.includes(channelId)) ? state.channel : undefined;
+				}
 				// Ledger balance + metering lookup (consumeCredit's org existence
 				// check and the orgIsMetered gate).
 				if (table === state.tables.organizations) {
-					return { creditsRemaining: state.credits, stripeCustomerId: state.customerId };
+					return { creditsRemaining: state.credits, plan: state.plan, stripeSubscriptionId: state.stripeSubscriptionId, stripeCustomerId: state.customerId };
 				}
 				throw new Error('unexpected get query');
 			},
@@ -62,7 +68,13 @@ const mocks = vi.hoisted(() => {
 						...state.insertedComments.map((comment) => queryKey(comment.id))
 					])].filter((id) => params.includes(id)).map((id) => ({ id }));
 				}
-				if (table === state.tables.rules) return state.ruleRows;
+				if (table === state.tables.rules) {
+					const params = queryParams(condition);
+					return state.ruleRows.filter((row) => {
+						if (!row || typeof row !== 'object' || !('channelId' in row)) return true;
+						return params.includes(queryKey((row as { channelId: unknown }).channelId));
+					});
+				}
 				if (table === state.tables.channelAllowedHandles) {
 					// Honor eq(channelId, ...): only rows for the queried channel come back.
 					const params = queryParams(condition);
@@ -103,7 +115,7 @@ const mocks = vi.hoisted(() => {
 				throw new Error('unexpected delete query');
 			}
 		})),
-		update: (table: unknown) => ({
+		update: vi.fn((table: unknown) => ({
 			set: (values: Record<string, unknown>) => ({
 				where: (condition?: unknown) => {
 					const none = { returning: async () => [] as Record<string, unknown>[] };
@@ -115,9 +127,18 @@ const mocks = vi.hoisted(() => {
 						// another run exhausted the credits between the budget read and
 						// the atomic charge.
 						if (state.failCharges || (state.credits ?? 0) <= 0) return { returning: async () => [] as Record<string, unknown>[] };
-						return { returning: async () => [{ creditsRemaining: Math.max(0, (state.credits ?? 0) - 1) }] };
+						state.credits = Math.max(0, (state.credits ?? 0) - 1);
+						return { returning: async () => [{ creditsRemaining: state.credits }] };
 					}
 					if (table === state.tables.channels) {
+						// The active=active no-op is the atomic channel guard. It must
+						// return no row for a deleted/inactive channel and must not be
+						// confused with a cursor update in assertions.
+						if ('active' in values) {
+							const params = queryParams(condition);
+							const identityMatches = params.length <= 2 || params.includes(state.channel?.refreshTokenEnc);
+							return { returning: async () => state.channel?.active && identityMatches ? [{ id: state.channel.id }] : [] };
+						}
 						state.channelUpdates.push(values);
 						return none;
 					}
@@ -151,7 +172,31 @@ const mocks = vi.hoisted(() => {
 					return none;
 				}
 			})
-		})
+		}))
+	};
+
+	const runTransaction = async (callback: (value: typeof transaction) => Promise<unknown>) => {
+		const snapshot = {
+			credits: state.credits,
+			channel: state.channel ? { ...state.channel } : state.channel,
+			channelUpdates: [...state.channelUpdates],
+			insertedCredits: [...state.insertedCredits],
+			insertedComments: [...state.insertedComments],
+			insertedAudits: [...state.insertedAudits],
+			moderationActions: state.moderationActions.map((row) => ({ ...row }))
+		};
+		try {
+			return await callback(transaction);
+		} catch (error) {
+			state.credits = snapshot.credits;
+			state.channel = snapshot.channel;
+			state.channelUpdates = snapshot.channelUpdates;
+			state.insertedCredits = snapshot.insertedCredits;
+			state.insertedComments = snapshot.insertedComments;
+			state.insertedAudits = snapshot.insertedAudits;
+			state.moderationActions = snapshot.moderationActions;
+			throw error;
+		}
 	};
 
 	return {
@@ -159,10 +204,11 @@ const mocks = vi.hoisted(() => {
 		db: {
 			select: vi.fn(() => ({ from: (table: unknown) => query(table) })),
 			insert: vi.fn((table: unknown) => ({ values: async (values: unknown) => store(table, values) })),
-			transaction: vi.fn(async (callback: (value: typeof transaction) => Promise<unknown>) => callback(transaction)),
+			transaction: vi.fn(runTransaction),
 			update: vi.fn((table: unknown) => transaction.update(table)),
 			transactionValue: transaction
 		},
+		defaultTransaction: runTransaction,
 		decrypt: vi.fn(),
 		assertBeforeDeadline: vi.fn(),
 		refreshAccessToken: vi.fn(),
@@ -303,13 +349,36 @@ export function expectAiUnavailableQueued(result: unknown, extra: Record<string,
 
 export function resetPipelineMocks() {
 	vi.clearAllMocks();
+	mocks.db.transaction.mockReset();
+	mocks.db.transaction.mockImplementation(mocks.defaultTransaction);
+	// clearAllMocks preserves implementations. Reset every external behavior
+	// mock explicitly so one test cannot leak a rejection or custom handler into
+	// the next test.
+	for (const mock of [
+		mocks.decrypt,
+		mocks.assertBeforeDeadline,
+		mocks.refreshAccessToken,
+		mocks.fetchNewComments,
+		mocks.fetchVideoMetadata,
+		mocks.getCommentModerationStatus,
+		mocks.setModerationStatus,
+		mocks.deleteComment,
+		mocks.scoreComment,
+		mocks.serializeScores,
+		mocks.scoreTone,
+		mocks.resolveOpenAiKey
+	]) mock.mockReset();
 	mocks.state.tables = { channels, comments, rules, channelAllowedHandles, auditLog, moderationActions, organizations, creditTransactions };
 	mocks.state.credits = 5;
 	mocks.state.failCharges = false;
+	mocks.state.plan = 'free';
+	mocks.state.stripeSubscriptionId = null;
+	mocks.state.customerId = null;
 	mocks.state.insertedCredits = [];
 	mocks.state.env.DRY_RUN = 'false';
 	mocks.state.channel = {
 		id: 'channel',
+		userId: 'user',
 		title: 'Channel',
 		refreshTokenEnc: 'encrypted-refresh-token',
 		cursor: null,
@@ -328,12 +397,14 @@ export function resetPipelineMocks() {
 	mocks.state.insertedAudits = [];
 	mocks.state.moderationActions = [];
 	mocks.decrypt.mockReturnValue('refresh-token');
+	mocks.assertBeforeDeadline.mockImplementation(() => undefined);
 	mocks.refreshAccessToken.mockResolvedValue('access-token');
 	mocks.fetchNewComments.mockResolvedValue({
 		comments: [newComment()],
 		nextPageToken: null,
 		reachedCursor: true
 	});
+	mocks.scoreComment.mockResolvedValue(moderation(0.1));
 	mocks.setModerationStatus.mockResolvedValue(undefined);
 	mocks.deleteComment.mockResolvedValue(undefined);
 	mocks.getCommentModerationStatus.mockResolvedValue('rejected');

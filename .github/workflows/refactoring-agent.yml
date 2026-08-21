@@ -28,6 +28,17 @@ jobs:
       pull-requests: write
       issues: write
     steps:
+      - name: Validate PR branch ref for the refactoring action
+        shell: bash
+        env:
+          HEAD_REF: ${{ github.event.issue.pull_request.head.ref }}
+        run: |
+          case "$HEAD_REF" in
+            ''|*[!A-Za-z0-9._/-]*)
+              echo "Refusing unsafe PR branch name: $HEAD_REF" >&2
+              exit 1
+              ;;
+          esac
       # codescene-oss/pr-refactoring-agent@v1.0.8
       # v1.0.8 == bbc72fbfb8e514ed2dd0a1ba2dda2e0083abac73
       - name: Run CodeScene PR refactoring agent

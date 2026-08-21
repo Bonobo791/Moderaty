@@ -51,6 +51,17 @@ test.each([
 	expect(result).toMatchObject({ fetched: 1, acted, queued, partial: false, skipped: false, dryRun: false });
 });
 
+test('does not apply another channel’s rules', async () => {
+	mocks.state.ruleRows = [
+		{ id: 1, channelId: 'other-channel', type: 'keyword', pattern: 'comment', action: 'ban' },
+		{ id: 2, channelId: 'channel', type: 'keyword', pattern: 'comment', action: 'hold' }
+	];
+
+	await runChannel('channel');
+
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'heldForReview', false, 'access-token', undefined);
+});
+
 test('validates and compiles each regex rule once per run, not per comment', async () => {
 	mocks.state.ruleRows = [{ id: 1, type: 'regex', pattern: 'spam', action: 'hold' }];
 	mocks.fetchNewComments.mockResolvedValue({
@@ -91,6 +102,18 @@ test('routes AI scoring failures to the review queue instead of failing the run 
 	expectAiUnavailableQueued(result, { fetched: 1, partial: false, skipped: false });
 });
 
+test('redacts sensitive Error messages from the persisted audit reason', async () => {
+	mocks.scoreComment.mockRejectedValue(new Error('OpenAI response Authorization: Bearer sk-secret-token'));
+
+	const result = await runChannel('channel');
+
+	expectAiUnavailableQueued(result);
+	const audit = mocks.state.insertedAudits[0];
+	expect(audit.reason).toBe('ai unavailable: scoring unavailable');
+	expect(JSON.stringify(audit)).not.toContain('sk-secret-token');
+	expect(JSON.stringify(audit)).not.toContain('Bearer');
+});
+
 test('never serializes a non-Error rejection into the audit reason (credentials stay out of the log)', async () => {
 	// SDK/fetch rejections can carry enumerable credentials (Authorization
 	// headers, response bodies). errorText must persist a safe scalar, never
@@ -107,7 +130,7 @@ test('never serializes a non-Error rejection into the audit reason (credentials 
 	expect(JSON.stringify(audit)).not.toContain('sk-secret-token');
 	expect(JSON.stringify(audit)).not.toContain('Bearer');
 	// The safe scalar is still present.
-	expect(audit.reason).toBe('ai unavailable: unknown error');
+	expect(audit.reason).toBe('ai unavailable: scoring unavailable');
 });
 
 test.each([
@@ -207,14 +230,29 @@ test('routes tone scoring failures to the review queue (I11)', async () => {
 	expectAiUnavailableQueued(result);
 });
 
-test('routes video metadata failures to the review queue instead of aborting the run (I11)', async () => {
+test('continues rule and safety decisions when video metadata fails', async () => {
 	mocks.state.channel.toneLevel = 2;
+	mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'keyword', pattern: 'comment', action: 'reject' }];
 	mocks.scoreComment.mockResolvedValue(moderation(0.1));
 	mocks.fetchVideoMetadata.mockRejectedValue(new Error('videos.list failed with 500'));
 
 	const result = await runChannel('channel');
 
+	expect(mocks.scoreComment).not.toHaveBeenCalled();
+	expect(mocks.scoreTone).not.toHaveBeenCalled();
+	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ status: 'rejected', decidedBy: 'rule' })]);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
+	expect(result).toMatchObject({ fetched: 1, acted: 1, queued: 0, partial: false });
+});
+
+test('queues an unruled comment when video metadata fails', async () => {
+	mocks.state.channel.toneLevel = 2;
+	mocks.fetchVideoMetadata.mockRejectedValue(new Error('videos.list failed with 500'));
+
+	const result = await runChannel('channel');
+
 	expectAiUnavailableQueued(result);
+	expect(mocks.scoreComment).not.toHaveBeenCalled();
 	expect(mocks.scoreTone).not.toHaveBeenCalled();
 });
 

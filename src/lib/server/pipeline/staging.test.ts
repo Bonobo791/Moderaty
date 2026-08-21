@@ -51,7 +51,7 @@ test('a dry run counts the protected comment as implicit approved and audits the
 	expect(mocks.state.insertedAudits).toEqual([
 		expect.objectContaining({ commentId: 'comment', action: 'dry-run', reason: 'protected handle', text: 'this is toxic' })
 	]);
-	expect(mocks.db.transaction).not.toHaveBeenCalled();
+	expect(mocks.db.transaction).toHaveBeenCalledTimes(1);
 	expect(mocks.scoreComment).not.toHaveBeenCalled();
 	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
 });
@@ -258,7 +258,7 @@ test('truncates the ai-unavailable reason at 200 characters', async () => {
 	expect(mocks.state.insertedAudits).toEqual([expect.objectContaining({
 		commentId: 'comment',
 		action: 'queue',
-		reason: `ai unavailable: ${'e'.repeat(300)}`.slice(0, 200)
+		reason: 'ai unavailable: scoring unavailable'
 	})]);
 });
 

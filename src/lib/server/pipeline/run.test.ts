@@ -19,6 +19,35 @@ const mocks = getMocks();
 beforeEach(resetPipelineMocks);
 afterEach(restoreDryRun);
 
+test('resetPipelineMocks removes test-specific mock implementations', async () => {
+	mocks.scoreComment.mockRejectedValue(new Error('stale implementation'));
+	mocks.db.transaction.mockRejectedValueOnce(new Error('stale transaction'));
+	resetPipelineMocks();
+
+	const result = await runChannel('channel');
+
+	expect(result).toMatchObject({ fetched: 1, partial: false, skipped: false });
+	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ decidedBy: 'ai' })]);
+});
+
+test('channel query mocks honor the requested channel id', async () => {
+	await expect(runChannel('different-channel')).rejects.toThrow('channel not found: different-channel');
+});
+
+test('credit charge updates the fake balance across runs', async () => {
+	mocks.state.channel.orgId = 'org-1';
+	mocks.state.credits = 1;
+	mocks.scoreComment.mockResolvedValue(moderation(0.1));
+
+	await runChannel('channel');
+	mocks.fetchNewComments.mockResolvedValue({ comments: [newComment({ id: 'second' })], nextPageToken: null, reachedCursor: true });
+
+	const second = await runChannel('channel');
+
+	expect(second).toMatchObject({ outOfCredits: true });
+	expect(mocks.state.insertedComments).toHaveLength(1);
+});
+
 test('persists the chronologically newest timestamp when UTC offsets differ', async () => {
 	mocks.scoreComment.mockResolvedValue(moderation(0));
 	mocks.fetchNewComments.mockResolvedValue({
@@ -48,7 +77,7 @@ test('does not call YouTube moderation or deletion APIs during a dry run', async
 	expect(mocks.scoreComment).not.toHaveBeenCalled();
 	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
-	expect(mocks.db.transaction).not.toHaveBeenCalled();
+	expect(mocks.db.transaction).toHaveBeenCalledTimes(1);
 	expect(mocks.state.insertedAudits).toEqual([expect.objectContaining({
 		commentId: 'comment',
 		action: 'dry-run'
@@ -85,7 +114,7 @@ test('forceDryRun previews a live deployment: dry-run audit rows carry the comme
 
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
 	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
-	expect(mocks.db.transaction).not.toHaveBeenCalled();
+	expect(mocks.db.transaction).toHaveBeenCalledTimes(1);
 	expect(mocks.state.insertedComments).toEqual([]);
 	expect(mocks.state.channelUpdates).toEqual([]);
 	expect(mocks.state.insertedAudits).toEqual([expect.objectContaining({
@@ -223,7 +252,7 @@ test('keeps the existing cursor when the fetched page is empty', async () => {
 		expect.objectContaining({ cursor: '2026-01-01T00:00:00.000Z' })
 	);
 	// No decisions means no staging transaction at all.
-	expect(mocks.db.transaction).not.toHaveBeenCalled();
+	expect(mocks.db.transaction).toHaveBeenCalledTimes(1);
 	expect(result).toMatchObject({ fetched: 0, skipped: false });
 });
 
@@ -247,8 +276,8 @@ test('selects only the columns each lookup needs', async () => {
 
 	await runChannel('channel');
 
-	expect(mocks.db.select).toHaveBeenCalledWith({ active: channels.active });
 	expect(mocks.db.select).toHaveBeenCalledWith({ id: comments.id });
+	expect(mocks.db.select).not.toHaveBeenCalledWith({ active: channels.active });
 });
 
 test('fails loudly when the channel does not exist', async () => {
@@ -534,8 +563,11 @@ describe('credit consumption (billing)', () => {
 
 		await expect(runChannel('channel')).rejects.toThrow(/credit charge failed/);
 
-		// No ledger consumption rows were committed; the run did not advance.
+		// No ledger or staging rows were committed; the run did not advance.
 		expect(mocks.state.insertedCredits).toEqual([]);
+		expect(mocks.state.insertedComments).toEqual([]);
+		expect(mocks.state.insertedAudits).toEqual([]);
+		expect(mocks.state.moderationActions).toEqual([]);
 		errorSpy.mockRestore();
 	});
 

@@ -12,7 +12,7 @@ import { DeadlineExceededError } from '$lib/server/http';
 import { prepareRules } from '$lib/server/rules';
 import type { ToneProtections } from '$lib/server/tone';
 import { fetchVideoMetadata, type CommentPage } from '$lib/server/youtube';
-import { aiUnavailable, decide } from './decisions';
+import { decide, metadataUnavailable } from './decisions';
 import type { Decision, DecisionBatchOptions, ScoreOutcome } from './types';
 
 /**
@@ -38,6 +38,7 @@ export async function loadVideoContext(
 			} catch (error) {
 				if (error instanceof DeadlineExceededError) throw error;
 				metadataError = error;
+				videoContext = null;
 			}
 		}
 	}
@@ -134,7 +135,10 @@ export async function scoreComments(
 const settled = await Promise.allSettled(
 	newComments.map(async (comment) => {
 		try {
-			if (metadataError) return aiUnavailable(comment, metadataError);
+			// Video metadata is required only for tone context. Preserve the
+			// allowlist/rule precedence, then queue unresolved comments loudly;
+			// do not spend an AI credit when the enrichment call failed.
+			if (metadataError) return metadataUnavailable(comment, rulesForChannel, allowlist, metadataError);
 			// Stryker disable next-line ConditionalExpression: equivalent — for a null videoId both branches yield undefined (Map.get(null) misses), and a non-null id takes the false branch anyway
 			const meta = comment.videoId === null ? undefined : videoContext?.get(comment.videoId);
 			const tone = videoContext

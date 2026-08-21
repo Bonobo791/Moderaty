@@ -7,6 +7,7 @@ import { normalizeHandle } from '$lib/server/allowlist';
 import { consumeCredit, orgIsMetered, type LedgerHandle } from '$lib/server/billing/ledger';
 import { db } from '$lib/server/db';
 import { auditLog, comments, moderationActions } from '$lib/server/db/schema';
+import { assertChannelActive, type ChannelIdentity } from './enforcement';
 import type { Decision } from './types';
 
 /**
@@ -87,10 +88,15 @@ function actionRows(channelId: string, decisions: Decision[]) {
 }
 
 
-export async function stageDecisions(channelId: string, decisions: Decision[], orgId?: string | null) {
+export async function stageDecisions(channelId: string, decisions: Decision[], orgId?: string | null, expected?: ChannelIdentity) {
 	if (!decisions.length) return;
 	const actions = actionRows(channelId, decisions);
 	await db.transaction(async (transaction) => {
+		// The channel check and all staging writes share one transaction. Account
+		// deletion either commits first (and this fails) or waits until these rows
+		// are complete; no orphaned rows can be created between a preflight read
+		// and the inserts.
+		await assertChannelActive(channelId, transaction, expected);
 		await transaction.insert(comments).values(commentRows(channelId, decisions));
 		if (actions.length) await transaction.insert(moderationActions).values(actions);
 		const audits = auditRows(channelId, decisions.filter((decision) => !decision.youtubeAction), false);
@@ -137,14 +143,20 @@ export async function stageOrAuditDecisions(
 	channelId: string,
 	decisions: Decision[],
 	dryRun: boolean,
-	orgId: string | null | undefined
+	orgId: string | null | undefined,
+	expected?: ChannelIdentity
 ): Promise<number> {
 	if (dryRun) {
 		const acted = decisions.filter((decision) => decision.youtubeAction).length;
 		const audits = auditRows(channelId, decisions, true);
-		if (audits.length) await db.insert(auditLog).values(audits);
+		if (audits.length) {
+			await db.transaction(async (transaction) => {
+				await assertChannelActive(channelId, transaction, expected);
+				await transaction.insert(auditLog).values(audits);
+			});
+		}
 		return acted;
 	}
-	await stageDecisions(channelId, decisions, orgId);
+	await stageDecisions(channelId, decisions, orgId, expected);
 	return decisions.filter((decision) => decision.youtubeAction).length;
 }

@@ -48,14 +48,17 @@ async function persistResults(
 	) ?? channel.cursor;
 	const scanCursor = channel.scanCursor ?? newest;
 	const complete = page.reachedCursor || !page.nextPageToken;
-	await db
-		.update(channels)
-		.set(
-			complete
-				? { cursor: scanCursor, nextPageToken: null, scanCursor: null }
-				: { nextPageToken: page.nextPageToken, scanCursor }
-		)
-		.where(eq(channels.id, channelId));
+	await db.transaction(async (transaction) => {
+		await assertChannelActive(channelId, transaction, channel);
+		await transaction
+			.update(channels)
+			.set(
+				complete
+					? { cursor: scanCursor, nextPageToken: null, scanCursor: null }
+					: { nextPageToken: page.nextPageToken, scanCursor }
+				)
+			.where(eq(channels.id, channelId));
+	});
 }
 
 /** Window-mode dry-run finish: reported, never persisted (I8 — the caller owns the drain state). */
@@ -124,7 +127,9 @@ export async function runChannel(
 		if (loaded.kind === 'skip') return loaded.result;
 		const { channel } = loaded;
 		dryRun = loaded.dryRun;
+		await assertChannelActive(channelId, db, channel);
 		const accessToken = await refreshAccessToken(decrypt(channel.refreshTokenEnc), deadline);
+		await assertChannelActive(channelId, db, channel);
 		// Window mode (on-demand dry-run drain): one page bounded by the window,
 		// independent of the live cursor/checkpoint — real runs keep advancing
 		// those undisturbed.
@@ -155,8 +160,8 @@ export async function runChannel(
 
 		// Deletion may have committed during the YouTube/AI calls above: re-check
 		// before any durable write (I3) so a deleted account gets no new rows.
-		await assertChannelActive(channelId);
-		acted = await stageOrAuditDecisions(channelId, decisions, dryRun, channel.orgId);
+		await assertChannelActive(channelId, db, channel);
+		acted = await stageOrAuditDecisions(channelId, decisions, dryRun, channel.orgId, channel);
 		// Fail loudly only after successful decisions are staged, and before the
 		// cursor advances, so the next run retries just the failed comments.
 		if (failures.length) {
@@ -166,7 +171,7 @@ export async function runChannel(
 			return finishDryRun(window, page, { fetched, acted, queued });
 		}
 
-		const enforcement = await runEnforcement(channelId, accessToken, deadline, channel.orgId, deferred);
+		const enforcement = await runEnforcement(channelId, accessToken, deadline, channel.orgId, deferred, channel);
 		acted = enforcement.acted;
 		if (enforcement.outOfCredits) {
 			return { fetched, acted, queued, partial: false, skipped: false, dryRun, outOfCredits: true };

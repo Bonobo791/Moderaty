@@ -52,9 +52,20 @@ function ruleDecision(comment: NewComment, rule: PreparedRule['rule']): Decision
  * headers, cookies — so they must NEVER be serialized into the channel-visible
  * reason; the raw error is logged server-side by aiUnavailable instead.
  */
-function errorText(error: unknown): string {
-	if (error instanceof Error) return error.message;
-	return 'unknown error';
+function errorText(_error: unknown): string {
+	// Error messages from SDKs and upstream responses can contain credentials,
+	// request headers, or response bodies. The full error is server-log-only;
+	// the channel-visible reason must remain a fixed, non-sensitive summary.
+	return 'scoring unavailable';
+}
+
+export function metadataUnavailable(
+	comment: NewComment,
+	rules: PreparedRule[],
+	allowlist: Set<string>,
+	error: unknown
+): Decision {
+	return preAiDecision(comment, rules, allowlist) ?? aiUnavailable(comment, error);
 }
 
 export function aiUnavailable(comment: NewComment, error: unknown): Decision {

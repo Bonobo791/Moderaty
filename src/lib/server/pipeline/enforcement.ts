@@ -3,7 +3,7 @@
 //
 // Licensed under the PolyForm Shield License 1.0.0; see LICENSE.
 
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { maybeTriggerAutoTopUp } from '$lib/server/billing/autotopup';
 import { db } from '$lib/server/db';
 import { auditLog, channels, moderationActions } from '$lib/server/db/schema';
@@ -24,13 +24,35 @@ export class ChannelDeactivatedError extends Error {}
  * in-flight run, so the run must stop at the next boundary instead of writing
  * rows or moderating comments for a deleted account.
  */
-export async function assertChannelActive(channelId: string): Promise<void> {
-	const row = await db
-		.select({ active: channels.active })
-		.from(channels)
-		.where(eq(channels.id, channelId))
-		.get();
-	if (!row?.active) throw new ChannelDeactivatedError(`channel deactivated mid-run: ${channelId}`);
+export type ChannelIdentity = Pick<typeof channels.$inferSelect, 'userId' | 'refreshTokenEnc'>;
+type ChannelGuardHandle = Pick<typeof db, 'update'>;
+
+/**
+ * Atomically claims a short-lived channel write boundary. The no-op UPDATE is
+ * deliberately the first transaction operation: a SELECT-only check on
+ * SQLite's deferred transaction can race account deletion before the next
+ * INSERT/UPDATE. The connector identity predicate also invalidates a run when
+ * account deletion detaches a shared-team channel without pausing it.
+ */
+export async function assertChannelActive(
+	channelId: string,
+	handle: ChannelGuardHandle = db,
+	expected?: ChannelIdentity
+): Promise<void> {
+	const ownership = expected
+		? expected.userId === null ? isNull(channels.userId) : eq(channels.userId, expected.userId)
+		: undefined;
+	const guarded = await handle
+		.update(channels)
+		.set({ active: sql`${channels.active}` })
+		.where(and(
+			eq(channels.id, channelId),
+			eq(channels.active, 1),
+			ownership,
+			expected ? eq(channels.refreshTokenEnc, expected.refreshTokenEnc) : undefined
+		))
+		.returning({ id: channels.id });
+	if (!guarded.length) throw new ChannelDeactivatedError(`channel deactivated mid-run: ${channelId}`);
 }
 
 function validAction(action: string): YoutubeAction {
@@ -47,32 +69,39 @@ function outstandingAction(action: typeof moderationActions.$inferSelect): Outst
 	return { ...action, action: validAction(action.action), state: action.state };
 }
 
-async function markDispatched(actions: OutstandingAction[]) {
+async function markDispatched(actions: OutstandingAction[], expected?: ChannelIdentity) {
 	// Stryker disable next-line ConditionalExpression: equivalent — both callers pass a non-empty array (applyModerationAction batches of ≥1, the delete loop a single action), so the empty-array branch is unreachable
 	if (!actions.length) return;
-	await db
-		.update(moderationActions)
-		.set({ state: 'dispatched', lastAttemptAt: new Date().toISOString() })
-		.where(inArray(moderationActions.commentId, actions.map((action) => action.commentId)));
+	await db.transaction(async (transaction) => {
+		await assertChannelActive(actions[0].channelId, transaction, expected);
+		await transaction
+			.update(moderationActions)
+			.set({ state: 'dispatched', lastAttemptAt: new Date().toISOString() })
+			.where(inArray(moderationActions.commentId, actions.map((action) => action.commentId)));
+	});
 }
 
-async function claimPendingActions(actions: OutstandingAction[]): Promise<Set<string>> {
+async function claimPendingActions(actions: OutstandingAction[], expected?: ChannelIdentity): Promise<Set<string>> {
 	if (!actions.length) return new Set();
-	const claimed = await db
-		.update(moderationActions)
-		.set({ state: 'dispatched' })
-		.where(and(
-			inArray(moderationActions.commentId, actions.map((action) => action.commentId)),
-			eq(moderationActions.state, 'pending')
-		))
-		.returning({ commentId: moderationActions.commentId });
-	return new Set(claimed.map((row) => row.commentId));
+	return db.transaction(async (transaction) => {
+		await assertChannelActive(actions[0].channelId, transaction, expected);
+		const claimed = await transaction
+			.update(moderationActions)
+			.set({ state: 'dispatched' })
+			.where(and(
+				inArray(moderationActions.commentId, actions.map((action) => action.commentId)),
+				eq(moderationActions.state, 'pending')
+			))
+			.returning({ commentId: moderationActions.commentId });
+		return new Set(claimed.map((row) => row.commentId));
+	});
 }
 
-async function completeActions(actions: OutstandingAction[]) {
+async function completeActions(actions: OutstandingAction[], expected?: ChannelIdentity) {
 	// Stryker disable next-line ConditionalExpression: equivalent — all callers pass a non-empty array (applyModerationAction batches of ≥1, single verified or deleted actions)
 	if (!actions.length) return;
 	await db.transaction(async (transaction) => {
+		await assertChannelActive(actions[0].channelId, transaction, expected);
 		await transaction
 			.update(moderationActions)
 			.set({ state: 'completed' })
@@ -94,9 +123,11 @@ async function completeActions(actions: OutstandingAction[]) {
 async function verificationResult(
 	action: OutstandingAction,
 	accessToken: string,
-	deadline: number | undefined
+	deadline: number | undefined,
+	expected?: ChannelIdentity
 ): Promise<'completed' | 'retry'> {
 	assertBeforeDeadline(deadline);
+	await assertChannelActive(action.channelId, db, expected);
 	const status = await getCommentModerationStatus(action.commentId, accessToken, deadline);
 	// Stryker disable next-line StringLiteral: 'retry'→"" equivalent — the caller only compares result === 'completed', so every other string takes the identical retry path
 	if (action.action === 'delete') return status === null ? 'completed' : 'retry';
@@ -116,15 +147,17 @@ async function applyModerationAction(
 	status: 'heldForReview' | 'rejected',
 	banAuthor: boolean,
 	accessToken: string,
-	deadline: number | undefined
+	deadline: number | undefined,
+	expected?: ChannelIdentity
 ): Promise<number> {
 	let acted = 0;
 	for (let index = 0; index < actions.length; index += 50) {
 		const batch = actions.slice(index, index + 50);
-		await markDispatched(batch);
+		await markDispatched(batch, expected);
 		assertBeforeDeadline(deadline);
+		await assertChannelActive(batch[0].channelId, db, expected);
 		await setModerationStatus(batch.map((action) => action.commentId), status, banAuthor, accessToken, deadline);
-		await completeActions(batch);
+		await completeActions(batch, expected);
 		acted += batch.length;
 	}
 	return acted;
@@ -133,31 +166,33 @@ async function applyModerationAction(
 async function applyYoutubeActions(
 	actions: OutstandingAction[],
 	accessToken: string,
-	deadline: number | undefined
+	deadline: number | undefined,
+	expected?: ChannelIdentity
 ): Promise<number> {
 	const selected = (action: YoutubeAction) => actions.filter((item) => item.action === action);
 	let acted = 0;
-	acted += await applyModerationAction(selected('hold'), 'heldForReview', false, accessToken, deadline);
-	acted += await applyModerationAction(selected('reject'), 'rejected', false, accessToken, deadline);
-	acted += await applyModerationAction(selected('ban'), 'rejected', true, accessToken, deadline);
-	acted += await applyDeletes(selected('delete'), accessToken, deadline);
+	acted += await applyModerationAction(selected('hold'), 'heldForReview', false, accessToken, deadline, expected);
+	acted += await applyModerationAction(selected('reject'), 'rejected', false, accessToken, deadline, expected);
+	acted += await applyModerationAction(selected('ban'), 'rejected', true, accessToken, deadline, expected);
+	acted += await applyDeletes(selected('delete'), accessToken, deadline, expected);
 	return acted;
 }
 
 /** Dispatches, deletes, and completes a batch of delete actions (I3/I4-safe). */
-async function applyDeletes(actions: OutstandingAction[], accessToken: string, deadline: number | undefined): Promise<number> {
+async function applyDeletes(actions: OutstandingAction[], accessToken: string, deadline: number | undefined, expected?: ChannelIdentity): Promise<number> {
 	let acted = 0;
 	for (const action of actions) {
-		await markDispatched([action]);
+		await markDispatched([action], expected);
 		assertBeforeDeadline(deadline);
+		await assertChannelActive(action.channelId, db, expected);
 		await deleteComment(action.commentId, accessToken, deadline);
-		await completeActions([action]);
+		await completeActions([action], expected);
 		acted += 1;
 	}
 	return acted;
 }
 
-async function processOutstandingActions(channelId: string, accessToken: string, deadline?: number): Promise<number> {
+async function processOutstandingActions(channelId: string, accessToken: string, deadline?: number, expected?: ChannelIdentity): Promise<number> {
 	const actions = (await db
 		.select()
 		.from(moderationActions)
@@ -167,7 +202,7 @@ async function processOutstandingActions(channelId: string, accessToken: string,
 		))
 		.all()).map(outstandingAction);
 	// Stryker disable next-line MethodExpression, ConditionalExpression: equivalent — claimPendingActions' SQL still guards eq(state, 'pending'), so handing it dispatched rows too claims nothing extra
-	const claimed = await claimPendingActions(actions.filter((action) => action.state === 'pending'));
+	const claimed = await claimPendingActions(actions.filter((action) => action.state === 'pending'), expected);
 	// Stryker disable next-line ArrayDeclaration: equivalent — applyYoutubeActions selects entries by their action field, so a foreign element in the array is never selected
 	const ready: OutstandingAction[] = [];
 	for (const action of actions) {
@@ -178,13 +213,13 @@ async function processOutstandingActions(channelId: string, accessToken: string,
 			if (claimed.has(action.commentId)) ready.push({ ...action, state: 'dispatched' });
 			continue;
 		}
-		if ((await verifyDispatchedAction(action, accessToken, deadline)) === 'completed') {
-			await completeActions([action]);
+		if ((await verifyDispatchedAction(action, accessToken, deadline, expected)) === 'completed') {
+			await completeActions([action], expected);
 			continue;
 		}
 		ready.push(action);
 	}
-	return applyYoutubeActions(ready, accessToken, deadline);
+	return applyYoutubeActions(ready, accessToken, deadline, expected);
 }
 
 /**
@@ -192,9 +227,9 @@ async function processOutstandingActions(channelId: string, accessToken: string,
  * must not strand the action: leave it 'dispatched' so the next run
  * re-verifies, and fail loudly (DeadlineExceededError still escapes).
  */
-async function verifyDispatchedAction(action: OutstandingAction, accessToken: string, deadline: number | undefined): Promise<'completed' | 'retry'> {
+async function verifyDispatchedAction(action: OutstandingAction, accessToken: string, deadline: number | undefined, expected?: ChannelIdentity): Promise<'completed' | 'retry'> {
 	try {
-		return await verificationResult(action, accessToken, deadline);
+		return await verificationResult(action, accessToken, deadline, expected);
 	} catch (error) {
 		if (error instanceof DeadlineExceededError) throw error;
 		throw new Error(
@@ -208,12 +243,14 @@ export async function runEnforcement(
 	accessToken: string,
 	deadline: number | undefined,
 	orgId: string | null | undefined,
-	deferred: number
+	deferred: number,
+	expected?: ChannelIdentity
 ): Promise<{ acted: number; outOfCredits: boolean }> {
 	// ... and again before any YouTube enforcement call.
-	await assertChannelActive(channelId);
-	const acted = await processOutstandingActions(channelId, accessToken, deadline);
+	await assertChannelActive(channelId, db, expected);
+	const acted = await processOutstandingActions(channelId, accessToken, deadline, expected);
 	if (orgId) {
+		await assertChannelActive(channelId, db, expected);
 		try {
 			await maybeTriggerAutoTopUp(orgId);
 		} catch (error) {

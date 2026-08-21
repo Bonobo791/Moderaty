@@ -23,16 +23,18 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 <script lang="ts">
 	let { value, duration = 350 }: { value: number; duration?: number } = $props();
 
-	let shown = $state(Math.round(value));
+	let shown = $state<number>();
+	const displayed = $derived(shown ?? Math.round(value));
 
 	$effect(() => {
 		const target = Math.round(value);
 		const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-		if (reduced || duration <= 0 || shown === target) {
+		const current = shown ?? target;
+		if (reduced || duration <= 0 || current === target) {
 			shown = target;
 			return;
 		}
-		const from = shown;
+		const from = current;
 		const start = performance.now();
 		let raf = 0;
 		const tick = (now: number) => {
@@ -47,4 +49,4 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	});
 </script>
 
-<span class="mono">{shown}</span>
+<span class="mono">{displayed}</span>

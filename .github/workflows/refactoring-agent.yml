@@ -1,0 +1,40 @@
+name: PR Refactoring Agent
+
+# CodeScene runs only for explicit commands from repository members or maintainers.
+# Configure CODESCENE_ACCESS_TOKEN and ANTHROPIC_API_KEY in repository Actions secrets.
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codescene-refactor-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  refactor:
+    if: >-
+      github.event.issue.pull_request != null &&
+      startsWith(github.event.comment.body, '/cs-agent') &&
+      (github.event.comment.author_association == 'OWNER' ||
+      github.event.comment.author_association == 'COLLABORATOR' ||
+      github.event.comment.author_association == 'MEMBER')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      # codescene-oss/pr-refactoring-agent@v1.0.8
+      # v1.0.8 == bbc72fbfb8e514ed2dd0a1ba2dda2e0083abac73
+      - name: Run CodeScene PR refactoring agent
+        uses: codescene-oss/pr-refactoring-agent@bbc72fbfb8e514ed2dd0a1ba2dda2e0083abac73
+        with:
+          pr_number: ${{ github.event.issue.number }}
+          command: ${{ github.event.comment.body }}
+          model: 'anthropic/claude-sonnet-4-6-20251101'
+          codescene_token: ${{ secrets.CODESCENE_ACCESS_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

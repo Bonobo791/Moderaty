@@ -213,7 +213,7 @@ vi.mock('$lib/server/youtube', () => ({
 
 import { auditLog, channelAllowedHandles, channels, comments, creditTransactions, moderationActions, organizations, rules } from '$lib/server/db/schema';
 import { SQLiteSyncDialect } from 'drizzle-orm/sqlite-core';
-import type { NewComment } from './youtube';
+import type { NewComment } from '../youtube';
 
 const dialect = new SQLiteSyncDialect();
 

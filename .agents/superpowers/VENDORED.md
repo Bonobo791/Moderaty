@@ -8,7 +8,7 @@ This directory vendors the selected skills, manifests, and harness hooks from th
 - Archive SHA-256: `2933703111f44dd1ae0234372cd2a924afb372a682fe3d9acdb6497231213fcb`
 - License: MIT (see `LICENSE`)
 
-Upstream CI, tests, planning history, release tooling, the OpenCode integration, and the optional visual-companion runtime are intentionally omitted.
+Upstream CI, tests, planning history, release tooling, the OpenCode integration, the optional visual-companion runtime, and the optional graph-rendering utility are intentionally omitted. The graph utility accepted arbitrary filesystem paths and was not part of the application runtime.
 To update, fetch the corresponding release archive, verify its commit and checksum,
 replace this directory, and review the release notes before committing.
 

@@ -11,7 +11,7 @@
 -- A copy of the License is included in the LICENSE file at the
 -- repository root.
 --
--- Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+-- Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 -- Issue #77: the dashboard ban counter (action='ban' + channel_id IN,
 -- GROUP BY channel_id) and the per-channel log page (channel_id =) both

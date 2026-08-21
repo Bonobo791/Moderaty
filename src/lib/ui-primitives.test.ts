@@ -11,7 +11,7 @@
 // A copy of the License is included in the LICENSE file at the
 // repository root.
 //
-// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 // SSR pins for the redesign primitives (Commit 1): Ticker renders its
 // target value directly under SSR (the rAF tween is client-only) and

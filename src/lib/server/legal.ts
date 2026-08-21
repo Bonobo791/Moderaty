@@ -11,7 +11,7 @@
 // A copy of the License is included in the LICENSE file at the
 // repository root.
 //
-// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 // Legal consent constants and the pending-consent cookie that carries a
 // Google-verified identity from the OAuth callback to the /consent

@@ -11,7 +11,7 @@
 // A copy of the License is included in the LICENSE file at the
 // repository root.
 //
-// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 // Property tests for rules.ts (I6). recheck is the REAL oracle — never mocked
 // here: the property cross-checks validateRule's accept/reject verdict against

@@ -11,7 +11,7 @@
 // A copy of the License is included in the LICENSE file at the
 // repository root.
 //
-// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 import { eq } from 'drizzle-orm';
 import { afterEach, expect, test, vi } from 'vitest';

@@ -11,7 +11,7 @@
 # A copy of the License is included in the LICENSE file at the
 # repository root.
 #
-# Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+# Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 #
 # Daily production database backup. Dumps the `moderaty` Turso database with
 # scripts/backup-db.mjs and keeps the gzipped dump as a workflow artifact for

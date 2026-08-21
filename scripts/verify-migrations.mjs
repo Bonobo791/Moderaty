@@ -12,7 +12,7 @@
 // A copy of the License is included in the LICENSE file at the
 // repository root.
 //
-// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 //
 // Schema verification: proves that every migration in drizzle/meta/_journal.json
 // is actually applied to the database TURSO_DATABASE_URL points at. READ ONLY —

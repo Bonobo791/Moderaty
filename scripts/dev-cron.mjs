@@ -12,7 +12,7 @@
 // A copy of the License is included in the LICENSE file at the
 // repository root.
 //
-// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 //
 // Dev cron driver. Netlify Scheduled Functions only fire on the published
 // production deploy — never on branch deploys, and nothing fires against

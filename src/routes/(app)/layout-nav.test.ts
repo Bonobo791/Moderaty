@@ -11,7 +11,7 @@
 // A copy of the License is included in the LICENSE file at the
 // repository root.
 //
-// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 // SSR pins for the app header (redesign Commit 5): the displayName links to
 // /account, and the nav link matching the current pathname gets the active

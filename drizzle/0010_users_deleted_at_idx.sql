@@ -11,6 +11,6 @@
 -- A copy of the License is included in the LICENSE file at the
 -- repository root.
 --
--- Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+-- Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 CREATE INDEX `users_deleted_at_idx` ON `users` (`deleted_at`);

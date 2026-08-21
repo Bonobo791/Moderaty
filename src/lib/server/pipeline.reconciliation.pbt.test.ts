@@ -11,7 +11,7 @@
 // A copy of the License is included in the LICENSE file at the
 // repository root.
 //
-// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 // Property tests for pipeline reconciliation (I3), dry-run conservation (I8),
 // and scan boundedness/cursor monotonicity (I10) — same testdb harness as

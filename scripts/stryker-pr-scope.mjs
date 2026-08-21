@@ -12,7 +12,7 @@
 // A copy of the License is included in the LICENSE file at the
 // repository root.
 //
-// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 //
 // Computes the Stryker --mutate scope for PR-scale runs: the src files that
 // changed vs a base ref, filtered to the same set as the mutate globs in

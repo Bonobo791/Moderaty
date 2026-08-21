@@ -12,7 +12,7 @@ language governing permissions and limitations under the License.
 A copy of the License is included in the LICENSE file at the
 repository root.
 
-Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 -->
 
 <!-- Review queue (redesign spec Phase 4): Approve/Reject are underlined

@@ -12,7 +12,7 @@ language governing permissions and limitations under the License.
 A copy of the License is included in the LICENSE file at the
 repository root.
 
-Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 -->
 <p>
 	Prepared in accordance with the Brazilian General Data Protection Law (Lei no 13.709/2018 —

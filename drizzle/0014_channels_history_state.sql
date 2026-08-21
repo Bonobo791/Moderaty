@@ -11,7 +11,7 @@
 -- A copy of the License is included in the LICENSE file at the
 -- repository root.
 --
--- Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+-- Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 ALTER TABLE `channels` ADD `history_next_page_token` text;--> statement-breakpoint
 ALTER TABLE `channels` ADD `history_boundary` text;--> statement-breakpoint

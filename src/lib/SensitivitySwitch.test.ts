@@ -11,7 +11,7 @@
 // A copy of the License is included in the LICENSE file at the
 // repository root.
 //
-// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 // SSR pins for the two-stop sensitivity switch (Commit 3, spec §7/Step 3.2):
 // both meme endpoints, the role="slider" ARIA contract, the per-level

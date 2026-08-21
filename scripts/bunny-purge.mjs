@@ -12,7 +12,7 @@
 // A copy of the License is included in the LICENSE file at the
 // repository root.
 //
-// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 //
 // Bunny CDN cache purge (docs/COOLIFY_BUNNY.md). Bunny never auto-detects
 // origin changes, so every PRODUCTION deploy must purge the pull zone — the

@@ -20,4 +20,6 @@ exclude_patterns:
     - "**/.stryker-tmp/**"
     - "**/.worktrees/**"
     - "**/.codacy/**"
+    - "**/*.md"
+    - "**/.gitignore"
     - ".agents/superpowers/**"

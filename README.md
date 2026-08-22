@@ -17,12 +17,6 @@ as a second opinion, and sends uncertain decisions to a human review queue.
 [![Maintainability Rating](https://sonarcloud.io/api/project_badges/measure?project=Bonobo791_Moderaty&metric=sqale_rating)](https://sonarcloud.io/summary/new_code?id=Bonobo791_Moderaty)
 [![Vulnerabilities](https://sonarcloud.io/api/project_badges/measure?project=Bonobo791_Moderaty&metric=vulnerabilities)](https://sonarcloud.io/summary/new_code?id=Bonobo791_Moderaty)
 
-[![CodeScene general](https://codescene.io/images/analyzed-by-codescene-badge.svg)](https://codescene.io/projects/83771)
-[![CodeScene System Mastery](https://codescene.io/projects/83771/status-badges/system-mastery)](https://codescene.io/projects/83771)
-[![CodeScene Hotspot Code Health](https://codescene.io/projects/83771/status-badges/hotspot-code-health)](https://codescene.io/projects/83771)
-[![CodeScene Missed Goals](https://codescene.io/projects/83771/status-badges/missed-goals)](https://codescene.io/projects/83771)
-[![CodeScene System Mastery](https://codescene.io/projects/83771/status-badges/system-mastery)](https://codescene.io/projects/83771)
-
 ## What it does
 
 - Connects YouTube channels through Google OAuth.

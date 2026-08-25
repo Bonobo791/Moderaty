@@ -131,6 +131,27 @@ test('rejects a payment whose amount does not match the persisted attempt', asyn
 	expect(org?.creditsRemaining).toBe(0);
 });
 
+test('an approved payment carrying a partial refund is rejected loudly — never fulfilled', async () => {
+	// Mercado Pago reports a partial refund as `approved` with
+	// 0 < refunded_amount < transaction_amount; granting the full credits would
+	// ack money already partly returned. Partial refunds are rejected for
+	// manual review (DEPLOY.md §3) (codex/cubic, round 4).
+	await expect(fulfillMercadoPagoPayment({ ...payment, refundedAmount: 2 })).rejects.toThrow(/partial refund/);
+
+	expect(await ledgerRows()).toHaveLength(0);
+	const org = await testDb().db.select({ creditsRemaining: organizations.creditsRemaining }).from(organizations).where(eq(organizations.id, 'org-1')).get();
+	expect(org?.creditsRemaining).toBe(0);
+	expect((await attemptRow())?.status).toBe('pending');
+});
+
+test('an approved payment whose refunded amount covers the whole payment is out of contract', async () => {
+	// A fully refunded payment arrives as status `refunded` — `approved` with
+	// refunded_amount >= transaction_amount violates the provider contract (I2).
+	await expect(fulfillMercadoPagoPayment({ ...payment, refundedAmount: 5 })).rejects.toThrow(/refunded amount/);
+
+	expect(await ledgerRows()).toHaveLength(0);
+});
+
 test('reverses a full Mercado Pago refund exactly once after the approved grant', async () => {
 	expect(await processMercadoPagoPayment(payment)).toBe(true);
 	expect(await processMercadoPagoPayment({ ...payment, status: 'refunded', refundedAmount: 5 })).toBe(true);
@@ -261,6 +282,33 @@ test('a chargeback deduped by a prior refund still disables auto top-up and neve
 	expect((await attemptRow())?.status).toBe('disputed');
 });
 
+test('a chargeback whose credits were never granted still disables auto top-up', async () => {
+	// The chargeback beat fulfillment: there is nothing to subtract, but the
+	// dispute side effect must still apply — otherwise an org with a
+	// chargeback stays eligible for off-session charges (codex/cubic, round 4).
+	await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'active' }).where(eq(organizations.id, 'org-1'));
+
+	expect(await processMercadoPagoPayment({ ...payment, status: 'charged_back' })).toBe(false);
+
+	expect(await ledgerRows()).toHaveLength(0);
+	const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+	expect(org?.autoTopupEnabled).toBe(0);
+	expect(org?.autoTopupState).toBe('disabled');
+	expect((await attemptRow())?.status).toBe('disputed');
+});
+
+test('a refund whose credits were never granted does not touch auto top-up', async () => {
+	// Only DISPUTES disable off-session charging — a plain refund is not a
+	// chargeback signal.
+	await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'active' }).where(eq(organizations.id, 'org-1'));
+
+	expect(await processMercadoPagoPayment({ ...payment, status: 'refunded', refundedAmount: 5 })).toBe(false);
+
+	const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+	expect(org?.autoTopupEnabled).toBe(1);
+	expect(org?.autoTopupState).toBe('active');
+});
+
 test('a reversal whose payment amount does not match the persisted attempt fails loudly and touches nothing', async () => {
 	// A self-consistent but WRONG refunded lookup (R$1 reported for a R$5
 	// attempt) must not revoke the full entitlement (codex, round 3).
@@ -361,6 +409,7 @@ test('a bundle with a malformed configured price is logged loudly and skipped, n
 test.each([
 	{ url: 'https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=pref-1' },
 	{ url: 'https://www.mercadopago.com.ar/checkout/v1/redirect?pref_id=pref-1' },
+	{ url: 'https://www.mercadopago.cl/checkout/v1/redirect?pref_id=pref-1' },
 	{ url: 'https://sandbox.mercadopago.com/checkout/v1/redirect?pref_id=pref-1' },
 	{ url: 'https://www.mercadopago.com/checkout/v1/redirect?pref_id=pref-1' }
 ])('accepts a Mercado Pago checkout URL: $url', async ({ url }) => {
@@ -509,4 +558,54 @@ test('the checkout idempotency key is a deterministic 64-char hash within the Me
 	expect(keyA).toMatch(/^[0-9a-f]{64}$/);
 	expect(keyB).toMatch(/^[0-9a-f]{64}$/);
 	expect(keyA).not.toBe(keyB);
+});
+
+test('the checkout idempotency key is namespaced per org — an attempt id reused after deletion derives a different key', async () => {
+	// Attempt ids are CALLER-SUPPLIED (the usage form's attempt_id field) and
+	// attempts cascade-delete with their org: without the org in the hashed
+	// composite, a recycled attempt id would recreate the deleted tenant's
+	// Mercado Pago idempotency key and MP could replay the old preference
+	// (cubic, round 4).
+	let preferenceCount = 0;
+	vi.stubGlobal(
+		'fetch',
+		vi.fn().mockImplementation(() => {
+			preferenceCount += 1;
+			return Promise.resolve(
+				new Response(
+					JSON.stringify({
+						id: `pref-${preferenceCount}`,
+						sandbox_init_point: `https://sandbox.mercadopago.com.br/checkout/v1/redirect?pref_id=pref-${preferenceCount}`
+					}),
+					{ status: 201 }
+				)
+			);
+		})
+	);
+
+	await createMercadoPagoCreditCheckout('org-1', TEST_OWNER, 'credits_100', 'attempt_shared');
+	const firstKey = (
+		await testDb().db
+			.select({ idempotencyKey: mercadoPagoCheckoutAttempts.idempotencyKey })
+			.from(mercadoPagoCheckoutAttempts)
+			.where(eq(mercadoPagoCheckoutAttempts.attemptId, 'attempt_shared'))
+			.get()
+	)?.idempotencyKey;
+
+	// Account deletion cascade-removes the org's attempts; a new tenant can
+	// then legitimately reuse the same caller-supplied attempt id.
+	await testDb().db.delete(organizations).where(eq(organizations.id, 'org-1'));
+	await testDb().db.insert(organizations).values({ id: 'org-2', name: 'Two', creditsRemaining: 0 });
+	await createMercadoPagoCreditCheckout('org-2', TEST_OWNER, 'credits_100', 'attempt_shared');
+	const secondKey = (
+		await testDb().db
+			.select({ idempotencyKey: mercadoPagoCheckoutAttempts.idempotencyKey })
+			.from(mercadoPagoCheckoutAttempts)
+			.where(eq(mercadoPagoCheckoutAttempts.attemptId, 'attempt_shared'))
+			.get()
+	)?.idempotencyKey;
+
+	expect(firstKey).toMatch(/^[0-9a-f]{64}$/);
+	expect(secondKey).toMatch(/^[0-9a-f]{64}$/);
+	expect(secondKey).not.toBe(firstKey);
 });

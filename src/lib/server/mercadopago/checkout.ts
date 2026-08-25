@@ -49,8 +49,11 @@ function normalizedAttemptId(value?: string): string {
 // `mercadopago:checkout:<attempt>:<uuid>` form was 94 (codex, round 3). The
 // sha256 hex is exactly 64 chars and deterministic: the same attempt always
 // derives the same key, so a retry reuses the provider's stored preference.
-function checkoutIdempotencyKey(attemptId: string): string {
-	return createHash('sha256').update(`mercadopago:checkout:${attemptId}`).digest('hex');
+// The ORG is part of the composite (round 4): attempt ids are caller-supplied
+// and attempts cascade-delete with their org, so an attempt id recycled by
+// another tenant must not reproduce a deleted checkout's key.
+function checkoutIdempotencyKey(orgId: string, attemptId: string): string {
+	return createHash('sha256').update(`mercadopago:checkout:${orgId}:${attemptId}`).digest('hex');
 }
 
 const ATTEMPT_PROJECTION = {
@@ -73,7 +76,7 @@ async function loadOrCreateAttempt(orgId: string, bundle: MercadoPagoBundle, sup
 			attemptId,
 			orgId,
 			bundleId: bundle.id,
-			idempotencyKey: checkoutIdempotencyKey(attemptId),
+			idempotencyKey: checkoutIdempotencyKey(orgId, attemptId),
 			amountCents: bundle.amountCents,
 			credits: bundle.credits
 		})

@@ -62,6 +62,9 @@ const CHECKOUT_COUNTRY_HOST = /^(www|sandbox)\.mercadopago\.com\.([a-z]{2})$/;
 
 function isCheckoutHost(hostname: string): boolean {
 	if (hostname === 'mercadopago.com' || hostname.endsWith('.mercadopago.com')) return true;
+	// Chile's checkout origin is a standalone TLD (www.mercadopago.cl), not
+	// mercadopago.com.cl (cubic, round 4) — both forms are allowlisted.
+	if (/^(www|sandbox)\.mercadopago\.cl$/.test(hostname)) return true;
 	const country = CHECKOUT_COUNTRY_HOST.exec(hostname);
 	return country !== null && CHECKOUT_COUNTRY_TLDS.has(country[2]);
 }

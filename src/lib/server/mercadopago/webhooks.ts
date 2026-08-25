@@ -108,6 +108,19 @@ export async function fulfillMercadoPagoPayment(payment: MercadoPagoPayment): Pr
 	// the live catalog env may have changed between checkout and the webhook,
 	// and a mismatch must not strand a legitimately paid transaction (codex).
 	if (paymentAmountCents(payment.transactionAmount) !== attempt.amountCents) throw new Error('Mercado Pago payment amount does not match the checkout');
+	// Mercado Pago reports a PARTIAL refund as `approved` with
+	// 0 < refunded_amount < transaction_amount — granting the full credits
+	// would ack money already partly returned. Partial refunds are rejected for
+	// manual review (DEPLOY.md §3): throw so the webhook 500s and nothing is
+	// granted (codex/cubic, round 4). A refunded amount covering the whole
+	// approved payment is out of contract entirely — a full refund arrives as
+	// status `refunded` (I2).
+	if (payment.refundedAmount !== 0) {
+		if (paymentAmountCents(payment.refundedAmount) >= paymentAmountCents(payment.transactionAmount)) {
+			throw new Error('Mercado Pago approved payment has an out-of-contract refunded amount');
+		}
+		throw new Error('Mercado Pago payment has a partial refund — rejected for manual review');
+	}
 	// Pre-column attempts (credits NULL) fall back to the live catalog.
 	const credits = attempt.credits ?? mercadoPagoBundleById(attempt.bundleId).credits;
 	return db.transaction(async (tx) => {
@@ -216,8 +229,11 @@ async function reverseMercadoPagoPayment(payment: MercadoPagoPayment, reason: 'r
 			.get();
 		// A terminal reversal whose credits were never granted (the refund beat
 		// fulfillment, or fulfillment never ran): nothing to subtract — mark the
-		// attempt and stop retrying instead of throwing forever (codex).
+		// attempt and stop retrying instead of throwing forever (codex). The
+		// dispute side effect still applies: a chargeback with no grant is a
+		// chargeback all the same (codex/cubic, round 4).
 		if (!grant) {
+			await disableAutoTopup();
 			await markTerminal();
 			return false;
 		}

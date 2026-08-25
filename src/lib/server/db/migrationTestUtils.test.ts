@@ -64,8 +64,8 @@ const CHANNELS_NO_CONTRACT_DDL = `
 `;
 
 test('migrationStatements splits on breakpoints and strips license/comment lines', () => {
-	// 0010 carries the full license header before its single statement
-	// and no breakpoints: one chunk whose comment lines must all be gone.
+	// 0010 is a single statement with no breakpoints (migration files carry
+	// no license header since 2026-08-25; any comment lines must still be gone).
 	expect(migrationStatements('0010_users_deleted_at_idx.sql')).toEqual([
 		'CREATE INDEX `users_deleted_at_idx` ON `users` (`deleted_at`);'
 	]);

@@ -326,12 +326,15 @@ Use Node 24 and npm 11.
   exit 0 without applying anything when the database is unreachable (the
   0007 incident — three clean exits, zero applications).
 - **Never edit a migration file that any environment has already applied —
-  not even comments or license headers.** `npm run db:verify` (the deploy
-  gate) hashes each file's full contents and compares against
-  `__drizzle_migrations`; a comment-only edit strands that database with
-  MISSING/EXTRA drift and blocks its deploys until a human reconciles the
-  bookkeeping with `scripts/reconcile-migrations.mjs` (DEPLOY.md §1).
-  Changed behavior always ships as a NEW migration.
+  and never add license headers or other comment blocks to migration
+  files.** Migration SQL files are generated artifacts and carry no license
+  header (removed from `0000`–`0016` on 2026-08-25; the license applies via
+  the repo-root LICENSE). `npm run db:verify` (the deploy gate) hashes each
+  file's full contents and compares against `__drizzle_migrations`; any
+  content change strands that database with MISSING/EXTRA drift and blocks
+  its deploys until a human reconciles the bookkeeping with
+  `scripts/reconcile-migrations.mjs` (DEPLOY.md §1). Changed behavior always
+  ships as a NEW migration.
 - `npm run test` — run the Vitest suite (see
   `src/routes/api/auth/google/oauth.test.ts`).
 

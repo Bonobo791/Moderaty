@@ -15,7 +15,7 @@
 
 import { describe, expect, test } from 'vitest';
 
-import { forecastCost, hostedCostUsd, validateCommentCount } from './cost';
+import { forecastCost, forecastMonths, hostedCostUsd, validateCommentCount } from './cost';
 
 describe('hosted cost calculator', () => {
 	test('the free tier costs zero and paid usage includes the first 100 comments', () => {
@@ -39,5 +39,22 @@ describe('hosted cost calculator', () => {
 		highComments: 300,
 		highCostUsd: 15
 	});
+	});
+});
+
+describe('three-month forecast gate', () => {
+	test('returns null until ALL three months are filled — a blank input is never treated as 0', () => {
+		// forecastMonths([...]) feeds CostMath's "Forecast a range" calculator:
+		// blank months must yield no forecast at all, not an instant low
+		// estimate built on zeros (codex).
+		expect(forecastMonths([undefined, undefined, undefined])).toBeNull();
+		expect(forecastMonths([100, undefined, 300])).toBeNull();
+		expect(forecastMonths([0, 0, 0])).not.toBeNull();
+	});
+
+	test('returns null when any filled month is invalid, and the forecast when all three are valid', () => {
+		expect(forecastMonths([100, -1, 300])).toBeNull();
+		expect(forecastMonths([100, 1.5, 300])).toBeNull();
+		expect(forecastMonths([100, 200, 300])).toEqual(forecastCost([100, 200, 300]));
 	});
 });

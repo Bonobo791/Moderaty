@@ -49,8 +49,19 @@ export function mercadoPagoBundleById(id: string): MercadoPagoBundle {
 
 export function configuredMercadoPagoBundles(): MercadoPagoBundle[] {
 	return CREDIT_BUNDLES.flatMap((bundle) => {
-		const priceEnv = priceEnvFor(bundle);
+		const priceEnv = PRICE_ENV_BY_BUNDLE[bundle.id];
+		if (!priceEnv) {
+			console.error(`mercadopago: no price env mapping for bundle ${bundle.id} — excluded from the catalog`);
+			return [];
+		}
 		if (!env[priceEnv]) return [];
-		return [{ ...bundle, amountCents: amountCentsFor(bundle), priceEnv }];
+		// A malformed price is a configuration error, not a reason to take the
+		// usage page down: log loudly and keep the valid bundles (codex/cubic).
+		try {
+			return [{ ...bundle, amountCents: amountCentsFor(bundle), priceEnv }];
+		} catch (cause) {
+			console.error(`mercadopago: bundle ${bundle.id} has a malformed ${priceEnv} — excluded from the catalog:`, cause);
+			return [];
+		}
 	});
 }

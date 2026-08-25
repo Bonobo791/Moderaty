@@ -178,16 +178,21 @@ export const mercadoPagoCheckoutAttempts = sqliteTable('mercado_pago_checkout_at
 	idempotencyKey: text('idempotency_key').notNull().unique(),
 	preferenceId: text('preference_id').unique(),
 	initPoint: text('init_point'),
-	status: text('status').notNull().default('pending'), // pending | open | fulfilled
+	status: text('status').notNull().default('pending'), // pending | open | fulfilled | refunded | disputed
 	currency: text('currency').notNull().default('BRL'),
 	amountCents: integer('amount_cents').notNull(),
+	// The credit count agreed at checkout time (0036, nullable for pre-column
+	// attempts): fulfillment must NOT depend on the live catalog env, which can
+	// change between checkout and the webhook.
+	credits: integer('credits'),
 	paymentId: text('payment_id').unique(),
 	paidAt: text('paid_at'),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
 	updatedAt: text('updated_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
-	index('mercado_pago_attempts_org_status_idx').on(table.orgId, table.status),
-	index('mercado_pago_attempts_payment_idx').on(table.paymentId)
+	index('mercado_pago_attempts_org_status_idx').on(table.orgId, table.status)
+	// payment_id carries its own UNIQUE constraint — a separate non-unique
+	// index (0035) was redundant and is dropped in 0036.
 ]);
 
 export const memberships = sqliteTable('memberships', {

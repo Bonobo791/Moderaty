@@ -40,6 +40,17 @@ export type CostForecast = {
 	highCostUsd: number;
 };
 
+/**
+ * Forecasts from three monthly comment counts. A BLANK month (undefined) or
+ * an invalid one yields null — never a forecast silently built on zeros.
+ */
+export function forecastMonths(months: readonly (number | undefined)[]): CostForecast | null {
+	if (months.some((month) => month === undefined)) return null;
+	const counts = months as number[];
+	if (!counts.every((count) => Number.isSafeInteger(count) && count >= 0 && count <= MAX_CALCULATOR_COMMENTS)) return null;
+	return forecastCost(counts);
+}
+
 export function forecastCost(values: readonly number[]): CostForecast {
 	if (values.length !== 3) throw new Error('cost forecast requires exactly three monthly comment counts');
 	const comments = values.map(validateCommentCount);

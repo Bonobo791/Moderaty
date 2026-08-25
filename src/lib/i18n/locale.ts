@@ -21,6 +21,12 @@ export function isLocale(value: string | null | undefined): value is Locale {
 	return value === 'en' || value === 'pt-BR';
 }
 
+function supportedLocaleFor(language: string): Locale | null {
+	if (language === 'pt-br' || language === 'pt') return 'pt-BR';
+	if (language === 'en' || language.startsWith('en-')) return 'en';
+	return null;
+}
+
 function languageFromAcceptLanguage(header: string | null): Locale {
 	if (!header) return 'en';
 	const preferences = header
@@ -29,13 +35,20 @@ function languageFromAcceptLanguage(header: string | null): Locale {
 			const [language, ...parameters] = part.trim().split(';');
 			const quality = parameters.find((parameter) => parameter.trim().startsWith('q='));
 			const q = quality ? Number(quality.trim().slice(2)) : 1;
-			return { language: language.toLowerCase(), q: Number.isFinite(q) ? q : 0 };
+			return { language: language.trim().toLowerCase(), q: Number.isFinite(q) ? q : 0 };
 		})
-		.filter((preference) => preference.q > 0)
 		.sort((left, right) => right.q - left.q);
+	// An explicit q=0 EXCLUDES the language outright (RFC 7231 §5.3.1) — even
+	// a wildcard match must not return it.
+	const excluded = new Set(preferences.filter((preference) => preference.q === 0).map((preference) => supportedLocaleFor(preference.language)));
 	for (const preference of preferences) {
-		if (preference.language === 'pt-br' || preference.language === 'pt') return 'pt-BR';
-		if (preference.language === 'en' || preference.language.startsWith('en-')) return 'en';
+		if (preference.q === 0) continue;
+		const locale = supportedLocaleFor(preference.language);
+		if (locale) return locale;
+		if (preference.language === '*') {
+			const fallback = SUPPORTED_LOCALES.find((supported) => !excluded.has(supported));
+			if (fallback) return fallback;
+		}
 	}
 	return 'en';
 }

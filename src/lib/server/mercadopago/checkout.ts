@@ -52,7 +52,8 @@ async function loadOrCreateAttempt(orgId: string, bundle: MercadoPagoBundle, sup
 			orgId,
 			bundleId: bundle.id,
 			idempotencyKey: `mercadopago:checkout:${attemptId}:${randomUUID()}`,
-			amountCents: bundle.amountCents
+			amountCents: bundle.amountCents,
+			credits: bundle.credits
 		})
 		.onConflictDoNothing({ target: mercadoPagoCheckoutAttempts.attemptId })
 		.returning({
@@ -99,6 +100,11 @@ export async function createMercadoPagoCreditCheckout(
 	const bundle = mercadoPagoBundleById(bundleId);
 	const attempt = await loadOrCreateAttempt(orgId, bundle, attemptId);
 	if (attempt.status === 'fulfilled') throw new Error('Mercado Pago checkout attempt has already completed');
+	// A reversed attempt is terminal too — reopening its initPoint would sell
+	// credits against a payment that was already refunded or charged back.
+	if (attempt.status === 'refunded' || attempt.status === 'disputed') {
+		throw new Error(`Mercado Pago checkout attempt was ${attempt.status} and cannot be reused; start a new checkout`);
+	}
 	if (attempt.initPoint) return attempt.initPoint;
 	const preference = await mercadoPagoProvider.createCheckout({
 		orgId,

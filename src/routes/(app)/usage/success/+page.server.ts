@@ -59,6 +59,11 @@ async function mercadoPagoSuccess(user: SessionUser, attemptId: string): Promise
 		.get();
 	if (!attempt) return { maintenance: false, user, sessionId: attemptId, granted: false, pending: false, failed: true };
 	if (attempt.status === 'fulfilled') return { maintenance: false, user, sessionId: attemptId, granted: true, pending: false, failed: false };
+	// A reversed attempt (refund or chargeback) is terminal: there is no
+	// fulfillment left to wait for — never leave the page pending (codex).
+	if (attempt.status === 'refunded' || attempt.status === 'disputed') {
+		return { maintenance: false, user, sessionId: attemptId, granted: false, pending: false, failed: true };
+	}
 	if (attempt.paymentId) {
 		try {
 			const applied = await processMercadoPagoPayment(await retrievePayment(attempt.paymentId));

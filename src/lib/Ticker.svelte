@@ -21,6 +21,8 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
      the target directly. -->
 
 <script lang="ts">
+	import { untrack } from 'svelte';
+
 	let { value, duration = 350 }: { value: number; duration?: number } = $props();
 
 	let shown = $state<number>();
@@ -29,7 +31,9 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	$effect(() => {
 		const target = Math.round(value);
 		const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-		const current = shown ?? target;
+		// `shown` is written by tick() below — reading it bare would make this
+		// effect depend on its own output and re-trigger on every frame (codex).
+		const current = untrack(() => shown ?? target);
 		if (reduced || duration <= 0 || current === target) {
 			shown = target;
 			return;

@@ -27,6 +27,18 @@ describe('locale resolution', () => {
 		expect(resolveLocale({ acceptLanguage: 'pt-BR,pt;q=0.9,en;q=0.8' })).toBe('pt-BR');
 	});
 
+	test('whitespace around the language tag still matches', () => {
+		expect(resolveLocale({ acceptLanguage: 'pt-BR ; q=0.9' })).toBe('pt-BR');
+		expect(resolveLocale({ acceptLanguage: ' en ; q=0.9' })).toBe('en');
+	});
+
+	test('an explicit q=0 excludes the language even when a wildcard is present', () => {
+		// 'en;q=0' means "anything but English" — the wildcard must fall
+		// through to the other supported locale, never return the excluded one.
+		expect(resolveLocale({ acceptLanguage: 'en;q=0,*;q=1' })).toBe('pt-BR');
+		expect(resolveLocale({ acceptLanguage: 'pt;q=0,*;q=0.5' })).toBe('en');
+	});
+
 	test('invalid or unsupported preferences fail closed to English', () => {
 		expect(resolveLocale({ cookie: 'fr', acceptLanguage: 'de-DE' })).toBe('en');
 	});
@@ -34,7 +46,7 @@ describe('locale resolution', () => {
 
 describe('message catalog', () => {
 	test('every shell message has both translations', () => {
-		const keys = ['languageLabel', 'english', 'portuguese', 'apply', 'app', 'dashboard', 'usage', 'team', 'help', 'switchTeam', 'signOut', 'maintenance', 'moderationPaused', 'databaseUnavailable', 'signInTitle', 'signInDescription', 'signInGoogle', 'finishAccount', 'updatedTerms', 'finishAccountPrompt', 'legalChanged', 'createAccount', 'acceptContinue', 'marketingText'] as const;
+		const keys = ['languageLabel', 'english', 'portuguese', 'apply', 'app', 'dashboard', 'usage', 'team', 'help', 'switchTeam', 'signOut', 'maintenance', 'moderationPaused', 'databaseUnavailable', 'signInTitle', 'signInDescription', 'signInGoogle', 'finishAccount', 'almostThere', 'updatedTerms', 'finishAccountPrompt', 'legalChanged', 'createAccount', 'acceptContinue', 'marketingText'] as const;
 		for (const key of keys) {
 			expect(t('en', key)).not.toBe('');
 			expect(t('pt-BR', key)).not.toBe('');

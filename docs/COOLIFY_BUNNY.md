@@ -120,7 +120,7 @@ One-time setup (human, in the Coolify dashboard):
    | `STRIPE_PRICE_CREDITS_100` / `STRIPE_PRICE_CREDITS_500` / `STRIPE_PRICE_CREDITS_2000` | production Prices | dev Prices | one-time USD Price IDs for the 100/500/2,000-credit bundles; auto top-up validates active/currency/type |
    | `STRIPE_PRICE_HOSTED_MONTHLY` / `STRIPE_PRICE_LIFETIME` | production Prices | dev Prices | hosted USD 5 monthly recurring Price and USD 49 one-time Price; the app validates mode, currency, amount, and interval |
    | `MERCADOPAGO_ACCESS_TOKEN` / `MERCADOPAGO_WEBHOOK_SECRET` | production | dev | optional BRL prepaid credit checkout; webhook fulfillment is signed and idempotent |
-   | `MERCADOPAGO_ENVIRONMENT` / `MERCADOPAGO_PRICE_CREDITS_*_BRL_CENTS` | production | dev | optional Mercado Pago sandbox/production mode and BRL bundle prices in cents |
+   | `MERCADOPAGO_ENVIRONMENT` / `MERCADOPAGO_PRICE_CREDITS_*_BRL_CENTS` | production | sandbox | optional Mercado Pago sandbox/production mode and BRL bundle prices in cents |
    | `MJ_APIKEY_PUBLIC` / `MJ_APIKEY_PRIVATE` / `MAILJET_FROM_EMAIL` / `MAILJET_FROM_NAME` | production | dev | MailJet credentials for the contact form's verification e-mails (`MAILJET_FROM_EMAIL` must be a sender verified in the Mailjet account) |
    Do not set `BUNNY_ACCESS_KEY` in the application environment — the purge
    runs OUTSIDE the container (`.github/workflows/bunny-purge.yml`), with a

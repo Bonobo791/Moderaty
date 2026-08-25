@@ -147,6 +147,7 @@ the site exists), local work, and outage recovery.
   | `STRIPE_SECRET_KEY` | Stripe API secret key (live mode) |
   | `STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret |
   | `STRIPE_PRICE_CREDITS_100` / `STRIPE_PRICE_CREDITS_500` / `STRIPE_PRICE_CREDITS_2000` | Stripe Price IDs for the three credit bundles (active, one-time, USD — auto top-up validates all three) |
+  | `STRIPE_PRICE_HOSTED_MONTHLY` / `STRIPE_PRICE_LIFETIME` | Stripe Price IDs for the hosted monthly plan (recurring, USD 5) and the lifetime plan (one-time, USD 49) |
   | `ENCRYPTION_KEY` | `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
   | `CRON_SECRET` | any long random string; also used to trigger cron manually |
   | `MJ_APIKEY_PUBLIC` / `MJ_APIKEY_PRIVATE` | MailJet REST API key and secret key (contact-form verification e-mails) |

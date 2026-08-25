@@ -19,7 +19,9 @@ import { isLocale, LOCALE_COOKIE } from '$lib/i18n/locale';
 import { cookieSecure } from '$lib/server/oauthState';
 
 function safeReturnTo(value: FormDataEntryValue | null): string {
-	if (typeof value !== 'string' || value === '' || !value.startsWith('/') || value.startsWith('//') || /[\r\n]/.test(value)) {
+	// A backslash makes browsers resolve '/\evil.example' as protocol-relative
+	// ('//evil.example') — an open redirect (codex).
+	if (typeof value !== 'string' || value === '' || !value.startsWith('/') || value.startsWith('//') || value.includes('\\') || /[\r\n]/.test(value)) {
 		throw new Error('locale return path is invalid');
 	}
 	return value;

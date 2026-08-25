@@ -1,13 +1,18 @@
 <!-- Moderaty — YouTube Comment Auto-Moderation Tool -->
 
 <script lang="ts">
-	import { browser } from '$app/environment';
+	import { building } from '$app/environment';
 	import { page } from '$app/state';
 	import type { Locale } from '$lib/i18n/locale';
 	import { t } from '$lib/i18n/messages';
 
 	let { locale }: { locale: Locale } = $props();
-	const returnTo = $derived(`${page.url.pathname}${browser ? page.url.search : ''}`);
+	// Include the query string on real SSR too — gating on `browser` dropped
+	// ?state= from the /consent round-trip for no-JS submissions (codex). Only
+	// PRERENDERED pages must skip it: url.search is inaccessible while
+	// prerendering, and those pages are query-agnostic anyway. The hash is
+	// deliberately excluded: fragments never reach the server.
+	const returnTo = $derived(`${page.url.pathname}${building ? '' : page.url.search}`);
 </script>
 
 <form class="language-switcher" method="POST" action="/api/locale">

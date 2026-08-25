@@ -14,7 +14,7 @@
 // Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { and, eq, gt, isNull, or, sql } from 'drizzle-orm';
+import { and, eq, gt, isNull, lt, or, sql } from 'drizzle-orm';
 
 import { env } from '$env/dynamic/private';
 import { applyLedgerDelta } from '$lib/server/billing/ledger';
@@ -74,6 +74,7 @@ export async function fulfillMercadoPagoPayment(payment: MercadoPagoPayment): Pr
 			orgId: mercadoPagoCheckoutAttempts.orgId,
 			bundleId: mercadoPagoCheckoutAttempts.bundleId,
 			amountCents: mercadoPagoCheckoutAttempts.amountCents,
+			credits: mercadoPagoCheckoutAttempts.credits,
 			paymentId: mercadoPagoCheckoutAttempts.paymentId
 		})
 		.from(mercadoPagoCheckoutAttempts)
@@ -81,13 +82,17 @@ export async function fulfillMercadoPagoPayment(payment: MercadoPagoPayment): Pr
 		.get();
 	if (attempt?.orgId !== orgId) throw new Error('Mercado Pago checkout attempt was not found');
 	if (attempt.paymentId && attempt.paymentId !== payment.id) throw new Error('Mercado Pago checkout attempt has a different payment');
-	const bundle = mercadoPagoBundleById(attempt.bundleId);
-	if (bundle.amountCents !== attempt.amountCents) throw new Error('Mercado Pago checkout amount no longer matches the configured catalog');
-	if (Math.round(payment.transactionAmount * 100) !== attempt.amountCents) throw new Error('Mercado Pago payment amount does not match the checkout');
+	// The ATTEMPT ROW is the source of truth for what was agreed at checkout —
+	// the live catalog env may have changed between checkout and the webhook,
+	// and a mismatch must not strand a legitimately paid transaction (codex).
+	if (!Number.isSafeInteger(payment.transactionAmount * 100)) throw new Error('Mercado Pago payment amount is not a whole number of cents');
+	if (payment.transactionAmount * 100 !== attempt.amountCents) throw new Error('Mercado Pago payment amount does not match the checkout');
+	// Pre-column attempts (credits NULL) fall back to the live catalog.
+	const credits = attempt.credits ?? mercadoPagoBundleById(attempt.bundleId).credits;
 	return db.transaction(async (tx) => {
 		const applied = await applyLedgerDelta(tx, {
 			orgId,
-			delta: bundle.credits,
+			delta: credits,
 			reason: 'purchase',
 			refType: 'checkout_session',
 			refId: providerLedgerRef('mercadopago', payment.id)
@@ -103,7 +108,10 @@ export async function fulfillMercadoPagoPayment(payment: MercadoPagoPayment): Pr
 }
 
 async function reverseMercadoPagoPayment(payment: MercadoPagoPayment, reason: 'refund' | 'dispute'): Promise<boolean> {
-	if (payment.refundedAmount !== payment.transactionAmount) {
+	// Only a REFUND must be reported in full — a chargeback reverses the whole
+	// payment by definition and often arrives with NO refunded amount, which
+	// must not throw forever (codex).
+	if (reason === 'refund' && payment.refundedAmount !== payment.transactionAmount) {
 		throw new Error('Mercado Pago payment is not a full refund');
 	}
 	const { orgId, attemptId } = externalReference(payment.externalReference);
@@ -114,12 +122,37 @@ async function reverseMercadoPagoPayment(payment: MercadoPagoPayment, reason: 'r
 		.get();
 	if (attempt?.orgId !== orgId) throw new Error('Mercado Pago checkout attempt was not found');
 	if (attempt.paymentId && attempt.paymentId !== payment.id) throw new Error('Mercado Pago checkout attempt has a different payment');
+	const status = reason === 'refund' ? 'refunded' : 'disputed';
+	const markTerminal = () =>
+		db
+			.update(mercadoPagoCheckoutAttempts)
+			.set({ paymentId: payment.id, status, updatedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` })
+			.where(and(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId), or(isNull(mercadoPagoCheckoutAttempts.paymentId), eq(mercadoPagoCheckoutAttempts.paymentId, payment.id))));
+	// A payment can be BOTH charged back and refunded — the reversal is keyed
+	// on the payment, not on (refType, refId), so the second terminal event
+	// never subtracts the credits again (codeant HIGH). The attempt still
+	// records the latest terminal state.
+	const reversal = await db
+		.select({ id: creditTransactions.id })
+		.from(creditTransactions)
+		.where(and(eq(creditTransactions.orgId, orgId), eq(creditTransactions.refId, providerLedgerRef('mercadopago', payment.id)), or(eq(creditTransactions.refType, 'refund'), eq(creditTransactions.refType, 'dispute')), lt(creditTransactions.delta, 0)))
+		.get();
+	if (reversal) {
+		await markTerminal();
+		return false;
+	}
 	const grant = await db
 		.select({ orgId: creditTransactions.orgId, delta: creditTransactions.delta })
 		.from(creditTransactions)
 		.where(and(eq(creditTransactions.orgId, orgId), eq(creditTransactions.refType, 'checkout_session'), eq(creditTransactions.refId, providerLedgerRef('mercadopago', payment.id)), eq(creditTransactions.reason, 'purchase'), gt(creditTransactions.delta, 0)))
 		.get();
-	if (!grant) throw new Error('Mercado Pago refund arrived before its credit grant; retry is required');
+	// A terminal reversal whose credits were never granted (the refund beat
+	// fulfillment, or fulfillment never ran): nothing to subtract — mark the
+	// attempt and stop retrying instead of throwing forever (codex).
+	if (!grant) {
+		await markTerminal();
+		return false;
+	}
 	if (reason === 'dispute') {
 		await db.update(organizations).set({ autoTopupEnabled: 0, autoTopupState: 'disabled' }).where(eq(organizations.id, orgId));
 	}
@@ -130,10 +163,7 @@ async function reverseMercadoPagoPayment(payment: MercadoPagoPayment, reason: 'r
 		refType: reason,
 		refId: providerLedgerRef('mercadopago', payment.id)
 	});
-	await db
-		.update(mercadoPagoCheckoutAttempts)
-		.set({ paymentId: payment.id, status: reason === 'refund' ? 'refunded' : 'disputed', updatedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` })
-		.where(and(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId), or(isNull(mercadoPagoCheckoutAttempts.paymentId), eq(mercadoPagoCheckoutAttempts.paymentId, payment.id))));
+	await markTerminal();
 	return reversed;
 }
 

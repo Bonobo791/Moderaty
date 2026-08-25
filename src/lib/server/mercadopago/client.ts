@@ -117,6 +117,7 @@ export async function retrievePayment(paymentId: string): Promise<MercadoPagoPay
 	});
 	const body = record(await jsonResponse(response, 'Mercado Pago payment lookup'), 'Mercado Pago payment');
 	if (typeof body.id !== 'number' && typeof body.id !== 'string') throw new Error('Mercado Pago payment has no id');
+	if (String(body.id) !== paymentId) throw new Error('Mercado Pago returned a different payment than requested');
 	if (typeof body.status !== 'string' || typeof body.external_reference !== 'string') throw new Error('Mercado Pago payment has invalid status or reference');
 	if (typeof body.transaction_amount !== 'number' || !Number.isFinite(body.transaction_amount) || body.transaction_amount <= 0) throw new Error('Mercado Pago payment has invalid amount');
 	if (typeof body.currency_id !== 'string') throw new Error('Mercado Pago payment has invalid currency');

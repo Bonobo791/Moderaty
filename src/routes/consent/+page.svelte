@@ -34,7 +34,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 <main class="consent-main">
 	<div class="card consent-card">
 		{#if data.kind === 'new'}
-			<h1>{t(data.locale, 'finishAccount')}{data.displayName ? `, ${data.displayName}` : ''}</h1>
+			<h1>{t(data.locale, 'almostThere')}{data.displayName ? `, ${data.displayName}` : ''}</h1>
 			<p class="muted">{t(data.locale, 'finishAccountPrompt')}</p>
 		{:else}
 			<h1>{t(data.locale, 'updatedTerms')}</h1>

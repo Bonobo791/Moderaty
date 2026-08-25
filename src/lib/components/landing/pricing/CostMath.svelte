@@ -23,16 +23,17 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 <script lang="ts">
 	import { page } from '$app/state';
 	import Reveal from '../Reveal.svelte';
-	import { forecastCost, hostedCostUsd, MAX_CALCULATOR_COMMENTS } from '$lib/landing/cost';
+	import { forecastMonths, hostedCostUsd, MAX_CALCULATOR_COMMENTS } from '$lib/landing/cost';
 
 	let monthOne = $state<number | undefined>(undefined);
 	let monthTwo = $state<number | undefined>(undefined);
 	let monthThree = $state<number | undefined>(undefined);
 	const locale = $derived(page.data.locale ?? 'en');
-	const counts = $derived([monthOne ?? 0, monthTwo ?? 0, monthThree ?? 0]);
 	const validCount = (value: number | undefined) => value === undefined || (Number.isSafeInteger(value) && value >= 0 && value <= MAX_CALCULATOR_COMMENTS);
 	const validInputs = $derived(validCount(monthOne) && validCount(monthTwo) && validCount(monthThree));
-	const forecast = $derived(validInputs ? forecastCost(counts) : null);
+	// The forecast needs ALL THREE months — a blank input is not a 0, so a
+	// partially filled form shows nothing instead of an instant low estimate.
+	const forecast = $derived(validInputs ? forecastMonths([monthOne, monthTwo, monthThree]) : null);
 	const lastMonthCost = $derived(monthOne === undefined ? null : validCount(monthOne) ? hostedCostUsd(monthOne) : null);
 	const formatUsd = (value: number) => new Intl.NumberFormat(locale === 'pt-BR' ? 'pt-BR' : 'en-US', { style: 'currency', currency: 'USD' }).format(value);
 	const hasInput = $derived(monthOne !== undefined || monthTwo !== undefined || monthThree !== undefined);
@@ -83,9 +84,9 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 					<label for="month-two">{locale === 'pt-BR' ? 'Mês 2' : 'Month 2'}<input id="month-two" type="number" min="0" max={MAX_CALCULATOR_COMMENTS} step="1" bind:value={monthTwo} /></label>
 					<label for="month-three">{locale === 'pt-BR' ? 'Mês 3' : 'Month 3'}<input id="month-three" type="number" min="0" max={MAX_CALCULATOR_COMMENTS} step="1" bind:value={monthThree} /></label>
 				</div>
-				{#if hasInput && forecast}
+				{#if forecast}
 					<p class="forecast" aria-live="polite">{formatUsd(forecast.lowCostUsd)}–{formatUsd(forecast.highCostUsd)} <span>({forecast.lowComments.toLocaleString(locale)}–{forecast.highComments.toLocaleString(locale)} {label})</span></p>
-				{:else if hasInput}
+				{:else if hasInput && !validInputs}
 					<p class="input-error" role="alert">{locale === 'pt-BR' ? 'Informe números inteiros válidos.' : 'Enter valid whole numbers.'}</p>
 				{/if}
 			</div>

@@ -44,3 +44,11 @@ test('rejects unsupported locales and external return paths', async () => {
 	const externalResponse = await POST({ request: new Request('https://moderaty.example/api/locale', { method: 'POST', body: external }), cookies: cookies() } as never);
 	expect(externalResponse.status).toBe(400);
 });
+
+test('rejects backslash return paths — browsers resolve /\\evil.example as protocol-relative', async () => {
+	const form = new FormData();
+	form.set('locale', 'en');
+	form.set('returnTo', '/\\evil.example');
+	const response = await POST({ request: new Request('https://moderaty.example/api/locale', { method: 'POST', body: form }), cookies: cookies() } as never);
+	expect(response.status).toBe(400);
+});

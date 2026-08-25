@@ -221,7 +221,11 @@ the site exists), local work, and outage recovery.
   abort and the endpoint's 20s run budget. Raise it to 26s (Site settings →
   Functions) so the graceful-timeout path can fire; on a 10s limit the
   platform kills first (runs still recover via lease expiry, but failures are
-  reported less cleanly).
+  reported less cleanly). This is a site-level setting, and adapter-netlify
+  serves every SSR route (including `/api/mercadopago/webhook`) through the
+  same function — the raised limit also keeps Mercado Pago webhook handling
+  inside its ~22s retry window instead of falling into the 15-minute replay
+  loop.
 - Manual trigger (e.g. right after connecting a channel) — prefer the header
   form so the secret stays out of shell history and logs:
   `curl -H "Authorization: Bearer <CRON_SECRET>" "https://<your-site>/api/cron"`

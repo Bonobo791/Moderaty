@@ -19,8 +19,16 @@ import { encrypt } from '$lib/server/crypto';
 import { auditLog, channels, comments, moderationActions, rules } from '$lib/server/db/schema';
 import { eq } from 'drizzle-orm';
 
-const mocks = vi.hoisted(() => ({ runChannel: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+	runChannel: vi.fn(),
+	// $env/dynamic/private mock: analyzeHistory reads DRY_RUN to refuse planting
+	// a history drain that can never advance on an env-dry deployment.
+	// ENCRYPTION_KEY is a synthetic credential fixture — same maintainer-approved
+	// exception as netlify/cron.test.mjs (2026-07-30, PR #13 review, per AGENTS.md).
+	env: { DRY_RUN: 'false', ENCRYPTION_KEY: 'actions-test-key' } as Record<string, string | undefined>
+}));
 vi.mock('$lib/server/pipeline', () => ({ runChannel: mocks.runChannel }));
+vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
 import { actions } from './+page.server';
 
@@ -127,6 +135,34 @@ test('analyze history moves the scan boundary N months back and resets the drain
 		expect(Date.parse(cursor ?? '')).toBeLessThanOrEqual(after - expected + 1000);
 	} finally {
 		infoSpy.mockRestore();
+	}
+});
+
+test('analyze history refuses loudly on a dry-run deployment — 409, boundary untouched', async () => {
+	// The env-dry trap: runChannel exits through finishDryRun before
+	// persistResults under DRY_RUN=true (I8), so a planted history drain can
+	// never advance — it re-audits page 1 forever and looks stuck. Refuse up
+	// front instead of planting a scan that cannot run.
+	await seedChannel('UC1');
+	await testDb()
+		.db.update(channels)
+		.set({ cursor: '2026-07-30T00:00:00.000Z', nextPageToken: 'tok', scanCursor: '2026-07-29T00:00:00.000Z' })
+		.where(eq(channels.id, 'UC1'));
+	mocks.env.DRY_RUN = 'true';
+	try {
+		const res = await analyzeHistory('UC1', '3');
+
+		expect(res).toMatchObject({
+			status: 409,
+			data: { scope: 'history', channelId: 'UC1', error: expect.stringContaining('DRY_RUN=false') }
+		});
+		expect(await scanWindowOf('UC1')).toEqual({
+			cursor: '2026-07-30T00:00:00.000Z',
+			nextPageToken: 'tok',
+			scanCursor: '2026-07-29T00:00:00.000Z'
+		});
+	} finally {
+		mocks.env.DRY_RUN = 'false';
 	}
 });
 

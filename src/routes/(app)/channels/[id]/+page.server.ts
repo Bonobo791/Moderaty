@@ -22,6 +22,7 @@ import { requireOrgRole } from '$lib/server/ownership';
 import { runChannel } from '$lib/server/pipeline';
 import { requireUser } from '$lib/server/session';
 import { and, eq, isNull, lt, or } from 'drizzle-orm';
+import { env } from '$env/dynamic/private';
 import { fail } from '@sveltejs/kit';
 
 /** Window presets shared by Analyze history and the dry-run preview (months). */
@@ -81,6 +82,17 @@ export const actions = {
 		// run, so an unbounded window is an unbounded API/AI cost (I10).
 		if (!HISTORY_MONTH_PRESETS.has(months)) {
 			return fail(400, { scope: 'history', channelId, error: 'history window must be 1, 3, 6, 12, or 24 months' });
+		}
+		// Env-dry trap: under DRY_RUN=true every run exits through finishDryRun
+		// before persistResults (I8), so the planted drain can never advance —
+		// each cron tick re-fetches page 1 and the scan looks stuck forever.
+		// Refuse loudly instead of planting a scan that cannot moderate.
+		if (env.DRY_RUN === 'true') {
+			return fail(409, {
+				scope: 'history',
+				channelId,
+				error: 'This deployment runs in dry-run mode: history analysis audits only and never moderates. Set DRY_RUN=false to moderate.'
+			});
 		}
 		// Move the scan boundary back and reset the drain state: cron's next runs
 		// page from the newest comment down to this boundary. Already-seen

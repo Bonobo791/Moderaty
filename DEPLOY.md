@@ -63,30 +63,68 @@ the site exists), local work, and outage recovery.
   applied-count check: it recomputes each journal entry's sha256 and compares
   against `__drizzle_migrations`, failing loudly on any missing or extra
   hash — the deploy gate runs it on every build.
-- **Historical drift repair (0003 only, likely already done):** migration
-  `0003_wide_impossible_man.sql` had its license header added ~30 minutes after
-  it was applied, changing its recorded hash. If the first gated deploy
-  reports `MISSING 0003_wide_impossible_man` + an `EXTRA applied hash
-  4cb16c12…`, the production database still holds the pre-header hash; the
-  only difference is the header (verify with
-  `git diff 4c11b2f 33428fb -- drizzle/0003_wide_impossible_man.sql`), so
-  backfill the journal row instead of re-running the migration:
-  `UPDATE __drizzle_migrations SET hash = 'effa15e51ca99fd0acf8556c1f1a9bc3abd097bc84dac09f6b05eff27c4f2130' WHERE hash = '4cb16c12ec9d828ba5d32b31f85a55d70af231d310f3904eb149e039822301c6';`
-  (one row), then re-run `npm run db:verify`. If production reports no drift
-  at all, nothing to do — it was migrated after the header commit.
-- **License-header swap (PolyForm, every header-carrying migration):** the
-  AGPL header on each of `0000`–`0016` (except `0012`) was replaced by the
-  PolyForm Shield notice, which changes the sha256 recorded for any database
-  where those migrations are already applied. The dev database has been
-  repaired; **production must be repaired by a human before its next deploy**:
-  after merging this change, run the deploy gate once (it will report
-  `MISSING`/`EXTRA` for exactly the 16 header-carrying migrations), then
-  backfill each row instead of re-running the migration:
-  `UPDATE __drizzle_migrations SET hash = '<new sha256 from scripts/verify-migrations.mjs output>' WHERE hash = '<old sha256>';`
-  (16 rows, one per migration; only the comment header differs — the SQL
-  statements are byte-identical), then re-run `npm run db:verify`. A
-  convenience is to compute old/new pairs from the pre- and post-merge file
-  hashes (`sha256sum drizzle/<tag>.sql`) and update by exact old-hash match.
+- **Historical drift repair (16 migrations, REQUIRED before the first gated
+  production deploy of this branch):** production has applied `0000`–`0019`
+  (20 rows), but 16 rows in `__drizzle_migrations` record pre-header /
+  AGPL-header / pre-contact-update hashes while the repo files were rewritten
+  twice since (AGPL header → PolyForm Shield header → commercial-contact
+  update). The gate will apply `0020`–`0035` cleanly, then fail verification
+  with 16 `MISSING` + 16 `EXTRA` — the DDL is already applied; only the
+  bookkeeping hashes drifted. Verified 2026-08-25 against production:
+  14 of the 16 drifts are header-comment-only; the two exceptions are
+  schema-equivalent (see below). Repair, from a checkout with the production
+  values sourced:
+
+  1. Let the gated deploy run its migrate step (it applies `0020`–`0035`,
+     bringing production to 36 rows) and fail at verify.
+  2. Dump the recorded hashes in rowid order:
+     `SELECT rowid, hash FROM __drizzle_migrations ORDER BY rowid;`
+  3. Run the reconciler with those 36 hashes as the attestation:
+     `RECONCILE_EXPECTED_HASHES='["<row1 hash>",...,"<row36 hash>"]' node scripts/reconcile-migrations.mjs`
+     It refuses on any count or positional mismatch, rewrites only the 16
+     drifted rows in one write transaction, and read-back verifies each.
+  4. `npm run db:verify` must pass; retry the deploy.
+
+  Expected drifted rows (old → new, positional mapping confirmed against
+  production 2026-08-25):
+
+  | row | migration | old hash (prefix) | new hash |
+  |---|---|---|---|
+  | 1 | 0000_add_channel_scan_state | 9f0eacaf… | 9060bf3e5f994f40ae427a4295a475874b4b84a72d91c6f598da6a62ad1d2f09 |
+  | 2 | 0001_add_moderation_actions | 8acc1c74… | cd2dc8c9ab50d916ed054dcd753e4044ac17c534324d503204fc4bee1d67d0a6 |
+  | 3 | 0002_add_channel_cron_lease | 55a05b2f… | 44230339484f3387cd7ac5f52afb61b1449ef303a669162e8e8785ea0d103d88 |
+  | 4 | 0003_wide_impossible_man | 4cb16c12… | 85270a0b3a5da75d5ad0cc95d9e09c2b727ebab5874943e68145f13c5ae84af2 |
+  | 5 | 0004_smiling_nextwave | 70c0f38b… | 696cf965a32650cc83175617810aa7244a397761bac3f4c42852e93cefc3e9db |
+  | 6 | 0005_common_texas_twister | cb7ee4c3… | 623b8e563f512762d7a2dba079f4f73a451276e8a87341eebcf269679a8a71e7 |
+  | 7 | 0006_huge_boom_boom | 8c7d1440… | 0a48f2df03625f4dbee4a505aa114bc0d8981368f2950ac160cab73901269ab0 |
+  | 8 | 0007_curved_blade | 7bc5adea… | c3a8336f8d3a3cd26f6dd84f6312f1c70c4aed95f8b25c576a145f760fc3d638 |
+  | 9 | 0008_relax_comment_author_pii | 6b573491… | 93afef62f0ba015862e2cbbea3612296827eb03e48607bd9d978673b721bf58c |
+  | 10 | 0009_aromatic_red_wolf | d49389ca… | 5ff4ba9ce1014545bc00aa408096a59e5910ab2175b93a54293daf7716e2b20d |
+  | 11 | 0010_users_deleted_at_idx | dcbbf7fa… | 52daf06dd958dc9b87cdf6df4565431e846252c718c8a8777e218adf309fda12 |
+  | 12 | 0011_consents_email | 20cb0570… | 3ec78e46da33c9174e88cc8a2efd120b2f4e170b24315c903b934657b453c65b |
+  | 14 | 0013_channels_org_contract | 61e5ed85… | 0a38b7389a1dfb5800d51fc36e82cf902bbb104388a4d81d7eed0aa8beccc5ff |
+  | 15 | 0014_channels_history_state | 283fda6a… | ca35c57b8f4b2fb016806330c1add91b9d3fec661c13ba704679a458e85b3c9c |
+  | 16 | 0015_channels_protect_flags | 94d2659e… | f66ddfb2b37e7ea08a1fb41d30e135e1af6ecdefd73e41d654440540c6134fae |
+  | 17 | 0016_audit_log_channel_action_idx | ca78ba56… | 27deb209b6fa421a67708ea74a04761c46101d7cdcc6ae80fd716988f289973e |
+
+  Rows 13 (`0012`), 18–20 (`0017`–`0019`) already match the current files —
+  they were applied after the last header rewrite.
+
+  The two non-header drifts, both safe to rehash:
+  - `0013` also gained `DROP TABLE IF EXISTS __new_channels` (mid-rebuild
+    retry guard). It only changes re-run behavior; production applied the
+    rebuild successfully, so the live schema is identical.
+  - `0014` tightened its backfill to `WHERE next_page_token IS NOT NULL AND
+    scan_cursor IS NOT NULL`. Production ran the looser version, so channels
+    that had a continuation token but no scan boundary were backfilled into
+    the unresumable shape (`history_next_page_token` set, `history_boundary`
+    NULL). Schema is identical; to clear those stale rows after the repair:
+    `UPDATE channels SET history_next_page_token = NULL WHERE history_next_page_token IS NOT NULL AND history_boundary IS NULL;`
+
+  **Going forward: never edit a migration file that any environment has
+  already applied — not even comments.** The deploy gate hashes file
+  contents; a header or wording change strands the database with
+  MISSING/EXTRA drift. New behavior always ships as a NEW migration.
 - For the multi-tenancy contract (migration `0013_channels_org_contract.sql`
   and later), also run the tenancy Definition-of-Done probe against the
   production database from a checkout with the production values sourced:

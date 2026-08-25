@@ -79,7 +79,7 @@ export async function fulfillMercadoPagoPayment(payment: MercadoPagoPayment): Pr
 		.from(mercadoPagoCheckoutAttempts)
 		.where(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId))
 		.get();
-	if (!attempt || attempt.orgId !== orgId) throw new Error('Mercado Pago checkout attempt was not found');
+	if (attempt?.orgId !== orgId) throw new Error('Mercado Pago checkout attempt was not found');
 	if (attempt.paymentId && attempt.paymentId !== payment.id) throw new Error('Mercado Pago checkout attempt has a different payment');
 	const bundle = mercadoPagoBundleById(attempt.bundleId);
 	if (bundle.amountCents !== attempt.amountCents) throw new Error('Mercado Pago checkout amount no longer matches the configured catalog');
@@ -112,7 +112,7 @@ async function reverseMercadoPagoPayment(payment: MercadoPagoPayment, reason: 'r
 		.from(mercadoPagoCheckoutAttempts)
 		.where(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId))
 		.get();
-	if (!attempt || attempt.orgId !== orgId) throw new Error('Mercado Pago checkout attempt was not found');
+	if (attempt?.orgId !== orgId) throw new Error('Mercado Pago checkout attempt was not found');
 	if (attempt.paymentId && attempt.paymentId !== payment.id) throw new Error('Mercado Pago checkout attempt has a different payment');
 	const grant = await db
 		.select({ orgId: creditTransactions.orgId, delta: creditTransactions.delta })

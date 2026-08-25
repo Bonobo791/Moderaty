@@ -36,33 +36,45 @@ import { fulfillCheckout } from '$lib/server/stripe/webhooks';
 
 import type { PageServerLoad } from './$types';
 
-export const load: PageServerLoad = async ({ locals, url }) => {
-	if (locals.dbDown) {
-		return { maintenance: true, user: null, sessionId: null, granted: false, pending: false, failed: false };
-	}
-	const user = requireUser(locals);
-	const sessionId = url.searchParams.get('session_id');
-	const provider = url.searchParams.get('provider');
-	const mercadoPagoAttemptId = url.searchParams.get('attempt_id');
-	if (provider === 'mercadopago' && mercadoPagoAttemptId) {
-		const attempt = await db
-			.select({ status: mercadoPagoCheckoutAttempts.status, paymentId: mercadoPagoCheckoutAttempts.paymentId })
-			.from(mercadoPagoCheckoutAttempts)
-			.where(and(eq(mercadoPagoCheckoutAttempts.attemptId, mercadoPagoAttemptId), eq(mercadoPagoCheckoutAttempts.orgId, user.orgId)))
-			.get();
-		if (!attempt) return { maintenance: false, user, sessionId: mercadoPagoAttemptId, granted: false, pending: false, failed: true };
-		if (attempt.status === 'fulfilled') return { maintenance: false, user, sessionId: mercadoPagoAttemptId, granted: true, pending: false, failed: false };
-		if (attempt.paymentId) {
-			try {
-				const applied = await processMercadoPagoPayment(await retrievePayment(attempt.paymentId));
-				return { maintenance: false, user, sessionId: mercadoPagoAttemptId, granted: applied || attempt.status === 'fulfilled', pending: !applied, failed: false };
-			} catch (cause) {
-				console.error('usage/success: Mercado Pago fulfillment retry failed:', cause);
-			}
+type SessionUser = ReturnType<typeof requireUser>;
+type SuccessState = {
+	maintenance: boolean;
+	user: SessionUser | null;
+	sessionId: string | null;
+	granted: boolean;
+	pending: boolean;
+	failed: boolean;
+};
+
+/**
+ * Mercado Pago branch: fulfill the user's own attempt idempotently. Unknown
+ * attempt → failed; already fulfilled → granted; paid but unfulfilled → run
+ * the same idempotent processor the webhook uses; otherwise still pending.
+ */
+async function mercadoPagoSuccess(user: SessionUser, attemptId: string): Promise<SuccessState> {
+	const attempt = await db
+		.select({ status: mercadoPagoCheckoutAttempts.status, paymentId: mercadoPagoCheckoutAttempts.paymentId })
+		.from(mercadoPagoCheckoutAttempts)
+		.where(and(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId), eq(mercadoPagoCheckoutAttempts.orgId, user.orgId)))
+		.get();
+	if (!attempt) return { maintenance: false, user, sessionId: attemptId, granted: false, pending: false, failed: true };
+	if (attempt.status === 'fulfilled') return { maintenance: false, user, sessionId: attemptId, granted: true, pending: false, failed: false };
+	if (attempt.paymentId) {
+		try {
+			const applied = await processMercadoPagoPayment(await retrievePayment(attempt.paymentId));
+			return { maintenance: false, user, sessionId: attemptId, granted: applied || attempt.status === 'fulfilled', pending: !applied, failed: false };
+		} catch (cause) {
+			console.error('usage/success: Mercado Pago fulfillment retry failed:', cause);
 		}
-		return { maintenance: false, user, sessionId: mercadoPagoAttemptId, granted: false, pending: true, failed: false };
 	}
-	if (!sessionId) return { maintenance: false, user, sessionId: null, granted: false, pending: false, failed: false };
+	return { maintenance: false, user, sessionId: attemptId, granted: false, pending: true, failed: false };
+}
+
+/**
+ * Stripe branch: retrieve the session and run the idempotent fulfillCheckout.
+ * A session belonging to another org is never fulfilled (and never leaks).
+ */
+async function stripeSuccess(user: SessionUser, sessionId: string): Promise<SuccessState> {
 	let granted = false;
 	let pending = false;
 	try {
@@ -111,4 +123,18 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 		pending = true;
 	}
 	return { maintenance: false, user, sessionId, granted, pending, failed: !granted && !pending };
+}
+
+export const load: PageServerLoad = async ({ locals, url }) => {
+	if (locals.dbDown) {
+		return { maintenance: true, user: null, sessionId: null, granted: false, pending: false, failed: false };
+	}
+	const user = requireUser(locals);
+	const sessionId = url.searchParams.get('session_id');
+	const mercadoPagoAttemptId = url.searchParams.get('attempt_id');
+	if (url.searchParams.get('provider') === 'mercadopago' && mercadoPagoAttemptId) {
+		return mercadoPagoSuccess(user, mercadoPagoAttemptId);
+	}
+	if (!sessionId) return { maintenance: false, user, sessionId: null, granted: false, pending: false, failed: false };
+	return stripeSuccess(user, sessionId);
 };

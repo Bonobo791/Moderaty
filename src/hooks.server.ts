@@ -38,7 +38,7 @@ export const handle: Handle = async ({ event, resolve }) => {
 	const resolveLocalized = () =>
 		resolve(event, {
 			transformPageChunk: ({ html, done }) =>
-				done ? html.replace('<html lang=\"en\">', `<html lang=\"${locale}\">`) : html
+				done ? html.replace('<html lang="en">', `<html lang="${locale}">`) : html
 		});
 	// /api/health is the uptime probe (issue #82): its whole job is to report
 	// database health itself, so it bypasses the migration guard and session

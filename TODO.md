@@ -89,12 +89,16 @@ refactor only when the file is touched anyway; no security/correctness impact.
 - [x] Reconcile the dev database's historical migration hashes and verify all
       37 journal entries. Production remains human-only and must be checked
       separately.
-- [ ] Mark the completed pipeline refactor and disconnect design documents as
+- [x] Mark the completed pipeline refactor and disconnect design documents as
       historical, and identify the current implementation as the source of
-      truth.
-- [ ] Replace the legacy greenfield instructions in
+      truth. Done — both docs already carry a historical banner pointing at the
+      current implementation (verified 2026-08-25, PR #136 round 2 triage).
+- [x] Replace the legacy greenfield instructions in
       `EXECUTION_PLAN_YouTube_Comment_Moderator.md` with a link to the current
-      README, AGENTS.md, and deployment runbook.
+      README, AGENTS.md, and deployment runbook. Done — the document already
+      opens with a "Historical plan" banner linking to `README.md`,
+      `AGENTS.md`, `DEPLOY.md`, and `docs/COOLIFY_BUNNY.md` (verified
+      2026-08-25, PR #136 round 2 triage).
 - [ ] Triage the seven existing Svelte warnings in the UI components and
       account page.
 

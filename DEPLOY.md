@@ -63,57 +63,61 @@ the site exists), local work, and outage recovery.
   applied-count check: it recomputes each journal entry's sha256 and compares
   against `__drizzle_migrations`, failing loudly on any missing or extra
   hash — the deploy gate runs it on every build.
-- **Historical drift repair (15 migrations, REQUIRED before the first gated
-  production deploy of this branch):** migration SQL files no longer carry
-  license headers at all (removed 2026-08-25 — headers are what caused this
-  drift class; the license applies via the repo-root LICENSE). The dev
-  database has been reconciled to the headerless files and verified.
-  Production has applied `0000`–`0019` (20 rows); 16 of those rows record
-  pre-header / AGPL-header hashes, and stripping the headers restores
-  `0003` to byte-identical with what production recorded (row 4 self-heals,
-  no update needed). The other 15 rows drift. The gate will apply
-  `0020`–`0036` cleanly, then fail verification with 15 `MISSING` + 15
-  `EXTRA` — the DDL is already applied; only the bookkeeping hashes drifted.
-  Verified 2026-08-25 against production: 13 of the 15 drifts are
-  header-comment-only (the stripped files are byte-identical to what
-  production ran, minus comments); the two exceptions are schema-equivalent
-  (see below). Repair, from a checkout with the production values sourced:
+- **Historical drift repair (16 migrations, REQUIRED to unblock the gated
+  production deploy):** migration SQL files no longer carry license headers
+  at all (removed 2026-08-25 — headers are what caused this drift class; the
+  license applies via the repo-root LICENSE). The dev database has been
+  reconciled to the headerless files and verified. Production's rows
+  `0000`–`0016` (except `0012`) record the **PolyForm-era** hashes (an
+  intermediate reconciliation aligned prod with the pre-header-strip files;
+  confirmed by the 2026-08-25 build's EXTRA list, which matches the
+  `b28a45f` file versions exactly and in order). Tonight's gated deploy
+  already applied `0020`–`0036` (prod is at 37 rows), then failed
+  verification with 16 `MISSING` + 16 `EXTRA` — the DDL is fully applied;
+  only the bookkeeping hashes drifted, so the repair can run immediately
+  (no need to wait for another failed gate). Verified 2026-08-25: 14 of the
+  16 drifts are header-comment-only (the headerless files are byte-identical
+  to what production ran, minus comments); the two exceptions are
+  schema-equivalent (see below). Repair, from a checkout with the production
+  values sourced:
 
-  1. Let the gated deploy run its migrate step (it applies `0020`–`0036`,
-     bringing production to 37 rows) and fail at verify.
-  2. Dump the recorded hashes in rowid order:
+  1. Dump the recorded hashes in rowid order (expect 37 rows):
      `SELECT rowid, hash FROM __drizzle_migrations ORDER BY rowid;`
-  3. Run the reconciler with those 37 hashes as the attestation:
+  2. Run the reconciler with those 37 hashes as the attestation:
      `RECONCILE_EXPECTED_HASHES='["<row1 hash>",...,"<row37 hash>"]' node scripts/reconcile-migrations.mjs`
-     It refuses on any count or positional mismatch, rewrites only the 15
+     It refuses on any count or positional mismatch, rewrites only the 16
      drifted rows in one write transaction, and read-back verifies each.
-  4. `npm run db:verify` must pass; retry the deploy.
+  3. `npm run db:verify` must pass; retry the deploy.
 
-  Expected drifted rows (old → new, positional mapping confirmed against
-  production 2026-08-25; new hashes are the headerless files):
+  Expected drifted rows (old → new; old hashes are the PolyForm-era values
+  confirmed by the failed build's EXTRA list, new hashes are the headerless
+  files):
 
   | row | migration | old hash (prefix) | new hash |
   |---|---|---|---|
-  | 1 | 0000_add_channel_scan_state | 9f0eacaf… | ea82e6a91eaaac247e24a691a3e3f4461896f2bc862dced0add773189dcee4e4 |
-  | 2 | 0001_add_moderation_actions | 8acc1c74… | 27f5cf45c4ba2e74b819179f1f5bb4af4f8413d596fbfea0d6bf7e0da70f8bb1 |
-  | 3 | 0002_add_channel_cron_lease | 55a05b2f… | a0b52c1590ac779b716fbf0edd63903a5c1c8200a3834d9ea1fdef30594e47f9 |
-  | 5 | 0004_smiling_nextwave | 70c0f38b… | 5ef9931cede6c7f7206340974a2dfe00e832d5fb56a0db559394e1b165e0af61 |
-  | 6 | 0005_common_texas_twister | cb7ee4c3… | 702b1bb4d5dcce5ff39c973a34da4436faef740639eaf354e5a629ee3900df4b |
-  | 7 | 0006_huge_boom_boom | 8c7d1440… | 3e74c497a40a957e093cf666c92928131c3971a9647fce2ca303bbbe4d586603 |
-  | 8 | 0007_curved_blade | 7bc5adea… | 98cb0399a7f96686fcdf1baa902f22a1f853ab6bc7abefea7f209ff9bceaca29 |
-  | 9 | 0008_relax_comment_author_pii | 6b573491… | 0120d969bbaffd9ae85b8ada4a59b1374e7d3970a83b1a7986cadff0cda096fe |
-  | 10 | 0009_aromatic_red_wolf | d49389ca… | 41102b3c22d9c4660662b5d4795e26c41f1a3a6c81b6aa3ae0aea23509c1986c |
-  | 11 | 0010_users_deleted_at_idx | dcbbf7fa… | 19860f87f4f4f325740abb68dbcf230c724147873647721a290d83ed47d67a48 |
-  | 12 | 0011_consents_email | 20cb0570… | 1dcf1a9e2ac45524f5ec24dfeaa570ee04e7ec8b8e0786a26bb213ce5c326749 |
-  | 14 | 0013_channels_org_contract | 61e5ed85… | c7d8c993750069bf737378285df04ca6b5448bdefc40598f1b94a690801d079a |
-  | 15 | 0014_channels_history_state | 283fda6a… | f7651be80d4ffeb4fa0e6aca7033dd13db261a2e852e89a0a5ba37fc9b83fcdd |
-  | 16 | 0015_channels_protect_flags | 94d2659e… | a5b7de46f76653c9167b4078025a1a31fb7920fe05c1688da5ffcdd2375b5671 |
-  | 17 | 0016_audit_log_channel_action_idx | ca78ba56… | 9fa32be994df1e086d073000ca9b9f63c324b22eb7c7b1ac03ec79b791f36c07 |
+  | 1 | 0000_add_channel_scan_state | db022801… | ea82e6a91eaaac247e24a691a3e3f4461896f2bc862dced0add773189dcee4e4 |
+  | 2 | 0001_add_moderation_actions | 0a656e29… | 27f5cf45c4ba2e74b819179f1f5bb4af4f8413d596fbfea0d6bf7e0da70f8bb1 |
+  | 3 | 0002_add_channel_cron_lease | f02ef3e6… | a0b52c1590ac779b716fbf0edd63903a5c1c8200a3834d9ea1fdef30594e47f9 |
+  | 4 | 0003_wide_impossible_man | e29c1403… | 4cb16c12ec9d828ba5d32b31f85a55d70af231d310f3904eb149e039822301c6 |
+  | 5 | 0004_smiling_nextwave | 014e1956… | 5ef9931cede6c7f7206340974a2dfe00e832d5fb56a0db559394e1b165e0af61 |
+  | 6 | 0005_common_texas_twister | d7234aaf… | 702b1bb4d5dcce5ff39c973a34da4436faef740639eaf354e5a629ee3900df4b |
+  | 7 | 0006_huge_boom_boom | 7069ef35… | 3e74c497a40a957e093cf666c92928131c3971a9647fce2ca303bbbe4d586603 |
+  | 8 | 0007_curved_blade | c43f2b4a… | 98cb0399a7f96686fcdf1baa902f22a1f853ab6bc7abefea7f209ff9bceaca29 |
+  | 9 | 0008_relax_comment_author_pii | 943da0e8… | 0120d969bbaffd9ae85b8ada4a59b1374e7d3970a83b1a7986cadff0cda096fe |
+  | 10 | 0009_aromatic_red_wolf | ecbf61fd… | 41102b3c22d9c4660662b5d4795e26c41f1a3a6c81b6aa3ae0aea23509c1986c |
+  | 11 | 0010_users_deleted_at_idx | fff7b031… | 19860f87f4f4f325740abb68dbcf230c724147873647721a290d83ed47d67a48 |
+  | 12 | 0011_consents_email | 25953b7f… | 1dcf1a9e2ac45524f5ec24dfeaa570ee04e7ec8b8e0786a26bb213ce5c326749 |
+  | 14 | 0013_channels_org_contract | 83937cac… | c7d8c993750069bf737378285df04ca6b5448bdefc40598f1b94a690801d079a |
+  | 15 | 0014_channels_history_state | ce29a066… | f7651be80d4ffeb4fa0e6aca7033dd13db261a2e852e89a0a5ba37fc9b83fcdd |
+  | 16 | 0015_channels_protect_flags | 5fb21cc5… | a5b7de46f76653c9167b4078025a1a31fb7920fe05c1688da5ffcdd2375b5671 |
+  | 17 | 0016_audit_log_channel_action_idx | cf415769… | 9fa32be994df1e086d073000ca9b9f63c324b22eb7c7b1ac03ec79b791f36c07 |
 
-  Row 4 (`0003`) needs no update — the headerless file hashes to exactly the
-  `4cb16c12…` production recorded (it was applied before any header existed).
-  Rows 13 (`0012`) and 18–20 (`0017`–`0019`) never carried headers and already
-  match.
+  Row 13 (`0012`) and rows 18–20 (`0017`–`0019`) never carried headers and
+  already match; rows 21–37 (`0020`–`0036`) were recorded by tonight's
+  migrate step from the headerless files, so they match too. Note the
+  headerless `0003` hashes to `4cb16c12…` — exactly what production
+  ORIGINALLY recorded before any header existed (the intermediate
+  reconciliation had moved row 4 to the PolyForm-era `e29c1403…`).
 
   The two non-header drifts, both safe to rehash:
   - `0013` also gained `DROP TABLE IF EXISTS __new_channels` (mid-rebuild

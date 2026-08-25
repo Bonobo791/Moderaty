@@ -11,7 +11,7 @@
 // A copy of the License is included in the LICENSE file at the
 // repository root.
 //
-// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 // Property tests for runChannel (pipeline.ts) against the REAL in-memory test
 // database (testdb.ts mocks $lib/server/db). Unlike pipeline.test.ts (hoisted

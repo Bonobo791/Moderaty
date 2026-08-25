@@ -12,12 +12,16 @@ language governing permissions and limitations under the License.
 A copy of the License is included in the LICENSE file at the
 repository root.
 
-Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 -->
 
 # Disconnect channel (full removal) — design
 
-Date: 2026-08-06. Status: approved by maintainer (approach A).
+Date: 2026-08-06. Status: implemented on `dev` (approach A).
+
+> The implementation lives in `src/routes/(app)/channels/[id]/+page.server.ts`
+> and the channel detail page. This historical design originally described a
+> dashboard action; the channel detail location is now authoritative.
 
 ## Purpose
 

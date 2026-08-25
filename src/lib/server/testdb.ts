@@ -11,7 +11,7 @@
 // A copy of the License is included in the LICENSE file at the
 // repository root.
 //
-// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 // Test helper: real in-memory libsql database with the app schema.
 // Never imported by app code — tests only.
@@ -384,6 +384,24 @@ export async function createTestDb(): Promise<TestDb> {
 			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE INDEX stripe_checkout_attempts_org_status_idx ON stripe_checkout_attempts (org_id, status)`,
+		`CREATE TABLE mercado_pago_checkout_attempts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			attempt_id TEXT NOT NULL UNIQUE,
+			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+			bundle_id TEXT NOT NULL,
+			idempotency_key TEXT NOT NULL UNIQUE,
+			preference_id TEXT UNIQUE,
+			init_point TEXT,
+			status TEXT NOT NULL DEFAULT 'pending',
+			currency TEXT NOT NULL DEFAULT 'BRL',
+			amount_cents INTEGER NOT NULL,
+			credits INTEGER,
+			payment_id TEXT UNIQUE,
+			paid_at TEXT,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`,
+		`CREATE INDEX mercado_pago_attempts_org_status_idx ON mercado_pago_checkout_attempts (org_id, status)`,
 		SEED_LIFETIME_SLOTS,
 		`CREATE TABLE memberships (
 			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

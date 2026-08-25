@@ -17,8 +17,6 @@ as a second opinion, and sends uncertain decisions to a human review queue.
 [![Maintainability Rating](https://sonarcloud.io/api/project_badges/measure?project=Bonobo791_Moderaty&metric=sqale_rating)](https://sonarcloud.io/summary/new_code?id=Bonobo791_Moderaty)
 [![Vulnerabilities](https://sonarcloud.io/api/project_badges/measure?project=Bonobo791_Moderaty&metric=vulnerabilities)](https://sonarcloud.io/summary/new_code?id=Bonobo791_Moderaty)
 
-[![CodeScene general](https://codescene.io/images/analyzed-by-codescene-badge.svg)](https://codescene.io/projects/83771)
-
 ## What it does
 
 - Connects YouTube channels through Google OAuth.
@@ -121,6 +119,8 @@ Copy [.env.example](.env.example) and provide these values as appropriate:
 | `CRON_SECRET` | Secret for scheduled and manual cron requests |
 | `ENCRYPTION_KEY` | Key used to encrypt stored YouTube refresh tokens |
 | `DRY_RUN` | Must be `true` or `false`; `true` records audit previews without durable moderation changes |
+| `MERCADOPAGO_ACCESS_TOKEN`, `MERCADOPAGO_WEBHOOK_SECRET` | Optional Mercado Pago BRL prepaid-credit checkout credentials |
+| `MERCADOPAGO_ENVIRONMENT`, `MERCADOPAGO_PRICE_CREDITS_*_BRL_CENTS` | Optional Mercado Pago mode and BRL bundle prices in cents |
 
 Never commit `.env` or real credentials. Netlify environment-variable setup is
 covered by [DEPLOY.md](DEPLOY.md).

@@ -12,7 +12,7 @@ language governing permissions and limitations under the License.
 A copy of the License is included in the LICENSE file at the
 repository root.
 
-Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 -->
 
 <!-- Ticker: integer counter that tweens to its target over `duration`
@@ -21,18 +21,24 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
      the target directly. -->
 
 <script lang="ts">
+	import { untrack } from 'svelte';
+
 	let { value, duration = 350 }: { value: number; duration?: number } = $props();
 
-	let shown = $state(Math.round(value));
+	let shown = $state<number>();
+	const displayed = $derived(shown ?? Math.round(value));
 
 	$effect(() => {
 		const target = Math.round(value);
 		const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-		if (reduced || duration <= 0 || shown === target) {
+		// `shown` is written by tick() below — reading it bare would make this
+		// effect depend on its own output and re-trigger on every frame (codex).
+		const current = untrack(() => shown ?? target);
+		if (reduced || duration <= 0 || current === target) {
 			shown = target;
 			return;
 		}
-		const from = shown;
+		const from = current;
 		const start = performance.now();
 		let raf = 0;
 		const tick = (now: number) => {
@@ -47,4 +53,4 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	});
 </script>
 
-<span class="mono">{shown}</span>
+<span class="mono">{displayed}</span>

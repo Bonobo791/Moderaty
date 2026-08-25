@@ -11,7 +11,7 @@
 // A copy of the License is included in the LICENSE file at the
 // repository root.
 //
-// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 // Checkout success landing. The WEBHOOK is the authoritative fulfillment
 // path; this page just runs the same idempotent fulfillCheckout for instant
@@ -22,6 +22,13 @@
 
 import { createHash } from 'node:crypto';
 
+import { and, eq } from 'drizzle-orm';
+
+import { db } from '$lib/server/db';
+import { mercadoPagoCheckoutAttempts } from '$lib/server/db/schema';
+import { retrievePayment } from '$lib/server/mercadopago/client';
+import { processMercadoPagoPayment } from '$lib/server/mercadopago/webhooks';
+
 import { markCheckoutAttemptFulfilled } from '$lib/server/billing/checkout';
 import { requireUser } from '$lib/server/session';
 import { getStripe } from '$lib/server/stripe/client';
@@ -29,13 +36,61 @@ import { fulfillCheckout } from '$lib/server/stripe/webhooks';
 
 import type { PageServerLoad } from './$types';
 
-export const load: PageServerLoad = async ({ locals, url }) => {
-	if (locals.dbDown) {
-		return { maintenance: true, user: null, sessionId: null, granted: false, pending: false, failed: false };
+type SessionUser = ReturnType<typeof requireUser>;
+type SuccessState = {
+	maintenance: boolean;
+	user: SessionUser | null;
+	sessionId: string | null;
+	granted: boolean;
+	pending: boolean;
+	failed: boolean;
+};
+
+/**
+ * Mercado Pago branch: fulfill the user's own attempt idempotently. Unknown
+ * attempt → failed; already fulfilled → granted; paid but unfulfilled → run
+ * the same idempotent processor the webhook uses; otherwise still pending.
+ */
+async function mercadoPagoSuccess(user: SessionUser, attemptId: string): Promise<SuccessState> {
+	const attempt = await db
+		.select({ status: mercadoPagoCheckoutAttempts.status, paymentId: mercadoPagoCheckoutAttempts.paymentId })
+		.from(mercadoPagoCheckoutAttempts)
+		.where(and(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId), eq(mercadoPagoCheckoutAttempts.orgId, user.orgId)))
+		.get();
+	if (!attempt) return { maintenance: false, user, sessionId: attemptId, granted: false, pending: false, failed: true };
+	if (attempt.status === 'fulfilled') return { maintenance: false, user, sessionId: attemptId, granted: true, pending: false, failed: false };
+	// A reversed attempt (refund or chargeback) is terminal: there is no
+	// fulfillment left to wait for — never leave the page pending (codex).
+	if (attempt.status === 'refunded' || attempt.status === 'disputed') {
+		return { maintenance: false, user, sessionId: attemptId, granted: false, pending: false, failed: true };
 	}
-	const user = requireUser(locals);
-	const sessionId = url.searchParams.get('session_id');
-	if (!sessionId) return { maintenance: false, user, sessionId: null, granted: false, pending: false, failed: false };
+	if (attempt.paymentId) {
+		try {
+			await processMercadoPagoPayment(await retrievePayment(attempt.paymentId));
+			// The snapshot above is stale by now: inline processing may have
+			// flipped the attempt to a TERMINAL state (a refund/chargeback
+			// reversal) — re-read before deciding what to render (cubic, round 3).
+			const fresh = await db
+				.select({ status: mercadoPagoCheckoutAttempts.status })
+				.from(mercadoPagoCheckoutAttempts)
+				.where(and(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId), eq(mercadoPagoCheckoutAttempts.orgId, user.orgId)))
+				.get();
+			if (fresh?.status === 'fulfilled') return { maintenance: false, user, sessionId: attemptId, granted: true, pending: false, failed: false };
+			if (fresh?.status === 'refunded' || fresh?.status === 'disputed') {
+				return { maintenance: false, user, sessionId: attemptId, granted: false, pending: false, failed: true };
+			}
+		} catch (cause) {
+			console.error('usage/success: Mercado Pago fulfillment retry failed:', cause);
+		}
+	}
+	return { maintenance: false, user, sessionId: attemptId, granted: false, pending: true, failed: false };
+}
+
+/**
+ * Stripe branch: retrieve the session and run the idempotent fulfillCheckout.
+ * A session belonging to another org is never fulfilled (and never leaks).
+ */
+async function stripeSuccess(user: SessionUser, sessionId: string): Promise<SuccessState> {
 	let granted = false;
 	let pending = false;
 	try {
@@ -84,4 +139,18 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 		pending = true;
 	}
 	return { maintenance: false, user, sessionId, granted, pending, failed: !granted && !pending };
+}
+
+export const load: PageServerLoad = async ({ locals, url }) => {
+	if (locals.dbDown) {
+		return { maintenance: true, user: null, sessionId: null, granted: false, pending: false, failed: false };
+	}
+	const user = requireUser(locals);
+	const sessionId = url.searchParams.get('session_id');
+	const mercadoPagoAttemptId = url.searchParams.get('attempt_id');
+	if (url.searchParams.get('provider') === 'mercadopago' && mercadoPagoAttemptId) {
+		return mercadoPagoSuccess(user, mercadoPagoAttemptId);
+	}
+	if (!sessionId) return { maintenance: false, user, sessionId: null, granted: false, pending: false, failed: false };
+	return stripeSuccess(user, sessionId);
 };

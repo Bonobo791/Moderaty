@@ -11,13 +11,14 @@
 // A copy of the License is included in the LICENSE file at the
 // repository root.
 //
-// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 import type { Handle } from '@sveltejs/kit';
 
 import { isHttpError } from '@sveltejs/kit';
 
 import { cookieSecure } from '$lib/server/oauthState';
+import { LOCALE_COOKIE, resolveLocale } from '$lib/i18n/locale';
 import { assertMigrationsCurrent } from '$lib/server/migrationGuard';
 import { getSessionUser, SESSION_COOKIE } from '$lib/server/session';
 
@@ -30,6 +31,15 @@ import { getSessionUser, SESSION_COOKIE } from '$lib/server/session';
 // maintenance overlay. A valid user sees a loud maintenance state, never a
 // silent downgrade to signed-out.
 export const handle: Handle = async ({ event, resolve }) => {
+	const locale = resolveLocale({
+		cookie: event.cookies.get(LOCALE_COOKIE),
+		acceptLanguage: event.request?.headers?.get('accept-language')
+	});
+	const resolveLocalized = () =>
+		resolve(event, {
+			transformPageChunk: ({ html, done }) =>
+				done ? html.replace('<html lang="en">', `<html lang="${locale}">`) : html
+		});
 	// /api/health is the uptime probe (issue #82): its whole job is to report
 	// database health itself, so it bypasses the migration guard and session
 	// resolution — either one would convert a database outage into a 500
@@ -51,7 +61,7 @@ export const handle: Handle = async ({ event, resolve }) => {
 		console.error('migration guard query failed:', e);
 		event.locals.dbDown = true;
 		event.locals.user = null;
-		return resolve(event);
+		return resolveLocalized();
 	}
 	const token = event.cookies.get(SESSION_COOKIE);
 	try {
@@ -75,5 +85,5 @@ export const handle: Handle = async ({ event, resolve }) => {
 		event.locals.dbDown = true;
 		event.locals.user = null;
 	}
-	return resolve(event);
+	return resolveLocalized();
 };

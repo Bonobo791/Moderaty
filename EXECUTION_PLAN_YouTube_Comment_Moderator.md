@@ -1,5 +1,10 @@
 # EXECUTION PLAN: Moderaty — YouTube Comment Auto-Moderator (MVP) — v3
 
+> **Historical plan.** The MVP and later billing, tenancy, deployment, and
+> pipeline work are implemented on `dev`. Current operational guidance is in
+> `README.md`, `AGENTS.md`, `DEPLOY.md`, and `docs/COOLIFY_BUNNY.md`. Treat this
+> document as historical design context, not an active execution checklist.
+
 > Hand this entire document to the executor model. It has no other context.
 > Everything it needs is written here. Follow the steps in order and improvise nothing.
 > The app is named **Moderaty** (brand name — use it in nav, page titles, and copy; the

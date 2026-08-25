@@ -11,12 +11,13 @@
 // A copy of the License is included in the LICENSE file at the
 // repository root.
 //
-// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 // SSR pins for the redesign primitives (Commit 1): Ticker renders its
 // target value directly under SSR (the rAF tween is client-only) and
 // SharpCheckbox enforces the I13 labeling rule loudly.
 
+import { readFileSync } from 'node:fs';
 import { render } from 'svelte/server';
 import { expect, test } from 'vitest';
 
@@ -27,6 +28,15 @@ test('Ticker SSR renders the rounded target value with the mono class', () => {
 	const { body } = render(Ticker, { props: { value: 42 } });
 	expect(body).toContain('class="mono"');
 	expect(body).toContain('>42</span>');
+});
+
+test('Ticker reads the animated value inside the effect via untrack (no self-restart loop)', () => {
+	// The $effect writes `shown` from its rAF tick; reading `shown` bare would
+	// make the effect depend on its own output and re-trigger every frame
+	// (codex). SSR cannot run effects, so pin the source contract directly.
+	const source = readFileSync(new URL('./Ticker.svelte', import.meta.url), 'utf8');
+	const effectBody = source.slice(source.indexOf('$effect('));
+	expect(effectBody).toContain('untrack(() => shown');
 });
 
 test('SharpCheckbox throws without a label or aria-label (I13, fail loudly)', () => {

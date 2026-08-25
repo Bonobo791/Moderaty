@@ -12,7 +12,7 @@ language governing permissions and limitations under the License.
 A copy of the License is included in the LICENSE file at the
 repository root.
 
-Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 -->
 
 <!-- Account settings (redesign spec §7 Step 5.1/5.2): identity headline, the
@@ -40,8 +40,10 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		initialArmed?: boolean;
 	} = $props();
 
-	let confirmed = $state(initialConfirmed);
-	let armed = $state(initialArmed);
+	let confirmed = $state<boolean>();
+	let armed = $state<boolean>();
+	const confirmedValue = $derived(confirmed ?? initialConfirmed);
+	const armedValue = $derived(armed ?? initialArmed);
 
 	const roleLabel = $derived(
 		data.orgRole ? data.orgRole[0].toUpperCase() + data.orgRole.slice(1) : 'Member'
@@ -50,13 +52,13 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	// Unchecking the acknowledgement disarms the button — the armed state can
 	// never survive the condition that enabled it.
 	$effect(() => {
-		if (!confirmed) armed = false;
+		if (!confirmedValue) armed = false;
 	});
 
 	function onDeleteClick(event: MouseEvent) {
 		// First click arms instead of submitting; the second click falls through
 		// and submits the form to the deleteAccount action.
-		if (!armed) {
+		if (!armedValue) {
 			event.preventDefault();
 			armed = true;
 		}
@@ -130,19 +132,25 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	{/if}
 	<form method="POST" action="?/deleteAccount" use:enhance>
 		<SharpCheckbox
-			bind:checked={confirmed}
+			checked={confirmedValue}
+			onchange={(event) => {
+				const target = event.currentTarget;
+				if (!(target instanceof HTMLInputElement)) throw new Error('delete confirmation target was not an input');
+				confirmed = target.checked;
+				armed = false;
+			}}
 			name="confirm"
 			label="I understand and want to delete my Moderaty account"
 		/>
 		<button
 			class="delete-btn"
-			class:outlined={confirmed && !armed}
-			class:armed
+			class:outlined={confirmedValue && !armedValue}
+			class:armed={armedValue}
 			type="submit"
-			disabled={!confirmed}
+			disabled={!confirmedValue}
 			onclick={onDeleteClick}
 		>
-			{armed ? 'Click again to confirm. No restore window.' : 'Delete my account'}
+			{armedValue ? 'Click again to confirm. No restore window.' : 'Delete my account'}
 		</button>
 	</form>
 </div>

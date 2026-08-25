@@ -11,16 +11,17 @@
 // A copy of the License is included in the LICENSE file at the
 // repository root.
 //
-// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { TEST_OWNER, setupTestDb, testDb } from '$lib/server/testdb';
-import { organizations } from '$lib/server/db/schema';
+import { mercadoPagoCheckoutAttempts, organizations } from '$lib/server/db/schema';
 import { getCredits } from '$lib/server/billing/ledger';
 
 const mocks = vi.hoisted(() => ({
-	sessionsRetrieve: vi.fn()
+	sessionsRetrieve: vi.fn(),
+	retrievePayment: vi.fn()
 }));
 
 vi.mock('$lib/server/stripe/client', () => ({
@@ -28,11 +29,14 @@ vi.mock('$lib/server/stripe/client', () => ({
 		checkout: { sessions: { retrieve: mocks.sessionsRetrieve } }
 	})
 }));
+vi.mock('$lib/server/mercadopago/client', () => ({
+	retrievePayment: mocks.retrievePayment
+}));
 vi.mock('$env/dynamic/private', () => ({ env: {} }));
 
 import { load } from './+page.server';
 
-setupTestDb(['organizations', 'credit_transactions', 'stripe_events']);
+setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'mercado_pago_checkout_attempts']);
 
 const OWNER = TEST_OWNER;
 
@@ -167,5 +171,62 @@ describe('usage/success load', () => {
 		expect(data.granted).toBe(false);
 		expect(data.pending).toBe(true);
 		expect(await getCredits('org-1')).toBe(0);
+	});
+});
+
+describe('usage/success Mercado Pago branch', () => {
+	function loadMercadoPago(attemptId: string) {
+		const url = new URL('/usage/success', 'http://localhost');
+		url.searchParams.set('provider', 'mercadopago');
+		url.searchParams.set('attempt_id', attemptId);
+		return load({ locals: { user: OWNER } as never, url } as never);
+	}
+
+	test.each(['refunded', 'disputed'])('a %s attempt is terminal — failed, never pending, and never re-retrieved', async (status) => {
+		// A reversed payment has no fulfillment left to wait for: the page must
+		// show the failed state immediately instead of pending forever (codex).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.insert(mercadoPagoCheckoutAttempts).values({
+			attemptId: 'attempt_1',
+			orgId: 'org-1',
+			bundleId: 'credits_100',
+			idempotencyKey: 'mp-key',
+			amountCents: 500,
+			status,
+			paymentId: 'pay-1'
+		});
+
+		const data = (await loadMercadoPago('attempt_1')) as { granted: boolean; pending: boolean; failed: boolean };
+
+		expect(data).toMatchObject({ granted: false, pending: false, failed: true });
+		expect(mocks.retrievePayment).not.toHaveBeenCalled();
+	});
+
+	test('a pending attempt whose inline processing lands a terminal reversal shows failed — never stale pending', async () => {
+		// The attempt snapshot is read BEFORE processMercadoPagoPayment runs; a
+		// refund/chargeback processed inline flips the row to terminal, and the
+		// page must decide from the post-processing state (cubic, round 3).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.insert(mercadoPagoCheckoutAttempts).values({
+			attemptId: 'attempt_1',
+			orgId: 'org-1',
+			bundleId: 'credits_100',
+			idempotencyKey: 'mp-key',
+			amountCents: 500,
+			status: 'open',
+			paymentId: 'pay-1'
+		});
+		mocks.retrievePayment.mockResolvedValue({
+			id: 'pay-1',
+			status: 'refunded',
+			externalReference: 'org-1:attempt_1',
+			transactionAmount: 5,
+			refundedAmount: 5,
+			currencyId: 'BRL'
+		});
+
+		const data = (await loadMercadoPago('attempt_1')) as { granted: boolean; pending: boolean; failed: boolean };
+
+		expect(data).toMatchObject({ granted: false, pending: false, failed: true });
 	});
 });

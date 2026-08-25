@@ -12,7 +12,7 @@ language governing permissions and limitations under the License.
 A copy of the License is included in the LICENSE file at the
 repository root.
 
-Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 -->
 
 <p>These Terms are drafted to comply with the Brazilian Consumer Protection Code (Lei no 8.078/1990 — CDC), the LGPD (Lei no 13.709/2018), the Marco Civil da Internet (Lei no 12.965/2014), and the ECA Digital (Lei no 15.211/2025), and with the YouTube API Services Terms of Service.</p>
@@ -192,6 +192,6 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <p>Service operator: [legal name], sole proprietorship, CNPJ [number], registered address [address], Brazil.</p>
 
-<p>Support and notices: <a href="mailto:contact@marketingprowess.simplelogin.com">contact@marketingprowess.simplelogin.com</a>, or the <a href="/contact">contact form</a> on our site.</p>
+<p>Support and notices: <a href="mailto:contact@AdvancedDigitalMarketingLTDA.com">contact@AdvancedDigitalMarketingLTDA.com</a>, or the <a href="/contact">contact form</a> on our site.</p>
 
-<p>Data Protection Officer (Encarregado de Proteção de Dados): Andrew Philip Weilbacher, <a href="mailto:contact@marketingprowess.simplelogin.com">contact@marketingprowess.simplelogin.com</a>.</p>
+<p>Data Protection Officer (Encarregado de Proteção de Dados): Andrew Philip Weilbacher, <a href="mailto:contact@AdvancedDigitalMarketingLTDA.com">contact@AdvancedDigitalMarketingLTDA.com</a>.</p>

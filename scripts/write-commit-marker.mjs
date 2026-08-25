@@ -12,7 +12,7 @@
 // A copy of the License is included in the LICENSE file at the
 // repository root.
 //
-// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 //
 // Writes the deployed commit SHA to static/__moderaty_commit.txt at BUILD
 // time, so the bunny-purge workflow can wait for the deployment to actually

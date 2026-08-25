@@ -12,11 +12,12 @@ language governing permissions and limitations under the License.
 A copy of the License is included in the LICENSE file at the
 repository root.
 
-Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 -->
 
 <script lang="ts">
 	import { segmentConsentText } from '$lib/consentText';
+	import { t } from '$lib/i18n/messages';
 
 	let { data, form } = $props();
 	// The sentence arrives as data.consentText = CONSENT_CHECKBOX_TEXT — the
@@ -27,17 +28,17 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 </script>
 
 <svelte:head>
-	<title>Moderaty — Finish creating your account</title>
+	<title>Moderaty — {t(data.locale, 'finishAccount')}</title>
 </svelte:head>
 
 <main class="consent-main">
 	<div class="card consent-card">
 		{#if data.kind === 'new'}
-			<h1>Almost there{data.displayName ? `, ${data.displayName}` : ''}</h1>
-			<p class="muted">To finish creating your account:</p>
+			<h1>{t(data.locale, 'almostThere')}{data.displayName ? `, ${data.displayName}` : ''}</h1>
+			<p class="muted">{t(data.locale, 'finishAccountPrompt')}</p>
 		{:else}
-			<h1>Updated terms</h1>
-			<p class="muted">Our legal documents have changed — please review and accept the current version to continue.</p>
+			<h1>{t(data.locale, 'updatedTerms')}</h1>
+			<p class="muted">{t(data.locale, 'legalChanged')}</p>
 		{/if}
 
 		{#if form?.error}
@@ -51,9 +52,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			</label>
 			<label class="check">
 				<input type="checkbox" name="marketing" />
-				<span>{data.marketingText}</span>
+				<span>{t(data.locale, 'marketingText')}</span>
 			</label>
-			<button class="btn" type="submit">{data.kind === 'new' ? 'Create account' : 'Accept and continue'}</button>
+			<button class="btn" type="submit">{data.kind === 'new' ? t(data.locale, 'createAccount') : t(data.locale, 'acceptContinue')}</button>
 		</form>
 		<p class="refund-note">{data.refundText}</p>
 		<p class="privacy-note">{data.privacyText}</p>

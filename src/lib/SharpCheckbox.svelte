@@ -12,7 +12,7 @@ language governing permissions and limitations under the License.
 A copy of the License is included in the LICENSE file at the
 repository root.
 
-Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 -->
 
 <!-- SharpCheckbox: 18px square, 1px --line border, --accent fill with a
@@ -27,7 +27,8 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		ariaLabel = '',
 		name = undefined,
 		required = false,
-		disabled = false
+		disabled = false,
+		onchange = undefined
 	}: {
 		checked?: boolean;
 		label?: string;
@@ -35,13 +36,18 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		name?: string;
 		required?: boolean;
 		disabled?: boolean;
+		onchange?: (event: Event) => void;
 	} = $props();
 
-	if (!label && !ariaLabel) {
-		throw new Error('SharpCheckbox requires a visible label or an aria-label (I13)');
-	}
+	const labelIsValid = $derived.by(() => {
+		if (!label && !ariaLabel) {
+			throw new Error('SharpCheckbox requires a visible label or an aria-label (I13)');
+		}
+		return true;
+	});
 </script>
 
+{#if labelIsValid}
 <label class="sharp-checkbox" class:disabled>
 	<input
 		type="checkbox"
@@ -49,10 +55,12 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		{name}
 		{required}
 		{disabled}
+		onchange={onchange}
 		aria-label={ariaLabel || undefined}
 	/>
 	{#if label}<span class="label-text">{label}</span>{/if}
 </label>
+{/if}
 
 <style>
 	.sharp-checkbox {

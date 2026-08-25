@@ -11,7 +11,7 @@
 // A copy of the License is included in the LICENSE file at the
 // repository root.
 //
-// Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
@@ -22,7 +22,8 @@ import { requireOrgRole } from '$lib/server/ownership';
 import { runChannel } from '$lib/server/pipeline';
 import { requireUser } from '$lib/server/session';
 import { and, eq, isNull, lt, or } from 'drizzle-orm';
-import { fail } from '@sveltejs/kit';
+import { env } from '$env/dynamic/private';
+import { error, fail } from '@sveltejs/kit';
 
 /** Window presets shared by Analyze history and the dry-run preview (months). */
 const HISTORY_MONTH_PRESETS: ReadonlySet<number> = new Set([1, 3, 6, 12, 24]);
@@ -74,6 +75,13 @@ export const actions = {
 	},
 	analyzeHistory: async ({ request, locals }) => {
 		const user = requireUser(locals);
+		// runChannel accepts exactly 'true'/'false' for DRY_RUN; anything else
+		// (unset, misspelled) would pass the env-dry check below, reset the scan
+		// state, and then be rejected on every invocation — the planted scan is
+		// stuck forever. Fail loudly BEFORE any DB mutation (codex, PR #136).
+		if (env.DRY_RUN !== 'true' && env.DRY_RUN !== 'false') {
+			throw error(500, 'DRY_RUN must be set to exactly "true" or "false" — the deployment is misconfigured');
+		}
 		const f = await request.formData();
 		const channelId = String(f.get('channelId') ?? '');
 		const months = Number(f.get('months'));
@@ -81,6 +89,17 @@ export const actions = {
 		// run, so an unbounded window is an unbounded API/AI cost (I10).
 		if (!HISTORY_MONTH_PRESETS.has(months)) {
 			return fail(400, { scope: 'history', channelId, error: 'history window must be 1, 3, 6, 12, or 24 months' });
+		}
+		// Env-dry trap: under DRY_RUN=true every run exits through finishDryRun
+		// before persistResults (I8), so the planted drain can never advance —
+		// each cron tick re-fetches page 1 and the scan looks stuck forever.
+		// Refuse loudly instead of planting a scan that cannot moderate.
+		if (env.DRY_RUN === 'true') {
+			return fail(409, {
+				scope: 'history',
+				channelId,
+				error: 'This deployment runs in dry-run mode: history analysis audits only and never moderates. Set DRY_RUN=false to moderate.'
+			});
 		}
 		// Move the scan boundary back and reset the drain state: cron's next runs
 		// page from the newest comment down to this boundary. Already-seen

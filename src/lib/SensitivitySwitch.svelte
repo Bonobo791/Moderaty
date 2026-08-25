@@ -12,7 +12,7 @@ language governing permissions and limitations under the License.
 A copy of the License is included in the LICENSE file at the
 repository root.
 
-Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 -->
 
 <!-- SensitivitySwitch: the two-stop moderation-sensitivity control
@@ -52,9 +52,10 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	} as const;
 
 	// Displayed selection; 0/100 is the spec's slider value space.
-	let selected = $state<1 | 2>(level === 2 ? 2 : 1);
-	const v = $derived(selected === 2 ? 100 : 0);
-	const mode = $derived(MODES[selected]);
+	let selected = $state<1 | 2>();
+	const selectedValue = $derived(selected ?? (level === 2 ? 2 : 1));
+	const v = $derived(selectedValue === 2 ? 100 : 0);
+	const mode = $derived(MODES[selectedValue]);
 	// Keeps the knob inside the track at both stops (spec Step 3.2).
 	const knobLeft = $derived(v === 0 ? 'calc(0% + 20px)' : 'calc(100% - 20px)');
 
@@ -82,7 +83,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 	});
 
 	function choose(next: 1 | 2) {
-		if (next === selected) return;
+		if (next === selectedValue) return;
 		selected = next;
 		dirty = true;
 		clearTimeout(debounceTimer);
@@ -160,7 +161,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		<button
 			type="button"
 			class="endpoint chill"
-			class:inactive={selected !== 1}
+			class:inactive={selectedValue !== 1}
 			aria-label="Set sensitivity to Edge Lord"
 			onclick={() => choose(1)}
 		>
@@ -186,6 +187,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 			<span class="fill" style:width="{v}%"></span>
 			<span
 				class="knob"
+				role="presentation"
 				class:dragging
 				style:left={knobLeft}
 				onpointerdown={onKnobPointerdown}
@@ -200,7 +202,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		<button
 			type="button"
 			class="endpoint strict"
-			class:inactive={selected !== 2}
+			class:inactive={selectedValue !== 2}
 			aria-label="Set sensitivity to Edge Lord plus Ackchyually"
 			onclick={() => choose(2)}
 		>
@@ -209,9 +211,9 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		</button>
 	</div>
 
-	{#key selected}
+	{#key selectedValue}
 		<div class="readout">
-			<span class="mode-stop mono" class:strict={selected === 2}>{mode.stop}</span>
+			<span class="mode-stop mono" class:strict={selectedValue === 2}>{mode.stop}</span>
 			<div class="mode-copy">
 				{#if mode.name !== mode.stop}
 					<span class="caps-label mode-name">{mode.name}</span>
@@ -234,7 +236,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		hidden
 	>
 		<input type="hidden" name="channelId" value={channelId} />
-		<input type="hidden" name="toneLevel" value={selected} />
+		<input type="hidden" name="toneLevel" value={selectedValue} />
 	</form>
 </section>
 

@@ -1,5 +1,8 @@
 # TODO
 
+Once channel is disconnected, the user should be routed back to their dashboard.
+Once a user account is deleted, the user should be routed to a page that says "your data is now deleted and your account has been closed". This should also cause any subscriptions or auto-top ups for the user to be deleted.
+
 Deferred product work, quality refactors, and release-step items. The
 SonarQube/Codacy quality sections below reflect the state after the
 2026-08-20 S3776 triage (all criticals fixed on `dev`); the analyzers
@@ -7,15 +10,27 @@ re-evaluate on the next `dev → main` merge.
 
 ## Product features
 
-- [ ] Add contact page with company name and email.
-- [ ] Add calculator to calculate costs per last 3 months of comment volume on
-      homepage (the user adds their number of comments and it spits out a
-      number).
+- [x] Contact page with company name and email — implemented in
+      `src/routes/contact/` and covered by route/server tests.
+- [x] Add manual cost calculators to the homepage and Pricing page; users can
+      enter last-month volume or three months of volume for a low/high range
+      (`src/lib/landing/cost.ts`, `CostMath.svelte`).
 - [ ] Add calculator that pulls real data from YouTube to determine costs —
       a forecast that gives a range of potential costs for the next month with
       a disclaimer that this is a 95% probability of being in the shown range.
-- [ ] Create auto-recharge functionality and update website language.
-- [ ] Add channel disconnect button and functionality.
+- [x] Auto-recharge functionality and consent language — implemented in
+      `src/lib/server/billing/autotopup.ts` and the Usage page.
+- [x] Channel disconnect and full data removal — implemented in the channel
+      detail route, not the old dashboard design location.
+- [ ] Publish the Portuguese (`pt-BR`) product and legal translation with
+      locale handling, deterministic formatting, and consent-version updates.
+- [x] Add Mercado Pago as a second billing provider without changing Stripe
+      behavior; the first slice is BRL prepaid checkout with idempotent signed
+      webhooks. A provider-neutral checkout seam lives in
+      `src/lib/server/billing/providers.ts`; full refund/dispute reconciliation
+      is now covered for Mercado Pago, while auto top-up remains Stripe-only.
+- [ ] Replace legal operator placeholders (`[legal name]`, CNPJ, and address)
+      in Terms and Privacy before production launch.
 
 ## Quality — status after the 2026-08-20 SonarQube critical triage
 
@@ -62,6 +77,30 @@ refactor only when the file is touched anyway; no security/correctness impact.
       the metric (tests).
 - [ ] `src/lib/server/pipeline.ts:307` — SonarQube MINOR S1940: use `<=`
       instead of `!… < …` (trivial, no behavior change).
+- [ ] Locale on prerendered legal pages: `terms`/`privacy`/`dpa` export
+      `prerender = true`, so the root layout's locale is baked at build time
+      for those pages (codex, deferred as architectural — revisit when the
+      pt-BR legal translation ships).
+
+## Documentation and release readiness
+
+- [x] Restore the Netlify/Turso/Google/cron/backup/outage runbook in
+      `DEPLOY.md`.
+- [x] Reconcile the dev database's historical migration hashes and verify all
+      37 journal entries. Production remains human-only and must be checked
+      separately.
+- [x] Mark the completed pipeline refactor and disconnect design documents as
+      historical, and identify the current implementation as the source of
+      truth. Done — both docs already carry a historical banner pointing at the
+      current implementation (verified 2026-08-25, PR #136 round 2 triage).
+- [x] Replace the legacy greenfield instructions in
+      `EXECUTION_PLAN_YouTube_Comment_Moderator.md` with a link to the current
+      README, AGENTS.md, and deployment runbook. Done — the document already
+      opens with a "Historical plan" banner linking to `README.md`,
+      `AGENTS.md`, `DEPLOY.md`, and `docs/COOLIFY_BUNNY.md` (verified
+      2026-08-25, PR #136 round 2 triage).
+- [ ] Triage the seven existing Svelte warnings in the UI components and
+      account page.
 
 ## Codacy dashboard cleanups (settings clicks — no code)
 

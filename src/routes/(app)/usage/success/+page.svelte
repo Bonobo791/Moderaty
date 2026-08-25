@@ -12,7 +12,7 @@ language governing permissions and limitations under the License.
 A copy of the License is included in the LICENSE file at the
 repository root.
 
-Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 -->
 
 <script lang="ts">
@@ -36,7 +36,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 		<h2 style="margin-top:0">Payment received — almost there</h2>
 		<p>
 			Your credits will appear on the Usage tab within a few seconds. If they do not,
-			refresh this page in a moment — your purchase is recorded on Stripe's side either way.
+			refresh this page in a moment — your purchase is recorded by the payment provider either way.
 		</p>
 		<a class="btn primary" href="/usage">Back to Usage</a>
 	</div>

@@ -1,5 +1,10 @@
 # Moderaty pipeline module refactor plan
 
+> **Status: completed on `dev`.** The focused modules are now implemented under
+> `src/lib/server/pipeline/`, while `src/lib/server/pipeline.ts` remains the
+> compatibility facade. Use the source modules and current tests as the source
+> of truth; this document records the historical plan and decisions.
+
 ## Goal
 - Split `src/lib/server/pipeline.ts` into focused modules so moderation decisions, scoring, database staging, YouTube enforcement, and run orchestration have separate change boundaries.
 - Preserve the existing public import path and behavior while making the implementation and its regular test suite easier to navigate.

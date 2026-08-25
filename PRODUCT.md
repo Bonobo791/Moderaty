@@ -86,7 +86,7 @@ Category line: "Comment protection for YouTube creators."
   is not a strategy. It's a surrender."
 - Voice: protective, plain-English, on the creator's side.
 - License: PolyForm Shield 1.0.0 with commercial licensing option
-  (contact@marketingprowess.simplelogin.com — see COMMERCIAL.md); copyright
+  (contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md); copyright
   Andrew Philip Weilbacher; license header required on new source/doc files.
 
 ## Evidence on Hand

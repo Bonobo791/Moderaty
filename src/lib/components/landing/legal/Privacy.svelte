@@ -12,7 +12,7 @@ language governing permissions and limitations under the License.
 A copy of the License is included in the LICENSE file at the
 repository root.
 
-Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIAL.md
+Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 -->
 
 <p>This Policy provides the information required by Article 9 of the Brazilian General Data Protection Law (Lei no 13.709/2018 — LGPD) in a clear, adequate and ostensible manner, and includes the disclosures required by the YouTube API Services Terms of Service.</p>
@@ -20,7 +20,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 <h2 id="s1">1. Who We Are and What This Policy Covers</h2>
 <p><strong>1.1</strong> Moderaty is a YouTube comment moderation service operated by [legal name], a sole proprietorship registered in Brazil, CNPJ [number], registered address [address] (Moderaty, we, us). For the personal data described in this Policy, Moderaty is the data controller under the LGPD.</p>
 <p><strong>1.2</strong> This Policy covers personal data of our users (YouTube channel owners and their authorized team members) and of people who contact us. It also explains, for transparency, how comment data flows through the Service — but note that for comment data we act as processor on behalf of the channel owner, who is the controller (Section 3).</p>
-<p><strong>1.3</strong> Our Data Protection Officer (Encarregado de Proteção de Dados) is Andrew Philip Weilbacher, reachable at <a href="mailto:contact@marketingprowess.simplelogin.com">contact@marketingprowess.simplelogin.com</a>. The DPO acts with independence and technical autonomy, in accordance with ANPD Resolution CD/ANPD no 18/2024.</p>
+<p><strong>1.3</strong> Our Data Protection Officer (Encarregado de Proteção de Dados) is Andrew Philip Weilbacher, reachable at <a href="mailto:contact@AdvancedDigitalMarketingLTDA.com">contact@AdvancedDigitalMarketingLTDA.com</a>. The DPO acts with independence and technical autonomy, in accordance with ANPD Resolution CD/ANPD no 18/2024.</p>
 <p><strong>1.4</strong> <strong class="highlight">PROVIDING CERTAIN PERSONAL DATA (ACCOUNT AND BILLING INFORMATION) IS A CONDITION FOR USING THE SERVICE, BECAUSE WITHOUT IT WE CANNOT CREATE YOUR ACCOUNT, CONNECT YOUR CHANNEL, OR PROCESS PAYMENTS. WHERE THAT IS THE CASE, THIS FACT IS DISCLOSED HERE WITH PROMINENCE, AS REQUIRED BY ARTICLE 9, §3, OF THE LGPD. YOUR RIGHTS AND HOW TO EXERCISE THEM ARE IN SECTION 10.</strong></p>
 
 <h2 id="s2">2. The Data We Process, and Why</h2>
@@ -128,7 +128,7 @@ Commercial licensing: contact@marketingprowess.simplelogin.com — see COMMERCIA
 
 <h2 id="s10">10. Your Rights</h2>
 <p><strong>10.1</strong> Under Article 18 of the LGPD, you have the right to: (I) confirmation that we process your data; (II) access; (III) correction of incomplete, inaccurate, or outdated data; (IV) anonymization, blocking, or deletion of unnecessary, excessive, or unlawfully processed data; (V) portability, as regulated by the ANPD; (VI) deletion of data processed with consent; (VII) information about the entities with which we share data; (VIII) information about the option not to consent and its consequences; (IX) revocation of consent; and (X) opposition to processing based on legitimate interest, where the legal requirements are met.</p>
-<p><strong>10.2</strong> To exercise any right, contact our DPO at <a href="mailto:contact@marketingprowess.simplelogin.com">contact@marketingprowess.simplelogin.com</a>. We respond within 15 days. We may need to verify your identity before acting — a proportionate security measure. Requests are free of charge. If we cannot fulfill a request (for example, because the data was already deleted or must be retained by law), we will explain why within the same period.</p>
+<p><strong>10.2</strong> To exercise any right, contact our DPO at <a href="mailto:contact@AdvancedDigitalMarketingLTDA.com">contact@AdvancedDigitalMarketingLTDA.com</a>. We respond within 15 days. We may need to verify your identity before acting — a proportionate security measure. Requests are free of charge. If we cannot fulfill a request (for example, because the data was already deleted or must be retained by law), we will explain why within the same period.</p>
 <p><strong>10.3</strong> You may also lodge a complaint with the ANPD (Autoridade Nacional de Proteção de Dados) at <a href="https://www.gov.br/anpd/pt-br" target="_blank" rel="noreferrer">https://www.gov.br/anpd/pt-br</a>.</p>
 
 <h2 id="s11">11. Children and Adolescents</h2>

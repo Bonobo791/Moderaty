@@ -1,5 +1,8 @@
 # TODO
 
+Once channel is disconnected, the user should be routed back to their dashboard.
+Once a user account is deleted, the user should be routed to a page that says "your data is now deleted and your account has been closed". This should also cause any subscriptions or auto-top ups for the user to be deleted.
+
 Deferred product work, quality refactors, and release-step items. The
 SonarQube/Codacy quality sections below reflect the state after the
 2026-08-20 S3776 triage (all criticals fixed on `dev`); the analyzers
@@ -74,13 +77,17 @@ refactor only when the file is touched anyway; no security/correctness impact.
       the metric (tests).
 - [ ] `src/lib/server/pipeline.ts:307` — SonarQube MINOR S1940: use `<=`
       instead of `!… < …` (trivial, no behavior change).
+- [ ] Locale on prerendered legal pages: `terms`/`privacy`/`dpa` export
+      `prerender = true`, so the root layout's locale is baked at build time
+      for those pages (codex, deferred as architectural — revisit when the
+      pt-BR legal translation ships).
 
 ## Documentation and release readiness
 
 - [x] Restore the Netlify/Turso/Google/cron/backup/outage runbook in
       `DEPLOY.md`.
 - [x] Reconcile the dev database's historical migration hashes and verify all
-      35 journal entries. Production remains human-only and must be checked
+      37 journal entries. Production remains human-only and must be checked
       separately.
 - [ ] Mark the completed pipeline refactor and disconnect design documents as
       historical, and identify the current implementation as the source of

@@ -16,7 +16,7 @@
 import { json } from '@sveltejs/kit';
 
 import { retrievePayment } from '$lib/server/mercadopago/client';
-import { processMercadoPagoPayment, verifyWebhookSignature } from '$lib/server/mercadopago/webhooks';
+import { MercadoPagoWebhookSignatureError, processMercadoPagoPayment, verifyWebhookSignature } from '$lib/server/mercadopago/webhooks';
 
 // The payment id arrives in the POST body — attacker-controlled text that
 // must never reach the server log raw (CRLF injection, unbounded length).
@@ -40,14 +40,20 @@ export async function POST({ request }) {
 		return json({ error: 'payment webhook has no payment id' }, { status: 400 });
 	}
 	const paymentId = String(body.data.id);
-	// A signature failure is a permanent rejection, not a transient error —
+	// A signature MISMATCH is a permanent rejection, not a transient error —
 	// 400, so Mercado Pago does not burn retries on a request that will never
-	// become valid (codex). Genuine processing failures stay 500 (retriable).
+	// become valid (codex). Missing server CONFIGURATION (no webhook secret) or
+	// an unexpected verifier failure is a deployment fault a retry can outlive
+	// — it must stay on the retriable 500 path (cubic, round 3).
 	try {
 		verifyWebhookSignature(request.headers, paymentId);
 	} catch (cause) {
-		console.error(`Mercado Pago webhook signature rejected for payment ${loggablePaymentId(paymentId)}:`, cause);
-		return json({ error: 'Mercado Pago webhook signature rejected' }, { status: 400 });
+		if (cause instanceof MercadoPagoWebhookSignatureError) {
+			console.error(`Mercado Pago webhook signature rejected for payment ${loggablePaymentId(paymentId)}:`, cause);
+			return json({ error: 'Mercado Pago webhook signature rejected' }, { status: 400 });
+		}
+		console.error(`Mercado Pago webhook signature could not be verified for payment ${loggablePaymentId(paymentId)}:`, cause);
+		return json({ error: 'Mercado Pago webhook processing failed' }, { status: 500 });
 	}
 	try {
 		const payment = await retrievePayment(paymentId);

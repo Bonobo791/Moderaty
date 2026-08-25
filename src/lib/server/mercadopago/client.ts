@@ -53,9 +53,18 @@ function apiUrl(path: string): URL {
 }
 
 // The returned init_point is persisted and later used in redirect(303, url):
-// only https Mercado Pago checkout origins are trusted — www.mercadopago.com,
-// its subdomains, and the country hosts (www.mercadopago.com.br, .com.ar, …).
-const CHECKOUT_HOST = /(^|\.)mercadopago\.com(\.[a-z]{2})?$/;
+// only https Mercado Pago checkout origins are trusted — the apex
+// mercadopago.com and its subdomains, plus www/sandbox on the documented
+// country markets. A generic two-letter suffix pattern would accept
+// registrable origins like mercadopago.com.io (codex, PR #136 round 3).
+const CHECKOUT_COUNTRY_TLDS: ReadonlySet<string> = new Set(['br', 'ar', 'mx', 'cl', 'co', 'pe', 'uy']);
+const CHECKOUT_COUNTRY_HOST = /^(www|sandbox)\.mercadopago\.com\.([a-z]{2})$/;
+
+function isCheckoutHost(hostname: string): boolean {
+	if (hostname === 'mercadopago.com' || hostname.endsWith('.mercadopago.com')) return true;
+	const country = CHECKOUT_COUNTRY_HOST.exec(hostname);
+	return country !== null && CHECKOUT_COUNTRY_TLDS.has(country[2]);
+}
 
 function checkoutUrl(value: string): string {
 	let url: URL;
@@ -65,7 +74,7 @@ function checkoutUrl(value: string): string {
 		throw new Error('Mercado Pago preference returned a malformed checkout URL');
 	}
 	if (url.protocol !== 'https:') throw new Error('Mercado Pago checkout URL must use https');
-	if (!CHECKOUT_HOST.test(url.hostname)) {
+	if (!isCheckoutHost(url.hostname)) {
 		throw new Error(`Mercado Pago checkout URL host is not a Mercado Pago origin: ${url.hostname}`);
 	}
 	return url.toString();
@@ -73,12 +82,15 @@ function checkoutUrl(value: string): string {
 
 // The complete status set processMercadoPagoPayment handles: acted on
 // (approved/refunded/charged_back) or a valid no-op (pending/in_process/
-// rejected/cancelled). Anything else is out of contract — the call failed (I2),
-// never a silent fall-through that answers the webhook 200 without fulfilling.
+// authorized/in_mediation/rejected/cancelled). Anything else is out of
+// contract — the call failed (I2), never a silent fall-through that answers
+// the webhook 200 without fulfilling.
 const KNOWN_PAYMENT_STATUSES: ReadonlySet<string> = new Set([
 	'approved',
 	'pending',
 	'in_process',
+	'authorized',
+	'in_mediation',
 	'rejected',
 	'refunded',
 	'charged_back',

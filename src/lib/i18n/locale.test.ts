@@ -52,6 +52,25 @@ describe('locale resolution', () => {
 		expect(resolveLocale({ acceptLanguage: 'pt;q=0,*;q=0.5' })).toBe('en');
 	});
 
+	test('a non-positive quality never selects the language', () => {
+		// q is 0–1 by RFC 7231; a negative or zero weight is "not acceptable",
+		// never a low-priority candidate (cubic, PR #136 round 3).
+		expect(resolveLocale({ acceptLanguage: 'pt-BR;q=-1' })).toBe('en');
+		expect(resolveLocale({ acceptLanguage: 'pt-BR;q=-1,en;q=0.5' })).toBe('en');
+	});
+
+	test('an exact q=0 exclusion also wins over a broader range that maps to the same locale', () => {
+		// 'pt-BR;q=0' excludes Brazilian Portuguese; 'pt;q=1' must not smuggle
+		// it back in through the broader range (cubic/codex, round 3).
+		expect(resolveLocale({ acceptLanguage: 'pt-BR;q=0,pt;q=1' })).toBe('en');
+	});
+
+	test('a locale matched by an explicit range keeps its own quality — the wildcard only claims the rest', () => {
+		// Most-specific match wins (RFC 7231 §5.3.1): en resolves at q=0.5, so
+		// the wildcard at q=1 selects pt-BR — not en at the wildcard's quality.
+		expect(resolveLocale({ acceptLanguage: 'en;q=0.5,*;q=1' })).toBe('pt-BR');
+	});
+
 	test('invalid or unsupported preferences fail closed to English', () => {
 		expect(resolveLocale({ cookie: 'fr', acceptLanguage: 'de-DE' })).toBe('en');
 	});

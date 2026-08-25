@@ -40,17 +40,31 @@ function languageFromAcceptLanguage(header: string | null): Locale {
 			return { language: language.trim().toLowerCase(), q: Number.isFinite(q) ? q : 0 };
 		})
 		.sort((left, right) => right.q - left.q);
-	// An explicit q=0 EXCLUDES the language outright (RFC 7231 §5.3.1) — even
-	// a wildcard match must not return it.
-	const excluded = new Set(preferences.filter((preference) => preference.q === 0).map((preference) => supportedLocaleFor(preference.language)));
+	// A NON-POSITIVE quality excludes the language outright (RFC 7231 §5.3.1 —
+	// q is 0–1, so a negative weight is never a low-priority candidate). The
+	// exclusion binds the SUPPORTED LOCALE it names: a broader range ('pt;q=1')
+	// must not smuggle back a locale an exact range excluded ('pt-BR;q=0')
+	// (cubic/codex, PR #136 round 3).
+	const excluded = new Set(preferences.filter((preference) => preference.q <= 0).map((preference) => supportedLocaleFor(preference.language)));
+	// Most-specific match wins: a locale claimed by ANY non-wildcard range keeps
+	// that range's quality, so the wildcard fallback only ever selects from the
+	// locales no explicit range matched ('en;q=0.5,*;q=1' resolves en at 0.5
+	// and lets the wildcard pick pt-BR).
+	const claimed = new Set(
+		preferences
+			.filter((preference) => preference.q > 0 && preference.language !== '*')
+			.map((preference) => supportedLocaleFor(preference.language))
+			.filter((locale) => locale !== null && !excluded.has(locale))
+	);
 	for (const preference of preferences) {
-		if (preference.q === 0) continue;
-		const locale = supportedLocaleFor(preference.language);
-		if (locale) return locale;
+		if (preference.q <= 0) continue;
 		if (preference.language === '*') {
-			const fallback = SUPPORTED_LOCALES.find((supported) => !excluded.has(supported));
+			const fallback = SUPPORTED_LOCALES.find((supported) => !excluded.has(supported) && !claimed.has(supported));
 			if (fallback) return fallback;
+			continue;
 		}
+		const locale = supportedLocaleFor(preference.language);
+		if (locale && !excluded.has(locale)) return locale;
 	}
 	return 'en';
 }

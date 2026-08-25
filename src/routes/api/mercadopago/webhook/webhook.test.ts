@@ -13,7 +13,7 @@
 //
 // Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
-import { beforeEach, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
 	verifyWebhookSignature: vi.fn(),
@@ -21,7 +21,10 @@ const mocks = vi.hoisted(() => ({
 	processMercadoPagoPayment: vi.fn()
 }));
 
-vi.mock('$lib/server/mercadopago/webhooks', () => ({
+vi.mock('$lib/server/mercadopago/webhooks', async (importOriginal) => ({
+	// Spread the original so the real MercadoPagoWebhookSignatureError class is
+	// available for instanceof checks while the two entry points stay mocked.
+	...(await importOriginal<typeof import('$lib/server/mercadopago/webhooks')>()),
 	verifyWebhookSignature: mocks.verifyWebhookSignature,
 	processMercadoPagoPayment: mocks.processMercadoPagoPayment
 }));
@@ -30,6 +33,7 @@ vi.mock('$lib/server/mercadopago/client', () => ({
 }));
 
 import { POST } from './+server';
+import { MercadoPagoWebhookSignatureError } from '$lib/server/mercadopago/webhooks';
 
 function webhookRequest(paymentId: string): Request {
 	return new Request('https://moderaty.example/api/mercadopago/webhook', {
@@ -54,11 +58,17 @@ beforeEach(() => {
 	mocks.processMercadoPagoPayment.mockResolvedValue(true);
 });
 
+afterEach(() => {
+	// clearAllMocks only clears call data — the console.error spy (and its
+	// stale `logged` closure) would leak into later files' tests (cubic).
+	vi.restoreAllMocks();
+});
+
 test('a signature failure is a 400 — never a retriable 500', async () => {
 	// A bad signature will never become valid on retry; answering 500 only
 	// buys pointless Mercado Pago retries (codex).
 	mocks.verifyWebhookSignature.mockImplementation(() => {
-		throw new Error('Mercado Pago webhook signature is invalid');
+		throw new MercadoPagoWebhookSignatureError('Mercado Pago webhook signature is invalid');
 	});
 	const logged = captureErrors();
 
@@ -67,6 +77,21 @@ test('a signature failure is a 400 — never a retriable 500', async () => {
 	expect(response.status).toBe(400);
 	expect(mocks.retrievePayment).not.toHaveBeenCalled();
 	expect(logged[0]).toContain('signature');
+});
+
+test('a missing webhook secret is a server-configuration error — 500, so Mercado Pago retries', async () => {
+	// Only a signature MISMATCH is permanent; missing server config is a
+	// deployment fault the retry can outlive, so it stays on the retriable 500
+	// path (cubic, PR #136 round 3).
+	mocks.verifyWebhookSignature.mockImplementation(() => {
+		throw new Error('MERCADOPAGO_WEBHOOK_SECRET is not configured');
+	});
+	captureErrors();
+
+	const response = await POST({ request: webhookRequest('pay-1') } as never);
+
+	expect(response.status).toBe(500);
+	expect(mocks.retrievePayment).not.toHaveBeenCalled();
 });
 
 test('a processing failure stays a 500 so Mercado Pago retries', async () => {

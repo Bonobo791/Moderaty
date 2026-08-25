@@ -14,7 +14,7 @@
 // Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 import { and, eq, isNull, sql } from 'drizzle-orm';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
@@ -36,6 +36,7 @@ type CheckoutAttempt = {
 	initPoint: string | null;
 	status: string;
 	amountCents: number;
+	credits: number | null;
 };
 
 function normalizedAttemptId(value?: string): string {
@@ -43,6 +44,26 @@ function normalizedAttemptId(value?: string): string {
 	if (!ATTEMPT_ID.test(value)) throw new Error('checkout attempt id is invalid');
 	return value;
 }
+
+// Mercado Pago caps X-Idempotency-Key at 64 characters — the composite
+// `mercadopago:checkout:<attempt>:<uuid>` form was 94 (codex, round 3). The
+// sha256 hex is exactly 64 chars and deterministic: the same attempt always
+// derives the same key, so a retry reuses the provider's stored preference.
+function checkoutIdempotencyKey(attemptId: string): string {
+	return createHash('sha256').update(`mercadopago:checkout:${attemptId}`).digest('hex');
+}
+
+const ATTEMPT_PROJECTION = {
+	attemptId: mercadoPagoCheckoutAttempts.attemptId,
+	orgId: mercadoPagoCheckoutAttempts.orgId,
+	bundleId: mercadoPagoCheckoutAttempts.bundleId,
+	idempotencyKey: mercadoPagoCheckoutAttempts.idempotencyKey,
+	preferenceId: mercadoPagoCheckoutAttempts.preferenceId,
+	initPoint: mercadoPagoCheckoutAttempts.initPoint,
+	status: mercadoPagoCheckoutAttempts.status,
+	amountCents: mercadoPagoCheckoutAttempts.amountCents,
+	credits: mercadoPagoCheckoutAttempts.credits
+} as const;
 
 async function loadOrCreateAttempt(orgId: string, bundle: MercadoPagoBundle, suppliedAttemptId?: string): Promise<CheckoutAttempt> {
 	const attemptId = normalizedAttemptId(suppliedAttemptId);
@@ -52,34 +73,16 @@ async function loadOrCreateAttempt(orgId: string, bundle: MercadoPagoBundle, sup
 			attemptId,
 			orgId,
 			bundleId: bundle.id,
-			idempotencyKey: `mercadopago:checkout:${attemptId}:${randomUUID()}`,
+			idempotencyKey: checkoutIdempotencyKey(attemptId),
 			amountCents: bundle.amountCents,
 			credits: bundle.credits
 		})
 		.onConflictDoNothing({ target: mercadoPagoCheckoutAttempts.attemptId })
-		.returning({
-			attemptId: mercadoPagoCheckoutAttempts.attemptId,
-			orgId: mercadoPagoCheckoutAttempts.orgId,
-			bundleId: mercadoPagoCheckoutAttempts.bundleId,
-			idempotencyKey: mercadoPagoCheckoutAttempts.idempotencyKey,
-			preferenceId: mercadoPagoCheckoutAttempts.preferenceId,
-			initPoint: mercadoPagoCheckoutAttempts.initPoint,
-			status: mercadoPagoCheckoutAttempts.status,
-			amountCents: mercadoPagoCheckoutAttempts.amountCents
-		})
+		.returning(ATTEMPT_PROJECTION)
 		.all();
 	if (inserted.length === 1) return inserted[0];
 	const existing = await db
-		.select({
-			attemptId: mercadoPagoCheckoutAttempts.attemptId,
-			orgId: mercadoPagoCheckoutAttempts.orgId,
-			bundleId: mercadoPagoCheckoutAttempts.bundleId,
-			idempotencyKey: mercadoPagoCheckoutAttempts.idempotencyKey,
-			preferenceId: mercadoPagoCheckoutAttempts.preferenceId,
-			initPoint: mercadoPagoCheckoutAttempts.initPoint,
-			status: mercadoPagoCheckoutAttempts.status,
-			amountCents: mercadoPagoCheckoutAttempts.amountCents
-		})
+		.select(ATTEMPT_PROJECTION)
 		.from(mercadoPagoCheckoutAttempts)
 		.where(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId))
 		.get();
@@ -118,7 +121,11 @@ export async function createMercadoPagoCreditCheckout(
 		orgId,
 		attemptId: attempt.attemptId,
 		bundleId: bundle.id,
-		credits: bundle.credits,
+		// The persisted snapshot, not the live catalog: a retry after a deploy
+		// changed the bundle's credit count must advertise the SAME credits the
+		// fulfillment path will grant (cubic/codex, round 3). Pre-column
+		// attempts (credits NULL) fall back to the live catalog.
+		credits: attempt.credits ?? bundle.credits,
 		amountCents: bundle.amountCents,
 		idempotencyKey: attempt.idempotencyKey,
 		appUrl

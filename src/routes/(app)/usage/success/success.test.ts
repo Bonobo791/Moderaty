@@ -201,4 +201,32 @@ describe('usage/success Mercado Pago branch', () => {
 		expect(data).toMatchObject({ granted: false, pending: false, failed: true });
 		expect(mocks.retrievePayment).not.toHaveBeenCalled();
 	});
+
+	test('a pending attempt whose inline processing lands a terminal reversal shows failed — never stale pending', async () => {
+		// The attempt snapshot is read BEFORE processMercadoPagoPayment runs; a
+		// refund/chargeback processed inline flips the row to terminal, and the
+		// page must decide from the post-processing state (cubic, round 3).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.insert(mercadoPagoCheckoutAttempts).values({
+			attemptId: 'attempt_1',
+			orgId: 'org-1',
+			bundleId: 'credits_100',
+			idempotencyKey: 'mp-key',
+			amountCents: 500,
+			status: 'open',
+			paymentId: 'pay-1'
+		});
+		mocks.retrievePayment.mockResolvedValue({
+			id: 'pay-1',
+			status: 'refunded',
+			externalReference: 'org-1:attempt_1',
+			transactionAmount: 5,
+			refundedAmount: 5,
+			currencyId: 'BRL'
+		});
+
+		const data = (await loadMercadoPago('attempt_1')) as { granted: boolean; pending: boolean; failed: boolean };
+
+		expect(data).toMatchObject({ granted: false, pending: false, failed: true });
+	});
 });

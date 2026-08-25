@@ -66,8 +66,19 @@ async function mercadoPagoSuccess(user: SessionUser, attemptId: string): Promise
 	}
 	if (attempt.paymentId) {
 		try {
-			const applied = await processMercadoPagoPayment(await retrievePayment(attempt.paymentId));
-			return { maintenance: false, user, sessionId: attemptId, granted: applied || attempt.status === 'fulfilled', pending: !applied, failed: false };
+			await processMercadoPagoPayment(await retrievePayment(attempt.paymentId));
+			// The snapshot above is stale by now: inline processing may have
+			// flipped the attempt to a TERMINAL state (a refund/chargeback
+			// reversal) — re-read before deciding what to render (cubic, round 3).
+			const fresh = await db
+				.select({ status: mercadoPagoCheckoutAttempts.status })
+				.from(mercadoPagoCheckoutAttempts)
+				.where(and(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId), eq(mercadoPagoCheckoutAttempts.orgId, user.orgId)))
+				.get();
+			if (fresh?.status === 'fulfilled') return { maintenance: false, user, sessionId: attemptId, granted: true, pending: false, failed: false };
+			if (fresh?.status === 'refunded' || fresh?.status === 'disputed') {
+				return { maintenance: false, user, sessionId: attemptId, granted: false, pending: false, failed: true };
+			}
 		} catch (cause) {
 			console.error('usage/success: Mercado Pago fulfillment retry failed:', cause);
 		}

@@ -202,11 +202,104 @@ test('a refund for a terminal payment whose credits were never granted is proces
 	expect(org?.creditsRemaining).toBe(0);
 });
 
+// --- Race hardening (PR #136 round 3, cubic/codex) ---------------------------
+// Fulfillment and reversal both read the attempt before writing; the read is
+// stale by definition. The status transition itself is the claim.
+
+test('an approved webhook for an attempt a reversal already terminalized grants nothing and keeps the terminal status', async () => {
+	// The reversal beat fulfillment: fulfillment must NOT resurrect the credits
+	// nor overwrite 'refunded' with 'fulfilled'.
+	await testDb()
+		.db.update(mercadoPagoCheckoutAttempts)
+		.set({ status: 'refunded', paymentId: 'pay-1' })
+		.where(eq(mercadoPagoCheckoutAttempts.attemptId, 'attempt_1'));
+
+	expect(await fulfillMercadoPagoPayment(payment)).toBe(false);
+
+	expect(await ledgerRows()).toHaveLength(0);
+	expect((await attemptRow())?.status).toBe('refunded');
+	const org = await testDb().db.select({ creditsRemaining: organizations.creditsRemaining }).from(organizations).where(eq(organizations.id, 'org-1')).get();
+	expect(org?.creditsRemaining).toBe(0);
+});
+
+test('concurrent refund and chargeback for the same payment reverse the grant exactly once', async () => {
+	// The check-and-insert is atomic, so the loser of the race either dedupes
+	// outright or fails loudly (SQLITE_LOCKED on this single-connection test
+	// harness) — and its retry, exactly what Mercado Pago does after a 500,
+	// dedupes on the committed reversal row.
+	expect(await processMercadoPagoPayment(payment)).toBe(true);
+
+	const refund = { ...payment, status: 'refunded', refundedAmount: 5 };
+	const chargeback = { ...payment, status: 'charged_back' };
+	const results = await Promise.allSettled([processMercadoPagoPayment(refund), processMercadoPagoPayment(chargeback)]);
+	for (const [index, result] of results.entries()) {
+		if (result.status === 'rejected') await processMercadoPagoPayment(index === 0 ? refund : chargeback);
+	}
+
+	const rows = await ledgerRows();
+	expect(rows.filter((row) => row.delta < 0)).toHaveLength(1);
+	const org = await testDb().db.select({ creditsRemaining: organizations.creditsRemaining }).from(organizations).where(eq(organizations.id, 'org-1')).get();
+	expect(org?.creditsRemaining).toBe(0);
+});
+
+test('a chargeback deduped by a prior refund still disables auto top-up and never double-subtracts', async () => {
+	// The refund creates the payment-level reversal first; the later chargeback
+	// is a dedup no-op for the LEDGER, but the dispute side effect (no more
+	// off-session charges) must still apply (codex, round 3).
+	await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'active' }).where(eq(organizations.id, 'org-1'));
+	expect(await processMercadoPagoPayment(payment)).toBe(true);
+	expect(await processMercadoPagoPayment({ ...payment, status: 'refunded', refundedAmount: 5 })).toBe(true);
+
+	expect(await processMercadoPagoPayment({ ...payment, status: 'charged_back' })).toBe(false);
+
+	const rows = await ledgerRows();
+	expect(rows.filter((row) => row.delta < 0)).toHaveLength(1);
+	const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+	expect(org?.autoTopupEnabled).toBe(0);
+	expect(org?.autoTopupState).toBe('disabled');
+	expect(org?.creditsRemaining).toBe(0);
+	expect((await attemptRow())?.status).toBe('disputed');
+});
+
+test('a reversal whose payment amount does not match the persisted attempt fails loudly and touches nothing', async () => {
+	// A self-consistent but WRONG refunded lookup (R$1 reported for a R$5
+	// attempt) must not revoke the full entitlement (codex, round 3).
+	expect(await processMercadoPagoPayment(payment)).toBe(true);
+
+	await expect(processMercadoPagoPayment({ ...payment, transactionAmount: 1, status: 'refunded', refundedAmount: 1 })).rejects.toThrow(/amount does not match/);
+
+	const org = await testDb().db.select({ creditsRemaining: organizations.creditsRemaining }).from(organizations).where(eq(organizations.id, 'org-1')).get();
+	expect(org?.creditsRemaining).toBe(100);
+	expect((await attemptRow())?.status).toBe('fulfilled');
+});
+
+test('a reversal whose payment currency does not match the persisted attempt fails loudly and touches nothing', async () => {
+	expect(await processMercadoPagoPayment(payment)).toBe(true);
+
+	await expect(processMercadoPagoPayment({ ...payment, currencyId: 'USD', status: 'refunded', refundedAmount: 5 })).rejects.toThrow(/currency does not match/);
+
+	const org = await testDb().db.select({ creditsRemaining: organizations.creditsRemaining }).from(organizations).where(eq(organizations.id, 'org-1')).get();
+	expect(org?.creditsRemaining).toBe(100);
+	expect((await attemptRow())?.status).toBe('fulfilled');
+});
+
 test('rejects a payment amount that is not whole cents instead of rounding it', async () => {
 	// Math.round would mask a malformed 5.005 (500.4999… cents) as a valid
 	// 500 — external amounts must be exact or the call fails loudly (I2).
 	await expect(fulfillMercadoPagoPayment({ ...payment, transactionAmount: 5.005 })).rejects.toThrow(/whole number of cents/);
 	expect(await ledgerRows()).toHaveLength(0);
+});
+
+test('accepts a binary-inexact BRL amount like 19.99 as its whole-cent value', async () => {
+	// 19.99 * 100 is 1998.9999999999998 in binary floating point — an exact
+	// integer check rejects a perfectly legitimate payment (cubic, round 3).
+	// The tolerance only absorbs representation error: 5.005 above still throws.
+	await testDb().db.update(mercadoPagoCheckoutAttempts).set({ amountCents: 1999 }).where(eq(mercadoPagoCheckoutAttempts.attemptId, 'attempt_1'));
+
+	expect(await fulfillMercadoPagoPayment({ ...payment, transactionAmount: 19.99 })).toBe(true);
+
+	const org = await testDb().db.select({ creditsRemaining: organizations.creditsRemaining }).from(organizations).where(eq(organizations.id, 'org-1')).get();
+	expect(org?.creditsRemaining).toBe(100);
 });
 
 test('grants the credits persisted on the attempt even when the catalog price changed since checkout', async () => {
@@ -282,6 +375,8 @@ test.each([
 	{ name: 'a non-Mercado-Pago host', url: 'https://evil.example/checkout' },
 	{ name: 'plain http on a real Mercado Pago host', url: 'http://www.mercadopago.com/checkout' },
 	{ name: 'a lookalike host', url: 'https://mercadopago.com.evil.example/checkout' },
+	{ name: 'a registrable country suffix outside the documented markets', url: 'https://www.mercadopago.com.io/checkout' },
+	{ name: 'the apex with a registrable country suffix', url: 'https://mercadopago.com.io/checkout' },
 	{ name: 'not a URL at all', url: 'not-a-url' }
 ])('rejects a preference whose checkout URL is $name', async ({ url }) => {
 	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(preferenceResponse(url)));
@@ -303,7 +398,7 @@ function paymentResponse(status: string) {
 	);
 }
 
-test.each(['approved', 'pending', 'in_process', 'rejected', 'refunded', 'charged_back', 'cancelled'])(
+test.each(['approved', 'pending', 'in_process', 'rejected', 'refunded', 'charged_back', 'cancelled', 'authorized', 'in_mediation'])(
 	'accepts the handled Mercado Pago payment status "%s"',
 	async (status) => {
 		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(paymentResponse(status)));
@@ -314,7 +409,16 @@ test.each(['approved', 'pending', 'in_process', 'rejected', 'refunded', 'charged
 	}
 );
 
-test.each([{ status: 'authorized' }, { status: 'in_mediation' }, { status: 'APPROVED' }, { status: '' }])(
+test.each(['authorized', 'in_mediation'])('the valid nonterminal status "%s" is an acknowledged no-op — no fulfillment, no reversal', async (status) => {
+	// Long-lived legitimate states must ack 200 without touching the ledger;
+	// throwing would storm 500-retries for a payment still in flight (round 3).
+	expect(await processMercadoPagoPayment({ ...payment, status })).toBe(false);
+
+	expect(await ledgerRows()).toHaveLength(0);
+	expect((await attemptRow())?.status).toBe('pending');
+});
+
+test.each([{ status: 'APPROVED' }, { status: '' }])(
 	'an out-of-contract payment status "$status" fails loudly',
 	async ({ status }) => {
 		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(paymentResponse(status)));
@@ -346,4 +450,63 @@ test('checkout refuses when MERCADOPAGO_WEBHOOK_SECRET is missing — no prefere
 		.where(eq(mercadoPagoCheckoutAttempts.attemptId, 'attempt_secret'))
 		.get();
 	expect(planted).toBeUndefined();
+});
+
+// --- Checkout snapshot and idempotency key (PR #136 round 3) ------------------
+
+test('resuming a pending checkout advertises the credits persisted on the attempt, not the live catalog', async () => {
+	// The bundle's credit count may change between the first checkout attempt
+	// and the retry; the preference and fulfillment must agree on the snapshot
+	// taken when the attempt was created (cubic/codex).
+	const fetchMock = vi.fn().mockResolvedValue(preferenceResponse('https://sandbox.mercadopago.com.br/checkout/v1/redirect?pref_id=pref-1'));
+	vi.stubGlobal('fetch', fetchMock);
+	await testDb().db.insert(mercadoPagoCheckoutAttempts).values({
+		attemptId: 'attempt_snapshot',
+		orgId: 'org-1',
+		bundleId: 'credits_100',
+		idempotencyKey: 'mp-key-snapshot',
+		amountCents: 500,
+		credits: 77
+	});
+
+	const initPoint = await createMercadoPagoCreditCheckout('org-1', TEST_OWNER, 'credits_100', 'attempt_snapshot');
+
+	expect(initPoint).toBe('https://sandbox.mercadopago.com.br/checkout/v1/redirect?pref_id=pref-1');
+	const [, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+	expect(JSON.parse(String(init.body)).items[0].title).toBe('77 Moderaty comment credits');
+});
+
+test('the checkout idempotency key is a deterministic 64-char hash within the Mercado Pago limit', async () => {
+	// Mercado Pago caps X-Idempotency-Key at 64 characters; the composite
+	// `mercadopago:checkout:<attempt>:<uuid>` form was 94 (codex).
+	let preferenceCount = 0;
+	vi.stubGlobal(
+		'fetch',
+		vi.fn().mockImplementation(() => {
+			preferenceCount += 1;
+			return Promise.resolve(
+				new Response(
+					JSON.stringify({
+						id: `pref-${preferenceCount}`,
+						sandbox_init_point: `https://sandbox.mercadopago.com.br/checkout/v1/redirect?pref_id=pref-${preferenceCount}`
+					}),
+					{ status: 201 }
+				)
+			);
+		})
+	);
+
+	await createMercadoPagoCreditCheckout('org-1', TEST_OWNER, 'credits_100', 'attempt_key_a');
+	await createMercadoPagoCreditCheckout('org-1', TEST_OWNER, 'credits_100', 'attempt_key_b');
+
+	const keys = await testDb().db
+		.select({ attemptId: mercadoPagoCheckoutAttempts.attemptId, idempotencyKey: mercadoPagoCheckoutAttempts.idempotencyKey })
+		.from(mercadoPagoCheckoutAttempts)
+		.all();
+	const byAttempt = new Map(keys.map((row) => [row.attemptId, row.idempotencyKey]));
+	const keyA = byAttempt.get('attempt_key_a');
+	const keyB = byAttempt.get('attempt_key_b');
+	expect(keyA).toMatch(/^[0-9a-f]{64}$/);
+	expect(keyB).toMatch(/^[0-9a-f]{64}$/);
+	expect(keyA).not.toBe(keyB);
 });

@@ -15,10 +15,23 @@
 
 import { describe, expect, test } from 'vitest';
 
-import { resolveLocale } from './locale';
+import { isLocale, resolveLocale, SUPPORTED_LOCALES } from './locale';
 import { t } from './messages';
 
 describe('locale resolution', () => {
+	test('isLocale accepts exactly the supported locales, derived from SUPPORTED_LOCALES', () => {
+		// The runtime check must be derived from SUPPORTED_LOCALES — a hardcoded
+		// list silently rejects a newly added locale at every boundary (cubic).
+		for (const locale of SUPPORTED_LOCALES) {
+			expect(isLocale(locale)).toBe(true);
+		}
+		expect(isLocale('fr')).toBe(false);
+		expect(isLocale('EN')).toBe(false);
+		expect(isLocale('pt')).toBe(false);
+		expect(isLocale('')).toBe(false);
+		expect(isLocale(null)).toBe(false);
+		expect(isLocale(undefined)).toBe(false);
+	});
 	test('a valid cookie wins over the browser preference', () => {
 		expect(resolveLocale({ cookie: 'en', acceptLanguage: 'pt-BR,pt;q=0.9' })).toBe('en');
 	});

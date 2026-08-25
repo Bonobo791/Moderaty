@@ -35,6 +35,7 @@ vi.mock('$lib/server/migrationGuard', () => ({
 	assertMigrationsCurrent: mocks.assertMigrationsCurrent
 }));
 
+import { LOCALE_COOKIE } from '$lib/i18n/locale';
 import { handle } from './hooks.server';
 
 beforeEach(() => {
@@ -52,6 +53,25 @@ function makeEvent() {
 		url: new URL('http://localhost/')
 	};
 }
+
+test('the locale is read from the exported LOCALE_COOKIE and applied to the html lang', async () => {
+	// The cookie name must come from $lib/i18n/locale's LOCALE_COOKIE, not a
+	// hardcoded string that can drift from the writer in /api/locale (cubic).
+	mocks.getSessionUser.mockResolvedValue(null);
+	const event = {
+		cookies: { get: (name: string) => (name === LOCALE_COOKIE ? 'pt-BR' : undefined), set: vi.fn() },
+		locals: {} as { user: unknown; dbDown?: boolean },
+		url: new URL('http://localhost/')
+	};
+	const resolve = vi.fn(
+		async (_event: unknown, opts?: { transformPageChunk?: (input: { html: string; done: boolean }) => string }) =>
+			new Response(opts?.transformPageChunk?.({ html: '<html lang="en"><body></body></html>', done: true }))
+	);
+
+	const response = await handle({ event, resolve } as never);
+
+	expect(await response.text()).toContain('<html lang="pt-BR">');
+});
 
 test('a database failure during session lookup degrades to maintenance mode, never a bare 500', async () => {
 	mocks.getSessionUser.mockRejectedValue(new Error('database is locked'));

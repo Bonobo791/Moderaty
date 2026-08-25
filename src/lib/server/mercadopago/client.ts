@@ -52,6 +52,39 @@ function apiUrl(path: string): URL {
 	return new URL(path, API_BASE);
 }
 
+// The returned init_point is persisted and later used in redirect(303, url):
+// only https Mercado Pago checkout origins are trusted — www.mercadopago.com,
+// its subdomains, and the country hosts (www.mercadopago.com.br, .com.ar, …).
+const CHECKOUT_HOST = /(^|\.)mercadopago\.com(\.[a-z]{2})?$/;
+
+function checkoutUrl(value: string): string {
+	let url: URL;
+	try {
+		url = new URL(value);
+	} catch {
+		throw new Error('Mercado Pago preference returned a malformed checkout URL');
+	}
+	if (url.protocol !== 'https:') throw new Error('Mercado Pago checkout URL must use https');
+	if (!CHECKOUT_HOST.test(url.hostname)) {
+		throw new Error(`Mercado Pago checkout URL host is not a Mercado Pago origin: ${url.hostname}`);
+	}
+	return url.toString();
+}
+
+// The complete status set processMercadoPagoPayment handles: acted on
+// (approved/refunded/charged_back) or a valid no-op (pending/in_process/
+// rejected/cancelled). Anything else is out of contract — the call failed (I2),
+// never a silent fall-through that answers the webhook 200 without fulfilling.
+const KNOWN_PAYMENT_STATUSES: ReadonlySet<string> = new Set([
+	'approved',
+	'pending',
+	'in_process',
+	'rejected',
+	'refunded',
+	'charged_back',
+	'cancelled'
+]);
+
 function record(value: unknown, label: string): Record<string, unknown> {
 	if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} returned an invalid object`);
 	return value as Record<string, unknown>;
@@ -99,7 +132,7 @@ export async function createCreditPreference(input: {
 	const initPoint = environment() === 'sandbox' ? body.sandbox_init_point : body.init_point;
 	if (typeof body.id !== 'string' || body.id.length === 0) throw new Error('Mercado Pago preference has no id');
 	if (typeof initPoint !== 'string' || initPoint.length === 0) throw new Error('Mercado Pago preference has no checkout URL');
-	return { id: body.id, initPoint };
+	return { id: body.id, initPoint: checkoutUrl(initPoint) };
 }
 
 export const mercadoPagoProvider: PrepaidCreditProvider = {
@@ -119,6 +152,7 @@ export async function retrievePayment(paymentId: string): Promise<MercadoPagoPay
 	if (typeof body.id !== 'number' && typeof body.id !== 'string') throw new Error('Mercado Pago payment has no id');
 	if (String(body.id) !== paymentId) throw new Error('Mercado Pago returned a different payment than requested');
 	if (typeof body.status !== 'string' || typeof body.external_reference !== 'string') throw new Error('Mercado Pago payment has invalid status or reference');
+	if (!KNOWN_PAYMENT_STATUSES.has(body.status)) throw new Error(`Mercado Pago payment has an unknown payment status: ${body.status}`);
 	if (typeof body.transaction_amount !== 'number' || !Number.isFinite(body.transaction_amount) || body.transaction_amount <= 0) throw new Error('Mercado Pago payment has invalid amount');
 	if (typeof body.currency_id !== 'string') throw new Error('Mercado Pago payment has invalid currency');
 	const refundedAmount = body.transaction_amount_refunded;

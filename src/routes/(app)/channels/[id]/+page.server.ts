@@ -23,7 +23,7 @@ import { runChannel } from '$lib/server/pipeline';
 import { requireUser } from '$lib/server/session';
 import { and, eq, isNull, lt, or } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
-import { fail } from '@sveltejs/kit';
+import { error, fail } from '@sveltejs/kit';
 
 /** Window presets shared by Analyze history and the dry-run preview (months). */
 const HISTORY_MONTH_PRESETS: ReadonlySet<number> = new Set([1, 3, 6, 12, 24]);
@@ -75,6 +75,13 @@ export const actions = {
 	},
 	analyzeHistory: async ({ request, locals }) => {
 		const user = requireUser(locals);
+		// runChannel accepts exactly 'true'/'false' for DRY_RUN; anything else
+		// (unset, misspelled) would pass the env-dry check below, reset the scan
+		// state, and then be rejected on every invocation — the planted scan is
+		// stuck forever. Fail loudly BEFORE any DB mutation (codex, PR #136).
+		if (env.DRY_RUN !== 'true' && env.DRY_RUN !== 'false') {
+			throw error(500, 'DRY_RUN must be set to exactly "true" or "false" — the deployment is misconfigured');
+		}
 		const f = await request.formData();
 		const channelId = String(f.get('channelId') ?? '');
 		const months = Number(f.get('months'));

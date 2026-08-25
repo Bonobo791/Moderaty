@@ -18,7 +18,7 @@ import type { Handle } from '@sveltejs/kit';
 import { isHttpError } from '@sveltejs/kit';
 
 import { cookieSecure } from '$lib/server/oauthState';
-import { resolveLocale } from '$lib/i18n/locale';
+import { LOCALE_COOKIE, resolveLocale } from '$lib/i18n/locale';
 import { assertMigrationsCurrent } from '$lib/server/migrationGuard';
 import { getSessionUser, SESSION_COOKIE } from '$lib/server/session';
 
@@ -32,7 +32,7 @@ import { getSessionUser, SESSION_COOKIE } from '$lib/server/session';
 // silent downgrade to signed-out.
 export const handle: Handle = async ({ event, resolve }) => {
 	const locale = resolveLocale({
-		cookie: event.cookies.get('moderaty_locale'),
+		cookie: event.cookies.get(LOCALE_COOKIE),
 		acceptLanguage: event.request?.headers?.get('accept-language')
 	});
 	const resolveLocalized = () =>

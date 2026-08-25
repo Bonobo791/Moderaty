@@ -26,7 +26,7 @@ import type { MercadoPagoPayment } from './client';
 
 const MAX_SIGNATURE_AGE_MS = 5 * 60 * 1000;
 
-function webhookSecret(): string {
+export function webhookSecret(): string {
 	const secret = env.MERCADOPAGO_WEBHOOK_SECRET;
 	if (!secret) throw new Error('MERCADOPAGO_WEBHOOK_SECRET is not configured');
 	return secret;

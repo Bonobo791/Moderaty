@@ -76,21 +76,27 @@ test('lists only configured BRL bundles with whole-cent prices', () => {
 	]);
 });
 
+const preferenceInput = {
+	orgId: 'org-1',
+	attemptId: 'attempt_1',
+	bundleId: 'credits_100',
+	credits: 100,
+	amountCents: 500,
+	idempotencyKey: 'mp-key',
+	appUrl: 'https://moderaty.example'
+};
+
+function preferenceResponse(initPoint: string) {
+	return new Response(JSON.stringify({ id: 'pref-1', sandbox_init_point: initPoint }), { status: 201 });
+}
+
 test('creates a sandbox preference with a stable external reference and BRL amount', async () => {
 	const fetchMock = vi.fn().mockResolvedValue(
-		new Response(JSON.stringify({ id: 'pref-1', sandbox_init_point: 'https://sandbox.mercadopago.test/pref-1' }), { status: 201 })
+		preferenceResponse('https://sandbox.mercadopago.com.br/checkout/v1/redirect?pref_id=pref-1')
 	);
 	vi.stubGlobal('fetch', fetchMock);
-	const result = await createCreditPreference({
-		orgId: 'org-1',
-		attemptId: 'attempt_1',
-		bundleId: 'credits_100',
-		credits: 100,
-		amountCents: 500,
-		idempotencyKey: 'mp-key',
-		appUrl: 'https://moderaty.example'
-	});
-	expect(result).toEqual({ id: 'pref-1', initPoint: 'https://sandbox.mercadopago.test/pref-1' });
+	const result = await createCreditPreference(preferenceInput);
+	expect(result).toEqual({ id: 'pref-1', initPoint: 'https://sandbox.mercadopago.com.br/checkout/v1/redirect?pref_id=pref-1' });
 	const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
 	expect(url.toString()).toBe('https://api.mercadopago.com/checkout/preferences');
 	expect(init.headers).toMatchObject({ Authorization: 'Bearer app-token', 'X-Idempotency-Key': 'mp-key' });
@@ -252,4 +258,92 @@ test('a bundle with a malformed configured price is logged loudly and skipped, n
 		mocks.env.MERCADOPAGO_PRICE_CREDITS_500_BRL_CENTS = '1900';
 		errorSpy.mockRestore();
 	}
+});
+
+// --- Checkout URL allowlist (V1, PR #136 round 2, codex) --------------------
+// The init_point is persisted and later used in redirect(303, url): a
+// malformed or hostile upstream response must never become a trusted open
+// redirect. Only https Mercado Pago checkout origins are accepted.
+
+test.each([
+	{ url: 'https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=pref-1' },
+	{ url: 'https://www.mercadopago.com.ar/checkout/v1/redirect?pref_id=pref-1' },
+	{ url: 'https://sandbox.mercadopago.com/checkout/v1/redirect?pref_id=pref-1' },
+	{ url: 'https://www.mercadopago.com/checkout/v1/redirect?pref_id=pref-1' }
+])('accepts a Mercado Pago checkout URL: $url', async ({ url }) => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(preferenceResponse(url)));
+
+	const result = await createCreditPreference(preferenceInput);
+
+	expect(result).toEqual({ id: 'pref-1', initPoint: url });
+});
+
+test.each([
+	{ name: 'a non-Mercado-Pago host', url: 'https://evil.example/checkout' },
+	{ name: 'plain http on a real Mercado Pago host', url: 'http://www.mercadopago.com/checkout' },
+	{ name: 'a lookalike host', url: 'https://mercadopago.com.evil.example/checkout' },
+	{ name: 'not a URL at all', url: 'not-a-url' }
+])('rejects a preference whose checkout URL is $name', async ({ url }) => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(preferenceResponse(url)));
+
+	await expect(createCreditPreference(preferenceInput)).rejects.toThrow(/checkout URL/);
+});
+
+// --- Payment status validation (V6, PR #136 round 2, codex) ------------------
+// processMercadoPagoPayment acts on approved/refunded/charged_back and treats
+// pending/in_process/rejected/cancelled as valid no-ops. Any OTHER status is
+// out of contract: it must throw so the webhook answers 500 and Mercado Pago
+// retries, instead of falling through to `false` (200, no fulfillment, no
+// reversal, retries killed).
+
+function paymentResponse(status: string) {
+	return new Response(
+		JSON.stringify({ id: 'pay-1', status, external_reference: 'org-1:attempt_1', transaction_amount: 5, currency_id: 'BRL' }),
+		{ status: 200 }
+	);
+}
+
+test.each(['approved', 'pending', 'in_process', 'rejected', 'refunded', 'charged_back', 'cancelled'])(
+	'accepts the handled Mercado Pago payment status "%s"',
+	async (status) => {
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(paymentResponse(status)));
+
+		const result = await retrievePayment('pay-1');
+
+		expect(result.status).toBe(status);
+	}
+);
+
+test.each([{ status: 'authorized' }, { status: 'in_mediation' }, { status: 'APPROVED' }, { status: '' }])(
+	'an out-of-contract payment status "$status" fails loudly',
+	async ({ status }) => {
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(paymentResponse(status)));
+
+		await expect(retrievePayment('pay-1')).rejects.toThrow(/unknown payment status/);
+	}
+);
+
+// --- Checkout requires the complete provider configuration (V5, PR #136 ------
+// round 2, codex): with prices and the access token configured but no webhook
+// secret, every webhook would throw before fulfillment — the customer pays and
+// never receives credits. Refuse to create the preference, and plant nothing.
+
+test('checkout refuses when MERCADOPAGO_WEBHOOK_SECRET is missing — no preference, no attempt row', async () => {
+	delete (mocks.env as Record<string, string | undefined>).MERCADOPAGO_WEBHOOK_SECRET;
+	const fetchSpy = vi.fn();
+	vi.stubGlobal('fetch', fetchSpy);
+	try {
+		await expect(createMercadoPagoCreditCheckout('org-1', TEST_OWNER, 'credits_100', 'attempt_secret')).rejects.toThrow(
+			/MERCADOPAGO_WEBHOOK_SECRET is not configured/
+		);
+	} finally {
+		mocks.env.MERCADOPAGO_WEBHOOK_SECRET = 'webhook-secret';
+	}
+	expect(fetchSpy).not.toHaveBeenCalled();
+	const planted = await testDb()
+		.db.select({ attemptId: mercadoPagoCheckoutAttempts.attemptId })
+		.from(mercadoPagoCheckoutAttempts)
+		.where(eq(mercadoPagoCheckoutAttempts.attemptId, 'attempt_secret'))
+		.get();
+	expect(planted).toBeUndefined();
 });

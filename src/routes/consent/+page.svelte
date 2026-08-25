@@ -28,7 +28,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 </script>
 
 <svelte:head>
-	<title>{t(data.locale, 'finishAccount')}</title>
+	<title>Moderaty — {t(data.locale, 'finishAccount')}</title>
 </svelte:head>
 
 <main class="consent-main">

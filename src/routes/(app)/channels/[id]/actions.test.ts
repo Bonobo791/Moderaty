@@ -166,6 +166,48 @@ test('analyze history refuses loudly on a dry-run deployment — 409, boundary u
 	}
 });
 
+test('analyze history fails loudly when DRY_RUN is unset instead of planting a stuck scan', async () => {
+	// runChannel accepts exactly 'true'/'false'; an unset DRY_RUN would pass the
+	// env-dry check below, reset the scan state, and then be rejected on every
+	// invocation — the planted scan is stuck forever. Fail with a loud 500
+	// BEFORE any DB mutation (codex, PR #136 round 2).
+	await seedChannel('UC1');
+	await testDb()
+		.db.update(channels)
+		.set({ cursor: '2026-07-30T00:00:00.000Z', nextPageToken: 'tok', scanCursor: '2026-07-29T00:00:00.000Z' })
+		.where(eq(channels.id, 'UC1'));
+	delete mocks.env.DRY_RUN;
+	try {
+		await expect(analyzeHistory('UC1', '3')).rejects.toMatchObject({ status: 500 });
+		expect(await scanWindowOf('UC1')).toEqual({
+			cursor: '2026-07-30T00:00:00.000Z',
+			nextPageToken: 'tok',
+			scanCursor: '2026-07-29T00:00:00.000Z'
+		});
+	} finally {
+		mocks.env.DRY_RUN = 'false';
+	}
+});
+
+test('analyze history fails loudly when DRY_RUN is misspelled instead of planting a stuck scan', async () => {
+	await seedChannel('UC1');
+	await testDb()
+		.db.update(channels)
+		.set({ cursor: '2026-07-30T00:00:00.000Z', nextPageToken: 'tok', scanCursor: '2026-07-29T00:00:00.000Z' })
+		.where(eq(channels.id, 'UC1'));
+	mocks.env.DRY_RUN = 'ture';
+	try {
+		await expect(analyzeHistory('UC1', '3')).rejects.toMatchObject({ status: 500 });
+		expect(await scanWindowOf('UC1')).toEqual({
+			cursor: '2026-07-30T00:00:00.000Z',
+			nextPageToken: 'tok',
+			scanCursor: '2026-07-29T00:00:00.000Z'
+		});
+	} finally {
+		mocks.env.DRY_RUN = 'false';
+	}
+});
+
 test.each([{ months: '0' }, { months: '2' }, { months: '25' }, { months: 'x' }, { months: '' }])(
 	'analyze history rejects months "$months" with 400 and changes nothing',
 	async ({ months }) => {

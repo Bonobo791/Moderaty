@@ -18,7 +18,9 @@ export const SUPPORTED_LOCALES = ['en', 'pt-BR'] as const;
 export type Locale = (typeof SUPPORTED_LOCALES)[number];
 
 export function isLocale(value: string | null | undefined): value is Locale {
-	return value === 'en' || value === 'pt-BR';
+	// Derived from SUPPORTED_LOCALES: a hardcoded list silently rejects a newly
+	// added locale at every boundary (cubic, PR #136).
+	return (SUPPORTED_LOCALES as readonly string[]).includes(value ?? '');
 }
 
 function supportedLocaleFor(language: string): Locale | null {

@@ -23,6 +23,7 @@ import { requireOrgRole } from '$lib/server/ownership';
 import type { SessionUser } from '$lib/server/session';
 import { mercadoPagoProvider } from './client';
 import { mercadoPagoBundleById, type MercadoPagoBundle } from './bundles';
+import { webhookSecret } from './webhooks';
 
 const ATTEMPT_ID = /^[A-Za-z0-9_-]{8,128}$/;
 
@@ -97,6 +98,13 @@ export async function createMercadoPagoCreditCheckout(
 	requireOrgRole(user, 'owner');
 	const appUrl = env.APP_URL;
 	if (!appUrl) throw new Error('APP_URL is not configured');
+	// The webhook secret is part of the provider configuration: with prices and
+	// the access token set but no secret, the preference would still be payable
+	// while every webhook throws before fulfillment — the customer pays and
+	// never receives credits (codex, PR #136). Validate BEFORE planting an
+	// attempt or creating the preference; the access token and bundle price are
+	// validated by createCreditPreference/mercadoPagoBundleById respectively.
+	webhookSecret();
 	const bundle = mercadoPagoBundleById(bundleId);
 	const attempt = await loadOrCreateAttempt(orgId, bundle, attemptId);
 	if (attempt.status === 'fulfilled') throw new Error('Mercado Pago checkout attempt has already completed');

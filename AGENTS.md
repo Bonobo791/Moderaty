@@ -297,7 +297,8 @@ users row is anonymized to a tombstone (`google_sub = 'deleted:<id>'`,
 email/display name `'[deleted]'`) rather than deleted, keeping
 `consents.user_id` valid and freeing the real Google sub for a future
 fresh signup (signing back in is a NEW signup through `/consent`, never a
-restore). The statutory exception: the `consents` evidentiary log keeps the
+restore). The action lands the deleted user on the public `/account-deleted`
+confirmation page (the session is already erased). The statutory exception: the `consents` evidentiary log keeps the
 e-mail, doc version, checkbox text, IP, and user agent under LGPD Art. 16,
 III — the e-mail lives ONLY in `consents` (migration 0011 backfills it from
 `users`), so blocking it from any other use is architectural, not

@@ -19,8 +19,7 @@ as a second opinion, and sends uncertain decisions to a human review queue.
 
 [![CodeScene general](https://codescene.io/images/analyzed-by-codescene-badge.svg)](https://codescene.io/projects/83771)
 [![CodeScene Average Code Health](https://codescene.io/projects/83771/status-badges/average-code-health)](https://codescene.io/projects/83771)
-[![CodeScene Hotspot Code Health](https://codescene.io/projects/83771/status-badges/hotspot-code-health)](https://codescene.io/projects/83771)
-[![CodeScene System Mastery](https://codescene.io/projects/83771/status-badges/system-mastery)](https://codescene.io/projects/83771)
+<a href="https://codescene.io/projects/83771"><img src="https://codescene.io/projects/83771/status-badges/hotspot-code-health" alt="Hotspot Code Health"></a>[![CodeScene System Mastery](https://codescene.io/projects/83771/status-badges/system-mastery)](https://codescene.io/projects/83771)
 
 ## What it does
 

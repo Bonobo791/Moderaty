@@ -23,7 +23,7 @@ import { env } from '$env/dynamic/private';
 import { eq } from 'drizzle-orm';
 
 import { AUTO_TOPUP_DEFAULT_THRESHOLD } from '$lib/server/billing/autotopup';
-import { createCreditCheckout, createPlanCheckout } from '$lib/server/billing/checkout';
+import { createCreditCheckout, createPlanCheckout, getOrCreateStripeCustomer } from '$lib/server/billing/checkout';
 import { createMercadoPagoCreditCheckout } from '$lib/server/mercadopago/checkout';
 import { configuredMercadoPagoBundles } from '$lib/server/mercadopago/bundles';
 import { listCreditTransactions, orgIsMetered, usageSummary } from '$lib/server/billing/ledger';
@@ -31,6 +31,7 @@ import { db } from '$lib/server/db';
 import { organizations } from '$lib/server/db/schema';
 import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
 import { configuredBundles } from '$lib/server/stripe/bundles';
+import { getStripe } from '$lib/server/stripe/client';
 import { requireOrgRole } from '$lib/server/ownership';
 import { requireUser } from '$lib/server/session';
 
@@ -40,10 +41,10 @@ function isStripeCheckoutError(error: unknown): boolean {
 	return error !== null && typeof error === 'object' && typeof (error as { type?: unknown }).type === 'string';
 }
 
-function checkoutFailure(error: unknown, orgId: string) {
+function checkoutFailure(error: unknown, orgId: string, what = 'start checkout') {
 	const message = error instanceof Error ? error.message : String(error);
-	console.error(`usage: checkout failed for org ${orgId}: ${message}`);
-	return fail(400, { error: isStripeCheckoutError(error) ? 'Could not start checkout — please try again.' : `Could not start checkout: ${message}` });
+	console.error(`usage: ${what} failed for org ${orgId}: ${message}`);
+	return fail(400, { error: isStripeCheckoutError(error) ? `Could not ${what} — please try again.` : `Could not ${what}: ${message}` });
 }
 
 
@@ -280,5 +281,35 @@ export const actions: Actions = {
 				.where(eq(organizations.id, user.orgId));
 		}
 		return { ok: true };
+	},
+	/**
+	 * Owner-only: opens the Stripe customer portal so the org can manage its
+	 * saved cards (and its hosted subscription) on Stripe's hosted page. Card
+	 * changes made there sync back via the payment_method.detached and
+	 * customer.updated webhooks — a changed/removed top-up card pauses auto
+	 * top-up until the owner re-consents here (savePaymentMethod's rule).
+	 */
+	manageCards: async ({ locals }) => {
+		const user = requireUser(locals);
+		try {
+			// Owner-only inside; creates the customer on first use so a brand-new
+			// org can still open the portal to add its first card.
+			const customer = await getOrCreateStripeCustomer(user.orgId, user);
+			const appUrl = env.APP_URL;
+			if (!appUrl) throw new Error('APP_URL is not configured');
+			// No `configuration` id: Stripe uses the account's DEFAULT portal
+			// configuration — the human activates it once (docs/
+			// stripe-checkout-webhooks.md) with payment-method management on.
+			const session = await getStripe().billingPortal.sessions.create({
+				customer,
+				return_url: new URL('/usage', appUrl).toString()
+			});
+			throw redirect(303, session.url);
+		} catch (error) {
+			// The thrown redirect is the success path — never flatten it into a
+			// 400 (same guard as buy/buyPlan); auth HttpErrors pass through too.
+			if (isRedirect(error) || isHttpError(error)) throw error;
+			return checkoutFailure(error, user.orgId, 'open the card manager');
+		}
 	}
 };

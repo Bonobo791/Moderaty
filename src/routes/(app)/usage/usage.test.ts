@@ -24,14 +24,15 @@ import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
 
 const mocks = vi.hoisted(() => ({
 	sessionsCreate: vi.fn(),
-	customersCreate: vi.fn(), pricesRetrieve: vi.fn()
+	customersCreate: vi.fn(), pricesRetrieve: vi.fn(), billingPortalSessionsCreate: vi.fn()
 }));
 
 vi.mock('$lib/server/stripe/client', () => ({
 	getStripe: () => ({
 		checkout: { sessions: { create: mocks.sessionsCreate } },
 		prices: { retrieve: mocks.pricesRetrieve },
-		customers: { create: mocks.customersCreate }
+		customers: { create: mocks.customersCreate },
+		billingPortal: { sessions: { create: mocks.billingPortalSessionsCreate } }
 	})
 }));
 vi.mock('$env/dynamic/private', () => ({
@@ -73,6 +74,10 @@ function buyPlan(plan: string, user: SessionUser | null = OWNER) {
 
 function setAutoTopup(fields: Record<string, string>, user: SessionUser | null = OWNER) {
 	return actions.setAutoTopup({ request: postForm(fields), locals: { user } } as never);
+}
+
+function manageCards(user: SessionUser | null = OWNER) {
+	return actions.manageCards({ locals: { user } } as never);
 }
 
 beforeEach(() => {
@@ -409,5 +414,96 @@ describe('usage plan checkout action', () => {
 		const result = await buyPlan('not-a-plan');
 		expect(result).toMatchObject({ status: 400, data: { error: 'Unknown billing plan.' } });
 		expect(mocks.pricesRetrieve).not.toHaveBeenCalled();
+	});
+});
+
+describe('usage manageCards action (Stripe customer portal)', () => {
+	test('rejects a signed-out request with 401', async () => {
+		await expect(manageCards(null)).rejects.toMatchObject({ status: 401 });
+		expect(mocks.billingPortalSessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test('rejects a non-owner with 403', async () => {
+		await seedOrg({ stripeCustomerId: 'cus_1' });
+		await expect(manageCards({ ...OWNER, orgRole: 'member' as const })).rejects.toMatchObject({ status: 403 });
+		expect(mocks.billingPortalSessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test('redirects the owner to a portal session for the org customer with a /usage return', async () => {
+		await seedOrg({ stripeCustomerId: 'cus_1' });
+		mocks.billingPortalSessionsCreate.mockResolvedValue({ url: 'https://billing.stripe.com/p/session/test_123' });
+
+		await expect(manageCards()).rejects.toMatchObject({ status: 303, location: 'https://billing.stripe.com/p/session/test_123' });
+
+		expect(mocks.billingPortalSessionsCreate).toHaveBeenCalledWith({ customer: 'cus_1', return_url: 'http://localhost:5173/usage' });
+	});
+
+	test('creates the Stripe customer first when the org has none', async () => {
+		await seedOrg();
+		mocks.billingPortalSessionsCreate.mockResolvedValue({ url: 'https://billing.stripe.com/p/session/test_123' });
+
+		await expect(manageCards()).rejects.toMatchObject({ status: 303 });
+
+		expect(mocks.customersCreate).toHaveBeenCalledWith({ name: 'One', email: 'one@example.com', metadata: { org_id: 'org-1' } }, { idempotencyKey: 'customer:org-1' });
+		expect(mocks.billingPortalSessionsCreate).toHaveBeenCalledWith({ customer: 'cus_new', return_url: 'http://localhost:5173/usage' });
+	});
+
+	test('a Stripe failure returns a generic message and logs the raw error server-side only', async () => {
+		// Raw third-party error text must never reach the client — same rule as
+		// checkout (it can leak card/bank details).
+		await seedOrg({ stripeCustomerId: 'cus_1' });
+		mocks.billingPortalSessionsCreate.mockRejectedValue(Object.assign(new Error('no configuration with payment method update, card brand visa'), { type: 'StripeInvalidRequestError' }));
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+		const result = await manageCards();
+
+		expect(result).toMatchObject({ status: 400 });
+		const serialized = JSON.stringify(result);
+		expect(serialized).not.toContain('card brand visa');
+		expect(serialized).toContain('Could not open the card manager');
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('no configuration with payment method update'));
+		errorSpy.mockRestore();
+	});
+});
+
+describe('usage cards section', () => {
+	function renderUsage(overrides: Record<string, unknown> = {}) {
+		return render(Page, {
+			props: {
+				data: {
+					maintenance: false,
+					user: OWNER,
+					summary: { remaining: 10, usedThisMonth: 0, usedLifetime: 0 },
+					metered: true,
+					mercadoPagoBundles: [],
+					history: [],
+					bundles: [],
+					autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: true },
+					autoTopupConsentText: 'consent',
+					plans: { hosted: false, lifetime: false },
+					...overrides
+				},
+				form: null
+			} as never
+		}).body;
+	}
+
+	test('an owner sees the Cards section with the manage button', () => {
+		const body = renderUsage();
+		expect(body).toContain('action="?/manageCards"');
+		expect(body).toContain('Manage cards');
+	});
+
+	test('a member never sees the card manager', () => {
+		const body = renderUsage({ user: { ...OWNER, orgRole: 'member' } });
+		expect(body).not.toContain('manageCards');
+	});
+
+	test('the no-card state says so instead of implying one is saved', () => {
+		const body = renderUsage({
+			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: false }
+		});
+		expect(body).toContain('No card saved yet');
+		expect(body).not.toContain('A card is saved');
 	});
 });

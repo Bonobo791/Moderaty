@@ -212,6 +212,23 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 			</button>
 		</form>
 	</div>
+
+	<div class="card">
+		<h2 style="margin-top:0">Cards</h2>
+		<p class="muted">
+			{#if data.autoTopup?.hasCard}
+				A card is saved for automatic top-up and future purchases.
+			{:else}
+				No card saved yet — buy any bundle once, or add one via Manage cards.
+			{/if}
+			Add, remove, or change your cards on Stripe's secure customer portal; your hosted
+			subscription can be managed there too. Changing the saved card pauses automatic
+			top-up until you re-enable it here.
+		</p>
+		<form method="POST" action="?/manageCards" use:enhance={submitting}>
+			<button class="btn secondary small" type="submit" disabled={pending}>Manage cards</button>
+		</form>
+	</div>
 {/if}
 
 <div class="card">

@@ -624,6 +624,64 @@ async function findOrgForStripe(subscriptionId?: string, customerId?: string) {
 	return undefined;
 }
 
+/**
+ * Card-management sync for the Stripe customer portal: removals happen
+ * off-app, so the org's saved top-up card pointer must never go stale. The
+ * removed card being the org's DEFAULT clears the pointer and pauses auto
+ * top-up — the consent evidence covered the old card (same rule as
+ * savePaymentMethod's card-change branch); any other wallet card is a no-op.
+ */
+async function handlePaymentMethodDetached(paymentMethod: Stripe.PaymentMethod): Promise<void> {
+	const customerId = typeof paymentMethod.customer === 'string' ? paymentMethod.customer : paymentMethod.customer?.id;
+	if (!customerId) {
+		console.info(`stripe: payment_method.detached ${paymentMethod.id} carries no customer — nothing to sync`);
+		return;
+	}
+	const org = await findOrgForStripe(undefined, customerId);
+	if (!org) {
+		// Expected after account deletion (the customer was erased at Stripe):
+		// redelivery can never fix this, so acknowledge without throwing.
+		console.info(`stripe: payment_method.detached ${paymentMethod.id} for untracked customer ${customerId} — nothing to sync`);
+		return;
+	}
+	if (org.stripeDefaultPmId !== paymentMethod.id) return;
+	await db
+		.update(organizations)
+		.set({ stripeDefaultPmId: null, autoTopupEnabled: 0, autoTopupState: 'disabled' })
+		.where(eq(organizations.id, org.id));
+	console.error(`stripe: the top-up card ${paymentMethod.id} was removed for org ${org.id} — auto top-up DISABLED; save a new card and re-enable`);
+}
+
+/**
+ * Customer-portal default-card sync: a NEW default payment method is a new
+ * billing instrument the on-file consent never covered, so the pointer
+ * resyncs and auto top-up pauses for fresh consent. Events without a default
+ * card (the account-deletion e-mail scrub, name changes) are not card
+ * changes and leave the org untouched.
+ */
+async function handleCustomerUpdated(customer: Stripe.Customer): Promise<void> {
+	const org = await findOrgForStripe(undefined, customer.id);
+	if (!org) {
+		console.info(`stripe: customer.updated for untracked customer ${customer.id} — nothing to sync`);
+		return;
+	}
+	const incoming = customer.invoice_settings?.default_payment_method;
+	const incomingId = typeof incoming === 'string' ? incoming : (incoming?.id ?? null);
+	if (!incomingId || incomingId === org.stripeDefaultPmId) return;
+	await db
+		.update(organizations)
+		.set({
+			stripeDefaultPmId: incomingId,
+			...(org.autoTopupEnabled === 1 ? { autoTopupEnabled: 0, autoTopupState: 'disabled' } : {})
+		})
+		.where(eq(organizations.id, org.id));
+	if (org.autoTopupEnabled === 1) {
+		console.error(`stripe: default card changed for org ${org.id} (${org.stripeDefaultPmId} -> ${incomingId}) — auto top-up DISABLED, fresh consent required`);
+	} else {
+		console.info(`stripe: default card changed for org ${org.id} (${org.stripeDefaultPmId} -> ${incomingId})`);
+	}
+}
+
 function isSupersededSubscription(org: Awaited<ReturnType<typeof findOrgForStripe>>, subscriptionId: string, eventType: string): boolean {
 	if (!org?.stripeSubscriptionId || org.stripeSubscriptionId === subscriptionId) return false;
 	console.error(`stripe: ignoring stale ${eventType} for superseded subscription ${subscriptionId}; current subscription is ${org.stripeSubscriptionId}`);
@@ -773,6 +831,14 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
 		case 'charge.dispute.funds_withdrawn':
 		case 'charge.dispute.funds_reinstated':
 			console.error(`stripe: dispute lifecycle event ${event.type} for ${event.data.object.id} — funds_* events need manual review`);
+			handled = true;
+			break;
+		case 'payment_method.detached':
+			await handlePaymentMethodDetached(event.data.object);
+			handled = true;
+			break;
+		case 'customer.updated':
+			await handleCustomerUpdated(event.data.object);
 			handled = true;
 			break;
 			default:

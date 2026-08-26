@@ -778,3 +778,65 @@ describe('handleStripeEvent', () => {
 		expect(await getCredits('org-1')).toBe(0);
 	});
 });
+
+describe('portal card sync (changes made in the Stripe customer portal)', () => {
+	async function orgState() {
+		return testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+	}
+
+	test('payment_method.detached for the top-up card clears it and disables auto top-up loudly', async () => {
+		// The consent evidence covered the OLD card — a removed default can never
+		// keep charging (same rule as savePaymentMethod's card-change branch).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeDefaultPmId: 'pm_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			expect(await handleStripeEvent(event('payment_method.detached', 'evt_pmd_1', { id: 'pm_1', object: 'payment_method', customer: 'cus_1' }) as never)).toBe(true);
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: null, autoTopupEnabled: 0, autoTopupState: 'disabled' });
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('pm_1'));
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('payment_method.detached for another card leaves the top-up card alone', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeDefaultPmId: 'pm_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		expect(await handleStripeEvent(event('payment_method.detached', 'evt_pmd_2', { id: 'pm_other', object: 'payment_method', customer: 'cus_1' }) as never)).toBe(true);
+		expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
+	});
+
+	test('payment_method.detached for an untracked customer is noted and acknowledged, never retried', async () => {
+		// e.g. account deletion deleted the customer at Stripe — redelivery can
+		// never fix this, so it must not throw (Stripe would retry for days).
+		const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+		try {
+			expect(await handleStripeEvent(event('payment_method.detached', 'evt_pmd_3', { id: 'pm_x', object: 'payment_method', customer: 'cus_unknown' }) as never)).toBe(true);
+			expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('cus_unknown'));
+		} finally {
+			infoSpy.mockRestore();
+		}
+	});
+
+	test('customer.updated resyncs a changed default card and disables auto top-up (fresh consent)', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeDefaultPmId: 'pm_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			expect(await handleStripeEvent(event('customer.updated', 'evt_cu_1', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: 'pm_2' } }) as never)).toBe(true);
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_2', autoTopupEnabled: 0, autoTopupState: 'disabled' });
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('pm_2'));
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('customer.updated with the same default card changes nothing', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeDefaultPmId: 'pm_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		expect(await handleStripeEvent(event('customer.updated', 'evt_cu_2', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: 'pm_1' } }) as never)).toBe(true);
+		expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
+	});
+
+	test('customer.updated without a default card (e.g. the deletion e-mail scrub) changes nothing', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeDefaultPmId: 'pm_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		expect(await handleStripeEvent(event('customer.updated', 'evt_cu_3', { id: 'cus_1', object: 'customer', email: '', invoice_settings: {} }) as never)).toBe(true);
+		expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
+	});
+});

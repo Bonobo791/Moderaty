@@ -773,9 +773,7 @@ test('disconnect revokes the grant at Google, then erases the channel and every 
 	const fetchSpy = stubRevoke(200);
 	const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 	try {
-		const res = await disconnectChannel('UC1', true);
-
-		expect(res).toMatchObject({ ok: true, scope: 'disconnect', channelId: 'UC1' });
+		await expect(disconnectChannel('UC1', true)).rejects.toMatchObject({ status: 303, location: '/dashboard' });
 		// The decrypted token went to Google's revocation endpoint.
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
 		const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
@@ -797,9 +795,7 @@ test('a failed revocation is logged loudly and never blocks the erase', async ()
 	stubRevoke(400);
 	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 	try {
-		const res = await disconnectChannel('UC1', true);
-
-		expect(res).toMatchObject({ ok: true, scope: 'disconnect', channelId: 'UC1' });
+		await expect(disconnectChannel('UC1', true)).rejects.toMatchObject({ status: 303, location: '/dashboard' });
 		expect(await rowsOf('UC1')).toEqual(ERASED);
 		expect(errorSpy).toHaveBeenCalledWith('token revocation failed for channel, disconnecting anyway:', 'UC1', expect.any(Error));
 		// The channel-scoped context travels into revokeGoogleToken's own log so
@@ -817,9 +813,7 @@ test('an undecryptable stored token is logged loudly and the erase still happens
 	const fetchSpy = stubRevoke();
 	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 	try {
-		const res = await disconnectChannel('UC1', true);
-
-		expect(res).toMatchObject({ ok: true, scope: 'disconnect', channelId: 'UC1' });
+		await expect(disconnectChannel('UC1', true)).rejects.toMatchObject({ status: 303, location: '/dashboard' });
 		expect(await rowsOf('UC1')).toEqual(ERASED);
 		expect(fetchSpy).not.toHaveBeenCalled();
 		expect(errorSpy).toHaveBeenCalledWith('token revocation failed for channel, disconnecting anyway:', 'UC1', expect.any(Error));

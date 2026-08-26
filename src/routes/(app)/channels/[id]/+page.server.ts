@@ -23,7 +23,7 @@ import { runChannel } from '$lib/server/pipeline';
 import { requireUser } from '$lib/server/session';
 import { and, eq, isNull, lt, or } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
-import { error, fail } from '@sveltejs/kit';
+import { error, fail, redirect } from '@sveltejs/kit';
 
 /** Window presets shared by Analyze history and the dry-run preview (months). */
 const HISTORY_MONTH_PRESETS: ReadonlySet<number> = new Set([1, 3, 6, 12, 24]);
@@ -257,6 +257,8 @@ export const actions = {
 		});
 		// The channel's own audit rows die with it — the server log is the record.
 		console.info(`channel ${channel.id} disconnected and erased by user ${user.id}`);
-		return { ok: true as const, scope: 'disconnect', channelId };
+		// Gone for good — the channel page 404s from here, so send the user
+		// back to their dashboard (same 303 as org switch / team creation).
+		throw redirect(303, '/dashboard');
 	}
 };

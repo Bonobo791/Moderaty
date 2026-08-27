@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => ({
 	chargesRetrieve: vi.fn(),
 	disputesRetrieve: vi.fn(),
 	customersUpdate: vi.fn(),
+	customersRetrieve: vi.fn(),
 	paymentMethodsAttach: vi.fn()
 }));
 
@@ -37,7 +38,7 @@ vi.mock('$lib/server/stripe/client', () => ({
 		paymentIntents: { retrieve: mocks.paymentIntentsRetrieve },
 		charges: { retrieve: mocks.chargesRetrieve },
 		disputes: { retrieve: mocks.disputesRetrieve },
-		customers: { update: mocks.customersUpdate },
+		customers: { update: mocks.customersUpdate, retrieve: mocks.customersRetrieve },
 		paymentMethods: { attach: mocks.paymentMethodsAttach }
 	})
 }));
@@ -895,13 +896,37 @@ describe('portal card sync (changes made in the Stripe customer portal)', () => 
 		}
 	});
 
-	test('same-timestamp customer.updated events order by event id', async () => {
+	test('same-second customer.updated events reconcile from the LIVE customer, never event-id order', async () => {
+		// `created` has second precision and Stripe event ids carry no documented
+		// causal order (codex P1): on a tie neither payload can be trusted as the
+		// later state, so the handler fetches the live customer — the truth after
+		// every change made up to the fetch. Here the SECOND event arrives with a
+		// SMALLER id and a payload that disagrees with the live default; the live
+		// value (pm_3) must win.
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeDefaultPmId: 'pm_1', autoTopupEnabled: 0, autoTopupState: 'disabled' });
+		mocks.customersRetrieve.mockResolvedValue({ id: 'cus_1', invoice_settings: { default_payment_method: 'pm_3' } });
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		try {
 			expect(await handleStripeEvent(event('customer.updated', 'evt_cu_b', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: 'pm_2' } }, 200) as never)).toBe(true);
-			expect(await handleStripeEvent(event('customer.updated', 'evt_cu_a', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: 'pm_3' } }, 200) as never)).toBe(true);
+			expect(await handleStripeEvent(event('customer.updated', 'evt_cu_a', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: 'pm_2' } }, 200) as never)).toBe(true);
+			expect(mocks.customersRetrieve).toHaveBeenCalledWith('cus_1', { expand: ['invoice_settings.default_payment_method'] });
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_3', stripeCustomerLastEventCreated: 200, stripeCustomerLastEventId: 'evt_cu_a' });
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('a failed same-second reconcile throws so Stripe redelivers — nothing stored, nothing processed', async () => {
+		// The reconcile fetch IS the decision on a tie; if it fails the event must
+		// not be acknowledged into a frozen stale state (I11: fail loud, retry).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeDefaultPmId: 'pm_2', stripeCustomerLastEventCreated: 200, stripeCustomerLastEventId: 'evt_cu_b' });
+		mocks.customersRetrieve.mockRejectedValue(new Error('stripe unavailable'));
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			await expect(handleStripeEvent(event('customer.updated', 'evt_cu_a', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: 'pm_9' } }, 200) as never)).rejects.toThrow('stripe unavailable');
 			expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_2', stripeCustomerLastEventId: 'evt_cu_b' });
+			const receipt = await testDb().db.select().from(stripeEvents).where(eq(stripeEvents.eventId, 'evt_cu_a')).get();
+			expect(receipt?.processedAt ?? null).toBeNull();
 		} finally {
 			errorSpy.mockRestore();
 		}

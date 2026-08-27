@@ -58,8 +58,8 @@ function session(overrides: Record<string, unknown> = {}): Record<string, unknow
 	};
 }
 
-function event(type: string, id: string, object: Record<string, unknown>): { id: string; type: string; data: { object: unknown } } {
-	return { id, type, data: { object: { id, object: 'test', ...object } } };
+function event(type: string, id: string, object: Record<string, unknown>, created?: number): { id: string; type: string; created?: number; data: { object: unknown } } {
+	return { id, type, ...(created === undefined ? {} : { created }), data: { object: { id, object: 'test', ...object } } };
 }
 
 beforeEach(() => {
@@ -820,8 +820,8 @@ describe('portal card sync (changes made in the Stripe customer portal)', () => 
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeDefaultPmId: 'pm_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		try {
-			expect(await handleStripeEvent(event('customer.updated', 'evt_cu_1', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: 'pm_2' } }) as never)).toBe(true);
-			expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_2', autoTopupEnabled: 0, autoTopupState: 'disabled' });
+			expect(await handleStripeEvent(event('customer.updated', 'evt_cu_1', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: 'pm_2' } }, 100) as never)).toBe(true);
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_2', autoTopupEnabled: 0, autoTopupState: 'disabled', stripeCustomerLastEventCreated: 100, stripeCustomerLastEventId: 'evt_cu_1' });
 			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('pm_2'));
 		} finally {
 			errorSpy.mockRestore();
@@ -830,7 +830,7 @@ describe('portal card sync (changes made in the Stripe customer portal)', () => 
 
 	test('customer.updated with the same default card changes nothing', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeDefaultPmId: 'pm_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
-		expect(await handleStripeEvent(event('customer.updated', 'evt_cu_2', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: 'pm_1' } }) as never)).toBe(true);
+		expect(await handleStripeEvent(event('customer.updated', 'evt_cu_2', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: 'pm_1' } }, 100) as never)).toBe(true);
 		expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
 	});
 
@@ -848,9 +848,56 @@ describe('portal card sync (changes made in the Stripe customer portal)', () => 
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeDefaultPmId: 'pm_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		try {
-			expect(await handleStripeEvent(event('customer.updated', 'evt_cu_clear', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: null } }) as never)).toBe(true);
+			expect(await handleStripeEvent(event('customer.updated', 'evt_cu_clear', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: null } }, 100) as never)).toBe(true);
 			expect(await orgState()).toMatchObject({ stripeDefaultPmId: null, autoTopupEnabled: 0, autoTopupState: 'disabled' });
 			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('cleared'));
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('a stale (out-of-order) customer.updated cannot resurrect an old card', async () => {
+		// Stripe does not guarantee webhook ordering: an older immutable
+		// snapshot arriving after a newer one must not restore the previous
+		// card (coderabbit MAJOR / cubic P1) — same ordering guard as
+		// applySubscriptionSnapshot.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeDefaultPmId: 'pm_1', autoTopupEnabled: 0, autoTopupState: 'disabled' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			expect(await handleStripeEvent(event('customer.updated', 'evt_cu_new', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: 'pm_2' } }, 200) as never)).toBe(true);
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_2' });
+			// The older snapshot arrives LATE — it must be skipped, loudly.
+			expect(await handleStripeEvent(event('customer.updated', 'evt_cu_old', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: 'pm_1' } }, 100) as never)).toBe(true);
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_2', stripeCustomerLastEventCreated: 200, stripeCustomerLastEventId: 'evt_cu_new' });
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('stale'));
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('same-timestamp customer.updated events order by event id', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeDefaultPmId: 'pm_1', autoTopupEnabled: 0, autoTopupState: 'disabled' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			expect(await handleStripeEvent(event('customer.updated', 'evt_cu_b', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: 'pm_2' } }, 200) as never)).toBe(true);
+			expect(await handleStripeEvent(event('customer.updated', 'evt_cu_a', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: 'pm_3' } }, 200) as never)).toBe(true);
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_2', stripeCustomerLastEventId: 'evt_cu_b' });
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('a newer customer.updated with the SAME card still advances the ordering cursor', async () => {
+		// If a no-change event did not advance the cursor, a stale snapshot
+		// arriving after it could still resurrect the old card.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeDefaultPmId: 'pm_1', autoTopupEnabled: 0, autoTopupState: 'disabled' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			expect(await handleStripeEvent(event('customer.updated', 'evt_cu_new', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: 'pm_2' } }, 200) as never)).toBe(true);
+			expect(await handleStripeEvent(event('customer.updated', 'evt_cu_same', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: 'pm_2' } }, 300) as never)).toBe(true);
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_2', stripeCustomerLastEventCreated: 300, stripeCustomerLastEventId: 'evt_cu_same' });
+			expect(await handleStripeEvent(event('customer.updated', 'evt_cu_stale', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: 'pm_1' } }, 250) as never)).toBe(true);
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_2' });
 		} finally {
 			errorSpy.mockRestore();
 		}

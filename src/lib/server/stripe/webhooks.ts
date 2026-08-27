@@ -29,7 +29,7 @@ import { db } from '$lib/server/db';
 import { organizations, creditTransactions, stripeEvents, stripeLifetimeEntitlements, stripeDisputeReversals } from '$lib/server/db/schema';
 import { applyLedgerDelta, drainPendingReversals, findGrantForStripe, queuePendingReversal } from '$lib/server/billing/ledger';
 import { grantAutoTopupCredits, handleAutoTopupFailure } from '$lib/server/billing/autotopup';
-import { claimLifetimeSlot, grantSubscriptionPeriod, refundSubscriptionPeriod, disputeSubscriptionPeriod, releaseLifetimeForPayment, applySubscriptionSnapshot, revokeLifetimeForDispute, restoreLifetimeForDispute, restoreDisputedSubscriptionPeriod } from '$lib/server/billing/entitlements';
+import { claimLifetimeSlot, grantSubscriptionPeriod, refundSubscriptionPeriod, disputeSubscriptionPeriod, releaseLifetimeForPayment, applySubscriptionSnapshot, isNewerEvent, revokeLifetimeForDispute, restoreLifetimeForDispute, restoreDisputedSubscriptionPeriod } from '$lib/server/billing/entitlements';
 import { bundleById, type CreditBundle } from '$lib/server/stripe/bundles';
 import { isActiveSubscriptionStatus } from '$lib/server/billing/plans';
 import { markCheckoutAttemptFulfilled } from '$lib/server/billing/checkout';
@@ -658,8 +658,12 @@ async function handlePaymentMethodDetached(paymentMethod: Stripe.PaymentMethod):
  * default_payment_method KEY (the account-deletion e-mail scrub, name
  * changes) are not card changes and leave the org untouched; an EXPLICIT
  * null default is a real removal and mirrors as a cleared pointer (cubic P1).
+ * Stripe does not guarantee webhook ordering, so snapshots apply only in
+ * envelope order — the persisted cursor (`stripe_customer_last_event_*`)
+ * rejects an older event arriving late instead of letting it resurrect a
+ * previous card (same guard as applySubscriptionSnapshot; coderabbit MAJOR).
  */
-async function handleCustomerUpdated(customer: Stripe.Customer): Promise<void> {
+async function handleCustomerUpdated(customer: Stripe.Customer, eventCreated: number | undefined, eventId: string): Promise<void> {
 	const org = await findOrgForStripe(undefined, customer.id);
 	if (!org) {
 		console.info(`stripe: customer.updated for untracked customer ${customer.id} — nothing to sync`);
@@ -667,13 +671,30 @@ async function handleCustomerUpdated(customer: Stripe.Customer): Promise<void> {
 	}
 	const settings = customer.invoice_settings;
 	if (!settings || !('default_payment_method' in settings)) return;
+	if (typeof eventCreated !== 'number') {
+		throw new Error(`customer.updated ${eventId} is missing its envelope created timestamp`);
+	}
+	if (!isNewerEvent(org.stripeCustomerLastEventCreated, org.stripeCustomerLastEventId, eventCreated, eventId)) {
+		console.error(`stripe: ignoring stale customer.updated ${eventId} for org ${org.id} (created ${eventCreated}, last applied ${org.stripeCustomerLastEventCreated ?? 'none'})`);
+		return;
+	}
 	const incoming = settings.default_payment_method;
 	const incomingId = typeof incoming === 'string' ? incoming : (incoming?.id ?? null);
-	if (incomingId === org.stripeDefaultPmId) return;
+	if (incomingId === org.stripeDefaultPmId) {
+		// No card change, but the cursor must still advance — otherwise a
+		// stale snapshot arriving later could resurrect the previous card.
+		await db
+			.update(organizations)
+			.set({ stripeCustomerLastEventCreated: eventCreated, stripeCustomerLastEventId: eventId })
+			.where(eq(organizations.id, org.id));
+		return;
+	}
 	await db
 		.update(organizations)
 		.set({
 			stripeDefaultPmId: incomingId,
+			stripeCustomerLastEventCreated: eventCreated,
+			stripeCustomerLastEventId: eventId,
 			...(org.autoTopupEnabled === 1 ? { autoTopupEnabled: 0, autoTopupState: 'disabled' } : {})
 		})
 		.where(eq(organizations.id, org.id));
@@ -841,7 +862,7 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
 			handled = true;
 			break;
 		case 'customer.updated':
-			await handleCustomerUpdated(event.data.object);
+			await handleCustomerUpdated(event.data.object, event.created, event.id);
 			handled = true;
 			break;
 			default:

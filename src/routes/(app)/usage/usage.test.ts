@@ -232,19 +232,39 @@ describe('usage buy action', () => {
 		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
 	});
 
-	test('an unknown bundle fails loudly with a 400', async () => {
+	test('an unknown bundle fails loudly without echoing the submitted id', async () => {
+		// A tampered/stale bundle id is an internal validation failure — the
+		// response stays generic (500), the detail lives in the server log only.
 		await seedOrg();
-		const result = await buy('credits_999999');
-		expect(result).toMatchObject({ status: 400 });
-		expect(JSON.stringify(result)).toContain('unknown credit bundle');
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const result = await buy('credits_999999');
+			expect(result).toMatchObject({ status: 500 });
+			const serialized = JSON.stringify(result);
+			expect(serialized).toContain('Could not start checkout');
+			expect(serialized).not.toContain('credits_999999');
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('unknown credit bundle'));
+		} finally {
+			errorSpy.mockRestore();
+		}
 	});
 
-	test('an unconfigured bundle price fails loudly', async () => {
+	test('an unconfigured bundle price fails loudly without leaking env internals', async () => {
+		// A missing STRIPE_PRICE_* env var is a server defect (500) — the env
+		// var name is internal configuration detail, never client copy.
 		await seedOrg();
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		mocks.sessionsCreate.mockRejectedValue(new Error('STRIPE_PRICE_CREDITS_500 is not configured'));
-		const result = await buy('credits_500');
-		expect(result).toMatchObject({ status: 400 });
-		expect(JSON.stringify(result)).toContain('Could not start checkout');
+		try {
+			const result = await buy('credits_500');
+			expect(result).toMatchObject({ status: 500 });
+			const serialized = JSON.stringify(result);
+			expect(serialized).toContain('Could not start checkout');
+			expect(serialized).not.toContain('STRIPE_PRICE_CREDITS_500');
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('STRIPE_PRICE_CREDITS_500'));
+		} finally {
+			errorSpy.mockRestore();
+		}
 	});
 });
 
@@ -498,34 +518,59 @@ describe('usage manageCards action (Stripe customer portal)', () => {
 		}
 	});
 
-	test('a portal session without a URL is a loud 400, never a broken redirect', async () => {
+	test('a portal session without a URL is a loud 500, never a broken redirect', async () => {
 		// I1: every field of a Stripe response is nullable — an unvalidated
-		// session.url would emit a broken Location header (codex P1).
+		// session.url would emit a broken Location header (codex P1). The thrown
+		// message embeds the Stripe customer id — internal detail that must stay
+		// in the server log, never reach the client (codex P1).
 		await seedOrg({ stripeCustomerId: 'cus_1' });
 		mocks.billingPortalSessionsCreate.mockResolvedValue({});
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		try {
 			const result = await manageCards();
-			expect(result).toMatchObject({ status: 400 });
-			expect(JSON.stringify(result)).toContain('Could not open the card manager');
+			expect(result).toMatchObject({ status: 500 });
+			const serialized = JSON.stringify(result);
+			expect(serialized).toContain('Could not open the card manager');
+			expect(serialized).not.toContain('cus_1');
 			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('portal'));
 		} finally {
 			errorSpy.mockRestore();
 		}
 	});
 
-	test('a non-https portal URL is a loud 400, never an off-scheme redirect', async () => {
+	test('a non-https portal URL is a loud 500, never an off-scheme redirect', async () => {
 		// Portal URLs are always https://billing.stripe.com/... — anything else
 		// from the API response is malformed and must not become a Location
-		// header (cubic P2).
+		// header (cubic P2). Same no-leak rule on the customer id.
 		await seedOrg({ stripeCustomerId: 'cus_1' });
 		mocks.billingPortalSessionsCreate.mockResolvedValue({ url: 'http://phishing.example/portal' });
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		try {
 			const result = await manageCards();
-			expect(result).toMatchObject({ status: 400 });
-			expect(JSON.stringify(result)).toContain('Could not open the card manager');
+			expect(result).toMatchObject({ status: 500 });
+			const serialized = JSON.stringify(result);
+			expect(serialized).toContain('Could not open the card manager');
+			expect(serialized).not.toContain('cus_1');
 			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('portal'));
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('a customer-creation failure is a generic 500 — DB internals stay in the server log', async () => {
+		// getOrCreateStripeCustomer can fail with raw libsql/driver errors whose
+		// messages carry internal detail; the client gets a generic 500 (codex).
+		await seedOrg(); // no stripeCustomerId — the create path runs
+		mocks.customersCreate.mockRejectedValue(new Error('libsql: SECRET connection detail'));
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const result = await manageCards();
+			expect(result).toMatchObject({ status: 500 });
+			const serialized = JSON.stringify(result);
+			expect(serialized).toContain('Could not open the card manager');
+			expect(serialized).not.toContain('libsql');
+			expect(serialized).not.toContain('SECRET');
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('libsql: SECRET connection detail'));
 		} finally {
 			errorSpy.mockRestore();
 		}

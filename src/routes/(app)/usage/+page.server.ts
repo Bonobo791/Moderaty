@@ -44,7 +44,12 @@ function isStripeCheckoutError(error: unknown): boolean {
 function checkoutFailure(error: unknown, orgId: string, what = 'start checkout') {
 	const message = error instanceof Error ? error.message : String(error);
 	console.error(`usage: ${what} failed for org ${orgId}: ${message}`);
-	return fail(400, { error: isStripeCheckoutError(error) ? `Could not ${what} — please try again.` : `Could not ${what}: ${message}` });
+	// Raw exception text NEVER reaches the client (AGENTS.md review rule): a
+	// Stripe SDK error always carries a `type` and is a transient API failure
+	// the user can retry (400). Anything else is a server-side defect — DB
+	// internals, env var names, customer/session ids embedded in messages —
+	// so it is a generic 500 either way, with full detail only in the log.
+	return fail(isStripeCheckoutError(error) ? 400 : 500, { error: `Could not ${what} — please try again.` });
 }
 
 
@@ -163,12 +168,10 @@ export const actions: Actions = {
 			// (HttpError) pass through too — a 403 must stay a 403, never be
 			// flattened into a 400 checkout failure.
 			if (isRedirect(error) || isHttpError(error)) throw error;
-			// Never surface RAW Stripe error text to the client (it can leak
-			// card/bank details): a Stripe SDK error always carries a `type`,
-			// and those get a generic message. Internal validation failures
-			// (unknown bundle, missing APP_URL…) keep their specific, safe
-			// message so the user can act on them. Full details go to the
-			// server log either way.
+			// Never surface RAW error text to the client (it can leak card/bank
+			// details, env var names, or internal ids): Stripe SDK errors carry a
+			// `type` and get a generic 400; every other failure is a generic 500.
+			// Full details go to the server log either way.
 			return checkoutFailure(error, user.orgId);
 		}
 	},

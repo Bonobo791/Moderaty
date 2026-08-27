@@ -36,14 +36,12 @@ describe('app shell', () => {
 		expect(fallbackTitle).toBeGreaterThan(svelteKitHead);
 	});
 
-	test('.gitignore keeps the .agents/skills-src/ exception (repo-local skill sources stay trackable)', () => {
-		// AGENTS.md mandates repo-local skill sources at .agents/skills-src/<name>/.
-		// `.agents/*` ignores the tooling copies; without the negation, new source
-		// files under skills-src are silently untrackable (cubic P2).
+	test('.gitignore ignores installed .agents tooling copies', () => {
+		// `.agents/` holds installed skill copies and hook state (the Reasonix /
+		// superpowers installs) — none of it is repo content, so the ignore rule
+		// is pinned. (The maintainer deliberately untracked skills-src in
+		// 189d985; the earlier exception test was retired with it.)
 		const gitignore = readFileSync(new URL('../.gitignore', import.meta.url), 'utf8');
-		const ignoreRule = gitignore.indexOf('.agents/*');
-		expect(ignoreRule).toBeGreaterThanOrEqual(0);
-		const exception = gitignore.indexOf('!.agents/skills-src/');
-		expect(exception).toBeGreaterThan(ignoreRule);
+		expect(gitignore.indexOf('.agents/*')).toBeGreaterThanOrEqual(0);
 	});
 });

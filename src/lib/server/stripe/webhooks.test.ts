@@ -943,6 +943,49 @@ describe('portal card sync (changes made in the Stripe customer portal)', () => 
 		}
 	});
 
+	test('a card change disables auto top-up even when an enable lands mid-flight', async () => {
+		// The read-time `autoTopupEnabled === 1` check cannot see an owner click
+		// that enables top-up INSIDE the read-write window — the write would
+		// install the new card while leaving the just-enabled automation active,
+		// charging a card the consent never covered (codex P1). The disable must
+		// be decided atomically by the UPDATE itself, at row-lock time.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeDefaultPmId: 'pm_1', autoTopupEnabled: 0, autoTopupState: 'idle' });
+		const realUpdate = testDb().db.update.bind(testDb().db);
+		let injected = false;
+		const updateSpy = vi.spyOn(testDb().db, 'update').mockImplementation(((table: unknown) => {
+			if (!injected && table === organizations) {
+				injected = true;
+				// The owner's enable lands first: client.execute starts immediately,
+				// while the handler's just-created builder runs when awaited next.
+				void testDb().client.execute("UPDATE organizations SET auto_topup_enabled = 1, auto_topup_state = 'idle' WHERE id = 'org-1'");
+			}
+			return realUpdate(table as never);
+		}) as never);
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			expect(await handleStripeEvent(event('customer.updated', 'evt_cu_enable_race', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: 'pm_2' } }, 100) as never)).toBe(true);
+			expect(injected).toBe(true);
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_2', autoTopupEnabled: 0, autoTopupState: 'disabled' });
+		} finally {
+			updateSpy.mockRestore();
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('a card change with auto top-up OFF leaves the automation state untouched', async () => {
+		// enabled=0/state='idle' (top-up simply off, never paused by failures) —
+		// the atomic disable must not stamp 'disabled' (the failure-paused banner
+		// state) onto an org that was not running the automation (codex P1).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeDefaultPmId: 'pm_1', autoTopupEnabled: 0, autoTopupState: 'idle' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			expect(await handleStripeEvent(event('customer.updated', 'evt_cu_off', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: 'pm_2' } }, 100) as never)).toBe(true);
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_2', autoTopupEnabled: 0, autoTopupState: 'idle' });
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
 	test('payment_method.detached arriving with customer: null still clears the org top-up card', async () => {
 		// Stripe fires the event AFTER detachment, so the PaymentMethod's
 		// customer is already null — keying the org lookup on it would leave

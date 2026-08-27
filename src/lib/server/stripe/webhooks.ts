@@ -21,7 +21,7 @@
 // The inbox lease is claimed before side effects and marked complete only after
 // successful handling; failed handlers release the lease for Stripe's retry.
 
-import { and, eq, isNull, lt, ne, or } from 'drizzle-orm';
+import { and, eq, isNull, lt, ne, or, sql, type SQL } from 'drizzle-orm';
 import type Stripe from 'stripe';
 import { randomUUID } from 'node:crypto';
 
@@ -713,7 +713,8 @@ async function handleCustomerUpdated(customer: Stripe.Customer, eventCreated: nu
 			or(isNull(organizations.stripeCustomerLastEventId), lt(organizations.stripeCustomerLastEventId, eventId))
 		)
 	);
-	const applyIfCurrent = async (set: Partial<typeof organizations.$inferInsert>): Promise<boolean> => {
+	type OrgSet = { [K in keyof typeof organizations.$inferInsert]?: (typeof organizations.$inferInsert)[K] | SQL };
+	const applyIfCurrent = async (set: OrgSet): Promise<boolean> => {
 		const res = await db.update(organizations).set(set).where(and(eq(organizations.id, org.id), cursorStillOlder));
 		if (res.rowsAffected === 0) {
 			console.info(`stripe: customer.updated ${eventId} lost the apply race for org ${org.id} — a newer-or-equal snapshot already landed`);
@@ -731,11 +732,25 @@ async function handleCustomerUpdated(customer: Stripe.Customer, eventCreated: nu
 		stripeDefaultPmId: incomingId,
 		stripeCustomerLastEventCreated: eventCreated,
 		stripeCustomerLastEventId: eventId,
-		...(org.autoTopupEnabled === 1 ? { autoTopupEnabled: 0, autoTopupState: 'disabled' } : {})
+		// Atomic consent reset (codex P1): reading `autoTopupEnabled` above and
+		// spreading the disable conditionally would miss an enable that lands
+		// INSIDE the read-write window — leaving top-up active on a card the
+		// consent never covered. The CASE decides at row-lock time instead: on
+		// a card change, top-up is disabled iff it is enabled THEN; an org with
+		// top-up off keeps its state (no spurious failure-paused 'disabled').
+		autoTopupEnabled: sql`CASE WHEN ${organizations.autoTopupEnabled} = 1 THEN 0 ELSE ${organizations.autoTopupEnabled} END`,
+		autoTopupState: sql`CASE WHEN ${organizations.autoTopupEnabled} = 1 THEN 'disabled' ELSE ${organizations.autoTopupState} END`
 	});
 	if (!applied) return;
+	// The disable was decided at row-lock time, so the accurate post-write row
+	// state — not the pre-write read — decides what the log claims.
+	const after = await db
+		.select({ autoTopupEnabled: organizations.autoTopupEnabled, autoTopupState: organizations.autoTopupState })
+		.from(organizations)
+		.where(eq(organizations.id, org.id))
+		.get();
 	const change = incomingId ? `${org.stripeDefaultPmId} -> ${incomingId}` : `${org.stripeDefaultPmId} -> cleared`;
-	if (org.autoTopupEnabled === 1) {
+	if (after?.autoTopupEnabled === 0 && after.autoTopupState === 'disabled' && org.autoTopupState !== 'disabled') {
 		console.error(`stripe: default card changed for org ${org.id} (${change}) — auto top-up DISABLED, fresh consent required`);
 	} else {
 		console.info(`stripe: default card changed for org ${org.id} (${change})`);

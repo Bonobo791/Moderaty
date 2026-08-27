@@ -464,6 +464,39 @@ describe('usage manageCards action (Stripe customer portal)', () => {
 		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('no configuration with payment method update'));
 		errorSpy.mockRestore();
 	});
+
+	test('a missing APP_URL fails 500 BEFORE any Stripe customer is created', async () => {
+		// Env validation belongs at handler start (AGENTS.md): creating the
+		// remote customer first would leave an external side effect from a
+		// request that could never open the portal (codex P1).
+		await seedOrg(); // no stripeCustomerId — the create path is the trap
+		const { env } = await import('$env/dynamic/private');
+		const original = env.APP_URL;
+		delete (env as Record<string, unknown>).APP_URL;
+		try {
+			await expect(manageCards()).rejects.toMatchObject({ status: 500 });
+			expect(mocks.customersCreate).not.toHaveBeenCalled();
+			expect(mocks.billingPortalSessionsCreate).not.toHaveBeenCalled();
+		} finally {
+			(env as Record<string, unknown>).APP_URL = original;
+		}
+	});
+
+	test('a portal session without a URL is a loud 400, never a broken redirect', async () => {
+		// I1: every field of a Stripe response is nullable — an unvalidated
+		// session.url would emit a broken Location header (codex P1).
+		await seedOrg({ stripeCustomerId: 'cus_1' });
+		mocks.billingPortalSessionsCreate.mockResolvedValue({});
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const result = await manageCards();
+			expect(result).toMatchObject({ status: 400 });
+			expect(JSON.stringify(result)).toContain('Could not open the card manager');
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('portal'));
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
 });
 
 describe('usage cards section', () => {

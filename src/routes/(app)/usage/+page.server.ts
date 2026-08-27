@@ -291,12 +291,15 @@ export const actions: Actions = {
 	 */
 	manageCards: async ({ locals }) => {
 		const user = requireUser(locals);
+		// Env validation at handler start (AGENTS.md): creating the Stripe
+		// customer first would leave an external side effect from a request
+		// that could never open the portal (codex P1).
+		const appUrl = env.APP_URL;
+		if (!appUrl) throw error(500, 'APP_URL is not configured');
 		try {
 			// Owner-only inside; creates the customer on first use so a brand-new
 			// org can still open the portal to add its first card.
 			const customer = await getOrCreateStripeCustomer(user.orgId, user);
-			const appUrl = env.APP_URL;
-			if (!appUrl) throw new Error('APP_URL is not configured');
 			// No `configuration` id: Stripe uses the account's DEFAULT portal
 			// configuration — the human activates it once (docs/
 			// stripe-checkout-webhooks.md) with payment-method management on.
@@ -304,6 +307,11 @@ export const actions: Actions = {
 				customer,
 				return_url: new URL('/usage', appUrl).toString()
 			});
+			// I1: every field of a Stripe response is nullable — never emit a
+			// redirect to an unvalidated url.
+			if (typeof session.url !== 'string' || session.url.length === 0) {
+				throw new Error(`stripe returned no portal URL for customer ${customer}`);
+			}
 			throw redirect(303, session.url);
 		} catch (error) {
 			// The thrown redirect is the success path — never flatten it into a

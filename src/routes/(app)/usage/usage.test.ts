@@ -497,6 +497,23 @@ describe('usage manageCards action (Stripe customer portal)', () => {
 			errorSpy.mockRestore();
 		}
 	});
+
+	test('a non-https portal URL is a loud 400, never an off-scheme redirect', async () => {
+		// Portal URLs are always https://billing.stripe.com/... — anything else
+		// from the API response is malformed and must not become a Location
+		// header (cubic P2).
+		await seedOrg({ stripeCustomerId: 'cus_1' });
+		mocks.billingPortalSessionsCreate.mockResolvedValue({ url: 'http://phishing.example/portal' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const result = await manageCards();
+			expect(result).toMatchObject({ status: 400 });
+			expect(JSON.stringify(result)).toContain('Could not open the card manager');
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('portal'));
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
 });
 
 describe('usage cards section', () => {

@@ -308,11 +308,13 @@ export const actions: Actions = {
 				return_url: new URL('/usage', appUrl).toString()
 			});
 			// I1: every field of a Stripe response is nullable — never emit a
-			// redirect to an unvalidated url.
-			if (typeof session.url !== 'string' || session.url.length === 0) {
-				throw new Error(`stripe returned no portal URL for customer ${customer}`);
+			// redirect to an unvalidated url. Portal URLs are always https
+			// (billing.stripe.com); anything else is malformed (cubic P2).
+			const portalUrl = typeof session.url === 'string' ? URL.parse(session.url) : null;
+			if (!portalUrl || portalUrl.protocol !== 'https:') {
+				throw new Error(`stripe returned no usable portal URL for customer ${customer}`);
 			}
-			throw redirect(303, session.url);
+			throw redirect(303, portalUrl.toString());
 		} catch (error) {
 			// The thrown redirect is the success path — never flatten it into a
 			// 400 (same guard as buy/buyPlan); auth HttpErrors pass through too.

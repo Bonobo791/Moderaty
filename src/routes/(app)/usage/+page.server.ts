@@ -52,22 +52,43 @@ function checkoutFailure(error: unknown, orgId: string, what = 'start checkout')
 	return fail(isStripeCheckoutError(error) ? 400 : 500, { error: `Could not ${what} — please try again.` });
 }
 
+/** The I12 maintenance payload — identical for the dbDown shortcut and the load-failure catch. */
+function maintenanceData() {
+	return {
+		maintenance: true as const,
+		user: null,
+		summary: null,
+		mercadoPagoBundles: [],
+		metered: false,
+		history: [],
+		bundles: [],
+		autoTopup: null,
+		autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
+		stripeConfigured: Boolean(env.STRIPE_SECRET_KEY),
+		plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) }
+	};
+}
+
+/**
+ * Shared checkout try/catch: the success path throws a 303 redirect, auth
+ * failures (HttpError) pass through untouched, and everything else is a loud
+ * generic failure via checkoutFailure — raw error text never reaches the
+ * client (it can leak card/bank details, env var names, or internal ids).
+ */
+async function checkoutRedirect(create: () => Promise<string>, orgId: string) {
+	try {
+		throw redirect(303, await create());
+	} catch (error) {
+		// SvelteKit's redirect() is a function that THROWS a Redirect — detect
+		// it with isRedirect, never instanceof.
+		if (isRedirect(error) || isHttpError(error)) throw error;
+		return checkoutFailure(error, orgId);
+	}
+}
 
 export const load: PageServerLoad = async ({ locals }) => {
 	if (locals.dbDown) {
-		return {
-			maintenance: true,
-			user: null,
-			summary: null,
-			mercadoPagoBundles: [],
-			metered: false,
-			history: [],
-			bundles: [],
-			autoTopup: null,
-			autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
-			stripeConfigured: Boolean(env.STRIPE_SECRET_KEY),
-			plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) }
-		};
+		return maintenanceData();
 	}
 	const user = requireUser(locals);
 	try {
@@ -139,19 +160,7 @@ export const load: PageServerLoad = async ({ locals }) => {
 		// (I12: the (app) layout renders the overlay for this payload instead
 		// of SvelteKit's unstyled error page). Mirrors the dashboard load.
 		console.error(`usage: load failed for org ${user.orgId}: ${error instanceof Error ? error.message : String(error)}`);
-		return {
-			maintenance: true,
-			user: null,
-			summary: null,
-			mercadoPagoBundles: [],
-			metered: false,
-			history: [],
-			bundles: [],
-			autoTopup: null,
-			autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
-			stripeConfigured: Boolean(env.STRIPE_SECRET_KEY),
-			plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) }
-		};
+		return maintenanceData();
 	}
 };
 
@@ -162,21 +171,7 @@ export const actions: Actions = {
 		const form = await request.formData();
 		const bundleId = String(form.get('bundle') ?? '');
 		const attemptId = String(form.get('attempt_id') ?? '');
-		try {
-			const url = await createCreditCheckout(user.orgId, user, bundleId, attemptId);
-			throw redirect(303, url);
-		} catch (error) {
-			// SvelteKit's redirect() is a function that THROWS a Redirect —
-			// detect it with isRedirect, never instanceof. Auth failures
-			// (HttpError) pass through too — a 403 must stay a 403, never be
-			// flattened into a 400 checkout failure.
-			if (isRedirect(error) || isHttpError(error)) throw error;
-			// Never surface RAW error text to the client (it can leak card/bank
-			// details, env var names, or internal ids): Stripe SDK errors carry a
-			// `type` and get a generic 400; every other failure is a generic 500.
-			// Full details go to the server log either way.
-			return checkoutFailure(error, user.orgId);
-		}
+		return checkoutRedirect(() => createCreditCheckout(user.orgId, user, bundleId, attemptId), user.orgId);
 	},
 	/** Owner-only: creates a Mercado Pago BRL prepaid credit checkout. */
 	buyMercadoPago: async ({ request, locals }) => {
@@ -200,13 +195,7 @@ export const actions: Actions = {
 		const plan = String(form.get('plan') ?? '');
 		const attemptId = String(form.get('attempt_id') ?? '');
 		if (plan !== 'hosted' && plan !== 'lifetime') return fail(400, { error: 'Unknown billing plan.' });
-		try {
-			const url = await createPlanCheckout(user.orgId, user, plan, attemptId);
-			throw redirect(303, url);
-		} catch (error) {
-			if (isRedirect(error) || isHttpError(error)) throw error;
-			return checkoutFailure(error, user.orgId);
-		}
+		return checkoutRedirect(() => createPlanCheckout(user.orgId, user, plan, attemptId), user.orgId);
 	},
 	/**
 	 * Owner-only: enables/disables auto top-up. Enabling requires the explicit

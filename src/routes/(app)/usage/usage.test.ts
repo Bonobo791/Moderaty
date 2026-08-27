@@ -438,6 +438,39 @@ describe('usage plan checkout action', () => {
 });
 
 describe('usage manageCards action (Stripe customer portal)', () => {
+	/** Swaps APP_URL for the body and always restores it — even on failure. */
+	async function withAppUrl(value: string | undefined, body: () => Promise<void>) {
+		const { env } = await import('$env/dynamic/private');
+		const original = env.APP_URL as string | undefined;
+		if (value === undefined) delete (env as Record<string, unknown>).APP_URL;
+		else (env as Record<string, unknown>).APP_URL = value;
+		try {
+			await body();
+		} finally {
+			if (original === undefined) delete (env as Record<string, unknown>).APP_URL;
+			else (env as Record<string, unknown>).APP_URL = original;
+		}
+	}
+
+	/**
+	 * A manageCards failure contract: generic 500, the configured message, none
+	 * of the internal details in the response, and the raw detail logged
+	 * server-side. console.error stays silenced for the duration.
+	 */
+	async function expectPortalFailure(opts: { notContaining: string[]; logged: string }) {
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const result = await manageCards();
+			expect(result).toMatchObject({ status: 500 });
+			const serialized = JSON.stringify(result);
+			expect(serialized).toContain('Could not open the card manager');
+			for (const leak of opts.notContaining) expect(serialized).not.toContain(leak);
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining(opts.logged));
+		} finally {
+			errorSpy.mockRestore();
+		}
+	}
+
 	test('rejects a signed-out request with 401', async () => {
 		await expect(manageCards(null)).rejects.toMatchObject({ status: 401 });
 		expect(mocks.billingPortalSessionsCreate).not.toHaveBeenCalled();
@@ -490,32 +523,22 @@ describe('usage manageCards action (Stripe customer portal)', () => {
 		// remote customer first would leave an external side effect from a
 		// request that could never open the portal (codex P1).
 		await seedOrg(); // no stripeCustomerId — the create path is the trap
-		const { env } = await import('$env/dynamic/private');
-		const original = env.APP_URL;
-		delete (env as Record<string, unknown>).APP_URL;
-		try {
+		await withAppUrl(undefined, async () => {
 			await expect(manageCards()).rejects.toMatchObject({ status: 500 });
 			expect(mocks.customersCreate).not.toHaveBeenCalled();
 			expect(mocks.billingPortalSessionsCreate).not.toHaveBeenCalled();
-		} finally {
-			(env as Record<string, unknown>).APP_URL = original;
-		}
+		});
 	});
 
 	test('a malformed APP_URL fails 500 BEFORE any Stripe customer is created', async () => {
 		// A non-empty but unparseable APP_URL passes a presence-only check and
 		// would create the customer before new URL() throws (cubic/codex P2).
 		await seedOrg(); // no stripeCustomerId — the create path is the trap
-		const { env } = await import('$env/dynamic/private');
-		const original = env.APP_URL;
-		(env as Record<string, unknown>).APP_URL = 'moderaty.example';
-		try {
+		await withAppUrl('moderaty.example', async () => {
 			await expect(manageCards()).rejects.toMatchObject({ status: 500 });
 			expect(mocks.customersCreate).not.toHaveBeenCalled();
 			expect(mocks.billingPortalSessionsCreate).not.toHaveBeenCalled();
-		} finally {
-			(env as Record<string, unknown>).APP_URL = original;
-		}
+		});
 	});
 
 	test('a portal session without a URL is a loud 500, never a broken redirect', async () => {
@@ -525,17 +548,7 @@ describe('usage manageCards action (Stripe customer portal)', () => {
 		// in the server log, never reach the client (codex P1).
 		await seedOrg({ stripeCustomerId: 'cus_1' });
 		mocks.billingPortalSessionsCreate.mockResolvedValue({});
-		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-		try {
-			const result = await manageCards();
-			expect(result).toMatchObject({ status: 500 });
-			const serialized = JSON.stringify(result);
-			expect(serialized).toContain('Could not open the card manager');
-			expect(serialized).not.toContain('cus_1');
-			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('portal'));
-		} finally {
-			errorSpy.mockRestore();
-		}
+		await expectPortalFailure({ notContaining: ['cus_1'], logged: 'portal' });
 	});
 
 	test('a non-https portal URL is a loud 500, never an off-scheme redirect', async () => {
@@ -544,17 +557,7 @@ describe('usage manageCards action (Stripe customer portal)', () => {
 		// header (cubic P2). Same no-leak rule on the customer id.
 		await seedOrg({ stripeCustomerId: 'cus_1' });
 		mocks.billingPortalSessionsCreate.mockResolvedValue({ url: 'http://phishing.example/portal' });
-		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-		try {
-			const result = await manageCards();
-			expect(result).toMatchObject({ status: 500 });
-			const serialized = JSON.stringify(result);
-			expect(serialized).toContain('Could not open the card manager');
-			expect(serialized).not.toContain('cus_1');
-			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('portal'));
-		} finally {
-			errorSpy.mockRestore();
-		}
+		await expectPortalFailure({ notContaining: ['cus_1'], logged: 'portal' });
 	});
 
 	test('a customer-creation failure is a generic 500 — DB internals stay in the server log', async () => {
@@ -562,18 +565,7 @@ describe('usage manageCards action (Stripe customer portal)', () => {
 		// messages carry internal detail; the client gets a generic 500 (codex).
 		await seedOrg(); // no stripeCustomerId — the create path runs
 		mocks.customersCreate.mockRejectedValue(new Error('libsql: SECRET connection detail'));
-		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-		try {
-			const result = await manageCards();
-			expect(result).toMatchObject({ status: 500 });
-			const serialized = JSON.stringify(result);
-			expect(serialized).toContain('Could not open the card manager');
-			expect(serialized).not.toContain('libsql');
-			expect(serialized).not.toContain('SECRET');
-			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('libsql: SECRET connection detail'));
-		} finally {
-			errorSpy.mockRestore();
-		}
+		await expectPortalFailure({ notContaining: ['libsql', 'SECRET'], logged: 'libsql: SECRET connection detail' });
 	});
 });
 

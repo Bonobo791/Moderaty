@@ -215,19 +215,26 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 
 	<div class="card">
 		<h2 style="margin-top:0">Cards</h2>
-		<p class="muted">
-			{#if data.autoTopup?.hasCard}
-				A card is saved for automatic top-up.
-			{:else}
-				No card saved yet — buy a Stripe bundle once, or add one via Manage cards.
-			{/if}
-			Add, remove, or change your cards on Stripe's secure customer portal; your hosted
-			subscription can be managed there too. Changing the saved card pauses automatic
-			top-up until you re-enable it here.
-		</p>
-		<form method="POST" action="?/manageCards" use:enhance={submitting}>
-			<button class="btn secondary small" type="submit" disabled={pending}>Manage cards</button>
-		</form>
+		{#if data.stripeConfigured}
+			<p class="muted">
+				{#if data.autoTopup?.hasCard}
+					A card is saved for automatic top-up.
+				{:else}
+					No card saved yet — buy a Stripe bundle once, or add one via Manage cards.
+				{/if}
+				Add, remove, or change your cards on Stripe's secure customer portal; your hosted
+				subscription can be managed there too. Changing the saved card pauses automatic
+				top-up until you re-enable it here.
+			</p>
+			<form method="POST" action="?/manageCards" use:enhance={submitting}>
+				<button class="btn secondary small" type="submit" disabled={pending}>Manage cards</button>
+			</form>
+		{:else}
+			<!-- Self-hosted/free without STRIPE_SECRET_KEY: the portal can never
+			open, so say so instead of rendering a permanently failing button
+			(codex P2, I12). -->
+			<p class="muted">Card management is unavailable — Stripe billing is not configured on this instance.</p>
+		{/if}
 	</div>
 {/if}
 

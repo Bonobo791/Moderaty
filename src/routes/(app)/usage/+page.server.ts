@@ -65,6 +65,7 @@ export const load: PageServerLoad = async ({ locals }) => {
 			bundles: [],
 			autoTopup: null,
 			autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
+			stripeConfigured: Boolean(env.STRIPE_SECRET_KEY),
 			plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) }
 		};
 	}
@@ -127,6 +128,7 @@ export const load: PageServerLoad = async ({ locals }) => {
 				subscriptionStatus: org.stripeSubscriptionStatus,
 				periodEnd: org.stripeSubscriptionPeriodEnd
 			},
+			stripeConfigured: Boolean(env.STRIPE_SECRET_KEY),
 			plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) }
 		};
 	} catch (error) {
@@ -147,6 +149,7 @@ export const load: PageServerLoad = async ({ locals }) => {
 			bundles: [],
 			autoTopup: null,
 			autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
+			stripeConfigured: Boolean(env.STRIPE_SECRET_KEY),
 			plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) }
 		};
 	}

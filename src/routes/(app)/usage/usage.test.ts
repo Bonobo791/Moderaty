@@ -591,6 +591,7 @@ describe('usage cards section', () => {
 					bundles: [],
 					autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: true },
 					autoTopupConsentText: 'consent',
+					stripeConfigured: true,
 					plans: { hosted: false, lifetime: false },
 					...overrides
 				},
@@ -614,6 +615,16 @@ describe('usage cards section', () => {
 	test('a member never sees the card manager', () => {
 		const body = renderUsage({ user: { ...OWNER, orgRole: 'member' } });
 		expect(body).not.toContain('manageCards');
+	});
+
+	test('a Stripe-less self-hosted instance gets an explicit unavailable state, never a broken form', () => {
+		// Self-hosted/free deployments without STRIPE_SECRET_KEY can never open
+		// the customer portal — rendering the control would be a permanently
+		// failing button (codex P2, I12). The load passes a non-secret
+		// availability flag; the section says why instead of breaking.
+		const body = renderUsage({ stripeConfigured: false });
+		expect(body).not.toContain('manageCards');
+		expect(body).toContain('not configured');
 	});
 
 	test('the no-card state says so instead of implying one is saved', () => {

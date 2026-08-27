@@ -840,6 +840,22 @@ describe('portal card sync (changes made in the Stripe customer portal)', () => 
 		expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
 	});
 
+	test('customer.updated with an EXPLICITLY cleared default clears the org card and disables auto top-up', async () => {
+		// default_payment_method: null (key present) is a real removal — the
+		// default was cleared at Stripe — distinct from invoice_settings: {}
+		// (key absent), which is an unrelated update like a name change. Mirror
+		// the cleared state instead of leaving the pointer stale (cubic P1).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeDefaultPmId: 'pm_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			expect(await handleStripeEvent(event('customer.updated', 'evt_cu_clear', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: null } }) as never)).toBe(true);
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: null, autoTopupEnabled: 0, autoTopupState: 'disabled' });
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('cleared'));
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
 	test('payment_method.detached arriving with customer: null still clears the org top-up card', async () => {
 		// Stripe fires the event AFTER detachment, so the PaymentMethod's
 		// customer is already null — keying the org lookup on it would leave

@@ -654,9 +654,10 @@ async function handlePaymentMethodDetached(paymentMethod: Stripe.PaymentMethod):
 /**
  * Customer-portal default-card sync: a NEW default payment method is a new
  * billing instrument the on-file consent never covered, so the pointer
- * resyncs and auto top-up pauses for fresh consent. Events without a default
- * card (the account-deletion e-mail scrub, name changes) are not card
- * changes and leave the org untouched.
+ * resyncs and auto top-up pauses for fresh consent. Events without the
+ * default_payment_method KEY (the account-deletion e-mail scrub, name
+ * changes) are not card changes and leave the org untouched; an EXPLICIT
+ * null default is a real removal and mirrors as a cleared pointer (cubic P1).
  */
 async function handleCustomerUpdated(customer: Stripe.Customer): Promise<void> {
 	const org = await findOrgForStripe(undefined, customer.id);
@@ -664,9 +665,11 @@ async function handleCustomerUpdated(customer: Stripe.Customer): Promise<void> {
 		console.info(`stripe: customer.updated for untracked customer ${customer.id} — nothing to sync`);
 		return;
 	}
-	const incoming = customer.invoice_settings?.default_payment_method;
+	const settings = customer.invoice_settings;
+	if (!settings || !('default_payment_method' in settings)) return;
+	const incoming = settings.default_payment_method;
 	const incomingId = typeof incoming === 'string' ? incoming : (incoming?.id ?? null);
-	if (!incomingId || incomingId === org.stripeDefaultPmId) return;
+	if (incomingId === org.stripeDefaultPmId) return;
 	await db
 		.update(organizations)
 		.set({
@@ -674,10 +677,11 @@ async function handleCustomerUpdated(customer: Stripe.Customer): Promise<void> {
 			...(org.autoTopupEnabled === 1 ? { autoTopupEnabled: 0, autoTopupState: 'disabled' } : {})
 		})
 		.where(eq(organizations.id, org.id));
+	const change = incomingId ? `${org.stripeDefaultPmId} -> ${incomingId}` : `${org.stripeDefaultPmId} -> cleared`;
 	if (org.autoTopupEnabled === 1) {
-		console.error(`stripe: default card changed for org ${org.id} (${org.stripeDefaultPmId} -> ${incomingId}) — auto top-up DISABLED, fresh consent required`);
+		console.error(`stripe: default card changed for org ${org.id} (${change}) — auto top-up DISABLED, fresh consent required`);
 	} else {
-		console.info(`stripe: default card changed for org ${org.id} (${org.stripeDefaultPmId} -> ${incomingId})`);
+		console.info(`stripe: default card changed for org ${org.id} (${change})`);
 	}
 }
 

@@ -877,6 +877,22 @@ describe('portal card sync (changes made in the Stripe customer portal)', () => 
 		expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_1' });
 	});
 
+	test('a customer.updated with an invalid created timestamp throws — never stored as the cursor', async () => {
+		// I2: out-of-range external data is a failed API call. A garbage-but-
+		// numeric `created` (fractional, non-safe-integer, non-positive, or
+		// implausibly future) persisted as the ordering cursor would mark every
+		// later legitimate card update stale FOREVER (codex P2) — throw so the
+		// event is never marked processed and Stripe redelivers.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeDefaultPmId: 'pm_1' });
+		const farFuture = Math.floor(Date.now() / 1000) + 7 * 86_400;
+		for (const [i, bad] of [200.5, Number.MAX_SAFE_INTEGER + 1, -5, 0, farFuture].entries()) {
+			await expect(handleStripeEvent(event('customer.updated', `evt_cu_badts_${i}`, { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: 'pm_2' } }, bad) as never)).rejects.toThrow(/created/);
+		}
+		expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_1', stripeCustomerLastEventCreated: null });
+		const processed = await testDb().db.select().from(stripeEvents).where(eq(stripeEvents.eventId, 'evt_cu_badts_0')).get();
+		expect(processed?.processedAt ?? null).toBeNull();
+	});
+
 	test('a stale (out-of-order) customer.updated cannot resurrect an old card', async () => {
 		// Stripe does not guarantee webhook ordering: an older immutable
 		// snapshot arriving after a newer one must not restore the previous

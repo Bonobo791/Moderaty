@@ -682,8 +682,17 @@ async function handleCustomerUpdated(customer: Stripe.Customer, eventCreated: nu
 	}
 	const settings = customer.invoice_settings;
 	if (!settings || !('default_payment_method' in settings)) return;
-	if (typeof eventCreated !== 'number') {
-		throw new Error(`customer.updated ${eventId} is missing its envelope created timestamp`);
+	// I2: out-of-range external data is a failed API call (codex P2). A
+	// garbage-but-numeric `created` persisted as the ordering cursor would mark
+	// every later legitimate update stale forever — accept only a positive safe
+	// integer no more than a day in the future (clock-skew tolerance).
+	if (
+		typeof eventCreated !== 'number' ||
+		!Number.isSafeInteger(eventCreated) ||
+		eventCreated <= 0 ||
+		eventCreated > Math.floor(Date.now() / 1000) + 86_400
+	) {
+		throw new Error(`customer.updated ${eventId} carries an invalid envelope created timestamp: ${eventCreated}`);
 	}
 	let lastCreated = org.stripeCustomerLastEventCreated;
 	if (lastCreated !== null && eventCreated < lastCreated) {

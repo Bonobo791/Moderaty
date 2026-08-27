@@ -693,24 +693,39 @@ async function handleCustomerUpdated(customer: Stripe.Customer, eventCreated: nu
 	} else {
 		throw new Error(`customer.updated ${eventId} carries a malformed default_payment_method`);
 	}
+	// Compare-and-set in the UPDATE itself: two deliveries hold independent
+	// inbox leases and can both pass the read-time guard, so the write must
+	// re-check the cursor. Zero rows = a newer-or-equal snapshot landed
+	// meanwhile — acknowledge (a redelivery can never fix a lost race).
+	const cursorStillOlder = or(
+		isNull(organizations.stripeCustomerLastEventCreated),
+		lt(organizations.stripeCustomerLastEventCreated, eventCreated),
+		and(
+			eq(organizations.stripeCustomerLastEventCreated, eventCreated),
+			or(isNull(organizations.stripeCustomerLastEventId), lt(organizations.stripeCustomerLastEventId, eventId))
+		)
+	);
+	const applyIfCurrent = async (set: Partial<typeof organizations.$inferInsert>): Promise<boolean> => {
+		const res = await db.update(organizations).set(set).where(and(eq(organizations.id, org.id), cursorStillOlder));
+		if (res.rowsAffected === 0) {
+			console.info(`stripe: customer.updated ${eventId} lost the apply race for org ${org.id} — a newer-or-equal snapshot already landed`);
+			return false;
+		}
+		return true;
+	};
 	if (incomingId === org.stripeDefaultPmId) {
 		// No card change, but the cursor must still advance — otherwise a
 		// stale snapshot arriving later could resurrect the previous card.
-		await db
-			.update(organizations)
-			.set({ stripeCustomerLastEventCreated: eventCreated, stripeCustomerLastEventId: eventId })
-			.where(eq(organizations.id, org.id));
+		await applyIfCurrent({ stripeCustomerLastEventCreated: eventCreated, stripeCustomerLastEventId: eventId });
 		return;
 	}
-	await db
-		.update(organizations)
-		.set({
-			stripeDefaultPmId: incomingId,
-			stripeCustomerLastEventCreated: eventCreated,
-			stripeCustomerLastEventId: eventId,
-			...(org.autoTopupEnabled === 1 ? { autoTopupEnabled: 0, autoTopupState: 'disabled' } : {})
-		})
-		.where(eq(organizations.id, org.id));
+	const applied = await applyIfCurrent({
+		stripeDefaultPmId: incomingId,
+		stripeCustomerLastEventCreated: eventCreated,
+		stripeCustomerLastEventId: eventId,
+		...(org.autoTopupEnabled === 1 ? { autoTopupEnabled: 0, autoTopupState: 'disabled' } : {})
+	});
+	if (!applied) return;
 	const change = incomingId ? `${org.stripeDefaultPmId} -> ${incomingId}` : `${org.stripeDefaultPmId} -> cleared`;
 	if (org.autoTopupEnabled === 1) {
 		console.error(`stripe: default card changed for org ${org.id} (${change}) — auto top-up DISABLED, fresh consent required`);

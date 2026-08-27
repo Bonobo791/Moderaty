@@ -923,6 +923,26 @@ describe('portal card sync (changes made in the Stripe customer portal)', () => 
 		}
 	});
 
+	test('overlapping customer.updated deliveries cannot regress the cursor or the card', async () => {
+		// Distinct event ids get independent inbox leases, so nothing
+		// serializes two deliveries. Both read the cursor before either writes
+		// (symmetric await paths interleave FIFO); without a compare-and-set
+		// predicate the OLDER write lands last and regresses both the cursor
+		// and the card (codex/cubic P1).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeDefaultPmId: 'pm_1', autoTopupEnabled: 0, autoTopupState: 'disabled' });
+		const newer = event('customer.updated', 'evt_cu_win', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: 'pm_2' } }, 200);
+		const older = event('customer.updated', 'evt_cu_lose', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: 'pm_1' } }, 100);
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const [winResult, loseResult] = await Promise.all([handleStripeEvent(newer as never), handleStripeEvent(older as never)]);
+			expect(winResult).toBe(true); // the loser is acknowledged too — redelivery cannot fix a lost race
+			expect(loseResult).toBe(true);
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_2', stripeCustomerLastEventCreated: 200, stripeCustomerLastEventId: 'evt_cu_win' });
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
 	test('payment_method.detached arriving with customer: null still clears the org top-up card', async () => {
 		// Stripe fires the event AFTER detachment, so the PaymentMethod's
 		// customer is already null — keying the org lookup on it would leave

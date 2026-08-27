@@ -45,9 +45,7 @@ reasonix.toml
 .reasonix
 .aimax
 .codacy
-# Ignore .agents contents (installed skill copies, hooks state, tooling), but
-# keep the repo-local skill SOURCES tracked (AGENTS.md mandates
-# .agents/skills-src/<name>/). A bare `.agents` would exclude the directory
-# itself and make re-including anything under it impossible.
+# Ignore .agents contents (installed skill copies, hooks state, tooling).
+# A bare `.agents` would exclude the directory itself and make re-including
+# anything under it impossible.
 .agents/*
-!.agents/skills-src/

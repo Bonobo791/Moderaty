@@ -38,7 +38,7 @@ function assertUnambiguous(matches: readonly unknown[], input: StripeIdentifiers
 }
 
 
-function isNewerEvent(
+export function isNewerEvent(
 	currentCreated: number | null | undefined,
 	currentId: string | null | undefined,
 	eventCreated: number,

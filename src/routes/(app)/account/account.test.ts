@@ -209,7 +209,7 @@ test('delete account revokes each channel at Google, erases everything, and sign
 
 	const { res, cookies } = await captureDelete(OWNER, { confirm: 'on' });
 
-	expect(res).toMatchObject({ status: 302, location: '/' });
+	expect(res).toMatchObject({ status: 303, location: '/account-deleted' });
 	// Revocation used the DECRYPTED refresh token of the owned channel.
 	expect(decryptMock).toHaveBeenCalledWith('enc');
 	expect(fetch).toHaveBeenCalledWith(
@@ -236,7 +236,7 @@ test('delete account still deletes when revocation fails, logging loudly', async
 
 	const { res } = await captureDelete(OWNER, { confirm: 'on' });
 
-	expect(res).toMatchObject({ status: 302, location: '/' });
+	expect(res).toMatchObject({ status: 303, location: '/account-deleted' });
 	expect(errorSpy).toHaveBeenCalled();
 	// The revocation request is logged with its channel-scoped prefix so the
 	// orphaned grant can be traced.
@@ -267,7 +267,7 @@ test('a revocation failure on one channel does not stop the others', async () =>
 	try {
 		const { res } = await captureDelete(OWNER, { confirm: 'on' });
 
-		expect(res).toMatchObject({ status: 302, location: '/' });
+		expect(res).toMatchObject({ status: 303, location: '/account-deleted' });
 		// The failure is logged loudly WITH the channel id (as a separate
 		// argument — never interpolated)…
 		expect(errorSpy).toHaveBeenCalledWith('token revocation failed for channel, deleting anyway:', 'UC1', expect.any(Error));

@@ -24,14 +24,15 @@ import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
 
 const mocks = vi.hoisted(() => ({
 	sessionsCreate: vi.fn(),
-	customersCreate: vi.fn(), pricesRetrieve: vi.fn()
+	customersCreate: vi.fn(), pricesRetrieve: vi.fn(), billingPortalSessionsCreate: vi.fn()
 }));
 
 vi.mock('$lib/server/stripe/client', () => ({
 	getStripe: () => ({
 		checkout: { sessions: { create: mocks.sessionsCreate } },
 		prices: { retrieve: mocks.pricesRetrieve },
-		customers: { create: mocks.customersCreate }
+		customers: { create: mocks.customersCreate },
+		billingPortal: { sessions: { create: mocks.billingPortalSessionsCreate } }
 	})
 }));
 vi.mock('$env/dynamic/private', () => ({
@@ -73,6 +74,10 @@ function buyPlan(plan: string, user: SessionUser | null = OWNER) {
 
 function setAutoTopup(fields: Record<string, string>, user: SessionUser | null = OWNER) {
 	return actions.setAutoTopup({ request: postForm(fields), locals: { user } } as never);
+}
+
+function manageCards(user: SessionUser | null = OWNER) {
+	return actions.manageCards({ locals: { user } } as never);
 }
 
 beforeEach(() => {
@@ -227,19 +232,39 @@ describe('usage buy action', () => {
 		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
 	});
 
-	test('an unknown bundle fails loudly with a 400', async () => {
+	test('an unknown bundle fails loudly without echoing the submitted id', async () => {
+		// A tampered/stale bundle id is an internal validation failure — the
+		// response stays generic (500), the detail lives in the server log only.
 		await seedOrg();
-		const result = await buy('credits_999999');
-		expect(result).toMatchObject({ status: 400 });
-		expect(JSON.stringify(result)).toContain('unknown credit bundle');
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const result = await buy('credits_999999');
+			expect(result).toMatchObject({ status: 500 });
+			const serialized = JSON.stringify(result);
+			expect(serialized).toContain('Could not start checkout');
+			expect(serialized).not.toContain('credits_999999');
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('unknown credit bundle'));
+		} finally {
+			errorSpy.mockRestore();
+		}
 	});
 
-	test('an unconfigured bundle price fails loudly', async () => {
+	test('an unconfigured bundle price fails loudly without leaking env internals', async () => {
+		// A missing STRIPE_PRICE_* env var is a server defect (500) — the env
+		// var name is internal configuration detail, never client copy.
 		await seedOrg();
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		mocks.sessionsCreate.mockRejectedValue(new Error('STRIPE_PRICE_CREDITS_500 is not configured'));
-		const result = await buy('credits_500');
-		expect(result).toMatchObject({ status: 400 });
-		expect(JSON.stringify(result)).toContain('Could not start checkout');
+		try {
+			const result = await buy('credits_500');
+			expect(result).toMatchObject({ status: 500 });
+			const serialized = JSON.stringify(result);
+			expect(serialized).toContain('Could not start checkout');
+			expect(serialized).not.toContain('STRIPE_PRICE_CREDITS_500');
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('STRIPE_PRICE_CREDITS_500'));
+		} finally {
+			errorSpy.mockRestore();
+		}
 	});
 });
 
@@ -409,5 +434,200 @@ describe('usage plan checkout action', () => {
 		const result = await buyPlan('not-a-plan');
 		expect(result).toMatchObject({ status: 400, data: { error: 'Unknown billing plan.' } });
 		expect(mocks.pricesRetrieve).not.toHaveBeenCalled();
+	});
+});
+
+describe('usage manageCards action (Stripe customer portal)', () => {
+	/** Swaps APP_URL for the body and always restores it — even on failure. */
+	async function withAppUrl(value: string | undefined, body: () => Promise<void>) {
+		const { env } = await import('$env/dynamic/private');
+		const original = env.APP_URL as string | undefined;
+		if (value === undefined) delete (env as Record<string, unknown>).APP_URL;
+		else (env as Record<string, unknown>).APP_URL = value;
+		try {
+			await body();
+		} finally {
+			if (original === undefined) delete (env as Record<string, unknown>).APP_URL;
+			else (env as Record<string, unknown>).APP_URL = original;
+		}
+	}
+
+	/**
+	 * A manageCards failure contract: generic 500, the configured message, none
+	 * of the internal details in the response, and the raw detail logged
+	 * server-side. console.error stays silenced for the duration.
+	 */
+	async function expectPortalFailure(opts: { notContaining: string[]; logged: string }) {
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const result = await manageCards();
+			expect(result).toMatchObject({ status: 500 });
+			const serialized = JSON.stringify(result);
+			expect(serialized).toContain('Could not open the card manager');
+			for (const leak of opts.notContaining) expect(serialized).not.toContain(leak);
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining(opts.logged));
+		} finally {
+			errorSpy.mockRestore();
+		}
+	}
+
+	test('rejects a signed-out request with 401', async () => {
+		await expect(manageCards(null)).rejects.toMatchObject({ status: 401 });
+		expect(mocks.billingPortalSessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test('rejects a non-owner with 403', async () => {
+		await seedOrg({ stripeCustomerId: 'cus_1' });
+		await expect(manageCards({ ...OWNER, orgRole: 'member' as const })).rejects.toMatchObject({ status: 403 });
+		expect(mocks.billingPortalSessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test('redirects the owner to a portal session for the org customer with a /usage return', async () => {
+		await seedOrg({ stripeCustomerId: 'cus_1' });
+		mocks.billingPortalSessionsCreate.mockResolvedValue({ url: 'https://billing.stripe.com/p/session/test_123' });
+
+		await expect(manageCards()).rejects.toMatchObject({ status: 303, location: 'https://billing.stripe.com/p/session/test_123' });
+
+		expect(mocks.billingPortalSessionsCreate).toHaveBeenCalledWith({ customer: 'cus_1', return_url: 'http://localhost:5173/usage' });
+	});
+
+	test('creates the Stripe customer first when the org has none', async () => {
+		await seedOrg();
+		mocks.billingPortalSessionsCreate.mockResolvedValue({ url: 'https://billing.stripe.com/p/session/test_123' });
+
+		await expect(manageCards()).rejects.toMatchObject({ status: 303 });
+
+		expect(mocks.customersCreate).toHaveBeenCalledWith({ name: 'One', email: 'one@example.com', metadata: { org_id: 'org-1' } }, { idempotencyKey: 'customer:org-1' });
+		expect(mocks.billingPortalSessionsCreate).toHaveBeenCalledWith({ customer: 'cus_new', return_url: 'http://localhost:5173/usage' });
+	});
+
+	test('a Stripe failure returns a generic message and logs the raw error server-side only', async () => {
+		// Raw third-party error text must never reach the client — same rule as
+		// checkout (it can leak card/bank details).
+		await seedOrg({ stripeCustomerId: 'cus_1' });
+		mocks.billingPortalSessionsCreate.mockRejectedValue(Object.assign(new Error('no configuration with payment method update, card brand visa'), { type: 'StripeInvalidRequestError' }));
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+		const result = await manageCards();
+
+		expect(result).toMatchObject({ status: 400 });
+		const serialized = JSON.stringify(result);
+		expect(serialized).not.toContain('card brand visa');
+		expect(serialized).toContain('Could not open the card manager');
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('no configuration with payment method update'));
+		errorSpy.mockRestore();
+	});
+
+	test('a missing APP_URL fails 500 BEFORE any Stripe customer is created', async () => {
+		// Env validation belongs at handler start (AGENTS.md): creating the
+		// remote customer first would leave an external side effect from a
+		// request that could never open the portal (codex P1).
+		await seedOrg(); // no stripeCustomerId — the create path is the trap
+		await withAppUrl(undefined, async () => {
+			await expect(manageCards()).rejects.toMatchObject({ status: 500 });
+			expect(mocks.customersCreate).not.toHaveBeenCalled();
+			expect(mocks.billingPortalSessionsCreate).not.toHaveBeenCalled();
+		});
+	});
+
+	test('a malformed APP_URL fails 500 BEFORE any Stripe customer is created', async () => {
+		// A non-empty but unparseable APP_URL passes a presence-only check and
+		// would create the customer before new URL() throws (cubic/codex P2).
+		await seedOrg(); // no stripeCustomerId — the create path is the trap
+		await withAppUrl('moderaty.example', async () => {
+			await expect(manageCards()).rejects.toMatchObject({ status: 500 });
+			expect(mocks.customersCreate).not.toHaveBeenCalled();
+			expect(mocks.billingPortalSessionsCreate).not.toHaveBeenCalled();
+		});
+	});
+
+	test('a portal session without a URL is a loud 500, never a broken redirect', async () => {
+		// I1: every field of a Stripe response is nullable — an unvalidated
+		// session.url would emit a broken Location header (codex P1). The thrown
+		// message embeds the Stripe customer id — internal detail that must stay
+		// in the server log, never reach the client (codex P1).
+		await seedOrg({ stripeCustomerId: 'cus_1' });
+		mocks.billingPortalSessionsCreate.mockResolvedValue({});
+		await expectPortalFailure({ notContaining: ['cus_1'], logged: 'portal' });
+	});
+
+	test('a non-https portal URL is a loud 500, never an off-scheme redirect', async () => {
+		// Portal URLs are always https://billing.stripe.com/... — anything else
+		// from the API response is malformed and must not become a Location
+		// header (cubic P2). Same no-leak rule on the customer id.
+		await seedOrg({ stripeCustomerId: 'cus_1' });
+		mocks.billingPortalSessionsCreate.mockResolvedValue({ url: 'http://phishing.example/portal' });
+		await expectPortalFailure({ notContaining: ['cus_1'], logged: 'portal' });
+	});
+
+	test('a customer-creation failure is a generic 500 — DB internals stay in the server log', async () => {
+		// getOrCreateStripeCustomer can fail with raw libsql/driver errors whose
+		// messages carry internal detail; the client gets a generic 500 (codex).
+		await seedOrg(); // no stripeCustomerId — the create path runs
+		mocks.customersCreate.mockRejectedValue(new Error('libsql: SECRET connection detail'));
+		await expectPortalFailure({ notContaining: ['libsql', 'SECRET'], logged: 'libsql: SECRET connection detail' });
+	});
+});
+
+describe('usage cards section', () => {
+	function renderUsage(overrides: Record<string, unknown> = {}) {
+		return render(Page, {
+			props: {
+				data: {
+					maintenance: false,
+					user: OWNER,
+					summary: { remaining: 10, usedThisMonth: 0, usedLifetime: 0 },
+					metered: true,
+					mercadoPagoBundles: [],
+					history: [],
+					bundles: [],
+					autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: true },
+					autoTopupConsentText: 'consent',
+					stripeConfigured: true,
+					plans: { hosted: false, lifetime: false },
+					...overrides
+				},
+				form: null
+			} as never
+		}).body;
+	}
+
+	test('an owner sees the Cards section with the manage button', () => {
+		const body = renderUsage();
+		expect(body).toContain('action="?/manageCards"');
+		expect(body).toContain('Manage cards');
+		// The saved card backs automatic top-up only — Checkout saves it with
+		// setup_future_usage: 'off_session' (allow_redisplay: limited), so it is
+		// never prefilled in later Checkout sessions; promising "future
+		// purchases" overclaims (cubic P2).
+		expect(body).toContain('A card is saved for automatic top-up.');
+		expect(body).not.toContain('future purchases');
+	});
+
+	test('a member never sees the card manager', () => {
+		const body = renderUsage({ user: { ...OWNER, orgRole: 'member' } });
+		expect(body).not.toContain('manageCards');
+	});
+
+	test('a Stripe-less self-hosted instance gets an explicit unavailable state, never a broken form', () => {
+		// Self-hosted/free deployments without STRIPE_SECRET_KEY can never open
+		// the customer portal — rendering the control would be a permanently
+		// failing button (codex P2, I12). The load passes a non-secret
+		// availability flag; the section says why instead of breaking.
+		const body = renderUsage({ stripeConfigured: false });
+		expect(body).not.toContain('manageCards');
+		expect(body).toContain('not configured');
+	});
+
+	test('the no-card state says so instead of implying one is saved', () => {
+		const body = renderUsage({
+			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: false }
+		});
+		expect(body).toContain('No card saved yet');
+		expect(body).not.toContain('A card is saved');
+		// Only a STRIPE bundle saves a card — a Mercado Pago purchase saves no
+		// Stripe payment method, so "buy any bundle" would mislead (cubic P2).
+		expect(body).toContain('buy a Stripe bundle once');
+		expect(body).not.toContain('buy any bundle');
 	});
 });

@@ -194,6 +194,8 @@ describe('organizations', () => {
 			stripe_subscription_cancel_at_period_end: { notNull: false },
 			stripe_subscription_last_event_created: { notNull: false },
 			stripe_subscription_last_event_id: { notNull: false },
+			stripe_customer_last_event_created: { notNull: false },
+			stripe_customer_last_event_id: { notNull: false },
 			created_at: { notNull: true, hasDefault: true }
 		});
 		expectCreatedAtDefault(organizations);

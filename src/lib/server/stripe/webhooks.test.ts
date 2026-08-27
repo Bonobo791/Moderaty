@@ -14,7 +14,7 @@
 // Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 import { eq } from 'drizzle-orm';
-import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { beforeEach, describe, expect, test, vi, type MockInstance } from 'vitest';
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { db } from '$lib/server/db';
@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => ({
 	chargesRetrieve: vi.fn(),
 	disputesRetrieve: vi.fn(),
 	customersUpdate: vi.fn(),
+	customersRetrieve: vi.fn(),
 	paymentMethodsAttach: vi.fn()
 }));
 
@@ -37,7 +38,7 @@ vi.mock('$lib/server/stripe/client', () => ({
 		paymentIntents: { retrieve: mocks.paymentIntentsRetrieve },
 		charges: { retrieve: mocks.chargesRetrieve },
 		disputes: { retrieve: mocks.disputesRetrieve },
-		customers: { update: mocks.customersUpdate },
+		customers: { update: mocks.customersUpdate, retrieve: mocks.customersRetrieve },
 		paymentMethods: { attach: mocks.paymentMethodsAttach }
 	})
 }));
@@ -58,8 +59,8 @@ function session(overrides: Record<string, unknown> = {}): Record<string, unknow
 	};
 }
 
-function event(type: string, id: string, object: Record<string, unknown>): { id: string; type: string; data: { object: unknown } } {
-	return { id, type, data: { object: { id, object: 'test', ...object } } };
+function event(type: string, id: string, object: Record<string, unknown>, created?: number): { id: string; type: string; created?: number; data: { object: unknown } } {
+	return { id, type, ...(created === undefined ? {} : { created }), data: { object: { id, object: 'test', ...object } } };
 }
 
 beforeEach(() => {
@@ -776,5 +777,292 @@ describe('handleStripeEvent', () => {
 		await applyLedgerDelta(db, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_2', paymentIntentId: 'pi_2', chargeId: 'ch_2' });
 		expect(await handleStripeEvent(event('charge.dispute.created', 'evt_5', { id: 'du_1' }) as never)).toBe(true);
 		expect(await getCredits('org-1')).toBe(0);
+	});
+});
+
+describe('portal card sync (changes made in the Stripe customer portal)', () => {
+	async function orgState() {
+		return testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+	}
+
+	/** Seeds org-1 with a saved top-up card; pass null to leave a column NULL. */
+	async function seedOrg(overrides: Record<string, unknown> = {}) {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeDefaultPmId: 'pm_1', autoTopupEnabled: 1, autoTopupState: 'idle', ...overrides });
+	}
+
+	function customerUpdated(id: string, defaultPm: unknown, created?: number) {
+		return event('customer.updated', id, { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: defaultPm } }, created);
+	}
+
+	function detached(id: string, paymentMethodId: string, customer: string | null = 'cus_1') {
+		return event('payment_method.detached', id, { id: paymentMethodId, object: 'payment_method', customer });
+	}
+
+	/** Silences console.error for the body and hands the spy over for assertions. */
+	async function withErrorSpy(body: (errorSpy: MockInstance) => Promise<void>) {
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			await body(errorSpy);
+		} finally {
+			errorSpy.mockRestore();
+		}
+	}
+
+	/**
+	 * Runs `sql` inside the handler's read-write window: right after it builds
+	 * its first organizations UPDATE, before the builder is awaited
+	 * (client.execute starts immediately; the drizzle builder is lazy).
+	 */
+	function injectOnFirstOrgUpdate(sql: string) {
+		const realUpdate = testDb().db.update.bind(testDb().db);
+		let fired = false;
+		const spy = vi.spyOn(testDb().db, 'update').mockImplementation(((table: unknown) => {
+			if (!fired && table === organizations) {
+				fired = true;
+				void testDb().client.execute(sql);
+			}
+			return realUpdate(table as never);
+		}) as never);
+		return { fired: () => fired, restore: () => spy.mockRestore() };
+	}
+
+	async function expectUnprocessed(eventId: string) {
+		const receipt = await testDb().db.select().from(stripeEvents).where(eq(stripeEvents.eventId, eventId)).get();
+		expect(receipt?.processedAt ?? null).toBeNull();
+	}
+
+	test('payment_method.detached for the top-up card clears it and disables auto top-up loudly', async () => {
+		// The consent evidence covered the OLD card — a removed default can never
+		// keep charging (same rule as savePaymentMethod's card-change branch).
+		await seedOrg();
+		await withErrorSpy(async (errorSpy) => {
+			expect(await handleStripeEvent(detached('evt_pmd_1', 'pm_1') as never)).toBe(true);
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: null, autoTopupEnabled: 0, autoTopupState: 'disabled' });
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('pm_1'));
+		});
+	});
+
+	test('payment_method.detached for another card leaves the top-up card alone', async () => {
+		await seedOrg();
+		expect(await handleStripeEvent(detached('evt_pmd_2', 'pm_other') as never)).toBe(true);
+		expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
+	});
+
+	test('payment_method.detached for an untracked customer is noted and acknowledged, never retried', async () => {
+		// e.g. account deletion deleted the customer at Stripe — redelivery can
+		// never fix this, so it must not throw (Stripe would retry for days).
+		const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+		try {
+			expect(await handleStripeEvent(detached('evt_pmd_3', 'pm_x', 'cus_unknown') as never)).toBe(true);
+			expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('pm_x'));
+		} finally {
+			infoSpy.mockRestore();
+		}
+	});
+
+	test('customer.updated resyncs a changed default card and disables auto top-up (fresh consent)', async () => {
+		await seedOrg();
+		await withErrorSpy(async (errorSpy) => {
+			expect(await handleStripeEvent(customerUpdated('evt_cu_1', 'pm_2', 100) as never)).toBe(true);
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_2', autoTopupEnabled: 0, autoTopupState: 'disabled', stripeCustomerLastEventCreated: 100, stripeCustomerLastEventId: 'evt_cu_1' });
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('pm_2'));
+		});
+	});
+
+	test('customer.updated with the same default card changes nothing', async () => {
+		await seedOrg();
+		expect(await handleStripeEvent(customerUpdated('evt_cu_2', 'pm_1', 100) as never)).toBe(true);
+		expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
+	});
+
+	test('customer.updated without a default card (e.g. the deletion e-mail scrub) changes nothing', async () => {
+		// invoice_settings without the default_payment_method KEY is an unrelated
+		// update (name change, e-mail scrub) — not a card change.
+		await seedOrg();
+		expect(await handleStripeEvent(event('customer.updated', 'evt_cu_3', { id: 'cus_1', object: 'customer', email: '', invoice_settings: {} }) as never)).toBe(true);
+		expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
+	});
+
+	test('customer.updated with an EXPLICITLY cleared default clears the org card and disables auto top-up', async () => {
+		// default_payment_method: null (key present) is a real removal — the
+		// default was cleared at Stripe — distinct from invoice_settings: {}
+		// (key absent), which is an unrelated update like a name change. Mirror
+		// the cleared state instead of leaving the pointer stale (cubic P1).
+		await seedOrg();
+		await withErrorSpy(async (errorSpy) => {
+			expect(await handleStripeEvent(customerUpdated('evt_cu_clear', null, 100) as never)).toBe(true);
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: null, autoTopupEnabled: 0, autoTopupState: 'disabled' });
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('cleared'));
+		});
+	});
+
+	test('customer.updated with an expanded default whose id is not a string throws — never stored, never processed', async () => {
+		// I1/I2: a malformed signed payload ({ default_payment_method: { id: 123 } })
+		// must not pass a non-string into the text column, nor be silently
+		// acknowledged and marked processed (codex P2) — throw so Stripe
+		// redelivers instead of freezing garbage into the org row.
+		await seedOrg({ autoTopupEnabled: null, autoTopupState: null });
+		await expect(handleStripeEvent(customerUpdated('evt_cu_bad', { id: 123 }, 100) as never)).rejects.toThrow('malformed');
+		expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_1' });
+		await expectUnprocessed('evt_cu_bad');
+	});
+
+	test('customer.updated with an empty-string default id throws', async () => {
+		// '' is not a valid null-default (that is null) nor a usable card id —
+		// acknowledge nothing, store nothing (codex P2).
+		await seedOrg({ autoTopupEnabled: null, autoTopupState: null });
+		await expect(handleStripeEvent(customerUpdated('evt_cu_empty', '', 100) as never)).rejects.toThrow('malformed');
+		expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_1' });
+	});
+
+	test('a customer.updated with an invalid created timestamp throws — never stored as the cursor', async () => {
+		// I2: out-of-range external data is a failed API call. A garbage-but-
+		// numeric `created` (fractional, non-safe-integer, non-positive, or
+		// implausibly future) persisted as the ordering cursor would mark every
+		// later legitimate card update stale FOREVER (codex P2) — throw so the
+		// event is never marked processed and Stripe redelivers.
+		await seedOrg({ autoTopupEnabled: null, autoTopupState: null });
+		const farFuture = Math.floor(Date.now() / 1000) + 7 * 86_400;
+		for (const [i, bad] of [200.5, Number.MAX_SAFE_INTEGER + 1, -5, 0, farFuture].entries()) {
+			await expect(handleStripeEvent(customerUpdated(`evt_cu_badts_${i}`, 'pm_2', bad) as never)).rejects.toThrow(/created/);
+		}
+		expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_1', stripeCustomerLastEventCreated: null });
+		await expectUnprocessed('evt_cu_badts_0');
+	});
+
+	test('a stale (out-of-order) customer.updated cannot resurrect an old card', async () => {
+		// Stripe does not guarantee webhook ordering: an older immutable
+		// snapshot arriving after a newer one must not restore the previous
+		// card (coderabbit MAJOR / cubic P1) — same ordering guard as
+		// applySubscriptionSnapshot.
+		await seedOrg({ autoTopupEnabled: 0, autoTopupState: 'disabled' });
+		await withErrorSpy(async (errorSpy) => {
+			expect(await handleStripeEvent(customerUpdated('evt_cu_new', 'pm_2', 200) as never)).toBe(true);
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_2' });
+			// The older snapshot arrives LATE — it must be skipped, loudly.
+			expect(await handleStripeEvent(customerUpdated('evt_cu_old', 'pm_1', 100) as never)).toBe(true);
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_2', stripeCustomerLastEventCreated: 200, stripeCustomerLastEventId: 'evt_cu_new' });
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('stale'));
+		});
+	});
+
+	test('same-second customer.updated events reconcile from the LIVE customer, never event-id order', async () => {
+		// `created` has second precision and Stripe event ids carry no documented
+		// causal order (codex P1): on a tie neither payload can be trusted as the
+		// later state, so the handler fetches the live customer — the truth after
+		// every change made up to the fetch. Here the SECOND event arrives with a
+		// SMALLER id and a payload that disagrees with the live default; the live
+		// value (pm_3) must win.
+		await seedOrg({ autoTopupEnabled: 0, autoTopupState: 'disabled' });
+		mocks.customersRetrieve.mockResolvedValue({ id: 'cus_1', invoice_settings: { default_payment_method: 'pm_3' } });
+		await withErrorSpy(async () => {
+			expect(await handleStripeEvent(customerUpdated('evt_cu_b', 'pm_2', 200) as never)).toBe(true);
+			expect(await handleStripeEvent(customerUpdated('evt_cu_a', 'pm_2', 200) as never)).toBe(true);
+			expect(mocks.customersRetrieve).toHaveBeenCalledWith('cus_1', { expand: ['invoice_settings.default_payment_method'] });
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_3', stripeCustomerLastEventCreated: 200, stripeCustomerLastEventId: 'evt_cu_a' });
+		});
+	});
+
+	test('a failed same-second reconcile throws so Stripe redelivers — nothing stored, nothing processed', async () => {
+		// The reconcile fetch IS the decision on a tie; if it fails the event must
+		// not be acknowledged into a frozen stale state (I11: fail loud, retry).
+		await seedOrg({ stripeDefaultPmId: 'pm_2', stripeCustomerLastEventCreated: 200, stripeCustomerLastEventId: 'evt_cu_b', autoTopupEnabled: null, autoTopupState: null });
+		mocks.customersRetrieve.mockRejectedValue(new Error('stripe unavailable'));
+		await withErrorSpy(async () => {
+			await expect(handleStripeEvent(customerUpdated('evt_cu_a', 'pm_9', 200) as never)).rejects.toThrow('stripe unavailable');
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_2', stripeCustomerLastEventId: 'evt_cu_b' });
+			await expectUnprocessed('evt_cu_a');
+		});
+	});
+
+	test('a newer customer.updated with the SAME card still advances the ordering cursor', async () => {
+		// If a no-change event did not advance the cursor, a stale snapshot
+		// arriving after it could still resurrect the old card.
+		await seedOrg({ autoTopupEnabled: 0, autoTopupState: 'disabled' });
+		await withErrorSpy(async () => {
+			expect(await handleStripeEvent(customerUpdated('evt_cu_new', 'pm_2', 200) as never)).toBe(true);
+			expect(await handleStripeEvent(customerUpdated('evt_cu_same', 'pm_2', 300) as never)).toBe(true);
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_2', stripeCustomerLastEventCreated: 300, stripeCustomerLastEventId: 'evt_cu_same' });
+			expect(await handleStripeEvent(customerUpdated('evt_cu_stale', 'pm_1', 250) as never)).toBe(true);
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_2' });
+		});
+	});
+
+	test('overlapping customer.updated deliveries cannot regress the cursor or the card', async () => {
+		// Distinct event ids get independent inbox leases, so nothing
+		// serializes two deliveries. Both read the cursor before either writes
+		// (symmetric await paths interleave FIFO); without a compare-and-set
+		// predicate the OLDER write lands last and regresses both the cursor
+		// and the card (codex/cubic P1).
+		await seedOrg({ autoTopupEnabled: 0, autoTopupState: 'disabled' });
+		const newer = customerUpdated('evt_cu_win', 'pm_2', 200);
+		const older = customerUpdated('evt_cu_lose', 'pm_1', 100);
+		await withErrorSpy(async () => {
+			const [winResult, loseResult] = await Promise.all([handleStripeEvent(newer as never), handleStripeEvent(older as never)]);
+			expect(winResult).toBe(true); // the loser is acknowledged too — redelivery cannot fix a lost race
+			expect(loseResult).toBe(true);
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_2', stripeCustomerLastEventCreated: 200, stripeCustomerLastEventId: 'evt_cu_win' });
+		});
+	});
+
+	test('a card change disables auto top-up even when an enable lands mid-flight', async () => {
+		// The read-time `autoTopupEnabled === 1` check cannot see an owner click
+		// that enables top-up INSIDE the read-write window — the write would
+		// install the new card while leaving the just-enabled automation active,
+		// charging a card the consent never covered (codex P1). The disable must
+		// be decided atomically by the UPDATE itself, at row-lock time.
+		await seedOrg({ autoTopupEnabled: 0, autoTopupState: 'idle' });
+		const injection = injectOnFirstOrgUpdate("UPDATE organizations SET auto_topup_enabled = 1, auto_topup_state = 'idle' WHERE id = 'org-1'");
+		try {
+			await withErrorSpy(async () => {
+				expect(await handleStripeEvent(customerUpdated('evt_cu_enable_race', 'pm_2', 100) as never)).toBe(true);
+				expect(injection.fired()).toBe(true);
+				expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_2', autoTopupEnabled: 0, autoTopupState: 'disabled' });
+			});
+		} finally {
+			injection.restore();
+		}
+	});
+
+	test('a card change with auto top-up OFF leaves the automation state untouched', async () => {
+		// enabled=0/state='idle' (top-up simply off, never paused by failures) —
+		// the atomic disable must not stamp 'disabled' (the failure-paused banner
+		// state) onto an org that was not running the automation (codex P1).
+		await seedOrg({ autoTopupEnabled: 0, autoTopupState: 'idle' });
+		await withErrorSpy(async () => {
+			expect(await handleStripeEvent(customerUpdated('evt_cu_off', 'pm_2', 100) as never)).toBe(true);
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_2', autoTopupEnabled: 0, autoTopupState: 'idle' });
+		});
+	});
+
+	test('payment_method.detached arriving with customer: null still clears the org top-up card', async () => {
+		// Stripe fires the event AFTER detachment, so the PaymentMethod's
+		// customer is already null — keying the org lookup on it would leave
+		// the top-up pointer stale forever (codex P1). The PM id is the key.
+		await seedOrg();
+		await withErrorSpy(async (errorSpy) => {
+			expect(await handleStripeEvent(detached('evt_pmd_null', 'pm_1', null) as never)).toBe(true);
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: null, autoTopupEnabled: 0, autoTopupState: 'disabled' });
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('pm_1'));
+		});
+	});
+
+	test('a detached event whose pointer moved mid-flight cannot clear the NEW card', async () => {
+		// The race, injected deterministically: the handler has read the org
+		// (pointer pm_1) when a concurrent customer.updated stores pm_2 INSIDE
+		// the read-write window. An update keyed only on the org id would clear
+		// the valid new card (codex P1); the compare-and-set restricts the
+		// clear to a pointer that still equals the detached payment-method id.
+		await seedOrg();
+		const injection = injectOnFirstOrgUpdate("UPDATE organizations SET stripe_default_pm_id = 'pm_2' WHERE id = 'org-1'");
+		try {
+			await withErrorSpy(async () => {
+				expect(await handleStripeEvent(detached('evt_pmd_race', 'pm_1', null) as never)).toBe(true);
+				expect(injection.fired()).toBe(true);
+				expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_2', autoTopupEnabled: 1, autoTopupState: 'idle' });
+			});
+		} finally {
+			injection.restore();
+		}
 	});
 });

@@ -128,3 +128,26 @@ Insert `stripe_events` in the same transaction as the grant; the UNIQUE `event_i
 **Local loop**: `stripe login` → `stripe listen --forward-to localhost:5173/api/stripe/webhook` (copy `whsec_...` to `.env`) → `npm run dev` → `stripe trigger checkout.session.completed` / `charge.refunded`.
 
 **Stripe Tax decision**: enable only if you'll register where you have nexus; then use `txcd_10000000`, `tax_behavior: 'exclusive'`, `automatic_tax.enabled=true` + `customer_creation=always`. Deferred for now.
+
+## 10. Customer portal (card management)
+
+The usage page's **Manage cards** button opens a Stripe customer portal
+session (`billingPortal.sessions.create` with no `configuration` id — Stripe
+uses the account's **default** portal configuration). Card changes made there
+sync back over two webhook events: `payment_method.detached` (when the
+removed card IS the org's tracked top-up card, clears the pointer and pauses
+auto top-up; detaching any other wallet card is a no-op) and `customer.updated`
+(resyncs `invoice_settings.default_payment_method`; a changed default pauses
+auto top-up for fresh consent — the same rule as a new card at checkout).
+
+**Human dashboard steps (per mode — test and live):**
+
+1. **Settings → Billing → Customer portal**: activate the default
+   configuration with **Payment methods → Allow customers to view, update,
+   and remove payment methods** ON. If the app answers "Could not open the
+   card manager" and the server log shows a Stripe configuration error, this
+   step is missing.
+2. **Webhooks → the app's endpoint → Events**: add `payment_method.detached`
+   and `customer.updated` to the existing list (§9). Without them the saved
+   top-up card pointer can go stale after portal changes.
+

@@ -258,7 +258,11 @@ OpenAI, AES-256-GCM encrypted at rest; `resolveOpenAiKey` in
 the env key stays the default and the only self-host path). Never serialize
 the key or ciphertext to the client; the page gets a boolean.
 `users.plan` is the hook for the future Stripe integration (hosted plans;
-free tier = self-hosted only).
+free tier = self-hosted only). Card and hosted-subscription management runs
+through the Stripe customer portal (usage page → **Manage cards**,
+owner-only); portal changes sync back via the `payment_method.detached` and
+`customer.updated` webhooks, and a changed/removed top-up card pauses auto
+top-up until the owner re-consents (docs/stripe-checkout-webhooks.md §10).
 
 Accounts are created only by the **consent interstitial**, never by the OAuth
 callback itself: login parks the identity in the encrypted
@@ -297,7 +301,8 @@ users row is anonymized to a tombstone (`google_sub = 'deleted:<id>'`,
 email/display name `'[deleted]'`) rather than deleted, keeping
 `consents.user_id` valid and freeing the real Google sub for a future
 fresh signup (signing back in is a NEW signup through `/consent`, never a
-restore). The statutory exception: the `consents` evidentiary log keeps the
+restore). The action lands the deleted user on the public `/account-deleted`
+confirmation page (the session is already erased). The statutory exception: the `consents` evidentiary log keeps the
 e-mail, doc version, checkbox text, IP, and user agent under LGPD Art. 16,
 III — the e-mail lives ONLY in `consents` (migration 0011 backfills it from
 `users`), so blocking it from any other use is architectural, not

@@ -87,6 +87,8 @@ export const actions = {
 		}
 		await deleteUserRecords(user.id);
 		cookies.delete(SESSION_COOKIE, { path: '/' });
-		throw redirect(302, '/');
+		// The session is gone, so land on the public confirmation page — never
+		// back on an (app) page that would just bounce to /login.
+		throw redirect(303, '/account-deleted');
 	}
 };

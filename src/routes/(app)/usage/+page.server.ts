@@ -23,7 +23,7 @@ import { env } from '$env/dynamic/private';
 import { eq } from 'drizzle-orm';
 
 import { AUTO_TOPUP_DEFAULT_THRESHOLD } from '$lib/server/billing/autotopup';
-import { createCreditCheckout, createPlanCheckout } from '$lib/server/billing/checkout';
+import { createCreditCheckout, createPlanCheckout, getOrCreateStripeCustomer } from '$lib/server/billing/checkout';
 import { createMercadoPagoCreditCheckout } from '$lib/server/mercadopago/checkout';
 import { configuredMercadoPagoBundles } from '$lib/server/mercadopago/bundles';
 import { listCreditTransactions, orgIsMetered, usageSummary } from '$lib/server/billing/ledger';
@@ -31,6 +31,7 @@ import { db } from '$lib/server/db';
 import { organizations } from '$lib/server/db/schema';
 import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
 import { configuredBundles } from '$lib/server/stripe/bundles';
+import { getStripe } from '$lib/server/stripe/client';
 import { requireOrgRole } from '$lib/server/ownership';
 import { requireUser } from '$lib/server/session';
 
@@ -40,27 +41,54 @@ function isStripeCheckoutError(error: unknown): boolean {
 	return error !== null && typeof error === 'object' && typeof (error as { type?: unknown }).type === 'string';
 }
 
-function checkoutFailure(error: unknown, orgId: string) {
+function checkoutFailure(error: unknown, orgId: string, what = 'start checkout') {
 	const message = error instanceof Error ? error.message : String(error);
-	console.error(`usage: checkout failed for org ${orgId}: ${message}`);
-	return fail(400, { error: isStripeCheckoutError(error) ? 'Could not start checkout — please try again.' : `Could not start checkout: ${message}` });
+	console.error(`usage: ${what} failed for org ${orgId}: ${message}`);
+	// Raw exception text NEVER reaches the client (AGENTS.md review rule): a
+	// Stripe SDK error always carries a `type` and is a transient API failure
+	// the user can retry (400). Anything else is a server-side defect — DB
+	// internals, env var names, customer/session ids embedded in messages —
+	// so it is a generic 500 either way, with full detail only in the log.
+	return fail(isStripeCheckoutError(error) ? 400 : 500, { error: `Could not ${what} — please try again.` });
 }
 
+/** The I12 maintenance payload — identical for the dbDown shortcut and the load-failure catch. */
+function maintenanceData() {
+	return {
+		maintenance: true as const,
+		user: null,
+		summary: null,
+		mercadoPagoBundles: [],
+		metered: false,
+		history: [],
+		bundles: [],
+		autoTopup: null,
+		autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
+		stripeConfigured: Boolean(env.STRIPE_SECRET_KEY),
+		plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) }
+	};
+}
+
+/**
+ * Shared checkout try/catch: the success path throws a 303 redirect, auth
+ * failures (HttpError) pass through untouched, and everything else is a loud
+ * generic failure via checkoutFailure — raw error text never reaches the
+ * client (it can leak card/bank details, env var names, or internal ids).
+ */
+async function checkoutRedirect(create: () => Promise<string>, orgId: string) {
+	try {
+		throw redirect(303, await create());
+	} catch (error) {
+		// SvelteKit's redirect() is a function that THROWS a Redirect — detect
+		// it with isRedirect, never instanceof.
+		if (isRedirect(error) || isHttpError(error)) throw error;
+		return checkoutFailure(error, orgId);
+	}
+}
 
 export const load: PageServerLoad = async ({ locals }) => {
 	if (locals.dbDown) {
-		return {
-			maintenance: true,
-			user: null,
-			summary: null,
-			mercadoPagoBundles: [],
-			metered: false,
-			history: [],
-			bundles: [],
-			autoTopup: null,
-			autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
-			plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) }
-		};
+		return maintenanceData();
 	}
 	const user = requireUser(locals);
 	try {
@@ -121,6 +149,7 @@ export const load: PageServerLoad = async ({ locals }) => {
 				subscriptionStatus: org.stripeSubscriptionStatus,
 				periodEnd: org.stripeSubscriptionPeriodEnd
 			},
+			stripeConfigured: Boolean(env.STRIPE_SECRET_KEY),
 			plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) }
 		};
 	} catch (error) {
@@ -131,18 +160,7 @@ export const load: PageServerLoad = async ({ locals }) => {
 		// (I12: the (app) layout renders the overlay for this payload instead
 		// of SvelteKit's unstyled error page). Mirrors the dashboard load.
 		console.error(`usage: load failed for org ${user.orgId}: ${error instanceof Error ? error.message : String(error)}`);
-		return {
-			maintenance: true,
-			user: null,
-			summary: null,
-			mercadoPagoBundles: [],
-			metered: false,
-			history: [],
-			bundles: [],
-			autoTopup: null,
-			autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
-			plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) }
-		};
+		return maintenanceData();
 	}
 };
 
@@ -153,23 +171,7 @@ export const actions: Actions = {
 		const form = await request.formData();
 		const bundleId = String(form.get('bundle') ?? '');
 		const attemptId = String(form.get('attempt_id') ?? '');
-		try {
-			const url = await createCreditCheckout(user.orgId, user, bundleId, attemptId);
-			throw redirect(303, url);
-		} catch (error) {
-			// SvelteKit's redirect() is a function that THROWS a Redirect —
-			// detect it with isRedirect, never instanceof. Auth failures
-			// (HttpError) pass through too — a 403 must stay a 403, never be
-			// flattened into a 400 checkout failure.
-			if (isRedirect(error) || isHttpError(error)) throw error;
-			// Never surface RAW Stripe error text to the client (it can leak
-			// card/bank details): a Stripe SDK error always carries a `type`,
-			// and those get a generic message. Internal validation failures
-			// (unknown bundle, missing APP_URL…) keep their specific, safe
-			// message so the user can act on them. Full details go to the
-			// server log either way.
-			return checkoutFailure(error, user.orgId);
-		}
+		return checkoutRedirect(() => createCreditCheckout(user.orgId, user, bundleId, attemptId), user.orgId);
 	},
 	/** Owner-only: creates a Mercado Pago BRL prepaid credit checkout. */
 	buyMercadoPago: async ({ request, locals }) => {
@@ -193,13 +195,7 @@ export const actions: Actions = {
 		const plan = String(form.get('plan') ?? '');
 		const attemptId = String(form.get('attempt_id') ?? '');
 		if (plan !== 'hosted' && plan !== 'lifetime') return fail(400, { error: 'Unknown billing plan.' });
-		try {
-			const url = await createPlanCheckout(user.orgId, user, plan, attemptId);
-			throw redirect(303, url);
-		} catch (error) {
-			if (isRedirect(error) || isHttpError(error)) throw error;
-			return checkoutFailure(error, user.orgId);
-		}
+		return checkoutRedirect(() => createPlanCheckout(user.orgId, user, plan, attemptId), user.orgId);
 	},
 	/**
 	 * Owner-only: enables/disables auto top-up. Enabling requires the explicit
@@ -280,5 +276,49 @@ export const actions: Actions = {
 				.where(eq(organizations.id, user.orgId));
 		}
 		return { ok: true };
+	},
+	/**
+	 * Owner-only: opens the Stripe customer portal so the org can manage its
+	 * saved cards (and its hosted subscription) on Stripe's hosted page. Card
+	 * changes made there sync back via the payment_method.detached and
+	 * customer.updated webhooks — a changed/removed top-up card pauses auto
+	 * top-up until the owner re-consents here (savePaymentMethod's rule).
+	 */
+	manageCards: async ({ locals }) => {
+		const user = requireUser(locals);
+		// Env validation at handler start (AGENTS.md): creating the Stripe
+		// customer first would leave an external side effect from a request
+		// that could never open the portal (codex P1). The value must be an
+		// absolute http(s) base URL — a malformed one passes a presence-only
+		// check and only fails later at new URL() (cubic/codex P2).
+		const appUrl = env.APP_URL ? URL.parse(env.APP_URL) : null;
+		if (!appUrl || (appUrl.protocol !== 'https:' && appUrl.protocol !== 'http:')) {
+			throw error(500, 'APP_URL is not configured as a valid absolute http(s) URL');
+		}
+		try {
+			// Owner-only inside; creates the customer on first use so a brand-new
+			// org can still open the portal to add its first card.
+			const customer = await getOrCreateStripeCustomer(user.orgId, user);
+			// No `configuration` id: Stripe uses the account's DEFAULT portal
+			// configuration — the human activates it once (docs/
+			// stripe-checkout-webhooks.md) with payment-method management on.
+			const session = await getStripe().billingPortal.sessions.create({
+				customer,
+				return_url: new URL('/usage', appUrl).toString()
+			});
+			// I1: every field of a Stripe response is nullable — never emit a
+			// redirect to an unvalidated url. Portal URLs are always https
+			// (billing.stripe.com); anything else is malformed (cubic P2).
+			const portalUrl = typeof session.url === 'string' ? URL.parse(session.url) : null;
+			if (!portalUrl || portalUrl.protocol !== 'https:') {
+				throw new Error(`stripe returned no usable portal URL for customer ${customer}`);
+			}
+			throw redirect(303, portalUrl.toString());
+		} catch (error) {
+			// The thrown redirect is the success path — never flatten it into a
+			// 400 (same guard as buy/buyPlan); auth HttpErrors pass through too.
+			if (isRedirect(error) || isHttpError(error)) throw error;
+			return checkoutFailure(error, user.orgId, 'open the card manager');
+		}
 	}
 };

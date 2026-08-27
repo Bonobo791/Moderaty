@@ -270,6 +270,8 @@ export async function createTestDb(): Promise<TestDb> {
 			stripe_subscription_cancel_at_period_end INTEGER,
 			stripe_subscription_last_event_created INTEGER,
 			stripe_subscription_last_event_id TEXT,
+			stripe_customer_last_event_created INTEGER,
+			stripe_customer_last_event_id TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE UNIQUE INDEX organizations_stripe_customer_id_unique ON organizations (stripe_customer_id) WHERE stripe_customer_id IS NOT NULL`,

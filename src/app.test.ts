@@ -35,4 +35,13 @@ describe('app shell', () => {
 		expect(svelteKitHead).toBeGreaterThanOrEqual(0); // placeholder must exist (indexOf -1 would silently pass the comparison)
 		expect(fallbackTitle).toBeGreaterThan(svelteKitHead);
 	});
+
+	test('.gitignore ignores installed .agents tooling copies', () => {
+		// `.agents/` holds installed skill copies and hook state (the Reasonix /
+		// superpowers installs) — none of it is repo content, so the ignore rule
+		// is pinned. (The maintainer deliberately untracked skills-src in
+		// 189d985; the earlier exception test was retired with it.)
+		const gitignore = readFileSync(new URL('../.gitignore', import.meta.url), 'utf8');
+		expect(gitignore.indexOf('.agents/*')).toBeGreaterThanOrEqual(0);
+	});
 });

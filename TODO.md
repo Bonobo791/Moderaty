@@ -1,7 +1,39 @@
 # TODO
+-Create log drain in coolify
+Here's the full runbook. ~10 minutes, mostly in Axiom.
 
-Once channel is disconnected, the user should be routed back to their dashboard.
-Once a user account is deleted, the user should be routed to a page that says "your data is now deleted and your account has been closed". This should also cause any subscriptions or auto-top ups for the user to be deleted.
+## 1. Axiom setup (app.axiom.co)
+
+1. Create a free account if you don't have one.
+2. **Datasets → New Dataset** — name it `moderaty`.
+3. **Settings → API Tokens → New Token** — name e.g. `coolify-drain`, scope it to **Ingest** on the `moderaty` dataset only. Copy the token (shown once).
+
+## 2. Coolify — server level (one time)
+
+1. Coolify dashboard → **Servers** → the VPS running `moderaty-prod`/`moderaty-dev`.
+2. **Log Drains** tab → enable.
+3. Select **Axiom**, paste the API token and dataset name `moderaty`, save.
+
+## 3. Coolify — per app (both apps)
+
+For each of `moderaty-prod` and `moderaty-dev`:
+
+1. Open the app → **Advanced** tab → **Drain Logs** → enable.
+2. **Restart** the app — drains only attach on container start, per the [Coolify docs](https://coolify.io/docs/knowledge-base/drain-logs).
+
+## 4. Verify
+
+1. On `moderaty-dev`, fire one cron tick (`curl -H "Authorization: Bearer <CRON_SECRET>" https://<dev-domain>/api/cron`) or just browse a few pages.
+2. In Axiom → `moderaty` dataset → you should see container stdout arriving within seconds: cron tick logs, request logs, any server errors.
+
+## What this gets you
+
+Everything the app writes to stdout/stderr — which is all our logging (`console.error` on failed dry runs, cron errors, OAuth failures) — lands in Axiom, searchable and persistent, instead of evaporating with the container. That's the durable answer to "how do I see server errors": Axiom's query UI (or alerts, if you later want e.g. a notification on `dry run failed`).
+
+One note: the drain ships **container** logs, so the in-container cron ticker (`dev-cron.mjs`) output is included too. Nothing in the repo needs to change — this is pure Coolify/Axiom config, so no commit, no doc update required unless you want it recorded in `docs/COOLIFY_BUNNY.md` (say the word and I'll add a short §"Log drain" there).
+
+-There needs to be an area to actually sign up for the recurring subscription and also the $49 lifetime deal. 
+-There needs to be a way to cancel any subscriptions or auto top-ups
 
 Deferred product work, quality refactors, and release-step items. The
 SonarQube/Codacy quality sections below reflect the state after the
@@ -32,32 +64,6 @@ re-evaluate on the next `dev → main` merge.
 - [ ] Replace legal operator placeholders (`[legal name]`, CNPJ, and address)
       in Terms and Privacy before production launch.
 
-## Quality — status after the 2026-08-20 SonarQube critical triage
-
-**SonarQube criticals: ALL FIXED on `dev`** (verified with
-`analyze_code_snippet` — 0 criticals on every production file):
-
-- [x] `src/lib/server/rules.ts` — `duplicateAlternation` (29) + `unsafeSyntax`
-      (25) → shared `scanAction()` state machine + `isBackreference` (`3c389a8`).
-- [x] `src/routes/api/auth/google/callback/+server.ts` — `fetchOwnedChannels`
-      (27) → `fetchChannelPage` + `collectChannelItems` (`7137003`).
-- [x] `src/lib/server/stripe/webhooks.ts` — `fulfillCheckout` (38) →
-      `rejectLateGrant` + `loadBundle` + `savePaymentMethod` (`ff11c09`).
-- [x] `src/lib/server/pipeline.ts` — `decideNewComments` (27),
-      `processOutstandingActions` (16), `runChannel` (33) → helper extraction
-      (`84f3895`).
-- [x] `src/routes/api/cron/+server.ts` — `GET` (53) → `authorizeCron` +
-      `runSweep` + `runClaimedChannel` (`4cc7008`).
-- [x] `src/lib/server/deletion.ts:147` — refactored in `4115955`.
-- [x] `drizzle/*.sql` `plsql:S1192` ×2 (generated migration SQL — cannot
-      define constants) — marked WONTFIX in SonarQube.
-- [x] Already-fixed-on-dev items the main analysis was stale for:
-      `write-commit-marker.mjs`, `pre-push-gate.mjs`, `billing/autotopup.ts`,
-      google login callback, `google.ts`, `youtube.ts`.
-
-After the next `dev → main` merge, re-check the SonarCloud quality gate
-(critical count should be 0) and Codacy.
-
 ## Deferred quality refactors (low value; keep the suite green)
 
 Test/script helpers and large test files flagged by Lizard (Codacy) nloc/ccn —
@@ -83,22 +89,6 @@ refactor only when the file is touched anyway; no security/correctness impact.
       pt-BR legal translation ships).
 
 ## Documentation and release readiness
-
-- [x] Restore the Netlify/Turso/Google/cron/backup/outage runbook in
-      `DEPLOY.md`.
-- [x] Reconcile the dev database's historical migration hashes and verify all
-      37 journal entries. Production remains human-only and must be checked
-      separately.
-- [x] Mark the completed pipeline refactor and disconnect design documents as
-      historical, and identify the current implementation as the source of
-      truth. Done — both docs already carry a historical banner pointing at the
-      current implementation (verified 2026-08-25, PR #136 round 2 triage).
-- [x] Replace the legacy greenfield instructions in
-      `EXECUTION_PLAN_YouTube_Comment_Moderator.md` with a link to the current
-      README, AGENTS.md, and deployment runbook. Done — the document already
-      opens with a "Historical plan" banner linking to `README.md`,
-      `AGENTS.md`, `DEPLOY.md`, and `docs/COOLIFY_BUNNY.md` (verified
-      2026-08-25, PR #136 round 2 triage).
 - [ ] Triage the seven existing Svelte warnings in the UI components and
       account page.
 
@@ -116,10 +106,3 @@ refactor only when the file is touched anyway; no security/correctness impact.
       `package-lock.json` file-length, `netlify-migrate.test.mjs` /
       `pre-push-gate.mjs` / `tonePrompt.js` "looks like JS template string".
 
-## Operational (human, at the dev → main release)
-
-- [ ] Apply migration **0028** (`contact_submissions_pending_email_unique`
-      partial index) to the production DB per DEPLOY.md §1 — committed and
-      dev-verified.
-- [ ] Merge `dev → main` (batched release), then confirm SonarCloud + Codacy
-      gates on the new main head.

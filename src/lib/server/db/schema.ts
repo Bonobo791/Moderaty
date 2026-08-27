@@ -98,6 +98,11 @@ export const organizations = sqliteTable('organizations', {
 	stripeSubscriptionCancelAtPeriodEnd: integer('stripe_subscription_cancel_at_period_end'),
 	stripeSubscriptionLastEventCreated: integer('stripe_subscription_last_event_created'),
 	stripeSubscriptionLastEventId: text('stripe_subscription_last_event_id'),
+	// customer.updated ordering cursor (Stripe does not guarantee webhook
+	// ordering): the last APPLIED customer.updated envelope, so a stale
+	// snapshot can never resurrect an old default card.
+	stripeCustomerLastEventCreated: integer('stripe_customer_last_event_created'),
+	stripeCustomerLastEventId: text('stripe_customer_last_event_id'),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
 	uniqueIndex('organizations_stripe_customer_id_unique').on(table.stripeCustomerId).where(sql`${table.stripeCustomerId} IS NOT NULL`),

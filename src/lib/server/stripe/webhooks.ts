@@ -21,7 +21,7 @@
 // The inbox lease is claimed before side effects and marked complete only after
 // successful handling; failed handlers release the lease for Stripe's retry.
 
-import { and, eq, isNull, lt, ne, or } from 'drizzle-orm';
+import { and, eq, isNull, lt, ne, or, sql, type SQL } from 'drizzle-orm';
 import type Stripe from 'stripe';
 import { randomUUID } from 'node:crypto';
 
@@ -624,6 +624,186 @@ async function findOrgForStripe(subscriptionId?: string, customerId?: string) {
 	return undefined;
 }
 
+/**
+ * Card-management sync for the Stripe customer portal: removals happen
+ * off-app, so the org's saved top-up card pointer must never go stale. The
+ * removed card being the org's DEFAULT clears the pointer and pauses auto
+ * top-up — the consent evidence covered the old card (same rule as
+ * savePaymentMethod's card-change branch); any other wallet card is a no-op.
+ * The lookup keys on the PM id, never the event's customer: Stripe fires
+ * `payment_method.detached` AFTER detachment, so `customer` is already null
+ * on the delivered object (codex P1).
+ */
+async function handlePaymentMethodDetached(paymentMethod: Stripe.PaymentMethod): Promise<void> {
+	const org = await db.select().from(organizations).where(eq(organizations.stripeDefaultPmId, paymentMethod.id)).get();
+	if (!org) {
+		// Some other wallet card, or a customer erased at Stripe by account
+		// deletion: nothing to sync, and redelivery can never fix it — so
+		// acknowledge (in the server log) instead of throwing into Stripe's
+		// multi-day retry loop.
+		console.info(`stripe: payment_method.detached ${paymentMethod.id} is no organization's top-up card — nothing to sync`);
+		return;
+	}
+	// Compare-and-set: between the read above and this write, a concurrent
+	// customer.updated can store a REPLACEMENT card — an update keyed only on
+	// the org id would clear that valid new card (codex P1). Zero rows = the
+	// pointer already moved; acknowledge, never retry.
+	const res = await db
+		.update(organizations)
+		.set({ stripeDefaultPmId: null, autoTopupEnabled: 0, autoTopupState: 'disabled' })
+		.where(and(eq(organizations.id, org.id), eq(organizations.stripeDefaultPmId, paymentMethod.id)));
+	if (res.rowsAffected === 0) {
+		console.info(`stripe: payment_method.detached ${paymentMethod.id} lost the apply race for org ${org.id} — the pointer already moved to a newer card`);
+		return;
+	}
+	console.error(`stripe: the top-up card ${paymentMethod.id} was removed for org ${org.id} — auto top-up DISABLED; save a new card and re-enable`);
+}
+
+/**
+ * Customer-portal default-card sync: a NEW default payment method is a new
+ * billing instrument the on-file consent never covered, so the pointer
+ * resyncs and auto top-up pauses for fresh consent. Events without the
+ * default_payment_method KEY (the account-deletion e-mail scrub, name
+ * changes) are not card changes and leave the org untouched; an EXPLICIT
+ * null default is a real removal and mirrors as a cleared pointer (cubic P1).
+ * Stripe does not guarantee webhook ordering, so snapshots apply only in
+ * envelope order — the persisted cursor (`stripe_customer_last_event_*`)
+ * rejects an older event arriving late instead of letting it resurrect a
+ * previous card (same guard as applySubscriptionSnapshot; coderabbit MAJOR).
+ * The envelope `created` has SECOND precision and event ids carry no
+ * documented causal order, so a same-second tie reconciles from the LIVE
+ * customer instead of sorting opaque ids (codex P1).
+ */
+async function handleCustomerUpdated(customer: Stripe.Customer, eventCreated: number | undefined, eventId: string): Promise<void> {
+	const org = await findOrgForStripe(undefined, customer.id);
+	if (!org) {
+		console.info(`stripe: customer.updated for untracked customer ${customer.id} — nothing to sync`);
+		return;
+	}
+	const settings = customer.invoice_settings;
+	if (!settings || !('default_payment_method' in settings)) return;
+	// I2: out-of-range external data is a failed API call (codex P2). A
+	// garbage-but-numeric `created` persisted as the ordering cursor would mark
+	// every later legitimate update stale forever — accept only a positive safe
+	// integer no more than a day in the future (clock-skew tolerance).
+	if (
+		typeof eventCreated !== 'number' ||
+		!Number.isSafeInteger(eventCreated) ||
+		eventCreated <= 0 ||
+		eventCreated > Math.floor(Date.now() / 1000) + 86_400
+	) {
+		throw new Error(`customer.updated ${eventId} carries an invalid envelope created timestamp: ${eventCreated}`);
+	}
+	let lastCreated = org.stripeCustomerLastEventCreated;
+	if (lastCreated !== null && eventCreated < lastCreated) {
+		console.error(`stripe: ignoring stale customer.updated ${eventId} for org ${org.id} (created ${eventCreated}, last applied ${lastCreated})`);
+		return;
+	}
+	type OrgSet = { [K in keyof typeof organizations.$inferInsert]?: (typeof organizations.$inferInsert)[K] | SQL };
+	// Compare-and-set in the UPDATE itself: two deliveries hold independent
+	// inbox leases and can both pass the read-time guard, so the write must
+	// re-check the cursor. A PAYLOAD write demands a strictly older cursor; a
+	// RECONCILE write accepts an equal one (its value came from the live fetch,
+	// which is newer than either tied snapshot).
+	const writeDefaultPm = async (pmId: string | null, allowTie: boolean): Promise<boolean> => {
+		const cursorAppliable = or(
+			isNull(organizations.stripeCustomerLastEventCreated),
+			lt(organizations.stripeCustomerLastEventCreated, eventCreated),
+			...(allowTie ? [eq(organizations.stripeCustomerLastEventCreated, eventCreated)] : [])
+		);
+		const set: OrgSet =
+			pmId === org.stripeDefaultPmId
+				? // No card change, but the cursor must still advance — otherwise a
+					// stale snapshot arriving later could resurrect the previous card.
+					{ stripeCustomerLastEventCreated: eventCreated, stripeCustomerLastEventId: eventId }
+				: {
+						stripeDefaultPmId: pmId,
+						stripeCustomerLastEventCreated: eventCreated,
+						stripeCustomerLastEventId: eventId,
+						// Atomic consent reset (codex P1): the CASE decides at row-lock
+						// time, so an enable landing INSIDE the read-write window is
+						// still disabled — the consent never covered the new card.
+						// An org with top-up off keeps its state (no spurious
+						// failure-paused 'disabled').
+						autoTopupEnabled: sql`CASE WHEN ${organizations.autoTopupEnabled} = 1 THEN 0 ELSE ${organizations.autoTopupEnabled} END`,
+						autoTopupState: sql`CASE WHEN ${organizations.autoTopupEnabled} = 1 THEN 'disabled' ELSE ${organizations.autoTopupState} END`
+					};
+		const res = await db.update(organizations).set(set).where(and(eq(organizations.id, org.id), cursorAppliable));
+		return res.rowsAffected > 0;
+	};
+	// Two attempts bound the race fallout: a payload write that loses to an
+	// EQUAL-created cursor means ordering is still undecidable — retry once as
+	// a live-customer reconcile before acknowledging.
+	for (let attempt = 0; attempt < 2; attempt++) {
+		const tied = lastCreated === eventCreated;
+		const incomingId = tied ? await fetchLiveDefaultPmId(customer.id, eventId) : eventDefaultPmId(customer, eventId);
+		if (await writeDefaultPm(incomingId, tied)) {
+			if (incomingId !== org.stripeDefaultPmId) {
+				// The disable was decided at row-lock time, so the accurate
+				// post-write row state — not the pre-write read — drives the log.
+				const after = await db
+					.select({ autoTopupEnabled: organizations.autoTopupEnabled, autoTopupState: organizations.autoTopupState })
+					.from(organizations)
+					.where(eq(organizations.id, org.id))
+					.get();
+				const change = incomingId ? `${org.stripeDefaultPmId} -> ${incomingId}` : `${org.stripeDefaultPmId} -> cleared`;
+				if (after?.autoTopupEnabled === 0 && after.autoTopupState === 'disabled' && org.autoTopupState !== 'disabled') {
+					console.error(`stripe: default card changed for org ${org.id} (${change}) — auto top-up DISABLED, fresh consent required`);
+				} else {
+					console.info(`stripe: default card changed for org ${org.id} (${change})`);
+				}
+			}
+			return;
+		}
+		if (tied) break; // a reconcile losing means a strictly-newer cursor landed — nothing to redo
+		const fresh = await db
+			.select({ created: organizations.stripeCustomerLastEventCreated })
+			.from(organizations)
+			.where(eq(organizations.id, org.id))
+			.get();
+		if (fresh?.created !== eventCreated) break; // lost to a strictly newer snapshot (or the row is gone)
+		lastCreated = fresh.created;
+	}
+	console.info(`stripe: customer.updated ${eventId} lost the apply race for org ${org.id} — a newer-or-equal snapshot already landed`);
+}
+
+/**
+ * I2: a present default_payment_method key on the EVENT payload must carry a
+ * usable value — null (cleared), a non-empty string id, or an expanded object
+ * with a non-empty string id. Anything else ({ id: 123 }, '', {}) is a failed
+ * API call: throw so Stripe redelivers rather than freezing garbage into the
+ * org row (codex P2). Key ABSENCE is checked by the caller (not a card change).
+ */
+function eventDefaultPmId(customer: Stripe.Customer, eventId: string): string | null {
+	const incoming = customer.invoice_settings?.default_payment_method;
+	if (incoming === null) return null;
+	if (typeof incoming === 'string' && incoming.length > 0) return incoming;
+	if (typeof incoming === 'object' && typeof incoming.id === 'string' && incoming.id.length > 0) return incoming.id;
+	throw new Error(`customer.updated ${eventId} carries a malformed default_payment_method`);
+}
+
+/**
+ * Same-second reconcile (codex P1): on a `created` tie the event payload
+ * cannot be ordered, so the default is read from the LIVE customer — the
+ * state after every change made up to the fetch. Any failure throws so Stripe
+ * redelivers: acknowledging into a frozen stale pointer is worse than a retry.
+ */
+async function fetchLiveDefaultPmId(customerId: string, eventId: string): Promise<string | null> {
+	const live = await getStripe().customers.retrieve(customerId, { expand: ['invoice_settings.default_payment_method'] });
+	// A customer deleted at Stripe can never be reconciled — throw so Stripe
+	// redelivers; by then account deletion has dropped the org row and the
+	// redelivery acknowledges as untracked.
+	if ('deleted' in live && live.deleted) {
+		throw new Error(`customer.updated ${eventId}: cannot reconcile deleted customer ${customerId}`);
+	}
+	// On the LIVE object an absent key IS the current state: no default card.
+	const value = live.invoice_settings?.default_payment_method;
+	if (value === null || value === undefined) return null;
+	if (typeof value === 'string' && value.length > 0) return value;
+	if (typeof value === 'object' && typeof value.id === 'string' && value.id.length > 0) return value.id;
+	throw new Error(`customer.updated ${eventId}: live customer ${customerId} carries a malformed default_payment_method`);
+}
+
 function isSupersededSubscription(org: Awaited<ReturnType<typeof findOrgForStripe>>, subscriptionId: string, eventType: string): boolean {
 	if (!org?.stripeSubscriptionId || org.stripeSubscriptionId === subscriptionId) return false;
 	console.error(`stripe: ignoring stale ${eventType} for superseded subscription ${subscriptionId}; current subscription is ${org.stripeSubscriptionId}`);
@@ -773,6 +953,14 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
 		case 'charge.dispute.funds_withdrawn':
 		case 'charge.dispute.funds_reinstated':
 			console.error(`stripe: dispute lifecycle event ${event.type} for ${event.data.object.id} — funds_* events need manual review`);
+			handled = true;
+			break;
+		case 'payment_method.detached':
+			await handlePaymentMethodDetached(event.data.object);
+			handled = true;
+			break;
+		case 'customer.updated':
+			await handleCustomerUpdated(event.data.object, event.created, event.id);
 			handled = true;
 			break;
 			default:

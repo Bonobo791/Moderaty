@@ -482,6 +482,22 @@ describe('usage manageCards action (Stripe customer portal)', () => {
 		}
 	});
 
+	test('a malformed APP_URL fails 500 BEFORE any Stripe customer is created', async () => {
+		// A non-empty but unparseable APP_URL passes a presence-only check and
+		// would create the customer before new URL() throws (cubic/codex P2).
+		await seedOrg(); // no stripeCustomerId — the create path is the trap
+		const { env } = await import('$env/dynamic/private');
+		const original = env.APP_URL;
+		(env as Record<string, unknown>).APP_URL = 'moderaty.example';
+		try {
+			await expect(manageCards()).rejects.toMatchObject({ status: 500 });
+			expect(mocks.customersCreate).not.toHaveBeenCalled();
+			expect(mocks.billingPortalSessionsCreate).not.toHaveBeenCalled();
+		} finally {
+			(env as Record<string, unknown>).APP_URL = original;
+		}
+	});
+
 	test('a portal session without a URL is a loud 400, never a broken redirect', async () => {
 		// I1: every field of a Stripe response is nullable — an unvalidated
 		// session.url would emit a broken Location header (codex P1).

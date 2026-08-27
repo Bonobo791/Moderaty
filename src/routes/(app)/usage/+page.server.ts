@@ -293,9 +293,13 @@ export const actions: Actions = {
 		const user = requireUser(locals);
 		// Env validation at handler start (AGENTS.md): creating the Stripe
 		// customer first would leave an external side effect from a request
-		// that could never open the portal (codex P1).
-		const appUrl = env.APP_URL;
-		if (!appUrl) throw error(500, 'APP_URL is not configured');
+		// that could never open the portal (codex P1). The value must be an
+		// absolute http(s) base URL — a malformed one passes a presence-only
+		// check and only fails later at new URL() (cubic/codex P2).
+		const appUrl = env.APP_URL ? URL.parse(env.APP_URL) : null;
+		if (!appUrl || (appUrl.protocol !== 'https:' && appUrl.protocol !== 'http:')) {
+			throw error(500, 'APP_URL is not configured as a valid absolute http(s) URL');
+		}
 		try {
 			// Owner-only inside; creates the customer on first use so a brand-new
 			// org can still open the portal to add its first card.

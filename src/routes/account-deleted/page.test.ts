@@ -39,3 +39,10 @@ test('renders the deletion confirmation verbatim (pt-BR)', () => {
 	expect(body).toContain('Seus dados foram excluídos e sua conta foi encerrada.');
 	expect(body).toContain('href="/"');
 });
+
+test('the confirmation acknowledges the legally retained consent record', () => {
+	// The consents evidentiary log keeps the e-mail for ten years (LGPD Art.
+	// 16, III) — the copy must qualify "deleted", never overpromise (codex P2).
+	expect(renderPage('en')).toContain('ten years');
+	expect(renderPage('pt-BR')).toContain('dez anos');
+});

@@ -43,7 +43,7 @@ const MESSAGES = {
 		acceptContinue: 'Accept and continue',
 		marketingText: 'Send me occasional product updates and moderation tips by e-mail (optional)',
 		accountDeletedTitle: 'Your account has been closed',
-		accountDeletedBody: 'Your data is now deleted and your account has been closed.',
+		accountDeletedBody: 'Your data is now deleted and your account has been closed. The only record we keep is your consent to our legal documents, as the law requires; it is erased after ten years.',
 		accountDeletedBackHome: 'Back to Moderaty'
 	},
 	'pt-BR': {
@@ -73,7 +73,7 @@ const MESSAGES = {
 		acceptContinue: 'Aceitar e continuar',
 		marketingText: 'Quero receber ocasionalmente novidades do produto e dicas de moderação por e-mail (opcional)',
 		accountDeletedTitle: 'Sua conta foi encerrada',
-		accountDeletedBody: 'Seus dados foram excluídos e sua conta foi encerrada.',
+		accountDeletedBody: 'Seus dados foram excluídos e sua conta foi encerrada. O único registro que mantemos é o seu consentimento aos documentos legais, conforme exigido por lei; ele é apagado após dez anos.',
 		accountDeletedBackHome: 'Voltar ao Moderaty'
 	}
 } as const;

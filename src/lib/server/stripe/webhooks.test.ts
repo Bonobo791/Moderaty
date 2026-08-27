@@ -856,6 +856,26 @@ describe('portal card sync (changes made in the Stripe customer portal)', () => 
 		}
 	});
 
+	test('customer.updated with an expanded default whose id is not a string throws — never stored, never processed', async () => {
+		// I1/I2: a malformed signed payload ({ default_payment_method: { id: 123 } })
+		// must not pass a non-string into the text column, nor be silently
+		// acknowledged and marked processed (codex P2) — throw so Stripe
+		// redelivers instead of freezing garbage into the org row.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeDefaultPmId: 'pm_1' });
+		await expect(handleStripeEvent(event('customer.updated', 'evt_cu_bad', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: { id: 123 } } }, 100) as never)).rejects.toThrow('malformed');
+		expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_1' });
+		const receipt = await testDb().db.select().from(stripeEvents).where(eq(stripeEvents.eventId, 'evt_cu_bad')).get();
+		expect(receipt?.processedAt ?? null).toBeNull();
+	});
+
+	test('customer.updated with an empty-string default id throws', async () => {
+		// '' is not a valid null-default (that is null) nor a usable card id —
+		// acknowledge nothing, store nothing (codex P2).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeDefaultPmId: 'pm_1' });
+		await expect(handleStripeEvent(event('customer.updated', 'evt_cu_empty', { id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: '' } }, 100) as never)).rejects.toThrow('malformed');
+		expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_1' });
+	});
+
 	test('a stale (out-of-order) customer.updated cannot resurrect an old card', async () => {
 		// Stripe does not guarantee webhook ordering: an older immutable
 		// snapshot arriving after a newer one must not restore the previous

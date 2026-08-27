@@ -679,7 +679,20 @@ async function handleCustomerUpdated(customer: Stripe.Customer, eventCreated: nu
 		return;
 	}
 	const incoming = settings.default_payment_method;
-	const incomingId = typeof incoming === 'string' ? incoming : (incoming?.id ?? null);
+	// I2: a present key must carry a usable value — null (cleared), a
+	// non-empty string id, or an expanded object with a non-empty string id.
+	// Anything else ({ id: 123 }, '', {}) is a failed API call: throw so
+	// Stripe redelivers rather than freezing garbage into the org row (codex P2).
+	let incomingId: string | null;
+	if (incoming === null) {
+		incomingId = null;
+	} else if (typeof incoming === 'string' && incoming.length > 0) {
+		incomingId = incoming;
+	} else if (typeof incoming === 'object' && typeof incoming.id === 'string' && incoming.id.length > 0) {
+		incomingId = incoming.id;
+	} else {
+		throw new Error(`customer.updated ${eventId} carries a malformed default_payment_method`);
+	}
 	if (incomingId === org.stripeDefaultPmId) {
 		// No card change, but the cursor must still advance — otherwise a
 		// stale snapshot arriving later could resurrect the previous card.

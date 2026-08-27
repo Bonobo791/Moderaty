@@ -42,7 +42,9 @@ test('renders the deletion confirmation verbatim (pt-BR)', () => {
 
 test('the confirmation acknowledges the legally retained consent record', () => {
 	// The consents evidentiary log keeps the e-mail for ten years (LGPD Art.
-	// 16, III) — the copy must qualify "deleted", never overpromise (codex P2).
-	expect(renderPage('en')).toContain('ten years');
-	expect(renderPage('pt-BR')).toContain('dez anos');
+	// 16, III); the cron sweep erases only consents.email — the anonymized row
+	// itself is KEPT. The copy must promise exactly that, never that the whole
+	// record is erased (codex P2).
+	expect(renderPage('en')).toContain('the e-mail it contains is erased after ten years');
+	expect(renderPage('pt-BR')).toContain('o e-mail que ele contém é apagado após dez anos');
 });

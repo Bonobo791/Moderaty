@@ -134,8 +134,9 @@ Insert `stripe_events` in the same transaction as the grant; the UNIQUE `event_i
 The usage page's **Manage cards** button opens a Stripe customer portal
 session (`billingPortal.sessions.create` with no `configuration` id — Stripe
 uses the account's **default** portal configuration). Card changes made there
-sync back over two webhook events: `payment_method.detached` (removes the
-org's top-up card pointer and pauses auto top-up) and `customer.updated`
+sync back over two webhook events: `payment_method.detached` (when the
+removed card IS the org's tracked top-up card, clears the pointer and pauses
+auto top-up; detaching any other wallet card is a no-op) and `customer.updated`
 (resyncs `invoice_settings.default_payment_method`; a changed default pauses
 auto top-up for fresh consent — the same rule as a new card at checkout).
 

@@ -217,9 +217,9 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		<h2 style="margin-top:0">Cards</h2>
 		<p class="muted">
 			{#if data.autoTopup?.hasCard}
-				A card is saved for automatic top-up and future purchases.
+				A card is saved for automatic top-up.
 			{:else}
-				No card saved yet — buy any bundle once, or add one via Manage cards.
+				No card saved yet — buy a Stripe bundle once, or add one via Manage cards.
 			{/if}
 			Add, remove, or change your cards on Stripe's secure customer portal; your hosted
 			subscription can be managed there too. Changing the saved card pauses automatic

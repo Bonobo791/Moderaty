@@ -50,3 +50,4 @@ reasonix.toml
 # .agents/skills-src/<name>/). A bare `.agents` would exclude the directory
 # itself and make re-including anything under it impossible.
 .agents/*
+!.agents/skills-src/

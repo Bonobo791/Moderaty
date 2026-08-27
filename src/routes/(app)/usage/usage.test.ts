@@ -525,6 +525,12 @@ describe('usage cards section', () => {
 		const body = renderUsage();
 		expect(body).toContain('action="?/manageCards"');
 		expect(body).toContain('Manage cards');
+		// The saved card backs automatic top-up only — Checkout saves it with
+		// setup_future_usage: 'off_session' (allow_redisplay: limited), so it is
+		// never prefilled in later Checkout sessions; promising "future
+		// purchases" overclaims (cubic P2).
+		expect(body).toContain('A card is saved for automatic top-up.');
+		expect(body).not.toContain('future purchases');
 	});
 
 	test('a member never sees the card manager', () => {
@@ -538,5 +544,9 @@ describe('usage cards section', () => {
 		});
 		expect(body).toContain('No card saved yet');
 		expect(body).not.toContain('A card is saved');
+		// Only a STRIPE bundle saves a card — a Mercado Pago purchase saves no
+		// Stripe payment method, so "buy any bundle" would mislead (cubic P2).
+		expect(body).toContain('buy a Stripe bundle once');
+		expect(body).not.toContain('buy any bundle');
 	});
 });

@@ -630,21 +630,20 @@ async function findOrgForStripe(subscriptionId?: string, customerId?: string) {
  * removed card being the org's DEFAULT clears the pointer and pauses auto
  * top-up — the consent evidence covered the old card (same rule as
  * savePaymentMethod's card-change branch); any other wallet card is a no-op.
+ * The lookup keys on the PM id, never the event's customer: Stripe fires
+ * `payment_method.detached` AFTER detachment, so `customer` is already null
+ * on the delivered object (codex P1).
  */
 async function handlePaymentMethodDetached(paymentMethod: Stripe.PaymentMethod): Promise<void> {
-	const customerId = typeof paymentMethod.customer === 'string' ? paymentMethod.customer : paymentMethod.customer?.id;
-	if (!customerId) {
-		console.info(`stripe: payment_method.detached ${paymentMethod.id} carries no customer — nothing to sync`);
-		return;
-	}
-	const org = await findOrgForStripe(undefined, customerId);
+	const org = await db.select().from(organizations).where(eq(organizations.stripeDefaultPmId, paymentMethod.id)).get();
 	if (!org) {
-		// Expected after account deletion (the customer was erased at Stripe):
-		// redelivery can never fix this, so acknowledge without throwing.
-		console.info(`stripe: payment_method.detached ${paymentMethod.id} for untracked customer ${customerId} — nothing to sync`);
+		// Some other wallet card, or a customer erased at Stripe by account
+		// deletion: nothing to sync, and redelivery can never fix it — so
+		// acknowledge (in the server log) instead of throwing into Stripe's
+		// multi-day retry loop.
+		console.info(`stripe: payment_method.detached ${paymentMethod.id} is no organization's top-up card — nothing to sync`);
 		return;
 	}
-	if (org.stripeDefaultPmId !== paymentMethod.id) return;
 	await db
 		.update(organizations)
 		.set({ stripeDefaultPmId: null, autoTopupEnabled: 0, autoTopupState: 'disabled' })

@@ -810,7 +810,7 @@ describe('portal card sync (changes made in the Stripe customer portal)', () => 
 		const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 		try {
 			expect(await handleStripeEvent(event('payment_method.detached', 'evt_pmd_3', { id: 'pm_x', object: 'payment_method', customer: 'cus_unknown' }) as never)).toBe(true);
-			expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('cus_unknown'));
+			expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('pm_x'));
 		} finally {
 			infoSpy.mockRestore();
 		}
@@ -838,5 +838,20 @@ describe('portal card sync (changes made in the Stripe customer portal)', () => 
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeDefaultPmId: 'pm_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
 		expect(await handleStripeEvent(event('customer.updated', 'evt_cu_3', { id: 'cus_1', object: 'customer', email: '', invoice_settings: {} }) as never)).toBe(true);
 		expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
+	});
+
+	test('payment_method.detached arriving with customer: null still clears the org top-up card', async () => {
+		// Stripe fires the event AFTER detachment, so the PaymentMethod's
+		// customer is already null — keying the org lookup on it would leave
+		// the top-up pointer stale forever (codex P1). The PM id is the key.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeDefaultPmId: 'pm_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			expect(await handleStripeEvent(event('payment_method.detached', 'evt_pmd_null', { id: 'pm_1', object: 'payment_method', customer: null }) as never)).toBe(true);
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: null, autoTopupEnabled: 0, autoTopupState: 'disabled' });
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('pm_1'));
+		} finally {
+			errorSpy.mockRestore();
+		}
 	});
 });

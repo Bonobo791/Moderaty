@@ -644,10 +644,18 @@ async function handlePaymentMethodDetached(paymentMethod: Stripe.PaymentMethod):
 		console.info(`stripe: payment_method.detached ${paymentMethod.id} is no organization's top-up card — nothing to sync`);
 		return;
 	}
-	await db
+	// Compare-and-set: between the read above and this write, a concurrent
+	// customer.updated can store a REPLACEMENT card — an update keyed only on
+	// the org id would clear that valid new card (codex P1). Zero rows = the
+	// pointer already moved; acknowledge, never retry.
+	const res = await db
 		.update(organizations)
 		.set({ stripeDefaultPmId: null, autoTopupEnabled: 0, autoTopupState: 'disabled' })
-		.where(eq(organizations.id, org.id));
+		.where(and(eq(organizations.id, org.id), eq(organizations.stripeDefaultPmId, paymentMethod.id)));
+	if (res.rowsAffected === 0) {
+		console.info(`stripe: payment_method.detached ${paymentMethod.id} lost the apply race for org ${org.id} — the pointer already moved to a newer card`);
+		return;
+	}
 	console.error(`stripe: the top-up card ${paymentMethod.id} was removed for org ${org.id} — auto top-up DISABLED; save a new card and re-enable`);
 }
 

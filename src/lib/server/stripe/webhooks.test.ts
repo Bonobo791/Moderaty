@@ -957,4 +957,34 @@ describe('portal card sync (changes made in the Stripe customer portal)', () => 
 			errorSpy.mockRestore();
 		}
 	});
+
+	test('a detached event whose pointer moved mid-flight cannot clear the NEW card', async () => {
+		// The race, injected deterministically: the handler has read the org
+		// (pointer pm_1) when a concurrent customer.updated stores pm_2 INSIDE
+		// the read-write window. An update keyed only on the org id would clear
+		// the valid new card (codex P1); the compare-and-set restricts the
+		// clear to a pointer that still equals the detached payment-method id.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeDefaultPmId: 'pm_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		const realUpdate = testDb().db.update.bind(testDb().db);
+		let injected = false;
+		const updateSpy = vi.spyOn(testDb().db, 'update').mockImplementation(((table: unknown) => {
+			if (!injected && table === organizations) {
+				injected = true;
+				// The concurrent replacement lands first: client.execute starts
+				// immediately, while the handler's just-created builder only runs
+				// when the handler awaits it a few sync steps later.
+				void testDb().client.execute("UPDATE organizations SET stripe_default_pm_id = 'pm_2' WHERE id = 'org-1'");
+			}
+			return realUpdate(table as never);
+		}) as never);
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			expect(await handleStripeEvent(event('payment_method.detached', 'evt_pmd_race', { id: 'pm_1', object: 'payment_method', customer: null }) as never)).toBe(true);
+			expect(injected).toBe(true);
+			expect(await orgState()).toMatchObject({ stripeDefaultPmId: 'pm_2', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		} finally {
+			updateSpy.mockRestore();
+			errorSpy.mockRestore();
+		}
+	});
 });

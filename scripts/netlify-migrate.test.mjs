@@ -13,14 +13,15 @@
 //
 // Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
-// Behavior tests for netlify-migrate.mjs. The real drizzle-kit bin and the
-// real verification script are replaced via the script's documented test-only
-// seams (MODERATY_DRIZZLE_KIT_BIN / MODERATY_VERIFY_BIN) with fake node
-// scripts that record every invocation and can be told to fail, so the gate's
-// own logic — the CONTEXT decision, run order, and loud failure propagation —
-// is exercised end to end without touching a database. Every test fails if
-// the script's real logic breaks (e.g. running the migration on a preview
-// build, or ignoring a failure).
+// Behavior tests for netlify-migrate.mjs. The real drizzle-kit bin, the
+// real verification script, and the real database preflight are replaced via
+// the script's documented test-only seams (MODERATY_DRIZZLE_KIT_BIN /
+// MODERATY_VERIFY_BIN / MODERATY_PREFLIGHT_BIN) with fake node scripts that
+// record every invocation and can be told to fail, so the gate's own logic —
+// the CONTEXT decision, run order, and loud failure propagation — is exercised
+// end to end without touching a database. Every test fails if the script's
+// real logic breaks (e.g. running the migration on a preview build, or
+// ignoring a failure).
 
 import { execFile } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -52,6 +53,18 @@ if (process.env.GATE_FAIL === 'migrate') {
 `
 );
 
+// The fake database preflight: records the invocation, fails when told to.
+const fakePreflight = join(tmp, 'fake-preflight.cjs');
+writeFileSync(
+	fakePreflight,
+	`require('node:fs').appendFileSync(process.env.GATE_LOG, 'db:preflight\\n');
+if (process.env.GATE_FAIL === 'preflight') {
+  console.error('fake preflight: cannot reach the database — SERVER_ERROR: Server returned HTTP status 401');
+  process.exit(1);
+}
+`
+);
+
 // The fake verification script: records the invocation, fails when told to.
 const fakeVerify = join(tmp, 'fake-verify.cjs');
 writeFileSync(
@@ -71,6 +84,7 @@ function runGate(env) {
 			GATE_LOG: gateLog,
 			MODERATY_DRIZZLE_KIT_BIN: fakeDrizzle,
 			MODERATY_VERIFY_BIN: fakeVerify,
+			MODERATY_PREFLIGHT_BIN: fakePreflight,
 			// Preflight needs database credentials; explicit `env` overrides win.
 			TURSO_DATABASE_URL: 'https://db.example.turso.io',
 			TURSO_AUTH_TOKEN: 'test-token',
@@ -97,20 +111,38 @@ describe('netlify-migrate', () => {
 
 	it('runs db:migrate then db:verify on production builds and proceeds', async () => {
 		const { stdout } = await runGate({ CONTEXT: 'production' });
-		expect(logLines()).toEqual(['db:migrate', 'db:verify']);
+		expect(logLines()).toEqual(['db:preflight', 'db:migrate', 'db:verify']);
 		expect(stdout).toContain('migrations applied and verified — proceeding');
 	});
 
 	it('runs migrations on branch-deploy builds (dev branch deploys migrate dev-2)', async () => {
 		const { stdout } = await runGate({ CONTEXT: 'branch-deploy' });
-		expect(logLines()).toEqual(['db:migrate', 'db:verify']);
+		expect(logLines()).toEqual(['db:preflight', 'db:migrate', 'db:verify']);
 		expect(stdout).toContain('proceeding with the build');
 	});
 
 	it('runs migrations when CONTEXT is unset (conservative default, never a silent skip)', async () => {
 		const { stdout } = await runGate({});
 		expect(stdout).toContain('CONTEXT=(unset)');
-		expect(logLines()).toEqual(['db:migrate', 'db:verify']);
+		expect(logLines()).toEqual(['db:preflight', 'db:migrate', 'db:verify']);
+	});
+
+	it('blocks the build loudly when db:preflight fails, surfacing the real error and never invoking drizzle-kit', async () => {
+		// 2026-09-17 Coolify dev deploy: an expired TURSO_AUTH_TOKEN made Turso
+		// answer 401, drizzle-kit swallowed the error and exited 1 silently —
+		// the deploy log showed only a spinner. The preflight runs first so the
+		// REAL error reaches the log, and nothing downstream runs.
+		try {
+			await runGate({ CONTEXT: 'production', GATE_FAIL: 'preflight' });
+			expect.unreachable('an unreachable database must block the build');
+		} catch (error) {
+			expect(error.code).toBe(1);
+			expect(logLines()).toEqual(['db:preflight']);
+			const out = `${error.stdout ?? ''}${error.stderr ?? ''}`;
+			expect(out).toContain('HTTP status 401');
+			expect(out).toContain('db:preflight failed');
+			expect(out).toContain('blocking the deploy');
+		}
 	});
 
 	it('blocks the build loudly when db:migrate fails', async () => {
@@ -131,16 +163,16 @@ describe('netlify-migrate', () => {
 		} catch (error) {
 			expect(error.code).toBe(1);
 			// Both steps ran — the failure is specifically the verification.
-			expect(logLines()).toEqual(['db:migrate', 'db:verify']);
+			expect(logLines()).toEqual(['db:preflight', 'db:migrate', 'db:verify']);
 			expect(`${error.stdout ?? ''}${error.stderr ?? ''}`).toContain('db:verify failed');
 			expect(`${error.stdout ?? ''}${error.stderr ?? ''}`).toContain('blocking the deploy');
 		}
 	});
 
-	it('never runs db:verify before db:migrate — order is migrate, then verify', async () => {
+	it('never runs db:verify before db:migrate — order is preflight, migrate, then verify', async () => {
 		// Covers a regression where verification could be skipped or reordered.
 		await runGate({ CONTEXT: 'production' });
-		expect(logLines()).toEqual(['db:migrate', 'db:verify']);
+		expect(logLines()).toEqual(['db:preflight', 'db:migrate', 'db:verify']);
 	});
 
 	it('blocks the build with an actionable message when TURSO_DATABASE_URL never reached the build', async () => {
@@ -175,7 +207,7 @@ describe('netlify-migrate', () => {
 
 	it('allows file: database URLs without a token (local development)', async () => {
 		const { stdout } = await runGate({ CONTEXT: 'production', TURSO_DATABASE_URL: 'file:./local.db', TURSO_AUTH_TOKEN: '' });
-		expect(logLines()).toEqual(['db:migrate', 'db:verify']);
+		expect(logLines()).toEqual(['db:preflight', 'db:migrate', 'db:verify']);
 		expect(stdout).toContain('migrations applied and verified');
 	});
 

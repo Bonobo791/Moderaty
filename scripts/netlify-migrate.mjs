@@ -33,8 +33,9 @@
 // path — nothing is resolved through PATH (javascript:S4036), so an attacker
 // who can write to a PATH directory can never redirect the migration or the
 // verification to their own code. The MODERATY_DRIZZLE_KIT_BIN /
-// MODERATY_VERIFY_BIN env overrides exist ONLY for the test suite to
-// substitute fake scripts; production always uses the defaults below.
+// MODERATY_VERIFY_BIN / MODERATY_PREFLIGHT_BIN env overrides exist ONLY for
+// the test suite to substitute fake scripts; production always uses the
+// defaults below.
 //
 // Runs only from the netlify.toml build command; it needs the per-context
 // Netlify env vars (TURSO_DATABASE_URL / TURSO_AUTH_TOKEN), which drizzle-kit
@@ -90,7 +91,14 @@ if (!databaseUrl.startsWith('file:') && !process.env.TURSO_AUTH_TOKEN) {
 	process.exit(1);
 }
 
+// db:preflight runs first because drizzle-kit exits 1 with no output on
+// connection failures — the preflight surfaces the real driver error (expired
+// token, unreachable host) into the deploy log before anything can swallow it.
 const steps = [
+	{
+		name: 'db:preflight',
+		args: [process.env.MODERATY_PREFLIGHT_BIN ?? join(repoRoot, 'scripts', 'db-preflight.mjs')]
+	},
 	{
 		name: 'db:migrate',
 		args: [process.env.MODERATY_DRIZZLE_KIT_BIN ?? join(repoRoot, 'node_modules', 'drizzle-kit', 'bin.cjs'), 'migrate']

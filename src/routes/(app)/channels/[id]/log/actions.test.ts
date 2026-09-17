@@ -21,15 +21,19 @@ import { eq } from 'drizzle-orm';
 const mocks = vi.hoisted(() => ({
 	env: { DRY_RUN: 'false' } as Record<string, string | undefined>,
 	decrypt: vi.fn((_enc: string) => 'decrypted-refresh-token'),
-	refreshAccessToken: vi.fn(async (_token: string) => 'access-token'),
-	setModerationStatus: vi.fn(async () => {})
+	refreshAccessToken: vi.fn(async (_token?: string) => 'access-token'),
+	setModerationStatus: vi.fn(async (_ids: string[], _status: string, _ban?: boolean, _token?: string, _deadline?: number) => {}),
+	deleteComment: vi.fn(async (_id: string, _token?: string, _deadline?: number) => {}),
+	getCommentModerationStatus: vi.fn(async (_id: string, _token?: string, _deadline?: number) => null as string | null)
 }));
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 vi.mock('$lib/server/crypto', () => ({ decrypt: mocks.decrypt }));
 vi.mock('$lib/server/youtube', () => ({
 	refreshAccessToken: mocks.refreshAccessToken,
-	setModerationStatus: mocks.setModerationStatus
+	setModerationStatus: mocks.setModerationStatus,
+	deleteComment: mocks.deleteComment,
+	getCommentModerationStatus: mocks.getCommentModerationStatus
 }));
 
 import { actions } from './+page.server';
@@ -45,7 +49,26 @@ beforeEach(async () => {
 		.values({ id: 'UC1', userId: OWNER.id, orgId: 'org-1', title: 'One', refreshTokenEnc: 'enc-1' });
 	mocks.env.DRY_RUN = 'false';
 	vi.clearAllMocks();
+	// clearAllMocks keeps implementations — re-seed the defaults.
+	mocks.decrypt.mockReturnValue('decrypted-refresh-token');
+	mocks.refreshAccessToken.mockResolvedValue('access-token');
+	mocks.setModerationStatus.mockResolvedValue(undefined);
+	mocks.deleteComment.mockResolvedValue(undefined);
+	mocks.getCommentModerationStatus.mockResolvedValue(null);
 });
+
+/** Minimal YouTube remote state: reads return `remote`, writes update it. */
+function simulateYouTube(initial: string | null) {
+	const yt = { remote: initial as string | null };
+	mocks.getCommentModerationStatus.mockImplementation(async () => yt.remote);
+	mocks.setModerationStatus.mockImplementation(async (_ids: string[], status: string) => {
+		yt.remote = status;
+	});
+	mocks.deleteComment.mockImplementation(async () => {
+		yt.remote = null;
+	});
+	return yt;
+}
 
 async function seedComment(id: string, status: string, priorAction: string, channelId = 'UC1') {
 	await testDb().db.insert(comments).values({
@@ -75,6 +98,7 @@ async function commentRow(id: string) {
 
 test('undo restores a rejected comment at YouTube and records the restore', async () => {
 	await seedComment('c1', 'rejected', 'reject');
+	simulateYouTube('rejected');
 
 	const res = await undo('c1');
 
@@ -83,7 +107,7 @@ test('undo restores a rejected comment at YouTube and records the restore', asyn
 	// or skipped token step fails this test.
 	expect(mocks.decrypt).toHaveBeenCalledWith('enc-1');
 	expect(mocks.refreshAccessToken).toHaveBeenCalledWith('decrypted-refresh-token');
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token');
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined);
 	expect(await commentRow('c1')).toMatchObject({ status: 'approved', decidedBy: 'human' });
 	expect(await testDb().db.select().from(auditLog).all()).toContainEqual(
 		// authorHandle is null: manual actions have no handle source (the
@@ -94,10 +118,11 @@ test('undo restores a rejected comment at YouTube and records the restore', asyn
 
 test('undo of a ban restores the comment and names the original action', async () => {
 	await seedComment('c1', 'rejected', 'ban');
+	simulateYouTube('rejected');
 
 	await undo('c1');
 
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token');
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined);
 	expect(await commentRow('c1')).toMatchObject({ status: 'approved' });
 	expect(await testDb().db.select().from(auditLog).all()).toContainEqual(
 		expect.objectContaining({ commentId: 'c1', action: 'restore', reason: 'undo of ban', actor: 'user' })
@@ -119,6 +144,7 @@ test('undo on a deleted comment 404s and changes nothing', async () => {
 
 test('a YouTube failure releases the claim and fails loudly', async () => {
 	await seedComment('c1', 'rejected', 'reject');
+	simulateYouTube('rejected');
 	mocks.setModerationStatus.mockRejectedValueOnce(new Error('YouTube refused the transition'));
 
 	await expect(undo('c1')).rejects.toThrow('YouTube refused the transition');
@@ -141,33 +167,58 @@ test('a dry run records a dry-run audit row and makes no YouTube call', async ()
 	);
 });
 
-test('a failed audit insert leaves the undo retryable in a restoring state', async () => {
+test('a failed finalize releases the claim so the undo stays retryable', async () => {
 	await seedComment('c1', 'rejected', 'reject');
-	// The remote restore succeeds but the audit-row transaction fails.
+	simulateYouTube('rejected');
+	// The remote restore lands but the finalize transaction fails: the claim
+	// releases and its staged intent row is dropped — nothing half-recorded,
+	// and the idempotent publish is not repeated on retry.
 	await testDb().client.execute(
-		`CREATE TRIGGER fail_audit_insert BEFORE INSERT ON audit_log
-		 WHEN NEW.action = 'restore' BEGIN SELECT RAISE(ABORT, 'simulated audit insert failure'); END`
+		`CREATE TRIGGER fail_finalize BEFORE UPDATE ON comments
+		 WHEN NEW.status = 'approved' BEGIN SELECT RAISE(ABORT, 'simulated finalize failure'); END`
 	);
 	try {
-		await expect(undo('c1')).rejects.toThrow(/Failed query|simulated audit insert failure/);
+		await expect(undo('c1')).rejects.toThrow(/Failed query|simulated finalize failure/);
 	} finally {
-		await testDb().client.execute('DROP TRIGGER fail_audit_insert');
+		await testDb().client.execute('DROP TRIGGER fail_finalize');
 	}
 
-	// Not lost, not half-recorded: the comment parks in 'restoring' with NO
-	// audit row yet, so the undo can be retried instead of 404ing forever.
-	expect(await commentRow('c1')).toMatchObject({ status: 'restoring' });
+	expect(await commentRow('c1')).toMatchObject({ status: 'rejected', decidedBy: 'ai' });
 	expect((await testDb().db.select().from(auditLog).all()).filter((row) => row.action === 'restore')).toHaveLength(0);
 
-	// The retry re-applies the (idempotent) YouTube call and completes.
+	// The retry sees the remote already published and only finalizes.
 	const res = await undo('c1');
 
 	expect(res).toMatchObject({ success: expect.stringContaining('estored') });
-	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(2);
+	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
 	expect(await commentRow('c1')).toMatchObject({ status: 'approved', decidedBy: 'human' });
 	expect(await testDb().db.select().from(auditLog).all()).toContainEqual(
 		expect.objectContaining({ commentId: 'c1', action: 'restore', reason: 'undo of reject', actor: 'user' })
 	);
+});
+
+test('a crashed undo leaves durable intent the reconcile sweep can finish', async () => {
+	// Claim committed 'restoring' + the 'restore' intent row, then the process
+	// died before the remote call. Simulated here by seeding that state
+	// directly: the next undo resumes it — intent row reused, publish applied.
+	await seedComment('c1', 'restoring', 'reject');
+	await testDb().db.insert(auditLog).values({
+		channelId: 'UC1',
+		commentId: 'c1',
+		action: 'restore',
+		reason: 'undo of reject',
+		actor: 'user',
+		authorHandle: null
+	});
+	simulateYouTube('rejected');
+
+	const res = await undo('c1');
+
+	expect(res).toMatchObject({ success: expect.stringContaining('estored') });
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined);
+	expect(await commentRow('c1')).toMatchObject({ status: 'approved', decidedBy: 'human' });
+	// Exactly ONE restore row — the crashed attempt's intent row, reused.
+	expect((await testDb().db.select().from(auditLog).all()).filter((row) => row.action === 'restore')).toHaveLength(1);
 });
 
 test('undo rejects a signed-out request with 401', async () => {
@@ -208,6 +259,7 @@ test('undo with no prior audit row still restores and names the generic action',
 		status: 'held',
 		decidedBy: 'ai'
 	});
+	simulateYouTube('heldForReview');
 
 	const res = await undo('c1');
 
@@ -220,6 +272,7 @@ test('undo with no prior audit row still restores and names the generic action',
 
 test('a concurrent undo that loses the atomic claim 404s instead of double-restoring', async () => {
 	await seedComment('c1', 'rejected', 'reject');
+	simulateYouTube('rejected');
 
 	// Both submissions read status='rejected' before either claims; the
 	// conditional claim update makes exactly one winner (I3/I4).

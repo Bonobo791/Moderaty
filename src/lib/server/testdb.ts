@@ -37,11 +37,15 @@ const SEED_LIFETIME_SLOTS = `WITH RECURSIVE slots(n) AS (SELECT 1 UNION ALL SELE
 // Every test file that imports this helper gets the app db mocked onto the
 // shared in-memory instance. This module is always imported before the
 // route-under-test, so the mock is registered before $lib/server/db loads.
-vi.mock('$lib/server/db', () => ({
-	get db() {
-		return testDb().db;
-	}
-}));
+vi.mock('$lib/server/db', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('$lib/server/db')>();
+	return {
+		...actual,
+		get db() {
+			return testDb().db;
+		}
+	};
+});
 
 /**
  * Deletes every row from the given tables. Used per-test by setupTestDb and

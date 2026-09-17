@@ -32,15 +32,19 @@ const mocks = vi.hoisted(() => {
 		select: vi.fn((...args: unknown[]) => {
 			state.selectArgs = args;
 			const projection = args[0] as Record<string, unknown> | undefined;
-			return {
-				from: () => ({
-					where: () => ({
-						orderBy: () => ({
-							limit: () => ({
-								all: async () => state.rows.map((row) => project(row, projection))
-							})
+			const tail = {
+				where: () => ({
+					orderBy: () => ({
+						limit: () => ({
+							all: async () => state.rows.map((row) => project(row, projection))
 						})
 					})
+				})
+			};
+			return {
+				from: () => ({
+					...tail,
+					leftJoin: () => tail
 				})
 			};
 		})
@@ -107,7 +111,7 @@ describe('queue load projection (behavior)', () => {
 		expect(result.pending).toHaveLength(2);
 		expect(result.pending.map((row) => row.id)).toEqual(['comment-1', 'comment-2']);
 		for (const row of result.pending) {
-			expect(Object.keys(row).sort()).toEqual(['id', 'publishedAt', 'text']);
+			expect(Object.keys(row).sort()).toEqual(['holdState', 'id', 'publishedAt', 'text']);
 			expect(row).not.toHaveProperty('authorName');
 			expect(row).not.toHaveProperty('authorChannelId');
 		}
@@ -118,6 +122,7 @@ describe('queue load projection (behavior)', () => {
 
 		expect(mocks.state.selectArgs).toHaveLength(1);
 		expect(Object.keys(mocks.state.selectArgs[0] as Record<string, unknown>).sort()).toEqual([
+			'holdState',
 			'id',
 			'publishedAt',
 			'text'

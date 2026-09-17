@@ -336,10 +336,12 @@ test('I3: bounded passes converge outstanding actions; completion requires enfor
 					if (!action) throw new Error(`verification of untracked comment ${id}`);
 					if (verifyThrows) throw new Error(plan.seamMessage);
 					const terminal =
-						(action === 'delete' && plan.observed === null) ||
+						// A remotely-deleted comment is terminal for every action:
+						// there is nothing left to enforce.
+						plan.observed === null ||
 						(action === 'hold' && plan.observed === 'heldForReview') ||
 						(action === 'reject' && plan.observed === 'rejected') ||
-						(action === 'ban' && (plan.observed === 'rejected' || plan.observed === null));
+						(action === 'ban' && plan.observed === 'rejected');
 					if (terminal) verifiedTerminal.add(id);
 					return plan.observed;
 				});

@@ -13,11 +13,12 @@
 //
 // Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
-import { db } from '$lib/server/db';
+import { db, withBusyRetry } from '$lib/server/db';
 import { auditLog, comments, moderationActions } from '$lib/server/db/schema';
 import { ownedChannel } from '$lib/server/ownership';
 import { requireUser } from '$lib/server/session';
-import { refreshAccessToken, setModerationStatus } from '$lib/server/youtube';
+import { refreshAccessToken, getCommentModerationStatus } from '$lib/server/youtube';
+import { applyHumanIntent, finalizeHumanIntent } from '$lib/server/pipeline/enforcement';
 import { decrypt } from '$lib/server/crypto';
 import { env } from '$env/dynamic/private';
 import { error, fail } from '@sveltejs/kit';
@@ -149,59 +150,109 @@ export const actions = {
 		// call is idempotent (I4), so re-applying it is safe.
 		// Stryker disable next-line ConditionalExpression, StringLiteral: →false/''-literal equivalent — when the comment IS 'restoring', judging it non-resuming only adds a re-claim `SET status='restoring' WHERE status='restoring'` (always matches, writes the value the row already holds) and a failure-release writing back the same selected values; observable state is identical. Sweeps the killable →true sibling, which stays pinned by the failed-audit test via the claim's 'restoring' effect.
 		const resuming = comment.status === 'restoring';
-		// Stryker disable next-line ConditionalExpression: →true equivalent — a resumed undo that re-claims issues `SET status='restoring' WHERE status='restoring'`, a no-op write that always matches one row, identical to skipping the claim; sweeps the killable →false sibling, which stays pinned by the failed-audit test (status must read 'restoring' after a failed audit commit).
-		if (!resuming) {
-			// Atomically claim the comment BEFORE the external call: the conditional
-			// update makes concurrent undo submissions single-winner (the loser 404s).
-			const claimed = await db
+		const dryRun = env.DRY_RUN === 'true';
+		if (dryRun) {
+			// No remote call in dry run: final status and the dry-run audit row
+			// commit atomically — nothing dangles between them.
+			const claimed = await db.transaction(async (tx) => {
+				const rows = await tx
+					.update(comments)
+					.set({ status: 'approved', decidedBy: 'human' })
+					.where(and(eq(comments.id, commentId), eq(comments.status, comment.status)))
+					.returning({ id: comments.id });
+				if (!rows.length) return false;
+				// Name the action being undone — server-side, never from the form.
+				const prior = await tx
+					.select({ action: auditLog.action })
+					.from(auditLog)
+					.where(and(eq(auditLog.channelId, params.id), eq(auditLog.commentId, commentId), inArray(auditLog.action, ['hold', 'reject', 'ban'])))
+					.orderBy(desc(auditLog.createdAt), desc(auditLog.id))
+					.limit(1)
+					.get();
+				await tx.insert(auditLog).values({
+					channelId: params.id,
+					commentId,
+					action: 'dry-run',
+					reason: `undo of ${prior?.action ?? 'moderation action'}`,
+					actor: 'user',
+					authorHandle: null,
+					createdAt: new Date().toISOString()
+				});
+				return true;
+			});
+			if (!claimed) throw error(404, 'reversible comment not found in this channel');
+			return { success: 'Restored — recorded in audit log.' };
+		}
+		// Claim into 'restoring' and record the 'restore' intent row in ONE
+		// transaction (I3): a crash leaves durable intent the reconcile sweep
+		// re-executes — never a comment restored remotely with no local record.
+		// The resume path only fills in an intent row for a claim that crashed
+		// before this durability existed.
+		const claim = await withBusyRetry(() => db.transaction(async (tx) => {
+			const rows = await tx
 				.update(comments)
 				.set({ status: 'restoring' })
 				.where(and(eq(comments.id, commentId), eq(comments.status, comment.status)))
 				.returning({ id: comments.id });
-			if (claimed.length === 0) throw error(404, 'reversible comment not found in this channel');
-		}
-		const dryRun = env.DRY_RUN === 'true';
-		try {
-			if (!dryRun) {
-				const token = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
-				await setModerationStatus([commentId], 'published', false, token);
+			if (!rows.length) return null;
+			if (resuming) {
+				// The crashed attempt's intent row is the durable record — reuse
+				// it rather than writing a duplicate. A fresh claim always writes
+				// its own row (each undo is its own audit entry).
+				const existing = await tx
+					.select({ id: auditLog.id })
+					.from(auditLog)
+					.where(and(eq(auditLog.channelId, params.id), eq(auditLog.commentId, commentId), eq(auditLog.action, 'restore')))
+					.orderBy(desc(auditLog.createdAt), desc(auditLog.id))
+					.limit(1)
+					.get();
+				if (existing) return { intentId: existing.id };
 			}
+			// Name the action being undone — server-side, never from the form.
+			const prior = await tx
+				.select({ action: auditLog.action })
+				.from(auditLog)
+				.where(and(eq(auditLog.channelId, params.id), eq(auditLog.commentId, commentId), inArray(auditLog.action, ['hold', 'reject', 'ban'])))
+				.orderBy(desc(auditLog.createdAt), desc(auditLog.id))
+				.limit(1)
+				.get();
+			const intent = await tx
+				.insert(auditLog)
+				.values({
+					channelId: params.id,
+					commentId,
+					action: 'restore',
+					reason: `undo of ${prior?.action ?? 'moderation action'}`,
+					actor: 'user',
+					// No handle source at manual-action time: comments.author_name is never persisted by design.
+					authorHandle: null,
+					createdAt: new Date().toISOString()
+				})
+				.returning({ id: auditLog.id });
+			return { intentId: intent[0].id };
+		}));
+		if (!claim) throw error(404, 'reversible comment not found in this channel');
+		try {
+			const token = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
+			const remote = await getCommentModerationStatus(commentId, token);
+			const { holdLanded } = await applyHumanIntent(commentId, 'restore', remote, token);
+			await finalizeHumanIntent(params.id, commentId, 'restore', holdLanded);
 		} catch (e) {
-			// Release a fresh claim so the failed restore stays retryable; a
-			// resumed attempt stays 'restoring' either way.
-			// Stryker disable next-line ConditionalExpression: →true equivalent — releasing a resumed attempt writes back exactly the values the row already holds (status 'restoring', the decidedBy just selected), so observable state is identical; sweeps the killable →false sibling, which stays pinned by the YouTube-failure release test.
+			// Release a fresh claim so the failed restore stays retryable and
+			// drop its staged intent row — nothing committed. A resumed attempt
+			// keeps its claim and its intent row: they belong to the earlier
+			// crash the reconcile sweep still owes a finish.
 			if (!resuming) {
-				await db
-					.update(comments)
-					.set({ status: comment.status, decidedBy: comment.decidedBy })
-					.where(eq(comments.id, commentId));
+				await db.transaction(async (tx) => {
+					await tx
+						.update(comments)
+						.set({ status: comment.status, decidedBy: comment.decidedBy })
+						.where(eq(comments.id, commentId));
+					await tx.delete(auditLog).where(eq(auditLog.id, claim.intentId));
+				});
 			}
 			throw e;
 		}
-		// Name the action being undone — server-side, never from the form.
-		const prior = await db
-			.select({ action: auditLog.action })
-			.from(auditLog)
-			.where(and(eq(auditLog.channelId, params.id), eq(auditLog.commentId, commentId), inArray(auditLog.action, ['hold', 'reject', 'ban'])))
-			.orderBy(desc(auditLog.createdAt), desc(auditLog.id))
-			.limit(1)
-			.get();
-		// The remote call already landed: the audit row and the final status
-		// commit as one unit. If this transaction fails, the comment stays
-		// 'restoring' — the next undo retries instead of losing the record.
-		await db.transaction(async (tx) => {
-			await tx.insert(auditLog).values({
-				channelId: params.id,
-				commentId,
-				action: dryRun ? 'dry-run' : 'restore',
-				reason: `undo of ${prior?.action ?? 'moderation action'}`,
-				actor: 'user',
-				// No handle source at manual-action time: comments.author_name is never persisted by design.
-				authorHandle: null,
-				createdAt: new Date().toISOString()
-			});
-			await tx.update(comments).set({ status: 'approved', decidedBy: 'human' }).where(eq(comments.id, commentId));
-		});
 		return { success: 'Restored — recorded in audit log.' };
 	},
 	/**

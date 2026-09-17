@@ -29,9 +29,10 @@ describe('queue page states (I12)', () => {
 		expect(queuePage).toMatch(/class="error-box"[^>]*role="alert"/);
 	});
 
-	it('uses grammatical guidance copy', () => {
+	it('uses grammatical guidance copy that never overclaims the hold state', () => {
 		expect(queuePage).not.toContain('Nothing here is public-facing yet only if previously held');
-		expect(queuePage).toContain('These comments are held for review on YouTube and are not public yet.');
+		expect(queuePage).not.toContain('These comments are held for review on YouTube and are not public yet.');
+		expect(queuePage).toContain('may still be public');
 	});
 
 	it('confirms destructive actions inline', () => {

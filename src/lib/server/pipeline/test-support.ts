@@ -37,7 +37,14 @@ const mocks = vi.hoisted(() => {
 		moderationActions: [] as Record<string, unknown>[],
 		// comments.status for pre-stored rows (existingIds): the enforcement
 		// supersede partition reads it when deciding whether a hold still applies.
-		commentStatuses: {} as Record<string, string>
+		commentStatuses: {} as Record<string, string>,
+		// comments.decidedBy for pre-stored rows (existingIds).
+		commentDecidedBy: {} as Record<string, string>,
+		// Fired at the start of every comments .all() query with its call index,
+		// so a test can flip a stored status BETWEEN two reads in one flow
+		// (e.g. a human release landing between partition and supersede).
+		commentsSelectCalls: 0,
+		onCommentsSelect: undefined as ((callIndex: number) => void) | undefined
 	};
 	const store = (table: unknown, values: unknown) => {
 		const rows = (Array.isArray(values) ? values : [values]) as Record<string, unknown>[];
@@ -47,7 +54,8 @@ const mocks = vi.hoisted(() => {
 		if (table === state.tables.creditTransactions) state.insertedCredits.push(...rows);
 	};
 	const query = (table: unknown) => ({
-		where: (condition?: unknown) => ({
+		where: (condition?: unknown) => {
+			const inner = {
 			get: async () => {
 				if (table === state.tables.channels) {
 					const params = queryParams(condition);
@@ -59,24 +67,48 @@ const mocks = vi.hoisted(() => {
 				if (table === state.tables.organizations) {
 					return { creditsRemaining: state.credits, plan: state.plan, stripeSubscriptionId: state.stripeSubscriptionId, stripeCustomerId: state.customerId };
 				}
+				if (table === state.tables.auditLog) {
+					// "Latest" reads sort createdAt/id desc — approximate by
+					// returning the last inserted row matching both eq()s.
+					const params = queryParams(condition);
+					const matches = state.insertedAudits.filter((row) =>
+						params.includes(queryKey(row.commentId)) && params.includes(queryKey(row.channelId)));
+					return matches.at(-1);
+				}
 				throw new Error('unexpected get query');
 			},
 			all: async () => {
 				if (table === state.tables.comments) {
 					// Honor the inArray(comments.id, ...) condition: a row only counts as
-					// already-stored when the query actually selects its id.
+					// already-stored when the query actually selects its id. A query
+					// carrying status values (eq/inArray on comments.status) instead
+					// matches rows BY that status (the reconcile sweep's shape).
+					state.commentsSelectCalls += 1;
+					state.onCommentsSelect?.(state.commentsSelectCalls);
 					const params = queryParams(condition);
+					const statusFilter = params.filter((param) => COMMENT_STATUSES.has(param as string));
 					return [...new Set([
 						...state.existingIds,
 						...state.insertedComments.map((comment) => queryKey(comment.id))
-					])].filter((id) => params.includes(id)).map((id) => {
+					])].map((id) => {
 						// Status resolution order: the staged row wins (it carries the
 						// status stageDecisions wrote), then a test-seeded status for
 						// pre-stored ids, then 'held' — the status a legacy dispatched
 						// hold's comment carries.
 						const staged = state.insertedComments.find((comment) => comment.id === id);
-						return { id, status: staged?.status ?? state.commentStatuses[id] ?? 'held' };
-					});
+						return {
+							id,
+							status: staged?.status ?? state.commentStatuses[id] ?? 'held',
+							decidedBy: staged?.decidedBy ?? state.commentDecidedBy[id] ?? 'ai'
+						};
+					}).filter((row) => params.includes(row.id) || (statusFilter.length > 0 && statusFilter.includes(row.status)));
+				}
+				if (table === state.tables.auditLog) {
+					// Honor eq(channelId)/eq(commentId): rows matching both come back,
+					// insertion-ordered (callers asking for "latest" take the last).
+					const params = queryParams(condition);
+					return state.insertedAudits.filter((row) =>
+						params.includes(queryKey(row.commentId)) && params.includes(queryKey(row.channelId)));
 				}
 				if (table === state.tables.rules) {
 					const params = queryParams(condition);
@@ -101,7 +133,12 @@ const mocks = vi.hoisted(() => {
 				}
 				throw new Error('unexpected all query');
 			}
-		})
+			};
+			// The fake stores no sort order — orderBy/limit pass through so
+			// query-builder chains keep working, returning the same shape.
+			const chain = { ...inner, orderBy: () => chain, limit: () => chain };
+			return chain;
+		}
 	});
 	const transaction = {
 		insert: vi.fn((table: unknown) => ({
@@ -154,6 +191,29 @@ const mocks = vi.hoisted(() => {
 						state.channelUpdates.push(values);
 						return none;
 					}
+					if (table === state.tables.comments) {
+						// Status/decidedBy writes honor the where: id predicates AND
+						// status predicates (eq 'restoring' guards the finalize).
+						const params = queryParams(condition);
+						const statusFilter = params.filter((param) => COMMENT_STATUSES.has(param as string));
+						const apply = (row: Record<string, unknown>) => {
+							const current = row.status as string;
+							if (params.includes(queryKey(row.id)) && (!statusFilter.length || statusFilter.includes(current))) {
+								Object.assign(row, values);
+								return true;
+							}
+							return false;
+						};
+						state.insertedComments.forEach(apply);
+						for (const id of state.existingIds) {
+							const current = state.commentStatuses[id] ?? 'held';
+							if (params.includes(id) && (!statusFilter.length || statusFilter.includes(current))) {
+								if ('status' in values) state.commentStatuses[id] = values.status as string;
+								if ('decidedBy' in values) state.commentDecidedBy[id] = values.decidedBy as string;
+							}
+						}
+						return none;
+					}
 					if (table !== state.tables.moderationActions || !('state' in values)) return none;
 					if (values.state === 'dispatched' && !('lastAttemptAt' in values)) {
 						// Atomic claim: only pending rows transition, and the claimed ids
@@ -175,13 +235,31 @@ const mocks = vi.hoisted(() => {
 							fields && typeof fields === 'object' && 'commentId' in fields ? claimedCommentIds : [];
 						return { returning: returningClaimedIds };
 					}
-					// markDispatched / completeActions: honor inArray(commentId, ...) —
-					// only rows whose id the query selects are updated.
+					// markDispatched / completeActions / markSuperseded: honor
+					// inArray(commentId, ...) AND any state predicate — transitions
+					// only move rows still in an allowed predecessor state, and
+					// RETURNING reports the rows that actually transitioned so
+					// completeActions can gate its audit insert on the rowcount.
 					const params = queryParams(condition);
+					const stateFilter = params.filter((param) => ACTION_STATES.has(param as string));
+					const transitioned: Record<string, unknown>[] = [];
 					state.moderationActions.forEach((item) => {
-						if (params.includes(queryKey(item.commentId))) Object.assign(item, values);
+						if (
+							params.includes(queryKey(item.commentId)) &&
+							(!stateFilter.length || stateFilter.includes(item.state))
+						) {
+							Object.assign(item, values);
+							transitioned.push(item);
+						}
 					});
-					return none;
+					return {
+						returning: async (fields: unknown) =>
+							fields && typeof fields === 'object'
+								? transitioned.map((item) =>
+										Object.fromEntries(Object.keys(fields).map((key) => [key, item[key]]))
+									)
+								: []
+					};
 				}
 			})
 		}))
@@ -272,6 +350,9 @@ import { SQLiteSyncDialect } from 'drizzle-orm/sqlite-core';
 import type { NewComment } from '../youtube';
 
 const dialect = new SQLiteSyncDialect();
+
+const COMMENT_STATUSES = new Set(['pending', 'approved', 'held', 'rejected', 'deleted', 'restoring']);
+const ACTION_STATES = new Set(['pending', 'dispatched', 'completed', 'superseded', 'manual_review']);
 
 /** Binds the parameters of a real drizzle where-condition so the fake store
  * honors which rows a query actually targets. */
@@ -431,6 +512,9 @@ export function resetPipelineMocks() {
 	mocks.state.insertedAudits = [];
 	mocks.state.moderationActions = [];
 	mocks.state.commentStatuses = {};
+	mocks.state.commentDecidedBy = {};
+	mocks.state.commentsSelectCalls = 0;
+	mocks.state.onCommentsSelect = undefined;
 	mocks.decrypt.mockReturnValue('refresh-token');
 	mocks.assertBeforeDeadline.mockImplementation(() => undefined);
 	mocks.refreshAccessToken.mockResolvedValue('access-token');

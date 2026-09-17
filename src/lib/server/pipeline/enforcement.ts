@@ -3,7 +3,7 @@
 //
 // Licensed under the PolyForm Shield License 1.0.0; see LICENSE.
 
-import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { maybeTriggerAutoTopUp } from '$lib/server/billing/autotopup';
 import { db } from '$lib/server/db';
 import { auditLog, channels, comments, moderationActions } from '$lib/server/db/schema';
@@ -74,10 +74,17 @@ function updateActionStates(
 	actions: OutstandingAction[],
 	set: { state: 'dispatched' | 'superseded' | 'completed'; lastAttemptAt?: string }
 ) {
+	// Transitions only ever move OUTSTANDING rows: a terminal state must never
+	// be rewritten by a stale run (completed→superseded) nor claimed by a row
+	// a concurrent decider already finished. The predecessor predicate makes
+	// every transition conditional on the row still being in flight.
 	return transaction
 		.update(moderationActions)
 		.set(set)
-		.where(inArray(moderationActions.commentId, actions.map((action) => action.commentId)));
+		.where(and(
+			inArray(moderationActions.commentId, actions.map((action) => action.commentId)),
+			inArray(moderationActions.state, ['pending', 'dispatched'])
+		));
 }
 
 /**
@@ -124,9 +131,27 @@ async function claimPendingActions(actions: OutstandingAction[], expected?: Chan
  * after the fact. 'superseded' is a terminal state — no completion audit row,
  * because the hold never reached YouTube (the 'queue' row already records why
  * the comment was ever queued).
+ *
+ * The comment status is re-read INSIDE this transaction: partitionHolds ran
+ * earlier without a lock, and a failed human action can restore the comment
+ * to 'pending' in between — superseding then would strand it (public on
+ * YouTube while the queue calls it held, nothing retrying the hold).
  */
-function markSuperseded(actions: OutstandingAction[], expected?: ChannelIdentity) {
-	return transitionActions(actions, { state: 'superseded' }, expected);
+async function markSuperseded(actions: OutstandingAction[], expected?: ChannelIdentity) {
+	if (!actions.length) return;
+	await db.transaction(async (transaction) => {
+		await assertChannelActive(actions[0].channelId, transaction, expected);
+		const rows = await transaction
+			.select({ id: comments.id, status: comments.status })
+			.from(comments)
+			.where(inArray(comments.id, actions.map((action) => action.commentId)))
+			.all();
+		const decided = new Set(
+			rows.filter((row) => row.status !== 'pending' && row.status !== 'held').map((row) => row.id)
+		);
+		const still = actions.filter((action) => decided.has(action.commentId));
+		if (still.length) await updateActionStates(transaction, still, { state: 'superseded' });
+	});
 }
 
 /**
@@ -159,8 +184,22 @@ async function completeActions(actions: OutstandingAction[], expected?: ChannelI
 	if (!actions.length) return;
 	await db.transaction(async (transaction) => {
 		await assertChannelActive(actions[0].channelId, transaction, expected);
-		await updateActionStates(transaction, actions, { state: 'completed' });
-		await transaction.insert(auditLog).values(actions.map((action) => ({
+		// Audit only rows this transaction actually completed: a concurrent
+		// decider may have superseded one between the remote call and now —
+		// writing its 'hold'/'reject' audit row would record a remote action
+		// that never landed.
+		const transitioned = await transaction
+			.update(moderationActions)
+			.set({ state: 'completed' })
+			.where(and(
+				inArray(moderationActions.commentId, actions.map((action) => action.commentId)),
+				inArray(moderationActions.state, ['pending', 'dispatched'])
+			))
+			.returning({ commentId: moderationActions.commentId });
+		const done = new Set(transitioned.map((row) => row.commentId));
+		const finished = actions.filter((action) => done.has(action.commentId));
+		if (!finished.length) return;
+		await transaction.insert(auditLog).values(finished.map((action) => ({
 			channelId: action.channelId,
 			commentId: action.commentId,
 			action: action.action,
@@ -304,6 +343,154 @@ async function verifyDispatchedAction(action: OutstandingAction, accessToken: st
 	}
 }
 
+/**
+ * The local status a human intent commits to once remote state matches.
+ * 'restore' is the audit-log undo verb. Unknown actions return null — the
+ * caller skips (sweep) or throws (queue) rather than guessing a status.
+ */
+export function humanFinalStatus(action: string): 'approved' | 'deleted' | 'rejected' | null {
+	if (action === 'approve' || action === 'restore') return 'approved';
+	if (action === 'delete') return 'deleted';
+	if (action === 'reject' || action === 'ban') return 'rejected';
+	return null;
+}
+
+/**
+ * Applies a recorded human intent to YouTube and verifies the result.
+ * `remote` is the preflight read — approve publishes ANY non-public state
+ * ('rejected'/'likelySpam' included), never just 'heldForReview'. A re-read
+ * after each write catches an in-flight hold landing after the decision:
+ * one re-apply converges it. remote === null (comment gone) short-circuits
+ * — there is nothing left to enforce. Returns the last observed state.
+ * Throws when two applies still leave the wrong state: the caller releases
+ * the claim or leaves it for reconcile — it never claims success.
+ */
+export async function applyHumanIntent(
+	commentId: string,
+	action: string,
+	remote: string | null,
+	accessToken: string,
+	deadline?: number
+): Promise<{ remote: string | null; holdLanded: boolean }> {
+	const wanted =
+		action === 'approve' || action === 'restore' ? 'published' : action === 'delete' ? null : 'rejected';
+	// A hold observed at ANY read — preflight or mid-apply — really landed on
+	// YouTube and earns its completion audit at finalize.
+	let holdLanded = remote === 'heldForReview';
+	// Up to two writes, each followed by a re-read. An already-converged
+	// state still gets one confirmation read: a dispatched hold can land
+	// behind the preflight (or behind a write) and must be re-applied, never
+	// left hiding a comment the human decided to publish.
+	let writes = 0;
+	for (;;) {
+		if (remote !== null && remote !== wanted) {
+			if (writes === 2) break;
+			if (wanted === 'published') {
+				await setModerationStatus([commentId], 'published', false, accessToken, deadline);
+			} else if (wanted === 'rejected') {
+				await setModerationStatus([commentId], 'rejected', action === 'ban', accessToken, deadline);
+			} else {
+				await deleteComment(commentId, accessToken, deadline);
+			}
+			writes += 1;
+		}
+		remote = await getCommentModerationStatus(commentId, accessToken, deadline);
+		holdLanded ||= remote === 'heldForReview';
+		if (remote === null || remote === wanted) return { remote, holdLanded };
+	}
+	throw new Error(`comment ${commentId} remote state '${remote}' did not converge to '${wanted}'`);
+}
+
+/**
+ * Commits the local result of a human intent in ONE transaction: the final
+ * comment status (guarded on 'restoring' — a loser write is a no-op, never
+ * a stale overwrite) and hold bookkeeping. A hold that actually LANDED on
+ * YouTube completes and gets its audit row here — completeActions never saw
+ * it, but the remote hold really happened, so the record says so. A hold
+ * that never reached YouTube is superseded. Both the queue action and the
+ * reconcile sweep finalize through here.
+ */
+export async function finalizeHumanIntent(
+	channelId: string,
+	commentId: string,
+	action: string,
+	holdLanded: boolean,
+	expected?: ChannelIdentity
+): Promise<void> {
+	const status = humanFinalStatus(action);
+	if (!status) throw new Error(`unsupported human intent '${action}'`);
+	await db.transaction(async (transaction) => {
+		await assertChannelActive(channelId, transaction, expected);
+		await transaction
+			.update(comments)
+			.set({ status, decidedBy: 'human' })
+			.where(and(eq(comments.id, commentId), eq(comments.status, 'restoring')));
+		const transitioned = await transaction
+			.update(moderationActions)
+			.set({ state: holdLanded ? 'completed' : 'superseded' })
+			.where(
+				and(
+					eq(moderationActions.commentId, commentId),
+					eq(moderationActions.action, 'hold'),
+					inArray(moderationActions.state, ['pending', 'dispatched'])
+				)
+			)
+			.returning({ reason: moderationActions.reason });
+		if (holdLanded && transitioned.length) {
+			await transaction.insert(auditLog).values(
+				transitioned.map((row) => ({
+					channelId,
+					commentId,
+					action: 'hold',
+					reason: row.reason,
+					actor: 'system',
+					authorHandle: null,
+					createdAt: new Date().toISOString()
+				}))
+			);
+		}
+	});
+}
+
+/**
+ * Human actions claim a comment into 'restoring' and record their intent as
+ * an audit row BEFORE the remote call (I3). A crash leaves 'restoring' +
+ * the intent row — this sweep re-executes the intent (every remote verb is
+ * idempotent) and commits the final status, so a crashed action converges
+ * instead of sitting invisible between states forever. A 'restoring' row
+ * without a user intent audit is not ours to finish.
+ */
+async function reconcileRestoring(channelId: string, accessToken: string, deadline?: number, expected?: ChannelIdentity) {
+	const stuck = await db
+		.select({ id: comments.id })
+		.from(comments)
+		.where(and(eq(comments.channelId, channelId), eq(comments.status, 'restoring')))
+		.all();
+	for (const row of stuck) {
+		const intent = await db
+			.select({ action: auditLog.action, actor: auditLog.actor })
+			.from(auditLog)
+			.where(and(eq(auditLog.channelId, channelId), eq(auditLog.commentId, row.id)))
+			.orderBy(desc(auditLog.createdAt), desc(auditLog.id))
+			.limit(1)
+			.get();
+		if (!intent || intent.actor !== 'user' || !humanFinalStatus(intent.action)) continue;
+		try {
+			assertBeforeDeadline(deadline);
+			const remote = await getCommentModerationStatus(row.id, accessToken, deadline);
+			const { holdLanded } = await applyHumanIntent(row.id, intent.action, remote, accessToken, deadline);
+			await finalizeHumanIntent(channelId, row.id, intent.action, holdLanded, expected);
+		} catch (error) {
+			if (error instanceof DeadlineExceededError) throw error;
+			// Leave it 'restoring' for the next run — one stuck comment must
+			// never abort the sweep or the run (I1), and never fail silently.
+			console.error(
+				`reconcile: could not finish '${intent.action}' for comment ${row.id}: ${error instanceof Error ? error.message : String(error)} — retrying next run`
+			);
+		}
+	}
+}
+
 export async function runEnforcement(
 	channelId: string,
 	accessToken: string,
@@ -315,6 +502,7 @@ export async function runEnforcement(
 	// ... and again before any YouTube enforcement call.
 	await assertChannelActive(channelId, db, expected);
 	const acted = await processOutstandingActions(channelId, accessToken, deadline, expected);
+	await reconcileRestoring(channelId, accessToken, deadline, expected);
 	if (orgId) {
 		await assertChannelActive(channelId, db, expected);
 		try {

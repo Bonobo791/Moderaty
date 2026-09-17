@@ -118,7 +118,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	{#if form?.error}<div class="error-box" role="alert">{form.error}</div>{/if}
 	{#if form?.success}<div class="flash" role="status">{form.success}</div>{/if}
 
-	<p class="muted">These comments are held for review on YouTube and are not public yet. Rejected or approved comments already have a final state. Your action is final.</p>
+	<p class="muted">Each comment shows whether its YouTube hold has actually landed — until it reads "held", it may still be public. Rejected or approved comments already have a final state. Your action is final.</p>
 
 	{#each visible as c (c.id)}
 		<div class="row-wrap" class:exiting={exiting[c.id]}>
@@ -130,6 +130,11 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 				>
 					<p class="row-time muted" title={c.publishedAt}>{relativeTime(c.publishedAt)}</p>
 					<blockquote class="quote">{c.text}</blockquote>
+					{#if c.holdState === 'completed'}
+						<p class="hold-state muted">Held on YouTube — not public.</p>
+					{:else}
+						<p class="hold-state">Hold requested — may still be public on YouTube.</p>
+					{/if}
 					{#if confirming?.id === c.id}
 						<p style="margin:0 0 8px">
 							{#if confirming.kind === 'delete'}
@@ -218,6 +223,16 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	}
 	.row-time {
 		margin: 0 0 8px;
+	}
+	/* Hold state line: quiet when the hold really landed, visibly flagged
+	   while it is only requested — the row must never overclaim. */
+	.hold-state {
+		margin: 8px 0 0;
+		font-size: 13px;
+		color: var(--text-2);
+	}
+	.hold-state.muted {
+		color: var(--text-3);
 	}
 	.row-actions {
 		display: flex;

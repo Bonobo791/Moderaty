@@ -367,3 +367,116 @@ test.each([
 	expect(mocks.state.insertedAudits).toEqual([]);
 	expect(result).toMatchObject({ acted: 0 });
 });
+
+test('a hold is not superseded when the comment returned to pending before the supersede commit', async () => {
+	// partitionHolds read 'approved' and queued the row for supersede; a failed
+	// human action then restored 'pending' before markSuperseded's transaction
+	// read — superseding now would strand it (public on YouTube while the
+	// queue calls it held, nothing retrying). The in-transaction re-check must
+	// leave the hold dispatched.
+	mocks.state.existingIds = ['comment'];
+	mocks.state.commentStatuses = { comment: 'approved' };
+	mocks.state.moderationActions = [dispatchedAction({ action: 'hold', reason: 'ai score 0.60' })];
+	mocks.getCommentModerationStatus.mockResolvedValue('published');
+	// comments reads: #1 stored-ids dedupe, #2 partitionHolds, #3 the
+	// supersede re-check — flip to 'pending' exactly at the re-check.
+	mocks.state.onCommentsSelect = (callIndex) => {
+		if (callIndex === 3) mocks.state.commentStatuses = { comment: 'pending' };
+	};
+
+	await runChannel('channel');
+
+	expectActionState('dispatched');
+	expect(mocks.state.insertedAudits).toEqual([]);
+});
+
+test('a completed transition never rewrites a concurrently superseded row nor audits it', async () => {
+	// The human queue decision superseded the action while our remote call was
+	// in flight: completion must skip the row — no terminal-state rewrite, and
+	// no audit row for a remote write the record says never landed.
+	mocks.state.existingIds = ['comment'];
+	mocks.state.moderationActions = [dispatchedAction({ action: 'reject', reason: 'rule #1 (keyword)' })];
+	mocks.getCommentModerationStatus.mockResolvedValue('published');
+	mocks.setModerationStatus.mockImplementation(async () => {
+		mocks.state.moderationActions[0].state = 'superseded';
+	});
+
+	await runChannel('channel');
+
+	expect(mocks.state.moderationActions[0].state).toBe('superseded');
+	expect(mocks.state.insertedAudits).toEqual([]);
+});
+
+test('a crashed human action is re-executed and finalized by the reconcile sweep', async () => {
+	// The queue claim left the comment 'restoring' with a durable intent audit
+	// (I3) and crashed before finishing: the next run must finish exactly the
+	// recorded intent and land the final status — not leave it dangling.
+	mocks.state.insertedComments = [
+		{ id: 'comment', channelId: 'channel', text: 'x', publishedAt: '2026-01-01T00:00:00Z', status: 'restoring', decidedBy: 'human' }
+	];
+	mocks.fetchNewComments.mockResolvedValue({ comments: [], nextPageToken: null, reachedCursor: true });
+	mocks.state.insertedAudits = [
+		{ channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'manual review', actor: 'user', createdAt: '2026-01-01T00:00:00Z' }
+	];
+	// Preflight 'published' → reject → post-write verify reads 'rejected'.
+	mocks.getCommentModerationStatus
+		.mockResolvedValueOnce('published')
+		.mockResolvedValue('rejected');
+
+	await runChannel('channel');
+
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
+	expect(mocks.state.insertedComments[0].status).toBe('rejected');
+});
+
+test('a crashed approve intent is republished and finalized by the reconcile sweep', async () => {
+	mocks.state.insertedComments = [
+		{ id: 'comment', channelId: 'channel', text: 'x', publishedAt: '2026-01-01T00:00:00Z', status: 'restoring', decidedBy: 'human' }
+	];
+	mocks.fetchNewComments.mockResolvedValue({ comments: [], nextPageToken: null, reachedCursor: true });
+	mocks.state.insertedAudits = [
+		{ channelId: 'channel', commentId: 'comment', action: 'approve', reason: 'manual review', actor: 'user', createdAt: '2026-01-01T00:00:00Z' }
+	];
+	// Preflight 'heldForReview' → publish → post-write verify reads 'published'.
+	mocks.getCommentModerationStatus
+		.mockResolvedValueOnce('heldForReview')
+		.mockResolvedValue('published');
+
+	await runChannel('channel');
+
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'published', false, 'access-token', undefined);
+	expect(mocks.state.insertedComments[0].status).toBe('approved');
+});
+
+test('a crashed intent on a remotely-deleted comment finalizes without a remote write', async () => {
+	mocks.state.insertedComments = [
+		{ id: 'comment', channelId: 'channel', text: 'x', publishedAt: '2026-01-01T00:00:00Z', status: 'restoring', decidedBy: 'human' }
+	];
+	mocks.fetchNewComments.mockResolvedValue({ comments: [], nextPageToken: null, reachedCursor: true });
+	mocks.state.insertedAudits = [
+		{ channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'manual review', actor: 'user', createdAt: '2026-01-01T00:00:00Z' }
+	];
+	mocks.getCommentModerationStatus.mockResolvedValue(null);
+
+	await runChannel('channel');
+
+	expectNoYoutubeWrites();
+	expect(mocks.state.insertedComments[0].status).toBe('rejected');
+});
+
+test('the reconcile sweep ignores a restoring comment without a user intent audit', async () => {
+	// 'restoring' rows a human never claimed (or whose latest audit is a
+	// system action) are not ours to finish.
+	mocks.state.insertedComments = [
+		{ id: 'comment', channelId: 'channel', text: 'x', publishedAt: '2026-01-01T00:00:00Z', status: 'restoring', decidedBy: 'human' }
+	];
+	mocks.fetchNewComments.mockResolvedValue({ comments: [], nextPageToken: null, reachedCursor: true });
+	mocks.state.insertedAudits = [
+		{ channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'rule #1 (keyword)', actor: 'system', createdAt: '2026-01-01T00:00:00Z' }
+	];
+
+	await runChannel('channel');
+
+	expect(mocks.getCommentModerationStatus).not.toHaveBeenCalled();
+	expect(mocks.state.insertedComments[0].status).toBe('restoring');
+});

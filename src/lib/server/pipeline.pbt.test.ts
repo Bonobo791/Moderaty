@@ -122,7 +122,7 @@ const ingestRunArb = fc.tuple(channelRowArb, commentSetArb).chain(([channel, set
 /**
  * Deterministic scorer: a pure hash of the comment text into [0, 0.99], so the
  * same text always decides identically across runs (idempotency needs that)
- * and generated sets sweep every decision band (approve/queue/reject/ban).
+ * and generated sets sweep every decision band (approve/queue/delete/ban).
  */
 function deterministicScore(text: string): number {
 	let hash = 0;
@@ -165,14 +165,16 @@ async function seedOrgFor(orgId: string | null): Promise<void> {
 	});
 }
 
-/** Seeds the generated channel row (tone level 1 — no tone pass, no video metadata call). */
-async function seedChannel(channel: ChannelRow): Promise<void> {
+/** Seeds the generated channel row (no toneLevel unless given — the default
+ * means no tone pass, no video metadata call). */
+async function seedChannel(channel: ChannelRow, toneLevel?: number): Promise<void> {
 	await testDb().db.insert(channels).values({
 		id: channel.id,
 		userId: channel.userId,
 		orgId: channel.orgId,
 		title: channel.title,
-		refreshTokenEnc: channel.refreshTokenEnc
+		refreshTokenEnc: channel.refreshTokenEnc,
+		...(toneLevel === undefined ? {} : { toneLevel })
 	});
 	// A channel carrying an orgId needs its org row: the ledger gates AI
 	// scoring on the balance and fails loudly for a missing org (never a
@@ -264,14 +266,16 @@ test('I11: generated scoring failures land in the human queue while scored comme
 	// the awaited runChannel goes red. Auto-approving or auto-rejecting a failed
 	// comment flips its status/decidedBy assertions; persisting an aiScore or a
 	// matchedRuleId for a failure, or writing author PII anywhere, breaks the
-	// null assertions. Scored comments are banned outright; failed comments are
-	// held for review on YouTube — still enforced, but with the 'hold' action —
-	// and the moderation_actions oracle catches either side going missing or
-	// swapping actions. Miscounting the queue breaks result.queued.
+	// null assertions. Scored omni comments sweep every band — delete at
+	// 0.76–0.94, ban at ≥0.95 — while the always-flagged tone pass proves the
+	// tone signal only ever holds; failed comments are held for review on
+	// YouTube — still enforced, but with the 'hold' action — and the
+	// moderation_actions oracle catches either side going missing or swapping
+	// actions. Miscounting the queue breaks result.queued.
 	await fc.assert(
 		fc.asyncProperty(failureRunArb, async (run) => {
 			await wipeTables(WIPE);
-			await seedChannel(run.channel);
+			await seedChannel(run.channel, 2); // tone level 2: the tone pass runs
 			const page: CommentPage = { comments: run.set, nextPageToken: null, reachedCursor: true };
 			mocks.fetchNewComments.mockResolvedValue(page);
 			// The scorer sees only text, so the generated per-comment mask lands on
@@ -280,8 +284,15 @@ test('I11: generated scoring failures land in the human queue while scored comme
 			const failedTexts = new Set(run.set.filter((_, index) => run.mask[index]).map((comment) => comment.text));
 			mocks.scoreComment.mockImplementation(async (text: string) => {
 				if (failedTexts.has(text)) throw new Error(run.errorMessage);
-				return { score: 0.99, scores: scoresFor(0.99) }; // ≥ AUTO_BAN 0.95 → ban
+				const score = deterministicScore(text);
+				return { score, scores: scoresFor(score) };
 			});
+			// The tone pass always flags — its score lands in [0.76, 1.00], above
+			// any sub-flag omni score — so every low-omni scored comment exercises
+			// the tone-decides path, which must only ever produce 'hold'.
+			mocks.scoreTone.mockImplementation(async (text: string) => ({
+				score: Math.round((0.76 + deterministicScore(text) * 0.24) * 100) / 100
+			}));
 
 			// I11: a scoring failure never aborts the batch.
 			const result = await runChannel(run.channel.id);
@@ -308,18 +319,27 @@ test('I11: generated scoring failures land in the human queue while scored comme
 					expect(row.aiScore).toBeNull();
 					expect(row.matchedRuleId).toBeNull();
 				} else {
-					expect(row.status).toBe('rejected');
+					const omni = deterministicScore(comment.text);
+					// Omni flags: delete at 0.76–0.94, ban at ≥0.95. Below the flag
+					// bands the always-flagged tone pass decides — and the tone
+					// signal only ever holds, never deletes or bans.
+					expect(row.status).toBe(omni >= 0.95 ? 'rejected' : omni >= 0.76 ? 'deleted' : 'held');
 					expect(row.decidedBy).toBe('ai');
 				}
 			}
 			expect(result.queued).toBe(expectedQueued);
-			// Every comment carries a remote action: scored ones are banned,
-			// queued (failed) ones are held for review so they are genuinely
-			// non-public while they wait for a human (MOD-5).
+			// Every comment carries a remote action: the omni-flagged ones are
+			// deleted or banned per band, tone-flagged and queued (failed) ones
+			// are held for review so they are genuinely non-public while they
+			// wait for a human or sit in the audit log (MOD-5).
 			const textById = new Map(run.set.map((comment) => [comment.id, comment.text]));
 			expect(actions).toHaveLength(run.set.length);
 			for (const action of actions) {
-				expect(action.action).toBe(failedTexts.has(textById.get(action.commentId) ?? '') ? 'hold' : 'ban');
+				const text = textById.get(action.commentId) ?? '';
+				const omni = deterministicScore(text);
+				expect(action.action).toBe(
+					failedTexts.has(text) || omni < 0.76 ? 'hold' : omni >= 0.95 ? 'ban' : 'delete'
+				);
 				expect(action.state).toBe('completed');
 			}
 			expect(audits.filter((row) => row.action === 'queue')).toHaveLength(expectedQueued);

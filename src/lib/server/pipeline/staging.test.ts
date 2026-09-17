@@ -302,7 +302,7 @@ test('staging inserts no empty action batch for an approved comment', async () =
 });
 
 test.each([
-	{ score: 0.8, audit: 'reject' },
+	{ score: 0.8, audit: 'delete' },
 	{ score: 0.95, audit: 'ban' }
 ])('a dry run still writes the audit row for an ai $audit decision', async ({ score }) => {
 	// The dry-run audit covers every decision, including the ones that carry a

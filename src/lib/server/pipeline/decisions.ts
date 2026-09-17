@@ -90,11 +90,23 @@ export function aiUnavailable(comment: NewComment, error: unknown): Decision {
 
 function aiOutcome(comment: NewComment, aiScore: string | null, signal: 'ai' | 'tone', score: number): Decision {
 	const reason = `${signal} score ${score.toFixed(2)}`;
-	if (score >= AUTO_BAN) {
-		return { comment, status: 'rejected', decidedBy: 'ai', matchedRuleId: null, aiScore, auditAction: 'ban', reason, youtubeAction: 'ban' };
-	}
-	if (score >= AUTO_REJECT) {
-		return { comment, status: 'rejected', decidedBy: 'ai', matchedRuleId: null, aiScore, auditAction: 'reject', reason, youtubeAction: 'reject' };
+	// The two signals carry different enforcement policies. The OpenAI
+	// moderation classifier deletes flagged comments (0.76–0.94) and bans the
+	// author at the top band. The tone model — level 2 plus the LGBTQIA/Women
+	// protection sections that ride in its prompt — is fuzzier, so its flags
+	// only ever HIDE: heldForReview on YouTube plus a 'hold' audit row, fully
+	// undoable. Tone never deletes and never bans, even at ≥0.95.
+	if (signal === 'tone') {
+		if (score >= AUTO_REJECT) {
+			return { comment, status: 'held', decidedBy: 'ai', matchedRuleId: null, aiScore, auditAction: 'hold', reason, youtubeAction: 'hold' };
+		}
+	} else {
+		if (score >= AUTO_BAN) {
+			return { comment, status: 'rejected', decidedBy: 'ai', matchedRuleId: null, aiScore, auditAction: 'ban', reason, youtubeAction: 'ban' };
+		}
+		if (score >= AUTO_REJECT) {
+			return { comment, status: 'deleted', decidedBy: 'ai', matchedRuleId: null, aiScore, auditAction: 'delete', reason, youtubeAction: 'delete' };
+		}
 	}
 	if (score >= QUEUE) {
 		return { comment, status: 'pending', decidedBy: 'ai', matchedRuleId: null, aiScore, auditAction: 'queue', reason, youtubeAction: 'hold' };
@@ -127,7 +139,8 @@ async function aiDecision(
 	if (score >= AUTO_REJECT) return aiOutcome(comment, aiScore, 'ai', score);
 	// Level 2 ("Edge lord + Ackchyually..."): the tone pass sees demeaning,
 	// condescending, and sarcastic comments the safety classifier cannot. The
-	// stronger of the two signals decides, on identical bands (tone included).
+	// stronger of the two signals decides; which action a flag produces is
+	// signal-specific (aiOutcome): omni deletes/bans, tone only holds.
 	if (tone) {
 		let toneScore: number;
 		try {

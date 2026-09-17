@@ -14,9 +14,9 @@
 // Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 import { db } from '$lib/server/db';
-import { comments, auditLog } from '$lib/server/db/schema';
+import { comments, auditLog, moderationActions } from '$lib/server/db/schema';
 import { and, eq, desc } from 'drizzle-orm';
-import { refreshAccessToken, setModerationStatus, deleteComment } from '$lib/server/youtube';
+import { refreshAccessToken, setModerationStatus, deleteComment, getCommentModerationStatus } from '$lib/server/youtube';
 import { decrypt } from '$lib/server/crypto';
 import { ownedChannel } from '$lib/server/ownership';
 import { requireUser } from '$lib/server/session';
@@ -60,16 +60,40 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
 	// Concurrent submissions otherwise both pass the pending check and issue
 	// duplicate YouTube actions and duplicate audit rows; with the conditional
 	// update, the loser finds zero rows and 404s.
-	const claimed = await db
-		.update(comments)
-		.set({ status, decidedBy: 'human' })
-		.where(and(eq(comments.id, commentId), eq(comments.channelId, paramsId), eq(comments.status, 'pending')))
-		.returning({ id: comments.id });
-	if (claimed.length === 0) throw error(404, 'pending comment not found in this channel');
+	const claim = await db.transaction(async (transaction) => {
+		const claimed = await transaction
+			.update(comments)
+			.set({ status, decidedBy: 'human' })
+			.where(and(eq(comments.id, commentId), eq(comments.channelId, paramsId), eq(comments.status, 'pending')))
+			.returning({ id: comments.id });
+		if (claimed.length === 0) return null;
+		// Read the staged 'hold' in the same transaction as the claim. A row
+		// still 'pending' can never have reached YouTube — enforcement
+		// supersedes holds for decided comments — while 'dispatched' may be
+		// in flight and 'completed' means the comment is held right now.
+		const hold = await transaction
+			.select({ state: moderationActions.state })
+			.from(moderationActions)
+			.where(and(eq(moderationActions.commentId, commentId), eq(moderationActions.action, 'hold')))
+			.get();
+		return { holdState: hold?.state ?? null };
+	});
+	if (!claim) throw error(404, 'pending comment not found in this channel');
 	const dryRun = env.DRY_RUN === 'true';
 	try {
-		if (!dryRun && action !== 'approve') {
+		// Approving needs a remote call only when a hold may actually have
+		// reached YouTube; every other action always calls.
+		const needsRemote = action !== 'approve' || claim.holdState === 'dispatched' || claim.holdState === 'completed';
+		if (!dryRun && needsRemote) {
 			const token = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
+			if (action === 'approve') {
+				// Un-hold: 'completed' was applied for certain; 'dispatched' may
+				// be in flight — verify first so a never-applied hold never gets
+				// a pointless remote write.
+				const held = claim.holdState === 'completed'
+					|| (await getCommentModerationStatus(commentId, token)) === 'heldForReview';
+				if (held) await setModerationStatus([commentId], 'published', false, token);
+			}
 			if (action === 'reject') await setModerationStatus([commentId], 'rejected', false, token);
 			if (action === 'ban') await setModerationStatus([commentId], 'rejected', true, token);
 			if (action === 'delete') await deleteComment(commentId, token);

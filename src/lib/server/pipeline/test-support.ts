@@ -34,7 +34,10 @@ const mocks = vi.hoisted(() => {
 		handleRows: [] as Record<string, unknown>[],
 		insertedComments: [] as Record<string, unknown>[],
 		insertedAudits: [] as Record<string, unknown>[],
-		moderationActions: [] as Record<string, unknown>[]
+		moderationActions: [] as Record<string, unknown>[],
+		// comments.status for pre-stored rows (existingIds): the enforcement
+		// supersede partition reads it when deciding whether a hold still applies.
+		commentStatuses: {} as Record<string, string>
 	};
 	const store = (table: unknown, values: unknown) => {
 		const rows = (Array.isArray(values) ? values : [values]) as Record<string, unknown>[];
@@ -66,7 +69,14 @@ const mocks = vi.hoisted(() => {
 					return [...new Set([
 						...state.existingIds,
 						...state.insertedComments.map((comment) => queryKey(comment.id))
-					])].filter((id) => params.includes(id)).map((id) => ({ id }));
+					])].filter((id) => params.includes(id)).map((id) => {
+						// Status resolution order: the staged row wins (it carries the
+						// status stageDecisions wrote), then a test-seeded status for
+						// pre-stored ids, then 'held' — the status a legacy dispatched
+						// hold's comment carries.
+						const staged = state.insertedComments.find((comment) => comment.id === id);
+						return { id, status: staged?.status ?? state.commentStatuses[id] ?? 'held' };
+					});
 				}
 				if (table === state.tables.rules) {
 					const params = queryParams(condition);
@@ -339,14 +349,36 @@ export function expectActionState(state: string) {
 	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({ commentId: 'comment', state })]);
 }
 
+export function expectNoYoutubeWrites() {
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
+}
+
+export function expectHeldForReview() {
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'heldForReview', false, 'access-token', undefined);
+}
+
+/** The 'queue' (staging) then 'hold' (completion) audit rows a queued decision leaves. */
+export function queueHoldAudits(reason: unknown) {
+	return [
+		expect.objectContaining({ commentId: 'comment', action: 'queue', reason }),
+		expect.objectContaining({ commentId: 'comment', action: 'hold', reason })
+	];
+}
+
 export function expectAiUnavailableQueued(result: unknown, extra: Record<string, unknown> = {}) {
 	expect(mocks.state.insertedComments).toEqual([
 		expect.objectContaining({ id: 'comment', status: 'pending', decidedBy: 'none', aiScore: null })
 	]);
-	expect(mocks.state.insertedAudits).toEqual([
-		expect.objectContaining({ commentId: 'comment', action: 'queue', reason: expect.stringContaining('ai unavailable') })
+	// Queued means held on YouTube: the staged 'hold' was enforced in the same
+	// run, so the audit trail is 'queue' (staging) followed by 'hold'
+	// (completion) — and the comment is genuinely non-public while it waits.
+	expect(mocks.state.insertedAudits).toEqual(queueHoldAudits(expect.stringContaining('ai unavailable')));
+	expect(mocks.state.moderationActions).toEqual([
+		expect.objectContaining({ commentId: 'comment', action: 'hold', state: 'completed' })
 	]);
-	expect(result).toMatchObject({ acted: 0, queued: 1, ...extra });
+	expectHeldForReview();
+	expect(result).toMatchObject({ acted: 1, queued: 1, ...extra });
 }
 
 export function resetPipelineMocks() {
@@ -398,6 +430,7 @@ export function resetPipelineMocks() {
 	mocks.state.insertedComments = [];
 	mocks.state.insertedAudits = [];
 	mocks.state.moderationActions = [];
+	mocks.state.commentStatuses = {};
 	mocks.decrypt.mockReturnValue('refresh-token');
 	mocks.assertBeforeDeadline.mockImplementation(() => undefined);
 	mocks.refreshAccessToken.mockResolvedValue('access-token');

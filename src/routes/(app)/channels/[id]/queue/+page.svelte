@@ -118,7 +118,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	{#if form?.error}<div class="error-box" role="alert">{form.error}</div>{/if}
 	{#if form?.success}<div class="flash" role="status">{form.success}</div>{/if}
 
-	<p class="muted">These comments are held for review and are not public yet. Rejected or approved comments already have a final state. Your action is final.</p>
+	<p class="muted">These comments are held for review on YouTube and are not public yet. Rejected or approved comments already have a final state. Your action is final.</p>
 
 	{#each visible as c (c.id)}
 		<div class="row-wrap" class:exiting={exiting[c.id]}>

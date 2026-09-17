@@ -99,7 +99,15 @@ export async function stageDecisions(channelId: string, decisions: Decision[], o
 		await assertChannelActive(channelId, transaction, expected);
 		await transaction.insert(comments).values(commentRows(channelId, decisions));
 		if (actions.length) await transaction.insert(moderationActions).values(actions);
-		const audits = auditRows(channelId, decisions.filter((decision) => !decision.youtubeAction), false);
+		// Enforcement decisions (ban/reject/delete/hold) get their audit row at
+		// completion from completeActions — EXCEPT a queued comment's 'queue'
+		// row, which records WHY it waits for a human even though its 'hold'
+		// row is written later by enforcement.
+		const audits = auditRows(
+			channelId,
+			decisions.filter((decision) => !decision.youtubeAction || decision.auditAction === 'queue'),
+			false
+		);
 		if (audits.length) await transaction.insert(auditLog).values(audits);
 		// One credit per BILLABLE decision (AI budget was claimed for it), in
 		// the SAME transaction as the staging: a crash rolls both back and a

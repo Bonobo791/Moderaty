@@ -4,6 +4,8 @@ import {
 	dispatchedAction,
 	expectActionState,
 	expectAiUnavailableQueued,
+	expectHeldForReview,
+	expectNoYoutubeWrites,
 	getMocks,
 	moderation,
 	newComment,
@@ -72,8 +74,7 @@ test.each([
 
 	await runChannel('channel');
 
-	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
-	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expectNoYoutubeWrites();
 	expectActionState('completed');
 });
 
@@ -89,15 +90,15 @@ test('retries a dispatched ban while the comment is still public', async () => {
 });
 
 test.each([
-	{ raw: 0.506, status: 'pending', reason: 'ai score 0.51' },
-	{ raw: 0.504, status: 'approved', reason: 'ai score 0.50' }
-])('rounds the AI score to 2 decimals before deciding ($raw → $status)', async ({ raw, status, reason }) => {
+	{ raw: 0.506, status: 'pending', actions: ['queue', 'hold'], reason: 'ai score 0.51' },
+	{ raw: 0.504, status: 'approved', actions: ['approve'], reason: 'ai score 0.50' }
+])('rounds the AI score to 2 decimals before deciding ($raw → $status)', async ({ raw, status, actions, reason }) => {
 	mocks.scoreComment.mockResolvedValue(moderation(raw));
 
 	await runChannel('channel');
 
 	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status })]);
-	expect(mocks.state.insertedAudits).toEqual([expect.objectContaining({ commentId: 'comment', reason })]);
+	expect(mocks.state.insertedAudits).toEqual(actions.map((action) => expect.objectContaining({ commentId: 'comment', action, reason })));
 });
 
 test('keeps a dispatched action retriable when verification fails transiently', async () => {
@@ -128,8 +129,7 @@ test('stops without new writes or YouTube calls when account deletion deactivate
 	expect(mocks.state.insertedComments).toEqual([]);
 	expect(mocks.state.insertedAudits).toEqual([]);
 	expect(mocks.state.moderationActions).toEqual([]);
-	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
-	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expectNoYoutubeWrites();
 	expect(mocks.state.channelUpdates).toEqual([]);
 	expect(result).toMatchObject({ fetched: 1, partial: true, dryRun: false });
 });
@@ -144,8 +144,7 @@ test('stops when account deletion replaces the shared-channel connector identity
 
 	expect(result).toMatchObject({ partial: true, skipped: false });
 	expect(mocks.state.insertedComments).toEqual([]);
-	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
-	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expectNoYoutubeWrites();
 });
 
 test('does not dispatch staged enforcement when the channel is deactivated after decisions are staged', async () => {
@@ -162,8 +161,7 @@ test('does not dispatch staged enforcement when the channel is deactivated after
 	expect(mocks.state.insertedComments).toEqual([]);
 	expect(mocks.state.insertedAudits).toEqual([]);
 	expect(mocks.state.moderationActions).toEqual([]);
-	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
-	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expectNoYoutubeWrites();
 	expect(mocks.state.channelUpdates).toEqual([]);
 	expect(result).toMatchObject({ partial: true });
 });
@@ -174,8 +172,7 @@ test('skips a pending action already claimed by a concurrent run', async () => {
 
 	const result = await runChannel('channel');
 
-	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
-	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expectNoYoutubeWrites();
 	expect(mocks.state.insertedAudits).toEqual([]);
 	expectActionState('pending');
 	expect(result).toMatchObject({ fetched: 1, acted: 0, skipped: false, dryRun: false });
@@ -214,7 +211,7 @@ test('rule hold action dispatches heldForReview to YouTube', async () => {
 
 	const result = await runChannel('channel');
 
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'heldForReview', false, 'access-token', undefined);
+	expectHeldForReview();
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
 	expect(result).toMatchObject({ fetched: 1, acted: 1, dryRun: false });
 });
@@ -271,8 +268,7 @@ test('fails loudly on an unknown stored moderation action', async () => {
 
 	await expect(runChannel('channel')).rejects.toThrow('moderation action is invalid: explode');
 
-	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
-	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expectNoYoutubeWrites();
 });
 
 test('does not run the claim update when there is nothing pending to claim', async () => {
@@ -317,4 +313,54 @@ test('fails the run with every per-comment failure joined, each naming its comme
 	await expect(runChannel('channel')).rejects.toThrow(
 		'moderation decision failed for 2 comment(s): comment bad1: scores failed to serialize; comment bad2: scores failed to serialize'
 	);
+});
+
+test('a dry run never issues a YouTube write for a queued comment (I8)', async () => {
+	mocks.state.env.DRY_RUN = 'true';
+	mocks.scoreComment.mockResolvedValue(moderation(0.6));
+
+	const result = await runChannel('channel');
+
+	expect(result).toMatchObject({ fetched: 1, queued: 1, dryRun: true });
+	expectNoYoutubeWrites();
+	expect(mocks.state.insertedComments).toEqual([]);
+	expect(mocks.state.moderationActions).toEqual([]);
+	expect(mocks.state.insertedAudits).toEqual([
+		expect.objectContaining({ commentId: 'comment', action: 'dry-run' })
+	]);
+});
+
+test('a completed queue hold is never re-issued — reruns are idempotent (I4)', async () => {
+	mocks.scoreComment.mockResolvedValue(moderation(0.6));
+
+	await runChannel('channel');
+
+	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
+
+	// The second run dedupes the stored comment and never reselects the
+	// completed hold — no second YouTube write.
+	await runChannel('channel');
+
+	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
+	expectActionState('completed');
+});
+
+test.each([
+	{ state: 'pending' },
+	{ state: 'dispatched' }
+])('a human decision supersedes an unapplied queue hold ($state) — it is never held', async ({ state }) => {
+	// The review queue claimed the comment while its staged 'hold' was still
+	// outstanding: the hold must not be applied after the fact.
+	mocks.state.existingIds = ['comment'];
+	mocks.state.commentStatuses = { comment: 'approved' };
+	mocks.state.moderationActions = [dispatchedAction({ action: 'hold', reason: 'ai score 0.60', state })];
+	mocks.getCommentModerationStatus.mockResolvedValue('published');
+
+	const result = await runChannel('channel');
+
+	expectNoYoutubeWrites();
+	expectActionState('superseded');
+	// A never-applied hold writes no completion audit row.
+	expect(mocks.state.insertedAudits).toEqual([]);
+	expect(result).toMatchObject({ acted: 0 });
 });

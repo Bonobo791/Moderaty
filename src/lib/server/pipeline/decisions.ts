@@ -82,7 +82,9 @@ export function aiUnavailable(comment: NewComment, error: unknown): Decision {
 		aiScore: null,
 		auditAction: 'queue',
 		reason: `ai unavailable: ${errorText(error)}`.slice(0, 200),
-		youtubeAction: null
+		// Queued comments are held on YouTube before the internal queue presents
+		// them — otherwise the queue would show a still-public comment.
+		youtubeAction: 'hold'
 	};
 }
 
@@ -95,7 +97,7 @@ function aiOutcome(comment: NewComment, aiScore: string | null, signal: 'ai' | '
 		return { comment, status: 'rejected', decidedBy: 'ai', matchedRuleId: null, aiScore, auditAction: 'reject', reason, youtubeAction: 'reject' };
 	}
 	if (score >= QUEUE) {
-		return { comment, status: 'pending', decidedBy: 'ai', matchedRuleId: null, aiScore, auditAction: 'queue', reason, youtubeAction: null };
+		return { comment, status: 'pending', decidedBy: 'ai', matchedRuleId: null, aiScore, auditAction: 'queue', reason, youtubeAction: 'hold' };
 	}
 	return { comment, status: 'approved', decidedBy: 'ai', matchedRuleId: null, aiScore, auditAction: 'approve', reason, youtubeAction: null };
 }

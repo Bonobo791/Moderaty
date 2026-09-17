@@ -6,7 +6,7 @@
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { maybeTriggerAutoTopUp } from '$lib/server/billing/autotopup';
 import { db } from '$lib/server/db';
-import { auditLog, channels, moderationActions } from '$lib/server/db/schema';
+import { auditLog, channels, comments, moderationActions } from '$lib/server/db/schema';
 import { assertBeforeDeadline, DeadlineExceededError } from '$lib/server/http';
 import {
 	deleteComment,
@@ -69,16 +69,37 @@ function outstandingAction(action: typeof moderationActions.$inferSelect): Outst
 	return { ...action, action: validAction(action.action), state: action.state };
 }
 
-async function markDispatched(actions: OutstandingAction[], expected?: ChannelIdentity) {
-	// Stryker disable next-line ConditionalExpression: equivalent — both callers pass a non-empty array (applyModerationAction batches of ≥1, the delete loop a single action), so the empty-array branch is unreachable
+function updateActionStates(
+	transaction: ChannelGuardHandle,
+	actions: OutstandingAction[],
+	set: { state: 'dispatched' | 'superseded' | 'completed'; lastAttemptAt?: string }
+) {
+	return transaction
+		.update(moderationActions)
+		.set(set)
+		.where(inArray(moderationActions.commentId, actions.map((action) => action.commentId)));
+}
+
+/**
+ * Transitions outstanding action rows inside the channel-guard transaction.
+ * The 'dispatched' transition stamps lastAttemptAt; terminal transitions
+ * leave attempt bookkeeping untouched.
+ */
+async function transitionActions(
+	actions: OutstandingAction[],
+	set: { state: 'dispatched' | 'superseded'; lastAttemptAt?: string },
+	expected?: ChannelIdentity
+) {
+	// Stryker disable next-line ConditionalExpression: equivalent — removing the guard makes an empty batch run a no-op update; observably identical (dispatch callers always pass ≥1, markSuperseded passes an empty partition)
 	if (!actions.length) return;
 	await db.transaction(async (transaction) => {
 		await assertChannelActive(actions[0].channelId, transaction, expected);
-		await transaction
-			.update(moderationActions)
-			.set({ state: 'dispatched', lastAttemptAt: new Date().toISOString() })
-			.where(inArray(moderationActions.commentId, actions.map((action) => action.commentId)));
+		await updateActionStates(transaction, actions, set);
 	});
+}
+
+function markDispatched(actions: OutstandingAction[], expected?: ChannelIdentity) {
+	return transitionActions(actions, { state: 'dispatched', lastAttemptAt: new Date().toISOString() }, expected);
 }
 
 async function claimPendingActions(actions: OutstandingAction[], expected?: ChannelIdentity): Promise<Set<string>> {
@@ -97,15 +118,48 @@ async function claimPendingActions(actions: OutstandingAction[], expected?: Chan
 	});
 }
 
+/**
+ * A human decision supersedes a staged 'hold' it raced with: the queue claims
+ * the comment (status leaves 'pending'), so the hold must never be applied
+ * after the fact. 'superseded' is a terminal state — no completion audit row,
+ * because the hold never reached YouTube (the 'queue' row already records why
+ * the comment was ever queued).
+ */
+function markSuperseded(actions: OutstandingAction[], expected?: ChannelIdentity) {
+	return transitionActions(actions, { state: 'superseded' }, expected);
+}
+
+/**
+ * Splits a hold batch into actions that still apply and ones a human decision
+ * already superseded. 'pending' means the comment still waits for review and
+ * 'held' a rule's standing hold — both still want the remote hold. Anything
+ * else (approved/rejected/deleted by a human or rule, a restore in flight, or
+ * a comment row gone) means the comment's fate is decided: holding it now
+ * would re-hide a comment a human already judged.
+ */
+async function partitionHolds(actions: OutstandingAction[]): Promise<{ applicable: OutstandingAction[]; superseded: OutstandingAction[] }> {
+	const rows = await db
+		.select({ id: comments.id, status: comments.status })
+		.from(comments)
+		.where(inArray(comments.id, actions.map((action) => action.commentId)))
+		.all();
+	const statusById = new Map(rows.map((row) => [row.id, row.status]));
+	const applicable: OutstandingAction[] = [];
+	const superseded: OutstandingAction[] = [];
+	for (const action of actions) {
+		const status = statusById.get(action.commentId);
+		if (status === 'pending' || status === 'held') applicable.push(action);
+		else superseded.push(action);
+	}
+	return { applicable, superseded };
+}
+
 async function completeActions(actions: OutstandingAction[], expected?: ChannelIdentity) {
 	// Stryker disable next-line ConditionalExpression: equivalent — all callers pass a non-empty array (applyModerationAction batches of ≥1, single verified or deleted actions)
 	if (!actions.length) return;
 	await db.transaction(async (transaction) => {
 		await assertChannelActive(actions[0].channelId, transaction, expected);
-		await transaction
-			.update(moderationActions)
-			.set({ state: 'completed' })
-			.where(inArray(moderationActions.commentId, actions.map((action) => action.commentId)));
+		await updateActionStates(transaction, actions, { state: 'completed' });
 		await transaction.insert(auditLog).values(actions.map((action) => ({
 			channelId: action.channelId,
 			commentId: action.commentId,
@@ -156,9 +210,18 @@ async function applyModerationAction(
 		await markDispatched(batch, expected);
 		assertBeforeDeadline(deadline);
 		await assertChannelActive(batch[0].channelId, db, expected);
-		await setModerationStatus(batch.map((action) => action.commentId), status, banAuthor, accessToken, deadline);
-		await completeActions(batch, expected);
-		acted += batch.length;
+		// Queue holds stay provisional until applied: a human review decision
+		// supersedes them. The comments-status check runs AFTER the dispatch
+		// claim so a decision committed mid-flight still wins the race.
+		const { applicable, superseded } = status === 'heldForReview'
+			? await partitionHolds(batch)
+			: { applicable: batch, superseded: [] };
+		await markSuperseded(superseded, expected);
+		if (applicable.length) {
+			await setModerationStatus(applicable.map((action) => action.commentId), status, banAuthor, accessToken, deadline);
+			await completeActions(applicable, expected);
+			acted += applicable.length;
+		}
 	}
 	return acted;
 }

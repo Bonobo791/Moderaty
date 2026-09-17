@@ -15,14 +15,15 @@
 
 import { beforeEach, expect, test, vi } from 'vitest';
 import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
-import { auditLog, channels, comments } from '$lib/server/db/schema';
+import { auditLog, channels, comments, moderationActions } from '$lib/server/db/schema';
 import { eq } from 'drizzle-orm';
 
 const mocks = vi.hoisted(() => ({
 	env: { DRY_RUN: 'true' } as Record<string, string | undefined>,
 	refreshAccessToken: vi.fn(async () => 'access-token'),
 	setModerationStatus: vi.fn(async () => {}),
-	deleteComment: vi.fn(async () => {})
+	deleteComment: vi.fn(async () => {}),
+	getCommentModerationStatus: vi.fn(async () => null as string | null)
 }));
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
@@ -30,12 +31,13 @@ vi.mock('$lib/server/crypto', () => ({ decrypt: vi.fn(() => 'decrypted-refresh-t
 vi.mock('$lib/server/youtube', () => ({
 	refreshAccessToken: mocks.refreshAccessToken,
 	setModerationStatus: mocks.setModerationStatus,
-	deleteComment: mocks.deleteComment
+	deleteComment: mocks.deleteComment,
+	getCommentModerationStatus: mocks.getCommentModerationStatus
 }));
 
 import { actions, load } from './+page.server';
 
-setupTestDb(['audit_log', 'comments', 'channels']);
+setupTestDb(['audit_log', 'comments', 'channels', 'moderation_actions']);
 
 beforeEach(async () => {
 	await testDb()
@@ -73,6 +75,28 @@ async function seedComment(id: string, channelId: string, status = 'pending') {
 		status,
 		decidedBy: 'ai'
 	});
+}
+
+/** The 'hold' moderation action the pipeline stages for a queued comment. */
+async function seedHold(commentId: string, channelId: string, state = 'completed') {
+	await testDb().db.insert(moderationActions).values({
+		commentId,
+		channelId,
+		action: 'hold',
+		reason: 'ai score 0.60',
+		state,
+		lastAttemptAt: null,
+		lastManualRetryAt: null
+	});
+}
+
+/** Queues 'c1' with a staged 'hold' in `state`, then approves it (DRY_RUN off). */
+async function approveHeldComment(state: string) {
+	mocks.env.DRY_RUN = 'false';
+	await seedComment('c1', 'UC1');
+	await seedHold('c1', 'UC1', state);
+	const res = await act('approve', { commentId: 'c1' });
+	expect(res).toMatchObject({ success: 'Approved — recorded in audit log.' });
 }
 
 async function commentRow(id: string) {
@@ -215,6 +239,48 @@ test('approve outside DRY_RUN skips YouTube entirely and audits approve', async 
 	const audits = await auditRows();
 	expect(audits).toHaveLength(1);
 	expect(audits[0]).toMatchObject({ channelId: 'UC1', commentId: 'c1', action: 'approve', reason: 'manual review', actor: 'user' });
+});
+
+test('approve outside DRY_RUN publishes a comment the pipeline held on YouTube', async () => {
+	// Queue items under the hold contract are genuinely non-public on YouTube:
+	// approving one must un-hold it or it stays invisible forever.
+	await approveHeldComment('completed');
+
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token');
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expect((await commentRow('c1'))?.status).toBe('approved');
+
+	const audits = await auditRows();
+	expect(audits).toHaveLength(1);
+	expect(audits[0]).toMatchObject({ channelId: 'UC1', commentId: 'c1', action: 'approve', actor: 'user' });
+});
+
+test('approve skips the publish call when the staged hold was never dispatched', async () => {
+	// A 'pending' hold at claim time can never have reached YouTube — the
+	// claim already supersedes it, so no un-hold call is needed.
+	await approveHeldComment('pending');
+
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expect((await commentRow('c1'))?.status).toBe('approved');
+});
+
+test.each([
+	{ observed: 'heldForReview', publishes: true },
+	{ observed: 'published', publishes: false }
+])('approve verifies an in-flight hold before publishing (observed: $observed)', async ({ observed, publishes }) => {
+	// A 'dispatched' hold may or may not have reached YouTube — check before
+	// un-holding so a never-applied hold never gets a pointless write.
+	mocks.getCommentModerationStatus.mockResolvedValue(observed);
+	await approveHeldComment('dispatched');
+
+	expect(mocks.getCommentModerationStatus).toHaveBeenCalledWith('c1', 'access-token');
+	if (publishes) {
+		expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token');
+	} else {
+		expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	}
+	expect((await commentRow('c1'))?.status).toBe('approved');
 });
 
 test('del outside DRY_RUN deletes on YouTube, marks deleted, and audits delete', async () => {

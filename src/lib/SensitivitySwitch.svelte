@@ -47,7 +47,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 			stop: 'STRICT',
 			name: 'EDGE LORD + ACKCHYUALLY...',
 			description:
-				'Hateful comments and demeaning, condescending, or sarcastic tone get moderated. The edge lord has entered the chat.'
+				'Demeaning, condescending, or sarcastic tone gets hidden — never deleted. The edge lord has entered the chat.'
 		}
 	} as const;
 

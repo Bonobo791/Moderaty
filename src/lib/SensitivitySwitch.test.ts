@@ -77,7 +77,7 @@ test('the edge lord readout renders the EDGE LORD stop label and the verbatim ch
 	const body = renderSwitch(1);
 	expect(body).toContain('>EDGE LORD</span>');
 	expect(body).toContain('Only clear hate speech and spam get yeeted. Snark survives.');
-	expect(body).not.toContain('Hateful comments and demeaning, condescending, or sarcastic tone get moderated. The edge lord has entered the chat.');
+	expect(body).not.toContain('Demeaning, condescending, or sarcastic tone gets hidden — never deleted. The edge lord has entered the chat.');
 	// At level 1 the mode name EQUALS the stop label — the duplicate
 	// mode-name element must be hidden, or the readout reads "EDGE LORD
 	// EDGE LORD" (coderabbit).
@@ -87,7 +87,7 @@ test('the edge lord readout renders the EDGE LORD stop label and the verbatim ch
 test('the strict readout renders the STRICT stop label and the verbatim strict copy', () => {
 	const body = renderSwitch(2);
 	expect(body).toContain('>STRICT</span>');
-	expect(body).toContain('Hateful comments and demeaning, condescending, or sarcastic tone get moderated. The edge lord has entered the chat.');
+	expect(body).toContain('Demeaning, condescending, or sarcastic tone gets hidden — never deleted. The edge lord has entered the chat.');
 	// Level 2 shows the distinct mode name under the stop label — a missing
 	// mode-name here must fail the test (coderabbit).
 	expect(body).toMatch(/class="[^"]*\bmode-name\b[^"]*">EDGE LORD \+ ACKCHYUALLY\.\.\.<\/span>/);

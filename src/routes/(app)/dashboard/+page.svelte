@@ -124,7 +124,9 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 					<th>Channel</th>
 					<th>Status</th>
 					<th class="num">Pending</th>
+					<th class="num col-held">Held</th>
 					<th class="num col-rejected">Rejected</th>
+					<th class="num col-deleted">Deleted</th>
 					<th class="num col-approved">Approved</th>
 					<th class="col-sensitivity">Sensitivity</th>
 					<th class="col-last">Last checked</th>
@@ -159,7 +161,9 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 							{/if}
 						</td>
 						<td class="mono num">{pending}</td>
+						<td class="mono num col-held">{count(ch.id, 'held')}</td>
 						<td class="mono num col-rejected">{count(ch.id, 'rejected')}</td>
+						<td class="mono num col-deleted">{count(ch.id, 'deleted')}</td>
 						<td class="mono num col-approved">{count(ch.id, 'approved')}</td>
 						<td class="col-sensitivity">
 							<div class="mini-track">
@@ -350,7 +354,9 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	/* responsive column collapse (spec §7): display:none, no width tricks */
 	@media (max-width: 767px) {
 		.col-id,
+		.col-held,
 		.col-rejected,
+		.col-deleted,
 		.col-sensitivity,
 		.col-last {
 			display: none;

@@ -154,7 +154,7 @@ test('the sensitivity control renders the two-stop switch with both meme endpoin
 test('the sensitivity readout switches copy at the strict level', () => {
 	const body = renderPage({ ...LAYOUT_DATA, ch: { ...LAYOUT_DATA.ch, toneLevel: 2 } });
 	expect(body).toContain('STRICT');
-	expect(body).toContain('Hateful comments and demeaning, condescending, or sarcastic tone get moderated. The edge lord has entered the chat.');
+	expect(body).toContain('Demeaning, condescending, or sarcastic tone gets hidden — never deleted. The edge lord has entered the chat.');
 });
 
 test('the switch persists through the setToneLevel action with the hidden fields the action requires', () => {

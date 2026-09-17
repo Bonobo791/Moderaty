@@ -55,10 +55,12 @@ describe('db-preflight', () => {
 			expect.unreachable('a malformed database URL must fail loudly');
 		} catch (error) {
 			expect(error.code).not.toBe(0);
-			const out = `${error.stdout ?? ''}${error.stderr ?? ''}`;
-			expect(out).toContain('db-preflight:');
-			expect(out).toContain('URL_INVALID');
-			expect(out).toContain('blocking the deploy');
+			const stderr = `${error.stderr ?? ''}`;
+			expect(stderr).toContain('db-preflight:');
+			expect(stderr).toContain('URL_INVALID');
+			expect(stderr).toContain('blocking the deploy');
+			const stdout = `${error.stdout ?? ''}`;
+			expect(stdout).not.toContain('db-preflight:');
 		}
 	});
 });

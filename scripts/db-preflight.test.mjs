@@ -20,7 +20,7 @@
 // the underlying driver error on stderr — never silently.
 
 import { execFile } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -61,6 +61,30 @@ describe('db-preflight', () => {
 			expect(stderr).toContain('blocking the deploy');
 			const stdout = `${error.stdout ?? ''}`;
 			expect(stdout).not.toContain('db-preflight:');
+		}
+	});
+
+	it('exits non-zero when reads work but writes are denied', async () => {
+		// The write probe exists because a valid-but-read-only credential
+		// passes SELECT 1 yet fails the migration's first write — the same
+		// silent exit 1 this preflight was built to diagnose.
+		const roPath = join(tmp, 'readonly.db');
+		writeFileSync(roPath, '');
+		chmodSync(roPath, 0o444);
+		try {
+			await runPreflight({
+				TURSO_DATABASE_URL: `file:${roPath}`,
+				TURSO_AUTH_TOKEN: ''
+			});
+			expect.unreachable('a read-only database must fail the write probe');
+		} catch (error) {
+			expect(error.code).not.toBe(0);
+			const stderr = `${error.stderr ?? ''}`;
+			expect(stderr).toContain('db-preflight:');
+			expect(stderr).toContain('blocking the deploy');
+			expect(stderr).toMatch(/read.only|READONLY/i);
+		} finally {
+			chmodSync(roPath, 0o644); // let rmSync remove it
 		}
 	});
 });

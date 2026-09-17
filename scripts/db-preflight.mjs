@@ -19,11 +19,14 @@
 // then the process exits 1 with nothing on stderr. The 2026-09-17 Coolify dev
 // deploy proved it: an expired TURSO_AUTH_TOKEN made Turso answer HTTP 401,
 // and the deploy log contained only spinner frames. This script makes the same
-// connection drizzle-kit is about to make (a bare SELECT 1 through
-// @libsql/client, the same driver) and prints the REAL error, so a dead
-// credential or unreachable host is diagnosable from the deploy log alone.
-// Env-var presence is already preflighted by netlify-migrate.mjs before this
-// runs; this step only proves the credentials actually work.
+// connection drizzle-kit is about to make through @libsql/client (the same
+// driver) and prints the REAL error, so a dead credential or unreachable host
+// is diagnosable from the deploy log alone. Env-var presence is already
+// preflighted by netlify-migrate.mjs before this runs; this step proves the
+// credentials actually work — AND can write. A valid-but-read-only token
+// passes SELECT 1 yet fails the migration's first write, so connectivity
+// alone is not enough: a real DDL round-trip must succeed before we report
+// the credentials usable.
 
 import { createClient } from '@libsql/client';
 
@@ -36,14 +39,23 @@ try {
 		authToken: authToken || undefined
 	});
 	await client.execute('SELECT 1');
+	// Prove write access, not just connectivity: a read-only token passes
+	// SELECT 1 yet fails the migration's first write with drizzle-kit's
+	// silent exit 1. One atomic batch creates and drops a per-run probe
+	// table — a genuine write that leaves nothing behind.
+	const probe = `_preflight_write_probe_${Date.now().toString(36)}`;
+	await client.batch([`CREATE TABLE ${probe} (id INTEGER PRIMARY KEY)`, `DROP TABLE ${probe}`], 'write');
 	client.close();
 } catch (error) {
 	const message = error instanceof Error ? error.message : String(error);
 	console.error(
-		`db-preflight: cannot reach the database — ${message}\n` +
+		`db-preflight: database unreachable or not writable — ${message}\n` +
 			'  This check exists because drizzle-kit exits 1 with no output on connection failures.\n' +
 			'  Likely causes:\n' +
 			'  - HTTP 401: TURSO_AUTH_TOKEN is expired, revoked, or minted for a different database.\n' +
+			'  - Read-only credential: the token authenticates reads (SELECT 1 passes) but cannot\n' +
+			'    write — the migration needs a full-access token.\n' +
+			'    Mint a fresh non-expiring token (`turso db tokens create <db> -e never`) and update\n' +
 			'    Mint a fresh non-expiring token (`turso db tokens create <db> -e never`) and update\n' +
 			'    EVERY copy: the worktree .env, the Coolify app env (Build Variable flag ON — the\n' +
 			'    Dockerfile only receives it via --mount=type=secret), and the Netlify branch-deploys\n' +
@@ -51,9 +63,9 @@ try {
 			'  - DNS/fetch errors: TURSO_DATABASE_URL is wrong, or Turso is unreachable from the\n' +
 			'    builder.\n' +
 			'  - file: URLs: the path is not writable by the build user.\n' +
-			'blocking the deploy — a build that cannot reach its database must never ship.'
+			'blocking the deploy — a build that cannot reach and write its database must never ship.'
 	);
 	process.exit(1);
 }
 
-console.log('db-preflight: database reachable, credentials accepted.');
+console.log('db-preflight: database reachable, credentials accepted and writable.');

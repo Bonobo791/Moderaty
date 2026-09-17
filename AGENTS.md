@@ -12,7 +12,8 @@ One agent works the full stack. There are no per-layer agent boundaries.
 - **`dev` is the integration branch and the working branch.** Commit
   directly to `dev` in `.worktrees/dev` — no per-feature branches or PRs.
   A PR is still useful for large or risky work (it triggers the review
-  bots); the agent may merge its own PRs. Work in the `.worktrees/dev`
+  bots); the agent NEVER merges or closes its own PRs — they stay open
+  for the human. Work in the `.worktrees/dev`
   worktree — never switch branches in a checkout in use elsewhere.
 - **`main` is production.** Only the human merges `dev → main`, batched, to
   control Netlify production-deploy credit spend. Never push to `main`
@@ -60,9 +61,10 @@ Day-to-day work commits directly to `dev`; pull requests are optional
 - **Commit after every step** with message `step <N>: <step name>`.
 - **Never commit or open a PR while `npm run check`, `npm run build`, or
   `npm run test` is red.** Green is proven locally, not discovered in CI.
-- When a PR is used: target `dev`, and the agent may merge it once checks
-  are green and review findings are resolved. Resume with
-  `git checkout dev && git pull`.
+- When a PR is used: target `dev`, and the agent NEVER merges or closes
+  it — not even when checks are green and review findings are resolved.
+  Open the PR, triage bot findings, then stop and report; merging is the
+  human's call. Resume with `git checkout dev && git pull`.
 - **Never** push to `main` directly, never `--force`.
   `dev → main` is the human's batched release, not an executor step.
 - **Every review finding (human or bot) gets a failing test BEFORE its fix.**

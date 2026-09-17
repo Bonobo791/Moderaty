@@ -15,11 +15,11 @@
 
 import { expect, test } from 'vitest';
 import { TEST_OWNER, setupTestDb, testDb } from '$lib/server/testdb';
-import { auditLog, channels } from '$lib/server/db/schema';
+import { auditLog, channels, comments } from '$lib/server/db/schema';
 
 import { load } from './+page.server';
 
-setupTestDb(['audit_log', 'channels']);
+setupTestDb(['audit_log', 'channels', 'comments']);
 
 const OWNER = TEST_OWNER;
 
@@ -68,6 +68,46 @@ test('load marks only the latest reversible action per comment as undoable', asy
 	expect(byComment.get('c-restored:hold')).toBeNull();
 	expect(byComment.get('c-restored:restore')).toBeNull();
 	expect(byComment.get('c-approve:approve')).toBeNull();
+});
+
+test('a hold row on a still-pending queue comment offers no Undo — the handler would 404', async () => {
+	// The undo handler only accepts decided comments (held/rejected/restoring).
+	// A queued comment is 'pending': its completed 'hold' audit row is the
+	// latest entry, but Undo on it can only fail — the queue's own actions
+	// are the path. The button must not be offered.
+	await seedChannel();
+	await testDb().db.insert(comments).values({
+		id: 'c-queued',
+		channelId: 'UC1',
+		text: 'held text',
+		publishedAt: '2026-01-01T00:00:00Z',
+		status: 'pending',
+		decidedBy: 'ai'
+	});
+	await seedEntries([{ commentId: 'c-queued', action: 'hold', createdAt: '2026-01-01T00:00:01.000Z' }]);
+
+	const result = await load({ params: { id: 'UC1' }, locals: { user: OWNER }, url: LOG_URL } as never);
+
+	expect(result!.entries[0]).toMatchObject({ commentId: 'c-queued', action: 'hold', undoable: null });
+});
+
+test('a hold row on a held comment still offers Undo', async () => {
+	// The status gate only hides Undo the handler would reject — a decided
+	// ('held') comment keeps the full undo it had before.
+	await seedChannel();
+	await testDb().db.insert(comments).values({
+		id: 'c-held',
+		channelId: 'UC1',
+		text: 'held text',
+		publishedAt: '2026-01-01T00:00:00Z',
+		status: 'held',
+		decidedBy: 'rule'
+	});
+	await seedEntries([{ commentId: 'c-held', action: 'hold', createdAt: '2026-01-01T00:00:01.000Z' }]);
+
+	const result = await load({ params: { id: 'UC1' }, locals: { user: OWNER }, url: LOG_URL } as never);
+
+	expect(result!.entries[0]).toMatchObject({ commentId: 'c-held', action: 'hold', undoable: 'full' });
 });
 
 test('tied timestamps still pick the truly latest action (auto-increment id breaks the tie)', async () => {

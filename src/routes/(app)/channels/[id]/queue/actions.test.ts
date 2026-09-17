@@ -173,19 +173,62 @@ test('a second act on an already-claimed comment 404s and audits nothing new', a
 });
 
 test('a failed YouTube call releases the claim so the action stays retryable', async () => {
+	// The failure surfaces as a form failure in the error-box — not a bare
+	// 500 page — and the comment returns to the queue for a retry.
 	mocks.env.DRY_RUN = 'false';
 	mocks.setModerationStatus.mockRejectedValueOnce(new Error('youtube 500'));
+	vi.spyOn(console, 'error').mockImplementation(() => {});
 	await seedComment('c1', 'UC1');
 
-	await expect(act('reject', { commentId: 'c1' })).rejects.toThrowError('youtube 500');
+	const res = await act('reject', { commentId: 'c1' });
+	expect(res).toMatchObject({ status: 500, data: { error: 'The YouTube action failed — the comment is back in the queue. Try again.' } });
 
 	expect(await commentRow('c1')).toMatchObject({ status: 'pending', decidedBy: 'none' });
 	expect(await auditRows()).toHaveLength(0);
 
 	// The retry goes through.
-	const res = await act('reject', { commentId: 'c1' });
-	expect(res).toMatchObject({ success: 'Rejected — recorded in audit log.' });
+	const retry = await act('reject', { commentId: 'c1' });
+	expect(retry).toMatchObject({ success: 'Rejected — recorded in audit log.' });
 	expect((await commentRow('c1'))?.status).toBe('rejected');
+});
+
+test('a failed human action re-arms a hold enforcement superseded mid-claim', async () => {
+	// partitionHolds marks a hold 'superseded' the moment a human claim
+	// commits a decided status. If the remote call then fails, the comment
+	// returns to 'pending' — and the hold must return to 'pending' too, or
+	// the comment sits in the queue public on YouTube while the page calls
+	// it held ('superseded' is terminal; nothing retries it).
+	mocks.env.DRY_RUN = 'false';
+	mocks.setModerationStatus.mockRejectedValueOnce(new Error('youtube 500'));
+	const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	await seedComment('c1', 'UC1');
+	await seedHold('c1', 'UC1', 'superseded');
+
+	const res = await act('reject', { commentId: 'c1' });
+
+	expect(res).toMatchObject({ status: 500 });
+	expect(await commentRow('c1')).toMatchObject({ status: 'pending', decidedBy: 'none' });
+	const hold = await testDb().db.select().from(moderationActions).where(eq(moderationActions.commentId, 'c1')).get();
+	expect(hold?.state).toBe('pending');
+	// The real error is logged server-side; the client sees a generic message.
+	expect(consoleSpy).toHaveBeenCalled();
+	expect((res as { data?: { error?: string } }).data?.error).not.toContain('youtube 500');
+});
+
+test('a failed human action leaves a dispatched hold for the reconcile loop', async () => {
+	// A 'dispatched' hold may be in flight to YouTube — the reconcile loop
+	// re-verifies it against the restored 'pending' comment. Only
+	// terminally-'superseded' holds are re-armed.
+	mocks.env.DRY_RUN = 'false';
+	mocks.setModerationStatus.mockRejectedValueOnce(new Error('youtube 500'));
+	vi.spyOn(console, 'error').mockImplementation(() => {});
+	await seedComment('c1', 'UC1');
+	await seedHold('c1', 'UC1', 'dispatched');
+
+	await act('reject', { commentId: 'c1' });
+
+	const hold = await testDb().db.select().from(moderationActions).where(eq(moderationActions.commentId, 'c1')).get();
+	expect(hold?.state).toBe('dispatched');
 });
 
 test('approve in DRY_RUN finalizes locally, audits dry-run, and skips YouTube', async () => {

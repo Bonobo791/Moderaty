@@ -44,6 +44,13 @@ export async function load({ params, locals }) {
 	return { ch: { id: ch.id, title: ch.title }, pending };
 }
 
+const SUCCESS_TEXT: Record<'approve' | 'reject' | 'delete' | 'ban', string> = {
+	approve: 'Approved — recorded in audit log.',
+	reject: 'Rejected — recorded in audit log.',
+	delete: 'Deleted — recorded in audit log.',
+	ban: 'Author banned — recorded in audit log.'
+};
+
 /** DB status for a human review action (no nested ternary — sonarcloud S3358). */
 function statusForAction(action: string): 'approved' | 'deleted' | 'rejected' {
 	if (action === 'approve') return 'approved';
@@ -99,9 +106,32 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
 			if (action === 'delete') await deleteComment(commentId, token);
 		}
 	} catch (e) {
-		// Release the claim so a failed external action stays retryable.
-		await db.update(comments).set({ status: 'pending', decidedBy: 'none' }).where(eq(comments.id, commentId));
-		throw e;
+		// Release the claim AND re-arm a hold enforcement superseded on the
+		// strength of it — one transaction, or the comment can sit 'pending'
+		// with a terminally-superseded hold: public on YouTube while the
+		// queue calls it held, and nothing retries it. A 'dispatched' hold
+		// stays dispatched — the reconcile loop re-verifies it against the
+		// restored 'pending'.
+		await db.transaction(async (transaction) => {
+			await transaction
+				.update(comments)
+				.set({ status: 'pending', decidedBy: 'none' })
+				.where(eq(comments.id, commentId));
+			await transaction
+				.update(moderationActions)
+				.set({ state: 'pending' })
+				.where(
+					and(
+						eq(moderationActions.commentId, commentId),
+						eq(moderationActions.action, 'hold'),
+						eq(moderationActions.state, 'superseded')
+					)
+				);
+		});
+		// Full error detail stays server-side; the client gets a generic
+		// message in the error-box instead of a bare 500 page (I12).
+		console.error(`[queue] ${action} failed for comment ${commentId}`, e);
+		return fail(500, { error: 'The YouTube action failed — the comment is back in the queue. Try again.' });
 	}
 	await db.insert(auditLog).values({
 		channelId: paramsId,
@@ -113,6 +143,7 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
 		authorHandle: null,
 		createdAt: new Date().toISOString()
 	});
+	return { success: SUCCESS_TEXT[action] };
 }
 
 function commentIdFrom(formData: FormData): string | null {
@@ -126,28 +157,24 @@ export const actions = {
 		requireUser(locals);
 		const commentId = commentIdFrom(await request.formData());
 		if (!commentId) return fail(400, { error: 'Invalid comment ID' });
-		await act(params.id, commentId, 'approve', locals);
-		return { success: 'Approved — recorded in audit log.' };
+		return act(params.id, commentId, 'approve', locals);
 	},
 	reject: async ({ params, request, locals }) => {
 		requireUser(locals);
 		const commentId = commentIdFrom(await request.formData());
 		if (!commentId) return fail(400, { error: 'Invalid comment ID' });
-		await act(params.id, commentId, 'reject', locals);
-		return { success: 'Rejected — recorded in audit log.' };
+		return act(params.id, commentId, 'reject', locals);
 	},
 	del: async ({ params, request, locals }) => {
 		requireUser(locals);
 		const commentId = commentIdFrom(await request.formData());
 		if (!commentId) return fail(400, { error: 'Invalid comment ID' });
-		await act(params.id, commentId, 'delete', locals);
-		return { success: 'Deleted — recorded in audit log.' };
+		return act(params.id, commentId, 'delete', locals);
 	},
 	ban: async ({ params, request, locals }) => {
 		requireUser(locals);
 		const commentId = commentIdFrom(await request.formData());
 		if (!commentId) return fail(400, { error: 'Invalid comment ID' });
-		await act(params.id, commentId, 'ban', locals);
-		return { success: 'Author banned — recorded in audit log.' };
+		return act(params.id, commentId, 'ban', locals);
 	}
 };

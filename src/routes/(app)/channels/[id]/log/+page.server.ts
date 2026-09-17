@@ -44,9 +44,15 @@ function parseCursor(raw: string | null): { ts: string; id: number } | null {
 // only that one can be undone. 'hold'/'reject' reverse fully via YouTube;
 // 'ban' restores the comment but the author ban is permanent (no API);
 // everything else ('delete', 'approve', 'queue', 'dry-run', 'restore') is
-// not reversible.
-function undoableFor(latest: boolean, action: string): 'full' | 'comment-only' | null {
+// not reversible. The undo handler only accepts decided comments
+// (held/rejected/restoring), so a still-pending queue comment — whose
+// completed 'hold' row IS its latest entry — must not offer an Undo that
+// can only 404; the queue's own actions are the path. (A missing comment
+// row is a test-only fixture: production deletes comments with their
+// channel's audit rows.)
+function undoableFor(latest: boolean, action: string, commentStatus: string | undefined): 'full' | 'comment-only' | null {
 	if (!latest) return null;
+	if (commentStatus !== undefined && commentStatus !== 'held' && commentStatus !== 'rejected' && commentStatus !== 'restoring') return null;
 	if (action === 'hold' || action === 'reject') return 'full';
 	if (action === 'ban') return 'comment-only';
 	return null;
@@ -84,6 +90,7 @@ export async function load({ params, locals, url }) {
 	// that can skew across serverless instances, so id order alone is NOT the
 	// display order. Bounded by the page's comment ids.
 	const latestIds = new Map<string, number>();
+	const statusById = new Map<string, string>();
 	if (page.length) {
 		const commentIds = [...new Set(page.map((row) => row.commentId))];
 		const latest = await db.all<{ commentId: string; latestId: number }>(sql`
@@ -96,10 +103,18 @@ export async function load({ params, locals, url }) {
 			) WHERE rn = 1
 		`);
 		for (const row of latest) latestIds.set(row.commentId, row.latestId);
+		// Comment status gates Undo the same way the handler does: offering it
+		// on a comment the handler would reject is a guaranteed-404 button.
+		const statusRows = await db
+			.select({ id: comments.id, status: comments.status })
+			.from(comments)
+			.where(and(eq(comments.channelId, params.id), inArray(comments.id, commentIds)))
+			.all();
+		for (const row of statusRows) statusById.set(row.id, row.status);
 	}
 	const entries = page.map((entry) => ({
 		...entry,
-		undoable: undoableFor(entry.id === latestIds.get(entry.commentId), entry.action)
+		undoable: undoableFor(entry.id === latestIds.get(entry.commentId), entry.action, statusById.get(entry.commentId))
 	}));
 	const last = page.at(-1);
 	const nextCursor = hasMore && last ? `${last.createdAt}|${last.id}` : null;

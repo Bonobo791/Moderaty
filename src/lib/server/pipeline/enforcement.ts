@@ -6,7 +6,7 @@
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { maybeTriggerAutoTopUp } from '$lib/server/billing/autotopup';
 import { db } from '$lib/server/db';
-import { auditLog, channels, moderationActions } from '$lib/server/db/schema';
+import { auditLog, channels, comments, moderationActions } from '$lib/server/db/schema';
 import { assertBeforeDeadline, DeadlineExceededError } from '$lib/server/http';
 import {
 	deleteComment,
@@ -97,6 +97,50 @@ async function claimPendingActions(actions: OutstandingAction[], expected?: Chan
 	});
 }
 
+/**
+ * A human decision supersedes a staged 'hold' it raced with: the queue claims
+ * the comment (status leaves 'pending'), so the hold must never be applied
+ * after the fact. 'superseded' is a terminal state — no completion audit row,
+ * because the hold never reached YouTube (the 'queue' row already records why
+ * the comment was ever queued).
+ */
+async function markSuperseded(actions: OutstandingAction[], expected?: ChannelIdentity) {
+	// Stryker disable next-line ConditionalExpression: equivalent — the only caller passes a non-empty array (the superseded partition of a hold batch)
+	if (!actions.length) return;
+	await db.transaction(async (transaction) => {
+		await assertChannelActive(actions[0].channelId, transaction, expected);
+		await transaction
+			.update(moderationActions)
+			.set({ state: 'superseded' })
+			.where(inArray(moderationActions.commentId, actions.map((action) => action.commentId)));
+	});
+}
+
+/**
+ * Splits a hold batch into actions that still apply and ones a human decision
+ * already superseded. 'pending' means the comment still waits for review and
+ * 'held' a rule's standing hold — both still want the remote hold. Anything
+ * else (approved/rejected/deleted by a human or rule, a restore in flight, or
+ * a comment row gone) means the comment's fate is decided: holding it now
+ * would re-hide a comment a human already judged.
+ */
+async function partitionHolds(actions: OutstandingAction[]): Promise<{ applicable: OutstandingAction[]; superseded: OutstandingAction[] }> {
+	const rows = await db
+		.select({ id: comments.id, status: comments.status })
+		.from(comments)
+		.where(inArray(comments.id, actions.map((action) => action.commentId)))
+		.all();
+	const statusById = new Map(rows.map((row) => [row.id, row.status]));
+	const applicable: OutstandingAction[] = [];
+	const superseded: OutstandingAction[] = [];
+	for (const action of actions) {
+		const status = statusById.get(action.commentId);
+		if (status === 'pending' || status === 'held') applicable.push(action);
+		else superseded.push(action);
+	}
+	return { applicable, superseded };
+}
+
 async function completeActions(actions: OutstandingAction[], expected?: ChannelIdentity) {
 	// Stryker disable next-line ConditionalExpression: equivalent — all callers pass a non-empty array (applyModerationAction batches of ≥1, single verified or deleted actions)
 	if (!actions.length) return;
@@ -156,9 +200,18 @@ async function applyModerationAction(
 		await markDispatched(batch, expected);
 		assertBeforeDeadline(deadline);
 		await assertChannelActive(batch[0].channelId, db, expected);
-		await setModerationStatus(batch.map((action) => action.commentId), status, banAuthor, accessToken, deadline);
-		await completeActions(batch, expected);
-		acted += batch.length;
+		// Queue holds stay provisional until applied: a human review decision
+		// supersedes them. The comments-status check runs AFTER the dispatch
+		// claim so a decision committed mid-flight still wins the race.
+		const { applicable, superseded } = status === 'heldForReview'
+			? await partitionHolds(batch)
+			: { applicable: batch, superseded: [] };
+		await markSuperseded(superseded, expected);
+		if (applicable.length) {
+			await setModerationStatus(applicable.map((action) => action.commentId), status, banAuthor, accessToken, deadline);
+			await completeActions(applicable, expected);
+			acted += applicable.length;
+		}
 	}
 	return acted;
 }

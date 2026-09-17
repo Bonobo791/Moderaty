@@ -20,24 +20,32 @@ beforeEach(resetPipelineMocks);
 afterEach(restoreDryRun);
 
 test.each([
-	{ score: 0.5, status: 'approved', queued: 0, acted: 0, api: 'none', audit: 'approve' },
-	{ score: 0.51, status: 'pending', queued: 1, acted: 0, api: 'none', audit: 'queue' },
-	{ score: 0.75, status: 'pending', queued: 1, acted: 0, api: 'none', audit: 'queue' },
-	{ score: 0.76, status: 'rejected', queued: 0, acted: 1, api: 'reject', audit: 'reject' },
-	{ score: 0.94, status: 'rejected', queued: 0, acted: 1, api: 'reject', audit: 'reject' },
-	{ score: 0.95, status: 'rejected', queued: 0, acted: 1, api: 'ban', audit: 'ban' }
-])('categorizes score $score as $status', async ({ score, status, queued, acted, api, audit }) => {
+	{ score: 0.5, status: 'approved', queued: 0, acted: 0, api: 'none', audits: ['approve'] },
+	{ score: 0.51, status: 'pending', queued: 1, acted: 1, api: 'hold', audits: ['queue', 'hold'] },
+	{ score: 0.75, status: 'pending', queued: 1, acted: 1, api: 'hold', audits: ['queue', 'hold'] },
+	{ score: 0.76, status: 'rejected', queued: 0, acted: 1, api: 'reject', audits: ['reject'] },
+	{ score: 0.94, status: 'rejected', queued: 0, acted: 1, api: 'reject', audits: ['reject'] },
+	{ score: 0.95, status: 'rejected', queued: 0, acted: 1, api: 'ban', audits: ['ban'] }
+])('categorizes score $score as $status', async ({ score, status, queued, acted, api, audits }) => {
 	mocks.scoreComment.mockResolvedValue(moderation(score));
 
 	const result = await runChannel('channel');
 
 	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status, decidedBy: 'ai' })]);
-	expect(mocks.state.insertedAudits).toEqual([
-		expect.objectContaining({ commentId: 'comment', action: audit, reason: `ai score ${score.toFixed(2)}` })
-	]);
+	expect(mocks.state.insertedAudits).toEqual(audits.map((action) =>
+		expect.objectContaining({ commentId: 'comment', action, reason: `ai score ${score.toFixed(2)}` })
+	));
 	if (api === 'delete') {
 		expect(mocks.deleteComment).toHaveBeenCalledWith('comment', 'access-token', undefined);
 		expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	} else if (api === 'hold') {
+		// A queued comment is genuinely non-public: the staged 'hold' was
+		// enforced to heldForReview before the queue ever presents it.
+		expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'heldForReview', false, 'access-token', undefined);
+		expect(mocks.state.moderationActions).toEqual([
+			expect.objectContaining({ commentId: 'comment', action: 'hold', state: 'completed' })
+		]);
+		expect(mocks.deleteComment).not.toHaveBeenCalled();
 	} else if (api === 'reject') {
 		expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
 		expect(mocks.deleteComment).not.toHaveBeenCalled();
@@ -192,9 +200,11 @@ test('queues a borderline tone score (0.51–0.75)', async () => {
 
 	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'pending' })]);
 	expect(mocks.state.insertedAudits).toEqual([
-		expect.objectContaining({ commentId: 'comment', action: 'queue', reason: 'tone score 0.60' })
+		expect.objectContaining({ commentId: 'comment', action: 'queue', reason: 'tone score 0.60' }),
+		expect.objectContaining({ commentId: 'comment', action: 'hold', reason: 'tone score 0.60' })
 	]);
-	expect(result).toMatchObject({ acted: 0, queued: 1 });
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'heldForReview', false, 'access-token', undefined);
+	expect(result).toMatchObject({ acted: 1, queued: 1 });
 });
 
 test('keeps the omni outcome when it is the stronger signal', async () => {
@@ -206,7 +216,8 @@ test('keeps the omni outcome when it is the stronger signal', async () => {
 
 	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'pending' })]);
 	expect(mocks.state.insertedAudits).toEqual([
-		expect.objectContaining({ commentId: 'comment', action: 'queue', reason: 'ai score 0.60' })
+		expect.objectContaining({ commentId: 'comment', action: 'queue', reason: 'ai score 0.60' }),
+		expect.objectContaining({ commentId: 'comment', action: 'hold', reason: 'ai score 0.60' })
 	]);
 });
 
@@ -454,6 +465,7 @@ test('keeps the ai signal when the tone score ties it', async () => {
 	await runChannel('channel');
 
 	expect(mocks.state.insertedAudits).toEqual([
-		expect.objectContaining({ commentId: 'comment', action: 'queue', reason: 'ai score 0.60' })
+		expect.objectContaining({ commentId: 'comment', action: 'queue', reason: 'ai score 0.60' }),
+		expect.objectContaining({ commentId: 'comment', action: 'hold', reason: 'ai score 0.60' })
 	]);
 });

@@ -31,7 +31,7 @@ describe('queue page states (I12)', () => {
 
 	it('uses grammatical guidance copy', () => {
 		expect(queuePage).not.toContain('Nothing here is public-facing yet only if previously held');
-		expect(queuePage).toContain('These comments are held for review and are not public yet.');
+		expect(queuePage).toContain('These comments are held for review on YouTube and are not public yet.');
 	});
 
 	it('confirms destructive actions inline', () => {

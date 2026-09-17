@@ -264,9 +264,10 @@ test('I11: generated scoring failures land in the human queue while scored comme
 	// the awaited runChannel goes red. Auto-approving or auto-rejecting a failed
 	// comment flips its status/decidedBy assertions; persisting an aiScore or a
 	// matchedRuleId for a failure, or writing author PII anywhere, breaks the
-	// null assertions. Skipping enforcement of scored comments (or enforcing
-	// failed ones) breaks the moderation_actions oracle; miscounting the queue
-	// breaks result.queued.
+	// null assertions. Scored comments are banned outright; failed comments are
+	// held for review on YouTube — still enforced, but with the 'hold' action —
+	// and the moderation_actions oracle catches either side going missing or
+	// swapping actions. Miscounting the queue breaks result.queued.
 	await fc.assert(
 		fc.asyncProperty(failureRunArb, async (run) => {
 			await wipeTables(WIPE);
@@ -312,10 +313,13 @@ test('I11: generated scoring failures land in the human queue while scored comme
 				}
 			}
 			expect(result.queued).toBe(expectedQueued);
-			// Scored (non-failed) comments are still enforced; failed ones are not.
-			expect(actions).toHaveLength(run.set.length - expectedQueued);
+			// Every comment carries a remote action: scored ones are banned,
+			// queued (failed) ones are held for review so they are genuinely
+			// non-public while they wait for a human (MOD-5).
+			const textById = new Map(run.set.map((comment) => [comment.id, comment.text]));
+			expect(actions).toHaveLength(run.set.length);
 			for (const action of actions) {
-				expect(action.action).toBe('ban');
+				expect(action.action).toBe(failedTexts.has(textById.get(action.commentId) ?? '') ? 'hold' : 'ban');
 				expect(action.state).toBe('completed');
 			}
 			expect(audits.filter((row) => row.action === 'queue')).toHaveLength(expectedQueued);

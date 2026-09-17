@@ -59,6 +59,9 @@ Day-to-day work commits directly to `dev`; pull requests are optional
 (large/risky work, or to trigger the review bots). Executor rules:
 
 - **Commit after every step** with message `step <N>: <step name>`.
+- **No attribution trailers in commits.** Never append "Generated with
+  Devin", "Co-Authored-By", or any tool/agent signature to commit
+  messages — the message is the conventional subject and body only.
 - **Never commit or open a PR while `npm run check`, `npm run build`, or
   `npm run test` is red.** Green is proven locally, not discovered in CI.
 - When a PR is used: target `dev`, and the agent NEVER merges or closes

@@ -81,6 +81,18 @@ test.each([
 	expect(mocks.state.insertedAudits).toEqual(expect.arrayContaining([
 		expect.objectContaining({ commentId: 'comment', action: audit, authorHandle: 'some.user' })
 	]));
+	if (audit === 'queue') {
+		// Pin the completion row too: the staged 'hold' carries the handle
+		// through moderation_actions — a dropped field or a wrong action on
+		// the second row must fail this test, not hide behind the count.
+		expect(mocks.state.insertedAudits).toContainEqual(expect.objectContaining({
+			commentId: 'comment',
+			action: 'hold',
+			actor: 'system',
+			authorHandle: 'some.user',
+			reason: expect.any(String)
+		}));
+	}
 });
 
 test('a dry-run audit row carries the normalized handle alongside the capped text', async () => {
@@ -258,11 +270,22 @@ test('truncates the ai-unavailable reason at 200 characters', async () => {
 
 	await runChannel('channel');
 
-	expect(mocks.state.insertedAudits).toEqual(expect.arrayContaining([expect.objectContaining({
+	// Exactly two rows: 'queue' (why it waits for a human) and 'hold' (the
+	// remote action at enforcement completion) — no extra rows, and no raw
+	// error text leaking into either reason field.
+	expect(mocks.state.insertedAudits).toHaveLength(2);
+	expect(mocks.state.insertedAudits).toContainEqual(expect.objectContaining({
 		commentId: 'comment',
 		action: 'queue',
-		reason: 'ai unavailable: scoring unavailable'
-	})]));
+		reason: 'ai unavailable: scoring unavailable',
+		actor: 'system'
+	}));
+	expect(mocks.state.insertedAudits).toContainEqual(expect.objectContaining({
+		commentId: 'comment',
+		action: 'hold',
+		reason: 'ai unavailable: scoring unavailable',
+		actor: 'system'
+	}));
 });
 
 test('a dry run counts only enforceable decisions as acted', async () => {

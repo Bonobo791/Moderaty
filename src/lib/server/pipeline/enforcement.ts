@@ -185,10 +185,13 @@ async function verificationResult(
 	const status = await getCommentModerationStatus(action.commentId, accessToken, deadline);
 	// Stryker disable next-line StringLiteral: 'retry'→"" equivalent — the caller only compares result === 'completed', so every other string takes the identical retry path
 	if (action.action === 'delete') return status === null ? 'completed' : 'retry';
+	// A remotely-deleted comment (null) can never accept a moderation write:
+	// completing instead of retrying keeps the dead comment from throwing
+	// setModerationStatus's 404 and hard-failing every later run.
 	// Stryker disable next-line StringLiteral: 'retry'→"" equivalent — same reasoning as the delete branch above
-	if (action.action === 'hold') return status === 'heldForReview' ? 'completed' : 'retry';
+	if (action.action === 'hold') return status === 'heldForReview' || status === null ? 'completed' : 'retry';
 	// Stryker disable next-line StringLiteral: 'retry'→"" equivalent — same reasoning as the delete branch above
-	if (action.action === 'reject') return status === 'rejected' ? 'completed' : 'retry';
+	if (action.action === 'reject') return status === 'rejected' || status === null ? 'completed' : 'retry';
 	// Ban is a single atomic API call (reject + banAuthor), so a comment already
 	// in a terminal state after dispatch means the call landed — complete it
 	// rather than stranding the action in manual review.

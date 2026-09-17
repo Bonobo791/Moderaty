@@ -232,8 +232,11 @@ test.each([
 	{ action: 'delete', observed: 'rejected', completed: false },
 	{ action: 'hold', observed: 'heldForReview', completed: true },
 	{ action: 'hold', observed: 'published', completed: false },
+	// A remotely-deleted comment needs no moderation: complete the action
+	// instead of re-throwing setModerationStatus's 404 every run forever.
+	{ action: 'hold', observed: null, completed: true },
 	{ action: 'reject', observed: 'rejected', completed: true },
-	{ action: 'reject', observed: null, completed: false },
+	{ action: 'reject', observed: null, completed: true },
 	{ action: 'ban', observed: 'rejected', completed: true },
 	{ action: 'ban', observed: null, completed: true },
 	{ action: 'ban', observed: 'published', completed: false }

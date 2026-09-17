@@ -69,16 +69,37 @@ function outstandingAction(action: typeof moderationActions.$inferSelect): Outst
 	return { ...action, action: validAction(action.action), state: action.state };
 }
 
-async function markDispatched(actions: OutstandingAction[], expected?: ChannelIdentity) {
-	// Stryker disable next-line ConditionalExpression: equivalent — both callers pass a non-empty array (applyModerationAction batches of ≥1, the delete loop a single action), so the empty-array branch is unreachable
+function updateActionStates(
+	transaction: ChannelGuardHandle,
+	actions: OutstandingAction[],
+	set: { state: 'dispatched' | 'superseded' | 'completed'; lastAttemptAt?: string }
+) {
+	return transaction
+		.update(moderationActions)
+		.set(set)
+		.where(inArray(moderationActions.commentId, actions.map((action) => action.commentId)));
+}
+
+/**
+ * Transitions outstanding action rows inside the channel-guard transaction.
+ * The 'dispatched' transition stamps lastAttemptAt; terminal transitions
+ * leave attempt bookkeeping untouched.
+ */
+async function transitionActions(
+	actions: OutstandingAction[],
+	set: { state: 'dispatched' | 'superseded'; lastAttemptAt?: string },
+	expected?: ChannelIdentity
+) {
+	// Stryker disable next-line ConditionalExpression: equivalent — removing the guard makes an empty batch run a no-op update; observably identical (dispatch callers always pass ≥1, markSuperseded passes an empty partition)
 	if (!actions.length) return;
 	await db.transaction(async (transaction) => {
 		await assertChannelActive(actions[0].channelId, transaction, expected);
-		await transaction
-			.update(moderationActions)
-			.set({ state: 'dispatched', lastAttemptAt: new Date().toISOString() })
-			.where(inArray(moderationActions.commentId, actions.map((action) => action.commentId)));
+		await updateActionStates(transaction, actions, set);
 	});
+}
+
+function markDispatched(actions: OutstandingAction[], expected?: ChannelIdentity) {
+	return transitionActions(actions, { state: 'dispatched', lastAttemptAt: new Date().toISOString() }, expected);
 }
 
 async function claimPendingActions(actions: OutstandingAction[], expected?: ChannelIdentity): Promise<Set<string>> {
@@ -104,16 +125,8 @@ async function claimPendingActions(actions: OutstandingAction[], expected?: Chan
  * because the hold never reached YouTube (the 'queue' row already records why
  * the comment was ever queued).
  */
-async function markSuperseded(actions: OutstandingAction[], expected?: ChannelIdentity) {
-	// Stryker disable next-line ConditionalExpression: equivalent — the only caller passes a non-empty array (the superseded partition of a hold batch)
-	if (!actions.length) return;
-	await db.transaction(async (transaction) => {
-		await assertChannelActive(actions[0].channelId, transaction, expected);
-		await transaction
-			.update(moderationActions)
-			.set({ state: 'superseded' })
-			.where(inArray(moderationActions.commentId, actions.map((action) => action.commentId)));
-	});
+function markSuperseded(actions: OutstandingAction[], expected?: ChannelIdentity) {
+	return transitionActions(actions, { state: 'superseded' }, expected);
 }
 
 /**
@@ -146,10 +159,7 @@ async function completeActions(actions: OutstandingAction[], expected?: ChannelI
 	if (!actions.length) return;
 	await db.transaction(async (transaction) => {
 		await assertChannelActive(actions[0].channelId, transaction, expected);
-		await transaction
-			.update(moderationActions)
-			.set({ state: 'completed' })
-			.where(inArray(moderationActions.commentId, actions.map((action) => action.commentId)));
+		await updateActionStates(transaction, actions, { state: 'completed' });
 		await transaction.insert(auditLog).values(actions.map((action) => ({
 			channelId: action.channelId,
 			commentId: action.commentId,

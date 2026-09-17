@@ -4,6 +4,8 @@ import {
 	dispatchedAction,
 	expectActionState,
 	expectAiUnavailableQueued,
+	expectHeldForReview,
+	expectNoYoutubeWrites,
 	getMocks,
 	moderation,
 	newComment,
@@ -72,8 +74,7 @@ test.each([
 
 	await runChannel('channel');
 
-	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
-	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expectNoYoutubeWrites();
 	expectActionState('completed');
 });
 
@@ -128,8 +129,7 @@ test('stops without new writes or YouTube calls when account deletion deactivate
 	expect(mocks.state.insertedComments).toEqual([]);
 	expect(mocks.state.insertedAudits).toEqual([]);
 	expect(mocks.state.moderationActions).toEqual([]);
-	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
-	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expectNoYoutubeWrites();
 	expect(mocks.state.channelUpdates).toEqual([]);
 	expect(result).toMatchObject({ fetched: 1, partial: true, dryRun: false });
 });
@@ -144,8 +144,7 @@ test('stops when account deletion replaces the shared-channel connector identity
 
 	expect(result).toMatchObject({ partial: true, skipped: false });
 	expect(mocks.state.insertedComments).toEqual([]);
-	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
-	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expectNoYoutubeWrites();
 });
 
 test('does not dispatch staged enforcement when the channel is deactivated after decisions are staged', async () => {
@@ -162,8 +161,7 @@ test('does not dispatch staged enforcement when the channel is deactivated after
 	expect(mocks.state.insertedComments).toEqual([]);
 	expect(mocks.state.insertedAudits).toEqual([]);
 	expect(mocks.state.moderationActions).toEqual([]);
-	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
-	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expectNoYoutubeWrites();
 	expect(mocks.state.channelUpdates).toEqual([]);
 	expect(result).toMatchObject({ partial: true });
 });
@@ -174,8 +172,7 @@ test('skips a pending action already claimed by a concurrent run', async () => {
 
 	const result = await runChannel('channel');
 
-	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
-	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expectNoYoutubeWrites();
 	expect(mocks.state.insertedAudits).toEqual([]);
 	expectActionState('pending');
 	expect(result).toMatchObject({ fetched: 1, acted: 0, skipped: false, dryRun: false });
@@ -214,7 +211,7 @@ test('rule hold action dispatches heldForReview to YouTube', async () => {
 
 	const result = await runChannel('channel');
 
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'heldForReview', false, 'access-token', undefined);
+	expectHeldForReview();
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
 	expect(result).toMatchObject({ fetched: 1, acted: 1, dryRun: false });
 });
@@ -271,8 +268,7 @@ test('fails loudly on an unknown stored moderation action', async () => {
 
 	await expect(runChannel('channel')).rejects.toThrow('moderation action is invalid: explode');
 
-	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
-	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expectNoYoutubeWrites();
 });
 
 test('does not run the claim update when there is nothing pending to claim', async () => {
@@ -326,8 +322,7 @@ test('a dry run never issues a YouTube write for a queued comment (I8)', async (
 	const result = await runChannel('channel');
 
 	expect(result).toMatchObject({ fetched: 1, queued: 1, dryRun: true });
-	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
-	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expectNoYoutubeWrites();
 	expect(mocks.state.insertedComments).toEqual([]);
 	expect(mocks.state.moderationActions).toEqual([]);
 	expect(mocks.state.insertedAudits).toEqual([
@@ -363,8 +358,7 @@ test.each([
 
 	const result = await runChannel('channel');
 
-	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
-	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expectNoYoutubeWrites();
 	expectActionState('superseded');
 	// A never-applied hold writes no completion audit row.
 	expect(mocks.state.insertedAudits).toEqual([]);

@@ -4,9 +4,12 @@ import {
 	dispatchedAction,
 	expectActionState,
 	expectAiUnavailableQueued,
+	expectHeldForReview,
+	expectNoYoutubeWrites,
 	getMocks,
 	moderation,
 	newComment,
+	queueHoldAudits,
 	resetPipelineMocks,
 	protectHandle,
 	runWindowPage,
@@ -41,7 +44,7 @@ test.each([
 	} else if (api === 'hold') {
 		// A queued comment is genuinely non-public: the staged 'hold' was
 		// enforced to heldForReview before the queue ever presents it.
-		expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'heldForReview', false, 'access-token', undefined);
+		expectHeldForReview();
 		expect(mocks.state.moderationActions).toEqual([
 			expect.objectContaining({ commentId: 'comment', action: 'hold', state: 'completed' })
 		]);
@@ -53,8 +56,7 @@ test.each([
 		expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', true, 'access-token', undefined);
 		expect(mocks.deleteComment).not.toHaveBeenCalled();
 	} else {
-		expect(mocks.setModerationStatus).not.toHaveBeenCalled();
-		expect(mocks.deleteComment).not.toHaveBeenCalled();
+		expectNoYoutubeWrites();
 	}
 	expect(result).toMatchObject({ fetched: 1, acted, queued, partial: false, skipped: false, dryRun: false });
 });
@@ -67,7 +69,7 @@ test('does not apply another channel’s rules', async () => {
 
 	await runChannel('channel');
 
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'heldForReview', false, 'access-token', undefined);
+	expectHeldForReview();
 });
 
 test('validates and compiles each regex rule once per run, not per comment', async () => {
@@ -199,11 +201,8 @@ test('queues a borderline tone score (0.51–0.75)', async () => {
 	const result = await runChannel('channel');
 
 	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'pending' })]);
-	expect(mocks.state.insertedAudits).toEqual([
-		expect.objectContaining({ commentId: 'comment', action: 'queue', reason: 'tone score 0.60' }),
-		expect.objectContaining({ commentId: 'comment', action: 'hold', reason: 'tone score 0.60' })
-	]);
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'heldForReview', false, 'access-token', undefined);
+	expect(mocks.state.insertedAudits).toEqual(queueHoldAudits('tone score 0.60'));
+	expectHeldForReview();
 	expect(result).toMatchObject({ acted: 1, queued: 1 });
 });
 
@@ -215,10 +214,7 @@ test('keeps the omni outcome when it is the stronger signal', async () => {
 	await runChannel('channel');
 
 	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'pending' })]);
-	expect(mocks.state.insertedAudits).toEqual([
-		expect.objectContaining({ commentId: 'comment', action: 'queue', reason: 'ai score 0.60' }),
-		expect.objectContaining({ commentId: 'comment', action: 'hold', reason: 'ai score 0.60' })
-	]);
+	expect(mocks.state.insertedAudits).toEqual(queueHoldAudits('ai score 0.60'));
 });
 
 test('skips the tone call entirely when the omni score already rejects', async () => {
@@ -310,8 +306,7 @@ test('a protected handle is approved without rules, scoring, or enforcement — 
 	]);
 	expect(mocks.state.moderationActions).toEqual([]);
 	expect(mocks.scoreComment).not.toHaveBeenCalled();
-	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
-	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expectNoYoutubeWrites();
 	expect(result).toMatchObject({ fetched: 1, acted: 0, queued: 0, dryRun: false });
 });
 
@@ -464,8 +459,5 @@ test('keeps the ai signal when the tone score ties it', async () => {
 
 	await runChannel('channel');
 
-	expect(mocks.state.insertedAudits).toEqual([
-		expect.objectContaining({ commentId: 'comment', action: 'queue', reason: 'ai score 0.60' }),
-		expect.objectContaining({ commentId: 'comment', action: 'hold', reason: 'ai score 0.60' })
-	]);
+	expect(mocks.state.insertedAudits).toEqual(queueHoldAudits('ai score 0.60'));
 });

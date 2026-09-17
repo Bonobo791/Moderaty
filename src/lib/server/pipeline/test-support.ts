@@ -349,6 +349,23 @@ export function expectActionState(state: string) {
 	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({ commentId: 'comment', state })]);
 }
 
+export function expectNoYoutubeWrites() {
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
+}
+
+export function expectHeldForReview() {
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'heldForReview', false, 'access-token', undefined);
+}
+
+/** The 'queue' (staging) then 'hold' (completion) audit rows a queued decision leaves. */
+export function queueHoldAudits(reason: unknown) {
+	return [
+		expect.objectContaining({ commentId: 'comment', action: 'queue', reason }),
+		expect.objectContaining({ commentId: 'comment', action: 'hold', reason })
+	];
+}
+
 export function expectAiUnavailableQueued(result: unknown, extra: Record<string, unknown> = {}) {
 	expect(mocks.state.insertedComments).toEqual([
 		expect.objectContaining({ id: 'comment', status: 'pending', decidedBy: 'none', aiScore: null })
@@ -356,14 +373,11 @@ export function expectAiUnavailableQueued(result: unknown, extra: Record<string,
 	// Queued means held on YouTube: the staged 'hold' was enforced in the same
 	// run, so the audit trail is 'queue' (staging) followed by 'hold'
 	// (completion) — and the comment is genuinely non-public while it waits.
-	expect(mocks.state.insertedAudits).toEqual([
-		expect.objectContaining({ commentId: 'comment', action: 'queue', reason: expect.stringContaining('ai unavailable') }),
-		expect.objectContaining({ commentId: 'comment', action: 'hold' })
-	]);
+	expect(mocks.state.insertedAudits).toEqual(queueHoldAudits(expect.stringContaining('ai unavailable')));
 	expect(mocks.state.moderationActions).toEqual([
 		expect.objectContaining({ commentId: 'comment', action: 'hold', state: 'completed' })
 	]);
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'heldForReview', false, 'access-token', undefined);
+	expectHeldForReview();
 	expect(result).toMatchObject({ acted: 1, queued: 1, ...extra });
 }
 

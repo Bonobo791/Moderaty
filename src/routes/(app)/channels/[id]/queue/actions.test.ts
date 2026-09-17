@@ -90,6 +90,15 @@ async function seedHold(commentId: string, channelId: string, state = 'completed
 	});
 }
 
+/** Queues 'c1' with a staged 'hold' in `state`, then approves it (DRY_RUN off). */
+async function approveHeldComment(state: string) {
+	mocks.env.DRY_RUN = 'false';
+	await seedComment('c1', 'UC1');
+	await seedHold('c1', 'UC1', state);
+	const res = await act('approve', { commentId: 'c1' });
+	expect(res).toMatchObject({ success: 'Approved — recorded in audit log.' });
+}
+
 async function commentRow(id: string) {
 	return testDb().db.select().from(comments).where(eq(comments.id, id)).get();
 }
@@ -235,11 +244,7 @@ test('approve outside DRY_RUN skips YouTube entirely and audits approve', async 
 test('approve outside DRY_RUN publishes a comment the pipeline held on YouTube', async () => {
 	// Queue items under the hold contract are genuinely non-public on YouTube:
 	// approving one must un-hold it or it stays invisible forever.
-	mocks.env.DRY_RUN = 'false';
-	await seedComment('c1', 'UC1');
-	await seedHold('c1', 'UC1', 'completed');
-	const res = await act('approve', { commentId: 'c1' });
-	expect(res).toMatchObject({ success: 'Approved — recorded in audit log.' });
+	await approveHeldComment('completed');
 
 	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token');
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
@@ -253,11 +258,7 @@ test('approve outside DRY_RUN publishes a comment the pipeline held on YouTube',
 test('approve skips the publish call when the staged hold was never dispatched', async () => {
 	// A 'pending' hold at claim time can never have reached YouTube — the
 	// claim already supersedes it, so no un-hold call is needed.
-	mocks.env.DRY_RUN = 'false';
-	await seedComment('c1', 'UC1');
-	await seedHold('c1', 'UC1', 'pending');
-	const res = await act('approve', { commentId: 'c1' });
-	expect(res).toMatchObject({ success: 'Approved — recorded in audit log.' });
+	await approveHeldComment('pending');
 
 	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
@@ -270,12 +271,8 @@ test.each([
 ])('approve verifies an in-flight hold before publishing (observed: $observed)', async ({ observed, publishes }) => {
 	// A 'dispatched' hold may or may not have reached YouTube — check before
 	// un-holding so a never-applied hold never gets a pointless write.
-	mocks.env.DRY_RUN = 'false';
 	mocks.getCommentModerationStatus.mockResolvedValue(observed);
-	await seedComment('c1', 'UC1');
-	await seedHold('c1', 'UC1', 'dispatched');
-	const res = await act('approve', { commentId: 'c1' });
-	expect(res).toMatchObject({ success: 'Approved — recorded in audit log.' });
+	await approveHeldComment('dispatched');
 
 	expect(mocks.getCommentModerationStatus).toHaveBeenCalledWith('c1', 'access-token');
 	if (publishes) {

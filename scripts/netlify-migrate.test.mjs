@@ -82,6 +82,7 @@ function runGate(env) {
 		env: {
 			...process.env,
 			GATE_LOG: gateLog,
+			MODERATY_MIGRATE_TEST_HOOKS: '1',
 			MODERATY_DRIZZLE_KIT_BIN: fakeDrizzle,
 			MODERATY_VERIFY_BIN: fakeVerify,
 			MODERATY_PREFLIGHT_BIN: fakePreflight,
@@ -209,6 +210,31 @@ describe('netlify-migrate', () => {
 		const { stdout } = await runGate({ CONTEXT: 'production', TURSO_DATABASE_URL: 'file:./local.db', TURSO_AUTH_TOKEN: '' });
 		expect(logLines()).toEqual(['db:preflight', 'db:migrate', 'db:verify']);
 		expect(stdout).toContain('migrations applied and verified');
+	});
+
+	it('ignores MODERATY_*_BIN overrides without MODERATY_MIGRATE_TEST_HOOKS=1', async () => {
+		// The overrides are a test-only seam: outside the flag they must be
+		// ignored loudly so a poisoned production env var cannot redirect the
+		// migration to arbitrary code. The real preflight fails fast on an
+		// unwritable file: path — proof the gate ran the REAL script, not the
+		// fake (which would have logged 'db:preflight' and passed).
+		try {
+			await runGate({
+				CONTEXT: 'production',
+				MODERATY_MIGRATE_TEST_HOOKS: '',
+				TURSO_DATABASE_URL: `file:${join(tmp, 'no-such-dir', 'x.db')}`,
+				TURSO_AUTH_TOKEN: ''
+			});
+			expect.unreachable('the real preflight must fail on an unwritable path');
+		} catch (error) {
+			expect(error.code).toBe(1);
+			expect(logLines()).toEqual([]);
+			const stderr = `${error.stderr ?? ''}`;
+			expect(stderr).toContain('ignoring MODERATY_PREFLIGHT_BIN');
+			expect(stderr).toContain('ignoring MODERATY_DRIZZLE_KIT_BIN');
+			expect(stderr).toContain('ignoring MODERATY_VERIFY_BIN');
+			expect(stderr).toContain('db:preflight failed');
+		}
 	});
 
 	it('never applies the env preflight to deploy-preview builds (they skip SQL entirely)', async () => {

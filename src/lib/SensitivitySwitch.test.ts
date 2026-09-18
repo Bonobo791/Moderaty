@@ -121,3 +121,11 @@ test('the Applied indicator only renders after a successful persist', () => {
 	expect(renderSwitch(1)).not.toContain('role="status"');
 	expect(renderSwitch(1)).not.toMatch(/class="applied/);
 });
+
+// MOD-10: a failed save surfaces an inline alert — it exists only after a
+// real failure, so SSR must ship without it.
+test('the save-error alert is absent until a persist actually fails', () => {
+	expect(renderSwitch(1)).not.toContain('role="alert"');
+	expect(renderSwitch(1)).not.toMatch(/class="save-error/);
+	expect(renderSwitch(1)).not.toContain('could not be saved');
+});

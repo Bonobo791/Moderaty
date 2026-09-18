@@ -99,6 +99,29 @@ test('rejects a signed-out request with 401', async () => {
 	expect(await toneLevelOf('UC1')).toBeNull();
 });
 
+// MOD-10: a save that dies inside the db must be loud on the server and a
+// generic 502 to the client — never a bare exception the control cannot
+// distinguish from success, and never raw db detail to the browser.
+test('a database failure saving sensitivity is logged loudly and returns a generic 502', async () => {
+	await seedChannel('UC1');
+	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	const updateSpy = vi.spyOn(testDb().db, 'update').mockImplementation(() => {
+		throw new Error('hrana 502: connect to upstream failed');
+	});
+	try {
+		const res = (await setToneLevel('UC1', '2')) as { status: number; data: { error: string } };
+
+		expect(res.status).toBe(502);
+		expect(res.data.error).toBe('Sensitivity could not be saved — try again.');
+		expect(res.data.error).not.toContain('hrana');
+		expect(spy).toHaveBeenCalledWith('setToneLevel failed for channel:', 'UC1', expect.any(Error));
+		expect(await toneLevelOf('UC1')).toBeNull();
+	} finally {
+		updateSpy.mockRestore();
+		spy.mockRestore();
+	}
+});
+
 function analyzeHistory(channelId: string, months: string, user: typeof OWNER | null = OWNER) {
 	return actions.analyzeHistory({ request: postForm({ channelId, months }), locals: { user } } as never);
 }

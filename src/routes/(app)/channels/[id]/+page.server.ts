@@ -58,9 +58,17 @@ export const actions = {
 		if (!isToneLevel(toneLevel)) {
 			return fail(400, { error: 'tone level must be 1 (Edge Lord) or 2 (Edge lord + Ackchyually…)' });
 		}
-		const updated = await updateOwnChannel(user.orgId, channelId, { toneLevel });
-		if (updated.length === 0) return fail(404, { error: 'channel not found' });
-		return { ok: true };
+		try {
+			const updated = await updateOwnChannel(user.orgId, channelId, { toneLevel });
+			if (updated.length === 0) return fail(404, { error: 'channel not found' });
+			return { ok: true };
+		} catch (e) {
+			// Loud server-side, generic client-side (MOD-10): the switch must be
+			// able to tell a save failure from a success, and raw db detail
+			// never reaches the browser.
+			console.error('setToneLevel failed for channel:', channelId, e);
+			return fail(502, { error: 'Sensitivity could not be saved — try again.' });
+		}
 	},
 	setProtections: async ({ request, locals }) => {
 		const user = requireUser(locals);

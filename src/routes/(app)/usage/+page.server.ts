@@ -26,7 +26,7 @@ import { AUTO_TOPUP_DEFAULT_THRESHOLD } from '$lib/server/billing/autotopup';
 import { createCreditCheckout, createPlanCheckout, getOrCreateStripeCustomer } from '$lib/server/billing/checkout';
 import { createMercadoPagoCreditCheckout } from '$lib/server/mercadopago/checkout';
 import { configuredMercadoPagoBundles } from '$lib/server/mercadopago/bundles';
-import { listCreditTransactions, orgIsMetered, usageSummary } from '$lib/server/billing/ledger';
+import { isUnmeteredPlan, listCreditTransactions, orgIsMetered, usageSummary } from '$lib/server/billing/ledger';
 import { db } from '$lib/server/db';
 import { organizations } from '$lib/server/db/schema';
 import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
@@ -227,12 +227,20 @@ export const actions: Actions = {
 		const current = await db
 			.select({
 				autoTopupEnabled: organizations.autoTopupEnabled,
-				autoTopupState: organizations.autoTopupState
+				autoTopupState: organizations.autoTopupState,
+				plan: organizations.plan
 			})
 			.from(organizations)
 			.where(eq(organizations.id, user.orgId))
 			.get();
 		const wasEnabled = current?.autoTopupEnabled === 1;
+		// A lifetime org's scoring is already unlimited — enabling (or a
+		// threshold update while a stale flag survives) would charge a real
+		// card for credits it can never need. Disabling stays allowed so a
+		// stale flag can still be cleared (MOD-35).
+		if (enabled && isUnmeteredPlan(current?.plan)) {
+			return fail(400, { error: 'Your lifetime plan includes unlimited moderated comments — auto top-up is not needed.' });
+		}
 		if (enabled && !wasEnabled && form.get('consent') !== 'on') {
 			return fail(400, { error: 'You must tick the consent checkbox to enable automatic top-up.' });
 		}

@@ -121,6 +121,39 @@ describe('maybeTriggerAutoTopUp', () => {
 		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
 	});
 
+	test('never triggers for a lifetime org, even enabled and below threshold', async () => {
+		// An enabled flag on an unmetered plan is a data anomaly (the org
+		// upgraded while enabled): skip loudly BEFORE any Stripe call and
+		// never take the claim — unlimited scoring needs no credits.
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		await seedOrg({ plan: 'lifetime' });
+		try {
+			expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+			expect(mocks.pricesRetrieve).not.toHaveBeenCalled();
+			expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('unmetered'));
+			expect((await orgRow()).autoTopupState).toBe('idle');
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('the atomic claim re-checks the plan: upgrading to lifetime mid-flight never charges', async () => {
+		// The org upgrades between the eligibility read and the claim — the
+		// claim's plan predicate must reject it, or a lifetime org is charged
+		// for credits it can never need.
+		await seedOrg();
+		mocks.pricesRetrieve.mockImplementation(async () => {
+			await testDb().db
+				.update(organizations)
+				.set({ plan: 'lifetime' })
+				.where(eq(organizations.id, 'org-1'));
+			return { id: 'price_100', unit_amount: 500, active: true, currency: 'usd', type: 'one_time' };
+		});
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+	});
+
 	test('respects the 24h cooldown after the last attempt', async () => {
 		await seedOrg({ autoTopupLastAttemptAt: new Date().toISOString() });
 		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);

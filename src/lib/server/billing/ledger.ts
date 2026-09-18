@@ -111,6 +111,10 @@ export async function getCredits(orgId: string): Promise<number> {
  * account into a finite balance that pauses AI scoring (codex review). */
 const UNMETERED_PLANS = new Set(['lifetime']);
 
+export function isUnmeteredPlan(plan: string | null | undefined): boolean {
+	return UNMETERED_PLANS.has(plan ?? '');
+}
+
 export async function orgIsMetered(orgId: string): Promise<boolean> {
 	const row = await db
 		.select({ creditsRemaining: organizations.creditsRemaining, plan: organizations.plan, stripeSubscriptionId: organizations.stripeSubscriptionId })
@@ -118,8 +122,26 @@ export async function orgIsMetered(orgId: string): Promise<boolean> {
 		.where(eq(organizations.id, orgId))
 		.get();
 	if (!row) throw new Error(`org not found: ${orgId}`);
-	if (UNMETERED_PLANS.has(row.plan)) return false;
+	if (isUnmeteredPlan(row.plan)) return false;
 	return hasHostedEntitlement(row) || row.creditsRemaining !== null;
+}
+
+/**
+ * Rejects credit purchases for plans whose comments are already unlimited.
+ * Called before a checkout attempt is planted for ANY credit bundle (Stripe
+ * and Mercado Pago): a lifetime org buying credits pays real money for a
+ * balance it can never need (MOD-35).
+ */
+export async function assertCreditsPurchasable(orgId: string): Promise<void> {
+	const row = await db
+		.select({ plan: organizations.plan })
+		.from(organizations)
+		.where(eq(organizations.id, orgId))
+		.get();
+	if (!row) throw new Error(`org not found: ${orgId}`);
+	if (isUnmeteredPlan(row.plan)) {
+		throw new Error('the lifetime plan includes unlimited moderated comments — credit purchases are not available');
+	}
 }
 
 /**

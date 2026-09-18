@@ -27,10 +27,10 @@
 //    state flips to 'disabled' and the customer must re-authenticate via a
 //    fresh Checkout. Other declines disable after 2 consecutive failures.
 
-import { and, asc, count, eq, gte, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, count, eq, gte, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
-import { applyLedgerDelta, drainPendingReversals } from '$lib/server/billing/ledger';
+import { applyLedgerDelta, drainPendingReversals, isUnmeteredPlan } from '$lib/server/billing/ledger';
 import { creditTransactions, organizations } from '$lib/server/db/schema';
 import { autoTopupBundle, bundleById, priceIdFor } from '$lib/server/stripe/bundles';
 import { getStripe } from '$lib/server/stripe/client';
@@ -59,6 +59,7 @@ export interface AutoTopupState {
 	customerId: string | null;
 	defaultPmId: string | null;
 	creditsRemaining: number | null;
+	plan: string | null;
 }
 
 /**
@@ -78,7 +79,8 @@ export async function readAutoTopupState(orgId: string): Promise<AutoTopupState>
 			failures: organizations.autoTopupFailures,
 			customerId: organizations.stripeCustomerId,
 			defaultPmId: organizations.stripeDefaultPmId,
-			creditsRemaining: organizations.creditsRemaining
+			creditsRemaining: organizations.creditsRemaining,
+			plan: organizations.plan
 		})
 		.from(organizations)
 		.where(eq(organizations.id, orgId))
@@ -184,6 +186,13 @@ function isCardFailure(error: unknown): boolean {
  */
 /** True when the org passes the cheap eligibility checks (no DB counts yet). */
 function basicEligibility(org: AutoTopupState): boolean {
+	// An unmetered plan (lifetime) never needs a top-up — unlimited scoring
+	// makes the charge pure waste. An enabled flag on one is a data anomaly
+	// (the org upgraded while enabled): loud, then skip (MOD-35).
+	if (isUnmeteredPlan(org.plan)) {
+		if (org.enabled === 1) console.error(`auto top-up skipped for unmetered org (plan ${org.plan}) despite an enabled flag — data anomaly`);
+		return false;
+	}
 	if (org.enabled !== 1) return false;
 	if ((org.creditsRemaining ?? 0) >= (org.threshold ?? AUTO_TOPUP_DEFAULT_THRESHOLD)) return false;
 	if (org.state === 'disabled') {
@@ -247,6 +256,10 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 				eq(organizations.id, orgId),
 				eq(organizations.autoTopupState, 'idle'),
 				eq(organizations.autoTopupEnabled, 1),
+				// Mirror of UNMETERED_PLANS (ledger.ts): an org upgraded to
+				// lifetime between the eligibility read and this claim must
+				// never be charged for credits it cannot need (MOD-35).
+				ne(organizations.plan, 'lifetime'),
 				sql`COALESCE(${organizations.creditsRemaining}, 0) < COALESCE(${organizations.autoTopupThreshold}, ${AUTO_TOPUP_DEFAULT_THRESHOLD})`,
 				isNotNull(organizations.stripeCustomerId),
 				isNotNull(organizations.stripeDefaultPmId)

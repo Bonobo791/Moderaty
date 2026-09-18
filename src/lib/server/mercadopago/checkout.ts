@@ -22,6 +22,7 @@ import { mercadoPagoCheckoutAttempts } from '$lib/server/db/schema';
 import { requireOrgRole } from '$lib/server/ownership';
 import type { SessionUser } from '$lib/server/session';
 import { mercadoPagoProvider } from './client';
+import { assertCreditsPurchasable } from '$lib/server/billing/ledger';
 import { mercadoPagoBundleById, type MercadoPagoBundle } from './bundles';
 import { webhookSecret } from './webhooks';
 
@@ -104,6 +105,9 @@ export async function createMercadoPagoCreditCheckout(
 	requireOrgRole(user, 'owner');
 	const appUrl = env.APP_URL;
 	if (!appUrl) throw new Error('APP_URL is not configured');
+	// Unlimited plans never buy credits — rejected before any provider
+	// validation or attempt row (the lifetime org's scoring is free; MOD-35).
+	await assertCreditsPurchasable(orgId);
 	// The webhook secret is part of the provider configuration: with prices and
 	// the access token set but no secret, the preference would still be payable
 	// while every webhook throws before fulfillment — the customer pays and

@@ -17,7 +17,7 @@ import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
-import { organizations } from '$lib/server/db/schema';
+import { mercadoPagoCheckoutAttempts, organizations, stripeCheckoutAttempts } from '$lib/server/db/schema';
 import type { SessionUser } from '$lib/server/session';
 import { applyLedgerDelta, consumeCredit } from '$lib/server/billing/ledger';
 import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
@@ -51,7 +51,7 @@ import { render } from 'svelte/server';
 import Page from './+page.svelte';
 import { actions, load } from './+page.server';
 
-setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_checkout_attempts']);
+setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_checkout_attempts', 'mercado_pago_checkout_attempts']);
 
 const OWNER = TEST_OWNER;
 
@@ -171,6 +171,39 @@ describe('usage load', () => {
 		expect(body).toContain('Moderaty is temporarily unable to reach its database');
 		expect(body).not.toContain('Credits left');
 	});
+
+	test('a lifetime org sees no credit purchase or auto top-up forms — with an explanation, not silence', async () => {
+		// Unlimited scoring makes credit bundles and auto top-up useless, so
+		// the cards are replaced by an explanatory line (I12: never silently
+		// different). A metered org renders them normally.
+		const base = {
+			maintenance: false,
+			user: OWNER,
+			summary: { remaining: 0, usedThisMonth: 0, usedLifetime: 0 },
+			metered: false,
+			history: [],
+			bundles: [{ id: 'credits_100', label: '100 credits' }],
+			mercadoPagoBundles: [{ id: 'credits_100', label: '100 credits', amountCents: 990 }],
+			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: false },
+			autoTopupConsentText: 'consent',
+			stripeConfigured: true,
+			plans: { hosted: true, lifetime: true }
+		};
+		const lifetime = render(Page, {
+			props: { data: { ...base, billing: { plan: 'lifetime', subscriptionStatus: null, periodEnd: null } }, form: null } as never
+		}).body;
+		expect(lifetime).not.toContain('action="?/buy"');
+		expect(lifetime).not.toContain('action="?/buyMercadoPago"');
+		expect(lifetime).not.toContain('action="?/setAutoTopup"');
+		expect(lifetime).toContain('unlimited moderated comments');
+
+		const metered = render(Page, {
+			props: { data: { ...base, billing: { plan: null, subscriptionStatus: null, periodEnd: null } }, form: null } as never
+		}).body;
+		expect(metered).toContain('action="?/buy"');
+		expect(metered).toContain('action="?/buyMercadoPago"');
+		expect(metered).toContain('action="?/setAutoTopup"');
+	});
 });
 
 describe('usage buy action', () => {
@@ -262,6 +295,39 @@ describe('usage buy action', () => {
 			expect(serialized).toContain('Could not start checkout');
 			expect(serialized).not.toContain('STRIPE_PRICE_CREDITS_500');
 			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('STRIPE_PRICE_CREDITS_500'));
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('a lifetime org cannot open a Stripe credit checkout — unlimited plans never buy credits', async () => {
+		// The lifetime plan's scoring is already unlimited: a crafted POST
+		// (the button is hidden in the UI) must fail loudly BEFORE a Checkout
+		// Session exists — never sell a balance the org can never need.
+		await seedOrg({ plan: 'lifetime' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const result = await buy('credits_100');
+			expect(result).toMatchObject({ status: 500 });
+			expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+			expect(mocks.customersCreate).not.toHaveBeenCalled();
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('lifetime'));
+			expect(await testDb().db.select().from(stripeCheckoutAttempts)).toHaveLength(0);
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('a lifetime org cannot open a Mercado Pago credit checkout', async () => {
+		// Same guard on the BRL path: the check must run before any provider
+		// validation or attempt row, so no MP env config is needed here.
+		await seedOrg({ plan: 'lifetime' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const result = (await actions.buyMercadoPago({ request: postForm({ bundle: 'credits_100' }), locals: { user: OWNER } } as never)) as { status: number };
+			expect(result.status).toBeGreaterThanOrEqual(400);
+			expect(errorSpy.mock.calls.flat().some((arg) => arg instanceof Error && arg.message.includes('lifetime'))).toBe(true);
+			expect(await testDb().db.select().from(mercadoPagoCheckoutAttempts)).toHaveLength(0);
 		} finally {
 			errorSpy.mockRestore();
 		}
@@ -405,6 +471,24 @@ describe('usage setAutoTopup action', () => {
 		await seedOrg();
 		const member = { ...OWNER, orgRole: 'member' as const };
 		await expect(setAutoTopup({ enabled: 'on', threshold: '250', consent: 'on' }, member)).rejects.toMatchObject({ status: 403 });
+	});
+
+	test('a lifetime org cannot enable or update auto top-up; disabling stays allowed', async () => {
+		// Unlimited scoring makes a top-up charge pure waste — enabling (or a
+		// threshold update while a stale flag survives) is a loud 400. Turning
+		// the flag OFF must still work so a stale flag can be cleared.
+		await seedOrg({ plan: 'lifetime', autoTopupEnabled: 1, autoTopupThreshold: 100, autoTopupState: 'idle' });
+
+		const enable = await setAutoTopup({ enabled: 'on', threshold: '150' });
+		expect(enable).toMatchObject({ status: 400 });
+		expect(JSON.stringify(enable)).toContain('lifetime');
+		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.autoTopupThreshold).toBe(100);
+
+		const off = await setAutoTopup({ threshold: '150' });
+		expect(off).toMatchObject({ ok: true });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.autoTopupEnabled).toBe(0);
+		expect(org?.autoTopupThreshold).toBe(100); // disabling keeps the stored threshold
 	});
 });
 

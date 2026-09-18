@@ -25,6 +25,7 @@ import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { organizations, stripeCheckoutAttempts, stripeLifetimeEntitlements, stripeLifetimeSlots } from '$lib/server/db/schema';
 import { bundleById, priceIdFor, type CreditBundle } from '$lib/server/stripe/bundles';
+import { assertCreditsPurchasable } from './ledger';
 import { isActiveSubscriptionStatus, planPriceEnv, validatePlanPrice, type PaidPlan } from './plans';
 import { getStripe } from '$lib/server/stripe/client';
 import { requireOrgRole } from '$lib/server/ownership';
@@ -106,6 +107,9 @@ export async function createCreditCheckout(orgId: string, user: SessionUser, bun
 	const bundle: CreditBundle = bundleById(bundleId);
 	const appUrl = env.APP_URL;
 	if (!appUrl) throw new Error('APP_URL is not configured');
+	// Unlimited plans never buy credits — rejected before an attempt row is
+	// planted (the lifetime org's scoring is already free; MOD-35).
+	await assertCreditsPurchasable(orgId);
 	return createCheckoutAttempt(orgId, bundle.id, attemptId, async (idempotencyKey) => {
 		const customer = await getOrCreateStripeCustomer(orgId, user);
 		return getStripe().checkout.sessions.create({

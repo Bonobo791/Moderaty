@@ -21,6 +21,7 @@ import { db } from '$lib/server/db';
 import { creditTransactions, organizations, stripePendingReversals, stripeSubscriptionPeriods } from '$lib/server/db/schema';
 import {
 	applyLedgerDelta,
+	assertCreditsPurchasable,
 	consumeCredit,
 	drainPendingReversals,
 	findGrantForStripe,
@@ -169,6 +170,25 @@ describe('orgIsMetered', () => {
 
 	test('fails loudly for an unknown org', async () => {
 		await expect(orgIsMetered('missing')).rejects.toThrow('org not found');
+	});
+});
+
+describe('assertCreditsPurchasable', () => {
+	test('passes for metered orgs, throws for the unmetered lifetime plan', async () => {
+		// Credit checkout creation (Stripe AND Mercado Pago) must reject an
+		// unlimited plan before planting an attempt — a lifetime org buying
+		// credits pays real money for a balance it can never need (MOD-35).
+		await seedOrg('org-1', null, null);
+		await expect(assertCreditsPurchasable('org-1')).resolves.toBeUndefined();
+		await seedOrg('org-2', 500, 'cus_1');
+		await expect(assertCreditsPurchasable('org-2')).resolves.toBeUndefined();
+
+		await testDb().db.update(organizations).set({ plan: 'lifetime' }).where(eq(organizations.id, 'org-1'));
+		await expect(assertCreditsPurchasable('org-1')).rejects.toThrow(/lifetime/);
+	});
+
+	test('fails loudly for an unknown org', async () => {
+		await expect(assertCreditsPurchasable('missing')).rejects.toThrow('org not found');
 	});
 });
 

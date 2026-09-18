@@ -125,6 +125,12 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 {/if}
 
 {#if isOwner}
+	{#if data.billing?.plan === 'lifetime'}
+		<div class="card">
+			<h2 style="margin-top:0">Buy credits</h2>
+			<p class="muted">Your lifetime plan includes unlimited moderated comments — credits and auto top-up are not needed.</p>
+		</div>
+	{:else}
 	<div class="card">
 		<h2 style="margin-top:0">Buy credits</h2>
 		{#if data.bundles.length === 0}
@@ -212,6 +218,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 			</button>
 		</form>
 	</div>
+	{/if}
 
 	<div class="card">
 		<h2 style="margin-top:0">Cards</h2>

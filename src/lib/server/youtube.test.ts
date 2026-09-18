@@ -24,7 +24,13 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
-import { deleteComment, fetchNewComments, fetchVideoMetadata, getCommentModerationStatus, refreshAccessToken, setModerationStatus } from './youtube';
+import { deleteComment, fetchNewComments, fetchVideoMetadata, getCommentModerationStatus, refreshAccessToken, setModerationStatus, YOUTUBE_ID_BATCH_SIZE } from './youtube';
+
+// Pins the shared constant to YouTube's documented `id`-list cap — a change
+// here is a provider-limit change, not a refactor, and must be deliberate.
+test('YOUTUBE_ID_BATCH_SIZE matches the YouTube API id-list cap of 50', () => {
+	expect(YOUTUBE_ID_BATCH_SIZE).toBe(50);
+});
 
 beforeEach(() => {
 	mocks.env.GOOGLE_CLIENT_ID = 'client-id';

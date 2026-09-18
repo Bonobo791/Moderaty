@@ -87,9 +87,12 @@ export async function moderationMockModule(
 	};
 }
 
-/** $lib/server/youtube vi.mock body shared by every pipeline PBT file. */
-export function youtubeMockModule(mocks: PipelineMocks) {
+/** $lib/server/youtube vi.mock body shared by every pipeline PBT file.
+ * Real exports (YOUTUBE_ID_BATCH_SIZE, types) survive; only the network
+ * calls are faked so the constant cannot drift between mock and source. */
+export async function youtubeMockModule(mocks: PipelineMocks) {
 	return {
+		...(await vi.importActual<typeof import('./youtube')>('./youtube')),
 		refreshAccessToken: mocks.refreshAccessToken,
 		fetchNewComments: mocks.fetchNewComments,
 		fetchVideoMetadata: mocks.fetchVideoMetadata,

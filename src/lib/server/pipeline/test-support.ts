@@ -336,7 +336,10 @@ vi.mock('$lib/server/tone', () => ({
 vi.mock('$lib/server/openaiKey', () => ({
 	resolveOpenAiKey: mocks.resolveOpenAiKey
 }));
-vi.mock('$lib/server/youtube', () => ({
+vi.mock('$lib/server/youtube', async (importOriginal) => ({
+	// Real exports (YOUTUBE_ID_BATCH_SIZE, types) survive; only the network
+	// calls are faked so the constant cannot drift between mock and source.
+	...(await importOriginal<typeof import('$lib/server/youtube')>()),
 	refreshAccessToken: mocks.refreshAccessToken,
 	fetchNewComments: mocks.fetchNewComments,
 	fetchVideoMetadata: mocks.fetchVideoMetadata,

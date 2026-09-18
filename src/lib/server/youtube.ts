@@ -18,6 +18,13 @@ import { fetchWithRetry } from '$lib/server/http';
 
 const YT = 'https://www.googleapis.com/youtube/v3';
 
+/**
+ * YouTube caps comma-separated `id` list parameters at 50 per request
+ * (videos.list, comments.setModerationStatus, comments.list). Every batching
+ * loop that talks to those endpoints must share this bound.
+ */
+export const YOUTUBE_ID_BATCH_SIZE = 50;
+
 type JsonObject = Record<string, unknown>;
 
 export interface NewComment {
@@ -124,7 +131,7 @@ const MAX_VIDEO_DESCRIPTION_LENGTH = 500;
 /**
  * Fetches titles and descriptions for videos, for tone-scoring context.
  *
- * @param videoIds - The video IDs to look up (batched 50 per API call).
+ * @param videoIds - The video IDs to look up (batched YOUTUBE_ID_BATCH_SIZE per API call).
  * @param accessToken - The OAuth access token for the YouTube API.
  * @param deadline - Optional request deadline.
  * @returns A map from video ID to its title and truncated description; videos
@@ -136,8 +143,8 @@ export async function fetchVideoMetadata(
 	deadline?: number
 ): Promise<Map<string, { title: string; description: string }>> {
 	const out = new Map<string, { title: string; description: string }>();
-	for (let i = 0; i < videoIds.length; i += 50) {
-		const batch = videoIds.slice(i, i + 50);
+	for (let i = 0; i < videoIds.length; i += YOUTUBE_ID_BATCH_SIZE) {
+		const batch = videoIds.slice(i, i + YOUTUBE_ID_BATCH_SIZE);
 		const params = new URLSearchParams({ part: 'snippet', id: batch.join(',') });
 		const res = await ytFetch(`/videos?${params}`, accessToken, undefined, deadline);
 		const data = object(await jsonResponse(res, 'videos.list'), 'videos.list response');
@@ -305,8 +312,8 @@ export async function setModerationStatus(
 	accessToken: string,
 	deadline?: number
 ): Promise<void> {
-	for (let i = 0; i < ids.length; i += 50) {
-		const batch = ids.slice(i, i + 50);
+	for (let i = 0; i < ids.length; i += YOUTUBE_ID_BATCH_SIZE) {
+		const batch = ids.slice(i, i + YOUTUBE_ID_BATCH_SIZE);
 		const params = new URLSearchParams({
 			id: batch.join(','),
 			moderationStatus: status

@@ -166,6 +166,21 @@ One-time setup (human, in the Coolify dashboard):
       serve the pushed commit before purging; without it the marker reads
       `unknown` and the wait always times out.
 
+   **Expired Turso tokens fail loudly now.** After the credential env check,
+   the gate's first spawned step is `scripts/db-preflight.mjs`, a `SELECT 1`
+   through the same `@libsql/client`
+   driver drizzle-kit uses — added because drizzle-kit exits 1 with *no*
+   output on connection failures (the 2026-09-17 dev deploy showed only
+   spinner frames; the cause was a 30-day `TURSO_AUTH_TOKEN` that had expired
+   12 days earlier). If the gate fails with `db-preflight: cannot reach the
+   database — ... HTTP status 401`, mint a non-expiring token for the
+   database in the failing `TURSO_DATABASE_URL` — `turso db tokens create
+   dev-2 -e never` for the dev app, `turso db tokens create
+   moderaty-bonobo791 -e never` for prod (never a dev token for a prod
+   outage) — and update every copy: the
+   worktree `.env`, this app's env vars, and the Netlify branch-deploys
+   context.
+
    **Build Variable flags — only the two TURSO_* variables need them.**
    Coolify injects an `ARG` statement into the Dockerfile for every env var
    with Build Variable ON (a misconfigured app logs hadolint

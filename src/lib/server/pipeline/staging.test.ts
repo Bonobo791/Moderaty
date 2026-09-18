@@ -57,9 +57,11 @@ test('a dry run counts the protected comment as implicit approved and audits the
 });
 
 test.each([
-	{ score: 0.34, audit: 'approve' },
-	{ score: 0.6, audit: 'queue' }
-])('an auto-action ($audit) audit row carries the comment author’s normalized handle', async ({ score, audit }) => {
+	{ score: 0.34, audit: 'approve', count: 1 },
+	// A queued comment writes TWO rows carrying the handle: 'queue' at staging
+	// (why it waits) and 'hold' at enforcement completion (the remote action).
+	{ score: 0.6, audit: 'queue', count: 2 }
+])('an auto-action ($audit) audit row carries the comment author’s normalized handle', async ({ score, audit, count }) => {
 	// The audit row records WHO was moderated, normalized exactly the way the
 	// allowlist stores handles: lowercase, trimmed, one leading '@' stripped.
 	// (Rows for decisions WITH a YouTube action — ban/reject/delete/hold — are
@@ -75,9 +77,22 @@ test.each([
 
 	await runChannel('channel');
 
-	expect(mocks.state.insertedAudits).toEqual([
+	expect(mocks.state.insertedAudits).toHaveLength(count);
+	expect(mocks.state.insertedAudits).toEqual(expect.arrayContaining([
 		expect.objectContaining({ commentId: 'comment', action: audit, authorHandle: 'some.user' })
-	]);
+	]));
+	if (audit === 'queue') {
+		// Pin the completion row too: the staged 'hold' carries the handle
+		// through moderation_actions — a dropped field or a wrong action on
+		// the second row must fail this test, not hide behind the count.
+		expect(mocks.state.insertedAudits).toContainEqual(expect.objectContaining({
+			commentId: 'comment',
+			action: 'hold',
+			actor: 'system',
+			authorHandle: 'some.user',
+			reason: expect.any(String)
+		}));
+	}
 });
 
 test('a dry-run audit row carries the normalized handle alongside the capped text', async () => {
@@ -255,11 +270,22 @@ test('truncates the ai-unavailable reason at 200 characters', async () => {
 
 	await runChannel('channel');
 
-	expect(mocks.state.insertedAudits).toEqual([expect.objectContaining({
+	// Exactly two rows: 'queue' (why it waits for a human) and 'hold' (the
+	// remote action at enforcement completion) — no extra rows, and no raw
+	// error text leaking into either reason field.
+	expect(mocks.state.insertedAudits).toHaveLength(2);
+	expect(mocks.state.insertedAudits).toContainEqual(expect.objectContaining({
 		commentId: 'comment',
 		action: 'queue',
-		reason: 'ai unavailable: scoring unavailable'
-	})]);
+		reason: 'ai unavailable: scoring unavailable',
+		actor: 'system'
+	}));
+	expect(mocks.state.insertedAudits).toContainEqual(expect.objectContaining({
+		commentId: 'comment',
+		action: 'hold',
+		reason: 'ai unavailable: scoring unavailable',
+		actor: 'system'
+	}));
 });
 
 test('a dry run counts only enforceable decisions as acted', async () => {
@@ -299,7 +325,7 @@ test('staging inserts no empty action batch for an approved comment', async () =
 });
 
 test.each([
-	{ score: 0.8, audit: 'reject' },
+	{ score: 0.8, audit: 'delete' },
 	{ score: 0.95, audit: 'ban' }
 ])('a dry run still writes the audit row for an ai $audit decision', async ({ score }) => {
 	// The dry-run audit covers every decision, including the ones that carry a

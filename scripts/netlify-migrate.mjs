@@ -33,8 +33,11 @@
 // path — nothing is resolved through PATH (javascript:S4036), so an attacker
 // who can write to a PATH directory can never redirect the migration or the
 // verification to their own code. The MODERATY_DRIZZLE_KIT_BIN /
-// MODERATY_VERIFY_BIN env overrides exist ONLY for the test suite to
-// substitute fake scripts; production always uses the defaults below.
+// MODERATY_VERIFY_BIN / MODERATY_PREFLIGHT_BIN env overrides exist ONLY for
+// the test suite to substitute fake scripts — they are honored solely when
+// MODERATY_MIGRATE_TEST_HOOKS=1, so a stray or injected production env var
+// can never redirect the migration to arbitrary code; production always
+// uses the defaults below.
 //
 // Runs only from the netlify.toml build command; it needs the per-context
 // Netlify env vars (TURSO_DATABASE_URL / TURSO_AUTH_TOKEN), which drizzle-kit
@@ -90,14 +93,35 @@ if (!databaseUrl.startsWith('file:') && !process.env.TURSO_AUTH_TOKEN) {
 	process.exit(1);
 }
 
+// Test-only seam: the MODERATY_*_BIN overrides substitute fake scripts for
+// the test suite. They are honored ONLY under MODERATY_MIGRATE_TEST_HOOKS=1 —
+// anywhere else they are ignored with a loud notice, so a poisoned
+// production env var can never execute arbitrary code at the migration gate.
+const testHooks = process.env.MODERATY_MIGRATE_TEST_HOOKS === '1';
+const override = (envName, fallback) => {
+	if (!process.env[envName]) return fallback;
+	if (testHooks) return process.env[envName];
+	console.error(
+		`netlify-migrate: ignoring ${envName} — binary overrides only apply under MODERATY_MIGRATE_TEST_HOOKS=1.`
+	);
+	return fallback;
+};
+
+// db:preflight runs first because drizzle-kit exits 1 with no output on
+// connection failures — the preflight surfaces the real driver error (expired
+// token, unreachable host) into the deploy log before anything can swallow it.
 const steps = [
 	{
+		name: 'db:preflight',
+		args: [override('MODERATY_PREFLIGHT_BIN', join(repoRoot, 'scripts', 'db-preflight.mjs'))]
+	},
+	{
 		name: 'db:migrate',
-		args: [process.env.MODERATY_DRIZZLE_KIT_BIN ?? join(repoRoot, 'node_modules', 'drizzle-kit', 'bin.cjs'), 'migrate']
+		args: [override('MODERATY_DRIZZLE_KIT_BIN', join(repoRoot, 'node_modules', 'drizzle-kit', 'bin.cjs')), 'migrate']
 	},
 	{
 		name: 'db:verify',
-		args: [process.env.MODERATY_VERIFY_BIN ?? join(repoRoot, 'scripts', 'verify-migrations.mjs')]
+		args: [override('MODERATY_VERIFY_BIN', join(repoRoot, 'scripts', 'verify-migrations.mjs'))]
 	}
 ];
 

@@ -441,13 +441,16 @@ describe('OAuth scope and ban claims match implementation', () => {
 		expect(banFaq?.a).toMatch(/ban rule bans/i);
 	});
 
-	it('the FAQ acknowledges tone-score bans alongside toxicity', () => {
-		// pipeline.ts passes toneScore through the same aiOutcome AUTO_BAN=0.95
-		// threshold, so a 0.95+ tone score also bans automatically; the ban
-		// answer must not present toxicity as the only AI path.
+	it('the FAQ keeps auto-ban exclusive to the toxicity signal', () => {
+		// decisions.ts aiOutcome: the tone signal only ever holds — even at
+		// ≥0.95 — while omni toxicity ≥0.95 still bans. The ban answer must
+		// name toxicity as the only AI path to a ban and must not promise
+		// tone-score bans.
 		const banFaq = FAQ_ENTRIES.find((f) => f.q === 'Will Moderaty ban my real fans?');
 		expect(banFaq, 'ban FAQ entry missing').toBeDefined();
-		expect(banFaq?.a).toMatch(/0\.95 or higher.*toxicity or tone analysis.*trigger an automatic ban/i);
+		expect(banFaq?.a).toMatch(/0\.95 or higher on the AI's toxicity analysis.*automatic ban/i);
+		expect(banFaq?.a).toMatch(/tone analysis only ever hides/i);
+		expect(banFaq?.a).not.toMatch(/toxicity or tone analysis/i);
 	});
 
 	it('the access FAQ discloses video title/description reads', () => {

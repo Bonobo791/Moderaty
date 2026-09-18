@@ -51,3 +51,22 @@ export const db = new Proxy({} as LibSQLDatabase<typeof schema>, {
 		return typeof value === 'function' ? value.bind(instance) : value;
 	}
 });
+
+/**
+ * Retries a short transaction on SQLite lock contention. Remote Turso
+ * serializes writers server-side, but file-backed libSQL (self-hosted
+ * deployments, tests) can answer SQLITE_LOCKED/SQLITE_BUSY when two
+ * writers race — the loser retries after the winner commits instead of
+ * surfacing a raw lock error.
+ */
+export async function withBusyRetry<T>(work: () => Promise<T>, attempts = 3): Promise<T> {
+	for (let attempt = 1; ; attempt++) {
+		try {
+			return await work();
+		} catch (error) {
+			const code = (error as { code?: string }).code ?? '';
+			if (attempt >= attempts || !/^SQLITE_(LOCKED|BUSY)/.test(code)) throw error;
+			await new Promise((resolve) => setTimeout(resolve, attempt * 25));
+		}
+	}
+}

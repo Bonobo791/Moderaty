@@ -15,14 +15,15 @@
 
 import { beforeEach, expect, test, vi } from 'vitest';
 import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
-import { auditLog, channels, comments } from '$lib/server/db/schema';
+import { auditLog, channels, comments, moderationActions } from '$lib/server/db/schema';
 import { eq } from 'drizzle-orm';
 
 const mocks = vi.hoisted(() => ({
 	env: { DRY_RUN: 'true' } as Record<string, string | undefined>,
-	refreshAccessToken: vi.fn(async () => 'access-token'),
-	setModerationStatus: vi.fn(async () => {}),
-	deleteComment: vi.fn(async () => {})
+	refreshAccessToken: vi.fn(async (_token?: string) => 'access-token'),
+	setModerationStatus: vi.fn(async (_ids: string[], _status: string, _ban?: boolean, _token?: string, _deadline?: number) => {}),
+	deleteComment: vi.fn(async (_id: string, _token?: string, _deadline?: number) => {}),
+	getCommentModerationStatus: vi.fn(async (_id: string, _token?: string, _deadline?: number) => null as string | null)
 }));
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
@@ -30,12 +31,13 @@ vi.mock('$lib/server/crypto', () => ({ decrypt: vi.fn(() => 'decrypted-refresh-t
 vi.mock('$lib/server/youtube', () => ({
 	refreshAccessToken: mocks.refreshAccessToken,
 	setModerationStatus: mocks.setModerationStatus,
-	deleteComment: mocks.deleteComment
+	deleteComment: mocks.deleteComment,
+	getCommentModerationStatus: mocks.getCommentModerationStatus
 }));
 
 import { actions, load } from './+page.server';
 
-setupTestDb(['audit_log', 'comments', 'channels']);
+setupTestDb(['audit_log', 'comments', 'channels', 'moderation_actions']);
 
 beforeEach(async () => {
 	await testDb()
@@ -46,6 +48,13 @@ beforeEach(async () => {
 		]);
 	mocks.env.DRY_RUN = 'true';
 	vi.clearAllMocks();
+	// vi.clearAllMocks clears call history but NOT implementations — re-seed
+	// the defaults or a resolved value from one test.each iteration leaks
+	// into the next.
+	mocks.refreshAccessToken.mockResolvedValue('access-token');
+	mocks.setModerationStatus.mockResolvedValue(undefined);
+	mocks.deleteComment.mockResolvedValue(undefined);
+	mocks.getCommentModerationStatus.mockResolvedValue(null);
 });
 
 const QUEUE_URL = 'http://localhost/channels/UC1/queue';
@@ -75,6 +84,28 @@ async function seedComment(id: string, channelId: string, status = 'pending') {
 	});
 }
 
+/** The 'hold' moderation action the pipeline stages for a queued comment. */
+async function seedHold(commentId: string, channelId: string, state = 'completed') {
+	await testDb().db.insert(moderationActions).values({
+		commentId,
+		channelId,
+		action: 'hold',
+		reason: 'ai score 0.60',
+		state,
+		lastAttemptAt: null,
+		lastManualRetryAt: null
+	});
+}
+
+/** Queues 'c1' with a staged 'hold' in `state`, then approves it (DRY_RUN off). */
+async function approveHeldComment(state: string) {
+	mocks.env.DRY_RUN = 'false';
+	await seedComment('c1', 'UC1');
+	await seedHold('c1', 'UC1', state);
+	const res = await act('approve', { commentId: 'c1' });
+	expect(res).toMatchObject({ success: 'Approved — recorded in audit log.' });
+}
+
 async function commentRow(id: string) {
 	return testDb().db.select().from(comments).where(eq(comments.id, id)).get();
 }
@@ -86,8 +117,27 @@ async function auditRows() {
 async function expectNothingDecided(id: string, status: string) {
 	expect((await commentRow(id))?.status).toBe(status);
 	expect(await auditRows()).toHaveLength(0);
+	expect(mocks.refreshAccessToken).not.toHaveBeenCalled();
+	expect(mocks.getCommentModerationStatus).not.toHaveBeenCalled();
 	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
+}
+
+/**
+ * A minimal YouTube remote-state simulator: getCommentModerationStatus
+ * reads `remote`, the writes update it. Tests drive `remote` mid-flight to
+ * model a hold landing behind a human decision.
+ */
+function simulateYouTube(initial: string | null) {
+	const yt = { remote: initial as string | null };
+	mocks.getCommentModerationStatus.mockImplementation(async () => yt.remote);
+	mocks.setModerationStatus.mockImplementation(async (_ids: string[], status: string) => {
+		yt.remote = status;
+	});
+	mocks.deleteComment.mockImplementation(async () => {
+		yt.remote = null;
+	});
+	return yt;
 }
 
 test('load projects only the channel fields the page renders — never the credential', async () => {
@@ -149,19 +199,87 @@ test('a second act on an already-claimed comment 404s and audits nothing new', a
 });
 
 test('a failed YouTube call releases the claim so the action stays retryable', async () => {
+	// The failure surfaces as a form failure in the error-box — not a bare
+	// 500 page — and the comment returns to the queue for a retry.
 	mocks.env.DRY_RUN = 'false';
+	const yt = simulateYouTube('published');
 	mocks.setModerationStatus.mockRejectedValueOnce(new Error('youtube 500'));
+	vi.spyOn(console, 'error').mockImplementation(() => {});
 	await seedComment('c1', 'UC1');
 
-	await expect(act('reject', { commentId: 'c1' })).rejects.toThrowError('youtube 500');
+	const res = await act('reject', { commentId: 'c1' });
+	expect(res).toMatchObject({ status: 500, data: { error: 'The YouTube action failed — the comment is back in the queue. Try again.' } });
 
 	expect(await commentRow('c1')).toMatchObject({ status: 'pending', decidedBy: 'none' });
 	expect(await auditRows()).toHaveLength(0);
 
 	// The retry goes through.
-	const res = await act('reject', { commentId: 'c1' });
-	expect(res).toMatchObject({ success: 'Rejected — recorded in audit log.' });
+	const retry = await act('reject', { commentId: 'c1' });
+	expect(retry).toMatchObject({ success: 'Rejected — recorded in audit log.' });
 	expect((await commentRow('c1'))?.status).toBe('rejected');
+	expect(yt.remote).toBe('rejected');
+});
+
+test('a crashed claim leaves durable intent — not a decided comment', async () => {
+	// I3: the claim transaction commits 'restoring' + the intent audit row
+	// BEFORE any remote call. Inside the remote write the comment must
+	// already read 'restoring' with its intent recorded — a crash here is
+	// what the reconcile sweep finishes, never a final status with
+	// unapplied remote work.
+	mocks.env.DRY_RUN = 'false';
+	const yt = simulateYouTube('published');
+	let during: { status: string | undefined; audits: number } | null = null;
+	mocks.setModerationStatus.mockImplementation(async (_ids: string[], status: string) => {
+		during ??= { status: (await commentRow('c1'))?.status, audits: (await auditRows()).length };
+		yt.remote = status;
+	});
+	await seedComment('c1', 'UC1');
+
+	await act('reject', { commentId: 'c1' });
+
+	expect(during).toEqual({ status: 'restoring', audits: 1 });
+	expect((await commentRow('c1'))?.status).toBe('rejected');
+});
+
+test('a failed human action re-arms a hold enforcement superseded mid-claim', async () => {
+	// partitionHolds marks a hold 'superseded' the moment a human claim
+	// commits a decided status. If the remote call then fails, the comment
+	// returns to 'pending' — and the hold must return to 'pending' too, or
+	// the comment sits in the queue public on YouTube while the page calls
+	// it held ('superseded' is terminal; nothing retries it).
+	mocks.env.DRY_RUN = 'false';
+	simulateYouTube('published');
+	mocks.setModerationStatus.mockRejectedValueOnce(new Error('youtube 500'));
+	const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	await seedComment('c1', 'UC1');
+	await seedHold('c1', 'UC1', 'superseded');
+
+	const res = await act('reject', { commentId: 'c1' });
+
+	expect(res).toMatchObject({ status: 500 });
+	expect(await commentRow('c1')).toMatchObject({ status: 'pending', decidedBy: 'none' });
+	const hold = await testDb().db.select().from(moderationActions).where(eq(moderationActions.commentId, 'c1')).get();
+	expect(hold?.state).toBe('pending');
+	// The real error is logged server-side; the client sees a generic message.
+	expect(consoleSpy).toHaveBeenCalled();
+	expect((res as { data?: { error?: string } }).data?.error).not.toContain('youtube 500');
+});
+
+test('a failed human action leaves a dispatched hold for the reconcile loop', async () => {
+	// A 'dispatched' hold may be in flight to YouTube — the reconcile loop
+	// re-verifies it against the restored 'pending' comment. Only
+	// terminally-'superseded' holds are re-armed.
+	mocks.env.DRY_RUN = 'false';
+	simulateYouTube('published');
+	mocks.setModerationStatus.mockRejectedValueOnce(new Error('youtube 500'));
+	vi.spyOn(console, 'error').mockImplementation(() => {});
+	await seedComment('c1', 'UC1');
+	await seedHold('c1', 'UC1', 'dispatched');
+
+	await act('reject', { commentId: 'c1' });
+
+	const hold = await testDb().db.select().from(moderationActions).where(eq(moderationActions.commentId, 'c1')).get();
+	expect(hold?.state).toBe('dispatched');
 });
 
 test('approve in DRY_RUN finalizes locally, audits dry-run, and skips YouTube', async () => {
@@ -184,13 +302,14 @@ test('approve in DRY_RUN finalizes locally, audits dry-run, and skips YouTube', 
 
 test('reject outside DRY_RUN calls YouTube and audits reject', async () => {
 	mocks.env.DRY_RUN = 'false';
+	simulateYouTube('published');
 	await seedComment('c1', 'UC1');
 	const res = await act('reject', { commentId: 'c1' });
 	expect(res).toMatchObject({ success: 'Rejected — recorded in audit log.' });
 
 	expect(mocks.refreshAccessToken).toHaveBeenCalledWith('decrypted-refresh-token');
 	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'rejected', false, 'access-token');
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'rejected', false, 'access-token', undefined);
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
 	expect((await commentRow('c1'))?.status).toBe('rejected');
 
@@ -201,13 +320,14 @@ test('reject outside DRY_RUN calls YouTube and audits reject', async () => {
 	expect(audits[0]).toMatchObject({ channelId: 'UC1', commentId: 'c1', action: 'reject', reason: 'manual review', actor: 'user', authorHandle: null });
 });
 
-test('approve outside DRY_RUN skips YouTube entirely and audits approve', async () => {
+test('approve outside DRY_RUN on an already-public comment writes nothing and audits approve', async () => {
 	mocks.env.DRY_RUN = 'false';
+	simulateYouTube('published');
 	await seedComment('c1', 'UC1');
 	const res = await act('approve', { commentId: 'c1' });
 	expect(res).toMatchObject({ success: 'Approved — recorded in audit log.' });
 
-	expect(mocks.refreshAccessToken).not.toHaveBeenCalled();
+	expect(mocks.getCommentModerationStatus).toHaveBeenCalledWith('c1', 'access-token', undefined);
 	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
 	expect((await commentRow('c1'))?.status).toBe('approved');
@@ -217,15 +337,117 @@ test('approve outside DRY_RUN skips YouTube entirely and audits approve', async 
 	expect(audits[0]).toMatchObject({ channelId: 'UC1', commentId: 'c1', action: 'approve', reason: 'manual review', actor: 'user' });
 });
 
+test('approve outside DRY_RUN publishes a comment the pipeline held on YouTube', async () => {
+	// Queue items under the hold contract are genuinely non-public on YouTube:
+	// approving one must un-hold it or it stays invisible forever.
+	simulateYouTube('heldForReview');
+	await approveHeldComment('completed');
+
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined);
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expect((await commentRow('c1'))?.status).toBe('approved');
+
+	const audits = await auditRows();
+	expect(audits).toHaveLength(1);
+	expect(audits[0]).toMatchObject({ channelId: 'UC1', commentId: 'c1', action: 'approve', actor: 'user' });
+});
+
+test('approve skips the publish call when the comment is already public remotely', async () => {
+	// A 'pending' hold at claim time can never have reached YouTube — and the
+	// preflight proves the comment is public, so no un-hold call is needed.
+	simulateYouTube('published');
+	await approveHeldComment('pending');
+
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expect((await commentRow('c1'))?.status).toBe('approved');
+});
+
+test.each([
+	{ observed: 'heldForReview', publishes: true },
+	{ observed: 'rejected', publishes: true },
+	{ observed: 'likelySpam', publishes: true },
+	{ observed: 'published', publishes: false }
+])('approve publishes ANY non-public remote state, not just heldForReview (observed: $observed)', async ({ observed, publishes }) => {
+	// YouTube's own systems can leave a queued comment 'rejected' or
+	// 'likelySpam' — publishing only 'heldForReview' would approve locally
+	// while the comment stays invisible forever.
+	simulateYouTube(observed);
+	await approveHeldComment('dispatched');
+
+	expect(mocks.getCommentModerationStatus).toHaveBeenCalledWith('c1', 'access-token', undefined);
+	if (publishes) {
+		expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined);
+	} else {
+		expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	}
+	expect((await commentRow('c1'))?.status).toBe('approved');
+});
+
+test('a hold landing behind the approval is re-published by the post-write verify', async () => {
+	// The dispatched hold lands behind the preflight read AND behind the
+	// first publish: preflight 'published' → confirm 'heldForReview' →
+	// publish → still 'heldForReview' → publish again → 'published'. The
+	// final remote state must match the human decision — never 'approved'
+	// locally while YouTube still hides the comment.
+	mocks.env.DRY_RUN = 'false';
+	const seen = ['published', 'heldForReview', 'heldForReview', 'published'];
+	let reads = 0;
+	mocks.getCommentModerationStatus.mockImplementation(async () => seen[Math.min(reads++, seen.length - 1)]);
+	await seedComment('c1', 'UC1');
+	await seedHold('c1', 'UC1', 'dispatched');
+
+	const res = await act('approve', { commentId: 'c1' });
+
+	expect(res).toMatchObject({ success: 'Approved — recorded in audit log.' });
+	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(2);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined);
+	expect((await commentRow('c1'))?.status).toBe('approved');
+});
+
+test('a dispatched hold verified as landed is completed and audited before the human action finalizes', async () => {
+	// The hold really reached YouTube — completeActions never saw it (the
+	// human claim superseded first), so finalize writes the 'hold' audit row
+	// itself or the log never records the comment was hidden.
+	mocks.env.DRY_RUN = 'false';
+	simulateYouTube('heldForReview');
+	await seedComment('c1', 'UC1');
+	await seedHold('c1', 'UC1', 'dispatched');
+
+	await act('approve', { commentId: 'c1' });
+
+	const hold = await testDb().db.select().from(moderationActions).where(eq(moderationActions.commentId, 'c1')).get();
+	expect(hold?.state).toBe('completed');
+	const audits = await auditRows();
+	expect(audits).toHaveLength(2);
+	expect(audits.map((row) => `${row.action}:${row.actor}`).sort()).toEqual(['approve:user', 'hold:system']);
+});
+
+test('a never-landed hold is superseded at finalize — no phantom hold audit', async () => {
+	mocks.env.DRY_RUN = 'false';
+	simulateYouTube('published');
+	await seedComment('c1', 'UC1');
+	await seedHold('c1', 'UC1', 'pending');
+
+	await act('approve', { commentId: 'c1' });
+
+	const hold = await testDb().db.select().from(moderationActions).where(eq(moderationActions.commentId, 'c1')).get();
+	expect(hold?.state).toBe('superseded');
+	const audits = await auditRows();
+	expect(audits).toHaveLength(1);
+	expect(audits[0].action).toBe('approve');
+});
+
 test('del outside DRY_RUN deletes on YouTube, marks deleted, and audits delete', async () => {
 	mocks.env.DRY_RUN = 'false';
+	simulateYouTube('published');
 	await seedComment('c1', 'UC1');
 	const res = await act('del', { commentId: 'c1' });
 	expect(res).toMatchObject({ success: 'Deleted — recorded in audit log.' });
 
 	expect(mocks.refreshAccessToken).toHaveBeenCalledWith('decrypted-refresh-token');
 	expect(mocks.deleteComment).toHaveBeenCalledTimes(1);
-	expect(mocks.deleteComment).toHaveBeenCalledWith('c1', 'access-token');
+	expect(mocks.deleteComment).toHaveBeenCalledWith('c1', 'access-token', undefined);
 	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
 	expect((await commentRow('c1'))?.status).toBe('deleted');
 
@@ -236,19 +458,36 @@ test('del outside DRY_RUN deletes on YouTube, marks deleted, and audits delete',
 
 test('ban outside DRY_RUN rejects with the author ban on YouTube and audits ban', async () => {
 	mocks.env.DRY_RUN = 'false';
+	simulateYouTube('published');
 	await seedComment('c1', 'UC1');
 	const res = await act('ban', { commentId: 'c1' });
 	expect(res).toMatchObject({ success: 'Author banned — recorded in audit log.' });
 
 	expect(mocks.refreshAccessToken).toHaveBeenCalledWith('decrypted-refresh-token');
 	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'rejected', true, 'access-token');
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'rejected', true, 'access-token', undefined);
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
 	expect((await commentRow('c1'))?.status).toBe('rejected');
 
 	const audits = await auditRows();
 	expect(audits).toHaveLength(1);
 	expect(audits[0]).toMatchObject({ channelId: 'UC1', commentId: 'c1', action: 'ban', reason: 'manual review', actor: 'user' });
+});
+
+test('load surfaces the real hold state per queued comment', async () => {
+	await seedComment('c-held', 'UC1', 'pending');
+	await seedHold('c-held', 'UC1', 'completed');
+	await seedComment('c-requested', 'UC1', 'pending');
+	await seedHold('c-requested', 'UC1', 'dispatched');
+	await seedComment('c-none', 'UC1', 'pending');
+
+	const result = await load({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);
+
+	expect(result?.pending.map((row) => `${row.id}:${row.holdState ?? 'none'}`).sort()).toEqual([
+		'c-held:completed',
+		'c-none:none',
+		'c-requested:dispatched'
+	]);
 });
 
 test('load returns only this channel’s pending comments', async () => {

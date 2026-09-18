@@ -28,63 +28,45 @@
 // same state space with a far simpler oracle — no interleavings exist to
 // schedule.
 
-import { eq } from 'drizzle-orm';
 import fc from 'fast-check';
 import { beforeEach, expect, test, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({
-	// FC_NUM_RUNS rides through the env mock so testarbitraries.ts keeps
-	// honoring the burn-in knob (it reads $env/dynamic/private at import time).
-	env: { DRY_RUN: 'false', FC_NUM_RUNS: process.env.FC_NUM_RUNS } as Record<string, string | undefined>,
-	decrypt: vi.fn(() => 'refresh-token'),
-	refreshAccessToken: vi.fn(async () => 'access-token'),
-	fetchNewComments: vi.fn(),
-	fetchVideoMetadata: vi.fn(async () => new Map()),
-	getCommentModerationStatus: vi.fn(async (_id: string): Promise<string | null> => null),
-	setModerationStatus: vi.fn(async (_ids: string[]) => {}),
-	deleteComment: vi.fn(async (_id: string) => {}),
-	scoreComment: vi.fn(),
-	scoreTone: vi.fn(),
-	resolveOpenAiKey: vi.fn(async () => 'test-openai-key')
-}));
+const mocks = await vi.hoisted(async () => (await import('./pbt-support')).createPipelineMocks());
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 vi.mock('$lib/server/crypto', () => ({ decrypt: mocks.decrypt }));
-vi.mock('$lib/server/moderation', async (importOriginal) => ({
-	// serializeScores stays real (pure JSON); only the network scorer is mocked.
-	...(await importOriginal<typeof import('$lib/server/moderation')>()),
-	scoreComment: mocks.scoreComment
-}));
+vi.mock('$lib/server/moderation', async (importOriginal) =>
+	(await import('./pbt-support')).moderationMockModule(importOriginal, mocks)
+);
 vi.mock('$lib/server/tone', () => ({ scoreTone: mocks.scoreTone }));
 vi.mock('$lib/server/openaiKey', () => ({ resolveOpenAiKey: mocks.resolveOpenAiKey }));
-vi.mock('$lib/server/youtube', () => ({
-	refreshAccessToken: mocks.refreshAccessToken,
-	fetchNewComments: mocks.fetchNewComments,
-	fetchVideoMetadata: mocks.fetchVideoMetadata,
-	getCommentModerationStatus: mocks.getCommentModerationStatus,
-	setModerationStatus: mocks.setModerationStatus,
-	deleteComment: mocks.deleteComment
-}));
+vi.mock('$lib/server/youtube', async () => (await import('./pbt-support')).youtubeMockModule(mocks));
 
 import { setupTestDb, testDb, wipeTables } from './testdb';
 import { auditLog, channels, comments, moderationActions, organizations, rules } from './db/schema';
 import { runChannel, type ChannelRunResult } from './pipeline';
-import type { ToxicityScores } from './moderation';
 import type { CommentModerationStatus, CommentPage, FetchCommentsOptions, NewComment } from './youtube';
 import {
 	RULE_ACTIONS,
-	channelIdArb,
 	channelRowArb,
-	commentTextArb,
 	idArb,
 	isoTimestampArb,
-	overLimitTextArb,
 	pastIsoArb,
 	toIso,
 	type ChannelRow
 } from './testarbitraries';
+import {
+	by,
+	channelRow,
+	commentSetArb,
+	newCommentArb,
+	PBT_WIPE,
+	scoreDeterministically,
+	seedChannel,
+	seedOrgFor
+} from './pbt-support';
 
-const WIPE = ['moderation_actions', 'comments', 'audit_log', 'rules', 'channels', 'organizations', 'credit_transactions'];
+const WIPE = PBT_WIPE;
 
 // Each property is ONE vitest test running pbtNumRuns() predicates; a
 // FC_NUM_RUNS=1000 burn-in of multi-pass runChannel predicates blows past
@@ -98,98 +80,6 @@ beforeEach(() => {
 });
 
 type ActionType = (typeof RULE_ACTIONS)[number];
-
-// ---------------------------------------------------------------------------
-// Shared generated input and helpers (mirrors pipeline.pbt.test.ts)
-// ---------------------------------------------------------------------------
-
-/** A NewComment with storage-contract-hostile text (≤500 and 501–600 chars mixed). */
-const newCommentArb: fc.Arbitrary<NewComment> = fc.record({
-	id: idArb,
-	threadId: idArb,
-	videoId: fc.option(idArb, { nil: null }),
-	authorChannelId: channelIdArb,
-	authorName: fc.string({ maxLength: 40 }),
-	text: fc.oneof(commentTextArb, overLimitTextArb),
-	publishedAt: isoTimestampArb
-});
-
-/** Deterministic scorer: a pure hash of the comment text into [0, 0.99]. */
-function deterministicScore(text: string): number {
-	let hash = 0;
-	for (let index = 0; index < text.length; index += 1) {
-		hash = (hash * 31 + text.charCodeAt(index)) % 100;
-	}
-	return hash / 100;
-}
-
-const SCORE_CATEGORIES = [
-	'harassment',
-	'harassment/threatening',
-	'hate',
-	'hate/threatening',
-	'illicit',
-	'illicit/violent',
-	'self-harm',
-	'self-harm/intent',
-	'self-harm/instructions',
-	'sexual',
-	'sexual/minors',
-	'violence',
-	'violence/graphic'
-] as const;
-
-/** A full ToxicityScores with every category at the same score. */
-function scoresFor(score: number): ToxicityScores {
-	return Object.fromEntries(SCORE_CATEGORIES.map((category) => [category, score])) as ToxicityScores;
-}
-
-/** Deterministic scorer mock implementation shared by all three properties. */
-async function scoreDeterministically(text: string) {
-	const score = deterministicScore(text);
-	return { score, scores: scoresFor(score) };
-}
-
-/** Seeds the high-credit org row the ledger gate needs (a huge balance keeps
- * consumption irrelevant to the reconciliation properties under test). No-op
- * for org-less channels. Shared by every property so the fixture lives once. */
-async function seedOrgFor(orgId: string | null): Promise<void> {
-	if (orgId === null) return;
-	await testDb().db.insert(organizations).values({
-		id: orgId,
-		name: `Org ${orgId}`,
-		creditsRemaining: 1_000_000
-	});
-}
-
-/** Seeds the generated channel row, bare (tone level 1, no cursor fields). */
-async function seedChannel(channel: ChannelRow): Promise<void> {
-	await testDb().db.insert(channels).values({
-		id: channel.id,
-		userId: channel.userId,
-		orgId: channel.orgId,
-		title: channel.title,
-		refreshTokenEnc: channel.refreshTokenEnc
-	});
-	// The ledger gates AI on the org's balance and fails loudly for a missing
-	// org — generated channels carrying an orgId get a seeded org with a huge
-	// balance so consumption never perturbs the properties under test.
-	await seedOrgFor(channel.orgId);
-}
-
-function by<T>(rows: T[], key: (row: T) => string | number): T[] {
-	return [...rows].sort((x, y) => {
-		const kx = key(x);
-		const ky = key(y);
-		return kx < ky ? -1 : kx > ky ? 1 : 0;
-	});
-}
-
-async function channelRow(channelId: string) {
-	const row = await testDb().db.select().from(channels).where(eq(channels.id, channelId)).get();
-	if (!row) throw new Error(`channel ${channelId} missing from the test database`);
-	return row;
-}
 
 /**
  * Re-installs the hoisted default seam behavior. vi.clearAllMocks() drops
@@ -336,10 +226,12 @@ test('I3: bounded passes converge outstanding actions; completion requires enfor
 					if (!action) throw new Error(`verification of untracked comment ${id}`);
 					if (verifyThrows) throw new Error(plan.seamMessage);
 					const terminal =
-						(action === 'delete' && plan.observed === null) ||
+						// A remotely-deleted comment is terminal for every action:
+						// there is nothing left to enforce.
+						plan.observed === null ||
 						(action === 'hold' && plan.observed === 'heldForReview') ||
 						(action === 'reject' && plan.observed === 'rejected') ||
-						(action === 'ban' && (plan.observed === 'rejected' || plan.observed === null));
+						(action === 'ban' && plan.observed === 'rejected');
 					if (terminal) verifiedTerminal.add(id);
 					return plan.observed;
 				});
@@ -434,13 +326,6 @@ test('I3: bounded passes converge outstanding actions; completion requires enfor
 // ---------------------------------------------------------------------------
 // I8 — dry-run conservation
 // ---------------------------------------------------------------------------
-
-/** 0–20 comments, unique ids by construction. */
-const commentSetArb = fc.uniqueArray(newCommentArb, {
-	minLength: 0,
-	maxLength: 20,
-	selector: (comment) => comment.id
-});
 
 /**
  * A channel, a comment page, a subset of the page pre-stored by an earlier

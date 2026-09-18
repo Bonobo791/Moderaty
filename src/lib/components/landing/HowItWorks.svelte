@@ -88,9 +88,10 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 
 {#snippet ladder()}
 	<div><span class="t-lit">≥ 0.95</span> <span class="t-arrow">→</span> <span class="t-ban">AUTHOR BANNED AUTOMATICALLY</span></div>
-	<div><span class="t-lit">0.76 – 0.94</span> <span class="t-arrow">→</span> <span class="t-ban">REJECTED AUTOMATICALLY</span></div>
+	<div><span class="t-lit">0.76 – 0.94</span> <span class="t-arrow">→</span> <span class="t-ban">DELETED AUTOMATICALLY</span></div>
 	<div><span class="t-lit">0.51 – 0.75</span> <span class="t-arrow">→</span> <span class="t-amber">HELD FOR YOUR REVIEW</span></div>
 	<div><span class="t-lit">≤ 0.50</span> <span class="t-arrow">→</span> <span class="t-mint">APPROVED</span></div>
+	<div class="t-note">the stricter setting's tone flags only hide — never delete.</div>
 {/snippet}
 
 {#snippet audit()}

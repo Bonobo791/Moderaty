@@ -4,9 +4,12 @@ import {
 	dispatchedAction,
 	expectActionState,
 	expectAiUnavailableQueued,
+	expectHeldForReview,
+	expectNoYoutubeWrites,
 	getMocks,
 	moderation,
 	newComment,
+	queueHoldAudits,
 	resetPipelineMocks,
 	protectHandle,
 	runWindowPage,
@@ -20,24 +23,32 @@ beforeEach(resetPipelineMocks);
 afterEach(restoreDryRun);
 
 test.each([
-	{ score: 0.5, status: 'approved', queued: 0, acted: 0, api: 'none', audit: 'approve' },
-	{ score: 0.51, status: 'pending', queued: 1, acted: 0, api: 'none', audit: 'queue' },
-	{ score: 0.75, status: 'pending', queued: 1, acted: 0, api: 'none', audit: 'queue' },
-	{ score: 0.76, status: 'rejected', queued: 0, acted: 1, api: 'reject', audit: 'reject' },
-	{ score: 0.94, status: 'rejected', queued: 0, acted: 1, api: 'reject', audit: 'reject' },
-	{ score: 0.95, status: 'rejected', queued: 0, acted: 1, api: 'ban', audit: 'ban' }
-])('categorizes score $score as $status', async ({ score, status, queued, acted, api, audit }) => {
+	{ score: 0.5, status: 'approved', queued: 0, acted: 0, api: 'none', audits: ['approve'] },
+	{ score: 0.51, status: 'pending', queued: 1, acted: 1, api: 'hold', audits: ['queue', 'hold'] },
+	{ score: 0.75, status: 'pending', queued: 1, acted: 1, api: 'hold', audits: ['queue', 'hold'] },
+	{ score: 0.76, status: 'deleted', queued: 0, acted: 1, api: 'delete', audits: ['delete'] },
+	{ score: 0.94, status: 'deleted', queued: 0, acted: 1, api: 'delete', audits: ['delete'] },
+	{ score: 0.95, status: 'rejected', queued: 0, acted: 1, api: 'ban', audits: ['ban'] }
+])('categorizes score $score as $status', async ({ score, status, queued, acted, api, audits }) => {
 	mocks.scoreComment.mockResolvedValue(moderation(score));
 
 	const result = await runChannel('channel');
 
 	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status, decidedBy: 'ai' })]);
-	expect(mocks.state.insertedAudits).toEqual([
-		expect.objectContaining({ commentId: 'comment', action: audit, reason: `ai score ${score.toFixed(2)}` })
-	]);
+	expect(mocks.state.insertedAudits).toEqual(audits.map((action) =>
+		expect.objectContaining({ commentId: 'comment', action, reason: `ai score ${score.toFixed(2)}` })
+	));
 	if (api === 'delete') {
 		expect(mocks.deleteComment).toHaveBeenCalledWith('comment', 'access-token', undefined);
 		expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	} else if (api === 'hold') {
+		// A queued comment is genuinely non-public: the staged 'hold' was
+		// enforced to heldForReview before the queue ever presents it.
+		expectHeldForReview();
+		expect(mocks.state.moderationActions).toEqual([
+			expect.objectContaining({ commentId: 'comment', action: 'hold', state: 'completed' })
+		]);
+		expect(mocks.deleteComment).not.toHaveBeenCalled();
 	} else if (api === 'reject') {
 		expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
 		expect(mocks.deleteComment).not.toHaveBeenCalled();
@@ -45,8 +56,7 @@ test.each([
 		expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', true, 'access-token', undefined);
 		expect(mocks.deleteComment).not.toHaveBeenCalled();
 	} else {
-		expect(mocks.setModerationStatus).not.toHaveBeenCalled();
-		expect(mocks.deleteComment).not.toHaveBeenCalled();
+		expectNoYoutubeWrites();
 	}
 	expect(result).toMatchObject({ fetched: 1, acted, queued, partial: false, skipped: false, dryRun: false });
 });
@@ -59,7 +69,7 @@ test('does not apply another channel’s rules', async () => {
 
 	await runChannel('channel');
 
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'heldForReview', false, 'access-token', undefined);
+	expectHeldForReview();
 });
 
 test('validates and compiles each regex rule once per run, not per comment', async () => {
@@ -147,7 +157,7 @@ test.each([
 	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'approved' })]);
 });
 
-test('rejects a demeaning comment the omni score alone would approve', async () => {
+test('holds a demeaning comment the omni score alone would approve — tone flags only hide, never delete', async () => {
 	mocks.state.channel.toneLevel = 2;
 	mocks.scoreComment.mockResolvedValue(moderation(0.1));
 	mocks.scoreTone.mockResolvedValue({ score: 0.82 });
@@ -161,26 +171,28 @@ test('rejects a demeaning comment the omni score alone would approve', async () 
 		{ protectLgbtqia: 0, protectWomen: 0 },
 		'sk-resolved-key'
 	);
-	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'rejected' })]);
+	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'held' })]);
 	expect(mocks.state.insertedAudits).toEqual([
-		expect.objectContaining({ commentId: 'comment', action: 'reject', reason: 'tone score 0.82' })
+		expect.objectContaining({ commentId: 'comment', action: 'hold', reason: 'tone score 0.82' })
 	]);
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
+	expectHeldForReview();
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
 	expect(result).toMatchObject({ acted: 1, queued: 0 });
 });
 
-test('bans the author of a genuinely harmful tone attack (≥0.95)', async () => {
+test('holds — never bans — a genuinely harmful tone attack (≥0.95)', async () => {
 	mocks.state.channel.toneLevel = 2;
 	mocks.scoreComment.mockResolvedValue(moderation(0.1));
 	mocks.scoreTone.mockResolvedValue({ score: 0.97 });
 
 	await runChannel('channel');
 
-	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'rejected' })]);
+	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'held' })]);
 	expect(mocks.state.insertedAudits).toEqual([
-		expect.objectContaining({ commentId: 'comment', action: 'ban', reason: 'tone score 0.97' })
+		expect.objectContaining({ commentId: 'comment', action: 'hold', reason: 'tone score 0.97' })
 	]);
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', true, 'access-token', undefined);
+	expectHeldForReview();
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
 });
 
 test('queues a borderline tone score (0.51–0.75)', async () => {
@@ -191,10 +203,9 @@ test('queues a borderline tone score (0.51–0.75)', async () => {
 	const result = await runChannel('channel');
 
 	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'pending' })]);
-	expect(mocks.state.insertedAudits).toEqual([
-		expect.objectContaining({ commentId: 'comment', action: 'queue', reason: 'tone score 0.60' })
-	]);
-	expect(result).toMatchObject({ acted: 0, queued: 1 });
+	expect(mocks.state.insertedAudits).toEqual(queueHoldAudits('tone score 0.60'));
+	expectHeldForReview();
+	expect(result).toMatchObject({ acted: 1, queued: 1 });
 });
 
 test('keeps the omni outcome when it is the stronger signal', async () => {
@@ -205,19 +216,17 @@ test('keeps the omni outcome when it is the stronger signal', async () => {
 	await runChannel('channel');
 
 	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'pending' })]);
-	expect(mocks.state.insertedAudits).toEqual([
-		expect.objectContaining({ commentId: 'comment', action: 'queue', reason: 'ai score 0.60' })
-	]);
+	expect(mocks.state.insertedAudits).toEqual(queueHoldAudits('ai score 0.60'));
 });
 
-test('skips the tone call entirely when the omni score already rejects', async () => {
+test('skips the tone call entirely when the omni score already deletes', async () => {
 	mocks.state.channel.toneLevel = 2;
 	mocks.scoreComment.mockResolvedValue(moderation(0.8));
 
 	await runChannel('channel');
 
 	expect(mocks.scoreTone).not.toHaveBeenCalled();
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
+	expect(mocks.deleteComment).toHaveBeenCalledWith('comment', 'access-token', undefined);
 });
 
 test('routes tone scoring failures to the review queue (I11)', async () => {
@@ -299,8 +308,7 @@ test('a protected handle is approved without rules, scoring, or enforcement — 
 	]);
 	expect(mocks.state.moderationActions).toEqual([]);
 	expect(mocks.scoreComment).not.toHaveBeenCalled();
-	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
-	expect(mocks.deleteComment).not.toHaveBeenCalled();
+	expectNoYoutubeWrites();
 	expect(result).toMatchObject({ fetched: 1, acted: 0, queued: 0, dryRun: false });
 });
 
@@ -393,10 +401,11 @@ test('a ticked protection flag forces the tone pass even below sensitivity level
 		{ protectLgbtqia: 0, protectWomen: 1 },
 		'sk-resolved-key'
 	);
-	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'rejected' })]);
+	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'held' })]);
 	expect(mocks.state.insertedAudits).toEqual([
-		expect.objectContaining({ commentId: 'comment', action: 'reject', reason: 'tone score 0.90' })
+		expect.objectContaining({ commentId: 'comment', action: 'hold', reason: 'tone score 0.90' })
 	]);
+	expectHeldForReview();
 	expect(result).toMatchObject({ acted: 1, queued: 0 });
 });
 
@@ -431,7 +440,7 @@ test('no flags and sensitivity below 2 keeps the tone pass off (no extra AI spen
 	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', status: 'approved' })]);
 });
 
-test('skips the tone pass at exactly the auto-reject threshold (0.76)', async () => {
+test('skips the tone pass at exactly the auto-delete threshold (0.76)', async () => {
 	mocks.state.channel.toneLevel = 2;
 	mocks.scoreComment.mockResolvedValue(moderation(0.76));
 
@@ -439,11 +448,12 @@ test('skips the tone pass at exactly the auto-reject threshold (0.76)', async ()
 
 	expect(mocks.scoreTone).not.toHaveBeenCalled();
 	expect(mocks.state.insertedComments).toEqual([
-		expect.objectContaining({ id: 'comment', status: 'rejected', decidedBy: 'ai' })
+		expect.objectContaining({ id: 'comment', status: 'deleted', decidedBy: 'ai' })
 	]);
 	expect(mocks.state.insertedAudits).toEqual([
-		expect.objectContaining({ commentId: 'comment', action: 'reject', reason: 'ai score 0.76' })
+		expect.objectContaining({ commentId: 'comment', action: 'delete', reason: 'ai score 0.76' })
 	]);
+	expect(mocks.deleteComment).toHaveBeenCalledWith('comment', 'access-token', undefined);
 });
 
 test('keeps the ai signal when the tone score ties it', async () => {
@@ -453,7 +463,5 @@ test('keeps the ai signal when the tone score ties it', async () => {
 
 	await runChannel('channel');
 
-	expect(mocks.state.insertedAudits).toEqual([
-		expect.objectContaining({ commentId: 'comment', action: 'queue', reason: 'ai score 0.60' })
-	]);
+	expect(mocks.state.insertedAudits).toEqual(queueHoldAudits('ai score 0.60'));
 });

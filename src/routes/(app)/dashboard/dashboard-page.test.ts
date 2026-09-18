@@ -154,13 +154,15 @@ test('the ledger header names the section and the connection count', () => {
 	expect(body).toContain('3 connected');
 });
 
-test('the ledger renders all seven columns', () => {
+test('the ledger renders all nine columns', () => {
 	const head = renderPage(PENDING_DATA).slice(0, renderPage(PENDING_DATA).indexOf('tbody'));
 	for (const column of [
 		'Channel',
 		'Status',
 		'Pending',
+		'Held',
 		'Rejected',
+		'Deleted',
 		'Approved',
 		'Sensitivity',
 		'Last checked'
@@ -224,7 +226,7 @@ test('the last-checked cell falls back to never and relativizes timestamps', () 
 
 test('the responsive collapse classes are present on the collapsible columns', () => {
 	const body = renderPage(PENDING_DATA);
-	for (const cls of ['col-rejected', 'col-approved', 'col-sensitivity', 'col-last']) {
+	for (const cls of ['col-held', 'col-rejected', 'col-deleted', 'col-approved', 'col-sensitivity', 'col-last']) {
 		expect(body).toMatch(new RegExp(`class="[^"]*\\b${cls}\\b[^"]*"`));
 	}
 });

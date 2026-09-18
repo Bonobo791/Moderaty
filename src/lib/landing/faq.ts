@@ -26,7 +26,7 @@ export const FAQ_ENTRIES: FaqEntry[] = [
 	},
 	{
 		q: 'Will Moderaty ban my real fans?',
-		a: 'Not by default. Your rules act first: a ban rule bans on the spot, whatever the AI would have scored. Without a rule, only comments scoring 0.95 or higher on the AI\'s toxicity or tone analysis trigger an automatic ban. Anything uncertain waits in your review queue for a one-click decision, and every action is logged in your audit trail.'
+		a: 'Not by default. Your rules act first: a ban rule bans on the spot, whatever the AI would have scored. Without a rule, only comments scoring 0.95 or higher on the AI\'s toxicity analysis trigger an automatic ban; the stricter tone analysis only ever hides a comment, never bans. Anything uncertain waits in your review queue for a one-click decision, and every action is logged in your audit trail.'
 	},
 	{
 		q: "What happens when the AI isn't sure about a comment?",

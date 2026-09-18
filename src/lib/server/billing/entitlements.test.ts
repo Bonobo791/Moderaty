@@ -157,4 +157,25 @@ describe('lifetime entitlements', () => {
 		expect(entitlement?.status).toBe('released');
 		expect(await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-2', paymentIntentId: 'pi-2', chargeId: 'ch-2' })).toMatchObject({ slot: 1 });
 	});
+
+	test('a released lifetime falls back to hosted while a subscription stays active', async () => {
+		await testDb().db.update(organizations).set({ stripeSubscriptionId: 'sub-1', stripeSubscriptionStatus: 'active' }).where(eq(organizations.id, 'org-1'));
+		await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-1', paymentIntentId: 'pi-1', chargeId: 'ch-1' });
+		expect(await releaseLifetimeForPayment({ paymentIntentId: 'pi-1', chargeId: 'ch-1' })).toBe(true);
+		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.plan).toBe('hosted');
+	});
+
+	test('a disputed lifetime falls back to free without an active subscription', async () => {
+		await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-1', paymentIntentId: 'pi-1', chargeId: 'ch-1' });
+		expect(await revokeLifetimeForDispute({ paymentIntentId: 'pi-1', chargeId: 'ch-1' })).toBe(true);
+		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.plan).toBe('free');
+	});
+
+	test('a dispute queued before lifetime fulfillment keeps a hosted plan while a subscription stays active', async () => {
+		await testDb().db.update(organizations).set({ plan: 'hosted', stripeSubscriptionId: 'sub-1', stripeSubscriptionStatus: 'active' }).where(eq(organizations.id, 'org-1'));
+		await testDb().db.insert(stripePendingReversals).values({ chargeId: 'ch-1', reason: 'dispute' });
+		const result = await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-1', paymentIntentId: 'pi-1', chargeId: 'ch-1' });
+		expect(result).toEqual({ slot: 1, status: 'released' });
+		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.plan).toBe('hosted');
+	});
 });

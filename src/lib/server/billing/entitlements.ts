@@ -151,6 +151,18 @@ export interface LifetimeClaimResult {
 	status: 'active' | 'released';
 }
 
+/**
+ * After a lifetime entitlement is lost (released or disputed), the org's
+ * cached plan falls back to 'hosted' when an active subscription remains
+ * and 'free' otherwise. Runs inside the caller's transaction so the plan
+ * never commits an entitlement state that rolled back.
+ */
+async function downgradeOrgPlanAfterLifetimeLoss(tx: Tx, orgId: string): Promise<void> {
+	const subscription = await tx.select({ id: organizations.stripeSubscriptionId, status: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, orgId)).get();
+	const nextPlan = subscription?.id && subscription.status && isActiveSubscriptionStatus(subscription.status) ? 'hosted' : 'free';
+	await tx.update(organizations).set({ plan: nextPlan }).where(eq(organizations.id, orgId));
+}
+
 async function applyPendingLifetimeReversal(tx: Tx, input: LifetimeClaim, slot: number, entitlementId: number, reversal: PendingReversalState): Promise<LifetimeClaimResult | undefined> {
 	if (!input.chargeId || reversal.pending.length === 0 || reversal.wonDispute) return undefined;
 	const pendingStatus: 'disputed' | 'released' = reversal.disputeId && !reversal.hasRefund ? 'disputed' : 'released';
@@ -158,9 +170,7 @@ async function applyPendingLifetimeReversal(tx: Tx, input: LifetimeClaim, slot: 
 	if (pendingStatus === 'released') await tx.update(stripeLifetimeSlots).set({ activeOrgId: null, activeEntitlementId: null, releasedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` }).where(eq(stripeLifetimeSlots.slot, slot));
 	await tx.delete(stripePendingReversals).where(eq(stripePendingReversals.chargeId, input.chargeId));
 	if (reversal.disputeId) await tx.update(stripeDisputeReversals).set({ source: 'lifetime', status: reversal.hasRefund ? 'ignored' : 'reversed' }).where(eq(stripeDisputeReversals.disputeId, reversal.disputeId));
-	const subscription = await tx.select({ id: organizations.stripeSubscriptionId, status: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, input.orgId)).get();
-	const nextPlan = subscription?.id && subscription.status && isActiveSubscriptionStatus(subscription.status) ? 'hosted' : 'free';
-	await tx.update(organizations).set({ plan: nextPlan }).where(eq(organizations.id, input.orgId));
+	await downgradeOrgPlanAfterLifetimeLoss(tx, input.orgId);
 	return { slot, status: pendingStatus === 'disputed' ? 'active' : 'released' };
 }
 
@@ -225,9 +235,7 @@ export async function releaseLifetimeForPayment(input: StripeIdentifiers): Promi
 		if (entitlement.status !== 'active' && entitlement.status !== 'disputed') return true;
 		await tx.update(stripeLifetimeEntitlements).set({ status: 'released', releasedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` }).where(eq(stripeLifetimeEntitlements.id, entitlement.id));
 		await tx.update(stripeLifetimeSlots).set({ activeOrgId: null, activeEntitlementId: null, releasedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` }).where(and(eq(stripeLifetimeSlots.slot, entitlement.slot), eq(stripeLifetimeSlots.activeOrgId, entitlement.orgId)));
-		const sub = await tx.select({ id: organizations.stripeSubscriptionId, status: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, entitlement.orgId)).get();
-		const nextPlan = sub?.id && sub.status && isActiveSubscriptionStatus(sub.status) ? 'hosted' : 'free';
-		await tx.update(organizations).set({ plan: nextPlan }).where(eq(organizations.id, entitlement.orgId));
+		await downgradeOrgPlanAfterLifetimeLoss(tx, entitlement.orgId);
 		return true;
 	});
 }
@@ -242,9 +250,7 @@ export async function revokeLifetimeForDispute(input: StripeIdentifiers): Promis
 		if (entitlement.status === 'disputed') return true;
 		if (entitlement.status !== 'active') return false;
 		await tx.update(stripeLifetimeEntitlements).set({ status: 'disputed' }).where(eq(stripeLifetimeEntitlements.id, entitlement.id));
-		const sub = await tx.select({ id: organizations.stripeSubscriptionId, status: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, entitlement.orgId)).get();
-		const nextPlan = sub?.id && sub.status && isActiveSubscriptionStatus(sub.status) ? 'hosted' : 'free';
-		await tx.update(organizations).set({ plan: nextPlan }).where(eq(organizations.id, entitlement.orgId));
+		await downgradeOrgPlanAfterLifetimeLoss(tx, entitlement.orgId);
 		return true;
 	});
 }

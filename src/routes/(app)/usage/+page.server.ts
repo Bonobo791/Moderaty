@@ -24,6 +24,7 @@ import { eq } from 'drizzle-orm';
 
 import { AUTO_TOPUP_DEFAULT_THRESHOLD } from '$lib/server/billing/autotopup';
 import { createCreditCheckout, createPlanCheckout, getOrCreateStripeCustomer } from '$lib/server/billing/checkout';
+import { lifetimeSlotsRemaining } from '$lib/server/billing/entitlements';
 import { createMercadoPagoCreditCheckout } from '$lib/server/mercadopago/checkout';
 import { configuredMercadoPagoBundles } from '$lib/server/mercadopago/bundles';
 import { isUnmeteredPlan, listCreditTransactions, orgIsMetered, usageSummary } from '$lib/server/billing/ledger';
@@ -60,6 +61,7 @@ function maintenanceData() {
 		summary: null,
 		mercadoPagoBundles: [],
 		metered: false,
+		lifetimeSlots: null,
 		history: [],
 		bundles: [],
 		autoTopup: null,
@@ -115,10 +117,11 @@ export const load: PageServerLoad = async ({ locals }) => {
 		if (!org) {
 			throw error(500, 'account has no organization — contact support');
 		}
-		const [summary, history, metered] = await Promise.all([
+		const [summary, history, metered, lifetimeSlots] = await Promise.all([
 			usageSummary(user.orgId),
 			listCreditTransactions(user.orgId, 30),
-			orgIsMetered(user.orgId)
+			orgIsMetered(user.orgId),
+			lifetimeSlotsRemaining()
 		]);
 		return {
 			maintenance: false,
@@ -126,6 +129,7 @@ export const load: PageServerLoad = async ({ locals }) => {
 			mercadoPagoBundles: configuredMercadoPagoBundles(),
 			summary,
 			metered,
+			lifetimeSlots,
 			history: history.map((row) => ({
 				id: row.id,
 				delta: row.delta,

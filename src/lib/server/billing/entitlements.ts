@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, count, eq, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { db } from '$lib/server/db';
 import {
 	organizations,
@@ -144,6 +144,18 @@ export interface LifetimeClaim {
 	checkoutSessionId: string;
 	paymentIntentId?: string;
 	chargeId?: string;
+}
+
+/** Unclaimed lifetime slots — the deal's remaining inventory (MOD-37). A
+ * disputed entitlement keeps its slot until the dispute resolves, so it is
+ * NOT counted here; a released slot returns to the pool. */
+export async function lifetimeSlotsRemaining(): Promise<number> {
+	const row = await db
+		.select({ n: count() })
+		.from(stripeLifetimeSlots)
+		.where(isNull(stripeLifetimeSlots.activeOrgId))
+		.get();
+	return row?.n ?? 0;
 }
 
 export interface LifetimeClaimResult {

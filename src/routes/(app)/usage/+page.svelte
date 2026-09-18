@@ -113,12 +113,21 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 				<p class="muted">100 included comments per billing period. Unused comments do not roll over; prepaid credits cover overage.</p>
 			{/if}
 			{#if data.plans.lifetime}
-				<form method="POST" action="?/buyPlan" use:enhance={submitting}>
-					<input type="hidden" name="plan" value="lifetime" />
-					<input type="hidden" name="attempt_id" value={checkoutAttempts.lifetime ?? ''} />
-					<button class="btn secondary" type="submit" disabled={pending}>Buy lifetime · $49</button>
-				</form>
-				<p class="muted">Unlimited comments while the lifetime plan is available. Limited to 1,000 purchasers.</p>
+				{#if data.billing?.plan === 'lifetime'}
+					<p class="muted">You have the lifetime plan — unlimited moderated comments.</p>
+				{:else if data.lifetimeSlots === 0}
+					<p class="muted">The lifetime plan is sold out — all 1,000 claimed.</p>
+				{:else}
+					<form method="POST" action="?/buyPlan" use:enhance={submitting}>
+						<input type="hidden" name="plan" value="lifetime" />
+						<input type="hidden" name="attempt_id" value={checkoutAttempts.lifetime ?? ''} />
+						<button class="btn secondary" type="submit" disabled={pending}>Buy lifetime · $49</button>
+					</form>
+					<p class="muted">
+						Unlimited comments while the lifetime plan is available.
+						{#if typeof data.lifetimeSlots === 'number'}{1000 - data.lifetimeSlots} of 1,000 claimed.{/if}
+					</p>
+				{/if}
 			{/if}
 		</div>
 	</div>

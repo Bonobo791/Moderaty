@@ -20,6 +20,8 @@ import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
 import { mercadoPagoCheckoutAttempts, organizations, stripeCheckoutAttempts } from '$lib/server/db/schema';
 import type { SessionUser } from '$lib/server/session';
 import { applyLedgerDelta, consumeCredit } from '$lib/server/billing/ledger';
+import { claimLifetimeSlot } from '$lib/server/billing/entitlements';
+import { LIFETIME_SLOT_LIMIT } from '$lib/server/billing/plans';
 import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
 
 const mocks = vi.hoisted(() => ({
@@ -51,7 +53,7 @@ import { render } from 'svelte/server';
 import Page from './+page.svelte';
 import { actions, load } from './+page.server';
 
-setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_checkout_attempts', 'mercado_pago_checkout_attempts']);
+setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_checkout_attempts', 'mercado_pago_checkout_attempts', 'stripe_lifetime_entitlements', 'stripe_lifetime_slots', 'stripe_pending_reversals', 'stripe_dispute_reversals']);
 
 const OWNER = TEST_OWNER;
 
@@ -142,6 +144,16 @@ describe('usage load', () => {
 		expect(consume?.id).toEqual(expect.any(Number));
 	});
 
+	test('load surfaces the remaining lifetime slot count', async () => {
+		await seedOrg();
+		const fresh = (await load({ locals: { user: OWNER } } as never)) as { lifetimeSlots: number };
+		expect(fresh.lifetimeSlots).toBe(LIFETIME_SLOT_LIMIT);
+
+		await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-1', paymentIntentId: 'pi-1', chargeId: 'ch-1' });
+		const after = (await load({ locals: { user: OWNER } } as never)) as { lifetimeSlots: number };
+		expect(after.lifetimeSlots).toBe(LIFETIME_SLOT_LIMIT - 1);
+	});
+
 	test('a missing organization is a loud 500, never a maintenance payload', async () => {
 		// The user's session points at an org row that no longer exists — an
 		// account-integrity failure that must reach the user with the support
@@ -203,6 +215,44 @@ describe('usage load', () => {
 		expect(metered).toContain('action="?/buy"');
 		expect(metered).toContain('action="?/buyMercadoPago"');
 		expect(metered).toContain('action="?/setAutoTopup"');
+	});
+
+	test('the Plans card shows the claimed count, a sold-out state at zero, and an owned state for lifetime orgs', async () => {
+		// The deal is 1,000 slots: buyers see how many are gone, nobody can
+		// click a dead buy button once sold out, and a lifetime org sees its
+		// plan instead of a second buy form (I12: explicit states, never a
+		// button that only fails at checkout).
+		const base = {
+			maintenance: false,
+			user: OWNER,
+			summary: { remaining: 0, usedThisMonth: 0, usedLifetime: 0 },
+			metered: false,
+			history: [],
+			bundles: [],
+			mercadoPagoBundles: [],
+			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: false },
+			autoTopupConsentText: 'consent',
+			stripeConfigured: true,
+			plans: { hosted: false, lifetime: true }
+		};
+
+		const available = render(Page, {
+			props: { data: { ...base, lifetimeSlots: 997, billing: { plan: null, subscriptionStatus: null, periodEnd: null } }, form: null } as never
+		}).body;
+		expect(available).toContain('action="?/buyPlan"');
+		expect(available).toContain('3 of 1,000 claimed');
+
+		const soldOut = render(Page, {
+			props: { data: { ...base, lifetimeSlots: 0, billing: { plan: null, subscriptionStatus: null, periodEnd: null } }, form: null } as never
+		}).body;
+		expect(soldOut).not.toContain('action="?/buyPlan"');
+		expect(soldOut).toContain('sold out');
+
+		const owned = render(Page, {
+			props: { data: { ...base, lifetimeSlots: 0, billing: { plan: 'lifetime', subscriptionStatus: null, periodEnd: null } }, form: null } as never
+		}).body;
+		expect(owned).not.toContain('action="?/buyPlan"');
+		expect(owned).toContain('lifetime plan');
 	});
 });
 

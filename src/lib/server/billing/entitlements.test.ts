@@ -3,8 +3,9 @@ import { beforeEach, describe, expect, test } from 'vitest';
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { organizations, stripeLifetimeEntitlements, stripeLifetimeSlots, stripeSubscriptionPeriods, stripePendingReversals, stripeDisputeReversals } from '$lib/server/db/schema';
-import { claimLifetimeSlot, grantSubscriptionPeriod, releaseLifetimeForPayment, applySubscriptionSnapshot, disputeSubscriptionPeriod, restoreDisputedSubscriptionPeriod, revokeLifetimeForDispute, restoreLifetimeForDispute } from './entitlements';
+import { claimLifetimeSlot, grantSubscriptionPeriod, lifetimeSlotsRemaining, releaseLifetimeForPayment, applySubscriptionSnapshot, disputeSubscriptionPeriod, restoreDisputedSubscriptionPeriod, revokeLifetimeForDispute, restoreLifetimeForDispute } from './entitlements';
 import { consumeCredit, getCredits } from './ledger';
+import { LIFETIME_SLOT_LIMIT } from './plans';
 
 setupTestDb(['organizations', 'stripe_subscription_periods', 'stripe_lifetime_entitlements', 'stripe_lifetime_slots', 'stripe_pending_reversals', 'stripe_dispute_reversals']);
 
@@ -177,5 +178,22 @@ describe('lifetime entitlements', () => {
 		const result = await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-1', paymentIntentId: 'pi-1', chargeId: 'ch-1' });
 		expect(result).toEqual({ slot: 1, status: 'released' });
 		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.plan).toBe('hosted');
+	});
+
+	test('lifetimeSlotsRemaining counts only unclaimed slots — refunds return, disputes hold', async () => {
+		expect(await lifetimeSlotsRemaining()).toBe(LIFETIME_SLOT_LIMIT);
+
+		await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-1', paymentIntentId: 'pi-1', chargeId: 'ch-1' });
+		expect(await lifetimeSlotsRemaining()).toBe(LIFETIME_SLOT_LIMIT - 1);
+
+		// A released slot returns to the pool.
+		await releaseLifetimeForPayment({ paymentIntentId: 'pi-1', chargeId: 'ch-1' });
+		expect(await lifetimeSlotsRemaining()).toBe(LIFETIME_SLOT_LIMIT);
+
+		// A disputed entitlement KEEPS its slot until the dispute resolves —
+		// it is not back in the pool.
+		await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-2', paymentIntentId: 'pi-2', chargeId: 'ch-2' });
+		await revokeLifetimeForDispute({ paymentIntentId: 'pi-2', chargeId: 'ch-2' });
+		expect(await lifetimeSlotsRemaining()).toBe(LIFETIME_SLOT_LIMIT - 1);
 	});
 });

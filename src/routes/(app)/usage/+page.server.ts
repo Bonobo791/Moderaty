@@ -20,7 +20,7 @@
 
 import { error, fail, isHttpError, isRedirect, redirect } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
-import { eq } from 'drizzle-orm';
+import { and, eq, ne } from 'drizzle-orm';
 
 import { AUTO_TOPUP_DEFAULT_THRESHOLD } from '$lib/server/billing/autotopup';
 import { createCreditCheckout, createPlanCheckout, getOrCreateStripeCustomer } from '$lib/server/billing/checkout';
@@ -272,7 +272,11 @@ export const actions: Actions = {
 			// preserve the claim — resetting it would let the sweep create a
 			// second PaymentIntent for the same shortage (coderabbit).
 			const resetClaim = !wasEnabled || current?.autoTopupState === 'disabled';
-			await db
+			// The plan check above is a pre-read — an upgrade to lifetime can
+			// land between it and this write, so the update stays conditional:
+			// a 0-row result means the org went unmetered mid-submit and the
+			// enable must fail loudly, never silently arm a stale flag (review).
+			const written = await db
 				.update(organizations)
 				.set({
 					autoTopupEnabled: 1,
@@ -280,7 +284,12 @@ export const actions: Actions = {
 					...(resetClaim ? { autoTopupState: 'idle', autoTopupFailures: 0 } : {}),
 					...evidence
 				})
-				.where(eq(organizations.id, user.orgId));
+				.where(and(eq(organizations.id, user.orgId), ne(organizations.plan, 'lifetime')))
+				.returning({ id: organizations.id });
+			if (written.length !== 1) {
+				console.error(`setAutoTopup lost a plan race for org ${user.orgId}: the org went lifetime mid-submit — enable rejected`);
+				return fail(400, { error: 'Your lifetime plan includes unlimited moderated comments — auto top-up is not needed.' });
+			}
 		} else {
 			await db
 				.update(organizations)

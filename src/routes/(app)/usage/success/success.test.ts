@@ -16,17 +16,20 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { TEST_OWNER, setupTestDb, testDb } from '$lib/server/testdb';
-import { mercadoPagoCheckoutAttempts, organizations } from '$lib/server/db/schema';
+import { mercadoPagoCheckoutAttempts, organizations, stripeLifetimeEntitlements, stripeLifetimeSlots } from '$lib/server/db/schema';
 import { getCredits } from '$lib/server/billing/ledger';
+import { eq } from 'drizzle-orm';
 
 const mocks = vi.hoisted(() => ({
 	sessionsRetrieve: vi.fn(),
+	refundsCreate: vi.fn(),
 	retrievePayment: vi.fn()
 }));
 
 vi.mock('$lib/server/stripe/client', () => ({
 	getStripe: () => ({
-		checkout: { sessions: { retrieve: mocks.sessionsRetrieve } }
+		checkout: { sessions: { retrieve: mocks.sessionsRetrieve } },
+		refunds: { create: mocks.refundsCreate }
 	})
 }));
 vi.mock('$lib/server/mercadopago/client', () => ({
@@ -36,7 +39,7 @@ vi.mock('$env/dynamic/private', () => ({ env: {} }));
 
 import { load } from './+page.server';
 
-setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'mercado_pago_checkout_attempts']);
+setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'mercado_pago_checkout_attempts', 'stripe_lifetime_slots', 'stripe_lifetime_entitlements']);
 
 const OWNER = TEST_OWNER;
 
@@ -119,6 +122,27 @@ describe('usage/success load', () => {
 		errorSpy.mockRestore();
 	});
 
+	test('a paid checkout that cannot grant shows the refunded state, never "No purchase found"', async () => {
+		// A duplicate/sold-out lifetime checkout refunds the payment — the
+		// buyer must see a refunded outcome, not a generic failure (review).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'lifetime' });
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1', activeEntitlementId: 1 }).where(eq(stripeLifetimeSlots.slot, 1));
+		await testDb().db.insert(stripeLifetimeEntitlements).values({ id: 1, orgId: 'org-1', slot: 1, checkoutSessionId: 'cs_first' });
+		mocks.sessionsRetrieve.mockResolvedValue(
+			paidSession({ id: 'cs_dup', mode: 'payment', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_dup', latest_charge: 'ch_dup' } })
+		);
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const data = (await loadWith('cs_dup')) as { granted: boolean; pending: boolean; failed: boolean; refunded: boolean };
+			expect(data.granted).toBe(false);
+			expect(data.failed).toBe(false);
+			expect(data.refunded).toBe(true);
+			expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_dup' }, { idempotencyKey: 'refund:ungrantable:cs_dup' });
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
 	test('a retrieval failure logs a fixed category and a truncated id — never the raw error or full session id', async () => {
 		// The session id is query-controlled and the provider error can carry
 		// payment details — the log must stay restricted (coderabbit).
@@ -182,9 +206,14 @@ describe('usage/success Mercado Pago branch', () => {
 		return load({ locals: { user: OWNER } as never, url } as never);
 	}
 
-	test.each(['refunded', 'disputed'])('a %s attempt is terminal — failed, never pending, and never re-retrieved', async (status) => {
+	test.each([
+		{ status: 'refunded', expected: { granted: false, pending: false, failed: false, refunded: true } },
+		{ status: 'disputed', expected: { granted: false, pending: false, failed: true, refunded: false } }
+	])('a $status attempt is terminal — a deliberate verdict, never pending, and never re-retrieved', async ({ status, expected }) => {
 		// A reversed payment has no fulfillment left to wait for: the page must
-		// show the failed state immediately instead of pending forever (codex).
+		// show a terminal state immediately instead of pending forever (codex).
+		// A refund is a deliberate outcome — the buyer gets the refunded state,
+		// not the generic failure (review); a chargeback still reads as failed.
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		await testDb().db.insert(mercadoPagoCheckoutAttempts).values({
 			attemptId: 'attempt_1',
@@ -196,13 +225,16 @@ describe('usage/success Mercado Pago branch', () => {
 			paymentId: 'pay-1'
 		});
 
-		const data = (await loadMercadoPago('attempt_1')) as { granted: boolean; pending: boolean; failed: boolean };
+		const data = (await loadMercadoPago('attempt_1')) as { granted: boolean; pending: boolean; failed: boolean; refunded: boolean };
 
-		expect(data).toMatchObject({ granted: false, pending: false, failed: true });
+		expect(data).toMatchObject(expected);
 		expect(mocks.retrievePayment).not.toHaveBeenCalled();
 	});
 
-	test('a pending attempt whose inline processing lands a terminal reversal shows failed — never stale pending', async () => {
+	test.each([
+		{ paymentStatus: 'refunded', expected: { granted: false, pending: false, failed: false, refunded: true } },
+		{ paymentStatus: 'charged_back', expected: { granted: false, pending: false, failed: true, refunded: false } }
+	])('a pending attempt whose inline processing lands a $paymentStatus reversal shows its verdict — never stale pending', async ({ paymentStatus, expected }) => {
 		// The attempt snapshot is read BEFORE processMercadoPagoPayment runs; a
 		// refund/chargeback processed inline flips the row to terminal, and the
 		// page must decide from the post-processing state (cubic, round 3).
@@ -218,15 +250,15 @@ describe('usage/success Mercado Pago branch', () => {
 		});
 		mocks.retrievePayment.mockResolvedValue({
 			id: 'pay-1',
-			status: 'refunded',
+			status: paymentStatus,
 			externalReference: 'org-1:attempt_1',
 			transactionAmount: 5,
 			refundedAmount: 5,
 			currencyId: 'BRL'
 		});
 
-		const data = (await loadMercadoPago('attempt_1')) as { granted: boolean; pending: boolean; failed: boolean };
+		const data = (await loadMercadoPago('attempt_1')) as { granted: boolean; pending: boolean; failed: boolean; refunded: boolean };
 
-		expect(data).toMatchObject({ granted: false, pending: false, failed: true });
+		expect(data).toMatchObject(expected);
 	});
 });

@@ -120,9 +120,26 @@ test('fulfills an approved payment exactly once through the credit ledger', asyn
 	expect(await fulfillMercadoPagoPayment(payment)).toBe(true);
 	expect(await fulfillMercadoPagoPayment(payment)).toBe(false);
 	const org = await testDb().db.select({ creditsRemaining: organizations.creditsRemaining }).from(organizations).where(eq(organizations.id, 'org-1')).get();
-	const rows = await testDb().db.select().from(creditTransactions).where(and(eq(creditTransactions.orgId, 'org-1'), eq(creditTransactions.refId, 'mercadopago:pay-1')));
 	expect(org?.creditsRemaining).toBe(100);
+	const rows = await testDb().db.select().from(creditTransactions).where(and(eq(creditTransactions.orgId, 'org-1'), eq(creditTransactions.refId, 'mercadopago:pay-1')));
 	expect(rows).toHaveLength(1);
+});
+
+test('an approved payment for a lifetime org throws loudly — never granted, never fulfilled', async () => {
+	// The plan can flip to lifetime after checkout opened: the grant is
+	// gated atomically inside the ledger transaction, so fulfillment throws,
+	// the claimed transition rolls back, and the webhook 500s for manual
+	// review — the customer needs a human refund (review).
+	await testDb().db.update(organizations).set({ plan: 'lifetime' }).where(eq(organizations.id, 'org-1'));
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		await expect(fulfillMercadoPagoPayment(payment)).rejects.toThrow(/unmetered|lifetime/i);
+	} finally {
+		errorSpy.mockRestore();
+	}
+	const org = await testDb().db.select({ creditsRemaining: organizations.creditsRemaining }).from(organizations).where(eq(organizations.id, 'org-1')).get();
+	expect(org?.creditsRemaining).toBe(0);
+	expect((await attemptRow())?.status).not.toBe('fulfilled');
 });
 
 test('rejects a payment whose amount does not match the persisted attempt', async () => {

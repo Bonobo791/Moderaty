@@ -44,6 +44,8 @@ type SuccessState = {
 	granted: boolean;
 	pending: boolean;
 	failed: boolean;
+	/** The payment was refunded (or queued for refund) instead of granting — a deliberate outcome, not a failure. */
+	refunded: boolean;
 };
 
 /**
@@ -57,12 +59,16 @@ async function mercadoPagoSuccess(user: SessionUser, attemptId: string): Promise
 		.from(mercadoPagoCheckoutAttempts)
 		.where(and(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId), eq(mercadoPagoCheckoutAttempts.orgId, user.orgId)))
 		.get();
-	if (!attempt) return { maintenance: false, user, sessionId: attemptId, granted: false, pending: false, failed: true };
-	if (attempt.status === 'fulfilled') return { maintenance: false, user, sessionId: attemptId, granted: true, pending: false, failed: false };
-	// A reversed attempt (refund or chargeback) is terminal: there is no
-	// fulfillment left to wait for — never leave the page pending (codex).
-	if (attempt.status === 'refunded' || attempt.status === 'disputed') {
-		return { maintenance: false, user, sessionId: attemptId, granted: false, pending: false, failed: true };
+	if (!attempt) return { maintenance: false, user, sessionId: attemptId, granted: false, pending: false, failed: true, refunded: false };
+	if (attempt.status === 'fulfilled') return { maintenance: false, user, sessionId: attemptId, granted: true, pending: false, failed: false, refunded: false };
+	// A reversed attempt is terminal: there is no fulfillment left to wait
+	// for — never leave the page pending (codex). A refund means the money
+	// went back, so show that deliberately; a chargeback reads as failed.
+	if (attempt.status === 'refunded') {
+		return { maintenance: false, user, sessionId: attemptId, granted: false, pending: false, failed: false, refunded: true };
+	}
+	if (attempt.status === 'disputed') {
+		return { maintenance: false, user, sessionId: attemptId, granted: false, pending: false, failed: true, refunded: false };
 	}
 	if (attempt.paymentId) {
 		try {
@@ -75,15 +81,18 @@ async function mercadoPagoSuccess(user: SessionUser, attemptId: string): Promise
 				.from(mercadoPagoCheckoutAttempts)
 				.where(and(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId), eq(mercadoPagoCheckoutAttempts.orgId, user.orgId)))
 				.get();
-			if (fresh?.status === 'fulfilled') return { maintenance: false, user, sessionId: attemptId, granted: true, pending: false, failed: false };
-			if (fresh?.status === 'refunded' || fresh?.status === 'disputed') {
-				return { maintenance: false, user, sessionId: attemptId, granted: false, pending: false, failed: true };
+			if (fresh?.status === 'fulfilled') return { maintenance: false, user, sessionId: attemptId, granted: true, pending: false, failed: false, refunded: false };
+			if (fresh?.status === 'refunded') {
+				return { maintenance: false, user, sessionId: attemptId, granted: false, pending: false, failed: false, refunded: true };
+			}
+			if (fresh?.status === 'disputed') {
+				return { maintenance: false, user, sessionId: attemptId, granted: false, pending: false, failed: true, refunded: false };
 			}
 		} catch (cause) {
 			console.error('usage/success: Mercado Pago fulfillment retry failed:', cause);
 		}
 	}
-	return { maintenance: false, user, sessionId: attemptId, granted: false, pending: true, failed: false };
+	return { maintenance: false, user, sessionId: attemptId, granted: false, pending: true, failed: false, refunded: false };
 }
 
 /**
@@ -93,21 +102,25 @@ async function mercadoPagoSuccess(user: SessionUser, attemptId: string): Promise
 async function stripeSuccess(user: SessionUser, sessionId: string): Promise<SuccessState> {
 	let granted = false;
 	let pending = false;
+	let refunded = false;
 	try {
 		const session = await getStripe().checkout.sessions.retrieve(sessionId);
 		if (session.metadata?.org_id !== user.orgId) {
 			// Not this user's purchase — never fulfill (and never leak details).
-			return { maintenance: false, user, sessionId, granted: false, pending: true, failed: false };
+			return { maintenance: false, user, sessionId, granted: false, pending: true, failed: false, refunded: false };
 		}
 		if (session.payment_status === 'unpaid') {
 			pending = true;
 		} else {
 			// 'granted' (this call applied the credits) and 'already' (the
 			// webhook beat the redirect — the common case) are both success; a
-			// 'rejected' paid session (unusable bundle metadata) must NEVER
+			// 'refunded' verdict means the session was paid but ungrantable and
+			// the money was returned — deliberate, never the generic failure;
+			// a 'rejected' paid session (unusable bundle metadata) must NEVER
 			// report success for credits that were not granted (coderabbit).
 			const result = await fulfillCheckout(sessionId);
 			granted = result === 'granted' || result === 'already';
+			refunded = result === 'refunded';
 			if (granted) await markCheckoutAttemptFulfilled(sessionId);
 		}
 	} catch (cause) {
@@ -126,7 +139,7 @@ async function stripeSuccess(user: SessionUser, sessionId: string): Promise<Succ
 			console.error(
 				`usage/success: checkout session ${createHash('sha256').update(sessionId).digest('hex').slice(0, 12)}… does not exist — no purchase to show`
 			);
-			return { maintenance: false, user, sessionId, granted: false, pending: false, failed: true };
+			return { maintenance: false, user, sessionId, granted: false, pending: false, failed: true, refunded: false };
 		}
 		// A TRANSIENT retrieval failure is different: the webhook remains the
 		// source of truth; log loudly and show pending. The session id is
@@ -138,12 +151,12 @@ async function stripeSuccess(user: SessionUser, sessionId: string): Promise<Succ
 		);
 		pending = true;
 	}
-	return { maintenance: false, user, sessionId, granted, pending, failed: !granted && !pending };
+	return { maintenance: false, user, sessionId, granted, pending, failed: !granted && !pending && !refunded, refunded };
 }
 
 export const load: PageServerLoad = async ({ locals, url }) => {
 	if (locals.dbDown) {
-		return { maintenance: true, user: null, sessionId: null, granted: false, pending: false, failed: false };
+		return { maintenance: true, user: null, sessionId: null, granted: false, pending: false, failed: false, refunded: false };
 	}
 	const user = requireUser(locals);
 	const sessionId = url.searchParams.get('session_id');
@@ -151,6 +164,6 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 	if (url.searchParams.get('provider') === 'mercadopago' && mercadoPagoAttemptId) {
 		return mercadoPagoSuccess(user, mercadoPagoAttemptId);
 	}
-	if (!sessionId) return { maintenance: false, user, sessionId: null, granted: false, pending: false, failed: false };
+	if (!sessionId) return { maintenance: false, user, sessionId: null, granted: false, pending: false, failed: false, refunded: false };
 	return stripeSuccess(user, sessionId);
 };

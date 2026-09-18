@@ -215,6 +215,18 @@ describe('usage load', () => {
 		expect(metered).toContain('action="?/buy"');
 		expect(metered).toContain('action="?/buyMercadoPago"');
 		expect(metered).toContain('action="?/setAutoTopup"');
+
+		// A stale enabled flag (enabled before the upgrade) must be
+		// DISABLE-able from the page — but only disable: no enable checkbox,
+		// threshold field, or consent the server would reject (review).
+		const stale = render(Page, {
+			props: { data: { ...base, billing: { plan: 'lifetime', subscriptionStatus: null, periodEnd: null }, autoTopup: { ...base.autoTopup, enabled: true } }, form: null } as never
+		}).body;
+		expect(stale).toContain('action="?/setAutoTopup"');
+		expect(stale).toContain('Disable automatic top-up');
+		expect(stale).not.toContain('name="enabled"');
+		expect(stale).not.toContain('name="threshold"');
+		expect(stale).not.toContain('Enable auto top-up');
 	});
 
 	test('the Plans card shows the claimed count, a sold-out state at zero, and an owned state for lifetime orgs', async () => {
@@ -541,6 +553,30 @@ describe('usage setAutoTopup action', () => {
 		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
 		expect(org?.autoTopupEnabled).toBe(0);
 		expect(org?.autoTopupThreshold).toBe(100); // disabling keeps the stored threshold
+	});
+
+	test('an enable that loses the plan race fails loudly instead of leaving a stale flag', async () => {
+		// The read-time plan check happens BEFORE the write: a lifetime
+		// webhook landing in between must not let the UPDATE plant enabled=1
+		// on an unmetered org — the write itself re-checks the plan (review).
+		await seedOrg();
+		const client = testDb().client;
+		const originalExecute = client.execute.bind(client);
+		client.execute = (async (stmt: unknown) => {
+			const sqlText = String((stmt as { sql?: string }).sql ?? stmt);
+			if (/update "organizations" set/i.test(sqlText) && sqlText.includes('auto_topup_enabled')) {
+				await originalExecute("update organizations set plan = 'lifetime' where id = 'org-1'");
+			}
+			return originalExecute(stmt as never);
+		}) as never;
+		try {
+			const result = await setAutoTopup({ enabled: 'on', threshold: '250', consent: 'on' });
+			expect(result).toMatchObject({ status: 400 });
+		} finally {
+			client.execute = originalExecute;
+		}
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.autoTopupEnabled).toBeFalsy(); // never armed — the flag stays unset
 	});
 });
 

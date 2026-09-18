@@ -40,6 +40,15 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		</p>
 		<a class="btn primary" href="/usage">Back to Usage</a>
 	</div>
+{:else if data.refunded}
+	<div class="card">
+		<h2 style="margin-top:0">Payment refunded</h2>
+		<p>
+			This purchase could not be completed — your payment is being refunded automatically
+			and nothing was granted. Refunds usually land within a few business days.
+		</p>
+		<a class="btn primary" href="/usage">Back to Usage</a>
+	</div>
 {:else}
 	<div class="card">
 		<h2 style="margin-top:0">No purchase found</h2>

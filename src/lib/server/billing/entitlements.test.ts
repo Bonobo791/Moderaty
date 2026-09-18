@@ -94,6 +94,18 @@ describe('lifetime entitlements', () => {
 		expect(org?.plan).toBe('lifetime');
 	});
 
+	test('claiming lifetime clears a stale auto top-up authorization in the same transaction', async () => {
+		// An org that upgrades while auto top-up is enabled must not keep a
+		// live off-session charge mandate — the flag and state clear atomically
+		// with the plan flip (review).
+		await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle' }).where(eq(organizations.id, 'org-1'));
+		await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-1', paymentIntentId: 'pi-1', chargeId: 'ch-1' });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.plan).toBe('lifetime');
+		expect(org?.autoTopupEnabled).toBe(0);
+		expect(org?.autoTopupState).toBe('idle'); // neutral off-state — 'disabled' would read as failure-paused
+	});
+
 	test('a dispute queued before lifetime fulfillment releases the claimed slot', async () => {
 		await testDb().db.insert(stripePendingReversals).values({ chargeId: 'ch-1', reason: 'dispute' });
 		const result = await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-1', paymentIntentId: 'pi-1', chargeId: 'ch-1' });

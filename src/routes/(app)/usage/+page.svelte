@@ -138,6 +138,18 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		<div class="card">
 			<h2 style="margin-top:0">Buy credits</h2>
 			<p class="muted">Your lifetime plan includes unlimited moderated comments — credits and auto top-up are not needed.</p>
+			{#if hasAutoTopup}
+				<!-- A flag enabled before the upgrade survives here (the server
+				allows disabling on lifetime but never enabling) — the owner must
+				be able to clear it, with no enable/threshold controls (review). -->
+				<p class="muted">
+					Automatic top-up was switched on before your upgrade. It is not needed on the
+					lifetime plan — you can switch it off here.
+				</p>
+				<form method="POST" action="?/setAutoTopup" use:enhance={submitting}>
+					<button class="btn secondary small" type="submit" disabled={pending}>Disable automatic top-up</button>
+				</form>
+			{/if}
 		</div>
 	{:else}
 	<div class="card">

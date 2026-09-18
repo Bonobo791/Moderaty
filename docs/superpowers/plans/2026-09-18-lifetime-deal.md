@@ -587,6 +587,19 @@ lifetime tests do.)
 and the helper (fail loudly, never throw — the webhook must ACK; a retry can
 never mint a slot):
 
+> **Reconciled during PR review (2026-09):** the shipped helper is
+> `refundUngrantableCheckout(sessionId, orgId, paymentIntent, charge, reason)`
+> — generalized beyond sold-out to duplicate lifetime checkouts and credit
+> purchases fulfilled after the org went lifetime — and its refund-API
+> failure now PROPAGATES after the MANUAL REFUND REQUIRED log. Swallowing a
+> transient refund failure would ACK the delivery and leave the customer
+> charged until a human reads the log; the 500 makes Stripe redeliver and
+> retry the refund under the same idempotency key. Ungrantable outcomes
+> return the `'refunded'` verdict (distinct from `'rejected'`) so
+> `/usage/success` shows a deliberate refunded state, and the idempotency
+> key is `refund:ungrantable:${sessionId}`. The no-payment-intent and
+> already-refunded paths still ACK — nothing a retry could change.
+
 ```ts
 /** A paid lifetime checkout that found no slot gets its money back — loudly, idempotently. */
 async function refundSlotlessLifetime(

@@ -34,6 +34,7 @@ import { bundleById, type CreditBundle } from '$lib/server/stripe/bundles';
 import { isActiveSubscriptionStatus } from '$lib/server/billing/plans';
 import { markCheckoutAttemptFulfilled } from '$lib/server/billing/checkout';
 import { getStripe } from '$lib/server/stripe/client';
+import { refundUngrantablePayment } from '$lib/server/stripe/refunds';
 
 /**
  * Records a Stripe event when it has not already been recorded.
@@ -126,17 +127,20 @@ function creditsForBundle(bundle: CreditBundle): number {
  * methods) must wait for async_payment_succeeded, and no_payment_required
  * (a $0 session) grants nothing.
  *
- * The result is a three-way verdict, not a boolean (coderabbit): 'granted'
- * (this call applied the credits), 'already' (a previous delivery did — the
- * success page must still read success), and 'rejected' (the session cannot
- * or did not grant — never report success for it).
+ * The result is a verdict, not a boolean (coderabbit): 'granted' (this
+ * call applied the credits/entitlement), 'already' (a previous delivery
+ * did — the success page must still read success), 'refunded' (the session
+ * was paid but ungrantable and the payment was refunded or queued for one
+ * — the buyer sees that, not a generic failure), and 'rejected' (the
+ * session cannot or did not grant — never report success for it).
  *
  * @throws A card-persistence failure propagates (after a loud log) so the
  * webhook route answers 500 and Stripe redelivers — the idempotent retry
  * saves the card without double-granting (codex 6141). The grant itself is
- * already committed and never rolled back.
+ * already committed and never rolled back. A refund failure also
+ * propagates — no ACK for a paid customer we could not refund (review).
  */
-export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'already' | 'rejected'> {
+export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'already' | 'rejected' | 'refunded'> {
 	const session = await getStripe().checkout.sessions.retrieve(sessionId, {
 		// latest_charge expanded so a LATE grant can revalidate the charge's
 		// current refund/dispute state (codex review) without a second call.
@@ -207,7 +211,7 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 		// than reporting 'already' success while keeping the money (review).
 		if (activeLifetime) {
 			await refundUngrantableCheckout(sessionId, orgId, paymentIntent, charge, 'the org already has an active lifetime plan');
-			return 'rejected';
+			return 'refunded';
 		}
 		let result;
 		try {
@@ -227,7 +231,7 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 				if (!winner) throw error;
 			}
 			await refundUngrantableCheckout(sessionId, orgId, paymentIntent, charge, 'claimed no slot');
-			return 'rejected';
+			return 'refunded';
 		}
 		if (result.status === 'active' && result.slot > 0) return 'granted';
 		console.error(`stripe: lifetime checkout ${sessionId} for org ${orgId} was PAID but claimed no slot (status ${result.status}, slot ${result.slot}) — manual refund required`);
@@ -261,7 +265,7 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 		// (review: the grant, not just checkout creation, must be gated).
 		if (!(error instanceof Error && error.message === UNMETERED_CREDIT_GRANT_ERROR)) throw error;
 		await refundUngrantableCheckout(sessionId, orgId, paymentIntent, charge, 'the org is on an unmetered plan');
-		return 'rejected';
+		return 'refunded';
 	}
 	// A refund/dispute event may have arrived BEFORE this grant (Stripe does
 	// not order deliveries): apply the queued reversal now, in the same
@@ -284,8 +288,12 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 /**
  * A paid checkout that cannot grant anything gets its money back — loudly,
  * idempotently (sold-out lifetime, duplicate lifetime, post-upgrade credit
- * purchase). Never throws: the webhook must ACK since no retry can make the
- * checkout grantable; a refund failure logs MANUAL REFUND REQUIRED.
+ * purchase). A refund API failure PROPAGATES after a loud MANUAL REFUND
+ * REQUIRED log: swallowing it would ACK the delivery and leave the customer
+ * charged until a human reads the log — the webhook must 500 so Stripe
+ * redelivers and retries the refund under the same idempotency key (review).
+ * The no-payment-intent and already-refunded paths still return normally —
+ * nothing a retry could change.
  */
 async function refundUngrantableCheckout(
 	sessionId: string,
@@ -302,15 +310,11 @@ async function refundUngrantableCheckout(
 		console.error(`stripe: checkout ${sessionId} for org ${orgId} was ungrantable (${reason}) but charge ${charge.id} is already refunded`);
 		return;
 	}
-	try {
-		await getStripe().refunds.create(
-			{ payment_intent: paymentIntent.id },
-			{ idempotencyKey: `refund:ungrantable:${sessionId}` }
-		);
-		console.error(`stripe: checkout ${sessionId} for org ${orgId} was PAID but ${reason} — auto-refunded payment intent ${paymentIntent.id}`);
-	} catch (error) {
-		console.error(`stripe: checkout ${sessionId} auto-refund FAILED for org ${orgId} — MANUAL REFUND REQUIRED: ${error instanceof Error ? error.message : String(error)}`);
-	}
+	await refundUngrantablePayment({
+		paymentIntentId: paymentIntent.id,
+		idempotencyKey: `refund:ungrantable:${sessionId}`,
+		label: `checkout ${sessionId} for org ${orgId} was PAID but ${reason}`
+	});
 }
 
 /** Narrows the expanded Checkout session to the payment_intent and its latest_charge (both stay a string-union). */
@@ -572,7 +576,19 @@ export async function restoreWonDispute(disputeId: string): Promise<boolean> {
 		const match = await findGrantForStripe(db, identifiers);
 		if (match) {
 			const disputeReversal = await db.select({ id: creditTransactions.id }).from(creditTransactions).where(and(eq(creditTransactions.orgId, match.orgId), eq(creditTransactions.reason, 'dispute'), eq(creditTransactions.chargeId, reversal.chargeId))).get();
-			if (disputeReversal) restored = await applyLedgerDelta(db, { orgId: match.orgId, delta: match.credits, reason: 'adjust', refType: 'dispute', refId: disputeId, chargeId: reversal.chargeId });
+			if (disputeReversal) {
+				try {
+					restored = await applyLedgerDelta(db, { orgId: match.orgId, delta: match.credits, reason: 'adjust', refType: 'dispute', refId: disputeId, chargeId: reversal.chargeId });
+				} catch (error) {
+					// An upgrade to lifetime between the dispute and its win makes
+					// the org unmetered — it cannot hold credits, so the honest
+					// resolution is "nothing to restore": close the reversal
+					// loudly instead of wedging the webhook on the grant guard.
+					if (!(error instanceof Error && error.message === UNMETERED_CREDIT_GRANT_ERROR)) throw error;
+					console.error(`stripe: won dispute ${disputeId} for unmetered org ${match.orgId} — closing the reversal without re-granting credits`);
+					restored = true;
+				}
+			}
 		}
 	}
 	if (!restored) return false;

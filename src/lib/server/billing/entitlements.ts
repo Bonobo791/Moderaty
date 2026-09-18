@@ -231,7 +231,15 @@ export async function claimLifetimeSlot(input: LifetimeClaim): Promise<LifetimeC
 			if (!input.chargeId) throw new Error('won dispute reconciliation requires a charge id');
 			await tx.delete(stripePendingReversals).where(eq(stripePendingReversals.chargeId, input.chargeId));
 		}
-		await tx.update(organizations).set({ plan: 'lifetime' }).where(eq(organizations.id, input.orgId));
+		// Clear any stale auto top-up authorization atomically with the plan
+		// flip — a lifetime org's scoring is unmetered, so a surviving enabled
+		// flag is a live off-session charge mandate for credits it can never
+		// need (review). A later downgrade re-enables only through the
+		// consent-gated setAutoTopup path.
+		await tx
+			.update(organizations)
+			.set({ plan: 'lifetime', autoTopupEnabled: 0, autoTopupState: 'idle' })
+			.where(eq(organizations.id, input.orgId));
 		return { slot: slot.slot, status: 'active' };
 	});
 }

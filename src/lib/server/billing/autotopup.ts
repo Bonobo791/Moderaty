@@ -30,10 +30,11 @@
 import { and, asc, count, eq, gte, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
-import { applyLedgerDelta, drainPendingReversals, isUnmeteredPlan } from '$lib/server/billing/ledger';
+import { applyLedgerDelta, drainPendingReversals, isUnmeteredPlan, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
 import { creditTransactions, organizations } from '$lib/server/db/schema';
 import { autoTopupBundle, bundleById, priceIdFor } from '$lib/server/stripe/bundles';
 import { getStripe } from '$lib/server/stripe/client';
+import { refundUngrantablePayment } from '$lib/server/stripe/refunds';
 
 export const AUTO_TOPUP_DEFAULT_THRESHOLD = 100;
 const COOLDOWN_MS = 24 * 60 * 60 * 1000;
@@ -432,15 +433,31 @@ export async function grantAutoTopupCredits(
 		return false;
 	}
 	const bundle = bundleById(bundleId);
-	const applied = await applyLedgerDelta(db, {
-		orgId,
-		delta: bundle.credits,
-		reason: 'auto_topup',
-		refType: 'payment_intent',
-		refId: pi.id,
-		paymentIntentId: pi.id,
-		chargeId: typeof pi.latest_charge === 'string' ? pi.latest_charge : undefined
-	});
+	let applied;
+	try {
+		applied = await applyLedgerDelta(db, {
+			orgId,
+			delta: bundle.credits,
+			reason: 'auto_topup',
+			refType: 'payment_intent',
+			refId: pi.id,
+			paymentIntentId: pi.id,
+			chargeId: typeof pi.latest_charge === 'string' ? pi.latest_charge : undefined
+		});
+	} catch (error) {
+		// The claim re-checks the plan before charging, but an upgrade to
+		// lifetime can land between the off-session charge and this delivery:
+		// the paid PI is refunded idempotently and the claim released —
+		// never a retry storm against the unmetered-grant guard (review).
+		if (!(error instanceof Error && error.message === UNMETERED_CREDIT_GRANT_ERROR)) throw error;
+		await refundUngrantablePayment({
+			paymentIntentId: pi.id,
+			idempotencyKey: `refund:ungrantable:${pi.id}`,
+			label: `auto-topup PI ${pi.id} for org ${orgId} succeeded but the org is unmetered`
+		});
+		await releaseClaimForPi(orgId, pi);
+		return false;
+	}
 	if (!applied) {
 		// Duplicate delivery — the grant already committed on the FIRST
 		// delivery. That delivery's org-state reset may have failed (a crash
@@ -550,6 +567,11 @@ export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<numb
 			and(
 				eq(organizations.autoTopupEnabled, 1),
 				eq(organizations.autoTopupState, 'idle'),
+				// Mirror of the atomic claim's plan predicate: a lifetime org
+				// with a stale enabled flag is skipped loudly downstream — but
+				// it must never be SELECTED either, or enough stale rows fill
+				// the bounded batch and starve metered orgs (I10, review).
+				ne(organizations.plan, 'lifetime'),
 				// COALESCE both sides: a NULL balance (pre-billing org) must read
 				// as 0 here, or SQL NULL comparison silently drops the org.
 				sql`COALESCE(${organizations.creditsRemaining}, 0) < COALESCE(${organizations.autoTopupThreshold}, ${AUTO_TOPUP_DEFAULT_THRESHOLD})`,

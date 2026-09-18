@@ -25,13 +25,15 @@ const mocks = vi.hoisted(() => ({
 	paymentIntentsCreate: vi.fn(),
 	paymentIntentsRetrieve: vi.fn(),
 	paymentIntentsList: vi.fn(),
-	pricesRetrieve: vi.fn()
+	pricesRetrieve: vi.fn(),
+	refundsCreate: vi.fn()
 }));
 
 vi.mock('$lib/server/stripe/client', () => ({
 	getStripe: () => ({
 		paymentIntents: { create: mocks.paymentIntentsCreate, retrieve: mocks.paymentIntentsRetrieve, list: mocks.paymentIntentsList },
-		prices: { retrieve: mocks.pricesRetrieve }
+		prices: { retrieve: mocks.pricesRetrieve },
+		refunds: { create: mocks.refundsCreate }
 	})
 }));
 vi.mock('$env/dynamic/private', () => ({
@@ -530,6 +532,32 @@ describe('sweepAutoTopUp', () => {
 		expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(2);
 	});
 
+	test('the sweep never spends a batch slot on a stale-enabled lifetime org', async () => {
+		// An enabled flag surviving a lifetime upgrade is a data anomaly the
+		// claim and basicEligibility already skip — but it must not be
+		// SELECTED, or enough stale rows occupy the bounded batch and starve
+		// every metered org (I10 fairness, review).
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			await seedOrg({ plan: 'lifetime' }); // org-1: enabled flag survived the upgrade
+			await testDb().db.insert(organizations).values({
+				id: 'org-2',
+				name: 'Org 2',
+				creditsRemaining: 10,
+				autoTopupEnabled: 1,
+				autoTopupThreshold: 100,
+				autoTopupState: 'idle',
+				stripeCustomerId: 'cus_2',
+				stripeDefaultPmId: 'pm_2'
+			});
+			expect(await sweepAutoTopUp(1)).toBe(1);
+			expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(1);
+			expect(mocks.paymentIntentsCreate.mock.calls[0][0]).toMatchObject({ customer: 'cus_2' });
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
 	test('a failing org does not stop the sweep', async () => {
 		await seedOrg();
 		await testDb().db.insert(organizations).values({
@@ -743,5 +771,27 @@ describe('grantAutoTopupCredits', () => {
 		const org = await orgRow();
 		expect(org.autoTopupState).toBe('in_flight');
 		expect(org.autoTopupFailures).toBe(1);
+	});
+
+	test('a top-up grant landing after the org went lifetime refunds the charge and releases the claim', async () => {
+		// The claim re-checks the plan before charging, but an upgrade can
+		// land between the off-session charge and this grant — the paid PI is
+		// refunded (idempotent) and the claim released instead of throwing
+		// forever against the unmetered-grant guard (review).
+		await seedOrg({
+			plan: 'lifetime',
+			autoTopupState: 'in_flight',
+			autoTopupLastAttemptAt: new Date().toISOString()
+		});
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			expect(await grantAutoTopupCredits('org-1', succeededPi())).toBe(false);
+			expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_1' }, { idempotencyKey: 'refund:ungrantable:pi_1' });
+		} finally {
+			errorSpy.mockRestore();
+		}
+		const org = await orgRow();
+		expect(org.autoTopupState).toBe('idle');
+		expect(org.creditsRemaining).toBe(50); // nothing granted
 	});
 });

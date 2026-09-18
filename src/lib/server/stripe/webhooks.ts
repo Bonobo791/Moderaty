@@ -377,17 +377,20 @@ async function updateDisputeReversal(disputeId: string, values: { status?: Dispu
 }
 
 /**
- * Reverses credits granted for a refunded or disputed charge. Each path
- * anchors on its OWN refType — 'refund' for refunds, 'dispute' for disputes
- * (refId = charge id) — so the full lifecycle applies exactly once per step:
- * a dispute reversal, a won-dispute restore (refType 'dispute', refId =
- * dispute id), and a later legitimate full refund each clear their own anchor
- * and can never block or double-apply one another. The reason field
- * ('refund' vs 'dispute') keeps the ledger legible.
+ * Reverses the entitlement side of a refunded or disputed charge. Lifetime
+ * purchases lose their slot: a refund releases the entitlement and frees the
+ * slot for resale, a dispute marks it disputed while it is contested — either
+ * way the org's plan falls back to 'hosted' when an active subscription
+ * remains and 'free' otherwise. When no lifetime entitlement matches, the
+ * charge's paid subscription period is marked 'refunded' or 'disputed'
+ * instead. A dispute-reversal row recorded for the charge is resolved with
+ * the matching source ('lifetime' or 'subscription').
  *
  * @param chargeId - The Stripe charge identifier
  * @param reason - Whether the reversal is for a refund or dispute
- * @returns `true` if a reversal was applied, `false` if no matching credit grant was found or the reversal was already recorded
+ * @param paymentIntentId - The charge's payment intent; combined with chargeId it matches the entitlement unambiguously
+ * @param disputeId - The dispute id when reason is 'dispute', so its pending reversal row can be resolved
+ * @returns `true` if a lifetime entitlement or subscription period was reversed, `false` if neither matched — the caller then falls through to the credit-grant reversal
  */
 async function reverseEntitlements(chargeId: string, reason: 'refund' | 'dispute', paymentIntentId?: string, disputeId?: string): Promise<boolean> {
 	const lifetimeChanged = reason === 'refund' ? await releaseLifetimeForPayment({ paymentIntentId, chargeId }) : await revokeLifetimeForDispute({ paymentIntentId, chargeId });

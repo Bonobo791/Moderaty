@@ -29,7 +29,7 @@ import { db } from '$lib/server/db';
 import { organizations, creditTransactions, stripeEvents, stripeLifetimeEntitlements, stripeDisputeReversals } from '$lib/server/db/schema';
 import { applyLedgerDelta, drainPendingReversals, findGrantForStripe, queuePendingReversal } from '$lib/server/billing/ledger';
 import { grantAutoTopupCredits, handleAutoTopupFailure } from '$lib/server/billing/autotopup';
-import { claimLifetimeSlot, grantSubscriptionPeriod, refundSubscriptionPeriod, disputeSubscriptionPeriod, releaseLifetimeForPayment, applySubscriptionSnapshot, revokeLifetimeForDispute, restoreLifetimeForDispute, restoreDisputedSubscriptionPeriod } from '$lib/server/billing/entitlements';
+import { claimLifetimeSlot, grantSubscriptionPeriod, refundSubscriptionPeriod, disputeSubscriptionPeriod, releaseLifetimeForPayment, applySubscriptionSnapshot, revokeLifetimeForDispute, restoreLifetimeForDispute, restoreDisputedSubscriptionPeriod, LIFETIME_SOLD_OUT_ERROR } from '$lib/server/billing/entitlements';
 import { bundleById, type CreditBundle } from '$lib/server/stripe/bundles';
 import { isActiveSubscriptionStatus } from '$lib/server/billing/plans';
 import { markCheckoutAttemptFulfilled } from '$lib/server/billing/checkout';
@@ -203,12 +203,19 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 		}
 		const activeLifetime = await db.select({ id: stripeLifetimeEntitlements.id }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
 		if (activeLifetime) return 'already';
-		const result = await claimLifetimeSlot({
-			orgId,
-			checkoutSessionId: sessionId,
-			paymentIntentId: paymentIntent?.id,
-			chargeId: typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : charge?.id
-		});
+		let result;
+		try {
+			result = await claimLifetimeSlot({
+				orgId,
+				checkoutSessionId: sessionId,
+				paymentIntentId: paymentIntent?.id,
+				chargeId: typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : charge?.id
+			});
+		} catch (error) {
+			if (!(error instanceof Error && error.message === LIFETIME_SOLD_OUT_ERROR)) throw error;
+			await refundSlotlessLifetime(sessionId, orgId, paymentIntent, charge);
+			return 'rejected';
+		}
 		if (result.status === 'active' && result.slot > 0) return 'granted';
 		console.error(`stripe: lifetime checkout ${sessionId} for org ${orgId} was PAID but claimed no slot (status ${result.status}, slot ${result.slot}) — manual refund required`);
 		return 'rejected';
@@ -249,6 +256,36 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 	// failure is retried instead of leaving the org with no top-up card.
 	await savePaymentMethod(session, orgId, paymentIntent, charge);
 	return applied ? 'granted' : 'already';
+}
+
+/**
+ * A paid lifetime checkout that found no slot gets its money back — loudly,
+ * idempotently. Never throws: the webhook must ACK since no retry can mint a
+ * slot; a refund failure logs MANUAL REFUND REQUIRED for a human.
+ */
+async function refundSlotlessLifetime(
+	sessionId: string,
+	orgId: string,
+	paymentIntent: Stripe.PaymentIntent | null,
+	charge: Stripe.Charge | null | undefined
+): Promise<void> {
+	if (!paymentIntent?.id) {
+		console.error(`stripe: lifetime checkout ${sessionId} for org ${orgId} was PAID but claimed no slot and has no payment intent — MANUAL REFUND REQUIRED`);
+		return;
+	}
+	if (charge?.refunded === true) {
+		console.error(`stripe: lifetime checkout ${sessionId} for org ${orgId} was slotless but charge ${charge.id} is already refunded`);
+		return;
+	}
+	try {
+		await getStripe().refunds.create(
+			{ payment_intent: paymentIntent.id },
+			{ idempotencyKey: `refund:lifetime-soldout:${sessionId}` }
+		);
+		console.error(`stripe: lifetime checkout ${sessionId} for org ${orgId} was PAID but claimed no slot — auto-refunded payment intent ${paymentIntent.id}`);
+	} catch (error) {
+		console.error(`stripe: lifetime checkout ${sessionId} auto-refund FAILED for org ${orgId} — MANUAL REFUND REQUIRED: ${error instanceof Error ? error.message : String(error)}`);
+	}
 }
 
 /** Narrows the expanded Checkout session to the payment_intent and its latest_charge (both stay a string-union). */

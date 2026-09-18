@@ -12,7 +12,7 @@ import { HOSTED_INCLUDED_CREDITS, isActiveSubscriptionStatus } from './plans';
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
-const LIFETIME_SOLD_OUT_ERROR = 'lifetime plan is sold out';
+export const LIFETIME_SOLD_OUT_ERROR = 'lifetime plan is sold out';
 const LIFETIME_ENTITLEMENT_RECORD_ERROR = 'lifetime entitlement was not recorded';
 const LIFETIME_SLOT_RACE_ERROR = 'lifetime slot claim lost its race';
 const PAYMENT_REFERENCE_REQUIRED_ERROR = 'payment intent or charge id is required';

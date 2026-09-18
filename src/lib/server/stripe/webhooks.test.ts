@@ -29,7 +29,8 @@ const mocks = vi.hoisted(() => ({
 	disputesRetrieve: vi.fn(),
 	customersUpdate: vi.fn(),
 	customersRetrieve: vi.fn(),
-	paymentMethodsAttach: vi.fn()
+	paymentMethodsAttach: vi.fn(),
+	refundsCreate: vi.fn()
 }));
 
 vi.mock('$lib/server/stripe/client', () => ({
@@ -39,7 +40,8 @@ vi.mock('$lib/server/stripe/client', () => ({
 		charges: { retrieve: mocks.chargesRetrieve },
 		disputes: { retrieve: mocks.disputesRetrieve },
 		customers: { update: mocks.customersUpdate, retrieve: mocks.customersRetrieve },
-		paymentMethods: { attach: mocks.paymentMethodsAttach }
+		paymentMethods: { attach: mocks.paymentMethodsAttach },
+		refunds: { create: mocks.refundsCreate }
 	})
 }));
 vi.mock('$env/dynamic/private', () => ({ env: {} }));
@@ -132,6 +134,26 @@ describe('paid hosted products', () => {
 		} finally {
 			errorSpy.mockRestore();
 		}
+	});
+
+	test('a paid lifetime checkout that finds no slot auto-refunds and stays rejected', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		// Occupy every slot so claimLifetimeSlot throws sold-out (MOD-38).
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lifetime', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		expect(await fulfillCheckout('cs_lifetime')).toBe('rejected');
+		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_1' }, { idempotencyKey: 'refund:lifetime-soldout:cs_lifetime' });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.plan).not.toBe('lifetime');
+		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toHaveLength(0);
+	});
+
+	test('a slotless checkout whose charge is already refunded is not refunded twice', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: { id: 'ch_1', refunded: true } } }));
+		expect(await fulfillCheckout('cs_lifetime')).toBe('rejected');
+		expect(mocks.refundsCreate).not.toHaveBeenCalled();
 	});
 });
 

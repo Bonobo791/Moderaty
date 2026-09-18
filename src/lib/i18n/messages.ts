@@ -15,7 +15,7 @@
 
 import type { Locale } from './locale';
 
-const MESSAGES = {
+export const MESSAGES = {
 	en: {
 		languageLabel: 'Language',
 		english: 'English',

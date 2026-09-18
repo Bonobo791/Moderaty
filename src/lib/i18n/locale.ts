@@ -17,6 +17,23 @@ export const LOCALE_COOKIE = 'moderaty_locale';
 export const SUPPORTED_LOCALES = ['en', 'pt-BR'] as const;
 export type Locale = (typeof SUPPORTED_LOCALES)[number];
 
+/**
+ * The surfaces whose user-facing copy is fully translated for every
+ * supported locale (MOD-11). Everything else — the landing, the signed-in
+ * app — is English-only, so the stored/browser preference only resolves on
+ * these paths and the selector only renders there: offering pt-BR on an
+ * English surface would change a page's language partially with no
+ * indication. Expand the translations first, then add the path — never
+ * the other way around.
+ */
+export const BILINGUAL_PATHS: ReadonlySet<string> = new Set(['/login', '/consent', '/account-deleted']);
+
+export function isBilingualPath(pathname: string): boolean {
+	// A stray trailing slash must not silently flip a bilingual page English.
+	const normalized = pathname.length > 1 && pathname.endsWith('/') ? pathname.slice(0, -1) : pathname;
+	return BILINGUAL_PATHS.has(normalized);
+}
+
 export function isLocale(value: string | null | undefined): value is Locale {
 	// Derived from SUPPORTED_LOCALES: a hardcoded list silently rejects a newly
 	// added locale at every boundary (cubic, PR #136).

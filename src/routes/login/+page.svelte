@@ -16,6 +16,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 -->
 
 <script lang="ts">
+	import LanguageSwitcher from '$lib/components/LanguageSwitcher.svelte';
 	import { t } from '$lib/i18n/messages';
 
 	let { data } = $props();
@@ -25,6 +26,8 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	<title>{t(data.locale, 'signInTitle')}</title>
 </svelte:head>
 
+<!-- This page is fully translated — it may offer the selector (MOD-11). -->
+<LanguageSwitcher locale={data.locale} />
 <!-- Static sign-in prompt; the guard redirect lives in +page.server.ts. -->
 <main class="login-main">
 	<div class="card login-card">

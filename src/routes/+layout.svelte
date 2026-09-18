@@ -18,7 +18,6 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 <script lang="ts">
 	import '../app.css';
 	import favicon from '$lib/assets/favicon.svg';
-	import LanguageSwitcher from '$lib/components/LanguageSwitcher.svelte';
 
 	let { children, data } = $props();
 </script>
@@ -36,5 +35,4 @@ FORM: terminal-ink night shift; live component as hero visual, verdict stamps as
 FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
 -->
 
-<LanguageSwitcher locale={data.locale ?? 'en'} />
 {@render children()}

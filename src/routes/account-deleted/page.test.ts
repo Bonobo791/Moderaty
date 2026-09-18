@@ -18,7 +18,13 @@
 // both locales, plus the way back to the landing page.
 
 import { render } from 'svelte/server';
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
+
+// The page mounts LanguageSwitcher (MOD-11), which reads $app/state's page.url
+// for its return path — mock it the same way LanguageSwitcher.test.ts does.
+vi.mock('$app/state', () => ({
+	page: { url: new URL('https://moderaty.example/account-deleted') }
+}));
 
 import Page from './+page.svelte';
 
@@ -47,4 +53,12 @@ test('the confirmation acknowledges the legally retained consent record', () => 
 	// record is erased (codex P2).
 	expect(renderPage('en')).toContain('the e-mail it contains is erased after ten years');
 	expect(renderPage('pt-BR')).toContain('o e-mail que ele contém é apagado após dez anos');
+});
+
+// MOD-11: this page is fully translated, so it is one of the three surfaces
+// permitted to offer the language selector.
+test('the bilingual selector is mounted on this translated page', () => {
+	const body = renderPage('en');
+	expect(body).toContain('language-switcher');
+	expect(body).toContain('name="locale"');
 });

@@ -1,0 +1,52 @@
+// Moderaty — YouTube Comment Auto-Moderation Tool
+// Copyright (C) 2026 Andrew Philip Weilbacher
+//
+// Licensed under the PolyForm Shield License 1.0.0; you may not use
+// this file except in compliance with the License. You may obtain a
+// copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
+//
+// The software is provided "as is", without warranty or condition of
+// any kind, express or implied. See the License for the specific
+// language governing permissions and limitations under the License.
+// A copy of the License is included in the LICENSE file at the
+// repository root.
+//
+// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
+
+// The root layout's locale projection is the single gate every page reads
+// (MOD-11): bilingual surfaces resolve the stored/browser preference;
+// English-only surfaces get 'en' no matter what the cookie says — a pt-BR
+// preference must not half-translate the app shell around English content.
+
+import { expect, test } from 'vitest';
+
+import { LOCALE_COOKIE } from '$lib/i18n/locale';
+import { load } from './+layout.server';
+
+function loadLocale(pathname: string, cookie?: string, acceptLanguage = 'en') {
+	const result = load({
+		cookies: { get: (name: string) => (name === LOCALE_COOKIE ? cookie : undefined) },
+		request: { headers: { get: () => acceptLanguage } },
+		url: new URL(`https://moderaty.example${pathname}`)
+	} as never) as { locale: string };
+	return result.locale;
+}
+
+test.each(['/login', '/consent', '/account-deleted'])(
+	'%s resolves the stored pt-BR preference',
+	(pathname) => {
+		expect(loadLocale(pathname, 'pt-BR')).toBe('pt-BR');
+	}
+);
+
+test.each(['/', '/dashboard', '/channels/UC1', '/org'])(
+	'%s stays English even with a pt-BR cookie — the surface is not translated',
+	(pathname) => {
+		expect(loadLocale(pathname, 'pt-BR')).toBe('en');
+	}
+);
+
+test('the browser language only resolves on bilingual paths', () => {
+	expect(loadLocale('/login', undefined, 'pt-BR,pt;q=0.9')).toBe('pt-BR');
+	expect(loadLocale('/dashboard', undefined, 'pt-BR,pt;q=0.9')).toBe('en');
+});

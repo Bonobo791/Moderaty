@@ -53,6 +53,40 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		data.bans.reduce((total: number, b: any) => total + b.n, 0)
 	);
 
+	// Run-health summary: only channels whose last check actually succeeded
+	// count as protected — never-run and failed channels are called out
+	// instead of being swept into the headline claim (MOD-8).
+	const protectedCount = $derived(
+		data.chs.filter((ch: any) => ch.lastRunStatus === 'success').length
+	);
+	const failedCount = $derived(
+		data.chs.filter((ch: any) => ch.lastRunStatus === 'failed').length
+	);
+	const uncheckedCount = $derived(data.chs.length - protectedCount - failedCount);
+	const healthSubline = $derived.by(() => {
+		if (failedCount + uncheckedCount === 0)
+			return `${data.chs.length} channels protected. Queue's clear. Not a single main character slipped past.`;
+		const parts: string[] = [];
+		if (failedCount > 0) parts.push(`${failedCount} failed the last check`);
+		if (uncheckedCount > 0) parts.push(`${uncheckedCount} waiting for a first check`);
+		return `${protectedCount} of ${data.chs.length} channels protected — ${parts.join(', ')}.`;
+	});
+
+	// Safe actionable copy per persisted failure category — cron only stores
+	// the category, so raw provider detail can never reach this page.
+	const FAILURE_ACTIONS: Record<string, string> = {
+		token: 'YouTube access expired — reconnect the channel',
+		quota: 'YouTube quota is exhausted — we retry on the next check',
+		scoring: 'AI scoring was unavailable — we retry on the next check',
+		timeout: 'The last check timed out — we retry on the next check'
+	};
+	function failureAction(category: string | null): string {
+		return (
+			FAILURE_ACTIONS[category ?? ''] ??
+			'The last check failed — we retry on the next check'
+		);
+	}
+
 	function openChannel(channelId: string) {
 		goto(`/channels/${channelId}`);
 	}
@@ -85,7 +119,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	{:else}
 		<h1 class="door-headline">The door is quiet. Too quiet.</h1>
 		<p class="door-subline">
-			{data.chs.length} channels protected. Queue's clear. Not a single main character slipped past.
+			{healthSubline}
 		</p>
 	{/if}
 	<div class="door-stats">
@@ -152,12 +186,20 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 							<span class="mono channel-id col-id">ID: {ch.id}</span>
 						</td>
 						<td>
-							<span class="caps-label protected-label">Protected</span>
+							{#if ch.lastRunStatus === 'failed'}
+								<span class="caps-label failed-label">Check failed</span>
+								<span class="status-sub">{failureAction(ch.lastRunError)}</span>
+								<span class="status-sub">last success {ch.lastSuccessAt ? relativeTime(ch.lastSuccessAt) : 'never'}</span>
+							{:else if ch.lastRunStatus === 'success'}
+								<span class="caps-label protected-label">Protected</span>
+							{:else}
+								<span class="caps-label unchecked-label">Not checked yet</span>
+							{/if}
 							{#if pending > 0}
 								<a class="status-sub pending-link" href="/channels/{ch.id}/queue">
 									{pending} comment{pending === 1 ? '' : 's'} waiting for review
 								</a>
-							{:else}
+							{:else if ch.lastRunStatus !== 'failed'}
 								<span class="status-sub">queue is clear</span>
 							{/if}
 						</td>
@@ -295,6 +337,12 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	}
 	.protected-label {
 		color: var(--ok);
+	}
+	.failed-label {
+		color: var(--accent);
+	}
+	.unchecked-label {
+		color: var(--text-3);
 	}
 	.status-sub {
 		display: block;

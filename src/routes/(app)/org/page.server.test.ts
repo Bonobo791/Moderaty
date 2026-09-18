@@ -30,6 +30,9 @@ import { decrypt } from '$lib/server/crypto';
 import { SESSION_COOKIE, type SessionUser } from '$lib/server/session';
 import { makeCookies } from '$lib/server/testcookies';
 
+import { render } from 'svelte/server';
+
+import Page from './+page.svelte';
 import { actions, load } from './+page.server';
 
 setupTestDb(['sessions', 'invites', 'memberships', 'organizations', 'users']);
@@ -480,4 +483,42 @@ test('clearOpenAiKey: owner wipes the stored key; non-owner is 403', async () =>
 	expect(await storedKey()).toBeNull();
 	const view = (await load(ctx(TEST_OWNER))) as { hasOpenAiKey: boolean };
 	expect(view.hasOpenAiKey).toBe(false);
+});
+
+function renderOrgPage(user: SessionUser | null, hasOpenAiKey = false) {
+	return render(Page, {
+		props: {
+			data: {
+				user,
+				members: [],
+				invites: [],
+				inviteBase: 'http://localhost/invite/',
+				hasOpenAiKey,
+				maintenance: false
+			},
+			form: null
+		} as never
+	}).body;
+}
+
+test('OpenAI key card: the owner sees a labeled set-key form; the saved state swaps to a remove form', async () => {
+	const unset = renderOrgPage(TEST_OWNER, false);
+	expect(unset).toContain('action="?/setOpenAiKey"');
+	expect(unset).toMatch(/<label for="openai-key">/);
+	expect(unset).toContain('name="openAiKey"');
+	expect(unset).not.toContain('action="?/clearOpenAiKey"');
+
+	const set = renderOrgPage(TEST_OWNER, true);
+	expect(set).toContain('action="?/clearOpenAiKey"');
+	expect(set).not.toContain('action="?/setOpenAiKey"');
+	// The key itself never renders — the page only ever sees a boolean.
+	expect(set).not.toContain('value="sk-');
+});
+
+test('OpenAI key card: members and admins never see the form (the actions are owner-only)', async () => {
+	for (const user of [MEMBER, ADMIN]) {
+		const body = renderOrgPage(user, false);
+		expect(body).not.toContain('setOpenAiKey');
+		expect(body).not.toContain('openAiKey');
+	}
 });

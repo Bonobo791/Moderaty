@@ -46,6 +46,15 @@ vi.mock('$lib/server/stripe/client', () => ({
 }));
 vi.mock('$env/dynamic/private', () => ({ env: {} }));
 
+// claimLifetimeSlot stays a vi.fn delegate so one test can stage the
+// concurrent-loser throw — every other call runs the real implementation.
+vi.mock('$lib/server/billing/entitlements', async (importOriginal) => {
+	const mod = await importOriginal<typeof import('$lib/server/billing/entitlements')>();
+	return { ...mod, claimLifetimeSlot: vi.fn(mod.claimLifetimeSlot) };
+});
+
+import { claimLifetimeSlot } from '$lib/server/billing/entitlements';
+
 setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_pending_reversals', 'stripe_lifetime_entitlements', 'stripe_subscription_periods', 'stripe_lifetime_slots', 'stripe_dispute_reversals']);
 
 function session(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -189,6 +198,51 @@ describe('paid hosted products', () => {
 		expect(await fulfillCheckout('cs_dup')).toBe('refunded');
 		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_2' }, { idempotencyKey: 'refund:ungrantable:cs_dup' });
 		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toHaveLength(1);
+	});
+
+	test('a same-session concurrent fulfillment sees its own claim and returns already — never refunds the winner', async () => {
+		// The success redirect and the webhook can fulfill the SAME session
+		// concurrently: the loser's recovery re-read observes the winner's
+		// active entitlement and must recognize it belongs to THIS session —
+		// refunding it would hand the org lifetime access for free (codex P1).
+		// The by-session SELECT is forced to miss, replaying the read window.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'lifetime' });
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1', activeEntitlementId: 1 }).where(eq(stripeLifetimeSlots.slot, 1));
+		await testDb().db.insert(stripeLifetimeEntitlements).values({ id: 1, orgId: 'org-1', slot: 1, checkoutSessionId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_1', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		const client = testDb().client;
+		const originalExecute = client.execute.bind(client);
+		client.execute = (async (stmt: unknown) => {
+			const sqlText = String((stmt as { sql?: string }).sql ?? stmt);
+			if (/from "stripe_lifetime_entitlements"/i.test(sqlText) && /where[\s\S]*checkout_session_id/i.test(sqlText)) {
+				return { rows: [], columns: [], rowsAffected: 0, lastInsertRowid: undefined };
+			}
+			return originalExecute(stmt as never);
+		}) as never;
+		try {
+			expect(await fulfillCheckout('cs_1')).toBe('already');
+		} finally {
+			client.execute = originalExecute;
+		}
+		expect(mocks.refundsCreate).not.toHaveBeenCalled();
+	});
+
+	test('a same-session claim that loses on the unique index sees its own winner — never refunds it', async () => {
+		// Deeper window: the reads before the claim all miss (the winner has
+		// not committed), the claim's insert dies on the unique active-org
+		// index, and the recovery re-read observes the winner — a same-session
+		// winner ACKs as 'already', never a refund (codex P1).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_1', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		// The winner commits inside the claim (the concurrent winner's tx) —
+		// the loser's recovery re-read then observes it.
+		vi.mocked(claimLifetimeSlot).mockImplementationOnce(async () => {
+			await testDb().db.insert(stripeLifetimeEntitlements).values({ orgId: 'org-1', slot: 1, checkoutSessionId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+			throw new Error('UNIQUE constraint failed: stripe_lifetime_entitlements_active_org_idx');
+		});
+
+		expect(await fulfillCheckout('cs_1')).toBe('already');
+		expect(mocks.refundsCreate).not.toHaveBeenCalled();
 	});
 
 	test('a credit checkout fulfilled after the org went lifetime refunds instead of granting', async () => {

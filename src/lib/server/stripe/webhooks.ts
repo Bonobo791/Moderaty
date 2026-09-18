@@ -205,7 +205,12 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 			console.error(`stripe: lifetime checkout ${sessionId} would overlap hosted access for ${orgId}`);
 			return 'rejected';
 		}
-		const activeLifetime = await db.select({ id: stripeLifetimeEntitlements.id }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
+		const activeLifetime = await db.select({ id: stripeLifetimeEntitlements.id, checkoutSessionId: stripeLifetimeEntitlements.checkoutSessionId }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
+		// The winner may be THIS session: a concurrent duplicate delivery
+		// (success redirect + webhook) committed between the session-scoped
+		// read above and this one — its own claim is 'already', never a
+		// refund of the payment that just won (codex P1).
+		if (activeLifetime?.checkoutSessionId === sessionId) return 'already';
 		// A second lifetime checkout for an org that already has one is paid
 		// but can grant nothing — refund it like a slotless checkout rather
 		// than reporting 'already' success while keeping the money (review).
@@ -227,8 +232,13 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 				// index; the aborted tx's snapshot could not see the winner, so
 				// re-read fresh — a winner means this was a paid duplicate and
 				// falls into the same refund path, anything else is a real error.
-				const winner = await db.select({ id: stripeLifetimeEntitlements.id }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
+				const winner = await db.select({ id: stripeLifetimeEntitlements.id, checkoutSessionId: stripeLifetimeEntitlements.checkoutSessionId }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
 				if (!winner) throw error;
+				// The winner may be THIS session's own claim — a duplicate
+				// delivery (success redirect + webhook) that lost on the
+				// index. ACK as 'already'; refunding it would leave the org
+				// with lifetime access it never paid for (codex P1).
+				if (winner.checkoutSessionId === sessionId) return 'already';
 			}
 			await refundUngrantableCheckout(sessionId, orgId, paymentIntent, charge, 'claimed no slot');
 			return 'refunded';

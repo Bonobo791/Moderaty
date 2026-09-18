@@ -340,6 +340,54 @@ test('a failing channel run reports failure, never success', async () => {
 	}
 });
 
+test('a successful run records healthy state and clears a prior failure', async () => {
+	// MOD-7: health lives apart from the rotation timestamp — a channel that
+	// failed before must read healthy again only after a real success.
+	await seedChannel('UC-ok', { lastRunStatus: 'failed', lastRunError: 'quota' });
+	mocks.runChannel.mockResolvedValue(runResult());
+
+	const res = await call({ bearer: 'test-secret' });
+
+	expect(res.status).toBe(200);
+	const row = await channelRow('UC-ok');
+	expect(row?.lastRunStatus).toBe('success');
+	expect(row?.lastSuccessAt).not.toBeNull();
+	expect(row?.lastRunError).toBeNull();
+	expect(row?.lastRunAt).not.toBeNull();
+	expect(row?.leaseExpiresAt).toBeNull();
+});
+
+test.each([
+	{ label: 'token', message: 'google oauth refresh failed: 401 unauthorized_client', category: 'token' },
+	{ label: 'OpenAI', message: 'OpenAI scoring request failed: 500 Internal Server Error', category: 'scoring' },
+	{ label: 'quota', message: 'commentThreads.list failed: 403 quotaExceeded', category: 'quota' },
+	{ label: 'generic', message: 'database is locked', category: 'error' }
+])('a failed run persists failed health for a $label failure and never touches the success fields', async ({ message, category }) => {
+	// MOD-7: a failed run must not update the success timestamp/status — the
+	// dashboard's "last checked" freshness used to lie because only
+	// lastRunAt existed. Only the sanitized category is stored: provider
+	// error bodies can echo request details and stay in the server log.
+	await seedChannel('UC-fail', { lastRunStatus: 'success', lastSuccessAt: '2026-08-01T00:00:00.000Z' });
+	mocks.runChannel.mockRejectedValue(new Error(message));
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+	try {
+		const res = await call({ bearer: 'test-secret' });
+
+		expect(res.status).toBe(500);
+		const row = await channelRow('UC-fail');
+		expect(row?.lastRunStatus).toBe('failed');
+		expect(row?.lastRunError).toBe(category);
+		// Success fields are frozen at their prior values — the failure
+		// cannot masquerade as a healthy run (nor erase when it last was).
+		expect(row?.lastSuccessAt).toBe('2026-08-01T00:00:00.000Z');
+		expect(row?.lastRunAt).not.toBeNull(); // rotation still ticks so others are not starved
+		expect(row?.leaseExpiresAt).toBeNull();
+	} finally {
+		errorSpy.mockRestore();
+	}
+});
+
 test('erases consent e-mails older than 10 years, keeping the anonymized row', async () => {
 	mocks.env.DRY_RUN = 'false';
 	const oldDate = new Date(Date.now() - CONSENT_EMAIL_RETENTION_MS - DAY_MS).toISOString();

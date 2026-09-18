@@ -254,6 +254,9 @@ export const channels = sqliteTable('channels', {
 	dryRunBoundary: text('dry_run_boundary'), // on-demand dry-run window (ISO): the drain rescores comments down to this timestamp; null = no dry-run drain in flight
 	dryRunPageToken: text('dry_run_page_token'), // YouTube continuation token for the dry-run drain's next page
 	lastRunAt: text('last_run_at'), // ISO timestamp of last cron run; rotation orders by it ASC (NULLs first)
+	lastRunStatus: text('last_run_status'), // run health (MOD-7): 'success' | 'failed'; NULL = never run — kept separate from lastRunAt so a failed run cannot look fresh-and-healthy
+	lastSuccessAt: text('last_success_at'), // ISO of the last run that did not throw; failures never touch it
+	lastRunError: text('last_run_error'), // sanitized failure category for the dashboard ('token' | 'quota' | 'scoring' | 'timeout' | 'error'); cleared on success — raw provider details stay in the server log
 	leaseExpiresAt: text('lease_expires_at'), // expiring cron claim; null or past = claimable
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	active: integer('active').notNull().default(1),

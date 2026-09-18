@@ -22,6 +22,7 @@ import { channels } from '$lib/server/db/schema';
 import { nullExpiredConsentEmails, nullExpiredHandles, retryStripeCustomerDeletions } from '$lib/server/deletion';
 import { sweepAutoTopUp } from '$lib/server/billing/autotopup';
 import { sweepStalePendingReversals } from '$lib/server/billing/ledger';
+import { DeadlineExceededError } from '$lib/server/http';
 import { runChannel, type ChannelRunResult } from '$lib/server/pipeline';
 import type { RequestHandler } from './$types';
 
@@ -73,6 +74,22 @@ async function runSweep<T>(dryRun: boolean, label: string, run: () => Promise<T>
 		console.error(`${label} failed:`, cause);
 		return { value: null, error: cause instanceof Error ? cause.message : String(cause) };
 	}
+}
+
+/**
+ * Maps a run failure to the sanitized category persisted on the channel. The
+ * full error is logged server-side; only this coarse reason reaches the
+ * dashboard — provider error bodies can echo request details (tokens, keys)
+ * and must never be stored. Order matters: a 403 naming 'quotaExceeded' is a
+ * quota failure, not an auth one.
+ */
+function categorizeRunFailure(cause: unknown): 'token' | 'quota' | 'scoring' | 'timeout' | 'error' {
+	if (cause instanceof DeadlineExceededError) return 'timeout';
+	const message = (cause instanceof Error ? cause.message : String(cause)).toLowerCase();
+	if (/quota|rate.?limit|429|too many/.test(message)) return 'quota';
+	if (/unauthorized|invalid_grant|invalid_token|401|403|oauth|token|credential/.test(message)) return 'token';
+	if (/openai|scor(e|ing)|moderation/.test(message)) return 'scoring';
+	return 'error';
 }
 
 /**
@@ -186,10 +203,12 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		.returning({ id: channels.id });
 	if (claimed.length === 0) return json({ ...base, claimed: false, results: {} });
 
+	let runFailure: 'token' | 'quota' | 'scoring' | 'timeout' | 'error' | null = null;
 	try {
 		const { result, dryRunWindow } = await runClaimedChannel(channel, deadline);
 		return json({ ...base, results: { [channel.id]: result }, dryRunWindow });
 	} catch (cause) {
+		runFailure = categorizeRunFailure(cause);
 		const message = cause instanceof Error ? cause.message : String(cause);
 		console.error(`channel run ${channel.id} failed:`, cause);
 		return json(
@@ -197,10 +216,18 @@ export const GET: RequestHandler = async ({ url, request }) => {
 			{ status: 500 } // failure must not look like success to the cron caller
 		);
 	} finally {
-		// Record the run even on failure so a failing channel cannot starve the others.
+		// Record the run even on failure so a failing channel cannot starve the
+		// others — but health is kept separate from the rotation timestamp
+		// (MOD-7): a failure must not update the success fields.
 		await db
 			.update(channels)
-			.set({ leaseExpiresAt: null, lastRunAt: nowIso })
+			.set({
+				leaseExpiresAt: null,
+				lastRunAt: nowIso,
+				lastRunStatus: runFailure ? 'failed' : 'success',
+				lastRunError: runFailure,
+				...(runFailure ? {} : { lastSuccessAt: nowIso })
+			})
 			.where(eq(channels.id, channel.id));
 	}
 };

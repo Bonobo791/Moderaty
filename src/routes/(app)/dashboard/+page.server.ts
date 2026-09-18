@@ -44,6 +44,7 @@ export async function load({ locals }) {
 				lastRunStatus: channels.lastRunStatus,
 				lastSuccessAt: channels.lastSuccessAt,
 				lastRunError: channels.lastRunError,
+				active: channels.active,
 				toneLevel: channels.toneLevel,
 				protectLgbtqia: channels.protectLgbtqia,
 				protectWomen: channels.protectWomen,

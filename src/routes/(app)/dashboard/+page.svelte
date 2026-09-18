@@ -56,18 +56,20 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	// Run-health summary: only channels whose last check actually succeeded
 	// count as protected — never-run and failed channels are called out
 	// instead of being swept into the headline claim (MOD-8).
+	const pausedCount = $derived(data.chs.filter((ch: any) => ch.active === 0).length);
 	const protectedCount = $derived(
-		data.chs.filter((ch: any) => ch.lastRunStatus === 'success').length
+		data.chs.filter((ch: any) => ch.active !== 0 && ch.lastRunStatus === 'success').length
 	);
 	const failedCount = $derived(
-		data.chs.filter((ch: any) => ch.lastRunStatus === 'failed').length
+		data.chs.filter((ch: any) => ch.active !== 0 && ch.lastRunStatus === 'failed').length
 	);
-	const uncheckedCount = $derived(data.chs.length - protectedCount - failedCount);
+	const uncheckedCount = $derived(data.chs.length - protectedCount - failedCount - pausedCount);
 	const healthSubline = $derived.by(() => {
-		if (failedCount + uncheckedCount === 0)
+		if (failedCount + uncheckedCount + pausedCount === 0)
 			return `${data.chs.length} channels protected. Queue's clear. Not a single main character slipped past.`;
 		const parts: string[] = [];
 		if (failedCount > 0) parts.push(`${failedCount} failed the last check`);
+		if (pausedCount > 0) parts.push(`${pausedCount} paused`);
 		if (uncheckedCount > 0) parts.push(`${uncheckedCount} waiting for a first check`);
 		return `${protectedCount} of ${data.chs.length} channels protected — ${parts.join(', ')}.`;
 	});
@@ -186,7 +188,10 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 							<span class="mono channel-id col-id">ID: {ch.id}</span>
 						</td>
 						<td>
-							{#if ch.lastRunStatus === 'failed'}
+							{#if ch.active === 0}
+								<span class="caps-label unchecked-label">Paused</span>
+								<span class="status-sub">moderation paused — resume on the channel page</span>
+							{:else if ch.lastRunStatus === 'failed'}
 								<span class="caps-label failed-label">Check failed</span>
 								<span class="status-sub">{failureAction(ch.lastRunError)}</span>
 								<span class="status-sub">last success {ch.lastSuccessAt ? relativeTime(ch.lastSuccessAt) : 'never'}</span>
@@ -199,7 +204,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 								<a class="status-sub pending-link" href="/channels/{ch.id}/queue">
 									{pending} comment{pending === 1 ? '' : 's'} waiting for review
 								</a>
-							{:else if ch.lastRunStatus !== 'failed'}
+							{:else if ch.active !== 0 && ch.lastRunStatus !== 'failed'}
 								<span class="status-sub">queue is clear</span>
 							{/if}
 						</td>

@@ -41,7 +41,7 @@ function monthsAgoBoundary(months: number): string {
 async function updateOwnChannel(
 	orgId: string,
 	channelId: string,
-	values: Partial<Pick<typeof channels.$inferInsert, 'toneLevel' | 'protectLgbtqia' | 'protectWomen'>>
+	values: Partial<Pick<typeof channels.$inferInsert, 'toneLevel' | 'protectLgbtqia' | 'protectWomen' | 'active'>>
 ) {	return db
 		.update(channels)
 		.set(values)
@@ -73,6 +73,25 @@ export const actions = {
 		const updated = await updateOwnChannel(user.orgId, channelId, { protectLgbtqia, protectWomen });
 		if (updated.length === 0) return fail(404, { scope: 'protections', channelId, error: 'channel not found' });
 		return { ok: true };
+	},
+	setPaused: async ({ request, locals }) => {
+		const user = requireUser(locals);
+		const f = await request.formData();
+		const channelId = String(f.get('channelId') ?? '');
+		// Explicit target state — a checkbox-style presence/absence field could
+		// never express "resume" (absent = pause? = resume?). 'true'/'false' is
+		// the only accepted form; anything else is a loud 400, never a guess.
+		const raw = f.get('paused');
+		if (raw !== 'true' && raw !== 'false') {
+			return fail(400, { scope: 'pause', channelId, error: 'paused must be "true" or "false"' });
+		}
+		// active=0 is the only change: cron's active=1 predicate and
+		// runChannel's inactive-skip stop future claims while the channel,
+		// its token, and all its data stay put (MOD-9). Idempotent — pausing
+		// a paused channel is a harmless no-op.
+		const updated = await updateOwnChannel(user.orgId, channelId, { active: raw === 'true' ? 0 : 1 });
+		if (updated.length === 0) return fail(404, { scope: 'pause', channelId, error: 'channel not found' });
+		return { ok: true, scope: 'pause', channelId, paused: raw === 'true' };
 	},
 	analyzeHistory: async ({ request, locals }) => {
 		const user = requireUser(locals);

@@ -34,6 +34,7 @@ const LAYOUT_DATA = {
 		toneLevel: 1,
 		protectLgbtqia: 1,
 		protectWomen: 0,
+		active: 1,
 		scanning: false
 	},
 	pending: 0,
@@ -253,6 +254,33 @@ test('the disconnect danger block is hidden from a member (the action enforces r
 
 test('every control form posts the channel id the moved actions still require', () => {
 	const body = renderPage(LAYOUT_DATA);
-	// Sensitivity, protections, history, dry run, disconnect: five hidden fields.
-	expect(body.match(/name="channelId" value="UC1"/g)).toHaveLength(5);
+	// Pause/resume, sensitivity, protections, history, dry run, disconnect: six hidden fields.
+	expect(body.match(/name="channelId" value="UC1"/g)).toHaveLength(6);
+});
+
+// ── overview page: pause/resume (MOD-9) ─────────────────────────────────
+
+test('an active channel offers a labeled pause control posting paused=true', () => {
+	const body = renderPage(LAYOUT_DATA);
+	expect(body).toContain('action="?/setPaused"');
+	expect(body).toContain('name="paused" value="true"');
+	expect(body).toContain('Pause moderation on My Channel');
+	// No pause state is claimed while the channel is live.
+	expect(body).not.toContain('Moderation is paused');
+	expect(body).not.toContain('Resume moderation');
+});
+
+test('a paused channel shows the paused banner and a resume control posting paused=false', () => {
+	const body = renderPage({ ...LAYOUT_DATA, ch: { ...LAYOUT_DATA.ch, active: 0 } });
+	expect(body).toContain('Moderation is paused for My Channel');
+	expect(body).toContain('cron skips it');
+	expect(body).toContain('name="paused" value="false"');
+	expect(body).toContain('Resume moderation on My Channel');
+	expect(body).not.toContain('Pause moderation on My Channel');
+});
+
+test('a paused-channel failure renders the scoped error', () => {
+	const body = renderPage(LAYOUT_DATA, { scope: 'pause', channelId: 'UC1', error: 'channel not found' });
+	expect(body).toContain('role="alert"');
+	expect(body).toContain('channel not found');
 });

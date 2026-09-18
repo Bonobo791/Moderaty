@@ -36,6 +36,22 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	<title>Moderaty — {ch.title}</title>
 </svelte:head>
 
+{#if ch.active === 0}
+	<p class="paused-banner" role="status">
+		Moderation is paused for {ch.title} — cron skips it and new comments go unchecked.
+		Nothing is deleted and the connection stays live; resume any time.
+	</p>
+{/if}
+<form class="pause-form" method="POST" action="?/setPaused" use:enhance>
+	<input type="hidden" name="channelId" value={ch.id} />
+	<input type="hidden" name="paused" value={ch.active === 0 ? 'false' : 'true'} />
+	<button class="btn secondary small" type="submit">
+		{ch.active === 0 ? `Resume moderation on ${ch.title}` : `Pause moderation on ${ch.title}`}
+	</button>
+</form>
+{#if form?.scope === 'pause' && form?.error}
+	<p class="error-box" role="alert">{form.error}</p>
+{/if}
 <SensitivitySwitch channelId={ch.id} channelTitle={ch.title} level={ch.toneLevel ?? 1} />
 <form class="protections" method="POST" action="?/setProtections" use:enhance>
 	<input type="hidden" name="channelId" value={ch.id} />
@@ -167,6 +183,15 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		align-items: center;
 		flex-wrap: wrap;
 		margin-top: 10px;
+	}
+	.pause-form {
+		margin: 0 0 10px;
+	}
+	.paused-banner {
+		margin: 0 0 10px;
+		padding: 10px 12px;
+		border: 1px solid var(--accent);
+		font-size: 0.9rem;
 	}
 	.channel-disconnect {
 		margin-top: 14px;

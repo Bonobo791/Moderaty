@@ -44,6 +44,7 @@ const CHS = [
 		lastRunStatus: 'success',
 		lastSuccessAt: '2026-08-01T00:00:00Z',
 		lastRunError: null,
+		active: 1,
 		toneLevel: 1,
 		protectLgbtqia: 0,
 		protectWomen: 0,
@@ -57,6 +58,7 @@ const CHS = [
 		lastRunStatus: 'success',
 		lastSuccessAt: '2026-07-30T00:00:00Z',
 		lastRunError: null,
+		active: 1,
 		toneLevel: 2,
 		protectLgbtqia: 0,
 		protectWomen: 0,
@@ -70,6 +72,7 @@ const CHS = [
 		lastRunStatus: null,
 		lastSuccessAt: null,
 		lastRunError: null,
+		active: 1,
 		toneLevel: 2,
 		protectLgbtqia: 0,
 		protectWomen: 0,
@@ -260,6 +263,24 @@ test('a never-run channel waits for its first check instead of looking protected
 	expect(row).not.toContain('Check failed');
 	// The queue state stays real underneath — nothing pending is still clear.
 	expect(row).toContain('queue is clear');
+});
+
+test('a paused channel reads as paused — never protected, failed, or never-run (MOD-9)', () => {
+	// Even with a healthy last-run record, a paused channel is not protected:
+	// cron stops claiming it, so "Protected" would be a lie.
+	const paused = {
+		...QUIET_DATA,
+		chs: CHS.map((ch) => (ch.id === 'UC2' ? { ...ch, active: 0 } : ch))
+	};
+	const body = renderPage(paused);
+	const row = rowFor(body, 'Second Channel');
+	expect(row).toContain('Paused');
+	expect(row).not.toContain('Protected');
+	expect(row).not.toContain('Check failed');
+	expect(row).not.toContain('Not checked yet');
+	expect(row).toContain('resume on the channel page');
+	// UC2 paused + UC3 never-run → only UC1 counts as protected.
+	expect(body).toContain('1 of 3 channels protected — 1 paused, 1 waiting for a first check.');
 });
 
 /** The markup of ONE ledger row, cut out so a sensitivity pin can never be

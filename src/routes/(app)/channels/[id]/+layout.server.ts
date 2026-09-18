@@ -39,6 +39,7 @@ function maintenancePayload(channelId: string, tab: ChannelTab) {
 			toneLevel: null,
 			protectLgbtqia: 0,
 			protectWomen: 0,
+			active: 1,
 			scanning: false
 		},
 		pending: 0,
@@ -80,6 +81,7 @@ export async function load({ params, locals, url }) {
 			toneLevel: row.toneLevel,
 			protectLgbtqia: row.protectLgbtqia,
 			protectWomen: row.protectWomen,
+			active: row.active,
 			scanning: row.nextPageToken !== null
 		};
 		return { ch, pending, banned, tab, maintenance: false, orgRole: user.orgRole };

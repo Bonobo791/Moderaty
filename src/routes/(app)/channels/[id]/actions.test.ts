@@ -645,6 +645,11 @@ test.each([
 		echoes: true
 	},
 	{
+		name: 'set paused',
+		call: () => actions.setPaused({ request: postForm({ paused: 'true' }), locals: { user: OWNER } } as never),
+		echoes: true
+	},
+	{
 		name: 'dry run',
 		call: () => actions.dryRun({ request: postForm({}), locals: { user: OWNER } } as never),
 		echoes: true
@@ -662,7 +667,103 @@ test.each([
 	expect(await toneLevelOf('Stryker was here!')).toBeNull();
 	expect(await scanWindowOf('Stryker was here!')).toEqual({ cursor: null, nextPageToken: null, scanCursor: null });
 	expect(await protectionsOf('Stryker was here!')).toEqual({ protectLgbtqia: 0, protectWomen: 0 });
+	expect(await activeOf('Stryker was here!')).toBe(1);
 	expect(mocks.runChannel).not.toHaveBeenCalled();
+});
+
+// --- setPaused: user-facing pause/resume (MOD-9) ---------------------------
+// Pausing flips channels.active — cron's active=1 predicate and runChannel's
+// inactive-skip do the rest. Nothing else may change: no token revocation,
+// no row deletion, no cursor/scan-state churn.
+
+function setPaused(channelId: string, paused: string, user: typeof OWNER | null = OWNER) {
+	return actions.setPaused({ request: postForm({ channelId, paused }), locals: { user } } as never);
+}
+
+async function activeOf(id: string) {
+	return (await channelById(id))?.active;
+}
+
+test('pause deactivates the channel while keeping every row and the token intact', async () => {
+	await seedChannelWithToken('UC1', 'google-refresh-token');
+	await seedChannelData('UC1');
+	await testDb()
+		.db.update(channels)
+		.set({ cursor: '2026-07-30T00:00:00.000Z', lastRunAt: '2026-08-01T00:00:00.000Z' })
+		.where(eq(channels.id, 'UC1'));
+	const fetchSpy = stubRevoke();
+	try {
+		const res = await setPaused('UC1', 'true');
+
+		expect(res).toMatchObject({ ok: true, scope: 'pause', channelId: 'UC1' });
+		expect(await activeOf('UC1')).toBe(0);
+		// Pause is NOT disconnect: the channel and everything it owns survives,
+		// no revocation call is made, and scheduling state is left alone.
+		expect(await rowsOf('UC1')).toEqual(INTACT);
+		expect(fetchSpy).not.toHaveBeenCalled();
+		const ch = await channelById('UC1');
+		expect(ch?.cursor).toBe('2026-07-30T00:00:00.000Z');
+		expect(ch?.lastRunAt).toBe('2026-08-01T00:00:00.000Z');
+	} finally {
+		vi.unstubAllGlobals();
+	}
+});
+
+test('resume reactivates the channel so cron rotation picks it up again', async () => {
+	await seedChannel('UC1');
+	await testDb().db.update(channels).set({ active: 0 }).where(eq(channels.id, 'UC1'));
+
+	const res = await setPaused('UC1', 'false');
+
+	expect(res).toMatchObject({ ok: true });
+	expect(await activeOf('UC1')).toBe(1);
+});
+
+test('pause is idempotent — pausing a paused channel stays paused without error', async () => {
+	await seedChannel('UC1');
+	await testDb().db.update(channels).set({ active: 0 }).where(eq(channels.id, 'UC1'));
+
+	const res = await setPaused('UC1', 'true');
+
+	expect(res).toMatchObject({ ok: true });
+	expect(await activeOf('UC1')).toBe(0);
+});
+
+test.each([{ paused: 'yes' }, { paused: '1' }, { paused: '' }])(
+	'setPaused rejects invalid paused value "$paused" with 400 and changes nothing',
+	async ({ paused }) => {
+		await seedChannel('UC1');
+
+		const res = await setPaused('UC1', paused);
+
+		expect(res).toMatchObject({ status: 400, data: { scope: 'pause', channelId: 'UC1' } });
+		expect(await activeOf('UC1')).toBe(1);
+	}
+);
+
+test('setPaused reads an unknown channel as 404', async () => {
+	const res = await setPaused('UC-missing', 'true');
+
+	expect(res).toMatchObject({
+		status: 404,
+		data: { scope: 'pause', channelId: 'UC-missing', error: 'channel not found' }
+	});
+});
+
+test('setPaused reads another team\'s channel as 404 and leaves it running', async () => {
+	await seedChannel('UC1', 'user-2', 'org-2');
+
+	const res = await setPaused('UC1', 'true');
+
+	expect(res).toMatchObject({ status: 404 });
+	expect(await activeOf('UC1')).toBe(1);
+});
+
+test('setPaused rejects a signed-out request with 401', async () => {
+	await seedChannel('UC1');
+
+	await expect(setPaused('UC1', 'true', null)).rejects.toMatchObject({ status: 401 });
+	expect(await activeOf('UC1')).toBe(1);
 });
 
 // --- disconnectChannel: full removal of a channel and all its data ---------

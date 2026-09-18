@@ -117,10 +117,10 @@ export async function stageDecisions(channelId: string, decisions: Decision[], o
 		// budget); a comment whose charge fails (balance hit 0 mid-batch)
 		// stages free.
 		if (orgId) {
-			// Unmetered orgs (NULL balance — self-hosted, lifetime, pre-billing)
-			// are unlimited: their consumeCredit attempts are DESIGNED no-ops
-			// (the NULL-balance guard rejects the charge), so only a METERED
-			// org's failed charge is an anomaly worth aborting for.
+			// Unmetered orgs (self-hosted, lifetime, pre-billing) are unlimited:
+			// their consumeCredit attempts are DESIGNED no-ops (the NULL-balance
+			// guard or the unmetered-plan early return rejects the charge), so
+			// only a METERED org's failed charge is an anomaly worth aborting for.
 			const metered = await orgIsMetered(orgId);
 			for (const decision of decisions) {
 				if (!decision.billable) continue;

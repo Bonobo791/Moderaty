@@ -194,6 +194,18 @@ describe('assertCreditsPurchasable', () => {
 
 
 describe('consumeCredit', () => {
+	test('an unmetered (lifetime) org never consumes a credit, even holding a balance', async () => {
+		// Unlimited scoring must not burn a stranded pre-upgrade balance 1 per
+		// AI comment — no decrement, no ledger row. The MOD-36 decision: the
+		// balance freezes until the org is metered again.
+		await seedOrg('org-1', 500, 'cus_1');
+		await testDb().db.update(organizations).set({ plan: 'lifetime' }).where(eq(organizations.id, 'org-1'));
+		expect(await consumeCredit(db, 'org-1', 'comment-1')).toBe(false);
+		const org = await testDb().db.select({ creditsRemaining: organizations.creditsRemaining }).from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.creditsRemaining).toBe(500);
+		expect(await testDb().db.select().from(creditTransactions)).toHaveLength(0);
+	});
+
 	test('charges one credit and records the row with the new balance', async () => {
 		await seedOrg('org-1', 5);
 		const charged = await consumeCredit(db, 'org-1', 'comment-1');

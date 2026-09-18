@@ -542,6 +542,29 @@ describe('credit consumption (billing)', () => {
 		expect(mocks.state.insertedCredits).toEqual([]);
 	});
 
+	test('a lifetime org holding a stranded balance scores AI unlimited and burns none of it', async () => {
+		// The org bought credits while metered, then upgraded to lifetime: the
+		// balance freezes — scoring is unlimited and consumeCredit no-ops for
+		// unmetered plans (MOD-36). Staging can never abort on a failed charge.
+		mocks.state.channel.orgId = 'org-1';
+		mocks.state.plan = 'lifetime';
+		mocks.state.credits = 500;
+		mocks.scoreComment.mockResolvedValue(moderation(0.1));
+		mocks.fetchNewComments.mockResolvedValue({
+			comments: [newComment({ id: 'a' }), newComment({ id: 'b' })],
+			nextPageToken: null,
+			reachedCursor: true
+		});
+
+		const result = await runChannel('channel');
+
+		expect(mocks.scoreComment).toHaveBeenCalledTimes(2);
+		expect(mocks.state.insertedComments).toHaveLength(2);
+		expect(mocks.state.insertedCredits).toEqual([]);
+		expect(mocks.state.credits).toBe(500); // frozen — never burned
+		expect(result.outOfCredits).toBeUndefined();
+	});
+
 	test('a comment whose credit charge FAILS (balance exhausted concurrently) aborts the staging — never stages free', async () => {
 		// Two concurrent cron invocations on different channels of the same
 		// metered org can both read the same balance into their in-memory AI

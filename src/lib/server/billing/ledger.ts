@@ -213,6 +213,12 @@ export async function consumeCredit(handle: LedgerHandle, orgId: string, comment
 			.where(eq(organizations.id, orgId))
 			.get();
 		if (!org) throw new Error(`org not found: ${orgId}`);
+		// Unmetered plans (lifetime) never consume: their scoring is already
+		// unlimited, so a stranded pre-upgrade balance must not burn 1-per-
+		// comment for nothing — it freezes until the org is metered again
+		// (MOD-36). Returns false like an exhausted balance; staging only
+		// treats that as fatal for METERED orgs.
+		if (isUnmeteredPlan(org.plan)) return false;
 		const inserted = await tx
 			.insert(creditTransactions)
 			.values({

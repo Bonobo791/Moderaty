@@ -27,6 +27,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	import Ticker from '$lib/Ticker.svelte';
 	import { autoRefresh } from '$lib/auto-refresh.svelte';
 	import { relativeTime } from '$lib/relative-time';
+	import { TONE_LEVEL_OMNI_AND_TONE } from '$lib/toneLevels';
 
 	let { data } = $props();
 
@@ -135,7 +136,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 			<tbody>
 				{#each data.chs as ch (ch.id)}
 					{@const pending = count(ch.id, 'pending')}
-					{@const strict = ch.toneLevel === 2}
+					{@const strict = ch.toneLevel === TONE_LEVEL_OMNI_AND_TONE}
 					<!-- The row itself is a keyboard-focusable link (Enter navigates);
 						the name cell keeps a real anchor for href semantics. -->
 					<tr

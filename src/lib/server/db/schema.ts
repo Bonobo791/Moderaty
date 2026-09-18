@@ -257,7 +257,7 @@ export const channels = sqliteTable('channels', {
 	leaseExpiresAt: text('lease_expires_at'), // expiring cron claim; null or past = claimable
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	active: integer('active').notNull().default(1),
-	toneLevel: integer('tone_level'), // moderation sensitivity: null or 1 = omni only, 2 = omni + tone pass
+	toneLevel: integer('tone_level'), // moderation sensitivity ($lib/toneLevels): null or TONE_LEVEL_OMNI_ONLY(1) = omni only, TONE_LEVEL_OMNI_AND_TONE(2) = omni + tone pass
 	protectLgbtqia: integer('protect_lgbtqia').notNull().default(0), // protection setting: 1 = heightened protection for comments targeting LGBTQIA+ people
 	protectWomen: integer('protect_women').notNull().default(0), // protection setting: 1 = heightened protection for comments targeting women
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)

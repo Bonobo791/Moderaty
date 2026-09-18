@@ -10,6 +10,7 @@ import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
 import { DeadlineExceededError } from '$lib/server/http';
 import { resolveOpenAiKey } from '$lib/server/openaiKey';
+import { TONE_LEVEL_OMNI_ONLY } from '$lib/toneLevels';
 import { fetchNewComments, refreshAccessToken, type CommentPage } from '$lib/server/youtube';
 import { assertChannelActive, ChannelDeactivatedError, runEnforcement } from './enforcement';
 import { decideNewComments } from './scoring';
@@ -142,7 +143,7 @@ export async function runChannel(
 
 		const { decisions, failures, deferred } = await decideNewComments(channelId, page, {
 			accessToken,
-			toneLevel: channel.toneLevel ?? 1,
+			toneLevel: channel.toneLevel ?? TONE_LEVEL_OMNI_ONLY,
 			protections: {
 				protectLgbtqia: channel.protectLgbtqia ?? 0,
 				protectWomen: channel.protectWomen ?? 0

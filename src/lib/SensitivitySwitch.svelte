@@ -26,6 +26,11 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 
 <script lang="ts">
 	import { enhance } from '$app/forms';
+	import {
+		TONE_LEVEL_OMNI_ONLY,
+		TONE_LEVEL_OMNI_AND_TONE,
+		type ToneLevel
+	} from '$lib/toneLevels';
 
 	let {
 		channelId,
@@ -38,12 +43,12 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	} = $props();
 
 	const MODES = {
-		1: {
+		[TONE_LEVEL_OMNI_ONLY]: {
 			stop: 'EDGE LORD',
 			name: 'EDGE LORD',
 			description: 'Only clear hate speech and spam get yeeted. Snark survives.'
 		},
-		2: {
+		[TONE_LEVEL_OMNI_AND_TONE]: {
 			stop: 'STRICT',
 			name: 'EDGE LORD + ACKCHYUALLY...',
 			description:
@@ -52,9 +57,11 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	} as const;
 
 	// Displayed selection; 0/100 is the spec's slider value space.
-	let selected = $state<1 | 2>();
-	const selectedValue = $derived(selected ?? (level === 2 ? 2 : 1));
-	const v = $derived(selectedValue === 2 ? 100 : 0);
+	let selected = $state<ToneLevel>();
+	const selectedValue = $derived(
+		selected ?? (level === TONE_LEVEL_OMNI_AND_TONE ? TONE_LEVEL_OMNI_AND_TONE : TONE_LEVEL_OMNI_ONLY)
+	);
+	const v = $derived(selectedValue === TONE_LEVEL_OMNI_AND_TONE ? 100 : 0);
 	const mode = $derived(MODES[selectedValue]);
 	// Keeps the knob inside the track at both stops (spec Step 3.2).
 	const knobLeft = $derived(v === 0 ? 'calc(0% + 20px)' : 'calc(100% - 20px)');
@@ -74,7 +81,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	// Server state wins while nothing awaits persistence (autoRefresh
 	// revalidates the load every 15s; another surface may change the level).
 	$effect(() => {
-		if (!dirty) selected = level === 2 ? 2 : 1;
+		if (!dirty) selected = level === TONE_LEVEL_OMNI_AND_TONE ? TONE_LEVEL_OMNI_AND_TONE : TONE_LEVEL_OMNI_ONLY;
 	});
 	$effect(() => () => clearTimeout(debounceTimer));
 	$effect(() => () => {
@@ -82,7 +89,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		clearTimeout(appliedFadeTimer);
 	});
 
-	function choose(next: 1 | 2) {
+	function choose(next: ToneLevel) {
 		if (next === selectedValue) return;
 		selected = next;
 		dirty = true;
@@ -112,23 +119,23 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		if (result.type === 'success') {
 			showApplied();
 		} else if (result.type === 'failure' || result.type === 'error') {
-			selected = level === 2 ? 2 : 1;
+			selected = level === TONE_LEVEL_OMNI_AND_TONE ? TONE_LEVEL_OMNI_AND_TONE : TONE_LEVEL_OMNI_ONLY;
 		}
 	}
 
 	function onTrackClick(event: MouseEvent) {
 		if (dragging || !trackEl) return;
 		const rect = trackEl.getBoundingClientRect();
-		choose(event.clientX - rect.left < rect.width / 2 ? 1 : 2);
+		choose(event.clientX - rect.left < rect.width / 2 ? TONE_LEVEL_OMNI_ONLY : TONE_LEVEL_OMNI_AND_TONE);
 	}
 
 	function onTrackKeydown(event: KeyboardEvent) {
 		if (event.key === 'ArrowRight' || event.key === 'ArrowUp' || event.key === 'End') {
 			event.preventDefault();
-			choose(2);
+			choose(TONE_LEVEL_OMNI_AND_TONE);
 		} else if (event.key === 'ArrowLeft' || event.key === 'ArrowDown' || event.key === 'Home') {
 			event.preventDefault();
-			choose(1);
+			choose(TONE_LEVEL_OMNI_ONLY);
 		}
 	}
 
@@ -142,7 +149,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	function onKnobPointermove(event: PointerEvent) {
 		if (!dragging || !trackEl) return;
 		const rect = trackEl.getBoundingClientRect();
-		choose(event.clientX - rect.left < rect.width / 2 ? 1 : 2);
+		choose(event.clientX - rect.left < rect.width / 2 ? TONE_LEVEL_OMNI_ONLY : TONE_LEVEL_OMNI_AND_TONE);
 	}
 	function onKnobPointerup() {
 		dragging = false;
@@ -161,9 +168,9 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		<button
 			type="button"
 			class="endpoint chill"
-			class:inactive={selectedValue !== 1}
+			class:inactive={selectedValue !== TONE_LEVEL_OMNI_ONLY}
 			aria-label="Set sensitivity to Edge Lord"
-			onclick={() => choose(1)}
+			onclick={() => choose(TONE_LEVEL_OMNI_ONLY)}
 		>
 			<img src="/edge-lord.jpg" alt="" width="44" height="44" />
 			EDGE LORD
@@ -202,9 +209,9 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		<button
 			type="button"
 			class="endpoint strict"
-			class:inactive={selectedValue !== 2}
+			class:inactive={selectedValue !== TONE_LEVEL_OMNI_AND_TONE}
 			aria-label="Set sensitivity to Edge Lord plus Ackchyually"
-			onclick={() => choose(2)}
+			onclick={() => choose(TONE_LEVEL_OMNI_AND_TONE)}
 		>
 			<img src="/ackchyually.gif" alt="" width="44" height="44" />
 			EDGE LORD + ACKCHYUALLY&hellip;
@@ -213,7 +220,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 
 	{#key selectedValue}
 		<div class="readout">
-			<span class="mode-stop mono" class:strict={selectedValue === 2}>{mode.stop}</span>
+			<span class="mode-stop mono" class:strict={selectedValue === TONE_LEVEL_OMNI_AND_TONE}>{mode.stop}</span>
 			<div class="mode-copy">
 				{#if mode.name !== mode.stop}
 					<span class="caps-label mode-name">{mode.name}</span>

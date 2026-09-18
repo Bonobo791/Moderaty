@@ -21,6 +21,7 @@ import { revokeGoogleToken } from '$lib/server/google';
 import { requireOrgRole } from '$lib/server/ownership';
 import { runChannel } from '$lib/server/pipeline';
 import { requireUser } from '$lib/server/session';
+import { isToneLevel } from '$lib/toneLevels';
 import { and, eq, isNull, lt, or } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { error, fail, redirect } from '@sveltejs/kit';
@@ -54,7 +55,7 @@ export const actions = {
 		const f = await request.formData();
 		const channelId = String(f.get('channelId') ?? '');
 		const toneLevel = Number(f.get('toneLevel'));
-		if (toneLevel !== 1 && toneLevel !== 2) {
+		if (!isToneLevel(toneLevel)) {
 			return fail(400, { error: 'tone level must be 1 (Edge Lord) or 2 (Edge lord + Ackchyually…)' });
 		}
 		const updated = await updateOwnChannel(user.orgId, channelId, { toneLevel });

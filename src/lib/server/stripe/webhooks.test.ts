@@ -142,7 +142,7 @@ describe('paid hosted products', () => {
 		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1' });
 		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lifetime', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
 		expect(await fulfillCheckout('cs_lifetime')).toBe('rejected');
-		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_1' }, { idempotencyKey: 'refund:lifetime-soldout:cs_lifetime' });
+		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_1' }, { idempotencyKey: 'refund:ungrantable:cs_lifetime' });
 		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
 		expect(org?.plan).not.toBe('lifetime');
 		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toHaveLength(0);
@@ -154,6 +154,32 @@ describe('paid hosted products', () => {
 		mocks.sessionsRetrieve.mockResolvedValue(session({ metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: { id: 'ch_1', refunded: true } } }));
 		expect(await fulfillCheckout('cs_lifetime')).toBe('rejected');
 		expect(mocks.refundsCreate).not.toHaveBeenCalled();
+	});
+
+	test('a paid duplicate lifetime checkout for an org that already has lifetime auto-refunds', async () => {
+		// Same class as sold-out: the checkout is paid but can grant nothing.
+		// Covers the sequential duplicate AND the concurrent race whose loser
+		// dies on the unique active-org index — the recovery re-read sees the
+		// winner's committed row either way.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'lifetime' });
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1', activeEntitlementId: 1 }).where(eq(stripeLifetimeSlots.slot, 1));
+		await testDb().db.insert(stripeLifetimeEntitlements).values({ id: 1, orgId: 'org-1', slot: 1, checkoutSessionId: 'cs_first' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_dup', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_2', latest_charge: 'ch_2' } }));
+		expect(await fulfillCheckout('cs_dup')).toBe('rejected');
+		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_2' }, { idempotencyKey: 'refund:ungrantable:cs_dup' });
+		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toHaveLength(1);
+	});
+
+	test('a credit checkout fulfilled after the org went lifetime refunds instead of granting', async () => {
+		// assertCreditsPurchasable guards checkout CREATION; the grant itself
+		// must stay gated atomically or an in-flight checkout grants credits a
+		// lifetime org can never use (review: TOCTOU).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'lifetime', creditsRemaining: 100 });
+		mocks.sessionsRetrieve.mockResolvedValue(session());
+		expect(await fulfillCheckout('cs_123')).toBe('rejected');
+		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_1' }, { idempotencyKey: 'refund:ungrantable:cs_123' });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.creditsRemaining).toBe(100);
 	});
 });
 

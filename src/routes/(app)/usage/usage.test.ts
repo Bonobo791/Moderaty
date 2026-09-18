@@ -249,7 +249,9 @@ describe('usage load', () => {
 		expect(soldOut).toContain('sold out');
 
 		const owned = render(Page, {
-			props: { data: { ...base, lifetimeSlots: 0, billing: { plan: 'lifetime', subscriptionStatus: null, periodEnd: null } }, form: null } as never
+			// plans.hosted configured too — a lifetime org must not get a hosted
+			// buy form the server would only reject as an overlap (review).
+			props: { data: { ...base, plans: { hosted: true, lifetime: true }, lifetimeSlots: 0, billing: { plan: 'lifetime', subscriptionStatus: null, periodEnd: null } }, form: null } as never
 		}).body;
 		expect(owned).not.toContain('action="?/buyPlan"');
 		expect(owned).toContain('lifetime plan');

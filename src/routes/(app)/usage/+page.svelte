@@ -104,7 +104,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		<h2 style="margin-top:0">Plans</h2>
 		<p class="muted">Current plan: <strong>{data.billing?.plan ?? 'free'}</strong>{#if data.billing?.periodEnd} · period ends {new Date(data.billing.periodEnd).toLocaleDateString()}{/if}</p>
 		<div class="plan-actions">
-			{#if data.plans.hosted}
+			{#if data.plans.hosted && data.billing?.plan !== 'lifetime'}
 				<form method="POST" action="?/buyPlan" use:enhance={submitting}>
 					<input type="hidden" name="plan" value="hosted" />
 					<input type="hidden" name="attempt_id" value={checkoutAttempts.hosted ?? ''} />

@@ -27,7 +27,7 @@ import { randomUUID } from 'node:crypto';
 
 import { db } from '$lib/server/db';
 import { organizations, creditTransactions, stripeEvents, stripeLifetimeEntitlements, stripeDisputeReversals } from '$lib/server/db/schema';
-import { applyLedgerDelta, drainPendingReversals, findGrantForStripe, queuePendingReversal } from '$lib/server/billing/ledger';
+import { applyLedgerDelta, drainPendingReversals, findGrantForStripe, queuePendingReversal, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
 import { grantAutoTopupCredits, handleAutoTopupFailure } from '$lib/server/billing/autotopup';
 import { claimLifetimeSlot, grantSubscriptionPeriod, refundSubscriptionPeriod, disputeSubscriptionPeriod, releaseLifetimeForPayment, applySubscriptionSnapshot, revokeLifetimeForDispute, restoreLifetimeForDispute, restoreDisputedSubscriptionPeriod, LIFETIME_SOLD_OUT_ERROR } from '$lib/server/billing/entitlements';
 import { bundleById, type CreditBundle } from '$lib/server/stripe/bundles';
@@ -202,7 +202,13 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 			return 'rejected';
 		}
 		const activeLifetime = await db.select({ id: stripeLifetimeEntitlements.id }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
-		if (activeLifetime) return 'already';
+		// A second lifetime checkout for an org that already has one is paid
+		// but can grant nothing — refund it like a slotless checkout rather
+		// than reporting 'already' success while keeping the money (review).
+		if (activeLifetime) {
+			await refundUngrantableCheckout(sessionId, orgId, paymentIntent, charge, 'the org already has an active lifetime plan');
+			return 'rejected';
+		}
 		let result;
 		try {
 			result = await claimLifetimeSlot({
@@ -212,8 +218,15 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 				chargeId: typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : charge?.id
 			});
 		} catch (error) {
-			if (!(error instanceof Error && error.message === LIFETIME_SOLD_OUT_ERROR)) throw error;
-			await refundSlotlessLifetime(sessionId, orgId, paymentIntent, charge);
+			if (!(error instanceof Error && error.message === LIFETIME_SOLD_OUT_ERROR)) {
+				// A concurrent same-org claim loses on the unique active-org
+				// index; the aborted tx's snapshot could not see the winner, so
+				// re-read fresh — a winner means this was a paid duplicate and
+				// falls into the same refund path, anything else is a real error.
+				const winner = await db.select({ id: stripeLifetimeEntitlements.id }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
+				if (!winner) throw error;
+			}
+			await refundUngrantableCheckout(sessionId, orgId, paymentIntent, charge, 'claimed no slot');
 			return 'rejected';
 		}
 		if (result.status === 'active' && result.slot > 0) return 'granted';
@@ -231,15 +244,25 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 	// Narrow the expanded object once (chargeId prefers the expanded
 	// object's id — it is the same id either way).
 	const chargeId = typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : charge?.id;
-	const applied = await applyLedgerDelta(db, {
-		orgId,
-		delta: creditsForBundle(bundle),
-		reason: 'purchase',
-		refType: 'checkout_session',
-		refId: sessionId,
-		paymentIntentId: paymentIntent?.id,
-		chargeId
-	});
+	let applied;
+	try {
+		applied = await applyLedgerDelta(db, {
+			orgId,
+			delta: creditsForBundle(bundle),
+			reason: 'purchase',
+			refType: 'checkout_session',
+			refId: sessionId,
+			paymentIntentId: paymentIntent?.id,
+			chargeId
+		});
+	} catch (error) {
+		// A checkout opened before the org went lifetime fulfills against an
+		// unmetered plan — paid credits that can never be used get refunded
+		// (review: the grant, not just checkout creation, must be gated).
+		if (!(error instanceof Error && error.message === UNMETERED_CREDIT_GRANT_ERROR)) throw error;
+		await refundUngrantableCheckout(sessionId, orgId, paymentIntent, charge, 'the org is on an unmetered plan');
+		return 'rejected';
+	}
 	// A refund/dispute event may have arrived BEFORE this grant (Stripe does
 	// not order deliveries): apply the queued reversal now, in the same
 	// breath as the grant, so the customer never keeps credits for money that
@@ -259,32 +282,34 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 }
 
 /**
- * A paid lifetime checkout that found no slot gets its money back — loudly,
- * idempotently. Never throws: the webhook must ACK since no retry can mint a
- * slot; a refund failure logs MANUAL REFUND REQUIRED for a human.
+ * A paid checkout that cannot grant anything gets its money back — loudly,
+ * idempotently (sold-out lifetime, duplicate lifetime, post-upgrade credit
+ * purchase). Never throws: the webhook must ACK since no retry can make the
+ * checkout grantable; a refund failure logs MANUAL REFUND REQUIRED.
  */
-async function refundSlotlessLifetime(
+async function refundUngrantableCheckout(
 	sessionId: string,
 	orgId: string,
 	paymentIntent: Stripe.PaymentIntent | null,
-	charge: Stripe.Charge | null | undefined
+	charge: Stripe.Charge | null | undefined,
+	reason: string
 ): Promise<void> {
 	if (!paymentIntent?.id) {
-		console.error(`stripe: lifetime checkout ${sessionId} for org ${orgId} was PAID but claimed no slot and has no payment intent — MANUAL REFUND REQUIRED`);
+		console.error(`stripe: checkout ${sessionId} for org ${orgId} was PAID but ${reason} and has no payment intent — MANUAL REFUND REQUIRED`);
 		return;
 	}
 	if (charge?.refunded === true) {
-		console.error(`stripe: lifetime checkout ${sessionId} for org ${orgId} was slotless but charge ${charge.id} is already refunded`);
+		console.error(`stripe: checkout ${sessionId} for org ${orgId} was ungrantable (${reason}) but charge ${charge.id} is already refunded`);
 		return;
 	}
 	try {
 		await getStripe().refunds.create(
 			{ payment_intent: paymentIntent.id },
-			{ idempotencyKey: `refund:lifetime-soldout:${sessionId}` }
+			{ idempotencyKey: `refund:ungrantable:${sessionId}` }
 		);
-		console.error(`stripe: lifetime checkout ${sessionId} for org ${orgId} was PAID but claimed no slot — auto-refunded payment intent ${paymentIntent.id}`);
+		console.error(`stripe: checkout ${sessionId} for org ${orgId} was PAID but ${reason} — auto-refunded payment intent ${paymentIntent.id}`);
 	} catch (error) {
-		console.error(`stripe: lifetime checkout ${sessionId} auto-refund FAILED for org ${orgId} — MANUAL REFUND REQUIRED: ${error instanceof Error ? error.message : String(error)}`);
+		console.error(`stripe: checkout ${sessionId} auto-refund FAILED for org ${orgId} — MANUAL REFUND REQUIRED: ${error instanceof Error ? error.message : String(error)}`);
 	}
 }
 

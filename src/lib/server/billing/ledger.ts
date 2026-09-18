@@ -144,6 +144,8 @@ export async function assertCreditsPurchasable(orgId: string): Promise<void> {
 	}
 }
 
+export const UNMETERED_CREDIT_GRANT_ERROR = 'an unmetered plan cannot receive credit grants';
+
 /**
  * Applies a credit ledger adjustment exactly once.
  *
@@ -159,11 +161,17 @@ export async function applyLedgerDelta(
 		// never surface the FK constraint error instead (the org FK is
 		// defense-in-depth, not the primary guard).
 		const org = await tx
-			.select({ id: organizations.id })
+			.select({ id: organizations.id, plan: organizations.plan })
 			.from(organizations)
 			.where(eq(organizations.id, orgId))
 			.get();
 		if (!org) throw new Error(`org not found: ${orgId}`);
+		// The atomic counterpart of assertCreditsPurchasable: checkout creation
+		// is gated at the form, but a checkout in flight when the org went
+		// lifetime must still not grant — paid-but-unusable credits get
+		// refunded by the caller (review: TOCTOU). Only positive deltas are
+		// blocked; reversals must always be able to claw a stranded balance back.
+		if (delta > 0 && isUnmeteredPlan(org.plan)) throw new Error(UNMETERED_CREDIT_GRANT_ERROR);
 		const inserted = await tx
 			.insert(creditTransactions)
 			.values({

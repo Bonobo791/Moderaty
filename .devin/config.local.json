@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Exec(node)",
+      "Exec(git add)",
+      "Exec(gh pr)",
+      "Exec(gh api)",
+      "Exec(git commit)",
+      "Exec(git pull)",
+      "Exec(git remote)",
+      "Exec(curl)",
+      "Exec(npx vitest)",
+      "Exec(cat)",
+      "Exec(date)",
+      "Exec(grep)",
+      "Exec(python3)",
+      "Exec(TURSO_DATABASE_URL=\"file:/tmp/hook-gate-test.db\" TURSO_AUTH_TOKEN=\"\" node)",
+      "Exec(CONTEXT=production MODERATY_PREFLIGHT_BIN=/tmp/fake MODERATY_DRIZZLE_KIT_BIN=/tmp/fake2 MODERATY_VERIFY_BIN=/tmp/fake3 TURSO_DATABASE_URL=\"file:/tmp/hook-gate2.db\" TURSO_AUTH_TOKEN=\"\" node)",
+      "Exec(cd)",
+      "Exec(find)",
+      "Exec(npm run)",
+      "Exec(rg)",
+      "Exec(sed)",
+      "Exec(git)",
+      "Exec(dotenv)",
+      "Exec(env)",
+      "Exec(xargs)",
+      "Exec(cp)",
+      "Exec(npm install)"
+    ]
+  }
+}

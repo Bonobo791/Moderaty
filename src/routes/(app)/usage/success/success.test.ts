@@ -138,7 +138,30 @@ describe('usage/success load', () => {
 			expect(data.granted).toBe(false);
 			expect(data.failed).toBe(false);
 			expect(data.refunded).toBe(true);
-			expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_dup', metadata: { reason: 'ungrantable' } }, { idempotencyKey: 'refund:ungrantable:cs_dup' });
+			expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_dup', metadata: { reason: 'ungrantable', org_id: 'org-1', checkout_session_id: 'cs_dup' } }, { idempotencyKey: 'refund:ungrantable:cs_dup' });
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('a failed automatic refund shows the failed state — never "we are processing it"', async () => {
+		// The refund resolved terminally FAILED at Stripe: reporting pending
+		// ("payment received, processing") would tell the buyer a refund is on
+		// its way when none is — the honest state is the generic failure with
+		// support contact (codex P1).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'lifetime' });
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1', activeEntitlementId: 1 }).where(eq(stripeLifetimeSlots.slot, 1));
+		await testDb().db.insert(stripeLifetimeEntitlements).values({ id: 1, orgId: 'org-1', slot: 1, checkoutSessionId: 'cs_first' });
+		mocks.sessionsRetrieve.mockResolvedValue(
+			paidSession({ id: 'cs_dup', mode: 'payment', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_dup', latest_charge: 'ch_dup' } })
+		);
+		mocks.refundsCreate.mockResolvedValue({ id: 're_1', status: 'failed' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const data = (await loadWith('cs_dup')) as { granted: boolean; pending: boolean; failed: boolean; refunded: boolean };
+			expect(data.failed).toBe(true);
+			expect(data.pending).toBe(false);
+			expect(data.refunded).toBe(false);
 		} finally {
 			errorSpy.mockRestore();
 		}

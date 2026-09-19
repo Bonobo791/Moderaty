@@ -26,7 +26,7 @@ import type Stripe from 'stripe';
 import { randomUUID } from 'node:crypto';
 
 import { db } from '$lib/server/db';
-import { organizations, creditTransactions, stripeEvents, stripeLifetimeEntitlements, stripeDisputeReversals } from '$lib/server/db/schema';
+import { organizations, creditTransactions, stripeEvents, stripeLifetimeEntitlements, stripeDisputeReversals, stripeCheckoutAttempts } from '$lib/server/db/schema';
 import { applyLedgerDelta, drainPendingReversals, findGrantForStripe, queuePendingReversal, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
 import { grantAutoTopupCredits, handleAutoTopupFailure } from '$lib/server/billing/autotopup';
 import { claimLifetimeSlot, grantSubscriptionPeriod, refundSubscriptionPeriod, disputeSubscriptionPeriod, releaseLifetimeForPayment, applySubscriptionSnapshot, revokeLifetimeForDispute, restoreLifetimeForDispute, restoreDisputedSubscriptionPeriod, LIFETIME_SOLD_OUT_ERROR } from '$lib/server/billing/entitlements';
@@ -331,7 +331,9 @@ async function refundUngrantableCheckout(
 	await refundUngrantablePayment({
 		paymentIntentId: paymentIntent.id,
 		idempotencyKey: `refund:ungrantable:${sessionId}`,
-		label: `checkout ${sessionId} for org ${orgId} was PAID but ${reason}`
+		label: `checkout ${sessionId} for org ${orgId} was PAID but ${reason}`,
+		orgId,
+		checkoutSessionId: sessionId
 	});
 }
 
@@ -999,12 +1001,21 @@ async function handleSubscriptionEvent(event: Stripe.Event): Promise<void> {
  * could never grant: scream for a human refund. Succeeded refunds need no
  * action — the create-time log already recorded them.
  */
-function handleUngrantableRefundUpdate(refund: Stripe.Refund): void {
+async function handleUngrantableRefundUpdate(refund: Stripe.Refund): Promise<void> {
 	if (refund.metadata?.reason !== 'ungrantable') return;
-	if (refund.status === 'failed' || refund.status === 'canceled') {
-		const pi = typeof refund.payment_intent === 'string' ? refund.payment_intent : refund.payment_intent?.id;
-		console.error(`stripe: ungrantable refund ${refund.id} for payment intent ${pi ?? 'unknown'} resolved ${refund.status} — the customer is still charged, MANUAL REFUND REQUIRED`);
+	if (refund.status !== 'failed' && refund.status !== 'canceled') return;
+	const pi = typeof refund.payment_intent === 'string' ? refund.payment_intent : refund.payment_intent?.id;
+	// Durable operator record BEFORE the throw: a session-linked refund marks
+	// its checkout attempt 'manual_refund_required' — a queryable row that
+	// outlives the event's retry horizon and log rotation (codex P1).
+	// PI-only refunds (auto top-up) have no attempt row; the throw keeps
+	// their delivery in Stripe's failed-events queue as the operator
+	// surface, so redeliveries keep screaming until a human refunds.
+	if (refund.metadata?.checkout_session_id) {
+		await db.update(stripeCheckoutAttempts).set({ status: 'manual_refund_required' }).where(eq(stripeCheckoutAttempts.stripeSessionId, refund.metadata.checkout_session_id));
 	}
+	console.error(`stripe: ungrantable refund ${refund.id} for payment intent ${pi ?? 'unknown'} resolved ${refund.status} — the customer is still charged, MANUAL REFUND REQUIRED`);
+	throw new Error(`stripe: ungrantable refund ${refund.id} resolved ${refund.status} — MANUAL REFUND REQUIRED`);
 }
 
 export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
@@ -1070,15 +1081,22 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
 			handled = true;
 			break;
 		case 'charge.refund.updated':
+		case 'refund.updated':
+		case 'refund.failed': {
 			// data.object is the Refund. We only escalate OUR ungrantable
 			// refunds (tagged reason:'ungrantable' at create): a pending or
 			// requires_action refund was ACKed as in-flight — if Stripe later
 			// reports a terminal failure the customer is still charged for an
 			// ungrantable purchase, and without this no signal exists (codex
-			// P1). Ordinary refunds stay quiet.
-			handleUngrantableRefundUpdate(event.data.object);
+			// P1). refund.updated is the broader event — charge.refund.updated
+			// is emitted only for selected payment methods (CodeRabbit) — and
+			// refund.failed covers a refund that arrives already failed; all
+			// three route here (the status check filters), ordinary refunds
+			// stay quiet.
+			await handleUngrantableRefundUpdate(event.data.object);
 			handled = true;
 			break;
+		}
 		case 'charge.dispute.created':
 			await reverseDispute(event.data.object.id);
 			handled = true;

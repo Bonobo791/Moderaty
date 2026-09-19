@@ -533,32 +533,6 @@ describe('sweepAutoTopUp', () => {
 		expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(2);
 	});
 
-	test('the sweep never spends a batch slot on a stale-enabled lifetime org', async () => {
-		// An enabled flag surviving a lifetime upgrade is a data anomaly the
-		// claim and basicEligibility already skip — but it must not be
-		// SELECTED, or enough stale rows occupy the bounded batch and starve
-		// every metered org (I10 fairness, review).
-		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-		try {
-			await seedOrg({ plan: 'lifetime' }); // org-1: enabled flag survived the upgrade
-			await testDb().db.insert(organizations).values({
-				id: 'org-2',
-				name: 'Org 2',
-				creditsRemaining: 10,
-				autoTopupEnabled: 1,
-				autoTopupThreshold: 100,
-				autoTopupState: 'idle',
-				stripeCustomerId: 'cus_2',
-				stripeDefaultPmId: 'pm_2'
-			});
-			expect(await sweepAutoTopUp(1)).toBe(1);
-			expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(1);
-			expect(mocks.paymentIntentsCreate.mock.calls[0][0]).toMatchObject({ customer: 'cus_2' });
-		} finally {
-			errorSpy.mockRestore();
-		}
-	});
-
 	test('a stale-enabled lifetime org is still reconciled: a missed paid top-up refunds and the flag clears', async () => {
 		// The charge batch correctly excludes lifetime orgs — but a PI that
 		// succeeded before the upgrade (its webhook lost) is still paid money
@@ -579,21 +553,23 @@ describe('sweepAutoTopUp', () => {
 
 		expect(await sweepAutoTopUp(5)).toBe(0);
 
-		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_missed', metadata: { reason: 'ungrantable' } }, { idempotencyKey: 'refund:ungrantable:pi_missed' });
+		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_missed', metadata: { reason: 'ungrantable', org_id: 'org-1' } }, { idempotencyKey: 'refund:ungrantable:pi_missed' });
 		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
 		const org = await orgRow();
 		expect(org.autoTopupEnabled).toBe(0); // anomaly durably cleared
 	});
 
-	test('the stale-lifetime reconcile shares the invocation budget — never doubles the limit', async () => {
-		// sweepAutoTopUp(limit) documents limit as the max organizations per
-		// invocation: an independent .limit(limit) on the reconcile pass would
-		// double the Stripe calls against the shared cron deadline (codex P2).
-		// With limit=1 the metered candidate takes the single slot — the stale
-		// row waits for the next invocation.
+	test('the stale-lifetime reconcile runs first on the shared budget and a processed row leaves the candidate set', async () => {
+		// Owed refunds outrank new charges: the finite anomaly set drains
+		// before metered work consumes the shared budget (codex P1/P2 —
+		// metered-first with limit=0 capacity meant stale rows could starve
+		// past the 7-day reconcile window unreconciled). A processed row also
+		// clears its last-attempt marker so it can never re-enter the set —
+		// otherwise the same front row re-reconciles every invocation and
+		// later rows wait until they age out (cubic).
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		try {
-			await seedOrg({ plan: 'lifetime' }); // org-1: stale enabled flag
+			await seedOrg({ plan: 'lifetime', autoTopupLastAttemptAt: new Date().toISOString() }); // org-1: stale flag + recent attempt
 			await testDb().db.insert(organizations).values({
 				id: 'org-2',
 				name: 'Org 2',
@@ -604,10 +580,16 @@ describe('sweepAutoTopUp', () => {
 				stripeCustomerId: 'cus_2',
 				stripeDefaultPmId: 'pm_2'
 			});
+			expect(await sweepAutoTopUp(1)).toBe(0); // the single slot goes to the stale row
+			expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+			const org = await orgRow();
+			expect(org.autoTopupEnabled).toBe(0);
+			expect(org.autoTopupLastAttemptAt).toBeNull(); // advanced — can never be selected again
+			// Next invocation: the stale set is empty, so the metered org
+			// finally gets its slot.
 			expect(await sweepAutoTopUp(1)).toBe(1);
 			expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(1);
-			const org = await orgRow();
-			expect(org.autoTopupEnabled).toBe(1); // not reconciled this invocation — the slot was spent
+			expect(mocks.paymentIntentsCreate.mock.calls[0][0]).toMatchObject({ customer: 'cus_2' });
 		} finally {
 			errorSpy.mockRestore();
 		}
@@ -635,7 +617,7 @@ describe('sweepAutoTopUp', () => {
 		} finally {
 			errorSpy.mockRestore();
 		}
-		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_missed', metadata: { reason: 'ungrantable' } }, { idempotencyKey: 'refund:ungrantable:pi_missed' });
+		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_missed', metadata: { reason: 'ungrantable', org_id: 'org-1' } }, { idempotencyKey: 'refund:ungrantable:pi_missed' });
 		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
 	});
 
@@ -876,7 +858,7 @@ describe('grantAutoTopupCredits', () => {
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 		try {
 			expect(await grantAutoTopupCredits('org-1', succeededPi())).toBe(false);
-			expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_1', metadata: { reason: 'ungrantable' } }, { idempotencyKey: 'refund:ungrantable:pi_1' });
+			expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_1', metadata: { reason: 'ungrantable', org_id: 'org-1' } }, { idempotencyKey: 'refund:ungrantable:pi_1' });
 		} finally {
 			errorSpy.mockRestore();
 		}

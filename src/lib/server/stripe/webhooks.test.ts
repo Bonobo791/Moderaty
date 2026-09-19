@@ -18,7 +18,7 @@ import { beforeEach, describe, expect, test, vi, type MockInstance } from 'vites
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { db } from '$lib/server/db';
-import { organizations, creditTransactions, stripeEvents, stripePendingReversals, stripeLifetimeEntitlements, stripeLifetimeSlots, stripeSubscriptionPeriods, stripeDisputeReversals } from '$lib/server/db/schema';
+import { organizations, creditTransactions, stripeEvents, stripePendingReversals, stripeLifetimeEntitlements, stripeLifetimeSlots, stripeSubscriptionPeriods, stripeDisputeReversals, stripeCheckoutAttempts } from '$lib/server/db/schema';
 import { applyLedgerDelta, getCredits } from '$lib/server/billing/ledger';
 import { claimEvent, fulfillAutoTopup, fulfillCheckout, handleStripeEvent, markEventProcessed, restoreWonDispute, reverseCharge, reverseDispute } from './webhooks';
 
@@ -55,7 +55,7 @@ vi.mock('$lib/server/billing/entitlements', async (importOriginal) => {
 
 import { claimLifetimeSlot } from '$lib/server/billing/entitlements';
 
-setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_pending_reversals', 'stripe_lifetime_entitlements', 'stripe_subscription_periods', 'stripe_lifetime_slots', 'stripe_dispute_reversals']);
+setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_pending_reversals', 'stripe_lifetime_entitlements', 'stripe_subscription_periods', 'stripe_lifetime_slots', 'stripe_dispute_reversals', 'stripe_checkout_attempts']);
 
 function session(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 	return {
@@ -175,7 +175,7 @@ describe('paid hosted products', () => {
 		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1' });
 		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lifetime', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
 		expect(await fulfillCheckout('cs_lifetime')).toBe('refunded');
-		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_1', metadata: { reason: 'ungrantable' } }, { idempotencyKey: 'refund:ungrantable:cs_lifetime' });
+		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_1', metadata: { reason: 'ungrantable', org_id: 'org-1', checkout_session_id: 'cs_lifetime' } }, { idempotencyKey: 'refund:ungrantable:cs_lifetime' });
 		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
 		expect(org?.plan).not.toBe('lifetime');
 		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toHaveLength(0);
@@ -263,7 +263,7 @@ describe('paid hosted products', () => {
 		await testDb().db.insert(stripeLifetimeEntitlements).values({ id: 1, orgId: 'org-1', slot: 1, checkoutSessionId: 'cs_first' });
 		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_dup', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_2', latest_charge: 'ch_2' } }));
 		expect(await fulfillCheckout('cs_dup')).toBe('refunded');
-		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_2', metadata: { reason: 'ungrantable' } }, { idempotencyKey: 'refund:ungrantable:cs_dup' });
+		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_2', metadata: { reason: 'ungrantable', org_id: 'org-1', checkout_session_id: 'cs_dup' } }, { idempotencyKey: 'refund:ungrantable:cs_dup' });
 		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toHaveLength(1);
 	});
 
@@ -378,7 +378,7 @@ describe('paid hosted products', () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'lifetime', creditsRemaining: 100 });
 		mocks.sessionsRetrieve.mockResolvedValue(session());
 		expect(await fulfillCheckout('cs_123')).toBe('refunded');
-		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_1', metadata: { reason: 'ungrantable' } }, { idempotencyKey: 'refund:ungrantable:cs_123' });
+		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_1', metadata: { reason: 'ungrantable', org_id: 'org-1', checkout_session_id: 'cs_123' } }, { idempotencyKey: 'refund:ungrantable:cs_123' });
 		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
 		expect(org?.creditsRemaining).toBe(100);
 	});
@@ -1049,18 +1049,23 @@ describe('handleStripeEvent', () => {
 		expect(await getCredits('org-1')).toBe(0);
 	});
 
-	test('a terminal failure on a tagged ungrantable refund is screamed loudly', async () => {
+	test('a terminal failure on a tagged ungrantable refund marks the attempt and stays unprocessed', async () => {
 		// A pending/requires_action refund we created is accepted as in-flight —
 		// but Stripe later reports its TERMINAL status via charge.refund.updated.
 		// A failed/canceled outcome means the customer is still charged for an
-		// ungrantable purchase; without this the ACKed webhook left no signal
-		// (codex P1). The reason:'ungrantable' tag persisted on the refund at
-		// create time identifies OUR refunds.
+		// ungrantable purchase: the checkout attempt is the durable operator
+		// record (session-linked refunds), and the throw keeps the event in
+		// Stripe's failed-delivery queue so redeliveries keep screaming
+		// MANUAL REFUND REQUIRED until a human refunds (codex P1).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.insert(stripeCheckoutAttempts).values({ attemptId: 'att_1', orgId: 'org-1', product: 'credits_500', idempotencyKey: 'checkout:att_1:k', stripeSessionId: 'cs_1' });
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 		try {
-			const evt = event('charge.refund.updated', 'evt_ru_fail', { id: 're_1', object: 'refund', status: 'failed', payment_intent: 'pi_1', metadata: { reason: 'ungrantable' } });
-			expect(await handleStripeEvent(evt as never)).toBe(true);
+			const evt = event('charge.refund.updated', 'evt_ru_fail', { id: 're_1', object: 'refund', status: 'failed', payment_intent: 'pi_1', metadata: { reason: 'ungrantable', checkout_session_id: 'cs_1', org_id: 'org-1' } });
+			await expect(handleStripeEvent(evt as never)).rejects.toThrow(/MANUAL REFUND REQUIRED/);
 			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('MANUAL REFUND REQUIRED'));
+			const attempt = await testDb().db.select().from(stripeCheckoutAttempts).where(eq(stripeCheckoutAttempts.stripeSessionId, 'cs_1')).get();
+			expect(attempt?.status).toBe('manual_refund_required');
 		} finally {
 			errorSpy.mockRestore();
 		}

@@ -283,7 +283,12 @@ export async function restoreLifetimeForDispute(input: StripeIdentifiers): Promi
 		const entitlement = matches[0];
 		if (!entitlement) return false;
 		await tx.update(stripeLifetimeEntitlements).set({ status: 'active', releasedAt: null }).where(eq(stripeLifetimeEntitlements.id, entitlement.id));
-		await tx.update(organizations).set({ plan: 'lifetime' }).where(eq(organizations.id, entitlement.orgId));
+		// The same atomic mandate reset as claimLifetimeSlot: during the
+		// dispute downgrade the org read as metered, so the owner could have
+		// consented to auto top-up — restoring the plan without clearing it
+		// leaves a live off-session charge mandate on an unmetered org
+		// (codex P2). Every transition back to lifetime clears it.
+		await tx.update(organizations).set({ plan: 'lifetime', autoTopupEnabled: 0, autoTopupState: 'idle' }).where(eq(organizations.id, entitlement.orgId));
 		return true;
 	});
 }

@@ -141,6 +141,14 @@ async function stripeSuccess(user: SessionUser, sessionId: string): Promise<Succ
 			);
 			return { maintenance: false, user, sessionId, granted: false, pending: false, failed: true, refunded: false };
 		}
+		// A failed or impossible automatic refund is equally definitive:
+		// 'pending' would tell the buyer money is on its way back when the
+		// refund was never requested or already died at Stripe — the attempt
+		// row is marked manual_refund_required by the refund.updated handler
+		// and ops is already screaming (codex P1).
+		if (cause instanceof Error && cause.message.includes('MANUAL REFUND REQUIRED')) {
+			return { maintenance: false, user, sessionId, granted: false, pending: false, failed: true, refunded: false };
+		}
 		// A TRANSIENT retrieval failure is different: the webhook remains the
 		// source of truth; log loudly and show pending. The session id is
 		// query-controlled and the provider error can carry payment details —

@@ -164,7 +164,7 @@ export const stripeCheckoutAttempts = sqliteTable('stripe_checkout_attempts', {
 	product: text('product').notNull(),
 	idempotencyKey: text('idempotency_key').notNull().unique(),
 	stripeSessionId: text('stripe_session_id').unique(),
-	status: text('status').notNull().default('pending'), // pending | open | fulfilled | expired
+	status: text('status').notNull().default('pending'), // pending | open | fulfilled | expired | manual_refund_required
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
 	updatedAt: text('updated_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [

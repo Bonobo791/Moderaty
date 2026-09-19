@@ -453,7 +453,8 @@ export async function grantAutoTopupCredits(
 		await refundUngrantablePayment({
 			paymentIntentId: pi.id,
 			idempotencyKey: `refund:ungrantable:${pi.id}`,
-			label: `auto-topup PI ${pi.id} for org ${orgId} succeeded but the org is unmetered`
+			label: `auto-topup PI ${pi.id} for org ${orgId} succeeded but the org is unmetered`,
+			orgId
 		});
 		await releaseClaimForPi(orgId, pi);
 		return false;
@@ -560,6 +561,52 @@ export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<numb
 				)
 			)
 		);
+	// Owed refunds outrank new charges: the stale-lifetime reconcile pass
+	// runs FIRST on the shared budget. The set is finite and self-draining —
+	// a processed row clears both selection markers, so the anomaly is gone
+	// permanently within a few invocations while metered work simply waits
+	// (it recurs anyway). Metered-first would let a perpetually full charge
+	// batch starve these rows past the 7-day reconcile window with their
+	// paid charges never refunded (codex P1).
+	//
+	// Selection is a surviving enabled flag OR a last-attempt timestamp
+	// inside the reconcile window: claimLifetimeSlot clears the flag
+	// atomically at grant, so the NORMAL upgrade path leaves enabled=0 rows
+	// whose only surviving marker is the attempt timestamp — a flag-only
+	// predicate would never discover their lost-webhook charges (codex P1).
+	const reconcileCutoff = new Date(Date.now() - RECONCILE_WINDOW_MS).toISOString();
+	const staleLifetime = await db
+		.select({ id: organizations.id, enabled: organizations.autoTopupEnabled })
+		.from(organizations)
+		.where(
+			and(
+				eq(organizations.plan, 'lifetime'),
+				or(eq(organizations.autoTopupEnabled, 1), sql`${organizations.autoTopupLastAttemptAt} >= ${reconcileCutoff}`)
+			)
+		)
+		.orderBy(asc(organizations.autoTopupLastAttemptAt), asc(organizations.id))
+		.limit(limit)
+		.all();
+	for (const row of staleLifetime) {
+		if (deadline !== undefined && Date.now() >= deadline) break;
+		try {
+			await reconcileAutoTopup(row.id);
+			// Advancement IS the budget fix: clearing both markers removes the
+			// row from the candidate set forever — otherwise the same
+			// reconciled row stays first in the ordering every invocation and
+			// later rows wait until they age out (codex P1, cubic). On a
+			// reconcile FAILURE the markers stay, so the row is retried next
+			// invocation instead of silently aging out unrefunded.
+			const cleared = await db
+				.update(organizations)
+				.set({ autoTopupEnabled: 0, autoTopupState: 'idle', autoTopupLastAttemptAt: null })
+				.where(and(eq(organizations.id, row.id), eq(organizations.plan, 'lifetime')))
+				.returning({ id: organizations.id });
+			if (cleared.length === 1 && row.enabled === 1) console.error(`auto top-up: cleared a stale enabled flag on lifetime org ${row.id}`);
+		} catch (error) {
+			console.error(`auto top-up sweep failed for org ${row.id}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
 	const rows = await db
 		.select({ id: organizations.id })
 		.from(organizations)
@@ -586,7 +633,7 @@ export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<numb
 			)
 		)
 		.orderBy(asc(organizations.autoTopupLastAttemptAt), asc(organizations.id))
-		.limit(limit)
+		.limit(limit - staleLifetime.length)
 		.all();
 	let triggered = 0;
 	for (const row of rows) {
@@ -603,49 +650,6 @@ export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<numb
 			// no lost money). Idempotent and cheap — one list call per org.
 			await reconcileAutoTopup(row.id);
 			if (await maybeTriggerAutoTopUp(row.id)) triggered += 1;
-		} catch (error) {
-			console.error(`auto top-up sweep failed for org ${row.id}: ${error instanceof Error ? error.message : String(error)}`);
-		}
-	}
-	// Reconcile stale lifetime orgs OUTSIDE the charge batch: they can never
-	// be charged again, but a PI that succeeded before the upgrade (its
-	// webhook lost) is still paid money — reconcileAutoTopup runs its refund
-	// path. Selection is by a surviving enabled flag OR a last-attempt
-	// timestamp inside the reconcile window: claimLifetimeSlot clears the
-	// flag atomically at grant, so the NORMAL upgrade path leaves enabled=0
-	// rows whose only surviving marker is the attempt timestamp — a
-	// flag-only predicate would never discover their lost-webhook charges
-	// (codex P1, round 6). The stale flag is then cleared durably so the
-	// anomaly cannot recur (codex P1, round 3). The pass SHARES the
-	// invocation's limit — an independent bound would double the Stripe
-	// calls against the shared cron deadline (codex P2).
-	const reconcileCutoff = new Date(Date.now() - RECONCILE_WINDOW_MS).toISOString();
-	const staleLifetime = await db
-		.select({ id: organizations.id, enabled: organizations.autoTopupEnabled })
-		.from(organizations)
-		.where(
-			and(
-				eq(organizations.plan, 'lifetime'),
-				or(eq(organizations.autoTopupEnabled, 1), sql`${organizations.autoTopupLastAttemptAt} >= ${reconcileCutoff}`)
-			)
-		)
-		.orderBy(asc(organizations.autoTopupLastAttemptAt), asc(organizations.id))
-		.limit(limit - rows.length)
-		.all();
-	for (const row of staleLifetime) {
-		if (deadline !== undefined && Date.now() >= deadline) break;
-		try {
-			await reconcileAutoTopup(row.id);
-			// Clear the flag only when it survived: a flag already cleared at
-			// grant needs no write, and the log stays honest (codex P1).
-			if (row.enabled === 1) {
-				const cleared = await db
-					.update(organizations)
-					.set({ autoTopupEnabled: 0, autoTopupState: 'disabled' })
-					.where(and(eq(organizations.id, row.id), eq(organizations.plan, 'lifetime')))
-					.returning({ id: organizations.id });
-				if (cleared.length === 1) console.error(`auto top-up: cleared a stale enabled flag on lifetime org ${row.id}`);
-			}
 		} catch (error) {
 			console.error(`auto top-up sweep failed for org ${row.id}: ${error instanceof Error ? error.message : String(error)}`);
 		}

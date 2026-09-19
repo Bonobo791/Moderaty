@@ -34,14 +34,24 @@ export async function refundUngrantablePayment(input: {
 	idempotencyKey: string;
 	/** Human-readable log context, e.g. `checkout cs_1 for org org-1 was PAID but claimed no slot`. */
 	label: string;
+	/** Persisted on the refund so the terminal charge.refund.updated event routes back to our records. */
+	orgId: string;
+	checkoutSessionId?: string;
 }): Promise<void> {
 	try {
-		// The reason tag is persisted ON the refund so a later terminal-status
-		// event (charge.refund.updated → failed/canceled) can identify OUR
-		// ungrantable refunds and escalate — a pending refund that dies at
-		// Stripe must not vanish quietly after we ACKed (codex P1).
+		// The tags persisted ON the refund let a later terminal-status event
+		// (charge.refund.updated → failed/canceled) identify OUR ungrantable
+		// refunds and escalate — a pending refund that dies at Stripe must not
+		// vanish quietly after we ACKed (codex P1).
 		const refund = await getStripe().refunds.create(
-			{ payment_intent: input.paymentIntentId, metadata: { reason: 'ungrantable' } },
+			{
+				payment_intent: input.paymentIntentId,
+				metadata: {
+					reason: 'ungrantable',
+					org_id: input.orgId,
+					...(input.checkoutSessionId ? { checkout_session_id: input.checkoutSessionId } : {})
+				}
+			},
 			{ idempotencyKey: input.idempotencyKey }
 		);
 		// Validate the boundary response (I2): refunds.create can RESOLVE a

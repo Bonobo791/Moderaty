@@ -153,6 +153,21 @@ describe('lifetime entitlements', () => {
 		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.plan).toBe('lifetime');
 	});
 
+	test('a won-dispute restore clears an auto top-up mandate enabled during the downgrade', async () => {
+		// While the entitlement is disputed the org reads as metered, so the
+		// consent-gated setAutoTopup path accepts an enable; restoring the plan
+		// must drop that mandate atomically — an in-flight charge landing on a
+		// lifetime org only buys an avoidable refund (codex P2).
+		await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-1', paymentIntentId: 'pi-1', chargeId: 'ch-1' });
+		expect(await revokeLifetimeForDispute({ paymentIntentId: 'pi-1', chargeId: 'ch-1' })).toBe(true);
+		await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle' }).where(eq(organizations.id, 'org-1'));
+		expect(await restoreLifetimeForDispute({ paymentIntentId: 'pi-1', chargeId: 'ch-1' })).toBe(true);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.plan).toBe('lifetime');
+		expect(org?.autoTopupEnabled).toBe(0);
+		expect(org?.autoTopupState).toBe('idle');
+	});
+
 
 	test('a won dispute recorded before lifetime fulfillment keeps the slot active', async () => {
 		await testDb().db.insert(stripePendingReversals).values({ chargeId: 'ch-1', reason: 'dispute', disputeId: 'disp-1' });

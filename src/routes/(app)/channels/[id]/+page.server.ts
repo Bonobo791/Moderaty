@@ -22,7 +22,7 @@ import { requireOrgRole } from '$lib/server/ownership';
 import { runChannel } from '$lib/server/pipeline';
 import { requireUser } from '$lib/server/session';
 import { isToneLevel } from '$lib/toneLevels';
-import { and, eq, isNull, lt, or } from 'drizzle-orm';
+import { and, eq, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { error, fail, redirect } from '@sveltejs/kit';
 
@@ -41,7 +41,13 @@ function monthsAgoBoundary(months: number): string {
 async function updateOwnChannel(
 	orgId: string,
 	channelId: string,
-	values: Partial<Pick<typeof channels.$inferInsert, 'toneLevel' | 'protectLgbtqia' | 'protectWomen' | 'active'>>
+	values: {
+		// Each writable column accepts its insert type or a SQL fragment
+		// (drizzle .set() supports both — a conditional CASE needs the latter).
+		[K in 'toneLevel' | 'protectLgbtqia' | 'protectWomen' | 'active' | 'lastRunStatus' | 'lastRunError']?:
+			| (typeof channels.$inferInsert)[K]
+			| SQL;
+	}
 ) {	return db
 		.update(channels)
 		.set(values)
@@ -96,8 +102,22 @@ export const actions = {
 		// active=0 is the only change: cron's active=1 predicate and
 		// runChannel's inactive-skip stop future claims while the channel,
 		// its token, and all its data stay put (MOD-9). Idempotent — pausing
-		// a paused channel is a harmless no-op.
-		const updated = await updateOwnChannel(user.orgId, channelId, { active: raw === 'true' ? 0 : 1 });
+		// a paused channel is a harmless no-op. A real 0→1 resume also clears
+		// the stale verdict: its success predates the pause, so the channel is
+		// "Not checked yet" until cron records a new live check (codex,
+		// PR #142). The CASE keeps a redundant resume on an active channel
+		// from erasing good health.
+		const updated = await updateOwnChannel(
+			user.orgId,
+			channelId,
+			raw === 'true'
+				? { active: 0 }
+				: {
+						active: 1,
+						lastRunStatus: sql`case when ${channels.active} = 0 then null else ${channels.lastRunStatus} end`,
+						lastRunError: sql`case when ${channels.active} = 0 then null else ${channels.lastRunError} end`
+					}
+		);
 		if (updated.length === 0) return fail(404, { scope: 'pause', channelId, error: 'channel not found' });
 		return { ok: true, scope: 'pause', channelId, paused: raw === 'true' };
 	},

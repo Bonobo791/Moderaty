@@ -348,7 +348,7 @@ test('a deadline-partial run records failed/timeout health, never success', asyn
 	// { partial: true } — recording success would count a timed-out channel as
 	// protected and advance lastSuccessAt on a check that did not complete.
 	await seedChannel('UC-partial', { lastRunStatus: 'success', lastSuccessAt: '2026-08-01T00:00:00.000Z' });
-	mocks.runChannel.mockResolvedValue(runResult({ partial: true, stoppedReason: 'deadline' }));
+	mocks.runChannel.mockResolvedValue(runResult({ dryRun: false, partial: true, stoppedReason: 'deadline' }));
 
 	const res = await call({ bearer: 'test-secret' });
 
@@ -366,7 +366,7 @@ test('a credit-starved run records failed/credits health, never success', async 
 	// but deferred every AI decision, so "Protected" would be a lie; the
 	// category tells the user the actionable fix (top up), not a reconnect.
 	await seedChannel('UC-credits', { lastRunStatus: 'success', lastSuccessAt: '2026-08-01T00:00:00.000Z' });
-	mocks.runChannel.mockResolvedValue(runResult({ outOfCredits: true }));
+	mocks.runChannel.mockResolvedValue(runResult({ dryRun: false, outOfCredits: true }));
 
 	const res = await call({ bearer: 'test-secret' });
 
@@ -401,7 +401,7 @@ test('a failing channel run reports failure, never success', async () => {
 	// MOD-7: health lives apart from the rotation timestamp — a channel that
 	// failed before must read healthy again only after a real success.
 	await seedChannel('UC-ok', { lastRunStatus: 'failed', lastRunError: 'quota' });
-	mocks.runChannel.mockResolvedValue(runResult());
+	mocks.runChannel.mockResolvedValue(runResult({ dryRun: false }));
 
 	const res = await call({ bearer: 'test-secret' });
 
@@ -474,11 +474,58 @@ test('a bookkeeping failure in the run-recording finally cannot mask the run res
 		const res = await call({ bearer: 'test-secret' });
 
 		expect(res.status).toBe(200);
-		expect(await res.json()).toMatchObject({ results: { 'UC-rec': runResult() } });
+		// codex, PR #142 r2: the run result is preserved, but the bookkeeping
+		// failure is surfaced in the payload — a silent server-log-only
+		// fallback would hide a degraded state from the scheduled caller.
+		expect(await res.json()).toMatchObject({ results: { 'UC-rec': runResult() }, bookkeepingError: true });
 		expect(errorSpy).toHaveBeenCalledWith('run-health write failed for channel:', 'UC-rec', expect.any(Error));
 	} finally {
 		errorSpy.mockRestore();
 		await testDb().client.execute('DROP TRIGGER fail_run_record');
+	}
+});
+
+test('a dry-run result writes no health verdict — preview work is not a live check (codex, PR #142)', async () => {
+	// DRY_RUN=true deployments resolve every run with dryRun: true; stamping
+	// success/lastSuccessAt would label a channel Protected though it never
+	// moderated anything live. lastRunAt still ticks (rotation) and the
+	// lease still clears.
+	await seedChannel('UC-dry', { lastRunStatus: 'failed', lastRunError: 'quota', lastSuccessAt: '2026-08-01T00:00:00.000Z' });
+	mocks.runChannel.mockResolvedValue(runResult()); // dryRun: true default
+
+	const res = await call({ bearer: 'test-secret' });
+
+	expect(res.status).toBe(200);
+	const row = await channelRow('UC-dry');
+	expect(row?.lastRunStatus).toBe('failed');
+	expect(row?.lastRunError).toBe('quota');
+	expect(row?.lastSuccessAt).toBe('2026-08-01T00:00:00.000Z');
+	expect(row?.lastRunAt).not.toBeNull();
+	expect(row?.leaseExpiresAt).toBeNull();
+});
+
+test('a mid-run reconnect skips the health write and flags the caller (codex, PR #142)', async () => {
+	// The finally update matched only the channel id: a reconnect replacing
+	// refreshTokenEnc mid-run would stamp the NEW connector with the OLD
+	// run's verdict. The write is guarded by connector identity like
+	// assertChannelActive — zero rows matched means loud log + flag.
+	await seedChannel('UC-race', { lastRunStatus: 'success', lastSuccessAt: '2026-08-01T00:00:00.000Z' });
+	mocks.runChannel.mockImplementation(async () => {
+		await testDb().db.update(channels).set({ refreshTokenEnc: 'rotated' }).where(eq(channels.id, 'UC-race'));
+		return runResult({ dryRun: false });
+	});
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		const res = await call({ bearer: 'test-secret' });
+
+		expect(res.status).toBe(200);
+		expect(await res.json()).toMatchObject({ bookkeepingError: true });
+		const row = await channelRow('UC-race');
+		expect(row?.refreshTokenEnc).toBe('rotated');
+		expect(row?.lastRunStatus).toBe('success'); // untouched — the verdict belongs to the old connector
+		expect(row?.lastSuccessAt).toBe('2026-08-01T00:00:00.000Z');
+	} finally {
+		errorSpy.mockRestore();
 	}
 });
 

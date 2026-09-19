@@ -27,6 +27,7 @@ vite.config.ts.timestamp-*
 .cursor
 .codex
 .claude
+.devin/
 .kimi
 .vscode
 .serena

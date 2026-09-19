@@ -211,47 +211,64 @@ export const GET: RequestHandler = async ({ url, request }) => {
 
 	// The run's health verdict: a completed live run is 'success', a thrown or
 	// incomplete one carries its sanitized category, and a run with no verdict
-	// (paused mid-run, skipped as inactive) writes neither — stamping success
-	// would lie, stamping failed/timeout would lie on resume (codex+cubic).
+	// (dry run, paused mid-run, skipped as inactive) writes neither — stamping
+	// success would lie, stamping failed/timeout would lie on resume
+	// (codex+cubic).
 	type RunCategory = 'token' | 'quota' | 'scoring' | 'timeout' | 'credits' | 'error';
 	let runHealth: 'success' | 'none' | { status: 'failed'; error: RunCategory } = 'success';
+	let body: Record<string, unknown>;
+	let status = 200;
 	try {
 		const { result, dryRunWindow } = await runClaimedChannel(channel, deadline);
-		if (result.outOfCredits) runHealth = { status: 'failed', error: 'credits' };
-		else if (result.stoppedReason === 'deactivated' || result.skipped) runHealth = 'none';
+		if (result.dryRun || result.stoppedReason === 'deactivated' || result.skipped) runHealth = 'none';
+		else if (result.outOfCredits) runHealth = { status: 'failed', error: 'credits' };
 		else if (result.partial) runHealth = { status: 'failed', error: 'timeout' };
-		return json({ ...base, results: { [channel.id]: result }, dryRunWindow });
+		body = { ...base, results: { [channel.id]: result }, dryRunWindow };
 	} catch (cause) {
 		const category = categorizeRunFailure(cause);
 		runHealth = { status: 'failed', error: category };
 		console.error(`channel run ${channel.id} failed:`, cause);
-		return json(
-			// The caller gets the sanitized category, never the raw provider
-			// message — error bodies can echo request details/tokens (codeant).
-			{ ...base, ok: false, results: { [channel.id]: { error: category } } },
-			{ status: 500 } // failure must not look like success to the cron caller
-		);
-	} finally {
-		// Record the run even on failure so a failing channel cannot starve the
-		// others — but health is kept separate from the rotation timestamp
-		// (MOD-7): a failure must not update the success fields. A bookkeeping
-		// failure must not mask the real response or leave the lease uncleared
-		// (it self-expires by design) — log loudly, move on (codeant).
-		try {
-			await db
-				.update(channels)
-				.set({
-					leaseExpiresAt: null,
-					lastRunAt: nowIso,
-					...(runHealth === 'success'
-						? { lastRunStatus: 'success', lastRunError: null, lastSuccessAt: nowIso }
-						: runHealth === 'none'
-							? {}
-							: { lastRunStatus: runHealth.status, lastRunError: runHealth.error })
-				})
-				.where(eq(channels.id, channel.id));
-		} catch (writeCause) {
-			console.error('run-health write failed for channel:', channel.id, writeCause);
-		}
+		// The caller gets the sanitized category, never the raw provider
+		// message — error bodies can echo request details/tokens (codeant).
+		body = { ...base, ok: false, results: { [channel.id]: { error: category } } };
+		status = 500; // failure must not look like success to the cron caller
 	}
+	// Record the run even on failure so a failing channel cannot starve the
+	// others — but health is kept separate from the rotation timestamp
+	// (MOD-7): a failure must not update the success fields. The write is
+	// guarded by connector identity like assertChannelActive: a reconnect
+	// mid-run replaces refreshTokenEnc, and the old run's verdict must not
+	// land on the new connector (codex). A bookkeeping failure never masks
+	// the run result but IS flagged in the payload — a server-log-only
+	// fallback would hide the degraded state (codeant+codex); the lease
+	// self-expires either way.
+	try {
+		const written = await db
+			.update(channels)
+			.set({
+				leaseExpiresAt: null,
+				lastRunAt: nowIso,
+				...(runHealth === 'success'
+					? { lastRunStatus: 'success', lastRunError: null, lastSuccessAt: nowIso }
+					: runHealth === 'none'
+						? {}
+						: { lastRunStatus: runHealth.status, lastRunError: runHealth.error })
+			})
+			.where(
+				and(
+					eq(channels.id, channel.id),
+					channel.userId === null ? isNull(channels.userId) : eq(channels.userId, channel.userId),
+					eq(channels.refreshTokenEnc, channel.refreshTokenEnc)
+				)
+			)
+			.returning({ id: channels.id });
+		if (written.length === 0) {
+			console.error('run-health write skipped: channel connector changed mid-run:', channel.id);
+			body = { ...body, bookkeepingError: true };
+		}
+	} catch (writeCause) {
+		console.error('run-health write failed for channel:', channel.id, writeCause);
+		body = { ...body, bookkeepingError: true };
+	}
+	return json(body, { status });
 };

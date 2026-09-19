@@ -742,6 +742,43 @@ test('resume reactivates the channel so cron rotation picks it up again', async 
 	expect(await activeOf('UC1')).toBe(1);
 });
 
+test('resume clears the stale verdict so a just-resumed channel reads Not checked yet (codex, PR #142 r2)', async () => {
+	// A paused-then-resumed channel's lastRunStatus='success' predates the
+	// pause — every comment received meanwhile is unchecked, so Protected
+	// would lie until cron records a new successful check. lastSuccessAt
+	// stays: when it last succeeded is still a fact.
+	await seedChannel('UC1');
+	await testDb().db
+		.update(channels)
+		.set({ active: 0, lastRunStatus: 'success', lastRunError: null, lastSuccessAt: '2026-08-01T00:00:00.000Z' })
+		.where(eq(channels.id, 'UC1'));
+
+	const res = await setPaused('UC1', 'false');
+
+	expect(res).toMatchObject({ ok: true });
+	const row = await channelById('UC1');
+	expect(row?.active).toBe(1);
+	expect(row?.lastRunStatus).toBeNull();
+	expect(row?.lastRunError).toBeNull();
+	expect(row?.lastSuccessAt).toBe('2026-08-01T00:00:00.000Z');
+});
+
+test('a redundant resume on an already-active channel preserves its health verdict', async () => {
+	// Double-submitted resumes must not erase a real success — the clear
+	// only applies to an actual paused→active transition.
+	await seedChannel('UC1');
+	await testDb().db
+		.update(channels)
+		.set({ active: 1, lastRunStatus: 'success', lastSuccessAt: '2026-08-01T00:00:00.000Z' })
+		.where(eq(channels.id, 'UC1'));
+
+	const res = await setPaused('UC1', 'false');
+
+	expect(res).toMatchObject({ ok: true });
+	const row = await channelById('UC1');
+	expect(row?.lastRunStatus).toBe('success');
+});
+
 test('pause is idempotent — pausing a paused channel stays paused without error', async () => {
 	await seedChannel('UC1');
 	await testDb().db.update(channels).set({ active: 0 }).where(eq(channels.id, 'UC1'));

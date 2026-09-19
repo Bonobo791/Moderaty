@@ -125,6 +125,24 @@ test('projects the active flag the paused banner and header read (cubic, PR #142
 	expect(data.ch.active).toBe(0);
 });
 
+test('projects the run-health fields the header branches on (codex, PR #142 r2)', async () => {
+	await seedChannel('UC1');
+	// The header renders Check failed / Not checked yet from these columns —
+	// a dropped projection silently renders Protected for a failed channel.
+	await testDb().db
+		.update(channels)
+		.set({ lastRunStatus: 'failed', lastRunError: 'quota', lastSuccessAt: '2026-08-01T00:00:00.000Z' })
+		.where(eq(channels.id, 'UC1'));
+
+	const data = (await loadLayout('UC1')) as LayoutData;
+
+	expect(data.ch).toMatchObject({
+		lastRunStatus: 'failed',
+		lastRunError: 'quota',
+		lastSuccessAt: '2026-08-01T00:00:00.000Z'
+	});
+});
+
 test('another team\'s channel reads as 404 — existence never leaks', async () => {
 	await seedChannel('UC1', 'user-2', 'org-2');
 

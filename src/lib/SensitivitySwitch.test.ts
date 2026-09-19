@@ -155,3 +155,11 @@ test('an obsolete failed submit cannot flash its error over a queued newer choic
 	const source = readFileSync(new URL('./SensitivitySwitch.svelte', import.meta.url), 'utf8');
 	expect(source).toMatch(/if \(!queuedSubmit\)\s*\{[^}]*selected = outcome\.selected[^}]*saveError = outcome\.message[^}]*\}/s);
 });
+
+test('an obsolete successful submit cannot flash Applied over a queued newer choice (codex, PR #142 r2)', () => {
+	// Symmetric to the failure guard: a stale success labeling the displayed
+	// (not-yet-submitted) choice "Applied" is the same lie in the other
+	// direction.
+	const source = readFileSync(new URL('./SensitivitySwitch.svelte', import.meta.url), 'utf8');
+	expect(source).toMatch(/outcome\.kind === 'applied'\)\s*\{[^}]*if \(!queuedSubmit\)/s);
+});

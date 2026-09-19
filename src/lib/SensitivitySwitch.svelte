@@ -148,8 +148,13 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		dirty = queuedSubmit;
 		const outcome = persistOutcome(result, level);
 		if (outcome.kind === 'applied') {
-			saveError = null;
-			showApplied();
+			// Symmetric to the failure guard: a stale success must not label the
+			// displayed (not-yet-submitted) choice "Applied" — the queued
+			// submit's own outcome reports the state (codex, PR #142).
+			if (!queuedSubmit) {
+				saveError = null;
+				showApplied();
+			}
 		} else if (!queuedSubmit) {
 			// Only revert/report when nothing newer is queued — a re-flip
 			// already owns the knob, and the stale failure's message would

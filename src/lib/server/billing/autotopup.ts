@@ -513,11 +513,14 @@ async function releaseClaimForPi(
 /**
  * Recovers credits for recent successful auto-top-up payments whose webhook processing may have been missed.
  *
- * @returns The number of recovered payments
+ * @returns `recovered` — payments granted; `inFlight` — a matching top-up PI
+ *   is still in a non-terminal Stripe status (processing/requires_*): callers
+ *   must not clear the row's reconciliation markers yet, or a PI that
+ *   succeeds later with a lost webhook becomes undiscoverable (codex P1).
  */
-export async function reconcileAutoTopup(orgId: string): Promise<number> {
+export async function reconcileAutoTopup(orgId: string): Promise<{ recovered: number; inFlight: boolean }> {
 	const org = await readAutoTopupState(orgId);
-	if (!org.customerId) return 0;
+	if (!org.customerId) return { recovered: 0, inFlight: false };
 	const sinceSeconds = Math.floor((Date.now() - RECONCILE_WINDOW_MS) / 1000);
 	const list = await getStripe().paymentIntents.list({
 		customer: org.customerId,
@@ -525,14 +528,20 @@ export async function reconcileAutoTopup(orgId: string): Promise<number> {
 		limit: 100
 	});
 	let granted = 0;
+	let inFlight = false;
 	for (const pi of list.data) {
-		if (pi.status !== 'succeeded') continue;
+		if (pi.status !== 'succeeded') {
+			// Only OUR still-unresolved top-up PIs pin the marker — a terminal
+			// (canceled) or unrelated PI must not keep the row selected.
+			if (pi.status !== 'canceled' && pi.metadata?.type === 'auto_topup' && pi.metadata?.org_id === orgId) inFlight = true;
+			continue;
+		}
 		if (await grantAutoTopupCredits(orgId, pi)) granted += 1;
 	}
 	if (granted > 0) {
 		console.info(`auto top-up reconciliation granted ${granted} recovered charge(s) for org ${orgId}`);
 	}
-	return granted;
+	return { recovered: granted, inFlight };
 }
 
 /**
@@ -590,19 +599,25 @@ export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<numb
 	for (const row of staleLifetime) {
 		if (deadline !== undefined && Date.now() >= deadline) break;
 		try {
-			await reconcileAutoTopup(row.id);
+			const { inFlight } = await reconcileAutoTopup(row.id);
 			// Advancement IS the budget fix: clearing both markers removes the
 			// row from the candidate set forever — otherwise the same
 			// reconciled row stays first in the ordering every invocation and
-			// later rows wait until they age out (codex P1, cubic). On a
-			// reconcile FAILURE the markers stay, so the row is retried next
-			// invocation instead of silently aging out unrefunded.
-			const cleared = await db
-				.update(organizations)
-				.set({ autoTopupEnabled: 0, autoTopupState: 'idle', autoTopupLastAttemptAt: null })
-				.where(and(eq(organizations.id, row.id), eq(organizations.plan, 'lifetime')))
-				.returning({ id: organizations.id });
-			if (cleared.length === 1 && row.enabled === 1) console.error(`auto top-up: cleared a stale enabled flag on lifetime org ${row.id}`);
+			// later rows wait until they age out (codex P1, cubic). But only
+			// when nothing is still resolving at Stripe: a claimed top-up PI
+			// still 'processing' can succeed later with its webhook lost —
+			// clearing the marker now would make that charge undiscoverable
+			// (codex P1, round 8). On a reconcile FAILURE the markers likewise
+			// stay, so the row is retried next invocation instead of silently
+			// aging out unrefunded.
+			if (!inFlight) {
+				const cleared = await db
+					.update(organizations)
+					.set({ autoTopupEnabled: 0, autoTopupState: 'idle', autoTopupLastAttemptAt: null })
+					.where(and(eq(organizations.id, row.id), eq(organizations.plan, 'lifetime')))
+					.returning({ id: organizations.id });
+				if (cleared.length === 1 && row.enabled === 1) console.error(`auto top-up: cleared a stale enabled flag on lifetime org ${row.id}`);
+			}
 		} catch (error) {
 			console.error(`auto top-up sweep failed for org ${row.id}: ${error instanceof Error ? error.message : String(error)}`);
 		}

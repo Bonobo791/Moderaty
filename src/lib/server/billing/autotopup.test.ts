@@ -595,6 +595,51 @@ describe('sweepAutoTopUp', () => {
 		}
 	});
 
+	test('a stale lifetime row keeps its markers while a top-up PI is still processing', async () => {
+		// A claimed charge still in-flight at upgrade resolves later at Stripe;
+		// if the webhook is then lost, clearing the last-attempt marker now
+		// would make the row undiscoverable forever — the customer stays
+		// charged with neither credits nor a refund (codex P1). The markers
+		// clear only once every matching PI is terminal.
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			await seedOrg({ plan: 'lifetime', autoTopupLastAttemptAt: new Date().toISOString() });
+			mocks.paymentIntentsList.mockResolvedValue({
+				data: [{
+					id: 'pi_processing',
+					status: 'processing',
+					latest_charge: 'ch_processing',
+					created: Math.floor(Date.now() / 1000),
+					metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_100' }
+				}]
+			});
+			expect(await sweepAutoTopUp(5)).toBe(0);
+			expect(mocks.refundsCreate).not.toHaveBeenCalled(); // nothing to refund yet
+			let org = await orgRow();
+			expect(org.autoTopupEnabled).toBe(1); // markers retained — still discoverable
+			expect(org.autoTopupLastAttemptAt).not.toBeNull();
+
+			// The PI resolves to succeeded; the webhook is lost; the next sweep
+			// refunds it and only then does the row leave the candidate set.
+			mocks.paymentIntentsList.mockResolvedValue({
+				data: [{
+					id: 'pi_processing',
+					status: 'succeeded',
+					latest_charge: 'ch_processing',
+					created: Math.floor(Date.now() / 1000),
+					metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_100' }
+				}]
+			});
+			expect(await sweepAutoTopUp(5)).toBe(0);
+			expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_processing', metadata: { reason: 'ungrantable', org_id: 'org-1' } }, { idempotencyKey: 'refund:ungrantable:pi_processing' });
+			org = await orgRow();
+			expect(org.autoTopupEnabled).toBe(0);
+			expect(org.autoTopupLastAttemptAt).toBeNull();
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
 	test('a lifetime org whose flag was cleared at upgrade is still reconciled', async () => {
 		// claimLifetimeSlot clears autoTopupEnabled atomically with the plan
 		// flip — the NORMAL upgrade path produces enabled=0 rows that a

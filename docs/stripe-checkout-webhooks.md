@@ -93,7 +93,7 @@ Moderaty keeps billing state in its database; Stripe is the payment evidence and
 
 ## 9. Recommended design
 
-**Events to subscribe**: `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed` (optional), `charge.refunded`, `charge.dispute.created` (+ optionally `charge.dispute.closed`, `charge.dispute.funds_withdrawn`, `charge.dispute.funds_reinstated`). Route: `src/routes/api/stripe/webhook/+server.ts` — verify raw body (`await request.text()` + `constructEvent`), return 2xx fast, run `fulfill_checkout(session.id)` idempotently.
+**Events to subscribe**: `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed` (optional), `charge.refunded`, `charge.refund.updated`, `charge.dispute.created` (+ optionally `charge.dispute.closed`, `charge.dispute.funds_withdrawn`, `charge.dispute.funds_reinstated`). Route: `src/routes/api/stripe/webhook/+server.ts` — verify raw body (`await request.text()` + `constructEvent`), return 2xx fast, run `fulfill_checkout(session.id)` idempotently. `charge.refund.updated` is NOT for partial-refund reversal (still v1-out-of-scope) — it carries the terminal status of the app's own ungrantable refunds (tagged `metadata.reason='ungrantable'` at create): a `failed`/`canceled` outcome on an ACKed pending refund means the customer is still charged, so the handler escalates MANUAL REFUND REQUIRED.
 
 **Dedupe tables**:
 

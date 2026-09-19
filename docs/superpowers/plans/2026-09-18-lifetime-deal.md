@@ -584,49 +584,30 @@ lifetime tests do.)
 		}
 ```
 
-and the helper (fail loudly, never throw — the webhook must ACK; a retry can
-never mint a slot):
+and the helper — **shipped contract (reconciled through six PR review
+rounds, 2026-09):** `refundUngrantableCheckout(sessionId, orgId,
+paymentIntent, charge, reason)` in `src/lib/server/stripe/webhooks.ts`
+delegates to `refundUngrantablePayment` in `src/lib/server/stripe/refunds.ts`
+— generalized beyond sold-out to duplicate lifetime checkouts, credit
+purchases fulfilled after the org went lifetime, and post-upgrade auto
+top-up charges. Its semantics differ from the originally-planned
+"never throw" shape:
 
-> **Reconciled during PR review (2026-09):** the shipped helper is
-> `refundUngrantableCheckout(sessionId, orgId, paymentIntent, charge, reason)`
-> — generalized beyond sold-out to duplicate lifetime checkouts and credit
-> purchases fulfilled after the org went lifetime — and its refund-API
-> failure now PROPAGATES after the MANUAL REFUND REQUIRED log. Swallowing a
-> transient refund failure would ACK the delivery and leave the customer
-> charged until a human reads the log; the 500 makes Stripe redeliver and
-> retry the refund under the same idempotency key. Ungrantable outcomes
-> return the `'refunded'` verdict (distinct from `'rejected'`) so
-> `/usage/success` shows a deliberate refunded state, and the idempotency
-> key is `refund:ungrantable:${sessionId}`. The no-payment-intent and
-> already-refunded paths still ACK — nothing a retry could change.
-
-```ts
-/** A paid lifetime checkout that found no slot gets its money back — loudly, idempotently. */
-async function refundSlotlessLifetime(
-	sessionId: string,
-	orgId: string,
-	paymentIntent: Stripe.PaymentIntent | null,
-	charge: Stripe.Charge | null | undefined
-): Promise<void> {
-	if (!paymentIntent?.id) {
-		console.error(`stripe: lifetime checkout ${sessionId} for org ${orgId} was PAID but claimed no slot and has no payment intent — MANUAL REFUND REQUIRED`);
-		return;
-	}
-	if (charge?.refunded === true) {
-		console.error(`stripe: lifetime checkout ${sessionId} for org ${orgId} was slotless but charge ${charge.id} is already refunded`);
-		return;
-	}
-	try {
-		await getStripe().refunds.create(
-			{ payment_intent: paymentIntent.id },
-			{ idempotencyKey: `refund:lifetime-soldout:${sessionId}` }
-		);
-		console.error(`stripe: lifetime checkout ${sessionId} for org ${orgId} was PAID but claimed no slot — auto-refunded payment intent ${paymentIntent.id}`);
-	} catch (error) {
-		console.error(`stripe: lifetime checkout ${sessionId} auto-refund FAILED for org ${orgId} — MANUAL REFUND REQUIRED: ${error instanceof Error ? error.message : String(error)}`);
-	}
-}
-```
+- **Refund-API failures PROPAGATE** after the MANUAL REFUND REQUIRED log —
+  swallowing would ACK the delivery and leave the customer charged until a
+  human reads the log; the 500 makes Stripe redeliver and retry under the
+  same `refund:ungrantable:${sessionId}` idempotency key.
+- **The refund's resolved status is validated**: `succeeded` is done;
+  `pending`/`requires_action` are in flight and accepted (each refund is
+  tagged `metadata.reason='ungrantable'` at create so a later terminal
+  `charge.refund.updated` — failed/canceled — screams MANUAL REFUND
+  REQUIRED); any other resolved status throws.
+- **A paid session with no payment intent throws** — a malformed Stripe
+  response must never report `'refunded'` when nothing was refunded.
+- **Ungrantable outcomes return the `'refunded'` verdict** (distinct from
+  `'rejected'`) so `/usage/success` shows a deliberate refunded state.
+- Only the **already-refunded** path ACKs quietly — nothing a retry could
+  change.
 
 - [ ] **Step 4: Run, watch them pass** +
   `npx vitest run src/lib/server/stripe` for regressions.

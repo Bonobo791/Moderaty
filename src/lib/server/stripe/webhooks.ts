@@ -219,7 +219,7 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 			await refundUngrantableCheckout(sessionId, orgId, paymentIntent, charge, 'the org already has an active lifetime plan');
 			return 'refunded';
 		}
-		let result;
+		let result: Awaited<ReturnType<typeof claimLifetimeSlot>>;
 		try {
 			result = await claimLifetimeSlot({
 				orgId,
@@ -259,7 +259,7 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 	// Narrow the expanded object once (chargeId prefers the expanded
 	// object's id — it is the same id either way).
 	const chargeId = typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : charge?.id;
-	let applied;
+	let applied: boolean;
 	try {
 		applied = await applyLedgerDelta(db, {
 			orgId,
@@ -991,6 +991,22 @@ async function handleSubscriptionEvent(event: Stripe.Event): Promise<void> {
  * @param event - The Stripe event to process
  * @returns `true` if the event type is supported, `false` otherwise
  */
+/**
+ * Processes the terminal status of refunds WE created for ungrantable
+ * payments (tagged `reason: 'ungrantable'` at create — the Stripe-side
+ * persistence that identifies them, codex P1). A failed/canceled refund on
+ * an ACKed delivery means the customer is still charged for a purchase we
+ * could never grant: scream for a human refund. Succeeded refunds need no
+ * action — the create-time log already recorded them.
+ */
+function handleUngrantableRefundUpdate(refund: Stripe.Refund): void {
+	if (refund.metadata?.reason !== 'ungrantable') return;
+	if (refund.status === 'failed' || refund.status === 'canceled') {
+		const pi = typeof refund.payment_intent === 'string' ? refund.payment_intent : refund.payment_intent?.id;
+		console.error(`stripe: ungrantable refund ${refund.id} for payment intent ${pi ?? 'unknown'} resolved ${refund.status} — the customer is still charged, MANUAL REFUND REQUIRED`);
+	}
+}
+
 export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
 	// Claim a durable inbox lease before dispatch. Completed event IDs are
 	// skipped; a competing live worker fails loudly so Stripe retries it.
@@ -1047,10 +1063,20 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
 			// Stripe's charge.refunded fires for partial refunds too, so
 			// reverseCharge verifies the charge is FULLY refunded (amounts
 			// compared) before reversing the grant. Partial refunds
-			// (refund.created/refund.updated) are intentionally unhandled, and
+			// (refund.created) are intentionally unhandled, and
 			// reversing after the credits are spent can leave a negative balance
 			// — both documented v1 limitations (docs/stripe-checkout-webhooks.md §7).
 			await reverseCharge(event.data.object.id, 'refund');
+			handled = true;
+			break;
+		case 'charge.refund.updated':
+			// data.object is the Refund. We only escalate OUR ungrantable
+			// refunds (tagged reason:'ungrantable' at create): a pending or
+			// requires_action refund was ACKed as in-flight — if Stripe later
+			// reports a terminal failure the customer is still charged for an
+			// ungrantable purchase, and without this no signal exists (codex
+			// P1). Ordinary refunds stay quiet.
+			handleUngrantableRefundUpdate(event.data.object);
 			handled = true;
 			break;
 		case 'charge.dispute.created':

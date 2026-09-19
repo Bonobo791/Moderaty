@@ -138,7 +138,7 @@ describe('usage/success load', () => {
 			expect(data.granted).toBe(false);
 			expect(data.failed).toBe(false);
 			expect(data.refunded).toBe(true);
-			expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_dup' }, { idempotencyKey: 'refund:ungrantable:cs_dup' });
+			expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_dup', metadata: { reason: 'ungrantable' } }, { idempotencyKey: 'refund:ungrantable:cs_dup' });
 		} finally {
 			errorSpy.mockRestore();
 		}

@@ -36,7 +36,14 @@ export async function refundUngrantablePayment(input: {
 	label: string;
 }): Promise<void> {
 	try {
-		const refund = await getStripe().refunds.create({ payment_intent: input.paymentIntentId }, { idempotencyKey: input.idempotencyKey });
+		// The reason tag is persisted ON the refund so a later terminal-status
+		// event (charge.refund.updated → failed/canceled) can identify OUR
+		// ungrantable refunds and escalate — a pending refund that dies at
+		// Stripe must not vanish quietly after we ACKed (codex P1).
+		const refund = await getStripe().refunds.create(
+			{ payment_intent: input.paymentIntentId, metadata: { reason: 'ungrantable' } },
+			{ idempotencyKey: input.idempotencyKey }
+		);
 		// Validate the boundary response (I2): refunds.create can RESOLVE a
 		// failed/canceled refund — logging success would ACK the delivery and
 		// leave the customer charged with no retry (codex P1). 'succeeded' is

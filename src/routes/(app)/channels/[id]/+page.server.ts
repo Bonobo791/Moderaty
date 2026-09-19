@@ -21,7 +21,8 @@ import { revokeGoogleToken } from '$lib/server/google';
 import { requireOrgRole } from '$lib/server/ownership';
 import { runChannel } from '$lib/server/pipeline';
 import { requireUser } from '$lib/server/session';
-import { and, eq, isNull, lt, or } from 'drizzle-orm';
+import { isToneLevel } from '$lib/toneLevels';
+import { and, eq, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { error, fail, redirect } from '@sveltejs/kit';
 
@@ -40,7 +41,13 @@ function monthsAgoBoundary(months: number): string {
 async function updateOwnChannel(
 	orgId: string,
 	channelId: string,
-	values: Partial<Pick<typeof channels.$inferInsert, 'toneLevel' | 'protectLgbtqia' | 'protectWomen'>>
+	values: {
+		// Each writable column accepts its insert type or a SQL fragment
+		// (drizzle .set() supports both — a conditional CASE needs the latter).
+		[K in 'toneLevel' | 'protectLgbtqia' | 'protectWomen' | 'active' | 'lastRunStatus' | 'lastRunError']?:
+			| (typeof channels.$inferInsert)[K]
+			| SQL;
+	}
 ) {	return db
 		.update(channels)
 		.set(values)
@@ -54,12 +61,20 @@ export const actions = {
 		const f = await request.formData();
 		const channelId = String(f.get('channelId') ?? '');
 		const toneLevel = Number(f.get('toneLevel'));
-		if (toneLevel !== 1 && toneLevel !== 2) {
+		if (!isToneLevel(toneLevel)) {
 			return fail(400, { error: 'tone level must be 1 (Edge Lord) or 2 (Edge lord + Ackchyually…)' });
 		}
-		const updated = await updateOwnChannel(user.orgId, channelId, { toneLevel });
-		if (updated.length === 0) return fail(404, { error: 'channel not found' });
-		return { ok: true };
+		try {
+			const updated = await updateOwnChannel(user.orgId, channelId, { toneLevel });
+			if (updated.length === 0) return fail(404, { error: 'channel not found' });
+			return { ok: true };
+		} catch (e) {
+			// Loud server-side, generic client-side (MOD-10): the switch must be
+			// able to tell a save failure from a success, and raw db detail
+			// never reaches the browser.
+			console.error('setToneLevel failed for channel:', channelId, e);
+			return fail(502, { error: 'Sensitivity could not be saved — try again.' });
+		}
 	},
 	setProtections: async ({ request, locals }) => {
 		const user = requireUser(locals);
@@ -72,6 +87,39 @@ export const actions = {
 		const updated = await updateOwnChannel(user.orgId, channelId, { protectLgbtqia, protectWomen });
 		if (updated.length === 0) return fail(404, { scope: 'protections', channelId, error: 'channel not found' });
 		return { ok: true };
+	},
+	setPaused: async ({ request, locals }) => {
+		const user = requireUser(locals);
+		const f = await request.formData();
+		const channelId = String(f.get('channelId') ?? '');
+		// Explicit target state — a checkbox-style presence/absence field could
+		// never express "resume" (absent = pause? = resume?). 'true'/'false' is
+		// the only accepted form; anything else is a loud 400, never a guess.
+		const raw = f.get('paused');
+		if (raw !== 'true' && raw !== 'false') {
+			return fail(400, { scope: 'pause', channelId, error: 'paused must be "true" or "false"' });
+		}
+		// active=0 is the only change: cron's active=1 predicate and
+		// runChannel's inactive-skip stop future claims while the channel,
+		// its token, and all its data stay put (MOD-9). Idempotent — pausing
+		// a paused channel is a harmless no-op. A real 0→1 resume also clears
+		// the stale verdict: its success predates the pause, so the channel is
+		// "Not checked yet" until cron records a new live check (codex,
+		// PR #142). The CASE keeps a redundant resume on an active channel
+		// from erasing good health.
+		const updated = await updateOwnChannel(
+			user.orgId,
+			channelId,
+			raw === 'true'
+				? { active: 0 }
+				: {
+						active: 1,
+						lastRunStatus: sql`case when ${channels.active} = 0 then null else ${channels.lastRunStatus} end`,
+						lastRunError: sql`case when ${channels.active} = 0 then null else ${channels.lastRunError} end`
+					}
+		);
+		if (updated.length === 0) return fail(404, { scope: 'pause', channelId, error: 'channel not found' });
+		return { ok: true, scope: 'pause', channelId, paused: raw === 'true' };
 	},
 	analyzeHistory: async ({ request, locals }) => {
 		const user = requireUser(locals);

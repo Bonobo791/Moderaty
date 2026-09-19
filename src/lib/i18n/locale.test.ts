@@ -16,7 +16,7 @@
 import { describe, expect, test } from 'vitest';
 
 import { isLocale, resolveLocale, SUPPORTED_LOCALES } from './locale';
-import { t } from './messages';
+import { MESSAGES, t } from './messages';
 
 describe('locale resolution', () => {
 	test('isLocale accepts exactly the supported locales, derived from SUPPORTED_LOCALES', () => {
@@ -77,11 +77,17 @@ describe('locale resolution', () => {
 });
 
 describe('message catalog', () => {
-	test('every shell message has both translations', () => {
-		const keys = ['languageLabel', 'english', 'portuguese', 'apply', 'app', 'dashboard', 'usage', 'team', 'help', 'switchTeam', 'signOut', 'maintenance', 'moderationPaused', 'databaseUnavailable', 'signInTitle', 'signInDescription', 'signInGoogle', 'finishAccount', 'almostThere', 'updatedTerms', 'finishAccountPrompt', 'legalChanged', 'createAccount', 'acceptContinue', 'marketingText'] as const;
-		for (const key of keys) {
-			expect(t('en', key)).not.toBe('');
-			expect(t('pt-BR', key)).not.toBe('');
+	test('every supported locale covers the full key set, derived not hardcoded', () => {
+		// The key set is derived from the catalogs themselves so a newly added
+		// key cannot slip past the parity check untranslated (MOD-11).
+		const enKeys = Object.keys(MESSAGES.en).sort();
+		for (const locale of SUPPORTED_LOCALES) {
+			expect(Object.keys(MESSAGES[locale]).sort(), `${locale} key set`).toEqual(enKeys);
+		}
+		for (const locale of SUPPORTED_LOCALES) {
+			for (const key of enKeys) {
+				expect(t(locale, key as keyof typeof MESSAGES.en).length, `${locale}.${key}`).toBeGreaterThan(0);
+			}
 		}
 	});
 });

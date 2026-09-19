@@ -24,7 +24,13 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
-import { deleteComment, fetchNewComments, fetchVideoMetadata, getCommentModerationStatus, refreshAccessToken, setModerationStatus } from './youtube';
+import { deleteComment, fetchNewComments, fetchVideoMetadata, getCommentModerationStatus, refreshAccessToken, setModerationStatus, YOUTUBE_ID_BATCH_SIZE } from './youtube';
+
+// Pins the shared constant to YouTube's documented `id`-list cap — a change
+// here is a provider-limit change, not a refactor, and must be deliberate.
+test('YOUTUBE_ID_BATCH_SIZE matches the YouTube API id-list cap of 50', () => {
+	expect(YOUTUBE_ID_BATCH_SIZE).toBe(50);
+});
 
 beforeEach(() => {
 	mocks.env.GOOGLE_CLIENT_ID = 'client-id';
@@ -309,6 +315,21 @@ test('fetches video metadata in batches of fifty', async () => {
 	expect(batches).toEqual([ids.slice(0, 50), ['video-51']]);
 	expect(result.get('video-1')).toEqual({ title: 'Title video-1', description: 'Description video-1' });
 	expect(result.get('video-51')).toEqual({ title: 'Title video-51', description: 'Description video-51' });
+});
+
+test('fetches video metadata batches in parallel so a slow first batch cannot stall the run', async () => {
+	const ids = Array.from({ length: 51 }, (_, index) => `video-${index + 1}`);
+	const deferred: Array<() => void> = [];
+	const fetch = vi.fn().mockImplementation(
+		() => new Promise<Response>((resolve) => deferred.push(() => resolve(new Response(JSON.stringify({ items: [] }), { status: 200 }))))
+	);
+	vi.stubGlobal('fetch', fetch);
+
+	const pending = fetchVideoMetadata(ids, 'token');
+	await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+	for (const resolve of deferred) resolve();
+	const result = await pending;
+	expect(result.size).toBe(0);
 });
 
 test('truncates long video descriptions for the tone prompt', async () => {

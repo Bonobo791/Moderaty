@@ -20,13 +20,14 @@
 
 import { error, fail, isHttpError, isRedirect, redirect } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
-import { eq } from 'drizzle-orm';
+import { and, eq, ne } from 'drizzle-orm';
 
 import { AUTO_TOPUP_DEFAULT_THRESHOLD } from '$lib/server/billing/autotopup';
 import { createCreditCheckout, createPlanCheckout, getOrCreateStripeCustomer } from '$lib/server/billing/checkout';
+import { lifetimeSlotsRemaining } from '$lib/server/billing/entitlements';
 import { createMercadoPagoCreditCheckout } from '$lib/server/mercadopago/checkout';
 import { configuredMercadoPagoBundles } from '$lib/server/mercadopago/bundles';
-import { listCreditTransactions, orgIsMetered, usageSummary } from '$lib/server/billing/ledger';
+import { isUnmeteredPlan, listCreditTransactions, orgIsMetered, usageSummary } from '$lib/server/billing/ledger';
 import { db } from '$lib/server/db';
 import { organizations } from '$lib/server/db/schema';
 import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
@@ -60,6 +61,7 @@ function maintenanceData() {
 		summary: null,
 		mercadoPagoBundles: [],
 		metered: false,
+		lifetimeSlots: null,
 		history: [],
 		bundles: [],
 		autoTopup: null,
@@ -115,10 +117,11 @@ export const load: PageServerLoad = async ({ locals }) => {
 		if (!org) {
 			throw error(500, 'account has no organization — contact support');
 		}
-		const [summary, history, metered] = await Promise.all([
+		const [summary, history, metered, lifetimeSlots] = await Promise.all([
 			usageSummary(user.orgId),
 			listCreditTransactions(user.orgId, 30),
-			orgIsMetered(user.orgId)
+			orgIsMetered(user.orgId),
+			lifetimeSlotsRemaining()
 		]);
 		return {
 			maintenance: false,
@@ -126,6 +129,7 @@ export const load: PageServerLoad = async ({ locals }) => {
 			mercadoPagoBundles: configuredMercadoPagoBundles(),
 			summary,
 			metered,
+			lifetimeSlots,
 			history: history.map((row) => ({
 				id: row.id,
 				delta: row.delta,
@@ -209,15 +213,20 @@ export const actions: Actions = {
 		const form = await request.formData();
 		const enabled = form.get('enabled') === 'on';
 		const thresholdRaw = String(form.get('threshold') ?? '');
-		// An ABSENT threshold field must fail, not silently become 0:
-		// Number('') === 0 passes every check below and would set "top up
-		// below zero", stopping replenishment (codex 6161).
-		if (thresholdRaw.trim() === '') {
-			return fail(400, { error: 'Auto top-up threshold must be a whole number of credits between 0 and 1,000,000.' });
-		}
-		const threshold = Number(thresholdRaw);
-		if (!Number.isInteger(threshold) || threshold < 0 || threshold > 1_000_000) {
-			return fail(400, { error: 'Auto top-up threshold must be a whole number of credits between 0 and 1,000,000.' });
+		// The threshold is required only when ENABLING: an absent field must
+		// fail, not silently become 0 (Number('') === 0 would set "top up
+		// below zero" — codex 6161). A disable submit legitimately carries no
+		// threshold — the lifetime disable-only control posts none — and the
+		// write below ignores it anyway (codex, round 3).
+		let threshold = 0;
+		if (enabled) {
+			if (thresholdRaw.trim() === '') {
+				return fail(400, { error: 'Auto top-up threshold must be a whole number of credits between 0 and 1,000,000.' });
+			}
+			threshold = Number(thresholdRaw);
+			if (!Number.isInteger(threshold) || threshold < 0 || threshold > 1_000_000) {
+				return fail(400, { error: 'Auto top-up threshold must be a whole number of credits between 0 and 1,000,000.' });
+			}
 		}
 		// Consent is required only on the disabled→enabled TRANSITION: the page
 		// hides the checkbox once enabled, so an already-enabled org updating
@@ -227,12 +236,20 @@ export const actions: Actions = {
 		const current = await db
 			.select({
 				autoTopupEnabled: organizations.autoTopupEnabled,
-				autoTopupState: organizations.autoTopupState
+				autoTopupState: organizations.autoTopupState,
+				plan: organizations.plan
 			})
 			.from(organizations)
 			.where(eq(organizations.id, user.orgId))
 			.get();
 		const wasEnabled = current?.autoTopupEnabled === 1;
+		// A lifetime org's scoring is already unlimited — enabling (or a
+		// threshold update while a stale flag survives) would charge a real
+		// card for credits it can never need. Disabling stays allowed so a
+		// stale flag can still be cleared (MOD-35).
+		if (enabled && isUnmeteredPlan(current?.plan)) {
+			return fail(400, { error: 'Your lifetime plan includes unlimited moderated comments — auto top-up is not needed.' });
+		}
 		if (enabled && !wasEnabled && form.get('consent') !== 'on') {
 			return fail(400, { error: 'You must tick the consent checkbox to enable automatic top-up.' });
 		}
@@ -260,7 +277,11 @@ export const actions: Actions = {
 			// preserve the claim — resetting it would let the sweep create a
 			// second PaymentIntent for the same shortage (coderabbit).
 			const resetClaim = !wasEnabled || current?.autoTopupState === 'disabled';
-			await db
+			// The plan check above is a pre-read — an upgrade to lifetime can
+			// land between it and this write, so the update stays conditional:
+			// a 0-row result means the org went unmetered mid-submit and the
+			// enable must fail loudly, never silently arm a stale flag (review).
+			const written = await db
 				.update(organizations)
 				.set({
 					autoTopupEnabled: 1,
@@ -268,7 +289,12 @@ export const actions: Actions = {
 					...(resetClaim ? { autoTopupState: 'idle', autoTopupFailures: 0 } : {}),
 					...evidence
 				})
-				.where(eq(organizations.id, user.orgId));
+				.where(and(eq(organizations.id, user.orgId), ne(organizations.plan, 'lifetime')))
+				.returning({ id: organizations.id });
+			if (written.length !== 1) {
+				console.error(`setAutoTopup lost a plan race for org ${user.orgId}: the org went lifetime mid-submit — enable rejected`);
+				return fail(400, { error: 'Your lifetime plan includes unlimited moderated comments — auto top-up is not needed.' });
+			}
 		} else {
 			await db
 				.update(organizations)

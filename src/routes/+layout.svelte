@@ -18,9 +18,16 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 <script lang="ts">
 	import '../app.css';
 	import favicon from '$lib/assets/favicon.svg';
-	import LanguageSwitcher from '$lib/components/LanguageSwitcher.svelte';
 
 	let { children, data } = $props();
+
+	// hooks.server.ts rewrites <html lang> only on a full page load; after
+	// client-side navigation the layout load re-runs (data.locale is already
+	// gated to the surface's coverage) but the attribute would go stale —
+	// keep it describing the rendered surface (cubic, PR #142).
+	$effect(() => {
+		document.documentElement.lang = data.locale;
+	});
 </script>
 
 <svelte:head>
@@ -36,5 +43,4 @@ FORM: terminal-ink night shift; live component as hero visual, verdict stamps as
 FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
 -->
 
-<LanguageSwitcher locale={data.locale ?? 'en'} />
 {@render children()}

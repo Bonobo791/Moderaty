@@ -326,7 +326,10 @@ test('a failing channel run reports failure, never success', async () => {
 		const res = await call({ bearer: 'test-secret' });
 
 		expect(res.status).toBe(500);
-		expect(await res.json()).toMatchObject({ ok: false, results: { 'UC-bad': { error: 'youtube quota exhausted' } } });
+		// The response carries the sanitized category, never the raw provider
+		// message — error bodies can echo request details/tokens (codeant,
+		// PR #142). The full error stays in the server log.
+		expect(await res.json()).toMatchObject({ ok: false, results: { 'UC-bad': { error: 'quota' } } });
 		// The failure is logged loudly with the channel id (an emptied log
 		// message stayed green in the mutation audit).
 		expect(errorSpy).toHaveBeenCalledWith('channel run UC-bad failed:', expect.any(Error));
@@ -336,6 +339,192 @@ test('a failing channel run reports failure, never success', async () => {
 		expect(row?.leaseExpiresAt).toBeNull();
 	} finally {
 		// Restore the spy — a lingering console.error mock leaks into later tests.
+		errorSpy.mockRestore();
+	}
+});
+
+test('a deadline-partial run records failed/timeout health, never success', async () => {
+	// codex+cubic, PR #142: runChannel RESOLVES deadline exhaustion as
+	// { partial: true } — recording success would count a timed-out channel as
+	// protected and advance lastSuccessAt on a check that did not complete.
+	await seedChannel('UC-partial', { lastRunStatus: 'success', lastSuccessAt: '2026-08-01T00:00:00.000Z' });
+	mocks.runChannel.mockResolvedValue(runResult({ dryRun: false, partial: true, stoppedReason: 'deadline' }));
+
+	const res = await call({ bearer: 'test-secret' });
+
+	expect(res.status).toBe(200);
+	const row = await channelRow('UC-partial');
+	expect(row?.lastRunStatus).toBe('failed');
+	expect(row?.lastRunError).toBe('timeout');
+	expect(row?.lastSuccessAt).toBe('2026-08-01T00:00:00.000Z'); // frozen — no false freshness
+	expect(row?.lastRunAt).not.toBeNull(); // rotation still ticks
+	expect(row?.leaseExpiresAt).toBeNull();
+});
+
+test('a credit-starved run records failed/credits health, never success', async () => {
+	// codex, PR #142: outOfCredits also resolves — the channel fetched comments
+	// but deferred every AI decision, so "Protected" would be a lie; the
+	// category tells the user the actionable fix (top up), not a reconnect.
+	await seedChannel('UC-credits', { lastRunStatus: 'success', lastSuccessAt: '2026-08-01T00:00:00.000Z' });
+	mocks.runChannel.mockResolvedValue(runResult({ dryRun: false, outOfCredits: true }));
+
+	const res = await call({ bearer: 'test-secret' });
+
+	expect(res.status).toBe(200);
+	const row = await channelRow('UC-credits');
+	expect(row?.lastRunStatus).toBe('failed');
+	expect(row?.lastRunError).toBe('credits');
+	expect(row?.lastSuccessAt).toBe('2026-08-01T00:00:00.000Z');
+});
+
+test.each([
+	{ label: 'deactivated mid-run', result: { partial: true, stoppedReason: 'deactivated' } },
+	{ label: 'skipped as inactive', result: { skipped: true } }
+])('a run with no verdict ($label) leaves the prior health verdict untouched', async ({ result }) => {
+	// A paused channel's Paused badge comes from active=0, not the run-health
+	// columns — stamping failed/timeout would lie on resume, stamping success
+	// would lie about a check that never completed. Neither is written.
+	await seedChannel('UC-paused', { lastRunStatus: 'success', lastSuccessAt: '2026-08-01T00:00:00.000Z', lastRunError: null });
+	mocks.runChannel.mockResolvedValue(runResult(result));
+
+	const res = await call({ bearer: 'test-secret' });
+
+	expect(res.status).toBe(200);
+	const row = await channelRow('UC-paused');
+	expect(row?.lastRunStatus).toBe('success');
+	expect(row?.lastSuccessAt).toBe('2026-08-01T00:00:00.000Z');
+	expect(row?.lastRunAt).not.toBeNull();
+	expect(row?.leaseExpiresAt).toBeNull();
+});
+
+test('a failing channel run reports failure, never success', async () => {
+	// MOD-7: health lives apart from the rotation timestamp — a channel that
+	// failed before must read healthy again only after a real success.
+	await seedChannel('UC-ok', { lastRunStatus: 'failed', lastRunError: 'quota' });
+	mocks.runChannel.mockResolvedValue(runResult({ dryRun: false }));
+
+	const res = await call({ bearer: 'test-secret' });
+
+	expect(res.status).toBe(200);
+	const row = await channelRow('UC-ok');
+	expect(row?.lastRunStatus).toBe('success');
+	expect(row?.lastSuccessAt).not.toBeNull();
+	expect(row?.lastRunError).toBeNull();
+	expect(row?.lastRunAt).not.toBeNull();
+	expect(row?.leaseExpiresAt).toBeNull();
+});
+
+test.each([
+	{ label: 'token', message: 'google oauth refresh failed: 401 unauthorized_client', category: 'token' },
+	{ label: 'expired access token', message: 'youtube access token expired', category: 'token' },
+	{ label: 'OpenAI', message: 'OpenAI scoring request failed: 500 Internal Server Error', category: 'scoring' },
+	{ label: 'moderation response', message: 'moderation response has missing or out-of-range category scores', category: 'scoring' },
+	{ label: 'moderation request failure', message: 'moderation failed: 503 service unavailable', category: 'scoring' },
+	{ label: 'quota', message: 'commentThreads.list failed: 403 quotaExceeded', category: 'quota' },
+	{ label: 'generic', message: 'database is locked', category: 'error' },
+	// cubic+coderabbit, PR #142: a YouTube pagination failure is NOT an auth
+	// failure — "reconnect the channel" would send the user on a false errand.
+	{ label: 'expired page token', message: 'The request specifies an invalid page token.', category: 'error' },
+	// cubic, PR #142: a YouTube moderation-action verification failure is not
+	// an AI scoring failure — the word "moderation" alone must not win.
+	{ label: 'action verification', message: 'moderation action c1 verification failed: 500 Internal Server Error', category: 'error' },
+	{ label: 'moderationStatus validation', message: 'comments.list response moderationStatus is unsupported: x', category: 'error' }
+])('a failed run persists failed health for a $label failure and never touches the success fields', async ({ message, category }) => {
+	// MOD-7: a failed run must not update the success timestamp/status — the
+	// dashboard's "last checked" freshness used to lie because only
+	// lastRunAt existed. Only the sanitized category is stored: provider
+	// error bodies can echo request details and stay in the server log.
+	await seedChannel('UC-fail', { lastRunStatus: 'success', lastSuccessAt: '2026-08-01T00:00:00.000Z' });
+	mocks.runChannel.mockRejectedValue(new Error(message));
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+	try {
+		const res = await call({ bearer: 'test-secret' });
+
+		expect(res.status).toBe(500);
+		const row = await channelRow('UC-fail');
+		expect(row?.lastRunStatus).toBe('failed');
+		expect(row?.lastRunError).toBe(category);
+		// Success fields are frozen at their prior values — the failure
+		// cannot masquerade as a healthy run (nor erase when it last was).
+		expect(row?.lastSuccessAt).toBe('2026-08-01T00:00:00.000Z');
+		expect(row?.lastRunAt).not.toBeNull(); // rotation still ticks so others are not starved
+		expect(row?.leaseExpiresAt).toBeNull();
+	} finally {
+		errorSpy.mockRestore();
+	}
+});
+
+test('a bookkeeping failure in the run-recording finally cannot mask the run result', async () => {
+	// codeant, PR #142: the health write runs in `finally` — an unchecked throw
+	// would replace the run's real response and leave the lease uncleared.
+	// The lease self-expires; the write failure is logged loudly and the
+	// run result still reaches the caller.
+	await seedChannel('UC-rec');
+	mocks.runChannel.mockResolvedValue(runResult());
+	// Only the health write sets last_run_at — the claim's lease write leaves
+	// it untouched, so this trigger fires exactly on the finally UPDATE.
+	await testDb().client.execute(
+		`CREATE TRIGGER fail_run_record BEFORE UPDATE ON channels
+		 WHEN NEW.last_run_at IS NOT NULL
+		 BEGIN SELECT RAISE(ABORT, 'simulated bookkeeping failure'); END`
+	);
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		const res = await call({ bearer: 'test-secret' });
+
+		expect(res.status).toBe(200);
+		// codex, PR #142 r2: the run result is preserved, but the bookkeeping
+		// failure is surfaced in the payload — a silent server-log-only
+		// fallback would hide a degraded state from the scheduled caller.
+		expect(await res.json()).toMatchObject({ results: { 'UC-rec': runResult() }, bookkeepingError: true });
+		expect(errorSpy).toHaveBeenCalledWith('run-health write failed for channel:', 'UC-rec', expect.any(Error));
+	} finally {
+		errorSpy.mockRestore();
+		await testDb().client.execute('DROP TRIGGER fail_run_record');
+	}
+});
+
+test('a dry-run result writes no health verdict — preview work is not a live check (codex, PR #142)', async () => {
+	// DRY_RUN=true deployments resolve every run with dryRun: true; stamping
+	// success/lastSuccessAt would label a channel Protected though it never
+	// moderated anything live. lastRunAt still ticks (rotation) and the
+	// lease still clears.
+	await seedChannel('UC-dry', { lastRunStatus: 'failed', lastRunError: 'quota', lastSuccessAt: '2026-08-01T00:00:00.000Z' });
+	mocks.runChannel.mockResolvedValue(runResult()); // dryRun: true default
+
+	const res = await call({ bearer: 'test-secret' });
+
+	expect(res.status).toBe(200);
+	const row = await channelRow('UC-dry');
+	expect(row?.lastRunStatus).toBe('failed');
+	expect(row?.lastRunError).toBe('quota');
+	expect(row?.lastSuccessAt).toBe('2026-08-01T00:00:00.000Z');
+	expect(row?.lastRunAt).not.toBeNull();
+	expect(row?.leaseExpiresAt).toBeNull();
+});
+
+test('a mid-run reconnect skips the health write and flags the caller (codex, PR #142)', async () => {
+	// The finally update matched only the channel id: a reconnect replacing
+	// refreshTokenEnc mid-run would stamp the NEW connector with the OLD
+	// run's verdict. The write is guarded by connector identity like
+	// assertChannelActive — zero rows matched means loud log + flag.
+	await seedChannel('UC-race', { lastRunStatus: 'success', lastSuccessAt: '2026-08-01T00:00:00.000Z' });
+	mocks.runChannel.mockImplementation(async () => {
+		await testDb().db.update(channels).set({ refreshTokenEnc: 'rotated' }).where(eq(channels.id, 'UC-race'));
+		return runResult({ dryRun: false });
+	});
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		const res = await call({ bearer: 'test-secret' });
+
+		expect(res.status).toBe(200);
+		expect(await res.json()).toMatchObject({ bookkeepingError: true });
+		const row = await channelRow('UC-race');
+		expect(row?.refreshTokenEnc).toBe('rotated');
+		expect(row?.lastRunStatus).toBe('success'); // untouched — the verdict belongs to the old connector
+		expect(row?.lastSuccessAt).toBe('2026-08-01T00:00:00.000Z');
+	} finally {
 		errorSpy.mockRestore();
 	}
 });

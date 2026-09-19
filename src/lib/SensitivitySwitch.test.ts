@@ -18,6 +18,7 @@
 // readout copy, the knob stop positions, and the hidden persistence form.
 // Svelte's SSR render is lazy: assert on render(...).body.
 
+import { readFileSync } from 'node:fs';
 import { render } from 'svelte/server';
 import { expect, test } from 'vitest';
 
@@ -120,4 +121,45 @@ test('the Applied indicator only renders after a successful persist', () => {
 	// doc comment, which SSR emits.
 	expect(renderSwitch(1)).not.toContain('role="status"');
 	expect(renderSwitch(1)).not.toMatch(/class="applied/);
+});
+
+// MOD-10: a failed save surfaces an inline alert — it exists only after a
+// real failure, so SSR must ship without it.
+test('the save-error alert is absent until a persist actually fails', () => {
+	expect(renderSwitch(1)).not.toContain('role="alert"');
+	expect(renderSwitch(1)).not.toMatch(/class="save-error/);
+	expect(renderSwitch(1)).not.toContain('could not be saved');
+});
+
+// codex+cubic, PR #142: SSR alone can never drive a failed enhanced-form
+// result in the node test env, so the failure path's WIRING is pinned at
+// source level — removing the alert markup, the persistOutcome call, or the
+// enhance-callback hookup must fail a test, not slip through silently.
+test('the failed-save path is wired: alert markup, persistOutcome, and the enhance callback', () => {
+	const source = readFileSync(new URL('./SensitivitySwitch.svelte', import.meta.url), 'utf8');
+	// The alert renders the server-agnostic message inside role="alert".
+	expect(source).toContain('role="alert"');
+	expect(source).toMatch(/saveError\}\s*Flip a stop to retry/);
+	// The enhance callback delegates the settle to handlePersist, which maps
+	// the result through persistOutcome (the tested decision logic).
+	expect(source).toMatch(/handlePersist\(result\)/);
+	expect(source).toMatch(/persistOutcome\(result, level\)/);
+	// A failed persist must write saveError — deleting the assignment is a
+	// silent-failure regression.
+	expect(source).toMatch(/saveError = outcome\.message/);
+});
+
+test('an obsolete failed submit cannot flash its error over a queued newer choice (coderabbit+cubic)', () => {
+	// When a re-flip queued behind the in-flight save, the stale failure must
+	// not display — the newer submit owns the outcome and will report itself.
+	const source = readFileSync(new URL('./SensitivitySwitch.svelte', import.meta.url), 'utf8');
+	expect(source).toMatch(/if \(!queuedSubmit\)\s*\{[^}]*selected = outcome\.selected[^}]*saveError = outcome\.message[^}]*\}/s);
+});
+
+test('an obsolete successful submit cannot flash Applied over a queued newer choice (codex, PR #142 r2)', () => {
+	// Symmetric to the failure guard: a stale success labeling the displayed
+	// (not-yet-submitted) choice "Applied" is the same lie in the other
+	// direction.
+	const source = readFileSync(new URL('./SensitivitySwitch.svelte', import.meta.url), 'utf8');
+	expect(source).toMatch(/outcome\.kind === 'applied'\)\s*\{[^}]*if \(!queuedSubmit\)/s);
 });

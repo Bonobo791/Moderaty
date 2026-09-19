@@ -111,6 +111,10 @@ export async function getCredits(orgId: string): Promise<number> {
  * account into a finite balance that pauses AI scoring (codex review). */
 const UNMETERED_PLANS = new Set(['lifetime']);
 
+export function isUnmeteredPlan(plan: string | null | undefined): boolean {
+	return UNMETERED_PLANS.has(plan ?? '');
+}
+
 export async function orgIsMetered(orgId: string): Promise<boolean> {
 	const row = await db
 		.select({ creditsRemaining: organizations.creditsRemaining, plan: organizations.plan, stripeSubscriptionId: organizations.stripeSubscriptionId })
@@ -118,9 +122,29 @@ export async function orgIsMetered(orgId: string): Promise<boolean> {
 		.where(eq(organizations.id, orgId))
 		.get();
 	if (!row) throw new Error(`org not found: ${orgId}`);
-	if (UNMETERED_PLANS.has(row.plan)) return false;
+	if (isUnmeteredPlan(row.plan)) return false;
 	return hasHostedEntitlement(row) || row.creditsRemaining !== null;
 }
+
+/**
+ * Rejects credit purchases for plans whose comments are already unlimited.
+ * Called before a checkout attempt is planted for ANY credit bundle (Stripe
+ * and Mercado Pago): a lifetime org buying credits pays real money for a
+ * balance it can never need (MOD-35).
+ */
+export async function assertCreditsPurchasable(orgId: string): Promise<void> {
+	const row = await db
+		.select({ plan: organizations.plan })
+		.from(organizations)
+		.where(eq(organizations.id, orgId))
+		.get();
+	if (!row) throw new Error(`org not found: ${orgId}`);
+	if (isUnmeteredPlan(row.plan)) {
+		throw new Error('the lifetime plan includes unlimited moderated comments — credit purchases are not available');
+	}
+}
+
+export const UNMETERED_CREDIT_GRANT_ERROR = 'an unmetered plan cannot receive credit grants';
 
 /**
  * Applies a credit ledger adjustment exactly once.
@@ -137,11 +161,29 @@ export async function applyLedgerDelta(
 		// never surface the FK constraint error instead (the org FK is
 		// defense-in-depth, not the primary guard).
 		const org = await tx
-			.select({ id: organizations.id })
+			.select({ id: organizations.id, plan: organizations.plan })
 			.from(organizations)
 			.where(eq(organizations.id, orgId))
 			.get();
 		if (!org) throw new Error(`org not found: ${orgId}`);
+		// Dedup BEFORE the plan guard: a redelivery of an already-applied delta
+		// is an idempotent no-op regardless of the org's CURRENT plan — checking
+		// the plan first would make callers refund a payment whose grant already
+		// committed (a purchase granted while metered, replayed post-upgrade —
+		// codex P1). The onConflictDoNothing below stays the atomic backstop
+		// for two concurrent first-time grants racing past this read.
+		const existing = await tx
+			.select({ id: creditTransactions.id })
+			.from(creditTransactions)
+			.where(and(eq(creditTransactions.orgId, orgId), eq(creditTransactions.refType, refType), eq(creditTransactions.refId, refId)))
+			.get();
+		if (existing) return false;
+		// The atomic counterpart of assertCreditsPurchasable: checkout creation
+		// is gated at the form, but a checkout in flight when the org went
+		// lifetime must still not grant — paid-but-unusable credits get
+		// refunded by the caller (review: TOCTOU). Only positive deltas are
+		// blocked; reversals must always be able to claw a stranded balance back.
+		if (delta > 0 && isUnmeteredPlan(org.plan)) throw new Error(UNMETERED_CREDIT_GRANT_ERROR);
 		const inserted = await tx
 			.insert(creditTransactions)
 			.values({
@@ -191,6 +233,12 @@ export async function consumeCredit(handle: LedgerHandle, orgId: string, comment
 			.where(eq(organizations.id, orgId))
 			.get();
 		if (!org) throw new Error(`org not found: ${orgId}`);
+		// Unmetered plans (lifetime) never consume: their scoring is already
+		// unlimited, so a stranded pre-upgrade balance must not burn 1-per-
+		// comment for nothing — it freezes until the org is metered again
+		// (MOD-36). Returns false like an exhausted balance; staging only
+		// treats that as fatal for METERED orgs.
+		if (isUnmeteredPlan(org.plan)) return false;
 		const inserted = await tx
 			.insert(creditTransactions)
 			.values({

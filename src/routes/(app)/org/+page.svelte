@@ -49,6 +49,30 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	</div>
 {/if}
 
+{#if isOwner}
+	<div class="card">
+		<h2 style="margin-top:0">OpenAI key</h2>
+		{#if data.hasOpenAiKey}
+			<p class="muted">
+				A team OpenAI key is saved — AI scoring runs on it instead of the deployment's key.
+			</p>
+			<form method="POST" action="?/clearOpenAiKey" use:enhance>
+				<button class="btn danger small" type="submit">Remove the saved OpenAI key</button>
+			</form>
+		{:else}
+			<p class="muted">
+				Score comments with your own OpenAI key instead of the deployment's. The key is
+				validated with OpenAI before it is saved, stored encrypted, and never shown again.
+			</p>
+			<form method="POST" action="?/setOpenAiKey" use:enhance>
+				<label for="openai-key">OpenAI API key (starts with sk-)</label>
+				<input id="openai-key" type="password" name="openAiKey" maxlength="200" required />
+				<button class="btn secondary small" type="submit">Save OpenAI key</button>
+			</form>
+		{/if}
+	</div>
+{/if}
+
 <div class="card">
 	<h2 style="margin-top:0">Members</h2>
 	<table class="stack-table">

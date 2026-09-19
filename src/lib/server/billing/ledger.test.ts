@@ -21,6 +21,7 @@ import { db } from '$lib/server/db';
 import { creditTransactions, organizations, stripePendingReversals, stripeSubscriptionPeriods } from '$lib/server/db/schema';
 import {
 	applyLedgerDelta,
+	assertCreditsPurchasable,
 	consumeCredit,
 	drainPendingReversals,
 	findGrantForStripe,
@@ -172,8 +173,39 @@ describe('orgIsMetered', () => {
 	});
 });
 
+describe('assertCreditsPurchasable', () => {
+	test('passes for metered orgs, throws for the unmetered lifetime plan', async () => {
+		// Credit checkout creation (Stripe AND Mercado Pago) must reject an
+		// unlimited plan before planting an attempt — a lifetime org buying
+		// credits pays real money for a balance it can never need (MOD-35).
+		await seedOrg('org-1', null, null);
+		await expect(assertCreditsPurchasable('org-1')).resolves.toBeUndefined();
+		await seedOrg('org-2', 500, 'cus_1');
+		await expect(assertCreditsPurchasable('org-2')).resolves.toBeUndefined();
+
+		await testDb().db.update(organizations).set({ plan: 'lifetime' }).where(eq(organizations.id, 'org-1'));
+		await expect(assertCreditsPurchasable('org-1')).rejects.toThrow(/lifetime/);
+	});
+
+	test('fails loudly for an unknown org', async () => {
+		await expect(assertCreditsPurchasable('missing')).rejects.toThrow('org not found');
+	});
+});
+
 
 describe('consumeCredit', () => {
+	test('an unmetered (lifetime) org never consumes a credit, even holding a balance', async () => {
+		// Unlimited scoring must not burn a stranded pre-upgrade balance 1 per
+		// AI comment — no decrement, no ledger row. The MOD-36 decision: the
+		// balance freezes until the org is metered again.
+		await seedOrg('org-1', 500, 'cus_1');
+		await testDb().db.update(organizations).set({ plan: 'lifetime' }).where(eq(organizations.id, 'org-1'));
+		expect(await consumeCredit(db, 'org-1', 'comment-1')).toBe(false);
+		const org = await testDb().db.select({ creditsRemaining: organizations.creditsRemaining }).from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.creditsRemaining).toBe(500);
+		expect(await testDb().db.select().from(creditTransactions)).toHaveLength(0);
+	});
+
 	test('charges one credit and records the row with the new balance', async () => {
 		await seedOrg('org-1', 5);
 		const charged = await consumeCredit(db, 'org-1', 'comment-1');

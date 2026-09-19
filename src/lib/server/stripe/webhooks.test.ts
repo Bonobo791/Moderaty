@@ -18,7 +18,7 @@ import { beforeEach, describe, expect, test, vi, type MockInstance } from 'vites
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { db } from '$lib/server/db';
-import { organizations, stripeEvents, stripePendingReversals, stripeLifetimeEntitlements, stripeLifetimeSlots, stripeSubscriptionPeriods, stripeDisputeReversals } from '$lib/server/db/schema';
+import { organizations, creditTransactions, stripeEvents, stripePendingReversals, stripeLifetimeEntitlements, stripeLifetimeSlots, stripeSubscriptionPeriods, stripeDisputeReversals, stripeCheckoutAttempts } from '$lib/server/db/schema';
 import { applyLedgerDelta, getCredits } from '$lib/server/billing/ledger';
 import { claimEvent, fulfillAutoTopup, fulfillCheckout, handleStripeEvent, markEventProcessed, restoreWonDispute, reverseCharge, reverseDispute } from './webhooks';
 
@@ -29,7 +29,9 @@ const mocks = vi.hoisted(() => ({
 	disputesRetrieve: vi.fn(),
 	customersUpdate: vi.fn(),
 	customersRetrieve: vi.fn(),
-	paymentMethodsAttach: vi.fn()
+	subscriptionsRetrieve: vi.fn(),
+	paymentMethodsAttach: vi.fn(),
+	refundsCreate: vi.fn()
 }));
 
 vi.mock('$lib/server/stripe/client', () => ({
@@ -39,12 +41,23 @@ vi.mock('$lib/server/stripe/client', () => ({
 		charges: { retrieve: mocks.chargesRetrieve },
 		disputes: { retrieve: mocks.disputesRetrieve },
 		customers: { update: mocks.customersUpdate, retrieve: mocks.customersRetrieve },
-		paymentMethods: { attach: mocks.paymentMethodsAttach }
+		subscriptions: { retrieve: mocks.subscriptionsRetrieve },
+		paymentMethods: { attach: mocks.paymentMethodsAttach },
+		refunds: { create: mocks.refundsCreate }
 	})
 }));
 vi.mock('$env/dynamic/private', () => ({ env: {} }));
 
-setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_pending_reversals', 'stripe_lifetime_entitlements', 'stripe_subscription_periods', 'stripe_lifetime_slots', 'stripe_dispute_reversals']);
+// claimLifetimeSlot stays a vi.fn delegate so one test can stage the
+// concurrent-loser throw — every other call runs the real implementation.
+vi.mock('$lib/server/billing/entitlements', async (importOriginal) => {
+	const mod = await importOriginal<typeof import('$lib/server/billing/entitlements')>();
+	return { ...mod, claimLifetimeSlot: vi.fn(mod.claimLifetimeSlot) };
+});
+
+import { claimLifetimeSlot } from '$lib/server/billing/entitlements';
+
+setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_pending_reversals', 'stripe_lifetime_entitlements', 'stripe_subscription_periods', 'stripe_lifetime_slots', 'stripe_dispute_reversals', 'stripe_checkout_attempts']);
 
 function session(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 	return {
@@ -65,6 +78,9 @@ function event(type: string, id: string, object: Record<string, unknown>, create
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	// Stripe's real refunds.create resolves a Refund — the status drives the
+	// helper's validate-before-ACK contract.
+	mocks.refundsCreate.mockResolvedValue({ id: 're_1', status: 'succeeded' });
 });
 
 
@@ -132,6 +148,241 @@ describe('paid hosted products', () => {
 		} finally {
 			errorSpy.mockRestore();
 		}
+	});
+
+	test('a failed refund propagates so Stripe retries the delivery', async () => {
+		// ACKing after a transient refund failure would leave the customer
+		// charged until a human reads the log — rethrow so the redelivery
+		// retries the refund under the same idempotency key (review).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lifetime', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		mocks.refundsCreate.mockRejectedValue(new Error('rate limited'));
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			await expect(fulfillCheckout('cs_lifetime')).rejects.toThrow('rate limited');
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('MANUAL REFUND REQUIRED'));
+		} finally {
+			// clearAllMocks does not reset implementations — restore the
+			// resolved default or the rejection leaks into later tests.
+			mocks.refundsCreate.mockReset();
+			mocks.refundsCreate.mockResolvedValue({ id: 're_1', status: 'succeeded' });
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('a paid lifetime checkout that finds no slot auto-refunds and stays rejected', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		// Occupy every slot so claimLifetimeSlot throws sold-out (MOD-38).
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lifetime', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		expect(await fulfillCheckout('cs_lifetime')).toBe('refunded');
+		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_1', metadata: { reason: 'ungrantable', org_id: 'org-1', checkout_session_id: 'cs_lifetime' } }, { idempotencyKey: 'refund:ungrantable:cs_lifetime' });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.plan).not.toBe('lifetime');
+		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toHaveLength(0);
+	});
+
+	test('a slotless checkout whose charge is already refunded is not refunded twice', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: { id: 'ch_1', refunded: true } } }));
+		expect(await fulfillCheckout('cs_lifetime')).toBe('refunded');
+		expect(mocks.refundsCreate).not.toHaveBeenCalled();
+	});
+
+	test('a credit purchase granted before the upgrade replays as already — never refunds the completed purchase', async () => {
+		// The grant committed while the org was metered; a redelivery arriving
+		// after the upgrade must no-op on the ledger idempotency anchor BEFORE
+		// the unmetered-plan guard runs — refunding it would hand the customer
+		// their granted credits AND their money back (codex P1).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_1', metadata: { org_id: 'org-1', bundle: 'credits_500' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		expect(await fulfillCheckout('cs_1')).toBe('granted');
+		await testDb().db.update(organizations).set({ plan: 'lifetime' }).where(eq(organizations.id, 'org-1'));
+		expect(await fulfillCheckout('cs_1')).toBe('already');
+		expect(mocks.refundsCreate).not.toHaveBeenCalled();
+	});
+
+	test('a refund that resolves failed propagates — the customer is still charged', async () => {
+		// refunds.create can RESOLVE with a non-succeeded refund: logging
+		// success and ACKing would leave the customer charged with no retry
+		// (codex P1). A failed/canceled refund is loud and retryable; a pending
+		// one is genuinely in flight and accepted.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lifetime', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		mocks.refundsCreate.mockResolvedValue({ id: 're_1', status: 'failed' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			await expect(fulfillCheckout('cs_lifetime')).rejects.toThrow(/MANUAL REFUND REQUIRED/);
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('MANUAL REFUND REQUIRED'));
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('a pending refund is accepted — the money is genuinely in flight', async () => {
+		// Retrying a pending refund under the same idempotency key returns the
+		// same pending object forever — treating it as a failure would retry a
+		// storm against a refund Stripe is already processing (codex P1).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lifetime', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		mocks.refundsCreate.mockResolvedValue({ id: 're_1', status: 'pending' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			expect(await fulfillCheckout('cs_lifetime')).toBe('refunded');
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('a paid ungrantable checkout with no payment intent throws — never claims a refund', async () => {
+		// A paid session missing its payment intent is a malformed Stripe
+		// response (I2): ACKing 'refunded' would tell the buyer money is
+		// coming back when none was requested. Throw so the delivery retries
+		// and the MANUAL REFUND REQUIRED line keeps firing (codex P1).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lifetime', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: null }));
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			await expect(fulfillCheckout('cs_lifetime')).rejects.toThrow(/no payment intent/);
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('MANUAL REFUND REQUIRED'));
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('a paid duplicate lifetime checkout for an org that already has lifetime auto-refunds', async () => {
+		// Same class as sold-out: the checkout is paid but can grant nothing.
+		// Covers the sequential duplicate AND the concurrent race whose loser
+		// dies on the unique active-org index — the recovery re-read sees the
+		// winner's committed row either way.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'lifetime' });
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1', activeEntitlementId: 1 }).where(eq(stripeLifetimeSlots.slot, 1));
+		await testDb().db.insert(stripeLifetimeEntitlements).values({ id: 1, orgId: 'org-1', slot: 1, checkoutSessionId: 'cs_first' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_dup', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_2', latest_charge: 'ch_2' } }));
+		expect(await fulfillCheckout('cs_dup')).toBe('refunded');
+		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_2', metadata: { reason: 'ungrantable', org_id: 'org-1', checkout_session_id: 'cs_dup' } }, { idempotencyKey: 'refund:ungrantable:cs_dup' });
+		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toHaveLength(1);
+	});
+
+	test('a same-session concurrent fulfillment sees its own claim and returns already — never refunds the winner', async () => {
+		// The success redirect and the webhook can fulfill the SAME session
+		// concurrently: the loser's recovery re-read observes the winner's
+		// active entitlement and must recognize it belongs to THIS session —
+		// refunding it would hand the org lifetime access for free (codex P1).
+		// The by-session SELECT is forced to miss, replaying the read window.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'lifetime' });
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1', activeEntitlementId: 1 }).where(eq(stripeLifetimeSlots.slot, 1));
+		await testDb().db.insert(stripeLifetimeEntitlements).values({ id: 1, orgId: 'org-1', slot: 1, checkoutSessionId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_1', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		const client = testDb().client;
+		const originalExecute = client.execute.bind(client);
+		client.execute = (async (stmt: unknown) => {
+			const sqlText = String((stmt as { sql?: string }).sql ?? stmt);
+			if (/from "stripe_lifetime_entitlements"/i.test(sqlText) && /where[\s\S]*checkout_session_id/i.test(sqlText)) {
+				return { rows: [], columns: [], rowsAffected: 0, lastInsertRowid: undefined };
+			}
+			return originalExecute(stmt as never);
+		}) as never;
+		try {
+			expect(await fulfillCheckout('cs_1')).toBe('already');
+		} finally {
+			client.execute = originalExecute;
+		}
+		expect(mocks.refundsCreate).not.toHaveBeenCalled();
+	});
+
+	test('a same-session claim that loses on the unique index sees its own winner — never refunds it', async () => {
+		// Deeper window: the reads before the claim all miss (the winner has
+		// not committed), the claim's insert dies on the unique active-org
+		// index, and the recovery re-read observes the winner — a same-session
+		// winner ACKs as 'already', never a refund (codex P1).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_1', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		// The winner commits inside the claim (the concurrent winner's tx) —
+		// the loser's recovery re-read then observes it.
+		vi.mocked(claimLifetimeSlot).mockImplementationOnce(async () => {
+			await testDb().db.insert(stripeLifetimeEntitlements).values({ orgId: 'org-1', slot: 1, checkoutSessionId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+			throw new Error('UNIQUE constraint failed: stripe_lifetime_entitlements_active_org_idx');
+		});
+
+		expect(await fulfillCheckout('cs_1')).toBe('already');
+		expect(mocks.refundsCreate).not.toHaveBeenCalled();
+	});
+
+	test('a concurrent same-session delivery never refunds the winning entitlement', async () => {
+		// The success-page load and the webhook can fulfill the same session
+		// concurrently: the loser's by-session read can return a pre-commit
+		// snapshot and then observe the winner's active org entitlement — it
+		// must return 'already', never refund the PaymentIntent that paid for
+		// that entitlement (refunding it would hand the org lifetime for free).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		const client = testDb().client;
+		const originalExecute = client.execute.bind(client);
+		let interleaved = false;
+		client.execute = (async (stmt: unknown) => {
+			const sqlText = String((stmt as { sql?: string }).sql ?? stmt);
+			if (!interleaved && /select .*from "stripe_lifetime_entitlements"/i.test(sqlText) && sqlText.includes('checkout_session_id')) {
+				interleaved = true;
+				await testDb().db.insert(stripeLifetimeEntitlements).values({ id: 1, orgId: 'org-1', slot: 1, checkoutSessionId: 'cs_1' });
+				await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1', activeEntitlementId: 1 }).where(eq(stripeLifetimeSlots.slot, 1));
+				return { rows: [], rowsAffected: 0, columns: [], columnTypes: [] };
+			}
+			return originalExecute(stmt as never);
+		}) as never;
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_1', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		try {
+			expect(await fulfillCheckout('cs_1')).toBe('already');
+			expect(mocks.refundsCreate).not.toHaveBeenCalled();
+		} finally {
+			client.execute = originalExecute;
+		}
+	});
+
+	test('a winner landing after the org-scoped read is never refunded by the losing delivery', async () => {
+		// Deeper interleave of the same race: both pre-claim reads return a
+		// pre-commit snapshot, and this session's own entitlement only becomes
+		// visible at claim time — the loser must report a success verdict and
+		// never refund the PaymentIntent behind the winning grant (codex P1).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		const client = testDb().client;
+		const originalExecute = client.execute.bind(client);
+		let fakesLeft = 2;
+		client.execute = (async (stmt: unknown) => {
+			const sqlText = String((stmt as { sql?: string }).sql ?? stmt);
+			if (fakesLeft > 0 && /select .*from "stripe_lifetime_entitlements"/i.test(sqlText)) {
+				fakesLeft -= 1;
+				if (fakesLeft === 0) {
+					await testDb().db.insert(stripeLifetimeEntitlements).values({ id: 1, orgId: 'org-1', slot: 1, checkoutSessionId: 'cs_1' });
+					await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1', activeEntitlementId: 1 }).where(eq(stripeLifetimeSlots.slot, 1));
+				}
+				return { rows: [], rowsAffected: 0, columns: [], columnTypes: [] };
+			}
+			return originalExecute(stmt as never);
+		}) as never;
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_1', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		try {
+			expect(['granted', 'already']).toContain(await fulfillCheckout('cs_1'));
+			expect(mocks.refundsCreate).not.toHaveBeenCalled();
+		} finally {
+			client.execute = originalExecute;
+		}
+	});
+
+	test('a credit checkout fulfilled after the org went lifetime refunds instead of granting', async () => {
+		// assertCreditsPurchasable guards checkout CREATION; the grant itself
+		// must stay gated atomically or an in-flight checkout grants credits a
+		// lifetime org can never use (review: TOCTOU).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'lifetime', creditsRemaining: 100 });
+		mocks.sessionsRetrieve.mockResolvedValue(session());
+		expect(await fulfillCheckout('cs_123')).toBe('refunded');
+		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_1', metadata: { reason: 'ungrantable', org_id: 'org-1', checkout_session_id: 'cs_123' } }, { idempotencyKey: 'refund:ungrantable:cs_123' });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.creditsRemaining).toBe(100);
 	});
 });
 
@@ -230,6 +481,66 @@ describe('subscription lifecycle webhooks', () => {
 		expect(org?.plan).toBe('hosted');
 		expect(org?.stripeSubscriptionStatus).toBe('active');
 	});
+
+	test('subscription events sync the subscription default card as the saved top-up card', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		// Subscription Checkout stores the paid card on subscription.default_payment_method,
+		// not customer.invoice_settings — this event is the only delivery of it.
+		const subscription = { id: 'sub_1', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false, default_payment_method: 'pm_sub_1' };
+		expect(await handleStripeEvent(event('customer.subscription.updated', 'evt_pm_sync', subscription, 300) as never)).toBe(true);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeDefaultPmId).toBe('pm_sub_1');
+		// The consent evidence covered the previous card, so a card change under
+		// enabled auto top-up pauses it pending fresh consent (savePaymentMethod rule).
+		expect(org?.autoTopupEnabled).toBe(0);
+		expect(org?.autoTopupState).toBe('disabled');
+	});
+
+	test('subscription card sync leaves auto top-up alone when the card is unchanged', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeDefaultPmId: 'pm_sub_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		const subscription = { id: 'sub_1', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false, default_payment_method: { id: 'pm_sub_1' } };
+		expect(await handleStripeEvent(event('customer.subscription.updated', 'evt_pm_same', subscription, 300) as never)).toBe(true);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeDefaultPmId).toBe('pm_sub_1');
+		expect(org?.autoTopupEnabled).toBe(1);
+		expect(org?.autoTopupState).toBe('idle');
+	});
+
+	test('a subscription without a default card does not clear the saved pointer', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeDefaultPmId: 'pm_keep' });
+		// null means the subscription falls back to the customer-level default — the
+		// card still exists; only payment_method.detached/customer.updated may clear it.
+		const subscription = { id: 'sub_1', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false, default_payment_method: null };
+		expect(await handleStripeEvent(event('customer.subscription.updated', 'evt_pm_null', subscription, 300) as never)).toBe(true);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeDefaultPmId).toBe('pm_keep');
+	});
+
+	test('a stale subscription event cannot regress the saved card', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
+		const base = { id: 'sub_1', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false };
+		expect(await handleStripeEvent(event('customer.subscription.updated', 'evt_pm_new', { ...base, default_payment_method: 'pm_new' }, 300) as never)).toBe(true);
+		expect(await handleStripeEvent(event('customer.subscription.updated', 'evt_pm_old', { ...base, default_payment_method: 'pm_old' }, 100) as never)).toBe(true);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeDefaultPmId).toBe('pm_new');
+	});
+
+	test('a malformed subscription default_payment_method fails loudly', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
+		const subscription = { id: 'sub_1', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false, default_payment_method: { id: 123 } };
+		await expect(handleStripeEvent(event('customer.subscription.updated', 'evt_pm_bad', subscription, 300) as never)).rejects.toThrow('malformed default_payment_method');
+	});
+
+	test('hosted fulfillment stores the subscription card without waiting for subscription events', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ mode: 'subscription', subscription: 'sub_1', metadata: { org_id: 'org-1', product: 'hosted' }, payment_intent: null }));
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_1', default_payment_method: 'pm_sub_1' });
+		expect(await fulfillCheckout('cs_123')).toBe('granted');
+		expect(mocks.subscriptionsRetrieve).toHaveBeenCalledWith('sub_1', { expand: ['default_payment_method'] });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeSubscriptionId).toBe('sub_1');
+		expect(org?.stripeDefaultPmId).toBe('pm_sub_1');
+	});
 	test('a won dispute restores a subscription period allowance', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
 		await handleStripeEvent(event('invoice.paid', 'in_1', { id: 'in_1', subscription: 'sub_1', payment_intent: 'pi_1', charge: 'ch_1', period_start: 1798848000, period_end: 1801526400, lines: { data: [{ subscription: 'sub_1', period: { start: 1798848000, end: 1801526400 } }] } }) as never);
@@ -277,6 +588,25 @@ describe('subscription lifecycle webhooks', () => {
 		await restoreWonDispute('disp_2');
 		expect(await getCredits('org-1')).toBe(500);
 		expect(await testDb().db.select().from(stripeDisputeReversals)).toHaveLength(2);
+	});
+
+	test('a won dispute on an unmetered org closes the reversal without re-granting credits', async () => {
+		// The org upgraded to lifetime while the dispute was open: the credit
+		// restore is moot on an unmetered plan, and the unmetered-grant guard
+		// would otherwise wedge the dispute webhook on a permanent throw.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'lifetime', creditsRemaining: 0 });
+		await testDb().db.insert(creditTransactions).values({ orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+		await testDb().db.insert(creditTransactions).values({ orgId: 'org-1', delta: -500, reason: 'dispute', refType: 'dispute', refId: 'ch_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+		await testDb().db.insert(stripeDisputeReversals).values({ disputeId: 'disp_w', chargeId: 'ch_1', paymentIntentId: 'pi_1', status: 'reversed', source: 'credits' });
+		mocks.disputesRetrieve.mockResolvedValue({ id: 'disp_w', charge: 'ch_1', status: 'won' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			expect(await restoreWonDispute('disp_w')).toBe(true);
+		} finally {
+			errorSpy.mockRestore();
+		}
+		expect((await testDb().db.select().from(stripeDisputeReversals).where(eq(stripeDisputeReversals.disputeId, 'disp_w')).get())?.status).toBe('restored');
+		expect(await testDb().db.select().from(creditTransactions).where(eq(creditTransactions.reason, 'adjust'))).toHaveLength(0);
 	});
 
 	test('concurrent delivery claims one inbox lease and rejects the competing worker', async () => {
@@ -330,13 +660,15 @@ describe('fulfillCheckout', () => {
 		// any late grant (codex review).
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 
-		// Fully refunded charge: reject, never grant.
+		// Fully refunded charge: never grant — but the verdict is 'refunded',
+		// not generic 'rejected', so the success page keeps showing the
+		// deliberate refunded state on every later load (codex, round 3).
 		mocks.sessionsRetrieve.mockResolvedValue(
 			session({
 				payment_intent: { id: 'pi_1', latest_charge: { id: 'ch_1', disputed: false, amount: 50000, amount_refunded: 50000 }, payment_method: 'pm_1' }
 			})
 		);
-		expect(await fulfillCheckout('cs_1')).toBe('rejected');
+		expect(await fulfillCheckout('cs_1')).toBe('refunded');
 		expect(await getCredits('org-1')).toBe(0);
 
 		// Disputed charge: reject, never grant.
@@ -777,6 +1109,42 @@ describe('handleStripeEvent', () => {
 		await applyLedgerDelta(db, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_2', paymentIntentId: 'pi_2', chargeId: 'ch_2' });
 		expect(await handleStripeEvent(event('charge.dispute.created', 'evt_5', { id: 'du_1' }) as never)).toBe(true);
 		expect(await getCredits('org-1')).toBe(0);
+	});
+
+	test('a terminal failure on a tagged ungrantable refund marks the attempt and stays unprocessed', async () => {
+		// A pending/requires_action refund we created is accepted as in-flight —
+		// but Stripe later reports its TERMINAL status via charge.refund.updated.
+		// A failed/canceled outcome means the customer is still charged for an
+		// ungrantable purchase: the checkout attempt is the durable operator
+		// record (session-linked refunds), and the throw keeps the event in
+		// Stripe's failed-delivery queue so redeliveries keep screaming
+		// MANUAL REFUND REQUIRED until a human refunds (codex P1).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.insert(stripeCheckoutAttempts).values({ attemptId: 'att_1', orgId: 'org-1', product: 'credits_500', idempotencyKey: 'checkout:att_1:k', stripeSessionId: 'cs_1' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			const evt = event('charge.refund.updated', 'evt_ru_fail', { id: 're_1', object: 'refund', status: 'failed', payment_intent: 'pi_1', metadata: { reason: 'ungrantable', checkout_session_id: 'cs_1', org_id: 'org-1' } });
+			await expect(handleStripeEvent(evt as never)).rejects.toThrow(/MANUAL REFUND REQUIRED/);
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('MANUAL REFUND REQUIRED'));
+			const attempt = await testDb().db.select().from(stripeCheckoutAttempts).where(eq(stripeCheckoutAttempts.stripeSessionId, 'cs_1')).get();
+			expect(attempt?.status).toBe('manual_refund_required');
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('a refund.updated without the ungrantable tag is acknowledged quietly', async () => {
+		// Ordinary refunds (customer-initiated, dashboard refunds) are not ours
+		// to escalate — the event is handled (no retry storm) without the
+		// manual-refund scream.
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			const evt = event('charge.refund.updated', 'evt_ru_ok', { id: 're_2', object: 'refund', status: 'succeeded', payment_intent: 'pi_2' });
+			expect(await handleStripeEvent(evt as never)).toBe(true);
+			expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining('MANUAL REFUND REQUIRED'));
+		} finally {
+			errorSpy.mockRestore();
+		}
 	});
 });
 

@@ -36,9 +36,13 @@ function maintenancePayload(channelId: string, tab: ChannelTab) {
 			id: channelId,
 			title: '',
 			lastRunAt: null,
+			lastRunStatus: null,
+			lastRunError: null,
+			lastSuccessAt: null,
 			toneLevel: null,
 			protectLgbtqia: 0,
 			protectWomen: 0,
+			active: 1,
 			scanning: false
 		},
 		pending: 0,
@@ -77,9 +81,13 @@ export async function load({ params, locals, url }) {
 			id: row.id,
 			title: row.title,
 			lastRunAt: row.lastRunAt,
+			lastRunStatus: row.lastRunStatus,
+			lastRunError: row.lastRunError,
+			lastSuccessAt: row.lastSuccessAt,
 			toneLevel: row.toneLevel,
 			protectLgbtqia: row.protectLgbtqia,
 			protectWomen: row.protectWomen,
+			active: row.active,
 			scanning: row.nextPageToken !== null
 		};
 		return { ch, pending, banned, tab, maintenance: false, orgRole: user.orgRole };

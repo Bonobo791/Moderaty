@@ -223,7 +223,7 @@ test('returns a partial result when the deadline hits during dispatched-action v
 
 	const result = await runChannel('channel');
 
-	expect(result).toEqual({ fetched: 1, acted: 0, queued: 0, partial: true, skipped: false, dryRun: false });
+	expect(result).toEqual({ fetched: 1, acted: 0, queued: 0, partial: true, skipped: false, dryRun: false, stoppedReason: 'deadline' });
 	expectActionState('dispatched');
 });
 

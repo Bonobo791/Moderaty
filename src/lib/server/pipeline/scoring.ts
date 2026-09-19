@@ -11,6 +11,7 @@ import { comments, rules } from '$lib/server/db/schema';
 import { DeadlineExceededError } from '$lib/server/http';
 import { prepareRules } from '$lib/server/rules';
 import type { ToneProtections } from '$lib/server/tone';
+import { TONE_LEVEL_OMNI_AND_TONE } from '$lib/toneLevels';
 import { fetchVideoMetadata, type CommentPage } from '$lib/server/youtube';
 import { decide, metadataUnavailable } from './decisions';
 import type { Decision, DecisionBatchOptions, ScoreOutcome } from './types';
@@ -105,11 +106,11 @@ const newComments = page.comments.filter((comment) => {
 	seen.add(comment.id);
 	return true;
 });
-// A ticked protection flag forces the tone pass on even below level 2: the
-// channel owner asked for heightened scrutiny, so the checkbox must never
-// be a silent no-op.
+// A ticked protection flag forces the tone pass on even below
+// TONE_LEVEL_OMNI_AND_TONE: the channel owner asked for heightened scrutiny,
+// so the checkbox must never be a silent no-op.
 const toneEnabled =
-	options.toneLevel >= 2 || Boolean(options.protections.protectLgbtqia) || Boolean(options.protections.protectWomen);
+	options.toneLevel >= TONE_LEVEL_OMNI_AND_TONE || Boolean(options.protections.protectLgbtqia) || Boolean(options.protections.protectWomen);
 const { videoContext, metadataError } = await loadVideoContext(
 	toneEnabled,
 	newComments,

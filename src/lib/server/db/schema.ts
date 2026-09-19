@@ -164,7 +164,7 @@ export const stripeCheckoutAttempts = sqliteTable('stripe_checkout_attempts', {
 	product: text('product').notNull(),
 	idempotencyKey: text('idempotency_key').notNull().unique(),
 	stripeSessionId: text('stripe_session_id').unique(),
-	status: text('status').notNull().default('pending'), // pending | open | fulfilled | expired
+	status: text('status').notNull().default('pending'), // pending | open | fulfilled | expired | manual_refund_required
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
 	updatedAt: text('updated_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
@@ -183,7 +183,7 @@ export const mercadoPagoCheckoutAttempts = sqliteTable('mercado_pago_checkout_at
 	idempotencyKey: text('idempotency_key').notNull().unique(),
 	preferenceId: text('preference_id').unique(),
 	initPoint: text('init_point'),
-	status: text('status').notNull().default('pending'), // pending | open | fulfilled | refunded | disputed
+	status: text('status').notNull().default('pending'), // pending | open | fulfilled | refunded | disputed | manual_refund_required
 	currency: text('currency').notNull().default('BRL'),
 	amountCents: integer('amount_cents').notNull(),
 	// The credit count agreed at checkout time (0036, nullable for pre-column
@@ -254,10 +254,13 @@ export const channels = sqliteTable('channels', {
 	dryRunBoundary: text('dry_run_boundary'), // on-demand dry-run window (ISO): the drain rescores comments down to this timestamp; null = no dry-run drain in flight
 	dryRunPageToken: text('dry_run_page_token'), // YouTube continuation token for the dry-run drain's next page
 	lastRunAt: text('last_run_at'), // ISO timestamp of last cron run; rotation orders by it ASC (NULLs first)
+	lastRunStatus: text('last_run_status'), // run health (MOD-7): 'success' | 'failed'; NULL = never run — kept separate from lastRunAt so a failed run cannot look fresh-and-healthy
+	lastSuccessAt: text('last_success_at'), // ISO of the last run that did not throw; failures never touch it
+	lastRunError: text('last_run_error'), // sanitized failure category for the dashboard ('token' | 'quota' | 'scoring' | 'timeout' | 'error'); cleared on success — raw provider details stay in the server log
 	leaseExpiresAt: text('lease_expires_at'), // expiring cron claim; null or past = claimable
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	active: integer('active').notNull().default(1),
-	toneLevel: integer('tone_level'), // moderation sensitivity: null or 1 = omni only, 2 = omni + tone pass
+	toneLevel: integer('tone_level'), // moderation sensitivity ($lib/toneLevels): null or TONE_LEVEL_OMNI_ONLY(1) = omni only, TONE_LEVEL_OMNI_AND_TONE(2) = omni + tone pass
 	protectLgbtqia: integer('protect_lgbtqia').notNull().default(0), // protection setting: 1 = heightened protection for comments targeting LGBTQIA+ people
 	protectWomen: integer('protect_women').notNull().default(0), // protection setting: 1 = heightened protection for comments targeting women
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)

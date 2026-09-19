@@ -28,6 +28,7 @@
 // component doc comments, so pins target markup/visible copy, never words
 // that only appear in comments.
 
+import { readFileSync } from 'node:fs';
 import { render } from 'svelte/server';
 import { expect, test } from 'vitest';
 
@@ -40,7 +41,11 @@ const CHS = [
 		id: 'UC1',
 		title: 'My Channel',
 		cursor: null,
-		lastRunAt: null,
+		lastRunAt: '2026-08-01T00:00:00Z',
+		lastRunStatus: 'success',
+		lastSuccessAt: '2026-08-01T00:00:00Z',
+		lastRunError: null,
+		active: 1,
 		toneLevel: 1,
 		protectLgbtqia: 0,
 		protectWomen: 0,
@@ -51,6 +56,10 @@ const CHS = [
 		title: 'Second Channel',
 		cursor: null,
 		lastRunAt: '2026-07-30T00:00:00Z',
+		lastRunStatus: 'success',
+		lastSuccessAt: '2026-07-30T00:00:00Z',
+		lastRunError: null,
+		active: 1,
 		toneLevel: 2,
 		protectLgbtqia: 0,
 		protectWomen: 0,
@@ -61,6 +70,10 @@ const CHS = [
 		title: 'Third Channel',
 		cursor: null,
 		lastRunAt: null,
+		lastRunStatus: null,
+		lastSuccessAt: null,
+		lastRunError: null,
+		active: 1,
 		toneLevel: 2,
 		protectLgbtqia: 0,
 		protectWomen: 0,
@@ -114,6 +127,14 @@ test('a mid-load outage renders a maintenance state and hides every destructive 
 test('the all-clear headline and subline render when nothing is pending', () => {
 	const body = renderPage(QUIET_DATA);
 	expect(body).toContain('The door is quiet. Too quiet.');
+	// UC3 has never run: only genuinely healthy channels count as protected
+	// (MOD-8) — the headline cannot claim coverage the runs never proved.
+	expect(body).toContain('2 of 3 channels protected — 1 waiting for a first check.');
+});
+
+test('the all-clear subline claims full protection only when every channel is healthy', () => {
+	const healthy = { ...QUIET_DATA, chs: CHS.map((ch) => ({ ...ch, lastRunStatus: 'success', lastSuccessAt: ch.lastRunAt })) };
+	const body = renderPage(healthy);
 	expect(body).toContain('3 channels protected. Queue\'s clear. Not a single main character slipped past.');
 });
 
@@ -196,6 +217,74 @@ test('the status cell shows PROTECTED, queue is clear, or a pending-queue link',
 	expect(body).toContain('href="/channels/UC1/queue"');
 });
 
+test('a channel whose latest run failed is never presented as protected (MOD-8)', () => {
+	const failed = {
+		...QUIET_DATA,
+		chs: CHS.map((ch) =>
+			ch.id === 'UC2'
+				? { ...ch, lastRunStatus: 'failed', lastRunError: 'token', lastRunAt: '2026-09-01T00:00:00Z', lastSuccessAt: '2026-08-01T00:00:00Z' }
+				: ch
+		)
+	};
+	const body = renderPage(failed);
+	const row = rowFor(body, 'Second Channel');
+	expect(row).toContain('Check failed');
+	expect(row).not.toContain('Protected');
+	// The user-actionable line, plus the success/attempt distinction —
+	// "last success" is the honest freshness signal for a failed channel.
+	expect(row).toContain('YouTube access expired — reconnect the channel');
+	expect(row).toContain('last success');
+	// The failure also counts against the door-status claim — UC3 never ran.
+	expect(body).toContain('1 of 3 channels protected — 1 failed the last check, 1 waiting for a first check.');
+});
+
+test.each([
+	{ category: 'quota', action: 'YouTube quota is exhausted' },
+	{ category: 'credits', action: 'AI credits ran out' },
+	{ category: 'scoring', action: 'AI scoring was unavailable' },
+	{ category: 'timeout', action: 'The last check timed out' },
+	{ category: 'error', action: 'The last check failed' },
+	{ category: null, action: 'The last check failed' },
+	{ category: 'unexpected-provider-detail', action: 'The last check failed' }
+])('a "$category" failure maps to a safe actionable message', ({ category, action }) => {
+	const failed = {
+		...PENDING_DATA,
+		chs: CHS.map((ch) => (ch.id === 'UC2' ? { ...ch, lastRunStatus: 'failed', lastRunError: category } : ch))
+	};
+	const row = rowFor(renderPage(failed), 'Second Channel');
+	expect(row).toContain(action);
+	expect(row).toContain('we retry on the next check');
+	// Raw provider detail must never reach the page — only the safe copy.
+	expect(row).not.toContain('unexpected-provider-detail');
+});
+
+test('a never-run channel waits for its first check instead of looking protected', () => {
+	const row = rowFor(renderPage(PENDING_DATA), 'Third Channel');
+	expect(row).toContain('Not checked yet');
+	expect(row).not.toContain('Protected');
+	expect(row).not.toContain('Check failed');
+	// The queue state stays real underneath — nothing pending is still clear.
+	expect(row).toContain('queue is clear');
+});
+
+test('a paused channel reads as paused — never protected, failed, or never-run (MOD-9)', () => {
+	// Even with a healthy last-run record, a paused channel is not protected:
+	// cron stops claiming it, so "Protected" would be a lie.
+	const paused = {
+		...QUIET_DATA,
+		chs: CHS.map((ch) => (ch.id === 'UC2' ? { ...ch, active: 0 } : ch))
+	};
+	const body = renderPage(paused);
+	const row = rowFor(body, 'Second Channel');
+	expect(row).toContain('Paused');
+	expect(row).not.toContain('Protected');
+	expect(row).not.toContain('Check failed');
+	expect(row).not.toContain('Not checked yet');
+	expect(row).toContain('resume on the channel page');
+	// UC2 paused + UC3 never-run → only UC1 counts as protected.
+	expect(body).toContain('1 of 3 channels protected — 1 paused, 1 waiting for a first check.');
+});
+
 /** The markup of ONE ledger row, cut out so a sensitivity pin can never be
  * satisfied by another channel's cell. */
 function rowFor(body: string, title: string): string {
@@ -256,6 +345,16 @@ test('the channel controls moved to the detail page — the dashboard renders no
 	expect(body).not.toContain('Dry run');
 	expect(body).not.toContain('Disconnect channel');
 	expect(body).not.toContain('Strict protection');
+});
+
+test('the pending-queue link stops click propagation so the row handler cannot hijack its navigation (codeant, PR #142)', () => {
+	// The anchor sits inside a row whose onclick navigates to the channel —
+	// without stopPropagation the two navigations race (SSR strips handlers,
+	// so this is a source pin, same pattern as i18n-coverage.test.ts).
+	const source = readFileSync(new URL('./+page.svelte', import.meta.url), 'utf8');
+	const linkStart = source.indexOf('pending-link');
+	expect(linkStart).toBeGreaterThan(-1);
+	expect(source.slice(linkStart, linkStart + 400)).toContain('stopPropagation');
 });
 
 test('no channels renders the empty state and the quiet zero-count header', () => {

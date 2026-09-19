@@ -3,8 +3,9 @@ import { beforeEach, describe, expect, test } from 'vitest';
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { organizations, stripeLifetimeEntitlements, stripeLifetimeSlots, stripeSubscriptionPeriods, stripePendingReversals, stripeDisputeReversals } from '$lib/server/db/schema';
-import { claimLifetimeSlot, grantSubscriptionPeriod, releaseLifetimeForPayment, applySubscriptionSnapshot, disputeSubscriptionPeriod, restoreDisputedSubscriptionPeriod, revokeLifetimeForDispute, restoreLifetimeForDispute } from './entitlements';
+import { claimLifetimeSlot, grantSubscriptionPeriod, lifetimeSlotsRemaining, releaseLifetimeForPayment, applySubscriptionSnapshot, disputeSubscriptionPeriod, restoreDisputedSubscriptionPeriod, revokeLifetimeForDispute, restoreLifetimeForDispute } from './entitlements';
 import { consumeCredit, getCredits } from './ledger';
+import { LIFETIME_SLOT_LIMIT } from './plans';
 
 setupTestDb(['organizations', 'stripe_subscription_periods', 'stripe_lifetime_entitlements', 'stripe_lifetime_slots', 'stripe_pending_reversals', 'stripe_dispute_reversals']);
 
@@ -93,6 +94,18 @@ describe('lifetime entitlements', () => {
 		expect(org?.plan).toBe('lifetime');
 	});
 
+	test('claiming lifetime clears a stale auto top-up authorization in the same transaction', async () => {
+		// An org that upgrades while auto top-up is enabled must not keep a
+		// live off-session charge mandate — the flag and state clear atomically
+		// with the plan flip (review).
+		await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle' }).where(eq(organizations.id, 'org-1'));
+		await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-1', paymentIntentId: 'pi-1', chargeId: 'ch-1' });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.plan).toBe('lifetime');
+		expect(org?.autoTopupEnabled).toBe(0);
+		expect(org?.autoTopupState).toBe('idle'); // neutral off-state — 'disabled' would read as failure-paused
+	});
+
 	test('a dispute queued before lifetime fulfillment releases the claimed slot', async () => {
 		await testDb().db.insert(stripePendingReversals).values({ chargeId: 'ch-1', reason: 'dispute' });
 		const result = await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-1', paymentIntentId: 'pi-1', chargeId: 'ch-1' });
@@ -140,6 +153,21 @@ describe('lifetime entitlements', () => {
 		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.plan).toBe('lifetime');
 	});
 
+	test('a won-dispute restore clears an auto top-up mandate enabled during the downgrade', async () => {
+		// While the entitlement is disputed the org reads as metered, so the
+		// consent-gated setAutoTopup path accepts an enable; restoring the plan
+		// must drop that mandate atomically — an in-flight charge landing on a
+		// lifetime org only buys an avoidable refund (codex P2).
+		await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-1', paymentIntentId: 'pi-1', chargeId: 'ch-1' });
+		expect(await revokeLifetimeForDispute({ paymentIntentId: 'pi-1', chargeId: 'ch-1' })).toBe(true);
+		await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle' }).where(eq(organizations.id, 'org-1'));
+		expect(await restoreLifetimeForDispute({ paymentIntentId: 'pi-1', chargeId: 'ch-1' })).toBe(true);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.plan).toBe('lifetime');
+		expect(org?.autoTopupEnabled).toBe(0);
+		expect(org?.autoTopupState).toBe('idle');
+	});
+
 
 	test('a won dispute recorded before lifetime fulfillment keeps the slot active', async () => {
 		await testDb().db.insert(stripePendingReversals).values({ chargeId: 'ch-1', reason: 'dispute', disputeId: 'disp-1' });
@@ -156,5 +184,43 @@ describe('lifetime entitlements', () => {
 		const entitlement = await testDb().db.select().from(stripeLifetimeEntitlements).where(eq(stripeLifetimeEntitlements.checkoutSessionId, 'cs-1')).get();
 		expect(entitlement?.status).toBe('released');
 		expect(await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-2', paymentIntentId: 'pi-2', chargeId: 'ch-2' })).toMatchObject({ slot: 1 });
+	});
+
+	test('a released lifetime falls back to hosted while a subscription stays active', async () => {
+		await testDb().db.update(organizations).set({ stripeSubscriptionId: 'sub-1', stripeSubscriptionStatus: 'active' }).where(eq(organizations.id, 'org-1'));
+		await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-1', paymentIntentId: 'pi-1', chargeId: 'ch-1' });
+		expect(await releaseLifetimeForPayment({ paymentIntentId: 'pi-1', chargeId: 'ch-1' })).toBe(true);
+		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.plan).toBe('hosted');
+	});
+
+	test('a disputed lifetime falls back to free without an active subscription', async () => {
+		await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-1', paymentIntentId: 'pi-1', chargeId: 'ch-1' });
+		expect(await revokeLifetimeForDispute({ paymentIntentId: 'pi-1', chargeId: 'ch-1' })).toBe(true);
+		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.plan).toBe('free');
+	});
+
+	test('a dispute queued before lifetime fulfillment keeps a hosted plan while a subscription stays active', async () => {
+		await testDb().db.update(organizations).set({ plan: 'hosted', stripeSubscriptionId: 'sub-1', stripeSubscriptionStatus: 'active' }).where(eq(organizations.id, 'org-1'));
+		await testDb().db.insert(stripePendingReversals).values({ chargeId: 'ch-1', reason: 'dispute' });
+		const result = await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-1', paymentIntentId: 'pi-1', chargeId: 'ch-1' });
+		expect(result).toEqual({ slot: 1, status: 'released' });
+		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.plan).toBe('hosted');
+	});
+
+	test('lifetimeSlotsRemaining counts only unclaimed slots — refunds return, disputes hold', async () => {
+		expect(await lifetimeSlotsRemaining()).toBe(LIFETIME_SLOT_LIMIT);
+
+		await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-1', paymentIntentId: 'pi-1', chargeId: 'ch-1' });
+		expect(await lifetimeSlotsRemaining()).toBe(LIFETIME_SLOT_LIMIT - 1);
+
+		// A released slot returns to the pool.
+		await releaseLifetimeForPayment({ paymentIntentId: 'pi-1', chargeId: 'ch-1' });
+		expect(await lifetimeSlotsRemaining()).toBe(LIFETIME_SLOT_LIMIT);
+
+		// A disputed entitlement KEEPS its slot until the dispute resolves —
+		// it is not back in the pool.
+		await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-2', paymentIntentId: 'pi-2', chargeId: 'ch-2' });
+		await revokeLifetimeForDispute({ paymentIntentId: 'pi-2', chargeId: 'ch-2' });
+		expect(await lifetimeSlotsRemaining()).toBe(LIFETIME_SLOT_LIMIT - 1);
 	});
 });

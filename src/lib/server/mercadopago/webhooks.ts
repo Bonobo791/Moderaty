@@ -17,7 +17,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { and, eq, gt, isNull, lt, notInArray, or, sql } from 'drizzle-orm';
 
 import { env } from '$env/dynamic/private';
-import { applyLedgerDelta } from '$lib/server/billing/ledger';
+import { applyLedgerDelta, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
 import { providerLedgerRef } from '$lib/server/billing/providers';
 import { db } from '$lib/server/db';
 import { creditTransactions, mercadoPagoCheckoutAttempts, organizations } from '$lib/server/db/schema';
@@ -123,43 +123,67 @@ export async function fulfillMercadoPagoPayment(payment: MercadoPagoPayment): Pr
 	}
 	// Pre-column attempts (credits NULL) fall back to the live catalog.
 	const credits = attempt.credits ?? mercadoPagoBundleById(attempt.bundleId).credits;
-	return db.transaction(async (tx) => {
-		// Claim the terminal transition BEFORE granting: a concurrent reversal
-		// may have flipped the attempt to refunded/disputed after the read above
-		// — granting then would resurrect credits the reversal just took, and an
-		// unconditional status write would erase the terminal record (cubic/codex,
-		// round 3). Idempotent replays of an already-fulfilled payment re-claim
-		// successfully ('fulfilled' is not excluded).
-		const claimed = await tx
+	try {
+		return await db.transaction(async (tx) => {
+			// Claim the terminal transition BEFORE granting: a concurrent reversal
+			// may have flipped the attempt to refunded/disputed after the read above
+			// — granting then would resurrect credits the reversal just took, and an
+			// unconditional status write would erase the terminal record (cubic/codex,
+			// round 3). Idempotent replays of an already-fulfilled payment re-claim
+			// successfully ('fulfilled' is not excluded).
+			const claimed = await tx
+				.update(mercadoPagoCheckoutAttempts)
+				.set({ paymentId: payment.id, status: 'fulfilled', paidAt: new Date().toISOString(), updatedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` })
+				.where(
+					and(
+						eq(mercadoPagoCheckoutAttempts.attemptId, attemptId),
+						or(isNull(mercadoPagoCheckoutAttempts.paymentId), eq(mercadoPagoCheckoutAttempts.paymentId, payment.id)),
+						notInArray(mercadoPagoCheckoutAttempts.status, ['refunded', 'disputed', 'manual_refund_required'])
+					)
+				)
+				.returning({ id: mercadoPagoCheckoutAttempts.id });
+			if (claimed.length !== 1) {
+				const current = await tx
+					.select({ status: mercadoPagoCheckoutAttempts.status, paymentId: mercadoPagoCheckoutAttempts.paymentId })
+					.from(mercadoPagoCheckoutAttempts)
+					.where(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId))
+					.get();
+				// The reversal (or a prior manual-refund marking) won the race: the
+				// terminal state stands, nothing is granted, and the webhook acks —
+				// there is nothing left to retry.
+				if (current?.paymentId === payment.id && (current.status === 'refunded' || current.status === 'disputed' || current.status === 'manual_refund_required')) return false;
+				throw new Error('Mercado Pago checkout attempt changed while fulfilling');
+			}
+			return applyLedgerDelta(tx, {
+				orgId,
+				delta: credits,
+				reason: 'purchase',
+				refType: 'checkout_session',
+				refId: providerLedgerRef('mercadopago', payment.id)
+			});
+		});
+	} catch (error) {
+		// The org upgraded to lifetime between checkout and approval: the grant
+		// is refused atomically, but letting that throw roll back the paymentId
+		// write erases the only evidence the success page can retry from — the
+		// charged buyer sat on "almost there" forever while every redelivery
+		// repeated the failure (codex P1). Persist the terminal outcome in a
+		// SECOND transaction and ACK: nothing self-heals while the org is
+		// unmetered, so the durable row + loud log is the resolution.
+		if (!(error instanceof Error && error.message === UNMETERED_CREDIT_GRANT_ERROR)) throw error;
+		await db
 			.update(mercadoPagoCheckoutAttempts)
-			.set({ paymentId: payment.id, status: 'fulfilled', paidAt: new Date().toISOString(), updatedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` })
+			.set({ paymentId: payment.id, status: 'manual_refund_required', updatedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` })
 			.where(
 				and(
 					eq(mercadoPagoCheckoutAttempts.attemptId, attemptId),
 					or(isNull(mercadoPagoCheckoutAttempts.paymentId), eq(mercadoPagoCheckoutAttempts.paymentId, payment.id)),
-					notInArray(mercadoPagoCheckoutAttempts.status, ['refunded', 'disputed'])
+					notInArray(mercadoPagoCheckoutAttempts.status, ['fulfilled', 'refunded', 'disputed', 'manual_refund_required'])
 				)
-			)
-			.returning({ id: mercadoPagoCheckoutAttempts.id });
-		if (claimed.length !== 1) {
-			const current = await tx
-				.select({ status: mercadoPagoCheckoutAttempts.status, paymentId: mercadoPagoCheckoutAttempts.paymentId })
-				.from(mercadoPagoCheckoutAttempts)
-				.where(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId))
-				.get();
-			// The reversal won the race: the terminal state stands, nothing is
-			// granted, and the webhook acks — there is nothing left to retry.
-			if (current?.paymentId === payment.id && (current.status === 'refunded' || current.status === 'disputed')) return false;
-			throw new Error('Mercado Pago checkout attempt changed while fulfilling');
-		}
-		return applyLedgerDelta(tx, {
-			orgId,
-			delta: credits,
-			reason: 'purchase',
-			refType: 'checkout_session',
-			refId: providerLedgerRef('mercadopago', payment.id)
-		});
-	});
+			);
+		console.error(`mercadopago: approved payment ${payment.id} for attempt ${attemptId} hit an unmetered org — nothing granted, MANUAL REFUND REQUIRED`);
+		return false;
+	}
 }
 
 async function reverseMercadoPagoPayment(payment: MercadoPagoPayment, reason: 'refund' | 'dispute'): Promise<boolean> {

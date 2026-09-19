@@ -61,7 +61,7 @@ test('the locale is read from the exported LOCALE_COOKIE and applied to the html
 	const event = {
 		cookies: { get: (name: string) => (name === LOCALE_COOKIE ? 'pt-BR' : undefined), set: vi.fn() },
 		locals: {} as { user: unknown; dbDown?: boolean },
-		url: new URL('http://localhost/')
+		url: new URL('http://localhost/login')
 	};
 	const resolve = vi.fn(
 		async (_event: unknown, opts?: { transformPageChunk?: (input: { html: string; done: boolean }) => string }) =>
@@ -71,6 +71,26 @@ test('the locale is read from the exported LOCALE_COOKIE and applied to the html
 	const response = await handle({ event, resolve } as never);
 
 	expect(await response.text()).toContain('<html lang="pt-BR">');
+});
+
+test('a pt-BR cookie cannot mark an English-only surface pt-BR (MOD-11)', async () => {
+	// The html lang must describe the actual content: on the English-only app
+	// surface a stored pt-BR preference would otherwise claim a translation
+	// that does not exist.
+	mocks.getSessionUser.mockResolvedValue(null);
+	const event = {
+		cookies: { get: (name: string) => (name === LOCALE_COOKIE ? 'pt-BR' : undefined), set: vi.fn() },
+		locals: {} as { user: unknown; dbDown?: boolean },
+		url: new URL('http://localhost/dashboard')
+	};
+	const resolve = vi.fn(
+		async (_event: unknown, opts?: { transformPageChunk?: (input: { html: string; done: boolean }) => string }) =>
+			new Response(opts?.transformPageChunk?.({ html: '<html lang="en"><body></body></html>', done: true }))
+	);
+
+	const response = await handle({ event, resolve } as never);
+
+	expect(await response.text()).toContain('<html lang="en">');
 });
 
 test('a database failure during session lookup degrades to maintenance mode, never a bare 500', async () => {

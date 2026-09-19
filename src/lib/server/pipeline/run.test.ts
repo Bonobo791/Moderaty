@@ -30,6 +30,16 @@ test('resetPipelineMocks removes test-specific mock implementations', async () =
 	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ decidedBy: 'ai' })]);
 });
 
+test('the http mock surface is complete for the real youtube module it sits behind', async () => {
+	// cubic, PR #142: importOriginal evaluates real youtube.ts under this
+	// mock — every name it imports from $lib/server/http must exist, or an
+	// un-stubbed real export fails confusingly with undefined-is-not-a-fn.
+	const http = await import('$lib/server/http');
+	expect(typeof http.fetchWithRetry).toBe('function');
+	expect(typeof http.assertBeforeDeadline).toBe('function');
+	expect(typeof http.DeadlineExceededError).toBe('function');
+});
+
 test('channel query mocks honor the requested channel id', async () => {
 	await expect(runChannel('different-channel')).rejects.toThrow('channel not found: different-channel');
 });
@@ -299,7 +309,7 @@ test('treats a vanished channel row as deactivated mid-run, logging and stopping
 
 	const result = await runChannel('channel');
 
-	expect(result).toEqual({ fetched: 1, acted: 0, queued: 0, partial: true, skipped: false, dryRun: false });
+	expect(result).toEqual({ fetched: 1, acted: 0, queued: 0, partial: true, skipped: false, dryRun: false, stoppedReason: 'deactivated' });
 	expect(mocks.state.insertedComments).toEqual([]);
 	expect(info).toHaveBeenCalledWith(
 		expect.stringContaining('stopping run for channel: channel deactivated mid-run: channel')
@@ -312,7 +322,7 @@ test('returns a partial result when the deadline hits during comment fetch', asy
 
 	const result = await runChannel('channel');
 
-	expect(result).toEqual({ fetched: 0, acted: 0, queued: 0, partial: true, skipped: false, dryRun: false });
+	expect(result).toEqual({ fetched: 0, acted: 0, queued: 0, partial: true, skipped: false, dryRun: false, stoppedReason: 'deadline' });
 	expect(mocks.state.insertedComments).toEqual([]);
 	expect(mocks.state.channelUpdates).toEqual([]);
 });
@@ -324,7 +334,7 @@ test('returns a partial result when the deadline hits during video metadata fetc
 
 	const result = await runChannel('channel');
 
-	expect(result).toEqual({ fetched: 1, acted: 0, queued: 0, partial: true, skipped: false, dryRun: false });
+	expect(result).toEqual({ fetched: 1, acted: 0, queued: 0, partial: true, skipped: false, dryRun: false, stoppedReason: 'deadline' });
 	expect(mocks.state.insertedComments).toEqual([]);
 });
 
@@ -337,7 +347,7 @@ test('returns a partial result when the deadline hits during omni scoring — no
 
 	const result = await runChannel('channel');
 
-	expect(result).toEqual({ fetched: 1, acted: 0, queued: 0, partial: true, skipped: false, dryRun: false });
+	expect(result).toEqual({ fetched: 1, acted: 0, queued: 0, partial: true, skipped: false, dryRun: false, stoppedReason: 'deadline' });
 	expect(mocks.state.insertedComments).toEqual([]);
 	expect(mocks.state.insertedAudits).toEqual([]);
 	expect(mocks.state.channelUpdates).toEqual([]);
@@ -350,7 +360,7 @@ test('returns a partial result when the deadline hits during tone scoring — no
 
 	const result = await runChannel('channel');
 
-	expect(result).toEqual({ fetched: 1, acted: 0, queued: 0, partial: true, skipped: false, dryRun: false });
+	expect(result).toEqual({ fetched: 1, acted: 0, queued: 0, partial: true, skipped: false, dryRun: false, stoppedReason: 'deadline' });
 	expect(mocks.state.insertedComments).toEqual([]);
 	expect(mocks.state.insertedAudits).toEqual([]);
 	expect(mocks.state.channelUpdates).toEqual([]);
@@ -540,6 +550,29 @@ describe('credit consumption (billing)', () => {
 		expect(result.outOfCredits).toBeUndefined();
 		expect(mocks.scoreComment).toHaveBeenCalled();
 		expect(mocks.state.insertedCredits).toEqual([]);
+	});
+
+	test('a lifetime org holding a stranded balance scores AI unlimited and burns none of it', async () => {
+		// The org bought credits while metered, then upgraded to lifetime: the
+		// balance freezes — scoring is unlimited and consumeCredit no-ops for
+		// unmetered plans (MOD-36). Staging can never abort on a failed charge.
+		mocks.state.channel.orgId = 'org-1';
+		mocks.state.plan = 'lifetime';
+		mocks.state.credits = 500;
+		mocks.scoreComment.mockResolvedValue(moderation(0.1));
+		mocks.fetchNewComments.mockResolvedValue({
+			comments: [newComment({ id: 'a' }), newComment({ id: 'b' })],
+			nextPageToken: null,
+			reachedCursor: true
+		});
+
+		const result = await runChannel('channel');
+
+		expect(mocks.scoreComment).toHaveBeenCalledTimes(2);
+		expect(mocks.state.insertedComments).toHaveLength(2);
+		expect(mocks.state.insertedCredits).toEqual([]);
+		expect(mocks.state.credits).toBe(500); // frozen — never burned
+		expect(result.outOfCredits).toBeUndefined();
 	});
 
 	test('a comment whose credit charge FAILS (balance exhausted concurrently) aborts the staging — never stages free', async () => {

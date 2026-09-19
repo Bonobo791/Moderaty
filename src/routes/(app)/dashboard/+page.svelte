@@ -27,6 +27,8 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	import Ticker from '$lib/Ticker.svelte';
 	import { autoRefresh } from '$lib/auto-refresh.svelte';
 	import { relativeTime } from '$lib/relative-time';
+	import { runFailureAction } from '$lib/runHealth';
+	import { TONE_LEVEL_OMNI_AND_TONE } from '$lib/toneLevels';
 
 	let { data } = $props();
 
@@ -51,6 +53,32 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	const bannedSum = $derived(
 		data.bans.reduce((total: number, b: any) => total + b.n, 0)
 	);
+
+	// Run-health summary: only channels whose last check actually succeeded
+	// count as protected — never-run and failed channels are called out
+	// instead of being swept into the headline claim (MOD-8).
+	const pausedCount = $derived(data.chs.filter((ch: any) => ch.active === 0).length);
+	const protectedCount = $derived(
+		data.chs.filter((ch: any) => ch.active !== 0 && ch.lastRunStatus === 'success').length
+	);
+	const failedCount = $derived(
+		data.chs.filter((ch: any) => ch.active !== 0 && ch.lastRunStatus === 'failed').length
+	);
+	const uncheckedCount = $derived(data.chs.length - protectedCount - failedCount - pausedCount);
+	const healthSubline = $derived.by(() => {
+		if (failedCount + uncheckedCount + pausedCount === 0)
+			return `${data.chs.length} channels protected. Queue's clear. Not a single main character slipped past.`;
+		const parts: string[] = [];
+		if (failedCount > 0) parts.push(`${failedCount} failed the last check`);
+		if (pausedCount > 0) parts.push(`${pausedCount} paused`);
+		if (uncheckedCount > 0) parts.push(`${uncheckedCount} waiting for a first check`);
+		return `${protectedCount} of ${data.chs.length} channels protected — ${parts.join(', ')}.`;
+	});
+
+	// Safe actionable copy per persisted failure category lives in
+	// $lib/runHealth — shared with the channel header so identical states
+	// read identically on both surfaces.
+	const failureAction = runFailureAction;
 
 	function openChannel(channelId: string) {
 		goto(`/channels/${channelId}`);
@@ -84,7 +112,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	{:else}
 		<h1 class="door-headline">The door is quiet. Too quiet.</h1>
 		<p class="door-subline">
-			{data.chs.length} channels protected. Queue's clear. Not a single main character slipped past.
+			{healthSubline}
 		</p>
 	{/if}
 	<div class="door-stats">
@@ -135,7 +163,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 			<tbody>
 				{#each data.chs as ch (ch.id)}
 					{@const pending = count(ch.id, 'pending')}
-					{@const strict = ch.toneLevel === 2}
+					{@const strict = ch.toneLevel === TONE_LEVEL_OMNI_AND_TONE}
 					<!-- The row itself is a keyboard-focusable link (Enter navigates);
 						the name cell keeps a real anchor for href semantics. -->
 					<tr
@@ -151,12 +179,27 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 							<span class="mono channel-id col-id">ID: {ch.id}</span>
 						</td>
 						<td>
-							<span class="caps-label protected-label">Protected</span>
+							{#if ch.active === 0}
+								<span class="caps-label unchecked-label">Paused</span>
+								<span class="status-sub">moderation paused — resume on the channel page</span>
+							{:else if ch.lastRunStatus === 'failed'}
+								<span class="caps-label failed-label">Check failed</span>
+								<span class="status-sub">{failureAction(ch.lastRunError)}</span>
+								<span class="status-sub">last success {ch.lastSuccessAt ? relativeTime(ch.lastSuccessAt) : 'never'}</span>
+							{:else if ch.lastRunStatus === 'success'}
+								<span class="caps-label protected-label">Protected</span>
+							{:else}
+								<span class="caps-label unchecked-label">Not checked yet</span>
+							{/if}
 							{#if pending > 0}
-								<a class="status-sub pending-link" href="/channels/{ch.id}/queue">
+								<a
+									class="status-sub pending-link"
+									href="/channels/{ch.id}/queue"
+									onclick={(event) => event.stopPropagation()}
+								>
 									{pending} comment{pending === 1 ? '' : 's'} waiting for review
 								</a>
-							{:else}
+							{:else if ch.active !== 0 && ch.lastRunStatus !== 'failed'}
 								<span class="status-sub">queue is clear</span>
 							{/if}
 						</td>
@@ -294,6 +337,12 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	}
 	.protected-label {
 		color: var(--ok);
+	}
+	.failed-label {
+		color: var(--accent);
+	}
+	.unchecked-label {
+		color: var(--text-3);
 	}
 	.status-sub {
 		display: block;

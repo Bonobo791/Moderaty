@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, count, eq, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { db } from '$lib/server/db';
 import {
 	organizations,
@@ -12,7 +12,7 @@ import { HOSTED_INCLUDED_CREDITS, isActiveSubscriptionStatus } from './plans';
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
-const LIFETIME_SOLD_OUT_ERROR = 'lifetime plan is sold out';
+export const LIFETIME_SOLD_OUT_ERROR = 'lifetime plan is sold out';
 const LIFETIME_ENTITLEMENT_RECORD_ERROR = 'lifetime entitlement was not recorded';
 const LIFETIME_SLOT_RACE_ERROR = 'lifetime slot claim lost its race';
 const PAYMENT_REFERENCE_REQUIRED_ERROR = 'payment intent or charge id is required';
@@ -146,9 +146,33 @@ export interface LifetimeClaim {
 	chargeId?: string;
 }
 
+/** Unclaimed lifetime slots — the deal's remaining inventory (MOD-37). A
+ * disputed entitlement keeps its slot until the dispute resolves, so it is
+ * NOT counted here; a released slot returns to the pool. */
+export async function lifetimeSlotsRemaining(): Promise<number> {
+	const row = await db
+		.select({ n: count() })
+		.from(stripeLifetimeSlots)
+		.where(isNull(stripeLifetimeSlots.activeOrgId))
+		.get();
+	return row?.n ?? 0;
+}
+
 export interface LifetimeClaimResult {
 	slot: number;
 	status: 'active' | 'released';
+}
+
+/**
+ * After a lifetime entitlement is lost (released or disputed), the org's
+ * cached plan falls back to 'hosted' when an active subscription remains
+ * and 'free' otherwise. Runs inside the caller's transaction so the plan
+ * never commits an entitlement state that rolled back.
+ */
+async function downgradeOrgPlanAfterLifetimeLoss(tx: Tx, orgId: string): Promise<void> {
+	const subscription = await tx.select({ id: organizations.stripeSubscriptionId, status: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, orgId)).get();
+	const nextPlan = subscription?.id && subscription.status && isActiveSubscriptionStatus(subscription.status) ? 'hosted' : 'free';
+	await tx.update(organizations).set({ plan: nextPlan }).where(eq(organizations.id, orgId));
 }
 
 async function applyPendingLifetimeReversal(tx: Tx, input: LifetimeClaim, slot: number, entitlementId: number, reversal: PendingReversalState): Promise<LifetimeClaimResult | undefined> {
@@ -158,9 +182,7 @@ async function applyPendingLifetimeReversal(tx: Tx, input: LifetimeClaim, slot: 
 	if (pendingStatus === 'released') await tx.update(stripeLifetimeSlots).set({ activeOrgId: null, activeEntitlementId: null, releasedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` }).where(eq(stripeLifetimeSlots.slot, slot));
 	await tx.delete(stripePendingReversals).where(eq(stripePendingReversals.chargeId, input.chargeId));
 	if (reversal.disputeId) await tx.update(stripeDisputeReversals).set({ source: 'lifetime', status: reversal.hasRefund ? 'ignored' : 'reversed' }).where(eq(stripeDisputeReversals.disputeId, reversal.disputeId));
-	const subscription = await tx.select({ id: organizations.stripeSubscriptionId, status: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, input.orgId)).get();
-	const nextPlan = subscription?.id && subscription.status && isActiveSubscriptionStatus(subscription.status) ? 'hosted' : 'free';
-	await tx.update(organizations).set({ plan: nextPlan }).where(eq(organizations.id, input.orgId));
+	await downgradeOrgPlanAfterLifetimeLoss(tx, input.orgId);
 	return { slot, status: pendingStatus === 'disputed' ? 'active' : 'released' };
 }
 
@@ -209,7 +231,15 @@ export async function claimLifetimeSlot(input: LifetimeClaim): Promise<LifetimeC
 			if (!input.chargeId) throw new Error('won dispute reconciliation requires a charge id');
 			await tx.delete(stripePendingReversals).where(eq(stripePendingReversals.chargeId, input.chargeId));
 		}
-		await tx.update(organizations).set({ plan: 'lifetime' }).where(eq(organizations.id, input.orgId));
+		// Clear any stale auto top-up authorization atomically with the plan
+		// flip — a lifetime org's scoring is unmetered, so a surviving enabled
+		// flag is a live off-session charge mandate for credits it can never
+		// need (review). A later downgrade re-enables only through the
+		// consent-gated setAutoTopup path.
+		await tx
+			.update(organizations)
+			.set({ plan: 'lifetime', autoTopupEnabled: 0, autoTopupState: 'idle' })
+			.where(eq(organizations.id, input.orgId));
 		return { slot: slot.slot, status: 'active' };
 	});
 }
@@ -225,9 +255,7 @@ export async function releaseLifetimeForPayment(input: StripeIdentifiers): Promi
 		if (entitlement.status !== 'active' && entitlement.status !== 'disputed') return true;
 		await tx.update(stripeLifetimeEntitlements).set({ status: 'released', releasedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` }).where(eq(stripeLifetimeEntitlements.id, entitlement.id));
 		await tx.update(stripeLifetimeSlots).set({ activeOrgId: null, activeEntitlementId: null, releasedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` }).where(and(eq(stripeLifetimeSlots.slot, entitlement.slot), eq(stripeLifetimeSlots.activeOrgId, entitlement.orgId)));
-		const sub = await tx.select({ id: organizations.stripeSubscriptionId, status: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, entitlement.orgId)).get();
-		const nextPlan = sub?.id && sub.status && isActiveSubscriptionStatus(sub.status) ? 'hosted' : 'free';
-		await tx.update(organizations).set({ plan: nextPlan }).where(eq(organizations.id, entitlement.orgId));
+		await downgradeOrgPlanAfterLifetimeLoss(tx, entitlement.orgId);
 		return true;
 	});
 }
@@ -242,9 +270,7 @@ export async function revokeLifetimeForDispute(input: StripeIdentifiers): Promis
 		if (entitlement.status === 'disputed') return true;
 		if (entitlement.status !== 'active') return false;
 		await tx.update(stripeLifetimeEntitlements).set({ status: 'disputed' }).where(eq(stripeLifetimeEntitlements.id, entitlement.id));
-		const sub = await tx.select({ id: organizations.stripeSubscriptionId, status: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, entitlement.orgId)).get();
-		const nextPlan = sub?.id && sub.status && isActiveSubscriptionStatus(sub.status) ? 'hosted' : 'free';
-		await tx.update(organizations).set({ plan: nextPlan }).where(eq(organizations.id, entitlement.orgId));
+		await downgradeOrgPlanAfterLifetimeLoss(tx, entitlement.orgId);
 		return true;
 	});
 }
@@ -257,7 +283,12 @@ export async function restoreLifetimeForDispute(input: StripeIdentifiers): Promi
 		const entitlement = matches[0];
 		if (!entitlement) return false;
 		await tx.update(stripeLifetimeEntitlements).set({ status: 'active', releasedAt: null }).where(eq(stripeLifetimeEntitlements.id, entitlement.id));
-		await tx.update(organizations).set({ plan: 'lifetime' }).where(eq(organizations.id, entitlement.orgId));
+		// The same atomic mandate reset as claimLifetimeSlot: during the
+		// dispute downgrade the org read as metered, so the owner could have
+		// consented to auto top-up — restoring the plan without clearing it
+		// leaves a live off-session charge mandate on an unmetered org
+		// (codex P2). Every transition back to lifetime clears it.
+		await tx.update(organizations).set({ plan: 'lifetime', autoTopupEnabled: 0, autoTopupState: 'idle' }).where(eq(organizations.id, entitlement.orgId));
 		return true;
 	});
 }

@@ -532,13 +532,15 @@ describe('AI-cost claims match implementation', () => {
 	});
 });
 
-// Lifetime BYOK claims removed: there is no per-account key flow — hosted
-// scoring (lifetime included) runs on the deployment's env.OPENAI_API_KEY
-// (moderation.ts, tone.ts), so "lifetime buyers score on their own account"
-// and "we never see the key" were false for hosted buyers. BYOK claims may
-// only appear where they are true: the self-hosted tier. Restore the lifetime
-// claims only when the per-account key flow ships.
-describe('lifetime BYOK claims match the missing key flow', () => {
+// Lifetime BYOK claims removed: the per-account key flow now exists
+// (owner-only Team page card → organizations.openai_key_enc → resolveOpenAiKey
+// prefers it over env.OPENAI_API_KEY at scoring time), but public marketing
+// still does not promise it — "lifetime buyers score on their own account"
+// remains an unadvertised opt-in. BYOK claims may only appear where they were
+// always true: the self-hosted tier. Restore the lifetime claims only after a
+// maintainer decision, since advertising them rewrites Terms §6.1(c) and
+// needs a LEGAL_VERSION bump plus re-consent.
+describe('lifetime BYOK claims stay out of unadvertised marketing', () => {
 	const lifetimeSurfaces: Record<string, string> = {
 		PlanLifetime: readFileSync(
 			new URL('../components/landing/PlanLifetime.svelte', import.meta.url),

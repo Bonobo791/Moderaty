@@ -30,6 +30,11 @@ export interface ChannelRunResult {
 	partial: boolean;
 	skipped: boolean;
 	dryRun: boolean;
+	/** Why a partial run stopped early: 'deadline' means the check timed out
+	 * (a failed-check verdict); 'deactivated' means the channel was paused
+	 * mid-run (no verdict — the Paused badge covers it). Absent on complete
+	 * runs and on results produced before this field existed. */
+	stoppedReason?: 'deadline' | 'deactivated';
 	/** Window-mode continuation: token for the next drain page (null when the
 	 * window is exhausted) and whether the drain reached its boundary. Absent
 	 * outside window mode. */

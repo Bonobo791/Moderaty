@@ -21,19 +21,20 @@
 // The inbox lease is claimed before side effects and marked complete only after
 // successful handling; failed handlers release the lease for Stripe's retry.
 
-import { and, eq, isNull, lt, ne, or, sql, type SQL } from 'drizzle-orm';
+import { and, eq, isNull, lt, lte, ne, or, sql, type SQL } from 'drizzle-orm';
 import type Stripe from 'stripe';
 import { randomUUID } from 'node:crypto';
 
 import { db } from '$lib/server/db';
-import { organizations, creditTransactions, stripeEvents, stripeLifetimeEntitlements, stripeDisputeReversals } from '$lib/server/db/schema';
-import { applyLedgerDelta, drainPendingReversals, findGrantForStripe, queuePendingReversal } from '$lib/server/billing/ledger';
+import { organizations, creditTransactions, stripeEvents, stripeLifetimeEntitlements, stripeDisputeReversals, stripeCheckoutAttempts } from '$lib/server/db/schema';
+import { applyLedgerDelta, drainPendingReversals, findGrantForStripe, queuePendingReversal, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
 import { grantAutoTopupCredits, handleAutoTopupFailure } from '$lib/server/billing/autotopup';
-import { claimLifetimeSlot, grantSubscriptionPeriod, refundSubscriptionPeriod, disputeSubscriptionPeriod, releaseLifetimeForPayment, applySubscriptionSnapshot, revokeLifetimeForDispute, restoreLifetimeForDispute, restoreDisputedSubscriptionPeriod } from '$lib/server/billing/entitlements';
+import { claimLifetimeSlot, grantSubscriptionPeriod, refundSubscriptionPeriod, disputeSubscriptionPeriod, releaseLifetimeForPayment, applySubscriptionSnapshot, revokeLifetimeForDispute, restoreLifetimeForDispute, restoreDisputedSubscriptionPeriod, LIFETIME_SOLD_OUT_ERROR } from '$lib/server/billing/entitlements';
 import { bundleById, type CreditBundle } from '$lib/server/stripe/bundles';
 import { isActiveSubscriptionStatus } from '$lib/server/billing/plans';
 import { markCheckoutAttemptFulfilled } from '$lib/server/billing/checkout';
 import { getStripe } from '$lib/server/stripe/client';
+import { refundUngrantablePayment } from '$lib/server/stripe/refunds';
 
 /**
  * Records a Stripe event when it has not already been recorded.
@@ -126,17 +127,20 @@ function creditsForBundle(bundle: CreditBundle): number {
  * methods) must wait for async_payment_succeeded, and no_payment_required
  * (a $0 session) grants nothing.
  *
- * The result is a three-way verdict, not a boolean (coderabbit): 'granted'
- * (this call applied the credits), 'already' (a previous delivery did — the
- * success page must still read success), and 'rejected' (the session cannot
- * or did not grant — never report success for it).
+ * The result is a verdict, not a boolean (coderabbit): 'granted' (this
+ * call applied the credits/entitlement), 'already' (a previous delivery
+ * did — the success page must still read success), 'refunded' (the session
+ * was paid but ungrantable and the payment was refunded or queued for one
+ * — the buyer sees that, not a generic failure), and 'rejected' (the
+ * session cannot or did not grant — never report success for it).
  *
  * @throws A card-persistence failure propagates (after a loud log) so the
  * webhook route answers 500 and Stripe redelivers — the idempotent retry
  * saves the card without double-granting (codex 6141). The grant itself is
- * already committed and never rolled back.
+ * already committed and never rolled back. A refund failure also
+ * propagates — no ACK for a paid customer we could not refund (review).
  */
-export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'already' | 'rejected'> {
+export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'already' | 'rejected' | 'refunded'> {
 	const session = await getStripe().checkout.sessions.retrieve(sessionId, {
 		// latest_charge expanded so a LATE grant can revalidate the charge's
 		// current refund/dispute state (codex review) without a second call.
@@ -159,7 +163,8 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 	// sweep dropped a queued reversal. Granting would hand credits back for
 	// money that already left (fully refunded or disputed), so the charge's
 	// CURRENT state is checked before the ledger mutation.
-	if (rejectLateGrant(session, sessionId)) return 'rejected';
+	const lateVerdict = lateGrantVerdict(session, sessionId);
+	if (lateVerdict) return lateVerdict;
 
 	const { paymentIntent, charge } = getPaymentIntentAndCharge(session);
 	if (product === 'hosted' || product === 'lifetime') {
@@ -187,6 +192,18 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 			}
 			if (existing.stripeSubscriptionId === subscriptionId) return 'already';
 			await db.update(organizations).set({ stripeSubscriptionId: subscriptionId, stripeCustomerId: customerId ?? existing.stripeCustomerId }).where(eq(organizations.id, orgId));
+			// Subscription Checkout stores the paid card on the SUBSCRIPTION's
+			// default_payment_method (customer.invoice_settings stays unset), so
+			// the pointer is synced eagerly here — waiting on the
+			// customer.subscription.created event would leave "no card saved"
+			// until it lands, and fulfillment must not fail if this sync does.
+			try {
+				const liveSubscription = await getStripe().subscriptions.retrieve(subscriptionId, { expand: ['default_payment_method'] });
+				const pmId = subscriptionDefaultPmId(asRecord(liveSubscription), `checkout ${sessionId}`);
+				if (pmId) await applySubscriptionDefaultPm(orgId, pmId);
+			} catch (cause) {
+				console.error(`stripe: subscription card sync during fulfillment of ${sessionId} failed for org ${orgId} — customer.subscription events must deliver it`, cause);
+			}
 			return 'granted';
 		}
 		if (session.mode !== 'payment') {
@@ -201,14 +218,44 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 			console.error(`stripe: lifetime checkout ${sessionId} would overlap hosted access for ${orgId}`);
 			return 'rejected';
 		}
-		const activeLifetime = await db.select({ id: stripeLifetimeEntitlements.id }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
-		if (activeLifetime) return 'already';
-		const result = await claimLifetimeSlot({
-			orgId,
-			checkoutSessionId: sessionId,
-			paymentIntentId: paymentIntent?.id,
-			chargeId: typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : charge?.id
-		});
+		const activeLifetime = await db.select({ id: stripeLifetimeEntitlements.id, checkoutSessionId: stripeLifetimeEntitlements.checkoutSessionId }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
+		// The winner may be THIS session: a concurrent duplicate delivery
+		// (success redirect + webhook) committed between the session-scoped
+		// read above and this one — its own claim is 'already', never a
+		// refund of the payment that just won (codex P1).
+		if (activeLifetime?.checkoutSessionId === sessionId) return 'already';
+		// A second lifetime checkout for an org that already has one is paid
+		// but can grant nothing — refund it like a slotless checkout rather
+		// than reporting 'already' success while keeping the money (review).
+		if (activeLifetime) {
+			await refundUngrantableCheckout(sessionId, orgId, paymentIntent, charge, 'the org already has an active lifetime plan');
+			return 'refunded';
+		}
+		let result: Awaited<ReturnType<typeof claimLifetimeSlot>>;
+		try {
+			result = await claimLifetimeSlot({
+				orgId,
+				checkoutSessionId: sessionId,
+				paymentIntentId: paymentIntent?.id,
+				chargeId: typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : charge?.id
+			});
+		} catch (error) {
+			if (!(error instanceof Error && error.message === LIFETIME_SOLD_OUT_ERROR)) {
+				// A concurrent same-org claim loses on the unique active-org
+				// index; the aborted tx's snapshot could not see the winner, so
+				// re-read fresh — a winner means this was a paid duplicate and
+				// falls into the same refund path, anything else is a real error.
+				const winner = await db.select({ id: stripeLifetimeEntitlements.id, checkoutSessionId: stripeLifetimeEntitlements.checkoutSessionId }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
+				if (!winner) throw error;
+				// The winner may be THIS session's own claim — a duplicate
+				// delivery (success redirect + webhook) that lost on the
+				// index. ACK as 'already'; refunding it would leave the org
+				// with lifetime access it never paid for (codex P1).
+				if (winner.checkoutSessionId === sessionId) return 'already';
+			}
+			await refundUngrantableCheckout(sessionId, orgId, paymentIntent, charge, 'claimed no slot');
+			return 'refunded';
+		}
 		if (result.status === 'active' && result.slot > 0) return 'granted';
 		console.error(`stripe: lifetime checkout ${sessionId} for org ${orgId} was PAID but claimed no slot (status ${result.status}, slot ${result.slot}) — manual refund required`);
 		return 'rejected';
@@ -224,15 +271,25 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 	// Narrow the expanded object once (chargeId prefers the expanded
 	// object's id — it is the same id either way).
 	const chargeId = typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : charge?.id;
-	const applied = await applyLedgerDelta(db, {
-		orgId,
-		delta: creditsForBundle(bundle),
-		reason: 'purchase',
-		refType: 'checkout_session',
-		refId: sessionId,
-		paymentIntentId: paymentIntent?.id,
-		chargeId
-	});
+	let applied: boolean;
+	try {
+		applied = await applyLedgerDelta(db, {
+			orgId,
+			delta: creditsForBundle(bundle),
+			reason: 'purchase',
+			refType: 'checkout_session',
+			refId: sessionId,
+			paymentIntentId: paymentIntent?.id,
+			chargeId
+		});
+	} catch (error) {
+		// A checkout opened before the org went lifetime fulfills against an
+		// unmetered plan — paid credits that can never be used get refunded
+		// (review: the grant, not just checkout creation, must be gated).
+		if (!(error instanceof Error && error.message === UNMETERED_CREDIT_GRANT_ERROR)) throw error;
+		await refundUngrantableCheckout(sessionId, orgId, paymentIntent, charge, 'the org is on an unmetered plan');
+		return 'refunded';
+	}
 	// A refund/dispute event may have arrived BEFORE this grant (Stripe does
 	// not order deliveries): apply the queued reversal now, in the same
 	// breath as the grant, so the customer never keeps credits for money that
@@ -251,6 +308,47 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 	return applied ? 'granted' : 'already';
 }
 
+/**
+ * A paid checkout that cannot grant anything gets its money back — loudly,
+ * idempotently (sold-out lifetime, duplicate lifetime, post-upgrade credit
+ * purchase). A refund API failure PROPAGATES after a loud MANUAL REFUND
+ * REQUIRED log: swallowing it would ACK the delivery and leave the customer
+ * charged until a human reads the log — the webhook must 500 so Stripe
+ * redelivers and retries the refund under the same idempotency key (review).
+ * A paid session with no payment intent throws the same way — a malformed
+ * response must never report 'refunded' when nothing was refunded (codex
+ * P1). Only the already-refunded path returns normally — nothing a retry
+ * could change.
+ */
+async function refundUngrantableCheckout(
+	sessionId: string,
+	orgId: string,
+	paymentIntent: Stripe.PaymentIntent | null,
+	charge: Stripe.Charge | null | undefined,
+	reason: string
+): Promise<void> {
+	if (!paymentIntent?.id) {
+		// A PAID session with no payment intent is a malformed Stripe response
+		// (I2) — returning would ACK the delivery and report 'refunded' to the
+		// buyer when no refund was ever requested. Throw so the delivery stays
+		// un-ACKed, Stripe retries, and the MANUAL REFUND REQUIRED line keeps
+		// firing until a human refunds (codex P1).
+		console.error(`stripe: checkout ${sessionId} for org ${orgId} was PAID but ${reason} and has no payment intent — MANUAL REFUND REQUIRED`);
+		throw new Error(`stripe: paid checkout ${sessionId} has no payment intent — MANUAL REFUND REQUIRED`);
+	}
+	if (charge?.refunded === true) {
+		console.error(`stripe: checkout ${sessionId} for org ${orgId} was ungrantable (${reason}) but charge ${charge.id} is already refunded`);
+		return;
+	}
+	await refundUngrantablePayment({
+		paymentIntentId: paymentIntent.id,
+		idempotencyKey: `refund:ungrantable:${sessionId}`,
+		label: `checkout ${sessionId} for org ${orgId} was PAID but ${reason}`,
+		orgId,
+		checkoutSessionId: sessionId
+	});
+}
+
 /** Narrows the expanded Checkout session to the payment_intent and its latest_charge (both stay a string-union). */
 function getPaymentIntentAndCharge(session: Stripe.Checkout.Session): {
 	paymentIntent: Stripe.PaymentIntent | null;
@@ -262,9 +360,17 @@ function getPaymentIntentAndCharge(session: Stripe.Checkout.Session): {
 }
 
 /** True when the charge backing this session is disputed or fully refunded — a late grant must be refused. */
-function rejectLateGrant(session: Stripe.Checkout.Session, sessionId: string): boolean {
+/**
+ * Revalidates the charge's CURRENT state before any late grant (the success
+ * page can fulfill an old paid session long after the pending-reversal
+ * sweep ran): a refunded or disputed charge must never mint credits. A
+ * fully refunded charge reports 'refunded' — the deliberate verdict the
+ * success page renders — while a disputed one stays 'rejected' (the money
+ * outcome is unresolved, not returned).
+ */
+function lateGrantVerdict(session: Stripe.Checkout.Session, sessionId: string): 'refunded' | 'rejected' | null {
 	const { charge } = getPaymentIntentAndCharge(session);
-	if (!charge) return false;
+	if (!charge) return null;
 	const fullyRefunded =
 		typeof charge.amount_refunded === 'number' &&
 		typeof charge.amount === 'number' &&
@@ -273,9 +379,9 @@ function rejectLateGrant(session: Stripe.Checkout.Session, sessionId: string): b
 		console.error(
 			`stripe: checkout session ${sessionId} charge ${charge.id} is ${charge.disputed ? 'disputed' : 'fully refunded'} — late grant refused`
 		);
-		return true;
+		return charge.disputed ? 'rejected' : 'refunded';
 	}
-	return false;
+	return null;
 }
 
 /** Resolves the bundle id or returns null (unknown bundle — loud rejection). */
@@ -377,17 +483,20 @@ async function updateDisputeReversal(disputeId: string, values: { status?: Dispu
 }
 
 /**
- * Reverses credits granted for a refunded or disputed charge. Each path
- * anchors on its OWN refType — 'refund' for refunds, 'dispute' for disputes
- * (refId = charge id) — so the full lifecycle applies exactly once per step:
- * a dispute reversal, a won-dispute restore (refType 'dispute', refId =
- * dispute id), and a later legitimate full refund each clear their own anchor
- * and can never block or double-apply one another. The reason field
- * ('refund' vs 'dispute') keeps the ledger legible.
+ * Reverses the entitlement side of a refunded or disputed charge. Lifetime
+ * purchases lose their slot: a refund releases the entitlement and frees the
+ * slot for resale, a dispute marks it disputed while it is contested — either
+ * way the org's plan falls back to 'hosted' when an active subscription
+ * remains and 'free' otherwise. When no lifetime entitlement matches, the
+ * charge's paid subscription period is marked 'refunded' or 'disputed'
+ * instead. A dispute-reversal row recorded for the charge is resolved with
+ * the matching source ('lifetime' or 'subscription').
  *
  * @param chargeId - The Stripe charge identifier
  * @param reason - Whether the reversal is for a refund or dispute
- * @returns `true` if a reversal was applied, `false` if no matching credit grant was found or the reversal was already recorded
+ * @param paymentIntentId - The charge's payment intent; combined with chargeId it matches the entitlement unambiguously
+ * @param disputeId - The dispute id when reason is 'dispute', so its pending reversal row can be resolved
+ * @returns `true` if a lifetime entitlement or subscription period was reversed, `false` if neither matched — the caller then falls through to the credit-grant reversal
  */
 async function reverseEntitlements(chargeId: string, reason: 'refund' | 'dispute', paymentIntentId?: string, disputeId?: string): Promise<boolean> {
 	const lifetimeChanged = reason === 'refund' ? await releaseLifetimeForPayment({ paymentIntentId, chargeId }) : await revokeLifetimeForDispute({ paymentIntentId, chargeId });
@@ -507,7 +616,23 @@ export async function restoreWonDispute(disputeId: string): Promise<boolean> {
 		const match = await findGrantForStripe(db, identifiers);
 		if (match) {
 			const disputeReversal = await db.select({ id: creditTransactions.id }).from(creditTransactions).where(and(eq(creditTransactions.orgId, match.orgId), eq(creditTransactions.reason, 'dispute'), eq(creditTransactions.chargeId, reversal.chargeId))).get();
-			if (disputeReversal) restored = await applyLedgerDelta(db, { orgId: match.orgId, delta: match.credits, reason: 'adjust', refType: 'dispute', refId: disputeId, chargeId: reversal.chargeId });
+			if (disputeReversal) {
+				try {
+					// Dedup-first means a false return is "a previous call already
+					// committed this restoration" (a crash between the ledger write
+					// and the reversal mark below) — still 'restored', never a wedge.
+					await applyLedgerDelta(db, { orgId: match.orgId, delta: match.credits, reason: 'adjust', refType: 'dispute', refId: disputeId, chargeId: reversal.chargeId });
+					restored = true;
+				} catch (error) {
+					// An upgrade to lifetime between the dispute and its win makes
+					// the org unmetered — it cannot hold credits, so the honest
+					// resolution is "nothing to restore": close the reversal
+					// loudly instead of wedging the webhook on the grant guard.
+					if (!(error instanceof Error && error.message === UNMETERED_CREDIT_GRANT_ERROR)) throw error;
+					console.error(`stripe: won dispute ${disputeId} for unmetered org ${match.orgId} — closing the reversal without re-granting credits`);
+					restored = true;
+				}
+			}
 		}
 	}
 	if (!restored) return false;
@@ -804,6 +929,62 @@ async function fetchLiveDefaultPmId(customerId: string, eventId: string): Promis
 	throw new Error(`customer.updated ${eventId}: live customer ${customerId} carries a malformed default_payment_method`);
 }
 
+/**
+ * Reads the card Checkout stored on the subscription itself. Subscription-mode
+ * Checkout sets subscription.default_payment_method, NOT
+ * customer.invoice_settings.default_payment_method — so customer.updated alone
+ * can never observe a hosted subscriber's card. null/absent carries no
+ * information (the subscription may fall back to the customer-level default),
+ * so only a usable id is returned; a present-but-malformed value is a failed
+ * API call — throw so Stripe redelivers (same contract as eventDefaultPmId).
+ */
+function subscriptionDefaultPmId(subscription: StripeRecord, eventId: string): string | undefined {
+	const value = subscription.default_payment_method;
+	if (value === null || value === undefined) return undefined;
+	if (typeof value === 'string' && value.length > 0) return value;
+	const expanded = optionalRecord(value);
+	if (expanded && typeof expanded.id === 'string' && expanded.id.length > 0) return expanded.id;
+	throw new Error(`Stripe subscription event ${eventId} carries a malformed default_payment_method`);
+}
+
+/**
+ * Writes the subscription's card as the org's saved top-up card. Only a
+ * pointer CHANGE is written; a change under enabled auto top-up disables it
+ * atomically pending fresh consent — the consent evidence covered the
+ * previous card (same rule as savePaymentMethod and customer.updated).
+ * `maxEventCreated` bounds staleness: a subscription event older than the
+ * last applied subscription snapshot must not regress the pointer.
+ */
+async function applySubscriptionDefaultPm(orgId: string, pmId: string, maxEventCreated?: number): Promise<void> {
+	const res = await db
+		.update(organizations)
+		.set({
+			stripeDefaultPmId: pmId,
+			autoTopupEnabled: sql`CASE WHEN ${organizations.autoTopupEnabled} = 1 THEN 0 ELSE ${organizations.autoTopupEnabled} END`,
+			autoTopupState: sql`CASE WHEN ${organizations.autoTopupEnabled} = 1 THEN 'disabled' ELSE ${organizations.autoTopupState} END`
+		})
+		.where(
+			and(
+				eq(organizations.id, orgId),
+				or(isNull(organizations.stripeDefaultPmId), ne(organizations.stripeDefaultPmId, pmId)),
+				...(maxEventCreated === undefined
+					? []
+					: [or(isNull(organizations.stripeSubscriptionLastEventCreated), lte(organizations.stripeSubscriptionLastEventCreated, maxEventCreated))])
+			)
+		);
+	if (res.rowsAffected === 0) return;
+	const after = await db
+		.select({ autoTopupEnabled: organizations.autoTopupEnabled, autoTopupState: organizations.autoTopupState })
+		.from(organizations)
+		.where(eq(organizations.id, orgId))
+		.get();
+	if (after?.autoTopupEnabled === 0 && after.autoTopupState === 'disabled') {
+		console.error(`stripe: subscription card changed for org ${orgId} (now ${pmId}) — auto top-up DISABLED, fresh consent required`);
+	} else {
+		console.info(`stripe: subscription card synced for org ${orgId} (${pmId})`);
+	}
+}
+
 function isSupersededSubscription(org: Awaited<ReturnType<typeof findOrgForStripe>>, subscriptionId: string, eventType: string): boolean {
 	if (!org?.stripeSubscriptionId || org.stripeSubscriptionId === subscriptionId) return false;
 	console.error(`stripe: ignoring stale ${eventType} for superseded subscription ${subscriptionId}; current subscription is ${org.stripeSubscriptionId}`);
@@ -859,7 +1040,8 @@ async function handleSubscriptionEvent(event: Stripe.Event): Promise<void> {
 	}
 	const { periodStart, periodEnd } = subscriptionPeriod(subscription, event.id);
 	if (typeof subscription.cancel_at_period_end !== 'boolean') throw new Error(`Stripe ${event.type} ${event.id} has invalid cancel_at_period_end`);
-	await applySubscriptionSnapshot({
+	const pmId = subscriptionDefaultPmId(subscription, event.id);
+	const applied = await applySubscriptionSnapshot({
 		orgId: org.id,
 		subscriptionId,
 		status,
@@ -869,6 +1051,9 @@ async function handleSubscriptionEvent(event: Stripe.Event): Promise<void> {
 		eventCreated: event.created,
 		eventId: event.id
 	});
+	// Only a snapshot this event actually applied may carry its card — a stale
+	// event's payment method is equally stale.
+	if (applied && pmId) await applySubscriptionDefaultPm(org.id, pmId, event.created);
 }
 
 /**
@@ -880,6 +1065,31 @@ async function handleSubscriptionEvent(event: Stripe.Event): Promise<void> {
  * @param event - The Stripe event to process
  * @returns `true` if the event type is supported, `false` otherwise
  */
+/**
+ * Processes the terminal status of refunds WE created for ungrantable
+ * payments (tagged `reason: 'ungrantable'` at create — the Stripe-side
+ * persistence that identifies them, codex P1). A failed/canceled refund on
+ * an ACKed delivery means the customer is still charged for a purchase we
+ * could never grant: scream for a human refund. Succeeded refunds need no
+ * action — the create-time log already recorded them.
+ */
+async function handleUngrantableRefundUpdate(refund: Stripe.Refund): Promise<void> {
+	if (refund.metadata?.reason !== 'ungrantable') return;
+	if (refund.status !== 'failed' && refund.status !== 'canceled') return;
+	const pi = typeof refund.payment_intent === 'string' ? refund.payment_intent : refund.payment_intent?.id;
+	// Durable operator record BEFORE the throw: a session-linked refund marks
+	// its checkout attempt 'manual_refund_required' — a queryable row that
+	// outlives the event's retry horizon and log rotation (codex P1).
+	// PI-only refunds (auto top-up) have no attempt row; the throw keeps
+	// their delivery in Stripe's failed-events queue as the operator
+	// surface, so redeliveries keep screaming until a human refunds.
+	if (refund.metadata?.checkout_session_id) {
+		await db.update(stripeCheckoutAttempts).set({ status: 'manual_refund_required' }).where(eq(stripeCheckoutAttempts.stripeSessionId, refund.metadata.checkout_session_id));
+	}
+	console.error(`stripe: ungrantable refund ${refund.id} for payment intent ${pi ?? 'unknown'} resolved ${refund.status} — the customer is still charged, MANUAL REFUND REQUIRED`);
+	throw new Error(`stripe: ungrantable refund ${refund.id} resolved ${refund.status} — MANUAL REFUND REQUIRED`);
+}
+
 export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
 	// Claim a durable inbox lease before dispatch. Completed event IDs are
 	// skipped; a competing live worker fails loudly so Stripe retries it.
@@ -936,12 +1146,29 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
 			// Stripe's charge.refunded fires for partial refunds too, so
 			// reverseCharge verifies the charge is FULLY refunded (amounts
 			// compared) before reversing the grant. Partial refunds
-			// (refund.created/refund.updated) are intentionally unhandled, and
+			// (refund.created) are intentionally unhandled, and
 			// reversing after the credits are spent can leave a negative balance
 			// — both documented v1 limitations (docs/stripe-checkout-webhooks.md §7).
 			await reverseCharge(event.data.object.id, 'refund');
 			handled = true;
 			break;
+		case 'charge.refund.updated':
+		case 'refund.updated':
+		case 'refund.failed': {
+			// data.object is the Refund. We only escalate OUR ungrantable
+			// refunds (tagged reason:'ungrantable' at create): a pending or
+			// requires_action refund was ACKed as in-flight — if Stripe later
+			// reports a terminal failure the customer is still charged for an
+			// ungrantable purchase, and without this no signal exists (codex
+			// P1). refund.updated is the broader event — charge.refund.updated
+			// is emitted only for selected payment methods (CodeRabbit) — and
+			// refund.failed covers a refund that arrives already failed; all
+			// three route here (the status check filters), ordinary refunds
+			// stay quiet.
+			await handleUngrantableRefundUpdate(event.data.object);
+			handled = true;
+			break;
+		}
 		case 'charge.dispute.created':
 			await reverseDispute(event.data.object.id);
 			handled = true;

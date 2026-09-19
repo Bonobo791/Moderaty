@@ -11,7 +11,8 @@ import { assertBeforeDeadline, DeadlineExceededError } from '$lib/server/http';
 import {
 	deleteComment,
 	getCommentModerationStatus,
-	setModerationStatus
+	setModerationStatus,
+	YOUTUBE_ID_BATCH_SIZE
 } from '$lib/server/youtube';
 import type { OutstandingAction, YoutubeAction } from './types';
 
@@ -247,8 +248,8 @@ async function applyModerationAction(
 	expected?: ChannelIdentity
 ): Promise<number> {
 	let acted = 0;
-	for (let index = 0; index < actions.length; index += 50) {
-		const batch = actions.slice(index, index + 50);
+	for (let index = 0; index < actions.length; index += YOUTUBE_ID_BATCH_SIZE) {
+		const batch = actions.slice(index, index + YOUTUBE_ID_BATCH_SIZE);
 		await markDispatched(batch, expected);
 		assertBeforeDeadline(deadline);
 		await assertChannelActive(batch[0].channelId, db, expected);

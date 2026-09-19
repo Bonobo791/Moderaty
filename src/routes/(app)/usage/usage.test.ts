@@ -17,9 +17,11 @@ import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
-import { organizations } from '$lib/server/db/schema';
+import { mercadoPagoCheckoutAttempts, organizations, stripeCheckoutAttempts } from '$lib/server/db/schema';
 import type { SessionUser } from '$lib/server/session';
 import { applyLedgerDelta, consumeCredit } from '$lib/server/billing/ledger';
+import { claimLifetimeSlot } from '$lib/server/billing/entitlements';
+import { LIFETIME_SLOT_LIMIT } from '$lib/server/billing/plans';
 import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
 
 const mocks = vi.hoisted(() => ({
@@ -51,7 +53,7 @@ import { render } from 'svelte/server';
 import Page from './+page.svelte';
 import { actions, load } from './+page.server';
 
-setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_checkout_attempts']);
+setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_checkout_attempts', 'mercado_pago_checkout_attempts', 'stripe_lifetime_entitlements', 'stripe_lifetime_slots', 'stripe_pending_reversals', 'stripe_dispute_reversals']);
 
 const OWNER = TEST_OWNER;
 
@@ -142,6 +144,16 @@ describe('usage load', () => {
 		expect(consume?.id).toEqual(expect.any(Number));
 	});
 
+	test('load surfaces the remaining lifetime slot count', async () => {
+		await seedOrg();
+		const fresh = (await load({ locals: { user: OWNER } } as never)) as { lifetimeSlots: number };
+		expect(fresh.lifetimeSlots).toBe(LIFETIME_SLOT_LIMIT);
+
+		await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-1', paymentIntentId: 'pi-1', chargeId: 'ch-1' });
+		const after = (await load({ locals: { user: OWNER } } as never)) as { lifetimeSlots: number };
+		expect(after.lifetimeSlots).toBe(LIFETIME_SLOT_LIMIT - 1);
+	});
+
 	test('a missing organization is a loud 500, never a maintenance payload', async () => {
 		// The user's session points at an org row that no longer exists — an
 		// account-integrity failure that must reach the user with the support
@@ -170,6 +182,91 @@ describe('usage load', () => {
 		});
 		expect(body).toContain('Moderaty is temporarily unable to reach its database');
 		expect(body).not.toContain('Credits left');
+	});
+
+	test('a lifetime org sees no credit purchase or auto top-up forms — with an explanation, not silence', async () => {
+		// Unlimited scoring makes credit bundles and auto top-up useless, so
+		// the cards are replaced by an explanatory line (I12: never silently
+		// different). A metered org renders them normally.
+		const base = {
+			maintenance: false,
+			user: OWNER,
+			summary: { remaining: 0, usedThisMonth: 0, usedLifetime: 0 },
+			metered: false,
+			history: [],
+			bundles: [{ id: 'credits_100', label: '100 credits' }],
+			mercadoPagoBundles: [{ id: 'credits_100', label: '100 credits', amountCents: 990 }],
+			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: false },
+			autoTopupConsentText: 'consent',
+			stripeConfigured: true,
+			plans: { hosted: true, lifetime: true }
+		};
+		const lifetime = render(Page, {
+			props: { data: { ...base, billing: { plan: 'lifetime', subscriptionStatus: null, periodEnd: null } }, form: null } as never
+		}).body;
+		expect(lifetime).not.toContain('action="?/buy"');
+		expect(lifetime).not.toContain('action="?/buyMercadoPago"');
+		expect(lifetime).not.toContain('action="?/setAutoTopup"');
+		expect(lifetime).toContain('unlimited moderated comments');
+
+		const metered = render(Page, {
+			props: { data: { ...base, billing: { plan: null, subscriptionStatus: null, periodEnd: null } }, form: null } as never
+		}).body;
+		expect(metered).toContain('action="?/buy"');
+		expect(metered).toContain('action="?/buyMercadoPago"');
+		expect(metered).toContain('action="?/setAutoTopup"');
+
+		// A stale enabled flag (enabled before the upgrade) must be
+		// DISABLE-able from the page — but only disable: no enable checkbox,
+		// threshold field, or consent the server would reject (review).
+		const stale = render(Page, {
+			props: { data: { ...base, billing: { plan: 'lifetime', subscriptionStatus: null, periodEnd: null }, autoTopup: { ...base.autoTopup, enabled: true } }, form: null } as never
+		}).body;
+		expect(stale).toContain('action="?/setAutoTopup"');
+		expect(stale).toContain('Disable automatic top-up');
+		expect(stale).not.toContain('name="enabled"');
+		expect(stale).not.toContain('name="threshold"');
+		expect(stale).not.toContain('Enable auto top-up');
+	});
+
+	test('the Plans card shows the claimed count, a sold-out state at zero, and an owned state for lifetime orgs', async () => {
+		// The deal is 1,000 slots: buyers see how many are gone, nobody can
+		// click a dead buy button once sold out, and a lifetime org sees its
+		// plan instead of a second buy form (I12: explicit states, never a
+		// button that only fails at checkout).
+		const base = {
+			maintenance: false,
+			user: OWNER,
+			summary: { remaining: 0, usedThisMonth: 0, usedLifetime: 0 },
+			metered: false,
+			history: [],
+			bundles: [],
+			mercadoPagoBundles: [],
+			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: false },
+			autoTopupConsentText: 'consent',
+			stripeConfigured: true,
+			plans: { hosted: false, lifetime: true }
+		};
+
+		const available = render(Page, {
+			props: { data: { ...base, lifetimeSlots: 997, billing: { plan: null, subscriptionStatus: null, periodEnd: null } }, form: null } as never
+		}).body;
+		expect(available).toContain('action="?/buyPlan"');
+		expect(available).toContain('3 of 1,000 claimed');
+
+		const soldOut = render(Page, {
+			props: { data: { ...base, lifetimeSlots: 0, billing: { plan: null, subscriptionStatus: null, periodEnd: null } }, form: null } as never
+		}).body;
+		expect(soldOut).not.toContain('action="?/buyPlan"');
+		expect(soldOut).toContain('sold out');
+
+		const owned = render(Page, {
+			// plans.hosted configured too — a lifetime org must not get a hosted
+			// buy form the server would only reject as an overlap (review).
+			props: { data: { ...base, plans: { hosted: true, lifetime: true }, lifetimeSlots: 0, billing: { plan: 'lifetime', subscriptionStatus: null, periodEnd: null } }, form: null } as never
+		}).body;
+		expect(owned).not.toContain('action="?/buyPlan"');
+		expect(owned).toContain('lifetime plan');
 	});
 });
 
@@ -262,6 +359,39 @@ describe('usage buy action', () => {
 			expect(serialized).toContain('Could not start checkout');
 			expect(serialized).not.toContain('STRIPE_PRICE_CREDITS_500');
 			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('STRIPE_PRICE_CREDITS_500'));
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('a lifetime org cannot open a Stripe credit checkout — unlimited plans never buy credits', async () => {
+		// The lifetime plan's scoring is already unlimited: a crafted POST
+		// (the button is hidden in the UI) must fail loudly BEFORE a Checkout
+		// Session exists — never sell a balance the org can never need.
+		await seedOrg({ plan: 'lifetime' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const result = await buy('credits_100');
+			expect(result).toMatchObject({ status: 500 });
+			expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+			expect(mocks.customersCreate).not.toHaveBeenCalled();
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('lifetime'));
+			expect(await testDb().db.select().from(stripeCheckoutAttempts)).toHaveLength(0);
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('a lifetime org cannot open a Mercado Pago credit checkout', async () => {
+		// Same guard on the BRL path: the check must run before any provider
+		// validation or attempt row, so no MP env config is needed here.
+		await seedOrg({ plan: 'lifetime' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const result = (await actions.buyMercadoPago({ request: postForm({ bundle: 'credits_100' }), locals: { user: OWNER } } as never)) as { status: number };
+			expect(result.status).toBeGreaterThanOrEqual(400);
+			expect(errorSpy.mock.calls.flat().some((arg) => arg instanceof Error && arg.message.includes('lifetime'))).toBe(true);
+			expect(await testDb().db.select().from(mercadoPagoCheckoutAttempts)).toHaveLength(0);
 		} finally {
 			errorSpy.mockRestore();
 		}
@@ -405,6 +535,63 @@ describe('usage setAutoTopup action', () => {
 		await seedOrg();
 		const member = { ...OWNER, orgRole: 'member' as const };
 		await expect(setAutoTopup({ enabled: 'on', threshold: '250', consent: 'on' }, member)).rejects.toMatchObject({ status: 403 });
+	});
+
+	test('a lifetime org cannot enable or update auto top-up; disabling stays allowed', async () => {
+		// Unlimited scoring makes a top-up charge pure waste — enabling (or a
+		// threshold update while a stale flag survives) is a loud 400. Turning
+		// the flag OFF must still work so a stale flag can be cleared.
+		await seedOrg({ plan: 'lifetime', autoTopupEnabled: 1, autoTopupThreshold: 100, autoTopupState: 'idle' });
+
+		const enable = await setAutoTopup({ enabled: 'on', threshold: '150' });
+		expect(enable).toMatchObject({ status: 400 });
+		expect(JSON.stringify(enable)).toContain('lifetime');
+		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.autoTopupThreshold).toBe(100);
+
+		const off = await setAutoTopup({ threshold: '150' });
+		expect(off).toMatchObject({ ok: true });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.autoTopupEnabled).toBe(0);
+		expect(org?.autoTopupThreshold).toBe(100); // disabling keeps the stored threshold
+	});
+
+	test('disabling needs no threshold — the lifetime disable-only control submits no fields', async () => {
+		// The lifetime card renders a bare disable button: no threshold field
+		// exists on it, so the missing-threshold guard must not fire for a
+		// DISABLE submit — the flag the control exists to clear would be
+		// unreachable otherwise (codex, round 3).
+		await seedOrg({ plan: 'lifetime', autoTopupEnabled: 1, autoTopupThreshold: 100, autoTopupState: 'idle' });
+
+		const result = await setAutoTopup({});
+
+		expect(result).toMatchObject({ ok: true });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.autoTopupEnabled).toBe(0);
+		expect(org?.autoTopupThreshold).toBe(100);
+	});
+
+	test('an enable that loses the plan race fails loudly instead of leaving a stale flag', async () => {
+		// The read-time plan check happens BEFORE the write: a lifetime
+		// webhook landing in between must not let the UPDATE plant enabled=1
+		// on an unmetered org — the write itself re-checks the plan (review).
+		await seedOrg();
+		const client = testDb().client;
+		const originalExecute = client.execute.bind(client);
+		client.execute = (async (stmt: unknown) => {
+			const sqlText = String((stmt as { sql?: string }).sql ?? stmt);
+			if (/update "organizations" set/i.test(sqlText) && sqlText.includes('auto_topup_enabled')) {
+				await originalExecute("update organizations set plan = 'lifetime' where id = 'org-1'");
+			}
+			return originalExecute(stmt as never);
+		}) as never;
+		try {
+			const result = await setAutoTopup({ enabled: 'on', threshold: '250', consent: 'on' });
+			expect(result).toMatchObject({ status: 400 });
+		} finally {
+			client.execute = originalExecute;
+		}
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.autoTopupEnabled).toBeFalsy(); // never armed — the flag stays unset
 	});
 });
 

@@ -36,6 +36,22 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	<title>Moderaty — {ch.title}</title>
 </svelte:head>
 
+{#if ch.active === 0}
+	<p class="paused-banner" role="status">
+		Moderation is paused for {ch.title} — cron skips it and new comments go unchecked.
+		Nothing is deleted and the connection stays live; resume any time.
+	</p>
+{/if}
+<form class="pause-form" method="POST" action="?/setPaused" use:enhance>
+	<input type="hidden" name="channelId" value={ch.id} />
+	<input type="hidden" name="paused" value={ch.active === 0 ? 'false' : 'true'} />
+	<button class="btn secondary small" type="submit">
+		{ch.active === 0 ? `Resume moderation on ${ch.title}` : `Pause moderation on ${ch.title}`}
+	</button>
+</form>
+{#if form?.scope === 'pause' && form?.error}
+	<p class="error-box" role="alert">{form.error}</p>
+{/if}
 <SensitivitySwitch channelId={ch.id} channelTitle={ch.title} level={ch.toneLevel ?? 1} />
 <form class="protections" method="POST" action="?/setProtections" use:enhance>
 	<input type="hidden" name="channelId" value={ch.id} />
@@ -67,75 +83,80 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 {#if form?.scope === 'protections' && form?.error}
 	<p class="error-box" role="alert">{form.error}</p>
 {/if}
-<form method="POST" action="?/analyzeHistory" class="history-form">
-	<input type="hidden" name="channelId" value={ch.id} />
-	<label for="history-months-{ch.id}">Analyze history</label>
-	<select id="history-months-{ch.id}" name="months" aria-label="How far back to analyze comments on {ch.title}">
-		<option value="1">last month</option>
-		<option value="3" selected>last 3 months</option>
-		<option value="6">last 6 months</option>
-		<option value="12">last 12 months</option>
-		<option value="24">last 24 months</option>
-	</select>
-	<button class="btn secondary small" type="submit">Analyze history on {ch.title}</button>
-</form>
-{#if form?.scope === 'history'}
-	{#if form?.error}
-		<p class="error-box" role="alert">{form.error}</p>
-	{:else if form?.ok}
+{#if ch.active !== 0}
+	<!-- Scan controls are meaningless while paused: the cron claim is gated
+		on active=1 and runChannel short-circuits inactive channels, so the
+		buttons would "succeed" while doing nothing (codex, PR #142). -->
+	<form method="POST" action="?/analyzeHistory" class="history-form">
+		<input type="hidden" name="channelId" value={ch.id} />
+		<label for="history-months-{ch.id}">Analyze history</label>
+		<select id="history-months-{ch.id}" name="months" aria-label="How far back to analyze comments on {ch.title}">
+			<option value="1">last month</option>
+			<option value="3" selected>last 3 months</option>
+			<option value="6">last 6 months</option>
+			<option value="12">last 12 months</option>
+			<option value="24">last 24 months</option>
+		</select>
+		<button class="btn secondary small" type="submit">Analyze history on {ch.title}</button>
+	</form>
+	{#if form?.scope === 'history'}
+		{#if form?.error}
+			<p class="error-box" role="alert">{form.error}</p>
+		{:else if form?.ok}
+			<p class="muted" role="status">
+				History scan started — cron is working back {form.months === 1 ? '1 month' : `${form.months} months`}. New comments keep flowing into the review queue as it drains.
+			</p>
+		{/if}
+	{/if}
+	{#if ch.scanning}
 		<p class="muted" role="status">
-			History scan started — cron is working back {form.months === 1 ? '1 month' : `${form.months} months`}. New comments keep flowing into the review queue as it drains.
+			History scan in progress — cron is working through the backlog and new comments flow into the review queue as it drains. This runs in the background: refreshing or leaving this page won't stop it.
 		</p>
 	{/if}
-{/if}
-{#if ch.scanning}
-	<p class="muted" role="status">
-		History scan in progress — cron is working through the backlog and new comments flow into the review queue as it drains. This runs in the background: refreshing or leaving this page won't stop it.
-	</p>
-{/if}
-<form
-	method="POST"
-	action="?/dryRun"
-	class="history-form"
-	use:enhance={() => {
-		dryRunPending = true;
-		return async ({ update }) => {
-			await update();
-			dryRunPending = false;
-		};
-	}}
->
-	<input type="hidden" name="channelId" value={ch.id} />
-	<label for="dryrun-months-{ch.id}">Dry run</label>
-	<select id="dryrun-months-{ch.id}" name="months" aria-label="How far back the dry run covers on {ch.title}">
-		<option value="1">last month</option>
-		<option value="3" selected>last 3 months</option>
-		<option value="6">last 6 months</option>
-		<option value="12">last 12 months</option>
-		<option value="24">last 24 months</option>
-		<option value="all">all time</option>
-	</select>
-	<button
-		class="btn secondary small"
-		type="submit"
-		disabled={dryRunPending}
-		aria-label="Run a dry-run preview on {ch.title}"
+	<form
+		method="POST"
+		action="?/dryRun"
+		class="history-form"
+		use:enhance={() => {
+			dryRunPending = true;
+			return async ({ update }) => {
+				await update();
+				dryRunPending = false;
+			};
+		}}
 	>
-		{dryRunPending ? 'Running dry run…' : 'Dry run'}
-	</button>
-</form>
-{#if form?.scope === 'dryRun'}
-	{#if form?.error}
-		<p class="error-box" role="alert">{form.error}</p>
-	{:else if form?.skipped}
-		<p class="muted" role="status">Dry run preview: nothing new to preview right now.</p>
-	{:else if form?.ok}
-		<p class="muted" role="status">
-			Dry run preview ({form.months === 'all' ? 'all time' : form.months === 1 ? 'last month' : `last ${form.months} months`}): {form.fetched} comment{form.fetched === 1 ? '' : 's'} scanned —
-			{form.acted} would be acted on, {form.queued} would go to the review queue.
-			{#if form.partial}Partial — the 20 s preview limit was hit; see the audit log for what completed. {/if}
-			<a href="/channels/{ch.id}/log">See the audit log</a>.
-		</p>
+		<input type="hidden" name="channelId" value={ch.id} />
+		<label for="dryrun-months-{ch.id}">Dry run</label>
+		<select id="dryrun-months-{ch.id}" name="months" aria-label="How far back the dry run covers on {ch.title}">
+			<option value="1">last month</option>
+			<option value="3" selected>last 3 months</option>
+			<option value="6">last 6 months</option>
+			<option value="12">last 12 months</option>
+			<option value="24">last 24 months</option>
+			<option value="all">all time</option>
+		</select>
+		<button
+			class="btn secondary small"
+			type="submit"
+			disabled={dryRunPending}
+			aria-label="Run a dry-run preview on {ch.title}"
+		>
+			{dryRunPending ? 'Running dry run…' : 'Dry run'}
+		</button>
+	</form>
+	{#if form?.scope === 'dryRun'}
+		{#if form?.error}
+			<p class="error-box" role="alert">{form.error}</p>
+		{:else if form?.skipped}
+			<p class="muted" role="status">Dry run preview: nothing new to preview right now.</p>
+		{:else if form?.ok}
+			<p class="muted" role="status">
+				Dry run preview ({form.months === 'all' ? 'all time' : form.months === 1 ? 'last month' : `last ${form.months} months`}): {form.fetched} comment{form.fetched === 1 ? '' : 's'} scanned —
+				{form.acted} would be acted on, {form.queued} would go to the review queue.
+				{#if form.partial}Partial — the 20 s preview limit was hit; see the audit log for what completed. {/if}
+				<a href="/channels/{ch.id}/log">See the audit log</a>.
+			</p>
+		{/if}
 	{/if}
 {/if}
 {#if data.orgRole === 'owner' || data.orgRole === 'admin'}
@@ -167,6 +188,15 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		align-items: center;
 		flex-wrap: wrap;
 		margin-top: 10px;
+	}
+	.pause-form {
+		margin: 0 0 10px;
+	}
+	.paused-banner {
+		margin: 0 0 10px;
+		padding: 10px 12px;
+		border: 1px solid var(--accent);
+		font-size: 0.9rem;
 	}
 	.channel-disconnect {
 		margin-top: 14px;

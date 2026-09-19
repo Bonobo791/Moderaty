@@ -80,6 +80,23 @@ test('the header shows PROTECTED, the clear-queue subline, and the banned ticker
 	expect(body).toContain('Edge lords banned');
 });
 
+test('a paused channel header says Paused — never Protected or "queue is clear" (codex+cubic, PR #142)', () => {
+	// The overview's paused banner contradicts an unconditional "Protected"
+	// header on the same page — the header branches on active like the
+	// dashboard status cell does.
+	const body = renderLayout({ ...LAYOUT_DATA, ch: { ...LAYOUT_DATA.ch, active: 0 } });
+	expect(body).toContain('Paused');
+	expect(body).not.toContain('Protected');
+	expect(body).not.toContain('queue is clear');
+});
+
+test('a paused channel with a queue still links to it from the header status', () => {
+	const body = renderLayout({ ...LAYOUT_DATA, pending: 4, ch: { ...LAYOUT_DATA.ch, active: 0 } });
+	expect(body).toContain('Paused');
+	expect(body).toContain('href="/channels/UC1/queue"');
+	expect(body).toContain('4 comments waiting for review');
+});
+
 test('a non-zero pending count links to the queue from the header status', () => {
 	const body = renderLayout({ ...LAYOUT_DATA, pending: 2 });
 	expect(body).toContain('href="/channels/UC1/queue"');

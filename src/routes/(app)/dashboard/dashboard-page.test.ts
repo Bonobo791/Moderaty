@@ -28,6 +28,7 @@
 // component doc comments, so pins target markup/visible copy, never words
 // that only appear in comments.
 
+import { readFileSync } from 'node:fs';
 import { render } from 'svelte/server';
 import { expect, test } from 'vitest';
 
@@ -239,6 +240,7 @@ test('a channel whose latest run failed is never presented as protected (MOD-8)'
 
 test.each([
 	{ category: 'quota', action: 'YouTube quota is exhausted' },
+	{ category: 'credits', action: 'AI credits ran out' },
 	{ category: 'scoring', action: 'AI scoring was unavailable' },
 	{ category: 'timeout', action: 'The last check timed out' },
 	{ category: 'error', action: 'The last check failed' },
@@ -343,6 +345,16 @@ test('the channel controls moved to the detail page — the dashboard renders no
 	expect(body).not.toContain('Dry run');
 	expect(body).not.toContain('Disconnect channel');
 	expect(body).not.toContain('Strict protection');
+});
+
+test('the pending-queue link stops click propagation so the row handler cannot hijack its navigation (codeant, PR #142)', () => {
+	// The anchor sits inside a row whose onclick navigates to the channel —
+	// without stopPropagation the two navigations race (SSR strips handlers,
+	// so this is a source pin, same pattern as i18n-coverage.test.ts).
+	const source = readFileSync(new URL('./+page.svelte', import.meta.url), 'utf8');
+	const linkStart = source.indexOf('pending-link');
+	expect(linkStart).toBeGreaterThan(-1);
+	expect(source.slice(linkStart, linkStart + 400)).toContain('stopPropagation');
 });
 
 test('no channels renders the empty state and the quiet zero-count header', () => {

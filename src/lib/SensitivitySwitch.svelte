@@ -150,10 +150,11 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		if (outcome.kind === 'applied') {
 			saveError = null;
 			showApplied();
-		} else {
-			// Only revert when nothing newer is queued — a re-flip already owns
-			// the knob, and stomping it would lose the user's pending choice.
-			if (!queuedSubmit) selected = outcome.selected;
+		} else if (!queuedSubmit) {
+			// Only revert/report when nothing newer is queued — a re-flip
+			// already owns the knob, and the stale failure's message would
+			// flash over the pending choice (coderabbit+cubic, PR #142).
+			selected = outcome.selected;
 			saveError = outcome.message;
 		}
 	}

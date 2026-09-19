@@ -27,7 +27,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 </svelte:head>
 
 <!-- This page is fully translated — it may offer the selector (MOD-11). -->
-<LanguageSwitcher locale={data.locale} />
+<div class="switcher-bar"><LanguageSwitcher locale={data.locale} /></div>
 <!-- Static confirmation; the session is already erased, so this page is public. -->
 <main class="deleted-main">
 	<div class="card deleted-card">
@@ -40,6 +40,13 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 </main>
 
 <style>
+	/* Out of flow so the 100vh main below stays exactly one viewport tall. */
+	.switcher-bar {
+		position: absolute;
+		top: 0;
+		left: 0;
+		right: 0;
+	}
 	.deleted-main {
 		display: grid;
 		place-items: center;

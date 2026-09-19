@@ -20,13 +20,17 @@ export type Locale = (typeof SUPPORTED_LOCALES)[number];
 /**
  * The surfaces whose user-facing copy is fully translated for every
  * supported locale (MOD-11). Everything else — the landing, the signed-in
- * app — is English-only, so the stored/browser preference only resolves on
- * these paths and the selector only renders there: offering pt-BR on an
- * English surface would change a page's language partially with no
- * indication. Expand the translations first, then add the path — never
+ * app, and /consent — is English-only, so the stored/browser preference
+ * only resolves on these paths and the selector only renders there:
+ * offering pt-BR on an English surface would change a page's language
+ * partially with no indication. /consent is excluded because its legally
+ * operative sentence, refund/privacy notices, and server validation copy
+ * come from English constants the evidence log stores verbatim — a
+ * selector would wrap English legal text in pt-BR chrome (codex+cubic,
+ * PR #142). Expand the translations first, then add the path — never
  * the other way around.
  */
-export const BILINGUAL_PATHS: ReadonlySet<string> = new Set(['/login', '/consent', '/account-deleted']);
+export const BILINGUAL_PATHS: ReadonlySet<string> = new Set(['/login', '/account-deleted']);
 
 export function isBilingualPath(pathname: string): boolean {
 	// A stray trailing slash must not silently flip a bilingual page English.

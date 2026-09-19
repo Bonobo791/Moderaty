@@ -317,6 +317,21 @@ test('fetches video metadata in batches of fifty', async () => {
 	expect(result.get('video-51')).toEqual({ title: 'Title video-51', description: 'Description video-51' });
 });
 
+test('fetches video metadata batches in parallel so a slow first batch cannot stall the run', async () => {
+	const ids = Array.from({ length: 51 }, (_, index) => `video-${index + 1}`);
+	const deferred: Array<() => void> = [];
+	const fetch = vi.fn().mockImplementation(
+		() => new Promise<Response>((resolve) => deferred.push(() => resolve(new Response(JSON.stringify({ items: [] }), { status: 200 }))))
+	);
+	vi.stubGlobal('fetch', fetch);
+
+	const pending = fetchVideoMetadata(ids, 'token');
+	await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+	for (const resolve of deferred) resolve();
+	const result = await pending;
+	expect(result.size).toBe(0);
+});
+
 test('truncates long video descriptions for the tone prompt', async () => {
 	const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
 		items: [videoItem('video-1', 'Title', 'd'.repeat(600))]

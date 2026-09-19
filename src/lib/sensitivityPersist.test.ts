@@ -38,6 +38,17 @@ test.each([
 	expect((outcome as { message: string }).message).toContain('could not be saved');
 });
 
+test('a generic server detail is not prefixed twice (cubic, PR #142)', () => {
+	// The 502 path's detail IS the generic message — prefixing it again would
+	// render "Sensitivity could not be saved — Sensitivity could not be saved…".
+	const outcome = persistOutcome(
+		{ type: 'failure', data: { error: 'Sensitivity could not be saved — try again.' } },
+		1
+	);
+
+	expect((outcome as { message: string }).message).toBe('Sensitivity could not be saved — try again.');
+});
+
 test('a failure without server detail falls back to generic copy — never silent', () => {
 	const outcome = persistOutcome({ type: 'failure' }, 2);
 

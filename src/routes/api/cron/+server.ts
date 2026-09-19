@@ -83,12 +83,18 @@ async function runSweep<T>(dryRun: boolean, label: string, run: () => Promise<T>
  * and must never be stored. Order matters: a 403 naming 'quotaExceeded' is a
  * quota failure, not an auth one.
  */
-function categorizeRunFailure(cause: unknown): 'token' | 'quota' | 'scoring' | 'timeout' | 'error' {
+function categorizeRunFailure(cause: unknown): 'token' | 'quota' | 'scoring' | 'timeout' | 'credits' | 'error' {
 	if (cause instanceof DeadlineExceededError) return 'timeout';
 	const message = (cause instanceof Error ? cause.message : String(cause)).toLowerCase();
 	if (/quota|rate.?limit|429|too many/.test(message)) return 'quota';
-	if (/unauthorized|invalid_grant|invalid_token|401|403|oauth|token|credential/.test(message)) return 'token';
-	if (/openai|scor(e|ing)|moderation/.test(message)) return 'scoring';
+	// 'token' alone is too broad — an expired PAGINATION token ("invalid page
+	// token") is a transient provider error, not an auth failure, and the
+	// dashboard would wrongly tell the user to reconnect (cubic+coderabbit).
+	if (/unauthorized|invalid_grant|invalid_token|401|403|oauth|refresh token|access token|credential/.test(message)) return 'token';
+	// 'moderation' alone is too broad — YouTube moderation-ACTION failures
+	// ("moderation action … verification failed", "moderationStatus is
+	// unsupported") are provider errors, not AI scoring outages (cubic).
+	if (/openai|scor(e|ing)|moderation (?:failed|returned|response)/.test(message)) return 'scoring';
 	return 'error';
 }
 
@@ -203,31 +209,49 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		.returning({ id: channels.id });
 	if (claimed.length === 0) return json({ ...base, claimed: false, results: {} });
 
-	let runFailure: 'token' | 'quota' | 'scoring' | 'timeout' | 'error' | null = null;
+	// The run's health verdict: a completed live run is 'success', a thrown or
+	// incomplete one carries its sanitized category, and a run with no verdict
+	// (paused mid-run, skipped as inactive) writes neither — stamping success
+	// would lie, stamping failed/timeout would lie on resume (codex+cubic).
+	type RunCategory = 'token' | 'quota' | 'scoring' | 'timeout' | 'credits' | 'error';
+	let runHealth: 'success' | 'none' | { status: 'failed'; error: RunCategory } = 'success';
 	try {
 		const { result, dryRunWindow } = await runClaimedChannel(channel, deadline);
+		if (result.outOfCredits) runHealth = { status: 'failed', error: 'credits' };
+		else if (result.stoppedReason === 'deactivated' || result.skipped) runHealth = 'none';
+		else if (result.partial) runHealth = { status: 'failed', error: 'timeout' };
 		return json({ ...base, results: { [channel.id]: result }, dryRunWindow });
 	} catch (cause) {
-		runFailure = categorizeRunFailure(cause);
-		const message = cause instanceof Error ? cause.message : String(cause);
+		const category = categorizeRunFailure(cause);
+		runHealth = { status: 'failed', error: category };
 		console.error(`channel run ${channel.id} failed:`, cause);
 		return json(
-			{ ...base, ok: false, results: { [channel.id]: { error: message } } },
+			// The caller gets the sanitized category, never the raw provider
+			// message — error bodies can echo request details/tokens (codeant).
+			{ ...base, ok: false, results: { [channel.id]: { error: category } } },
 			{ status: 500 } // failure must not look like success to the cron caller
 		);
 	} finally {
 		// Record the run even on failure so a failing channel cannot starve the
 		// others — but health is kept separate from the rotation timestamp
-		// (MOD-7): a failure must not update the success fields.
-		await db
-			.update(channels)
-			.set({
-				leaseExpiresAt: null,
-				lastRunAt: nowIso,
-				lastRunStatus: runFailure ? 'failed' : 'success',
-				lastRunError: runFailure,
-				...(runFailure ? {} : { lastSuccessAt: nowIso })
-			})
-			.where(eq(channels.id, channel.id));
+		// (MOD-7): a failure must not update the success fields. A bookkeeping
+		// failure must not mask the real response or leave the lease uncleared
+		// (it self-expires by design) — log loudly, move on (codeant).
+		try {
+			await db
+				.update(channels)
+				.set({
+					leaseExpiresAt: null,
+					lastRunAt: nowIso,
+					...(runHealth === 'success'
+						? { lastRunStatus: 'success', lastRunError: null, lastSuccessAt: nowIso }
+						: runHealth === 'none'
+							? {}
+							: { lastRunStatus: runHealth.status, lastRunError: runHealth.error })
+				})
+				.where(eq(channels.id, channel.id));
+		} catch (writeCause) {
+			console.error('run-health write failed for channel:', channel.id, writeCause);
+		}
 	}
 };

@@ -18,6 +18,7 @@
 // readout copy, the knob stop positions, and the hidden persistence form.
 // Svelte's SSR render is lazy: assert on render(...).body.
 
+import { readFileSync } from 'node:fs';
 import { render } from 'svelte/server';
 import { expect, test } from 'vitest';
 
@@ -128,4 +129,29 @@ test('the save-error alert is absent until a persist actually fails', () => {
 	expect(renderSwitch(1)).not.toContain('role="alert"');
 	expect(renderSwitch(1)).not.toMatch(/class="save-error/);
 	expect(renderSwitch(1)).not.toContain('could not be saved');
+});
+
+// codex+cubic, PR #142: SSR alone can never drive a failed enhanced-form
+// result in the node test env, so the failure path's WIRING is pinned at
+// source level — removing the alert markup, the persistOutcome call, or the
+// enhance-callback hookup must fail a test, not slip through silently.
+test('the failed-save path is wired: alert markup, persistOutcome, and the enhance callback', () => {
+	const source = readFileSync(new URL('./SensitivitySwitch.svelte', import.meta.url), 'utf8');
+	// The alert renders the server-agnostic message inside role="alert".
+	expect(source).toContain('role="alert"');
+	expect(source).toMatch(/saveError\}\s*Flip a stop to retry/);
+	// The enhance callback delegates the settle to handlePersist, which maps
+	// the result through persistOutcome (the tested decision logic).
+	expect(source).toMatch(/handlePersist\(result\)/);
+	expect(source).toMatch(/persistOutcome\(result, level\)/);
+	// A failed persist must write saveError — deleting the assignment is a
+	// silent-failure regression.
+	expect(source).toMatch(/saveError = outcome\.message/);
+});
+
+test('an obsolete failed submit cannot flash its error over a queued newer choice (coderabbit+cubic)', () => {
+	// When a re-flip queued behind the in-flight save, the stale failure must
+	// not display — the newer submit owns the outcome and will report itself.
+	const source = readFileSync(new URL('./SensitivitySwitch.svelte', import.meta.url), 'utf8');
+	expect(source).toMatch(/if \(!queuedSubmit\)\s*\{[^}]*selected = outcome\.selected[^}]*saveError = outcome\.message[^}]*\}/s);
 });

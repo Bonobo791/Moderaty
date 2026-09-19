@@ -16,6 +16,7 @@
 import { expect, test, vi } from 'vitest';
 import { error } from '@sveltejs/kit';
 import { TEST_OWNER, setupTestDb, testDb } from '$lib/server/testdb';
+import { eq } from 'drizzle-orm';
 import { auditLog, channels, comments } from '$lib/server/db/schema';
 
 import { load } from './+layout.server';
@@ -111,6 +112,17 @@ test('projects the tone and protection flags the overview page renders', async (
 	const data = (await loadLayout('UC1')) as LayoutData;
 
 	expect(data.ch).toMatchObject({ toneLevel: 2, protectLgbtqia: 1, protectWomen: 0, lastRunAt: '2026-07-30T00:00:00Z' });
+});
+
+test('projects the active flag the paused banner and header read (cubic, PR #142)', async () => {
+	await seedChannel('UC1');
+	// Default seed is active; the paused payload must carry 0 explicitly —
+	// a dropped projection would render a live channel for a paused one.
+	await testDb().db.update(channels).set({ active: 0 }).where(eq(channels.id, 'UC1'));
+
+	const data = (await loadLayout('UC1')) as LayoutData;
+
+	expect(data.ch.active).toBe(0);
 });
 
 test('another team\'s channel reads as 404 — existence never leaks', async () => {

@@ -65,14 +65,25 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 			</div>
 			<div class="channel-status">
 				<div class="protected">
-					<span class="caps-label protected-label">Protected</span>
-					<span class="protected-sub">
-						{#if data.pending > 0}
-							<a href="{base}/queue">{data.pending} comment{data.pending === 1 ? '' : 's'} waiting for review</a>
-						{:else}
-							queue is clear
-						{/if}
-					</span>
+					{#if data.ch.active === 0}
+						<span class="caps-label paused-label">Paused</span>
+						<span class="protected-sub">
+							{#if data.pending > 0}
+								<a href="{base}/queue">{data.pending} comment{data.pending === 1 ? '' : 's'} waiting for review</a>
+							{:else}
+								moderation paused
+							{/if}
+						</span>
+					{:else}
+						<span class="caps-label protected-label">Protected</span>
+						<span class="protected-sub">
+							{#if data.pending > 0}
+								<a href="{base}/queue">{data.pending} comment{data.pending === 1 ? '' : 's'} waiting for review</a>
+							{:else}
+								queue is clear
+							{/if}
+						</span>
+					{/if}
 				</div>
 				<div class="banned">
 					<span class="banned-count"><Ticker value={data.banned} /></span>
@@ -139,6 +150,9 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	}
 	.protected-label {
 		color: var(--ok);
+	}
+	.paused-label {
+		color: var(--text-3);
 	}
 	.protected-sub {
 		font-size: 13px;

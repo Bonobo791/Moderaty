@@ -16,7 +16,6 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 -->
 
 <script lang="ts">
-	import LanguageSwitcher from '$lib/components/LanguageSwitcher.svelte';
 	import { segmentConsentText } from '$lib/consentText';
 	import { t } from '$lib/i18n/messages';
 
@@ -32,8 +31,9 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	<title>Moderaty — {t(data.locale, 'finishAccount')}</title>
 </svelte:head>
 
-<!-- This page is fully translated — it may offer the selector (MOD-11). -->
-<LanguageSwitcher locale={data.locale} />
+<!-- This page is English-only: the consent sentence, refund/privacy
+	notices, and server validation copy are English constants (MOD-11 —
+	no selector until the legal copy itself is translated, PR #142 review). -->
 <main class="consent-main">
 	<div class="card consent-card">
 		{#if data.kind === 'new'}

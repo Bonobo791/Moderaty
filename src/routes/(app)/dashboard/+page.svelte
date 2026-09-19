@@ -78,6 +78,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	// the category, so raw provider detail can never reach this page.
 	const FAILURE_ACTIONS: Record<string, string> = {
 		token: 'YouTube access expired — reconnect the channel',
+		credits: 'AI credits ran out — top up on the usage page; we retry on the next check',
 		quota: 'YouTube quota is exhausted — we retry on the next check',
 		scoring: 'AI scoring was unavailable — we retry on the next check',
 		timeout: 'The last check timed out — we retry on the next check'
@@ -201,7 +202,11 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 								<span class="caps-label unchecked-label">Not checked yet</span>
 							{/if}
 							{#if pending > 0}
-								<a class="status-sub pending-link" href="/channels/{ch.id}/queue">
+								<a
+									class="status-sub pending-link"
+									href="/channels/{ch.id}/queue"
+									onclick={(event) => event.stopPropagation()}
+								>
 									{pending} comment{pending === 1 ? '' : 's'} waiting for review
 								</a>
 							{:else if ch.active !== 0 && ch.lastRunStatus !== 'failed'}

@@ -32,14 +32,14 @@ function loadLocale(pathname: string, cookie?: string, acceptLanguage = 'en') {
 	return result.locale;
 }
 
-test.each(['/login', '/consent', '/account-deleted'])(
+test.each(['/login', '/account-deleted'])(
 	'%s resolves the stored pt-BR preference',
 	(pathname) => {
 		expect(loadLocale(pathname, 'pt-BR')).toBe('pt-BR');
 	}
 );
 
-test.each(['/', '/dashboard', '/channels/UC1', '/org'])(
+test.each(['/', '/dashboard', '/channels/UC1', '/org', '/consent'])(
 	'%s stays English even with a pt-BR cookie — the surface is not translated',
 	(pathname) => {
 		expect(loadLocale(pathname, 'pt-BR')).toBe('en');

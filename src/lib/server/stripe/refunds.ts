@@ -36,8 +36,18 @@ export async function refundUngrantablePayment(input: {
 	label: string;
 }): Promise<void> {
 	try {
-		await getStripe().refunds.create({ payment_intent: input.paymentIntentId }, { idempotencyKey: input.idempotencyKey });
-		console.error(`stripe: ${input.label} — auto-refunded payment intent ${input.paymentIntentId}`);
+		const refund = await getStripe().refunds.create({ payment_intent: input.paymentIntentId }, { idempotencyKey: input.idempotencyKey });
+		// Validate the boundary response (I2): refunds.create can RESOLVE a
+		// failed/canceled refund — logging success would ACK the delivery and
+		// leave the customer charged with no retry (codex P1). 'succeeded' is
+		// done; 'pending'/'requires_action' are genuinely in flight at Stripe
+		// (retrying under the same idempotency key returns the same object, so
+		// treating them as failures would storm forever); anything else means
+		// the refund did not and will not happen — loud and retryable.
+		if (refund.status !== 'succeeded' && refund.status !== 'pending' && refund.status !== 'requires_action') {
+			throw new Error(`refund ${refund.id} resolved ${refund.status ?? 'no status'} — MANUAL REFUND REQUIRED`);
+		}
+		console.error(`stripe: ${input.label} — auto-refunded payment intent ${input.paymentIntentId} (refund ${refund.id}, status ${refund.status})`);
 	} catch (error) {
 		console.error(`stripe: ${input.label} — auto-refund FAILED, MANUAL REFUND REQUIRED: ${error instanceof Error ? error.message : String(error)}`);
 		throw error;

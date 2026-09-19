@@ -166,6 +166,18 @@ export async function applyLedgerDelta(
 			.where(eq(organizations.id, orgId))
 			.get();
 		if (!org) throw new Error(`org not found: ${orgId}`);
+		// Dedup BEFORE the plan guard: a redelivery of an already-applied delta
+		// is an idempotent no-op regardless of the org's CURRENT plan — checking
+		// the plan first would make callers refund a payment whose grant already
+		// committed (a purchase granted while metered, replayed post-upgrade —
+		// codex P1). The onConflictDoNothing below stays the atomic backstop
+		// for two concurrent first-time grants racing past this read.
+		const existing = await tx
+			.select({ id: creditTransactions.id })
+			.from(creditTransactions)
+			.where(and(eq(creditTransactions.orgId, orgId), eq(creditTransactions.refType, refType), eq(creditTransactions.refId, refId)))
+			.get();
+		if (existing) return false;
 		// The atomic counterpart of assertCreditsPurchasable: checkout creation
 		// is gated at the form, but a checkout in flight when the org went
 		// lifetime must still not grant — paid-but-unusable credits get

@@ -303,8 +303,10 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
  * REQUIRED log: swallowing it would ACK the delivery and leave the customer
  * charged until a human reads the log — the webhook must 500 so Stripe
  * redelivers and retries the refund under the same idempotency key (review).
- * The no-payment-intent and already-refunded paths still return normally —
- * nothing a retry could change.
+ * A paid session with no payment intent throws the same way — a malformed
+ * response must never report 'refunded' when nothing was refunded (codex
+ * P1). Only the already-refunded path returns normally — nothing a retry
+ * could change.
  */
 async function refundUngrantableCheckout(
 	sessionId: string,
@@ -314,8 +316,13 @@ async function refundUngrantableCheckout(
 	reason: string
 ): Promise<void> {
 	if (!paymentIntent?.id) {
+		// A PAID session with no payment intent is a malformed Stripe response
+		// (I2) — returning would ACK the delivery and report 'refunded' to the
+		// buyer when no refund was ever requested. Throw so the delivery stays
+		// un-ACKed, Stripe retries, and the MANUAL REFUND REQUIRED line keeps
+		// firing until a human refunds (codex P1).
 		console.error(`stripe: checkout ${sessionId} for org ${orgId} was PAID but ${reason} and has no payment intent — MANUAL REFUND REQUIRED`);
-		return;
+		throw new Error(`stripe: paid checkout ${sessionId} has no payment intent — MANUAL REFUND REQUIRED`);
 	}
 	if (charge?.refunded === true) {
 		console.error(`stripe: checkout ${sessionId} for org ${orgId} was ungrantable (${reason}) but charge ${charge.id} is already refunded`);
@@ -597,7 +604,11 @@ export async function restoreWonDispute(disputeId: string): Promise<boolean> {
 			const disputeReversal = await db.select({ id: creditTransactions.id }).from(creditTransactions).where(and(eq(creditTransactions.orgId, match.orgId), eq(creditTransactions.reason, 'dispute'), eq(creditTransactions.chargeId, reversal.chargeId))).get();
 			if (disputeReversal) {
 				try {
-					restored = await applyLedgerDelta(db, { orgId: match.orgId, delta: match.credits, reason: 'adjust', refType: 'dispute', refId: disputeId, chargeId: reversal.chargeId });
+					// Dedup-first means a false return is "a previous call already
+					// committed this restoration" (a crash between the ledger write
+					// and the reversal mark below) — still 'restored', never a wedge.
+					await applyLedgerDelta(db, { orgId: match.orgId, delta: match.credits, reason: 'adjust', refType: 'dispute', refId: disputeId, chargeId: reversal.chargeId });
+					restored = true;
 				} catch (error) {
 					// An upgrade to lifetime between the dispute and its win makes
 					// the org unmetered — it cannot hold credits, so the honest

@@ -62,6 +62,7 @@ function loadWith(sessionId: string | null) {
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	mocks.refundsCreate.mockResolvedValue({ id: 're_1', status: 'succeeded' });
 });
 
 describe('usage/success load', () => {

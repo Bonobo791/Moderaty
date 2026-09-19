@@ -68,6 +68,7 @@ beforeEach(() => {
 	mocks.paymentIntentsCreate.mockResolvedValue({ id: 'pi_new' });
 	mocks.paymentIntentsList.mockResolvedValue({ data: [] });
 	mocks.pricesRetrieve.mockResolvedValue({ id: 'price_100', unit_amount: 500, active: true, currency: 'usd', type: 'one_time' });
+	mocks.refundsCreate.mockResolvedValue({ id: 're_1', status: 'succeeded' });
 });
 
 describe('maybeTriggerAutoTopUp', () => {
@@ -819,5 +820,25 @@ describe('grantAutoTopupCredits', () => {
 		const org = await orgRow();
 		expect(org.autoTopupState).toBe('idle');
 		expect(org.creditsRemaining).toBe(50); // nothing granted
+	});
+
+	test('a top-up charge granted before the upgrade replays as a no-op — never a refund', async () => {
+		// The grant committed while the org was metered; a duplicate delivery
+		// arriving after the upgrade must dedup on the ledger anchor BEFORE
+		// the unmetered guard runs — refunding it would claw back a completed
+		// charge and leave the granted credits in place (codex P1).
+		await seedOrg({ plan: 'lifetime', autoTopupState: 'in_flight', autoTopupLastAttemptAt: new Date().toISOString() });
+		await testDb().db.insert(creditTransactions).values({
+			orgId: 'org-1',
+			delta: 100,
+			reason: 'auto_topup',
+			refType: 'payment_intent',
+			refId: 'pi_1',
+			paymentIntentId: 'pi_1',
+			chargeId: 'ch_1',
+			balanceAfter: 150
+		});
+		expect(await grantAutoTopupCredits('org-1', succeededPi())).toBe(false);
+		expect(mocks.refundsCreate).not.toHaveBeenCalled();
 	});
 });

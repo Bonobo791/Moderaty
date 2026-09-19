@@ -76,6 +76,9 @@ function event(type: string, id: string, object: Record<string, unknown>, create
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	// Stripe's real refunds.create resolves a Refund — the status drives the
+	// helper's validate-before-ACK contract.
+	mocks.refundsCreate.mockResolvedValue({ id: 're_1', status: 'succeeded' });
 });
 
 
@@ -161,7 +164,7 @@ describe('paid hosted products', () => {
 			// clearAllMocks does not reset implementations — restore the
 			// resolved default or the rejection leaks into later tests.
 			mocks.refundsCreate.mockReset();
-			mocks.refundsCreate.mockResolvedValue({ id: 're_1' });
+			mocks.refundsCreate.mockResolvedValue({ id: 're_1', status: 'succeeded' });
 			errorSpy.mockRestore();
 		}
 	});
@@ -184,6 +187,70 @@ describe('paid hosted products', () => {
 		mocks.sessionsRetrieve.mockResolvedValue(session({ metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: { id: 'ch_1', refunded: true } } }));
 		expect(await fulfillCheckout('cs_lifetime')).toBe('refunded');
 		expect(mocks.refundsCreate).not.toHaveBeenCalled();
+	});
+
+	test('a credit purchase granted before the upgrade replays as already — never refunds the completed purchase', async () => {
+		// The grant committed while the org was metered; a redelivery arriving
+		// after the upgrade must no-op on the ledger idempotency anchor BEFORE
+		// the unmetered-plan guard runs — refunding it would hand the customer
+		// their granted credits AND their money back (codex P1).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_1', metadata: { org_id: 'org-1', bundle: 'credits_500' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		expect(await fulfillCheckout('cs_1')).toBe('granted');
+		await testDb().db.update(organizations).set({ plan: 'lifetime' }).where(eq(organizations.id, 'org-1'));
+		expect(await fulfillCheckout('cs_1')).toBe('already');
+		expect(mocks.refundsCreate).not.toHaveBeenCalled();
+	});
+
+	test('a refund that resolves failed propagates — the customer is still charged', async () => {
+		// refunds.create can RESOLVE with a non-succeeded refund: logging
+		// success and ACKing would leave the customer charged with no retry
+		// (codex P1). A failed/canceled refund is loud and retryable; a pending
+		// one is genuinely in flight and accepted.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lifetime', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		mocks.refundsCreate.mockResolvedValue({ id: 're_1', status: 'failed' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			await expect(fulfillCheckout('cs_lifetime')).rejects.toThrow(/MANUAL REFUND REQUIRED/);
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('MANUAL REFUND REQUIRED'));
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('a pending refund is accepted — the money is genuinely in flight', async () => {
+		// Retrying a pending refund under the same idempotency key returns the
+		// same pending object forever — treating it as a failure would retry a
+		// storm against a refund Stripe is already processing (codex P1).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lifetime', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		mocks.refundsCreate.mockResolvedValue({ id: 're_1', status: 'pending' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			expect(await fulfillCheckout('cs_lifetime')).toBe('refunded');
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('a paid ungrantable checkout with no payment intent throws — never claims a refund', async () => {
+		// A paid session missing its payment intent is a malformed Stripe
+		// response (I2): ACKing 'refunded' would tell the buyer money is
+		// coming back when none was requested. Throw so the delivery retries
+		// and the MANUAL REFUND REQUIRED line keeps firing (codex P1).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lifetime', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: null }));
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			await expect(fulfillCheckout('cs_lifetime')).rejects.toThrow(/no payment intent/);
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('MANUAL REFUND REQUIRED'));
+		} finally {
+			errorSpy.mockRestore();
+		}
 	});
 
 	test('a paid duplicate lifetime checkout for an org that already has lifetime auto-refunds', async () => {

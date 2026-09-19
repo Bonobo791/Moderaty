@@ -29,6 +29,7 @@ const mocks = vi.hoisted(() => ({
 	disputesRetrieve: vi.fn(),
 	customersUpdate: vi.fn(),
 	customersRetrieve: vi.fn(),
+	subscriptionsRetrieve: vi.fn(),
 	paymentMethodsAttach: vi.fn()
 }));
 
@@ -39,6 +40,7 @@ vi.mock('$lib/server/stripe/client', () => ({
 		charges: { retrieve: mocks.chargesRetrieve },
 		disputes: { retrieve: mocks.disputesRetrieve },
 		customers: { update: mocks.customersUpdate, retrieve: mocks.customersRetrieve },
+		subscriptions: { retrieve: mocks.subscriptionsRetrieve },
 		paymentMethods: { attach: mocks.paymentMethodsAttach }
 	})
 }));
@@ -229,6 +231,66 @@ describe('subscription lifecycle webhooks', () => {
 		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
 		expect(org?.plan).toBe('hosted');
 		expect(org?.stripeSubscriptionStatus).toBe('active');
+	});
+
+	test('subscription events sync the subscription default card as the saved top-up card', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		// Subscription Checkout stores the paid card on subscription.default_payment_method,
+		// not customer.invoice_settings — this event is the only delivery of it.
+		const subscription = { id: 'sub_1', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false, default_payment_method: 'pm_sub_1' };
+		expect(await handleStripeEvent(event('customer.subscription.updated', 'evt_pm_sync', subscription, 300) as never)).toBe(true);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeDefaultPmId).toBe('pm_sub_1');
+		// The consent evidence covered the previous card, so a card change under
+		// enabled auto top-up pauses it pending fresh consent (savePaymentMethod rule).
+		expect(org?.autoTopupEnabled).toBe(0);
+		expect(org?.autoTopupState).toBe('disabled');
+	});
+
+	test('subscription card sync leaves auto top-up alone when the card is unchanged', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeDefaultPmId: 'pm_sub_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		const subscription = { id: 'sub_1', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false, default_payment_method: { id: 'pm_sub_1' } };
+		expect(await handleStripeEvent(event('customer.subscription.updated', 'evt_pm_same', subscription, 300) as never)).toBe(true);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeDefaultPmId).toBe('pm_sub_1');
+		expect(org?.autoTopupEnabled).toBe(1);
+		expect(org?.autoTopupState).toBe('idle');
+	});
+
+	test('a subscription without a default card does not clear the saved pointer', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeDefaultPmId: 'pm_keep' });
+		// null means the subscription falls back to the customer-level default — the
+		// card still exists; only payment_method.detached/customer.updated may clear it.
+		const subscription = { id: 'sub_1', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false, default_payment_method: null };
+		expect(await handleStripeEvent(event('customer.subscription.updated', 'evt_pm_null', subscription, 300) as never)).toBe(true);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeDefaultPmId).toBe('pm_keep');
+	});
+
+	test('a stale subscription event cannot regress the saved card', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
+		const base = { id: 'sub_1', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false };
+		expect(await handleStripeEvent(event('customer.subscription.updated', 'evt_pm_new', { ...base, default_payment_method: 'pm_new' }, 300) as never)).toBe(true);
+		expect(await handleStripeEvent(event('customer.subscription.updated', 'evt_pm_old', { ...base, default_payment_method: 'pm_old' }, 100) as never)).toBe(true);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeDefaultPmId).toBe('pm_new');
+	});
+
+	test('a malformed subscription default_payment_method fails loudly', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
+		const subscription = { id: 'sub_1', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false, default_payment_method: { id: 123 } };
+		await expect(handleStripeEvent(event('customer.subscription.updated', 'evt_pm_bad', subscription, 300) as never)).rejects.toThrow('malformed default_payment_method');
+	});
+
+	test('hosted fulfillment stores the subscription card without waiting for subscription events', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ mode: 'subscription', subscription: 'sub_1', metadata: { org_id: 'org-1', product: 'hosted' }, payment_intent: null }));
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_1', default_payment_method: 'pm_sub_1' });
+		expect(await fulfillCheckout('cs_123')).toBe('granted');
+		expect(mocks.subscriptionsRetrieve).toHaveBeenCalledWith('sub_1', { expand: ['default_payment_method'] });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeSubscriptionId).toBe('sub_1');
+		expect(org?.stripeDefaultPmId).toBe('pm_sub_1');
 	});
 	test('a won dispute restores a subscription period allowance', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });

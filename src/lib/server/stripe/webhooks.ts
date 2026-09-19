@@ -21,7 +21,7 @@
 // The inbox lease is claimed before side effects and marked complete only after
 // successful handling; failed handlers release the lease for Stripe's retry.
 
-import { and, eq, isNull, lt, ne, or, sql, type SQL } from 'drizzle-orm';
+import { and, eq, isNull, lt, lte, ne, or, sql, type SQL } from 'drizzle-orm';
 import type Stripe from 'stripe';
 import { randomUUID } from 'node:crypto';
 
@@ -187,6 +187,18 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 			}
 			if (existing.stripeSubscriptionId === subscriptionId) return 'already';
 			await db.update(organizations).set({ stripeSubscriptionId: subscriptionId, stripeCustomerId: customerId ?? existing.stripeCustomerId }).where(eq(organizations.id, orgId));
+			// Subscription Checkout stores the paid card on the SUBSCRIPTION's
+			// default_payment_method (customer.invoice_settings stays unset), so
+			// the pointer is synced eagerly here — waiting on the
+			// customer.subscription.created event would leave "no card saved"
+			// until it lands, and fulfillment must not fail if this sync does.
+			try {
+				const liveSubscription = await getStripe().subscriptions.retrieve(subscriptionId, { expand: ['default_payment_method'] });
+				const pmId = subscriptionDefaultPmId(asRecord(liveSubscription), `checkout ${sessionId}`);
+				if (pmId) await applySubscriptionDefaultPm(orgId, pmId);
+			} catch (cause) {
+				console.error(`stripe: subscription card sync during fulfillment of ${sessionId} failed for org ${orgId} — customer.subscription events must deliver it`, cause);
+			}
 			return 'granted';
 		}
 		if (session.mode !== 'payment') {
@@ -807,6 +819,62 @@ async function fetchLiveDefaultPmId(customerId: string, eventId: string): Promis
 	throw new Error(`customer.updated ${eventId}: live customer ${customerId} carries a malformed default_payment_method`);
 }
 
+/**
+ * Reads the card Checkout stored on the subscription itself. Subscription-mode
+ * Checkout sets subscription.default_payment_method, NOT
+ * customer.invoice_settings.default_payment_method — so customer.updated alone
+ * can never observe a hosted subscriber's card. null/absent carries no
+ * information (the subscription may fall back to the customer-level default),
+ * so only a usable id is returned; a present-but-malformed value is a failed
+ * API call — throw so Stripe redelivers (same contract as eventDefaultPmId).
+ */
+function subscriptionDefaultPmId(subscription: StripeRecord, eventId: string): string | undefined {
+	const value = subscription.default_payment_method;
+	if (value === null || value === undefined) return undefined;
+	if (typeof value === 'string' && value.length > 0) return value;
+	const expanded = optionalRecord(value);
+	if (expanded && typeof expanded.id === 'string' && expanded.id.length > 0) return expanded.id;
+	throw new Error(`Stripe subscription event ${eventId} carries a malformed default_payment_method`);
+}
+
+/**
+ * Writes the subscription's card as the org's saved top-up card. Only a
+ * pointer CHANGE is written; a change under enabled auto top-up disables it
+ * atomically pending fresh consent — the consent evidence covered the
+ * previous card (same rule as savePaymentMethod and customer.updated).
+ * `maxEventCreated` bounds staleness: a subscription event older than the
+ * last applied subscription snapshot must not regress the pointer.
+ */
+async function applySubscriptionDefaultPm(orgId: string, pmId: string, maxEventCreated?: number): Promise<void> {
+	const res = await db
+		.update(organizations)
+		.set({
+			stripeDefaultPmId: pmId,
+			autoTopupEnabled: sql`CASE WHEN ${organizations.autoTopupEnabled} = 1 THEN 0 ELSE ${organizations.autoTopupEnabled} END`,
+			autoTopupState: sql`CASE WHEN ${organizations.autoTopupEnabled} = 1 THEN 'disabled' ELSE ${organizations.autoTopupState} END`
+		})
+		.where(
+			and(
+				eq(organizations.id, orgId),
+				or(isNull(organizations.stripeDefaultPmId), ne(organizations.stripeDefaultPmId, pmId)),
+				...(maxEventCreated === undefined
+					? []
+					: [or(isNull(organizations.stripeSubscriptionLastEventCreated), lte(organizations.stripeSubscriptionLastEventCreated, maxEventCreated))])
+			)
+		);
+	if (res.rowsAffected === 0) return;
+	const after = await db
+		.select({ autoTopupEnabled: organizations.autoTopupEnabled, autoTopupState: organizations.autoTopupState })
+		.from(organizations)
+		.where(eq(organizations.id, orgId))
+		.get();
+	if (after?.autoTopupEnabled === 0 && after.autoTopupState === 'disabled') {
+		console.error(`stripe: subscription card changed for org ${orgId} (now ${pmId}) — auto top-up DISABLED, fresh consent required`);
+	} else {
+		console.info(`stripe: subscription card synced for org ${orgId} (${pmId})`);
+	}
+}
+
 function isSupersededSubscription(org: Awaited<ReturnType<typeof findOrgForStripe>>, subscriptionId: string, eventType: string): boolean {
 	if (!org?.stripeSubscriptionId || org.stripeSubscriptionId === subscriptionId) return false;
 	console.error(`stripe: ignoring stale ${eventType} for superseded subscription ${subscriptionId}; current subscription is ${org.stripeSubscriptionId}`);
@@ -862,7 +930,8 @@ async function handleSubscriptionEvent(event: Stripe.Event): Promise<void> {
 	}
 	const { periodStart, periodEnd } = subscriptionPeriod(subscription, event.id);
 	if (typeof subscription.cancel_at_period_end !== 'boolean') throw new Error(`Stripe ${event.type} ${event.id} has invalid cancel_at_period_end`);
-	await applySubscriptionSnapshot({
+	const pmId = subscriptionDefaultPmId(subscription, event.id);
+	const applied = await applySubscriptionSnapshot({
 		orgId: org.id,
 		subscriptionId,
 		status,
@@ -872,6 +941,9 @@ async function handleSubscriptionEvent(event: Stripe.Event): Promise<void> {
 		eventCreated: event.created,
 		eventId: event.id
 	});
+	// Only a snapshot this event actually applied may carry its card — a stale
+	// event's payment method is equally stale.
+	if (applied && pmId) await applySubscriptionDefaultPm(org.id, pmId, event.created);
 }
 
 /**

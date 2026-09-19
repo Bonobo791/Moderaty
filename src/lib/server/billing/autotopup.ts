@@ -611,13 +611,15 @@ export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<numb
 	// never be charged again, but a PI that succeeded before the upgrade (its
 	// webhook lost) is still paid money — reconcileAutoTopup runs its refund
 	// path. The stale flag is then cleared durably so the anomaly cannot
-	// recur or re-enter future sweeps (codex P1, round 3).
+	// recur or re-enter future sweeps (codex P1, round 3). The pass SHARES
+	// the invocation's limit — an independent bound would double the Stripe
+	// calls against the shared cron deadline (codex P2).
 	const staleLifetime = await db
 		.select({ id: organizations.id })
 		.from(organizations)
 		.where(and(eq(organizations.autoTopupEnabled, 1), eq(organizations.plan, 'lifetime')))
 		.orderBy(asc(organizations.autoTopupLastAttemptAt), asc(organizations.id))
-		.limit(limit)
+		.limit(limit - rows.length)
 		.all();
 	for (const row of staleLifetime) {
 		if (deadline !== undefined && Date.now() >= deadline) break;

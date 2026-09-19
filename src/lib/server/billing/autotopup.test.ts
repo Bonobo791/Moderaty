@@ -585,6 +585,34 @@ describe('sweepAutoTopUp', () => {
 		expect(org.autoTopupEnabled).toBe(0); // anomaly durably cleared
 	});
 
+	test('the stale-lifetime reconcile shares the invocation budget — never doubles the limit', async () => {
+		// sweepAutoTopUp(limit) documents limit as the max organizations per
+		// invocation: an independent .limit(limit) on the reconcile pass would
+		// double the Stripe calls against the shared cron deadline (codex P2).
+		// With limit=1 the metered candidate takes the single slot — the stale
+		// row waits for the next invocation.
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			await seedOrg({ plan: 'lifetime' }); // org-1: stale enabled flag
+			await testDb().db.insert(organizations).values({
+				id: 'org-2',
+				name: 'Org 2',
+				creditsRemaining: 10,
+				autoTopupEnabled: 1,
+				autoTopupThreshold: 100,
+				autoTopupState: 'idle',
+				stripeCustomerId: 'cus_2',
+				stripeDefaultPmId: 'pm_2'
+			});
+			expect(await sweepAutoTopUp(1)).toBe(1);
+			expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(1);
+			const org = await orgRow();
+			expect(org.autoTopupEnabled).toBe(1); // not reconciled this invocation — the slot was spent
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
 	test('a failing org does not stop the sweep', async () => {
 		await seedOrg();
 		await testDb().db.insert(organizations).values({

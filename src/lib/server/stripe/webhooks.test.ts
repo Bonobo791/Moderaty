@@ -245,6 +245,65 @@ describe('paid hosted products', () => {
 		expect(mocks.refundsCreate).not.toHaveBeenCalled();
 	});
 
+	test('a concurrent same-session delivery never refunds the winning entitlement', async () => {
+		// The success-page load and the webhook can fulfill the same session
+		// concurrently: the loser's by-session read can return a pre-commit
+		// snapshot and then observe the winner's active org entitlement — it
+		// must return 'already', never refund the PaymentIntent that paid for
+		// that entitlement (refunding it would hand the org lifetime for free).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		const client = testDb().client;
+		const originalExecute = client.execute.bind(client);
+		let interleaved = false;
+		client.execute = (async (stmt: unknown) => {
+			const sqlText = String((stmt as { sql?: string }).sql ?? stmt);
+			if (!interleaved && /select .*from "stripe_lifetime_entitlements"/i.test(sqlText) && sqlText.includes('checkout_session_id')) {
+				interleaved = true;
+				await testDb().db.insert(stripeLifetimeEntitlements).values({ id: 1, orgId: 'org-1', slot: 1, checkoutSessionId: 'cs_1' });
+				await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1', activeEntitlementId: 1 }).where(eq(stripeLifetimeSlots.slot, 1));
+				return { rows: [], rowsAffected: 0, columns: [], columnTypes: [] };
+			}
+			return originalExecute(stmt as never);
+		}) as never;
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_1', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		try {
+			expect(await fulfillCheckout('cs_1')).toBe('already');
+			expect(mocks.refundsCreate).not.toHaveBeenCalled();
+		} finally {
+			client.execute = originalExecute;
+		}
+	});
+
+	test('a winner landing after the org-scoped read is never refunded by the losing delivery', async () => {
+		// Deeper interleave of the same race: both pre-claim reads return a
+		// pre-commit snapshot, and this session's own entitlement only becomes
+		// visible at claim time — the loser must report a success verdict and
+		// never refund the PaymentIntent behind the winning grant (codex P1).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		const client = testDb().client;
+		const originalExecute = client.execute.bind(client);
+		let fakesLeft = 2;
+		client.execute = (async (stmt: unknown) => {
+			const sqlText = String((stmt as { sql?: string }).sql ?? stmt);
+			if (fakesLeft > 0 && /select .*from "stripe_lifetime_entitlements"/i.test(sqlText)) {
+				fakesLeft -= 1;
+				if (fakesLeft === 0) {
+					await testDb().db.insert(stripeLifetimeEntitlements).values({ id: 1, orgId: 'org-1', slot: 1, checkoutSessionId: 'cs_1' });
+					await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1', activeEntitlementId: 1 }).where(eq(stripeLifetimeSlots.slot, 1));
+				}
+				return { rows: [], rowsAffected: 0, columns: [], columnTypes: [] };
+			}
+			return originalExecute(stmt as never);
+		}) as never;
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_1', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		try {
+			expect(['granted', 'already']).toContain(await fulfillCheckout('cs_1'));
+			expect(mocks.refundsCreate).not.toHaveBeenCalled();
+		} finally {
+			client.execute = originalExecute;
+		}
+	});
+
 	test('a credit checkout fulfilled after the org went lifetime refunds instead of granting', async () => {
 		// assertCreditsPurchasable guards checkout CREATION; the grant itself
 		// must stay gated atomically or an in-flight checkout grants credits a

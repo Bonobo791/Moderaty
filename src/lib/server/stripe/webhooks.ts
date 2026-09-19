@@ -163,7 +163,8 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 	// sweep dropped a queued reversal. Granting would hand credits back for
 	// money that already left (fully refunded or disputed), so the charge's
 	// CURRENT state is checked before the ledger mutation.
-	if (rejectLateGrant(session, sessionId)) return 'rejected';
+	const lateVerdict = lateGrantVerdict(session, sessionId);
+	if (lateVerdict) return lateVerdict;
 
 	const { paymentIntent, charge } = getPaymentIntentAndCharge(session);
 	if (product === 'hosted' || product === 'lifetime') {
@@ -338,9 +339,17 @@ function getPaymentIntentAndCharge(session: Stripe.Checkout.Session): {
 }
 
 /** True when the charge backing this session is disputed or fully refunded — a late grant must be refused. */
-function rejectLateGrant(session: Stripe.Checkout.Session, sessionId: string): boolean {
+/**
+ * Revalidates the charge's CURRENT state before any late grant (the success
+ * page can fulfill an old paid session long after the pending-reversal
+ * sweep ran): a refunded or disputed charge must never mint credits. A
+ * fully refunded charge reports 'refunded' — the deliberate verdict the
+ * success page renders — while a disputed one stays 'rejected' (the money
+ * outcome is unresolved, not returned).
+ */
+function lateGrantVerdict(session: Stripe.Checkout.Session, sessionId: string): 'refunded' | 'rejected' | null {
 	const { charge } = getPaymentIntentAndCharge(session);
-	if (!charge) return false;
+	if (!charge) return null;
 	const fullyRefunded =
 		typeof charge.amount_refunded === 'number' &&
 		typeof charge.amount === 'number' &&
@@ -349,9 +358,9 @@ function rejectLateGrant(session: Stripe.Checkout.Session, sessionId: string): b
 		console.error(
 			`stripe: checkout session ${sessionId} charge ${charge.id} is ${charge.disputed ? 'disputed' : 'fully refunded'} — late grant refused`
 		);
-		return true;
+		return charge.disputed ? 'rejected' : 'refunded';
 	}
-	return false;
+	return null;
 }
 
 /** Resolves the bundle id or returns null (unknown bundle — loud rejection). */

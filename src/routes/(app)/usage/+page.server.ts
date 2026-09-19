@@ -213,15 +213,20 @@ export const actions: Actions = {
 		const form = await request.formData();
 		const enabled = form.get('enabled') === 'on';
 		const thresholdRaw = String(form.get('threshold') ?? '');
-		// An ABSENT threshold field must fail, not silently become 0:
-		// Number('') === 0 passes every check below and would set "top up
-		// below zero", stopping replenishment (codex 6161).
-		if (thresholdRaw.trim() === '') {
-			return fail(400, { error: 'Auto top-up threshold must be a whole number of credits between 0 and 1,000,000.' });
-		}
-		const threshold = Number(thresholdRaw);
-		if (!Number.isInteger(threshold) || threshold < 0 || threshold > 1_000_000) {
-			return fail(400, { error: 'Auto top-up threshold must be a whole number of credits between 0 and 1,000,000.' });
+		// The threshold is required only when ENABLING: an absent field must
+		// fail, not silently become 0 (Number('') === 0 would set "top up
+		// below zero" — codex 6161). A disable submit legitimately carries no
+		// threshold — the lifetime disable-only control posts none — and the
+		// write below ignores it anyway (codex, round 3).
+		let threshold = 0;
+		if (enabled) {
+			if (thresholdRaw.trim() === '') {
+				return fail(400, { error: 'Auto top-up threshold must be a whole number of credits between 0 and 1,000,000.' });
+			}
+			threshold = Number(thresholdRaw);
+			if (!Number.isInteger(threshold) || threshold < 0 || threshold > 1_000_000) {
+				return fail(400, { error: 'Auto top-up threshold must be a whole number of credits between 0 and 1,000,000.' });
+			}
 		}
 		// Consent is required only on the disabled→enabled TRANSITION: the page
 		// hides the checkbox once enabled, so an already-enabled org updating

@@ -558,6 +558,32 @@ describe('sweepAutoTopUp', () => {
 		}
 	});
 
+	test('a stale-enabled lifetime org is still reconciled: a missed paid top-up refunds and the flag clears', async () => {
+		// The charge batch correctly excludes lifetime orgs — but a PI that
+		// succeeded before the upgrade (its webhook lost) is still paid money
+		// for unusable credits. Excluding the row from SELECTION entirely
+		// would skip reconcileAutoTopup too, leaving the charge unrefunded
+		// forever: reconciliation runs independently of charge eligibility,
+		// and the stale flag is cleared durably (codex P1, round 3).
+		await seedOrg({ plan: 'lifetime' }); // enabled=1 survived the upgrade, carded, balance below threshold
+		mocks.paymentIntentsList.mockResolvedValue({
+			data: [{
+				id: 'pi_missed',
+				status: 'succeeded',
+				latest_charge: 'ch_missed',
+				created: Math.floor(Date.now() / 1000),
+				metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_100' }
+			}]
+		});
+
+		expect(await sweepAutoTopUp(5)).toBe(0);
+
+		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_missed' }, { idempotencyKey: 'refund:ungrantable:pi_missed' });
+		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+		const org = await orgRow();
+		expect(org.autoTopupEnabled).toBe(0); // anomaly durably cleared
+	});
+
 	test('a failing org does not stop the sweep', async () => {
 		await seedOrg();
 		await testDb().db.insert(organizations).values({

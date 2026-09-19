@@ -555,6 +555,21 @@ describe('usage setAutoTopup action', () => {
 		expect(org?.autoTopupThreshold).toBe(100); // disabling keeps the stored threshold
 	});
 
+	test('disabling needs no threshold — the lifetime disable-only control submits no fields', async () => {
+		// The lifetime card renders a bare disable button: no threshold field
+		// exists on it, so the missing-threshold guard must not fire for a
+		// DISABLE submit — the flag the control exists to clear would be
+		// unreachable otherwise (codex, round 3).
+		await seedOrg({ plan: 'lifetime', autoTopupEnabled: 1, autoTopupThreshold: 100, autoTopupState: 'idle' });
+
+		const result = await setAutoTopup({});
+
+		expect(result).toMatchObject({ ok: true });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.autoTopupEnabled).toBe(0);
+		expect(org?.autoTopupThreshold).toBe(100);
+	});
+
 	test('an enable that loses the plan race fails loudly instead of leaving a stale flag', async () => {
 		// The read-time plan check happens BEFORE the write: a lifetime
 		// webhook landing in between must not let the UPDATE plant enabled=1

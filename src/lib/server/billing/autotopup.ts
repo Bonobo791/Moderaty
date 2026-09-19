@@ -607,5 +607,31 @@ export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<numb
 			console.error(`auto top-up sweep failed for org ${row.id}: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
+	// Reconcile stale-flag lifetime orgs OUTSIDE the charge batch: they can
+	// never be charged again, but a PI that succeeded before the upgrade (its
+	// webhook lost) is still paid money — reconcileAutoTopup runs its refund
+	// path. The stale flag is then cleared durably so the anomaly cannot
+	// recur or re-enter future sweeps (codex P1, round 3).
+	const staleLifetime = await db
+		.select({ id: organizations.id })
+		.from(organizations)
+		.where(and(eq(organizations.autoTopupEnabled, 1), eq(organizations.plan, 'lifetime')))
+		.orderBy(asc(organizations.autoTopupLastAttemptAt), asc(organizations.id))
+		.limit(limit)
+		.all();
+	for (const row of staleLifetime) {
+		if (deadline !== undefined && Date.now() >= deadline) break;
+		try {
+			await reconcileAutoTopup(row.id);
+			const cleared = await db
+				.update(organizations)
+				.set({ autoTopupEnabled: 0, autoTopupState: 'disabled' })
+				.where(and(eq(organizations.id, row.id), eq(organizations.plan, 'lifetime')))
+				.returning({ id: organizations.id });
+			if (cleared.length === 1) console.error(`auto top-up: cleared a stale enabled flag on lifetime org ${row.id}`);
+		} catch (error) {
+			console.error(`auto top-up sweep failed for org ${row.id}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
 	return triggered;
 }

@@ -531,13 +531,15 @@ describe('fulfillCheckout', () => {
 		// any late grant (codex review).
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 
-		// Fully refunded charge: reject, never grant.
+		// Fully refunded charge: never grant — but the verdict is 'refunded',
+		// not generic 'rejected', so the success page keeps showing the
+		// deliberate refunded state on every later load (codex, round 3).
 		mocks.sessionsRetrieve.mockResolvedValue(
 			session({
 				payment_intent: { id: 'pi_1', latest_charge: { id: 'ch_1', disputed: false, amount: 50000, amount_refunded: 50000 }, payment_method: 'pm_1' }
 			})
 		);
-		expect(await fulfillCheckout('cs_1')).toBe('rejected');
+		expect(await fulfillCheckout('cs_1')).toBe('refunded');
 		expect(await getCredits('org-1')).toBe(0);
 
 		// Disputed charge: reject, never grant.

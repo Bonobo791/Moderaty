@@ -49,6 +49,16 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		</p>
 		<a class="btn primary" href="/usage">Back to Usage</a>
 	</div>
+{:else if data.manualRefund}
+	<div class="card">
+		<h2 style="margin-top:0">Payment received — refund needs review</h2>
+		<p>
+			This purchase could not be completed, and the automatic refund could not be
+			confirmed. Nothing was granted and your payment is flagged for a manual refund —
+			contact support if it has not landed within a few business days.
+		</p>
+		<a class="btn primary" href="/usage">Back to Usage</a>
+	</div>
 {:else}
 	<div class="card">
 		<h2 style="margin-top:0">No purchase found</h2>

@@ -183,7 +183,7 @@ export const mercadoPagoCheckoutAttempts = sqliteTable('mercado_pago_checkout_at
 	idempotencyKey: text('idempotency_key').notNull().unique(),
 	preferenceId: text('preference_id').unique(),
 	initPoint: text('init_point'),
-	status: text('status').notNull().default('pending'), // pending | open | fulfilled | refunded | disputed
+	status: text('status').notNull().default('pending'), // pending | open | fulfilled | refunded | disputed | manual_refund_required
 	currency: text('currency').notNull().default('BRL'),
 	amountCents: integer('amount_cents').notNull(),
 	// The credit count agreed at checkout time (0036, nullable for pre-column

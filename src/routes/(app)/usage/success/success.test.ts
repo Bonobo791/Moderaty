@@ -16,7 +16,7 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { TEST_OWNER, setupTestDb, testDb } from '$lib/server/testdb';
-import { mercadoPagoCheckoutAttempts, organizations, stripeLifetimeEntitlements, stripeLifetimeSlots } from '$lib/server/db/schema';
+import { mercadoPagoCheckoutAttempts, organizations, stripeCheckoutAttempts, stripeLifetimeEntitlements, stripeLifetimeSlots } from '$lib/server/db/schema';
 import { getCredits } from '$lib/server/billing/ledger';
 import { eq } from 'drizzle-orm';
 
@@ -39,7 +39,7 @@ vi.mock('$env/dynamic/private', () => ({ env: {} }));
 
 import { load } from './+page.server';
 
-setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'mercado_pago_checkout_attempts', 'stripe_lifetime_slots', 'stripe_lifetime_entitlements']);
+setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'mercado_pago_checkout_attempts', 'stripe_checkout_attempts', 'stripe_lifetime_slots', 'stripe_lifetime_entitlements']);
 
 const OWNER = TEST_OWNER;
 
@@ -144,11 +144,11 @@ describe('usage/success load', () => {
 		}
 	});
 
-	test('a failed automatic refund shows the failed state — never "we are processing it"', async () => {
-		// The refund resolved terminally FAILED at Stripe: reporting pending
-		// ("payment received, processing") would tell the buyer a refund is on
-		// its way when none is — the honest state is the generic failure with
-		// support contact (codex P1).
+	test('a failed automatic refund shows the manual-refund state — never pending or "No purchase found"', async () => {
+		// The refund resolved terminally FAILED at Stripe: pending claims money
+		// is coming back when none is, and the generic failure reads as "no
+		// purchase" to a buyer who was in fact charged — the honest state is
+		// the dedicated manual-refund message (codex P1).
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'lifetime' });
 		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1', activeEntitlementId: 1 }).where(eq(stripeLifetimeSlots.slot, 1));
 		await testDb().db.insert(stripeLifetimeEntitlements).values({ id: 1, orgId: 'org-1', slot: 1, checkoutSessionId: 'cs_first' });
@@ -158,10 +158,35 @@ describe('usage/success load', () => {
 		mocks.refundsCreate.mockResolvedValue({ id: 're_1', status: 'failed' });
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		try {
-			const data = (await loadWith('cs_dup')) as { granted: boolean; pending: boolean; failed: boolean; refunded: boolean };
-			expect(data.failed).toBe(true);
+			const data = (await loadWith('cs_dup')) as { granted: boolean; pending: boolean; failed: boolean; refunded: boolean; manualRefund: boolean };
+			expect(data.manualRefund).toBe(true);
+			expect(data.failed).toBe(false);
 			expect(data.pending).toBe(false);
 			expect(data.refunded).toBe(false);
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('a persisted manual_refund_required attempt surfaces even when the session retrieve fails transiently', async () => {
+		// The webhook-side refund.updated handler already marked the attempt —
+		// a transient Stripe outage must not mask that durable record behind
+		// the generic pending state (codex P1).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.insert(stripeCheckoutAttempts).values({
+			attemptId: 'att_1',
+			orgId: 'org-1',
+			product: 'lifetime',
+			idempotencyKey: 'checkout:att_1:k',
+			stripeSessionId: 'cs_1',
+			status: 'manual_refund_required'
+		});
+		mocks.sessionsRetrieve.mockRejectedValue(new Error('Connection reset by peer'));
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const data = (await loadWith('cs_1')) as { pending: boolean; manualRefund: boolean };
+			expect(data.manualRefund).toBe(true);
+			expect(data.pending).toBe(false);
 		} finally {
 			errorSpy.mockRestore();
 		}
@@ -231,8 +256,12 @@ describe('usage/success Mercado Pago branch', () => {
 	}
 
 	test.each([
-		{ status: 'refunded', expected: { granted: false, pending: false, failed: false, refunded: true } },
-		{ status: 'disputed', expected: { granted: false, pending: false, failed: true, refunded: false } }
+		{ status: 'refunded', expected: { granted: false, pending: false, failed: false, refunded: true, manualRefund: false } },
+		{ status: 'disputed', expected: { granted: false, pending: false, failed: true, refunded: false, manualRefund: false } },
+		// A paid payment that can never be granted (lifetime upgrade raced the
+		// approval) is recorded for a human refund — the buyer sees the
+		// dedicated manual-refund state, not pending forever (codex P1).
+		{ status: 'manual_refund_required', expected: { granted: false, pending: false, failed: false, refunded: false, manualRefund: true } }
 	])('a $status attempt is terminal — a deliberate verdict, never pending, and never re-retrieved', async ({ status, expected }) => {
 		// A reversed payment has no fulfillment left to wait for: the page must
 		// show a terminal state immediately instead of pending forever (codex).

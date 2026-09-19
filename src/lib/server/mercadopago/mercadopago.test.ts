@@ -125,21 +125,29 @@ test('fulfills an approved payment exactly once through the credit ledger', asyn
 	expect(rows).toHaveLength(1);
 });
 
-test('an approved payment for a lifetime org throws loudly — never granted, never fulfilled', async () => {
-	// The plan can flip to lifetime after checkout opened: the grant is
-	// gated atomically inside the ledger transaction, so fulfillment throws,
-	// the claimed transition rolls back, and the webhook 500s for manual
-	// review — the customer needs a human refund (review).
+test('an approved payment for a lifetime org persists manual_refund_required — never granted, never pending', async () => {
+	// The plan can flip to lifetime after checkout opened: the grant is gated
+	// atomically inside the ledger transaction — but a bare throw rolls back
+	// the paymentId write too, so the success page could never retry and the
+	// webhook retried the same failure until the delivery died silently
+	// (codex P1). The durable outcome is recorded in a second transaction and
+	// the delivery ACKs: nothing can fix itself while the org stays
+	// unmetered — a human refund is the only resolution.
 	await testDb().db.update(organizations).set({ plan: 'lifetime' }).where(eq(organizations.id, 'org-1'));
 	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 	try {
-		await expect(fulfillMercadoPagoPayment(payment)).rejects.toThrow(/unmetered|lifetime/i);
+		expect(await fulfillMercadoPagoPayment(payment)).toBe(false);
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('MANUAL REFUND REQUIRED'));
 	} finally {
 		errorSpy.mockRestore();
 	}
 	const org = await testDb().db.select({ creditsRemaining: organizations.creditsRemaining }).from(organizations).where(eq(organizations.id, 'org-1')).get();
 	expect(org?.creditsRemaining).toBe(0);
-	expect((await attemptRow())?.status).not.toBe('fulfilled');
+	const attempt = await attemptRow();
+	expect(attempt?.status).toBe('manual_refund_required');
+	expect(attempt?.paymentId).toBe('pay-1');
+	// A redelivery sees the durable terminal record and ACKs quietly.
+	expect(await fulfillMercadoPagoPayment(payment)).toBe(false);
 });
 
 test('rejects a payment whose amount does not match the persisted attempt', async () => {

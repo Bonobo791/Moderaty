@@ -22,10 +22,13 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	 used: an 800ms debounce (restarted on every re-flip, so a rapid
 	 double-flip fires exactly one request with the final value) submits the
 	 hidden form programmatically; `Applied` shows for 1.6s then fades over
-	 150ms; a failed action reverts the knob silently (spec §6.5). -->
+	 150ms. A failed persist is LOUD (MOD-10): the knob reverts to the
+	 persisted server level and an inline alert says the save did not happen —
+	 flipping a stop retries without a refresh. -->
 
 <script lang="ts">
 	import { enhance } from '$app/forms';
+	import { persistOutcome } from '$lib/sensitivityPersist';
 	import {
 		TONE_LEVEL_OMNI_ONLY,
 		TONE_LEVEL_OMNI_AND_TONE,
@@ -69,6 +72,16 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	// True while a change is debouncing or its submit is in flight — the
 	// server value must not snap the knob back until the persist settles.
 	let dirty = $state(false);
+	// Visible only after a failed persist — a save that did not happen can
+	// never look like a save that did (MOD-10).
+	let saveError = $state<string | null>(null);
+	// One submit at a time: a flip during an in-flight save re-arms the
+	// debounce instead of racing a second request (MOD-10).
+	let submitting = $state(false);
+	// A debounced submit is still waiting to fire — while set, `dirty` must
+	// survive the current persist settling, or the server value would snap
+	// the knob back mid-queue.
+	let queuedSubmit = $state(false);
 	let appliedNow = $state(false);
 	let appliedFading = $state(false);
 	let dragging = $state(false);
@@ -93,8 +106,23 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		if (next === selectedValue) return;
 		selected = next;
 		dirty = true;
+		saveError = null;
+		queuedSubmit = true;
+		scheduleSubmit();
+	}
+
+	function scheduleSubmit() {
 		clearTimeout(debounceTimer);
-		debounceTimer = setTimeout(() => formEl?.requestSubmit(), 800);
+		debounceTimer = setTimeout(() => {
+			if (submitting) {
+				// The in-flight save settles first; the latest knob value goes
+				// out right after instead of racing a concurrent request.
+				scheduleSubmit();
+				return;
+			}
+			queuedSubmit = false;
+			formEl?.requestSubmit();
+		}, 800);
 	}
 
 	function showApplied() {
@@ -111,15 +139,28 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		}, 1600);
 	}
 
-	// use:enhance callback: on success show `Applied`; on failure revert the
-	// knob silently (spec §6.5) — the revalidated load restores the last
-	// persisted level, and setting `selected` now skips the wait.
-	function handlePersist(result: { type: string }) {
-		dirty = false;
-		if (result.type === 'success') {
-			showApplied();
-		} else if (result.type === 'failure' || result.type === 'error') {
-			selected = level === TONE_LEVEL_OMNI_AND_TONE ? TONE_LEVEL_OMNI_AND_TONE : TONE_LEVEL_OMNI_ONLY;
+	// use:enhance callback: success shows `Applied`; any failure reverts the
+	// knob to the persisted level AND surfaces the message — a save that did
+	// not happen can never look like one that did (MOD-10).
+	function handlePersist(result: { type: string; data?: { error?: unknown } }) {
+		// A re-flip queued behind this submit keeps the knob dirty — the
+		// server value must not snap back before that submit goes out.
+		dirty = queuedSubmit;
+		const outcome = persistOutcome(result, level);
+		if (outcome.kind === 'applied') {
+			// Symmetric to the failure guard: a stale success must not label the
+			// displayed (not-yet-submitted) choice "Applied" — the queued
+			// submit's own outcome reports the state (codex, PR #142).
+			if (!queuedSubmit) {
+				saveError = null;
+				showApplied();
+			}
+		} else if (!queuedSubmit) {
+			// Only revert/report when nothing newer is queued — a re-flip
+			// already owns the knob, and the stale failure's message would
+			// flash over the pending choice (coderabbit+cubic, PR #142).
+			selected = outcome.selected;
+			saveError = outcome.message;
 		}
 	}
 
@@ -230,14 +271,20 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		</div>
 	{/key}
 
+	{#if saveError}
+		<p class="save-error" role="alert">{saveError} Flip a stop to retry.</p>
+	{/if}
+
 	<form
 		bind:this={formEl}
 		method="POST"
 		action="?/setToneLevel"
 		use:enhance={() => {
+			submitting = true;
 			return async ({ result, update }) => {
 				handlePersist(result);
 				await update();
+				submitting = false;
 			};
 		}}
 		hidden
@@ -264,6 +311,11 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	}
 	.applied.fading {
 		opacity: 0;
+	}
+	.save-error {
+		margin: 14px 0 0;
+		font-size: 13px;
+		color: var(--accent);
 	}
 
 	.switch-row {

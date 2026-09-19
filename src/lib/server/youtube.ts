@@ -143,13 +143,21 @@ export async function fetchVideoMetadata(
 	deadline?: number
 ): Promise<Map<string, { title: string; description: string }>> {
 	const out = new Map<string, { title: string; description: string }>();
+	const batches: string[][] = [];
 	for (let i = 0; i < videoIds.length; i += YOUTUBE_ID_BATCH_SIZE) {
-		const batch = videoIds.slice(i, i + YOUTUBE_ID_BATCH_SIZE);
-		const params = new URLSearchParams({ part: 'snippet', id: batch.join(',') });
-		const res = await ytFetch(`/videos?${params}`, accessToken, undefined, deadline);
-		const data = object(await jsonResponse(res, 'videos.list'), 'videos.list response');
-		if (!Array.isArray(data.items)) throw new Error('videos.list response items is missing or invalid');
-		for (const [index, item] of data.items.entries()) {
+		batches.push(videoIds.slice(i, i + YOUTUBE_ID_BATCH_SIZE));
+	}
+	const responses = await Promise.all(
+		batches.map(async (batch) => {
+			const params = new URLSearchParams({ part: 'snippet', id: batch.join(',') });
+			const res = await ytFetch(`/videos?${params}`, accessToken, undefined, deadline);
+			const data = object(await jsonResponse(res, 'videos.list'), 'videos.list response');
+			if (!Array.isArray(data.items)) throw new Error('videos.list response items is missing or invalid');
+			return data.items;
+		})
+	);
+	for (const items of responses) {
+		for (const [index, item] of items.entries()) {
 			const context = `videos.list response item ${index}`;
 			try {
 				const video = object(item, context);

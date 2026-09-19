@@ -31,6 +31,9 @@ const LAYOUT_DATA = {
 		id: 'UC1',
 		title: 'My Channel',
 		lastRunAt: null,
+		lastRunStatus: 'success',
+		lastRunError: null,
+		lastSuccessAt: '2026-09-01T00:00:00.000Z',
 		toneLevel: 1,
 		protectLgbtqia: 1,
 		protectWomen: 0,
@@ -78,6 +81,45 @@ test('the header shows PROTECTED, the clear-queue subline, and the banned ticker
 	// Ticker SSR renders the target directly.
 	expect(body).toContain('mono">7</span>');
 	expect(body).toContain('Edge lords banned');
+});
+
+test('a paused channel header says Paused — never Protected or "queue is clear" (codex+cubic, PR #142)', () => {
+	// The overview's paused banner contradicts an unconditional "Protected"
+	// header on the same page — the header branches on active like the
+	// dashboard status cell does.
+	const body = renderLayout({ ...LAYOUT_DATA, ch: { ...LAYOUT_DATA.ch, active: 0 } });
+	expect(body).toContain('Paused');
+	expect(body).not.toContain('Protected');
+	expect(body).not.toContain('queue is clear');
+});
+
+test('a failed channel header says Check failed — never Protected (codex, PR #142 r2)', () => {
+	// The dashboard's Check failed state must survive onto the channel's own
+	// tabs — an unconditional Protected would contradict it on the same row.
+	const body = renderLayout({
+		...LAYOUT_DATA,
+		ch: { ...LAYOUT_DATA.ch, lastRunStatus: 'failed', lastRunError: 'quota' }
+	});
+	expect(body).toContain('Check failed');
+	expect(body).toContain('quota is exhausted');
+	expect(body).not.toContain('Protected');
+	expect(body).not.toContain('queue is clear');
+});
+
+test('a never-checked channel header says Not checked yet (codex, PR #142 r2)', () => {
+	const body = renderLayout({
+		...LAYOUT_DATA,
+		ch: { ...LAYOUT_DATA.ch, lastRunStatus: null, lastRunError: null, lastSuccessAt: null }
+	});
+	expect(body).toContain('Not checked yet');
+	expect(body).not.toContain('Protected');
+});
+
+test('a paused channel with a queue still links to it from the header status', () => {
+	const body = renderLayout({ ...LAYOUT_DATA, pending: 4, ch: { ...LAYOUT_DATA.ch, active: 0 } });
+	expect(body).toContain('Paused');
+	expect(body).toContain('href="/channels/UC1/queue"');
+	expect(body).toContain('4 comments waiting for review');
 });
 
 test('a non-zero pending count links to the queue from the header status', () => {
@@ -277,6 +319,16 @@ test('a paused channel shows the paused banner and a resume control posting paus
 	expect(body).toContain('name="paused" value="false"');
 	expect(body).toContain('Resume moderation on My Channel');
 	expect(body).not.toContain('Pause moderation on My Channel');
+});
+
+test('a paused channel hides the scan controls — they can only silently skip (codex, PR #142 r2)', () => {
+	// Analyze history and Dry run both depend on a cron claim gated on
+	// active=1, and runChannel short-circuits inactive channels — on a paused
+	// channel the buttons would "succeed" while doing nothing.
+	const body = renderPage({ ...LAYOUT_DATA, ch: { ...LAYOUT_DATA.ch, active: 0, scanning: true } });
+	expect(body).not.toContain('action="?/analyzeHistory"');
+	expect(body).not.toContain('action="?/dryRun"');
+	expect(body).not.toContain('History scan in progress');
 });
 
 test('a paused-channel failure renders the scoped error', () => {

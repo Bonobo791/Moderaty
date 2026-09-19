@@ -18,7 +18,7 @@ import type { Handle } from '@sveltejs/kit';
 import { isHttpError } from '@sveltejs/kit';
 
 import { cookieSecure } from '$lib/server/oauthState';
-import { LOCALE_COOKIE, resolveLocale } from '$lib/i18n/locale';
+import { LOCALE_COOKIE, isBilingualPath, resolveLocale } from '$lib/i18n/locale';
 import { assertMigrationsCurrent } from '$lib/server/migrationGuard';
 import { getSessionUser, SESSION_COOKIE } from '$lib/server/session';
 
@@ -31,10 +31,15 @@ import { getSessionUser, SESSION_COOKIE } from '$lib/server/session';
 // maintenance overlay. A valid user sees a loud maintenance state, never a
 // silent downgrade to signed-out.
 export const handle: Handle = async ({ event, resolve }) => {
-	const locale = resolveLocale({
-		cookie: event.cookies.get(LOCALE_COOKIE),
-		acceptLanguage: event.request?.headers?.get('accept-language')
-	});
+	// The html lang must describe the actual content (MOD-11): the stored or
+	// browser preference only applies on fully translated surfaces — anywhere
+	// else the page is English and must say so.
+	const locale = isBilingualPath(event.url.pathname)
+		? resolveLocale({
+				cookie: event.cookies.get(LOCALE_COOKIE),
+				acceptLanguage: event.request?.headers?.get('accept-language')
+			})
+		: 'en';
 	const resolveLocalized = () =>
 		resolve(event, {
 			transformPageChunk: ({ html, done }) =>

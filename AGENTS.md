@@ -15,8 +15,9 @@ One agent works the full stack. There are no per-layer agent boundaries.
   bots); the agent NEVER merges or closes its own PRs — they stay open
   for the human. Work in the `.worktrees/dev`
   worktree — never switch branches in a checkout in use elsewhere.
-- **`main` is production.** Only the human merges `dev → main`, batched, to
-  control Netlify production-deploy credit spend. Never push to `main`
+- **`main` is production.** Only the human merges `dev → main`, batched —
+  every merge redeploys the `moderaty-prod` Coolify app and purges the
+  Bunny CDN zone. Never push to `main`
   directly; the human's review gate is the `dev → main` merge.
 - Keep `dev` releasable: `npm run check`, `npm run build`, and
   `npm run test` green at all times so the human can batch-merge at any
@@ -174,25 +175,32 @@ Process:
 
 Moderaty is a SvelteKit 2 app using Svelte 5 and TypeScript. Routes live in
 `src/routes/`; reusable code belongs in `src/lib/`, with server-only modules in
-`src/lib/server/`. Put static files in `static/`. Configure adapter-netlify in
-`svelte.config.js`; Netlify deploys endpoints as standard Node Functions. Keep
+`src/lib/server/`. Put static files in `static/`. `svelte.config.js` picks the
+adapter at build time: `MODERATY_ADAPTER=node` → adapter-node (the Dockerfile
+sets this — the operator's Coolify deployment); unset → adapter-netlify (the
+Netlify target); any other value fails the build loudly. Keep
 `vite.config.ts` for Vite-only settings. Do not edit
 generated `.svelte-kit/` files or commit build output.
 
-The cron trigger is a Netlify Scheduled Function in
-`netlify/functions/cron.mjs` (every minute during early operation — raise to
-`*/15 * * * *` when user volume grows; calls `GET $APP_URL/api/cron`
-with the secret in an `Authorization: Bearer` header; the endpoint also keeps
-the plan-documented `?secret=` query form for manual triggers). Deployment
-steps live in [DEPLOY.md](DEPLOY.md); the alternative self-hosted target
-(Coolify dev/prod apps, Dockerfile build, Bunny CDN pull zone, post-deploy
-cache purges) is documented in [docs/COOLIFY_BUNNY.md](docs/COOLIFY_BUNNY.md),
-and `scripts/dev-cron.mjs --once` doubles as that target's in-container cron
-ticker. **Scheduled functions only fire on the
-published production deploy** — branch deploys (including `dev`) and
-Deploy Previews never trigger them, and nothing fires against `npm run dev`.
-In every non-production environment the pipeline only advances when something
-calls `GET /api/cron`: use `node --env-file=.env scripts/dev-cron.mjs`
+**The operator hosts on Coolify** (two apps built by the Dockerfile:
+`moderaty-prod` on branch `main` behind a Bunny CDN pull zone, `moderaty-dev`
+on branch `dev` — [docs/COOLIFY_BUNNY.md](docs/COOLIFY_BUNNY.md)). Each app's
+cron is a Coolify **Scheduled Task** that runs
+`APP_URL=http://127.0.0.1:3000 node scripts/dev-cron.mjs --once` every minute
+during early operation — raise to `*/15 * * * *` when user volume grows; it
+calls `GET /api/cron` on localhost with `CRON_SECRET` in an
+`Authorization: Bearer` header, and a GitHub Actions workflow purges the
+Bunny zone on every push to `main`. The endpoint also keeps the
+plan-documented `?secret=` query form for manual triggers.
+**Netlify stays in the repo as a supported alternative deploy target**
+(`netlify.toml`, `netlify/functions/cron.mjs` — a Scheduled Function ticking
+the same `/api/cron` — and the default adapter), for self-hosters who prefer
+it; deployment steps for that target live in [DEPLOY.md](DEPLOY.md). On the
+Netlify target, scheduled functions only fire on the published production
+deploy — branch deploys and Deploy Previews never trigger them, and nothing
+fires against `npm run dev`. In every non-scheduled environment the pipeline
+only advances when something calls `GET /api/cron`: use
+`node --env-file=.env scripts/dev-cron.mjs`
 (`--once` for a single tick) alongside the dev server, pointing `APP_URL` at
 whichever instance should drain.
 
@@ -211,12 +219,12 @@ must not appear in `src/`.
 ## Environments
 
 Dev and production are **fully isolated**, each with its own Google OAuth
-client and its own Turso database:
+client and its own Turso database, deployed as separate Coolify apps:
 
-| | Google OAuth client | Turso database | Netlify env context |
+| | Google OAuth client | Turso database | Coolify app |
 |---|---|---|---|
-| **Dev** | `880114106606-kmn2b9p…` | `dev-2-bonobo791` | `branch-deploys` |
-| **Production** | `880114106606-1t4edg0…` | `moderaty-bonobo791` | `production` |
+| **Dev** | `880114106606-kmn2b9p…` | `dev-2-bonobo791` | `moderaty-dev` (branch `dev`) |
+| **Production** | `880114106606-1t4edg0…` | `moderaty-bonobo791` | `moderaty-prod` (branch `main`, behind Bunny CDN) |
 
 - **All agent work uses the dev credentials**, which live in the dev
   worktree's `.env` (`.worktrees/dev/.env`). Migration verification, seed
@@ -228,11 +236,13 @@ client and its own Turso database:
   It is NOT a dev config: never `npm run dev` against it, never copy its
   values into a dev `.env`, and never point any dev tooling at the
   production database. Production database changes are human-only.
-- **Netlify carries both environments**: the `production` deploy context
-  (serves `main`) has the production client + database, the
-  `branch-deploys` context (the `dev` branch and PR previews) has the dev
-  client + database. Both contexts set the same ten keys; `APP_URL` and
-  `DRY_RUN` differ per context, not in `.env`.
+- **Coolify carries both environments**: env vars are set per app — the dev
+  app gets the dev client/database and Stripe test keys, the prod app the
+  production values (see the full env matrix in
+  [docs/COOLIFY_BUNNY.md](docs/COOLIFY_BUNNY.md) §3). Runtime secrets are
+  Runtime Variables only; only `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN` also
+  get Build Variable ON, reaching the Dockerfile's migrate gate as BuildKit
+  secret mounts.
 - **OAuth grants are per-client.** A channel connected in one environment
   cannot be token-refreshed in the other — Google answers
   `401 unauthorized_client`, which surfaces as a failed dry run / cron run.
@@ -326,7 +336,8 @@ Use Node 24 and npm 11.
   (default localhost) so history scans and dry-run windows actually drain
   outside production; run it alongside `npm run dev`.
 - `npm run check` — run SvelteKit sync and strict diagnostics.
-- `npm run build` — create the Netlify deployment build.
+- `npm run build` — create the deployment build (adapter-node when
+  `MODERATY_ADAPTER=node`, adapter-netlify otherwise).
 - `npm run preview` — serve the production build locally.
 - `npm run db:migrate` — apply Drizzle migrations from `drizzle/` (loads
   `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN` from the environment; source `.env`

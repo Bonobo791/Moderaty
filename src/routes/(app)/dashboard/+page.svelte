@@ -27,6 +27,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	import Ticker from '$lib/Ticker.svelte';
 	import { autoRefresh } from '$lib/auto-refresh.svelte';
 	import { relativeTime } from '$lib/relative-time';
+	import { runFailureAction } from '$lib/runHealth';
 	import { TONE_LEVEL_OMNI_AND_TONE } from '$lib/toneLevels';
 
 	let { data } = $props();
@@ -74,20 +75,10 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		return `${protectedCount} of ${data.chs.length} channels protected — ${parts.join(', ')}.`;
 	});
 
-	// Safe actionable copy per persisted failure category — cron only stores
-	// the category, so raw provider detail can never reach this page.
-	const FAILURE_ACTIONS: Record<string, string> = {
-		token: 'YouTube access expired — reconnect the channel',
-		quota: 'YouTube quota is exhausted — we retry on the next check',
-		scoring: 'AI scoring was unavailable — we retry on the next check',
-		timeout: 'The last check timed out — we retry on the next check'
-	};
-	function failureAction(category: string | null): string {
-		return (
-			FAILURE_ACTIONS[category ?? ''] ??
-			'The last check failed — we retry on the next check'
-		);
-	}
+	// Safe actionable copy per persisted failure category lives in
+	// $lib/runHealth — shared with the channel header so identical states
+	// read identically on both surfaces.
+	const failureAction = runFailureAction;
 
 	function openChannel(channelId: string) {
 		goto(`/channels/${channelId}`);
@@ -201,7 +192,11 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 								<span class="caps-label unchecked-label">Not checked yet</span>
 							{/if}
 							{#if pending > 0}
-								<a class="status-sub pending-link" href="/channels/{ch.id}/queue">
+								<a
+									class="status-sub pending-link"
+									href="/channels/{ch.id}/queue"
+									onclick={(event) => event.stopPropagation()}
+								>
 									{pending} comment{pending === 1 ? '' : 's'} waiting for review
 								</a>
 							{:else if ch.active !== 0 && ch.lastRunStatus !== 'failed'}

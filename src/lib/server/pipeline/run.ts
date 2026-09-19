@@ -181,11 +181,11 @@ export async function runChannel(
 		return { fetched, acted, queued, partial: false, skipped: false, dryRun };
 	} catch (error) {
 		if (error instanceof DeadlineExceededError) {
-			return { fetched, acted, queued, partial: true, skipped: false, dryRun };
+			return { fetched, acted, queued, partial: true, skipped: false, dryRun, stoppedReason: 'deadline' };
 		}
 		if (error instanceof ChannelDeactivatedError) {
 			console.info(`stopping run for ${channelId}: ${error.message}`);
-			return { fetched, acted, queued, partial: true, skipped: false, dryRun };
+			return { fetched, acted, queued, partial: true, skipped: false, dryRun, stoppedReason: 'deactivated' };
 		}
 		throw error;
 	}

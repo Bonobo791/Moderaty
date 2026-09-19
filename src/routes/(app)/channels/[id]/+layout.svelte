@@ -18,6 +18,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 <script lang="ts">
 	import Ticker from '$lib/Ticker.svelte';
 	import { relativeTime } from '$lib/relative-time';
+	import { runFailureAction } from '$lib/runHealth';
 
 	let { data, children } = $props();
 
@@ -65,14 +66,42 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 			</div>
 			<div class="channel-status">
 				<div class="protected">
-					<span class="caps-label protected-label">Protected</span>
-					<span class="protected-sub">
-						{#if data.pending > 0}
-							<a href="{base}/queue">{data.pending} comment{data.pending === 1 ? '' : 's'} waiting for review</a>
-						{:else}
-							queue is clear
-						{/if}
-					</span>
+					{#if data.ch.active === 0}
+						<span class="caps-label paused-label">Paused</span>
+						<span class="protected-sub">
+							{#if data.pending > 0}
+								<a href="{base}/queue">{data.pending} comment{data.pending === 1 ? '' : 's'} waiting for review</a>
+							{:else}
+								moderation paused
+							{/if}
+						</span>
+					{:else if data.ch.lastRunStatus === 'failed'}
+						<!-- Same states as the dashboard cell — a failed channel must
+							not read as healthy on its own tabs (codex, PR #142). -->
+						<span class="caps-label failed-label">Check failed</span>
+						<span class="protected-sub">
+							{runFailureAction(data.ch.lastRunError)}
+							{#if data.pending > 0}
+								· <a href="{base}/queue">{data.pending} waiting for review</a>
+							{/if}
+						</span>
+					{:else if data.ch.lastRunStatus === 'success'}
+						<span class="caps-label protected-label">Protected</span>
+						<span class="protected-sub">
+							{#if data.pending > 0}
+								<a href="{base}/queue">{data.pending} comment{data.pending === 1 ? '' : 's'} waiting for review</a>
+							{:else}
+								queue is clear
+							{/if}
+						</span>
+					{:else}
+						<span class="caps-label unchecked-label">Not checked yet</span>
+						<span class="protected-sub">
+							{#if data.pending > 0}
+								<a href="{base}/queue">{data.pending} comment{data.pending === 1 ? '' : 's'} waiting for review</a>
+							{/if}
+						</span>
+					{/if}
 				</div>
 				<div class="banned">
 					<span class="banned-count"><Ticker value={data.banned} /></span>
@@ -139,6 +168,15 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	}
 	.protected-label {
 		color: var(--ok);
+	}
+	.paused-label {
+		color: var(--text-3);
+	}
+	.failed-label {
+		color: var(--accent);
+	}
+	.unchecked-label {
+		color: var(--text-3);
 	}
 	.protected-sub {
 		font-size: 13px;

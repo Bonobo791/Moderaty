@@ -18,5 +18,8 @@ export const TONE_LEVELS = [TONE_LEVEL_OMNI_ONLY, TONE_LEVEL_OMNI_AND_TONE] as c
 export type ToneLevel = (typeof TONE_LEVELS)[number];
 
 export function isToneLevel(value: unknown): value is ToneLevel {
-	return value === TONE_LEVEL_OMNI_ONLY || value === TONE_LEVEL_OMNI_AND_TONE;
+	// Derived from TONE_LEVELS: a hardcoded list silently rejects a newly
+	// added level at every boundary (cubic, PR #142) — same pattern as
+	// isLocale-from-SUPPORTED_LOCALES.
+	return (TONE_LEVELS as readonly unknown[]).includes(value);
 }

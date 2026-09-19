@@ -99,6 +99,29 @@ test('rejects a signed-out request with 401', async () => {
 	expect(await toneLevelOf('UC1')).toBeNull();
 });
 
+// MOD-10: a save that dies inside the db must be loud on the server and a
+// generic 502 to the client — never a bare exception the control cannot
+// distinguish from success, and never raw db detail to the browser.
+test('a database failure saving sensitivity is logged loudly and returns a generic 502', async () => {
+	await seedChannel('UC1');
+	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	const updateSpy = vi.spyOn(testDb().db, 'update').mockImplementation(() => {
+		throw new Error('hrana 502: connect to upstream failed');
+	});
+	try {
+		const res = (await setToneLevel('UC1', '2')) as { status: number; data: { error: string } };
+
+		expect(res.status).toBe(502);
+		expect(res.data.error).toBe('Sensitivity could not be saved — try again.');
+		expect(res.data.error).not.toContain('hrana');
+		expect(spy).toHaveBeenCalledWith('setToneLevel failed for channel:', 'UC1', expect.any(Error));
+		expect(await toneLevelOf('UC1')).toBeNull();
+	} finally {
+		updateSpy.mockRestore();
+		spy.mockRestore();
+	}
+});
+
 function analyzeHistory(channelId: string, months: string, user: typeof OWNER | null = OWNER) {
 	return actions.analyzeHistory({ request: postForm({ channelId, months }), locals: { user } } as never);
 }
@@ -717,6 +740,43 @@ test('resume reactivates the channel so cron rotation picks it up again', async 
 
 	expect(res).toMatchObject({ ok: true });
 	expect(await activeOf('UC1')).toBe(1);
+});
+
+test('resume clears the stale verdict so a just-resumed channel reads Not checked yet (codex, PR #142 r2)', async () => {
+	// A paused-then-resumed channel's lastRunStatus='success' predates the
+	// pause — every comment received meanwhile is unchecked, so Protected
+	// would lie until cron records a new successful check. lastSuccessAt
+	// stays: when it last succeeded is still a fact.
+	await seedChannel('UC1');
+	await testDb().db
+		.update(channels)
+		.set({ active: 0, lastRunStatus: 'success', lastRunError: null, lastSuccessAt: '2026-08-01T00:00:00.000Z' })
+		.where(eq(channels.id, 'UC1'));
+
+	const res = await setPaused('UC1', 'false');
+
+	expect(res).toMatchObject({ ok: true });
+	const row = await channelById('UC1');
+	expect(row?.active).toBe(1);
+	expect(row?.lastRunStatus).toBeNull();
+	expect(row?.lastRunError).toBeNull();
+	expect(row?.lastSuccessAt).toBe('2026-08-01T00:00:00.000Z');
+});
+
+test('a redundant resume on an already-active channel preserves its health verdict', async () => {
+	// Double-submitted resumes must not erase a real success — the clear
+	// only applies to an actual paused→active transition.
+	await seedChannel('UC1');
+	await testDb().db
+		.update(channels)
+		.set({ active: 1, lastRunStatus: 'success', lastSuccessAt: '2026-08-01T00:00:00.000Z' })
+		.where(eq(channels.id, 'UC1'));
+
+	const res = await setPaused('UC1', 'false');
+
+	expect(res).toMatchObject({ ok: true });
+	const row = await channelById('UC1');
+	expect(row?.lastRunStatus).toBe('success');
 });
 
 test('pause is idempotent — pausing a paused channel stays paused without error', async () => {

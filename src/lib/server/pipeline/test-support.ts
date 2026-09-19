@@ -301,6 +301,7 @@ const mocks = vi.hoisted(() => {
 		defaultTransaction: runTransaction,
 		decrypt: vi.fn(),
 		assertBeforeDeadline: vi.fn(),
+		fetchWithRetry: vi.fn(),
 		refreshAccessToken: vi.fn(),
 		fetchNewComments: vi.fn(),
 		fetchVideoMetadata: vi.fn(),
@@ -324,7 +325,11 @@ vi.mock('$lib/server/db', () => ({ db: mocks.db }));
 vi.mock('$env/dynamic/private', () => ({ env: mocks.state.env }));
 vi.mock('$lib/server/http', () => ({
 	assertBeforeDeadline: mocks.assertBeforeDeadline,
-	DeadlineExceededError: mocks.DeadlineExceededError
+	DeadlineExceededError: mocks.DeadlineExceededError,
+	// importOriginal evaluates the real youtube.ts under this mock — its
+	// fetchWithRetry import must resolve, or an un-stubbed real export
+	// fails as "undefined is not a function" instead of a clear mock call.
+	fetchWithRetry: mocks.fetchWithRetry
 }));
 vi.mock('$lib/server/moderation', () => ({
 	scoreComment: mocks.scoreComment,
@@ -475,6 +480,7 @@ export function resetPipelineMocks() {
 	for (const mock of [
 		mocks.decrypt,
 		mocks.assertBeforeDeadline,
+		mocks.fetchWithRetry,
 		mocks.refreshAccessToken,
 		mocks.fetchNewComments,
 		mocks.fetchVideoMetadata,

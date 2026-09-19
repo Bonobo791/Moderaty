@@ -182,9 +182,20 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 				console.error(`stripe: hosted checkout ${sessionId} would overlap lifetime access for ${orgId}`);
 				return 'rejected';
 			}
-			if (existing.stripeSubscriptionId && existing.stripeSubscriptionId !== subscriptionId && isActiveSubscriptionStatus(existing.stripeSubscriptionStatus)) {
-				console.error(`stripe: hosted checkout ${sessionId} would replace an active subscription for ${orgId}`);
-				return 'rejected';
+			// One live subscription per org. The stored status is only a cache —
+			// it is null until a subscription webhook lands and stale whenever
+			// deliveries fail — so exclusivity is decided by the LIVE Stripe
+			// status of the stored subscription. A live one means this paid
+			// checkout minted a duplicate: cancel it and refund its first
+			// invoice instead of keeping the money for a sub we never honor.
+			if (existing.stripeSubscriptionId && existing.stripeSubscriptionId !== subscriptionId) {
+				const liveStatus = await liveSubscriptionStatus(existing.stripeSubscriptionId);
+				if (subscriptionStatusIsLive(liveStatus)) {
+					console.error(`stripe: hosted checkout ${sessionId} for org ${orgId} would overlap live subscription ${existing.stripeSubscriptionId} (${liveStatus}) — tearing down duplicate ${subscriptionId}`);
+					await teardownDuplicateSubscription(subscriptionId, orgId, { checkoutSessionId: sessionId, paymentExpected: true });
+					return 'refunded';
+				}
+				console.info(`stripe: stored subscription ${existing.stripeSubscriptionId} for org ${orgId} is ${liveStatus} — checkout ${sessionId} replaces it`);
 			}
 			if (existing.stripeCustomerId && customerId && existing.stripeCustomerId !== customerId) {
 				console.error(`stripe: hosted checkout ${sessionId} customer does not belong to org ${orgId}`);
@@ -718,7 +729,24 @@ function invoicePeriod(invoice: StripeRecord, subscriptionId: string): { periodS
 	return { periodStart: isoSeconds(period.start, 'subscription line period.start'), periodEnd: isoSeconds(period.end, 'subscription line period.end') };
 }
 
-function invoicePaymentReferences(invoice: StripeRecord): { paymentIntentId?: string; chargeId?: string } {
+/**
+ * Reads an invoice's PAID InvoicePayment records — the authoritative source
+ * when the event payload omits payment references. `invoice.payments` is an
+ * includable property and is NOT guaranteed on the delivered object (the
+ * 2026-07-29.dahlia invoice.paid payload omits it entirely); under I2 the
+ * missing list is a gap to fetch, not a value to guess at.
+ */
+async function fetchInvoicePaymentRefs(invoiceId: string): Promise<{ paymentIntentId?: string; chargeId?: string }> {
+	const list = await getStripe().invoicePayments.list({ invoice: invoiceId, status: 'paid' });
+	for (const item of list.data) {
+		const paymentIntentId = stripeId(item.payment?.payment_intent);
+		const chargeId = stripeId(item.payment?.charge);
+		if (paymentIntentId || chargeId) return { paymentIntentId, chargeId };
+	}
+	return {};
+}
+
+async function invoicePaymentReferences(invoice: StripeRecord, invoiceId: string): Promise<{ paymentIntentId?: string; chargeId?: string }> {
 	const payments = invoice.payments === undefined || invoice.payments === null ? undefined : asRecord(invoice.payments);
 	const data = payments?.data;
 	if (payments && !Array.isArray(data)) throw new Error('Stripe invoice payments is malformed');
@@ -732,6 +760,8 @@ function invoicePaymentReferences(invoice: StripeRecord): { paymentIntentId?: st
 	}
 	const legacy = { paymentIntentId: stripeId(invoice.payment_intent), chargeId: stripeId(invoice.charge) };
 	if (legacy.paymentIntentId || legacy.chargeId) return legacy;
+	const fetched = await fetchInvoicePaymentRefs(invoiceId);
+	if (fetched.paymentIntentId || fetched.chargeId) return fetched;
 	throw new Error(INVOICE_PAYMENT_REQUIRED_ERROR);
 }
 
@@ -985,9 +1015,89 @@ async function applySubscriptionDefaultPm(orgId: string, pmId: string, maxEventC
 	}
 }
 
-function isSupersededSubscription(org: Awaited<ReturnType<typeof findOrgForStripe>>, subscriptionId: string, eventType: string): boolean {
+/**
+ * Live Stripe status for a stored subscription. The org row's cached status
+ * is untrusted for exclusivity decisions — it stays null until a
+ * customer.subscription.* webhook lands, and goes stale whenever deliveries
+ * fail (observed: five duplicate subscriptions minted while the webhook
+ * endpoint 400ed). A subscription Stripe has forgotten reads as dead.
+ */
+async function liveSubscriptionStatus(subscriptionId: string): Promise<string> {
+	try {
+		const subscription = await getStripe().subscriptions.retrieve(subscriptionId);
+		const status = asRecord(subscription).status;
+		if (typeof status !== 'string' || status.length === 0) throw new Error(`Stripe subscription ${subscriptionId} carries no usable status`);
+		return status;
+	} catch (cause) {
+		const missing =
+			cause !== null &&
+			typeof cause === 'object' &&
+			(cause as { type?: unknown }).type === 'StripeInvalidRequestError' &&
+			(cause as { code?: unknown }).code === 'resource_missing';
+		if (missing) return 'canceled';
+		throw cause;
+	}
+}
+
+/** True while a subscription can still bill: Stripe's active set plus 'incomplete' (first payment may still land) and 'paused' (can resume). */
+function subscriptionStatusIsLive(status: string): boolean {
+	return isActiveSubscriptionStatus(status) || status === 'incomplete' || status === 'paused';
+}
+
+/**
+ * One live subscription per org, ever. A second live subscription on the
+ * org's customer is a duplicate that keeps billing the buyer: cancel it at
+ * Stripe (stops all future invoices) and refund its first paid invoice
+ * payment. Idempotent — the cancel is a no-op once done and the refund
+ * anchors on a per-subscription key, so the fulfillment and subscription-
+ * event paths converging on the same duplicate never double-refund.
+ * `paymentExpected` distinguishes callers that KNOW money moved (a paid
+ * checkout session, an invoice.paid): a missing paid payment there is a
+ * loud retry, while subscription-lifecycle events tolerate an invoice that
+ * has not settled yet — the duplicate's own invoice.paid refunds it later.
+ */
+async function teardownDuplicateSubscription(duplicateSubscriptionId: string, orgId: string, opts: { checkoutSessionId?: string; invoiceId?: string; paymentExpected: boolean }): Promise<void> {
+	const canceled = asRecord(await getStripe().subscriptions.cancel(duplicateSubscriptionId));
+	console.error(`stripe: canceled duplicate subscription ${duplicateSubscriptionId} for org ${orgId} — only one live subscription per org is allowed`);
+	// Prefer the invoice the caller KNOWS was paid (an invoice.paid payload);
+	// otherwise the canceled subscription's latest invoice is the first charge.
+	const latestInvoiceId = opts.invoiceId ?? stripeId(canceled.latest_invoice);
+	const refs = latestInvoiceId ? await fetchInvoicePaymentRefs(latestInvoiceId) : {};
+	if (refs.paymentIntentId) {
+		await refundUngrantablePayment({
+			paymentIntentId: refs.paymentIntentId,
+			idempotencyKey: `refund:ungrantable:subscription:${duplicateSubscriptionId}`,
+			label: `duplicate hosted subscription ${duplicateSubscriptionId} for org ${orgId}`,
+			orgId,
+			checkoutSessionId: opts.checkoutSessionId
+		});
+		return;
+	}
+	if (refs.chargeId || opts.paymentExpected) {
+		// A paid payment exists but cannot be auto-refunded (charge-only), or
+		// the money is provably taken yet invisible to invoicePayments — either
+		// way a human must refund: throw so the delivery stays un-ACKed.
+		console.error(`stripe: duplicate subscription ${duplicateSubscriptionId} for org ${orgId} was canceled but its payment could not be auto-refunded — MANUAL REFUND REQUIRED`);
+		throw new Error(`stripe: duplicate subscription ${duplicateSubscriptionId} canceled but its paid payment was not refundable — MANUAL REFUND REQUIRED`);
+	}
+	console.info(`stripe: duplicate subscription ${duplicateSubscriptionId} for org ${orgId} canceled; no paid invoice payment to refund yet`);
+}
+
+/**
+ * The org tracks ONE subscription. An event naming a different subscription
+ * is superseded ONLY while the tracked one is actually live at Stripe — a
+ * dead tracked subscription means the incoming event belongs to a
+ * resubscribe and must apply (its invoice.paid grants the first period even
+ * when it beats checkout.session.completed to the endpoint).
+ */
+async function isSupersededSubscription(org: Awaited<ReturnType<typeof findOrgForStripe>>, subscriptionId: string, eventType: string): Promise<boolean> {
 	if (!org?.stripeSubscriptionId || org.stripeSubscriptionId === subscriptionId) return false;
-	console.error(`stripe: ignoring stale ${eventType} for superseded subscription ${subscriptionId}; current subscription is ${org.stripeSubscriptionId}`);
+	const live = await liveSubscriptionStatus(org.stripeSubscriptionId);
+	if (!subscriptionStatusIsLive(live)) {
+		console.info(`stripe: tracked subscription ${org.stripeSubscriptionId} is ${live} — ${eventType} for ${subscriptionId} may proceed`);
+		return false;
+	}
+	console.error(`stripe: ignoring stale ${eventType} for superseded subscription ${subscriptionId}; live subscription ${org.stripeSubscriptionId} (${live}) is still tracked for org ${org.id}`);
 	return true;
 }
 
@@ -1002,9 +1112,15 @@ async function handleInvoicePaid(event: Stripe.Event): Promise<void> {
 		console.error(`stripe: invoice.paid ${invoiceId} has no mapped organization`);
 		return;
 	}
-	if (isSupersededSubscription(org, subscriptionId, 'invoice.paid')) return;
+	if (await isSupersededSubscription(org, subscriptionId, 'invoice.paid')) {
+		// An untracked subscription that is billing the org's customer anyway:
+		// cancel it and refund this paid invoice (paymentExpected — the invoice
+		// literally just reported paid).
+		await teardownDuplicateSubscription(subscriptionId, org.id, { invoiceId, paymentExpected: true });
+		return;
+	}
 	const { periodStart, periodEnd } = invoicePeriod(invoice, subscriptionId);
-	const payment = invoicePaymentReferences(invoice);
+	const payment = await invoicePaymentReferences(invoice, invoiceId);
 	await grantSubscriptionPeriod({ orgId: org.id, subscriptionId, invoiceId, ...payment, periodKey: `${periodStart}/${periodEnd}`, periodStart, periodEnd, eventCreated: event.created, eventId: event.id });
 }
 
@@ -1018,7 +1134,11 @@ async function handleInvoicePaymentFailed(event: Stripe.Event): Promise<void> {
 		console.error(`stripe: invoice.payment_failed ${stripeId(invoice.id) ?? event.id} has no mapped organization`);
 		return;
 	}
-	if (subscriptionId && isSupersededSubscription(org, subscriptionId, 'invoice.payment_failed')) return;
+	if (subscriptionId && (await isSupersededSubscription(org, subscriptionId, 'invoice.payment_failed'))) {
+		// No payment landed on this invoice — cancel the duplicate; nothing to refund.
+		await teardownDuplicateSubscription(subscriptionId, org.id, { paymentExpected: false });
+		return;
+	}
 	const period = org?.stripeSubscriptionPeriodStart && org.stripeSubscriptionPeriodEnd
 		? storedSubscriptionPeriod(org, event.id)
 		: subscriptionId
@@ -1036,6 +1156,12 @@ async function handleSubscriptionEvent(event: Stripe.Event): Promise<void> {
 	const org = await findOrgForStripe(subscriptionId, customerId);
 	if (!org) {
 		console.error(`stripe: ${event.type} ${subscriptionId} has no mapped organization`);
+		return;
+	}
+	if (await isSupersededSubscription(org, subscriptionId, event.type)) {
+		// A second live subscription is a duplicate — cancel + refund it rather
+		// than letting it displace the tracked one or keep billing silently.
+		await teardownDuplicateSubscription(subscriptionId, org.id, { paymentExpected: false });
 		return;
 	}
 	const { periodStart, periodEnd } = subscriptionPeriod(subscription, event.id);

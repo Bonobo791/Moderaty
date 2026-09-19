@@ -122,6 +122,27 @@ One-time setup (human, in the Coolify dashboard):
    | `MERCADOPAGO_ACCESS_TOKEN` / `MERCADOPAGO_WEBHOOK_SECRET` | production | dev | optional BRL prepaid credit checkout; webhook fulfillment is signed and idempotent |
    | `MERCADOPAGO_ENVIRONMENT` / `MERCADOPAGO_PRICE_CREDITS_*_BRL_CENTS` | production | sandbox | optional Mercado Pago sandbox/production mode and BRL bundle prices in cents |
    | `MJ_APIKEY_PUBLIC` / `MJ_APIKEY_PRIVATE` / `MAILJET_FROM_EMAIL` / `MAILJET_FROM_NAME` | production | dev | MailJet credentials for the contact form's verification e-mails (`MAILJET_FROM_EMAIL` must be a sender verified in the Mailjet account) |
+
+   **Stripe webhook endpoint is per-environment, per-sandbox.** Register
+   `https://<app-domain>/api/stripe/webhook` under **Developers → Webhooks**
+   (Workbench → Event destinations) once per app — `moderaty-prod`'s in the
+   live environment, `moderaty-dev`'s inside whichever test environment or
+   *named sandbox* owns that app's `STRIPE_SECRET_KEY` and Prices. Endpoints
+   do not cross environments: an endpoint registered in the default test
+   environment never receives a sandbox's events, and vice versa — that
+   mismatch silently starves every webhook (`stripe_events` stays empty,
+   plans never flip to `hosted`, saved cards never appear). Pin each
+   endpoint's API version to the SDK's (`2026-07-29.dahlia`, see
+   `src/lib/server/stripe/client.ts`) and copy *that endpoint's* signing
+   secret into the app's `STRIPE_WEBHOOK_SECRET` — a `stripe listen` secret
+   or another endpoint's `whsec_` fails verification with
+   `400 invalid signature`. Subscribe the endpoint to every event the
+   dispatcher handles (full list in DEPLOY.md §2); after a purchase, the
+   endpoint's Deliveries should show 2xx for `customer.subscription.created`
+   and `invoice.paid`, and the Usage page should show the new plan and saved
+   card. A `500 handler failed` delivery is an application bug — check the
+   app log, not the endpoint config.
+
    Do not set `BUNNY_ACCESS_KEY` in the application environment — the purge
    runs OUTSIDE the container (`.github/workflows/bunny-purge.yml`), with a
    least-privilege zone-scoped Bunny key stored as a GitHub Actions secret.

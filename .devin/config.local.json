@@ -26,7 +26,11 @@
       "Exec(env)",
       "Exec(xargs)",
       "Exec(cp)",
-      "Exec(npm install)"
+      "Exec(npm install)",
+      "Exec(ls)",
+      "Exec(jq)",
+      "Exec(rm)",
+      "Exec(reply)"
     ]
   }
 }

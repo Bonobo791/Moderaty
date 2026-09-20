@@ -225,9 +225,16 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 		if (existing) return 'already';
 		const org = await db.select({ stripeSubscriptionId: organizations.stripeSubscriptionId, stripeSubscriptionStatus: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, orgId)).get();
 		if (!org) throw new Error(`org not found: ${orgId}`);
-		if (org.stripeSubscriptionId && isActiveSubscriptionStatus(org.stripeSubscriptionStatus)) {
-			console.error(`stripe: lifetime checkout ${sessionId} would overlap hosted access for ${orgId}`);
-			return 'rejected';
+		// A subscription already scheduled to end does not block the upgrade —
+		// that wind-down window is the supported cancel→lifetime path. The
+		// stored status is only a cache, so the blocking verdict comes from the
+		// LIVE subscription: live and NOT scheduled to end (e.g. a portal
+		// resume mid-checkout) means the paid session can never grant — refund
+		// it like every other ungrantable payment instead of keeping the money.
+		if (org.stripeSubscriptionId && isActiveSubscriptionStatus(org.stripeSubscriptionStatus) && (await liveHostedBlocksLifetime(org.stripeSubscriptionId, sessionId))) {
+			console.error(`stripe: lifetime checkout ${sessionId} would overlap hosted access for ${orgId} — the live subscription is not scheduled to end`);
+			await refundUngrantableCheckout(sessionId, orgId, paymentIntent, charge, 'the org has a live hosted subscription that is not scheduled to end');
+			return 'refunded';
 		}
 		const activeLifetime = await db.select({ id: stripeLifetimeEntitlements.id, checkoutSessionId: stripeLifetimeEntitlements.checkoutSessionId }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
 		// The winner may be THIS session: a concurrent duplicate delivery
@@ -1023,20 +1030,58 @@ async function applySubscriptionDefaultPm(orgId: string, pmId: string, maxEventC
  * endpoint 400ed). A subscription Stripe has forgotten reads as dead.
  */
 async function liveSubscriptionStatus(subscriptionId: string): Promise<string> {
+	const live = await fetchLiveSubscription(subscriptionId);
+	if (!live) return 'canceled';
+	const status = live.status;
+	if (typeof status !== 'string' || status.length === 0) throw new Error(`Stripe subscription ${subscriptionId} carries no usable status`);
+	return status;
+}
+
+async function fetchLiveSubscription(subscriptionId: string): Promise<StripeRecord | null> {
 	try {
-		const subscription = await getStripe().subscriptions.retrieve(subscriptionId);
-		const status = asRecord(subscription).status;
-		if (typeof status !== 'string' || status.length === 0) throw new Error(`Stripe subscription ${subscriptionId} carries no usable status`);
-		return status;
+		return asRecord(await getStripe().subscriptions.retrieve(subscriptionId));
 	} catch (cause) {
 		const missing =
 			cause !== null &&
 			typeof cause === 'object' &&
 			(cause as { type?: unknown }).type === 'StripeInvalidRequestError' &&
 			(cause as { code?: unknown }).code === 'resource_missing';
-		if (missing) return 'canceled';
+		if (missing) return null;
 		throw cause;
 	}
+}
+
+/**
+ * True when the subscription is scheduled to end — either mechanism: the
+ * legacy cancel_at_period_end flag OR the cancel_at timestamp the customer
+ * portal writes for end-of-period cancellation (observed live: a portal
+ * cancel delivered cancel_at_period_end=false + cancel_at=period_end, which
+ * a flag-only read recorded as "not canceling"). An absent cancel_at means
+ * "not scheduled"; a present-but-malformed one is a failed API call (I2) —
+ * throw so the caller's retry re-reads instead of persisting "still paying".
+ */
+function subscriptionCancelScheduled(subscription: StripeRecord, context: string): boolean {
+	if (typeof subscription.cancel_at_period_end !== 'boolean') throw new Error(`Stripe subscription ${context} has invalid cancel_at_period_end`);
+	const cancelAt = subscription.cancel_at;
+	if (cancelAt === null || cancelAt === undefined) return subscription.cancel_at_period_end;
+	if (typeof cancelAt !== 'number' || !Number.isSafeInteger(cancelAt) || cancelAt <= 0) throw new Error(`Stripe subscription ${context} has invalid cancel_at`);
+	return true;
+}
+
+/**
+ * LIVE check before a paid lifetime checkout overlaps a hosted subscription:
+ * the stored status is only a cache, and a portal resume may not have
+ * webhoked yet — so when the cache says the sub is live, Stripe decides. A
+ * subscription that is still billing AND not scheduled to end blocks the
+ * grant (the caller refunds the ungrantable payment); a scheduled-end or
+ * forgotten subscription lets the upgrade through.
+ */
+async function liveHostedBlocksLifetime(subscriptionId: string, context: string): Promise<boolean> {
+	const live = await fetchLiveSubscription(subscriptionId);
+	if (!live) return false;
+	const status = live.status;
+	if (typeof status !== 'string' || status.length === 0) throw new Error(`Stripe subscription ${subscriptionId} carries no usable status`);
+	return isActiveSubscriptionStatus(status) && !subscriptionCancelScheduled(live, context);
 }
 
 /** True while a subscription can still bill: Stripe's active set plus 'incomplete' (first payment may still land) and 'paused' (can resume). */
@@ -1165,7 +1210,7 @@ async function handleSubscriptionEvent(event: Stripe.Event): Promise<void> {
 		return;
 	}
 	const { periodStart, periodEnd } = subscriptionPeriod(subscription, event.id);
-	if (typeof subscription.cancel_at_period_end !== 'boolean') throw new Error(`Stripe ${event.type} ${event.id} has invalid cancel_at_period_end`);
+	const canceling = subscriptionCancelScheduled(subscription, event.id);
 	const pmId = subscriptionDefaultPmId(subscription, event.id);
 	const applied = await applySubscriptionSnapshot({
 		orgId: org.id,
@@ -1173,13 +1218,31 @@ async function handleSubscriptionEvent(event: Stripe.Event): Promise<void> {
 		status,
 		periodStart,
 		periodEnd,
-		cancelAtPeriodEnd: subscription.cancel_at_period_end,
+		cancelAtPeriodEnd: canceling,
 		eventCreated: event.created,
 		eventId: event.id
 	});
 	// Only a snapshot this event actually applied may carry its card — a stale
 	// event's payment method is equally stale.
 	if (applied && pmId) await applySubscriptionDefaultPm(org.id, pmId, event.created);
+	if (applied) await endSubscriptionOnLifetimeOrg(org.id, subscriptionId, event, status, canceling);
+}
+
+/**
+ * A lifetime org must never keep paying for hosted access. Lifetime can be
+ * bought while a subscription is merely SCHEDULED to end, so the one way back
+ * to a live-and-billing sub is a portal resume (or an out-of-band new one).
+ * When the freshest snapshot says the tracked subscription is live and not
+ * ending on a lifetime org, re-schedule its cancellation at period end — the
+ * Terms' cancellation rule, and it preserves the paid remainder — and scream.
+ * A Stripe failure throws so the delivery stays un-ACKed and retries.
+ */
+async function endSubscriptionOnLifetimeOrg(orgId: string, subscriptionId: string, event: Stripe.Event, status: string, canceling: boolean): Promise<void> {
+	if (canceling || !isActiveSubscriptionStatus(status)) return;
+	const lifetime = await db.select({ id: stripeLifetimeEntitlements.id }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
+	if (!lifetime) return;
+	console.error(`stripe: ${event.type} ${event.id} shows subscription ${subscriptionId} live and not ending on lifetime org ${orgId} — re-scheduling its cancellation at period end so it cannot bill alongside the lifetime plan`);
+	await getStripe().subscriptions.update(subscriptionId, { cancel_at_period_end: true });
 }
 
 /**

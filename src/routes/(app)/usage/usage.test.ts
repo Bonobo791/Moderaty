@@ -335,6 +335,41 @@ describe('usage load', () => {
 		// The cancel-first hint keeps the lifetime path discoverable.
 		expect(body).toContain('cancel');
 	});
+
+	test('load exposes the pending-cancellation flag on billing', async () => {
+		await seedOrg({ plan: 'hosted', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active', stripeSubscriptionCancelAtPeriodEnd: 1, stripeSubscriptionPeriodEnd: '2026-10-19T00:00:00.000Z' });
+		const data = (await load({ locals: { user: OWNER } } as never)) as { billing: { cancelAtPeriodEnd: boolean; periodEnd: string } };
+		expect(data.billing.cancelAtPeriodEnd).toBe(true);
+		expect(data.billing.periodEnd).toBe('2026-10-19T00:00:00.000Z');
+	});
+
+	test('a cancel-pending hosted org sees the pending notice and the lifetime buy form', async () => {
+		// The cancel is already scheduled — the page must SAY so (silence is
+		// the bug: the canceled sub looked identical to a live one) and the
+		// lifetime offer unlocks immediately instead of after period end.
+		const base = {
+			maintenance: false,
+			user: OWNER,
+			summary: { remaining: 0, usedThisMonth: 0, usedLifetime: 0 },
+			metered: false,
+			history: [],
+			bundles: [],
+			mercadoPagoBundles: [],
+			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: false, card: null },
+			autoTopupConsentText: 'consent',
+			stripeConfigured: true,
+			plans: { hosted: true, lifetime: true },
+			lifetimeSlots: 997,
+			billing: { plan: 'hosted', subscriptionStatus: 'active', periodEnd: '2026-10-19T00:00:00.000Z', cancelAtPeriodEnd: true }
+		};
+		const body = render(Page, { props: { data: base, form: null } as never }).body;
+		expect(body).toContain('Manage subscription');
+		expect(body).toContain('subscription is canceled');
+		expect(body).toContain('action="?/buyPlan"');
+		expect(body).toContain('value="lifetime"');
+		// A second hosted subscription stays blocked — resume via the portal.
+		expect(body).not.toContain('value="hosted"');
+	});
 });
 
 describe('usage buy action', () => {

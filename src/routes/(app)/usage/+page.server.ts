@@ -143,7 +143,8 @@ export const load: PageServerLoad = async ({ locals }) => {
 				creditsRemaining: organizations.creditsRemaining,
 				plan: organizations.plan,
 				stripeSubscriptionStatus: organizations.stripeSubscriptionStatus,
-				stripeSubscriptionPeriodEnd: organizations.stripeSubscriptionPeriodEnd
+				stripeSubscriptionPeriodEnd: organizations.stripeSubscriptionPeriodEnd,
+				stripeSubscriptionCancelAtPeriodEnd: organizations.stripeSubscriptionCancelAtPeriodEnd
 			})
 			.from(organizations)
 			.where(eq(organizations.id, user.orgId))
@@ -187,7 +188,10 @@ export const load: PageServerLoad = async ({ locals }) => {
 			billing: {
 				plan: org.plan,
 				subscriptionStatus: org.stripeSubscriptionStatus,
-				periodEnd: org.stripeSubscriptionPeriodEnd
+				periodEnd: org.stripeSubscriptionPeriodEnd,
+				// 1 while the subscription is scheduled to end (either Stripe
+				// mechanism: cancel_at_period_end or the portal's cancel_at).
+				cancelAtPeriodEnd: org.stripeSubscriptionCancelAtPeriodEnd === 1
 			},
 			stripeConfigured: Boolean(env.STRIPE_SECRET_KEY),
 			plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) }

@@ -31,6 +31,7 @@ const mocks = vi.hoisted(() => ({
 	customersRetrieve: vi.fn(),
 	subscriptionsRetrieve: vi.fn(),
 	subscriptionsCancel: vi.fn(),
+	subscriptionsUpdate: vi.fn(),
 	invoicePaymentsList: vi.fn(),
 	paymentMethodsAttach: vi.fn(),
 	refundsCreate: vi.fn()
@@ -43,7 +44,7 @@ vi.mock('$lib/server/stripe/client', () => ({
 		charges: { retrieve: mocks.chargesRetrieve },
 		disputes: { retrieve: mocks.disputesRetrieve },
 		customers: { update: mocks.customersUpdate, retrieve: mocks.customersRetrieve },
-		subscriptions: { retrieve: mocks.subscriptionsRetrieve, cancel: mocks.subscriptionsCancel },
+		subscriptions: { retrieve: mocks.subscriptionsRetrieve, cancel: mocks.subscriptionsCancel, update: mocks.subscriptionsUpdate },
 		invoicePayments: { list: mocks.invoicePaymentsList },
 		paymentMethods: { attach: mocks.paymentMethodsAttach },
 		refunds: { create: mocks.refundsCreate }
@@ -104,10 +105,52 @@ describe('fenced Stripe event leases', () => {
 });
 
 describe('paid hosted products', () => {
-	test('rejects a lifetime fulfillment while a hosted subscription is active', async () => {
+	test('refunds a lifetime fulfillment while a hosted subscription is live and not ending', async () => {
+		// The stored status is only a cache: before refusing the grant the
+		// LIVE subscription is consulted — still billing and not scheduled to
+		// end means the paid session can never grant, so the money goes back
+		// (a bare 'rejected' would keep $49 for nothing).
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
 		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lifetime', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
-		expect(await fulfillCheckout('cs_lifetime')).toBe('rejected');
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_1', status: 'active', cancel_at_period_end: false, cancel_at: null });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			expect(await fulfillCheckout('cs_lifetime')).toBe('refunded');
+		} finally {
+			errorSpy.mockRestore();
+		}
+		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_1', metadata: { reason: 'ungrantable', org_id: 'org-1', checkout_session_id: 'cs_lifetime' } }, { idempotencyKey: 'refund:ungrantable:cs_lifetime' });
+		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toHaveLength(0);
+	});
+
+	test('a lifetime checkout grants while the hosted subscription is scheduled to end', async () => {
+		// The cancel-pending window is the supported upgrade path: the stored
+		// flag says the sub is ending and the LIVE check confirms Stripe still
+		// has it scheduled (cancel_at), so lifetime claims a slot — the hosted
+		// allowance simply runs out at period end.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active', stripeSubscriptionCancelAtPeriodEnd: 1 });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lt_pending', metadata: { org_id: 'org-1', product: 'lifetime' } }));
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_1', status: 'active', cancel_at_period_end: false, cancel_at: 1_802_678_400 });
+		expect(await fulfillCheckout('cs_lt_pending')).toBe('granted');
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.plan).toBe('lifetime');
+		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toHaveLength(1);
+	});
+
+	test('a lifetime checkout refunds when the subscription was resumed mid-checkout', async () => {
+		// The org's row still says cancel-pending, but Stripe shows the
+		// subscription resumed (no cancel_at, no cancel_at_period_end): the
+		// grant would overlap hosted access, so the payment is ungrantable.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active', stripeSubscriptionCancelAtPeriodEnd: 1 });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lt_resumed', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_1', status: 'active', cancel_at_period_end: false, cancel_at: null });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			expect(await fulfillCheckout('cs_lt_resumed')).toBe('refunded');
+		} finally {
+			errorSpy.mockRestore();
+		}
+		expect(mocks.refundsCreate).toHaveBeenCalledWith(expect.objectContaining({ payment_intent: 'pi_1' }), expect.objectContaining({ idempotencyKey: expect.stringContaining('cs_lt_resumed') }));
 		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toHaveLength(0);
 	});
 
@@ -619,6 +662,69 @@ describe('subscription lifecycle webhooks', () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
 		const subscription = { id: 'sub_1', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false, default_payment_method: { id: 123 } };
 		await expect(handleStripeEvent(event('customer.subscription.updated', 'evt_pm_bad', subscription, 300) as never)).rejects.toThrow('malformed default_payment_method');
+	});
+
+	test('a portal cancellation scheduled via cancel_at is recorded as pending', async () => {
+		// The Stripe customer portal schedules end-of-period cancellation via
+		// the cancel_at TIMESTAMP while cancel_at_period_end stays false —
+		// reading only the flag records a canceled sub as "not canceling" and
+		// the pending cancel stays invisible to the org (production repro).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
+		const subscription = { id: 'sub_1', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false, cancel_at: 1_802_678_400, canceled_at: 1_800_100_000 };
+		expect(await handleStripeEvent(event('customer.subscription.updated', 'evt_cancel_at', subscription, 300) as never)).toBe(true);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeSubscriptionCancelAtPeriodEnd).toBe(1);
+		expect(org?.plan).toBe('hosted');
+	});
+
+	test('a malformed cancel_at timestamp fails loudly', async () => {
+		// I2: a present-but-garbage cancel_at is a failed API call — throwing
+		// keeps the delivery un-ACKed instead of persisting "not canceling".
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
+		const subscription = { id: 'sub_1', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false, cancel_at: 'soon' };
+		await expect(handleStripeEvent(event('customer.subscription.updated', 'evt_bad_cancel_at', subscription, 300) as never)).rejects.toThrow('cancel_at');
+	});
+
+	test('resuming a scheduled cancellation clears the pending flag', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active', stripeSubscriptionCancelAtPeriodEnd: 1 });
+		const subscription = { id: 'sub_1', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false, cancel_at: null, canceled_at: null };
+		expect(await handleStripeEvent(event('customer.subscription.updated', 'evt_resumed', subscription, 300) as never)).toBe(true);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeSubscriptionCancelAtPeriodEnd).toBe(0);
+		expect(mocks.subscriptionsUpdate).not.toHaveBeenCalled();
+	});
+
+	test('a subscription resumed on a lifetime org is re-canceled at period end', async () => {
+		// Lifetime can be bought while a hosted sub is merely scheduled to
+		// end; a portal resume after that purchase would keep billing $5/mo
+		// for an entitlement the lifetime plan already covers — the handler
+		// re-schedules its cancellation (period end, per the Terms' cancel
+		// rule) and screams, instead of silently double-charging forever.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'lifetime', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1', activeEntitlementId: 1 }).where(eq(stripeLifetimeSlots.slot, 1));
+		await testDb().db.insert(stripeLifetimeEntitlements).values({ id: 1, orgId: 'org-1', slot: 1, checkoutSessionId: 'cs_lt' });
+		const subscription = { id: 'sub_1', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false, cancel_at: null, canceled_at: null };
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			expect(await handleStripeEvent(event('customer.subscription.updated', 'evt_resume_lt', subscription, 300) as never)).toBe(true);
+		} finally {
+			errorSpy.mockRestore();
+		}
+		expect(mocks.subscriptionsUpdate).toHaveBeenCalledWith('sub_1', { cancel_at_period_end: true });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.plan).toBe('lifetime');
+	});
+
+	test('a subscription still scheduled to end on a lifetime org is left alone', async () => {
+		// The normal upgrade path: sub is ending at period end while lifetime
+		// is active — nothing to re-cancel, no Stripe write at all.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'lifetime', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1', activeEntitlementId: 1 }).where(eq(stripeLifetimeSlots.slot, 1));
+		await testDb().db.insert(stripeLifetimeEntitlements).values({ id: 1, orgId: 'org-1', slot: 1, checkoutSessionId: 'cs_lt' });
+		const subscription = { id: 'sub_1', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false, cancel_at: 1_802_678_400 };
+		expect(await handleStripeEvent(event('customer.subscription.updated', 'evt_lt_ending', subscription, 300) as never)).toBe(true);
+		expect(mocks.subscriptionsUpdate).not.toHaveBeenCalled();
+		expect(mocks.subscriptionsCancel).not.toHaveBeenCalled();
 	});
 
 	test('hosted fulfillment stores the subscription card without waiting for subscription events', async () => {

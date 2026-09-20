@@ -70,6 +70,22 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	{data.user?.orgName} — comment credits
 </p>
 
+{#snippet lifetimeOffer()}
+	{#if data.lifetimeSlots === 0}
+		<p class="muted">The lifetime plan is sold out — all 1,000 claimed.</p>
+	{:else}
+		<form method="POST" action="?/buyPlan" use:enhance={submitting}>
+			<input type="hidden" name="plan" value="lifetime" />
+			<input type="hidden" name="attempt_id" value={checkoutAttempts.lifetime ?? ''} />
+			<button class="btn secondary" type="submit" disabled={pending}>Buy lifetime · $49</button>
+		</form>
+		<p class="muted">
+			Unlimited comments while the lifetime plan is available.
+			{#if typeof data.lifetimeSlots === 'number'}{1000 - data.lifetimeSlots} of 1,000 claimed.{/if}
+		</p>
+	{/if}
+{/snippet}
+
 {#if form?.error}
 	<p class="error-box" role="alert">{form.error}</p>
 {/if}
@@ -108,15 +124,27 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 				<p class="muted">You have the lifetime plan — unlimited moderated comments.</p>
 			{:else if data.billing?.plan === 'hosted'}
 				<!-- One live subscription per org: a second buy form would only be
-				rejected server-side, and lifetime requires canceling first —
-				render the portal button that can actually manage the
+				rejected server-side, and lifetime requires the subscription to be
+				ending — render the portal button that can actually manage the
 				subscription instead of buttons that always fail (I12). -->
 				{#if data.stripeConfigured}
 					<form method="POST" action="?/manageCards" use:enhance={submitting}>
 						<button class="btn secondary" type="submit" disabled={pending}>Manage subscription</button>
 					</form>
 				{/if}
-				{#if data.plans.lifetime}
+				{#if data.billing.cancelAtPeriodEnd}
+					<!-- The cancel already registered — say so plainly instead of
+					repeating "cancel first" at a user who just did. Lifetime unlocks
+					immediately: the sub cannot renew, and a resume is re-canceled
+					by the subscription webhook handler. -->
+					<p class="muted">
+						Your subscription is canceled{#if data.billing.periodEnd} — it stays active until {new Date(data.billing.periodEnd).toLocaleDateString()}{/if};
+						included comments keep working until it ends.
+					</p>
+					{#if data.plans.lifetime}
+						{@render lifetimeOffer()}
+					{/if}
+				{:else if data.plans.lifetime}
 					<p class="muted">To switch to the lifetime plan, cancel your hosted subscription first (Manage subscription).</p>
 				{/if}
 			{:else}
@@ -129,19 +157,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 					<p class="muted">100 included comments per billing period. Unused comments do not roll over; prepaid credits cover overage.</p>
 				{/if}
 				{#if data.plans.lifetime}
-					{#if data.lifetimeSlots === 0}
-						<p class="muted">The lifetime plan is sold out — all 1,000 claimed.</p>
-					{:else}
-						<form method="POST" action="?/buyPlan" use:enhance={submitting}>
-							<input type="hidden" name="plan" value="lifetime" />
-							<input type="hidden" name="attempt_id" value={checkoutAttempts.lifetime ?? ''} />
-							<button class="btn secondary" type="submit" disabled={pending}>Buy lifetime · $49</button>
-						</form>
-						<p class="muted">
-							Unlimited comments while the lifetime plan is available.
-							{#if typeof data.lifetimeSlots === 'number'}{1000 - data.lifetimeSlots} of 1,000 claimed.{/if}
-						</p>
-					{/if}
+					{@render lifetimeOffer()}
 				{/if}
 			{/if}
 		</div>

@@ -227,16 +227,25 @@ export async function markCheckoutAttemptFulfilled(sessionId: string): Promise<v
 }
 
 async function assertPlanAvailable(orgId: string, plan: PaidPlan): Promise<void> {
-	const org = await db.select({ plan: organizations.plan, stripeSubscriptionId: organizations.stripeSubscriptionId, stripeSubscriptionStatus: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, orgId)).get();
+	const org = await db.select({ plan: organizations.plan, stripeSubscriptionId: organizations.stripeSubscriptionId, stripeSubscriptionStatus: organizations.stripeSubscriptionStatus, stripeSubscriptionCancelAtPeriodEnd: organizations.stripeSubscriptionCancelAtPeriodEnd }).from(organizations).where(eq(organizations.id, orgId)).get();
 	if (!org) throw new Error(`org not found: ${orgId}`);
 	const hasActiveHosted = Boolean(org.stripeSubscriptionId && isActiveSubscriptionStatus(org.stripeSubscriptionStatus));
 	const lifetime = await db.select({ id: stripeLifetimeEntitlements.id }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
 	if (plan === 'hosted') {
+		// A cancel-pending sub still blocks a SECOND hosted subscription —
+		// staying on hosted means resuming in the portal, not minting a
+		// duplicate the webhook would have to tear down and refund.
 		if (hasActiveHosted) throw new Error(HOSTED_PLAN_EXISTS_ERROR);
 		if (org.plan === 'lifetime' || lifetime) throw new Error(LIFETIME_PLAN_EXISTS_ERROR);
 		return;
 	}
-	if (hasActiveHosted) throw new Error(ACTIVE_HOSTED_PLAN_ERROR);
+	// The lifetime gate is looser: a subscription already scheduled to end
+	// (cancel_at_period_end or the portal's cancel_at timestamp — both land
+	// in stripeSubscriptionCancelAtPeriodEnd) cannot renew, so buying now is
+	// safe. Fulfillment re-verifies against the LIVE subscription in case a
+	// resume hasn't webhoked yet, and a later resume is re-canceled by the
+	// subscription-event handler.
+	if (hasActiveHosted && org.stripeSubscriptionCancelAtPeriodEnd !== 1) throw new Error(ACTIVE_HOSTED_PLAN_ERROR);
 	if (org.plan === 'lifetime' || lifetime) throw new Error(LIFETIME_PLAN_EXISTS_ERROR);
 	const available = await db.select({ slot: stripeLifetimeSlots.slot }).from(stripeLifetimeSlots).where(isNull(stripeLifetimeSlots.activeOrgId)).limit(1).get();
 	if (!available) throw new Error(LIFETIME_SOLD_OUT_ERROR);

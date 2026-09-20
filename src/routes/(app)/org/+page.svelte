@@ -49,7 +49,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	</div>
 {/if}
 
-{#if isOwner}
+{#if isOwner && (data.openAiKeyEligible || data.hasOpenAiKey)}
 	<div class="card">
 		<h2 style="margin-top:0">OpenAI key</h2>
 		{#if data.hasOpenAiKey}
@@ -59,7 +59,10 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 			<form method="POST" action="?/clearOpenAiKey" use:enhance>
 				<button class="btn danger small" type="submit">Remove the saved OpenAI key</button>
 			</form>
-		{:else}
+		{:else if data.openAiKeyEligible}
+			<!-- Lifetime-plan option: the set form renders only while the org is
+			eligible; the saved state above stays visible regardless so a stored
+			key never becomes an unremovable invisible credential. -->
 			<p class="muted">
 				Score comments with your own OpenAI key instead of the deployment's. The key is
 				validated with OpenAI before it is saved, stored encrypted, and never shown again.

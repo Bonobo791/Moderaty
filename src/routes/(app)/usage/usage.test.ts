@@ -308,6 +308,40 @@ describe('usage load', () => {
 		expect(owned).toContain('lifetime plan');
 	});
 
+	test('a lifetime org sees the BYOK pointer to the Team page; metered orgs do not', async () => {
+		// The key form lives on the Team page (owner-only, lifetime-gated);
+		// the lifetime plan state on this page names it so buyers can find
+		// it — hosted and free orgs never see the option advertised.
+		const base = {
+			maintenance: false,
+			user: OWNER,
+			summary: { remaining: 0, usedThisMonth: 0, usedLifetime: 0 },
+			metered: false,
+			history: [],
+			bundles: [],
+			mercadoPagoBundles: [],
+			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: false },
+			autoTopupConsentText: 'consent',
+			stripeConfigured: true,
+			plans: { hosted: true, lifetime: true }
+		};
+		const lifetime = render(Page, {
+			props: { data: { ...base, billing: { plan: 'lifetime', subscriptionStatus: null, periodEnd: null } }, form: null } as never
+		}).body;
+		expect(lifetime).toContain('href="/org"');
+		expect(lifetime).toContain('OpenAI API key');
+
+		const hosted = render(Page, {
+			props: { data: { ...base, billing: { plan: 'hosted', subscriptionStatus: 'active', periodEnd: '2026-10-19T00:00:00.000Z' } }, form: null } as never
+		}).body;
+		expect(hosted).not.toContain('OpenAI API key');
+
+		const free = render(Page, {
+			props: { data: { ...base, billing: { plan: null, subscriptionStatus: null, periodEnd: null } }, form: null } as never
+		}).body;
+		expect(free).not.toContain('OpenAI API key');
+	});
+
 	test('a hosted org sees Manage subscription instead of dead buy buttons', async () => {
 		// One live subscription per org: the "Start hosted" form only ever
 		// 400s for a subscribed org, and the lifetime form only ever tells

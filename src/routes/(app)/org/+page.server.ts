@@ -49,15 +49,19 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 			invites: [],
 			inviteBase: new URL('/invite/', url.origin).toString(),
 			maintenance: true,
-			hasOpenAiKey: false
+			hasOpenAiKey: false,
+			openAiKeyEligible: false
 		};
 	const user = requireUser(locals);
 	const members = await listMembers(user.id, user.orgId);
 	const invites =
 		user.orgRole === 'admin' || user.orgRole === 'owner' ? await listOpenInvites(user.id, user.orgId) : [];
-	// Never serialize secrets to the client: the page gets a boolean only.
+	// Never serialize secrets to the client: the page gets booleans only.
+	// BYOK is a lifetime-plan option — openAiKeyEligible gates the set form;
+	// hasOpenAiKey stays separate so a key saved before eligibility was lost
+	// still renders its remove state instead of becoming invisible.
 	const keyRow = await db
-		.select({ openaiKeyEnc: organizations.openaiKeyEnc })
+		.select({ openaiKeyEnc: organizations.openaiKeyEnc, plan: organizations.plan })
 		.from(organizations)
 		.where(eq(organizations.id, user.orgId))
 		.get();
@@ -66,7 +70,8 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 		members,
 		invites,
 		inviteBase: new URL('/invite/', url.origin).toString(),
-		hasOpenAiKey: Boolean(keyRow?.openaiKeyEnc)
+		hasOpenAiKey: Boolean(keyRow?.openaiKeyEnc),
+		openAiKeyEligible: keyRow?.plan === 'lifetime'
 	};
 };
 
@@ -141,6 +146,16 @@ export const actions: Actions = {
 	setOpenAiKey: async ({ request, locals }) => {
 		const user = requireUser(locals);
 		requireOrgRole(user, 'owner');
+		// BYOK is a lifetime-plan option — enforce it here, not just by
+		// hiding the card: a hand-rolled POST hits the same wall, and the
+		// check runs before any form parsing or outbound validation call.
+		const org = await db
+			.select({ plan: organizations.plan })
+			.from(organizations)
+			.where(eq(organizations.id, user.orgId))
+			.get();
+		if (org?.plan !== 'lifetime')
+			return fail(403, { error: 'Using your own OpenAI key requires the lifetime plan.' });
 		// Stryker disable next-line StringLiteral: a missing openAiKey field ('') and any placeholder without the sk- prefix fail the identical startsWith('sk-') 400 check. NOTE: also sweeps the 'openAiKey' field-name mutant on this line (pinned by the setOpenAiKey tests, verified killed pre-exclusion).
 		const key = String((await request.formData()).get('openAiKey') ?? '').trim();
 		if (!key.startsWith('sk-') || key.length > 200)

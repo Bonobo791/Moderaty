@@ -122,6 +122,12 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		<div class="plan-actions">
 			{#if data.billing?.plan === 'lifetime'}
 				<p class="muted">You have the lifetime plan — unlimited moderated comments.</p>
+				<!-- BYOK is a lifetime perk: the form itself lives on the Team
+				page (owner-only there too) — this names it where buyers look. -->
+				<p class="muted">
+					Optional: score comments with your own OpenAI API key — manage it on the
+					<a href="/org">Team page</a>.
+				</p>
 			{:else if data.billing?.plan === 'hosted'}
 				<!-- One live subscription per org: a second buy form would only be
 				rejected server-side, and lifetime requires the subscription to be

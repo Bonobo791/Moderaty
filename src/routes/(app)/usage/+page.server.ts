@@ -23,7 +23,7 @@ import { env } from '$env/dynamic/private';
 import { and, eq, ne } from 'drizzle-orm';
 
 import { AUTO_TOPUP_DEFAULT_THRESHOLD } from '$lib/server/billing/autotopup';
-import { createCreditCheckout, createPlanCheckout, getOrCreateStripeCustomer } from '$lib/server/billing/checkout';
+import { checkoutRejectionMessage, createCreditCheckout, createPlanCheckout, getOrCreateStripeCustomer } from '$lib/server/billing/checkout';
 import { lifetimeSlotsRemaining } from '$lib/server/billing/entitlements';
 import { createMercadoPagoCreditCheckout } from '$lib/server/mercadopago/checkout';
 import { configuredMercadoPagoBundles } from '$lib/server/mercadopago/bundles';
@@ -72,6 +72,31 @@ function maintenanceData() {
 }
 
 /**
+ * The saved payment method's display label, fetched live — the portal can
+ * swap the org's card at any time, so cached brand/last4 would drift. A
+ * Stripe failure is loud in the server log and renders "details
+ * unavailable" in the UI — never a maintenance page over a cosmetic read,
+ * and never a blank implication that no card exists (the pointer is
+ * authoritative for hasCard).
+ */
+async function savedCardLabel(pmId: string): Promise<{ label: string } | null> {
+	try {
+		const pm = await getStripe().paymentMethods.retrieve(pmId);
+		const card = pm.card;
+		if (pm.type === 'card' && card && typeof card.brand === 'string' && typeof card.last4 === 'string') {
+			const brand = card.brand[0].toUpperCase() + card.brand.slice(1);
+			return { label: `${brand} •••• ${card.last4}` };
+		}
+		// Non-card instrument (link, bank debit, …): identify it by type.
+		const type = typeof pm.type === 'string' && pm.type.length > 0 ? pm.type : 'unknown';
+		return { label: `${type[0].toUpperCase()}${type.slice(1)} payment method` };
+	} catch (cause) {
+		console.error(`usage: saved payment method ${pmId} could not be loaded: ${cause instanceof Error ? cause.message : String(cause)}`);
+		return null;
+	}
+}
+
+/**
  * Shared checkout try/catch: the success path throws a 303 redirect, auth
  * failures (HttpError) pass through untouched, and everything else is a loud
  * generic failure via checkoutFailure — raw error text never reaches the
@@ -84,6 +109,15 @@ async function checkoutRedirect(create: () => Promise<string>, orgId: string) {
 		// SvelteKit's redirect() is a function that THROWS a Redirect — detect
 		// it with isRedirect, never instanceof.
 		if (isRedirect(error) || isHttpError(error)) throw error;
+		// Known business rejections (already subscribed, sold out, unmetered
+		// org buying credits) carry their real reason — a generic defect
+		// message would tell the user to retry a purchase that can never
+		// succeed.
+		const rejection = checkoutRejectionMessage(error);
+		if (rejection) {
+			console.info(`usage: checkout rejected for org ${orgId}: ${error instanceof Error ? error.message : String(error)}`);
+			return fail(400, { error: rejection });
+		}
 		return checkoutFailure(error, orgId);
 	}
 }
@@ -117,11 +151,12 @@ export const load: PageServerLoad = async ({ locals }) => {
 		if (!org) {
 			throw error(500, 'account has no organization — contact support');
 		}
-		const [summary, history, metered, lifetimeSlots] = await Promise.all([
+		const [summary, history, metered, lifetimeSlots, savedCard] = await Promise.all([
 			usageSummary(user.orgId),
 			listCreditTransactions(user.orgId, 30),
 			orgIsMetered(user.orgId),
-			lifetimeSlotsRemaining()
+			lifetimeSlotsRemaining(),
+			org.stripeDefaultPmId ? savedCardLabel(org.stripeDefaultPmId) : Promise.resolve(null)
 		]);
 		return {
 			maintenance: false,
@@ -146,7 +181,8 @@ export const load: PageServerLoad = async ({ locals }) => {
 				state: org.autoTopupState ?? 'idle',
 				failures: org.autoTopupFailures ?? 0,
 				lastAttemptAt: org.autoTopupLastAttemptAt,
-				hasCard: Boolean(org.stripeDefaultPmId)
+				hasCard: Boolean(org.stripeDefaultPmId),
+				card: savedCard
 			},
 			billing: {
 				plan: org.plan,

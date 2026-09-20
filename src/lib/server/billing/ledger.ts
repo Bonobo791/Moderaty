@@ -126,6 +126,8 @@ export async function orgIsMetered(orgId: string): Promise<boolean> {
 	return hasHostedEntitlement(row) || row.creditsRemaining !== null;
 }
 
+export const UNMETERED_CREDIT_PURCHASE_ERROR = 'the lifetime plan includes unlimited moderated comments — credit purchases are not available';
+
 /**
  * Rejects credit purchases for plans whose comments are already unlimited.
  * Called before a checkout attempt is planted for ANY credit bundle (Stripe
@@ -140,7 +142,7 @@ export async function assertCreditsPurchasable(orgId: string): Promise<void> {
 		.get();
 	if (!row) throw new Error(`org not found: ${orgId}`);
 	if (isUnmeteredPlan(row.plan)) {
-		throw new Error('the lifetime plan includes unlimited moderated comments — credit purchases are not available');
+		throw new Error(UNMETERED_CREDIT_PURCHASE_ERROR);
 	}
 }
 

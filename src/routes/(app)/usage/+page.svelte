@@ -99,34 +99,49 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	</p>
 {/if}
 
-{#if isOwner && (data.plans.hosted || data.plans.lifetime)}
+{#if isOwner && (data.plans.hosted || data.plans.lifetime || data.billing?.plan === 'hosted' || data.billing?.plan === 'lifetime')}
 	<div class="card">
 		<h2 style="margin-top:0">Plans</h2>
 		<p class="muted">Current plan: <strong>{data.billing?.plan ?? 'free'}</strong>{#if data.billing?.periodEnd} · period ends {new Date(data.billing.periodEnd).toLocaleDateString()}{/if}</p>
 		<div class="plan-actions">
-			{#if data.plans.hosted && data.billing?.plan !== 'lifetime'}
-				<form method="POST" action="?/buyPlan" use:enhance={submitting}>
-					<input type="hidden" name="plan" value="hosted" />
-					<input type="hidden" name="attempt_id" value={checkoutAttempts.hosted ?? ''} />
-					<button class="btn secondary" type="submit" disabled={pending}>Start hosted · $5/month</button>
-				</form>
-				<p class="muted">100 included comments per billing period. Unused comments do not roll over; prepaid credits cover overage.</p>
-			{/if}
-			{#if data.plans.lifetime}
-				{#if data.billing?.plan === 'lifetime'}
-					<p class="muted">You have the lifetime plan — unlimited moderated comments.</p>
-				{:else if data.lifetimeSlots === 0}
-					<p class="muted">The lifetime plan is sold out — all 1,000 claimed.</p>
-				{:else}
-					<form method="POST" action="?/buyPlan" use:enhance={submitting}>
-						<input type="hidden" name="plan" value="lifetime" />
-						<input type="hidden" name="attempt_id" value={checkoutAttempts.lifetime ?? ''} />
-						<button class="btn secondary" type="submit" disabled={pending}>Buy lifetime · $49</button>
+			{#if data.billing?.plan === 'lifetime'}
+				<p class="muted">You have the lifetime plan — unlimited moderated comments.</p>
+			{:else if data.billing?.plan === 'hosted'}
+				<!-- One live subscription per org: a second buy form would only be
+				rejected server-side, and lifetime requires canceling first —
+				render the portal button that can actually manage the
+				subscription instead of buttons that always fail (I12). -->
+				{#if data.stripeConfigured}
+					<form method="POST" action="?/manageCards" use:enhance={submitting}>
+						<button class="btn secondary" type="submit" disabled={pending}>Manage subscription</button>
 					</form>
-					<p class="muted">
-						Unlimited comments while the lifetime plan is available.
-						{#if typeof data.lifetimeSlots === 'number'}{1000 - data.lifetimeSlots} of 1,000 claimed.{/if}
-					</p>
+				{/if}
+				{#if data.plans.lifetime}
+					<p class="muted">To switch to the lifetime plan, cancel your hosted subscription first (Manage subscription).</p>
+				{/if}
+			{:else}
+				{#if data.plans.hosted}
+					<form method="POST" action="?/buyPlan" use:enhance={submitting}>
+						<input type="hidden" name="plan" value="hosted" />
+						<input type="hidden" name="attempt_id" value={checkoutAttempts.hosted ?? ''} />
+						<button class="btn secondary" type="submit" disabled={pending}>Start hosted · $5/month</button>
+					</form>
+					<p class="muted">100 included comments per billing period. Unused comments do not roll over; prepaid credits cover overage.</p>
+				{/if}
+				{#if data.plans.lifetime}
+					{#if data.lifetimeSlots === 0}
+						<p class="muted">The lifetime plan is sold out — all 1,000 claimed.</p>
+					{:else}
+						<form method="POST" action="?/buyPlan" use:enhance={submitting}>
+							<input type="hidden" name="plan" value="lifetime" />
+							<input type="hidden" name="attempt_id" value={checkoutAttempts.lifetime ?? ''} />
+							<button class="btn secondary" type="submit" disabled={pending}>Buy lifetime · $49</button>
+						</form>
+						<p class="muted">
+							Unlimited comments while the lifetime plan is available.
+							{#if typeof data.lifetimeSlots === 'number'}{1000 - data.lifetimeSlots} of 1,000 claimed.{/if}
+						</p>
+					{/if}
 				{/if}
 			{/if}
 		</div>
@@ -245,8 +260,10 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		<h2 style="margin-top:0">Cards</h2>
 		{#if data.stripeConfigured}
 			<p class="muted">
-				{#if data.autoTopup?.hasCard}
-					A card is saved for automatic top-up.
+				{#if data.autoTopup?.hasCard && data.autoTopup?.card}
+					{data.autoTopup.card.label} is saved for automatic top-up.
+				{:else if data.autoTopup?.hasCard}
+					A card is saved for automatic top-up. (Card details are unavailable right now.)
 				{:else}
 					No card saved yet — buy a Stripe bundle once, or add one via Manage cards.
 				{/if}

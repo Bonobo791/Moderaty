@@ -25,7 +25,7 @@ import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { organizations, stripeCheckoutAttempts, stripeLifetimeEntitlements, stripeLifetimeSlots } from '$lib/server/db/schema';
 import { bundleById, priceIdFor, type CreditBundle } from '$lib/server/stripe/bundles';
-import { assertCreditsPurchasable } from './ledger';
+import { assertCreditsPurchasable, UNMETERED_CREDIT_PURCHASE_ERROR } from './ledger';
 import { isActiveSubscriptionStatus, planPriceEnv, validatePlanPrice, type PaidPlan } from './plans';
 import { getStripe } from '$lib/server/stripe/client';
 import { requireOrgRole } from '$lib/server/ownership';
@@ -35,6 +35,31 @@ const HOSTED_PLAN_EXISTS_ERROR = 'organization already has a hosted subscription
 const ACTIVE_HOSTED_PLAN_ERROR = 'organization already has an active hosted subscription';
 const LIFETIME_PLAN_EXISTS_ERROR = 'organization already has the lifetime plan';
 const LIFETIME_SOLD_OUT_ERROR = 'lifetime plan is sold out';
+
+/**
+ * User-facing text for KNOWN business rejections of checkout creation —
+ * the buyer did nothing wrong and retrying will never help, so the answer
+ * is a specific 400, not the generic defect message. Internal strings are
+ * whitelisted by identity: anything unmapped (DB internals, env names,
+ * Stripe ids) stays a generic 500 per the no-leak rule.
+ */
+export function checkoutRejectionMessage(error: unknown): string | null {
+	if (!(error instanceof Error)) return null;
+	switch (error.message) {
+		case HOSTED_PLAN_EXISTS_ERROR:
+			return 'Your organization already has an active hosted subscription — manage it via the customer portal below.';
+		case ACTIVE_HOSTED_PLAN_ERROR:
+			return 'Cancel your hosted subscription before buying the lifetime plan — manage it via the customer portal below.';
+		case LIFETIME_PLAN_EXISTS_ERROR:
+			return 'Your organization already has the lifetime plan.';
+		case LIFETIME_SOLD_OUT_ERROR:
+			return 'The lifetime plan is sold out — all 1,000 copies are claimed.';
+		case UNMETERED_CREDIT_PURCHASE_ERROR:
+			return 'Your lifetime plan includes unlimited moderated comments — credit purchases are not needed.';
+		default:
+			return null;
+	}
+}
 
 /**
  * Retrieves the organization's Stripe customer ID, creating and storing one when needed.

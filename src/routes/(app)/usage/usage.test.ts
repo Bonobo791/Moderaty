@@ -17,7 +17,7 @@ import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
-import { mercadoPagoCheckoutAttempts, organizations, stripeCheckoutAttempts } from '$lib/server/db/schema';
+import { mercadoPagoCheckoutAttempts, organizations, stripeCheckoutAttempts, stripeLifetimeSlots } from '$lib/server/db/schema';
 import type { SessionUser } from '$lib/server/session';
 import { applyLedgerDelta, consumeCredit } from '$lib/server/billing/ledger';
 import { claimLifetimeSlot } from '$lib/server/billing/entitlements';
@@ -26,7 +26,8 @@ import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
 
 const mocks = vi.hoisted(() => ({
 	sessionsCreate: vi.fn(),
-	customersCreate: vi.fn(), pricesRetrieve: vi.fn(), billingPortalSessionsCreate: vi.fn()
+	customersCreate: vi.fn(), pricesRetrieve: vi.fn(), billingPortalSessionsCreate: vi.fn(),
+	paymentMethodsRetrieve: vi.fn()
 }));
 
 vi.mock('$lib/server/stripe/client', () => ({
@@ -34,7 +35,8 @@ vi.mock('$lib/server/stripe/client', () => ({
 		checkout: { sessions: { create: mocks.sessionsCreate } },
 		prices: { retrieve: mocks.pricesRetrieve },
 		customers: { create: mocks.customersCreate },
-		billingPortal: { sessions: { create: mocks.billingPortalSessionsCreate } }
+		billingPortal: { sessions: { create: mocks.billingPortalSessionsCreate } },
+		paymentMethods: { retrieve: mocks.paymentMethodsRetrieve }
 	})
 }));
 vi.mock('$env/dynamic/private', () => ({
@@ -87,6 +89,7 @@ beforeEach(() => {
 	mocks.sessionsCreate.mockResolvedValue({ id: 'cs_new', url: 'https://checkout.stripe.com/pay/test_123' });
 	mocks.customersCreate.mockResolvedValue({ id: 'cus_new' });
 	mocks.pricesRetrieve.mockImplementation(async (id: string) => id === 'price_hosted' ? { id, active: true, currency: 'usd', type: 'recurring', unit_amount: 500, recurring: { interval: 'month', interval_count: 1 } } : { id, active: true, currency: 'usd', type: 'one_time', unit_amount: 4900 });
+	mocks.paymentMethodsRetrieve.mockResolvedValue({ id: 'pm_1', type: 'card', card: { brand: 'visa', last4: '4242' } });
 });
 
 describe('usage load', () => {
@@ -142,6 +145,42 @@ describe('usage load', () => {
 		const consume = history.find((row) => row.reason === 'consume');
 		expect(consume).toMatchObject({ delta: -1, reason: 'consume', refType: 'comment', refId: 'comment-1' });
 		expect(consume?.id).toEqual(expect.any(Number));
+	});
+
+	test('resolves the saved card brand/last4 live from Stripe for the Cards section', async () => {
+		// The card display is driven by the stored default PM pointer, resolved
+		// live so a card swapped in the Stripe portal shows correctly without a
+		// webhook round-trip.
+		await seedOrg({ stripeDefaultPmId: 'pm_1' });
+		const data = (await load({ locals: { user: OWNER } } as never)) as { autoTopup: { hasCard: boolean; card: { label: string } | null } };
+		expect(data.autoTopup.hasCard).toBe(true);
+		expect(data.autoTopup.card?.label).toBe('Visa •••• 4242');
+		expect(mocks.paymentMethodsRetrieve).toHaveBeenCalledWith('pm_1');
+	});
+
+	test('a payment-method fetch failure keeps the card flag and says details are unavailable — never a maintenance page', async () => {
+		// The pointer stays authoritative (hasCard); only the display details
+		// degrade. The failure is loud in the server log and visible in copy.
+		await seedOrg({ stripeDefaultPmId: 'pm_gone' });
+		mocks.paymentMethodsRetrieve.mockRejectedValue(new Error('resource_missing'));
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const data = (await load({ locals: { user: OWNER } } as never)) as { maintenance: boolean; autoTopup: { hasCard: boolean; card: unknown } };
+			expect(data.maintenance).toBe(false);
+			expect(data.autoTopup.hasCard).toBe(true);
+			expect(data.autoTopup.card).toBeNull();
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('pm_gone'));
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('no saved card pointer means no Stripe call at all', async () => {
+		await seedOrg();
+		const data = (await load({ locals: { user: OWNER } } as never)) as { autoTopup: { hasCard: boolean; card: unknown } };
+		expect(data.autoTopup.hasCard).toBe(false);
+		expect(data.autoTopup.card).toBeNull();
+		expect(mocks.paymentMethodsRetrieve).not.toHaveBeenCalled();
 	});
 
 	test('load surfaces the remaining lifetime slot count', async () => {
@@ -268,6 +307,34 @@ describe('usage load', () => {
 		expect(owned).not.toContain('action="?/buyPlan"');
 		expect(owned).toContain('lifetime plan');
 	});
+
+	test('a hosted org sees Manage subscription instead of dead buy buttons', async () => {
+		// One live subscription per org: the "Start hosted" form only ever
+		// 400s for a subscribed org, and the lifetime form only ever tells
+		// them to cancel first — replace both with the portal button that can
+		// actually manage the subscription (I12: no button that only fails).
+		const base = {
+			maintenance: false,
+			user: OWNER,
+			summary: { remaining: 0, usedThisMonth: 0, usedLifetime: 0 },
+			metered: false,
+			history: [],
+			bundles: [],
+			mercadoPagoBundles: [],
+			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: false, card: null },
+			autoTopupConsentText: 'consent',
+			stripeConfigured: true,
+			plans: { hosted: true, lifetime: true },
+			billing: { plan: 'hosted', subscriptionStatus: 'active', periodEnd: '2026-10-19T00:00:00.000Z' }
+		};
+		const body = render(Page, { props: { data: base, form: null } as never }).body;
+		expect(body).toContain('Manage subscription');
+		expect(body).toContain('action="?/manageCards"');
+		expect(body).not.toContain('value="hosted"');
+		expect(body).not.toContain('value="lifetime"');
+		// The cancel-first hint keeps the lifetime path discoverable.
+		expect(body).toContain('cancel');
+	});
 });
 
 describe('usage buy action', () => {
@@ -367,19 +434,16 @@ describe('usage buy action', () => {
 	test('a lifetime org cannot open a Stripe credit checkout — unlimited plans never buy credits', async () => {
 		// The lifetime plan's scoring is already unlimited: a crafted POST
 		// (the button is hidden in the UI) must fail loudly BEFORE a Checkout
-		// Session exists — never sell a balance the org can never need.
+		// Session exists — never sell a balance the org can never need. This
+		// is a KNOWN domain rejection, so the response carries the real reason
+		// (400), not the generic defect message.
 		await seedOrg({ plan: 'lifetime' });
-		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-		try {
-			const result = await buy('credits_100');
-			expect(result).toMatchObject({ status: 500 });
-			expect(mocks.sessionsCreate).not.toHaveBeenCalled();
-			expect(mocks.customersCreate).not.toHaveBeenCalled();
-			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('lifetime'));
-			expect(await testDb().db.select().from(stripeCheckoutAttempts)).toHaveLength(0);
-		} finally {
-			errorSpy.mockRestore();
-		}
+		const result = await buy('credits_100');
+		expect(result).toMatchObject({ status: 400 });
+		expect(JSON.stringify(result)).toContain('unlimited moderated comments');
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+		expect(mocks.customersCreate).not.toHaveBeenCalled();
+		expect(await testDb().db.select().from(stripeCheckoutAttempts)).toHaveLength(0);
 	});
 
 	test('a lifetime org cannot open a Mercado Pago credit checkout', async () => {
@@ -622,6 +686,46 @@ describe('usage plan checkout action', () => {
 		expect(result).toMatchObject({ status: 400, data: { error: 'Unknown billing plan.' } });
 		expect(mocks.pricesRetrieve).not.toHaveBeenCalled();
 	});
+
+	test('a hosted org re-buying hosted gets a specific 400, never a generic 500', async () => {
+		// The button is hidden in the UI, but a crafted/stale POST must answer
+		// with the REAL reason — a generic "try again" implies retrying would
+		// help when the purchase can never succeed (MOD buttons investigation).
+		await seedOrg({ plan: 'hosted', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
+		const result = await buyPlan('hosted');
+		expect(result).toMatchObject({ status: 400 });
+		expect(JSON.stringify(result)).toContain('already');
+		expect(JSON.stringify(result)).toContain('subscription');
+		expect(JSON.stringify(result)).not.toContain('sub_1');
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test('a hosted org buying lifetime is told to cancel first — specific 400, not a defect page', async () => {
+		await seedOrg({ plan: 'hosted', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
+		const result = await buyPlan('lifetime');
+		expect(result).toMatchObject({ status: 400 });
+		expect(JSON.stringify(result).toLowerCase()).toContain('cancel');
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test('a lifetime org buying any plan hears that it already owns it', async () => {
+		await seedOrg({ plan: 'lifetime' });
+		for (const plan of ['hosted', 'lifetime']) {
+			const result = await buyPlan(plan);
+			expect(result).toMatchObject({ status: 400 });
+			expect(JSON.stringify(result)).toContain('lifetime plan');
+		}
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test('a sold-out lifetime plan says so to the buyer', async () => {
+		// Exhaust the slot pool first so the domain rejection fires.
+		await seedOrg();
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1' });
+		const result = await buyPlan('lifetime');
+		expect(result).toMatchObject({ status: 400 });
+		expect(JSON.stringify(result)).toContain('sold out');
+	});
 });
 
 describe('usage manageCards action (Stripe customer portal)', () => {
@@ -789,6 +893,24 @@ describe('usage cards section', () => {
 		// purchases" overclaims (cubic P2).
 		expect(body).toContain('A card is saved for automatic top-up.');
 		expect(body).not.toContain('future purchases');
+	});
+
+	test('the resolved card label renders instead of the generic sentence', () => {
+		// The owner should SEE which card is on file — the portal's card list
+		// and Moderaty's copy must agree.
+		const body = renderUsage({
+			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: true, card: { label: 'Visa •••• 4242' } }
+		});
+		expect(body).toContain('Visa •••• 4242');
+		expect(body).not.toContain('No card saved');
+	});
+
+	test('a card pointer with unresolved details says so instead of implying which card', () => {
+		const body = renderUsage({
+			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: true, card: null }
+		});
+		expect(body).toContain('A card is saved for automatic top-up.');
+		expect(body).toContain('unavailable');
 	});
 
 	test('a member never sees the card manager', () => {

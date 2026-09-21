@@ -558,8 +558,25 @@ describe('lifetime BYOK disclosure matches the required-key Terms', () => {
 
 	// Disclosure must be USER-VISIBLE: source comments can carry the phrase
 	// while the rendered copy says nothing, so strip HTML comments before
-	// matching (coderabbit).
-	const visible = (text: string) => text.replace(/<!--[\s\S]*?-->/g, '');
+	// matching (coderabbit). The strip runs to a fixpoint and treats an
+	// unterminated '<!--' as a comment to end-of-string — a single pass can
+	// leave a reconstructed '<!--' across the removal boundary
+	// (CodeQL js/incomplete-multi-character-sanitization).
+	const visible = (text: string) => {
+		let out = text;
+		let prev: string;
+		do {
+			prev = out;
+			out = out.replace(/<!--[\s\S]*?(?:-->|$)/g, '');
+		} while (out !== prev);
+		return out;
+	};
+
+	it('the comment stripper removes crafted comments completely', () => {
+		expect(visible('<!<!-- -->-->')).not.toContain('<!--');
+		expect(visible('a<!-- c -->b<!-- d -->c')).toBe('abc');
+		expect(visible('unterminated <!--')).toBe('unterminated ');
+	});
 
 	it('every surface that sells the lifetime plan discloses the required OpenAI key', () => {
 		for (const [name, text] of Object.entries(lifetimeSurfaces)) {

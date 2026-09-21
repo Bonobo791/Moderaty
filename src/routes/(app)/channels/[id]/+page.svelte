@@ -30,6 +30,30 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	// True while the dry-run preview is in flight; the button is disabled
 	// while it runs (the action's lease claim also 409s a server-side race).
 	let dryRunPending = $state(false);
+
+	// Strict-protection toggles submit on change. While a save is in flight
+	// (or queued behind one) the local intent owns the boxes — enhance's
+	// default success reset, and any mid-save autoRefresh invalidation, would
+	// otherwise snap a just-ticked box back to the pre-save state. And since
+	// setProtections writes BOTH columns from field presence/absence, a submit
+	// serialized in that window silently clears the other flag: the two could
+	// never be on at once. One submit at a time; a mid-flight change re-fires
+	// on settle carrying the latest state of both.
+	let protectionsForm: HTMLFormElement | undefined = $state();
+	let protectLgbtqia = $state<boolean | null>(null);
+	let protectWomen = $state<boolean | null>(null);
+	let protectionsSaving = $state(false);
+	let protectionsQueued = $state(false);
+	const lgbtqiaChecked = $derived(protectLgbtqia ?? ch.protectLgbtqia === 1);
+	const womenChecked = $derived(protectWomen ?? ch.protectWomen === 1);
+
+	function protectionChanged(event: Event) {
+		const input = event.currentTarget as HTMLInputElement;
+		if (input.name === 'protectLgbtqia') protectLgbtqia = input.checked;
+		else protectWomen = input.checked;
+		if (protectionsSaving) protectionsQueued = true;
+		else protectionsForm?.requestSubmit();
+	}
 </script>
 
 <svelte:head>
@@ -53,7 +77,31 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	<p class="error-box" role="alert">{form.error}</p>
 {/if}
 <SensitivitySwitch channelId={ch.id} channelTitle={ch.title} level={ch.toneLevel ?? 1} />
-<form class="protections" method="POST" action="?/setProtections" use:enhance>
+<form
+	class="protections"
+	method="POST"
+	action="?/setProtections"
+	bind:this={protectionsForm}
+	use:enhance={() => {
+		protectionsSaving = true;
+		return async ({ update }) => {
+			// reset:false — a success reset would restore defaultChecked (the
+			// pre-save render), snapping the just-ticked box back to unchecked.
+			await update({ reset: false });
+			protectionsSaving = false;
+			if (protectionsQueued) {
+				protectionsQueued = false;
+				protectionsForm?.requestSubmit();
+			} else {
+				// Settled for real — the server row owns the boxes again. On
+				// failure this also reverts them to what actually persisted;
+				// a failed save can never leave a phantom tick (MOD-10).
+				protectLgbtqia = null;
+				protectWomen = null;
+			}
+		};
+	}}
+>
 	<input type="hidden" name="channelId" value={ch.id} />
 	<span class="sensitivity-title">Strict protection</span>
 	<label class="protection-toggle" for="protect-lgbtqia-{ch.id}">
@@ -61,8 +109,8 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 			id="protect-lgbtqia-{ch.id}"
 			type="checkbox"
 			name="protectLgbtqia"
-			checked={ch.protectLgbtqia === 1}
-			onchange={(event) => event.currentTarget.form?.requestSubmit()}
+			checked={lgbtqiaChecked}
+			onchange={protectionChanged}
 		/>
 		Harassment targeting LGBTQIA+ people
 	</label>
@@ -71,8 +119,8 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 			id="protect-women-{ch.id}"
 			type="checkbox"
 			name="protectWomen"
-			checked={ch.protectWomen === 1}
-			onchange={(event) => event.currentTarget.form?.requestSubmit()}
+			checked={womenChecked}
+			onchange={protectionChanged}
 		/>
 		Harassment targeting women
 	</label>

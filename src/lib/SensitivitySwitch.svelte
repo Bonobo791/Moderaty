@@ -282,8 +282,15 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		use:enhance={() => {
 			submitting = true;
 			return async ({ result, update }) => {
+				// The fresh server level must land BEFORE dirty clears: the settle
+				// effect re-syncs `selected` to `level` the moment dirty drops, so
+				// clearing it first snaps the knob back to the pre-save stop and it
+				// re-flies when the invalidation lands (the left-then-right flicker).
+				// reset:false keeps the hidden inputs' serialized values live —
+				// reset restores defaultValue, and Svelte only rewrites the property
+				// when selectedValue changes, leaving a stale toneLevel behind.
+				await update({ reset: false });
 				handlePersist(result);
-				await update();
 				submitting = false;
 			};
 		}}

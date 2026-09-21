@@ -17,6 +17,7 @@
 // and the overview page (the controls moved from the dashboard cards).
 // Svelte's SSR render is lazy: assert on render(...).body.
 
+import { readFileSync } from 'node:fs';
 import { createRawSnippet } from 'svelte';
 import { render } from 'svelte/server';
 import { expect, test } from 'vitest';
@@ -216,6 +217,35 @@ test('strict protection renders both labeled checkboxes with their persisted sta
 	expect(body).toContain('for="protect-lgbtqia-UC1"');
 	expect(body).toContain('for="protect-women-UC1"');
 	expect(body).toContain('Heightened AI scrutiny for these comments, at any sensitivity level.');
+});
+
+// SSR can never drive an enhanced-form result in the node test env, so the
+// save-while-changing wiring is pinned at source level (same convention as
+// SensitivitySwitch.test.ts) — deleting it must fail a test, not slip
+// through as a silent UI regression.
+test('the protection checkboxes render local intent, not the raw server row', () => {
+	// While a save is in flight the boxes must show the user's tick — a
+	// mid-save invalidation (autoRefresh every 15s, or the submit's own
+	// update) would otherwise snap them back to the pre-save state, and a
+	// submit serialized in that window writes the wrong whole-row state.
+	const source = readFileSync(new URL('./+page.svelte', import.meta.url), 'utf8');
+	expect(source).toMatch(/checked=\{lgbtqiaChecked\}/);
+	expect(source).toMatch(/checked=\{womenChecked\}/);
+	expect(source).toMatch(/protectLgbtqia \?\? ch\.protectLgbtqia === 1/);
+	expect(source).toMatch(/protectWomen \?\? ch\.protectWomen === 1/);
+});
+
+test('the protections form never resets to stale checked state and serializes one save at a time', () => {
+	// enhance's default update() resets the form on success — restoring
+	// defaultChecked snaps a just-ticked box back to unchecked (the flicker).
+	// And setProtections writes BOTH columns from field presence/absence, so
+	// a second submit racing the first is a last-writer-wins snapshot that
+	// clears the other flag — a mid-flight change must queue and re-fire on
+	// settle carrying the latest intent of both boxes.
+	const source = readFileSync(new URL('./+page.svelte', import.meta.url), 'utf8');
+	expect(source).toMatch(/await update\(\{ reset: false \}\)/);
+	expect(source).toMatch(/if \(protectionsSaving\) protectionsQueued = true/);
+	expect(source).toMatch(/protectionsQueued = false;\s*protectionsForm\?\.requestSubmit\(\)/s);
 });
 
 test('the analyze-history form offers the window presets with a labeled select', () => {

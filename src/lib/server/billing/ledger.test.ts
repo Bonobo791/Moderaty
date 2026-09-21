@@ -128,7 +128,10 @@ describe('drainPendingReversals crash-consistency', () => {
 		// a bare db.delete would have wiped both rows before both mutations.
 		expect(deleteSpy).not.toHaveBeenCalled();
 		expect(await testDb().db.select().from(stripePendingReversals).all()).toHaveLength(0);
-		expect(await getCredits('org-1')).toBe(-100);
+		// 'dispute' sorts before 'refund' on the UNIQUE index: the dispute takes
+		// 100 → 0, then the refund reversal floors at 0 — a refunded grant never
+		// leaves a negative debt balance (disputes stay unbounded for won-restore).
+		expect(await getCredits('org-1')).toBe(0);
 	});
 });
 
@@ -420,6 +423,17 @@ describe('usageSummary', () => {
 		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBe(0);
 		expect(await consumeCredit(testDb().db, 'org-1', 'comment-2')).toBe(false);
 	});
+	test('a lifetime org still counts its live paid subscription period — the comments were paid for, not refunded', async () => {
+		// Cancel→lifetime during the wind-down: the hosted period row stays
+		// 'paid' and inside its window, so its unconsumed included comments
+		// belong in the balance — upgrading the plan must not hide them.
+		const periodStart = new Date(Date.now() - 60_000).toISOString();
+		const periodEnd = new Date(Date.now() + 60_000).toISOString();
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'LT', plan: 'lifetime', creditsRemaining: 100 });
+		await testDb().db.insert(stripeSubscriptionPeriods).values({ orgId: 'org-1', subscriptionId: 'sub-1', invoiceId: 'in-1', periodKey: 'period-1', periodStart, periodEnd, includedCredits: 100, consumedCredits: 0, status: 'paid' });
+		expect(await getCredits('org-1')).toBe(200);
+	});
+
 	test('a canceled hosted subscription remains metered instead of becoming free unlimited access', async () => {
 		const periodStart = new Date(Date.now() - 60_000).toISOString();
 		const periodEnd = new Date(Date.now() + 60_000).toISOString();

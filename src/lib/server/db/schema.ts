@@ -61,7 +61,7 @@ export const organizations = sqliteTable('organizations', {
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	plan: text('plan').notNull().default('free'), // future Stripe gating hook (hosted plans)
 	personalFor: text('personal_for').unique(), // users.id of the user this is the personal org for; null = shared org
-	// Per-org BYOK OpenAI key (hosted plans), AES-256-GCM via crypto.ts —
+	// Per-org BYOK OpenAI key (lifetime plan only), AES-256-GCM via crypto.ts —
 	// owner-managed from the Team page; never serialized to the client.
 	openaiKeyEnc: text('openai_key_enc'),
 	// Billing — prepaid comment credits, per-ORGANIZATION (the tenant grain).

@@ -176,6 +176,31 @@ the site exists), local work, and outage recovery.
   The build command migrates + verifies against whichever database the
   context points at, so every production and `dev` deploy is gated on its
   own schema being current (Deploy Previews skip the migration step).
+- **Stripe webhook endpoint.** Register
+  `https://<your-site>/api/stripe/webhook` under **Developers → Webhooks** —
+  inside the *same* Stripe environment that owns `STRIPE_SECRET_KEY` and the
+  Prices. Webhook endpoints are scoped per environment: live mode, test mode,
+  and **each named sandbox keeps its own registry**, so an endpoint created
+  in test mode never receives a sandbox's events (and vice versa). Pin the
+  endpoint's API version to the SDK's (`2026-07-29.dahlia`, see
+  `src/lib/server/stripe/client.ts`) — event payloads follow the endpoint's
+  pinned version — and subscribe it to: `checkout.session.completed`,
+  `checkout.session.async_payment_succeeded`,
+  `checkout.session.async_payment_failed`, `invoice.paid`,
+  `invoice.payment_failed`, `customer.subscription.created`,
+  `customer.subscription.updated`, `customer.subscription.deleted`,
+  `payment_intent.succeeded`, `payment_intent.payment_failed`,
+  `charge.refunded`, `charge.refund.updated`, `refund.updated`,
+  `refund.failed`, `charge.dispute.created`, `charge.dispute.closed`,
+  `charge.dispute.funds_withdrawn`, `charge.dispute.funds_reinstated`,
+  `payment_method.detached`, `customer.updated`.
+- Copy **that endpoint's own** signing secret (`whsec_…`) into
+  `STRIPE_WEBHOOK_SECRET` — every endpoint and every environment has its own,
+  and a `stripe listen` secret only validates CLI-forwarded events. Triage
+  under the endpoint's Deliveries: `400 invalid signature` means the secret
+  doesn't match the endpoint, `500 webhook not configured`/`stripe not
+  configured` means the env vars never reached the deployment, and `500
+  handler failed` is an application bug (check the server log).
 
 ## 3. Mercado Pago (optional BRL prepaid credits)
 
@@ -243,6 +268,12 @@ the site exists), local work, and outage recovery.
   counts and `dry-run` audit rows, with no YouTube-side changes.
 - Set `DRY_RUN=false`, redeploy/restart env, trigger again; confirm held
   comments appear in YouTube Studio → Comments → Held for review.
+- Verify Stripe end to end in the deployment's own environment (live mode for
+  prod, the dev sandbox for dev): run a hosted checkout, then confirm the
+  endpoint's deliveries show 2xx for `customer.subscription.created` and
+  `invoice.paid`, and the Usage page shows plan `hosted` with a period end
+  date and the saved card's label ("Visa •••• 4242 is saved for automatic
+  top-up" — or "A card is saved" while details are still resolving).
 - Watch the next scheduled invocation succeed in the Netlify function logs.
 
 ## 7. Backups

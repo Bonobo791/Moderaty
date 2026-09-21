@@ -46,13 +46,13 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	<title>Pricing | Moderaty</title>
 	<meta
 		name="description"
-		content="Free and open source when self-hosted (PolyForm Shield, bring your own key). Hosted: $5 a month for 100 moderated comments, auto-renewed, 5¢ top-ups. First 1,000 users: $49 once for lifetime hosting."
+		content="Free and open source when self-hosted (PolyForm Shield, bring your own key). Hosted: $5 a month for 100 moderated comments, auto-renewed, 5¢ top-ups. First 1,000 users: $49 once for lifetime hosting, scoring on your own OpenAI key."
 	/>
 	<meta property="og:type" content="website" />
 	<meta property="og:title" content="Protection, priced like a utility." />
 	<meta
 		property="og:description"
-		content="Free and open source when self-hosted. Hosted: $5 a month for 100 comments, or $49 once for lifetime hosting (first 1,000 users)."
+		content="Free and open source when self-hosted. Hosted: $5 a month for 100 comments, or $49 once for lifetime hosting (first 1,000 users, your own OpenAI key)."
 	/>
 	{@html jsonLd(faqPage)}
 </svelte:head>

@@ -40,11 +40,11 @@ setupTestDb(['sessions', 'invites', 'memberships', 'organizations', 'users']);
 const MEMBER: SessionUser = { ...TEST_OWNER, orgRole: 'member' };
 const ADMIN: SessionUser = { ...TEST_OWNER, orgRole: 'admin' };
 
-async function seedOwnerOrg() {
+async function seedOwnerOrg(plan: 'free' | 'hosted' | 'lifetime' = 'free') {
 	await testDb()
 		.db.insert(users)
 		.values({ id: TEST_OWNER.id, googleSub: 'sub-user-1', email: TEST_OWNER.email, displayName: TEST_OWNER.displayName });
-	await testDb().db.insert(organizations).values({ id: 'org-1', name: 'One' });
+	await testDb().db.insert(organizations).values({ id: 'org-1', name: 'One', plan });
 	await testDb().db.insert(memberships).values({ userId: TEST_OWNER.id, orgId: 'org-1', role: 'owner' });
 }
 
@@ -320,6 +320,10 @@ test('remove: a member caller is 403 at the route, same as the other admin-gated
 
 afterEach(() => {
 	vi.unstubAllGlobals();
+	// unstubAllGlobals does NOT restore vi.spyOn mocks — the console.error
+	// spy created inside setKeyUnderFakeTimers would leak its implementation
+	// and call history into the next test (coderabbit).
+	vi.restoreAllMocks();
 });
 
 /** Stubs global fetch (the live OpenAI key check) and records each call. */
@@ -337,8 +341,23 @@ async function storedKey(orgId = 'org-1') {
 	return org?.openaiKeyEnc ?? null;
 }
 
+// Runs setOpenAiKey under fake timers so fetchWithRetry's 5xx backoff is
+// skipped — returns the failed action result plus the console.error spy
+// for the per-test assertions.
+async function setKeyUnderFakeTimers(openAiKey: string) {
+	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	vi.useFakeTimers();
+	try {
+		const pending = actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey }));
+		await vi.advanceTimersByTimeAsync(20_000); // fetchWithRetry backoff on 5xx
+		return { bad: failure(await pending), spy };
+	} finally {
+		vi.useRealTimers();
+	}
+}
+
 test('setOpenAiKey: owner stores an encrypted key after live validation; the page only ever exposes a boolean', async () => {
-	await seedOwnerOrg();
+	await seedOwnerOrg('lifetime');
 	const calls = stubOpenAi(200);
 
 	const res = await actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: 'sk-test-org-key' }));
@@ -360,15 +379,35 @@ test('setOpenAiKey: owner stores an encrypted key after live validation; the pag
 });
 
 test('setOpenAiKey: non-owner is 403 and nothing is stored or validated', async () => {
-	await seedOwnerOrg();
+	// Lifetime org — the only thing that can 403 here is the role check.
+	await seedOwnerOrg('lifetime');
 	const calls = stubOpenAi(200);
 	await expect(actions.setOpenAiKey(ctx(MEMBER, { openAiKey: 'sk-x' }))).rejects.toMatchObject({ status: 403 });
 	expect(await storedKey()).toBeNull();
 	expect(calls).toHaveLength(0);
 });
 
+test('setOpenAiKey: a non-lifetime org is 403 — the key never reaches OpenAI and nothing is stored', async () => {
+	// BYOK is a lifetime-plan option: free and hosted owners are rejected
+	// server-side, not just by a hidden card — a hand-rolled POST must hit
+	// the same wall (I12: the UI never offers what the server rejects, and
+	// the server never trusts the UI).
+	for (const plan of ['free', 'hosted'] as const) {
+		await testDb().db.delete(memberships);
+		await testDb().db.delete(organizations);
+		await testDb().db.delete(users);
+		await seedOwnerOrg(plan);
+		const calls = stubOpenAi(200);
+		const denied = failure(await actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: 'sk-legit-key' })));
+		expect(denied.status).toBe(403);
+		expect(denied.data.error).toBe('Using your own OpenAI key requires the lifetime plan.');
+		expect(await storedKey()).toBeNull();
+		expect(calls).toHaveLength(0);
+	}
+});
+
 test('setOpenAiKey: a key without the sk- prefix fails 400 before any OpenAI call', async () => {
-	await seedOwnerOrg();
+	await seedOwnerOrg('lifetime');
 	const calls = stubOpenAi(200);
 	const bad = failure(await actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: 'not-a-key' })));
 	expect(bad.status).toBe(400);
@@ -383,7 +422,7 @@ test('setOpenAiKey: a key without the sk- prefix fails 400 before any OpenAI cal
 });
 
 test('setOpenAiKey: surrounding whitespace is trimmed before validation and storage', async () => {
-	await seedOwnerOrg();
+	await seedOwnerOrg('lifetime');
 	const calls = stubOpenAi(200);
 	const res = await actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: '  sk-trimmed-key  ' }));
 	expect(res).toMatchObject({ ok: true });
@@ -392,7 +431,7 @@ test('setOpenAiKey: surrounding whitespace is trimmed before validation and stor
 });
 
 test('setOpenAiKey: keys over 200 characters are rejected; exactly 200 is accepted', async () => {
-	await seedOwnerOrg();
+	await seedOwnerOrg('lifetime');
 	const calls = stubOpenAi(200);
 	const tooLong = failure(await actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: `sk-${'x'.repeat(198)}` })));
 	expect(tooLong.status).toBe(400);
@@ -407,7 +446,7 @@ test('setOpenAiKey: keys over 200 characters are rejected; exactly 200 is accept
 });
 
 test('setOpenAiKey: OpenAI rejecting the key fails 400 and stores nothing', async () => {
-	await seedOwnerOrg();
+	await seedOwnerOrg('lifetime');
 	stubOpenAi(401);
 	const bad = failure(await actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: 'sk-bad-key' })));
 	expect(bad.status).toBe(400);
@@ -416,7 +455,7 @@ test('setOpenAiKey: OpenAI rejecting the key fails 400 and stores nothing', asyn
 });
 
 test('setOpenAiKey: OpenAI forbidding the key (403) fails 400 and stores nothing', async () => {
-	await seedOwnerOrg();
+	await seedOwnerOrg('lifetime');
 	stubOpenAi(403);
 	const bad = failure(await actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: 'sk-forbidden' })));
 	expect(bad.status).toBe(400);
@@ -425,19 +464,11 @@ test('setOpenAiKey: OpenAI forbidding the key (403) fails 400 and stores nothing
 });
 
 test('setOpenAiKey: an OpenAI server error fails 502, logs the status, and stores nothing', async () => {
-	await seedOwnerOrg();
+	await seedOwnerOrg('lifetime');
 	stubOpenAi(500);
-	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
-	vi.useFakeTimers();
-	try {
-		const pending = actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: 'sk-server-error' }));
-		await vi.advanceTimersByTimeAsync(20_000); // fetchWithRetry backoff on 5xx
-		const bad = failure(await pending);
-		expect(bad.status).toBe(502);
-		expect(bad.data.error).toBe('OpenAI could not validate the key right now — try again in a moment.');
-	} finally {
-		vi.useRealTimers();
-	}
+	const { bad, spy } = await setKeyUnderFakeTimers('sk-server-error');
+	expect(bad.status).toBe(502);
+	expect(bad.data.error).toBe('OpenAI could not validate the key right now — try again in a moment.');
 	expect(await storedKey()).toBeNull();
 	expect(spy).toHaveBeenCalledWith('OpenAI key validation returned a non-OK status:', 500);
 });
@@ -445,21 +476,13 @@ test('setOpenAiKey: an OpenAI server error fails 502, logs the status, and store
 test('setOpenAiKey: an unreachable OpenAI fails 502 and logs only a message, never the key or a raw error object', async () => {
 	// CWE-532: the caught fetch error is an object whose dump can carry request
 	// detail; the log must be a plain message string so the key can never leak.
-	await seedOwnerOrg();
+	await seedOwnerOrg('lifetime');
 	vi.stubGlobal('fetch', async () => {
 		throw new Error('fetch failed');
 	});
-	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
-	vi.useFakeTimers();
-	try {
-		const pending = actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: 'sk-secret-key' }));
-		await vi.advanceTimersByTimeAsync(20_000); // fetchWithRetry backoff
-		const bad = failure(await pending);
-		expect(bad.status).toBe(502);
-		expect(bad.data.error).toBe('Could not reach OpenAI to validate the key — try again in a moment.');
-	} finally {
-		vi.useRealTimers();
-	}
+	const { bad, spy } = await setKeyUnderFakeTimers('sk-secret-key');
+	expect(bad.status).toBe(502);
+	expect(bad.data.error).toBe('Could not reach OpenAI to validate the key — try again in a moment.');
 	expect(await storedKey()).toBeNull();
 	expect(spy).toHaveBeenCalled();
 	expect(spy).toHaveBeenCalledWith('OpenAI key validation request failed:', 'fetch failed');
@@ -470,7 +493,7 @@ test('setOpenAiKey: an unreachable OpenAI fails 502 and logs only a message, nev
 });
 
 test('clearOpenAiKey: owner wipes the stored key; non-owner is 403', async () => {
-	await seedOwnerOrg();
+	await seedOwnerOrg('lifetime');
 	stubOpenAi(200);
 	await actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: 'sk-test-org-key' }));
 	expect(await storedKey()).toBeTruthy();
@@ -485,7 +508,7 @@ test('clearOpenAiKey: owner wipes the stored key; non-owner is 403', async () =>
 	expect(view.hasOpenAiKey).toBe(false);
 });
 
-function renderOrgPage(user: SessionUser | null, hasOpenAiKey = false) {
+function renderOrgPage(user: SessionUser | null, hasOpenAiKey = false, openAiKeyEligible = true) {
 	return render(Page, {
 		props: {
 			data: {
@@ -494,6 +517,7 @@ function renderOrgPage(user: SessionUser | null, hasOpenAiKey = false) {
 				invites: [],
 				inviteBase: 'http://localhost/invite/',
 				hasOpenAiKey,
+				openAiKeyEligible,
 				maintenance: false
 			},
 			form: null
@@ -521,4 +545,18 @@ test('OpenAI key card: members and admins never see the form (the actions are ow
 		expect(body).not.toContain('setOpenAiKey');
 		expect(body).not.toContain('openAiKey');
 	}
+});
+
+test('OpenAI key card: a non-lifetime owner sees no set form — but a stored key stays removable', async () => {
+	// The option is lifetime-only; a key saved before the org lost
+	// eligibility must not become an invisible credential — the card keeps
+	// its remove state instead of vanishing.
+	const plain = renderOrgPage(TEST_OWNER, false, false);
+	expect(plain).not.toContain('setOpenAiKey');
+	expect(plain).not.toContain('openAiKey');
+	expect(plain).not.toContain('clearOpenAiKey');
+
+	const saved = renderOrgPage(TEST_OWNER, true, false);
+	expect(saved).toContain('action="?/clearOpenAiKey"');
+	expect(saved).not.toContain('action="?/setOpenAiKey"');
 });

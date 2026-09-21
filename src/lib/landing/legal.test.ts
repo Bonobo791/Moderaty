@@ -38,15 +38,14 @@ function readRoute(slug: string, file: string): string {
 }
 
 describe('LEGAL_DOCS', () => {
-	it('the billing terms (auto top-up authorization, bundle refunds, billable scope) shipped under a NEW legal version', () => {
-		// The STRIPE BILLING commit rewrote Terms §6.1/§6.2 materially (bundle
-		// model, unscheduled auto top-up authorization), and the billable-scope
-		// correction rewrote §6.1(d) (credits consumed by live AI-scored
-		// comments only) — exactly the "material legal-doc change" that must
-		// bump LEGAL_VERSION so the re-consent gate (hasCurrentConsent) routes
-		// every user back through /consent. Never let billing terms ride along
-		// under an old version.
-		expect(LEGAL_VERSION).toBe('1.10');
+	it('material Terms changes always ship under a NEW legal version', () => {
+		// 1.10 was the PolyForm license swap; 1.11 is the lifetime-BYOK
+		// requirement — §6.1(c) now makes the buyer's own OpenAI key mandatory
+		// for lifetime scoring — exactly the "material legal-doc change" that
+		// must bump LEGAL_VERSION so the re-consent gate (hasCurrentConsent)
+		// routes every user back through /consent. Never let legal changes
+		// ride along under an old version.
+		expect(LEGAL_VERSION).toBe('1.11');
 	});
 
 	it('lists exactly the three published legal documents', () => {
@@ -532,18 +531,22 @@ describe('AI-cost claims match implementation', () => {
 	});
 });
 
-// Lifetime BYOK claims removed: the per-account key flow now exists
-// (owner-only Team page card → organizations.openai_key_enc → resolveOpenAiKey
-// prefers it over env.OPENAI_API_KEY at scoring time), but public marketing
-// still does not promise it — "lifetime buyers score on their own account"
-// remains an unadvertised opt-in. BYOK claims may only appear where they were
-// always true: the self-hosted tier. Restore the lifetime claims only after a
-// maintainer decision, since advertising them rewrites Terms §6.1(c) and
-// needs a LEGAL_VERSION bump plus re-consent.
-describe('lifetime BYOK claims stay out of unadvertised marketing', () => {
+// Lifetime BYOK is REQUIRED — maintainer decision shipped in
+// LEGAL_VERSION 1.11: Terms §6.1(c) states the lifetime plan scores on the
+// buyer's own OpenAI key (resolveOpenAiKey withholds the deployment key from
+// lifetime orgs entirely). Marketing must therefore disclose the key
+// anywhere the lifetime plan is sold or described — hiding a material
+// requirement until after checkout is a false-claims problem (codex P1) —
+// and must never claim the operator runs the lifetime AI.
+describe('lifetime BYOK disclosure matches the required-key Terms', () => {
 	const lifetimeSurfaces: Record<string, string> = {
 		PlanLifetime: readFileSync(
 			new URL('../components/landing/PlanLifetime.svelte', import.meta.url),
+			'utf8'
+		),
+		'lifetime ticks': readFileSync(new URL('./plans.ts', import.meta.url), 'utf8'),
+		'pricing hero': readFileSync(
+			new URL('../components/landing/pricing/PricingHero.svelte', import.meta.url),
 			'utf8'
 		),
 		'homepage pricing section': readFileSync(
@@ -553,29 +556,67 @@ describe('lifetime BYOK claims stay out of unadvertised marketing', () => {
 		'pricing page meta': readRoute('pricing', '+page.svelte')
 	};
 
-	it('no surface ties the lifetime plan to BYOK or a buyer-owned key', () => {
-		const RETIRED = [/lifetime[^.]*BYOK|BYOK[^.]*lifetime/i, /lifetime[^.;]*own OpenAI key/i];
+	// Disclosure must be USER-VISIBLE: source comments can carry the phrase
+	// while the rendered copy says nothing, so strip HTML comments before
+	// matching (coderabbit). The strip runs to a fixpoint and treats an
+	// unterminated '<!--' as a comment to end-of-string — a single pass can
+	// leave a reconstructed '<!--' across the removal boundary
+	// (CodeQL js/incomplete-multi-character-sanitization).
+	const visible = (text: string) => {
+		let out = text;
+		let prev: string;
+		do {
+			prev = out;
+			out = out.replace(/<!--[\s\S]*?(?:-->|$)/g, '');
+		} while (out !== prev);
+		return out;
+	};
+
+	it('the comment stripper removes crafted comments completely', () => {
+		expect(visible('<!<!-- -->-->')).not.toContain('<!--');
+		expect(visible('a<!-- c -->b<!-- d -->c')).toBe('abc');
+		expect(visible('unterminated <!--')).toBe('unterminated ');
+	});
+
+	it('every surface that sells the lifetime plan discloses the required OpenAI key', () => {
 		for (const [name, text] of Object.entries(lifetimeSurfaces)) {
-			for (const pattern of RETIRED) {
-				expect(text, `${name} still sells lifetime BYOK: ${pattern}`).not.toMatch(pattern);
+			expect(visible(text), `${name} sells lifetime without disclosing the required OpenAI key (Terms §6.1(c))`).toMatch(/own OpenAI (API )?key/i);
+		}
+		const lifetimeFaq = PRICING_FAQ_ENTRIES.find((f) => f.q === 'What is the $49 lifetime deal?');
+		expect(lifetimeFaq?.a).toMatch(/own OpenAI API key/i);
+	});
+
+	it('no surface claims the operator runs lifetime AI or that buyers never touch a key', () => {
+		const FALSE = [/we run the AI/i, /never touch a key/i, /no key to manage/i, /we never see the key/i];
+		for (const [name, text] of Object.entries(lifetimeSurfaces)) {
+			for (const pattern of FALSE) {
+				expect(visible(text), `${name} still claims we run lifetime AI: ${pattern}`).not.toMatch(pattern);
 			}
 		}
-		const lifetimeTicks = readFileSync(new URL('./plans.ts', import.meta.url), 'utf8');
-		expect(lifetimeTicks).not.toMatch(/Your OpenAI key, your model cost/);
 		const lifetimeFaq = PRICING_FAQ_ENTRIES.find((f) => f.q === 'What is the $49 lifetime deal?');
-		expect(lifetimeFaq?.a).not.toMatch(/own OpenAI key/i);
+		for (const pattern of FALSE) {
+			expect(lifetimeFaq?.a ?? '', `lifetime FAQ still claims ${pattern}`).not.toMatch(pattern);
+		}
 	});
 
-	it('Terms §6.1 clause (c) no longer promises lifetime buyers their own key', () => {
+	it('Terms §6.1 clause (c) states the lifetime plan scores on the buyer’s own key', () => {
+		// Maintainer decision (LEGAL_VERSION 1.11): lifetime BYOK is REQUIRED,
+		// not an opt-in — clause (c) must say the plan runs on the buyer's key,
+		// that the key is mandatory, and that scoring on our key is not
+		// included. A regression that quietly drops the requirement — or
+		// restores the old "run by us" claim — must fail here.
 		const terms = readComponent('terms');
 		const s61 = terms.slice(terms.indexOf('<strong>6.1</strong>'));
-		expect(s61.slice(0, s61.indexOf('</p>'))).not.toMatch(/\(c\)[^;]*OpenAI key/i);
+		const clause = s61.slice(0, s61.indexOf('</p>'));
+		expect(clause).toMatch(/\(c\)[^;]*own OpenAI API key/i);
+		expect(clause).toMatch(/\(c\)[^;]*must provide/i);
+		expect(clause).not.toMatch(/\(c\)[^;]*run by us/i);
 	});
 
-	it('the BYOK FAQ answer is scoped to self-hosting, where the claim is true', () => {
+	it('the BYOK FAQ answer covers self-hosting AND the lifetime plan — both score on the buyer key', () => {
 		const byok = PRICING_FAQ_ENTRIES.find((f) => f.q === 'What does BYOK mean?');
 		expect(byok, 'BYOK FAQ entry missing').toBeDefined();
 		expect(byok?.a).toMatch(/self-host/i);
-		expect(byok?.a).not.toMatch(/lifetime/i);
+		expect(byok?.a).toMatch(/lifetime/i);
 	});
 });

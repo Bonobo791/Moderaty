@@ -17,7 +17,7 @@ import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
-import { mercadoPagoCheckoutAttempts, organizations, stripeCheckoutAttempts } from '$lib/server/db/schema';
+import { mercadoPagoCheckoutAttempts, organizations, stripeCheckoutAttempts, stripeLifetimeSlots } from '$lib/server/db/schema';
 import type { SessionUser } from '$lib/server/session';
 import { applyLedgerDelta, consumeCredit } from '$lib/server/billing/ledger';
 import { claimLifetimeSlot } from '$lib/server/billing/entitlements';
@@ -26,7 +26,8 @@ import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
 
 const mocks = vi.hoisted(() => ({
 	sessionsCreate: vi.fn(),
-	customersCreate: vi.fn(), pricesRetrieve: vi.fn(), billingPortalSessionsCreate: vi.fn()
+	customersCreate: vi.fn(), pricesRetrieve: vi.fn(), billingPortalSessionsCreate: vi.fn(),
+	paymentMethodsRetrieve: vi.fn()
 }));
 
 vi.mock('$lib/server/stripe/client', () => ({
@@ -34,12 +35,14 @@ vi.mock('$lib/server/stripe/client', () => ({
 		checkout: { sessions: { create: mocks.sessionsCreate } },
 		prices: { retrieve: mocks.pricesRetrieve },
 		customers: { create: mocks.customersCreate },
-		billingPortal: { sessions: { create: mocks.billingPortalSessionsCreate } }
+		billingPortal: { sessions: { create: mocks.billingPortalSessionsCreate } },
+		paymentMethods: { retrieve: mocks.paymentMethodsRetrieve }
 	})
 }));
 vi.mock('$env/dynamic/private', () => ({
 	env: {
 		APP_URL: 'http://localhost:5173',
+		ENCRYPTION_KEY: 'test-encryption-key',
 		STRIPE_PRICE_CREDITS_100: 'price_100',
 		STRIPE_PRICE_CREDITS_500: 'price_500',
 		STRIPE_PRICE_CREDITS_2000: 'price_2000',
@@ -87,9 +90,28 @@ beforeEach(() => {
 	mocks.sessionsCreate.mockResolvedValue({ id: 'cs_new', url: 'https://checkout.stripe.com/pay/test_123' });
 	mocks.customersCreate.mockResolvedValue({ id: 'cus_new' });
 	mocks.pricesRetrieve.mockImplementation(async (id: string) => id === 'price_hosted' ? { id, active: true, currency: 'usd', type: 'recurring', unit_amount: 500, recurring: { interval: 'month', interval_count: 1 } } : { id, active: true, currency: 'usd', type: 'one_time', unit_amount: 4900 });
+	mocks.paymentMethodsRetrieve.mockResolvedValue({ id: 'pm_1', type: 'card', card: { brand: 'visa', last4: '4242' } });
 });
 
 describe('usage load', () => {
+	// The render tests all share one data shape — the full load payload a
+	// healthy page receives; each test spreads it and overrides what varies.
+	function usagePageData() {
+		return {
+			maintenance: false,
+			user: OWNER,
+			summary: { remaining: 0, usedThisMonth: 0, usedLifetime: 0 },
+			metered: false,
+			history: [],
+			bundles: [],
+			mercadoPagoBundles: [],
+			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: false, card: null },
+			autoTopupConsentText: 'consent',
+			stripeConfigured: true,
+			plans: { hosted: true, lifetime: true }
+		};
+	}
+
 	test('a database failure mid-load degrades to the maintenance payload and logs loudly', async () => {
 		// The layout renders the maintenance overlay for this shape — the page
 		// must never surface SvelteKit's unstyled 500 for a mid-load DB error.
@@ -144,6 +166,42 @@ describe('usage load', () => {
 		expect(consume?.id).toEqual(expect.any(Number));
 	});
 
+	test('resolves the saved card brand/last4 live from Stripe for the Cards section', async () => {
+		// The card display is driven by the stored default PM pointer, resolved
+		// live so a card swapped in the Stripe portal shows correctly without a
+		// webhook round-trip.
+		await seedOrg({ stripeDefaultPmId: 'pm_1' });
+		const data = (await load({ locals: { user: OWNER } } as never)) as { autoTopup: { hasCard: boolean; card: { label: string } | null } };
+		expect(data.autoTopup.hasCard).toBe(true);
+		expect(data.autoTopup.card?.label).toBe('Visa •••• 4242');
+		expect(mocks.paymentMethodsRetrieve).toHaveBeenCalledWith('pm_1');
+	});
+
+	test('a payment-method fetch failure keeps the card flag and says details are unavailable — never a maintenance page', async () => {
+		// The pointer stays authoritative (hasCard); only the display details
+		// degrade. The failure is loud in the server log and visible in copy.
+		await seedOrg({ stripeDefaultPmId: 'pm_gone' });
+		mocks.paymentMethodsRetrieve.mockRejectedValue(new Error('resource_missing'));
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const data = (await load({ locals: { user: OWNER } } as never)) as { maintenance: boolean; autoTopup: { hasCard: boolean; card: unknown } };
+			expect(data.maintenance).toBe(false);
+			expect(data.autoTopup.hasCard).toBe(true);
+			expect(data.autoTopup.card).toBeNull();
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('pm_gone'));
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('no saved card pointer means no Stripe call at all', async () => {
+		await seedOrg();
+		const data = (await load({ locals: { user: OWNER } } as never)) as { autoTopup: { hasCard: boolean; card: unknown } };
+		expect(data.autoTopup.hasCard).toBe(false);
+		expect(data.autoTopup.card).toBeNull();
+		expect(mocks.paymentMethodsRetrieve).not.toHaveBeenCalled();
+	});
+
 	test('load surfaces the remaining lifetime slot count', async () => {
 		await seedOrg();
 		const fresh = (await load({ locals: { user: OWNER } } as never)) as { lifetimeSlots: number };
@@ -188,19 +246,7 @@ describe('usage load', () => {
 		// Unlimited scoring makes credit bundles and auto top-up useless, so
 		// the cards are replaced by an explanatory line (I12: never silently
 		// different). A metered org renders them normally.
-		const base = {
-			maintenance: false,
-			user: OWNER,
-			summary: { remaining: 0, usedThisMonth: 0, usedLifetime: 0 },
-			metered: false,
-			history: [],
-			bundles: [{ id: 'credits_100', label: '100 credits' }],
-			mercadoPagoBundles: [{ id: 'credits_100', label: '100 credits', amountCents: 990 }],
-			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: false },
-			autoTopupConsentText: 'consent',
-			stripeConfigured: true,
-			plans: { hosted: true, lifetime: true }
-		};
+		const base = { ...usagePageData(), bundles: [{ id: 'credits_100', label: '100 credits' }], mercadoPagoBundles: [{ id: 'credits_100', label: '100 credits', amountCents: 990 }] };
 		const lifetime = render(Page, {
 			props: { data: { ...base, billing: { plan: 'lifetime', subscriptionStatus: null, periodEnd: null } }, form: null } as never
 		}).body;
@@ -234,25 +280,18 @@ describe('usage load', () => {
 		// click a dead buy button once sold out, and a lifetime org sees its
 		// plan instead of a second buy form (I12: explicit states, never a
 		// button that only fails at checkout).
-		const base = {
-			maintenance: false,
-			user: OWNER,
-			summary: { remaining: 0, usedThisMonth: 0, usedLifetime: 0 },
-			metered: false,
-			history: [],
-			bundles: [],
-			mercadoPagoBundles: [],
-			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: false },
-			autoTopupConsentText: 'consent',
-			stripeConfigured: true,
-			plans: { hosted: false, lifetime: true }
-		};
+		const base = { ...usagePageData(), plans: { hosted: false, lifetime: true } };
 
 		const available = render(Page, {
 			props: { data: { ...base, lifetimeSlots: 997, billing: { plan: null, subscriptionStatus: null, periodEnd: null } }, form: null } as never
 		}).body;
 		expect(available).toContain('action="?/buyPlan"');
 		expect(available).toContain('3 of 1,000 claimed');
+		// BYOK is mandatory on lifetime (Terms §6.1(c)) — an offer that says
+		// "unlimited comments" without naming the required OpenAI key hides a
+		// material ongoing cost until after purchase (codex P1). Disclose it
+		// on the purchase surface, not just post-sale.
+		expect(available).toMatch(/own OpenAI API key/i);
 
 		const soldOut = render(Page, {
 			props: { data: { ...base, lifetimeSlots: 0, billing: { plan: null, subscriptionStatus: null, periodEnd: null } }, form: null } as never
@@ -267,6 +306,124 @@ describe('usage load', () => {
 		}).body;
 		expect(owned).not.toContain('action="?/buyPlan"');
 		expect(owned).toContain('lifetime plan');
+	});
+
+	test('a lifetime org never gets a period end on the plan line — a live hosted subscription shows separately', async () => {
+		// After a cancel→lifetime upgrade the subscription keeps its paid
+		// window, but "period ends" belongs to the SUBSCRIPTION — the lifetime
+		// plan has no period. The live sub renders as its own line so the
+		// user can see it winding down.
+		const base = { ...usagePageData(), summary: { remaining: 200, usedThisMonth: 0, usedLifetime: 0 }, hasOpenAiKey: true };
+		const windingDown = render(Page, {
+			props: { data: { ...base, billing: { plan: 'lifetime', subscriptionStatus: 'active', periodEnd: '2026-10-19T22:46:39.000Z', cancelAtPeriodEnd: true, subscriptionLive: true } }, form: null } as never
+		}).body;
+		expect(windingDown).toContain('Current plan: <strong>lifetime</strong>');
+		expect(windingDown).not.toContain('period ends');
+		expect(windingDown).toContain('Hosted subscription');
+		expect(windingDown).toContain(new Date('2026-10-19T22:46:39.000Z').toLocaleDateString());
+
+		// Once the subscription is terminal there is nothing to show.
+		const ended = render(Page, {
+			props: { data: { ...base, billing: { plan: 'lifetime', subscriptionStatus: 'canceled', periodEnd: '2026-10-19T22:46:39.000Z', cancelAtPeriodEnd: false, subscriptionLive: false } }, form: null } as never
+		}).body;
+		expect(ended).not.toContain('Hosted subscription');
+	});
+
+	test('a lifetime org sees its required BYOK state — a loud missing-key warning or the saved-key status', async () => {
+		// BYOK is not optional on lifetime: no stored key means scoring cannot
+		// run (resolveOpenAiKey withholds the deployment key, comments queue).
+		// The plan card must say so loudly — not "optional" — and point at the
+		// Team page where the owner-only form lives. Metered orgs see neither.
+		const base = usagePageData();
+		const missing = render(Page, {
+			props: { data: { ...base, hasOpenAiKey: false, billing: { plan: 'lifetime', subscriptionStatus: null, periodEnd: null } }, form: null } as never
+		}).body;
+		expect(missing).toContain('href="/org"');
+		expect(missing).toContain('OpenAI API key');
+		expect(missing).toContain('error-box');
+		expect(missing).toContain('review queue');
+		expect(missing).not.toContain('Optional');
+
+		const saved = render(Page, {
+			props: { data: { ...base, hasOpenAiKey: true, billing: { plan: 'lifetime', subscriptionStatus: null, periodEnd: null } }, form: null } as never
+		}).body;
+		expect(saved).toContain('OpenAI API key');
+		expect(saved).toContain('href="/org"');
+		expect(saved).not.toContain('error-box');
+
+		const hosted = render(Page, {
+			props: { data: { ...base, hasOpenAiKey: false, billing: { plan: 'hosted', subscriptionStatus: 'active', periodEnd: '2026-10-19T00:00:00.000Z' } }, form: null } as never
+		}).body;
+		expect(hosted).not.toContain('OpenAI API key');
+	});
+
+	test('load exposes hasOpenAiKey as a boolean — never the key or its ciphertext', async () => {
+		await seedOrg();
+		const unset = (await load({ locals: { user: OWNER } } as never)) as { hasOpenAiKey: boolean };
+		expect(unset.hasOpenAiKey).toBe(false);
+
+		await testDb().db.update(organizations).set({ openaiKeyEnc: 'ENC:sentinel-ciphertext' }).where(eq(organizations.id, 'org-1'));
+		const view = (await load({ locals: { user: OWNER } } as never)) as Record<string, unknown>;
+		expect(view.hasOpenAiKey).toBe(true);
+		// The serialized payload must carry only the boolean — never the
+		// stored ciphertext, which a leak would hand straight to the client.
+		expect(JSON.stringify(view)).not.toContain('ENC:sentinel-ciphertext');
+	});
+
+	test('a lifetime org whose stored key no longer decrypts sees the missing-key warning, not "scoring active"', async () => {
+		// Truthiness is not usability: a corrupt ciphertext (key rotation,
+		// truncation) still passes Boolean(openaiKeyEnc) — the page would
+		// claim scoring runs on the saved key while resolveOpenAiKey queues
+		// every comment (codex P2). The flag must reflect a DECRYPTABLE key.
+		await seedOrg({ plan: 'lifetime', openaiKeyEnc: 'ENC:not-real-ciphertext' });
+		const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			const view = (await load({ locals: { user: OWNER } } as never)) as { hasOpenAiKey: boolean };
+			expect(view.hasOpenAiKey).toBe(false);
+		} finally {
+			spy.mockRestore();
+		}
+		// And a decryptable key still reports true — the positive leg.
+		const { encrypt } = await import('$lib/server/crypto');
+		await testDb().db.update(organizations).set({ openaiKeyEnc: encrypt('sk-live-usable') }).where(eq(organizations.id, 'org-1'));
+		const usable = (await load({ locals: { user: OWNER } } as never)) as { hasOpenAiKey: boolean };
+		expect(usable.hasOpenAiKey).toBe(true);
+	});
+
+	test('a hosted org sees Manage subscription instead of dead buy buttons', async () => {
+		// One live subscription per org: the "Start hosted" form only ever
+		// 400s for a subscribed org, and the lifetime form only ever tells
+		// them to cancel first — replace both with the portal button that can
+		// actually manage the subscription (I12: no button that only fails).
+		const base = { ...usagePageData(), billing: { plan: 'hosted', subscriptionStatus: 'active', periodEnd: '2026-10-19T00:00:00.000Z' } };
+		const body = render(Page, { props: { data: base, form: null } as never }).body;
+		expect(body).toContain('Manage subscription');
+		expect(body).toContain('action="?/manageCards"');
+		expect(body).not.toContain('value="hosted"');
+		expect(body).not.toContain('value="lifetime"');
+		// The cancel-first hint keeps the lifetime path discoverable.
+		expect(body).toContain('cancel');
+	});
+
+	test('load exposes the pending-cancellation flag on billing', async () => {
+		await seedOrg({ plan: 'hosted', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active', stripeSubscriptionCancelAtPeriodEnd: 1, stripeSubscriptionPeriodEnd: '2026-10-19T00:00:00.000Z' });
+		const data = (await load({ locals: { user: OWNER } } as never)) as { billing: { cancelAtPeriodEnd: boolean; periodEnd: string } };
+		expect(data.billing.cancelAtPeriodEnd).toBe(true);
+		expect(data.billing.periodEnd).toBe('2026-10-19T00:00:00.000Z');
+	});
+
+	test('a cancel-pending hosted org sees the pending notice and the lifetime buy form', async () => {
+		// The cancel is already scheduled — the page must SAY so (silence is
+		// the bug: the canceled sub looked identical to a live one) and the
+		// lifetime offer unlocks immediately instead of after period end.
+		const base = { ...usagePageData(), lifetimeSlots: 997, billing: { plan: 'hosted', subscriptionStatus: 'active', periodEnd: '2026-10-19T00:00:00.000Z', cancelAtPeriodEnd: true } };
+		const body = render(Page, { props: { data: base, form: null } as never }).body;
+		expect(body).toContain('Manage subscription');
+		expect(body).toContain('subscription is canceled');
+		expect(body).toContain('action="?/buyPlan"');
+		expect(body).toContain('value="lifetime"');
+		// A second hosted subscription stays blocked — resume via the portal.
+		expect(body).not.toContain('value="hosted"');
 	});
 });
 
@@ -367,19 +524,16 @@ describe('usage buy action', () => {
 	test('a lifetime org cannot open a Stripe credit checkout — unlimited plans never buy credits', async () => {
 		// The lifetime plan's scoring is already unlimited: a crafted POST
 		// (the button is hidden in the UI) must fail loudly BEFORE a Checkout
-		// Session exists — never sell a balance the org can never need.
+		// Session exists — never sell a balance the org can never need. This
+		// is a KNOWN domain rejection, so the response carries the real reason
+		// (400), not the generic defect message.
 		await seedOrg({ plan: 'lifetime' });
-		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-		try {
-			const result = await buy('credits_100');
-			expect(result).toMatchObject({ status: 500 });
-			expect(mocks.sessionsCreate).not.toHaveBeenCalled();
-			expect(mocks.customersCreate).not.toHaveBeenCalled();
-			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('lifetime'));
-			expect(await testDb().db.select().from(stripeCheckoutAttempts)).toHaveLength(0);
-		} finally {
-			errorSpy.mockRestore();
-		}
+		const result = await buy('credits_100');
+		expect(result).toMatchObject({ status: 400 });
+		expect(JSON.stringify(result)).toContain('unlimited moderated comments');
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+		expect(mocks.customersCreate).not.toHaveBeenCalled();
+		expect(await testDb().db.select().from(stripeCheckoutAttempts)).toHaveLength(0);
 	});
 
 	test('a lifetime org cannot open a Mercado Pago credit checkout', async () => {
@@ -622,6 +776,46 @@ describe('usage plan checkout action', () => {
 		expect(result).toMatchObject({ status: 400, data: { error: 'Unknown billing plan.' } });
 		expect(mocks.pricesRetrieve).not.toHaveBeenCalled();
 	});
+
+	test('a hosted org re-buying hosted gets a specific 400, never a generic 500', async () => {
+		// The button is hidden in the UI, but a crafted/stale POST must answer
+		// with the REAL reason — a generic "try again" implies retrying would
+		// help when the purchase can never succeed (MOD buttons investigation).
+		await seedOrg({ plan: 'hosted', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
+		const result = await buyPlan('hosted');
+		expect(result).toMatchObject({ status: 400 });
+		expect(JSON.stringify(result)).toContain('already');
+		expect(JSON.stringify(result)).toContain('subscription');
+		expect(JSON.stringify(result)).not.toContain('sub_1');
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test('a hosted org buying lifetime is told to cancel first — specific 400, not a defect page', async () => {
+		await seedOrg({ plan: 'hosted', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
+		const result = await buyPlan('lifetime');
+		expect(result).toMatchObject({ status: 400 });
+		expect(JSON.stringify(result).toLowerCase()).toContain('cancel');
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test('a lifetime org buying any plan hears that it already owns it', async () => {
+		await seedOrg({ plan: 'lifetime' });
+		for (const plan of ['hosted', 'lifetime']) {
+			const result = await buyPlan(plan);
+			expect(result).toMatchObject({ status: 400 });
+			expect(JSON.stringify(result)).toContain('lifetime plan');
+		}
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test('a sold-out lifetime plan says so to the buyer', async () => {
+		// Exhaust the slot pool first so the domain rejection fires.
+		await seedOrg();
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1' });
+		const result = await buyPlan('lifetime');
+		expect(result).toMatchObject({ status: 400 });
+		expect(JSON.stringify(result)).toContain('sold out');
+	});
 });
 
 describe('usage manageCards action (Stripe customer portal)', () => {
@@ -789,6 +983,41 @@ describe('usage cards section', () => {
 		// purchases" overclaims (cubic P2).
 		expect(body).toContain('A card is saved for automatic top-up.');
 		expect(body).not.toContain('future purchases');
+	});
+
+	test('the resolved card label renders instead of the generic sentence', () => {
+		// The owner should SEE which card is on file — the portal's card list
+		// and Moderaty's copy must agree.
+		const body = renderUsage({
+			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: true, card: { label: 'Visa •••• 4242' } }
+		});
+		expect(body).toContain('Visa •••• 4242');
+		expect(body).not.toContain('No card saved');
+	});
+
+	test('a malformed card payload resolves to unavailable — never rendered as a trusted label', async () => {
+		// I2: Stripe's card fields are external data — a one-character last4 or
+		// an empty brand must not render as if it were a real saved card
+		// (codex P1). Malformed means logged + unavailable, not displayed.
+		await seedOrg({ creditsRemaining: 5, autoTopupEnabled: 1, autoTopupThreshold: 100, autoTopupState: 'idle', stripeDefaultPmId: 'pm_1' });
+		mocks.paymentMethodsRetrieve.mockResolvedValue({ id: 'pm_1', type: 'card', card: { brand: 'visa', last4: 'x' } });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const data = (await load({ locals: { user: OWNER } } as never)) as { autoTopup: { hasCard: boolean; card: unknown } };
+			expect(data.autoTopup.hasCard).toBe(true);
+			expect(data.autoTopup.card).toBeNull();
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('malformed'));
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('a card pointer with unresolved details says so instead of implying which card', () => {
+		const body = renderUsage({
+			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: true, card: null }
+		});
+		expect(body).toContain('A card is saved for automatic top-up.');
+		expect(body).toContain('unavailable');
 	});
 
 	test('a member never sees the card manager', () => {

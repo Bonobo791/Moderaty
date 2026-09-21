@@ -12,7 +12,8 @@ const mocks = vi.hoisted(() => {
 			auditLog: undefined as unknown,
 			moderationActions: undefined as unknown,
 			organizations: undefined as unknown,
-			creditTransactions: undefined as unknown
+			creditTransactions: undefined as unknown,
+			stripeSubscriptionPeriods: undefined as unknown
 		},
 		// Org credit balance the fake organizations select reports (ledger gate).
 		credits: 5 as number | null,
@@ -67,6 +68,10 @@ const mocks = vi.hoisted(() => {
 				if (table === state.tables.organizations) {
 					return { creditsRemaining: state.credits, plan: state.plan, stripeSubscriptionId: state.stripeSubscriptionId, stripeCustomerId: state.customerId };
 				}
+				// The ledger's paid-period queries (getCredits' included-credit
+				// sum, consumeCredit's allowance row). The fake seeds no
+				// subscription periods, so no row matches — the honest answer.
+				if (table === state.tables.stripeSubscriptionPeriods) return undefined;
 				if (table === state.tables.auditLog) {
 					// "Latest" reads sort createdAt/id desc — approximate by
 					// returning the last inserted row matching both eq()s.
@@ -353,7 +358,7 @@ vi.mock('$lib/server/youtube', async (importOriginal) => ({
 	deleteComment: mocks.deleteComment
 }));
 
-import { auditLog, channelAllowedHandles, channels, comments, creditTransactions, moderationActions, organizations, rules } from '$lib/server/db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, creditTransactions, moderationActions, organizations, rules, stripeSubscriptionPeriods } from '$lib/server/db/schema';
 import { SQLiteSyncDialect } from 'drizzle-orm/sqlite-core';
 import type { NewComment } from '../youtube';
 
@@ -492,7 +497,7 @@ export function resetPipelineMocks() {
 		mocks.scoreTone,
 		mocks.resolveOpenAiKey
 	]) mock.mockReset();
-	mocks.state.tables = { channels, comments, rules, channelAllowedHandles, auditLog, moderationActions, organizations, creditTransactions };
+	mocks.state.tables = { channels, comments, rules, channelAllowedHandles, auditLog, moderationActions, organizations, creditTransactions, stripeSubscriptionPeriods };
 	mocks.state.credits = 5;
 	mocks.state.failCharges = false;
 	mocks.state.plan = 'free';

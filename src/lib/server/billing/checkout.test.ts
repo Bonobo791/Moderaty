@@ -159,6 +159,29 @@ describe('createPlanCheckout', () => {
 		await expect(createPlanCheckout('org-1', owner(), 'lifetime')).rejects.toThrow('already has an active hosted subscription');
 		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
 	});
+
+	test('allows a lifetime checkout while the hosted subscription is scheduled to end', async () => {
+		// The upgrade path: the subscription can only wind down (it cannot
+		// renew), so paying for lifetime now is safe — fulfillment re-verifies
+		// the schedule against the LIVE subscription in case of a resume.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active', stripeSubscriptionCancelAtPeriodEnd: 1 });
+		const url = await createPlanCheckout('org-1', owner(), 'lifetime', 'attempt-lt-pending');
+		expect(url).toBe('https://checkout.stripe.com/c/pay/cs_1');
+		expect(mocks.sessionsCreate).toHaveBeenCalledWith(expect.objectContaining({
+			mode: 'payment',
+			line_items: [{ price: 'price_lifetime', quantity: 1 }],
+			metadata: { org_id: 'org-1', product: 'lifetime' }
+		}), expect.anything());
+	});
+
+	test('still rejects a second hosted checkout while cancellation is pending', async () => {
+		// A cancel-pending subscription is still the org's one subscription —
+		// staying on hosted means resuming it in the portal, not minting a
+		// duplicate that the webhook would have to tear down and refund.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active', stripeSubscriptionCancelAtPeriodEnd: 1 });
+		await expect(createPlanCheckout('org-1', owner(), 'hosted')).rejects.toThrow('already has a hosted subscription');
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
 	test('rejects a hosted checkout while the organization has lifetime access', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'lifetime' });
 		await expect(createPlanCheckout('org-1', owner(), 'hosted')).rejects.toThrow('already has the lifetime plan');

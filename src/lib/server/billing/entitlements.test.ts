@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, test } from 'vitest';
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { organizations, stripeLifetimeEntitlements, stripeLifetimeSlots, stripeSubscriptionPeriods, stripePendingReversals, stripeDisputeReversals } from '$lib/server/db/schema';
-import { claimLifetimeSlot, grantSubscriptionPeriod, lifetimeSlotsRemaining, releaseLifetimeForPayment, applySubscriptionSnapshot, disputeSubscriptionPeriod, restoreDisputedSubscriptionPeriod, revokeLifetimeForDispute, restoreLifetimeForDispute } from './entitlements';
+import { claimLifetimeSlot, grantSubscriptionPeriod, lifetimeSlotsRemaining, releaseLifetimeForPayment, applySubscriptionSnapshot, disputeSubscriptionPeriod, restoreDisputedSubscriptionPeriod, revokeLifetimeForDispute, restoreLifetimeForDispute, refundSubscriptionPeriod } from './entitlements';
 import { consumeCredit, getCredits } from './ledger';
 import { LIFETIME_SLOT_LIMIT } from './plans';
 
@@ -52,6 +52,51 @@ describe('subscription period entitlements', () => {
 		expect(await getCredits('org-1')).toBe(0);
 		const period = await testDb().db.select().from(stripeSubscriptionPeriods).where(eq(stripeSubscriptionPeriods.invoiceId, 'in-1')).get();
 		expect(period?.consumedCredits).toBe(2);
+	});
+
+	test('a refund matches a period that stored only the payment intent', async () => {
+		// invoicePaymentReferences accepts either ref alone — a period row can
+		// carry only payment_intent_id. The refund event arrives with BOTH refs;
+		// requiring both columns to agree misses the row and the refunded
+		// period's included comments stay usable (codeant P1).
+		const now = Date.now();
+		await testDb().db.insert(stripeSubscriptionPeriods).values({
+			orgId: 'org-1', subscriptionId: 'sub-1', invoiceId: 'in-pi-only', paymentIntentId: 'pi-1', chargeId: null,
+			periodKey: 'p1', periodStart: new Date(now - 86_400_000).toISOString(), periodEnd: new Date(now + 86_400_000).toISOString(),
+			includedCredits: 100, consumedCredits: 0, status: 'paid'
+		});
+		expect(await refundSubscriptionPeriod({ paymentIntentId: 'pi-1', chargeId: 'ch-1' })).toBe(true);
+		const period = await testDb().db.select().from(stripeSubscriptionPeriods).where(eq(stripeSubscriptionPeriods.invoiceId, 'in-pi-only')).get();
+		expect(period?.status).toBe('refunded');
+	});
+
+	test('a both-refs refund never matches a period row whose identifiers are BOTH null', async () => {
+		// The no-contradiction predicate tolerates one missing column, but a
+		// row storing NEITHER ref would otherwise satisfy it for every refund —
+		// marking an unrelated paid period refunded and (via the webhook's
+		// refundedSubscription lookup) canceling its subscription (coderabbit).
+		// At least one stored identifier must positively match.
+		const now = Date.now();
+		await testDb().db.insert(stripeSubscriptionPeriods).values({
+			orgId: 'org-1', subscriptionId: 'sub-1', invoiceId: 'in-bare', paymentIntentId: null, chargeId: null,
+			periodKey: 'p1', periodStart: new Date(now - 86_400_000).toISOString(), periodEnd: new Date(now + 86_400_000).toISOString(),
+			includedCredits: 100, consumedCredits: 0, status: 'paid'
+		});
+		expect(await refundSubscriptionPeriod({ paymentIntentId: 'pi-1', chargeId: 'ch-1' })).toBe(false);
+		const period = await testDb().db.select().from(stripeSubscriptionPeriods).where(eq(stripeSubscriptionPeriods.invoiceId, 'in-bare')).get();
+		expect(period?.status).toBe('paid');
+	});
+
+	test('a refund matches a period that stored only the charge', async () => {
+		const now = Date.now();
+		await testDb().db.insert(stripeSubscriptionPeriods).values({
+			orgId: 'org-1', subscriptionId: 'sub-1', invoiceId: 'in-ch-only', paymentIntentId: null, chargeId: 'ch-1',
+			periodKey: 'p1', periodStart: new Date(now - 86_400_000).toISOString(), periodEnd: new Date(now + 86_400_000).toISOString(),
+			includedCredits: 100, consumedCredits: 0, status: 'paid'
+		});
+		expect(await refundSubscriptionPeriod({ paymentIntentId: 'pi-1', chargeId: 'ch-1' })).toBe(true);
+		const period = await testDb().db.select().from(stripeSubscriptionPeriods).where(eq(stripeSubscriptionPeriods.invoiceId, 'in-ch-only')).get();
+		expect(period?.status).toBe('refunded');
 	});
 
 	test('a refund queued before invoice fulfillment marks that period unusable', async () => {

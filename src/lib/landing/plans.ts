@@ -51,7 +51,7 @@ export const TICKS_HOSTED_DETAILED = [
 
 export const TICKS_LIFETIME = [
 	'One payment, hosted forever',
-	'We run the AI — no key to manage',
+	'AI scoring on your own OpenAI API key',
 	'Unlimited moderated comments',
 	'Only the first 1,000 users'
 ];
@@ -59,7 +59,7 @@ export const TICKS_LIFETIME = [
 export const TICKS_LIFETIME_DETAILED = [
 	'Everything in hosted, minus the monthly bill',
 	'We run it, patch it, and keep it awake, forever',
-	'No key to manage: we run the AI for you',
+	'AI scoring runs on your own OpenAI API key (Terms §6.1(c))',
 	'Unlimited moderated comments, no meter',
 	'Capped at the first 1,000 users, then it is gone'
 ];

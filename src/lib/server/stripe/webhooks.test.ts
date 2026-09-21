@@ -30,6 +30,11 @@ const mocks = vi.hoisted(() => ({
 	customersUpdate: vi.fn(),
 	customersRetrieve: vi.fn(),
 	subscriptionsRetrieve: vi.fn(),
+	subscriptionsCancel: vi.fn(),
+	subscriptionsUpdate: vi.fn(),
+	invoicePaymentsList: vi.fn(),
+	invoicesRetrieve: vi.fn(),
+	invoicesList: vi.fn(),
 	paymentMethodsAttach: vi.fn(),
 	refundsCreate: vi.fn()
 }));
@@ -41,7 +46,9 @@ vi.mock('$lib/server/stripe/client', () => ({
 		charges: { retrieve: mocks.chargesRetrieve },
 		disputes: { retrieve: mocks.disputesRetrieve },
 		customers: { update: mocks.customersUpdate, retrieve: mocks.customersRetrieve },
-		subscriptions: { retrieve: mocks.subscriptionsRetrieve },
+		subscriptions: { retrieve: mocks.subscriptionsRetrieve, cancel: mocks.subscriptionsCancel, update: mocks.subscriptionsUpdate },
+		invoicePayments: { list: mocks.invoicePaymentsList },
+		invoices: { retrieve: mocks.invoicesRetrieve, list: mocks.invoicesList },
 		paymentMethods: { attach: mocks.paymentMethodsAttach },
 		refunds: { create: mocks.refundsCreate }
 	})
@@ -76,8 +83,33 @@ function event(type: string, id: string, object: Record<string, unknown>, create
 	return { id, type, ...(created === undefined ? {} : { created }), data: { object: { id, object: 'test', ...object } } };
 }
 
+// Shared arrange+act for the live-check lifetime tests: seed an org with
+// a stored subscription, point the session/live-sub mocks at the given
+// states, fulfill, and swallow the loud refund log (it is asserted via
+// refundsCreate, not the console).
+async function seedSubscribedOrgAndFulfillLifetime(opts: { cachedStatus: string; sessionId: string; live: Record<string, unknown> }) {
+	await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: opts.cachedStatus });
+	mocks.sessionsRetrieve.mockResolvedValue(session({ id: opts.sessionId, metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+	mocks.subscriptionsRetrieve.mockResolvedValue(opts.live);
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+	try {
+		return await fulfillCheckout(opts.sessionId);
+	} finally {
+		errorSpy.mockRestore();
+	}
+}
+
 beforeEach(() => {
 	vi.clearAllMocks();
+	// clearAllMocks resets call history but NOT implementations — a test that
+	// forgets to stub a Stripe read would otherwise inherit whatever the
+	// previous test configured (cubic). Give the read mocks neutral defaults;
+	// tests stub their own specifics on top.
+	mocks.invoicePaymentsList.mockReset().mockResolvedValue({ data: [] });
+	mocks.invoicesRetrieve.mockReset();
+	mocks.invoicesList.mockReset().mockResolvedValue({ data: [] });
+	mocks.subscriptionsRetrieve.mockReset();
+	mocks.subscriptionsCancel.mockReset();
 	// Stripe's real refunds.create resolves a Refund — the status drives the
 	// helper's validate-before-ACK contract.
 	mocks.refundsCreate.mockResolvedValue({ id: 're_1', status: 'succeeded' });
@@ -101,19 +133,134 @@ describe('fenced Stripe event leases', () => {
 });
 
 describe('paid hosted products', () => {
-	test('rejects a lifetime fulfillment while a hosted subscription is active', async () => {
-		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
-		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lifetime', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
-		expect(await fulfillCheckout('cs_lifetime')).toBe('rejected');
+	test('refunds a lifetime fulfillment while a hosted subscription is live and not ending', async () => {
+		// The stored status is only a cache: before refusing the grant the
+		// LIVE subscription is consulted — still billing and not scheduled to
+		// end means the paid session can never grant, so the money goes back
+		// (a bare 'rejected' would keep $49 for nothing).
+		expect(await seedSubscribedOrgAndFulfillLifetime({
+			cachedStatus: 'active', sessionId: 'cs_lifetime',
+			live: { id: 'sub_1', status: 'active', cancel_at_period_end: false, cancel_at: null }
+		})).toBe('refunded');
+		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_1', metadata: { reason: 'ungrantable', org_id: 'org-1', checkout_session_id: 'cs_lifetime' } }, { idempotencyKey: 'refund:ungrantable:cs_lifetime' });
 		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toHaveLength(0);
 	});
 
-	test('rejects a hosted fulfillment while lifetime access is active', async () => {
+	test('a lifetime checkout consults the LIVE subscription even when the cached status is non-active', async () => {
+		// The stored status is only a cache: a missed subscription.deleted
+		// webhook (or a portal resume that never delivered) can leave it
+		// 'canceled' while Stripe still has the subscription live and billing.
+		// Gating the live check on the cache would grant lifetime while the
+		// customer keeps paying monthly (codeant P1) — Stripe decides, always.
+		expect(await seedSubscribedOrgAndFulfillLifetime({
+			cachedStatus: 'canceled', sessionId: 'cs_lt_stale',
+			live: { id: 'sub_1', status: 'active', cancel_at_period_end: false, cancel_at: null }
+		})).toBe('refunded');
+		expect(mocks.subscriptionsRetrieve).toHaveBeenCalled();
+		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_1', metadata: { reason: 'ungrantable', org_id: 'org-1', checkout_session_id: 'cs_lt_stale' } }, { idempotencyKey: 'refund:ungrantable:cs_lt_stale' });
+		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toHaveLength(0);
+	});
+
+	test('a lifetime checkout grants when the stored subscription is actually dead at Stripe', async () => {
+		// The other side of the live check: a stale cache saying 'active' for
+		// a sub Stripe knows is canceled must NOT block the upgrade — the
+		// record is wrong, the live lookup is the truth.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lt_dead', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_1', status: 'canceled' });
+		expect(await fulfillCheckout('cs_lt_dead')).toBe('granted');
+		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toHaveLength(1);
+	});
+
+	test('a concurrent hosted fulfillment that loses the subscription claim tears its own sub down', async () => {
+		// Two paid subscription checkouts for the same org can interleave
+		// read→write: both observe no stored subscription, and an unconditional
+		// UPDATE lets the second overwrite the first winner — orphaning a live,
+		// billing subscription the org row no longer names (codeant P1). The
+		// claim is conditional instead: the loser sees the foreign winner, and
+		// cancels + refunds the subscription ITS session just minted.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		const client = testDb().client;
+		const originalExecute = client.execute.bind(client);
+		let injected = false;
+		client.execute = (async (stmt: unknown) => {
+			const sqlText = String((stmt as { sql?: string }).sql ?? stmt);
+			if (!injected && /update\s+"organizations"/i.test(sqlText) && /stripe_subscription_id/i.test(sqlText)) {
+				injected = true;
+				// The concurrent winner commits between the loser's read and write.
+				await testDb().db.update(organizations).set({ stripeSubscriptionId: 'sub_winner' }).where(eq(organizations.id, 'org-1'));
+			}
+			return originalExecute(stmt as never);
+		}) as never;
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_loser', mode: 'subscription', subscription: 'sub_loser', metadata: { org_id: 'org-1', product: 'hosted' }, payment_intent: null }));
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_loser', status: 'active', default_payment_method: null });
+		mocks.subscriptionsCancel.mockResolvedValue({ id: 'sub_loser', status: 'canceled', latest_invoice: 'in_loser' });
+		mocks.invoicePaymentsList.mockResolvedValue({ data: [{ invoice: 'in_loser', payment: { payment_intent: 'pi_loser', charge: 'ch_loser' } }] });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			expect(await fulfillCheckout('cs_loser')).toBe('refunded');
+		} finally {
+			client.execute = originalExecute;
+			errorSpy.mockRestore();
+		}
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeSubscriptionId).toBe('sub_winner');
+		expect(mocks.subscriptionsCancel).toHaveBeenCalledWith('sub_loser');
+		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_loser', metadata: { reason: 'ungrantable', org_id: 'org-1', checkout_session_id: 'cs_loser' } }, { idempotencyKey: 'refund:ungrantable:subscription:sub_loser:payment:pi_loser' });
+	});
+
+	test('a lifetime checkout grants while the hosted subscription is scheduled to end', async () => {
+		// The cancel-pending window is the supported upgrade path: the stored
+		// flag says the sub is ending and the LIVE check confirms Stripe still
+		// has it scheduled (cancel_at), so lifetime claims a slot — the hosted
+		// allowance simply runs out at period end.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active', stripeSubscriptionCancelAtPeriodEnd: 1 });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lt_pending', metadata: { org_id: 'org-1', product: 'lifetime' } }));
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_1', status: 'active', cancel_at_period_end: false, cancel_at: 1_802_678_400, current_period_end: 1_802_678_400 });
+		expect(await fulfillCheckout('cs_lt_pending')).toBe('granted');
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.plan).toBe('lifetime');
+		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toHaveLength(1);
+	});
+
+	test('a lifetime checkout refunds when the subscription was resumed mid-checkout', async () => {
+		// The org's row still says cancel-pending, but Stripe shows the
+		// subscription resumed (no cancel_at, no cancel_at_period_end): the
+		// grant would overlap hosted access, so the payment is ungrantable.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active', stripeSubscriptionCancelAtPeriodEnd: 1 });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lt_resumed', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_1', status: 'active', cancel_at_period_end: false, cancel_at: null });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			expect(await fulfillCheckout('cs_lt_resumed')).toBe('refunded');
+		} finally {
+			errorSpy.mockRestore();
+		}
+		expect(mocks.refundsCreate).toHaveBeenCalledWith(expect.objectContaining({ payment_intent: 'pi_1' }), expect.objectContaining({ idempotencyKey: expect.stringContaining('cs_lt_resumed') }));
+		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toHaveLength(0);
+	});
+
+	test('a paid hosted checkout overlapping lifetime cancels and refunds the subscription it minted', async () => {
+		// payment_status was already 'paid' when fulfillCheckout dispatched —
+		// a bare 'rejected' ACKs the event and keeps a live, billing
+		// subscription running for a customer who can never receive hosted
+		// access (coderabbit CRITICAL). The paid duplicate gets the standard
+		// teardown: cancel + refund its paid invoice.
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1', activeEntitlementId: 1 }).where(eq(stripeLifetimeSlots.slot, 1));
 		await testDb().db.insert(stripeLifetimeEntitlements).values({ id: 1, orgId: 'org-1', slot: 1, checkoutSessionId: 'cs_old' });
 		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_hosted', mode: 'subscription', subscription: 'sub_1', metadata: { org_id: 'org-1', product: 'hosted' }, payment_intent: null }));
-		expect(await fulfillCheckout('cs_hosted')).toBe('rejected');
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_1', status: 'active' });
+		mocks.subscriptionsCancel.mockResolvedValue({ id: 'sub_1', status: 'canceled', latest_invoice: 'in_dup' });
+		mocks.invoicePaymentsList.mockResolvedValue({ data: [{ invoice: 'in_dup', payment: { payment_intent: 'pi_dup', charge: 'ch_dup' } }] });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			expect(await fulfillCheckout('cs_hosted')).toBe('refunded');
+		} finally {
+			errorSpy.mockRestore();
+		}
+		expect(mocks.subscriptionsCancel).toHaveBeenCalledWith('sub_1');
+		expect(mocks.refundsCreate).toHaveBeenCalledWith(expect.objectContaining({ payment_intent: 'pi_dup' }), { idempotencyKey: 'refund:ungrantable:subscription:sub_1:payment:pi_dup' });
 	});
 
 	test('checkout completion records the subscription but does not grant monthly allowance', async () => {
@@ -448,11 +595,98 @@ describe('subscription lifecycle webhooks', () => {
 		expect(org).toMatchObject({ stripeSubscriptionStatus: 'past_due', stripeSubscriptionPeriodStart: new Date(1_800_000_000 * 1000).toISOString(), stripeSubscriptionPeriodEnd: new Date(1_802_678_400 * 1000).toISOString() });
 	});
 
-	test('ignores an invoice for a superseded subscription', async () => {
-		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_current' });
-		const invoice = { id: 'in_stale', subscription: 'sub_old', customer: 'cus_1', payment_intent: 'pi_1', lines: { data: [{ subscription: 'sub_1', period: { start: 1_800_000_000, end: 1_802_678_400 } }] } };
+	test('ignores an invoice for a superseded subscription — and tears the duplicate down', async () => {
+		// The tracked subscription is LIVE at Stripe, so the invoice's
+		// subscription is an untracked duplicate: its paid period never grants
+		// and the duplicate is canceled + refunded at Stripe (one live
+		// subscription per org — codex/grilling session 2026-09-19).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_current', stripeSubscriptionStatus: 'active' });
+		mocks.subscriptionsRetrieve.mockImplementation((id: string) => Promise.resolve(id === 'sub_current' ? { id, status: 'active' } : { id, status: 'active' }));
+		mocks.subscriptionsCancel.mockResolvedValue({ id: 'sub_old', status: 'canceled', latest_invoice: 'in_stale' });
+		mocks.invoicePaymentsList.mockResolvedValue({ data: [{ payment: { type: 'payment_intent', payment_intent: 'pi_dup' } }] });
+		const invoice = { id: 'in_stale', subscription: 'sub_old', customer: 'cus_1', payment_intent: 'pi_dup', lines: { data: [{ subscription: 'sub_old', period: { start: 1_800_000_000, end: 1_802_678_400 } }] } };
 		expect(await handleStripeEvent(event('invoice.paid', 'evt_stale_invoice', invoice) as never)).toBe(true);
 		expect(await testDb().db.select().from(stripeSubscriptionPeriods)).toHaveLength(0);
+		expect(mocks.subscriptionsCancel).toHaveBeenCalledWith('sub_old');
+		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_dup', metadata: expect.objectContaining({ reason: 'ungrantable', org_id: 'org-1' }) }, { idempotencyKey: 'refund:ungrantable:subscription:sub_old:payment:pi_dup' });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeSubscriptionId).toBe('sub_current');
+	});
+
+	test('an invoice for a resubscribe grants when the tracked subscription is dead at Stripe', async () => {
+		// Stored pointer can name a subscription Stripe has already canceled
+		// (stored status is only a cache — webhooks can lag or fail). The new
+		// subscription's invoice.paid arriving before checkout.session.completed
+		// must still grant its period, not be skipped as "superseded".
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_old', stripeSubscriptionStatus: null });
+		mocks.subscriptionsRetrieve.mockImplementation((id: string) => Promise.resolve({ id, status: 'canceled' }));
+		const invoice = { id: 'in_resub', subscription: 'sub_new', customer: 'cus_1', payment_intent: 'pi_new', lines: { data: [{ subscription: 'sub_new', period: { start: 1_800_000_000, end: 1_802_678_400 } }] } };
+		expect(await handleStripeEvent(event('invoice.paid', 'evt_resub_invoice', invoice) as never)).toBe(true);
+		expect(await testDb().db.select().from(stripeSubscriptionPeriods).where(eq(stripeSubscriptionPeriods.invoiceId, 'in_resub'))).toHaveLength(1);
+		expect(mocks.subscriptionsCancel).not.toHaveBeenCalled();
+	});
+
+	test('invoice.paid reads payment references from the invoicePayments API when the payload omits them', async () => {
+		// api 2026-07-29.dahlia payloads can ship an invoice with NO payments,
+		// payment_intent or charge fields at all (observed on a live sandbox
+		// delivery) — the reference must be fetched or the period never grants.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
+		mocks.invoicePaymentsList.mockResolvedValue({ data: [{ payment: { type: 'payment_intent', payment_intent: 'pi_fetched' } }] });
+		const invoice = {
+			parent: { type: 'subscription_details', subscription_details: { subscription: 'sub_1' } },
+			customer: 'cus_1',
+			lines: { data: [{ parent: { type: 'subscription_item_details', subscription_item_details: { subscription: 'sub_1', proration: false } }, period: { start: 1_800_000_000, end: 1_802_678_400 } }] }
+		};
+		expect(await handleStripeEvent(event('invoice.paid', 'in_api_refs', invoice) as never)).toBe(true);
+		expect(mocks.invoicePaymentsList).toHaveBeenCalledWith({ invoice: 'in_api_refs', status: 'paid' });
+		const period = await testDb().db.select().from(stripeSubscriptionPeriods).where(eq(stripeSubscriptionPeriods.invoiceId, 'in_api_refs')).get();
+		expect(period).toMatchObject({ paymentIntentId: 'pi_fetched' });
+	});
+
+	test('invoice.paid still throws when no usable payment reference exists anywhere', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
+		mocks.invoicePaymentsList.mockResolvedValue({ data: [{ payment: { type: 'payment_record', payment_record: 'pr_1' } }] });
+		const invoice = {
+			parent: { type: 'subscription_details', subscription_details: { subscription: 'sub_1' } },
+			customer: 'cus_1',
+			lines: { data: [{ subscription: 'sub_1', period: { start: 1_800_000_000, end: 1_802_678_400 } }] }
+		};
+		await expect(handleStripeEvent(event('invoice.paid', 'in_no_refs', invoice) as never)).rejects.toThrow('no usable payment reference');
+		expect(await testDb().db.select().from(stripeSubscriptionPeriods)).toHaveLength(0);
+	});
+
+	test('a subscription event for a different subscription while one is live tears the duplicate down', async () => {
+		// Stripe does not order deliveries: customer.subscription.created for a
+		// duplicate can arrive BEFORE checkout.session.completed. The tracked
+		// subscription must win either way — the duplicate is canceled +
+		// refunded and its snapshot never displaces the org's pointer.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_tracked', stripeSubscriptionStatus: 'active' });
+		mocks.subscriptionsRetrieve.mockImplementation((id: string) => Promise.resolve({ id, status: 'active' }));
+		mocks.subscriptionsCancel.mockResolvedValue({ id: 'sub_dup', status: 'canceled', latest_invoice: 'in_dup' });
+		mocks.invoicePaymentsList.mockResolvedValue({ data: [{ payment: { type: 'payment_intent', payment_intent: 'pi_dup' } }] });
+		const subscription = { id: 'sub_dup', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false };
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			expect(await handleStripeEvent(event('customer.subscription.created', 'evt_dup_sub', subscription) as never)).toBe(true);
+		} finally {
+			errorSpy.mockRestore();
+		}
+		expect(mocks.subscriptionsCancel).toHaveBeenCalledWith('sub_dup');
+		expect(mocks.refundsCreate).toHaveBeenCalledWith(expect.objectContaining({ payment_intent: 'pi_dup' }), { idempotencyKey: 'refund:ungrantable:subscription:sub_dup:payment:pi_dup' });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeSubscriptionId).toBe('sub_tracked');
+		expect(org?.stripeSubscriptionStatus).toBe('active');
+	});
+
+	test('a subscription event re-points the org once the tracked subscription is dead', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_old', stripeSubscriptionStatus: 'canceled' });
+		mocks.subscriptionsRetrieve.mockImplementation((id: string) => Promise.resolve({ id, status: 'canceled' }));
+		const subscription = { id: 'sub_new', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false };
+		expect(await handleStripeEvent(event('customer.subscription.created', 'evt_resub', subscription) as never)).toBe(true);
+		expect(mocks.subscriptionsCancel).not.toHaveBeenCalled();
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeSubscriptionId).toBe('sub_new');
+		expect(org?.stripeSubscriptionStatus).toBe('active');
 	});
 
 	test('subscription events read billing periods from subscription items', async () => {
@@ -531,6 +765,69 @@ describe('subscription lifecycle webhooks', () => {
 		await expect(handleStripeEvent(event('customer.subscription.updated', 'evt_pm_bad', subscription, 300) as never)).rejects.toThrow('malformed default_payment_method');
 	});
 
+	test('a portal cancellation scheduled via cancel_at is recorded as pending', async () => {
+		// The Stripe customer portal schedules end-of-period cancellation via
+		// the cancel_at TIMESTAMP while cancel_at_period_end stays false —
+		// reading only the flag records a canceled sub as "not canceling" and
+		// the pending cancel stays invisible to the org (production repro).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
+		const subscription = { id: 'sub_1', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false, cancel_at: 1_802_678_400, canceled_at: 1_800_100_000 };
+		expect(await handleStripeEvent(event('customer.subscription.updated', 'evt_cancel_at', subscription, 300) as never)).toBe(true);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeSubscriptionCancelAtPeriodEnd).toBe(1);
+		expect(org?.plan).toBe('hosted');
+	});
+
+	test('a malformed cancel_at timestamp fails loudly', async () => {
+		// I2: a present-but-garbage cancel_at is a failed API call — throwing
+		// keeps the delivery un-ACKed instead of persisting "not canceling".
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
+		const subscription = { id: 'sub_1', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false, cancel_at: 'soon' };
+		await expect(handleStripeEvent(event('customer.subscription.updated', 'evt_bad_cancel_at', subscription, 300) as never)).rejects.toThrow('cancel_at');
+	});
+
+	test('resuming a scheduled cancellation clears the pending flag', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active', stripeSubscriptionCancelAtPeriodEnd: 1 });
+		const subscription = { id: 'sub_1', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false, cancel_at: null, canceled_at: null };
+		expect(await handleStripeEvent(event('customer.subscription.updated', 'evt_resumed', subscription, 300) as never)).toBe(true);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeSubscriptionCancelAtPeriodEnd).toBe(0);
+		expect(mocks.subscriptionsUpdate).not.toHaveBeenCalled();
+	});
+
+	test('a subscription resumed on a lifetime org is re-canceled at period end', async () => {
+		// Lifetime can be bought while a hosted sub is merely scheduled to
+		// end; a portal resume after that purchase would keep billing $5/mo
+		// for an entitlement the lifetime plan already covers — the handler
+		// re-schedules its cancellation (period end, per the Terms' cancel
+		// rule) and screams, instead of silently double-charging forever.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'lifetime', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1', activeEntitlementId: 1 }).where(eq(stripeLifetimeSlots.slot, 1));
+		await testDb().db.insert(stripeLifetimeEntitlements).values({ id: 1, orgId: 'org-1', slot: 1, checkoutSessionId: 'cs_lt' });
+		const subscription = { id: 'sub_1', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false, cancel_at: null, canceled_at: null };
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			expect(await handleStripeEvent(event('customer.subscription.updated', 'evt_resume_lt', subscription, 300) as never)).toBe(true);
+		} finally {
+			errorSpy.mockRestore();
+		}
+		expect(mocks.subscriptionsUpdate).toHaveBeenCalledWith('sub_1', { cancel_at_period_end: true });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.plan).toBe('lifetime');
+	});
+
+	test('a subscription still scheduled to end on a lifetime org is left alone', async () => {
+		// The normal upgrade path: sub is ending at period end while lifetime
+		// is active — nothing to re-cancel, no Stripe write at all.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'lifetime', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1', activeEntitlementId: 1 }).where(eq(stripeLifetimeSlots.slot, 1));
+		await testDb().db.insert(stripeLifetimeEntitlements).values({ id: 1, orgId: 'org-1', slot: 1, checkoutSessionId: 'cs_lt' });
+		const subscription = { id: 'sub_1', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false, cancel_at: 1_802_678_400 };
+		expect(await handleStripeEvent(event('customer.subscription.updated', 'evt_lt_ending', subscription, 300) as never)).toBe(true);
+		expect(mocks.subscriptionsUpdate).not.toHaveBeenCalled();
+		expect(mocks.subscriptionsCancel).not.toHaveBeenCalled();
+	});
+
 	test('hosted fulfillment stores the subscription card without waiting for subscription events', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1' });
 		mocks.sessionsRetrieve.mockResolvedValue(session({ mode: 'subscription', subscription: 'sub_1', metadata: { org_id: 'org-1', product: 'hosted' }, payment_intent: null }));
@@ -540,6 +837,54 @@ describe('subscription lifecycle webhooks', () => {
 		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
 		expect(org?.stripeSubscriptionId).toBe('sub_1');
 		expect(org?.stripeDefaultPmId).toBe('pm_sub_1');
+	});
+
+	test('a second hosted checkout while the stored subscription is LIVE cancels and refunds the duplicate', async () => {
+		// The outage scenario: the stored status cache can be null or stale, so
+		// the verdict comes from a LIVE retrieve of the stored subscription.
+		// The new subscription is canceled (stops all future billing) and its
+		// first paid invoice is refunded — the org keeps its original pointer.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_old', stripeSubscriptionStatus: null });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_dup', mode: 'subscription', subscription: 'sub_new', metadata: { org_id: 'org-1', product: 'hosted' }, payment_intent: null }));
+		mocks.subscriptionsRetrieve.mockImplementation((id: string) => Promise.resolve(id === 'sub_old' ? { id, status: 'active' } : { id, status: 'active' }));
+		mocks.subscriptionsCancel.mockResolvedValue({ id: 'sub_new', status: 'canceled', latest_invoice: 'in_dup' });
+		mocks.invoicePaymentsList.mockResolvedValue({ data: [{ payment: { type: 'payment_intent', payment_intent: 'pi_dup' } }] });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			expect(await fulfillCheckout('cs_dup')).toBe('refunded');
+		} finally {
+			errorSpy.mockRestore();
+		}
+		expect(mocks.subscriptionsCancel).toHaveBeenCalledWith('sub_new');
+		expect(mocks.invoicePaymentsList).toHaveBeenCalledWith({ invoice: 'in_dup', status: 'paid' });
+		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_dup', metadata: { reason: 'ungrantable', org_id: 'org-1', checkout_session_id: 'cs_dup' } }, { idempotencyKey: 'refund:ungrantable:subscription:sub_new:payment:pi_dup' });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeSubscriptionId).toBe('sub_old');
+	});
+
+	test('a hosted checkout replaces a stored subscription that is DEAD at Stripe', async () => {
+		// Resubscribe after a real cancel: the live check sees the old sub is
+		// gone, so the new checkout proceeds and re-points the org.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_old', stripeSubscriptionStatus: 'canceled' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_resub', mode: 'subscription', subscription: 'sub_new', metadata: { org_id: 'org-1', product: 'hosted' }, payment_intent: null }));
+		mocks.subscriptionsRetrieve.mockImplementation((id: string, opts?: unknown) =>
+			Promise.resolve(id === 'sub_old' ? { id, status: 'canceled' } : { id, default_payment_method: 'pm_new' })
+		);
+		expect(await fulfillCheckout('cs_resub')).toBe('granted');
+		expect(mocks.subscriptionsCancel).not.toHaveBeenCalled();
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeSubscriptionId).toBe('sub_new');
+		expect(org?.stripeDefaultPmId).toBe('pm_new');
+	});
+
+	test('a hosted subscriber can still buy a credit bundle', async () => {
+		// Subscription + top-ups coexist: an active hosted plan must never
+		// block or refund a credits purchase.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active', plan: 'hosted' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_credits', metadata: { org_id: 'org-1', bundle: 'credits_500' } }));
+		expect(await fulfillCheckout('cs_credits')).toBe('granted');
+		expect(await getCredits('org-1')).toBe(500);
+		expect(mocks.subscriptionsCancel).not.toHaveBeenCalled();
 	});
 	test('a won dispute restores a subscription period allowance', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1' });
@@ -599,6 +944,7 @@ describe('subscription lifecycle webhooks', () => {
 		await testDb().db.insert(creditTransactions).values({ orgId: 'org-1', delta: -500, reason: 'dispute', refType: 'dispute', refId: 'ch_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
 		await testDb().db.insert(stripeDisputeReversals).values({ disputeId: 'disp_w', chargeId: 'ch_1', paymentIntentId: 'pi_1', status: 'reversed', source: 'credits' });
 		mocks.disputesRetrieve.mockResolvedValue({ id: 'disp_w', charge: 'ch_1', status: 'won' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1', amount: 500, amount_refunded: 0 });
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 		try {
 			expect(await restoreWonDispute('disp_w')).toBe(true);
@@ -889,12 +1235,18 @@ describe('reverseCharge / reverseDispute', () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		await applyLedgerDelta(db, { orgId: 'org-1', delta: 2000, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
 		mocks.disputesRetrieve.mockResolvedValueOnce({ id: 'du_1', charge: 'ch_1', status: 'lost' }).mockResolvedValueOnce({ id: 'du_1', charge: 'ch_1', status: 'won' });
-		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1', amount: 200000, amount_refunded: 200000 });
+		// The charge reads refunded only AFTER the refund lands — a static
+		// fully-refunded mock would make the pre-refund restore see money that
+		// has not left yet (codex P1: a won dispute on a refunded charge is
+		// not restorable).
+		let refunded = false;
+		mocks.chargesRetrieve.mockImplementation(async () => ({ id: 'ch_1', payment_intent: 'pi_1', amount: 200000, amount_refunded: refunded ? 200000 : 0 }));
 
 		expect(await reverseDispute('du_1')).toBe(true);
 		expect(await getCredits('org-1')).toBe(0);
 		expect(await restoreWonDispute('du_1')).toBe(true);
 		expect(await getCredits('org-1')).toBe(2000);
+		refunded = true;
 		expect(await reverseCharge('ch_1', 'refund')).toBe(true);
 		expect(await getCredits('org-1')).toBe(0);
 		// A duplicate refund delivery never reverses twice.
@@ -939,6 +1291,271 @@ describe('reverseCharge / reverseDispute', () => {
 
 		expect(await restoreWonDispute('du_1')).toBe(false);
 		expect(await getCredits('org-1')).toBe(2000);
+	});
+
+	test('a full refund of a partially-spent grant ZEROES the balance — never a negative debt', async () => {
+		// "Refunded" means the credits are gone, not a negative balance carried
+		// against the next purchase: the reversal floors at zero. Disputes stay
+		// unbounded on purpose — a won dispute restores the FULL grant, so the
+		// true negative must be kept or the restore would over-credit.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+		// 300 of the 500 were spent before the refund landed.
+		await testDb().db.update(organizations).set({ creditsRemaining: 200 }).where(eq(organizations.id, 'org-1'));
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1', amount: 50000, amount_refunded: 50000 });
+
+		expect(await reverseCharge('ch_1', 'refund')).toBe(true);
+		expect(await getCredits('org-1')).toBe(0);
+	});
+
+	test('a full refund of a subscription charge cancels the subscription at Stripe', async () => {
+		// Marking the period 'refunded' kills THIS period's included comments,
+		// but an uncanceled subscription stays active and the next invoice.paid
+		// grants a fresh paid period — service resumes on a refunded account.
+		// The subscription must be canceled so it cannot renew.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'hosted', creditsRemaining: 1000, stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
+		await testDb().db.insert(stripeSubscriptionPeriods).values({ orgId: 'org-1', subscriptionId: 'sub_1', invoiceId: 'in_1', paymentIntentId: 'pi_sub', chargeId: 'ch_sub', periodKey: 'p1', periodStart: new Date(Date.now() - 60_000).toISOString(), periodEnd: new Date(Date.now() + 60_000).toISOString(), includedCredits: 100, consumedCredits: 0, status: 'paid' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_sub', payment_intent: 'pi_sub', amount: 500, amount_refunded: 500 });
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_1', status: 'active' });
+		mocks.subscriptionsCancel.mockResolvedValue({ id: 'sub_1', status: 'canceled' });
+
+		expect(await reverseCharge('ch_sub', 'refund')).toBe(true);
+		expect(mocks.subscriptionsCancel).toHaveBeenCalledWith('sub_1');
+		// Only the refunded purchase dies: the period's 100 included comments
+		// are gone, the 1000 SEPARATELY purchased credits are untouched.
+		expect(await getCredits('org-1')).toBe(1000);
+
+		// The canceled subscription's deleted event then drops the org to free.
+		const deleted = event('customer.subscription.deleted', 'evt_sub_del', { id: 'sub_1', customer: 'cus_1', status: 'canceled', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false }, 400);
+		expect(await handleStripeEvent(deleted as never)).toBe(true);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.plan).toBe('free');
+	});
+
+	test('a subscription refund matches a period that stored only the payment intent', async () => {
+		// invoicePaymentReferences accepts either payment ref alone — a period
+		// row can carry only payment_intent_id. The refund's charge arrives with
+		// BOTH refs; a strict both-columns match misses the row, so the period's
+		// included comments survive the refund AND the subscription-cancel
+		// lookup has to fall back to the invoice index (codeant P1).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'hosted', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
+		await testDb().db.insert(stripeSubscriptionPeriods).values({ orgId: 'org-1', subscriptionId: 'sub_1', invoiceId: 'in_pi_only', paymentIntentId: 'pi_sub', chargeId: null, periodKey: 'p1', periodStart: '2026-01-01T00:00:00.000Z', periodEnd: '2026-02-01T00:00:00.000Z', includedCredits: 100, consumedCredits: 0, status: 'paid' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_sub', payment_intent: 'pi_sub', amount: 500, amount_refunded: 500 });
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_1', status: 'active' });
+		mocks.subscriptionsCancel.mockResolvedValue({ id: 'sub_1', status: 'canceled' });
+
+		expect(await reverseCharge('ch_sub', 'refund')).toBe(true);
+		const period = await testDb().db.select().from(stripeSubscriptionPeriods).where(eq(stripeSubscriptionPeriods.invoiceId, 'in_pi_only')).get();
+		expect(period?.status).toBe('refunded');
+		expect(mocks.subscriptionsCancel).toHaveBeenCalledWith('sub_1');
+	});
+
+	test('a refund before invoice.paid still finds the subscription through the charge invoice', async () => {
+		// No period row exists yet (refund beat the grant), but the charge's
+		// invoice still names the subscription — cancel it anyway, and queue the
+		// credit obligation for the grant when it lands.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_early', payment_intent: 'pi_early', amount: 500, amount_refunded: 500 });
+		// Dahlia Charges carry no invoice back-link — the InvoicePayment index
+		// resolves PI → invoice → subscription.
+		mocks.invoicePaymentsList.mockResolvedValue({ data: [{ invoice: 'in_early', payment: { type: 'payment_intent', payment_intent: 'pi_early' } }] });
+		mocks.invoicesRetrieve.mockResolvedValue({ id: 'in_early', parent: { type: 'subscription_details', subscription_details: { subscription: 'sub_1' } } });
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_1', status: 'active' });
+		mocks.subscriptionsCancel.mockResolvedValue({ id: 'sub_1', status: 'canceled' });
+
+		expect(await reverseCharge('ch_early', 'refund')).toBe(false); // no grant/period yet — queued
+		expect(mocks.subscriptionsCancel).toHaveBeenCalledWith('sub_1');
+		const pending = await testDb().db.select().from(stripePendingReversals).where(eq(stripePendingReversals.chargeId, 'ch_early')).get();
+		expect(pending?.reason).toBe('refund');
+	});
+
+	test('a terminal event for a superseded subscription is ignored — never torn down again', async () => {
+		// A delayed customer.subscription.deleted for the OLD subscription can
+		// arrive after the org resubscribed: the incoming sub is already dead
+		// at Stripe, so the duplicate-teardown path would double-cancel (a
+		// Stripe error → endless webhook retry) and could even refund an
+		// invoice that was never a duplicate charge (codex P2 / cubic P1).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_new', stripeSubscriptionStatus: 'active', stripeCustomerId: 'cus_1' });
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_new', status: 'active' });
+		const deleted = event('customer.subscription.deleted', 'evt_old_del', { id: 'sub_old', customer: 'cus_1', status: 'canceled', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false }, 400);
+		expect(await handleStripeEvent(deleted as never)).toBe(true);
+		expect(mocks.subscriptionsCancel).not.toHaveBeenCalled();
+		expect(mocks.refundsCreate).not.toHaveBeenCalled();
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeSubscriptionId).toBe('sub_new');
+	});
+
+	test('a duplicate teardown skips the cancel when the subscription is already terminal — but still refunds', async () => {
+		// The retry path: the first teardown canceled the duplicate and then
+		// its refund leg failed — on redelivery the cancel is now impossible
+		// (Stripe rejects canceling a canceled subscription), and calling it
+		// would fail the delivery before the refund ever retries
+		// (coderabbit / cubic P1). Live check first: terminal → skip cancel,
+		// still run the refund leg.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_main', stripeSubscriptionStatus: 'active', stripeCustomerId: 'cus_1' });
+		mocks.subscriptionsRetrieve.mockImplementation(async (id: string) =>
+			id === 'sub_main' ? { id, status: 'active' } : { id, status: 'canceled', latest_invoice: 'in_dup' });
+		mocks.invoicePaymentsList.mockResolvedValue({ data: [{ invoice: 'in_dup', payment: { payment_intent: 'pi_dup', charge: 'ch_dup' } }] });
+		const paid = event('invoice.paid', 'evt_dup_paid', { id: 'in_dup', customer: 'cus_1', parent: { type: 'subscription_details', subscription_details: { subscription: 'sub_dup' } } }, 500);
+		expect(await handleStripeEvent(paid as never)).toBe(true);
+		expect(mocks.subscriptionsCancel).not.toHaveBeenCalled();
+		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_dup', metadata: { reason: 'ungrantable', org_id: 'org-1' } }, { idempotencyKey: 'refund:ungrantable:subscription:sub_dup:payment:pi_dup' });
+	});
+
+	test('a duplicate subscription Stripe no longer knows is skipped as terminal — the refund leg still runs', async () => {
+		// fetchLiveSubscription returns null only on resource_missing: the sub
+		// is GONE, so canceling would 400 and fail the delivery before the
+		// refund leg retries (coderabbit). Missing = terminal — skip the cancel,
+		// continue to the invoice's paid payment.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_main', stripeSubscriptionStatus: 'active', stripeCustomerId: 'cus_1' });
+		mocks.subscriptionsRetrieve.mockImplementation(async (id: string) => {
+			if (id === 'sub_main') return { id, status: 'active' };
+			throw Object.assign(new Error('No such subscription'), { type: 'StripeInvalidRequestError', code: 'resource_missing' });
+		});
+		mocks.invoicePaymentsList.mockResolvedValue({ data: [{ invoice: 'in_dup', payment: { payment_intent: 'pi_dup', charge: 'ch_dup' } }] });
+		const paid = event('invoice.paid', 'evt_dup_gone', { id: 'in_dup', customer: 'cus_1', parent: { type: 'subscription_details', subscription_details: { subscription: 'sub_gone' } } }, 500);
+		expect(await handleStripeEvent(paid as never)).toBe(true);
+		expect(mocks.subscriptionsCancel).not.toHaveBeenCalled();
+		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_dup', metadata: { reason: 'ungrantable', org_id: 'org-1' } }, { idempotencyKey: 'refund:ungrantable:subscription:sub_gone:payment:pi_dup' });
+	});
+
+	test('a delayed invoice.paid for a superseded sub whose period was honored is NOT refunded', async () => {
+		// The customer resubscribed: sub_new is tracked and live, sub_old is
+		// canceled at Stripe. Its legitimate first-period invoice.paid now
+		// arrives late — that payment was already honored (its period row
+		// exists), so refunding it would claw back money for delivered service
+		// (codex P1). Only a payment that never produced a period is provably
+		// a duplicate charge.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_new', stripeSubscriptionStatus: 'active', stripeCustomerId: 'cus_1' });
+		await testDb().db.insert(stripeSubscriptionPeriods).values({ orgId: 'org-1', subscriptionId: 'sub_old', invoiceId: 'in_old', paymentIntentId: 'pi_old', chargeId: 'ch_old', periodKey: 'p0', periodStart: '2026-01-01T00:00:00.000Z', periodEnd: '2026-02-01T00:00:00.000Z', includedCredits: 100, consumedCredits: 30, status: 'paid' });
+		mocks.subscriptionsRetrieve.mockImplementation(async (id: string) => id === 'sub_new' ? { id, status: 'active' } : { id, status: 'canceled' });
+		const paid = event('invoice.paid', 'evt_old_paid', { id: 'in_old', customer: 'cus_1', parent: { type: 'subscription_details', subscription_details: { subscription: 'sub_old' } } }, 500);
+		expect(await handleStripeEvent(paid as never)).toBe(true);
+		expect(mocks.subscriptionsCancel).not.toHaveBeenCalled();
+		expect(mocks.refundsCreate).not.toHaveBeenCalled();
+		const period = await testDb().db.select().from(stripeSubscriptionPeriods).where(eq(stripeSubscriptionPeriods.invoiceId, 'in_old')).get();
+		expect(period?.status).toBe('paid');
+	});
+
+	test('a long-lived duplicate subscription gets EVERY paid invoice refunded, not just the latest', async () => {
+		// A webhook outage can let a duplicate survive a second billing cycle —
+		// refunding only latest_invoice leaves the earlier charge with the
+		// merchant (codex P1). The teardown enumerates the sub's paid invoices
+		// and refunds each under a PER-PAYMENT idempotency key.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_main', stripeSubscriptionStatus: 'active', stripeCustomerId: 'cus_1' });
+		mocks.subscriptionsRetrieve.mockImplementation(async (id: string) => id === 'sub_main' ? { id, status: 'active' } : { id, status: 'active' });
+		mocks.subscriptionsCancel.mockResolvedValue({ id: 'sub_dup', status: 'canceled', latest_invoice: 'in_d2' });
+		mocks.invoicesList.mockResolvedValue({ data: [{ id: 'in_d1' }, { id: 'in_d2' }] });
+		mocks.invoicePaymentsList.mockImplementation(async ({ invoice }: { invoice: string }) => ({ data: [{ invoice, payment: { payment_intent: invoice === 'in_d1' ? 'pi_d1' : 'pi_d2' } }] }));
+		const paid = event('invoice.paid', 'evt_dup_m2', { id: 'in_d2', customer: 'cus_1', parent: { type: 'subscription_details', subscription_details: { subscription: 'sub_dup' } } }, 500);
+		expect(await handleStripeEvent(paid as never)).toBe(true);
+		expect(mocks.subscriptionsCancel).toHaveBeenCalledWith('sub_dup');
+		expect(mocks.invoicesList).toHaveBeenCalledWith(expect.objectContaining({ subscription: 'sub_dup' }));
+		expect(mocks.refundsCreate).toHaveBeenCalledWith(expect.objectContaining({ payment_intent: 'pi_d1' }), { idempotencyKey: 'refund:ungrantable:subscription:sub_dup:payment:pi_d1' });
+		expect(mocks.refundsCreate).toHaveBeenCalledWith(expect.objectContaining({ payment_intent: 'pi_d2' }), { idempotencyKey: 'refund:ungrantable:subscription:sub_dup:payment:pi_d2' });
+	});
+
+	test('a teardown facing an unrecognizable live status throws instead of skipping the cancel', async () => {
+		// An unknown status is NOT "terminal": skipping the cancel on it would
+		// leave a possibly-billing duplicate alive while the refund leg runs
+		// (codex P2). I2 — the unclassifiable response fails the delivery.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_main', stripeSubscriptionStatus: 'active', stripeCustomerId: 'cus_1' });
+		mocks.subscriptionsRetrieve.mockImplementation(async (id: string) => id === 'sub_main' ? { id, status: 'active' } : { id, status: 'quixotic' });
+		const subscription = { id: 'sub_dup', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false };
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			await expect(handleStripeEvent(event('customer.subscription.created', 'evt_dup_unknown', subscription, 500) as never)).rejects.toThrow('unknown status');
+		} finally {
+			errorSpy.mockRestore();
+		}
+		expect(mocks.subscriptionsCancel).not.toHaveBeenCalled();
+		expect(mocks.refundsCreate).not.toHaveBeenCalled();
+	});
+
+	test('a custom cancel_at BEYOND the current period end does not count as winding down', async () => {
+		// cancel_at is a timestamp, not a promise the current period is the
+		// last: a value past period end renews at least once more, so the
+		// lifetime checkout must still refund rather than overlap hosted
+		// billing (codex P1).
+		expect(await seedSubscribedOrgAndFulfillLifetime({
+			cachedStatus: 'active', sessionId: 'cs_lt_far',
+			live: { id: 'sub_1', status: 'active', cancel_at_period_end: false, cancel_at: 1_805_357_600, current_period_end: 1_802_678_400 }
+		})).toBe('refunded');
+		expect(mocks.refundsCreate).toHaveBeenCalledWith(expect.objectContaining({ payment_intent: 'pi_1' }), { idempotencyKey: 'refund:ungrantable:cs_lt_far' });
+		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toHaveLength(0);
+	});
+
+	test('a same-second subscription tie broken by event-id order still enforces the lifetime cancel', async () => {
+		// The snapshot dedupe breaks a same-second tie on OPAQUE event ids —
+		// a portal resume whose id sorts lower is rejected as "stale" even
+		// though Stripe's live state is the resubscribed, billing sub. The
+		// enforcement decision reconciles from the LIVE subscription instead
+		// of trusting the dropped payload (codex P1).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'lifetime', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active', stripeSubscriptionCancelAtPeriodEnd: 1, stripeSubscriptionLastEventCreated: 500, stripeSubscriptionLastEventId: 'evt_b' });
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1', activeEntitlementId: 1 }).where(eq(stripeLifetimeSlots.slot, 1));
+		await testDb().db.insert(stripeLifetimeEntitlements).values({ id: 1, orgId: 'org-1', slot: 1, checkoutSessionId: 'cs_lt' });
+		// evt_a sorts before the stored evt_b in the same second → the resume
+		// payload is dropped as stale, but the LIVE sub is billing again.
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_1', status: 'active', cancel_at_period_end: false, cancel_at: null, current_period_end: 1_802_678_400 });
+		const subscription = { id: 'sub_1', customer: 'cus_1', status: 'active', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false };
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			expect(await handleStripeEvent(event('customer.subscription.updated', 'evt_a', subscription, 500) as never)).toBe(true);
+		} finally {
+			errorSpy.mockRestore();
+		}
+		expect(mocks.subscriptionsUpdate).toHaveBeenCalledWith('sub_1', { cancel_at_period_end: true });
+	});
+
+	test('a won dispute restores nothing when the charge was fully refunded', async () => {
+		// Dispute reversal applied (−500), then the charge was fully refunded
+		// (the refund reversal floored the balance at 0). A later dispute WIN
+		// must not re-add the grant — the money is gone either way, so the
+		// restore would mint spendable credits on a refunded payment (codex P1).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', creditsRemaining: 0 });
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: -500, reason: 'dispute', refType: 'dispute', refId: 'disp_1', chargeId: 'ch_1' });
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: -500, reason: 'refund', refType: 'refund', refId: 'ch_1', chargeId: 'ch_1' });
+		await testDb().db.insert(stripeDisputeReversals).values({ disputeId: 'disp_1', chargeId: 'ch_1', paymentIntentId: 'pi_1', status: 'reversed', source: 'credits' });
+		mocks.disputesRetrieve.mockResolvedValue({ id: 'disp_1', charge: 'ch_1', status: 'won' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1', amount: 5000, amount_refunded: 5000 });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			expect(await restoreWonDispute('disp_1')).toBe(false);
+		} finally {
+			errorSpy.mockRestore();
+		}
+		expect(await getCredits('org-1')).toBe(0);
+		const reversal = await testDb().db.select().from(stripeDisputeReversals).where(eq(stripeDisputeReversals.disputeId, 'disp_1')).get();
+		expect(reversal?.status).toBe('ignored');
+		expect(await testDb().db.select().from(creditTransactions).where(eq(creditTransactions.reason, 'adjust'))).toHaveLength(0);
+	});
+
+	test('an already-canceled subscription is not re-canceled on refund replay', async () => {
+		// Idempotent: redelivery after the first cancel must not call cancel
+		// again (a cancel on a canceled subscription errors at Stripe).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'hosted', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'canceled' });
+		await testDb().db.insert(stripeSubscriptionPeriods).values({ orgId: 'org-1', subscriptionId: 'sub_1', invoiceId: 'in_1', paymentIntentId: 'pi_sub', chargeId: 'ch_sub', periodKey: 'p1', periodStart: '2026-01-01T00:00:00.000Z', periodEnd: '2026-02-01T00:00:00.000Z', includedCredits: 100, consumedCredits: 0, status: 'paid' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_sub', payment_intent: 'pi_sub', amount: 500, amount_refunded: 500 });
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_1', status: 'canceled' });
+
+		expect(await reverseCharge('ch_sub', 'refund')).toBe(true);
+		expect(mocks.subscriptionsCancel).not.toHaveBeenCalled();
+	});
+
+	test('a bundle refund never cancels the org\'s unrelated subscription', async () => {
+		// Purchased credits and the subscription are independent purchases —
+		// refunding a bundle reverses its credits but must leave a live
+		// subscription the charge never paid for alone.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'hosted', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1', amount: 50000, amount_refunded: 50000 });
+
+		expect(await reverseCharge('ch_1', 'refund')).toBe(true);
+		expect(await getCredits('org-1')).toBe(0);
+		expect(mocks.subscriptionsCancel).not.toHaveBeenCalled();
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeSubscriptionStatus).toBe('active');
 	});
 
 	test('a refund matching no grant queues a pending reversal for when the grant lands', async () => {
@@ -1023,12 +1640,12 @@ describe('handleStripeEvent', () => {
 		const pending = await testDb().db.select().from(stripePendingReversals).where(eq(stripePendingReversals.chargeId, 'ch_1')).all();
 		expect(pending.map((row) => row.reason).sort()).toEqual(['dispute', 'refund']);
 
-		// The grant lands: both obligations drain — 500 in, 1000 out (net -500;
-		// a negative balance is the documented v1 consequence of reversing
-		// credits the customer already spent).
+		// The grant lands: both obligations drain — 500 in, the dispute takes
+		// it to 0, then the refund reversal floors at 0 (refunded credits zero
+		// out; only dispute reversals keep a true negative for won-restore math).
 		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_1', payment_intent: { id: 'pi_1', latest_charge: 'ch_1', payment_method: 'pm_1' } }));
 		expect(await handleStripeEvent(event('checkout.session.completed', 'evt_grant', session({ id: 'cs_1', payment_intent: { id: 'pi_1', latest_charge: 'ch_1', payment_method: 'pm_1' } })) as never)).toBe(true);
-		expect(await getCredits('org-1')).toBe(-500);
+		expect(await getCredits('org-1')).toBe(0);
 		expect(await testDb().db.select().from(stripePendingReversals).where(eq(stripePendingReversals.chargeId, 'ch_1')).all()).toEqual([]);
 	});
 

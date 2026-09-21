@@ -266,12 +266,17 @@ existence). Pre-accounts "orphan" channels (`user_id IS NULL`) are claimed by
 the first user ever to complete account creation. Self-hosted instances use
 the same code path; BYOK is via env (`GOOGLE_CLIENT_ID/SECRET`,
 `OPENAI_API_KEY`, Turso), so self-hosters never cost the hosted operator.
-Hosted accounts can additionally set a per-account OpenAI key on the Team
-page (`organizations.openai_key_enc`, owner-only, live-validated against
-OpenAI, AES-256-GCM encrypted at rest; `resolveOpenAiKey` in
-`src/lib/server/openaiKey.ts` prefers it over the env key at scoring time —
-the env key stays the default and the only self-host path). Never serialize
-the key or ciphertext to the client; the page gets a boolean.
+Lifetime-plan orgs MUST set a per-organization OpenAI key on the Team page
+(`organizations.openai_key_enc`, owner-only AND plan-gated to lifetime,
+live-validated against OpenAI, AES-256-GCM encrypted at rest;
+`resolveOpenAiKey` in `src/lib/server/openaiKey.ts` prefers it over the env
+key at scoring time — the env key stays the default for metered plans and
+the only self-host path, but a lifetime org with no usable stored key gets
+NO env fallback: scoring can't run and comments land in the review queue.
+The same holds when the org row is UNREADABLE — a DB failure resolves no
+key at all, since the unknown plan could be lifetime).
+Never serialize the key or ciphertext to the client; the page gets a
+boolean.
 `users.plan` is the hook for the future Stripe integration (hosted plans;
 free tier = self-hosted only). Card and hosted-subscription management runs
 through the Stripe customer portal (usage page → **Manage cards**,

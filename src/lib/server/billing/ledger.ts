@@ -78,12 +78,16 @@ export function hasHostedEntitlement(input: { plan: string; stripeSubscriptionId
  */
 export async function getCredits(orgId: string): Promise<number> {
 	const row = await db
-		.select({ creditsRemaining: organizations.creditsRemaining, plan: organizations.plan, stripeSubscriptionId: organizations.stripeSubscriptionId })
+		.select({ creditsRemaining: organizations.creditsRemaining })
 		.from(organizations)
 		.where(eq(organizations.id, orgId))
 		.get();
 	if (!row) throw new Error(`org not found: ${orgId}`);
-	if (!hasHostedEntitlement(row)) return row.creditsRemaining ?? 0;
+	// A paid, in-window subscription period always contributes its
+	// unconsumed included comments — the org paid for them and they were
+	// never refunded, whatever the current plan (a cancel→lifetime upgrade
+	// keeps the hosted period live until it ends). No plan gate here: the
+	// period row's status + window is the authority.
 	const now = new Date().toISOString();
 	const period = await db
 		.select({ remaining: sql<number>`COALESCE(SUM(${stripeSubscriptionPeriods.includedCredits} - ${stripeSubscriptionPeriods.consumedCredits}), 0)` })
@@ -126,6 +130,8 @@ export async function orgIsMetered(orgId: string): Promise<boolean> {
 	return hasHostedEntitlement(row) || row.creditsRemaining !== null;
 }
 
+export const UNMETERED_CREDIT_PURCHASE_ERROR = 'the lifetime plan includes unlimited moderated comments — credit purchases are not available';
+
 /**
  * Rejects credit purchases for plans whose comments are already unlimited.
  * Called before a checkout attempt is planted for ANY credit bundle (Stripe
@@ -140,7 +146,7 @@ export async function assertCreditsPurchasable(orgId: string): Promise<void> {
 		.get();
 	if (!row) throw new Error(`org not found: ${orgId}`);
 	if (isUnmeteredPlan(row.plan)) {
-		throw new Error('the lifetime plan includes unlimited moderated comments — credit purchases are not available');
+		throw new Error(UNMETERED_CREDIT_PURCHASE_ERROR);
 	}
 }
 
@@ -203,7 +209,18 @@ export async function applyLedgerDelta(
 			.update(organizations)
 			// COALESCE: pre-billing orgs carry NULL credits (I7 nullable-first);
 			// NULL + delta would stay NULL forever, silently eating every grant.
-			.set({ creditsRemaining: sql`COALESCE(${organizations.creditsRemaining}, 0) + ${delta}` })
+			// REFUND reversals floor at zero: a refunded grant's credits are
+			// GONE, not a negative debt carried against the next purchase —
+			// "refunded" means the org owes nothing and holds nothing.
+			// Dispute reversals stay unbounded on purpose: a won dispute
+			// restores the FULL grant, so keeping the true negative is the
+			// only math that restores correctly.
+			.set({
+				creditsRemaining:
+					delta < 0 && reason === 'refund'
+						? sql`MAX(0, COALESCE(${organizations.creditsRemaining}, 0) + ${delta})`
+						: sql`COALESCE(${organizations.creditsRemaining}, 0) + ${delta}`
+			})
 			.where(eq(organizations.id, orgId))
 			.returning({ balance: organizations.creditsRemaining });
 		if (updated.length === 0) throw new Error(`org not found: ${orgId}`);
@@ -422,10 +439,18 @@ export async function queuePendingReversal(chargeId: string, reason: 'refund' | 
  * @returns The number of reversals applied
  */
 export async function drainPendingReversals(chargeId: string): Promise<number> {
+	// Order matters when a charge carries both obligations: the dispute
+	// reversal is unbounded (a later won-dispute restore re-adds the full
+	// grant) while the refund reversal floors at zero, so the dispute must
+	// apply FIRST and the refund LAST — draining the other way could leave a
+	// negative balance the refund was supposed to prevent. 'dispute' sorts
+	// before 'refund' alphabetically; ORDER BY makes the contract explicit
+	// instead of trusting SQLite's index scan order (cubic review).
 	const pending = await db
 		.select()
 		.from(stripePendingReversals)
 		.where(eq(stripePendingReversals.chargeId, chargeId))
+		.orderBy(asc(stripePendingReversals.reason))
 		.all();
 	let drained = 0;
 	for (const row of pending) {

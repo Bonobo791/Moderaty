@@ -24,11 +24,11 @@ export const PRICING_FAQ_ENTRIES: { q: string; a: string }[] = [
 	},
 	{
 		q: 'What is the $49 lifetime deal?',
-		a: 'First 1,000 users only: one $49 payment, hosted forever, unlimited moderated comments, and we run the AI for you. When the 1,000 are gone, the deal is gone.'
+		a: 'First 1,000 users only: one $49 payment, hosted forever, unlimited moderated comments. AI scoring under this plan runs on your own OpenAI API key, which you provide and keep valid. When the 1,000 are gone, the deal is gone.'
 	},
 	{
 		q: 'What does BYOK mean?',
-		a: 'Bring your own key. Self-hosted Moderaty scores comments with your OpenAI API key, on your account, so the AI cost for most self-hosters is near zero. We never see the key.'
+		a: 'Bring your own key. Self-hosted Moderaty uses the OpenAI key configured on your infrastructure, so we never see it. The lifetime plan also scores on your OpenAI API key, so the AI cost is yours at OpenAI prices instead of ours; hosted keys are stored encrypted, and the service processes them to validate the key and score comments.'
 	},
 	{
 		q: 'Why is self-hosting free?',

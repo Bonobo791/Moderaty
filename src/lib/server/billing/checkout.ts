@@ -25,7 +25,7 @@ import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { organizations, stripeCheckoutAttempts, stripeLifetimeEntitlements, stripeLifetimeSlots } from '$lib/server/db/schema';
 import { bundleById, priceIdFor, type CreditBundle } from '$lib/server/stripe/bundles';
-import { assertCreditsPurchasable } from './ledger';
+import { assertCreditsPurchasable, UNMETERED_CREDIT_PURCHASE_ERROR } from './ledger';
 import { isActiveSubscriptionStatus, planPriceEnv, validatePlanPrice, type PaidPlan } from './plans';
 import { getStripe } from '$lib/server/stripe/client';
 import { requireOrgRole } from '$lib/server/ownership';
@@ -35,6 +35,31 @@ const HOSTED_PLAN_EXISTS_ERROR = 'organization already has a hosted subscription
 const ACTIVE_HOSTED_PLAN_ERROR = 'organization already has an active hosted subscription';
 const LIFETIME_PLAN_EXISTS_ERROR = 'organization already has the lifetime plan';
 const LIFETIME_SOLD_OUT_ERROR = 'lifetime plan is sold out';
+
+/**
+ * User-facing text for KNOWN business rejections of checkout creation —
+ * the buyer did nothing wrong and retrying will never help, so the answer
+ * is a specific 400, not the generic defect message. Internal strings are
+ * whitelisted by identity: anything unmapped (DB internals, env names,
+ * Stripe ids) stays a generic 500 per the no-leak rule.
+ */
+export function checkoutRejectionMessage(error: unknown): string | null {
+	if (!(error instanceof Error)) return null;
+	switch (error.message) {
+		case HOSTED_PLAN_EXISTS_ERROR:
+			return 'Your organization already has an active hosted subscription — manage it via the customer portal below.';
+		case ACTIVE_HOSTED_PLAN_ERROR:
+			return 'Cancel your hosted subscription before buying the lifetime plan — manage it via the customer portal below.';
+		case LIFETIME_PLAN_EXISTS_ERROR:
+			return 'Your organization already has the lifetime plan.';
+		case LIFETIME_SOLD_OUT_ERROR:
+			return 'The lifetime plan is sold out — all 1,000 copies are claimed.';
+		case UNMETERED_CREDIT_PURCHASE_ERROR:
+			return 'Your lifetime plan includes unlimited moderated comments — credit purchases are not needed.';
+		default:
+			return null;
+	}
+}
 
 /**
  * Retrieves the organization's Stripe customer ID, creating and storing one when needed.
@@ -202,16 +227,25 @@ export async function markCheckoutAttemptFulfilled(sessionId: string): Promise<v
 }
 
 async function assertPlanAvailable(orgId: string, plan: PaidPlan): Promise<void> {
-	const org = await db.select({ plan: organizations.plan, stripeSubscriptionId: organizations.stripeSubscriptionId, stripeSubscriptionStatus: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, orgId)).get();
+	const org = await db.select({ plan: organizations.plan, stripeSubscriptionId: organizations.stripeSubscriptionId, stripeSubscriptionStatus: organizations.stripeSubscriptionStatus, stripeSubscriptionCancelAtPeriodEnd: organizations.stripeSubscriptionCancelAtPeriodEnd }).from(organizations).where(eq(organizations.id, orgId)).get();
 	if (!org) throw new Error(`org not found: ${orgId}`);
 	const hasActiveHosted = Boolean(org.stripeSubscriptionId && isActiveSubscriptionStatus(org.stripeSubscriptionStatus));
 	const lifetime = await db.select({ id: stripeLifetimeEntitlements.id }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
 	if (plan === 'hosted') {
+		// A cancel-pending sub still blocks a SECOND hosted subscription —
+		// staying on hosted means resuming in the portal, not minting a
+		// duplicate the webhook would have to tear down and refund.
 		if (hasActiveHosted) throw new Error(HOSTED_PLAN_EXISTS_ERROR);
 		if (org.plan === 'lifetime' || lifetime) throw new Error(LIFETIME_PLAN_EXISTS_ERROR);
 		return;
 	}
-	if (hasActiveHosted) throw new Error(ACTIVE_HOSTED_PLAN_ERROR);
+	// The lifetime gate is looser: a subscription already scheduled to end
+	// (cancel_at_period_end or the portal's cancel_at timestamp — both land
+	// in stripeSubscriptionCancelAtPeriodEnd) cannot renew, so buying now is
+	// safe. Fulfillment re-verifies against the LIVE subscription in case a
+	// resume hasn't webhoked yet, and a later resume is re-canceled by the
+	// subscription-event handler.
+	if (hasActiveHosted && org.stripeSubscriptionCancelAtPeriodEnd !== 1) throw new Error(ACTIVE_HOSTED_PLAN_ERROR);
 	if (org.plan === 'lifetime' || lifetime) throw new Error(LIFETIME_PLAN_EXISTS_ERROR);
 	const available = await db.select({ slot: stripeLifetimeSlots.slot }).from(stripeLifetimeSlots).where(isNull(stripeLifetimeSlots.activeOrgId)).limit(1).get();
 	if (!available) throw new Error(LIFETIME_SOLD_OUT_ERROR);

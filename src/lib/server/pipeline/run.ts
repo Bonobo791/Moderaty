@@ -148,8 +148,10 @@ export async function runChannel(
 				protectLgbtqia: channel.protectLgbtqia ?? 0,
 				protectWomen: channel.protectWomen ?? 0
 			},
-			// Per-org BYOK (hosted plans): the org's own OpenAI key when stored,
-			// the deployment's env key otherwise (openaiKey.ts).
+			// Per-org BYOK (lifetime plan): the org's own OpenAI key when
+			// stored, the deployment's env key for metered plans only — a
+			// lifetime org without one resolves undefined and the comments
+			// queue unscored (I11; openaiKey.ts).
 			openAiKey: await resolveOpenAiKey(channel.orgId),
 			deadline,
 			rescore: window !== undefined,

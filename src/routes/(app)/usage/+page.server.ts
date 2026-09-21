@@ -23,12 +23,14 @@ import { env } from '$env/dynamic/private';
 import { and, eq, ne } from 'drizzle-orm';
 
 import { AUTO_TOPUP_DEFAULT_THRESHOLD } from '$lib/server/billing/autotopup';
-import { createCreditCheckout, createPlanCheckout, getOrCreateStripeCustomer } from '$lib/server/billing/checkout';
+import { checkoutRejectionMessage, createCreditCheckout, createPlanCheckout, getOrCreateStripeCustomer } from '$lib/server/billing/checkout';
 import { lifetimeSlotsRemaining } from '$lib/server/billing/entitlements';
 import { createMercadoPagoCreditCheckout } from '$lib/server/mercadopago/checkout';
 import { configuredMercadoPagoBundles } from '$lib/server/mercadopago/bundles';
 import { isUnmeteredPlan, listCreditTransactions, orgIsMetered, usageSummary } from '$lib/server/billing/ledger';
+import { isActiveSubscriptionStatus } from '$lib/server/billing/plans';
 import { db } from '$lib/server/db';
+import { resolveOpenAiKey } from '$lib/server/openaiKey';
 import { organizations } from '$lib/server/db/schema';
 import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
 import { configuredBundles } from '$lib/server/stripe/bundles';
@@ -67,8 +69,41 @@ function maintenanceData() {
 		autoTopup: null,
 		autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
 		stripeConfigured: Boolean(env.STRIPE_SECRET_KEY),
-		plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) }
+		plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) },
+		hasOpenAiKey: false
 	};
+}
+
+/**
+ * The saved payment method's display label, fetched live — the portal can
+ * swap the org's card at any time, so cached brand/last4 would drift. A
+ * Stripe failure is loud in the server log and renders "details
+ * unavailable" in the UI — never a maintenance page over a cosmetic read,
+ * and never a blank implication that no card exists (the pointer is
+ * authoritative for hasCard).
+ */
+async function savedCardLabel(pmId: string): Promise<{ label: string } | null> {
+	try {
+		const pm = await getStripe().paymentMethods.retrieve(pmId);
+		const card = pm.card;
+		if (pm.type === 'card' && card && typeof card.brand === 'string' && typeof card.last4 === 'string') {
+			const brand = card.brand.trim();
+			// I2: these fields render as a trusted "saved card" label — a
+			// malformed payload (empty brand, non-4-digit last4) is a failed
+			// read, not displayable data.
+			if (brand.length === 0 || brand.length > 32 || !/^\d{4}$/.test(card.last4)) {
+				console.error(`usage: saved payment method ${pmId} returned malformed card fields (brand=${JSON.stringify(card.brand)}, last4=${JSON.stringify(card.last4)}) — details unavailable`);
+				return null;
+			}
+			return { label: `${brand[0].toUpperCase()}${brand.slice(1)} •••• ${card.last4}` };
+		}
+		// Non-card instrument (link, bank debit, …): identify it by type.
+		const type = typeof pm.type === 'string' && pm.type.length > 0 ? pm.type : 'unknown';
+		return { label: `${type[0].toUpperCase()}${type.slice(1)} payment method` };
+	} catch (cause) {
+		console.error(`usage: saved payment method ${pmId} could not be loaded: ${cause instanceof Error ? cause.message : String(cause)}`);
+		return null;
+	}
 }
 
 /**
@@ -84,6 +119,15 @@ async function checkoutRedirect(create: () => Promise<string>, orgId: string) {
 		// SvelteKit's redirect() is a function that THROWS a Redirect — detect
 		// it with isRedirect, never instanceof.
 		if (isRedirect(error) || isHttpError(error)) throw error;
+		// Known business rejections (already subscribed, sold out, unmetered
+		// org buying credits) carry their real reason — a generic defect
+		// message would tell the user to retry a purchase that can never
+		// succeed.
+		const rejection = checkoutRejectionMessage(error);
+		if (rejection) {
+			console.info(`usage: checkout rejected for org ${orgId}: ${error instanceof Error ? error.message : String(error)}`);
+			return fail(400, { error: rejection });
+		}
 		return checkoutFailure(error, orgId);
 	}
 }
@@ -108,8 +152,11 @@ export const load: PageServerLoad = async ({ locals }) => {
 				stripeDefaultPmId: organizations.stripeDefaultPmId,
 				creditsRemaining: organizations.creditsRemaining,
 				plan: organizations.plan,
+				stripeSubscriptionId: organizations.stripeSubscriptionId,
 				stripeSubscriptionStatus: organizations.stripeSubscriptionStatus,
-				stripeSubscriptionPeriodEnd: organizations.stripeSubscriptionPeriodEnd
+				stripeSubscriptionPeriodEnd: organizations.stripeSubscriptionPeriodEnd,
+				stripeSubscriptionCancelAtPeriodEnd: organizations.stripeSubscriptionCancelAtPeriodEnd,
+				openaiKeyEnc: organizations.openaiKeyEnc
 			})
 			.from(organizations)
 			.where(eq(organizations.id, user.orgId))
@@ -117,11 +164,18 @@ export const load: PageServerLoad = async ({ locals }) => {
 		if (!org) {
 			throw error(500, 'account has no organization — contact support');
 		}
-		const [summary, history, metered, lifetimeSlots] = await Promise.all([
+		const [summary, history, metered, lifetimeSlots, savedCard, usableOpenAiKey] = await Promise.all([
 			usageSummary(user.orgId),
 			listCreditTransactions(user.orgId, 30),
 			orgIsMetered(user.orgId),
-			lifetimeSlotsRemaining()
+			lifetimeSlotsRemaining(),
+			org.stripeDefaultPmId ? savedCardLabel(org.stripeDefaultPmId) : Promise.resolve(null),
+			// Truthiness is not usability: a corrupt ciphertext still passes
+			// Boolean(openaiKeyEnc) but resolves to no key — the page would claim
+			// scoring runs while every comment queues (codex P2). Only the
+			// lifetime plan's flag means "usable"; other plans' ciphertext is
+			// stored-but-ignored either way.
+			org.plan === 'lifetime' ? resolveOpenAiKey(user.orgId) : Promise.resolve(undefined)
 		]);
 		return {
 			maintenance: false,
@@ -146,13 +200,27 @@ export const load: PageServerLoad = async ({ locals }) => {
 				state: org.autoTopupState ?? 'idle',
 				failures: org.autoTopupFailures ?? 0,
 				lastAttemptAt: org.autoTopupLastAttemptAt,
-				hasCard: Boolean(org.stripeDefaultPmId)
+				hasCard: Boolean(org.stripeDefaultPmId),
+				card: savedCard
 			},
 			billing: {
 				plan: org.plan,
 				subscriptionStatus: org.stripeSubscriptionStatus,
-				periodEnd: org.stripeSubscriptionPeriodEnd
+				periodEnd: org.stripeSubscriptionPeriodEnd,
+				// 1 while the subscription is scheduled to end (either Stripe
+				// mechanism: cancel_at_period_end or the portal's cancel_at).
+				cancelAtPeriodEnd: org.stripeSubscriptionCancelAtPeriodEnd === 1,
+				// The hosted subscription can still be inside its paid window
+				// after a lifetime upgrade (cancel→lifetime wind-down) — the
+				// page shows it as its own line, never attached to the lifetime
+				// plan label (a lifetime plan has no period to end).
+				subscriptionLive: Boolean(org.stripeSubscriptionId) && isActiveSubscriptionStatus(org.stripeSubscriptionStatus)
 			},
+			// Never serialize secrets: the page gets a boolean only. Lifetime
+			// orgs with hasOpenAiKey=false see the required-key warning — and
+			// for them the flag is USABILITY (a decryptable key resolves), not
+			// mere ciphertext presence.
+			hasOpenAiKey: org.plan === 'lifetime' ? usableOpenAiKey !== undefined : Boolean(org.openaiKeyEnc),
 			stripeConfigured: Boolean(env.STRIPE_SECRET_KEY),
 			plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) }
 		};

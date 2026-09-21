@@ -126,7 +126,7 @@ test('a mid-load outage renders a maintenance state and hides every destructive 
 
 test('the all-clear headline and subline render when nothing is pending', () => {
 	const body = renderPage(QUIET_DATA);
-	expect(body).toContain('The door is quiet. Too quiet.');
+	expect(body).toContain("All clear. Nobody's being weird for once.");
 	// UC3 has never run: only genuinely healthy channels count as protected
 	// (MOD-8) — the headline cannot claim coverage the runs never proved.
 	expect(body).toContain('2 of 3 channels protected — 1 waiting for a first check.');
@@ -135,14 +135,14 @@ test('the all-clear headline and subline render when nothing is pending', () => 
 test('the all-clear subline claims full protection only when every channel is healthy', () => {
 	const healthy = { ...QUIET_DATA, chs: CHS.map((ch) => ({ ...ch, lastRunStatus: 'success', lastSuccessAt: ch.lastRunAt })) };
 	const body = renderPage(healthy);
-	expect(body).toContain('3 channels protected. Queue\'s clear. Not a single main character slipped past.');
+	expect(body).toContain('3 channels protected. Queue\'s clear. Zero main character behavior detected.');
 });
 
 test('the pending headline and subline render with the summed count', () => {
 	const body = renderPage(PENDING_DATA);
-	expect(body).toContain('5 caught lacking at the door.');
+	expect(body).toContain('5 comments acting sus.');
 	expect(body).toContain(
-		'5 comments are waiting for a decision. The rope isn\'t going to check itself.'
+		'5 comments are waiting for a decision. The pile isn\'t going to sort itself.'
 	);
 });
 
@@ -166,7 +166,7 @@ test('the stat labels are the spec caps labels', () => {
 	expect(stats).toContain('Pending');
 	expect(stats).toContain('Rejected');
 	expect(stats).toContain('Approved');
-	expect(stats).toContain('Edge lords banned');
+	expect(stats).toContain('Told to touch grass');
 });
 
 test('the ledger header names the section and the connection count', () => {
@@ -361,6 +361,6 @@ test('no channels renders the empty state and the quiet zero-count header', () =
 	const body = renderPage(EMPTY_DATA);
 	expect(body).toContain('No channels connected');
 	expect(body).toContain('0 connected');
-	expect(body).toContain('The door is quiet. Too quiet.');
-	expect(body).toContain('0 channels protected. Queue\'s clear. Not a single main character slipped past.');
+	expect(body).toContain("All clear. Nobody's being weird for once.");
+	expect(body).toContain('0 channels protected. Queue\'s clear. Zero main character behavior detected.');
 });

@@ -188,7 +188,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 			</div>
 		</div>
 	{:else}
-		<p class="queue-empty">Queue is clear. The rope holds.</p>
+		<p class="queue-empty">Queue is clear. We are so back.</p>
 	{/each}
 {/if}
 

@@ -30,6 +30,7 @@ import { configuredMercadoPagoBundles } from '$lib/server/mercadopago/bundles';
 import { isUnmeteredPlan, listCreditTransactions, orgIsMetered, usageSummary } from '$lib/server/billing/ledger';
 import { isActiveSubscriptionStatus } from '$lib/server/billing/plans';
 import { db } from '$lib/server/db';
+import { resolveOpenAiKey } from '$lib/server/openaiKey';
 import { organizations } from '$lib/server/db/schema';
 import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
 import { configuredBundles } from '$lib/server/stripe/bundles';
@@ -163,12 +164,18 @@ export const load: PageServerLoad = async ({ locals }) => {
 		if (!org) {
 			throw error(500, 'account has no organization — contact support');
 		}
-		const [summary, history, metered, lifetimeSlots, savedCard] = await Promise.all([
+		const [summary, history, metered, lifetimeSlots, savedCard, usableOpenAiKey] = await Promise.all([
 			usageSummary(user.orgId),
 			listCreditTransactions(user.orgId, 30),
 			orgIsMetered(user.orgId),
 			lifetimeSlotsRemaining(),
-			org.stripeDefaultPmId ? savedCardLabel(org.stripeDefaultPmId) : Promise.resolve(null)
+			org.stripeDefaultPmId ? savedCardLabel(org.stripeDefaultPmId) : Promise.resolve(null),
+			// Truthiness is not usability: a corrupt ciphertext still passes
+			// Boolean(openaiKeyEnc) but resolves to no key — the page would claim
+			// scoring runs while every comment queues (codex P2). Only the
+			// lifetime plan's flag means "usable"; other plans' ciphertext is
+			// stored-but-ignored either way.
+			org.plan === 'lifetime' ? resolveOpenAiKey(user.orgId) : Promise.resolve(undefined)
 		]);
 		return {
 			maintenance: false,
@@ -210,8 +217,10 @@ export const load: PageServerLoad = async ({ locals }) => {
 				subscriptionLive: Boolean(org.stripeSubscriptionId) && isActiveSubscriptionStatus(org.stripeSubscriptionStatus)
 			},
 			// Never serialize secrets: the page gets a boolean only. Lifetime
-			// orgs with hasOpenAiKey=false see the required-key warning.
-			hasOpenAiKey: Boolean(org.openaiKeyEnc),
+			// orgs with hasOpenAiKey=false see the required-key warning — and
+			// for them the flag is USABILITY (a decryptable key resolves), not
+			// mere ciphertext presence.
+			hasOpenAiKey: org.plan === 'lifetime' ? usableOpenAiKey !== undefined : Boolean(org.openaiKeyEnc),
 			stripeConfigured: Boolean(env.STRIPE_SECRET_KEY),
 			plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) }
 		};

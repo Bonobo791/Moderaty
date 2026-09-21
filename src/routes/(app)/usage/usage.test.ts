@@ -42,6 +42,7 @@ vi.mock('$lib/server/stripe/client', () => ({
 vi.mock('$env/dynamic/private', () => ({
 	env: {
 		APP_URL: 'http://localhost:5173',
+		ENCRYPTION_KEY: 'test-encryption-key',
 		STRIPE_PRICE_CREDITS_100: 'price_100',
 		STRIPE_PRICE_CREDITS_500: 'price_500',
 		STRIPE_PRICE_CREDITS_2000: 'price_2000',
@@ -367,6 +368,26 @@ describe('usage load', () => {
 		// The serialized payload must carry only the boolean — never the
 		// stored ciphertext, which a leak would hand straight to the client.
 		expect(JSON.stringify(view)).not.toContain('ENC:sentinel-ciphertext');
+	});
+
+	test('a lifetime org whose stored key no longer decrypts sees the missing-key warning, not "scoring active"', async () => {
+		// Truthiness is not usability: a corrupt ciphertext (key rotation,
+		// truncation) still passes Boolean(openaiKeyEnc) — the page would
+		// claim scoring runs on the saved key while resolveOpenAiKey queues
+		// every comment (codex P2). The flag must reflect a DECRYPTABLE key.
+		await seedOrg({ plan: 'lifetime', openaiKeyEnc: 'ENC:not-real-ciphertext' });
+		const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			const view = (await load({ locals: { user: OWNER } } as never)) as { hasOpenAiKey: boolean };
+			expect(view.hasOpenAiKey).toBe(false);
+		} finally {
+			spy.mockRestore();
+		}
+		// And a decryptable key still reports true — the positive leg.
+		const { encrypt } = await import('$lib/server/crypto');
+		await testDb().db.update(organizations).set({ openaiKeyEnc: encrypt('sk-live-usable') }).where(eq(organizations.id, 'org-1'));
+		const usable = (await load({ locals: { user: OWNER } } as never)) as { hasOpenAiKey: boolean };
+		expect(usable.hasOpenAiKey).toBe(true);
 	});
 
 	test('a hosted org sees Manage subscription instead of dead buy buttons', async () => {

@@ -50,14 +50,18 @@ export function serializeScores(scores: ToxicityScores): string {
  * @param text - The comment text to evaluate
  * @param deadline - Optional abort deadline for the request.
  * @param apiKey - The OpenAI key to bill (org BYOK key when the pipeline
- * resolved one); defaults to the deployment's `OPENAI_API_KEY`.
+ * resolved one). Deliberately NOT defaulted to `env.OPENAI_API_KEY`: a
+ * default parameter would silently re-arm the deployment key whenever the
+ * caller resolved `undefined` (e.g. a lifetime org without a usable BYOK
+ * key), defeating the plan's key boundary. Callers on metered plans pass
+ * the resolved key, which already falls back to the env var upstream.
  * @returns The maximum toxicity score and the score for each category
  * @throws If the OpenAI API key is missing, the moderation request fails, or required scores are absent or outside [0, 1]
  */
 export async function scoreComment(
 	text: string,
 	deadline?: number,
-	apiKey: string | undefined = env.OPENAI_API_KEY
+	apiKey?: string
 ): Promise<ModerationResult> {
 	if (!apiKey) throw new Error('OPENAI_API_KEY is required');
 	const res = await fetchWithRetry('https://api.openai.com/v1/moderations', {

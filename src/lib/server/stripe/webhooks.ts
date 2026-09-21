@@ -195,8 +195,14 @@ async function fulfillHostedCheckout(session: Stripe.Checkout.Session, sessionId
 	if (!existing) throw new Error(`org not found: ${orgId}`);
 	const lifetime = await db.select({ id: stripeLifetimeEntitlements.id }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
 	if (lifetime) {
-		console.error(`stripe: hosted checkout ${sessionId} would overlap lifetime access for ${orgId}`);
-		return 'rejected';
+		// A PAID hosted checkout overlapping lifetime can never grant — but a
+		// bare 'rejected' ACKs the delivery while the freshly minted
+		// subscription keeps billing forever (coderabbit CRITICAL). It gets
+		// the standard duplicate teardown: cancel at Stripe + refund every
+		// paid invoice.
+		console.error(`stripe: hosted checkout ${sessionId} would overlap lifetime access for ${orgId} — tearing down duplicate ${subscriptionId}`);
+		await teardownDuplicateSubscription(subscriptionId, orgId, { checkoutSessionId: sessionId, paymentExpected: true });
+		return 'refunded';
 	}
 	// One live subscription per org. The stored status is only a cache —
 	// it is null until a subscription webhook lands and stale whenever
@@ -206,7 +212,7 @@ async function fulfillHostedCheckout(session: Stripe.Checkout.Session, sessionId
 	// invoice instead of keeping the money for a sub we never honor.
 	if (existing.stripeSubscriptionId && existing.stripeSubscriptionId !== subscriptionId) {
 		const liveStatus = await liveSubscriptionStatus(existing.stripeSubscriptionId);
-		if (subscriptionStatusIsLive(liveStatus)) {
+		if (subscriptionStatusMeaning(existing.stripeSubscriptionId, liveStatus) === 'live') {
 			console.error(`stripe: hosted checkout ${sessionId} for org ${orgId} would overlap live subscription ${existing.stripeSubscriptionId} (${liveStatus}) — tearing down duplicate ${subscriptionId}`);
 			await teardownDuplicateSubscription(subscriptionId, orgId, { checkoutSessionId: sessionId, paymentExpected: true });
 			return 'refunded';
@@ -422,13 +428,15 @@ function getPaymentIntentAndCharge(session: Stripe.Checkout.Session): {
  * success page renders — while a disputed one stays 'rejected' (the money
  * outcome is unresolved, not returned).
  */
+/** True when the charge's full amount was refunded — partial refunds keep their purchase (documented v1 scope). */
+function chargeFullyRefunded(charge: { amount?: unknown; amount_refunded?: unknown }): boolean {
+	return typeof charge.amount === 'number' && charge.amount > 0 && typeof charge.amount_refunded === 'number' && charge.amount_refunded >= charge.amount;
+}
+
 function lateGrantVerdict(session: Stripe.Checkout.Session, sessionId: string): 'refunded' | 'rejected' | null {
 	const { charge } = getPaymentIntentAndCharge(session);
 	if (!charge) return null;
-	const fullyRefunded =
-		typeof charge.amount_refunded === 'number' &&
-		typeof charge.amount === 'number' &&
-		charge.amount_refunded >= charge.amount;
+	const fullyRefunded = chargeFullyRefunded(charge);
 	if (charge.disputed || fullyRefunded) {
 		console.error(
 			`stripe: checkout session ${sessionId} charge ${charge.id} is ${charge.disputed ? 'disputed' : 'fully refunded'} — late grant refused`
@@ -674,7 +682,7 @@ async function cancelRefundedSubscription(chargeId: string, paymentIntentId?: st
 	}
 	const status = live.status;
 	if (typeof status !== 'string' || status.length === 0) throw new Error(`Stripe subscription ${match.subscriptionId} carries no usable status`);
-	if (!subscriptionStatusIsLive(status)) {
+	if (subscriptionStatusMeaning(match.subscriptionId, status) === 'terminal') {
 		console.info(`stripe: refunded charge ${chargeId} — subscription ${match.subscriptionId} is already ${status}, nothing to cancel`);
 		return;
 	}
@@ -726,6 +734,16 @@ export async function restoreWonDispute(disputeId: string): Promise<boolean> {
 	if (!reversal || reversal.status === 'ignored' || reversal.status === 'restored') return false;
 	if (reversal.status === 'pending') {
 		await db.update(stripeDisputeReversals).set({ status: 'won' }).where(eq(stripeDisputeReversals.disputeId, disputeId));
+		return false;
+	}
+	// A charge FULLY REFUNDED after the reversal already paid the customer
+	// back — restoring now would mint spendable credits (or revive an
+	// entitlement/period) on money we no longer hold (codex P1). Close the
+	// reversal 'ignored' so a redelivery cannot re-restore either.
+	const charge = await getStripe().charges.retrieve(reversal.chargeId);
+	if (chargeFullyRefunded(charge)) {
+		console.error(`stripe: won dispute ${disputeId} is not restorable — charge ${reversal.chargeId} was fully refunded`);
+		await db.update(stripeDisputeReversals).set({ status: 'ignored' }).where(eq(stripeDisputeReversals.disputeId, disputeId));
 		return false;
 	}
 	const identifiers = { paymentIntentId: reversal.paymentIntentId ?? undefined, chargeId: reversal.chargeId };
@@ -1167,7 +1185,19 @@ function subscriptionCancelScheduled(subscription: StripeRecord, context: string
 	const cancelAt = subscription.cancel_at;
 	if (cancelAt === null || cancelAt === undefined) return subscription.cancel_at_period_end;
 	if (typeof cancelAt !== 'number' || !Number.isSafeInteger(cancelAt) || cancelAt <= 0) throw new Error(`Stripe subscription ${context} has invalid cancel_at`);
-	return true;
+	// cancel_at is a timestamp, not a promise this period is the last: a
+	// value PAST the current period end renews at least once more before
+	// the cancel lands — still billing, not winding down (codex P1). The
+	// period end can sit on the subscription or its first item (newer API
+	// shapes moved it) — same fallback as subscriptionPeriod.
+	let periodEnd = subscription.current_period_end;
+	if (periodEnd === undefined) {
+		const items = optionalRecord(subscription.items);
+		const first = Array.isArray(items?.data) ? optionalRecord(items.data[0]) : undefined;
+		periodEnd = first?.current_period_end;
+	}
+	if (typeof periodEnd !== 'number' || !Number.isSafeInteger(periodEnd) || periodEnd <= 0) throw new Error(`Stripe subscription ${context} has invalid current_period_end`);
+	return subscription.cancel_at_period_end || cancelAt <= periodEnd;
 }
 
 /**
@@ -1186,9 +1216,18 @@ async function liveHostedBlocksLifetime(subscriptionId: string, context: string)
 	return isActiveSubscriptionStatus(status) && !subscriptionCancelScheduled(live, context);
 }
 
-/** True while a subscription can still bill: Stripe's active set plus 'incomplete' (first payment may still land) and 'paused' (can resume). */
-function subscriptionStatusIsLive(status: string): boolean {
-	return isActiveSubscriptionStatus(status) || status === 'incomplete' || status === 'paused';
+/**
+ * Stripe's documented subscription statuses split into still-billable and
+ * done. 'live' is the active set plus 'incomplete' (first payment may still
+ * land) and 'paused' (can resume); 'terminal' is 'canceled' and
+ * 'incomplete_expired'. Anything else is a failed read or a status this
+ * build predates — silently filing it as terminal would skip a needed
+ * cancel while the refund leg runs (codex P2), so unknown = loud (I2).
+ */
+function subscriptionStatusMeaning(subscriptionId: string, status: string): 'live' | 'terminal' {
+	if (isActiveSubscriptionStatus(status) || status === 'incomplete' || status === 'paused') return 'live';
+	if (status === 'canceled' || status === 'incomplete_expired') return 'terminal';
+	throw new Error(`Stripe subscription ${subscriptionId} carries an unknown status '${status}'`);
 }
 
 /**
@@ -1210,7 +1249,6 @@ async function teardownDuplicateSubscription(duplicateSubscriptionId: string, or
 	// land here after the first teardown did the job — the throw would fail
 	// the delivery before the refund leg below ever retries (cubic P1).
 	const live = await fetchLiveSubscription(duplicateSubscriptionId);
-	const liveStatus = live && typeof live.status === 'string' && live.status.length > 0 ? live.status : undefined;
 	let canceled: StripeRecord;
 	if (!live) {
 		// resource_missing means the subscription is gone — canceling a
@@ -1218,35 +1256,86 @@ async function teardownDuplicateSubscription(duplicateSubscriptionId: string, or
 		// before the refund leg ever retries (coderabbit).
 		console.info(`stripe: duplicate subscription ${duplicateSubscriptionId} for org ${orgId} is already gone — skipping the cancel`);
 		canceled = {};
-	} else if (liveStatus && !subscriptionStatusIsLive(liveStatus)) {
-		console.info(`stripe: duplicate subscription ${duplicateSubscriptionId} for org ${orgId} is already ${liveStatus} — skipping the second cancel`);
-		canceled = live;
 	} else {
-		canceled = asRecord(await getStripe().subscriptions.cancel(duplicateSubscriptionId));
-		console.error(`stripe: canceled duplicate subscription ${duplicateSubscriptionId} for org ${orgId} — only one live subscription per org is allowed`);
+		const liveStatus = typeof live.status === 'string' && live.status.length > 0 ? live.status : undefined;
+		if (!liveStatus) throw new Error(`Stripe subscription ${duplicateSubscriptionId} carries no usable status`);
+		if (subscriptionStatusMeaning(duplicateSubscriptionId, liveStatus) === 'terminal') {
+			console.info(`stripe: duplicate subscription ${duplicateSubscriptionId} for org ${orgId} is already ${liveStatus} — skipping the second cancel`);
+			canceled = live;
+		} else {
+			canceled = asRecord(await getStripe().subscriptions.cancel(duplicateSubscriptionId));
+			console.error(`stripe: canceled duplicate subscription ${duplicateSubscriptionId} for org ${orgId} — only one live subscription per org is allowed`);
+		}
 	}
-	// Prefer the invoice the caller KNOWS was paid (an invoice.paid payload);
-	// otherwise the canceled subscription's latest invoice is the first charge.
-	const latestInvoiceId = opts.invoiceId ?? stripeId(canceled.latest_invoice);
-	const refs = latestInvoiceId ? await fetchInvoicePaymentRefs(latestInvoiceId) : {};
-	if (refs.paymentIntentId) {
+	// Refund every paid payment the duplicate collected: the invoice the
+	// caller KNOWS about (an invoice.paid payload or the canceled record's
+	// latest) AND every other paid invoice on the subscription — a duplicate
+	// that survived a webhook outage can have billed multiple cycles, and
+	// refunding only the latest leaves the earlier charges with us (codex
+	// P1). Each refund anchors on a PER-PAYMENT idempotency key so retries
+	// and separate payments never collide.
+	const invoiceIds = new Set<string>();
+	const knownInvoiceId = opts.invoiceId ?? stripeId(canceled.latest_invoice);
+	if (knownInvoiceId) invoiceIds.add(knownInvoiceId);
+	if (live) {
+		const paid = await getStripe().invoices.list({ subscription: duplicateSubscriptionId, status: 'paid', limit: 100 });
+		for (const invoice of paid.data) {
+			const id = stripeId(asRecord(invoice).id);
+			if (id) invoiceIds.add(id);
+		}
+	}
+	let refundedAny = false;
+	let honoredAny = false;
+	let unrefundable = false;
+	for (const invoiceId of invoiceIds) {
+		// A period row for this invoice means the payment was HONORED — the
+		// customer received the service. Refunding delivered service is a
+		// clawback, not a duplicate-charge correction: a delayed invoice.paid
+		// for a legit old subscription must not refund just because the org
+		// later resubscribed (codex P1). Any status counts — a 'refunded' or
+		// 'disputed' period is already owned by the charge.refunded/dispute
+		// reversal path.
+		if (await subscriptionInvoiceWasHonored(invoiceId)) {
+			console.info(`stripe: invoice ${invoiceId} on superseded subscription ${duplicateSubscriptionId} already produced a period — leaving the honored payment`);
+			honoredAny = true;
+			continue;
+		}
+		const refs = await fetchInvoicePaymentRefs(invoiceId);
+		if (!refs.paymentIntentId && !refs.chargeId) continue; // never settled — nothing moved
+		if (!refs.paymentIntentId) {
+			unrefundable = true;
+			continue;
+		}
 		await refundUngrantablePayment({
 			paymentIntentId: refs.paymentIntentId,
-			idempotencyKey: `refund:ungrantable:subscription:${duplicateSubscriptionId}`,
+			idempotencyKey: `refund:ungrantable:subscription:${duplicateSubscriptionId}:payment:${refs.paymentIntentId}`,
 			label: `duplicate hosted subscription ${duplicateSubscriptionId} for org ${orgId}`,
 			orgId,
 			checkoutSessionId: opts.checkoutSessionId
 		});
-		return;
+		refundedAny = true;
 	}
-	if (refs.chargeId || opts.paymentExpected) {
+	if (unrefundable || (opts.paymentExpected && !refundedAny && !honoredAny)) {
 		// A paid payment exists but cannot be auto-refunded (charge-only), or
 		// the money is provably taken yet invisible to invoicePayments — either
 		// way a human must refund: throw so the delivery stays un-ACKed.
 		console.error(`stripe: duplicate subscription ${duplicateSubscriptionId} for org ${orgId} was canceled but its payment could not be auto-refunded — MANUAL REFUND REQUIRED`);
 		throw new Error(`stripe: duplicate subscription ${duplicateSubscriptionId} canceled but its paid payment was not refundable — MANUAL REFUND REQUIRED`);
 	}
-	console.info(`stripe: duplicate subscription ${duplicateSubscriptionId} for org ${orgId} canceled; no paid invoice payment to refund yet`);
+	if (!refundedAny && !honoredAny) {
+		console.info(`stripe: duplicate subscription ${duplicateSubscriptionId} for org ${orgId} canceled; no paid invoice payment to refund yet`);
+	}
+}
+
+/**
+ * True when a subscription invoice already produced a period row — the
+ * payment bought service the org received. The teardown refund leg skips
+ * honored payments so a delayed invoice.paid for a legitimate superseded
+ * subscription is never clawed back (codex P1).
+ */
+async function subscriptionInvoiceWasHonored(invoiceId: string): Promise<boolean> {
+	const row = await db.select({ id: stripeSubscriptionPeriods.id }).from(stripeSubscriptionPeriods).where(eq(stripeSubscriptionPeriods.invoiceId, invoiceId)).get();
+	return Boolean(row);
 }
 
 /**
@@ -1259,7 +1348,7 @@ async function teardownDuplicateSubscription(duplicateSubscriptionId: string, or
 async function isSupersededSubscription(org: Awaited<ReturnType<typeof findOrgForStripe>>, subscriptionId: string, eventType: string): Promise<boolean> {
 	if (!org?.stripeSubscriptionId || org.stripeSubscriptionId === subscriptionId) return false;
 	const live = await liveSubscriptionStatus(org.stripeSubscriptionId);
-	if (!subscriptionStatusIsLive(live)) {
+	if (subscriptionStatusMeaning(org.stripeSubscriptionId, live) !== 'live') {
 		console.info(`stripe: tracked subscription ${org.stripeSubscriptionId} is ${live} — ${eventType} for ${subscriptionId} may proceed`);
 		return false;
 	}
@@ -1330,7 +1419,7 @@ async function handleSubscriptionEvent(event: Stripe.Event): Promise<void> {
 		// nothing to cancel and nothing provably paid to refund. Tearing it
 		// down anyway would double-cancel (a Stripe error → endless retries)
 		// and could refund an invoice that was never a duplicate charge.
-		if (!subscriptionStatusIsLive(status)) {
+		if (subscriptionStatusMeaning(subscriptionId, status) === 'terminal') {
 			console.info(`stripe: ignoring terminal ${event.type} for superseded subscription ${subscriptionId} (status ${status}) — tracked subscription ${org.stripeSubscriptionId} stays`);
 			return;
 		}
@@ -1352,10 +1441,32 @@ async function handleSubscriptionEvent(event: Stripe.Event): Promise<void> {
 		eventCreated: event.created,
 		eventId: event.id
 	});
+	if (!applied) {
+		// A strictly-older event is provably stale — acknowledge quietly. But
+		// a SAME-SECOND tie is decided by opaque event-id order, which carries
+		// no causality: a portal resume whose id sorts lower is dropped even
+		// though Stripe's live record may already show the subscription
+		// billing again (codex P1). Before trusting the drop, reconcile the
+		// enforcement decision from the LIVE subscription — the same rule
+		// customer.updated applies to its card pointer.
+		const cursor = await db.select({ created: organizations.stripeSubscriptionLastEventCreated }).from(organizations).where(eq(organizations.id, org.id)).get();
+		if (cursor?.created === event.created) {
+			const live = await fetchLiveSubscription(subscriptionId);
+			if (live) {
+				const liveStatus = typeof live.status === 'string' && live.status.length > 0 ? live.status : undefined;
+				if (!liveStatus) throw new Error(`Stripe subscription ${subscriptionId} carries no usable status`);
+				if (subscriptionStatusMeaning(subscriptionId, liveStatus) === 'live') {
+					await endSubscriptionOnLifetimeOrg(org.id, subscriptionId, event, liveStatus, subscriptionCancelScheduled(live, event.id));
+				}
+			}
+		}
+		console.info(`stripe: ${event.type} ${event.id} for subscription ${subscriptionId} is stale — a same-or-newer snapshot already applied`);
+		return;
+	}
 	// Only a snapshot this event actually applied may carry its card — a stale
 	// event's payment method is equally stale.
-	if (applied && pmId) await applySubscriptionDefaultPm(org.id, pmId, event.created);
-	if (applied) await endSubscriptionOnLifetimeOrg(org.id, subscriptionId, event, status, canceling);
+	if (pmId) await applySubscriptionDefaultPm(org.id, pmId, event.created);
+	await endSubscriptionOnLifetimeOrg(org.id, subscriptionId, event, status, canceling);
 }
 
 /**

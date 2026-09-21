@@ -40,7 +40,11 @@ export interface ToneResult {
  * @param deadline - Optional abort deadline for the request.
  * @param protections - Per-channel strict-protection flags appended to the rubric.
  * @param apiKey - The OpenAI key to bill (org BYOK key when the pipeline
- * resolved one); defaults to the deployment's `OPENAI_API_KEY`.
+ * resolved one). Deliberately NOT defaulted to `env.OPENAI_API_KEY`: a
+ * default parameter would silently re-arm the deployment key whenever the
+ * caller resolved `undefined` (e.g. a lifetime org without a usable BYOK
+ * key), defeating the plan's key boundary. Callers on metered plans pass
+ * the resolved key, which already falls back to the env var upstream.
  * @returns The calibrated tone score.
  * @throws If the OpenAI API key is missing, the request fails, or the score is absent or outside [0, 1].
  */
@@ -49,7 +53,7 @@ export async function scoreTone(
 	context: ToneContext,
 	deadline?: number,
 	protections: ToneProtections = {},
-	apiKey: string | undefined = env.OPENAI_API_KEY
+	apiKey?: string
 ): Promise<ToneResult> {
 	if (!apiKey) throw new Error('OPENAI_API_KEY is required');
 	// Prompt-injection guard: comment text and video metadata are attacker-controlled,

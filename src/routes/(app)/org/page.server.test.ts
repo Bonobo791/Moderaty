@@ -320,6 +320,10 @@ test('remove: a member caller is 403 at the route, same as the other admin-gated
 
 afterEach(() => {
 	vi.unstubAllGlobals();
+	// unstubAllGlobals does NOT restore vi.spyOn mocks — the console.error
+	// spy created inside setKeyUnderFakeTimers would leak its implementation
+	// and call history into the next test (coderabbit).
+	vi.restoreAllMocks();
 });
 
 /** Stubs global fetch (the live OpenAI key check) and records each call. */

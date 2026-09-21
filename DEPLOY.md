@@ -272,7 +272,8 @@ the site exists), local work, and outage recovery.
   prod, the dev sandbox for dev): run a hosted checkout, then confirm the
   endpoint's deliveries show 2xx for `customer.subscription.created` and
   `invoice.paid`, and the Usage page shows plan `hosted` with a period end
-  date and "A card is saved".
+  date and the saved card's label ("Visa •••• 4242 is saved for automatic
+  top-up" — or "A card is saved" while details are still resolving).
 - Watch the next scheduled invocation succeed in the Netlify function logs.
 
 ## 7. Backups

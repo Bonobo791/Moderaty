@@ -86,8 +86,15 @@ async function savedCardLabel(pmId: string): Promise<{ label: string } | null> {
 		const pm = await getStripe().paymentMethods.retrieve(pmId);
 		const card = pm.card;
 		if (pm.type === 'card' && card && typeof card.brand === 'string' && typeof card.last4 === 'string') {
-			const brand = card.brand[0].toUpperCase() + card.brand.slice(1);
-			return { label: `${brand} •••• ${card.last4}` };
+			const brand = card.brand.trim();
+			// I2: these fields render as a trusted "saved card" label — a
+			// malformed payload (empty brand, non-4-digit last4) is a failed
+			// read, not displayable data.
+			if (brand.length === 0 || brand.length > 32 || !/^\d{4}$/.test(card.last4)) {
+				console.error(`usage: saved payment method ${pmId} returned malformed card fields (brand=${JSON.stringify(card.brand)}, last4=${JSON.stringify(card.last4)}) — details unavailable`);
+				return null;
+			}
+			return { label: `${brand[0].toUpperCase()}${brand.slice(1)} •••• ${card.last4}` };
 		}
 		// Non-card instrument (link, bank debit, …): identify it by type.
 		const type = typeof pm.type === 'string' && pm.type.length > 0 ? pm.type : 'unknown';

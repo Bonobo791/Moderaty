@@ -137,11 +137,13 @@ One-time setup (human, in the Coolify dashboard):
    secret into the app's `STRIPE_WEBHOOK_SECRET` — a `stripe listen` secret
    or another endpoint's `whsec_` fails verification with
    `400 invalid signature`. Subscribe the endpoint to every event the
-   dispatcher handles (full list in DEPLOY.md §2); after a purchase, the
-   endpoint's Deliveries should show 2xx for `customer.subscription.created`
+   dispatcher handles (full list in DEPLOY.md §2); after a HOSTED purchase,
+   the endpoint's Deliveries should show 2xx for `customer.subscription.created`
    and `invoice.paid`, and the Usage page should show the new plan and saved
-   card. A `500 handler failed` delivery is an application bug — check the
-   app log, not the endpoint config.
+   card — a LIFETIME purchase is a one-time payment, so it produces
+   `checkout.session.completed`/`payment_intent.succeeded`/`charge.succeeded`
+   but no subscription events. A `500 handler failed` delivery is an
+   application bug — check the app log, not the endpoint config.
 
    Do not set `BUNNY_ACCESS_KEY` in the application environment — the purge
    runs OUTSIDE the container (`.github/workflows/bunny-purge.yml`), with a

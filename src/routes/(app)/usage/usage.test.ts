@@ -292,6 +292,11 @@ describe('usage load', () => {
 		}).body;
 		expect(available).toContain('action="?/buyPlan"');
 		expect(available).toContain('3 of 1,000 claimed');
+		// BYOK is mandatory on lifetime (Terms §6.1(c)) — an offer that says
+		// "unlimited comments" without naming the required OpenAI key hides a
+		// material ongoing cost until after purchase (codex P1). Disclose it
+		// on the purchase surface, not just post-sale.
+		expect(available).toMatch(/own OpenAI API key/i);
 
 		const soldOut = render(Page, {
 			props: { data: { ...base, lifetimeSlots: 0, billing: { plan: null, subscriptionStatus: null, periodEnd: null } }, form: null } as never
@@ -1025,6 +1030,23 @@ describe('usage cards section', () => {
 		});
 		expect(body).toContain('Visa •••• 4242');
 		expect(body).not.toContain('No card saved');
+	});
+
+	test('a malformed card payload resolves to unavailable — never rendered as a trusted label', async () => {
+		// I2: Stripe's card fields are external data — a one-character last4 or
+		// an empty brand must not render as if it were a real saved card
+		// (codex P1). Malformed means logged + unavailable, not displayed.
+		await seedOrg({ creditsRemaining: 5, autoTopupEnabled: 1, autoTopupThreshold: 100, autoTopupState: 'idle', stripeDefaultPmId: 'pm_1' });
+		mocks.paymentMethodsRetrieve.mockResolvedValue({ id: 'pm_1', type: 'card', card: { brand: 'visa', last4: 'x' } });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const data = (await load({ locals: { user: OWNER } } as never)) as { autoTopup: { hasCard: boolean; card: unknown } };
+			expect(data.autoTopup.hasCard).toBe(true);
+			expect(data.autoTopup.card).toBeNull();
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('malformed'));
+		} finally {
+			errorSpy.mockRestore();
+		}
 	});
 
 	test('a card pointer with unresolved details says so instead of implying which card', () => {

@@ -439,10 +439,18 @@ export async function queuePendingReversal(chargeId: string, reason: 'refund' | 
  * @returns The number of reversals applied
  */
 export async function drainPendingReversals(chargeId: string): Promise<number> {
+	// Order matters when a charge carries both obligations: the dispute
+	// reversal is unbounded (a later won-dispute restore re-adds the full
+	// grant) while the refund reversal floors at zero, so the dispute must
+	// apply FIRST and the refund LAST — draining the other way could leave a
+	// negative balance the refund was supposed to prevent. 'dispute' sorts
+	// before 'refund' alphabetically; ORDER BY makes the contract explicit
+	// instead of trusting SQLite's index scan order (cubic review).
 	const pending = await db
 		.select()
 		.from(stripePendingReversals)
 		.where(eq(stripePendingReversals.chargeId, chargeId))
+		.orderBy(asc(stripePendingReversals.reason))
 		.all();
 	let drained = 0;
 	for (const row of pending) {

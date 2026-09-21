@@ -84,6 +84,14 @@ function event(type: string, id: string, object: Record<string, unknown>, create
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	// clearAllMocks resets call history but NOT implementations — a test that
+	// forgets to stub a Stripe read would otherwise inherit whatever the
+	// previous test configured (cubic). Give the read mocks neutral defaults;
+	// tests stub their own specifics on top.
+	mocks.invoicePaymentsList.mockReset().mockResolvedValue({ data: [] });
+	mocks.invoicesRetrieve.mockReset();
+	mocks.subscriptionsRetrieve.mockReset();
+	mocks.subscriptionsCancel.mockReset();
 	// Stripe's real refunds.create resolves a Refund — the status drives the
 	// helper's validate-before-ACK contract.
 	mocks.refundsCreate.mockResolvedValue({ id: 're_1', status: 'succeeded' });
@@ -1329,6 +1337,39 @@ describe('reverseCharge / reverseDispute', () => {
 		expect(mocks.subscriptionsCancel).toHaveBeenCalledWith('sub_1');
 		const pending = await testDb().db.select().from(stripePendingReversals).where(eq(stripePendingReversals.chargeId, 'ch_early')).get();
 		expect(pending?.reason).toBe('refund');
+	});
+
+	test('a terminal event for a superseded subscription is ignored — never torn down again', async () => {
+		// A delayed customer.subscription.deleted for the OLD subscription can
+		// arrive after the org resubscribed: the incoming sub is already dead
+		// at Stripe, so the duplicate-teardown path would double-cancel (a
+		// Stripe error → endless webhook retry) and could even refund an
+		// invoice that was never a duplicate charge (codex P2 / cubic P1).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_new', stripeSubscriptionStatus: 'active', stripeCustomerId: 'cus_1' });
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_new', status: 'active' });
+		const deleted = event('customer.subscription.deleted', 'evt_old_del', { id: 'sub_old', customer: 'cus_1', status: 'canceled', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false }, 400);
+		expect(await handleStripeEvent(deleted as never)).toBe(true);
+		expect(mocks.subscriptionsCancel).not.toHaveBeenCalled();
+		expect(mocks.refundsCreate).not.toHaveBeenCalled();
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeSubscriptionId).toBe('sub_new');
+	});
+
+	test('a duplicate teardown skips the cancel when the subscription is already terminal — but still refunds', async () => {
+		// The retry path: the first teardown canceled the duplicate and then
+		// its refund leg failed — on redelivery the cancel is now impossible
+		// (Stripe rejects canceling a canceled subscription), and calling it
+		// would fail the delivery before the refund ever retries
+		// (coderabbit / cubic P1). Live check first: terminal → skip cancel,
+		// still run the refund leg.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_main', stripeSubscriptionStatus: 'active', stripeCustomerId: 'cus_1' });
+		mocks.subscriptionsRetrieve.mockImplementation(async (id: string) =>
+			id === 'sub_main' ? { id, status: 'active' } : { id, status: 'canceled', latest_invoice: 'in_dup' });
+		mocks.invoicePaymentsList.mockResolvedValue({ data: [{ invoice: 'in_dup', payment: { payment_intent: 'pi_dup', charge: 'ch_dup' } }] });
+		const paid = event('invoice.paid', 'evt_dup_paid', { id: 'in_dup', customer: 'cus_1', parent: { type: 'subscription_details', subscription_details: { subscription: 'sub_dup' } } }, 500);
+		expect(await handleStripeEvent(paid as never)).toBe(true);
+		expect(mocks.subscriptionsCancel).not.toHaveBeenCalled();
+		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_dup', metadata: { reason: 'ungrantable', org_id: 'org-1' } }, { idempotencyKey: 'refund:ungrantable:subscription:sub_dup' });
 	});
 
 	test('an already-canceled subscription is not re-canceled on refund replay', async () => {

@@ -531,16 +531,22 @@ describe('AI-cost claims match implementation', () => {
 	});
 });
 
-// Lifetime BYOK is now REQUIRED — maintainer decision shipped in
+// Lifetime BYOK is REQUIRED — maintainer decision shipped in
 // LEGAL_VERSION 1.11: Terms §6.1(c) states the lifetime plan scores on the
 // buyer's own OpenAI key (resolveOpenAiKey withholds the deployment key from
-// lifetime orgs entirely). Marketing surfaces still do not sell it — the
-// pricing panels and FAQ keep the plan description unchanged — so these
-// guards stay. The BYOK FAQ answer remains scoped to self-hosting.
-describe('lifetime BYOK claims stay out of unadvertised marketing', () => {
+// lifetime orgs entirely). Marketing must therefore disclose the key
+// anywhere the lifetime plan is sold or described — hiding a material
+// requirement until after checkout is a false-claims problem (codex P1) —
+// and must never claim the operator runs the lifetime AI.
+describe('lifetime BYOK disclosure matches the required-key Terms', () => {
 	const lifetimeSurfaces: Record<string, string> = {
 		PlanLifetime: readFileSync(
 			new URL('../components/landing/PlanLifetime.svelte', import.meta.url),
+			'utf8'
+		),
+		'lifetime ticks': readFileSync(new URL('./plans.ts', import.meta.url), 'utf8'),
+		'pricing hero': readFileSync(
+			new URL('../components/landing/pricing/PricingHero.svelte', import.meta.url),
 			'utf8'
 		),
 		'homepage pricing section': readFileSync(
@@ -550,17 +556,25 @@ describe('lifetime BYOK claims stay out of unadvertised marketing', () => {
 		'pricing page meta': readRoute('pricing', '+page.svelte')
 	};
 
-	it('no surface ties the lifetime plan to BYOK or a buyer-owned key', () => {
-		const RETIRED = [/lifetime[^.]*BYOK|BYOK[^.]*lifetime/i, /lifetime[^.;]*own OpenAI key/i];
+	it('every surface that sells the lifetime plan discloses the required OpenAI key', () => {
 		for (const [name, text] of Object.entries(lifetimeSurfaces)) {
-			for (const pattern of RETIRED) {
-				expect(text, `${name} still sells lifetime BYOK: ${pattern}`).not.toMatch(pattern);
+			expect(text, `${name} sells lifetime without disclosing the required OpenAI key (Terms §6.1(c))`).toMatch(/own OpenAI (API )?key/i);
+		}
+		const lifetimeFaq = PRICING_FAQ_ENTRIES.find((f) => f.q === 'What is the $49 lifetime deal?');
+		expect(lifetimeFaq?.a).toMatch(/own OpenAI API key/i);
+	});
+
+	it('no surface claims the operator runs lifetime AI or that buyers never touch a key', () => {
+		const FALSE = [/we run the AI/i, /never touch a key/i, /no key to manage/i];
+		for (const [name, text] of Object.entries(lifetimeSurfaces)) {
+			for (const pattern of FALSE) {
+				expect(text, `${name} still claims we run lifetime AI: ${pattern}`).not.toMatch(pattern);
 			}
 		}
-		const lifetimeTicks = readFileSync(new URL('./plans.ts', import.meta.url), 'utf8');
-		expect(lifetimeTicks).not.toMatch(/Your OpenAI key, your model cost/);
 		const lifetimeFaq = PRICING_FAQ_ENTRIES.find((f) => f.q === 'What is the $49 lifetime deal?');
-		expect(lifetimeFaq?.a).not.toMatch(/own OpenAI key/i);
+		for (const pattern of FALSE) {
+			expect(lifetimeFaq?.a ?? '', `lifetime FAQ still claims ${pattern}`).not.toMatch(pattern);
+		}
 	});
 
 	it('Terms §6.1 clause (c) states the lifetime plan scores on the buyer’s own key', () => {
@@ -577,10 +591,10 @@ describe('lifetime BYOK claims stay out of unadvertised marketing', () => {
 		expect(clause).not.toMatch(/\(c\)[^;]*run by us/i);
 	});
 
-	it('the BYOK FAQ answer is scoped to self-hosting, where the claim is true', () => {
+	it('the BYOK FAQ answer covers self-hosting AND the lifetime plan — both score on the buyer key', () => {
 		const byok = PRICING_FAQ_ENTRIES.find((f) => f.q === 'What does BYOK mean?');
 		expect(byok, 'BYOK FAQ entry missing').toBeDefined();
 		expect(byok?.a).toMatch(/self-host/i);
-		expect(byok?.a).not.toMatch(/lifetime/i);
+		expect(byok?.a).toMatch(/lifetime/i);
 	});
 });

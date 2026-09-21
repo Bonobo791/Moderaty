@@ -18,7 +18,8 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 <!--
 	Pricing hero: a bracketed quick-answer block (written for AI engines and
 	skimmers) above the H1. Self-hosting is BYOK: free software, your own
-	OpenAI key for the AI scoring. Hosted plans run the AI for you.
+	OpenAI key for the AI scoring. The $5/mo hosted plan runs the AI for
+	you; the lifetime plan scores on the buyer's own OpenAI key.
 -->
 
 <script lang="ts">
@@ -36,7 +37,8 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 					Moderaty is free and open source when self-hosted: PolyForm Shield 1.0.0, bring your own OpenAI key
 					for the AI scoring.
 					Hosted costs $5 a month for 100 moderated comments, auto-renewed, with 5¢ top-ups when
-					you run out. The first 1,000 users can instead pay $49 once for lifetime hosting.
+					you run out. The first 1,000 users can instead pay $49 once for lifetime hosting —
+					scoring on your own OpenAI key.
 				</p>
 			</div>
 		</div>

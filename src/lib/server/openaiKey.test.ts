@@ -37,8 +37,8 @@ async function seedOrg(id: string, openaiKeyEnc: string | null, plan: 'free' | '
 	await testDb().db.insert(organizations).values({ id, name: id, openaiKeyEnc, plan });
 }
 
-test('a stored org key beats the env key', async () => {
-	await seedOrg('org-1', encrypt('sk-org-key'));
+test('a stored org key beats the env key — on lifetime, the only plan it serves', async () => {
+	await seedOrg('org-1', encrypt('sk-org-key'), 'lifetime');
 	expect(await resolveOpenAiKey('org-1')).toBe('sk-org-key');
 });
 
@@ -66,13 +66,17 @@ test('an unknown org uses the env key — quietly', async () => {
 	expect(spy).not.toHaveBeenCalled();
 });
 
-test('corrupt ciphertext falls back to the env key and logs loudly', async () => {
+test('a stored key on a metered org is ignored WITHOUT decrypting — even corrupt ciphertext resolves the env key', async () => {
+	// Non-lifetime plans never consult the stored ciphertext: decrypt is not
+	// even attempted (a garbage blob would otherwise cost a decrypt call and
+	// a misleading error log) — the key is ignored loudly and scoring runs
+	// on the deployment key (codex P1).
 	await seedOrg('org-3', 'not-valid-ciphertext');
 	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
 	expect(await resolveOpenAiKey('org-3')).toBe('env-openai-key');
 	expect(spy).toHaveBeenCalledWith(
-		'stored OpenAI key failed to decrypt — falling back to the deployment key',
-		{ orgId: 'org-3', error: expect.any(Error) }
+		'stored OpenAI key ignored — BYOK keys serve only the lifetime plan',
+		{ orgId: 'org-3' }
 	);
 });
 
@@ -134,4 +138,19 @@ test('a lifetime org with a CORRUPT stored key gets nothing either — never the
 test('a lifetime org WITH a stored key scores on it', async () => {
 	await seedOrg('org-lifetime-key', encrypt('sk-lifetime-key'), 'lifetime');
 	expect(await resolveOpenAiKey('org-lifetime-key')).toBe('sk-lifetime-key');
+});
+
+test('a stored key on a NON-lifetime org is ignored — BYOK keys serve only the lifetime plan', async () => {
+	// A key saved while eligible (a pre-gate hosted save, or a lifetime org
+	// later downgraded by refund/dispute) must not keep billing the
+	// customer's OpenAI account: metered plans score on the deployment key.
+	// The stale ciphertext stays stored — the Team page still offers
+	// removal — but it is never used (codex P1).
+	await seedOrg('org-hosted-key', encrypt('sk-stale-key'), 'hosted');
+	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	expect(await resolveOpenAiKey('org-hosted-key')).toBe('env-openai-key');
+	expect(spy).toHaveBeenCalledWith(
+		'stored OpenAI key ignored — BYOK keys serve only the lifetime plan',
+		{ orgId: 'org-hosted-key' }
+	);
 });

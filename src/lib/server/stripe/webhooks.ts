@@ -1175,7 +1175,8 @@ function subscriptionStatusIsLive(status: string): boolean {
  * One live subscription per org, ever. A second live subscription on the
  * org's customer is a duplicate that keeps billing the buyer: cancel it at
  * Stripe (stops all future invoices) and refund its first paid invoice
- * payment. Idempotent — the cancel is a no-op once done and the refund
+ * payment. Idempotent — a live check skips the cancel once the subscription
+ * is terminal (Stripe would error on the second call) and the refund
  * anchors on a per-subscription key, so the fulfillment and subscription-
  * event paths converging on the same duplicate never double-refund.
  * `paymentExpected` distinguishes callers that KNOW money moved (a paid
@@ -1184,8 +1185,20 @@ function subscriptionStatusIsLive(status: string): boolean {
  * has not settled yet — the duplicate's own invoice.paid refunds it later.
  */
 async function teardownDuplicateSubscription(duplicateSubscriptionId: string, orgId: string, opts: { checkoutSessionId?: string; invoiceId?: string; paymentExpected: boolean }): Promise<void> {
-	const canceled = asRecord(await getStripe().subscriptions.cancel(duplicateSubscriptionId));
-	console.error(`stripe: canceled duplicate subscription ${duplicateSubscriptionId} for org ${orgId} — only one live subscription per org is allowed`);
+	// Live-check before canceling: Stripe rejects canceling a subscription
+	// that is already terminal, and a redelivery or a late terminal event can
+	// land here after the first teardown did the job — the throw would fail
+	// the delivery before the refund leg below ever retries (cubic P1).
+	const live = await fetchLiveSubscription(duplicateSubscriptionId);
+	const liveStatus = live && typeof live.status === 'string' && live.status.length > 0 ? live.status : undefined;
+	let canceled: StripeRecord;
+	if (live && liveStatus && !subscriptionStatusIsLive(liveStatus)) {
+		console.info(`stripe: duplicate subscription ${duplicateSubscriptionId} for org ${orgId} is already ${liveStatus} — skipping the second cancel`);
+		canceled = live;
+	} else {
+		canceled = asRecord(await getStripe().subscriptions.cancel(duplicateSubscriptionId));
+		console.error(`stripe: canceled duplicate subscription ${duplicateSubscriptionId} for org ${orgId} — only one live subscription per org is allowed`);
+	}
 	// Prefer the invoice the caller KNOWS was paid (an invoice.paid payload);
 	// otherwise the canceled subscription's latest invoice is the first charge.
 	const latestInvoiceId = opts.invoiceId ?? stripeId(canceled.latest_invoice);
@@ -1286,6 +1299,15 @@ async function handleSubscriptionEvent(event: Stripe.Event): Promise<void> {
 		return;
 	}
 	if (await isSupersededSubscription(org, subscriptionId, event.type)) {
+		// A terminal event for the superseded subscription is just its death
+		// notice arriving late — it is already dead at Stripe, so there is
+		// nothing to cancel and nothing provably paid to refund. Tearing it
+		// down anyway would double-cancel (a Stripe error → endless retries)
+		// and could refund an invoice that was never a duplicate charge.
+		if (!subscriptionStatusIsLive(status)) {
+			console.info(`stripe: ignoring terminal ${event.type} for superseded subscription ${subscriptionId} (status ${status}) — tracked subscription ${org.stripeSubscriptionId} stays`);
+			return;
+		}
 		// A second live subscription is a duplicate — cancel + refund it rather
 		// than letting it displace the tracked one or keep billing silently.
 		await teardownDuplicateSubscription(subscriptionId, org.id, { paymentExpected: false });

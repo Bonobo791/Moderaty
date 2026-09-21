@@ -17,7 +17,8 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 
 <!--
 	The lifetime deal: hosted forever for one $49 payment, capped at the
-	first 1,000 users. We run the AI — buyers never touch a key. Card markup
+	first 1,000 users. AI scoring runs on the buyer's own OpenAI API key
+	(Terms §6.1(c)) — the card must say so before purchase. Card markup
 	and styles live in PlanCard.svelte.
 -->
 
@@ -39,8 +40,8 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	ticks={detailed ? TICKS_LIFETIME_DETAILED : TICKS_LIFETIME}
 >
 	{#snippet body()}
-		Hosted forever for one payment. We run the AI for you — no key to manage, nothing to
-		configure. Unlimited comments, no meter.
+		Hosted forever for one payment. Unlimited comments, no meter — AI scoring runs on
+		your own OpenAI API key, which you provide after purchase.
 	{/snippet}
 	{#snippet cta()}
 		<a href={LOGIN_URL} class="btn-press primary-btn">Connect YouTube channel</a>

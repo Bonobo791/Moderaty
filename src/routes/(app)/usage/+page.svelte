@@ -80,7 +80,8 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 			<button class="btn secondary" type="submit" disabled={pending}>Buy lifetime · $49</button>
 		</form>
 		<p class="muted">
-			Unlimited comments while the lifetime plan is available.
+			Unlimited comments while the lifetime plan is available — AI scoring runs on your
+			own OpenAI API key, which you provide on the Team page after purchase.
 			{#if typeof data.lifetimeSlots === 'number'}{1000 - data.lifetimeSlots} of 1,000 claimed.{/if}
 		</p>
 	{/if}

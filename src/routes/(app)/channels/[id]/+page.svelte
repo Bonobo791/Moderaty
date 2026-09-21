@@ -18,6 +18,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import { autoRefresh } from '$lib/auto-refresh.svelte';
+	import { armIntentRelease } from '$lib/intentRelease';
 	import SensitivitySwitch from '$lib/SensitivitySwitch.svelte';
 
 	let { data, form } = $props();
@@ -30,6 +31,87 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	// True while the dry-run preview is in flight; the button is disabled
 	// while it runs (the action's lease claim also 409s a server-side race).
 	let dryRunPending = $state(false);
+
+	// Strict-protection toggles submit on change. While a save is in flight
+	// (or queued behind one, or awaiting the server row's echo) the local
+	// intent owns the boxes — enhance's default success reset, a mid-save
+	// autoRefresh invalidation, or a superseded update() landing pre-commit
+	// data would otherwise snap a just-ticked box back to the pre-save state.
+	// And since setProtections writes BOTH columns from field presence/absence,
+	// a submit serialized in such a window silently clears the other flag:
+	// the two could never be on at once. One submit at a time; a mid-flight
+	// change re-fires on settle carrying the latest state of both.
+	let protectionsForm: HTMLFormElement | undefined = $state();
+	let protectLgbtqia = $state<boolean | null>(null);
+	let protectWomen = $state<boolean | null>(null);
+	let protectionsSaving = $state(false);
+	let protectionsQueued = $state(false);
+	// Cancel for the bounded-release timer armed when a settle leaves an
+	// override unechoed — a concurrent write can mean no echo ever lands, and
+	// an unbounded mask would hide every 15s autoRefresh forever and let a
+	// later whole-row submit rewrite the stale value (codex, PR #147).
+	let protectionsRelease: (() => void) | undefined;
+	const lgbtqiaChecked = $derived(protectLgbtqia ?? ch.protectLgbtqia === 1);
+	const womenChecked = $derived(protectWomen ?? ch.protectWomen === 1);
+
+	// Each override hands back to the server row only once the row echoes it.
+	// update() can resolve on a superseded invalidation (a racing tone save,
+	// or the 15s autoRefresh) while pre-commit data still shows — clearing on
+	// settle alone would revert the box and poison the next submit's
+	// whole-row payload. Failures revert in the settle handler (MOD-10).
+	$effect(() => {
+		// No release while a save is in flight or queued: toggling back to the
+		// still-showing pre-commit value satisfies the equality mid-flight,
+		// and the first save's landing would then display — and the queued
+		// re-fire serialize — the committed value, persisting the opposite of
+		// the user's final choice (codex+coderabbit, PR #147).
+		if (protectionsSaving || protectionsQueued) return;
+		if (protectLgbtqia !== null && (ch.protectLgbtqia === 1) === protectLgbtqia) protectLgbtqia = null;
+		if (protectWomen !== null && (ch.protectWomen === 1) === protectWomen) protectWomen = null;
+		if (protectLgbtqia === null && protectWomen === null) {
+			protectionsRelease?.();
+			protectionsRelease = undefined;
+		}
+	});
+
+	// /channels/A → /channels/B is a param-only navigation — SvelteKit reuses
+	// this component, so without a reset, A's overrides render on B's boxes
+	// and a queued settle-refire serializes them into B's row (cubic,
+	// PR #147). The switch remounts through {#key ch.id} for the same reason.
+	let lastChannelId: string | undefined;
+	$effect(() => {
+		if (lastChannelId !== undefined && ch.id !== lastChannelId) {
+			protectLgbtqia = null;
+			protectWomen = null;
+			protectionsQueued = false;
+			protectionsRelease?.();
+			protectionsRelease = undefined;
+		}
+		lastChannelId = ch.id;
+	});
+	$effect(() => () => protectionsRelease?.());
+
+	function protectionChanged(event: Event) {
+		const input = event.currentTarget as HTMLInputElement;
+		if (input.name === 'protectLgbtqia') protectLgbtqia = input.checked;
+		else protectWomen = input.checked;
+		// New intent owns the mask — a release armed by the previous save's
+		// settle must never drop it mid-flight.
+		protectionsRelease?.();
+		protectionsRelease = undefined;
+		if (protectionsSaving) {
+			protectionsQueued = true;
+			// The re-fire serializes the live boxes — freeze the untouched one
+			// to its displayed intent too, or a stale pre-commit landing before
+			// the refire would write its outdated value into the other column
+			// (setProtections writes the whole row from field presence)
+			// (codeant, PR #147).
+			protectLgbtqia ??= lgbtqiaChecked;
+			protectWomen ??= womenChecked;
+		} else {
+			protectionsForm?.requestSubmit();
+		}
+	}
 </script>
 
 <svelte:head>
@@ -52,8 +134,47 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 {#if form?.scope === 'pause' && form?.error}
 	<p class="error-box" role="alert">{form.error}</p>
 {/if}
-<SensitivitySwitch channelId={ch.id} channelTitle={ch.title} level={ch.toneLevel ?? 1} />
-<form class="protections" method="POST" action="?/setProtections" use:enhance>
+{#key ch.id}
+	<SensitivitySwitch channelId={ch.id} channelTitle={ch.title} level={ch.toneLevel ?? 1} />
+{/key}
+<form
+	class="protections"
+	method="POST"
+	action="?/setProtections"
+	bind:this={protectionsForm}
+	use:enhance={() => {
+		protectionsSaving = true;
+		return async ({ result, update }) => {
+			// reset:false — a success reset would restore defaultChecked (the
+			// pre-save render), snapping the just-ticked box back to unchecked.
+			await update({ reset: false });
+			protectionsSaving = false;
+			if (protectionsQueued) {
+				// A mid-flight change was never submitted — re-fire carrying the
+				// latest state of both boxes (the action writes the whole row).
+				protectionsQueued = false;
+				protectionsForm?.requestSubmit();
+			} else if (result.type !== 'success') {
+				// Failed save — the row never moved; revert to it (the error box
+				// renders form.error). Clean successes release through the echo
+				// effect once the landed server row confirms the intent.
+				protectLgbtqia = null;
+				protectWomen = null;
+			} else if (protectLgbtqia !== null || protectWomen !== null) {
+				// Committed but unechoed: usually just a superseded pre-commit
+				// load, but another writer overwriting the value means no echo
+				// ever lands — bound the mask so the server row rules again
+				// instead of masking every refresh behind stale intent (codex,
+				// PR #147). A queued submit's own settle re-arms if needed.
+				protectionsRelease?.();
+				protectionsRelease = armIntentRelease(() => {
+					protectLgbtqia = null;
+					protectWomen = null;
+				});
+			}
+		};
+	}}
+>
 	<input type="hidden" name="channelId" value={ch.id} />
 	<span class="sensitivity-title">Strict protection</span>
 	<label class="protection-toggle" for="protect-lgbtqia-{ch.id}">
@@ -61,8 +182,8 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 			id="protect-lgbtqia-{ch.id}"
 			type="checkbox"
 			name="protectLgbtqia"
-			checked={ch.protectLgbtqia === 1}
-			onchange={(event) => event.currentTarget.form?.requestSubmit()}
+			checked={lgbtqiaChecked}
+			onchange={protectionChanged}
 		/>
 		Harassment targeting LGBTQIA+ people
 	</label>
@@ -71,8 +192,8 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 			id="protect-women-{ch.id}"
 			type="checkbox"
 			name="protectWomen"
-			checked={ch.protectWomen === 1}
-			onchange={(event) => event.currentTarget.form?.requestSubmit()}
+			checked={womenChecked}
+			onchange={protectionChanged}
 		/>
 		Harassment targeting women
 	</label>

@@ -105,7 +105,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 				</div>
 				<div class="banned">
 					<span class="banned-count"><Ticker value={data.banned} /></span>
-					<span class="caps-label banned-label">Edge lords banned</span>
+					<span class="caps-label banned-label">Told to touch grass</span>
 				</div>
 			</div>
 		</div>

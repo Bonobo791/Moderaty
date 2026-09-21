@@ -61,7 +61,7 @@ Category line: "Comment protection for YouTube creators."
   (tone ≥0.95 bans — reserved for genuine harm without verbal abuse). Level 1
   ("Edge Lord") runs the omni pass only. The stronger signal decides; the tone
   call is skipped when omni already rejects. The dashboard shows each channel's
-  level slider and completed-ban count ("X Edge Lords Banned").
+  level slider and completed-ban count ("X told to touch grass").
 - Enforcement durability: every action is recorded locally (`action_pending`)
   BEFORE any YouTube write and confirmed after; `DRY_RUN=true` previews change
   nothing durable (audit rows only).

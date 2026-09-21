@@ -17,6 +17,7 @@
 // and the overview page (the controls moved from the dashboard cards).
 // Svelte's SSR render is lazy: assert on render(...).body.
 
+import { readFileSync } from 'node:fs';
 import { createRawSnippet } from 'svelte';
 import { render } from 'svelte/server';
 import { expect, test } from 'vitest';
@@ -80,7 +81,7 @@ test('the header shows PROTECTED, the clear-queue subline, and the banned ticker
 	expect(body).toContain('queue is clear');
 	// Ticker SSR renders the target directly.
 	expect(body).toContain('mono">7</span>');
-	expect(body).toContain('Edge lords banned');
+	expect(body).toContain('Told to touch grass');
 });
 
 test('a paused channel header says Paused — never Protected or "queue is clear" (codex+cubic, PR #142)', () => {
@@ -215,7 +216,98 @@ test('strict protection renders both labeled checkboxes with their persisted sta
 	expect(body).toContain('Harassment targeting women');
 	expect(body).toContain('for="protect-lgbtqia-UC1"');
 	expect(body).toContain('for="protect-women-UC1"');
+	// The action persists by field presence — the names are the write path.
+	expect(body).toContain('name="protectLgbtqia"');
+	expect(body).toContain('name="protectWomen"');
 	expect(body).toContain('Heightened AI scrutiny for these comments, at any sensitivity level.');
+});
+
+// SSR can never drive an enhanced-form result in the node test env, so the
+// save-while-changing wiring is pinned at source level (same convention as
+// SensitivitySwitch.test.ts) — deleting it must fail a test, not slip
+// through as a silent UI regression.
+test('the protection checkboxes render local intent, not the raw server row', () => {
+	// While a save is in flight the boxes must show the user's tick — a
+	// mid-save invalidation (autoRefresh every 15s, or the submit's own
+	// update) would otherwise snap them back to the pre-save state, and a
+	// submit serialized in that window writes the wrong whole-row state.
+	const source = readFileSync(new URL('./+page.svelte', import.meta.url), 'utf8');
+	expect(source).toMatch(/checked=\{lgbtqiaChecked\}/);
+	expect(source).toMatch(/checked=\{womenChecked\}/);
+	expect(source).toMatch(/protectLgbtqia \?\? ch\.protectLgbtqia === 1/);
+	expect(source).toMatch(/protectWomen \?\? ch\.protectWomen === 1/);
+});
+
+test('the protections form never resets to stale checked state and serializes one save at a time', () => {
+	// enhance's default update() resets the form on success — restoring
+	// defaultChecked snaps a just-ticked box back to unchecked (the flicker).
+	// And setProtections writes BOTH columns from field presence/absence, so
+	// a second submit racing the first is a last-writer-wins snapshot that
+	// clears the other flag — a mid-flight change must queue and re-fire on
+	// settle carrying the latest intent of both boxes.
+	const source = readFileSync(new URL('./+page.svelte', import.meta.url), 'utf8');
+	expect(source).toMatch(/await update\(\{ reset: false \}\)/);
+	expect(source).toMatch(/if \(protectionsSaving\)[^}]*protectionsQueued = true/);
+	expect(source).toMatch(/protectionsQueued = false;\s*protectionsForm\?\.requestSubmit\(\)/s);
+});
+
+test('a protection override releases only when the server row echoes it — failures revert', () => {
+	// update() resolves on superseded invalidations too (a racing tone save,
+	// the 15s autoRefresh): pre-commit data can still be showing at settle,
+	// so clearing the override there would snap the box back and poison the
+	// next whole-row submit. The echo effect is the release; a failed save
+	// reverts to the persisted row instead (MOD-10).
+	const source = readFileSync(new URL('./+page.svelte', import.meta.url), 'utf8');
+	expect(source).toMatch(/\(ch\.protectLgbtqia === 1\) === protectLgbtqia\) protectLgbtqia = null/);
+	expect(source).toMatch(/\(ch\.protectWomen === 1\) === protectWomen\) protectWomen = null/);
+	// The revert must live INSIDE the failure branch — a bare substring check
+	// passes even if the branch stops clearing the overrides — and the
+	// failure must surface as the scoped, visible alert (cubic, PR #147).
+	expect(source).toMatch(/else if \(result\.type !== 'success'\)[^}]*protectLgbtqia = null;\s*protectWomen = null;/s);
+	expect(source).toMatch(/form\?\.scope === 'protections' && form\?\.error/);
+});
+
+test('navigating to another channel drops pending protection intent and remounts the switch (cubic, PR #147)', () => {
+	// /channels/A → /channels/B is a param-only navigation — SvelteKit reuses
+	// this component, so stale overrides would render on B's boxes and a
+	// queued settle-refire would serialize them into B's row. The switch is
+	// keyed so its pending debounce/intent state dies with A too.
+	const source = readFileSync(new URL('./+page.svelte', import.meta.url), 'utf8');
+	expect(source).toMatch(/\{#key ch\.id\}/);
+	expect(source).toMatch(
+		/ch\.id !== lastChannelId\) \{\s*protectLgbtqia = null;\s*protectWomen = null;\s*protectionsQueued = false;/s
+	);
+});
+
+test('a queued protection re-fire freezes both boxes to the displayed intent (codeant, PR #147)', () => {
+	// The re-fire serializes the live checkboxes — a stale pre-commit landing
+	// between queue and refire would write its outdated value into the
+	// untouched column (setProtections writes the whole row from field
+	// presence). Freezing both overrides at queue time keeps the payload the
+	// user's displayed intent.
+	const source = readFileSync(new URL('./+page.svelte', import.meta.url), 'utf8');
+	expect(source).toMatch(
+		/protectionsQueued = true;[\s\S]{0,500}protectLgbtqia \?\?= lgbtqiaChecked;\s*protectWomen \?\?= womenChecked;/
+	);
+});
+
+test('the echo release cannot clear protection overrides while a save is in flight or queued (codex+coderabbit, PR #147)', () => {
+	// Toggle on → toggle back mid-flight: the second value equals the stale
+	// pre-commit row, so an unguarded echo check clears the override — the
+	// first save's landing then displays the committed value and the queued
+	// re-fire serializes it, persisting the opposite of the user's final
+	// choice. Same guard as SensitivitySwitch's echo release.
+	const source = readFileSync(new URL('./+page.svelte', import.meta.url), 'utf8');
+	expect(source).toMatch(/if \(protectionsSaving \|\| protectionsQueued\) return/);
+});
+
+test('an unechoed protection override releases on a bounded timer (codex, PR #147)', () => {
+	// A concurrent write after our commit can mean the echo never lands —
+	// unbounded overrides would mask every 15s autoRefresh forever, and a
+	// later whole-row submit would rewrite the stale value over the newer
+	// server change.
+	const source = readFileSync(new URL('./+page.svelte', import.meta.url), 'utf8');
+	expect(source).toMatch(/armIntentRelease\(\(\) => \{\s*protectLgbtqia = null;\s*protectWomen = null;/s);
 });
 
 test('the analyze-history form offers the window presets with a labeled select', () => {

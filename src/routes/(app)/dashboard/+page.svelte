@@ -67,7 +67,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	const uncheckedCount = $derived(data.chs.length - protectedCount - failedCount - pausedCount);
 	const healthSubline = $derived.by(() => {
 		if (failedCount + uncheckedCount + pausedCount === 0)
-			return `${data.chs.length} channels protected. Queue's clear. Not a single main character slipped past.`;
+			return `${data.chs.length} channels protected. Queue's clear. Zero main character behavior detected.`;
 		const parts: string[] = [];
 		if (failedCount > 0) parts.push(`${failedCount} failed the last check`);
 		if (pausedCount > 0) parts.push(`${pausedCount} paused`);
@@ -103,14 +103,14 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	</div>
 {:else}
 <section class="door-status" aria-labelledby="door-status-label">
-	<span class="caps-label" id="door-status-label">Door status</span>
+	<span class="caps-label" id="door-status-label">Vibe check</span>
 	{#if pendingSum > 0}
-		<h1 class="door-headline">{pendingSum} caught lacking at the door.</h1>
+		<h1 class="door-headline">{pendingSum} comments acting sus.</h1>
 		<p class="door-subline">
-			{pendingSum} comments are waiting for a decision. The rope isn't going to check itself.
+			{pendingSum} comments are waiting for a decision. The pile isn't going to sort itself.
 		</p>
 	{:else}
-		<h1 class="door-headline">The door is quiet. Too quiet.</h1>
+		<h1 class="door-headline">All clear. Nobody's being weird for once.</h1>
 		<p class="door-subline">
 			{healthSubline}
 		</p>
@@ -130,7 +130,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		</div>
 		<div class="stat">
 			<span class="stat-value accent"><Ticker value={bannedSum} /></span>
-			<span class="caps-label">Edge lords banned</span>
+			<span class="caps-label">Told to touch grass</span>
 		</div>
 	</div>
 </section>
@@ -143,7 +143,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	{#if data.chs.length === 0}
 		<EmptyState
 			title="No channels connected"
-			hint="Connect your YouTube channels and start yeeting edge lords."
+			hint="Connect your YouTube channels and start handing out Ls."
 		/>
 	{:else}
 		<table class="ledger-table">

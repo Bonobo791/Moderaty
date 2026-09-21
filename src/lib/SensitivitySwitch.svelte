@@ -28,6 +28,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 
 <script lang="ts">
 	import { enhance } from '$app/forms';
+	import { armIntentRelease } from '$lib/intentRelease';
 	import { persistOutcome } from '$lib/sensitivityPersist';
 	import {
 		TONE_LEVEL_OMNI_ONLY,
@@ -61,16 +62,19 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 
 	// Displayed selection; 0/100 is the spec's slider value space.
 	let selected = $state<ToneLevel>();
-	const selectedValue = $derived(
-		selected ?? (level === TONE_LEVEL_OMNI_AND_TONE ? TONE_LEVEL_OMNI_AND_TONE : TONE_LEVEL_OMNI_ONLY)
+	const serverLevel = $derived(
+		level === TONE_LEVEL_OMNI_AND_TONE ? TONE_LEVEL_OMNI_AND_TONE : TONE_LEVEL_OMNI_ONLY
 	);
+	const selectedValue = $derived(selected ?? serverLevel);
 	const v = $derived(selectedValue === TONE_LEVEL_OMNI_AND_TONE ? 100 : 0);
 	const mode = $derived(MODES[selectedValue]);
 	// Keeps the knob inside the track at both stops (spec Step 3.2).
 	const knobLeft = $derived(v === 0 ? 'calc(0% + 20px)' : 'calc(100% - 20px)');
 
-	// True while a change is debouncing or its submit is in flight — the
-	// server value must not snap the knob back until the persist settles.
+	// True while a change is debouncing, its submit is in flight, or the
+	// landed server level hasn't echoed the persisted stop yet — a superseded
+	// invalidation can resolve update() with pre-commit data still showing,
+	// and releasing there snaps the knob back before the echo re-flies it.
 	let dirty = $state(false);
 	// Visible only after a failed persist — a save that did not happen can
 	// never look like a save that did (MOD-10).
@@ -82,6 +86,11 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	// survive the current persist settling, or the server value would snap
 	// the knob back mid-queue.
 	let queuedSubmit = $state(false);
+	// Cancel for the bounded-release timer armed when a settle leaves the mask
+	// on without an echo — a concurrent write can mean no echo ever lands, and
+	// unbounded `dirty` would mask every 15s autoRefresh forever (codex,
+	// PR #147). New intent, a landed echo, and teardown all cancel it.
+	let intentRelease: (() => void) | undefined;
 	let appliedNow = $state(false);
 	let appliedFading = $state(false);
 	let dragging = $state(false);
@@ -92,11 +101,28 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	let appliedFadeTimer: ReturnType<typeof setTimeout> | undefined;
 
 	// Server state wins while nothing awaits persistence (autoRefresh
-	// revalidates the load every 15s; another surface may change the level).
+	// revalidates the load every 15s). While dirty, a landing that echoes the
+	// chosen stop releases the mask — any other landing is stale data from a
+	// load that ran before the commit, and adopting it would snap the knob
+	// back to the pre-save stop before the echo re-flies it.
 	$effect(() => {
-		if (!dirty) selected = level === TONE_LEVEL_OMNI_AND_TONE ? TONE_LEVEL_OMNI_AND_TONE : TONE_LEVEL_OMNI_ONLY;
+		if (!dirty) {
+			selected = serverLevel;
+		} else if (!submitting && !queuedSubmit && selectedValue === serverLevel) {
+			// The echo release must stay masked while a save is in flight or
+			// queued: flipping back to the still-showing pre-save stop satisfies
+			// the equality mid-flight, and the stale update() landing then snaps
+			// `selected` onto the committed stop — the queued re-submit would
+			// serialize that wrong stop (cubic, PR #147).
+			dirty = false;
+			intentRelease?.();
+			intentRelease = undefined;
+		}
 	});
-	$effect(() => () => clearTimeout(debounceTimer));
+	$effect(() => () => {
+		clearTimeout(debounceTimer);
+		intentRelease?.();
+	});
 	$effect(() => () => {
 		clearTimeout(appliedTimer);
 		clearTimeout(appliedFadeTimer);
@@ -104,6 +130,10 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 
 	function choose(next: ToneLevel) {
 		if (next === selectedValue) return;
+		// New intent owns the mask — a release armed by the previous save's
+		// settle must never drop it mid-flight.
+		intentRelease?.();
+		intentRelease = undefined;
 		selected = next;
 		dirty = true;
 		saveError = null;
@@ -143,9 +173,22 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	// knob to the persisted level AND surfaces the message — a save that did
 	// not happen can never look like one that did (MOD-10).
 	function handlePersist(result: { type: string; data?: { error?: unknown } }) {
-		// A re-flip queued behind this submit keeps the knob dirty — the
-		// server value must not snap back before that submit goes out.
-		dirty = queuedSubmit;
+		// The mask releases on echo (the $effect above), not on settle: a
+		// superseded update() can resolve with the pre-save level still
+		// showing. A queued re-flip keeps the knob dirty regardless.
+		dirty = queuedSubmit || selectedValue !== serverLevel;
+		intentRelease?.();
+		intentRelease = undefined;
+		if (dirty && !queuedSubmit) {
+			// Committed but unechoed: usually just a superseded pre-commit load,
+			// but another tab overwriting the value means no echo ever lands —
+			// bound the mask so the server row rules again instead of masking
+			// every refresh behind a stale stop (codex, PR #147). The queued
+			// submit's own settle re-arms if still unechoed.
+			intentRelease = armIntentRelease(() => {
+				dirty = false;
+			});
+		}
 		const outcome = persistOutcome(result, level);
 		if (outcome.kind === 'applied') {
 			// Symmetric to the failure guard: a stale success must not label the
@@ -282,8 +325,15 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		use:enhance={() => {
 			submitting = true;
 			return async ({ result, update }) => {
+				// The fresh server level must land BEFORE dirty clears: the settle
+				// effect re-syncs `selected` to `level` the moment dirty drops, so
+				// clearing it first snaps the knob back to the pre-save stop and it
+				// re-flies when the invalidation lands (the left-then-right flicker).
+				// reset:false keeps the hidden inputs' serialized values live —
+				// reset restores defaultValue, and Svelte only rewrites the property
+				// when selectedValue changes, leaving a stale toneLevel behind.
+				await update({ reset: false });
 				handlePersist(result);
-				await update();
 				submitting = false;
 			};
 		}}

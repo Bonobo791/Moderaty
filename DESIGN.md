@@ -123,6 +123,13 @@ components:
 
 **Creative North Star: "The Cyclorama Cue Sheet"**
 
+> **Superseded spec.** The Cyclorama system below (cyc-black/cobalt/rose/dawn,
+> Saira family, no-green/no-amber) predates the shipped redesign — the code
+> uses the terminal-ink system in "Landing brief (shipped redesign)" further
+> down (ink canvas, banhammer pink, mint/amber verdicts, Archivo + IBM Plex
+> Mono). Where the two disagree, the shipped redesign is authoritative; this
+> section stays for its naming and story rationale (coderabbit, PR #147).
+
 Moderaty renders the product's promise — the night's comments cleared before
 morning — as a stage lighting plot. The landing page is one seamless cyclorama:
 a depthless cyc-black ground (`#050506`) with a low cobalt horizon, rose
@@ -315,3 +322,15 @@ world shows a list of consequences — reuse it for any landing enumeration.
 - **Don't** use hard offset drop shadows or floating elevated chrome; depth is staged with color phases.
 - **Don't** use glyph/icon fonts or a shield motif — the world speaks in cue numbers and horizon bands.
 - **Don't** clamp or abbreviate the cue sequence; the landing's story is the ordered LX-00 → LX-05 arc.
+
+## Landing brief (shipped redesign)
+
+Moved out of `src/routes/+layout.svelte` — as an HTML comment it was
+served in every page's source.
+
+- THESIS: The night shift, in terminal ink — a dark, mono-driven page where the product visibly does its job; one hot banhammer-pink accent is the hammer, verdict stamps, and primary CTA. Refuses the gradient-hero SaaS landing and the shield-icon security look.
+- OWN-WORLD: ink #0B0B14 canvas, surface #12121E, hairline #23233A, paper #F4F4F8 at an opacity ladder; banhammer pink #EF2D5E, verdict semantics mint #3ECF8E / amber #F5B84C; Archivo (variable, Expanded for stats) display, IBM Plex Mono terminal register; corner-bracketed panels, radius-0 stamps, pill only on the primary CTA.
+- STORY: A creator arrives dreading the unread pile, watches the Bonk Queue judge a scripted night — rules, AI scoring, human queue — meets the regulars, and connects their channel so morning is already clean.
+- FIRST VIEWPORT: asymmetric split — eyebrow, "Never read another hate comment." with a marker-highlighted punch, connect CTA left; the live Bonk Queue panel right, verdicts stamping in as comments arrive.
+- FORM: terminal-ink night shift; live component as hero visual, verdict stamps as the only decoration.
+- FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md

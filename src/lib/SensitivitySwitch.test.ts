@@ -163,3 +163,34 @@ test('an obsolete successful submit cannot flash Applied over a queued newer cho
 	const source = readFileSync(new URL('./SensitivitySwitch.svelte', import.meta.url), 'utf8');
 	expect(source).toMatch(/outcome\.kind === 'applied'\)\s*\{[^}]*if \(!queuedSubmit\)/s);
 });
+
+test('the knob stays masked until the server level echoes the persisted stop', () => {
+	// update() can resolve on a SUPERSEDED invalidation — a racing
+	// protections save or the 15s autoRefresh — while pre-commit data still
+	// shows. Clearing `dirty` on settle alone snaps the knob back to the old
+	// stop before the echo re-flies it (the reported left-then-right
+	// flicker): dirty may only release once the landed level already matches
+	// the displayed choice, and the update must resolve before handlePersist.
+	const source = readFileSync(new URL('./SensitivitySwitch.svelte', import.meta.url), 'utf8');
+	expect(source).toMatch(/await update\(\{ reset: false \}\);\s*handlePersist\(result\)/);
+	expect(source).toMatch(/dirty = queuedSubmit \|\| selectedValue !== serverLevel/);
+	expect(source).toMatch(/selectedValue === serverLevel\)\s*\{[^}]*dirty = false/);
+});
+
+test('a mid-flight flip back to the pre-save stop cannot drop the mask (cubic, PR #147)', () => {
+	// While the first save is in flight serverLevel still reads the pre-save
+	// stop, so flipping back to it satisfies an unguarded equality release —
+	// dirty drops, the stale update() then lands the committed stop, snaps
+	// `selected` onto it, and the queued re-submit serializes that wrong
+	// stop. The echo release is only allowed while nothing submits or queues.
+	const source = readFileSync(new URL('./SensitivitySwitch.svelte', import.meta.url), 'utf8');
+	expect(source).toMatch(/else if \(!submitting && !queuedSubmit && selectedValue === serverLevel\)/);
+});
+
+test('a never-echoed intent releases the mask on a bounded timer (codex, PR #147)', () => {
+	// A concurrent write after our commit can mean the echo never lands —
+	// unbounded `dirty` would mask every 15s autoRefresh forever, keeping a
+	// stop the server no longer holds on screen.
+	const source = readFileSync(new URL('./SensitivitySwitch.svelte', import.meta.url), 'utf8');
+	expect(source).toMatch(/armIntentRelease\(\(\) => \{\s*dirty = false/s);
+});

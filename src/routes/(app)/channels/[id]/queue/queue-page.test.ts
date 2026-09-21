@@ -111,9 +111,9 @@ describe('queue optimistic flow (source pins)', () => {
 describe('queue empty state and heading (SSR)', () => {
 	it('renders the verbatim spec empty copy only when the queue is empty', () => {
 		const empty = renderQueue({ pending: [] });
-		expect(empty).toContain('Queue is clear. The rope holds.');
+		expect(empty).toContain('Queue is clear. We are so back.');
 		const populated = renderQueue({ pending: PENDING });
-		expect(populated).not.toContain('Queue is clear. The rope holds.');
+		expect(populated).not.toContain('Queue is clear. We are so back.');
 	});
 
 	it('styles the empty state to spec: --text-2, 14px, 48px padding', () => {

@@ -164,11 +164,15 @@ test('an obsolete successful submit cannot flash Applied over a queued newer cho
 	expect(source).toMatch(/outcome\.kind === 'applied'\)\s*\{[^}]*if \(!queuedSubmit\)/s);
 });
 
-test('the fresh server level lands before dirty clears — the knob can never snap back to the pre-save stop', () => {
-	// Clearing `dirty` hands `selected` back to the `level` prop; if that
-	// happens before update()'s invalidation delivers the saved level, the
-	// knob reverts to the OLD stop and re-flies when the fresh data arrives
-	// (the reported left-then-right flicker). The update must resolve first.
+test('the knob stays masked until the server level echoes the persisted stop', () => {
+	// update() can resolve on a SUPERSEDED invalidation — a racing
+	// protections save or the 15s autoRefresh — while pre-commit data still
+	// shows. Clearing `dirty` on settle alone snaps the knob back to the old
+	// stop before the echo re-flies it (the reported left-then-right
+	// flicker): dirty may only release once the landed level already matches
+	// the displayed choice, and the update must resolve before handlePersist.
 	const source = readFileSync(new URL('./SensitivitySwitch.svelte', import.meta.url), 'utf8');
 	expect(source).toMatch(/await update\(\{ reset: false \}\);\s*handlePersist\(result\)/);
+	expect(source).toMatch(/dirty = queuedSubmit \|\| selectedValue !== serverLevel/);
+	expect(source).toMatch(/selectedValue === serverLevel\)\s*\{\s*dirty = false/);
 });

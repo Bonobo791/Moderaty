@@ -216,6 +216,9 @@ test('strict protection renders both labeled checkboxes with their persisted sta
 	expect(body).toContain('Harassment targeting women');
 	expect(body).toContain('for="protect-lgbtqia-UC1"');
 	expect(body).toContain('for="protect-women-UC1"');
+	// The action persists by field presence — the names are the write path.
+	expect(body).toContain('name="protectLgbtqia"');
+	expect(body).toContain('name="protectWomen"');
 	expect(body).toContain('Heightened AI scrutiny for these comments, at any sensitivity level.');
 });
 
@@ -246,6 +249,18 @@ test('the protections form never resets to stale checked state and serializes on
 	expect(source).toMatch(/await update\(\{ reset: false \}\)/);
 	expect(source).toMatch(/if \(protectionsSaving\) protectionsQueued = true/);
 	expect(source).toMatch(/protectionsQueued = false;\s*protectionsForm\?\.requestSubmit\(\)/s);
+});
+
+test('a protection override releases only when the server row echoes it — failures revert', () => {
+	// update() resolves on superseded invalidations too (a racing tone save,
+	// the 15s autoRefresh): pre-commit data can still be showing at settle,
+	// so clearing the override there would snap the box back and poison the
+	// next whole-row submit. The echo effect is the release; a failed save
+	// reverts to the persisted row instead (MOD-10).
+	const source = readFileSync(new URL('./+page.svelte', import.meta.url), 'utf8');
+	expect(source).toMatch(/\(ch\.protectLgbtqia === 1\) === protectLgbtqia\) protectLgbtqia = null/);
+	expect(source).toMatch(/\(ch\.protectWomen === 1\) === protectWomen\) protectWomen = null/);
+	expect(source).toMatch(/result\.type !== 'success'/);
 });
 
 test('the analyze-history form offers the window presets with a labeled select', () => {

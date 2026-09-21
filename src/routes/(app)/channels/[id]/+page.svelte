@@ -32,13 +32,14 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	let dryRunPending = $state(false);
 
 	// Strict-protection toggles submit on change. While a save is in flight
-	// (or queued behind one) the local intent owns the boxes — enhance's
-	// default success reset, and any mid-save autoRefresh invalidation, would
-	// otherwise snap a just-ticked box back to the pre-save state. And since
-	// setProtections writes BOTH columns from field presence/absence, a submit
-	// serialized in that window silently clears the other flag: the two could
-	// never be on at once. One submit at a time; a mid-flight change re-fires
-	// on settle carrying the latest state of both.
+	// (or queued behind one, or awaiting the server row's echo) the local
+	// intent owns the boxes — enhance's default success reset, a mid-save
+	// autoRefresh invalidation, or a superseded update() landing pre-commit
+	// data would otherwise snap a just-ticked box back to the pre-save state.
+	// And since setProtections writes BOTH columns from field presence/absence,
+	// a submit serialized in such a window silently clears the other flag:
+	// the two could never be on at once. One submit at a time; a mid-flight
+	// change re-fires on settle carrying the latest state of both.
 	let protectionsForm: HTMLFormElement | undefined = $state();
 	let protectLgbtqia = $state<boolean | null>(null);
 	let protectWomen = $state<boolean | null>(null);
@@ -46,6 +47,16 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	let protectionsQueued = $state(false);
 	const lgbtqiaChecked = $derived(protectLgbtqia ?? ch.protectLgbtqia === 1);
 	const womenChecked = $derived(protectWomen ?? ch.protectWomen === 1);
+
+	// Each override hands back to the server row only once the row echoes it.
+	// update() can resolve on a superseded invalidation (a racing tone save,
+	// or the 15s autoRefresh) while pre-commit data still shows — clearing on
+	// settle alone would revert the box and poison the next submit's
+	// whole-row payload. Failures revert in the settle handler (MOD-10).
+	$effect(() => {
+		if (protectLgbtqia !== null && (ch.protectLgbtqia === 1) === protectLgbtqia) protectLgbtqia = null;
+		if (protectWomen !== null && (ch.protectWomen === 1) === protectWomen) protectWomen = null;
+	});
 
 	function protectionChanged(event: Event) {
 		const input = event.currentTarget as HTMLInputElement;
@@ -84,18 +95,20 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	bind:this={protectionsForm}
 	use:enhance={() => {
 		protectionsSaving = true;
-		return async ({ update }) => {
+		return async ({ result, update }) => {
 			// reset:false — a success reset would restore defaultChecked (the
 			// pre-save render), snapping the just-ticked box back to unchecked.
 			await update({ reset: false });
 			protectionsSaving = false;
 			if (protectionsQueued) {
+				// A mid-flight change was never submitted — re-fire carrying the
+				// latest state of both boxes (the action writes the whole row).
 				protectionsQueued = false;
 				protectionsForm?.requestSubmit();
-			} else {
-				// Settled for real — the server row owns the boxes again. On
-				// failure this also reverts them to what actually persisted;
-				// a failed save can never leave a phantom tick (MOD-10).
+			} else if (result.type !== 'success') {
+				// Failed save — the row never moved; revert to it (the error box
+				// renders form.error). Clean successes release through the echo
+				// effect once the landed server row confirms the intent.
 				protectLgbtqia = null;
 				protectWomen = null;
 			}

@@ -61,16 +61,19 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 
 	// Displayed selection; 0/100 is the spec's slider value space.
 	let selected = $state<ToneLevel>();
-	const selectedValue = $derived(
-		selected ?? (level === TONE_LEVEL_OMNI_AND_TONE ? TONE_LEVEL_OMNI_AND_TONE : TONE_LEVEL_OMNI_ONLY)
+	const serverLevel = $derived(
+		level === TONE_LEVEL_OMNI_AND_TONE ? TONE_LEVEL_OMNI_AND_TONE : TONE_LEVEL_OMNI_ONLY
 	);
+	const selectedValue = $derived(selected ?? serverLevel);
 	const v = $derived(selectedValue === TONE_LEVEL_OMNI_AND_TONE ? 100 : 0);
 	const mode = $derived(MODES[selectedValue]);
 	// Keeps the knob inside the track at both stops (spec Step 3.2).
 	const knobLeft = $derived(v === 0 ? 'calc(0% + 20px)' : 'calc(100% - 20px)');
 
-	// True while a change is debouncing or its submit is in flight — the
-	// server value must not snap the knob back until the persist settles.
+	// True while a change is debouncing, its submit is in flight, or the
+	// landed server level hasn't echoed the persisted stop yet — a superseded
+	// invalidation can resolve update() with pre-commit data still showing,
+	// and releasing there snaps the knob back before the echo re-flies it.
 	let dirty = $state(false);
 	// Visible only after a failed persist — a save that did not happen can
 	// never look like a save that did (MOD-10).
@@ -92,9 +95,16 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	let appliedFadeTimer: ReturnType<typeof setTimeout> | undefined;
 
 	// Server state wins while nothing awaits persistence (autoRefresh
-	// revalidates the load every 15s; another surface may change the level).
+	// revalidates the load every 15s). While dirty, a landing that echoes the
+	// chosen stop releases the mask — any other landing is stale data from a
+	// load that ran before the commit, and adopting it would snap the knob
+	// back to the pre-save stop before the echo re-flies it.
 	$effect(() => {
-		if (!dirty) selected = level === TONE_LEVEL_OMNI_AND_TONE ? TONE_LEVEL_OMNI_AND_TONE : TONE_LEVEL_OMNI_ONLY;
+		if (!dirty) {
+			selected = serverLevel;
+		} else if (selectedValue === serverLevel) {
+			dirty = false;
+		}
 	});
 	$effect(() => () => clearTimeout(debounceTimer));
 	$effect(() => () => {
@@ -143,9 +153,10 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	// knob to the persisted level AND surfaces the message — a save that did
 	// not happen can never look like one that did (MOD-10).
 	function handlePersist(result: { type: string; data?: { error?: unknown } }) {
-		// A re-flip queued behind this submit keeps the knob dirty — the
-		// server value must not snap back before that submit goes out.
-		dirty = queuedSubmit;
+		// The mask releases on echo (the $effect above), not on settle: a
+		// superseded update() can resolve with the pre-save level still
+		// showing. A queued re-flip keeps the knob dirty regardless.
+		dirty = queuedSubmit || selectedValue !== serverLevel;
 		const outcome = persistOutcome(result, level);
 		if (outcome.kind === 'applied') {
 			// Symmetric to the failure guard: a stale success must not label the

@@ -28,6 +28,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 
 <script lang="ts">
 	import { enhance } from '$app/forms';
+	import { armIntentRelease } from '$lib/intentRelease';
 	import { persistOutcome } from '$lib/sensitivityPersist';
 	import {
 		TONE_LEVEL_OMNI_ONLY,
@@ -85,6 +86,11 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	// survive the current persist settling, or the server value would snap
 	// the knob back mid-queue.
 	let queuedSubmit = $state(false);
+	// Cancel for the bounded-release timer armed when a settle leaves the mask
+	// on without an echo — a concurrent write can mean no echo ever lands, and
+	// unbounded `dirty` would mask every 15s autoRefresh forever (codex,
+	// PR #147). New intent, a landed echo, and teardown all cancel it.
+	let intentRelease: (() => void) | undefined;
 	let appliedNow = $state(false);
 	let appliedFading = $state(false);
 	let dragging = $state(false);
@@ -102,11 +108,21 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	$effect(() => {
 		if (!dirty) {
 			selected = serverLevel;
-		} else if (selectedValue === serverLevel) {
+		} else if (!submitting && !queuedSubmit && selectedValue === serverLevel) {
+			// The echo release must stay masked while a save is in flight or
+			// queued: flipping back to the still-showing pre-save stop satisfies
+			// the equality mid-flight, and the stale update() landing then snaps
+			// `selected` onto the committed stop — the queued re-submit would
+			// serialize that wrong stop (cubic, PR #147).
 			dirty = false;
+			intentRelease?.();
+			intentRelease = undefined;
 		}
 	});
-	$effect(() => () => clearTimeout(debounceTimer));
+	$effect(() => () => {
+		clearTimeout(debounceTimer);
+		intentRelease?.();
+	});
 	$effect(() => () => {
 		clearTimeout(appliedTimer);
 		clearTimeout(appliedFadeTimer);
@@ -114,6 +130,10 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 
 	function choose(next: ToneLevel) {
 		if (next === selectedValue) return;
+		// New intent owns the mask — a release armed by the previous save's
+		// settle must never drop it mid-flight.
+		intentRelease?.();
+		intentRelease = undefined;
 		selected = next;
 		dirty = true;
 		saveError = null;
@@ -157,6 +177,18 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		// superseded update() can resolve with the pre-save level still
 		// showing. A queued re-flip keeps the knob dirty regardless.
 		dirty = queuedSubmit || selectedValue !== serverLevel;
+		intentRelease?.();
+		intentRelease = undefined;
+		if (dirty && !queuedSubmit) {
+			// Committed but unechoed: usually just a superseded pre-commit load,
+			// but another tab overwriting the value means no echo ever lands —
+			// bound the mask so the server row rules again instead of masking
+			// every refresh behind a stale stop (codex, PR #147). The queued
+			// submit's own settle re-arms if still unechoed.
+			intentRelease = armIntentRelease(() => {
+				dirty = false;
+			});
+		}
 		const outcome = persistOutcome(result, level);
 		if (outcome.kind === 'applied') {
 			// Symmetric to the failure guard: a stale success must not label the

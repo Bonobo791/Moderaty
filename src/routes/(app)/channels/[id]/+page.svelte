@@ -18,6 +18,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import { autoRefresh } from '$lib/auto-refresh.svelte';
+	import { armIntentRelease } from '$lib/intentRelease';
 	import SensitivitySwitch from '$lib/SensitivitySwitch.svelte';
 
 	let { data, form } = $props();
@@ -45,6 +46,11 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	let protectWomen = $state<boolean | null>(null);
 	let protectionsSaving = $state(false);
 	let protectionsQueued = $state(false);
+	// Cancel for the bounded-release timer armed when a settle leaves an
+	// override unechoed — a concurrent write can mean no echo ever lands, and
+	// an unbounded mask would hide every 15s autoRefresh forever and let a
+	// later whole-row submit rewrite the stale value (codex, PR #147).
+	let protectionsRelease: (() => void) | undefined;
 	const lgbtqiaChecked = $derived(protectLgbtqia ?? ch.protectLgbtqia === 1);
 	const womenChecked = $derived(protectWomen ?? ch.protectWomen === 1);
 
@@ -56,14 +62,49 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	$effect(() => {
 		if (protectLgbtqia !== null && (ch.protectLgbtqia === 1) === protectLgbtqia) protectLgbtqia = null;
 		if (protectWomen !== null && (ch.protectWomen === 1) === protectWomen) protectWomen = null;
+		if (protectLgbtqia === null && protectWomen === null) {
+			protectionsRelease?.();
+			protectionsRelease = undefined;
+		}
 	});
+
+	// /channels/A → /channels/B is a param-only navigation — SvelteKit reuses
+	// this component, so without a reset, A's overrides render on B's boxes
+	// and a queued settle-refire serializes them into B's row (cubic,
+	// PR #147). The switch remounts through {#key ch.id} for the same reason.
+	let lastChannelId: string | undefined;
+	$effect(() => {
+		if (lastChannelId !== undefined && ch.id !== lastChannelId) {
+			protectLgbtqia = null;
+			protectWomen = null;
+			protectionsQueued = false;
+			protectionsRelease?.();
+			protectionsRelease = undefined;
+		}
+		lastChannelId = ch.id;
+	});
+	$effect(() => () => protectionsRelease?.());
 
 	function protectionChanged(event: Event) {
 		const input = event.currentTarget as HTMLInputElement;
 		if (input.name === 'protectLgbtqia') protectLgbtqia = input.checked;
 		else protectWomen = input.checked;
-		if (protectionsSaving) protectionsQueued = true;
-		else protectionsForm?.requestSubmit();
+		// New intent owns the mask — a release armed by the previous save's
+		// settle must never drop it mid-flight.
+		protectionsRelease?.();
+		protectionsRelease = undefined;
+		if (protectionsSaving) {
+			protectionsQueued = true;
+			// The re-fire serializes the live boxes — freeze the untouched one
+			// to its displayed intent too, or a stale pre-commit landing before
+			// the refire would write its outdated value into the other column
+			// (setProtections writes the whole row from field presence)
+			// (codeant, PR #147).
+			protectLgbtqia ??= lgbtqiaChecked;
+			protectWomen ??= womenChecked;
+		} else {
+			protectionsForm?.requestSubmit();
+		}
 	}
 </script>
 
@@ -87,7 +128,9 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 {#if form?.scope === 'pause' && form?.error}
 	<p class="error-box" role="alert">{form.error}</p>
 {/if}
-<SensitivitySwitch channelId={ch.id} channelTitle={ch.title} level={ch.toneLevel ?? 1} />
+{#key ch.id}
+	<SensitivitySwitch channelId={ch.id} channelTitle={ch.title} level={ch.toneLevel ?? 1} />
+{/key}
 <form
 	class="protections"
 	method="POST"
@@ -111,6 +154,17 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 				// effect once the landed server row confirms the intent.
 				protectLgbtqia = null;
 				protectWomen = null;
+			} else if (protectLgbtqia !== null || protectWomen !== null) {
+				// Committed but unechoed: usually just a superseded pre-commit
+				// load, but another writer overwriting the value means no echo
+				// ever lands — bound the mask so the server row rules again
+				// instead of masking every refresh behind stale intent (codex,
+				// PR #147). A queued submit's own settle re-arms if needed.
+				protectionsRelease?.();
+				protectionsRelease = armIntentRelease(() => {
+					protectLgbtqia = null;
+					protectWomen = null;
+				});
 			}
 		};
 	}}

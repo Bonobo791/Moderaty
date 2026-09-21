@@ -81,7 +81,7 @@ test('the header shows PROTECTED, the clear-queue subline, and the banned ticker
 	expect(body).toContain('queue is clear');
 	// Ticker SSR renders the target directly.
 	expect(body).toContain('mono">7</span>');
-	expect(body).toContain('Edge lords banned');
+	expect(body).toContain('Told to touch grass');
 });
 
 test('a paused channel header says Paused — never Protected or "queue is clear" (codex+cubic, PR #142)', () => {
@@ -247,7 +247,7 @@ test('the protections form never resets to stale checked state and serializes on
 	// settle carrying the latest intent of both boxes.
 	const source = readFileSync(new URL('./+page.svelte', import.meta.url), 'utf8');
 	expect(source).toMatch(/await update\(\{ reset: false \}\)/);
-	expect(source).toMatch(/if \(protectionsSaving\) protectionsQueued = true/);
+	expect(source).toMatch(/if \(protectionsSaving\)[^}]*protectionsQueued = true/);
 	expect(source).toMatch(/protectionsQueued = false;\s*protectionsForm\?\.requestSubmit\(\)/s);
 });
 
@@ -260,7 +260,44 @@ test('a protection override releases only when the server row echoes it — fail
 	const source = readFileSync(new URL('./+page.svelte', import.meta.url), 'utf8');
 	expect(source).toMatch(/\(ch\.protectLgbtqia === 1\) === protectLgbtqia\) protectLgbtqia = null/);
 	expect(source).toMatch(/\(ch\.protectWomen === 1\) === protectWomen\) protectWomen = null/);
-	expect(source).toMatch(/result\.type !== 'success'/);
+	// The revert must live INSIDE the failure branch — a bare substring check
+	// passes even if the branch stops clearing the overrides — and the
+	// failure must surface as the scoped, visible alert (cubic, PR #147).
+	expect(source).toMatch(/else if \(result\.type !== 'success'\)[^}]*protectLgbtqia = null;\s*protectWomen = null;/s);
+	expect(source).toMatch(/form\?\.scope === 'protections' && form\?\.error/);
+});
+
+test('navigating to another channel drops pending protection intent and remounts the switch (cubic, PR #147)', () => {
+	// /channels/A → /channels/B is a param-only navigation — SvelteKit reuses
+	// this component, so stale overrides would render on B's boxes and a
+	// queued settle-refire would serialize them into B's row. The switch is
+	// keyed so its pending debounce/intent state dies with A too.
+	const source = readFileSync(new URL('./+page.svelte', import.meta.url), 'utf8');
+	expect(source).toMatch(/\{#key ch\.id\}/);
+	expect(source).toMatch(
+		/ch\.id !== lastChannelId\) \{\s*protectLgbtqia = null;\s*protectWomen = null;\s*protectionsQueued = false;/s
+	);
+});
+
+test('a queued protection re-fire freezes both boxes to the displayed intent (codeant, PR #147)', () => {
+	// The re-fire serializes the live checkboxes — a stale pre-commit landing
+	// between queue and refire would write its outdated value into the
+	// untouched column (setProtections writes the whole row from field
+	// presence). Freezing both overrides at queue time keeps the payload the
+	// user's displayed intent.
+	const source = readFileSync(new URL('./+page.svelte', import.meta.url), 'utf8');
+	expect(source).toMatch(
+		/protectionsQueued = true;[\s\S]{0,500}protectLgbtqia \?\?= lgbtqiaChecked;\s*protectWomen \?\?= womenChecked;/
+	);
+});
+
+test('an unechoed protection override releases on a bounded timer (codex, PR #147)', () => {
+	// A concurrent write after our commit can mean the echo never lands —
+	// unbounded overrides would mask every 15s autoRefresh forever, and a
+	// later whole-row submit would rewrite the stale value over the newer
+	// server change.
+	const source = readFileSync(new URL('./+page.svelte', import.meta.url), 'utf8');
+	expect(source).toMatch(/armIntentRelease\(\(\) => \{\s*protectLgbtqia = null;\s*protectWomen = null;/s);
 });
 
 test('the analyze-history form offers the window presets with a labeled select', () => {

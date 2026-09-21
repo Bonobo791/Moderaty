@@ -67,7 +67,8 @@ function maintenanceData() {
 		autoTopup: null,
 		autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
 		stripeConfigured: Boolean(env.STRIPE_SECRET_KEY),
-		plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) }
+		plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) },
+		hasOpenAiKey: false
 	};
 }
 
@@ -144,7 +145,8 @@ export const load: PageServerLoad = async ({ locals }) => {
 				plan: organizations.plan,
 				stripeSubscriptionStatus: organizations.stripeSubscriptionStatus,
 				stripeSubscriptionPeriodEnd: organizations.stripeSubscriptionPeriodEnd,
-				stripeSubscriptionCancelAtPeriodEnd: organizations.stripeSubscriptionCancelAtPeriodEnd
+				stripeSubscriptionCancelAtPeriodEnd: organizations.stripeSubscriptionCancelAtPeriodEnd,
+				openaiKeyEnc: organizations.openaiKeyEnc
 			})
 			.from(organizations)
 			.where(eq(organizations.id, user.orgId))
@@ -193,6 +195,9 @@ export const load: PageServerLoad = async ({ locals }) => {
 				// mechanism: cancel_at_period_end or the portal's cancel_at).
 				cancelAtPeriodEnd: org.stripeSubscriptionCancelAtPeriodEnd === 1
 			},
+			// Never serialize secrets: the page gets a boolean only. Lifetime
+			// orgs with hasOpenAiKey=false see the required-key warning.
+			hasOpenAiKey: Boolean(org.openaiKeyEnc),
 			stripeConfigured: Boolean(env.STRIPE_SECRET_KEY),
 			plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) }
 		};

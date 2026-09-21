@@ -25,6 +25,11 @@ import { organizations } from '$lib/server/db/schema';
  * when one is stored (hosted per-account billing), the deployment's
  * `OPENAI_API_KEY` otherwise (self-host and default hosted path).
  *
+ * Lifetime is the exception: BYOK is not optional there — the plan's price
+ * cannot fund unbounded operator-side scoring, so a lifetime org without a
+ * decryptable stored key resolves `undefined` and the comments queue for
+ * human review (I11) instead of silently spending the deployment's key.
+ *
  * @param orgId - The channel's org, or null for a pre-account orphan channel.
  * @returns The effective API key, or undefined when neither source has one —
  * the scorers throw loudly on a missing key and the comment lands in the
@@ -33,25 +38,39 @@ import { organizations } from '$lib/server/db/schema';
 export async function resolveOpenAiKey(orgId: string | null): Promise<string | undefined> {
 	if (!orgId) return env.OPENAI_API_KEY;
 	let enc: string | null | undefined;
+	let plan: string | undefined;
 	try {
 		const row = await db
-			.select({ openaiKeyEnc: organizations.openaiKeyEnc })
+			.select({ openaiKeyEnc: organizations.openaiKeyEnc, plan: organizations.plan })
 			.from(organizations)
 			.where(eq(organizations.id, orgId))
 			.get();
 		enc = row?.openaiKeyEnc;
+		plan = row?.plan;
 	} catch (error) {
 		// Loud fallback: a mid-run DB hiccup must neither abort the batch nor
-		// go unnoticed — degrade to the deployment key and log it.
+		// go unnoticed — degrade to the deployment key and log it. The plan is
+		// unreadable here, so the lifetime carve-out cannot apply.
 		console.error('failed to read the stored OpenAI key — falling back to the deployment key', { orgId, error });
 		return env.OPENAI_API_KEY;
 	}
-	if (!enc) return env.OPENAI_API_KEY;
+	if (!enc) {
+		if (plan === 'lifetime') {
+			console.error('lifetime org has no stored OpenAI key — scoring cannot run on the deployment key', { orgId });
+			return undefined;
+		}
+		return env.OPENAI_API_KEY;
+	}
 	try {
 		return decrypt(enc);
 	} catch (error) {
 		// Loud fallback: a corrupt stored key must not abort the run, but it
-		// must never be silent either.
+		// must never be silent either. On lifetime even the env fallback is
+		// off-limits — it would bill the operator for the buyer's usage.
+		if (plan === 'lifetime') {
+			console.error('stored OpenAI key failed to decrypt — no deployment-key fallback on the lifetime plan', { orgId, error });
+			return undefined;
+		}
 		console.error('stored OpenAI key failed to decrypt — falling back to the deployment key', { orgId, error });
 		return env.OPENAI_API_KEY;
 	}

@@ -33,8 +33,8 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-async function seedOrg(id: string, openaiKeyEnc: string | null) {
-	await testDb().db.insert(organizations).values({ id, name: id, openaiKeyEnc });
+async function seedOrg(id: string, openaiKeyEnc: string | null, plan: 'free' | 'hosted' | 'lifetime' = 'free') {
+	await testDb().db.insert(organizations).values({ id, name: id, openaiKeyEnc, plan });
 }
 
 test('a stored org key beats the env key', async () => {
@@ -98,4 +98,36 @@ test('no stored key and no env key resolves to undefined (the scorer throws loud
 	mocks.env.OPENAI_API_KEY = undefined;
 	await seedOrg('org-4', null);
 	expect(await resolveOpenAiKey('org-4')).toBeUndefined();
+});
+
+test('a lifetime org with no stored key gets NOTHING — the deployment key is not theirs to burn', async () => {
+	// BYOK is not optional on lifetime: the $49 price cannot fund unbounded
+	// operator-side scoring, so a keyless lifetime org resolves undefined —
+	// the scorer throws and every comment lands in the review queue (I11)
+	// instead of silently spending the deployment's key. Loud, per run.
+	await seedOrg('org-lifetime', null, 'lifetime');
+	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	expect(await resolveOpenAiKey('org-lifetime')).toBeUndefined();
+	expect(spy).toHaveBeenCalledWith(
+		'lifetime org has no stored OpenAI key — scoring cannot run on the deployment key',
+		{ orgId: 'org-lifetime' }
+	);
+});
+
+test('a lifetime org with a CORRUPT stored key gets nothing either — never the env fallback', async () => {
+	// An undecryptable key on a metered org degrades to the env key; on
+	// lifetime that same fallback would quietly bill the operator for the
+	// buyer's usage. Resolve undefined instead — still logged loudly.
+	await seedOrg('org-lifetime-corrupt', 'not-valid-ciphertext', 'lifetime');
+	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	expect(await resolveOpenAiKey('org-lifetime-corrupt')).toBeUndefined();
+	expect(spy).toHaveBeenCalledWith(
+		'stored OpenAI key failed to decrypt — no deployment-key fallback on the lifetime plan',
+		{ orgId: 'org-lifetime-corrupt', error: expect.any(Error) }
+	);
+});
+
+test('a lifetime org WITH a stored key scores on it', async () => {
+	await seedOrg('org-lifetime-key', encrypt('sk-lifetime-key'), 'lifetime');
+	expect(await resolveOpenAiKey('org-lifetime-key')).toBe('sk-lifetime-key');
 });

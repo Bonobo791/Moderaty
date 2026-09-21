@@ -54,18 +54,19 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		<h2 style="margin-top:0">OpenAI key</h2>
 		{#if data.hasOpenAiKey}
 			<p class="muted">
-				A team OpenAI key is saved — AI scoring runs on it instead of the deployment's key.
+				A team OpenAI key is saved — AI scoring runs on it.
 			</p>
 			<form method="POST" action="?/clearOpenAiKey" use:enhance>
 				<button class="btn danger small" type="submit">Remove the saved OpenAI key</button>
 			</form>
 		{:else if data.openAiKeyEligible}
-			<!-- Lifetime-plan option: the set form renders only while the org is
-			eligible; the saved state above stays visible regardless so a stored
-			key never becomes an unremovable invisible credential. -->
+			<!-- Lifetime-plan requirement: the set form renders only while the
+			org is eligible; the saved state above stays visible regardless so a
+			stored key never becomes an unremovable invisible credential. -->
 			<p class="muted">
-				Score comments with your own OpenAI key instead of the deployment's. The key is
-				validated with OpenAI before it is saved, stored encrypted, and never shown again.
+				The lifetime plan scores comments on your own OpenAI key — scoring cannot run
+				without it. The key is validated with OpenAI before it is saved, stored
+				encrypted, and never shown again.
 			</p>
 			<form method="POST" action="?/setOpenAiKey" use:enhance>
 				<label for="openai-key">OpenAI API key (starts with sk-)</label>

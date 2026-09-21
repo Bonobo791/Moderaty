@@ -308,10 +308,11 @@ describe('usage load', () => {
 		expect(owned).toContain('lifetime plan');
 	});
 
-	test('a lifetime org sees the BYOK pointer to the Team page; metered orgs do not', async () => {
-		// The key form lives on the Team page (owner-only, lifetime-gated);
-		// the lifetime plan state on this page names it so buyers can find
-		// it — hosted and free orgs never see the option advertised.
+	test('a lifetime org sees its required BYOK state — a loud missing-key warning or the saved-key status', async () => {
+		// BYOK is not optional on lifetime: no stored key means scoring cannot
+		// run (resolveOpenAiKey withholds the deployment key, comments queue).
+		// The plan card must say so loudly — not "optional" — and point at the
+		// Team page where the owner-only form lives. Metered orgs see neither.
 		const base = {
 			maintenance: false,
 			user: OWNER,
@@ -325,21 +326,39 @@ describe('usage load', () => {
 			stripeConfigured: true,
 			plans: { hosted: true, lifetime: true }
 		};
-		const lifetime = render(Page, {
-			props: { data: { ...base, billing: { plan: 'lifetime', subscriptionStatus: null, periodEnd: null } }, form: null } as never
+		const missing = render(Page, {
+			props: { data: { ...base, hasOpenAiKey: false, billing: { plan: 'lifetime', subscriptionStatus: null, periodEnd: null } }, form: null } as never
 		}).body;
-		expect(lifetime).toContain('href="/org"');
-		expect(lifetime).toContain('OpenAI API key');
+		expect(missing).toContain('href="/org"');
+		expect(missing).toContain('OpenAI API key');
+		expect(missing).toContain('error-box');
+		expect(missing).toContain('review queue');
+		expect(missing).not.toContain('Optional');
+
+		const saved = render(Page, {
+			props: { data: { ...base, hasOpenAiKey: true, billing: { plan: 'lifetime', subscriptionStatus: null, periodEnd: null } }, form: null } as never
+		}).body;
+		expect(saved).toContain('OpenAI API key');
+		expect(saved).toContain('href="/org"');
+		expect(saved).not.toContain('error-box');
 
 		const hosted = render(Page, {
-			props: { data: { ...base, billing: { plan: 'hosted', subscriptionStatus: 'active', periodEnd: '2026-10-19T00:00:00.000Z' } }, form: null } as never
+			props: { data: { ...base, hasOpenAiKey: false, billing: { plan: 'hosted', subscriptionStatus: 'active', periodEnd: '2026-10-19T00:00:00.000Z' } }, form: null } as never
 		}).body;
 		expect(hosted).not.toContain('OpenAI API key');
+	});
 
-		const free = render(Page, {
-			props: { data: { ...base, billing: { plan: null, subscriptionStatus: null, periodEnd: null } }, form: null } as never
-		}).body;
-		expect(free).not.toContain('OpenAI API key');
+	test('load exposes hasOpenAiKey as a boolean — never the key or its ciphertext', async () => {
+		await seedOrg();
+		const unset = (await load({ locals: { user: OWNER } } as never)) as { hasOpenAiKey: boolean };
+		expect(unset.hasOpenAiKey).toBe(false);
+
+		await testDb().db.update(organizations).set({ openaiKeyEnc: 'ENC:sentinel-ciphertext' }).where(eq(organizations.id, 'org-1'));
+		const view = (await load({ locals: { user: OWNER } } as never)) as Record<string, unknown>;
+		expect(view.hasOpenAiKey).toBe(true);
+		// The serialized payload must carry only the boolean — never the
+		// stored ciphertext, which a leak would hand straight to the client.
+		expect(JSON.stringify(view)).not.toContain('ENC:sentinel-ciphertext');
 	});
 
 	test('a hosted org sees Manage subscription instead of dead buy buttons', async () => {

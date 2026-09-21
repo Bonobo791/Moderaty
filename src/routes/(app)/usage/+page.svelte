@@ -122,12 +122,22 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		<div class="plan-actions">
 			{#if data.billing?.plan === 'lifetime'}
 				<p class="muted">You have the lifetime plan — unlimited moderated comments.</p>
-				<!-- BYOK is a lifetime perk: the form itself lives on the Team
-				page (owner-only there too) — this names it where buyers look. -->
-				<p class="muted">
-					Optional: score comments with your own OpenAI API key — manage it on the
-					<a href="/org">Team page</a>.
-				</p>
+				<!-- BYOK is REQUIRED on lifetime, not a perk: the plan's price
+				cannot fund operator-side scoring, so resolveOpenAiKey withholds
+				the deployment key and a keyless org's comments land in the
+				review queue. Say that loudly (I12) and point at the Team page,
+				where the owner-only form lives. -->
+				{#if data.hasOpenAiKey}
+					<p class="muted">
+						Scoring runs on your own OpenAI API key — manage it on the
+						<a href="/org">Team page</a>.
+					</p>
+				{:else}
+					<p class="error-box" role="alert">
+						Scoring needs your own OpenAI API key on the lifetime plan — set it on the
+						<a href="/org">Team page</a>. Until then, new comments land in the review queue unscored.
+					</p>
+				{/if}
 			{:else if data.billing?.plan === 'hosted'}
 				<!-- One live subscription per org: a second buy form would only be
 				rejected server-side, and lifetime requires the subscription to be

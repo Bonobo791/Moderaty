@@ -76,17 +76,21 @@ test('corrupt ciphertext falls back to the env key and logs loudly', async () =>
 	);
 });
 
-test('a database failure falls back to the env key and logs loudly instead of crashing the run', async () => {
-	// resolveOpenAiKey must never throw: a mid-run DB hiccup degrades to the
-	// deployment key (loudly), not to an aborted moderation batch.
+test('a database failure resolves NO key — the plan is unknown, so the env key may belong to a lifetime org', async () => {
+	// resolveOpenAiKey must never throw: a mid-run DB hiccup resolves
+	// undefined (loudly), not an aborted moderation batch — the scorers throw
+	// and the comments queue for human review (I11). The deployment key is
+	// NOT a safe fallback here: the plan is unreadable, so the org could be
+	// lifetime, and spending the operator's key for a lifetime run is the
+	// exact leak BYOK-required exists to prevent (codeant P1).
 	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
 	const dbSpy = vi.spyOn(testDb().db, 'select').mockImplementation(() => {
 		throw new Error('database is down');
 	});
 	try {
-		expect(await resolveOpenAiKey('org-1')).toBe('env-openai-key');
+		expect(await resolveOpenAiKey('org-1')).toBeUndefined();
 		expect(spy).toHaveBeenCalledWith(
-			'failed to read the stored OpenAI key — falling back to the deployment key',
+			'failed to read the stored OpenAI key — plan unknown, so no deployment-key fallback (a lifetime org would burn it)',
 			{ orgId: 'org-1', error: expect.any(Error) }
 		);
 	} finally {

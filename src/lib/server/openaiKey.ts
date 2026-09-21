@@ -22,7 +22,7 @@ import { organizations } from '$lib/server/db/schema';
 
 /**
  * Resolves the OpenAI key a channel run scores with: the org's own BYOK key
- * when one is stored (hosted per-account billing), the deployment's
+ * when one is stored (hosted per-organization billing), the deployment's
  * `OPENAI_API_KEY` otherwise (self-host and default hosted path).
  *
  * Lifetime is the exception: BYOK is not optional there — the plan's price
@@ -48,11 +48,13 @@ export async function resolveOpenAiKey(orgId: string | null): Promise<string | u
 		enc = row?.openaiKeyEnc;
 		plan = row?.plan;
 	} catch (error) {
-		// Loud fallback: a mid-run DB hiccup must neither abort the batch nor
-		// go unnoticed — degrade to the deployment key and log it. The plan is
-		// unreadable here, so the lifetime carve-out cannot apply.
-		console.error('failed to read the stored OpenAI key — falling back to the deployment key', { orgId, error });
-		return env.OPENAI_API_KEY;
+		// Loud, and NO fallback: a mid-run DB hiccup must neither abort the
+		// batch nor go unnoticed — resolve nothing and let the scorer defer
+		// the comments to the review queue (I11). The plan is unreadable, so
+		// the org could be lifetime — returning the deployment key here would
+		// spend operator money the Terms promise never to spend (codeant P1).
+		console.error('failed to read the stored OpenAI key — plan unknown, so no deployment-key fallback (a lifetime org would burn it)', { orgId, error });
+		return undefined;
 	}
 	if (!enc) {
 		if (plan === 'lifetime') {

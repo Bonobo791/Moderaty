@@ -24,10 +24,21 @@ type PendingReversalState = {
 	wonDispute: boolean;
 };
 
-type StripeIdentifiers = { paymentIntentId?: string; chargeId?: string };
+export type StripeIdentifiers = { paymentIntentId?: string; chargeId?: string };
 
-function stripeIdentifierPredicate(input: StripeIdentifiers, paymentIntentColumn: Parameters<typeof eq>[0], chargeColumn: Parameters<typeof eq>[0]): SQL<unknown> {
-	if (input.paymentIntentId && input.chargeId) return and(eq(paymentIntentColumn, input.paymentIntentId), eq(chargeColumn, input.chargeId)) as SQL<unknown>;
+export function stripeIdentifierPredicate(input: StripeIdentifiers, paymentIntentColumn: Parameters<typeof eq>[0], chargeColumn: Parameters<typeof eq>[0]): SQL<unknown> {
+	// "No stored identifier contradicts": rows may persist only ONE ref (the
+	// invoice's InvoicePayment can carry a bare payment_intent), so requiring
+	// both columns to match misses half-keyed rows and the refund/dispute
+	// would leave the entitlement alive (codeant P1) — but a stored ref that
+	// DISAGREES must still exclude the row, since a mismatched pair cannot
+	// come from the same payment.
+	if (input.paymentIntentId && input.chargeId) {
+		return and(
+			or(eq(paymentIntentColumn, input.paymentIntentId), isNull(paymentIntentColumn)),
+			or(eq(chargeColumn, input.chargeId), isNull(chargeColumn))
+		) as SQL<unknown>;
+	}
 	if (input.paymentIntentId) return eq(paymentIntentColumn, input.paymentIntentId);
 	if (input.chargeId) return eq(chargeColumn, input.chargeId);
 	throw new Error(PAYMENT_REFERENCE_REQUIRED_ERROR);

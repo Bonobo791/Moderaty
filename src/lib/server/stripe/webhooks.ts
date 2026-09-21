@@ -29,7 +29,7 @@ import { db } from '$lib/server/db';
 import { organizations, creditTransactions, stripeEvents, stripeLifetimeEntitlements, stripeDisputeReversals, stripeCheckoutAttempts, stripeSubscriptionPeriods } from '$lib/server/db/schema';
 import { applyLedgerDelta, drainPendingReversals, findGrantForStripe, queuePendingReversal, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
 import { grantAutoTopupCredits, handleAutoTopupFailure } from '$lib/server/billing/autotopup';
-import { claimLifetimeSlot, grantSubscriptionPeriod, refundSubscriptionPeriod, disputeSubscriptionPeriod, releaseLifetimeForPayment, applySubscriptionSnapshot, revokeLifetimeForDispute, restoreLifetimeForDispute, restoreDisputedSubscriptionPeriod, LIFETIME_SOLD_OUT_ERROR } from '$lib/server/billing/entitlements';
+import { claimLifetimeSlot, grantSubscriptionPeriod, refundSubscriptionPeriod, disputeSubscriptionPeriod, releaseLifetimeForPayment, applySubscriptionSnapshot, revokeLifetimeForDispute, restoreLifetimeForDispute, restoreDisputedSubscriptionPeriod, stripeIdentifierPredicate, LIFETIME_SOLD_OUT_ERROR } from '$lib/server/billing/entitlements';
 import { bundleById, type CreditBundle } from '$lib/server/stripe/bundles';
 import { isActiveSubscriptionStatus } from '$lib/server/billing/plans';
 import { markCheckoutAttemptFulfilled } from '$lib/server/billing/checkout';
@@ -202,7 +202,22 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 				return 'rejected';
 			}
 			if (existing.stripeSubscriptionId === subscriptionId) return 'already';
-			await db.update(organizations).set({ stripeSubscriptionId: subscriptionId, stripeCustomerId: customerId ?? existing.stripeCustomerId }).where(eq(organizations.id, orgId));
+			// Claim the org row CONDITIONALLY: a concurrent fulfillment can
+			// commit a different subscription between the read above and this
+			// write, and an unconditional update would overwrite the winner —
+			// orphaning a live, billing subscription the org row no longer
+			// names (codeant P1). Zero rows back means we lost the race: this
+			// session's freshly minted subscription is the duplicate, so tear
+			// it down and refund its first payment like any other duplicate.
+			const claimed = await db.update(organizations).set({ stripeSubscriptionId: subscriptionId, stripeCustomerId: customerId ?? existing.stripeCustomerId }).where(and(eq(organizations.id, orgId), or(
+				eq(organizations.stripeSubscriptionId, subscriptionId),
+				existing.stripeSubscriptionId ? eq(organizations.stripeSubscriptionId, existing.stripeSubscriptionId) : isNull(organizations.stripeSubscriptionId)
+			))).returning({ id: organizations.id });
+			if (!claimed[0]) {
+				console.error(`stripe: hosted checkout ${sessionId} for org ${orgId} lost the subscription claim to a concurrent fulfillment — tearing down duplicate ${subscriptionId}`);
+				await teardownDuplicateSubscription(subscriptionId, orgId, { checkoutSessionId: sessionId, paymentExpected: true });
+				return 'refunded';
+			}
 			// Subscription Checkout stores the paid card on the SUBSCRIPTION's
 			// default_payment_method (customer.invoice_settings stays unset), so
 			// the pointer is synced eagerly here — waiting on the
@@ -227,11 +242,13 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 		if (!org) throw new Error(`org not found: ${orgId}`);
 		// A subscription already scheduled to end does not block the upgrade —
 		// that wind-down window is the supported cancel→lifetime path. The
-		// stored status is only a cache, so the blocking verdict comes from the
-		// LIVE subscription: live and NOT scheduled to end (e.g. a portal
-		// resume mid-checkout) means the paid session can never grant — refund
-		// it like every other ungrantable payment instead of keeping the money.
-		if (org.stripeSubscriptionId && isActiveSubscriptionStatus(org.stripeSubscriptionStatus) && (await liveHostedBlocksLifetime(org.stripeSubscriptionId, sessionId))) {
+		// stored status is only a cache and can be stale IN BOTH directions
+		// (a missed webhook leaves 'canceled' on a sub Stripe still bills, or
+		// 'active' on a dead one), so the blocking verdict comes from the LIVE
+		// subscription unconditionally: live and NOT scheduled to end (e.g. a
+		// portal resume mid-checkout) means the paid session can never grant —
+		// refund it like every other ungrantable payment (codeant P1).
+		if (org.stripeSubscriptionId && (await liveHostedBlocksLifetime(org.stripeSubscriptionId, sessionId))) {
 			console.error(`stripe: lifetime checkout ${sessionId} would overlap hosted access for ${orgId} — the live subscription is not scheduled to end`);
 			await refundUngrantableCheckout(sessionId, orgId, paymentIntent, charge, 'the org has a live hosted subscription that is not scheduled to end');
 			return 'refunded';
@@ -598,11 +615,9 @@ export async function reverseCharge(chargeId: string, reason: 'refund' | 'disput
  * paid for no subscription (credit bundle, auto top-up, lifetime).
  */
 async function refundedSubscription(chargeId: string, paymentIntentId?: string): Promise<{ subscriptionId: string; orgId?: string } | null> {
-	// Same matching rule as refundSubscriptionPeriod: both ids must agree when
-	// both are present; the charge id alone is the fallback.
-	const periodPredicate = paymentIntentId
-		? and(eq(stripeSubscriptionPeriods.paymentIntentId, paymentIntentId), eq(stripeSubscriptionPeriods.chargeId, chargeId))
-		: eq(stripeSubscriptionPeriods.chargeId, chargeId);
+	// Same matching rule as refundSubscriptionPeriod: any stored identifier
+	// agrees — a period can persist only one ref (codeant P1).
+	const periodPredicate = stripeIdentifierPredicate({ paymentIntentId, chargeId }, stripeSubscriptionPeriods.paymentIntentId, stripeSubscriptionPeriods.chargeId);
 	const periods = await db
 		.select({ subscriptionId: stripeSubscriptionPeriods.subscriptionId, orgId: stripeSubscriptionPeriods.orgId })
 		.from(stripeSubscriptionPeriods)

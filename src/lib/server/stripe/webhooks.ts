@@ -26,7 +26,7 @@ import type Stripe from 'stripe';
 import { randomUUID } from 'node:crypto';
 
 import { db } from '$lib/server/db';
-import { organizations, creditTransactions, stripeEvents, stripeLifetimeEntitlements, stripeDisputeReversals, stripeCheckoutAttempts } from '$lib/server/db/schema';
+import { organizations, creditTransactions, stripeEvents, stripeLifetimeEntitlements, stripeDisputeReversals, stripeCheckoutAttempts, stripeSubscriptionPeriods } from '$lib/server/db/schema';
 import { applyLedgerDelta, drainPendingReversals, findGrantForStripe, queuePendingReversal, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
 import { grantAutoTopupCredits, handleAutoTopupFailure } from '$lib/server/billing/autotopup';
 import { claimLifetimeSlot, grantSubscriptionPeriod, refundSubscriptionPeriod, disputeSubscriptionPeriod, releaseLifetimeForPayment, applySubscriptionSnapshot, revokeLifetimeForDispute, restoreLifetimeForDispute, restoreDisputedSubscriptionPeriod, LIFETIME_SOLD_OUT_ERROR } from '$lib/server/billing/entitlements';
@@ -577,8 +577,75 @@ export async function reverseCharge(chargeId: string, reason: 'refund' | 'disput
 	}
 	if (reason === 'dispute' && !disputeId) throw new Error(`dispute reversal for ${chargeId} is missing dispute id`);
 	if (disputeId) await recordDisputeReversal({ disputeId, chargeId, paymentIntentId, status: 'pending', source: 'unknown' });
-	if (await reverseEntitlements(chargeId, reason, paymentIntentId, disputeId)) return true;
+	const entitlementsReversed = await reverseEntitlements(chargeId, reason, paymentIntentId, disputeId);
+	// A refund that paid for a subscription must also END the subscription:
+	// refundSubscriptionPeriod kills this period's included comments, but an
+	// uncanceled subscription stays active and the next invoice.paid would
+	// grant a fresh paid period — service resuming on a refunded account.
+	// Refunds only: a disputed subscription keeps its lifecycle (the dispute
+	// can still be won).
+	if (reason === 'refund') await cancelRefundedSubscription(chargeId, paymentIntentId);
+	if (entitlementsReversed) return true;
 	return reverseCreditGrant(chargeId, reason, disputeId, paymentIntentId);
+}
+
+/**
+ * Resolves the subscription a refunded charge paid for. The paid period row
+ * is the direct link (keyed by the same payment refs refundSubscriptionPeriod
+ * matched); when the refund beat invoice.paid and no period exists yet, the
+ * charge's InvoicePayment record resolves PI → invoice → subscription (the
+ * dahlia Charge carries no invoice back-link). Returns null for charges that
+ * paid for no subscription (credit bundle, auto top-up, lifetime).
+ */
+async function refundedSubscription(chargeId: string, paymentIntentId?: string): Promise<{ subscriptionId: string; orgId?: string } | null> {
+	// Same matching rule as refundSubscriptionPeriod: both ids must agree when
+	// both are present; the charge id alone is the fallback.
+	const periodPredicate = paymentIntentId
+		? and(eq(stripeSubscriptionPeriods.paymentIntentId, paymentIntentId), eq(stripeSubscriptionPeriods.chargeId, chargeId))
+		: eq(stripeSubscriptionPeriods.chargeId, chargeId);
+	const periods = await db
+		.select({ subscriptionId: stripeSubscriptionPeriods.subscriptionId, orgId: stripeSubscriptionPeriods.orgId })
+		.from(stripeSubscriptionPeriods)
+		.where(periodPredicate)
+		.limit(2)
+		.all();
+	if (periods.length > 1) throw new Error(`stripe: refund for ${chargeId} matched multiple subscription periods — refusing to guess which subscription to cancel`);
+	if (periods[0]) return periods[0];
+	if (!paymentIntentId) return null;
+	const payments = await getStripe().invoicePayments.list({ payment: { type: 'payment_intent', payment_intent: paymentIntentId }, status: 'paid' });
+	const invoiceId = payments.data.map((item) => stripeId(item.invoice)).find((id) => id !== undefined);
+	if (!invoiceId) return null;
+	const invoice = asRecord(await getStripe().invoices.retrieve(invoiceId));
+	const subscriptionId = invoiceSubscriptionId(invoice);
+	if (!subscriptionId) return null; // a one-off invoice, not subscription billing
+	return { subscriptionId, orgId: (await findOrgForStripe(subscriptionId))?.id };
+}
+
+/**
+ * Cancels the Stripe subscription a fully refunded charge paid for — without
+ * it, refundSubscriptionPeriod kills this period's included comments but the
+ * subscription stays active and the next invoice.paid grants a fresh paid
+ * period: service resumes on a refunded account. Idempotent: a canceled or
+ * forgotten subscription is skipped. A Stripe failure throws so the delivery
+ * stays un-ACKed and retries — an active subscription left behind would keep
+ * billing a refunded customer.
+ */
+async function cancelRefundedSubscription(chargeId: string, paymentIntentId?: string): Promise<void> {
+	const match = await refundedSubscription(chargeId, paymentIntentId);
+	if (!match) return;
+	const live = await fetchLiveSubscription(match.subscriptionId);
+	if (!live) {
+		console.info(`stripe: refunded charge ${chargeId} — subscription ${match.subscriptionId} is already gone`);
+		return;
+	}
+	const status = live.status;
+	if (typeof status !== 'string' || status.length === 0) throw new Error(`Stripe subscription ${match.subscriptionId} carries no usable status`);
+	if (!subscriptionStatusIsLive(status)) {
+		console.info(`stripe: refunded charge ${chargeId} — subscription ${match.subscriptionId} is already ${status}, nothing to cancel`);
+		return;
+	}
+	await getStripe().subscriptions.cancel(match.subscriptionId);
+	console.error(`stripe: subscription ${match.subscriptionId} canceled — charge ${chargeId} was fully refunded${match.orgId ? ` (org ${match.orgId})` : ''}; it cannot renew into a new paid period`);
 }
 
 /**

@@ -209,7 +209,18 @@ export async function applyLedgerDelta(
 			.update(organizations)
 			// COALESCE: pre-billing orgs carry NULL credits (I7 nullable-first);
 			// NULL + delta would stay NULL forever, silently eating every grant.
-			.set({ creditsRemaining: sql`COALESCE(${organizations.creditsRemaining}, 0) + ${delta}` })
+			// REFUND reversals floor at zero: a refunded grant's credits are
+			// GONE, not a negative debt carried against the next purchase —
+			// "refunded" means the org owes nothing and holds nothing.
+			// Dispute reversals stay unbounded on purpose: a won dispute
+			// restores the FULL grant, so keeping the true negative is the
+			// only math that restores correctly.
+			.set({
+				creditsRemaining:
+					delta < 0 && reason === 'refund'
+						? sql`MAX(0, COALESCE(${organizations.creditsRemaining}, 0) + ${delta})`
+						: sql`COALESCE(${organizations.creditsRemaining}, 0) + ${delta}`
+			})
 			.where(eq(organizations.id, orgId))
 			.returning({ balance: organizations.creditsRemaining });
 		if (updated.length === 0) throw new Error(`org not found: ${orgId}`);

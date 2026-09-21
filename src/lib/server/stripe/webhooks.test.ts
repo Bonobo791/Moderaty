@@ -33,6 +33,7 @@ const mocks = vi.hoisted(() => ({
 	subscriptionsCancel: vi.fn(),
 	subscriptionsUpdate: vi.fn(),
 	invoicePaymentsList: vi.fn(),
+	invoicesRetrieve: vi.fn(),
 	paymentMethodsAttach: vi.fn(),
 	refundsCreate: vi.fn()
 }));
@@ -46,6 +47,7 @@ vi.mock('$lib/server/stripe/client', () => ({
 		customers: { update: mocks.customersUpdate, retrieve: mocks.customersRetrieve },
 		subscriptions: { retrieve: mocks.subscriptionsRetrieve, cancel: mocks.subscriptionsCancel, update: mocks.subscriptionsUpdate },
 		invoicePayments: { list: mocks.invoicePaymentsList },
+		invoices: { retrieve: mocks.invoicesRetrieve },
 		paymentMethods: { attach: mocks.paymentMethodsAttach },
 		refunds: { create: mocks.refundsCreate }
 	})
@@ -1185,6 +1187,90 @@ describe('reverseCharge / reverseDispute', () => {
 		expect(await getCredits('org-1')).toBe(2000);
 	});
 
+	test('a full refund of a partially-spent grant ZEROES the balance — never a negative debt', async () => {
+		// "Refunded" means the credits are gone, not a negative balance carried
+		// against the next purchase: the reversal floors at zero. Disputes stay
+		// unbounded on purpose — a won dispute restores the FULL grant, so the
+		// true negative must be kept or the restore would over-credit.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+		// 300 of the 500 were spent before the refund landed.
+		await testDb().db.update(organizations).set({ creditsRemaining: 200 }).where(eq(organizations.id, 'org-1'));
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1', amount: 50000, amount_refunded: 50000 });
+
+		expect(await reverseCharge('ch_1', 'refund')).toBe(true);
+		expect(await getCredits('org-1')).toBe(0);
+	});
+
+	test('a full refund of a subscription charge cancels the subscription at Stripe', async () => {
+		// Marking the period 'refunded' kills THIS period's included comments,
+		// but an uncanceled subscription stays active and the next invoice.paid
+		// grants a fresh paid period — service resumes on a refunded account.
+		// The subscription must be canceled so it cannot renew.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'hosted', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
+		await testDb().db.insert(stripeSubscriptionPeriods).values({ orgId: 'org-1', subscriptionId: 'sub_1', invoiceId: 'in_1', paymentIntentId: 'pi_sub', chargeId: 'ch_sub', periodKey: 'p1', periodStart: new Date(Date.now() - 60_000).toISOString(), periodEnd: new Date(Date.now() + 60_000).toISOString(), includedCredits: 100, consumedCredits: 0, status: 'paid' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_sub', payment_intent: 'pi_sub', amount: 500, amount_refunded: 500 });
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_1', status: 'active' });
+		mocks.subscriptionsCancel.mockResolvedValue({ id: 'sub_1', status: 'canceled' });
+
+		expect(await reverseCharge('ch_sub', 'refund')).toBe(true);
+		expect(mocks.subscriptionsCancel).toHaveBeenCalledWith('sub_1');
+		// The refunded period's included comments are gone.
+		expect(await getCredits('org-1')).toBe(0);
+
+		// The canceled subscription's deleted event then drops the org to free.
+		const deleted = event('customer.subscription.deleted', 'evt_sub_del', { id: 'sub_1', customer: 'cus_1', status: 'canceled', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false }, 400);
+		expect(await handleStripeEvent(deleted as never)).toBe(true);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.plan).toBe('free');
+	});
+
+	test('a refund before invoice.paid still finds the subscription through the charge invoice', async () => {
+		// No period row exists yet (refund beat the grant), but the charge's
+		// invoice still names the subscription — cancel it anyway, and queue the
+		// credit obligation for the grant when it lands.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_early', payment_intent: 'pi_early', amount: 500, amount_refunded: 500 });
+		// Dahlia Charges carry no invoice back-link — the InvoicePayment index
+		// resolves PI → invoice → subscription.
+		mocks.invoicePaymentsList.mockResolvedValue({ data: [{ invoice: 'in_early', payment: { type: 'payment_intent', payment_intent: 'pi_early' } }] });
+		mocks.invoicesRetrieve.mockResolvedValue({ id: 'in_early', parent: { type: 'subscription_details', subscription_details: { subscription: 'sub_1' } } });
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_1', status: 'active' });
+		mocks.subscriptionsCancel.mockResolvedValue({ id: 'sub_1', status: 'canceled' });
+
+		expect(await reverseCharge('ch_early', 'refund')).toBe(false); // no grant/period yet — queued
+		expect(mocks.subscriptionsCancel).toHaveBeenCalledWith('sub_1');
+		const pending = await testDb().db.select().from(stripePendingReversals).where(eq(stripePendingReversals.chargeId, 'ch_early')).get();
+		expect(pending?.reason).toBe('refund');
+	});
+
+	test('an already-canceled subscription is not re-canceled on refund replay', async () => {
+		// Idempotent: redelivery after the first cancel must not call cancel
+		// again (a cancel on a canceled subscription errors at Stripe).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'hosted', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'canceled' });
+		await testDb().db.insert(stripeSubscriptionPeriods).values({ orgId: 'org-1', subscriptionId: 'sub_1', invoiceId: 'in_1', paymentIntentId: 'pi_sub', chargeId: 'ch_sub', periodKey: 'p1', periodStart: '2026-01-01T00:00:00.000Z', periodEnd: '2026-02-01T00:00:00.000Z', includedCredits: 100, consumedCredits: 0, status: 'paid' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_sub', payment_intent: 'pi_sub', amount: 500, amount_refunded: 500 });
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_1', status: 'canceled' });
+
+		expect(await reverseCharge('ch_sub', 'refund')).toBe(true);
+		expect(mocks.subscriptionsCancel).not.toHaveBeenCalled();
+	});
+
+	test('a bundle refund never cancels the org\'s unrelated subscription', async () => {
+		// Purchased credits and the subscription are independent purchases —
+		// refunding a bundle reverses its credits but must leave a live
+		// subscription the charge never paid for alone.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'hosted', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1', amount: 50000, amount_refunded: 50000 });
+
+		expect(await reverseCharge('ch_1', 'refund')).toBe(true);
+		expect(await getCredits('org-1')).toBe(0);
+		expect(mocks.subscriptionsCancel).not.toHaveBeenCalled();
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeSubscriptionStatus).toBe('active');
+	});
+
 	test('a refund matching no grant queues a pending reversal for when the grant lands', async () => {
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_none', payment_intent: 'pi_none', amount: 50000, amount_refunded: 50000 });
@@ -1267,12 +1353,12 @@ describe('handleStripeEvent', () => {
 		const pending = await testDb().db.select().from(stripePendingReversals).where(eq(stripePendingReversals.chargeId, 'ch_1')).all();
 		expect(pending.map((row) => row.reason).sort()).toEqual(['dispute', 'refund']);
 
-		// The grant lands: both obligations drain — 500 in, 1000 out (net -500;
-		// a negative balance is the documented v1 consequence of reversing
-		// credits the customer already spent).
+		// The grant lands: both obligations drain — 500 in, the dispute takes
+		// it to 0, then the refund reversal floors at 0 (refunded credits zero
+		// out; only dispute reversals keep a true negative for won-restore math).
 		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_1', payment_intent: { id: 'pi_1', latest_charge: 'ch_1', payment_method: 'pm_1' } }));
 		expect(await handleStripeEvent(event('checkout.session.completed', 'evt_grant', session({ id: 'cs_1', payment_intent: { id: 'pi_1', latest_charge: 'ch_1', payment_method: 'pm_1' } })) as never)).toBe(true);
-		expect(await getCredits('org-1')).toBe(-500);
+		expect(await getCredits('org-1')).toBe(0);
 		expect(await testDb().db.select().from(stripePendingReversals).where(eq(stripePendingReversals.chargeId, 'ch_1')).all()).toEqual([]);
 	});
 

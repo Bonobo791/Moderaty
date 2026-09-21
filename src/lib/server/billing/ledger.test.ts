@@ -128,7 +128,10 @@ describe('drainPendingReversals crash-consistency', () => {
 		// a bare db.delete would have wiped both rows before both mutations.
 		expect(deleteSpy).not.toHaveBeenCalled();
 		expect(await testDb().db.select().from(stripePendingReversals).all()).toHaveLength(0);
-		expect(await getCredits('org-1')).toBe(-100);
+		// 'dispute' sorts before 'refund' on the UNIQUE index: the dispute takes
+		// 100 → 0, then the refund reversal floors at 0 — a refunded grant never
+		// leaves a negative debt balance (disputes stay unbounded for won-restore).
+		expect(await getCredits('org-1')).toBe(0);
 	});
 });
 

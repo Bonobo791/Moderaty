@@ -1207,7 +1207,7 @@ describe('reverseCharge / reverseDispute', () => {
 		// but an uncanceled subscription stays active and the next invoice.paid
 		// grants a fresh paid period — service resumes on a refunded account.
 		// The subscription must be canceled so it cannot renew.
-		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'hosted', stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'hosted', creditsRemaining: 1000, stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
 		await testDb().db.insert(stripeSubscriptionPeriods).values({ orgId: 'org-1', subscriptionId: 'sub_1', invoiceId: 'in_1', paymentIntentId: 'pi_sub', chargeId: 'ch_sub', periodKey: 'p1', periodStart: new Date(Date.now() - 60_000).toISOString(), periodEnd: new Date(Date.now() + 60_000).toISOString(), includedCredits: 100, consumedCredits: 0, status: 'paid' });
 		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_sub', payment_intent: 'pi_sub', amount: 500, amount_refunded: 500 });
 		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_1', status: 'active' });
@@ -1215,8 +1215,9 @@ describe('reverseCharge / reverseDispute', () => {
 
 		expect(await reverseCharge('ch_sub', 'refund')).toBe(true);
 		expect(mocks.subscriptionsCancel).toHaveBeenCalledWith('sub_1');
-		// The refunded period's included comments are gone.
-		expect(await getCredits('org-1')).toBe(0);
+		// Only the refunded purchase dies: the period's 100 included comments
+		// are gone, the 1000 SEPARATELY purchased credits are untouched.
+		expect(await getCredits('org-1')).toBe(1000);
 
 		// The canceled subscription's deleted event then drops the org to free.
 		const deleted = event('customer.subscription.deleted', 'evt_sub_del', { id: 'sub_1', customer: 'cus_1', status: 'canceled', current_period_start: 1_800_000_000, current_period_end: 1_802_678_400, cancel_at_period_end: false }, 400);

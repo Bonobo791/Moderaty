@@ -167,139 +167,158 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 	if (lateVerdict) return lateVerdict;
 
 	const { paymentIntent, charge } = getPaymentIntentAndCharge(session);
-	if (product === 'hosted' || product === 'lifetime') {
-		if (product === 'hosted') {
-			const subscriptionId = typeof session.subscription === 'string' ? session.subscription : session.subscription?.id;
-			if (session.mode !== 'subscription' || !subscriptionId) {
-				console.error(`stripe: hosted checkout ${sessionId} is not a subscription session`);
-				return 'rejected';
-			}
-			const customerId = typeof session.customer === 'string' ? session.customer : session.customer?.id;
-			const existing = await db.select({ stripeSubscriptionId: organizations.stripeSubscriptionId, stripeSubscriptionStatus: organizations.stripeSubscriptionStatus, stripeCustomerId: organizations.stripeCustomerId }).from(organizations).where(eq(organizations.id, orgId)).get();
-			if (!existing) throw new Error(`org not found: ${orgId}`);
-			const lifetime = await db.select({ id: stripeLifetimeEntitlements.id }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
-			if (lifetime) {
-				console.error(`stripe: hosted checkout ${sessionId} would overlap lifetime access for ${orgId}`);
-				return 'rejected';
-			}
-			// One live subscription per org. The stored status is only a cache —
-			// it is null until a subscription webhook lands and stale whenever
-			// deliveries fail — so exclusivity is decided by the LIVE Stripe
-			// status of the stored subscription. A live one means this paid
-			// checkout minted a duplicate: cancel it and refund its first
-			// invoice instead of keeping the money for a sub we never honor.
-			if (existing.stripeSubscriptionId && existing.stripeSubscriptionId !== subscriptionId) {
-				const liveStatus = await liveSubscriptionStatus(existing.stripeSubscriptionId);
-				if (subscriptionStatusIsLive(liveStatus)) {
-					console.error(`stripe: hosted checkout ${sessionId} for org ${orgId} would overlap live subscription ${existing.stripeSubscriptionId} (${liveStatus}) — tearing down duplicate ${subscriptionId}`);
-					await teardownDuplicateSubscription(subscriptionId, orgId, { checkoutSessionId: sessionId, paymentExpected: true });
-					return 'refunded';
-				}
-				console.info(`stripe: stored subscription ${existing.stripeSubscriptionId} for org ${orgId} is ${liveStatus} — checkout ${sessionId} replaces it`);
-			}
-			if (existing.stripeCustomerId && customerId && existing.stripeCustomerId !== customerId) {
-				console.error(`stripe: hosted checkout ${sessionId} customer does not belong to org ${orgId}`);
-				return 'rejected';
-			}
-			if (existing.stripeSubscriptionId === subscriptionId) return 'already';
-			// Claim the org row CONDITIONALLY: a concurrent fulfillment can
-			// commit a different subscription between the read above and this
-			// write, and an unconditional update would overwrite the winner —
-			// orphaning a live, billing subscription the org row no longer
-			// names (codeant P1). Zero rows back means we lost the race: this
-			// session's freshly minted subscription is the duplicate, so tear
-			// it down and refund its first payment like any other duplicate.
-			const claimed = await db.update(organizations).set({ stripeSubscriptionId: subscriptionId, stripeCustomerId: customerId ?? existing.stripeCustomerId }).where(and(eq(organizations.id, orgId), or(
-				eq(organizations.stripeSubscriptionId, subscriptionId),
-				existing.stripeSubscriptionId ? eq(organizations.stripeSubscriptionId, existing.stripeSubscriptionId) : isNull(organizations.stripeSubscriptionId)
-			))).returning({ id: organizations.id });
-			if (!claimed[0]) {
-				console.error(`stripe: hosted checkout ${sessionId} for org ${orgId} lost the subscription claim to a concurrent fulfillment — tearing down duplicate ${subscriptionId}`);
-				await teardownDuplicateSubscription(subscriptionId, orgId, { checkoutSessionId: sessionId, paymentExpected: true });
-				return 'refunded';
-			}
-			// Subscription Checkout stores the paid card on the SUBSCRIPTION's
-			// default_payment_method (customer.invoice_settings stays unset), so
-			// the pointer is synced eagerly here — waiting on the
-			// customer.subscription.created event would leave "no card saved"
-			// until it lands, and fulfillment must not fail if this sync does.
-			try {
-				const liveSubscription = await getStripe().subscriptions.retrieve(subscriptionId, { expand: ['default_payment_method'] });
-				const pmId = subscriptionDefaultPmId(asRecord(liveSubscription), `checkout ${sessionId}`);
-				if (pmId) await applySubscriptionDefaultPm(orgId, pmId);
-			} catch (cause) {
-				console.error(`stripe: subscription card sync during fulfillment of ${sessionId} failed for org ${orgId} — customer.subscription events must deliver it`, cause);
-			}
-			return 'granted';
-		}
-		if (session.mode !== 'payment') {
-			console.error(`stripe: lifetime checkout ${sessionId} is not a one-time payment session`);
-			return 'rejected';
-		}
-		const existing = await db.select({ id: stripeLifetimeEntitlements.id }).from(stripeLifetimeEntitlements).where(eq(stripeLifetimeEntitlements.checkoutSessionId, sessionId)).get();
-		if (existing) return 'already';
-		const org = await db.select({ stripeSubscriptionId: organizations.stripeSubscriptionId, stripeSubscriptionStatus: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, orgId)).get();
-		if (!org) throw new Error(`org not found: ${orgId}`);
-		// A subscription already scheduled to end does not block the upgrade —
-		// that wind-down window is the supported cancel→lifetime path. The
-		// stored status is only a cache and can be stale IN BOTH directions
-		// (a missed webhook leaves 'canceled' on a sub Stripe still bills, or
-		// 'active' on a dead one), so the blocking verdict comes from the LIVE
-		// subscription unconditionally: live and NOT scheduled to end (e.g. a
-		// portal resume mid-checkout) means the paid session can never grant —
-		// refund it like every other ungrantable payment (codeant P1).
-		if (org.stripeSubscriptionId && (await liveHostedBlocksLifetime(org.stripeSubscriptionId, sessionId))) {
-			console.error(`stripe: lifetime checkout ${sessionId} would overlap hosted access for ${orgId} — the live subscription is not scheduled to end`);
-			await refundUngrantableCheckout(sessionId, orgId, paymentIntent, charge, 'the org has a live hosted subscription that is not scheduled to end');
-			return 'refunded';
-		}
-		const activeLifetime = await db.select({ id: stripeLifetimeEntitlements.id, checkoutSessionId: stripeLifetimeEntitlements.checkoutSessionId }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
-		// The winner may be THIS session: a concurrent duplicate delivery
-		// (success redirect + webhook) committed between the session-scoped
-		// read above and this one — its own claim is 'already', never a
-		// refund of the payment that just won (codex P1).
-		if (activeLifetime?.checkoutSessionId === sessionId) return 'already';
-		// A second lifetime checkout for an org that already has one is paid
-		// but can grant nothing — refund it like a slotless checkout rather
-		// than reporting 'already' success while keeping the money (review).
-		if (activeLifetime) {
-			await refundUngrantableCheckout(sessionId, orgId, paymentIntent, charge, 'the org already has an active lifetime plan');
-			return 'refunded';
-		}
-		let result: Awaited<ReturnType<typeof claimLifetimeSlot>>;
-		try {
-			result = await claimLifetimeSlot({
-				orgId,
-				checkoutSessionId: sessionId,
-				paymentIntentId: paymentIntent?.id,
-				chargeId: typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : charge?.id
-			});
-		} catch (error) {
-			if (!(error instanceof Error && error.message === LIFETIME_SOLD_OUT_ERROR)) {
-				// A concurrent same-org claim loses on the unique active-org
-				// index; the aborted tx's snapshot could not see the winner, so
-				// re-read fresh — a winner means this was a paid duplicate and
-				// falls into the same refund path, anything else is a real error.
-				const winner = await db.select({ id: stripeLifetimeEntitlements.id, checkoutSessionId: stripeLifetimeEntitlements.checkoutSessionId }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
-				if (!winner) throw error;
-				// The winner may be THIS session's own claim — a duplicate
-				// delivery (success redirect + webhook) that lost on the
-				// index. ACK as 'already'; refunding it would leave the org
-				// with lifetime access it never paid for (codex P1).
-				if (winner.checkoutSessionId === sessionId) return 'already';
-			}
-			await refundUngrantableCheckout(sessionId, orgId, paymentIntent, charge, 'claimed no slot');
-			return 'refunded';
-		}
-		if (result.status === 'active' && result.slot > 0) return 'granted';
-		console.error(`stripe: lifetime checkout ${sessionId} for org ${orgId} was PAID but claimed no slot (status ${result.status}, slot ${result.slot}) — manual refund required`);
-		return 'rejected';
-	}
-
+	if (product === 'hosted') return fulfillHostedCheckout(session, sessionId, orgId);
+	if (product === 'lifetime') return fulfillLifetimeCheckout(session, sessionId, orgId, paymentIntent, charge);
 	// An unknown bundle id is an operator config bug, not a transient failure:
 	// acknowledge loudly and reject (the credits can never be granted — a
 	// retry storm would only produce three days of 500s).
 	if (!bundleId) return 'rejected';
+	return fulfillBundleCheckout(session, sessionId, orgId, bundleId, paymentIntent, charge);
+}
+
+type CheckoutVerdict = 'granted' | 'already' | 'rejected' | 'refunded';
+
+/**
+ * Hosted checkout fulfillment: one live subscription per org, ever — the
+ * org row is claimed CONDITIONALLY so a concurrent fulfillment losing the
+ * race tears down and refunds its own duplicate instead of orphaning a
+ * billing subscription (codeant P1).
+ */
+async function fulfillHostedCheckout(session: Stripe.Checkout.Session, sessionId: string, orgId: string): Promise<CheckoutVerdict> {
+	const subscriptionId = typeof session.subscription === 'string' ? session.subscription : session.subscription?.id;
+	if (session.mode !== 'subscription' || !subscriptionId) {
+		console.error(`stripe: hosted checkout ${sessionId} is not a subscription session`);
+		return 'rejected';
+	}
+	const customerId = typeof session.customer === 'string' ? session.customer : session.customer?.id;
+	const existing = await db.select({ stripeSubscriptionId: organizations.stripeSubscriptionId, stripeSubscriptionStatus: organizations.stripeSubscriptionStatus, stripeCustomerId: organizations.stripeCustomerId }).from(organizations).where(eq(organizations.id, orgId)).get();
+	if (!existing) throw new Error(`org not found: ${orgId}`);
+	const lifetime = await db.select({ id: stripeLifetimeEntitlements.id }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
+	if (lifetime) {
+		console.error(`stripe: hosted checkout ${sessionId} would overlap lifetime access for ${orgId}`);
+		return 'rejected';
+	}
+	// One live subscription per org. The stored status is only a cache —
+	// it is null until a subscription webhook lands and stale whenever
+	// deliveries fail — so exclusivity is decided by the LIVE Stripe
+	// status of the stored subscription. A live one means this paid
+	// checkout minted a duplicate: cancel it and refund its first
+	// invoice instead of keeping the money for a sub we never honor.
+	if (existing.stripeSubscriptionId && existing.stripeSubscriptionId !== subscriptionId) {
+		const liveStatus = await liveSubscriptionStatus(existing.stripeSubscriptionId);
+		if (subscriptionStatusIsLive(liveStatus)) {
+			console.error(`stripe: hosted checkout ${sessionId} for org ${orgId} would overlap live subscription ${existing.stripeSubscriptionId} (${liveStatus}) — tearing down duplicate ${subscriptionId}`);
+			await teardownDuplicateSubscription(subscriptionId, orgId, { checkoutSessionId: sessionId, paymentExpected: true });
+			return 'refunded';
+		}
+		console.info(`stripe: stored subscription ${existing.stripeSubscriptionId} for org ${orgId} is ${liveStatus} — checkout ${sessionId} replaces it`);
+	}
+	if (existing.stripeCustomerId && customerId && existing.stripeCustomerId !== customerId) {
+		console.error(`stripe: hosted checkout ${sessionId} customer does not belong to org ${orgId}`);
+		return 'rejected';
+	}
+	if (existing.stripeSubscriptionId === subscriptionId) return 'already';
+	// Claim the org row CONDITIONALLY: a concurrent fulfillment can
+	// commit a different subscription between the read above and this
+	// write, and an unconditional update would overwrite the winner —
+	// orphaning a live, billing subscription the org row no longer
+	// names (codeant P1). Zero rows back means we lost the race: this
+	// session's freshly minted subscription is the duplicate, so tear
+	// it down and refund its first payment like any other duplicate.
+	const claimed = await db.update(organizations).set({ stripeSubscriptionId: subscriptionId, stripeCustomerId: customerId ?? existing.stripeCustomerId }).where(and(eq(organizations.id, orgId), or(
+		eq(organizations.stripeSubscriptionId, subscriptionId),
+		existing.stripeSubscriptionId ? eq(organizations.stripeSubscriptionId, existing.stripeSubscriptionId) : isNull(organizations.stripeSubscriptionId)
+	))).returning({ id: organizations.id });
+	if (!claimed[0]) {
+		console.error(`stripe: hosted checkout ${sessionId} for org ${orgId} lost the subscription claim to a concurrent fulfillment — tearing down duplicate ${subscriptionId}`);
+		await teardownDuplicateSubscription(subscriptionId, orgId, { checkoutSessionId: sessionId, paymentExpected: true });
+		return 'refunded';
+	}
+	// Subscription Checkout stores the paid card on the SUBSCRIPTION's
+	// default_payment_method (customer.invoice_settings stays unset), so
+	// the pointer is synced eagerly here — waiting on the
+	// customer.subscription.created event would leave "no card saved"
+	// until it lands, and fulfillment must not fail if this sync does.
+	try {
+		const liveSubscription = await getStripe().subscriptions.retrieve(subscriptionId, { expand: ['default_payment_method'] });
+		const pmId = subscriptionDefaultPmId(asRecord(liveSubscription), `checkout ${sessionId}`);
+		if (pmId) await applySubscriptionDefaultPm(orgId, pmId);
+	} catch (cause) {
+		console.error(`stripe: subscription card sync during fulfillment of ${sessionId} failed for org ${orgId} — customer.subscription events must deliver it`, cause);
+	}
+	return 'granted';
+}
+
+/**
+ * Lifetime checkout fulfillment: a live-and-billing hosted subscription
+ * blocks the grant (refunded like every ungrantable payment); a scheduled
+ * wind-down does not — that is the supported cancel→lifetime path. The
+ * verdict comes from the LIVE subscription unconditionally; the stored
+ * status is a cache that goes stale in both directions (codeant P1).
+ */
+async function fulfillLifetimeCheckout(session: Stripe.Checkout.Session, sessionId: string, orgId: string, paymentIntent: Stripe.PaymentIntent | null, charge: Stripe.Charge | null | undefined): Promise<CheckoutVerdict> {
+	if (session.mode !== 'payment') {
+		console.error(`stripe: lifetime checkout ${sessionId} is not a one-time payment session`);
+		return 'rejected';
+	}
+	const existing = await db.select({ id: stripeLifetimeEntitlements.id }).from(stripeLifetimeEntitlements).where(eq(stripeLifetimeEntitlements.checkoutSessionId, sessionId)).get();
+	if (existing) return 'already';
+	const org = await db.select({ stripeSubscriptionId: organizations.stripeSubscriptionId, stripeSubscriptionStatus: organizations.stripeSubscriptionStatus }).from(organizations).where(eq(organizations.id, orgId)).get();
+	if (!org) throw new Error(`org not found: ${orgId}`);
+	if (org.stripeSubscriptionId && (await liveHostedBlocksLifetime(org.stripeSubscriptionId, sessionId))) {
+		console.error(`stripe: lifetime checkout ${sessionId} would overlap hosted access for ${orgId} — the live subscription is not scheduled to end`);
+		await refundUngrantableCheckout(sessionId, orgId, paymentIntent, charge, 'the org has a live hosted subscription that is not scheduled to end');
+		return 'refunded';
+	}
+	const activeLifetime = await db.select({ id: stripeLifetimeEntitlements.id, checkoutSessionId: stripeLifetimeEntitlements.checkoutSessionId }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
+	// The winner may be THIS session: a concurrent duplicate delivery
+	// (success redirect + webhook) committed between the session-scoped
+	// read above and this one — its own claim is 'already', never a
+	// refund of the payment that just won (codex P1).
+	if (activeLifetime?.checkoutSessionId === sessionId) return 'already';
+	// A second lifetime checkout for an org that already has one is paid
+	// but can grant nothing — refund it like a slotless checkout rather
+	// than reporting 'already' success while keeping the money (review).
+	if (activeLifetime) {
+		await refundUngrantableCheckout(sessionId, orgId, paymentIntent, charge, 'the org already has an active lifetime plan');
+		return 'refunded';
+	}
+	let result: Awaited<ReturnType<typeof claimLifetimeSlot>>;
+	try {
+		result = await claimLifetimeSlot({
+			orgId,
+			checkoutSessionId: sessionId,
+			paymentIntentId: paymentIntent?.id,
+			chargeId: typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : charge?.id
+		});
+	} catch (error) {
+		if (!(error instanceof Error && error.message === LIFETIME_SOLD_OUT_ERROR)) {
+			// A concurrent same-org claim loses on the unique active-org
+			// index; the aborted tx's snapshot could not see the winner, so
+			// re-read fresh — a winner means this was a paid duplicate and
+			// falls into the same refund path, anything else is a real error.
+			const winner = await db.select({ id: stripeLifetimeEntitlements.id, checkoutSessionId: stripeLifetimeEntitlements.checkoutSessionId }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
+			if (!winner) throw error;
+			// The winner may be THIS session's own claim — a duplicate
+			// delivery (success redirect + webhook) that lost on the
+			// index. ACK as 'already'; refunding it would leave the org
+			// with lifetime access it never paid for (codex P1).
+			if (winner.checkoutSessionId === sessionId) return 'already';
+		}
+		await refundUngrantableCheckout(sessionId, orgId, paymentIntent, charge, 'claimed no slot');
+		return 'refunded';
+	}
+	if (result.status === 'active' && result.slot > 0) return 'granted';
+	console.error(`stripe: lifetime checkout ${sessionId} for org ${orgId} was PAID but claimed no slot (status ${result.status}, slot ${result.slot}) — manual refund required`);
+	return 'rejected';
+}
+
+/**
+ * Credit-bundle fulfillment: apply the grant idempotently, refund instead
+ * when the org went unmetered mid-checkout, drain any reversal that beat
+ * the grant, then save the paid card for future auto top-ups.
+ */
+async function fulfillBundleCheckout(session: Stripe.Checkout.Session, sessionId: string, orgId: string, bundleId: string, paymentIntent: Stripe.PaymentIntent | null, charge: Stripe.Charge | null | undefined): Promise<CheckoutVerdict> {
 	const bundle = loadBundle(bundleId, sessionId);
 	if (!bundle) return 'rejected';
 
@@ -660,7 +679,8 @@ async function cancelRefundedSubscription(chargeId: string, paymentIntentId?: st
 		return;
 	}
 	await getStripe().subscriptions.cancel(match.subscriptionId);
-	console.error(`stripe: subscription ${match.subscriptionId} canceled — charge ${chargeId} was fully refunded${match.orgId ? ` (org ${match.orgId})` : ''}; it cannot renew into a new paid period`);
+	const orgNote = match.orgId ? ` (org ${match.orgId})` : '';
+	console.error(`stripe: subscription ${match.subscriptionId} canceled — charge ${chargeId} was fully refunded${orgNote}; it cannot renew into a new paid period`);
 }
 
 /**

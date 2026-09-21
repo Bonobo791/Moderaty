@@ -115,20 +115,31 @@ describe('fenced Stripe event leases', () => {
 });
 
 describe('paid hosted products', () => {
+	// Shared arrange+act for the live-check lifetime tests: seed an org with
+	// a stored subscription, point the session/live-sub mocks at the given
+	// states, fulfill, and swallow the loud refund log (it is asserted via
+	// refundsCreate, not the console).
+	async function seedSubscribedOrgAndFulfillLifetime(opts: { cachedStatus: string; sessionId: string; live: Record<string, unknown> }) {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: opts.cachedStatus });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: opts.sessionId, metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		mocks.subscriptionsRetrieve.mockResolvedValue(opts.live);
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			return await fulfillCheckout(opts.sessionId);
+		} finally {
+			errorSpy.mockRestore();
+		}
+	}
+
 	test('refunds a lifetime fulfillment while a hosted subscription is live and not ending', async () => {
 		// The stored status is only a cache: before refusing the grant the
 		// LIVE subscription is consulted — still billing and not scheduled to
 		// end means the paid session can never grant, so the money goes back
 		// (a bare 'rejected' would keep $49 for nothing).
-		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'active' });
-		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lifetime', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
-		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_1', status: 'active', cancel_at_period_end: false, cancel_at: null });
-		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-		try {
-			expect(await fulfillCheckout('cs_lifetime')).toBe('refunded');
-		} finally {
-			errorSpy.mockRestore();
-		}
+		expect(await seedSubscribedOrgAndFulfillLifetime({
+			cachedStatus: 'active', sessionId: 'cs_lifetime',
+			live: { id: 'sub_1', status: 'active', cancel_at_period_end: false, cancel_at: null }
+		})).toBe('refunded');
 		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_1', metadata: { reason: 'ungrantable', org_id: 'org-1', checkout_session_id: 'cs_lifetime' } }, { idempotencyKey: 'refund:ungrantable:cs_lifetime' });
 		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toHaveLength(0);
 	});
@@ -139,15 +150,10 @@ describe('paid hosted products', () => {
 		// 'canceled' while Stripe still has the subscription live and billing.
 		// Gating the live check on the cache would grant lifetime while the
 		// customer keeps paying monthly (codeant P1) — Stripe decides, always.
-		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_1', stripeSubscriptionStatus: 'canceled' });
-		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lt_stale', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
-		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_1', status: 'active', cancel_at_period_end: false, cancel_at: null });
-		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-		try {
-			expect(await fulfillCheckout('cs_lt_stale')).toBe('refunded');
-		} finally {
-			errorSpy.mockRestore();
-		}
+		expect(await seedSubscribedOrgAndFulfillLifetime({
+			cachedStatus: 'canceled', sessionId: 'cs_lt_stale',
+			live: { id: 'sub_1', status: 'active', cancel_at_period_end: false, cancel_at: null }
+		})).toBe('refunded');
 		expect(mocks.subscriptionsRetrieve).toHaveBeenCalled();
 		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_1', metadata: { reason: 'ungrantable', org_id: 'org-1', checkout_session_id: 'cs_lt_stale' } }, { idempotencyKey: 'refund:ungrantable:cs_lt_stale' });
 		expect(await testDb().db.select().from(stripeLifetimeEntitlements)).toHaveLength(0);

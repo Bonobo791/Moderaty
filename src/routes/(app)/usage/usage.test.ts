@@ -93,6 +93,24 @@ beforeEach(() => {
 });
 
 describe('usage load', () => {
+	// The render tests all share one data shape — the full load payload a
+	// healthy page receives; each test spreads it and overrides what varies.
+	function usagePageData() {
+		return {
+			maintenance: false,
+			user: OWNER,
+			summary: { remaining: 0, usedThisMonth: 0, usedLifetime: 0 },
+			metered: false,
+			history: [],
+			bundles: [],
+			mercadoPagoBundles: [],
+			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: false, card: null },
+			autoTopupConsentText: 'consent',
+			stripeConfigured: true,
+			plans: { hosted: true, lifetime: true }
+		};
+	}
+
 	test('a database failure mid-load degrades to the maintenance payload and logs loudly', async () => {
 		// The layout renders the maintenance overlay for this shape — the page
 		// must never surface SvelteKit's unstyled 500 for a mid-load DB error.
@@ -227,19 +245,7 @@ describe('usage load', () => {
 		// Unlimited scoring makes credit bundles and auto top-up useless, so
 		// the cards are replaced by an explanatory line (I12: never silently
 		// different). A metered org renders them normally.
-		const base = {
-			maintenance: false,
-			user: OWNER,
-			summary: { remaining: 0, usedThisMonth: 0, usedLifetime: 0 },
-			metered: false,
-			history: [],
-			bundles: [{ id: 'credits_100', label: '100 credits' }],
-			mercadoPagoBundles: [{ id: 'credits_100', label: '100 credits', amountCents: 990 }],
-			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: false },
-			autoTopupConsentText: 'consent',
-			stripeConfigured: true,
-			plans: { hosted: true, lifetime: true }
-		};
+		const base = { ...usagePageData(), bundles: [{ id: 'credits_100', label: '100 credits' }], mercadoPagoBundles: [{ id: 'credits_100', label: '100 credits', amountCents: 990 }] };
 		const lifetime = render(Page, {
 			props: { data: { ...base, billing: { plan: 'lifetime', subscriptionStatus: null, periodEnd: null } }, form: null } as never
 		}).body;
@@ -273,19 +279,7 @@ describe('usage load', () => {
 		// click a dead buy button once sold out, and a lifetime org sees its
 		// plan instead of a second buy form (I12: explicit states, never a
 		// button that only fails at checkout).
-		const base = {
-			maintenance: false,
-			user: OWNER,
-			summary: { remaining: 0, usedThisMonth: 0, usedLifetime: 0 },
-			metered: false,
-			history: [],
-			bundles: [],
-			mercadoPagoBundles: [],
-			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: false },
-			autoTopupConsentText: 'consent',
-			stripeConfigured: true,
-			plans: { hosted: false, lifetime: true }
-		};
+		const base = { ...usagePageData(), plans: { hosted: false, lifetime: true } };
 
 		const available = render(Page, {
 			props: { data: { ...base, lifetimeSlots: 997, billing: { plan: null, subscriptionStatus: null, periodEnd: null } }, form: null } as never
@@ -318,20 +312,7 @@ describe('usage load', () => {
 		// window, but "period ends" belongs to the SUBSCRIPTION — the lifetime
 		// plan has no period. The live sub renders as its own line so the
 		// user can see it winding down.
-		const base = {
-			maintenance: false,
-			user: OWNER,
-			summary: { remaining: 200, usedThisMonth: 0, usedLifetime: 0 },
-			metered: false,
-			history: [],
-			bundles: [],
-			mercadoPagoBundles: [],
-			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: false },
-			autoTopupConsentText: 'consent',
-			stripeConfigured: true,
-			plans: { hosted: true, lifetime: true },
-			hasOpenAiKey: true
-		};
+		const base = { ...usagePageData(), summary: { remaining: 200, usedThisMonth: 0, usedLifetime: 0 }, hasOpenAiKey: true };
 		const windingDown = render(Page, {
 			props: { data: { ...base, billing: { plan: 'lifetime', subscriptionStatus: 'active', periodEnd: '2026-10-19T22:46:39.000Z', cancelAtPeriodEnd: true, subscriptionLive: true } }, form: null } as never
 		}).body;
@@ -352,19 +333,7 @@ describe('usage load', () => {
 		// run (resolveOpenAiKey withholds the deployment key, comments queue).
 		// The plan card must say so loudly — not "optional" — and point at the
 		// Team page where the owner-only form lives. Metered orgs see neither.
-		const base = {
-			maintenance: false,
-			user: OWNER,
-			summary: { remaining: 0, usedThisMonth: 0, usedLifetime: 0 },
-			metered: false,
-			history: [],
-			bundles: [],
-			mercadoPagoBundles: [],
-			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: false },
-			autoTopupConsentText: 'consent',
-			stripeConfigured: true,
-			plans: { hosted: true, lifetime: true }
-		};
+		const base = usagePageData();
 		const missing = render(Page, {
 			props: { data: { ...base, hasOpenAiKey: false, billing: { plan: 'lifetime', subscriptionStatus: null, periodEnd: null } }, form: null } as never
 		}).body;
@@ -405,20 +374,7 @@ describe('usage load', () => {
 		// 400s for a subscribed org, and the lifetime form only ever tells
 		// them to cancel first — replace both with the portal button that can
 		// actually manage the subscription (I12: no button that only fails).
-		const base = {
-			maintenance: false,
-			user: OWNER,
-			summary: { remaining: 0, usedThisMonth: 0, usedLifetime: 0 },
-			metered: false,
-			history: [],
-			bundles: [],
-			mercadoPagoBundles: [],
-			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: false, card: null },
-			autoTopupConsentText: 'consent',
-			stripeConfigured: true,
-			plans: { hosted: true, lifetime: true },
-			billing: { plan: 'hosted', subscriptionStatus: 'active', periodEnd: '2026-10-19T00:00:00.000Z' }
-		};
+		const base = { ...usagePageData(), billing: { plan: 'hosted', subscriptionStatus: 'active', periodEnd: '2026-10-19T00:00:00.000Z' } };
 		const body = render(Page, { props: { data: base, form: null } as never }).body;
 		expect(body).toContain('Manage subscription');
 		expect(body).toContain('action="?/manageCards"');
@@ -439,21 +395,7 @@ describe('usage load', () => {
 		// The cancel is already scheduled — the page must SAY so (silence is
 		// the bug: the canceled sub looked identical to a live one) and the
 		// lifetime offer unlocks immediately instead of after period end.
-		const base = {
-			maintenance: false,
-			user: OWNER,
-			summary: { remaining: 0, usedThisMonth: 0, usedLifetime: 0 },
-			metered: false,
-			history: [],
-			bundles: [],
-			mercadoPagoBundles: [],
-			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: false, card: null },
-			autoTopupConsentText: 'consent',
-			stripeConfigured: true,
-			plans: { hosted: true, lifetime: true },
-			lifetimeSlots: 997,
-			billing: { plan: 'hosted', subscriptionStatus: 'active', periodEnd: '2026-10-19T00:00:00.000Z', cancelAtPeriodEnd: true }
-		};
+		const base = { ...usagePageData(), lifetimeSlots: 997, billing: { plan: 'hosted', subscriptionStatus: 'active', periodEnd: '2026-10-19T00:00:00.000Z', cancelAtPeriodEnd: true } };
 		const body = render(Page, { props: { data: base, form: null } as never }).body;
 		expect(body).toContain('Manage subscription');
 		expect(body).toContain('subscription is canceled');

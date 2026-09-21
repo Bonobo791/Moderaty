@@ -337,6 +337,21 @@ async function storedKey(orgId = 'org-1') {
 	return org?.openaiKeyEnc ?? null;
 }
 
+// Runs setOpenAiKey under fake timers so fetchWithRetry's 5xx backoff is
+// skipped — returns the failed action result plus the console.error spy
+// for the per-test assertions.
+async function setKeyUnderFakeTimers(openAiKey: string) {
+	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	vi.useFakeTimers();
+	try {
+		const pending = actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey }));
+		await vi.advanceTimersByTimeAsync(20_000); // fetchWithRetry backoff on 5xx
+		return { bad: failure(await pending), spy };
+	} finally {
+		vi.useRealTimers();
+	}
+}
+
 test('setOpenAiKey: owner stores an encrypted key after live validation; the page only ever exposes a boolean', async () => {
 	await seedOwnerOrg('lifetime');
 	const calls = stubOpenAi(200);
@@ -447,17 +462,9 @@ test('setOpenAiKey: OpenAI forbidding the key (403) fails 400 and stores nothing
 test('setOpenAiKey: an OpenAI server error fails 502, logs the status, and stores nothing', async () => {
 	await seedOwnerOrg('lifetime');
 	stubOpenAi(500);
-	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
-	vi.useFakeTimers();
-	try {
-		const pending = actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: 'sk-server-error' }));
-		await vi.advanceTimersByTimeAsync(20_000); // fetchWithRetry backoff on 5xx
-		const bad = failure(await pending);
-		expect(bad.status).toBe(502);
-		expect(bad.data.error).toBe('OpenAI could not validate the key right now — try again in a moment.');
-	} finally {
-		vi.useRealTimers();
-	}
+	const { bad, spy } = await setKeyUnderFakeTimers('sk-server-error');
+	expect(bad.status).toBe(502);
+	expect(bad.data.error).toBe('OpenAI could not validate the key right now — try again in a moment.');
 	expect(await storedKey()).toBeNull();
 	expect(spy).toHaveBeenCalledWith('OpenAI key validation returned a non-OK status:', 500);
 });
@@ -469,17 +476,9 @@ test('setOpenAiKey: an unreachable OpenAI fails 502 and logs only a message, nev
 	vi.stubGlobal('fetch', async () => {
 		throw new Error('fetch failed');
 	});
-	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
-	vi.useFakeTimers();
-	try {
-		const pending = actions.setOpenAiKey(ctx(TEST_OWNER, { openAiKey: 'sk-secret-key' }));
-		await vi.advanceTimersByTimeAsync(20_000); // fetchWithRetry backoff
-		const bad = failure(await pending);
-		expect(bad.status).toBe(502);
-		expect(bad.data.error).toBe('Could not reach OpenAI to validate the key — try again in a moment.');
-	} finally {
-		vi.useRealTimers();
-	}
+	const { bad, spy } = await setKeyUnderFakeTimers('sk-secret-key');
+	expect(bad.status).toBe(502);
+	expect(bad.data.error).toBe('Could not reach OpenAI to validate the key — try again in a moment.');
 	expect(await storedKey()).toBeNull();
 	expect(spy).toHaveBeenCalled();
 	expect(spy).toHaveBeenCalledWith('OpenAI key validation request failed:', 'fetch failed');

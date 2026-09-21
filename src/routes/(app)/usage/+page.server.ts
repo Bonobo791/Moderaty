@@ -28,6 +28,7 @@ import { lifetimeSlotsRemaining } from '$lib/server/billing/entitlements';
 import { createMercadoPagoCreditCheckout } from '$lib/server/mercadopago/checkout';
 import { configuredMercadoPagoBundles } from '$lib/server/mercadopago/bundles';
 import { isUnmeteredPlan, listCreditTransactions, orgIsMetered, usageSummary } from '$lib/server/billing/ledger';
+import { isActiveSubscriptionStatus } from '$lib/server/billing/plans';
 import { db } from '$lib/server/db';
 import { organizations } from '$lib/server/db/schema';
 import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
@@ -143,6 +144,7 @@ export const load: PageServerLoad = async ({ locals }) => {
 				stripeDefaultPmId: organizations.stripeDefaultPmId,
 				creditsRemaining: organizations.creditsRemaining,
 				plan: organizations.plan,
+				stripeSubscriptionId: organizations.stripeSubscriptionId,
 				stripeSubscriptionStatus: organizations.stripeSubscriptionStatus,
 				stripeSubscriptionPeriodEnd: organizations.stripeSubscriptionPeriodEnd,
 				stripeSubscriptionCancelAtPeriodEnd: organizations.stripeSubscriptionCancelAtPeriodEnd,
@@ -193,7 +195,12 @@ export const load: PageServerLoad = async ({ locals }) => {
 				periodEnd: org.stripeSubscriptionPeriodEnd,
 				// 1 while the subscription is scheduled to end (either Stripe
 				// mechanism: cancel_at_period_end or the portal's cancel_at).
-				cancelAtPeriodEnd: org.stripeSubscriptionCancelAtPeriodEnd === 1
+				cancelAtPeriodEnd: org.stripeSubscriptionCancelAtPeriodEnd === 1,
+				// The hosted subscription can still be inside its paid window
+				// after a lifetime upgrade (cancel→lifetime wind-down) — the
+				// page shows it as its own line, never attached to the lifetime
+				// plan label (a lifetime plan has no period to end).
+				subscriptionLive: Boolean(org.stripeSubscriptionId) && isActiveSubscriptionStatus(org.stripeSubscriptionStatus)
 			},
 			// Never serialize secrets: the page gets a boolean only. Lifetime
 			// orgs with hasOpenAiKey=false see the required-key warning.

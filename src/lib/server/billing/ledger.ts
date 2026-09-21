@@ -78,12 +78,16 @@ export function hasHostedEntitlement(input: { plan: string; stripeSubscriptionId
  */
 export async function getCredits(orgId: string): Promise<number> {
 	const row = await db
-		.select({ creditsRemaining: organizations.creditsRemaining, plan: organizations.plan, stripeSubscriptionId: organizations.stripeSubscriptionId })
+		.select({ creditsRemaining: organizations.creditsRemaining })
 		.from(organizations)
 		.where(eq(organizations.id, orgId))
 		.get();
 	if (!row) throw new Error(`org not found: ${orgId}`);
-	if (!hasHostedEntitlement(row)) return row.creditsRemaining ?? 0;
+	// A paid, in-window subscription period always contributes its
+	// unconsumed included comments — the org paid for them and they were
+	// never refunded, whatever the current plan (a cancel→lifetime upgrade
+	// keeps the hosted period live until it ends). No plan gate here: the
+	// period row's status + window is the authority.
 	const now = new Date().toISOString();
 	const period = await db
 		.select({ remaining: sql<number>`COALESCE(SUM(${stripeSubscriptionPeriods.includedCredits} - ${stripeSubscriptionPeriods.consumedCredits}), 0)` })

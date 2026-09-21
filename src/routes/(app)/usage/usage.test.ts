@@ -308,6 +308,40 @@ describe('usage load', () => {
 		expect(owned).toContain('lifetime plan');
 	});
 
+	test('a lifetime org never gets a period end on the plan line — a live hosted subscription shows separately', async () => {
+		// After a cancel→lifetime upgrade the subscription keeps its paid
+		// window, but "period ends" belongs to the SUBSCRIPTION — the lifetime
+		// plan has no period. The live sub renders as its own line so the
+		// user can see it winding down.
+		const base = {
+			maintenance: false,
+			user: OWNER,
+			summary: { remaining: 200, usedThisMonth: 0, usedLifetime: 0 },
+			metered: false,
+			history: [],
+			bundles: [],
+			mercadoPagoBundles: [],
+			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: false },
+			autoTopupConsentText: 'consent',
+			stripeConfigured: true,
+			plans: { hosted: true, lifetime: true },
+			hasOpenAiKey: true
+		};
+		const windingDown = render(Page, {
+			props: { data: { ...base, billing: { plan: 'lifetime', subscriptionStatus: 'active', periodEnd: '2026-10-19T22:46:39.000Z', cancelAtPeriodEnd: true, subscriptionLive: true } }, form: null } as never
+		}).body;
+		expect(windingDown).toContain('Current plan: <strong>lifetime</strong>');
+		expect(windingDown).not.toContain('period ends');
+		expect(windingDown).toContain('Hosted subscription');
+		expect(windingDown).toContain(new Date('2026-10-19T22:46:39.000Z').toLocaleDateString());
+
+		// Once the subscription is terminal there is nothing to show.
+		const ended = render(Page, {
+			props: { data: { ...base, billing: { plan: 'lifetime', subscriptionStatus: 'canceled', periodEnd: '2026-10-19T22:46:39.000Z', cancelAtPeriodEnd: false, subscriptionLive: false } }, form: null } as never
+		}).body;
+		expect(ended).not.toContain('Hosted subscription');
+	});
+
 	test('a lifetime org sees its required BYOK state — a loud missing-key warning or the saved-key status', async () => {
 		// BYOK is not optional on lifetime: no stored key means scoring cannot
 		// run (resolveOpenAiKey withholds the deployment key, comments queue).

@@ -118,10 +118,18 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 {#if isOwner && (data.plans.hosted || data.plans.lifetime || data.billing?.plan === 'hosted' || data.billing?.plan === 'lifetime')}
 	<div class="card">
 		<h2 style="margin-top:0">Plans</h2>
-		<p class="muted">Current plan: <strong>{data.billing?.plan ?? 'free'}</strong>{#if data.billing?.periodEnd} · period ends {new Date(data.billing.periodEnd).toLocaleDateString()}{/if}</p>
+		<p class="muted">Current plan: <strong>{data.billing?.plan ?? 'free'}</strong>{#if data.billing?.plan === 'hosted' && data.billing?.periodEnd} · period ends {new Date(data.billing.periodEnd).toLocaleDateString()}{/if}</p>
 		<div class="plan-actions">
 			{#if data.billing?.plan === 'lifetime'}
 				<p class="muted">You have the lifetime plan — unlimited moderated comments.</p>
+				{#if data.billing.subscriptionLive && data.billing.periodEnd}
+					<!-- The previous hosted subscription keeps its paid window after
+					the upgrade — a separate line, never part of the lifetime plan
+					label (a lifetime plan has no period to end). -->
+					<p class="muted">
+						Hosted subscription {data.billing.cancelAtPeriodEnd ? 'ends' : 'renews'} {new Date(data.billing.periodEnd).toLocaleDateString()}.
+					</p>
+				{/if}
 				<!-- BYOK is REQUIRED on lifetime, not a perk: the plan's price
 				cannot fund operator-side scoring, so resolveOpenAiKey withholds
 				the deployment key and a keyless org's comments land in the

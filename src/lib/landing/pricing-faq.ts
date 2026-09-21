@@ -28,7 +28,7 @@ export const PRICING_FAQ_ENTRIES: { q: string; a: string }[] = [
 	},
 	{
 		q: 'What does BYOK mean?',
-		a: 'Bring your own key. Self-hosted Moderaty and the lifetime plan score comments with your OpenAI API key, on your account, so the AI cost is yours at OpenAI prices instead of ours. We never see the key.'
+		a: 'Bring your own key. Self-hosted Moderaty uses the OpenAI key configured on your infrastructure, so we never see it. The lifetime plan also scores on your OpenAI API key, so the AI cost is yours at OpenAI prices instead of ours; hosted keys are stored encrypted, and the service processes them to validate the key and score comments.'
 	},
 	{
 		q: 'Why is self-hosting free?',

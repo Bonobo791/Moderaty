@@ -34,7 +34,12 @@ export function stripeIdentifierPredicate(input: StripeIdentifiers, paymentInten
 	// DISAGREES must still exclude the row, since a mismatched pair cannot
 	// come from the same payment.
 	if (input.paymentIntentId && input.chargeId) {
+		// Tolerate a missing column, but require at least one POSITIVE match:
+		// a row storing neither ref would satisfy the no-contradiction checks
+		// for every refund and could mark an unrelated period refunded
+		// (coderabbit).
 		return and(
+			or(eq(paymentIntentColumn, input.paymentIntentId), eq(chargeColumn, input.chargeId)),
 			or(eq(paymentIntentColumn, input.paymentIntentId), isNull(paymentIntentColumn)),
 			or(eq(chargeColumn, input.chargeId), isNull(chargeColumn))
 		) as SQL<unknown>;

@@ -52,6 +52,13 @@ export async function resolveOpenAiKey(orgId: string | null): Promise<string | u
 			.get();
 		enc = row?.openaiKeyEnc;
 		plan = row?.plan;
+		// A missing row is an integrity violation, not a normal state — the
+		// plan is unreadable, so fail closed exactly like a failed read: the
+		// org could be lifetime and the deployment key is not theirs to burn.
+		if (!row) {
+			console.error('organization not found — plan unknown, so no deployment-key fallback (a lifetime org would burn it)', { orgId });
+			return undefined;
+		}
 	} catch (error) {
 		// Loud, and NO fallback: a mid-run DB hiccup must neither abort the
 		// batch nor go unnoticed — resolve nothing and let the scorer defer

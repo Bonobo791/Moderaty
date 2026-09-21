@@ -1212,7 +1212,13 @@ async function teardownDuplicateSubscription(duplicateSubscriptionId: string, or
 	const live = await fetchLiveSubscription(duplicateSubscriptionId);
 	const liveStatus = live && typeof live.status === 'string' && live.status.length > 0 ? live.status : undefined;
 	let canceled: StripeRecord;
-	if (live && liveStatus && !subscriptionStatusIsLive(liveStatus)) {
+	if (!live) {
+		// resource_missing means the subscription is gone — canceling a
+		// subscription Stripe no longer has would 400 and fail the delivery
+		// before the refund leg ever retries (coderabbit).
+		console.info(`stripe: duplicate subscription ${duplicateSubscriptionId} for org ${orgId} is already gone — skipping the cancel`);
+		canceled = {};
+	} else if (liveStatus && !subscriptionStatusIsLive(liveStatus)) {
 		console.info(`stripe: duplicate subscription ${duplicateSubscriptionId} for org ${orgId} is already ${liveStatus} — skipping the second cancel`);
 		canceled = live;
 	} else {

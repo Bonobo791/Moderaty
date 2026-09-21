@@ -556,19 +556,24 @@ describe('lifetime BYOK disclosure matches the required-key Terms', () => {
 		'pricing page meta': readRoute('pricing', '+page.svelte')
 	};
 
+	// Disclosure must be USER-VISIBLE: source comments can carry the phrase
+	// while the rendered copy says nothing, so strip HTML comments before
+	// matching (coderabbit).
+	const visible = (text: string) => text.replace(/<!--[\s\S]*?-->/g, '');
+
 	it('every surface that sells the lifetime plan discloses the required OpenAI key', () => {
 		for (const [name, text] of Object.entries(lifetimeSurfaces)) {
-			expect(text, `${name} sells lifetime without disclosing the required OpenAI key (Terms §6.1(c))`).toMatch(/own OpenAI (API )?key/i);
+			expect(visible(text), `${name} sells lifetime without disclosing the required OpenAI key (Terms §6.1(c))`).toMatch(/own OpenAI (API )?key/i);
 		}
 		const lifetimeFaq = PRICING_FAQ_ENTRIES.find((f) => f.q === 'What is the $49 lifetime deal?');
 		expect(lifetimeFaq?.a).toMatch(/own OpenAI API key/i);
 	});
 
 	it('no surface claims the operator runs lifetime AI or that buyers never touch a key', () => {
-		const FALSE = [/we run the AI/i, /never touch a key/i, /no key to manage/i];
+		const FALSE = [/we run the AI/i, /never touch a key/i, /no key to manage/i, /we never see the key/i];
 		for (const [name, text] of Object.entries(lifetimeSurfaces)) {
 			for (const pattern of FALSE) {
-				expect(text, `${name} still claims we run lifetime AI: ${pattern}`).not.toMatch(pattern);
+				expect(visible(text), `${name} still claims we run lifetime AI: ${pattern}`).not.toMatch(pattern);
 			}
 		}
 		const lifetimeFaq = PRICING_FAQ_ENTRIES.find((f) => f.q === 'What is the $49 lifetime deal?');

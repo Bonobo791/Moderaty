@@ -70,6 +70,23 @@ describe('subscription period entitlements', () => {
 		expect(period?.status).toBe('refunded');
 	});
 
+	test('a both-refs refund never matches a period row whose identifiers are BOTH null', async () => {
+		// The no-contradiction predicate tolerates one missing column, but a
+		// row storing NEITHER ref would otherwise satisfy it for every refund —
+		// marking an unrelated paid period refunded and (via the webhook's
+		// refundedSubscription lookup) canceling its subscription (coderabbit).
+		// At least one stored identifier must positively match.
+		const now = Date.now();
+		await testDb().db.insert(stripeSubscriptionPeriods).values({
+			orgId: 'org-1', subscriptionId: 'sub-1', invoiceId: 'in-bare', paymentIntentId: null, chargeId: null,
+			periodKey: 'p1', periodStart: new Date(now - 86_400_000).toISOString(), periodEnd: new Date(now + 86_400_000).toISOString(),
+			includedCredits: 100, consumedCredits: 0, status: 'paid'
+		});
+		expect(await refundSubscriptionPeriod({ paymentIntentId: 'pi-1', chargeId: 'ch-1' })).toBe(false);
+		const period = await testDb().db.select().from(stripeSubscriptionPeriods).where(eq(stripeSubscriptionPeriods.invoiceId, 'in-bare')).get();
+		expect(period?.status).toBe('paid');
+	});
+
 	test('a refund matches a period that stored only the charge', async () => {
 		const now = Date.now();
 		await testDb().db.insert(stripeSubscriptionPeriods).values({

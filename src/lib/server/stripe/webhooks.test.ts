@@ -1378,6 +1378,23 @@ describe('reverseCharge / reverseDispute', () => {
 		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_dup', metadata: { reason: 'ungrantable', org_id: 'org-1' } }, { idempotencyKey: 'refund:ungrantable:subscription:sub_dup' });
 	});
 
+	test('a duplicate subscription Stripe no longer knows is skipped as terminal — the refund leg still runs', async () => {
+		// fetchLiveSubscription returns null only on resource_missing: the sub
+		// is GONE, so canceling would 400 and fail the delivery before the
+		// refund leg retries (coderabbit). Missing = terminal — skip the cancel,
+		// continue to the invoice's paid payment.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeSubscriptionId: 'sub_main', stripeSubscriptionStatus: 'active', stripeCustomerId: 'cus_1' });
+		mocks.subscriptionsRetrieve.mockImplementation(async (id: string) => {
+			if (id === 'sub_main') return { id, status: 'active' };
+			throw Object.assign(new Error('No such subscription'), { type: 'StripeInvalidRequestError', code: 'resource_missing' });
+		});
+		mocks.invoicePaymentsList.mockResolvedValue({ data: [{ invoice: 'in_dup', payment: { payment_intent: 'pi_dup', charge: 'ch_dup' } }] });
+		const paid = event('invoice.paid', 'evt_dup_gone', { id: 'in_dup', customer: 'cus_1', parent: { type: 'subscription_details', subscription_details: { subscription: 'sub_gone' } } }, 500);
+		expect(await handleStripeEvent(paid as never)).toBe(true);
+		expect(mocks.subscriptionsCancel).not.toHaveBeenCalled();
+		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_dup', metadata: { reason: 'ungrantable', org_id: 'org-1' } }, { idempotencyKey: 'refund:ungrantable:subscription:sub_gone' });
+	});
+
 	test('an already-canceled subscription is not re-canceled on refund replay', async () => {
 		// Idempotent: redelivery after the first cancel must not call cancel
 		// again (a cancel on a canceled subscription errors at Stripe).

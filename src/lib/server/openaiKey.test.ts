@@ -59,11 +59,17 @@ test('a null org (pre-account channel) uses the env key — without touching the
 	expect(spy).not.toHaveBeenCalled();
 });
 
-test('an unknown org uses the env key — quietly', async () => {
+test('an unknown org resolves NO key — the plan is unknown, so the env key may belong to a lifetime org', async () => {
+	// A channel pointing at a deleted or never-created org is an integrity
+	// violation, not a normal state: the plan is unreadable, so fail closed
+	// exactly like a failed read — resolving the deployment key could hand it
+	// to a lifetime org that must never spend it (coderabbit).
 	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
-	expect(await resolveOpenAiKey('org-missing')).toBe('env-openai-key');
-	// No stored row is a normal state, not an error: no loud log.
-	expect(spy).not.toHaveBeenCalled();
+	expect(await resolveOpenAiKey('org-missing')).toBeUndefined();
+	expect(spy).toHaveBeenCalledWith(
+		'organization not found — plan unknown, so no deployment-key fallback (a lifetime org would burn it)',
+		{ orgId: 'org-missing' }
+	);
 });
 
 test('a stored key on a metered org is ignored WITHOUT decrypting — even corrupt ciphertext resolves the env key', async () => {

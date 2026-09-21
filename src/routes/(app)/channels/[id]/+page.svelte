@@ -60,6 +60,12 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 	// settle alone would revert the box and poison the next submit's
 	// whole-row payload. Failures revert in the settle handler (MOD-10).
 	$effect(() => {
+		// No release while a save is in flight or queued: toggling back to the
+		// still-showing pre-commit value satisfies the equality mid-flight,
+		// and the first save's landing would then display — and the queued
+		// re-fire serialize — the committed value, persisting the opposite of
+		// the user's final choice (codex+coderabbit, PR #147).
+		if (protectionsSaving || protectionsQueued) return;
 		if (protectLgbtqia !== null && (ch.protectLgbtqia === 1) === protectLgbtqia) protectLgbtqia = null;
 		if (protectWomen !== null && (ch.protectWomen === 1) === protectWomen) protectWomen = null;
 		if (protectLgbtqia === null && protectWomen === null) {

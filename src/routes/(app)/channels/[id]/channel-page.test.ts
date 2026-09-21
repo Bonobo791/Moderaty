@@ -291,6 +291,16 @@ test('a queued protection re-fire freezes both boxes to the displayed intent (co
 	);
 });
 
+test('the echo release cannot clear protection overrides while a save is in flight or queued (codex+coderabbit, PR #147)', () => {
+	// Toggle on → toggle back mid-flight: the second value equals the stale
+	// pre-commit row, so an unguarded echo check clears the override — the
+	// first save's landing then displays the committed value and the queued
+	// re-fire serializes it, persisting the opposite of the user's final
+	// choice. Same guard as SensitivitySwitch's echo release.
+	const source = readFileSync(new URL('./+page.svelte', import.meta.url), 'utf8');
+	expect(source).toMatch(/if \(protectionsSaving \|\| protectionsQueued\) return/);
+});
+
 test('an unechoed protection override releases on a bounded timer (codex, PR #147)', () => {
 	// A concurrent write after our commit can mean the echo never lands —
 	// unbounded overrides would mask every 15s autoRefresh forever, and a

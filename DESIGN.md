@@ -123,6 +123,13 @@ components:
 
 **Creative North Star: "The Cyclorama Cue Sheet"**
 
+> **Superseded spec.** The Cyclorama system below (cyc-black/cobalt/rose/dawn,
+> Saira family, no-green/no-amber) predates the shipped redesign — the code
+> uses the terminal-ink system in "Landing brief (shipped redesign)" further
+> down (ink canvas, banhammer pink, mint/amber verdicts, Archivo + IBM Plex
+> Mono). Where the two disagree, the shipped redesign is authoritative; this
+> section stays for its naming and story rationale (coderabbit, PR #147).
+
 Moderaty renders the product's promise — the night's comments cleared before
 morning — as a stage lighting plot. The landing page is one seamless cyclorama:
 a depthless cyc-black ground (`#050506`) with a low cobalt horizon, rose

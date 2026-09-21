@@ -30,7 +30,12 @@ export type LegalDoc = {
 	toc: LegalTocEntry[];
 };
 
-export const LEGAL_EFFECTIVE_DATE = '17 August 2026';
+export const LEGAL_EFFECTIVE_DATE = '20 September 2026';
+// 1.11: LIFETIME BYOK REQUIRED — Terms §6.1(c) rewritten: the lifetime plan
+// scores on the buyer's own OpenAI key, which the buyer must provide and
+// keep valid (a keyless lifetime org's comments queue for manual review —
+// no operator-key scoring). Material change: users without a 1.11 consent
+// row are routed back through /consent.
 // 1.10: LICENSE SWAP — the self-hosted grant changed to the
 // PolyForm Shield License 1.0.0 (Terms §6.1(a); footer, FAQ, pricing, and
 // the license link updated to match the LICENSE file). Material change:
@@ -58,7 +63,7 @@ export const LEGAL_EFFECTIVE_DATE = '17 August 2026';
 // 1.5: Terms §6.1(c) corrected — the lifetime hosted plan has no per-account
 // key flow (hosted scoring runs on the deployment's OPENAI_API_KEY), so the
 // "your own OpenAI key" promise was removed from the lifetime clause.
-export const LEGAL_VERSION = '1.10';
+export const LEGAL_VERSION = '1.11';
 export const LEGAL_KICKER = 'YouTube Comment Moderation Service';
 
 /**

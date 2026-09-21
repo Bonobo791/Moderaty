@@ -38,15 +38,14 @@ function readRoute(slug: string, file: string): string {
 }
 
 describe('LEGAL_DOCS', () => {
-	it('the billing terms (auto top-up authorization, bundle refunds, billable scope) shipped under a NEW legal version', () => {
-		// The STRIPE BILLING commit rewrote Terms §6.1/§6.2 materially (bundle
-		// model, unscheduled auto top-up authorization), and the billable-scope
-		// correction rewrote §6.1(d) (credits consumed by live AI-scored
-		// comments only) — exactly the "material legal-doc change" that must
-		// bump LEGAL_VERSION so the re-consent gate (hasCurrentConsent) routes
-		// every user back through /consent. Never let billing terms ride along
-		// under an old version.
-		expect(LEGAL_VERSION).toBe('1.10');
+	it('material Terms changes always ship under a NEW legal version', () => {
+		// 1.10 was the PolyForm license swap; 1.11 is the lifetime-BYOK
+		// requirement — §6.1(c) now makes the buyer's own OpenAI key mandatory
+		// for lifetime scoring — exactly the "material legal-doc change" that
+		// must bump LEGAL_VERSION so the re-consent gate (hasCurrentConsent)
+		// routes every user back through /consent. Never let legal changes
+		// ride along under an old version.
+		expect(LEGAL_VERSION).toBe('1.11');
 	});
 
 	it('lists exactly the three published legal documents', () => {
@@ -532,14 +531,12 @@ describe('AI-cost claims match implementation', () => {
 	});
 });
 
-// Lifetime BYOK claims removed: the per-account key flow now exists
-// (owner-only Team page card → organizations.openai_key_enc → resolveOpenAiKey
-// prefers it over env.OPENAI_API_KEY at scoring time), but public marketing
-// still does not promise it — "lifetime buyers score on their own account"
-// remains an unadvertised opt-in. BYOK claims may only appear where they were
-// always true: the self-hosted tier. Restore the lifetime claims only after a
-// maintainer decision, since advertising them rewrites Terms §6.1(c) and
-// needs a LEGAL_VERSION bump plus re-consent.
+// Lifetime BYOK is now REQUIRED — maintainer decision shipped in
+// LEGAL_VERSION 1.11: Terms §6.1(c) states the lifetime plan scores on the
+// buyer's own OpenAI key (resolveOpenAiKey withholds the deployment key from
+// lifetime orgs entirely). Marketing surfaces still do not sell it — the
+// pricing panels and FAQ keep the plan description unchanged — so these
+// guards stay. The BYOK FAQ answer remains scoped to self-hosting.
 describe('lifetime BYOK claims stay out of unadvertised marketing', () => {
 	const lifetimeSurfaces: Record<string, string> = {
 		PlanLifetime: readFileSync(
@@ -566,10 +563,18 @@ describe('lifetime BYOK claims stay out of unadvertised marketing', () => {
 		expect(lifetimeFaq?.a).not.toMatch(/own OpenAI key/i);
 	});
 
-	it('Terms §6.1 clause (c) no longer promises lifetime buyers their own key', () => {
+	it('Terms §6.1 clause (c) states the lifetime plan scores on the buyer’s own key', () => {
+		// Maintainer decision (LEGAL_VERSION 1.11): lifetime BYOK is REQUIRED,
+		// not an opt-in — clause (c) must say the plan runs on the buyer's key,
+		// that the key is mandatory, and that scoring on our key is not
+		// included. A regression that quietly drops the requirement — or
+		// restores the old "run by us" claim — must fail here.
 		const terms = readComponent('terms');
 		const s61 = terms.slice(terms.indexOf('<strong>6.1</strong>'));
-		expect(s61.slice(0, s61.indexOf('</p>'))).not.toMatch(/\(c\)[^;]*OpenAI key/i);
+		const clause = s61.slice(0, s61.indexOf('</p>'));
+		expect(clause).toMatch(/\(c\)[^;]*own OpenAI API key/i);
+		expect(clause).toMatch(/\(c\)[^;]*must provide/i);
+		expect(clause).not.toMatch(/\(c\)[^;]*run by us/i);
 	});
 
 	it('the BYOK FAQ answer is scoped to self-hosting, where the claim is true', () => {

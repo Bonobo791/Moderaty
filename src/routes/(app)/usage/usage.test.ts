@@ -555,6 +555,27 @@ describe('usage buy action', () => {
 		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
 	});
 
+	test('a bundle Price whose amount contradicts the advertised discount answers 400 — never "try again"', async () => {
+		// validateBundlePrice rejects the misconfigured catalog entry before
+		// any durable state; the action must surface the sanitized
+		// non-retryable verdict instead of a generic retry prompt (codex).
+		await seedOrg();
+		mocks.pricesRetrieve.mockResolvedValue({ id: 'price_500', active: true, currency: 'usd', type: 'one_time', unit_amount: 4900 });
+		const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+		try {
+			const result = await buy('credits_500');
+			expect(result).toMatchObject({ status: 400 });
+			const serialized = JSON.stringify(result);
+			expect(serialized).toContain('misconfigured');
+			expect(serialized).not.toContain('STRIPE_PRICE_CREDITS_500');
+			expect(serialized).not.toContain('try again');
+			expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+			expect(await testDb().db.select().from(stripeCheckoutAttempts)).toHaveLength(0);
+		} finally {
+			infoSpy.mockRestore();
+		}
+	});
+
 	test('an unknown bundle fails loudly without echoing the submitted id', async () => {
 		// A tampered/stale bundle id is an internal validation failure — the
 		// response stays generic (500), the detail lives in the server log only.

@@ -515,4 +515,20 @@ describe('checkoutRejectionMessage', () => {
 		// is crafted, and the missing-var defect stays a generic 500.
 		expect(checkoutRejectionMessage(new Error('STRIPE_TEST_PRODUCT is not configured'))).toBeNull();
 	});
+
+	test('a misconfigured bundle Price is a non-retryable operator rejection', () => {
+		// validateBundlePrice errors are permanent deployment faults — the
+		// buyer-facing button would otherwise fail forever behind a generic
+		// "try again" (codex). The env var name stays in the server log.
+		const message = checkoutRejectionMessage(new Error('STRIPE_PRICE_CREDITS_500 Stripe Price must charge 2040 cents'));
+		expect(message).toContain('misconfigured');
+		expect(message).not.toContain('STRIPE_PRICE_CREDITS_500');
+	});
+
+	test('a missing bundle Price env stays a server defect, not a rejection', () => {
+		// Same rule as the test product: the button only renders for
+		// configured bundles, so an unset env means a crafted POST — generic
+		// 500, never a sanitized rejection.
+		expect(checkoutRejectionMessage(new Error('STRIPE_PRICE_CREDITS_500 is not configured'))).toBeNull();
+	});
 });

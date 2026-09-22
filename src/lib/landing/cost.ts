@@ -13,7 +13,7 @@
 //
 // Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
-import { progressiveCreditCostUsd } from '$lib/credit-pricing';
+import { purchasableCreditCostUsd } from '$lib/credit-pricing';
 
 export const MONTHLY_PLAN_USD = 5;
 export const INCLUDED_COMMENTS = 100;
@@ -29,9 +29,11 @@ export function validateCommentCount(value: number): number {
 export function hostedCostUsd(value: number): number {
 	const comments = validateCommentCount(value);
 	if (comments === 0) return 0;
-	// Past the included 100, top-up comments price progressively: the first
-	// 100 pay full price, then each deeper tranche pays its band's rate.
-	return MONTHLY_PLAN_USD + progressiveCreditCostUsd(Math.max(0, comments - INCLUDED_COMMENTS));
+	// Past the included 100, top-up comments are forecast at the cheapest
+	// purchasable combination of the fixed 100/500/2,000-credit bundles —
+	// the per-tranche progressive rate is not buyable between bundle sizes,
+	// so it would understate the real cost (codex).
+	return MONTHLY_PLAN_USD + purchasableCreditCostUsd(Math.max(0, comments - INCLUDED_COMMENTS));
 }
 
 export type CostForecast = {

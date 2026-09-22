@@ -75,6 +75,14 @@ export function checkoutRejectionMessage(error: unknown): string | null {
 	if (error.message !== 'STRIPE_TEST_PRODUCT is not configured' && error.message.startsWith('STRIPE_TEST_PRODUCT')) {
 		return 'The test checkout is misconfigured on this deployment — the exact reason is in the server log.';
 	}
+	// Same rule for the bundle catalog: validateBundlePrice/priceIdFor errors
+	// on a CONFIGURED STRIPE_PRICE_CREDITS_* var are permanent deployment
+	// faults, not transient failures — the advertised button would otherwise
+	// fail forever behind "please try again" (codex). The missing-var case
+	// stays a 500: the button only renders for configured bundles.
+	if (!error.message.endsWith(' is not configured') && error.message.startsWith('STRIPE_PRICE_CREDITS_')) {
+		return 'This credit bundle is misconfigured on this deployment — the exact reason is in the server log.';
+	}
 	return null;
 }
 

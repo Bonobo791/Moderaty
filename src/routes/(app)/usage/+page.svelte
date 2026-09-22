@@ -35,6 +35,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		const keys = [
 			'hosted',
 			'lifetime',
+			'test',
 			...data.bundles.map((bundle: { id: string }) => bundle.id),
 			...mercadoPagoBundles.map((bundle: { id: string }) => `mercadopago:${bundle.id}`)
 		];
@@ -219,7 +220,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 					<form method="POST" action="?/buy" use:enhance={submitting}>
 						<input type="hidden" name="bundle" value={bundle.id} />
 						<input type="hidden" name="attempt_id" value={checkoutAttempts[bundle.id] ?? ''} />
-						<button class="btn primary" type="submit" disabled={pending}>Buy {bundle.label}</button>
+						<button class="btn primary" type="submit" disabled={pending}>Buy {bundle.label}{#if bundle.discountPercent}{' · '}{bundle.discountPercent}% off{/if}</button>
 					</form>
 				{/each}
 			</div>
@@ -295,6 +296,24 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 			</button>
 		</form>
 	</div>
+	{/if}
+
+	{#if data.testProduct && data.stripeConfigured}
+		<div class="card">
+			<h2 style="margin-top:0">Test checkout</h2>
+			<p class="muted">
+				STRIPE_TEST_PRODUCT is configured on this deployment — run a live test purchase to
+				verify checkout, webhooks, and credit granting end-to-end. A completed payment grants
+				1 credit and shows up in the purchase history below; on a lifetime plan the payment is
+				refunded automatically instead. On a metered plan the payment method is saved for
+				automatic top-up — if it differs from the saved card, automatic top-up is disabled
+				until you re-enable it with fresh consent. Remove the variable to hide this.
+			</p>
+			<form method="POST" action="?/buyTest" use:enhance={submitting}>
+				<input type="hidden" name="attempt_id" value={checkoutAttempts.test ?? ''} />
+				<button class="btn secondary" type="submit" disabled={pending}>Run test purchase</button>
+			</form>
+		</div>
 	{/if}
 
 	<div class="card">

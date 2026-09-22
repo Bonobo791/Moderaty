@@ -23,6 +23,7 @@ import { applyLedgerDelta, consumeCredit } from '$lib/server/billing/ledger';
 import { claimLifetimeSlot } from '$lib/server/billing/entitlements';
 import { LIFETIME_SLOT_LIMIT } from '$lib/server/billing/plans';
 import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
+import { configuredBundles } from '$lib/server/stripe/bundles';
 
 const mocks = vi.hoisted(() => ({
 	sessionsCreate: vi.fn(),
@@ -47,9 +48,12 @@ vi.mock('$env/dynamic/private', () => ({
 		STRIPE_PRICE_CREDITS_500: 'price_500',
 		STRIPE_PRICE_CREDITS_2000: 'price_2000',
 		STRIPE_PRICE_HOSTED_MONTHLY: 'price_hosted',
-		STRIPE_PRICE_LIFETIME: 'price_lifetime'
+		STRIPE_PRICE_LIFETIME: 'price_lifetime',
+		STRIPE_TEST_PRODUCT: 'price_test'
 	}
 }));
+
+import { env } from '$env/dynamic/private';
 
 import { render } from 'svelte/server';
 
@@ -77,6 +81,10 @@ function buyPlan(plan: string, user: SessionUser | null = OWNER) {
 	return actions.buyPlan({ request: postForm({ plan }), locals: { user } } as never);
 }
 
+function buyTest(user: SessionUser | null = OWNER) {
+	return actions.buyTest({ request: postForm({}), locals: { user } } as never);
+}
+
 function setAutoTopup(fields: Record<string, string>, user: SessionUser | null = OWNER) {
 	return actions.setAutoTopup({ request: postForm(fields), locals: { user } } as never);
 }
@@ -89,8 +97,15 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.sessionsCreate.mockResolvedValue({ id: 'cs_new', url: 'https://checkout.stripe.com/pay/test_123' });
 	mocks.customersCreate.mockResolvedValue({ id: 'cus_new' });
-	mocks.pricesRetrieve.mockImplementation(async (id: string) => id === 'price_hosted' ? { id, active: true, currency: 'usd', type: 'recurring', unit_amount: 500, recurring: { interval: 'month', interval_count: 1 } } : { id, active: true, currency: 'usd', type: 'one_time', unit_amount: 4900 });
+	// Bundle Prices must charge the shared catalog amount — the checkout
+	// validates unit_amount against expectedBundlePriceCents before any
+	// session exists. price_lifetime stays at its catalog 4900.
+	const bundleCents: Record<string, number> = { price_100: 500, price_500: 2040, price_2000: 6465, price_lifetime: 4900, price_test: 100 };
+	mocks.pricesRetrieve.mockImplementation(async (id: string) => id === 'price_hosted' ? { id, active: true, currency: 'usd', type: 'recurring', unit_amount: 500, recurring: { interval: 'month', interval_count: 1 } } : { id, active: true, currency: 'usd', type: 'one_time', unit_amount: bundleCents[id] ?? 100 });
 	mocks.paymentMethodsRetrieve.mockResolvedValue({ id: 'pm_1', type: 'card', card: { brand: 'visa', last4: '4242' } });
+	// The env mock object is shared: a test that unsets STRIPE_TEST_PRODUCT
+	// must not leak that into the next test.
+	env.STRIPE_TEST_PRODUCT = 'price_test';
 });
 
 describe('usage load', () => {
@@ -108,7 +123,8 @@ describe('usage load', () => {
 			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: false, card: null },
 			autoTopupConsentText: 'consent',
 			stripeConfigured: true,
-			plans: { hosted: true, lifetime: true }
+			plans: { hosted: true, lifetime: true },
+			testProduct: true
 		};
 	}
 
@@ -275,6 +291,20 @@ describe('usage load', () => {
 		expect(stale).not.toContain('Enable auto top-up');
 	});
 
+	test('the buy credits card advertises the larger bundles\' bulk discount', () => {
+		// The percentage lives in the CREDIT_BUNDLES catalog — rendering the
+		// real configured bundles pins both the values and the button copy.
+		// Svelte's {#if} anchors interleave HTML comments between text nodes,
+		// so assert the fragments in order rather than stripping comments
+		// (CodeQL flags comment-stripping regexes as incomplete sanitization).
+		const body = render(Page, {
+			props: { data: { ...usagePageData(), bundles: configuredBundles() }, form: null } as never
+		}).body;
+		expect(body).toMatch(/Buy 100 comments[\s\S]*?<\/button>/);
+		expect(body).toMatch(/Buy 500 comments[\s\S]*?· 18% off[\s\S]*?<\/button>/);
+		expect(body).toMatch(/Buy 2,000 comments[\s\S]*?· 35% off[\s\S]*?<\/button>/);
+	});
+
 	test('the Plans card shows the claimed count, a sold-out state at zero, and an owned state for lifetime orgs', async () => {
 		// The deal is 1,000 slots: buyers see how many are gone, nobody can
 		// click a dead buy button once sold out, and a lifetime org sees its
@@ -425,6 +455,45 @@ describe('usage load', () => {
 		// A second hosted subscription stays blocked — resume via the portal.
 		expect(body).not.toContain('value="hosted"');
 	});
+
+	test('load reports the test product only while STRIPE_TEST_PRODUCT is set', async () => {
+		await seedOrg();
+		expect(((await load({ locals: { user: OWNER } } as never)) as { testProduct: boolean }).testProduct).toBe(true);
+		(env as Record<string, string | undefined>).STRIPE_TEST_PRODUCT = undefined;
+		try {
+			expect(((await load({ locals: { user: OWNER } } as never)) as { testProduct: boolean }).testProduct).toBe(false);
+		} finally {
+			env.STRIPE_TEST_PRODUCT = 'price_test';
+		}
+	});
+
+	test('the test checkout card renders only when the test product and Stripe are both configured', async () => {
+		// The card is the operator's smoke-test entry point — hidden without
+		// STRIPE_TEST_PRODUCT, and never a permanently failing button when
+		// Stripe itself is unconfigured (the codex P2 rule on dead buttons).
+		const configured = render(Page, { props: { data: usagePageData(), form: null } as never }).body;
+		expect(configured).toContain('action="?/buyTest"');
+		expect(configured).toContain('Run test purchase');
+
+		const noProduct = render(Page, { props: { data: { ...usagePageData(), testProduct: false }, form: null } as never }).body;
+		expect(noProduct).not.toContain('?/buyTest');
+
+		const noStripe = render(Page, { props: { data: { ...usagePageData(), stripeConfigured: false }, form: null } as never }).body;
+		expect(noStripe).not.toContain('?/buyTest');
+	});
+
+	test('the test checkout card discloses that a paid test saves the card and can disable auto top-up', async () => {
+		// codex/coderabbit: a successful test payment runs the shared
+		// savePaymentMethod path — a different card becomes the saved card and
+		// disables auto top-up until re-consented. That side effect must be
+		// disclosed BEFORE the owner clicks, not discovered after.
+		// Fragments must be contiguous in the rendered markup — the copy wraps
+		// across source lines.
+		const body = render(Page, { props: { data: usagePageData(), form: null } as never }).body;
+		expect(body).toContain('the payment method is saved for');
+		expect(body).toContain('automatic top-up is disabled');
+		expect(body).toContain('until you re-enable it with fresh consent');
+	});
 });
 
 describe('usage buy action', () => {
@@ -484,6 +553,27 @@ describe('usage buy action', () => {
 
 		await expect(buy('credits_100', member)).rejects.toMatchObject({ status: 403 });
 		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test('a bundle Price whose amount contradicts the advertised discount answers 400 — never "try again"', async () => {
+		// validateBundlePrice rejects the misconfigured catalog entry before
+		// any durable state; the action must surface the sanitized
+		// non-retryable verdict instead of a generic retry prompt (codex).
+		await seedOrg();
+		mocks.pricesRetrieve.mockResolvedValue({ id: 'price_500', active: true, currency: 'usd', type: 'one_time', unit_amount: 4900 });
+		const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+		try {
+			const result = await buy('credits_500');
+			expect(result).toMatchObject({ status: 400 });
+			const serialized = JSON.stringify(result);
+			expect(serialized).toContain('misconfigured');
+			expect(serialized).not.toContain('STRIPE_PRICE_CREDITS_500');
+			expect(serialized).not.toContain('try again');
+			expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+			expect(await testDb().db.select().from(stripeCheckoutAttempts)).toHaveLength(0);
+		} finally {
+			infoSpy.mockRestore();
+		}
 	});
 
 	test('an unknown bundle fails loudly without echoing the submitted id', async () => {
@@ -549,6 +639,71 @@ describe('usage buy action', () => {
 		} finally {
 			errorSpy.mockRestore();
 		}
+	});
+});
+
+describe('usage buyTest action', () => {
+	test('an owner starts a test Checkout tagged product=test and redirects to it', async () => {
+		await seedOrg();
+
+		await expect(buyTest()).rejects.toMatchObject({ status: 303, location: 'https://checkout.stripe.com/pay/test_123' });
+
+		expect(mocks.sessionsCreate).toHaveBeenCalledWith(expect.objectContaining({
+			mode: 'payment',
+			line_items: [{ price: 'price_test', quantity: 1 }],
+			metadata: { org_id: 'org-1', product: 'test' }
+		}), expect.anything());
+	});
+
+	test('a crafted POST with STRIPE_TEST_PRODUCT unset fails loudly without leaking the env name', async () => {
+		// The button is hidden without the env var, but the action re-validates:
+		// a missing var is a server defect (500), generic to the client, loud in
+		// the log — and it must not plant a checkout attempt row.
+		await seedOrg();
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		(env as Record<string, string | undefined>).STRIPE_TEST_PRODUCT = undefined;
+		try {
+			const result = await buyTest();
+			expect(result).toMatchObject({ status: 500 });
+			const serialized = JSON.stringify(result);
+			expect(serialized).toContain('Could not start checkout');
+			expect(serialized).not.toContain('STRIPE_TEST_PRODUCT');
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('STRIPE_TEST_PRODUCT'));
+			expect(await testDb().db.select().from(stripeCheckoutAttempts)).toHaveLength(0);
+		} finally {
+			env.STRIPE_TEST_PRODUCT = 'price_test';
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('a misconfigured STRIPE_TEST_PRODUCT answers 400 with a sanitized reason — never "try again"', async () => {
+		// The advertised button would otherwise fail forever behind a generic
+		// retry message (codeant): a bad test-product config is a non-retryable
+		// operator rejection — specific about WHAT without leaking env names or
+		// Stripe internals, loud in the server log.
+		await seedOrg();
+		env.STRIPE_TEST_PRODUCT = 'price_inactive';
+		mocks.pricesRetrieve.mockResolvedValueOnce({ id: 'price_inactive', active: false, currency: 'usd', type: 'one_time', unit_amount: 100 });
+		const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+		try {
+			const result = await buyTest();
+			expect(result).toMatchObject({ status: 400 });
+			const serialized = JSON.stringify(result);
+			expect(serialized).toContain('misconfigured');
+			expect(serialized).not.toContain('STRIPE_TEST_PRODUCT');
+			expect(serialized).not.toContain('try again');
+			expect(await testDb().db.select().from(stripeCheckoutAttempts)).toHaveLength(0);
+		} finally {
+			infoSpy.mockRestore();
+		}
+	});
+
+	test('non-owners cannot open the test checkout (403)', async () => {
+		await seedOrg();
+		const member = { ...OWNER, orgRole: 'member' as const };
+
+		await expect(buyTest(member)).rejects.toMatchObject({ status: 403 });
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
 	});
 });
 

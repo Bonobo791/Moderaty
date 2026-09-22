@@ -41,7 +41,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 >
 	{#snippet body()}
 		Same engine, our servers. 100 moderated comments every month, renewed automatically. Run out
-		and top up at the same nickel a comment.
+		and top up — a nickel a comment to start, less at volume.
 	{/snippet}
 	{#snippet cta()}
 		<a href={LOGIN_URL} class="btn-press primary-btn">Connect YouTube channel</a>

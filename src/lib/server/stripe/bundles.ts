@@ -21,6 +21,8 @@
 
 import { env } from '$env/dynamic/private';
 
+import { bundleDiscountPercent } from '$lib/credit-pricing';
+
 export interface CreditBundle {
 	/** Stable id, e.g. 'credits_100'. Used in Stripe metadata + ledger refs. */
 	id: string;
@@ -28,14 +30,16 @@ export interface CreditBundle {
 	credits: number;
 	/** Human label shown on the usage page. */
 	label: string;
+	/** Bulk discount vs. the 100-credit base price, advertised on the buy button. */
+	discountPercent?: number;
 	/** Env var holding the Stripe Price id for this bundle. */
 	priceEnv: string;
 }
 
 export const CREDIT_BUNDLES: CreditBundle[] = [
-	{ id: 'credits_100', credits: 100, label: '100 comments', priceEnv: 'STRIPE_PRICE_CREDITS_100' },
-	{ id: 'credits_500', credits: 500, label: '500 comments', priceEnv: 'STRIPE_PRICE_CREDITS_500' },
-	{ id: 'credits_2000', credits: 2000, label: '2,000 comments', priceEnv: 'STRIPE_PRICE_CREDITS_2000' }
+	{ id: 'credits_100', credits: 100, label: '100 comments', discountPercent: bundleDiscountPercent(100), priceEnv: 'STRIPE_PRICE_CREDITS_100' },
+	{ id: 'credits_500', credits: 500, label: '500 comments', discountPercent: bundleDiscountPercent(500), priceEnv: 'STRIPE_PRICE_CREDITS_500' },
+	{ id: 'credits_2000', credits: 2000, label: '2,000 comments', discountPercent: bundleDiscountPercent(2000), priceEnv: 'STRIPE_PRICE_CREDITS_2000' }
 ];
 
 /**

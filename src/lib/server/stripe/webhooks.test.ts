@@ -1137,6 +1137,59 @@ describe('fulfillCheckout', () => {
 		expect(org?.stripeCustomerId).toBe('cus_1');
 		expect(org?.stripeDefaultPmId).toBe('pm_1');
 	});
+
+	test('a paid test checkout grants one credit through the shared purchase path', async () => {
+		// The STRIPE_TEST_PRODUCT smoke test must exercise the REAL grant
+		// path: a 'purchase' ledger row the refund/dispute machinery can
+		// reverse, and the paid card saved for auto top-up.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_test', metadata: { org_id: 'org-1', product: 'test' } }));
+
+		expect(await fulfillCheckout('cs_test')).toBe('granted');
+		expect(await getCredits('org-1')).toBe(1);
+		const rows = await testDb().db.select().from(creditTransactions).where(eq(creditTransactions.orgId, 'org-1'));
+		expect(rows).toMatchObject([{ delta: 1, reason: 'purchase', refType: 'checkout_session', refId: 'cs_test', paymentIntentId: 'pi_1', chargeId: 'ch_1' }]);
+		expect(mocks.customersUpdate).toHaveBeenCalledWith('cus_1', { invoice_settings: { default_payment_method: 'pm_1' } });
+	});
+
+	test('a test checkout is idempotent — a duplicate delivery never double-grants', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_test', metadata: { org_id: 'org-1', product: 'test' } }));
+
+		expect(await fulfillCheckout('cs_test')).toBe('granted');
+		expect(await fulfillCheckout('cs_test')).toBe('already');
+		expect(await getCredits('org-1')).toBe(1);
+	});
+
+	test('a test checkout in subscription mode is a loud rejection — never grants', async () => {
+		// The test checkout is always mode 'payment'; a subscription-mode
+		// session claiming product 'test' is malformed, not a test purchase.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_test_sub', mode: 'subscription', subscription: 'sub_1', metadata: { org_id: 'org-1', product: 'test' } }));
+
+		expect(await fulfillCheckout('cs_test_sub')).toBe('rejected');
+		expect(await getCredits('org-1')).toBe(0);
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('not a one-time payment session'));
+		errorSpy.mockRestore();
+	});
+
+	test('a paid test checkout on an unmetered org is refunded, never granted', async () => {
+		// A lifetime org cannot receive credit grants — the paid test
+		// checkout exercises the ungrantable→refund path instead of
+		// pretending to grant (the deliberate outcome the operator is
+		// verifying).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'lifetime' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_test_unmetered', metadata: { org_id: 'org-1', product: 'test' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			expect(await fulfillCheckout('cs_test_unmetered')).toBe('refunded');
+		} finally {
+			errorSpy.mockRestore();
+		}
+		expect(mocks.refundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_1', metadata: { reason: 'ungrantable', org_id: 'org-1', checkout_session_id: 'cs_test_unmetered' } }, { idempotencyKey: 'refund:ungrantable:cs_test_unmetered' });
+		expect(await getCredits('org-1')).toBe(0);
+	});
 });
 
 describe('fulfillAutoTopup', () => {

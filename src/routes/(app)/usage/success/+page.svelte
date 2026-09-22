@@ -27,26 +27,52 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 
 {#if data.granted}
 	<div class="card">
-		<h2 style="margin-top:0">Thank you!</h2>
-		<p>Your credits have been added to your balance.</p>
+		{#if data.test}
+			<h2 style="margin-top:0">Test checkout passed</h2>
+			<p>
+				Stripe's webhook received the payment and granted the test credit — checkout,
+				webhook, and ledger are verified end-to-end on this deployment.
+			</p>
+		{:else}
+			<h2 style="margin-top:0">Thank you!</h2>
+			<p>Your credits have been added to your balance.</p>
+		{/if}
 		<a class="btn primary" href="/usage">Back to Usage</a>
 	</div>
 {:else if data.pending}
 	<div class="card">
-		<h2 style="margin-top:0">Payment received — almost there</h2>
-		<p>
-			Your credits will appear on the Usage tab within a few seconds. If they do not,
-			refresh this page in a moment — your purchase is recorded by the payment provider either way.
-		</p>
+		{#if data.test}
+			<h2 style="margin-top:0">Payment received — waiting for the webhook</h2>
+			<p>
+				The test only counts once Stripe's webhook confirms the credit grant — refresh in
+				a few seconds. If it never confirms, the webhook endpoint is not reaching this
+				deployment (check the Stripe webhook configuration and the server log).
+			</p>
+		{:else}
+			<h2 style="margin-top:0">Payment received — almost there</h2>
+			<p>
+				Your credits will appear on the Usage tab within a few seconds. If they do not,
+				refresh this page in a moment — your purchase is recorded by the payment provider either way.
+			</p>
+		{/if}
 		<a class="btn primary" href="/usage">Back to Usage</a>
 	</div>
 {:else if data.refunded}
 	<div class="card">
-		<h2 style="margin-top:0">Payment refunded</h2>
-		<p>
-			This purchase could not be completed — your payment is being refunded automatically
-			and nothing was granted. Refunds usually land within a few business days.
-		</p>
+		{#if data.test}
+			<h2 style="margin-top:0">Test checkout refunded</h2>
+			<p>
+				This plan is unmetered, so the payment was refunded instead of granting a credit —
+				the refund path was exercised end-to-end. Refunds usually land within a few
+				business days.
+			</p>
+		{:else}
+			<h2 style="margin-top:0">Payment refunded</h2>
+			<p>
+				This purchase could not be completed — your payment is being refunded automatically
+				and nothing was granted. Refunds usually land within a few business days.
+			</p>
+		{/if}
 		<a class="btn primary" href="/usage">Back to Usage</a>
 	</div>
 {:else if data.manualRefund}

@@ -25,6 +25,7 @@ import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { organizations, stripeCheckoutAttempts, stripeLifetimeEntitlements, stripeLifetimeSlots } from '$lib/server/db/schema';
 import { bundleById, priceIdFor, type CreditBundle } from '$lib/server/stripe/bundles';
+import { expectedBundlePriceCents } from '$lib/credit-pricing';
 import { assertCreditsPurchasable, UNMETERED_CREDIT_PURCHASE_ERROR } from './ledger';
 import { isActiveSubscriptionStatus, planPriceEnv, validatePlanPrice, type PaidPlan } from './plans';
 import { getStripe } from '$lib/server/stripe/client';
@@ -35,6 +36,13 @@ const HOSTED_PLAN_EXISTS_ERROR = 'organization already has a hosted subscription
 const ACTIVE_HOSTED_PLAN_ERROR = 'organization already has an active hosted subscription';
 const LIFETIME_PLAN_EXISTS_ERROR = 'organization already has the lifetime plan';
 const LIFETIME_SOLD_OUT_ERROR = 'lifetime plan is sold out';
+
+/**
+ * The metadata `product` value (and checkout-attempt product) for the
+ * operator test checkout driven by STRIPE_TEST_PRODUCT. The webhook's
+ * fulfillment dispatches on this value — keep it in sync with webhooks.ts.
+ */
+export const TEST_CHECKOUT_PRODUCT = 'test';
 
 /**
  * User-facing text for KNOWN business rejections of checkout creation —
@@ -57,8 +65,25 @@ export function checkoutRejectionMessage(error: unknown): string | null {
 		case UNMETERED_CREDIT_PURCHASE_ERROR:
 			return 'Your lifetime plan includes unlimited moderated comments — credit purchases are not needed.';
 		default:
-			return null;
+			break;
 	}
+	// STRIPE_TEST_PRODUCT resolution failures are operator-facing rejections:
+	// retrying can never fix a bad test-product config, so the action answers
+	// 400 with a sanitized reason — the env name and Stripe detail stay in
+	// the server log. The missing-var case is a crafted-POST defect (the
+	// button never renders without it) and keeps its generic 500.
+	if (error.message !== 'STRIPE_TEST_PRODUCT is not configured' && error.message.startsWith('STRIPE_TEST_PRODUCT')) {
+		return 'The test checkout is misconfigured on this deployment — the exact reason is in the server log.';
+	}
+	// Same rule for the bundle catalog: validateBundlePrice/priceIdFor errors
+	// on a CONFIGURED STRIPE_PRICE_CREDITS_* var are permanent deployment
+	// faults, not transient failures — the advertised button would otherwise
+	// fail forever behind "please try again" (codex). The missing-var case
+	// stays a 500: the button only renders for configured bundles.
+	if (!error.message.endsWith(' is not configured') && error.message.startsWith('STRIPE_PRICE_CREDITS_')) {
+		return 'This credit bundle is misconfigured on this deployment — the exact reason is in the server log.';
+	}
+	return null;
 }
 
 /**
@@ -112,7 +137,24 @@ export async function getOrCreateStripeCustomer(orgId: string, user: SessionUser
 	return customer.id;
 }
 
-function checkoutRedirectUrls(appUrl: string): { success_url: string; cancel_url: string } {
+/**
+ * APP_URL must be an absolute http(s) URL — checked BEFORE any durable
+ * checkout state exists: a malformed value would otherwise surface inside
+ * new URL() only after the attempt row (and possibly the Stripe customer)
+ * was already persisted, and a non-http(s) scheme could reach Stripe's
+ * redirect fields (coderabbit/cubic). Same rule as the card-portal action.
+ */
+function checkoutAppUrl(): URL {
+	const raw = env.APP_URL;
+	if (!raw) throw new Error('APP_URL is not configured');
+	const appUrl = URL.parse(raw);
+	if (!appUrl || (appUrl.protocol !== 'http:' && appUrl.protocol !== 'https:')) {
+		throw new Error('APP_URL is not configured as a valid absolute http(s) URL');
+	}
+	return appUrl;
+}
+
+function checkoutRedirectUrls(appUrl: URL): { success_url: string; cancel_url: string } {
 	return {
 		success_url: new URL('/usage/success?session_id={CHECKOUT_SESSION_ID}', appUrl).toString(),
 		cancel_url: new URL('/usage', appUrl).toString()
@@ -130,16 +172,22 @@ function checkoutRedirectUrls(appUrl: string): { success_url: string; cancel_url
 export async function createCreditCheckout(orgId: string, user: SessionUser, bundleId: string, attemptId?: string): Promise<string> {
 	requireOrgRole(user, 'owner');
 	const bundle: CreditBundle = bundleById(bundleId);
-	const appUrl = env.APP_URL;
-	if (!appUrl) throw new Error('APP_URL is not configured');
+	const appUrl = checkoutAppUrl();
 	// Unlimited plans never buy credits — rejected before an attempt row is
 	// planted (the lifetime org's scoring is already free; MOD-35).
 	await assertCreditsPurchasable(orgId);
+	// The configured Price is validated BEFORE the attempt row: a bundle
+	// Price that is inactive, non-USD, recurring, or charges a different
+	// amount than the advertised discount would either fail downstream or —
+	// worse — charge the buyer an amount the button never promised (codex).
+	// Same catalog-validation rule as the plan checkout's validatePlanPrice.
+	const priceId = priceIdFor(bundle);
+	validateBundlePrice(bundle, await getStripe().prices.retrieve(priceId));
 	return createCheckoutAttempt(orgId, bundle.id, attemptId, async (idempotencyKey) => {
 		const customer = await getOrCreateStripeCustomer(orgId, user);
 		return getStripe().checkout.sessions.create({
 			mode: 'payment',
-			line_items: [{ price: priceIdFor(bundle), quantity: 1 }],
+			line_items: [{ price: priceId, quantity: 1 }],
 			customer,
 			client_reference_id: orgId,
 			metadata: { org_id: orgId, bundle: bundle.id, credits: String(bundle.credits) },
@@ -259,6 +307,22 @@ function configuredPlanPriceId(plan: PaidPlan): string {
 }
 
 /**
+ * The configured bundle Price must charge exactly the catalog amount the
+ * discount label is derived from — anything else means the button's
+ * advertised cut is a lie about what the buyer pays (codex). Errors name
+ * the env var, not the Stripe id, matching configuredPlanPriceId.
+ */
+function validateBundlePrice(bundle: CreditBundle, price: { active?: unknown; currency?: unknown; type?: unknown; unit_amount?: unknown }): void {
+	if (price.active !== true) throw new Error(`${bundle.priceEnv} Stripe Price is inactive`);
+	if (price.currency !== 'usd') throw new Error(`${bundle.priceEnv} Stripe Price must be USD`);
+	if (price.type !== 'one_time') throw new Error(`${bundle.priceEnv} Stripe Price must be one-time`);
+	const expectedCents = expectedBundlePriceCents(bundle.credits);
+	if (price.unit_amount !== expectedCents) {
+		throw new Error(`${bundle.priceEnv} Stripe Price must charge ${expectedCents} cents — the ${bundle.label} bundle advertises its discount against that catalog amount`);
+	}
+}
+
+/**
  * Creates a Checkout Session for one of the hosted products. The application
  * owns the catalog: Stripe's configured Price is retrieved and checked before
  * any Checkout session is created, and fulfillment rechecks the metadata and
@@ -266,8 +330,7 @@ function configuredPlanPriceId(plan: PaidPlan): string {
  */
 export async function createPlanCheckout(orgId: string, user: SessionUser, plan: PaidPlan, attemptId?: string): Promise<string> {
 	requireOrgRole(user, 'owner');
-	const appUrl = env.APP_URL;
-	if (!appUrl) throw new Error('APP_URL is not configured');
+	const appUrl = checkoutAppUrl();
 	return createCheckoutAttempt(orgId, plan, attemptId, async (idempotencyKey) => {
 		await assertPlanAvailable(orgId, plan);
 		const priceId = configuredPlanPriceId(plan);
@@ -283,6 +346,95 @@ export async function createPlanCheckout(orgId: string, user: SessionUser, plan:
 				client_reference_id: orgId,
 				metadata,
 				...(plan === 'hosted' ? { subscription_data: { metadata } } : {}),
+				...checkoutRedirectUrls(appUrl)
+			},
+			{ idempotencyKey }
+		);
+	});
+}
+
+/**
+ * Resolves STRIPE_TEST_PRODUCT to a Stripe Price id. The var accepts a Price
+ * id directly (`price_...`) or a Product id (`prod_...`) — the name says
+ * product because that is what the dashboard hands the operator, but Checkout
+ * needs a Price. A product resolves through its `default_price`; without one
+ * it must have exactly one active price, or the configuration is ambiguous
+ * and fails loudly. The resolved price is validated (active, one-time —
+ * the test checkout runs in payment mode) before any session is created (I2).
+ */
+async function testProductPriceId(): Promise<string> {
+	const configured = env.STRIPE_TEST_PRODUCT;
+	if (!configured) throw new Error('STRIPE_TEST_PRODUCT is not configured');
+	try {
+		let priceId = configured;
+		if (configured.startsWith('prod_')) {
+			const product = await getStripe().products.retrieve(configured);
+			const defaultPrice = typeof product.default_price === 'string' ? product.default_price : product.default_price?.id;
+			if (defaultPrice) {
+				priceId = defaultPrice;
+			} else {
+				const prices = await getStripe().prices.list({ product: configured, active: true, limit: 2 });
+				if (prices.data.length !== 1) {
+					throw new Error(`STRIPE_TEST_PRODUCT product has no default price and ${prices.data.length} active prices — set a default price or configure the Price id directly`);
+				}
+				priceId = prices.data[0].id;
+			}
+		}
+		if (!priceId.startsWith('price_')) throw new Error('STRIPE_TEST_PRODUCT must be a Stripe Product (prod_...) or Price (price_...) id');
+		const price = await getStripe().prices.retrieve(priceId);
+		if (price.active !== true) throw new Error('STRIPE_TEST_PRODUCT resolves to an inactive Stripe Price');
+		if (price.type !== 'one_time') throw new Error('STRIPE_TEST_PRODUCT resolves to a recurring Stripe Price — the test checkout runs in payment mode');
+		// A zero-amount (or amount-less, e.g. custom_unit_amount) Price completes
+		// Checkout as no_payment_required — fulfillCheckout rejects those, so the
+		// smoke test would end without ever touching the paid pipeline it exists
+		// to verify (codex/cubic). The test must charge real money.
+		if (typeof price.unit_amount !== 'number' || price.unit_amount <= 0) {
+			throw new Error('STRIPE_TEST_PRODUCT resolves to a zero-priced Stripe Price — the test checkout must charge a real payment');
+		}
+		return priceId;
+	} catch (error) {
+		if (error instanceof Error && error.message.startsWith('STRIPE_TEST_PRODUCT')) throw error;
+		// A prod_/price_ id that does not exist in the active Stripe mode is a
+		// permanent misconfiguration, not a transient provider failure — it
+		// must carry the STRIPE_TEST_PRODUCT prefix so the action maps it to
+		// the sanitized 400 instead of a retryable generic error (codex).
+		if ((error as { code?: unknown })?.code === 'resource_missing') {
+			throw new Error('STRIPE_TEST_PRODUCT references a Stripe Product or Price that does not exist in this mode');
+		}
+		throw error;
+	}
+}
+
+/**
+ * Creates a Checkout Session for the operator test product
+ * (STRIPE_TEST_PRODUCT) — a smoke test for a deployment's billing pipeline:
+ * the attempt row, Checkout Session, webhook fulfillment, and ledger grant
+ * are all real, and a paid test checkout grants one credit. Deliberately NOT
+ * gated by assertCreditsPurchasable — on an unmetered org the paid test
+ * checkout exercises the ungrantable→refund path, which is also worth
+ * verifying. Owner-only like every purchase.
+ */
+export async function createTestCheckout(orgId: string, user: SessionUser, attemptId?: string): Promise<string> {
+	requireOrgRole(user, 'owner');
+	const appUrl = checkoutAppUrl();
+	// Config check BEFORE the attempt row: a crafted POST without the env var
+	// must fail without planting durable state (env validation at handler
+	// start — the review rules).
+	if (!env.STRIPE_TEST_PRODUCT) throw new Error('STRIPE_TEST_PRODUCT is not configured');
+	// The Stripe price resolves BEFORE the attempt row too — a failed lookup
+	// or invalid configuration must not leave a durable pending attempt that
+	// no session will ever claim (cubic/codeant).
+	const priceId = await testProductPriceId();
+	return createCheckoutAttempt(orgId, TEST_CHECKOUT_PRODUCT, attemptId, async (idempotencyKey) => {
+		const customer = await getOrCreateStripeCustomer(orgId, user);
+		return getStripe().checkout.sessions.create(
+			{
+				mode: 'payment',
+				line_items: [{ price: priceId, quantity: 1 }],
+				customer,
+				client_reference_id: orgId,
+				metadata: { org_id: orgId, product: TEST_CHECKOUT_PRODUCT },
+				payment_intent_data: { setup_future_usage: 'off_session' },
 				...checkoutRedirectUrls(appUrl)
 			},
 			{ idempotencyKey }

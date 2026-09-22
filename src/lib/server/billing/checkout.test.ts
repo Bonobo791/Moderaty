@@ -15,16 +15,19 @@
 
 import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { env } from '$env/dynamic/private';
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { organizations, stripeLifetimeSlots } from '$lib/server/db/schema';
-import { createCreditCheckout, createPlanCheckout, getOrCreateStripeCustomer } from './checkout';
+import { createCreditCheckout, createPlanCheckout, createTestCheckout, getOrCreateStripeCustomer } from './checkout';
 import type { SessionUser } from '$lib/server/session';
 
 const mocks = vi.hoisted(() => ({
 	customersCreate: vi.fn(),
 	sessionsCreate: vi.fn(),
 	pricesRetrieve: vi.fn(),
+	pricesList: vi.fn(),
+	productsRetrieve: vi.fn(),
 	sessionsRetrieve: vi.fn()
 }));
 
@@ -32,11 +35,12 @@ vi.mock('$lib/server/stripe/client', () => ({
 	getStripe: () => ({
 		customers: { create: mocks.customersCreate },
 		checkout: { sessions: { create: mocks.sessionsCreate, retrieve: mocks.sessionsRetrieve } },
-		prices: { retrieve: mocks.pricesRetrieve }
+		prices: { retrieve: mocks.pricesRetrieve, list: mocks.pricesList },
+		products: { retrieve: mocks.productsRetrieve }
 	})
 }));
 vi.mock('$env/dynamic/private', () => ({
-	env: { APP_URL: 'https://app.example', STRIPE_PRICE_CREDITS_100: 'price_100', STRIPE_PRICE_CREDITS_500: 'price_500', STRIPE_PRICE_CREDITS_2000: 'price_2000', STRIPE_PRICE_HOSTED_MONTHLY: 'price_hosted', STRIPE_PRICE_LIFETIME: 'price_lifetime' }
+	env: { APP_URL: 'https://app.example', STRIPE_PRICE_CREDITS_100: 'price_100', STRIPE_PRICE_CREDITS_500: 'price_500', STRIPE_PRICE_CREDITS_2000: 'price_2000', STRIPE_PRICE_HOSTED_MONTHLY: 'price_hosted', STRIPE_PRICE_LIFETIME: 'price_lifetime', STRIPE_TEST_PRODUCT: 'price_test' }
 }));
 
 setupTestDb(['organizations', 'stripe_lifetime_slots', 'stripe_checkout_attempts']);
@@ -59,6 +63,9 @@ beforeEach(() => {
 	mocks.customersCreate.mockResolvedValue({ id: 'cus_1' });
 	mocks.sessionsCreate.mockResolvedValue({ id: 'cs_1', url: 'https://checkout.stripe.com/c/pay/cs_1' });
 	mocks.pricesRetrieve.mockImplementation(async (id: string) => id === 'price_hosted' ? { id, active: true, currency: 'usd', type: 'recurring', unit_amount: 500, recurring: { interval: 'month', interval_count: 1 } } : { id, active: true, currency: 'usd', type: 'one_time', unit_amount: 4900 });
+	// The env mock object is shared: tests that change STRIPE_TEST_PRODUCT
+	// rely on this reset so one override never leaks into the next test.
+	env.STRIPE_TEST_PRODUCT = 'price_test';
 });
 
 describe('getOrCreateStripeCustomer', () => {
@@ -256,5 +263,102 @@ describe('createCreditCheckout', () => {
 		}
 		expect(constructed.some(([input, base]) => input === '/usage/success?session_id={CHECKOUT_SESSION_ID}' && base === 'https://app.example')).toBe(true);
 		expect(constructed.some(([input, base]) => input === '/usage' && base === 'https://app.example')).toBe(true);
+	});
+});
+
+describe('createTestCheckout', () => {
+	test('uses a configured Price id directly and tags the session as the test product', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+
+		const url = await createTestCheckout('org-1', owner(), 'attempt-test');
+
+		expect(url).toBe('https://checkout.stripe.com/c/pay/cs_1');
+		expect(mocks.pricesRetrieve).toHaveBeenCalledWith('price_test');
+		expect(mocks.sessionsCreate).toHaveBeenCalledWith(expect.objectContaining({
+			mode: 'payment',
+			line_items: [{ price: 'price_test', quantity: 1 }],
+			customer: 'cus_1',
+			client_reference_id: 'org-1',
+			metadata: { org_id: 'org-1', product: 'test' },
+			payment_intent_data: { setup_future_usage: 'off_session' },
+			success_url: 'https://app.example/usage/success?session_id={CHECKOUT_SESSION_ID}',
+			cancel_url: 'https://app.example/usage'
+		}), { idempotencyKey: expect.stringMatching(/^checkout:attempt-test:/) });
+	});
+
+	test('resolves a Product id through its default price', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		env.STRIPE_TEST_PRODUCT = 'prod_test';
+		mocks.productsRetrieve.mockResolvedValue({ id: 'prod_test', default_price: 'price_from_product' });
+
+		await createTestCheckout('org-1', owner());
+
+		expect(mocks.productsRetrieve).toHaveBeenCalledWith('prod_test');
+		expect(mocks.sessionsCreate.mock.calls[0][0].line_items).toEqual([{ price: 'price_from_product', quantity: 1 }]);
+	});
+
+	test('falls back to the product’s single active price when it has no default', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		env.STRIPE_TEST_PRODUCT = 'prod_test';
+		mocks.productsRetrieve.mockResolvedValue({ id: 'prod_test', default_price: null });
+		mocks.pricesList.mockResolvedValue({ data: [{ id: 'price_only' }] });
+
+		await createTestCheckout('org-1', owner());
+
+		expect(mocks.pricesList).toHaveBeenCalledWith({ product: 'prod_test', active: true, limit: 2 });
+		expect(mocks.sessionsCreate.mock.calls[0][0].line_items).toEqual([{ price: 'price_only', quantity: 1 }]);
+	});
+
+	test('fails loudly when a product has no default price and the active prices are ambiguous', async () => {
+		// Two active prices and no default means there is no safe choice —
+		// picking one silently could charge the wrong amount (I2).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		env.STRIPE_TEST_PRODUCT = 'prod_test';
+		mocks.productsRetrieve.mockResolvedValue({ id: 'prod_test', default_price: null });
+		mocks.pricesList.mockResolvedValue({ data: [{ id: 'price_a' }, { id: 'price_b' }] });
+
+		await expect(createTestCheckout('org-1', owner())).rejects.toThrow('no default price');
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test('fails loudly when STRIPE_TEST_PRODUCT is not configured', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		(env as Record<string, string | undefined>).STRIPE_TEST_PRODUCT = undefined;
+
+		await expect(createTestCheckout('org-1', owner())).rejects.toThrow('STRIPE_TEST_PRODUCT is not configured');
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test('fails loudly on a value that is neither a Product nor a Price id', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		env.STRIPE_TEST_PRODUCT = 'not_a_stripe_id';
+
+		await expect(createTestCheckout('org-1', owner())).rejects.toThrow('must be a Stripe Product (prod_...) or Price (price_...) id');
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test('rejects an inactive resolved price', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		env.STRIPE_TEST_PRODUCT = 'price_inactive';
+		mocks.pricesRetrieve.mockResolvedValueOnce({ id: 'price_inactive', active: false, currency: 'usd', type: 'one_time', unit_amount: 100 });
+
+		await expect(createTestCheckout('org-1', owner())).rejects.toThrow('inactive Stripe Price');
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test('rejects a recurring resolved price — the test checkout is payment mode', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		env.STRIPE_TEST_PRODUCT = 'price_recurring';
+		mocks.pricesRetrieve.mockResolvedValueOnce({ id: 'price_recurring', active: true, currency: 'usd', type: 'recurring', unit_amount: 100, recurring: { interval: 'month', interval_count: 1 } });
+
+		await expect(createTestCheckout('org-1', owner())).rejects.toThrow('recurring Stripe Price');
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test('requires an owner — a member can never open the test checkout', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+
+		await expect(createTestCheckout('org-1', owner({ orgRole: 'member' }))).rejects.toMatchObject({ status: 403 });
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
 	});
 });

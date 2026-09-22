@@ -23,7 +23,7 @@ import { env } from '$env/dynamic/private';
 import { and, eq, ne } from 'drizzle-orm';
 
 import { AUTO_TOPUP_DEFAULT_THRESHOLD } from '$lib/server/billing/autotopup';
-import { checkoutRejectionMessage, createCreditCheckout, createPlanCheckout, getOrCreateStripeCustomer } from '$lib/server/billing/checkout';
+import { checkoutRejectionMessage, createCreditCheckout, createPlanCheckout, createTestCheckout, getOrCreateStripeCustomer } from '$lib/server/billing/checkout';
 import { lifetimeSlotsRemaining } from '$lib/server/billing/entitlements';
 import { createMercadoPagoCreditCheckout } from '$lib/server/mercadopago/checkout';
 import { configuredMercadoPagoBundles } from '$lib/server/mercadopago/bundles';
@@ -70,6 +70,7 @@ function maintenanceData() {
 		autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
 		stripeConfigured: Boolean(env.STRIPE_SECRET_KEY),
 		plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) },
+		testProduct: Boolean(env.STRIPE_TEST_PRODUCT),
 		hasOpenAiKey: false
 	};
 }
@@ -222,7 +223,8 @@ export const load: PageServerLoad = async ({ locals }) => {
 			// mere ciphertext presence.
 			hasOpenAiKey: org.plan === 'lifetime' ? usableOpenAiKey !== undefined : Boolean(org.openaiKeyEnc),
 			stripeConfigured: Boolean(env.STRIPE_SECRET_KEY),
-			plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) }
+			plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) },
+			testProduct: Boolean(env.STRIPE_TEST_PRODUCT)
 		};
 	} catch (error) {
 		// Deliberate HttpErrors (the missing-org 500 above) must pass through
@@ -268,6 +270,19 @@ export const actions: Actions = {
 		const attemptId = String(form.get('attempt_id') ?? '');
 		if (plan !== 'hosted' && plan !== 'lifetime') return fail(400, { error: 'Unknown billing plan.' });
 		return checkoutRedirect(() => createPlanCheckout(user.orgId, user, plan, attemptId), user.orgId);
+	},
+	/**
+	 * Owner-only: creates a Checkout for the operator test product
+	 * (STRIPE_TEST_PRODUCT) — a real purchase that smoke-tests this
+	 * deployment's whole billing pipeline. The button only renders when the
+	 * env var is set, but the action re-validates: a crafted POST without the
+	 * var configured fails loudly, never a silent no-op.
+	 */
+	buyTest: async ({ request, locals }) => {
+		const user = requireUser(locals);
+		const form = await request.formData();
+		const attemptId = String(form.get('attempt_id') ?? '');
+		return checkoutRedirect(() => createTestCheckout(user.orgId, user, attemptId), user.orgId);
 	},
 	/**
 	 * Owner-only: enables/disables auto top-up. Enabling requires the explicit

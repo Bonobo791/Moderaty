@@ -37,6 +37,13 @@ const LIFETIME_PLAN_EXISTS_ERROR = 'organization already has the lifetime plan';
 const LIFETIME_SOLD_OUT_ERROR = 'lifetime plan is sold out';
 
 /**
+ * The metadata `product` value (and checkout-attempt product) for the
+ * operator test checkout driven by STRIPE_TEST_PRODUCT. The webhook's
+ * fulfillment dispatches on this value — keep it in sync with webhooks.ts.
+ */
+export const TEST_CHECKOUT_PRODUCT = 'test';
+
+/**
  * User-facing text for KNOWN business rejections of checkout creation —
  * the buyer did nothing wrong and retrying will never help, so the answer
  * is a specific 400, not the generic defect message. Internal strings are
@@ -283,6 +290,74 @@ export async function createPlanCheckout(orgId: string, user: SessionUser, plan:
 				client_reference_id: orgId,
 				metadata,
 				...(plan === 'hosted' ? { subscription_data: { metadata } } : {}),
+				...checkoutRedirectUrls(appUrl)
+			},
+			{ idempotencyKey }
+		);
+	});
+}
+
+/**
+ * Resolves STRIPE_TEST_PRODUCT to a Stripe Price id. The var accepts a Price
+ * id directly (`price_...`) or a Product id (`prod_...`) — the name says
+ * product because that is what the dashboard hands the operator, but Checkout
+ * needs a Price. A product resolves through its `default_price`; without one
+ * it must have exactly one active price, or the configuration is ambiguous
+ * and fails loudly. The resolved price is validated (active, one-time —
+ * the test checkout runs in payment mode) before any session is created (I2).
+ */
+async function testProductPriceId(): Promise<string> {
+	const configured = env.STRIPE_TEST_PRODUCT;
+	if (!configured) throw new Error('STRIPE_TEST_PRODUCT is not configured');
+	let priceId = configured;
+	if (configured.startsWith('prod_')) {
+		const product = await getStripe().products.retrieve(configured);
+		const defaultPrice = typeof product.default_price === 'string' ? product.default_price : product.default_price?.id;
+		if (defaultPrice) {
+			priceId = defaultPrice;
+		} else {
+			const prices = await getStripe().prices.list({ product: configured, active: true, limit: 2 });
+			if (prices.data.length !== 1) {
+				throw new Error(`STRIPE_TEST_PRODUCT product has no default price and ${prices.data.length} active prices — set a default price or configure the Price id directly`);
+			}
+			priceId = prices.data[0].id;
+		}
+	}
+	if (!priceId.startsWith('price_')) throw new Error('STRIPE_TEST_PRODUCT must be a Stripe Product (prod_...) or Price (price_...) id');
+	const price = await getStripe().prices.retrieve(priceId);
+	if (price.active !== true) throw new Error('STRIPE_TEST_PRODUCT resolves to an inactive Stripe Price');
+	if (price.type !== 'one_time') throw new Error('STRIPE_TEST_PRODUCT resolves to a recurring Stripe Price — the test checkout runs in payment mode');
+	return priceId;
+}
+
+/**
+ * Creates a Checkout Session for the operator test product
+ * (STRIPE_TEST_PRODUCT) — a smoke test for a deployment's billing pipeline:
+ * the attempt row, Checkout Session, webhook fulfillment, and ledger grant
+ * are all real, and a paid test checkout grants one credit. Deliberately NOT
+ * gated by assertCreditsPurchasable — on an unmetered org the paid test
+ * checkout exercises the ungrantable→refund path, which is also worth
+ * verifying. Owner-only like every purchase.
+ */
+export async function createTestCheckout(orgId: string, user: SessionUser, attemptId?: string): Promise<string> {
+	requireOrgRole(user, 'owner');
+	const appUrl = env.APP_URL;
+	if (!appUrl) throw new Error('APP_URL is not configured');
+	// Config check BEFORE the attempt row: a crafted POST without the env var
+	// must fail without planting durable state (env validation at handler
+	// start — the review rules).
+	if (!env.STRIPE_TEST_PRODUCT) throw new Error('STRIPE_TEST_PRODUCT is not configured');
+	return createCheckoutAttempt(orgId, TEST_CHECKOUT_PRODUCT, attemptId, async (idempotencyKey) => {
+		const priceId = await testProductPriceId();
+		const customer = await getOrCreateStripeCustomer(orgId, user);
+		return getStripe().checkout.sessions.create(
+			{
+				mode: 'payment',
+				line_items: [{ price: priceId, quantity: 1 }],
+				customer,
+				client_reference_id: orgId,
+				metadata: { org_id: orgId, product: TEST_CHECKOUT_PRODUCT },
+				payment_intent_data: { setup_future_usage: 'off_session' },
 				...checkoutRedirectUrls(appUrl)
 			},
 			{ idempotencyKey }

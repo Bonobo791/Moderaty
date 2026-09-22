@@ -32,7 +32,7 @@ import { grantAutoTopupCredits, handleAutoTopupFailure } from '$lib/server/billi
 import { claimLifetimeSlot, grantSubscriptionPeriod, refundSubscriptionPeriod, disputeSubscriptionPeriod, releaseLifetimeForPayment, applySubscriptionSnapshot, revokeLifetimeForDispute, restoreLifetimeForDispute, restoreDisputedSubscriptionPeriod, stripeIdentifierPredicate, LIFETIME_SOLD_OUT_ERROR } from '$lib/server/billing/entitlements';
 import { bundleById, type CreditBundle } from '$lib/server/stripe/bundles';
 import { isActiveSubscriptionStatus } from '$lib/server/billing/plans';
-import { markCheckoutAttemptFulfilled } from '$lib/server/billing/checkout';
+import { markCheckoutAttemptFulfilled, TEST_CHECKOUT_PRODUCT } from '$lib/server/billing/checkout';
 import { getStripe } from '$lib/server/stripe/client';
 import { refundUngrantablePayment } from '$lib/server/stripe/refunds';
 
@@ -154,7 +154,7 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 		console.error(`stripe: checkout session ${sessionId} has no org_id/bundle metadata — cannot credit`);
 		return 'rejected';
 	}
-	if ((product && bundleId) || (!product && !bundleId) || (product && product !== 'hosted' && product !== 'lifetime')) {
+	if ((product && bundleId) || (!product && !bundleId) || (product && product !== 'hosted' && product !== 'lifetime' && product !== TEST_CHECKOUT_PRODUCT)) {
 		console.error(`stripe: checkout session ${sessionId} has invalid product metadata — cannot fulfill`);
 		return 'rejected';
 	}
@@ -169,6 +169,7 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 	const { paymentIntent, charge } = getPaymentIntentAndCharge(session);
 	if (product === 'hosted') return fulfillHostedCheckout(session, sessionId, orgId);
 	if (product === 'lifetime') return fulfillLifetimeCheckout(session, sessionId, orgId, paymentIntent, charge);
+	if (product === TEST_CHECKOUT_PRODUCT) return fulfillTestCheckout(session, sessionId, orgId, paymentIntent, charge);
 	// An unknown bundle id is an operator config bug, not a transient failure:
 	// acknowledge loudly and reject (the credits can never be granted — a
 	// retry storm would only produce three days of 500s).
@@ -327,7 +328,33 @@ async function fulfillLifetimeCheckout(session: Stripe.Checkout.Session, session
 async function fulfillBundleCheckout(session: Stripe.Checkout.Session, sessionId: string, orgId: string, bundleId: string, paymentIntent: Stripe.PaymentIntent | null, charge: Stripe.Charge | null | undefined): Promise<CheckoutVerdict> {
 	const bundle = loadBundle(bundleId, sessionId);
 	if (!bundle) return 'rejected';
+	return fulfillCreditPurchase(session, sessionId, orgId, creditsForBundle(bundle), paymentIntent, charge);
+}
 
+/** Credits a paid test checkout grants (STRIPE_TEST_PRODUCT smoke test). */
+const TEST_CHECKOUT_CREDITS = 1;
+
+/**
+ * Test-product fulfillment: a paid STRIPE_TEST_PRODUCT checkout grants
+ * TEST_CHECKOUT_CREDITS credit through the identical ledger/reversal/card-save
+ * path as a real bundle — that shared path is exactly what the operator's
+ * smoke test exists to verify.
+ */
+async function fulfillTestCheckout(session: Stripe.Checkout.Session, sessionId: string, orgId: string, paymentIntent: Stripe.PaymentIntent | null, charge: Stripe.Charge | null | undefined): Promise<CheckoutVerdict> {
+	if (session.mode !== 'payment') {
+		console.error(`stripe: test checkout ${sessionId} is not a one-time payment session`);
+		return 'rejected';
+	}
+	return fulfillCreditPurchase(session, sessionId, orgId, TEST_CHECKOUT_CREDITS, paymentIntent, charge);
+}
+
+/**
+ * The shared credit grant behind bundle and test-product checkouts: apply the
+ * grant idempotently, refund instead when the org went unmetered mid-checkout,
+ * drain any reversal that beat the grant, then save the paid card for future
+ * auto top-ups.
+ */
+async function fulfillCreditPurchase(session: Stripe.Checkout.Session, sessionId: string, orgId: string, credits: number, paymentIntent: Stripe.PaymentIntent | null, charge: Stripe.Charge | null | undefined): Promise<CheckoutVerdict> {
 	// Narrow the expanded object once (chargeId prefers the expanded
 	// object's id — it is the same id either way).
 	const chargeId = typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : charge?.id;
@@ -335,7 +362,7 @@ async function fulfillBundleCheckout(session: Stripe.Checkout.Session, sessionId
 	try {
 		applied = await applyLedgerDelta(db, {
 			orgId,
-			delta: creditsForBundle(bundle),
+			delta: credits,
 			reason: 'purchase',
 			refType: 'checkout_session',
 			refId: sessionId,

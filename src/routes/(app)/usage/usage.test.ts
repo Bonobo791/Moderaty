@@ -47,9 +47,12 @@ vi.mock('$env/dynamic/private', () => ({
 		STRIPE_PRICE_CREDITS_500: 'price_500',
 		STRIPE_PRICE_CREDITS_2000: 'price_2000',
 		STRIPE_PRICE_HOSTED_MONTHLY: 'price_hosted',
-		STRIPE_PRICE_LIFETIME: 'price_lifetime'
+		STRIPE_PRICE_LIFETIME: 'price_lifetime',
+		STRIPE_TEST_PRODUCT: 'price_test'
 	}
 }));
+
+import { env } from '$env/dynamic/private';
 
 import { render } from 'svelte/server';
 
@@ -77,6 +80,10 @@ function buyPlan(plan: string, user: SessionUser | null = OWNER) {
 	return actions.buyPlan({ request: postForm({ plan }), locals: { user } } as never);
 }
 
+function buyTest(user: SessionUser | null = OWNER) {
+	return actions.buyTest({ request: postForm({}), locals: { user } } as never);
+}
+
 function setAutoTopup(fields: Record<string, string>, user: SessionUser | null = OWNER) {
 	return actions.setAutoTopup({ request: postForm(fields), locals: { user } } as never);
 }
@@ -91,6 +98,9 @@ beforeEach(() => {
 	mocks.customersCreate.mockResolvedValue({ id: 'cus_new' });
 	mocks.pricesRetrieve.mockImplementation(async (id: string) => id === 'price_hosted' ? { id, active: true, currency: 'usd', type: 'recurring', unit_amount: 500, recurring: { interval: 'month', interval_count: 1 } } : { id, active: true, currency: 'usd', type: 'one_time', unit_amount: 4900 });
 	mocks.paymentMethodsRetrieve.mockResolvedValue({ id: 'pm_1', type: 'card', card: { brand: 'visa', last4: '4242' } });
+	// The env mock object is shared: a test that unsets STRIPE_TEST_PRODUCT
+	// must not leak that into the next test.
+	env.STRIPE_TEST_PRODUCT = 'price_test';
 });
 
 describe('usage load', () => {
@@ -108,7 +118,8 @@ describe('usage load', () => {
 			autoTopup: { enabled: false, threshold: 100, state: 'idle', failures: 0, lastAttemptAt: null, hasCard: false, card: null },
 			autoTopupConsentText: 'consent',
 			stripeConfigured: true,
-			plans: { hosted: true, lifetime: true }
+			plans: { hosted: true, lifetime: true },
+			testProduct: true
 		};
 	}
 
@@ -425,6 +436,32 @@ describe('usage load', () => {
 		// A second hosted subscription stays blocked — resume via the portal.
 		expect(body).not.toContain('value="hosted"');
 	});
+
+	test('load reports the test product only while STRIPE_TEST_PRODUCT is set', async () => {
+		await seedOrg();
+		expect(((await load({ locals: { user: OWNER } } as never)) as { testProduct: boolean }).testProduct).toBe(true);
+		(env as Record<string, string | undefined>).STRIPE_TEST_PRODUCT = undefined;
+		try {
+			expect(((await load({ locals: { user: OWNER } } as never)) as { testProduct: boolean }).testProduct).toBe(false);
+		} finally {
+			env.STRIPE_TEST_PRODUCT = 'price_test';
+		}
+	});
+
+	test('the test checkout card renders only when the test product and Stripe are both configured', async () => {
+		// The card is the operator's smoke-test entry point — hidden without
+		// STRIPE_TEST_PRODUCT, and never a permanently failing button when
+		// Stripe itself is unconfigured (the codex P2 rule on dead buttons).
+		const configured = render(Page, { props: { data: usagePageData(), form: null } as never }).body;
+		expect(configured).toContain('action="?/buyTest"');
+		expect(configured).toContain('Run test purchase');
+
+		const noProduct = render(Page, { props: { data: { ...usagePageData(), testProduct: false }, form: null } as never }).body;
+		expect(noProduct).not.toContain('?/buyTest');
+
+		const noStripe = render(Page, { props: { data: { ...usagePageData(), stripeConfigured: false }, form: null } as never }).body;
+		expect(noStripe).not.toContain('?/buyTest');
+	});
 });
 
 describe('usage buy action', () => {
@@ -549,6 +586,49 @@ describe('usage buy action', () => {
 		} finally {
 			errorSpy.mockRestore();
 		}
+	});
+});
+
+describe('usage buyTest action', () => {
+	test('an owner starts a test Checkout tagged product=test and redirects to it', async () => {
+		await seedOrg();
+
+		await expect(buyTest()).rejects.toMatchObject({ status: 303, location: 'https://checkout.stripe.com/pay/test_123' });
+
+		expect(mocks.sessionsCreate).toHaveBeenCalledWith(expect.objectContaining({
+			mode: 'payment',
+			line_items: [{ price: 'price_test', quantity: 1 }],
+			metadata: { org_id: 'org-1', product: 'test' }
+		}), expect.anything());
+	});
+
+	test('a crafted POST with STRIPE_TEST_PRODUCT unset fails loudly without leaking the env name', async () => {
+		// The button is hidden without the env var, but the action re-validates:
+		// a missing var is a server defect (500), generic to the client, loud in
+		// the log — and it must not plant a checkout attempt row.
+		await seedOrg();
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		(env as Record<string, string | undefined>).STRIPE_TEST_PRODUCT = undefined;
+		try {
+			const result = await buyTest();
+			expect(result).toMatchObject({ status: 500 });
+			const serialized = JSON.stringify(result);
+			expect(serialized).toContain('Could not start checkout');
+			expect(serialized).not.toContain('STRIPE_TEST_PRODUCT');
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('STRIPE_TEST_PRODUCT'));
+			expect(await testDb().db.select().from(stripeCheckoutAttempts)).toHaveLength(0);
+		} finally {
+			env.STRIPE_TEST_PRODUCT = 'price_test';
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('non-owners cannot open the test checkout (403)', async () => {
+		await seedOrg();
+		const member = { ...OWNER, orgRole: 'member' as const };
+
+		await expect(buyTest(member)).rejects.toMatchObject({ status: 403 });
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
 	});
 });
 

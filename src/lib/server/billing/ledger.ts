@@ -390,9 +390,11 @@ export interface UsageSummary {
 export async function usageSummary(orgId: string): Promise<UsageSummary> {
 	const remaining = await getCredits(orgId);
 	const monthStart = monthStartIso();
-	// "Used" means moderation consumption only: refund/dispute reversals are
-	// also negative-delta rows, but they are money leaving the ledger, not
-	// comments scored — summing every negative row would inflate the stats.
+	// "Used" means comment-processing consumption (moderation 'comment' and
+	// digest 'feedback' charges alike — both are spent credits): refund and
+	// dispute reversals are also negative-delta rows, but they are money
+	// leaving the ledger, not work performed — summing every negative row
+	// would inflate the stats.
 	// Aggregated in SQL over the (org_id, created_at) index: the usage page
 	// must stay bounded as the ledger grows, never fetch every consume row
 	// into memory just to add it up in JS.

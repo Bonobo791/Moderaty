@@ -153,8 +153,9 @@
 			{/each}
 			{#if data.latest.pooledCount}
 				<p class="muted pooled">
-					Plus {data.latest.pooledCount} other comment{data.latest.pooledCount === 1 ? '' : 's'} below the evidence
-					threshold — counted, but not shown as a recurring theme.
+					Plus {data.latest.pooledCount} other comment{data.latest.pooledCount === 1 ? '' : 's'} — below the
+					minimum-comments threshold or in a category you turned off — counted, but not shown as a
+					recurring theme.
 				</p>
 			{/if}
 			{#if !grouped.length && !data.latest.pooledCount}

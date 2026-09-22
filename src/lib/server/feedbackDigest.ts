@@ -31,7 +31,7 @@ import { channels, comments, creditTransactions, feedbackDigests, feedbackFindin
 import { classifyFeedback, type FeedbackCategory } from '$lib/server/feedback';
 import { concealEvidence } from '$lib/server/feedbackSanitize';
 import { groupFeedback } from '$lib/server/feedbackGroup';
-import { DeadlineExceededError, assertBeforeDeadline } from '$lib/server/http';
+import { DeadlineExceededError } from '$lib/server/http';
 import { consumeFeedbackCredit, orgIsMetered, type LedgerHandle } from '$lib/server/billing/ledger';
 import { resolveOpenAiKey } from '$lib/server/openaiKey';
 
@@ -40,6 +40,14 @@ export const DIGEST_COMMENT_CAP = 100;
 
 /** Evidence excerpts are capped like audit_log.text — long comments store the same 500 chars. */
 const EXCERPT_MAX = 500;
+
+/**
+ * Reserved headroom before the write transaction: a full batch runs
+ * hundreds of sequential statements against the remote database, so
+ * entering the tx with the deadline already spent risks a mid-write kill —
+ * the run defers instead and retries with markers untouched (codex).
+ */
+const WRITE_RESERVE_MS = 5_000;
 
 /** Weekly cadence: a channel is due again 7 days after its last evaluation. */
 export const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -353,7 +361,12 @@ export async function generateFeedbackDigest(
 		});
 
 		const batchIds = new Set(batch.map((c) => c.id));
-		assertBeforeDeadline(deadline);
+		// Reserve write headroom, not just the deadline edge: the persistence
+		// tx is the slowest remaining phase and a kill mid-transaction would
+		// force the (charged) classifications to be repeated next run.
+		if (deadline !== undefined && Date.now() > deadline - WRITE_RESERVE_MS) {
+			throw new DeadlineExceededError();
+		}
 		const result = await withBusyRetry(() =>
 			db.transaction(async (tx) => {
 				await replaceWindowDigest(tx, channelId, windowStart, windowEnd);

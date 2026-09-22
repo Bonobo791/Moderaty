@@ -49,11 +49,27 @@ export function progressiveCreditCostUsd(credits: number): number {
 }
 
 /**
- * The cut a bundle of `credits` credits advertises — the percentOff of the
- * band that size falls into (a 2,000-credit bundle lands in the deepest
- * band: 41% off), or undefined at the base tier.
+ * The cut a bundle of `credits` credits advertises — the EFFECTIVE percent
+ * the progressive price saves vs. the flat per-credit rate at that size.
+ * The band rates are marginal (per-tranche), so a 500-credit bundle is 18%
+ * off overall even though its deepest tranche is 23% off — advertising the
+ * band rate would overstate what the buyer actually saves (codex). Floored
+ * so the advertised number never overstates the real cut; undefined below
+ * 1% (the base tier).
  */
 export function bundleDiscountPercent(credits: number): number | undefined {
-	const band = CREDIT_PRICE_BANDS.find((candidate) => credits <= candidate.upToCredits);
-	return band && band.percentOff > 0 ? band.percentOff : undefined;
+	const undiscounted = credits * USD_PER_CREDIT;
+	if (undiscounted <= 0) return undefined;
+	const effective = (1 - progressiveCreditCostUsd(credits) / undiscounted) * 100;
+	return effective >= 1 ? Math.floor(effective) : undefined;
+}
+
+/**
+ * The catalog price of `credits` credits in Stripe cents — what a
+ * configured bundle Price must charge for the advertised discount to be
+ * true. Checkout validates the operator's Stripe Price against this
+ * (a mismatch would charge a different amount than the button promises).
+ */
+export function expectedBundlePriceCents(credits: number): number {
+	return Math.round(progressiveCreditCostUsd(credits) * 100);
 }

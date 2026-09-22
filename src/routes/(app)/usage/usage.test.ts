@@ -97,7 +97,11 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.sessionsCreate.mockResolvedValue({ id: 'cs_new', url: 'https://checkout.stripe.com/pay/test_123' });
 	mocks.customersCreate.mockResolvedValue({ id: 'cus_new' });
-	mocks.pricesRetrieve.mockImplementation(async (id: string) => id === 'price_hosted' ? { id, active: true, currency: 'usd', type: 'recurring', unit_amount: 500, recurring: { interval: 'month', interval_count: 1 } } : { id, active: true, currency: 'usd', type: 'one_time', unit_amount: 4900 });
+	// Bundle Prices must charge the shared catalog amount — the checkout
+	// validates unit_amount against expectedBundlePriceCents before any
+	// session exists. price_lifetime stays at its catalog 4900.
+	const bundleCents: Record<string, number> = { price_100: 500, price_500: 2040, price_2000: 6465, price_lifetime: 4900, price_test: 100 };
+	mocks.pricesRetrieve.mockImplementation(async (id: string) => id === 'price_hosted' ? { id, active: true, currency: 'usd', type: 'recurring', unit_amount: 500, recurring: { interval: 'month', interval_count: 1 } } : { id, active: true, currency: 'usd', type: 'one_time', unit_amount: bundleCents[id] ?? 100 });
 	mocks.paymentMethodsRetrieve.mockResolvedValue({ id: 'pm_1', type: 'card', card: { brand: 'visa', last4: '4242' } });
 	// The env mock object is shared: a test that unsets STRIPE_TEST_PRODUCT
 	// must not leak that into the next test.
@@ -290,13 +294,15 @@ describe('usage load', () => {
 	test('the buy credits card advertises the larger bundles\' bulk discount', () => {
 		// The percentage lives in the CREDIT_BUNDLES catalog — rendering the
 		// real configured bundles pins both the values and the button copy.
-		// (Svelte's {#if} anchors split the text node, so strip comments.)
+		// Svelte's {#if} anchors interleave HTML comments between text nodes,
+		// so assert the fragments in order rather than stripping comments
+		// (CodeQL flags comment-stripping regexes as incomplete sanitization).
 		const body = render(Page, {
 			props: { data: { ...usagePageData(), bundles: configuredBundles() }, form: null } as never
-		}).body.replace(/<!--[\s\S]*?-->/g, '');
-		expect(body).toContain('Buy 100 comments</button>');
-		expect(body).toContain('Buy 500 comments · 23% off');
-		expect(body).toContain('Buy 2,000 comments · 41% off');
+		}).body;
+		expect(body).toMatch(/Buy 100 comments[\s\S]*?<\/button>/);
+		expect(body).toMatch(/Buy 500 comments[\s\S]*?· 18% off[\s\S]*?<\/button>/);
+		expect(body).toMatch(/Buy 2,000 comments[\s\S]*?· 35% off[\s\S]*?<\/button>/);
 	});
 
 	test('the Plans card shows the claimed count, a sold-out state at zero, and an owned state for lifetime orgs', async () => {

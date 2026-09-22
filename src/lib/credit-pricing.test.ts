@@ -13,22 +13,41 @@
 
 import { describe, expect, test } from 'vitest';
 
-import { CREDIT_PRICE_BANDS, USD_PER_CREDIT, bundleDiscountPercent, progressiveCreditCostUsd } from './credit-pricing';
+import { CREDIT_PRICE_BANDS, USD_PER_CREDIT, bundleDiscountPercent, expectedBundlePriceCents, progressiveCreditCostUsd } from './credit-pricing';
 import { CREDIT_BUNDLES } from './server/stripe/bundles';
 
 describe('credit volume pricing', () => {
-	test('the Stripe catalog advertises exactly the band-table cuts — no drift', () => {
-		// bundles.ts derives discountPercent from CREDIT_PRICE_BANDS; this pins
+	test('the Stripe catalog advertises exactly the table-derived cuts — no drift', () => {
+		// bundles.ts derives discountPercent from the shared table; this pins
 		// the wiring so the Usage-page buttons and the landing calculators can
 		// never disagree about what a bundle saves.
 		expect(CREDIT_BUNDLES.map((bundle) => [bundle.id, bundle.discountPercent])).toEqual([
 			['credits_100', undefined],
-			['credits_500', 23],
-			['credits_2000', 41]
+			['credits_500', 18],
+			['credits_2000', 35]
 		]);
 		for (const bundle of CREDIT_BUNDLES) {
 			expect(bundleDiscountPercent(bundle.credits)).toBe(bundle.discountPercent);
 		}
+	});
+
+	test('the advertised cut is the EFFECTIVE cut of the progressive price — never the marginal band rate', () => {
+		// The band rates apply per-tranche: a 500-credit bundle's deepest
+		// tranche is 23% off, but the bundle as a whole saves 18.4% — the
+		// button must advertise the effective cut or the label overstates
+		// what the buyer actually saves (codex).
+		expect(bundleDiscountPercent(500)).toBe(Math.floor((1 - progressiveCreditCostUsd(500) / (500 * USD_PER_CREDIT)) * 100));
+		expect(bundleDiscountPercent(2000)).toBe(35);
+		expect(bundleDiscountPercent(100)).toBeUndefined();
+		expect(bundleDiscountPercent(0)).toBeUndefined();
+	});
+
+	test('expectedBundlePriceCents is the configured Stripe amount for each bundle', () => {
+		// The checkout validates the operator's configured Price against this
+		// catalog amount — a mismatch means the advertised discount is a lie.
+		expect(expectedBundlePriceCents(100)).toBe(500);
+		expect(expectedBundlePriceCents(500)).toBe(2040);
+		expect(expectedBundlePriceCents(2000)).toBe(6465);
 	});
 
 	test('each tranche pays its own band rate — progressive, not flat', () => {

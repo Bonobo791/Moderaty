@@ -62,7 +62,12 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.customersCreate.mockResolvedValue({ id: 'cus_1' });
 	mocks.sessionsCreate.mockResolvedValue({ id: 'cs_1', url: 'https://checkout.stripe.com/c/pay/cs_1' });
-	mocks.pricesRetrieve.mockImplementation(async (id: string) => id === 'price_hosted' ? { id, active: true, currency: 'usd', type: 'recurring', unit_amount: 500, recurring: { interval: 'month', interval_count: 1 } } : { id, active: true, currency: 'usd', type: 'one_time', unit_amount: 4900 });
+	// Bundle Prices must charge the shared catalog amount — the checkout
+	// validates unit_amount against expectedBundlePriceCents before any
+	// session exists (a mismatch would charge a price the button never
+	// advertised). price_lifetime stays at its catalog 4900.
+	const bundleCents: Record<string, number> = { price_100: 500, price_500: 2040, price_2000: 6465, price_lifetime: 4900, price_test: 100 };
+	mocks.pricesRetrieve.mockImplementation(async (id: string) => id === 'price_hosted' ? { id, active: true, currency: 'usd', type: 'recurring', unit_amount: 500, recurring: { interval: 'month', interval_count: 1 } } : { id, active: true, currency: 'usd', type: 'one_time', unit_amount: bundleCents[id] ?? 100 });
 	// The env mock object is shared: tests that change STRIPE_TEST_PRODUCT
 	// rely on this reset so one override never leaks into the next test.
 	env.STRIPE_TEST_PRODUCT = 'price_test';
@@ -265,6 +270,28 @@ describe('createCreditCheckout', () => {
 		expect(constructed.some(([input, base]) => input === '/usage/success?session_id={CHECKOUT_SESSION_ID}' && String(base) === 'https://app.example/')).toBe(true);
 		expect(constructed.some(([input, base]) => input === '/usage' && String(base) === 'https://app.example/')).toBe(true);
 	});
+
+	test.each([
+		['an inactive Price', { active: false, currency: 'usd', type: 'one_time', unit_amount: 2040 }, 'inactive'],
+		['a non-USD Price', { active: true, currency: 'eur', type: 'one_time', unit_amount: 2040 }, 'must be USD'],
+		['a recurring Price', { active: true, currency: 'usd', type: 'recurring', unit_amount: 2040 }, 'must be one-time'],
+		['a Price charging the wrong amount', { active: true, currency: 'usd', type: 'one_time', unit_amount: 4900 }, 'must charge 2040 cents']
+	])('rejects %s before any durable state — the advertised discount must match the charge', async (_label, price, reason) => {
+		// The button advertises a discount derived from the shared pricing
+		// table; a configured Price that does not match would charge a
+		// different amount than the label promises (codex). Validation runs
+		// before the attempt row, like the test product's resolution.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.pricesRetrieve.mockResolvedValue({ id: 'price_500', ...price });
+
+		const error = await createCreditCheckout('org-1', owner(), 'credits_500').catch((cause: unknown) => cause);
+
+		expect((error as Error).message).toContain('STRIPE_PRICE_CREDITS_500');
+		expect((error as Error).message).toContain(reason);
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+		expect(mocks.customersCreate).not.toHaveBeenCalled();
+		expect(await testDb().db.select().from(stripeCheckoutAttempts)).toHaveLength(0);
+	});
 });
 
 describe('createTestCheckout', () => {
@@ -361,6 +388,41 @@ describe('createTestCheckout', () => {
 
 		await expect(createTestCheckout('org-1', owner({ orgRole: 'member' }))).rejects.toMatchObject({ status: 403 });
 		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test.each([
+		['configured Price id', 'price_gone'],
+		['configured Product id', 'prod_gone']
+	])('a %s that does not exist in this Stripe mode is a misconfiguration, not a transient failure', async (_label, configured) => {
+		// products.retrieve/prices.retrieve throw StripeInvalidRequestError
+		// (code resource_missing) for an id absent in the active mode — a
+		// permanent operator error that must reach the sanitized 400 path
+		// instead of the retryable generic failure (codex).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		env.STRIPE_TEST_PRODUCT = configured;
+		const missing = Object.assign(new Error('No such object'), { type: 'StripeInvalidRequestError', code: 'resource_missing' });
+		if (configured.startsWith('prod_')) mocks.productsRetrieve.mockRejectedValue(missing);
+		else mocks.pricesRetrieve.mockRejectedValue(missing);
+
+		const error = await createTestCheckout('org-1', owner(), 'attempt-gone').catch((cause: unknown) => cause);
+
+		expect((error as Error).message).toMatch(/^STRIPE_TEST_PRODUCT/);
+		expect(checkoutRejectionMessage(error)).toContain('misconfigured');
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+		expect(await testDb().db.select().from(stripeCheckoutAttempts)).toHaveLength(0);
+	});
+
+	test('a non-resource_missing Stripe lookup failure keeps its raw verdict', async () => {
+		// Only resource_missing maps to the misconfiguration branch — a
+		// rate-limit or auth failure during resolution stays a loud provider
+		// error, not a sanitized "misconfigured" lie.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.pricesRetrieve.mockRejectedValue(Object.assign(new Error('rate limited'), { type: 'StripeRateLimitError' }));
+
+		const error = await createTestCheckout('org-1', owner()).catch((cause: unknown) => cause);
+
+		expect((error as Error).message).toBe('rate limited');
+		expect(checkoutRejectionMessage(error)).toBeNull();
 	});
 
 	test('rejects a zero-priced resolved Price — a free checkout can never exercise the paid pipeline', async () => {

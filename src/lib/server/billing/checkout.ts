@@ -25,6 +25,7 @@ import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { organizations, stripeCheckoutAttempts, stripeLifetimeEntitlements, stripeLifetimeSlots } from '$lib/server/db/schema';
 import { bundleById, priceIdFor, type CreditBundle } from '$lib/server/stripe/bundles';
+import { expectedBundlePriceCents } from '$lib/credit-pricing';
 import { assertCreditsPurchasable, UNMETERED_CREDIT_PURCHASE_ERROR } from './ledger';
 import { isActiveSubscriptionStatus, planPriceEnv, validatePlanPrice, type PaidPlan } from './plans';
 import { getStripe } from '$lib/server/stripe/client';
@@ -167,11 +168,18 @@ export async function createCreditCheckout(orgId: string, user: SessionUser, bun
 	// Unlimited plans never buy credits — rejected before an attempt row is
 	// planted (the lifetime org's scoring is already free; MOD-35).
 	await assertCreditsPurchasable(orgId);
+	// The configured Price is validated BEFORE the attempt row: a bundle
+	// Price that is inactive, non-USD, recurring, or charges a different
+	// amount than the advertised discount would either fail downstream or —
+	// worse — charge the buyer an amount the button never promised (codex).
+	// Same catalog-validation rule as the plan checkout's validatePlanPrice.
+	const priceId = priceIdFor(bundle);
+	validateBundlePrice(bundle, await getStripe().prices.retrieve(priceId));
 	return createCheckoutAttempt(orgId, bundle.id, attemptId, async (idempotencyKey) => {
 		const customer = await getOrCreateStripeCustomer(orgId, user);
 		return getStripe().checkout.sessions.create({
 			mode: 'payment',
-			line_items: [{ price: priceIdFor(bundle), quantity: 1 }],
+			line_items: [{ price: priceId, quantity: 1 }],
 			customer,
 			client_reference_id: orgId,
 			metadata: { org_id: orgId, bundle: bundle.id, credits: String(bundle.credits) },
@@ -291,6 +299,22 @@ function configuredPlanPriceId(plan: PaidPlan): string {
 }
 
 /**
+ * The configured bundle Price must charge exactly the catalog amount the
+ * discount label is derived from — anything else means the button's
+ * advertised cut is a lie about what the buyer pays (codex). Errors name
+ * the env var, not the Stripe id, matching configuredPlanPriceId.
+ */
+function validateBundlePrice(bundle: CreditBundle, price: { active?: unknown; currency?: unknown; type?: unknown; unit_amount?: unknown }): void {
+	if (price.active !== true) throw new Error(`${bundle.priceEnv} Stripe Price is inactive`);
+	if (price.currency !== 'usd') throw new Error(`${bundle.priceEnv} Stripe Price must be USD`);
+	if (price.type !== 'one_time') throw new Error(`${bundle.priceEnv} Stripe Price must be one-time`);
+	const expectedCents = expectedBundlePriceCents(bundle.credits);
+	if (price.unit_amount !== expectedCents) {
+		throw new Error(`${bundle.priceEnv} Stripe Price must charge ${expectedCents} cents — the ${bundle.label} bundle advertises its discount against that catalog amount`);
+	}
+}
+
+/**
  * Creates a Checkout Session for one of the hosted products. The application
  * owns the catalog: Stripe's configured Price is retrieved and checked before
  * any Checkout session is created, and fulfillment rechecks the metadata and
@@ -333,32 +357,44 @@ export async function createPlanCheckout(orgId: string, user: SessionUser, plan:
 async function testProductPriceId(): Promise<string> {
 	const configured = env.STRIPE_TEST_PRODUCT;
 	if (!configured) throw new Error('STRIPE_TEST_PRODUCT is not configured');
-	let priceId = configured;
-	if (configured.startsWith('prod_')) {
-		const product = await getStripe().products.retrieve(configured);
-		const defaultPrice = typeof product.default_price === 'string' ? product.default_price : product.default_price?.id;
-		if (defaultPrice) {
-			priceId = defaultPrice;
-		} else {
-			const prices = await getStripe().prices.list({ product: configured, active: true, limit: 2 });
-			if (prices.data.length !== 1) {
-				throw new Error(`STRIPE_TEST_PRODUCT product has no default price and ${prices.data.length} active prices — set a default price or configure the Price id directly`);
+	try {
+		let priceId = configured;
+		if (configured.startsWith('prod_')) {
+			const product = await getStripe().products.retrieve(configured);
+			const defaultPrice = typeof product.default_price === 'string' ? product.default_price : product.default_price?.id;
+			if (defaultPrice) {
+				priceId = defaultPrice;
+			} else {
+				const prices = await getStripe().prices.list({ product: configured, active: true, limit: 2 });
+				if (prices.data.length !== 1) {
+					throw new Error(`STRIPE_TEST_PRODUCT product has no default price and ${prices.data.length} active prices — set a default price or configure the Price id directly`);
+				}
+				priceId = prices.data[0].id;
 			}
-			priceId = prices.data[0].id;
 		}
+		if (!priceId.startsWith('price_')) throw new Error('STRIPE_TEST_PRODUCT must be a Stripe Product (prod_...) or Price (price_...) id');
+		const price = await getStripe().prices.retrieve(priceId);
+		if (price.active !== true) throw new Error('STRIPE_TEST_PRODUCT resolves to an inactive Stripe Price');
+		if (price.type !== 'one_time') throw new Error('STRIPE_TEST_PRODUCT resolves to a recurring Stripe Price — the test checkout runs in payment mode');
+		// A zero-amount (or amount-less, e.g. custom_unit_amount) Price completes
+		// Checkout as no_payment_required — fulfillCheckout rejects those, so the
+		// smoke test would end without ever touching the paid pipeline it exists
+		// to verify (codex/cubic). The test must charge real money.
+		if (typeof price.unit_amount !== 'number' || price.unit_amount <= 0) {
+			throw new Error('STRIPE_TEST_PRODUCT resolves to a zero-priced Stripe Price — the test checkout must charge a real payment');
+		}
+		return priceId;
+	} catch (error) {
+		if (error instanceof Error && error.message.startsWith('STRIPE_TEST_PRODUCT')) throw error;
+		// A prod_/price_ id that does not exist in the active Stripe mode is a
+		// permanent misconfiguration, not a transient provider failure — it
+		// must carry the STRIPE_TEST_PRODUCT prefix so the action maps it to
+		// the sanitized 400 instead of a retryable generic error (codex).
+		if ((error as { code?: unknown })?.code === 'resource_missing') {
+			throw new Error('STRIPE_TEST_PRODUCT references a Stripe Product or Price that does not exist in this mode');
+		}
+		throw error;
 	}
-	if (!priceId.startsWith('price_')) throw new Error('STRIPE_TEST_PRODUCT must be a Stripe Product (prod_...) or Price (price_...) id');
-	const price = await getStripe().prices.retrieve(priceId);
-	if (price.active !== true) throw new Error('STRIPE_TEST_PRODUCT resolves to an inactive Stripe Price');
-	if (price.type !== 'one_time') throw new Error('STRIPE_TEST_PRODUCT resolves to a recurring Stripe Price — the test checkout runs in payment mode');
-	// A zero-amount (or amount-less, e.g. custom_unit_amount) Price completes
-	// Checkout as no_payment_required — fulfillCheckout rejects those, so the
-	// smoke test would end without ever touching the paid pipeline it exists
-	// to verify (codex/cubic). The test must charge real money.
-	if (typeof price.unit_amount !== 'number' || price.unit_amount <= 0) {
-		throw new Error('STRIPE_TEST_PRODUCT resolves to a zero-priced Stripe Price — the test checkout must charge a real payment');
-	}
-	return priceId;
 }
 
 /**

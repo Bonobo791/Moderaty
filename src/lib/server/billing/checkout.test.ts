@@ -18,8 +18,8 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { env } from '$env/dynamic/private';
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
-import { organizations, stripeLifetimeSlots } from '$lib/server/db/schema';
-import { createCreditCheckout, createPlanCheckout, createTestCheckout, getOrCreateStripeCustomer } from './checkout';
+import { organizations, stripeCheckoutAttempts, stripeLifetimeSlots } from '$lib/server/db/schema';
+import { checkoutRejectionMessage, createCreditCheckout, createPlanCheckout, createTestCheckout, getOrCreateStripeCustomer } from './checkout';
 import type { SessionUser } from '$lib/server/session';
 
 const mocks = vi.hoisted(() => ({
@@ -261,8 +261,9 @@ describe('createCreditCheckout', () => {
 		} finally {
 			vi.unstubAllGlobals();
 		}
-		expect(constructed.some(([input, base]) => input === '/usage/success?session_id={CHECKOUT_SESSION_ID}' && base === 'https://app.example')).toBe(true);
-		expect(constructed.some(([input, base]) => input === '/usage' && base === 'https://app.example')).toBe(true);
+		// The base is the validated APP_URL as a URL object — href-normalized.
+		expect(constructed.some(([input, base]) => input === '/usage/success?session_id={CHECKOUT_SESSION_ID}' && String(base) === 'https://app.example/')).toBe(true);
+		expect(constructed.some(([input, base]) => input === '/usage' && String(base) === 'https://app.example/')).toBe(true);
 	});
 });
 
@@ -360,5 +361,96 @@ describe('createTestCheckout', () => {
 
 		await expect(createTestCheckout('org-1', owner({ orgRole: 'member' }))).rejects.toMatchObject({ status: 403 });
 		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test('rejects a zero-priced resolved Price — a free checkout can never exercise the paid pipeline', async () => {
+		// unit_amount 0 completes Checkout as no_payment_required, which
+		// fulfillCheckout rejects — the smoke test would end without ever
+		// touching the paid-payment path it exists to verify (codex/cubic).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		env.STRIPE_TEST_PRODUCT = 'price_free';
+		mocks.pricesRetrieve.mockResolvedValueOnce({ id: 'price_free', active: true, currency: 'usd', type: 'one_time', unit_amount: 0 });
+
+		await expect(createTestCheckout('org-1', owner())).rejects.toThrow('zero-priced');
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test('rejects a resolved Price with no fixed amount — custom_unit_amount is not a test charge', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		env.STRIPE_TEST_PRODUCT = 'price_custom';
+		mocks.pricesRetrieve.mockResolvedValueOnce({ id: 'price_custom', active: true, currency: 'usd', type: 'one_time', unit_amount: null });
+
+		await expect(createTestCheckout('org-1', owner())).rejects.toThrow('zero-priced');
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test.each([
+		['a value that is neither Product nor Price id', 'not_a_stripe_id', 'must be a Stripe Product'],
+		['an inactive resolved price', 'price_inactive', 'inactive Stripe Price']
+	])('a failing STRIPE_TEST_PRODUCT resolution (%s) plants no checkout attempt row', async (_label, configured, reason) => {
+		// The price resolves BEFORE the attempt row is inserted — a bad
+		// operator config must not leave a durable pending attempt that no
+		// session will ever claim (cubic/codeant).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		env.STRIPE_TEST_PRODUCT = configured;
+		if (configured === 'price_inactive') {
+			mocks.pricesRetrieve.mockResolvedValueOnce({ id: 'price_inactive', active: false, currency: 'usd', type: 'one_time', unit_amount: 100 });
+		}
+
+		await expect(createTestCheckout('org-1', owner(), 'attempt-bad')).rejects.toThrow(reason);
+		expect(await testDb().db.select().from(stripeCheckoutAttempts)).toHaveLength(0);
+	});
+});
+
+describe('checkout configuration validation', () => {
+	test.each(['not a url', 'ftp://app.example/path', 'javascript:alert(1)'])(
+		'a malformed APP_URL (%s) is rejected before any durable state — in every checkout creator',
+		async (bad) => {
+			// A presence-only check let a malformed APP_URL reach the attempt
+			// callback: the attempt row (and possibly the Stripe customer) was
+			// already durable when new URL() finally threw (coderabbit/cubic).
+			await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+			const previous = env.APP_URL;
+			env.APP_URL = bad;
+			try {
+				await expect(createCreditCheckout('org-1', owner(), 'credits_100')).rejects.toThrow('valid absolute http(s) URL');
+				await expect(createPlanCheckout('org-1', owner(), 'hosted')).rejects.toThrow('valid absolute http(s) URL');
+				await expect(createTestCheckout('org-1', owner())).rejects.toThrow('valid absolute http(s) URL');
+			} finally {
+				env.APP_URL = previous;
+			}
+			expect(await testDb().db.select().from(stripeCheckoutAttempts)).toHaveLength(0);
+			expect(mocks.customersCreate).not.toHaveBeenCalled();
+			expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+		}
+	);
+
+	test('a missing APP_URL still fails loudly', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		const previous = env.APP_URL;
+		(env as Record<string, string | undefined>).APP_URL = undefined;
+		try {
+			await expect(createTestCheckout('org-1', owner())).rejects.toThrow('APP_URL is not configured');
+		} finally {
+			env.APP_URL = previous;
+		}
+		expect(await testDb().db.select().from(stripeCheckoutAttempts)).toHaveLength(0);
+	});
+});
+
+describe('checkoutRejectionMessage', () => {
+	test('STRIPE_TEST_PRODUCT resolution failures are non-retryable operator rejections', () => {
+		// A misconfigured test product fails forever — the owner gets a real
+		// verdict instead of "please try again", but env internals stay out of
+		// the client payload (codeant).
+		const message = checkoutRejectionMessage(new Error('STRIPE_TEST_PRODUCT resolves to an inactive Stripe Price'));
+		expect(message).toContain('misconfigured');
+		expect(message).not.toContain('STRIPE_TEST_PRODUCT');
+	});
+
+	test('a missing STRIPE_TEST_PRODUCT stays a server defect, not a rejection', () => {
+		// The button never renders without the var — a POST that reaches this
+		// is crafted, and the missing-var defect stays a generic 500.
+		expect(checkoutRejectionMessage(new Error('STRIPE_TEST_PRODUCT is not configured'))).toBeNull();
 	});
 });

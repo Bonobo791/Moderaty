@@ -636,6 +636,28 @@ describe('usage buyTest action', () => {
 		}
 	});
 
+	test('a misconfigured STRIPE_TEST_PRODUCT answers 400 with a sanitized reason — never "try again"', async () => {
+		// The advertised button would otherwise fail forever behind a generic
+		// retry message (codeant): a bad test-product config is a non-retryable
+		// operator rejection — specific about WHAT without leaking env names or
+		// Stripe internals, loud in the server log.
+		await seedOrg();
+		env.STRIPE_TEST_PRODUCT = 'price_inactive';
+		mocks.pricesRetrieve.mockResolvedValueOnce({ id: 'price_inactive', active: false, currency: 'usd', type: 'one_time', unit_amount: 100 });
+		const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+		try {
+			const result = await buyTest();
+			expect(result).toMatchObject({ status: 400 });
+			const serialized = JSON.stringify(result);
+			expect(serialized).toContain('misconfigured');
+			expect(serialized).not.toContain('STRIPE_TEST_PRODUCT');
+			expect(serialized).not.toContain('try again');
+			expect(await testDb().db.select().from(stripeCheckoutAttempts)).toHaveLength(0);
+		} finally {
+			infoSpy.mockRestore();
+		}
+	});
+
 	test('non-owners cannot open the test checkout (403)', async () => {
 		await seedOrg();
 		const member = { ...OWNER, orgRole: 'member' as const };

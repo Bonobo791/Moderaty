@@ -64,8 +64,17 @@ export function checkoutRejectionMessage(error: unknown): string | null {
 		case UNMETERED_CREDIT_PURCHASE_ERROR:
 			return 'Your lifetime plan includes unlimited moderated comments — credit purchases are not needed.';
 		default:
-			return null;
+			break;
 	}
+	// STRIPE_TEST_PRODUCT resolution failures are operator-facing rejections:
+	// retrying can never fix a bad test-product config, so the action answers
+	// 400 with a sanitized reason — the env name and Stripe detail stay in
+	// the server log. The missing-var case is a crafted-POST defect (the
+	// button never renders without it) and keeps its generic 500.
+	if (error.message !== 'STRIPE_TEST_PRODUCT is not configured' && error.message.startsWith('STRIPE_TEST_PRODUCT')) {
+		return 'The test checkout is misconfigured on this deployment — the exact reason is in the server log.';
+	}
+	return null;
 }
 
 /**
@@ -119,7 +128,24 @@ export async function getOrCreateStripeCustomer(orgId: string, user: SessionUser
 	return customer.id;
 }
 
-function checkoutRedirectUrls(appUrl: string): { success_url: string; cancel_url: string } {
+/**
+ * APP_URL must be an absolute http(s) URL — checked BEFORE any durable
+ * checkout state exists: a malformed value would otherwise surface inside
+ * new URL() only after the attempt row (and possibly the Stripe customer)
+ * was already persisted, and a non-http(s) scheme could reach Stripe's
+ * redirect fields (coderabbit/cubic). Same rule as the card-portal action.
+ */
+function checkoutAppUrl(): URL {
+	const raw = env.APP_URL;
+	if (!raw) throw new Error('APP_URL is not configured');
+	const appUrl = URL.parse(raw);
+	if (!appUrl || (appUrl.protocol !== 'http:' && appUrl.protocol !== 'https:')) {
+		throw new Error('APP_URL is not configured as a valid absolute http(s) URL');
+	}
+	return appUrl;
+}
+
+function checkoutRedirectUrls(appUrl: URL): { success_url: string; cancel_url: string } {
 	return {
 		success_url: new URL('/usage/success?session_id={CHECKOUT_SESSION_ID}', appUrl).toString(),
 		cancel_url: new URL('/usage', appUrl).toString()
@@ -137,8 +163,7 @@ function checkoutRedirectUrls(appUrl: string): { success_url: string; cancel_url
 export async function createCreditCheckout(orgId: string, user: SessionUser, bundleId: string, attemptId?: string): Promise<string> {
 	requireOrgRole(user, 'owner');
 	const bundle: CreditBundle = bundleById(bundleId);
-	const appUrl = env.APP_URL;
-	if (!appUrl) throw new Error('APP_URL is not configured');
+	const appUrl = checkoutAppUrl();
 	// Unlimited plans never buy credits — rejected before an attempt row is
 	// planted (the lifetime org's scoring is already free; MOD-35).
 	await assertCreditsPurchasable(orgId);
@@ -273,8 +298,7 @@ function configuredPlanPriceId(plan: PaidPlan): string {
  */
 export async function createPlanCheckout(orgId: string, user: SessionUser, plan: PaidPlan, attemptId?: string): Promise<string> {
 	requireOrgRole(user, 'owner');
-	const appUrl = env.APP_URL;
-	if (!appUrl) throw new Error('APP_URL is not configured');
+	const appUrl = checkoutAppUrl();
 	return createCheckoutAttempt(orgId, plan, attemptId, async (idempotencyKey) => {
 		await assertPlanAvailable(orgId, plan);
 		const priceId = configuredPlanPriceId(plan);
@@ -327,6 +351,13 @@ async function testProductPriceId(): Promise<string> {
 	const price = await getStripe().prices.retrieve(priceId);
 	if (price.active !== true) throw new Error('STRIPE_TEST_PRODUCT resolves to an inactive Stripe Price');
 	if (price.type !== 'one_time') throw new Error('STRIPE_TEST_PRODUCT resolves to a recurring Stripe Price — the test checkout runs in payment mode');
+	// A zero-amount (or amount-less, e.g. custom_unit_amount) Price completes
+	// Checkout as no_payment_required — fulfillCheckout rejects those, so the
+	// smoke test would end without ever touching the paid pipeline it exists
+	// to verify (codex/cubic). The test must charge real money.
+	if (typeof price.unit_amount !== 'number' || price.unit_amount <= 0) {
+		throw new Error('STRIPE_TEST_PRODUCT resolves to a zero-priced Stripe Price — the test checkout must charge a real payment');
+	}
 	return priceId;
 }
 
@@ -341,14 +372,16 @@ async function testProductPriceId(): Promise<string> {
  */
 export async function createTestCheckout(orgId: string, user: SessionUser, attemptId?: string): Promise<string> {
 	requireOrgRole(user, 'owner');
-	const appUrl = env.APP_URL;
-	if (!appUrl) throw new Error('APP_URL is not configured');
+	const appUrl = checkoutAppUrl();
 	// Config check BEFORE the attempt row: a crafted POST without the env var
 	// must fail without planting durable state (env validation at handler
 	// start — the review rules).
 	if (!env.STRIPE_TEST_PRODUCT) throw new Error('STRIPE_TEST_PRODUCT is not configured');
+	// The Stripe price resolves BEFORE the attempt row too — a failed lookup
+	// or invalid configuration must not leave a durable pending attempt that
+	// no session will ever claim (cubic/codeant).
+	const priceId = await testProductPriceId();
 	return createCheckoutAttempt(orgId, TEST_CHECKOUT_PRODUCT, attemptId, async (idempotencyKey) => {
-		const priceId = await testProductPriceId();
 		const customer = await getOrCreateStripeCustomer(orgId, user);
 		return getStripe().checkout.sessions.create(
 			{

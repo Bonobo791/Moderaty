@@ -45,6 +45,14 @@ describe('normalizeClaimKey', () => {
 		expect(normalizeClaimKey('When is the NEXT video?!')).toBe(normalizeClaimKey('when is the next video'));
 		expect(normalizeClaimKey('o áudio está alto')).toBe('o audio esta alto');
 	});
+
+	test('keeps non-Latin letters — a claim written entirely in another script still has a key', () => {
+		// The prompt instructs claims in the commenter's own language; an
+		// ASCII-only key normalizes them to '' and pools every one forever
+		// (codeant).
+		expect(normalizeClaimKey('字幕を付けてください')).not.toBe('');
+		expect(normalizeClaimKey('добавьте субтитры')).not.toBe('');
+	});
 });
 
 describe('groupFeedback', () => {
@@ -133,6 +141,27 @@ describe('groupFeedback', () => {
 		expect(findings.map((f) => f.supporterCount)).toEqual([4, 3, 3]);
 		expect(findings[1].summary).toContain('newest theme');
 		expect(findings[2].summary).toContain('older theme');
+	});
+
+	test('recency compares instants — an offset timestamp sorting later as text is still older', () => {
+		// '2026-01-07T01:00:00+05:30' is 2026-01-06T19:30:00Z: lexically it
+		// sorts AFTER '2026-01-06T23:00:00.000Z' but its instant is EARLIER —
+		// a text compare would rank the wrong theme as newest (codeant).
+		const { findings } = groupFeedback([
+			...supporters('offset theme', 3, 'a', { publishedAt: '2026-01-07T01:00:00+05:30' }),
+			...supporters('truly newest theme', 3, 'b', { publishedAt: '2026-01-06T23:00:00.000Z' })
+		]);
+		expect(findings[0].summary).toContain('truly newest theme');
+		expect(findings[0].latestAt).toBe('2026-01-06T23:00:00.000Z');
+	});
+
+	test('non-Latin claims group into a finding instead of pooling', () => {
+		const { findings, pooled } = groupFeedback(
+			supporters('字幕を付けてください', 3, 'j', { category: 'request' })
+		);
+		expect(findings).toHaveLength(1);
+		expect(findings[0].supporterCount).toBe(3);
+		expect(pooled).toBe(0);
 	});
 
 	test('a claim that is nothing but abuse drops to the pool instead of headlining a finding', () => {

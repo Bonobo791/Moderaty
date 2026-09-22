@@ -19,7 +19,7 @@
 // comments — pure and side-effect free so identical input always yields an
 // identical digest (I4) and the eval harness can run it under plain Node.
 
-import { sanitizeClaim } from './feedbackSanitize';
+import { sanitizeClaim } from './feedbackSanitize.js';
 
 /** Maximum supporting comments persisted per finding. */
 export const MAX_EVIDENCE = 5;
@@ -56,9 +56,12 @@ const PER_CATEGORY_VERB = {
 
 /**
  * Normalizes a claim to its grouping key: lowercase, diacritics stripped,
- * every non-alphanumeric run collapsed to a single space. The model is
- * instructed to paraphrase to common wording; this key catches the residual
- * case/punctuation drift so the same theme still groups together.
+ * every non-letter/non-number run collapsed to a single space. Unicode
+ * letters survive — the prompt instructs claims in the commenter's own
+ * language, so an ASCII-only key would normalize an all-Japanese (or
+ * Cyrillic, Arabic, …) claim to '' and pool it forever (codeant). The model
+ * is instructed to paraphrase to common wording; this key catches the
+ * residual case/punctuation drift so the same theme still groups together.
  *
  * @param {string} claim
  * @returns {string}
@@ -68,7 +71,7 @@ export function normalizeClaimKey(claim) {
 		.normalize('NFKD')
 		.replace(/[\u0300-\u036f]/g, '')
 		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, ' ')
+		.replace(/[^\p{L}\p{N}]+/gu, ' ')
 		.trim();
 }
 
@@ -146,11 +149,11 @@ export function groupFeedback(comments, { categories, threshold = DEFAULT_THRESH
 			(a, b) =>
 				Number(a.hasAbuse) - Number(b.hasAbuse) ||
 				a.text.length - b.text.length ||
-				b.publishedAt.localeCompare(a.publishedAt) ||
+				Date.parse(b.publishedAt) - Date.parse(a.publishedAt) ||
 				a.commentId.localeCompare(b.commentId)
 		);
 		const latestAt = members.reduce(
-			(max, m) => (m.publishedAt > max ? m.publishedAt : max),
+			(max, m) => (Date.parse(m.publishedAt) > Date.parse(max) ? m.publishedAt : max),
 			members[0].publishedAt
 		);
 		findings.push({
@@ -164,7 +167,7 @@ export function groupFeedback(comments, { categories, threshold = DEFAULT_THRESH
 	findings.sort(
 		(a, b) =>
 			b.supporterCount - a.supporterCount ||
-			b.latestAt.localeCompare(a.latestAt) ||
+			Date.parse(b.latestAt) - Date.parse(a.latestAt) ||
 			a.summary.localeCompare(b.summary)
 	);
 	return { findings, pooled };

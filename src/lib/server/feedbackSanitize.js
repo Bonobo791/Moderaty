@@ -20,7 +20,7 @@
 // mostly mask anyway. The default render path only ever sees this output —
 // raw text requires the explicit per-comment reveal action.
 
-import { ABUSE_TERMS } from './feedbackLexicon';
+import { ABUSE_TERMS } from './feedbackLexicon.js';
 
 /** Mask substituted for each abusive span. */
 export const REDACTION = '█████';

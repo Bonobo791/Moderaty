@@ -218,3 +218,25 @@ test('generate rejects a cross-org channel with 404', async () => {
 	).rejects.toMatchObject({ status: 404 });
 	expect(mocks.generateFeedbackDigest).not.toHaveBeenCalled();
 });
+
+// Feedback digests spend org credits (one per classified comment on metered
+// orgs) — arming or triggering that spend is owner-only, same as every other
+// money-moving action (codeant security finding).
+const MEMBER = { ...OWNER, orgRole: 'member' as const };
+
+test('settings rejects a non-owner member with 403 — arming credit spend is owner-only', async () => {
+	await seedChannel('UC1');
+	await expect(
+		postSettings('UC1', { enabled: 'on', cadence: 'weekly', category: 'question', threshold: '3' }, MEMBER)
+	).rejects.toMatchObject({ status: 403 });
+	const ch = await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get();
+	expect(ch?.feedbackEnabled).toBeNull();
+});
+
+test('generate rejects a non-owner member with 403 before calling the job', async () => {
+	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1 });
+	await expect(
+		actions.generate({ params: { id: 'UC1' }, locals: { user: MEMBER } } as never)
+	).rejects.toMatchObject({ status: 403 });
+	expect(mocks.generateFeedbackDigest).not.toHaveBeenCalled();
+});

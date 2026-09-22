@@ -199,6 +199,34 @@ test('a fully-failed classification marks the digest failed and never advances t
 	expect(await testDb().db.select().from(feedbackFindings).all()).toHaveLength(1);
 });
 
+test('timestamps with timezone offsets are windowed by instant, not text order', async () => {
+	// publishedAt is stored verbatim — any parseable offset is legal in the
+	// data model (youtube.ts validates with Date.parse only). The offset
+	// comment below is 2026-01-04T19:30:00Z, so '2026-01-04T23:00:00.000Z' is
+	// the true latest instant even though it sorts EARLIER as text. A text
+	// compare anchors the window to the wrong string and permanently skips
+	// comments whose instants fall between the two (codeant).
+	await seedChannel('UC1', { feedbackEnabled: 1 });
+	await seedComment('offset', 'UC1', 'offset comment', '2026-01-05T01:00:00+05:30'); // = 2026-01-04T19:30:00Z
+	await seedComment('latest', 'UC1', 'latest comment', '2026-01-04T23:00:00.000Z');
+	RESPONSES = {
+		'offset comment': { category: 'question', hasAbuse: false, claim: 'a theme' },
+		'latest comment': { category: 'question', hasAbuse: false, claim: 'a theme' }
+	};
+
+	const first = await generateFeedbackDigest('UC1', { force: true });
+	expect(first).toMatchObject({ status: 'complete', commentsClassified: 2 });
+	const digest = await testDb().db.select().from(feedbackDigests).get();
+	expect(digest?.windowEnd).toBe('2026-01-04T23:00:00.000Z');
+
+	// This comment's instant is after the stored windowEnd but its text sorts
+	// BEFORE the offset string — a text boundary drops it forever.
+	await seedComment('between', 'UC1', 'between comment', '2026-01-04T23:30:00.000Z');
+	RESPONSES['between comment'] = { category: 'question', hasAbuse: false, claim: 'a theme' };
+	const second = await generateFeedbackDigest('UC1', { force: true });
+	expect(second).toMatchObject({ status: 'complete', commentsClassified: 1 });
+});
+
 test('the next window starts where the last complete digest ended', async () => {
 	await seedChannel('UC1', { feedbackEnabled: 1 });
 	for (const i of [1, 2, 3]) {

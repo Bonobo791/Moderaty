@@ -19,7 +19,7 @@ import { fail } from '@sveltejs/kit';
 import { db } from '$lib/server/db';
 import { channels, feedbackDigests, feedbackFindings, findingEvidence } from '$lib/server/db/schema';
 import { enabledCategories, generateFeedbackDigest } from '$lib/server/feedbackDigest';
-import { ownedChannel } from '$lib/server/ownership';
+import { ownedChannel, requireOrgRole } from '$lib/server/ownership';
 import { requireUser } from '$lib/server/session';
 
 /** The four digest categories, in display order — the only values accepted by the settings form. */
@@ -111,6 +111,9 @@ export async function load({ params, locals }) {
 export const actions = {
 	/** "Generate now" — a forced run over the window since the last complete digest. */
 	generate: async ({ params, locals }) => {
+		// A run spends org credits on metered plans — owner-only like every
+		// money-moving action; membership alone is not enough (codeant).
+		requireOrgRole(requireUser(locals), 'owner');
 		const ch = await ownedChannel(params.id, locals);
 		if (ch.feedbackEnabled !== 1) {
 			return fail(400, { scope: 'digest', error: 'Enable the feedback digest below before generating.' });
@@ -152,6 +155,9 @@ export const actions = {
 	/** Per-channel feedback controls (MOD-91): opt-in, cadence, categories, threshold, e-mail flag. */
 	settings: async ({ params, request, locals }) => {
 		const user = requireUser(locals);
+		// Enabling the digest arms recurring per-comment credit spend — that
+		// decision belongs to the owner, not any org member (codeant).
+		requireOrgRole(user, 'owner');
 		const ch = await ownedChannel(params.id, locals);
 		const f = await request.formData();
 		const enabled = f.get('enabled') === 'on' ? 1 : 0;

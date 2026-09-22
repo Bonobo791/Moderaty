@@ -46,8 +46,11 @@ function fail(message) {
 }
 
 /**
- * Parses and validates a model response exactly like feedback.ts — the eval
- * must reject what production rejects, or it grades a looser contract.
+ * Parses and validates a model response like feedback.ts, but stricter on
+ * purpose: the eval enforces the rubric's <80-char claim bound (the contract
+ * the prompt actually asks for), while production's 200 is only the
+ * malformed-response failsafe. A verdict the model should never produce must
+ * fail here even when production would tolerate it.
  *
  * @param {unknown} content - the choices[0].message.content string
  * @returns {{ category: string, hasAbuse: boolean, claim: string }}

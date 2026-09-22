@@ -77,13 +77,22 @@ interface ClassifiedRow {
 	claim: string;
 }
 
+/**
+ * Compares stored ISO timestamps by INSTANT, not text: publishedAt is stored
+ * verbatim from YouTube and the data model permits any parseable offset
+ * ('+05:30' sorts differently as text than as a moment). julianday returns
+ * NULL on garbage, which fails the predicate loudly rather than silently
+ * including a malformed row (I2).
+ */
+const instant = (column: typeof comments.publishedAt | typeof feedbackDigests.windowEnd) => sql`julianday(${column})`;
+
 /** The digest window resumes where the last COMPLETE digest ended — a failed run never advances it. */
 async function lastWindowEnd(channelId: string): Promise<string> {
 	const row = await db
 		.select({ windowEnd: feedbackDigests.windowEnd })
 		.from(feedbackDigests)
 		.where(and(eq(feedbackDigests.channelId, channelId), eq(feedbackDigests.status, 'complete')))
-		.orderBy(desc(feedbackDigests.windowEnd))
+		.orderBy(desc(instant(feedbackDigests.windowEnd)))
 		.limit(1)
 		.get();
 	return row?.windowEnd ?? EPOCH;
@@ -114,7 +123,7 @@ export async function digestDue(channel: typeof channels.$inferSelect, now = Dat
 		const row = await db
 			.select({ n: sql<number>`COUNT(*)` })
 			.from(comments)
-			.where(and(eq(comments.channelId, channel.id), gt(comments.publishedAt, since)))
+			.where(and(eq(comments.channelId, channel.id), gt(instant(comments.publishedAt), sql`julianday(${since})`)))
 			.get();
 		return (row?.n ?? 0) >= PER_100_COUNT;
 	}
@@ -224,8 +233,8 @@ export async function generateFeedbackDigest(
 	const batch = await db
 		.select({ id: comments.id, text: comments.text, publishedAt: comments.publishedAt })
 		.from(comments)
-		.where(and(eq(comments.channelId, channelId), gt(comments.publishedAt, windowStart)))
-		.orderBy(asc(comments.publishedAt))
+		.where(and(eq(comments.channelId, channelId), gt(instant(comments.publishedAt), sql`julianday(${windowStart})`)))
+		.orderBy(asc(instant(comments.publishedAt)))
 		.limit(DIGEST_COMMENT_CAP)
 		.all();
 	const nowIso = new Date().toISOString();

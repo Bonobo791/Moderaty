@@ -19,7 +19,7 @@ import { env } from '$env/dynamic/private';
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { organizations, stripeCheckoutAttempts, stripeLifetimeSlots } from '$lib/server/db/schema';
-import { checkoutRejectionMessage, createCreditCheckout, createPlanCheckout, createTestCheckout, getOrCreateStripeCustomer } from './checkout';
+import { checkoutRejectionMessage, createCreditCheckout, createPlanCheckout, createTestCheckout, getOrCreateStripeCustomer, TEST_CHECKOUT_OPERATOR_EMAIL } from './checkout';
 import type { SessionUser } from '$lib/server/session';
 
 const mocks = vi.hoisted(() => ({
@@ -56,6 +56,11 @@ function owner(overrides: Partial<SessionUser> = {}): SessionUser {
 		orgRole: 'owner',
 		...overrides
 	};
+}
+
+/** The deployment operator — the only account the test checkout serves. */
+function operator(overrides: Partial<SessionUser> = {}): SessionUser {
+	return owner({ email: TEST_CHECKOUT_OPERATOR_EMAIL, ...overrides });
 }
 
 beforeEach(() => {
@@ -298,7 +303,7 @@ describe('createTestCheckout', () => {
 	test('uses a configured Price id directly and tags the session as the test product', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 
-		const url = await createTestCheckout('org-1', owner(), 'attempt-test');
+		const url = await createTestCheckout('org-1', operator(), 'attempt-test');
 
 		expect(url).toBe('https://checkout.stripe.com/c/pay/cs_1');
 		expect(mocks.pricesRetrieve).toHaveBeenCalledWith('price_test');
@@ -319,7 +324,7 @@ describe('createTestCheckout', () => {
 		env.STRIPE_TEST_PRODUCT = 'prod_test';
 		mocks.productsRetrieve.mockResolvedValue({ id: 'prod_test', default_price: 'price_from_product' });
 
-		await createTestCheckout('org-1', owner());
+		await createTestCheckout('org-1', operator());
 
 		expect(mocks.productsRetrieve).toHaveBeenCalledWith('prod_test');
 		expect(mocks.sessionsCreate.mock.calls[0][0].line_items).toEqual([{ price: 'price_from_product', quantity: 1 }]);
@@ -331,7 +336,7 @@ describe('createTestCheckout', () => {
 		mocks.productsRetrieve.mockResolvedValue({ id: 'prod_test', default_price: null });
 		mocks.pricesList.mockResolvedValue({ data: [{ id: 'price_only' }] });
 
-		await createTestCheckout('org-1', owner());
+		await createTestCheckout('org-1', operator());
 
 		expect(mocks.pricesList).toHaveBeenCalledWith({ product: 'prod_test', active: true, limit: 2 });
 		expect(mocks.sessionsCreate.mock.calls[0][0].line_items).toEqual([{ price: 'price_only', quantity: 1 }]);
@@ -345,7 +350,7 @@ describe('createTestCheckout', () => {
 		mocks.productsRetrieve.mockResolvedValue({ id: 'prod_test', default_price: null });
 		mocks.pricesList.mockResolvedValue({ data: [{ id: 'price_a' }, { id: 'price_b' }] });
 
-		await expect(createTestCheckout('org-1', owner())).rejects.toThrow('no default price');
+		await expect(createTestCheckout('org-1', operator())).rejects.toThrow('no default price');
 		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
 	});
 
@@ -353,7 +358,7 @@ describe('createTestCheckout', () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		(env as Record<string, string | undefined>).STRIPE_TEST_PRODUCT = undefined;
 
-		await expect(createTestCheckout('org-1', owner())).rejects.toThrow('STRIPE_TEST_PRODUCT is not configured');
+		await expect(createTestCheckout('org-1', operator())).rejects.toThrow('STRIPE_TEST_PRODUCT is not configured');
 		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
 	});
 
@@ -361,7 +366,7 @@ describe('createTestCheckout', () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		env.STRIPE_TEST_PRODUCT = 'not_a_stripe_id';
 
-		await expect(createTestCheckout('org-1', owner())).rejects.toThrow('must be a Stripe Product (prod_...) or Price (price_...) id');
+		await expect(createTestCheckout('org-1', operator())).rejects.toThrow('must be a Stripe Product (prod_...) or Price (price_...) id');
 		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
 	});
 
@@ -370,7 +375,7 @@ describe('createTestCheckout', () => {
 		env.STRIPE_TEST_PRODUCT = 'price_inactive';
 		mocks.pricesRetrieve.mockResolvedValueOnce({ id: 'price_inactive', active: false, currency: 'usd', type: 'one_time', unit_amount: 100 });
 
-		await expect(createTestCheckout('org-1', owner())).rejects.toThrow('inactive Stripe Price');
+		await expect(createTestCheckout('org-1', operator())).rejects.toThrow('inactive Stripe Price');
 		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
 	});
 
@@ -379,7 +384,7 @@ describe('createTestCheckout', () => {
 		env.STRIPE_TEST_PRODUCT = 'price_recurring';
 		mocks.pricesRetrieve.mockResolvedValueOnce({ id: 'price_recurring', active: true, currency: 'usd', type: 'recurring', unit_amount: 100, recurring: { interval: 'month', interval_count: 1 } });
 
-		await expect(createTestCheckout('org-1', owner())).rejects.toThrow('recurring Stripe Price');
+		await expect(createTestCheckout('org-1', operator())).rejects.toThrow('recurring Stripe Price');
 		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
 	});
 
@@ -388,6 +393,27 @@ describe('createTestCheckout', () => {
 
 		await expect(createTestCheckout('org-1', owner({ orgRole: 'member' }))).rejects.toMatchObject({ status: 403 });
 		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test('an owner who is not the operator gets 403 — the test checkout is gated to the operator account', async () => {
+		// Every other org owner is a regular user: the card never renders for
+		// them, and a crafted POST must fail server-side — hiding alone would
+		// leave the endpoint open to any owner.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+
+		await expect(createTestCheckout('org-1', owner())).rejects.toMatchObject({ status: 403 });
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+		expect(mocks.productsRetrieve).not.toHaveBeenCalled();
+		expect(mocks.pricesRetrieve).not.toHaveBeenCalled();
+		expect(await testDb().db.select().from(stripeCheckoutAttempts)).toHaveLength(0);
+	});
+
+	test('the operator gate matches the email case-insensitively', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+
+		const url = await createTestCheckout('org-1', owner({ email: TEST_CHECKOUT_OPERATOR_EMAIL.toUpperCase() }));
+
+		expect(url).toBe('https://checkout.stripe.com/c/pay/cs_1');
 	});
 
 	test.each([
@@ -404,7 +430,7 @@ describe('createTestCheckout', () => {
 		if (configured.startsWith('prod_')) mocks.productsRetrieve.mockRejectedValue(missing);
 		else mocks.pricesRetrieve.mockRejectedValue(missing);
 
-		const error = await createTestCheckout('org-1', owner(), 'attempt-gone').catch((cause: unknown) => cause);
+		const error = await createTestCheckout('org-1', operator(), 'attempt-gone').catch((cause: unknown) => cause);
 
 		expect((error as Error).message).toMatch(/^STRIPE_TEST_PRODUCT/);
 		expect(checkoutRejectionMessage(error)).toContain('misconfigured');
@@ -419,7 +445,7 @@ describe('createTestCheckout', () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		mocks.pricesRetrieve.mockRejectedValue(Object.assign(new Error('rate limited'), { type: 'StripeRateLimitError' }));
 
-		const error = await createTestCheckout('org-1', owner()).catch((cause: unknown) => cause);
+		const error = await createTestCheckout('org-1', operator()).catch((cause: unknown) => cause);
 
 		expect((error as Error).message).toBe('rate limited');
 		expect(checkoutRejectionMessage(error)).toBeNull();
@@ -433,7 +459,7 @@ describe('createTestCheckout', () => {
 		env.STRIPE_TEST_PRODUCT = 'price_free';
 		mocks.pricesRetrieve.mockResolvedValueOnce({ id: 'price_free', active: true, currency: 'usd', type: 'one_time', unit_amount: 0 });
 
-		await expect(createTestCheckout('org-1', owner())).rejects.toThrow('zero-priced');
+		await expect(createTestCheckout('org-1', operator())).rejects.toThrow('zero-priced');
 		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
 	});
 
@@ -442,7 +468,7 @@ describe('createTestCheckout', () => {
 		env.STRIPE_TEST_PRODUCT = 'price_custom';
 		mocks.pricesRetrieve.mockResolvedValueOnce({ id: 'price_custom', active: true, currency: 'usd', type: 'one_time', unit_amount: null });
 
-		await expect(createTestCheckout('org-1', owner())).rejects.toThrow('zero-priced');
+		await expect(createTestCheckout('org-1', operator())).rejects.toThrow('zero-priced');
 		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
 	});
 
@@ -459,7 +485,7 @@ describe('createTestCheckout', () => {
 			mocks.pricesRetrieve.mockResolvedValueOnce({ id: 'price_inactive', active: false, currency: 'usd', type: 'one_time', unit_amount: 100 });
 		}
 
-		await expect(createTestCheckout('org-1', owner(), 'attempt-bad')).rejects.toThrow(reason);
+		await expect(createTestCheckout('org-1', operator(), 'attempt-bad')).rejects.toThrow(reason);
 		expect(await testDb().db.select().from(stripeCheckoutAttempts)).toHaveLength(0);
 	});
 });
@@ -477,7 +503,7 @@ describe('checkout configuration validation', () => {
 			try {
 				await expect(createCreditCheckout('org-1', owner(), 'credits_100')).rejects.toThrow('valid absolute http(s) URL');
 				await expect(createPlanCheckout('org-1', owner(), 'hosted')).rejects.toThrow('valid absolute http(s) URL');
-				await expect(createTestCheckout('org-1', owner())).rejects.toThrow('valid absolute http(s) URL');
+				await expect(createTestCheckout('org-1', operator())).rejects.toThrow('valid absolute http(s) URL');
 			} finally {
 				env.APP_URL = previous;
 			}
@@ -492,7 +518,7 @@ describe('checkout configuration validation', () => {
 		const previous = env.APP_URL;
 		(env as Record<string, string | undefined>).APP_URL = undefined;
 		try {
-			await expect(createTestCheckout('org-1', owner())).rejects.toThrow('APP_URL is not configured');
+			await expect(createTestCheckout('org-1', operator())).rejects.toThrow('APP_URL is not configured');
 		} finally {
 			env.APP_URL = previous;
 		}

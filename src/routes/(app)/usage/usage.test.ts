@@ -19,6 +19,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
 import { mercadoPagoCheckoutAttempts, organizations, stripeCheckoutAttempts, stripeLifetimeSlots } from '$lib/server/db/schema';
 import type { SessionUser } from '$lib/server/session';
+import { TEST_CHECKOUT_OPERATOR_EMAIL } from '$lib/server/billing/checkout';
 import { applyLedgerDelta, consumeCredit } from '$lib/server/billing/ledger';
 import { claimLifetimeSlot } from '$lib/server/billing/entitlements';
 import { LIFETIME_SLOT_LIMIT } from '$lib/server/billing/plans';
@@ -63,6 +64,10 @@ import { actions, load } from './+page.server';
 setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_checkout_attempts', 'mercado_pago_checkout_attempts', 'stripe_lifetime_entitlements', 'stripe_lifetime_slots', 'stripe_pending_reversals', 'stripe_dispute_reversals']);
 
 const OWNER = TEST_OWNER;
+// The test checkout is gated to the operator account — TEST_OWNER's email is
+// deliberately NOT it, so OPERATOR is a distinct fixture and every
+// non-operator assertion below exercises a real owner who is not allowed.
+const OPERATOR: SessionUser = { ...TEST_OWNER, email: TEST_CHECKOUT_OPERATOR_EMAIL };
 
 async function seedOrg(overrides: Record<string, unknown> = {}): Promise<void> {
 	await testDb().db.insert(organizations).values({
@@ -81,7 +86,7 @@ function buyPlan(plan: string, user: SessionUser | null = OWNER) {
 	return actions.buyPlan({ request: postForm({ plan }), locals: { user } } as never);
 }
 
-function buyTest(user: SessionUser | null = OWNER) {
+function buyTest(user: SessionUser | null = OPERATOR) {
 	return actions.buyTest({ request: postForm({}), locals: { user } } as never);
 }
 
@@ -456,12 +461,16 @@ describe('usage load', () => {
 		expect(body).not.toContain('value="hosted"');
 	});
 
-	test('load reports the test product only while STRIPE_TEST_PRODUCT is set', async () => {
+	test('load reports the test product only for the operator and only while STRIPE_TEST_PRODUCT is set', async () => {
 		await seedOrg();
-		expect(((await load({ locals: { user: OWNER } } as never)) as { testProduct: boolean }).testProduct).toBe(true);
+		// The operator sees the flag with the var configured…
+		expect(((await load({ locals: { user: OPERATOR } } as never)) as { testProduct: boolean }).testProduct).toBe(true);
+		// …and a regular owner — the production bug this gate fixes — never
+		// does, even on a deployment where the var is set.
+		expect(((await load({ locals: { user: OWNER } } as never)) as { testProduct: boolean }).testProduct).toBe(false);
 		(env as Record<string, string | undefined>).STRIPE_TEST_PRODUCT = undefined;
 		try {
-			expect(((await load({ locals: { user: OWNER } } as never)) as { testProduct: boolean }).testProduct).toBe(false);
+			expect(((await load({ locals: { user: OPERATOR } } as never)) as { testProduct: boolean }).testProduct).toBe(false);
 		} finally {
 			env.STRIPE_TEST_PRODUCT = 'price_test';
 		}
@@ -700,10 +709,18 @@ describe('usage buyTest action', () => {
 
 	test('non-owners cannot open the test checkout (403)', async () => {
 		await seedOrg();
-		const member = { ...OWNER, orgRole: 'member' as const };
+		const member = { ...OPERATOR, orgRole: 'member' as const };
 
 		await expect(buyTest(member)).rejects.toMatchObject({ status: 403 });
 		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test('a crafted POST from an owner who is not the operator gets 403 — hiding the card is not the enforcement', async () => {
+		await seedOrg();
+
+		await expect(buyTest(OWNER)).rejects.toMatchObject({ status: 403 });
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+		expect(await testDb().db.select().from(stripeCheckoutAttempts)).toHaveLength(0);
 	});
 });
 

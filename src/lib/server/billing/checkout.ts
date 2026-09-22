@@ -18,6 +18,7 @@
 // success-page redirect is not reliable, the webhook is authoritative); both
 // are idempotent, so instant UX and eventual delivery never double-grant.
 
+import { error } from '@sveltejs/kit';
 import { and, eq, isNull, sql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 
@@ -43,6 +44,24 @@ const LIFETIME_SOLD_OUT_ERROR = 'lifetime plan is sold out';
  * fulfillment dispatches on this value — keep it in sync with webhooks.ts.
  */
 export const TEST_CHECKOUT_PRODUCT = 'test';
+
+/**
+ * The only account allowed to run the operator test checkout. The smoke test
+ * charges real money on the deployment's Stripe account, so it is gated to
+ * the operator's login email — enforced server-side in createTestCheckout,
+ * never just a hidden button (a crafted POST from another org's owner must
+ * not open one). The Usage page renders the card only for this account via
+ * the same predicate, so hiding and enforcement can never drift apart.
+ */
+export const TEST_CHECKOUT_OPERATOR_EMAIL = 'andrew.weilbacher@gmail.com';
+
+/**
+ * Whether this user may see and use the test checkout — true only for the
+ * deployment operator's account email (case-insensitive).
+ */
+export function isTestCheckoutOperator(user: Pick<SessionUser, 'email'>): boolean {
+	return user.email.toLowerCase() === TEST_CHECKOUT_OPERATOR_EMAIL;
+}
 
 /**
  * User-facing text for KNOWN business rejections of checkout creation —
@@ -412,10 +431,12 @@ async function testProductPriceId(): Promise<string> {
  * are all real, and a paid test checkout grants one credit. Deliberately NOT
  * gated by assertCreditsPurchasable — on an unmetered org the paid test
  * checkout exercises the ungrantable→refund path, which is also worth
- * verifying. Owner-only like every purchase.
+ * verifying. Owner-only AND restricted to the operator account: other org
+ * owners never see the card, and a crafted POST gets a 403 here.
  */
 export async function createTestCheckout(orgId: string, user: SessionUser, attemptId?: string): Promise<string> {
 	requireOrgRole(user, 'owner');
+	if (!isTestCheckoutOperator(user)) throw error(403, 'the test checkout is not available for this account');
 	const appUrl = checkoutAppUrl();
 	// Config check BEFORE the attempt row: a crafted POST without the env var
 	// must fail without planting durable state (env validation at handler

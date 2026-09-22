@@ -21,17 +21,18 @@
 // then commits digest + findings + evidence + the per-comment digest
 // markers + the rotation stamp together, or not at all — never a partial
 // digest. Per-comment classifier failures are counted and skipped (I1);
-// a job-level failure records a 'failed' row so the page can say so
-// instead of silently showing stale data.
+// a job-level failure records a 'failed' row and a deferral a 'deferred'
+// row so the page can say so instead of silently showing stale data —
+// both are transient state a terminal outcome clears.
 
-import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { db, withBusyRetry } from '$lib/server/db';
 import { channels, comments, creditTransactions, feedbackDigests, feedbackFindings, findingEvidence } from '$lib/server/db/schema';
 import { classifyFeedback, type FeedbackCategory } from '$lib/server/feedback';
 import { concealEvidence } from '$lib/server/feedbackSanitize';
 import { groupFeedback } from '$lib/server/feedbackGroup';
-import { DeadlineExceededError } from '$lib/server/http';
+import { DeadlineExceededError, assertBeforeDeadline } from '$lib/server/http';
 import { consumeFeedbackCredit, orgIsMetered, type LedgerHandle } from '$lib/server/billing/ledger';
 import { resolveOpenAiKey } from '$lib/server/openaiKey';
 
@@ -152,9 +153,12 @@ export async function digestDue(channel: typeof channels.$inferSelect, now = Dat
 }
 
 /**
- * Replaces any existing digest for the same (channel, window) — the
- * idempotency anchor (I4): a re-run converges to one row set instead of
- * erroring on the unique index. Children die first, explicitly.
+ * Replaces any TRANSIENT row for the same (channel, window) — 'failed' and
+ * 'deferred' leftovers are attempt state a fresh run supersedes. A
+ * 'complete' row at the same window is a DIFFERENT capped batch (coverage
+ * lives in the per-comment markers, so a re-run of the same comments is
+ * impossible): deleting it would silently drop a processed batch from
+ * history (codex). Children die first, explicitly.
  */
 async function replaceWindowDigest(
 	tx: LedgerHandle,
@@ -169,7 +173,8 @@ async function replaceWindowDigest(
 			and(
 				eq(feedbackDigests.channelId, channelId),
 				eq(feedbackDigests.windowStart, windowStart),
-				eq(feedbackDigests.windowEnd, windowEnd)
+				eq(feedbackDigests.windowEnd, windowEnd),
+				ne(feedbackDigests.status, 'complete')
 			)
 		)
 		.all();
@@ -189,8 +194,19 @@ async function replaceWindowDigest(
 	await tx.delete(feedbackDigests).where(inArray(feedbackDigests.id, digestIds));
 }
 
-/** Records a loud failure row (idempotent on the window anchor) and reports the sanitized category. */
-async function markDigestFailed(channelId: string, windowStart: string, windowEnd: string, reason: string): Promise<void> {
+/**
+ * Deferred rows describe the channel's CURRENT blockage, not history — a
+ * terminal outcome (complete/failed) or a newer deferral makes every older
+ * deferred row stale. They never carry findings, so a bare delete suffices.
+ */
+async function clearDeferredDigests(tx: LedgerHandle, channelId: string): Promise<void> {
+	await tx
+		.delete(feedbackDigests)
+		.where(and(eq(feedbackDigests.channelId, channelId), eq(feedbackDigests.status, 'deferred')));
+}
+
+/** Records a transient non-complete row (failed/deferred) at the window anchor, clearing stale deferrals. */
+async function markDigestState(channelId: string, windowStart: string, windowEnd: string, status: 'failed' | 'deferred', reason: string): Promise<void> {
 	try {
 		await db.transaction(async (tx) => {
 			// A channel deleted mid-run gets no posthumous rows — the
@@ -200,20 +216,21 @@ async function markDigestFailed(channelId: string, windowStart: string, windowEn
 				.from(channels)
 				.where(eq(channels.id, channelId))
 				.get();
-			if (!alive) throw new Error(`channel ${channelId} vanished — skipping failure record`);
+			if (!alive) throw new Error(`channel ${channelId} vanished — skipping ${status} record`);
 			await replaceWindowDigest(tx, channelId, windowStart, windowEnd);
+			await clearDeferredDigests(tx, channelId);
 			await tx.insert(feedbackDigests).values({
 				channelId,
 				windowStart,
 				windowEnd,
-				status: 'failed',
+				status,
 				error: reason
 			});
 		});
 	} catch (cause) {
-		// The failure row itself failed to write — log loudly; the next tick
+		// The status row itself failed to write — log loudly; the next tick
 		// retries the same window (it never advanced).
-		console.error(`could not record digest failure for channel ${channelId}:`, cause);
+		console.error(`could not record digest ${status} for channel ${channelId}:`, cause);
 	}
 }
 
@@ -282,7 +299,7 @@ export async function generateFeedbackDigest(
 	const apiKey = await resolveOpenAiKey(channel.orgId);
 	if (!apiKey) {
 		console.error(`feedback digest for ${channelId}: no OpenAI key resolved — marking failed`);
-		await markDigestFailed(channelId, windowStart, windowEnd, 'scoring');
+		await markDigestState(channelId, windowStart, windowEnd, 'failed', 'scoring');
 		return { status: 'failed', reason: 'no-key' };
 	}
 
@@ -302,6 +319,11 @@ export async function generateFeedbackDigest(
 			const orgId = channel.orgId;
 			await db.transaction(async (tx) => {
 				for (const comment of batch) {
+					// The tx performs sequential statements for up to 100 comments;
+					// if it outlives the budget, committing would debit credits
+					// while every classify call rejects on arrival. Aborting rolls
+					// back ALL charges — the deferral spends nothing (codex).
+					assertBeforeDeadline(deadline);
 					const charged = await consumeFeedbackCredit(tx, orgId, comment.id);
 					if (charged) {
 						creditsCharged++;
@@ -370,6 +392,9 @@ export async function generateFeedbackDigest(
 		const result = await withBusyRetry(() =>
 			db.transaction(async (tx) => {
 				await replaceWindowDigest(tx, channelId, windowStart, windowEnd);
+				// A completed run resolves any earlier deferral — the stale
+				// "waiting for credits" state must not linger beside it.
+				await clearDeferredDigests(tx, channelId);
 				const [digest] = await tx
 					.insert(feedbackDigests)
 					.values({
@@ -465,14 +490,19 @@ export async function generateFeedbackDigest(
 		if (cause instanceof DeadlineExceededError) {
 			// Budget gone — defer to the next tick; the window never advanced.
 			console.info(`feedback digest for ${channelId} deferred: deadline exceeded`);
+			await markDigestState(channelId, windowStart, windowEnd, 'deferred', 'deadline');
 			return { status: 'deferred', reason: 'deadline' };
 		}
 		if (cause instanceof Error && /insufficient credits/.test(cause.message)) {
+			// The row makes the blockage channel-visible: without it the page
+			// shows "No digest yet" while every tick repeats the deferral
+			// (codex). A later complete/failed row clears it.
 			console.warn(`feedback digest for ${channelId} deferred: ${cause.message}`);
+			await markDigestState(channelId, windowStart, windowEnd, 'deferred', 'credits');
 			return { status: 'deferred', reason: 'credits' };
 		}
 		console.error(`feedback digest for ${channelId} failed:`, cause);
-		await markDigestFailed(channelId, windowStart, windowEnd, 'error');
+		await markDigestState(channelId, windowStart, windowEnd, 'failed', 'error');
 		return { status: 'failed', reason: 'error' };
 	}
 }

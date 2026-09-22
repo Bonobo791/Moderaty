@@ -467,7 +467,7 @@ export async function createTestDb(): Promise<TestDb> {
 			emailed_at TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
-		`CREATE UNIQUE INDEX feedback_digests_channel_window_unique ON feedback_digests (channel_id, window_start, window_end)`,
+		`CREATE INDEX feedback_digests_channel_window_idx ON feedback_digests (channel_id, window_start, window_end)`,
 		`CREATE INDEX feedback_digests_channel_created_idx ON feedback_digests (channel_id, created_at)`,
 		`CREATE TABLE feedback_findings (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,

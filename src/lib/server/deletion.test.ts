@@ -23,7 +23,7 @@ vi.mock('$lib/server/stripe/client', () => ({
 }));
 
 import { DAY_MS, seedConsent, seedUser as seedBareUser, setupTestDb, testDb } from './testdb';
-import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, stripeLifetimeEntitlements, stripeLifetimeSlots, users } from './db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, findingEvidence, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, stripeLifetimeEntitlements, stripeLifetimeSlots, users } from './db/schema';
 import {
 	AUDIT_HANDLE_RETENTION_MS,
 	CONSENT_EMAIL_RETENTION_MS,
@@ -39,7 +39,7 @@ import {
 	nullExpiredModerationActionHandles
 } from './deletion';
 
-setupTestDb(['moderation_actions', 'comments', 'audit_log', 'channel_allowed_handles', 'rules', 'channels', 'sessions', 'consents', 'invites', 'memberships', 'organizations', 'users', 'credit_transactions', 'stripe_deletion_outbox', 'stripe_lifetime_slots', 'stripe_lifetime_entitlements']);
+setupTestDb(['moderation_actions', 'comments', 'audit_log', 'channel_allowed_handles', 'rules', 'channels', 'sessions', 'consents', 'invites', 'memberships', 'organizations', 'users', 'credit_transactions', 'stripe_deletion_outbox', 'stripe_lifetime_slots', 'stripe_lifetime_entitlements', 'feedback_digests', 'feedback_findings', 'finding_evidence']);
 
 afterEach(() => {
 	vi.clearAllMocks();
@@ -120,6 +120,46 @@ test('deleteChannelRecords with an expected org aborts loudly when the channel c
 	expect(await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).all()).toHaveLength(1);
 	expect(await testDb().db.select().from(comments).where(eq(comments.channelId, 'UC1')).all()).toHaveLength(1);
 	expect(await testDb().db.select().from(rules).where(eq(rules.channelId, 'UC1')).all()).toHaveLength(1);
+});
+
+test('deleteChannelRecords erases the feedback digest chain with the channel', async () => {
+	await seedChannel('UC1', 'user-9', 'org-1', 'ours');
+	await testDb().db.insert(feedbackDigests).values({
+		channelId: 'UC1',
+		windowStart: '2026-01-01T00:00:00.000Z',
+		windowEnd: '2026-01-08T00:00:00.000Z',
+		status: 'complete'
+	});
+	const digest = await testDb().db.select().from(feedbackDigests).get();
+	await testDb().db.insert(feedbackFindings).values({
+		digestId: digest!.id,
+		category: 'question',
+		summary: '3 viewers asked: when is the next video',
+		supporterCount: 3
+	});
+	const finding = await testDb().db.select().from(feedbackFindings).get();
+	await testDb().db.insert(findingEvidence).values({
+		findingId: finding!.id,
+		commentId: 'comment-1',
+		sanitizedExcerpt: 'when is the next video coming?'
+	});
+	// A digest on an unrelated channel must survive.
+	await seedChannel('UC2', 'user-9', 'org-9', 'other org');
+	await testDb().db.insert(feedbackDigests).values({
+		channelId: 'UC2',
+		windowStart: '2026-01-01T00:00:00.000Z',
+		windowEnd: '2026-01-08T00:00:00.000Z',
+		status: 'complete'
+	});
+
+	await testDb().db.transaction(async (tx) => {
+		await deleteChannelRecords(tx, ['UC1'], { expectedOrgId: 'org-1' });
+	});
+
+	expect(await testDb().db.select().from(feedbackDigests).where(eq(feedbackDigests.channelId, 'UC1')).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(feedbackFindings).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(findingEvidence).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(feedbackDigests).where(eq(feedbackDigests.channelId, 'UC2')).all()).toHaveLength(1);
 });
 
 test('deleteChannelRecords with a matching expected org erases the channel and its data', async () => {

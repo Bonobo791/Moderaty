@@ -32,7 +32,7 @@ import { and, asc, eq, inArray, isNotNull, isNull, lt, ne, or } from 'drizzle-or
 import type Stripe from 'stripe';
 
 import { db } from '$lib/server/db';
-import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, stripeLifetimeSlots, users } from '$lib/server/db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, findingEvidence, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, stripeLifetimeSlots, users } from '$lib/server/db/schema';
 import { getStripe } from '$lib/server/stripe/client';
 
 export const CONSENT_EMAIL_RETENTION_MS = 10 * 365.25 * 24 * 60 * 60 * 1000; // 10 years
@@ -77,7 +77,7 @@ async function cancelCustomerSubscriptions(customerId: string, options?: StripeR
  * the child rows go.
  */
 export async function deleteChannelRecords(
-	tx: Pick<typeof db, 'delete'>,
+	tx: Pick<typeof db, 'delete' | 'select'>,
 	channelIds: string[],
 	options?: { expectedOrgId?: string }
 ): Promise<void> {
@@ -91,6 +91,20 @@ export async function deleteChannelRecords(
 		await tx.delete(comments).where(inArray(comments.channelId, channelIds));
 		await tx.delete(auditLog).where(inArray(auditLog.channelId, channelIds));
 		await tx.delete(rules).where(inArray(rules.channelId, channelIds));
+		// Feedback digest chain (P-MOD-5): evidence → findings → digests.
+		// Explicit deletes in child-to-parent order like the rest of this
+		// helper — never rely on the FK cascade alone.
+		const digestIds = tx
+			.select({ id: feedbackDigests.id })
+			.from(feedbackDigests)
+			.where(inArray(feedbackDigests.channelId, channelIds));
+		const findingIds = tx
+			.select({ id: feedbackFindings.id })
+			.from(feedbackFindings)
+			.where(inArray(feedbackFindings.digestId, digestIds));
+		await tx.delete(findingEvidence).where(inArray(findingEvidence.findingId, findingIds));
+		await tx.delete(feedbackFindings).where(inArray(feedbackFindings.digestId, digestIds));
+		await tx.delete(feedbackDigests).where(inArray(feedbackDigests.channelId, channelIds));
 	};
 	if (options?.expectedOrgId) {
 		const removed = await tx

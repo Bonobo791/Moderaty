@@ -23,6 +23,7 @@ import { nullExpiredConsentEmails, nullExpiredHandles, retryStripeCustomerDeleti
 import { sweepAutoTopUp } from '$lib/server/billing/autotopup';
 import { sweepStalePendingReversals } from '$lib/server/billing/ledger';
 import { DeadlineExceededError } from '$lib/server/http';
+import { generateFeedbackDigest } from '$lib/server/feedbackDigest';
 import { runChannel, type ChannelRunResult } from '$lib/server/pipeline';
 import type { RequestHandler } from './$types';
 
@@ -107,7 +108,7 @@ function categorizeRunFailure(cause: unknown): 'token' | 'quota' | 'scoring' | '
 async function runClaimedChannel(
 	channel: typeof channels.$inferSelect,
 	deadline: number
-): Promise<{ result: ChannelRunResult; dryRunWindow: unknown }> {
+): Promise<{ result: ChannelRunResult; dryRunWindow: unknown; digest: unknown }> {
 	const result = await runChannel(channel.id, { deadline });
 	let dryRunWindow: unknown;
 	if (channel.dryRunBoundary) {
@@ -139,7 +140,20 @@ async function runClaimedChannel(
 			dryRunWindow = { error: cause instanceof Error ? cause.message : String(cause) };
 		}
 	}
-	return { result, dryRunWindow };
+	// The feedback digest piggybacks on the same lease and budget (I10): the
+	// claimed channel generates one when its cadence is due and budget
+	// remains. A digest failure must never mask the moderation verdict —
+	// loud, surfaced in the payload, retried on the next claim.
+	let digest: unknown;
+	if (Date.now() < deadline) {
+		try {
+			digest = await generateFeedbackDigest(channel.id, { deadline });
+		} catch (cause) {
+			console.error(`feedback digest for channel ${channel.id} failed:`, cause);
+			digest = { error: 'error' };
+		}
+	}
+	return { result, dryRunWindow, digest };
 }
 
 export const GET: RequestHandler = async ({ url, request }) => {
@@ -219,11 +233,11 @@ export const GET: RequestHandler = async ({ url, request }) => {
 	let body: Record<string, unknown>;
 	let status = 200;
 	try {
-		const { result, dryRunWindow } = await runClaimedChannel(channel, deadline);
+		const { result, dryRunWindow, digest } = await runClaimedChannel(channel, deadline);
 		if (result.dryRun || result.stoppedReason === 'deactivated' || result.skipped) runHealth = 'none';
 		else if (result.outOfCredits) runHealth = { status: 'failed', error: 'credits' };
 		else if (result.partial) runHealth = { status: 'failed', error: 'timeout' };
-		body = { ...base, results: { [channel.id]: result }, dryRunWindow };
+		body = { ...base, results: { [channel.id]: result }, dryRunWindow, digest };
 	} catch (cause) {
 		const category = categorizeRunFailure(cause);
 		runHealth = { status: 'failed', error: category };

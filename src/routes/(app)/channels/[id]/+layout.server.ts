@@ -20,11 +20,12 @@ import { ownedChannel } from '$lib/server/ownership';
 import { requireUser } from '$lib/server/session';
 
 /** The channel-detail tabs, derived from the request path so SSR stays prop-driven. */
-export type ChannelTab = 'overview' | 'rules' | 'queue' | 'log';
+export type ChannelTab = 'overview' | 'rules' | 'queue' | 'feedback' | 'log';
 
 function tabFromPath(pathname: string): ChannelTab {
 	if (pathname.endsWith('/rules')) return 'rules';
 	if (pathname.endsWith('/queue')) return 'queue';
+	if (pathname.endsWith('/feedback')) return 'feedback';
 	if (pathname.endsWith('/log')) return 'log';
 	return 'overview';
 }

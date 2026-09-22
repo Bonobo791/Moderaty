@@ -263,6 +263,15 @@ export const channels = sqliteTable('channels', {
 	toneLevel: integer('tone_level'), // moderation sensitivity ($lib/toneLevels): null or TONE_LEVEL_OMNI_ONLY(1) = omni only, TONE_LEVEL_OMNI_AND_TONE(2) = omni + tone pass
 	protectLgbtqia: integer('protect_lgbtqia').notNull().default(0), // protection setting: 1 = heightened protection for comments targeting LGBTQIA+ people
 	protectWomen: integer('protect_women').notNull().default(0), // protection setting: 1 = heightened protection for comments targeting women
+	// Feedback digest controls (P-MOD-5). All nullable per I7 — null means
+	// the feature is off / defaults apply: opt-in OFF, weekly cadence, all
+	// categories, threshold 3, no e-mail.
+	feedbackEnabled: integer('feedback_enabled'), // 1 = digest opt-in; null/0 = off
+	feedbackCadence: text('feedback_cadence'), // 'weekly' | 'per_100' | 'manual'; null = weekly
+	feedbackCategories: text('feedback_categories'), // comma list of enabled categories; null = all
+	feedbackThreshold: integer('feedback_threshold'), // min supporters per finding; null = 3
+	feedbackEmail: integer('feedback_email'), // 1 = also e-mail each digest — RESERVED, unwired until MOD-92 (no Mailjet path writes/reads it yet)
+	feedbackLastDigestAt: text('feedback_last_digest_at'), // rotation ordering; NULLs generate first
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
 	index('channels_user_id_idx').on(table.userId),
@@ -370,6 +379,65 @@ export const auditLog = sqliteTable('audit_log', {
 	// without this, the page load would scan every audit row of the channel.
 	index('audit_log_channel_comment_idx').on(table.channelId, table.commentId)
 ]);
+
+// Creator feedback digest (P-MOD-5). Privacy contract: NO author columns
+// anywhere in these three tables — a digest records WHAT viewers said,
+// never WHO said it. Evidence rows carry the comment id (so the explicit
+// in-app reveal can fetch comments.text) plus the sanitized excerpt that
+// the default render path shows; raw abusive wording is never persisted
+// here. channel_id is plain text like every channel-child table — orphan
+// protection is deletion.ts + the tenancy probe.
+export const feedbackDigests = sqliteTable('feedback_digests', {
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	channelId: text('channel_id').notNull(),
+	windowStart: text('window_start').notNull(), // ISO; last complete digest's window_end (epoch for the first)
+	windowEnd: text('window_end').notNull(), // ISO; published_at of the newest classified comment
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	status: text('status').notNull(), // 'complete' | 'failed'
+	commentsClassified: integer('comments_classified').notNull().default(0),
+	commentsFailed: integer('comments_failed').notNull().default(0), // per-comment classifier failures, skipped and counted (I1)
+	pooledCount: integer('pooled_count').notNull().default(0), // feedback comments that fell below the evidence threshold
+	creditsUsed: integer('credits_used'), // metered credits charged for this run; null = unmetered/none
+	error: text('error'), // sanitized failure category only — raw provider detail stays in the server log
+	emailedAt: text('emailed_at'), // set once the digest e-mail went out — RESERVED, unwired until MOD-92; always null today
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+}, (table) => [
+	// Idempotency anchor (I4): re-running the same window replaces the row,
+	// never duplicates it.
+	uniqueIndex('feedback_digests_channel_window_unique').on(
+		table.channelId,
+		table.windowStart,
+		table.windowEnd
+	),
+	index('feedback_digests_channel_created_idx').on(table.channelId, table.createdAt)
+]);
+
+export const feedbackFindings = sqliteTable('feedback_findings', {
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	digestId: integer('digest_id')
+		.notNull()
+		.references(() => feedbackDigests.id, { onDelete: 'cascade' }),
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	category: text('category').notNull(), // 'question' | 'criticism' | 'correction' | 'request'
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	summary: text('summary').notNull(), // neutral, quantity-qualified, sanitized before storage
+	supporterCount: integer('supporter_count').notNull(), // distinct supporting comments — the comment itself can only count once
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+}, (table) => [index('feedback_findings_digest_idx').on(table.digestId)]);
+
+export const findingEvidence = sqliteTable('finding_evidence', {
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	findingId: integer('finding_id')
+		.notNull()
+		.references(() => feedbackFindings.id, { onDelete: 'cascade' }),
+	commentId: text('comment_id').notNull(), // real comments.id — validated at write time; reveal path re-checks tenancy
+	sanitizedExcerpt: text('sanitized_excerpt').notNull(), // concealEvidence() output — the only text the default render shows
+	hasAbuse: integer('has_abuse').notNull().default(0), // 1 = classifier flagged abuse; drives the reveal warning
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+}, (table) => [index('finding_evidence_finding_idx').on(table.findingId)]);
 
 // Evidentiary consent log (CDC Art. 6º, VIII; LGPD). One row per acceptance
 // event — initial signup and every re-acceptance after a LEGAL_VERSION bump.

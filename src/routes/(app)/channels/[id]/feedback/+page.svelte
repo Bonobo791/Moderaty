@@ -171,10 +171,6 @@
 				<span>Minimum supporters before a theme becomes a finding</span>
 				<input type="number" name="threshold" min="2" max="10" value={data.settings.threshold} />
 			</label>
-			<label class="check">
-				<input type="checkbox" name="email" checked={data.settings.email} />
-				E-mail me each new digest
-			</label>
 			<button class="btn small">Save settings</button>
 		</form>
 	</section>

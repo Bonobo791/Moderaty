@@ -270,7 +270,7 @@ export const channels = sqliteTable('channels', {
 	feedbackCadence: text('feedback_cadence'), // 'weekly' | 'per_100' | 'manual'; null = weekly
 	feedbackCategories: text('feedback_categories'), // comma list of enabled categories; null = all
 	feedbackThreshold: integer('feedback_threshold'), // min supporters per finding; null = 3
-	feedbackEmail: integer('feedback_email'), // 1 = also e-mail each digest
+	feedbackEmail: integer('feedback_email'), // 1 = also e-mail each digest — RESERVED, unwired until MOD-92 (no Mailjet path writes/reads it yet)
 	feedbackLastDigestAt: text('feedback_last_digest_at'), // rotation ordering; NULLs generate first
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
@@ -400,7 +400,7 @@ export const feedbackDigests = sqliteTable('feedback_digests', {
 	pooledCount: integer('pooled_count').notNull().default(0), // feedback comments that fell below the evidence threshold
 	creditsUsed: integer('credits_used'), // metered credits charged for this run; null = unmetered/none
 	error: text('error'), // sanitized failure category only — raw provider detail stays in the server log
-	emailedAt: text('emailed_at'), // set once the digest e-mail went out; null = pending, retried next tick
+	emailedAt: text('emailed_at'), // set once the digest e-mail went out — RESERVED, unwired until MOD-92; always null today
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
 	// Idempotency anchor (I4): re-running the same window replaces the row,

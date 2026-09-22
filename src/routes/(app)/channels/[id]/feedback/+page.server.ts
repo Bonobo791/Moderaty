@@ -103,8 +103,7 @@ export async function load({ params, locals }) {
 			enabled: ch.feedbackEnabled === 1,
 			cadence: ch.feedbackCadence ?? 'weekly',
 			categories: enabledCategories(ch),
-			threshold: ch.feedbackThreshold ?? 3,
-			email: ch.feedbackEmail === 1
+			threshold: ch.feedbackThreshold ?? 3
 		}
 	};
 }
@@ -174,7 +173,6 @@ export const actions = {
 		if (!Number.isInteger(threshold) || threshold < 2 || threshold > 10) {
 			return fail(400, { scope: 'settings', error: 'Evidence threshold must be a whole number from 2 to 10.' });
 		}
-		const email = f.get('email') === 'on' ? 1 : 0;
 		// Org-scoped update: another team's channel matches 0 rows and reads
 		// as "not found" — never leak existence.
 		const updated = await db
@@ -183,8 +181,7 @@ export const actions = {
 				feedbackEnabled: enabled,
 				feedbackCadence: cadence,
 				feedbackCategories: categories,
-				feedbackThreshold: threshold,
-				feedbackEmail: email
+				feedbackThreshold: threshold
 			})
 			.where(and(eq(channels.id, params.id), eq(channels.orgId, user.orgId)))
 			.returning({ id: channels.id });

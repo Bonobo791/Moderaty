@@ -121,14 +121,13 @@ function postSettings(channelId: string, fields: Record<string, string | string[
 	return actions.settings({ params: { id: channelId }, request: new Request('http://localhost/', { method: 'POST', body: form }), locals: { user } } as never);
 }
 
-test('settings persists enabled, cadence, categories, threshold, and e-mail opt-in', async () => {
+test('settings persists enabled, cadence, categories, and threshold', async () => {
 	await seedChannel('UC1');
 	const res = await postSettings('UC1', {
 		enabled: 'on',
 		cadence: 'per_100',
 		category: ['request', 'question'], // reversed — stored in canonical order
-		threshold: '5',
-		email: 'on'
+		threshold: '5'
 	});
 	expect(res).toMatchObject({ ok: true, scope: 'settings' });
 	const ch = await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get();
@@ -136,8 +135,7 @@ test('settings persists enabled, cadence, categories, threshold, and e-mail opt-
 		feedbackEnabled: 1,
 		feedbackCadence: 'per_100',
 		feedbackCategories: 'question,request',
-		feedbackThreshold: 5,
-		feedbackEmail: 1
+		feedbackThreshold: 5
 	});
 });
 

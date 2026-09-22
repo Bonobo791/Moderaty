@@ -46,6 +46,7 @@ export const DEFAULT_THRESHOLD = 3;
  * @property {string} latestAt - newest publishedAt among supporters
  */
 
+/** @type {Record<string, string>} */
 const PER_CATEGORY_VERB = {
 	question: 'asked',
 	criticism: 'criticized',

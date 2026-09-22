@@ -16,9 +16,9 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { TEST_OWNER, setupTestDb, testDb } from '$lib/server/testdb';
-import { creditTransactions, mercadoPagoCheckoutAttempts, organizations, stripeCheckoutAttempts, stripeLifetimeEntitlements, stripeLifetimeSlots } from '$lib/server/db/schema';
-import { getCredits } from '$lib/server/billing/ledger';
-import { fulfillCheckout } from '$lib/server/stripe/webhooks';
+import { creditTransactions, mercadoPagoCheckoutAttempts, organizations, stripeCheckoutAttempts, stripeEvents, stripeLifetimeEntitlements, stripeLifetimeSlots } from '$lib/server/db/schema';
+import { applyLedgerDelta, getCredits } from '$lib/server/billing/ledger';
+import { handleStripeEvent } from '$lib/server/stripe/webhooks';
 import { eq } from 'drizzle-orm';
 
 const mocks = vi.hoisted(() => ({
@@ -281,8 +281,12 @@ describe('usage/success test-checkout branch', () => {
 	test('a test checkout shows granted once the webhook fulfillment landed', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		mocks.sessionsRetrieve.mockResolvedValue(paidTestSession());
-		// What the webhook handler runs on checkout.session.completed.
-		expect(await fulfillCheckout('cs_1')).toBe('granted');
+		// The real webhook path: claim the delivery, fulfill, mark the
+		// attempt fulfilled, mark the event processed — the pass signal the
+		// observer trusts is the processed stripe_events row.
+		expect(
+			await handleStripeEvent({ id: 'evt_t', type: 'checkout.session.completed', data: { object: { id: 'cs_1' } } } as never)
+		).toBe(true);
 		expect(await getCredits('org-1')).toBe(1);
 
 		const data = (await loadWith('cs_1')) as { granted: boolean; pending: boolean; test: boolean };
@@ -291,6 +295,60 @@ describe('usage/success test-checkout branch', () => {
 		expect(data.granted).toBe(true);
 		expect(data.pending).toBe(false);
 		expect(await getCredits('org-1')).toBe(1); // still exactly once
+	});
+
+	test('a committed grant with no processed webhook event stays pending — never self-completes', async () => {
+		// codex P1 round 2: fulfillCreditPurchase commits the ledger grant
+		// BEFORE savePaymentMethod — a failing card save leaves the row while
+		// the event stays unprocessed and retrying. The grant alone must NOT
+		// read as a passed smoke test, and the page must never write the
+		// webhook-owned 'fulfilled' attempt status itself.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.insert(stripeCheckoutAttempts).values({
+			attemptId: 'att_t',
+			orgId: 'org-1',
+			product: 'test',
+			idempotencyKey: 'checkout:att_t:k',
+			stripeSessionId: 'cs_1',
+			status: 'open'
+		});
+		await applyLedgerDelta(testDb().db, { orgId: 'org-1', delta: 1, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1' });
+		mocks.sessionsRetrieve.mockResolvedValue(paidTestSession());
+
+		const data = (await loadWith('cs_1')) as { granted: boolean; pending: boolean; test: boolean };
+
+		expect(data.test).toBe(true);
+		expect(data.granted).toBe(false);
+		expect(data.pending).toBe(true);
+		// The attempt stays 'open' — only the webhook's own handler may mark
+		// it fulfilled; nothing the observer writes can fake that signal.
+		const attempt = await testDb().db
+			.select({ status: stripeCheckoutAttempts.status })
+			.from(stripeCheckoutAttempts)
+			.where(eq(stripeCheckoutAttempts.stripeSessionId, 'cs_1'))
+			.get();
+		expect(attempt?.status).toBe('open');
+	});
+
+	test('a processed event with no grant stays pending — the refunded path needs the charge', async () => {
+		// The event proves the delivery was HANDLED; the credit outcome is
+		// still read from the ledger/charge — a processed event alone is not
+		// a grant verdict.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.insert(stripeEvents).values({
+			eventId: 'evt_t',
+			eventType: 'checkout.session.completed',
+			objectId: 'cs_1',
+			objectType: 'checkout.session',
+			processedAt: '2026-01-01T00:00:00.000Z'
+		});
+		mocks.sessionsRetrieve.mockResolvedValue(paidTestSession());
+
+		const data = (await loadWith('cs_1')) as { granted: boolean; pending: boolean; test: boolean };
+
+		expect(data.test).toBe(true);
+		expect(data.granted).toBe(false);
+		expect(data.pending).toBe(true);
 	});
 
 	test('a test checkout refunded by the webhook shows the refunded state', async () => {

@@ -22,11 +22,11 @@
 
 import { createHash } from 'node:crypto';
 
-import { and, eq, gt } from 'drizzle-orm';
+import { and, eq, gt, inArray, isNotNull } from 'drizzle-orm';
 import type Stripe from 'stripe';
 
 import { db } from '$lib/server/db';
-import { creditTransactions, mercadoPagoCheckoutAttempts, stripeCheckoutAttempts } from '$lib/server/db/schema';
+import { creditTransactions, mercadoPagoCheckoutAttempts, stripeCheckoutAttempts, stripeEvents } from '$lib/server/db/schema';
 import { retrievePayment } from '$lib/server/mercadopago/client';
 import { processMercadoPagoPayment } from '$lib/server/mercadopago/webhooks';
 
@@ -117,12 +117,15 @@ async function mercadoPagoSuccess(user: SessionUser, attemptId: string): Promise
 /**
  * Test-checkout observation: the smoke test's success criterion is WEBHOOK
  * fulfillment, so this page only observes — it never fulfills (codex P1).
- * A ledger grant for the session can only exist if the webhook's own
- * fulfillCheckout ran (the success page no longer calls it for the test
- * product), so 'granted' proves checkout → webhook → ledger end-to-end; no
- * grant stays pending so a broken webhook endpoint reads as a failed test
- * instead of a masked pass. The unmetered-plan refund and terminal
- * manual-refund verdicts are observed from the charge and the attempt row.
+ * 'granted' needs BOTH the ledger credit AND the webhook-owned processed
+ * stripe_events row for the session: fulfillCreditPurchase commits the
+ * grant BEFORE savePaymentMethod, so a failing card save leaves the credit
+ * behind while the delivery stays unprocessed and retrying — the grant
+ * alone would still mask a half-broken webhook (codex P1, round 2). Only
+ * the webhook handler writes processedAt (after fulfillCheckout returned
+ * successfully) and marks the attempt fulfilled; this page writes neither.
+ * The unmetered-plan refund and terminal manual-refund verdicts are
+ * observed from the charge and the attempt row.
  */
 async function observeTestCheckout(user: SessionUser, sessionId: string, session: Stripe.Checkout.Session): Promise<Pick<SuccessState, 'granted' | 'pending' | 'refunded' | 'manualRefund'>> {
 	const grant = await db
@@ -130,10 +133,18 @@ async function observeTestCheckout(user: SessionUser, sessionId: string, session
 		.from(creditTransactions)
 		.where(and(eq(creditTransactions.orgId, user.orgId), eq(creditTransactions.refType, 'checkout_session'), eq(creditTransactions.refId, sessionId), gt(creditTransactions.delta, 0)))
 		.get();
-	if (grant) {
-		// Housekeeping only: the webhook already marked the attempt — this
-		// idempotent write never fulfills anything itself.
-		await markCheckoutAttemptFulfilled(sessionId);
+	const delivered = await db
+		.select({ id: stripeEvents.id })
+		.from(stripeEvents)
+		.where(
+			and(
+				inArray(stripeEvents.eventType, ['checkout.session.completed', 'checkout.session.async_payment_succeeded']),
+				eq(stripeEvents.objectId, sessionId),
+				isNotNull(stripeEvents.processedAt)
+			)
+		)
+		.get();
+	if (grant && delivered) {
 		return { granted: true, pending: false, refunded: false, manualRefund: false };
 	}
 	const { charge } = getPaymentIntentAndCharge(session);

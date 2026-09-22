@@ -23,6 +23,7 @@
 import { createHash } from 'node:crypto';
 
 import { and, eq, gt } from 'drizzle-orm';
+import type Stripe from 'stripe';
 
 import { db } from '$lib/server/db';
 import { creditTransactions, mercadoPagoCheckoutAttempts, stripeCheckoutAttempts } from '$lib/server/db/schema';
@@ -123,7 +124,7 @@ async function mercadoPagoSuccess(user: SessionUser, attemptId: string): Promise
  * instead of a masked pass. The unmetered-plan refund and terminal
  * manual-refund verdicts are observed from the charge and the attempt row.
  */
-async function observeTestCheckout(user: SessionUser, sessionId: string, session: { payment_intent?: unknown }): Promise<Pick<SuccessState, 'granted' | 'pending' | 'refunded' | 'manualRefund'>> {
+async function observeTestCheckout(user: SessionUser, sessionId: string, session: Stripe.Checkout.Session): Promise<Pick<SuccessState, 'granted' | 'pending' | 'refunded' | 'manualRefund'>> {
 	const grant = await db
 		.select({ id: creditTransactions.id })
 		.from(creditTransactions)
@@ -135,7 +136,7 @@ async function observeTestCheckout(user: SessionUser, sessionId: string, session
 		await markCheckoutAttemptFulfilled(sessionId);
 		return { granted: true, pending: false, refunded: false, manualRefund: false };
 	}
-	const { charge } = getPaymentIntentAndCharge(session as never);
+	const { charge } = getPaymentIntentAndCharge(session);
 	if (charge && chargeFullyRefunded(charge)) {
 		return { granted: false, pending: false, refunded: true, manualRefund: false };
 	}

@@ -43,11 +43,17 @@ test('no leak: redacted output never still contains a lexicon term', () => {
 });
 
 test('no leak: a standalone abusive word injected into arbitrary text never survives', () => {
+	// `not.toContain(term)` over-claimed (cubic): an arbitrary pre/post can
+	// carry the term inside a longer word, which the word-boundary rules
+	// correctly leave intact. The sound pin is two-fold: at least one span
+	// must be masked (the injected word is always standalone, hence always
+	// matchable), and a second pass must find nothing left to mask — the
+	// injected occurrence cannot still be matchable and survive.
 	fc.assert(
 		fc.property(fc.string(), TERM_ARB, fc.string(), (pre, term, post) => {
 			const input = `${pre} ${term} ${post}`;
-			const { text } = redactAbuse(input);
-			expect(text).not.toContain(term);
+			const { text, redacted } = redactAbuse(input);
+			expect(redacted).toBeGreaterThanOrEqual(1);
 			expect(redactAbuse(text).redacted).toBe(0);
 		})
 	);

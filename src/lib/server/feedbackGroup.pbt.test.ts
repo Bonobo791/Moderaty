@@ -80,14 +80,16 @@ test('threshold: no finding ever reports fewer supporters than the threshold', (
 	);
 });
 
-test('idempotent and category-honest: reruns converge, findings only use enabled categories', () => {
+test('category-honest: findings only use enabled categories', () => {
+	// Property audit: the rerun-equality half was dropped (cubic) — a pure
+	// function deep-equals itself under any implementation, so it could
+	// never fail. What remains is the real invariant: a disabled category
+	// must never surface a finding.
 	fc.assert(
-		fc.property(COMMENTS_ARB, (comments) => {
+		fc.property(COMMENTS_ARB, THRESHOLD_ARB, (comments, threshold) => {
 			const categories = ['question', 'request'];
-			const once = groupFeedback(comments, { categories });
-			const twice = groupFeedback(comments, { categories });
-			expect(once).toEqual(twice);
-			for (const finding of once.findings) expect(categories).toContain(finding.category);
+			const { findings } = groupFeedback(comments, { categories, threshold });
+			for (const finding of findings) expect(categories).toContain(finding.category);
 		})
 	);
 });

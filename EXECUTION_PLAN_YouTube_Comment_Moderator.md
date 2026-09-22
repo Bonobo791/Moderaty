@@ -25,15 +25,10 @@ This project is reviewed by a human via pull requests. The executor's branching 
 - **One branch per phase.** Phases: `phase-a-scaffold`, `phase-b-database`, `phase-c-server-libs`, `phase-d-tests`, `phase-e-auth-cron`, `phase-f-ui`, `phase-g-design`, `phase-h-e2e`. Before a phase's first step: `git checkout main && git pull && git checkout -b <branch>`.
 - **Commit after every step** with message `step <N>: <step name>`.
 - **Never open a PR while `npm run check`, `npm run build`, or `npm run test` is red.** Fix first. The PR is the proof of green, not the place to discover red.
-- **When a phase's last step passes its Verify and everything is green:** push and open the PR:
-  ```bash
-  git push -u origin <branch>
-  gh pr create --base main --title "Phase <X>: <name>" --body "Automated PR. All checks green locally. Do not merge if any step's Verify failed."
-  ```
-  (No `gh` CLI → push and print the compare URL instead.)
+- **When a phase's last step passes its Verify and everything is green:** commit and STOP. The agent never pushes — the human or sync step pushes the branch and opens the PR (`gh pr create --base main --title "Phase <X>: <name>"`). A local-only commit cannot reach a remote branch or a PR; do not pretend otherwise.
 - **Then STOP.** Do not start the next phase until the human confirms merge. Resume with `git checkout main && git pull` and the next phase branch.
-- **Never** push to `main` directly, never merge your own PR, never `--force`.
-- **Review findings (human or bot): every finding gets a failing test BEFORE its fix.** Add the reproducing test to the phase branch, watch it fail, then fix, watch it pass, commit both together (`fix: phase <X> review — <what>`), push, stop for re-review. A fix without its reproducing test is not done.
+- **Never** push — not to `main`, not to `dev`, not to a phase branch — and never merge your own PR, never `--force`.
+- **Review findings (human or bot): every finding gets a failing test BEFORE its fix.** Add the reproducing test to the phase branch, watch it fail, then fix, watch it pass, commit both together (`fix: phase <X> review — <what>`), stop for re-review. A fix without its reproducing test is not done.
 - Steps 27–28 (credentials + live smoke test) require human action; open the Phase H PR after everything achievable autonomously and list remaining manual checks in the PR body.
 
 ---

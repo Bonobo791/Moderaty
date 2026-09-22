@@ -305,7 +305,9 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 				STRIPE_TEST_PRODUCT is configured on this deployment — run a live test purchase to
 				verify checkout, webhooks, and credit granting end-to-end. A completed payment grants
 				1 credit and shows up in the purchase history below; on a lifetime plan the payment is
-				refunded automatically instead. Remove the variable to hide this.
+				refunded automatically instead. On a metered plan the payment method is saved for
+				automatic top-up — if it differs from the saved card, automatic top-up is disabled
+				until you re-enable it with fresh consent. Remove the variable to hide this.
 			</p>
 			<form method="POST" action="?/buyTest" use:enhance={submitting}>
 				<input type="hidden" name="attempt_id" value={checkoutAttempts.test ?? ''} />

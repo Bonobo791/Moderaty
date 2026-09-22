@@ -475,6 +475,19 @@ describe('usage load', () => {
 		const noStripe = render(Page, { props: { data: { ...usagePageData(), stripeConfigured: false }, form: null } as never }).body;
 		expect(noStripe).not.toContain('?/buyTest');
 	});
+
+	test('the test checkout card discloses that a paid test saves the card and can disable auto top-up', async () => {
+		// codex/coderabbit: a successful test payment runs the shared
+		// savePaymentMethod path — a different card becomes the saved card and
+		// disables auto top-up until re-consented. That side effect must be
+		// disclosed BEFORE the owner clicks, not discovered after.
+		// Fragments must be contiguous in the rendered markup — the copy wraps
+		// across source lines.
+		const body = render(Page, { props: { data: usagePageData(), form: null } as never }).body;
+		expect(body).toContain('the payment method is saved for');
+		expect(body).toContain('automatic top-up is disabled');
+		expect(body).toContain('until you re-enable it with fresh consent');
+	});
 });
 
 describe('usage buy action', () => {

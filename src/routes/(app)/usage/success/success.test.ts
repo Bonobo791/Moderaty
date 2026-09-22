@@ -16,8 +16,9 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { TEST_OWNER, setupTestDb, testDb } from '$lib/server/testdb';
-import { mercadoPagoCheckoutAttempts, organizations, stripeCheckoutAttempts, stripeLifetimeEntitlements, stripeLifetimeSlots } from '$lib/server/db/schema';
+import { creditTransactions, mercadoPagoCheckoutAttempts, organizations, stripeCheckoutAttempts, stripeLifetimeEntitlements, stripeLifetimeSlots } from '$lib/server/db/schema';
 import { getCredits } from '$lib/server/billing/ledger';
+import { fulfillCheckout } from '$lib/server/stripe/webhooks';
 import { eq } from 'drizzle-orm';
 
 const mocks = vi.hoisted(() => ({
@@ -39,7 +40,7 @@ vi.mock('$env/dynamic/private', () => ({ env: {} }));
 
 import { load } from './+page.server';
 
-setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'mercado_pago_checkout_attempts', 'stripe_checkout_attempts', 'stripe_lifetime_slots', 'stripe_lifetime_entitlements']);
+setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'mercado_pago_checkout_attempts', 'stripe_checkout_attempts', 'stripe_lifetime_slots', 'stripe_lifetime_entitlements', 'stripe_pending_reversals']);
 
 const OWNER = TEST_OWNER;
 
@@ -243,6 +244,104 @@ describe('usage/success load', () => {
 
 		expect(data.granted).toBe(false);
 		expect(data.pending).toBe(true);
+		expect(await getCredits('org-1')).toBe(0);
+	});
+});
+
+describe('usage/success test-checkout branch', () => {
+	// codex P1: the STRIPE_TEST_PRODUCT smoke test exists to prove the
+	// deployment's webhook pipeline. If the success-page redirect fulfilled
+	// the session itself, a broken webhook endpoint would look green — so the
+	// test branch only OBSERVES, it never fulfills.
+	function paidTestSession(overrides: Record<string, unknown> = {}) {
+		return paidSession({
+			mode: 'payment',
+			metadata: { org_id: 'org-1', product: 'test' },
+			payment_intent: { id: 'pi_t', latest_charge: { id: 'ch_t', amount: 100, amount_refunded: 0, refunded: false }, payment_method: null },
+			customer: 'cus_1',
+			...overrides
+		});
+	}
+
+	test('a paid test checkout is observed, never fulfilled — pending until the webhook grants', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.sessionsRetrieve.mockResolvedValue(paidTestSession());
+
+		const data = (await loadWith('cs_1')) as { granted: boolean; pending: boolean; failed: boolean; test: boolean };
+
+		expect(data.test).toBe(true);
+		expect(data.granted).toBe(false);
+		expect(data.pending).toBe(true);
+		expect(data.failed).toBe(false);
+		// The credit is NOT granted by the page — only the webhook's own
+		// fulfillCheckout may write it.
+		expect(await getCredits('org-1')).toBe(0);
+	});
+
+	test('a test checkout shows granted once the webhook fulfillment landed', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.sessionsRetrieve.mockResolvedValue(paidTestSession());
+		// What the webhook handler runs on checkout.session.completed.
+		expect(await fulfillCheckout('cs_1')).toBe('granted');
+		expect(await getCredits('org-1')).toBe(1);
+
+		const data = (await loadWith('cs_1')) as { granted: boolean; pending: boolean; test: boolean };
+
+		expect(data.test).toBe(true);
+		expect(data.granted).toBe(true);
+		expect(data.pending).toBe(false);
+		expect(await getCredits('org-1')).toBe(1); // still exactly once
+	});
+
+	test('a test checkout refunded by the webhook shows the refunded state', async () => {
+		// An unmetered org's paid test exercises the ungrantable→refund path —
+		// observed from the charge state, never by self-fulfilling.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'lifetime' });
+		mocks.sessionsRetrieve.mockResolvedValue(
+			paidTestSession({ payment_intent: { id: 'pi_t', latest_charge: { id: 'ch_t', amount: 100, amount_refunded: 100, refunded: true }, payment_method: null } })
+		);
+
+		const data = (await loadWith('cs_1')) as { granted: boolean; refunded: boolean; pending: boolean; test: boolean };
+
+		expect(data.test).toBe(true);
+		expect(data.refunded).toBe(true);
+		expect(data.granted).toBe(false);
+		expect(data.pending).toBe(false);
+	});
+
+	test('a test checkout whose refund failed terminally shows the manual-refund state', async () => {
+		// The webhook's refund.updated handler marks the attempt durable —
+		// the page reads it instead of sitting pending forever.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'lifetime' });
+		await testDb().db.insert(stripeCheckoutAttempts).values({
+			attemptId: 'att_t',
+			orgId: 'org-1',
+			product: 'test',
+			idempotencyKey: 'checkout:att_t:k',
+			stripeSessionId: 'cs_1',
+			status: 'manual_refund_required'
+		});
+		mocks.sessionsRetrieve.mockResolvedValue(paidTestSession());
+
+		const data = (await loadWith('cs_1')) as { manualRefund: boolean; pending: boolean; test: boolean };
+
+		expect(data.test).toBe(true);
+		expect(data.manualRefund).toBe(true);
+		expect(data.pending).toBe(false);
+	});
+
+	test('a no_payment_required test session is a failed smoke test, not pending', async () => {
+		// A $0-completed test checkout can never verify the paid pipeline —
+		// zero-priced Prices are rejected at creation, so only a stale session
+		// reaches this. It must read as a failure, not "waiting for webhook".
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.sessionsRetrieve.mockResolvedValue(paidTestSession({ payment_status: 'no_payment_required' }));
+
+		const data = (await loadWith('cs_1')) as { granted: boolean; pending: boolean; failed: boolean; test: boolean };
+
+		expect(data.test).toBe(true);
+		expect(data.failed).toBe(true);
+		expect(data.pending).toBe(false);
 		expect(await getCredits('org-1')).toBe(0);
 	});
 });

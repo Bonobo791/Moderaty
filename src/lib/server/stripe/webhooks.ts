@@ -437,7 +437,7 @@ async function refundUngrantableCheckout(
 }
 
 /** Narrows the expanded Checkout session to the payment_intent and its latest_charge (both stay a string-union). */
-function getPaymentIntentAndCharge(session: Stripe.Checkout.Session): {
+export function getPaymentIntentAndCharge(session: Stripe.Checkout.Session): {
 	paymentIntent: Stripe.PaymentIntent | null;
 	charge: Stripe.Charge | null | undefined;
 } {
@@ -456,7 +456,7 @@ function getPaymentIntentAndCharge(session: Stripe.Checkout.Session): {
  * outcome is unresolved, not returned).
  */
 /** True when the charge's full amount was refunded — partial refunds keep their purchase (documented v1 scope). */
-function chargeFullyRefunded(charge: { amount?: unknown; amount_refunded?: unknown }): boolean {
+export function chargeFullyRefunded(charge: { amount?: unknown; amount_refunded?: unknown }): boolean {
 	return typeof charge.amount === 'number' && charge.amount > 0 && typeof charge.amount_refunded === 'number' && charge.amount_refunded >= charge.amount;
 }
 

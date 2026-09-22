@@ -22,17 +22,17 @@
 
 import { createHash } from 'node:crypto';
 
-import { and, eq } from 'drizzle-orm';
+import { and, eq, gt } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
-import { mercadoPagoCheckoutAttempts, stripeCheckoutAttempts } from '$lib/server/db/schema';
+import { creditTransactions, mercadoPagoCheckoutAttempts, stripeCheckoutAttempts } from '$lib/server/db/schema';
 import { retrievePayment } from '$lib/server/mercadopago/client';
 import { processMercadoPagoPayment } from '$lib/server/mercadopago/webhooks';
 
-import { markCheckoutAttemptFulfilled } from '$lib/server/billing/checkout';
+import { markCheckoutAttemptFulfilled, TEST_CHECKOUT_PRODUCT } from '$lib/server/billing/checkout';
 import { requireUser } from '$lib/server/session';
 import { getStripe } from '$lib/server/stripe/client';
-import { fulfillCheckout } from '$lib/server/stripe/webhooks';
+import { chargeFullyRefunded, fulfillCheckout, getPaymentIntentAndCharge } from '$lib/server/stripe/webhooks';
 
 import type { PageServerLoad } from './$types';
 
@@ -48,6 +48,8 @@ type SuccessState = {
 	refunded: boolean;
 	/** The payment was taken but can never be granted and the automatic refund failed or does not exist — a human refund is required. */
 	manualRefund: boolean;
+	/** This session is the STRIPE_TEST_PRODUCT smoke test — the page renders webhook-verification copy instead of buyer copy. */
+	test?: boolean;
 };
 
 /**
@@ -111,19 +113,69 @@ async function mercadoPagoSuccess(user: SessionUser, attemptId: string): Promise
  * Stripe branch: retrieve the session and run the idempotent fulfillCheckout.
  * A session belonging to another org is never fulfilled (and never leaks).
  */
+/**
+ * Test-checkout observation: the smoke test's success criterion is WEBHOOK
+ * fulfillment, so this page only observes — it never fulfills (codex P1).
+ * A ledger grant for the session can only exist if the webhook's own
+ * fulfillCheckout ran (the success page no longer calls it for the test
+ * product), so 'granted' proves checkout → webhook → ledger end-to-end; no
+ * grant stays pending so a broken webhook endpoint reads as a failed test
+ * instead of a masked pass. The unmetered-plan refund and terminal
+ * manual-refund verdicts are observed from the charge and the attempt row.
+ */
+async function observeTestCheckout(user: SessionUser, sessionId: string, session: { payment_intent?: unknown }): Promise<Pick<SuccessState, 'granted' | 'pending' | 'refunded' | 'manualRefund'>> {
+	const grant = await db
+		.select({ id: creditTransactions.id })
+		.from(creditTransactions)
+		.where(and(eq(creditTransactions.orgId, user.orgId), eq(creditTransactions.refType, 'checkout_session'), eq(creditTransactions.refId, sessionId), gt(creditTransactions.delta, 0)))
+		.get();
+	if (grant) {
+		// Housekeeping only: the webhook already marked the attempt — this
+		// idempotent write never fulfills anything itself.
+		await markCheckoutAttemptFulfilled(sessionId);
+		return { granted: true, pending: false, refunded: false, manualRefund: false };
+	}
+	const { charge } = getPaymentIntentAndCharge(session as never);
+	if (charge && chargeFullyRefunded(charge)) {
+		return { granted: false, pending: false, refunded: true, manualRefund: false };
+	}
+	const attempt = await db
+		.select({ status: stripeCheckoutAttempts.status })
+		.from(stripeCheckoutAttempts)
+		.where(and(eq(stripeCheckoutAttempts.stripeSessionId, sessionId), eq(stripeCheckoutAttempts.orgId, user.orgId)))
+		.get();
+	if (attempt?.status === 'manual_refund_required') {
+		return { granted: false, pending: false, refunded: false, manualRefund: true };
+	}
+	return { granted: false, pending: true, refunded: false, manualRefund: false };
+}
+
 async function stripeSuccess(user: SessionUser, sessionId: string): Promise<SuccessState> {
 	let granted = false;
 	let pending = false;
 	let refunded = false;
 	let manualRefund = false;
+	let test = false;
 	try {
-		const session = await getStripe().checkout.sessions.retrieve(sessionId);
+		const session = await getStripe().checkout.sessions.retrieve(sessionId, {
+			// latest_charge expanded so the test branch can observe a refund
+			// without a second retrieve (same expansion fulfillCheckout uses).
+			expand: ['payment_intent', 'payment_intent.latest_charge']
+		});
 		if (session.metadata?.org_id !== user.orgId) {
 			// Not this user's purchase — never fulfill (and never leak details).
 			return { maintenance: false, user, sessionId, granted: false, pending: true, failed: false, refunded: false, manualRefund: false };
 		}
 		if (session.payment_status === 'unpaid') {
 			pending = true;
+		} else if (session.metadata?.product === TEST_CHECKOUT_PRODUCT) {
+			test = true;
+			if (session.payment_status === 'paid') {
+				({ granted, pending, refunded, manualRefund } = await observeTestCheckout(user, sessionId, session));
+			}
+			// 'no_payment_required' (a $0 test session) can never verify the
+			// paid pipeline — zero-priced Prices are rejected at checkout
+			// creation, and nothing set here falls through to failed.
 		} else {
 			// 'granted' (this call applied the credits) and 'already' (the
 			// webhook beat the redirect — the common case) are both success; a
@@ -183,7 +235,7 @@ async function stripeSuccess(user: SessionUser, sessionId: string): Promise<Succ
 		);
 		pending = true;
 	}
-	return { maintenance: false, user, sessionId, granted, pending, failed: !granted && !pending && !refunded && !manualRefund, refunded, manualRefund };
+	return { maintenance: false, user, sessionId, granted, pending, failed: !granted && !pending && !refunded && !manualRefund, refunded, manualRefund, test };
 }
 
 export const load: PageServerLoad = async ({ locals, url }) => {

@@ -102,9 +102,9 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.sessionsCreate.mockResolvedValue({ id: 'cs_new', url: 'https://checkout.stripe.com/pay/test_123' });
 	mocks.customersCreate.mockResolvedValue({ id: 'cus_new' });
-	// Bundle Prices must charge the shared catalog amount — the checkout
-	// validates unit_amount against expectedBundlePriceCents before any
-	// session exists. price_lifetime stays at its catalog 4900.
+	// Bundle Prices pass through to Checkout unvalidated — the operator owns
+	// the catalog; these fixtures just give every Price a retrievable shape.
+	// price_lifetime stays at its catalog 4900.
 	const bundleCents: Record<string, number> = { price_100: 500, price_500: 2040, price_2000: 6465, price_lifetime: 4900, price_test: 100 };
 	mocks.pricesRetrieve.mockImplementation(async (id: string) => id === 'price_hosted' ? { id, active: true, currency: 'usd', type: 'recurring', unit_amount: 500, recurring: { interval: 'month', interval_count: 1 } } : { id, active: true, currency: 'usd', type: 'one_time', unit_amount: bundleCents[id] ?? 100 });
 	mocks.paymentMethodsRetrieve.mockResolvedValue({ id: 'pm_1', type: 'card', card: { brand: 'visa', last4: '4242' } });
@@ -564,12 +564,13 @@ describe('usage buy action', () => {
 		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
 	});
 
-	test('a bundle Price whose amount contradicts the advertised discount answers 400 — never "try again"', async () => {
-		// validateBundlePrice rejects the misconfigured catalog entry before
-		// any durable state; the action must surface the sanitized
+	test('a malformed bundle Price env var answers 400 — never "try again"', async () => {
+		// A STRIPE_PRICE_CREDITS_* var that is not a Price id is a permanent
+		// deployment fault; the action must surface the sanitized
 		// non-retryable verdict instead of a generic retry prompt (codex).
 		await seedOrg();
-		mocks.pricesRetrieve.mockResolvedValue({ id: 'price_500', active: true, currency: 'usd', type: 'one_time', unit_amount: 4900 });
+		const saved = env.STRIPE_PRICE_CREDITS_500;
+		env.STRIPE_PRICE_CREDITS_500 = 'not_a_price_id';
 		const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 		try {
 			const result = await buy('credits_500');
@@ -581,6 +582,7 @@ describe('usage buy action', () => {
 			expect(mocks.sessionsCreate).not.toHaveBeenCalled();
 			expect(await testDb().db.select().from(stripeCheckoutAttempts)).toHaveLength(0);
 		} finally {
+			env.STRIPE_PRICE_CREDITS_500 = saved;
 			infoSpy.mockRestore();
 		}
 	});
@@ -691,8 +693,7 @@ describe('usage buyTest action', () => {
 		// operator rejection — specific about WHAT without leaking env names or
 		// Stripe internals, loud in the server log.
 		await seedOrg();
-		env.STRIPE_TEST_PRODUCT = 'price_inactive';
-		mocks.pricesRetrieve.mockResolvedValueOnce({ id: 'price_inactive', active: false, currency: 'usd', type: 'one_time', unit_amount: 100 });
+		env.STRIPE_TEST_PRODUCT = 'bogus';
 		const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 		try {
 			const result = await buyTest();
@@ -703,6 +704,7 @@ describe('usage buyTest action', () => {
 			expect(serialized).not.toContain('try again');
 			expect(await testDb().db.select().from(stripeCheckoutAttempts)).toHaveLength(0);
 		} finally {
+			env.STRIPE_TEST_PRODUCT = 'price_test';
 			infoSpy.mockRestore();
 		}
 	});

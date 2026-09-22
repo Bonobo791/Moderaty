@@ -399,7 +399,7 @@ export const feedbackDigests = sqliteTable('feedback_digests', {
 	windowStart: text('window_start').notNull(), // ISO; last complete digest's window_end (epoch for the first)
 	windowEnd: text('window_end').notNull(), // ISO; published_at of the newest classified comment
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
-	status: text('status').notNull(), // 'complete' | 'failed'
+	status: text('status').notNull(), // 'complete' | 'failed' | 'deferred'
 	commentsClassified: integer('comments_classified').notNull().default(0),
 	commentsFailed: integer('comments_failed').notNull().default(0), // per-comment classifier failures, skipped and counted (I1)
 	pooledCount: integer('pooled_count').notNull().default(0), // feedback comments that fell below the evidence threshold
@@ -408,9 +408,11 @@ export const feedbackDigests = sqliteTable('feedback_digests', {
 	emailedAt: text('emailed_at'), // set once the digest e-mail went out — RESERVED, unwired until MOD-92; always null today
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
-	// Idempotency anchor (I4): re-running the same window replaces the row,
-	// never duplicates it.
-	uniqueIndex('feedback_digests_channel_window_unique').on(
+	// Transient-row anchor (I4): a re-run replaces a FAILED/DEFERRED leftover
+	// at the same window. NOT unique — two capped batches can share one
+	// descriptive window (≥201 comments at a single publishedAt), and
+	// completed digests are distinct batches that must coexist (codex).
+	index('feedback_digests_channel_window_idx').on(
 		table.channelId,
 		table.windowStart,
 		table.windowEnd

@@ -1161,17 +1161,80 @@ describe('fulfillCheckout', () => {
 		expect(await getCredits('org-1')).toBe(1);
 	});
 
-	test('a test checkout in subscription mode is a loud rejection — never grants', async () => {
-		// The test checkout is always mode 'payment'; a subscription-mode
-		// session claiming product 'test' is malformed, not a test purchase.
+	test('a test checkout on a recurring price grants once, cancels the smoke-test subscription, and saves its card', async () => {
+		// STRIPE_TEST_PRODUCT may resolve to a recurring Price — the checkout
+		// then runs in subscription mode and mints a real subscription.
+		// Fulfillment must grant the test credit, cancel that subscription
+		// (a smoke test must not bill the operator monthly), and still sync
+		// the saved card — the subscription session carries no payment
+		// intent, so the card comes from the subscription's default PM.
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
-		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_test_sub', mode: 'subscription', subscription: 'sub_1', metadata: { org_id: 'org-1', product: 'test' } }));
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_test_sub', mode: 'subscription', subscription: 'sub_test', payment_intent: null, metadata: { org_id: 'org-1', product: 'test' } }));
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_test', status: 'active', default_payment_method: 'pm_test' });
+		mocks.subscriptionsCancel.mockResolvedValue({ id: 'sub_test', status: 'canceled' });
 
-		expect(await fulfillCheckout('cs_test_sub')).toBe('rejected');
-		expect(await getCredits('org-1')).toBe(0);
-		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('not a one-time payment session'));
-		errorSpy.mockRestore();
+		expect(await fulfillCheckout('cs_test_sub')).toBe('granted');
+		expect(await getCredits('org-1')).toBe(1);
+		expect(mocks.subscriptionsCancel).toHaveBeenCalledWith('sub_test');
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeDefaultPmId).toBe('pm_test');
+		// The minted subscription must never be tracked as the org's plan.
+		expect(org?.stripeSubscriptionId).toBeNull();
+	});
+
+	test('an already-canceled test subscription still grants — the cancel step is skipped, not fatal', async () => {
+		// A redelivery after the cancel succeeded must not die on
+		// subscriptions.cancel: status 'canceled' skips the call entirely.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_test_sub2', mode: 'subscription', subscription: 'sub_test', payment_intent: null, metadata: { org_id: 'org-1', product: 'test' } }));
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_test', status: 'canceled', default_payment_method: null });
+
+		expect(await fulfillCheckout('cs_test_sub2')).toBe('granted');
+		expect(mocks.subscriptionsCancel).not.toHaveBeenCalled();
+		expect(await getCredits('org-1')).toBe(1);
+	});
+
+	test('customer.subscription events for the test product never touch the org', async () => {
+		// A recurring STRIPE_TEST_PRODUCT mints a real subscription tagged
+		// product:'test'. The subscription pipeline must ignore it entirely —
+		// tracking it would turn the smoke test into a fake hosted plan
+		// (monthly allowance, entitlement gates, duplicate teardown).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1' });
+		const sub = { id: 'sub_test', customer: 'cus_1', status: 'active', metadata: { product: 'test' }, cancel_at_period_end: false };
+
+		expect(await handleStripeEvent(event('customer.subscription.created', 'evt_test_sub', sub) as never)).toBe(true);
+
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeSubscriptionId).toBeNull();
+		expect(mocks.subscriptionsCancel).not.toHaveBeenCalled();
+	});
+
+	test('invoice.paid for a test-product subscription grants no period credits', async () => {
+		// The recurring test price's invoices must never enter the
+		// hosted-period pipeline: with no tracked subscription an unguarded
+		// handler would treat the invoice as a resubscribe and grant the
+		// monthly allowance on top of the test credit.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1' });
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_test', status: 'active', metadata: { product: 'test' } });
+		const invoice = { id: 'in_test', subscription: 'sub_test', customer: 'cus_1', payment_intent: 'pi_test', lines: { data: [{ subscription: 'sub_test', period: { start: 1_800_000_000, end: 1_802_678_400 } }] } };
+
+		expect(await handleStripeEvent(event('invoice.paid', 'evt_test_invoice', invoice) as never)).toBe(true);
+
+		expect(await testDb().db.select().from(stripeSubscriptionPeriods)).toHaveLength(0);
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeSubscriptionId).toBeNull();
+		expect(mocks.subscriptionsCancel).not.toHaveBeenCalled();
+	});
+
+	test('invoice.payment_failed for a test-product subscription is ignored, not recorded as past_due', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1' });
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_test', status: 'active', metadata: { product: 'test' } });
+		const invoice = { id: 'in_test_fail', subscription: 'sub_test', customer: 'cus_1', lines: { data: [{ subscription: 'sub_test', period: { start: 1_800_000_000, end: 1_802_678_400 } }] } };
+
+		expect(await handleStripeEvent(event('invoice.payment_failed', 'evt_test_fail', invoice) as never)).toBe(true);
+
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org?.stripeSubscriptionStatus).toBeNull();
 	});
 
 	test('a paid test checkout on an unmetered org is refunded, never granted', async () => {

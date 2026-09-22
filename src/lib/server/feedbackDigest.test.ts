@@ -364,7 +364,47 @@ test('a capped batch keeps the channel due until the backlog drains', async () =
 	expect(await digestDue(ch)).toBe(false);
 });
 
-test('out-of-credit metered orgs defer without writing a partial digest', async () => {
+test('a deadline already spent rolls the charge transaction back — no credits, no provider calls', async () => {
+	// Cron hands the digest whatever budget the moderation page left — which
+	// can be past the deadline. The charge tx must abort with NOTHING
+	// committed: committing credits when every classifyFeedback would
+	// reject on arrival debits the balance for work that never ran (codex).
+	await testDb().db.update(organizations).set({ creditsRemaining: 10 }).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC1', { feedbackEnabled: 1 });
+	for (const i of [1, 2, 3]) {
+		await seedComment(`c${i}`, 'UC1', `text ${i}`, `2026-01-0${i}T00:00:00.000Z`);
+	}
+	const result = await generateFeedbackDigest('UC1', { force: true, deadline: Date.now() - 1 });
+	expect(result).toMatchObject({ status: 'deferred', reason: 'deadline' });
+	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(0);
+	const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+	expect(org?.creditsRemaining).toBe(10);
+	expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+	// The comments stay unprocessed — the next tick retries them.
+	expect(await testDb().db.select().from(comments).where(isNull(comments.feedbackDigestedAt)).all()).toHaveLength(3);
+});
+
+test('same-timestamp capped batches keep distinct digest rows — the window anchor never deletes a complete digest', async () => {
+	// 201 comments sharing one publishedAt: batch 2 and batch 3 both land on
+	// the descriptive window (T,T). The anchor exists to replace a FAILED or
+	// DEFERRED leftover, never a completed digest — otherwise backlog
+	// history silently loses an entire processed batch (codex).
+	await seedChannel('UC1', { feedbackEnabled: 1 });
+	for (let i = 0; i < 201; i++) {
+		await seedComment(`c${i}`, 'UC1', `t${i}`, '2026-02-01T00:00:00.000Z');
+		RESPONSES[`t${i}`] = { category: 'question', hasAbuse: false, claim: `theme ${i}` };
+	}
+	for (const expected of [100, 100, 1]) {
+		const result = await generateFeedbackDigest('UC1', { force: true });
+		expect(result).toMatchObject({ status: 'complete', commentsClassified: expected });
+	}
+	const digests = await testDb().db.select().from(feedbackDigests).orderBy(feedbackDigests.id).all();
+	expect(digests).toHaveLength(3);
+	expect(digests.every((d) => d.status === 'complete')).toBe(true);
+	expect(digests.reduce((sum, d) => sum + d.commentsClassified, 0)).toBe(201);
+});
+
+test('out-of-credit metered orgs defer without spending — and the deferral is recorded for the page', async () => {
 	await testDb().db.update(organizations).set({ creditsRemaining: 2 }).where(eq(organizations.id, 'org-1'));
 	await seedChannel('UC1', { feedbackEnabled: 1 });
 	for (const i of [1, 2, 3]) {
@@ -372,11 +412,33 @@ test('out-of-credit metered orgs defer without writing a partial digest', async 
 	}
 	const result = await generateFeedbackDigest('UC1', { force: true });
 	expect(result).toMatchObject({ status: 'deferred', reason: 'credits' });
-	expect(await testDb().db.select().from(feedbackDigests).all()).toHaveLength(0);
+	// A cron deferral that only logs leaves the owner staring at "No digest
+	// yet" while every tick repeats it — the deferral is channel-visible
+	// state, recorded as a row (codex).
+	const digests = await testDb().db.select().from(feedbackDigests).all();
+	expect(digests).toHaveLength(1);
+	expect(digests[0]).toMatchObject({ status: 'deferred', error: 'credits' });
 	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(0);
 	// Balance untouched — the deferral charged nothing.
 	const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
 	expect(org?.creditsRemaining).toBe(2);
+});
+
+test('a complete run clears the deferred row — it describes channel state, not history', async () => {
+	await testDb().db.update(organizations).set({ creditsRemaining: 2 }).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC1', { feedbackEnabled: 1 });
+	for (const i of [1, 2, 3]) {
+		await seedComment(`c${i}`, 'UC1', `text ${i}`, `2026-01-0${i}T00:00:00.000Z`);
+		RESPONSES[`text ${i}`] = { category: 'question', hasAbuse: false, claim: 'theme' };
+	}
+	expect((await generateFeedbackDigest('UC1', { force: true })).status).toBe('deferred');
+	// The owner tops up; the next tick completes and the stale deferral
+	// banner must not linger beside the real digest.
+	await testDb().db.update(organizations).set({ creditsRemaining: 10 }).where(eq(organizations.id, 'org-1'));
+	expect((await generateFeedbackDigest('UC1', { force: true })).status).toBe('complete');
+	const digests = await testDb().db.select().from(feedbackDigests).all();
+	expect(digests).toHaveLength(1);
+	expect(digests[0].status).toBe('complete');
 });
 
 test('unmetered (lifetime) orgs run on their BYOK key without any credit writes', async () => {

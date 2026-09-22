@@ -341,11 +341,35 @@ const TEST_CHECKOUT_CREDITS = 1;
  * smoke test exists to verify.
  */
 async function fulfillTestCheckout(session: Stripe.Checkout.Session, sessionId: string, orgId: string, paymentIntent: Stripe.PaymentIntent | null, charge: Stripe.Charge | null | undefined): Promise<CheckoutVerdict> {
-	if (session.mode !== 'payment') {
-		console.error(`stripe: test checkout ${sessionId} is not a one-time payment session`);
+	if (session.mode === 'payment') {
+		return fulfillCreditPurchase(session, sessionId, orgId, TEST_CHECKOUT_CREDITS, paymentIntent, charge);
+	}
+	const subscriptionId = stripeId(session.subscription);
+	if (session.mode !== 'subscription' || !subscriptionId) {
+		console.error(`stripe: test checkout ${sessionId} is neither a payment nor a subscription session`);
 		return 'rejected';
 	}
-	return fulfillCreditPurchase(session, sessionId, orgId, TEST_CHECKOUT_CREDITS, paymentIntent, charge);
+	// A recurring test price mints a REAL subscription — cancel it first so a
+	// failure below never leaves the smoke test billing monthly. The sub is
+	// tagged product:'test' at checkout creation, so the subscription and
+	// invoice pipelines ignore it entirely.
+	const subscription = asRecord(await getStripe().subscriptions.retrieve(subscriptionId));
+	if (!subscription) throw new Error(`stripe: test checkout ${sessionId} returned a malformed subscription ${subscriptionId}`);
+	if (subscription.status !== 'canceled') {
+		await getStripe().subscriptions.cancel(subscriptionId);
+		console.info(`stripe: test checkout ${sessionId} canceled smoke-test subscription ${subscriptionId}`);
+	}
+	const verdict = await fulfillCreditPurchase(session, sessionId, orgId, TEST_CHECKOUT_CREDITS, paymentIntent, charge);
+	// Subscription sessions carry no payment_intent — the card lives on the
+	// subscription's default_payment_method. Sync it so the smoke test still
+	// exercises the saved-payment-method path the payment-mode run covers.
+	const pmId = subscriptionDefaultPmId(subscription, sessionId);
+	if (!pmId) {
+		console.error(`stripe: test checkout ${sessionId} subscription ${subscriptionId} saved no default payment method`);
+	} else {
+		await applySubscriptionDefaultPm(orgId, pmId);
+	}
+	return verdict;
 }
 
 /**
@@ -1176,6 +1200,17 @@ async function applySubscriptionDefaultPm(orgId: string, pmId: string, maxEventC
  * fail (observed: five duplicate subscriptions minted while the webhook
  * endpoint 400ed). A subscription Stripe has forgotten reads as dead.
  */
+/**
+ * True when the subscription is the operator test product's — checkout.ts
+ * tags it product:'test' via subscription_data.metadata. The lookup is a
+ * Stripe fetch (the invoice payloads do not reliably carry the tag), so
+ * callers only pay it for subscriptions the org does not already track.
+ */
+async function isTestProductSubscription(subscriptionId: string): Promise<boolean> {
+	const sub = await fetchLiveSubscription(subscriptionId);
+	return optionalRecord(sub?.metadata)?.product === TEST_CHECKOUT_PRODUCT;
+}
+
 async function liveSubscriptionStatus(subscriptionId: string): Promise<string> {
 	const live = await fetchLiveSubscription(subscriptionId);
 	if (!live) return 'canceled';
@@ -1394,6 +1429,14 @@ async function handleInvoicePaid(event: Stripe.Event): Promise<void> {
 		console.error(`stripe: invoice.paid ${invoiceId} has no mapped organization`);
 		return;
 	}
+	// An untracked subscription billing the org's customer could be the
+	// recurring test product — check its metadata before the
+	// resubscribe/duplicate logic: a test invoice grants no period credits
+	// (fulfillTestCheckout handles the whole smoke test).
+	if (subscriptionId !== org.stripeSubscriptionId && (await isTestProductSubscription(subscriptionId))) {
+		console.info(`stripe: ignoring invoice.paid ${invoiceId} for test-product subscription ${subscriptionId}`);
+		return;
+	}
 	if (await isSupersededSubscription(org, subscriptionId, 'invoice.paid')) {
 		// An untracked subscription that is billing the org's customer anyway:
 		// cancel it and refund this paid invoice (paymentExpected — the invoice
@@ -1416,6 +1459,10 @@ async function handleInvoicePaymentFailed(event: Stripe.Event): Promise<void> {
 		console.error(`stripe: invoice.payment_failed ${stripeId(invoice.id) ?? event.id} has no mapped organization`);
 		return;
 	}
+	if (subscriptionId && subscriptionId !== org.stripeSubscriptionId && (await isTestProductSubscription(subscriptionId))) {
+		console.info(`stripe: ignoring invoice.payment_failed for test-product subscription ${subscriptionId}`);
+		return;
+	}
 	if (subscriptionId && (await isSupersededSubscription(org, subscriptionId, 'invoice.payment_failed'))) {
 		// No payment landed on this invoice — cancel the duplicate; nothing to refund.
 		await teardownDuplicateSubscription(subscriptionId, org.id, { paymentExpected: false });
@@ -1435,6 +1482,13 @@ async function handleSubscriptionEvent(event: Stripe.Event): Promise<void> {
 	const customerId = stripeId(subscription.customer);
 	const status = typeof subscription.status === 'string' ? subscription.status : undefined;
 	if (!subscriptionId || !status) throw new Error(`Stripe ${event.type} ${event.id} is missing subscription id or status`);
+	// The operator test product's subscription (recurring STRIPE_TEST_PRODUCT)
+	// is never the org's plan — ignore it before it can be tracked, torn
+	// down as a "duplicate", or mark the org past_due.
+	if (optionalRecord(subscription.metadata)?.product === TEST_CHECKOUT_PRODUCT) {
+		console.info(`stripe: ignoring ${event.type} for test-product subscription ${subscriptionId}`);
+		return;
+	}
 	const org = await findOrgForStripe(subscriptionId, customerId);
 	if (!org) {
 		console.error(`stripe: ${event.type} ${subscriptionId} has no mapped organization`);

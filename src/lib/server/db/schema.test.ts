@@ -570,9 +570,11 @@ describe('feedback_digests', () => {
 		expect(names.some((n) => /author|handle|avatar/.test(n))).toBe(false);
 	});
 
-	test('idempotency anchor and latest-per-channel index', async () => {
+	test('transient-row anchor and latest-per-channel index', async () => {
 		const { feedbackDigests } = await loadSchema();
-		expectIndex(feedbackDigests, 'feedback_digests_channel_window_unique', ['channel_id', 'window_start', 'window_end'], { unique: true });
+		// NOT unique on purpose: capped batches can share a descriptive
+		// window — the anchor de-dupes transient rows only.
+		expectIndex(feedbackDigests, 'feedback_digests_channel_window_idx', ['channel_id', 'window_start', 'window_end']);
 		expectIndex(feedbackDigests, 'feedback_digests_channel_created_idx', ['channel_id', 'created_at']);
 		expectCreatedAtDefault(feedbackDigests);
 	});

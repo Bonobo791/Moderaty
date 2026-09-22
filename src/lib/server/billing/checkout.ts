@@ -26,7 +26,6 @@ import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { organizations, stripeCheckoutAttempts, stripeLifetimeEntitlements, stripeLifetimeSlots } from '$lib/server/db/schema';
 import { bundleById, priceIdFor, type CreditBundle } from '$lib/server/stripe/bundles';
-import { expectedBundlePriceCents } from '$lib/credit-pricing';
 import { assertCreditsPurchasable, UNMETERED_CREDIT_PURCHASE_ERROR } from './ledger';
 import { isActiveSubscriptionStatus, planPriceEnv, validatePlanPrice, type PaidPlan } from './plans';
 import { getStripe } from '$lib/server/stripe/client';
@@ -94,11 +93,11 @@ export function checkoutRejectionMessage(error: unknown): string | null {
 	if (error.message !== 'STRIPE_TEST_PRODUCT is not configured' && error.message.startsWith('STRIPE_TEST_PRODUCT')) {
 		return 'The test checkout is misconfigured on this deployment — the exact reason is in the server log.';
 	}
-	// Same rule for the bundle catalog: validateBundlePrice/priceIdFor errors
-	// on a CONFIGURED STRIPE_PRICE_CREDITS_* var are permanent deployment
-	// faults, not transient failures — the advertised button would otherwise
-	// fail forever behind "please try again" (codex). The missing-var case
-	// stays a 500: the button only renders for configured bundles.
+	// Same rule for the bundle catalog: a STRIPE_PRICE_CREDITS_* var that is
+	// not a Price id is a permanent deployment fault, not a transient
+	// failure — the advertised button would otherwise fail forever behind
+	// "please try again" (codex). The missing-var case stays a 500: the
+	// button only renders for configured bundles.
 	if (!error.message.endsWith(' is not configured') && error.message.startsWith('STRIPE_PRICE_CREDITS_')) {
 		return 'This credit bundle is misconfigured on this deployment — the exact reason is in the server log.';
 	}
@@ -195,13 +194,11 @@ export async function createCreditCheckout(orgId: string, user: SessionUser, bun
 	// Unlimited plans never buy credits — rejected before an attempt row is
 	// planted (the lifetime org's scoring is already free; MOD-35).
 	await assertCreditsPurchasable(orgId);
-	// The configured Price is validated BEFORE the attempt row: a bundle
-	// Price that is inactive, non-USD, recurring, or charges a different
-	// amount than the advertised discount would either fail downstream or —
-	// worse — charge the buyer an amount the button never promised (codex).
-	// Same catalog-validation rule as the plan checkout's validatePlanPrice.
+	// The operator owns the Stripe catalog: the configured Price is passed
+	// through unchecked (only the env var's shape is verified locally).
+	// Stripe is the authority on whether the Price can be billed — an
+	// unusable one fails loudly at session creation, not here.
 	const priceId = priceIdFor(bundle);
-	validateBundlePrice(bundle, await getStripe().prices.retrieve(priceId));
 	return createCheckoutAttempt(orgId, bundle.id, attemptId, async (idempotencyKey) => {
 		const customer = await getOrCreateStripeCustomer(orgId, user);
 		return getStripe().checkout.sessions.create({
@@ -326,22 +323,6 @@ function configuredPlanPriceId(plan: PaidPlan): string {
 }
 
 /**
- * The configured bundle Price must charge exactly the catalog amount the
- * discount label is derived from — anything else means the button's
- * advertised cut is a lie about what the buyer pays (codex). Errors name
- * the env var, not the Stripe id, matching configuredPlanPriceId.
- */
-function validateBundlePrice(bundle: CreditBundle, price: { active?: unknown; currency?: unknown; type?: unknown; unit_amount?: unknown }): void {
-	if (price.active !== true) throw new Error(`${bundle.priceEnv} Stripe Price is inactive`);
-	if (price.currency !== 'usd') throw new Error(`${bundle.priceEnv} Stripe Price must be USD`);
-	if (price.type !== 'one_time') throw new Error(`${bundle.priceEnv} Stripe Price must be one-time`);
-	const expectedCents = expectedBundlePriceCents(bundle.credits);
-	if (price.unit_amount !== expectedCents) {
-		throw new Error(`${bundle.priceEnv} Stripe Price must charge ${expectedCents} cents — the ${bundle.label} bundle advertises its discount against that catalog amount`);
-	}
-}
-
-/**
  * Creates a Checkout Session for one of the hosted products. The application
  * owns the catalog: Stripe's configured Price is retrieved and checked before
  * any Checkout session is created, and fulfillment rechecks the metadata and
@@ -373,15 +354,16 @@ export async function createPlanCheckout(orgId: string, user: SessionUser, plan:
 }
 
 /**
- * Resolves STRIPE_TEST_PRODUCT to a Stripe Price id. The var accepts a Price
+ * Resolves STRIPE_TEST_PRODUCT to a Stripe Price. The var accepts a Price
  * id directly (`price_...`) or a Product id (`prod_...`) — the name says
  * product because that is what the dashboard hands the operator, but Checkout
  * needs a Price. A product resolves through its `default_price`; without one
  * it must have exactly one active price, or the configuration is ambiguous
- * and fails loudly. The resolved price is validated (active, one-time —
- * the test checkout runs in payment mode) before any session is created (I2).
+ * and fails loudly. Beyond resolution the operator owns the product's shape:
+ * no amount or activity checks — the only thing the app needs from the Price
+ * is whether the session runs in payment or subscription mode.
  */
-async function testProductPriceId(): Promise<string> {
+async function testProductPrice(): Promise<{ priceId: string; recurring: boolean }> {
 	const configured = env.STRIPE_TEST_PRODUCT;
 	if (!configured) throw new Error('STRIPE_TEST_PRODUCT is not configured');
 	try {
@@ -401,16 +383,7 @@ async function testProductPriceId(): Promise<string> {
 		}
 		if (!priceId.startsWith('price_')) throw new Error('STRIPE_TEST_PRODUCT must be a Stripe Product (prod_...) or Price (price_...) id');
 		const price = await getStripe().prices.retrieve(priceId);
-		if (price.active !== true) throw new Error('STRIPE_TEST_PRODUCT resolves to an inactive Stripe Price');
-		if (price.type !== 'one_time') throw new Error('STRIPE_TEST_PRODUCT resolves to a recurring Stripe Price — the test checkout runs in payment mode');
-		// A zero-amount (or amount-less, e.g. custom_unit_amount) Price completes
-		// Checkout as no_payment_required — fulfillCheckout rejects those, so the
-		// smoke test would end without ever touching the paid pipeline it exists
-		// to verify (codex/cubic). The test must charge real money.
-		if (typeof price.unit_amount !== 'number' || price.unit_amount <= 0) {
-			throw new Error('STRIPE_TEST_PRODUCT resolves to a zero-priced Stripe Price — the test checkout must charge a real payment');
-		}
-		return priceId;
+		return { priceId, recurring: price.type === 'recurring' };
 	} catch (error) {
 		if (error instanceof Error && error.message.startsWith('STRIPE_TEST_PRODUCT')) throw error;
 		// A prod_/price_ id that does not exist in the active Stripe mode is a
@@ -445,17 +418,23 @@ export async function createTestCheckout(orgId: string, user: SessionUser, attem
 	// The Stripe price resolves BEFORE the attempt row too — a failed lookup
 	// or invalid configuration must not leave a durable pending attempt that
 	// no session will ever claim (cubic/codeant).
-	const priceId = await testProductPriceId();
+	const { priceId, recurring } = await testProductPrice();
 	return createCheckoutAttempt(orgId, TEST_CHECKOUT_PRODUCT, attemptId, async (idempotencyKey) => {
 		const customer = await getOrCreateStripeCustomer(orgId, user);
+		const metadata = { org_id: orgId, product: TEST_CHECKOUT_PRODUCT };
 		return getStripe().checkout.sessions.create(
 			{
-				mode: 'payment',
+				mode: recurring ? 'subscription' : 'payment',
 				line_items: [{ price: priceId, quantity: 1 }],
 				customer,
 				client_reference_id: orgId,
-				metadata: { org_id: orgId, product: TEST_CHECKOUT_PRODUCT },
-				payment_intent_data: { setup_future_usage: 'off_session' },
+				metadata,
+				// Payment mode saves the card via the PI; subscription mode tags
+				// the minted subscription so the webhook never mistakes the
+				// smoke test for the org's hosted plan.
+				...(recurring
+					? { subscription_data: { metadata } }
+					: { payment_intent_data: { setup_future_usage: 'off_session' } }),
 				...checkoutRedirectUrls(appUrl)
 			},
 			{ idempotencyKey }

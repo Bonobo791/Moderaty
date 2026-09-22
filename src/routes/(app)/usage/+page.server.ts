@@ -23,7 +23,7 @@ import { env } from '$env/dynamic/private';
 import { and, eq, ne } from 'drizzle-orm';
 
 import { AUTO_TOPUP_DEFAULT_THRESHOLD } from '$lib/server/billing/autotopup';
-import { checkoutRejectionMessage, createCreditCheckout, createPlanCheckout, createTestCheckout, getOrCreateStripeCustomer } from '$lib/server/billing/checkout';
+import { checkoutRejectionMessage, createCreditCheckout, createPlanCheckout, createTestCheckout, getOrCreateStripeCustomer, isTestCheckoutOperator } from '$lib/server/billing/checkout';
 import { lifetimeSlotsRemaining } from '$lib/server/billing/entitlements';
 import { createMercadoPagoCreditCheckout } from '$lib/server/mercadopago/checkout';
 import { configuredMercadoPagoBundles } from '$lib/server/mercadopago/bundles';
@@ -70,7 +70,8 @@ function maintenanceData() {
 		autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
 		stripeConfigured: Boolean(env.STRIPE_SECRET_KEY),
 		plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) },
-		testProduct: Boolean(env.STRIPE_TEST_PRODUCT),
+		// No user in the maintenance payload — no operator, no test checkout.
+		testProduct: false,
 		hasOpenAiKey: false
 	};
 }
@@ -224,7 +225,10 @@ export const load: PageServerLoad = async ({ locals }) => {
 			hasOpenAiKey: org.plan === 'lifetime' ? usableOpenAiKey !== undefined : Boolean(org.openaiKeyEnc),
 			stripeConfigured: Boolean(env.STRIPE_SECRET_KEY),
 			plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) },
-			testProduct: Boolean(env.STRIPE_TEST_PRODUCT)
+			// Operator-only smoke test: the card never renders for other
+			// accounts — and the buyTest action re-checks the same predicate
+			// server-side, so a crafted POST gets a 403, not a session.
+			testProduct: Boolean(env.STRIPE_TEST_PRODUCT) && isTestCheckoutOperator(user)
 		};
 	} catch (error) {
 		// Deliberate HttpErrors (the missing-org 500 above) must pass through

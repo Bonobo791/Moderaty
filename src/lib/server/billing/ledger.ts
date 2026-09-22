@@ -28,7 +28,10 @@ export type CreditReason = 'consume' | 'purchase' | 'auto_topup' | 'refund' | 'd
 // 'refund' and 'dispute' are reversal refTypes anchored on the charge id —
 // DISTINCT anchors on purpose: a dispute reversal, a won-dispute restore, and
 // a later full refund each apply exactly once without blocking one another.
-export type CreditRefType = 'comment' | 'checkout_session' | 'payment_intent' | 'charge' | 'refund' | 'dispute' | 'admin';
+// 'feedback' anchors digest classification on the comment id — distinct from
+// the 'comment' moderation charge so a comment can carry one of each without
+// colliding on the (org_id, ref_type, ref_id) unique anchor.
+export type CreditRefType = 'comment' | 'feedback' | 'checkout_session' | 'payment_intent' | 'charge' | 'refund' | 'dispute' | 'admin';
 
 /** The DB surface the ledger needs; both `db` and a transaction satisfy it. */
 export type LedgerHandle = Pick<typeof db, 'insert' | 'update' | 'select' | 'delete'>;
@@ -233,14 +236,12 @@ export async function applyLedgerDelta(
 }
 
 /**
- * Charges one available credit for a comment.
+ * Charges one available credit anchored on (refType, refId).
  *
- * @param orgId - The organization whose credits are charged
- * @param commentId - The comment associated with the charge
- * @returns `true` if this call charged the comment, `false` if it was already charged or no credit was available
+ * @returns `true` if this call charged, `false` if it was already charged or no credit was available
  * @throws Error if the organization does not exist
  */
-export async function consumeCredit(handle: LedgerHandle, orgId: string, commentId: string): Promise<boolean> {
+async function consumeOneCredit(handle: LedgerHandle, orgId: string, refType: 'comment' | 'feedback', refId: string): Promise<boolean> {
 	return inLedgerTx(handle, async (tx) => {
 		// Existence check first: an unknown org is a data bug and must fail loudly,
 		// not silently stage comments free.
@@ -262,8 +263,8 @@ export async function consumeCredit(handle: LedgerHandle, orgId: string, comment
 				orgId,
 				delta: -1,
 				reason: 'consume',
-				refType: 'comment',
-				refId: commentId,
+				refType,
+				refId,
 				balanceAfter: null
 			})
 			.onConflictDoNothing({ target: UNIQUE_TARGET })
@@ -304,12 +305,40 @@ export async function consumeCredit(handle: LedgerHandle, orgId: string, comment
 			.where(and(eq(organizations.id, orgId), sql`${organizations.creditsRemaining} > 0`))
 			.returning({ balance: organizations.creditsRemaining });
 		if (updated.length === 0) {
-			await tx.delete(creditTransactions).where(and(eq(creditTransactions.orgId, orgId), eq(creditTransactions.refType, 'comment'), eq(creditTransactions.refId, commentId)));
+			await tx.delete(creditTransactions).where(and(eq(creditTransactions.orgId, orgId), eq(creditTransactions.refType, refType), eq(creditTransactions.refId, refId)));
 			return false;
 		}
 		await tx.update(creditTransactions).set({ balanceAfter: updated[0].balance }).where(eq(creditTransactions.id, inserted[0].id));
 		return true;
 	});
+}
+
+/**
+ * Charges one available credit for a comment.
+ *
+ * @param orgId - The organization whose credits are charged
+ * @param commentId - The comment associated with the charge
+ * @returns `true` if this call charged the comment, `false` if it was already charged or no credit was available
+ * @throws Error if the organization does not exist
+ */
+export async function consumeCredit(handle: LedgerHandle, orgId: string, commentId: string): Promise<boolean> {
+	return consumeOneCredit(handle, orgId, 'comment', commentId);
+}
+
+/**
+ * Charges one credit for a feedback-digest classification, anchored on the
+ * comment id under refType 'feedback' — the digest's charge is distinct
+ * from moderation's 'comment' charge so a comment can pay for both without
+ * the unique anchor colliding, and an overlap-safe digest re-run never
+ * double-charges a comment it already classified.
+ *
+ * @param orgId - The organization whose credits are charged
+ * @param commentId - The comment the digest classified
+ * @returns `true` if this call charged, `false` if already charged or no credit was available
+ * @throws Error if the organization does not exist
+ */
+export async function consumeFeedbackCredit(handle: LedgerHandle, orgId: string, commentId: string): Promise<boolean> {
+	return consumeOneCredit(handle, orgId, 'feedback', commentId);
 }
 
 export interface GrantMatch {
@@ -361,9 +390,11 @@ export interface UsageSummary {
 export async function usageSummary(orgId: string): Promise<UsageSummary> {
 	const remaining = await getCredits(orgId);
 	const monthStart = monthStartIso();
-	// "Used" means moderation consumption only: refund/dispute reversals are
-	// also negative-delta rows, but they are money leaving the ledger, not
-	// comments scored — summing every negative row would inflate the stats.
+	// "Used" means comment-processing consumption (moderation 'comment' and
+	// digest 'feedback' charges alike — both are spent credits): refund and
+	// dispute reversals are also negative-delta rows, but they are money
+	// leaving the ledger, not work performed — summing every negative row
+	// would inflate the stats.
 	// Aggregated in SQL over the (org_id, created_at) index: the usage page
 	// must stay bounded as the ledger grows, never fetch every consume row
 	// into memory just to add it up in JS.

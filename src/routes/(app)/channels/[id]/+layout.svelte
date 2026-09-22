@@ -27,6 +27,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		{ key: 'overview', label: 'Overview', href: base },
 		{ key: 'rules', label: 'Rules', href: `${base}/rules` },
 		{ key: 'queue', label: `Review queue (${data.pending})`, href: `${base}/queue` },
+		{ key: 'feedback', label: 'Feedback', href: `${base}/feedback` },
 		{ key: 'log', label: 'Audit log', href: `${base}/log` }
 	]);
 

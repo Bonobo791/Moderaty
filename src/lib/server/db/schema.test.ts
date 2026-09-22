@@ -366,6 +366,12 @@ describe('channels', () => {
 			tone_level: { notNull: false },
 			protect_lgbtqia: { notNull: true, hasDefault: true },
 			protect_women: { notNull: true, hasDefault: true },
+			feedback_enabled: { notNull: false },
+			feedback_cadence: { notNull: false },
+			feedback_categories: { notNull: false },
+			feedback_threshold: { notNull: false },
+			feedback_email: { notNull: false },
+			feedback_last_digest_at: { notNull: false },
 			created_at: { notNull: true, hasDefault: true }
 		});
 		expectCreatedAtDefault(channels);
@@ -421,6 +427,7 @@ describe('comments', () => {
 			decided_by: { notNull: true },
 			matched_rule_id: { notNull: false },
 			ai_score: { notNull: false },
+			feedback_digested_at: { notNull: false },
 			created_at: { notNull: true, hasDefault: true }
 		});
 		expectCreatedAtDefault(comments);
@@ -537,5 +544,75 @@ describe('contact_submissions', () => {
 		expect(getTableConfig(contactSubmissions).columns.find((c) => c.name === 'status')!.default).toBe('pending');
 		expectIndex(contactSubmissions, 'contact_submissions_status_email_idx', ['status', 'email']);
 		expectCreatedAtDefault(contactSubmissions);
+	});
+});
+
+describe('feedback_digests', () => {
+	test('table shape: window-keyed run record with no author columns', async () => {
+		const { feedbackDigests } = await loadSchema();
+		expect(getTableConfig(feedbackDigests).name).toBe('feedback_digests');
+		expectColumns(feedbackDigests, {
+			id: { notNull: true, primary: true, autoIncrement: true },
+			channel_id: { notNull: true },
+			window_start: { notNull: true },
+			window_end: { notNull: true },
+			status: { notNull: true },
+			comments_classified: { notNull: true, hasDefault: true },
+			comments_failed: { notNull: true, hasDefault: true },
+			pooled_count: { notNull: true, hasDefault: true },
+			credits_used: { notNull: false },
+			error: { notNull: false },
+			emailed_at: { notNull: false },
+			created_at: { notNull: true, hasDefault: true }
+		});
+		// Privacy contract: no author identity may be persisted on a digest.
+		const names = getTableConfig(feedbackDigests).columns.map((c) => c.name);
+		expect(names.some((n) => /author|handle|avatar/.test(n))).toBe(false);
+	});
+
+	test('idempotency anchor and latest-per-channel index', async () => {
+		const { feedbackDigests } = await loadSchema();
+		expectIndex(feedbackDigests, 'feedback_digests_channel_window_unique', ['channel_id', 'window_start', 'window_end'], { unique: true });
+		expectIndex(feedbackDigests, 'feedback_digests_channel_created_idx', ['channel_id', 'created_at']);
+		expectCreatedAtDefault(feedbackDigests);
+	});
+});
+
+describe('feedback_findings', () => {
+	test('table shape with cascade FK to the digest', async () => {
+		const { feedbackFindings, feedbackDigests } = await loadSchema();
+		expect(getTableConfig(feedbackFindings).name).toBe('feedback_findings');
+		expectColumns(feedbackFindings, {
+			id: { notNull: true, primary: true, autoIncrement: true },
+			digest_id: { notNull: true },
+			category: { notNull: true },
+			summary: { notNull: true },
+			supporter_count: { notNull: true },
+			created_at: { notNull: true, hasDefault: true }
+		});
+		expectForeignKey(feedbackFindings, 'digest_id', feedbackDigests, 'id', 'cascade');
+		expectIndex(feedbackFindings, 'feedback_findings_digest_idx', ['digest_id']);
+		expectCreatedAtDefault(feedbackFindings);
+	});
+});
+
+describe('finding_evidence', () => {
+	test('table shape: comment id + sanitized excerpt, cascade to finding', async () => {
+		const { findingEvidence, feedbackFindings } = await loadSchema();
+		expect(getTableConfig(findingEvidence).name).toBe('finding_evidence');
+		expectColumns(findingEvidence, {
+			id: { notNull: true, primary: true, autoIncrement: true },
+			finding_id: { notNull: true },
+			comment_id: { notNull: true },
+			sanitized_excerpt: { notNull: true },
+			has_abuse: { notNull: true, hasDefault: true },
+			created_at: { notNull: true, hasDefault: true }
+		});
+		expectForeignKey(findingEvidence, 'finding_id', feedbackFindings, 'id', 'cascade');
+		expectIndex(findingEvidence, 'finding_evidence_finding_idx', ['finding_id']);
+		// comment_id deliberately carries no FK — the reveal path re-checks
+		// tenancy itself and channel teardown is deletion.ts's job.
+		expect(getTableConfig(findingEvidence).foreignKeys).toHaveLength(1);
+		expectCreatedAtDefault(findingEvidence);
 	});
 });

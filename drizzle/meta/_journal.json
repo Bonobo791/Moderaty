@@ -274,6 +274,20 @@
       "when": 1789767786432,
       "tag": "0038_channel_run_health",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "6",
+      "when": 1790094896644,
+      "tag": "0039_feedback_digest",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "6",
+      "when": 1790104578257,
+      "tag": "0040_feedback_digested_marker",
+      "breakpoints": true
     }
   ]
 }

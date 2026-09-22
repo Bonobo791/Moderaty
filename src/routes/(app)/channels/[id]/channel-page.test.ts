@@ -132,16 +132,18 @@ test('a non-zero pending count links to the queue from the header status', () =>
 
 // ── layout: tab bar ────────────────────────────────────────────────────
 
-test('the tab bar is a tablist with all four section links and the queue count in the label', () => {
+test('the tab bar is a tablist with all five section links and the queue count in the label', () => {
 	const body = renderLayout({ ...LAYOUT_DATA, pending: 3 });
 	expect(body).toContain('role="tablist"');
 	expect(body).toContain('href="/channels/UC1"');
 	expect(body).toContain('href="/channels/UC1/rules"');
 	expect(body).toContain('href="/channels/UC1/queue"');
+	expect(body).toContain('href="/channels/UC1/feedback"');
 	expect(body).toContain('href="/channels/UC1/log"');
 	expect(body).toContain('Review queue (3)');
 	expect(body).toContain('Overview');
 	expect(body).toContain('Rules');
+	expect(body).toContain('Feedback');
 	expect(body).toContain('Audit log');
 });
 
@@ -149,6 +151,7 @@ test.each([
 	{ tab: 'overview', href: '/channels/UC1"', selected: 'aria-selected="true"' },
 	{ tab: 'rules', href: '/channels/UC1/rules', selected: 'aria-selected="true"' },
 	{ tab: 'queue', href: '/channels/UC1/queue', selected: 'aria-selected="true"' },
+	{ tab: 'feedback', href: '/channels/UC1/feedback', selected: 'aria-selected="true"' },
 	{ tab: 'log', href: '/channels/UC1/log', selected: 'aria-selected="true"' }
 ])('the "$tab" tab is aria-selected when active', ({ tab, href }) => {
 	const body = renderLayout({ ...LAYOUT_DATA, tab });
@@ -156,7 +159,7 @@ test.each([
 	expect(body.match(/aria-selected="true"/g)).toHaveLength(1);
 	expect(body).toContain(`href="${href}`);
 	// Inactive tabs are explicitly unselected (tablist semantics).
-	expect(body.match(/aria-selected="false"/g)).toHaveLength(3);
+	expect(body.match(/aria-selected="false"/g)).toHaveLength(4);
 });
 
 test('the layout renders its child page', () => {

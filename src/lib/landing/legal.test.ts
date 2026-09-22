@@ -39,13 +39,14 @@ function readRoute(slug: string, file: string): string {
 
 describe('LEGAL_DOCS', () => {
 	it('material Terms changes always ship under a NEW legal version', () => {
-		// 1.10 was the PolyForm license swap; 1.11 is the lifetime-BYOK
-		// requirement — §6.1(c) now makes the buyer's own OpenAI key mandatory
-		// for lifetime scoring — exactly the "material legal-doc change" that
-		// must bump LEGAL_VERSION so the re-consent gate (hasCurrentConsent)
-		// routes every user back through /consent. Never let legal changes
-		// ride along under an old version.
-		expect(LEGAL_VERSION).toBe('1.11');
+		// 1.10 was the PolyForm license swap; 1.11 was the lifetime-BYOK
+		// requirement; 1.12 is the digest credit disclosure — §6.1(d) now
+		// states an enabled feedback digest consumes a credit per classified
+		// comment — exactly the "material legal-doc change" that must bump
+		// LEGAL_VERSION so the re-consent gate (hasCurrentConsent) routes
+		// every user back through /consent. Never let legal changes ride
+		// along under an old version.
+		expect(LEGAL_VERSION).toBe('1.12');
 	});
 
 	it('lists exactly the three published legal documents', () => {
@@ -528,6 +529,27 @@ describe('AI-cost claims match implementation', () => {
 				expect(text, `${name} still names AI internals: ${pattern}`).not.toMatch(pattern);
 			}
 		}
+	});
+});
+
+// LEGAL_VERSION 1.12: feedback digests classify stored comments and a
+// metered org pays one credit per classification — on top of the comment's
+// live-run moderation charge (codex P1 on PR #149). The billing clause must
+// disclose that spend; the §2 Credits definition must cover AI scoring
+// beyond moderation.
+describe('digest credit spend is disclosed in the Terms', () => {
+	it('Terms §6.1(d) discloses that an enabled feedback digest consumes credits', () => {
+		const terms = readComponent('terms');
+		const s61 = terms.slice(terms.indexOf('<strong>6.1</strong>'));
+		const clause = s61.slice(0, s61.indexOf('</p>'));
+		const d = clause.slice(clause.indexOf('(d)'));
+		expect(d).toMatch(/feedback digest/i);
+	});
+
+	it('the Credits definition covers AI-scored comments, not only moderation', () => {
+		const terms = readComponent('terms');
+		const def = terms.slice(terms.indexOf('<strong>Credits:</strong>'));
+		expect(def.slice(0, def.indexOf('</p>'))).toMatch(/AI-scored comments/i);
 	});
 });
 

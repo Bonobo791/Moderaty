@@ -351,10 +351,35 @@ describe('usage/success test-checkout branch', () => {
 		expect(data.pending).toBe(true);
 	});
 
+	test('an unpaid test session keeps the smoke-test copy — pending, not buyer copy', async () => {
+		// A delayed-notification payment method redirects with
+		// payment_status 'unpaid'; the test flag must be decided BEFORE the
+		// status branch or the page renders ordinary buyer copy for a
+		// smoke-test payment still awaiting webhook confirmation (codex).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.sessionsRetrieve.mockResolvedValue(paidTestSession({ payment_status: 'unpaid' }));
+
+		const data = (await loadWith('cs_1')) as { granted: boolean; pending: boolean; failed: boolean; test: boolean };
+
+		expect(data.test).toBe(true);
+		expect(data.pending).toBe(true);
+		expect(data.granted).toBe(false);
+		expect(data.failed).toBe(false);
+	});
+
 	test('a test checkout refunded by the webhook shows the refunded state', async () => {
 		// An unmetered org's paid test exercises the ungrantable→refund path —
-		// observed from the charge state, never by self-fulfilling.
+		// observed from the charge state, never by self-fulfilling. The
+		// processed event row is the webhook's own proof the refund came from
+		// the automatic path.
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'lifetime' });
+		await testDb().db.insert(stripeEvents).values({
+			eventId: 'evt_t',
+			eventType: 'checkout.session.completed',
+			objectId: 'cs_1',
+			objectType: 'checkout.session',
+			processedAt: '2026-01-01T00:00:00.000Z'
+		});
 		mocks.sessionsRetrieve.mockResolvedValue(
 			paidTestSession({ payment_intent: { id: 'pi_t', latest_charge: { id: 'ch_t', amount: 100, amount_refunded: 100, refunded: true }, payment_method: null } })
 		);
@@ -363,6 +388,67 @@ describe('usage/success test-checkout branch', () => {
 
 		expect(data.test).toBe(true);
 		expect(data.refunded).toBe(true);
+		expect(data.granted).toBe(false);
+		expect(data.pending).toBe(false);
+	});
+
+	test('a refunded charge with no processed event stays pending — the refund must be webhook-attributed', async () => {
+		// A manual dashboard refund is a real outcome but proves nothing about
+		// the pipeline the smoke test exists to verify — without a processed
+		// delivery the page waits rather than claim the automatic path.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', plan: 'lifetime' });
+		mocks.sessionsRetrieve.mockResolvedValue(
+			paidTestSession({ payment_intent: { id: 'pi_t', latest_charge: { id: 'ch_t', amount: 100, amount_refunded: 100, refunded: true }, payment_method: null } })
+		);
+
+		const data = (await loadWith('cs_1')) as { granted: boolean; refunded: boolean; pending: boolean; test: boolean };
+
+		expect(data.test).toBe(true);
+		expect(data.refunded).toBe(false);
+		expect(data.granted).toBe(false);
+		expect(data.pending).toBe(true);
+	});
+
+	test('a granted test checkout whose charge was later refunded shows refunded — terminal money state beats the grant', async () => {
+		// Grant + processed event both exist, but the charge was refunded
+		// afterwards (operator refund, dispute loss): reporting 'granted'
+		// would certify a pipeline whose money went back (coderabbit).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.sessionsRetrieve.mockResolvedValue(paidTestSession());
+		expect(
+			await handleStripeEvent({ id: 'evt_t', type: 'checkout.session.completed', data: { object: { id: 'cs_1' } } } as never)
+		).toBe(true);
+		expect(await getCredits('org-1')).toBe(1);
+		// The refund lands AFTER fulfillment — the next retrieve shows it.
+		mocks.sessionsRetrieve.mockResolvedValue(
+			paidTestSession({ payment_intent: { id: 'pi_t', latest_charge: { id: 'ch_t', amount: 100, amount_refunded: 100, refunded: true }, payment_method: null } })
+		);
+
+		const data = (await loadWith('cs_1')) as { granted: boolean; refunded: boolean; pending: boolean; test: boolean };
+
+		expect(data.test).toBe(true);
+		expect(data.refunded).toBe(true);
+		expect(data.granted).toBe(false);
+		expect(data.pending).toBe(false);
+	});
+
+	test('a granted test checkout with a disputed charge is a failed smoke test', async () => {
+		// The money outcome is unresolved — neither granted nor refunded is
+		// the truth; the page must fail rather than claim a pass (coderabbit).
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		mocks.sessionsRetrieve.mockResolvedValue(paidTestSession());
+		expect(
+			await handleStripeEvent({ id: 'evt_t', type: 'checkout.session.completed', data: { object: { id: 'cs_1' } } } as never)
+		).toBe(true);
+		// The dispute lands after fulfillment — re-fetch shows it disputed.
+		mocks.sessionsRetrieve.mockResolvedValue(
+			paidTestSession({ payment_intent: { id: 'pi_t', latest_charge: { id: 'ch_t', amount: 100, amount_refunded: 0, refunded: false, disputed: true }, payment_method: null } })
+		);
+
+		const data = (await loadWith('cs_1')) as { granted: boolean; failed: boolean; pending: boolean; test: boolean };
+
+		expect(data.test).toBe(true);
+		expect(data.failed).toBe(true);
 		expect(data.granted).toBe(false);
 		expect(data.pending).toBe(false);
 	});

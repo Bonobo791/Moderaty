@@ -36,7 +36,7 @@ export const TICKS_SELF_HOSTED_DETAILED = [
 
 export const TICKS_HOSTED = [
 	'Auto-renews monthly, 100 comments included',
-	'Top-ups in bundles of 100, 500, or 2,000 comments',
+	'Top-ups in bundles of 100, 500, or 2,000 comments, up to 41% off',
 	'Automatic top-up is opt-in',
 	'Same rules, same model, same audit log'
 ];
@@ -45,7 +45,7 @@ export const TICKS_HOSTED_DETAILED = [
 	'Everything in self-hosted',
 	'We run it, patch it, and keep it awake',
 	'One-click YouTube OAuth',
-	'100 comments a month; top up with comment bundles when you run out',
+	'100 comments a month; top up with comment bundles when you run out, up to 41% off',
 	'Automatic top-up is opt-in, off by default'
 ];
 

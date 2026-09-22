@@ -24,6 +24,16 @@ describe('hosted cost calculator', () => {
 		expect(hostedCostUsd(110)).toBe(5.5);
 	});
 
+	test('top-up comments price progressively through the volume bands', () => {
+		// Each tranche past the included 100 pays its own band's rate — the
+		// first 100 top-up comments at full price, the next 400 at the
+		// 500-bundle rate (23% off), the rest at the 2,000-bundle rate
+		// (41% off). Matches the cuts the Usage page's buy buttons advertise.
+		expect(hostedCostUsd(200)).toBe(10); // 100 × $0.05
+		expect(hostedCostUsd(600)).toBeCloseTo(25.4, 5); // + 400 × $0.0385
+		expect(hostedCostUsd(2100)).toBeCloseTo(69.65, 5); // + 1500 × $0.0295
+	});
+
 	test('rejects fractional, negative, unsafe, and unbounded inputs', () => {
 		for (const value of [-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1, 10_000_001]) {
 			expect(() => validateCommentCount(value)).toThrow();
@@ -31,14 +41,14 @@ describe('hosted cost calculator', () => {
 	});
 
 	test('returns a three-month average and a conservative low/high range', () => {
-		expect(forecastCost([100, 200, 300])).toEqual({
-		averageComments: 200,
-		averageCostUsd: 10,
-		lowComments: 100,
-		lowCostUsd: 5,
-		highComments: 300,
-		highCostUsd: 15
-	});
+		const forecast = forecastCost([100, 200, 300]);
+		expect(forecast.averageComments).toBe(200);
+		expect(forecast.lowComments).toBe(100);
+		expect(forecast.highComments).toBe(300);
+		expect(forecast.lowCostUsd).toBe(5);
+		expect(forecast.averageCostUsd).toBe(10);
+		// 300 comments = $5 plan + 100 top-up at $0.05 + 100 at 23% off.
+		expect(forecast.highCostUsd).toBeCloseTo(13.85, 5);
 	});
 });
 

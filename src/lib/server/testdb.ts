@@ -187,6 +187,12 @@ export async function createTestDb(): Promise<TestDb> {
 			tone_level INTEGER,
 			protect_lgbtqia INTEGER NOT NULL DEFAULT 0,
 			protect_women INTEGER NOT NULL DEFAULT 0,
+			feedback_enabled INTEGER,
+			feedback_cadence TEXT,
+			feedback_categories TEXT,
+			feedback_threshold INTEGER,
+			feedback_email INTEGER,
+			feedback_last_digest_at TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
 			CONSTRAINT channels_org_requires_owner CHECK (org_id IS NOT NULL OR user_id IS NULL)
 		)`,
@@ -444,7 +450,41 @@ export async function createTestDb(): Promise<TestDb> {
 			expires_at TEXT NOT NULL,
 			accepted_by TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-		)`
+		)`,
+		`CREATE TABLE feedback_digests (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			channel_id TEXT NOT NULL,
+			window_start TEXT NOT NULL,
+			window_end TEXT NOT NULL,
+			status TEXT NOT NULL,
+			comments_classified INTEGER NOT NULL DEFAULT 0,
+			comments_failed INTEGER NOT NULL DEFAULT 0,
+			pooled_count INTEGER NOT NULL DEFAULT 0,
+			credits_used INTEGER,
+			error TEXT,
+			emailed_at TEXT,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`,
+		`CREATE UNIQUE INDEX feedback_digests_channel_window_unique ON feedback_digests (channel_id, window_start, window_end)`,
+		`CREATE INDEX feedback_digests_channel_created_idx ON feedback_digests (channel_id, created_at)`,
+		`CREATE TABLE feedback_findings (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			digest_id INTEGER NOT NULL REFERENCES feedback_digests(id) ON DELETE CASCADE,
+			category TEXT NOT NULL,
+			summary TEXT NOT NULL,
+			supporter_count INTEGER NOT NULL,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`,
+		`CREATE INDEX feedback_findings_digest_idx ON feedback_findings (digest_id)`,
+		`CREATE TABLE finding_evidence (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			finding_id INTEGER NOT NULL REFERENCES feedback_findings(id) ON DELETE CASCADE,
+			comment_id TEXT NOT NULL,
+			sanitized_excerpt TEXT NOT NULL,
+			has_abuse INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`,
+		`CREATE INDEX finding_evidence_finding_idx ON finding_evidence (finding_id)`
 	]);
 	return { db: drizzle(client, { schema }), client };
 }

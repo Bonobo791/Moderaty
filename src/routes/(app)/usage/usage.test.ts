@@ -23,6 +23,7 @@ import { applyLedgerDelta, consumeCredit } from '$lib/server/billing/ledger';
 import { claimLifetimeSlot } from '$lib/server/billing/entitlements';
 import { LIFETIME_SLOT_LIMIT } from '$lib/server/billing/plans';
 import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
+import { configuredBundles } from '$lib/server/stripe/bundles';
 
 const mocks = vi.hoisted(() => ({
 	sessionsCreate: vi.fn(),
@@ -284,6 +285,18 @@ describe('usage load', () => {
 		expect(stale).not.toContain('name="enabled"');
 		expect(stale).not.toContain('name="threshold"');
 		expect(stale).not.toContain('Enable auto top-up');
+	});
+
+	test('the buy credits card advertises the larger bundles\' bulk discount', () => {
+		// The percentage lives in the CREDIT_BUNDLES catalog — rendering the
+		// real configured bundles pins both the values and the button copy.
+		// (Svelte's {#if} anchors split the text node, so strip comments.)
+		const body = render(Page, {
+			props: { data: { ...usagePageData(), bundles: configuredBundles() }, form: null } as never
+		}).body.replace(/<!--[\s\S]*?-->/g, '');
+		expect(body).toContain('Buy 100 comments</button>');
+		expect(body).toContain('Buy 500 comments · 23% off');
+		expect(body).toContain('Buy 2,000 comments · 41% off');
 	});
 
 	test('the Plans card shows the claimed count, a sold-out state at zero, and an owned state for lifetime orgs', async () => {

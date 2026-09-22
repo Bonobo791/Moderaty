@@ -220,7 +220,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 					<form method="POST" action="?/buy" use:enhance={submitting}>
 						<input type="hidden" name="bundle" value={bundle.id} />
 						<input type="hidden" name="attempt_id" value={checkoutAttempts[bundle.id] ?? ''} />
-						<button class="btn primary" type="submit" disabled={pending}>Buy {bundle.label}</button>
+						<button class="btn primary" type="submit" disabled={pending}>Buy {bundle.label}{#if bundle.discountPercent}{' · '}{bundle.discountPercent}% off{/if}</button>
 					</form>
 				{/each}
 			</div>

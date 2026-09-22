@@ -58,7 +58,6 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		text-align: center;
 	}
 	.deleted-card .btn {
-		display: inline-block;
 		margin-top: 16px;
 	}
 </style>

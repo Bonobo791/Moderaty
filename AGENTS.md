@@ -69,7 +69,9 @@ Day-to-day work commits directly to `dev`; pull requests are optional
   it — not even when checks are green and review findings are resolved.
   Open the PR, triage bot findings, then stop and report; merging is the
   human's call. Resume with `git checkout dev && git pull`.
-- **Never** push to `main` directly, never `--force`.
+- **Never `git push` — commits only.** The agent's job ends at a green
+  local commit; pushing (even `dev`) is the human's/sync step's call.
+  Never push to `main` directly, never `--force`.
   `dev → main` is the human's batched release, not an executor step.
 - **Every review finding (human or bot) gets a failing test BEFORE its fix.**
   Add the reproducing test, watch it fail, then fix, watch it pass, commit

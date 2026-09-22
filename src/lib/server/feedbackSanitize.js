@@ -14,11 +14,12 @@
 // Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 // Deterministic concealment for digest evidence (MOD-68). Redaction NEVER
-// relies on the LLM: a lexicon pass masks known abusive spans, the
-// classifier's hasAbuse flag forces full concealment when the lexicon can't
-// pinpoint the abuse, and a thin-content rule conceals comments that are
-// mostly mask anyway. The default render path only ever sees this output —
-// raw text requires the explicit per-comment reveal action.
+// relies on the LLM: a lexicon pass masks known abusive spans to a fixpoint
+// (one mask can bridge a multi-word insult back into view — "shut fuck up"
+// leaves "shut █ up"), the classifier's hasAbuse flag conceals the comment
+// outright — the lexicon can never prove it caught everything the
+// classifier saw — and a thin-content rule conceals comments that are
+// mostly mask anyway. Rendered digests only ever see this output.
 
 import { ABUSE_TERMS } from './feedbackLexicon.js';
 
@@ -26,7 +27,7 @@ import { ABUSE_TERMS } from './feedbackLexicon.js';
 export const REDACTION = '█████';
 
 /** Placeholder for evidence whose wording cannot be shown safely. */
-export const CONCEALED_MESSAGE = '[concealed — view original]';
+export const CONCEALED_MESSAGE = '[concealed]';
 
 // Common leetspeak/lookalike substitutions folded onto their base letter so
 // "f*ck" variants and "5h1t" still match the lexicon. '*' stays literal so
@@ -106,32 +107,43 @@ const ABUSE_RE = new RegExp(
  */
 export function redactAbuse(text) {
 	if (!text) return { text: '', redacted: 0 };
-	const { norm, map } = normalizeWithMap(text);
-	ABUSE_RE.lastIndex = 0;
-	/** @type {Array<[number, number]>} half-open spans in original offsets */
-	const spans = [];
-	for (let m = ABUSE_RE.exec(norm); m; m = ABUSE_RE.exec(norm)) {
-		const start = map[m.index];
-		const end = map[m.index + m[0].length - 1] + 1;
-		spans.push([start, end]);
+	// Iterate to a fixpoint: a mask normalizes to spaces, so masking one
+	// span can bridge the halves of a multi-word term back into a match
+	// ("shut fuck up" → "shut █ up" still matches "shut up"). Each pass
+	// removes every current hit — a match always contains letters that
+	// become spaces — so the loop terminates. The marker itself can never
+	// match.
+	let current = text;
+	let redacted = 0;
+	for (;;) {
+		const { norm, map } = normalizeWithMap(current);
+		ABUSE_RE.lastIndex = 0;
+		/** @type {Array<[number, number]>} half-open spans in original offsets */
+		const spans = [];
+		for (let m = ABUSE_RE.exec(norm); m; m = ABUSE_RE.exec(norm)) {
+			const start = map[m.index];
+			const end = map[m.index + m[0].length - 1] + 1;
+			spans.push([start, end]);
+		}
+		if (!spans.length) break;
+		spans.sort((a, b) => a[0] - b[0]);
+		const merged = [spans[0]];
+		for (const span of spans.slice(1)) {
+			const last = merged[merged.length - 1];
+			if (span[0] <= last[1]) last[1] = Math.max(last[1], span[1]);
+			else merged.push(span);
+		}
+		let out = '';
+		let cursor = 0;
+		for (const [start, end] of merged) {
+			out += current.slice(cursor, start) + REDACTION;
+			cursor = end;
+		}
+		out += current.slice(cursor);
+		current = out.replace(new RegExp(`(${REDACTION})(\\s*${REDACTION})+`, 'g'), REDACTION);
+		redacted += merged.length;
 	}
-	if (!spans.length) return { text, redacted: 0 };
-	spans.sort((a, b) => a[0] - b[0]);
-	const merged = [spans[0]];
-	for (const span of spans.slice(1)) {
-		const last = merged[merged.length - 1];
-		if (span[0] <= last[1]) last[1] = Math.max(last[1], span[1]);
-		else merged.push(span);
-	}
-	let out = '';
-	let cursor = 0;
-	for (const [start, end] of merged) {
-		out += text.slice(cursor, start) + REDACTION;
-		cursor = end;
-	}
-	out += text.slice(cursor);
-	out = out.replace(new RegExp(`(${REDACTION})(\\s*${REDACTION})+`, 'g'), REDACTION);
-	return { text: out, redacted: merged.length };
+	return { text: current, redacted };
 }
 
 /**
@@ -154,19 +166,20 @@ function tooThin(redactedText) {
  * Produces the safe-to-render form of an evidence comment.
  *
  * @param {string} text - the raw comment text (untrusted).
- * @param {{ hasAbuse?: boolean }} [flags] - classifier signal: when true and
- *   the lexicon found nothing to mask, the abuse is somewhere the lexicon
- *   can't see — conceal the whole comment rather than risk a partial leak.
+ * @param {{ hasAbuse?: boolean }} [flags] - classifier signal: when true the
+ *   comment conceals outright. A lexicon hit proves abuse was there, but a
+ *   partial mask can leave unlisted wording readable — the lexicon can
+ *   never prove it caught everything the classifier saw. The sanitized
+ *   claim still carries the useful content into the finding summary.
  * @returns {{ text: string, concealed: boolean, redacted: number }} either
  *   masked text or the CONCEALED_MESSAGE placeholder.
  */
 export function concealEvidence(text, { hasAbuse } = {}) {
 	const { text: masked, redacted } = redactAbuse(text);
-	// hasAbuse with nothing masked means the insult is one the lexicon can't
-	// see — conceal everything. Masking that leaves under two real words is
-	// residue, not evidence — conceal it too. A short-but-clean comment
-	// (nothing masked, no flag) still renders.
-	if ((hasAbuse && redacted === 0) || (redacted > 0 && tooThin(masked))) {
+	// Masking that leaves under two real words is residue, not evidence —
+	// conceal it too. A short-but-clean comment (nothing masked, no flag)
+	// still renders.
+	if (hasAbuse || (redacted > 0 && tooThin(masked))) {
 		return { text: CONCEALED_MESSAGE, concealed: true, redacted };
 	}
 	return { text: masked, concealed: false, redacted };

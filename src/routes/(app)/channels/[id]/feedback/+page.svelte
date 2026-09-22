@@ -20,10 +20,16 @@
 	 excerpt only; abusive wording never reaches this page (MOD-71/72). -->
 
 <script lang="ts">
+	import { enhance } from '$app/forms';
+	import EmptyState from '$lib/EmptyState.svelte';
 	import Skeleton from '$lib/Skeleton.svelte';
 	import { relativeTime } from '$lib/relative-time';
 
 	let { data, form } = $props();
+
+	// In-flight guard for Generate now — a double-submit would race the
+	// lease claim into a spurious 409 and could spend twice before it lands.
+	let generating = $state(false);
 
 	const CATEGORY_LABELS: Record<string, string> = {
 		question: 'Recurring questions',
@@ -87,14 +93,32 @@
 	{:else}
 		{#if newestFailed}
 			<div class="error-box" role="alert">
-				<strong>Latest digest run failed</strong> — it will retry on the next cron tick. The digest below is the last
-				complete one{data.latest ? ` (window ended ${relativeTime(data.latest.windowEnd)})` : ''}.
+				<strong>Latest digest run failed</strong> —
+				{data.settings.cadence === 'manual'
+					? 'use Generate now to retry.'
+					: 'it will retry on the next cron tick.'}
+				{data.latest
+					? `The digest below is the last complete one (window ended ${relativeTime(data.latest.windowEnd)}).`
+					: 'No complete digest exists yet.'}
 			</div>
 		{/if}
 
 		<div class="digest-head">
-			<form class="inline" method="POST" action="?/generate">
-				<button class="btn small">Generate now</button>
+			<form
+				class="inline"
+				method="POST"
+				action="?/generate"
+				use:enhance={() => {
+					generating = true;
+					return async ({ update }) => {
+						await update();
+						generating = false;
+					};
+				}}
+			>
+				<button class="btn small" disabled={generating}>
+					{generating ? 'Generating…' : 'Generate now'}
+				</button>
 			</form>
 			{#if data.latest}
 				<p class="muted">
@@ -134,12 +158,18 @@
 				</p>
 			{/if}
 			{#if !grouped.length && !data.latest.pooledCount}
-				<p class="digest-empty">No recurring feedback this window — nothing met the evidence threshold.</p>
+				<EmptyState
+					title="No recurring feedback this window"
+					hint="Nothing met the minimum-comments threshold — below-threshold feedback would show as the pooled count."
+				/>
 			{/if}
 		{:else}
-			<p class="digest-empty">
-				No digest yet. The next cron tick generates one automatically — or use <strong>Generate now</strong>.
-			</p>
+			<EmptyState
+				title="No digest yet"
+				hint={data.settings.cadence === 'manual'
+					? 'Manual cadence — use Generate now to run the first one.'
+					: 'The next cron tick generates one automatically — or use Generate now.'}
+			/>
 		{/if}
 	{/if}
 
@@ -168,9 +198,13 @@
 				{/each}
 			</fieldset>
 			<label class="field">
-				<span>Minimum supporters before a theme becomes a finding</span>
+				<span>Minimum comments reporting a theme before it becomes a finding</span>
 				<input type="number" name="threshold" min="2" max="10" value={data.settings.threshold} />
 			</label>
+			<p class="muted settings-note">
+				On metered plans each comment the digest processes spends one credit — the run defers when
+				credits run out.
+			</p>
 			<button class="btn small">Save settings</button>
 		</form>
 	</section>
@@ -238,11 +272,9 @@
 	.pooled {
 		margin: 20px 0 0;
 	}
-	.digest-empty {
+	.settings-note {
 		margin: 0;
-		padding: 40px 0;
-		font-size: 14px;
-		color: var(--text-2);
+		font-size: 13px;
 	}
 	.card {
 		border: 1px solid var(--line);

@@ -427,6 +427,7 @@ describe('comments', () => {
 			decided_by: { notNull: true },
 			matched_rule_id: { notNull: false },
 			ai_score: { notNull: false },
+			feedback_digested_at: { notNull: false },
 			created_at: { notNull: true, hasDefault: true }
 		});
 		expectCreatedAtDefault(comments);

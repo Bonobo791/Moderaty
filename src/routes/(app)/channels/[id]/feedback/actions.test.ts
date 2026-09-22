@@ -36,6 +36,10 @@ setupTestDb(['finding_evidence', 'feedback_findings', 'feedback_digests', 'comme
 
 const OWNER = TEST_OWNER;
 
+// Distinct created_at per seeded row — identical defaults make the page's
+// newest-first ordering rely on a tie-break that isn't there (cubic).
+let digestSeq = 0;
+
 beforeEach(() => {
 	mocks.generateFeedbackDigest.mockReset();
 });
@@ -57,6 +61,7 @@ async function seedDigest(channelId: string, over: Record<string, unknown> = {})
 			windowEnd: '2026-01-07T00:00:00.000Z',
 			status: 'complete',
 			commentsClassified: 6,
+			createdAt: `2026-01-01T00:${String(digestSeq++ % 60).padStart(2, '0')}:00.000Z`,
 			...over
 		})
 		.returning({ id: feedbackDigests.id });
@@ -68,7 +73,7 @@ test('load returns the newest complete digest with findings and sanitized eviden
 	const digestId = await seedDigest('UC1');
 	const [finding] = await testDb().db
 		.insert(feedbackFindings)
-		.values({ digestId, category: 'question', summary: '3 viewers asked: when is the next video', supporterCount: 3 })
+		.values({ digestId, category: 'question', summary: '3 comments asked: when is the next video', supporterCount: 3 })
 		.returning({ id: feedbackFindings.id });
 	await testDb().db.insert(findingEvidence).values({
 		findingId: finding.id,
@@ -84,7 +89,7 @@ test('load returns the newest complete digest with findings and sanitized eviden
 	};
 	expect(data.latest?.id).toBe(digestId);
 	expect(data.findings).toHaveLength(1);
-	expect(data.findings[0].summary).toBe('3 viewers asked: when is the next video');
+	expect(data.findings[0].summary).toBe('3 comments asked: when is the next video');
 	expect(data.findings[0].evidence[0].sanitizedExcerpt).toBe('when is the next video');
 	expect(data.settings).toMatchObject({ enabled: true, categories: ['question', 'criticism', 'correction', 'request'] });
 	// The tenancy/secret columns must never reach the browser.
@@ -101,6 +106,19 @@ test('load surfaces a newer failed digest alongside the last complete one', asyn
 	expect(data.latest?.status).toBe('complete');
 });
 
+test('load still finds the last complete digest when newer failed rows fill the history', async () => {
+	// The 10-row history list is capped — a streak of failures must not bury
+	// the last complete digest and make the page claim none exists (codex).
+	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1 });
+	const completeId = await seedDigest('UC1');
+	for (let i = 0; i < 11; i++) {
+		await seedDigest('UC1', { status: 'failed', error: 'scoring', windowStart: `2026-02-${String(i + 1).padStart(2, '0')}T00:00:00.000Z`, windowEnd: `2026-03-${String(i + 1).padStart(2, '0')}T00:00:00.000Z` });
+	}
+
+	const data = (await callLoad('UC1')) as { latest: { id: number; status: string } | null };
+	expect(data.latest).toMatchObject({ id: completeId, status: 'complete' });
+});
+
 test('load rejects a channel owned by another org with 404 — digest contents never leak', async () => {
 	await seedChannel('UC1', 'org-2', { feedbackEnabled: 1 });
 	await seedDigest('UC1');
@@ -113,7 +131,11 @@ test('load rejects a signed-out request with 401', async () => {
 	await expect(callLoad('UC1', null)).rejects.toMatchObject({ status: 401 });
 });
 
-function postSettings(channelId: string, fields: Record<string, string | string[]>, user: typeof OWNER | null = OWNER) {
+function postSettings(
+	channelId: string,
+	fields: Record<string, string | string[]>,
+	user: (Omit<typeof OWNER, 'orgRole'> & { orgRole: string }) | null = OWNER
+) {
 	const form = new FormData();
 	for (const [key, value] of Object.entries(fields)) {
 		for (const v of Array.isArray(value) ? value : [value]) form.append(key, v);
@@ -209,6 +231,38 @@ test('generate maps a deferred run to a 409 the UI can show', async () => {
 	mocks.generateFeedbackDigest.mockResolvedValue({ status: 'deferred', reason: 'credits' });
 	const res = await actions.generate({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);
 	expect(res).toMatchObject({ status: 409, data: { scope: 'digest' } });
+	expect(JSON.stringify(res)).toContain('cron');
+});
+
+test('a deferred run on manual cadence never promises a cron retry', async () => {
+	// Manual cadence means cron never picks this channel — telling the user
+	// it "will retry on the next cron tick" is a lie (codex).
+	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1, feedbackCadence: 'manual' });
+	mocks.generateFeedbackDigest.mockResolvedValue({ status: 'deferred', reason: 'deadline' });
+	const res = await actions.generate({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);
+	expect(res).toMatchObject({ status: 409, data: { scope: 'digest' } });
+	expect(JSON.stringify(res)).not.toContain('cron');
+	expect(JSON.stringify(res)).toContain('Generate now');
+});
+
+test('generate claims the channel lease — a channel mid-scan returns 409 without calling the job', async () => {
+	// Without the claim, a manual run can overlap a cron digest and the
+	// failure path can clobber the concurrent success (codex).
+	await seedChannel('UC1', 'org-1', {
+		feedbackEnabled: 1,
+		leaseExpiresAt: new Date(Date.now() + 60_000).toISOString()
+	});
+	const res = await actions.generate({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);
+	expect(res).toMatchObject({ status: 409, data: { scope: 'digest' } });
+	expect(mocks.generateFeedbackDigest).not.toHaveBeenCalled();
+});
+
+test('generate releases its lease when the run finishes', async () => {
+	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1 });
+	mocks.generateFeedbackDigest.mockResolvedValue({ status: 'complete', findings: 0, commentsClassified: 2 });
+	await actions.generate({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);
+	const ch = await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get();
+	expect(ch?.leaseExpiresAt).toBeNull();
 });
 
 test('generate rejects a cross-org channel with 404', async () => {

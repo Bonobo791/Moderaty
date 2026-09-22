@@ -14,7 +14,7 @@
 // Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 import { beforeEach, expect, test, vi } from 'vitest';
-import { eq } from 'drizzle-orm';
+import { eq, isNull } from 'drizzle-orm';
 
 const mocks = vi.hoisted(() => ({
 	env: { OPENAI_API_KEY: 'test-openai-key', DRY_RUN: 'false' } as Record<string, string | undefined>,
@@ -144,16 +144,16 @@ test('a complete digest writes findings + sanitized evidence in one transaction'
 	const findings = await testDb().db.select().from(feedbackFindings).all();
 	expect(findings).toHaveLength(2);
 	const criticism = findings.find((f) => f.category === 'criticism')!;
-	expect(criticism.summary).toBe('3 viewers criticized: the audio at 3:00 is blown');
+	expect(criticism.summary).toBe('3 comments criticized: the audio at 3:00 is blown');
 	expect(criticism.supporterCount).toBe(3);
 
 	const evidence = await testDb().db.select().from(findingEvidence).where(eq(findingEvidence.findingId, criticism.id)).all();
 	expect(evidence).toHaveLength(3);
-	// The abusive supporter's stored excerpt is the masked form — raw abuse
-	// must never be persisted (MOD-68).
+	// A flagged comment conceals outright — the lexicon can never prove it
+	// masked EVERY insult, so a partial mask still risks leaking an
+	// unlisted slur (cubic+codex). The claim survives in the summary above.
 	const abusiveRow = evidence.find((e) => e.hasAbuse === 1)!;
-	expect(abusiveRow.sanitizedExcerpt).not.toContain('idiot');
-	expect(abusiveRow.sanitizedExcerpt).toContain('the audio at 3:00 is blown');
+	expect(abusiveRow.sanitizedExcerpt).toBe(CONCEALED_MESSAGE);
 	// Clean supporters lead the evidence order.
 	expect(evidence[0].hasAbuse).toBe(0);
 });
@@ -257,12 +257,111 @@ test('metered orgs pay one credit per attempted comment, inside the same transac
 	const ledger = await testDb().db.select().from(creditTransactions).all();
 	expect(ledger).toHaveLength(3);
 	expect(ledger.every((row) => row.refType === 'feedback')).toBe(true);
-	// A second run of the same window charges nothing more (anchor dedupe).
-	await generateFeedbackDigest('UC1', { force: true });
+	// A re-run finds no unprocessed comments (the marker, not the window,
+	// is the coverage record) — it is a no-op that touches nothing.
+	const second = await generateFeedbackDigest('UC1', { force: true });
+	expect(second.status).toBe('empty');
 	const after = await testDb().db.select().from(creditTransactions).all();
 	expect(after).toHaveLength(3);
 	const orgAfter = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
 	expect(orgAfter?.creditsRemaining).toBe(7);
+});
+
+test('a run interrupted after charging re-anchors instead of re-charging', async () => {
+	// The charge commits in its own transaction BEFORE the provider calls
+	// (codex). If the write tx never lands — crash, deadline — the anchors
+	// persist and the retry classifies the same comments without paying again.
+	await testDb().db.update(organizations).set({ creditsRemaining: 10 }).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC1', { feedbackEnabled: 1 });
+	for (const i of [1, 2, 3]) {
+		await seedComment(`c${i}`, 'UC1', `text ${i}`, `2026-01-0${i}T00:00:00.000Z`);
+	}
+	// Simulate the orphan anchors a crashed run would leave behind.
+	for (const id of ['c1', 'c2']) {
+		await testDb().db.insert(creditTransactions).values({
+			orgId: 'org-1', delta: -1, reason: 'consume', refType: 'feedback', refId: id, balanceAfter: 9
+		});
+	}
+	RESPONSES = Object.fromEntries([1, 2, 3].map((i) => [`text ${i}`, { category: 'question', hasAbuse: false, claim: 'theme' }]));
+	const result = await generateFeedbackDigest('UC1', { force: true });
+	expect(result).toMatchObject({ status: 'complete', commentsClassified: 3, creditsUsed: 1 });
+	const ledger = await testDb().db.select().from(creditTransactions).all();
+	expect(ledger).toHaveLength(3);
+	const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+	expect(org?.creditsRemaining).toBe(9);
+});
+
+test('a failed run still holds its charge anchors — the retry does not re-charge', async () => {
+	await testDb().db.update(organizations).set({ creditsRemaining: 10 }).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC1', { feedbackEnabled: 1 });
+	for (const i of [1, 2, 3]) {
+		await seedComment(`c${i}`, 'UC1', `text ${i}`, `2026-01-0${i}T00:00:00.000Z`);
+		fetchFailures[`text ${i}`] = 'boom';
+	}
+	const first = await generateFeedbackDigest('UC1', { force: true });
+	expect(first.status).toBe('failed');
+	// The attempted classifications were real provider work — the charges
+	// stand, and the failed digest row still records the outage.
+	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(3);
+	fetchFailures = {};
+	for (const i of [1, 2, 3]) {
+		RESPONSES[`text ${i}`] = { category: 'question', hasAbuse: false, claim: 'theme' };
+	}
+	const second = await generateFeedbackDigest('UC1', { force: true });
+	expect(second).toMatchObject({ status: 'complete', creditsUsed: 0 });
+	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(3);
+});
+
+test('a comment backfilled with an older publishedAt is still digested', async () => {
+	// Analyze-history deliberately inserts old comments AFTER the window has
+	// advanced — a publication-time cursor would never see them (codex).
+	await seedChannel('UC1', { feedbackEnabled: 1 });
+	await seedComment('new1', 'UC1', 'new question', '2026-02-01T00:00:00.000Z');
+	RESPONSES['new question'] = { category: 'question', hasAbuse: false, claim: 'new theme' };
+	expect((await generateFeedbackDigest('UC1', { force: true })).status).toBe('complete');
+
+	await seedComment('old1', 'UC1', 'old question', '2020-01-01T00:00:00.000Z');
+	RESPONSES['old question'] = { category: 'question', hasAbuse: false, claim: 'old theme' };
+	const second = await generateFeedbackDigest('UC1', { force: true });
+	expect(second).toMatchObject({ status: 'complete', commentsClassified: 1 });
+});
+
+test('a timestamp tie at the cap boundary does not drop the remainder', async () => {
+	// 101 comments where the 100th and 101st share a publishedAt instant —
+	// a window anchored on that instant would lose the tied row forever.
+	await seedChannel('UC1', { feedbackEnabled: 1 });
+	for (let i = 0; i < 101; i++) {
+		const publishedAt = i >= 99 ? '2026-02-01T00:00:00.000Z' : new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString();
+		await seedComment(`c${i}`, 'UC1', `t${i}`, publishedAt);
+		RESPONSES[`t${i}`] = { category: 'question', hasAbuse: false, claim: `theme ${i}` };
+	}
+	const first = await generateFeedbackDigest('UC1', { force: true });
+	expect(first).toMatchObject({ status: 'complete', commentsClassified: 100 });
+	const second = await generateFeedbackDigest('UC1', { force: true });
+	expect(second).toMatchObject({ status: 'complete', commentsClassified: 1 });
+	const covered = await testDb().db.select().from(comments).where(isNull(comments.feedbackDigestedAt)).all();
+	expect(covered).toHaveLength(0);
+});
+
+test('a capped batch keeps the channel due until the backlog drains', async () => {
+	// Stamping the rotation on a capped batch would suppress the remaining
+	// comments for a whole cadence period (codex) — the stamp only lands
+	// once the page is not full.
+	await seedChannel('UC1', { feedbackEnabled: 1 });
+	for (let i = 0; i < 101; i++) {
+		await seedComment(`c${i}`, 'UC1', `t${i}`, new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString());
+		RESPONSES[`t${i}`] = { category: 'question', hasAbuse: false, claim: `theme ${i}` };
+	}
+	const first = await generateFeedbackDigest('UC1', { force: true });
+	expect(first).toMatchObject({ status: 'complete', commentsClassified: 100 });
+	let ch = (await testDb().db.select().from(channels).get())!;
+	expect(ch.feedbackLastDigestAt).toBeNull();
+	expect(await digestDue(ch)).toBe(true);
+	const second = await generateFeedbackDigest('UC1', { force: true });
+	expect(second).toMatchObject({ status: 'complete', commentsClassified: 1 });
+	ch = (await testDb().db.select().from(channels).get())!;
+	expect(ch.feedbackLastDigestAt).not.toBeNull();
+	expect(await digestDue(ch)).toBe(false);
 });
 
 test('out-of-credit metered orgs defer without writing a partial digest', async () => {

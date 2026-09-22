@@ -222,8 +222,10 @@ export async function createTestDb(): Promise<TestDb> {
 			decided_by TEXT NOT NULL,
 			matched_rule_id INTEGER,
 			ai_score TEXT,
+			feedback_digested_at TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
+		`CREATE INDEX comments_channel_digested_idx ON comments (channel_id, feedback_digested_at)`,
 		`CREATE TABLE audit_log (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			channel_id TEXT NOT NULL,

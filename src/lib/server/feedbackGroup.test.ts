@@ -64,7 +64,7 @@ describe('groupFeedback', () => {
 		]);
 		expect(findings).toHaveLength(2);
 		expect(findings[0]).toMatchObject({ category: 'question', supporterCount: 5 });
-		expect(findings[0].summary).toBe('5 viewers asked: when is the next video');
+		expect(findings[0].summary).toBe('5 comments asked: when is the next video');
 		expect(findings[1]).toMatchObject({ category: 'criticism', supporterCount: 3 });
 	});
 
@@ -183,8 +183,8 @@ describe('groupFeedback', () => {
 
 describe('findingSummary', () => {
 	test('quantity-qualifies singular and plural', () => {
-		expect(findingSummary('question', 1, 'the claim')).toBe('One viewer asked: the claim');
-		expect(findingSummary('request', 7, 'the claim')).toBe('7 viewers requested: the claim');
+		expect(findingSummary('question', 1, 'the claim')).toBe('One comment asked: the claim');
+		expect(findingSummary('request', 7, 'the claim')).toBe('7 comments requested: the claim');
 	});
 
 	test('throws on an unknown category rather than writing a misleading summary', () => {

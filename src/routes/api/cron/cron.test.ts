@@ -578,6 +578,21 @@ test('a sweep failure is reported and does not stop the channel run', async () =
 	expect((await testDb().db.select().from(consents).all())[0].email).toBe('old@example.com');
 });
 
+test('an invalid DRY_RUN fails loudly at the entry — no sweep runs live', async () => {
+	// 'yes' is not 'true': without the entry check the retention sweeps would
+	// have run with dryRun=false and erased real data.
+	mocks.env.DRY_RUN = 'yes';
+	const oldDate = new Date(Date.now() - CONSENT_EMAIL_RETENTION_MS - DAY_MS).toISOString();
+	await seedConsent('old', oldDate);
+	await seedChannel('UC-live');
+
+	await expect(call({ bearer: 'test-secret' })).rejects.toMatchObject({ status: 500 });
+	expect(mocks.runChannel).not.toHaveBeenCalled();
+	expect(mocks.retryStripeCustomerDeletions).not.toHaveBeenCalled();
+	// Nothing durable happened — the expired consent e-mail is still there.
+	expect((await testDb().db.select().from(consents).all())[0].email).toBe('old@example.com');
+});
+
 test('a dry run skips the consent e-mail sweep entirely (I8)', async () => {
 	const oldDate = new Date(Date.now() - CONSENT_EMAIL_RETENTION_MS - DAY_MS).toISOString();
 	await seedConsent('old', oldDate);

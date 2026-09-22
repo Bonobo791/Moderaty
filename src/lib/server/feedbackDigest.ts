@@ -14,14 +14,17 @@
 // Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
 // Digest generation job (MOD-90): bounded cron rotation, per-channel
-// cadence, credit metering, and all-or-nothing persistence. A run either
-// writes one complete digest (digest + findings + evidence + credit
-// charges + rotation stamp in ONE transaction) or writes nothing — never
-// a partial digest. Per-comment classifier failures are counted and
-// skipped (I1); a job-level failure records a 'failed' row so the page
-// can say so instead of silently showing stale data.
+// cadence, credit metering, and all-or-nothing persistence. Metered orgs
+// are charged up front in one transaction — before any provider call —
+// anchored per comment so a crashed run retries without double-charging;
+// a shortfall defers with the balance untouched. The write transaction
+// then commits digest + findings + evidence + the per-comment digest
+// markers + the rotation stamp together, or not at all — never a partial
+// digest. Per-comment classifier failures are counted and skipped (I1);
+// a job-level failure records a 'failed' row so the page can say so
+// instead of silently showing stale data.
 
-import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { db, withBusyRetry } from '$lib/server/db';
 import { channels, comments, creditTransactions, feedbackDigests, feedbackFindings, findingEvidence } from '$lib/server/db/schema';
@@ -29,7 +32,7 @@ import { classifyFeedback, type FeedbackCategory } from '$lib/server/feedback';
 import { concealEvidence } from '$lib/server/feedbackSanitize';
 import { groupFeedback } from '$lib/server/feedbackGroup';
 import { DeadlineExceededError, assertBeforeDeadline } from '$lib/server/http';
-import { consumeFeedbackCredit, getCredits, orgIsMetered, type LedgerHandle } from '$lib/server/billing/ledger';
+import { consumeFeedbackCredit, orgIsMetered, type LedgerHandle } from '$lib/server/billing/ledger';
 import { resolveOpenAiKey } from '$lib/server/openaiKey';
 
 /** One page of stored comments per run — the same bound moderation uses (I10). */
@@ -41,7 +44,7 @@ const EXCERPT_MAX = 500;
 /** Weekly cadence: a channel is due again 7 days after its last evaluation. */
 export const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
-/** 'per_100' cadence: due once ≥100 comments are newer than the last complete digest window. */
+/** 'per_100' cadence: due once ≥100 comments are still unprocessed (marker NULL). */
 export const PER_100_COUNT = 100;
 
 const EPOCH = '1970-01-01T00:00:00.000Z';
@@ -86,7 +89,12 @@ interface ClassifiedRow {
  */
 const instant = (column: typeof comments.publishedAt | typeof feedbackDigests.windowEnd) => sql`julianday(${column})`;
 
-/** The digest window resumes where the last COMPLETE digest ended — a failed run never advances it. */
+/**
+ * The digest row's windowStart label resumes where the last COMPLETE digest
+ * ended — display metadata only. Coverage is tracked by the per-comment
+ * feedback_digested_at marker, not this edge, so a failed run losing the
+ * row or a backfilled comment can't distort what's processed.
+ */
 async function lastWindowEnd(channelId: string): Promise<string> {
 	const row = await db
 		.select({ windowEnd: feedbackDigests.windowEnd })
@@ -112,18 +120,19 @@ export function enabledCategories(channel: typeof channels.$inferSelect): Feedba
 /**
  * Is this channel's digest due right now?
  * - manual: never auto — the dashboard's "generate now" passes force.
- * - per_100: ≥100 stored comments newer than the last complete window.
+ * - per_100: ≥100 stored comments still carry a NULL digest marker.
  * - weekly (default + unknown values, loudly): last evaluation ≥ 7 days ago.
  */
 export async function digestDue(channel: typeof channels.$inferSelect, now = Date.now()): Promise<boolean> {
 	const cadence = channel.feedbackCadence ?? 'weekly';
 	if (cadence === 'manual') return false;
 	if (cadence === 'per_100') {
-		const since = await lastWindowEnd(channel.id);
+		// Unprocessed is the marker, not a timestamp — a backfilled comment
+		// with an old publishedAt counts the same as a fresh one.
 		const row = await db
 			.select({ n: sql<number>`COUNT(*)` })
 			.from(comments)
-			.where(and(eq(comments.channelId, channel.id), gt(instant(comments.publishedAt), sql`julianday(${since})`)))
+			.where(and(eq(comments.channelId, channel.id), isNull(comments.feedbackDigestedAt)))
 			.get();
 		return (row?.n ?? 0) >= PER_100_COUNT;
 	}
@@ -227,26 +236,36 @@ export async function generateFeedbackDigest(
 	if (channel.feedbackEnabled !== 1) return { status: 'skipped', reason: 'disabled' };
 	if (!force && !(await digestDue(channel))) return { status: 'skipped', reason: 'cadence' };
 
-	const windowStart = await lastWindowEnd(channelId);
-	// Oldest-first drain: a burst beyond the cap leaves the newest comments
-	// for the next digest instead of silently swallowing the oldest ones.
+	// Coverage is the per-comment marker, not a publication-time window:
+	// every comment with a NULL feedback_digested_at is eligible — including
+	// Analyze-history backfills whose publishedAt predates earlier digests
+	// and cap-boundary timestamp ties a window edge could never express
+	// (codex+coderabbit). Oldest-first drain: a burst beyond the cap leaves
+	// the newest comments for the next digest instead of silently
+	// swallowing the oldest ones.
 	const batch = await db
 		.select({ id: comments.id, text: comments.text, publishedAt: comments.publishedAt })
 		.from(comments)
-		.where(and(eq(comments.channelId, channelId), gt(instant(comments.publishedAt), sql`julianday(${windowStart})`)))
-		.orderBy(asc(instant(comments.publishedAt)))
+		.where(and(eq(comments.channelId, channelId), isNull(comments.feedbackDigestedAt)))
+		.orderBy(asc(instant(comments.publishedAt)), asc(comments.id))
 		.limit(DIGEST_COMMENT_CAP)
 		.all();
 	const nowIso = new Date().toISOString();
 	if (!batch.length) {
-		// Nothing new — stamp the evaluation so the weekly rotation moves on;
-		// no digest row (the page's empty state already says it).
+		// Nothing unprocessed — stamp the evaluation so the weekly rotation
+		// moves on; no digest row (the page's empty state already says it).
 		await db
 			.update(channels)
 			.set({ feedbackLastDigestAt: nowIso })
 			.where(eq(channels.id, channelId));
 		return { status: 'empty' };
 	}
+	// The row's window is descriptive, not authoritative — coverage lives in
+	// the markers. Resume the label where the last complete digest ended,
+	// but a backfilled batch that predates it anchors on its own earliest
+	// instant instead of writing an inverted window.
+	const since = await lastWindowEnd(channelId);
+	const windowStart = Date.parse(batch[0].publishedAt) < Date.parse(since) ? batch[0].publishedAt : since;
 	const windowEnd = batch[batch.length - 1].publishedAt;
 
 	// The OpenAI key comes from the org's BYOK resolution — a lifetime org
@@ -259,22 +278,45 @@ export async function generateFeedbackDigest(
 		return { status: 'failed', reason: 'no-key' };
 	}
 
-	// Advisory pre-check: skip the LLM calls entirely when the balance
-	// plainly can't cover the batch. The authoritative charge happens
-	// per-comment inside the write transaction — a mid-tx shortfall rolls
-	// EVERYTHING back, so a deferred run never leaves a partial digest.
 	const metered = channel.orgId ? await orgIsMetered(channel.orgId) : false;
-	if (metered && channel.orgId) {
-		const credits = await getCredits(channel.orgId);
-		if (credits < batch.length) {
-			console.warn(
-				`feedback digest for ${channelId} deferred: ${credits} credits < ${batch.length} comments`
-			);
-			return { status: 'deferred', reason: 'credits' };
-		}
-	}
 
 	try {
+		// Charge the whole batch BEFORE any provider call, in ONE
+		// transaction: the (org, 'feedback', commentId) anchor makes each
+		// charge idempotent — a run that crashed between charge and write
+		// retries classification without paying again. All-or-nothing, so a
+		// shortfall defers with the balance untouched; and because the money
+		// is committed before the LLM call, a second same-org channel can no
+		// longer race a read-only precheck into wasted provider spend
+		// (codex).
+		let creditsCharged = 0;
+		if (metered && channel.orgId) {
+			const orgId = channel.orgId;
+			await db.transaction(async (tx) => {
+				for (const comment of batch) {
+					const charged = await consumeFeedbackCredit(tx, orgId, comment.id);
+					if (charged) {
+						creditsCharged++;
+						continue;
+					}
+					// False also covers "already charged" — distinguish by
+					// looking for the anchor row before calling it a shortfall.
+					const prior = await tx
+						.select({ id: creditTransactions.id })
+						.from(creditTransactions)
+						.where(
+							and(
+								eq(creditTransactions.orgId, orgId),
+								eq(creditTransactions.refType, 'feedback'),
+								eq(creditTransactions.refId, comment.id)
+							)
+						)
+						.get();
+					if (!prior) throw new Error('insufficient credits for feedback digest');
+				}
+			});
+		}
+
 		// Per-comment failures are counted and skipped (I1); a deadline aborts
 		// the whole run so the tick can defer cleanly.
 		const settled = await Promise.allSettled(
@@ -288,8 +330,8 @@ export async function generateFeedbackDigest(
 			const outcome = settled[i];
 			if (outcome.status === 'rejected') {
 				// A deadline aborts the whole run — the tick defers cleanly and
-				// retries the same window; anything else is a bad ITEM (I1):
-				// count it, log it, keep going.
+				// retries the same comments (markers never moved); anything
+				// else is a bad ITEM (I1): count it, log it, keep going.
 				if (outcome.reason instanceof DeadlineExceededError) throw outcome.reason;
 				failed++;
 				console.error(`feedback classification failed for comment ${batch[i].id}:`, outcome.reason);
@@ -298,7 +340,7 @@ export async function generateFeedbackDigest(
 			classified.push({ commentId: batch[i].id, text: batch[i].text, publishedAt: batch[i].publishedAt, ...outcome.value });
 		}
 		// Every comment failing is a job failure, not an empty digest —
-		// 'complete' would advance the window and permanently skip coverage.
+		// 'complete' would mark them digested and permanently skip coverage.
 		// Throw so the run is marked failed and the next tick retries.
 		if (failed > 0 && classified.length === 0) {
 			throw new Error(`classification failed for all ${failed} comments`);
@@ -310,6 +352,7 @@ export async function generateFeedbackDigest(
 			threshold
 		});
 
+		const batchIds = new Set(batch.map((c) => c.id));
 		assertBeforeDeadline(deadline);
 		const result = await withBusyRetry(() =>
 			db.transaction(async (tx) => {
@@ -324,7 +367,7 @@ export async function generateFeedbackDigest(
 						commentsClassified: classified.length,
 						commentsFailed: failed,
 						pooledCount: pooled,
-						creditsUsed: null // stamped with the real charge count below
+						creditsUsed: metered ? creditsCharged : null
 					})
 					.returning({ id: feedbackDigests.id });
 				for (const finding of findings) {
@@ -337,68 +380,63 @@ export async function generateFeedbackDigest(
 							supporterCount: finding.supporterCount
 						})
 						.returning({ id: feedbackFindings.id });
-					for (const evidence of finding.evidence) {
+					const evidenceRows = finding.evidence.map((evidence) => {
 						// Evidence ids come from the classified batch itself — a
 						// hallucinated id is impossible by construction, and this
 						// assertion is the loud backstop (I2).
-						if (!batch.some((c) => c.id === evidence.commentId)) {
+						if (!batchIds.has(evidence.commentId)) {
 							throw new Error(`feedback digest: evidence ${evidence.commentId} is not a stored comment`);
 						}
 						const concealed = concealEvidence(evidence.text.slice(0, EXCERPT_MAX), {
 							hasAbuse: evidence.hasAbuse
 						});
-						await tx.insert(findingEvidence).values({
+						return {
 							findingId: row.id,
 							commentId: evidence.commentId,
 							sanitizedExcerpt: concealed.text,
 							hasAbuse: evidence.hasAbuse ? 1 : 0
-						});
-					}
+						};
+					});
+					if (evidenceRows.length) await tx.insert(findingEvidence).values(evidenceRows);
 				}
-				// Authoritative charge, same transaction: metered orgs pay one
-				// credit per comment attempted (the LLM call happened). An
-				// already-charged comment (overlap re-run) costs nothing again;
-				// a genuine shortfall aborts the transaction — nothing
-				// half-written.
-				let creditsCharged = 0;
-				if (metered && channel.orgId) {
-					for (const comment of batch) {
-						const charged = await consumeFeedbackCredit(tx, channel.orgId, comment.id);
-						if (charged) {
-							creditsCharged++;
-							continue;
-						}
-						// False also covers "already charged" — distinguish by
-						// looking for the anchor row before calling it a shortfall.
-						const prior = await tx
-							.select({ id: creditTransactions.id })
-							.from(creditTransactions)
-							.where(
-								and(
-									eq(creditTransactions.orgId, channel.orgId!),
-									eq(creditTransactions.refType, 'feedback'),
-									eq(creditTransactions.refId, comment.id)
-								)
-							)
-							.get();
-						if (!prior) throw new Error('insufficient credits for feedback digest');
-					}
+				// Mark every comment the run covered — classified, counted-failed,
+				// or 'none' — as digested. The marker, not a timestamp edge, is
+				// the coverage record: only a committed digest moves it, so an
+				// abort leaves the whole batch eligible for the next run.
+				await tx
+					.update(comments)
+					.set({ feedbackDigestedAt: nowIso })
+					.where(inArray(comments.id, [...batchIds]));
+				// Stamp the rotation only once the backlog is drained — a capped
+				// batch leaves remainder comments unprocessed and the channel
+				// must stay due so the next tick keeps draining (codex). The
+				// count reads post-update state inside the same transaction.
+				const remaining = await tx
+					.select({ n: sql<number>`COUNT(*)` })
+					.from(comments)
+					.where(and(eq(comments.channelId, channelId), isNull(comments.feedbackDigestedAt)))
+					.get();
+				if ((remaining?.n ?? 0) === 0) {
+					// The rotation stamp is the channel's own row — a 0-row
+					// update means the channel vanished mid-run; fail loudly
+					// and roll back.
+					const stamped = await tx
+						.update(channels)
+						.set({ feedbackLastDigestAt: nowIso })
+						.where(eq(channels.id, channelId))
+						.returning({ id: channels.id });
+					if (!stamped.length) throw new Error(`channel ${channelId} vanished mid-digest — aborting`);
+				} else {
+					// Backlog remains → no stamp, the channel stays due. Still
+					// assert the channel is alive: a mid-run delete must abort.
+					const alive = await tx
+						.select({ id: channels.id })
+						.from(channels)
+						.where(eq(channels.id, channelId))
+						.get();
+					if (!alive) throw new Error(`channel ${channelId} vanished mid-digest — aborting`);
 				}
-				if (metered) {
-					await tx
-						.update(feedbackDigests)
-						.set({ creditsUsed: creditsCharged })
-						.where(eq(feedbackDigests.id, digest.id));
-				}
-				// The rotation stamp is the channel's own row — a 0-row update
-				// means the channel vanished mid-run; fail loudly and roll back.
-				const stamped = await tx
-					.update(channels)
-					.set({ feedbackLastDigestAt: nowIso })
-					.where(eq(channels.id, channelId))
-					.returning({ id: channels.id });
-				if (!stamped.length) throw new Error(`channel ${channelId} vanished mid-digest — aborting`);
-				return { digestId: digest.id, creditsCharged };
+				return { digestId: digest.id };
 			})
 		);
 		return {
@@ -408,7 +446,7 @@ export async function generateFeedbackDigest(
 			commentsFailed: failed,
 			findings: findings.length,
 			pooled,
-			creditsUsed: result.creditsCharged
+			creditsUsed: creditsCharged
 		};
 	} catch (cause) {
 		if (cause instanceof DeadlineExceededError) {

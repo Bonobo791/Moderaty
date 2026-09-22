@@ -48,7 +48,8 @@ Categories — pick exactly ONE that best fits the extractable claim:
   plans. Earnest confusion phrased as a question counts.
 - "criticism": a substantive negative opinion about the video, its ideas,
   its quality, or the creator's choices — content-focused, not a personal
-  attack. "The pacing dragged" is criticism; "you're pathetic" is not.
+  attack. "The pacing dragged" is criticism; "this is trash" or "you're
+  pathetic" is not — a dismissal with no extractable claim is "none".
 - "correction": the commenter points out a specific factual error,
   misstatement, wrong figure, wrong name, or bad instruction in the video,
   usually with the right value. Vague "this is all wrong" claims without a
@@ -58,11 +59,12 @@ Categories — pick exactly ONE that best fits the extractable claim:
   an upload schedule. Requests to be told something are questions; requests
   to make or change something are requests.
 - "none": everything else — praise, reactions, jokes, spam, self-promotion,
-  links, emoji-only chatter, meta conversation, and ABUSE WITH NO
-  EXTRACTABLE CLAIM. "none" comments are dropped; they never become
-  feedback.
+  links, emoji-only chatter, meta conversation, vague dismissals with no
+  extractable claim ("this is trash", "worst video ever", "mid"), and
+  ABUSE WITH NO EXTRACTABLE CLAIM. "none" comments are dropped; they never
+  become feedback.
 
-The claim field is the digest's only record of WHAT viewers said. Rules:
+The claim field is the digest's only record of WHAT commenters said. Rules:
 - Extract the safe claim, never the abuse. If a comment wraps feedback in
   insults ("you idiot, the spec is 25 ft-lb"), the claim is the feedback
   ("the torque spec is 25 ft-lb"), never the insult. Strip every insult,
@@ -78,9 +80,9 @@ The claim field is the digest's only record of WHAT viewers said. Rules:
   feedback is "none" even if it is polite.
 
 The hasAbuse flag is the concealment signal, independent of category:
-- true when the comment contains insults, slurs, profanity aimed at a
-  person, threats, or demeaning language — anywhere in the text, even if a
-  clean claim was extracted.
+- true when the comment contains insults, slurs, profanity, threats, or
+  demeaning language — anywhere in the text, even if a clean claim was
+  extracted. Negativity alone is not abuse: flag wording, not opinion.
 - false when the wording is clean, even if the content is negative.
 - A comment can be useful AND abusive: "f*** this editor, the audio at
   3:00 is blown out" is category "criticism" with hasAbuse true and claim
@@ -95,13 +97,14 @@ Calibration examples:
 - "great video!" -> {"category": "none", "hasAbuse": false, "claim": ""}
 - "first!" -> {"category": "none", "hasAbuse": false, "claim": ""}
 - "you're an idiot, the gap should be 0.028 not 0.035" -> {"category": "correction", "hasAbuse": true, "claim": "the spark plug gap is 0.028"}
+- "this is trash, worst video ever" -> {"category": "none", "hasAbuse": false, "claim": ""}
 - "f*** you and this garbage channel" -> {"category": "none", "hasAbuse": true, "claim": ""}
 - "anyone else notice the mic clipping? fix your audio dude" -> {"category": "criticism", "hasAbuse": false, "claim": "the microphone is clipping"}
 
 Stay strict on evidence: when unsure between a feedback category and
 "none", choose "none" — the digest only shows claims backed by several
-viewers, so a dropped borderline comment costs nothing and an invented one
-misleads the creator.`;
+comments, so a dropped borderline only ever hides noise while an invented
+claim misleads the creator.`;
 
 /**
  * Builds the system prompt for the feedback-classification pass.

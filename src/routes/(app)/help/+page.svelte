@@ -42,15 +42,17 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 <div class="card">
 	<h2>The feedback digest</h2>
 	<p>
-		Beyond moderation, Moderaty can group your comments into a digest of what viewers keep
-		telling you: recurring questions, substantive criticism, corrections, and requests. A theme
-		only shows up once several viewers raise it — one-off remarks are counted but never listed.
+		Beyond moderation, Moderaty can group your comments into a digest of what keeps coming
+		up: recurring questions, substantive criticism, corrections, and requests. A theme
+		only shows up once enough comments raise it — one-off remarks are counted but never listed.
 	</p>
 	<p>
 		Abusive wording is always concealed: the digest shows the sanitized claim, never the insult.
 		The digest is read-only insight — it never changes a comment's moderation status and never
-		replies on your behalf. Turn it on per channel from the channel's <strong>Feedback</strong>
-		tab, where you can also pick the categories, the cadence, and the evidence threshold.
+		replies on your behalf. On metered plans each comment the digest processes consumes one
+		credit, the same as AI scoring. Turn it on per channel from the channel's
+		<strong>Feedback</strong> tab, where you can also pick the categories, the cadence, and the
+		evidence threshold.
 	</p>
 </div>
 

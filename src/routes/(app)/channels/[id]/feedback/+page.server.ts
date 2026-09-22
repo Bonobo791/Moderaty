@@ -13,12 +13,12 @@
 //
 // Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
 
-import { and, asc, desc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, lt, or } from 'drizzle-orm';
 import { fail } from '@sveltejs/kit';
 
 import { db } from '$lib/server/db';
 import { channels, feedbackDigests, feedbackFindings, findingEvidence } from '$lib/server/db/schema';
-import { enabledCategories, generateFeedbackDigest } from '$lib/server/feedbackDigest';
+import { enabledCategories, generateFeedbackDigest, type DigestResult } from '$lib/server/feedbackDigest';
 import { ownedChannel, requireOrgRole } from '$lib/server/ownership';
 import { requireUser } from '$lib/server/session';
 
@@ -33,27 +33,42 @@ export async function load({ params, locals }) {
 	// on the null-user outage shape.
 	if (locals.dbDown) return { ch: { id: params.id, title: '' }, maintenance: true };
 	const ch = await ownedChannel(params.id, locals);
-	const digests = await db
-		.select({
-			id: feedbackDigests.id,
-			windowStart: feedbackDigests.windowStart,
-			windowEnd: feedbackDigests.windowEnd,
-			status: feedbackDigests.status,
-			commentsClassified: feedbackDigests.commentsClassified,
-			commentsFailed: feedbackDigests.commentsFailed,
-			pooledCount: feedbackDigests.pooledCount,
-			creditsUsed: feedbackDigests.creditsUsed,
-			error: feedbackDigests.error,
-			createdAt: feedbackDigests.createdAt
-		})
-		.from(feedbackDigests)
-		.where(eq(feedbackDigests.channelId, params.id))
-		.orderBy(desc(feedbackDigests.createdAt))
-		.limit(10)
-		.all();
-	// The page renders the newest COMPLETE digest; a newer failed/deferred row
-	// still surfaces as the status banner (never silently stale).
-	const latest = digests.find((d) => d.status === 'complete') ?? null;
+	const digestFields = {
+		id: feedbackDigests.id,
+		windowStart: feedbackDigests.windowStart,
+		windowEnd: feedbackDigests.windowEnd,
+		status: feedbackDigests.status,
+		commentsClassified: feedbackDigests.commentsClassified,
+		commentsFailed: feedbackDigests.commentsFailed,
+		pooledCount: feedbackDigests.pooledCount,
+		creditsUsed: feedbackDigests.creditsUsed,
+		error: feedbackDigests.error,
+		createdAt: feedbackDigests.createdAt
+	} as const;
+	const [digests, latest] = await Promise.all([
+		db
+			.select(digestFields)
+			.from(feedbackDigests)
+			.where(eq(feedbackDigests.channelId, params.id))
+			// id is monotonic — createdAt can tie within a millisecond (cubic).
+			.orderBy(desc(feedbackDigests.id))
+			.limit(10)
+			.all(),
+		// The newest COMPLETE digest must come from its own query: a streak of
+		// failed rows can push it out of the 10-row history page entirely, and
+		// deriving it from that page would make the UI claim none exists
+		// (codex).
+		db
+			.select(digestFields)
+			.from(feedbackDigests)
+			.where(and(eq(feedbackDigests.channelId, params.id), eq(feedbackDigests.status, 'complete')))
+			.orderBy(desc(feedbackDigests.id))
+			.limit(1)
+			.get()
+	]);
+	// A newer failed/deferred row still surfaces as the status banner (never
+	// silently stale) while the page renders the last good digest.
+	const latestComplete = latest ?? null;
 	let findings: {
 		id: number;
 		category: string;
@@ -61,11 +76,11 @@ export async function load({ params, locals }) {
 		supporterCount: number;
 		evidence: { id: number; sanitizedExcerpt: string; hasAbuse: number }[];
 	}[] = [];
-	if (latest) {
+	if (latestComplete) {
 		const rows = await db
 			.select()
 			.from(feedbackFindings)
-			.where(eq(feedbackFindings.digestId, latest.id))
+			.where(eq(feedbackFindings.digestId, latestComplete.id))
 			.orderBy(desc(feedbackFindings.supporterCount))
 			.all();
 		const ids = rows.map((r) => r.id);
@@ -97,7 +112,7 @@ export async function load({ params, locals }) {
 	return {
 		ch: { id: ch.id, title: ch.title },
 		digests,
-		latest,
+		latest: latestComplete,
 		findings,
 		settings: {
 			enabled: ch.feedbackEnabled === 1,
@@ -109,47 +124,77 @@ export async function load({ params, locals }) {
 }
 
 export const actions = {
-	/** "Generate now" — a forced run over the window since the last complete digest. */
+	/** "Generate now" — a forced run over every comment the digest has not processed yet. */
 	generate: async ({ params, locals }) => {
 		// A run spends org credits on metered plans — owner-only like every
 		// money-moving action; membership alone is not enough (codeant).
-		requireOrgRole(requireUser(locals), 'owner');
+		const user = requireUser(locals);
+		requireOrgRole(user, 'owner');
 		const ch = await ownedChannel(params.id, locals);
 		if (ch.feedbackEnabled !== 1) {
 			return fail(400, { scope: 'digest', error: 'Enable the feedback digest below before generating.' });
 		}
-		let result;
+		// A manual run can overlap a cron digest — and its failure path can
+		// clobber the concurrent run's success. Claim the channel lease first,
+		// same protocol as the dry-run preview and cron: the UPDATE predicate
+		// makes claimants single-winner, and the lease self-expires if this
+		// request dies mid-run (codex).
+		const myLease = new Date(Date.now() + 60_000).toISOString();
+		const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, new Date().toISOString()));
+		const claimed = await db
+			.update(channels)
+			.set({ leaseExpiresAt: myLease })
+			.where(and(eq(channels.id, params.id), eq(channels.orgId, user.orgId), claimable))
+			.returning({ id: channels.id });
+		if (!claimed.length) {
+			return fail(409, { scope: 'digest', error: 'This channel is mid-scan — retry in a minute.' });
+		}
+		// A 'manual' cadence never gets a cron retry — don't promise one.
+		const retryHint =
+			ch.feedbackCadence === 'manual'
+				? 'retry with Generate now.'
+				: 'it will retry on the next cron tick.';
 		try {
-			result = await generateFeedbackDigest(params.id, { force: true, deadline: Date.now() + MANUAL_RUN_BUDGET_MS });
+			const result: DigestResult = await generateFeedbackDigest(params.id, {
+				force: true,
+				deadline: Date.now() + MANUAL_RUN_BUDGET_MS
+			});
+			switch (result.status) {
+				case 'complete':
+					return {
+						ok: true,
+						scope: 'digest',
+						message: `Digest generated — ${result.findings} finding(s) from ${result.commentsClassified} comment(s).`
+					};
+				case 'empty':
+					return { ok: true, scope: 'digest', message: 'No new comments since the last digest window.' };
+				case 'dry-run':
+					return fail(409, { scope: 'digest', error: 'This deployment runs in dry-run mode — digests cannot be generated.' });
+				case 'deferred':
+					return fail(409, {
+						scope: 'digest',
+						error: `Generation deferred (${result.reason ?? 'busy'}) — ${retryHint}`
+					});
+				case 'skipped':
+					return fail(409, { scope: 'digest', error: 'The channel is paused — resume it before generating.' });
+				default:
+					return fail(502, {
+						scope: 'digest',
+						error: `Digest generation failed (${result.reason ?? 'error'}) — ${retryHint}`
+					});
+			}
 		} catch (e) {
 			// Loud server-side, generic client-side — raw provider detail never
 			// reaches the browser.
 			console.error('manual feedback digest failed for channel:', params.id, e);
 			return fail(502, { scope: 'digest', error: 'Digest generation failed — check the server log and try again.' });
-		}
-		switch (result.status) {
-			case 'complete':
-				return {
-					ok: true,
-					scope: 'digest',
-					message: `Digest generated — ${result.findings} finding(s) from ${result.commentsClassified} comment(s).`
-				};
-			case 'empty':
-				return { ok: true, scope: 'digest', message: 'No new comments since the last digest window.' };
-			case 'dry-run':
-				return fail(409, { scope: 'digest', error: 'This deployment runs in dry-run mode — digests cannot be generated.' });
-			case 'deferred':
-				return fail(409, {
-					scope: 'digest',
-					error: `Generation deferred (${result.reason ?? 'busy'}) — it will retry on the next cron tick.`
-				});
-			case 'skipped':
-				return fail(409, { scope: 'digest', error: 'The channel is paused — resume it before generating.' });
-			default:
-				return fail(502, {
-					scope: 'digest',
-					error: `Digest generation failed (${result.reason ?? 'error'}) — it will retry on the next cron tick.`
-				});
+		} finally {
+			// Release only OUR lease: if the run overran it and cron claimed the
+			// channel in between, that lease is untouched.
+			await db
+				.update(channels)
+				.set({ leaseExpiresAt: null })
+				.where(and(eq(channels.id, params.id), eq(channels.leaseExpiresAt, myLease)));
 		}
 	},
 	/** Per-channel feedback controls (MOD-91): opt-in, cadence, categories, threshold, e-mail flag. */

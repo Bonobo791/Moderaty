@@ -79,6 +79,22 @@ describe('redactAbuse', () => {
 		expect(redactAbuse('go.die').redacted).toBe(1);
 	});
 
+	test('a mask must not bridge a multi-word insult back into view', () => {
+		// 'shut fuck up': masking 'fuck' leaves 'shut █ up', which still reads
+		// as 'shut up' — the pass re-scans until nothing matches, so the whole
+		// phrase conceals (cubic).
+		expect(redactAbuse('shut fuck up').text).toBe(REDACTION);
+		expect(redactAbuse(redactAbuse('shut fuck up').text).redacted).toBe(0);
+	});
+
+	test('does not over-match innocent Portuguese words after diacritic folding', () => {
+		// 'pos' folds pôs/pós onto it — common words like 'pós-graduação'
+		// must never mask (cubic).
+		for (const clean of ['minha pós-graduação começa segunda', 'ele pôs a mesa', 'pós-jogo']) {
+			expect(redactAbuse(clean)).toEqual({ text: clean, redacted: 0 });
+		}
+	});
+
 	test('empty and whitespace input returns empty unchanged', () => {
 		expect(redactAbuse('')).toEqual({ text: '', redacted: 0 });
 	});
@@ -93,10 +109,14 @@ describe('concealEvidence', () => {
 		});
 	});
 
-	test('abuse wrapped around a claim shows the claim with the abuse masked', () => {
+	test('a flagged comment conceals even when the lexicon masked part of it', () => {
+		// The lexicon can never prove it masked ALL the abuse — 'idiot' is
+		// masked here but an unlisted second insult would render verbatim.
+		// A hasAbuse flag therefore conceals the whole excerpt; the sanitized
+		// claim still carries the feedback in the finding summary
+		// (cubic+codex+coderabbit).
 		const out = concealEvidence('you idiot, the audio at 3:00 is blown out', { hasAbuse: true });
-		expect(out.concealed).toBe(false);
-		expect(out.text).toBe(`you ${REDACTION}, the audio at 3:00 is blown out`);
+		expect(out).toMatchObject({ text: CONCEALED_MESSAGE, concealed: true });
 	});
 
 	test('hasAbuse with no lexicon hit conceals the whole comment', () => {

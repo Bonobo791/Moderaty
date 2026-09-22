@@ -327,8 +327,13 @@ export const comments = sqliteTable('comments', {
 	decidedBy: text('decided_by').notNull(), // 'rule' | 'ai' | 'human' | 'none' | 'allowlist'
 	matchedRuleId: integer('matched_rule_id'),
 	aiScore: text('ai_score'), // JSON string of the six category scores, or null
+	// NULL until a feedback digest has covered this comment — the digest's
+	// eligibility marker. A publication-time window can never express "not
+	// yet digested" for a comment inserted late with an old publishedAt
+	// (history backfill) or tied at the page-cap boundary (codex+coderabbit).
+	feedbackDigestedAt: text('feedback_digested_at'),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
-});
+}, (table) => [index('comments_channel_digested_idx').on(table.channelId, table.feedbackDigestedAt)]);
 
 export const moderationActions = sqliteTable('moderation_actions', {
 	commentId: text('comment_id').primaryKey(),

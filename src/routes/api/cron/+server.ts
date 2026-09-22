@@ -160,6 +160,12 @@ export const GET: RequestHandler = async ({ url, request }) => {
 	// Captured at handler start so the DB prelude consumes the same budget.
 	const deadline = Date.now() + RUN_BUDGET_MS;
 	authorizeCron(url, request);
+	// Validate BEFORE any sweep or claim: an invalid value must fail loudly
+	// at the entry, not silently run the sweeps live (runChannel re-checks,
+	// but by then retention writes would already have landed).
+	if (env.DRY_RUN !== 'true' && env.DRY_RUN !== 'false') {
+		throw error(500, 'DRY_RUN must be true or false');
+	}
 	const dryRun = env.DRY_RUN === 'true';
 
 	// Consent-evidence retention sweep runs first, while the full budget

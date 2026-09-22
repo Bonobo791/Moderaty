@@ -214,9 +214,14 @@ test('posts to the chat completions endpoint with JSON content type', async () =
 test('a deadline-bounded request propagates the deadline error', async () => {
 	// The digest job enforces a run deadline; classification must not
 	// swallow the abort — the job defers the whole run to the next tick.
+	// The deadline stays in the FUTURE so the request actually reaches
+	// fetch: an already-expired one would throw before the stub, never
+	// exercising the path this test claims to cover (cubic).
 	const { DeadlineExceededError } = await import('./http');
-	vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new DeadlineExceededError()));
-	await expect(classifyFeedback('text', CONTEXT, Date.now() - 1, 'key')).rejects.toThrow(
+	const fetch = vi.fn().mockRejectedValue(new DeadlineExceededError());
+	vi.stubGlobal('fetch', fetch);
+	await expect(classifyFeedback('text', CONTEXT, Date.now() + 50, 'key')).rejects.toThrow(
 		DeadlineExceededError
 	);
+	expect(fetch).toHaveBeenCalled();
 });

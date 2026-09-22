@@ -86,7 +86,9 @@ export function normalizeClaimKey(claim) {
 export function findingSummary(category, supporters, claim) {
 	const verb = PER_CATEGORY_VERB[category];
 	if (!verb) throw new Error(`findingSummary: unknown category "${category}"`);
-	const who = supporters === 1 ? 'One viewer' : `${supporters} viewers`;
+	// The count is distinct comments, not distinct viewers — the digest has
+	// no identity signal, so the summary names the unit it actually counts.
+	const who = supporters === 1 ? 'One comment' : `${supporters} comments`;
 	return `${who} ${verb}: ${claim}`;
 }
 
@@ -143,8 +145,8 @@ export function groupFeedback(comments, { categories, threshold = DEFAULT_THRESH
 			continue;
 		}
 		// Evidence favors clean, short examples — the reader should see the
-		// clearest supporters first (MOD-70); abusive ones stay available to
-		// the reveal path but never lead.
+		// clearest supporters first (MOD-70); flagged evidence conceals at
+		// sanitize time, so ordering it last keeps real wording in view.
 		const ranked = [...members].sort(
 			(a, b) =>
 				Number(a.hasAbuse) - Number(b.hasAbuse) ||

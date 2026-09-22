@@ -46,7 +46,9 @@ export const ABUSE_TERMS = [
 	// Common obfuscations and abbreviations (single-vowel '*' masks like
 	// "f*ck" are generated automatically by the sanitizer)
 	'f**k', 's**t', 'a**hole',
-	'wtf', 'stfu', 'gtfo', 'kys', 'fml', 'pos',
+	// 'pos' is deliberately absent: after diacritic folding it hits pós,
+	// posição, etc. — common benign Portuguese words (coderabbit).
+	'wtf', 'stfu', 'gtfo', 'kys', 'fml',
 	// Person-directed phrases
 	'kill yourself', 'go die', 'die already', 'neck yourself',
 	'go to hell', 'shut up', 'nobody likes you', 'nobody asked',

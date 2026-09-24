@@ -37,6 +37,7 @@
 	},
 	"dependencies": {
 		"@libsql/client": "^0.17.4",
+		"@openai/guardrails": "0.2.1",
 		"drizzle-orm": "^0.45.2",
 		"recheck": "4.5.0",
 		"stripe": "22.5.0"

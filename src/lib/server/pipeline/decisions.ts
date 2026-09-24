@@ -1,5 +1,6 @@
 import { normalizeHandle } from '$lib/server/allowlist';
 import { DeadlineExceededError } from '$lib/server/http';
+import { detectJailbreak } from '$lib/server/jailbreak';
 import { scoreComment, serializeScores } from '$lib/server/moderation';
 import { matchPreparedRule, type PreparedRule, type RuleAction } from '$lib/server/rules';
 import { scoreTone, type ToneContext, type ToneProtections } from '$lib/server/tone';
@@ -118,6 +119,20 @@ async function aiDecision(
 ): Promise<Decision> {
 	let moderation: Awaited<ReturnType<typeof scoreComment>>;
 	try {
+		if (!openAiKey) throw new Error('OPENAI_API_KEY is required');
+		const jailbreak = await detectJailbreak(comment.text, openAiKey, deadline);
+		if (jailbreak.flagged) {
+			return {
+				comment,
+				status: 'pending',
+				decidedBy: 'ai',
+				matchedRuleId: null,
+				aiScore: null,
+				auditAction: 'queue',
+				reason: `jailbreak guard flagged (${jailbreak.confidence.toFixed(2)})`,
+				youtubeAction: 'hold'
+			};
+		}
 		moderation = await scoreComment(comment.text, deadline, openAiKey);
 	} catch (error) {
 		// A deadline-expired score is a bounded-run abort (I10), not an AI

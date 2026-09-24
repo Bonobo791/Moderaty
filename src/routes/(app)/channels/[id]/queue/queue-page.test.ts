@@ -29,6 +29,15 @@ function renderQueue(data: unknown, form: unknown = null) {
 }
 
 describe('queue row actions (SSR)', () => {
+	it('shows the queued reason or an explicit missing-reason cue', () => {
+		const withReason = renderQueue({ pending: [{ ...PENDING[0], reason: 'jailbreak guard flagged (0.70)' }] });
+		expect(withReason).toContain('Why queued:');
+		expect(withReason).toContain('jailbreak guard flagged (0.70)');
+
+		const withoutReason = renderQueue({ pending: [PENDING[0]] });
+		expect(withoutReason).toContain('Why queued: No reason was recorded.');
+	});
+
 	it('renders Approve/Reject as underlined row-action text buttons posting to the existing actions', () => {
 		const body = renderQueue({ pending: PENDING });
 		expect(body).toContain('action="?/approve"');

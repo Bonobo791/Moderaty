@@ -93,7 +93,7 @@
 <!-- Accessible heading only: the shared channel header (h1) and the active
 	 tab already identify this section visually. -->
 <h2 class="sr-only">Review queue</h2>
-<p class="page-sub">Borderline comments (AI score 0.51–0.75, or AI unavailable) waiting for your decision.</p>
+<p class="page-sub">Borderline comments (AI score 0.51–0.75), AI-unavailable comments, and possible prompt-injection flags waiting for your decision.</p>
 
 {#if data.pending === undefined}
 	<Skeleton rows={3} />
@@ -101,7 +101,7 @@
 	{#if form?.error}<div class="error-box" role="alert">{form.error}</div>{/if}
 	{#if form?.success}<div class="flash" role="status">{form.success}</div>{/if}
 
-	<p class="muted">Each comment shows whether its YouTube hold has actually landed — until it reads "held", it may still be public. Rejected or approved comments already have a final state. Your action is final.</p>
+	<p class="muted">Queued comments may remain public on YouTube until their hold is confirmed; each row shows whether the hold has landed. Your action is final.</p>
 
 	{#each visible as c (c.id)}
 		<div class="row-wrap" class:exiting={exiting[c.id]}>
@@ -113,6 +113,11 @@
 				>
 					<p class="row-time muted" title={c.publishedAt}>{relativeTime(c.publishedAt)}</p>
 					<blockquote class="quote">{c.text}</blockquote>
+					{#if c.reason}
+						<p class="queue-reason"><strong>Why queued:</strong> {c.reason}</p>
+					{:else}
+						<p class="queue-reason muted">Why queued: No reason was recorded.</p>
+					{/if}
 					{#if c.holdState === 'completed'}
 						<p class="hold-state muted">Held on YouTube — not public.</p>
 					{:else}
@@ -209,6 +214,10 @@
 	}
 	/* Hold state line: quiet when the hold really landed, visibly flagged
 	   while it is only requested — the row must never overclaim. */
+	.queue-reason {
+		margin: 8px 0 0;
+		font-size: 13px;
+	}
 	.hold-state {
 		margin: 8px 0 0;
 		font-size: 13px;

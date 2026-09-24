@@ -209,14 +209,23 @@ whichever instance should drain.
 Approved dependencies only (execution plan v3): `drizzle-orm`,
 `@libsql/client`, the SvelteKit adapter, `recheck` (runtime); `stripe`
 (runtime — server-only payment SDK, maintainer-approved for the billing
-integration; never import it into client code); `drizzle-kit`,
+integration; never import it into client code); `@openai/guardrails`
+(runtime — maintainer-approved jailbreak detection, server-only; its
+transitive OpenAI SDK must never be imported into client code); `drizzle-kit`,
 `vitest`, `@stryker-mutator/core`, `@stryker-mutator/vitest-runner`,
 `fast-check` (dev — property-based testing, maintainer-approved; the
 `@fast-check/vitest` connector stays optional, plain `fc.assert` in vitest
 tests is the house style).
-No auth libraries, no googleapis SDK, no OpenAI SDK, no CSS
-frameworks, no zod. UI copy uses the brand **Moderaty** — the string `yt-mod`
+No auth libraries, no googleapis SDK, no direct OpenAI SDK, no CSS
+frameworks, no direct zod dependency. UI copy uses the brand **Moderaty** — the string `yt-mod`
 must not appear in `src/`.
+
+The Jailbreak guardrail is an additional AI signal before moderation and tone
+scoring: allowlisted and rule-matched comments bypass it, while other comments
+are screened with their explicitly resolved organization key. Flagged comments
+are held for human review, never auto-rejected or deleted. Detector failures
+queue through `aiUnavailable`; deadline expiry aborts the run instead. The
+optional `OPENAI_JAILBREAK_MODEL` defaults to `gpt-4.1-mini`.
 
 ## Environments
 

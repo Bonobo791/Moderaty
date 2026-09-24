@@ -138,6 +138,7 @@ the site exists), local work, and outage recovery.
   | `TURSO_AUTH_TOKEN` | from step 1 |
   | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google Cloud OAuth client (Web) |
   | `OPENAI_API_KEY` | for AI scoring |
+  | `OPENAI_JAILBREAK_MODEL` | optional prompt-injection detector model; defaults to `gpt-4.1-mini` |
   | `STRIPE_SECRET_KEY` | Stripe API secret key (live mode) |
   | `STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret |
   | `STRIPE_PRICE_CREDITS_100` / `STRIPE_PRICE_CREDITS_500` / `STRIPE_PRICE_CREDITS_2000` | Stripe Price IDs for the three credit bundles (active, one-time, USD — auto top-up validates all three) |

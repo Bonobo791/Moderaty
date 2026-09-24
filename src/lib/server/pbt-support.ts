@@ -40,6 +40,14 @@ export const PBT_WIPE = [
  * $env/dynamic/private at import time).
  */
 export function createPipelineMocks() {
+	vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+		if (String(input) !== 'https://api.openai.com/v1/chat/completions') {
+			throw new Error('unexpected external request in pipeline property tests');
+		}
+		return new Response(JSON.stringify({
+			choices: [{ message: { content: JSON.stringify({ flagged: false, confidence: 0.1 }) } }]
+		}), { status: 200 });
+	}));
 	return {
 		env: { DRY_RUN: 'false', FC_NUM_RUNS: process.env.FC_NUM_RUNS } as Record<
 			string,

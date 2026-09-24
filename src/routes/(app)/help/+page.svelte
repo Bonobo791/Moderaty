@@ -8,9 +8,11 @@
 <div class="card">
 	<h2>How it works</h2>
 	<p>
-		Moderaty scans new comments on your connected YouTube channels, scores them against your
-		rules and sensitivity setting, and acts: hold for review, reject, delete, or ban the author.
-		Uncertain comments land in the channel's review queue instead — nothing there is public yet.
+		Moderaty scans new comments on your connected YouTube channels. Comments that need AI scoring
+		are screened first for possible prompt-injection attacks; flagged comments go to the review
+		queue without moderation scoring. Other comments are scored against your rules and sensitivity
+		setting, then held, rejected, deleted, or used to ban the author. Queued comments may remain
+		public on YouTube until their hold is confirmed.
 	</p>
 </div>
 

@@ -1,8 +1,3 @@
-// Moderaty — YouTube Comment Auto-Moderation Tool
-// Copyright (C) 2026 Andrew Philip Weilbacher
-//
-// Licensed under the PolyForm Shield License 1.0.0; see LICENSE.
-
 import type { loadHandleSet } from '$lib/server/allowlist';
 import type { moderationActions } from '$lib/server/db/schema';
 import type { prepareRules } from '$lib/server/rules';

@@ -1,8 +1,3 @@
-// Moderaty — YouTube Comment Auto-Moderation Tool
-// Copyright (C) 2026 Andrew Philip Weilbacher
-//
-// Licensed under the PolyForm Shield License 1.0.0; see LICENSE.
-
 // MOD-11 — the locale contract: only surfaces whose user-facing copy is
 // fully translated for every supported locale may offer the selector and
 // resolve the stored preference. The landing, the signed-in app, and the

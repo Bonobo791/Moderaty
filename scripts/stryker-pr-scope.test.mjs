@@ -1,18 +1,3 @@
-// Moderaty — YouTube Comment Auto-Moderation Tool
-// Copyright (C) 2026 Andrew Philip Weilbacher
-//
-// Licensed under the PolyForm Shield License 1.0.0; you may not use
-// this file except in compliance with the License. You may obtain a
-// copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
-//
-// The software is provided "as is", without warranty or condition of
-// any kind, express or implied. See the License for the specific
-// language governing permissions and limitations under the License.
-// A copy of the License is included in the LICENSE file at the
-// repository root.
-//
-// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
-
 // The scope filter must mirror the mutate globs in stryker.config.json:
 // passing --mutate on the CLI OVERRIDES the config, so any file the filter
 // lets through gets mutated even if the config excludes it (PR #103 review).

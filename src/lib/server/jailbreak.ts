@@ -67,7 +67,7 @@ function jailbreakBundle(): GuardrailBundle {
 function validInfo(result: GuardrailResult): GuardrailResult['info'] {
 	const info = result.info;
 	if (!info || typeof info !== 'object' || Array.isArray(info) || info.guardrail_name !== 'Jailbreak') {
-		throw new Error(ERR_RESULT_INFO);
+		throw new TypeError(ERR_RESULT_INFO);
 	}
 	return info;
 }
@@ -87,18 +87,18 @@ function hasVerdictFields(result: GuardrailResult, info: GuardrailResult['info']
 
 function validatedVerdict(result: GuardrailResult): { flagged: boolean; confidence: number } {
 	const info = validInfo(result);
-	if (!hasVerdictFields(result, info)) throw new Error(ERR_RESULT_FIELDS);
+	if (!hasVerdictFields(result, info)) throw new TypeError(ERR_RESULT_FIELDS);
 	if (result.tripwireTriggered !== (info.flagged && info.confidence >= CONFIDENCE_THRESHOLD)) {
-		throw new Error(ERR_TRIPWIRE);
+		throw new TypeError(ERR_TRIPWIRE);
 	}
 	return { flagged: info.flagged && info.confidence >= CONFIDENCE_THRESHOLD, confidence: info.confidence };
 }
 
 function validateResults(results: GuardrailResult[]): { flagged: boolean; confidence: number } {
-	if (!Array.isArray(results) || results.length !== 1) throw new Error(ERR_RESULT_COUNT);
+	if (!Array.isArray(results) || results.length !== 1) throw new TypeError(ERR_RESULT_COUNT);
 	const result = results[0];
 	if (!result || typeof result !== 'object' || result.executionFailed === true) {
-		throw new Error(ERR_EXECUTION);
+		throw new TypeError(ERR_EXECUTION);
 	}
 	return validatedVerdict(result);
 }
@@ -108,7 +108,7 @@ export async function detectJailbreak(
 	apiKey: string,
 	deadline?: number
 ): Promise<{ flagged: boolean; confidence: number }> {
-	if (!apiKey) throw new Error(ERR_KEY_REQUIRED);
+	if (!apiKey) throw new TypeError(ERR_KEY_REQUIRED);
 	assertBeforeDeadline(deadline);
 
 	let results: GuardrailResult[];

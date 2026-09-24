@@ -44,7 +44,7 @@ export const PBT_WIPE = [
 export function createPipelineMocks() {
 	vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
 		if (String(input) !== 'https://api.openai.com/v1/chat/completions') {
-			throw new Error(UNEXPECTED_EXTERNAL_REQUEST);
+			throw new TypeError(UNEXPECTED_EXTERNAL_REQUEST);
 		}
 		return new Response(JSON.stringify({
 			choices: [{ message: { content: JSON.stringify({ flagged: false, confidence: 0.1 }) } }]

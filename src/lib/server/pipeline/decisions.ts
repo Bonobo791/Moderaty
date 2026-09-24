@@ -122,7 +122,7 @@ async function aiDecision(
 ): Promise<Decision> {
 	let moderation: Awaited<ReturnType<typeof scoreComment>>;
 	try {
-		if (!openAiKey) throw new Error(ERR_KEY_REQUIRED);
+		if (!openAiKey) throw new TypeError(ERR_KEY_REQUIRED);
 		const jailbreak = await detectJailbreak(comment.text, openAiKey, deadline);
 		if (jailbreak.flagged) {
 			return {

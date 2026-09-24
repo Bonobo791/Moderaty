@@ -138,11 +138,7 @@ export const actions = {
 		const source = await evidenceSource(params.id, evidenceId);
 		if (!source) {
 			console.error('feedback evidence source unavailable:', { channelId: params.id, evidenceId, userId: user.id });
-			return fail(404, {
-				scope: 'reveal',
-				evidenceId,
-				error: 'The original comment is no longer available.'
-			});
+			return fail(404, { scope: 'reveal', evidenceId, error: 'The original comment is no longer available.' });
 		}
 		if (source.hasAbuse === 1 && form.get('confirmedAbuse') !== 'yes') {
 			return { scope: 'reveal', evidenceId, confirmationRequired: true };

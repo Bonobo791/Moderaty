@@ -1,19 +1,3 @@
-<!--
-# Moderaty — YouTube Comment Auto-Moderation Tool
-# Copyright (C) 2026 Andrew Philip Weilbacher
-
-Licensed under the PolyForm Shield License 1.0.0; you may not use
-this file except in compliance with the License. You may obtain a
-copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
-
-The software is provided "as is", without warranty or condition of
-any kind, express or implied. See the License for the specific
-language governing permissions and limitations under the License.
-A copy of the License is included in the LICENSE file at the
-repository root.
-
-Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
--->
 <p>
 	Prepared in accordance with the Brazilian General Data Protection Law (Lei no 13.709/2018 —
 	LGPD), the Marco Civil da Internet (Lei no 12.965/2014), and the Digital Statute of Children
@@ -419,15 +403,19 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		<tbody>
 			<tr>
 				<td>Name / Company: ______________________________</td>
-				<td>Name / Company: ______________________________</td>
+				<td>Name / Company: Advanced Digital Marketing LTDA</td>
 			</tr>
 			<tr>
 				<td>CNPJ / Tax ID (if any): _______________________</td>
-				<td>CNPJ: ______________________________________</td>
+				<td>CNPJ: 68.425.709/0001-72</td>
 			</tr>
 			<tr>
 				<td>E-mail for notices: __________________________</td>
-				<td>E-mail for notices: __________________________</td>
+				<td>E-mail for notices: contact@Moderaty.com</td>
+			</tr>
+			<tr>
+				<td>Registered address: __________________________</td>
+				<td>Registered address: Avenida Paulista 777 ANDAR 15 CONJ 15 SALA 3408 SAO PAULO, SP BRASIL</td>
 			</tr>
 			<tr>
 				<td>Signature: __________________________________</td>

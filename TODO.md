@@ -61,7 +61,7 @@ re-evaluate on the next `dev → main` merge.
       webhooks. A provider-neutral checkout seam lives in
       `src/lib/server/billing/providers.ts`; full refund/dispute reconciliation
       is now covered for Mercado Pago, while auto top-up remains Stripe-only.
-- [ ] Replace legal operator placeholders (`[legal name]`, CNPJ, and address)
+- [x] Replace legal operator placeholders (`[legal name]`, CNPJ, and address)
       in Terms and Privacy before production launch.
 
 ## Deferred quality refactors (low value; keep the suite green)

@@ -1,18 +1,3 @@
-// Moderaty — YouTube Comment Auto-Moderation Tool
-// Copyright (C) 2026 Andrew Philip Weilbacher
-//
-// Licensed under the PolyForm Shield License 1.0.0; you may not use
-// this file except in compliance with the License. You may obtain a
-// copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
-//
-// The software is provided "as is", without warranty or condition of
-// any kind, express or implied. See the License for the specific
-// language governing permissions and limitations under the License.
-// A copy of the License is included in the LICENSE file at the
-// repository root.
-//
-// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
-
 export type LegalTocEntry = { id: string; label: string };
 
 export type LegalDoc = {
@@ -69,7 +54,7 @@ export const LEGAL_EFFECTIVE_DATE = '22 October 2026';
 // 1.5: Terms §6.1(c) corrected — the lifetime hosted plan has no per-account
 // key flow (hosted scoring runs on the deployment's OPENAI_API_KEY), so the
 // "your own OpenAI key" promise was removed from the lifetime clause.
-export const LEGAL_VERSION = '1.12';
+export const LEGAL_VERSION = '1.13';
 export const LEGAL_KICKER = 'YouTube Comment Moderation Service';
 
 /**

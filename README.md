@@ -173,7 +173,7 @@ Moderaty is source-available under a dual-license model:
   not permitted by the PolyForm Shield License.
 
 For commercial licensing, contact
-[contact@AdvancedDigitalMarketingLTDA.com](mailto:contact@AdvancedDigitalMarketingLTDA.com).
+[contact@Moderaty.com](mailto:contact@Moderaty.com).
 
 See [COMMERCIAL.md](COMMERCIAL.md).
 

@@ -1,18 +1,3 @@
-// Moderaty — YouTube Comment Auto-Moderation Tool
-// Copyright (C) 2026 Andrew Philip Weilbacher
-//
-// Licensed under the PolyForm Shield License 1.0.0; you may not use
-// this file except in compliance with the License. You may obtain a
-// copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
-//
-// The software is provided "as is", without warranty or condition of
-// any kind, express or implied. See the License for the specific
-// language governing permissions and limitations under the License.
-// A copy of the License is included in the LICENSE file at the
-// repository root.
-//
-// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
-
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { PRIVACY_NOTICE_TEXT, REFUND_NOTICE_TEXT, AUTO_TOPUP_CONSENT_TEXT } from '../server/legal';
@@ -40,13 +25,12 @@ function readRoute(slug: string, file: string): string {
 describe('LEGAL_DOCS', () => {
 	it('material Terms changes always ship under a NEW legal version', () => {
 		// 1.10 was the PolyForm license swap; 1.11 was the lifetime-BYOK
-		// requirement; 1.12 is the digest credit disclosure — §6.1(d) now
-		// states an enabled feedback digest consumes a credit per classified
-		// comment — exactly the "material legal-doc change" that must bump
-		// LEGAL_VERSION so the re-consent gate (hasCurrentConsent) routes
-		// every user back through /consent. Never let legal changes ride
+		// requirement; 1.12 was the digest credit disclosure; 1.13 identifies
+		// the legal operator and updates its contact details. Material changes
+		// must bump LEGAL_VERSION so the re-consent gate (hasCurrentConsent)
+		// routes every user back through /consent. Never let legal changes ride
 		// along under an old version.
-		expect(LEGAL_VERSION).toBe('1.12');
+		expect(LEGAL_VERSION).toBe('1.13');
 	});
 
 	it('lists exactly the three published legal documents', () => {
@@ -133,6 +117,71 @@ describe('legal page content (PR #35 review)', () => {
 		for (const doc of LEGAL_DOCS) {
 			expect(readRoute(doc.slug, '+page.ts')).toContain('export const prerender = true');
 		}
+	});
+});
+
+describe('legal operator identity', () => {
+	it('publishes the operator legal identity and contact details', () => {
+		const terms = readComponent('terms');
+		const terms11 = terms.match(/<p><strong>1\.1<\/strong>([\s\S]*?)<\/p>/)?.[1] ?? '';
+		const terms21 = terms.slice(terms.indexOf('<h2 id="s21">'));
+		const privacy = readComponent('privacy');
+		const privacy11 = privacy.match(/<p><strong>1\.1<\/strong>([\s\S]*?)<\/p>/)?.[1] ?? '';
+		const privacy13 = privacy.match(/<p><strong>1\.3<\/strong>([\s\S]*?)<\/p>/)?.[1] ?? '';
+		const privacy102 = privacy.match(/<p><strong>10\.2<\/strong>([\s\S]*?)<\/p>/)?.[1] ?? '';
+		const company = 'Advanced Digital Marketing LTDA';
+		const cnpj = '68.425.709/0001-72';
+		const address = 'Avenida Paulista 777 ANDAR 15 CONJ 15 SALA 3408 SAO PAULO, SP BRASIL';
+		const contact = 'contact@Moderaty.com';
+
+		expect(terms11).not.toMatch(/sole proprietorship/i);
+		expect(terms21).toContain(`Service operator: ${company}`);
+		expect(terms21).toContain(`CNPJ ${cnpj}`);
+		expect(terms21).toContain(address);
+		expect(terms21.match(new RegExp(`<a href="mailto:${contact}">${contact}<\\/a>`, 'g'))).toHaveLength(2);
+		expect(terms21).not.toContain('contact@AdvancedDigitalMarketingLTDA.com');
+		expect(terms21).toContain('Andrew Philip Weilbacher');
+		expect(terms21).not.toMatch(/\[(legal name|number|address)\]|sole proprietorship/i);
+
+		expect(privacy11).toContain(company);
+		expect(privacy11).toContain(cnpj);
+		expect(privacy11).toContain(address);
+		expect(privacy11).not.toMatch(/\[(legal name|number|address)\]|sole proprietorship/i);
+		for (const paragraph of [privacy13, privacy102]) {
+			expect(paragraph).toContain(`<a href="mailto:${contact}">${contact}</a>`);
+			expect(paragraph).not.toContain('contact@AdvancedDigitalMarketingLTDA.com');
+		}
+
+		const dpa = readComponent('dpa');
+		const signature = dpa.slice(dpa.indexOf('<h2 id="signature">'), dpa.indexOf('<h2 id="annex-1">'));
+		const signatureRows = Array.from(
+			signature.matchAll(/<tr>\s*<td>([^<]*)<\/td>\s*<td>([^<]*)<\/td>\s*<\/tr>/g),
+			(row) => [row[1] ?? '', row[2] ?? '']
+		);
+		expect(signatureRows).toContainEqual([
+			'Name / Company: ______________________________',
+			`Name / Company: ${company}`
+		]);
+		expect(signatureRows).toContainEqual([
+			'CNPJ / Tax ID (if any): _______________________',
+			`CNPJ: ${cnpj}`
+		]);
+		expect(signatureRows).toContainEqual([
+			'E-mail for notices: __________________________',
+			`E-mail for notices: ${contact}`
+		]);
+		expect(signatureRows).toContainEqual([
+			'Registered address: __________________________',
+			`Registered address: ${address}`
+		]);
+		for (const field of ['Signature', 'Name', 'Title', 'Date']) {
+			expect(signature.match(new RegExp(`<td>${field}: _+<\\/td>`, 'g'))).toHaveLength(2);
+		}
+
+		expect(readFileSync(new URL('../../../COMMERCIAL.md', import.meta.url), 'utf8')).toContain(contact);
+		expect(readFileSync(new URL('../../../README.md', import.meta.url), 'utf8')).toContain(
+			`[${contact}](mailto:${contact})`
+		);
 	});
 });
 

@@ -1,8 +1,3 @@
-// Moderaty — YouTube Comment Auto-Moderation Tool
-// Copyright (C) 2026 Andrew Philip Weilbacher
-//
-// Licensed under the PolyForm Shield License 1.0.0; see LICENSE.
-
 /**
  * The moderation-sensitivity levels a channel supports. Level 1 scores every
  * comment with the omni classifier only; level 2 adds the tone pass, which

@@ -1,8 +1,3 @@
-// Moderaty — YouTube Comment Auto-Moderation Tool
-// Copyright (C) 2026 Andrew Philip Weilbacher
-//
-// Licensed under the PolyForm Shield License 1.0.0; see LICENSE.
-
 import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { maybeTriggerAutoTopUp } from '$lib/server/billing/autotopup';
 import { db } from '$lib/server/db';

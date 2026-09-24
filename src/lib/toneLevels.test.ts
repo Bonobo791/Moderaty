@@ -1,8 +1,3 @@
-// Moderaty — YouTube Comment Auto-Moderation Tool
-// Copyright (C) 2026 Andrew Philip Weilbacher
-//
-// Licensed under the PolyForm Shield License 1.0.0; see LICENSE.
-
 // The shared tone-level representation (MOD-14): the type, the canonical
 // list, and the boundary guard must never disagree — a level added to
 // TONE_LEVELS widens ToneLevel, so a guard that re-hardcodes the members

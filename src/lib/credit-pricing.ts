@@ -1,16 +1,3 @@
-// Moderaty — YouTube Comment Auto-Moderation Tool
-// Copyright (C) 2026 Advanced Digital Marketing LTDA
-//
-// Licensed under the PolyForm Shield License 1.0.0; you may not use
-// this file except in compliance with the License. You may obtain a
-// copy of the License at <https://polyformproject.org/licenses/shield/1.0.0>.
-//
-// The software is provided "as is", without warranty or condition of
-// any kind, express or implied. See the License for the specific
-// language governing permissions and limitations under the License.
-//
-// Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIAL.md
-
 // Volume pricing for top-up credits — the single source for BOTH the Stripe
 // bundle catalog (src/lib/server/stripe/bundles.ts) and the landing cost
 // calculators (src/lib/landing/cost.ts), so the cut a bundle advertises and

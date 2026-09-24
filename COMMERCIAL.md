@@ -56,7 +56,7 @@ Commercial licenses may permit:
 
 Commercial licensing:
 
-contact@AdvancedDigitalMarketingLTDA.com
+contact@Moderaty.com
 
 ## Official Hosted Service
 

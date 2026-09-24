@@ -19,7 +19,7 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 
 <h2 id="s1">1. Agreement and Acceptance</h2>
 
-<p><strong>1.1</strong> These Terms of Service (Terms) are a binding contract between you (you, the User) and the operator of the Moderaty service identified in Section 21 (Moderaty, we, us), a sole proprietorship registered in Brazil. They govern your access to and use of Moderaty, a web-based YouTube comment moderation service (the Service).</p>
+<p><strong>1.1</strong> These Terms of Service (Terms) are a binding contract between you (you, the User) and the operator of the Moderaty service identified in Section 21 (Moderaty, we, us). They govern your access to and use of Moderaty, a web-based YouTube comment moderation service (the Service).</p>
 
 <p><strong>1.2</strong> You accept these Terms by ticking the acceptance checkbox at sign-up, by making a purchase, or by using the Service. The full text of these Terms is made available to you before acceptance, and you can download or print it. If you do not agree, do not use the Service.</p>
 
@@ -190,8 +190,8 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 
 <h2 id="s21">21. Contact and Data Protection Officer</h2>
 
-<p>Service operator: [legal name], sole proprietorship, CNPJ [number], registered address [address], Brazil.</p>
+<p>Service operator: Advanced Digital Marketing LTDA, CNPJ 68.425.709/0001-72, registered address Avenida Paulista 777 ANDAR 15 CONJ 15 SALA 3408 SAO PAULO, SP BRASIL.</p>
 
-<p>Support and notices: <a href="mailto:contact@AdvancedDigitalMarketingLTDA.com">contact@AdvancedDigitalMarketingLTDA.com</a>, or the <a href="/contact">contact form</a> on our site.</p>
+<p>Support and notices: <a href="mailto:contact@Moderaty.com">contact@Moderaty.com</a>, or the <a href="/contact">contact form</a> on our site.</p>
 
-<p>Data Protection Officer (Encarregado de Proteção de Dados): Andrew Philip Weilbacher, <a href="mailto:contact@AdvancedDigitalMarketingLTDA.com">contact@AdvancedDigitalMarketingLTDA.com</a>.</p>
+<p>Data Protection Officer (Encarregado de Proteção de Dados): Andrew Philip Weilbacher, <a href="mailto:contact@Moderaty.com">contact@Moderaty.com</a>.</p>

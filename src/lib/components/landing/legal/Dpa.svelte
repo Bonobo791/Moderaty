@@ -419,15 +419,19 @@ Commercial licensing: contact@AdvancedDigitalMarketingLTDA.com — see COMMERCIA
 		<tbody>
 			<tr>
 				<td>Name / Company: ______________________________</td>
-				<td>Name / Company: ______________________________</td>
+				<td>Name / Company: Advanced Digital Marketing LTDA</td>
 			</tr>
 			<tr>
 				<td>CNPJ / Tax ID (if any): _______________________</td>
-				<td>CNPJ: ______________________________________</td>
+				<td>CNPJ: 68.425.709/0001-72</td>
 			</tr>
 			<tr>
 				<td>E-mail for notices: __________________________</td>
-				<td>E-mail for notices: __________________________</td>
+				<td>E-mail for notices: contact@Moderaty.com</td>
+			</tr>
+			<tr>
+				<td>Registered address: __________________________</td>
+				<td>Registered address: Avenida Paulista 777 ANDAR 15 CONJ 15 SALA 3408 SAO PAULO, SP BRASIL</td>
 			</tr>
 			<tr>
 				<td>Signature: __________________________________</td>

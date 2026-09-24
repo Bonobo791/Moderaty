@@ -6,6 +6,8 @@
 import { render } from 'svelte/server';
 import { describe, expect, it } from 'vitest';
 
+import { concealEvidence } from '$lib/server/feedbackSanitize';
+
 import Page from './+page.svelte';
 
 const SETTINGS = { enabled: true, cadence: 'weekly', categories: ['question', 'criticism'], threshold: 3 };
@@ -82,5 +84,116 @@ describe('feedback page deferred banner (SSR)', () => {
 			})
 		);
 		expect(body).not.toContain('out of credits');
+	});
+});
+
+const POPULATED_FINDINGS = [
+	{
+		id: 11,
+		category: 'question',
+		summary: 'Two viewers asked when the next stream starts',
+		supporterCount: 2,
+		evidence: [
+			{ id: 101, sanitizedExcerpt: 'When does the stream start?', hasAbuse: 0 },
+			{ id: 102, sanitizedExcerpt: 'What time is the next stream?', hasAbuse: 0 }
+		]
+	},
+	{
+		id: 12,
+		category: 'correction',
+		summary: 'Three viewers corrected the episode number',
+		supporterCount: 3,
+		evidence: [{ id: 103, sanitizedExcerpt: 'This is episode four, not five.', hasAbuse: 0 }]
+	}
+];
+
+function populatedData(findings: unknown[] = POPULATED_FINDINGS) {
+	const latest = { ...COMPLETE_DIGEST, pooledCount: 0 };
+	return pageData({ digests: [latest], latest, findings });
+}
+
+describe('feedback page I12 states (SSR)', () => {
+	it('renders a loading skeleton without settings controls while digest data is unresolved', () => {
+		const body = renderFeedback(pageData({ digests: undefined }));
+		expect(body).toContain('aria-busy="true"');
+		expect(body).toContain('aria-label="Loading"');
+		expect(body).not.toContain('action="?/settings"');
+	});
+
+	it('renders both empty states for no digest and a complete digest with no recurring feedback', () => {
+		const noDigest = renderFeedback(pageData());
+		expect(noDigest).toContain('No digest yet');
+
+		const latest = { ...COMPLETE_DIGEST, pooledCount: 0 };
+		const noFindings = renderFeedback(pageData({ digests: [latest], latest }));
+		expect(noFindings).toContain('No recurring feedback this window');
+	});
+
+	it('renders form and newest-run errors as accessible error boxes', () => {
+		const formError = renderFeedback(pageData(), { error: 'boom' });
+		expect(formError).toMatch(/class="[^"]*error-box[^"]*" role="alert">boom<\/div>/);
+
+		const failed = { ...COMPLETE_DIGEST, id: 8, status: 'failed', error: 'scoring' };
+		const failedRun = renderFeedback(pageData({ digests: [failed] }));
+		expect(failedRun).toContain('Latest digest run failed');
+	});
+
+	it('renders populated findings by category with collapsed evidence and generation time', () => {
+		const body = renderFeedback(populatedData());
+		expect(body).toContain('Recurring questions');
+		expect(body).toContain('Corrections');
+		expect(body).toContain('Two viewers asked when the next stream starts');
+		expect(body).toContain('Three viewers corrected the episode number');
+		expect(body).toContain('<details');
+		expect(body).toContain('Show 2 supporting comments');
+		expect(body).toContain('· generated ');
+	});
+});
+
+describe('feedback evidence concealment and reveal fallback (SSR)', () => {
+	const raw = 'you fucking idiot, the audio at 3:00 is blown out';
+	const evidenceId = 201;
+	const finding = {
+		id: 21,
+		category: 'criticism',
+		summary: 'Two viewers reported blown-out audio',
+		supporterCount: 2,
+		evidence: [
+			{
+				id: evidenceId,
+				sanitizedExcerpt: concealEvidence(raw, { hasAbuse: true }).text,
+				hasAbuse: 1
+			}
+		]
+	};
+
+	it('never SSRs abusive raw evidence by default and labels its targeted reveal control', () => {
+		const body = renderFeedback(populatedData([finding]));
+		expect(body).not.toContain('fucking');
+		expect(body).not.toContain('idiot');
+		expect(body).not.toContain(raw);
+		expect(body).toContain('aria-label="Show original comment 1 for “Two viewers reported blown-out audio”"');
+	});
+
+	it('renders a successful no-JS reveal for only the matching evidence item', () => {
+		const body = renderFeedback(populatedData([finding]), {
+			scope: 'reveal',
+			evidenceId,
+			text: 'RAW ORIGINAL'
+		});
+		expect(body.match(/RAW ORIGINAL/g)).toHaveLength(1);
+		expect(body).toContain('aria-label="Hide original comment 1 for “Two viewers reported blown-out audio”"');
+		expect(body).not.toMatch(/class="[^"]*error-box[^"]*" role="alert"/);
+	});
+
+	it('renders a no-JS reveal failure inline instead of in the page-level banner', () => {
+		const body = renderFeedback(populatedData([finding]), {
+			scope: 'reveal',
+			evidenceId,
+			error: 'The original comment is no longer available.'
+		});
+		expect(body).toMatch(/class="[^"]*reveal-error[^"]*" role="alert">The original comment is no longer available\.<\/div>/);
+		expect(body.match(/The original comment is no longer available\./g)).toHaveLength(1);
+		expect(body.indexOf('reveal-error')).toBeGreaterThan(body.indexOf('class="evidence'));
 	});
 });

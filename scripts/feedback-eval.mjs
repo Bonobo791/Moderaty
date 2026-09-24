@@ -88,6 +88,32 @@ export function abuseLeaks(rawText, verdict) {
 	return leaks;
 }
 
+/**
+ * Per-category precision and recall over (expected, predicted) category
+ * pairs. A denominator of zero yields null — "no data" is reported as n/a,
+ * never disguised as a perfect or zero score.
+ *
+ * @param {{ expected: string, predicted: string }[]} pairs
+ * @returns {Record<string, { tp: number, predicted: number, expected: number, precision: number | null, recall: number | null }>}
+ */
+export function categoryMetrics(pairs) {
+	/** @type {Record<string, { tp: number, predicted: number, expected: number, precision: number | null, recall: number | null }>} */
+	const out = {};
+	for (const category of FEEDBACK_CATEGORIES) {
+		const tp = pairs.filter((p) => p.expected === category && p.predicted === category).length;
+		const predicted = pairs.filter((p) => p.predicted === category).length;
+		const expected = pairs.filter((p) => p.expected === category).length;
+		out[category] = {
+			tp,
+			predicted,
+			expected,
+			precision: predicted ? tp / predicted : null,
+			recall: expected ? tp / expected : null
+		};
+	}
+	return out;
+}
+
 /** One live classification, same request shape as feedback.ts. */
 async function classify(text, apiKey, model) {
 	const tag = `data-${randomBytes(8).toString('hex')}`;
@@ -125,6 +151,7 @@ async function main() {
 
 	let failures = 0;
 	const classified = [];
+	const pairs = [];
 	for (const testCase of FEEDBACK_CORPUS) {
 		let verdict;
 		try {
@@ -134,6 +161,7 @@ async function main() {
 			console.log(`FAIL  "${testCase.text.slice(0, 50)}"  (${testCase.note}) — ${e.message}`);
 			continue;
 		}
+		pairs.push({ expected: testCase.expected.category, predicted: verdict.category });
 		const faithful =
 			verdict.category === testCase.expected.category && verdict.hasAbuse === testCase.expected.hasAbuse;
 		const leaks = abuseLeaks(testCase.text, verdict);
@@ -161,6 +189,14 @@ async function main() {
 			console.log(`LEAK  summary contains an abuse term: ${JSON.stringify(finding.summary)}`);
 		}
 	}
+	const pct = (v) => (v === null ? 'n/a' : `${(v * 100).toFixed(1)}%`);
+	console.log('\nper-category classification (over successfully parsed cases):');
+	for (const [category, m] of Object.entries(categoryMetrics(pairs))) {
+		console.log(
+			`  ${category.padEnd(10)} precision=${pct(m.precision)} (${m.tp}/${m.predicted})  recall=${pct(m.recall)} (${m.tp}/${m.expected})`
+		);
+	}
+
 	if (groupLeaks) fail(`${groupLeaks} finding summary(ies) leak abuse terms`);
 
 	if (failures) fail(`${failures}/${FEEDBACK_CORPUS.length} case(s) failed faithfulness or leaked abuse`);

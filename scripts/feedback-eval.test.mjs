@@ -4,12 +4,12 @@ import { expect, test } from 'vitest';
 import { FEEDBACK_CATEGORIES } from '../src/lib/server/feedbackPrompt.js';
 import { concealEvidence, redactAbuse } from '../src/lib/server/feedbackSanitize.js';
 import { FEEDBACK_CORPUS } from './feedback-corpus.mjs';
-import { abuseLeaks, parseVerdict } from './feedback-eval.mjs';
+import { abuseLeaks, categoryMetrics, parseVerdict } from './feedback-eval.mjs';
 
 // ---- corpus sanity (MOD-87) ----
 
 test('the corpus covers every category in both languages, clean and abusive', () => {
-	expect(FEEDBACK_CORPUS.length).toBeGreaterThanOrEqual(30);
+	expect(FEEDBACK_CORPUS.length).toBeGreaterThanOrEqual(100);
 	const cells = new Set(FEEDBACK_CORPUS.map((c) => `${c.lang}:${c.expected.category}:${c.expected.hasAbuse}`));
 	for (const lang of ['en', 'pt']) {
 		for (const category of ['question', 'criticism', 'correction', 'request']) {
@@ -108,6 +108,29 @@ test('abuseLeaks accepts a fully-clean verdict', () => {
 		claim: 'when is the next video'
 	});
 	expect(leaks).toEqual([]);
+});
+
+// ---- categoryMetrics (MOD-93 precision/recall) ----
+
+test('categoryMetrics computes per-category precision and recall from the confusion counts', () => {
+	const m = categoryMetrics([
+		{ expected: 'question', predicted: 'question' },
+		{ expected: 'question', predicted: 'none' },
+		{ expected: 'criticism', predicted: 'question' },
+		{ expected: 'criticism', predicted: 'criticism' },
+		{ expected: 'criticism', predicted: 'criticism' },
+		{ expected: 'none', predicted: 'none' }
+	]);
+	expect(m.question).toEqual({ tp: 1, predicted: 2, expected: 2, precision: 0.5, recall: 0.5 });
+	expect(m.criticism).toEqual({ tp: 2, predicted: 2, expected: 3, precision: 1, recall: 2 / 3 });
+	expect(m.none).toEqual({ tp: 1, predicted: 2, expected: 1, precision: 0.5, recall: 1 });
+});
+
+test('categoryMetrics reports n/a (null), not 0 or 1, when a category has no predictions or labels', () => {
+	const m = categoryMetrics([{ expected: 'question', predicted: 'none' }]);
+	expect(m.question).toEqual({ tp: 0, predicted: 0, expected: 1, precision: null, recall: 0 });
+	expect(m.correction).toEqual({ tp: 0, predicted: 0, expected: 0, precision: null, recall: null });
+	expect(Object.keys(m).sort()).toEqual([...FEEDBACK_CATEGORIES].sort());
 });
 
 // ---- shared-module contract (same guard as tone-eval's) ----

@@ -1,6 +1,6 @@
 <!-- Feedback digest: recurring questions, criticism, corrections, and
-	 requests grouped from comments — supporting evidence is the sanitized
-	 excerpt only; abusive wording never reaches this page (MOD-71/72). -->
+	 requests grouped from comments — supporting evidence stays concealed
+	 unless a viewer explicitly reveals the original for this visit (MOD-71/72). -->
 
 <script lang="ts">
 	import { enhance } from '$app/forms';
@@ -9,10 +9,28 @@
 	import { relativeTime } from '$lib/relative-time';
 
 	let { data, form } = $props();
+	const revealForm = $derived(
+		form as { scope?: string; evidenceId?: number; text?: string; error?: string } | null | undefined
+	);
 
 	// In-flight guard for Generate now — a double-submit would race the
 	// lease claim into a spurious 409 and could spend twice before it lands.
 	let generating = $state(false);
+	let revealedEvidence = $state<Record<number, string>>({});
+	let hiddenEvidence = $state<Record<number, boolean>>({});
+	let revealErrors = $state<Record<number, string>>({});
+
+	function withoutKey<T>(record: Record<number, T>, id: number): Record<number, T> {
+		const { [id]: removed, ...rest } = record;
+		void removed;
+		return rest;
+	}
+
+	function hideOriginal(id: number): void {
+		revealedEvidence = withoutKey(revealedEvidence, id);
+		hiddenEvidence = { ...hiddenEvidence, [id]: true };
+		revealErrors = withoutKey(revealErrors, id);
+	}
 
 	const CATEGORY_LABELS: Record<string, string> = {
 		question: 'Recurring questions',
@@ -66,8 +84,8 @@
 {#if data.maintenance || data.digests === undefined}
 	<Skeleton rows={3} />
 {:else}
-	{#if form?.error}<div class="error-box" role="alert">{form.error}</div>{/if}
-	{#if form?.message}<div class="flash" role="status">{form.message}</div>{/if}
+	{#if form?.scope !== 'reveal' && form?.error}<div class="error-box" role="alert">{form.error}</div>{/if}
+	{#if form?.scope !== 'reveal' && form?.message}<div class="flash" role="status">{form.message}</div>{/if}
 
 	{#if !data.settings.enabled}
 		<div class="card">
@@ -122,7 +140,7 @@
 			{#if data.latest}
 				<p class="muted">
 					Window {windowLabel(data.latest)} · {data.latest.commentsClassified} classified{#if data.latest.commentsFailed}
-						· {data.latest.commentsFailed} failed{/if}
+						· {data.latest.commentsFailed} failed{/if} · generated {relativeTime(data.latest.createdAt)}
 				</p>
 			{/if}
 		</div>
@@ -135,16 +153,71 @@
 						<div class="finding">
 							<p class="finding-summary">{finding.summary}</p>
 							{#if finding.evidence.length}
-								<ul class="evidence-list">
-									{#each finding.evidence as e (e.id)}
-										<li class="evidence" class:concealed={e.hasAbuse === 1}>
-											<blockquote class="quote">{e.sanitizedExcerpt}</blockquote>
-											{#if e.hasAbuse === 1}
-												<span class="caps-label concealed-label">wording concealed</span>
-											{/if}
-										</li>
-									{/each}
-								</ul>
+								<details class="evidence-details">
+									<summary>
+										Show {finding.evidence.length} supporting comment{finding.evidence.length === 1 ? '' : 's'}<span class="sr-only"> for “{finding.summary}”</span>
+									</summary>
+									<ul class="evidence-list">
+										{#each finding.evidence as e, i (e.id)}
+											{@const serverOriginal = revealForm?.scope === 'reveal' && revealForm.evidenceId === e.id && revealForm.text ? revealForm.text : undefined}
+											{@const original = revealedEvidence[e.id] ?? (hiddenEvidence[e.id] ? undefined : serverOriginal)}
+											{@const serverError = revealForm?.scope === 'reveal' && revealForm.evidenceId === e.id && revealForm.error ? revealForm.error : undefined}
+											{@const revealError = revealErrors[e.id] ?? serverError}
+											<li class="evidence" class:concealed={e.hasAbuse === 1 && !original}>
+												<blockquote class="quote">{original ?? e.sanitizedExcerpt}</blockquote>
+												{#if original !== undefined}
+													<button
+														class="btn secondary small reveal-button"
+														type="button"
+														aria-label={`Hide original comment ${i + 1} for “${finding.summary}”`}
+														onclick={() => hideOriginal(e.id)}
+													>Hide original</button>
+												{:else}
+													{#if e.hasAbuse === 1}
+														<span class="caps-label concealed-label">wording concealed</span>
+													{/if}
+													<form
+														class="reveal-form"
+														method="POST"
+														action="?/reveal"
+														use:enhance={({ cancel }) => {
+															if (e.hasAbuse === 1 && !confirm('This comment contains abusive wording. Show it anyway?')) {
+																cancel();
+																return;
+															}
+															revealErrors = withoutKey(revealErrors, e.id);
+															return async ({ result }) => {
+																if (
+																	result.type === 'success' &&
+																	result.data?.evidenceId === e.id &&
+																	typeof result.data.text === 'string'
+																) {
+																	revealedEvidence = { ...revealedEvidence, [e.id]: result.data.text };
+																	hiddenEvidence = withoutKey(hiddenEvidence, e.id);
+																	return;
+																}
+																const message =
+																	result.type === 'failure' && typeof result.data?.error === 'string'
+																		? result.data.error
+																		: 'The original comment could not be shown.';
+																revealErrors = { ...revealErrors, [e.id]: message };
+															};
+														}}
+													>
+														<input type="hidden" name="evidenceId" value={e.id} />
+														<button
+															class="btn secondary small"
+															aria-label={`Show original comment ${i + 1} for “${finding.summary}”`}
+														>Show original comment</button>
+													</form>
+												{/if}
+												{#if revealError}
+													<div class="error-box reveal-error" role="alert">{revealError}</div>
+												{/if}
+											</li>
+										{/each}
+									</ul>
+								</details>
 							{/if}
 						</div>
 					{/each}
@@ -271,16 +344,30 @@
 		margin: 0 0 10px;
 		font-weight: 600;
 	}
+	.evidence-details summary {
+		cursor: pointer;
+		color: var(--text-2);
+		font-size: 14px;
+	}
 	.evidence-list {
 		list-style: none;
-		margin: 0;
+		margin: 12px 0 0;
 		padding: 0;
 		display: flex;
 		flex-direction: column;
-		gap: 10px;
+		gap: 14px;
 	}
 	.evidence .quote {
 		margin: 0;
+	}
+	.reveal-form {
+		margin-top: 8px;
+	}
+	.reveal-button {
+		margin-top: 8px;
+	}
+	.reveal-error {
+		margin: 8px 0 0;
 	}
 	.concealed .quote {
 		opacity: 0.75;

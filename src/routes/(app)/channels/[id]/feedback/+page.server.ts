@@ -2,7 +2,7 @@ import { and, asc, desc, eq, inArray, isNull, lt, or } from 'drizzle-orm';
 import { fail } from '@sveltejs/kit';
 
 import { db } from '$lib/server/db';
-import { channels, feedbackDigests, feedbackFindings, findingEvidence } from '$lib/server/db/schema';
+import { channels, comments, feedbackDigests, feedbackFindings, findingEvidence } from '$lib/server/db/schema';
 import { enabledCategories, generateFeedbackDigest, type DigestResult } from '$lib/server/feedbackDigest';
 import { ownedChannel, requireOrgRole } from '$lib/server/ownership';
 import { requireUser } from '$lib/server/session';
@@ -109,6 +109,38 @@ export async function load({ params, locals }) {
 }
 
 export const actions = {
+	reveal: async ({ params, request, locals }) => {
+		const user = requireUser(locals);
+		await ownedChannel(params.id, locals);
+		const form = await request.formData();
+		const evidenceId = Number(form.get('evidenceId'));
+		if (!Number.isSafeInteger(evidenceId) || evidenceId <= 0) {
+			return fail(400, { scope: 'reveal', error: 'Invalid evidence id.' });
+		}
+		const source = await db
+			.select({ text: comments.text })
+			.from(findingEvidence)
+			.innerJoin(feedbackFindings, eq(feedbackFindings.id, findingEvidence.findingId))
+			.innerJoin(feedbackDigests, eq(feedbackDigests.id, feedbackFindings.digestId))
+			.innerJoin(comments, eq(comments.id, findingEvidence.commentId))
+			.where(
+				and(
+					eq(findingEvidence.id, evidenceId),
+					eq(feedbackDigests.channelId, params.id),
+					eq(comments.channelId, params.id)
+				)
+			)
+			.get();
+		if (!source) {
+			console.error('feedback evidence source unavailable:', { channelId: params.id, evidenceId, userId: user.id });
+			return fail(404, {
+				scope: 'reveal',
+				evidenceId,
+				error: 'The original comment is no longer available.'
+			});
+		}
+		return { scope: 'reveal', evidenceId, text: source.text };
+	},
 	/** "Generate now" — a forced run over every comment the digest has not processed yet. */
 	generate: async ({ params, locals }) => {
 		// A run spends org credits on metered plans — owner-only like every

@@ -74,5 +74,91 @@ export const FEEDBACK_CORPUS = [
 	// ---- Portuguese none ----
 	{ text: 'ótimo vídeo!', lang: 'pt', expected: { category: 'none', hasAbuse: false }, note: 'pt praise' },
 	{ text: 'primeiro!', lang: 'pt', expected: { category: 'none', hasAbuse: false }, note: 'pt chatter' },
-	{ text: 'vai se foder, seu canal é uma merda', lang: 'pt', expected: { category: 'none', hasAbuse: true }, note: 'pt abuse with no extractable claim' }
+	{ text: 'vai se foder, seu canal é uma merda', lang: 'pt', expected: { category: 'none', hasAbuse: true }, note: 'pt abuse with no extractable claim' },
+
+	// ==== Expansion to ≥100 cases (MOD-87): other niches — cooking, gaming,
+	// tech, fitness, history — so the eval is not tuned to one channel type.
+
+	// ---- English questions (expansion) ----
+	{ text: 'what camera do you film with?', lang: 'en', expected: { category: 'question', hasAbuse: false }, note: 'gear question, filming' },
+	{ text: 'how long did you let the dough rest?', lang: 'en', expected: { category: 'question', hasAbuse: false }, note: 'cooking process question' },
+	{ text: 'which graphics card was that benchmark on?', lang: 'en', expected: { category: 'question', hasAbuse: false }, note: 'tech setup question' },
+	{ text: 'does this recipe work with almond flour?', lang: 'en', expected: { category: 'question', hasAbuse: false }, note: 'substitution question' },
+	{ text: 'what song is playing at the end, you moron', lang: 'en', expected: { category: 'question', hasAbuse: true }, note: 'music question wrapped in an insult' },
+
+	// ---- English criticism (expansion) ----
+	{ text: 'the background music is louder than your voice', lang: 'en', expected: { category: 'criticism', hasAbuse: false }, note: 'audio mix criticism' },
+	{ text: 'the intro is way too long before you get to the point', lang: 'en', expected: { category: 'criticism', hasAbuse: false }, note: 'intro pacing criticism' },
+	{ text: 'the text on screen disappears before I can read it', lang: 'en', expected: { category: 'criticism', hasAbuse: false }, note: 'on-screen text criticism' },
+	{ text: 'the camera keeps losing focus during the close-ups', lang: 'en', expected: { category: 'criticism', hasAbuse: false }, note: 'focus criticism' },
+	{ text: 'the music is so fucking loud I cannot hear you', lang: 'en', expected: { category: 'criticism', hasAbuse: true }, note: 'audio mix criticism with profanity' },
+	{ text: 'the jump cuts are shit, impossible to follow the steps', lang: 'en', expected: { category: 'criticism', hasAbuse: true }, note: 'editing criticism with profanity' },
+
+	// ---- English corrections (expansion) ----
+	{ text: 'water boils at 100 °C at sea level, not 90', lang: 'en', expected: { category: 'correction', hasAbuse: false }, note: 'science figure correction' },
+	{ text: 'the Battle of Hastings was in 1066, not 1166', lang: 'en', expected: { category: 'correction', hasAbuse: false }, note: 'history date correction' },
+	{ text: 'that GPU has 12 GB of VRAM, not 8', lang: 'en', expected: { category: 'correction', hasAbuse: false }, note: 'tech spec correction' },
+	{ text: 'the capital of Australia is Canberra, not Sydney', lang: 'en', expected: { category: 'correction', hasAbuse: false }, note: 'geography correction' },
+	{ text: 'dumbass, the recipe card says 180 °C, not 280', lang: 'en', expected: { category: 'correction', hasAbuse: true }, note: 'temperature correction wrapped in an insult' },
+	{ text: 'wrong again idiot, the patch released in March, not May', lang: 'en', expected: { category: 'correction', hasAbuse: true }, note: 'date correction wrapped in an insult' },
+
+	// ---- English requests (expansion) ----
+	{ text: 'please add subtitles to your videos', lang: 'en', expected: { category: 'request', hasAbuse: false }, note: 'accessibility format request' },
+	{ text: 'can you do a beginner version of this workout?', lang: 'en', expected: { category: 'request', hasAbuse: false }, note: 'follow-up request phrased as ability question' },
+	{ text: 'please put the full recipe in the description', lang: 'en', expected: { category: 'request', hasAbuse: false }, note: 'description content request' },
+	{ text: 'do a review of the new Steam Deck', lang: 'en', expected: { category: 'request', hasAbuse: false }, note: 'topic request, tech' },
+	{ text: 'add timestamps for once, you lazy bastard', lang: 'en', expected: { category: 'request', hasAbuse: true }, note: 'format request wrapped in profanity' },
+	{ text: 'upload more often you useless clown', lang: 'en', expected: { category: 'request', hasAbuse: true }, note: 'schedule request wrapped in insults' },
+
+	// ---- English none (expansion) ----
+	{ text: 'love this channel so much', lang: 'en', expected: { category: 'none', hasAbuse: false }, note: 'praise' },
+	{ text: 'this made my day 😂', lang: 'en', expected: { category: 'none', hasAbuse: false }, note: 'reaction with emoji' },
+	{ text: 'subscribe to my channel for free giveaways', lang: 'en', expected: { category: 'none', hasAbuse: false }, note: 'spam / self-promotion' },
+	{ text: 'lol', lang: 'en', expected: { category: 'none', hasAbuse: false }, note: 'minimal chatter' },
+	{ text: 'worst video ever', lang: 'en', expected: { category: 'none', hasAbuse: false }, note: 'vague dismissal, clean wording — rubric says none/clean' },
+	{ text: 'you are a pathetic loser', lang: 'en', expected: { category: 'none', hasAbuse: true }, note: 'pure insult, no claim' },
+	{ text: 'shut up and go die', lang: 'en', expected: { category: 'none', hasAbuse: true }, note: 'hostile phrase, no claim' },
+	{ text: 'nobody asked, delete your channel', lang: 'en', expected: { category: 'none', hasAbuse: true }, note: 'person-directed hostility, no claim' },
+
+	// ---- Portuguese questions (expansion) ----
+	{ text: 'qual câmera você usa para gravar?', lang: 'pt', expected: { category: 'question', hasAbuse: false }, note: 'pt gear question, filming' },
+	{ text: 'quanto tempo a massa precisa descansar?', lang: 'pt', expected: { category: 'question', hasAbuse: false }, note: 'pt cooking process question' },
+	{ text: 'essa receita funciona com farinha de amêndoa?', lang: 'pt', expected: { category: 'question', hasAbuse: false }, note: 'pt substitution question' },
+	{ text: 'qual placa de vídeo você usou nesse teste?', lang: 'pt', expected: { category: 'question', hasAbuse: false }, note: 'pt tech setup question' },
+	{ text: 'que música é essa no final, seu idiota?', lang: 'pt', expected: { category: 'question', hasAbuse: true }, note: 'pt music question wrapped in an insult' },
+	{ text: 'porra, qual é o nome dessa ferramenta?', lang: 'pt', expected: { category: 'question', hasAbuse: true }, note: 'pt tool question with profanity' },
+
+	// ---- Portuguese criticism (expansion) ----
+	{ text: 'a música de fundo está mais alta que a sua voz', lang: 'pt', expected: { category: 'criticism', hasAbuse: false }, note: 'pt audio mix criticism' },
+	{ text: 'a introdução é longa demais', lang: 'pt', expected: { category: 'criticism', hasAbuse: false }, note: 'pt intro pacing criticism' },
+	{ text: 'a câmera perde o foco nos closes', lang: 'pt', expected: { category: 'criticism', hasAbuse: false }, note: 'pt focus criticism' },
+	{ text: 'as legendas somem antes de dar para ler', lang: 'pt', expected: { category: 'criticism', hasAbuse: false }, note: 'pt on-screen text criticism' },
+	{ text: 'a música tá alta pra caralho, não dá pra ouvir nada', lang: 'pt', expected: { category: 'criticism', hasAbuse: true }, note: 'pt audio mix criticism with profanity' },
+	{ text: 'seu babaca, a imagem tá toda tremida', lang: 'pt', expected: { category: 'criticism', hasAbuse: true }, note: 'pt stabilization criticism wrapped in an insult' },
+
+	// ---- Portuguese corrections (expansion) ----
+	{ text: 'a água ferve a 100 °C ao nível do mar, não a 90', lang: 'pt', expected: { category: 'correction', hasAbuse: false }, note: 'pt science figure correction' },
+	{ text: 'a capital da Austrália é Canberra, não Sydney', lang: 'pt', expected: { category: 'correction', hasAbuse: false }, note: 'pt geography correction' },
+	{ text: 'essa placa tem 12 GB de memória, não 8', lang: 'pt', expected: { category: 'correction', hasAbuse: false }, note: 'pt tech spec correction' },
+	{ text: 'o Brasil foi descoberto em 1500, não em 1600', lang: 'pt', expected: { category: 'correction', hasAbuse: false }, note: 'pt history date correction' },
+	{ text: 'seu imbecil, a temperatura do forno é 180 °C, não 280', lang: 'pt', expected: { category: 'correction', hasAbuse: true }, note: 'pt temperature correction wrapped in an insult' },
+	{ text: 'errado de novo, otário, a atualização saiu em março', lang: 'pt', expected: { category: 'correction', hasAbuse: true }, note: 'pt date correction wrapped in an insult' },
+
+	// ---- Portuguese requests (expansion) ----
+	{ text: 'coloca legenda nos vídeos, por favor', lang: 'pt', expected: { category: 'request', hasAbuse: false }, note: 'pt accessibility format request' },
+	{ text: 'faz uma versão para iniciantes desse treino', lang: 'pt', expected: { category: 'request', hasAbuse: false }, note: 'pt follow-up request' },
+	{ text: 'coloca a receita completa na descrição', lang: 'pt', expected: { category: 'request', hasAbuse: false }, note: 'pt description content request' },
+	{ text: 'faz uma review do novo Steam Deck', lang: 'pt', expected: { category: 'request', hasAbuse: false }, note: 'pt topic request, tech' },
+	{ text: 'coloca os timestamps, seu preguiçoso de merda', lang: 'pt', expected: { category: 'request', hasAbuse: true }, note: 'pt format request wrapped in profanity' },
+	{ text: 'abaixa essa música, caralho', lang: 'pt', expected: { category: 'request', hasAbuse: true }, note: 'pt audio request with profanity' },
+
+	// ---- Portuguese none (expansion) ----
+	{ text: 'amo esse canal', lang: 'pt', expected: { category: 'none', hasAbuse: false }, note: 'pt praise' },
+	{ text: 'kkkkkk', lang: 'pt', expected: { category: 'none', hasAbuse: false }, note: 'pt laughter chatter' },
+	{ text: 'se inscreve no meu canal, sorteio toda semana', lang: 'pt', expected: { category: 'none', hasAbuse: false }, note: 'pt spam / self-promotion' },
+	{ text: 'que vídeo incrível, parabéns', lang: 'pt', expected: { category: 'none', hasAbuse: false }, note: 'pt praise' },
+	{ text: 'pior vídeo que já vi', lang: 'pt', expected: { category: 'none', hasAbuse: false }, note: 'pt vague dismissal, clean wording' },
+	{ text: 'você é um lixo', lang: 'pt', expected: { category: 'none', hasAbuse: true }, note: 'pt pure insult, no claim' },
+	{ text: 'cala a boca, ninguém te quer aqui', lang: 'pt', expected: { category: 'none', hasAbuse: true }, note: 'pt hostile phrase, no claim' },
+	{ text: 'some daqui, seu verme', lang: 'pt', expected: { category: 'none', hasAbuse: true }, note: 'pt person-directed hostility, no claim' }
 ];

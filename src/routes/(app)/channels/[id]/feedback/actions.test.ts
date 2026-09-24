@@ -2,7 +2,7 @@ import { beforeEach, expect, test, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 
 import { TEST_OWNER, setupTestDb, testDb } from '$lib/server/testdb';
-import { channels, feedbackDigests, feedbackFindings, findingEvidence } from '$lib/server/db/schema';
+import { channels, comments, feedbackDigests, feedbackFindings, findingEvidence } from '$lib/server/db/schema';
 
 const mocks = vi.hoisted(() => ({
 	generateFeedbackDigest: vi.fn()
@@ -55,6 +55,15 @@ async function seedDigest(channelId: string, over: Record<string, unknown> = {})
 
 test('load returns the newest complete digest with findings and sanitized evidence', async () => {
 	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1 });
+	const rawSource = 'raw source text must never reach the default load';
+	await testDb().db.insert(comments).values({
+		id: 'c1',
+		channelId: 'UC1',
+		text: rawSource,
+		publishedAt: '2026-01-01T00:00:00.000Z',
+		status: 'approved',
+		decidedBy: 'ai'
+	});
 	const digestId = await seedDigest('UC1');
 	const [finding] = await testDb().db
 		.insert(feedbackFindings)
@@ -77,8 +86,9 @@ test('load returns the newest complete digest with findings and sanitized eviden
 	expect(data.findings[0].summary).toBe('3 comments asked: when is the next video');
 	expect(data.findings[0].evidence[0].sanitizedExcerpt).toBe('when is the next video');
 	expect(data.settings).toMatchObject({ enabled: true, categories: ['question', 'criticism', 'correction', 'request'] });
-	// The tenancy/secret columns must never reach the browser.
+	// The default load stays concealed-only: neither secrets nor raw source text reach the browser.
 	expect(JSON.stringify(data)).not.toContain('refreshTokenEnc');
+	expect(JSON.stringify(data)).not.toContain(rawSource);
 });
 
 test('load surfaces a newer failed digest alongside the last complete one', async () => {
@@ -278,4 +288,107 @@ test('generate rejects a non-owner member with 403 before calling the job', asyn
 		actions.generate({ params: { id: 'UC1' }, locals: { user: MEMBER } } as never)
 	).rejects.toMatchObject({ status: 403 });
 	expect(mocks.generateFeedbackDigest).not.toHaveBeenCalled();
+});
+
+function postReveal(channelId: string, evidenceId: string, user: typeof OWNER | typeof MEMBER | null = OWNER) {
+	const form = new FormData();
+	form.set('evidenceId', evidenceId);
+	return actions.reveal({
+		params: { id: channelId },
+		request: new Request('http://localhost/', { method: 'POST', body: form }),
+		locals: { user }
+	} as never);
+}
+
+async function seedRevealEvidence(channelId: string, commentId: string, text: string) {
+	await testDb().db.insert(comments).values({
+		id: commentId,
+		channelId,
+		authorChannelId: 'author-secret',
+		authorName: 'Author Secret',
+		text,
+		publishedAt: '2026-01-01T00:00:00.000Z',
+		status: 'approved',
+		decidedBy: 'ai'
+	});
+	const digestId = await seedDigest(channelId);
+	const [finding] = await testDb().db
+		.insert(feedbackFindings)
+		.values({ digestId, category: 'criticism', summary: 'Two viewers reported audio trouble', supporterCount: 2 })
+		.returning({ id: feedbackFindings.id });
+	const [evidence] = await testDb().db
+		.insert(findingEvidence)
+		.values({ findingId: finding.id, commentId, sanitizedExcerpt: 'audio trouble', hasAbuse: 1 })
+		.returning({ id: findingEvidence.id });
+	return evidence.id;
+}
+
+test('reveal returns only the raw comment text for evidence on the requested channel', async () => {
+	await seedChannel('UC1');
+	const evidenceId = await seedRevealEvidence('UC1', 'c1', 'raw original text');
+
+	const result = await postReveal('UC1', String(evidenceId));
+	expect(result).toEqual({ scope: 'reveal', evidenceId, text: 'raw original text' });
+	expect(JSON.stringify(result)).not.toContain('Author Secret');
+	expect(JSON.stringify(result)).not.toContain('author-secret');
+});
+
+test('reveal allows a non-owner organization member to read evidence', async () => {
+	await seedChannel('UC1');
+	const evidenceId = await seedRevealEvidence('UC1', 'c1', 'member-visible raw text');
+
+	await expect(postReveal('UC1', String(evidenceId), MEMBER)).resolves.toEqual({
+		scope: 'reveal',
+		evidenceId,
+		text: 'member-visible raw text'
+	});
+});
+
+test('reveal rejects another organization channel with 404', async () => {
+	await seedChannel('UC2', 'org-2');
+	const evidenceId = await seedRevealEvidence('UC2', 'c2', 'other organization text');
+
+	await expect(postReveal('UC2', String(evidenceId))).rejects.toMatchObject({ status: 404 });
+});
+
+test('reveal does not accept evidence belonging to a different channel digest', async () => {
+	await seedChannel('UC1');
+	await seedChannel('UC2');
+	const evidenceId = await seedRevealEvidence('UC2', 'c2', 'different channel text');
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+	const result = await postReveal('UC1', String(evidenceId));
+	expect(result).toMatchObject({
+		status: 404,
+		data: { scope: 'reveal', evidenceId, error: 'The original comment is no longer available.' }
+	});
+	expect(errorSpy).toHaveBeenCalledOnce();
+	errorSpy.mockRestore();
+});
+
+test.each(['1.5', '0', '-1', '9007199254740992'])(
+	'reveal rejects invalid evidence id %s with 400',
+	async (evidenceId) => {
+		await seedChannel('UC1');
+		const result = await postReveal('UC1', evidenceId);
+		expect(result).toMatchObject({
+			status: 400,
+			data: { scope: 'reveal', error: 'Invalid evidence id.' }
+		});
+	}
+);
+
+test('reveal returns 404 when the source comment has been deleted', async () => {
+	await seedChannel('UC1');
+	const evidenceId = await seedRevealEvidence('UC1', 'c1', 'soon deleted');
+	await testDb().db.delete(comments).where(eq(comments.id, 'c1'));
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+	const result = await postReveal('UC1', String(evidenceId));
+	expect(result).toMatchObject({
+		status: 404,
+		data: { scope: 'reveal', evidenceId, error: 'The original comment is no longer available.' }
+	});
+	expect(errorSpy).toHaveBeenCalledOnce();
+	errorSpy.mockRestore();
 });

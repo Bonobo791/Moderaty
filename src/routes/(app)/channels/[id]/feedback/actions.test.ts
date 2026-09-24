@@ -1,4 +1,4 @@
-import { beforeEach, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 
 import { TEST_OWNER, setupTestDb, testDb } from '$lib/server/testdb';
@@ -28,6 +28,8 @@ let digestSeq = 0;
 beforeEach(() => {
 	mocks.generateFeedbackDigest.mockReset();
 });
+
+afterEach(() => vi.restoreAllMocks());
 
 async function seedChannel(id: string, orgId: string | null = 'org-1', over: Record<string, unknown> = {}) {
 	await testDb().db.insert(channels).values({ id, userId: 'user-1', orgId, title: `Channel ${id}`, refreshTokenEnc: 'enc', ...over });
@@ -290,9 +292,15 @@ test('generate rejects a non-owner member with 403 before calling the job', asyn
 	expect(mocks.generateFeedbackDigest).not.toHaveBeenCalled();
 });
 
-function postReveal(channelId: string, evidenceId: string, user: typeof OWNER | typeof MEMBER | null = OWNER) {
+function postReveal(
+	channelId: string,
+	evidenceId: string,
+	user: typeof OWNER | typeof MEMBER | null = OWNER,
+	confirmedAbuse?: string
+) {
 	const form = new FormData();
 	form.set('evidenceId', evidenceId);
+	if (confirmedAbuse !== undefined) form.set('confirmedAbuse', confirmedAbuse);
 	return actions.reveal({
 		params: { id: channelId },
 		request: new Request('http://localhost/', { method: 'POST', body: form }),
@@ -300,7 +308,7 @@ function postReveal(channelId: string, evidenceId: string, user: typeof OWNER | 
 	} as never);
 }
 
-async function seedRevealEvidence(channelId: string, commentId: string, text: string) {
+async function seedRevealEvidence(channelId: string, commentId: string, text: string, hasAbuse = 1) {
 	await testDb().db.insert(comments).values({
 		id: commentId,
 		channelId,
@@ -318,16 +326,40 @@ async function seedRevealEvidence(channelId: string, commentId: string, text: st
 		.returning({ id: feedbackFindings.id });
 	const [evidence] = await testDb().db
 		.insert(findingEvidence)
-		.values({ findingId: finding.id, commentId, sanitizedExcerpt: 'audio trouble', hasAbuse: 1 })
+		.values({ findingId: finding.id, commentId, sanitizedExcerpt: 'audio trouble', hasAbuse })
 		.returning({ id: findingEvidence.id });
 	return evidence.id;
 }
+
+test('abusive evidence requires explicit confirmation before returning the raw comment', async () => {
+	await seedChannel('UC1');
+	const raw = 'raw abusive original text';
+	const evidenceId = await seedRevealEvidence('UC1', 'c1', raw);
+
+	const result = await postReveal('UC1', String(evidenceId));
+
+	expect(result).toEqual({ scope: 'reveal', evidenceId, confirmationRequired: true });
+	expect(JSON.stringify(result)).not.toContain(raw);
+	expect(JSON.stringify(result)).not.toContain('Author Secret');
+	expect(JSON.stringify(result)).not.toContain('author-secret');
+});
+
+test('non-abusive evidence reveals immediately without confirmation', async () => {
+	await seedChannel('UC1');
+	const evidenceId = await seedRevealEvidence('UC1', 'c1', 'ordinary original text', 0);
+
+	await expect(postReveal('UC1', String(evidenceId))).resolves.toEqual({
+		scope: 'reveal',
+		evidenceId,
+		text: 'ordinary original text'
+	});
+});
 
 test('reveal returns only the raw comment text for evidence on the requested channel', async () => {
 	await seedChannel('UC1');
 	const evidenceId = await seedRevealEvidence('UC1', 'c1', 'raw original text');
 
-	const result = await postReveal('UC1', String(evidenceId));
+	const result = await postReveal('UC1', String(evidenceId), OWNER, 'yes');
 	expect(result).toEqual({ scope: 'reveal', evidenceId, text: 'raw original text' });
 	expect(JSON.stringify(result)).not.toContain('Author Secret');
 	expect(JSON.stringify(result)).not.toContain('author-secret');
@@ -337,7 +369,7 @@ test('reveal allows a non-owner organization member to read evidence', async () 
 	await seedChannel('UC1');
 	const evidenceId = await seedRevealEvidence('UC1', 'c1', 'member-visible raw text');
 
-	await expect(postReveal('UC1', String(evidenceId), MEMBER)).resolves.toEqual({
+	await expect(postReveal('UC1', String(evidenceId), MEMBER, 'yes')).resolves.toEqual({
 		scope: 'reveal',
 		evidenceId,
 		text: 'member-visible raw text'
@@ -391,4 +423,13 @@ test('reveal returns 404 when the source comment has been deleted', async () => 
 	});
 	expect(errorSpy).toHaveBeenCalledOnce();
 	errorSpy.mockRestore();
+});
+
+test('a failed assertion does not leave console.error mocked for the next test', () => {
+	vi.spyOn(console, 'error').mockImplementation(() => {});
+	expect(() => expect('actual').toBe('expected')).toThrow();
+});
+
+test('console.error spies are restored before the next test', () => {
+	expect(vi.isMockFunction(console.error)).toBe(false);
 });

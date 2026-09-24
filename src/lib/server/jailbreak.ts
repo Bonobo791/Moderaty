@@ -37,6 +37,39 @@ function llmContext(apiKey: string, deadline?: number): GuardrailLLMContext {
 	return { guardrailLlm: adapter as unknown as GuardrailLLMContext['guardrailLlm'] };
 }
 
+function validatedVerdict(result: GuardrailResult): { flagged: boolean; confidence: number } {
+	const info = result.info;
+	if (!info || typeof info !== 'object' || Array.isArray(info) || info.guardrail_name !== 'Jailbreak') {
+		throw new Error('Jailbreak guardrail returned invalid result information');
+	}
+	if (
+		typeof result.tripwireTriggered !== 'boolean' ||
+		typeof info.flagged !== 'boolean' ||
+		typeof info.confidence !== 'number' ||
+		!Number.isFinite(info.confidence) ||
+		info.confidence < 0 ||
+		info.confidence > 1
+	) {
+		throw new Error('Jailbreak guardrail returned invalid flag or confidence');
+	}
+	if (result.tripwireTriggered !== (info.flagged && info.confidence >= CONFIDENCE_THRESHOLD)) {
+		throw new Error('Jailbreak guardrail returned an inconsistent tripwire status');
+	}
+	return {
+		flagged: info.flagged === true && info.confidence >= CONFIDENCE_THRESHOLD,
+		confidence: info.confidence
+	};
+}
+
+function validateResults(results: GuardrailResult[]): { flagged: boolean; confidence: number } {
+	if (!Array.isArray(results) || results.length !== 1) throw new Error('Jailbreak guardrail returned an invalid result count');
+	const result = results[0];
+	if (!result || typeof result !== 'object' || result.executionFailed === true) {
+		throw new Error('Jailbreak guardrail execution failed');
+	}
+	return validatedVerdict(result);
+}
+
 export async function detectJailbreak(
 	text: string,
 	apiKey: string,
@@ -67,32 +100,5 @@ export async function detectJailbreak(
 		throw error;
 	}
 	assertBeforeDeadline(deadline);
-
-	if (!Array.isArray(results) || results.length !== 1) throw new Error('Jailbreak guardrail returned an invalid result count');
-	const result = results[0];
-	if (!result || typeof result !== 'object' || result.executionFailed === true) {
-		throw new Error('Jailbreak guardrail execution failed');
-	}
-	const info = result.info;
-	if (!info || typeof info !== 'object' || Array.isArray(info) || info.guardrail_name !== 'Jailbreak') {
-		throw new Error('Jailbreak guardrail returned invalid result information');
-	}
-	if (
-		typeof result.tripwireTriggered !== 'boolean' ||
-		typeof info.flagged !== 'boolean' ||
-		typeof info.confidence !== 'number' ||
-		!Number.isFinite(info.confidence) ||
-		info.confidence < 0 ||
-		info.confidence > 1
-	) {
-		throw new Error('Jailbreak guardrail returned invalid flag or confidence');
-	}
-	if (result.tripwireTriggered !== (info.flagged && info.confidence >= CONFIDENCE_THRESHOLD)) {
-		throw new Error('Jailbreak guardrail returned an inconsistent tripwire status');
-	}
-
-	return {
-		flagged: info.flagged === true && info.confidence >= CONFIDENCE_THRESHOLD,
-		confidence: info.confidence
-	};
+	return validateResults(results);
 }

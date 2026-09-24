@@ -10,7 +10,7 @@
 
 	let { data, form } = $props();
 	const revealForm = $derived(
-		form as { scope?: string; evidenceId?: number; text?: string; error?: string } | null | undefined
+		form as { scope?: string; evidenceId?: number; text?: string; error?: string; confirmationRequired?: boolean } | null | undefined
 	);
 
 	// In-flight guard for Generate now — a double-submit would race the
@@ -153,7 +153,10 @@
 						<div class="finding">
 							<p class="finding-summary">{finding.summary}</p>
 							{#if finding.evidence.length}
-								<details class="evidence-details">
+								<details
+									class="evidence-details"
+									open={revealForm?.scope === 'reveal' && finding.evidence.some((e) => e.id === revealForm.evidenceId)}
+								>
 									<summary>
 										Show {finding.evidence.length} supporting comment{finding.evidence.length === 1 ? '' : 's'}<span class="sr-only"> for “{finding.summary}”</span>
 									</summary>
@@ -163,9 +166,20 @@
 											{@const original = revealedEvidence[e.id] ?? (hiddenEvidence[e.id] ? undefined : serverOriginal)}
 											{@const serverError = revealForm?.scope === 'reveal' && revealForm.evidenceId === e.id && revealForm.error ? revealForm.error : undefined}
 											{@const revealError = revealErrors[e.id] ?? serverError}
+											{@const confirmationRequired = revealForm?.scope === 'reveal' && revealForm.evidenceId === e.id && revealForm.confirmationRequired === true}
 											<li class="evidence" class:concealed={e.hasAbuse === 1 && !original}>
 												<blockquote class="quote">{original ?? e.sanitizedExcerpt}</blockquote>
-												{#if original !== undefined}
+												{#if confirmationRequired && e.hasAbuse === 1}
+													<p class="muted reveal-warning">This comment contains abusive wording. Show it anyway?</p>
+													<form class="reveal-form" method="POST" action="?/reveal">
+														<input type="hidden" name="evidenceId" value={e.id} />
+														<input type="hidden" name="confirmedAbuse" value="yes" />
+														<button
+															class="btn secondary small"
+															aria-label={`Show abusive original comment ${i + 1} for “${finding.summary}”`}
+														>Show the abusive comment</button>
+													</form>
+												{:else if original !== undefined}
 													<button
 														class="btn secondary small reveal-button"
 														type="button"
@@ -180,10 +194,13 @@
 														class="reveal-form"
 														method="POST"
 														action="?/reveal"
-														use:enhance={({ cancel }) => {
-															if (e.hasAbuse === 1 && !confirm('This comment contains abusive wording. Show it anyway?')) {
-																cancel();
-																return;
+														use:enhance={({ cancel, formData }) => {
+															if (e.hasAbuse === 1) {
+																if (!confirm('This comment contains abusive wording. Show it anyway?')) {
+																	cancel();
+																	return;
+																}
+																formData.set('confirmedAbuse', 'yes');
 															}
 															revealErrors = withoutKey(revealErrors, e.id);
 															return async ({ result }) => {

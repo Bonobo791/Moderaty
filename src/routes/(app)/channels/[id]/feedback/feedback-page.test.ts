@@ -166,6 +166,13 @@ describe('feedback evidence concealment and reveal fallback (SSR)', () => {
 			}
 		]
 	};
+	const otherFinding = {
+		id: 22,
+		category: 'criticism',
+		summary: 'Another finding',
+		supporterCount: 2,
+		evidence: [{ id: 202, sanitizedExcerpt: 'ordinary feedback', hasAbuse: 0 }]
+	};
 
 	it('never SSRs abusive raw evidence by default and labels its targeted reveal control', () => {
 		const body = renderFeedback(populatedData([finding]));
@@ -173,6 +180,21 @@ describe('feedback evidence concealment and reveal fallback (SSR)', () => {
 		expect(body).not.toContain('idiot');
 		expect(body).not.toContain(raw);
 		expect(body).toContain('aria-label="Show original comment 1 for “Two viewers reported blown-out audio”"');
+	});
+
+	it('asks before revealing abusive evidence without rendering its raw text', () => {
+		const body = renderFeedback(populatedData([finding]), {
+			scope: 'reveal',
+			evidenceId,
+			confirmationRequired: true
+		});
+		expect(body).toContain('This comment contains abusive wording. Show it anyway?');
+		expect(body).toContain('name="evidenceId" value="201"');
+		expect(body).toContain('name="confirmedAbuse" value="yes"');
+		expect(body).toContain('Show the abusive comment');
+		expect(body).not.toContain('fucking');
+		expect(body).not.toContain('idiot');
+		expect(body).not.toContain(raw);
 	});
 
 	it('renders a successful no-JS reveal for only the matching evidence item', () => {
@@ -195,5 +217,17 @@ describe('feedback evidence concealment and reveal fallback (SSR)', () => {
 		expect(body).toMatch(/class="[^"]*reveal-error[^"]*" role="alert">The original comment is no longer available\.<\/div>/);
 		expect(body.match(/The original comment is no longer available\./g)).toHaveLength(1);
 		expect(body.indexOf('reveal-error')).toBeGreaterThan(body.indexOf('class="evidence'));
+	});
+
+	it.each([
+		{ state: 'success', form: { scope: 'reveal', evidenceId, text: 'RAW ORIGINAL' } },
+		{ state: 'failure', form: { scope: 'reveal', evidenceId, error: 'The original comment is no longer available.' } },
+		{ state: 'confirmation', form: { scope: 'reveal', evidenceId, confirmationRequired: true } }
+	])('opens only the finding containing the targeted evidence on no-JS $state', ({ form }) => {
+		const body = renderFeedback(populatedData([finding, otherFinding]), form);
+		const details = body.match(/<details[^>]*>/g) ?? [];
+		expect(details).toHaveLength(2);
+		expect(details[0]).toMatch(/\sopen(?:\s|=|>)/);
+		expect(details[1]).not.toMatch(/\sopen(?:\s|=|>)/);
 	});
 });

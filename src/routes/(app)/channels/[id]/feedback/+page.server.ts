@@ -118,7 +118,7 @@ export const actions = {
 			return fail(400, { scope: 'reveal', error: 'Invalid evidence id.' });
 		}
 		const source = await db
-			.select({ text: comments.text })
+			.select({ text: comments.text, hasAbuse: findingEvidence.hasAbuse })
 			.from(findingEvidence)
 			.innerJoin(feedbackFindings, eq(feedbackFindings.id, findingEvidence.findingId))
 			.innerJoin(feedbackDigests, eq(feedbackDigests.id, feedbackFindings.digestId))
@@ -138,6 +138,9 @@ export const actions = {
 				evidenceId,
 				error: 'The original comment is no longer available.'
 			});
+		}
+		if (source.hasAbuse === 1 && form.get('confirmedAbuse') !== 'yes') {
+			return { scope: 'reveal', evidenceId, confirmationRequired: true };
 		}
 		return { scope: 'reveal', evidenceId, text: source.text };
 	},

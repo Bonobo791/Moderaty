@@ -26,6 +26,13 @@ engines:
   opengrep:
     exclude_paths:
       - '**/*.test.ts'
+  # Same rationale as opengrep: complexity budgets (method length,
+  # cyclomatic complexity, file size) target production code — seed
+  # helpers and long assertion blocks are normal in tests.
+  lizard:
+    exclude_paths:
+      - '**/*.test.ts'
+      - '**/*.test.mjs'
   # The org's custom "Enforce Access to RAC_* Tables in SQL Queries" Semgrep
   # pattern is a leftover from another project: this repo has no RAC_* tables
   # and the rule fires on every generated drizzle migration SQL. Excluded here

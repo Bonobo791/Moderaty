@@ -108,6 +108,24 @@ export async function load({ params, locals }) {
 	};
 }
 
+/** The raw comment behind one evidence row, scoped to the channel it belongs to. */
+function evidenceSource(channelId: string, evidenceId: number) {
+	return db
+		.select({ text: comments.text, hasAbuse: findingEvidence.hasAbuse })
+		.from(findingEvidence)
+		.innerJoin(feedbackFindings, eq(feedbackFindings.id, findingEvidence.findingId))
+		.innerJoin(feedbackDigests, eq(feedbackDigests.id, feedbackFindings.digestId))
+		.innerJoin(comments, eq(comments.id, findingEvidence.commentId))
+		.where(
+			and(
+				eq(findingEvidence.id, evidenceId),
+				eq(feedbackDigests.channelId, channelId),
+				eq(comments.channelId, channelId)
+			)
+		)
+		.get();
+}
+
 export const actions = {
 	reveal: async ({ params, request, locals }) => {
 		const user = requireUser(locals);
@@ -117,20 +135,7 @@ export const actions = {
 		if (!Number.isSafeInteger(evidenceId) || evidenceId <= 0) {
 			return fail(400, { scope: 'reveal', error: 'Invalid evidence id.' });
 		}
-		const source = await db
-			.select({ text: comments.text, hasAbuse: findingEvidence.hasAbuse })
-			.from(findingEvidence)
-			.innerJoin(feedbackFindings, eq(feedbackFindings.id, findingEvidence.findingId))
-			.innerJoin(feedbackDigests, eq(feedbackDigests.id, feedbackFindings.digestId))
-			.innerJoin(comments, eq(comments.id, findingEvidence.commentId))
-			.where(
-				and(
-					eq(findingEvidence.id, evidenceId),
-					eq(feedbackDigests.channelId, params.id),
-					eq(comments.channelId, params.id)
-				)
-			)
-			.get();
+		const source = await evidenceSource(params.id, evidenceId);
 		if (!source) {
 			console.error('feedback evidence source unavailable:', { channelId: params.id, evidenceId, userId: user.id });
 			return fail(404, {

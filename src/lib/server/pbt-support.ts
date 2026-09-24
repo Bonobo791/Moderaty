@@ -21,6 +21,8 @@ import {
 	type ChannelRow
 } from './testarbitraries';
 
+const UNEXPECTED_EXTERNAL_REQUEST = 'unexpected external request in pipeline property tests';
+
 /** Tables every pipeline property wipes between runs. */
 export const PBT_WIPE = [
 	'moderation_actions',
@@ -42,7 +44,7 @@ export const PBT_WIPE = [
 export function createPipelineMocks() {
 	vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
 		if (String(input) !== 'https://api.openai.com/v1/chat/completions') {
-			throw new Error('unexpected external request in pipeline property tests');
+			throw new Error(UNEXPECTED_EXTERNAL_REQUEST);
 		}
 		return new Response(JSON.stringify({
 			choices: [{ message: { content: JSON.stringify({ flagged: false, confidence: 0.1 }) } }]

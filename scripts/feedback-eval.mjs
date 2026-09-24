@@ -98,20 +98,20 @@ export function abuseLeaks(rawText, verdict) {
  */
 export function categoryMetrics(pairs) {
 	/** @type {Record<string, { tp: number, predicted: number, expected: number, precision: number | null, recall: number | null }>} */
-	const out = {};
+	const out = new Map();
 	for (const category of FEEDBACK_CATEGORIES) {
 		const tp = pairs.filter((p) => p.expected === category && p.predicted === category).length;
 		const predicted = pairs.filter((p) => p.predicted === category).length;
 		const expected = pairs.filter((p) => p.expected === category).length;
-		out[category] = {
+		out.set(category, {
 			tp,
 			predicted,
 			expected,
 			precision: predicted ? tp / predicted : null,
 			recall: expected ? tp / expected : null
-		};
+		});
 	}
-	return out;
+	return Object.fromEntries(out);
 }
 
 /** One live classification, same request shape as feedback.ts. */
@@ -189,7 +189,8 @@ async function main() {
 			console.log(`LEAK  summary contains an abuse term: ${JSON.stringify(finding.summary)}`);
 		}
 	}
-	const pct = (v) => (v === null ? 'n/a' : `${(v * 100).toFixed(1)}%`);
+	const pctFormat = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 1, maximumFractionDigits: 1 });
+	const pct = (v) => (v === null ? 'n/a' : pctFormat.format(v));
 	console.log('\nper-category classification (over successfully parsed cases):');
 	for (const [category, m] of Object.entries(categoryMetrics(pairs))) {
 		console.log(

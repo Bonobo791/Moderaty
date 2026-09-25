@@ -124,6 +124,41 @@ test.each([
 	expect(thrown).toMatchObject({ status: 500, body: { message: 'APP_URL is not configured' } });
 });
 
+test.each([
+	['malformed', 'https://[invalid'],
+	['file URL', 'file:///tmp/site'],
+	['credentials', 'https://u&v:secret@example.com'],
+	['path', 'https://moderaty.example/path'],
+	['query', 'https://moderaty.example?secret=1']
+])('all site-index builders reject an invalid %s APP_URL without leaking credentials', (_reason, appUrl) => {
+	mocks.env.APP_URL = appUrl;
+	const thrownErrors = [robotsTxt, sitemapXml, llmsTxt].map((build) => {
+		try {
+			build();
+		} catch (e) {
+			return e;
+		}
+		return undefined;
+	});
+
+	for (const thrown of thrownErrors) {
+		expect(thrown).toMatchObject({
+			status: 500,
+			body: { message: 'APP_URL is not configured as a valid absolute http(s) origin' }
+		});
+		expect(JSON.stringify(thrown)).not.toContain('secret');
+		expect(JSON.stringify(thrown)).not.toContain('u&v');
+	}
+});
+
+test('site-index builders normalize valid APP_URL values to their origin', () => {
+	mocks.env.APP_URL = 'HTTPS://MODERATY.example:443/';
+
+	expect(robotsTxt()).toContain('Sitemap: https://moderaty.example/sitemap.xml');
+	expect(sitemapXml()).toContain('<loc>https://moderaty.example/</loc>');
+	expect(llmsTxt()).toContain('](https://moderaty.example/pricing)');
+});
+
 test('the sitemap endpoint answers 200 application/xml with the built body', async () => {
 	const res = await sitemapGet({} as never);
 

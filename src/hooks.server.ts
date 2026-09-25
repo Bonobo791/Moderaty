@@ -41,20 +41,22 @@ export const handle: Handle = async ({ event, resolve }) => {
 		if (isNoIndexRoute(event.route.id)) response.headers.set('X-Robots-Tag', 'noindex');
 		return response;
 	};
-	// /api/health is the uptime probe (issue #82): its whole job is to report
-	// database health itself, so it bypasses the migration guard and session
-	// resolution — either one would convert a database outage into a 500
-	// before the endpoint could answer with its documented 503.
-	if (event.url.pathname === '/api/health') return respond(resolve(event));
+	// The health probe reports database health itself, and the public metadata
+	// endpoints are independent of the application schema and session.
+	// Bypassing the guard and session keeps all four available during outages.
+	if (['/api/health', '/robots.txt', '/sitemap.xml', '/llms.txt'].includes(event.route.id ?? '')) {
+		return respond(resolve(event));
+	}
 	// Deploy-ordering boundary (issue #81): if the database is behind the
 	// deployed code's migration journal, every DB query would fail with
 	// scattered "no such column" errors — fail the request here with one clear
 	// 503 instead. The guard's deliberate HttpError passes through (a
 	// deploy-ordering condition, NOT an outage — never degrades). A database
 	// failure INSIDE the check is an outage: degrade to maintenance mode.
-	// The site-wide coupling is intentional: the public pages are prerendered
-	// and served statically (handle never runs for them), so every request that
-	// reaches this point is DB-backed and would fail downstream anyway.
+	// The site-wide coupling is intentional: public pages are prerendered and
+	// served statically, while health and metadata endpoints bypass above.
+	// Every request that reaches this point is DB-backed and would fail
+	// downstream anyway.
 	try {
 		await assertMigrationsCurrent();
 	} catch (e) {

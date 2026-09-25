@@ -137,7 +137,7 @@ test('a renewed session refreshes the cookie with the new expiry and security at
 	});
 });
 
-test('a database behind the code fails the request with the guard 503 before any session work', async () => {
+test('a database behind the code fails an internal route with the guard 503 before any session work', async () => {
 	// error() throws by design — capture the HttpError it produces so the mock
 	// rejects with the same instanceof the real guard throws.
 	let guardError: unknown;
@@ -147,7 +147,11 @@ test('a database behind the code fails the request with the guard 503 before any
 		guardError = e;
 	}
 	mocks.assertMigrationsCurrent.mockRejectedValue(guardError);
-	const event = makeEvent();
+	const event = {
+		...makeEvent(),
+		url: new URL('http://localhost/dashboard'),
+		route: { id: '/(app)/dashboard' }
+	};
 	const resolve = vi.fn(async () => new Response('ok'));
 
 	await expect(handle({ event, resolve } as never)).rejects.toMatchObject({ status: 503 });
@@ -197,6 +201,31 @@ test('/api/health bypasses the guard and session so a database outage still reac
 	expect(resolve).toHaveBeenCalled();
 	expect(mocks.assertMigrationsCurrent).not.toHaveBeenCalled();
 	expect(mocks.getSessionUser).not.toHaveBeenCalled();
+});
+
+test.each([
+	['/robots.txt', '/robots.txt', 'User-agent: *'],
+	['/sitemap.xml', '/sitemap.xml', '<?xml version="1.0" encoding="UTF-8"?>'],
+	['/llms.txt', '/llms.txt', '# Moderaty']
+])('%s bypasses the migration guard and session lookup', async (routeId, pathname, content) => {
+	let guardError: unknown;
+	try {
+		error(503, 'the service is being upgraded — please retry in a few minutes');
+	} catch (e) {
+		guardError = e;
+	}
+	mocks.assertMigrationsCurrent.mockRejectedValue(guardError);
+	mocks.getSessionUser.mockRejectedValue(new Error('session lookup should not run'));
+	const event = { ...makeEvent(), url: new URL(`http://localhost${pathname}`), route: { id: routeId } };
+	const resolve = vi.fn(async () => new Response(content));
+
+	const response = await handle({ event, resolve } as never);
+
+	expect(response.status).toBe(200);
+	expect(await response.text()).toBe(content);
+	expect(mocks.assertMigrationsCurrent).not.toHaveBeenCalled();
+	expect(mocks.getSessionUser).not.toHaveBeenCalled();
+	expect(response.headers.get('x-robots-tag')).toBeNull();
 });
 
 test('a deliberate HttpError from session resolution propagates — integrity failures are not outages', async () => {

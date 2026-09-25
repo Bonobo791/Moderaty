@@ -34,7 +34,21 @@ export function isNoIndexRoute(routeId: string | null | undefined): boolean {
 // misconfigured deployment fails loudly instead of serving internal hosts.
 function appUrl(): string {
 	if (!env.APP_URL) throw error(500, 'APP_URL is not configured');
-	return env.APP_URL;
+	const parsed = URL.parse(env.APP_URL);
+	if (
+		!parsed ||
+		(parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
+		parsed.username ||
+		parsed.password ||
+		parsed.pathname !== '/' ||
+		parsed.search ||
+		parsed.hash ||
+		env.APP_URL.includes('?') ||
+		env.APP_URL.includes('#')
+	) {
+		throw error(500, 'APP_URL is not configured as a valid absolute http(s) origin');
+	}
+	return parsed.origin;
 }
 
 export function robotsTxt(): string {
@@ -53,10 +67,16 @@ export function robotsTxt(): string {
 
 export function sitemapXml(): string {
 	const base = appUrl();
-	const urls = PUBLIC_PAGES.map(
-		(path) => `\t<url><loc>${new URL(path, base).toString()}</loc></url>`
+	const urls = PUBLIC_PAGES.map((path) =>
+		['\t<url><loc>', new URL(path, base).toString(), '</loc></url>'].join('')
 	).join('\n');
-	return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls}\n</urlset>\n`;
+	return [
+		'<?xml version="1.0" encoding="UTF-8"?>',
+		'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+		urls,
+		'</urlset>',
+		''
+	].join('\n');
 }
 
 export function llmsTxt(): string {

@@ -6,6 +6,7 @@ import { cookieSecure } from '$lib/server/oauthState';
 import { LOCALE_COOKIE, isBilingualPath, resolveLocale } from '$lib/i18n/locale';
 import { assertMigrationsCurrent } from '$lib/server/migrationGuard';
 import { getSessionUser, SESSION_COOKIE } from '$lib/server/session';
+import { isNoIndexRoute } from '$lib/server/siteIndex';
 
 // Resolves the session cookie into locals.user for every request. When the
 // session slid into its renewal window, the cookie is refreshed with the new
@@ -30,20 +31,32 @@ export const handle: Handle = async ({ event, resolve }) => {
 			transformPageChunk: ({ html, done }) =>
 				done ? html.replace('<html lang="en">', `<html lang="${locale}">`) : html
 		});
-	// /api/health is the uptime probe (issue #82): its whole job is to report
-	// database health itself, so it bypasses the migration guard and session
-	// resolution — either one would convert a database outage into a 500
-	// before the endpoint could answer with its documented 503.
-	if (event.url.pathname === '/api/health') return resolve(event);
+	// Internal surfaces carry X-Robots-Tag: noindex on every response — it
+	// reaches crawlers even on the 302 an anonymous visitor gets from an
+	// auth-gated page, where a <meta> tag could never exist. robots.txt
+	// deliberately leaves these paths crawlable: a Disallow would hide the
+	// header and let bare URLs index anyway.
+	const respond = async (pending: Response | Promise<Response>) => {
+		const response = await pending;
+		if (isNoIndexRoute(event.route.id)) response.headers.set('X-Robots-Tag', 'noindex');
+		return response;
+	};
+	// The health probe reports database health itself, and the public metadata
+	// endpoints are independent of the application schema and session.
+	// Bypassing the guard and session keeps all four available during outages.
+	if (['/api/health', '/robots.txt', '/sitemap.xml', '/llms.txt'].includes(event.route.id ?? '')) {
+		return respond(resolve(event));
+	}
 	// Deploy-ordering boundary (issue #81): if the database is behind the
 	// deployed code's migration journal, every DB query would fail with
 	// scattered "no such column" errors — fail the request here with one clear
 	// 503 instead. The guard's deliberate HttpError passes through (a
 	// deploy-ordering condition, NOT an outage — never degrades). A database
 	// failure INSIDE the check is an outage: degrade to maintenance mode.
-	// The site-wide coupling is intentional: the public pages are prerendered
-	// and served statically (handle never runs for them), so every request that
-	// reaches this point is DB-backed and would fail downstream anyway.
+	// The site-wide coupling is intentional: public pages are prerendered and
+	// served statically, while health and metadata endpoints bypass above.
+	// Every request that reaches this point is DB-backed and would fail
+	// downstream anyway.
 	try {
 		await assertMigrationsCurrent();
 	} catch (e) {
@@ -51,7 +64,7 @@ export const handle: Handle = async ({ event, resolve }) => {
 		console.error('migration guard query failed:', e);
 		event.locals.dbDown = true;
 		event.locals.user = null;
-		return resolveLocalized();
+		return respond(resolveLocalized());
 	}
 	const token = event.cookies.get(SESSION_COOKIE);
 	try {
@@ -75,5 +88,5 @@ export const handle: Handle = async ({ event, resolve }) => {
 		event.locals.dbDown = true;
 		event.locals.user = null;
 	}
-	return resolveLocalized();
+	return respond(resolveLocalized());
 };

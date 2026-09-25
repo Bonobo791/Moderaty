@@ -15,22 +15,19 @@ export const PUBLIC_PAGES = [
 	'/dpa'
 ] as const;
 
-// Paths crawlers should not fetch. /contact/verify is deliberately absent:
-// Disallow would hide its noindex meta, letting the bare URL index anyway.
-const DISALLOWED_PATHS = [
-	'/api/',
-	'/account',
-	'/account-deleted',
-	'/channels/',
-	'/connect-channel',
-	'/consent',
-	'/dashboard',
-	'/help',
-	'/invite/',
-	'/logout',
-	'/org',
-	'/usage'
-] as const;
+// Route ids that must never appear in a search index: the authenticated
+// (app) console, single-use flow pages, and every API endpoint. Keyed on
+// route.id (not the URL) so trailing-slash variants and param routes match.
+// The header these drive (X-Robots-Tag, set in hooks.server.ts) also marks
+// the 302 an anonymous crawler gets from an auth-gated page, where a <meta>
+// tag could never exist.
+const NOINDEX_ROUTES = ['/consent', '/connect-channel', '/logout', '/account-deleted', '/contact/verify'];
+const NOINDEX_PREFIXES = ['/(app)/', '/api/', '/invite/'];
+
+export function isNoIndexRoute(routeId: string | null | undefined): boolean {
+	if (!routeId) return false;
+	return NOINDEX_ROUTES.includes(routeId) || NOINDEX_PREFIXES.some((prefix) => routeId.startsWith(prefix));
+}
 
 // APP_URL is the canonical public origin (the Bunny domain in production).
 // Absolute sitemap/robots URLs come from it — not the request — so a
@@ -43,7 +40,11 @@ function appUrl(): string {
 export function robotsTxt(): string {
 	return [
 		'User-agent: *',
-		...DISALLOWED_PATHS.map((path) => `Disallow: ${path}`),
+		// Only /api stays barred — it is endpoints, not pages. Internal pages
+		// stay crawlable so their X-Robots-Tag: noindex header (see
+		// isNoIndexRoute / hooks.server.ts) is actually seen: a Disallow would
+		// hide the tag, letting bare URLs index anyway.
+		'Disallow: /api/',
 		'',
 		`Sitemap: ${new URL('/sitemap.xml', appUrl()).toString()}`,
 		''

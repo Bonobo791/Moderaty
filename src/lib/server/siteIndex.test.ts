@@ -1,5 +1,5 @@
 import { beforeEach, expect, test, vi } from 'vitest';
-import { llmsTxt, PUBLIC_PAGES, robotsTxt, sitemapXml } from './siteIndex';
+import { isNoIndexRoute, llmsTxt, PUBLIC_PAGES, robotsTxt, sitemapXml } from './siteIndex';
 import { GET as robotsGet } from '../../routes/robots.txt/+server';
 import { GET as sitemapGet } from '../../routes/sitemap.xml/+server';
 import { GET as llmsGet } from '../../routes/llms.txt/+server';
@@ -44,18 +44,52 @@ test.each(PRIVATE_PATHS)('the sitemap never publishes %s', (path) => {
 	expect(sitemapXml()).not.toContain(`<loc>https://moderaty.example${path}`);
 });
 
-test('robots.txt allows crawling, bars the private surface, and points at the sitemap', () => {
+test('robots.txt bars only /api/ — internal pages stay crawlable so their noindex header is seen', () => {
 	const body = robotsTxt();
 
 	expect(body.startsWith('User-agent: *\n')).toBe(true);
-	for (const path of PRIVATE_PATHS) {
-		expect(body).toContain(`Disallow: ${path}`);
+	// A Disallow hides X-Robots-Tag from crawlers, so internal PAGES are
+	// deliberately not listed here (isNoIndexRoute marks them instead).
+	// /api/ stays: those are endpoints, not pages, and bots should not fetch
+	// the OAuth/webhook endpoints at all.
+	expect(body.match(/^Disallow:.*$/gm)).toEqual(['Disallow: /api/']);
+	for (const path of PRIVATE_PATHS.filter((p) => p !== '/api/')) {
+		expect(body).not.toContain(`Disallow: ${path}`);
 	}
 	expect(body.trimEnd().endsWith('Sitemap: https://moderaty.example/sitemap.xml')).toBe(true);
 });
 
-test('robots.txt does NOT disallow /contact/verify — a Disallow would hide its noindex meta', () => {
-	expect(robotsTxt()).not.toContain('verify');
+test.each([
+	'/(app)/dashboard',
+	'/(app)/channels/[id]',
+	'/(app)/org/switch',
+	'/api/cron',
+	'/api/health',
+	'/invite/[token]',
+	'/consent',
+	'/connect-channel',
+	'/logout',
+	'/account-deleted',
+	'/contact/verify'
+])('isNoIndexRoute marks %s as internal', (routeId) => {
+	expect(isNoIndexRoute(routeId)).toBe(true);
+});
+
+test.each([
+	'/',
+	'/login',
+	'/pricing',
+	'/contact',
+	'/privacy',
+	'/terms',
+	'/dpa',
+	'/robots.txt',
+	'/sitemap.xml',
+	'/llms.txt',
+	null,
+	undefined
+])('isNoIndexRoute leaves %s indexable', (routeId) => {
+	expect(isNoIndexRoute(routeId)).toBe(false);
 });
 
 test('llms.txt is a markdown index whose links all resolve under APP_URL', () => {

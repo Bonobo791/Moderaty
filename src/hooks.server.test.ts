@@ -35,7 +35,8 @@ function makeEvent() {
 	return {
 		cookies: { get: () => 'session-token', set: vi.fn() },
 		locals: {} as { user: unknown; dbDown?: boolean },
-		url: new URL('http://localhost/')
+		url: new URL('http://localhost/'),
+		route: { id: '/' }
 	};
 }
 
@@ -46,7 +47,8 @@ test('the locale is read from the exported LOCALE_COOKIE and applied to the html
 	const event = {
 		cookies: { get: (name: string) => (name === LOCALE_COOKIE ? 'pt-BR' : undefined), set: vi.fn() },
 		locals: {} as { user: unknown; dbDown?: boolean },
-		url: new URL('http://localhost/login')
+		url: new URL('http://localhost/login'),
+		route: { id: '/login' }
 	};
 	const resolve = vi.fn(
 		async (_event: unknown, opts?: { transformPageChunk?: (input: { html: string; done: boolean }) => string }) =>
@@ -66,7 +68,8 @@ test('a pt-BR cookie cannot mark an English-only surface pt-BR (MOD-11)', async 
 	const event = {
 		cookies: { get: (name: string) => (name === LOCALE_COOKIE ? 'pt-BR' : undefined), set: vi.fn() },
 		locals: {} as { user: unknown; dbDown?: boolean },
-		url: new URL('http://localhost/dashboard')
+		url: new URL('http://localhost/dashboard'),
+		route: { id: '/(app)/dashboard' }
 	};
 	const resolve = vi.fn(
 		async (_event: unknown, opts?: { transformPageChunk?: (input: { html: string; done: boolean }) => string }) =>
@@ -171,7 +174,7 @@ test('a database failure inside the guard check degrades to maintenance mode, ne
 test('/login still renders during a database outage (signed-out view, maintenance flagged)', async () => {
 	mocks.getSessionUser.mockRejectedValue(new Error('database is locked'));
 	vi.spyOn(console, 'error').mockImplementation(() => {});
-	const event = { ...makeEvent(), url: new URL('http://localhost/login') };
+	const event = { ...makeEvent(), url: new URL('http://localhost/login'), route: { id: '/login' } };
 	const resolve = vi.fn(async () => new Response('ok'));
 
 	await handle({ event, resolve } as never);
@@ -186,7 +189,7 @@ test('/api/health bypasses the guard and session so a database outage still reac
 	// the guard or the session lookup would convert an outage into a 500
 	// before the endpoint could answer with its documented 503.
 	mocks.assertMigrationsCurrent.mockRejectedValue(new Error('database is locked'));
-	const event = { ...makeEvent(), url: new URL('http://localhost/api/health') };
+	const event = { ...makeEvent(), url: new URL('http://localhost/api/health'), route: { id: '/api/health' } };
 	const resolve = vi.fn(async () => new Response('ok'));
 
 	await handle({ event, resolve } as never);
@@ -263,7 +266,8 @@ test('a renewed session without a cookie token does not rewrite the cookie', asy
 	const event = {
 		cookies: { get: () => undefined, set: vi.fn() },
 		locals: {} as { user: unknown; dbDown?: boolean },
-		url: new URL('http://localhost/')
+		url: new URL('http://localhost/'),
+		route: { id: '/' }
 	};
 	const resolve = vi.fn(async () => new Response('ok'));
 
@@ -295,4 +299,70 @@ test('a session-lookup outage is logged with its identifiable message', async ()
 	await handle({ event, resolve } as never);
 
 	expect(errSpy).toHaveBeenCalledWith('session lookup failed:', expect.any(Error));
+});
+
+test.each([
+	'/(app)/dashboard',
+	'/(app)/org/switch',
+	'/api/cron',
+	'/invite/[token]',
+	'/consent',
+	'/connect-channel',
+	'/logout',
+	'/account-deleted',
+	'/contact/verify'
+])('a response on internal route %s carries X-Robots-Tag: noindex', async (routeId) => {
+	mocks.getSessionUser.mockResolvedValue(null);
+	const event = { ...makeEvent(), route: { id: routeId } };
+	const resolve = vi.fn(async () => new Response('ok'));
+
+	const response = await handle({ event, resolve } as never);
+
+	expect(response.headers.get('x-robots-tag')).toBe('noindex');
+});
+
+test.each(['/', '/login', '/pricing', '/contact'])(
+	'a response on public route %s stays indexable — no X-Robots-Tag',
+	async (routeId) => {
+		mocks.getSessionUser.mockResolvedValue(null);
+		const event = { ...makeEvent(), route: { id: routeId } };
+		const resolve = vi.fn(async () => new Response('ok'));
+
+		const response = await handle({ event, resolve } as never);
+
+		expect(response.headers.get('x-robots-tag')).toBeNull();
+	}
+);
+
+test('the noindex header marks auth-gate redirects, not just rendered pages', async () => {
+	// The 302 an anonymous crawler gets from /dashboard is the ONLY response
+	// that URL ever produces — if the header skipped redirects, the internal
+	// surface would be unmarked exactly where crawlers reach it.
+	mocks.getSessionUser.mockResolvedValue(null);
+	const event = {
+		...makeEvent(),
+		url: new URL('http://localhost/dashboard'),
+		route: { id: '/(app)/dashboard' }
+	};
+	const resolve = vi.fn(async () => new Response(null, { status: 302, headers: { location: '/login' } }));
+
+	const response = await handle({ event, resolve } as never);
+
+	expect(response.status).toBe(302);
+	expect(response.headers.get('x-robots-tag')).toBe('noindex');
+});
+
+test('the /api/health early return also carries the noindex header', async () => {
+	// Health bypasses resolveLocalized via plain resolve() — the wrapping
+	// must happen on that path too or the probe endpoint stays unmarked.
+	const event = {
+		...makeEvent(),
+		url: new URL('http://localhost/api/health'),
+		route: { id: '/api/health' }
+	};
+	const resolve = vi.fn(async () => new Response('{"status":"ok"}'));
+
+	const response = await handle({ event, resolve } as never);
+
+	expect(response.headers.get('x-robots-tag')).toBe('noindex');
 });

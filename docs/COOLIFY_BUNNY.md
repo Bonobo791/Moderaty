@@ -94,6 +94,7 @@ One-time setup (human, in the Coolify dashboard):
    | `TURSO_AUTH_TOKEN` | production | dev | Build Variable ON + runtime; delivered to the build as a BuildKit secret |
    | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | production client | dev client | keep the existing clients — grants survive |
    | `OPENAI_API_KEY` | production | dev | |
+   | `OPENAI_JAILBREAK_MODEL` | optional | optional | prompt-injection detector model; defaults to `gpt-4.1-mini` |
    | `ENCRYPTION_KEY` | production value | dev value | `crypto.randomBytes(32).toString('hex')` per env |
    | `CRON_SECRET` | production value | dev value | any long random string |
    | `APP_URL` | `https://<public-domain>` (Bunny) | `https://<dev-domain>` | drives OAuth `redirect_uri` + Secure cookies |

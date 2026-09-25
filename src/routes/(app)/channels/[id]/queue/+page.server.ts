@@ -23,7 +23,8 @@ export async function load({ params, locals }) {
 			id: comments.id,
 			text: comments.text,
 			publishedAt: comments.publishedAt,
-			holdState: moderationActions.state
+			holdState: moderationActions.state,
+			reason: moderationActions.reason
 		})
 		.from(comments)
 		.leftJoin(

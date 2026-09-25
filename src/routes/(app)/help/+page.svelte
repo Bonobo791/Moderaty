@@ -8,9 +8,11 @@
 <div class="card">
 	<h2>How it works</h2>
 	<p>
-		Moderaty scans new comments on your connected YouTube channels, scores them against your
-		rules and sensitivity setting, and acts: hold for review, reject, delete, or ban the author.
-		Uncertain comments land in the channel's review queue instead — nothing there is public yet.
+		Moderaty scans new comments on your connected YouTube channels. Comments that need AI scoring
+		are screened first for possible prompt-injection attacks; flagged comments go to the review
+		queue without moderation scoring. Other comments are scored against your rules and sensitivity
+		setting, then held, rejected, deleted, or used to ban the author. Queued comments may remain
+		public on YouTube until their hold is confirmed.
 	</p>
 </div>
 
@@ -31,6 +33,8 @@
 	</p>
 	<p>
 		Abusive wording is always concealed: the digest shows the sanitized claim, never the insult.
+		Supporting comments are concealed by default; “Show original comment” reveals the original text
+		on demand for that visit only — nothing is saved, and it is concealed again next time.
 		The digest is read-only insight — it never changes a comment's moderation status and never
 		replies on your behalf. On metered plans each comment the digest processes consumes one
 		credit, the same as AI scoring. Turn it on per channel from the channel's

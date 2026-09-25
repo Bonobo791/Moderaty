@@ -94,6 +94,7 @@ test('scores with the org-resolved OpenAI key (BYOK), threaded to both scorers',
 	await runChannel('channel');
 
 	expect(mocks.resolveOpenAiKey).toHaveBeenCalledWith('org-1');
+	expect(mocks.detectJailbreak).toHaveBeenCalledWith('A comment', 'sk-resolved-key', undefined);
 	expect(mocks.scoreComment).toHaveBeenCalledWith('A comment', undefined, 'sk-resolved-key');
 	expect(mocks.scoreTone).toHaveBeenCalledWith(
 		'A comment',
@@ -102,6 +103,62 @@ test('scores with the org-resolved OpenAI key (BYOK), threaded to both scorers',
 		{ protectLgbtqia: 0, protectWomen: 0 },
 		'sk-resolved-key'
 	);
+});
+
+test('flags jailbreak attempts for human review before moderation scoring', async () => {
+	mocks.state.channel.orgId = 'org-1';
+	mocks.state.channel.toneLevel = 2;
+	mocks.detectJailbreak.mockResolvedValue({ flagged: true, confidence: 0.7 });
+
+	const result = await runChannel('channel');
+
+	expect(mocks.detectJailbreak).toHaveBeenCalledWith('A comment', 'sk-resolved-key', undefined);
+	expect(mocks.scoreComment).not.toHaveBeenCalled();
+	expect(mocks.scoreTone).not.toHaveBeenCalled();
+	expect(mocks.state.insertedComments).toEqual([
+		expect.objectContaining({ id: 'comment', status: 'pending', decidedBy: 'ai', matchedRuleId: null, aiScore: null })
+	]);
+	expect(mocks.state.insertedAudits).toEqual(queueHoldAudits('jailbreak guard flagged (0.70)'));
+	expectHeldForReview();
+	expect(mocks.state.insertedCredits).toEqual([expect.objectContaining({ orgId: 'org-1', delta: -1, refId: 'comment' })]);
+	expect(result).toMatchObject({ fetched: 1, acted: 1, queued: 1, partial: false, skipped: false });
+});
+
+test('routes jailbreak detector failures to the review queue instead of scoring', async () => {
+	mocks.detectJailbreak.mockRejectedValue(new Error('guardrail provider response contains sensitive details'));
+
+	const result = await runChannel('channel');
+
+	expectAiUnavailableQueued(result);
+	expect(mocks.scoreComment).not.toHaveBeenCalled();
+	expect(mocks.scoreTone).not.toHaveBeenCalled();
+	expect(mocks.state.insertedAudits[0].reason).toBe('ai unavailable: scoring unavailable');
+});
+
+test('routes a missing resolved key to review without invoking AI classifiers', async () => {
+	mocks.state.channel.orgId = null;
+	mocks.resolveOpenAiKey.mockResolvedValue(undefined);
+
+	const result = await runChannel('channel');
+
+	expect(mocks.resolveOpenAiKey).toHaveBeenCalledWith(null);
+	expectAiUnavailableQueued(result, { fetched: 1, partial: false, skipped: false });
+	expect(mocks.detectJailbreak).not.toHaveBeenCalled();
+	expect(mocks.scoreComment).not.toHaveBeenCalled();
+	expect(mocks.scoreTone).not.toHaveBeenCalled();
+});
+
+test('a jailbreak deadline aborts the run without durable writes', async () => {
+	mocks.detectJailbreak.mockRejectedValue(new mocks.DeadlineExceededError());
+
+	const result = await runChannel('channel');
+
+	expect(result).toMatchObject({ fetched: 1, acted: 0, queued: 0, partial: true, stoppedReason: 'deadline' });
+	expect(mocks.state.insertedComments).toEqual([]);
+	expect(mocks.state.insertedAudits).toEqual([]);
+	expect(mocks.state.insertedCredits).toEqual([]);
+	expect(mocks.state.channelUpdates).toEqual([]);
+	expect(mocks.scoreComment).not.toHaveBeenCalled();
 });
 
 test('routes AI scoring failures to the review queue instead of failing the run (I11)', async () => {
@@ -307,6 +364,7 @@ test('a protected handle is approved without rules, scoring, or enforcement — 
 		expect.objectContaining({ commentId: 'comment', action: 'approve', reason: 'protected handle', actor: 'system' })
 	]);
 	expect(mocks.state.moderationActions).toEqual([]);
+	expect(mocks.detectJailbreak).not.toHaveBeenCalled();
 	expect(mocks.scoreComment).not.toHaveBeenCalled();
 	expectNoYoutubeWrites();
 	expect(result).toMatchObject({ fetched: 1, acted: 0, queued: 0, dryRun: false });
@@ -334,6 +392,7 @@ test('only the protected identity is exempt — the same toxic text still bans a
 		expect.objectContaining({ commentId: 'troll', action: 'ban', state: 'completed' })
 	]);
 	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['troll'], 'rejected', true, 'access-token', undefined);
+	expect(mocks.detectJailbreak).not.toHaveBeenCalled();
 	expect(mocks.scoreComment).not.toHaveBeenCalled();
 	expect(result).toMatchObject({ fetched: 2, acted: 1, queued: 0 });
 });

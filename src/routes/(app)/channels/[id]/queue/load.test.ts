@@ -60,6 +60,8 @@ describe('queue load projection (behavior)', () => {
 				id: 'comment-1',
 				text: 'first held comment',
 				publishedAt: '2026-01-01T00:00:00.000Z',
+				holdState: 'completed',
+				reason: 'jailbreak guard flagged (0.70)',
 				authorName: 'Legacy Author',
 				authorChannelId: 'UClegacy1'
 			},
@@ -67,11 +69,13 @@ describe('queue load projection (behavior)', () => {
 				id: 'comment-2',
 				text: 'second held comment',
 				publishedAt: '2026-01-02T00:00:00.000Z',
+				holdState: null,
+				reason: null,
 				authorName: 'Another Author',
 				authorChannelId: 'UClegacy2'
 			}
 		];
-		mocks.ownedChannel.mockResolvedValue({ id: 'UCchan', title: 'My channel', refreshTokenEnc: 'enc' });
+		mocks.ownedChannel.mockResolvedValue({ id: 'UCchan', title: 'My channel', refreshTokenEnc: 'secret-refresh-token' });
 	});
 
 	const event = () =>
@@ -96,10 +100,13 @@ describe('queue load projection (behavior)', () => {
 		expect(result.pending).toHaveLength(2);
 		expect(result.pending.map((row) => row.id)).toEqual(['comment-1', 'comment-2']);
 		for (const row of result.pending) {
-			expect(Object.keys(row).sort()).toEqual(['holdState', 'id', 'publishedAt', 'text']);
+			expect(Object.keys(row).sort()).toEqual(['holdState', 'id', 'publishedAt', 'reason', 'text']);
 			expect(row).not.toHaveProperty('authorName');
 			expect(row).not.toHaveProperty('authorChannelId');
 		}
+		expect(result.pending[0].reason).toBe('jailbreak guard flagged (0.70)');
+		expect(result.pending[1].reason).toBeNull();
+		expect(JSON.stringify(result)).not.toContain('secret-refresh-token');
 	});
 
 	it('queries with an explicit field projection, not a bare .select()', async () => {
@@ -110,6 +117,7 @@ describe('queue load projection (behavior)', () => {
 			'holdState',
 			'id',
 			'publishedAt',
+			'reason',
 			'text'
 		]);
 	});

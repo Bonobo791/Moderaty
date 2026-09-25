@@ -1,5 +1,6 @@
 import { normalizeHandle } from '$lib/server/allowlist';
 import { DeadlineExceededError } from '$lib/server/http';
+import { detectJailbreak } from '$lib/server/jailbreak';
 import { scoreComment, serializeScores } from '$lib/server/moderation';
 import { matchPreparedRule, type PreparedRule, type RuleAction } from '$lib/server/rules';
 import { scoreTone, type ToneContext, type ToneProtections } from '$lib/server/tone';
@@ -9,6 +10,9 @@ import type { NewComment } from '$lib/server/youtube';
 const AUTO_BAN = 0.95;
 const AUTO_REJECT = 0.76;
 const QUEUE = 0.51;
+
+const ERR_KEY_REQUIRED = 'OPENAI_API_KEY is required';
+const SCORE_FORMAT = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 const RULE_ACTIONS: Record<RuleAction, {
 	status: string;
@@ -84,7 +88,7 @@ export function aiUnavailable(comment: NewComment, error: unknown): Decision {
 }
 
 function aiOutcome(comment: NewComment, aiScore: string | null, signal: 'ai' | 'tone', score: number): Decision {
-	const reason = `${signal} score ${score.toFixed(2)}`;
+	const reason = `${signal} score ${SCORE_FORMAT.format(score)}`;
 	// The two signals carry different enforcement policies. The OpenAI
 	// moderation classifier deletes flagged comments (0.76–0.94) and bans the
 	// author at the top band. The tone model — level 2 plus the LGBTQIA/Women
@@ -118,6 +122,20 @@ async function aiDecision(
 ): Promise<Decision> {
 	let moderation: Awaited<ReturnType<typeof scoreComment>>;
 	try {
+		if (!openAiKey) throw new TypeError(ERR_KEY_REQUIRED);
+		const jailbreak = await detectJailbreak(comment.text, openAiKey, deadline);
+		if (jailbreak.flagged) {
+			return {
+				comment,
+				status: 'pending',
+				decidedBy: 'ai',
+				matchedRuleId: null,
+				aiScore: null,
+				auditAction: 'queue',
+				reason: `jailbreak guard flagged (${SCORE_FORMAT.format(jailbreak.confidence)})`,
+				youtubeAction: 'hold'
+			};
+		}
 		moderation = await scoreComment(comment.text, deadline, openAiKey);
 	} catch (error) {
 		// A deadline-expired score is a bounded-run abort (I10), not an AI

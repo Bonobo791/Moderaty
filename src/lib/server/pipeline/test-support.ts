@@ -316,6 +316,7 @@ const mocks = vi.hoisted(() => {
 		scoreComment: vi.fn(),
 		serializeScores: vi.fn(),
 		scoreTone: vi.fn(),
+		detectJailbreak: vi.fn(),
 		resolveOpenAiKey: vi.fn(),
 		checkSync: vi.fn(() => ({ status: 'safe' })),
 		DeadlineExceededError: class DeadlineExceededError extends Error {}
@@ -342,6 +343,9 @@ vi.mock('$lib/server/moderation', () => ({
 }));
 vi.mock('$lib/server/tone', () => ({
 	scoreTone: mocks.scoreTone
+}));
+vi.mock('$lib/server/jailbreak', () => ({
+	detectJailbreak: mocks.detectJailbreak
 }));
 vi.mock('$lib/server/openaiKey', () => ({
 	resolveOpenAiKey: mocks.resolveOpenAiKey
@@ -495,6 +499,7 @@ export function resetPipelineMocks() {
 		mocks.scoreComment,
 		mocks.serializeScores,
 		mocks.scoreTone,
+		mocks.detectJailbreak,
 		mocks.resolveOpenAiKey
 	]) mock.mockReset();
 	mocks.state.tables = { channels, comments, rules, channelAllowedHandles, auditLog, moderationActions, organizations, creditTransactions, stripeSubscriptionPeriods };
@@ -543,6 +548,7 @@ export function resetPipelineMocks() {
 	mocks.getCommentModerationStatus.mockResolvedValue('rejected');
 	mocks.serializeScores.mockReturnValue('{}');
 	mocks.scoreTone.mockResolvedValue({ score: 0 });
+	mocks.detectJailbreak.mockResolvedValue({ flagged: false, confidence: 0.1 });
 	mocks.resolveOpenAiKey.mockResolvedValue('sk-resolved-key');
 	mocks.fetchVideoMetadata.mockResolvedValue(new Map([
 		['video', { title: 'Video title', description: 'Video description' }]

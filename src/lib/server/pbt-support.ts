@@ -21,6 +21,8 @@ import {
 	type ChannelRow
 } from './testarbitraries';
 
+const UNEXPECTED_EXTERNAL_REQUEST = 'unexpected external request in pipeline property tests';
+
 /** Tables every pipeline property wipes between runs. */
 export const PBT_WIPE = [
 	'moderation_actions',
@@ -40,6 +42,14 @@ export const PBT_WIPE = [
  * $env/dynamic/private at import time).
  */
 export function createPipelineMocks() {
+	vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+		if (String(input) !== 'https://api.openai.com/v1/chat/completions') {
+			throw new TypeError(UNEXPECTED_EXTERNAL_REQUEST);
+		}
+		return new Response(JSON.stringify({
+			choices: [{ message: { content: JSON.stringify({ flagged: false, confidence: 0.1 }) } }]
+		}), { status: 200 });
+	}));
 	return {
 		env: { DRY_RUN: 'false', FC_NUM_RUNS: process.env.FC_NUM_RUNS } as Record<
 			string,

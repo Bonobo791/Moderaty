@@ -1,4 +1,5 @@
 import type { loadHandleSet } from '$lib/server/allowlist';
+import type { DryRunClaim } from '$lib/server/dryRun';
 import type { moderationActions } from '$lib/server/db/schema';
 import type { prepareRules } from '$lib/server/rules';
 import type { CommentPage, NewComment, fetchVideoMetadata } from '$lib/server/youtube';
@@ -16,6 +17,12 @@ export interface RunChannelOptions {
 	 * real runs — re-scoring them is the point of the preview. Only meaningful
 	 * with forceDryRun. The caller persists any continuation state. */
 	window?: { boundary: string; pageToken: string | null };
+	/** Dashboard-preview claim binding (cubic): when set, the loaded channel
+	 * row must still carry this fingerprint — org, connector ciphertext, and
+	 * the claim's lease. A delete/reconnect lands the same channel id on a
+	 * fresh row; without the check the preview would run against a channel
+	 * that never claimed the allowance. */
+	claim?: DryRunClaim;
 }
 
 export interface ChannelRunResult {

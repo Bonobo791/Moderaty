@@ -20,6 +20,7 @@ import { concealEvidence } from '$lib/server/feedbackSanitize';
 import { groupFeedback } from '$lib/server/feedbackGroup';
 import { DeadlineExceededError, assertBeforeDeadline } from '$lib/server/http';
 import { consumeFeedbackCredit, orgIsMetered, type LedgerHandle } from '$lib/server/billing/ledger';
+import { channelMatchesClaim, type DryRunClaim } from '$lib/server/dryRun';
 import { resolveOpenAiKey } from '$lib/server/openaiKey';
 
 /** One page of stored comments per run — the same bound moderation uses (I10). */
@@ -573,10 +574,16 @@ export interface FeedbackPreview {
 
 export async function previewFeedbackDigest(
 	channelId: string,
-	{ boundary, deadline }: { boundary: string; deadline?: number }
+	{ boundary, deadline, claim }: { boundary: string; deadline?: number; claim?: DryRunClaim }
 ): Promise<FeedbackPreview> {
 	const channel = await db.select().from(channels).where(eq(channels.id, channelId)).get();
 	if (!channel) throw new Error(`channel not found: ${channelId}`);
+	// Same binding as the moderation preview: the row loaded here must be the
+	// row the allowance claimed, or a delete/reconnect slipped in a fresh
+	// connector under the same id (cubic+codeant).
+	if (claim && !channelMatchesClaim(channel, claim)) {
+		throw new Error(`channel ${channelId} changed under the dry-run claim — aborting the preview`);
+	}
 	if (!channel.active) throw new Error('channel is paused');
 	const apiKey = await resolveOpenAiKey(channel.orgId);
 	if (!apiKey) throw new Error('no OpenAI key resolved for feedback preview');

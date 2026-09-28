@@ -842,6 +842,22 @@ test('feedback dry-run builds grouped sanitized findings without writing or char
 	expect((await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())).toMatchObject({ cursor: '2026-01-01T00:00:00.000Z', feedbackHistoryBoundary: null });
 });
 
+test('a feedback preview aborts when its claimed row was swapped mid-claim', async () => {
+	// The claim's fingerprint — org, connector ciphertext, lease — must match
+	// the live row: a delete/reconnect reuses the channel id with a fresh
+	// grant, and running the preview against it would spend the wrong org's
+	// YouTube quota and expose its comments to the claimant (cubic+codeant).
+	await seedChannel('UC1', { feedbackEnabled: 1, leaseExpiresAt: '2099-01-01T00:00:00.000Z' });
+	const claim = { orgId: 'org-1', refreshTokenEnc: 'enc', leaseExpiresAt: '2099-01-01T00:00:00.000Z' };
+	await testDb().db.delete(channels).where(eq(channels.id, 'UC1'));
+	await seedChannel('UC1', { feedbackEnabled: 1, refreshTokenEnc: 'enc-reconnected' });
+
+	await expect(
+		previewFeedbackDigest('UC1', { boundary: '2025-01-01T00:00:00.000Z', claim })
+	).rejects.toThrow('changed under the dry-run claim');
+	expect(mocks.fetchNewComments).not.toHaveBeenCalled();
+});
+
 // ---- cadence + rotation ----
 
 test('digestDue: an active history scan bypasses manual and recent weekly cadence', async () => {

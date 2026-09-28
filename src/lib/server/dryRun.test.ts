@@ -15,6 +15,16 @@ async function release(id: string, orgId: string, lease: string) {
 	await testDb().db.update(channels).set({ leaseExpiresAt: null }).where(and(eq(channels.id, id), eq(channels.orgId, orgId), eq(channels.leaseExpiresAt, lease)));
 }
 
+test('a successful claim returns the row fingerprint execution must re-verify', async () => {
+	// The claim must carry the claimed row's identity: a delete/reconnect can
+	// land the same channel id on a fresh row mid-preview, and only this
+	// fingerprint tells the new row from the one the allowance bound (cubic).
+	await seedChannel('UC1');
+	const claim = await claimDryRun('UC1', 'org-1', 'moderation');
+	if (!('lease' in claim)) throw new Error('expected claim');
+	expect(claim.identity).toEqual({ orgId: 'org-1', refreshTokenEnc: 'enc', leaseExpiresAt: claim.lease });
+});
+
 test('claims one allowance per selected feature and channel', async () => {
 	await seedChannel('UC1');
 	await seedChannel('UC2');

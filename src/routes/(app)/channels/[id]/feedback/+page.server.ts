@@ -225,7 +225,9 @@ export const actions = {
 		}
 		if ('status' in claim) return fail(claim.status, { scope: 'feedbackDryRun', error: claim.error });
 		try {
-			const preview = await previewFeedbackDigest(params.id, { boundary: historyWindowBoundary(window), deadline: Date.now() + 15_000 });
+			// Same claim binding as the moderation preview: the row executing
+			// must be the row that claimed the allowance (cubic+codeant).
+			const preview = await previewFeedbackDigest(params.id, { boundary: historyWindowBoundary(window), deadline: Date.now() + 15_000, claim: claim.identity });
 			return {
 				ok: true,
 				scope: 'feedbackDryRun',

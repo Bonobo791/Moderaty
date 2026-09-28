@@ -234,7 +234,11 @@ export const actions = {
 			const result = await runChannel(channelId, {
 				deadline: Date.now() + 20_000,
 				forceDryRun: true,
-				window: { boundary, pageToken: null }
+				window: { boundary, pageToken: null },
+				// Bind execution to the row that claimed the allowance — a
+				// delete/reconnect under the same channel id must abort the
+				// preview, not run the new connector (cubic+codeant).
+				claim: claim.identity
 			});
 			// Persist the drain state under the held lease: incomplete windows
 			// hand cron the continuation; complete ones clear any older drain.

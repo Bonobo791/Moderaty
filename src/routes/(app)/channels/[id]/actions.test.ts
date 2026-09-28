@@ -729,7 +729,10 @@ test('dry run previews a live deployment through runChannel and echoes the count
 		forceDryRun: true,
 		// Default window: last 3 months (same preset default as Analyze history).
 		// One page per drain step is forced by window mode inside runChannel.
-		window: { boundary: expect.any(String), pageToken: null }
+		window: { boundary: expect.any(String), pageToken: null },
+		// The preview is bound to the row that claimed it — a delete/reconnect
+		// on the same channel id swaps the fingerprint and must abort (cubic).
+		claim: { orgId: 'org-1', refreshTokenEnc: 'enc', leaseExpiresAt: expect.any(String) }
 	});
 	// One page with a hard 20s ceiling so the preview fits the serverless window.
 	const deadline = mocks.runChannel.mock.calls[0][1].deadline as number;
@@ -780,7 +783,8 @@ test('dry run remains available without purchased credits and persists its conti
 	expect(mocks.runChannel).toHaveBeenCalledWith('UC1', {
 		deadline: expect.any(Number),
 		forceDryRun: true,
-		window: { boundary: expect.any(String), pageToken: null }
+		window: { boundary: expect.any(String), pageToken: null },
+		claim: { orgId: 'org-1', refreshTokenEnc: 'enc', leaseExpiresAt: expect.any(String) }
 	});
 	const window = mocks.runChannel.mock.calls[0][1].window;
 	const expected = 3 * 30 * 24 * 60 * 60 * 1000;
@@ -928,7 +932,8 @@ test('dry run with months "all" scopes the window to the epoch boundary', async 
 	expect(mocks.runChannel).toHaveBeenCalledWith('UC1', {
 		deadline: expect.any(Number),
 		forceDryRun: true,
-		window: { boundary: '1970-01-01T00:00:00.000Z', pageToken: null }
+		window: { boundary: '1970-01-01T00:00:00.000Z', pageToken: null },
+		claim: { orgId: 'org-1', refreshTokenEnc: 'enc', leaseExpiresAt: expect.any(String) }
 	});
 	expect(res).toMatchObject({ ok: true, months: 'all', background: true });
 	// The persisted drain boundary must be the epoch, not null — null would

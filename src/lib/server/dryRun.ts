@@ -5,11 +5,28 @@ import { channels } from '$lib/server/db/schema';
 
 export type PreviewFeature = 'moderation' | 'feedback';
 
+/** The claimed row's fingerprint — org, connector ciphertext, and the lease
+ * the claim set. Execution must re-verify it against the live row: a
+ * delete/reconnect reuses the channel id with a fresh grant, and only this
+ * fingerprint distinguishes the claimant's row from an impostor (cubic). */
+export interface DryRunClaim {
+	orgId: string | null;
+	refreshTokenEnc: string;
+	leaseExpiresAt: string;
+}
+
+export function channelMatchesClaim(
+	channel: Pick<typeof channels.$inferSelect, 'orgId' | 'refreshTokenEnc' | 'leaseExpiresAt'>,
+	claim: DryRunClaim
+): boolean {
+	return channel.orgId === claim.orgId && channel.refreshTokenEnc === claim.refreshTokenEnc && channel.leaseExpiresAt === claim.leaseExpiresAt;
+}
+
 export async function claimDryRun(
 	channelId: string,
 	orgId: string,
 	feature: PreviewFeature
-): Promise<{ lease: string } | { status: 404 | 409; error: string }> {
+): Promise<{ lease: string; identity: DryRunClaim } | { status: 404 | 409; error: string }> {
 	const now = new Date().toISOString();
 	const lease = new Date(Date.now() + 60_000).toISOString();
 	const usedColumn = feature === 'moderation' ? channels.moderationDryRunUsedAt : channels.feedbackDryRunUsedAt;
@@ -29,8 +46,10 @@ export async function claimDryRun(
 				or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, now))
 			)
 		)
-		.returning({ id: channels.id });
-	if (claimed.length) return { lease };
+		.returning({ id: channels.id, orgId: channels.orgId, refreshTokenEnc: channels.refreshTokenEnc });
+	if (claimed.length) {
+		return { lease, identity: { orgId: claimed[0].orgId, refreshTokenEnc: claimed[0].refreshTokenEnc, leaseExpiresAt: lease } };
+	}
 
 	const channel = await db
 		.select({ active: channels.active, used: usedColumn })

@@ -552,7 +552,13 @@ test('feedback dry run returns a sanitized preview, claims its one-time allowanc
 
 	const result = await postFeedbackAction('dryRun', 'UC1', { months: 'all' });
 
-	expect(mocks.previewFeedbackDigest).toHaveBeenCalledWith('UC1', { boundary: '1970-01-01T00:00:00.000Z', deadline: expect.any(Number) });
+	expect(mocks.previewFeedbackDigest).toHaveBeenCalledWith('UC1', {
+		boundary: '1970-01-01T00:00:00.000Z',
+		deadline: expect.any(Number),
+		// Bound to the claimed row — a delete/reconnect on the same channel id
+		// must abort the preview instead of running the new connector (cubic).
+		claim: { orgId: 'org-1', refreshTokenEnc: 'enc', leaseExpiresAt: expect.any(String) }
+	});
 	expect(result).toMatchObject({ ok: true, scope: 'feedbackDryRun', dryRunUsed: true, preview, message: 'Free feedback dry run complete. Limited to 1 per channel; no credits used.' });
 	let channel = (await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())!;
 	expect(channel.feedbackDryRunUsedAt).toBeTruthy();

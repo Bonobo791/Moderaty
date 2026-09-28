@@ -599,6 +599,7 @@ describe('finding_evidence', () => {
 			comment_id: { notNull: true },
 			sanitized_excerpt: { notNull: true },
 			has_abuse: { notNull: true, hasDefault: true },
+			source_text: { notNull: false },
 			created_at: { notNull: true, hasDefault: true }
 		});
 		expectForeignKey(findingEvidence, 'finding_id', feedbackFindings, 'id', 'cascade');

@@ -434,6 +434,7 @@ export const findingEvidence = sqliteTable('finding_evidence', {
 	commentId: text('comment_id').notNull(), // real comments.id — validated at write time; reveal path re-checks tenancy
 	sanitizedExcerpt: text('sanitized_excerpt').notNull(), // concealEvidence() output — the only text the default render shows
 	hasAbuse: integer('has_abuse').notNull().default(0), // 1 = classifier flagged abuse; drives the reveal warning
+	sourceText: text('source_text'), // the exact text this digest classified — pinned per evidence row so a later scan refreshing the shared snapshot can't change what an older digest's reveal shows (codex). Null on rows written before the column existed: reveal falls back to the snapshot/live join.
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [index('finding_evidence_finding_idx').on(table.findingId)]);
 

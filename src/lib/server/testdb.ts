@@ -475,6 +475,7 @@ export async function createTestDb(): Promise<TestDb> {
 			comment_id TEXT NOT NULL,
 			sanitized_excerpt TEXT NOT NULL,
 			has_abuse INTEGER NOT NULL DEFAULT 0,
+			source_text TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE INDEX finding_evidence_finding_idx ON finding_evidence (finding_id)`,

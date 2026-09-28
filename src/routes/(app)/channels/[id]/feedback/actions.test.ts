@@ -717,6 +717,33 @@ test('abusive evidence requires explicit confirmation before returning the raw c
 	expect(JSON.stringify(result)).not.toContain('author-secret');
 });
 
+test('a reveal returns the text its digest classified when a later scan refreshed the snapshot (codex)', async () => {
+	// Scan-a analyzed 'OLD TEXT' and stored a digest; scan-b re-ran over the
+	// edited comment and refreshed the shared feedback_history_comments row
+	// to 'NEW TEXT'. The older digest is still selectable on the page — its
+	// evidence row pins the text it actually classified, or revealing it
+	// shows words the classifier never saw.
+	await seedChannel('UC1');
+	const digestId = await seedDigest('UC1');
+	const [finding] = await testDb().db
+		.insert(feedbackFindings)
+		.values({ digestId, category: 'question', summary: 'A viewer asked about timing', supporterCount: 1 })
+		.returning({ id: feedbackFindings.id });
+	const [evidence] = await testDb().db
+		.insert(findingEvidence)
+		.values({ findingId: finding.id, commentId: 'edited', sanitizedExcerpt: 'concealed excerpt', hasAbuse: 0, sourceText: 'OLD TEXT' })
+		.returning({ id: findingEvidence.id });
+	await testDb().db
+		.insert(feedbackHistoryComments)
+		.values({ id: 'edited', channelId: 'UC1', text: 'NEW TEXT', publishedAt: '2025-01-01T00:00:00.000Z', scanId: 'scan-b' });
+
+	await expect(postReveal('UC1', String(evidence.id))).resolves.toEqual({
+		scope: 'reveal',
+		evidenceId: evidence.id,
+		text: 'OLD TEXT'
+	});
+});
+
 test('a reveal prefers the historical snapshot when the comment exists in both stores (cubic)', async () => {
 	// The digest classified the snapshot's text — when moderation later
 	// re-stores the same comment (possibly edited since), the reveal must

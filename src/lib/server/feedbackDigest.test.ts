@@ -758,6 +758,37 @@ test('a rescan refreshes the snapshot to the text it actually classified', async
 	expect(rows[0]).toMatchObject({ text: 'EDITED TEXT', publishedAt: '2024-06-01T00:00:00.000Z', scanId: 'scan-b' });
 });
 
+test('each digest pins the text it classified on its evidence rows (codex)', async () => {
+	// Scan-a analyzed 'OLD TEXT'; the comment was later edited and scan-b
+	// re-classified 'EDITED TEXT', refreshing the shared snapshot. Revealing
+	// scan-a's finding must still show 'OLD TEXT' — the evidence row carries
+	// the text its own digest classified, so completed digests survive
+	// snapshot refreshes.
+	await seedChannel('UC1', {
+		feedbackEnabled: 1,
+		feedbackThreshold: 1,
+		feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z',
+		feedbackHistoryScanId: 'scan-b',
+		feedbackHistoryPageToken: null
+	});
+	await testDb().db.insert(feedbackHistoryComments).values({
+		id: 'edited', channelId: 'UC1', text: 'OLD TEXT', publishedAt: '2024-01-01T00:00:00.000Z', scanId: 'scan-a'
+	});
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [{ id: 'edited', text: 'EDITED TEXT', publishedAt: '2024-06-01T00:00:00.000Z' }],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+	RESPONSES = { 'EDITED TEXT': { category: 'question', hasAbuse: false, claim: 'a timing question' } };
+
+	const result = await generateFeedbackDigest('UC1');
+
+	expect(result).toMatchObject({ status: 'complete', commentsClassified: 1 });
+	const evidence = await testDb().db.select().from(findingEvidence).where(eq(findingEvidence.commentId, 'edited')).all();
+	expect(evidence).toHaveLength(1);
+	expect(evidence[0]).toMatchObject({ commentId: 'edited', sourceText: 'EDITED TEXT', hasAbuse: 0 });
+});
+
 test('history write headroom deferral preserves the checkpoint and writes no completed sources', async () => {
 	await testDb().db.update(organizations).set({ creditsRemaining: 10 }).where(eq(organizations.id, 'org-1'));
 	await seedChannel('UC1', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryPageToken: 'page-1' });

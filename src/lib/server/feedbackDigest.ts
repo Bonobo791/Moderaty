@@ -514,7 +514,12 @@ export async function generateFeedbackDigest(
 							findingId: row.id,
 							commentId: evidence.commentId,
 							sanitizedExcerpt: concealed.text,
-							hasAbuse: evidence.hasAbuse ? 1 : 0
+							hasAbuse: evidence.hasAbuse ? 1 : 0,
+							// The text THIS digest classified, pinned on the evidence
+							// row: a later rescan refreshes the shared snapshot, and
+							// an older completed digest must still reveal the words
+							// it actually analyzed (codex).
+							sourceText: evidence.text
 						};
 					});
 					if (evidenceRows.length) await tx.insert(findingEvidence).values(evidenceRows);

@@ -142,10 +142,12 @@ export async function load({ params, locals, url }) {
 
 /** The raw comment behind one evidence row, scoped to the channel it belongs to. */
 function evidenceSource(channelId: string, evidenceId: number) {
-	// The historical snapshot wins over the live comments row: it is the text
-	// the classifier actually saw — a moderation re-store of the same comment
-	// can carry edited content (cubic).
-	const sourceText = sql<string>`coalesce(${feedbackHistoryComments.text}, ${comments.text})`;
+	// The evidence row's pinned text wins: it is exactly what this digest's
+	// classifier saw — a later rescan can refresh the shared history snapshot
+	// with edited content, and this digest must still reveal its own words
+	// (codex). The snapshot comes next for rows written before the column
+	// existed, then the live comments row.
+	const sourceText = sql<string>`coalesce(${findingEvidence.sourceText}, ${feedbackHistoryComments.text}, ${comments.text})`;
 	return db
 		.select({ text: sourceText, hasAbuse: findingEvidence.hasAbuse })
 		.from(findingEvidence)

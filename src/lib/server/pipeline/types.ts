@@ -101,10 +101,11 @@ export type DecisionBatchOptions = {
 
 export type AiBudget = {
 	remaining: number;
-	/** Comment ids already charged under the active history scan: a retry
-	 * after a post-charge crash must not defer them to the balance gate —
-	 * the committed anchor covers the AI call, and deferring parks a paid
-	 * drain on an exhausted balance forever (codex+cubic). */
+	/** Comment ids this history scan already charged+staged: staging commits
+	 * verdict+action+anchor atomically, so an anchor marks the comment DONE.
+	 * prepareDecisionBatch filters them out of the batch — a retry otherwise
+	 * defers them to the balance gate (parking a paid drain forever) or
+	 * re-stages them every tick a page sits on outOfCredits (codex+cubic). */
 	prepaid?: Set<string>;
 };
 

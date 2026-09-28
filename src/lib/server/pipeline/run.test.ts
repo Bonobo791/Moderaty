@@ -265,7 +265,9 @@ test('a rescan retry after a mid-drain crash stages covered — the committed an
 	// not defer the paid comment to outOfCredits — the committed scan anchor
 	// covers it, or the cursor parks forever on work already bought
 	// (codex+cubic) — and it must not charge again (cubic: the crash model,
-	// not a stale channel row, is what leaves the boundary planted).
+	// not a stale channel row, is what leaves the boundary planted). Because
+	// charge and stage commit in one transaction, an anchored comment is
+	// already staged — the retry skips it instead of re-scoring (codex).
 	mocks.state.channel.orgId = 'org-1';
 	mocks.state.credits = 1;
 	mocks.state.channel.historyBoundary = '2026-01-01T00:00:00.000Z';
@@ -288,7 +290,42 @@ test('a rescan retry after a mid-drain crash stages covered — the committed an
 	expect(retried.outOfCredits).toBeUndefined();
 	expect(mocks.state.insertedCredits.filter((row) => row.refId === 'comment#scan-req-1')).toHaveLength(1);
 	expect(mocks.state.credits).toBe(0);
+	// The covered comment was skipped on the retry: one AI call total, and its
+	// committed action still completed through the enforcement sweep.
+	expect(mocks.scoreComment).toHaveBeenCalledTimes(1);
+	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({ commentId: 'comment', state: 'completed' })]);
 	expect(mocks.state.channelUpdates).toContainEqual(expect.objectContaining({ historyBoundary: null, historyScanId: null }));
+});
+
+test('a parked rescan page skips comments this scan already staged — no repeat AI, staging, or enforcement burn', async () => {
+	// The scan staged+charged 'paid' but ran out of credits before 'unpaid':
+	// the checkpoint parks at outOfCredits. Every later tick must reattempt
+	// only the unpaid remainder — re-scoring 'paid' would burn an OpenAI call
+	// and re-pend its completed action every tick until top-up (codex). The
+	// committed action row still finishes through the normal sweep.
+	mocks.state.channel.orgId = 'org-1';
+	mocks.state.credits = 0;
+	mocks.state.channel.historyBoundary = '2026-01-01T00:00:00.000Z';
+	mocks.state.channel.historyScanId = 'scan-req-1';
+	mocks.state.existingIds = ['paid', 'unpaid'];
+	mocks.state.insertedCredits = [{ orgId: 'org-1', refType: 'comment', refId: 'paid#scan-req-1' }];
+	mocks.state.moderationActions = [dispatchedAction({ commentId: 'paid', action: 'delete' })];
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ id: 'paid' }), newComment({ id: 'unpaid' })],
+		nextPageToken: 'page-2',
+		reachedCursor: false
+	});
+	mocks.getCommentModerationStatus.mockResolvedValue(null);
+
+	const result = await runChannel('channel');
+
+	expect(result.outOfCredits).toBe(true);
+	expect(mocks.scoreComment).not.toHaveBeenCalled();
+	expect(mocks.state.insertedComments).toEqual([]);
+	expect(mocks.state.insertedCredits).toHaveLength(1);
+	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({ commentId: 'paid', state: 'completed' })]);
+	// The page stays parked — only a top-up advances the checkpoint.
+	expect(mocks.state.channelUpdates).toEqual([]);
 });
 
 test('skips an inactive channel without fetching or scoring', async () => {

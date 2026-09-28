@@ -1,0 +1,1 @@
+ALTER TABLE `finding_evidence` ADD `source_text` text;

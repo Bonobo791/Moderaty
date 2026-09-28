@@ -218,22 +218,17 @@ export async function decide(
 ): Promise<Decision> {
 	const preAi = preAiDecision(comment, rules, allowlist);
 	if (preAi) return preAi;
-	// A retried rescan may arrive with this comment's charge already committed:
-	// the scan anchor exists, so the comment is prepaid and the balance gate
-	// must not defer it — a post-charge crash retry at zero balance would
-	// otherwise park the drain forever on work that was already paid
-	// (codex+cubic). Staging still runs its charge step, which the anchor
-	// resolves to "covered" with no second debit.
-	if (aiBudget.prepaid?.has(comment.id) !== true) {
-		// Metered AI: claim one credit of the batch's AI budget SYNCHRONOUSLY —
-		// before any await — so the concurrent decide() workers in Promise.allSettled
-		// can never over-spend it. Rules/allowlist above never consume budget.
-		// Out of credits: rules/allowlist already had their say — only the AI step
-		// is paused (product choice). The comment stays unprocessed and the cursor
-		// parks so a later run scores it once credits are topped up.
-		if (aiBudget.remaining <= 0 || Number.isNaN(aiBudget.remaining)) return deferredDecision(comment);
-		aiBudget.remaining -= 1;
-	}
+	// Metered AI: claim one credit of the batch's AI budget SYNCHRONOUSLY —
+	// before any await — so the concurrent decide() workers in Promise.allSettled
+	// can never over-spend it. Rules/allowlist above never consume budget.
+	// Out of credits: rules/allowlist already had their say — only the AI step
+	// is paused (product choice). The comment stays unprocessed and the cursor
+	// parks so a later run scores it once credits are topped up. Comments a
+	// rescan already charged+staged never reach here — prepareDecisionBatch
+	// filters them out of the batch (codex: a parked page re-scoring them
+	// would re-pend their completed actions every tick).
+	if (aiBudget.remaining <= 0 || Number.isNaN(aiBudget.remaining)) return deferredDecision(comment);
+	aiBudget.remaining -= 1;
 	// The budget claim IS the billing marker: this decision consumed an AI
 	// call, so stageDecisions may charge it exactly one credit.
 	return { ...(await aiDecision(comment, tone, options.deadline, options.protections, options.openAiKey)), billable: true };

@@ -71,10 +71,12 @@ const aiBudget: AiBudget = {
 	remaining: metered && options.orgId ? await getCredits(options.orgId) : Number.POSITIVE_INFINITY
 };
 // A retried rescan can arrive with charges already committed: the staging
-// transaction writes verdict+anchor atomically, so a crash between staging
-// and the checkpoint leaves paid anchors behind. Comments anchored under
-// THIS scan's ref are prepaid — the budget gate must not defer them, or a
-// drained balance parks the paid work forever (codex+cubic). The ref shape
+// transaction writes verdict+action+anchor atomically, so an anchor under
+// THIS scan's ref means the comment is DONE — re-scoring it while the page
+// sits parked on outOfCredits would re-pend its completed action and burn
+// an OpenAI call + YouTube write on every tick until top-up (codex). The
+// committed moderation_actions row still drives the enforcement sweep, so
+// the crash-after-charge case drains with no extra work. The ref shape
 // matches staging's exactly, including the plain comment id a pre-nonce
 // drain charges.
 if (metered && options.orgId && options.rescore && page.comments.length) {
@@ -118,14 +120,17 @@ const existingIds = new Set(storedIds);
 const rulesForChannel = prepareRules(await db.select().from(rules).where(eq(rules.channelId, channelId)).all());
 // One allowlist read per run; decide() checks it before any rule or scoring.
 const allowlist = await loadHandleSet(channelId);
-// Dedupe twice: against already-stored comments AND within this batch.
+// Dedupe three ways: against already-stored comments, within this batch,
+// and against comments this scan already charged+staged (prepaid). The
+// last keeps a parked rescan page from re-scoring finished work every tick;
+// prepaid comments' committed action rows still drain via enforcement.
 // commentThreads pagination can repeat an item across page boundaries, and
 // two decisions with one comment id would violate the comments.id PRIMARY
 // KEY, failing the entire staging transaction (I1: one bad item never
 // aborts the batch).
 const seen = new Set<string>();
 const newComments = page.comments.filter((comment) => {
-	if (existingIds.has(comment.id) || seen.has(comment.id)) return false;
+	if (existingIds.has(comment.id) || seen.has(comment.id) || aiBudget.prepaid?.has(comment.id)) return false;
 	seen.add(comment.id);
 	return true;
 });

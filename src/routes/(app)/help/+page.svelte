@@ -41,6 +41,16 @@
 		<strong>Feedback</strong> tab, where you can also pick the categories, the cadence, and the
 		evidence threshold.
 	</p>
+	<h3>Historical feedback and previews</h3>
+	<p>
+		Analyze history on the Overview tab can apply moderation actions to older comments. Analyze feedback history on the Feedback tab only reads comments and groups feedback; it never changes moderation. Choose 1, 3, 6, 12, or 24 months. Historical feedback runs in batches of up to 100 comments and continues automatically, even with manual digest cadence. Comments already included in a digest are skipped, and retries are not charged twice. Turning feedback off pauses the scan; re-enabling it resumes where it stopped.
+	</p>
+	<p>
+		On metered plans, feedback costs one credit per comment in addition to moderation. The full batch must have enough credits before processing starts; if the balance is short, the batch pauses without processing. Lifetime plans and self-hosted unmetered accounts are not charged credits.
+	</p>
+	<p>
+		Each channel gets 1 free moderation dry run and 1 free feedback dry run. Neither spends credits. Moderation previews drain the selected window in the background; feedback previews cover the first page, up to 100 comments. The allowance is used when a preview starts, even if it later fails. No credits are charged. These dashboard previews are separate from self-hosted <code>DRY_RUN=true</code> mode, which simulates a deployment.
+	</p>
 </div>
 
 <div class="card">

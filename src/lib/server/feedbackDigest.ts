@@ -13,12 +13,14 @@
 import { and, asc, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { db, withBusyRetry } from '$lib/server/db';
-import { channels, comments, creditTransactions, feedbackDigests, feedbackFindings, findingEvidence } from '$lib/server/db/schema';
+import { channels, comments, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence } from '$lib/server/db/schema';
 import { classifyFeedback, type FeedbackCategory } from '$lib/server/feedback';
+import { fetchFeedbackPage, pendingFeedbackHistoryPage, pendingStoredFeedback, advanceFeedbackHistory, type FeedbackHistoryPage } from '$lib/server/feedbackHistory';
 import { concealEvidence } from '$lib/server/feedbackSanitize';
 import { groupFeedback } from '$lib/server/feedbackGroup';
 import { DeadlineExceededError, assertBeforeDeadline } from '$lib/server/http';
 import { consumeFeedbackCredit, orgIsMetered, type LedgerHandle } from '$lib/server/billing/ledger';
+import { channelMatchesClaim, type DryRunClaim } from '$lib/server/dryRun';
 import { resolveOpenAiKey } from '$lib/server/openaiKey';
 
 /** One page of stored comments per run — the same bound moderation uses (I10). */
@@ -43,6 +45,10 @@ export const PER_100_COUNT = 100;
 
 const EPOCH = '1970-01-01T00:00:00.000Z';
 
+const ERR_INSUFFICIENT_CREDITS = 'insufficient credits for feedback digest';
+const ERR_PREVIEW_PAUSED = 'channel is paused';
+const ERR_PREVIEW_NO_KEY = 'no OpenAI key resolved for feedback preview';
+
 export type DigestStatus = 'complete' | 'empty' | 'deferred' | 'skipped' | 'failed' | 'dry-run';
 
 export interface DigestResult {
@@ -55,6 +61,7 @@ export interface DigestResult {
 	findings?: number;
 	pooled?: number;
 	creditsUsed?: number;
+	historyRemaining?: boolean;
 }
 
 export interface DigestOptions {
@@ -72,6 +79,34 @@ interface ClassifiedRow {
 	category: FeedbackCategory;
 	hasAbuse: boolean;
 	claim: string;
+}
+
+async function classifyBatch(
+	batch: { id: string; text: string; publishedAt: string }[],
+	deadline: number | undefined,
+	apiKey: string
+): Promise<{ classified: ClassifiedRow[]; failed: number }> {
+	const settled = await Promise.allSettled(
+		batch.map((comment) =>
+			classifyFeedback(comment.text, { videoTitle: '', videoDescription: '' }, deadline, apiKey)
+		)
+	);
+	const classified: ClassifiedRow[] = [];
+	let failed = 0;
+	for (let i = 0; i < settled.length; i++) {
+		const outcome = settled[i];
+		if (outcome.status === 'rejected') {
+			// A deadline aborts the whole run — the tick defers cleanly and
+			// retries the same comments (markers never moved); anything
+			// else is a bad ITEM (I1): count it, log it, keep going.
+			if (outcome.reason instanceof DeadlineExceededError) throw outcome.reason;
+			failed++;
+			console.error('feedback classification failed for comment:', batch[i].id, outcome.reason);
+			continue;
+		}
+		classified.push({ commentId: batch[i].id, text: batch[i].text, publishedAt: batch[i].publishedAt, ...outcome.value });
+	}
+	return { classified, failed };
 }
 
 /**
@@ -118,6 +153,7 @@ export function enabledCategories(channel: typeof channels.$inferSelect): Feedba
  * - weekly (default + unknown values, loudly): last evaluation ≥ 7 days ago.
  */
 export async function digestDue(channel: typeof channels.$inferSelect, now = Date.now()): Promise<boolean> {
+	if (channel.feedbackHistoryBoundary) return true;
 	const cadence = channel.feedbackCadence ?? 'weekly';
 	if (cadence === 'manual') return false;
 	if (cadence === 'per_100') {
@@ -126,7 +162,7 @@ export async function digestDue(channel: typeof channels.$inferSelect, now = Dat
 		const row = await db
 			.select({ n: sql<number>`COUNT(*)` })
 			.from(comments)
-			.where(and(eq(comments.channelId, channel.id), isNull(comments.feedbackDigestedAt)))
+			.where(pendingStoredFeedback(channel.id))
 			.get();
 		return (row?.n ?? 0) >= PER_100_COUNT;
 	}
@@ -138,30 +174,18 @@ export async function digestDue(channel: typeof channels.$inferSelect, now = Dat
 }
 
 /**
- * Replaces any TRANSIENT row for the same (channel, window) — 'failed' and
- * 'deferred' leftovers are attempt state a fresh run supersedes. A
- * 'complete' row at the same window is a DIFFERENT capped batch (coverage
- * lives in the per-comment markers, so a re-run of the same comments is
- * impossible): deleting it would silently drop a processed batch from
- * history (codex). Children die first, explicitly.
+ * Deletes a channel's TRANSIENT rows ('failed'/'deferred') — attempt state
+ * any fresh outcome supersedes, at ANY window — with their findings
+ * children. 'complete' rows are untouched: a complete row at the same
+ * window is a DIFFERENT capped batch (coverage lives in the per-comment
+ * markers, so a re-run of the same comments is impossible): deleting it
+ * would silently drop a processed batch from history (codex).
  */
-async function replaceWindowDigest(
-	tx: LedgerHandle,
-	channelId: string,
-	windowStart: string,
-	windowEnd: string
-): Promise<void> {
+async function clearTransientDigests(tx: LedgerHandle, channelId: string): Promise<void> {
 	const existing = await tx
 		.select({ id: feedbackDigests.id })
 		.from(feedbackDigests)
-		.where(
-			and(
-				eq(feedbackDigests.channelId, channelId),
-				eq(feedbackDigests.windowStart, windowStart),
-				eq(feedbackDigests.windowEnd, windowEnd),
-				ne(feedbackDigests.status, 'complete')
-			)
-		)
+		.where(and(eq(feedbackDigests.channelId, channelId), ne(feedbackDigests.status, 'complete')))
 		.all();
 	if (!existing.length) return;
 	const digestIds = existing.map((d) => d.id);
@@ -179,35 +203,51 @@ async function replaceWindowDigest(
 	await tx.delete(feedbackDigests).where(inArray(feedbackDigests.id, digestIds));
 }
 
-/**
- * Deferred rows describe the channel's CURRENT blockage, not history — a
- * terminal outcome (complete/failed) or a newer deferral makes every older
- * deferred row stale. They never carry findings, so a bare delete suffices.
- */
-async function clearDeferredDigests(tx: LedgerHandle, channelId: string): Promise<void> {
-	await tx
-		.delete(feedbackDigests)
-		.where(and(eq(feedbackDigests.channelId, channelId), eq(feedbackDigests.status, 'deferred')));
-}
-
-/** Records a transient non-complete row (failed/deferred) at the window anchor, clearing stale deferrals. */
-async function markDigestState(channelId: string, windowStart: string, windowEnd: string, status: 'failed' | 'deferred', reason: string): Promise<void> {
+/** Records a transient non-complete row (failed/deferred), superseding all earlier attempt state. */
+async function markDigestState(
+	channelId: string,
+	windowStart: string,
+	windowEnd: string,
+	status: 'failed' | 'deferred',
+	reason: string,
+	expected?: typeof channels.$inferSelect
+): Promise<void> {
 	try {
 		await db.transaction(async (tx) => {
 			// A channel deleted mid-run gets no posthumous rows — the
 			// existence check mirrors the stamp guard in the main write.
+			const guards = expected
+				? [
+						expected.orgId === null ? isNull(channels.orgId) : eq(channels.orgId, expected.orgId),
+						expected.leaseExpiresAt === null ? isNull(channels.leaseExpiresAt) : eq(channels.leaseExpiresAt, expected.leaseExpiresAt),
+						expected.feedbackHistoryBoundary === null
+							? isNull(channels.feedbackHistoryBoundary)
+							: eq(channels.feedbackHistoryBoundary, expected.feedbackHistoryBoundary),
+						expected.feedbackHistoryPageToken === null
+							? isNull(channels.feedbackHistoryPageToken)
+							: eq(channels.feedbackHistoryPageToken, expected.feedbackHistoryPageToken)
+					]
+				: [];
 			const alive = await tx
 				.select({ id: channels.id })
 				.from(channels)
-				.where(eq(channels.id, channelId))
+				.where(and(eq(channels.id, channelId), ...guards))
 				.get();
 			if (!alive) throw new Error(`channel ${channelId} vanished — skipping ${status} record`);
-			await replaceWindowDigest(tx, channelId, windowStart, windowEnd);
-			await clearDeferredDigests(tx, channelId);
+			// Reuse the newest transient row's window as the anchor: a retry
+			// overwrites the same row instead of stacking a fresh-windowed row
+			// per attempt, which accumulated one orphan per tick (codex+cubic).
+			const prior = await tx
+				.select({ windowStart: feedbackDigests.windowStart, windowEnd: feedbackDigests.windowEnd })
+				.from(feedbackDigests)
+				.where(and(eq(feedbackDigests.channelId, channelId), ne(feedbackDigests.status, 'complete')))
+				.orderBy(desc(feedbackDigests.id))
+				.get();
+			await clearTransientDigests(tx, channelId);
 			await tx.insert(feedbackDigests).values({
 				channelId,
-				windowStart,
-				windowEnd,
+				windowStart: prior?.windowStart ?? windowStart,
+				windowEnd: prior?.windowEnd ?? windowEnd,
 				status,
 				error: reason
 			});
@@ -246,37 +286,72 @@ export async function generateFeedbackDigest(
 	if (channel.feedbackEnabled !== 1) return { status: 'skipped', reason: 'disabled' };
 	if (!force && !(await digestDue(channel))) return { status: 'skipped', reason: 'cadence' };
 
-	// Coverage is the per-comment marker, not a publication-time window:
-	// every comment with a NULL feedback_digested_at is eligible — including
-	// Analyze-history backfills whose publishedAt predates earlier digests
-	// and cap-boundary timestamp ties a window edge could never express
-	// (codex+coderabbit). Oldest-first drain: a burst beyond the cap leaves
-	// the newest comments for the next digest instead of silently
-	// swallowing the oldest ones.
-	const batch = await db
-		.select({ id: comments.id, text: comments.text, publishedAt: comments.publishedAt })
-		.from(comments)
-		.where(and(eq(comments.channelId, channelId), isNull(comments.feedbackDigestedAt)))
-		.orderBy(asc(instant(comments.publishedAt)), asc(comments.id))
-		.limit(DIGEST_COMMENT_CAP)
-		.all();
 	const nowIso = new Date().toISOString();
-	if (!batch.length) {
-		// Nothing unprocessed — stamp the evaluation so the weekly rotation
-		// moves on; no digest row (the page's empty state already says it).
-		await db
-			.update(channels)
-			.set({ feedbackLastDigestAt: nowIso })
-			.where(eq(channels.id, channelId));
-		return { status: 'empty' };
+	let historyPage: FeedbackHistoryPage | undefined;
+	let batch: { id: string; text: string; publishedAt: string }[];
+	let windowStart: string;
+	let windowEnd: string;
+	if (channel.feedbackHistoryBoundary) {
+		windowStart = channel.feedbackHistoryBoundary;
+		windowEnd = nowIso;
+		let page: FeedbackHistoryPage;
+		try {
+			page = await pendingFeedbackHistoryPage(channel, deadline);
+			historyPage = page;
+		} catch (cause) {
+			console.error('feedback history page fetch failed for channel:', channelId, cause);
+			const deferred = cause instanceof DeadlineExceededError;
+			await markDigestState(channelId, windowStart, windowEnd, deferred ? 'deferred' : 'failed', deferred ? 'deadline' : 'history-fetch', channel);
+			return { status: deferred ? 'deferred' : 'failed', reason: deferred ? 'deadline' : 'history-fetch', historyRemaining: true };
+		}
+		batch = page.batch;
+		if (!batch.length) {
+			try {
+				await db.transaction(async (tx) => {
+					await advanceFeedbackHistory(tx, channel, page);
+					await clearTransientDigests(tx, channelId);
+				});
+			} catch (cause) {
+				console.error('feedback history checkpoint failed for channel:', channelId, cause);
+				await markDigestState(channelId, windowStart, windowEnd, 'failed', 'history-checkpoint', channel);
+				return { status: 'failed', reason: 'history-checkpoint', historyRemaining: true };
+			}
+			return { status: 'empty', historyRemaining: !page.complete };
+		}
+		windowStart = batch[0].publishedAt;
+		windowEnd = batch.at(-1)!.publishedAt;
+	} else {
+		// Coverage is the per-comment marker, not a publication-time window:
+		// every comment with a NULL feedback_digested_at is eligible — including
+		// Analyze-history backfills whose publishedAt predates earlier digests
+		// and cap-boundary timestamp ties a window edge could never express
+		// (codex+coderabbit). Oldest-first drain: a burst beyond the cap leaves
+		// the newest comments for the next digest instead of silently
+		// swallowing the oldest ones.
+		batch = await db
+			.select({ id: comments.id, text: comments.text, publishedAt: comments.publishedAt })
+			.from(comments)
+			.where(pendingStoredFeedback(channelId))
+			.orderBy(asc(instant(comments.publishedAt)), asc(comments.id))
+			.limit(DIGEST_COMMENT_CAP)
+			.all();
+		if (!batch.length) {
+			// Nothing unprocessed — stamp the evaluation so the weekly rotation
+			// moves on; no digest row (the page's empty state already says it).
+			await db
+				.update(channels)
+				.set({ feedbackLastDigestAt: nowIso })
+				.where(eq(channels.id, channelId));
+			return { status: 'empty' };
+		}
+		// The row's window is descriptive, not authoritative — coverage lives in
+		// the markers. Resume the label where the last complete digest ended,
+		// but a backfilled batch that predates it anchors on its own earliest
+		// instant instead of writing an inverted window.
+		const since = await lastWindowEnd(channelId);
+		windowStart = Date.parse(batch[0].publishedAt) < Date.parse(since) ? batch[0].publishedAt : since;
+		windowEnd = batch.at(-1)!.publishedAt;
 	}
-	// The row's window is descriptive, not authoritative — coverage lives in
-	// the markers. Resume the label where the last complete digest ended,
-	// but a backfilled batch that predates it anchors on its own earliest
-	// instant instead of writing an inverted window.
-	const since = await lastWindowEnd(channelId);
-	const windowStart = Date.parse(batch[0].publishedAt) < Date.parse(since) ? batch[0].publishedAt : since;
-	const windowEnd = batch[batch.length - 1].publishedAt;
 
 	// The OpenAI key comes from the org's BYOK resolution — a lifetime org
 	// without a usable key gets NO deployment-key fallback (openaiKey.ts);
@@ -284,8 +359,8 @@ export async function generateFeedbackDigest(
 	const apiKey = await resolveOpenAiKey(channel.orgId);
 	if (!apiKey) {
 		console.error(`feedback digest for ${channelId}: no OpenAI key resolved — marking failed`);
-		await markDigestState(channelId, windowStart, windowEnd, 'failed', 'scoring');
-		return { status: 'failed', reason: 'no-key' };
+		await markDigestState(channelId, windowStart, windowEnd, 'failed', 'scoring', channel);
+		return { status: 'failed', reason: 'no-key', ...(historyPage ? { historyRemaining: true } : {}) };
 	}
 
 	const metered = channel.orgId ? await orgIsMetered(channel.orgId) : false;
@@ -310,50 +385,34 @@ export async function generateFeedbackDigest(
 					// back ALL charges — the deferral spends nothing (codex).
 					assertBeforeDeadline(deadline);
 					const charged = await consumeFeedbackCredit(tx, orgId, comment.id);
-					if (charged) {
-						creditsCharged++;
-						continue;
-					}
-					// False also covers "already charged" — distinguish by
-					// looking for the anchor row before calling it a shortfall.
-					const prior = await tx
-						.select({ id: creditTransactions.id })
-						.from(creditTransactions)
-						.where(
-							and(
-								eq(creditTransactions.orgId, orgId),
-								eq(creditTransactions.refType, 'feedback'),
-								eq(creditTransactions.refId, comment.id)
+					if (!charged) {
+						// False also covers "already charged" — distinguish by
+						// looking for the anchor row before calling it a shortfall.
+						const prior = await tx
+							.select({ id: creditTransactions.id })
+							.from(creditTransactions)
+							.where(
+								and(
+									eq(creditTransactions.orgId, orgId),
+									eq(creditTransactions.refType, 'feedback'),
+									eq(creditTransactions.refId, comment.id)
+								)
 							)
-						)
-						.get();
-					if (!prior) throw new Error('insufficient credits for feedback digest');
+							.get();
+						if (!prior) throw new Error(ERR_INSUFFICIENT_CREDITS);
+					}
+					// Every batch member ends the charge pass covered by an
+					// anchor — fresh debit or one persisted by a crashed/failed
+					// attempt — so creditsUsed reports what the digest cost the
+					// org, not just this run's new debits (codex).
+					creditsCharged++;
 				}
 			});
 		}
 
 		// Per-comment failures are counted and skipped (I1); a deadline aborts
 		// the whole run so the tick can defer cleanly.
-		const settled = await Promise.allSettled(
-			batch.map((comment) =>
-				classifyFeedback(comment.text, { videoTitle: '', videoDescription: '' }, deadline, apiKey)
-			)
-		);
-		const classified: ClassifiedRow[] = [];
-		let failed = 0;
-		for (let i = 0; i < settled.length; i++) {
-			const outcome = settled[i];
-			if (outcome.status === 'rejected') {
-				// A deadline aborts the whole run — the tick defers cleanly and
-				// retries the same comments (markers never moved); anything
-				// else is a bad ITEM (I1): count it, log it, keep going.
-				if (outcome.reason instanceof DeadlineExceededError) throw outcome.reason;
-				failed++;
-				console.error(`feedback classification failed for comment ${batch[i].id}:`, outcome.reason);
-				continue;
-			}
-			classified.push({ commentId: batch[i].id, text: batch[i].text, publishedAt: batch[i].publishedAt, ...outcome.value });
-		}
+		const { classified, failed } = await classifyBatch(batch, deadline, apiKey);
 		// Every comment failing is a job failure, not an empty digest —
 		// 'complete' would mark them digested and permanently skip coverage.
 		// Throw so the run is marked failed and the next tick retries.
@@ -376,10 +435,9 @@ export async function generateFeedbackDigest(
 		}
 		const result = await withBusyRetry(() =>
 			db.transaction(async (tx) => {
-				await replaceWindowDigest(tx, channelId, windowStart, windowEnd);
-				// A completed run resolves any earlier deferral — the stale
-				// "waiting for credits" state must not linger beside it.
-				await clearDeferredDigests(tx, channelId);
+				// A completed run resolves all earlier attempt state — the stale
+				// "waiting for credits"/"failed" rows must not linger beside it.
+				await clearTransientDigests(tx, channelId);
 				const [digest] = await tx
 					.insert(feedbackDigests)
 					.values({
@@ -426,38 +484,50 @@ export async function generateFeedbackDigest(
 				// or 'none' — as digested. The marker, not a timestamp edge, is
 				// the coverage record: only a committed digest moves it, so an
 				// abort leaves the whole batch eligible for the next run.
-				await tx
-					.update(comments)
-					.set({ feedbackDigestedAt: nowIso })
-					.where(inArray(comments.id, [...batchIds]));
-				// Stamp the rotation only once the backlog is drained — a capped
-				// batch leaves remainder comments unprocessed and the channel
-				// must stay due so the next tick keeps draining (codex). The
-				// count reads post-update state inside the same transaction.
-				const remaining = await tx
-					.select({ n: sql<number>`COUNT(*)` })
-					.from(comments)
-					.where(and(eq(comments.channelId, channelId), isNull(comments.feedbackDigestedAt)))
-					.get();
-				if ((remaining?.n ?? 0) === 0) {
-					// The rotation stamp is the channel's own row — a 0-row
-					// update means the channel vanished mid-run; fail loudly
-					// and roll back.
-					const stamped = await tx
-						.update(channels)
-						.set({ feedbackLastDigestAt: nowIso })
-						.where(eq(channels.id, channelId))
-						.returning({ id: channels.id });
-					if (!stamped.length) throw new Error(`channel ${channelId} vanished mid-digest — aborting`);
+				if (historyPage) {
+					await tx
+						.insert(feedbackHistoryComments)
+						.values(historyPage.batch.map((comment) => ({ ...comment, channelId })))
+						.onConflictDoNothing({ target: feedbackHistoryComments.id });
+					await tx
+						.update(comments)
+						.set({ feedbackDigestedAt: nowIso })
+						.where(and(eq(comments.channelId, channelId), inArray(comments.id, [...batchIds])));
+					await advanceFeedbackHistory(tx, channel, historyPage);
 				} else {
-					// Backlog remains → no stamp, the channel stays due. Still
-					// assert the channel is alive: a mid-run delete must abort.
-					const alive = await tx
-						.select({ id: channels.id })
-						.from(channels)
-						.where(eq(channels.id, channelId))
+					await tx
+						.update(comments)
+						.set({ feedbackDigestedAt: nowIso })
+						.where(and(eq(comments.channelId, channelId), inArray(comments.id, [...batchIds])));
+					// Stamp the rotation only once the backlog is drained — a capped
+					// batch leaves remainder comments unprocessed and the channel
+					// must stay due so the next tick keeps draining (codex). The
+					// count reads post-update state inside the same transaction.
+					const remaining = await tx
+						.select({ n: sql<number>`COUNT(*)` })
+						.from(comments)
+						.where(pendingStoredFeedback(channelId))
 						.get();
-					if (!alive) throw new Error(`channel ${channelId} vanished mid-digest — aborting`);
+					if ((remaining?.n ?? 0) === 0) {
+						// The rotation stamp is the channel's own row — a 0-row
+						// update means the channel vanished mid-run; fail loudly
+						// and roll back.
+						const stamped = await tx
+							.update(channels)
+							.set({ feedbackLastDigestAt: nowIso })
+							.where(eq(channels.id, channelId))
+							.returning({ id: channels.id });
+						if (!stamped.length) throw new Error(`channel ${channelId} vanished mid-digest — aborting`);
+					} else {
+						// Backlog remains → no stamp, the channel stays due. Still
+						// assert the channel is alive: a mid-run delete must abort.
+						const alive = await tx
+							.select({ id: channels.id })
+							.from(channels)
+							.where(eq(channels.id, channelId))
+							.get();
+						if (!alive) throw new Error(`channel ${channelId} vanished mid-digest — aborting`);
+					}
 				}
 				return { digestId: digest.id };
 			})
@@ -469,25 +539,79 @@ export async function generateFeedbackDigest(
 			commentsFailed: failed,
 			findings: findings.length,
 			pooled,
-			creditsUsed: creditsCharged
+			creditsUsed: creditsCharged,
+			...(historyPage ? { historyRemaining: !historyPage.complete } : {})
 		};
 	} catch (cause) {
 		if (cause instanceof DeadlineExceededError) {
 			// Budget gone — defer to the next tick; the window never advanced.
 			console.info(`feedback digest for ${channelId} deferred: deadline exceeded`);
-			await markDigestState(channelId, windowStart, windowEnd, 'deferred', 'deadline');
-			return { status: 'deferred', reason: 'deadline' };
+			await markDigestState(channelId, windowStart, windowEnd, 'deferred', 'deadline', channel);
+			return { status: 'deferred', reason: 'deadline', ...(historyPage ? { historyRemaining: true } : {}) };
 		}
 		if (cause instanceof Error && /insufficient credits/.test(cause.message)) {
 			// The row makes the blockage channel-visible: without it the page
 			// shows "No digest yet" while every tick repeats the deferral
 			// (codex). A later complete/failed row clears it.
 			console.warn(`feedback digest for ${channelId} deferred: ${cause.message}`);
-			await markDigestState(channelId, windowStart, windowEnd, 'deferred', 'credits');
-			return { status: 'deferred', reason: 'credits' };
+			await markDigestState(channelId, windowStart, windowEnd, 'deferred', 'credits', channel);
+			return { status: 'deferred', reason: 'credits', ...(historyPage ? { historyRemaining: true } : {}) };
 		}
 		console.error(`feedback digest for ${channelId} failed:`, cause);
-		await markDigestState(channelId, windowStart, windowEnd, 'failed', 'error');
-		return { status: 'failed', reason: 'error' };
+		await markDigestState(channelId, windowStart, windowEnd, 'failed', 'error', channel);
+		return { status: 'failed', reason: 'error', ...(historyPage ? { historyRemaining: true } : {}) };
 	}
+}
+
+export interface FeedbackPreview {
+	commentsClassified: number;
+	commentsFailed: number;
+	pooled: number;
+	hasMore: boolean;
+	findings: {
+		category: string;
+		summary: string;
+		supporterCount: number;
+		evidence: { sanitizedExcerpt: string; hasAbuse: number }[];
+	}[];
+}
+
+export async function previewFeedbackDigest(
+	channelId: string,
+	{ boundary, deadline, claim }: { boundary: string; deadline?: number; claim?: DryRunClaim }
+): Promise<FeedbackPreview> {
+	const channel = await db.select().from(channels).where(eq(channels.id, channelId)).get();
+	if (!channel) throw new Error(`channel not found: ${channelId}`);
+	// Same binding as the moderation preview: the row loaded here must be the
+	// row the allowance claimed, or a delete/reconnect slipped in a fresh
+	// connector under the same id (cubic+codeant).
+	if (claim && !channelMatchesClaim(channel, claim)) {
+		throw new Error(`channel ${channelId} changed under the dry-run claim — aborting the preview`);
+	}
+	if (!channel.active) throw new Error(ERR_PREVIEW_PAUSED);
+	const apiKey = await resolveOpenAiKey(channel.orgId);
+	if (!apiKey) throw new Error(ERR_PREVIEW_NO_KEY);
+	const page = await fetchFeedbackPage(channel, boundary, null, deadline);
+	if (!page.batch.length) return { commentsClassified: 0, commentsFailed: 0, pooled: 0, hasMore: !page.complete, findings: [] };
+	const { classified, failed } = await classifyBatch(page.batch, deadline, apiKey);
+	if (failed > 0 && classified.length === 0) throw new Error(`classification failed for all ${failed} preview comments`);
+	const { findings, pooled } = groupFeedback(classified, {
+		categories: enabledCategories(channel),
+		threshold: channel.feedbackThreshold ?? 3
+	});
+	return {
+		commentsClassified: classified.length,
+		commentsFailed: failed,
+		pooled,
+		hasMore: !page.complete,
+		findings: findings.map((finding) => ({
+			category: finding.category,
+			summary: finding.summary,
+			supporterCount: finding.supporterCount,
+			evidence: finding.evidence.map((evidence) => ({
+				sanitizedExcerpt: concealEvidence(evidence.text.slice(0, EXCERPT_MAX), { hasAbuse: evidence.hasAbuse }).text,
+				hasAbuse: evidence.hasAbuse ? 1 : 0
+			}))
+		}))
+	};
 }

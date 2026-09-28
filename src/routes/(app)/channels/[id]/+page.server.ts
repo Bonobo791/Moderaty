@@ -3,6 +3,9 @@ import { channels } from '$lib/server/db/schema';
 import { decrypt } from '$lib/server/crypto';
 import { deleteChannelRecords } from '$lib/server/deletion';
 import { revokeGoogleToken } from '$lib/server/google';
+import { claimDryRun } from '$lib/server/dryRun';
+import { historyAccessError } from '$lib/server/historyAccess';
+import { historyWindowBoundary, parseHistoryWindow } from '$lib/historyWindow';
 import { requireOrgRole } from '$lib/server/ownership';
 import { runChannel } from '$lib/server/pipeline';
 import { requireUser } from '$lib/server/session';
@@ -10,14 +13,6 @@ import { isToneLevel } from '$lib/toneLevels';
 import { and, eq, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { error, fail, redirect } from '@sveltejs/kit';
-
-/** Window presets shared by Analyze history and the dry-run preview (months). */
-const HISTORY_MONTH_PRESETS: ReadonlySet<number> = new Set([1, 3, 6, 12, 24]);
-
-/** Boundary instant for a months window: now − months × 30 days. */
-function monthsAgoBoundary(months: number): string {
-	return new Date(Date.now() - months * 30 * 24 * 60 * 60 * 1000).toISOString();
-}
 
 /**
  * Tenancy-scoped channel update shared by the card actions: another team's
@@ -117,10 +112,11 @@ export const actions = {
 		}
 		const f = await request.formData();
 		const channelId = String(f.get('channelId') ?? '');
-		const months = Number(f.get('months'));
+		const rawMonths = f.get('months');
 		// Preset windows only — the scan drains newest-first at 300 comments per
 		// run, so an unbounded window is an unbounded API/AI cost (I10).
-		if (!HISTORY_MONTH_PRESETS.has(months)) {
+		const months = parseHistoryWindow(typeof rawMonths === 'string' ? rawMonths : null);
+		if (months === null) {
 			return fail(400, { scope: 'history', channelId, error: 'history window must be 1, 3, 6, 12, or 24 months' });
 		}
 		// Env-dry trap: under DRY_RUN=true every run exits through finishDryRun
@@ -134,12 +130,32 @@ export const actions = {
 				error: 'This deployment runs in dry-run mode: history analysis audits only and never moderates. Set DRY_RUN=false to moderate.'
 			});
 		}
+		try {
+			const owned = await db.select({ id: channels.id }).from(channels)
+				.where(and(eq(channels.id, channelId), eq(channels.orgId, user.orgId))).get();
+			if (!owned) return fail(404, { scope: 'history', channelId, error: 'channel not found' });
+			const historyAccess = await historyAccessError(user.orgId);
+			if (historyAccess) {
+				console.warn('history analysis blocked:', { channelId, orgId: user.orgId, reason: historyAccess });
+				return fail(402, {
+					scope: 'history',
+					channelId,
+					historyAccess,
+					error: historyAccess === 'key'
+						? 'Your lifetime deal requires your own OpenAI API key. An organization owner must add it on the Team page before analyzing history.'
+						: 'To analyze history, purchase credits, subscribe, or buy the lifetime deal and add your own OpenAI API key. If your credits or subscription allowance are exhausted, purchase more credits to continue.'
+				});
+			}
+		} catch (cause) {
+			console.error('history analysis access check failed:', channelId, cause);
+			return fail(503, { scope: 'history', channelId, error: 'Could not verify access to history analysis. Please try again.' });
+		}
 		// Move the scan boundary back and reset the drain state: cron's next runs
 		// page from the newest comment down to this boundary. Already-seen
 		// comments are skipped before scoring (decideNewComments dedupes by id),
 		// so only the unscanned history costs moderation calls. Tenancy-scoped:
 		// another team's channel reads as "not found".
-		const boundary = monthsAgoBoundary(months);
+		const boundary = historyWindowBoundary(months);
 		// Coordinate with the cron lease: a run in flight would otherwise persist
 		// its own scan state and silently cancel (or be cancelled by) this reset.
 		// The lease predicate is part of the UPDATE itself, so the check is
@@ -172,43 +188,39 @@ export const actions = {
 	},
 	dryRun: async ({ request, locals }) => {
 		const user = requireUser(locals);
+		// Same misconfiguration guard as analyzeHistory: anything besides
+		// exactly 'true'/'false' would pass silently into runChannel — fail
+		// loudly BEFORE any DB mutation.
+		if (env.DRY_RUN !== 'true' && env.DRY_RUN !== 'false') {
+			throw error(500, 'DRY_RUN must be set to exactly "true" or "false" — the deployment is misconfigured');
+		}
 		const f = await request.formData();
 		const channelId = String(f.get('channelId') ?? '');
 		// Same presets as Analyze history; absent → 3 (the UI default). 'all'
 		// covers channels whose entire history predates every months preset.
 		const rawMonths = f.has('months') ? String(f.get('months')) : '3';
-		if (rawMonths !== 'all' && !HISTORY_MONTH_PRESETS.has(Number(rawMonths))) {
+		const months = parseHistoryWindow(rawMonths, true);
+		if (months === null) {
 			return fail(400, { scope: 'dryRun', channelId, error: 'dry-run window must be 1, 3, 6, 12, or 24 months, or all time' });
 		}
-		const months = rawMonths === 'all' ? ('all' as const) : Number(rawMonths);
 		// 'all' maps to the epoch boundary: no comment is ever older than it, and
 		// the non-null drain state keeps cron paging until YouTube runs out of pages.
-		const boundary = months === 'all' ? '1970-01-01T00:00:00.000Z' : monthsAgoBoundary(months);
-		// Atomic lease claim, same protocol as cron/analyzeHistory: the UPDATE's
-		// predicate makes concurrent claimants single-winner (TOCTOU-safe), and
-		// it doubles as the tenancy check — another team's channel matches 0
-		// rows and reads as "not found". The lease self-expires if this request
-		// dies mid-preview.
-		const myLease = new Date(Date.now() + 60_000).toISOString();
-		const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, new Date().toISOString()));
-		const claimed = await db
-			.update(channels)
-			.set({ leaseExpiresAt: myLease })
-			.where(and(eq(channels.id, channelId), eq(channels.orgId, user.orgId), claimable))
-			.returning({ id: channels.id });
-		if (claimed.length === 0) {
-			// Distinguish "not your channel" from "currently scanning": the extra
-			// read only happens on the failure path.
-			const existing = await db
-				.select({ id: channels.id })
-				.from(channels)
-				.where(and(eq(channels.id, channelId), eq(channels.orgId, user.orgId)))
-				.get();
-			if (existing) {
-				return fail(409, { scope: 'dryRun', channelId, error: 'This channel is mid-scan — retry in a minute.' });
-			}
-			return fail(404, { scope: 'dryRun', channelId, error: 'channel not found' });
+		const boundary = historyWindowBoundary(months);
+		// Atomic one-use claim: the UPDATE's predicate sets
+		// moderation_dry_run_used_at AND takes the lease in a single write, so
+		// concurrent claimants are single-winner (TOCTOU-safe) and the tenancy
+		// check rides the same predicate — another team's channel matches 0
+		// rows and reads as "not found". The lease self-expires if this
+		// request dies mid-preview. Burning the allowance on a failed attempt
+		// is deliberate — cheap retry abuse would otherwise be unlimited.
+		let claim: Awaited<ReturnType<typeof claimDryRun>>;
+		try {
+			claim = await claimDryRun(channelId, user.orgId, 'moderation');
+		} catch (cause) {
+			console.error('dry-run claim failed for channel:', channelId, cause);
+			return fail(500, { scope: 'dryRun', channelId, error: 'The dry run could not be started. Check the server log and try again.' });
 		}
+		if ('status' in claim) return fail(claim.status, { scope: 'dryRun', channelId, error: claim.error });
 		// First page synchronously (one page, hard 20 s ceiling); a window with
 		// more pages drains one page per cron invocation afterwards. The run
 		// writes nothing durable except dry-run audit rows (I8).
@@ -216,7 +228,11 @@ export const actions = {
 			const result = await runChannel(channelId, {
 				deadline: Date.now() + 20_000,
 				forceDryRun: true,
-				window: { boundary, pageToken: null }
+				window: { boundary, pageToken: null },
+				// Bind execution to the row that claimed the allowance — a
+				// delete/reconnect under the same channel id must abort the
+				// preview, not run the new connector (cubic+codeant).
+				claim: claim.identity
 			});
 			// Persist the drain state under the held lease: incomplete windows
 			// hand cron the continuation; complete ones clear any older drain.
@@ -228,7 +244,7 @@ export const actions = {
 			// STILL holding our lease: if the preview overran it and cron
 			// claimed the channel mid-run, the drain state belongs to cron now
 			// and a 0-row update leaves it untouched.
-			const stillOurs = and(eq(channels.id, channelId), eq(channels.leaseExpiresAt, myLease));
+			const stillOurs = and(eq(channels.id, channelId), eq(channels.leaseExpiresAt, claim.lease));
 			const background = !result.skipped && result.windowComplete !== true;
 			if (result.windowComplete === true) {
 				await db
@@ -241,12 +257,18 @@ export const actions = {
 					.set({ dryRunBoundary: boundary, dryRunPageToken: result.windowNextPageToken ?? null })
 					.where(stillOurs);
 			}
-			return { ok: true as const, scope: 'dryRun', channelId, months, ...result, background };
+			return { ok: true as const, scope: 'dryRun', channelId, months, dryRunUsed: true, ...result, background };
 		} catch (e) {
 			// Loud server-side, generic client-side — never return raw
-			// YouTube/OpenAI error detail to the browser.
+			// YouTube/OpenAI error detail to the browser. attempted:true tells
+			// the page the one-use allowance was spent even though it failed.
 			console.error('dry run failed for channel:', channelId, e);
-			return fail(502, { scope: 'dryRun', channelId, error: 'The dry run failed — check the server log and try again.' });
+			return fail(502, {
+				scope: 'dryRun',
+				channelId,
+				attempted: true,
+				error: 'The dry run failed. This attempt used your one free moderation preview; no credits were charged. Check the server log.'
+			});
 		} finally {
 			// Release only OUR lease: if the preview overran it and cron claimed
 			// the channel in between, that lease is untouched. lastRunAt is
@@ -254,7 +276,7 @@ export const actions = {
 			await db
 				.update(channels)
 				.set({ leaseExpiresAt: null })
-				.where(and(eq(channels.id, channelId), eq(channels.leaseExpiresAt, myLease)));
+				.where(and(eq(channels.id, channelId), eq(channels.leaseExpiresAt, claim.lease)));
 		}
 	},
 	disconnectChannel: async ({ request, locals }) => {

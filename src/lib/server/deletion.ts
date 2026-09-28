@@ -17,7 +17,7 @@ import { and, asc, eq, inArray, isNotNull, isNull, lt, ne, or } from 'drizzle-or
 import type Stripe from 'stripe';
 
 import { db } from '$lib/server/db';
-import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, findingEvidence, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, stripeLifetimeSlots, users } from '$lib/server/db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, stripeLifetimeSlots, users } from '$lib/server/db/schema';
 import { getStripe } from '$lib/server/stripe/client';
 
 export const CONSENT_EMAIL_RETENTION_MS = 10 * 365.25 * 24 * 60 * 60 * 1000; // 10 years
@@ -74,6 +74,7 @@ export async function deleteChannelRecords(
 		await tx.delete(channelAllowedHandles).where(inArray(channelAllowedHandles.channelId, channelIds));
 		await tx.delete(moderationActions).where(inArray(moderationActions.channelId, channelIds));
 		await tx.delete(comments).where(inArray(comments.channelId, channelIds));
+		await tx.delete(feedbackHistoryComments).where(inArray(feedbackHistoryComments.channelId, channelIds));
 		await tx.delete(auditLog).where(inArray(auditLog.channelId, channelIds));
 		await tx.delete(rules).where(inArray(rules.channelId, channelIds));
 		// Feedback digest chain (P-MOD-5): evidence → findings → digests.

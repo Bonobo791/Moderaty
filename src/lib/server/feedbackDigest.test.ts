@@ -3,24 +3,30 @@ import { eq, isNull } from 'drizzle-orm';
 
 const mocks = vi.hoisted(() => ({
 	env: { OPENAI_API_KEY: 'test-openai-key', DRY_RUN: 'false' } as Record<string, string | undefined>,
-	decrypt: vi.fn((enc: string) => `decrypted:${enc}`)
+	decrypt: vi.fn((enc: string) => `decrypted:${enc}`),
+	fetchNewComments: vi.fn()
 }));
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 vi.mock('$lib/server/crypto', () => ({ decrypt: mocks.decrypt }));
+vi.mock('$lib/server/youtube', () => ({
+	refreshAccessToken: vi.fn(async () => 'access-token'),
+	fetchNewComments: mocks.fetchNewComments
+}));
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
-import { channels, comments, creditTransactions, feedbackDigests, feedbackFindings, findingEvidence, organizations } from '$lib/server/db/schema';
-import { digestDue, generateFeedbackDigest } from './feedbackDigest';
+import { channels, comments, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, organizations } from '$lib/server/db/schema';
+import { digestDue, generateFeedbackDigest, previewFeedbackDigest } from './feedbackDigest';
 import { CONCEALED_MESSAGE } from './feedbackSanitize';
 
-setupTestDb(['finding_evidence', 'feedback_findings', 'feedback_digests', 'comments', 'channels', 'organizations', 'credit_transactions']);
+setupTestDb(['finding_evidence', 'feedback_findings', 'feedback_digests', 'feedback_history_comments', 'comments', 'channels', 'organizations', 'credit_transactions']);
 
 // fetch mock: classify each comment from its text embedded in the prompt.
 // Per-test RESPONSES maps comment-text → classification JSON; anything
 // unmapped gets a 'none' verdict.
 let RESPONSES: Record<string, { category: string; hasAbuse: boolean; claim: string }> = {};
 let fetchFailures: Record<string, string> = {};
+let beforeClassify: (() => Promise<void>) | undefined;
 
 function installFetch() {
 	vi.stubGlobal(
@@ -33,6 +39,7 @@ function installFetch() {
 			// through fetchWithRetry's backoff and slow the suite.
 			if (fetchFailures[text]) return new Response('not json', { status: 200 });
 			const verdict = RESPONSES[text] ?? { category: 'none', hasAbuse: false, claim: '' };
+			await beforeClassify?.();
 			return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(verdict) } }] }), { status: 200 });
 		})
 	);
@@ -53,8 +60,10 @@ async function seedComment(id: string, channelId: string, text: string, publishe
 beforeEach(async () => {
 	RESPONSES = {};
 	fetchFailures = {};
+	beforeClassify = undefined;
 	mocks.env.DRY_RUN = 'false';
 	vi.clearAllMocks();
+	mocks.fetchNewComments.mockReset();
 	installFetch();
 	// Every seeded channel attaches to org-1 — a bare 'free' org with a NULL
 	// balance is unmetered (no purchases), so plain tests run charge-free.
@@ -62,11 +71,13 @@ beforeEach(async () => {
 });
 
 test('disabled channel skips without writing anything', async () => {
-	await seedChannel('UC1', { feedbackEnabled: 0 });
+	await seedChannel('UC1', { feedbackEnabled: 0, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryPageToken: 'page-2' });
 	await seedComment('c1', 'UC1', 'when is the next video', '2026-01-05T00:00:00.000Z');
 	const result = await generateFeedbackDigest('UC1', { force: true });
 	expect(result.status).toBe('skipped');
 	expect(await testDb().db.select().from(feedbackDigests).all()).toHaveLength(0);
+	expect((await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())).toMatchObject({ feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryPageToken: 'page-2' });
+	expect(mocks.fetchNewComments).not.toHaveBeenCalled();
 });
 
 test('a missing channel throws loudly', async () => {
@@ -269,7 +280,9 @@ test('a run interrupted after charging re-anchors instead of re-charging', async
 	}
 	RESPONSES = Object.fromEntries([1, 2, 3].map((i) => [`text ${i}`, { category: 'question', hasAbuse: false, claim: 'theme' }]));
 	const result = await generateFeedbackDigest('UC1', { force: true });
-	expect(result).toMatchObject({ status: 'complete', commentsClassified: 3, creditsUsed: 1 });
+	// creditsUsed counts every comment the digest covered — the two orphan
+	// anchors are spend the org already made FOR this batch (codex).
+	expect(result).toMatchObject({ status: 'complete', commentsClassified: 3, creditsUsed: 3 });
 	const ledger = await testDb().db.select().from(creditTransactions).all();
 	expect(ledger).toHaveLength(3);
 	const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
@@ -293,7 +306,9 @@ test('a failed run still holds its charge anchors — the retry does not re-char
 		RESPONSES[`text ${i}`] = { category: 'question', hasAbuse: false, claim: 'theme' };
 	}
 	const second = await generateFeedbackDigest('UC1', { force: true });
-	expect(second).toMatchObject({ status: 'complete', creditsUsed: 0 });
+	// The retry debits nothing new — the ledger stays at 3 — but the digest's
+	// comments still cost the org 3 credits; reporting 0 would lie (codex).
+	expect(second).toMatchObject({ status: 'complete', creditsUsed: 3 });
 	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(3);
 });
 
@@ -482,7 +497,377 @@ test('a concealed-only evidence comment stores the placeholder', async () => {
 	expect(concealed.sanitizedExcerpt).toBe(CONCEALED_MESSAGE);
 });
 
+test('historical batches deduplicate completed IDs before charging, advance only feedback state, and never create moderated comments', async () => {
+	await testDb().db.update(organizations).set({ creditsRemaining: 5 }).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC1', {
+		feedbackEnabled: 1,
+		feedbackCadence: 'manual',
+		feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z',
+		feedbackHistoryPageToken: 'page-1',
+		cursor: '2026-01-01T00:00:00.000Z',
+		nextPageToken: 'live-page',
+		scanCursor: 'live-scan'
+	});
+	await seedComment('stored-done', 'UC1', 'already processed normal comment', '2024-01-01T00:00:00.000Z');
+	await testDb().db.update(comments).set({ feedbackDigestedAt: '2025-01-01T00:00:00.000Z', status: 'held', decidedBy: 'human' }).where(eq(comments.id, 'stored-done'));
+	await testDb().db.insert(feedbackHistoryComments).values({ id: 'history-done', channelId: 'UC1', text: 'already processed history', publishedAt: '2024-01-02T00:00:00.000Z' });
+	const longText = 'ordinary feedback '.repeat(40);
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [
+			{ id: 'new-history', text: longText, publishedAt: '2024-01-03T00:00:00.000Z' },
+			{ id: 'stored-done', text: 'stored duplicate', publishedAt: '2024-01-01T00:00:00.000Z' },
+			{ id: 'history-done', text: 'history duplicate', publishedAt: '2024-01-02T00:00:00.000Z' },
+			{ id: 'new-history', text: 'duplicate response ID', publishedAt: '2024-01-03T00:00:00.000Z' }
+		],
+		nextPageToken: 'page-2',
+		reachedCursor: false
+	});
+
+	const channel = (await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())!;
+	expect(await digestDue(channel)).toBe(true);
+	const result = await generateFeedbackDigest('UC1');
+
+	expect(result).toMatchObject({ status: 'complete', commentsClassified: 1, commentsFailed: 0, creditsUsed: 1, historyRemaining: true });
+	expect(mocks.fetchNewComments).toHaveBeenCalledWith('UC1', 'access-token', '2025-01-01T00:00:00.000Z', {
+		maxPages: 1, pageToken: 'page-1', deadline: undefined
+	});
+	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(1);
+	expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBe(4);
+	const sources = await testDb().db.select().from(feedbackHistoryComments).where(eq(feedbackHistoryComments.channelId, 'UC1')).all();
+	expect(sources).toHaveLength(2);
+	expect(sources.find((row) => row.id === 'new-history')?.text).toBe(longText.slice(0, 500));
+	const stored = (await testDb().db.select().from(comments).where(eq(comments.id, 'stored-done')).get())!;
+	expect(stored).toMatchObject({ status: 'held', decidedBy: 'human', feedbackDigestedAt: '2025-01-01T00:00:00.000Z' });
+	expect(await testDb().db.select().from(comments).where(eq(comments.channelId, 'UC1')).all()).toHaveLength(1);
+	const updatedChannel = (await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())!;
+	expect(updatedChannel).toMatchObject({
+		feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryPageToken: 'page-2',
+		cursor: '2026-01-01T00:00:00.000Z', nextPageToken: 'live-page', scanCursor: 'live-scan'
+	});
+});
+
+test('two historical pages produce distinct digests and advance only the feedback checkpoint', async () => {
+	await testDb().db.update(organizations).set({ creditsRemaining: 10 }).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC1', {
+		feedbackEnabled: 1,
+		feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z',
+		feedbackHistoryPageToken: 'page-1',
+		cursor: '2026-01-01T00:00:00.000Z',
+		nextPageToken: 'live-page',
+		scanCursor: 'live-scan'
+	});
+	mocks.fetchNewComments
+		.mockResolvedValueOnce({ comments: [{ id: 'history-one', text: 'one historical comment', publishedAt: '2024-01-01T00:00:00.000Z' }], nextPageToken: 'page-2', reachedCursor: false })
+		.mockResolvedValueOnce({ comments: [{ id: 'history-two', text: 'another historical comment', publishedAt: '2024-01-02T00:00:00.000Z' }], nextPageToken: null, reachedCursor: true });
+
+	const first = await generateFeedbackDigest('UC1');
+	const second = await generateFeedbackDigest('UC1');
+
+	expect(first).toMatchObject({ status: 'complete', commentsClassified: 1, creditsUsed: 1, historyRemaining: true });
+	expect(second).toMatchObject({ status: 'complete', commentsClassified: 1, creditsUsed: 1, historyRemaining: false });
+	expect(mocks.fetchNewComments.mock.calls.map((call) => call[3]?.pageToken)).toEqual(['page-1', 'page-2']);
+	expect((await testDb().db.select().from(feedbackDigests).orderBy(feedbackDigests.id).all()).map((digest) => digest.windowEnd)).toEqual([
+		'2024-01-01T00:00:00.000Z', '2024-01-02T00:00:00.000Z'
+	]);
+	expect(await testDb().db.select().from(feedbackHistoryComments).where(eq(feedbackHistoryComments.channelId, 'UC1')).all()).toHaveLength(2);
+	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(2);
+	expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBe(8);
+	expect((await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())).toMatchObject({
+		feedbackHistoryBoundary: null, feedbackHistoryPageToken: null,
+		cursor: '2026-01-01T00:00:00.000Z', nextPageToken: 'live-page', scanCursor: 'live-scan'
+	});
+});
+
+test('a fully failed historical batch retries without debiting its persisted charges twice', async () => {
+	await testDb().db.update(organizations).set({ creditsRemaining: 10 }).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC1', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryPageToken: 'page-1' });
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [
+			{ id: 'fail-one', text: 'broken one', publishedAt: '2024-01-01T00:00:00.000Z' },
+			{ id: 'fail-two', text: 'broken two', publishedAt: '2024-01-02T00:00:00.000Z' }
+		],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+	fetchFailures = { 'broken one': 'temporary failure', 'broken two': 'temporary failure' };
+
+	const first = await generateFeedbackDigest('UC1');
+
+	expect(first).toMatchObject({ status: 'failed', historyRemaining: true });
+	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(2);
+	expect(await testDb().db.select().from(feedbackHistoryComments).all()).toHaveLength(0);
+	expect((await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())?.feedbackHistoryBoundary).toBe('2025-01-01T00:00:00.000Z');
+	fetchFailures = {};
+
+	const retry = await generateFeedbackDigest('UC1');
+
+	expect(retry).toMatchObject({ status: 'complete', commentsClassified: 2, creditsUsed: 2, historyRemaining: false });
+	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(2);
+	expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBe(8);
+	expect(await testDb().db.select().from(feedbackHistoryComments).all()).toHaveLength(2);
+	expect((await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())?.feedbackHistoryBoundary).toBeNull();
+});
+
+test('history write headroom deferral preserves the checkpoint and writes no completed sources', async () => {
+	await testDb().db.update(organizations).set({ creditsRemaining: 10 }).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC1', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryPageToken: 'page-1' });
+	mocks.fetchNewComments.mockResolvedValue({ comments: [{ id: 'history-one', text: 'one historical comment', publishedAt: '2024-01-01T00:00:00.000Z' }], nextPageToken: null, reachedCursor: true });
+
+	const result = await generateFeedbackDigest('UC1', { deadline: Date.now() + 2_000 });
+
+	expect(result).toMatchObject({ status: 'deferred', reason: 'deadline', historyRemaining: true });
+	expect(await testDb().db.select().from(feedbackHistoryComments).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(feedbackDigests).all()).toMatchObject([{ status: 'deferred', error: 'deadline' }]);
+	expect((await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())).toMatchObject({ feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryPageToken: 'page-1' });
+});
+
+test.each(['reassigned', 'deleted'] as const)('a channel %s during classification cannot retain history writes', async (race) => {
+	await seedChannel('UC1', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z' });
+	mocks.fetchNewComments.mockResolvedValue({ comments: [{ id: 'history-one', text: 'one historical comment', publishedAt: '2024-01-01T00:00:00.000Z' }], nextPageToken: null, reachedCursor: true });
+	beforeClassify = async () => {
+		if (race === 'reassigned') await testDb().db.update(channels).set({ orgId: 'org-other' }).where(eq(channels.id, 'UC1'));
+		else await testDb().db.delete(channels).where(eq(channels.id, 'UC1'));
+	};
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+	try {
+		const result = await generateFeedbackDigest('UC1');
+		expect(result).toMatchObject({ status: 'failed', reason: 'error', historyRemaining: true });
+		expect(await testDb().db.select().from(feedbackDigests).where(eq(feedbackDigests.channelId, 'UC1')).all()).toHaveLength(0);
+		expect(await testDb().db.select().from(feedbackHistoryComments).all()).toHaveLength(0);
+		if (race === 'reassigned') expect((await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())?.orgId).toBe('org-other');
+		else expect(await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get()).toBeUndefined();
+	} finally {
+		errorSpy.mockRestore();
+	}
+});
+
+test('a history source inserted later by moderation is skipped by the ordinary stored digest', async () => {
+	await testDb().db.update(organizations).set({ creditsRemaining: 10 }).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC1', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z' });
+	mocks.fetchNewComments.mockResolvedValue({ comments: [{ id: 'history-one', text: 'one historical comment', publishedAt: '2024-01-01T00:00:00.000Z' }], nextPageToken: null, reachedCursor: true });
+	await generateFeedbackDigest('UC1');
+	await seedComment('history-one', 'UC1', 'one historical comment', '2024-01-01T00:00:00.000Z');
+
+	const normal = await generateFeedbackDigest('UC1', { force: true });
+
+	expect(normal).toEqual({ status: 'empty' });
+	expect(await testDb().db.select().from(feedbackDigests).all()).toHaveLength(1);
+	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(1);
+	expect((await testDb().db.select().from(comments).where(eq(comments.id, 'history-one')).get())?.status).toBe('approved');
+});
+
+test('historical batches on lifetime plans use the stored BYOK key and charge no credits', async () => {
+	await testDb().db.update(organizations).set({ plan: 'lifetime', openaiKeyEnc: 'enc-org-key', creditsRemaining: 0 }).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC1', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z' });
+	mocks.fetchNewComments.mockResolvedValue({ comments: [{ id: 'history-one', text: 'one historical comment', publishedAt: '2024-01-01T00:00:00.000Z' }], nextPageToken: null, reachedCursor: true });
+
+	const result = await generateFeedbackDigest('UC1');
+
+	expect(result).toMatchObject({ status: 'complete', creditsUsed: 0, historyRemaining: false });
+	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(0);
+	expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBe(0);
+	expect(vi.mocked(fetch).mock.calls[0]?.[1]?.headers).toMatchObject({ Authorization: 'Bearer decrypted:enc-org-key' });
+});
+
+test('a successful empty history page clears transient failures but retains completed digest history', async () => {
+	await seedChannel('UC1', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryPageToken: 'page-1' });
+	await testDb().db.insert(feedbackDigests).values({
+		channelId: 'UC1', windowStart: '1970-01-01T00:00:00.000Z', windowEnd: '2024-01-01T00:00:00.000Z', status: 'complete', commentsClassified: 1
+	});
+	await seedComment('done', 'UC1', 'already digested', '2024-01-01T00:00:00.000Z');
+	await testDb().db.update(comments).set({ feedbackDigestedAt: '2025-01-01T00:00:00.000Z' }).where(eq(comments.id, 'done'));
+	mocks.fetchNewComments.mockRejectedValueOnce(new Error('temporary history fetch failure'));
+
+	const failed = await generateFeedbackDigest('UC1');
+	expect(failed).toMatchObject({ status: 'failed', reason: 'history-fetch' });
+	expect((await testDb().db.select().from(feedbackDigests).all()).map((digest) => digest.status)).toContain('failed');
+	mocks.fetchNewComments.mockResolvedValue({ comments: [{ id: 'done', text: 'already digested', publishedAt: '2024-01-01T00:00:00.000Z' }], nextPageToken: null, reachedCursor: true });
+
+	const result = await generateFeedbackDigest('UC1');
+
+	expect(result).toEqual({ status: 'empty', historyRemaining: false });
+	expect((await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())).toMatchObject({ feedbackHistoryBoundary: null, feedbackHistoryPageToken: null });
+	expect((await testDb().db.select().from(feedbackDigests).all()).map((digest) => digest.status)).toEqual(['complete']);
+	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(0);
+});
+
+test('a historical YouTube failure is logged server-side, sanitized to the page, and leaves its checkpoint in place', async () => {
+	await seedChannel('UC1', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryPageToken: 'page-1' });
+	mocks.fetchNewComments.mockRejectedValue(new Error('private provider response token-123'));
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+	try {
+		const result = await generateFeedbackDigest('UC1');
+
+		expect(result).toMatchObject({ status: 'failed', reason: 'history-fetch', historyRemaining: true });
+		expect(JSON.stringify(result)).not.toContain('token-123');
+		expect(errorSpy).toHaveBeenCalledWith('feedback history page fetch failed for channel:', 'UC1', expect.any(Error));
+		expect((await testDb().db.select().from(feedbackDigests).get())).toMatchObject({ windowStart: '2025-01-01T00:00:00.000Z', status: 'failed', error: 'history-fetch' });
+		expect((await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())).toMatchObject({ feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryPageToken: 'page-1' });
+	} finally {
+		errorSpy.mockRestore();
+	}
+});
+
+test('repeated history-fetch failures keep one transient row at a stable window', async () => {
+	// The failure window used to end at a fresh nowIso every attempt, so each
+	// retry wrote a NEW transient row beside the old one and the history
+	// accumulated forever (codex+cubic). Retries must update the same row.
+	await seedChannel('UC1', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryPageToken: 'page-1' });
+	mocks.fetchNewComments.mockRejectedValue(new Error('youtube down'));
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+	try {
+		expect((await generateFeedbackDigest('UC1')).status).toBe('failed');
+		const firstRow = await testDb().db.select().from(feedbackDigests).get();
+		expect(firstRow).toMatchObject({ status: 'failed', error: 'history-fetch' });
+
+		expect((await generateFeedbackDigest('UC1')).status).toBe('failed');
+		expect((await generateFeedbackDigest('UC1')).status).toBe('failed');
+
+		const rows = await testDb().db.select().from(feedbackDigests).all();
+		expect(rows).toHaveLength(1);
+		expect({ windowStart: rows[0].windowStart, windowEnd: rows[0].windowEnd }).toEqual({
+			windowStart: firstRow?.windowStart,
+			windowEnd: firstRow?.windowEnd
+		});
+	} finally {
+		errorSpy.mockRestore();
+	}
+});
+
+test('a stolen history lease rolls back the digest, source rows, and checkpoint write', async () => {
+	await seedChannel('UC1', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', leaseExpiresAt: '2099-01-01T00:00:00.000Z' });
+	mocks.fetchNewComments.mockResolvedValue({ comments: [{ id: 'history-1', text: 'one history comment', publishedAt: '2024-01-01T00:00:00.000Z' }], nextPageToken: null, reachedCursor: true });
+	beforeClassify = async () => {
+		await testDb().db.update(channels).set({ leaseExpiresAt: '2100-01-01T00:00:00.000Z' }).where(eq(channels.id, 'UC1'));
+	};
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+	try {
+		const result = await generateFeedbackDigest('UC1');
+
+		expect(result).toMatchObject({ status: 'failed', reason: 'error', historyRemaining: true });
+		expect(await testDb().db.select().from(feedbackDigests).all()).toHaveLength(0);
+		expect(await testDb().db.select().from(feedbackHistoryComments).all()).toHaveLength(0);
+		expect((await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())).toMatchObject({ feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', leaseExpiresAt: '2100-01-01T00:00:00.000Z' });
+	} finally {
+		errorSpy.mockRestore();
+	}
+});
+
+test('historical partial classification failures remain counted, charged once, and recorded as completed sources', async () => {
+	await testDb().db.update(organizations).set({ creditsRemaining: 10 }).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC1', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z' });
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [
+			{ id: 'failed-history', text: 'broken history item', publishedAt: '2024-01-01T00:00:00.000Z' },
+			{ id: 'none-history', text: 'none history item', publishedAt: '2024-01-02T00:00:00.000Z' }
+		],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+	fetchFailures = { 'broken history item': 'provider error' };
+
+	const result = await generateFeedbackDigest('UC1');
+
+	expect(result).toMatchObject({ status: 'complete', commentsClassified: 1, commentsFailed: 1, creditsUsed: 2, historyRemaining: false });
+	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(2);
+	expect(await testDb().db.select().from(feedbackHistoryComments).where(eq(feedbackHistoryComments.channelId, 'UC1')).all()).toHaveLength(2);
+	expect((await testDb().db.select().from(feedbackDigests).get())).toMatchObject({ commentsFailed: 1, creditsUsed: 2 });
+	expect((await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())).toMatchObject({ feedbackHistoryBoundary: null, feedbackHistoryPageToken: null });
+});
+
+test('a historical credit shortfall defers the whole page before classification or source writes', async () => {
+	await testDb().db.update(organizations).set({ creditsRemaining: 1 }).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC1', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryPageToken: 'page-1' });
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [
+			{ id: 'h1', text: 'first history source', publishedAt: '2024-01-01T00:00:00.000Z' },
+			{ id: 'h2', text: 'second history source', publishedAt: '2024-01-02T00:00:00.000Z' }
+		],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	const result = await generateFeedbackDigest('UC1');
+
+	expect(result).toMatchObject({ status: 'deferred', reason: 'credits', historyRemaining: true });
+	expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(feedbackDigests).all()).toHaveLength(1);
+	expect(await testDb().db.select().from(feedbackHistoryComments).all()).toHaveLength(0);
+	expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBe(1);
+	expect((await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())).toMatchObject({ feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryPageToken: 'page-1' });
+});
+
+test('feedback dry-run handles an empty first page without writes or credits', async () => {
+	await seedChannel('UC1');
+	mocks.fetchNewComments.mockResolvedValue({ comments: [], nextPageToken: null, reachedCursor: true });
+
+	const preview = await previewFeedbackDigest('UC1', { boundary: '2025-01-01T00:00:00.000Z' });
+
+	expect(preview).toEqual({ commentsClassified: 0, commentsFailed: 0, pooled: 0, hasMore: false, findings: [] });
+	expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+	expect(await testDb().db.select().from(feedbackDigests).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(feedbackHistoryComments).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(0);
+});
+
+test('feedback dry-run builds grouped sanitized findings without writing or charging', async () => {
+	await testDb().db.update(organizations).set({ creditsRemaining: 8 }).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC1', { feedbackThreshold: 3, cursor: '2026-01-01T00:00:00.000Z' });
+	const texts = ['when is the next stream?', 'when does the next stream start?', 'when will the next stream happen?'];
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: texts.map((text, index) => ({ id: `preview-${index}`, text, publishedAt: `2026-01-0${index + 1}T00:00:00.000Z` })),
+		nextPageToken: 'preview-page-2',
+		reachedCursor: false
+	});
+	RESPONSES = Object.fromEntries(texts.map((text) => [text, { category: 'question', hasAbuse: false, claim: 'when is the next stream' }]));
+	RESPONSES[texts[2]] = { category: 'question', hasAbuse: true, claim: 'when is the next stream' };
+
+	const preview = await previewFeedbackDigest('UC1', { boundary: '2025-12-01T00:00:00.000Z', deadline: Date.now() + 15_000 });
+
+	expect(preview).toMatchObject({ commentsClassified: 3, commentsFailed: 0, pooled: 0, hasMore: true });
+	expect(preview.findings).toHaveLength(1);
+	expect(preview.findings[0]).toMatchObject({ category: 'question', supporterCount: 3 });
+	expect(JSON.stringify(preview)).not.toContain(texts[2]);
+	expect(preview.findings[0].evidence.some((item) => item.hasAbuse === 1 && item.sanitizedExcerpt === CONCEALED_MESSAGE)).toBe(true);
+	expect(await testDb().db.select().from(feedbackDigests).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(feedbackHistoryComments).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(comments).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(0);
+	expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBe(8);
+	expect((await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())).toMatchObject({ cursor: '2026-01-01T00:00:00.000Z', feedbackHistoryBoundary: null });
+});
+
+test('a feedback preview aborts when its claimed row was swapped mid-claim', async () => {
+	// The claim's fingerprint — org, connector ciphertext, lease — must match
+	// the live row: a delete/reconnect reuses the channel id with a fresh
+	// grant, and running the preview against it would spend the wrong org's
+	// YouTube quota and expose its comments to the claimant (cubic+codeant).
+	await seedChannel('UC1', { feedbackEnabled: 1, leaseExpiresAt: '2099-01-01T00:00:00.000Z' });
+	const claim = { orgId: 'org-1', refreshTokenEnc: 'enc', leaseExpiresAt: '2099-01-01T00:00:00.000Z' };
+	await testDb().db.delete(channels).where(eq(channels.id, 'UC1'));
+	await seedChannel('UC1', { feedbackEnabled: 1, refreshTokenEnc: 'enc-reconnected' });
+
+	await expect(
+		previewFeedbackDigest('UC1', { boundary: '2025-01-01T00:00:00.000Z', claim })
+	).rejects.toThrow('changed under the dry-run claim');
+	expect(mocks.fetchNewComments).not.toHaveBeenCalled();
+});
+
 // ---- cadence + rotation ----
+
+test('digestDue: an active history scan bypasses manual and recent weekly cadence', async () => {
+	await seedChannel('UC1', { feedbackCadence: 'manual', feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z' });
+	let channel = (await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())!;
+	expect(await digestDue(channel)).toBe(true);
+	await testDb().db.update(channels).set({ feedbackCadence: 'weekly', feedbackLastDigestAt: new Date().toISOString() }).where(eq(channels.id, 'UC1'));
+	channel = (await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())!;
+	expect(await digestDue(channel)).toBe(true);
+});
 
 test('digestDue: weekly due when never generated, not due inside 7 days', async () => {
 	await seedChannel('UC1', { feedbackEnabled: 1 });

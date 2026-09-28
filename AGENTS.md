@@ -288,6 +288,12 @@ The same holds when the org row is UNREADABLE — a DB failure resolves no
 key at all, since the unknown plan could be lifetime).
 Never serialize the key or ciphertext to the client; the page gets a
 boolean.
+**Analyze history requires purchase access** before changing the scan cursor:
+available purchased credits or paid subscription allowance, or the lifetime
+plan with a usable stored organization OpenAI key. Unpaid requests show a
+purchase message; lifetime accounts missing their key are directed to Team.
+**Dry run remains available without a purchase** — do not apply the history
+purchase gate to previews.
 `users.plan` is the hook for the future Stripe integration (hosted plans;
 free tier = self-hosted only). Card and hosted-subscription management runs
 through the Stripe customer portal (usage page → **Manage cards**,

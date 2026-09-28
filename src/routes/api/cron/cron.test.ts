@@ -9,11 +9,16 @@ import { AUDIT_HANDLE_RETENTION_MS, CONSENT_EMAIL_RETENTION_MS } from '$lib/serv
 const mocks = vi.hoisted(() => ({
 	env: { CRON_SECRET: 'test-secret', DRY_RUN: 'true' } as Record<string, string | undefined>,
 	runChannel: vi.fn(),
+	generateFeedbackDigest: vi.fn(),
 	retryStripeCustomerDeletions: vi.fn(async (_limit: number, _deadline: number) => 0)
 }));
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 vi.mock('$lib/server/pipeline', () => ({ runChannel: mocks.runChannel }));
+vi.mock('$lib/server/feedbackDigest', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('$lib/server/feedbackDigest')>();
+	return { ...actual, generateFeedbackDigest: mocks.generateFeedbackDigest };
+});
 vi.mock('$lib/server/deletion', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('$lib/server/deletion')>();
 	// Spy on just the outbox retry (the other deletion sweeps stay real) so a
@@ -61,6 +66,7 @@ beforeEach(() => {
 	mocks.env.CRON_SECRET = 'test-secret';
 	mocks.env.DRY_RUN = 'true';
 	vi.clearAllMocks();
+	mocks.generateFeedbackDigest.mockResolvedValue({ status: 'skipped', reason: 'disabled' });
 });
 
 function call(secret?: { query?: string; bearer?: string }) {
@@ -283,6 +289,75 @@ test('selects the least-recently-run channel first', async () => {
 	await call({ bearer: 'test-secret' });
 
 	expect(mocks.runChannel).toHaveBeenCalledWith('UC-old', expect.anything());
+});
+
+test('a channel with an unfinished history scan waits its least-recently-run turn', async () => {
+	// History work must never outrank the rotation: a stuck or multi-page job
+	// would otherwise claim every invocation and starve live moderation.
+	mocks.env.DRY_RUN = 'false';
+	await seedChannel('UC-old', { lastRunAt: '2026-01-01T00:00:00.000Z' });
+	await seedChannel('UC-history', { feedbackEnabled: 1, lastRunAt: '2026-09-01T00:00:00.000Z', feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z' });
+	mocks.runChannel.mockResolvedValue(runResult());
+
+	await call({ bearer: 'test-secret' });
+
+	expect(mocks.runChannel).toHaveBeenCalledWith('UC-old', expect.anything());
+	expect(mocks.runChannel).not.toHaveBeenCalledWith('UC-history', expect.anything());
+});
+
+test('disabled history does not starve an older channel or claim first-position priority', async () => {
+	mocks.env.DRY_RUN = 'false';
+	await seedChannel('UC-older', { lastRunAt: '2026-01-01T00:00:00.000Z' });
+	await seedChannel('UC-disabled-history', { active: 1, feedbackEnabled: 0, lastRunAt: '2026-09-01T00:00:00.000Z', feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z' });
+	mocks.runChannel.mockResolvedValue(runResult());
+
+	await call({ bearer: 'test-secret' });
+
+	expect(mocks.runChannel).toHaveBeenCalledWith('UC-older', expect.anything());
+	expect(mocks.runChannel).not.toHaveBeenCalledWith('UC-disabled-history', expect.anything());
+	expect((await channelRow('UC-disabled-history'))?.feedbackHistoryBoundary).toBe('2025-01-01T00:00:00.000Z');
+});
+
+test('history feedback runs after moderation and is not attempted twice in the same tick', async () => {
+	// The history page shares the claimed channel's leftover budget: a fetch
+	// that overruns defers cleanly instead of pushing live moderation past
+	// the deadline (codex+cubic).
+	mocks.env.DRY_RUN = 'false';
+	await seedChannel('UC-history', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z' });
+	const order: string[] = [];
+	mocks.generateFeedbackDigest.mockImplementationOnce(async () => {
+		order.push('feedback');
+		return { status: 'complete', historyRemaining: true };
+	});
+	mocks.runChannel.mockImplementationOnce(async () => {
+		order.push('moderation');
+		return runResult();
+	});
+
+	await call({ bearer: 'test-secret' });
+
+	expect(order).toEqual(['moderation', 'feedback']);
+	expect(mocks.generateFeedbackDigest).toHaveBeenCalledTimes(1);
+});
+
+test('history digest failure does not prevent moderation or trigger a second digest attempt in the same tick', async () => {
+	mocks.env.DRY_RUN = 'false';
+	await seedChannel('UC-history', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z' });
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	mocks.generateFeedbackDigest.mockRejectedValueOnce(new Error('raw feedback failure'));
+	mocks.runChannel.mockResolvedValueOnce(runResult());
+
+	try {
+		const response = await call({ bearer: 'test-secret' });
+		expect(response.status).toBe(200);
+		expect(mocks.runChannel).toHaveBeenCalledTimes(1);
+		expect(mocks.generateFeedbackDigest).toHaveBeenCalledTimes(1);
+		expect(errorSpy).toHaveBeenCalledWith('feedback digest failed for channel:', 'UC-history', expect.any(Error));
+		const body = await response.json();
+		expect(JSON.stringify(body)).not.toContain('raw feedback failure');
+	} finally {
+		errorSpy.mockRestore();
+	}
 });
 
 test('records the run afterwards: lastRunAt is set and the lease is cleared', async () => {

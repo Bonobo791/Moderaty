@@ -93,6 +93,24 @@ test('a database failure resolves NO key — the plan is unknown, so the env key
 	}
 });
 
+test('read failures propagate when explicitly requested', async () => {
+	const outage = new Error('database is down');
+	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	vi.spyOn(testDb().db, 'select').mockImplementation(() => {
+		throw outage;
+	});
+	await expect(resolveOpenAiKey('org-1', { throwOnReadError: true })).rejects.toBe(outage);
+	expect(spy).toHaveBeenCalledWith(
+		'failed to read the stored OpenAI key — plan unknown, so no deployment-key fallback (a lifetime org would burn it)',
+		{ orgId: 'org-1', error: outage }
+	);
+});
+
+test('an unreadable missing organization throws when explicitly requested', async () => {
+	vi.spyOn(console, 'error').mockImplementation(() => {});
+	await expect(resolveOpenAiKey('org-missing', { throwOnReadError: true })).rejects.toThrow('organization not found: org-missing');
+});
+
 test('no stored key and no env key resolves to undefined (the scorer throws loudly)', async () => {
 	mocks.env.OPENAI_API_KEY = undefined;
 	await seedOrg('org-4', null);
@@ -124,6 +142,15 @@ test('a lifetime org with a CORRUPT stored key gets nothing either — never the
 		'stored OpenAI key failed to decrypt — no deployment-key fallback on the lifetime plan',
 		{ orgId: 'org-lifetime-corrupt', error: expect.any(Error) }
 	);
+});
+
+test('a corrupt stored key propagates when read failures are requested — verification failure, not a missing key', async () => {
+	// Access gates (history analysis) ask for loud reads so corrupt ciphertext
+	// surfaces as "could not verify" instead of the misleading "configure a
+	// key" that an undefined resolve would report.
+	await seedOrg('org-lifetime-corrupt-flag', 'not-valid-ciphertext', 'lifetime');
+	vi.spyOn(console, 'error').mockImplementation(() => {});
+	await expect(resolveOpenAiKey('org-lifetime-corrupt-flag', { throwOnReadError: true })).rejects.toThrow();
 });
 
 test('a lifetime org WITH a stored key scores on it', async () => {

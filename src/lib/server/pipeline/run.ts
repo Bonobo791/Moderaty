@@ -4,6 +4,7 @@ import { decrypt } from '$lib/server/crypto';
 import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
 import { DeadlineExceededError } from '$lib/server/http';
+import { channelMatchesClaim } from '$lib/server/dryRun';
 import { resolveOpenAiKey } from '$lib/server/openaiKey';
 import { TONE_LEVEL_OMNI_ONLY } from '$lib/toneLevels';
 import { fetchNewComments, refreshAccessToken, type CommentPage } from '$lib/server/youtube';
@@ -87,10 +88,18 @@ function finishDryRun(
 async function loadChannelForRun(
 	channelId: string,
 	forceDryRun: boolean | undefined,
-	window: RunChannelOptions['window']
+	window: RunChannelOptions['window'],
+	claim?: RunChannelOptions['claim']
 ): Promise<{ kind: 'run'; channel: typeof channels.$inferSelect; dryRun: boolean } | { kind: 'skip'; result: ChannelRunResult }> {
 	const channel = await db.select().from(channels).where(eq(channels.id, channelId)).get();
 	if (!channel) throw new Error(`channel not found: ${channelId}`);
+	// A claimed preview must run against the row that claimed it: a
+	// delete/reconnect can swap in a fresh row under the same id between the
+	// claim and this load, and the row-identity guard inside the run would
+	// only ever compare the new row to itself (cubic+codeant).
+	if (claim && !channelMatchesClaim(channel, claim)) {
+		throw new Error(`channel ${channelId} changed under the dry-run claim — aborting the preview`);
+	}
 	if (!channel.active) return { kind: 'skip', result: emptyResult() };
 	if (env.DRY_RUN !== 'true' && env.DRY_RUN !== 'false') {
 		throw new Error('DRY_RUN must be true or false');
@@ -111,7 +120,7 @@ async function loadChannelForRun(
  */
 export async function runChannel(
 	channelId: string,
-	{ maxPages = 3, deadline, forceDryRun, window }: RunChannelOptions = {}
+	{ maxPages = 3, deadline, forceDryRun, window, claim }: RunChannelOptions = {}
 ): Promise<ChannelRunResult> {
 	let fetched = 0;
 	let acted = 0;
@@ -119,7 +128,7 @@ export async function runChannel(
 	// Stryker disable next-line BooleanLiteral: equivalent — dryRun is reassigned from env/forceDryRun before any read; the catch only returns for errors thrown after that assignment
 	let dryRun = false;
 	try {
-		const loaded = await loadChannelForRun(channelId, forceDryRun, window);
+		const loaded = await loadChannelForRun(channelId, forceDryRun, window, claim);
 		if (loaded.kind === 'skip') return loaded.result;
 		const { channel } = loaded;
 		dryRun = loaded.dryRun;

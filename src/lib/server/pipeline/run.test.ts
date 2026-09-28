@@ -204,6 +204,32 @@ test('skips an inactive channel without fetching or scoring', async () => {
 	expect(mocks.scoreComment).not.toHaveBeenCalled();
 });
 
+test('a preview whose claimed row was swapped aborts before any provider call', async () => {
+	// delete+reconnect lands the same channel id on a fresh row and connector;
+	// the claim fingerprint must gate EXECUTION, not only the writes — the
+	// loaded row comparing equal to itself proves nothing (cubic+codeant).
+	mocks.state.channel.orgId = 'org-1';
+	mocks.state.channel.leaseExpiresAt = '2099-01-01T00:00:00.000Z';
+	for (const claim of [
+		{ orgId: 'org-2', refreshTokenEnc: 'encrypted-refresh-token', leaseExpiresAt: '2099-01-01T00:00:00.000Z' }, // reconnected under another org
+		{ orgId: 'org-1', refreshTokenEnc: 'enc-reconnected', leaseExpiresAt: '2099-01-01T00:00:00.000Z' }, // same org, fresh grant ciphertext
+		{ orgId: 'org-1', refreshTokenEnc: 'encrypted-refresh-token', leaseExpiresAt: '2099-02-02T00:00:00.000Z' } // lease lost to cron
+	]) {
+		await expect(
+			runChannel('channel', { forceDryRun: true, window: { boundary: '2025-01-01T00:00:00.000Z', pageToken: null }, claim })
+		).rejects.toThrow('changed under the dry-run claim');
+	}
+	expect(mocks.fetchNewComments).not.toHaveBeenCalled();
+});
+
+test('a preview claim matching the live row runs normally', async () => {
+	mocks.state.channel.orgId = 'org-1';
+	mocks.state.channel.leaseExpiresAt = '2099-01-01T00:00:00.000Z';
+	const claim = { orgId: 'org-1', refreshTokenEnc: 'encrypted-refresh-token', leaseExpiresAt: '2099-01-01T00:00:00.000Z' };
+	const result = await runChannel('channel', { forceDryRun: true, window: { boundary: '2025-01-01T00:00:00.000Z', pageToken: null }, claim });
+	expect(result).toMatchObject({ skipped: false, dryRun: true });
+});
+
 test('fails loudly when DRY_RUN is not true or false', async () => {
 	process.env.DRY_RUN = 'ture';
 	mocks.state.env.DRY_RUN = 'ture';

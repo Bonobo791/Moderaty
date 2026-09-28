@@ -85,59 +85,65 @@ function categorizeRunFailure(cause: unknown): 'token' | 'quota' | 'scoring' | '
 }
 
 /**
- * Runs the claimed channel (one page), then the dry-run window drain while a
- * preview is in flight (I10 — bounded, same lease). A drain failure must never
- * mask the normal run — loud, surfaced in the payload, retried next
- * invocation.
+ * One dry-run window page under the claimed channel's lease (I10 — bounded).
+ * A drain failure must never mask the normal run — loud, surfaced in the
+ * payload, retried next invocation.
  */
+async function drainDryRunWindow(channel: typeof channels.$inferSelect, deadline: number): Promise<unknown> {
+	if (!channel.dryRunBoundary) return undefined;
+	try {
+		const drain = await runChannel(channel.id, {
+			deadline,
+			forceDryRun: true,
+			window: { boundary: channel.dryRunBoundary, pageToken: channel.dryRunPageToken ?? null }
+		});
+		// Both writes are predicated on the boundary actually drained: the
+		// row was read BEFORE the atomic claim, so a dashboard preview can
+		// have replanted a new window in between — a stale drain must never
+		// clear or overwrite the replacement state (0-row update = no-op).
+		const drainedBoundary = eq(channels.dryRunBoundary, channel.dryRunBoundary);
+		if (drain.windowComplete === true) {
+			await db
+				.update(channels)
+				.set({ dryRunBoundary: null, dryRunPageToken: null })
+				.where(and(eq(channels.id, channel.id), drainedBoundary));
+		} else if (drain.windowComplete === false) {
+			await db
+				.update(channels)
+				.set({ dryRunPageToken: drain.windowNextPageToken ?? null })
+				.where(and(eq(channels.id, channel.id), drainedBoundary));
+		}
+		return drain;
+	} catch (cause) {
+		console.error('dry-run window drain failed for channel:', channel.id, cause);
+		return { error: cause instanceof Error ? cause.message : String(cause) };
+	}
+}
+
+/**
+ * The feedback digest piggybacks on the same lease and budget (I10): the
+ * claimed channel generates one when its cadence is due — and a history
+ * job in flight runs one bounded page here too — while budget remains.
+ * A digest failure must never mask the moderation verdict — loud,
+ * surfaced in the payload, retried on the next claim.
+ */
+async function runDueDigest(channel: typeof channels.$inferSelect, deadline: number): Promise<unknown> {
+	if (Date.now() >= deadline) return undefined;
+	try {
+		return await generateFeedbackDigest(channel.id, { deadline });
+	} catch (cause) {
+		console.error('feedback digest failed for channel:', channel.id, cause);
+		return { error: 'error' };
+	}
+}
+
 async function runClaimedChannel(
 	channel: typeof channels.$inferSelect,
 	deadline: number
 ): Promise<{ result: ChannelRunResult; dryRunWindow: unknown; digest: unknown }> {
 	const result = await runChannel(channel.id, { deadline });
-	let dryRunWindow: unknown;
-	if (channel.dryRunBoundary) {
-		try {
-			const drain = await runChannel(channel.id, {
-				deadline,
-				forceDryRun: true,
-				window: { boundary: channel.dryRunBoundary, pageToken: channel.dryRunPageToken ?? null }
-			});
-			// Both writes are predicated on the boundary actually drained: the
-			// row was read BEFORE the atomic claim, so a dashboard preview can
-			// have replanted a new window in between — a stale drain must never
-			// clear or overwrite the replacement state (0-row update = no-op).
-			const drainedBoundary = eq(channels.dryRunBoundary, channel.dryRunBoundary);
-			if (drain.windowComplete === true) {
-				await db
-					.update(channels)
-					.set({ dryRunBoundary: null, dryRunPageToken: null })
-					.where(and(eq(channels.id, channel.id), drainedBoundary));
-			} else if (drain.windowComplete === false) {
-				await db
-					.update(channels)
-					.set({ dryRunPageToken: drain.windowNextPageToken ?? null })
-					.where(and(eq(channels.id, channel.id), drainedBoundary));
-			}
-			dryRunWindow = drain;
-		} catch (cause) {
-			console.error('dry-run window drain failed for channel:', channel.id, cause);
-			dryRunWindow = { error: cause instanceof Error ? cause.message : String(cause) };
-		}
-	}
-	// The feedback digest piggybacks on the same lease and budget (I10): the
-	// claimed channel generates one when its cadence is due and budget
-	// remains. A digest failure must never mask the moderation verdict —
-	// loud, surfaced in the payload, retried on the next claim.
-	let digest: unknown;
-	if (Date.now() < deadline) {
-		try {
-			digest = await generateFeedbackDigest(channel.id, { deadline });
-		} catch (cause) {
-			console.error(`feedback digest for channel ${channel.id} failed:`, cause);
-			digest = { error: 'error' };
-		}
-	}
+	const dryRunWindow = await drainDryRunWindow(channel, deadline);
+	const digest = await runDueDigest(channel, deadline);
 	return { result, dryRunWindow, digest };
 }
 
@@ -202,6 +208,8 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		.where(and(eq(channels.active, 1), claimable))
 		// Channels with a dry-run drain in flight first — a preview the user is
 		// actively waiting on must not starve behind the ordinary rotation.
+		// History jobs get no such priority: a multi-page or stuck history
+		// drain must never outrank least-recently-run moderation (codex+cubic).
 		.orderBy(desc(sql`${channels.dryRunBoundary} is not null`), asc(channels.lastRunAt))
 		.limit(1);
 	if (!channel) return json({ ...base, results: {} });

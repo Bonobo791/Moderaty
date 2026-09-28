@@ -10,8 +10,8 @@
 			{/each}
 		</ul>
 		<p class="microcopy">
-			Google asks for standard YouTube access, used only on your comments. Free and open source (PolyForm Shield). Dry-run mode proves it
-			before anything changes. We keep no data on you beyond what your account needs to run, and nothing after you leave that
+			Google asks for standard YouTube access, used only on your comments. Free and open source (PolyForm Shield). 1 free dry run per feature per channel, no credits. Moderation previews drain the selected window in the background; feedback previews cover the first page, up to 100 comments.
+			We keep no data on you beyond what your account needs to run, and nothing after you leave that
 			the LGPD does not require.
 		</p>
 	</div>

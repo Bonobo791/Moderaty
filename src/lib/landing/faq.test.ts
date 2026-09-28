@@ -1,5 +1,7 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { FAQ_ENTRIES } from './faq';
+import { TICKS_SELF_HOSTED, TICKS_SELF_HOSTED_DETAILED } from './plans';
 import { SCRIPT } from './queue-script';
 
 describe('landing copy guardrails', () => {
@@ -20,5 +22,22 @@ describe('landing copy guardrails', () => {
 			expect(item.text).not.toMatch(/[—–]/);
 			expect(item.reason).not.toMatch(/[—–]/);
 		}
+	});
+
+	it('states separate one-time moderation and first-page feedback previews accurately', () => {
+		const previewFaq = FAQ_ENTRIES.find(({ q }) => q === 'Can I test Moderaty without changing anything on my channel?');
+		expect(previewFaq?.a).toContain('Each channel gets 1 free moderation dry run and 1 free feedback dry run. Neither spends credits.');
+		expect(previewFaq?.a).toContain('Moderation previews drain the selected window in the background; feedback previews cover the first page, up to 100 comments.');
+		expect(TICKS_SELF_HOSTED.join(' ')).toContain('1 free dry run per feature per channel');
+		expect(TICKS_SELF_HOSTED_DETAILED.join(' ')).toContain('1 free dry run per feature per channel');
+		const howItWorks = readFileSync(new URL('../components/landing/HowItWorks.svelte', import.meta.url), 'utf8').replace(/\s+/g, ' ');
+		const trustBar = readFileSync(new URL('../components/landing/TrustBar.svelte', import.meta.url), 'utf8').replace(/\s+/g, ' ');
+		expect(howItWorks).toContain('Each channel gets 1 free moderation dry run and 1 free feedback dry run. Neither spends credits.');
+		expect(howItWorks).toContain('Moderation previews drain the selected window in the background; feedback previews cover the first page, up to 100 comments.');
+		// The full preview sentence — dropping "no credits" or the feedback
+		// scope half must fail, not slip through as a substring (cubic).
+		expect(trustBar).toContain(
+			'1 free dry run per feature per channel, no credits. Moderation previews drain the selected window in the background; feedback previews cover the first page, up to 100 comments.'
+		);
 	});
 });

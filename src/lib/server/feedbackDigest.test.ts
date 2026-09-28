@@ -280,7 +280,9 @@ test('a run interrupted after charging re-anchors instead of re-charging', async
 	}
 	RESPONSES = Object.fromEntries([1, 2, 3].map((i) => [`text ${i}`, { category: 'question', hasAbuse: false, claim: 'theme' }]));
 	const result = await generateFeedbackDigest('UC1', { force: true });
-	expect(result).toMatchObject({ status: 'complete', commentsClassified: 3, creditsUsed: 1 });
+	// creditsUsed counts every comment the digest covered — the two orphan
+	// anchors are spend the org already made FOR this batch (codex).
+	expect(result).toMatchObject({ status: 'complete', commentsClassified: 3, creditsUsed: 3 });
 	const ledger = await testDb().db.select().from(creditTransactions).all();
 	expect(ledger).toHaveLength(3);
 	const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
@@ -304,7 +306,9 @@ test('a failed run still holds its charge anchors — the retry does not re-char
 		RESPONSES[`text ${i}`] = { category: 'question', hasAbuse: false, claim: 'theme' };
 	}
 	const second = await generateFeedbackDigest('UC1', { force: true });
-	expect(second).toMatchObject({ status: 'complete', creditsUsed: 0 });
+	// The retry debits nothing new — the ledger stays at 3 — but the digest's
+	// comments still cost the org 3 credits; reporting 0 would lie (codex).
+	expect(second).toMatchObject({ status: 'complete', creditsUsed: 3 });
 	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(3);
 });
 
@@ -597,7 +601,7 @@ test('a fully failed historical batch retries without debiting its persisted cha
 
 	const retry = await generateFeedbackDigest('UC1');
 
-	expect(retry).toMatchObject({ status: 'complete', commentsClassified: 2, creditsUsed: 0, historyRemaining: false });
+	expect(retry).toMatchObject({ status: 'complete', commentsClassified: 2, creditsUsed: 2, historyRemaining: false });
 	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(2);
 	expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBe(8);
 	expect(await testDb().db.select().from(feedbackHistoryComments).all()).toHaveLength(2);
@@ -701,6 +705,33 @@ test('a historical YouTube failure is logged server-side, sanitized to the page,
 		expect(errorSpy).toHaveBeenCalledWith('feedback history page fetch failed for channel UC1:', expect.any(Error));
 		expect((await testDb().db.select().from(feedbackDigests).get())).toMatchObject({ windowStart: '2025-01-01T00:00:00.000Z', status: 'failed', error: 'history-fetch' });
 		expect((await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())).toMatchObject({ feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryPageToken: 'page-1' });
+	} finally {
+		errorSpy.mockRestore();
+	}
+});
+
+test('repeated history-fetch failures keep one transient row at a stable window', async () => {
+	// The failure window used to end at a fresh nowIso every attempt, so each
+	// retry wrote a NEW transient row beside the old one and the history
+	// accumulated forever (codex+cubic). Retries must update the same row.
+	await seedChannel('UC1', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryPageToken: 'page-1' });
+	mocks.fetchNewComments.mockRejectedValue(new Error('youtube down'));
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+	try {
+		expect((await generateFeedbackDigest('UC1')).status).toBe('failed');
+		const firstRow = await testDb().db.select().from(feedbackDigests).get();
+		expect(firstRow).toMatchObject({ status: 'failed', error: 'history-fetch' });
+
+		expect((await generateFeedbackDigest('UC1')).status).toBe('failed');
+		expect((await generateFeedbackDigest('UC1')).status).toBe('failed');
+
+		const rows = await testDb().db.select().from(feedbackDigests).all();
+		expect(rows).toHaveLength(1);
+		expect({ windowStart: rows[0].windowStart, windowEnd: rows[0].windowEnd }).toEqual({
+			windowStart: firstRow?.windowStart,
+			windowEnd: firstRow?.windowEnd
+		});
 	} finally {
 		errorSpy.mockRestore();
 	}

@@ -79,6 +79,18 @@ async function seedComment(id: string, channelId: string, text: string, publishe
 	await testDb().db.insert(comments).values({ id, channelId, text, publishedAt, status: 'approved', decidedBy: 'ai' });
 }
 
+/** Seeds comments c1..cN on consecutive January days plus each verdict. */
+async function seedCommentBatch(entries: { text: string; category?: string; hasAbuse?: boolean; claim?: string }[]) {
+	for (const [i, entry] of entries.entries()) {
+		await seedComment(`c${i + 1}`, 'UC1', entry.text, `2026-01-0${i + 1}T00:00:00.000Z`);
+		RESPONSES[entry.text] = {
+			category: entry.category ?? 'question',
+			hasAbuse: entry.hasAbuse ?? false,
+			claim: entry.claim ?? entry.text
+		};
+	}
+}
+
 beforeEach(async () => {
 	RESPONSES = {};
 	CLUSTER = {};
@@ -192,15 +204,11 @@ test('the AI theme pass merges differently-worded claims into one finding', asyn
 	// Exact claim-key matching alone would pool all three — "what comes up
 	// most" is only visible once the model merges them onto one theme.
 	await seedChannel('UC1', { feedbackEnabled: 1, feedbackThreshold: 3 });
-	const texts = ['next episode when?', 'when is part 2 coming', 'release schedule for the next video'];
-	for (const [i, text] of texts.entries()) {
-		await seedComment(`c${i}`, 'UC1', text, `2026-01-0${i + 1}T00:00:00.000Z`);
-	}
-	RESPONSES = {
-		'next episode when?': { category: 'question', hasAbuse: false, claim: 'next episode when' },
-		'when is part 2 coming': { category: 'question', hasAbuse: false, claim: 'when is part 2 coming' },
-		'release schedule for the next video': { category: 'question', hasAbuse: false, claim: 'release schedule' }
-	};
+	await seedCommentBatch([
+		{ text: 'next episode when?', claim: 'next episode when' },
+		{ text: 'when is part 2 coming', claim: 'when is part 2 coming' },
+		{ text: 'release schedule for the next video', claim: 'release schedule' }
+	]);
 	for (const claim of ['next episode when', 'when is part 2 coming', 'release schedule']) {
 		CLUSTER[claim] = 'when is the next video';
 	}
@@ -212,10 +220,11 @@ test('the AI theme pass merges differently-worded claims into one finding', asyn
 
 test('a malformed theme-merge response fails the run loudly instead of writing a wrong digest', async () => {
 	await seedChannel('UC1', { feedbackEnabled: 1 });
-	for (const i of [1, 2, 3]) {
-		await seedComment(`c${i}`, 'UC1', `text ${i}`, `2026-01-0${i}T00:00:00.000Z`);
-		RESPONSES[`text ${i}`] = { category: 'question', hasAbuse: false, claim: `theme ${i}` };
-	}
+	await seedCommentBatch([
+		{ text: 'text 1', claim: 'theme 1' },
+		{ text: 'text 2', claim: 'theme 2' },
+		{ text: 'text 3', claim: 'theme 3' }
+	]);
 	CLUSTER_RAW = 'not json';
 	const result = await generateFeedbackDigest('UC1', { force: true });
 	expect(result).toMatchObject({ status: 'failed' });
@@ -229,12 +238,11 @@ test('reposted identical text is one voice, not a recurring theme', async () => 
 	// The same wording under two different comment ids (a double-post or a
 	// cross-video copy-paste) must never meet the minimum-comments bar.
 	await seedChannel('UC1', { feedbackEnabled: 1, feedbackThreshold: 2 });
-	await seedComment('c1', 'UC1', 'can I bring my wife who is not Thai and under 50', '2026-01-01T00:00:00.000Z');
-	await seedComment('c2', 'UC1', 'can I bring my wife who is not Thai and under 50', '2026-01-02T00:00:00.000Z');
-	const verdict = { category: 'question', hasAbuse: false, claim: 'bringing a non-Thai wife under 50' };
-	RESPONSES = {
-		'can I bring my wife who is not Thai and under 50': verdict
-	};
+	const repost = 'can I bring my wife who is not Thai and under 50';
+	await seedCommentBatch([
+		{ text: repost, claim: 'bringing a non-Thai wife under 50' },
+		{ text: repost, claim: 'bringing a non-Thai wife under 50' }
+	]);
 	const result = await generateFeedbackDigest('UC1', { force: true });
 	expect(result).toMatchObject({ status: 'complete', findings: 0, pooled: 2 });
 });

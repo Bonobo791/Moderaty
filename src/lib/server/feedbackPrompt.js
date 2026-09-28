@@ -109,8 +109,7 @@ export function buildFeedbackPrompt() {
  */
 export const FEEDBACK_CLUSTER_PROMPT = `You merge extracted YouTube feedback claims into recurring themes for a channel owner's digest.
 
-Input is a JSON array: [{"i": <index>, "category": "question"|"criticism"|"correction"|"request", "claim": "<extracted claim>"}]
-Each element is one comment's feedback claim, already cleaned of abusive wording.
+Input is a JSON array where each element is one comment's feedback claim, already cleaned of abusive wording. Each element has three fields: "i" (the claim's index), "category" (one of "question", "criticism", "correction", "request"), and "claim" (the extracted claim text).
 
 Merge rules:
 - Two claims belong to the same theme only when they ask, criticize, correct,
@@ -124,8 +123,7 @@ Merge rules:
   separate: an under-merged theme only hides a borderline recurrence, an
   over-merged theme invents a recurrence that is not there.
 
-Respond with JSON only:
-{"themes": [{"claim": "<canonical theme claim>", "members": [<i values>]}]}
+Respond with JSON only: an object with one key, "themes", whose value is an array. Each array element is one theme and has two fields: "claim" (the theme's canonical wording) and "members" (an array of the input "i" values whose claims belong to that theme).
 
 - Every input index must appear in exactly one theme's members — no index
   twice, none omitted. A claim that shares its theme with nothing else is a

@@ -95,13 +95,13 @@ export function groupFeedback(comments, { categories, threshold = DEFAULT_THRESH
 	/** @type {Map<string, { category: string, claim: string, members: Map<string, ClassifiedComment>, texts: Set<string> }>} */
 	const groups = new Map();
 	let pooled = 0;
-	for (const comment of comments) {
-		if (comment.category === 'none') continue;
+	comments.forEach((comment) => {
+		if (comment.category === 'none') return;
 		if (enabled && !enabled.has(comment.category)) {
 			// Category toggled off — still feedback, counted as pooled so the
 			// digest can report "also seen" without surfacing the theme.
 			pooled++;
-			continue;
+			return;
 		}
 		// The stored claim is sanitized again here — defense in depth: a
 		// claim that is nothing but abuse can't headline a finding. Neither
@@ -110,14 +110,11 @@ export function groupFeedback(comments, { categories, threshold = DEFAULT_THRESH
 		const claimKey = normalizeClaimKey(claim);
 		if (!claim || !claimKey) {
 			pooled++;
-			continue;
+			return;
 		}
 		const key = `${comment.category}\u0000${claimKey}`;
-		let group = groups.get(key);
-		if (!group) {
-			group = { category: comment.category, claim, members: new Map(), texts: new Set() };
-			groups.set(key, group);
-		}
+		const group = groups.get(key) ?? { category: comment.category, claim, members: new Map(), texts: new Set() };
+		groups.set(key, group);
 		// Distinct comment ids only — one comment must never count twice
 		// toward its own theme (MOD-70).
 		if (!group.members.has(comment.commentId)) {
@@ -127,10 +124,10 @@ export function groupFeedback(comments, { categories, threshold = DEFAULT_THRESH
 			// recurring signal — it must never meet the threshold alone.
 			group.texts.add(normalizeClaimKey(comment.text));
 		}
-	}
+	});
 	/** @type {GroupedFinding[]} */
 	const findings = [];
-	for (const group of groups.values()) {
+	groups.forEach((group) => {
 		const members = [...group.members.values()];
 		// The threshold gates on distinct wordings — "minimum comments
 		// reporting a theme" means minimum distinct voices. supporterCount
@@ -138,7 +135,7 @@ export function groupFeedback(comments, { categories, threshold = DEFAULT_THRESH
 		// theme, keeping the findings+pooled accounting complete.
 		if (group.texts.size < threshold) {
 			pooled += members.length;
-			continue;
+			return;
 		}
 		// Evidence favors clean, short examples — the reader should see the
 		// clearest supporters first (MOD-70); flagged evidence conceals at
@@ -152,15 +149,12 @@ export function groupFeedback(comments, { categories, threshold = DEFAULT_THRESH
 		);
 		// One excerpt per distinct wording — two identical supporters would
 		// render the same quote twice while adding no information.
-		const seenTexts = new Set();
-		const evidence = [];
-		for (const member of ranked) {
-			const textKey = normalizeClaimKey(member.text);
-			if (seenTexts.has(textKey)) continue;
-			seenTexts.add(textKey);
-			evidence.push(member);
-			if (evidence.length >= MAX_EVIDENCE) break;
-		}
+		const evidence = ranked
+			.filter(
+				(member, i, arr) =>
+					arr.findIndex((m) => normalizeClaimKey(m.text) === normalizeClaimKey(member.text)) === i
+			)
+			.slice(0, MAX_EVIDENCE);
 		const latestAt = members.reduce(
 			(max, m) => (Date.parse(m.publishedAt) > Date.parse(max) ? m.publishedAt : max),
 			members[0].publishedAt
@@ -172,7 +166,7 @@ export function groupFeedback(comments, { categories, threshold = DEFAULT_THRESH
 			evidence,
 			latestAt
 		});
-	}
+	});
 	findings.sort(
 		(a, b) =>
 			b.supporterCount - a.supporterCount ||

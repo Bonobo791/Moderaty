@@ -258,7 +258,7 @@ test.each([
 				scope: 'history',
 				channelId: 'UC1',
 				historyAccess: 'key',
-				error: expect.stringContaining('Your lifetime deal requires your own OpenAI API key')
+				error: 'Your lifetime deal requires your own OpenAI API key. An organization owner must add it on the Team page before analyzing history.'
 			}
 		});
 		expect(await channelById('UC1')).toEqual(before);
@@ -350,6 +350,34 @@ test('an access-check database failure returns a sanitized 503 without changing 
 		});
 		expect(res.data.error).not.toContain('database read unavailable');
 		expect(errorSpy).toHaveBeenCalledWith('history analysis access check failed:', 'UC1', expect.any(Error));
+		expect(mocks.runChannel).not.toHaveBeenCalled();
+	} finally {
+		selectSpy.mockRestore();
+		errorSpy.mockRestore();
+	}
+	expect(await channelById('UC1')).toEqual(before);
+});
+
+test('a lifetime key database failure returns 503 rather than asking for a key', async () => {
+	await updateOrg('org-1', { plan: 'lifetime', creditsRemaining: 0, openaiKeyEnc: encrypt('synthetic lifetime fixture') });
+	await seedHistoryChannelState();
+	const before = await channelById('UC1');
+	const outage = new Error('private database outage detail');
+	const originalSelect = testDb().db.select.bind(testDb().db);
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	const selectSpy = vi.spyOn(testDb().db, 'select')
+		.mockImplementationOnce(originalSelect)
+		.mockImplementationOnce(originalSelect)
+		.mockImplementationOnce(() => { throw outage; });
+	try {
+		const res = await analyzeHistory('UC1', '3');
+		expect(res).toMatchObject({
+			status: 503,
+			data: { scope: 'history', channelId: 'UC1', error: 'Could not verify access to history analysis. Please try again.' }
+		});
+		expect(res).not.toMatchObject({ data: { historyAccess: 'key' } });
+		expect(JSON.stringify(res)).not.toContain(outage.message);
+		expect(errorSpy).toHaveBeenCalledWith('history analysis access check failed:', 'UC1', outage);
 		expect(mocks.runChannel).not.toHaveBeenCalled();
 	} finally {
 		selectSpy.mockRestore();

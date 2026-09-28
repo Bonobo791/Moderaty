@@ -210,7 +210,7 @@
 				{#if 'historyAccess' in form && form.historyAccess === 'purchase'}
 					<a href="/usage">View plans and credits</a>
 				{:else if 'historyAccess' in form && form.historyAccess === 'key'}
-					<a href="/org">Add your OpenAI key on the Team page</a>
+					<a href="/org">OpenAI key setup on the Team page</a>
 				{/if}
 			</p>
 		{:else if form?.ok}

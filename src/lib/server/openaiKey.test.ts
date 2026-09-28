@@ -93,6 +93,24 @@ test('a database failure resolves NO key — the plan is unknown, so the env key
 	}
 });
 
+test('read failures propagate when explicitly requested', async () => {
+	const outage = new Error('database is down');
+	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	vi.spyOn(testDb().db, 'select').mockImplementation(() => {
+		throw outage;
+	});
+	await expect(resolveOpenAiKey('org-1', { throwOnReadError: true })).rejects.toBe(outage);
+	expect(spy).toHaveBeenCalledWith(
+		'failed to read the stored OpenAI key — plan unknown, so no deployment-key fallback (a lifetime org would burn it)',
+		{ orgId: 'org-1', error: outage }
+	);
+});
+
+test('an unreadable missing organization throws when explicitly requested', async () => {
+	vi.spyOn(console, 'error').mockImplementation(() => {});
+	await expect(resolveOpenAiKey('org-missing', { throwOnReadError: true })).rejects.toThrow('organization not found: org-missing');
+});
+
 test('no stored key and no env key resolves to undefined (the scorer throws loudly)', async () => {
 	mocks.env.OPENAI_API_KEY = undefined;
 	await seedOrg('org-4', null);

@@ -306,36 +306,36 @@ test('the analyze-history form offers the window presets with a labeled select',
 	expect(body).toContain('Analyze history on My Channel');
 });
 
-test('a purchase-required history failure shows the purchase link and leaves Dry run available', () => {
-	const body = renderPage(LAYOUT_DATA, {
-		scope: 'history',
-		channelId: 'UC1',
+test.each([
+	{
+		name: 'purchase-required',
 		historyAccess: 'purchase',
-		error: 'To analyze history, purchase credits, subscribe, or buy the lifetime deal and add your own OpenAI API key.'
-	});
-
-	expect(body).toContain('role="alert"');
-	expect(body).toContain('purchase credits, subscribe, or buy the lifetime deal');
-	expect(body).toContain('href="/usage"');
-	expect(body).toContain('View plans and credits');
-	expect(body).toContain('action="?/dryRun"');
-	expect(body).toContain('aria-label="Run a dry-run preview on My Channel"');
-	expect(body).not.toContain('History scan started');
-});
-
-test('a lifetime-key-required history failure links to Team settings', () => {
-	const body = renderPage(LAYOUT_DATA, {
-		scope: 'history',
-		channelId: 'UC1',
+		error: 'To analyze history, purchase credits, subscribe, or buy the lifetime deal and add your own OpenAI API key.',
+		href: '/usage',
+		label: 'View plans and credits'
+	},
+	{
+		name: 'lifetime-key-required',
 		historyAccess: 'key',
-		error: 'Your lifetime deal requires your own OpenAI API key. Add it on the Team page before analyzing history.'
-	});
+		error: 'Your lifetime deal requires your own OpenAI API key. An organization owner must add it on the Team page before analyzing history.',
+		href: '/org',
+		label: 'OpenAI key setup on the Team page'
+	}
+].flatMap((testCase) => ['owner', 'admin', 'member'].map((orgRole) => ({ ...testCase, orgRole }))))(
+	'a $name history failure gives $orgRole recovery guidance and leaves Dry run available',
+	({ historyAccess, error, href, label, orgRole }) => {
+		const body = renderPage({ ...LAYOUT_DATA, orgRole }, { scope: 'history', channelId: 'UC1', historyAccess, error });
 
-	expect(body).toContain('role="alert"');
-	expect(body).toContain('href="/org"');
-	expect(body).toContain('Add your OpenAI key on the Team page');
-	expect(body).not.toContain('History scan started');
-});
+		expect(body).toContain('role="alert"');
+		expect(body).toContain(error);
+		expect(body).toContain(`href="${href}"`);
+		expect(body).toContain(label);
+		expect(body).toContain('action="?/dryRun"');
+		expect(body).toContain('aria-label="Run a dry-run preview on My Channel"');
+		expect(body).not.toContain('History scan started');
+		if (historyAccess === 'key') expect(body).not.toContain('>Add your OpenAI key on the Team page<');
+	}
+);
 
 test('an unrelated history error shows no purchase or key-specific link', () => {
 	const body = renderPage(LAYOUT_DATA, { scope: 'history', channelId: 'UC1', error: 'The scan is unavailable.' });

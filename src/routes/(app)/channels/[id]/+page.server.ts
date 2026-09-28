@@ -25,7 +25,7 @@ async function historyAccessError(orgId: string): Promise<'purchase' | 'key' | n
 	const org = await db.select({ plan: organizations.plan }).from(organizations).where(eq(organizations.id, orgId)).get();
 	if (!org) throw new Error(`organization not found: ${orgId}`);
 	if (org.plan === 'lifetime') {
-		return (await resolveOpenAiKey(orgId))?.trim() ? null : 'key';
+		return (await resolveOpenAiKey(orgId, { throwOnReadError: true }))?.trim() ? null : 'key';
 	}
 	return (await getCredits(orgId)) > 0 ? null : 'purchase';
 }
@@ -157,7 +157,7 @@ export const actions = {
 					channelId,
 					historyAccess,
 					error: historyAccess === 'key'
-						? 'Your lifetime deal requires your own OpenAI API key. Add it on the Team page before analyzing history.'
+						? 'Your lifetime deal requires your own OpenAI API key. An organization owner must add it on the Team page before analyzing history.'
 						: 'To analyze history, purchase credits, subscribe, or buy the lifetime deal and add your own OpenAI API key. If your credits or subscription allowance are exhausted, purchase more credits to continue.'
 				});
 			}

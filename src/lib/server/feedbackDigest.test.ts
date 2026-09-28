@@ -23,10 +23,27 @@ setupTestDb(['finding_evidence', 'feedback_findings', 'feedback_digests', 'feedb
 
 // fetch mock: classify each comment from its text embedded in the prompt.
 // Per-test RESPONSES maps comment-text → classification JSON; anything
-// unmapped gets a 'none' verdict.
+// unmapped gets a 'none' verdict. The theme-merge call carries a JSON
+// claims array instead of a Comment: line — the mock merges claims through
+// CLUSTER (claim → canonical), defaulting each claim to its own theme.
 let RESPONSES: Record<string, { category: string; hasAbuse: boolean; claim: string }> = {};
+let CLUSTER: Record<string, string> = {};
+let CLUSTER_RAW: string | undefined;
 let fetchFailures: Record<string, string> = {};
 let beforeClassify: (() => Promise<void>) | undefined;
+
+function clusterBody(user: string): string {
+	const items = JSON.parse(user.slice(user.indexOf('\n') + 1, user.lastIndexOf('\n<'))) as { i: number; claim: string }[];
+	if (CLUSTER_RAW !== undefined) return CLUSTER_RAW;
+	const themes = new Map<string, number[]>();
+	for (const item of items) {
+		const canonical = CLUSTER[item.claim] ?? item.claim;
+		const members = themes.get(canonical) ?? [];
+		members.push(item.i);
+		themes.set(canonical, members);
+	}
+	return JSON.stringify({ themes: [...themes.entries()].map(([claim, members]) => ({ claim, members })) });
+}
 
 function installFetch() {
 	vi.stubGlobal(
@@ -34,6 +51,11 @@ function installFetch() {
 		vi.fn(async (_url: string, init: { body?: string }) => {
 			const body = JSON.parse(String(init.body));
 			const user = body.messages.find((m: { role: string }) => m.role === 'user')?.content ?? '';
+			if (!user.includes('\n\nComment: ')) {
+				// Theme-merge request — a malformed 200 fails the batch loudly
+				// the same way a bad classification fails one comment.
+				return new Response(JSON.stringify({ choices: [{ message: { content: clusterBody(user) } }] }), { status: 200 });
+			}
 			const text = user.slice(user.indexOf('\n\nComment: ') + '\n\nComment: '.length, user.lastIndexOf('\n</'));
 			// A malformed 200 fails the item immediately — a 5xx would go
 			// through fetchWithRetry's backoff and slow the suite.
@@ -59,6 +81,8 @@ async function seedComment(id: string, channelId: string, text: string, publishe
 
 beforeEach(async () => {
 	RESPONSES = {};
+	CLUSTER = {};
+	CLUSTER_RAW = undefined;
 	fetchFailures = {};
 	beforeClassify = undefined;
 	mocks.env.DRY_RUN = 'false';
@@ -162,6 +186,57 @@ test('below-threshold themes pool into the count-only figure', async () => {
 	expect(result).toMatchObject({ status: 'complete', findings: 0, pooled: 1 });
 	const digest = await testDb().db.select().from(feedbackDigests).get();
 	expect(digest?.pooledCount).toBe(1);
+});
+
+test('the AI theme pass merges differently-worded claims into one finding', async () => {
+	// Exact claim-key matching alone would pool all three — "what comes up
+	// most" is only visible once the model merges them onto one theme.
+	await seedChannel('UC1', { feedbackEnabled: 1, feedbackThreshold: 3 });
+	const texts = ['next episode when?', 'when is part 2 coming', 'release schedule for the next video'];
+	for (const [i, text] of texts.entries()) {
+		await seedComment(`c${i}`, 'UC1', text, `2026-01-0${i + 1}T00:00:00.000Z`);
+	}
+	RESPONSES = {
+		'next episode when?': { category: 'question', hasAbuse: false, claim: 'next episode when' },
+		'when is part 2 coming': { category: 'question', hasAbuse: false, claim: 'when is part 2 coming' },
+		'release schedule for the next video': { category: 'question', hasAbuse: false, claim: 'release schedule' }
+	};
+	for (const claim of ['next episode when', 'when is part 2 coming', 'release schedule']) {
+		CLUSTER[claim] = 'when is the next video';
+	}
+	const result = await generateFeedbackDigest('UC1', { force: true });
+	expect(result).toMatchObject({ status: 'complete', findings: 1, pooled: 0 });
+	const finding = (await testDb().db.select().from(feedbackFindings).all())[0];
+	expect(finding).toMatchObject({ category: 'question', supporterCount: 3, summary: '3 comments asked: when is the next video' });
+});
+
+test('a malformed theme-merge response fails the run loudly instead of writing a wrong digest', async () => {
+	await seedChannel('UC1', { feedbackEnabled: 1 });
+	for (const i of [1, 2, 3]) {
+		await seedComment(`c${i}`, 'UC1', `text ${i}`, `2026-01-0${i}T00:00:00.000Z`);
+		RESPONSES[`text ${i}`] = { category: 'question', hasAbuse: false, claim: `theme ${i}` };
+	}
+	CLUSTER_RAW = 'not json';
+	const result = await generateFeedbackDigest('UC1', { force: true });
+	expect(result).toMatchObject({ status: 'failed' });
+	const digest = await testDb().db.select().from(feedbackDigests).get();
+	expect(digest?.status).toBe('failed');
+	// The batch stays unprocessed — the next tick retries the same comments.
+	expect(await testDb().db.select().from(comments).where(isNull(comments.feedbackDigestedAt)).all()).toHaveLength(3);
+});
+
+test('reposted identical text is one voice, not a recurring theme', async () => {
+	// The same wording under two different comment ids (a double-post or a
+	// cross-video copy-paste) must never meet the minimum-comments bar.
+	await seedChannel('UC1', { feedbackEnabled: 1, feedbackThreshold: 2 });
+	await seedComment('c1', 'UC1', 'can I bring my wife who is not Thai and under 50', '2026-01-01T00:00:00.000Z');
+	await seedComment('c2', 'UC1', 'can I bring my wife who is not Thai and under 50', '2026-01-02T00:00:00.000Z');
+	const verdict = { category: 'question', hasAbuse: false, claim: 'bringing a non-Thai wife under 50' };
+	RESPONSES = {
+		'can I bring my wife who is not Thai and under 50': verdict
+	};
+	const result = await generateFeedbackDigest('UC1', { force: true });
+	expect(result).toMatchObject({ status: 'complete', findings: 0, pooled: 2 });
 });
 
 test('per-comment classification failures are counted, not fatal', async () => {

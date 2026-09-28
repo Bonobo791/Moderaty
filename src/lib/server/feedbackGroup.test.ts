@@ -89,6 +89,30 @@ describe('groupFeedback', () => {
 		expect(pooled).toBe(1);
 	});
 
+	test('identical reposted text is one voice and cannot meet the threshold alone', () => {
+		// A double-posted or cross-video copy-paste comment is not recurring
+		// feedback — distinct wordings are the recurring signal (MOD-69).
+		const repost = (id: string) => comment({ commentId: id, text: 'can I bring my wife who is under 50' });
+		const { findings, pooled } = groupFeedback([repost('a'), repost('b'), repost('c')], { threshold: 2 });
+		expect(findings).toEqual([]);
+		// All three comments still count — conservation is preserved.
+		expect(pooled).toBe(3);
+	});
+
+	test('a surfaced finding lists each distinct wording once in evidence', () => {
+		const { findings } = groupFeedback(
+			[
+				comment({ commentId: 'a', text: 'same words' }),
+				comment({ commentId: 'b', text: 'same words' }),
+				comment({ commentId: 'c', text: 'different words' })
+			],
+			{ threshold: 2 }
+		);
+		expect(findings).toHaveLength(1);
+		expect(findings[0].supporterCount).toBe(3);
+		expect(findings[0].evidence.map((e) => e.commentId)).toEqual(['a', 'c']);
+	});
+
 	test('honors a custom evidence threshold', () => {
 		const comments = supporters('borderline theme', 2);
 		expect(groupFeedback(comments, { threshold: 2 }).findings).toHaveLength(1);

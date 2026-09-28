@@ -83,7 +83,8 @@ export function findingSummary(category, supporters, claim) {
  * @param {ClassifiedComment[]} comments - classified comments for one window
  * @param {{ categories?: readonly string[], threshold?: number }} [options] -
  *   `categories` limits which categories may form findings (channel toggle);
- *   `threshold` is the minimum distinct supporter count (default 3).
+ *   `threshold` is the minimum distinct-WORDED supporter count — identical
+ *   reposted text counts once toward it (default 3).
  * @returns {{ findings: GroupedFinding[], pooled: number }} findings ranked
  *   by supporter count then recency, plus `pooled` — the number of feedback
  *   comments whose themes fell below threshold (the count-only "also seen"
@@ -91,7 +92,7 @@ export function findingSummary(category, supporters, claim) {
  */
 export function groupFeedback(comments, { categories, threshold = DEFAULT_THRESHOLD } = {}) {
 	const enabled = categories ? new Set(categories) : null;
-	/** @type {Map<string, { category: string, claim: string, members: Map<string, ClassifiedComment> }>} */
+	/** @type {Map<string, { category: string, claim: string, members: Map<string, ClassifiedComment>, texts: Set<string> }>} */
 	const groups = new Map();
 	let pooled = 0;
 	for (const comment of comments) {
@@ -114,18 +115,28 @@ export function groupFeedback(comments, { categories, threshold = DEFAULT_THRESH
 		const key = `${comment.category}\u0000${claimKey}`;
 		let group = groups.get(key);
 		if (!group) {
-			group = { category: comment.category, claim, members: new Map() };
+			group = { category: comment.category, claim, members: new Map(), texts: new Set() };
 			groups.set(key, group);
 		}
 		// Distinct comment ids only — one comment must never count twice
 		// toward its own theme (MOD-70).
-		if (!group.members.has(comment.commentId)) group.members.set(comment.commentId, comment);
+		if (!group.members.has(comment.commentId)) {
+			group.members.set(comment.commentId, comment);
+			// Track distinct WORDINGS behind the theme: the same text reposted
+			// (a double-post, a copy-paste across videos) is one voice, not a
+			// recurring signal — it must never meet the threshold alone.
+			group.texts.add(normalizeClaimKey(comment.text));
+		}
 	}
 	/** @type {GroupedFinding[]} */
 	const findings = [];
 	for (const group of groups.values()) {
 		const members = [...group.members.values()];
-		if (members.length < threshold) {
+		// The threshold gates on distinct wordings — "minimum comments
+		// reporting a theme" means minimum distinct voices. supporterCount
+		// still reports every distinct comment that backed the surfaced
+		// theme, keeping the findings+pooled accounting complete.
+		if (group.texts.size < threshold) {
 			pooled += members.length;
 			continue;
 		}
@@ -139,6 +150,17 @@ export function groupFeedback(comments, { categories, threshold = DEFAULT_THRESH
 				Date.parse(b.publishedAt) - Date.parse(a.publishedAt) ||
 				a.commentId.localeCompare(b.commentId)
 		);
+		// One excerpt per distinct wording — two identical supporters would
+		// render the same quote twice while adding no information.
+		const seenTexts = new Set();
+		const evidence = [];
+		for (const member of ranked) {
+			const textKey = normalizeClaimKey(member.text);
+			if (seenTexts.has(textKey)) continue;
+			seenTexts.add(textKey);
+			evidence.push(member);
+			if (evidence.length >= MAX_EVIDENCE) break;
+		}
 		const latestAt = members.reduce(
 			(max, m) => (Date.parse(m.publishedAt) > Date.parse(max) ? m.publishedAt : max),
 			members[0].publishedAt
@@ -147,7 +169,7 @@ export function groupFeedback(comments, { categories, threshold = DEFAULT_THRESH
 			category: group.category,
 			summary: findingSummary(group.category, members.length, group.claim),
 			supporterCount: members.length,
-			evidence: ranked.slice(0, MAX_EVIDENCE),
+			evidence,
 			latestAt
 		});
 	}

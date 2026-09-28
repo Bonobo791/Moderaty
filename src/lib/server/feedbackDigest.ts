@@ -15,6 +15,7 @@ import { env } from '$env/dynamic/private';
 import { db, withBusyRetry } from '$lib/server/db';
 import { channels, comments, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence } from '$lib/server/db/schema';
 import { classifyFeedback, type FeedbackCategory } from '$lib/server/feedback';
+import { clusterClassifiedClaims } from '$lib/server/feedbackCluster';
 import { fetchFeedbackPage, pendingFeedbackHistoryPage, pendingStoredFeedback, advanceFeedbackHistory, type FeedbackHistoryPage } from '$lib/server/feedbackHistory';
 import { concealEvidence } from '$lib/server/feedbackSanitize';
 import { groupFeedback } from '$lib/server/feedbackGroup';
@@ -420,8 +421,14 @@ export async function generateFeedbackDigest(
 			throw new Error(`classification failed for all ${failed} comments`);
 		}
 
+		// The AI theme pass merges differently-worded claims for the same
+		// recurring feedback BEFORE grouping — otherwise exact claim matching
+		// undercounts what actually comes up most. A malformed merge response
+		// throws: the run fails loudly and retries next tick (markers never
+		// moved), it never writes a wrong digest.
+		const themed = await clusterClassifiedClaims(classified, deadline, apiKey);
 		const threshold = channel.feedbackThreshold ?? 3;
-		const { findings, pooled } = groupFeedback(classified, {
+		const { findings, pooled } = groupFeedback(themed, {
 			categories: enabledCategories(channel),
 			threshold
 		});
@@ -595,7 +602,8 @@ export async function previewFeedbackDigest(
 	if (!page.batch.length) return { commentsClassified: 0, commentsFailed: 0, pooled: 0, hasMore: !page.complete, findings: [] };
 	const { classified, failed } = await classifyBatch(page.batch, deadline, apiKey);
 	if (failed > 0 && classified.length === 0) throw new Error(`classification failed for all ${failed} preview comments`);
-	const { findings, pooled } = groupFeedback(classified, {
+	const themed = await clusterClassifiedClaims(classified, deadline, apiKey);
+	const { findings, pooled } = groupFeedback(themed, {
 		categories: enabledCategories(channel),
 		threshold: channel.feedbackThreshold ?? 3
 	});

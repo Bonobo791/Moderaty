@@ -99,3 +99,46 @@ claim misleads the creator.`;
 export function buildFeedbackPrompt() {
 	return FEEDBACK_PROMPT;
 }
+
+/**
+ * The theme-merging rubric: one call per batch decides WHICH claims express
+ * the same recurring feedback — the determination exact claim-string
+ * matching cannot make ("what feedback actually comes up most"). Members
+ * are referenced by input index, never by comment id, so a merged theme can
+ * never smuggle a comment the batch did not classify.
+ */
+export const FEEDBACK_CLUSTER_PROMPT = `You merge extracted YouTube feedback claims into recurring themes for a channel owner's digest.
+
+Input is a JSON array: [{"i": <index>, "category": "question"|"criticism"|"correction"|"request", "claim": "<extracted claim>"}]
+Each element is one comment's feedback claim, already cleaned of abusive wording.
+
+Merge rules:
+- Two claims belong to the same theme only when they ask, criticize, correct,
+  or request the same thing — differently-worded duplicates count: "when is
+  the next video", "next episode when?", and "part 2 release date?" are one
+  theme. Merely sharing a topic is NOT the same theme: "the audio is loud"
+  and "the thumbnail is dark" are different themes.
+- Never merge across categories — a question and a criticism about the same
+  subject are never one theme.
+- When unsure whether two claims express the same feedback, keep them
+  separate: an under-merged theme only hides a borderline recurrence, an
+  over-merged theme invents a recurrence that is not there.
+
+Respond with JSON only:
+{"themes": [{"claim": "<canonical theme claim>", "members": [<i values>]}]}
+
+- Every input index must appear in exactly one theme's members — no index
+  twice, none omitted. A claim that shares its theme with nothing else is a
+  single-member theme.
+- "claim" is the theme's canonical wording: a short neutral phrase under 80
+  characters, in the language most of its members use, with no names, no
+  handles, no pronouns identifying commenters, and no abusive wording.`;
+
+/**
+ * Builds the system prompt for the claim-clustering pass.
+ *
+ * @returns The prompt to send.
+ */
+export function buildClusterPrompt() {
+	return FEEDBACK_CLUSTER_PROMPT;
+}

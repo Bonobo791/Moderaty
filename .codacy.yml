@@ -4,23 +4,20 @@ exclude_paths:
   - '.svelte-kit/**'
   - 'build/**'
   - 'node_modules/**'
+  # Generated drizzle migrations: SQLite-only SQL where T-SQL schema
+  # qualification and ANSI portability rules do not apply — and the org's
+  # leftover "Enforce Access to RAC_* Tables in SQL Queries" custom Semgrep
+  # pattern fires on every migration. The per-engine exclusion did not
+  # suppress it (the org pattern runs under a different tool id), so the
+  # directory is excluded top-level until the pattern is deleted in the
+  # Codacy dashboard (see TODO.md).
+  - 'drizzle/**'
 engines:
   agentlinter:
     exclude_paths:
       - 'AGENTS.md'
       - 'package.json'
       - 'package-lock.json'
-  # Drizzle migrations target SQLite; TSQLLint rules (schema qualification,
-  # SET ANSI options) are T-SQL-specific and do not apply.
-  tsqllint:
-    exclude_paths:
-      - 'drizzle/**'
-  # SQLint lints for ANSI portability (double-quoted identifiers, no PRAGMA);
-  # drizzle migrations are generated, SQLite-only SQL where those rules do
-  # not apply.
-  SQLint:
-    exclude_paths:
-      - 'drizzle/**'
   # Test files use patterns (mock calls, stringified assertions) that trip
   # correctness rules intended for production code.
   opengrep:
@@ -33,10 +30,4 @@ engines:
     exclude_paths:
       - '**/*.test.ts'
       - '**/*.test.mjs'
-  # The org's custom "Enforce Access to RAC_* Tables in SQL Queries" Semgrep
-  # pattern is a leftover from another project: this repo has no RAC_* tables
-  # and the rule fires on every generated drizzle migration SQL. Excluded here
-  # until the pattern is deleted in the Codacy dashboard (see TODO.md).
-  Semgrep:
-    exclude_paths:
-      - 'drizzle/**'
+

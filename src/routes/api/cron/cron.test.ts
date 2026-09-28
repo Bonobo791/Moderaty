@@ -352,7 +352,7 @@ test('history digest failure does not prevent moderation or trigger a second dig
 		expect(response.status).toBe(200);
 		expect(mocks.runChannel).toHaveBeenCalledTimes(1);
 		expect(mocks.generateFeedbackDigest).toHaveBeenCalledTimes(1);
-		expect(errorSpy).toHaveBeenCalledWith('feedback digest for channel UC-history failed:', expect.any(Error));
+		expect(errorSpy).toHaveBeenCalledWith('feedback digest failed for channel:', 'UC-history', expect.any(Error));
 		const body = await response.json();
 		expect(JSON.stringify(body)).not.toContain('raw feedback failure');
 	} finally {

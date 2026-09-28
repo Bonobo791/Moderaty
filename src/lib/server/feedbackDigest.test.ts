@@ -702,7 +702,7 @@ test('a historical YouTube failure is logged server-side, sanitized to the page,
 
 		expect(result).toMatchObject({ status: 'failed', reason: 'history-fetch', historyRemaining: true });
 		expect(JSON.stringify(result)).not.toContain('token-123');
-		expect(errorSpy).toHaveBeenCalledWith('feedback history page fetch failed for channel UC1:', expect.any(Error));
+		expect(errorSpy).toHaveBeenCalledWith('feedback history page fetch failed for channel:', 'UC1', expect.any(Error));
 		expect((await testDb().db.select().from(feedbackDigests).get())).toMatchObject({ windowStart: '2025-01-01T00:00:00.000Z', status: 'failed', error: 'history-fetch' });
 		expect((await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())).toMatchObject({ feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryPageToken: 'page-1' });
 	} finally {

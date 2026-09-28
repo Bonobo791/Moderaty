@@ -132,7 +132,7 @@ async function runDueDigest(channel: typeof channels.$inferSelect, deadline: num
 	try {
 		return await generateFeedbackDigest(channel.id, { deadline });
 	} catch (cause) {
-		console.error(`feedback digest for channel ${channel.id} failed:`, cause);
+		console.error('feedback digest failed for channel:', channel.id, cause);
 		return { error: 'error' };
 	}
 }

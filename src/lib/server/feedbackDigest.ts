@@ -45,6 +45,10 @@ export const PER_100_COUNT = 100;
 
 const EPOCH = '1970-01-01T00:00:00.000Z';
 
+const ERR_INSUFFICIENT_CREDITS = 'insufficient credits for feedback digest';
+const ERR_PREVIEW_PAUSED = 'channel is paused';
+const ERR_PREVIEW_NO_KEY = 'no OpenAI key resolved for feedback preview';
+
 export type DigestStatus = 'complete' | 'empty' | 'deferred' | 'skipped' | 'failed' | 'dry-run';
 
 export interface DigestResult {
@@ -97,7 +101,7 @@ async function classifyBatch(
 			// else is a bad ITEM (I1): count it, log it, keep going.
 			if (outcome.reason instanceof DeadlineExceededError) throw outcome.reason;
 			failed++;
-			console.error(`feedback classification failed for comment ${batch[i].id}:`, outcome.reason);
+			console.error('feedback classification failed for comment:', batch[i].id, outcome.reason);
 			continue;
 		}
 		classified.push({ commentId: batch[i].id, text: batch[i].text, publishedAt: batch[i].publishedAt, ...outcome.value });
@@ -295,7 +299,7 @@ export async function generateFeedbackDigest(
 			page = await pendingFeedbackHistoryPage(channel, deadline);
 			historyPage = page;
 		} catch (cause) {
-			console.error(`feedback history page fetch failed for channel ${channelId}:`, cause);
+			console.error('feedback history page fetch failed for channel:', channelId, cause);
 			const deferred = cause instanceof DeadlineExceededError;
 			await markDigestState(channelId, windowStart, windowEnd, deferred ? 'deferred' : 'failed', deferred ? 'deadline' : 'history-fetch', channel);
 			return { status: deferred ? 'deferred' : 'failed', reason: deferred ? 'deadline' : 'history-fetch', historyRemaining: true };
@@ -308,7 +312,7 @@ export async function generateFeedbackDigest(
 					await clearTransientDigests(tx, channelId);
 				});
 			} catch (cause) {
-				console.error(`feedback history checkpoint failed for channel ${channelId}:`, cause);
+				console.error('feedback history checkpoint failed for channel:', channelId, cause);
 				await markDigestState(channelId, windowStart, windowEnd, 'failed', 'history-checkpoint', channel);
 				return { status: 'failed', reason: 'history-checkpoint', historyRemaining: true };
 			}
@@ -395,7 +399,7 @@ export async function generateFeedbackDigest(
 								)
 							)
 							.get();
-						if (!prior) throw new Error('insufficient credits for feedback digest');
+						if (!prior) throw new Error(ERR_INSUFFICIENT_CREDITS);
 					}
 					// Every batch member ends the charge pass covered by an
 					// anchor — fresh debit or one persisted by a crashed/failed
@@ -584,9 +588,9 @@ export async function previewFeedbackDigest(
 	if (claim && !channelMatchesClaim(channel, claim)) {
 		throw new Error(`channel ${channelId} changed under the dry-run claim — aborting the preview`);
 	}
-	if (!channel.active) throw new Error('channel is paused');
+	if (!channel.active) throw new Error(ERR_PREVIEW_PAUSED);
 	const apiKey = await resolveOpenAiKey(channel.orgId);
-	if (!apiKey) throw new Error('no OpenAI key resolved for feedback preview');
+	if (!apiKey) throw new Error(ERR_PREVIEW_NO_KEY);
 	const page = await fetchFeedbackPage(channel, boundary, null, deadline);
 	if (!page.batch.length) return { commentsClassified: 0, commentsFailed: 0, pooled: 0, hasMore: !page.complete, findings: [] };
 	const { classified, failed } = await classifyBatch(page.batch, deadline, apiKey);

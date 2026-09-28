@@ -121,17 +121,13 @@ export function groupFeedback(comments, { categories, threshold = DEFAULT_THRESH
 			group.members.set(comment.commentId, comment);
 		}
 	});
-	/** @type {GroupedFinding[]} */
-	const findings = [];
-	groups.forEach((group) => {
-		const members = [...group.members.values()];
-		// The threshold gates on distinct comments — "minimum comments
-		// reporting a theme" means minimum distinct supporters; there is no
-		// author signal, so every distinct comment counts.
-		if (members.length < threshold) {
-			pooled += members.length;
-			return;
-		}
+	/**
+	 * Builds the ranked finding for a threshold-passing group.
+	 * @param {{ category: string, claim: string }} group
+	 * @param {ClassifiedComment[]} members
+	 * @returns {GroupedFinding}
+	 */
+	function toFinding(group, members) {
 		// Evidence favors clean, short examples — the reader should see the
 		// clearest supporters first (MOD-70); flagged evidence conceals at
 		// sanitize time, so ordering it last keeps real wording in view.
@@ -154,13 +150,27 @@ export function groupFeedback(comments, { categories, threshold = DEFAULT_THRESH
 			(max, m) => (Date.parse(m.publishedAt) > Date.parse(max) ? m.publishedAt : max),
 			members[0].publishedAt
 		);
-		findings.push({
+		return {
 			category: group.category,
 			summary: findingSummary(group.category, members.length, group.claim),
 			supporterCount: members.length,
 			evidence,
 			latestAt
-		});
+		};
+	}
+
+	/** @type {GroupedFinding[]} */
+	const findings = [];
+	groups.forEach((group) => {
+		const members = [...group.members.values()];
+		// The threshold gates on distinct comments — "minimum comments
+		// reporting a theme" means minimum distinct supporters; there is no
+		// author signal, so every distinct comment counts.
+		if (members.length < threshold) {
+			pooled += members.length;
+			return;
+		}
+		findings.push(toFinding(group, members));
 	});
 	findings.sort(
 		(a, b) =>

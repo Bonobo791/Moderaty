@@ -79,6 +79,12 @@ async function seedComment(id: string, channelId: string, text: string, publishe
 	await testDb().db.insert(comments).values({ id, channelId, text, publishedAt, status: 'approved', decidedBy: 'ai' });
 }
 
+const THREE_THEMES = [
+	{ text: 'text 1', claim: 'theme 1' },
+	{ text: 'text 2', claim: 'theme 2' },
+	{ text: 'text 3', claim: 'theme 3' }
+];
+
 /** Seeds comments c1..cN on consecutive January days plus each verdict. */
 async function seedCommentBatch(entries: { text: string; category?: string; hasAbuse?: boolean; claim?: string }[]) {
 	for (const [i, entry] of entries.entries()) {
@@ -220,11 +226,7 @@ test('the AI theme pass merges differently-worded claims into one finding', asyn
 
 test('a malformed theme-merge response fails the run loudly instead of writing a wrong digest', async () => {
 	await seedChannel('UC1', { feedbackEnabled: 1 });
-	await seedCommentBatch([
-		{ text: 'text 1', claim: 'theme 1' },
-		{ text: 'text 2', claim: 'theme 2' },
-		{ text: 'text 3', claim: 'theme 3' }
-	]);
+	await seedCommentBatch(THREE_THEMES);
 	CLUSTER_RAW = 'not json';
 	const result = await generateFeedbackDigest('UC1', { force: true });
 	expect(result).toMatchObject({ status: 'failed' });
@@ -256,11 +258,7 @@ test('the theme pass is bounded by the write reserve — a spent reserve aborts 
 	// request must carry deadline - WRITE_RESERVE so it can never consume
 	// the headroom the write needs (codex/cubic).
 	await seedChannel('UC1', { feedbackEnabled: 1 });
-	await seedCommentBatch([
-		{ text: 'text 1', claim: 'theme 1' },
-		{ text: 'text 2', claim: 'theme 2' },
-		{ text: 'text 3', claim: 'theme 3' }
-	]);
+	await seedCommentBatch(THREE_THEMES);
 	// Inside the reserve window: classification still completes (its calls
 	// are instant under the mock) but the merge request must not fire.
 	const result = await generateFeedbackDigest('UC1', { force: true, deadline: Date.now() + 2_000 });

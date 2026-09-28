@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { env } from '$env/dynamic/private';
 import { fetchWithRetry, jsonResponse } from '$lib/server/http';
 import { buildClusterPrompt } from '$lib/server/feedbackPrompt';
-import type { FeedbackCategory } from '$lib/server/feedback';
+import { CLAIM_MAX_LENGTH, type FeedbackCategory } from '$lib/server/feedback';
 
 /**
  * AI theme pass for the feedback digest. Per-comment classification already
@@ -26,7 +26,10 @@ interface ClusterTheme {
 	members: number[];
 }
 
-const CLUSTER_CLAIM_MAX = 200; // claims are bounded at extraction; a longer canonical claim is a malformed response (never clamp)
+// Canonical claims share the classifier's ceiling (CLAIM_MAX_LENGTH): the
+// rubric asks for <80 chars but classification admits up to 200, and the
+// model may legitimately echo one back — a tighter bound would reject
+// valid input, not just malformed output.
 const ERR_MALFORMED = 'feedback clustering response has missing or invalid themes';
 const ERR_API_KEY = 'OPENAI_API_KEY is required';
 
@@ -87,7 +90,7 @@ function validateTheme(theme: ClusterTheme): void {
 	if (
 		typeof theme?.claim !== 'string' ||
 		!theme.claim.trim() ||
-		theme.claim.length > CLUSTER_CLAIM_MAX ||
+		theme.claim.length > CLAIM_MAX_LENGTH ||
 		!Array.isArray(theme.members) ||
 		!theme.members.length
 	) {

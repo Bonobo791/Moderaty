@@ -16,7 +16,7 @@ export interface FeedbackClassification {
 	claim: string; // short neutral wording for grouping; '' when category is 'none'
 }
 
-const CLAIM_MAX_LENGTH = 200; // rubric demands <80 chars; anything past 200 is a malformed response (I2 — never clamp)
+export const CLAIM_MAX_LENGTH = 200; // rubric demands <80 chars; anything past 200 is a malformed response (I2 — never clamp)
 
 const CATEGORY_SET: ReadonlySet<string> = new Set(FEEDBACK_CATEGORIES);
 

@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import { error, fail } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
 
@@ -17,7 +17,7 @@ const VALID_CATEGORIES = ['question', 'criticism', 'correction', 'request'] as c
 /** Manual runs share the cron bounding idea: a hard ceiling, then a clean defer. */
 const MANUAL_RUN_BUDGET_MS = 15_000;
 
-export async function load({ params, locals }) {
+export async function load({ params, locals, url }) {
 	// Database outage: the layout renders the overlay; this load must not 401
 	// on the null-user outage shape.
 	if (locals.dbDown) return { ch: { id: params.id, title: '' }, maintenance: true };
@@ -34,30 +34,53 @@ export async function load({ params, locals }) {
 		error: feedbackDigests.error,
 		createdAt: feedbackDigests.createdAt
 	} as const;
-	const [digests, latest] = await Promise.all([
-		db
-			.select(digestFields)
-			.from(feedbackDigests)
-			.where(eq(feedbackDigests.channelId, params.id))
-			// id is monotonic — createdAt can tie within a millisecond (cubic).
-			.orderBy(desc(feedbackDigests.id))
-			.limit(10)
-			.all(),
-		// The newest COMPLETE digest must come from its own query: a streak of
-		// failed rows can push it out of the 10-row history page entirely, and
-		// deriving it from that page would make the UI claim none exists
-		// (codex).
-		db
+	// The newest COMPLETE digest is its own query: a streak of failed rows
+	// must not bury it and make the page claim none exists (codex).
+	const latest =
+		(await db
 			.select(digestFields)
 			.from(feedbackDigests)
 			.where(and(eq(feedbackDigests.channelId, params.id), eq(feedbackDigests.status, 'complete')))
+			// id is monotonic — createdAt can tie within a millisecond (cubic).
 			.orderBy(desc(feedbackDigests.id))
 			.limit(1)
-			.get()
-	]);
-	// A newer failed/deferred row still surfaces as the status banner (never
-	// silently stale) while the page renders the last good digest.
-	const latestComplete = latest ?? null;
+			.get()) ?? null;
+	// The history list is every complete digest — each one is a paid batch
+	// whose findings stay selectable — plus transient rows newer than the
+	// newest complete (the current attempt state; older transient leftovers
+	// are resolved noise). Row count is bounded by digest cadence itself.
+	const digests = await db
+		.select(digestFields)
+		.from(feedbackDigests)
+		.where(
+			and(
+				eq(feedbackDigests.channelId, params.id),
+				or(eq(feedbackDigests.status, 'complete'), gt(feedbackDigests.id, latest?.id ?? -1))
+			)
+		)
+		.orderBy(desc(feedbackDigests.id))
+		.all();
+	const latestComplete = latest;
+	// Every complete digest is selectable (?digest=N): a multi-page history
+	// drain writes one digest per bounded batch, and the paid findings on
+	// earlier pages stay reachable instead of being replaced by the newest
+	// page's result (codex). A forged/stale/non-complete id falls back to
+	// latest — the param only ever selects, never leaks.
+	const digestParam = Number(url.searchParams.get('digest'));
+	const selected =
+		(Number.isInteger(digestParam) &&
+			(await db
+				.select(digestFields)
+				.from(feedbackDigests)
+				.where(
+					and(
+						eq(feedbackDigests.channelId, params.id),
+						eq(feedbackDigests.id, digestParam),
+						eq(feedbackDigests.status, 'complete')
+					)
+				)
+				.get())) ||
+		latestComplete;
 	let findings: {
 		id: number;
 		category: string;
@@ -65,11 +88,11 @@ export async function load({ params, locals }) {
 		supporterCount: number;
 		evidence: { id: number; sanitizedExcerpt: string; hasAbuse: number }[];
 	}[] = [];
-	if (latestComplete) {
+	if (selected) {
 		const rows = await db
 			.select()
 			.from(feedbackFindings)
-			.where(eq(feedbackFindings.digestId, latestComplete.id))
+			.where(eq(feedbackFindings.digestId, selected.id))
 			.orderBy(desc(feedbackFindings.supporterCount))
 			.all();
 		const ids = rows.map((r) => r.id);
@@ -105,6 +128,7 @@ export async function load({ params, locals }) {
 		dryRunDeployment: env.DRY_RUN === 'true',
 		digests,
 		latest: latestComplete,
+		selected,
 		findings,
 		settings: {
 			enabled: ch.feedbackEnabled === 1,

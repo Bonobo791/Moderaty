@@ -43,8 +43,12 @@ async function seedChannel(id: string, orgId: string | null = 'org-1', over: Rec
 	await testDb().db.insert(channels).values({ id, userId: 'user-1', orgId, title: `Channel ${id}`, refreshTokenEnc: 'enc', ...over });
 }
 
-function callLoad(channelId: string, user: typeof OWNER | null = OWNER) {
-	return load({ params: { id: channelId }, locals: { user } } as never);
+function callLoad(channelId: string, user: typeof OWNER | null = OWNER, query = '') {
+	return load({
+		params: { id: channelId },
+		locals: { user },
+		url: new URL(`http://localhost/channels/${channelId}/feedback${query ? `?${query}` : ''}`)
+	} as never);
 }
 
 async function seedDigest(channelId: string, over: Record<string, unknown> = {}) {
@@ -139,6 +143,51 @@ test('load still finds the last complete digest when newer failed rows fill the 
 
 	const data = (await callLoad('UC1')) as { latest: { id: number; status: string } | null };
 	expect(data.latest).toMatchObject({ id: completeId, status: 'complete' });
+});
+
+test('?digest= selects an earlier complete digest and exposes its paid findings', async () => {
+	// A multi-page history drain produces one complete digest per page — the
+	// page must expose every batch's findings, not just the newest (codex).
+	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1 });
+	const olderId = await seedDigest('UC1', { windowEnd: '2025-12-01T00:00:00.000Z' });
+	const [olderFinding] = await testDb().db
+		.insert(feedbackFindings)
+		.values({ digestId: olderId, category: 'question', summary: 'page-one finding', supporterCount: 4 })
+		.returning({ id: feedbackFindings.id });
+	await testDb().db.insert(findingEvidence).values({ findingId: olderFinding.id, commentId: 'c1', sanitizedExcerpt: 'old evidence', hasAbuse: 0 });
+	const newerId = await seedDigest('UC1');
+	const [newerFinding] = await testDb().db
+		.insert(feedbackFindings)
+		.values({ digestId: newerId, category: 'request', summary: 'page-two finding', supporterCount: 2 })
+		.returning({ id: feedbackFindings.id });
+	await testDb().db.insert(findingEvidence).values({ findingId: newerFinding.id, commentId: 'c2', sanitizedExcerpt: 'new evidence', hasAbuse: 0 });
+
+	const selected = (await callLoad('UC1', OWNER, `digest=${olderId}`)) as unknown as {
+		latest: { id: number } | null;
+		selected: { id: number } | null;
+		findings: { summary: string }[];
+	};
+	expect(selected.latest?.id).toBe(newerId);
+	expect(selected.selected?.id).toBe(olderId);
+	expect(selected.findings.map((f) => f.summary)).toEqual(['page-one finding']);
+
+	// No param: the newest complete digest is the default selection.
+	const def = (await callLoad('UC1')) as unknown as { selected: { id: number } | null; findings: { summary: string }[] };
+	expect(def.selected?.id).toBe(newerId);
+	expect(def.findings.map((f) => f.summary)).toEqual(['page-two finding']);
+});
+
+test('a forged or stale ?digest= id falls back to the latest complete digest', async () => {
+	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1 });
+	await seedChannel('UC2', 'org-1', { feedbackEnabled: 1 });
+	const foreignId = await seedDigest('UC2');
+	const ownId = await seedDigest('UC1');
+	const failedId = await seedDigest('UC1', { status: 'failed', error: 'scoring' });
+
+	for (const query of [`digest=${foreignId}`, `digest=${failedId}`, 'digest=abc', 'digest=99999']) {
+		const data = (await callLoad('UC1', OWNER, query)) as unknown as { selected: { id: number } | null };
+		expect(data.selected?.id).toBe(ownId);
+	}
 });
 
 test('load rejects a channel owned by another org with 404 — digest contents never leak', async () => {

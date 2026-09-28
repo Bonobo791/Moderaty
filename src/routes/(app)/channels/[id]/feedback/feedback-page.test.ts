@@ -232,6 +232,41 @@ function populatedData(findings: unknown[] = POPULATED_FINDINGS) {
 	return pageData({ digests: [latest], latest, findings });
 }
 
+describe('feedback page digest history links (SSR)', () => {
+	// A multi-page history drain produces one complete digest per page —
+	// every row in the list must link to its own findings or earlier pages'
+	// paid work is invisible (codex).
+	const OLDER = { ...COMPLETE_DIGEST, id: 3, createdAt: '2026-01-05T00:00:00.000Z' };
+
+	it('links each complete digest row to its findings and marks the shown one', () => {
+		const body = renderFeedback(
+			pageData({ latest: COMPLETE_DIGEST, selected: COMPLETE_DIGEST, digests: [COMPLETE_DIGEST, OLDER], findings: [] })
+		);
+		expect(body).toContain('href="?digest=7"');
+		expect(body).toContain('href="?digest=3"');
+		expect(body).toContain('aria-current="true"');
+	});
+
+	it('failed rows have no findings link — there is nothing paid to show', () => {
+		const body = renderFeedback(
+			pageData({
+				latest: COMPLETE_DIGEST,
+				selected: COMPLETE_DIGEST,
+				digests: [{ ...COMPLETE_DIGEST, id: 9, status: 'failed', error: 'scoring' }, COMPLETE_DIGEST],
+				findings: []
+			})
+		);
+		expect(body).not.toContain('?digest=9');
+	});
+
+	it('offers a way back to the latest digest while an older one is selected', () => {
+		const body = renderFeedback(
+			pageData({ latest: COMPLETE_DIGEST, selected: OLDER, digests: [COMPLETE_DIGEST, OLDER], findings: [] })
+		);
+		expect(body).toContain('Back to latest digest');
+	});
+});
+
 describe('feedback page I12 states (SSR)', () => {
 	it('renders a loading skeleton without settings controls while digest data is unresolved', () => {
 		const body = renderFeedback(pageData({ digests: undefined }));
@@ -251,7 +286,7 @@ describe('feedback page I12 states (SSR)', () => {
 
 	it('renders form and newest-run errors as accessible error boxes', () => {
 		const formError = renderFeedback(pageData(), { error: 'boom' });
-		expect(formError).toMatch(/class="[^"]*error-box[^"]*" role="alert">boom<\/div>/);
+		expect(formError).toMatch(/class="[^"]*error-box[^"]*" role="alert">\s*boom/);
 
 		const failed = { ...COMPLETE_DIGEST, id: 8, status: 'failed', error: 'scoring' };
 		const failedRun = renderFeedback(pageData({ digests: [failed] }));

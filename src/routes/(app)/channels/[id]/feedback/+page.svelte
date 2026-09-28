@@ -82,6 +82,10 @@
 	const newestAttention = $derived(
 		(data.digests ?? []).find((d) => d.status !== 'complete' && (!data.latest || d.id > data.latest.id)) ?? null
 	);
+	// The digest whose findings render — ?digest=N selects any complete
+	// digest in history; it defaults to the latest complete (codex: a
+	// multi-page history drain must keep every page's findings reachable).
+	const shown = $derived(data.selected ?? data.latest ?? null);
 	const canOperate = $derived(data.orgRole === 'owner');
 
 	function windowLabel(digest: { windowStart: string; windowEnd: string }): string {
@@ -199,15 +203,18 @@
 					</button>
 				</form>
 			{/if}
-			{#if data.latest}
+			{#if shown}
 				<p class="muted">
-					Window {windowLabel(data.latest)} · {data.latest.commentsClassified} classified{#if data.latest.commentsFailed}
-						· {data.latest.commentsFailed} failed{/if} · {data.latest.creditsUsed === null ? 'unmetered' : `${data.latest.creditsUsed} credits used`} · generated {relativeTime(data.latest.createdAt)}
+					Window {windowLabel(shown)} · {shown.commentsClassified} classified{#if shown.commentsFailed}
+						· {shown.commentsFailed} failed{/if} · {shown.creditsUsed === null ? 'unmetered' : `${shown.creditsUsed} credits used`} · generated {relativeTime(shown.createdAt)}
+					{#if data.latest && shown.id !== data.latest.id}
+						· <a href="?">Back to latest digest</a>
+					{/if}
 				</p>
 			{/if}
 		</div>
 
-		{#if data.latest}
+		{#if shown}
 			{#each grouped as group (group.category)}
 				<section class="digest-section" aria-label={group.label}>
 					<h3 class="caps-label">{group.label}</h3>
@@ -302,14 +309,14 @@
 					{/each}
 				</section>
 			{/each}
-			{#if data.latest.pooledCount}
+			{#if shown.pooledCount}
 				<p class="muted pooled">
-					Plus {data.latest.pooledCount} other comment{data.latest.pooledCount === 1 ? '' : 's'} — below the
+					Plus {shown.pooledCount} other comment{shown.pooledCount === 1 ? '' : 's'} — below the
 					minimum-comments threshold or in a category you turned off — counted, but not shown as a
 					recurring theme.
 				</p>
 			{/if}
-			{#if !grouped.length && !data.latest.pooledCount}
+			{#if !grouped.length && !shown.pooledCount}
 				<EmptyState
 					title="No recurring feedback this window"
 					hint="Nothing met the minimum-comments threshold — below-threshold feedback would show as the pooled count."
@@ -485,9 +492,15 @@
 			<ul class="history-list">
 				{#each data.digests as d (d.id)}
 					<li class="muted">
-						{relativeTime(d.createdAt)} — {d.status}{#if d.status === 'complete'}
-							, {d.commentsClassified} classified{#if d.pooledCount}, {d.pooledCount} pooled{/if}, {d.creditsUsed === null ? 'unmetered' : `${d.creditsUsed} credits used`}{/if}{#if d.status === 'failed'}
-							({d.error ?? 'error'}){/if}
+						{#if d.status === 'complete'}
+							<a href="?digest={d.id}" aria-current={shown?.id === d.id ? 'true' : undefined}>
+								{relativeTime(d.createdAt)} — {d.status}, {d.commentsClassified} classified{#if d.pooledCount}
+									, {d.pooledCount} pooled{/if}, {d.creditsUsed === null ? 'unmetered' : `${d.creditsUsed} credits used`}
+							</a>
+						{:else}
+							{relativeTime(d.createdAt)} — {d.status}{#if d.status === 'failed'}
+								({d.error ?? 'error'}){/if}
+						{/if}
 					</li>
 				{/each}
 			</ul>

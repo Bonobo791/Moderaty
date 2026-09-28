@@ -144,7 +144,12 @@ function unionLinkedThemes(themeOf: Map<number, number>, rows: ClusterableClaim[
 	rows.forEach((row, i) => {
 		const themeIdx = themeOf.get(i);
 		if (themeIdx === undefined) throw new TypeError(ERR_MALFORMED);
-		const inputKey = `${row.category} ${normalizeClaimKey(row.claim)}`;
+		const norm = normalizeClaimKey(row.claim);
+		// A content-free input cannot prove two themes equivalent — '...'
+		// and '!!!' share no semantics. Linking on the empty key would let a
+		// content-free label win a component and pool real claims (codex).
+		if (!norm) return;
+		const inputKey = `${row.category} ${norm}`;
 		const first = themeByInput.get(inputKey);
 		if (first === undefined) {
 			themeByInput.set(inputKey, themeIdx);

@@ -155,6 +155,24 @@ test('a content-free canonical label may echo already content-free input claims'
 	expect(canonical).toEqual(['...', '...']);
 });
 
+test('content-free inputs cannot bridge themes — a junk label never reaches real claims', async () => {
+	// '...' and '!!!' normalize to the same empty key, but they share no
+	// semantics: linking them would let the junk-labeled theme win the
+	// component and pool the real recurrence 'audio is broken' (codex).
+	stubMerge({
+		themes: [
+			{ claim: '...', members: [0] },
+			{ claim: 'audio is broken', members: [1, 2, 3] }
+		]
+	});
+	const canonical = await clusterClaims(
+		[q('...'), q('!!!'), q('the audio is broken'), q('sound keeps cutting out')],
+		undefined,
+		'test-openai-key'
+	);
+	expect(canonical).toEqual(['...', 'audio is broken', 'audio is broken', 'audio is broken']);
+});
+
 test('equivalent inputs pull every member of the linked themes into one label', async () => {
 	// The second theme asserts 'same words' and 'other words' belong
 	// together; 'same words' ≡ 'same words' is provable, so the only

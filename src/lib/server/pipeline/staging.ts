@@ -116,6 +116,50 @@ async function upsertRescannedCommentRows(
  * action verdicts AND supersedes outstanding rows a fresh non-action verdict
  * replaces; live runs only ever see brand-new comments, so plain inserts.
  */
+/** Rescan: the new verdict replaces whatever the row held — even a completed
+ * or dispatched action returns to 'pending' so the fresh decision re-enforces.
+ * The earlier outcome stays in the audit log (comment_id is the PK). */
+async function upsertRescanActionRows(transaction: LedgerHandle, actions: ReturnType<typeof actionRows>): Promise<void> {
+	if (!actions.length) return;
+	await transaction
+		.insert(moderationActions)
+		.values(actions)
+		.onConflictDoUpdate({
+			target: moderationActions.commentId,
+			set: {
+				action: sql`excluded.action`,
+				reason: sql`excluded.reason`,
+				authorHandle: sql`excluded.author_handle`,
+				state: 'pending',
+				lastAttemptAt: null,
+				lastManualRetryAt: null
+			}
+		});
+}
+
+/** A rescan verdict with NO action cancels the comment's outstanding intent —
+ * a stale pending/dispatched row would otherwise be claimed by the next
+ * enforcement sweep and apply the OLD decision on YouTube (codeant). Terminal
+ * rows stay: they record actions that already reached YouTube, which no new
+ * verdict can undo. */
+async function supersedeStaleActionRows(transaction: LedgerHandle, commentIds: string[]): Promise<void> {
+	if (!commentIds.length) return;
+	await transaction
+		.update(moderationActions)
+		.set({ state: 'superseded' })
+		.where(
+			and(
+				inArray(moderationActions.commentId, commentIds),
+				inArray(moderationActions.state, ['pending', 'dispatched'])
+			)
+		);
+}
+
+/**
+ * Writes the moderation_actions side of a batch. Rescan mode both re-pends
+ * action verdicts AND supersedes outstanding rows a fresh non-action verdict
+ * replaces; live runs only ever see brand-new comments, so plain inserts.
+ */
 async function stageActionRows(
 	transaction: LedgerHandle,
 	decisions: Decision[],
@@ -126,45 +170,11 @@ async function stageActionRows(
 		if (actions.length) await transaction.insert(moderationActions).values(actions);
 		return;
 	}
-	if (actions.length) {
-		// One action row per comment (comment_id PK): the rescan's new
-		// verdict replaces whatever the row held — even a completed or
-		// dispatched action returns to 'pending' so the fresh decision
-		// re-enforces. The earlier outcome stays in the audit log.
-		await transaction
-			.insert(moderationActions)
-			.values(actions)
-			.onConflictDoUpdate({
-				target: moderationActions.commentId,
-				set: {
-					action: sql`excluded.action`,
-					reason: sql`excluded.reason`,
-					authorHandle: sql`excluded.author_handle`,
-					state: 'pending',
-					lastAttemptAt: null,
-					lastManualRetryAt: null
-				}
-			});
-	}
-	// The converse: a rescan verdict with NO action must cancel the comment's
-	// outstanding intent — a stale pending/dispatched row would otherwise be
-	// claimed by the next enforcement sweep and apply the OLD decision on
-	// YouTube (codeant). Terminal rows stay: they record actions that already
-	// reached YouTube, which no new verdict can undo.
-	const cancelled = decisions
-		.filter((decision) => !decision.youtubeAction)
-		.map((decision) => decision.comment.id);
-	if (cancelled.length) {
-		await transaction
-			.update(moderationActions)
-			.set({ state: 'superseded' })
-			.where(
-				and(
-					inArray(moderationActions.commentId, cancelled),
-					inArray(moderationActions.state, ['pending', 'dispatched'])
-				)
-			);
-	}
+	await upsertRescanActionRows(transaction, actions);
+	await supersedeStaleActionRows(
+		transaction,
+		decisions.filter((decision) => !decision.youtubeAction).map((decision) => decision.comment.id)
+	);
 }
 
 /**
@@ -213,7 +223,11 @@ async function chargeBillableDecisions(
 	}
 }
 
-export async function stageDecisions(channelId: string, decisions: Decision[], orgId?: string | null, expected?: ChannelIdentity, rescan?: RescanCharge) {
+/** Optional staging knobs: org to bill, channel identity for the liveness
+ * assert, and rescan mode (upserts + scan-scoped charge anchors). */
+export type StageOptions = { orgId?: string | null; expected?: ChannelIdentity; rescan?: RescanCharge };
+
+export async function stageDecisions(channelId: string, decisions: Decision[], options: StageOptions = {}) {
 	if (!decisions.length) return;
 	const actions = actionRows(channelId, decisions);
 	await db.transaction(async (transaction) => {
@@ -221,14 +235,14 @@ export async function stageDecisions(channelId: string, decisions: Decision[], o
 		// deletion either commits first (and this fails) or waits until these rows
 		// are complete; no orphaned rows can be created between a preflight read
 		// and the inserts.
-		await assertChannelActive(channelId, transaction, expected);
+		await assertChannelActive(channelId, transaction, options.expected);
 		const handle = transaction as LedgerHandle;
-		if (rescan) {
+		if (options.rescan) {
 			await upsertRescannedCommentRows(handle, channelId, decisions);
 		} else {
 			await transaction.insert(comments).values(commentRows(channelId, decisions));
 		}
-		await stageActionRows(handle, decisions, actions, rescan !== undefined);
+		await stageActionRows(handle, decisions, actions, options.rescan !== undefined);
 		// Enforcement decisions (ban/reject/delete/hold) get their audit row at
 		// completion from completeActions — EXCEPT a queued comment's 'queue'
 		// row, which records WHY it waits for a human even though its 'hold'
@@ -239,7 +253,7 @@ export async function stageDecisions(channelId: string, decisions: Decision[], o
 			false
 		);
 		if (audits.length) await transaction.insert(auditLog).values(audits);
-		await chargeBillableDecisions(handle, orgId, decisions, rescan?.chargeScope);
+		await chargeBillableDecisions(handle, options.orgId, decisions, options.rescan?.chargeScope);
 	});
 }
 
@@ -252,21 +266,19 @@ export async function stageOrAuditDecisions(
 	channelId: string,
 	decisions: Decision[],
 	dryRun: boolean,
-	orgId: string | null | undefined,
-	expected?: ChannelIdentity,
-	rescan?: RescanCharge
+	options: StageOptions = {}
 ): Promise<number> {
 	if (dryRun) {
 		const acted = decisions.filter((decision) => decision.youtubeAction).length;
 		const audits = auditRows(channelId, decisions, true);
 		if (audits.length) {
 			await db.transaction(async (transaction) => {
-				await assertChannelActive(channelId, transaction, expected);
+				await assertChannelActive(channelId, transaction, options.expected);
 				await transaction.insert(auditLog).values(audits);
 			});
 		}
 		return acted;
 	}
-	await stageDecisions(channelId, decisions, orgId, expected, rescan);
+	await stageDecisions(channelId, decisions, options);
 	return decisions.filter((decision) => decision.youtubeAction).length;
 }

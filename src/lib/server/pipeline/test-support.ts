@@ -436,16 +436,16 @@ function querySql(condition: unknown): string {
 	return dialect.sqlToQuery(condition as Parameters<typeof dialect.sqlToQuery>[0]).sql;
 }
 
+type BoundParam = { kind: 'eq'; value: unknown } | { kind: 'isNull' | 'absent' };
+
 /** The bound value of a `"channels"."col" = ?` clause — its position among the
  * placeholders is counted, not assumed, so predicate order stays the caller's
  * business. 'isNull' and 'absent' cover the other clause shapes. */
-function boundParam(condition: unknown, column: string): { kind: 'eq'; value: unknown } | { kind: 'isNull' | 'absent' } {
+function boundParam(condition: unknown, column: string): BoundParam {
 	const sql = querySql(condition);
 	const eqPos = sql.indexOf(`"channels"."${column}" = ?`);
-	if (eqPos !== -1) {
-		return { kind: 'eq', value: queryParams(condition)[sql.slice(0, eqPos).split('?').length - 1] };
-	}
-	return { kind: sql.includes(`"channels"."${column}" is null`) ? 'isNull' : 'absent' };
+	if (eqPos === -1) return { kind: sql.includes(`"channels"."${column}" is null`) ? 'isNull' : 'absent' };
+	return { kind: 'eq', value: queryParams(condition)[sql.slice(0, eqPos).split('?').length - 1] };
 }
 
 function valueRows(values: unknown): Record<string, unknown>[] {

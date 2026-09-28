@@ -41,6 +41,45 @@ export async function loadVideoContext(
 	return { videoContext, metadataError };
 }
 
+/**
+ * The page comments this history scan already charged+staged. The staging
+ * transaction writes verdict+action+anchor atomically, so an anchor under
+ * THIS scan's ref means the comment is DONE — re-scoring it while the page
+ * sits parked on outOfCredits would re-pend its completed action and burn
+ * an OpenAI call + YouTube write on every tick until top-up (codex). The
+ * committed moderation_actions row still drives the enforcement sweep, so
+ * the crash-after-charge case drains with no extra work. The ref shape
+ * matches staging's exactly, including the plain comment id a pre-nonce
+ * drain charges.
+ */
+async function loadPrepaidAnchors(
+	orgId: string,
+	pageComments: CommentPage['comments'],
+	chargeScope: string | null | undefined
+): Promise<Set<string>> {
+	const anchored = new Set(
+		(
+			await db
+				.select({ refId: creditTransactions.refId })
+				.from(creditTransactions)
+				.where(
+					and(
+						eq(creditTransactions.orgId, orgId),
+						eq(creditTransactions.refType, 'comment'),
+						inArray(
+							creditTransactions.refId,
+							pageComments.map((comment) => commentChargeRef(comment.id, chargeScope))
+						)
+					)
+				)
+				.all()
+		).map((row) => row.refId)
+	);
+	return new Set(
+		pageComments.map((comment) => comment.id).filter((id) => anchored.has(commentChargeRef(id, chargeScope)))
+	);
+}
+
 export async function prepareDecisionBatch(
 	channelId: string,
 	page: CommentPage,
@@ -68,38 +107,11 @@ if (options.consumeCredits && options.orgId) {
 	metered = await orgIsMetered(options.orgId);
 }
 const aiBudget: AiBudget = {
-	remaining: metered && options.orgId ? await getCredits(options.orgId) : Number.POSITIVE_INFINITY
+	remaining: metered && options.orgId ? await getCredits(options.orgId) : Number.POSITIVE_INFINITY,
+	prepaid: metered && options.orgId && options.rescore && page.comments.length
+		? await loadPrepaidAnchors(options.orgId, page.comments, options.chargeScope)
+		: undefined
 };
-// A retried rescan can arrive with charges already committed: the staging
-// transaction writes verdict+action+anchor atomically, so an anchor under
-// THIS scan's ref means the comment is DONE — re-scoring it while the page
-// sits parked on outOfCredits would re-pend its completed action and burn
-// an OpenAI call + YouTube write on every tick until top-up (codex). The
-// committed moderation_actions row still drives the enforcement sweep, so
-// the crash-after-charge case drains with no extra work. The ref shape
-// matches staging's exactly, including the plain comment id a pre-nonce
-// drain charges.
-if (metered && options.orgId && options.rescore && page.comments.length) {
-	const refs = page.comments.map((comment) => commentChargeRef(comment.id, options.chargeScope));
-	const anchored = new Set(
-		(
-			await db
-				.select({ refId: creditTransactions.refId })
-				.from(creditTransactions)
-				.where(
-					and(
-						eq(creditTransactions.orgId, options.orgId),
-						eq(creditTransactions.refType, 'comment'),
-						inArray(creditTransactions.refId, refs)
-					)
-				)
-				.all()
-		).map((row) => row.refId)
-	);
-	aiBudget.prepaid = new Set(
-		page.comments.map((comment) => comment.id).filter((id) => anchored.has(commentChargeRef(id, options.chargeScope)))
-	);
-}
 // Dry-run window mode (rescore: true) skips the stored-IDs dedupe entirely:
 // re-scoring comments a real run already moderated is the point of the
 // preview. The within-batch dedupe below still applies. The DB query is

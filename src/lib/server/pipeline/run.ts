@@ -201,7 +201,7 @@ export async function runChannel(
 		// Deletion may have committed during the YouTube/AI calls above: re-check
 		// before any durable write (I3) so a deleted account gets no new rows.
 		await assertChannelActive(channelId, db, channel);
-		acted = await stageOrAuditDecisions(channelId, decisions, dryRun, channel.orgId, channel, rescan);
+		acted = await stageOrAuditDecisions(channelId, decisions, dryRun, { orgId: channel.orgId, expected: channel, rescan });
 		// Fail loudly only after successful decisions are staged, and before the
 		// cursor advances, so the next run retries just the failed comments.
 		if (failures.length) {

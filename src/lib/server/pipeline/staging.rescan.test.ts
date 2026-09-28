@@ -87,7 +87,7 @@ test('a rescan upserts the stored comment, re-pends its completed action, and ch
 		orgId: 'org-1', delta: -1, reason: 'consume', refType: 'comment', refId: 'c1', balanceAfter: 10
 	});
 
-	await stageDecisions('UC1', [holdDecision()], 'org-1', IDENTITY, { chargeScope: 'scan-1' });
+	await stageDecisions('UC1', [holdDecision()], { orgId: 'org-1', expected: IDENTITY, rescan: { chargeScope: 'scan-1' } });
 
 	const stored = await testDb().db.select().from(comments).all();
 	expect(stored).toHaveLength(1);
@@ -120,8 +120,8 @@ test('a retry of the SAME rescan hits its anchors and debits nothing new', async
 	// charge (I4).
 	await seedChannelAndOrg(10);
 
-	await stageDecisions('UC1', [holdDecision()], 'org-1', IDENTITY, { chargeScope: 'scan-1' });
-	await stageDecisions('UC1', [holdDecision()], 'org-1', IDENTITY, { chargeScope: 'scan-1' });
+	await stageDecisions('UC1', [holdDecision()], { orgId: 'org-1', expected: IDENTITY, rescan: { chargeScope: 'scan-1' } });
+	await stageDecisions('UC1', [holdDecision()], { orgId: 'org-1', expected: IDENTITY, rescan: { chargeScope: 'scan-1' } });
 
 	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(1);
 	expect(await orgBalance()).toBe(9);
@@ -133,8 +133,8 @@ test('a DIFFERENT scan id on the same comment is a fresh debit — re-runs are n
 	// anchors so each requested analysis debits once per comment.
 	await seedChannelAndOrg(10);
 
-	await stageDecisions('UC1', [holdDecision()], 'org-1', IDENTITY, { chargeScope: 'scan-1' });
-	await stageDecisions('UC1', [holdDecision()], 'org-1', IDENTITY, { chargeScope: 'scan-2' });
+	await stageDecisions('UC1', [holdDecision()], { orgId: 'org-1', expected: IDENTITY, rescan: { chargeScope: 'scan-1' } });
+	await stageDecisions('UC1', [holdDecision()], { orgId: 'org-1', expected: IDENTITY, rescan: { chargeScope: 'scan-2' } });
 
 	const ledger = await testDb().db.select().from(creditTransactions).all();
 	expect(ledger.map((row) => row.refId).sort()).toEqual(['c1#scan-1', 'c1#scan-2']);
@@ -166,7 +166,7 @@ test('a rescan verdict with no action supersedes the comment\'s outstanding stag
 		auditAction: 'approve', reason: 'ai score 0.1', youtubeAction: null, billable: true
 	});
 
-	await stageDecisions('UC1', [approve('c1'), approve('c2'), approve('c3')], 'org-1', IDENTITY, { chargeScope: 'scan-1' });
+	await stageDecisions('UC1', [approve('c1'), approve('c2'), approve('c3')], { orgId: 'org-1', expected: IDENTITY, rescan: { chargeScope: 'scan-1' } });
 
 	const actions = await testDb().db.select().from(moderationActions).all();
 	expect(new Map(actions.map((row) => [row.commentId, row.state]))).toEqual(
@@ -187,7 +187,7 @@ test('a pre-nonce rescan (null scan id) upserts but keeps the plain comment anch
 		orgId: 'org-1', delta: -1, reason: 'consume', refType: 'comment', refId: 'c1', balanceAfter: 10
 	});
 
-	await stageDecisions('UC1', [holdDecision()], 'org-1', IDENTITY, { chargeScope: null });
+	await stageDecisions('UC1', [holdDecision()], { orgId: 'org-1', expected: IDENTITY, rescan: { chargeScope: null } });
 
 	expect((await testDb().db.select().from(comments).get())?.text).toBe('rescan text');
 	const ledger = await testDb().db.select().from(creditTransactions).all();
@@ -202,7 +202,7 @@ test('a live run keeps the plain comment anchor', async () => {
 	// charge, never a replay of the first analysis).
 	await seedChannelAndOrg(10);
 
-	await stageDecisions('UC1', [holdDecision()], 'org-1', IDENTITY);
+	await stageDecisions('UC1', [holdDecision()], { orgId: 'org-1', expected: IDENTITY });
 
 	const ledger = await testDb().db.select().from(creditTransactions).all();
 	expect(ledger).toHaveLength(1);
@@ -219,7 +219,7 @@ test('a rescan on an exhausted balance aborts the whole staging transaction — 
 		id: 'c1', channelId: 'UC1', text: 'old text', publishedAt: '2024-01-01T00:00:00.000Z', status: 'approved', decidedBy: 'ai'
 	});
 
-	await expect(stageDecisions('UC1', [holdDecision()], 'org-1', IDENTITY, { chargeScope: 'scan-1' })).rejects.toThrow('credit charge failed for comment c1');
+	await expect(stageDecisions('UC1', [holdDecision()], { orgId: 'org-1', expected: IDENTITY, rescan: { chargeScope: 'scan-1' } })).rejects.toThrow('credit charge failed for comment c1');
 
 	expect((await testDb().db.select().from(comments).get())?.status).toBe('approved');
 	expect(await testDb().db.select().from(moderationActions).all()).toHaveLength(0);

@@ -45,7 +45,13 @@ export const PER_100_COUNT = 100;
 
 const EPOCH = '1970-01-01T00:00:00.000Z';
 
-const ERR_INSUFFICIENT_CREDITS = 'insufficient credits for feedback digest';
+/** A metered org ran out of feedback credits mid-charge — a distinct class so
+ * the run's catch matches the type instead of regex-sniffing message text. */
+class InsufficientCreditsError extends Error {
+	constructor() {
+		super('insufficient credits for feedback digest');
+	}
+}
 const ERR_PREVIEW_PAUSED = 'channel is paused';
 const ERR_PREVIEW_NO_KEY = 'no OpenAI key resolved for feedback preview';
 
@@ -438,7 +444,7 @@ export async function generateFeedbackDigest(
 					if (!charged) {
 						// False also covers "already charged" — distinguish by
 						// looking for the anchor row before calling it a shortfall.
-						if (!(await hasChargeAnchor(tx, orgId, 'feedback', refId))) throw new Error(ERR_INSUFFICIENT_CREDITS);
+						if (!(await hasChargeAnchor(tx, orgId, 'feedback', refId))) throw new InsufficientCreditsError();
 					}
 					// Every batch member ends the charge pass covered by an
 					// anchor — fresh debit or one persisted by a crashed/failed
@@ -606,7 +612,7 @@ export async function generateFeedbackDigest(
 			await markDigestState(channelId, windowStart, windowEnd, 'deferred', 'deadline', channel);
 			return { status: 'deferred', reason: 'deadline', ...(historyPage ? { historyRemaining: true } : {}) };
 		}
-		if (cause instanceof Error && /insufficient credits/.test(cause.message)) {
+		if (cause instanceof InsufficientCreditsError) {
 			// The row makes the blockage channel-visible: without it the page
 			// shows "No digest yet" while every tick repeats the deferral
 			// (codex). A later complete/failed row clears it.

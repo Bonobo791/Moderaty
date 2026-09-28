@@ -618,7 +618,8 @@ describe('feedback_history_comments', () => {
 			id: { notNull: true, primary: true },
 			channel_id: { notNull: true },
 			text: { notNull: true },
-			published_at: { notNull: true }
+			published_at: { notNull: true },
+			scan_id: { notNull: false }
 		});
 		// Privacy contract mirrors feedback_digests: a historical snapshot
 		// stores the comment text only — never author identity columns.

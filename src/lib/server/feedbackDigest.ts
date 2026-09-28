@@ -225,7 +225,13 @@ async function markDigestState(
 							: eq(channels.feedbackHistoryBoundary, expected.feedbackHistoryBoundary),
 						expected.feedbackHistoryPageToken === null
 							? isNull(channels.feedbackHistoryPageToken)
-							: eq(channels.feedbackHistoryPageToken, expected.feedbackHistoryPageToken)
+							: eq(channels.feedbackHistoryPageToken, expected.feedbackHistoryPageToken),
+						// Two scans can share boundary+token — the nonce is the
+						// scan's identity: a stale attempt's status row must not
+						// write under a scan that isn't its own.
+						expected.feedbackHistoryScanId === null
+							? isNull(channels.feedbackHistoryScanId)
+							: eq(channels.feedbackHistoryScanId, expected.feedbackHistoryScanId)
 					]
 				: [];
 			const alive = await tx
@@ -290,7 +296,10 @@ export async function generateFeedbackDigest(
 	let historyPage: FeedbackHistoryPage | undefined;
 	// The scan id planted with the boundary is the history run's billing
 	// scope: each requested analysis charges its own anchors, while retries
-	// of the same run stay idempotent (boundary fallback for legacy markers).
+	// of the same run stay idempotent. A NULL scan id is a drain planted
+	// before the nonce column existed — its earlier pages charged the plain
+	// comment id, so the anchor must stay plain (never a boundary-derived
+	// twin) or the retry debits the same work twice (codex).
 	let historyBoundary: string | undefined;
 	let historyScanScope: string | undefined;
 	let batch: { id: string; text: string; publishedAt: string }[];
@@ -298,7 +307,7 @@ export async function generateFeedbackDigest(
 	let windowEnd: string;
 	if (channel.feedbackHistoryBoundary) {
 		historyBoundary = channel.feedbackHistoryBoundary;
-		historyScanScope = channel.feedbackHistoryScanId ?? historyBoundary;
+		historyScanScope = channel.feedbackHistoryScanId ?? undefined;
 		windowStart = historyBoundary;
 		windowEnd = nowIso;
 		let page: FeedbackHistoryPage;
@@ -315,6 +324,33 @@ export async function generateFeedbackDigest(
 			return { status: deferred ? 'deferred' : 'failed', reason: deferred ? 'deadline' : 'history-fetch', historyRemaining: true };
 		}
 		batch = page.batch;
+		if (batch.length) {
+			// Same-scan dedupe across pages: commentThreads can re-serve an item
+			// at a page boundary, and a comment THIS scan already committed must
+			// not re-enter the batch — its anchor blocks the second debit, but
+			// the repeat still double-counts creditsUsed and can mint a second
+			// digest's duplicate finding (codex). The marker is scan_id:
+			// another scan's rows (or a pre-nonce drain's NULLs under a null
+			// scan id, where every stored row predates it) still reprocess —
+			// re-running the same window is the point of the feature.
+			const committed = (
+				await db
+					.select({ id: feedbackHistoryComments.id })
+					.from(feedbackHistoryComments)
+					.where(
+						and(
+							eq(feedbackHistoryComments.channelId, channelId),
+							inArray(feedbackHistoryComments.id, batch.map((comment) => comment.id)),
+							channel.feedbackHistoryScanId === null
+								? isNull(feedbackHistoryComments.scanId)
+								: eq(feedbackHistoryComments.scanId, channel.feedbackHistoryScanId)
+						)
+					)
+					.all()
+			).map((row) => row.id);
+			const covered = new Set(committed);
+			batch = batch.filter((comment) => !covered.has(comment.id));
+		}
 		if (!batch.length) {
 			try {
 				await db.transaction(async (tx) => {
@@ -490,8 +526,21 @@ export async function generateFeedbackDigest(
 				if (historyPage) {
 					await tx
 						.insert(feedbackHistoryComments)
-						.values(historyPage.batch.map((comment) => ({ ...comment, channelId })))
-						.onConflictDoNothing({ target: feedbackHistoryComments.id });
+						.values(historyPage.batch.map((comment) => ({ ...comment, channelId, scanId: channel.feedbackHistoryScanId })))
+						// The snapshot is what reveal/evidence prefers — a rescan that
+						// classified edited text must refresh the row, or the page
+						// shows words this scan never analyzed (codex+cubic). The
+						// scan id re-stamps so the page-boundary dedupe knows this
+						// scan committed it; channel_id stays with the first
+						// writer — the refresh never steals another channel's row.
+						.onConflictDoUpdate({
+							target: feedbackHistoryComments.id,
+							set: {
+								text: sql`excluded.text`,
+								publishedAt: sql`excluded.published_at`,
+								scanId: sql`excluded.scan_id`
+							}
+						});
 					await tx
 						.update(comments)
 						.set({ feedbackDigestedAt: nowIso })

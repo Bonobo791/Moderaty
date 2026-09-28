@@ -482,7 +482,8 @@ export async function createTestDb(): Promise<TestDb> {
 			id TEXT PRIMARY KEY NOT NULL,
 			channel_id TEXT NOT NULL,
 			text TEXT NOT NULL,
-			published_at TEXT NOT NULL
+			published_at TEXT NOT NULL,
+			scan_id TEXT
 		)`,
 		`CREATE INDEX feedback_history_comments_channel_idx ON feedback_history_comments (channel_id)`
 	]);

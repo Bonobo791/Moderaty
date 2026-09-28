@@ -143,6 +143,14 @@ const mocks = vi.hoisted(() => {
 					return state.moderationActions.filter((action) =>
 						params.includes(queryKey(action.channelId)) && params.includes(queryKey(action.state)));
 				}
+				if (table === state.tables.creditTransactions) {
+					// The rescan prepaid-anchor read (eq org_id + eq ref_type +
+					// inArray(ref_id, ...)): a row only counts when an earlier
+					// charge actually committed that anchor.
+					const params = queryParams(condition);
+					return state.insertedCredits.filter((row) =>
+						params.includes(queryKey(row.orgId)) && params.includes(queryKey(row.refType)) && params.includes(queryKey(row.refId)));
+				}
 				throw new Error('unexpected all query');
 			}
 			};

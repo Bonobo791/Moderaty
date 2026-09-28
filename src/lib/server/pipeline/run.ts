@@ -162,6 +162,13 @@ export async function runChannel(
 		});
 		fetched = page.comments.length;
 
+		// A planted rescan upserts stored rows and scopes its charge anchors to
+		// the per-request nonce: each requested scan debits once while a retry
+		// of the SAME scan stages covered. A null scan id is a drain planted
+		// before the nonce column existed — it still upserts, but keeps the
+		// plain comment-id anchors its earlier pages already minted (codex).
+		const rescan = channel.historyBoundary === null ? undefined : { chargeScope: channel.historyScanId };
+
 		const { decisions, failures, deferred } = await decideNewComments(channelId, page, {
 			accessToken,
 			toneLevel: channel.toneLevel ?? TONE_LEVEL_OMNI_ONLY,
@@ -182,6 +189,10 @@ export async function runChannel(
 			// upsert) instead of being skipped.
 			rescore: window !== undefined || channel.historyBoundary !== null,
 			orgId: channel.orgId,
+			// The rescan's anchor scope lets the scorer recognize comments this
+			// scan already charged as prepaid instead of deferring them to a
+			// drained balance.
+			chargeScope: rescan?.chargeScope,
 			// Live runs consume credits (and gate AI on them); dry runs never do.
 			consumeCredits: !dryRun
 		});
@@ -190,12 +201,7 @@ export async function runChannel(
 		// Deletion may have committed during the YouTube/AI calls above: re-check
 		// before any durable write (I3) so a deleted account gets no new rows.
 		await assertChannelActive(channelId, db, channel);
-		// A planted rescan passes its scan id as the billing scope: anchors minted
-		// per request debit each metered comment once for THIS scan, while a retry
-		// of the same drain hits them and stages covered (boundary fallback for
-		// markers planted before the nonce column existed).
-		const rescanScope = channel.historyBoundary === null ? undefined : (channel.historyScanId ?? channel.historyBoundary);
-		acted = await stageOrAuditDecisions(channelId, decisions, dryRun, channel.orgId, channel, rescanScope);
+		acted = await stageOrAuditDecisions(channelId, decisions, dryRun, channel.orgId, channel, rescan);
 		// Fail loudly only after successful decisions are staged, and before the
 		// cursor advances, so the next run retries just the failed comments.
 		if (failures.length) {

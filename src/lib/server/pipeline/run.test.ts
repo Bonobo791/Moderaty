@@ -215,17 +215,22 @@ test('a planted history boundary rescores stored comments and charges under the 
 	expect(mocks.state.channelUpdates).toContainEqual(expect.objectContaining({ historyBoundary: null, historyScanId: null }));
 });
 
-test('a rescan channel with no scan id anchors charges to the boundary itself', async () => {
-	// Drains planted before the nonce column existed keep one stable scope for
-	// the rest of their drain: the window boundary.
+test('a rescan channel with no scan id keeps the legacy plain comment anchor', async () => {
+	// A drain planted before the nonce column existed already charged plain
+	// comment ids on its earlier pages — minting a boundary-scoped anchor now
+	// would debit those comments a second time (codex).
 	mocks.state.channel.orgId = 'org-1';
+	mocks.state.credits = 10;
 	mocks.state.channel.historyBoundary = '2026-01-01T00:00:00.000Z';
 	mocks.state.existingIds = ['comment'];
+	mocks.state.insertedCredits = [{ orgId: 'org-1', refType: 'comment', refId: 'comment' }];
 	mocks.scoreComment.mockResolvedValue(moderation(0.9));
 
 	await runChannel('channel');
 
-	expect(mocks.state.insertedCredits).toEqual([expect.objectContaining({ refId: 'comment#2026-01-01T00:00:00.000Z' })]);
+	// The pre-nonce anchor covers the retry — no second debit under any ref.
+	expect(mocks.state.insertedCredits).toEqual([expect.objectContaining({ refId: 'comment' })]);
+	expect(mocks.state.credits).toBe(10);
 });
 
 test('a stale run cannot clear a replanted history scan — the checkpoint write aborts', async () => {
@@ -254,22 +259,36 @@ test('a stale run cannot clear a replanted history scan — the checkpoint write
 	expect(mocks.state.channelUpdates).toEqual([]);
 });
 
-test('a rescan retry stages covered — the scan anchors block a second debit', async () => {
-	// Mid-drain crash: the first attempt's committed anchors are found by
-	// consumeCredit for the SAME scan id, so the retried page charges nothing
-	// new while still upserting the verdicts.
+test('a rescan retry after a mid-drain crash stages covered — the committed anchor blocks a second debit', async () => {
+	// Attempt 1 charged and staged the verdict, then died inside enforcement:
+	// the drain state stays planted and the balance is spent. The retry must
+	// not defer the paid comment to outOfCredits — the committed scan anchor
+	// covers it, or the cursor parks forever on work already bought
+	// (codex+cubic) — and it must not charge again (cubic: the crash model,
+	// not a stale channel row, is what leaves the boundary planted).
 	mocks.state.channel.orgId = 'org-1';
-	mocks.state.credits = 10;
+	mocks.state.credits = 1;
 	mocks.state.channel.historyBoundary = '2026-01-01T00:00:00.000Z';
 	mocks.state.channel.historyScanId = 'scan-req-1';
 	mocks.state.existingIds = ['comment'];
 	mocks.scoreComment.mockResolvedValue(moderation(0.9));
+	mocks.assertBeforeDeadline.mockImplementationOnce(() => {
+		throw new mocks.DeadlineExceededError('out of time');
+	});
 
-	await runChannel('channel');
-	await runChannel('channel');
+	const crashed = await runChannel('channel');
 
+	expect(crashed).toMatchObject({ partial: true, stoppedReason: 'deadline' });
 	expect(mocks.state.insertedCredits).toEqual([expect.objectContaining({ refId: 'comment#scan-req-1' })]);
-	expect(mocks.state.credits).toBe(9);
+	expect(mocks.state.credits).toBe(0);
+
+	const retried = await runChannel('channel');
+
+	expect(retried).toMatchObject({ fetched: 1, partial: false });
+	expect(retried.outOfCredits).toBeUndefined();
+	expect(mocks.state.insertedCredits.filter((row) => row.refId === 'comment#scan-req-1')).toHaveLength(1);
+	expect(mocks.state.credits).toBe(0);
+	expect(mocks.state.channelUpdates).toContainEqual(expect.objectContaining({ historyBoundary: null, historyScanId: null }));
 });
 
 test('skips an inactive channel without fetching or scoring', async () => {

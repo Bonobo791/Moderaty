@@ -69,9 +69,13 @@ async function orgBalance() {
 
 test('a rescan upserts the stored comment, re-pends its completed action, and charges under the scan id', async () => {
 	await seedChannelAndOrg(10);
+	// Every stored field the upsert refreshes is seeded DISTINCT from the
+	// incoming decision (old publishedAt, decidedBy, matchedRuleId, aiScore) —
+	// an upsert that dropped fields or kept stale values fails this test.
 	await testDb().db.insert(comments).values({
-		id: 'c1', channelId: 'UC1', text: 'old text', publishedAt: '2024-01-01T00:00:00.000Z',
-		status: 'approved', decidedBy: 'ai', feedbackDigestedAt: '2025-01-01T00:00:00.000Z'
+		id: 'c1', channelId: 'UC1', text: 'old text', publishedAt: '2020-06-15T00:00:00.000Z',
+		status: 'approved', decidedBy: 'human', matchedRuleId: 42, aiScore: '{"old":true}',
+		createdAt: '2020-01-01T00:00:00.000Z', feedbackDigestedAt: '2025-01-01T00:00:00.000Z'
 	});
 	await testDb().db.insert(moderationActions).values({
 		commentId: 'c1', channelId: 'UC1', action: 'reject', reason: 'old reason',
@@ -83,14 +87,17 @@ test('a rescan upserts the stored comment, re-pends its completed action, and ch
 		orgId: 'org-1', delta: -1, reason: 'consume', refType: 'comment', refId: 'c1', balanceAfter: 10
 	});
 
-	await stageDecisions('UC1', [holdDecision()], 'org-1', IDENTITY, 'scan-1');
+	await stageDecisions('UC1', [holdDecision()], 'org-1', IDENTITY, { chargeScope: 'scan-1' });
 
 	const stored = await testDb().db.select().from(comments).all();
 	expect(stored).toHaveLength(1);
-	// Fresh verdict + refreshed text; the feedback-digest marker is untouched
-	// (the upsert column list excludes it and createdAt on purpose).
+	// Fresh verdict + refreshed text/publishedAt/rule/score fields; the
+	// feedback-digest marker AND createdAt are untouched (the upsert column
+	// list excludes both on purpose).
 	expect(stored[0]).toMatchObject({
-		id: 'c1', text: 'rescan text', status: 'held', decidedBy: 'ai', feedbackDigestedAt: '2025-01-01T00:00:00.000Z'
+		id: 'c1', text: 'rescan text', publishedAt: '2024-01-01T00:00:00.000Z',
+		status: 'held', decidedBy: 'ai', matchedRuleId: null, aiScore: '{}',
+		createdAt: '2020-01-01T00:00:00.000Z', feedbackDigestedAt: '2025-01-01T00:00:00.000Z'
 	});
 	const actions = await testDb().db.select().from(moderationActions).all();
 	// One action row per comment: the rescan's verdict replaces the completed
@@ -113,8 +120,8 @@ test('a retry of the SAME rescan hits its anchors and debits nothing new', async
 	// charge (I4).
 	await seedChannelAndOrg(10);
 
-	await stageDecisions('UC1', [holdDecision()], 'org-1', IDENTITY, 'scan-1');
-	await stageDecisions('UC1', [holdDecision()], 'org-1', IDENTITY, 'scan-1');
+	await stageDecisions('UC1', [holdDecision()], 'org-1', IDENTITY, { chargeScope: 'scan-1' });
+	await stageDecisions('UC1', [holdDecision()], 'org-1', IDENTITY, { chargeScope: 'scan-1' });
 
 	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(1);
 	expect(await orgBalance()).toBe(9);
@@ -126,8 +133,8 @@ test('a DIFFERENT scan id on the same comment is a fresh debit — re-runs are n
 	// anchors so each requested analysis debits once per comment.
 	await seedChannelAndOrg(10);
 
-	await stageDecisions('UC1', [holdDecision()], 'org-1', IDENTITY, 'scan-1');
-	await stageDecisions('UC1', [holdDecision()], 'org-1', IDENTITY, 'scan-2');
+	await stageDecisions('UC1', [holdDecision()], 'org-1', IDENTITY, { chargeScope: 'scan-1' });
+	await stageDecisions('UC1', [holdDecision()], 'org-1', IDENTITY, { chargeScope: 'scan-2' });
 
 	const ledger = await testDb().db.select().from(creditTransactions).all();
 	expect(ledger.map((row) => row.refId).sort()).toEqual(['c1#scan-1', 'c1#scan-2']);
@@ -159,12 +166,34 @@ test('a rescan verdict with no action supersedes the comment\'s outstanding stag
 		auditAction: 'approve', reason: 'ai score 0.1', youtubeAction: null, billable: true
 	});
 
-	await stageDecisions('UC1', [approve('c1'), approve('c2'), approve('c3')], 'org-1', IDENTITY, 'scan-1');
+	await stageDecisions('UC1', [approve('c1'), approve('c2'), approve('c3')], 'org-1', IDENTITY, { chargeScope: 'scan-1' });
 
 	const actions = await testDb().db.select().from(moderationActions).all();
 	expect(new Map(actions.map((row) => [row.commentId, row.state]))).toEqual(
 		new Map([['c1', 'superseded'], ['c2', 'superseded'], ['c3', 'completed']])
 	);
+});
+
+test('a pre-nonce rescan (null scan id) upserts but keeps the plain comment anchor — no double debit', async () => {
+	// A drain planted before the nonce column existed has a boundary but no
+	// scan id: its earlier pages already charged 'c1'. The retry must still
+	// upsert the fresh verdict while the PLAIN anchor keeps it covered —
+	// minting 'c1#<anything>' would charge the same drain twice (codex).
+	await seedChannelAndOrg(10);
+	await testDb().db.insert(comments).values({
+		id: 'c1', channelId: 'UC1', text: 'old text', publishedAt: '2020-06-15T00:00:00.000Z', status: 'approved', decidedBy: 'ai'
+	});
+	await testDb().db.insert(creditTransactions).values({
+		orgId: 'org-1', delta: -1, reason: 'consume', refType: 'comment', refId: 'c1', balanceAfter: 10
+	});
+
+	await stageDecisions('UC1', [holdDecision()], 'org-1', IDENTITY, { chargeScope: null });
+
+	expect((await testDb().db.select().from(comments).get())?.text).toBe('rescan text');
+	const ledger = await testDb().db.select().from(creditTransactions).all();
+	expect(ledger).toHaveLength(1);
+	expect(ledger[0]).toMatchObject({ refType: 'comment', refId: 'c1' });
+	expect(await orgBalance()).toBe(10);
 });
 
 test('a live run keeps the plain comment anchor', async () => {
@@ -190,7 +219,7 @@ test('a rescan on an exhausted balance aborts the whole staging transaction — 
 		id: 'c1', channelId: 'UC1', text: 'old text', publishedAt: '2024-01-01T00:00:00.000Z', status: 'approved', decidedBy: 'ai'
 	});
 
-	await expect(stageDecisions('UC1', [holdDecision()], 'org-1', IDENTITY, 'scan-1')).rejects.toThrow('credit charge failed for comment c1');
+	await expect(stageDecisions('UC1', [holdDecision()], 'org-1', IDENTITY, { chargeScope: 'scan-1' })).rejects.toThrow('credit charge failed for comment c1');
 
 	expect((await testDb().db.select().from(comments).get())?.status).toBe('approved');
 	expect(await testDb().db.select().from(moderationActions).all()).toHaveLength(0);

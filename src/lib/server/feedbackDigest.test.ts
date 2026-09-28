@@ -663,6 +663,101 @@ test('a fully failed historical batch retries without debiting its persisted cha
 	expect((await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())?.feedbackHistoryBoundary).toBeNull();
 });
 
+test('a pre-nonce in-flight scan keeps the plain comment anchors it already charged', async () => {
+	// A drain planted before feedback_history_scan_id existed has a boundary
+	// but a NULL scan id — and its earlier pages already committed PLAIN
+	// comment-id anchors. Deriving a scope from the boundary would mint
+	// 'h1#<boundary>' and debit the same drain a second time (codex).
+	await testDb().db.update(organizations).set({ creditsRemaining: 10 }).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC1', {
+		feedbackEnabled: 1,
+		feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z',
+		feedbackHistoryPageToken: 'page-2'
+	});
+	await testDb().db.insert(creditTransactions).values({
+		orgId: 'org-1', delta: -1, reason: 'consume', refType: 'feedback', refId: 'h1', balanceAfter: 10
+	});
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [
+			{ id: 'h1', text: 'first historical comment', publishedAt: '2024-01-01T00:00:00.000Z' },
+			{ id: 'h2', text: 'second historical comment', publishedAt: '2024-01-02T00:00:00.000Z' }
+		],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	const result = await generateFeedbackDigest('UC1');
+
+	expect(result).toMatchObject({ status: 'complete', commentsClassified: 2, creditsUsed: 2, historyRemaining: false });
+	const ledger = await testDb().db.select().from(creditTransactions).all();
+	// h1's planted plain anchor covers it; only h2 debits — under the plain
+	// ref this drain has always used, never a boundary-scoped twin.
+	expect(ledger.map((row) => row.refId).sort()).toEqual(['h1', 'h2']);
+	expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBe(9);
+});
+
+test('a comment re-served at a page boundary is committed once per scan — not once per page', async () => {
+	// commentThreads can repeat an item across a page boundary mid-drain.
+	// The row this scan already committed carries THIS scan id — the
+	// per-scan dedupe must drop the repeat BEFORE classification: the
+	// anchor blocks the debit but not the double-counted creditsUsed or
+	// a second digest's duplicate finding (codex).
+	await testDb().db.update(organizations).set({ creditsRemaining: 10 }).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC1', {
+		feedbackEnabled: 1,
+		feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z',
+		feedbackHistoryScanId: 'scan-x',
+		feedbackHistoryPageToken: 'page-2'
+	});
+	// What the previous page of THIS scan committed.
+	await testDb().db.insert(feedbackHistoryComments).values({
+		id: 'dup', channelId: 'UC1', text: 'already committed this scan', publishedAt: '2024-01-01T00:00:00.000Z', scanId: 'scan-x'
+	});
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [
+			{ id: 'dup', text: 'already committed this scan', publishedAt: '2024-01-01T00:00:00.000Z' },
+			{ id: 'fresh', text: 'new historical comment', publishedAt: '2024-01-02T00:00:00.000Z' }
+		],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	const result = await generateFeedbackDigest('UC1');
+
+	expect(result).toMatchObject({ status: 'complete', commentsClassified: 1, creditsUsed: 1, historyRemaining: false });
+	const ledger = await testDb().db.select().from(creditTransactions).all();
+	expect(ledger.map((row) => row.refId)).toEqual(['fresh#scan-x']);
+	expect(await testDb().db.select().from(feedbackHistoryComments).where(eq(feedbackHistoryComments.channelId, 'UC1')).all()).toHaveLength(2);
+});
+
+test('a rescan refreshes the snapshot to the text it actually classified', async () => {
+	// The owner edited the comment on YouTube, then re-requested the window:
+	// the classifier sees the new text, so the snapshot reveal prefers must
+	// hold the new text — an onConflictDoNothing row would keep showing
+	// words this scan never analyzed (codex+cubic).
+	await seedChannel('UC1', {
+		feedbackEnabled: 1,
+		feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z',
+		feedbackHistoryScanId: 'scan-b',
+		feedbackHistoryPageToken: null
+	});
+	await testDb().db.insert(feedbackHistoryComments).values({
+		id: 'edited', channelId: 'UC1', text: 'OLD TEXT', publishedAt: '2024-01-01T00:00:00.000Z', scanId: 'scan-a'
+	});
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [{ id: 'edited', text: 'EDITED TEXT', publishedAt: '2024-06-01T00:00:00.000Z' }],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	const result = await generateFeedbackDigest('UC1');
+
+	expect(result).toMatchObject({ status: 'complete', commentsClassified: 1 });
+	const rows = await testDb().db.select().from(feedbackHistoryComments).where(eq(feedbackHistoryComments.id, 'edited')).all();
+	expect(rows).toHaveLength(1);
+	expect(rows[0]).toMatchObject({ text: 'EDITED TEXT', publishedAt: '2024-06-01T00:00:00.000Z', scanId: 'scan-b' });
+});
+
 test('history write headroom deferral preserves the checkpoint and writes no completed sources', async () => {
 	await testDb().db.update(organizations).set({ creditsRemaining: 10 }).where(eq(organizations.id, 'org-1'));
 	await seedChannel('UC1', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryPageToken: 'page-1' });

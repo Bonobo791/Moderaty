@@ -90,9 +90,22 @@ export type DecisionBatchOptions = {
 	deadline?: number;
 	rescore?: boolean;
 	orgId?: string | null;
+	/** The rescan's charge-anchor scope (its per-request scan nonce). Null is
+	 * a drain planted before the nonce column existed — its anchors are the
+	 * plain comment id. Absent on non-rescan runs. */
+	chargeScope?: string | null;
 	/** True for live runs: credits gate AI scoring and consumption applies.
 	 * Dry runs (previews, window rescore) always score and never consume. */
 	consumeCredits?: boolean;
+};
+
+export type AiBudget = {
+	remaining: number;
+	/** Comment ids already charged under the active history scan: a retry
+	 * after a post-charge crash must not defer them to the balance gate —
+	 * the committed anchor covers the AI call, and deferring parks a paid
+	 * drain on an exhausted balance forever (codex+cubic). */
+	prepaid?: Set<string>;
 };
 
 export type ScoreOutcome = PromiseSettledResult<Decision>;
@@ -101,9 +114,15 @@ export type DecisionBatch = {
 	newComments: Array<CommentPage['comments'][number]>;
 	rulesForChannel: ReturnType<typeof prepareRules>;
 	allowlist: Awaited<ReturnType<typeof loadHandleSet>>;
-	aiBudget: { remaining: number };
+	aiBudget: AiBudget;
 	videoContext: Awaited<ReturnType<typeof fetchVideoMetadata>> | null;
 	metadataError: unknown;
 };
+
+/** Rescan staging mode: stored rows upsert to the fresh verdict and action
+ * rows re-pend/supersede. chargeScope is the scan's per-request nonce; null is
+ * a drain planted before the nonce column existed — it still upserts but
+ * keeps charging the plain comment id its earlier pages anchored (codex). */
+export type RescanCharge = { chargeScope?: string | null };
 
 export type ToneDecisionContext = { context: ToneContext } | null;

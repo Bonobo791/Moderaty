@@ -309,6 +309,13 @@
       "when": 1790620438790,
       "tag": "0043_history_scan_ids",
       "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "6",
+      "when": 1790625740704,
+      "tag": "0044_history_scan_marker",
+      "breakpoints": true
     }
   ]
 }

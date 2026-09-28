@@ -1,0 +1,1 @@
+ALTER TABLE `feedback_history_comments` ADD `scan_id` text;

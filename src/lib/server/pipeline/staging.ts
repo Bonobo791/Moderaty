@@ -1,10 +1,10 @@
 import { and, inArray, sql } from 'drizzle-orm';
 import { normalizeHandle } from '$lib/server/allowlist';
-import { consumeCredit, hasChargeAnchor, orgIsMetered, type LedgerHandle } from '$lib/server/billing/ledger';
+import { commentChargeRef, consumeCredit, hasChargeAnchor, orgIsMetered, type LedgerHandle } from '$lib/server/billing/ledger';
 import { db } from '$lib/server/db';
 import { auditLog, comments, moderationActions } from '$lib/server/db/schema';
 import { assertChannelActive, type ChannelIdentity } from './enforcement';
-import type { Decision } from './types';
+import type { Decision, RescanCharge } from './types';
 
 /**
  * Builds audit records for moderation decisions.
@@ -120,9 +120,9 @@ async function stageActionRows(
 	transaction: LedgerHandle,
 	decisions: Decision[],
 	actions: ReturnType<typeof actionRows>,
-	rescanId: string | undefined
+	rescan: boolean
 ): Promise<void> {
-	if (!rescanId) {
+	if (!rescan) {
 		if (actions.length) await transaction.insert(moderationActions).values(actions);
 		return;
 	}
@@ -178,7 +178,7 @@ async function chargeBillableDecisions(
 	transaction: LedgerHandle,
 	orgId: string | null | undefined,
 	decisions: Decision[],
-	rescanId: string | undefined
+	chargeScope: string | null | undefined
 ): Promise<void> {
 	if (!orgId) return;
 	// Unmetered orgs (self-hosted, lifetime, pre-billing) are unlimited:
@@ -191,8 +191,11 @@ async function chargeBillableDecisions(
 		// A rescan charges again per comment: the anchor is scoped to
 		// the scan id planted for THIS request, so each requested scan
 		// debits once while a retry of the SAME scan hits the anchor and
-		// stages covered instead of double-charging (I4).
-		const refId = rescanId ? `${decision.comment.id}#${rescanId}` : decision.comment.id;
+		// stages covered instead of double-charging (I4). A null scope is
+		// a pre-nonce drain — its earlier pages charged the plain comment
+		// id, so the anchor stays plain or the retry double-charges
+		// (codex).
+		const refId = commentChargeRef(decision.comment.id, chargeScope);
 		const charged = await consumeCredit(transaction, orgId, refId);
 		if (charged || !metered) continue;
 		if (await hasChargeAnchor(transaction, orgId, 'comment', refId)) continue;
@@ -210,7 +213,7 @@ async function chargeBillableDecisions(
 	}
 }
 
-export async function stageDecisions(channelId: string, decisions: Decision[], orgId?: string | null, expected?: ChannelIdentity, rescanId?: string) {
+export async function stageDecisions(channelId: string, decisions: Decision[], orgId?: string | null, expected?: ChannelIdentity, rescan?: RescanCharge) {
 	if (!decisions.length) return;
 	const actions = actionRows(channelId, decisions);
 	await db.transaction(async (transaction) => {
@@ -220,12 +223,12 @@ export async function stageDecisions(channelId: string, decisions: Decision[], o
 		// and the inserts.
 		await assertChannelActive(channelId, transaction, expected);
 		const handle = transaction as LedgerHandle;
-		if (rescanId) {
+		if (rescan) {
 			await upsertRescannedCommentRows(handle, channelId, decisions);
 		} else {
 			await transaction.insert(comments).values(commentRows(channelId, decisions));
 		}
-		await stageActionRows(handle, decisions, actions, rescanId);
+		await stageActionRows(handle, decisions, actions, rescan !== undefined);
 		// Enforcement decisions (ban/reject/delete/hold) get their audit row at
 		// completion from completeActions — EXCEPT a queued comment's 'queue'
 		// row, which records WHY it waits for a human even though its 'hold'
@@ -236,7 +239,7 @@ export async function stageDecisions(channelId: string, decisions: Decision[], o
 			false
 		);
 		if (audits.length) await transaction.insert(auditLog).values(audits);
-		await chargeBillableDecisions(handle, orgId, decisions, rescanId);
+		await chargeBillableDecisions(handle, orgId, decisions, rescan?.chargeScope);
 	});
 }
 
@@ -251,7 +254,7 @@ export async function stageOrAuditDecisions(
 	dryRun: boolean,
 	orgId: string | null | undefined,
 	expected?: ChannelIdentity,
-	rescanId?: string
+	rescan?: RescanCharge
 ): Promise<number> {
 	if (dryRun) {
 		const acted = decisions.filter((decision) => decision.youtubeAction).length;
@@ -264,6 +267,6 @@ export async function stageOrAuditDecisions(
 		}
 		return acted;
 	}
-	await stageDecisions(channelId, decisions, orgId, expected, rescanId);
+	await stageDecisions(channelId, decisions, orgId, expected, rescan);
 	return decisions.filter((decision) => decision.youtubeAction).length;
 }

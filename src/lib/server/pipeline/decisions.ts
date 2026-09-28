@@ -4,7 +4,7 @@ import { detectJailbreak } from '$lib/server/jailbreak';
 import { scoreComment, serializeScores } from '$lib/server/moderation';
 import { matchPreparedRule, type PreparedRule, type RuleAction } from '$lib/server/rules';
 import { scoreTone, type ToneContext, type ToneProtections } from '$lib/server/tone';
-import type { AiOptions, Decision } from './types';
+import type { AiBudget, AiOptions, Decision } from './types';
 import type { NewComment } from '$lib/server/youtube';
 
 const AUTO_BAN = 0.95;
@@ -213,19 +213,27 @@ export async function decide(
 	rules: PreparedRule[],
 	allowlist: Set<string>,
 	tone: { context: ToneContext } | null,
-	aiBudget: { remaining: number },
+	aiBudget: AiBudget,
 	options: AiOptions
 ): Promise<Decision> {
 	const preAi = preAiDecision(comment, rules, allowlist);
 	if (preAi) return preAi;
-	// Metered AI: claim one credit of the batch's AI budget SYNCHRONOUSLY —
-	// before any await — so the concurrent decide() workers in Promise.allSettled
-	// can never over-spend it. Rules/allowlist above never consume budget.
-	// Out of credits: rules/allowlist already had their say — only the AI step
-	// is paused (product choice). The comment stays unprocessed and the cursor
-	// parks so a later run scores it once credits are topped up.
-	if (aiBudget.remaining <= 0 || Number.isNaN(aiBudget.remaining)) return deferredDecision(comment);
-	aiBudget.remaining -= 1;
+	// A retried rescan may arrive with this comment's charge already committed:
+	// the scan anchor exists, so the comment is prepaid and the balance gate
+	// must not defer it — a post-charge crash retry at zero balance would
+	// otherwise park the drain forever on work that was already paid
+	// (codex+cubic). Staging still runs its charge step, which the anchor
+	// resolves to "covered" with no second debit.
+	if (aiBudget.prepaid?.has(comment.id) !== true) {
+		// Metered AI: claim one credit of the batch's AI budget SYNCHRONOUSLY —
+		// before any await — so the concurrent decide() workers in Promise.allSettled
+		// can never over-spend it. Rules/allowlist above never consume budget.
+		// Out of credits: rules/allowlist already had their say — only the AI step
+		// is paused (product choice). The comment stays unprocessed and the cursor
+		// parks so a later run scores it once credits are topped up.
+		if (aiBudget.remaining <= 0 || Number.isNaN(aiBudget.remaining)) return deferredDecision(comment);
+		aiBudget.remaining -= 1;
+	}
 	// The budget claim IS the billing marker: this decision consumed an AI
 	// call, so stageDecisions may charge it exactly one credit.
 	return { ...(await aiDecision(comment, tone, options.deadline, options.protections, options.openAiKey)), billable: true };

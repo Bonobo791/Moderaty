@@ -1,15 +1,15 @@
-import { eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { loadHandleSet } from '$lib/server/allowlist';
-import { getCredits, orgIsMetered } from '$lib/server/billing/ledger';
+import { commentChargeRef, getCredits, orgIsMetered } from '$lib/server/billing/ledger';
 import { db } from '$lib/server/db';
-import { comments, rules } from '$lib/server/db/schema';
+import { comments, creditTransactions, rules } from '$lib/server/db/schema';
 import { DeadlineExceededError } from '$lib/server/http';
 import { prepareRules } from '$lib/server/rules';
 import type { ToneProtections } from '$lib/server/tone';
 import { TONE_LEVEL_OMNI_AND_TONE } from '$lib/toneLevels';
 import { fetchVideoMetadata, type CommentPage } from '$lib/server/youtube';
 import { decide, metadataUnavailable } from './decisions';
-import type { Decision, DecisionBatchOptions, ScoreOutcome } from './types';
+import type { AiBudget, Decision, DecisionBatchOptions, ScoreOutcome } from './types';
 
 /**
  * Fetches video titles/descriptions for level-2 tone scoring. Best-effort:
@@ -49,7 +49,7 @@ export async function prepareDecisionBatch(
 	newComments: Array<CommentPage['comments'][number]>;
 	rulesForChannel: ReturnType<typeof prepareRules>;
 	allowlist: Awaited<ReturnType<typeof loadHandleSet>>;
-	aiBudget: { remaining: number };
+	aiBudget: AiBudget;
 	videoContext: Awaited<ReturnType<typeof fetchVideoMetadata>> | null;
 	metadataError: unknown;
 }> {
@@ -67,9 +67,37 @@ let metered = false;
 if (options.consumeCredits && options.orgId) {
 	metered = await orgIsMetered(options.orgId);
 }
-const aiBudget = {
+const aiBudget: AiBudget = {
 	remaining: metered && options.orgId ? await getCredits(options.orgId) : Number.POSITIVE_INFINITY
 };
+// A retried rescan can arrive with charges already committed: the staging
+// transaction writes verdict+anchor atomically, so a crash between staging
+// and the checkpoint leaves paid anchors behind. Comments anchored under
+// THIS scan's ref are prepaid — the budget gate must not defer them, or a
+// drained balance parks the paid work forever (codex+cubic). The ref shape
+// matches staging's exactly, including the plain comment id a pre-nonce
+// drain charges.
+if (metered && options.orgId && options.rescore && page.comments.length) {
+	const refs = page.comments.map((comment) => commentChargeRef(comment.id, options.chargeScope));
+	const anchored = new Set(
+		(
+			await db
+				.select({ refId: creditTransactions.refId })
+				.from(creditTransactions)
+				.where(
+					and(
+						eq(creditTransactions.orgId, options.orgId),
+						eq(creditTransactions.refType, 'comment'),
+						inArray(creditTransactions.refId, refs)
+					)
+				)
+				.all()
+		).map((row) => row.refId)
+	);
+	aiBudget.prepaid = new Set(
+		page.comments.map((comment) => comment.id).filter((id) => anchored.has(commentChargeRef(id, options.chargeScope)))
+	);
+}
 // Dry-run window mode (rescore: true) skips the stored-IDs dedupe entirely:
 // re-scoring comments a real run already moderated is the point of the
 // preview. The within-batch dedupe below still applies. The DB query is
@@ -119,7 +147,7 @@ export async function scoreComments(
 	options: {
 		rulesForChannel: ReturnType<typeof prepareRules>;
 		allowlist: Awaited<ReturnType<typeof loadHandleSet>>;
-		aiBudget: { remaining: number };
+		aiBudget: AiBudget;
 		videoContext: Awaited<ReturnType<typeof fetchVideoMetadata>> | null;
 		metadataError: unknown;
 		deadline: number | undefined;
@@ -186,6 +214,7 @@ export async function decideNewComments(
 		deadline,
 		rescore,
 		orgId,
+		chargeScope,
 		consumeCredits
 	}: DecisionBatchOptions
 ): Promise<{ decisions: Decision[]; failures: string[]; deferred: number }> {
@@ -197,6 +226,7 @@ export async function decideNewComments(
 		deadline,
 		rescore,
 		orgId,
+		chargeScope,
 		consumeCredits
 	});
 	const settled = await scoreComments(batch.newComments, {

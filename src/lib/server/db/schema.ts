@@ -441,7 +441,12 @@ export const feedbackHistoryComments = sqliteTable('feedback_history_comments', 
 	id: text('id').primaryKey(),
 	channelId: text('channel_id').notNull(),
 	text: text('text').notNull(),
-	publishedAt: text('published_at').notNull()
+	publishedAt: text('published_at').notNull(),
+	// The requested scan that last committed this snapshot. A comment
+	// re-served at a page boundary dedupes only when THIS scan's id
+	// matches — rows committed by earlier scans (or pre-nonce drains,
+	// NULL) are reprocessed: re-running the same window is the point.
+	scanId: text('scan_id')
 }, (table) => [index('feedback_history_comments_channel_idx').on(table.channelId)]);
 
 // Evidentiary consent log (CDC Art. 6º, VIII; LGPD). One row per acceptance

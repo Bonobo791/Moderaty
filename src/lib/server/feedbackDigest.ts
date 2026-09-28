@@ -455,7 +455,7 @@ export async function generateFeedbackDigest(
 		// never consume the headroom the persistence tx needs (codex/cubic).
 		const clusterDeadline = deadline === undefined ? undefined : deadline - WRITE_RESERVE_MS;
 		const themed = themePassCanMatter(classified, categories, threshold)
-			? await clusterClassifiedClaims(classified, clusterDeadline, apiKey)
+			? await clusterClassifiedClaims(classified, categories, clusterDeadline, apiKey)
 			: classified;
 		const { findings, pooled } = groupFeedback(themed, { categories, threshold });
 
@@ -631,7 +631,7 @@ export async function previewFeedbackDigest(
 	const categories = enabledCategories(channel);
 	const threshold = channel.feedbackThreshold ?? 3;
 	const themed = themePassCanMatter(classified, categories, threshold)
-		? await clusterClassifiedClaims(classified, deadline, apiKey)
+		? await clusterClassifiedClaims(classified, categories, deadline, apiKey)
 		: classified;
 	const { findings, pooled } = groupFeedback(themed, { categories, threshold });
 	return {

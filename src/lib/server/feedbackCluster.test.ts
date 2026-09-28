@@ -140,6 +140,39 @@ test('two same-category themes emitting the same canonical label over distinct i
 	).rejects.toThrow('feedback clustering response has missing or invalid themes');
 });
 
+test('a content-free canonical label over real input claims is malformed', async () => {
+	stubMerge({ themes: [{ claim: '...', members: [0, 1] }] });
+	await expect(
+		clusterClaims([q('when is the next video'), q('part 2 release date')], undefined, 'test-openai-key')
+	).rejects.toThrow('feedback clustering response has missing or invalid themes');
+});
+
+test('a content-free canonical label may echo already content-free input claims', async () => {
+	// The classifier can emit '...' — echoing it back is pass-through that
+	// pools downstream, not a malformed response.
+	stubMerge({ themes: [{ claim: '...', members: [0, 1] }] });
+	const canonical = await clusterClaims([q('...'), q('!!!')], undefined, 'test-openai-key');
+	expect(canonical).toEqual(['...', '...']);
+});
+
+test('equivalent inputs pull every member of the linked themes into one label', async () => {
+	// The second theme asserts 'same words' and 'other words' belong
+	// together; 'same words' ≡ 'same words' is provable, so the only
+	// consistent read is all three under one label.
+	stubMerge({
+		themes: [
+			{ claim: 'label a', members: [0] },
+			{ claim: 'label b', members: [1, 2] }
+		]
+	});
+	const canonical = await clusterClaims(
+		[q('same words'), q('same words'), q('other words')],
+		undefined,
+		'test-openai-key'
+	);
+	expect(canonical).toEqual(['label a', 'label a', 'label a']);
+});
+
 test('clusterClassifiedClaims rewrites feedback rows and leaves none rows untouched', async () => {
 	stubMerge({ themes: [{ claim: 'shared theme', members: [0, 1] }] });
 	const merged = await clusterClassifiedClaims(
@@ -148,6 +181,7 @@ test('clusterClassifiedClaims rewrites feedback rows and leaves none rows untouc
 			{ commentId: 'b', category: 'question' as const, claim: 'wording two' },
 			{ commentId: 'n', category: 'none' as const, claim: '' }
 		],
+		['question'],
 		undefined,
 		'test-openai-key'
 	);
@@ -158,4 +192,23 @@ test('clusterClassifiedClaims rewrites feedback rows and leaves none rows untouc
 	const user: string = body.messages.find((m: { role: string }) => m.role === 'user')?.content;
 	expect(user).toContain('"i":1');
 	expect(user).not.toContain('"i":2');
+});
+
+test('clusterClassifiedClaims never sends disabled-category rows to the provider', async () => {
+	stubMerge({ themes: [{ claim: 'shared theme', members: [0, 1] }] });
+	const merged = await clusterClassifiedClaims(
+		[
+			{ commentId: 'a', category: 'question' as const, claim: 'wording one' },
+			{ commentId: 'b', category: 'question' as const, claim: 'wording two' },
+			{ commentId: 'c', category: 'criticism' as const, claim: 'disabled critique' }
+		],
+		['question'],
+		undefined,
+		'test-openai-key'
+	);
+	// Disabled-category rows keep their own claim — grouping pools them.
+	expect(merged.map((row) => row.claim)).toEqual(['shared theme', 'shared theme', 'disabled critique']);
+	const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0]?.[1]?.body));
+	const user: string = body.messages.find((m: { role: string }) => m.role === 'user')?.content;
+	expect(user).not.toContain('disabled critique');
 });

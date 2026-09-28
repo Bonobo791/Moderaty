@@ -104,47 +104,89 @@ function validateTheme(theme: ClusterTheme): void {
 	}
 }
 
-/** A member index must be in range and not claimed by another theme. */
-function validateMember(member: number, rows: ClusterableClaim[], canonical: Map<number, string>): void {
+/**
+ * Validates one member reference and returns its row. A canonical label
+ * that normalizes to nothing is malformed unless the input it covers was
+ * already content-free — echoing junk back lets it pool downstream, while
+ * inventing it would silently drop a real claim at regrouping (codex).
+ */
+function memberRow(member: number, theme: ClusterTheme, rows: ClusterableClaim[], canonical: Map<number, string>): ClusterableClaim {
 	if (!Number.isInteger(member) || member < 0 || member >= rows.length || canonical.has(member)) {
 		throw new TypeError(ERR_MALFORMED);
 	}
+	const row = rows.at(member);
+	if (row === undefined) throw new TypeError(ERR_MALFORMED);
+	if (!normalizeClaimKey(theme.claim) && normalizeClaimKey(row.claim)) throw new TypeError(ERR_MALFORMED);
+	return row;
+}
+
+/** Disjoint-set find over theme indexes. */
+function findRoot(parent: Map<number, number>, themeIdx: number): number {
+	let root = themeIdx;
+	let next = parent.get(root);
+	while (next !== undefined && next !== root) {
+		root = next;
+		next = parent.get(root);
+	}
+	return root;
 }
 
 /**
- * Reconciles the applied themes against the two invariants member-level
- * validation can't see (codex). Identical input claims within a category
- * are provably one theme — the model may not split them — so they share
- * the first covering theme's wording. And one canonical label may only
- * span different input claims when a single theme emitted it — the same
- * label across two theme objects over distinct inputs collapses separate
- * feedback into a false recurrence at regrouping.
+ * Unions themes that cover normalization-equivalent input claims. Identical
+ * inputs are provably one theme, so when the model splits them it asserts —
+ * by its own member lists — that the split themes belong together; the
+ * union is transitive, so every member of a linked theme shares the merge
+ * (codex).
+ */
+function unionLinkedThemes(themeOf: Map<number, number>, rows: ClusterableClaim[]): Map<number, number> {
+	const parent = new Map<number, number>();
+	const themeByInput = new Map<string, number>();
+	rows.forEach((row, i) => {
+		const themeIdx = themeOf.get(i);
+		if (themeIdx === undefined) throw new TypeError(ERR_MALFORMED);
+		const inputKey = `${row.category} ${normalizeClaimKey(row.claim)}`;
+		const first = themeByInput.get(inputKey);
+		if (first === undefined) {
+			themeByInput.set(inputKey, themeIdx);
+			return;
+		}
+		const a = findRoot(parent, first);
+		const b = findRoot(parent, themeIdx);
+		if (a !== b) parent.set(a, b);
+	});
+	return parent;
+}
+
+/**
+ * Resolves the canonical claim per input row. Each component of linked
+ * themes takes the wording of its lowest-indexed member's theme; a
+ * canonical label emitted by two separate components would collapse
+ * provably distinct input groups into a false recurrence at regrouping,
+ * so it is rejected as malformed (codex).
  */
 function reconcileThemes(canonical: Map<number, string>, themeOf: Map<number, number>, rows: ClusterableClaim[]): string[] {
-	const byInput = new Map<string, string>();
-	const effective = rows.map((row, i) => {
+	const parent = unionLinkedThemes(themeOf, rows);
+	const labelByComponent = new Map<number, string>();
+	const componentByLabel = new Map<string, number>();
+	return rows.map((row, i) => {
 		const claim = canonical.get(i);
-		if (claim === undefined) throw new TypeError(ERR_MALFORMED);
-		const inputKey = `${row.category} ${normalizeClaimKey(row.claim)}`;
-		const seen = byInput.get(inputKey);
-		if (seen !== undefined) return seen;
-		byInput.set(inputKey, claim);
-		return claim;
+		const themeIdx = themeOf.get(i);
+		if (claim === undefined || themeIdx === undefined) throw new TypeError(ERR_MALFORMED);
+		const component = findRoot(parent, themeIdx);
+		const label = labelByComponent.get(component) ?? claim;
+		labelByComponent.set(component, label);
+		// A label normalizing to '' can only pool — sharing it across
+		// components is harmless, while sharing a real label merges
+		// provably distinct input groups into a false recurrence.
+		const labelNorm = normalizeClaimKey(label);
+		if (labelNorm) {
+			const labelKey = `${row.category} ${labelNorm}`;
+			const owner = componentByLabel.get(labelKey);
+			if (owner !== undefined && owner !== component) throw new TypeError(ERR_MALFORMED);
+			componentByLabel.set(labelKey, component);
+		}
+		return label;
 	});
-	const labels = new Map<string, { themes: Set<number>; inputs: Set<string> }>();
-	effective.forEach((claim, i) => {
-		const row = rows.at(i);
-		if (row === undefined) throw new TypeError(ERR_MALFORMED);
-		const key = `${row.category} ${normalizeClaimKey(claim)}`;
-		const entry = labels.get(key) ?? { themes: new Set<number>(), inputs: new Set<string>() };
-		entry.themes.add(themeOf.get(i) ?? -1);
-		entry.inputs.add(normalizeClaimKey(row.claim));
-		labels.set(key, entry);
-	});
-	for (const entry of labels.values()) {
-		if (entry.themes.size > 1 && entry.inputs.size > 1) throw new TypeError(ERR_MALFORMED);
-	}
-	return effective;
 }
 
 /**
@@ -164,9 +206,7 @@ function applyThemes(themes: ClusterTheme[], rows: ClusterableClaim[]): string[]
 		// here it is enforced (I2).
 		let anchorCategory: string | undefined;
 		for (const member of theme.members) {
-			validateMember(member, rows, canonical);
-			const row = rows.at(member);
-			if (row === undefined) throw new TypeError(ERR_MALFORMED);
+			const row = memberRow(member, theme, rows, canonical);
 			anchorCategory ??= row.category;
 			if (row.category !== anchorCategory) throw new TypeError(ERR_MALFORMED);
 			canonical.set(member, theme.claim);
@@ -206,15 +246,18 @@ export async function clusterClaims(
 /**
  * Rewrites a classified batch's claims to their canonical theme wording so
  * downstream grouping counts real recurring feedback. 'none' rows carry no
- * claim and pass through untouched.
+ * claim, and categories the channel disabled can only pool — both pass
+ * through untouched and are never sent to the provider (codex).
  */
 export async function clusterClassifiedClaims<T extends ClusterableClaim>(
 	classified: T[],
+	categories: readonly string[],
 	deadline?: number,
 	apiKey?: string
 ): Promise<T[]> {
+	const enabled = new Set<string>(categories);
 	const feedbackIndexes = classified
-		.map((row, i) => (row.category === 'none' ? -1 : i))
+		.map((row, i) => (enabled.has(row.category) ? i : -1))
 		.filter((i) => i >= 0);
 	if (feedbackIndexes.length < 2) return classified;
 	const feedbackRows = feedbackIndexes.map((i) => {

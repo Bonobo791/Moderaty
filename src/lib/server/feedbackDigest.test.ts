@@ -96,6 +96,11 @@ const THREE_THEMES = [
 	{ text: 'text 3', claim: 'theme 3' }
 ];
 
+/** seedCommentBatch for text/claim(/category) tuples — keeps call sites terse. */
+async function seedClaims(...entries: [text: string, claim: string, category?: string][]) {
+	await seedCommentBatch(entries.map(([text, claim, category]) => ({ text, claim, category })));
+}
+
 /** Seeds comments c1..cN on consecutive January days plus each verdict. */
 async function seedCommentBatch(entries: { text: string; category?: string; hasAbuse?: boolean; claim?: string }[]) {
 	for (const [i, entry] of entries.entries()) {
@@ -221,11 +226,11 @@ test('the AI theme pass merges differently-worded claims into one finding', asyn
 	// Exact claim-key matching alone would pool all three — "what comes up
 	// most" is only visible once the model merges them onto one theme.
 	await seedChannel('UC1', { feedbackEnabled: 1, feedbackThreshold: 3 });
-	await seedCommentBatch([
-		{ text: 'next episode when?', claim: 'next episode when' },
-		{ text: 'when is part 2 coming', claim: 'when is part 2 coming' },
-		{ text: 'release schedule for the next video', claim: 'release schedule' }
-	]);
+	await seedClaims(
+		['next episode when?', 'next episode when'],
+		['when is part 2 coming', 'when is part 2 coming'],
+		['release schedule for the next video', 'release schedule']
+	);
 	for (const claim of ['next episode when', 'when is part 2 coming', 'release schedule']) {
 		CLUSTER[claim] = 'when is the next video';
 	}
@@ -253,10 +258,7 @@ test('reposted identical text counts as separate supporters toward the threshold
 	// "minimum comments". Evidence still lists the wording once.
 	await seedChannel('UC1', { feedbackEnabled: 1, feedbackThreshold: 2 });
 	const repost = 'can I bring my wife who is not Thai and under 50';
-	await seedCommentBatch([
-		{ text: repost, claim: 'bringing a non-Thai wife under 50' },
-		{ text: repost, claim: 'bringing a non-Thai wife under 50' }
-	]);
+	await seedClaims([repost, 'bringing a non-Thai wife under 50'], [repost, 'bringing a non-Thai wife under 50']);
 	const result = await generateFeedbackDigest('UC1', { force: true });
 	expect(result).toMatchObject({ status: 'complete', findings: 1, pooled: 0 });
 	const finding = (await testDb().db.select().from(feedbackFindings).all())[0];
@@ -282,15 +284,40 @@ test('a batch below the threshold in every enabled category skips the theme-merg
 	// the merge call is wasted spend, and a malformed response would fail a
 	// run whose all-pooled outcome is already determined (codex).
 	await seedChannel('UC1', { feedbackEnabled: 1, feedbackThreshold: 3 });
-	await seedCommentBatch([
-		{ text: 'q1', claim: 'one question' },
-		{ text: 'q2', claim: 'another question' },
-		{ text: 'c1', claim: 'a criticism', category: 'criticism' }
-	]);
+	await seedClaims(
+		['q1', 'one question'],
+		['q2', 'another question'],
+		['c1', 'a criticism', 'criticism']
+	);
 	CLUSTER_RAW = 'not json';
 	const result = await generateFeedbackDigest('UC1', { force: true });
 	expect(result).toMatchObject({ status: 'complete', findings: 0, pooled: 3 });
 	expect(mergeCallBodies()).toHaveLength(0);
+});
+
+test('disabled categories are excluded from the merge call and still pool', async () => {
+	// With only 'question' enabled, the criticisms can never form a finding —
+	// sending them to the merge call would spend tokens and let a bad
+	// assignment on a dead row fail the whole digest (codex).
+	await seedChannel('UC1', { feedbackEnabled: 1, feedbackThreshold: 3, feedbackCategories: 'question' });
+	await seedClaims(
+		['q1', 'one question'],
+		['q2', 'another question'],
+		['q3', 'a third question'],
+		['c1', 'a criticism', 'criticism'],
+		['c2', 'more criticism', 'criticism']
+	);
+	for (const claim of ['one question', 'another question', 'a third question']) {
+		CLUSTER[claim] = 'the questions merged';
+	}
+	const result = await generateFeedbackDigest('UC1', { force: true });
+	expect(result).toMatchObject({ status: 'complete', findings: 1, pooled: 2 });
+	const merges = mergeCallBodies();
+	expect(merges).toHaveLength(1);
+	const user = String(merges[0].messages.find((m: { role: string }) => m.role === 'user')?.content);
+	const items = JSON.parse(user.slice(user.indexOf('\n') + 1, user.lastIndexOf('\n<'))) as { category: string; claim: string }[];
+	expect(items).toHaveLength(3);
+	expect(items.some((item) => item.category === 'criticism' || item.claim.includes('criticism'))).toBe(false);
 });
 
 test('per-comment classification failures are counted, not fatal', async () => {

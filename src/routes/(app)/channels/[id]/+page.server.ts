@@ -1,12 +1,11 @@
 import { db } from '$lib/server/db';
-import { channels, organizations } from '$lib/server/db/schema';
-import { getCredits } from '$lib/server/billing/ledger';
+import { channels } from '$lib/server/db/schema';
 import { decrypt } from '$lib/server/crypto';
 import { deleteChannelRecords } from '$lib/server/deletion';
 import { revokeGoogleToken } from '$lib/server/google';
 import { claimDryRun } from '$lib/server/dryRun';
+import { historyAccessError } from '$lib/server/historyAccess';
 import { requireOrgRole } from '$lib/server/ownership';
-import { resolveOpenAiKey } from '$lib/server/openaiKey';
 import { runChannel } from '$lib/server/pipeline';
 import { requireUser } from '$lib/server/session';
 import { isToneLevel } from '$lib/toneLevels';
@@ -20,15 +19,6 @@ const HISTORY_MONTH_PRESETS: ReadonlySet<number> = new Set([1, 3, 6, 12, 24]);
 /** Boundary instant for a months window: now − months × 30 days. */
 function monthsAgoBoundary(months: number): string {
 	return new Date(Date.now() - months * 30 * 24 * 60 * 60 * 1000).toISOString();
-}
-
-async function historyAccessError(orgId: string): Promise<'purchase' | 'key' | null> {
-	const org = await db.select({ plan: organizations.plan }).from(organizations).where(eq(organizations.id, orgId)).get();
-	if (!org) throw new Error(`organization not found: ${orgId}`);
-	if (org.plan === 'lifetime') {
-		return (await resolveOpenAiKey(orgId, { throwOnReadError: true }))?.trim() ? null : 'key';
-	}
-	return (await getCredits(orgId)) > 0 ? null : 'purchase';
 }
 
 /**

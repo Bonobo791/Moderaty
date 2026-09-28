@@ -6,6 +6,7 @@ import { db } from '$lib/server/db';
 import { channels, comments, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence } from '$lib/server/db/schema';
 import { enabledCategories, generateFeedbackDigest, previewFeedbackDigest, type DigestResult } from '$lib/server/feedbackDigest';
 import { claimDryRun } from '$lib/server/dryRun';
+import { historyAccessError } from '$lib/server/historyAccess';
 import { historyWindowBoundary, parseHistoryWindow } from '$lib/historyWindow';
 import { ownedChannel, requireOrgRole } from '$lib/server/ownership';
 import { requireUser } from '$lib/server/session';
@@ -147,6 +148,25 @@ export const actions = {
 		if (env.DRY_RUN === 'true') return fail(409, { scope: 'history', error: 'Historical feedback analysis is unavailable while this deployment is in dry-run mode.' });
 		if (!ch.active || ch.feedbackEnabled !== 1) {
 			return fail(409, { scope: 'history', error: 'Resume the channel and enable feedback before analyzing history.' });
+		}
+		// Same gate as moderation history: every classified comment spends a
+		// credit (or the org's own key), so a checkpoint must never plant for an
+		// org with no access — cron would drain it on someone else's budget.
+		try {
+			const historyAccess = await historyAccessError(user.orgId);
+			if (historyAccess) {
+				console.warn('feedback history analysis blocked:', { channelId: params.id, orgId: user.orgId, reason: historyAccess });
+				return fail(402, {
+					scope: 'history',
+					historyAccess,
+					error: historyAccess === 'key'
+						? 'Your lifetime deal requires your own OpenAI API key. An organization owner must add it on the Team page before analyzing feedback history.'
+						: 'To analyze feedback history, purchase credits, subscribe, or buy the lifetime deal and add your own OpenAI API key. If your credits or subscription allowance are exhausted, purchase more credits to continue.'
+				});
+			}
+		} catch (cause) {
+			console.error('feedback history access check failed:', params.id, cause);
+			return fail(503, { scope: 'history', error: 'Could not verify access to feedback history analysis. Please try again.' });
 		}
 		const now = new Date().toISOString();
 		const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, now));

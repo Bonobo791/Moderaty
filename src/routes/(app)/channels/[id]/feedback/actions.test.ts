@@ -2,10 +2,11 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { and, eq } from 'drizzle-orm';
 
 import { TEST_OWNER, setupTestDb, testDb } from '$lib/server/testdb';
-import { channels, comments, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence } from '$lib/server/db/schema';
+import { encrypt } from '$lib/server/crypto';
+import { channels, comments, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, organizations, stripeSubscriptionPeriods } from '$lib/server/db/schema';
 
 const mocks = vi.hoisted(() => ({
-	env: { DRY_RUN: 'false' } as Record<string, string | undefined>,
+	env: { DRY_RUN: 'false', ENCRYPTION_KEY: 'feedback-actions-test-key' } as Record<string, string | undefined>,
 	generateFeedbackDigest: vi.fn(),
 	previewFeedbackDigest: vi.fn()
 }));
@@ -21,7 +22,7 @@ vi.mock('$lib/server/feedbackDigest', async (importOriginal) => {
 
 import { actions, load } from './+page.server';
 
-setupTestDb(['finding_evidence', 'feedback_findings', 'feedback_digests', 'feedback_history_comments', 'comments', 'channels']);
+setupTestDb(['finding_evidence', 'feedback_findings', 'feedback_digests', 'feedback_history_comments', 'comments', 'channels', 'organizations', 'stripe_subscription_periods']);
 
 const OWNER = TEST_OWNER;
 
@@ -29,10 +30,11 @@ const OWNER = TEST_OWNER;
 // newest-first ordering rely on a tie-break that isn't there (cubic).
 let digestSeq = 0;
 
-beforeEach(() => {
+beforeEach(async () => {
 	mocks.env.DRY_RUN = 'false';
 	mocks.generateFeedbackDigest.mockReset();
 	mocks.previewFeedbackDigest.mockReset();
+	await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Organization 1', plan: 'free', creditsRemaining: 100 });
 });
 
 afterEach(() => vi.restoreAllMocks());
@@ -396,6 +398,101 @@ test('analyzeHistory rejects invalid windows and callers without owner access', 
 	await seedChannel('UC2', 'org-2', { feedbackEnabled: 1 });
 	await expect(postFeedbackAction('analyzeHistory', 'UC2', { months: '3' })).rejects.toMatchObject({ status: 404 });
 	expect(mocks.generateFeedbackDigest).not.toHaveBeenCalled();
+});
+
+async function updateOrg(orgId: string, values: Partial<typeof organizations.$inferInsert>) {
+	await testDb().db.update(organizations).set(values).where(eq(organizations.id, orgId));
+}
+
+async function historyBoundaryOf(id: string) {
+	return (await testDb().db.select().from(channels).where(eq(channels.id, id)).get())?.feedbackHistoryBoundary;
+}
+
+async function seedSubscriptionPeriod(options: { invoiceId: string; status: string; periodEnd?: 'past' | 'future'; includedCredits?: number; consumedCredits?: number }) {
+	const now = Date.now();
+	await testDb().db.insert(stripeSubscriptionPeriods).values({
+		orgId: 'org-1',
+		subscriptionId: `sub-${options.invoiceId}`,
+		invoiceId: options.invoiceId,
+		periodKey: options.invoiceId,
+		periodStart: new Date(now - 86_400_000).toISOString(),
+		periodEnd: new Date(options.periodEnd === 'past' ? now - 1 : now + 86_400_000).toISOString(),
+		includedCredits: options.includedCredits ?? 100,
+		consumedCredits: options.consumedCredits ?? 0,
+		status: options.status
+	});
+}
+
+// History analysis spends real money per classified comment — the same
+// purchase/key gate as overview history must run BEFORE the checkpoint is
+// planted, or a never-paying org drains the deployment key forever (codex).
+test.each([
+	{ name: 'a null balance', org: { creditsRemaining: null } },
+	{ name: 'a zero balance', org: { creditsRemaining: 0 } },
+	{ name: 'a Stripe customer with no completed purchase', org: { stripeCustomerId: 'cus-abandoned', creditsRemaining: null } },
+	{
+		name: 'an exhausted paid subscription period',
+		org: { plan: 'hosted', creditsRemaining: null },
+		period: { invoiceId: 'exhausted-period', status: 'paid', includedCredits: 50, consumedCredits: 50 }
+	}
+])('analyzeHistory denies an org with $name before checkpointing', async ({ org, period }) => {
+	await updateOrg('org-1', org);
+	if (period) await seedSubscriptionPeriod(period);
+	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1 });
+	const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+	try {
+		const res = (await postFeedbackAction('analyzeHistory', 'UC1', { months: '3' })) as { status: number; data: Record<string, unknown> };
+
+		expect(res).toMatchObject({
+			status: 402,
+			data: { scope: 'history', historyAccess: 'purchase', error: expect.stringContaining('purchase credits, subscribe, or buy the lifetime deal') }
+		});
+		expect(await historyBoundaryOf('UC1')).toBeNull();
+		expect(warnSpy).toHaveBeenCalledWith('feedback history analysis blocked:', { channelId: 'UC1', orgId: 'org-1', reason: 'purchase' });
+	} finally {
+		warnSpy.mockRestore();
+	}
+});
+
+test.each([
+	{ name: 'missing', openaiKeyEnc: null },
+	{ name: 'encrypted whitespace', openaiKeyEnc: encrypt(' \t\n ') }
+])('a lifetime org with a $name key cannot queue feedback history', async ({ openaiKeyEnc }) => {
+	await updateOrg('org-1', { plan: 'lifetime', creditsRemaining: null, openaiKeyEnc });
+	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1 });
+
+	const res = await postFeedbackAction('analyzeHistory', 'UC1', { months: '3' });
+
+	expect(res).toMatchObject({
+		status: 402,
+		data: { scope: 'history', historyAccess: 'key', error: expect.stringContaining('your own OpenAI API key') }
+	});
+	expect(await historyBoundaryOf('UC1')).toBeNull();
+});
+
+test('a lifetime org with a stored key queues feedback history', async () => {
+	await updateOrg('org-1', { plan: 'lifetime', creditsRemaining: null, openaiKeyEnc: encrypt('synthetic-lifetime-key') });
+	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1 });
+
+	const res = await postFeedbackAction('analyzeHistory', 'UC1', { months: '3' });
+
+	expect(res).toMatchObject({ ok: true, scope: 'history' });
+	expect(await historyBoundaryOf('UC1')).not.toBeNull();
+});
+
+test('a failing access check is a loud 503, never a silently planted checkpoint', async () => {
+	await testDb().db.delete(organizations).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1 });
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		const res = await postFeedbackAction('analyzeHistory', 'UC1', { months: '3' });
+
+		expect(res).toMatchObject({ status: 503, data: { scope: 'history' } });
+		expect(await historyBoundaryOf('UC1')).toBeNull();
+		expect(errorSpy).toHaveBeenCalledWith('feedback history access check failed:', 'UC1', expect.any(Error));
+	} finally {
+		errorSpy.mockRestore();
+	}
 });
 
 test('feedback dry run returns a sanitized preview, claims its one-time allowance, and denies repeats', async () => {

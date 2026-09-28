@@ -105,7 +105,16 @@
 {#if data.maintenance || data.digests === undefined}
 	<Skeleton rows={3} />
 {:else}
-	{#if form?.scope !== 'reveal' && form?.error}<div class="error-box" role="alert">{form.error}</div>{/if}
+	{#if form?.scope !== 'reveal' && form?.error}
+		<div class="error-box" role="alert">
+			{form.error}
+			{#if form && 'historyAccess' in form && form.historyAccess === 'purchase'}
+				<a href="/usage">View plans and credits</a>
+			{:else if form && 'historyAccess' in form && form.historyAccess === 'key'}
+				<a href="/org">OpenAI key setup on the Team page</a>
+			{/if}
+		</div>
+	{/if}
 	{#if form?.scope !== 'reveal' && form?.message}<div class="flash" role="status">{form.message}</div>{/if}
 
 	<div class="credit-notice" role="note">

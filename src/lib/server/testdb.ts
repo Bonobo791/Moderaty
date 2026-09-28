@@ -178,6 +178,10 @@ export async function createTestDb(): Promise<TestDb> {
 			feedback_threshold INTEGER,
 			feedback_email INTEGER,
 			feedback_last_digest_at TEXT,
+			moderation_dry_run_used_at TEXT,
+			feedback_dry_run_used_at TEXT,
+			feedback_history_boundary TEXT,
+			feedback_history_page_token TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
 			CONSTRAINT channels_org_requires_owner CHECK (org_id IS NOT NULL OR user_id IS NULL)
 		)`,
@@ -471,7 +475,14 @@ export async function createTestDb(): Promise<TestDb> {
 			has_abuse INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
-		`CREATE INDEX finding_evidence_finding_idx ON finding_evidence (finding_id)`
+		`CREATE INDEX finding_evidence_finding_idx ON finding_evidence (finding_id)`,
+		`CREATE TABLE feedback_history_comments (
+			id TEXT PRIMARY KEY NOT NULL,
+			channel_id TEXT NOT NULL,
+			text TEXT NOT NULL,
+			published_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX feedback_history_comments_channel_idx ON feedback_history_comments (channel_id)`
 	]);
 	return { db: drizzle(client, { schema }), client };
 }

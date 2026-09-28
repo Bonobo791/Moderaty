@@ -60,13 +60,20 @@ test('never serializes the encrypted refresh token or the drain continuation tok
 		orgId: 'org-1',
 		title: 'Mine',
 		refreshTokenEnc: 'encrypted-refresh-token',
-		nextPageToken: 'secret-page-token'
+		nextPageToken: 'secret-page-token',
+		dryRunBoundary: '2026-09-01T00:00:00.000Z',
+		dryRunPageToken: 'secret-dry-run-token',
+		moderationDryRunUsedAt: '2026-08-01T00:00:00.000Z'
 	});
 
 	const data = (await loadLayout('UC1')) as LayoutData;
 
 	// A mid-drain channel is flagged scanning without leaking the token itself.
 	expect(data.ch.scanning).toBe(true);
+	expect(data.ch.dryRunScanning).toBe(true);
+	expect(data.ch.moderationDryRunUsed).toBe(true);
+	expect(data.ch).not.toHaveProperty('dryRunPageToken');
+	expect(data.ch).not.toHaveProperty('moderationDryRunUsedAt');
 	expect(data.ch).not.toHaveProperty('refreshTokenEnc');
 	expect(data.ch).not.toHaveProperty('nextPageToken');
 	expect(JSON.stringify(data)).not.toContain('encrypted-refresh-token');
@@ -79,6 +86,8 @@ test('an idle channel is flagged as not scanning', async () => {
 	const data = (await loadLayout('UC1')) as LayoutData;
 
 	expect(data.ch.scanning).toBe(false);
+	expect(data.ch.dryRunScanning).toBe(false);
+	expect(data.ch.moderationDryRunUsed).toBe(false);
 });
 
 test('projects the tone and protection flags the overview page renders', async () => {
@@ -161,7 +170,7 @@ test('a database outage returns the maintenance payload without requiring a user
 	const data = (await loadLayout('UC1', null, '/channels/UC1/queue', true)) as LayoutData;
 
 	expect(data.maintenance).toBe(true);
-	expect(data.ch).toMatchObject({ id: 'UC1', title: '', scanning: false });
+	expect(data.ch).toMatchObject({ id: 'UC1', title: '', scanning: false, dryRunScanning: false, moderationDryRunUsed: false });
 	expect(data.pending).toBe(0);
 	expect(data.banned).toBe(0);
 	expect(data.orgRole).toBeNull();

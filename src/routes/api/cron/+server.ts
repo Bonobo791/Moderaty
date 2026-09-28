@@ -94,6 +94,16 @@ async function runClaimedChannel(
 	channel: typeof channels.$inferSelect,
 	deadline: number
 ): Promise<{ result: ChannelRunResult; dryRunWindow: unknown; digest: unknown }> {
+	let digest: unknown;
+	const historyDigestHandled = Boolean(channel.feedbackHistoryBoundary && channel.feedbackEnabled === 1 && env.DRY_RUN === 'false');
+	if (historyDigestHandled) {
+		try {
+			digest = await generateFeedbackDigest(channel.id, { deadline });
+		} catch (cause) {
+			console.error(`feedback history digest failed for channel ${channel.id}:`, cause);
+			digest = { error: 'error' };
+		}
+	}
 	const result = await runChannel(channel.id, { deadline });
 	let dryRunWindow: unknown;
 	if (channel.dryRunBoundary) {
@@ -129,8 +139,7 @@ async function runClaimedChannel(
 	// claimed channel generates one when its cadence is due and budget
 	// remains. A digest failure must never mask the moderation verdict —
 	// loud, surfaced in the payload, retried on the next claim.
-	let digest: unknown;
-	if (Date.now() < deadline) {
+	if (!historyDigestHandled && Date.now() < deadline) {
 		try {
 			digest = await generateFeedbackDigest(channel.id, { deadline });
 		} catch (cause) {
@@ -202,7 +211,7 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		.where(and(eq(channels.active, 1), claimable))
 		// Channels with a dry-run drain in flight first — a preview the user is
 		// actively waiting on must not starve behind the ordinary rotation.
-		.orderBy(desc(sql`${channels.dryRunBoundary} is not null`), asc(channels.lastRunAt))
+		.orderBy(desc(sql`${channels.dryRunBoundary} is not null`), desc(sql`${channels.feedbackHistoryBoundary} is not null and ${channels.feedbackEnabled} = 1`), asc(channels.lastRunAt))
 		.limit(1);
 	if (!channel) return json({ ...base, results: {} });
 

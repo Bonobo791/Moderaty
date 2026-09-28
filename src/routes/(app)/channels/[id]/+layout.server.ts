@@ -29,7 +29,9 @@ function maintenancePayload(channelId: string, tab: ChannelTab) {
 			protectLgbtqia: 0,
 			protectWomen: 0,
 			active: 1,
-			scanning: false
+			scanning: false,
+			dryRunScanning: false,
+			moderationDryRunUsed: false
 		},
 		pending: 0,
 		banned: 0,
@@ -74,7 +76,9 @@ export async function load({ params, locals, url }) {
 			protectLgbtqia: row.protectLgbtqia,
 			protectWomen: row.protectWomen,
 			active: row.active,
-			scanning: row.nextPageToken !== null
+			scanning: row.nextPageToken !== null,
+			dryRunScanning: row.dryRunBoundary !== null,
+			moderationDryRunUsed: row.moderationDryRunUsedAt !== null
 		};
 		return { ch, pending, banned, tab, maintenance: false, orgRole: user.orgRole };
 	} catch (e) {

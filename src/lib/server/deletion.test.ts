@@ -8,7 +8,7 @@ vi.mock('$lib/server/stripe/client', () => ({
 }));
 
 import { DAY_MS, seedConsent, seedUser as seedBareUser, setupTestDb, testDb } from './testdb';
-import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, findingEvidence, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, stripeLifetimeEntitlements, stripeLifetimeSlots, users } from './db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, stripeLifetimeEntitlements, stripeLifetimeSlots, users } from './db/schema';
 import {
 	AUDIT_HANDLE_RETENTION_MS,
 	CONSENT_EMAIL_RETENTION_MS,
@@ -24,7 +24,7 @@ import {
 	nullExpiredModerationActionHandles
 } from './deletion';
 
-setupTestDb(['moderation_actions', 'comments', 'audit_log', 'channel_allowed_handles', 'rules', 'channels', 'sessions', 'consents', 'invites', 'memberships', 'organizations', 'users', 'credit_transactions', 'stripe_deletion_outbox', 'stripe_lifetime_slots', 'stripe_lifetime_entitlements', 'feedback_digests', 'feedback_findings', 'finding_evidence']);
+setupTestDb(['moderation_actions', 'comments', 'audit_log', 'channel_allowed_handles', 'rules', 'channels', 'sessions', 'consents', 'invites', 'memberships', 'organizations', 'users', 'credit_transactions', 'stripe_deletion_outbox', 'stripe_lifetime_slots', 'stripe_lifetime_entitlements', 'feedback_digests', 'feedback_findings', 'finding_evidence', 'feedback_history_comments']);
 
 afterEach(() => {
 	vi.clearAllMocks();
@@ -128,6 +128,7 @@ test('deleteChannelRecords erases the feedback digest chain with the channel', a
 		commentId: 'comment-1',
 		sanitizedExcerpt: 'when is the next video coming?'
 	});
+	await testDb().db.insert(feedbackHistoryComments).values({ id: 'history-1', channelId: 'UC1', text: 'historical source', publishedAt: '2026-01-01T00:00:00.000Z' });
 	// A digest on an unrelated channel must survive.
 	await seedChannel('UC2', 'user-9', 'org-9', 'other org');
 	await testDb().db.insert(feedbackDigests).values({
@@ -136,6 +137,7 @@ test('deleteChannelRecords erases the feedback digest chain with the channel', a
 		windowEnd: '2026-01-08T00:00:00.000Z',
 		status: 'complete'
 	});
+	await testDb().db.insert(feedbackHistoryComments).values({ id: 'history-2', channelId: 'UC2', text: 'other tenant source', publishedAt: '2026-01-01T00:00:00.000Z' });
 
 	await testDb().db.transaction(async (tx) => {
 		await deleteChannelRecords(tx, ['UC1'], { expectedOrgId: 'org-1' });
@@ -144,7 +146,23 @@ test('deleteChannelRecords erases the feedback digest chain with the channel', a
 	expect(await testDb().db.select().from(feedbackDigests).where(eq(feedbackDigests.channelId, 'UC1')).all()).toHaveLength(0);
 	expect(await testDb().db.select().from(feedbackFindings).all()).toHaveLength(0);
 	expect(await testDb().db.select().from(findingEvidence).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(feedbackHistoryComments).where(eq(feedbackHistoryComments.channelId, 'UC1')).all()).toHaveLength(0);
 	expect(await testDb().db.select().from(feedbackDigests).where(eq(feedbackDigests.channelId, 'UC2')).all()).toHaveLength(1);
+	expect(await testDb().db.select().from(feedbackHistoryComments).where(eq(feedbackHistoryComments.channelId, 'UC2')).all()).toHaveLength(1);
+});
+
+test('account deletion erases historical-only feedback sources without erasing another tenant', async () => {
+	const userId = await seedUser('gone');
+	await seedChannel('UC-team', 'team-user', 'org-team', 'Team channel');
+	await testDb().db.insert(feedbackHistoryComments).values([
+		{ id: 'history-gone', channelId: 'UC-gone', text: 'private historical feedback', publishedAt: '2026-01-01T00:00:00.000Z' },
+		{ id: 'history-team', channelId: 'UC-team', text: 'team historical feedback', publishedAt: '2026-01-01T00:00:00.000Z' }
+	]);
+
+	await deleteUserRecords(userId);
+
+	expect(await testDb().db.select().from(feedbackHistoryComments).where(eq(feedbackHistoryComments.channelId, 'UC-gone')).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(feedbackHistoryComments).where(eq(feedbackHistoryComments.channelId, 'UC-team')).all()).toHaveLength(1);
 });
 
 test('deleteChannelRecords with a matching expected org erases the channel and its data', async () => {

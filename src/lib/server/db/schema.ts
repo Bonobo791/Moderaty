@@ -257,6 +257,10 @@ export const channels = sqliteTable('channels', {
 	feedbackThreshold: integer('feedback_threshold'), // min supporters per finding; null = 3
 	feedbackEmail: integer('feedback_email'), // 1 = also e-mail each digest — RESERVED, unwired until MOD-92 (no Mailjet path writes/reads it yet)
 	feedbackLastDigestAt: text('feedback_last_digest_at'), // rotation ordering; NULLs generate first
+	moderationDryRunUsedAt: text('moderation_dry_run_used_at'),
+	feedbackDryRunUsedAt: text('feedback_dry_run_used_at'),
+	feedbackHistoryBoundary: text('feedback_history_boundary'),
+	feedbackHistoryPageToken: text('feedback_history_page_token'),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
 	index('channels_user_id_idx').on(table.userId),
@@ -430,6 +434,13 @@ export const findingEvidence = sqliteTable('finding_evidence', {
 	hasAbuse: integer('has_abuse').notNull().default(0), // 1 = classifier flagged abuse; drives the reveal warning
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [index('finding_evidence_finding_idx').on(table.findingId)]);
+
+export const feedbackHistoryComments = sqliteTable('feedback_history_comments', {
+	id: text('id').primaryKey(),
+	channelId: text('channel_id').notNull(),
+	text: text('text').notNull(),
+	publishedAt: text('published_at').notNull()
+}, (table) => [index('feedback_history_comments_channel_idx').on(table.channelId)]);
 
 // Evidentiary consent log (CDC Art. 6º, VIII; LGPD). One row per acceptance
 // event — initial signup and every re-acceptance after a LEGAL_VERSION bump.

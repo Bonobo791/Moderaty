@@ -357,6 +357,10 @@ describe('channels', () => {
 			feedback_threshold: { notNull: false },
 			feedback_email: { notNull: false },
 			feedback_last_digest_at: { notNull: false },
+			moderation_dry_run_used_at: { notNull: false },
+			feedback_dry_run_used_at: { notNull: false },
+			feedback_history_boundary: { notNull: false },
+			feedback_history_page_token: { notNull: false },
 			created_at: { notNull: true, hasDefault: true }
 		});
 		expectCreatedAtDefault(channels);

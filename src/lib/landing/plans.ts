@@ -7,7 +7,7 @@
 export const TICKS_SELF_HOSTED = [
 	'Full rules engine and 13-category AI scoring',
 	'Your key, your server, your data',
-	'Audit log and dry-run mode included',
+	'Audit log and 1 free dry run per feature per channel',
 	'Fork it, audit it, trust no one'
 ];
 
@@ -16,7 +16,7 @@ export const TICKS_SELF_HOSTED_DETAILED = [
 	'13-category AI scoring with your thresholds',
 	'Review queue for the borderline',
 	'Audit log: every action logged, every action reversible',
-	'Dry-run mode: watch it work before it touches your channel'
+	'1 free dry run per feature per channel'
 ];
 
 export const TICKS_HOSTED = [

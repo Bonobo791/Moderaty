@@ -35,7 +35,7 @@ export const FAQ_ENTRIES: FaqEntry[] = [
 	},
 	{
 		q: 'Can I test Moderaty without changing anything on my channel?',
-		a: 'Yes. Dry-run mode classifies everything and changes nothing. The audit trail shows exactly what would have happened, comment by comment.'
+		a: 'Each channel gets 1 free moderation dry run and 1 free feedback dry run. Neither spends credits. Moderation previews drain the selected window in the background; feedback previews cover the first page, up to 100 comments.'
 	},
 	{
 		q: 'Is Moderaty LGPD compliant?',

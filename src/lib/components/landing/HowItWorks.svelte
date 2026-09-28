@@ -53,8 +53,7 @@
 				<p class="step-body">
 					Borderline comments wait in your review queue: one click to approve, reject, delete, or
 					ban. Every action is written to the audit log before it happens on YouTube, so nothing
-					disappears without a trace and a crash mid-run never repeats an action. Dry-run mode
-					classifies everything and changes nothing until you trust it.
+					disappears without a trace and a crash mid-run never repeats an action. Each channel gets 1 free moderation dry run and 1 free feedback dry run. Neither spends credits. Moderation previews drain the selected window in the background; feedback previews cover the first page, up to 100 comments.
 				</p>
 			</div>
 			{@render terminal('audit.log', audit)}

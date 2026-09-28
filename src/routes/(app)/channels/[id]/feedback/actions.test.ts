@@ -1,23 +1,27 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 
 import { TEST_OWNER, setupTestDb, testDb } from '$lib/server/testdb';
-import { channels, comments, feedbackDigests, feedbackFindings, findingEvidence } from '$lib/server/db/schema';
+import { channels, comments, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence } from '$lib/server/db/schema';
 
 const mocks = vi.hoisted(() => ({
-	generateFeedbackDigest: vi.fn()
+	env: { DRY_RUN: 'false' } as Record<string, string | undefined>,
+	generateFeedbackDigest: vi.fn(),
+	previewFeedbackDigest: vi.fn()
 }));
+
+vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
 // generateFeedbackDigest is the only job export mocked — enabledCategories
 // stays real so the load projection is exercised end-to-end.
 vi.mock('$lib/server/feedbackDigest', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('$lib/server/feedbackDigest')>();
-	return { ...actual, generateFeedbackDigest: mocks.generateFeedbackDigest };
+	return { ...actual, generateFeedbackDigest: mocks.generateFeedbackDigest, previewFeedbackDigest: mocks.previewFeedbackDigest };
 });
 
 import { actions, load } from './+page.server';
 
-setupTestDb(['finding_evidence', 'feedback_findings', 'feedback_digests', 'comments', 'channels']);
+setupTestDb(['finding_evidence', 'feedback_findings', 'feedback_digests', 'feedback_history_comments', 'comments', 'channels']);
 
 const OWNER = TEST_OWNER;
 
@@ -26,7 +30,9 @@ const OWNER = TEST_OWNER;
 let digestSeq = 0;
 
 beforeEach(() => {
+	mocks.env.DRY_RUN = 'false';
 	mocks.generateFeedbackDigest.mockReset();
+	mocks.previewFeedbackDigest.mockReset();
 });
 
 afterEach(() => vi.restoreAllMocks());
@@ -93,6 +99,23 @@ test('load returns the newest complete digest with findings and sanitized eviden
 	expect(JSON.stringify(data)).not.toContain(rawSource);
 });
 
+test('load exposes only history activity and preview-use state, never continuation tokens or raw text', async () => {
+	await seedChannel('UC1', 'org-1', {
+		feedbackEnabled: 1,
+		feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z',
+		feedbackHistoryPageToken: 'private-history-token',
+		feedbackDryRunUsedAt: '2026-01-01T00:00:00.000Z'
+	});
+	await testDb().db.insert(feedbackHistoryComments).values({ id: 'private-id', channelId: 'UC1', text: 'private historical text', publishedAt: '2025-01-02T00:00:00.000Z' });
+
+	const data = await callLoad('UC1');
+
+	expect(data).toMatchObject({ history: { active: true, boundary: '2025-01-01T00:00:00.000Z' }, dryRunUsed: true });
+	expect(JSON.stringify(data)).not.toContain('private-history-token');
+	expect(JSON.stringify(data)).not.toContain('private-id');
+	expect(JSON.stringify(data)).not.toContain('private historical text');
+});
+
 test('load surfaces a newer failed digest alongside the last complete one', async () => {
 	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1 });
 	await seedDigest('UC1');
@@ -138,6 +161,17 @@ function postSettings(
 		for (const v of Array.isArray(value) ? value : [value]) form.append(key, v);
 	}
 	return actions.settings({ params: { id: channelId }, request: new Request('http://localhost/', { method: 'POST', body: form }), locals: { user } } as never);
+}
+
+function postFeedbackAction(
+	action: 'analyzeHistory' | 'dryRun',
+	channelId: string,
+	fields: Record<string, string>,
+	user: (Omit<typeof OWNER, 'orgRole'> & { orgRole: string }) | null = OWNER
+) {
+	const form = new FormData();
+	for (const [key, value] of Object.entries(fields)) form.set(key, value);
+	return actions[action]({ params: { id: channelId }, request: new Request('http://localhost/', { method: 'POST', body: form }), locals: { user } } as never);
 }
 
 test('settings persists enabled, cadence, categories, and threshold', async () => {
@@ -209,6 +243,24 @@ test('generate runs a forced digest and echoes the outcome', async () => {
 	expect(res).toMatchObject({ ok: true, scope: 'digest' });
 });
 
+test('generate reports that an incomplete historical batch continues under cron on manual cadence', async () => {
+	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1, feedbackCadence: 'manual', feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z' });
+	mocks.generateFeedbackDigest.mockResolvedValue({ status: 'complete', findings: 1, commentsClassified: 4, historyRemaining: true });
+
+	const result = await actions.generate({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);
+
+	expect(result).toMatchObject({ ok: true, scope: 'digest', message: expect.stringContaining('Historical analysis continues in the background on the next cron tick.') });
+});
+
+test('generate explains an empty history page continues from its next cron checkpoint', async () => {
+	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z' });
+	mocks.generateFeedbackDigest.mockResolvedValue({ status: 'empty', historyRemaining: true });
+
+	const result = await actions.generate({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);
+
+	expect(result).toMatchObject({ ok: true, scope: 'digest', message: 'This history page was scanned. The next page continues on the next cron tick.' });
+});
+
 test('generate refuses a disabled channel before calling the job', async () => {
 	await seedChannel('UC1', 'org-1', { feedbackEnabled: 0 });
 	const res = await actions.generate({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);
@@ -274,6 +326,7 @@ test('generate rejects a cross-org channel with 404', async () => {
 // orgs) — arming or triggering that spend is owner-only, same as every other
 // money-moving action (codeant security finding).
 const MEMBER = { ...OWNER, orgRole: 'member' as const };
+const ADMIN = { ...OWNER, orgRole: 'admin' as const };
 
 test('settings rejects a non-owner member with 403 — arming credit spend is owner-only', async () => {
 	await seedChannel('UC1');
@@ -290,6 +343,117 @@ test('generate rejects a non-owner member with 403 before calling the job', asyn
 		actions.generate({ params: { id: 'UC1' }, locals: { user: MEMBER } } as never)
 	).rejects.toMatchObject({ status: 403 });
 	expect(mocks.generateFeedbackDigest).not.toHaveBeenCalled();
+});
+
+test('analyzeHistory queues one independent feedback checkpoint without running moderation synchronously', async () => {
+	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1, cursor: '2026-06-01T00:00:00.000Z', nextPageToken: 'live-page' });
+
+	const result = await postFeedbackAction('analyzeHistory', 'UC1', { months: '3' });
+
+	expect(result).toMatchObject({ ok: true, scope: 'history', message: 'Historical feedback analysis queued. Cron processes up to 100 comments per batch without changing moderation.' });
+	const channel = (await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())!;
+	expect(Date.parse(channel.feedbackHistoryBoundary ?? '')).toBeGreaterThan(Date.now() - 91 * 24 * 60 * 60 * 1000);
+	expect(Date.parse(channel.feedbackHistoryBoundary ?? '')).toBeLessThanOrEqual(Date.now() - 89 * 24 * 60 * 60 * 1000);
+	expect(channel.feedbackHistoryPageToken).toBeNull();
+	expect(channel.cursor).toBe('2026-06-01T00:00:00.000Z');
+	expect(channel.nextPageToken).toBe('live-page');
+	expect(mocks.generateFeedbackDigest).not.toHaveBeenCalled();
+});
+
+test('analyzeHistory will not reset an active feedback job or charge it again', async () => {
+	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryPageToken: 'page-2' });
+
+	const result = await postFeedbackAction('analyzeHistory', 'UC1', { months: '1' });
+
+	expect(result).toMatchObject({ status: 409, data: { scope: 'history' } });
+	expect(await testDb().db.select({ id: channels.id }).from(channels).where(and(eq(channels.id, 'UC1'), eq(channels.feedbackHistoryBoundary, '2025-01-01T00:00:00.000Z'), eq(channels.feedbackHistoryPageToken, 'page-2'))).all()).toHaveLength(1);
+});
+
+test.each([
+	{ label: 'dry-run deployment', dryRun: 'true', active: 1, enabled: 1 },
+	{ label: 'disabled feedback', dryRun: 'false', active: 1, enabled: 0 },
+	{ label: 'paused channel', dryRun: 'false', active: 0, enabled: 1 }
+])('analyzeHistory rejects a $label before checkpointing', async ({ dryRun, active, enabled }) => {
+	mocks.env.DRY_RUN = dryRun;
+	await seedChannel('UC1', 'org-1', { active, feedbackEnabled: enabled });
+
+	const result = await postFeedbackAction('analyzeHistory', 'UC1', { months: '3' });
+
+	expect(result).toMatchObject({ status: 409, data: { scope: 'history' } });
+	expect((await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())?.feedbackHistoryBoundary).toBeNull();
+});
+
+test('analyzeHistory rejects invalid windows and callers without owner access', async () => {
+	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1 });
+	expect(await postFeedbackAction('analyzeHistory', 'UC1', { months: 'all' })).toMatchObject({ status: 400 });
+	await expect(postFeedbackAction('analyzeHistory', 'UC1', { months: '3' }, null)).rejects.toMatchObject({ status: 401 });
+	await expect(postFeedbackAction('analyzeHistory', 'UC1', { months: '3' }, MEMBER)).rejects.toMatchObject({ status: 403 });
+	await expect(postFeedbackAction('analyzeHistory', 'UC1', { months: '3' }, ADMIN)).rejects.toMatchObject({ status: 403 });
+	mocks.env.DRY_RUN = 'invalid';
+	await expect(postFeedbackAction('analyzeHistory', 'UC1', { months: '3' })).rejects.toMatchObject({ status: 500 });
+	expect((await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())?.feedbackHistoryBoundary).toBeNull();
+	mocks.env.DRY_RUN = 'false';
+	await seedChannel('UC2', 'org-2', { feedbackEnabled: 1 });
+	await expect(postFeedbackAction('analyzeHistory', 'UC2', { months: '3' })).rejects.toMatchObject({ status: 404 });
+	expect(mocks.generateFeedbackDigest).not.toHaveBeenCalled();
+});
+
+test('feedback dry run returns a sanitized preview, claims its one-time allowance, and denies repeats', async () => {
+	mocks.env.DRY_RUN = 'true';
+	await seedChannel('UC1');
+	const preview = { commentsClassified: 2, commentsFailed: 1, pooled: 1, hasMore: true, findings: [{ category: 'question', summary: '2 viewers asked about timing', supporterCount: 2, evidence: [{ sanitizedExcerpt: 'When is it?', hasAbuse: 0 }] }] };
+	mocks.previewFeedbackDigest.mockResolvedValue(preview);
+
+	const result = await postFeedbackAction('dryRun', 'UC1', { months: 'all' });
+
+	expect(mocks.previewFeedbackDigest).toHaveBeenCalledWith('UC1', { boundary: '1970-01-01T00:00:00.000Z', deadline: expect.any(Number) });
+	expect(result).toMatchObject({ ok: true, scope: 'feedbackDryRun', dryRunUsed: true, preview, message: 'Free feedback dry run complete. Limited to 1 per channel; no credits used.' });
+	let channel = (await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())!;
+	expect(channel.feedbackDryRunUsedAt).toBeTruthy();
+	expect(channel.leaseExpiresAt).toBeNull();
+
+	const denied = await postFeedbackAction('dryRun', 'UC1', { months: '3' });
+	expect(denied).toMatchObject({ status: 409, data: { scope: 'feedbackDryRun', error: expect.stringContaining('Limited to 1 free feedback dry run') } });
+	expect(mocks.previewFeedbackDigest).toHaveBeenCalledTimes(1);
+	channel = (await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())!;
+	expect(channel.feedbackDryRunUsedAt).toBeTruthy();
+	expect(channel.leaseExpiresAt).toBeNull();
+});
+
+test('a failed feedback preview consumes its allowance and returns only a sanitized error', async () => {
+	await seedChannel('UC1');
+	mocks.previewFeedbackDigest.mockRejectedValue(new Error('private provider response token-123'));
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		const result = await postFeedbackAction('dryRun', 'UC1', { months: '3' });
+		expect(result).toMatchObject({ status: 502, data: { scope: 'feedbackDryRun', attempted: true, error: expect.stringContaining('one free preview') } });
+		expect(JSON.stringify(result)).not.toContain('token-123');
+		expect(errorSpy).toHaveBeenCalledWith('feedback dry run failed for channel:', 'UC1', expect.any(Error));
+		expect((await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())).toMatchObject({ feedbackDryRunUsedAt: expect.any(String), leaseExpiresAt: null });
+		expect(await postFeedbackAction('dryRun', 'UC1', { months: '3' })).toMatchObject({ status: 409 });
+		expect(mocks.previewFeedbackDigest).toHaveBeenCalledTimes(1);
+	} finally {
+		errorSpy.mockRestore();
+	}
+});
+
+test('feedback dry run validates access and inputs before claiming its allowance', async () => {
+	await seedChannel('UC1');
+	await expect(postFeedbackAction('dryRun', 'UC1', { months: '2' }, null)).rejects.toMatchObject({ status: 401 });
+	await expect(postFeedbackAction('dryRun', 'UC1', { months: '3' }, MEMBER)).rejects.toMatchObject({ status: 403 });
+	await expect(postFeedbackAction('dryRun', 'UC1', { months: '3' }, ADMIN)).rejects.toMatchObject({ status: 403 });
+	expect(await postFeedbackAction('dryRun', 'UC1', { months: '7' })).toMatchObject({ status: 400 });
+	mocks.env.DRY_RUN = 'invalid';
+	await expect(postFeedbackAction('dryRun', 'UC1', { months: '3' })).rejects.toMatchObject({ status: 500 });
+	await seedChannel('UCpaused', 'org-1', { active: 0 });
+	mocks.env.DRY_RUN = 'false';
+	expect(await postFeedbackAction('dryRun', 'UCpaused', { months: '3' })).toMatchObject({ status: 409 });
+	await seedChannel('UC2', 'org-2');
+	await expect(postFeedbackAction('dryRun', 'UC2', { months: '3' })).rejects.toMatchObject({ status: 404 });
+	for (const id of ['UC1', 'UCpaused', 'UC2']) {
+		expect((await testDb().db.select().from(channels).where(eq(channels.id, id)).get())?.feedbackDryRunUsedAt).toBeNull();
+	}
+	expect(mocks.previewFeedbackDigest).not.toHaveBeenCalled();
 });
 
 function postReveal(
@@ -330,6 +494,20 @@ async function seedRevealEvidence(channelId: string, commentId: string, text: st
 		.returning({ id: findingEvidence.id });
 	return evidence.id;
 }
+
+test('historical-only evidence stays concealed on load and reveals only after the abusive-content confirmation', async () => {
+	await seedChannel('UC1');
+	const raw = 'historical source with abusive wording';
+	await testDb().db.insert(feedbackHistoryComments).values({ id: 'history-c1', channelId: 'UC1', text: raw, publishedAt: '2025-01-01T00:00:00.000Z' });
+	const digestId = await seedDigest('UC1');
+	const [finding] = await testDb().db.insert(feedbackFindings).values({ digestId, category: 'criticism', summary: 'Two viewers reported a problem', supporterCount: 2 }).returning({ id: feedbackFindings.id });
+	const [evidence] = await testDb().db.insert(findingEvidence).values({ findingId: finding.id, commentId: 'history-c1', sanitizedExcerpt: 'concealed excerpt', hasAbuse: 1 }).returning({ id: findingEvidence.id });
+
+	const loaded = await callLoad('UC1');
+	expect(JSON.stringify(loaded)).not.toContain(raw);
+	expect(await postReveal('UC1', String(evidence.id))).toEqual({ scope: 'reveal', evidenceId: evidence.id, confirmationRequired: true });
+	await expect(postReveal('UC1', String(evidence.id), OWNER, 'yes')).resolves.toEqual({ scope: 'reveal', evidenceId: evidence.id, text: raw });
+});
 
 test('abusive evidence requires explicit confirmation before returning the raw comment', async () => {
 	await seedChannel('UC1');

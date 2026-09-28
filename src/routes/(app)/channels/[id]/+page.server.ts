@@ -4,6 +4,7 @@ import { getCredits } from '$lib/server/billing/ledger';
 import { decrypt } from '$lib/server/crypto';
 import { deleteChannelRecords } from '$lib/server/deletion';
 import { revokeGoogleToken } from '$lib/server/google';
+import { claimDryRun } from '$lib/server/dryRun';
 import { requireOrgRole } from '$lib/server/ownership';
 import { resolveOpenAiKey } from '$lib/server/openaiKey';
 import { runChannel } from '$lib/server/pipeline';
@@ -25,7 +26,7 @@ async function historyAccessError(orgId: string): Promise<'purchase' | 'key' | n
 	const org = await db.select({ plan: organizations.plan }).from(organizations).where(eq(organizations.id, orgId)).get();
 	if (!org) throw new Error(`organization not found: ${orgId}`);
 	if (org.plan === 'lifetime') {
-		return (await resolveOpenAiKey(orgId))?.trim() ? null : 'key';
+		return (await resolveOpenAiKey(orgId, { throwOnReadError: true }))?.trim() ? null : 'key';
 	}
 	return (await getCredits(orgId)) > 0 ? null : 'purchase';
 }
@@ -157,7 +158,7 @@ export const actions = {
 					channelId,
 					historyAccess,
 					error: historyAccess === 'key'
-						? 'Your lifetime deal requires your own OpenAI API key. Add it on the Team page before analyzing history.'
+						? 'Your lifetime deal requires your own OpenAI API key. An organization owner must add it on the Team page before analyzing history.'
 						: 'To analyze history, purchase credits, subscribe, or buy the lifetime deal and add your own OpenAI API key. If your credits or subscription allowance are exhausted, purchase more credits to continue.'
 				});
 			}
@@ -203,6 +204,12 @@ export const actions = {
 	},
 	dryRun: async ({ request, locals }) => {
 		const user = requireUser(locals);
+		// Same misconfiguration guard as analyzeHistory: anything besides
+		// exactly 'true'/'false' would pass silently into runChannel — fail
+		// loudly BEFORE any DB mutation.
+		if (env.DRY_RUN !== 'true' && env.DRY_RUN !== 'false') {
+			throw error(500, 'DRY_RUN must be set to exactly "true" or "false" — the deployment is misconfigured');
+		}
 		const f = await request.formData();
 		const channelId = String(f.get('channelId') ?? '');
 		// Same presets as Analyze history; absent → 3 (the UI default). 'all'
@@ -215,31 +222,21 @@ export const actions = {
 		// 'all' maps to the epoch boundary: no comment is ever older than it, and
 		// the non-null drain state keeps cron paging until YouTube runs out of pages.
 		const boundary = months === 'all' ? '1970-01-01T00:00:00.000Z' : monthsAgoBoundary(months);
-		// Atomic lease claim, same protocol as cron/analyzeHistory: the UPDATE's
-		// predicate makes concurrent claimants single-winner (TOCTOU-safe), and
-		// it doubles as the tenancy check — another team's channel matches 0
-		// rows and reads as "not found". The lease self-expires if this request
-		// dies mid-preview.
-		const myLease = new Date(Date.now() + 60_000).toISOString();
-		const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, new Date().toISOString()));
-		const claimed = await db
-			.update(channels)
-			.set({ leaseExpiresAt: myLease })
-			.where(and(eq(channels.id, channelId), eq(channels.orgId, user.orgId), claimable))
-			.returning({ id: channels.id });
-		if (claimed.length === 0) {
-			// Distinguish "not your channel" from "currently scanning": the extra
-			// read only happens on the failure path.
-			const existing = await db
-				.select({ id: channels.id })
-				.from(channels)
-				.where(and(eq(channels.id, channelId), eq(channels.orgId, user.orgId)))
-				.get();
-			if (existing) {
-				return fail(409, { scope: 'dryRun', channelId, error: 'This channel is mid-scan — retry in a minute.' });
-			}
-			return fail(404, { scope: 'dryRun', channelId, error: 'channel not found' });
+		// Atomic one-use claim: the UPDATE's predicate sets
+		// moderation_dry_run_used_at AND takes the lease in a single write, so
+		// concurrent claimants are single-winner (TOCTOU-safe) and the tenancy
+		// check rides the same predicate — another team's channel matches 0
+		// rows and reads as "not found". The lease self-expires if this
+		// request dies mid-preview. Burning the allowance on a failed attempt
+		// is deliberate — cheap retry abuse would otherwise be unlimited.
+		let claim: Awaited<ReturnType<typeof claimDryRun>>;
+		try {
+			claim = await claimDryRun(channelId, user.orgId, 'moderation');
+		} catch (cause) {
+			console.error('dry-run claim failed for channel:', channelId, cause);
+			return fail(500, { scope: 'dryRun', channelId, error: 'The dry run could not be started. Check the server log and try again.' });
 		}
+		if ('status' in claim) return fail(claim.status, { scope: 'dryRun', channelId, error: claim.error });
 		// First page synchronously (one page, hard 20 s ceiling); a window with
 		// more pages drains one page per cron invocation afterwards. The run
 		// writes nothing durable except dry-run audit rows (I8).
@@ -259,7 +256,7 @@ export const actions = {
 			// STILL holding our lease: if the preview overran it and cron
 			// claimed the channel mid-run, the drain state belongs to cron now
 			// and a 0-row update leaves it untouched.
-			const stillOurs = and(eq(channels.id, channelId), eq(channels.leaseExpiresAt, myLease));
+			const stillOurs = and(eq(channels.id, channelId), eq(channels.leaseExpiresAt, claim.lease));
 			const background = !result.skipped && result.windowComplete !== true;
 			if (result.windowComplete === true) {
 				await db
@@ -272,12 +269,18 @@ export const actions = {
 					.set({ dryRunBoundary: boundary, dryRunPageToken: result.windowNextPageToken ?? null })
 					.where(stillOurs);
 			}
-			return { ok: true as const, scope: 'dryRun', channelId, months, ...result, background };
+			return { ok: true as const, scope: 'dryRun', channelId, months, dryRunUsed: true, ...result, background };
 		} catch (e) {
 			// Loud server-side, generic client-side — never return raw
-			// YouTube/OpenAI error detail to the browser.
+			// YouTube/OpenAI error detail to the browser. attempted:true tells
+			// the page the one-use allowance was spent even though it failed.
 			console.error('dry run failed for channel:', channelId, e);
-			return fail(502, { scope: 'dryRun', channelId, error: 'The dry run failed — check the server log and try again.' });
+			return fail(502, {
+				scope: 'dryRun',
+				channelId,
+				attempted: true,
+				error: 'The dry run failed. This attempt used your one free moderation preview; no credits were charged. Check the server log.'
+			});
 		} finally {
 			// Release only OUR lease: if the preview overran it and cron claimed
 			// the channel in between, that lease is untouched. lastRunAt is
@@ -285,7 +288,7 @@ export const actions = {
 			await db
 				.update(channels)
 				.set({ leaseExpiresAt: null })
-				.where(and(eq(channels.id, channelId), eq(channels.leaseExpiresAt, myLease)));
+				.where(and(eq(channels.id, channelId), eq(channels.leaseExpiresAt, claim.lease)));
 		}
 	},
 	disconnectChannel: async ({ request, locals }) => {

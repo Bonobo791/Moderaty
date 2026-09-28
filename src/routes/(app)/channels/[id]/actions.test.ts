@@ -258,7 +258,7 @@ test.each([
 				scope: 'history',
 				channelId: 'UC1',
 				historyAccess: 'key',
-				error: expect.stringContaining('Your lifetime deal requires your own OpenAI API key')
+				error: 'Your lifetime deal requires your own OpenAI API key. An organization owner must add it on the Team page before analyzing history.'
 			}
 		});
 		expect(await channelById('UC1')).toEqual(before);
@@ -350,6 +350,34 @@ test('an access-check database failure returns a sanitized 503 without changing 
 		});
 		expect(res.data.error).not.toContain('database read unavailable');
 		expect(errorSpy).toHaveBeenCalledWith('history analysis access check failed:', 'UC1', expect.any(Error));
+		expect(mocks.runChannel).not.toHaveBeenCalled();
+	} finally {
+		selectSpy.mockRestore();
+		errorSpy.mockRestore();
+	}
+	expect(await channelById('UC1')).toEqual(before);
+});
+
+test('a lifetime key database failure returns 503 rather than asking for a key', async () => {
+	await updateOrg('org-1', { plan: 'lifetime', creditsRemaining: 0, openaiKeyEnc: encrypt('synthetic lifetime fixture') });
+	await seedHistoryChannelState();
+	const before = await channelById('UC1');
+	const outage = new Error('private database outage detail');
+	const originalSelect = testDb().db.select.bind(testDb().db);
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	const selectSpy = vi.spyOn(testDb().db, 'select')
+		.mockImplementationOnce(originalSelect)
+		.mockImplementationOnce(originalSelect)
+		.mockImplementationOnce(() => { throw outage; });
+	try {
+		const res = await analyzeHistory('UC1', '3');
+		expect(res).toMatchObject({
+			status: 503,
+			data: { scope: 'history', channelId: 'UC1', error: 'Could not verify access to history analysis. Please try again.' }
+		});
+		expect(res).not.toMatchObject({ data: { historyAccess: 'key' } });
+		expect(JSON.stringify(res)).not.toContain(outage.message);
+		expect(errorSpy).toHaveBeenCalledWith('history analysis access check failed:', 'UC1', outage);
 		expect(mocks.runChannel).not.toHaveBeenCalled();
 	} finally {
 		selectSpy.mockRestore();
@@ -716,13 +744,27 @@ test('dry run previews a live deployment through runChannel and echoes the count
 	const boundary = Date.parse(mocks.runChannel.mock.calls[0][1].window.boundary as string);
 	expect(boundary).toBeLessThanOrEqual(before - 90 * 24 * 60 * 60 * 1000 + 5_000);
 	expect(boundary).toBeGreaterThanOrEqual(after - 90 * 24 * 60 * 60 * 1000 - 5_000);
-	expect(res).toMatchObject({ ok: true, scope: 'dryRun', channelId: 'UC1', months: 3, fetched: 3, acted: 1, queued: 1, dryRun: true, background: false });
+	expect(res).toMatchObject({ ok: true, scope: 'dryRun', channelId: 'UC1', months: 3, fetched: 3, acted: 1, queued: 1, dryRun: true, background: false, dryRunUsed: true });
 	// The preview takes the cron lease atomically and releases it afterwards;
 	// a preview is not a run, so lastRunAt is never touched.
 	const ch = await channelById('UC1');
 	expect(ch?.leaseExpiresAt).toBeNull();
 	expect(ch?.lastRunAt).toBeNull();
+	expect(ch?.moderationDryRunUsedAt).toBeTruthy();
+	expect(ch?.feedbackDryRunUsedAt).toBeNull();
 	expect(await drainStateOf('UC1')).toEqual({ boundary: null, pageToken: null });
+});
+
+test('deployment DRY_RUN still permits the one-time dashboard preview', async () => {
+	mocks.env.DRY_RUN = 'true';
+	await seedChannel('UC1');
+	mocks.runChannel.mockResolvedValue(dryRunResult({ fetched: 1, windowComplete: true }));
+
+	const result = await dryRun('UC1');
+
+	expect(result).toMatchObject({ ok: true, dryRunUsed: true });
+	expect(mocks.runChannel).toHaveBeenCalledWith('UC1', expect.objectContaining({ forceDryRun: true }));
+	expect((await channelById('UC1'))?.moderationDryRunUsedAt).toBeTruthy();
 });
 
 test('dry run remains available without purchased credits and persists its continuation', async () => {
@@ -747,7 +789,13 @@ test('dry run remains available without purchased credits and persists its conti
 	const ch = await channelById('UC1');
 	expect(ch?.dryRunBoundary).toBe(window.boundary);
 	expect(ch?.dryRunPageToken).toBe('preview-next');
+	expect(ch?.moderationDryRunUsedAt).toBeTruthy();
 	expect((await testDb().db.select({ creditsRemaining: organizations.creditsRemaining }).from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBeNull();
+
+	const retry = await dryRun('UC1', OWNER, '6');
+	expect(retry).toMatchObject({ status: 409, data: { error: 'Limited to 1 free moderation dry run per channel. This channel has already used it.' } });
+	expect(mocks.runChannel).toHaveBeenCalledTimes(1);
+	expect(await drainStateOf('UC1')).toEqual({ boundary: ch?.dryRunBoundary, pageToken: 'preview-next' });
 });
 
 test('dry run rejects a signed-out request with 401 and never runs', async () => {
@@ -769,6 +817,16 @@ test('dry run rejects a channel owned by another team with 404 and never runs', 
 	expect(mocks.runChannel).not.toHaveBeenCalled();
 });
 
+test('moderation dry run retains the existing organization-member permission', async () => {
+	await seedChannel('UC1');
+	mocks.runChannel.mockResolvedValue(dryRunResult({ windowComplete: true }));
+	const member = { ...OWNER, orgRole: 'member' as const };
+
+	const result = await actions.dryRun({ request: postForm({ channelId: 'UC1' }), locals: { user: member } } as never);
+
+	expect(result).toMatchObject({ ok: true, scope: 'dryRun', dryRunUsed: true });
+});
+
 test('dry run refuses to race a cron run holding the channel lease (409)', async () => {
 	await seedChannel('UC1');
 	await testDb().db.update(channels).set({ leaseExpiresAt: '2099-01-01T00:00:00.000Z' }).where(eq(channels.id, 'UC1'));
@@ -777,9 +835,44 @@ test('dry run refuses to race a cron run holding the channel lease (409)', async
 
 	expect(res).toMatchObject({
 		status: 409,
-		data: { scope: 'dryRun', channelId: 'UC1', error: 'This channel is mid-scan — retry in a minute.' }
+		data: { scope: 'dryRun', channelId: 'UC1', error: 'This channel is busy. Retry in a minute.' }
 	});
 	expect(mocks.runChannel).not.toHaveBeenCalled();
+});
+
+test('invalid env, invalid window, paused channel, and busy lease do not consume the moderation preview', async () => {
+	await seedChannel('UC-invalid-env');
+	await seedChannel('UC-invalid-window');
+	await seedChannel('UC-paused');
+	await seedChannel('UC-busy');
+	await testDb().db.update(channels).set({ active: 0 }).where(eq(channels.id, 'UC-paused'));
+	await testDb().db.update(channels).set({ leaseExpiresAt: '2099-01-01T00:00:00.000Z' }).where(eq(channels.id, 'UC-busy'));
+
+	mocks.env.DRY_RUN = 'invalid';
+	await expect(dryRun('UC-invalid-env')).rejects.toMatchObject({ status: 500 });
+	mocks.env.DRY_RUN = 'false';
+	expect(await dryRun('UC-invalid-window', OWNER, '7')).toMatchObject({ status: 400 });
+	expect(await dryRun('UC-paused')).toMatchObject({ status: 409, data: { error: 'This channel is paused. Resume it before running a dry run.' } });
+	expect(await dryRun('UC-busy')).toMatchObject({ status: 409, data: { error: 'This channel is busy. Retry in a minute.' } });
+	expect(mocks.runChannel).not.toHaveBeenCalled();
+	for (const id of ['UC-invalid-env', 'UC-invalid-window', 'UC-paused', 'UC-busy']) {
+		expect((await channelById(id))?.moderationDryRunUsedAt).toBeNull();
+	}
+});
+
+test('concurrent moderation previews have one winner and invoke the provider once', async () => {
+	await seedChannel('UC1');
+	mocks.runChannel.mockImplementation(async () => {
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		return dryRunResult({ windowComplete: true });
+	});
+
+	const results = await Promise.all([dryRun('UC1'), dryRun('UC1')]);
+
+	expect(results.filter((result) => 'ok' in result && result.ok)).toHaveLength(1);
+	expect(results.filter((result) => 'status' in result && result.status === 409)).toHaveLength(1);
+	expect(mocks.runChannel).toHaveBeenCalledTimes(1);
+	expect((await channelById('UC1'))?.moderationDryRunUsedAt).toBeTruthy();
 });
 
 test('a failed dry run is loud on the server and a generic 502 to the client', async () => {
@@ -787,13 +880,14 @@ test('a failed dry run is loud on the server and a generic 502 to the client', a
 	mocks.runChannel.mockRejectedValue(new Error('raw upstream detail: invalid_grant abc123'));
 	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
 	try {
-		const res = (await dryRun('UC1')) as { status: number; data: { error: string } };
+		const res = (await dryRun('UC1')) as unknown as { status: number; data: { attempted: boolean; error: string } };
 
 		expect(res.status).toBe(502);
 		expect(res.data).toEqual({
 			scope: 'dryRun',
 			channelId: 'UC1',
-			error: 'The dry run failed — check the server log and try again.'
+			attempted: true,
+			error: 'The dry run failed. This attempt used your one free moderation preview; no credits were charged. Check the server log.'
 		});
 		expect(res.data.error).not.toContain('invalid_grant');
 		expect(spy).toHaveBeenCalledWith('dry run failed for channel:', 'UC1', expect.any(Error));

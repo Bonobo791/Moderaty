@@ -10,6 +10,11 @@
 	autoRefresh();
 
 	const ch = $derived(data.ch);
+	const dryRunForm = $derived(form as { scope?: string; attempted?: boolean; dryRunUsed?: boolean } | null | undefined);
+	const moderationPreviewUsed = $derived(
+		ch.moderationDryRunUsed ||
+			(dryRunForm?.scope === 'dryRun' && (dryRunForm.attempted === true || dryRunForm.dryRunUsed === true))
+	);
 
 	// True while the dry-run preview is in flight; the button is disabled
 	// while it runs (the action's lease claim also 409s a server-side race).
@@ -117,6 +122,11 @@
 {#if form?.scope === 'pause' && form?.error}
 	<p class="error-box" role="alert">{form.error}</p>
 {/if}
+<div class="preview-limit" role="note">
+	<strong>Limited to 1 free moderation dry run per channel.</strong>
+	<p>This allowance is used when a run starts, even if it later fails. No credits are charged.</p>
+	{#if moderationPreviewUsed}<p>Moderation preview already used. This channel has used its moderation preview allowance.</p>{/if}
+</div>
 {#key ch.id}
 	<SensitivitySwitch channelId={ch.id} channelTitle={ch.title} level={ch.toneLevel ?? 1} />
 {/key}
@@ -210,7 +220,7 @@
 				{#if 'historyAccess' in form && form.historyAccess === 'purchase'}
 					<a href="/usage">View plans and credits</a>
 				{:else if 'historyAccess' in form && form.historyAccess === 'key'}
-					<a href="/org">Add your OpenAI key on the Team page</a>
+					<a href="/org">OpenAI key setup on the Team page</a>
 				{/if}
 			</p>
 		{:else if form?.ok}
@@ -224,37 +234,50 @@
 			History scan in progress — cron is working through the backlog and new comments flow into the review queue as it drains. This runs in the background: refreshing or leaving this page won't stop it.
 		</p>
 	{/if}
-	<form
-		method="POST"
-		action="?/dryRun"
-		class="history-form"
-		use:enhance={() => {
-			dryRunPending = true;
-			return async ({ update }) => {
-				await update();
-				dryRunPending = false;
-			};
-		}}
-	>
-		<input type="hidden" name="channelId" value={ch.id} />
-		<label for="dryrun-months-{ch.id}">Dry run</label>
-		<select id="dryrun-months-{ch.id}" name="months" aria-label="How far back the dry run covers on {ch.title}">
-			<option value="1">last month</option>
-			<option value="3" selected>last 3 months</option>
-			<option value="6">last 6 months</option>
-			<option value="12">last 12 months</option>
-			<option value="24">last 24 months</option>
-			<option value="all">all time</option>
-		</select>
-		<button
-			class="btn secondary small"
-			type="submit"
-			disabled={dryRunPending}
-			aria-label="Run a dry-run preview on {ch.title}"
-		>
-			{dryRunPending ? 'Running dry run…' : 'Dry run'}
+	{#if ch.dryRunScanning}
+		<p class="muted" role="status">
+			{ch.active === 0
+				? 'The saved preview window is paused with this channel and will continue when moderation resumes.'
+				: 'Your one allowed moderation preview is continuing through the selected window in the background; cron drains the remaining pages automatically.'}
+		</p>
+	{/if}
+	{#if moderationPreviewUsed}
+		<button class="btn secondary small" type="button" disabled aria-label="Run a dry-run preview on {ch.title}">
+			Moderation preview already used
 		</button>
-	</form>
+	{:else}
+		<form
+			method="POST"
+			action="?/dryRun"
+			class="history-form"
+			use:enhance={() => {
+				dryRunPending = true;
+				return async ({ update }) => {
+					await update();
+					dryRunPending = false;
+				};
+			}}
+		>
+			<input type="hidden" name="channelId" value={ch.id} />
+			<label for="dryrun-months-{ch.id}">Dry run</label>
+			<select id="dryrun-months-{ch.id}" name="months" aria-label="How far back the dry run covers on {ch.title}">
+				<option value="1">last month</option>
+				<option value="3" selected>last 3 months</option>
+				<option value="6">last 6 months</option>
+				<option value="12">last 12 months</option>
+				<option value="24">last 24 months</option>
+				<option value="all">all time</option>
+			</select>
+			<button
+				class="btn secondary small"
+				type="submit"
+				disabled={dryRunPending}
+				aria-label="Run a dry-run preview on {ch.title}"
+			>
+				{dryRunPending ? 'Running dry run…' : 'Dry run'}
+			</button>
+		</form>
+	{/if}
 	{#if form?.scope === 'dryRun'}
 		{#if form?.error}
 			<p class="error-box" role="alert">{form.error}</p>
@@ -265,6 +288,7 @@
 				Dry run preview ({form.months === 'all' ? 'all time' : form.months === 1 ? 'last month' : `last ${form.months} months`}): {form.fetched} comment{form.fetched === 1 ? '' : 's'} scanned —
 				{form.acted} would be acted on, {form.queued} would go to the review queue.
 				{#if form.partial}Partial — the 20 s preview limit was hit; see the audit log for what completed. {/if}
+				{#if form.background}The remaining pages in this selected window will continue under cron. {/if}
 				<a href="/channels/{ch.id}/log">See the audit log</a>.
 			</p>
 		{/if}
@@ -293,6 +317,19 @@
 {/if}
 
 <style>
+	.preview-limit {
+		padding: 16px 18px;
+		margin: 0 0 24px;
+		border: 1px solid var(--line);
+		border-radius: 8px;
+		background: var(--surface);
+		line-height: 1.5;
+	}
+	.preview-limit p {
+		margin: 6px 0 0;
+		color: var(--text-2);
+		font-size: 0.85rem;
+	}
 	.history-form {
 		display: flex;
 		gap: 8px;

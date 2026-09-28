@@ -25,7 +25,10 @@ import { organizations } from '$lib/server/db/schema';
  * the scorers throw loudly on a missing key and the comment lands in the
  * human review queue (I11).
  */
-export async function resolveOpenAiKey(orgId: string | null): Promise<string | undefined> {
+export async function resolveOpenAiKey(
+	orgId: string | null,
+	{ throwOnReadError = false }: { throwOnReadError?: boolean } = {}
+): Promise<string | undefined> {
 	if (!orgId) return env.OPENAI_API_KEY;
 	let enc: string | null | undefined;
 	let plan: string | undefined;
@@ -41,6 +44,7 @@ export async function resolveOpenAiKey(orgId: string | null): Promise<string | u
 		// plan is unreadable, so fail closed exactly like a failed read: the
 		// org could be lifetime and the deployment key is not theirs to burn.
 		if (!row) {
+			if (throwOnReadError) throw new Error(`organization not found: ${orgId}`);
 			console.error('organization not found — plan unknown, so no deployment-key fallback (a lifetime org would burn it)', { orgId });
 			return undefined;
 		}
@@ -51,6 +55,7 @@ export async function resolveOpenAiKey(orgId: string | null): Promise<string | u
 		// the org could be lifetime — returning the deployment key here would
 		// spend operator money the Terms promise never to spend (codeant P1).
 		console.error('failed to read the stored OpenAI key — plan unknown, so no deployment-key fallback (a lifetime org would burn it)', { orgId, error });
+		if (throwOnReadError) throw error;
 		return undefined;
 	}
 	if (!enc) {

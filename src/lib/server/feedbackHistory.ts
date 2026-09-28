@@ -87,6 +87,8 @@ export async function advanceFeedbackHistory(
 		.where(
 			and(
 				eq(channels.id, channel.id),
+				eq(channels.active, 1),
+				eq(channels.feedbackEnabled, 1),
 				channel.orgId === null ? isNull(channels.orgId) : eq(channels.orgId, channel.orgId),
 				channel.leaseExpiresAt === null ? isNull(channels.leaseExpiresAt) : eq(channels.leaseExpiresAt, channel.leaseExpiresAt),
 				eq(channels.feedbackHistoryBoundary, channel.feedbackHistoryBoundary),

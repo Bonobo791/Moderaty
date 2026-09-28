@@ -79,6 +79,7 @@ export async function resolveOpenAiKey(
 		// Only a lifetime org reaches this point — a corrupt stored key
 		// resolves nothing rather than spending the deployment key.
 		console.error('stored OpenAI key failed to decrypt — no deployment-key fallback on the lifetime plan', { orgId, error });
+		if (throwOnReadError) throw error;
 		return undefined;
 	}
 }

@@ -144,6 +144,15 @@ test('a lifetime org with a CORRUPT stored key gets nothing either — never the
 	);
 });
 
+test('a corrupt stored key propagates when read failures are requested — verification failure, not a missing key', async () => {
+	// Access gates (history analysis) ask for loud reads so corrupt ciphertext
+	// surfaces as "could not verify" instead of the misleading "configure a
+	// key" that an undefined resolve would report.
+	await seedOrg('org-lifetime-corrupt-flag', 'not-valid-ciphertext', 'lifetime');
+	vi.spyOn(console, 'error').mockImplementation(() => {});
+	await expect(resolveOpenAiKey('org-lifetime-corrupt-flag', { throwOnReadError: true })).rejects.toThrow();
+});
+
 test('a lifetime org WITH a stored key scores on it', async () => {
 	await seedOrg('org-lifetime-key', encrypt('sk-lifetime-key'), 'lifetime');
 	expect(await resolveOpenAiKey('org-lifetime-key')).toBe('sk-lifetime-key');

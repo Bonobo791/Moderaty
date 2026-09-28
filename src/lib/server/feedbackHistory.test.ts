@@ -117,6 +117,7 @@ test('pendingStoredFeedback excludes IDs already completed from YouTube history'
 
 test('advanceFeedbackHistory changes only feedback history checkpoints and rejects a stolen lease', async () => {
 	const channel = await seedChannel({
+		feedbackEnabled: 1,
 		cursor: '2026-06-01T00:00:00.000Z', nextPageToken: 'moderation-page', scanCursor: 'scan',
 		historyBoundary: '2025-01-01T00:00:00.000Z', historyNextPageToken: 'moderation-history-page',
 		dryRunBoundary: '2026-03-01T00:00:00.000Z', dryRunPageToken: 'preview-page', leaseExpiresAt: '2099-01-01T00:00:00.000Z'
@@ -136,4 +137,21 @@ test('advanceFeedbackHistory changes only feedback history checkpoints and rejec
 	await expect(advanceFeedbackHistory(testDb().db, updated, { batch: [], nextPageToken: null, complete: true })).rejects.toThrow('checkpoint changed');
 	updated = (await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())!;
 	expect(updated.feedbackHistoryPageToken).toBe('page-next');
+});
+
+test('advanceFeedbackHistory aborts when the channel was paused or feedback disabled mid-scan', async () => {
+	// A pause or feedback opt-out mid-scan must abort the commit, exactly like
+	// assertChannelActive does for moderation writes — otherwise the page the
+	// owner asked to stop still advances the durable history checkpoint.
+	const channel = await seedChannel({ feedbackEnabled: 1, leaseExpiresAt: '2099-01-01T00:00:00.000Z' });
+	const page = { batch: [], nextPageToken: 'page-next', complete: false };
+
+	await testDb().db.update(channels).set({ active: 0 }).where(eq(channels.id, 'UC1'));
+	await expect(advanceFeedbackHistory(testDb().db, channel, page)).rejects.toThrow('checkpoint changed');
+
+	await testDb().db.update(channels).set({ active: 1, feedbackEnabled: 0 }).where(eq(channels.id, 'UC1'));
+	await expect(advanceFeedbackHistory(testDb().db, channel, page)).rejects.toThrow('checkpoint changed');
+
+	const updated = (await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())!;
+	expect(updated.feedbackHistoryPageToken).toBeNull();
 });

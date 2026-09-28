@@ -45,6 +45,17 @@ function clusterBody(user: string): string {
 	return JSON.stringify({ themes: [...themes.entries()].map(([claim, members]) => ({ claim, members })) });
 }
 
+/** Fetch calls whose user content lacks the 'Comment: ' marker — theme-merge requests. */
+function mergeCallBodies() {
+	return vi
+		.mocked(fetch)
+		.mock.calls.map((c) => JSON.parse(String(c[1]?.body)))
+		.filter(
+			(b) =>
+				!String(b.messages.find((m: { role: string }) => m.role === 'user')?.content).includes('Comment: ')
+		);
+}
+
 function installFetch() {
 	vi.stubGlobal(
 		'fetch',
@@ -263,11 +274,7 @@ test('the theme pass is bounded by the write reserve — a spent reserve aborts 
 	// are instant under the mock) but the merge request must not fire.
 	const result = await generateFeedbackDigest('UC1', { force: true, deadline: Date.now() + 2_000 });
 	expect(result).toMatchObject({ status: 'deferred', reason: 'deadline' });
-	const bodies = vi.mocked(fetch).mock.calls.map((c) => JSON.parse(String(c[1]?.body)));
-	const clusterCalls = bodies.filter((b) =>
-		!String(b.messages.find((m: { role: string }) => m.role === 'user')?.content).includes('Comment: ')
-	);
-	expect(clusterCalls).toHaveLength(0);
+	expect(mergeCallBodies()).toHaveLength(0);
 });
 
 test('a batch below the threshold in every enabled category skips the theme-merge call', async () => {
@@ -283,11 +290,7 @@ test('a batch below the threshold in every enabled category skips the theme-merg
 	CLUSTER_RAW = 'not json';
 	const result = await generateFeedbackDigest('UC1', { force: true });
 	expect(result).toMatchObject({ status: 'complete', findings: 0, pooled: 3 });
-	const mergeCalls = vi
-		.mocked(fetch)
-		.mock.calls.map((c) => JSON.parse(String(c[1]?.body)))
-		.filter((b) => !String(b.messages.find((m: { role: string }) => m.role === 'user')?.content).includes('Comment: '));
-	expect(mergeCalls).toHaveLength(0);
+	expect(mergeCallBodies()).toHaveLength(0);
 });
 
 test('per-comment classification failures are counted, not fatal', async () => {

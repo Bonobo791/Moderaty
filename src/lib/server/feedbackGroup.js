@@ -122,15 +122,17 @@ export function groupFeedback(comments, { categories, threshold = DEFAULT_THRESH
 		}
 	});
 	/**
-	 * Builds the ranked finding for a threshold-passing group.
-	 * @param {{ category: string, claim: string }} group
+	 * Ranks a group's supporters into evidence excerpts: safe-before-flagged
+	 * (a flagged verbatim would leak abuse onto the page — flagged evidence
+	 * conceals at sanitize time, so ordering it last keeps real wording in
+	 * view), then shorter, then recency, then id for determinism (MOD-70).
+	 * One excerpt per distinct wording — a repost adds no information; texts
+	 * that normalize to '' (emoji- or punctuation-only) fall back to the raw
+	 * wording or they would all collapse into one phantom excerpt.
 	 * @param {ClassifiedComment[]} members
-	 * @returns {GroupedFinding}
+	 * @returns {ClassifiedComment[]}
 	 */
-	function toFinding(group, members) {
-		// Evidence favors clean, short examples — the reader should see the
-		// clearest supporters first (MOD-70); flagged evidence conceals at
-		// sanitize time, so ordering it last keeps real wording in view.
+	function rankEvidence(members) {
 		const ranked = [...members].sort(
 			(a, b) =>
 				Number(a.hasAbuse) - Number(b.hasAbuse) ||
@@ -138,14 +140,19 @@ export function groupFeedback(comments, { categories, threshold = DEFAULT_THRESH
 				Date.parse(b.publishedAt) - Date.parse(a.publishedAt) ||
 				a.commentId.localeCompare(b.commentId)
 		);
-		// One excerpt per distinct wording — two identical supporters would
-		// render the same quote twice while adding no information. Texts that
-		// normalize to '' (emoji- or punctuation-only) fall back to the raw
-		// wording, or they would all collapse into one phantom excerpt.
 		const wordingKey = (/** @type {string} */ text) => normalizeClaimKey(text) || text.trim();
-		const evidence = ranked
+		return ranked
 			.filter((member, i, arr) => arr.findIndex((m) => wordingKey(m.text) === wordingKey(member.text)) === i)
 			.slice(0, MAX_EVIDENCE);
+	}
+
+	/**
+	 * Builds the ranked finding for a threshold-passing group.
+	 * @param {{ category: string, claim: string }} group
+	 * @param {ClassifiedComment[]} members
+	 * @returns {GroupedFinding}
+	 */
+	function toFinding(group, members) {
 		const latestAt = members.reduce(
 			(max, m) => (Date.parse(m.publishedAt) > Date.parse(max) ? m.publishedAt : max),
 			members[0].publishedAt
@@ -154,7 +161,7 @@ export function groupFeedback(comments, { categories, threshold = DEFAULT_THRESH
 			category: group.category,
 			summary: findingSummary(group.category, members.length, group.claim),
 			supporterCount: members.length,
-			evidence,
+			evidence: rankEvidence(members),
 			latestAt
 		};
 	}

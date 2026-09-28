@@ -147,6 +147,16 @@ test('a content-free canonical label over real input claims is malformed', async
 	).rejects.toThrow('feedback clustering response has missing or invalid themes');
 });
 
+test('a canonical label that sanitizes to nothing is malformed over real claims', async () => {
+	// 'fucking shit' is nonblank with a nonempty normalized key, but
+	// groupFeedback sanitizes it to '' and would pool every member —
+	// the same silent loss a content-free label causes (codex).
+	stubMerge({ themes: [{ claim: 'fucking shit', members: [0, 1] }] });
+	await expect(
+		clusterClaims([q('the audio is broken'), q('sound keeps cutting out')], undefined, 'test-openai-key')
+	).rejects.toThrow('feedback clustering response has missing or invalid themes');
+});
+
 test('a content-free canonical label may echo already content-free input claims', async () => {
 	// The classifier can emit '...' — echoing it back is pass-through that
 	// pools downstream, not a malformed response.

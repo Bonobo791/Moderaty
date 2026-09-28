@@ -4,6 +4,7 @@ import { fetchWithRetry, jsonResponse } from '$lib/server/http';
 import { buildClusterPrompt } from '$lib/server/feedbackPrompt';
 import { CLAIM_MAX_LENGTH, type FeedbackCategory } from '$lib/server/feedback';
 import { normalizeClaimKey } from '$lib/server/feedbackGroup';
+import { sanitizeClaim } from '$lib/server/feedbackSanitize.js';
 
 /**
  * AI theme pass for the feedback digest. Per-comment classification already
@@ -32,6 +33,11 @@ interface ClusterTheme {
 // model may legitimately echo one back — a tighter bound would reject
 // valid input, not just malformed output.
 const ERR_MALFORMED = 'feedback clustering response has missing or invalid themes';
+
+/** The identity groupFeedback pools on: abuse stripped, then normalized ('' pools). */
+function groupKey(text: string): string {
+	return normalizeClaimKey(sanitizeClaim(text));
+}
 
 function parseThemes(content: unknown): ClusterTheme[] {
 	let parsed: { themes?: unknown };
@@ -106,8 +112,9 @@ function validateTheme(theme: ClusterTheme): void {
 
 /**
  * Validates one member reference and returns its row. A canonical label
- * that normalizes to nothing is malformed unless the input it covers was
- * already content-free — echoing junk back lets it pool downstream, while
+ * that pools at regrouping — normalizes or sanitizes to nothing, e.g.
+ * pure abuse — is malformed unless the input it covers was already
+ * content-free: echoing junk back lets it pool downstream, while
  * inventing it would silently drop a real claim at regrouping (codex).
  */
 function memberRow(member: number, theme: ClusterTheme, rows: ClusterableClaim[], canonical: Map<number, string>): ClusterableClaim {
@@ -116,7 +123,7 @@ function memberRow(member: number, theme: ClusterTheme, rows: ClusterableClaim[]
 	}
 	const row = rows.at(member);
 	if (row === undefined) throw new TypeError(ERR_MALFORMED);
-	if (!normalizeClaimKey(theme.claim) && normalizeClaimKey(row.claim)) throw new TypeError(ERR_MALFORMED);
+	if (!groupKey(theme.claim) && groupKey(row.claim)) throw new TypeError(ERR_MALFORMED);
 	return row;
 }
 
@@ -144,10 +151,11 @@ function unionLinkedThemes(themeOf: Map<number, number>, rows: ClusterableClaim[
 	rows.forEach((row, i) => {
 		const themeIdx = themeOf.get(i);
 		if (themeIdx === undefined) throw new TypeError(ERR_MALFORMED);
-		const norm = normalizeClaimKey(row.claim);
-		// A content-free input cannot prove two themes equivalent — '...'
-		// and '!!!' share no semantics. Linking on the empty key would let a
-		// content-free label win a component and pool real claims (codex).
+		const norm = groupKey(row.claim);
+		// An input that would pool at regrouping cannot prove two themes
+		// equivalent — '...' and '!!!' share no semantics. Linking on the
+		// empty key would let a content-free label win a component and
+		// pool the real claims under it (codex).
 		if (!norm) return;
 		const inputKey = `${row.category} ${norm}`;
 		const first = themeByInput.get(inputKey);
@@ -180,10 +188,10 @@ function reconcileThemes(canonical: Map<number, string>, themeOf: Map<number, nu
 		const component = findRoot(parent, themeIdx);
 		const label = labelByComponent.get(component) ?? claim;
 		labelByComponent.set(component, label);
-		// A label normalizing to '' can only pool — sharing it across
-		// components is harmless, while sharing a real label merges
-		// provably distinct input groups into a false recurrence.
-		const labelNorm = normalizeClaimKey(label);
+		// A label that pools can be shared across components harmlessly;
+		// sharing a real label merges provably distinct input groups into
+		// a false recurrence.
+		const labelNorm = groupKey(label);
 		if (labelNorm) {
 			const labelKey = `${row.category} ${labelNorm}`;
 			const owner = componentByLabel.get(labelKey);

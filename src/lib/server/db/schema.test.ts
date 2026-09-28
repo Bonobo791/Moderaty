@@ -607,3 +607,27 @@ describe('finding_evidence', () => {
 		expectCreatedAtDefault(findingEvidence);
 	});
 });
+
+describe('feedback_history_comments', () => {
+	test('table shape: comment-id snapshot with no author identity', async () => {
+		const { feedbackHistoryComments } = await loadSchema();
+		expect(getTableConfig(feedbackHistoryComments).name).toBe('feedback_history_comments');
+		expectColumns(feedbackHistoryComments, {
+			id: { notNull: true, primary: true },
+			channel_id: { notNull: true },
+			text: { notNull: true },
+			published_at: { notNull: true }
+		});
+		// Privacy contract mirrors feedback_digests: a historical snapshot
+		// stores the comment text only — never author identity columns.
+		const names = getTableConfig(feedbackHistoryComments).columns.map((c) => c.name);
+		expect(names.some((n) => /author|handle|avatar/.test(n))).toBe(false);
+		// The id primary key is the dedupe anchor — no separate unique index.
+		expect(getTableConfig(feedbackHistoryComments).foreignKeys).toHaveLength(0);
+	});
+
+	test('channel index for pending-page selection', async () => {
+		const { feedbackHistoryComments } = await loadSchema();
+		expectIndex(feedbackHistoryComments, 'feedback_history_comments_channel_idx', ['channel_id']);
+	});
+});

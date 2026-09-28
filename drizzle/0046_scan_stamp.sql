@@ -1,0 +1,1 @@
+ALTER TABLE `comments` ADD `scan_id` text;

@@ -87,17 +87,20 @@ test('a rescan upserts the stored comment, re-pends its completed action, and ch
 		orgId: 'org-1', delta: -1, reason: 'consume', refType: 'comment', refId: 'c1', balanceAfter: 10
 	});
 
-	await stageDecisions('UC1', [holdDecision()], { orgId: 'org-1', expected: IDENTITY, rescan: { chargeScope: 'scan-1' } });
+	await stageDecisions('UC1', [holdDecision()], { orgId: 'org-1', expected: IDENTITY, rescan: { chargeScope: 'scan-1', scanStamp: 'scan-1' } });
 
 	const stored = await testDb().db.select().from(comments).all();
 	expect(stored).toHaveLength(1);
 	// Fresh verdict + refreshed text/publishedAt/rule/score fields; the
 	// feedback-digest marker AND createdAt are untouched (the upsert column
-	// list excludes both on purpose).
+	// list excludes both on purpose). scan_id takes the scan stamp — the
+	// durable marker a parked page or crash retry reads to skip this scan's
+	// already-staged work.
 	expect(stored[0]).toMatchObject({
 		id: 'c1', text: 'rescan text', publishedAt: '2024-01-01T00:00:00.000Z',
 		status: 'held', decidedBy: 'ai', matchedRuleId: null, aiScore: '{}',
-		createdAt: '2020-01-01T00:00:00.000Z', feedbackDigestedAt: '2025-01-01T00:00:00.000Z'
+		createdAt: '2020-01-01T00:00:00.000Z', feedbackDigestedAt: '2025-01-01T00:00:00.000Z',
+		scanId: 'scan-1'
 	});
 	const actions = await testDb().db.select().from(moderationActions).all();
 	// One action row per comment: the rescan's verdict replaces the completed

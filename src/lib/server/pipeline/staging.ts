@@ -88,16 +88,22 @@ function actionRows(channelId: string, decisions: Decision[]) {
 async function upsertRescannedCommentRows(
 	transaction: LedgerHandle,
 	channelId: string,
-	decisions: Decision[]
+	decisions: Decision[],
+	scanStamp: string | null | undefined
 ): Promise<void> {
 	// A user-requested history rescan re-decides stored comments on
 	// purpose: the row UPSERTS to the fresh verdict instead of the
 	// insert dying on the comments.id primary key. Text/publishedAt
 	// refresh too (the YouTube comment may have been edited); the
 	// original createdAt and the feedback-digest marker are kept.
+	// The scan stamp goes on the row itself: it is THE record that this
+	// scan already staged the comment — the parked-page/crash-retry filter
+	// reads it to skip verdicts that mint no credit anchor (rule/allowlist,
+	// unmetered orgs) as well as billed ones (codex).
+	const stamp = scanStamp ?? null;
 	await transaction
 		.insert(comments)
-		.values(commentRows(channelId, decisions))
+		.values(commentRows(channelId, decisions).map((row) => ({ ...row, scanId: stamp })))
 		.onConflictDoUpdate({
 			target: comments.id,
 			set: {
@@ -106,7 +112,8 @@ async function upsertRescannedCommentRows(
 				status: sql`excluded.status`,
 				decidedBy: sql`excluded.decided_by`,
 				matchedRuleId: sql`excluded.matched_rule_id`,
-				aiScore: sql`excluded.ai_score`
+				aiScore: sql`excluded.ai_score`,
+				scanId: sql`excluded.scan_id`
 			}
 		});
 }
@@ -251,7 +258,7 @@ export async function stageDecisions(channelId: string, decisions: Decision[], o
 		await assertChannelActive(channelId, transaction, options.expected);
 		const handle = transaction as LedgerHandle;
 		if (options.rescan) {
-			await upsertRescannedCommentRows(handle, channelId, decisions);
+			await upsertRescannedCommentRows(handle, channelId, decisions, options.rescan.scanStamp);
 		} else {
 			await transaction.insert(comments).values(commentRows(channelId, decisions));
 		}

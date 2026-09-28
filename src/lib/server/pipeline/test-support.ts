@@ -99,6 +99,10 @@ const mocks = vi.hoisted(() => {
 					state.onCommentsSelect?.(state.commentsSelectCalls);
 					const params = queryParams(condition);
 					const statusFilter = params.filter((param) => COMMENT_STATUSES.has(param as string));
+					// The rescan staged-marker read (eq comments.scan_id = stamp): a
+					// row only matches when its stamp equals the bound value — NULL
+					// never equals, like real SQL.
+					const scanFiltered = querySql(condition).includes('"comments"."scan_id"');
 					return [...new Set([
 						...state.existingIds,
 						...state.insertedComments.map((comment) => queryKey(comment.id))
@@ -111,9 +115,12 @@ const mocks = vi.hoisted(() => {
 						return {
 							id,
 							status: staged?.status ?? state.commentStatuses[id] ?? 'held',
-							decidedBy: staged?.decidedBy ?? state.commentDecidedBy[id] ?? 'ai'
+							decidedBy: staged?.decidedBy ?? state.commentDecidedBy[id] ?? 'ai',
+							scanId: staged?.scanId ?? null
 						};
-					}).filter((row) => params.includes(row.id) || (statusFilter.length > 0 && statusFilter.includes(row.status)));
+					}).filter((row) =>
+						(params.includes(row.id) || (statusFilter.length > 0 && statusFilter.includes(row.status)))
+						&& (!scanFiltered || params.includes(row.scanId)));
 				}
 				if (table === state.tables.auditLog) {
 					// Honor eq(channelId)/eq(commentId): rows matching both come back,

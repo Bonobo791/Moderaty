@@ -167,7 +167,18 @@ export async function runChannel(
 		// of the SAME scan stages covered. A null scan id is a drain planted
 		// before the nonce column existed — it still upserts, but keeps the
 		// plain comment-id anchors its earlier pages already minted (codex).
-		const rescan = channel.historyBoundary === null ? undefined : { chargeScope: channel.historyScanId };
+		// The scan stamp the upsert writes to comments.scan_id falls back to
+		// the boundary for those pre-nonce drains: the boundary is a stable
+		// per-drain identity and the column has no pre-existing values to
+		// collide with, so every drain — nonce or legacy — marks its own
+		// staged rows for the parked-page/crash-retry skip (codex).
+		const rescan =
+			channel.historyBoundary === null
+				? undefined
+				: {
+						chargeScope: channel.historyScanId,
+						scanStamp: channel.historyScanId ?? channel.historyBoundary
+					};
 
 		const { decisions, failures, deferred } = await decideNewComments(channelId, page, {
 			accessToken,
@@ -189,10 +200,10 @@ export async function runChannel(
 			// upsert) instead of being skipped.
 			rescore: window !== undefined || channel.historyBoundary !== null,
 			orgId: channel.orgId,
-			// The rescan's anchor scope lets the scorer recognize comments this
-			// scan already charged as prepaid instead of deferring them to a
-			// drained balance.
-			chargeScope: rescan?.chargeScope,
+			// The rescan's staging marker lets the scorer skip comments this
+			// scan already committed instead of re-scoring them on a parked
+			// page or a crash retry — billing-independent (codex).
+			scanStamp: rescan?.scanStamp,
 			// Live runs consume credits (and gate AI on them); dry runs never do.
 			consumeCredits: !dryRun
 		});

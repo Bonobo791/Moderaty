@@ -1,8 +1,8 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import { loadHandleSet } from '$lib/server/allowlist';
-import { commentChargeRef, getCredits, orgIsMetered } from '$lib/server/billing/ledger';
+import { getCredits, orgIsMetered } from '$lib/server/billing/ledger';
 import { db } from '$lib/server/db';
-import { comments, creditTransactions, rules } from '$lib/server/db/schema';
+import { comments, rules } from '$lib/server/db/schema';
 import { DeadlineExceededError } from '$lib/server/http';
 import { prepareRules } from '$lib/server/rules';
 import type { ToneProtections } from '$lib/server/tone';
@@ -52,31 +52,22 @@ export async function loadVideoContext(
  * matches staging's exactly, including the plain comment id a pre-nonce
  * drain charges.
  */
-async function loadPrepaidAnchors(
-	orgId: string,
+/** Which of this page's stored comment rows the ACTIVE rescan already staged.
+ * The upsert stamps comments.scan_id with the scan marker, so the marker — not
+ * the credit ledger — tracks staged work: rule/allowlist and unmetered-org
+ * verdicts mint no anchor but must skip just the same (codex). */
+async function loadStagedIds(
 	pageComments: CommentPage['comments'],
-	chargeScope: string | null | undefined
+	scanStamp: string
 ): Promise<Set<string>> {
-	const anchored = new Set(
+	return new Set(
 		(
 			await db
-				.select({ refId: creditTransactions.refId })
-				.from(creditTransactions)
-				.where(
-					and(
-						eq(creditTransactions.orgId, orgId),
-						eq(creditTransactions.refType, 'comment'),
-						inArray(
-							creditTransactions.refId,
-							pageComments.map((comment) => commentChargeRef(comment.id, chargeScope))
-						)
-					)
-				)
+				.select({ id: comments.id })
+				.from(comments)
+				.where(and(inArray(comments.id, pageComments.map((comment) => comment.id)), eq(comments.scanId, scanStamp)))
 				.all()
-		).map((row) => row.refId)
-	);
-	return new Set(
-		pageComments.map((comment) => comment.id).filter((id) => anchored.has(commentChargeRef(id, chargeScope)))
+		).map((row) => row.id)
 	);
 }
 
@@ -107,11 +98,18 @@ if (options.consumeCredits && options.orgId) {
 	metered = await orgIsMetered(options.orgId);
 }
 const aiBudget: AiBudget = {
-	remaining: metered && options.orgId ? await getCredits(options.orgId) : Number.POSITIVE_INFINITY,
-	prepaid: metered && options.orgId && options.rescore && page.comments.length
-		? await loadPrepaidAnchors(options.orgId, page.comments, options.chargeScope)
-		: undefined
+	remaining: metered && options.orgId ? await getCredits(options.orgId) : Number.POSITIVE_INFINITY
 };
+// Comments the ACTIVE rescan already committed (stamped comments.scan_id =
+// scanStamp by the staging upsert) are done — verdict, action row, and any
+// charge landed atomically. Re-scoring them would burn an OpenAI call and
+// re-pend completed actions every tick a page sits parked (codex). Queried
+// only for rescans: live runs dedupe by storedIds below, and a null stamp
+// (non-rescan or dry-run window) has no marker to match.
+const stagedIds =
+	options.rescore && options.scanStamp && page.comments.length
+		? await loadStagedIds(page.comments, options.scanStamp)
+		: new Set<string>();
 // Dry-run window mode (rescore: true) skips the stored-IDs dedupe entirely:
 // re-scoring comments a real run already moderated is the point of the
 // preview. The within-batch dedupe below still applies. The DB query is
@@ -133,16 +131,16 @@ const rulesForChannel = prepareRules(await db.select().from(rules).where(eq(rule
 // One allowlist read per run; decide() checks it before any rule or scoring.
 const allowlist = await loadHandleSet(channelId);
 // Dedupe three ways: against already-stored comments, within this batch,
-// and against comments this scan already charged+staged (prepaid). The
+// and against comments this scan already staged (the scan_id marker). The
 // last keeps a parked rescan page from re-scoring finished work every tick;
-// prepaid comments' committed action rows still drain via enforcement.
+// staged comments' committed action rows still drain via enforcement.
 // commentThreads pagination can repeat an item across page boundaries, and
 // two decisions with one comment id would violate the comments.id PRIMARY
 // KEY, failing the entire staging transaction (I1: one bad item never
 // aborts the batch).
 const seen = new Set<string>();
 const newComments = page.comments.filter((comment) => {
-	if (existingIds.has(comment.id) || seen.has(comment.id) || aiBudget.prepaid?.has(comment.id)) return false;
+	if (existingIds.has(comment.id) || seen.has(comment.id) || stagedIds.has(comment.id)) return false;
 	seen.add(comment.id);
 	return true;
 });
@@ -231,7 +229,7 @@ export async function decideNewComments(
 		deadline,
 		rescore,
 		orgId,
-		chargeScope,
+		scanStamp,
 		consumeCredits
 	}: DecisionBatchOptions
 ): Promise<{ decisions: Decision[]; failures: string[]; deferred: number }> {
@@ -243,7 +241,7 @@ export async function decideNewComments(
 		deadline,
 		rescore,
 		orgId,
-		chargeScope,
+		scanStamp,
 		consumeCredits
 	});
 	const settled = await scoreComments(batch.newComments, {

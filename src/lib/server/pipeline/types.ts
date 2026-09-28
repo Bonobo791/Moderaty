@@ -93,10 +93,15 @@ export type DecisionBatchOptions = {
 	deadline?: number;
 	rescore?: boolean;
 	orgId?: string | null;
-	/** The rescan's charge-anchor scope (its per-request scan nonce). Null is
-	 * a drain planted before the nonce column existed — its anchors are the
-	 * plain comment id. Absent on non-rescan runs. */
-	chargeScope?: string | null;
+	/** The active rescan's staging marker — the value the upsert stamps on
+	 * comments.scan_id (the scan nonce; a pre-nonce drain falls back to its
+	 * planted boundary so it still marks its own work). Rows stamped with it
+	 * are skipped on the next page fetch: they were already decided+staged
+	 * by this scan, so a parked page or a crash retry must not re-score them
+	 * or re-pend their action rows. Billing-independent — it covers
+	 * rule/allowlist and unmetered verdicts that mint no credit anchor
+	 * (codex). Absent on non-rescan runs. */
+	scanStamp?: string | null;
 	/** True for live runs: credits gate AI scoring and consumption applies.
 	 * Dry runs (previews, window rescore) always score and never consume. */
 	consumeCredits?: boolean;
@@ -104,12 +109,6 @@ export type DecisionBatchOptions = {
 
 export type AiBudget = {
 	remaining: number;
-	/** Comment ids this history scan already charged+staged: staging commits
-	 * verdict+action+anchor atomically, so an anchor marks the comment DONE.
-	 * prepareDecisionBatch filters them out of the batch — a retry otherwise
-	 * defers them to the balance gate (parking a paid drain forever) or
-	 * re-stages them every tick a page sits on outOfCredits (codex+cubic). */
-	prepaid?: Set<string>;
 };
 
 export type ScoreOutcome = PromiseSettledResult<Decision>;
@@ -126,7 +125,10 @@ export type DecisionBatch = {
 /** Rescan staging mode: stored rows upsert to the fresh verdict and action
  * rows re-pend/supersede. chargeScope is the scan's per-request nonce; null is
  * a drain planted before the nonce column existed — it still upserts but
- * keeps charging the plain comment id its earlier pages anchored (codex). */
-export type RescanCharge = { chargeScope?: string | null };
+ * keeps charging the plain comment id its earlier pages anchored (codex).
+ * scanStamp is what the upsert writes to comments.scan_id — the nonce, or the
+ * drain's planted boundary when no nonce exists, so every drain marks its own
+ * staged rows and a retry/parked tick can skip them. */
+export type RescanCharge = { chargeScope?: string | null; scanStamp?: string | null };
 
 export type ToneDecisionContext = { context: ToneContext } | null;

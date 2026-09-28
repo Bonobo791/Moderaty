@@ -323,6 +323,16 @@ export const comments = sqliteTable('comments', {
 	// yet digested" for a comment inserted late with an old publishedAt
 	// (history backfill) or tied at the page-cap boundary (codex+coderabbit).
 	feedbackDigestedAt: text('feedback_digested_at'),
+	// The history scan that last staged this row (the scan nonce, or the
+	// planted boundary for a pre-nonce drain). Rescans filter on it: a page
+	// parked on credits — or a retry after a mid-drain crash — skips comments
+	// the active scan already committed instead of re-scoring them and
+	// re-pending their action rows every tick. NULL on live-run inserts and
+	// on rows staged before the column existed (a pre-nonce drain cannot be
+	// distinguished from never-scanned, which is the safe direction: it
+	// reprocesses rather than skips). Billing-independent — rule/allowlist
+	// and unmetered verdicts stamp it too (codex).
+	scanId: text('scan_id'),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [index('comments_channel_digested_idx').on(table.channelId, table.feedbackDigestedAt)]);
 

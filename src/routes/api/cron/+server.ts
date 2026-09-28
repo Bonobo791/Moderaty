@@ -94,16 +94,6 @@ async function runClaimedChannel(
 	channel: typeof channels.$inferSelect,
 	deadline: number
 ): Promise<{ result: ChannelRunResult; dryRunWindow: unknown; digest: unknown }> {
-	let digest: unknown;
-	const historyDigestHandled = Boolean(channel.feedbackHistoryBoundary && channel.feedbackEnabled === 1 && env.DRY_RUN === 'false');
-	if (historyDigestHandled) {
-		try {
-			digest = await generateFeedbackDigest(channel.id, { deadline });
-		} catch (cause) {
-			console.error(`feedback history digest failed for channel ${channel.id}:`, cause);
-			digest = { error: 'error' };
-		}
-	}
 	const result = await runChannel(channel.id, { deadline });
 	let dryRunWindow: unknown;
 	if (channel.dryRunBoundary) {
@@ -136,10 +126,12 @@ async function runClaimedChannel(
 		}
 	}
 	// The feedback digest piggybacks on the same lease and budget (I10): the
-	// claimed channel generates one when its cadence is due and budget
-	// remains. A digest failure must never mask the moderation verdict —
-	// loud, surfaced in the payload, retried on the next claim.
-	if (!historyDigestHandled && Date.now() < deadline) {
+	// claimed channel generates one when its cadence is due — and a history
+	// job in flight runs one bounded page here too — while budget remains.
+	// A digest failure must never mask the moderation verdict — loud,
+	// surfaced in the payload, retried on the next claim.
+	let digest: unknown;
+	if (Date.now() < deadline) {
 		try {
 			digest = await generateFeedbackDigest(channel.id, { deadline });
 		} catch (cause) {
@@ -211,7 +203,9 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		.where(and(eq(channels.active, 1), claimable))
 		// Channels with a dry-run drain in flight first — a preview the user is
 		// actively waiting on must not starve behind the ordinary rotation.
-		.orderBy(desc(sql`${channels.dryRunBoundary} is not null`), desc(sql`${channels.feedbackHistoryBoundary} is not null and ${channels.feedbackEnabled} = 1`), asc(channels.lastRunAt))
+		// History jobs get no such priority: a multi-page or stuck history
+		// drain must never outrank least-recently-run moderation (codex+cubic).
+		.orderBy(desc(sql`${channels.dryRunBoundary} is not null`), asc(channels.lastRunAt))
 		.limit(1);
 	if (!channel) return json({ ...base, results: {} });
 

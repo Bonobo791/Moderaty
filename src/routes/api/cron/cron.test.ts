@@ -291,7 +291,9 @@ test('selects the least-recently-run channel first', async () => {
 	expect(mocks.runChannel).toHaveBeenCalledWith('UC-old', expect.anything());
 });
 
-test('enabled history scan channels rotate ahead of non-history channels before last-run ordering', async () => {
+test('a channel with an unfinished history scan waits its least-recently-run turn', async () => {
+	// History work must never outrank the rotation: a stuck or multi-page job
+	// would otherwise claim every invocation and starve live moderation.
 	mocks.env.DRY_RUN = 'false';
 	await seedChannel('UC-old', { lastRunAt: '2026-01-01T00:00:00.000Z' });
 	await seedChannel('UC-history', { feedbackEnabled: 1, lastRunAt: '2026-09-01T00:00:00.000Z', feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z' });
@@ -299,7 +301,8 @@ test('enabled history scan channels rotate ahead of non-history channels before 
 
 	await call({ bearer: 'test-secret' });
 
-	expect(mocks.runChannel).toHaveBeenCalledWith('UC-history', expect.anything());
+	expect(mocks.runChannel).toHaveBeenCalledWith('UC-old', expect.anything());
+	expect(mocks.runChannel).not.toHaveBeenCalledWith('UC-history', expect.anything());
 });
 
 test('disabled history does not starve an older channel or claim first-position priority', async () => {
@@ -315,7 +318,10 @@ test('disabled history does not starve an older channel or claim first-position 
 	expect((await channelRow('UC-disabled-history'))?.feedbackHistoryBoundary).toBe('2025-01-01T00:00:00.000Z');
 });
 
-test('history feedback runs before moderation and is not retried a second time in the same tick', async () => {
+test('history feedback runs after moderation and is not attempted twice in the same tick', async () => {
+	// The history page shares the claimed channel's leftover budget: a fetch
+	// that overruns defers cleanly instead of pushing live moderation past
+	// the deadline (codex+cubic).
 	mocks.env.DRY_RUN = 'false';
 	await seedChannel('UC-history', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z' });
 	const order: string[] = [];
@@ -330,7 +336,7 @@ test('history feedback runs before moderation and is not retried a second time i
 
 	await call({ bearer: 'test-secret' });
 
-	expect(order).toEqual(['feedback', 'moderation']);
+	expect(order).toEqual(['moderation', 'feedback']);
 	expect(mocks.generateFeedbackDigest).toHaveBeenCalledTimes(1);
 });
 
@@ -346,7 +352,7 @@ test('history digest failure does not prevent moderation or trigger a second dig
 		expect(response.status).toBe(200);
 		expect(mocks.runChannel).toHaveBeenCalledTimes(1);
 		expect(mocks.generateFeedbackDigest).toHaveBeenCalledTimes(1);
-		expect(errorSpy).toHaveBeenCalledWith('feedback history digest failed for channel UC-history:', expect.any(Error));
+		expect(errorSpy).toHaveBeenCalledWith('feedback digest for channel UC-history failed:', expect.any(Error));
 		const body = await response.json();
 		expect(JSON.stringify(body)).not.toContain('raw feedback failure');
 	} finally {

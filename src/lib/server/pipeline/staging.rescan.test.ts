@@ -148,7 +148,11 @@ test('a rescan verdict with no action supersedes the comment\'s outstanding stag
 	// the next enforcement sweep claims the stale row and applies the OLD
 	// moderation decision on YouTube against the new verdict (codeant).
 	// A completed row is settled history: the remote action really happened,
-	// so it stays completed instead of being rewritten.
+	// so it stays completed instead of being rewritten. And a dispatched row
+	// may already have landed remotely — it can't be cancelled outright:
+	// 'cancelling' sends it through the sweep's verification, which resolves
+	// it completed (landed — audit records it) or superseded (never landed)
+	// instead of blindly retrying the stale call (codex).
 	await seedChannelAndOrg(10);
 	await testDb().db.insert(comments).values([
 		{ id: 'c1', channelId: 'UC1', text: 'one', publishedAt: '2024-01-01T00:00:00.000Z', status: 'pending', decidedBy: 'ai' },
@@ -170,7 +174,7 @@ test('a rescan verdict with no action supersedes the comment\'s outstanding stag
 
 	const actions = await testDb().db.select().from(moderationActions).all();
 	expect(new Map(actions.map((row) => [row.commentId, row.state]))).toEqual(
-		new Map([['c1', 'superseded'], ['c2', 'superseded'], ['c3', 'completed']])
+		new Map([['c1', 'superseded'], ['c2', 'cancelling'], ['c3', 'completed']])
 	);
 });
 

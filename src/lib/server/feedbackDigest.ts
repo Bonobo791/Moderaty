@@ -10,7 +10,7 @@
 // row so the page can say so instead of silently showing stale data —
 // both are transient state a terminal outcome clears.
 
-import { and, asc, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, sql } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { db, withBusyRetry } from '$lib/server/db';
 import { channels, comments, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence } from '$lib/server/db/schema';
@@ -331,30 +331,54 @@ export async function generateFeedbackDigest(
 		}
 		batch = page.batch;
 		if (batch.length) {
-			// Same-scan dedupe across pages: commentThreads can re-serve an item
-			// at a page boundary, and a comment THIS scan already committed must
-			// not re-enter the batch — its anchor blocks the second debit, but
-			// the repeat still double-counts creditsUsed and can mint a second
-			// digest's duplicate finding (codex). The marker is scan_id:
-			// another scan's rows (or a pre-nonce drain's NULLs under a null
-			// scan id, where every stored row predates it) still reprocess —
-			// re-running the same window is the point of the feature.
-			const committed = (
-				await db
-					.select({ id: feedbackHistoryComments.id })
-					.from(feedbackHistoryComments)
-					.where(
-						and(
-							eq(feedbackHistoryComments.channelId, channelId),
-							inArray(feedbackHistoryComments.id, batch.map((comment) => comment.id)),
-							channel.feedbackHistoryScanId === null
-								? isNull(feedbackHistoryComments.scanId)
-								: eq(feedbackHistoryComments.scanId, channel.feedbackHistoryScanId)
-						)
-					)
-					.all()
-			).map((row) => row.id);
-			const covered = new Set(committed);
+			const ids = batch.map((comment) => comment.id);
+			let covered: Set<string>;
+			if (channel.feedbackHistoryScanId === null) {
+				// A drain planted before the nonce column existed resumes under
+				// the OLD coverage semantics: the owner never asked for a repeat
+				// scan, so comments already digested by the stored path or
+				// already history-sourced stay covered — reprocessing them would
+				// mint duplicate findings and provider calls their legacy plain
+				// anchors can't even debit (codex). The all-rows history check
+				// also catches this drain's own page-boundary repeats, whose
+				// committed rows carry a NULL scan_id.
+				const [digested, historical] = await Promise.all([
+					db
+						.select({ id: comments.id })
+						.from(comments)
+						.where(and(eq(comments.channelId, channelId), inArray(comments.id, ids), isNotNull(comments.feedbackDigestedAt)))
+						.all(),
+					db
+						.select({ id: feedbackHistoryComments.id })
+						.from(feedbackHistoryComments)
+						.where(and(eq(feedbackHistoryComments.channelId, channelId), inArray(feedbackHistoryComments.id, ids)))
+						.all()
+				]);
+				covered = new Set([...digested, ...historical].map((row) => row.id));
+			} else {
+				// Same-scan dedupe across pages: commentThreads can re-serve an
+				// item at a page boundary, and a comment THIS scan already
+				// committed must not re-enter the batch — its anchor blocks the
+				// second debit, but the repeat still double-counts creditsUsed
+				// and can mint a second digest's duplicate finding (codex). Rows
+				// from other scans still reprocess — re-running the same window
+				// is the point of the feature.
+				covered = new Set(
+					(
+						await db
+							.select({ id: feedbackHistoryComments.id })
+							.from(feedbackHistoryComments)
+							.where(
+								and(
+									eq(feedbackHistoryComments.channelId, channelId),
+									inArray(feedbackHistoryComments.id, ids),
+									eq(feedbackHistoryComments.scanId, channel.feedbackHistoryScanId)
+								)
+							)
+							.all()
+					).map((row) => row.id)
+				);
+			}
 			batch = batch.filter((comment) => !covered.has(comment.id));
 		}
 		if (!batch.length) {

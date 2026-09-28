@@ -422,7 +422,7 @@ import type { NewComment } from '../youtube';
 const dialect = new SQLiteSyncDialect();
 
 const COMMENT_STATUSES = new Set(['pending', 'approved', 'held', 'rejected', 'deleted', 'restoring']);
-const ACTION_STATES = new Set(['pending', 'dispatched', 'completed', 'superseded', 'manual_review']);
+const ACTION_STATES = new Set(['pending', 'dispatched', 'cancelling', 'completed', 'superseded', 'manual_review']);
 
 /** Binds the parameters of a real drizzle where-condition so the fake store
  * honors which rows a query actually targets. */

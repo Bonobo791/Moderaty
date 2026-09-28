@@ -823,6 +823,38 @@ test.each(['reassigned', 'deleted'] as const)('a channel %s during classificatio
 	}
 });
 
+test('a resumed pre-nonce drain keeps the old coverage filter — covered comments are not reprocessed', async () => {
+	// This drain was planted before the scan-id column existed (NULL nonce):
+	// the owner never requested a repeat scan, so the batch must keep the old
+	// completed-comment semantics — comments already digested by the stored
+	// path and comments with ANY history-source row stay covered. Only
+	// genuinely uncovered work classifies; the legacy anchors would block a
+	// second debit but not the duplicate finding or provider spend (codex).
+	await seedChannel('UC1', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryPageToken: 'page-1' });
+	await seedComment('digested', 'UC1', 'already digested', '2024-02-01T00:00:00.000Z');
+	await testDb().db.update(comments).set({ feedbackDigestedAt: '2025-06-01T00:00:00.000Z' }).where(eq(comments.id, 'digested'));
+	await testDb().db.insert(feedbackHistoryComments).values([
+		{ id: 'hist-a', channelId: 'UC1', text: 'covered by a completed nonce scan', publishedAt: '2024-02-01T00:00:00.000Z', scanId: 'scan-a' },
+		{ id: 'hist-b', channelId: 'UC1', text: 'committed by an earlier page of THIS drain', publishedAt: '2024-02-01T00:00:00.000Z' }
+	]);
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [
+			{ id: 'digested', text: 'already digested', publishedAt: '2024-02-01T00:00:00.000Z' },
+			{ id: 'hist-a', text: 'covered by a completed nonce scan', publishedAt: '2024-02-01T00:00:00.000Z' },
+			{ id: 'hist-b', text: 'committed by an earlier page of THIS drain', publishedAt: '2024-02-01T00:00:00.000Z' },
+			{ id: 'fresh', text: 'uncovered', publishedAt: '2024-02-01T00:00:00.000Z' }
+		],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+	RESPONSES = { uncovered: { category: 'question', hasAbuse: false, claim: 'the uncovered question' } };
+
+	const result = await generateFeedbackDigest('UC1');
+
+	expect(result).toMatchObject({ status: 'complete', commentsClassified: 1 });
+	expect((await testDb().db.select().from(feedbackHistoryComments).where(eq(feedbackHistoryComments.id, 'fresh')).get())).toBeDefined();
+});
+
 test('a history source inserted later by moderation is skipped by the ordinary stored digest', async () => {
 	await testDb().db.update(organizations).set({ creditsRemaining: 10 }).where(eq(organizations.id, 'org-1'));
 	await seedChannel('UC1', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z' });
@@ -853,8 +885,10 @@ test('historical batches on lifetime plans use the stored BYOK key and charge no
 
 test('a recovered history page re-analyzes previously digested comments and clears transient failures', async () => {
 	// Coverage markers don't prune a re-requested window: a comment already
-	// digested once is classified again when the owner re-asks for the data.
-	await seedChannel('UC1', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryPageToken: 'page-1' });
+	// digested once is classified again when the owner re-asks for the data
+	// (the nonce marks an owner-requested scan — a NULL scan id is a pre-nonce
+	// drain resuming under the old coverage semantics instead).
+	await seedChannel('UC1', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryScanId: 'scan-1', feedbackHistoryPageToken: 'page-1' });
 	await seedComment('done', 'UC1', 'already digested', '2024-01-01T00:00:00.000Z');
 	await testDb().db.update(comments).set({ feedbackDigestedAt: '2025-01-01T00:00:00.000Z' }).where(eq(comments.id, 'done'));
 	mocks.fetchNewComments.mockRejectedValueOnce(new Error('temporary history fetch failure'));

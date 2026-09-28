@@ -1,4 +1,4 @@
-import { and, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { normalizeHandle } from '$lib/server/allowlist';
 import { commentChargeRef, consumeCredit, hasChargeAnchor, orgIsMetered, type LedgerHandle } from '$lib/server/billing/ledger';
 import { db } from '$lib/server/db';
@@ -141,7 +141,11 @@ async function upsertRescanActionRows(transaction: LedgerHandle, actions: Return
  * a stale pending/dispatched row would otherwise be claimed by the next
  * enforcement sweep and apply the OLD decision on YouTube (codeant). Terminal
  * rows stay: they record actions that already reached YouTube, which no new
- * verdict can undo. */
+ * verdict can undo. 'pending' never reached YouTube — cancel outright. A
+ * 'dispatched' call may already have landed remotely, so it goes 'cancelling'
+ * and the sweep's verification resolves it (codex): landed → completed with
+ * its audit row; never landed → superseded — never retried with the stale
+ * intent. */
 async function supersedeStaleActionRows(transaction: LedgerHandle, commentIds: string[]): Promise<void> {
 	if (!commentIds.length) return;
 	await transaction
@@ -150,7 +154,16 @@ async function supersedeStaleActionRows(transaction: LedgerHandle, commentIds: s
 		.where(
 			and(
 				inArray(moderationActions.commentId, commentIds),
-				inArray(moderationActions.state, ['pending', 'dispatched'])
+				eq(moderationActions.state, 'pending')
+			)
+		);
+	await transaction
+		.update(moderationActions)
+		.set({ state: 'cancelling' })
+		.where(
+			and(
+				inArray(moderationActions.commentId, commentIds),
+				eq(moderationActions.state, 'dispatched')
 			)
 		);
 }

@@ -40,9 +40,15 @@ test('0042 adds nullable allowance and feedback-history checkpoint columns', asy
 	const rows = await client.execute(
 		`SELECT id, moderation_dry_run_used_at, feedback_dry_run_used_at, feedback_history_boundary, feedback_history_page_token FROM channels ORDER BY id`
 	);
+	// Only a persisted dry_run_boundary is unambiguous dashboard-preview usage:
+	// audit 'dry-run' rows are also written by every run on a deployment with
+	// DRY_RUN=true, so backfilling from them would steal the preview allowance
+	// from channels that never used it (codex). A completed preview's boundary
+	// is already gone — those channels get their allowance fresh, which is
+	// harmless: the allowance did not exist before this migration.
 	expect(rows.rows).toEqual([
 		{ id: 'UCdrain', moderation_dry_run_used_at: '2026-05-01T00:00:00.000Z', feedback_dry_run_used_at: null, feedback_history_boundary: null, feedback_history_page_token: null },
-		{ id: 'UCpreview', moderation_dry_run_used_at: '2026-01-02T00:00:00.000Z', feedback_dry_run_used_at: null, feedback_history_boundary: null, feedback_history_page_token: null },
+		{ id: 'UCpreview', moderation_dry_run_used_at: null, feedback_dry_run_used_at: null, feedback_history_boundary: null, feedback_history_page_token: null },
 		{ id: 'UCuntouched', moderation_dry_run_used_at: null, feedback_dry_run_used_at: null, feedback_history_boundary: null, feedback_history_page_token: null }
 	]);
 });

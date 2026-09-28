@@ -519,6 +519,23 @@ test.each([
 	expect(await historyBoundaryOf('UC1')).toBeNull();
 });
 
+test('a lifetime org with a CORRUPT stored key gets a loud 503 — not "add a key"', async () => {
+	await updateOrg('org-1', { plan: 'lifetime', creditsRemaining: null, openaiKeyEnc: 'not-valid-encrypted-data' });
+	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1 });
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		const res = await postFeedbackAction('analyzeHistory', 'UC1', { months: '3' });
+
+		expect(res).toMatchObject({
+			status: 503,
+			data: { scope: 'history', error: 'Could not verify access to feedback history analysis. Please try again.' }
+		});
+		expect(await historyBoundaryOf('UC1')).toBeNull();
+	} finally {
+		errorSpy.mockRestore();
+	}
+});
+
 test('a lifetime org with a stored key queues feedback history', async () => {
 	await updateOrg('org-1', { plan: 'lifetime', creditsRemaining: null, openaiKeyEnc: encrypt('synthetic-lifetime-key') });
 	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1 });

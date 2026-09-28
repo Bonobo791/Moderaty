@@ -239,7 +239,6 @@ test.each(accessDenialCases)('analyze history denies $name before changing chann
 
 test.each([
 	{ name: 'missing', openaiKeyEnc: null },
-	{ name: 'corrupt', openaiKeyEnc: 'not-valid-encrypted-data' },
 	{ name: 'encrypted whitespace', openaiKeyEnc: encrypt(' \t\n ') }
 ])('a lifetime org with a $name key cannot start history analysis', async ({ openaiKeyEnc }) => {
 	await updateOrg('org-1', { plan: 'lifetime', creditsRemaining: 0, openaiKeyEnc });
@@ -272,6 +271,28 @@ test.each([
 		if (previousApiKey === undefined) delete mocks.env.OPENAI_API_KEY;
 		else mocks.env.OPENAI_API_KEY = previousApiKey;
 		warnSpy.mockRestore();
+		errorSpy.mockRestore();
+	}
+});
+
+test('a lifetime org with a CORRUPT stored key gets a loud 503 — verification failed, not "add a key"', async () => {
+	// Undecryptable ciphertext means the org DID add a key — pointing them at
+	// the Team page misleads. throwOnReadError propagates the failure and the
+	// action reports an access-verification error instead.
+	await updateOrg('org-1', { plan: 'lifetime', creditsRemaining: 0, openaiKeyEnc: 'not-valid-encrypted-data' });
+	await seedHistoryChannelState();
+	const before = await channelById('UC1');
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		const res = await analyzeHistory('UC1', '3') as { status: number; data: Record<string, unknown> };
+
+		expect(res).toMatchObject({
+			status: 503,
+			data: { scope: 'history', channelId: 'UC1', error: 'Could not verify access to history analysis. Please try again.' }
+		});
+		expect(await channelById('UC1')).toEqual(before);
+		expect(mocks.runChannel).not.toHaveBeenCalled();
+	} finally {
 		errorSpy.mockRestore();
 	}
 });

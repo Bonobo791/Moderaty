@@ -234,9 +234,10 @@ test('a malformed theme-merge response fails the run loudly instead of writing a
 	expect(await testDb().db.select().from(comments).where(isNull(comments.feedbackDigestedAt)).all()).toHaveLength(3);
 });
 
-test('reposted identical text is one voice, not a recurring theme', async () => {
-	// The same wording under two different comment ids (a double-post or a
-	// cross-video copy-paste) must never meet the minimum-comments bar.
+test('reposted identical text counts as separate supporters toward the threshold', async () => {
+	// Two different viewers writing the same words IS recurring feedback —
+	// there is no author signal, so each distinct comment counts toward
+	// "minimum comments". Evidence still lists the wording once.
 	await seedChannel('UC1', { feedbackEnabled: 1, feedbackThreshold: 2 });
 	const repost = 'can I bring my wife who is not Thai and under 50';
 	await seedCommentBatch([
@@ -244,7 +245,31 @@ test('reposted identical text is one voice, not a recurring theme', async () => 
 		{ text: repost, claim: 'bringing a non-Thai wife under 50' }
 	]);
 	const result = await generateFeedbackDigest('UC1', { force: true });
-	expect(result).toMatchObject({ status: 'complete', findings: 0, pooled: 2 });
+	expect(result).toMatchObject({ status: 'complete', findings: 1, pooled: 0 });
+	const finding = (await testDb().db.select().from(feedbackFindings).all())[0];
+	expect(finding?.supporterCount).toBe(2);
+	expect(await testDb().db.select().from(findingEvidence).all()).toHaveLength(1);
+});
+
+test('the theme pass is bounded by the write reserve — a spent reserve aborts it before the provider call', async () => {
+	// Clustering runs between classification and the persistence tx; its
+	// request must carry deadline - WRITE_RESERVE so it can never consume
+	// the headroom the write needs (codex/cubic).
+	await seedChannel('UC1', { feedbackEnabled: 1 });
+	await seedCommentBatch([
+		{ text: 'text 1', claim: 'theme 1' },
+		{ text: 'text 2', claim: 'theme 2' },
+		{ text: 'text 3', claim: 'theme 3' }
+	]);
+	// Inside the reserve window: classification still completes (its calls
+	// are instant under the mock) but the merge request must not fire.
+	const result = await generateFeedbackDigest('UC1', { force: true, deadline: Date.now() + 2_000 });
+	expect(result).toMatchObject({ status: 'deferred', reason: 'deadline' });
+	const bodies = vi.mocked(fetch).mock.calls.map((c) => JSON.parse(String(c[1]?.body)));
+	const clusterCalls = bodies.filter((b) =>
+		!String(b.messages.find((m: { role: string }) => m.role === 'user')?.content).includes('Comment: ')
+	);
+	expect(clusterCalls).toHaveLength(0);
 });
 
 test('per-comment classification failures are counted, not fatal', async () => {

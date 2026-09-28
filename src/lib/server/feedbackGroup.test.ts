@@ -89,14 +89,27 @@ describe('groupFeedback', () => {
 		expect(pooled).toBe(1);
 	});
 
-	test('identical reposted text is one voice and cannot meet the threshold alone', () => {
-		// A double-posted or cross-video copy-paste comment is not recurring
-		// feedback — distinct wordings are the recurring signal (MOD-69).
+	test('identical reposted text counts as separate supporters toward the threshold', () => {
+		// Distinct viewers writing the same words IS recurring feedback —
+		// there is no author signal, so each distinct comment counts.
 		const repost = (id: string) => comment({ commentId: id, text: 'can I bring my wife who is under 50' });
 		const { findings, pooled } = groupFeedback([repost('a'), repost('b'), repost('c')], { threshold: 2 });
-		expect(findings).toEqual([]);
-		// All three comments still count — conservation is preserved.
-		expect(pooled).toBe(3);
+		expect(findings).toHaveLength(1);
+		expect(findings[0].supporterCount).toBe(3);
+		// One excerpt still — identical supporters add no information.
+		expect(findings[0].evidence.map((e) => e.commentId)).toEqual(['a']);
+		expect(pooled).toBe(0);
+	});
+
+	test('emoji- or punctuation-only texts dedupe by raw wording, not the empty key', () => {
+		// normalizeClaimKey strips everything non-alphanumeric, so without a
+		// fallback every emoji-only comment shares the '' key and the
+		// evidence list would collapse distinct comments into one.
+		const emoji = (id: string, text: string) => comment({ commentId: id, text, category: 'question', claim: 'shared' });
+		const { findings } = groupFeedback([emoji('a', '😂'), emoji('b', '🎉'), emoji('c', '😂')], { threshold: 2 });
+		expect(findings).toHaveLength(1);
+		expect(findings[0].supporterCount).toBe(3);
+		expect(findings[0].evidence.map((e) => e.commentId)).toEqual(['a', 'b']);
 	});
 
 	test('a surfaced finding lists each distinct wording once in evidence', () => {

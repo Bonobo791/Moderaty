@@ -426,7 +426,10 @@ export async function generateFeedbackDigest(
 		// undercounts what actually comes up most. A malformed merge response
 		// throws: the run fails loudly and retries next tick (markers never
 		// moved), it never writes a wrong digest.
-		const themed = await clusterClassifiedClaims(classified, deadline, apiKey);
+		// Its request is bounded by the write reserve so the model call can
+		// never consume the headroom the persistence tx needs (codex/cubic).
+		const clusterDeadline = deadline === undefined ? undefined : deadline - WRITE_RESERVE_MS;
+		const themed = await clusterClassifiedClaims(classified, clusterDeadline, apiKey);
 		const threshold = channel.feedbackThreshold ?? 3;
 		const { findings, pooled } = groupFeedback(themed, {
 			categories: enabledCategories(channel),

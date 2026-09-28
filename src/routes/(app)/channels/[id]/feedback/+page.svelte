@@ -88,6 +88,15 @@
 	const shown = $derived(data.selected ?? data.latest ?? null);
 	const canOperate = $derived(data.orgRole === 'owner');
 
+	// History pagination links keep the selected digest's findings in view —
+	// ?digest= is the deep link, ?history= is only the list's position.
+	const digestParam = $derived(
+		shown && data.latest && shown.id !== data.latest.id ? `digest=${shown.id}&` : ''
+	);
+	const digestHref = (id: number) => `?digest=${id}${data.historyCursor ? `&history=${data.historyCursor}` : ''}`;
+	const newerHistoryHref = $derived(`?${digestParam}`.replace(/&$/, ''));
+	const olderHistoryHref = $derived(`?${digestParam}history=${data.historyNext}`);
+
 	function windowLabel(digest: { windowStart: string; windowEnd: string }): string {
 		const start = digest.windowStart === '1970-01-01T00:00:00.000Z' ? 'the beginning' : relativeTime(digest.windowStart);
 		return `${start} → ${relativeTime(digest.windowEnd)}`;
@@ -486,14 +495,14 @@
 		{/if}
 	</section>
 
-	{#if data.digests.length > 1}
+	{#if data.digests.length > 1 || data.historyCursor || data.historyNext}
 		<section class="history" aria-label="Digest history">
 			<h3 class="caps-label">Recent digests</h3>
 			<ul class="history-list">
 				{#each data.digests as d (d.id)}
 					<li class="muted">
 						{#if d.status === 'complete'}
-							<a href="?digest={d.id}" aria-current={shown?.id === d.id ? 'true' : undefined}>
+							<a href={digestHref(d.id)} aria-current={shown?.id === d.id ? 'true' : undefined}>
 								{relativeTime(d.createdAt)} — {d.status}, {d.commentsClassified} classified{#if d.pooledCount}
 									, {d.pooledCount} pooled{/if}, {d.creditsUsed === null ? 'unmetered' : `${d.creditsUsed} credits used`}
 							</a>
@@ -504,6 +513,12 @@
 					</li>
 				{/each}
 			</ul>
+			{#if data.historyCursor}
+				<p class="muted"><a href={newerHistoryHref}>← Newest digests</a></p>
+			{/if}
+			{#if data.historyNext}
+				<p class="muted"><a href={olderHistoryHref}>Older digests →</a></p>
+			{/if}
 		</section>
 	{/if}
 {/if}

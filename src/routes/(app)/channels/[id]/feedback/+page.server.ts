@@ -17,49 +17,74 @@ const VALID_CATEGORIES = ['question', 'criticism', 'correction', 'request'] as c
 /** Manual runs share the cron bounding idea: a hard ceiling, then a clean defer. */
 const MANUAL_RUN_BUDGET_MS = 15_000;
 
+/** Digest rows a history page lists — older ones paginate off behind a cursor. */
+const HISTORY_PAGE_SIZE = 25;
+
+const DIGEST_FIELDS = {
+	id: feedbackDigests.id,
+	windowStart: feedbackDigests.windowStart,
+	windowEnd: feedbackDigests.windowEnd,
+	status: feedbackDigests.status,
+	commentsClassified: feedbackDigests.commentsClassified,
+	commentsFailed: feedbackDigests.commentsFailed,
+	pooledCount: feedbackDigests.pooledCount,
+	creditsUsed: feedbackDigests.creditsUsed,
+	error: feedbackDigests.error,
+	createdAt: feedbackDigests.createdAt
+} as const;
+
+/**
+ * One page of a channel's digest history, newest first: complete digests —
+ * each a paid batch whose findings stay selectable — plus transient rows
+ * newer than the newest complete (the current attempt state; older
+ * transient leftovers are resolved noise). `before` is the cursor — the
+ * oldest id of the previous page — so a high-volume channel's backlog
+ * never loads, serializes, and renders all at once (codex #155). Ids are
+ * monotonic; createdAt can tie within a millisecond.
+ */
+async function digestHistoryPage(channelId: string, latestCompleteId: number, before?: number) {
+	const rows = await db
+		.select(DIGEST_FIELDS)
+		.from(feedbackDigests)
+		.where(
+			and(
+				eq(feedbackDigests.channelId, channelId),
+				or(eq(feedbackDigests.status, 'complete'), gt(feedbackDigests.id, latestCompleteId)),
+				before === undefined ? undefined : lt(feedbackDigests.id, before)
+			)
+		)
+		.orderBy(desc(feedbackDigests.id))
+		.limit(HISTORY_PAGE_SIZE + 1)
+		.all();
+	const digests = rows.slice(0, HISTORY_PAGE_SIZE);
+	return { digests, next: rows.length > HISTORY_PAGE_SIZE ? (digests.at(-1)?.id ?? null) : null };
+}
+
 export async function load({ params, locals, url }) {
 	// Database outage: the layout renders the overlay; this load must not 401
 	// on the null-user outage shape.
 	if (locals.dbDown) return { ch: { id: params.id, title: '' }, maintenance: true };
 	const ch = await ownedChannel(params.id, locals);
-	const digestFields = {
-		id: feedbackDigests.id,
-		windowStart: feedbackDigests.windowStart,
-		windowEnd: feedbackDigests.windowEnd,
-		status: feedbackDigests.status,
-		commentsClassified: feedbackDigests.commentsClassified,
-		commentsFailed: feedbackDigests.commentsFailed,
-		pooledCount: feedbackDigests.pooledCount,
-		creditsUsed: feedbackDigests.creditsUsed,
-		error: feedbackDigests.error,
-		createdAt: feedbackDigests.createdAt
-	} as const;
 	// The newest COMPLETE digest is its own query: a streak of failed rows
 	// must not bury it and make the page claim none exists (codex).
 	const latest =
 		(await db
-			.select(digestFields)
+			.select(DIGEST_FIELDS)
 			.from(feedbackDigests)
 			.where(and(eq(feedbackDigests.channelId, params.id), eq(feedbackDigests.status, 'complete')))
 			// id is monotonic — createdAt can tie within a millisecond (cubic).
 			.orderBy(desc(feedbackDigests.id))
 			.limit(1)
 			.get()) ?? null;
-	// The history list is every complete digest — each one is a paid batch
-	// whose findings stay selectable — plus transient rows newer than the
-	// newest complete (the current attempt state; older transient leftovers
-	// are resolved noise). Row count is bounded by digest cadence itself.
-	const digests = await db
-		.select(digestFields)
-		.from(feedbackDigests)
-		.where(
-			and(
-				eq(feedbackDigests.channelId, params.id),
-				or(eq(feedbackDigests.status, 'complete'), gt(feedbackDigests.id, latest?.id ?? -1))
-			)
-		)
-		.orderBy(desc(feedbackDigests.id))
-		.all();
+	// ?history=<id> pages the history list behind a cursor; ?digest=<id>
+	// still selects any complete digest directly regardless of page (codex).
+	const historyCursor = url.searchParams.get('history');
+	const historyBefore =
+		historyCursor !== null && Number.isInteger(Number(historyCursor))
+			? Number(historyCursor)
+			: undefined;
+	const historyPage = await digestHistoryPage(params.id, latest?.id ?? -1, historyBefore);
+	const digests = historyPage.digests;
 	const latestComplete = latest;
 	// Every complete digest is selectable (?digest=N): a multi-page history
 	// drain writes one digest per bounded batch, and the paid findings on
@@ -70,7 +95,7 @@ export async function load({ params, locals, url }) {
 	const selected =
 		(Number.isInteger(digestParam) &&
 			(await db
-				.select(digestFields)
+				.select(DIGEST_FIELDS)
 				.from(feedbackDigests)
 				.where(
 					and(
@@ -127,6 +152,8 @@ export async function load({ params, locals, url }) {
 		dryRunUsed: Boolean(ch.feedbackDryRunUsedAt),
 		dryRunDeployment: env.DRY_RUN === 'true',
 		digests,
+		historyCursor: historyBefore ?? null,
+		historyNext: historyPage.next,
 		latest: latestComplete,
 		selected,
 		findings,

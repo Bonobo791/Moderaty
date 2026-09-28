@@ -228,6 +228,32 @@ test('a rescan channel with no scan id anchors charges to the boundary itself', 
 	expect(mocks.state.insertedCredits).toEqual([expect.objectContaining({ refId: 'comment#2026-01-01T00:00:00.000Z' })]);
 });
 
+test('a stale run cannot clear a replanted history scan — the checkpoint write aborts', async () => {
+	// The owner re-requested the window while this worker was still fetching:
+	// the replant minted a fresh boundary+nonce that now owns the drain state.
+	// The stale run's completion write carries the OLD scan identity — the
+	// checkpoint guard must reject it instead of clearing the new scan
+	// (codeant).
+	mocks.state.channel.historyBoundary = '2026-01-01T00:00:00.000Z';
+	mocks.state.channel.historyScanId = 'scan-req-1';
+	mocks.state.existingIds = ['comment'];
+	mocks.scoreComment.mockResolvedValue(moderation(0.9));
+	mocks.fetchNewComments.mockImplementation(async () => {
+		mocks.state.channel = {
+			...mocks.state.channel,
+			historyBoundary: '2026-02-01T00:00:00.000Z',
+			historyScanId: 'scan-req-2',
+			nextPageToken: null
+		};
+		return { comments: [newComment()], nextPageToken: null, reachedCursor: true };
+	});
+
+	await expect(runChannel('channel')).rejects.toThrow('checkpoint changed');
+
+	expect(mocks.state.channel.historyScanId).toBe('scan-req-2');
+	expect(mocks.state.channelUpdates).toEqual([]);
+});
+
 test('a rescan retry stages covered — the scan anchors block a second debit', async () => {
 	// Mid-drain crash: the first attempt's committed anchors are found by
 	// consumeCredit for the SAME scan id, so the retried page charges nothing

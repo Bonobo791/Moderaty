@@ -169,19 +169,21 @@ const mocks = vi.hoisted(() => {
 							// by an earlier charge makes THIS insert conflict — nothing
 							// records and returning() comes back empty, exactly like
 							// the real constraint (rescan retries depend on it).
-							const rows = (Array.isArray(values) ? values : [values]) as Record<string, unknown>[];
+							const rows = valueRows(values);
 							const priors = state.insertedCredits.slice(0, state.insertedCredits.length - rows.length);
-							const conflict = rows.some((row) =>
-								priors.some((prior) =>
-									prior.orgId === row.orgId && prior.refType === row.refType && prior.refId === row.refId));
-							if (conflict) {
-								state.insertedCredits.splice(state.insertedCredits.length - rows.length, rows.length);
+							if (creditAnchorConflict(priors, rows)) {
+								state.insertedCredits.splice(priors.length, rows.length);
 								return { returning: async () => [] as Record<string, unknown>[] };
 							}
 						}
 						return { returning: async () => [{ id: 1 }] };
 					},
-					onConflictDoUpdate: async () => undefined
+					// Upsert mode (rescans): emulate the real conflict resolution —
+					// a row whose PK already exists merges into the stored row, so
+					// assertions see one row per id and wrong upsert code fails.
+					onConflictDoUpdate: async () => {
+						mergeUpsertedRows(state, table, values);
+					}
 				};
 			}
 		})),
@@ -221,8 +223,23 @@ const mocks = vi.hoisted(() => {
 							const identityMatches = params.length <= 2 || params.includes(state.channel?.refreshTokenEnc);
 							return { returning: async () => state.channel?.active && identityMatches ? [{ id: state.channel.id }] : [] };
 						}
+						// persistResults' scan-identity checkpoint guard: the WHERE
+						// binds the run's read values (eq) or asserts the column null
+						// (isNull). Compare against the LIVE row — a mid-run replant
+						// mismatches, the real UPDATE affects 0 rows, and nothing
+						// records (codeant race).
+						const scanGuard = (column: 'history_scan_id' | 'history_boundary'): boolean => {
+							const bound = boundParam(condition, column);
+							const live = column === 'history_scan_id' ? state.channel?.historyScanId : state.channel?.historyBoundary;
+							if (bound.kind === 'eq') return bound.value === live;
+							if (bound.kind === 'isNull') return live == null;
+							return true;
+						};
+						if (!scanGuard('history_scan_id') || !scanGuard('history_boundary')) {
+							return { returning: async () => [] as Record<string, unknown>[] };
+						}
 						state.channelUpdates.push(values);
-						return none;
+						return { returning: async () => [{ id: state.channel.id }] };
 					}
 					if (table === state.tables.comments) {
 						// Status/decidedBy writes honor the where: id predicates AND
@@ -404,6 +421,61 @@ const ACTION_STATES = new Set(['pending', 'dispatched', 'completed', 'superseded
 function queryParams(condition: unknown): unknown[] {
 	if (!condition) return [];
 	return dialect.sqlToQuery(condition as Parameters<typeof dialect.sqlToQuery>[0]).params;
+}
+
+function querySql(condition: unknown): string {
+	if (!condition) return '';
+	return dialect.sqlToQuery(condition as Parameters<typeof dialect.sqlToQuery>[0]).sql;
+}
+
+/** The bound value of a `"channels"."col" = ?` clause — its position among the
+ * placeholders is counted, not assumed, so predicate order stays the caller's
+ * business. 'isNull' and 'absent' cover the other clause shapes. */
+function boundParam(condition: unknown, column: string): { kind: 'eq'; value: unknown } | { kind: 'isNull' | 'absent' } {
+	const sql = querySql(condition);
+	const eqPos = sql.indexOf(`"channels"."${column}" = ?`);
+	if (eqPos !== -1) {
+		return { kind: 'eq', value: queryParams(condition)[sql.slice(0, eqPos).split('?').length - 1] };
+	}
+	return { kind: sql.includes(`"channels"."${column}" is null`) ? 'isNull' : 'absent' };
+}
+
+function valueRows(values: unknown): Record<string, unknown>[] {
+	return (Array.isArray(values) ? values : [values]) as Record<string, unknown>[];
+}
+
+function creditAnchorConflict(priors: Record<string, unknown>[], rows: Record<string, unknown>[]): boolean {
+	return rows.some((row) =>
+		priors.some((prior) =>
+			prior.orgId === row.orgId && prior.refType === row.refType && prior.refId === row.refId));
+}
+
+/** Emulates upsert conflict resolution for the tables rescans write: a pushed
+ * row whose PK already exists merges into the stored row — the fresh verdict
+ * fields win, the original createdAt survives (the real SET list never
+ * touches it) — instead of leaving a phantom duplicate assertions can't
+ * distinguish from a real insert (codeant nitpick). */
+function mergeUpsertedRows(
+	state: {
+		tables: { comments: unknown; moderationActions: unknown };
+		insertedComments: Record<string, unknown>[];
+		moderationActions: Record<string, unknown>[];
+	},
+	table: unknown,
+	values: unknown
+): void {
+	const merge = (list: Record<string, unknown>[], key: string) => {
+		const rows = valueRows(values);
+		const priors = list.slice(0, list.length - rows.length);
+		for (const row of rows) {
+			const prior = priors.find((stored) => stored[key] === row[key]);
+			if (!prior) continue;
+			Object.assign(prior, row, { createdAt: prior.createdAt });
+			list.splice(list.indexOf(row), 1);
+		}
+	};
+	if (table === state.tables.comments) merge(state.insertedComments, 'id');
+	if (table === state.tables.moderationActions) merge(state.moderationActions, 'commentId');
 }
 
 function queryKey(value: unknown): string {

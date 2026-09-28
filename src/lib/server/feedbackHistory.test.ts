@@ -157,6 +157,29 @@ test('advanceFeedbackHistory changes only feedback history checkpoints and rejec
 	expect(updated).toMatchObject({ feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryScanId: 'scan-2' });
 });
 
+test('advanceFeedbackHistory rejects a stale scan id even when boundary and page token are unchanged', async () => {
+	// The owner replants the SAME window while a worker from the previous
+	// scan is still finishing: boundary and pageToken can coincide between
+	// the two scans, so the scan id is the only field that distinguishes
+	// them. A stale completion must never clear the new scan (codeant).
+	const channel = await seedChannel({ feedbackEnabled: 1, feedbackHistoryScanId: 'scan-1', leaseExpiresAt: '2099-01-01T00:00:00.000Z' });
+	// Replant: identical boundary and page token, fresh scan nonce.
+	await testDb().db
+		.update(channels)
+		.set({ feedbackHistoryScanId: 'scan-2' })
+		.where(eq(channels.id, 'UC1'));
+
+	await expect(
+		advanceFeedbackHistory(testDb().db, channel, { batch: [], nextPageToken: null, complete: true })
+	).rejects.toThrow('checkpoint changed');
+
+	const updated = (await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())!;
+	expect(updated).toMatchObject({
+		feedbackHistoryBoundary: channel.feedbackHistoryBoundary,
+		feedbackHistoryScanId: 'scan-2'
+	});
+});
+
 test('advanceFeedbackHistory aborts when the channel was paused or feedback disabled mid-scan', async () => {
 	// A pause or feedback opt-out mid-scan must abort the commit, exactly like
 	// assertChannelActive does for moderation writes — otherwise the page the

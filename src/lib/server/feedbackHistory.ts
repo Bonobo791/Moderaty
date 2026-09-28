@@ -77,7 +77,13 @@ export async function advanceFeedbackHistory(
 				eq(channels.feedbackHistoryBoundary, channel.feedbackHistoryBoundary),
 				channel.feedbackHistoryPageToken === null
 					? isNull(channels.feedbackHistoryPageToken)
-					: eq(channels.feedbackHistoryPageToken, channel.feedbackHistoryPageToken)
+					: eq(channels.feedbackHistoryPageToken, channel.feedbackHistoryPageToken),
+				// The scan nonce is the checkpoint's identity: a replanted scan of
+				// the SAME window can share boundary and page token with a stale
+				// worker — only the scan id distinguishes them (codeant).
+				channel.feedbackHistoryScanId === null
+					? isNull(channels.feedbackHistoryScanId)
+					: eq(channels.feedbackHistoryScanId, channel.feedbackHistoryScanId)
 			)
 		)
 		.returning({ id: channels.id });

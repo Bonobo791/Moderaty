@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { decrypt } from '$lib/server/crypto';
 import { db } from '$lib/server/db';
@@ -47,14 +47,31 @@ async function persistResults(
 	const complete = page.reachedCursor || !page.nextPageToken;
 	await db.transaction(async (transaction) => {
 		await assertChannelActive(channelId, transaction, channel);
-		await transaction
+		// The checkpoint write carries THIS run's scan identity: a replant
+		// mid-run (owner re-requested the window — fresh boundary+nonce) must
+		// not be cleared or advanced by a stale worker. The scan predicates
+		// make its update a no-op, and the 0-row check aborts loudly the same
+		// way the feedback-history checkpoint guard does (codeant).
+		const updated = await transaction
 			.update(channels)
 			.set(
 				complete
 					? { cursor: scanCursor, nextPageToken: null, scanCursor: null, historyBoundary: null, historyScanId: null }
 					: { nextPageToken: page.nextPageToken, scanCursor }
 				)
-			.where(eq(channels.id, channelId));
+			.where(
+				and(
+					eq(channels.id, channelId),
+					channel.historyScanId === null
+						? isNull(channels.historyScanId)
+						: eq(channels.historyScanId, channel.historyScanId),
+					channel.historyBoundary === null
+						? isNull(channels.historyBoundary)
+						: eq(channels.historyBoundary, channel.historyBoundary)
+				)
+			)
+			.returning({ id: channels.id });
+		if (!updated.length) throw new Error(`history checkpoint changed for channel ${channelId} — aborting checkpoint write`);
 	});
 }
 

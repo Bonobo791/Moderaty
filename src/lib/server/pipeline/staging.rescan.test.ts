@@ -134,6 +134,39 @@ test('a DIFFERENT scan id on the same comment is a fresh debit — re-runs are n
 	expect(await orgBalance()).toBe(8);
 });
 
+test('a rescan verdict with no action supersedes the comment\'s outstanding staged actions — terminal rows stay', async () => {
+	// The earlier verdict staged a pending reject on c1 and a dispatched
+	// delete on c2; c3's action already completed. The fresh rescan verdict
+	// approves all three. Outstanding intent must be cancelled — otherwise
+	// the next enforcement sweep claims the stale row and applies the OLD
+	// moderation decision on YouTube against the new verdict (codeant).
+	// A completed row is settled history: the remote action really happened,
+	// so it stays completed instead of being rewritten.
+	await seedChannelAndOrg(10);
+	await testDb().db.insert(comments).values([
+		{ id: 'c1', channelId: 'UC1', text: 'one', publishedAt: '2024-01-01T00:00:00.000Z', status: 'pending', decidedBy: 'ai' },
+		{ id: 'c2', channelId: 'UC1', text: 'two', publishedAt: '2024-01-01T00:00:00.000Z', status: 'held', decidedBy: 'ai' },
+		{ id: 'c3', channelId: 'UC1', text: 'three', publishedAt: '2024-01-01T00:00:00.000Z', status: 'rejected', decidedBy: 'ai' }
+	]);
+	await testDb().db.insert(moderationActions).values([
+		{ commentId: 'c1', channelId: 'UC1', action: 'reject', reason: 'old verdict', state: 'pending' },
+		{ commentId: 'c2', channelId: 'UC1', action: 'delete', reason: 'old verdict', state: 'dispatched', lastAttemptAt: '2025-01-02T00:00:00.000Z' },
+		{ commentId: 'c3', channelId: 'UC1', action: 'reject', reason: 'old verdict', state: 'completed', lastAttemptAt: '2025-01-02T00:00:00.000Z' }
+	]);
+	const approve = (id: string): Decision => ({
+		comment: { id, threadId: 't', videoId: 'v', authorChannelId: 'a', authorName: '@Ann', text: 'rescan text', publishedAt: '2024-01-01T00:00:00.000Z' },
+		status: 'approved', decidedBy: 'ai', matchedRuleId: null, aiScore: '{}',
+		auditAction: 'approve', reason: 'ai score 0.1', youtubeAction: null, billable: true
+	});
+
+	await stageDecisions('UC1', [approve('c1'), approve('c2'), approve('c3')], 'org-1', IDENTITY, 'scan-1');
+
+	const actions = await testDb().db.select().from(moderationActions).all();
+	expect(new Map(actions.map((row) => [row.commentId, row.state]))).toEqual(
+		new Map([['c1', 'superseded'], ['c2', 'superseded'], ['c3', 'completed']])
+	);
+});
+
 test('a live run keeps the plain comment anchor', async () => {
 	// Outside a rescan the anchor is the bare comment id — the same anchor a
 	// LATER rescan deliberately does NOT share (a fresh request is a fresh

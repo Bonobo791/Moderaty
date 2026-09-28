@@ -81,6 +81,65 @@ test('a non-OK provider response throws through jsonResponse', async () => {
 	await expect(clusterClaims([q('a'), q('b')], undefined, 'test-openai-key')).rejects.toThrow('feedback clustering failed');
 });
 
+test('identical input claims keep one label even when the model splits them into differently-worded themes', async () => {
+	// Three exact-recurrence claims assigned three different canonical
+	// wordings would each regroup as a singleton — splitting indistinguishable
+	// inputs is provably wrong, so the first covering theme's label wins.
+	stubMerge({
+		themes: [
+			{ claim: 'release schedule', members: [0] },
+			{ claim: 'when is the next video', members: [1] },
+			{ claim: 'upload cadence', members: [2] }
+		]
+	});
+	const canonical = await clusterClaims(
+		[q('release schedule'), q('release schedule'), q('release schedule')],
+		undefined,
+		'test-openai-key'
+	);
+	expect(canonical).toEqual(['release schedule', 'release schedule', 'release schedule']);
+});
+
+test('identical input claims split across same-label themes unify rather than fail', async () => {
+	stubMerge({
+		themes: [
+			{ claim: 'more cat videos', members: [0] },
+			{ claim: 'more cat videos', members: [1, 2] }
+		]
+	});
+	const canonical = await clusterClaims(
+		[q('more cat videos pls'), q('more cat videos pls'), q('more cat videos pls')],
+		undefined,
+		'test-openai-key'
+	);
+	expect(canonical).toEqual(['more cat videos', 'more cat videos', 'more cat videos']);
+});
+
+test('two same-category themes emitting the same canonical label over distinct inputs throw', async () => {
+	// 'Turn the volume up' and 'turn the volume down' are separate themes —
+	// if two theme objects label them both 'audio volume' they merge at
+	// regrouping into a false recurrence. The label should have been emitted
+	// by one theme (or never shared); anything else is malformed.
+	stubMerge({
+		themes: [
+			{ claim: 'audio volume', members: [0, 1] },
+			{ claim: 'audio volume!', members: [2, 3] }
+		]
+	});
+	await expect(
+		clusterClaims(
+			[
+				{ category: 'request', claim: 'turn the volume up' },
+				{ category: 'request', claim: 'louder please' },
+				{ category: 'request', claim: 'turn the volume down' },
+				{ category: 'request', claim: 'much quieter audio' }
+			],
+			undefined,
+			'test-openai-key'
+		)
+	).rejects.toThrow('feedback clustering response has missing or invalid themes');
+});
+
 test('clusterClassifiedClaims rewrites feedback rows and leaves none rows untouched', async () => {
 	stubMerge({ themes: [{ claim: 'shared theme', members: [0, 1] }] });
 	const merged = await clusterClassifiedClaims(

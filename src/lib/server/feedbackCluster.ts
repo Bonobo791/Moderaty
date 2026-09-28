@@ -3,6 +3,7 @@ import { env } from '$env/dynamic/private';
 import { fetchWithRetry, jsonResponse } from '$lib/server/http';
 import { buildClusterPrompt } from '$lib/server/feedbackPrompt';
 import { CLAIM_MAX_LENGTH, type FeedbackCategory } from '$lib/server/feedback';
+import { normalizeClaimKey } from '$lib/server/feedbackGroup';
 
 /**
  * AI theme pass for the feedback digest. Per-comment classification already
@@ -106,6 +107,42 @@ function validateMember(member: number, rows: ClusterableClaim[], canonical: Map
 }
 
 /**
+ * Reconciles the applied themes against the two invariants member-level
+ * validation can't see (codex). Identical input claims within a category
+ * are provably one theme — the model may not split them — so they share
+ * the first covering theme's wording. And one canonical label may only
+ * span different input claims when a single theme emitted it — the same
+ * label across two theme objects over distinct inputs collapses separate
+ * feedback into a false recurrence at regrouping.
+ */
+function reconcileThemes(canonical: Map<number, string>, themeOf: Map<number, number>, rows: ClusterableClaim[]): string[] {
+	const byInput = new Map<string, string>();
+	const effective = rows.map((row, i) => {
+		const claim = canonical.get(i);
+		if (claim === undefined) throw new TypeError(ERR_MALFORMED);
+		const inputKey = `${row.category} ${normalizeClaimKey(row.claim)}`;
+		const seen = byInput.get(inputKey);
+		if (seen !== undefined) return seen;
+		byInput.set(inputKey, claim);
+		return claim;
+	});
+	const labels = new Map<string, { themes: Set<number>; inputs: Set<string> }>();
+	effective.forEach((claim, i) => {
+		const row = rows.at(i);
+		if (row === undefined) throw new TypeError(ERR_MALFORMED);
+		const key = `${row.category} ${normalizeClaimKey(claim)}`;
+		const entry = labels.get(key) ?? { themes: new Set<number>(), inputs: new Set<string>() };
+		entry.themes.add(themeOf.get(i) ?? -1);
+		entry.inputs.add(normalizeClaimKey(row.claim));
+		labels.set(key, entry);
+	});
+	for (const entry of labels.values()) {
+		if (entry.themes.size > 1 && entry.inputs.size > 1) throw new TypeError(ERR_MALFORMED);
+	}
+	return effective;
+}
+
+/**
  * Applies the model's theme list to the input rows: every member index is
  * validated, every input index must be covered exactly once, and no theme
  * may merge across categories. Returns the canonical claim per input index.
@@ -113,7 +150,9 @@ function validateMember(member: number, rows: ClusterableClaim[], canonical: Map
 function applyThemes(themes: ClusterTheme[], rows: ClusterableClaim[]): string[] {
 	/** Canonical claim per covered input index. */
 	const canonical = new Map<number, string>();
-	for (const theme of themes) {
+	/** Which theme object covered each member — the label check needs it. */
+	const themeOf = new Map<number, number>();
+	for (const [themeIndex, theme] of themes.entries()) {
 		validateTheme(theme);
 		// The first member anchors the theme's category — a cross-category
 		// merge can never represent one claim; the prompt forbids it and
@@ -126,17 +165,14 @@ function applyThemes(themes: ClusterTheme[], rows: ClusterableClaim[]): string[]
 			anchorCategory ??= row.category;
 			if (row.category !== anchorCategory) throw new TypeError(ERR_MALFORMED);
 			canonical.set(member, theme.claim);
+			themeOf.set(member, themeIndex);
 		}
 	}
 	// Coverage is exact only when every in-range index was assigned —
 	// members were deduped and range-checked on set, so a size shortfall
 	// means the response dropped an index.
 	if (canonical.size !== rows.length) throw new TypeError(ERR_MALFORMED);
-	return rows.map((_row, i) => {
-		const claim = canonical.get(i);
-		if (claim === undefined) throw new TypeError(ERR_MALFORMED);
-		return claim;
-	});
+	return reconcileThemes(canonical, themeOf, rows);
 }
 
 /**

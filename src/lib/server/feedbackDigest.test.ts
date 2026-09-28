@@ -270,6 +270,26 @@ test('the theme pass is bounded by the write reserve — a spent reserve aborts 
 	expect(clusterCalls).toHaveLength(0);
 });
 
+test('a batch below the threshold in every enabled category skips the theme-merge call', async () => {
+	// 2 questions + 1 criticism at threshold 3 can never surface a finding —
+	// the merge call is wasted spend, and a malformed response would fail a
+	// run whose all-pooled outcome is already determined (codex).
+	await seedChannel('UC1', { feedbackEnabled: 1, feedbackThreshold: 3 });
+	await seedCommentBatch([
+		{ text: 'q1', claim: 'one question' },
+		{ text: 'q2', claim: 'another question' },
+		{ text: 'c1', claim: 'a criticism', category: 'criticism' }
+	]);
+	CLUSTER_RAW = 'not json';
+	const result = await generateFeedbackDigest('UC1', { force: true });
+	expect(result).toMatchObject({ status: 'complete', findings: 0, pooled: 3 });
+	const mergeCalls = vi
+		.mocked(fetch)
+		.mock.calls.map((c) => JSON.parse(String(c[1]?.body)))
+		.filter((b) => !String(b.messages.find((m: { role: string }) => m.role === 'user')?.content).includes('Comment: '));
+	expect(mergeCalls).toHaveLength(0);
+});
+
 test('per-comment classification failures are counted, not fatal', async () => {
 	await seedChannel('UC1', { feedbackEnabled: 1 });
 	await seedComment('c1', 'UC1', 'ok comment', '2026-01-01T00:00:00.000Z');

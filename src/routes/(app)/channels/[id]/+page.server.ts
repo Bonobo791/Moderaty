@@ -1,9 +1,11 @@
 import { db } from '$lib/server/db';
-import { channels } from '$lib/server/db/schema';
+import { channels, organizations } from '$lib/server/db/schema';
+import { getCredits } from '$lib/server/billing/ledger';
 import { decrypt } from '$lib/server/crypto';
 import { deleteChannelRecords } from '$lib/server/deletion';
 import { revokeGoogleToken } from '$lib/server/google';
 import { requireOrgRole } from '$lib/server/ownership';
+import { resolveOpenAiKey } from '$lib/server/openaiKey';
 import { runChannel } from '$lib/server/pipeline';
 import { requireUser } from '$lib/server/session';
 import { isToneLevel } from '$lib/toneLevels';
@@ -17,6 +19,15 @@ const HISTORY_MONTH_PRESETS: ReadonlySet<number> = new Set([1, 3, 6, 12, 24]);
 /** Boundary instant for a months window: now − months × 30 days. */
 function monthsAgoBoundary(months: number): string {
 	return new Date(Date.now() - months * 30 * 24 * 60 * 60 * 1000).toISOString();
+}
+
+async function historyAccessError(orgId: string): Promise<'purchase' | 'key' | null> {
+	const org = await db.select({ plan: organizations.plan }).from(organizations).where(eq(organizations.id, orgId)).get();
+	if (!org) throw new Error(`organization not found: ${orgId}`);
+	if (org.plan === 'lifetime') {
+		return (await resolveOpenAiKey(orgId))?.trim() ? null : 'key';
+	}
+	return (await getCredits(orgId)) > 0 ? null : 'purchase';
 }
 
 /**
@@ -133,6 +144,26 @@ export const actions = {
 				channelId,
 				error: 'This deployment runs in dry-run mode: history analysis audits only and never moderates. Set DRY_RUN=false to moderate.'
 			});
+		}
+		try {
+			const owned = await db.select({ id: channels.id }).from(channels)
+				.where(and(eq(channels.id, channelId), eq(channels.orgId, user.orgId))).get();
+			if (!owned) return fail(404, { scope: 'history', channelId, error: 'channel not found' });
+			const historyAccess = await historyAccessError(user.orgId);
+			if (historyAccess) {
+				console.warn('history analysis blocked:', { channelId, orgId: user.orgId, reason: historyAccess });
+				return fail(402, {
+					scope: 'history',
+					channelId,
+					historyAccess,
+					error: historyAccess === 'key'
+						? 'Your lifetime deal requires your own OpenAI API key. Add it on the Team page before analyzing history.'
+						: 'To analyze history, purchase credits, subscribe, or buy the lifetime deal and add your own OpenAI API key. If your credits or subscription allowance are exhausted, purchase more credits to continue.'
+				});
+			}
+		} catch (cause) {
+			console.error('history analysis access check failed:', channelId, cause);
+			return fail(503, { scope: 'history', channelId, error: 'Could not verify access to history analysis. Please try again.' });
 		}
 		// Move the scan boundary back and reset the drain state: cron's next runs
 		// page from the newest comment down to this boundary. Already-seen

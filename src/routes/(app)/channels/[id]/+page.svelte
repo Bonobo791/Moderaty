@@ -205,7 +205,14 @@
 	</form>
 	{#if form?.scope === 'history'}
 		{#if form?.error}
-			<p class="error-box" role="alert">{form.error}</p>
+			<p class="error-box" role="alert">
+				{form.error}
+				{#if 'historyAccess' in form && form.historyAccess === 'purchase'}
+					<a href="/usage">View plans and credits</a>
+				{:else if 'historyAccess' in form && form.historyAccess === 'key'}
+					<a href="/org">Add your OpenAI key on the Team page</a>
+				{/if}
+			</p>
 		{:else if form?.ok}
 			<p class="muted" role="status">
 				History scan started — cron is working back {form.months === 1 ? '1 month' : `${form.months} months`}. New comments keep flowing into the review queue as it drains.

@@ -169,7 +169,7 @@ export const actions = {
 		const ch = await ownedChannel(params.id, locals);
 		const form = await request.formData();
 		const rawWindow = form.get('months');
-		const window = parseHistoryWindow(rawWindow === null ? '3' : typeof rawWindow === 'string' ? rawWindow : null);
+		const window = parseHistoryWindow(rawWindow instanceof File ? null : rawWindow ?? '3');
 		if (window === null) return fail(400, { scope: 'history', error: 'Choose a history window of 1, 3, 6, 12, or 24 months.' });
 		if (env.DRY_RUN !== 'true' && env.DRY_RUN !== 'false') throw error(500, 'DRY_RUN must be true or false');
 		if (env.DRY_RUN === 'true') return fail(409, { scope: 'history', error: 'Historical feedback analysis is unavailable while this deployment is in dry-run mode.' });
@@ -215,7 +215,7 @@ export const actions = {
 		const ch = await ownedChannel(params.id, locals);
 		const form = await request.formData();
 		const rawWindow = form.get('months');
-		const window = parseHistoryWindow(rawWindow === null ? '3' : typeof rawWindow === 'string' ? rawWindow : null, true);
+		const window = parseHistoryWindow(rawWindow instanceof File ? null : rawWindow ?? '3', true);
 		if (window === null) return fail(400, { scope: 'feedbackDryRun', error: 'Choose 1, 3, 6, 12, 24 months, or all time.' });
 		if (env.DRY_RUN !== 'true' && env.DRY_RUN !== 'false') throw error(500, 'DRY_RUN must be true or false');
 		if (!ch.active) return fail(409, { scope: 'feedbackDryRun', error: 'Resume the channel before running a dry run.' });

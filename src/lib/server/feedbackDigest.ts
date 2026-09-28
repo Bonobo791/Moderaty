@@ -315,7 +315,7 @@ export async function generateFeedbackDigest(
 			return { status: 'empty', historyRemaining: !page.complete };
 		}
 		windowStart = batch[0].publishedAt;
-		windowEnd = batch[batch.length - 1].publishedAt;
+		windowEnd = batch.at(-1)!.publishedAt;
 	} else {
 		// Coverage is the per-comment marker, not a publication-time window:
 		// every comment with a NULL feedback_digested_at is eligible — including
@@ -346,7 +346,7 @@ export async function generateFeedbackDigest(
 		// instant instead of writing an inverted window.
 		const since = await lastWindowEnd(channelId);
 		windowStart = Date.parse(batch[0].publishedAt) < Date.parse(since) ? batch[0].publishedAt : since;
-		windowEnd = batch[batch.length - 1].publishedAt;
+		windowEnd = batch.at(-1)!.publishedAt;
 	}
 
 	// The OpenAI key comes from the org's BYOK resolution — a lifetime org

@@ -80,6 +80,13 @@ const mocks = vi.hoisted(() => {
 						params.includes(queryKey(row.commentId)) && params.includes(queryKey(row.channelId)));
 					return matches.at(-1);
 				}
+				if (table === state.tables.creditTransactions) {
+					// hasChargeAnchor's (org_id, ref_type, ref_id) lookup: a row only
+					// exists when an earlier charge actually committed one.
+					const params = queryParams(condition);
+					return state.insertedCredits.find((row) =>
+						params.includes(queryKey(row.orgId)) && params.includes(queryKey(row.refType)) && params.includes(queryKey(row.refId)));
+				}
 				throw new Error('unexpected get query');
 			},
 			all: async () => {
@@ -152,9 +159,30 @@ const mocks = vi.hoisted(() => {
 				// chain must be returned synchronously or onConflictDoNothing lands
 				// on a Promise.
 				store(table, values);
-				// Ledger inserts chain onConflictDoNothing().returning() — simulate a
-				// fresh insert (never a conflict) so consumeCredit sees a charge.
-				return { onConflictDoNothing: () => ({ returning: async () => [{ id: 1 }] }) };
+				// Rescan upserts chain onConflictDoUpdate() and await it directly —
+				// the mock records the staged row either way (conflict resolution is
+				// a SQL concern the in-memory store does not emulate).
+				return {
+					onConflictDoNothing: () => {
+						if (table === state.tables.creditTransactions) {
+							// Honor UNIQUE(org_id, ref_type, ref_id): an anchor committed
+							// by an earlier charge makes THIS insert conflict — nothing
+							// records and returning() comes back empty, exactly like
+							// the real constraint (rescan retries depend on it).
+							const rows = (Array.isArray(values) ? values : [values]) as Record<string, unknown>[];
+							const priors = state.insertedCredits.slice(0, state.insertedCredits.length - rows.length);
+							const conflict = rows.some((row) =>
+								priors.some((prior) =>
+									prior.orgId === row.orgId && prior.refType === row.refType && prior.refId === row.refId));
+							if (conflict) {
+								state.insertedCredits.splice(state.insertedCredits.length - rows.length, rows.length);
+								return { returning: async () => [] as Record<string, unknown>[] };
+							}
+						}
+						return { returning: async () => [{ id: 1 }] };
+					},
+					onConflictDoUpdate: async () => undefined
+				};
 			}
 		})),
 		select: vi.fn(() => ({ from: (table: unknown) => query(table) })),
@@ -518,6 +546,8 @@ export function resetPipelineMocks() {
 		cursor: null,
 		nextPageToken: null,
 		scanCursor: null,
+		historyBoundary: null,
+		historyScanId: null,
 		active: 1,
 		toneLevel: null,
 		createdAt: '2026-01-01T00:00:00.000Z'

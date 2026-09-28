@@ -161,6 +161,7 @@ export async function createTestDb(): Promise<TestDb> {
 			scan_cursor TEXT,
 			history_next_page_token TEXT,
 			history_boundary TEXT,
+			history_scan_id TEXT,
 			dry_run_boundary TEXT,
 			dry_run_page_token TEXT,
 			last_run_at TEXT,
@@ -182,6 +183,7 @@ export async function createTestDb(): Promise<TestDb> {
 			feedback_dry_run_used_at TEXT,
 			feedback_history_boundary TEXT,
 			feedback_history_page_token TEXT,
+			feedback_history_scan_id TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
 			CONSTRAINT channels_org_requires_owner CHECK (org_id IS NOT NULL OR user_id IS NULL)
 		)`,

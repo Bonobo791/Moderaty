@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, isNotNull, notExists, type SQL } from 'drizzle-orm';
+import { and, eq, isNull, notExists, type SQL } from 'drizzle-orm';
 
 import { decrypt } from '$lib/server/crypto';
 import { db } from '$lib/server/db';
@@ -41,23 +41,6 @@ export async function fetchFeedbackPage(
 	};
 }
 
-export async function pendingFeedbackHistoryPage(
-	channel: typeof channels.$inferSelect,
-	deadline?: number
-): Promise<FeedbackHistoryPage> {
-	const boundary = channel.feedbackHistoryBoundary;
-	if (!boundary) throw new Error(`channel ${channel.id} has no feedback history boundary`);
-	const page = await fetchFeedbackPage(channel, boundary, channel.feedbackHistoryPageToken, deadline);
-	const ids = page.batch.map((comment) => comment.id);
-	if (!ids.length) return page;
-	const [stored, historical] = await Promise.all([
-		db.select({ id: comments.id }).from(comments).where(and(eq(comments.channelId, channel.id), inArray(comments.id, ids), isNotNull(comments.feedbackDigestedAt))).all(),
-		db.select({ id: feedbackHistoryComments.id }).from(feedbackHistoryComments).where(and(eq(feedbackHistoryComments.channelId, channel.id), inArray(feedbackHistoryComments.id, ids))).all()
-	]);
-	const completed = new Set([...stored, ...historical].map((row) => row.id));
-	return { ...page, batch: page.batch.filter((comment) => !completed.has(comment.id)) };
-}
-
 export function pendingStoredFeedback(channelId: string): SQL {
 	return and(
 		eq(comments.channelId, channelId),
@@ -81,7 +64,7 @@ export async function advanceFeedbackHistory(
 		.update(channels)
 		.set(
 			page.complete
-				? { feedbackHistoryBoundary: null, feedbackHistoryPageToken: null }
+				? { feedbackHistoryBoundary: null, feedbackHistoryPageToken: null, feedbackHistoryScanId: null }
 				: { feedbackHistoryBoundary: channel.feedbackHistoryBoundary, feedbackHistoryPageToken: page.nextPageToken }
 		)
 		.where(

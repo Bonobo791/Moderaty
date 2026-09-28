@@ -13,13 +13,13 @@
 import { and, asc, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { db, withBusyRetry } from '$lib/server/db';
-import { channels, comments, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence } from '$lib/server/db/schema';
+import { channels, comments, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence } from '$lib/server/db/schema';
 import { classifyFeedback, type FeedbackCategory } from '$lib/server/feedback';
-import { fetchFeedbackPage, pendingFeedbackHistoryPage, pendingStoredFeedback, advanceFeedbackHistory, type FeedbackHistoryPage } from '$lib/server/feedbackHistory';
+import { fetchFeedbackPage, pendingStoredFeedback, advanceFeedbackHistory, type FeedbackHistoryPage } from '$lib/server/feedbackHistory';
 import { concealEvidence } from '$lib/server/feedbackSanitize';
 import { groupFeedback } from '$lib/server/feedbackGroup';
 import { DeadlineExceededError, assertBeforeDeadline } from '$lib/server/http';
-import { consumeFeedbackCredit, orgIsMetered, type LedgerHandle } from '$lib/server/billing/ledger';
+import { consumeFeedbackCredit, hasChargeAnchor, orgIsMetered, type LedgerHandle } from '$lib/server/billing/ledger';
 import { channelMatchesClaim, type DryRunClaim } from '$lib/server/dryRun';
 import { resolveOpenAiKey } from '$lib/server/openaiKey';
 
@@ -288,15 +288,25 @@ export async function generateFeedbackDigest(
 
 	const nowIso = new Date().toISOString();
 	let historyPage: FeedbackHistoryPage | undefined;
+	// The scan id planted with the boundary is the history run's billing
+	// scope: each requested analysis charges its own anchors, while retries
+	// of the same run stay idempotent (boundary fallback for legacy markers).
+	let historyBoundary: string | undefined;
+	let historyScanScope: string | undefined;
 	let batch: { id: string; text: string; publishedAt: string }[];
 	let windowStart: string;
 	let windowEnd: string;
 	if (channel.feedbackHistoryBoundary) {
-		windowStart = channel.feedbackHistoryBoundary;
+		historyBoundary = channel.feedbackHistoryBoundary;
+		historyScanScope = channel.feedbackHistoryScanId ?? historyBoundary;
+		windowStart = historyBoundary;
 		windowEnd = nowIso;
 		let page: FeedbackHistoryPage;
 		try {
-			page = await pendingFeedbackHistoryPage(channel, deadline);
+			// Already-analyzed comments are classified again on purpose: the
+			// owner re-requested the window, and re-running over the same data
+			// is the point of the feature.
+			page = await fetchFeedbackPage(channel, historyBoundary, channel.feedbackHistoryPageToken, deadline);
 			historyPage = page;
 		} catch (cause) {
 			console.error('feedback history page fetch failed for channel:', channelId, cause);
@@ -384,22 +394,15 @@ export async function generateFeedbackDigest(
 					// while every classify call rejects on arrival. Aborting rolls
 					// back ALL charges — the deferral spends nothing (codex).
 					assertBeforeDeadline(deadline);
-					const charged = await consumeFeedbackCredit(tx, orgId, comment.id);
+					// History scans charge under anchors scoped to this run's
+					// scan id so every requested analysis debits per comment;
+					// the stored-comments digest keeps the plain comment anchor.
+					const refId = historyScanScope ? `${comment.id}#${historyScanScope}` : comment.id;
+					const charged = await consumeFeedbackCredit(tx, orgId, refId);
 					if (!charged) {
 						// False also covers "already charged" — distinguish by
 						// looking for the anchor row before calling it a shortfall.
-						const prior = await tx
-							.select({ id: creditTransactions.id })
-							.from(creditTransactions)
-							.where(
-								and(
-									eq(creditTransactions.orgId, orgId),
-									eq(creditTransactions.refType, 'feedback'),
-									eq(creditTransactions.refId, comment.id)
-								)
-							)
-							.get();
-						if (!prior) throw new Error(ERR_INSUFFICIENT_CREDITS);
+						if (!(await hasChargeAnchor(tx, orgId, 'feedback', refId))) throw new Error(ERR_INSUFFICIENT_CREDITS);
 					}
 					// Every batch member ends the charge pass covered by an
 					// anchor — fresh debit or one persisted by a crashed/failed

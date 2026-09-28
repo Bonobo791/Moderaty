@@ -234,8 +234,9 @@ export const channels = sqliteTable('channels', {
 	cursor: text('cursor'), // scan boundary (ISO): comments older than this are never fetched. New connects start at connection time (no history analyzed); "analyze history" moves it back; null = legacy pre-window row (unbounded first scan)
 	nextPageToken: text('next_page_token'), // YouTube continuation token for an incomplete scan
 	scanCursor: text('scan_cursor'), // high-water timestamp to commit once an incomplete scan ends
-	historyNextPageToken: text('history_next_page_token'), // history-drain continuation token (issue #70): the drain walks history independently so the live cursor keeps advancing on newest comments every run; null = no drain in flight
-	historyBoundary: text('history_boundary'), // ISO timestamp the history drain started walking back from (its eventual end state: cursor = boundary)
+	historyNextPageToken: text('history_next_page_token'), // RESERVED (issue #70): a future history drain that walks independently of the live cursor; nothing reads or writes it yet
+	historyBoundary: text('history_boundary'), // user-requested history rescan marker: non-null while an "Analyze history" drain is re-walking comments down to this boundary (planted with cursor=boundary)
+	historyScanId: text('history_scan_id'), // per-request nonce planted with history_boundary: scopes the rescan's credit anchors so each requested scan debits once while retries of the SAME scan stay idempotent; cleared with the boundary on completion
 	dryRunBoundary: text('dry_run_boundary'), // on-demand dry-run window (ISO): the drain rescores comments down to this timestamp; null = no dry-run drain in flight
 	dryRunPageToken: text('dry_run_page_token'), // YouTube continuation token for the dry-run drain's next page
 	lastRunAt: text('last_run_at'), // ISO timestamp of last cron run; rotation orders by it ASC (NULLs first)
@@ -261,6 +262,7 @@ export const channels = sqliteTable('channels', {
 	feedbackDryRunUsedAt: text('feedback_dry_run_used_at'),
 	feedbackHistoryBoundary: text('feedback_history_boundary'),
 	feedbackHistoryPageToken: text('feedback_history_page_token'),
+	feedbackHistoryScanId: text('feedback_history_scan_id'), // per-request nonce planted with feedback_history_boundary — the history run's billing scope (see history_scan_id)
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
 	index('channels_user_id_idx').on(table.userId),

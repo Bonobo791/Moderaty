@@ -340,6 +340,7 @@ describe('channels', () => {
 			scan_cursor: { notNull: false },
 			history_next_page_token: { notNull: false },
 			history_boundary: { notNull: false },
+			history_scan_id: { notNull: false },
 			dry_run_boundary: { notNull: false },
 			dry_run_page_token: { notNull: false },
 			last_run_at: { notNull: false },
@@ -361,6 +362,7 @@ describe('channels', () => {
 			feedback_dry_run_used_at: { notNull: false },
 			feedback_history_boundary: { notNull: false },
 			feedback_history_page_token: { notNull: false },
+			feedback_history_scan_id: { notNull: false },
 			created_at: { notNull: true, hasDefault: true }
 		});
 		expectCreatedAtDefault(channels);

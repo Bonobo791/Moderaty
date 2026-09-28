@@ -12,7 +12,7 @@ vi.mock('$lib/server/youtube', () => ({ refreshAccessToken: mocks.refreshAccessT
 
 import { setupTestDb, testDb } from './testdb';
 import { channels, comments, feedbackHistoryComments } from './db/schema';
-import { advanceFeedbackHistory, fetchFeedbackPage, pendingFeedbackHistoryPage, pendingStoredFeedback } from './feedbackHistory';
+import { advanceFeedbackHistory, fetchFeedbackPage, pendingStoredFeedback } from './feedbackHistory';
 
 setupTestDb(['comments', 'feedback_history_comments', 'channels']);
 
@@ -78,7 +78,11 @@ test('fetchFeedbackPage throws rather than silently truncating an oversized page
 	await expect(fetchFeedbackPage(channel, channel.feedbackHistoryBoundary!, null)).rejects.toThrow('exceeded 100 comments');
 });
 
-test('pendingFeedbackHistoryPage filters completed stored and historical IDs before returning a batch', async () => {
+test('fetchFeedbackPage returns every comment on the page — completed stored and historical IDs are re-analyzed, never filtered', async () => {
+	// Repeatable history analysis is the feature: a re-requested window must
+	// re-classify comments the digest or a previous history run already
+	// covered. Coverage markers no longer prune the batch — the charge
+	// anchors (scoped per scan) are what keep retries idempotent.
 	const channel = await seedChannel({ feedbackHistoryPageToken: 'page-2' });
 	await testDb().db.insert(comments).values({
 		id: 'stored-done', channelId: 'UC1', text: 'already covered', publishedAt: '2025-01-01T00:00:00.000Z', status: 'approved', decidedBy: 'ai', feedbackDigestedAt: '2026-01-01T00:00:00.000Z'
@@ -94,12 +98,16 @@ test('pendingFeedbackHistoryPage filters completed stored and historical IDs bef
 		reachedCursor: false
 	});
 
-	const page = await pendingFeedbackHistoryPage(channel, 99);
+	const page = await fetchFeedbackPage(channel, channel.feedbackHistoryBoundary!, 'page-2', 99);
 
 	expect(mocks.fetchNewComments).toHaveBeenCalledWith('UC1', 'access-token', channel.feedbackHistoryBoundary, {
 		maxPages: 1, pageToken: 'page-2', deadline: 99
 	});
-	expect(page.batch).toEqual([{ id: 'pending', text: 'new source', publishedAt: '2025-01-03T00:00:00.000Z' }]);
+	expect(page.batch).toEqual([
+		{ id: 'stored-done', text: 'already covered', publishedAt: '2025-01-01T00:00:00.000Z' },
+		{ id: 'history-done', text: 'already historical', publishedAt: '2025-01-02T00:00:00.000Z' },
+		{ id: 'pending', text: 'new source', publishedAt: '2025-01-03T00:00:00.000Z' }
+	]);
 });
 
 test('pendingStoredFeedback excludes IDs already completed from YouTube history', async () => {
@@ -120,23 +128,33 @@ test('advanceFeedbackHistory changes only feedback history checkpoints and rejec
 		feedbackEnabled: 1,
 		cursor: '2026-06-01T00:00:00.000Z', nextPageToken: 'moderation-page', scanCursor: 'scan',
 		historyBoundary: '2025-01-01T00:00:00.000Z', historyNextPageToken: 'moderation-history-page',
-		dryRunBoundary: '2026-03-01T00:00:00.000Z', dryRunPageToken: 'preview-page', leaseExpiresAt: '2099-01-01T00:00:00.000Z'
+		dryRunBoundary: '2026-03-01T00:00:00.000Z', dryRunPageToken: 'preview-page', leaseExpiresAt: '2099-01-01T00:00:00.000Z',
+		feedbackHistoryScanId: 'scan-1'
 	});
 	const incomplete = { batch: [], nextPageToken: 'page-next', complete: false };
 	await advanceFeedbackHistory(testDb().db, channel, incomplete);
 	let updated = (await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())!;
 	expect(updated.feedbackHistoryBoundary).toBe(channel.feedbackHistoryBoundary);
 	expect(updated.feedbackHistoryPageToken).toBe('page-next');
+	expect(updated.feedbackHistoryScanId).toBe('scan-1');
 	expect(updated).toMatchObject({
 		cursor: channel.cursor, nextPageToken: channel.nextPageToken, scanCursor: channel.scanCursor,
 		historyBoundary: channel.historyBoundary, historyNextPageToken: channel.historyNextPageToken,
 		dryRunBoundary: channel.dryRunBoundary, dryRunPageToken: channel.dryRunPageToken
 	});
 
-	await testDb().db.update(channels).set({ leaseExpiresAt: '2100-01-01T00:00:00.000Z' }).where(eq(channels.id, 'UC1'));
-	await expect(advanceFeedbackHistory(testDb().db, updated, { batch: [], nextPageToken: null, complete: true })).rejects.toThrow('checkpoint changed');
+	// Completing clears the whole scan state together — boundary, page token,
+	// and the billing nonce — so a fresh request never inherits a stale scope.
+	await advanceFeedbackHistory(testDb().db, updated, { batch: [], nextPageToken: null, complete: true });
 	updated = (await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())!;
-	expect(updated.feedbackHistoryPageToken).toBe('page-next');
+	expect(updated).toMatchObject({ feedbackHistoryBoundary: null, feedbackHistoryPageToken: null, feedbackHistoryScanId: null });
+
+	await testDb().db.update(channels).set({ feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryScanId: 'scan-2' }).where(eq(channels.id, 'UC1'));
+	const replanted = (await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())!;
+	await testDb().db.update(channels).set({ leaseExpiresAt: '2100-01-01T00:00:00.000Z' }).where(eq(channels.id, 'UC1'));
+	await expect(advanceFeedbackHistory(testDb().db, replanted, { batch: [], nextPageToken: null, complete: true })).rejects.toThrow('checkpoint changed');
+	updated = (await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())!;
+	expect(updated).toMatchObject({ feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryScanId: 'scan-2' });
 });
 
 test('advanceFeedbackHistory aborts when the channel was paused or feedback disabled mid-scan', async () => {

@@ -497,12 +497,17 @@ test('a concealed-only evidence comment stores the placeholder', async () => {
 	expect(concealed.sanitizedExcerpt).toBe(CONCEALED_MESSAGE);
 });
 
-test('historical batches deduplicate completed IDs before charging, advance only feedback state, and never create moderated comments', async () => {
-	await testDb().db.update(organizations).set({ creditsRemaining: 5 }).where(eq(organizations.id, 'org-1'));
+test('historical batches re-classify stored and history-completed comments, charge under the scan scope, and never create moderated comments', async () => {
+	// Repeatability: the re-requested window classifies every comment on the
+	// page again — coverage markers (feedback_digested_at, history rows) no
+	// longer prune the batch. Each run debits its own scan-scoped anchors, so
+	// the same comments pay once PER requested scan, never twice within one.
+	await testDb().db.update(organizations).set({ creditsRemaining: 10 }).where(eq(organizations.id, 'org-1'));
 	await seedChannel('UC1', {
 		feedbackEnabled: 1,
 		feedbackCadence: 'manual',
 		feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z',
+		feedbackHistoryScanId: 'scan-a',
 		feedbackHistoryPageToken: 'page-1',
 		cursor: '2026-01-01T00:00:00.000Z',
 		nextPageToken: 'live-page',
@@ -527,23 +532,73 @@ test('historical batches deduplicate completed IDs before charging, advance only
 	expect(await digestDue(channel)).toBe(true);
 	const result = await generateFeedbackDigest('UC1');
 
-	expect(result).toMatchObject({ status: 'complete', commentsClassified: 1, commentsFailed: 0, creditsUsed: 1, historyRemaining: true });
+	expect(result).toMatchObject({ status: 'complete', commentsClassified: 3, commentsFailed: 0, creditsUsed: 3, historyRemaining: true });
 	expect(mocks.fetchNewComments).toHaveBeenCalledWith('UC1', 'access-token', '2025-01-01T00:00:00.000Z', {
 		maxPages: 1, pageToken: 'page-1', deadline: undefined
 	});
-	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(1);
-	expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBe(4);
+	// Every batch member debited under THIS scan's scope — the anchors that
+	// keep a mid-drain retry idempotent are per-request, not per-window.
+	const ledger = await testDb().db.select().from(creditTransactions).all();
+	expect(ledger.map((row) => row.refId).sort()).toEqual(['history-done#scan-a', 'new-history#scan-a', 'stored-done#scan-a']);
+	expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBe(7);
 	const sources = await testDb().db.select().from(feedbackHistoryComments).where(eq(feedbackHistoryComments.channelId, 'UC1')).all();
-	expect(sources).toHaveLength(2);
+	expect(sources).toHaveLength(3);
 	expect(sources.find((row) => row.id === 'new-history')?.text).toBe(longText.slice(0, 500));
+	// Re-classifying a stored comment refreshes its digest marker but never
+	// its moderation state — the human's verdict stands.
 	const stored = (await testDb().db.select().from(comments).where(eq(comments.id, 'stored-done')).get())!;
-	expect(stored).toMatchObject({ status: 'held', decidedBy: 'human', feedbackDigestedAt: '2025-01-01T00:00:00.000Z' });
+	expect(stored).toMatchObject({ status: 'held', decidedBy: 'human' });
+	expect(stored.feedbackDigestedAt).not.toBe('2025-01-01T00:00:00.000Z');
 	expect(await testDb().db.select().from(comments).where(eq(comments.channelId, 'UC1')).all()).toHaveLength(1);
 	const updatedChannel = (await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())!;
 	expect(updatedChannel).toMatchObject({
-		feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryPageToken: 'page-2',
+		feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryScanId: 'scan-a', feedbackHistoryPageToken: 'page-2',
 		cursor: '2026-01-01T00:00:00.000Z', nextPageToken: 'live-page', scanCursor: 'live-scan'
 	});
+});
+
+test('re-requesting the same history window re-classifies every comment and debits again under the new scan id', async () => {
+	// The product contract: the owner can run the identical analysis as many
+	// times as they like over the same data. Each requested scan charges its
+	// own anchors — never silently free — while a retry of one scan remains
+	// idempotent (the same scan id hits its own anchors).
+	await testDb().db.update(organizations).set({ creditsRemaining: 10 }).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC1', {
+		feedbackEnabled: 1,
+		feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z',
+		feedbackHistoryScanId: 'scan-one',
+		feedbackHistoryPageToken: null
+	});
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [
+			{ id: 'h1', text: 'first historical comment', publishedAt: '2024-01-01T00:00:00.000Z' },
+			{ id: 'h2', text: 'second historical comment', publishedAt: '2024-01-02T00:00:00.000Z' }
+		],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	const first = await generateFeedbackDigest('UC1');
+	expect(first).toMatchObject({ status: 'complete', commentsClassified: 2, creditsUsed: 2, historyRemaining: false });
+	expect((await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())).toMatchObject({
+		feedbackHistoryBoundary: null, feedbackHistoryPageToken: null, feedbackHistoryScanId: null
+	});
+
+	// The owner re-requests the identical window: the action replants the
+	// boundary with a FRESH scan id (what analyzeHistory's randomUUID does).
+	await testDb().db.update(channels)
+		.set({ feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryScanId: 'scan-two', feedbackHistoryPageToken: null })
+		.where(eq(channels.id, 'UC1'));
+
+	const second = await generateFeedbackDigest('UC1');
+
+	expect(second).toMatchObject({ status: 'complete', commentsClassified: 2, creditsUsed: 2, historyRemaining: false });
+	const ledger = await testDb().db.select().from(creditTransactions).all();
+	expect(ledger).toHaveLength(4);
+	expect(ledger.map((row) => row.refId).sort()).toEqual(['h1#scan-one', 'h1#scan-two', 'h2#scan-one', 'h2#scan-two']);
+	expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBe(6);
+	// Both runs wrote their own digest rows — paid findings stay selectable.
+	expect(await testDb().db.select().from(feedbackDigests).all()).toHaveLength(2);
 });
 
 test('two historical pages produce distinct digests and advance only the feedback checkpoint', async () => {
@@ -670,11 +725,10 @@ test('historical batches on lifetime plans use the stored BYOK key and charge no
 	expect(vi.mocked(fetch).mock.calls[0]?.[1]?.headers).toMatchObject({ Authorization: 'Bearer decrypted:enc-org-key' });
 });
 
-test('a successful empty history page clears transient failures but retains completed digest history', async () => {
+test('a recovered history page re-analyzes previously digested comments and clears transient failures', async () => {
+	// Coverage markers don't prune a re-requested window: a comment already
+	// digested once is classified again when the owner re-asks for the data.
 	await seedChannel('UC1', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryPageToken: 'page-1' });
-	await testDb().db.insert(feedbackDigests).values({
-		channelId: 'UC1', windowStart: '1970-01-01T00:00:00.000Z', windowEnd: '2024-01-01T00:00:00.000Z', status: 'complete', commentsClassified: 1
-	});
 	await seedComment('done', 'UC1', 'already digested', '2024-01-01T00:00:00.000Z');
 	await testDb().db.update(comments).set({ feedbackDigestedAt: '2025-01-01T00:00:00.000Z' }).where(eq(comments.id, 'done'));
 	mocks.fetchNewComments.mockRejectedValueOnce(new Error('temporary history fetch failure'));
@@ -686,10 +740,10 @@ test('a successful empty history page clears transient failures but retains comp
 
 	const result = await generateFeedbackDigest('UC1');
 
-	expect(result).toEqual({ status: 'empty', historyRemaining: false });
+	expect(result).toMatchObject({ status: 'complete', commentsClassified: 1, historyRemaining: false });
 	expect((await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())).toMatchObject({ feedbackHistoryBoundary: null, feedbackHistoryPageToken: null });
+	// The transient failure row resolves; the rerun's complete row stands.
 	expect((await testDb().db.select().from(feedbackDigests).all()).map((digest) => digest.status)).toEqual(['complete']);
-	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(0);
 });
 
 test('a historical YouTube failure is logged server-side, sanitized to the page, and leaves its checkpoint in place', async () => {

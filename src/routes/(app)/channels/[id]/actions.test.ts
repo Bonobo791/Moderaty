@@ -156,10 +156,14 @@ async function seedHistoryChannelState(channelId = 'UC1') {
 }
 
 async function expectHistoryWindowStarted(channelId: string, before: number, after: number) {
-	const { cursor, nextPageToken, scanCursor } = await scanWindowOf(channelId);
+	const row = await channelById(channelId);
+	const { cursor, nextPageToken, scanCursor } = row ?? {};
 	const expected = 3 * 30 * 24 * 60 * 60 * 1000;
 	expect(nextPageToken).toBeNull();
 	expect(scanCursor).toBeNull();
+	// Every request mints a fresh scan id — the per-scan billing scope that
+	// lets a re-run debit again while this scan's retries stay idempotent.
+	expect(row?.historyScanId).toEqual(expect.any(String));
 	expect(Date.parse(cursor ?? '')).toBeGreaterThanOrEqual(before - expected - 1000);
 	expect(Date.parse(cursor ?? '')).toBeLessThanOrEqual(after - expected + 1000);
 }
@@ -341,6 +345,24 @@ test('a lifetime org with its own stored key starts history without credit balan
 	expect(res).toMatchObject({ ok: true, scope: 'history', channelId: 'UC1', months: 3 });
 	await expectHistoryWindowStarted('UC1', before, after);
 	expect((await testDb().db.select({ creditsRemaining: organizations.creditsRemaining }).from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBe(0);
+});
+
+test('every analyze history request mints a fresh scan id — the billing scope for that run', async () => {
+	// Re-running the identical window is allowed: each accepted request
+	// plants its own nonce so THIS run's charges mint new anchors while a
+	// retry of the same drain keeps replaying the same id (I4 billing).
+	await seedHistoryChannelState();
+
+	const first = await analyzeHistory('UC1', '3');
+	expect(first).toMatchObject({ ok: true });
+	const firstScanId = (await channelById('UC1'))?.historyScanId;
+	expect(firstScanId).toEqual(expect.any(String));
+
+	const second = await analyzeHistory('UC1', '3');
+	expect(second).toMatchObject({ ok: true });
+	const secondScanId = (await channelById('UC1'))?.historyScanId;
+	expect(secondScanId).toEqual(expect.any(String));
+	expect(secondScanId).not.toBe(firstScanId);
 });
 
 test('another organization\'s purchased balance cannot authorize this channel', async () => {

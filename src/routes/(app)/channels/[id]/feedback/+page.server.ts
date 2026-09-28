@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import { error, fail } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
+import { randomUUID } from 'node:crypto';
 
 import { db } from '$lib/server/db';
 import { channels, comments, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence } from '$lib/server/db/schema';
@@ -197,9 +198,13 @@ export const actions = {
 		}
 		const now = new Date().toISOString();
 		const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, now));
+		// A fresh scan id per request: the charge anchors it scopes make this
+		// analysis debit each comment once — re-running the same window mints a
+		// new id and charges again; a retry of THIS run hits the anchors and
+		// classifies without a second debit.
 		const updated = await db
 			.update(channels)
-			.set({ feedbackHistoryBoundary: historyWindowBoundary(window), feedbackHistoryPageToken: null })
+			.set({ feedbackHistoryBoundary: historyWindowBoundary(window), feedbackHistoryPageToken: null, feedbackHistoryScanId: randomUUID() })
 			.where(and(eq(channels.id, params.id), eq(channels.orgId, user.orgId), eq(channels.active, 1), eq(channels.feedbackEnabled, 1), isNull(channels.feedbackHistoryBoundary), claimable))
 			.returning({ id: channels.id });
 		if (!updated.length) return fail(409, { scope: 'history', error: 'Feedback history is already running or this channel is busy.' });

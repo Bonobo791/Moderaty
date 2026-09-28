@@ -193,6 +193,59 @@ test('window mode is complete when the listing ends without hitting the boundary
 	expect(result).toMatchObject({ windowComplete: true, windowNextPageToken: null });
 });
 
+test('a planted history boundary rescores stored comments and charges under the scan id', async () => {
+	// The owner asked to re-analyze the window: the stored-IDs dedupe is
+	// skipped, the row upserts to the fresh verdict, and the charge anchors
+	// to the per-request scan id — each requested scan debits once, retries
+	// of THIS scan hit the same anchors and stage covered (I4).
+	mocks.state.channel.orgId = 'org-1';
+	mocks.state.credits = 10;
+	mocks.state.channel.historyBoundary = '2026-01-01T00:00:00.000Z';
+	mocks.state.channel.historyScanId = 'scan-req-1';
+	mocks.state.existingIds = ['comment'];
+	mocks.scoreComment.mockResolvedValue(moderation(0.9));
+
+	const result = await runChannel('channel');
+
+	expect(result).toMatchObject({ fetched: 1, acted: 1, dryRun: false });
+	expect(mocks.scoreComment).toHaveBeenCalled();
+	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', decidedBy: 'ai' })]);
+	expect(mocks.state.insertedCredits).toEqual([expect.objectContaining({ refType: 'comment', refId: 'comment#scan-req-1' })]);
+	// Completion clears the boundary AND its nonce together.
+	expect(mocks.state.channelUpdates).toContainEqual(expect.objectContaining({ historyBoundary: null, historyScanId: null }));
+});
+
+test('a rescan channel with no scan id anchors charges to the boundary itself', async () => {
+	// Drains planted before the nonce column existed keep one stable scope for
+	// the rest of their drain: the window boundary.
+	mocks.state.channel.orgId = 'org-1';
+	mocks.state.channel.historyBoundary = '2026-01-01T00:00:00.000Z';
+	mocks.state.existingIds = ['comment'];
+	mocks.scoreComment.mockResolvedValue(moderation(0.9));
+
+	await runChannel('channel');
+
+	expect(mocks.state.insertedCredits).toEqual([expect.objectContaining({ refId: 'comment#2026-01-01T00:00:00.000Z' })]);
+});
+
+test('a rescan retry stages covered — the scan anchors block a second debit', async () => {
+	// Mid-drain crash: the first attempt's committed anchors are found by
+	// consumeCredit for the SAME scan id, so the retried page charges nothing
+	// new while still upserting the verdicts.
+	mocks.state.channel.orgId = 'org-1';
+	mocks.state.credits = 10;
+	mocks.state.channel.historyBoundary = '2026-01-01T00:00:00.000Z';
+	mocks.state.channel.historyScanId = 'scan-req-1';
+	mocks.state.existingIds = ['comment'];
+	mocks.scoreComment.mockResolvedValue(moderation(0.9));
+
+	await runChannel('channel');
+	await runChannel('channel');
+
+	expect(mocks.state.insertedCredits).toEqual([expect.objectContaining({ refId: 'comment#scan-req-1' })]);
+	expect(mocks.state.credits).toBe(9);
+});
+
 test('skips an inactive channel without fetching or scoring', async () => {
 	mocks.state.channel = { ...mocks.state.channel, active: 0 };
 

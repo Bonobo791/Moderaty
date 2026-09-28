@@ -221,6 +221,26 @@ export async function applyLedgerDelta(
 }
 
 /**
+ * True when a transaction row already anchors (orgId, refType, refId). After a
+ * consume*Credit call returns false, this distinguishes "the charge already
+ * exists" (a covered retry — stage without a new debit) from a real balance
+ * shortfall.
+ */
+export async function hasChargeAnchor(
+	handle: LedgerHandle,
+	orgId: string,
+	refType: 'comment' | 'feedback',
+	refId: string
+): Promise<boolean> {
+	const prior = await handle
+		.select({ id: creditTransactions.id })
+		.from(creditTransactions)
+		.where(and(eq(creditTransactions.orgId, orgId), eq(creditTransactions.refType, refType), eq(creditTransactions.refId, refId)))
+		.get();
+	return Boolean(prior);
+}
+
+/**
  * Charges one available credit anchored on (refType, refId).
  *
  * @returns `true` if this call charged, `false` if it was already charged or no credit was available

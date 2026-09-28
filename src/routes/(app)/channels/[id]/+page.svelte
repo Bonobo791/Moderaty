@@ -122,11 +122,9 @@
 {#if form?.scope === 'pause' && form?.error}
 	<p class="error-box" role="alert">{form.error}</p>
 {/if}
-<div class="preview-limit" role="note">
-	<strong>Limited to 1 free moderation dry run per channel.</strong>
-	<p>This allowance is used when a run starts, even if it later fails. No credits are charged.</p>
-	{#if moderationPreviewUsed}<p>Moderation preview already used. This channel has used its moderation preview allowance.</p>{/if}
-</div>
+<p class="preview-limit" role="note">
+	1 free moderation dry run per channel — used when the run starts, even if it fails. No credits are charged.
+</p>
 {#key ch.id}
 	<SensitivitySwitch channelId={ch.id} channelTitle={ch.title} level={ch.toneLevel ?? 1} />
 {/key}
@@ -294,7 +292,7 @@
 	<p class="muted" role="status">
 		{ch.active === 0
 			? 'The saved preview window is paused with this channel and will continue when moderation resumes.'
-			: 'Your one allowed moderation preview is continuing through the selected window in the background; cron drains the remaining pages automatically.'}
+			: 'The moderation dry-run preview is continuing through the selected window in the background; cron drains the remaining pages automatically.'}
 	</p>
 {/if}
 {#if data.orgRole === 'owner' || data.orgRole === 'admin'}
@@ -327,9 +325,6 @@
 		border-radius: 8px;
 		background: var(--surface);
 		line-height: 1.5;
-	}
-	.preview-limit p {
-		margin: 6px 0 0;
 		color: var(--text-2);
 		font-size: 0.85rem;
 	}

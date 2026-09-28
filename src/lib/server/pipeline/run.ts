@@ -51,7 +51,7 @@ async function persistResults(
 			.update(channels)
 			.set(
 				complete
-					? { cursor: scanCursor, nextPageToken: null, scanCursor: null }
+					? { cursor: scanCursor, nextPageToken: null, scanCursor: null, historyBoundary: null, historyScanId: null }
 					: { nextPageToken: page.nextPageToken, scanCursor }
 				)
 			.where(eq(channels.id, channelId));
@@ -158,7 +158,12 @@ export async function runChannel(
 			// queue unscored (I11; openaiKey.ts).
 			openAiKey: await resolveOpenAiKey(channel.orgId),
 			deadline,
-			rescore: window !== undefined,
+			// Rescore every fetched comment, skipping the stored-IDs dedupe:
+			// dry-run windows by design, and user-requested history rescans —
+			// the planted historyBoundary means the owner asked to re-analyze
+			// the window, so stored comments get a fresh decision (their rows
+			// upsert) instead of being skipped.
+			rescore: window !== undefined || channel.historyBoundary !== null,
 			orgId: channel.orgId,
 			// Live runs consume credits (and gate AI on them); dry runs never do.
 			consumeCredits: !dryRun
@@ -168,7 +173,12 @@ export async function runChannel(
 		// Deletion may have committed during the YouTube/AI calls above: re-check
 		// before any durable write (I3) so a deleted account gets no new rows.
 		await assertChannelActive(channelId, db, channel);
-		acted = await stageOrAuditDecisions(channelId, decisions, dryRun, channel.orgId, channel);
+		// A planted rescan passes its scan id as the billing scope: anchors minted
+		// per request debit each metered comment once for THIS scan, while a retry
+		// of the same drain hits them and stages covered (boundary fallback for
+		// markers planted before the nonce column existed).
+		const rescanScope = channel.historyBoundary === null ? undefined : (channel.historyScanId ?? channel.historyBoundary);
+		acted = await stageOrAuditDecisions(channelId, decisions, dryRun, channel.orgId, channel, rescanScope);
 		// Fail loudly only after successful decisions are staged, and before the
 		// cursor advances, so the next run retries just the failed comments.
 		if (failures.length) {

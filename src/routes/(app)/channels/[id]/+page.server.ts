@@ -10,6 +10,7 @@ import { requireOrgRole } from '$lib/server/ownership';
 import { runChannel } from '$lib/server/pipeline';
 import { requireUser } from '$lib/server/session';
 import { isToneLevel } from '$lib/toneLevels';
+import { randomUUID } from 'node:crypto';
 import { and, eq, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { error, fail, redirect } from '@sveltejs/kit';
@@ -151,10 +152,12 @@ export const actions = {
 			return fail(503, { scope: 'history', channelId, error: 'Could not verify access to history analysis. Please try again.' });
 		}
 		// Move the scan boundary back and reset the drain state: cron's next runs
-		// page from the newest comment down to this boundary. Already-seen
-		// comments are skipped before scoring (decideNewComments dedupes by id),
-		// so only the unscanned history costs moderation calls. Tenancy-scoped:
-		// another team's channel reads as "not found".
+		// page from the newest comment down to this boundary. The planted
+		// historyBoundary marks the drain as a user-requested rescan — every
+		// comment in the window is re-decided (even ones already stored) — and
+		// the fresh historyScanId scopes this scan's credit anchors so a repeat
+		// request debits again while retries of THIS scan stay idempotent.
+		// Tenancy-scoped: another team's channel reads as "not found".
 		const boundary = historyWindowBoundary(months);
 		// Coordinate with the cron lease: a run in flight would otherwise persist
 		// its own scan state and silently cancel (or be cancelled by) this reset.
@@ -163,7 +166,7 @@ export const actions = {
 		const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, new Date().toISOString()));
 		const updated = await db
 			.update(channels)
-			.set({ cursor: boundary, nextPageToken: null, scanCursor: null })
+			.set({ cursor: boundary, nextPageToken: null, scanCursor: null, historyBoundary: boundary, historyScanId: randomUUID() })
 			.where(and(eq(channels.id, channelId), eq(channels.orgId, user.orgId), claimable))
 			.returning({ id: channels.id });
 		if (updated.length === 0) {

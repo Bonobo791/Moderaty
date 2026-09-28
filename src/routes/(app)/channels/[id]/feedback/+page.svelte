@@ -122,7 +122,7 @@
 	{#if form?.scope !== 'reveal' && form?.message}<div class="flash" role="status">{form.message}</div>{/if}
 
 	<div class="credit-notice" role="note">
-		<strong>Feedback uses 1 credit per comment processed on metered plans, in addition to moderation. Historical analysis uses the same credits. Your one free feedback dry run uses no credits.</strong>
+		<strong>Feedback uses 1 credit per comment processed on metered plans, in addition to moderation. Historical analysis uses the same credits.</strong>
 		<p>Lifetime-plan and self-hosted unmetered accounts are not charged credits.</p>
 	</div>
 	{#if data.history.active}
@@ -393,14 +393,13 @@
 							<option value="all">All time</option>
 						</select>
 					</label>
-					<p class="muted settings-note">Scores only the first YouTube page, up to 100 comments. No digest, history, or moderation state is saved.</p>
+					<p class="muted settings-note">1 free feedback dry run per channel — scores only the first YouTube page (up to 100 comments) and saves no digest, history, or moderation state. Used when it starts, even if it fails. No credits are charged.</p>
 					<button class="btn small" disabled={previewingFeedback || feedbackPreviewUsed || !data.ch.active}>
 						{previewingFeedback ? 'Previewing…' : feedbackPreviewUsed ? 'Feedback preview already used' : 'Run feedback dry run'}
 					</button>
 				</form>
 			</div>
 		{/if}
-		<p class="limit-note">Limited to 1 free feedback dry run per channel. This one free feedback preview is used when it starts, even if it later fails. No credits are charged.{#if feedbackPreviewUsed} This channel has used its feedback preview allowance.{/if}</p>
 		{#if !canOperate}<p class="muted settings-note">Only an organization owner can start historical analysis or use the feedback dry run.</p>{/if}
 		{#if analyzingHistory}<div class="preview-loading" role="status" aria-busy="true"><Skeleton rows={1} /></div>{/if}
 		{#if previewingFeedback}<div class="preview-loading" role="status" aria-busy="true"><Skeleton rows={2} /></div>{/if}
@@ -408,7 +407,7 @@
 			<section class="preview-results" aria-label="Feedback dry-run results">
 				<h4>Feedback dry-run preview</h4>
 				<p class="muted">{feedbackPreview.commentsClassified} classified · {feedbackPreview.commentsFailed} failed · {feedbackPreview.pooled} pooled · 0 credits used</p>
-				<p class="muted">Preview covers only the first page, up to 100 comments; run historical analysis for the full window.</p>
+				<p class="muted">Run historical analysis for the full window.</p>
 				{#if feedbackPreview.hasMore}<p class="muted">More comments are available beyond this preview page.</p>{/if}
 				{#if feedbackPreview.findings.length}
 					{#each feedbackPreview.findings as finding, index (finding.category + finding.summary)}
@@ -599,11 +598,6 @@
 		display: grid;
 		grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
 		gap: 24px;
-	}
-	.limit-note {
-		margin: 18px 0 0;
-		font-weight: 600;
-		font-size: 13px;
 	}
 	.preview-loading {
 		margin-top: 16px;

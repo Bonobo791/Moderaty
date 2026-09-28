@@ -415,6 +415,24 @@ test('an idle channel does not show the scan-in-progress status', () => {
 	expect(body).not.toContain('History scan in progress');
 });
 
+test('a paused channel still shows the saved dry-run drain status (cubic)', () => {
+	// The drain outlives the pause — nesting the status inside the
+	// active-only controls block made the paused arm unreachable.
+	const body = renderPage({ ...LAYOUT_DATA, ch: { ...LAYOUT_DATA.ch, active: 0, dryRunScanning: true } });
+	expect(body).toContain('The saved preview window is paused with this channel and will continue when moderation resumes.');
+});
+
+test('an active channel mid-drain shows the continuing dry-run status', () => {
+	const body = renderPage({ ...LAYOUT_DATA, ch: { ...LAYOUT_DATA.ch, dryRunScanning: true } });
+	expect(body).toContain('continuing through the selected window in the background');
+});
+
+test('a paused channel with no drain shows neither dry-run status arm', () => {
+	const body = renderPage({ ...LAYOUT_DATA, ch: { ...LAYOUT_DATA.ch, active: 0 } });
+	expect(body).not.toContain('saved preview window');
+	expect(body).not.toContain('continuing through the selected window');
+});
+
 test('the disconnect danger block renders for an owner with the confirm checkbox labeled', () => {
 	const body = renderPage(LAYOUT_DATA);
 	expect(body).toContain('Danger zone — disconnect channel');

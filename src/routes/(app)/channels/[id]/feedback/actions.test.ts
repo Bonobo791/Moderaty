@@ -674,6 +674,21 @@ test('abusive evidence requires explicit confirmation before returning the raw c
 	expect(JSON.stringify(result)).not.toContain('author-secret');
 });
 
+test('a reveal prefers the historical snapshot when the comment exists in both stores (cubic)', async () => {
+	// The digest classified the snapshot's text — when moderation later
+	// re-stores the same comment (possibly edited since), the reveal must
+	// show what the classifier actually saw, not the drifted live row.
+	await seedChannel('UC1');
+	const evidenceId = await seedRevealEvidence('UC1', 'dup', 'edited live text', 0);
+	await testDb().db.insert(feedbackHistoryComments).values({ id: 'dup', channelId: 'UC1', text: 'original historical text', publishedAt: '2025-01-01T00:00:00.000Z' });
+
+	await expect(postReveal('UC1', String(evidenceId))).resolves.toEqual({
+		scope: 'reveal',
+		evidenceId,
+		text: 'original historical text'
+	});
+});
+
 test('non-abusive evidence reveals immediately without confirmation', async () => {
 	await seedChannel('UC1');
 	const evidenceId = await seedRevealEvidence('UC1', 'c1', 'ordinary original text', 0);

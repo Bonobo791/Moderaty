@@ -141,7 +141,10 @@ export async function load({ params, locals, url }) {
 
 /** The raw comment behind one evidence row, scoped to the channel it belongs to. */
 function evidenceSource(channelId: string, evidenceId: number) {
-	const sourceText = sql<string>`coalesce(${comments.text}, ${feedbackHistoryComments.text})`;
+	// The historical snapshot wins over the live comments row: it is the text
+	// the classifier actually saw — a moderation re-store of the same comment
+	// can carry edited content (cubic).
+	const sourceText = sql<string>`coalesce(${feedbackHistoryComments.text}, ${comments.text})`;
 	return db
 		.select({ text: sourceText, hasAbuse: findingEvidence.hasAbuse })
 		.from(findingEvidence)
@@ -153,7 +156,7 @@ function evidenceSource(channelId: string, evidenceId: number) {
 			and(
 				eq(findingEvidence.id, evidenceId),
 				eq(feedbackDigests.channelId, channelId),
-				sql`coalesce(${comments.text}, ${feedbackHistoryComments.text}) IS NOT NULL`
+				sql`coalesce(${feedbackHistoryComments.text}, ${comments.text}) IS NOT NULL`
 			)
 		)
 		.get();

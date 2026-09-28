@@ -234,13 +234,6 @@
 			History scan in progress — cron is working through the backlog and new comments flow into the review queue as it drains. This runs in the background: refreshing or leaving this page won't stop it.
 		</p>
 	{/if}
-	{#if ch.dryRunScanning}
-		<p class="muted" role="status">
-			{ch.active === 0
-				? 'The saved preview window is paused with this channel and will continue when moderation resumes.'
-				: 'Your one allowed moderation preview is continuing through the selected window in the background; cron drains the remaining pages automatically.'}
-		</p>
-	{/if}
 	{#if moderationPreviewUsed}
 		<button class="btn secondary small" type="button" disabled aria-label="Run a dry-run preview on {ch.title}">
 			Moderation preview already used
@@ -293,6 +286,16 @@
 			</p>
 		{/if}
 	{/if}
+{/if}
+{#if ch.dryRunScanning}
+	<!-- Status, not a control: the drain state survives a pause, so this must
+		render outside the active-only block or the paused arm is dead code
+		(cubic). -->
+	<p class="muted" role="status">
+		{ch.active === 0
+			? 'The saved preview window is paused with this channel and will continue when moderation resumes.'
+			: 'Your one allowed moderation preview is continuing through the selected window in the background; cron drains the remaining pages automatically.'}
+	</p>
 {/if}
 {#if data.orgRole === 'owner' || data.orgRole === 'admin'}
 	<details class="channel-disconnect">

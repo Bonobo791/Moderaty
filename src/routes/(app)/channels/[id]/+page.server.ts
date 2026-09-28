@@ -5,6 +5,7 @@ import { deleteChannelRecords } from '$lib/server/deletion';
 import { revokeGoogleToken } from '$lib/server/google';
 import { claimDryRun } from '$lib/server/dryRun';
 import { historyAccessError } from '$lib/server/historyAccess';
+import { historyWindowBoundary, parseHistoryWindow } from '$lib/historyWindow';
 import { requireOrgRole } from '$lib/server/ownership';
 import { runChannel } from '$lib/server/pipeline';
 import { requireUser } from '$lib/server/session';
@@ -12,14 +13,6 @@ import { isToneLevel } from '$lib/toneLevels';
 import { and, eq, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { error, fail, redirect } from '@sveltejs/kit';
-
-/** Window presets shared by Analyze history and the dry-run preview (months). */
-const HISTORY_MONTH_PRESETS: ReadonlySet<number> = new Set([1, 3, 6, 12, 24]);
-
-/** Boundary instant for a months window: now − months × 30 days. */
-function monthsAgoBoundary(months: number): string {
-	return new Date(Date.now() - months * 30 * 24 * 60 * 60 * 1000).toISOString();
-}
 
 /**
  * Tenancy-scoped channel update shared by the card actions: another team's
@@ -119,10 +112,11 @@ export const actions = {
 		}
 		const f = await request.formData();
 		const channelId = String(f.get('channelId') ?? '');
-		const months = Number(f.get('months'));
+		const rawMonths = f.get('months');
 		// Preset windows only — the scan drains newest-first at 300 comments per
 		// run, so an unbounded window is an unbounded API/AI cost (I10).
-		if (!HISTORY_MONTH_PRESETS.has(months)) {
+		const months = parseHistoryWindow(typeof rawMonths === 'string' ? rawMonths : null);
+		if (months === null) {
 			return fail(400, { scope: 'history', channelId, error: 'history window must be 1, 3, 6, 12, or 24 months' });
 		}
 		// Env-dry trap: under DRY_RUN=true every run exits through finishDryRun
@@ -161,7 +155,7 @@ export const actions = {
 		// comments are skipped before scoring (decideNewComments dedupes by id),
 		// so only the unscanned history costs moderation calls. Tenancy-scoped:
 		// another team's channel reads as "not found".
-		const boundary = monthsAgoBoundary(months);
+		const boundary = historyWindowBoundary(months);
 		// Coordinate with the cron lease: a run in flight would otherwise persist
 		// its own scan state and silently cancel (or be cancelled by) this reset.
 		// The lease predicate is part of the UPDATE itself, so the check is
@@ -205,13 +199,13 @@ export const actions = {
 		// Same presets as Analyze history; absent → 3 (the UI default). 'all'
 		// covers channels whose entire history predates every months preset.
 		const rawMonths = f.has('months') ? String(f.get('months')) : '3';
-		if (rawMonths !== 'all' && !HISTORY_MONTH_PRESETS.has(Number(rawMonths))) {
+		const months = parseHistoryWindow(rawMonths, true);
+		if (months === null) {
 			return fail(400, { scope: 'dryRun', channelId, error: 'dry-run window must be 1, 3, 6, 12, or 24 months, or all time' });
 		}
-		const months = rawMonths === 'all' ? ('all' as const) : Number(rawMonths);
 		// 'all' maps to the epoch boundary: no comment is ever older than it, and
 		// the non-null drain state keeps cron paging until YouTube runs out of pages.
-		const boundary = months === 'all' ? '1970-01-01T00:00:00.000Z' : monthsAgoBoundary(months);
+		const boundary = historyWindowBoundary(months);
 		// Atomic one-use claim: the UPDATE's predicate sets
 		// moderation_dry_run_used_at AND takes the lease in a single write, so
 		// concurrent claimants are single-winner (TOCTOU-safe) and the tenancy

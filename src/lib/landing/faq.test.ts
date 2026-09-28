@@ -34,7 +34,10 @@ describe('landing copy guardrails', () => {
 		const trustBar = readFileSync(new URL('../components/landing/TrustBar.svelte', import.meta.url), 'utf8').replace(/\s+/g, ' ');
 		expect(howItWorks).toContain('Each channel gets 1 free moderation dry run and 1 free feedback dry run. Neither spends credits.');
 		expect(howItWorks).toContain('Moderation previews drain the selected window in the background; feedback previews cover the first page, up to 100 comments.');
-		expect(trustBar).toContain('1 free dry run per feature per channel');
-		expect(trustBar).toContain('Moderation previews drain the selected window in the background');
+		// The full preview sentence — dropping "no credits" or the feedback
+		// scope half must fail, not slip through as a substring (cubic).
+		expect(trustBar).toContain(
+			'1 free dry run per feature per channel, no credits. Moderation previews drain the selected window in the background; feedback previews cover the first page, up to 100 comments.'
+		);
 	});
 });

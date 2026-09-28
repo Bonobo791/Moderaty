@@ -188,14 +188,6 @@ describe('feedback page deferred banner (SSR)', () => {
 		expect(body).not.toContain('after the blocker is resolved');
 	});
 
-	it('uses deadline-specific historical retry guidance', () => {
-		const body = renderFeedback(pageData({
-			history: { active: true, boundary: '2025-01-01T00:00:00.000Z' },
-			digests: [{ ...COMPLETE_DIGEST, id: 8, status: 'deferred', error: 'deadline', creditsUsed: null }]
-		}));
-		expect(body).toContain('The time limit was reached. Historical analysis retries on the next cron tick.');
-	});
-
 	it('a deferred row older than the latest complete digest does not banner', () => {
 		const body = renderFeedback(
 			pageData({

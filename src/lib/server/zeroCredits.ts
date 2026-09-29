@@ -138,6 +138,9 @@ async function sendMail(toEmail: string, toName: string, email: ZeroCreditEmail)
  */
 async function claimAndWarn(user: SweepUser, since: string, sinceMs: number, nowIso: string): Promise<EvalOutcome> {
 	const cutoffIso = new Date(Date.now() - ZERO_CREDIT_NOTICE_MS).toISOString();
+	// Resolve the /usage link BEFORE claiming: a missing APP_URL throws here,
+	// leaving the milestone due — claiming first would consume it unsent.
+	const link = usageUrl();
 	const claimed = await db
 		.update(users)
 		.set({ zeroCreditsNotifiedAt: nowIso })
@@ -155,7 +158,7 @@ async function claimAndWarn(user: SweepUser, since: string, sinceMs: number, now
 		name: user.displayName,
 		daysLeft,
 		deletionDateIso: new Date(sinceMs + ZERO_CREDIT_GRACE_MS).toISOString().slice(0, 10),
-		usageUrl: usageUrl()
+		usageUrl: link
 	});
 	try {
 		await sendMail(user.email, user.displayName, email);

@@ -206,6 +206,26 @@ describe('warning cadence', () => {
 		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
 	});
 
+	test('a missing APP_URL never consumes the milestone — the warning retries once configured', async () => {
+		await seedAccount('u1', { creditsRemaining: 0 });
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(8) }).where(eq(users.id, 'u1'));
+		delete mocks.env.APP_URL;
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+		const failed = await sweepZeroCreditAccounts();
+		expect(failed).toMatchObject({ warned: 0, errors: 1 });
+		// The claim must NOT stand: the milestone was never mailed, so the
+		// row stays due — the "never silently consumed" guarantee.
+		expect((await userRow('u1'))!.zeroCreditsNotifiedAt).toBeNull();
+		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+
+		mocks.env.APP_URL = 'https://moderaty.app';
+		const retried = await sweepZeroCreditAccounts();
+		expect(retried).toMatchObject({ warned: 1, errors: 0 });
+		expect(mocks.sendMailjetMessage).toHaveBeenCalledTimes(1);
+		errorSpy.mockRestore();
+	});
+
 	test('a failed send releases the claim so the milestone retries next sweep', async () => {
 		await seedAccount('u1', { creditsRemaining: 0 });
 		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(8) }).where(eq(users.id, 'u1'));

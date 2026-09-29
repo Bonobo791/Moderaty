@@ -252,6 +252,104 @@ export async function hasChargeAnchor(
 	return Boolean(prior);
 }
 
+export async function consumeCreditsBulk(
+	handle: LedgerHandle,
+	orgId: string,
+	refType: 'comment' | 'feedback',
+	refIds: string[]
+): Promise<{ charged: string[]; covered: string[]; uncharged: string[] }> {
+	const uniqueRefIds = [...new Set(refIds)];
+	if (!uniqueRefIds.length) return { charged: [], covered: [], uncharged: [] };
+
+	return inLedgerTx(handle, async (tx) => {
+		const org = await tx
+			.select({ creditsRemaining: organizations.creditsRemaining, plan: organizations.plan, stripeSubscriptionId: organizations.stripeSubscriptionId })
+			.from(organizations)
+			.where(eq(organizations.id, orgId))
+			.get();
+		if (!org) throw new Error(`org not found: ${orgId}`);
+		if (isUnmeteredPlan(org.plan)) return { charged: [], covered: [], uncharged: uniqueRefIds };
+
+		const existing = await tx
+			.select({ refId: creditTransactions.refId })
+			.from(creditTransactions)
+			.where(and(eq(creditTransactions.orgId, orgId), eq(creditTransactions.refType, refType), inArray(creditTransactions.refId, uniqueRefIds)))
+			.all();
+		const existingRefIds = new Set(existing.map((row) => row.refId));
+		const covered = uniqueRefIds.filter((refId) => existingRefIds.has(refId));
+		const toCharge = uniqueRefIds.filter((refId) => !existingRefIds.has(refId));
+		if (!toCharge.length) return { charged: [], covered, uncharged: [] };
+
+		let periodFunded = 0;
+		if (hasHostedEntitlement(org)) {
+			const now = new Date().toISOString();
+			const periods = await tx
+				.select({ id: stripeSubscriptionPeriods.id, includedCredits: stripeSubscriptionPeriods.includedCredits, consumedCredits: stripeSubscriptionPeriods.consumedCredits })
+				.from(stripeSubscriptionPeriods)
+				.where(and(
+					eq(stripeSubscriptionPeriods.orgId, orgId),
+					eq(stripeSubscriptionPeriods.status, 'paid'),
+					sql`${stripeSubscriptionPeriods.periodStart} <= ${now}`,
+					gt(stripeSubscriptionPeriods.periodEnd, now),
+					sql`${stripeSubscriptionPeriods.consumedCredits} < ${stripeSubscriptionPeriods.includedCredits}`
+				))
+				.orderBy(desc(stripeSubscriptionPeriods.periodStart), asc(stripeSubscriptionPeriods.id))
+				.all();
+			for (const period of periods) {
+				const available = Math.max(0, period.includedCredits - period.consumedCredits);
+				const count = Math.min(toCharge.length - periodFunded, available);
+				if (count === 0) continue;
+				const consumed = await tx
+					.update(stripeSubscriptionPeriods)
+					.set({ consumedCredits: sql`${stripeSubscriptionPeriods.consumedCredits} + ${count}` })
+					.where(and(
+						eq(stripeSubscriptionPeriods.id, period.id),
+						sql`${stripeSubscriptionPeriods.consumedCredits} + ${count} <= ${stripeSubscriptionPeriods.includedCredits}`
+					))
+					.returning({ id: stripeSubscriptionPeriods.id });
+				if (!consumed.length) throw new Error('subscription allowance changed concurrently — charge aborted');
+				periodFunded += count;
+				if (periodFunded === toCharge.length) break;
+			}
+		}
+
+		const purchasedNeeded = toCharge.length - periodFunded;
+		const availablePurchased = Math.max(0, org.creditsRemaining ?? 0);
+		const purchasedFunded = Math.min(purchasedNeeded, availablePurchased);
+		if (purchasedFunded > 0) {
+			const updated = await tx
+				.update(organizations)
+				.set({ creditsRemaining: sql`${organizations.creditsRemaining} - ${purchasedFunded}` })
+				.where(and(eq(organizations.id, orgId), sql`${organizations.creditsRemaining} >= ${purchasedFunded}`))
+				.returning({ creditsRemaining: organizations.creditsRemaining });
+			if (!updated.length) throw new Error('credit balance changed concurrently — charge aborted');
+		}
+
+		const charged = toCharge.slice(0, periodFunded + purchasedFunded);
+		const uncharged = toCharge.slice(charged.length);
+		if (charged.length) {
+			const rows = charged.map((refId, index) => ({
+				orgId,
+				delta: -1,
+				reason: 'consume' as const,
+				refType,
+				refId,
+				balanceAfter:
+					index < periodFunded
+						? org.creditsRemaining
+						: (org.creditsRemaining ?? 0) - (index - periodFunded + 1)
+			}));
+			const inserted = await tx
+				.insert(creditTransactions)
+				.values(rows)
+				.onConflictDoNothing({ target: UNIQUE_TARGET })
+				.returning({ refId: creditTransactions.refId });
+			if (inserted.length !== rows.length) throw new Error('charge anchor inserted concurrently — charge aborted');
+		}
+		return { charged, covered, uncharged };
+	});
+}
+
 /**
  * Charges one available credit anchored on (refType, refId).
  *
@@ -259,75 +357,8 @@ export async function hasChargeAnchor(
  * @throws Error if the organization does not exist
  */
 async function consumeOneCredit(handle: LedgerHandle, orgId: string, refType: 'comment' | 'feedback', refId: string): Promise<boolean> {
-	return inLedgerTx(handle, async (tx) => {
-		// Existence check first: an unknown org is a data bug and must fail loudly,
-		// not silently stage comments free.
-		const org = await tx
-			.select({ creditsRemaining: organizations.creditsRemaining, plan: organizations.plan, stripeSubscriptionId: organizations.stripeSubscriptionId })
-			.from(organizations)
-			.where(eq(organizations.id, orgId))
-			.get();
-		if (!org) throw new Error(`org not found: ${orgId}`);
-		// Unmetered plans (lifetime) never consume: their scoring is already
-		// unlimited, so a stranded pre-upgrade balance must not burn 1-per-
-		// comment for nothing — it freezes until the org is metered again
-		// (MOD-36). Returns false like an exhausted balance; staging only
-		// treats that as fatal for METERED orgs.
-		if (isUnmeteredPlan(org.plan)) return false;
-		const inserted = await tx
-			.insert(creditTransactions)
-			.values({
-				orgId,
-				delta: -1,
-				reason: 'consume',
-				refType,
-				refId,
-				balanceAfter: null
-			})
-			.onConflictDoNothing({ target: UNIQUE_TARGET })
-			.returning({ id: creditTransactions.id });
-		if (inserted.length === 0) return false; // already consumed — duplicate delivery
-
-		const now = new Date().toISOString();
-		const period = hasHostedEntitlement(org) ? await (tx
-			.select({ id: stripeSubscriptionPeriods.id })
-			.from(stripeSubscriptionPeriods)
-			.where(and(
-				eq(stripeSubscriptionPeriods.orgId, orgId),
-				eq(stripeSubscriptionPeriods.status, 'paid'),
-				sql`${stripeSubscriptionPeriods.periodStart} <= ${now}`,
-				gt(stripeSubscriptionPeriods.periodEnd, now),
-				sql`${stripeSubscriptionPeriods.consumedCredits} < ${stripeSubscriptionPeriods.includedCredits}`
-			))
-			.orderBy(desc(stripeSubscriptionPeriods.periodStart), asc(stripeSubscriptionPeriods.id))
-			.limit(1)
-			.get()) : undefined;
-		if (period) {
-			const consumed = await tx
-				.update(stripeSubscriptionPeriods)
-				.set({ consumedCredits: sql`${stripeSubscriptionPeriods.consumedCredits} + 1` })
-				.where(and(eq(stripeSubscriptionPeriods.id, period.id), sql`${stripeSubscriptionPeriods.consumedCredits} < ${stripeSubscriptionPeriods.includedCredits}`))
-				.returning({ id: stripeSubscriptionPeriods.id });
-			if (consumed.length === 1) {
-				await tx.update(creditTransactions).set({ balanceAfter: org.creditsRemaining }).where(eq(creditTransactions.id, inserted[0].id));
-				return true;
-			}
-		}
-
-		// Once the paid monthly allowance is exhausted, consume purchased
-		// overage atomically. Hosted orgs without a paid period remain metered.
-		const updated = await tx
-			.update(organizations)
-			.set({ creditsRemaining: sql`${organizations.creditsRemaining} - 1` })
-			.where(and(eq(organizations.id, orgId), sql`${organizations.creditsRemaining} > 0`))
-			.returning({ balance: organizations.creditsRemaining });
-		if (updated.length === 0) {
-			await tx.delete(creditTransactions).where(and(eq(creditTransactions.orgId, orgId), eq(creditTransactions.refType, refType), eq(creditTransactions.refId, refId)));
-			return false;
-		}
-		await tx.update(creditTransactions).set({ balanceAfter: updated[0].balance }).where(eq(creditTransactions.id, inserted[0].id));
-		return true;
-	});
+	const result = await consumeCreditsBulk(handle, orgId, refType, [refId]);
+	return result.charged.length === 1;
 }
 
 /**

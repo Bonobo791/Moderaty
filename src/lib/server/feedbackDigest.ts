@@ -20,7 +20,7 @@ import { concealEvidence } from '$lib/server/feedbackSanitize';
 import { clusterClassifiedClaims } from '$lib/server/feedbackCluster';
 import { groupFeedback } from '$lib/server/feedbackGroup';
 import { DeadlineExceededError, assertBeforeDeadline } from '$lib/server/http';
-import { consumeFeedbackCredit, hasChargeAnchor, orgIsMetered, type LedgerHandle } from '$lib/server/billing/ledger';
+import { consumeCreditsBulk, orgIsMetered, type LedgerHandle } from '$lib/server/billing/ledger';
 import { channelMatchesClaim, type DryRunClaim } from '$lib/server/dryRun';
 import { resolveOpenAiKey } from '$lib/server/openaiKey';
 
@@ -478,28 +478,12 @@ export async function generateFeedbackDigest(
 		if (metered && channel.orgId) {
 			const orgId = channel.orgId;
 			await db.transaction(async (tx) => {
-				for (const comment of batch) {
-					// The tx performs sequential statements for up to 100 comments;
-					// if it outlives the budget, committing would debit credits
-					// while every classify call rejects on arrival. Aborting rolls
-					// back ALL charges — the deferral spends nothing (codex).
-					assertBeforeDeadline(deadline);
-					// History scans charge under anchors scoped to this run's
-					// scan id so every requested analysis debits per comment;
-					// the stored-comments digest keeps the plain comment anchor.
-					const refId = historyScanScope ? `${comment.id}#${historyScanScope}` : comment.id;
-					const charged = await consumeFeedbackCredit(tx, orgId, refId);
-					if (!charged) {
-						// False also covers "already charged" — distinguish by
-						// looking for the anchor row before calling it a shortfall.
-						if (!(await hasChargeAnchor(tx, orgId, 'feedback', refId))) throw new InsufficientCreditsError();
-					}
-					// Every batch member ends the charge pass covered by an
-					// anchor — fresh debit or one persisted by a crashed/failed
-					// attempt — so creditsUsed reports what the digest cost the
-					// org, not just this run's new debits (codex).
-					creditsCharged++;
-				}
+				const refs = batch.map((comment) => historyScanScope ? `${comment.id}#${historyScanScope}` : comment.id);
+				assertBeforeDeadline(deadline);
+				const { charged, covered, uncharged } = await consumeCreditsBulk(tx, orgId, 'feedback', refs);
+				assertBeforeDeadline(deadline);
+				if (uncharged.length) throw new InsufficientCreditsError();
+				creditsCharged = charged.length + covered.length;
 			});
 		}
 

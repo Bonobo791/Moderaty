@@ -191,7 +191,8 @@ const mocks = vi.hoisted(() => {
 								return { returning: async () => [] as Record<string, unknown>[] };
 							}
 						}
-						return { returning: async () => [{ id: 1 }] };
+						const insertedRows = valueRows(values);
+						return { returning: async () => insertedRows.map((row, index) => ({ id: index + 1, refId: row.refId })) };
 					},
 					// Upsert mode (rescans): emulate the real conflict resolution —
 					// a row whose PK already exists merges into the stored row, so
@@ -219,14 +220,12 @@ const mocks = vi.hoisted(() => {
 				where: (condition?: unknown) => {
 					const none = { returning: async () => [] as Record<string, unknown>[] };
 					if (table === state.tables.organizations) {
-						// Ledger balance decrement simulates the real guard: at balance 0
-						// the UPDATE matches nothing (comment stages free — consumeCredit
-						// deletes its row and returns false); otherwise one credit lower.
-						// failCharges forces the same rejection regardless of the balance:
-						// another run exhausted the credits between the budget read and
-						// the atomic charge.
-						if (state.failCharges || (state.credits ?? 0) <= 0) return { returning: async () => [] as Record<string, unknown>[] };
-						state.credits = Math.max(0, (state.credits ?? 0) - 1);
+						// Ledger balance decrement simulates the real guard: when the
+						// balance cannot cover the atomic charge, the update matches
+						// nothing. failCharges forces the concurrent-shortfall path.
+						const amount = queryParams(values.creditsRemaining).find((param): param is number => typeof param === 'number') ?? 1;
+						if (state.failCharges || (state.credits ?? 0) < amount) return { returning: async () => [] as Record<string, unknown>[] };
+						state.credits = Math.max(0, (state.credits ?? 0) - amount);
 						return { returning: async () => [{ creditsRemaining: state.credits }] };
 					}
 					if (table === state.tables.channels) {

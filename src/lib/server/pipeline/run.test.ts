@@ -858,11 +858,9 @@ describe('credit consumption (billing)', () => {
 	test('a comment whose credit charge FAILS (balance exhausted concurrently) aborts the staging — never stages free', async () => {
 		// Two concurrent cron invocations on different channels of the same
 		// metered org can both read the same balance into their in-memory AI
-		// budget. Once one transaction exhausts the balance, the other's
-		// consumeCredit returns false — and that decision must NOT stage for
-		// free: the batch aborts loudly (nothing durable), the comments stay
-		// unprocessed, and the next run retries them once the org tops up
-		// (codex review).
+		// budget. If another charge exhausts it first, the guarded bulk balance
+		// update aborts the transaction — the comments never stage free and the
+		// next run retries them after a top-up (codex review).
 		mocks.state.channel.orgId = 'org-1';
 		mocks.state.credits = 5; // the in-memory AI budget reads 5...
 		mocks.state.failCharges = true; // ...but the atomic charge finds 0
@@ -874,7 +872,7 @@ describe('credit consumption (billing)', () => {
 		});
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-		await expect(runChannel('channel')).rejects.toThrow(/credit charge failed/);
+		await expect(runChannel('channel')).rejects.toThrow('credit balance changed concurrently — charge aborted');
 
 		// No ledger or staging rows were committed; the run did not advance.
 		expect(mocks.state.insertedCredits).toEqual([]);

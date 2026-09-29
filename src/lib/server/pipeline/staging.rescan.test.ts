@@ -26,7 +26,7 @@ vi.mock('$lib/server/youtube', () => ({
 	YOUTUBE_ID_BATCH_SIZE: 50
 }));
 
-import { setupTestDb, testDb } from '../testdb';
+import { countDbStatements, setupTestDb, testDb } from '../testdb';
 import { auditLog, channels, comments, creditTransactions, moderationActions, organizations } from '../db/schema';
 import { stageDecisions } from './staging';
 import type { Decision } from './types';
@@ -61,6 +61,13 @@ function holdDecision(overrides: Partial<Decision> = {}): Decision {
 		billable: true,
 		...overrides
 	};
+}
+
+function holdBatch(count: number, prefix: string): Decision[] {
+	return Array.from({ length: count }, (_, index) => {
+		const decision = holdDecision();
+		return { ...decision, comment: { ...decision.comment, id: `${prefix}-${index}` } };
+	});
 }
 
 async function orgBalance() {
@@ -232,4 +239,31 @@ test('a rescan on an exhausted balance aborts the whole staging transaction — 
 	expect(await testDb().db.select().from(moderationActions).all()).toHaveLength(0);
 	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(0);
 	expect(await orgBalance()).toBe(0);
+});
+
+test('300 billable decisions stage with a statement count independent of batch size', async () => {
+	await seedChannelAndOrg(1000);
+
+	const small = await countDbStatements(testDb().db, () => stageDecisions('UC1', holdBatch(3, 'small'), { orgId: 'org-1', expected: IDENTITY }));
+	const large = await countDbStatements(testDb().db, () => stageDecisions('UC1', holdBatch(300, 'large'), { orgId: 'org-1', expected: IDENTITY }));
+	expect(small.value).toBeUndefined();
+	expect(large.value).toBeUndefined();
+	expect(small.count).toBe(11);
+	expect(large.count).toBe(small.count);
+	expect(await testDb().db.select().from(comments).all()).toHaveLength(303);
+	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(303);
+});
+
+test('a staging shortfall reports the first uncharged comment and rolls back the page', async () => {
+	await seedChannelAndOrg(2);
+	const decisions = holdBatch(3, 'shortfall');
+
+	await expect(stageDecisions('UC1', decisions, { orgId: 'org-1', expected: IDENTITY })).rejects.toThrow(
+		'credit charge failed for comment shortfall-2 (org org-1) — staging aborted, balance exhausted concurrently'
+	);
+
+	expect(await testDb().db.select().from(comments).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(moderationActions).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(0);
+	expect(await orgBalance()).toBe(2);
 });

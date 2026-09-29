@@ -14,7 +14,7 @@ vi.mock('$lib/server/youtube', () => ({
 	fetchNewComments: mocks.fetchNewComments
 }));
 
-import { setupTestDb, testDb } from '$lib/server/testdb';
+import { countDbStatements, setupTestDb, testDb } from '$lib/server/testdb';
 import { channels, comments, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, organizations } from '$lib/server/db/schema';
 import { digestDue, generateFeedbackDigest, previewFeedbackDigest } from './feedbackDigest';
 import { CONCEALED_MESSAGE } from './feedbackSanitize';
@@ -417,6 +417,41 @@ test('metered orgs pay one credit per attempted comment, inside the same transac
 	expect(after).toHaveLength(3);
 	const orgAfter = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
 	expect(orgAfter?.creditsRemaining).toBe(7);
+});
+
+test('a 100-comment digest uses the same SQL statement count as a one-comment batch', async () => {
+	await testDb().db.update(organizations).set({ creditsRemaining: 500 }).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC-small', { feedbackEnabled: 1, feedbackThreshold: 101 });
+	await seedChannel('UC-large', { feedbackEnabled: 1, feedbackThreshold: 101 });
+	await seedComment('small-1', 'UC-small', 'small batch comment', '2026-01-01T00:00:00.000Z');
+	RESPONSES['small batch comment'] = { category: 'question', hasAbuse: false, claim: 'small claim' };
+	for (let i = 0; i < 100; i++) {
+		const text = `large batch comment ${i}`;
+		await seedComment(`large-${i}`, 'UC-large', text, new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString());
+		RESPONSES[text] = { category: 'question', hasAbuse: false, claim: `claim ${i}` };
+	}
+
+	const small = await countDbStatements(testDb().db, () => generateFeedbackDigest('UC-small', { force: true }));
+	const large = await countDbStatements(testDb().db, () => generateFeedbackDigest('UC-large', { force: true }));
+	expect(small.value).toMatchObject({ status: 'complete', commentsClassified: 1, creditsUsed: 1 });
+	expect(large.value).toMatchObject({ status: 'complete', commentsClassified: 100, creditsUsed: 100 });
+	expect(small.count).toBe(19);
+	expect(large.count).toBe(small.count);
+});
+
+test('a 100-comment credit shortfall defers without changing the balance or ledger', async () => {
+	await testDb().db.update(organizations).set({ creditsRemaining: 99 }).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC-shortfall', { feedbackEnabled: 1 });
+	for (let i = 0; i < 100; i++) {
+		await seedComment(`short-${i}`, 'UC-shortfall', `shortfall comment ${i}`, new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString());
+	}
+
+	const result = await generateFeedbackDigest('UC-shortfall', { force: true });
+
+	expect(result).toMatchObject({ status: 'deferred', reason: 'credits' });
+	expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBe(99);
+	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(0);
+	expect(vi.mocked(fetch)).not.toHaveBeenCalled();
 });
 
 test('a run interrupted after charging re-anchors instead of re-charging', async () => {

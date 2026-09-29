@@ -1,13 +1,14 @@
-import { eq } from 'drizzle-orm';
+import { asc, eq } from 'drizzle-orm';
 import { describe, expect, test, vi } from 'vitest';
 
-import { setupTestDb, testDb } from '$lib/server/testdb';
+import { countDbStatements, setupTestDb, testDb } from '$lib/server/testdb';
 import { db } from '$lib/server/db';
 import { creditTransactions, organizations, stripePendingReversals, stripeSubscriptionPeriods } from '$lib/server/db/schema';
 import {
 	applyLedgerDelta,
 	assertCreditsPurchasable,
 	consumeCredit,
+	consumeCreditsBulk,
 	drainPendingReversals,
 	findGrantForStripe,
 	getCredits,
@@ -36,6 +37,21 @@ async function seedChargeGrant(chargeId: string, orgId = 'org-1', credits = 100)
 		refId: chargeId,
 		chargeId,
 		balanceAfter: credits
+	});
+}
+
+async function seedHostedPeriod(includedCredits: number, consumedCredits = 0, orgId = 'org-1'): Promise<void> {
+	const now = Date.now();
+	await testDb().db.insert(stripeSubscriptionPeriods).values({
+		orgId,
+		subscriptionId: `sub-${orgId}`,
+		invoiceId: `in-${orgId}`,
+		periodKey: `period-${orgId}`,
+		periodStart: new Date(now - 60_000).toISOString(),
+		periodEnd: new Date(now + 60_000).toISOString(),
+		includedCredits,
+		consumedCredits,
+		status: 'paid'
 	});
 }
 
@@ -226,6 +242,95 @@ describe('consumeCredit', () => {
 
 	test('fails loudly for an unknown org', async () => {
 		await expect(consumeCredit(db, 'missing', 'comment-1')).rejects.toThrow('org not found');
+	});
+});
+
+describe('consumeCreditsBulk', () => {
+	test('allocates subscription allowance before purchased credits and keeps retries covered', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Hosted', plan: 'hosted', creditsRemaining: 5 });
+		await seedHostedPeriod(2);
+		const refIds = ['a', 'b', 'c'];
+
+		const first = await consumeCreditsBulk(db, 'org-1', 'comment', refIds);
+
+		expect(first).toEqual({ charged: refIds, covered: [], uncharged: [] });
+		const period = await testDb().db.select().from(stripeSubscriptionPeriods).get();
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		const rows = await testDb().db.select().from(creditTransactions).orderBy(asc(creditTransactions.id)).all();
+		expect(period?.consumedCredits).toBe(2);
+		expect(org?.creditsRemaining).toBe(4);
+		expect(rows.map((row) => [row.refId, row.balanceAfter])).toEqual([['a', 5], ['b', 5], ['c', 4]]);
+
+		const retry = await consumeCreditsBulk(db, 'org-1', 'comment', refIds);
+
+		expect(retry).toEqual({ charged: [], covered: refIds, uncharged: [] });
+		expect((await testDb().db.select().from(stripeSubscriptionPeriods).get())?.consumedCredits).toBe(2);
+		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBe(4);
+		expect(await testDb().db.select().from(creditTransactions)).toHaveLength(3);
+	});
+
+	test('returns the ordered shortfall after using the available allowance and purchased credits', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Hosted', plan: 'hosted', creditsRemaining: 2 });
+		await seedHostedPeriod(3, 2);
+		const refIds = ['a', 'b', 'c', 'd'];
+
+		const result = await consumeCreditsBulk(db, 'org-1', 'feedback', refIds);
+
+		expect(result).toEqual({ charged: ['a', 'b', 'c'], covered: [], uncharged: ['d'] });
+		expect((await testDb().db.select().from(stripeSubscriptionPeriods).get())?.consumedCredits).toBe(3);
+		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBe(0);
+		expect(await testDb().db.select().from(creditTransactions)).toHaveLength(3);
+	});
+
+	test('deduplicates ref ids without changing their input order', async () => {
+		await seedOrg('org-1', 5);
+
+		const result = await consumeCreditsBulk(db, 'org-1', 'comment', ['first', 'second', 'first', 'third', 'second']);
+
+		expect(result).toEqual({ charged: ['first', 'second', 'third'], covered: [], uncharged: [] });
+		expect((await testDb().db.select().from(creditTransactions).orderBy(asc(creditTransactions.id)).all()).map((row) => row.refId)).toEqual([
+			'first', 'second', 'third'
+		]);
+	});
+
+	test('an unmetered org leaves all refs uncharged and writes no ledger rows', async () => {
+		await seedOrg('org-1', 500);
+		await testDb().db.update(organizations).set({ plan: 'lifetime' }).where(eq(organizations.id, 'org-1'));
+		const refIds = ['a', 'b', 'c'];
+
+		const result = await consumeCreditsBulk(db, 'org-1', 'comment', refIds);
+
+		expect(result).toEqual({ charged: [], covered: [], uncharged: refIds });
+		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBe(500);
+		expect(await testDb().db.select().from(creditTransactions)).toHaveLength(0);
+	});
+
+	test('fails loudly when the organization is missing', async () => {
+		await expect(consumeCreditsBulk(db, 'missing', 'comment', ['a'])).rejects.toThrow('org not found: missing');
+	});
+
+	test('an empty request returns empty groups without issuing statements', async () => {
+		const { value, count } = await countDbStatements(testDb().db, () => consumeCreditsBulk(db, 'missing', 'comment', []));
+
+		expect(value).toEqual({ charged: [], covered: [], uncharged: [] });
+		expect(count).toBe(0);
+	});
+
+	test('statement count is independent of batch size from 3 to 300 refs', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-3', name: 'Hosted', plan: 'hosted', creditsRemaining: 1000 });
+		await testDb().db.insert(organizations).values({ id: 'org-300', name: 'Hosted', plan: 'hosted', creditsRemaining: 1000 });
+		await seedHostedPeriod(1000, 0, 'org-3');
+		await seedHostedPeriod(1000, 0, 'org-300');
+		const smallRefs = ['small-a', 'small-b', 'small-c'];
+		const largeRefs = Array.from({ length: 300 }, (_, index) => `large-${index}`);
+
+		const small = await countDbStatements(testDb().db, () => consumeCreditsBulk(db, 'org-3', 'comment', smallRefs));
+		const large = await countDbStatements(testDb().db, () => consumeCreditsBulk(db, 'org-300', 'comment', largeRefs));
+
+		expect(small.value.charged).toEqual(smallRefs);
+		expect(large.value.charged).toEqual(largeRefs);
+		expect(small.count).toBe(6);
+		expect(large.count).toBe(small.count);
 	});
 });
 

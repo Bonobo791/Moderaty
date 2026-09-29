@@ -21,7 +21,7 @@ import { effectiveBalanceSql, orgRowIsMetered } from '$lib/server/billing/ledger
 import { isActiveSubscriptionStatus } from '$lib/server/billing/plans';
 import { db } from '$lib/server/db';
 import { memberships, organizations, users } from '$lib/server/db/schema';
-import { deleteUserRecords, revokeChannelGrantsForUser } from '$lib/server/deletion';
+import { deleteUserRecords, revokeChannelGrants } from '$lib/server/deletion';
 import { escapeHtml } from '$lib/server/emailText';
 import { sendMailjetMessage } from '$lib/server/mailjet';
 
@@ -254,8 +254,8 @@ async function claimAndDelete(user: SweepUser, since: string, ageMs: number): Pr
 	} catch (cause) {
 		console.error('zero-credit sweep: final notice for user %s failed — deleting anyway:', user.id, cause);
 	}
-	await revokeChannelGrantsForUser(user.id, 'zero-credit deletion');
-	await deleteUserRecords(user.id);
+	const grants = await deleteUserRecords(user.id);
+	await revokeChannelGrants(grants, 'zero-credit deletion');
 	console.info(`zero-credit sweep: deleted account ${user.id} after ${Math.floor(ageMs / DAY_MS)} days at zero credits`);
 	return 'deleted';
 }

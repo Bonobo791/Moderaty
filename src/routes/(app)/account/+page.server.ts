@@ -1,6 +1,6 @@
 import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
-import { deleteUserRecords, revokeChannelGrantsForUser } from '$lib/server/deletion';
+import { deleteUserRecords, revokeChannelGrants } from '$lib/server/deletion';
 import { requireUser, SESSION_COOKIE } from '$lib/server/session';
 import { eq } from 'drizzle-orm';
 import { fail, isHttpError, redirect } from '@sveltejs/kit';
@@ -48,11 +48,12 @@ export const actions = {
 			return fail(400, { error: 'You must confirm account deletion to continue.' });
 		}
 		// Immediate deletion: everything is erased NOW except the evidentiary
-		// consent log (statutory retention, LGPD Art. 16, III). Each channel's
-		// YouTube grant is revoked at Google first (YouTube API ToS) — the
-		// revocation helper logs failures loudly without blocking the erase.
-		await revokeChannelGrantsForUser(user.id, 'account deletion');
-		await deleteUserRecords(user.id);
+		// consent log (statutory retention, LGPD Art. 16, III). The channel
+		// grants the transaction erases are revoked at Google next (YouTube
+		// API ToS) — the helper logs failures loudly without blocking the
+		// erase (the ciphertext is already gone, orphaning the grant).
+		const grants = await deleteUserRecords(user.id);
+		await revokeChannelGrants(grants, 'account deletion');
 		cookies.delete(SESSION_COOKIE, { path: '/' });
 		// The session is gone, so land on the public confirmation page — never
 		// back on an (app) page that would just bounce to /login.

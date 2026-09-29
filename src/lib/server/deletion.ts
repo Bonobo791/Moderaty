@@ -31,25 +31,27 @@ const AUDIT_HANDLE_SWEEP_BATCH = 50; // same drain-across-runs bound as the cons
 /** Placeholder for an erased refresh token — never valid ciphertext, so decrypt fails loudly in cron (AGENTS.md). */
 export const WIPED_REFRESH_TOKEN = 'erased:account-deletion';
 
+/** A channel grant captured by `deleteUserRecords` before the row was erased or wiped. */
+export interface ErasedChannelGrant {
+	id: string;
+	refreshTokenEnc: string;
+}
+
 /**
- * Revokes at Google every YouTube grant this account connected
- * (channels.userId — those grants belong to THIS user), honoring the
- * YouTube API ToS. Shared by the account page's immediate deletion and the
- * zero-credit retention sweep. A revocation failure is logged loudly but
- * never blocks deletion — the encrypted token is erased either way,
- * orphaning the grant. Channels in surviving team orgs keep their rows;
- * their dead token fails loudly in cron until a teammate reconnects.
+ * Revokes at Google each grant captured by `deleteUserRecords`
+ * (channels.userId plus every channel in a dissolved org — those grants
+ * belong to THIS user), honoring the YouTube API ToS. Shared by the
+ * account page's immediate deletion and the zero-credit retention sweep.
+ * A revocation failure is logged loudly but never blocks deletion — the
+ * encrypted token is erased either way, orphaning the grant. Channels in
+ * surviving team orgs keep their rows; their dead token fails loudly in
+ * cron until a teammate reconnects.
  *
- * @param userId - The account whose channel grants are revoked
+ * @param grants - The grants `deleteUserRecords` captured inside its transaction
  * @param context - Server-log prefix identifying the caller (e.g. 'account deletion')
  */
-export async function revokeChannelGrantsForUser(userId: string, context: string): Promise<void> {
-	const owned = await db
-		.select({ id: channels.id, refreshTokenEnc: channels.refreshTokenEnc })
-		.from(channels)
-		.where(eq(channels.userId, userId))
-		.all();
-	for (const ch of owned) {
+export async function revokeChannelGrants(grants: ErasedChannelGrant[], context: string): Promise<void> {
+	for (const ch of grants) {
 		try {
 			await revokeGoogleToken(decrypt(ch.refreshTokenEnc), `${context} channel ${ch.id}`);
 		} catch (cause) {
@@ -319,7 +321,7 @@ async function dissolveOrgs(tx: DeletionTx, dissolveOrgIds: string[]): Promise<s
 	return stripeCustomerIds;
 }
 
-export async function deleteUserRecords(userId: string): Promise<void> {
+export async function deleteUserRecords(userId: string): Promise<ErasedChannelGrant[]> {
 	// Promotions are logged only AFTER the transaction commits — a pre-commit
 	// log would claim a succession that a rollback erased. The promoted org's
 	// Stripe customer must be anonymized post-commit (the departing last owner
@@ -338,6 +340,11 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 	// the promoted ones: "last owner leaves" is an unreliable proxy for whose
 	// PII the customer holds (codex review).
 	const survivingOrgIds: string[] = [];
+	// Grants being erased — captured INSIDE the transaction so the caller can
+	// revoke them at Google post-commit. Selecting them outside the
+	// transaction would leave a window where a concurrently connected channel
+	// is wiped without its grant ever being revoked (codeant).
+	let erasedGrants: ErasedChannelGrant[] = [];
 	await db.transaction(async (tx) => {
 		const user = await tx
 			.select({ googleSub: users.googleSub })
@@ -362,6 +369,23 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 					await tx.select({ id: channels.id }).from(channels).where(inArray(channels.orgId, dissolveOrgIds)).all()
 				).map((ch) => ch.id)
 			: [];
+		// Capture BEFORE the channel rows are deleted or wiped: the dissolved
+		// orgs' channels (connected or orphan — a dissolving org is
+		// sole-member, so every grant in it belongs to this user) plus every
+		// channel this account connected into a surviving org.
+		erasedGrants = await tx
+			.select({ id: channels.id, refreshTokenEnc: channels.refreshTokenEnc })
+			.from(channels)
+			.where(
+				and(
+					or(
+						eq(channels.userId, userId),
+						dissolveOrgIds.length ? inArray(channels.orgId, dissolveOrgIds) : undefined
+					),
+					ne(channels.refreshTokenEnc, WIPED_REFRESH_TOKEN)
+				)
+			)
+			.all();
 		await deleteChannelRecords(tx, channelIds);
 		// Detach team channels this account connected: the row and history stay
 		// with the team; the dead grant is wiped so nothing silently moderates.
@@ -424,6 +448,7 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 			);
 		}
 	}
+	return erasedGrants;
 }
 
 /**

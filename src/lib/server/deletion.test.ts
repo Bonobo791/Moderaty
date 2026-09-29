@@ -255,7 +255,7 @@ async function expectAllTablesEmpty() {
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		mocks.customersDel.mockRejectedValue(new Error('stripe is down'));
 
-		await expect(deleteUserRecords(userId)).resolves.toBeUndefined();
+		await expect(deleteUserRecords(userId)).resolves.toEqual([{ id: 'UC-gone', refreshTokenEnc: 'enc' }]);
 		// The deletion completed: the tombstone is written even though the
 		// Stripe erasure failed (privacy is not held hostage by Stripe uptime).
 		expect(await userRow(userId)).toMatchObject({ googleSub: `deleted:${userId}` });
@@ -534,7 +534,16 @@ test('deleteUserRecords keeps team channels the user merely connected, wiping th
 	await seedChannel('UC-team', userId, 'org-team', 'team channel');
 	await seedModerationData('UC-team', 'team');
 
-	await deleteUserRecords(userId);
+	const grants = await deleteUserRecords(userId);
+
+	// Both erased grants are handed back for post-commit revocation: the
+	// dissolved personal org's channel AND the connected team channel about
+	// to be wiped (codeant: the capture happens inside the transaction, so a
+	// channel connected concurrently can never be wiped un-revoked).
+	expect(grants.sort((a, b) => a.id.localeCompare(b.id))).toEqual([
+		{ id: 'UC-gone', refreshTokenEnc: 'enc' },
+		{ id: 'UC-team', refreshTokenEnc: 'enc' }
+	]);
 
 	// The team channel survives, detached: connector nulled, token wiped with
 	// the exact sentinel so cron fails loudly instead of silently moderating

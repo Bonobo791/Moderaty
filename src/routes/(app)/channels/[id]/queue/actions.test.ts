@@ -314,7 +314,10 @@ test('reject outside DRY_RUN calls YouTube and audits reject', async () => {
 	expect(audits[0]).toMatchObject({ channelId: 'UC1', commentId: 'c1', action: 'reject', reason: 'manual review', actor: 'user', authorHandle: null });
 });
 
-test('a missing YouTube comment still finalizes the human action', async () => {
+test('a missing YouTube comment finalizes the human action as deleted — approve cannot restore a gone comment', async () => {
+	// codex: YouTube reports the comment gone — 'approved' can never be true
+	// remotely, so the honest terminal status is 'deleted' and the success
+	// text says the comment no longer exists instead of claiming approval.
 	mocks.env.DRY_RUN = 'false';
 	await seedComment('c1', 'UC1');
 	mocks.setModerationStatus.mockRejectedValueOnce(new mocks.CommentNotFoundError(['c1']));
@@ -322,10 +325,10 @@ test('a missing YouTube comment still finalizes the human action', async () => {
 
 	const res = await act('approve', { commentId: 'c1' });
 
-	expect(res).toMatchObject({ success: 'Approved — recorded in audit log.' });
+	expect(res).toMatchObject({ success: 'The comment no longer exists on YouTube — recorded as deleted.' });
 	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
 	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined);
-	expect(await commentRow('c1')).toMatchObject({ status: 'approved', decidedBy: 'human' });
+	expect(await commentRow('c1')).toMatchObject({ status: 'deleted', decidedBy: 'human' });
 	expect(await auditRows()).toEqual([expect.objectContaining({ commentId: 'c1', action: 'approve', actor: 'user' })]);
 	expect(warning).toHaveBeenCalledWith('comment c1 no longer exists on YouTube — completing approve');
 });

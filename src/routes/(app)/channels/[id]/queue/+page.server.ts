@@ -111,9 +111,13 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
 		return { intentId: intent[0].id };
 	}));
 	if (!claim) throw error(404, 'pending comment not found in this channel');
+	// 'missing' means YouTube reports the comment gone — the requested intent
+	// can never be true remotely, so the honest outcome to finalize is
+	// 'deleted', not the verb the user clicked (codex).
+	let remoteMissing = false;
 	try {
 		const token = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
-		await applyHumanIntent(commentId, action, token);
+		remoteMissing = (await applyHumanIntent(commentId, action, token)) === 'missing';
 	} catch (e) {
 		// The remote write did not land: release the claim — the comment
 		// returns to 'pending', the staged intent row is dropped (nothing
@@ -151,12 +155,12 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
 	// the durable intent row; the reconcile sweep re-applies the idempotent
 	// write and commits the final status on its next run.
 	try {
-		await finalizeHumanIntent(paramsId, commentId, action);
+		await finalizeHumanIntent(paramsId, commentId, remoteMissing ? 'delete' : action);
 	} catch (e) {
 		console.error('[queue] %s reached YouTube but finalize failed for comment %s — the reconcile sweep will finish it', action, commentId, e);
 		return fail(500, { error: 'The action reached YouTube but is still being recorded — it resolves automatically.' });
 	}
-	return { success: SUCCESS_TEXT[action] };
+	return { success: remoteMissing ? 'The comment no longer exists on YouTube — recorded as deleted.' : SUCCESS_TEXT[action] };
 }
 
 function commentIdFrom(formData: FormData): string | null {

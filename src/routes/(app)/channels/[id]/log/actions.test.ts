@@ -130,17 +130,20 @@ test('a YouTube failure releases the claim and fails loudly', async () => {
 	expect(await testDb().db.select().from(auditLog).all()).toHaveLength(1);
 });
 
-test('a missing YouTube comment still finalizes a restore', async () => {
+test('a missing YouTube comment finalizes a restore as deleted — nothing exists to restore', async () => {
+	// codex: the publish 404s because the comment is permanently gone — the
+	// honest outcome is 'deleted', not a local 'approved' over a remote
+	// deletion nothing could reconcile.
 	await seedComment('c1', 'rejected', 'reject');
 	mocks.setModerationStatus.mockRejectedValueOnce(new mocks.CommentNotFoundError(['c1']));
 	const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
 	const res = await undo('c1');
 
-	expect(res).toMatchObject({ success: expect.stringContaining('estored') });
+	expect(res).toMatchObject({ success: 'The comment no longer exists on YouTube — recorded as deleted.' });
 	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
 	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined);
-	expect(await commentRow('c1')).toMatchObject({ status: 'approved', decidedBy: 'human' });
+	expect(await commentRow('c1')).toMatchObject({ status: 'deleted', decidedBy: 'human' });
 	expect(warning).toHaveBeenCalledWith('comment c1 no longer exists on YouTube — completing restore');
 });
 

@@ -230,7 +230,23 @@ async function convergeHolds(
 		}
 		try {
 			await assertChannelActive(action.channelId, db, expected);
-			await applyHumanIntent(action.commentId, intent, accessToken, deadline);
+			const outcome = await applyHumanIntent(action.commentId, intent, accessToken, deadline);
+			if (outcome === 'missing' && intent !== 'delete') {
+				// The corrective write 404'd: YouTube has no comment to publish
+				// or reject — a dispatched delete already landed (or the owner
+				// removed it) before this verdict. 'approved'/'rejected' can
+				// never be true remotely, so the local row converges to the
+				// REAL outcome ('deleted') instead of superseding the action
+				// over a local-approved/remote-deleted lie (codex). The
+				// status guard keeps a mid-flight 'restoring' claim owned by
+				// the human flow — no match leaves the action outstanding.
+				const flipped = await db
+					.update(comments)
+					.set({ status: 'deleted' })
+					.where(and(eq(comments.id, action.commentId), inArray(comments.status, ['approved', 'rejected'])))
+					.returning({ id: comments.id });
+				if (!flipped.length) continue;
+			}
 			converged.add(action.commentId);
 		} catch (error) {
 			if (error instanceof DeadlineExceededError || error instanceof ChannelDeactivatedError) throw error;
@@ -457,13 +473,20 @@ export function humanFinalStatus(action: string): 'approved' | 'deleted' | 'reje
 	return null;
 }
 
-/** Applies one idempotent YouTube write for a recorded human intent. */
+/**
+ * Applies one idempotent YouTube write for a recorded human intent.
+ * 'missing' means YouTube reports the comment gone — a publish/reject
+ * corrective can never land, so the real remote outcome is 'deleted'
+ * whatever the intent asked. Callers converge or finalize THAT truth
+ * rather than stamping the requested status over a remote deletion
+ * (codex).
+ */
 export async function applyHumanIntent(
 	commentId: string,
 	action: string,
 	accessToken: string,
 	deadline?: number
-): Promise<void> {
+): Promise<'applied' | 'missing'> {
 	if (!humanFinalStatus(action)) throw new Error(`unsupported human intent '${action}'`);
 	assertBeforeDeadline(deadline);
 	try {
@@ -477,7 +500,9 @@ export async function applyHumanIntent(
 	} catch (error) {
 		if (!(error instanceof CommentNotFoundError)) throw error;
 		warnMissingComment(commentId, action);
+		return 'missing';
 	}
+	return 'applied';
 }
 
 /**
@@ -559,8 +584,11 @@ async function reconcileRestoring(channelId: string, accessToken: string, deadli
 		if (!intent || intent.actor !== 'user' || !humanFinalStatus(intent.action)) continue;
 		try {
 			assertBeforeDeadline(deadline);
-			await applyHumanIntent(row.id, intent.action, accessToken, deadline);
-			await finalizeHumanIntent(channelId, row.id, intent.action, expected);
+			const outcome = await applyHumanIntent(row.id, intent.action, accessToken, deadline);
+			// A comment YouTube no longer has IS deleted — finalize the real
+			// remote outcome rather than stamping the requested intent over a
+			// remote deletion (codex).
+			await finalizeHumanIntent(channelId, row.id, outcome === 'missing' ? 'delete' : intent.action, expected);
 		} catch (error) {
 			if (error instanceof DeadlineExceededError) throw error;
 			// Leave it 'restoring' for the next run — one stuck comment must

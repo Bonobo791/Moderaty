@@ -217,9 +217,12 @@ export const actions = {
 			return { intentId: intent[0].id };
 		}));
 		if (!claim) throw error(404, 'reversible comment not found in this channel');
+		// 'missing' means YouTube reports the comment gone — nothing exists to
+		// restore, so the honest outcome to finalize is 'deleted' (codex).
+		let remoteMissing = false;
 		try {
 			const token = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
-			await applyHumanIntent(commentId, 'restore', token);
+			remoteMissing = (await applyHumanIntent(commentId, 'restore', token)) === 'missing';
 		} catch (e) {
 			// The remote write did not land: release a fresh claim so the
 			// failed restore stays retryable and drop its staged intent row —
@@ -242,7 +245,7 @@ export const actions = {
 		// repair the desync (codeant). 'restoring' + the durable intent row
 		// are exactly what the reconcile sweep needs to finish the commit.
 		try {
-			await finalizeHumanIntent(params.id, commentId, 'restore');
+			await finalizeHumanIntent(params.id, commentId, remoteMissing ? 'delete' : 'restore');
 		} catch (e) {
 			// Remote succeeded, local commit failed: keep the claim and the
 			// intent row for the reconcile sweep, and tell the user it
@@ -251,7 +254,7 @@ export const actions = {
 			console.error('log undo: finalize failed for comment %s — reconcile sweep will finish it:', commentId, e);
 			return fail(500, { error: 'The restore reached YouTube but saving it failed — it will finish automatically on the next moderation run.' });
 		}
-		return { success: 'Restored — recorded in audit log.' };
+		return { success: remoteMissing ? 'The comment no longer exists on YouTube — recorded as deleted.' : 'Restored — recorded in audit log.' };
 	},
 	/**
 	 * Erases every stored commenter handle on this channel immediately, ahead

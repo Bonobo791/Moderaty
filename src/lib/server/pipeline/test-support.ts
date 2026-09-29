@@ -268,16 +268,18 @@ const mocks = vi.hoisted(() => {
 					}
 					if (table === state.tables.comments) {
 						// Status/decidedBy writes honor the where: id predicates AND
-						// status predicates (eq 'restoring' guards the finalize).
+						// status predicates (eq 'restoring' guards the finalize; the
+						// decided-status inArray guards the missing-target converge
+						// flip). RETURNING reports the rows the CAS actually matched.
 						const params = queryParams(condition);
 						const statusFilter = params.filter((param) => COMMENT_STATUSES.has(param as string));
+						const applied: Record<string, unknown>[] = [];
 						const apply = (row: Record<string, unknown>) => {
 							const current = row.status as string;
 							if (params.includes(queryKey(row.id)) && (!statusFilter.length || statusFilter.includes(current))) {
 								Object.assign(row, values);
-								return true;
+								applied.push(row);
 							}
-							return false;
 						};
 						state.insertedComments.forEach(apply);
 						for (const id of state.existingIds) {
@@ -285,9 +287,15 @@ const mocks = vi.hoisted(() => {
 							if (params.includes(id) && (!statusFilter.length || statusFilter.includes(current))) {
 								if ('status' in values) state.commentStatuses[id] = values.status as string;
 								if ('decidedBy' in values) state.commentDecidedBy[id] = values.decidedBy as string;
+								applied.push({ id });
 							}
 						}
-						return none;
+						return {
+							returning: async (fields: unknown) =>
+								fields && typeof fields === 'object'
+									? applied.map((row) => Object.fromEntries(Object.keys(fields).map((key) => [key, row[key]])))
+									: []
+						};
 					}
 					if (table !== state.tables.moderationActions || !('state' in values)) return none;
 					if (values.state === 'dispatched' && !('lastAttemptAt' in values)) {

@@ -155,6 +155,46 @@ test('a cancelling hold re-publishes a rescan-approved comment before supersedin
 	expectActionState('superseded');
 });
 
+test('a missing publish target converges the comment to deleted — never left approved over a remote deletion', async () => {
+	// codex: a dispatched delete already landed on YouTube before the rescan
+	// approved the comment — the corrective publish 404s because the comment
+	// is irreversibly gone. Treating that as convergence superseded the
+	// delete's bookkeeping over a local-'approved'/remote-deleted lie nothing
+	// could repair. Remote truth wins: the comment converges to 'deleted'.
+	mocks.state.existingIds = ['comment'];
+	mocks.state.commentStatuses = { comment: 'approved' };
+	mocks.state.moderationActions = [dispatchedAction({ action: 'delete', state: 'cancelling' })];
+	mocks.setModerationStatus.mockRejectedValueOnce(new CommentNotFoundError(['comment']));
+	const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+	await runChannel('channel');
+
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'published', false, 'access-token', undefined);
+	expect(mocks.state.commentStatuses.comment).toBe('deleted');
+	expectActionState('superseded');
+	expect(warning).toHaveBeenCalledWith('comment comment no longer exists on YouTube — completing approve');
+});
+
+test('a missing publish target leaves a mid-flight human claim owned by its own flow', async () => {
+	// The corrective write 404s — but the comment was claimed 'restoring'
+	// between the convergence read and the flip: the CAS must NOT overwrite a
+	// status it did not read, and the action stays outstanding rather than
+	// terminalizing over a decision that is no longer the one checked.
+	mocks.state.existingIds = ['comment'];
+	mocks.state.commentStatuses = { comment: 'approved' };
+	mocks.state.moderationActions = [dispatchedAction({ action: 'delete', state: 'cancelling' })];
+	mocks.setModerationStatus.mockImplementation(async () => {
+		mocks.state.commentStatuses.comment = 'restoring';
+		throw new CommentNotFoundError(['comment']);
+	});
+	vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+	await runChannel('channel');
+
+	expect(mocks.state.commentStatuses.comment).toBe('restoring');
+	expectActionState('cancelling');
+});
+
 test('a failed convergence write keeps a cancelling hold retryable', async () => {
 	mocks.state.existingIds = ['comment'];
 	mocks.state.commentStatuses = { comment: 'approved' };
@@ -635,7 +675,10 @@ test('a crashed approve intent is republished and finalized by the reconcile swe
 	expect(mocks.state.insertedComments[0].status).toBe('approved');
 });
 
-test('a missing comment during a crashed intent warns and finalizes', async () => {
+test('a missing comment during a crashed intent warns and finalizes the real outcome — deleted', async () => {
+	// codex: the replayed 'reject' intent 404s — YouTube has no comment to
+	// reject. Finalizing 'rejected' would record a remote state that does not
+	// exist; the comment is gone, so the honest terminal status is 'deleted'.
 	mocks.state.insertedComments = [
 		{ id: 'comment', channelId: 'channel', text: 'x', publishedAt: '2026-01-01T00:00:00Z', status: 'restoring', decidedBy: 'human' }
 	];
@@ -650,7 +693,7 @@ test('a missing comment during a crashed intent warns and finalizes', async () =
 
 	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
 	expect(warning).toHaveBeenCalledWith('comment comment no longer exists on YouTube — completing reject');
-	expect(mocks.state.insertedComments[0].status).toBe('rejected');
+	expect(mocks.state.insertedComments[0].status).toBe('deleted');
 });
 
 test('the reconcile sweep ignores a restoring comment without a user intent audit', async () => {

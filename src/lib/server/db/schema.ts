@@ -18,8 +18,17 @@ export const users = sqliteTable('users', {
 	displayName: text('display_name').notNull(),
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	plan: text('plan').notNull().default('free'), // LEGACY — billing hooks live on organizations.plan; read nowhere
+	// Zero-credit retention countdown (zeroCredits.ts cron sweep). All nullable
+	// per I7 — NULL since = not in countdown. Only billing-engaged accounts
+	// (every membership org metered AND unfunded) get stamped; unmetered
+	// orgs (never-purchased, lifetime) can never start the clock.
+	zeroCreditsSince: text('zero_credits_since'), // ISO of first broke observation; account deleted after 30 days
+	zeroCreditsNotifiedAt: text('zero_credits_notified_at'), // ISO of last warning e-mail — the idempotency claim for the 7-day cadence
+	zeroCreditsCheckedAt: text('zero_credits_checked_at'), // last sweep evaluation — drives the round-robin batch (NULLs sort first)
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
-});
+}, (table) => [
+	index('users_zero_credits_checked_idx').on(table.zeroCreditsCheckedAt)
+]);
 
 export const sessions = sqliteTable('sessions', {
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)

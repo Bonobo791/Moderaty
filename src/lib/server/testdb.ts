@@ -189,8 +189,12 @@ export async function createTestDb(): Promise<TestDb> {
 			email TEXT NOT NULL,
 			display_name TEXT NOT NULL,
 			plan TEXT NOT NULL DEFAULT 'free',
+			zero_credits_since TEXT,
+			zero_credits_notified_at TEXT,
+			zero_credits_checked_at TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
+		`CREATE INDEX users_zero_credits_checked_idx ON users (zero_credits_checked_at)`,
 		`CREATE TABLE sessions (
 			id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

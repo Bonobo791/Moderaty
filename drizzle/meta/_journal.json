@@ -330,6 +330,13 @@
       "when": 1790634784212,
       "tag": "0046_scan_stamp",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "6",
+      "when": 1790700257936,
+      "tag": "0047_zero_credit_retention",
+      "breakpoints": true
     }
   ]
 }

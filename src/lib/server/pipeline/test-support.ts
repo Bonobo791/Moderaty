@@ -64,8 +64,13 @@ const mocks = vi.hoisted(() => {
 					return channelId && (!params.length || params.includes(channelId)) ? state.channel : undefined;
 				}
 				// Ledger balance + metering lookup, with the active period balance
-				// absent in this harness.
+				// absent in this harness. Only the channel's org exists: a lookup
+				// for any other id returns undefined so the ledger's `org not
+				// found` throw fires exactly like production (codeant nitpick).
 				if (table === state.tables.organizations) {
+					const params = queryParams(condition);
+					const orgId = state.channel?.orgId;
+					if (typeof orgId !== 'string' || !params.includes(orgId)) return undefined;
 					return {
 						creditsRemaining: state.credits,
 						remaining: state.credits ?? 0,

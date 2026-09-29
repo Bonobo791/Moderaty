@@ -429,6 +429,89 @@ test('deleteUserRecords anonymizes the Stripe customer of a surviving team org w
 	expect(mocks.customersDel).not.toHaveBeenCalledWith('cus_shared');
 });
 
+test('deleteUserRecords caps every post-commit Stripe request to the remaining deadline', async () => {
+	// coderabbit: the shared client retries each request twice — an unbounded
+	// surviving-org update or customer deletion can outlive the cron budget
+	// and keep the caller's grant revocations from ever running.
+	const userId = await seedUser('gone');
+	const coMember = await seedBareUser('staying');
+	await testDb().db.update(organizations).set({ stripeCustomerId: 'cus_gone' }).where(eq(organizations.id, 'org-gone'));
+	await testDb().db.insert(organizations).values({ id: 'org-shared', name: 'Shared', stripeCustomerId: 'cus_shared' });
+	await testDb().db.insert(memberships).values({ userId, orgId: 'org-shared', role: 'owner' });
+	await testDb().db.insert(memberships).values({ userId: coMember, orgId: 'org-shared', role: 'member' });
+	mocks.customersUpdate.mockClear();
+	mocks.customersDel.mockClear();
+	mocks.customersUpdate.mockResolvedValue({ id: 'cus_shared' });
+	mocks.customersDel.mockResolvedValue({ id: 'cus_gone', deleted: true });
+	mocks.subscriptionsList.mockResolvedValue({ data: [], has_more: false });
+
+	const now = Date.now();
+	const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+	try {
+		await deleteUserRecords(userId, { deadline: now + 10_000 });
+	} finally {
+		nowSpy.mockRestore();
+	}
+	expect(mocks.customersUpdate).toHaveBeenCalledWith('cus_shared', { email: '' }, { timeout: 10_000, maxNetworkRetries: 0 });
+	expect(mocks.customersDel).toHaveBeenCalledWith('cus_gone', undefined, { timeout: 10_000, maxNetworkRetries: 0 });
+});
+
+test('a spent deadline defers post-commit Stripe work loudly', async () => {
+	// coderabbit: dissolved-customer erasure survives in the outbox, but the
+	// surviving-org anonymization has no durable retry — the deferral must
+	// name what was skipped rather than silently drop the PII scrub.
+	const userId = await seedUser('gone');
+	const coMember = await seedBareUser('staying');
+	await testDb().db.update(organizations).set({ stripeCustomerId: 'cus_gone' }).where(eq(organizations.id, 'org-gone'));
+	await testDb().db.insert(organizations).values({ id: 'org-shared', name: 'Shared', stripeCustomerId: 'cus_shared' });
+	await testDb().db.insert(memberships).values({ userId, orgId: 'org-shared', role: 'owner' });
+	await testDb().db.insert(memberships).values({ userId: coMember, orgId: 'org-shared', role: 'member' });
+	mocks.customersUpdate.mockClear();
+	mocks.customersDel.mockClear();
+
+	const now = Date.now();
+	const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		await deleteUserRecords(userId, { deadline: now }); // already spent
+		expect(mocks.customersUpdate).not.toHaveBeenCalled();
+		expect(mocks.customersDel).not.toHaveBeenCalled();
+		expect(await testDb().db.select().from(stripeDeletionOutbox).all()).toHaveLength(1);
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('anonymization deferred for 1 org(s): org-shared'));
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('1 Stripe customer erasure(s) stay queued'));
+	} finally {
+		errorSpy.mockRestore();
+		nowSpy.mockRestore();
+	}
+});
+
+test('the deadline deferral reports the erasures still queued, not the total', async () => {
+	// coderabbit: two dissolved customers — the first erasure lands, then the
+	// clock passes the deadline; the loud deferral must count the REST.
+	const userId = await seedUser('gone');
+	await testDb().db.update(organizations).set({ stripeCustomerId: 'cus_gone' }).where(eq(organizations.id, 'org-gone'));
+	await testDb().db.insert(organizations).values({ id: 'org-gone2', name: 'G2', stripeCustomerId: 'cus_gone2' });
+	await testDb().db.insert(memberships).values({ userId, orgId: 'org-gone2', role: 'owner' });
+	mocks.customersDel.mockClear();
+	mocks.subscriptionsList.mockResolvedValue({ data: [], has_more: false });
+	const now = Date.now();
+	const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+	// The first deletion succeeds, then the clock passes the deadline.
+	mocks.customersDel.mockImplementation(async (id: string) => {
+		nowSpy.mockReturnValue(now + 60_000);
+		return { id, deleted: true };
+	});
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		await deleteUserRecords(userId, { deadline: now + 10_000 });
+		expect(await testDb().db.select().from(stripeDeletionOutbox).all()).toHaveLength(1);
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('1 Stripe customer erasure(s) stay queued'));
+	} finally {
+		errorSpy.mockRestore();
+		nowSpy.mockRestore();
+	}
+});
+
 test('a post-commit Stripe failure cannot strand the erased channel grants', async () => {
 	// coderabbit: the surviving-org customer lookup used to run AFTER the
 	// erase committed — a failure there rejected the call before the caller

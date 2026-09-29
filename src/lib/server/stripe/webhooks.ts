@@ -1321,22 +1321,19 @@ const cancelDuplicateSubscription = async (duplicateSubscriptionId: string, orgI
 	return { canceled, live };
 };
 
-// Refund every paid payment the duplicate collected: the invoice the caller
+// Every invoice id the duplicate may have billed: the invoice the caller
 // KNOWS about (an invoice.paid payload or the canceled record's latest) AND
 // every other paid invoice on the subscription — a duplicate that survived a
 // webhook outage can have billed multiple cycles, and refunding only the
-// latest leaves the earlier charges with us (codex P1). Each refund anchors
-// on a PER-PAYMENT idempotency key so retries and separate payments never
-// collide.
-const refundDuplicateSubscriptionInvoices = async (
+// latest leaves the earlier charges with us (codex P1).
+async function collectDuplicateInvoiceIds(
 	duplicateSubscriptionId: string,
-	orgId: string,
 	canceled: StripeRecord,
 	live: StripeRecord | null,
-	opts: { checkoutSessionId?: string; invoiceId?: string; paymentExpected: boolean }
-): Promise<void> => {
+	invoiceId?: string
+): Promise<Set<string>> {
 	const invoiceIds = new Set<string>();
-	const knownInvoiceId = opts.invoiceId ?? stripeId(canceled.latest_invoice);
+	const knownInvoiceId = invoiceId ?? stripeId(canceled.latest_invoice);
 	if (knownInvoiceId) invoiceIds.add(knownInvoiceId);
 	if (live) {
 		const paid = await getStripe().invoices.list({ subscription: duplicateSubscriptionId, status: 'paid', limit: 100 });
@@ -1345,38 +1342,67 @@ const refundDuplicateSubscriptionInvoices = async (
 			if (id) invoiceIds.add(id);
 		}
 	}
+	return invoiceIds;
+}
+
+type DuplicateInvoiceOutcome = 'honored' | 'unsettled' | 'unrefundable' | 'refunded';
+
+// One invoice of the duplicate: an honored payment is never clawed back
+// (codex P1 — a delayed invoice.paid for a legit old subscription must not
+// refund because the org later resubscribed; any status counts — 'refunded'
+// or 'disputed' periods are owned by the charge.refunded/dispute reversal
+// path), an unsettled invoice never moved money, a charge-only payment needs
+// a human, and the rest refund on a PER-PAYMENT idempotency key so retries
+// and separate payments never collide.
+async function refundDuplicateInvoice(input: {
+	duplicateSubscriptionId: string;
+	orgId: string;
+	invoiceId: string;
+	checkoutSessionId?: string;
+}): Promise<DuplicateInvoiceOutcome> {
+	if (await subscriptionInvoiceWasHonored(input.invoiceId)) {
+		console.info(
+			`stripe: invoice ${input.invoiceId} on superseded subscription ${input.duplicateSubscriptionId} already produced a period — leaving the honored payment`
+		);
+		return 'honored';
+	}
+	const refs = await fetchInvoicePaymentRefs(input.invoiceId);
+	if (!refs.paymentIntentId && !refs.chargeId) return 'unsettled';
+	if (!refs.paymentIntentId) return 'unrefundable';
+	await refundUngrantablePayment({
+		paymentIntentId: refs.paymentIntentId,
+		idempotencyKey: `refund:ungrantable:subscription:${input.duplicateSubscriptionId}:payment:${refs.paymentIntentId}`,
+		label: `duplicate hosted subscription ${input.duplicateSubscriptionId} for org ${input.orgId}`,
+		orgId: input.orgId,
+		checkoutSessionId: input.checkoutSessionId
+	});
+	return 'refunded';
+}
+
+// Refund every paid payment the duplicate collected (see
+// collectDuplicateInvoiceIds). The outcome aggregation stays separate from
+// the per-invoice decisions (codacy complexity split).
+const refundDuplicateSubscriptionInvoices = async (input: {
+	duplicateSubscriptionId: string;
+	orgId: string;
+	canceled: StripeRecord;
+	live: StripeRecord | null;
+	checkoutSessionId?: string;
+	invoiceId?: string;
+	paymentExpected: boolean;
+}): Promise<void> => {
+	const { duplicateSubscriptionId, orgId, canceled, live } = input;
+	const invoiceIds = await collectDuplicateInvoiceIds(duplicateSubscriptionId, canceled, live, input.invoiceId);
 	let refundedAny = false;
 	let honoredAny = false;
 	let unrefundable = false;
 	for (const invoiceId of invoiceIds) {
-		// A period row for this invoice means the payment was HONORED — the
-		// customer received the service. Refunding delivered service is a
-		// clawback, not a duplicate-charge correction: a delayed invoice.paid
-		// for a legit old subscription must not refund just because the org
-		// later resubscribed (codex P1). Any status counts — a 'refunded' or
-		// 'disputed' period is already owned by the charge.refunded/dispute
-		// reversal path.
-		if (await subscriptionInvoiceWasHonored(invoiceId)) {
-			console.info(`stripe: invoice ${invoiceId} on superseded subscription ${duplicateSubscriptionId} already produced a period — leaving the honored payment`);
-			honoredAny = true;
-			continue;
-		}
-		const refs = await fetchInvoicePaymentRefs(invoiceId);
-		if (!refs.paymentIntentId && !refs.chargeId) continue; // never settled — nothing moved
-		if (!refs.paymentIntentId) {
-			unrefundable = true;
-			continue;
-		}
-		await refundUngrantablePayment({
-			paymentIntentId: refs.paymentIntentId,
-			idempotencyKey: `refund:ungrantable:subscription:${duplicateSubscriptionId}:payment:${refs.paymentIntentId}`,
-			label: `duplicate hosted subscription ${duplicateSubscriptionId} for org ${orgId}`,
-			orgId,
-			checkoutSessionId: opts.checkoutSessionId
-		});
-		refundedAny = true;
+		const outcome = await refundDuplicateInvoice({ duplicateSubscriptionId, orgId, invoiceId, checkoutSessionId: input.checkoutSessionId });
+		if (outcome === 'honored') honoredAny = true;
+		else if (outcome === 'unrefundable') unrefundable = true;
+		else if (outcome === 'refunded') refundedAny = true;
 	}
-	if (unrefundable || (opts.paymentExpected && !refundedAny && !honoredAny)) {
+	if (unrefundable || (input.paymentExpected && !refundedAny && !honoredAny)) {
 		// A paid payment exists but cannot be auto-refunded (charge-only), or
 		// the money is provably taken yet invisible to invoicePayments — either
 		// way a human must refund: throw so the delivery stays un-ACKed.
@@ -1390,7 +1416,7 @@ const refundDuplicateSubscriptionInvoices = async (
 
 async function teardownDuplicateSubscription(duplicateSubscriptionId: string, orgId: string, opts: { checkoutSessionId?: string; invoiceId?: string; paymentExpected: boolean }): Promise<void> {
 	const { canceled, live } = await cancelDuplicateSubscription(duplicateSubscriptionId, orgId);
-	await refundDuplicateSubscriptionInvoices(duplicateSubscriptionId, orgId, canceled, live, opts);
+	await refundDuplicateSubscriptionInvoices({ duplicateSubscriptionId, orgId, canceled, live, ...opts });
 }
 
 /**

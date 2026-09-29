@@ -450,18 +450,49 @@ export async function deleteUserRecords(userId: string, options?: DeleteUserOpti
 			`account deletion: promoted user ${promotion.successorId} to owner of org ${promotion.orgId} (last owner ${userId} was deleted)`
 		);
 	}
+	// Bound every post-commit Stripe call by the caller's deadline: the shared
+	// client retries each request up to twice, so an unbounded call can outlive
+	// the cron budget and keep the caller's grant revocations from ever running
+	// (coderabbit). The factory throws once the budget is spent so no request
+	// starts after it — the same contract as retryStripeCustomerDeletions.
+	const requestOptions: StripeRequestOptionsFactory | undefined =
+		options?.deadline === undefined
+			? undefined
+			: () => {
+					const remaining = options.deadline! - Date.now();
+					if (remaining <= 0) throw new Error('account deletion shared deadline expired');
+					return { timeout: remaining, maxNetworkRetries: 0 };
+				};
 	// Surviving orgs keep their Stripe customer (the team still bills), but
 	// the customer may have been created by the DEPARTING user (any owner can
 	// open Checkout) with their e-mail — that PII must not outlive the
 	// account. Anonymize best-effort for EVERY surviving org the user belonged
 	// to (not just promoted ones — codex review): the e-mail is scrubbed, the
 	// org name and saved card stay for the successor.
-	for (const { orgId, stripeCustomerId } of survivingStripeCustomers) {
+	for (let i = 0; i < survivingStripeCustomers.length; i += 1) {
+		const { orgId, stripeCustomerId } = survivingStripeCustomers[i];
+		// The anonymization pass has no durable retry — a spent budget must log
+		// the deferred orgs loudly rather than silently skip the PII scrub
+		// (coderabbit). The deadline is checked per org, not once: each call
+		// can consume the rest of the budget.
+		if (options?.deadline !== undefined && Date.now() >= options.deadline) {
+			console.error(
+				`account deletion: shared deadline reached — Stripe customer anonymization deferred for ${survivingStripeCustomers.length - i} org(s): ${survivingStripeCustomers
+					.slice(i)
+					.map((o) => o.orgId)
+					.join(', ')}`
+			);
+			break;
+		}
 		try {
 			// The typed SDK accepts `string | undefined` — an undefined value
 			// would OMIT the field (a no-op), so the identifier is scrubbed
 			// with an empty string instead of null.
-			await getStripe().customers.update(stripeCustomerId, { email: '' });
+			if (requestOptions) {
+				await getStripe().customers.update(stripeCustomerId, { email: '' }, requestOptions());
+			} else {
+				await getStripe().customers.update(stripeCustomerId, { email: '' });
+			}
 		} catch (error) {
 			console.error(
 				`account deletion: could not anonymize Stripe customer ${stripeCustomerId} for surviving org ${orgId}: ${error instanceof Error ? error.message : String(error)}`
@@ -474,18 +505,23 @@ export async function deleteUserRecords(userId: string, options?: DeleteUserOpti
 	// privacy must not be held hostage by Stripe availability (the same
 	// contract as revokeGoogleToken on channel grants). The OUTBOX row keeps
 	// the obligation durable: the cron retry erases it once Stripe confirms.
-	for (const customerId of stripeCustomerIds) {
+	for (let i = 0; i < stripeCustomerIds.length; i += 1) {
+		const customerId = stripeCustomerIds[i];
 		// The outbox row is the durable obligation — stopping here on a spent
 		// deadline loses nothing; the next sweep retries (codex).
 		if (options?.deadline !== undefined && Date.now() >= options.deadline) {
 			console.error(
-				`account deletion: shared deadline reached — ${stripeCustomerIds.length} Stripe customer erasure(s) stay queued in the outbox`
+				`account deletion: shared deadline reached — ${stripeCustomerIds.length - i} Stripe customer erasure(s) stay queued in the outbox`
 			);
 			break;
 		}
 		try {
-			await cancelCustomerSubscriptions(customerId);
-			await getStripe().customers.del(customerId);
+			await cancelCustomerSubscriptions(customerId, requestOptions);
+			if (requestOptions) {
+				await getStripe().customers.del(customerId, undefined, requestOptions());
+			} else {
+				await getStripe().customers.del(customerId);
+			}
 			await db.delete(stripeDeletionOutbox).where(eq(stripeDeletionOutbox.customerId, customerId));
 		} catch (error) {
 			console.error(

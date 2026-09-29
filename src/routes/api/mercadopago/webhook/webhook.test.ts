@@ -92,6 +92,20 @@ test('a processing failure stays a 500 so Mercado Pago retries', async () => {
 	expect(response.status).toBe(500);
 });
 
+test('the failure log renders the caught error on one line', async () => {
+	// coderabbit CWE-117: jsonResponse embeds upstream response bodies in
+	// errors, so a logged `cause` can carry newlines — the rendered error
+	// must be flattened, or attacker-adjacent text becomes forged log lines.
+	mocks.retrievePayment.mockRejectedValue(new Error('payment retrieval failed: 502\nX-Injected-Log-Line: forged entry'));
+	const logged = captureErrors();
+
+	await POST({ request: webhookRequest('pay-1') } as never);
+
+	expect(logged).toHaveLength(1);
+	expect(logged[0]).not.toMatch(/[\r\n]/);
+	expect(logged[0]).toContain('X-Injected-Log-Line'); // content survives, flattened
+});
+
 test('the failure log never carries a raw payment id (CRLF-safe, bounded)', async () => {
 	// The id comes from the POST body — it is attacker-controlled text that
 	// lands in the server log, so it is stripped to a safe alphabet and a
@@ -102,10 +116,9 @@ test('the failure log never carries a raw payment id (CRLF-safe, bounded)', asyn
 	await POST({ request: webhookRequest(`pay-1\r\nX-Injected: yes ${'a'.repeat(500)}`) } as never);
 
 	expect(logged).toHaveLength(1);
-	// The rendered call ends with the error's stack on later lines — the
-	// id-injection invariant lives on the message line.
-	const [line] = logged[0].split('\n');
-	expect(line).not.toMatch(/\r/);
-	expect(line).toContain('pay-1');
-	expect(line.length).toBeLessThan(250);
+	// The whole rendered entry is one bounded line — both the id and the
+	// error are sanitized before reaching the log (coderabbit CWE-117).
+	expect(logged[0]).not.toMatch(/[\r\n]/);
+	expect(logged[0]).toContain('pay-1');
+	expect(logged[0].length).toBeLessThan(800);
 });

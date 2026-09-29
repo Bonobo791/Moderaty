@@ -21,7 +21,7 @@ import { effectiveBalanceSql, isUnmeteredPlan, orgRowIsMetered } from '$lib/serv
 import { isActiveSubscriptionStatus } from '$lib/server/billing/plans';
 import { db } from '$lib/server/db';
 import { memberships, organizations, users } from '$lib/server/db/schema';
-import { deleteUserRecords, revokeChannelGrants, type DeletionTx } from '$lib/server/deletion';
+import { deleteUserRecords, revokeChannelGrants, type DeletionTx, type ErasedChannelGrant } from '$lib/server/deletion';
 import { escapeHtml } from '$lib/server/emailText';
 import { assertBeforeDeadline, DeadlineExceededError } from '$lib/server/http';
 import { sendMailjetMessage } from '$lib/server/mailjet';
@@ -256,9 +256,13 @@ async function claimAndWarn(user: SweepUser, since: string, sinceMs: number, now
  */
 async function claimAndDelete(user: SweepUser, since: string, ageMs: number, deadline?: number): Promise<EvalOutcome> {
 	assertBeforeDeadline(deadline); // nothing claimed yet — a spent budget defers cleanly
+	// The claim clears BOTH stamps: every survivor of this path (funded,
+	// abort, deadline) starts the next countdown with a clean slate — a kept
+	// notifiedAt would satisfy the next window's deletion gate with no fresh
+	// warning ever sent (coderabbit).
 	const claimed = await db
 		.update(users)
-		.set({ zeroCreditsSince: null })
+		.set({ zeroCreditsSince: null, zeroCreditsNotifiedAt: null })
 		.where(and(eq(users.id, user.id), eq(users.zeroCreditsSince, since)))
 		.returning({ id: users.id });
 	if (!claimed.length) return 'idle'; // funded mid-read, or a concurrent run owns the deletion
@@ -276,7 +280,7 @@ async function claimAndDelete(user: SweepUser, since: string, ageMs: number, dea
 		return 'cleared';
 	}
 	assertBeforeDeadline(deadline); // the erase is the commit boundary — a spent budget must not cross it
-	let grants;
+	let grants: ErasedChannelGrant[];
 	try {
 		grants = await deleteUserRecords(user.id, {
 			deadline,
@@ -338,10 +342,11 @@ async function evaluateUser(user: SweepUser, deadline?: number): Promise<EvalOut
 	}
 	if (user.since === null) {
 		// First broke observation stamps the clock only — the cadence rule
-		// forbids an e-mail the day credits hit zero.
+		// forbids an e-mail the day credits hit zero. Any warning stamp left
+		// over from a previous countdown dies with the new clock (coderabbit).
 		await db
 			.update(users)
-			.set({ zeroCreditsSince: nowIso })
+			.set({ zeroCreditsSince: nowIso, zeroCreditsNotifiedAt: null })
 			.where(and(eq(users.id, user.id), isNull(users.zeroCreditsSince)));
 		return 'stamped';
 	}
@@ -356,7 +361,10 @@ async function evaluateUser(user: SweepUser, deadline?: number): Promise<EvalOut
 		return 'idle';
 	}
 	if (ageMs >= ZERO_CREDIT_GRACE_MS) {
-		if (user.notifiedAt === null) {
+		// A stamp older than the current countdown belongs to an earlier
+		// cycle — no warning was delivered in THIS window (coderabbit).
+		const neverWarned = user.notifiedAt === null || Date.parse(user.notifiedAt) < sinceMs;
+		if (neverWarned) {
 			// Deletion requires a delivered warning — an account whose warnings
 			// all failed to send (APP_URL missing, Mailjet down) must not be
 			// erased on the bare clock. Restart the window so the promised
@@ -364,8 +372,16 @@ async function evaluateUser(user: SweepUser, deadline?: number): Promise<EvalOut
 			// sweep's warning claim still wins (codex+coderabbit).
 			const restamped = await db
 				.update(users)
-				.set({ zeroCreditsSince: nowIso })
-				.where(and(eq(users.id, user.id), eq(users.zeroCreditsSince, user.since), isNull(users.zeroCreditsNotifiedAt)))
+				.set({ zeroCreditsSince: nowIso, zeroCreditsNotifiedAt: null })
+				.where(
+					and(
+						eq(users.id, user.id),
+						eq(users.zeroCreditsSince, user.since),
+						user.notifiedAt === null
+							? isNull(users.zeroCreditsNotifiedAt)
+							: eq(users.zeroCreditsNotifiedAt, user.notifiedAt)
+					)
+				)
 				.returning({ id: users.id });
 			if (!restamped.length) return 'idle'; // a concurrent run claimed the milestone — it owns the outcome
 			console.error(`zero-credit sweep: user ${user.id} reached the grace expiry with no delivered warning — restarting the warning window`);

@@ -86,6 +86,7 @@ export async function sendMailjetMessage(message: MailjetMessage, deadline?: num
 	const credentials = Buffer.from(`${config.apiKey}:${config.secretKey}`).toString('base64');
 
 	let response: Response;
+	let body: string;
 	try {
 		response = await fetch(MAILJET_SEND_URL, {
 			method: 'POST',
@@ -96,17 +97,21 @@ export async function sendMailjetMessage(message: MailjetMessage, deadline?: num
 			body: JSON.stringify(payload),
 			signal: AbortSignal.timeout(timeoutMs)
 		});
+		// fetch resolving means the HEADERS arrived — the body can still be
+		// streaming, and the composed signal firing mid-read rejects text()
+		// here. The deadline check below must cover this read or a spent
+		// budget escapes as an unclassified provider failure (coderabbit).
+		body = await response.text();
 	} catch (error) {
 		// A spent budget is a scheduling condition, not a provider failure —
 		// keep it distinguishable so callers (the sweep) can defer cleanly.
 		if (deadline !== undefined && Date.now() >= deadline) throw new DeadlineExceededError();
-		// fetch throws on DNS/connection failure and on our own timeout.
+		// fetch throws on DNS/connection failure, on our own timeout, and
+		// response.text() throws on a mid-read abort or stream error.
 		// Stryker disable next-line StringLiteral: log-only message — mutating it changes no observable behavior
 		console.error('mailjet send failed (network):', error);
 		throw new Error('verification e-mail could not be sent (network failure)');
 	}
-
-	const body = await response.text();
 	if (!response.ok) {
 		// Stryker disable next-line StringLiteral: log-only message — mutating it changes no observable behavior
 		console.error(`mailjet send failed: HTTP ${response.status} ${body}`);

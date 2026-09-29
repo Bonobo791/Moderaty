@@ -383,6 +383,9 @@ describe('deletion', () => {
 		const user = await userRow('u1');
 		expect(user?.googleSub).toBe('sub-u1'); // still alive — never tombstoned
 		expect(user?.zeroCreditsSince).toBeNull(); // clock cleared by the claim
+		// coderabbit: the warning stamp must die with the countdown — kept, it
+		// would satisfy the next countdown's deletion gate with no fresh warning.
+		expect(user?.zeroCreditsNotifiedAt).toBeNull();
 	});
 
 	test('a purchase landing inside the deletion transaction aborts the erase', async () => {
@@ -426,6 +429,43 @@ describe('deletion', () => {
 			errorSpy.mockRestore();
 		}
 		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+	});
+
+	test('a warning stamp from an earlier countdown cannot satisfy the deletion gate', async () => {
+		// coderabbit: notifiedAt=60d predates this countdown's since=31d — no
+		// warning was ever delivered in the current window, so the gate must
+		// treat it as never-warned and restart, not erase the account.
+		await seedAccount('u1', { creditsRemaining: 0 });
+		await testDb().db
+			.update(users)
+			.set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(60) })
+			.where(eq(users.id, 'u1'));
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const result = await sweepZeroCreditAccounts();
+			expect(result).toMatchObject({ deleted: 0, errors: 0 });
+			const row = (await userRow('u1'))!;
+			expect(row.googleSub).toBe('sub-u1');
+			expect(Date.parse(row.zeroCreditsSince!)).toBeGreaterThan(Date.now() - 60_000);
+			expect(row.zeroCreditsNotifiedAt).toBeNull(); // stale stamp cleared with the restart
+		} finally {
+			errorSpy.mockRestore();
+		}
+		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+	});
+
+	test('a leftover warning stamp is cleared when a new countdown starts', async () => {
+		// coderabbit: a stamp can outlive its countdown (claim-abort paths used
+		// to clear only `since`). Re-stamping the clock must clear it, or the
+		// stale stamp would shorten the new countdown's warning cadence.
+		await seedAccount('u1', { creditsRemaining: 0 });
+		await testDb().db.update(users).set({ zeroCreditsNotifiedAt: daysAgo(40) }).where(eq(users.id, 'u1'));
+
+		const result = await sweepZeroCreditAccounts();
+		expect(result).toMatchObject({ evaluated: 1, errors: 0 });
+		const row = (await userRow('u1'))!;
+		expect(Date.parse(row.zeroCreditsSince!)).toBeGreaterThan(Date.now() - 60_000);
+		expect(row.zeroCreditsNotifiedAt).toBeNull();
 	});
 
 	test('a corrupt notified_at stamp must never unlock deletion', async () => {

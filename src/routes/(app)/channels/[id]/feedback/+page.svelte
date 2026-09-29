@@ -130,10 +130,6 @@
 	{/if}
 	{#if form?.scope !== 'reveal' && form?.message}<div class="flash" role="status">{form.message}</div>{/if}
 
-	<div class="credit-notice" role="note">
-		<strong>Feedback uses 1 credit per comment processed on metered plans, in addition to moderation. History scans use the same credits.</strong>
-		<p>Lifetime-plan and self-hosted unmetered accounts are not charged credits.</p>
-	</div>
 	{#if data.history.active}
 		<div class="flash history-status" role="status">
 			{#if !data.ch.active || !data.settings.enabled}
@@ -585,19 +581,6 @@
 	}
 	.settings-note {
 		margin: 0;
-		font-size: 13px;
-	}
-	.credit-notice {
-		padding: 16px 18px;
-		margin: 0 0 24px;
-		border: 1px solid var(--line);
-		border-radius: 8px;
-		background: var(--surface);
-		line-height: 1.5;
-	}
-	.credit-notice p {
-		margin: 6px 0 0;
-		color: var(--text-2);
 		font-size: 13px;
 	}
 	.history-status {

@@ -70,10 +70,9 @@ describe('feedback page role gating (SSR)', () => {
 		expect(body).not.toContain('action="?/settings"');
 	});
 
-	it('shows the billing notice to every role and keeps history and preview forms owner-only', () => {
+	it('keeps history and preview forms owner-only', () => {
 		for (const role of ['owner', 'member', 'admin']) {
 			const body = renderFeedback(pageData({ orgRole: role }));
-			expect(body).toContain('Feedback uses 1 credit per comment processed on metered plans, in addition to moderation. History scans use the same credits.');
 			if (role === 'owner') {
 				expect(body).toContain('action="?/analyzeHistory"');
 				expect(body).toContain('action="?/dryRun"');

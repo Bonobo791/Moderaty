@@ -2,7 +2,7 @@ import { db, withBusyRetry } from '$lib/server/db';
 import { auditLog, comments, moderationActions } from '$lib/server/db/schema';
 import { ownedChannel } from '$lib/server/ownership';
 import { requireUser } from '$lib/server/session';
-import { refreshAccessToken, getCommentModerationStatus } from '$lib/server/youtube';
+import { refreshAccessToken } from '$lib/server/youtube';
 import { applyHumanIntent, finalizeHumanIntent } from '$lib/server/pipeline/enforcement';
 import { decrypt } from '$lib/server/crypto';
 import { env } from '$env/dynamic/private';
@@ -219,9 +219,8 @@ export const actions = {
 		if (!claim) throw error(404, 'reversible comment not found in this channel');
 		try {
 			const token = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
-			const remote = await getCommentModerationStatus(commentId, token);
-			const { holdLanded } = await applyHumanIntent(commentId, 'restore', remote, token);
-			await finalizeHumanIntent(params.id, commentId, 'restore', holdLanded);
+			await applyHumanIntent(commentId, 'restore', token);
+			await finalizeHumanIntent(params.id, commentId, 'restore');
 		} catch (e) {
 			// Release a fresh claim so the failed restore stays retryable and
 			// drop its staged intent row — nothing committed. A resumed attempt

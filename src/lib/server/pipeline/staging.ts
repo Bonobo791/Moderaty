@@ -150,9 +150,8 @@ async function upsertRescanActionRows(transaction: LedgerHandle, actions: Return
  * rows stay: they record actions that already reached YouTube, which no new
  * verdict can undo. 'pending' never reached YouTube — cancel outright. A
  * 'dispatched' call may already have landed remotely, so it goes 'cancelling'
- * and the sweep's verification resolves it (codex): landed → completed with
- * its audit row; never landed → superseded — never retried with the stale
- * intent. */
+ * and the next sweep supersedes it without retrying or changing remote state;
+ * the owner can choose a new action from the queue or log. */
 async function supersedeStaleActionRows(transaction: LedgerHandle, commentIds: string[]): Promise<void> {
 	if (!commentIds.length) return;
 	await transaction

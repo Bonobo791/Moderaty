@@ -573,10 +573,9 @@ test.each([
 	// cubic+coderabbit, PR #142: a YouTube pagination failure is NOT an auth
 	// failure — "reconnect the channel" would send the user on a false errand.
 	{ label: 'expired page token', message: 'The request specifies an invalid page token.', category: 'error' },
-	// cubic, PR #142: a YouTube moderation-action verification failure is not
-	// an AI scoring failure — the word "moderation" alone must not win.
-	{ label: 'action verification', message: 'moderation action c1 verification failed: 500 Internal Server Error', category: 'error' },
-	{ label: 'moderationStatus validation', message: 'comments.list response moderationStatus is unsupported: x', category: 'error' }
+	// YouTube moderation write failures are provider errors, not AI scoring
+	// failures — the word "moderation" alone must not win.
+	{ label: 'moderation write', message: 'setModerationStatus failed: 500 Internal Server Error', category: 'error' }
 ])('a failed run persists failed health for a $label failure and never touches the success fields', async ({ message, category }) => {
 	// MOD-7: a failed run must not update the success timestamp/status — the
 	// dashboard's "last checked" freshness used to lie because only

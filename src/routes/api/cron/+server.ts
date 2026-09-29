@@ -91,9 +91,8 @@ function categorizeRunFailure(cause: unknown): 'token' | 'quota' | 'scoring' | '
 	// token") is a transient provider error, not an auth failure, and the
 	// dashboard would wrongly tell the user to reconnect (cubic+coderabbit).
 	if (/unauthorized|invalid_grant|invalid_token|401|403|oauth|refresh token|access token|credential/.test(message)) return 'token';
-	// 'moderation' alone is too broad — YouTube moderation-ACTION failures
-	// ("moderation action … verification failed", "moderationStatus is
-	// unsupported") are provider errors, not AI scoring outages (cubic).
+	// 'moderation' alone is too broad — a YouTube moderation write failure is
+	// a provider error, not an AI scoring outage.
 	if (/openai|scor(e|ing)|moderation (?:failed|returned|response)/.test(message)) return 'scoring';
 	return 'error';
 }

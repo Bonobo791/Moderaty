@@ -74,8 +74,7 @@ export type YoutubeAction = Exclude<Decision['youtubeAction'], null>;
 export type OutstandingAction = typeof moderationActions.$inferSelect & {
 	action: YoutubeAction;
 	// 'cancelling': a rescan verdict cancelled this intent after dispatch —
-	// the sweep verifies the remote call landed (→completed, audit kept) or
-	// never did (→superseded) instead of retrying the stale action (codex).
+	// the next sweep supersedes it without retrying or changing YouTube state.
 	state: 'pending' | 'dispatched' | 'cancelling';
 };
 

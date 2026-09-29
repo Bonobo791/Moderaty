@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
-import { deleteComment, fetchNewComments, fetchVideoMetadata, getCommentModerationStatus, refreshAccessToken, setModerationStatus, YOUTUBE_ID_BATCH_SIZE } from './youtube';
+import { CommentNotFoundError, deleteComment, fetchNewComments, fetchVideoMetadata, refreshAccessToken, setModerationStatus, YOUTUBE_ID_BATCH_SIZE } from './youtube';
 
 // Pins the shared constant to YouTube's documented `id`-list cap — a change
 // here is a provider-limit change, not a refactor, and must be deliberate.
@@ -200,6 +200,28 @@ test('posts the moderation update and fails loudly on a non-OK response', async 
 	expect(fetch.mock.calls[0]?.[1]).toMatchObject({ method: 'POST' });
 });
 
+test('throws CommentNotFoundError with the requested IDs when moderation status update returns 404', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('not found', { status: 404 })));
+
+	const failure = await setModerationStatus(['comment-1', 'comment-2'], 'heldForReview', false, 'token').catch((error: unknown) => error);
+
+	expect(failure).toBeInstanceOf(CommentNotFoundError);
+	expect(failure).toMatchObject({
+		commentIds: ['comment-1', 'comment-2'],
+		message: 'comments not found on YouTube: comment-1, comment-2'
+	});
+});
+
+test('keeps a 500 moderation update failure generic', async () => {
+	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('provider unavailable', { status: 500 })));
+
+	const failure = await setModerationStatus(['comment'], 'rejected', false, 'token').catch((error: unknown) => error);
+
+	expect(failure).toBeInstanceOf(Error);
+	expect(failure).not.toBeInstanceOf(CommentNotFoundError);
+	expect(failure).toMatchObject({ message: 'setModerationStatus failed: 500 provider unavailable' });
+});
+
 test('deletes a comment with a DELETE request and tolerates an already-deleted comment', async () => {
 	const fetch = vi.fn()
 		.mockResolvedValueOnce(new Response(null, { status: 204 }))
@@ -232,23 +254,6 @@ test('requests new comments in time order for the watched channel', async () => 
 	expect(url.searchParams.get('order')).toBe('time');
 	expect(url.searchParams.get('allThreadsRelatedToChannelId')).toBe('channel');
 	expect(url.searchParams.get('maxResults')).toBe('100');
-});
-
-test('returns a comment moderation status for recovery verification', async () => {
-	const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
-		items: [{ snippet: { moderationStatus: 'rejected' } }]
-	}), { status: 200 }));
-	vi.stubGlobal('fetch', fetch);
-
-	await expect(getCommentModerationStatus('comment', 'token')).resolves.toBe('rejected');
-	expect(String(fetch.mock.calls[0]?.[0])).toContain('part=snippet');
-	expect(String(fetch.mock.calls[0]?.[0])).toContain('id=comment');
-});
-
-test('treats a missing comment as absent during recovery verification', async () => {
-	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 404 })));
-
-	await expect(getCommentModerationStatus('comment', 'token')).resolves.toBeNull();
 });
 
 test('parses each comment\'s video ID for tone context', async () => {
@@ -615,85 +620,6 @@ test('posts exactly one moderation batch for fifty comment IDs', async () => {
 	await setModerationStatus(ids, 'heldForReview', false, 'token');
 
 	expect(fetch).toHaveBeenCalledTimes(1);
-});
-
-test.each(['heldForReview', 'published', 'likelySpam', 'rejected'] as const)(
-	'returns the %s moderation status during recovery verification',
-	async (status) => {
-		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rawPage({
-			items: [{ snippet: { moderationStatus: status } }]
-		})));
-
-		await expect(getCommentModerationStatus('comment', 'token')).resolves.toBe(status);
-	}
-);
-
-test('fails loudly on an unsupported moderation status', async () => {
-	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rawPage({
-		items: [{ snippet: { moderationStatus: 'spam' } }]
-	})));
-
-	// An unknown status must never be silently treated as a confirmed action (I2).
-	await expect(getCommentModerationStatus('comment', 'token')).rejects.toThrow(
-		'comments.list response moderationStatus is unsupported: spam'
-	);
-});
-
-test('returns null when the comment is absent from the list', async () => {
-	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rawPage({ items: [] })));
-
-	await expect(getCommentModerationStatus('comment', 'token')).resolves.toBeNull();
-});
-
-test('fails loudly when comments.list returns multiple comments', async () => {
-	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rawPage({
-		items: [{ snippet: { moderationStatus: 'rejected' } }, { snippet: { moderationStatus: 'rejected' } }]
-	})));
-
-	await expect(getCommentModerationStatus('comment', 'token')).rejects.toThrow(
-		'comments.list response returned multiple comments'
-	);
-});
-
-test('fails loudly when comments.list items is missing', async () => {
-	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rawPage({})));
-
-	await expect(getCommentModerationStatus('comment', 'token')).rejects.toThrow(
-		'comments.list response items is missing or invalid'
-	);
-});
-
-test('fails loudly when a comments.list response is not a JSON object', async () => {
-	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('[]', { status: 200 })));
-
-	await expect(getCommentModerationStatus('comment', 'token')).rejects.toThrow(
-		'comments.list response is missing or invalid'
-	);
-});
-
-test('fails loudly when moderationStatus is missing from the comment', async () => {
-	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rawPage({ items: [{ snippet: {} }] })));
-
-	await expect(getCommentModerationStatus('comment', 'token')).rejects.toThrow(
-		'comments.list response moderationStatus is missing or invalid'
-	);
-});
-
-test.each([
-	[[null], 'comments.list response item is missing or invalid'],
-	[[{}], 'comments.list response item snippet is missing or invalid']
-])('fails loudly when the comment entry is malformed: %j', async (items, message) => {
-	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(rawPage({ items })));
-
-	await expect(getCommentModerationStatus('comment', 'token')).rejects.toThrow(message);
-});
-
-test('fails loudly when the comments.list request fails', async () => {
-	vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('bad request', { status: 400 })));
-
-	await expect(getCommentModerationStatus('comment', 'token')).rejects.toThrow(
-		'comments.list failed: 400 bad request'
-	);
 });
 
 test('fails loudly when a commentThreads page is not valid JSON', async () => {

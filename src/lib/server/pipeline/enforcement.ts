@@ -4,8 +4,8 @@ import { db } from '$lib/server/db';
 import { auditLog, channels, comments, moderationActions } from '$lib/server/db/schema';
 import { assertBeforeDeadline, DeadlineExceededError } from '$lib/server/http';
 import {
+	CommentNotFoundError,
 	deleteComment,
-	getCommentModerationStatus,
 	setModerationStatus,
 	YOUTUBE_ID_BATCH_SIZE
 } from '$lib/server/youtube';
@@ -68,19 +68,19 @@ function outstandingAction(action: typeof moderationActions.$inferSelect): Outst
 function updateActionStates(
 	transaction: ChannelGuardHandle,
 	actions: OutstandingAction[],
-	set: { state: 'dispatched' | 'superseded' | 'completed'; lastAttemptAt?: string }
+	set: { state: 'dispatched' | 'superseded' | 'completed'; lastAttemptAt?: string },
+	fromStates: ('pending' | 'dispatched' | 'cancelling')[] = ['pending', 'dispatched', 'cancelling']
 ) {
-	// Transitions only ever move OUTSTANDING rows ('cancelling' included — a
-	// rescan-cancelled dispatch is still in flight until verified): a terminal
-	// state must never be rewritten by a stale run (completed→superseded) nor
-	// claimed by a row a concurrent decider already finished. The predecessor
-	// predicate makes every transition conditional on the row being in flight.
+	// Transitions only ever move outstanding rows: a terminal state must never
+	// be rewritten by a stale run (completed→superseded) nor claimed by a row a
+	// concurrent decider already finished. The predecessor predicate makes
+	// every transition conditional on the row still being in flight.
 	return transaction
 		.update(moderationActions)
 		.set(set)
 		.where(and(
 			inArray(moderationActions.commentId, actions.map((action) => action.commentId)),
-			inArray(moderationActions.state, ['pending', 'dispatched', 'cancelling'])
+			inArray(moderationActions.state, fromStates)
 		));
 }
 
@@ -92,13 +92,14 @@ function updateActionStates(
 async function transitionActions(
 	actions: OutstandingAction[],
 	set: { state: 'dispatched' | 'superseded'; lastAttemptAt?: string },
-	expected?: ChannelIdentity
+	expected?: ChannelIdentity,
+	fromStates?: ('pending' | 'dispatched' | 'cancelling')[]
 ) {
 	// Stryker disable next-line ConditionalExpression: equivalent — removing the guard makes an empty batch run a no-op update; observably identical (dispatch callers always pass ≥1, markSuperseded passes an empty partition)
 	if (!actions.length) return;
 	await db.transaction(async (transaction) => {
 		await assertChannelActive(actions[0].channelId, transaction, expected);
-		await updateActionStates(transaction, actions, set);
+		await updateActionStates(transaction, actions, set, fromStates);
 	});
 }
 
@@ -177,7 +178,7 @@ async function partitionHolds(actions: OutstandingAction[]): Promise<{ applicabl
 }
 
 async function completeActions(actions: OutstandingAction[], expected?: ChannelIdentity) {
-	// Stryker disable next-line ConditionalExpression: equivalent — all callers pass a non-empty array (applyModerationAction batches of ≥1, single verified or deleted actions)
+	// Stryker disable next-line ConditionalExpression: equivalent — all callers pass a non-empty array (applied batches or individually missing comments)
 	if (!actions.length) return;
 	await db.transaction(async (transaction) => {
 		await assertChannelActive(actions[0].channelId, transaction, expected);
@@ -210,29 +211,34 @@ async function completeActions(actions: OutstandingAction[], expected?: ChannelI
 	});
 }
 
-async function verificationResult(
+function warnMissingComment(commentId: string, action: string): void {
+	console.warn(`comment ${commentId} no longer exists on YouTube — completing ${action}`);
+}
+
+async function completeMissingAction(action: OutstandingAction, expected?: ChannelIdentity): Promise<void> {
+	warnMissingComment(action.commentId, action.action);
+	await completeActions([action], expected);
+}
+
+async function applyOneModerationAction(
 	action: OutstandingAction,
+	status: 'heldForReview' | 'rejected',
+	banAuthor: boolean,
 	accessToken: string,
 	deadline: number | undefined,
 	expected?: ChannelIdentity
-): Promise<'completed' | 'retry'> {
+): Promise<boolean> {
 	assertBeforeDeadline(deadline);
 	await assertChannelActive(action.channelId, db, expected);
-	const status = await getCommentModerationStatus(action.commentId, accessToken, deadline);
-	// Stryker disable next-line StringLiteral: 'retry'→"" equivalent — the caller only compares result === 'completed', so every other string takes the identical retry path
-	if (action.action === 'delete') return status === null ? 'completed' : 'retry';
-	// A remotely-deleted comment (null) can never accept a moderation write:
-	// completing instead of retrying keeps the dead comment from throwing
-	// setModerationStatus's 404 and hard-failing every later run.
-	// Stryker disable next-line StringLiteral: 'retry'→"" equivalent — same reasoning as the delete branch above
-	if (action.action === 'hold') return status === 'heldForReview' || status === null ? 'completed' : 'retry';
-	// Stryker disable next-line StringLiteral: 'retry'→"" equivalent — same reasoning as the delete branch above
-	if (action.action === 'reject') return status === 'rejected' || status === null ? 'completed' : 'retry';
-	// Ban is a single atomic API call (reject + banAuthor), so a comment already
-	// in a terminal state after dispatch means the call landed — complete it
-	// rather than stranding the action in manual review.
-	// Stryker disable next-line StringLiteral: 'retry'→"" equivalent — same reasoning as the delete branch above
-	return status === 'rejected' || status === null ? 'completed' : 'retry';
+	try {
+		await setModerationStatus([action.commentId], status, banAuthor, accessToken, deadline);
+	} catch (error) {
+		if (!(error instanceof CommentNotFoundError)) throw error;
+		await completeMissingAction(action, expected);
+		return false;
+	}
+	await completeActions([action], expected);
+	return true;
 }
 
 async function applyModerationAction(
@@ -249,18 +255,28 @@ async function applyModerationAction(
 		await markDispatched(batch, expected);
 		assertBeforeDeadline(deadline);
 		await assertChannelActive(batch[0].channelId, db, expected);
-		// Queue holds stay provisional until applied: a human review decision
-		// supersedes them. The comments-status check runs AFTER the dispatch
-		// claim so a decision committed mid-flight still wins the race.
+		// A hold stays provisional until applied: a human decision recorded in
+		// comments wins this database-only race before the YouTube write.
 		const { applicable, superseded } = status === 'heldForReview'
 			? await partitionHolds(batch)
 			: { applicable: batch, superseded: [] };
 		await markSuperseded(superseded, expected);
-		if (applicable.length) {
+		if (!applicable.length) continue;
+		try {
 			await setModerationStatus(applicable.map((action) => action.commentId), status, banAuthor, accessToken, deadline);
-			await completeActions(applicable, expected);
-			acted += applicable.length;
+		} catch (error) {
+			if (!(error instanceof CommentNotFoundError)) throw error;
+			if (applicable.length === 1) {
+				await completeMissingAction(applicable[0], expected);
+				continue;
+			}
+			for (const action of applicable) {
+				if (await applyOneModerationAction(action, status, banAuthor, accessToken, deadline, expected)) acted += 1;
+			}
+			continue;
 		}
+		await completeActions(applicable, expected);
+		acted += applicable.length;
 	}
 	return acted;
 }
@@ -303,60 +319,35 @@ async function processOutstandingActions(channelId: string, accessToken: string,
 			inArray(moderationActions.state, ['pending', 'dispatched', 'cancelling'])
 		))
 		.all()).map(outstandingAction);
+	const cancelling = actions.filter((action) => action.state === 'cancelling');
+	await transitionActions(cancelling, { state: 'superseded' }, expected, ['cancelling']);
+	for (const action of cancelling) {
+		console.warn(
+			`moderation action ${action.commentId} (${action.action}) was cancelled by a rescan after dispatch — YouTube may still reflect it; left unchanged until the user acts`
+		);
+	}
 	// Stryker disable next-line MethodExpression, ConditionalExpression: equivalent — claimPendingActions' SQL still guards eq(state, 'pending'), so handing it dispatched rows too claims nothing extra
 	const claimed = await claimPendingActions(actions.filter((action) => action.state === 'pending'), expected);
 	// Stryker disable next-line ArrayDeclaration: equivalent — applyYoutubeActions selects entries by their action field, so a foreign element in the array is never selected
 	const ready: OutstandingAction[] = [];
 	for (const action of actions) {
+		if (action.state === 'dispatched') {
+			ready.push(action);
+			continue;
+		}
 		if (action.state === 'pending') {
 			// Only actions this run claimed may be applied; an empty claim means a
 			// concurrent run owns the action, so skip it to avoid duplicate enforcement.
 			// Stryker disable next-line StringLiteral: equivalent — a ready entry's state field is never read again; applyYoutubeActions groups by action only
 			if (claimed.has(action.commentId)) ready.push({ ...action, state: 'dispatched' });
-			continue;
 		}
-		if (action.state === 'cancelling') {
-			// A rescan verdict cancelled this intent after dispatch — reconcile
-			// the remote call before resolving the row: landed → completed with
-			// its audit row (the action really happened); never landed →
-			// superseded, and it must NOT fall through to a retry that would
-			// apply the stale decision (codex).
-			if ((await verifyDispatchedAction(action, accessToken, deadline, expected)) === 'completed') {
-				await completeActions([action], expected);
-			} else {
-				await transitionActions([action], { state: 'superseded' }, expected);
-			}
-			continue;
-		}
-		if ((await verifyDispatchedAction(action, accessToken, deadline, expected)) === 'completed') {
-			await completeActions([action], expected);
-			continue;
-		}
-		ready.push(action);
 	}
 	return applyYoutubeActions(ready, accessToken, deadline, expected);
 }
 
 /**
- * Re-verifies a previously-dispatched action. Transient verification failures
- * must not strand the action: leave it 'dispatched' so the next run
- * re-verifies, and fail loudly (DeadlineExceededError still escapes).
- */
-async function verifyDispatchedAction(action: OutstandingAction, accessToken: string, deadline: number | undefined, expected?: ChannelIdentity): Promise<'completed' | 'retry'> {
-	try {
-		return await verificationResult(action, accessToken, deadline, expected);
-	} catch (error) {
-		if (error instanceof DeadlineExceededError) throw error;
-		throw new Error(
-			`moderation action ${action.commentId} verification failed: ${error instanceof Error ? error.message : String(error)}`
-		);
-	}
-}
-
-/**
- * The local status a human intent commits to once remote state matches.
- * 'restore' is the audit-log undo verb. Unknown actions return null — the
- * caller skips (sweep) or throws (queue) rather than guessing a status.
+ * The local status committed after applying a human intent. 'restore' is the
+ * audit-log undo verb. Unknown actions return null rather than guessing.
  */
 export function humanFinalStatus(action: string): 'approved' | 'deleted' | 'rejected' | null {
 	if (action === 'approve' || action === 'restore') return 'approved';
@@ -365,66 +356,39 @@ export function humanFinalStatus(action: string): 'approved' | 'deleted' | 'reje
 	return null;
 }
 
-/**
- * Applies a recorded human intent to YouTube and verifies the result.
- * `remote` is the preflight read — approve publishes ANY non-public state
- * ('rejected'/'likelySpam' included), never just 'heldForReview'. A re-read
- * after each write catches an in-flight hold landing after the decision:
- * one re-apply converges it. remote === null (comment gone) short-circuits
- * — there is nothing left to enforce. Returns the last observed state.
- * Throws when two applies still leave the wrong state: the caller releases
- * the claim or leaves it for reconcile — it never claims success.
- */
+/** Applies one idempotent YouTube write for a recorded human intent. */
 export async function applyHumanIntent(
 	commentId: string,
 	action: string,
-	remote: string | null,
 	accessToken: string,
 	deadline?: number
-): Promise<{ remote: string | null; holdLanded: boolean }> {
-	const wanted =
-		action === 'approve' || action === 'restore' ? 'published' : action === 'delete' ? null : 'rejected';
-	// A hold observed at ANY read — preflight or mid-apply — really landed on
-	// YouTube and earns its completion audit at finalize.
-	let holdLanded = remote === 'heldForReview';
-	// Up to two writes, each followed by a re-read. An already-converged
-	// state still gets one confirmation read: a dispatched hold can land
-	// behind the preflight (or behind a write) and must be re-applied, never
-	// left hiding a comment the human decided to publish.
-	let writes = 0;
-	for (;;) {
-		if (remote !== null && remote !== wanted) {
-			if (writes === 2) break;
-			if (wanted === 'published') {
-				await setModerationStatus([commentId], 'published', false, accessToken, deadline);
-			} else if (wanted === 'rejected') {
-				await setModerationStatus([commentId], 'rejected', action === 'ban', accessToken, deadline);
-			} else {
-				await deleteComment(commentId, accessToken, deadline);
-			}
-			writes += 1;
+): Promise<void> {
+	if (!humanFinalStatus(action)) throw new Error(`unsupported human intent '${action}'`);
+	assertBeforeDeadline(deadline);
+	try {
+		if (action === 'approve' || action === 'restore') {
+			await setModerationStatus([commentId], 'published', false, accessToken, deadline);
+		} else if (action === 'reject' || action === 'ban') {
+			await setModerationStatus([commentId], 'rejected', action === 'ban', accessToken, deadline);
+		} else {
+			await deleteComment(commentId, accessToken, deadline);
 		}
-		remote = await getCommentModerationStatus(commentId, accessToken, deadline);
-		holdLanded ||= remote === 'heldForReview';
-		if (remote === null || remote === wanted) return { remote, holdLanded };
+	} catch (error) {
+		if (!(error instanceof CommentNotFoundError)) throw error;
+		warnMissingComment(commentId, action);
 	}
-	throw new Error(`comment ${commentId} remote state '${remote}' did not converge to '${wanted}'`);
 }
 
 /**
  * Commits the local result of a human intent in ONE transaction: the final
- * comment status (guarded on 'restoring' — a loser write is a no-op, never
- * a stale overwrite) and hold bookkeeping. A hold that actually LANDED on
- * YouTube completes and gets its audit row here — completeActions never saw
- * it, but the remote hold really happened, so the record says so. A hold
- * that never reached YouTube is superseded. Both the queue action and the
- * reconcile sweep finalize through here.
+ * comment status is guarded on 'restoring', and hold bookkeeping is derived
+ * from the action row. A dispatched hold is completed and audited; a pending
+ * or cancelled hold is superseded without an audit row.
  */
 export async function finalizeHumanIntent(
 	channelId: string,
 	commentId: string,
 	action: string,
-	holdLanded: boolean,
 	expected?: ChannelIdentity
 ): Promise<void> {
 	const status = humanFinalStatus(action);
@@ -435,20 +399,26 @@ export async function finalizeHumanIntent(
 			.update(comments)
 			.set({ status, decidedBy: 'human' })
 			.where(and(eq(comments.id, commentId), eq(comments.status, 'restoring')));
-		const transitioned = await transaction
+		const dispatchedHold = await transaction
 			.update(moderationActions)
-			.set({ state: holdLanded ? 'completed' : 'superseded' })
-			.where(
-				and(
-					eq(moderationActions.commentId, commentId),
-					eq(moderationActions.action, 'hold'),
-					inArray(moderationActions.state, ['pending', 'dispatched'])
-				)
-			)
+			.set({ state: 'completed' })
+			.where(and(
+				eq(moderationActions.commentId, commentId),
+				eq(moderationActions.action, 'hold'),
+				eq(moderationActions.state, 'dispatched')
+			))
 			.returning({ reason: moderationActions.reason });
-		if (holdLanded && transitioned.length) {
+		await transaction
+			.update(moderationActions)
+			.set({ state: 'superseded' })
+			.where(and(
+				eq(moderationActions.commentId, commentId),
+				eq(moderationActions.action, 'hold'),
+				inArray(moderationActions.state, ['pending', 'cancelling'])
+			));
+		if (dispatchedHold.length) {
 			await transaction.insert(auditLog).values(
-				transitioned.map((row) => ({
+				dispatchedHold.map((row) => ({
 					channelId,
 					commentId,
 					action: 'hold',
@@ -487,9 +457,8 @@ async function reconcileRestoring(channelId: string, accessToken: string, deadli
 		if (!intent || intent.actor !== 'user' || !humanFinalStatus(intent.action)) continue;
 		try {
 			assertBeforeDeadline(deadline);
-			const remote = await getCommentModerationStatus(row.id, accessToken, deadline);
-			const { holdLanded } = await applyHumanIntent(row.id, intent.action, remote, accessToken, deadline);
-			await finalizeHumanIntent(channelId, row.id, intent.action, holdLanded, expected);
+			await applyHumanIntent(row.id, intent.action, accessToken, deadline);
+			await finalizeHumanIntent(channelId, row.id, intent.action, expected);
 		} catch (error) {
 			if (error instanceof DeadlineExceededError) throw error;
 			// Leave it 'restoring' for the next run — one stuck comment must

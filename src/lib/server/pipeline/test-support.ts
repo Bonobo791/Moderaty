@@ -380,7 +380,6 @@ const mocks = vi.hoisted(() => {
 		refreshAccessToken: vi.fn(),
 		fetchNewComments: vi.fn(),
 		fetchVideoMetadata: vi.fn(),
-		getCommentModerationStatus: vi.fn(),
 		setModerationStatus: vi.fn(),
 		deleteComment: vi.fn(),
 		scoreComment: vi.fn(),
@@ -427,7 +426,6 @@ vi.mock('$lib/server/youtube', async (importOriginal) => ({
 	refreshAccessToken: mocks.refreshAccessToken,
 	fetchNewComments: mocks.fetchNewComments,
 	fetchVideoMetadata: mocks.fetchVideoMetadata,
-	getCommentModerationStatus: mocks.getCommentModerationStatus,
 	setModerationStatus: mocks.setModerationStatus,
 	deleteComment: mocks.deleteComment
 }));
@@ -618,7 +616,6 @@ export function resetPipelineMocks() {
 		mocks.refreshAccessToken,
 		mocks.fetchNewComments,
 		mocks.fetchVideoMetadata,
-		mocks.getCommentModerationStatus,
 		mocks.setModerationStatus,
 		mocks.deleteComment,
 		mocks.scoreComment,
@@ -672,7 +669,6 @@ export function resetPipelineMocks() {
 	mocks.scoreComment.mockResolvedValue(moderation(0.1));
 	mocks.setModerationStatus.mockResolvedValue(undefined);
 	mocks.deleteComment.mockResolvedValue(undefined);
-	mocks.getCommentModerationStatus.mockResolvedValue('rejected');
 	mocks.serializeScores.mockReturnValue('{}');
 	mocks.scoreTone.mockResolvedValue({ score: 0 });
 	mocks.detectJailbreak.mockResolvedValue({ flagged: false, confidence: 0.1 });

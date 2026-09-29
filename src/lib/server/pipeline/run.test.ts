@@ -402,8 +402,6 @@ test('a parked rescan page skips comments this scan already staged — no repeat
 		nextPageToken: 'page-2',
 		reachedCursor: false
 	});
-	mocks.getCommentModerationStatus.mockResolvedValue(null);
-
 	const result = await runChannel('channel');
 
 	expect(result.outOfCredits).toBe(true);
@@ -703,7 +701,7 @@ test('returns a partial result when the deadline hits during video metadata fetc
 });
 
 test('returns a partial result when the deadline hits during omni scoring — nothing is queued or staged', async () => {
-	// The scoring path must abort like the fetch/metadata/verification paths:
+	// The scoring path must abort like fetch, metadata, and provider-call paths:
 	// a deadline-expired score is NOT an AI failure to queue (I11), it is a
 	// bounded-run abort (I10). Queuing it would dump the whole unprocessed
 	// tail of a burst into the review queue and advance the cursor past it.

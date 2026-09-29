@@ -1,7 +1,7 @@
 import { db, withBusyRetry } from '$lib/server/db';
 import { comments, auditLog, moderationActions } from '$lib/server/db/schema';
 import { and, eq, desc } from 'drizzle-orm';
-import { refreshAccessToken, getCommentModerationStatus } from '$lib/server/youtube';
+import { refreshAccessToken } from '$lib/server/youtube';
 import { applyHumanIntent, finalizeHumanIntent } from '$lib/server/pipeline/enforcement';
 import { decrypt } from '$lib/server/crypto';
 import { ownedChannel } from '$lib/server/ownership';
@@ -113,19 +113,15 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
 	if (!claim) throw error(404, 'pending comment not found in this channel');
 	try {
 		const token = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
-		// Preflight the real remote state: approve publishes ANY non-public
-		// state, a landed hold is audited at finalize, and the post-write
-		// verify converges an in-flight hold landing after the decision.
-		const remote = await getCommentModerationStatus(commentId, token);
-		const { holdLanded } = await applyHumanIntent(commentId, action, remote, token);
-		await finalizeHumanIntent(paramsId, commentId, action, holdLanded);
+		await applyHumanIntent(commentId, action, token);
+		await finalizeHumanIntent(paramsId, commentId, action);
 	} catch (e) {
 		// Release the claim: the comment returns to 'pending', the staged
 		// intent row is dropped (nothing committed), and any hold a concurrent
 		// enforcement superseded on the strength of the claim is re-armed —
 		// one transaction, or the comment can sit 'pending' with a terminally-
 		// superseded hold: public on YouTube while the queue calls it held.
-		// A 'dispatched' hold stays dispatched — the reconcile loop re-verifies
+		// A 'dispatched' hold stays dispatched — the reconcile loop re-applies
 		// it against the restored 'pending'.
 		await db.transaction(async (transaction) => {
 			await transaction

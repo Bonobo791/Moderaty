@@ -10,7 +10,8 @@ const mocks = vi.hoisted(() => ({
 	env: { CRON_SECRET: 'test-secret', DRY_RUN: 'true' } as Record<string, string | undefined>,
 	runChannel: vi.fn(),
 	generateFeedbackDigest: vi.fn(),
-	retryStripeCustomerDeletions: vi.fn(async (_limit: number, _deadline: number) => 0)
+	retryStripeCustomerDeletions: vi.fn(async (_limit: number, _deadline: number) => 0),
+	sweepZeroCreditAccounts: vi.fn(async (_limit: number, _deadline: number) => ({ evaluated: 0, warned: 0, deleted: 0, errors: 0 }))
 }));
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
@@ -24,6 +25,12 @@ vi.mock('$lib/server/deletion', async (importOriginal) => {
 	// Spy on just the outbox retry (the other deletion sweeps stay real) so a
 	// test can pin the shared deadline the route hands it.
 	return { ...actual, retryStripeCustomerDeletions: mocks.retryStripeCustomerDeletions };
+});
+vi.mock('$lib/server/zeroCredits', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('$lib/server/zeroCredits')>();
+	// The sweep itself is unit-tested in zeroCredits.test.ts; here the mock
+	// pins the cron wiring (deadline hand-off, payload fields, error surfacing).
+	return { ...actual, sweepZeroCreditAccounts: mocks.sweepZeroCreditAccounts };
 });
 
 import { GET } from './+server';
@@ -134,6 +141,45 @@ test('the stripe deletion outbox retry shares the cron deadline (bounded, never 
 	expect(limit).toBe(10);
 	expect(typeof deadline).toBe('number');
 	expect(deadline).toBeGreaterThan(Date.now() - 30_000); // a live budget, not the past
+});
+
+test('the zero-credit sweep shares the cron deadline and reports its counts', async () => {
+	mocks.env.DRY_RUN = 'false';
+	mocks.sweepZeroCreditAccounts.mockClear();
+	mocks.sweepZeroCreditAccounts.mockResolvedValueOnce({ evaluated: 12, warned: 3, deleted: 1, errors: 2 });
+
+	const res = await call({ query: 'test-secret' });
+
+	expect(mocks.sweepZeroCreditAccounts).toHaveBeenCalledTimes(1);
+	const [limit, deadline] = mocks.sweepZeroCreditAccounts.mock.calls[0] as [number, number];
+	expect(limit).toBe(25);
+	expect(typeof deadline).toBe('number');
+	expect(deadline).toBeGreaterThan(Date.now() - 30_000);
+	expect(await res.json()).toMatchObject({
+		zeroCreditAccountsChecked: 12,
+		zeroCreditWarningsSent: 3,
+		zeroCreditAccountsDeleted: 1,
+		zeroCreditItemErrors: 2,
+		zeroCreditSweepError: null
+	});
+});
+
+test('a zero-credit sweep failure surfaces in the payload without stopping moderation', async () => {
+	mocks.env.DRY_RUN = 'false';
+	mocks.sweepZeroCreditAccounts.mockRejectedValueOnce(new Error('db exploded'));
+	await seedChannel('UC1');
+	mocks.runChannel.mockResolvedValue(runResult());
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+	try {
+		const res = await call({ bearer: 'test-secret' });
+		expect(await res.json()).toMatchObject({ ok: false, zeroCreditSweepError: 'db exploded' });
+		// The sweep threw but the channel still ran — retention must never
+		// starve scheduled moderation.
+		expect(mocks.runChannel).toHaveBeenCalledWith('UC1', expect.anything());
+	} finally {
+		errorSpy.mockRestore();
+	}
 });
 
 test('rejects a wrong secret in both query and header without logging the provided value', async () => {

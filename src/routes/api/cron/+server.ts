@@ -9,6 +9,7 @@ import { sweepAutoTopUp } from '$lib/server/billing/autotopup';
 import { sweepStalePendingReversals } from '$lib/server/billing/ledger';
 import { DeadlineExceededError } from '$lib/server/http';
 import { generateFeedbackDigest } from '$lib/server/feedbackDigest';
+import { sweepZeroCreditAccounts, ZERO_CREDIT_SWEEP_BATCH } from '$lib/server/zeroCredits';
 import { runChannel, type ChannelRunResult } from '$lib/server/pipeline';
 import type { RequestHandler } from './$types';
 
@@ -195,11 +196,15 @@ export const GET: RequestHandler = async ({ url, request }) => {
 	// Stale pending-reversal sweep: refund/dispute obligations whose grant
 	// never arrived within 14 days are dead weight — dropped loudly, bounded.
 	const reversals = await runSweep(dryRun, 'pending-reversal sweep', () => sweepStalePendingReversals());
+	// Zero-credit retention sweep: billing-engaged accounts whose orgs all ran
+	// dry get stamped, warned every 7 days, and deleted at 30 (Terms §17).
+	// Bounded per invocation (I10); under DRY_RUN no account is touched.
+	const zeroCredit = await runSweep(dryRun, 'zero-credit account sweep', () => sweepZeroCreditAccounts(ZERO_CREDIT_SWEEP_BATCH, deadline));
 
 	// A failed sweep must never tick as success: ok reflects every sweep's
 	// outcome (each failure is also surfaced in its own *Error field and logged).
 	const base = {
-		ok: !consent.error && !handles.error && !autoTopup.error && !stripeDeletions.error && !reversals.error,
+		ok: !consent.error && !handles.error && !autoTopup.error && !stripeDeletions.error && !reversals.error && !zeroCredit.error,
 		dryRun,
 		consentEmailsNulled: consent.value ?? 0,
 		sweepError: consent.error,
@@ -211,7 +216,12 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		stripeCustomersDeleted: stripeDeletions.value ?? 0,
 		stripeDeletionSweepError: stripeDeletions.error,
 		pendingReversalsDropped: reversals.value ?? 0,
-		pendingReversalSweepError: reversals.error
+		pendingReversalSweepError: reversals.error,
+		zeroCreditAccountsChecked: zeroCredit.value?.evaluated ?? 0,
+		zeroCreditWarningsSent: zeroCredit.value?.warned ?? 0,
+		zeroCreditAccountsDeleted: zeroCredit.value?.deleted ?? 0,
+		zeroCreditItemErrors: zeroCredit.value?.errors ?? 0,
+		zeroCreditSweepError: zeroCredit.error
 	};
 
 	// The sweeps above consumed the budget; a channel run would abort

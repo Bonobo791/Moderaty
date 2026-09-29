@@ -526,7 +526,7 @@ test('a failing channel run reports failure, never success', async () => {
 		expect(await res.json()).toMatchObject({ ok: false, results: { 'UC-bad': { error: 'quota' } } });
 		// The failure is logged loudly with the channel id (an emptied log
 		// message stayed green in the mutation audit).
-		expect(errorSpy).toHaveBeenCalledWith('channel run UC-bad failed:', expect.any(Error));
+		expect(errorSpy).toHaveBeenCalledWith('channel run %s failed:', 'UC-bad', expect.any(Error));
 		// The run is still recorded, so a failing channel cannot starve the others.
 		const row = await testDb().db.select().from(channels).where(eq(channels.id, 'UC-bad')).get();
 		expect(row?.lastRunAt).not.toBeNull();
@@ -761,7 +761,7 @@ test('a sweep failure is reported and does not stop the channel run', async () =
 		expect(mocks.runChannel).toHaveBeenCalledWith('UC-live', expect.objectContaining({ deadline: expect.any(Number) }));
 		// The sweep failure is logged loudly (an emptied log message stayed
 		// green in the mutation audit).
-		expect(errorSpy).toHaveBeenCalledWith('consent e-mail retention sweep failed:', expect.any(Error));
+		expect(errorSpy).toHaveBeenCalledWith('%s failed:', 'consent e-mail retention sweep', expect.any(Error));
 	} finally {
 		errorSpy.mockRestore();
 		await testDb().client.execute('DROP TRIGGER fail_consent_update');
@@ -850,7 +850,7 @@ test('a handle sweep failure is reported and does not stop the channel run', asy
 		expect(body.actionHandlesNulled).toBe(0);
 		expect(mocks.runChannel).toHaveBeenCalledWith('UC-live', expect.objectContaining({ deadline: expect.any(Number) }));
 		// The sweep failure is logged loudly.
-		expect(errorSpy).toHaveBeenCalledWith('commenter-handle retention sweep failed:', expect.any(Error));
+		expect(errorSpy).toHaveBeenCalledWith('%s failed:', 'commenter-handle retention sweep', expect.any(Error));
 	} finally {
 		errorSpy.mockRestore();
 		await testDb().client.execute('DROP TRIGGER fail_audit_handle_update');

@@ -236,7 +236,7 @@ async function fulfillHostedCheckout(session: Stripe.Checkout.Session, sessionId
 		const pmId = subscriptionDefaultPmId(asRecord(liveSubscription), `checkout ${sessionId}`);
 		if (pmId) await applySubscriptionDefaultPm(orgId, pmId);
 	} catch (cause) {
-		console.error(`stripe: subscription card sync during fulfillment of ${sessionId} failed for org ${orgId} — customer.subscription events must deliver it`, cause);
+		console.error('stripe: subscription card sync during fulfillment of %s failed for org %s — customer.subscription events must deliver it', sessionId, orgId, cause);
 	}
 	return 'granted';
 }

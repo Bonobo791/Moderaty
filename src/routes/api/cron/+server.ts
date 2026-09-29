@@ -72,7 +72,7 @@ async function runSweep<T>(dryRun: boolean, label: string, run: () => Promise<T>
 	try {
 		return { value: await run(), error: null };
 	} catch (cause) {
-		console.error(`${label} failed:`, cause);
+		console.error('%s failed:', label, cause);
 		return { value: null, error: cause instanceof Error ? cause.message : String(cause) };
 	}
 }
@@ -286,7 +286,7 @@ export const GET: RequestHandler = async ({ url, request }) => {
 	} catch (cause) {
 		const category = categorizeRunFailure(cause);
 		runHealth = { status: 'failed', error: category };
-		console.error(`channel run ${channel.id} failed:`, cause);
+		console.error('channel run %s failed:', channel.id, cause);
 		// The caller gets the sanitized category, never the raw provider
 		// message — error bodies can echo request details/tokens (codeant).
 		body = { ...base, ok: false, results: { [channel.id]: { error: category } } };

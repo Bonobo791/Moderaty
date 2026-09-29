@@ -1,3 +1,5 @@
+import { format } from 'node:util';
+
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { eq } from 'drizzle-orm';
@@ -349,6 +351,42 @@ describe('batching', () => {
 	});
 });
 
+describe('loud failure logging', () => {
+	test('an evaluation failure logs the user id verbatim — a % in it cannot swallow the error arg', async () => {
+		// console.error treats arg[0] as a util.format format string: an id
+		// interpolated INTO it turns `%s` inside the id into a specifier that
+		// consumes the trailing error and hides the real failure (codeant).
+		await seedAccount('u%s-1', { creditsRemaining: 0 });
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(8) }).where(eq(users.id, 'u%s-1'));
+		mocks.sendMailjetMessage.mockRejectedValueOnce(new Error('mailjet down'));
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+		const result = await sweepZeroCreditAccounts();
+
+		expect(result.errors).toBe(1);
+		const call = errorSpy.mock.calls.find((args) => String(args[0]).includes('evaluation failed'));
+		expect(call).toBeDefined();
+		expect(format(...call!)).toContain('u%s-1');
+		expect(format(...call!)).toContain('mailjet down');
+		errorSpy.mockRestore();
+	});
+
+	test('a final-notice failure logs the user id verbatim', async () => {
+		await seedAccount('d%s-1', { creditsRemaining: 0 });
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31) }).where(eq(users.id, 'd%s-1'));
+		mocks.sendMailjetMessage.mockRejectedValueOnce(new Error('mailjet down'));
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+		const result = await sweepZeroCreditAccounts();
+
+		expect(result.deleted).toBe(1);
+		const call = errorSpy.mock.calls.find((args) => String(args[0]).includes('final notice'));
+		expect(call).toBeDefined();
+		expect(format(...call!)).toContain('d%s-1');
+		errorSpy.mockRestore();
+	});
+});
+
 describe('e-mail builders', () => {
 	test('the warning names the deadline and escapes the name', () => {
 		const email = buildZeroCreditWarningEmail({
@@ -362,6 +400,11 @@ describe('e-mail builders', () => {
 		expect(email.textPart).toContain('https://moderaty.app/usage');
 		expect(email.htmlPart).toContain('Evil &lt;script&gt;');
 		expect(email.htmlPart).not.toContain('<script>');
+		// Attribute context is escaped too — a quote in the URL cannot break
+		// out of the href.
+		const quoted = buildZeroCreditWarningEmail({ name: 'n', daysLeft: 1, deletionDateIso: 'd', usageUrl: 'https://x/usa"ge' });
+		expect(quoted.htmlPart).toContain('href="https://x/usa&quot;ge"');
+		expect(quoted.htmlPart).not.toContain('usa"ge');
 	});
 
 	test('the final notice states the deletion plainly', () => {

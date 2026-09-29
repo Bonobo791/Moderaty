@@ -291,7 +291,7 @@ async function markDigestState(
 	} catch (cause) {
 		// The status row itself failed to write — log loudly; the next tick
 		// retries the same window (it never advanced).
-		console.error(`could not record digest ${status} for channel ${channelId}:`, cause);
+		console.error('could not record digest %s for channel %s:', status, channelId, cause);
 	}
 }
 
@@ -661,7 +661,7 @@ export async function generateFeedbackDigest(
 			await markDigestState(channelId, windowStart, windowEnd, 'deferred', 'credits', channel);
 			return { status: 'deferred', reason: 'credits', ...(historyPage ? { historyRemaining: true } : {}) };
 		}
-		console.error(`feedback digest for ${channelId} failed:`, cause);
+		console.error('feedback digest for %s failed:', channelId, cause);
 		await markDigestState(channelId, windowStart, windowEnd, 'failed', 'error', channel);
 		return { status: 'failed', reason: 'error', ...(historyPage ? { historyRemaining: true } : {}) };
 	}

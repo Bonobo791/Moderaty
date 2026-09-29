@@ -142,7 +142,7 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
 		});
 		// Full error detail stays server-side; the client gets a generic
 		// message in the error-box instead of a bare 500 page (I12).
-		console.error(`[queue] ${action} failed for comment ${commentId}`, e);
+		console.error('[queue] %s failed for comment %s', action, commentId, e);
 		return fail(500, { error: 'The YouTube action failed — the comment is back in the queue. Try again.' });
 	}
 	return { success: SUCCESS_TEXT[action] };

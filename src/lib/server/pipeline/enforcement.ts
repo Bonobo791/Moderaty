@@ -230,7 +230,7 @@ async function convergeHolds(
 			if (error instanceof DeadlineExceededError || error instanceof ChannelDeactivatedError) throw error;
 			// Loud per-item failure (I1): the row stays outstanding so a later
 			// sweep re-attempts the corrective write.
-			console.warn(`remote convergence failed for comment ${action.commentId} (status ${status})`, error);
+			console.warn('remote convergence failed for comment %s (status %s)', action.commentId, status, error);
 		}
 	}
 	return converged;

@@ -189,7 +189,7 @@ async function claimAndDelete(user: SweepUser, since: string, ageMs: number): Pr
 	try {
 		await sendMail(user.email, user.displayName, buildZeroCreditDeletedEmail({ name: user.displayName }));
 	} catch (cause) {
-		console.error(`zero-credit sweep: final notice for user ${user.id} failed — deleting anyway:`, cause);
+		console.error('zero-credit sweep: final notice for user %s failed — deleting anyway:', user.id, cause);
 	}
 	await revokeChannelGrantsForUser(user.id, 'zero-credit deletion');
 	await deleteUserRecords(user.id);
@@ -305,7 +305,7 @@ export async function sweepZeroCreditAccounts(limit = ZERO_CREDIT_SWEEP_BATCH, d
 			else if (outcome === 'deleted') result.deleted += 1;
 		} catch (cause) {
 			result.errors += 1;
-			console.error(`zero-credit sweep: evaluation failed for user ${user.id}:`, cause);
+			console.error('zero-credit sweep: evaluation failed for user %s:', user.id, cause);
 		}
 	}
 	return result;

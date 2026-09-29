@@ -46,7 +46,7 @@ export function configuredMercadoPagoBundles(): MercadoPagoBundle[] {
 		try {
 			return [{ ...bundle, amountCents: amountCentsFor(bundle), priceEnv }];
 		} catch (cause) {
-			console.error(`mercadopago: bundle ${bundle.id} has a malformed ${priceEnv} — excluded from the catalog:`, cause);
+			console.error('mercadopago: bundle %s has a malformed %s — excluded from the catalog:', bundle.id, priceEnv, cause);
 			return [];
 		}
 	});

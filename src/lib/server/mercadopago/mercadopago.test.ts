@@ -404,7 +404,12 @@ test('a bundle with a malformed configured price is logged loudly and skipped, n
 		expect(configuredMercadoPagoBundles().map((bundle) => [bundle.id, bundle.amountCents])).toEqual([
 			['credits_2000', 5900]
 		]);
-		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('credits_500'), expect.anything());
+		expect(errorSpy).toHaveBeenCalledWith(
+			'mercadopago: bundle %s has a malformed %s — excluded from the catalog:',
+			'credits_500',
+			'MERCADOPAGO_PRICE_CREDITS_500_BRL_CENTS',
+			expect.anything()
+		);
 	} finally {
 		mocks.env.MERCADOPAGO_PRICE_CREDITS_500_BRL_CENTS = '1900';
 		errorSpy.mockRestore();

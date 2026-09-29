@@ -1,3 +1,5 @@
+import { format } from 'node:util';
+
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { auditLog, channelAllowedHandles, channels, comments, creditTransactions, moderationActions, organizations, rules } from '$lib/server/db/schema';
 import { CommentNotFoundError } from '../youtube';
@@ -156,6 +158,25 @@ test('a failed convergence write keeps a cancelling hold retryable', async () =>
 
 	expect(mocks.setModerationStatus).toHaveBeenLastCalledWith(['comment'], 'published', false, 'access-token', undefined);
 	expectActionState('superseded');
+});
+
+test('a failed convergence write logs the comment id verbatim — a % in it cannot swallow the error arg', async () => {
+	// console.warn treats arg[0] as a util.format format string: an id
+	// interpolated INTO it turns `%s` inside the id into a specifier that
+	// consumes the trailing error and hides the real failure (codeant).
+	mocks.state.existingIds = ['c%s-1'];
+	mocks.state.commentStatuses = { 'c%s-1': 'approved' };
+	mocks.state.moderationActions = [dispatchedAction({ commentId: 'c%s-1', action: 'hold', state: 'cancelling' })];
+	mocks.setModerationStatus.mockRejectedValueOnce(new Error('socket hang up'));
+	const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+	await runChannel('channel');
+
+	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({ commentId: 'c%s-1', state: 'cancelling' })]);
+	const call = warning.mock.calls.find((args) => String(args[0]).includes('convergence failed'));
+	expect(call).toBeDefined();
+	expect(format(...call!)).toContain('c%s-1');
+	expect(format(...call!)).toContain('socket hang up');
 });
 
 test('a human approval landing while a hold write is in flight is re-applied after the hold lands', async () => {

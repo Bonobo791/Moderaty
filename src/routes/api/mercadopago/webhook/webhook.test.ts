@@ -1,3 +1,5 @@
+import { format } from 'node:util';
+
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -31,7 +33,9 @@ function webhookRequest(paymentId: string): Request {
 function captureErrors(): string[] {
 	const logged: string[] = [];
 	vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
-		logged.push(String(args[0]));
+		// Rendered the way console.error prints it — arg[0] is the format
+		// string, later args are substituted/appended.
+		logged.push(format(...args));
 	});
 	return logged;
 }
@@ -98,7 +102,10 @@ test('the failure log never carries a raw payment id (CRLF-safe, bounded)', asyn
 	await POST({ request: webhookRequest(`pay-1\r\nX-Injected: yes ${'a'.repeat(500)}`) } as never);
 
 	expect(logged).toHaveLength(1);
-	expect(logged[0]).not.toMatch(/[\r\n]/);
-	expect(logged[0]).toContain('pay-1');
-	expect(logged[0].length).toBeLessThan(250);
+	// The rendered call ends with the error's stack on later lines — the
+	// id-injection invariant lives on the message line.
+	const [line] = logged[0].split('\n');
+	expect(line).not.toMatch(/\r/);
+	expect(line).toContain('pay-1');
+	expect(line.length).toBeLessThan(250);
 });

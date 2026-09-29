@@ -58,6 +58,11 @@ export function hasHostedEntitlement(input: { plan: string; stripeSubscriptionId
 	return input.plan === 'hosted' || (input.plan !== 'lifetime' && typeof input.stripeSubscriptionId === 'string');
 }
 
+// A paid, in-window subscription period always contributes its unconsumed
+// included comments — the org paid for them and they were never refunded,
+// whatever the current plan (a cancel→lifetime upgrade keeps the hosted
+// period live until it ends). No plan gate here: the period row's status +
+// window is the authority.
 export function activeAllowanceSql(nowIso: string) {
 	return sql<number>`COALESCE((
 		SELECT SUM(p.included_credits - p.consumed_credits)
@@ -267,12 +272,19 @@ export async function consumeCreditsBulk(
 	if (!uniqueRefIds.length) return { charged: [], covered: [], uncharged: [] };
 
 	return inLedgerTx(handle, async (tx) => {
+		// Existence check first: an unknown org is a data bug and must fail loudly,
+		// not silently stage comments free.
 		const org = await tx
 			.select({ creditsRemaining: organizations.creditsRemaining, plan: organizations.plan, stripeSubscriptionId: organizations.stripeSubscriptionId })
 			.from(organizations)
 			.where(eq(organizations.id, orgId))
 			.get();
 		if (!org) throw new Error(`org not found: ${orgId}`);
+		// Unmetered plans (lifetime) never consume: their scoring is already
+		// unlimited, so a stranded pre-upgrade balance must not burn 1-per-
+		// comment for nothing — it freezes until the org is metered again
+		// (MOD-36). Reported as uncharged like an exhausted balance; staging
+		// only treats that as fatal for METERED orgs.
 		if (isUnmeteredPlan(org.plan)) return { charged: [], covered: [], uncharged: uniqueRefIds };
 
 		const existing = await tx

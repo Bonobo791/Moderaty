@@ -217,6 +217,12 @@ async function chargeBillableDecisions(
 	// only a metered org's uncharged refs indicate a balance exhausted
 	// concurrently with this run's AI budget read.
 	const metered = await orgIsMetered(orgId);
+	// A rescan charges again per comment: the anchor is scoped to the scan id
+	// planted for THIS request, so each requested scan debits once while a
+	// retry of the SAME scan hits the anchor and stages covered instead of
+	// double-charging (I4). A null scope is a pre-nonce drain — its earlier
+	// pages charged the plain comment id, so the anchor stays plain or the
+	// retry double-charges (codex).
 	const refIds = billable.map((decision) => commentChargeRef(decision.comment.id, chargeScope));
 	const { uncharged } = await consumeCreditsBulk(transaction, orgId, 'comment', refIds);
 	if (metered && uncharged.length) {

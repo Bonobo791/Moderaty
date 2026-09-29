@@ -78,8 +78,8 @@ const REFUND_CLAIM = /refund|credit|cancel/i;
 const UNSUPPORTED_CLAIM = /expir|rollover|roll over|trial|discount|\bfees?\b/i;
 
 describe('pricing copy guardrails', () => {
-	it('ships exactly the 7 pricing FAQ pairs, each a real question with a real answer', () => {
-		expect(PRICING_FAQ_ENTRIES).toHaveLength(7);
+	it('ships exactly the 8 pricing FAQ pairs, each a real question with a real answer', () => {
+		expect(PRICING_FAQ_ENTRIES).toHaveLength(8);
 		for (const { q, a } of PRICING_FAQ_ENTRIES) {
 			expect(q.endsWith('?')).toBe(true);
 			expect(a.length).toBeGreaterThan(40);

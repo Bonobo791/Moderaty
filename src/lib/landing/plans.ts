@@ -6,6 +6,7 @@
  */
 export const TICKS_SELF_HOSTED = [
 	'Full rules engine and 13-category AI scoring',
+	'Feedback digest: the questions and requests that keep coming',
 	'Your key, your server, your data',
 	'Audit log and 1 free dry run per feature per channel',
 	'Fork it, audit it, trust no one'
@@ -14,7 +15,8 @@ export const TICKS_SELF_HOSTED = [
 export const TICKS_SELF_HOSTED_DETAILED = [
 	'Full rules engine: KEYWORD, REGEX, and USER rules fire before the AI',
 	'13-category AI scoring with your thresholds',
-	'Review queue for the borderline',
+	'Feedback digest: recurring questions, criticism, corrections, and requests, grouped',
+	'Review queue for the borderline, with team roles for whoever helps',
 	'Audit log: every action logged, every action reversible',
 	'1 free dry run per feature per channel'
 ];

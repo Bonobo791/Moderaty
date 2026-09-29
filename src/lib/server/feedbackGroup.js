@@ -83,7 +83,8 @@ export function findingSummary(category, supporters, claim) {
  * @param {ClassifiedComment[]} comments - classified comments for one window
  * @param {{ categories?: readonly string[], threshold?: number }} [options] -
  *   `categories` limits which categories may form findings (channel toggle);
- *   `threshold` is the minimum distinct supporter count (default 3).
+ *   `threshold` is the minimum distinct supporting comments before a theme
+ *   becomes a finding (default 3).
  * @returns {{ findings: GroupedFinding[], pooled: number }} findings ranked
  *   by supporter count then recency, plus `pooled` — the number of feedback
  *   comments whose themes fell below threshold (the count-only "also seen"
@@ -94,13 +95,13 @@ export function groupFeedback(comments, { categories, threshold = DEFAULT_THRESH
 	/** @type {Map<string, { category: string, claim: string, members: Map<string, ClassifiedComment> }>} */
 	const groups = new Map();
 	let pooled = 0;
-	for (const comment of comments) {
-		if (comment.category === 'none') continue;
+	comments.forEach((comment) => {
+		if (comment.category === 'none') return;
 		if (enabled && !enabled.has(comment.category)) {
 			// Category toggled off — still feedback, counted as pooled so the
 			// digest can report "also seen" without surfacing the theme.
 			pooled++;
-			continue;
+			return;
 		}
 		// The stored claim is sanitized again here — defense in depth: a
 		// claim that is nothing but abuse can't headline a finding. Neither
@@ -109,29 +110,29 @@ export function groupFeedback(comments, { categories, threshold = DEFAULT_THRESH
 		const claimKey = normalizeClaimKey(claim);
 		if (!claim || !claimKey) {
 			pooled++;
-			continue;
+			return;
 		}
 		const key = `${comment.category}\u0000${claimKey}`;
-		let group = groups.get(key);
-		if (!group) {
-			group = { category: comment.category, claim, members: new Map() };
-			groups.set(key, group);
-		}
+		const group = groups.get(key) ?? { category: comment.category, claim, members: new Map() };
+		groups.set(key, group);
 		// Distinct comment ids only — one comment must never count twice
 		// toward its own theme (MOD-70).
-		if (!group.members.has(comment.commentId)) group.members.set(comment.commentId, comment);
-	}
-	/** @type {GroupedFinding[]} */
-	const findings = [];
-	for (const group of groups.values()) {
-		const members = [...group.members.values()];
-		if (members.length < threshold) {
-			pooled += members.length;
-			continue;
+		if (!group.members.has(comment.commentId)) {
+			group.members.set(comment.commentId, comment);
 		}
-		// Evidence favors clean, short examples — the reader should see the
-		// clearest supporters first (MOD-70); flagged evidence conceals at
-		// sanitize time, so ordering it last keeps real wording in view.
+	});
+	/**
+	 * Ranks a group's supporters into evidence excerpts: safe-before-flagged
+	 * (a flagged verbatim would leak abuse onto the page — flagged evidence
+	 * conceals at sanitize time, so ordering it last keeps real wording in
+	 * view), then shorter, then recency, then id for determinism (MOD-70).
+	 * One excerpt per distinct wording — a repost adds no information; texts
+	 * that normalize to '' (emoji- or punctuation-only) fall back to the raw
+	 * wording or they would all collapse into one phantom excerpt.
+	 * @param {ClassifiedComment[]} members
+	 * @returns {ClassifiedComment[]}
+	 */
+	function rankEvidence(members) {
 		const ranked = [...members].sort(
 			(a, b) =>
 				Number(a.hasAbuse) - Number(b.hasAbuse) ||
@@ -139,18 +140,45 @@ export function groupFeedback(comments, { categories, threshold = DEFAULT_THRESH
 				Date.parse(b.publishedAt) - Date.parse(a.publishedAt) ||
 				a.commentId.localeCompare(b.commentId)
 		);
+		const wordingKey = (/** @type {string} */ text) => normalizeClaimKey(text) || text.trim();
+		return ranked
+			.filter((member, i, arr) => arr.findIndex((m) => wordingKey(m.text) === wordingKey(member.text)) === i)
+			.slice(0, MAX_EVIDENCE);
+	}
+
+	/**
+	 * Builds the ranked finding for a threshold-passing group.
+	 * @param {{ category: string, claim: string }} group
+	 * @param {ClassifiedComment[]} members
+	 * @returns {GroupedFinding}
+	 */
+	function toFinding(group, members) {
 		const latestAt = members.reduce(
 			(max, m) => (Date.parse(m.publishedAt) > Date.parse(max) ? m.publishedAt : max),
 			members[0].publishedAt
 		);
-		findings.push({
+		return {
 			category: group.category,
 			summary: findingSummary(group.category, members.length, group.claim),
 			supporterCount: members.length,
-			evidence: ranked.slice(0, MAX_EVIDENCE),
+			evidence: rankEvidence(members),
 			latestAt
-		});
+		};
 	}
+
+	/** @type {GroupedFinding[]} */
+	const findings = [];
+	groups.forEach((group) => {
+		const members = [...group.members.values()];
+		// The threshold gates on distinct comments — "minimum comments
+		// reporting a theme" means minimum distinct supporters; there is no
+		// author signal, so every distinct comment counts.
+		if (members.length < threshold) {
+			pooled += members.length;
+			return;
+		}
+		findings.push(toFinding(group, members));
+	});
 	findings.sort(
 		(a, b) =>
 			b.supporterCount - a.supporterCount ||

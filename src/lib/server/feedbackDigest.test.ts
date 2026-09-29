@@ -23,10 +23,38 @@ setupTestDb(['finding_evidence', 'feedback_findings', 'feedback_digests', 'feedb
 
 // fetch mock: classify each comment from its text embedded in the prompt.
 // Per-test RESPONSES maps comment-text → classification JSON; anything
-// unmapped gets a 'none' verdict.
+// unmapped gets a 'none' verdict. The theme-merge call carries a JSON
+// claims array instead of a Comment: line — the mock merges claims through
+// CLUSTER (claim → canonical), defaulting each claim to its own theme.
 let RESPONSES: Record<string, { category: string; hasAbuse: boolean; claim: string }> = {};
+let CLUSTER: Record<string, string> = {};
+let CLUSTER_RAW: string | undefined;
 let fetchFailures: Record<string, string> = {};
 let beforeClassify: (() => Promise<void>) | undefined;
+
+function clusterBody(user: string): string {
+	const items = JSON.parse(user.slice(user.indexOf('\n') + 1, user.lastIndexOf('\n<'))) as { i: number; claim: string }[];
+	if (CLUSTER_RAW !== undefined) return CLUSTER_RAW;
+	const themes = new Map<string, number[]>();
+	for (const item of items) {
+		const canonical = CLUSTER[item.claim] ?? item.claim;
+		const members = themes.get(canonical) ?? [];
+		members.push(item.i);
+		themes.set(canonical, members);
+	}
+	return JSON.stringify({ themes: [...themes.entries()].map(([claim, members]) => ({ claim, members })) });
+}
+
+/** Fetch calls whose user content lacks the 'Comment: ' marker — theme-merge requests. */
+function mergeCallBodies() {
+	return vi
+		.mocked(fetch)
+		.mock.calls.map((c) => JSON.parse(String(c[1]?.body)))
+		.filter(
+			(b) =>
+				!String(b.messages.find((m: { role: string }) => m.role === 'user')?.content).includes('Comment: ')
+		);
+}
 
 function installFetch() {
 	vi.stubGlobal(
@@ -34,6 +62,11 @@ function installFetch() {
 		vi.fn(async (_url: string, init: { body?: string }) => {
 			const body = JSON.parse(String(init.body));
 			const user = body.messages.find((m: { role: string }) => m.role === 'user')?.content ?? '';
+			if (!user.includes('\n\nComment: ')) {
+				// Theme-merge request — a malformed 200 fails the batch loudly
+				// the same way a bad classification fails one comment.
+				return new Response(JSON.stringify({ choices: [{ message: { content: clusterBody(user) } }] }), { status: 200 });
+			}
 			const text = user.slice(user.indexOf('\n\nComment: ') + '\n\nComment: '.length, user.lastIndexOf('\n</'));
 			// A malformed 200 fails the item immediately — a 5xx would go
 			// through fetchWithRetry's backoff and slow the suite.
@@ -57,8 +90,33 @@ async function seedComment(id: string, channelId: string, text: string, publishe
 	await testDb().db.insert(comments).values({ id, channelId, text, publishedAt, status: 'approved', decidedBy: 'ai' });
 }
 
+const THREE_THEMES = [
+	{ text: 'text 1', claim: 'theme 1' },
+	{ text: 'text 2', claim: 'theme 2' },
+	{ text: 'text 3', claim: 'theme 3' }
+];
+
+/** seedCommentBatch for text/claim(/category) tuples — keeps call sites terse. */
+async function seedClaims(...entries: [text: string, claim: string, category?: string][]) {
+	await seedCommentBatch(entries.map(([text, claim, category]) => ({ text, claim, category })));
+}
+
+/** Seeds comments c1..cN on consecutive January days plus each verdict. */
+async function seedCommentBatch(entries: { text: string; category?: string; hasAbuse?: boolean; claim?: string }[]) {
+	for (const [i, entry] of entries.entries()) {
+		await seedComment(`c${i + 1}`, 'UC1', entry.text, `2026-01-0${i + 1}T00:00:00.000Z`);
+		RESPONSES[entry.text] = {
+			category: entry.category ?? 'question',
+			hasAbuse: entry.hasAbuse ?? false,
+			claim: entry.claim ?? entry.text
+		};
+	}
+}
+
 beforeEach(async () => {
 	RESPONSES = {};
+	CLUSTER = {};
+	CLUSTER_RAW = undefined;
 	fetchFailures = {};
 	beforeClassify = undefined;
 	mocks.env.DRY_RUN = 'false';
@@ -162,6 +220,104 @@ test('below-threshold themes pool into the count-only figure', async () => {
 	expect(result).toMatchObject({ status: 'complete', findings: 0, pooled: 1 });
 	const digest = await testDb().db.select().from(feedbackDigests).get();
 	expect(digest?.pooledCount).toBe(1);
+});
+
+test('the AI theme pass merges differently-worded claims into one finding', async () => {
+	// Exact claim-key matching alone would pool all three — "what comes up
+	// most" is only visible once the model merges them onto one theme.
+	await seedChannel('UC1', { feedbackEnabled: 1, feedbackThreshold: 3 });
+	await seedClaims(
+		['next episode when?', 'next episode when'],
+		['when is part 2 coming', 'when is part 2 coming'],
+		['release schedule for the next video', 'release schedule']
+	);
+	for (const claim of ['next episode when', 'when is part 2 coming', 'release schedule']) {
+		CLUSTER[claim] = 'when is the next video';
+	}
+	const result = await generateFeedbackDigest('UC1', { force: true });
+	expect(result).toMatchObject({ status: 'complete', findings: 1, pooled: 0 });
+	const finding = (await testDb().db.select().from(feedbackFindings).all())[0];
+	expect(finding).toMatchObject({ category: 'question', supporterCount: 3, summary: '3 comments asked: when is the next video' });
+});
+
+test('a malformed theme-merge response fails the run loudly instead of writing a wrong digest', async () => {
+	await seedChannel('UC1', { feedbackEnabled: 1 });
+	await seedCommentBatch(THREE_THEMES);
+	CLUSTER_RAW = 'not json';
+	const result = await generateFeedbackDigest('UC1', { force: true });
+	expect(result).toMatchObject({ status: 'failed' });
+	const digest = await testDb().db.select().from(feedbackDigests).get();
+	expect(digest?.status).toBe('failed');
+	// The batch stays unprocessed — the next tick retries the same comments.
+	expect(await testDb().db.select().from(comments).where(isNull(comments.feedbackDigestedAt)).all()).toHaveLength(3);
+});
+
+test('reposted identical text counts as separate supporters toward the threshold', async () => {
+	// Two different viewers writing the same words IS recurring feedback —
+	// there is no author signal, so each distinct comment counts toward
+	// "minimum comments". Evidence still lists the wording once.
+	await seedChannel('UC1', { feedbackEnabled: 1, feedbackThreshold: 2 });
+	const repost = 'can I bring my wife who is not Thai and under 50';
+	await seedClaims([repost, 'bringing a non-Thai wife under 50'], [repost, 'bringing a non-Thai wife under 50']);
+	const result = await generateFeedbackDigest('UC1', { force: true });
+	expect(result).toMatchObject({ status: 'complete', findings: 1, pooled: 0 });
+	const finding = (await testDb().db.select().from(feedbackFindings).all())[0];
+	expect(finding?.supporterCount).toBe(2);
+	expect(await testDb().db.select().from(findingEvidence).all()).toHaveLength(1);
+});
+
+test('the theme pass is bounded by the write reserve — a spent reserve aborts it before the provider call', async () => {
+	// Clustering runs between classification and the persistence tx; its
+	// request must carry deadline - WRITE_RESERVE so it can never consume
+	// the headroom the write needs (codex/cubic).
+	await seedChannel('UC1', { feedbackEnabled: 1 });
+	await seedCommentBatch(THREE_THEMES);
+	// Inside the reserve window: classification still completes (its calls
+	// are instant under the mock) but the merge request must not fire.
+	const result = await generateFeedbackDigest('UC1', { force: true, deadline: Date.now() + 2_000 });
+	expect(result).toMatchObject({ status: 'deferred', reason: 'deadline' });
+	expect(mergeCallBodies()).toHaveLength(0);
+});
+
+test('a batch below the threshold in every enabled category skips the theme-merge call', async () => {
+	// 2 questions + 1 criticism at threshold 3 can never surface a finding —
+	// the merge call is wasted spend, and a malformed response would fail a
+	// run whose all-pooled outcome is already determined (codex).
+	await seedChannel('UC1', { feedbackEnabled: 1, feedbackThreshold: 3 });
+	await seedClaims(
+		['q1', 'one question'],
+		['q2', 'another question'],
+		['c1', 'a criticism', 'criticism']
+	);
+	CLUSTER_RAW = 'not json';
+	const result = await generateFeedbackDigest('UC1', { force: true });
+	expect(result).toMatchObject({ status: 'complete', findings: 0, pooled: 3 });
+	expect(mergeCallBodies()).toHaveLength(0);
+});
+
+test('disabled categories are excluded from the merge call and still pool', async () => {
+	// With only 'question' enabled, the criticisms can never form a finding —
+	// sending them to the merge call would spend tokens and let a bad
+	// assignment on a dead row fail the whole digest (codex).
+	await seedChannel('UC1', { feedbackEnabled: 1, feedbackThreshold: 3, feedbackCategories: 'question' });
+	await seedClaims(
+		['q1', 'one question'],
+		['q2', 'another question'],
+		['q3', 'a third question'],
+		['c1', 'a criticism', 'criticism'],
+		['c2', 'more criticism', 'criticism']
+	);
+	for (const claim of ['one question', 'another question', 'a third question']) {
+		CLUSTER[claim] = 'the questions merged';
+	}
+	const result = await generateFeedbackDigest('UC1', { force: true });
+	expect(result).toMatchObject({ status: 'complete', findings: 1, pooled: 2 });
+	const merges = mergeCallBodies();
+	expect(merges).toHaveLength(1);
+	const user = String(merges[0].messages.find((m: { role: string }) => m.role === 'user')?.content);
+	const items = JSON.parse(user.slice(user.indexOf('\n') + 1, user.lastIndexOf('\n<'))) as { category: string; claim: string }[];
+	expect(items).toHaveLength(3);
+	expect(items.some((item) => item.category === 'criticism' || item.claim.includes('criticism'))).toBe(false);
 });
 
 test('per-comment classification failures are counted, not fatal', async () => {

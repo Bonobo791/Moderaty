@@ -153,6 +153,29 @@ export function enabledCategories(channel: typeof channels.$inferSelect): Feedba
 }
 
 /**
+ * Whether the AI theme pass can change this batch's outcome. A finding
+ * requires `threshold` supporters in one enabled category, so when no
+ * enabled category already reaches it, grouping pools every row regardless
+ * of how claims merge — the provider call would be wasted spend, and its
+ * failure would defer a run whose result is already determined (codex).
+ */
+function themePassCanMatter(
+	classified: { category: FeedbackCategory }[],
+	categories: FeedbackCategory[],
+	threshold: number
+): boolean {
+	const enabled = new Set<string>(categories);
+	const counts = new Map<string, number>();
+	for (const row of classified) {
+		if (!enabled.has(row.category)) continue;
+		const n = (counts.get(row.category) ?? 0) + 1;
+		counts.set(row.category, n);
+		if (n >= threshold) return true;
+	}
+	return false;
+}
+
+/**
  * Is this channel's digest due right now?
  * - manual: never auto — the dashboard's "generate now" passes force.
  * - per_100: ≥100 stored comments still carry a NULL digest marker.
@@ -490,10 +513,19 @@ export async function generateFeedbackDigest(
 		}
 
 		const threshold = channel.feedbackThreshold ?? 3;
-		const { findings, pooled } = groupFeedback(classified, {
-			categories: enabledCategories(channel),
-			threshold
-		});
+		const categories = enabledCategories(channel);
+		// The AI theme pass merges differently-worded claims for the same
+		// recurring feedback BEFORE grouping — otherwise exact claim matching
+		// undercounts what actually comes up most. A malformed merge response
+		// throws: the run fails loudly and retries next tick (markers never
+		// moved), it never writes a wrong digest.
+		// Its request is bounded by the write reserve so the model call can
+		// never consume the headroom the persistence tx needs (codex/cubic).
+		const clusterDeadline = deadline === undefined ? undefined : deadline - WRITE_RESERVE_MS;
+		const themed = themePassCanMatter(classified, categories, threshold)
+			? await clusterClassifiedClaims(classified, categories, clusterDeadline, apiKey)
+			: classified;
+		const { findings, pooled } = groupFeedback(themed, { categories, threshold });
 
 		const batchIds = new Set(batch.map((c) => c.id));
 		// Reserve write headroom, not just the deadline edge: the persistence
@@ -682,10 +714,12 @@ export async function previewFeedbackDigest(
 	if (!page.batch.length) return { commentsClassified: 0, commentsFailed: 0, pooled: 0, hasMore: !page.complete, findings: [] };
 	const { classified, failed } = await classifyBatch(page.batch, deadline, apiKey);
 	if (failed > 0 && classified.length === 0) throw new Error(`classification failed for all ${failed} preview comments`);
-	const { findings, pooled } = groupFeedback(classified, {
-		categories: enabledCategories(channel),
-		threshold: channel.feedbackThreshold ?? 3
-	});
+	const categories = enabledCategories(channel);
+	const threshold = channel.feedbackThreshold ?? 3;
+	const themed = themePassCanMatter(classified, categories, threshold)
+		? await clusterClassifiedClaims(classified, categories, deadline, apiKey)
+		: classified;
+	const { findings, pooled } = groupFeedback(themed, { categories, threshold });
 	return {
 		commentsClassified: classified.length,
 		commentsFailed: failed,

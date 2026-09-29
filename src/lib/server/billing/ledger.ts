@@ -58,6 +58,21 @@ export function hasHostedEntitlement(input: { plan: string; stripeSubscriptionId
 	return input.plan === 'hosted' || (input.plan !== 'lifetime' && typeof input.stripeSubscriptionId === 'string');
 }
 
+export function activeAllowanceSql(nowIso: string) {
+	return sql<number>`COALESCE((
+		SELECT SUM(p.included_credits - p.consumed_credits)
+		FROM stripe_subscription_periods AS p
+		WHERE p.org_id = organizations.id
+			AND p.status = 'paid'
+			AND p.period_start <= ${nowIso}
+			AND p.period_end > ${nowIso}
+	), 0)`;
+}
+
+export function effectiveBalanceSql(nowIso: string) {
+	return sql<number>`COALESCE(${organizations.creditsRemaining}, 0) + ${activeAllowanceSql(nowIso)}`;
+}
+
 /**
  * Retrieves an organization's current credit balance.
  *
@@ -65,24 +80,14 @@ export function hasHostedEntitlement(input: { plan: string; stripeSubscriptionId
  * @returns The remaining credit balance, treating a missing balance as zero
  */
 export async function getCredits(orgId: string): Promise<number> {
+	const nowIso = new Date().toISOString();
 	const row = await db
-		.select({ creditsRemaining: organizations.creditsRemaining })
+		.select({ remaining: effectiveBalanceSql(nowIso) })
 		.from(organizations)
 		.where(eq(organizations.id, orgId))
 		.get();
 	if (!row) throw new Error(`org not found: ${orgId}`);
-	// A paid, in-window subscription period always contributes its
-	// unconsumed included comments — the org paid for them and they were
-	// never refunded, whatever the current plan (a cancel→lifetime upgrade
-	// keeps the hosted period live until it ends). No plan gate here: the
-	// period row's status + window is the authority.
-	const now = new Date().toISOString();
-	const period = await db
-		.select({ remaining: sql<number>`COALESCE(SUM(${stripeSubscriptionPeriods.includedCredits} - ${stripeSubscriptionPeriods.consumedCredits}), 0)` })
-		.from(stripeSubscriptionPeriods)
-		.where(and(eq(stripeSubscriptionPeriods.orgId, orgId), eq(stripeSubscriptionPeriods.status, 'paid'), sql`${stripeSubscriptionPeriods.periodStart} <= ${now}`, gt(stripeSubscriptionPeriods.periodEnd, now)))
-		.get();
-	return (row.creditsRemaining ?? 0) + (period?.remaining ?? 0);
+	return row.remaining;
 }
 
 /**

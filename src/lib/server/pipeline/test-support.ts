@@ -63,10 +63,16 @@ const mocks = vi.hoisted(() => {
 					const channelId = state.channel && typeof state.channel.id === 'string' ? state.channel.id : null;
 					return channelId && (!params.length || params.includes(channelId)) ? state.channel : undefined;
 				}
-				// Ledger balance + metering lookup (consumeCredit's org existence
-				// check and the orgIsMetered gate).
+				// Ledger balance + metering lookup, with the active period balance
+				// absent in this harness.
 				if (table === state.tables.organizations) {
-					return { creditsRemaining: state.credits, plan: state.plan, stripeSubscriptionId: state.stripeSubscriptionId, stripeCustomerId: state.customerId };
+					return {
+						creditsRemaining: state.credits,
+						remaining: state.credits ?? 0,
+						plan: state.plan,
+						stripeSubscriptionId: state.stripeSubscriptionId,
+						stripeCustomerId: state.customerId
+					};
 				}
 				// The ledger's paid-period queries (getCredits' included-credit
 				// sum, consumeCredit's allowance row). The fake seeds no

@@ -2,9 +2,9 @@ import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
-import { creditTransactions, organizations } from '$lib/server/db/schema';
+import { creditTransactions, organizations, stripeSubscriptionPeriods } from '$lib/server/db/schema';
 import { getCredits } from '$lib/server/billing/ledger';
-import { grantAutoTopupCredits, handleAutoTopupFailure, maybeTriggerAutoTopUp, recordAutoTopupFailure, stripeErrorCode, sweepAutoTopUp } from './autotopup';
+import { grantAutoTopupCredits, handleAutoTopupFailure, maybeTriggerAutoTopUp, readAutoTopupState, recordAutoTopupFailure, stripeErrorCode, sweepAutoTopUp } from './autotopup';
 
 const mocks = vi.hoisted(() => ({
 	paymentIntentsCreate: vi.fn(),
@@ -25,7 +25,7 @@ vi.mock('$env/dynamic/private', () => ({
 	env: { STRIPE_PRICE_CREDITS_100: 'price_100', STRIPE_PRICE_CREDITS_500: 'price_500', STRIPE_PRICE_CREDITS_2000: 'price_2000' }
 }));
 
-setupTestDb(['organizations', 'credit_transactions', 'stripe_events']);
+setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_subscription_periods']);
 
 async function seedOrg(overrides: Record<string, unknown> = {}): Promise<void> {
 	await testDb().db.insert(organizations).values({
@@ -39,6 +39,26 @@ async function seedOrg(overrides: Record<string, unknown> = {}): Promise<void> {
 		stripeCustomerId: 'cus_1',
 		stripeDefaultPmId: 'pm_1',
 		...overrides
+	});
+}
+
+async function seedPeriod({
+	includedCredits = 100,
+	consumedCredits = 0,
+	status = 'paid',
+	periodStart = new Date(Date.now() - 60_000).toISOString(),
+	periodEnd = new Date(Date.now() + 60_000).toISOString()
+}: { includedCredits?: number; consumedCredits?: number; status?: string; periodStart?: string; periodEnd?: string } = {}) {
+	await testDb().db.insert(stripeSubscriptionPeriods).values({
+		orgId: 'org-1',
+		subscriptionId: 'sub_1',
+		invoiceId: 'in_1',
+		periodKey: 'period_1',
+		periodStart,
+		periodEnd,
+		includedCredits,
+		consumedCredits,
+		status
 	});
 }
 
@@ -82,6 +102,60 @@ describe('maybeTriggerAutoTopUp', () => {
 	test('never triggers when the balance is at or above the threshold', async () => {
 		await seedOrg({ creditsRemaining: 150 });
 		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+	});
+
+	test('unused subscription allowance satisfies the auto-top-up threshold and sweep', async () => {
+		await seedOrg({ creditsRemaining: 0 });
+		await seedPeriod({ includedCredits: 100 });
+
+		expect((await readAutoTopupState('org-1')).allowanceRemaining).toBe(100);
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+		expect(await sweepAutoTopUp(5)).toBe(0);
+		expect(mocks.pricesRetrieve).not.toHaveBeenCalled();
+		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+	});
+
+	test('sweep candidate filtering skips fully allowance-covered orgs within its limit', async () => {
+		await seedOrg({ creditsRemaining: 0 });
+		await seedPeriod({ includedCredits: 100 });
+		await testDb().db.insert(organizations).values({
+			id: 'org-2', name: 'Org 2', creditsRemaining: 0, autoTopupEnabled: 1, autoTopupThreshold: 100,
+			autoTopupState: 'idle', stripeCustomerId: 'cus_2', stripeDefaultPmId: 'pm_2'
+		});
+
+		expect(await sweepAutoTopUp(1)).toBe(1);
+		expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(1);
+		expect(mocks.paymentIntentsCreate.mock.calls[0][0]).toMatchObject({ customer: 'cus_2' });
+	});
+
+	test('99 unused subscription credits remains below threshold and permits a top-up', async () => {
+		await seedOrg({ creditsRemaining: 0 });
+		await seedPeriod({ includedCredits: 99 });
+
+		expect((await readAutoTopupState('org-1')).allowanceRemaining).toBe(99);
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(true);
+		expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(1);
+	});
+
+	test.each([
+		{ label: 'expired', period: { includedCredits: 100, periodEnd: new Date(Date.now() - 60_000).toISOString() } },
+		{ label: 'refunded', period: { includedCredits: 100, status: 'refunded' } }
+	])('$label subscription period does not contribute to the threshold', async ({ period }) => {
+		await seedOrg({ creditsRemaining: 0 });
+		await seedPeriod(period);
+
+		expect((await readAutoTopupState('org-1')).allowanceRemaining).toBe(0);
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(true);
+		expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(1);
+	});
+
+	test('exactly 100 purchased credits with no allowance meets the threshold', async () => {
+		await seedOrg({ creditsRemaining: 100 });
+
+		expect((await readAutoTopupState('org-1')).allowanceRemaining).toBe(0);
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+		expect(mocks.pricesRetrieve).not.toHaveBeenCalled();
 		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
 	});
 

@@ -129,12 +129,44 @@ async function sendMail(toEmail: string, toName: string, email: ZeroCreditEmail)
 }
 
 /**
+ * Reads the user's org funding and applies the metered/broke predicate.
+ * 'corrupt' means a live user with zero memberships — a data bug, never a
+ * deletion candidate.
+ */
+async function fundingState(userId: string, nowIso: string): Promise<'broke' | 'funded' | 'corrupt'> {
+	const orgs: OrgFunding[] = await db
+		.select({
+			orgId: organizations.id,
+			plan: organizations.plan,
+			stripeSubscriptionId: organizations.stripeSubscriptionId,
+			subscriptionStatus: organizations.stripeSubscriptionStatus,
+			creditsRemaining: organizations.creditsRemaining,
+			balance: effectiveBalanceSql(nowIso)
+		})
+		.from(memberships)
+		.innerJoin(organizations, eq(memberships.orgId, organizations.id))
+		.where(eq(memberships.userId, userId))
+		.all();
+	if (!orgs.length) return 'corrupt';
+	const engaged = orgs.filter(orgRowIsMetered);
+	return engaged.length > 0 && engaged.every(orgIsUnfunded) ? 'broke' : 'funded';
+}
+
+/** Releases a claimed warning milestone so a later rotation can retry the send. */
+async function releaseWarningClaim(user: SweepUser, nowIso: string): Promise<void> {
+	await db
+		.update(users)
+		.set({ zeroCreditsNotifiedAt: user.notifiedAt })
+		.where(and(eq(users.id, user.id), eq(users.zeroCreditsNotifiedAt, nowIso)));
+}
+
+/**
  * Claims the current 7-day milestone before sending: the conditional UPDATE
  * only matches while the countdown stamp is unchanged and `notified_at` is
- * still due, so overlapping cron runs cannot double-send, and a refund
- * between the read and the claim revokes it. A failed send RESTORES the
- * prior claim so the warning retries next rotation — the milestone is never
- * silently consumed.
+ * still due, so overlapping cron runs cannot double-send, and a concurrent
+ * sweep's funded-clear revokes it. A failed send RESTORES the prior claim so
+ * the warning retries next rotation — the milestone is never silently
+ * consumed.
  */
 async function claimAndWarn(user: SweepUser, since: string, sinceMs: number, nowIso: string): Promise<EvalOutcome> {
 	const cutoffIso = new Date(Date.now() - ZERO_CREDIT_NOTICE_MS).toISOString();
@@ -153,6 +185,27 @@ async function claimAndWarn(user: SweepUser, since: string, sinceMs: number, now
 		)
 		.returning({ id: users.id });
 	if (!claimed.length) return 'idle'; // funded mid-read, or a concurrent run owns the milestone
+	// The claim pins only the countdown stamp — a purchase lands on the org's
+	// credits, never on `since`, so funding committed mid-evaluation is
+	// invisible to the guard. Re-verify before the e-mail goes out: a top-up
+	// racing this tick must not produce a warning for a now-funded account
+	// (codeant).
+	const state = await fundingState(user.id, nowIso);
+	if (state === 'corrupt') {
+		await releaseWarningClaim(user, nowIso);
+		console.error(`zero-credit sweep: live user ${user.id} has no memberships — data bug, skipped`);
+		return 'idle';
+	}
+	if (state === 'funded') {
+		// We hold the claim (`since` is still ours to move): clear the clock
+		// ourselves — the funded path would do it one rotation later anyway.
+		await db
+			.update(users)
+			.set({ zeroCreditsSince: null, zeroCreditsNotifiedAt: null })
+			.where(and(eq(users.id, user.id), eq(users.zeroCreditsSince, since)));
+		console.info(`zero-credit sweep: user ${user.id} funded mid-warning — countdown cleared, no e-mail sent`);
+		return 'cleared';
+	}
 	const daysLeft = Math.ceil((ZERO_CREDIT_GRACE_MS - (Date.now() - sinceMs)) / DAY_MS);
 	const email = buildZeroCreditWarningEmail({
 		name: user.displayName,
@@ -163,10 +216,7 @@ async function claimAndWarn(user: SweepUser, since: string, sinceMs: number, now
 	try {
 		await sendMail(user.email, user.displayName, email);
 	} catch (cause) {
-		await db
-			.update(users)
-			.set({ zeroCreditsNotifiedAt: user.notifiedAt })
-			.where(and(eq(users.id, user.id), eq(users.zeroCreditsNotifiedAt, nowIso)));
+		await releaseWarningClaim(user, nowIso);
 		throw cause;
 	}
 	return 'warned';
@@ -186,6 +236,19 @@ async function claimAndDelete(user: SweepUser, since: string, ageMs: number): Pr
 		.where(and(eq(users.id, user.id), eq(users.zeroCreditsSince, since)))
 		.returning({ id: users.id });
 	if (!claimed.length) return 'idle'; // funded mid-read, or a concurrent run owns the deletion
+	// Same claim race as claimAndWarn — a purchase lands on org credits, never
+	// on `since`, so the guard could not see a top-up committed mid-evaluation
+	// (codeant). The claim already cleared the clock, which is the correct
+	// funded state; only a still-broke account proceeds to erasure.
+	const state = await fundingState(user.id, new Date().toISOString());
+	if (state !== 'broke') {
+		if (state === 'corrupt') {
+			console.error(`zero-credit sweep: live user ${user.id} has no memberships — data bug, skipped`);
+		} else {
+			console.info(`zero-credit sweep: user ${user.id} funded mid-deletion — account survives`);
+		}
+		return 'cleared';
+	}
 	try {
 		await sendMail(user.email, user.displayName, buildZeroCreditDeletedEmail({ name: user.displayName }));
 	} catch (cause) {
@@ -206,29 +269,15 @@ async function claimAndDelete(user: SweepUser, since: string, ageMs: number): Pr
 async function evaluateUser(user: SweepUser): Promise<EvalOutcome> {
 	const nowIso = new Date().toISOString();
 	await db.update(users).set({ zeroCreditsCheckedAt: nowIso }).where(eq(users.id, user.id));
-	const orgs: OrgFunding[] = await db
-		.select({
-			orgId: organizations.id,
-			plan: organizations.plan,
-			stripeSubscriptionId: organizations.stripeSubscriptionId,
-			subscriptionStatus: organizations.stripeSubscriptionStatus,
-			creditsRemaining: organizations.creditsRemaining,
-			balance: effectiveBalanceSql(nowIso)
-		})
-		.from(memberships)
-		.innerJoin(organizations, eq(memberships.orgId, organizations.id))
-		.where(eq(memberships.userId, user.id))
-		.all();
-	if (!orgs.length) {
+	const state = await fundingState(user.id, nowIso);
+	if (state === 'corrupt') {
 		// Account creation inserts the personal-org membership in the same
 		// transaction — a live user with none is corrupt data, never a
 		// deletion candidate. Loud, skipped, re-evaluated each rotation.
 		console.error(`zero-credit sweep: live user ${user.id} has no memberships — data bug, skipped`);
 		return 'idle';
 	}
-	const engaged = orgs.filter(orgRowIsMetered);
-	const broke = engaged.length > 0 && engaged.every(orgIsUnfunded);
-	if (!broke) {
+	if (state === 'funded') {
 		if (user.since === null) return 'idle';
 		await db
 			.update(users)

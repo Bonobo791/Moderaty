@@ -241,6 +241,29 @@ describe('warning cadence', () => {
 		expect(retried).toMatchObject({ warned: 1, errors: 0 });
 		expect(mocks.sendMailjetMessage).toHaveBeenCalledTimes(2);
 	});
+
+	test('a purchase between evaluation and the warning claim suppresses the e-mail and clears the clock', async () => {
+		// codeant: the claim guard pins only `zero_credits_since` — a top-up
+		// lands on the org's credits, which the guard cannot see. The trigger
+		// commits the racing purchase inside the claim's own UPDATE.
+		await seedAccount('u1', { creditsRemaining: 0 });
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(8) }).where(eq(users.id, 'u1'));
+		await testDb().client.execute(
+			`CREATE TRIGGER racing_topup AFTER UPDATE OF zero_credits_notified_at ON users
+			 WHEN NEW.zero_credits_notified_at IS NOT NULL
+			 BEGIN UPDATE organizations SET credits_remaining = 50; END`
+		);
+		try {
+			const result = await sweepZeroCreditAccounts();
+			expect(result).toMatchObject({ evaluated: 1, warned: 0, errors: 0 });
+		} finally {
+			await testDb().client.execute('DROP TRIGGER racing_topup');
+		}
+		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+		// The funded state is discovered post-claim: the clock clears now —
+		// the funded path would do the same on the next rotation.
+		expect(await userRow('u1')).toMatchObject({ zeroCreditsSince: null, zeroCreditsNotifiedAt: null });
+	});
 });
 
 describe('countdown reset', () => {
@@ -304,6 +327,30 @@ describe('deletion', () => {
 		expect(result).toMatchObject({ deleted: 1, errors: 0 });
 		expect((await userRow('u1'))!.googleSub).toBe('deleted:u1');
 		vi.restoreAllMocks();
+	});
+
+	test('a purchase between evaluation and the deletion claim saves the account', async () => {
+		// codeant: same race as the warning claim, worse blast radius — a
+		// top-up commits as the claim clears `since`, and the code below would
+		// erase a now-funded account. The claim's own UPDATE fires the trigger
+		// that lands the purchase.
+		await seedAccount('u1', { creditsRemaining: 0 });
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31) }).where(eq(users.id, 'u1'));
+		await testDb().client.execute(
+			`CREATE TRIGGER racing_topup AFTER UPDATE OF zero_credits_since ON users
+			 WHEN NEW.zero_credits_since IS NULL
+			 BEGIN UPDATE organizations SET credits_remaining = 50; END`
+		);
+		try {
+			const result = await sweepZeroCreditAccounts();
+			expect(result).toMatchObject({ evaluated: 1, deleted: 0, errors: 0 });
+		} finally {
+			await testDb().client.execute('DROP TRIGGER racing_topup');
+		}
+		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+		const user = await userRow('u1');
+		expect(user?.googleSub).toBe('sub-u1'); // still alive — never tombstoned
+		expect(user?.zeroCreditsSince).toBeNull(); // clock cleared by the claim
 	});
 
 	test('a deletion failure is loud, counted, and retryable — the clock restarts', async () => {

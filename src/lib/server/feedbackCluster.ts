@@ -299,10 +299,16 @@ export async function clusterClaims(
  * response a mixed batch lets it emit — is impossible by construction.
  * The smaller per-category index set also makes exact member coverage
  * easier for the model to satisfy.
+ *
+ * A category with fewer than `threshold` rows can never produce a finding —
+ * merging it only spends provider budget and adds a failure surface for
+ * rows the grouping would pool anyway (codex). Sub-threshold rows pass
+ * through unclustered.
  */
 export const clusterClassifiedClaims = async <T extends ClusterableClaim>(
 	classified: T[],
 	categories: readonly string[],
+	threshold: number,
 	deadline?: number,
 	apiKey?: string
 ): Promise<T[]> => {
@@ -324,6 +330,7 @@ export const clusterClassifiedClaims = async <T extends ClusterableClaim>(
 	const canonicalByIndex = new Map<number, string>();
 	await Promise.all(
 		[...byCategory.values()].map(async (entries) => {
+			if (entries.length < threshold) return; // cannot reach the finding bar — no provider spend (codex)
 			const canonical = await clusterClaims(
 				entries.map((entry) => entry.row),
 				deadline,

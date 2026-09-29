@@ -276,6 +276,117 @@ export async function hasChargeAnchor(
 	return Boolean(prior);
 }
 
+/** RefIds already anchored in the ledger — retries of an earlier charge. */
+async function listAnchoredRefIds(
+	tx: LedgerHandle,
+	orgId: string,
+	refType: 'comment' | 'feedback',
+	refIds: string[]
+): Promise<Set<string>> {
+	const existing = await tx
+		.select({ refId: creditTransactions.refId })
+		.from(creditTransactions)
+		.where(and(eq(creditTransactions.orgId, orgId), eq(creditTransactions.refType, refType), inArray(creditTransactions.refId, refIds)))
+		.all();
+	return new Set(existing.map((row) => row.refId));
+}
+
+/**
+ * Funds up to `needed` charges from paid, in-window subscription periods —
+ * newest period first. Each period's conditional UPDATE claims the credits
+ * atomically; a concurrent change aborts the charge loudly instead of
+ * overdrawing the allowance.
+ *
+ * @returns The number of charges covered by subscription allowance
+ */
+async function consumeSubscriptionAllowance(tx: LedgerHandle, orgId: string, needed: number): Promise<number> {
+	const now = new Date().toISOString();
+	const periods = await tx
+		.select({ id: stripeSubscriptionPeriods.id, includedCredits: stripeSubscriptionPeriods.includedCredits, consumedCredits: stripeSubscriptionPeriods.consumedCredits })
+		.from(stripeSubscriptionPeriods)
+		.where(and(
+			eq(stripeSubscriptionPeriods.orgId, orgId),
+			eq(stripeSubscriptionPeriods.status, 'paid'),
+			sql`${stripeSubscriptionPeriods.periodStart} <= ${now}`,
+			gt(stripeSubscriptionPeriods.periodEnd, now),
+			sql`${stripeSubscriptionPeriods.consumedCredits} < ${stripeSubscriptionPeriods.includedCredits}`
+		))
+		.orderBy(desc(stripeSubscriptionPeriods.periodStart), asc(stripeSubscriptionPeriods.id))
+		.all();
+	let funded = 0;
+	for (const period of periods) {
+		const available = Math.max(0, period.includedCredits - period.consumedCredits);
+		const count = Math.min(needed - funded, available);
+		if (count === 0) continue;
+		const consumed = await tx
+			.update(stripeSubscriptionPeriods)
+			.set({ consumedCredits: sql`${stripeSubscriptionPeriods.consumedCredits} + ${count}` })
+			.where(and(
+				eq(stripeSubscriptionPeriods.id, period.id),
+				sql`${stripeSubscriptionPeriods.consumedCredits} + ${count} <= ${stripeSubscriptionPeriods.includedCredits}`
+			))
+			.returning({ id: stripeSubscriptionPeriods.id });
+		if (!consumed.length) throw new Error('subscription allowance changed concurrently — charge aborted');
+		funded += count;
+		if (funded === needed) break;
+	}
+	return funded;
+}
+
+/**
+ * Funds up to `needed` charges from the org's purchased balance. The
+ * conditional UPDATE claims the credits atomically — a concurrent debit
+ * aborts loudly instead of double-spending.
+ *
+ * @returns The number of charges covered by the purchased balance
+ */
+async function consumePurchasedBalance(tx: LedgerHandle, orgId: string, creditsRemaining: number | null, needed: number): Promise<number> {
+	const funded = Math.min(needed, Math.max(0, creditsRemaining ?? 0));
+	if (funded === 0) return 0;
+	const updated = await tx
+		.update(organizations)
+		.set({ creditsRemaining: sql`${organizations.creditsRemaining} - ${funded}` })
+		.where(and(eq(organizations.id, orgId), sql`${organizations.creditsRemaining} >= ${funded}`))
+		.returning({ creditsRemaining: organizations.creditsRemaining });
+	if (!updated.length) throw new Error('credit balance changed concurrently — charge aborted');
+	return funded;
+}
+
+/**
+ * Writes one `consume` ledger row per charged ref. Period-funded rows record
+ * the balance BEFORE this batch's purchased debit (allowance spend never
+ * touched it); purchased-funded rows record the running balance after each
+ * decrement. onConflictDoNothing + the row-count check catch a concurrent
+ * charge that raced past the anchor read.
+ */
+async function insertConsumeRows(
+	tx: LedgerHandle,
+	orgId: string,
+	refType: 'comment' | 'feedback',
+	charged: string[],
+	periodFunded: number,
+	startingBalance: number | null
+): Promise<void> {
+	if (!charged.length) return;
+	const rows = charged.map((refId, index) => ({
+		orgId,
+		delta: -1,
+		reason: 'consume' as const,
+		refType,
+		refId,
+		balanceAfter:
+			index < periodFunded
+				? startingBalance
+				: (startingBalance ?? 0) - (index - periodFunded + 1)
+	}));
+	const inserted = await tx
+		.insert(creditTransactions)
+		.values(rows)
+		.onConflictDoNothing({ target: UNIQUE_TARGET })
+		.returning({ refId: creditTransactions.refId });
+	if (inserted.length !== rows.length) throw new Error('charge anchor inserted concurrently — charge aborted');
+}
+
 export async function consumeCreditsBulk(
 	handle: LedgerHandle,
 	orgId: string,
@@ -301,83 +412,20 @@ export async function consumeCreditsBulk(
 		// only treats that as fatal for METERED orgs.
 		if (isUnmeteredPlan(org.plan)) return { charged: [], covered: [], uncharged: uniqueRefIds };
 
-		const existing = await tx
-			.select({ refId: creditTransactions.refId })
-			.from(creditTransactions)
-			.where(and(eq(creditTransactions.orgId, orgId), eq(creditTransactions.refType, refType), inArray(creditTransactions.refId, uniqueRefIds)))
-			.all();
-		const existingRefIds = new Set(existing.map((row) => row.refId));
-		const covered = uniqueRefIds.filter((refId) => existingRefIds.has(refId));
-		const toCharge = uniqueRefIds.filter((refId) => !existingRefIds.has(refId));
+		const anchoredRefIds = await listAnchoredRefIds(tx, orgId, refType, uniqueRefIds);
+		const covered = uniqueRefIds.filter((refId) => anchoredRefIds.has(refId));
+		const toCharge = uniqueRefIds.filter((refId) => !anchoredRefIds.has(refId));
 		if (!toCharge.length) return { charged: [], covered, uncharged: [] };
 
-		let periodFunded = 0;
-		if (hasHostedEntitlement(org)) {
-			const now = new Date().toISOString();
-			const periods = await tx
-				.select({ id: stripeSubscriptionPeriods.id, includedCredits: stripeSubscriptionPeriods.includedCredits, consumedCredits: stripeSubscriptionPeriods.consumedCredits })
-				.from(stripeSubscriptionPeriods)
-				.where(and(
-					eq(stripeSubscriptionPeriods.orgId, orgId),
-					eq(stripeSubscriptionPeriods.status, 'paid'),
-					sql`${stripeSubscriptionPeriods.periodStart} <= ${now}`,
-					gt(stripeSubscriptionPeriods.periodEnd, now),
-					sql`${stripeSubscriptionPeriods.consumedCredits} < ${stripeSubscriptionPeriods.includedCredits}`
-				))
-				.orderBy(desc(stripeSubscriptionPeriods.periodStart), asc(stripeSubscriptionPeriods.id))
-				.all();
-			for (const period of periods) {
-				const available = Math.max(0, period.includedCredits - period.consumedCredits);
-				const count = Math.min(toCharge.length - periodFunded, available);
-				if (count === 0) continue;
-				const consumed = await tx
-					.update(stripeSubscriptionPeriods)
-					.set({ consumedCredits: sql`${stripeSubscriptionPeriods.consumedCredits} + ${count}` })
-					.where(and(
-						eq(stripeSubscriptionPeriods.id, period.id),
-						sql`${stripeSubscriptionPeriods.consumedCredits} + ${count} <= ${stripeSubscriptionPeriods.includedCredits}`
-					))
-					.returning({ id: stripeSubscriptionPeriods.id });
-				if (!consumed.length) throw new Error('subscription allowance changed concurrently — charge aborted');
-				periodFunded += count;
-				if (periodFunded === toCharge.length) break;
-			}
-		}
-
-		const purchasedNeeded = toCharge.length - periodFunded;
-		const availablePurchased = Math.max(0, org.creditsRemaining ?? 0);
-		const purchasedFunded = Math.min(purchasedNeeded, availablePurchased);
-		if (purchasedFunded > 0) {
-			const updated = await tx
-				.update(organizations)
-				.set({ creditsRemaining: sql`${organizations.creditsRemaining} - ${purchasedFunded}` })
-				.where(and(eq(organizations.id, orgId), sql`${organizations.creditsRemaining} >= ${purchasedFunded}`))
-				.returning({ creditsRemaining: organizations.creditsRemaining });
-			if (!updated.length) throw new Error('credit balance changed concurrently — charge aborted');
-		}
-
+		// Subscription allowance funds first — the org already paid for those
+		// included comments; the purchased balance covers the remainder.
+		const periodFunded = hasHostedEntitlement(org)
+			? await consumeSubscriptionAllowance(tx, orgId, toCharge.length)
+			: 0;
+		const purchasedFunded = await consumePurchasedBalance(tx, orgId, org.creditsRemaining, toCharge.length - periodFunded);
 		const charged = toCharge.slice(0, periodFunded + purchasedFunded);
-		const uncharged = toCharge.slice(charged.length);
-		if (charged.length) {
-			const rows = charged.map((refId, index) => ({
-				orgId,
-				delta: -1,
-				reason: 'consume' as const,
-				refType,
-				refId,
-				balanceAfter:
-					index < periodFunded
-						? org.creditsRemaining
-						: (org.creditsRemaining ?? 0) - (index - periodFunded + 1)
-			}));
-			const inserted = await tx
-				.insert(creditTransactions)
-				.values(rows)
-				.onConflictDoNothing({ target: UNIQUE_TARGET })
-				.returning({ refId: creditTransactions.refId });
-			if (inserted.length !== rows.length) throw new Error('charge anchor inserted concurrently — charge aborted');
-		}
-		return { charged, covered, uncharged };
+		await insertConsumeRows(tx, orgId, refType, charged, periodFunded, org.creditsRemaining);
+		return { charged, covered, uncharged: toCharge.slice(charged.length) };
 	});
 }
 

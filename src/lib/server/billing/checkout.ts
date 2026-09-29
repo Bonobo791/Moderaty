@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { organizations, stripeCheckoutAttempts, stripeLifetimeEntitlements, stripeLifetimeSlots } from '$lib/server/db/schema';
-import { bundleById, priceIdFor, type CreditBundle } from '$lib/server/stripe/bundles';
+import { priceIdFor, purchasableBundleById, type CreditBundle } from '$lib/server/stripe/bundles';
 import { assertCreditsPurchasable, UNMETERED_CREDIT_PURCHASE_ERROR } from './ledger';
 import { isActiveSubscriptionStatus, planPriceEnv, validatePlanPrice, type PaidPlan } from './plans';
 import { getStripe } from '$lib/server/stripe/client';
@@ -174,7 +174,9 @@ function checkoutRedirectUrls(appUrl: URL): { success_url: string; cancel_url: s
  */
 export async function createCreditCheckout(orgId: string, user: SessionUser, bundleId: string, attemptId?: string): Promise<string> {
 	requireOrgRole(user, 'owner');
-	const bundle: CreditBundle = bundleById(bundleId);
+	// Manual purchase: hidden catalog entries (auto top-up / webhook grants)
+	// are rejected — the usage page never offered them (codeant).
+	const bundle: CreditBundle = purchasableBundleById(bundleId);
 	const appUrl = checkoutAppUrl();
 	// Unlimited plans never buy credits — rejected before an attempt row is
 	// planted (the lifetime org's scoring is already free; MOD-35).

@@ -63,6 +63,22 @@ export function bundleById(id: string): CreditBundle {
 }
 
 /**
+ * Resolves a bundle for a MANUAL one-time purchase. Unlike `bundleById` —
+ * which auto top-up and the webhook grant path use intentionally — this
+ * rejects `hiddenFromPurchase` catalog entries: their buy button never
+ * renders, so a request naming one is crafted and fails loudly (codeant).
+ *
+ * @param id - The stable ID of the bundle to purchase
+ * @returns The matching purchasable credit bundle
+ * @throws An error if the bundle is unknown or hidden from purchase
+ */
+export function purchasableBundleById(id: string): CreditBundle {
+	const bundle = bundleById(id);
+	if (bundle.hiddenFromPurchase) throw new Error(`credit bundle ${id} is not available for purchase`);
+	return bundle;
+}
+
+/**
  * Resolves and validates the Stripe Price ID configured for a credit bundle.
  *
  * @param bundle - The credit bundle whose configured Stripe Price ID to retrieve

@@ -1,6 +1,6 @@
 import { env } from '$env/dynamic/private';
 
-import { bundleById, CREDIT_BUNDLES, type CreditBundle } from '$lib/server/stripe/bundles';
+import { bundleById, CREDIT_BUNDLES, purchasableBundleById, type CreditBundle } from '$lib/server/stripe/bundles';
 
 export type MercadoPagoBundle = CreditBundle & { amountCents: number; priceEnv: string };
 
@@ -29,6 +29,17 @@ export function amountCentsFor(bundle: CreditBundle): number {
 
 export function mercadoPagoBundleById(id: string): MercadoPagoBundle {
 	const bundle = bundleById(id);
+	return { ...bundle, amountCents: amountCentsFor(bundle), priceEnv: priceEnvFor(bundle) };
+}
+
+/**
+ * Resolves a bundle for a MANUAL Mercado Pago purchase — same
+ * `hiddenFromPurchase` guard as `purchasableBundleById`, so a crafted POST
+ * cannot buy a bundle the grid never offered (codeant). The webhook grant
+ * path keeps using `mercadoPagoBundleById` for idempotent fulfillment.
+ */
+export function purchasableMercadoPagoBundleById(id: string): MercadoPagoBundle {
+	const bundle = purchasableBundleById(id);
 	return { ...bundle, amountCents: amountCentsFor(bundle), priceEnv: priceEnvFor(bundle) };
 }
 

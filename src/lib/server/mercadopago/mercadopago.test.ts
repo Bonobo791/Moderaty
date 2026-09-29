@@ -390,8 +390,10 @@ test('a payment lookup whose id does not match the requested payment fails loudl
 
 test('a refunded or disputed checkout attempt is terminal and never reopened', async () => {
 	for (const status of ['refunded', 'disputed'] as const) {
-		await testDb().db.update(mercadoPagoCheckoutAttempts).set({ status, initPoint: `https://mp.test/${status}` }).where(eq(mercadoPagoCheckoutAttempts.attemptId, 'attempt_1'));
-		await expect(createMercadoPagoCreditCheckout('org-1', TEST_OWNER, 'credits_100', 'attempt_1')).rejects.toThrow(new RegExp(status));
+		// A visible bundle: the attempt is a manual-checkout artifact, and
+		// credits_100 is rejected before the status check now (codeant).
+		await testDb().db.update(mercadoPagoCheckoutAttempts).set({ status, bundleId: 'credits_500', amountCents: 1900, initPoint: `https://mp.test/${status}` }).where(eq(mercadoPagoCheckoutAttempts.attemptId, 'attempt_1'));
+		await expect(createMercadoPagoCreditCheckout('org-1', TEST_OWNER, 'credits_500', 'attempt_1')).rejects.toThrow(new RegExp(status));
 	}
 });
 
@@ -516,6 +518,24 @@ test('checkout refuses when MERCADOPAGO_WEBHOOK_SECRET is missing — no prefere
 	expect(planted).toBeUndefined();
 });
 
+test('a hidden bundle is never sold through manual checkout', async () => {
+	// codeant: credits_100 stays resolvable for webhook grants and auto
+	// top-up, but its buy button never renders — a crafted POST naming it
+	// must neither reach Mercado Pago nor plant an attempt row.
+	const fetchSpy = vi.fn();
+	vi.stubGlobal('fetch', fetchSpy);
+	await expect(createMercadoPagoCreditCheckout('org-1', TEST_OWNER, 'credits_100', 'attempt_hidden')).rejects.toThrow(
+		'not available for purchase'
+	);
+	expect(fetchSpy).not.toHaveBeenCalled();
+	const planted = await testDb()
+		.db.select({ attemptId: mercadoPagoCheckoutAttempts.attemptId })
+		.from(mercadoPagoCheckoutAttempts)
+		.where(eq(mercadoPagoCheckoutAttempts.attemptId, 'attempt_hidden'))
+		.get();
+	expect(planted).toBeUndefined();
+});
+
 // --- Checkout snapshot and idempotency key (PR #136 round 3) ------------------
 
 test('resuming a pending checkout advertises the credits persisted on the attempt, not the live catalog', async () => {
@@ -527,13 +547,13 @@ test('resuming a pending checkout advertises the credits persisted on the attemp
 	await testDb().db.insert(mercadoPagoCheckoutAttempts).values({
 		attemptId: 'attempt_snapshot',
 		orgId: 'org-1',
-		bundleId: 'credits_100',
+		bundleId: 'credits_500',
 		idempotencyKey: 'mp-key-snapshot',
-		amountCents: 500,
+		amountCents: 1900,
 		credits: 77
 	});
 
-	const initPoint = await createMercadoPagoCreditCheckout('org-1', TEST_OWNER, 'credits_100', 'attempt_snapshot');
+	const initPoint = await createMercadoPagoCreditCheckout('org-1', TEST_OWNER, 'credits_500', 'attempt_snapshot');
 
 	expect(initPoint).toBe('https://sandbox.mercadopago.com.br/checkout/v1/redirect?pref_id=pref-1');
 	const [, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
@@ -560,8 +580,8 @@ test('the checkout idempotency key is a deterministic 64-char hash within the Me
 		})
 	);
 
-	await createMercadoPagoCreditCheckout('org-1', TEST_OWNER, 'credits_100', 'attempt_key_a');
-	await createMercadoPagoCreditCheckout('org-1', TEST_OWNER, 'credits_100', 'attempt_key_b');
+	await createMercadoPagoCreditCheckout('org-1', TEST_OWNER, 'credits_500', 'attempt_key_a');
+	await createMercadoPagoCreditCheckout('org-1', TEST_OWNER, 'credits_500', 'attempt_key_b');
 
 	const keys = await testDb().db
 		.select({ attemptId: mercadoPagoCheckoutAttempts.attemptId, idempotencyKey: mercadoPagoCheckoutAttempts.idempotencyKey })
@@ -598,7 +618,7 @@ test('the checkout idempotency key is namespaced per org — an attempt id reuse
 		})
 	);
 
-	await createMercadoPagoCreditCheckout('org-1', TEST_OWNER, 'credits_100', 'attempt_shared');
+	await createMercadoPagoCreditCheckout('org-1', TEST_OWNER, 'credits_500', 'attempt_shared');
 	const firstKey = (
 		await testDb().db
 			.select({ idempotencyKey: mercadoPagoCheckoutAttempts.idempotencyKey })
@@ -611,7 +631,7 @@ test('the checkout idempotency key is namespaced per org — an attempt id reuse
 	// then legitimately reuse the same caller-supplied attempt id.
 	await testDb().db.delete(organizations).where(eq(organizations.id, 'org-1'));
 	await testDb().db.insert(organizations).values({ id: 'org-2', name: 'Two', creditsRemaining: 0 });
-	await createMercadoPagoCreditCheckout('org-2', TEST_OWNER, 'credits_100', 'attempt_shared');
+	await createMercadoPagoCreditCheckout('org-2', TEST_OWNER, 'credits_500', 'attempt_shared');
 	const secondKey = (
 		await testDb().db
 			.select({ idempotencyKey: mercadoPagoCheckoutAttempts.idempotencyKey })

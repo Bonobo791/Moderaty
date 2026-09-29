@@ -276,6 +276,16 @@ describe('createCreditCheckout', () => {
 			expect.anything()
 		);
 	});
+
+	test('a hidden bundle is never sold through manual checkout', async () => {
+		// codeant: credits_100 stays in the catalog for auto top-up and
+		// idempotent webhook grants, but its buy button never renders — a
+		// crafted POST naming it must not reach Stripe.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+
+		await expect(createCreditCheckout('org-1', owner(), 'credits_100')).rejects.toThrow('not available for purchase');
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
 });
 
 describe('createTestCheckout', () => {
@@ -496,7 +506,7 @@ describe('checkout configuration validation', () => {
 			const previous = env.APP_URL;
 			env.APP_URL = bad;
 			try {
-				await expect(createCreditCheckout('org-1', owner(), 'credits_100')).rejects.toThrow('valid absolute http(s) URL');
+				await expect(createCreditCheckout('org-1', owner(), 'credits_500')).rejects.toThrow('valid absolute http(s) URL');
 				await expect(createPlanCheckout('org-1', owner(), 'hosted')).rejects.toThrow('valid absolute http(s) URL');
 				await expect(createTestCheckout('org-1', operator())).rejects.toThrow('valid absolute http(s) URL');
 			} finally {

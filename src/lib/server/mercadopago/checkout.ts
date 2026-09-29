@@ -8,7 +8,7 @@ import { requireOrgRole } from '$lib/server/ownership';
 import type { SessionUser } from '$lib/server/session';
 import { mercadoPagoProvider } from './client';
 import { assertCreditsPurchasable } from '$lib/server/billing/ledger';
-import { mercadoPagoBundleById, type MercadoPagoBundle } from './bundles';
+import { mercadoPagoBundleById, purchasableMercadoPagoBundleById, type MercadoPagoBundle } from './bundles';
 import { webhookSecret } from './webhooks';
 
 const ATTEMPT_ID = /^[A-Za-z0-9_-]{8,128}$/;
@@ -100,7 +100,7 @@ export async function createMercadoPagoCreditCheckout(
 	// attempt or creating the preference; the access token and bundle price are
 	// validated by createCreditPreference/mercadoPagoBundleById respectively.
 	webhookSecret();
-	const bundle = mercadoPagoBundleById(bundleId);
+	const bundle = purchasableMercadoPagoBundleById(bundleId);
 	const attempt = await loadOrCreateAttempt(orgId, bundle, attemptId);
 	if (attempt.status === 'fulfilled') throw new Error('Mercado Pago checkout attempt has already completed');
 	// A reversed attempt is terminal too — reopening its initPoint would sell

@@ -318,18 +318,21 @@ const mocks = vi.hoisted(() => {
 							fields && typeof fields === 'object' && 'commentId' in fields ? claimedCommentIds : [];
 						return { returning: returningClaimedIds };
 					}
-					// markDispatched / completeActions / markSuperseded: honor
-					// inArray(commentId, ...) AND any state predicate — transitions
-					// only move rows still in an allowed predecessor state, and
+					// markDispatched / completeActions / markSuperseded / finalize:
+					// honor inArray(commentId, ...) plus any state AND action
+					// predicates — transitions only move rows still in an allowed
+					// predecessor state whose action the query selects, and
 					// RETURNING reports the rows that actually transitioned so
 					// completeActions can gate its audit insert on the rowcount.
 					const params = queryParams(condition);
 					const stateFilter = params.filter((param) => ACTION_STATES.has(param as string));
+					const actionFilter = params.filter((param) => ACTION_VALUES.has(param as string));
 					const transitioned: Record<string, unknown>[] = [];
 					state.moderationActions.forEach((item) => {
 						if (
 							params.includes(queryKey(item.commentId)) &&
-							(!stateFilter.length || stateFilter.includes(item.state))
+							(!stateFilter.length || stateFilter.includes(item.state)) &&
+							(!actionFilter.length || actionFilter.includes(item.action))
 						) {
 							Object.assign(item, values);
 							transitioned.push(item);
@@ -446,6 +449,7 @@ const dialect = new SQLiteSyncDialect();
 
 const COMMENT_STATUSES = new Set(['pending', 'approved', 'held', 'rejected', 'deleted', 'restoring']);
 const ACTION_STATES = new Set(['pending', 'dispatched', 'cancelling', 'completed', 'superseded', 'manual_review']);
+const ACTION_VALUES = new Set(['hold', 'reject', 'ban', 'delete']);
 
 /** Binds the parameters of a real drizzle where-condition so the fake store
  * honors which rows a query actually targets. */

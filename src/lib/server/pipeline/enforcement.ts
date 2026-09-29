@@ -198,6 +198,26 @@ const DECIDED_INTENT: Record<string, 'approve' | 'reject' | 'delete'> = {
 	deleted: 'delete'
 };
 
+/** The remote outcome each queued action drives toward. */
+const ACTION_OUTCOME: Record<YoutubeAction, 'held' | 'rejected' | 'deleted'> = {
+	hold: 'held',
+	reject: 'rejected',
+	ban: 'rejected',
+	delete: 'deleted'
+};
+
+/**
+ * Comment statuses carrying their own remote truth: every decided status a
+ * corrective write can re-assert (DECIDED_INTENT) plus 'restoring', which
+ * the human flow owns end-to-end. A resolved action write whose outcome
+ * conflicts with one of these cannot prove its ordering against the
+ * decision's own write — the row must stay outstanding so the next sweep's
+ * corrective write lands LAST. 'pending'/'held' still want the queued
+ * action's outcome and a missing row has nothing to converge, so neither
+ * contests completion.
+ */
+const CONTESTED_STATUSES = new Set(['approved', 'rejected', 'deleted', 'restoring']);
+
 async function convergeHolds(
 	actions: OutstandingAction[],
 	accessToken: string,
@@ -264,18 +284,47 @@ async function completeActions(actions: OutstandingAction[], expected?: ChannelI
 	let completed = 0;
 	await db.transaction(async (transaction) => {
 		await assertChannelActive(actions[0].channelId, transaction, expected);
+		// The remote write resolved — but a comment whose local decision moved
+		// while it was in flight makes ordering unprovable: the write may land
+		// remotely AFTER the decision's own write. Completing the row would
+		// record a terminal state over potentially diverged remote truth —
+		// keep it 'cancelling' so the next sweep's corrective write lands
+		// last (codex).
+		const statuses = new Map(
+			(await transaction
+				.select({ id: comments.id, status: comments.status })
+				.from(comments)
+				.where(inArray(comments.id, actions.map((action) => action.commentId)))
+				.all()).map((row) => [row.id, row.status] as const)
+		);
+		const matching = actions.filter((action) => {
+			const status = statuses.get(action.commentId);
+			return status === undefined || !CONTESTED_STATUSES.has(status) || status === ACTION_OUTCOME[action.action];
+		});
+		const contested = actions.filter((action) => !matching.includes(action));
 		// Audit only rows this transaction actually completed: a concurrent
 		// decider may have superseded one between the remote call and now —
 		// writing its 'hold'/'reject' audit row would record a remote action
 		// that never landed.
-		const transitioned = await transaction
-			.update(moderationActions)
-			.set({ state: 'completed' })
-			.where(and(
-				inArray(moderationActions.commentId, actions.map((action) => action.commentId)),
-				inArray(moderationActions.state, ['pending', 'dispatched', 'cancelling'])
-			))
-			.returning({ commentId: moderationActions.commentId });
+		const transitioned = matching.length
+			? await transaction
+					.update(moderationActions)
+					.set({ state: 'completed' })
+					.where(and(
+						inArray(moderationActions.commentId, matching.map((action) => action.commentId)),
+						inArray(moderationActions.state, ['pending', 'dispatched', 'cancelling'])
+					))
+					.returning({ commentId: moderationActions.commentId })
+			: [];
+		if (contested.length) {
+			await transaction
+				.update(moderationActions)
+				.set({ state: 'cancelling' })
+				.where(and(
+					inArray(moderationActions.commentId, contested.map((action) => action.commentId)),
+					inArray(moderationActions.state, ['pending', 'dispatched', 'cancelling'])
+				));
+		}
 		const done = new Set(transitioned.map((row) => row.commentId));
 		const finished = actions.filter((action) => done.has(action.commentId));
 		completed = transitioned.length;
@@ -507,12 +556,16 @@ export async function applyHumanIntent(
 
 /**
  * Commits the local result of a human intent in ONE transaction: the final
- * comment status is guarded on 'restoring', and EVERY outstanding action row
- * for the comment is terminalized. A dispatched row (hold, reject, ban,
- * delete) is completed and audited — its remote write was attempted; a
- * pending or cancelling row is superseded without an audit row. Left
- * outstanding, a dispatched reject/delete/ban would be re-applied next sweep
- * over the human's decision (codex).
+ * comment status is guarded on 'restoring', and every outstanding action row
+ * for the comment is resolved by whether its remote outcome AGREES with the
+ * human's. A dispatched row whose outcome equals the final status completes
+ * and is audited — both writes land the same remote state either order. A
+ * CONFLICTING dispatched row may still have its write in flight: completing
+ * it would claim it landed before the human's write, which cannot be proven
+ * — it stays 'cancelling' so the next sweep's corrective write is guaranteed
+ * to land last (codex). A pending row never reached YouTube and supersedes;
+ * a cancelling row supersedes only when its outcome agrees, else its
+ * corrective write stays outstanding for the same in-flight reason.
  */
 export async function finalizeHumanIntent(
 	channelId: string,
@@ -522,27 +575,44 @@ export async function finalizeHumanIntent(
 ): Promise<void> {
 	const status = humanFinalStatus(action);
 	if (!status) throw new Error(`unsupported human intent '${action}'`);
+	const agreeing = (Object.keys(ACTION_OUTCOME) as YoutubeAction[]).filter((verb) => ACTION_OUTCOME[verb] === status);
 	await db.transaction(async (transaction) => {
 		await assertChannelActive(channelId, transaction, expected);
 		await transaction
 			.update(comments)
 			.set({ status, decidedBy: 'human' })
 			.where(and(eq(comments.id, commentId), eq(comments.status, 'restoring')));
-		const dispatched = await transaction
+		const dispatched = agreeing.length
+			? await transaction
+					.update(moderationActions)
+					.set({ state: 'completed' })
+					.where(and(
+						eq(moderationActions.commentId, commentId),
+						eq(moderationActions.state, 'dispatched'),
+						inArray(moderationActions.action, agreeing)
+					))
+					.returning({ action: moderationActions.action, reason: moderationActions.reason, authorHandle: moderationActions.authorHandle })
+			: [];
+		// Dispatched rows still here disagree with the human outcome — keep
+		// them outstanding until a corrective write lands last.
+		await transaction
 			.update(moderationActions)
-			.set({ state: 'completed' })
-			.where(and(
-				eq(moderationActions.commentId, commentId),
-				eq(moderationActions.state, 'dispatched')
-			))
-			.returning({ action: moderationActions.action, reason: moderationActions.reason, authorHandle: moderationActions.authorHandle });
+			.set({ state: 'cancelling' })
+			.where(and(eq(moderationActions.commentId, commentId), eq(moderationActions.state, 'dispatched')));
 		await transaction
 			.update(moderationActions)
 			.set({ state: 'superseded' })
-			.where(and(
-				eq(moderationActions.commentId, commentId),
-				inArray(moderationActions.state, ['pending', 'cancelling'])
-			));
+			.where(and(eq(moderationActions.commentId, commentId), eq(moderationActions.state, 'pending')));
+		if (agreeing.length) {
+			await transaction
+				.update(moderationActions)
+				.set({ state: 'superseded' })
+				.where(and(
+					eq(moderationActions.commentId, commentId),
+					eq(moderationActions.state, 'cancelling'),
+					inArray(moderationActions.action, agreeing)
+				));
+		}
 		if (dispatched.length) {
 			await transaction.insert(auditLog).values(
 				dispatched.map((row) => ({

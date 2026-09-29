@@ -408,9 +408,16 @@ test('a parked rescan page skips comments this scan already staged — no repeat
 	expect(mocks.scoreComment).not.toHaveBeenCalled();
 	expect(mocks.state.insertedComments).toHaveLength(1);
 	expect(mocks.state.insertedCredits).toHaveLength(1);
-	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({ commentId: 'paid', state: 'completed' })]);
+	// The delete resolved while 'paid' is locally approved — ordering vs the
+	// approval is unprovable, so the row stays outstanding ('cancelling') and
+	// the next sweep's corrective publish lands last (codex).
+	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({ commentId: 'paid', state: 'cancelling' })]);
 	// The page stays parked — only a top-up advances the checkpoint.
 	expect(mocks.state.channelUpdates).toEqual([]);
+
+	await runChannel('channel');
+	expect(mocks.setModerationStatus).toHaveBeenLastCalledWith(['paid'], 'published', false, 'access-token', undefined);
+	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({ commentId: 'paid', state: 'superseded' })]);
 });
 
 test('an incomplete history page preserves its scan and the next run scores only unstaged comments', async () => {

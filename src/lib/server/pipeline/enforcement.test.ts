@@ -243,11 +243,18 @@ test('a human approval landing while a hold write is in flight is re-applied aft
 
 	await runChannel('channel');
 
+	// The corrective publish already re-asserted 'approved'; the hold row
+	// itself stays 'cancelling' until a later sweep proves its write can no
+	// longer reorder a decided comment's remote state (codex).
 	expect(mocks.setModerationStatus.mock.calls).toEqual([
 		[['comment'], 'heldForReview', false, 'access-token', undefined],
 		[['comment'], 'published', false, 'access-token', undefined]
 	]);
-	expectActionState('completed');
+	expectActionState('cancelling');
+
+	await runChannel('channel');
+	expect(mocks.setModerationStatus).toHaveBeenLastCalledWith(['comment'], 'published', false, 'access-token', undefined);
+	expectActionState('superseded');
 });
 
 test('a dispatched hold superseded by a decided comment publishes it back instead of stranding it held', async () => {
@@ -262,11 +269,12 @@ test('a dispatched hold superseded by a decided comment publishes it back instea
 	expectActionState('superseded');
 });
 
-test('a hold on a restoring comment is not converged — the human flow finalizes it', async () => {
+test('a hold on a restoring comment is not converged — the human flow and the next sweep resolve it', async () => {
 	// codex: terminalizing the row while 'restoring' would drop the only
 	// mechanism that re-writes remote state if the hold landed after the
-	// human's publish. The row stays outstanding until reconcile replays the
-	// intent and finalize terminalizes the bookkeeping.
+	// human's write. The intent conflicts with the hold's outcome, so
+	// finalize keeps it 'cancelling' — the next sweep's corrective write is
+	// guaranteed to land after any in-flight hold.
 	mocks.state.existingIds = ['comment'];
 	mocks.state.commentStatuses = { comment: 'restoring' };
 	mocks.state.moderationActions = [dispatchedAction({ action: 'hold' })];
@@ -276,12 +284,17 @@ test('a hold on a restoring comment is not converged — the human flow finalize
 
 	await runChannel('channel');
 
-	// The recorded intent replays; the dispatched hold was remote-attempted,
-	// so finalize completes it with its audit row — the 'reject' wins
-	// remotely because the human intent wrote last.
+	// The recorded intent replays; the raced hold stays outstanding — its
+	// write may land after the human's reject, so 'completed' would lie.
 	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
-	expectActionState('completed');
-	expect(mocks.state.insertedAudits).toContainEqual(expect.objectContaining({ commentId: 'comment', action: 'hold', actor: 'system' }));
+	expectActionState('cancelling');
+	expect(mocks.state.insertedAudits).not.toContainEqual(expect.objectContaining({ commentId: 'comment', action: 'hold', actor: 'system' }));
+
+	// Next sweep: the corrective reject re-asserts the decided state and the
+	// row goes terminal — remote truth converges to 'rejected'.
+	await runChannel('channel');
+	expect(mocks.setModerationStatus).toHaveBeenLastCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
+	expectActionState('superseded');
 });
 
 test('a dispatched hold on a restoring comment stays outstanding without a user intent', async () => {
@@ -299,11 +312,12 @@ test('a dispatched hold on a restoring comment stays outstanding without a user 
 	expect(mocks.state.insertedAudits).toEqual([]);
 });
 
-test('a dispatched reject on a restoring comment is finalized, never re-applied', async () => {
-	// codex: finalize used to terminalize only HOLD rows — a dispatched
-	// reject/ban/delete left outstanding would be re-applied next sweep over
-	// the human's restore. The restore must finish without the stale reject
-	// ever touching YouTube again.
+test('a dispatched reject on a restoring comment stays reconcilable — the corrective write lands last', async () => {
+	// codex: the reject's remote write may still be in flight when the
+	// owner's publish lands. Completing the row claims an ordering no one
+	// can prove — remote would stay 'rejected' over a local 'approved' with
+	// nothing reconciling. 'cancelling' keeps it outstanding until the next
+	// sweep's corrective publish lands LAST.
 	mocks.state.existingIds = ['comment'];
 	mocks.state.commentStatuses = { comment: 'restoring' };
 	mocks.state.moderationActions = [dispatchedAction({ action: 'reject' })];
@@ -313,12 +327,60 @@ test('a dispatched reject on a restoring comment is finalized, never re-applied'
 
 	await runChannel('channel');
 
-	// 'restore' publishes; the stale reject row is completed (it may have
-	// landed earlier — the audit row is honest) without firing remotely.
+	// 'restore' publishes and finalizes 'approved'; the raced reject is
+	// kept outstanding, never completed over an unproven ordering — and the
+	// stale reject intent never touches YouTube again (converge publishes).
 	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'published', false, 'access-token', undefined);
 	expect(mocks.setModerationStatus).not.toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
-	expectActionState('completed');
+	expectActionState('cancelling');
 	expect(mocks.state.commentStatuses.comment).toBe('approved');
+	expect(mocks.state.insertedAudits).not.toContainEqual(expect.objectContaining({ commentId: 'comment', action: 'reject', actor: 'system' }));
+
+	// Next sweep: the corrective publish re-asserts the approved state — it
+	// lands after any late-landing reject — then the row goes terminal.
+	await runChannel('channel');
+	expect(mocks.setModerationStatus).toHaveBeenLastCalledWith(['comment'], 'published', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).not.toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
+	expectActionState('superseded');
+});
+
+test('a reject write resolving after a rescan re-approval stays reconcilable', async () => {
+	// codex: the write resolved but the comment re-decided 'approved'
+	// meanwhile — the reject may land remotely AFTER whatever published it.
+	// Completing the row would claim an ordering that never happened;
+	// 'cancelling' makes the next sweep's corrective publish land last.
+	mocks.state.existingIds = ['comment'];
+	mocks.state.commentStatuses = { comment: 'rejected' };
+	mocks.state.moderationActions = [dispatchedAction({ action: 'reject' })];
+	mocks.setModerationStatus.mockImplementationOnce(async () => {
+		mocks.state.commentStatuses.comment = 'approved';
+	});
+
+	await runChannel('channel');
+
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
+	expectActionState('cancelling');
+
+	await runChannel('channel');
+	expect(mocks.setModerationStatus).toHaveBeenLastCalledWith(['comment'], 'published', false, 'access-token', undefined);
+	expectActionState('superseded');
+});
+
+test('a dispatched action AGREEING with the human outcome completes at finalize', async () => {
+	// Both writes land 'rejected' either way — ordering is irrelevant, so the
+	// row completes and audits normally.
+	mocks.state.existingIds = ['comment'];
+	mocks.state.commentStatuses = { comment: 'restoring' };
+	mocks.state.moderationActions = [dispatchedAction({ action: 'reject' })];
+	mocks.state.insertedAudits = [
+		{ channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'queue UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
+	];
+
+	await runChannel('channel');
+
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
+	expect(mocks.state.commentStatuses.comment).toBe('rejected');
+	expectActionState('completed');
 	expect(mocks.state.insertedAudits).toContainEqual(expect.objectContaining({ commentId: 'comment', action: 'reject', actor: 'system' }));
 });
 

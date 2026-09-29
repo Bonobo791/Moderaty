@@ -371,7 +371,10 @@ test('approve publishes exactly once without reading current YouTube status', as
 	expect((await commentRow('c1'))?.status).toBe('approved');
 });
 
-test('a dispatched hold is completed and audited from its stored state at finalize', async () => {
+test('a dispatched hold stays outstanding at finalize — the next sweep converges it', async () => {
+	// codex: the hold's remote write may still be in flight when the owner's
+	// publish lands. Completing the row claims an ordering no one can
+	// prove — 'cancelling' keeps it for the next sweep's corrective write.
 	mocks.env.DRY_RUN = 'false';
 	await seedComment('c1', 'UC1');
 	await seedHold('c1', 'UC1', 'dispatched');
@@ -380,10 +383,10 @@ test('a dispatched hold is completed and audited from its stored state at finali
 
 	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
 	const hold = await testDb().db.select().from(moderationActions).where(eq(moderationActions.commentId, 'c1')).get();
-	expect(hold?.state).toBe('completed');
+	expect(hold?.state).toBe('cancelling');
 	const audits = await auditRows();
-	expect(audits).toHaveLength(2);
-	expect(audits.map((row) => `${row.action}:${row.actor}`).sort()).toEqual(['approve:user', 'hold:system']);
+	expect(audits).toHaveLength(1);
+	expect(audits[0]).toMatchObject({ action: 'approve', actor: 'user' });
 });
 
 test('a pending hold is superseded at finalize without a hold audit', async () => {

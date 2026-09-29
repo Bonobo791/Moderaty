@@ -99,6 +99,30 @@ function detailProblems(payload) {
 }
 
 /**
+ * Classifies an answered tick: `problems` lists every operator-actionable
+ * failure the payload reports; `ownerActionableOnly` marks a non-OK response
+ * whose ONLY failures are channel-owner categories (credits/token —
+ * dashboard-visible, self-resolving, suppressible). Shared by the local
+ * driver and the Netlify scheduled function so both schedulers classify
+ * identical ticks identically (codex).
+ */
+export function evaluateTick(resOk, payload) {
+	const problems = payload === null ? [] : detailProblems(payload);
+	if (!resOk) {
+		const entries = channelResultEntries(payload);
+		const ownerActionableOnly =
+			entries.length > 0 && entries.every((entry) => USER_ACTIONABLE_CATEGORIES.has(entry.error));
+		return { ownerActionableOnly, problems };
+	}
+	// On a 200, `ok` is the real sweep aggregate — a failure there never
+	// reaches the dashboard, so the caller's exit/report is its only alert.
+	if (payload !== null && payload.ok === false && !SWEEP_ERROR_FIELDS.some((field) => payload[field])) {
+		problems.push('ok:false with no sweep error detail');
+	}
+	return { ownerActionableOnly: false, problems };
+}
+
+/**
  * Calls the app's cron endpoint once, loudly.
  *
  * @param {typeof fetch} [fetchImpl] - fetch implementation (tests inject a stub)
@@ -127,13 +151,12 @@ export async function tickOnce(fetchImpl = fetch) {
 		payload = null;
 	}
 	console.log(`[${new Date().toISOString()}] tick → ${renderTick(payload, rawText)}`);
-	const problems = payload === null ? [] : detailProblems(payload);
+	const { ownerActionableOnly, problems } = evaluateTick(res.ok, payload);
 	if (!res.ok) {
-		const entries = channelResultEntries(payload);
-		const ownerActionableOnly =
-			entries.length > 0 && entries.every((entry) => USER_ACTIONABLE_CATEGORIES.has(entry.error));
 		if (ownerActionableOnly && problems.length === 0) {
-			const categories = entries.map((entry) => entry.error).join(', ');
+			const categories = channelResultEntries(payload)
+				.map((entry) => entry.error)
+				.join(', ');
 			console.warn(
 				`cron endpoint answered ${res.status} with only channel-owner failure(s) [${categories}] — dashboard-visible, suppressing the scheduler alert`
 			);
@@ -143,11 +166,6 @@ export async function tickOnce(fetchImpl = fetch) {
 	}
 	if (payload === null) {
 		throw new Error('cron endpoint returned a non-JSON body');
-	}
-	// On a 200, `ok` is the real sweep aggregate — a failure there never
-	// reaches the dashboard, so the exit code is its only alert channel.
-	if (payload.ok === false && !SWEEP_ERROR_FIELDS.some((field) => payload[field])) {
-		problems.push('ok:false with no sweep error detail');
 	}
 	if (problems.length) {
 		throw new Error(`cron tick reported failure(s): ${problems.join('; ')}`);

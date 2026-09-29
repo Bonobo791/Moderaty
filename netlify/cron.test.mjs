@@ -99,4 +99,41 @@ describe('scheduled cron trigger', () => {
 
 		await expect(handler()).rejects.toThrow('500');
 	});
+
+	it('fails the invocation when a 200 payload reports a sweep failure', async () => {
+		// codex: HTTP 200 alone cannot see an ops failure — `ok:false`, a
+		// spent budget, or a sweep error all hide inside the JSON body.
+		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ok: false, zeroCreditSweepError: 'db exploded' })));
+
+		await expect(handler()).rejects.toThrow(/zeroCreditSweepError/);
+	});
+
+	it('fails the invocation when a 200 reports an exhausted run budget', async () => {
+		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ok: true, budgetExhausted: true })));
+
+		await expect(handler()).rejects.toThrow(/budget/);
+	});
+
+	it('fails the invocation on ok:false with no sweep error detail', async () => {
+		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ok: false, results: {} })));
+
+		await expect(handler()).rejects.toThrow(/ok:false/);
+	});
+
+	it('fails the invocation on a non-JSON success body', async () => {
+		vi.stubGlobal('fetch', vi.fn(async () => new Response('<html>maintenance</html>', { status: 200 })));
+
+		await expect(handler()).rejects.toThrow(/non-JSON/);
+	});
+
+	it('suppresses a non-OK whose only failures are channel-owner categories', async () => {
+		// Same contract as the local driver: 'credits'/'token' failures are
+		// dashboard-visible and self-resolving — an invocation failure every
+		// minute would be pure noise.
+		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ok: false, results: { UC1: { error: 'credits' } } }, 500)));
+		const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+		await expect(handler()).resolves.toBeUndefined();
+		expect(warning).toHaveBeenCalled();
+	});
 });

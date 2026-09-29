@@ -225,7 +225,7 @@ export async function runChannel(
 			throw new Error(`moderation decision failed for ${failures.length} comment(s): ${failures.join('; ')}`);
 		}
 		if (dryRun) {
-			console.info(`run ${channelId}: dry run — fetched=${fetched} skippedAlreadySeen=${skipped} audited=${acted}`);
+			console.info(`run ${channelId}: dry run — fetched=${fetched} skippedAlreadySeen=${skipped} rescan=${rescan !== undefined} audited=${acted}`);
 			return finishDryRun(window, page, { fetched, acted, queued });
 		}
 
@@ -233,13 +233,13 @@ export async function runChannel(
 		acted = enforcement.acted;
 		if (enforcement.outOfCredits) {
 			console.warn(
-				`run ${channelId}: out of credits — ${deferred} comment(s) deferred, cursor parked; fetched=${fetched} skippedAlreadySeen=${skipped}`
+				`run ${channelId}: out of credits — ${deferred} comment(s) deferred, cursor parked; fetched=${fetched} skippedAlreadySeen=${skipped} rescan=${rescan !== undefined}`
 			);
 			return { fetched, acted, queued, partial: false, skipped: false, dryRun, outOfCredits: true };
 		}
 		const { complete, cursor: newCursor } = await persistResults(channelId, channel, page);
 		console.info(
-			`run ${channelId}: fetched=${fetched} skippedAlreadySeen=${skipped} staged=${decisions.length} deferred=${deferred} acted=${acted} queued=${queued}; scan ${complete ? `complete — cursor now ${newCursor}` : `continues next run (boundary ${channel.cursor})`}`
+			`run ${channelId}: fetched=${fetched} skippedAlreadySeen=${skipped} staged=${decisions.length} deferred=${deferred} acted=${acted} queued=${queued} rescan=${rescan !== undefined}; scan ${complete ? `complete — cursor now ${newCursor}` : `continues next run (boundary ${channel.cursor})`}`
 		);
 		return { fetched, acted, queued, partial: false, skipped: false, dryRun };
 	} catch (error) {

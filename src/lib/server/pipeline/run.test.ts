@@ -72,7 +72,7 @@ test('logs exact live counts including already-stored comments and the completed
 		await runChannel('channel');
 
 		expect(infoSpy).toHaveBeenCalledWith(
-			'run channel: fetched=3 skippedAlreadySeen=1 staged=2 deferred=0 acted=0 queued=0; scan complete — cursor now 2026-01-04T00:00:00.000Z'
+			'run channel: fetched=3 skippedAlreadySeen=1 staged=2 deferred=0 acted=0 queued=0 rescan=false; scan complete — cursor now 2026-01-04T00:00:00.000Z'
 		);
 	} finally {
 		infoSpy.mockRestore();
@@ -225,15 +225,21 @@ test('a planted history boundary rescores stored comments and charges under the 
 	mocks.state.channel.historyScanId = 'scan-req-1';
 	mocks.state.existingIds = ['comment'];
 	mocks.scoreComment.mockResolvedValue(moderation(0.9));
+	const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 
-	const result = await runChannel('channel');
+	try {
+		const result = await runChannel('channel');
 
-	expect(result).toMatchObject({ fetched: 1, acted: 1, dryRun: false });
-	expect(mocks.scoreComment).toHaveBeenCalled();
-	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', decidedBy: 'ai' })]);
-	expect(mocks.state.insertedCredits).toEqual([expect.objectContaining({ refType: 'comment', refId: 'comment#scan-req-1' })]);
-	// Completion clears the boundary AND its nonce together.
-	expect(mocks.state.channelUpdates).toContainEqual(expect.objectContaining({ historyBoundary: null, historyScanId: null }));
+		expect(result).toMatchObject({ fetched: 1, acted: 1, dryRun: false });
+		expect(mocks.scoreComment).toHaveBeenCalled();
+		expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', decidedBy: 'ai' })]);
+		expect(mocks.state.insertedCredits).toEqual([expect.objectContaining({ refType: 'comment', refId: 'comment#scan-req-1' })]);
+		expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('rescan=true; scan complete — cursor now'));
+		// Completion clears the boundary AND its nonce together.
+		expect(mocks.state.channelUpdates).toContainEqual(expect.objectContaining({ historyBoundary: null, historyScanId: null }));
+	} finally {
+		infoSpy.mockRestore();
+	}
 });
 
 test('a rescan channel with no scan id keeps the legacy plain comment anchor', async () => {
@@ -701,7 +707,7 @@ describe('credit consumption (billing)', () => {
 
 			expect(result.outOfCredits).toBe(true);
 			expect(warnSpy).toHaveBeenCalledWith(
-				'run channel: out of credits — 1 comment(s) deferred, cursor parked; fetched=1 skippedAlreadySeen=0'
+				'run channel: out of credits — 1 comment(s) deferred, cursor parked; fetched=1 skippedAlreadySeen=0 rescan=false'
 			);
 		} finally {
 			warnSpy.mockRestore();

@@ -17,6 +17,7 @@ import { channels, comments, feedbackDigests, feedbackFindings, feedbackHistoryC
 import { classifyFeedback, type FeedbackCategory } from '$lib/server/feedback';
 import { fetchFeedbackPage, pendingStoredFeedback, advanceFeedbackHistory, type FeedbackHistoryPage } from '$lib/server/feedbackHistory';
 import { concealEvidence } from '$lib/server/feedbackSanitize';
+import { clusterClassifiedClaims } from '$lib/server/feedbackCluster';
 import { groupFeedback } from '$lib/server/feedbackGroup';
 import { DeadlineExceededError, assertBeforeDeadline } from '$lib/server/http';
 import { consumeFeedbackCredit, hasChargeAnchor, orgIsMetered, type LedgerHandle } from '$lib/server/billing/ledger';

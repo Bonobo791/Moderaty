@@ -238,7 +238,7 @@
 			smallest configured bundle and the credits land on your balance automatically.
 		</p>
 		<p class="muted">
-			Automatic charges are processed at most once every 24 hours (and up to 3 times per
+			Automatic charges are processed at most once every 24 hours (and up to 30 times per
 			month). Expecting a large volume of comments? Buy credits in advance so scoring
 			isn't paused waiting on a top-up.
 		</p>

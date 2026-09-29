@@ -5,7 +5,7 @@
 //    concurrent triggers cannot both charge;
 //  - idempotency key per customer per day (`autotopup:{cus}:{date}:{attempt}`)
 //    so even a lost race collapses into one charge;
-//  - cooldown ≥24h and caps of 1/day, 3/month;
+//  - cooldown ≥24h and caps of 1/day, 30/month;
 //  - credits are granted ONLY by the payment_intent.succeeded webhook
 //    (fulfillAutoTopup), never at charge-creation time;
 //  - authentication_required (SCA) can never be retried off-session — the
@@ -24,7 +24,7 @@ import { refundUngrantablePayment } from '$lib/server/stripe/refunds';
 export const AUTO_TOPUP_DEFAULT_THRESHOLD = 100;
 const COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const MAX_PER_DAY = 1;
-const MAX_PER_MONTH = 3;
+const MAX_PER_MONTH = 30;
 const MAX_CONSECUTIVE_FAILURES = 2;
 // Stripe retries webhook deliveries for up to 3 days; a claim left in_flight
 // past that horizon means the webhook is definitively lost, so the sweep
@@ -33,7 +33,7 @@ const MAX_CONSECUTIVE_FAILURES = 2;
 const STALE_CLAIM_MS = 3 * 24 * 60 * 60 * 1000;
 // The reconciliation window must EXCEED the stale-claim horizon: a claim
 // only becomes stale at 72h, so the very PI it exists to recover was created
-// BEFORE the window. 7 days keeps the list tiny (3/month cap).
+// BEFORE the window. 7 days keeps the list tiny (30/month cap).
 const RECONCILE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface AutoTopupState {

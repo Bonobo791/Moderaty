@@ -202,9 +202,12 @@ export const GET: RequestHandler = async ({ url, request }) => {
 	const zeroCredit = await runSweep(dryRun, 'zero-credit account sweep', () => sweepZeroCreditAccounts(ZERO_CREDIT_SWEEP_BATCH, deadline));
 
 	// A failed sweep must never tick as success: ok reflects every sweep's
-	// outcome (each failure is also surfaced in its own *Error field and logged).
+	// outcome (each failure is also surfaced in its own *Error field and
+	// logged). Per-account zero-credit eval failures count too — they ride
+	// an answered 200 by design, so without them in `ok` a permanently
+	// throwing evaluation would retry forever, invisible (codeant).
 	const base = {
-		ok: !consent.error && !handles.error && !autoTopup.error && !stripeDeletions.error && !reversals.error && !zeroCredit.error,
+		ok: !consent.error && !handles.error && !autoTopup.error && !stripeDeletions.error && !reversals.error && !zeroCredit.error && !zeroCredit.value?.errors,
 		dryRun,
 		consentEmailsNulled: consent.value ?? 0,
 		sweepError: consent.error,

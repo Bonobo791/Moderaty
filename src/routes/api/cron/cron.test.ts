@@ -156,6 +156,10 @@ test('the zero-credit sweep shares the cron deadline and reports its counts', as
 	expect(typeof deadline).toBe('number');
 	expect(deadline).toBeGreaterThan(Date.now() - 30_000);
 	expect(await res.json()).toMatchObject({
+		// codeant: per-account eval failures must mark the tick failed —
+		// an ok:true response lets a permanently throwing evaluation retry
+		// forever, invisible to every scheduler.
+		ok: false,
 		zeroCreditAccountsChecked: 12,
 		zeroCreditWarningsSent: 3,
 		zeroCreditAccountsDeleted: 1,

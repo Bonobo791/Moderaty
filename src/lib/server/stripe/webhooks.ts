@@ -992,18 +992,11 @@ async function handlePaymentMethodDetached(paymentMethod: Stripe.PaymentMethod):
  * documented causal order, so a same-second tie reconciles from the LIVE
  * customer instead of sorting opaque ids (codex P1).
  */
-async function handleCustomerUpdated(customer: Stripe.Customer, eventCreated: number | undefined, eventId: string): Promise<void> {
-	const org = await findOrgForStripe(undefined, customer.id);
-	if (!org) {
-		console.info(`stripe: customer.updated for untracked customer ${customer.id} — nothing to sync`);
-		return;
-	}
-	const settings = customer.invoice_settings;
-	if (!settings || !('default_payment_method' in settings)) return;
-	// I2: out-of-range external data is a failed API call (codex P2). A
-	// garbage-but-numeric `created` persisted as the ordering cursor would mark
-	// every later legitimate update stale forever — accept only a positive safe
-	// integer no more than a day in the future (clock-skew tolerance).
+// I2: out-of-range external data is a failed API call (codex P2). A
+// garbage-but-numeric `created` persisted as the ordering cursor would mark
+// every later legitimate update stale forever — accept only a positive safe
+// integer no more than a day in the future (clock-skew tolerance).
+function assertEventCreated(eventCreated: number | undefined, eventId: string): asserts eventCreated is number {
 	if (
 		typeof eventCreated !== 'number' ||
 		!Number.isSafeInteger(eventCreated) ||
@@ -1012,6 +1005,34 @@ async function handleCustomerUpdated(customer: Stripe.Customer, eventCreated: nu
 	) {
 		throw new Error(`customer.updated ${eventId} carries an invalid envelope created timestamp: ${eventCreated}`);
 	}
+}
+
+const logAppliedDefaultPm = async (org: NonNullable<Awaited<ReturnType<typeof findOrgForStripe>>>, incomingId: string | null): Promise<void> => {
+	if (incomingId === org.stripeDefaultPmId) return;
+	// The disable was decided at row-lock time, so the accurate post-write row
+	// state — not the pre-write read — drives the log.
+	const after = await db
+		.select({ autoTopupEnabled: organizations.autoTopupEnabled, autoTopupState: organizations.autoTopupState })
+		.from(organizations)
+		.where(eq(organizations.id, org.id))
+		.get();
+	const change = incomingId ? `${org.stripeDefaultPmId} -> ${incomingId}` : `${org.stripeDefaultPmId} -> cleared`;
+	if (after?.autoTopupEnabled === 0 && after.autoTopupState === 'disabled' && org.autoTopupState !== 'disabled') {
+		console.error(`stripe: default card changed for org ${org.id} (${change}) — auto top-up DISABLED, fresh consent required`);
+	} else {
+		console.info(`stripe: default card changed for org ${org.id} (${change})`);
+	}
+};
+
+async function handleCustomerUpdated(customer: Stripe.Customer, eventCreated: number | undefined, eventId: string): Promise<void> {
+	const org = await findOrgForStripe(undefined, customer.id);
+	if (!org) {
+		console.info(`stripe: customer.updated for untracked customer ${customer.id} — nothing to sync`);
+		return;
+	}
+	const settings = customer.invoice_settings;
+	if (!settings || !('default_payment_method' in settings)) return;
+	assertEventCreated(eventCreated, eventId);
 	let lastCreated = org.stripeCustomerLastEventCreated;
 	if (lastCreated !== null && eventCreated < lastCreated) {
 		console.error(`stripe: ignoring stale customer.updated ${eventId} for org ${org.id} (created ${eventCreated}, last applied ${lastCreated})`);
@@ -1056,21 +1077,7 @@ async function handleCustomerUpdated(customer: Stripe.Customer, eventCreated: nu
 		const tied = lastCreated === eventCreated;
 		const incomingId = tied ? await fetchLiveDefaultPmId(customer.id, eventId) : eventDefaultPmId(customer, eventId);
 		if (await writeDefaultPm(incomingId, tied)) {
-			if (incomingId !== org.stripeDefaultPmId) {
-				// The disable was decided at row-lock time, so the accurate
-				// post-write row state — not the pre-write read — drives the log.
-				const after = await db
-					.select({ autoTopupEnabled: organizations.autoTopupEnabled, autoTopupState: organizations.autoTopupState })
-					.from(organizations)
-					.where(eq(organizations.id, org.id))
-					.get();
-				const change = incomingId ? `${org.stripeDefaultPmId} -> ${incomingId}` : `${org.stripeDefaultPmId} -> cleared`;
-				if (after?.autoTopupEnabled === 0 && after.autoTopupState === 'disabled' && org.autoTopupState !== 'disabled') {
-					console.error(`stripe: default card changed for org ${org.id} (${change}) — auto top-up DISABLED, fresh consent required`);
-				} else {
-					console.info(`stripe: default card changed for org ${org.id} (${change})`);
-				}
-			}
+			await logAppliedDefaultPm(org, incomingId);
 			return;
 		}
 		if (tied) break; // a reconcile losing means a strictly-newer cursor landed — nothing to redo
@@ -1290,37 +1297,44 @@ function subscriptionStatusMeaning(subscriptionId: string, status: string): 'liv
  * loud retry, while subscription-lifecycle events tolerate an invoice that
  * has not settled yet — the duplicate's own invoice.paid refunds it later.
  */
-async function teardownDuplicateSubscription(duplicateSubscriptionId: string, orgId: string, opts: { checkoutSessionId?: string; invoiceId?: string; paymentExpected: boolean }): Promise<void> {
+const cancelDuplicateSubscription = async (duplicateSubscriptionId: string, orgId: string): Promise<{ canceled: StripeRecord; live: StripeRecord | null }> => {
 	// Live-check before canceling: Stripe rejects canceling a subscription
 	// that is already terminal, and a redelivery or a late terminal event can
 	// land here after the first teardown did the job — the throw would fail
 	// the delivery before the refund leg below ever retries (cubic P1).
 	const live = await fetchLiveSubscription(duplicateSubscriptionId);
-	let canceled: StripeRecord;
 	if (!live) {
 		// resource_missing means the subscription is gone — canceling a
 		// subscription Stripe no longer has would 400 and fail the delivery
 		// before the refund leg ever retries (coderabbit).
 		console.info(`stripe: duplicate subscription ${duplicateSubscriptionId} for org ${orgId} is already gone — skipping the cancel`);
-		canceled = {};
-	} else {
-		const liveStatus = typeof live.status === 'string' && live.status.length > 0 ? live.status : undefined;
-		if (!liveStatus) throw new Error(`Stripe subscription ${duplicateSubscriptionId} carries no usable status`);
-		if (subscriptionStatusMeaning(duplicateSubscriptionId, liveStatus) === 'terminal') {
-			console.info(`stripe: duplicate subscription ${duplicateSubscriptionId} for org ${orgId} is already ${liveStatus} — skipping the second cancel`);
-			canceled = live;
-		} else {
-			canceled = asRecord(await getStripe().subscriptions.cancel(duplicateSubscriptionId));
-			console.error(`stripe: canceled duplicate subscription ${duplicateSubscriptionId} for org ${orgId} — only one live subscription per org is allowed`);
-		}
+		return { canceled: {}, live };
 	}
-	// Refund every paid payment the duplicate collected: the invoice the
-	// caller KNOWS about (an invoice.paid payload or the canceled record's
-	// latest) AND every other paid invoice on the subscription — a duplicate
-	// that survived a webhook outage can have billed multiple cycles, and
-	// refunding only the latest leaves the earlier charges with us (codex
-	// P1). Each refund anchors on a PER-PAYMENT idempotency key so retries
-	// and separate payments never collide.
+	const liveStatus = typeof live.status === 'string' && live.status.length > 0 ? live.status : undefined;
+	if (!liveStatus) throw new Error(`Stripe subscription ${duplicateSubscriptionId} carries no usable status`);
+	if (subscriptionStatusMeaning(duplicateSubscriptionId, liveStatus) === 'terminal') {
+		console.info(`stripe: duplicate subscription ${duplicateSubscriptionId} for org ${orgId} is already ${liveStatus} — skipping the second cancel`);
+		return { canceled: live, live };
+	}
+	const canceled = asRecord(await getStripe().subscriptions.cancel(duplicateSubscriptionId));
+	console.error(`stripe: canceled duplicate subscription ${duplicateSubscriptionId} for org ${orgId} — only one live subscription per org is allowed`);
+	return { canceled, live };
+};
+
+// Refund every paid payment the duplicate collected: the invoice the caller
+// KNOWS about (an invoice.paid payload or the canceled record's latest) AND
+// every other paid invoice on the subscription — a duplicate that survived a
+// webhook outage can have billed multiple cycles, and refunding only the
+// latest leaves the earlier charges with us (codex P1). Each refund anchors
+// on a PER-PAYMENT idempotency key so retries and separate payments never
+// collide.
+const refundDuplicateSubscriptionInvoices = async (
+	duplicateSubscriptionId: string,
+	orgId: string,
+	canceled: StripeRecord,
+	live: StripeRecord | null,
+	opts: { checkoutSessionId?: string; invoiceId?: string; paymentExpected: boolean }
+): Promise<void> => {
 	const invoiceIds = new Set<string>();
 	const knownInvoiceId = opts.invoiceId ?? stripeId(canceled.latest_invoice);
 	if (knownInvoiceId) invoiceIds.add(knownInvoiceId);
@@ -1372,6 +1386,11 @@ async function teardownDuplicateSubscription(duplicateSubscriptionId: string, or
 	if (!refundedAny && !honoredAny) {
 		console.info(`stripe: duplicate subscription ${duplicateSubscriptionId} for org ${orgId} canceled; no paid invoice payment to refund yet`);
 	}
+};
+
+async function teardownDuplicateSubscription(duplicateSubscriptionId: string, orgId: string, opts: { checkoutSessionId?: string; invoiceId?: string; paymentExpected: boolean }): Promise<void> {
+	const { canceled, live } = await cancelDuplicateSubscription(duplicateSubscriptionId, orgId);
+	await refundDuplicateSubscriptionInvoices(duplicateSubscriptionId, orgId, canceled, live, opts);
 }
 
 /**
@@ -1586,6 +1605,102 @@ async function handleUngrantableRefundUpdate(refund: Stripe.Refund): Promise<voi
 	throw new Error(`stripe: ungrantable refund ${refund.id} resolved ${refund.status} — MANUAL REFUND REQUIRED`);
 }
 
+const dispatchCheckoutEvent = async (event: Stripe.Event): Promise<boolean> => {
+	if (event.type === 'checkout.session.completed' || event.type === 'checkout.session.async_payment_succeeded') {
+		const result = await fulfillCheckout(event.data.object.id);
+		if (result === 'granted' || result === 'already') await markCheckoutAttemptFulfilled(event.data.object.id);
+		return true;
+	}
+	if (event.type === 'checkout.session.async_payment_failed') {
+		// A delayed-notification method finally failed: reverse whatever the
+		// session may have granted (idempotent — see reverseCharge).
+		await reverseSessionGrant(event.data.object.id);
+		return true;
+	}
+	return false;
+};
+
+const dispatchInvoiceEvent = async (event: Stripe.Event): Promise<boolean> => {
+	if (event.type === 'invoice.paid') await handleInvoicePaid(event);
+	else if (event.type === 'invoice.payment_failed') await handleInvoicePaymentFailed(event);
+	else return false;
+	return true;
+};
+
+const dispatchSubscriptionEvent = async (event: Stripe.Event): Promise<boolean> => {
+	if (event.type === 'customer.subscription.created' || event.type === 'customer.subscription.updated' || event.type === 'customer.subscription.deleted') {
+		await handleSubscriptionEvent(event);
+		return true;
+	}
+	return false;
+};
+
+const dispatchPaymentIntentEvent = async (event: Stripe.Event): Promise<boolean> => {
+	if (event.type === 'payment_intent.succeeded') await fulfillAutoTopup(event.data.object.id);
+	// Handled by the auto top-up module (needs the org's state columns).
+	else if (event.type === 'payment_intent.payment_failed') await handleAutoTopupFailure(event.data.object.id);
+	else return false;
+	return true;
+};
+
+const dispatchChargeEvent = async (event: Stripe.Event): Promise<boolean> => {
+	// Stripe's charge.refunded fires for partial refunds too, so reverseCharge
+	// verifies the charge is FULLY refunded (amounts compared) before
+	// reversing the grant. Partial refunds (refund.created) are intentionally
+	// unhandled, and reversing after the credits are spent can leave a
+	// negative balance — both documented v1 limitations
+	// (docs/stripe-checkout-webhooks.md §7).
+	if (event.type === 'charge.refunded') {
+		await reverseCharge(event.data.object.id, 'refund');
+		return true;
+	}
+	if (event.type === 'charge.refund.updated' || event.type === 'refund.updated' || event.type === 'refund.failed') {
+		// data.object is the Refund. We only escalate OUR ungrantable refunds
+		// (tagged reason:'ungrantable' at create): a pending or requires_action
+		// refund was ACKed as in-flight — if Stripe later reports a terminal
+		// failure the customer is still charged for an ungrantable purchase,
+		// and without this no signal exists (codex P1). refund.updated is the
+		// broader event — charge.refund.updated is emitted only for selected
+		// payment methods (CodeRabbit) — and refund.failed covers a refund
+		// that arrives already failed; all three route here (the status check
+		// filters), ordinary refunds stay quiet.
+		await handleUngrantableRefundUpdate(event.data.object);
+		return true;
+	}
+	if (event.type === 'charge.dispute.created') {
+		await reverseDispute(event.data.object.id);
+		return true;
+	}
+	if (event.type === 'charge.dispute.closed') {
+		await restoreWonDispute(event.data.object.id);
+		return true;
+	}
+	if (event.type === 'charge.dispute.funds_withdrawn' || event.type === 'charge.dispute.funds_reinstated') {
+		console.error(`stripe: dispute lifecycle event ${event.type} for ${event.data.object.id} — funds_* events need manual review`);
+		return true;
+	}
+	return false;
+};
+
+const dispatchStripeEvent = async (event: Stripe.Event): Promise<boolean> => {
+	if (event.type === 'payment_method.detached') {
+		await handlePaymentMethodDetached(event.data.object);
+		return true;
+	}
+	if (event.type === 'customer.updated') {
+		await handleCustomerUpdated(event.data.object, event.created, event.id);
+		return true;
+	}
+	const handled =
+		(await dispatchCheckoutEvent(event)) ||
+		(await dispatchInvoiceEvent(event)) ||
+		(await dispatchSubscriptionEvent(event)) ||
+		(await dispatchPaymentIntentEvent(event)) ||
+		(await dispatchChargeEvent(event));
+	if (!handled) console.error(`stripe: ignoring unhandled event type ${event.type}`);
+	return handled;
+};
+
 export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
 	// Claim a durable inbox lease before dispatch. Completed event IDs are
 	// skipped; a competing live worker fails loudly so Stripe retries it.
@@ -1599,97 +1714,8 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<boolean> {
 	// can never double-apply.
 	const leaseToken = await claimEvent(event);
 	if (!leaseToken) return true;
-	let handled: boolean;
 	try {
-		switch (event.type) {
-		case 'checkout.session.completed':
-		case 'checkout.session.async_payment_succeeded': {
-			const result = await fulfillCheckout(event.data.object.id);
-			if (result === 'granted' || result === 'already') await markCheckoutAttemptFulfilled(event.data.object.id);
-			handled = true;
-			break;
-		}
-		case 'checkout.session.async_payment_failed':
-			// A delayed-notification method finally failed: reverse whatever the
-			// session may have granted (idempotent — see reverseCharge).
-			await reverseSessionGrant(event.data.object.id);
-			handled = true;
-			break;
-		case 'invoice.paid':
-			await handleInvoicePaid(event);
-			handled = true;
-			break;
-		case 'invoice.payment_failed':
-			await handleInvoicePaymentFailed(event);
-			handled = true;
-			break;
-		case 'customer.subscription.created':
-		case 'customer.subscription.updated':
-		case 'customer.subscription.deleted':
-			await handleSubscriptionEvent(event);
-			handled = true;
-			break;
-		case 'payment_intent.succeeded':
-			await fulfillAutoTopup(event.data.object.id);
-			handled = true;
-			break;
-		case 'payment_intent.payment_failed':
-			// Handled by the auto top-up module (needs the org's state columns).
-			await handleAutoTopupFailure(event.data.object.id);
-			handled = true;
-			break;
-		case 'charge.refunded':
-			// Stripe's charge.refunded fires for partial refunds too, so
-			// reverseCharge verifies the charge is FULLY refunded (amounts
-			// compared) before reversing the grant. Partial refunds
-			// (refund.created) are intentionally unhandled, and
-			// reversing after the credits are spent can leave a negative balance
-			// — both documented v1 limitations (docs/stripe-checkout-webhooks.md §7).
-			await reverseCharge(event.data.object.id, 'refund');
-			handled = true;
-			break;
-		case 'charge.refund.updated':
-		case 'refund.updated':
-		case 'refund.failed': {
-			// data.object is the Refund. We only escalate OUR ungrantable
-			// refunds (tagged reason:'ungrantable' at create): a pending or
-			// requires_action refund was ACKed as in-flight — if Stripe later
-			// reports a terminal failure the customer is still charged for an
-			// ungrantable purchase, and without this no signal exists (codex
-			// P1). refund.updated is the broader event — charge.refund.updated
-			// is emitted only for selected payment methods (CodeRabbit) — and
-			// refund.failed covers a refund that arrives already failed; all
-			// three route here (the status check filters), ordinary refunds
-			// stay quiet.
-			await handleUngrantableRefundUpdate(event.data.object);
-			handled = true;
-			break;
-		}
-		case 'charge.dispute.created':
-			await reverseDispute(event.data.object.id);
-			handled = true;
-			break;
-		case 'charge.dispute.closed':
-			await restoreWonDispute(event.data.object.id);
-			handled = true;
-			break;
-		case 'charge.dispute.funds_withdrawn':
-		case 'charge.dispute.funds_reinstated':
-			console.error(`stripe: dispute lifecycle event ${event.type} for ${event.data.object.id} — funds_* events need manual review`);
-			handled = true;
-			break;
-		case 'payment_method.detached':
-			await handlePaymentMethodDetached(event.data.object);
-			handled = true;
-			break;
-		case 'customer.updated':
-			await handleCustomerUpdated(event.data.object, event.created, event.id);
-			handled = true;
-			break;
-			default:
-				console.error(`stripe: ignoring unhandled event type ${event.type}`);
-				handled = false;
-		}
+		const handled = await dispatchStripeEvent(event);
 		await markEventProcessed(event.id, leaseToken);
 		return handled;
 	} catch (error) {

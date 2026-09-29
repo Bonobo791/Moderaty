@@ -114,15 +114,15 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
 	try {
 		const token = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
 		await applyHumanIntent(commentId, action, token);
-		await finalizeHumanIntent(paramsId, commentId, action);
 	} catch (e) {
-		// Release the claim: the comment returns to 'pending', the staged
-		// intent row is dropped (nothing committed), and any hold a concurrent
-		// enforcement superseded on the strength of the claim is re-armed —
-		// one transaction, or the comment can sit 'pending' with a terminally-
-		// superseded hold: public on YouTube while the queue calls it held.
-		// A 'dispatched' hold stays dispatched — the reconcile loop re-applies
-		// it against the restored 'pending'.
+		// The remote write did not land: release the claim — the comment
+		// returns to 'pending', the staged intent row is dropped (nothing
+		// committed), and any hold a concurrent enforcement superseded on
+		// the strength of the claim is re-armed — one transaction, or the
+		// comment can sit 'pending' with a terminally-superseded hold:
+		// public on YouTube while the queue calls it held. A 'dispatched'
+		// hold stays dispatched — the reconcile loop re-applies it against
+		// the restored 'pending'.
 		await db.transaction(async (transaction) => {
 			await transaction
 				.update(comments)
@@ -144,6 +144,17 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
 		// message in the error-box instead of a bare 500 page (I12).
 		console.error('[queue] %s failed for comment %s', action, commentId, e);
 		return fail(500, { error: 'The YouTube action failed — the comment is back in the queue. Try again.' });
+	}
+	// The remote write landed — releasing the claim now would revert the
+	// local row and drop the intent while YouTube already reflects the
+	// action: a desync nothing could repair (codeant). Keep 'restoring' +
+	// the durable intent row; the reconcile sweep re-applies the idempotent
+	// write and commits the final status on its next run.
+	try {
+		await finalizeHumanIntent(paramsId, commentId, action);
+	} catch (e) {
+		console.error('[queue] %s reached YouTube but finalize failed for comment %s — the reconcile sweep will finish it', action, commentId, e);
+		return fail(500, { error: 'The action reached YouTube but is still being recorded — it resolves automatically.' });
 	}
 	return { success: SUCCESS_TEXT[action] };
 }

@@ -157,11 +157,12 @@ test('a dry run records a dry-run audit row and makes no YouTube call', async ()
 	);
 });
 
-test('a failed finalize releases the claim so the undo stays retryable', async () => {
+test('a failed finalize keeps the claim — the reconcile sweep converges the landed remote write', async () => {
 	await seedComment('c1', 'rejected', 'reject');
-	// The remote restore lands but the finalize transaction fails: the claim
-	// releases and its staged intent row is dropped — nothing half-recorded;
-	// the idempotent publish is repeated on retry.
+	// The remote restore lands but the finalize transaction fails (codeant):
+	// the claim and its intent row are KEPT — releasing them would revert
+	// the local row to 'rejected' while YouTube already shows the comment,
+	// a desync nothing could repair. The reconcile sweep finishes the commit.
 	await testDb().client.execute(
 		`CREATE TRIGGER fail_finalize BEFORE UPDATE ON comments
 		 WHEN NEW.status = 'approved' BEGIN SELECT RAISE(ABORT, 'simulated finalize failure'); END`
@@ -172,14 +173,14 @@ test('a failed finalize releases the claim so the undo stays retryable', async (
 		await testDb().client.execute('DROP TRIGGER fail_finalize');
 	}
 
-	expect(await commentRow('c1')).toMatchObject({ status: 'rejected', decidedBy: 'ai' });
-	expect((await testDb().db.select().from(auditLog).all()).filter((row) => row.action === 'restore')).toHaveLength(0);
+	expect(await commentRow('c1')).toMatchObject({ status: 'restoring' });
+	expect((await testDb().db.select().from(auditLog).all()).filter((row) => row.action === 'restore')).toHaveLength(1);
 
-	// The retry re-applies the same idempotent write and then finalizes.
-	const res = await undo('c1');
+	// Recovery needs no user retry: the reconcile sweep re-applies the
+	// idempotent publish and commits the final status.
+	const { runEnforcement } = await import('$lib/server/pipeline/enforcement');
+	await runEnforcement('UC1', 'access-token', undefined, null, 0);
 
-	expect(res).toMatchObject({ success: expect.stringContaining('estored') });
-	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(2);
 	expect(await commentRow('c1')).toMatchObject({ status: 'approved', decidedBy: 'human' });
 	expect(await testDb().db.select().from(auditLog).all()).toContainEqual(
 		expect.objectContaining({ commentId: 'c1', action: 'restore', reason: 'undo of reject', actor: 'user' })

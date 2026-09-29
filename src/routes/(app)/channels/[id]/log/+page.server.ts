@@ -220,12 +220,12 @@ export const actions = {
 		try {
 			const token = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
 			await applyHumanIntent(commentId, 'restore', token);
-			await finalizeHumanIntent(params.id, commentId, 'restore');
 		} catch (e) {
-			// Release a fresh claim so the failed restore stays retryable and
-			// drop its staged intent row — nothing committed. A resumed attempt
-			// keeps its claim and its intent row: they belong to the earlier
-			// crash the reconcile sweep still owes a finish.
+			// The remote write did not land: release a fresh claim so the
+			// failed restore stays retryable and drop its staged intent row —
+			// nothing committed. A resumed attempt keeps its claim and its
+			// intent row: they belong to the earlier crash the reconcile
+			// sweep still owes a finish.
 			if (!resuming) {
 				await db.transaction(async (tx) => {
 					await tx
@@ -237,6 +237,11 @@ export const actions = {
 			}
 			throw e;
 		}
+		// The publish landed — releasing the claim now would revert the local
+		// row while YouTube already shows the comment, with no record left to
+		// repair the desync (codeant). 'restoring' + the durable intent row
+		// are exactly what the reconcile sweep needs to finish the commit.
+		await finalizeHumanIntent(params.id, commentId, 'restore');
 		return { success: 'Restored — recorded in audit log.' };
 	},
 	/**

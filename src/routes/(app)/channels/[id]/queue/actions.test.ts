@@ -233,6 +233,34 @@ test('a failed human action re-arms a hold enforcement superseded mid-claim', as
 	expect((res as { data?: { error?: string } }).data?.error).not.toContain('youtube 500');
 });
 
+test('a remote write that lands but fails to finalize keeps the claim for the reconcile sweep', async () => {
+	// codeant: releasing the claim here would revert the comment to 'pending'
+	// and drop the intent row while YouTube already reflects the action —
+	// local state diverges with nothing left to repair it. 'restoring' + the
+	// durable intent row let the reconcile sweep re-apply and commit.
+	mocks.env.DRY_RUN = 'false';
+	await seedComment('c1', 'UC1');
+	await testDb().client.execute(
+		`CREATE TRIGGER fail_finalize BEFORE UPDATE ON comments
+		 WHEN NEW.status = 'approved' BEGIN SELECT RAISE(ABORT, 'simulated finalize failure'); END`
+	);
+	vi.spyOn(console, 'error').mockImplementation(() => {});
+	let res: unknown;
+	try {
+		res = await act('approve', { commentId: 'c1' });
+	} finally {
+		await testDb().client.execute('DROP TRIGGER fail_finalize');
+	}
+	expect(res).toMatchObject({ status: 500 });
+	expect(await commentRow('c1')).toMatchObject({ status: 'restoring' });
+	expect(await auditRows()).toContainEqual(expect.objectContaining({ commentId: 'c1', action: 'approve', actor: 'user' }));
+
+	// The reconcile sweep converges it — no user retry needed.
+	const { runEnforcement } = await import('$lib/server/pipeline/enforcement');
+	await runEnforcement('UC1', 'access-token', undefined, null, 0);
+	expect(await commentRow('c1')).toMatchObject({ status: 'approved', decidedBy: 'human' });
+});
+
 test('a failed human action leaves a dispatched hold for the reconcile loop', async () => {
 	// A 'dispatched' hold may be in flight to YouTube — the reconcile loop
 	// re-verifies it against the restored 'pending' comment. Only

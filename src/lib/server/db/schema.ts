@@ -595,6 +595,25 @@ export const stripeDeletionOutbox = sqliteTable('stripe_deletion_outbox', {
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 });
 
+// Google refresh-token revocations still owed after account teardown — the
+// same durability contract as stripe_deletion_outbox: the encrypted grant
+// is the only thing that can revoke the grant, so the erase transaction
+// persists it here BEFORE the channel row dies; a post-commit crash or a
+// deadline-killed drain can then never orphan a live grant (codex). The
+// row is deleted once Google confirms; the cron sweep retries failures.
+// NOT unique on channelId: a detached channel reconnected by a teammate and
+// erased again owes a second, independent revocation.
+export const googleRevocationOutbox = sqliteTable('google_revocation_outbox', {
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	channelId: text('channel_id').notNull(), // erased channel — log identity only
+	refreshTokenEnc: text('refresh_token_enc').notNull(), // AES-GCM ciphertext, deleted with the row on success
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	attempts: integer('attempts').notNull().default(0),
+	lastAttemptAt: text('last_attempt_at'),
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+});
+
 export const stripeEvents = sqliteTable('stripe_events', {
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	id: integer('id').primaryKey({ autoIncrement: true }),

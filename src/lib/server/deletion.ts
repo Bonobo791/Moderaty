@@ -17,7 +17,7 @@ import { and, asc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizz
 import type Stripe from 'stripe';
 
 import { db } from '$lib/server/db';
-import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, stripeLifetimeSlots, users } from '$lib/server/db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, googleRevocationOutbox, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, stripeLifetimeSlots, users } from '$lib/server/db/schema';
 import { decrypt } from '$lib/server/crypto';
 import { revokeGoogleToken } from '$lib/server/google';
 import { getStripe } from '$lib/server/stripe/client';
@@ -35,6 +35,16 @@ export const WIPED_REFRESH_TOKEN = 'erased:account-deletion';
 export interface ErasedChannelGrant {
 	id: string;
 	refreshTokenEnc: string;
+	/** The durable revocation-obligation row written inside the erase transaction — deleted once Google confirms. */
+	outboxId: number;
+}
+
+/** Records a failed revocation attempt so the outbox row backs off for the next pass. */
+async function markRevocationAttempt(outboxId: number, attempts = 0): Promise<void> {
+	await db
+		.update(googleRevocationOutbox)
+		.set({ attempts: attempts + 1, lastAttemptAt: new Date().toISOString() })
+		.where(eq(googleRevocationOutbox.id, outboxId));
 }
 
 /**
@@ -42,19 +52,30 @@ export interface ErasedChannelGrant {
  * (channels.userId plus every channel in a dissolved org — those grants
  * belong to THIS user), honoring the YouTube API ToS. Shared by the
  * account page's immediate deletion and the zero-credit retention sweep.
- * A revocation failure is logged loudly but never blocks deletion — the
- * encrypted token is erased either way, orphaning the grant. Channels in
- * surviving team orgs keep their rows; their dead token fails loudly in
- * cron until a teammate reconnects.
+ * A revocation failure is logged loudly and its outbox row marked — the
+ * obligation is durable, so the cron retry (`retryGoogleRevocations`)
+ * converges it instead of orphaning the grant. Channels in surviving team
+ * orgs keep their rows; their dead token fails loudly in cron until a
+ * teammate reconnects.
  *
  * @param grants - The grants `deleteUserRecords` captured inside its transaction
  * @param context - Server-log prefix identifying the caller (e.g. 'account deletion')
+ * @param deadline - Shared run budget: a spent budget defers the remaining
+ *   grants to the outbox (loudly) rather than dying mid-drain on a
+ *   serverless hard limit (codex).
  */
-export async function revokeChannelGrants(grants: ErasedChannelGrant[], context: string): Promise<void> {
-	for (const ch of grants) {
+export async function revokeChannelGrants(grants: ErasedChannelGrant[], context: string, deadline?: number): Promise<void> {
+	for (let i = 0; i < grants.length; i += 1) {
+		const ch = grants[i];
+		if (deadline !== undefined && Date.now() >= deadline) {
+			console.error(`${context}: shared deadline reached — ${grants.length - i} grant revocation(s) stay queued in the revocation outbox`);
+			break;
+		}
 		try {
-			await revokeGoogleToken(decrypt(ch.refreshTokenEnc), `${context} channel ${ch.id}`);
+			await revokeGoogleToken(decrypt(ch.refreshTokenEnc), `${context} channel ${ch.id}`, deadline);
+			await db.delete(googleRevocationOutbox).where(eq(googleRevocationOutbox.id, ch.outboxId));
 		} catch (cause) {
+			await markRevocationAttempt(ch.outboxId);
 			console.error('token revocation failed for channel, deleting anyway:', ch.id, cause);
 		}
 	}
@@ -416,7 +437,7 @@ export async function deleteUserRecords(userId: string, options?: DeleteUserOpti
 		// orgs' channels (connected or orphan — a dissolving org is
 		// sole-member, so every grant in it belongs to this user) plus every
 		// channel this account connected into a surviving org.
-		erasedGrants = await tx
+		const capturedGrants = await tx
 			.select({ id: channels.id, refreshTokenEnc: channels.refreshTokenEnc })
 			.from(channels)
 			.where(
@@ -429,6 +450,25 @@ export async function deleteUserRecords(userId: string, options?: DeleteUserOpti
 				)
 			)
 			.all();
+		// Persist the revocation obligation BEFORE the channel rows die: the
+		// ciphertext is the only thing that can revoke the grant at Google,
+		// so without this row a post-commit crash (or a deadline-killed
+		// drain) orphans a live grant forever (codex). Drained post-commit by
+		// `revokeChannelGrants` and retried by `retryGoogleRevocations`.
+		if (capturedGrants.length) {
+			const queued = await tx
+				.insert(googleRevocationOutbox)
+				.values(capturedGrants.map((g) => ({ channelId: g.id, refreshTokenEnc: g.refreshTokenEnc })))
+				.returning({ id: googleRevocationOutbox.id, channelId: googleRevocationOutbox.channelId });
+			const outboxByChannel = new Map(queued.map((row) => [row.channelId, row.id]));
+			erasedGrants = capturedGrants.map((grant) => {
+				const outboxId = outboxByChannel.get(grant.id);
+				// A missing obligation row means the insert silently dropped the
+				// grant — abort the whole erase rather than orphan it.
+				if (outboxId === undefined) throw new Error(`account deletion: revocation outbox insert dropped channel ${grant.id}`);
+				return { ...grant, outboxId };
+			});
+		}
 		await deleteChannelRecords(tx, channelIds);
 		// Detach team channels this account connected: the row and history stay
 		// with the team; the dead grant is wiped so nothing silently moderates.
@@ -544,6 +584,46 @@ export async function deleteUserRecords(userId: string, options?: DeleteUserOpti
 // (wrong Stripe mode, already-deleted customer) must not occupy the bounded
 // batch on every invocation and starve newer obligations.
 const DELETION_RETRY_BACKOFF_MS = 60 * 60 * 1000;
+
+/**
+ * Retries Google grant revocations owed by account teardowns — the outbox
+ * row was written inside the erase transaction, so a post-commit crash or a
+ * deadline-killed drain can never orphan a live grant (codex). Bounded per
+ * invocation (I10), oldest-due first with the shared hourly backoff; a row
+ * is removed only after Google confirms the revocation.
+ *
+ * @returns The number of grants confirmed revoked
+ */
+export async function retryGoogleRevocations(limit = 10, deadline?: number): Promise<number> {
+	const backoffCutoff = new Date(Date.now() - DELETION_RETRY_BACKOFF_MS).toISOString();
+	const rows = await db
+		.select()
+		.from(googleRevocationOutbox)
+		.where(or(isNull(googleRevocationOutbox.lastAttemptAt), lt(googleRevocationOutbox.lastAttemptAt, backoffCutoff)))
+		.orderBy(asc(googleRevocationOutbox.lastAttemptAt), asc(googleRevocationOutbox.id))
+		.limit(limit)
+		.all();
+	let revoked = 0;
+	for (let i = 0; i < rows.length; i += 1) {
+		const row = rows[i];
+		// Same shared-budget guard as the Stripe outbox: each revocation has
+		// its own timeout, so the sweep must stop before the remaining calls
+		// would eat the whole serverless window (codex).
+		if (deadline !== undefined && Date.now() >= deadline) {
+			console.error(`google revocation outbox stopped early: shared deadline expired — ${rows.length - i} row(s) deferred to the next invocation`);
+			break;
+		}
+		try {
+			await revokeGoogleToken(decrypt(row.refreshTokenEnc), `google revocation retry channel ${row.channelId}`, deadline);
+			await db.delete(googleRevocationOutbox).where(eq(googleRevocationOutbox.id, row.id));
+			revoked += 1;
+		} catch (error) {
+			await markRevocationAttempt(row.id, row.attempts);
+			console.error(`google revocation retry ${row.attempts + 1} failed for channel ${row.channelId}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+	return revoked;
+}
 
 export async function retryStripeCustomerDeletions(limit = 10, deadline?: number): Promise<number> {
 	// Fair rotation (codex): never-attempted rows first (NULL lastAttemptAt —

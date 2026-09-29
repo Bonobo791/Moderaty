@@ -4,7 +4,7 @@ import { and, asc, desc, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
-import { nullExpiredConsentEmails, nullExpiredHandles, retryStripeCustomerDeletions } from '$lib/server/deletion';
+import { nullExpiredConsentEmails, nullExpiredHandles, retryGoogleRevocations, retryStripeCustomerDeletions } from '$lib/server/deletion';
 import { sweepAutoTopUp } from '$lib/server/billing/autotopup';
 import { sweepStalePendingReversals } from '$lib/server/billing/ledger';
 import { DeadlineExceededError } from '$lib/server/http';
@@ -165,7 +165,7 @@ async function runClaimedChannel(
 const orZero = (value: number | null | undefined): number => value ?? 0;
 
 /**
- * The six maintenance sweeps that share the tick's budget, each isolated by
+ * The maintenance sweeps that share the tick's budget, each isolated by
  * runSweep so one failure never stops the rest. Returns the `base` payload
  * the response builds on.
  */
@@ -186,6 +186,10 @@ const runCronSweeps = async (dryRun: boolean, deadline: number, startedAt: numbe
 	// teardown whose first attempt hit a Stripe outage. Bounded per
 	// invocation (I10); a row is removed only after Stripe confirms.
 	const stripeDeletions = await runSweep(dryRun, 'stripe deletion outbox retry', () => retryStripeCustomerDeletions(10, deadline));
+	// Google revocation outbox retry: grants owed revocation from account
+	// teardown are durable BEFORE the channel dies — a killed post-commit
+	// drain must never orphan a live grant (codex). Bounded per invocation.
+	const googleRevocations = await runSweep(dryRun, 'google revocation outbox retry', () => retryGoogleRevocations(10, deadline));
 	// Stale pending-reversal sweep: refund/dispute obligations whose grant
 	// never arrived within 14 days are dead weight — dropped loudly, bounded.
 	const reversals = await runSweep(dryRun, 'pending-reversal sweep', () => sweepStalePendingReversals());
@@ -200,7 +204,7 @@ const runCronSweeps = async (dryRun: boolean, deadline: number, startedAt: numbe
 	// an answered 200 by design, so without them in `ok` a permanently
 	// throwing evaluation would retry forever, invisible (codeant).
 	const base = {
-		ok: !consent.error && !handles.error && !autoTopup.error && !stripeDeletions.error && !reversals.error && !zeroCredit.error && !zeroCredit.value?.errors,
+		ok: !consent.error && !handles.error && !autoTopup.error && !stripeDeletions.error && !googleRevocations.error && !reversals.error && !zeroCredit.error && !zeroCredit.value?.errors,
 		dryRun,
 		consentEmailsNulled: orZero(consent.value),
 		sweepError: consent.error,
@@ -211,6 +215,8 @@ const runCronSweeps = async (dryRun: boolean, deadline: number, startedAt: numbe
 		autoTopupSweepError: autoTopup.error,
 		stripeCustomersDeleted: orZero(stripeDeletions.value),
 		stripeDeletionSweepError: stripeDeletions.error,
+		googleGrantsRevoked: orZero(googleRevocations.value),
+		googleRevocationSweepError: googleRevocations.error,
 		pendingReversalsDropped: orZero(reversals.value),
 		pendingReversalSweepError: reversals.error,
 		zeroCreditAccountsChecked: orZero(zeroCredit.value?.evaluated),

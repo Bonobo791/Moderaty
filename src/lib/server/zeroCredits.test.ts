@@ -5,16 +5,20 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 
 const mocks = vi.hoisted(() => ({
-	env: { APP_URL: 'https://moderaty.app' } as Record<string, string | undefined>,
-	sendMailjetMessage: vi.fn()
+	env: { APP_URL: 'https://moderaty.app', ENCRYPTION_KEY: 'zc-test-key' } as Record<string, string | undefined>,
+	sendMailjetMessage: vi.fn(),
+	revokeGoogleToken: vi.fn()
 }));
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
 vi.mock('./mailjet', () => ({ sendMailjetMessage: mocks.sendMailjetMessage }));
 
+vi.mock('./google', () => ({ revokeGoogleToken: mocks.revokeGoogleToken }));
+
+import { encrypt } from './crypto';
 import { setupTestDb, testDb } from './testdb';
-import { memberships, organizations, users } from './db/schema';
+import { channels, googleRevocationOutbox, memberships, organizations, stripeSubscriptionPeriods, users } from './db/schema';
 import { DeadlineExceededError } from './http';
 import { buildZeroCreditDeletedEmail, buildZeroCreditWarningEmail, sweepZeroCreditAccounts } from './zeroCredits';
 
@@ -33,6 +37,8 @@ setupTestDb([
 	'rules',
 	'credit_transactions',
 	'stripe_deletion_outbox',
+	'google_revocation_outbox',
+	'stripe_subscription_periods',
 	'stripe_lifetime_slots',
 	'stripe_lifetime_entitlements',
 	'feedback_digests',
@@ -89,6 +95,8 @@ beforeEach(() => {
 	mocks.env.APP_URL = 'https://moderaty.app';
 	mocks.sendMailjetMessage.mockReset();
 	mocks.sendMailjetMessage.mockResolvedValue({ messageId: 1, messageUuid: 'uuid-1' });
+	mocks.revokeGoogleToken.mockReset();
+	mocks.revokeGoogleToken.mockResolvedValue(undefined);
 });
 
 describe('eligibility', () => {
@@ -108,7 +116,7 @@ describe('eligibility', () => {
 		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
 	});
 
-	test.each(['active', 'trialing', 'past_due', 'unpaid'])(
+	test.each(['active', 'trialing', 'past_due'])(
 		'a metered org with a live subscription status (%s) keeps the account out of the countdown',
 		async (status) => {
 			await seedAccount('u1', { creditsRemaining: 0, stripeSubscriptionId: 'sub_1', subscriptionStatus: status });
@@ -117,6 +125,49 @@ describe('eligibility', () => {
 			expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
 		}
 	);
+
+	test("an 'unpaid' subscription does NOT hold the countdown — dunning is over, no payment is in flight", async () => {
+		// codex: Stripe documents 'unpaid' as the terminal dunning state —
+		// payments are no longer attempted and access should be revoked.
+		// Treating it as "live" would exempt a permanently lapsed paid
+		// account from the Terms §17 deletion forever.
+		await seedAccount('u1', { plan: 'hosted', creditsRemaining: 0, stripeSubscriptionId: 'sub_1', subscriptionStatus: 'unpaid' });
+		const result = await sweepZeroCreditAccounts();
+		expect(result.errors).toBe(0);
+		expect((await userRow('u1'))!.zeroCreditsSince).not.toBeNull();
+	});
+
+	test('an org whose subscription never completed is NOT billing-engaged — the never-purchased exemption holds', async () => {
+		// codex: customer.subscription.created stores stripeSubscriptionId even
+		// for 'incomplete' subs (payment never succeeded). A bare id is not
+		// engagement — only a hosted plan, a granted balance, or a paid
+		// subscription period proves the account purchased.
+		await seedAccount('u1', { creditsRemaining: null, stripeSubscriptionId: 'sub_1', subscriptionStatus: 'incomplete' });
+		const result = await sweepZeroCreditAccounts();
+		expect(result.errors).toBe(0);
+		expect(await userRow('u1')).toMatchObject({ zeroCreditsSince: null, zeroCreditsNotifiedAt: null });
+		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+	});
+
+	test('a canceled subscription WITH a paid period is still billing-engaged — the countdown applies', async () => {
+		// The subscriber lapsed but DID purchase: §17 deletion applies to
+		// billing-engaged accounts, so the clock must start.
+		await seedAccount('u1', { creditsRemaining: null, stripeSubscriptionId: 'sub_1', subscriptionStatus: 'canceled' });
+		await testDb().db.insert(stripeSubscriptionPeriods).values({
+			orgId: 'org-u1',
+			subscriptionId: 'sub_1',
+			invoiceId: 'in_1',
+			periodKey: '2026-01',
+			periodStart: daysAgo(60),
+			periodEnd: daysAgo(30),
+			includedCredits: 100,
+			consumedCredits: 0,
+			status: 'paid'
+		});
+		const result = await sweepZeroCreditAccounts();
+		expect(result.errors).toBe(0);
+		expect((await userRow('u1'))!.zeroCreditsSince).not.toBeNull();
+	});
 
 	test('a billing-engaged account at zero stamps the clock — and sends NO e-mail on day 0', async () => {
 		await seedAccount('u1', { creditsRemaining: 0 });
@@ -386,6 +437,53 @@ describe('deletion', () => {
 		// coderabbit: the warning stamp must die with the countdown — kept, it
 		// would satisfy the next countdown's deletion gate with no fresh warning.
 		expect(user?.zeroCreditsNotifiedAt).toBeNull();
+	});
+
+	test('the erase queues each grant revocation in the outbox and drains it inside the shared deadline', async () => {
+		// codex: the post-commit drain used to run unbounded with no durable
+		// obligation — a function killed mid-drain orphaned live Google grants
+		// forever. The outbox row is written in-tx; the drain deletes it on
+		// success and carries the caller's deadline through to the request.
+		await seedAccount('u1', { creditsRemaining: 0 });
+		await testDb().db.insert(channels).values({ id: 'UC-1', userId: 'u1', orgId: 'org-u1', title: 'chan', refreshTokenEnc: encrypt('grant-token') });
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
+		mocks.revokeGoogleToken.mockResolvedValue(undefined);
+
+		const deadline = Date.now() + 60_000;
+		const result = await sweepZeroCreditAccounts(50, deadline);
+
+		expect(result.deleted).toBe(1);
+		expect(mocks.revokeGoogleToken).toHaveBeenCalledWith('grant-token', expect.stringContaining('UC-1'), deadline);
+		expect(await testDb().db.select().from(googleRevocationOutbox).all()).toEqual([]);
+	});
+
+	test('a deadline spent mid-drain leaves the revocation queued — never a silent orphan', async () => {
+		// codex: the drain used to run past the function's hard limit; now a
+		// spent budget defers loudly and the outbox keeps the obligation for
+		// the cron retry.
+		await seedAccount('u1', { creditsRemaining: 0 });
+		await testDb().db.insert(channels).values([
+			{ id: 'UC-1', userId: 'u1', orgId: 'org-u1', title: 'one', refreshTokenEnc: encrypt('tok-1') },
+			{ id: 'UC-2', userId: 'u1', orgId: 'org-u1', title: 'two', refreshTokenEnc: encrypt('tok-2') }
+		]);
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
+		let clock = Date.now();
+		const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+		// The first revocation resolves but burns the rest of the budget.
+		mocks.revokeGoogleToken.mockImplementation(async () => {
+			clock += 120_000;
+		});
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const result = await sweepZeroCreditAccounts(50, clock + 30_000);
+			expect(result.deleted).toBe(1);
+			expect(mocks.revokeGoogleToken).toHaveBeenCalledTimes(1);
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('1 grant revocation(s) stay queued'));
+			expect(await testDb().db.select().from(googleRevocationOutbox).all()).toHaveLength(1);
+		} finally {
+			nowSpy.mockRestore();
+			errorSpy.mockRestore();
+		}
 	});
 
 	test('a purchase landing inside the deletion transaction aborts the erase', async () => {

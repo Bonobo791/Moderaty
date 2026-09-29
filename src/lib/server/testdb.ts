@@ -377,6 +377,14 @@ export async function createTestDb(): Promise<TestDb> {
 			last_attempt_at TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
+		`CREATE TABLE google_revocation_outbox (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			channel_id TEXT NOT NULL,
+			refresh_token_enc TEXT NOT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			last_attempt_at TEXT,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`,
 		`CREATE TABLE stripe_events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			event_id TEXT NOT NULL UNIQUE,

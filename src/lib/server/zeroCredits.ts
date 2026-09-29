@@ -17,7 +17,7 @@
 import { and, asc, eq, isNull, notLike, or, sql } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 
-import { effectiveBalanceSql, isUnmeteredPlan, orgRowIsMetered } from '$lib/server/billing/ledger';
+import { effectiveBalanceSql, isUnmeteredPlan, paidSubscriptionPeriodExistsSql } from '$lib/server/billing/ledger';
 import { isActiveSubscriptionStatus } from '$lib/server/billing/plans';
 import { db } from '$lib/server/db';
 import { memberships, organizations, users } from '$lib/server/db/schema';
@@ -94,19 +94,23 @@ export function buildZeroCreditDeletedEmail(input: { name: string }): ZeroCredit
 interface OrgFunding {
 	orgId: string;
 	plan: string;
-	stripeSubscriptionId: string | null;
 	subscriptionStatus: string | null;
 	creditsRemaining: number | null;
 	balance: number;
+	/** EXISTS(...) → 0/1: the org ever received a paid subscription period. */
+	hasPaidPeriod: number;
 }
 
 /**
  * A metered org is "unfunded" only when its effective balance is gone AND
  * no live subscription state says billing is active (a renewal invoice in
- * flight — 'past_due'/'unpaid' — must never nuke the account mid-retry).
+ * flight — 'past_due' — must never nuke the account mid-retry). 'unpaid' is
+ * NOT live: Stripe stops attempting payments and access should be revoked
+ * (docs/stripe-auto-topup.md §3.1), so it must not suppress the countdown
+ * (codex).
  */
 function orgIsUnfunded(org: OrgFunding): boolean {
-	return org.balance <= 0 && !isActiveSubscriptionStatus(org.subscriptionStatus);
+	return org.balance <= 0 && !(isActiveSubscriptionStatus(org.subscriptionStatus) && org.subscriptionStatus !== 'unpaid');
 }
 
 interface SweepUser {
@@ -157,10 +161,10 @@ async function fundingState(
 		.select({
 			orgId: organizations.id,
 			plan: organizations.plan,
-			stripeSubscriptionId: organizations.stripeSubscriptionId,
 			subscriptionStatus: organizations.stripeSubscriptionStatus,
 			creditsRemaining: organizations.creditsRemaining,
-			balance: effectiveBalanceSql(nowIso)
+			balance: effectiveBalanceSql(nowIso),
+			hasPaidPeriod: paidSubscriptionPeriodExistsSql()
 		})
 		.from(memberships)
 		.innerJoin(organizations, eq(memberships.orgId, organizations.id))
@@ -168,7 +172,14 @@ async function fundingState(
 		.all();
 	if (!orgs.length) return 'corrupt';
 	if (orgs.some((org) => isUnmeteredPlan(org.plan))) return 'funded'; // lifetime exempts the account
-	const engaged = orgs.filter(orgRowIsMetered);
+	// 'broke' requires every BILLING-ENGAGED org unfunded. Engagement needs
+	// real purchase evidence — the hosted plan, a granted balance, or a paid
+	// subscription period. A bare stripeSubscriptionId is NOT evidence:
+	// customer.subscription.created stores it for 'incomplete' subs whose
+	// payment never succeeded, so a checkout that never converted would
+	// otherwise land a never-purchased account in the deletion countdown
+	// (codex — §17 applies only to billing-engaged accounts).
+	const engaged = orgs.filter((org) => org.plan === 'hosted' || org.creditsRemaining !== null || org.hasPaidPeriod);
 	return engaged.length > 0 && engaged.every(orgIsUnfunded) ? 'broke' : 'funded';
 }
 
@@ -300,9 +311,10 @@ async function claimAndDelete(user: SweepUser, since: string, ageMs: number, dea
 		}
 		throw cause;
 	}
-	// Post-commit work runs to completion even past the deadline: the account
-	// is already gone — abandoning revocation would orphan live Google grants.
-	await revokeChannelGrants(grants, 'zero-credit deletion');
+	// Post-commit revocation drains within the shared budget: each obligation
+	// is durable in the revocation outbox, so a spent deadline defers loudly
+	// to the cron retry instead of orphaning live Google grants (codex).
+	await revokeChannelGrants(grants, 'zero-credit deletion', deadline);
 	// The completion notice is best-effort — the erase is already committed;
 	// a mail failure must not masquerade as a failed deletion.
 	try {

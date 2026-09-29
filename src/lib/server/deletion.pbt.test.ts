@@ -28,7 +28,8 @@ const WIPE = [
 	'invites',
 	'memberships',
 	'organizations',
-	'users'
+	'users',
+	'google_revocation_outbox'
 ];
 
 setupTestDb(WIPE);

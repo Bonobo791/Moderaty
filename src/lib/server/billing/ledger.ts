@@ -79,6 +79,21 @@ export function effectiveBalanceSql(nowIso: string) {
 }
 
 /**
+ * True when the org ever received a paid subscription period — the durable
+ * receipt of billing engagement. A bare `stripeSubscriptionId` is NOT:
+ * `customer.subscription.created` stores it even for 'incomplete' subs whose
+ * payment never ran, so the id alone must never mark an account as having
+ * purchased (codex — the never-purchased retention exemption depends on it).
+ * A 'void' period proves nothing; paid/disputed/refunded all mean money moved.
+ */
+export function paidSubscriptionPeriodExistsSql() {
+	return sql<number>`EXISTS (
+		SELECT 1 FROM stripe_subscription_periods AS p
+		WHERE p.org_id = organizations.id AND p.status != 'void'
+	)`;
+}
+
+/**
  * Retrieves an organization's current credit balance.
  *
  * @param orgId - The organization identifier

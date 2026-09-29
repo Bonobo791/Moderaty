@@ -19,16 +19,88 @@
 // scheduler for container deployments — a Coolify Scheduled Task runs
 // `APP_URL=http://127.0.0.1:3000 node scripts/dev-cron.mjs --once` every
 // minute inside the app container, replacing the Netlify Scheduled Function.
+// Coolify emails on every non-zero exit, so the exit code is the alert
+// channel: the script exits 1 only for operator-actionable failures (endpoint
+// unreachable/non-OK, a failed sweep, a lost bookkeeping write, a channel
+// error category the channel owner cannot fix). Channel-owner-actionable
+// states — 'credits' (top-up needed) and 'token' (reconnect needed) — are
+// persistent and dashboard-visible, so they log a warning and exit 0 instead
+// of emailing once a minute until the owner acts.
+//
+// Dead-man's switch: set HEALTHCHECK_PING_URL (healthchecks.io, Uptime Kuma
+// push monitor, …) and every tick the endpoint answers pings it. A tick that
+// threw does NOT ping, so the monitor alerts once on silence — which also
+// covers the failure a non-zero exit can never report: the task never ran.
 
 const DEFAULT_INTERVAL_MS = 60_000;
+
+// Channel-run failure categories only the channel owner can resolve:
+// 'credits' (buy a bundle / fix auto top-up) and 'token' (reconnect the
+// channel's YouTube grant). They self-resolve when the owner acts, and the
+// dashboard already surfaces them via last_run_error — an operator email
+// every minute would be pure noise.
+const USER_ACTIONABLE_CATEGORIES = new Set(['credits', 'token']);
+
+// Sweep-error payload fields that mean "the app is broken", not "a channel is
+// unhappy". A failure in any of them is invisible on the dashboard, so the
+// exit code is the only alert path.
+const SWEEP_ERROR_FIELDS = [
+	'sweepError',
+	'handleSweepError',
+	'autoTopupSweepError',
+	'stripeDeletionSweepError',
+	'pendingReversalSweepError'
+];
+
+/** Renders a parsed payload or raw body for logs without letting response newlines forge log lines. */
+function renderTick(payload, rawText) {
+	const rendered = payload === null ? rawText.slice(0, 200) : JSON.stringify(payload);
+	return rendered.replaceAll(/[\r\n]+/g, ' ');
+}
+
+/**
+ * Extracts each channel result entry from a payload. A thrown run arrives as
+ * `{ error: category }` inside `results` on a 500; a returned result has no
+ * `error` field (out-of-credits reports `outOfCredits` on a 200 instead).
+ */
+function channelResultEntries(payload) {
+	const results = payload && typeof payload === 'object' ? payload.results : null;
+	if (!results || typeof results !== 'object' || Array.isArray(results)) return [];
+	return Object.values(results).filter((entry) => entry && typeof entry === 'object');
+}
+
+/**
+ * Operator-actionable problems carried inside an answered payload: failed
+ * sweeps, an exhausted tick budget, a lost health write, or a channel error
+ * in a category the owner cannot fix. Deliberately ignores `ok` — a thrown
+ * channel run forces `ok:false` on its 500 body, which says nothing about
+ * the sweeps; on a 200 the caller checks `ok` itself.
+ */
+function detailProblems(payload) {
+	const problems = [];
+	for (const field of SWEEP_ERROR_FIELDS) {
+		if (payload[field]) problems.push(`${field}: ${String(payload[field]).slice(0, 120)}`);
+	}
+	if (payload.budgetExhausted) problems.push('sweeps consumed the run budget — no channel claimed');
+	if (payload.bookkeepingError) problems.push('run-health bookkeeping write failed');
+	for (const entry of channelResultEntries(payload)) {
+		if (typeof entry.error === 'string' && !USER_ACTIONABLE_CATEGORIES.has(entry.error)) {
+			problems.push(`channel run failed: ${entry.error}`);
+		}
+	}
+	return problems;
+}
 
 /**
  * Calls the app's cron endpoint once, loudly.
  *
  * @param {typeof fetch} [fetchImpl] - fetch implementation (tests inject a stub)
  * @returns {Promise<object>} The endpoint's JSON payload
- * @throws If CRON_SECRET is unset, or the endpoint answers non-OK — a tick
- *   that failed must never look like one that succeeded.
+ * @throws If CRON_SECRET is unset, the endpoint answers a non-suppressible
+ *   failure, or an answered tick reports an ops-level problem — a tick that
+ *   failed must never look like one that succeeded. The only suppressed
+ *   non-OK is a run whose every channel failure is owner-actionable
+ *   (credits/token): persistent, dashboard-visible, unfixable by the operator.
  */
 export async function tickOnce(fetchImpl = fetch) {
 	const base = process.env.APP_URL ?? 'http://localhost:5173';
@@ -40,14 +112,58 @@ export async function tickOnce(fetchImpl = fetch) {
 		headers: { Authorization: `Bearer ${secret}` },
 		signal: AbortSignal.timeout(30_000)
 	});
-	if (!res.ok) {
-		throw new Error(`cron endpoint answered ${res.status}: ${(await res.text()).slice(0, 200)}`);
+	const rawText = await res.text();
+	let payload = null;
+	try {
+		payload = JSON.parse(rawText);
+	} catch {
+		payload = null;
 	}
-	const payload = await res.json();
-	// Strip CR/LF before logging: the payload is remote content and a raw
-	// newline in it would let a response forge extra log lines (S5145).
-	console.log(`[${new Date().toISOString()}] tick → ${JSON.stringify(payload).replaceAll(/[\r\n]+/g, ' ')}`);
+	console.log(`[${new Date().toISOString()}] tick → ${renderTick(payload, rawText)}`);
+	const problems = payload === null ? [] : detailProblems(payload);
+	if (!res.ok) {
+		const entries = channelResultEntries(payload);
+		const ownerActionableOnly =
+			entries.length > 0 && entries.every((entry) => USER_ACTIONABLE_CATEGORIES.has(entry.error));
+		if (ownerActionableOnly && problems.length === 0) {
+			const categories = entries.map((entry) => entry.error).join(', ');
+			console.warn(
+				`cron endpoint answered ${res.status} with only channel-owner failure(s) [${categories}] — dashboard-visible, suppressing the scheduler alert`
+			);
+			return payload;
+		}
+		throw new Error(`cron endpoint answered ${res.status}: ${renderTick(payload, rawText)}`);
+	}
+	if (payload === null) {
+		throw new Error('cron endpoint returned a non-JSON body');
+	}
+	// On a 200, `ok` is the real sweep aggregate — a failure there never
+	// reaches the dashboard, so the exit code is its only alert channel.
+	if (payload.ok === false && !SWEEP_ERROR_FIELDS.some((field) => payload[field])) {
+		problems.push('ok:false with no sweep error detail');
+	}
+	if (problems.length) {
+		throw new Error(`cron tick reported failure(s): ${problems.join('; ')}`);
+	}
 	return payload;
+}
+
+/**
+ * Dead-man's switch ping: GETs HEALTHCHECK_PING_URL after a tick the endpoint
+ * answered. Never throws — a monitor hiccup must not turn a healthy tick into
+ * a failed scheduled task.
+ */
+export async function pingHealthcheck(fetchImpl = fetch) {
+	const url = process.env.HEALTHCHECK_PING_URL;
+	if (!url) return;
+	try {
+		const res = await fetchImpl(url, { signal: AbortSignal.timeout(10_000) });
+		if (!res.ok) {
+			console.error(`healthcheck ping answered ${res.status}`);
+		}
+	} catch (cause) {
+		console.error('healthcheck ping failed:', cause instanceof Error ? cause.message : String(cause));
+	}
 }
 
 // Only run the driver when executed directly, not when imported by tests.
@@ -61,22 +177,21 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 		console.error('Usage: node --env-file=.env scripts/dev-cron.mjs [--once] [--interval-ms N]');
 		process.exit(1);
 	}
-	try {
-		await tickOnce();
-	} catch (cause) {
-		console.error('cron tick failed:', cause);
-		if (once) process.exit(1);
-	}
+	const tick = async () => {
+		try {
+			await tickOnce();
+			// Only answered ticks ping: a thrown tick stays silent so the
+			// dead-man's switch fires — that silence IS the alert.
+			await pingHealthcheck();
+		} catch (cause) {
+			console.error('cron tick failed:', cause);
+			return false;
+		}
+		return true;
+	};
+	if (!(await tick()) && once) process.exit(1);
 	if (!once) {
 		console.log(`dev cron driver: ticking every ${intervalMs / 1000}s (Ctrl+C to stop)`);
-		setInterval(async () => {
-			try {
-				await tickOnce();
-			} catch (cause) {
-				// Loud, but the driver survives: a transient failure must not
-				// silently stop the drain cadence for the rest of the session.
-				console.error('cron tick failed:', cause);
-			}
-		}, intervalMs);
+		setInterval(tick, intervalMs);
 	}
 }

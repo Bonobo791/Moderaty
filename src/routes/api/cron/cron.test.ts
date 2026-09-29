@@ -280,7 +280,8 @@ test('runs the channel with a server-side deadline inside the caller abort windo
 
 	expect(mocks.runChannel).toHaveBeenCalledWith('UC1', expect.objectContaining({
 		// The scheduled function aborts at 25s; the server must stop before that.
-		deadline: expect.any(Number)
+		deadline: expect.any(Number),
+		maxPages: 1
 	}));
 	const deadline = mocks.runChannel.mock.calls[0][1].deadline;
 	const windowMs = deadline - before;

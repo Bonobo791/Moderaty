@@ -114,7 +114,7 @@ export const actions = {
 		const f = await request.formData();
 		const channelId = String(f.get('channelId') ?? '');
 		const rawMonths = f.get('months');
-		// Preset windows only — the scan drains newest-first at 300 comments per
+		// Preset windows only — the scan drains newest-first at 100 comments per
 		// run, so an unbounded window is an unbounded API/AI cost (I10).
 		const months = parseHistoryWindow(typeof rawMonths === 'string' ? rawMonths : null);
 		if (months === null) {

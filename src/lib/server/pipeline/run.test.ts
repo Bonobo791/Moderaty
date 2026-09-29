@@ -242,6 +242,61 @@ test('a planted history boundary rescores stored comments and charges under the 
 	}
 });
 
+test('a completed history scan is not rescored by the next ordinary run', async () => {
+	mocks.state.channel.orgId = 'org-1';
+	mocks.state.credits = 10;
+	mocks.state.channel.historyBoundary = '2026-01-01T00:00:00.000Z';
+	mocks.state.channel.historyScanId = 'scan-req-1';
+	mocks.state.existingIds = ['A', 'B'];
+	mocks.scoreComment.mockResolvedValue(moderation(0.1));
+	const page = {
+		comments: [newComment({ id: 'A', text: 'Comment A' }), newComment({ id: 'B', text: 'Comment B' })],
+		nextPageToken: null,
+		reachedCursor: true
+	};
+	mocks.fetchNewComments.mockResolvedValue(page);
+
+	const first = await runChannel('channel');
+
+	expect(first).toMatchObject({ fetched: 2, partial: false, dryRun: false });
+	expect(mocks.scoreComment).toHaveBeenCalledTimes(2);
+	expect(mocks.state.insertedCredits.map((row) => row.refId)).toEqual(['A#scan-req-1', 'B#scan-req-1']);
+	expect(mocks.state.channelUpdates).toContainEqual(expect.objectContaining({ historyBoundary: null, historyScanId: null }));
+	const commentsAfterRescan = [...mocks.state.insertedComments];
+	const auditsAfterRescan = [...mocks.state.insertedAudits];
+	const creditsAfterRescan = [...mocks.state.insertedCredits];
+
+	// The fake database records writes separately from the channel row. Apply
+	// the completed checkpoint so the next invocation observes the persisted state.
+	mocks.state.channel = { ...mocks.state.channel, historyBoundary: null, historyScanId: null };
+	mocks.fetchNewComments.mockResolvedValue(page);
+	const second = await runChannel('channel');
+
+	expect(second).toMatchObject({ fetched: 2, partial: false, dryRun: false });
+	expect(mocks.scoreComment).toHaveBeenCalledTimes(2);
+	expect(mocks.state.insertedComments).toEqual(commentsAfterRescan);
+	expect(mocks.state.insertedAudits).toEqual(auditsAfterRescan);
+	expect(mocks.state.insertedCredits).toEqual(creditsAfterRescan);
+});
+
+test('a live page of already-stored comments is not scored or charged', async () => {
+	mocks.state.channel.orgId = 'org-1';
+	mocks.state.credits = 10;
+	mocks.state.existingIds = ['stored-A', 'stored-B'];
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ id: 'stored-A' }), newComment({ id: 'stored-B' })],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	const result = await runChannel('channel');
+
+	expect(result).toMatchObject({ fetched: 2, partial: false, skipped: false, dryRun: false });
+	expect(mocks.scoreComment).not.toHaveBeenCalled();
+	expect(mocks.state.insertedCredits).toEqual([]);
+	expect(mocks.state.insertedComments).toEqual([]);
+});
+
 test('a rescan channel with no scan id keeps the legacy plain comment anchor', async () => {
 	// A drain planted before the nonce column existed already charged plain
 	// comment ids on its earlier pages — minting a boundary-scoped anchor now
@@ -358,6 +413,52 @@ test('a parked rescan page skips comments this scan already staged — no repeat
 	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({ commentId: 'paid', state: 'completed' })]);
 	// The page stays parked — only a top-up advances the checkpoint.
 	expect(mocks.state.channelUpdates).toEqual([]);
+});
+
+test('an incomplete history page preserves its scan and the next run scores only unstaged comments', async () => {
+	mocks.state.channel.orgId = 'org-1';
+	mocks.state.credits = 10;
+	mocks.state.channel.historyBoundary = '2026-01-01T00:00:00.000Z';
+	mocks.state.channel.historyScanId = 'scan-req-1';
+	mocks.state.existingIds = ['A', 'B', 'C'];
+	mocks.scoreComment.mockResolvedValue(moderation(0.1));
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ id: 'A', text: 'Comment A' }), newComment({ id: 'B', text: 'Comment B' })],
+		nextPageToken: 'page-2',
+		reachedCursor: false
+	});
+
+	const first = await runChannel('channel');
+
+	expect(first).toMatchObject({ fetched: 2, partial: false, dryRun: false });
+	expect(mocks.scoreComment).toHaveBeenCalledTimes(2);
+	expect(mocks.state.channelUpdates).toContainEqual(expect.objectContaining({
+		nextPageToken: 'page-2',
+		scanCursor: '2026-01-04T00:00:00.000Z'
+	}));
+	expect(mocks.state.channelUpdates).not.toContainEqual(expect.objectContaining({ historyBoundary: null, historyScanId: null }));
+	expect(mocks.state.insertedComments.map((comment) => comment.scanId)).toEqual(['scan-req-1', 'scan-req-1']);
+
+	// Persist the page checkpoint in the fake row before the next invocation.
+	mocks.state.channel = { ...mocks.state.channel, nextPageToken: 'page-2', scanCursor: '2026-01-04T00:00:00.000Z' };
+	mocks.scoreComment.mockClear();
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [
+			newComment({ id: 'A', text: 'Comment A' }),
+			newComment({ id: 'B', text: 'Comment B' }),
+			newComment({ id: 'C', text: 'Comment C' })
+		],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	const second = await runChannel('channel');
+
+	expect(second).toMatchObject({ fetched: 3, partial: false, dryRun: false });
+	expect(mocks.scoreComment).toHaveBeenCalledTimes(1);
+	expect(mocks.scoreComment).toHaveBeenCalledWith('Comment C', undefined, 'sk-resolved-key');
+	expect(mocks.state.insertedCredits.map((row) => row.refId)).toEqual(['A#scan-req-1', 'B#scan-req-1', 'C#scan-req-1']);
+	expect(mocks.state.insertedComments.map((comment) => comment.id)).toEqual(['A', 'B', 'C']);
 });
 
 test('a parked rescan page also skips rule-matched comments this scan staged — they mint no credit anchor', async () => {

@@ -156,7 +156,7 @@ async function runClaimedChannel(
 	channel: typeof channels.$inferSelect,
 	deadline: number
 ): Promise<{ result: ChannelRunResult; dryRunWindow: unknown; digest: unknown }> {
-	const result = await runChannel(channel.id, { deadline });
+	const result = await runChannel(channel.id, { deadline, maxPages: 1 });
 	const dryRunWindow = await drainDryRunWindow(channel, deadline);
 	const digest = await runDueDigest(channel, deadline);
 	return { result, dryRunWindow, digest };

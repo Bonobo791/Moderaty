@@ -61,8 +61,11 @@ export function expectedBundlePriceCents(credits: number): number {
 	return Math.round(progressiveCreditCostUsd(credits) * 100);
 }
 
-/** The fixed purchasable bundle sizes, largest first. */
-const BUNDLE_SIZES = [2000, 500, 100] as const;
+/** The manually purchasable bundle sizes, largest first — the 100-credit
+ * bundle exists only as the automatic top-up increment (hiddenFromPurchase),
+ * so a public forecast of what top-ups cost never leans on a price a manual
+ * buyer cannot reach (codex). */
+const BUNDLE_SIZES = [2000, 500] as const;
 
 /** The floor/ceil counts of `size` that can cover `credits` (deduped). */
 function boundaryCounts(credits: number, size: number): number[] {
@@ -73,30 +76,26 @@ function boundaryCounts(credits: number, size: number): number[] {
 }
 
 /**
- * The cheapest purchasable USD price for `credits` top-up credits: credits
- * only exist as fixed 100/500/2,000 bundles, so the forecast is the minimum
- * over covering combinations — overshoot is allowed (leftover credits carry
- * over) and is sometimes cheaper than exact fit. The per-tranche progressive
- * rate past 500 is NOT purchasable, so forecasting with it understates the
- * real cost (codex: 1,000 credits forecast $35.15 vs the real $40.80).
+ * The cheapest purchasable USD price for `credits` top-up credits: manual
+ * credits only exist as fixed 500/2,000 bundles, so the forecast is the
+ * minimum over covering combinations — overshoot is allowed (leftover
+ * credits carry over) and is sometimes cheaper than exact fit. The
+ * per-tranche progressive rate past 500 is NOT purchasable, so forecasting
+ * with it understates the real cost (codex: 1,000 credits forecast $35.15
+ * vs the real $40.80).
  *
  * Per-credit the bigger bundle is always cheaper, so only the boundary
- * counts of each size are candidates — O(1) regardless of `credits`.
+ * counts of the large size are candidates, with the small size covering the
+ * remainder — O(1) regardless of `credits`.
  */
 export function purchasableCreditCostUsd(credits: number): number {
 	if (credits <= 0) return 0;
 	let best = Number.POSITIVE_INFINITY;
 	for (const big of boundaryCounts(credits, BUNDLE_SIZES[0])) {
-		const rem1 = credits - big * BUNDLE_SIZES[0];
-		for (const mid of boundaryCounts(rem1, BUNDLE_SIZES[1])) {
-			const rest = Math.max(0, rem1 - mid * BUNDLE_SIZES[1]);
-			const small = Math.ceil(rest / BUNDLE_SIZES[2]);
-			const cents =
-				big * expectedBundlePriceCents(BUNDLE_SIZES[0]) +
-				mid * expectedBundlePriceCents(BUNDLE_SIZES[1]) +
-				small * expectedBundlePriceCents(BUNDLE_SIZES[2]);
-			if (cents < best) best = cents;
-		}
+		const rest = Math.max(0, credits - big * BUNDLE_SIZES[0]);
+		const mid = Math.ceil(rest / BUNDLE_SIZES[1]);
+		const cents = big * expectedBundlePriceCents(BUNDLE_SIZES[0]) + mid * expectedBundlePriceCents(BUNDLE_SIZES[1]);
+		if (cents < best) best = cents;
 	}
 	return best / 100;
 }

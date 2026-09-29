@@ -21,7 +21,7 @@ export const TICKS_SELF_HOSTED_DETAILED = [
 
 export const TICKS_HOSTED = [
 	'Auto-renews monthly, 100 comments included',
-	'Top-ups in bundles of 100, 500, or 2,000 comments, up to 35% off',
+	'Top-ups in bundles of 500 or 2,000 comments, up to 35% off',
 	'Automatic top-up is opt-in',
 	'Same rules, same model, same audit log'
 ];

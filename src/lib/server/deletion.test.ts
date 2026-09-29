@@ -429,6 +429,28 @@ test('deleteUserRecords anonymizes the Stripe customer of a surviving team org w
 	expect(mocks.customersDel).not.toHaveBeenCalledWith('cus_shared');
 });
 
+test('a post-commit Stripe failure cannot strand the erased channel grants', async () => {
+	// coderabbit: the surviving-org customer lookup used to run AFTER the
+	// erase committed — a failure there rejected the call before the caller
+	// received the captured grants, so live Google tokens were never
+	// revoked. The lookup now happens inside the transaction; post-commit
+	// work is Stripe calls only, each failure isolated.
+	const userId = await seedUser('departing');
+	const coMember = await seedBareUser('staying');
+	await testDb().db.insert(organizations).values({ id: 'org-shared', name: 'Shared', stripeCustomerId: 'cus_shared' });
+	await testDb().db.insert(memberships).values({ userId, orgId: 'org-shared', role: 'owner' });
+	await testDb().db.insert(memberships).values({ userId: coMember, orgId: 'org-shared', role: 'member' });
+	mocks.customersUpdate.mockRejectedValue(new Error('stripe is down'));
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		const grants = await deleteUserRecords(userId);
+		expect(grants).toEqual([{ id: `UC-${userId}`, refreshTokenEnc: 'enc' }]);
+		expect((await userRow(userId))!.googleSub).toBe(`deleted:${userId}`);
+	} finally {
+		errorSpy.mockRestore();
+	}
+});
+
 test('deleteUserRecords scrubs the Stripe email even when the departing user was NOT the last owner (no promotion)', async () => {
 	// The checkout flow lets ANY owner create the team's Stripe customer —
 	// "last owner leaves" (promotion) is an unreliable proxy for whose PII the

@@ -17,12 +17,13 @@
 import { and, asc, eq, isNull, notLike, or, sql } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 
-import { effectiveBalanceSql, orgRowIsMetered } from '$lib/server/billing/ledger';
+import { effectiveBalanceSql, isUnmeteredPlan, orgRowIsMetered } from '$lib/server/billing/ledger';
 import { isActiveSubscriptionStatus } from '$lib/server/billing/plans';
 import { db } from '$lib/server/db';
 import { memberships, organizations, users } from '$lib/server/db/schema';
-import { deleteUserRecords, revokeChannelGrants } from '$lib/server/deletion';
+import { deleteUserRecords, revokeChannelGrants, type DeletionTx } from '$lib/server/deletion';
 import { escapeHtml } from '$lib/server/emailText';
+import { assertBeforeDeadline, DeadlineExceededError } from '$lib/server/http';
 import { sendMailjetMessage } from '$lib/server/mailjet';
 
 export const ZERO_CREDIT_GRACE_MS = 30 * 24 * 60 * 60 * 1000; // countdown length (Terms §17)
@@ -69,7 +70,7 @@ export function buildZeroCreditWarningEmail(input: {
 	return { subject, textPart, htmlPart };
 }
 
-/** Builds the post-deletion notice — sent before the erase, best-effort. */
+/** Builds the post-deletion notice — sent only after the erase commits, best-effort. */
 export function buildZeroCreditDeletedEmail(input: { name: string }): ZeroCreditEmail {
 	const subject = 'Your Moderaty account has been deleted';
 	const textPart = [
@@ -124,17 +125,35 @@ function usageUrl(): string {
 	return new URL('/usage', appUrl).toString();
 }
 
-async function sendMail(toEmail: string, toName: string, email: ZeroCreditEmail): Promise<void> {
-	await sendMailjetMessage({ toEmail, toName, subject: email.subject, textPart: email.textPart, htmlPart: email.htmlPart });
+async function sendMail(toEmail: string, toName: string, email: ZeroCreditEmail, deadline?: number): Promise<void> {
+	await sendMailjetMessage(
+		{ toEmail, toName, subject: email.subject, textPart: email.textPart, htmlPart: email.htmlPart },
+		deadline
+	);
 }
+
+/** The in-transaction funding guard found a funded account mid-erase. */
+class AccountFundedError extends Error {}
 
 /**
  * Reads the user's org funding and applies the metered/broke predicate.
  * 'corrupt' means a live user with zero memberships — a data bug, never a
- * deletion candidate.
+ * deletion candidate. Any LIFETIME org exempts the whole account: Terms
+ * §17.3 says lifetime orgs are never subject to zero-credit deletion, and
+ * erasing the account would destroy the lifetime org's data — the exemption
+ * is meaningless unless it protects the account (codex+coderabbit).
+ *
+ * `handle` lets the check run inside `deleteUserRecords`' erase transaction:
+ * with the write lock held, a purchase committed between the sweep's
+ * pre-check and the erase is either visible or blocked, so a funded account
+ * can never be deleted (codex).
  */
-async function fundingState(userId: string, nowIso: string): Promise<'broke' | 'funded' | 'corrupt'> {
-	const orgs: OrgFunding[] = await db
+async function fundingState(
+	userId: string,
+	nowIso: string,
+	handle: Pick<typeof db, 'select'> | DeletionTx = db
+): Promise<'broke' | 'funded' | 'corrupt'> {
+	const orgs: OrgFunding[] = await handle
 		.select({
 			orgId: organizations.id,
 			plan: organizations.plan,
@@ -148,6 +167,7 @@ async function fundingState(userId: string, nowIso: string): Promise<'broke' | '
 		.where(eq(memberships.userId, userId))
 		.all();
 	if (!orgs.length) return 'corrupt';
+	if (orgs.some((org) => isUnmeteredPlan(org.plan))) return 'funded'; // lifetime exempts the account
 	const engaged = orgs.filter(orgRowIsMetered);
 	return engaged.length > 0 && engaged.every(orgIsUnfunded) ? 'broke' : 'funded';
 }
@@ -168,7 +188,7 @@ async function releaseWarningClaim(user: SweepUser, nowIso: string): Promise<voi
  * the warning retries next rotation — the milestone is never silently
  * consumed.
  */
-async function claimAndWarn(user: SweepUser, since: string, sinceMs: number, nowIso: string): Promise<EvalOutcome> {
+async function claimAndWarn(user: SweepUser, since: string, sinceMs: number, nowIso: string, deadline?: number): Promise<EvalOutcome> {
 	const cutoffIso = new Date(Date.now() - ZERO_CREDIT_NOTICE_MS).toISOString();
 	// Resolve the /usage link BEFORE claiming: a missing APP_URL throws here,
 	// leaving the milestone due — claiming first would consume it unsent.
@@ -214,7 +234,10 @@ async function claimAndWarn(user: SweepUser, since: string, sinceMs: number, now
 		usageUrl: link
 	});
 	try {
-		await sendMail(user.email, user.displayName, email);
+		// A spent budget throws here too — inside the try — so the milestone
+		// claim releases and the warning retries next tick (codex).
+		assertBeforeDeadline(deadline);
+		await sendMail(user.email, user.displayName, email, deadline);
 	} catch (cause) {
 		await releaseWarningClaim(user, nowIso);
 		throw cause;
@@ -224,12 +247,15 @@ async function claimAndWarn(user: SweepUser, since: string, sinceMs: number, now
 
 /**
  * Claims the expired countdown (clearing `since` — only one concurrent run
- * wins), sends the final notice best-effort, revokes the account's Google
- * grants, then erases via the shared account-deletion path. If the delete
- * throws the account re-enters the queue with a fresh 30-day clock — an
- * account is never erased without the full warning window.
+ * wins), erases via the shared account-deletion path, revokes the account's
+ * Google grants, and only then mails the completion notice — sent before
+ * the commit, a failed erase would tell the user the account is gone while
+ * it is still live (codex+coderabbit). If the delete throws the account
+ * re-enters the queue with a fresh 30-day clock — an account is never
+ * erased without the full warning window.
  */
-async function claimAndDelete(user: SweepUser, since: string, ageMs: number): Promise<EvalOutcome> {
+async function claimAndDelete(user: SweepUser, since: string, ageMs: number, deadline?: number): Promise<EvalOutcome> {
+	assertBeforeDeadline(deadline); // nothing claimed yet — a spent budget defers cleanly
 	const claimed = await db
 		.update(users)
 		.set({ zeroCreditsSince: null })
@@ -249,13 +275,37 @@ async function claimAndDelete(user: SweepUser, since: string, ageMs: number): Pr
 		}
 		return 'cleared';
 	}
+	assertBeforeDeadline(deadline); // the erase is the commit boundary — a spent budget must not cross it
+	let grants;
+	try {
+		grants = await deleteUserRecords(user.id, {
+			deadline,
+			// The funding predicate re-runs INSIDE the erase transaction, under
+			// the write lock: a purchase committed between the pre-check above
+			// and here aborts the whole erase atomically (codex+coderabbit).
+			assertDeletable: async (tx) => {
+				if ((await fundingState(user.id, new Date().toISOString(), tx)) !== 'broke') {
+					throw new AccountFundedError();
+				}
+			}
+		});
+	} catch (cause) {
+		if (cause instanceof AccountFundedError) {
+			console.info(`zero-credit sweep: user ${user.id} funded mid-deletion — erase aborted, account survives`);
+			return 'cleared';
+		}
+		throw cause;
+	}
+	// Post-commit work runs to completion even past the deadline: the account
+	// is already gone — abandoning revocation would orphan live Google grants.
+	await revokeChannelGrants(grants, 'zero-credit deletion');
+	// The completion notice is best-effort — the erase is already committed;
+	// a mail failure must not masquerade as a failed deletion.
 	try {
 		await sendMail(user.email, user.displayName, buildZeroCreditDeletedEmail({ name: user.displayName }));
 	} catch (cause) {
-		console.error('zero-credit sweep: final notice for user %s failed — deleting anyway:', user.id, cause);
+		console.error('zero-credit sweep: post-deletion notice for user %s failed:', user.id, cause);
 	}
-	const grants = await deleteUserRecords(user.id);
-	await revokeChannelGrants(grants, 'zero-credit deletion');
 	console.info(`zero-credit sweep: deleted account ${user.id} after ${Math.floor(ageMs / DAY_MS)} days at zero credits`);
 	return 'deleted';
 }
@@ -266,7 +316,7 @@ async function claimAndDelete(user: SweepUser, since: string, ageMs: number): Pr
  * failing evaluation rotates to the back of the queue instead of hogging
  * the head of every batch.
  */
-async function evaluateUser(user: SweepUser): Promise<EvalOutcome> {
+async function evaluateUser(user: SweepUser, deadline?: number): Promise<EvalOutcome> {
 	const nowIso = new Date().toISOString();
 	await db.update(users).set({ zeroCreditsCheckedAt: nowIso }).where(eq(users.id, user.id));
 	const state = await fundingState(user.id, nowIso);
@@ -301,13 +351,30 @@ async function evaluateUser(user: SweepUser): Promise<EvalOutcome> {
 		return 'idle';
 	}
 	const ageMs = Date.now() - sinceMs;
-	if (ageMs >= ZERO_CREDIT_GRACE_MS) return claimAndDelete(user, user.since, ageMs);
 	if (user.notifiedAt !== null && Number.isNaN(Date.parse(user.notifiedAt))) {
 		console.error(`zero-credit sweep: user ${user.id} has an unparseable zero_credits_notified_at (${user.notifiedAt}) — skipped`);
 		return 'idle';
 	}
+	if (ageMs >= ZERO_CREDIT_GRACE_MS) {
+		if (user.notifiedAt === null) {
+			// Deletion requires a delivered warning — an account whose warnings
+			// all failed to send (APP_URL missing, Mailjet down) must not be
+			// erased on the bare clock. Restart the window so the promised
+			// cadence can run; the release is conditional so a concurrent
+			// sweep's warning claim still wins (codex+coderabbit).
+			const restamped = await db
+				.update(users)
+				.set({ zeroCreditsSince: nowIso })
+				.where(and(eq(users.id, user.id), eq(users.zeroCreditsSince, user.since), isNull(users.zeroCreditsNotifiedAt)))
+				.returning({ id: users.id });
+			if (!restamped.length) return 'idle'; // a concurrent run claimed the milestone — it owns the outcome
+			console.error(`zero-credit sweep: user ${user.id} reached the grace expiry with no delivered warning — restarting the warning window`);
+			return 'stamped';
+		}
+		return claimAndDelete(user, user.since, ageMs, deadline);
+	}
 	if (ageMs >= ZERO_CREDIT_NOTICE_MS && (user.notifiedAt === null || Date.now() - Date.parse(user.notifiedAt) >= ZERO_CREDIT_NOTICE_MS)) {
-		return claimAndWarn(user, user.since, sinceMs, nowIso);
+		return claimAndWarn(user, user.since, sinceMs, nowIso, deadline);
 	}
 	return 'idle';
 }
@@ -348,11 +415,18 @@ export async function sweepZeroCreditAccounts(limit = ZERO_CREDIT_SWEEP_BATCH, d
 	for (const user of batch) {
 		if (deadline !== undefined && Date.now() >= deadline) break;
 		try {
-			const outcome = await evaluateUser(user);
+			const outcome = await evaluateUser(user, deadline);
 			result.evaluated += 1;
 			if (outcome === 'warned') result.warned += 1;
 			else if (outcome === 'deleted') result.deleted += 1;
 		} catch (cause) {
+			// A spent budget is a scheduling condition, not a per-account
+			// failure: stop cleanly without counting an error so the tick
+			// reports budget exhaustion instead of a failed eval (codex).
+			if (cause instanceof DeadlineExceededError) {
+				console.error('zero-credit sweep: deadline reached mid-evaluation — deferring the remaining accounts');
+				break;
+			}
 			result.errors += 1;
 			console.error('zero-credit sweep: evaluation failed for user %s:', user.id, cause);
 		}

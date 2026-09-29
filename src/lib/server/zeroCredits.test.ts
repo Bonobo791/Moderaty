@@ -15,6 +15,7 @@ vi.mock('./mailjet', () => ({ sendMailjetMessage: mocks.sendMailjetMessage }));
 
 import { setupTestDb, testDb } from './testdb';
 import { memberships, organizations, users } from './db/schema';
+import { DeadlineExceededError } from './http';
 import { buildZeroCreditDeletedEmail, buildZeroCreditWarningEmail, sweepZeroCreditAccounts } from './zeroCredits';
 
 setupTestDb([
@@ -145,6 +146,37 @@ describe('eligibility', () => {
 		const result = await sweepZeroCreditAccounts();
 		expect(result.errors).toBe(0);
 		expect((await userRow('u1'))!.zeroCreditsSince).not.toBeNull();
+	});
+
+	test('a lifetime organization exempts the whole account — even beside a broke metered org', async () => {
+		// Terms §17.3: "lifetime-plan organizations are never subject to
+		// zero-credit deletion." Account deletion would dissolve the lifetime
+		// org's data, so the org-level exemption is meaningless unless it
+		// exempts the account (codex+coderabbit).
+		await seedAccount('u1', { creditsRemaining: 0 });
+		await seedSharedOrg('u1', 'org-lifetime', { plan: 'lifetime' });
+		const result = await sweepZeroCreditAccounts();
+		expect(result).toMatchObject({ evaluated: 1, warned: 0, deleted: 0, errors: 0 });
+		expect(await userRow('u1')).toMatchObject({ zeroCreditsSince: null, zeroCreditsNotifiedAt: null });
+		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+	});
+
+	test('a lifetime org acquired mid-countdown clears the clock — the account is never erased', async () => {
+		await seedAccount('u1', { creditsRemaining: 0 });
+		await seedSharedOrg('u1', 'org-lifetime', { plan: 'lifetime' });
+		await testDb().db
+			.update(users)
+			.set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7) })
+			.where(eq(users.id, 'u1'));
+		const result = await sweepZeroCreditAccounts();
+		expect(result).toMatchObject({ deleted: 0, errors: 0 });
+		const row = (await userRow('u1'))!;
+		expect(row.googleSub).toBe('sub-u1'); // still alive
+		expect(row.zeroCreditsSince).toBeNull(); // countdown cleared
+		// The lifetime org is untouched — its data survived the sweep.
+		expect(
+			await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-lifetime')).all()
+		).toHaveLength(1);
 	});
 
 	test('an account with no metered org at all is ignored even alongside unmetered extras', async () => {
@@ -293,7 +325,7 @@ describe('countdown reset', () => {
 describe('deletion', () => {
 	test('30 days at zero deletes the account via the shared tombstone path', async () => {
 		await seedAccount('u1', { creditsRemaining: 0 });
-		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31) }).where(eq(users.id, 'u1'));
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
 
 		const result = await sweepZeroCreditAccounts();
 		expect(result).toMatchObject({ deleted: 1, errors: 0 });
@@ -310,7 +342,7 @@ describe('deletion', () => {
 
 	test('the countdown claim makes a concurrent/second deletion a no-op', async () => {
 		await seedAccount('u1', { creditsRemaining: 0 });
-		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31) }).where(eq(users.id, 'u1'));
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
 		await sweepZeroCreditAccounts();
 		// Tombstoned users never enter the batch again.
 		const second = await sweepZeroCreditAccounts();
@@ -320,7 +352,7 @@ describe('deletion', () => {
 
 	test('a final-notice failure does not block the deletion', async () => {
 		await seedAccount('u1', { creditsRemaining: 0 });
-		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31) }).where(eq(users.id, 'u1'));
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
 		mocks.sendMailjetMessage.mockRejectedValueOnce(new Error('mailjet down'));
 		vi.spyOn(console, 'error').mockImplementation(() => {});
 		const result = await sweepZeroCreditAccounts();
@@ -335,7 +367,7 @@ describe('deletion', () => {
 		// erase a now-funded account. The claim's own UPDATE fires the trigger
 		// that lands the purchase.
 		await seedAccount('u1', { creditsRemaining: 0 });
-		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31) }).where(eq(users.id, 'u1'));
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
 		await testDb().client.execute(
 			`CREATE TRIGGER racing_topup AFTER UPDATE OF zero_credits_since ON users
 			 WHEN NEW.zero_credits_since IS NULL
@@ -353,9 +385,100 @@ describe('deletion', () => {
 		expect(user?.zeroCreditsSince).toBeNull(); // clock cleared by the claim
 	});
 
-	test('a deletion failure is loud, counted, and retryable — the clock restarts', async () => {
+	test('a purchase landing inside the deletion transaction aborts the erase', async () => {
+		// codex+coderabbit: the pre-delete funding check ran outside the erase
+		// transaction, so a top-up committed in the gap was still deleted. The
+		// guard's lock write inside deleteUserRecords' transaction fires this
+		// trigger — a purchase landing mid-erase — and the guard must see it.
+		await seedAccount('u1', { creditsRemaining: 0 });
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
+		await testDb().client.execute(
+			`CREATE TRIGGER topup_mid_delete AFTER UPDATE OF google_sub ON users
+			 BEGIN UPDATE organizations SET credits_remaining = 50; END`
+		);
+		try {
+			const result = await sweepZeroCreditAccounts();
+			expect(result).toMatchObject({ evaluated: 1, deleted: 0, errors: 0 });
+		} finally {
+			await testDb().client.execute('DROP TRIGGER topup_mid_delete');
+		}
+		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled(); // no "deleted" notice — nothing was deleted
+		expect((await userRow('u1'))!.googleSub).toBe('sub-u1'); // still alive — never tombstoned
+		expect(await testDb().db.select().from(organizations).all()).toHaveLength(1);
+	});
+
+	test('a day-30 account that was never warned is NOT deleted — the warning window restarts', async () => {
+		// codex+coderabbit: APP_URL missing or every Mailjet send failing
+		// leaves zeroCreditsNotifiedAt NULL; the bare clock must never erase
+		// an account that got none of the warnings Terms §17.3 promises.
 		await seedAccount('u1', { creditsRemaining: 0 });
 		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31) }).where(eq(users.id, 'u1'));
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const result = await sweepZeroCreditAccounts();
+			expect(result).toMatchObject({ deleted: 0, errors: 0 });
+			const row = (await userRow('u1'))!;
+			expect(row.googleSub).toBe('sub-u1');
+			// The countdown restarted so the promised warning cadence can run.
+			expect(Date.parse(row.zeroCreditsSince!)).toBeGreaterThan(Date.now() - 60_000);
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('no delivered warning'));
+		} finally {
+			errorSpy.mockRestore();
+		}
+		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+	});
+
+	test('a corrupt notified_at stamp must never unlock deletion', async () => {
+		await seedAccount('u1', { creditsRemaining: 0 });
+		await testDb().db
+			.update(users)
+			.set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: 'not-a-date' })
+			.where(eq(users.id, 'u1'));
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const result = await sweepZeroCreditAccounts();
+			expect(result).toMatchObject({ deleted: 0, errors: 0 });
+			expect((await userRow('u1'))!.googleSub).toBe('sub-u1');
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('unparseable'));
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	test('the completion notice is sent only after the erase commits', async () => {
+		await seedAccount('u1', { creditsRemaining: 0 });
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
+		// codex+coderabbit: the notice used to precede the erase — a failed
+		// deletion would tell the user their account is gone while it lives.
+		mocks.sendMailjetMessage.mockImplementation(async () => {
+			expect((await userRow('u1'))!.googleSub).toBe('deleted:u1'); // already committed
+			return { messageId: 1, messageUuid: 'uuid-1' };
+		});
+		const result = await sweepZeroCreditAccounts();
+		expect(result).toMatchObject({ deleted: 1, errors: 0 });
+		expect(mocks.sendMailjetMessage).toHaveBeenCalledTimes(1);
+	});
+
+	test('a failed deletion sends no completed-notice e-mail', async () => {
+		await seedAccount('u1', { creditsRemaining: 0 });
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
+		// Multi-member personal org → deleteUserRecords' tenancy guard refuses.
+		await testDb().db.insert(users).values({ id: 'u2', googleSub: 'sub-u2', email: 'u2@x.com', displayName: 'u2' });
+		await testDb().db.insert(memberships).values({ userId: 'u2', orgId: 'org-u1', role: 'member' });
+		vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const result = await sweepZeroCreditAccounts();
+			expect(result).toMatchObject({ deleted: 0, errors: 1 });
+		} finally {
+			vi.restoreAllMocks();
+		}
+		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+		expect((await userRow('u1'))!.googleSub).toBe('sub-u1');
+	});
+
+	test('a deletion failure is loud, counted, and retryable — the clock restarts', async () => {
+		await seedAccount('u1', { creditsRemaining: 0 });
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
 		// Corrupt the personal org into multi-member: deleteUserRecords' own
 		// data-bug guard must refuse, and the sweep must surface it.
 		await testDb().db.insert(users).values({ id: 'u2', googleSub: 'sub-u2', email: 'u2@x.com', displayName: 'u2' });
@@ -391,6 +514,34 @@ describe('batching', () => {
 		expect(result).toMatchObject({ evaluated: 0, errors: 0 });
 	});
 
+	test('a deadline that expires mid-warning defers the rest of the sweep without an error', async () => {
+		// codex: the deadline used to be checked only between users — Mailjet,
+		// the erase, and Stripe cleanup could run unbounded past the budget.
+		// DeadlineExceededError is a scheduling condition, not a per-account
+		// failure: the claim releases (milestone survives for next tick) and
+		// the sweep stops cleanly.
+		const deadline = Date.now() + 1_000;
+		await seedAccount('u1', { creditsRemaining: 0 });
+		await seedAccount('u2', { creditsRemaining: 0 });
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(8) }).where(eq(users.id, 'u1'));
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(8) }).where(eq(users.id, 'u2'));
+		mocks.sendMailjetMessage.mockImplementation(async (_msg: unknown, given?: number) => {
+			expect(given).toBe(deadline); // the shared budget reaches the provider call
+			throw new DeadlineExceededError();
+		});
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const result = await sweepZeroCreditAccounts(1_000, deadline);
+			expect(result).toMatchObject({ deleted: 0, errors: 0 });
+			expect(mocks.sendMailjetMessage).toHaveBeenCalledTimes(1); // u2 never reached the provider
+			expect((await userRow('u1'))!.zeroCreditsNotifiedAt).toBeNull(); // claim released — no milestone consumed
+			expect((await userRow('u2'))!.zeroCreditsNotifiedAt).toBeNull();
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('deadline'));
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
 	test('tombstoned accounts are never evaluated', async () => {
 		await testDb().db.insert(users).values({ id: 'gone', googleSub: 'deleted:gone', email: '[deleted]', displayName: '[deleted]' });
 		const result = await sweepZeroCreditAccounts();
@@ -420,14 +571,14 @@ describe('loud failure logging', () => {
 
 	test('a final-notice failure logs the user id verbatim', async () => {
 		await seedAccount('d%s-1', { creditsRemaining: 0 });
-		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31) }).where(eq(users.id, 'd%s-1'));
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7) }).where(eq(users.id, 'd%s-1'));
 		mocks.sendMailjetMessage.mockRejectedValueOnce(new Error('mailjet down'));
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
 		const result = await sweepZeroCreditAccounts();
 
 		expect(result.deleted).toBe(1);
-		const call = errorSpy.mock.calls.find((args) => String(args[0]).includes('final notice'));
+		const call = errorSpy.mock.calls.find((args) => String(args[0]).includes('post-deletion notice'));
 		expect(call).toBeDefined();
 		expect(format(...call!)).toContain('d%s-1');
 		errorSpy.mockRestore();

@@ -13,7 +13,7 @@
 // erases them after 30 days, keeping the row (and its moderation outcome)
 // as the record.
 
-import { and, asc, eq, inArray, isNotNull, isNull, lt, ne, or } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import type Stripe from 'stripe';
 
 import { db } from '$lib/server/db';
@@ -176,7 +176,28 @@ export function consentEmailCutoffIso(now?: number): string {
  * @throws If the user does not exist or is already tombstoned
  */
 
-type DeletionTx = Pick<typeof db, 'select' | 'insert' | 'update' | 'delete'>;
+export type DeletionTx = Pick<typeof db, 'select' | 'insert' | 'update' | 'delete'>;
+
+/**
+ * Caller hooks for `deleteUserRecords`.
+ */
+export interface DeleteUserOptions {
+	/**
+	 * Runs inside the erase transaction, after the RESERVED write lock is
+	 * taken but before any row is touched. Throw to abort the whole erase
+	 * atomically — the zero-credit sweep uses this to re-verify "still
+	 * unfunded" at the commit boundary: a purchase committed between the
+	 * sweep's pre-check and the erase would otherwise delete a funded
+	 * account (codex+coderabbit).
+	 */
+	assertDeletable?: (tx: DeletionTx) => Promise<void>;
+	/**
+	 * Shared run budget (cron). Post-commit Stripe customer erasure stops
+	 * at the deadline — every skipped customer stays durable in the
+	 * deletion outbox and is retried by `retryStripeCustomerDeletions`.
+	 */
+	deadline?: number;
+}
 
 /**
  * Data-bug guard: a personal org is single-member by definition, but the schema
@@ -321,7 +342,7 @@ async function dissolveOrgs(tx: DeletionTx, dissolveOrgIds: string[]): Promise<s
 	return stripeCustomerIds;
 }
 
-export async function deleteUserRecords(userId: string): Promise<ErasedChannelGrant[]> {
+export async function deleteUserRecords(userId: string, options?: DeleteUserOptions): Promise<ErasedChannelGrant[]> {
 	// Promotions are logged only AFTER the transaction commits — a pre-commit
 	// log would claim a succession that a rollback erased. The promoted org's
 	// Stripe customer must be anonymized post-commit (the departing last owner
@@ -345,6 +366,10 @@ export async function deleteUserRecords(userId: string): Promise<ErasedChannelGr
 	// transaction would leave a window where a concurrently connected channel
 	// is wiped without its grant ever being revoked (codeant).
 	let erasedGrants: ErasedChannelGrant[] = [];
+	// Surviving orgs' Stripe customers — captured INSIDE the transaction.
+	// Reading them post-commit could fail before the caller ever receives
+	// `erasedGrants`, stranding live Google grants unrevoked (coderabbit).
+	let survivingStripeCustomers: { orgId: string; stripeCustomerId: string }[] = [];
 	await db.transaction(async (tx) => {
 		const user = await tx
 			.select({ googleSub: users.googleSub })
@@ -353,6 +378,15 @@ export async function deleteUserRecords(userId: string): Promise<ErasedChannelGr
 			.get();
 		if (!user || user.googleSub.startsWith('deleted:')) {
 			throw new Error(`deleteUserRecords: user ${userId} not found or already deleted`);
+		}
+		if (options?.assertDeletable) {
+			// Take the RESERVED write lock BEFORE the predicate reads: a
+			// deferred transaction's SELECT leaves a window where a
+			// concurrent purchase commits unseen between the check and the
+			// first DELETE. The self-assign UPDATE makes guard-and-erase
+			// atomic (same pattern as assertChannelActive).
+			await tx.update(users).set({ googleSub: sql`${users.googleSub}` }).where(eq(users.id, userId));
+			await options.assertDeletable(tx);
 		}
 		const personalOrgIds = (
 			await tx.select({ id: organizations.id }).from(organizations).where(eq(organizations.personalFor, userId)).all()
@@ -364,6 +398,15 @@ export async function deleteUserRecords(userId: string): Promise<ErasedChannelGr
 		for (const membership of userMemberships) {
 			if (!dissolveOrgIds.includes(membership.orgId)) survivingOrgIds.push(membership.orgId);
 		}
+		survivingStripeCustomers = survivingOrgIds.length
+			? (
+					await tx
+						.select({ orgId: organizations.id, stripeCustomerId: organizations.stripeCustomerId })
+						.from(organizations)
+						.where(inArray(organizations.id, survivingOrgIds))
+						.all()
+				).flatMap((org) => (org.stripeCustomerId ? [{ orgId: org.orgId, stripeCustomerId: org.stripeCustomerId }] : []))
+			: [];
 		const channelIds = dissolveOrgIds.length
 			? (
 					await tx.select({ id: channels.id }).from(channels).where(inArray(channels.orgId, dissolveOrgIds)).all()
@@ -413,21 +456,15 @@ export async function deleteUserRecords(userId: string): Promise<ErasedChannelGr
 	// account. Anonymize best-effort for EVERY surviving org the user belonged
 	// to (not just promoted ones — codex review): the e-mail is scrubbed, the
 	// org name and saved card stay for the successor.
-	for (const orgId of survivingOrgIds) {
-		const org = await db
-			.select({ stripeCustomerId: organizations.stripeCustomerId })
-			.from(organizations)
-			.where(eq(organizations.id, orgId))
-			.get();
-		if (!org?.stripeCustomerId) continue;
+	for (const { orgId, stripeCustomerId } of survivingStripeCustomers) {
 		try {
 			// The typed SDK accepts `string | undefined` — an undefined value
 			// would OMIT the field (a no-op), so the identifier is scrubbed
 			// with an empty string instead of null.
-			await getStripe().customers.update(org.stripeCustomerId, { email: '' });
+			await getStripe().customers.update(stripeCustomerId, { email: '' });
 		} catch (error) {
 			console.error(
-				`account deletion: could not anonymize Stripe customer ${org.stripeCustomerId} for surviving org ${orgId}: ${error instanceof Error ? error.message : String(error)}`
+				`account deletion: could not anonymize Stripe customer ${stripeCustomerId} for surviving org ${orgId}: ${error instanceof Error ? error.message : String(error)}`
 			);
 		}
 	}
@@ -438,6 +475,14 @@ export async function deleteUserRecords(userId: string): Promise<ErasedChannelGr
 	// contract as revokeGoogleToken on channel grants). The OUTBOX row keeps
 	// the obligation durable: the cron retry erases it once Stripe confirms.
 	for (const customerId of stripeCustomerIds) {
+		// The outbox row is the durable obligation — stopping here on a spent
+		// deadline loses nothing; the next sweep retries (codex).
+		if (options?.deadline !== undefined && Date.now() >= options.deadline) {
+			console.error(
+				`account deletion: shared deadline reached — ${stripeCustomerIds.length} Stripe customer erasure(s) stay queued in the outbox`
+			);
+			break;
+		}
 		try {
 			await cancelCustomerSubscriptions(customerId);
 			await getStripe().customers.del(customerId);

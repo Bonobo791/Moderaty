@@ -193,6 +193,204 @@ test('window mode is complete when the listing ends without hitting the boundary
 	expect(result).toMatchObject({ windowComplete: true, windowNextPageToken: null });
 });
 
+test('a planted history boundary rescores stored comments and charges under the scan id', async () => {
+	// The owner asked to re-analyze the window: the stored-IDs dedupe is
+	// skipped, the row upserts to the fresh verdict, and the charge anchors
+	// to the per-request scan id — each requested scan debits once, retries
+	// of THIS scan hit the same anchors and stage covered (I4).
+	mocks.state.channel.orgId = 'org-1';
+	mocks.state.credits = 10;
+	mocks.state.channel.historyBoundary = '2026-01-01T00:00:00.000Z';
+	mocks.state.channel.historyScanId = 'scan-req-1';
+	mocks.state.existingIds = ['comment'];
+	mocks.scoreComment.mockResolvedValue(moderation(0.9));
+
+	const result = await runChannel('channel');
+
+	expect(result).toMatchObject({ fetched: 1, acted: 1, dryRun: false });
+	expect(mocks.scoreComment).toHaveBeenCalled();
+	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', decidedBy: 'ai' })]);
+	expect(mocks.state.insertedCredits).toEqual([expect.objectContaining({ refType: 'comment', refId: 'comment#scan-req-1' })]);
+	// Completion clears the boundary AND its nonce together.
+	expect(mocks.state.channelUpdates).toContainEqual(expect.objectContaining({ historyBoundary: null, historyScanId: null }));
+});
+
+test('a rescan channel with no scan id keeps the legacy plain comment anchor', async () => {
+	// A drain planted before the nonce column existed already charged plain
+	// comment ids on its earlier pages — minting a boundary-scoped anchor now
+	// would debit those comments a second time (codex).
+	mocks.state.channel.orgId = 'org-1';
+	mocks.state.credits = 10;
+	mocks.state.channel.historyBoundary = '2026-01-01T00:00:00.000Z';
+	mocks.state.existingIds = ['comment'];
+	mocks.state.insertedCredits = [{ orgId: 'org-1', refType: 'comment', refId: 'comment' }];
+	mocks.scoreComment.mockResolvedValue(moderation(0.9));
+
+	await runChannel('channel');
+
+	// The pre-nonce anchor covers the retry — no second debit under any ref.
+	expect(mocks.state.insertedCredits).toEqual([expect.objectContaining({ refId: 'comment' })]);
+	expect(mocks.state.credits).toBe(10);
+});
+
+test('a stale run cannot clear a replanted history scan — the checkpoint write aborts', async () => {
+	// The owner re-requested the window while this worker was still fetching:
+	// the replant minted a fresh boundary+nonce that now owns the drain state.
+	// The stale run's completion write carries the OLD scan identity — the
+	// checkpoint guard must reject it instead of clearing the new scan
+	// (codeant).
+	mocks.state.channel.historyBoundary = '2026-01-01T00:00:00.000Z';
+	mocks.state.channel.historyScanId = 'scan-req-1';
+	mocks.state.existingIds = ['comment'];
+	mocks.scoreComment.mockResolvedValue(moderation(0.9));
+	mocks.fetchNewComments.mockImplementation(async () => {
+		mocks.state.channel = {
+			...mocks.state.channel,
+			historyBoundary: '2026-02-01T00:00:00.000Z',
+			historyScanId: 'scan-req-2',
+			nextPageToken: null
+		};
+		return { comments: [newComment()], nextPageToken: null, reachedCursor: true };
+	});
+
+	await expect(runChannel('channel')).rejects.toThrow('checkpoint changed');
+
+	expect(mocks.state.channel.historyScanId).toBe('scan-req-2');
+	expect(mocks.state.channelUpdates).toEqual([]);
+});
+
+test('a rescan retry after a mid-drain crash stages covered — the committed anchor blocks a second debit', async () => {
+	// Attempt 1 charged and staged the verdict, then died inside enforcement:
+	// the drain state stays planted and the balance is spent. The retry must
+	// not defer the paid comment to outOfCredits — the committed scan anchor
+	// covers it, or the cursor parks forever on work already bought
+	// (codex+cubic) — and it must not charge again (cubic: the crash model,
+	// not a stale channel row, is what leaves the boundary planted). Because
+	// charge and stage commit in one transaction, an anchored comment is
+	// already staged — the retry skips it instead of re-scoring (codex).
+	mocks.state.channel.orgId = 'org-1';
+	mocks.state.credits = 1;
+	mocks.state.channel.historyBoundary = '2026-01-01T00:00:00.000Z';
+	mocks.state.channel.historyScanId = 'scan-req-1';
+	mocks.state.existingIds = ['comment'];
+	mocks.scoreComment.mockResolvedValue(moderation(0.9));
+	mocks.assertBeforeDeadline.mockImplementationOnce(() => {
+		throw new mocks.DeadlineExceededError('out of time');
+	});
+
+	const crashed = await runChannel('channel');
+
+	expect(crashed).toMatchObject({ partial: true, stoppedReason: 'deadline' });
+	expect(mocks.state.insertedCredits).toEqual([expect.objectContaining({ refId: 'comment#scan-req-1' })]);
+	expect(mocks.state.credits).toBe(0);
+
+	const retried = await runChannel('channel');
+
+	expect(retried).toMatchObject({ fetched: 1, partial: false });
+	expect(retried.outOfCredits).toBeUndefined();
+	expect(mocks.state.insertedCredits.filter((row) => row.refId === 'comment#scan-req-1')).toHaveLength(1);
+	expect(mocks.state.credits).toBe(0);
+	// The covered comment was skipped on the retry: one AI call total, and its
+	// committed action still completed through the enforcement sweep.
+	expect(mocks.scoreComment).toHaveBeenCalledTimes(1);
+	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({ commentId: 'comment', state: 'completed' })]);
+	expect(mocks.state.channelUpdates).toContainEqual(expect.objectContaining({ historyBoundary: null, historyScanId: null }));
+});
+
+test('a parked rescan page skips comments this scan already staged — no repeat AI, staging, or enforcement burn', async () => {
+	// The scan staged+charged 'paid' but ran out of credits before 'unpaid':
+	// the checkpoint parks at outOfCredits. Every later tick must reattempt
+	// only the unpaid remainder — re-scoring 'paid' would burn an OpenAI call
+	// and re-pend its completed action every tick until top-up (codex). The
+	// committed action row still finishes through the normal sweep.
+	mocks.state.channel.orgId = 'org-1';
+	mocks.state.credits = 0;
+	mocks.state.channel.historyBoundary = '2026-01-01T00:00:00.000Z';
+	mocks.state.channel.historyScanId = 'scan-req-1';
+	mocks.state.existingIds = ['paid', 'unpaid'];
+	mocks.state.insertedCredits = [{ orgId: 'org-1', refType: 'comment', refId: 'paid#scan-req-1' }];
+	// The durable marker is the staged row's scan stamp, not the ledger anchor:
+	// it covers verdicts that never mint one (rule/allowlist, unmetered orgs).
+	mocks.state.insertedComments = [
+		{ id: 'paid', channelId: 'channel', text: 'old', status: 'approved', decidedBy: 'ai', scanId: 'scan-req-1' }
+	];
+	mocks.state.moderationActions = [dispatchedAction({ commentId: 'paid', action: 'delete' })];
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ id: 'paid' }), newComment({ id: 'unpaid' })],
+		nextPageToken: 'page-2',
+		reachedCursor: false
+	});
+	mocks.getCommentModerationStatus.mockResolvedValue(null);
+
+	const result = await runChannel('channel');
+
+	expect(result.outOfCredits).toBe(true);
+	expect(mocks.scoreComment).not.toHaveBeenCalled();
+	expect(mocks.state.insertedComments).toHaveLength(1);
+	expect(mocks.state.insertedCredits).toHaveLength(1);
+	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({ commentId: 'paid', state: 'completed' })]);
+	// The page stays parked — only a top-up advances the checkpoint.
+	expect(mocks.state.channelUpdates).toEqual([]);
+});
+
+test('a parked rescan page also skips rule-matched comments this scan staged — they mint no credit anchor', async () => {
+	// Rule decisions never debit, so 'ruled' has no anchor: the credit-row
+	// marker can't see it (codex). The comments.scan_id stamp can — without
+	// it the parked page re-decides 'ruled' every tick and its completed
+	// action re-pends, repeat-firing YouTube enforcement until top-up.
+	mocks.state.channel.orgId = 'org-1';
+	mocks.state.credits = 0;
+	mocks.state.channel.historyBoundary = '2026-01-01T00:00:00.000Z';
+	mocks.state.channel.historyScanId = 'scan-req-1';
+	mocks.state.existingIds = ['ruled', 'unpaid'];
+	mocks.state.insertedComments = [
+		{ id: 'ruled', channelId: 'channel', text: 'spam', status: 'held', decidedBy: 'rule', scanId: 'scan-req-1' }
+	];
+	mocks.state.moderationActions = [{ commentId: 'ruled', channelId: 'channel', action: 'hold', reason: 'keyword', state: 'completed', authorHandle: null, lastAttemptAt: '2026-01-01T00:00:00.000Z', lastManualRetryAt: null, createdAt: '2026-01-01T00:00:00.000Z' }];
+	mocks.state.ruleRows = [{ id: 1, channelId: 'channel', type: 'keyword', pattern: 'spam', action: 'hold' }];
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ id: 'ruled', text: 'spam' }), newComment({ id: 'unpaid' })],
+		nextPageToken: 'page-2',
+		reachedCursor: false
+	});
+
+	const result = await runChannel('channel');
+
+	expect(result.outOfCredits).toBe(true);
+	// 'ruled' was already staged by this scan: no re-decision reaches the
+	// sweep, so YouTube sees no repeat enforcement call for it. (The final
+	// action state alone can't prove this — a re-pended row would re-dispatch
+	// and re-complete within the same tick, landing back on 'completed'.)
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	expect(mocks.state.insertedComments).toHaveLength(1);
+	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({ commentId: 'ruled', state: 'completed' })]);
+	expect(mocks.state.channelUpdates).toEqual([]);
+});
+
+test('a rescan retry on an unmetered org also skips already-staged comments — staging, not billing, is the marker', async () => {
+	// An org with no billing engagement mints zero credit anchors, so the
+	// ledger can't mark anything; a crash retry still must not re-score
+	// (codex). The comments row's scan stamp is the billing-free marker.
+	mocks.state.channel.orgId = null;
+	mocks.state.channel.historyBoundary = '2026-01-01T00:00:00.000Z';
+	mocks.state.channel.historyScanId = 'scan-req-1';
+	mocks.state.existingIds = ['comment'];
+	mocks.scoreComment.mockResolvedValue(moderation(0.9));
+	mocks.assertBeforeDeadline.mockImplementationOnce(() => {
+		throw new mocks.DeadlineExceededError('out of time');
+	});
+
+	const crashed = await runChannel('channel');
+
+	expect(crashed).toMatchObject({ partial: true, stoppedReason: 'deadline' });
+
+	const retried = await runChannel('channel');
+
+	expect(retried).toMatchObject({ fetched: 1, partial: false });
+	expect(mocks.scoreComment).toHaveBeenCalledTimes(1);
+	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({ commentId: 'comment', state: 'completed' })]);
+});
+
 test('skips an inactive channel without fetching or scoring', async () => {
 	mocks.state.channel = { ...mocks.state.channel, active: 0 };
 

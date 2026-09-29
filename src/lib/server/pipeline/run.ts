@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { decrypt } from '$lib/server/crypto';
 import { db } from '$lib/server/db';
@@ -47,14 +47,31 @@ async function persistResults(
 	const complete = page.reachedCursor || !page.nextPageToken;
 	await db.transaction(async (transaction) => {
 		await assertChannelActive(channelId, transaction, channel);
-		await transaction
+		// The checkpoint write carries THIS run's scan identity: a replant
+		// mid-run (owner re-requested the window — fresh boundary+nonce) must
+		// not be cleared or advanced by a stale worker. The scan predicates
+		// make its update a no-op, and the 0-row check aborts loudly the same
+		// way the feedback-history checkpoint guard does (codeant).
+		const updated = await transaction
 			.update(channels)
 			.set(
 				complete
-					? { cursor: scanCursor, nextPageToken: null, scanCursor: null }
+					? { cursor: scanCursor, nextPageToken: null, scanCursor: null, historyBoundary: null, historyScanId: null }
 					: { nextPageToken: page.nextPageToken, scanCursor }
 				)
-			.where(eq(channels.id, channelId));
+			.where(
+				and(
+					eq(channels.id, channelId),
+					channel.historyScanId === null
+						? isNull(channels.historyScanId)
+						: eq(channels.historyScanId, channel.historyScanId),
+					channel.historyBoundary === null
+						? isNull(channels.historyBoundary)
+						: eq(channels.historyBoundary, channel.historyBoundary)
+				)
+			)
+			.returning({ id: channels.id });
+		if (!updated.length) throw new Error(`history checkpoint changed for channel ${channelId} — aborting checkpoint write`);
 	});
 }
 
@@ -145,6 +162,24 @@ export async function runChannel(
 		});
 		fetched = page.comments.length;
 
+		// A planted rescan upserts stored rows and scopes its charge anchors to
+		// the per-request nonce: each requested scan debits once while a retry
+		// of the SAME scan stages covered. A null scan id is a drain planted
+		// before the nonce column existed — it still upserts, but keeps the
+		// plain comment-id anchors its earlier pages already minted (codex).
+		// The scan stamp the upsert writes to comments.scan_id falls back to
+		// the boundary for those pre-nonce drains: the boundary is a stable
+		// per-drain identity and the column has no pre-existing values to
+		// collide with, so every drain — nonce or legacy — marks its own
+		// staged rows for the parked-page/crash-retry skip (codex).
+		const rescan =
+			channel.historyBoundary === null
+				? undefined
+				: {
+						chargeScope: channel.historyScanId,
+						scanStamp: channel.historyScanId ?? channel.historyBoundary
+					};
+
 		const { decisions, failures, deferred } = await decideNewComments(channelId, page, {
 			accessToken,
 			toneLevel: channel.toneLevel ?? TONE_LEVEL_OMNI_ONLY,
@@ -158,8 +193,17 @@ export async function runChannel(
 			// queue unscored (I11; openaiKey.ts).
 			openAiKey: await resolveOpenAiKey(channel.orgId),
 			deadline,
-			rescore: window !== undefined,
+			// Rescore every fetched comment, skipping the stored-IDs dedupe:
+			// dry-run windows by design, and user-requested history rescans —
+			// the planted historyBoundary means the owner asked to re-analyze
+			// the window, so stored comments get a fresh decision (their rows
+			// upsert) instead of being skipped.
+			rescore: window !== undefined || channel.historyBoundary !== null,
 			orgId: channel.orgId,
+			// The rescan's staging marker lets the scorer skip comments this
+			// scan already committed instead of re-scoring them on a parked
+			// page or a crash retry — billing-independent (codex).
+			scanStamp: rescan?.scanStamp,
 			// Live runs consume credits (and gate AI on them); dry runs never do.
 			consumeCredits: !dryRun
 		});
@@ -168,7 +212,7 @@ export async function runChannel(
 		// Deletion may have committed during the YouTube/AI calls above: re-check
 		// before any durable write (I3) so a deleted account gets no new rows.
 		await assertChannelActive(channelId, db, channel);
-		acted = await stageOrAuditDecisions(channelId, decisions, dryRun, channel.orgId, channel);
+		acted = await stageOrAuditDecisions(channelId, decisions, dryRun, { orgId: channel.orgId, expected: channel, rescan });
 		// Fail loudly only after successful decisions are staged, and before the
 		// cursor advances, so the next run retries just the failed comments.
 		if (failures.length) {

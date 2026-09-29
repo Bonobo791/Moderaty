@@ -73,7 +73,10 @@ export type YoutubeAction = Exclude<Decision['youtubeAction'], null>;
 
 export type OutstandingAction = typeof moderationActions.$inferSelect & {
 	action: YoutubeAction;
-	state: 'pending' | 'dispatched';
+	// 'cancelling': a rescan verdict cancelled this intent after dispatch —
+	// the sweep verifies the remote call landed (→completed, audit kept) or
+	// never did (→superseded) instead of retrying the stale action (codex).
+	state: 'pending' | 'dispatched' | 'cancelling';
 };
 
 export interface AiOptions {
@@ -90,9 +93,22 @@ export type DecisionBatchOptions = {
 	deadline?: number;
 	rescore?: boolean;
 	orgId?: string | null;
+	/** The active rescan's staging marker — the value the upsert stamps on
+	 * comments.scan_id (the scan nonce; a pre-nonce drain falls back to its
+	 * planted boundary so it still marks its own work). Rows stamped with it
+	 * are skipped on the next page fetch: they were already decided+staged
+	 * by this scan, so a parked page or a crash retry must not re-score them
+	 * or re-pend their action rows. Billing-independent — it covers
+	 * rule/allowlist and unmetered verdicts that mint no credit anchor
+	 * (codex). Absent on non-rescan runs. */
+	scanStamp?: string | null;
 	/** True for live runs: credits gate AI scoring and consumption applies.
 	 * Dry runs (previews, window rescore) always score and never consume. */
 	consumeCredits?: boolean;
+};
+
+export type AiBudget = {
+	remaining: number;
 };
 
 export type ScoreOutcome = PromiseSettledResult<Decision>;
@@ -101,9 +117,18 @@ export type DecisionBatch = {
 	newComments: Array<CommentPage['comments'][number]>;
 	rulesForChannel: ReturnType<typeof prepareRules>;
 	allowlist: Awaited<ReturnType<typeof loadHandleSet>>;
-	aiBudget: { remaining: number };
+	aiBudget: AiBudget;
 	videoContext: Awaited<ReturnType<typeof fetchVideoMetadata>> | null;
 	metadataError: unknown;
 };
+
+/** Rescan staging mode: stored rows upsert to the fresh verdict and action
+ * rows re-pend/supersede. chargeScope is the scan's per-request nonce; null is
+ * a drain planted before the nonce column existed — it still upserts but
+ * keeps charging the plain comment id its earlier pages anchored (codex).
+ * scanStamp is what the upsert writes to comments.scan_id — the nonce, or the
+ * drain's planted boundary when no nonce exists, so every drain marks its own
+ * staged rows and a retry/parked tick can skip them. */
+export type RescanCharge = { chargeScope?: string | null; scanStamp?: string | null };
 
 export type ToneDecisionContext = { context: ToneContext } | null;

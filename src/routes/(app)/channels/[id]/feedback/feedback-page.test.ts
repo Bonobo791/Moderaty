@@ -70,16 +70,17 @@ describe('feedback page role gating (SSR)', () => {
 	it('shows the billing notice to every role and keeps history and preview forms owner-only', () => {
 		for (const role of ['owner', 'member', 'admin']) {
 			const body = renderFeedback(pageData({ orgRole: role }));
-			expect(body).toContain('Feedback uses 1 credit per comment processed on metered plans, in addition to moderation. Historical analysis uses the same credits. Your one free feedback dry run uses no credits.');
-			expect(body).toContain('Limited to 1 free feedback dry run per channel.');
-			expect(body).toContain('This one free feedback preview is used when it starts, even if it later fails. No credits are charged.');
+			expect(body).toContain('Feedback uses 1 credit per comment processed on metered plans, in addition to moderation. Historical analysis uses the same credits.');
 			if (role === 'owner') {
 				expect(body).toContain('action="?/analyzeHistory"');
 				expect(body).toContain('action="?/dryRun"');
-				expect(body).toContain('This one free feedback preview is used when it starts, even if it later fails. No credits are charged.');
+				// The one dry-run message: allowance, first-page scope, and the
+				// used-on-start rule consolidated into a single note.
+				expect(body).toContain('1 free feedback dry run per channel — scores only the first YouTube page (up to 100 comments) and saves no digest, history, or moderation state. Used when it starts, even if it fails. No credits are charged.');
 			} else {
 				expect(body).not.toContain('action="?/analyzeHistory"');
 				expect(body).not.toContain('action="?/dryRun"');
+				expect(body).not.toContain('1 free feedback dry run per channel');
 			}
 		}
 	});
@@ -96,13 +97,13 @@ describe('feedback page role gating (SSR)', () => {
 
 		const disabled = renderFeedback(pageData({ settings: { ...SETTINGS, enabled: false }, history: { active: true, boundary: '2025-01-01T00:00:00.000Z' }, dryRunUsed: true, ch: { id: 'UC1', title: 'Channel UC1', active: false } }));
 		expect(disabled).toContain('Feedback preview already used');
-		expect(disabled).toContain('This channel has used its feedback preview allowance.');
+		expect(disabled).toContain('1 free feedback dry run per channel');
 		expect(disabled).toContain('paused while this channel is paused or feedback is turned off');
 		expect(disabled).toMatch(/<button[^>]*disabled[^>]*>History analysis active<\/button>/);
 		expect(disabled).toMatch(/<button[^>]*disabled[^>]*>Feedback preview already used<\/button>/);
 
 		const failedAttempt = renderFeedback(pageData(), { scope: 'feedbackDryRun', attempted: true, error: 'provider failure' });
-		expect(failedAttempt).toContain('This channel has used its feedback preview allowance.');
+		expect(failedAttempt).toContain('1 free feedback dry run per channel');
 		expect(failedAttempt).toMatch(/<button[^>]*disabled[^>]*>Feedback preview already used<\/button>/);
 	});
 
@@ -124,7 +125,10 @@ describe('feedback page role gating (SSR)', () => {
 			}
 		});
 		expect(body).toContain('4 classified · 1 failed · 2 pooled · 0 credits used');
-		expect(body).toContain('Preview covers only the first page, up to 100 comments; run historical analysis for the full window.');
+		// First-page disclosure now lives in the one dry-run note plus the
+		// results caption — the preview never reads as a full-history scan.
+		expect(body).toContain('scores only the first YouTube page (up to 100 comments)');
+		expect(body).toContain('Run historical analysis for the full window.');
 		expect(body).toContain('More comments are available beyond this preview page.');
 		expect(body).toContain('When is the next stream?');
 		expect(body).not.toContain('action="?/reveal"');
@@ -138,7 +142,8 @@ describe('feedback page role gating (SSR)', () => {
 			preview: { commentsClassified: 0, commentsFailed: 0, pooled: 0, hasMore: false, findings: [] }
 		});
 		expect(body).toContain('No grouped findings in this preview');
-		expect(body).toContain('Preview covers only the first page, up to 100 comments');
+		expect(body).toContain('scores only the first YouTube page (up to 100 comments)');
+		expect(body).toContain('Run historical analysis for the full window.');
 	});
 });
 

@@ -406,18 +406,44 @@ test('analyzeHistory queues one independent feedback checkpoint without running 
 	expect(Date.parse(channel.feedbackHistoryBoundary ?? '')).toBeGreaterThan(Date.now() - 91 * 24 * 60 * 60 * 1000);
 	expect(Date.parse(channel.feedbackHistoryBoundary ?? '')).toBeLessThanOrEqual(Date.now() - 89 * 24 * 60 * 60 * 1000);
 	expect(channel.feedbackHistoryPageToken).toBeNull();
+	// A fresh scan id per request scopes this run's charge anchors — the
+	// value that lets an identical re-request debit again later.
+	expect(channel.feedbackHistoryScanId).toEqual(expect.any(String));
 	expect(channel.cursor).toBe('2026-06-01T00:00:00.000Z');
 	expect(channel.nextPageToken).toBe('live-page');
 	expect(mocks.generateFeedbackDigest).not.toHaveBeenCalled();
 });
 
 test('analyzeHistory will not reset an active feedback job or charge it again', async () => {
-	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryPageToken: 'page-2' });
+	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryScanId: 'scan-live', feedbackHistoryPageToken: 'page-2' });
 
 	const result = await postFeedbackAction('analyzeHistory', 'UC1', { months: '1' });
 
 	expect(result).toMatchObject({ status: 409, data: { scope: 'history' } });
-	expect(await testDb().db.select({ id: channels.id }).from(channels).where(and(eq(channels.id, 'UC1'), eq(channels.feedbackHistoryBoundary, '2025-01-01T00:00:00.000Z'), eq(channels.feedbackHistoryPageToken, 'page-2'))).all()).toHaveLength(1);
+	expect(await testDb().db.select({ id: channels.id }).from(channels).where(and(eq(channels.id, 'UC1'), eq(channels.feedbackHistoryBoundary, '2025-01-01T00:00:00.000Z'), eq(channels.feedbackHistoryScanId, 'scan-live'), eq(channels.feedbackHistoryPageToken, 'page-2'))).all()).toHaveLength(1);
+});
+
+test('a completed feedback history scan can be re-requested — the new run mints its own scan id', async () => {
+	// The owner may re-analyze the identical window as often as they like:
+	// each accepted request plants a fresh nonce so this run's charges are
+	// new anchors rather than replays of the previous scan's (I4 billing).
+	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1 });
+
+	const first = await postFeedbackAction('analyzeHistory', 'UC1', { months: '3' });
+	expect(first).toMatchObject({ ok: true });
+	const firstScanId = (await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())!.feedbackHistoryScanId;
+	expect(firstScanId).toEqual(expect.any(String));
+
+	// The drain finished: completion clears boundary, page token, and nonce.
+	await testDb().db.update(channels)
+		.set({ feedbackHistoryBoundary: null, feedbackHistoryPageToken: null, feedbackHistoryScanId: null })
+		.where(eq(channels.id, 'UC1'));
+
+	const second = await postFeedbackAction('analyzeHistory', 'UC1', { months: '3' });
+	expect(second).toMatchObject({ ok: true });
+	const secondScanId = (await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())!.feedbackHistoryScanId;
+	expect(secondScanId).toEqual(expect.any(String));
+	expect(secondScanId).not.toBe(firstScanId);
 });
 
 test.each([
@@ -689,6 +715,33 @@ test('abusive evidence requires explicit confirmation before returning the raw c
 	expect(JSON.stringify(result)).not.toContain(raw);
 	expect(JSON.stringify(result)).not.toContain('Author Secret');
 	expect(JSON.stringify(result)).not.toContain('author-secret');
+});
+
+test('a reveal returns the text its digest classified when a later scan refreshed the snapshot (codex)', async () => {
+	// Scan-a analyzed 'OLD TEXT' and stored a digest; scan-b re-ran over the
+	// edited comment and refreshed the shared feedback_history_comments row
+	// to 'NEW TEXT'. The older digest is still selectable on the page — its
+	// evidence row pins the text it actually classified, or revealing it
+	// shows words the classifier never saw.
+	await seedChannel('UC1');
+	const digestId = await seedDigest('UC1');
+	const [finding] = await testDb().db
+		.insert(feedbackFindings)
+		.values({ digestId, category: 'question', summary: 'A viewer asked about timing', supporterCount: 1 })
+		.returning({ id: feedbackFindings.id });
+	const [evidence] = await testDb().db
+		.insert(findingEvidence)
+		.values({ findingId: finding.id, commentId: 'edited', sanitizedExcerpt: 'concealed excerpt', hasAbuse: 0, sourceText: 'OLD TEXT' })
+		.returning({ id: findingEvidence.id });
+	await testDb().db
+		.insert(feedbackHistoryComments)
+		.values({ id: 'edited', channelId: 'UC1', text: 'NEW TEXT', publishedAt: '2025-01-01T00:00:00.000Z', scanId: 'scan-b' });
+
+	await expect(postReveal('UC1', String(evidence.id))).resolves.toEqual({
+		scope: 'reveal',
+		evidenceId: evidence.id,
+		text: 'OLD TEXT'
+	});
 });
 
 test('a reveal prefers the historical snapshot when the comment exists in both stores (cubic)', async () => {

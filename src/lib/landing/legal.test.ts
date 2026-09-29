@@ -26,11 +26,12 @@ describe('LEGAL_DOCS', () => {
 	it('material Terms changes always ship under a NEW legal version', () => {
 		// 1.10 was the PolyForm license swap; 1.11 was the lifetime-BYOK
 		// requirement; 1.12 was the digest credit disclosure; 1.13 identifies
-		// the legal operator and updates its contact details. Material changes
+		// the legal operator and updates its contact details; 1.14 adds the
+		// dormant zero-credit account deletion (Terms §17.3). Material changes
 		// must bump LEGAL_VERSION so the re-consent gate (hasCurrentConsent)
 		// routes every user back through /consent. Never let legal changes ride
 		// along under an old version.
-		expect(LEGAL_VERSION).toBe('1.13');
+		expect(LEGAL_VERSION).toBe('1.14');
 	});
 
 	it('lists exactly the three published legal documents', () => {
@@ -689,5 +690,38 @@ describe('lifetime BYOK disclosure matches the required-key Terms', () => {
 		expect(byok, 'BYOK FAQ entry missing').toBeDefined();
 		expect(byok?.a).toMatch(/self-host/i);
 		expect(byok?.a).toMatch(/lifetime/i);
+	});
+});
+
+// Guard for the dormant-account retention disclosure (LEGAL_VERSION 1.14):
+// the docs must state the exact rule the sweep implements — billing-engaged
+// accounts only, warnings every 7 days starting one week after the balance
+// reaches zero, deletion at 30 days, and the exemptions. A drifted clause
+// makes the cron behavior a surprise deletion.
+describe('zero-credit account retention disclosure (1.14)', () => {
+	it('Terms §17.3 states the dormant zero-credit deletion rule', () => {
+		const terms = readComponent('terms');
+		const s17 = terms.slice(terms.indexOf('<h2 id="s17">'), terms.indexOf('<h2 id="s18">'));
+		expect(s17).toContain('<strong>17.3</strong>');
+		expect(s17).toMatch(/17\.3<\/strong>[^<]*Credits or a hosted plan/);
+		expect(s17).toMatch(/every 7 days/);
+		expect(s17).toMatch(/30 days/);
+		expect(s17).toMatch(/never purchased|never subject to zero-credit deletion/);
+		// The effects clause moved to 17.4 — the old number must be gone.
+		expect(s17).toContain('<strong>17.4</strong>');
+		expect(s17).not.toMatch(/<strong>17\.3<\/strong> Upon termination/);
+	});
+
+	it('Privacy §7.1 names the automatic deletion and the warning cadence', () => {
+		const privacy = readComponent('privacy');
+		const s71 = privacy.slice(privacy.indexOf('<strong>7.1</strong>'));
+		expect(s71).toMatch(/out of credits for 30 days/);
+		expect(s71).toMatch(/every 7 days/);
+	});
+
+	it('DPA §17.2 covers termination by automatic account deletion', () => {
+		const dpa = readComponent('dpa');
+		const s172 = dpa.slice(dpa.indexOf('<strong>17.2</strong>'), dpa.indexOf('<h2 id="s18">'));
+		expect(s172).toMatch(/zero-credit|Terms §17\.3/);
 	});
 });

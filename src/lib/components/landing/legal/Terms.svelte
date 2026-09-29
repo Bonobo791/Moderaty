@@ -143,7 +143,9 @@
 
 <p><strong>17.2</strong> We may terminate for convenience with 30 days' prior notice; refunds are governed by Section 7. We may terminate immediately for material breach not cured within a reasonable period after notice, or where Section 13.3 applies.</p>
 
-<p><strong>17.3</strong> Upon termination: your access ends; Comment Data is handled as set out in the DPA (deletion within 30 days, except statutory logs); Sections 11, 14, 15, 16, 19, and 20 survive.</p>
+<p><strong>17.3</strong> An account that has purchased Credits or a hosted plan enters a dormant zero-credit period once every organization on it is out of moderation Credits — no prepaid balance and no active subscription. Starting one week after the balance first reaches zero, we e-mail a deletion warning every 7 days; if no organization on the account has regained Credits or an active subscription after 30 days, we delete the account and its data as set out in Section 17.4 and the Privacy Policy. Funding any organization (a credit purchase or an active subscription) ends the period immediately. Accounts that never purchased, self-hosted deployments, and lifetime-plan organizations are never subject to zero-credit deletion.</p>
+
+<p><strong>17.4</strong> Upon termination: your access ends; Comment Data is handled as set out in the DPA (deletion within 30 days, except statutory logs); Sections 11, 14, 15, 16, 19, and 20 survive.</p>
 
 <h2 id="s18">18. Changes to These Terms</h2>
 

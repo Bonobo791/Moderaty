@@ -16,6 +16,14 @@ export type LegalDoc = {
 };
 
 export const LEGAL_EFFECTIVE_DATE = '22 October 2026';
+// 1.14: ZERO-CREDIT RETENTION — Terms §17.3 (new) adds dormant-account
+// deletion: a billing-engaged account whose organizations all stay out of
+// credits is warned every 7 days and deleted after 30 days; never-purchased
+// and lifetime accounts are exempt. Privacy §7.1 and DPA §17.2 name the same
+// rule. Material change: users without a 1.14 consent row are routed back
+// through /consent.
+// 1.13: OPERATOR IDENTITY — the legal operator's company name, CNPJ, address,
+// and contact e-mail were published across all three documents.
 // 1.12: DIGEST CREDIT DISCLOSURE — Terms §2 and §6.1 amended so the comment
 // allowance and prepaid credits cover AI-scored comments generally, and a
 // comment classified by an enabled feedback digest consumes a credit
@@ -54,7 +62,7 @@ export const LEGAL_EFFECTIVE_DATE = '22 October 2026';
 // 1.5: Terms §6.1(c) corrected — the lifetime hosted plan has no per-account
 // key flow (hosted scoring runs on the deployment's OPENAI_API_KEY), so the
 // "your own OpenAI key" promise was removed from the lifetime clause.
-export const LEGAL_VERSION = '1.13';
+export const LEGAL_VERSION = '1.14';
 export const LEGAL_KICKER = 'YouTube Comment Moderation Service';
 
 /**

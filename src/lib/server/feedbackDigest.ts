@@ -501,9 +501,12 @@ export async function generateFeedbackDigest(
 		const categories = enabledCategories(channel);
 		// The AI theme pass merges differently-worded claims for the same
 		// recurring feedback BEFORE grouping — otherwise exact claim matching
-		// undercounts what actually comes up most. A malformed merge response
-		// throws: the run fails loudly and retries next tick (markers never
-		// moved), it never writes a wrong digest.
+		// undercounts what actually comes up most. The merge runs one call
+		// per category: themes never merge across categories anyway, so a
+		// mixed batch only let the model emit a malformed cross-category
+		// theme. A malformed merge response still throws: the run fails
+		// loudly and retries next tick (markers never moved), it never
+		// writes a wrong digest.
 		// Its request is bounded by the write reserve so the model call can
 		// never consume the headroom the persistence tx needs (codex/cubic).
 		const clusterDeadline = deadline === undefined ? undefined : deadline - WRITE_RESERVE_MS;

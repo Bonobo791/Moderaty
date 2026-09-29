@@ -80,6 +80,13 @@ const mocks = vi.hoisted(() => {
 						params.includes(queryKey(row.commentId)) && params.includes(queryKey(row.channelId)));
 					return matches.at(-1);
 				}
+				if (table === state.tables.creditTransactions) {
+					// hasChargeAnchor's (org_id, ref_type, ref_id) lookup: a row only
+					// exists when an earlier charge actually committed one.
+					const params = queryParams(condition);
+					return state.insertedCredits.find((row) =>
+						params.includes(queryKey(row.orgId)) && params.includes(queryKey(row.refType)) && params.includes(queryKey(row.refId)));
+				}
 				throw new Error('unexpected get query');
 			},
 			all: async () => {
@@ -92,6 +99,10 @@ const mocks = vi.hoisted(() => {
 					state.onCommentsSelect?.(state.commentsSelectCalls);
 					const params = queryParams(condition);
 					const statusFilter = params.filter((param) => COMMENT_STATUSES.has(param as string));
+					// The rescan staged-marker read (eq comments.scan_id = stamp): a
+					// row only matches when its stamp equals the bound value — NULL
+					// never equals, like real SQL.
+					const scanFiltered = querySql(condition).includes('"comments"."scan_id"');
 					return [...new Set([
 						...state.existingIds,
 						...state.insertedComments.map((comment) => queryKey(comment.id))
@@ -104,9 +115,12 @@ const mocks = vi.hoisted(() => {
 						return {
 							id,
 							status: staged?.status ?? state.commentStatuses[id] ?? 'held',
-							decidedBy: staged?.decidedBy ?? state.commentDecidedBy[id] ?? 'ai'
+							decidedBy: staged?.decidedBy ?? state.commentDecidedBy[id] ?? 'ai',
+							scanId: staged?.scanId ?? null
 						};
-					}).filter((row) => params.includes(row.id) || (statusFilter.length > 0 && statusFilter.includes(row.status)));
+					}).filter((row) =>
+						(params.includes(row.id) || (statusFilter.length > 0 && statusFilter.includes(row.status)))
+						&& (!scanFiltered || params.includes(row.scanId)));
 				}
 				if (table === state.tables.auditLog) {
 					// Honor eq(channelId)/eq(commentId): rows matching both come back,
@@ -136,6 +150,14 @@ const mocks = vi.hoisted(() => {
 					return state.moderationActions.filter((action) =>
 						params.includes(queryKey(action.channelId)) && params.includes(queryKey(action.state)));
 				}
+				if (table === state.tables.creditTransactions) {
+					// The rescan prepaid-anchor read (eq org_id + eq ref_type +
+					// inArray(ref_id, ...)): a row only counts when an earlier
+					// charge actually committed that anchor.
+					const params = queryParams(condition);
+					return state.insertedCredits.filter((row) =>
+						params.includes(queryKey(row.orgId)) && params.includes(queryKey(row.refType)) && params.includes(queryKey(row.refId)));
+				}
 				throw new Error('unexpected all query');
 			}
 			};
@@ -152,9 +174,32 @@ const mocks = vi.hoisted(() => {
 				// chain must be returned synchronously or onConflictDoNothing lands
 				// on a Promise.
 				store(table, values);
-				// Ledger inserts chain onConflictDoNothing().returning() — simulate a
-				// fresh insert (never a conflict) so consumeCredit sees a charge.
-				return { onConflictDoNothing: () => ({ returning: async () => [{ id: 1 }] }) };
+				// Rescan upserts chain onConflictDoUpdate() and await it directly —
+				// the mock records the staged row either way (conflict resolution is
+				// a SQL concern the in-memory store does not emulate).
+				return {
+					onConflictDoNothing: () => {
+						if (table === state.tables.creditTransactions) {
+							// Honor UNIQUE(org_id, ref_type, ref_id): an anchor committed
+							// by an earlier charge makes THIS insert conflict — nothing
+							// records and returning() comes back empty, exactly like
+							// the real constraint (rescan retries depend on it).
+							const rows = valueRows(values);
+							const priors = state.insertedCredits.slice(0, state.insertedCredits.length - rows.length);
+							if (creditAnchorConflict(priors, rows)) {
+								state.insertedCredits.splice(priors.length, rows.length);
+								return { returning: async () => [] as Record<string, unknown>[] };
+							}
+						}
+						return { returning: async () => [{ id: 1 }] };
+					},
+					// Upsert mode (rescans): emulate the real conflict resolution —
+					// a row whose PK already exists merges into the stored row, so
+					// assertions see one row per id and wrong upsert code fails.
+					onConflictDoUpdate: async () => {
+						mergeUpsertedRows(state, table, values);
+					}
+				};
 			}
 		})),
 		select: vi.fn(() => ({ from: (table: unknown) => query(table) })),
@@ -193,8 +238,23 @@ const mocks = vi.hoisted(() => {
 							const identityMatches = params.length <= 2 || params.includes(state.channel?.refreshTokenEnc);
 							return { returning: async () => state.channel?.active && identityMatches ? [{ id: state.channel.id }] : [] };
 						}
+						// persistResults' scan-identity checkpoint guard: the WHERE
+						// binds the run's read values (eq) or asserts the column null
+						// (isNull). Compare against the LIVE row — a mid-run replant
+						// mismatches, the real UPDATE affects 0 rows, and nothing
+						// records (codeant race).
+						const scanGuard = (column: 'history_scan_id' | 'history_boundary'): boolean => {
+							const bound = boundParam(condition, column);
+							const live = column === 'history_scan_id' ? state.channel?.historyScanId : state.channel?.historyBoundary;
+							if (bound.kind === 'eq') return bound.value === live;
+							if (bound.kind === 'isNull') return live == null;
+							return true;
+						};
+						if (!scanGuard('history_scan_id') || !scanGuard('history_boundary')) {
+							return { returning: async () => [] as Record<string, unknown>[] };
+						}
 						state.channelUpdates.push(values);
-						return none;
+						return { returning: async () => [{ id: state.channel.id }] };
 					}
 					if (table === state.tables.comments) {
 						// Status/decidedBy writes honor the where: id predicates AND
@@ -369,13 +429,68 @@ import type { NewComment } from '../youtube';
 const dialect = new SQLiteSyncDialect();
 
 const COMMENT_STATUSES = new Set(['pending', 'approved', 'held', 'rejected', 'deleted', 'restoring']);
-const ACTION_STATES = new Set(['pending', 'dispatched', 'completed', 'superseded', 'manual_review']);
+const ACTION_STATES = new Set(['pending', 'dispatched', 'cancelling', 'completed', 'superseded', 'manual_review']);
 
 /** Binds the parameters of a real drizzle where-condition so the fake store
  * honors which rows a query actually targets. */
 function queryParams(condition: unknown): unknown[] {
 	if (!condition) return [];
 	return dialect.sqlToQuery(condition as Parameters<typeof dialect.sqlToQuery>[0]).params;
+}
+
+function querySql(condition: unknown): string {
+	if (!condition) return '';
+	return dialect.sqlToQuery(condition as Parameters<typeof dialect.sqlToQuery>[0]).sql;
+}
+
+type BoundParam = { kind: 'eq'; value: unknown } | { kind: 'isNull' | 'absent' };
+
+/** The bound value of a `"channels"."col" = ?` clause — its position among the
+ * placeholders is counted, not assumed, so predicate order stays the caller's
+ * business. 'isNull' and 'absent' cover the other clause shapes. */
+function boundParam(condition: unknown, column: string): BoundParam {
+	const sql = querySql(condition);
+	const eqPos = sql.indexOf(`"channels"."${column}" = ?`);
+	if (eqPos === -1) return { kind: sql.includes(`"channels"."${column}" is null`) ? 'isNull' : 'absent' };
+	return { kind: 'eq', value: queryParams(condition)[sql.slice(0, eqPos).split('?').length - 1] };
+}
+
+function valueRows(values: unknown): Record<string, unknown>[] {
+	return (Array.isArray(values) ? values : [values]) as Record<string, unknown>[];
+}
+
+function creditAnchorConflict(priors: Record<string, unknown>[], rows: Record<string, unknown>[]): boolean {
+	return rows.some((row) =>
+		priors.some((prior) =>
+			prior.orgId === row.orgId && prior.refType === row.refType && prior.refId === row.refId));
+}
+
+/** Emulates upsert conflict resolution for the tables rescans write: a pushed
+ * row whose PK already exists merges into the stored row — the fresh verdict
+ * fields win, the original createdAt survives (the real SET list never
+ * touches it) — instead of leaving a phantom duplicate assertions can't
+ * distinguish from a real insert (codeant nitpick). */
+function mergeUpsertedRows(
+	state: {
+		tables: { comments: unknown; moderationActions: unknown };
+		insertedComments: Record<string, unknown>[];
+		moderationActions: Record<string, unknown>[];
+	},
+	table: unknown,
+	values: unknown
+): void {
+	const merge = (list: Record<string, unknown>[], key: string) => {
+		const rows = valueRows(values);
+		const priors = list.slice(0, list.length - rows.length);
+		for (const row of rows) {
+			const prior = priors.find((stored) => stored[key] === row[key]);
+			if (!prior) continue;
+			Object.assign(prior, row, { createdAt: prior.createdAt });
+			list.splice(list.indexOf(row), 1);
+		}
+	};
+	if (table === state.tables.comments) merge(state.insertedComments, 'id');
+	if (table === state.tables.moderationActions) merge(state.moderationActions, 'commentId');
 }
 
 function queryKey(value: unknown): string {
@@ -518,6 +633,8 @@ export function resetPipelineMocks() {
 		cursor: null,
 		nextPageToken: null,
 		scanCursor: null,
+		historyBoundary: null,
+		historyScanId: null,
 		active: 1,
 		toneLevel: null,
 		createdAt: '2026-01-01T00:00:00.000Z'

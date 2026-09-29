@@ -1,4 +1,4 @@
-import { eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { loadHandleSet } from '$lib/server/allowlist';
 import { getCredits, orgIsMetered } from '$lib/server/billing/ledger';
 import { db } from '$lib/server/db';
@@ -9,7 +9,7 @@ import type { ToneProtections } from '$lib/server/tone';
 import { TONE_LEVEL_OMNI_AND_TONE } from '$lib/toneLevels';
 import { fetchVideoMetadata, type CommentPage } from '$lib/server/youtube';
 import { decide, metadataUnavailable } from './decisions';
-import type { Decision, DecisionBatchOptions, ScoreOutcome } from './types';
+import type { AiBudget, Decision, DecisionBatchOptions, ScoreOutcome } from './types';
 
 /**
  * Fetches video titles/descriptions for level-2 tone scoring. Best-effort:
@@ -41,6 +41,36 @@ export async function loadVideoContext(
 	return { videoContext, metadataError };
 }
 
+/**
+ * The page comments this history scan already charged+staged. The staging
+ * transaction writes verdict+action+anchor atomically, so an anchor under
+ * THIS scan's ref means the comment is DONE — re-scoring it while the page
+ * sits parked on outOfCredits would re-pend its completed action and burn
+ * an OpenAI call + YouTube write on every tick until top-up (codex). The
+ * committed moderation_actions row still drives the enforcement sweep, so
+ * the crash-after-charge case drains with no extra work. The ref shape
+ * matches staging's exactly, including the plain comment id a pre-nonce
+ * drain charges.
+ */
+/** Which of this page's stored comment rows the ACTIVE rescan already staged.
+ * The upsert stamps comments.scan_id with the scan marker, so the marker — not
+ * the credit ledger — tracks staged work: rule/allowlist and unmetered-org
+ * verdicts mint no anchor but must skip just the same (codex). */
+async function loadStagedIds(
+	pageComments: CommentPage['comments'],
+	scanStamp: string
+): Promise<Set<string>> {
+	return new Set(
+		(
+			await db
+				.select({ id: comments.id })
+				.from(comments)
+				.where(and(inArray(comments.id, pageComments.map((comment) => comment.id)), eq(comments.scanId, scanStamp)))
+				.all()
+		).map((row) => row.id)
+	);
+}
+
 export async function prepareDecisionBatch(
 	channelId: string,
 	page: CommentPage,
@@ -49,7 +79,7 @@ export async function prepareDecisionBatch(
 	newComments: Array<CommentPage['comments'][number]>;
 	rulesForChannel: ReturnType<typeof prepareRules>;
 	allowlist: Awaited<ReturnType<typeof loadHandleSet>>;
-	aiBudget: { remaining: number };
+	aiBudget: AiBudget;
 	videoContext: Awaited<ReturnType<typeof fetchVideoMetadata>> | null;
 	metadataError: unknown;
 }> {
@@ -67,9 +97,19 @@ let metered = false;
 if (options.consumeCredits && options.orgId) {
 	metered = await orgIsMetered(options.orgId);
 }
-const aiBudget = {
+const aiBudget: AiBudget = {
 	remaining: metered && options.orgId ? await getCredits(options.orgId) : Number.POSITIVE_INFINITY
 };
+// Comments the ACTIVE rescan already committed (stamped comments.scan_id =
+// scanStamp by the staging upsert) are done — verdict, action row, and any
+// charge landed atomically. Re-scoring them would burn an OpenAI call and
+// re-pend completed actions every tick a page sits parked (codex). Queried
+// only for rescans: live runs dedupe by storedIds below, and a null stamp
+// (non-rescan or dry-run window) has no marker to match.
+const stagedIds =
+	options.rescore && options.scanStamp && page.comments.length
+		? await loadStagedIds(page.comments, options.scanStamp)
+		: new Set<string>();
 // Dry-run window mode (rescore: true) skips the stored-IDs dedupe entirely:
 // re-scoring comments a real run already moderated is the point of the
 // preview. The within-batch dedupe below still applies. The DB query is
@@ -90,14 +130,17 @@ const existingIds = new Set(storedIds);
 const rulesForChannel = prepareRules(await db.select().from(rules).where(eq(rules.channelId, channelId)).all());
 // One allowlist read per run; decide() checks it before any rule or scoring.
 const allowlist = await loadHandleSet(channelId);
-// Dedupe twice: against already-stored comments AND within this batch.
+// Dedupe three ways: against already-stored comments, within this batch,
+// and against comments this scan already staged (the scan_id marker). The
+// last keeps a parked rescan page from re-scoring finished work every tick;
+// staged comments' committed action rows still drain via enforcement.
 // commentThreads pagination can repeat an item across page boundaries, and
 // two decisions with one comment id would violate the comments.id PRIMARY
 // KEY, failing the entire staging transaction (I1: one bad item never
 // aborts the batch).
 const seen = new Set<string>();
 const newComments = page.comments.filter((comment) => {
-	if (existingIds.has(comment.id) || seen.has(comment.id)) return false;
+	if (existingIds.has(comment.id) || seen.has(comment.id) || stagedIds.has(comment.id)) return false;
 	seen.add(comment.id);
 	return true;
 });
@@ -119,7 +162,7 @@ export async function scoreComments(
 	options: {
 		rulesForChannel: ReturnType<typeof prepareRules>;
 		allowlist: Awaited<ReturnType<typeof loadHandleSet>>;
-		aiBudget: { remaining: number };
+		aiBudget: AiBudget;
 		videoContext: Awaited<ReturnType<typeof fetchVideoMetadata>> | null;
 		metadataError: unknown;
 		deadline: number | undefined;
@@ -186,6 +229,7 @@ export async function decideNewComments(
 		deadline,
 		rescore,
 		orgId,
+		scanStamp,
 		consumeCredits
 	}: DecisionBatchOptions
 ): Promise<{ decisions: Decision[]; failures: string[]; deferred: number }> {
@@ -197,6 +241,7 @@ export async function decideNewComments(
 		deadline,
 		rescore,
 		orgId,
+		scanStamp,
 		consumeCredits
 	});
 	const settled = await scoreComments(batch.newComments, {

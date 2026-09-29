@@ -57,8 +57,8 @@ function validAction(action: string): YoutubeAction {
 }
 
 function outstandingAction(action: typeof moderationActions.$inferSelect): OutstandingAction {
-	// Stryker disable next-line ConditionalExpression, BlockStatement: equivalent — the only caller queries with inArray(state, ['pending','dispatched']), so no other state can reach this guard
-	if (action.state !== 'pending' && action.state !== 'dispatched') {
+	// Stryker disable next-line ConditionalExpression, BlockStatement: equivalent — the only caller queries with inArray(state, ['pending','dispatched','cancelling']), so no other state can reach this guard
+	if (action.state !== 'pending' && action.state !== 'dispatched' && action.state !== 'cancelling') {
 		// Stryker disable next-line StringLiteral: equivalent — unreachable for the same reason as the guard above
 		throw new Error(`moderation action ${action.commentId} has invalid outstanding state: ${action.state}`);
 	}
@@ -70,16 +70,17 @@ function updateActionStates(
 	actions: OutstandingAction[],
 	set: { state: 'dispatched' | 'superseded' | 'completed'; lastAttemptAt?: string }
 ) {
-	// Transitions only ever move OUTSTANDING rows: a terminal state must never
-	// be rewritten by a stale run (completed→superseded) nor claimed by a row
-	// a concurrent decider already finished. The predecessor predicate makes
-	// every transition conditional on the row still being in flight.
+	// Transitions only ever move OUTSTANDING rows ('cancelling' included — a
+	// rescan-cancelled dispatch is still in flight until verified): a terminal
+	// state must never be rewritten by a stale run (completed→superseded) nor
+	// claimed by a row a concurrent decider already finished. The predecessor
+	// predicate makes every transition conditional on the row being in flight.
 	return transaction
 		.update(moderationActions)
 		.set(set)
 		.where(and(
 			inArray(moderationActions.commentId, actions.map((action) => action.commentId)),
-			inArray(moderationActions.state, ['pending', 'dispatched'])
+			inArray(moderationActions.state, ['pending', 'dispatched', 'cancelling'])
 		));
 }
 
@@ -189,7 +190,7 @@ async function completeActions(actions: OutstandingAction[], expected?: ChannelI
 			.set({ state: 'completed' })
 			.where(and(
 				inArray(moderationActions.commentId, actions.map((action) => action.commentId)),
-				inArray(moderationActions.state, ['pending', 'dispatched'])
+				inArray(moderationActions.state, ['pending', 'dispatched', 'cancelling'])
 			))
 			.returning({ commentId: moderationActions.commentId });
 		const done = new Set(transitioned.map((row) => row.commentId));
@@ -299,7 +300,7 @@ async function processOutstandingActions(channelId: string, accessToken: string,
 		.from(moderationActions)
 		.where(and(
 			eq(moderationActions.channelId, channelId),
-			inArray(moderationActions.state, ['pending', 'dispatched'])
+			inArray(moderationActions.state, ['pending', 'dispatched', 'cancelling'])
 		))
 		.all()).map(outstandingAction);
 	// Stryker disable next-line MethodExpression, ConditionalExpression: equivalent — claimPendingActions' SQL still guards eq(state, 'pending'), so handing it dispatched rows too claims nothing extra
@@ -312,6 +313,19 @@ async function processOutstandingActions(channelId: string, accessToken: string,
 			// concurrent run owns the action, so skip it to avoid duplicate enforcement.
 			// Stryker disable next-line StringLiteral: equivalent — a ready entry's state field is never read again; applyYoutubeActions groups by action only
 			if (claimed.has(action.commentId)) ready.push({ ...action, state: 'dispatched' });
+			continue;
+		}
+		if (action.state === 'cancelling') {
+			// A rescan verdict cancelled this intent after dispatch — reconcile
+			// the remote call before resolving the row: landed → completed with
+			// its audit row (the action really happened); never landed →
+			// superseded, and it must NOT fall through to a retry that would
+			// apply the stale decision (codex).
+			if ((await verifyDispatchedAction(action, accessToken, deadline, expected)) === 'completed') {
+				await completeActions([action], expected);
+			} else {
+				await transitionActions([action], { state: 'superseded' }, expected);
+			}
 			continue;
 		}
 		if ((await verifyDispatchedAction(action, accessToken, deadline, expected)) === 'completed') {

@@ -1,9 +1,10 @@
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { normalizeHandle } from '$lib/server/allowlist';
-import { consumeCredit, orgIsMetered, type LedgerHandle } from '$lib/server/billing/ledger';
+import { commentChargeRef, consumeCredit, hasChargeAnchor, orgIsMetered, type LedgerHandle } from '$lib/server/billing/ledger';
 import { db } from '$lib/server/db';
 import { auditLog, comments, moderationActions } from '$lib/server/db/schema';
 import { assertChannelActive, type ChannelIdentity } from './enforcement';
-import type { Decision } from './types';
+import type { Decision, RescanCharge } from './types';
 
 /**
  * Builds audit records for moderation decisions.
@@ -83,7 +84,170 @@ function actionRows(channelId: string, decisions: Decision[]) {
 }
 
 
-export async function stageDecisions(channelId: string, decisions: Decision[], orgId?: string | null, expected?: ChannelIdentity) {
+/** Rescan-only comment staging: stored rows take the fresh verdict by upsert. */
+async function upsertRescannedCommentRows(
+	transaction: LedgerHandle,
+	channelId: string,
+	decisions: Decision[],
+	scanStamp: string | null | undefined
+): Promise<void> {
+	// A user-requested history rescan re-decides stored comments on
+	// purpose: the row UPSERTS to the fresh verdict instead of the
+	// insert dying on the comments.id primary key. Text/publishedAt
+	// refresh too (the YouTube comment may have been edited); the
+	// original createdAt and the feedback-digest marker are kept.
+	// The scan stamp goes on the row itself: it is THE record that this
+	// scan already staged the comment — the parked-page/crash-retry filter
+	// reads it to skip verdicts that mint no credit anchor (rule/allowlist,
+	// unmetered orgs) as well as billed ones (codex).
+	const stamp = scanStamp ?? null;
+	await transaction
+		.insert(comments)
+		.values(commentRows(channelId, decisions).map((row) => ({ ...row, scanId: stamp })))
+		.onConflictDoUpdate({
+			target: comments.id,
+			set: {
+				text: sql`excluded.text`,
+				publishedAt: sql`excluded.published_at`,
+				status: sql`excluded.status`,
+				decidedBy: sql`excluded.decided_by`,
+				matchedRuleId: sql`excluded.matched_rule_id`,
+				aiScore: sql`excluded.ai_score`,
+				scanId: sql`excluded.scan_id`
+			}
+		});
+}
+
+/**
+ * Writes the moderation_actions side of a batch. Rescan mode both re-pends
+ * action verdicts AND supersedes outstanding rows a fresh non-action verdict
+ * replaces; live runs only ever see brand-new comments, so plain inserts.
+ */
+/** Rescan: the new verdict replaces whatever the row held — even a completed
+ * or dispatched action returns to 'pending' so the fresh decision re-enforces.
+ * The earlier outcome stays in the audit log (comment_id is the PK). */
+async function upsertRescanActionRows(transaction: LedgerHandle, actions: ReturnType<typeof actionRows>): Promise<void> {
+	if (!actions.length) return;
+	await transaction
+		.insert(moderationActions)
+		.values(actions)
+		.onConflictDoUpdate({
+			target: moderationActions.commentId,
+			set: {
+				action: sql`excluded.action`,
+				reason: sql`excluded.reason`,
+				authorHandle: sql`excluded.author_handle`,
+				state: 'pending',
+				lastAttemptAt: null,
+				lastManualRetryAt: null
+			}
+		});
+}
+
+/** A rescan verdict with NO action cancels the comment's outstanding intent —
+ * a stale pending/dispatched row would otherwise be claimed by the next
+ * enforcement sweep and apply the OLD decision on YouTube (codeant). Terminal
+ * rows stay: they record actions that already reached YouTube, which no new
+ * verdict can undo. 'pending' never reached YouTube — cancel outright. A
+ * 'dispatched' call may already have landed remotely, so it goes 'cancelling'
+ * and the sweep's verification resolves it (codex): landed → completed with
+ * its audit row; never landed → superseded — never retried with the stale
+ * intent. */
+async function supersedeStaleActionRows(transaction: LedgerHandle, commentIds: string[]): Promise<void> {
+	if (!commentIds.length) return;
+	await transaction
+		.update(moderationActions)
+		.set({ state: 'superseded' })
+		.where(
+			and(
+				inArray(moderationActions.commentId, commentIds),
+				eq(moderationActions.state, 'pending')
+			)
+		);
+	await transaction
+		.update(moderationActions)
+		.set({ state: 'cancelling' })
+		.where(
+			and(
+				inArray(moderationActions.commentId, commentIds),
+				eq(moderationActions.state, 'dispatched')
+			)
+		);
+}
+
+/**
+ * Writes the moderation_actions side of a batch. Rescan mode both re-pends
+ * action verdicts AND supersedes outstanding rows a fresh non-action verdict
+ * replaces; live runs only ever see brand-new comments, so plain inserts.
+ */
+async function stageActionRows(
+	transaction: LedgerHandle,
+	decisions: Decision[],
+	actions: ReturnType<typeof actionRows>,
+	rescan: boolean
+): Promise<void> {
+	if (!rescan) {
+		if (actions.length) await transaction.insert(moderationActions).values(actions);
+		return;
+	}
+	await upsertRescanActionRows(transaction, actions);
+	await supersedeStaleActionRows(
+		transaction,
+		decisions.filter((decision) => !decision.youtubeAction).map((decision) => decision.comment.id)
+	);
+}
+
+/**
+ * One credit per BILLABLE decision (AI budget was claimed for it), charged in
+ * the SAME transaction as the staging: a crash rolls both back and a re-run
+ * can never double-charge (the ledger's UNIQUE(org_id, ref_type, ref_id)
+ * anchor is the backstop). Rule/allowlist decisions are never billed
+ * (billable is set only where decide() decrements the AI budget).
+ */
+async function chargeBillableDecisions(
+	transaction: LedgerHandle,
+	orgId: string | null | undefined,
+	decisions: Decision[],
+	chargeScope: string | null | undefined
+): Promise<void> {
+	if (!orgId) return;
+	// Unmetered orgs (self-hosted, lifetime, pre-billing) are unlimited:
+	// their consumeCredit attempts are DESIGNED no-ops (the NULL-balance
+	// guard or the unmetered-plan early return rejects the charge), so
+	// only a METERED org's failed charge is an anomaly worth aborting for.
+	const metered = await orgIsMetered(orgId);
+	for (const decision of decisions) {
+		if (!decision.billable) continue;
+		// A rescan charges again per comment: the anchor is scoped to
+		// the scan id planted for THIS request, so each requested scan
+		// debits once while a retry of the SAME scan hits the anchor and
+		// stages covered instead of double-charging (I4). A null scope is
+		// a pre-nonce drain — its earlier pages charged the plain comment
+		// id, so the anchor stays plain or the retry double-charges
+		// (codex).
+		const refId = commentChargeRef(decision.comment.id, chargeScope);
+		const charged = await consumeCredit(transaction, orgId, refId);
+		if (charged || !metered) continue;
+		if (await hasChargeAnchor(transaction, orgId, 'comment', refId)) continue;
+		// The balance was exhausted CONCURRENTLY (another run of the same
+		// org spent the credits between this run's budget read and the
+		// atomic charge) — an existing anchor is the other false case and
+		// means this exact charge already committed. The decision must
+		// NEVER stage free on a shortfall: abort the staging transaction —
+		// the rollback leaves the comments unprocessed, so the next run
+		// re-fetches them once the org tops up (codex review). Loud: the
+		// caller sees the run fail and the cron answers 500.
+		throw new Error(
+			`credit charge failed for comment ${decision.comment.id} (org ${orgId}) — staging aborted, balance exhausted concurrently`
+		);
+	}
+}
+
+/** Optional staging knobs: org to bill, channel identity for the liveness
+ * assert, and rescan mode (upserts + scan-scoped charge anchors). */
+export type StageOptions = { orgId?: string | null; expected?: ChannelIdentity; rescan?: RescanCharge };
+
+export async function stageDecisions(channelId: string, decisions: Decision[], options: StageOptions = {}) {
 	if (!decisions.length) return;
 	const actions = actionRows(channelId, decisions);
 	await db.transaction(async (transaction) => {
@@ -91,9 +255,14 @@ export async function stageDecisions(channelId: string, decisions: Decision[], o
 		// deletion either commits first (and this fails) or waits until these rows
 		// are complete; no orphaned rows can be created between a preflight read
 		// and the inserts.
-		await assertChannelActive(channelId, transaction, expected);
-		await transaction.insert(comments).values(commentRows(channelId, decisions));
-		if (actions.length) await transaction.insert(moderationActions).values(actions);
+		await assertChannelActive(channelId, transaction, options.expected);
+		const handle = transaction as LedgerHandle;
+		if (options.rescan) {
+			await upsertRescannedCommentRows(handle, channelId, decisions, options.rescan.scanStamp);
+		} else {
+			await transaction.insert(comments).values(commentRows(channelId, decisions));
+		}
+		await stageActionRows(handle, decisions, actions, options.rescan !== undefined);
 		// Enforcement decisions (ban/reject/delete/hold) get their audit row at
 		// completion from completeActions — EXCEPT a queued comment's 'queue'
 		// row, which records WHY it waits for a human even though its 'hold'
@@ -104,36 +273,7 @@ export async function stageDecisions(channelId: string, decisions: Decision[], o
 			false
 		);
 		if (audits.length) await transaction.insert(auditLog).values(audits);
-		// One credit per BILLABLE decision (AI budget was claimed for it), in
-		// the SAME transaction as the staging: a crash rolls both back and a
-		// re-run can never double-charge (the ledger's UNIQUE(org_id, ref_type,
-		// ref_id) anchor is the backstop). Rule/allowlist decisions are never
-		// billed (billable is set only where decide() decrements the AI
-		// budget); a comment whose charge fails (balance hit 0 mid-batch)
-		// stages free.
-		if (orgId) {
-			// Unmetered orgs (self-hosted, lifetime, pre-billing) are unlimited:
-			// their consumeCredit attempts are DESIGNED no-ops (the NULL-balance
-			// guard or the unmetered-plan early return rejects the charge), so
-			// only a METERED org's failed charge is an anomaly worth aborting for.
-			const metered = await orgIsMetered(orgId);
-			for (const decision of decisions) {
-				if (!decision.billable) continue;
-				const charged = await consumeCredit(transaction as LedgerHandle, orgId, decision.comment.id);
-				if (!charged && metered) {
-					// The balance was exhausted CONCURRENTLY (another run of the
-					// same org spent the credits between this run's budget read
-					// and the atomic charge). The decision must NEVER stage free:
-					// abort the staging transaction — the rollback leaves the
-					// comments unprocessed, so the next run re-fetches them once
-					// the org tops up (codex review). Loud: the caller sees the
-					// run fail and the cron answers 500.
-					throw new Error(
-						`credit charge failed for comment ${decision.comment.id} (org ${orgId}) — staging aborted, balance exhausted concurrently`
-					);
-				}
-			}
-		}
+		await chargeBillableDecisions(handle, options.orgId, decisions, options.rescan?.chargeScope);
 	});
 }
 
@@ -146,20 +286,19 @@ export async function stageOrAuditDecisions(
 	channelId: string,
 	decisions: Decision[],
 	dryRun: boolean,
-	orgId: string | null | undefined,
-	expected?: ChannelIdentity
+	options: StageOptions = {}
 ): Promise<number> {
 	if (dryRun) {
 		const acted = decisions.filter((decision) => decision.youtubeAction).length;
 		const audits = auditRows(channelId, decisions, true);
 		if (audits.length) {
 			await db.transaction(async (transaction) => {
-				await assertChannelActive(channelId, transaction, expected);
+				await assertChannelActive(channelId, transaction, options.expected);
 				await transaction.insert(auditLog).values(audits);
 			});
 		}
 		return acted;
 	}
-	await stageDecisions(channelId, decisions, orgId, expected);
+	await stageDecisions(channelId, decisions, options);
 	return decisions.filter((decision) => decision.youtubeAction).length;
 }

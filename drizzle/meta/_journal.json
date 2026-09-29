@@ -302,6 +302,34 @@
       "when": 1790603822611,
       "tag": "0042_feedback_history",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "6",
+      "when": 1790620438790,
+      "tag": "0043_history_scan_ids",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "6",
+      "when": 1790625740704,
+      "tag": "0044_history_scan_marker",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "6",
+      "when": 1790627802960,
+      "tag": "0045_evidence_source_text",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "6",
+      "when": 1790634784212,
+      "tag": "0046_scan_stamp",
+      "breakpoints": true
     }
   ]
 }

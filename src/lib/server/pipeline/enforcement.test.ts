@@ -101,6 +101,44 @@ test.each([
 	expect(mocks.state.insertedAudits).toEqual(actions.map((action) => expect.objectContaining({ commentId: 'comment', action, reason })));
 });
 
+test('a cancelling action that never landed supersedes without re-applying the stale call', async () => {
+	// A rescan verdict cancelled the intent after dispatch; verification shows
+	// the remote call never landed (comment still published) — the row
+	// resolves to superseded and YouTube is never re-hit with the old action
+	// (codex).
+	mocks.state.existingIds = ['comment'];
+	mocks.state.moderationActions = [dispatchedAction({ action: 'reject', state: 'cancelling' })];
+	mocks.getCommentModerationStatus.mockResolvedValue('published');
+
+	await runChannel('channel');
+
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	expectActionState('superseded');
+});
+
+test('a cancelling action that already landed completes with its audit row', async () => {
+	// The remote reject did land before the rescan cancelled it — completing
+	// keeps the audit record of what actually happened on YouTube.
+	mocks.state.existingIds = ['comment'];
+	mocks.state.moderationActions = [dispatchedAction({ action: 'reject', state: 'cancelling' })];
+	mocks.getCommentModerationStatus.mockResolvedValue('rejected');
+
+	await runChannel('channel');
+
+	expectNoYoutubeWrites();
+	expectActionState('completed');
+	expect(mocks.state.insertedAudits).toEqual([expect.objectContaining({ commentId: 'comment', action: 'reject' })]);
+});
+
+test('a cancelling action stays cancelling when verification fails transiently', async () => {
+	mocks.state.existingIds = ['comment'];
+	mocks.state.moderationActions = [dispatchedAction({ state: 'cancelling' })];
+	mocks.getCommentModerationStatus.mockRejectedValueOnce(new Error('socket hang up'));
+
+	await expect(runChannel('channel')).rejects.toThrow('verification failed');
+	expectActionState('cancelling');
+});
+
 test('keeps a dispatched action retriable when verification fails transiently', async () => {
 	mocks.state.existingIds = ['comment'];
 	mocks.state.moderationActions = [dispatchedAction({ action: 'reject', reason: 'rule #1 (keyword)' })];

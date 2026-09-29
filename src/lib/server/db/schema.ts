@@ -234,8 +234,9 @@ export const channels = sqliteTable('channels', {
 	cursor: text('cursor'), // scan boundary (ISO): comments older than this are never fetched. New connects start at connection time (no history analyzed); "analyze history" moves it back; null = legacy pre-window row (unbounded first scan)
 	nextPageToken: text('next_page_token'), // YouTube continuation token for an incomplete scan
 	scanCursor: text('scan_cursor'), // high-water timestamp to commit once an incomplete scan ends
-	historyNextPageToken: text('history_next_page_token'), // history-drain continuation token (issue #70): the drain walks history independently so the live cursor keeps advancing on newest comments every run; null = no drain in flight
-	historyBoundary: text('history_boundary'), // ISO timestamp the history drain started walking back from (its eventual end state: cursor = boundary)
+	historyNextPageToken: text('history_next_page_token'), // RESERVED (issue #70): a future history drain that walks independently of the live cursor; nothing reads or writes it yet
+	historyBoundary: text('history_boundary'), // user-requested history rescan marker: non-null while an "Analyze history" drain is re-walking comments down to this boundary (planted with cursor=boundary)
+	historyScanId: text('history_scan_id'), // per-request nonce planted with history_boundary: scopes the rescan's credit anchors so each requested scan debits once while retries of the SAME scan stay idempotent; cleared with the boundary on completion
 	dryRunBoundary: text('dry_run_boundary'), // on-demand dry-run window (ISO): the drain rescores comments down to this timestamp; null = no dry-run drain in flight
 	dryRunPageToken: text('dry_run_page_token'), // YouTube continuation token for the dry-run drain's next page
 	lastRunAt: text('last_run_at'), // ISO timestamp of last cron run; rotation orders by it ASC (NULLs first)
@@ -261,6 +262,7 @@ export const channels = sqliteTable('channels', {
 	feedbackDryRunUsedAt: text('feedback_dry_run_used_at'),
 	feedbackHistoryBoundary: text('feedback_history_boundary'),
 	feedbackHistoryPageToken: text('feedback_history_page_token'),
+	feedbackHistoryScanId: text('feedback_history_scan_id'), // per-request nonce planted with feedback_history_boundary — the history run's billing scope (see history_scan_id)
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
 	index('channels_user_id_idx').on(table.userId),
@@ -321,6 +323,16 @@ export const comments = sqliteTable('comments', {
 	// yet digested" for a comment inserted late with an old publishedAt
 	// (history backfill) or tied at the page-cap boundary (codex+coderabbit).
 	feedbackDigestedAt: text('feedback_digested_at'),
+	// The history scan that last staged this row (the scan nonce, or the
+	// planted boundary for a pre-nonce drain). Rescans filter on it: a page
+	// parked on credits — or a retry after a mid-drain crash — skips comments
+	// the active scan already committed instead of re-scoring them and
+	// re-pending their action rows every tick. NULL on live-run inserts and
+	// on rows staged before the column existed (a pre-nonce drain cannot be
+	// distinguished from never-scanned, which is the safe direction: it
+	// reprocesses rather than skips). Billing-independent — rule/allowlist
+	// and unmetered verdicts stamp it too (codex).
+	scanId: text('scan_id'),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [index('comments_channel_digested_idx').on(table.channelId, table.feedbackDigestedAt)]);
 
@@ -332,7 +344,7 @@ export const moderationActions = sqliteTable('moderation_actions', {
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	reason: text('reason').notNull(),
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
-	state: text('state').notNull(), // 'pending' | 'dispatched' | 'completed' | 'superseded' ('manual_review' legacy)
+	state: text('state').notNull(), // 'pending' | 'dispatched' | 'cancelling' | 'completed' | 'superseded' ('manual_review' legacy)
 	lastAttemptAt: text('last_attempt_at'),
 	lastManualRetryAt: text('last_manual_retry_at'),
 	// Normalized commenter handle, 30-day TTL (same retention as audit_log):
@@ -432,6 +444,7 @@ export const findingEvidence = sqliteTable('finding_evidence', {
 	commentId: text('comment_id').notNull(), // real comments.id — validated at write time; reveal path re-checks tenancy
 	sanitizedExcerpt: text('sanitized_excerpt').notNull(), // concealEvidence() output — the only text the default render shows
 	hasAbuse: integer('has_abuse').notNull().default(0), // 1 = classifier flagged abuse; drives the reveal warning
+	sourceText: text('source_text'), // the exact text this digest classified — pinned per evidence row so a later scan refreshing the shared snapshot can't change what an older digest's reveal shows (codex). Null on rows written before the column existed: reveal falls back to the snapshot/live join.
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [index('finding_evidence_finding_idx').on(table.findingId)]);
 
@@ -439,7 +452,12 @@ export const feedbackHistoryComments = sqliteTable('feedback_history_comments', 
 	id: text('id').primaryKey(),
 	channelId: text('channel_id').notNull(),
 	text: text('text').notNull(),
-	publishedAt: text('published_at').notNull()
+	publishedAt: text('published_at').notNull(),
+	// The requested scan that last committed this snapshot. A comment
+	// re-served at a page boundary dedupes only when THIS scan's id
+	// matches — rows committed by earlier scans (or pre-nonce drains,
+	// NULL) are reprocessed: re-running the same window is the point.
+	scanId: text('scan_id')
 }, (table) => [index('feedback_history_comments_channel_idx').on(table.channelId)]);
 
 // Evidentiary consent log (CDC Art. 6º, VIII; LGPD). One row per acceptance

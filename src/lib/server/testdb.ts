@@ -161,6 +161,7 @@ export async function createTestDb(): Promise<TestDb> {
 			scan_cursor TEXT,
 			history_next_page_token TEXT,
 			history_boundary TEXT,
+			history_scan_id TEXT,
 			dry_run_boundary TEXT,
 			dry_run_page_token TEXT,
 			last_run_at TEXT,
@@ -182,6 +183,7 @@ export async function createTestDb(): Promise<TestDb> {
 			feedback_dry_run_used_at TEXT,
 			feedback_history_boundary TEXT,
 			feedback_history_page_token TEXT,
+			feedback_history_scan_id TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
 			CONSTRAINT channels_org_requires_owner CHECK (org_id IS NOT NULL OR user_id IS NULL)
 		)`,
@@ -212,6 +214,7 @@ export async function createTestDb(): Promise<TestDb> {
 			matched_rule_id INTEGER,
 			ai_score TEXT,
 			feedback_digested_at TEXT,
+			scan_id TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE INDEX comments_channel_digested_idx ON comments (channel_id, feedback_digested_at)`,
@@ -473,6 +476,7 @@ export async function createTestDb(): Promise<TestDb> {
 			comment_id TEXT NOT NULL,
 			sanitized_excerpt TEXT NOT NULL,
 			has_abuse INTEGER NOT NULL DEFAULT 0,
+			source_text TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE INDEX finding_evidence_finding_idx ON finding_evidence (finding_id)`,
@@ -480,7 +484,8 @@ export async function createTestDb(): Promise<TestDb> {
 			id TEXT PRIMARY KEY NOT NULL,
 			channel_id TEXT NOT NULL,
 			text TEXT NOT NULL,
-			published_at TEXT NOT NULL
+			published_at TEXT NOT NULL,
+			scan_id TEXT
 		)`,
 		`CREATE INDEX feedback_history_comments_channel_idx ON feedback_history_comments (channel_id)`
 	]);

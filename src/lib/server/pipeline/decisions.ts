@@ -4,7 +4,7 @@ import { detectJailbreak } from '$lib/server/jailbreak';
 import { scoreComment, serializeScores } from '$lib/server/moderation';
 import { matchPreparedRule, type PreparedRule, type RuleAction } from '$lib/server/rules';
 import { scoreTone, type ToneContext, type ToneProtections } from '$lib/server/tone';
-import type { AiOptions, Decision } from './types';
+import type { AiBudget, AiOptions, Decision } from './types';
 import type { NewComment } from '$lib/server/youtube';
 
 const AUTO_BAN = 0.95;
@@ -213,7 +213,7 @@ export async function decide(
 	rules: PreparedRule[],
 	allowlist: Set<string>,
 	tone: { context: ToneContext } | null,
-	aiBudget: { remaining: number },
+	aiBudget: AiBudget,
 	options: AiOptions
 ): Promise<Decision> {
 	const preAi = preAiDecision(comment, rules, allowlist);
@@ -223,7 +223,10 @@ export async function decide(
 	// can never over-spend it. Rules/allowlist above never consume budget.
 	// Out of credits: rules/allowlist already had their say — only the AI step
 	// is paused (product choice). The comment stays unprocessed and the cursor
-	// parks so a later run scores it once credits are topped up.
+	// parks so a later run scores it once credits are topped up. Comments a
+	// rescan already charged+staged never reach here — prepareDecisionBatch
+	// filters them out of the batch (codex: a parked page re-scoring them
+	// would re-pend their completed actions every tick).
 	if (aiBudget.remaining <= 0 || Number.isNaN(aiBudget.remaining)) return deferredDecision(comment);
 	aiBudget.remaining -= 1;
 	// The budget claim IS the billing marker: this decision consumed an AI

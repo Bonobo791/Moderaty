@@ -10,17 +10,16 @@
 // row so the page can say so instead of silently showing stale data —
 // both are transient state a terminal outcome clears.
 
-import { and, asc, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, sql } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { db, withBusyRetry } from '$lib/server/db';
-import { channels, comments, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence } from '$lib/server/db/schema';
+import { channels, comments, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence } from '$lib/server/db/schema';
 import { classifyFeedback, type FeedbackCategory } from '$lib/server/feedback';
-import { clusterClassifiedClaims } from '$lib/server/feedbackCluster';
-import { fetchFeedbackPage, pendingFeedbackHistoryPage, pendingStoredFeedback, advanceFeedbackHistory, type FeedbackHistoryPage } from '$lib/server/feedbackHistory';
+import { fetchFeedbackPage, pendingStoredFeedback, advanceFeedbackHistory, type FeedbackHistoryPage } from '$lib/server/feedbackHistory';
 import { concealEvidence } from '$lib/server/feedbackSanitize';
 import { groupFeedback } from '$lib/server/feedbackGroup';
 import { DeadlineExceededError, assertBeforeDeadline } from '$lib/server/http';
-import { consumeFeedbackCredit, orgIsMetered, type LedgerHandle } from '$lib/server/billing/ledger';
+import { consumeFeedbackCredit, hasChargeAnchor, orgIsMetered, type LedgerHandle } from '$lib/server/billing/ledger';
 import { channelMatchesClaim, type DryRunClaim } from '$lib/server/dryRun';
 import { resolveOpenAiKey } from '$lib/server/openaiKey';
 
@@ -46,7 +45,13 @@ export const PER_100_COUNT = 100;
 
 const EPOCH = '1970-01-01T00:00:00.000Z';
 
-const ERR_INSUFFICIENT_CREDITS = 'insufficient credits for feedback digest';
+/** A metered org ran out of feedback credits mid-charge — a distinct class so
+ * the run's catch matches the type instead of regex-sniffing message text. */
+class InsufficientCreditsError extends Error {
+	constructor() {
+		super('insufficient credits for feedback digest');
+	}
+}
 const ERR_PREVIEW_PAUSED = 'channel is paused';
 const ERR_PREVIEW_NO_KEY = 'no OpenAI key resolved for feedback preview';
 
@@ -249,7 +254,13 @@ async function markDigestState(
 							: eq(channels.feedbackHistoryBoundary, expected.feedbackHistoryBoundary),
 						expected.feedbackHistoryPageToken === null
 							? isNull(channels.feedbackHistoryPageToken)
-							: eq(channels.feedbackHistoryPageToken, expected.feedbackHistoryPageToken)
+							: eq(channels.feedbackHistoryPageToken, expected.feedbackHistoryPageToken),
+						// Two scans can share boundary+token — the nonce is the
+						// scan's identity: a stale attempt's status row must not
+						// write under a scan that isn't its own.
+						expected.feedbackHistoryScanId === null
+							? isNull(channels.feedbackHistoryScanId)
+							: eq(channels.feedbackHistoryScanId, expected.feedbackHistoryScanId)
 					]
 				: [];
 			const alive = await tx
@@ -312,15 +323,28 @@ export async function generateFeedbackDigest(
 
 	const nowIso = new Date().toISOString();
 	let historyPage: FeedbackHistoryPage | undefined;
+	// The scan id planted with the boundary is the history run's billing
+	// scope: each requested analysis charges its own anchors, while retries
+	// of the same run stay idempotent. A NULL scan id is a drain planted
+	// before the nonce column existed — its earlier pages charged the plain
+	// comment id, so the anchor must stay plain (never a boundary-derived
+	// twin) or the retry debits the same work twice (codex).
+	let historyBoundary: string | undefined;
+	let historyScanScope: string | undefined;
 	let batch: { id: string; text: string; publishedAt: string }[];
 	let windowStart: string;
 	let windowEnd: string;
 	if (channel.feedbackHistoryBoundary) {
-		windowStart = channel.feedbackHistoryBoundary;
+		historyBoundary = channel.feedbackHistoryBoundary;
+		historyScanScope = channel.feedbackHistoryScanId ?? undefined;
+		windowStart = historyBoundary;
 		windowEnd = nowIso;
 		let page: FeedbackHistoryPage;
 		try {
-			page = await pendingFeedbackHistoryPage(channel, deadline);
+			// Already-analyzed comments are classified again on purpose: the
+			// owner re-requested the window, and re-running over the same data
+			// is the point of the feature.
+			page = await fetchFeedbackPage(channel, historyBoundary, channel.feedbackHistoryPageToken, deadline);
 			historyPage = page;
 		} catch (cause) {
 			console.error('feedback history page fetch failed for channel:', channelId, cause);
@@ -329,6 +353,57 @@ export async function generateFeedbackDigest(
 			return { status: deferred ? 'deferred' : 'failed', reason: deferred ? 'deadline' : 'history-fetch', historyRemaining: true };
 		}
 		batch = page.batch;
+		if (batch.length) {
+			const ids = batch.map((comment) => comment.id);
+			let covered: Set<string>;
+			if (channel.feedbackHistoryScanId === null) {
+				// A drain planted before the nonce column existed resumes under
+				// the OLD coverage semantics: the owner never asked for a repeat
+				// scan, so comments already digested by the stored path or
+				// already history-sourced stay covered — reprocessing them would
+				// mint duplicate findings and provider calls their legacy plain
+				// anchors can't even debit (codex). The all-rows history check
+				// also catches this drain's own page-boundary repeats, whose
+				// committed rows carry a NULL scan_id.
+				const [digested, historical] = await Promise.all([
+					db
+						.select({ id: comments.id })
+						.from(comments)
+						.where(and(eq(comments.channelId, channelId), inArray(comments.id, ids), isNotNull(comments.feedbackDigestedAt)))
+						.all(),
+					db
+						.select({ id: feedbackHistoryComments.id })
+						.from(feedbackHistoryComments)
+						.where(and(eq(feedbackHistoryComments.channelId, channelId), inArray(feedbackHistoryComments.id, ids)))
+						.all()
+				]);
+				covered = new Set([...digested, ...historical].map((row) => row.id));
+			} else {
+				// Same-scan dedupe across pages: commentThreads can re-serve an
+				// item at a page boundary, and a comment THIS scan already
+				// committed must not re-enter the batch — its anchor blocks the
+				// second debit, but the repeat still double-counts creditsUsed
+				// and can mint a second digest's duplicate finding (codex). Rows
+				// from other scans still reprocess — re-running the same window
+				// is the point of the feature.
+				covered = new Set(
+					(
+						await db
+							.select({ id: feedbackHistoryComments.id })
+							.from(feedbackHistoryComments)
+							.where(
+								and(
+									eq(feedbackHistoryComments.channelId, channelId),
+									inArray(feedbackHistoryComments.id, ids),
+									eq(feedbackHistoryComments.scanId, channel.feedbackHistoryScanId)
+								)
+							)
+							.all()
+					).map((row) => row.id)
+				);
+			}
+			batch = batch.filter((comment) => !covered.has(comment.id));
+		}
 		if (!batch.length) {
 			try {
 				await db.transaction(async (tx) => {
@@ -408,22 +483,15 @@ export async function generateFeedbackDigest(
 					// while every classify call rejects on arrival. Aborting rolls
 					// back ALL charges — the deferral spends nothing (codex).
 					assertBeforeDeadline(deadline);
-					const charged = await consumeFeedbackCredit(tx, orgId, comment.id);
+					// History scans charge under anchors scoped to this run's
+					// scan id so every requested analysis debits per comment;
+					// the stored-comments digest keeps the plain comment anchor.
+					const refId = historyScanScope ? `${comment.id}#${historyScanScope}` : comment.id;
+					const charged = await consumeFeedbackCredit(tx, orgId, refId);
 					if (!charged) {
 						// False also covers "already charged" — distinguish by
 						// looking for the anchor row before calling it a shortfall.
-						const prior = await tx
-							.select({ id: creditTransactions.id })
-							.from(creditTransactions)
-							.where(
-								and(
-									eq(creditTransactions.orgId, orgId),
-									eq(creditTransactions.refType, 'feedback'),
-									eq(creditTransactions.refId, comment.id)
-								)
-							)
-							.get();
-						if (!prior) throw new Error(ERR_INSUFFICIENT_CREDITS);
+						if (!(await hasChargeAnchor(tx, orgId, 'feedback', refId))) throw new InsufficientCreditsError();
 					}
 					// Every batch member ends the charge pass covered by an
 					// anchor — fresh debit or one persisted by a crashed/failed
@@ -508,7 +576,12 @@ export async function generateFeedbackDigest(
 							findingId: row.id,
 							commentId: evidence.commentId,
 							sanitizedExcerpt: concealed.text,
-							hasAbuse: evidence.hasAbuse ? 1 : 0
+							hasAbuse: evidence.hasAbuse ? 1 : 0,
+							// The text THIS digest classified, pinned on the evidence
+							// row: a later rescan refreshes the shared snapshot, and
+							// an older completed digest must still reveal the words
+							// it actually analyzed (codex).
+							sourceText: evidence.text
 						};
 					});
 					if (evidenceRows.length) await tx.insert(findingEvidence).values(evidenceRows);
@@ -520,8 +593,21 @@ export async function generateFeedbackDigest(
 				if (historyPage) {
 					await tx
 						.insert(feedbackHistoryComments)
-						.values(historyPage.batch.map((comment) => ({ ...comment, channelId })))
-						.onConflictDoNothing({ target: feedbackHistoryComments.id });
+						.values(historyPage.batch.map((comment) => ({ ...comment, channelId, scanId: channel.feedbackHistoryScanId })))
+						// The snapshot is what reveal/evidence prefers — a rescan that
+						// classified edited text must refresh the row, or the page
+						// shows words this scan never analyzed (codex+cubic). The
+						// scan id re-stamps so the page-boundary dedupe knows this
+						// scan committed it; channel_id stays with the first
+						// writer — the refresh never steals another channel's row.
+						.onConflictDoUpdate({
+							target: feedbackHistoryComments.id,
+							set: {
+								text: sql`excluded.text`,
+								publishedAt: sql`excluded.published_at`,
+								scanId: sql`excluded.scan_id`
+							}
+						});
 					await tx
 						.update(comments)
 						.set({ feedbackDigestedAt: nowIso })
@@ -582,7 +668,7 @@ export async function generateFeedbackDigest(
 			await markDigestState(channelId, windowStart, windowEnd, 'deferred', 'deadline', channel);
 			return { status: 'deferred', reason: 'deadline', ...(historyPage ? { historyRemaining: true } : {}) };
 		}
-		if (cause instanceof Error && /insufficient credits/.test(cause.message)) {
+		if (cause instanceof InsufficientCreditsError) {
 			// The row makes the blockage channel-visible: without it the page
 			// shows "No digest yet" while every tick repeats the deferral
 			// (codex). A later complete/failed row clears it.

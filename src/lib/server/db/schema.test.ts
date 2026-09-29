@@ -340,6 +340,7 @@ describe('channels', () => {
 			scan_cursor: { notNull: false },
 			history_next_page_token: { notNull: false },
 			history_boundary: { notNull: false },
+			history_scan_id: { notNull: false },
 			dry_run_boundary: { notNull: false },
 			dry_run_page_token: { notNull: false },
 			last_run_at: { notNull: false },
@@ -361,6 +362,7 @@ describe('channels', () => {
 			feedback_dry_run_used_at: { notNull: false },
 			feedback_history_boundary: { notNull: false },
 			feedback_history_page_token: { notNull: false },
+			feedback_history_scan_id: { notNull: false },
 			created_at: { notNull: true, hasDefault: true }
 		});
 		expectCreatedAtDefault(channels);
@@ -417,6 +419,7 @@ describe('comments', () => {
 			matched_rule_id: { notNull: false },
 			ai_score: { notNull: false },
 			feedback_digested_at: { notNull: false },
+			scan_id: { notNull: false },
 			created_at: { notNull: true, hasDefault: true }
 		});
 		expectCreatedAtDefault(comments);
@@ -597,6 +600,7 @@ describe('finding_evidence', () => {
 			comment_id: { notNull: true },
 			sanitized_excerpt: { notNull: true },
 			has_abuse: { notNull: true, hasDefault: true },
+			source_text: { notNull: false },
 			created_at: { notNull: true, hasDefault: true }
 		});
 		expectForeignKey(findingEvidence, 'finding_id', feedbackFindings, 'id', 'cascade');
@@ -616,7 +620,8 @@ describe('feedback_history_comments', () => {
 			id: { notNull: true, primary: true },
 			channel_id: { notNull: true },
 			text: { notNull: true },
-			published_at: { notNull: true }
+			published_at: { notNull: true },
+			scan_id: { notNull: false }
 		});
 		// Privacy contract mirrors feedback_digests: a historical snapshot
 		// stores the comment text only — never author identity columns.

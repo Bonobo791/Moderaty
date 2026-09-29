@@ -362,15 +362,16 @@ test('the dry-run form offers the window presets with a labeled select, defaulti
 
 test('the moderation preview limit and no-credit attempt note remain visible when paused', () => {
 	const body = renderPage({ ...LAYOUT_DATA, ch: { ...LAYOUT_DATA.ch, active: 0, moderationDryRunUsed: true } });
-	expect(body).toContain('Limited to 1 free moderation dry run per channel.');
-	expect(body).toContain('This allowance is used when a run starts, even if it later fails. No credits are charged.');
-	expect(body).toContain('Moderation preview already used');
+	// One dry-run message on the page: the allowance note doubles as the
+	// used-up explanation — no second "already used" paragraph. The used
+	// button itself hides with the rest of the paused channel's controls.
+	expect(body).toContain('1 free moderation dry run per channel — used when the run starts, even if it fails. No credits are charged.');
 	expect(body).not.toContain('action="?/dryRun"');
 });
 
 test('a failed moderation preview attempt remains used and disables the button', () => {
 	const body = renderPage(LAYOUT_DATA, { scope: 'dryRun', attempted: true, error: 'The dry run failed. This attempt used your one free moderation preview; no credits were charged. Check the server log.' });
-	expect(body).toContain('This channel has used its moderation preview allowance.');
+	expect(body).toContain('1 free moderation dry run per channel — used when the run starts, even if it fails. No credits are charged.');
 	expect(body).toMatch(/<button[^>]*disabled[^>]*aria-label="Run a dry-run preview on My Channel"[^>]*>Moderation preview already used<\/button>/);
 });
 

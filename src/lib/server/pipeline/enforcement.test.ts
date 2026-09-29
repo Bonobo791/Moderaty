@@ -113,10 +113,12 @@ test.each([
 	expect(mocks.state.insertedAudits).toEqual(actions.map((action) => expect.objectContaining({ commentId: 'comment', action, reason })));
 });
 
-test('a cancelling action is superseded without a YouTube call and warns the owner', async () => {
+test('a cancelling action on an undecided comment is superseded without a YouTube call', async () => {
+	// The comment is still 'held' locally: remote hidden state already matches
+	// intent — no corrective write needed, and every later decision writes
+	// its own remote state.
 	mocks.state.existingIds = ['comment'];
 	mocks.state.moderationActions = [dispatchedAction({ action: 'reject', state: 'cancelling' })];
-	const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
 	await runChannel('channel');
 
@@ -124,9 +126,20 @@ test('a cancelling action is superseded without a YouTube call and warns the own
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
 	expectActionState('superseded');
 	expect(mocks.state.insertedAudits).toEqual([]);
-	expect(warning).toHaveBeenCalledWith(
-		'moderation action comment (reject) was cancelled by a rescan after dispatch — YouTube may still reflect it; left unchanged until the user acts'
-	);
+});
+
+test('a cancelling reject re-publishes a rescan-approved comment before superseding', async () => {
+	// codex: a dispatched reject can be live on YouTube when the rescan
+	// approves the comment — superseding without the corrective write leaves
+	// it hidden remotely with nothing reconciling it.
+	mocks.state.existingIds = ['comment'];
+	mocks.state.commentStatuses = { comment: 'approved' };
+	mocks.state.moderationActions = [dispatchedAction({ action: 'reject', state: 'cancelling' })];
+
+	await runChannel('channel');
+
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'published', false, 'access-token', undefined);
+	expectActionState('superseded');
 });
 
 test('a cancelling hold re-publishes a rescan-approved comment before superseding', async () => {
@@ -209,7 +222,11 @@ test('a dispatched hold superseded by a decided comment publishes it back instea
 	expectActionState('superseded');
 });
 
-test('a hold landing on a restoring comment replays the recorded user intent', async () => {
+test('a hold on a restoring comment is not converged — the human flow finalizes it', async () => {
+	// codex: terminalizing the row while 'restoring' would drop the only
+	// mechanism that re-writes remote state if the hold landed after the
+	// human's publish. The row stays outstanding until reconcile replays the
+	// intent and finalize terminalizes the bookkeeping.
 	mocks.state.existingIds = ['comment'];
 	mocks.state.commentStatuses = { comment: 'restoring' };
 	mocks.state.moderationActions = [dispatchedAction({ action: 'hold' })];
@@ -219,8 +236,80 @@ test('a hold landing on a restoring comment replays the recorded user intent', a
 
 	await runChannel('channel');
 
+	// The recorded intent replays; the dispatched hold was remote-attempted,
+	// so finalize completes it with its audit row — the 'reject' wins
+	// remotely because the human intent wrote last.
 	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
-	expectActionState('superseded');
+	expectActionState('completed');
+	expect(mocks.state.insertedAudits).toContainEqual(expect.objectContaining({ commentId: 'comment', action: 'hold', actor: 'system' }));
+});
+
+test('a dispatched hold on a restoring comment stays outstanding without a user intent', async () => {
+	// No user intent audit → reconcile leaves the comment alone, and the hold
+	// row must NOT be falsely converged — it stays dispatched for a later
+	// sweep to resolve once the status decides (codex).
+	mocks.state.existingIds = ['comment'];
+	mocks.state.commentStatuses = { comment: 'restoring' };
+	mocks.state.moderationActions = [dispatchedAction({ action: 'hold' })];
+
+	await runChannel('channel');
+
+	expectNoYoutubeWrites();
+	expectActionState('dispatched');
+	expect(mocks.state.insertedAudits).toEqual([]);
+});
+
+test('a dispatched reject on a restoring comment is finalized, never re-applied', async () => {
+	// codex: finalize used to terminalize only HOLD rows — a dispatched
+	// reject/ban/delete left outstanding would be re-applied next sweep over
+	// the human's restore. The restore must finish without the stale reject
+	// ever touching YouTube again.
+	mocks.state.existingIds = ['comment'];
+	mocks.state.commentStatuses = { comment: 'restoring' };
+	mocks.state.moderationActions = [dispatchedAction({ action: 'reject' })];
+	mocks.state.insertedAudits = [
+		{ channelId: 'channel', commentId: 'comment', action: 'restore', reason: 'undo', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
+	];
+
+	await runChannel('channel');
+
+	// 'restore' publishes; the stale reject row is completed (it may have
+	// landed earlier — the audit row is honest) without firing remotely.
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'published', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).not.toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
+	expectActionState('completed');
+	expect(mocks.state.commentStatuses.comment).toBe('approved');
+	expect(mocks.state.insertedAudits).toContainEqual(expect.objectContaining({ commentId: 'comment', action: 'reject', actor: 'system' }));
+});
+
+test('acted counts only rows this run terminalized — a failed corrective write is not counted', async () => {
+	// codex: applicable.length was added wholesale — a hold whose corrective
+	// write failed stayed outstanding yet still counted. It counts when a
+	// later sweep completes it.
+	mocks.state.existingIds = ['a', 'b'];
+	mocks.state.commentStatuses = { a: 'held', b: 'held' };
+	mocks.state.moderationActions = [
+		dispatchedAction({ commentId: 'a', action: 'hold' }),
+		dispatchedAction({ commentId: 'b', action: 'hold' })
+	];
+	mocks.setModerationStatus
+		.mockImplementationOnce(async () => {
+			// A human approves 'b' while the batch hold write is in flight.
+			mocks.state.commentStatuses.b = 'approved';
+		})
+		.mockRejectedValueOnce(new Error('socket hang up')); // the corrective publish for b fails
+	const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+	try {
+		const result = await runChannel('channel');
+		expect(result.acted).toBe(1);
+		expect(mocks.state.moderationActions).toEqual([
+			expect.objectContaining({ commentId: 'a', state: 'completed' }),
+			expect.objectContaining({ commentId: 'b', state: 'dispatched' })
+		]);
+		expect(warning).toHaveBeenCalled();
+	} finally {
+		warning.mockRestore();
+	}
 });
 
 test('a 404 moderation batch retries each hold and completes a comment still missing individually', async () => {

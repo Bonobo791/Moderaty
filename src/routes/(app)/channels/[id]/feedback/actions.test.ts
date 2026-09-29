@@ -294,22 +294,22 @@ test('generate runs a forced digest and echoes the outcome', async () => {
 	expect(res).toMatchObject({ ok: true, scope: 'digest' });
 });
 
-test('generate reports that an incomplete historical batch continues under cron on manual cadence', async () => {
+test('generate reports that an incomplete history batch continues in the background on manual cadence', async () => {
 	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1, feedbackCadence: 'manual', feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z' });
 	mocks.generateFeedbackDigest.mockResolvedValue({ status: 'complete', findings: 1, commentsClassified: 4, historyRemaining: true });
 
 	const result = await actions.generate({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);
 
-	expect(result).toMatchObject({ ok: true, scope: 'digest', message: expect.stringContaining('Historical analysis continues in the background on the next cron tick.') });
+	expect(result).toMatchObject({ ok: true, scope: 'digest', message: expect.stringContaining('The history scan continues in the background.') });
 });
 
-test('generate explains an empty history page continues from its next cron checkpoint', async () => {
+test('generate explains an empty history batch continues automatically', async () => {
 	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1, feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z' });
 	mocks.generateFeedbackDigest.mockResolvedValue({ status: 'empty', historyRemaining: true });
 
 	const result = await actions.generate({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);
 
-	expect(result).toMatchObject({ ok: true, scope: 'digest', message: 'This history page was scanned. The next page continues on the next cron tick.' });
+	expect(result).toMatchObject({ ok: true, scope: 'digest', message: 'This history batch was scanned. The next batch runs automatically.' });
 });
 
 test('generate refuses a disabled channel before calling the job', async () => {
@@ -331,12 +331,12 @@ test('generate maps a deferred run to a 409 the UI can show', async () => {
 	mocks.generateFeedbackDigest.mockResolvedValue({ status: 'deferred', reason: 'credits' });
 	const res = await actions.generate({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);
 	expect(res).toMatchObject({ status: 409, data: { scope: 'digest' } });
-	expect(JSON.stringify(res)).toContain('cron');
+	expect(JSON.stringify(res)).toContain('retry automatically');
 });
 
-test('a deferred run on manual cadence never promises a cron retry', async () => {
+test('a deferred run on manual cadence never promises an automatic retry', async () => {
 	// Manual cadence means cron never picks this channel — telling the user
-	// it "will retry on the next cron tick" is a lie (codex).
+	// it "will retry automatically" is a lie (codex).
 	await seedChannel('UC1', 'org-1', { feedbackEnabled: 1, feedbackCadence: 'manual' });
 	mocks.generateFeedbackDigest.mockResolvedValue({ status: 'deferred', reason: 'deadline' });
 	const res = await actions.generate({ params: { id: 'UC1' }, locals: { user: OWNER } } as never);
@@ -401,7 +401,7 @@ test('analyzeHistory queues one independent feedback checkpoint without running 
 
 	const result = await postFeedbackAction('analyzeHistory', 'UC1', { months: '3' });
 
-	expect(result).toMatchObject({ ok: true, scope: 'history', message: 'Historical feedback analysis queued. Cron processes up to 100 comments per batch without changing moderation.' });
+	expect(result).toMatchObject({ ok: true, scope: 'history', message: 'History scan started — up to 100 comments per background batch, and nothing is moderated. Each batch adds a digest below.' });
 	const channel = (await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())!;
 	expect(Date.parse(channel.feedbackHistoryBoundary ?? '')).toBeGreaterThan(Date.now() - 91 * 24 * 60 * 60 * 1000);
 	expect(Date.parse(channel.feedbackHistoryBoundary ?? '')).toBeLessThanOrEqual(Date.now() - 89 * 24 * 60 * 60 * 1000);
@@ -554,7 +554,7 @@ test('a lifetime org with a CORRUPT stored key gets a loud 503 — not "add a ke
 
 		expect(res).toMatchObject({
 			status: 503,
-			data: { scope: 'history', error: 'Could not verify access to feedback history analysis. Please try again.' }
+			data: { scope: 'history', error: 'Could not verify access to history scans. Please try again.' }
 		});
 		expect(await historyBoundaryOf('UC1')).toBeNull();
 	} finally {

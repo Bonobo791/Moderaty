@@ -73,7 +73,7 @@ describe('feedback page role gating (SSR)', () => {
 	it('shows the billing notice to every role and keeps history and preview forms owner-only', () => {
 		for (const role of ['owner', 'member', 'admin']) {
 			const body = renderFeedback(pageData({ orgRole: role }));
-			expect(body).toContain('Feedback uses 1 credit per comment processed on metered plans, in addition to moderation. Historical analysis uses the same credits.');
+			expect(body).toContain('Feedback uses 1 credit per comment processed on metered plans, in addition to moderation. History scans use the same credits.');
 			if (role === 'owner') {
 				expect(body).toContain('action="?/analyzeHistory"');
 				expect(body).toContain('action="?/dryRun"');
@@ -95,14 +95,14 @@ describe('feedback page role gating (SSR)', () => {
 
 	it('disables history and feedback preview when history is active, settings are off, allowance used, or channel paused', () => {
 		const activeHistory = renderFeedback(pageData({ history: { active: true, boundary: '2025-01-01T00:00:00.000Z' }, settings: { ...SETTINGS, cadence: 'manual' } }));
-		expect(activeHistory).toContain('Historical feedback analysis is continuing in the background under cron, including on manual digest cadence.');
-		expect(activeHistory).toContain('History analysis active');
+		expect(activeHistory).toContain('History scan in progress — the next batch runs automatically, even while digests are set to manual. No action needed.');
+		expect(activeHistory).toContain('History scan in progress');
 
 		const disabled = renderFeedback(pageData({ settings: { ...SETTINGS, enabled: false }, history: { active: true, boundary: '2025-01-01T00:00:00.000Z' }, dryRunUsed: true, ch: { id: 'UC1', title: 'Channel UC1', active: false } }));
 		expect(disabled).toContain('Feedback preview already used');
 		expect(disabled).toContain('1 free feedback dry run per channel');
-		expect(disabled).toContain('paused while this channel is paused or feedback is turned off');
-		expect(disabled).toMatch(/<button[^>]*disabled[^>]*>History analysis active<\/button>/);
+		expect(disabled).toContain('History scan paused — resume the channel and re-enable feedback to continue from where it stopped.');
+		expect(disabled).toMatch(/<button[^>]*disabled[^>]*>History scan in progress<\/button>/);
 		expect(disabled).toMatch(/<button[^>]*disabled[^>]*>Feedback preview already used<\/button>/);
 
 		const failedAttempt = renderFeedback(pageData(), { scope: 'feedbackDryRun', attempted: true, error: 'provider failure' });
@@ -131,7 +131,7 @@ describe('feedback page role gating (SSR)', () => {
 		// First-page disclosure now lives in the one dry-run note plus the
 		// results caption — the preview never reads as a full-history scan.
 		expect(body).toContain('scores only the first YouTube page (up to 100 comments)');
-		expect(body).toContain('Run historical analysis for the full window.');
+		expect(body).toContain('Run a history scan to cover the full window.');
 		expect(body).toContain('More comments are available beyond this preview page.');
 		expect(body).toContain('When is the next stream?');
 		expect(body).not.toContain('action="?/reveal"');
@@ -146,7 +146,7 @@ describe('feedback page role gating (SSR)', () => {
 		});
 		expect(body).toContain('No grouped findings in this preview');
 		expect(body).toContain('scores only the first YouTube page (up to 100 comments)');
-		expect(body).toContain('Run historical analysis for the full window.');
+		expect(body).toContain('Run a history scan to cover the full window.');
 	});
 });
 
@@ -171,7 +171,7 @@ describe('feedback page deferred banner (SSR)', () => {
 		expect(body).toContain('There are not enough credits for this batch.');
 		expect(body).toContain('Add credits on the Usage page');
 		expect(body).toContain('href="/usage"');
-		expect(body).toContain('historical analysis retries automatically.');
+		expect(body).toContain('the history scan retries automatically.');
 		expect(body).not.toContain('after the blocker is resolved');
 	});
 
@@ -182,7 +182,7 @@ describe('feedback page deferred banner (SSR)', () => {
 			digests: [deferred],
 			currentAttempt: deferred
 		}));
-		expect(body).toContain('The time limit was reached. Historical analysis retries on the next cron tick.');
+		expect(body).toContain('The time limit was reached. The history scan retries automatically.');
 	});
 
 	it('explains a historical batch credit shortfall with actionable Usage link copy', () => {
@@ -194,7 +194,7 @@ describe('feedback page deferred banner (SSR)', () => {
 			currentAttempt: deferred
 		}));
 		expect(body).toContain('There are not enough credits for this batch.');
-		expect(body).toContain('Add credits on the Usage page; historical analysis retries automatically.');
+		expect(body).toContain('Add credits on the Usage page; the history scan retries automatically.');
 		expect(body).toContain('href="/usage"');
 		expect(body).not.toContain('out of credits');
 		expect(body).not.toContain('after the blocker is resolved');

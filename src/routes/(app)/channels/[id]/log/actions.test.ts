@@ -167,12 +167,18 @@ test('a failed finalize keeps the claim — the reconcile sweep converges the la
 		`CREATE TRIGGER fail_finalize BEFORE UPDATE ON comments
 		 WHEN NEW.status = 'approved' BEGIN SELECT RAISE(ABORT, 'simulated finalize failure'); END`
 	);
+	let res: unknown;
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 	try {
-		await expect(undo('c1')).rejects.toThrow(/Failed query|simulated finalize failure/);
+		// fail() returns an ActionFailure, not a throw — the user sees a real
+		// 500 explaining the self-heal, while 'restoring' + the intent row
+		// stay durable for the reconcile sweep (codex).
+		res = await undo('c1');
 	} finally {
 		await testDb().client.execute('DROP TRIGGER fail_finalize');
+		errorSpy.mockRestore();
 	}
-
+	expect(res).toMatchObject({ status: 500, data: { error: expect.stringContaining('automatically') } });
 	expect(await commentRow('c1')).toMatchObject({ status: 'restoring' });
 	expect((await testDb().db.select().from(auditLog).all()).filter((row) => row.action === 'restore')).toHaveLength(1);
 

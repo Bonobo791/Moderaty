@@ -131,15 +131,15 @@
 	{#if form?.scope !== 'reveal' && form?.message}<div class="flash" role="status">{form.message}</div>{/if}
 
 	<div class="credit-notice" role="note">
-		<strong>Feedback uses 1 credit per comment processed on metered plans, in addition to moderation. Historical analysis uses the same credits.</strong>
+		<strong>Feedback uses 1 credit per comment processed on metered plans, in addition to moderation. History scans use the same credits.</strong>
 		<p>Lifetime-plan and self-hosted unmetered accounts are not charged credits.</p>
 	</div>
 	{#if data.history.active}
 		<div class="flash history-status" role="status">
 			{#if !data.ch.active || !data.settings.enabled}
-				Historical feedback analysis is paused while this channel is paused or feedback is turned off. Re-enable both to resume the saved checkpoint.
+				History scan paused — resume the channel and re-enable feedback to continue from where it stopped.
 			{:else}
-				Historical feedback analysis is continuing in the background under cron, including on manual digest cadence.
+				History scan in progress — the next batch runs automatically, even while digests are set to manual. No action needed.
 			{/if}
 		</div>
 	{/if}
@@ -157,10 +157,10 @@
 			<div class="error-box" role="alert">
 				<strong>Latest digest run failed</strong> —
 				{data.history.active
-					? 'historical analysis continues on the next cron tick.'
+					? 'the history scan continues automatically.'
 					: data.settings.cadence === 'manual'
 						? 'use Generate now to retry.'
-						: 'it will retry on the next cron tick.'}
+						: 'it will retry automatically.'}
 				{data.latest
 					? `The digest below is the last complete one (window ended ${relativeTime(data.latest.windowEnd)}).`
 					: 'No complete digest exists yet.'}
@@ -170,22 +170,22 @@
 				<strong>Latest digest run deferred</strong> —
 				{#if data.history.active}
 					{#if newestAttention.error === 'credits'}
-						There are not enough credits for this batch. <a href="/usage">Add credits on the Usage page; historical analysis retries automatically.</a>
+						There are not enough credits for this batch. <a href="/usage">Add credits on the Usage page; the history scan retries automatically.</a>
 					{:else if newestAttention.error === 'deadline'}
-						The time limit was reached. Historical analysis retries on the next cron tick.
+						The time limit was reached. The history scan retries automatically.
 					{:else}
-						Historical analysis retries on the next cron tick.
+						The history scan retries automatically.
 					{/if}
 				{:else if newestAttention.error === 'credits'}
 					{#if data.settings.cadence === 'manual'}
 						There are not enough credits for this batch. <a href="/usage">Add credits on the Usage page</a>, then use Generate now.
 					{:else}
-						There are not enough credits for this batch. <a href="/usage">Add credits on the Usage page</a>; it retries on the next cron tick.
+						There are not enough credits for this batch. <a href="/usage">Add credits on the Usage page</a>; it retries automatically.
 					{/if}
 				{:else if data.settings.cadence === 'manual'}
 					The time limit was reached. Use Generate now to retry.
 				{:else}
-					The time limit was reached and will retry on the next cron tick.
+					The time limit was reached and will retry automatically.
 				{/if}
 				{data.latest
 					? `The digest below is the last complete one (window ended ${relativeTime(data.latest.windowEnd)}).`
@@ -336,18 +336,18 @@
 				title="No digest yet"
 				hint={!canOperate
 					? data.settings.cadence === 'manual'
-						? 'Manual cadence — an owner runs it with Generate now.'
-						: 'The next cron tick generates one automatically.'
+						? 'Digests are set to manual — an owner runs it with Generate now.'
+						: 'The next scheduled run generates one.'
 					: data.settings.cadence === 'manual'
-						? 'Manual cadence — use Generate now to run the first one.'
-						: 'The next cron tick generates one automatically — or use Generate now.'}
+						? 'Digests are set to manual — use Generate now to run the first one.'
+						: 'The next scheduled run generates one — or use Generate now.'}
 			/>
 		{/if}
 	{/if}
 
-	<section class="card history-tools" aria-label="Historical feedback and preview">
-		<h3 class="caps-label">Historical feedback and preview</h3>
-		<p class="muted">Historical analysis reads YouTube comments without changing moderation. It processes up to 100 comments per cron batch and charges the same per-comment credit as the live feedback digest on metered plans.</p>
+	<section class="card history-tools" aria-label="History scan and preview">
+		<h3 class="caps-label">History scan and preview</h3>
+		<p class="muted">A history scan reads your YouTube comments without changing moderation. It works in background batches of up to 100 comments and uses the same per-comment credit as the regular digest on metered plans.</p>
 		{#if canOperate}
 			<div class="history-tool-grid">
 				<form
@@ -366,16 +366,16 @@
 					}}
 				>
 					<label class="field">
-						<span>Analyze feedback history window</span>
+						<span>Scan comments from the last</span>
 						<select name="months" disabled={analyzingHistory}>
 							{#each HISTORY_WINDOWS as window (window.value)}
 								<option value={window.value} selected={window.value === '3'}>{window.label}</option>
 							{/each}
 						</select>
 					</label>
-					<p class="muted settings-note">Requires enough credits for each complete batch. Turning feedback off pauses this checkpoint; it does not erase it.</p>
+					<p class="muted settings-note">Requires enough credits for each batch. Turning feedback off pauses the scan; it does not erase progress.</p>
 					<button class="btn small" disabled={analyzingHistory || data.history.active || !data.ch.active || !data.settings.enabled || data.dryRunDeployment}>
-						{analyzingHistory ? 'Queueing…' : data.history.active ? 'History analysis active' : 'Analyze feedback history'}
+						{analyzingHistory ? 'Starting…' : data.history.active ? 'History scan in progress' : 'Start history scan'}
 					</button>
 				</form>
 				<form
@@ -409,14 +409,14 @@
 				</form>
 			</div>
 		{/if}
-		{#if !canOperate}<p class="muted settings-note">Only an organization owner can start historical analysis or use the feedback dry run.</p>{/if}
+		{#if !canOperate}<p class="muted settings-note">Only an organization owner can start a history scan or run the feedback preview.</p>{/if}
 		{#if analyzingHistory}<div class="preview-loading" role="status" aria-busy="true"><Skeleton rows={1} /></div>{/if}
 		{#if previewingFeedback}<div class="preview-loading" role="status" aria-busy="true"><Skeleton rows={2} /></div>{/if}
 		{#if feedbackPreview}
 			<section class="preview-results" aria-label="Feedback dry-run results">
 				<h4>Feedback dry-run preview</h4>
 				<p class="muted">{feedbackPreview.commentsClassified} classified · {feedbackPreview.commentsFailed} failed · {feedbackPreview.pooled} pooled · 0 credits used</p>
-				<p class="muted">Run historical analysis for the full window.</p>
+				<p class="muted">Run a history scan to cover the full window.</p>
 				{#if feedbackPreview.hasMore}<p class="muted">More comments are available beyond this preview page.</p>{/if}
 				{#if feedbackPreview.findings.length}
 					{#each feedbackPreview.findings as finding, index (finding.category + finding.summary)}

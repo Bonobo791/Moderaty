@@ -220,7 +220,12 @@ async function convergeHolds(
 		const mayHaveLanded = applied || action.state !== 'pending';
 		const intent = status === undefined || !mayHaveLanded ? undefined : DECIDED_INTENT[status];
 		if (!intent) {
-			if (status !== undefined) converged.add(action.commentId);
+			// 'restoring' belongs to the human flow: reconcile replays the
+			// recorded intent and finalizeHumanIntent commits the decided
+			// status AND terminalizes this row. Converging here would mark it
+			// done while our remote write can still lose the ordering race
+			// with the human's — nothing would repair that (codex).
+			if (status !== undefined && status !== 'restoring') converged.add(action.commentId);
 			continue;
 		}
 		try {
@@ -237,9 +242,10 @@ async function convergeHolds(
 	return converged;
 }
 
-async function completeActions(actions: OutstandingAction[], expected?: ChannelIdentity) {
+async function completeActions(actions: OutstandingAction[], expected?: ChannelIdentity): Promise<number> {
 	// Stryker disable next-line ConditionalExpression: equivalent — all callers pass a non-empty array (applied batches or individually missing comments)
-	if (!actions.length) return;
+	if (!actions.length) return 0;
+	let completed = 0;
 	await db.transaction(async (transaction) => {
 		await assertChannelActive(actions[0].channelId, transaction, expected);
 		// Audit only rows this transaction actually completed: a concurrent
@@ -256,6 +262,7 @@ async function completeActions(actions: OutstandingAction[], expected?: ChannelI
 			.returning({ commentId: moderationActions.commentId });
 		const done = new Set(transitioned.map((row) => row.commentId));
 		const finished = actions.filter((action) => done.has(action.commentId));
+		completed = transitioned.length;
 		if (!finished.length) return;
 		await transaction.insert(auditLog).values(finished.map((action) => ({
 			channelId: action.channelId,
@@ -269,6 +276,7 @@ async function completeActions(actions: OutstandingAction[], expected?: ChannelI
 			createdAt: new Date().toISOString()
 		})));
 	});
+	return completed;
 }
 
 function warnMissingComment(commentId: string, action: string): void {
@@ -299,10 +307,12 @@ async function applyOneModerationAction(
 	}
 	if (status === 'heldForReview') {
 		const converged = await convergeHolds([action], accessToken, deadline, expected, true);
-		if (!converged.has(action.commentId)) return true;
+		// The remote write landed but the row stays outstanding (a failed
+		// corrective write or a restoring claim) — it is not "acted" until a
+		// later sweep terminalizes it (codex).
+		if (!converged.has(action.commentId)) return false;
 	}
-	await completeActions([action], expected);
-	return true;
+	return (await completeActions([action], expected)) > 0;
 }
 
 async function applyModerationAction(
@@ -347,8 +357,10 @@ async function applyModerationAction(
 		const finished = status === 'heldForReview'
 			? await convergeHolds(applicable, accessToken, deadline, expected, true)
 			: new Set(applicable.map((action) => action.commentId));
-		await completeActions(applicable.filter((action) => finished.has(action.commentId)), expected);
-		acted += applicable.length;
+		// Count only rows this run actually terminalized — a hold whose
+		// corrective write failed stays outstanding and counts when a later
+		// sweep completes it (codex).
+		acted += await completeActions(applicable.filter((action) => finished.has(action.commentId)), expected);
 	}
 	return acted;
 }
@@ -376,8 +388,7 @@ async function applyDeletes(actions: OutstandingAction[], accessToken: string, d
 		assertBeforeDeadline(deadline);
 		await assertChannelActive(action.channelId, db, expected);
 		await deleteComment(action.commentId, accessToken, deadline);
-		await completeActions([action], expected);
-		acted += 1;
+		acted += await completeActions([action], expected);
 	}
 	return acted;
 }
@@ -391,32 +402,35 @@ async function processOutstandingActions(channelId: string, accessToken: string,
 			inArray(moderationActions.state, ['pending', 'dispatched', 'cancelling'])
 		))
 		.all()).map(outstandingAction);
-	const cancelling = actions.filter((action) => action.state === 'cancelling');
-	// A cancelled hold may already be live on YouTube: converge the remote
-	// state before the row goes terminal, or a rescan-approved comment stays
-	// hidden forever with nothing reconciling it (codex). Reject/ban/delete
-	// remote states are terminal there — the warn below is all that exists.
-	const convergedHolds = await convergeHolds(
-		cancelling.filter((action) => action.action === 'hold'),
-		accessToken,
-		deadline,
-		expected
-	);
-	const releasable = cancelling.filter(
-		(action) => action.action !== 'hold' || convergedHolds.has(action.commentId)
-	);
+	// A 'restoring' comment is owned by the human flow end-to-end: its
+	// outstanding action rows are bookkeeping only, and finalizeHumanIntent
+	// terminalizes them — this sweep must neither apply nor supersede them
+	// (codex).
+	const restoringIds = actions.length
+		? (
+				await db
+					.select({ id: comments.id })
+					.from(comments)
+					.where(and(eq(comments.channelId, channelId), eq(comments.status, 'restoring')))
+					.all()
+			).map((row) => row.id)
+		: [];
+	const restoring = new Set(restoringIds);
+	const cancelling = actions.filter((action) => action.state === 'cancelling' && !restoring.has(action.commentId));
+	// A cancelled action may already be live on YouTube — holds AND
+	// reject/ban/delete alike: converge the remote state (re-write the
+	// comment's decided status) before the row goes terminal, or a
+	// rescan-approved comment stays hidden with nothing reconciling it
+	// (codex).
+	const convergedCancels = await convergeHolds(cancelling, accessToken, deadline, expected);
+	const releasable = cancelling.filter((action) => convergedCancels.has(action.commentId));
 	await transitionActions(releasable, { state: 'superseded' }, expected, ['cancelling']);
-	for (const action of releasable) {
-		if (action.action === 'hold') continue;
-		console.warn(
-			`moderation action ${action.commentId} (${action.action}) was cancelled by a rescan after dispatch — YouTube may still reflect it; left unchanged until the user acts`
-		);
-	}
 	// Stryker disable next-line MethodExpression, ConditionalExpression: equivalent — claimPendingActions' SQL still guards eq(state, 'pending'), so handing it dispatched rows too claims nothing extra
-	const claimed = await claimPendingActions(actions.filter((action) => action.state === 'pending'), expected);
+	const claimed = await claimPendingActions(actions.filter((action) => action.state === 'pending' && !restoring.has(action.commentId)), expected);
 	// Stryker disable next-line ArrayDeclaration: equivalent — applyYoutubeActions selects entries by their action field, so a foreign element in the array is never selected
 	const ready: OutstandingAction[] = [];
 	for (const action of actions) {
+		if (restoring.has(action.commentId)) continue;
 		if (action.state === 'dispatched') {
 			ready.push(action);
 			continue;
@@ -468,9 +482,12 @@ export async function applyHumanIntent(
 
 /**
  * Commits the local result of a human intent in ONE transaction: the final
- * comment status is guarded on 'restoring', and hold bookkeeping is derived
- * from the action row. A dispatched hold is completed and audited; a pending
- * or cancelled hold is superseded without an audit row.
+ * comment status is guarded on 'restoring', and EVERY outstanding action row
+ * for the comment is terminalized. A dispatched row (hold, reject, ban,
+ * delete) is completed and audited — its remote write was attempted; a
+ * pending or cancelling row is superseded without an audit row. Left
+ * outstanding, a dispatched reject/delete/ban would be re-applied next sweep
+ * over the human's decision (codex).
  */
 export async function finalizeHumanIntent(
 	channelId: string,
@@ -486,32 +503,30 @@ export async function finalizeHumanIntent(
 			.update(comments)
 			.set({ status, decidedBy: 'human' })
 			.where(and(eq(comments.id, commentId), eq(comments.status, 'restoring')));
-		const dispatchedHold = await transaction
+		const dispatched = await transaction
 			.update(moderationActions)
 			.set({ state: 'completed' })
 			.where(and(
 				eq(moderationActions.commentId, commentId),
-				eq(moderationActions.action, 'hold'),
 				eq(moderationActions.state, 'dispatched')
 			))
-			.returning({ reason: moderationActions.reason });
+			.returning({ action: moderationActions.action, reason: moderationActions.reason, authorHandle: moderationActions.authorHandle });
 		await transaction
 			.update(moderationActions)
 			.set({ state: 'superseded' })
 			.where(and(
 				eq(moderationActions.commentId, commentId),
-				eq(moderationActions.action, 'hold'),
 				inArray(moderationActions.state, ['pending', 'cancelling'])
 			));
-		if (dispatchedHold.length) {
+		if (dispatched.length) {
 			await transaction.insert(auditLog).values(
-				dispatchedHold.map((row) => ({
+				dispatched.map((row) => ({
 					channelId,
 					commentId,
-					action: 'hold',
+					action: row.action,
 					reason: row.reason,
 					actor: 'system',
-					authorHandle: null,
+					authorHandle: row.authorHandle ?? null,
 					createdAt: new Date().toISOString()
 				}))
 			);

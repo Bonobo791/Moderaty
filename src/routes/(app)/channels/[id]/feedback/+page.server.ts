@@ -222,9 +222,9 @@ export const actions = {
 		const window = parseHistoryWindow(rawWindow instanceof File ? null : rawWindow ?? '3');
 		if (window === null) return fail(400, { scope: 'history', error: 'Choose a history window of 1, 3, 6, 12, or 24 months.' });
 		if (env.DRY_RUN !== 'true' && env.DRY_RUN !== 'false') throw error(500, 'DRY_RUN must be true or false');
-		if (env.DRY_RUN === 'true') return fail(409, { scope: 'history', error: 'Historical feedback analysis is unavailable while this deployment is in dry-run mode.' });
+		if (env.DRY_RUN === 'true') return fail(409, { scope: 'history', error: 'History scans are unavailable while this deployment is in dry-run mode.' });
 		if (!ch.active || ch.feedbackEnabled !== 1) {
-			return fail(409, { scope: 'history', error: 'Resume the channel and enable feedback before analyzing history.' });
+			return fail(409, { scope: 'history', error: 'Resume the channel and enable feedback before starting a history scan.' });
 		}
 		// Same gate as moderation history: every classified comment spends a
 		// credit (or the org's own key), so a checkpoint must never plant for an
@@ -237,13 +237,13 @@ export const actions = {
 					scope: 'history',
 					historyAccess,
 					error: historyAccess === 'key'
-						? 'Your lifetime deal requires your own OpenAI API key. An organization owner must add it on the Team page before analyzing feedback history.'
-						: 'To analyze feedback history, purchase credits, subscribe, or buy the lifetime deal and add your own OpenAI API key. If your credits or subscription allowance are exhausted, purchase more credits to continue.'
+						? 'Your lifetime deal requires your own OpenAI API key. An organization owner must add it on the Team page before starting a history scan.'
+						: 'To run a history scan, purchase credits, subscribe, or buy the lifetime deal and add your own OpenAI API key. If your credits or subscription allowance are exhausted, purchase more credits to continue.'
 				});
 			}
 		} catch (cause) {
 			console.error('feedback history access check failed:', params.id, cause);
-			return fail(503, { scope: 'history', error: 'Could not verify access to feedback history analysis. Please try again.' });
+			return fail(503, { scope: 'history', error: 'Could not verify access to history scans. Please try again.' });
 		}
 		const now = new Date().toISOString();
 		const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, now));
@@ -256,11 +256,11 @@ export const actions = {
 			.set({ feedbackHistoryBoundary: historyWindowBoundary(window), feedbackHistoryPageToken: null, feedbackHistoryScanId: randomUUID() })
 			.where(and(eq(channels.id, params.id), eq(channels.orgId, user.orgId), eq(channels.active, 1), eq(channels.feedbackEnabled, 1), isNull(channels.feedbackHistoryBoundary), claimable))
 			.returning({ id: channels.id });
-		if (!updated.length) return fail(409, { scope: 'history', error: 'Feedback history is already running or this channel is busy.' });
+		if (!updated.length) return fail(409, { scope: 'history', error: 'A history scan is already running or this channel is busy.' });
 		return {
 			ok: true,
 			scope: 'history',
-			message: 'Historical feedback analysis queued. Cron processes up to 100 comments per batch without changing moderation.'
+			message: 'History scan started — up to 100 comments per background batch, and nothing is moderated. Each batch adds a digest below.'
 		};
 	},
 	dryRun: async ({ params, request, locals }) => {
@@ -352,7 +352,7 @@ export const actions = {
 		// A 'manual' cadence never gets a cron retry — don't promise one.
 		const retryHint =
 			ch.feedbackHistoryBoundary || ch.feedbackCadence !== 'manual'
-				? 'it will retry on the next cron tick.'
+				? 'it will retry automatically.'
 				: 'retry with Generate now.';
 		try {
 			const result: DigestResult = await generateFeedbackDigest(params.id, {
@@ -364,14 +364,14 @@ export const actions = {
 					return {
 						ok: true,
 						scope: 'digest',
-						message: `Digest generated — ${result.findings} finding(s) from ${result.commentsClassified} comment(s).${result.historyRemaining ? ' Historical analysis continues in the background on the next cron tick.' : ''}`
+						message: `Digest generated — ${result.findings} finding(s) from ${result.commentsClassified} comment(s).${result.historyRemaining ? ' The history scan continues in the background.' : ''}`
 					};
 				case 'empty':
 					return {
 						ok: true,
 						scope: 'digest',
 						message: result.historyRemaining
-							? 'This history page was scanned. The next page continues on the next cron tick.'
+							? 'This history batch was scanned. The next batch runs automatically.'
 							: 'No new comments since the last digest window.'
 					};
 				case 'dry-run':

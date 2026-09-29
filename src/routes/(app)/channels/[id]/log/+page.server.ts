@@ -241,7 +241,16 @@ export const actions = {
 		// row while YouTube already shows the comment, with no record left to
 		// repair the desync (codeant). 'restoring' + the durable intent row
 		// are exactly what the reconcile sweep needs to finish the commit.
-		await finalizeHumanIntent(params.id, commentId, 'restore');
+		try {
+			await finalizeHumanIntent(params.id, commentId, 'restore');
+		} catch (e) {
+			// Remote succeeded, local commit failed: keep the claim and the
+			// intent row for the reconcile sweep, and tell the user it
+			// resolves itself — an uncaught throw would surface the same 500
+			// without explaining the self-heal (codex).
+			console.error('log undo: finalize failed for comment %s — reconcile sweep will finish it:', commentId, e);
+			return fail(500, { error: 'The restore reached YouTube but saving it failed — it will finish automatically on the next moderation run.' });
+		}
 		return { success: 'Restored — recorded in audit log.' };
 	},
 	/**

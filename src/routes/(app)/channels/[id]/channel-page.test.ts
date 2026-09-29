@@ -388,7 +388,7 @@ test('an all-time dry-run result names the window in the success line', () => {
 		background: true
 	});
 	expect(body).toContain('Dry run preview (all time): 6 comments scanned');
-	expect(body).toContain('The remaining pages in this selected window will continue under cron.');
+	expect(body).toContain('The remaining pages in this window will continue in the background.');
 	expect(body).toContain('href="/channels/UC1/log"');
 });
 
@@ -473,7 +473,7 @@ test('an active channel offers a labeled pause control posting paused=true', () 
 test('a paused channel shows the paused banner and a resume control posting paused=false', () => {
 	const body = renderPage({ ...LAYOUT_DATA, ch: { ...LAYOUT_DATA.ch, active: 0 } });
 	expect(body).toContain('Moderation is paused for My Channel');
-	expect(body).toContain('cron skips it');
+	expect(body).toContain('checks stop and new comments go unchecked');
 	expect(body).toContain('name="paused" value="false"');
 	expect(body).toContain('Resume moderation on My Channel');
 	expect(body).not.toContain('Pause moderation on My Channel');

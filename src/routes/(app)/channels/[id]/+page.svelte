@@ -108,7 +108,7 @@
 
 {#if ch.active === 0}
 	<p class="paused-banner" role="status">
-		Moderation is paused for {ch.title} — cron skips it and new comments go unchecked.
+		Moderation is paused for {ch.title} — checks stop and new comments go unchecked.
 		Nothing is deleted and the connection stays live; resume any time.
 	</p>
 {/if}
@@ -223,13 +223,13 @@
 			</p>
 		{:else if form?.ok}
 			<p class="muted" role="status">
-				History scan started — cron is working back {form.months === 1 ? '1 month' : `${form.months} months`}. New comments keep flowing into the review queue as it drains.
+				History scan started — working back {form.months === 1 ? '1 month' : `${form.months} months`} in the background. New comments keep flowing into the review queue as it goes.
 			</p>
 		{/if}
 	{/if}
 	{#if ch.scanning}
 		<p class="muted" role="status">
-			History scan in progress — cron is working through the backlog and new comments flow into the review queue as it drains. This runs in the background: refreshing or leaving this page won't stop it.
+			History scan in progress — working through the backlog; new comments still flow into the review queue. This runs in the background: refreshing or leaving this page won't stop it.
 		</p>
 	{/if}
 	{#if moderationPreviewUsed}
@@ -279,7 +279,7 @@
 				Dry run preview ({form.months === 'all' ? 'all time' : form.months === 1 ? 'last month' : `last ${form.months} months`}): {form.fetched} comment{form.fetched === 1 ? '' : 's'} scanned —
 				{form.acted} would be acted on, {form.queued} would go to the review queue.
 				{#if form.partial}Partial — the 20 s preview limit was hit; see the audit log for what completed. {/if}
-				{#if form.background}The remaining pages in this selected window will continue under cron. {/if}
+				{#if form.background}The remaining pages in this window will continue in the background. {/if}
 				<a href="/channels/{ch.id}/log">See the audit log</a>.
 			</p>
 		{/if}
@@ -292,7 +292,7 @@
 	<p class="muted" role="status">
 		{ch.active === 0
 			? 'The saved preview window is paused with this channel and will continue when moderation resumes.'
-			: 'The moderation dry-run preview is continuing through the selected window in the background; cron drains the remaining pages automatically.'}
+			: 'The moderation dry-run preview is continuing through the selected window in the background; the remaining pages drain automatically.'}
 	</p>
 {/if}
 {#if data.orgRole === 'owner' || data.orgRole === 'admin'}

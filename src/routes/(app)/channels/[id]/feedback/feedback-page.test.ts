@@ -37,6 +37,9 @@ function pageData(over: Record<string, unknown> = {}) {
 		dryRunUsed: false,
 		dryRunDeployment: false,
 		digests: [],
+		// The banner's transient row arrives independently of the paginated
+		// history list — a test that wants the banner sets it explicitly.
+		currentAttempt: null,
 		latest: null,
 		findings: [],
 		settings: SETTINGS,
@@ -149,21 +152,21 @@ describe('feedback page role gating (SSR)', () => {
 
 describe('feedback page deferred banner (SSR)', () => {
 	it('surfaces a credit deferral instead of a silent empty state', () => {
+		const deferred = { ...COMPLETE_DIGEST, id: 8, status: 'deferred', error: 'credits', creditsUsed: null };
 		const body = renderFeedback(
-			pageData({
-				orgRole: 'member',
-				digests: [{ ...COMPLETE_DIGEST, id: 8, status: 'deferred', error: 'credits', creditsUsed: null }]
-			})
+			pageData({ orgRole: 'member', digests: [deferred], currentAttempt: deferred })
 		);
 		expect(body).toContain('credits');
 		expect(body).not.toContain('No digest yet');
 	});
 
 	it('explains that a historical batch needs enough credits and links to Usage', () => {
+		const deferred = { ...COMPLETE_DIGEST, id: 8, status: 'deferred', error: 'credits', creditsUsed: null };
 		const body = renderFeedback(pageData({
 			settings: { ...SETTINGS, cadence: 'manual' },
 			history: { active: true, boundary: '2025-01-01T00:00:00.000Z' },
-			digests: [{ ...COMPLETE_DIGEST, id: 8, status: 'deferred', error: 'credits', creditsUsed: null }]
+			digests: [deferred],
+			currentAttempt: deferred
 		}));
 		expect(body).toContain('There are not enough credits for this batch.');
 		expect(body).toContain('Add credits on the Usage page');
@@ -173,18 +176,22 @@ describe('feedback page deferred banner (SSR)', () => {
 	});
 
 	it('uses deadline-specific historical retry guidance', () => {
+		const deferred = { ...COMPLETE_DIGEST, id: 8, status: 'deferred', error: 'deadline', creditsUsed: null };
 		const body = renderFeedback(pageData({
 			history: { active: true, boundary: '2025-01-01T00:00:00.000Z' },
-			digests: [{ ...COMPLETE_DIGEST, id: 8, status: 'deferred', error: 'deadline', creditsUsed: null }]
+			digests: [deferred],
+			currentAttempt: deferred
 		}));
 		expect(body).toContain('The time limit was reached. Historical analysis retries on the next cron tick.');
 	});
 
 	it('explains a historical batch credit shortfall with actionable Usage link copy', () => {
+		const deferred = { ...COMPLETE_DIGEST, id: 8, status: 'deferred', error: 'credits', creditsUsed: null };
 		const body = renderFeedback(pageData({
 			settings: { ...SETTINGS, cadence: 'manual' },
 			history: { active: true, boundary: '2025-01-01T00:00:00.000Z' },
-			digests: [{ ...COMPLETE_DIGEST, id: 8, status: 'deferred', error: 'credits', creditsUsed: null }]
+			digests: [deferred],
+			currentAttempt: deferred
 		}));
 		expect(body).toContain('There are not enough credits for this batch.');
 		expect(body).toContain('Add credits on the Usage page; historical analysis retries automatically.');
@@ -194,6 +201,9 @@ describe('feedback page deferred banner (SSR)', () => {
 	});
 
 	it('a deferred row older than the latest complete digest does not banner', () => {
+		// The transient row sits in the history list but is stale — the load
+		// reports currentAttempt: null for anything older than the latest
+		// complete digest.
 		const body = renderFeedback(
 			pageData({
 				digests: [COMPLETE_DIGEST, { ...COMPLETE_DIGEST, id: 6, status: 'deferred', error: 'credits', creditsUsed: null }],
@@ -286,7 +296,7 @@ describe('feedback page I12 states (SSR)', () => {
 		expect(formError).toMatch(/class="[^"]*error-box[^"]*" role="alert">\s*boom/);
 
 		const failed = { ...COMPLETE_DIGEST, id: 8, status: 'failed', error: 'scoring' };
-		const failedRun = renderFeedback(pageData({ digests: [failed] }));
+		const failedRun = renderFeedback(pageData({ digests: [failed], currentAttempt: failed }));
 		expect(failedRun).toContain('Latest digest run failed');
 	});
 

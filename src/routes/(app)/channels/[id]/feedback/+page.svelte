@@ -78,10 +78,10 @@
 
 	// The newest row that is not a successful digest — 'failed' or a
 	// 'deferred' row the job records when it cannot run (out of credits /
-	// budget gone). Anything older than the latest complete digest is stale.
-	const newestAttention = $derived(
-		(data.digests ?? []).find((d) => d.status !== 'complete' && (!data.latest || d.id > data.latest.id)) ?? null
-	);
+	// budget gone). Loaded separately from the paginated list: on an older
+	// ?history= page the attempt is still current even though it isn't in
+	// data.digests (coderabbit/cubic). Older than the latest complete = stale.
+	const newestAttention = $derived(data.currentAttempt ?? null);
 	// The digest whose findings render — ?digest=N selects any complete
 	// digest in history; it defaults to the latest complete (codex: a
 	// multi-page history drain must keep every page's findings reachable).

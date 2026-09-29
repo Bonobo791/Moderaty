@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import { error, fail } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
 import { randomUUID } from 'node:crypto';
@@ -79,14 +79,33 @@ export async function load({ params, locals, url }) {
 			.get()) ?? null;
 	// ?history=<id> pages the history list behind a cursor; ?digest=<id>
 	// still selects any complete digest directly regardless of page (codex).
+	// Only a positive safe integer is a cursor: Number('') and '0' parse to 0,
+	// which would turn the id < before filter into an empty, un-navigable
+	// page — malformed input falls back to the first page (cubic/coderabbit).
 	const historyCursor = url.searchParams.get('history');
+	const parsedCursor = historyCursor === null ? NaN : Number(historyCursor);
 	const historyBefore =
-		historyCursor !== null && Number.isInteger(Number(historyCursor))
-			? Number(historyCursor)
-			: undefined;
+		Number.isSafeInteger(parsedCursor) && parsedCursor > 0 ? parsedCursor : undefined;
 	const historyPage = await digestHistoryPage(params.id, latest?.id ?? -1, historyBefore);
 	const digests = historyPage.digests;
 	const latestComplete = latest;
+	// The status banner's transient row (failed/deferred current attempt) is
+	// its own query: on an older ?history= page the row is not in `digests`
+	// at all, and paging must not hide the live warning (coderabbit/cubic).
+	const currentAttempt =
+		(await db
+			.select(DIGEST_FIELDS)
+			.from(feedbackDigests)
+			.where(
+				and(
+					eq(feedbackDigests.channelId, params.id),
+					ne(feedbackDigests.status, 'complete'),
+					gt(feedbackDigests.id, latest?.id ?? -1)
+				)
+			)
+			.orderBy(desc(feedbackDigests.id))
+			.limit(1)
+			.get()) ?? null;
 	// Every complete digest is selectable (?digest=N): a multi-page history
 	// drain writes one digest per bounded batch, and the paid findings on
 	// earlier pages stay reachable instead of being replaced by the newest
@@ -153,6 +172,7 @@ export async function load({ params, locals, url }) {
 		dryRunUsed: Boolean(ch.feedbackDryRunUsedAt),
 		dryRunDeployment: env.DRY_RUN === 'true',
 		digests,
+		currentAttempt,
 		historyCursor: historyBefore ?? null,
 		historyNext: historyPage.next,
 		latest: latestComplete,

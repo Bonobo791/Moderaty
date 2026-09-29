@@ -18,6 +18,8 @@ import type Stripe from 'stripe';
 
 import { db } from '$lib/server/db';
 import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, stripeLifetimeSlots, users } from '$lib/server/db/schema';
+import { decrypt } from '$lib/server/crypto';
+import { revokeGoogleToken } from '$lib/server/google';
 import { getStripe } from '$lib/server/stripe/client';
 
 export const CONSENT_EMAIL_RETENTION_MS = 10 * 365.25 * 24 * 60 * 60 * 1000; // 10 years
@@ -28,6 +30,33 @@ const AUDIT_HANDLE_SWEEP_BATCH = 50; // same drain-across-runs bound as the cons
 
 /** Placeholder for an erased refresh token — never valid ciphertext, so decrypt fails loudly in cron (AGENTS.md). */
 export const WIPED_REFRESH_TOKEN = 'erased:account-deletion';
+
+/**
+ * Revokes at Google every YouTube grant this account connected
+ * (channels.userId — those grants belong to THIS user), honoring the
+ * YouTube API ToS. Shared by the account page's immediate deletion and the
+ * zero-credit retention sweep. A revocation failure is logged loudly but
+ * never blocks deletion — the encrypted token is erased either way,
+ * orphaning the grant. Channels in surviving team orgs keep their rows;
+ * their dead token fails loudly in cron until a teammate reconnects.
+ *
+ * @param userId - The account whose channel grants are revoked
+ * @param context - Server-log prefix identifying the caller (e.g. 'account deletion')
+ */
+export async function revokeChannelGrantsForUser(userId: string, context: string): Promise<void> {
+	const owned = await db
+		.select({ id: channels.id, refreshTokenEnc: channels.refreshTokenEnc })
+		.from(channels)
+		.where(eq(channels.userId, userId))
+		.all();
+	for (const ch of owned) {
+		try {
+			await revokeGoogleToken(decrypt(ch.refreshTokenEnc), `${context} channel ${ch.id}`);
+		} catch (cause) {
+			console.error('token revocation failed for channel, deleting anyway:', ch.id, cause);
+		}
+	}
+}
 
 
 type StripeRequestOptionsFactory = () => Stripe.RequestOptions | undefined;

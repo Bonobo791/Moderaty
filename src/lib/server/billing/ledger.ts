@@ -117,6 +117,21 @@ export function isUnmeteredPlan(plan: string | null | undefined): boolean {
 	return UNMETERED_PLANS.has(plan ?? '');
 }
 
+/**
+ * The metered predicate on an already-loaded org row — shared by
+ * `orgIsMetered` and the zero-credit retention sweep so both classify the
+ * same row identically (a metered org is billing-engaged: hosted plan,
+ * subscription id, or a credit balance ever granted).
+ */
+export function orgRowIsMetered(row: {
+	plan: string;
+	stripeSubscriptionId: string | null;
+	creditsRemaining: number | null;
+}): boolean {
+	if (isUnmeteredPlan(row.plan)) return false;
+	return hasHostedEntitlement(row) || row.creditsRemaining !== null;
+}
+
 export async function orgIsMetered(orgId: string): Promise<boolean> {
 	const row = await db
 		.select({ creditsRemaining: organizations.creditsRemaining, plan: organizations.plan, stripeSubscriptionId: organizations.stripeSubscriptionId })
@@ -124,8 +139,7 @@ export async function orgIsMetered(orgId: string): Promise<boolean> {
 		.where(eq(organizations.id, orgId))
 		.get();
 	if (!row) throw new Error(`org not found: ${orgId}`);
-	if (isUnmeteredPlan(row.plan)) return false;
-	return hasHostedEntitlement(row) || row.creditsRemaining !== null;
+	return orgRowIsMetered(row);
 }
 
 export const UNMETERED_CREDIT_PURCHASE_ERROR = 'the lifetime plan includes unlimited moderated comments — credit purchases are not available';

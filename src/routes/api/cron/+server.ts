@@ -31,7 +31,10 @@ function secretMatches(provided: string | null, expected: string): boolean {
  */
 /** Verifies the cron caller: CRON_SECRET configured, then the bearer header or query secret. */
 function authorizeCron(url: URL, request: Request): void {
-	if (!env.CRON_SECRET) throw error(500, 'CRON_SECRET is not configured');
+	if (!env.CRON_SECRET) {
+		console.error('cron: CRON_SECRET is not configured');
+		throw error(500, 'CRON_SECRET is not configured');
+	}
 	// Bearer header is the preferred path (used by the Netlify scheduled
 	// function); the query param stays for the plan-documented manual curl.
 	// A present-but-malformed Authorization header fails closed — query auth
@@ -40,7 +43,18 @@ function authorizeCron(url: URL, request: Request): void {
 	let secret: string | null = null;
 	if (bearer === null) secret = url.searchParams.get('secret');
 	else if (bearer.startsWith('Bearer ')) secret = bearer.slice('Bearer '.length);
-	if (!secretMatches(secret, env.CRON_SECRET)) throw error(401, 'bad secret');
+	if (!secretMatches(secret, env.CRON_SECRET)) {
+		const mode =
+			bearer === null
+				? secret === null
+					? 'no credentials'
+					: 'secret mismatch'
+				: bearer.startsWith('Bearer ')
+					? 'secret mismatch'
+					: 'malformed Authorization header';
+		console.warn(`cron: rejected request — ${mode}`);
+		throw error(401, 'bad secret');
+	}
 }
 
 /**
@@ -97,6 +111,7 @@ async function drainDryRunWindow(channel: typeof channels.$inferSelect, deadline
 			forceDryRun: true,
 			window: { boundary: channel.dryRunBoundary, pageToken: channel.dryRunPageToken ?? null }
 		});
+		console.info(`cron: dry-run drain for ${channel.id}: fetched=${drain.fetched} windowComplete=${drain.windowComplete}`);
 		// Both writes are predicated on the boundary actually drained: the
 		// row was read BEFORE the atomic claim, so a dashboard preview can
 		// have replanted a new window in between — a stale drain must never
@@ -149,7 +164,8 @@ async function runClaimedChannel(
 
 export const GET: RequestHandler = async ({ url, request }) => {
 	// Captured at handler start so the DB prelude consumes the same budget.
-	const deadline = Date.now() + RUN_BUDGET_MS;
+	const startedAt = Date.now();
+	const deadline = startedAt + RUN_BUDGET_MS;
 	authorizeCron(url, request);
 	// Validate BEFORE any sweep or claim: an invalid value must fail loudly
 	// at the entry, not silently run the sweeps live (runChannel re-checks,
@@ -158,6 +174,7 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		throw error(500, 'DRY_RUN must be true or false');
 	}
 	const dryRun = env.DRY_RUN === 'true';
+	console.info(`cron: tick start (dryRun=${dryRun})`);
 
 	// Consent-evidence retention sweep runs first, while the full budget
 	// remains: consent e-mails older than 10 years (CC Art. 205) are erased —
@@ -200,7 +217,15 @@ export const GET: RequestHandler = async ({ url, request }) => {
 
 	// The sweeps above consumed the budget; a channel run would abort
 	// immediately on the expired deadline — report the sweeps, skip the claim.
-	if (Date.now() >= deadline) return json({ ...base, results: {} });
+	const sweepsFinishedAt = Date.now();
+	const elapsedMs = sweepsFinishedAt - startedAt;
+	console.info(`cron: sweeps finished in ${elapsedMs}ms`);
+	if (sweepsFinishedAt >= deadline) {
+		console.error(
+			`cron: sweeps consumed the ${RUN_BUDGET_MS}ms run budget (${elapsedMs}ms) — no channel claimed this tick`
+		);
+		return json({ ...base, budgetExhausted: true, results: {} });
+	}
 	const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, nowIso));
 	const [channel] = await db
 		.select()
@@ -212,7 +237,10 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		// drain must never outrank least-recently-run moderation (codex+cubic).
 		.orderBy(desc(sql`${channels.dryRunBoundary} is not null`), asc(channels.lastRunAt))
 		.limit(1);
-	if (!channel) return json({ ...base, results: {} });
+	if (!channel) {
+		console.info('cron: no active, unleased channel to run');
+		return json({ ...base, results: {} });
+	}
 
 	// Atomic claim: a concurrent claimant's UPDATE matches 0 rows and exits cleanly.
 	const claimed = await db
@@ -220,7 +248,13 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		.set({ leaseExpiresAt: new Date(Date.now() + LEASE_MS).toISOString() })
 		.where(and(eq(channels.id, channel.id), claimable))
 		.returning({ id: channels.id });
-	if (claimed.length === 0) return json({ ...base, claimed: false, results: {} });
+	if (claimed.length === 0) {
+		console.info(`cron: lost claim race for channel ${channel.id}`);
+		return json({ ...base, claimed: false, results: {} });
+	}
+	console.info(
+		`cron: claimed channel ${channel.id} (lastRunAt=${channel.lastRunAt ?? 'never'}, cursor=${channel.cursor ?? 'none'}, resumingPage=${channel.nextPageToken !== null}, dryRunDrain=${channel.dryRunBoundary !== null})`
+	);
 
 	// The run's health verdict: a completed live run is 'success', a thrown or
 	// incomplete one carries its sanitized category, and a run with no verdict
@@ -231,11 +265,14 @@ export const GET: RequestHandler = async ({ url, request }) => {
 	let runHealth: 'success' | 'none' | { status: 'failed'; error: RunCategory } = 'success';
 	let body: Record<string, unknown>;
 	let status = 200;
+	const runStartedAt = Date.now();
 	try {
 		const { result, dryRunWindow, digest } = await runClaimedChannel(channel, deadline);
 		if (result.dryRun || result.stoppedReason === 'deactivated' || result.skipped) runHealth = 'none';
 		else if (result.outOfCredits) runHealth = { status: 'failed', error: 'credits' };
 		else if (result.partial) runHealth = { status: 'failed', error: 'timeout' };
+		const health = typeof runHealth === 'string' ? runHealth : `failed:${runHealth.error}`;
+		console.info(`cron: channel ${channel.id} finished in ${Date.now() - runStartedAt}ms — health=${health}`);
 		body = { ...base, results: { [channel.id]: result }, dryRunWindow, digest };
 	} catch (cause) {
 		const category = categorizeRunFailure(cause);

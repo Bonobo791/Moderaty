@@ -45,6 +45,7 @@ async function persistResults(
 	) ?? channel.cursor;
 	const scanCursor = channel.scanCursor ?? newest;
 	const complete = page.reachedCursor || !page.nextPageToken;
+	const cursor = complete ? scanCursor : channel.cursor;
 	await db.transaction(async (transaction) => {
 		await assertChannelActive(channelId, transaction, channel);
 		await transaction
@@ -56,6 +57,7 @@ async function persistResults(
 				)
 			.where(eq(channels.id, channelId));
 	});
+	return { complete, cursor };
 }
 
 /** Window-mode dry-run finish: reported, never persisted (I8 — the caller owns the drain state). */
@@ -100,7 +102,10 @@ async function loadChannelForRun(
 	if (claim && !channelMatchesClaim(channel, claim)) {
 		throw new Error(`channel ${channelId} changed under the dry-run claim — aborting the preview`);
 	}
-	if (!channel.active) return { kind: 'skip', result: emptyResult() };
+	if (!channel.active) {
+		console.info(`run ${channelId}: skipped — channel inactive`);
+		return { kind: 'skip', result: emptyResult() };
+	}
 	if (env.DRY_RUN !== 'true' && env.DRY_RUN !== 'false') {
 		throw new Error('DRY_RUN must be true or false');
 	}
@@ -163,6 +168,7 @@ export async function runChannel(
 			// Live runs consume credits (and gate AI on them); dry runs never do.
 			consumeCredits: !dryRun
 		});
+		const skipped = fetched - decisions.length - failures.length - deferred;
 		queued = decisions.filter((decision) => decision.auditAction === 'queue').length;
 
 		// Deletion may have committed during the YouTube/AI calls above: re-check
@@ -175,18 +181,26 @@ export async function runChannel(
 			throw new Error(`moderation decision failed for ${failures.length} comment(s): ${failures.join('; ')}`);
 		}
 		if (dryRun) {
+			console.info(`run ${channelId}: dry run — fetched=${fetched} skippedAlreadySeen=${skipped} audited=${acted}`);
 			return finishDryRun(window, page, { fetched, acted, queued });
 		}
 
 		const enforcement = await runEnforcement(channelId, accessToken, deadline, channel.orgId, deferred, channel);
 		acted = enforcement.acted;
 		if (enforcement.outOfCredits) {
+			console.warn(
+				`run ${channelId}: out of credits — ${deferred} comment(s) deferred, cursor parked; fetched=${fetched} skippedAlreadySeen=${skipped}`
+			);
 			return { fetched, acted, queued, partial: false, skipped: false, dryRun, outOfCredits: true };
 		}
-		await persistResults(channelId, channel, page);
+		const { complete, cursor: newCursor } = await persistResults(channelId, channel, page);
+		console.info(
+			`run ${channelId}: fetched=${fetched} skippedAlreadySeen=${skipped} staged=${decisions.length} deferred=${deferred} acted=${acted} queued=${queued}; scan ${complete ? `complete — cursor now ${newCursor}` : `continues next run (boundary ${channel.cursor})`}`
+		);
 		return { fetched, acted, queued, partial: false, skipped: false, dryRun };
 	} catch (error) {
 		if (error instanceof DeadlineExceededError) {
+			console.warn(`run ${channelId}: deadline reached — partial (fetched=${fetched})`);
 			return { fetched, acted, queued, partial: true, skipped: false, dryRun, stoppedReason: 'deadline' };
 		}
 		if (error instanceof ChannelDeactivatedError) {

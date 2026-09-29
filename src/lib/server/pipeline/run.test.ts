@@ -58,6 +58,27 @@ test('credit charge updates the fake balance across runs', async () => {
 	expect(mocks.state.insertedComments).toHaveLength(1);
 });
 
+test('logs exact live counts including already-stored comments and the completed scan cursor', async () => {
+	mocks.state.existingIds = ['seen'];
+	mocks.scoreComment.mockResolvedValue(moderation(0.1));
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ id: 'seen' }), newComment({ id: 'first' }), newComment({ id: 'second' })],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+	const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+
+	try {
+		await runChannel('channel');
+
+		expect(infoSpy).toHaveBeenCalledWith(
+			'run channel: fetched=3 skippedAlreadySeen=1 staged=2 deferred=0 acted=0 queued=0; scan complete — cursor now 2026-01-04T00:00:00.000Z'
+		);
+	} finally {
+		infoSpy.mockRestore();
+	}
+});
+
 test('persists the chronologically newest timestamp when UTC offsets differ', async () => {
 	mocks.scoreComment.mockResolvedValue(moderation(0));
 	mocks.fetchNewComments.mockResolvedValue({
@@ -195,13 +216,19 @@ test('window mode is complete when the listing ends without hitting the boundary
 
 test('skips an inactive channel without fetching or scoring', async () => {
 	mocks.state.channel = { ...mocks.state.channel, active: 0 };
+	const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 
-	const result = await runChannel('channel');
+	try {
+		const result = await runChannel('channel');
 
-	expect(result).toEqual({ fetched: 0, acted: 0, queued: 0, partial: false, skipped: true, dryRun: false });
-	expect(mocks.refreshAccessToken).not.toHaveBeenCalled();
-	expect(mocks.fetchNewComments).not.toHaveBeenCalled();
-	expect(mocks.scoreComment).not.toHaveBeenCalled();
+		expect(result).toEqual({ fetched: 0, acted: 0, queued: 0, partial: false, skipped: true, dryRun: false });
+		expect(mocks.refreshAccessToken).not.toHaveBeenCalled();
+		expect(mocks.fetchNewComments).not.toHaveBeenCalled();
+		expect(mocks.scoreComment).not.toHaveBeenCalled();
+		expect(infoSpy).toHaveBeenCalledWith('run channel: skipped — channel inactive');
+	} finally {
+		infoSpy.mockRestore();
+	}
 });
 
 test('a preview whose claimed row was swapped aborts before any provider call', async () => {
@@ -345,12 +372,18 @@ test('treats a vanished channel row as deactivated mid-run, logging and stopping
 
 test('returns a partial result when the deadline hits during comment fetch', async () => {
 	mocks.fetchNewComments.mockRejectedValue(new mocks.DeadlineExceededError('out of time'));
+	const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-	const result = await runChannel('channel');
+	try {
+		const result = await runChannel('channel');
 
-	expect(result).toEqual({ fetched: 0, acted: 0, queued: 0, partial: true, skipped: false, dryRun: false, stoppedReason: 'deadline' });
-	expect(mocks.state.insertedComments).toEqual([]);
-	expect(mocks.state.channelUpdates).toEqual([]);
+		expect(result).toEqual({ fetched: 0, acted: 0, queued: 0, partial: true, skipped: false, dryRun: false, stoppedReason: 'deadline' });
+		expect(mocks.state.insertedComments).toEqual([]);
+		expect(mocks.state.channelUpdates).toEqual([]);
+		expect(warnSpy).toHaveBeenCalledWith('run channel: deadline reached — partial (fetched=0)');
+	} finally {
+		warnSpy.mockRestore();
+	}
 });
 
 test('returns a partial result when the deadline hits during video metadata fetch', async () => {
@@ -460,6 +493,23 @@ test('window mode without dry-run semantics fails loudly — it can never go liv
 });
 
 describe('credit consumption (billing)', () => {
+	test('logs the number of comments deferred when credits are exhausted', async () => {
+		mocks.state.channel.orgId = 'org-1';
+		mocks.state.credits = 0;
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+		try {
+			const result = await runChannel('channel');
+
+			expect(result.outOfCredits).toBe(true);
+			expect(warnSpy).toHaveBeenCalledWith(
+				'run channel: out of credits — 1 comment(s) deferred, cursor parked; fetched=1 skippedAlreadySeen=0'
+			);
+		} finally {
+			warnSpy.mockRestore();
+		}
+	});
+
 	test('consumes one credit per staged comment on a live run and advances the cursor', async () => {
 		mocks.state.channel.orgId = 'org-1';
 		mocks.state.credits = 5;

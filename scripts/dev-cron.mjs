@@ -84,6 +84,12 @@ function detailProblems(payload) {
 	}
 	if (payload.budgetExhausted) problems.push('sweeps consumed the run budget — no channel claimed');
 	if (payload.bookkeepingError) problems.push('run-health bookkeeping write failed');
+	// Per-account zero-credit eval failures ride a `ok:true` payload by design
+	// — without this check a user whose evaluation throws every rotation
+	// would retry forever, invisible to the scheduler (codeant).
+	if (typeof payload.zeroCreditItemErrors === 'number' && payload.zeroCreditItemErrors > 0) {
+		problems.push(`zeroCreditItemErrors: ${payload.zeroCreditItemErrors} account evaluation(s) failed`);
+	}
 	for (const entry of channelResultEntries(payload)) {
 		if (typeof entry.error === 'string' && !USER_ACTIONABLE_CATEGORIES.has(entry.error)) {
 			problems.push(`channel run failed: ${entry.error}`);
@@ -167,17 +173,47 @@ export async function pingHealthcheck(fetchImpl = fetch) {
 	}
 }
 
-// Only run the driver when executed directly, not when imported by tests.
-if (import.meta.url === `file://${process.argv[1]}`) {
-	const argv = process.argv.slice(2);
+/**
+ * Parses driver flags into { once, intervalMs }, or returns null on any
+ * malformed input — the caller prints usage and exits non-zero. A
+ * non-positive interval is rejected: `setInterval(tick, 0)` would hot-loop
+ * the endpoint and the local system (codeant).
+ */
+export function parseDriverArgs(argv) {
 	const once = argv.includes('--once');
 	const intervalFlag = argv.indexOf('--interval-ms');
 	const intervalMs =
 		intervalFlag === -1 ? DEFAULT_INTERVAL_MS : Number.parseInt(argv[intervalFlag + 1] ?? '', 10);
-	if (argv.some((a) => a !== '--once' && a !== '--interval-ms' && a !== String(intervalMs)) || Number.isNaN(intervalMs)) {
+	if (
+		argv.some((a) => a !== '--once' && a !== '--interval-ms' && a !== String(intervalMs)) ||
+		Number.isNaN(intervalMs) ||
+		intervalMs <= 0
+	) {
+		return null;
+	}
+	return { once, intervalMs };
+}
+
+/**
+ * Schedules ticks serially: the next run is armed only after the current
+ * tick settles. `setInterval` fires on the wall clock, so a tick slower than
+ * the interval would overlap its successor — two in-flight ticks fight over
+ * the same channel claim and sweep rows (codeant). `schedule` is injectable
+ * for tests; it defaults to setTimeout.
+ */
+export function scheduleTicks(tick, intervalMs, schedule = setTimeout) {
+	const step = () => void tick().finally(() => schedule(step, intervalMs));
+	schedule(step, intervalMs);
+}
+
+// Only run the driver when executed directly, not when imported by tests.
+if (import.meta.url === `file://${process.argv[1]}`) {
+	const parsed = parseDriverArgs(process.argv.slice(2));
+	if (!parsed) {
 		console.error('Usage: node --env-file=.env scripts/dev-cron.mjs [--once] [--interval-ms N]');
 		process.exit(1);
 	}
+	const { once, intervalMs } = parsed;
 	const tick = async () => {
 		try {
 			await tickOnce();
@@ -193,6 +229,6 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 	if (!(await tick()) && once) process.exit(1);
 	if (!once) {
 		console.log(`dev cron driver: ticking every ${intervalMs / 1000}s (Ctrl+C to stop)`);
-		setInterval(tick, intervalMs);
+		scheduleTicks(tick, intervalMs);
 	}
 }

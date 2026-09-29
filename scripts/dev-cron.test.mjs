@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { pingHealthcheck, tickOnce } from './dev-cron.mjs';
+import { parseDriverArgs, pingHealthcheck, scheduleTicks, tickOnce } from './dev-cron.mjs';
 
 // 'test-secret' is a synthetic credential fixture — maintainer-approved
 // documented exception per AGENTS.md (approved 2026-07-30, PR #13 review).
@@ -145,6 +145,73 @@ describe('dev cron tick', () => {
 		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
 
 		await expect(tickOnce()).rejects.toThrow('bookkeeping');
+	});
+
+	it('fails the tick when per-account zero-credit evaluations failed — the count is the only alert channel', async () => {
+		// `ok` stays true for per-item sweep errors by design, so a user whose
+		// evaluation throws every rotation would retry silently forever
+		// without this check (codeant).
+		const payload = { ok: true, zeroCreditItemErrors: 2, results: {} };
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
+
+		await expect(tickOnce()).rejects.toThrow('zeroCreditItemErrors');
+	});
+
+	it('does not suppress zero-credit item failures behind owner-actionable channel errors on a 500', async () => {
+		const payload = { ok: false, zeroCreditItemErrors: 1, results: { UC1: { error: 'credits' } } };
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, 500)));
+
+		await expect(tickOnce()).rejects.toThrow('zeroCreditItemErrors');
+	});
+});
+
+describe('driver args', () => {
+	it('rejects a zero or negative interval — setInterval(0) would hot-loop the endpoint', async () => {
+		expect(parseDriverArgs(['--interval-ms', '0'])).toBeNull();
+		expect(parseDriverArgs(['--interval-ms', '-5000'])).toBeNull();
+	});
+
+	it('rejects a non-numeric or missing interval value', async () => {
+		expect(parseDriverArgs(['--interval-ms', 'abc'])).toBeNull();
+		expect(parseDriverArgs(['--interval-ms'])).toBeNull();
+		expect(parseDriverArgs(['--bogus'])).toBeNull();
+	});
+
+	it('parses valid flag combinations', async () => {
+		expect(parseDriverArgs(['--once'])).toEqual({ once: true, intervalMs: 60000 });
+		expect(parseDriverArgs(['--interval-ms', '5000'])).toEqual({ once: false, intervalMs: 5000 });
+		expect(parseDriverArgs([])).toEqual({ once: false, intervalMs: 60000 });
+	});
+});
+
+describe('tick scheduling', () => {
+	it('never overlaps ticks — the next run arms only after the current tick settles', async () => {
+		// setInterval fires on the wall clock: a tick slower than the interval
+		// would stack concurrent runs fighting over the same channel claims
+		// (codeant). The scheduler re-arms from the tick's settle, so at most
+		// one tick is ever in flight.
+		const pending = [];
+		let inFlight = 0;
+		let maxInFlight = 0;
+		const tick = vi.fn(async () => {
+			inFlight += 1;
+			maxInFlight = Math.max(maxInFlight, inFlight);
+			await new Promise((resolve) => setTimeout(resolve, 1));
+			inFlight -= 1;
+			return true;
+		});
+		scheduleTicks(tick, 50, (fn) => pending.push(fn));
+		expect(pending).toHaveLength(1);
+		for (let i = 0; i < 3; i++) {
+			const step = pending.shift();
+			expect(step).toBeTypeOf('function');
+			step();
+			// The tick is still running — nothing may be armed yet.
+			expect(pending).toHaveLength(0);
+			await vi.waitFor(() => expect(pending).toHaveLength(1));
+		}
+		expect(tick).toHaveBeenCalledTimes(3);
+		expect(maxInFlight).toBe(1);
 	});
 });
 

@@ -127,6 +127,81 @@ test('a cancelling action is superseded without a YouTube call and warns the own
 	);
 });
 
+test('a cancelling hold re-publishes a rescan-approved comment before superseding', async () => {
+	mocks.state.existingIds = ['comment'];
+	mocks.state.commentStatuses = { comment: 'approved' };
+	mocks.state.moderationActions = [dispatchedAction({ action: 'hold', state: 'cancelling' })];
+
+	await runChannel('channel');
+
+	// The dispatched hold may have landed remotely: publish restores the
+	// comment the rescan approved, then the row can go terminal.
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'published', false, 'access-token', undefined);
+	expectActionState('superseded');
+});
+
+test('a failed convergence write keeps a cancelling hold retryable', async () => {
+	mocks.state.existingIds = ['comment'];
+	mocks.state.commentStatuses = { comment: 'approved' };
+	mocks.state.moderationActions = [dispatchedAction({ action: 'hold', state: 'cancelling' })];
+	mocks.setModerationStatus.mockRejectedValueOnce(new Error('socket hang up'));
+	const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+	await runChannel('channel');
+
+	expectActionState('cancelling');
+	expect(warning).toHaveBeenCalled();
+
+	await runChannel('channel');
+
+	expect(mocks.setModerationStatus).toHaveBeenLastCalledWith(['comment'], 'published', false, 'access-token', undefined);
+	expectActionState('superseded');
+});
+
+test('a human approval landing while a hold write is in flight is re-applied after the hold lands', async () => {
+	mocks.state.existingIds = ['comment'];
+	mocks.state.commentStatuses = { comment: 'pending' };
+	mocks.state.moderationActions = [dispatchedAction({ action: 'hold' })];
+	mocks.setModerationStatus.mockImplementationOnce(async () => {
+		// The owner's approve commits while the heldForReview write is in flight.
+		mocks.state.commentStatuses.comment = 'approved';
+	});
+
+	await runChannel('channel');
+
+	expect(mocks.setModerationStatus.mock.calls).toEqual([
+		[['comment'], 'heldForReview', false, 'access-token', undefined],
+		[['comment'], 'published', false, 'access-token', undefined]
+	]);
+	expectActionState('completed');
+});
+
+test('a dispatched hold superseded by a decided comment publishes it back instead of stranding it held', async () => {
+	mocks.state.existingIds = ['comment'];
+	mocks.state.commentStatuses = { comment: 'approved' };
+	mocks.state.moderationActions = [dispatchedAction({ action: 'hold' })];
+
+	await runChannel('channel');
+
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'published', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).not.toHaveBeenCalledWith(['comment'], 'heldForReview', false, 'access-token', undefined);
+	expectActionState('superseded');
+});
+
+test('a hold landing on a restoring comment replays the recorded user intent', async () => {
+	mocks.state.existingIds = ['comment'];
+	mocks.state.commentStatuses = { comment: 'restoring' };
+	mocks.state.moderationActions = [dispatchedAction({ action: 'hold' })];
+	mocks.state.insertedAudits = [
+		{ channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'queue UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
+	];
+
+	await runChannel('channel');
+
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
+	expectActionState('superseded');
+});
+
 test('a 404 moderation batch retries each hold and completes a comment still missing individually', async () => {
 	const ids = ['a', 'b', 'c'];
 	mocks.state.existingIds = ids;
@@ -353,18 +428,26 @@ test('a completed queue hold is never re-issued — reruns are idempotent (I4)',
 });
 
 test.each([
-	{ state: 'pending' },
-	{ state: 'dispatched' }
-])('a human decision supersedes an unapplied queue hold ($state) — it is never held', async ({ state }) => {
+	{ state: 'pending', published: false },
+	{ state: 'dispatched', published: true }
+])('a human decision supersedes an unapplied queue hold ($state) — it is never held', async ({ state, published }) => {
 	// The review queue claimed the comment while its staged 'hold' was still
-	// outstanding: the hold must not be applied after the fact.
+	// outstanding: the hold must not be applied after the fact. A row already
+	// dispatched may have landed remotely, so the sweep writes the approved
+	// state once to guarantee remote truth; a pending row never touched
+	// YouTube and needs no write.
 	mocks.state.existingIds = ['comment'];
 	mocks.state.commentStatuses = { comment: 'approved' };
 	mocks.state.moderationActions = [dispatchedAction({ action: 'hold', reason: 'ai score 0.60', state })];
 
 	const result = await runChannel('channel');
 
-	expectNoYoutubeWrites();
+	if (published) {
+		expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
+		expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'published', false, 'access-token', undefined);
+	} else {
+		expectNoYoutubeWrites();
+	}
 	expectActionState('superseded');
 	// A never-applied hold writes no completion audit row.
 	expect(mocks.state.insertedAudits).toEqual([]);
@@ -381,9 +464,10 @@ test('a hold is not superseded when the comment returned to pending before the s
 	mocks.state.commentStatuses = { comment: 'approved' };
 	mocks.state.moderationActions = [dispatchedAction({ action: 'hold', reason: 'ai score 0.60' })];
 	// comments reads: #1 stored-ids dedupe, #2 partitionHolds, #3 the
-	// supersede re-check — flip to 'pending' exactly at the re-check.
+	// convergence read, #4 the supersede re-check — flip to 'pending'
+	// exactly at the re-check.
 	mocks.state.onCommentsSelect = (callIndex) => {
-		if (callIndex === 3) mocks.state.commentStatuses = { comment: 'pending' };
+		if (callIndex === 4) mocks.state.commentStatuses = { comment: 'pending' };
 	};
 
 	await runChannel('channel');

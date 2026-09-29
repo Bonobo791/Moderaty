@@ -177,6 +177,65 @@ async function partitionHolds(actions: OutstandingAction[]): Promise<{ applicabl
 	return { applicable, superseded };
 }
 
+/**
+ * A hold's remote 'heldForReview' state must not outlive the comment's local
+ * decision: a dispatched write can land after a rescan approval or a human
+ * action already committed (codex), leaving YouTube hiding a comment local
+ * data calls approved — with the row terminal, nothing would reconcile it.
+ * Before a hold goes terminal, re-apply the decided state: 'approved' →
+ * publish, 'rejected' → reject, 'deleted' → delete. 'pending'/'held' still
+ * want the hold and 'restoring' is reconverged by the reconcile sweep
+ * replaying the recorded human intent, so neither needs a write here.
+ *
+ * Returns the comment ids safe to terminalize. A failed corrective write or
+ * a missing comment row keeps its action outstanding so the next sweep
+ * retries instead of recording a terminal state over diverged remote truth.
+ */
+const DECIDED_INTENT: Record<string, 'approve' | 'reject' | 'delete'> = {
+	approved: 'approve',
+	rejected: 'reject',
+	deleted: 'delete'
+};
+
+async function convergeHolds(
+	actions: OutstandingAction[],
+	accessToken: string,
+	deadline: number | undefined,
+	expected?: ChannelIdentity,
+	applied = false
+): Promise<Set<string>> {
+	const converged = new Set<string>();
+	if (!actions.length) return converged;
+	const rows = await db
+		.select({ id: comments.id, status: comments.status })
+		.from(comments)
+		.where(inArray(comments.id, actions.map((action) => action.commentId)))
+		.all();
+	const statusById = new Map(rows.map((row) => [row.id, row.status]));
+	for (const action of actions) {
+		const status = statusById.get(action.commentId);
+		// A row that was only ever 'pending' never reached YouTube — the
+		// deciding path already wrote remotely, so nothing needs re-applying.
+		const mayHaveLanded = applied || action.state !== 'pending';
+		const intent = status === undefined || !mayHaveLanded ? undefined : DECIDED_INTENT[status];
+		if (!intent) {
+			if (status !== undefined) converged.add(action.commentId);
+			continue;
+		}
+		try {
+			await assertChannelActive(action.channelId, db, expected);
+			await applyHumanIntent(action.commentId, intent, accessToken, deadline);
+			converged.add(action.commentId);
+		} catch (error) {
+			if (error instanceof DeadlineExceededError || error instanceof ChannelDeactivatedError) throw error;
+			// Loud per-item failure (I1): the row stays outstanding so a later
+			// sweep re-attempts the corrective write.
+			console.warn(`remote convergence failed for comment ${action.commentId} (status ${status})`, error);
+		}
+	}
+	return converged;
+}
+
 async function completeActions(actions: OutstandingAction[], expected?: ChannelIdentity) {
 	// Stryker disable next-line ConditionalExpression: equivalent — all callers pass a non-empty array (applied batches or individually missing comments)
 	if (!actions.length) return;
@@ -237,6 +296,10 @@ async function applyOneModerationAction(
 		await completeMissingAction(action, expected);
 		return false;
 	}
+	if (status === 'heldForReview') {
+		const converged = await convergeHolds([action], accessToken, deadline, expected, true);
+		if (!converged.has(action.commentId)) return true;
+	}
 	await completeActions([action], expected);
 	return true;
 }
@@ -260,7 +323,10 @@ async function applyModerationAction(
 		const { applicable, superseded } = status === 'heldForReview'
 			? await partitionHolds(batch)
 			: { applicable: batch, superseded: [] };
-		await markSuperseded(superseded, expected);
+		// A superseded hold may have been dispatched before a crash and already
+		// landed remotely — converge the decided state before terminalizing.
+		const releasable = await convergeHolds(superseded, accessToken, deadline, expected);
+		await markSuperseded(superseded.filter((action) => releasable.has(action.commentId)), expected);
 		if (!applicable.length) continue;
 		try {
 			await setModerationStatus(applicable.map((action) => action.commentId), status, banAuthor, accessToken, deadline);
@@ -275,7 +341,12 @@ async function applyModerationAction(
 			}
 			continue;
 		}
-		await completeActions(applicable, expected);
+		// The hold write resolved — but a human decision committed while it was
+		// in flight needs its state written last, or the late hold wins remotely.
+		const finished = status === 'heldForReview'
+			? await convergeHolds(applicable, accessToken, deadline, expected, true)
+			: new Set(applicable.map((action) => action.commentId));
+		await completeActions(applicable.filter((action) => finished.has(action.commentId)), expected);
 		acted += applicable.length;
 	}
 	return acted;
@@ -320,8 +391,22 @@ async function processOutstandingActions(channelId: string, accessToken: string,
 		))
 		.all()).map(outstandingAction);
 	const cancelling = actions.filter((action) => action.state === 'cancelling');
-	await transitionActions(cancelling, { state: 'superseded' }, expected, ['cancelling']);
-	for (const action of cancelling) {
+	// A cancelled hold may already be live on YouTube: converge the remote
+	// state before the row goes terminal, or a rescan-approved comment stays
+	// hidden forever with nothing reconciling it (codex). Reject/ban/delete
+	// remote states are terminal there — the warn below is all that exists.
+	const convergedHolds = await convergeHolds(
+		cancelling.filter((action) => action.action === 'hold'),
+		accessToken,
+		deadline,
+		expected
+	);
+	const releasable = cancelling.filter(
+		(action) => action.action !== 'hold' || convergedHolds.has(action.commentId)
+	);
+	await transitionActions(releasable, { state: 'superseded' }, expected, ['cancelling']);
+	for (const action of releasable) {
+		if (action.action === 'hold') continue;
 		console.warn(
 			`moderation action ${action.commentId} (${action.action}) was cancelled by a rescan after dispatch — YouTube may still reflect it; left unchanged until the user acts`
 		);
@@ -337,9 +422,10 @@ async function processOutstandingActions(channelId: string, accessToken: string,
 		}
 		if (action.state === 'pending') {
 			// Only actions this run claimed may be applied; an empty claim means a
-			// concurrent run owns the action, so skip it to avoid duplicate enforcement.
-			// Stryker disable next-line StringLiteral: equivalent — a ready entry's state field is never read again; applyYoutubeActions groups by action only
-			if (claimed.has(action.commentId)) ready.push({ ...action, state: 'dispatched' });
+			// concurrent run owns the action, so skip it to avoid duplicate
+			// enforcement. The in-memory 'pending' is kept: convergeHolds reads it
+			// to know the row never reached YouTube before this run.
+			if (claimed.has(action.commentId)) ready.push(action);
 		}
 	}
 	return applyYoutubeActions(ready, accessToken, deadline, expected);

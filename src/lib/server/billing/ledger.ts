@@ -404,22 +404,6 @@ export async function consumeCredit(handle: LedgerHandle, orgId: string, comment
 	return consumeOneCredit(handle, orgId, 'comment', commentId);
 }
 
-/**
- * Charges one credit for a feedback-digest classification, anchored on the
- * comment id under refType 'feedback' — the digest's charge is distinct
- * from moderation's 'comment' charge so a comment can pay for both without
- * the unique anchor colliding, and an overlap-safe digest re-run never
- * double-charges a comment it already classified.
- *
- * @param orgId - The organization whose credits are charged
- * @param commentId - The comment the digest classified
- * @returns `true` if this call charged, `false` if already charged or no credit was available
- * @throws Error if the organization does not exist
- */
-export async function consumeFeedbackCredit(handle: LedgerHandle, orgId: string, commentId: string): Promise<boolean> {
-	return consumeOneCredit(handle, orgId, 'feedback', commentId);
-}
-
 export interface GrantMatch {
 	orgId: string;
 	credits: number;

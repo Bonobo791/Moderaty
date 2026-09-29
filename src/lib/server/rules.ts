@@ -187,14 +187,17 @@ function assertShape(rule: RuleRow): void {
 	if (!rule.pattern) throw new Error(`rule #${rule.id} has an empty pattern`);
 }
 
-export function validateRule(rule: RuleRow): asserts rule is RuleRow & { type: (typeof RULE_TYPES)[number]; action: RuleAction } {
+/** A rule row whose type/action fields have been narrowed by validateRule. */
+export type ValidatedRule = RuleRow & { type: (typeof RULE_TYPES)[number]; action: RuleAction };
+
+export function validateRule(rule: RuleRow): asserts rule is ValidatedRule {
 	assertShape(rule);
 	if (rule.type === 'regex') regex(rule);
 }
 
 /** A validated rule with its regex (if any) compiled, ready for matching. */
 export interface PreparedRule {
-	rule: RuleRow & { type: (typeof RULE_TYPES)[number]; action: RuleAction };
+	rule: ValidatedRule;
 	compiled: RegExp | null;
 }
 

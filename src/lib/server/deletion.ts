@@ -144,8 +144,8 @@ export async function deleteChannelRecords(
  * @param now - The reference time in milliseconds since the Unix epoch
  * @returns The ISO timestamp 10 years before `now`
  */
-export function consentEmailCutoffIso(now = Date.now()): string {
-	return new Date(now - CONSENT_EMAIL_RETENTION_MS).toISOString();
+export function consentEmailCutoffIso(now?: number): string {
+	return new Date((now ?? Date.now()) - CONSENT_EMAIL_RETENTION_MS).toISOString();
 }
 
 /**
@@ -564,8 +564,8 @@ export async function nullExpiredConsentEmails(): Promise<number> {
  * @param now - The reference time in milliseconds since the Unix epoch
  * @returns The ISO timestamp 30 days before `now`
  */
-export function auditHandleCutoffIso(now = Date.now()): string {
-	return new Date(now - AUDIT_HANDLE_RETENTION_MS).toISOString();
+export function auditHandleCutoffIso(now?: number): string {
+	return new Date((now ?? Date.now()) - AUDIT_HANDLE_RETENTION_MS).toISOString();
 }
 
 /**
@@ -575,16 +575,16 @@ export function auditHandleCutoffIso(now = Date.now()): string {
  * (audit_log's INTEGER id, moderation_actions' TEXT commentId) so each
  * handle-bearing table is a thin wrapper calling this helper.
  */
-async function nullExpiredHandlesBatch<Id>(
+const nullExpiredHandlesBatch = async <Id>(
 	selectExpiredIds: (cutoffIso: string) => Promise<{ id: Id }[]>,
 	nullHandlesByIds: (ids: Id[]) => Promise<unknown>
-): Promise<number> {
+): Promise<number> => {
 	const expired = await selectExpiredIds(auditHandleCutoffIso());
 	// Stryker disable next-line ConditionalExpression: false equivalent — with zero expired rows the update runs inArray([]) (drizzle compiles to `false`, no rows updated) and expired.length is 0, so the skipped early return returns the same 0.
 	if (!expired.length) return 0;
 	await nullHandlesByIds(expired.map((row) => row.id));
 	return expired.length;
-}
+};
 
 /**
  * Erases stored commenter handles from audit rows older than the 30-day

@@ -44,7 +44,7 @@ export const db = new Proxy({} as LibSQLDatabase<typeof schema>, {
  * writers race — the loser retries after the winner commits instead of
  * surfacing a raw lock error.
  */
-export async function withBusyRetry<T>(work: () => Promise<T>, attempts = 3): Promise<T> {
+export const withBusyRetry = async <T>(work: () => Promise<T>, attempts = 3): Promise<T> => {
 	for (let attempt = 1; ; attempt++) {
 		try {
 			return await work();
@@ -54,4 +54,4 @@ export async function withBusyRetry<T>(work: () => Promise<T>, attempts = 3): Pr
 			await new Promise((resolve) => setTimeout(resolve, attempt * 25));
 		}
 	}
-}
+};

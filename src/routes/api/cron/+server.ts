@@ -64,7 +64,7 @@ function authorizeCron(url: URL, request: Request): void {
  * scheduled moderation: it is logged loudly, reported in the payload, and
  * skipped — the handler continues.
  */
-async function runSweep<T>(dryRun: boolean, label: string, run: () => Promise<T>): Promise<{ value: T | null; error: string | null }> {
+const runSweep = async <T>(dryRun: boolean, label: string, run: () => Promise<T>): Promise<{ value: T | null; error: string | null }> => {
 	if (dryRun) {
 		console.info(`dry run: ${label} skipped`);
 		return { value: null, error: null };
@@ -75,7 +75,7 @@ async function runSweep<T>(dryRun: boolean, label: string, run: () => Promise<T>
 		console.error('%s failed:', label, cause);
 		return { value: null, error: cause instanceof Error ? cause.message : String(cause) };
 	}
-}
+};
 
 /**
  * Maps a run failure to the sanitized category persisted on the channel. The

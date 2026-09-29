@@ -34,7 +34,7 @@ export type CostForecast = {
  * Forecasts from three monthly comment counts. A BLANK month (undefined) or
  * an invalid one yields null — never a forecast silently built on zeros.
  */
-export function forecastMonths(months: readonly (number | undefined)[]): CostForecast | null {
+export function forecastMonths(months: ReadonlyArray<number | undefined>): CostForecast | null {
 	if (months.some((month) => month === undefined)) return null;
 	const counts = months as number[];
 	if (!counts.every((count) => Number.isSafeInteger(count) && count >= 0 && count <= MAX_CALCULATOR_COMMENTS)) return null;

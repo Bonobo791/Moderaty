@@ -182,7 +182,7 @@ function themePassCanMatter(
  * - per_100: ≥100 stored comments still carry a NULL digest marker.
  * - weekly (default + unknown values, loudly): last evaluation ≥ 7 days ago.
  */
-export async function digestDue(channel: typeof channels.$inferSelect, now = Date.now()): Promise<boolean> {
+export async function digestDue(channel: typeof channels.$inferSelect, now?: number): Promise<boolean> {
 	if (channel.feedbackHistoryBoundary) return true;
 	const cadence = channel.feedbackCadence ?? 'weekly';
 	if (cadence === 'manual') return false;
@@ -200,7 +200,7 @@ export async function digestDue(channel: typeof channels.$inferSelect, now = Dat
 		console.error(`channel ${channel.id} has unknown feedback cadence "${cadence}" — treating as weekly`);
 	}
 	if (!channel.feedbackLastDigestAt) return true;
-	return Date.parse(channel.feedbackLastDigestAt) + WEEK_MS <= now;
+	return Date.parse(channel.feedbackLastDigestAt) + WEEK_MS <= (now ?? Date.now());
 }
 
 /**

@@ -10,10 +10,10 @@ function plural(n: number, unit: string): string {
 }
 
 /** Human "N units ago" rendering for ISO timestamps; falls back to the raw string if unparseable. */
-export function relativeTime(iso: string, now: Date = new Date()): string {
+export function relativeTime(iso: string, now?: Date): string {
 	const then = new Date(iso).getTime();
 	if (Number.isNaN(then)) return iso;
-	const diff = now.getTime() - then;
+	const diff = (now ?? new Date()).getTime() - then;
 	if (diff < MINUTE) return 'just now';
 	if (diff < HOUR) return plural(Math.floor(diff / MINUTE), 'minute');
 	if (diff < DAY) return plural(Math.floor(diff / HOUR), 'hour');

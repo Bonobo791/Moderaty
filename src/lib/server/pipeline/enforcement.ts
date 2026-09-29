@@ -22,6 +22,7 @@ export class ChannelDeactivatedError extends Error {}
  */
 export type ChannelIdentity = Pick<typeof channels.$inferSelect, 'userId' | 'refreshTokenEnc'>;
 type ChannelGuardHandle = Pick<typeof db, 'update'>;
+type OutstandingState = 'pending' | 'dispatched' | 'cancelling';
 
 /**
  * Atomically claims a short-lived channel write boundary. The no-op UPDATE is
@@ -69,7 +70,7 @@ function updateActionStates(
 	transaction: ChannelGuardHandle,
 	actions: OutstandingAction[],
 	set: { state: 'dispatched' | 'superseded' | 'completed'; lastAttemptAt?: string },
-	fromStates: ('pending' | 'dispatched' | 'cancelling')[] = ['pending', 'dispatched', 'cancelling']
+	fromStates: OutstandingState[] = ['pending', 'dispatched', 'cancelling']
 ) {
 	// Transitions only ever move outstanding rows: a terminal state must never
 	// be rewritten by a stale run (completed→superseded) nor claimed by a row a
@@ -93,7 +94,7 @@ async function transitionActions(
 	actions: OutstandingAction[],
 	set: { state: 'dispatched' | 'superseded'; lastAttemptAt?: string },
 	expected?: ChannelIdentity,
-	fromStates?: ('pending' | 'dispatched' | 'cancelling')[]
+	fromStates?: OutstandingState[]
 ) {
 	// Stryker disable next-line ConditionalExpression: equivalent — removing the guard makes an empty batch run a no-op update; observably identical (dispatch callers always pass ≥1, markSuperseded passes an empty partition)
 	if (!actions.length) return;

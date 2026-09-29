@@ -1,4 +1,5 @@
 import { redirect, error } from '@sveltejs/kit';
+import type { Cookies } from '@sveltejs/kit';
 
 import { eq } from 'drizzle-orm';
 
@@ -15,7 +16,7 @@ import { createSession, SESSION_COOKIE } from '$lib/server/session';
  * @param url - The callback URL containing the OAuth state and authorization code
  * @param cookies - The request cookies used to validate OAuth state and manage authentication data
  */
-export async function GET({ url, cookies }: { url: URL; cookies: import('@sveltejs/kit').Cookies }) {
+export async function GET({ url, cookies }: { url: URL; cookies: Cookies }) {
 	const state = url.searchParams.get('state');
 	const pending = readPendingStates(cookies);
 	if (!state || !pending.includes(state)) throw error(400, 'bad state');

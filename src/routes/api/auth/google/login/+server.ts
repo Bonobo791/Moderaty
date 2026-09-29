@@ -1,4 +1,5 @@
 import { error, redirect } from '@sveltejs/kit';
+import type { Cookies } from '@sveltejs/kit';
 
 import { randomBytes } from 'node:crypto';
 
@@ -8,7 +9,7 @@ import { readPendingStates, storePendingStates } from '$lib/server/oauthState';
 // Step 1 of sign-in: Google *identity* (who you are). YouTube access is a
 // separate consent at /api/auth/google so the sensitive scope is only
 // requested when the user actually connects a channel.
-export function GET({ cookies }: { cookies: import('@sveltejs/kit').Cookies }) {
+export function GET({ cookies }: { cookies: Cookies }) {
 	if (!env.GOOGLE_CLIENT_ID) throw error(500, 'GOOGLE_CLIENT_ID is not configured');
 	// Stryker disable next-line ConditionalExpression: equivalent — with APP_URL unset, storePendingStates below calls cookieSecure(), which throws the identical error(500, 'APP_URL is not configured') before the redirect URL is built
 	if (!env.APP_URL) throw error(500, 'APP_URL is not configured');

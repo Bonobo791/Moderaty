@@ -300,12 +300,12 @@ export async function clusterClaims(
  * The smaller per-category index set also makes exact member coverage
  * easier for the model to satisfy.
  */
-export async function clusterClassifiedClaims<T extends ClusterableClaim>(
+export const clusterClassifiedClaims = async <T extends ClusterableClaim>(
 	classified: T[],
 	categories: readonly string[],
 	deadline?: number,
 	apiKey?: string
-): Promise<T[]> {
+): Promise<T[]> => {
 	const enabled = new Set<string>(categories);
 	const feedbackIndexes = classified
 		.map((row, i) => (enabled.has(row.category) ? i : -1))
@@ -342,4 +342,4 @@ export async function clusterClassifiedClaims<T extends ClusterableClaim>(
 		// feedback rows are all in canonicalByIndex by construction.
 		return claim === undefined ? row : { ...row, claim };
 	});
-}
+};

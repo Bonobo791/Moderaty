@@ -28,13 +28,13 @@ export type LedgerHandle = Pick<typeof db, 'insert' | 'update' | 'select' | 'del
  * @param run - The mutation callback to execute
  * @returns The value produced by the mutation callback
  */
-async function inLedgerTx<T>(handle: LedgerHandle, run: (tx: LedgerHandle) => Promise<T>): Promise<T> {
+const inLedgerTx = async <T>(handle: LedgerHandle, run: (tx: LedgerHandle) => Promise<T>): Promise<T> => {
 	const withTx = (handle as { transaction?: (cb: (tx: LedgerHandle) => Promise<T>) => Promise<T> }).transaction;
 	// .call(handle): drizzle's transaction() reads this.session — an unbound
 	// method reference would crash on `this`.
 	if (withTx) return withTx.call(handle, (tx) => run(tx as LedgerHandle));
 	return run(handle);
-}
+};
 
 export interface LedgerDelta {
 	orgId: string;

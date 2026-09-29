@@ -1034,7 +1034,7 @@ async function handleCustomerUpdated(customer: Stripe.Customer, eventCreated: nu
 				? // No card change, but the cursor must still advance — otherwise a
 					// stale snapshot arriving later could resurrect the previous card.
 					{ stripeCustomerLastEventCreated: eventCreated, stripeCustomerLastEventId: eventId }
-				: {
+				: ({
 						stripeDefaultPmId: pmId,
 						stripeCustomerLastEventCreated: eventCreated,
 						stripeCustomerLastEventId: eventId,
@@ -1045,7 +1045,7 @@ async function handleCustomerUpdated(customer: Stripe.Customer, eventCreated: nu
 						// failure-paused 'disabled').
 						autoTopupEnabled: sql`CASE WHEN ${organizations.autoTopupEnabled} = 1 THEN 0 ELSE ${organizations.autoTopupEnabled} END`,
 						autoTopupState: sql`CASE WHEN ${organizations.autoTopupEnabled} = 1 THEN 'disabled' ELSE ${organizations.autoTopupState} END`
-					};
+					});
 		const res = await db.update(organizations).set(set).where(and(eq(organizations.id, org.id), cursorAppliable));
 		return res.rowsAffected > 0;
 	};

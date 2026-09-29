@@ -61,7 +61,7 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 };
 
 /** Wraps org.ts errors as form failures so the page shows .error-box (I12). */
-async function guard<T>(fn: () => Promise<T>): Promise<T | ActionFailure<{ error: string }>> {
+const guard = async <T>(fn: () => Promise<T>): Promise<T | ActionFailure<{ error: string }>> => {
 	try {
 		return await fn();
 	} catch (e) {
@@ -71,7 +71,7 @@ async function guard<T>(fn: () => Promise<T>): Promise<T | ActionFailure<{ error
 		if (typeof status === 'number' && message) return fail(status, { error: message });
 		throw e;
 	}
-}
+};
 
 export const actions: Actions = {
 	rename: async ({ request, locals }) => {

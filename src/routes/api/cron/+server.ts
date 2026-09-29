@@ -162,20 +162,14 @@ async function runClaimedChannel(
 	return { result, dryRunWindow, digest };
 }
 
-export const GET: RequestHandler = async ({ url, request }) => {
-	// Captured at handler start so the DB prelude consumes the same budget.
-	const startedAt = Date.now();
-	const deadline = startedAt + RUN_BUDGET_MS;
-	authorizeCron(url, request);
-	// Validate BEFORE any sweep or claim: an invalid value must fail loudly
-	// at the entry, not silently run the sweeps live (runChannel re-checks,
-	// but by then retention writes would already have landed).
-	if (env.DRY_RUN !== 'true' && env.DRY_RUN !== 'false') {
-		throw error(500, 'DRY_RUN must be true or false');
-	}
-	const dryRun = env.DRY_RUN === 'true';
-	console.info(`cron: tick start (dryRun=${dryRun})`);
+const orZero = (value: number | null | undefined): number => value ?? 0;
 
+/**
+ * The six maintenance sweeps that share the tick's budget, each isolated by
+ * runSweep so one failure never stops the rest. Returns the `base` payload
+ * the response builds on.
+ */
+const runCronSweeps = async (dryRun: boolean, deadline: number, startedAt: number) => {
 	// Consent-evidence retention sweep runs first, while the full budget
 	// remains: consent e-mails older than 10 years (CC Art. 205) are erased —
 	// the row stays as anonymized evidence.
@@ -184,7 +178,6 @@ export const GET: RequestHandler = async ({ url, request }) => {
 	// moderation actions older than 30 days are erased (the row and its
 	// outcome stay as the moderation record).
 	const handles = await runSweep(dryRun, 'commenter-handle retention sweep', () => nullExpiredHandles());
-	const nowIso = new Date().toISOString();
 	// Auto top-up sweep: the backstop for orgs whose balance dropped below
 	// their threshold without an on-consume trigger. Bounded per invocation
 	// (I10); under DRY_RUN nothing is charged.
@@ -209,71 +202,42 @@ export const GET: RequestHandler = async ({ url, request }) => {
 	const base = {
 		ok: !consent.error && !handles.error && !autoTopup.error && !stripeDeletions.error && !reversals.error && !zeroCredit.error && !zeroCredit.value?.errors,
 		dryRun,
-		consentEmailsNulled: consent.value ?? 0,
+		consentEmailsNulled: orZero(consent.value),
 		sweepError: consent.error,
-		auditHandlesNulled: handles.value?.auditLog ?? 0,
-		actionHandlesNulled: handles.value?.moderationActions ?? 0,
+		auditHandlesNulled: orZero(handles.value?.auditLog),
+		actionHandlesNulled: orZero(handles.value?.moderationActions),
 		handleSweepError: handles.error,
-		autoTopupsTriggered: autoTopup.value ?? 0,
+		autoTopupsTriggered: orZero(autoTopup.value),
 		autoTopupSweepError: autoTopup.error,
-		stripeCustomersDeleted: stripeDeletions.value ?? 0,
+		stripeCustomersDeleted: orZero(stripeDeletions.value),
 		stripeDeletionSweepError: stripeDeletions.error,
-		pendingReversalsDropped: reversals.value ?? 0,
+		pendingReversalsDropped: orZero(reversals.value),
 		pendingReversalSweepError: reversals.error,
-		zeroCreditAccountsChecked: zeroCredit.value?.evaluated ?? 0,
-		zeroCreditWarningsSent: zeroCredit.value?.warned ?? 0,
-		zeroCreditAccountsDeleted: zeroCredit.value?.deleted ?? 0,
-		zeroCreditItemErrors: zeroCredit.value?.errors ?? 0,
+		zeroCreditAccountsChecked: orZero(zeroCredit.value?.evaluated),
+		zeroCreditWarningsSent: orZero(zeroCredit.value?.warned),
+		zeroCreditAccountsDeleted: orZero(zeroCredit.value?.deleted),
+		zeroCreditItemErrors: orZero(zeroCredit.value?.errors),
 		zeroCreditSweepError: zeroCredit.error
 	};
+	console.info(`cron: sweeps finished in ${Date.now() - startedAt}ms`);
+	return base;
+};
 
-	// The sweeps above consumed the budget; a channel run would abort
-	// immediately on the expired deadline — report the sweeps, skip the claim.
-	const sweepsFinishedAt = Date.now();
-	const elapsedMs = sweepsFinishedAt - startedAt;
-	console.info(`cron: sweeps finished in ${elapsedMs}ms`);
-	if (sweepsFinishedAt >= deadline) {
-		console.error(
-			`cron: sweeps consumed the ${RUN_BUDGET_MS}ms run budget (${elapsedMs}ms) — no channel claimed this tick`
-		);
-		return json({ ...base, budgetExhausted: true, results: {} });
-	}
-	const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, nowIso));
-	const [channel] = await db
-		.select()
-		.from(channels)
-		.where(and(eq(channels.active, 1), claimable))
-		// Channels with a dry-run drain in flight first — a preview the user is
-		// actively waiting on must not starve behind the ordinary rotation.
-		// History jobs get no such priority: a multi-page or stuck history
-		// drain must never outrank least-recently-run moderation (codex+cubic).
-		.orderBy(desc(sql`${channels.dryRunBoundary} is not null`), asc(channels.lastRunAt))
-		.limit(1);
-	if (!channel) {
-		console.info('cron: no active, unleased channel to run');
-		return json({ ...base, results: {} });
-	}
+type RunCategory = 'token' | 'quota' | 'scoring' | 'timeout' | 'credits' | 'error';
 
-	// Atomic claim: a concurrent claimant's UPDATE matches 0 rows and exits cleanly.
-	const claimed = await db
-		.update(channels)
-		.set({ leaseExpiresAt: new Date(Date.now() + LEASE_MS).toISOString() })
-		.where(and(eq(channels.id, channel.id), claimable))
-		.returning({ id: channels.id });
-	if (claimed.length === 0) {
-		console.info(`cron: lost claim race for channel ${channel.id}`);
-		return json({ ...base, claimed: false, results: {} });
-	}
-	console.info(
-		`cron: claimed channel ${channel.id} (lastRunAt=${channel.lastRunAt ?? 'never'}, cursor=${channel.cursor ?? 'none'}, resumingPage=${channel.nextPageToken !== null}, dryRunDrain=${channel.dryRunBoundary !== null})`
-	);
-
-	// The run's health verdict: a completed live run is 'success', a thrown or
-	// incomplete one carries its sanitized category, and a run with no verdict
-	// (dry run, paused mid-run, skipped as inactive) writes neither — stamping
-	// success would lie, stamping failed/timeout would lie on resume
-	// (codex+cubic).
-	type RunCategory = 'token' | 'quota' | 'scoring' | 'timeout' | 'credits' | 'error';
+/**
+ * Runs the claimed channel and writes its bookkeeping row. The run's health
+ * verdict: a completed live run is 'success', a thrown or incomplete one
+ * carries its sanitized category, and a run with no verdict (dry run, paused
+ * mid-run, skipped as inactive) writes neither — stamping success would lie,
+ * stamping failed/timeout would lie on resume (codex+cubic).
+ */
+const runAndRecord = async (
+	channel: typeof channels.$inferSelect,
+	deadline: number,
+	base: Record<string, unknown>,
+	nowIso: string
+): Promise<{ body: Record<string, unknown>; status: number }> => {
 	let runHealth: 'success' | 'none' | { status: 'failed'; error: RunCategory } = 'success';
 	let body: Record<string, unknown>;
 	let status = 200;
@@ -332,5 +296,64 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		console.error('run-health write failed for channel:', channel.id, writeCause);
 		body = { ...body, bookkeepingError: true };
 	}
+	return { body, status };
+};
+
+export const GET: RequestHandler = async ({ url, request }) => {
+	// Captured at handler start so the DB prelude consumes the same budget.
+	const startedAt = Date.now();
+	const deadline = startedAt + RUN_BUDGET_MS;
+	authorizeCron(url, request);
+	// Validate BEFORE any sweep or claim: an invalid value must fail loudly
+	// at the entry, not silently run the sweeps live (runChannel re-checks,
+	// but by then retention writes would already have landed).
+	if (env.DRY_RUN !== 'true' && env.DRY_RUN !== 'false') {
+		throw error(500, 'DRY_RUN must be true or false');
+	}
+	const dryRun = env.DRY_RUN === 'true';
+	console.info(`cron: tick start (dryRun=${dryRun})`);
+	const base = await runCronSweeps(dryRun, deadline, startedAt);
+	const nowIso = new Date().toISOString();
+
+	// The sweeps above consumed the budget; a channel run would abort
+	// immediately on the expired deadline — report the sweeps, skip the claim.
+	if (Date.now() >= deadline) {
+		const elapsedMs = Date.now() - startedAt;
+		console.error(
+			`cron: sweeps consumed the ${RUN_BUDGET_MS}ms run budget (${elapsedMs}ms) — no channel claimed this tick`
+		);
+		return json({ ...base, budgetExhausted: true, results: {} });
+	}
+	const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, nowIso));
+	const [channel] = await db
+		.select()
+		.from(channels)
+		.where(and(eq(channels.active, 1), claimable))
+		// Channels with a dry-run drain in flight first — a preview the user is
+		// actively waiting on must not starve behind the ordinary rotation.
+		// History jobs get no such priority: a multi-page or stuck history
+		// drain must never outrank least-recently-run moderation (codex+cubic).
+		.orderBy(desc(sql`${channels.dryRunBoundary} is not null`), asc(channels.lastRunAt))
+		.limit(1);
+	if (!channel) {
+		console.info('cron: no active, unleased channel to run');
+		return json({ ...base, results: {} });
+	}
+
+	// Atomic claim: a concurrent claimant's UPDATE matches 0 rows and exits cleanly.
+	const claimed = await db
+		.update(channels)
+		.set({ leaseExpiresAt: new Date(Date.now() + LEASE_MS).toISOString() })
+		.where(and(eq(channels.id, channel.id), claimable))
+		.returning({ id: channels.id });
+	if (claimed.length === 0) {
+		console.info(`cron: lost claim race for channel ${channel.id}`);
+		return json({ ...base, claimed: false, results: {} });
+	}
+	console.info(
+		`cron: claimed channel ${channel.id} (lastRunAt=${channel.lastRunAt ?? 'never'}, cursor=${channel.cursor ?? 'none'}, resumingPage=${channel.nextPageToken !== null}, dryRunDrain=${channel.dryRunBoundary !== null})`
+	);
+
+	const { body, status } = await runAndRecord(channel, deadline, base, nowIso);
 	return json(body, { status });
 };

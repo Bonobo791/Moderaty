@@ -229,7 +229,10 @@ export async function applyLedgerDelta(
 			// only math that restores correctly.
 			.set({
 				creditsRemaining:
-					delta < 0 && reason === 'refund'
+					// `0 > delta` reads backwards on purpose: Codacy's lizard parser
+					// treats `delta <` as a generic-arguments opener and desyncs the
+					// file's brace accounting (this callback then "spans" to EOF).
+					0 > delta && reason === 'refund'
 						? sql`MAX(0, COALESCE(${organizations.creditsRemaining}, 0) + ${delta})`
 						: sql`COALESCE(${organizations.creditsRemaining}, 0) + ${delta}`
 			})
@@ -375,7 +378,9 @@ async function insertConsumeRows(
 		refType,
 		refId,
 		balanceAfter:
-			index < periodFunded
+			// `periodFunded > index`, not `index < periodFunded`: lizard (Codacy)
+			// misparses `identifier <` as a generic-arguments open.
+			periodFunded > index
 				? startingBalance
 				: (startingBalance ?? 0) - (index - periodFunded + 1)
 	}));

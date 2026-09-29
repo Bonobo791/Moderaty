@@ -116,6 +116,23 @@ describe('dev cron tick', () => {
 		await expect(tickOnce()).rejects.toThrow('sweepError: retention sweep blew up');
 	});
 
+	it('does not suppress a zero-credit sweep failure behind owner-actionable channel errors', async () => {
+		// A 500 whose channel errors are all owner-actionable is normally
+		// silenced — but a failed retention sweep rides the same payload and
+		// must still trip the operator alert.
+		const payload = { ok: false, results: { UC1: { error: 'token' } }, zeroCreditSweepError: 'sweep blew up' };
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, 500)));
+
+		await expect(tickOnce()).rejects.toThrow('zeroCreditSweepError');
+	});
+
+	it('names the zero-credit sweep failure on a 200 instead of the generic ok:false', async () => {
+		const payload = { ok: false, zeroCreditSweepError: 'db down', results: {} };
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
+
+		await expect(tickOnce()).rejects.toThrow('zeroCreditSweepError: db down');
+	});
+
 	it('fails the tick when sweeps consumed the whole run budget', async () => {
 		const payload = { ok: true, budgetExhausted: true, results: {} };
 		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));

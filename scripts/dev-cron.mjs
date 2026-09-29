@@ -49,7 +49,8 @@ const SWEEP_ERROR_FIELDS = [
 	'handleSweepError',
 	'autoTopupSweepError',
 	'stripeDeletionSweepError',
-	'pendingReversalSweepError'
+	'pendingReversalSweepError',
+	'zeroCreditSweepError'
 ];
 
 /** Renders a parsed payload or raw body for logs without letting response newlines forge log lines. */

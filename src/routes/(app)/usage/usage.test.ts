@@ -521,7 +521,7 @@ describe('usage buy action', () => {
 	test('a second purchase reuses the saved customer', async () => {
 		await seedOrg({ stripeCustomerId: 'cus_existing' });
 
-		await expect(buy('credits_100')).rejects.toMatchObject({ status: 303 });
+		await expect(buy('credits_500')).rejects.toMatchObject({ status: 303 });
 
 		expect(mocks.customersCreate).not.toHaveBeenCalled();
 		expect(mocks.sessionsCreate.mock.calls[0][0].customer).toBe('cus_existing');
@@ -548,7 +548,7 @@ describe('usage buy action', () => {
 		await seedOrg();
 		const member = { ...OWNER, orgRole: 'member' as const };
 
-		await expect(buy('credits_100', member)).rejects.toMatchObject({ status: 403 });
+		await expect(buy('credits_500', member)).rejects.toMatchObject({ status: 403 });
 		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
 	});
 
@@ -617,7 +617,7 @@ describe('usage buy action', () => {
 		// is a KNOWN domain rejection, so the response carries the real reason
 		// (400), not the generic defect message.
 		await seedOrg({ plan: 'lifetime' });
-		const result = await buy('credits_100');
+		const result = await buy('credits_500');
 		expect(result).toMatchObject({ status: 400 });
 		expect(JSON.stringify(result)).toContain('unlimited moderated comments');
 		expect(mocks.sessionsCreate).not.toHaveBeenCalled();

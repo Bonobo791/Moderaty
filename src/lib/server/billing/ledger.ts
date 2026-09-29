@@ -409,12 +409,14 @@ export async function consumeCreditsBulk(
 			.where(eq(organizations.id, orgId))
 			.get();
 		if (!org) throw new Error(`org not found: ${orgId}`);
-		// Unmetered plans (lifetime) never consume: their scoring is already
-		// unlimited, so a stranded pre-upgrade balance must not burn 1-per-
-		// comment for nothing — it freezes until the org is metered again
-		// (MOD-36). Reported as uncharged like an exhausted balance; staging
-		// only treats that as fatal for METERED orgs.
-		if (isUnmeteredPlan(org.plan)) return { charged: [], covered: [], uncharged: uniqueRefIds, metered: false };
+		// Unmetered orgs (lifetime plans, and pre-billing orgs with no hosted
+		// entitlement or granted balance) never consume: their scoring is
+		// already unlimited, so a stranded balance must not burn 1-per-comment
+		// for nothing — it freezes until the org is metered again (MOD-36).
+		// Reported as uncharged like an exhausted balance; staging only
+		// treats that as fatal for METERED orgs. The predicate is the shared
+		// orgRowIsMetered so this classification matches orgIsMetered exactly.
+		if (!orgRowIsMetered(org)) return { charged: [], covered: [], uncharged: uniqueRefIds, metered: false };
 
 		const anchoredRefIds = await listAnchoredRefIds(tx, orgId, refType, uniqueRefIds);
 		const covered = uniqueRefIds.filter((refId) => anchoredRefIds.has(refId));

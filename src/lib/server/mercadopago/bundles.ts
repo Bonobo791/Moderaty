@@ -34,6 +34,7 @@ export function mercadoPagoBundleById(id: string): MercadoPagoBundle {
 
 export function configuredMercadoPagoBundles(): MercadoPagoBundle[] {
 	return CREDIT_BUNDLES.flatMap((bundle) => {
+		if (bundle.hiddenFromPurchase) return [];
 		const priceEnv = PRICE_ENV_BY_BUNDLE[bundle.id];
 		if (!priceEnv) {
 			console.error(`mercadopago: no price env mapping for bundle ${bundle.id} — excluded from the catalog`);

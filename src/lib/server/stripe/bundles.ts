@@ -19,10 +19,16 @@ export interface CreditBundle {
 	discountPercent?: number;
 	/** Env var holding the Stripe Price id for this bundle. */
 	priceEnv: string;
+	/**
+	 * When true the bundle stays in the catalog — auto top-up still charges
+	 * it and `bundleById` still resolves it for idempotent grants — but it is
+	 * not offered as a manual one-time purchase on the usage page.
+	 */
+	hiddenFromPurchase?: boolean;
 }
 
 export const CREDIT_BUNDLES: CreditBundle[] = [
-	{ id: 'credits_100', credits: 100, label: '100 comments', discountPercent: bundleDiscountPercent(100), priceEnv: 'STRIPE_PRICE_CREDITS_100' },
+	{ id: 'credits_100', credits: 100, label: '100 comments', discountPercent: bundleDiscountPercent(100), priceEnv: 'STRIPE_PRICE_CREDITS_100', hiddenFromPurchase: true },
 	{ id: 'credits_500', credits: 500, label: '500 comments', discountPercent: bundleDiscountPercent(500), priceEnv: 'STRIPE_PRICE_CREDITS_500' },
 	{ id: 'credits_2000', credits: 2000, label: '2,000 comments', discountPercent: bundleDiscountPercent(2000), priceEnv: 'STRIPE_PRICE_CREDITS_2000' }
 ];
@@ -71,10 +77,12 @@ export function priceIdFor(bundle: CreditBundle): string {
 }
 
 /**
- * Lists credit bundles with configured Stripe Price IDs.
+ * Lists credit bundles offered for manual one-time purchase on the usage
+ * page — those with configured Stripe Price IDs that are not
+ * hiddenFromPurchase.
  *
  * @returns The bundles whose Stripe Price environment variables are set
  */
 export function configuredBundles(): CreditBundle[] {
-	return CREDIT_BUNDLES.filter((bundle) => env[bundle.priceEnv]);
+	return CREDIT_BUNDLES.filter((bundle) => env[bundle.priceEnv] && !bundle.hiddenFromPurchase);
 }

@@ -54,8 +54,9 @@ test('uses a provider-prefixed ledger reference and rejects unsafe payment ids',
 });
 
 test('lists only configured BRL bundles with whole-cent prices', () => {
+	// credits_100 is configured but hiddenFromPurchase — the Mercado Pago
+	// grid is a one-time purchase surface, so it is excluded too.
 	expect(configuredMercadoPagoBundles().map((bundle) => [bundle.id, bundle.amountCents])).toEqual([
-		['credits_100', 500],
 		['credits_500', 1900],
 		['credits_2000', 5900]
 	]);
@@ -401,7 +402,6 @@ test('a bundle with a malformed configured price is logged loudly and skipped, n
 	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 	try {
 		expect(configuredMercadoPagoBundles().map((bundle) => [bundle.id, bundle.amountCents])).toEqual([
-			['credits_100', 500],
 			['credits_2000', 5900]
 		]);
 		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('credits_500'), expect.anything());

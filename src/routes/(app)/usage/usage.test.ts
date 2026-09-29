@@ -157,7 +157,10 @@ describe('usage load', () => {
 		};
 
 		expect(data.summary).toMatchObject({ remaining: 619, usedLifetime: 1, usedThisMonth: 1 });
-		expect(data.bundles.map((bundle) => bundle.id)).toEqual(['credits_100', 'credits_500', 'credits_2000']);
+		// credits_100 is configured (STRIPE_PRICE_CREDITS_100 is set) but
+		// hiddenFromPurchase — auto top-up still charges it, the usage page
+		// no longer offers it as a one-time purchase.
+		expect(data.bundles.map((bundle) => bundle.id)).toEqual(['credits_500', 'credits_2000']);
 		expect(data.autoTopup).toMatchObject({ enabled: true, threshold: 100, state: 'idle', hasCard: true });
 		expect(data.history).toHaveLength(2);
 		// The history contract: every row carries the full record — id, delta,
@@ -290,7 +293,7 @@ describe('usage load', () => {
 		const body = render(Page, {
 			props: { data: { ...usagePageData(), bundles: configuredBundles() }, form: null } as never
 		}).body;
-		expect(body).toMatch(/Buy 100 comments[\s\S]*?<\/button>/);
+		expect(body).not.toContain('Buy 100 comments');
 		expect(body).toMatch(/Buy 500 comments[\s\S]*?· 18% off[\s\S]*?<\/button>/);
 		expect(body).toMatch(/Buy 2,000 comments[\s\S]*?· 35% off[\s\S]*?<\/button>/);
 	});

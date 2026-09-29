@@ -253,7 +253,7 @@ describe('consumeCreditsBulk', () => {
 
 		const first = await consumeCreditsBulk(db, 'org-1', 'comment', refIds);
 
-		expect(first).toEqual({ charged: refIds, covered: [], uncharged: [] });
+		expect(first).toEqual({ charged: refIds, covered: [], uncharged: [], metered: true });
 		const period = await testDb().db.select().from(stripeSubscriptionPeriods).get();
 		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
 		const rows = await testDb().db.select().from(creditTransactions).orderBy(asc(creditTransactions.id)).all();
@@ -263,7 +263,7 @@ describe('consumeCreditsBulk', () => {
 
 		const retry = await consumeCreditsBulk(db, 'org-1', 'comment', refIds);
 
-		expect(retry).toEqual({ charged: [], covered: refIds, uncharged: [] });
+		expect(retry).toEqual({ charged: [], covered: refIds, uncharged: [], metered: true });
 		expect((await testDb().db.select().from(stripeSubscriptionPeriods).get())?.consumedCredits).toBe(2);
 		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBe(4);
 		expect(await testDb().db.select().from(creditTransactions)).toHaveLength(3);
@@ -276,7 +276,7 @@ describe('consumeCreditsBulk', () => {
 
 		const result = await consumeCreditsBulk(db, 'org-1', 'feedback', refIds);
 
-		expect(result).toEqual({ charged: ['a', 'b', 'c'], covered: [], uncharged: ['d'] });
+		expect(result).toEqual({ charged: ['a', 'b', 'c'], covered: [], uncharged: ['d'], metered: true });
 		expect((await testDb().db.select().from(stripeSubscriptionPeriods).get())?.consumedCredits).toBe(3);
 		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBe(0);
 		expect(await testDb().db.select().from(creditTransactions)).toHaveLength(3);
@@ -287,7 +287,7 @@ describe('consumeCreditsBulk', () => {
 
 		const result = await consumeCreditsBulk(db, 'org-1', 'comment', ['first', 'second', 'first', 'third', 'second']);
 
-		expect(result).toEqual({ charged: ['first', 'second', 'third'], covered: [], uncharged: [] });
+		expect(result).toEqual({ charged: ['first', 'second', 'third'], covered: [], uncharged: [], metered: true });
 		expect((await testDb().db.select().from(creditTransactions).orderBy(asc(creditTransactions.id)).all()).map((row) => row.refId)).toEqual([
 			'first', 'second', 'third'
 		]);
@@ -300,7 +300,7 @@ describe('consumeCreditsBulk', () => {
 
 		const result = await consumeCreditsBulk(db, 'org-1', 'comment', refIds);
 
-		expect(result).toEqual({ charged: [], covered: [], uncharged: refIds });
+		expect(result).toEqual({ charged: [], covered: [], uncharged: refIds, metered: false });
 		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBe(500);
 		expect(await testDb().db.select().from(creditTransactions)).toHaveLength(0);
 	});

@@ -1,6 +1,6 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { normalizeHandle } from '$lib/server/allowlist';
-import { commentChargeRef, consumeCreditsBulk, orgIsMetered, type LedgerHandle } from '$lib/server/billing/ledger';
+import { commentChargeRef, consumeCreditsBulk, type LedgerHandle } from '$lib/server/billing/ledger';
 import { db } from '$lib/server/db';
 import { auditLog, comments, moderationActions } from '$lib/server/db/schema';
 import { assertChannelActive, type ChannelIdentity } from './enforcement';
@@ -212,10 +212,6 @@ async function chargeBillableDecisions(
 	if (!orgId) return;
 	const billable = decisions.filter((decision) => decision.billable);
 	if (!billable.length) return;
-	// Unmetered orgs (self-hosted, lifetime, pre-billing) are unlimited:
-	// only a metered org's uncharged refs indicate a balance exhausted
-	// concurrently with this run's AI budget read.
-	const metered = await orgIsMetered(orgId);
 	// A rescan charges again per comment: the anchor is scoped to the scan id
 	// planted for THIS request, so each requested scan debits once while a
 	// retry of the SAME scan hits the anchor and stages covered instead of
@@ -223,7 +219,13 @@ async function chargeBillableDecisions(
 	// pages charged the plain comment id, so the anchor stays plain or the
 	// retry double-charges (codex).
 	const refIds = billable.map((decision) => commentChargeRef(decision.comment.id, chargeScope));
-	const { uncharged } = await consumeCreditsBulk(transaction, orgId, 'comment', refIds);
+	// `metered` comes back read inside the charge transaction — a separate
+	// orgIsMetered read could disagree with the charge under a concurrent
+	// billing change (unmetered→metered stages free; metered→unmetered aborts
+	// an unlimited run). Unmetered orgs (self-hosted, lifetime, pre-billing)
+	// are unlimited: only a metered org's uncharged refs indicate a balance
+	// exhausted concurrently with this run's AI budget read (codeant).
+	const { uncharged, metered } = await consumeCreditsBulk(transaction, orgId, 'comment', refIds);
 	if (metered && uncharged.length) {
 		const failedIndex = refIds.indexOf(uncharged[0]);
 		const failedDecision = billable[failedIndex];

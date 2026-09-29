@@ -392,7 +392,11 @@ export async function consumeCreditsBulk(
 	orgId: string,
 	refType: 'comment' | 'feedback',
 	refIds: string[]
-): Promise<{ charged: string[]; covered: string[]; uncharged: string[] }> {
+	// `metered` reports the org's plan state read in THIS transaction — callers
+	// deciding whether an `uncharged` shortfall aborts must use it, not a
+	// second out-of-tx read that can disagree under a concurrent billing
+	// change (codeant). Absent when no charge was attempted (empty refIds).
+): Promise<{ charged: string[]; covered: string[]; uncharged: string[]; metered?: boolean }> {
 	const uniqueRefIds = [...new Set(refIds)];
 	if (!uniqueRefIds.length) return { charged: [], covered: [], uncharged: [] };
 
@@ -410,12 +414,12 @@ export async function consumeCreditsBulk(
 		// comment for nothing — it freezes until the org is metered again
 		// (MOD-36). Reported as uncharged like an exhausted balance; staging
 		// only treats that as fatal for METERED orgs.
-		if (isUnmeteredPlan(org.plan)) return { charged: [], covered: [], uncharged: uniqueRefIds };
+		if (isUnmeteredPlan(org.plan)) return { charged: [], covered: [], uncharged: uniqueRefIds, metered: false };
 
 		const anchoredRefIds = await listAnchoredRefIds(tx, orgId, refType, uniqueRefIds);
 		const covered = uniqueRefIds.filter((refId) => anchoredRefIds.has(refId));
 		const toCharge = uniqueRefIds.filter((refId) => !anchoredRefIds.has(refId));
-		if (!toCharge.length) return { charged: [], covered, uncharged: [] };
+		if (!toCharge.length) return { charged: [], covered, uncharged: [], metered: true };
 
 		// Subscription allowance funds first — the org already paid for those
 		// included comments; the purchased balance covers the remainder.
@@ -425,7 +429,7 @@ export async function consumeCreditsBulk(
 		const purchasedFunded = await consumePurchasedBalance(tx, orgId, org.creditsRemaining, toCharge.length - periodFunded);
 		const charged = toCharge.slice(0, periodFunded + purchasedFunded);
 		await insertConsumeRows(tx, orgId, refType, charged, periodFunded, org.creditsRemaining);
-		return { charged, covered, uncharged: toCharge.slice(charged.length) };
+		return { charged, covered, uncharged: toCharge.slice(charged.length), metered: true };
 	});
 }
 

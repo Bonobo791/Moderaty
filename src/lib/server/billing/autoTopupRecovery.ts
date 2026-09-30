@@ -1,4 +1,4 @@
-import { and, asc, eq, gte, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, isNull, lte, ne, or, sql } from 'drizzle-orm';
 import type { AnySQLiteColumn } from 'drizzle-orm/sqlite-core';
 import type Stripe from 'stripe';
 
@@ -89,7 +89,7 @@ async function cancelOrRefund(row: Recovery, pi: TopupPayment): Promise<boolean>
 	if (pi.status !== 'succeeded') {
 		if (!['requires_payment_method', 'requires_capture', 'requires_confirmation', 'requires_action', 'processing'].includes(pi.status ?? '')) throw new InvalidTopupPayment('Canceled auto top-up has an invalid payment status');
 		const canceled = await getStripe().paymentIntents.cancel(pi.id, { cancellation_reason: 'requested_by_customer' });
-		if (canceled.status !== 'canceled') throw new Error('Auto top-up cancellation did not complete');
+		if (canceled.id !== pi.id || canceled.status !== 'canceled') throw new Error('Auto top-up cancellation did not complete');
 		return true;
 	}
 	const existing = await existingRefundOutcome(pi.id);
@@ -110,7 +110,8 @@ export async function recoverPausedTopup(row: Recovery, pi: TopupPayment): Promi
 	if (!current) throw new Error('Canceled auto top-up recovery was not found');
 	if (current.paymentIntentId && current.paymentIntentId !== pi.id) throw new Error('Canceled auto top-up has a different payment intent');
 	if (current.resolvedAt) return true;
-	const bound = await db.update(stripeAutoTopupRecoveries).set({ paymentIntentId: pi.id, paymentLookupCursor: null, lastCheckedAt: new Date().toISOString() }).where(and(predicate, or(isNull(stripeAutoTopupRecoveries.paymentIntentId), eq(stripeAutoTopupRecoveries.paymentIntentId, pi.id)))).returning({ id: stripeAutoTopupRecoveries.id });
+	if (current.lastError === 'ambiguous_payment') throw new Error('Canceled auto top-up matches multiple payments — manual reconciliation required');
+	const bound = await db.update(stripeAutoTopupRecoveries).set({ paymentIntentId: pi.id, paymentLookupCursor: null, lookupCandidateId: null, lastCheckedAt: new Date().toISOString() }).where(and(predicate, isNull(stripeAutoTopupRecoveries.resolvedAt), or(isNull(stripeAutoTopupRecoveries.lastError), ne(stripeAutoTopupRecoveries.lastError, 'ambiguous_payment')), or(isNull(stripeAutoTopupRecoveries.paymentIntentId), eq(stripeAutoTopupRecoveries.paymentIntentId, pi.id)))).returning({ id: stripeAutoTopupRecoveries.id });
 	if (!bound.length) throw new Error('Canceled auto top-up was bound to another payment');
 	try {
 		const resolved = await cancelOrRefund(current, pi);
@@ -124,46 +125,51 @@ export async function recoverPausedTopup(row: Recovery, pi: TopupPayment): Promi
 	}
 }
 
-/** Validate and correlate one list item before any remote mutation. */
-async function recoverCandidate(row: Recovery, pi: TopupPayment | null): Promise<boolean> {
-	if (!pi || typeof pi.id !== 'string' || !pi.id || !['succeeded', 'canceled', 'requires_payment_method', 'requires_capture', 'requires_confirmation', 'requires_action', 'processing'].includes(pi.status ?? '')) throw new InvalidTopupPayment('Malformed payment intent');
-	if (pi.metadata?.type !== 'auto_topup' || pi.metadata.org_id !== row.orgId) return false;
-	const match = await findPausedTopup(db, row.orgId, pi);
-	if (match?.id !== row.id) return false;
-	await recoverPausedTopup(row, pi);
-	return true;
-}
-
-/** Advance only if another worker has not bound, resolved, or advanced this row. */
-async function advanceRecoveryLookup(row: Recovery, list: Stripe.ApiList<Stripe.PaymentIntent>): Promise<void> {
-	const cursor = list.has_more ? list.data.at(-1)?.id : null;
-	if (list.has_more && (typeof cursor !== 'string' || !cursor || cursor === row.paymentLookupCursor)) throw new Error('Canceled auto top-up lookup returned an invalid page cursor');
-	await db.update(stripeAutoTopupRecoveries).set({ paymentLookupCursor: cursor, lastError: null }).where(and(eq(stripeAutoTopupRecoveries.id, row.id), isNull(stripeAutoTopupRecoveries.resolvedAt), isNull(stripeAutoTopupRecoveries.paymentIntentId), row.paymentLookupCursor ? eq(stripeAutoTopupRecoveries.paymentLookupCursor, row.paymentLookupCursor) : isNull(stripeAutoTopupRecoveries.paymentLookupCursor)));
-}
-
-/** A malformed item cannot hide the matching payment later in Stripe's list. */
+/** Scan one page per tick, choosing only after the entire result is unambiguous. */
 async function recoverListedPayment(row: Recovery): Promise<void> {
+	if (row.lastError === 'ambiguous_payment') throw new Error('Canceled auto top-up matches multiple payments — manual reconciliation required');
 	const customerId = row.customerId ?? (await db.select({ customerId: organizations.stripeCustomerId }).from(organizations).where(eq(organizations.id, row.orgId)).get())?.customerId;
 	if (!customerId) throw new Error('Canceled auto top-up organization has no Stripe customer');
 	const attemptMs = Date.parse(row.attemptAt);
 	if (!Number.isFinite(attemptMs)) throw new Error('Canceled auto top-up has an invalid attempt timestamp');
-	const list = await getStripe().paymentIntents.list({ customer: customerId, ...(row.paymentLookupCursor ? { starting_after: row.paymentLookupCursor } : {}), created: { gte: Math.floor((attemptMs - 60_000) / 1000) }, limit: 100 });
-	if (!Array.isArray(list.data)) throw new Error('Stripe returned an invalid payment intent list');
+	const list = await getStripe().paymentIntents.list({ customer: customerId, created: { gte: Math.floor((attemptMs - 60_000) / 1000) }, limit: 100, ...(row.paymentLookupCursor ? { starting_after: row.paymentLookupCursor } : {}) });
+	if (!list || !Array.isArray(list.data) || typeof list.has_more !== 'boolean') throw new Error('Stripe returned an invalid payment intent list');
+	const progressPredicate = and(eq(stripeAutoTopupRecoveries.id, row.id), isNull(stripeAutoTopupRecoveries.resolvedAt), isNull(stripeAutoTopupRecoveries.paymentIntentId), or(isNull(stripeAutoTopupRecoveries.lastError), ne(stripeAutoTopupRecoveries.lastError, 'ambiguous_payment')), row.paymentLookupCursor ? eq(stripeAutoTopupRecoveries.paymentLookupCursor, row.paymentLookupCursor) : isNull(stripeAutoTopupRecoveries.paymentLookupCursor));
 	let skipped = 0;
-	let found = false;
+	let candidateId = row.lookupCandidateId;
+	let candidate: TopupPayment | undefined;
 	for (const pi of list.data) {
 		try {
-			found = await recoverCandidate(row, pi);
-			if (found) break;
+			if (!pi || typeof pi.id !== 'string' || !pi.id || !['succeeded', 'canceled', 'requires_payment_method', 'requires_capture', 'requires_confirmation', 'requires_action', 'processing'].includes(pi.status ?? '')) throw new InvalidTopupPayment('Malformed payment intent');
+			if (pi.metadata?.type !== 'auto_topup' || pi.metadata.org_id !== row.orgId) continue;
+			if (!topupAttemptCorrelation(pi, stripeAutoTopupRecoveries.attemptAt)) throw new InvalidTopupPayment('Payment intent has no attempt correlation');
+			const match = await findPausedTopup(db, row.orgId, pi);
+			if (match?.id !== row.id) continue;
+			if (candidateId && candidateId !== pi.id) {
+				await db.update(stripeAutoTopupRecoveries).set({ lastError: 'ambiguous_payment' }).where(eq(stripeAutoTopupRecoveries.id, row.id));
+				throw new Error('Canceled auto top-up matches multiple payments — manual reconciliation required');
+			}
+			candidateId = pi.id;
+			candidate = pi;
 		} catch (error) {
 			if (!(error instanceof InvalidTopupPayment)) throw error;
 			skipped++;
 		}
 	}
 	if (skipped) console.error('auto top-up recovery skipped malformed payment items', { orgId: row.orgId, skipped });
-	if (found) return;
-	await advanceRecoveryLookup(row, list);
-	if (!list.has_more) throw new Error('Canceled auto top-up payment not found yet — retry or manual reconciliation required');
+	if (list.has_more) {
+		const cursor = list.data.at(-1)?.id;
+		if (typeof cursor !== 'string' || !cursor || cursor === row.paymentLookupCursor) throw new Error('Stripe returned an invalid recovery pagination cursor');
+		await db.update(stripeAutoTopupRecoveries).set({ paymentLookupCursor: cursor, lookupCandidateId: candidateId, lastError: null }).where(progressPredicate);
+		return;
+	}
+	if (!candidateId) {
+		await db.update(stripeAutoTopupRecoveries).set({ paymentLookupCursor: null, lookupCandidateId: null }).where(progressPredicate);
+		throw new Error('Canceled auto top-up payment not found yet — retry or manual reconciliation required');
+	}
+	const payment = candidate ?? await getStripe().paymentIntents.retrieve(candidateId);
+	if (payment.id !== candidateId || (await findPausedTopup(db, row.orgId, payment))?.id !== row.id) throw new InvalidTopupPayment('Recovered payment does not match the selected attempt');
+	await recoverPausedTopup(row, payment);
 }
 
 /** Count attempted work (including failures), excluding rows skipped at the deadline. */
@@ -179,7 +185,7 @@ export async function sweepPausedTopups(limit: number, deadline?: number): Promi
 			if (row.paymentIntentId) await recoverPausedTopup(row, await getStripe().paymentIntents.retrieve(row.paymentIntentId));
 			else await recoverListedPayment(row);
 		} catch (error) {
-			await db.update(stripeAutoTopupRecoveries).set({ lastError: 'refund_or_cancellation_failed' }).where(predicate);
+			await db.update(stripeAutoTopupRecoveries).set({ lastError: sql`CASE WHEN ${stripeAutoTopupRecoveries.lastError} = 'ambiguous_payment' THEN ${stripeAutoTopupRecoveries.lastError} ELSE 'refund_or_cancellation_failed' END` }).where(predicate);
 			console.error('auto top-up recovery sweep failed', { orgId: row.orgId }, error);
 		}
 	}

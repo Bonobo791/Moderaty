@@ -90,6 +90,7 @@ export async function createMercadoPagoCreditCheckout(
 	requireOrgRole(user, 'owner');
 	const appUrl = env.APP_URL;
 	if (!appUrl) throw new Error('APP_URL is not configured');
+	webhookSecret();
 	// Unlimited plans never buy credits — rejected before any provider
 	// validation or attempt row (the lifetime org's scoring is free; MOD-35).
 	await assertCreditsPurchasable(orgId);
@@ -99,7 +100,6 @@ export async function createMercadoPagoCreditCheckout(
 	// never receives credits (codex, PR #136). Validate BEFORE planting an
 	// attempt or creating the preference; the access token and bundle price are
 	// validated by createCreditPreference/mercadoPagoBundleById respectively.
-	webhookSecret();
 	// The hidden-bundle guard applies only when this call CREATES the attempt:
 	// a still-open pre-deploy attempt (e.g. a credits_100 checkout started
 	// before the bundle was hidden) must resolve idempotently, not strand the

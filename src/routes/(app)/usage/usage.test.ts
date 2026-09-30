@@ -9,7 +9,7 @@ import { applyLedgerDelta, consumeCredit } from '$lib/server/billing/ledger';
 import { claimLifetimeSlot } from '$lib/server/billing/entitlements';
 import { LIFETIME_SLOT_LIMIT } from '$lib/server/billing/plans';
 import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
-import { configuredBundles } from '$lib/server/stripe/bundles';
+import { configuredBundles, configuredAutoTopupBundles } from '$lib/server/stripe/bundles';
 
 const mocks = vi.hoisted(() => ({
 	sessionsCreate: vi.fn(),
@@ -76,7 +76,7 @@ function buyTest(user: SessionUser | null = OPERATOR) {
 }
 
 function setAutoTopup(fields: Record<string, string>, user: SessionUser | null = OWNER) {
-	return actions.setAutoTopup({ request: postForm(fields), locals: { user } } as never);
+	return actions.setAutoTopup({ request: postForm({ bundle: 'credits_500', ...fields }), locals: { user } } as never);
 }
 
 function manageCards(user: SessionUser | null = OWNER) {
@@ -99,6 +99,26 @@ beforeEach(() => {
 });
 
 describe('usage load', () => {
+	test('legacy auto top-up pauses visibly until an owner chooses a bundle', async () => {
+		await seedOrg({ autoTopupEnabled: 1, autoTopupBundle: null });
+		const data = await load({ locals: { user: OWNER } } as never);
+		expect(data?.autoTopup).toMatchObject({ bundle: null });
+		expect(data?.autoTopupBundles.map((bundle: { id: string }) => bundle.id)).toEqual(['credits_500', 'credits_2000']);
+		const { body } = render(Page, { props: { data, form: null } as never });
+		expect(body).toContain('paused until you choose a bundle');
+		expect(body).toContain('for="auto-topup-bundle"');
+		expect(body).toContain('name="bundle"');
+	});
+	test('an unconfigured selection fails without changing settings', async () => {
+		await seedOrg();
+		const saved = env.STRIPE_PRICE_CREDITS_2000;
+		delete (env as Record<string, unknown>).STRIPE_PRICE_CREDITS_2000;
+		try {
+			expect(await setAutoTopup({ enabled: 'on', threshold: '100', consent: 'on', bundle: 'credits_2000' })).toMatchObject({ status: 400 });
+			expect((await testDb().db.select().from(organizations).get())?.autoTopupBundle).toBeNull();
+		} finally { env.STRIPE_PRICE_CREDITS_2000 = saved; }
+	});
+
 	// The render tests all share one data shape — the full load payload a
 	// healthy page receives; each test spreads it and overrides what varies.
 	function usagePageData() {
@@ -137,6 +157,7 @@ describe('usage load', () => {
 		const data = await load({ locals: { user: OWNER } } as never);
 		if (!data) throw new Error('Usage load returned no page data');
 		expect(data.autoTopup).toMatchObject({ recoveryPending: true, recoveryFailed: true });
+		expect(JSON.stringify(data)).not.toContain('pi_private');
 		const { body } = render(Page, { props: { data, form: null } as never });
 		expect(body).toContain('Contact support');
 		expect(body).not.toContain('pi_private');
@@ -650,16 +671,19 @@ describe('usage buy action', () => {
 	});
 
 	test('a lifetime org cannot open a Mercado Pago credit checkout', async () => {
-		// Same guard on the BRL path: the check must run before any provider
-		// validation or attempt row, so no MP env config is needed here.
+		// With valid provider configuration, unlimited plans cannot create attempts.
 		await seedOrg({ plan: 'lifetime' });
+		const priorSecret = env.MERCADOPAGO_WEBHOOK_SECRET;
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		try {
+			env.MERCADOPAGO_WEBHOOK_SECRET = 'webhook-test';
 			const result = (await actions.buyMercadoPago({ request: postForm({ bundle: 'credits_100' }), locals: { user: OWNER } } as never)) as { status: number };
 			expect(result.status).toBeGreaterThanOrEqual(400);
 			expect(errorSpy.mock.calls.flat().some((arg) => arg instanceof Error && arg.message.includes('lifetime'))).toBe(true);
 			expect(await testDb().db.select().from(mercadoPagoCheckoutAttempts)).toHaveLength(0);
 		} finally {
+			if (priorSecret === undefined) delete (env as Record<string, unknown>).MERCADOPAGO_WEBHOOK_SECRET;
+			else env.MERCADOPAGO_WEBHOOK_SECRET = priorSecret;
 			errorSpy.mockRestore();
 		}
 	});
@@ -739,6 +763,24 @@ describe('usage buyTest action', () => {
 });
 
 describe('usage setAutoTopup action', () => {
+	test.each(['', 'credits_100', 'unknown'])('rejects an unavailable auto-top-up bundle %s', async (bundle) => {
+		await seedOrg();
+		expect(await setAutoTopup({ enabled: 'on', threshold: '100', consent: 'on', bundle })).toMatchObject({ status: 400 });
+		expect((await testDb().db.select().from(organizations).get())?.autoTopupEnabled).not.toBe(1);
+	});
+	test('owner can change the selected bundle and disabling keeps it', async () => {
+		await seedOrg({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupBundle: 'credits_500' });
+		expect(await setAutoTopup({ enabled: 'on', threshold: '100', bundle: 'credits_2000' })).toEqual({ ok: true });
+		expect((await testDb().db.select().from(organizations).get())?.autoTopupBundle).toBe('credits_2000');
+		expect(await setAutoTopup({})).toEqual({ ok: true });
+		expect((await testDb().db.select().from(organizations).get())?.autoTopupBundle).toBe('credits_2000');
+	});
+	test.each(['in_flight', 'idle'])('bundle changes wait for unresolved payments in %s state', async (state) => {
+		await seedOrg({ autoTopupEnabled: 1, autoTopupState: state, autoTopupBundle: 'credits_500', autoTopupAttemptAt: new Date().toISOString() });
+		expect(await setAutoTopup({ enabled: 'on', threshold: '100', bundle: 'credits_2000' })).toMatchObject({ status: 409 });
+		expect((await testDb().db.select().from(organizations).get())?.autoTopupBundle).toBe('credits_500');
+	});
+
 	test('a refund between reading settings and writing enable wins the concurrent update', async () => {
 		await seedOrg({ autoTopupEnabled: 1, autoTopupState: 'idle' });
 		const client = testDb().client;
@@ -887,7 +929,7 @@ describe('usage setAutoTopup action', () => {
 		// pending) while the owner tweaks the threshold — resetting the claim
 		// here would let a later sweep create a SECOND PaymentIntent
 		// (coderabbit).
-		await seedOrg({ autoTopupEnabled: 1, autoTopupThreshold: 100, autoTopupState: 'in_flight', autoTopupFailures: 2 });
+		await seedOrg({ autoTopupEnabled: 1, autoTopupThreshold: 100, autoTopupState: 'in_flight', autoTopupBundle: 'credits_500', autoTopupFailures: 2 });
 
 		const result = await setAutoTopup({ enabled: 'on', threshold: '150' });
 
@@ -1272,4 +1314,60 @@ describe('usage cards section', () => {
 		expect(body).toContain('buy a Stripe bundle once');
 		expect(body).not.toContain('buy any bundle');
 	});
+});
+
+
+test('retired manual bundles return a specific 400 on both purchase paths without attempts', async () => {
+	await seedOrg();
+	Object.assign(env, { MERCADOPAGO_WEBHOOK_SECRET: 'webhook-test' });
+	try {
+	for (const action of [actions.buy, actions.buyMercadoPago]) {
+		const result = await action({ request: postForm({ bundle: 'credits_100' }), locals: { user: OWNER } } as never);
+		expect(result).toMatchObject({ status: 400 });
+		expect(JSON.stringify(result)).toContain('no longer available');
+	}
+	expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	expect(mocks.customersCreate).not.toHaveBeenCalled();
+	expect(await testDb().db.select().from(stripeCheckoutAttempts)).toHaveLength(0);
+	expect(await testDb().db.select().from(mercadoPagoCheckoutAttempts)).toHaveLength(0);
+	} finally { delete (env as Record<string, unknown>).MERCADOPAGO_WEBHOOK_SECRET; }
+});
+
+
+test('a stale threshold form cannot overwrite a concurrent bundle selection', async () => {
+	await seedOrg({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupBundle: 'credits_500' });
+	const client = testDb().client;
+	const execute = client.execute.bind(client);
+	client.execute = (async (stmt: unknown) => {
+		const text = String((stmt as { sql?: string }).sql ?? stmt);
+		if (/update "organizations" set/i.test(text) && text.includes('auto_topup_enabled')) {
+			await execute("update organizations set auto_topup_bundle = 'credits_2000' where id = 'org-1'");
+		}
+		return execute(stmt as never);
+	}) as never;
+	try {
+		expect(await setAutoTopup({ enabled: 'on', threshold: '150' })).toMatchObject({ status: 409 });
+	} finally { client.execute = execute; }
+	expect((await testDb().db.select().from(organizations).get())?.autoTopupBundle).toBe('credits_2000');
+});
+
+
+test('the saved selection renders with discounts and no retired option', async () => {
+	await seedOrg({ autoTopupBundle: 'credits_2000' });
+	const data = await load({ locals: { user: OWNER } } as never);
+	const { body } = render(Page, { props: { data, form: null } as never });
+	expect(body).toMatch(/value="credits_2000"[^>]*selected/);
+	expect(body).toContain('18% off');
+	expect(body).toContain('35% off');
+	expect(body).not.toContain('value="credits_100"');
+});
+
+test('malformed Stripe price configuration is logged and excluded from automatic top-up choices', () => {
+	const previous = env.STRIPE_PRICE_CREDITS_500;
+	const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		env.STRIPE_PRICE_CREDITS_500 = 'product_instead_of_price';
+		expect(configuredAutoTopupBundles().map((bundle) => bundle.id)).toEqual(['credits_2000']);
+		expect(log).toHaveBeenCalledWith(expect.stringContaining('STRIPE_PRICE_CREDITS_500'), expect.any(Error));
+	} finally { env.STRIPE_PRICE_CREDITS_500 = previous; log.mockRestore(); }
 });

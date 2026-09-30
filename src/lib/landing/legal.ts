@@ -16,6 +16,10 @@ export type LegalDoc = {
 };
 
 export const LEGAL_EFFECTIVE_DATE = '22 October 2026';
+// 1.15: CREDIT BUNDLES — new purchases offer 500 or 2,000 comments;
+// automatic top-up charges the bundle selected by the owner. Existing
+// auto top-up without a selected bundle pauses until explicitly configured.
+// Material change: users without a 1.15 consent row re-accept through /consent.
 // 1.14: ZERO-CREDIT RETENTION — Terms §17.3 (new) adds dormant-account
 // deletion: a billing-engaged account whose organizations all stay out of
 // credits is warned every 7 days and deleted after 30 days; never-purchased
@@ -62,7 +66,7 @@ export const LEGAL_EFFECTIVE_DATE = '22 October 2026';
 // 1.5: Terms §6.1(c) corrected — the lifetime hosted plan has no per-account
 // key flow (hosted scoring runs on the deployment's OPENAI_API_KEY), so the
 // "your own OpenAI key" promise was removed from the lifetime clause.
-export const LEGAL_VERSION = '1.14';
+export const LEGAL_VERSION = '1.15';
 export const LEGAL_KICKER = 'YouTube Comment Moderation Service';
 
 /**

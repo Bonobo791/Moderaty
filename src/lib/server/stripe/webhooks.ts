@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 
 import { db } from '$lib/server/db';
 import { organizations, creditTransactions, stripeEvents, stripeLifetimeEntitlements, stripeDisputeReversals, stripeCheckoutAttempts, stripeSubscriptionPeriods } from '$lib/server/db/schema';
-import { applyLedgerDelta, drainPendingReversals, findGrantForStripe, pauseAutoTopupForRefund, queuePendingReversal, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
+import { applyLedgerDelta, drainPendingReversals, findGrantForStripe, pauseForObservedStripeRefund, queuePendingReversal, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
 import { grantAutoTopupCredits, handleAutoTopupFailure } from '$lib/server/billing/autotopup';
 import { claimLifetimeSlot, grantSubscriptionPeriod, refundSubscriptionPeriod, disputeSubscriptionPeriod, releaseLifetimeForPayment, applySubscriptionSnapshot, revokeLifetimeForDispute, restoreLifetimeForDispute, restoreDisputedSubscriptionPeriod, stripeIdentifierPredicate, LIFETIME_SOLD_OUT_ERROR } from '$lib/server/billing/entitlements';
 import { bundleById, type CreditBundle } from '$lib/server/stripe/bundles';
@@ -673,15 +673,17 @@ async function refundOrgBeforeFulfillment(charge: Stripe.Charge, paymentIntentId
 
 /** Only a payment associated with a Moderaty purchase can revoke its authorization. */
 async function pauseRefundedCharge(charge: Stripe.Charge, paymentIntentId: string | undefined, occurredAt?: string): Promise<void> {
-	if (typeof charge.amount_refunded !== 'number' || charge.amount_refunded <= 0) return;
+	if (!Number.isSafeInteger(charge.amount) || charge.amount <= 0 || !Number.isSafeInteger(charge.amount_refunded) || charge.amount_refunded < 0 || charge.amount_refunded > charge.amount) throw new Error('Stripe refund has an invalid amount');
+	if (charge.amount_refunded === 0) return;
 	const chargeId = charge.id;
 	const org = await findGrantForStripe(db, { chargeId, paymentIntentId })
 		?? await db.select({ orgId: stripeSubscriptionPeriods.orgId }).from(stripeSubscriptionPeriods).where(stripeIdentifierPredicate({ chargeId, paymentIntentId }, stripeSubscriptionPeriods.paymentIntentId, stripeSubscriptionPeriods.chargeId)).get()
 		?? await db.select({ orgId: stripeLifetimeEntitlements.orgId }).from(stripeLifetimeEntitlements).where(stripeIdentifierPredicate({ chargeId, paymentIntentId }, stripeLifetimeEntitlements.paymentIntentId, stripeLifetimeEntitlements.chargeId)).get()
 		?? await refundOrgBeforeFulfillment(charge, paymentIntentId);
-	if (!org) return;
-	const reversed = await db.select({ id: creditTransactions.id }).from(creditTransactions).where(and(eq(creditTransactions.orgId, org.orgId), eq(creditTransactions.refType, 'refund'), eq(creditTransactions.refId, chargeId))).get();
-	if (!reversed) await pauseAutoTopupForRefund(db, org.orgId, occurredAt);
+	// Refunds recorded before observation tracking retain their original replay anchor.
+	const recordedRefund = org ? await db.select({ createdAt: creditTransactions.createdAt }).from(creditTransactions)
+		.where(and(eq(creditTransactions.orgId, org.orgId), eq(creditTransactions.refType, 'refund'), eq(creditTransactions.refId, chargeId))).get() : undefined;
+	await pauseForObservedStripeRefund(db, org?.orgId, chargeId, charge.amount_refunded, occurredAt ?? recordedRefund?.createdAt);
 }
 
 /**

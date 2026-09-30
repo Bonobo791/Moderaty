@@ -1,10 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { format } from 'node:util';
+import { env } from '$env/dynamic/private';
 import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
-import { creditTransactions, organizations, stripeSubscriptionPeriods, stripeAutoTopupRecoveries } from '$lib/server/db/schema';
+import { creditTransactions, organizations, stripeSubscriptionPeriods, stripeAutoTopupRecoveries, stripeRefundObservations } from '$lib/server/db/schema';
 import { applyLedgerDelta, getCredits, pauseAutoTopupForRefund } from '$lib/server/billing/ledger';
 import { grantAutoTopupCredits, handleAutoTopupFailure, maybeTriggerAutoTopUp, readAutoTopupState, recordAutoTopupFailure, stripeErrorCode, sweepAutoTopUp } from './autotopup';
 import { recoverPausedTopup, sweepPausedTopups } from './autoTopupRecovery';
@@ -29,7 +30,7 @@ vi.mock('$env/dynamic/private', () => ({
 	env: { STRIPE_PRICE_CREDITS_100: 'price_100', STRIPE_PRICE_CREDITS_500: 'price_500', STRIPE_PRICE_CREDITS_2000: 'price_2000' }
 }));
 
-setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_subscription_periods', 'stripe_auto_topup_recoveries']);
+setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_subscription_periods', 'stripe_auto_topup_recoveries', 'stripe_refund_observations']);
 
 async function seedOrg(overrides: Record<string, unknown> = {}): Promise<void> {
 	await testDb().db.insert(organizations).values({
@@ -37,7 +38,7 @@ async function seedOrg(overrides: Record<string, unknown> = {}): Promise<void> {
 		name: 'Org',
 		creditsRemaining: 50,
 		autoTopupEnabled: 1,
-		autoTopupThreshold: 100,
+		autoTopupBundle: 'credits_500', autoTopupThreshold: 100,
 		autoTopupState: 'idle',
 		autoTopupFailures: 0,
 		stripeCustomerId: 'cus_1',
@@ -75,8 +76,8 @@ async function orgRow() {
 beforeEach(() => {
 	vi.resetAllMocks();
 	mocks.paymentIntentsCreate.mockResolvedValue({ id: 'pi_new' });
-	mocks.paymentIntentsList.mockResolvedValue({ data: [] });
-	mocks.pricesRetrieve.mockResolvedValue({ id: 'price_100', unit_amount: 500, active: true, currency: 'usd', type: 'one_time' });
+	mocks.paymentIntentsList.mockResolvedValue({ data: [], has_more: false });
+	mocks.pricesRetrieve.mockImplementation(async (id: string) => ({ id, unit_amount: id === 'price_2000' ? 6465 : 2040, active: true, currency: 'usd', type: 'one_time' }));
 	mocks.refundsCreate.mockResolvedValue({ id: 're_1', status: 'succeeded' });
 	mocks.chargesList.mockResolvedValue({ data: [{ id: 'ch_1', amount: 100, amount_refunded: 0 }] });
 });
@@ -111,6 +112,41 @@ test.each([false, true])('a delayed refund recovers completed replacement top-up
 });
 
 describe('maybeTriggerAutoTopUp', () => {
+	test('a definitive invalid request releases the logical attempt for owner correction', async () => {
+		await seedOrg();
+		mocks.paymentIntentsCreate.mockRejectedValueOnce({ type: 'StripeInvalidRequestError', statusCode: 400, code: 'resource_missing' });
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+		expect(await orgRow()).toMatchObject({ autoTopupState: 'idle', autoTopupAttemptAt: null, autoTopupSubmittedAt: null });
+	});
+
+	test('charges the selected 2,000-credit bundle', async () => {
+		await seedOrg({ autoTopupBundle: 'credits_2000' });
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(true);
+		expect(mocks.pricesRetrieve).toHaveBeenCalledWith('price_2000');
+		expect(mocks.paymentIntentsCreate.mock.calls[0][0]).toMatchObject({ amount: 6465, metadata: { bundle: 'credits_2000' } });
+	});
+	test.each([null, 'credits_100', 'unknown'])('pauses loudly for stored bundle %s without calling Stripe', async (bundle) => {
+		await seedOrg({ autoTopupBundle: bundle });
+		const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+			expect(log).toHaveBeenCalledWith(expect.stringContaining('bundle'));
+			expect(mocks.pricesRetrieve).not.toHaveBeenCalled();
+			expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+			expect((await orgRow()).autoTopupState).toBe('idle');
+		} finally { log.mockRestore(); }
+	});
+	test('a bundle change during price lookup prevents charging the old selection', async () => {
+		await seedOrg();
+		mocks.pricesRetrieve.mockImplementationOnce(async () => {
+			await testDb().db.update(organizations).set({ autoTopupBundle: 'credits_2000' }).where(eq(organizations.id, 'org-1'));
+			return { id: 'price_500', unit_amount: 2040, active: true, currency: 'usd', type: 'one_time' };
+		});
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+		expect((await orgRow()).autoTopupState).toBe('idle');
+	});
+
 	test('a definitive card failure ends the logical attempt before a later charge', async () => {
 		await seedOrg({ creditsRemaining: 0 });
 		vi.useFakeTimers({ toFake: ['Date'] });
@@ -210,13 +246,13 @@ describe('maybeTriggerAutoTopUp', () => {
 		expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(1);
 		const [params, options] = mocks.paymentIntentsCreate.mock.calls[0];
 		expect(params).toMatchObject({
-			amount: 500,
+			amount: 2040,
 			currency: 'usd',
 			customer: 'cus_1',
 			payment_method: 'pm_1',
 			off_session: true,
 			confirm: true,
-			metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_100' }
+			metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_500' }
 		});
 		expect(options.idempotencyKey).toBe(`autotopup:cus_1:${params.metadata.auto_topup_attempt_at}`);
 		expect(params.metadata.auto_topup_attempt_at).toBe((await orgRow()).autoTopupLastAttemptAt);
@@ -245,7 +281,7 @@ describe('maybeTriggerAutoTopUp', () => {
 		await seedOrg({ creditsRemaining: 0 });
 		await seedPeriod({ includedCredits: 100 });
 		await testDb().db.insert(organizations).values({
-			id: 'org-2', name: 'Org 2', creditsRemaining: 0, autoTopupEnabled: 1, autoTopupThreshold: 100,
+			id: 'org-2', name: 'Org 2', creditsRemaining: 0, autoTopupEnabled: 1, autoTopupBundle: 'credits_500', autoTopupThreshold: 100,
 			autoTopupState: 'idle', stripeCustomerId: 'cus_2', stripeDefaultPmId: 'pm_2'
 		});
 
@@ -620,6 +656,56 @@ describe('sweepPausedTopups', () => {
 		expect((await testDb().db.select().from(stripeAutoTopupRecoveries).get())?.resolvedAt).toEqual(expect.any(String));
 	});
 
+	test('cancellation for a different payment never resolves the recovery', async () => {
+		await seedOrg({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: new Date().toISOString() });
+		await pauseAutoTopupForRefund(testDb().db, 'org-1');
+		const row = (await testDb().db.select().from(stripeAutoTopupRecoveries).get())!;
+		mocks.paymentIntentsCancel.mockResolvedValueOnce({ id: 'pi_other', status: 'canceled' });
+		await expect(recoverPausedTopup(row, { id: 'pi_expected', status: 'requires_action', metadata: { type: 'auto_topup', org_id: 'org-1' } })).rejects.toThrow('cancellation');
+		expect((await testDb().db.select().from(stripeAutoTopupRecoveries).get())?.resolvedAt).toBeNull();
+	});
+
+	test('missing list-item correlation cannot hide a valid payment', async () => {
+		const attemptAt = new Date().toISOString();
+		await seedOrg({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: attemptAt });
+		await pauseAutoTopupForRefund(testDb().db, 'org-1');
+		const pi = { id: 'pi_valid', status: 'succeeded', metadata: { type: 'auto_topup', org_id: 'org-1', auto_topup_attempt_at: attemptAt } };
+		mocks.paymentIntentsList.mockResolvedValueOnce({ data: [{ ...pi, id: 'pi_bad', metadata: { type: 'auto_topup', org_id: 'org-1' } }, pi], has_more: false });
+		await sweepPausedTopups(1);
+		expect(mocks.refundsCreate).toHaveBeenCalledWith(expect.objectContaining({ payment_intent: pi.id }), expect.anything());
+	});
+
+	test('ambiguous legacy payments are never canceled or refunded', async () => {
+		const attemptAt = new Date().toISOString();
+		await seedOrg({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: attemptAt });
+		await pauseAutoTopupForRefund(testDb().db, 'org-1');
+		const pi = { id: 'pi_one', status: 'succeeded', metadata: { type: 'auto_topup', org_id: 'org-1', auto_topup_attempt_day: attemptAt.slice(0, 10) } };
+		mocks.paymentIntentsList.mockResolvedValueOnce({ data: [pi, { ...pi, id: 'pi_two' }], has_more: false });
+		await sweepPausedTopups(1);
+		expect(mocks.refundsCreate).not.toHaveBeenCalled();
+		expect(mocks.paymentIntentsCancel).not.toHaveBeenCalled();
+		expect((await testDb().db.select().from(stripeAutoTopupRecoveries).get())?.resolvedAt).toBeNull();
+	});
+
+	test('recovery advances one persisted page per tick before choosing a payment', async () => {
+		const attemptAt = new Date().toISOString();
+		await seedOrg({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: attemptAt });
+		await pauseAutoTopupForRefund(testDb().db, 'org-1');
+		const pi = { id: 'pi_old', status: 'succeeded', metadata: { type: 'auto_topup', org_id: 'org-1', auto_topup_attempt_at: attemptAt } };
+		mocks.paymentIntentsList.mockResolvedValueOnce({ data: [{ id: 'pi_new', status: 'succeeded', metadata: {} }], has_more: true });
+		await sweepPausedTopups(1);
+		expect(mocks.paymentIntentsList).toHaveBeenCalledTimes(1);
+		mocks.paymentIntentsList.mockResolvedValueOnce({ data: [pi], has_more: false });
+		await sweepPausedTopups(1);
+		expect(mocks.paymentIntentsList.mock.calls[1][0]).toMatchObject({ starting_after: 'pi_new' });
+		expect(mocks.refundsCreate).toHaveBeenCalledWith(expect.objectContaining({ payment_intent: pi.id }), expect.anything());
+	});
+
+	test('customer deletion lookup uses its customer index', async () => {
+		const index = await testDb().client.execute("PRAGMA index_info('stripe_auto_topup_recoveries_customer_idx')");
+		expect(index.rows.map((row) => row.name)).toEqual(['customer_id', 'resolved_at']);
+	});
+
 	test('a payment refund can finish after its organization has been erased', async () => {
 		await seedOrg({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: new Date().toISOString() });
 		await pauseAutoTopupForRefund(testDb().db, 'org-1');
@@ -856,7 +942,7 @@ describe('sweepAutoTopUp', () => {
 			name: 'Org 2',
 			creditsRemaining: 10,
 			autoTopupEnabled: 1,
-			autoTopupThreshold: 100,
+			autoTopupBundle: 'credits_500', autoTopupThreshold: 100,
 			autoTopupState: 'idle',
 			stripeCustomerId: 'cus_2',
 			stripeDefaultPmId: 'pm_2'
@@ -867,7 +953,7 @@ describe('sweepAutoTopUp', () => {
 			name: 'Org 3',
 			creditsRemaining: 10,
 			autoTopupEnabled: 0,
-			autoTopupThreshold: 100,
+			autoTopupBundle: 'credits_500', autoTopupThreshold: 100,
 			autoTopupState: 'idle',
 			stripeCustomerId: 'cus_3',
 			stripeDefaultPmId: 'pm_3'
@@ -921,7 +1007,7 @@ describe('sweepAutoTopUp', () => {
 				name: 'Org 2',
 				creditsRemaining: 10,
 				autoTopupEnabled: 1,
-				autoTopupThreshold: 100,
+				autoTopupBundle: 'credits_500', autoTopupThreshold: 100,
 				autoTopupState: 'idle',
 				stripeCustomerId: 'cus_2',
 				stripeDefaultPmId: 'pm_2'
@@ -1028,7 +1114,7 @@ describe('sweepAutoTopUp', () => {
 			name: 'Org 2',
 			creditsRemaining: 10,
 			autoTopupEnabled: 1,
-			autoTopupThreshold: 100,
+			autoTopupBundle: 'credits_500', autoTopupThreshold: 100,
 			autoTopupState: 'idle',
 			stripeCustomerId: 'cus_2',
 			stripeDefaultPmId: 'pm_2'
@@ -1074,7 +1160,7 @@ describe('sweepAutoTopUp', () => {
 				name: `Org ${i}`,
 				creditsRemaining: 10,
 				autoTopupEnabled: 1,
-				autoTopupThreshold: 100,
+				autoTopupBundle: 'credits_500', autoTopupThreshold: 100,
 				autoTopupState: 'idle'
 			});
 		}
@@ -1083,7 +1169,7 @@ describe('sweepAutoTopUp', () => {
 			name: 'Org 8',
 			creditsRemaining: 10,
 			autoTopupEnabled: 1,
-			autoTopupThreshold: 100,
+			autoTopupBundle: 'credits_500', autoTopupThreshold: 100,
 			autoTopupState: 'idle',
 			stripeCustomerId: 'cus_8',
 			stripeDefaultPmId: 'pm_8'
@@ -1113,7 +1199,7 @@ describe('sweepAutoTopUp', () => {
 				name: 'Org 2',
 				creditsRemaining: 10,
 				autoTopupEnabled: 1,
-				autoTopupThreshold: 100,
+				autoTopupBundle: 'credits_500', autoTopupThreshold: 100,
 				autoTopupState: 'idle',
 				stripeCustomerId: 'cus_2',
 				stripeDefaultPmId: 'pm_2'
@@ -1313,4 +1399,139 @@ describe('grantAutoTopupCredits', () => {
 		expect(await grantAutoTopupCredits('org-1', succeededPi())).toBe(false);
 		expect(mocks.refundsCreate).not.toHaveBeenCalled();
 	});
+});
+
+
+test('legacy settings do not starve valid choices in the bounded sweep', async () => {
+	await seedOrg({ autoTopupBundle: null });
+	await testDb().db.insert(organizations).values({ id: 'org-2', name: 'Ready', creditsRemaining: 0, autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupThreshold: 100, autoTopupBundle: 'credits_500', stripeCustomerId: 'cus_2', stripeDefaultPmId: 'pm_2' });
+	expect(await sweepAutoTopUp(1)).toBe(1);
+	expect(mocks.paymentIntentsCreate.mock.calls[0][0]).toMatchObject({ customer: 'cus_2', metadata: { bundle: 'credits_500' } });
+});
+
+
+test('an unconfigured saved bundle pauses before any Stripe call', async () => {
+	await seedOrg({ autoTopupBundle: 'credits_2000' });
+	const saved = env.STRIPE_PRICE_CREDITS_2000;
+	const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		delete (env as Record<string, unknown>).STRIPE_PRICE_CREDITS_2000;
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+		expect(log).toHaveBeenCalledWith(expect.stringContaining('not a configured option'));
+		expect(mocks.pricesRetrieve).not.toHaveBeenCalled();
+		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+	} finally { env.STRIPE_PRICE_CREDITS_2000 = saved; log.mockRestore(); }
+});
+
+test('having only the retired bundle configured throws before claiming', async () => {
+	await seedOrg();
+	const saved500 = env.STRIPE_PRICE_CREDITS_500;
+	const saved2000 = env.STRIPE_PRICE_CREDITS_2000;
+	try {
+		delete (env as Record<string, unknown>).STRIPE_PRICE_CREDITS_500;
+		delete (env as Record<string, unknown>).STRIPE_PRICE_CREDITS_2000;
+		await expect(maybeTriggerAutoTopUp('org-1')).rejects.toThrow('no eligible auto top-up bundle');
+		expect((await orgRow()).autoTopupState).toBe('idle');
+		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+	} finally { env.STRIPE_PRICE_CREDITS_500 = saved500; env.STRIPE_PRICE_CREDITS_2000 = saved2000; }
+});
+
+
+test('a legacy selection still reconciles paid historical 100-credit intents', async () => {
+	await seedOrg({ autoTopupBundle: null, autoTopupLastAttemptAt: new Date(Date.now() - 25 * 3600_000).toISOString() });
+	mocks.paymentIntentsList.mockResolvedValue({ data: [{ id: 'pi_legacy', status: 'succeeded', created: Math.floor(Date.now() / 1000) - 25 * 3600, latest_charge: 'ch_legacy', metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_100' } }] });
+	expect(await sweepAutoTopUp(1)).toBe(0);
+	expect(await getCredits('org-1')).toBe(150);
+	expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+	expect(await sweepAutoTopUp(1)).toBe(0);
+	expect(await getCredits('org-1')).toBe(150);
+});
+
+
+test('reconciled legacy selections release the sweep budget on the next pass', async () => {
+	await seedOrg({ autoTopupBundle: null, autoTopupLastAttemptAt: new Date(Date.now() - 48 * 3600_000).toISOString() });
+	await testDb().db.insert(organizations).values({ id: 'org-2', name: 'Ready', creditsRemaining: 0, autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupBundle: 'credits_500', autoTopupThreshold: 100, autoTopupLastAttemptAt: new Date(Date.now() - 25 * 3600_000).toISOString(), stripeCustomerId: 'cus_2', stripeDefaultPmId: 'pm_2' });
+	expect(await sweepAutoTopUp(1)).toBe(0);
+	expect(await sweepAutoTopUp(1)).toBe(1);
+	expect(mocks.paymentIntentsCreate.mock.calls[0][0]).toMatchObject({ customer: 'cus_2' });
+});
+
+test('a failure arriving during a replaced claim cannot clear the newer attempt', async () => {
+	const previous = '2026-09-30T10:00:00.000Z';
+	const next = '2026-09-30T11:00:00.000Z';
+	await seedOrg({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: previous, autoTopupAttemptAt: previous });
+	const client = testDb().client;
+	const execute = client.execute.bind(client);
+	client.execute = (async (stmt: unknown) => {
+		const text = String((stmt as { sql?: string }).sql ?? stmt);
+		if (/update "organizations" set/i.test(text) && text.includes('auto_topup_failures')) await execute({ sql: 'UPDATE organizations SET auto_topup_last_attempt_at = ?, auto_topup_attempt_at = ? WHERE id = ?', args: [next, next, 'org-1'] });
+		return execute(stmt as never);
+	}) as never;
+	try { await recordAutoTopupFailure('org-1', 'card_declined', Date.parse(previous)); }
+	finally { client.execute = execute; }
+	expect(await orgRow()).toMatchObject({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: next, autoTopupAttemptAt: next, autoTopupFailures: 0 });
+});
+
+test('disabling automatic top-up after claiming releases the unsubmitted claim', async () => {
+	await seedOrg();
+	const client = testDb().client;
+	const execute = client.execute.bind(client);
+	client.execute = (async (stmt: unknown) => {
+		const text = String((stmt as { sql?: string }).sql ?? stmt);
+		const result = await execute(stmt as never);
+		if (/update "organizations" set/i.test(text) && text.includes('COALESCE') && text.includes('returning')) await execute("UPDATE organizations SET auto_topup_enabled = 0 WHERE id = 'org-1'");
+		return result;
+	}) as never;
+	try { expect(await maybeTriggerAutoTopUp('org-1')).toBe(false); }
+	finally { client.execute = execute; }
+	expect(await orgRow()).toMatchObject({ autoTopupState: 'idle', autoTopupSubmittedAt: null });
+	expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+});
+
+test.each([false, true])('an early partial refund excludes its own top-up while recovering replacements (replacement: %s)', async (replacement) => {
+	const attemptAt = new Date().toISOString();
+	await seedOrg({ autoTopupState: 'in_flight', autoTopupAttemptAt: attemptAt, autoTopupLastAttemptAt: attemptAt, autoTopupSubmittedAt: attemptAt });
+	if (replacement) await applyLedgerDelta(testDb().db, { orgId: 'org-1', delta: 100, reason: 'auto_topup', refType: 'payment_intent', refId: 'pi_replacement', paymentIntentId: 'pi_replacement', chargeId: 'ch_replacement' });
+	await testDb().db.insert(stripeRefundObservations).values({ chargeId: 'ch_partial', refundedAmountCents: 100, occurredAt: attemptAt });
+	await grantAutoTopupCredits('org-1', { id: 'pi_partial', status: 'succeeded', latest_charge: 'ch_partial', metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_500', auto_topup_attempt_at: attemptAt } } as never);
+	expect(await getCredits('org-1')).toBe(replacement ? 650 : 550);
+	expect(await orgRow()).toMatchObject({ autoTopupEnabled: 0, autoTopupState: 'disabled' });
+	expect((await testDb().db.select().from(stripeAutoTopupRecoveries)).map(row => row.paymentIntentId)).toEqual(replacement ? ['pi_replacement'] : []);
+});
+
+test('a retrieved pagination candidate must be the exact payment selected earlier', async () => {
+	const attemptAt = new Date().toISOString();
+	await seedOrg({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: attemptAt });
+	await pauseAutoTopupForRefund(testDb().db, 'org-1');
+	const pi = { id: 'pi_expected', status: 'succeeded', metadata: { type: 'auto_topup', org_id: 'org-1', auto_topup_attempt_at: attemptAt } };
+	mocks.paymentIntentsList.mockResolvedValueOnce({ data: [pi], has_more: true });
+	await sweepPausedTopups(1);
+	expect(mocks.refundsCreate).not.toHaveBeenCalled();
+	mocks.paymentIntentsList.mockResolvedValueOnce({ data: [], has_more: false });
+	mocks.paymentIntentsRetrieve.mockResolvedValueOnce({ ...pi, id: 'pi_other' });
+	await sweepPausedTopups(1);
+	expect(mocks.refundsCreate).not.toHaveBeenCalled();
+	expect((await testDb().db.select().from(stripeAutoTopupRecoveries).get())?.paymentIntentId).toBeNull();
+});
+
+test('older pagination progress cannot erase ambiguity recorded by a concurrent worker', async () => {
+	await seedOrg({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: new Date().toISOString() });
+	await pauseAutoTopupForRefund(testDb().db, 'org-1');
+	mocks.paymentIntentsList.mockResolvedValueOnce({ data: [{ id: 'pi_new', status: 'succeeded', metadata: {} }], has_more: true });
+	const client = testDb().client;
+	const execute = client.execute.bind(client);
+	client.execute = (async (stmt: unknown) => {
+		const text = String((stmt as { sql?: string }).sql ?? stmt);
+		if (/update "stripe_auto_topup_recoveries" set "payment_lookup_cursor"/i.test(text)) await execute("UPDATE stripe_auto_topup_recoveries SET last_error = 'ambiguous_payment'");
+		return execute(stmt as never);
+	}) as never;
+	try { await sweepPausedTopups(1); } finally { client.execute = execute; }
+	expect(await testDb().db.select().from(stripeAutoTopupRecoveries).get()).toMatchObject({ lastError: 'ambiguous_payment', paymentLookupCursor: null });
+});
+
+test('an invalid-request response naming a possibly created payment retains its recovery identity', async () => {
+	await seedOrg();
+	mocks.paymentIntentsCreate.mockRejectedValueOnce({ type: 'StripeInvalidRequestError', statusCode: 400, code: 'resource_missing', raw: { payment_intent: { id: 'pi_uncertain' } } });
+	await maybeTriggerAutoTopUp('org-1');
+	expect(await orgRow()).toMatchObject({ autoTopupAttemptAt: expect.any(String), autoTopupSubmittedAt: expect.any(String) });
 });

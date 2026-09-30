@@ -14,6 +14,8 @@ test('refund recovery migrations preserve obligations, backfill customers, and r
 		INSERT INTO organizations VALUES ('org-1', 'cus_1');
 		INSERT INTO stripe_auto_topup_recoveries (id, org_id, attempt_at, payment_intent_id, refund_id, last_error) VALUES (7, 'org-1', '2026-09-30T13:10:00.000Z', 'pi_1', 're_pending', 'refund_or_cancellation_failed');
 	`);
+	await expect(client.execute("INSERT INTO stripe_auto_topup_recoveries (org_id, attempt_at) VALUES ('org-1', '2026-09-30T13:10:00.000Z')")).rejects.toThrow(/UNIQUE/);
+
 	const read = () => client.execute('SELECT * FROM stripe_auto_topup_recoveries WHERE id = 7');
 	expect((await read()).rows[0]).toMatchObject({ id: 7, org_id: 'org-1', customer_id: null, payment_intent_id: 'pi_1', refund_id: 're_pending', resolved_at: null, last_error: 'refund_or_cancellation_failed' });
 	for (const statement of migrationStatements('0054_backfill_refund_recovery_customers.sql')) await client.execute(statement);
@@ -31,4 +33,12 @@ test('refund recovery migrations preserve obligations, backfill customers, and r
 	expect((await client.execute('PRAGMA integrity_check')).rows[0].integrity_check).toBe('ok');
 	const plan = await client.execute("EXPLAIN QUERY PLAN SELECT * FROM stripe_auto_topup_recoveries WHERE org_id = 'org-1' AND payment_intent_id = 'pi_1'");
 	expect(plan.rows.map((r) => r.detail).join(' ')).toContain('stripe_auto_topup_recoveries_payment_idx');
+	for (const statement of migrationStatements('0057_review_refund_observations.sql')) await client.execute(statement);
+	expect((await read()).rows[0]).toMatchObject({ payment_intent_id: 'pi_1', lookup_cursor: null, lookup_candidate_id: null });
+	const customerIndex = await client.execute("PRAGMA index_info('stripe_auto_topup_recoveries_customer_idx')");
+	expect(customerIndex.rows.map((row) => row.name)).toEqual(['customer_id', 'resolved_at']);
+	await expect(client.execute("INSERT INTO stripe_auto_topup_recoveries (org_id, attempt_at) VALUES ('org-1', '2026-09-30T13:10:00.000Z')")).rejects.toThrow(/UNIQUE/);
+	await client.execute("INSERT INTO stripe_refund_observations VALUES ('ch_1', 100, '2026-09-30T12:00:00.000Z', NULL)");
+	expect((await client.execute('SELECT * FROM stripe_refund_observations')).rows[0].refunded_amount_cents).toBe(100);
+
 });

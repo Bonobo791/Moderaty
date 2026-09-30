@@ -68,7 +68,7 @@ export const organizations = sqliteTable('organizations', {
 	stripeCustomerId: text('stripe_customer_id'), // Stripe Customer for this org
 	stripeDefaultPmId: text('stripe_default_pm_id'), // card saved for off-session auto top-up
 	autoTopupEnabled: integer('auto_topup_enabled'),
-	autoTopupBundle: text('auto_topup_bundle'), // Reserved by applied migration 0055; selection UI is separate work.
+	autoTopupBundle: text('auto_topup_bundle'),
 	autoTopupThreshold: integer('auto_topup_threshold'), // top up when credits < threshold
 	// 'idle' | 'in_flight' | 'disabled' — in_flight is the atomic claim against
 	// concurrent triggers; disabled after SCA/decline failures until the
@@ -579,12 +579,12 @@ export const stripeAutoTopupRecoveries = sqliteTable('stripe_auto_topup_recoveri
 	index('stripe_auto_topup_recoveries_pending_idx').on(table.resolvedAt, table.lastCheckedAt),
 	index('stripe_auto_topup_recoveries_customer_idx').on(table.customerId, table.resolvedAt)]);
 
-// Preserves dev-applied history from 0057; no runtime writer is enabled here.
+// Monotonic refund observations survive out-of-order grants and dedupe consent revocation.
 export const stripeRefundObservations = sqliteTable('stripe_refund_observations', {
 	chargeId: text('charge_id').primaryKey(),
 	refundedAmountCents: integer('refunded_amount_cents').notNull(),
 	occurredAt: text('occurred_at').notNull(),
-	orgId: text('org_id')
+	orgId: text('org_id') // NULL until the local purchase is known and its pause is applied
 });
 
 export const stripePendingReversals = sqliteTable(

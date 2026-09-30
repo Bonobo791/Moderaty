@@ -62,7 +62,7 @@ export function expectedBundlePriceCents(credits: number): number {
 }
 
 /** The manually purchasable bundle sizes, largest first — the 100-credit
- * bundle exists only as the automatic top-up increment (hiddenFromPurchase),
+ * bundle is retained only for historical grants (hiddenFromPurchase),
  * so a public forecast of what top-ups cost never leans on a price a manual
  * buyer cannot reach (codex). */
 const BUNDLE_SIZES = [2000, 500] as const;

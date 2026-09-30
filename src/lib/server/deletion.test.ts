@@ -44,7 +44,10 @@ test('account deletion retains unresolved payment recovery and defers Stripe cus
 	const userId = await seedUser('gone');
 	await testDb().db.update(organizations).set({ stripeCustomerId: 'cus_gone' }).where(eq(organizations.id, 'org-gone'));
 	await testDb().db.insert(stripeAutoTopupRecoveries).values({ orgId: 'org-gone', attemptAt: new Date().toISOString(), paymentIntentId: 'pi_refund_owed', refundId: 're_pending', lastError: 'refund_or_cancellation_failed' });
+	const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
 	await deleteUserRecords(userId);
+	expect(log).toHaveBeenCalledWith(expect.stringContaining('could not delete Stripe customer cus_gone: Stripe customer has unresolved automatic payment recovery'));
 	expect(await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-gone')).get()).toBeUndefined();
 	expect(await testDb().db.select().from(stripeAutoTopupRecoveries).get()).toMatchObject({ paymentIntentId: 'pi_refund_owed', refundId: 're_pending', customerId: 'cus_gone', resolvedAt: null });
 	expect(mocks.customersDel).not.toHaveBeenCalled();
@@ -53,6 +56,7 @@ test('account deletion retains unresolved payment recovery and defers Stripe cus
 	expect(await retryStripeCustomerDeletions()).toBe(1);
 	expect(mocks.customersDel).toHaveBeenCalledWith('cus_gone');
 	expect(await testDb().db.select().from(stripeAutoTopupRecoveries).all()).toEqual([]);
+	} finally { log.mockRestore(); }
 });
 
 afterEach(() => {
@@ -1556,4 +1560,17 @@ test('a bookkeeping failure mid-drain does not strand the rest of the outbox', a
 		await testDb().client.execute('DROP TRIGGER break_revocation_mark');
 		errorSpy.mockRestore();
 	}
+});
+
+test('a retry after Stripe already erased its customer clears the local outbox and completed recoveries', async () => {
+	await testDb().db.insert(stripeDeletionOutbox).values({ customerId: 'cus_erased' });
+	await testDb().db.insert(stripeAutoTopupRecoveries).values({ orgId: 'org-erased', customerId: 'cus_erased', attemptAt: new Date().toISOString(), resolvedAt: new Date().toISOString() });
+	mocks.subscriptionsList.mockRejectedValueOnce({ code: 'resource_missing', param: 'customer' });
+	const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		expect(await retryStripeCustomerDeletions()).toBe(1);
+		expect(await testDb().db.select().from(stripeDeletionOutbox)).toEqual([]);
+		expect(await testDb().db.select().from(stripeAutoTopupRecoveries)).toEqual([]);
+		expect(log).toHaveBeenCalledWith(expect.stringContaining('already deleted'), 'cus_erased');
+	} finally { log.mockRestore(); }
 });

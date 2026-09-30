@@ -17,7 +17,7 @@ import { and, asc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizz
 import type Stripe from 'stripe';
 
 import { db } from '$lib/server/db';
-import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, googleRevocationOutbox, invites, memberships, moderationActions, organizations, rules, sessions, stripeAutoTopupRecoveries, stripeDeletionOutbox, stripeLifetimeSlots, stripeScrubOutbox, users } from '$lib/server/db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, googleRevocationOutbox, invites, memberships, moderationActions, organizations, rules, sessions, stripeAutoTopupRecoveries, stripeRefundObservations, stripeDeletionOutbox, stripeLifetimeSlots, stripeScrubOutbox, users } from '$lib/server/db/schema';
 import { pauseAutoTopupForRefund } from '$lib/server/billing/ledger';
 import { decrypt } from '$lib/server/crypto';
 import { revokeGoogleToken } from '$lib/server/google';
@@ -106,18 +106,32 @@ async function cancelCustomerSubscriptions(customerId: string, options?: StripeR
 		}
 		if (subscription.status !== 'canceled' && subscription.status !== 'incomplete_expired') await getStripe().subscriptions.cancel(subscription.id, undefined, options?.());
 	}
+}
+
+/** Erase the Stripe customer and completed recovery identifiers together. */
+async function deleteStripeCustomer(customerId: string, options?: StripeRequestOptionsFactory): Promise<void> {
+	let alreadyDeleted = false;
+	try {
+		await cancelCustomerSubscriptions(customerId, options);
+	} catch (cause) {
+		if ((cause as { code?: unknown; param?: unknown })?.code !== 'resource_missing' || (cause as { param?: unknown }).param !== 'customer') throw cause;
+		alreadyDeleted = true;
+		console.error('Stripe customer already deleted — finishing local erasure:', customerId);
+	}
 	// Keep the customer discoverable until its overlapping payment is canceled
 	// or refunded. Local account erasure has already completed independently.
 	const pending = await db.select({ id: stripeAutoTopupRecoveries.id }).from(stripeAutoTopupRecoveries)
 		.where(and(eq(stripeAutoTopupRecoveries.customerId, customerId), isNull(stripeAutoTopupRecoveries.resolvedAt))).get();
 	if (pending) throw new Error('Stripe customer has unresolved automatic payment recovery — deletion deferred');
-}
-
-/** Erase the Stripe customer and completed recovery identifiers together. */
-async function deleteStripeCustomer(customerId: string, options?: StripeRequestOptionsFactory): Promise<void> {
-	await cancelCustomerSubscriptions(customerId, options);
-	if (options) await getStripe().customers.del(customerId, undefined, options());
-	else await getStripe().customers.del(customerId);
+	if (!alreadyDeleted) {
+		try {
+			if (options) await getStripe().customers.del(customerId, undefined, options());
+			else await getStripe().customers.del(customerId);
+		} catch (cause) {
+			if ((cause as { code?: unknown })?.code !== 'resource_missing') throw cause;
+			console.error('Stripe customer already deleted — finishing local erasure:', customerId);
+		}
+	}
 	await db.delete(stripeAutoTopupRecoveries).where(and(eq(stripeAutoTopupRecoveries.customerId, customerId), isNotNull(stripeAutoTopupRecoveries.resolvedAt)));
 }
 
@@ -386,6 +400,7 @@ async function dissolveOrgs(tx: DeletionTx, dissolveOrgIds: string[]): Promise<s
 	// The credit ledger is part of the org's records: comment ids,
 	// Checkout Session ids, PaymentIntent ids, and charge ids must not
 	// survive an "immediate and permanent" deletion as orphans.
+	await tx.delete(stripeRefundObservations).where(inArray(stripeRefundObservations.orgId, dissolveOrgIds));
 	await tx.delete(creditTransactions).where(inArray(creditTransactions.orgId, dissolveOrgIds));
 	await tx.delete(organizations).where(inArray(organizations.id, dissolveOrgIds));
 	return stripeCustomerIds;

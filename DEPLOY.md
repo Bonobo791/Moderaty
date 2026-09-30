@@ -141,7 +141,7 @@ the site exists), local work, and outage recovery.
   | `OPENAI_JAILBREAK_MODEL` | optional prompt-injection detector model; defaults to `gpt-6-luna` |
   | `STRIPE_SECRET_KEY` | Stripe API secret key (live mode) |
   | `STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret |
-  | `STRIPE_PRICE_CREDITS_100` / `STRIPE_PRICE_CREDITS_500` / `STRIPE_PRICE_CREDITS_2000` | Stripe Price IDs for the three credit bundles (active, one-time, USD — auto top-up validates all three) |
+  | `STRIPE_PRICE_CREDITS_100` / `STRIPE_PRICE_CREDITS_500` / `STRIPE_PRICE_CREDITS_2000` | Stripe Price IDs (active, one-time, USD); 500/2,000 are offered for purchases and owner-selected auto top-ups; 100 is retained for historical fulfillment |
   | `STRIPE_PRICE_HOSTED_MONTHLY` / `STRIPE_PRICE_LIFETIME` | Stripe Price IDs for the hosted monthly plan (recurring, USD 5) and the lifetime plan (one-time, USD 49) |
   | `STRIPE_TEST_PRODUCT` | optional — a Stripe Product (`prod_…`) or Price (`price_…`) id; when set, a "Test checkout" card on the usage page runs a real purchase end-to-end and grants 1 credit — visible only to the operator account hardcoded in `src/lib/server/billing/checkout.ts` (`TEST_CHECKOUT_OPERATOR_EMAIL`), never to other users |
   | `ENCRYPTION_KEY` | `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |

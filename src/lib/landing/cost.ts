@@ -16,7 +16,7 @@ export function hostedCostUsd(value: number): number {
 	if (comments === 0) return 0;
 	// Past the included 100, top-up comments are forecast at the cheapest
 	// purchasable combination of the fixed 500/2,000-credit bundles (the
-	// 100-credit size is automatic top-up only) — the per-tranche progressive
+	// 100-credit size is retained only for historical grants) — the per-tranche progressive
 	// rate is not buyable between bundle sizes,
 	// so it would understate the real cost (codex).
 	return MONTHLY_PLAN_USD + purchasableCreditCostUsd(Math.max(0, comments - INCLUDED_COMMENTS));

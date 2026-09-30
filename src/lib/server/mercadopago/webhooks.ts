@@ -132,6 +132,7 @@ export async function fulfillMercadoPagoPayment(payment: MercadoPagoPayment): Pr
 					and(
 						eq(mercadoPagoCheckoutAttempts.attemptId, attemptId),
 						or(isNull(mercadoPagoCheckoutAttempts.paymentId), eq(mercadoPagoCheckoutAttempts.paymentId, payment.id)),
+						sql`COALESCE(${mercadoPagoCheckoutAttempts.refundedAmountCents}, 0) = 0`,
 						notInArray(mercadoPagoCheckoutAttempts.status, ['refunded', 'disputed', 'manual_refund_required'])
 					)
 				)
@@ -216,7 +217,7 @@ async function reverseMercadoPagoPayment(payment: MercadoPagoPayment, reason: 'r
 		const markTerminal = () =>
 			tx
 				.update(mercadoPagoCheckoutAttempts)
-				.set({ paymentId: payment.id, status, updatedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` })
+				.set({ paymentId: payment.id, status, ...(reason === 'refund' ? { refundedAmountCents: paymentAmountCents(payment.refundedAmount) } : {}), updatedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` })
 				.where(and(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId), or(isNull(mercadoPagoCheckoutAttempts.paymentId), eq(mercadoPagoCheckoutAttempts.paymentId, payment.id))));
 		// A disputed customer must never be re-charged off-session. This applies
 		// on EVERY dispute delivery — including one deduped by a prior refund,
@@ -225,8 +226,8 @@ async function reverseMercadoPagoPayment(payment: MercadoPagoPayment, reason: 'r
 		const disableAutoTopup = async () => {
 			if (reason === 'refund') {
 				// Read in this transaction: a duplicate refund must respect a later resume.
-				const current = await tx.select({ status: mercadoPagoCheckoutAttempts.status }).from(mercadoPagoCheckoutAttempts).where(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId)).get();
-				if (current?.status !== 'refunded') await pauseAutoTopupForRefund(tx, orgId);
+				const current = await tx.select({ refundedAmountCents: mercadoPagoCheckoutAttempts.refundedAmountCents }).from(mercadoPagoCheckoutAttempts).where(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId)).get();
+				if ((current?.refundedAmountCents ?? 0) < paymentAmountCents(payment.refundedAmount)) await pauseAutoTopupForRefund(tx, orgId);
 				return;
 			}
 			await tx.update(organizations).set({ autoTopupEnabled: 0, autoTopupState: 'disabled' }).where(eq(organizations.id, orgId));

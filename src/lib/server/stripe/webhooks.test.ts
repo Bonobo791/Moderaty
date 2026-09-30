@@ -50,7 +50,7 @@ vi.mock('$lib/server/billing/entitlements', async (importOriginal) => {
 
 import { claimLifetimeSlot } from '$lib/server/billing/entitlements';
 
-setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_pending_reversals', 'stripe_lifetime_entitlements', 'stripe_subscription_periods', 'stripe_lifetime_slots', 'stripe_dispute_reversals', 'stripe_checkout_attempts']);
+setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_pending_reversals', 'stripe_lifetime_entitlements', 'stripe_subscription_periods', 'stripe_lifetime_slots', 'stripe_dispute_reversals', 'stripe_checkout_attempts', 'stripe_refund_observations']);
 
 function session(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 	return {
@@ -1339,6 +1339,45 @@ describe('reverseCharge / reverseDispute', () => {
 		expect(mocks.subscriptionsCancel).not.toHaveBeenCalled();
 	});
 
+	test('a partial refund before its checkout grant still pauses automatic charging', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_early', amount: 500, amount_refunded: 100 });
+		await reverseCharge('ch_early', 'refund', undefined, '2026-09-30T12:00:00.000Z');
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_early', chargeId: 'ch_early' });
+		expect(await getCredits('org-1')).toBe(500);
+		expect((await db.select().from(organizations).get())?.autoTopupEnabled).toBe(0);
+	});
+
+	test.each([NaN, Infinity, -1, 501, 0.5])('invalid Stripe refund amount %s cannot revoke consent or credits', async (amount_refunded) => {
+		await db.insert(organizations).values({ id: 'org-1', name: 'Org', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_invalid', chargeId: 'ch_invalid' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_invalid', amount: 500, amount_refunded });
+		await expect(reverseCharge('ch_invalid', 'refund')).rejects.toThrow(/refund.*amount/i);
+		expect((await db.select().from(organizations).get())?.autoTopupEnabled).toBe(1);
+		expect(await getCredits('org-1')).toBe(500);
+	});
+
+	test('a partial refund without an event timestamp cannot revoke newer consent on replay', async () => {
+		await db.insert(organizations).values({ id: 'org-1', name: 'Org', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_unknown', chargeId: 'ch_unknown' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_unknown', amount: 500, amount_refunded: 100 });
+		await reverseCharge('ch_unknown', 'refund');
+		await db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupPauseReason: null, autoTopupConsentedAt: new Date(Date.now() + 2000).toISOString() }).where(eq(organizations.id, 'org-1'));
+		await reverseCharge('ch_unknown', 'refund');
+		expect((await db.select().from(organizations).get())?.autoTopupEnabled).toBe(1);
+	});
+
+	test('a full subscription refund replay without its timestamp respects resumed consent', async () => {
+		await db.insert(organizations).values({ id: 'org-1', name: 'Org', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		await db.insert(stripeSubscriptionPeriods).values({ orgId: 'org-1', subscriptionId: 'sub_1', invoiceId: 'in_1', periodKey: 'period_1', periodStart: '2026-09-01T00:00:00.000Z', periodEnd: '2026-10-01T00:00:00.000Z', chargeId: 'ch_sub', includedCredits: 100 });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_sub', amount: 500, amount_refunded: 500 });
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_1', status: 'canceled' });
+		await reverseCharge('ch_sub', 'refund');
+		await db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupPauseReason: null, autoTopupConsentedAt: new Date(Date.now() + 2000).toISOString() }).where(eq(organizations.id, 'org-1'));
+		await reverseCharge('ch_sub', 'refund');
+		expect((await db.select().from(organizations).get())?.autoTopupEnabled).toBe(1);
+	});
+
 	test('a full refund retry reverses credits without overriding later owner consent', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupConsentedAt: '2026-09-30T13:11:00.000Z' });
 		await applyLedgerDelta(db, { orgId: 'org-1', delta: 100, reason: 'purchase', refType: 'checkout_session', refId: 'cs_retry', chargeId: 'ch_retry' });
@@ -1434,7 +1473,7 @@ describe('reverseCharge / reverseDispute', () => {
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', payment_intent: 'pi_1' });
 
-		expect(await reverseCharge('ch_1', 'refund')).toBe(false);
+		await expect(reverseCharge('ch_1', 'refund')).rejects.toThrow('invalid amount');
 		expect(await getCredits('org-1')).toBe(500);
 		errorSpy.mockRestore();
 	});
@@ -2275,4 +2314,17 @@ describe('portal card sync (changes made in the Stripe customer portal)', () => 
 			injection.restore();
 		}
 	});
+});
+
+
+test('a refund recorded before observation tracking preserves later consent on replay', async () => {
+	await db.insert(organizations).values({ id: 'org-1', name: 'Org', autoTopupEnabled: 1, autoTopupState: 'idle' });
+	await applyLedgerDelta(db, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_legacy_refund', chargeId: 'ch_legacy_refund' });
+	await applyLedgerDelta(db, { orgId: 'org-1', delta: -500, reason: 'refund', refType: 'refund', refId: 'ch_legacy_refund', chargeId: 'ch_legacy_refund' });
+	await db.update(creditTransactions).set({ createdAt: '2026-09-30T13:10:00.000Z' }).where(eq(creditTransactions.refType, 'refund'));
+	await db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupPauseReason: null, autoTopupConsentedAt: '2026-09-30T13:11:00.000Z' });
+	mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_legacy_refund', amount: 500, amount_refunded: 500 });
+	await reverseCharge('ch_legacy_refund', 'refund');
+	expect((await db.select().from(organizations).get())?.autoTopupEnabled).toBe(1);
+	expect(await getCredits('org-1')).toBe(0);
 });

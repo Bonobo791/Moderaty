@@ -3,7 +3,7 @@ import { describe, expect, test, vi } from 'vitest';
 
 import { countDbStatements, setupTestDb, testDb } from '$lib/server/testdb';
 import { db } from '$lib/server/db';
-import { creditTransactions, organizations, stripePendingReversals, stripeSubscriptionPeriods } from '$lib/server/db/schema';
+import { creditTransactions, organizations, stripePendingReversals, stripeSubscriptionPeriods, stripeAutoTopupRecoveries } from '$lib/server/db/schema';
 import {
 	applyLedgerDelta,
 	assertCreditsPurchasable,
@@ -15,11 +15,12 @@ import {
 	listCreditTransactions,
 	monthStartIso,
 	orgIsMetered,
+	pauseForObservedStripeRefund,
 	queuePendingReversal,
 	usageSummary
 } from './ledger';
 
-setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_pending_reversals', 'stripe_subscription_periods']);
+setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_pending_reversals', 'stripe_subscription_periods', 'stripe_auto_topup_recoveries', 'stripe_refund_observations']);
 
 async function seedOrg(orgId = 'org-1', credits: number | null = null, stripeCustomerId: string | null = null): Promise<void> {
 	await testDb().db
@@ -606,4 +607,39 @@ describe('usageSummary', () => {
 		const summary = await usageSummary('org-1');
 		expect(summary).toEqual({ remaining: 0, usedLifetime: 0, usedThisMonth: 0 });
 	});
+});
+
+test('a legacy queued refund uses its first observation time to preserve newer consent', async () => {
+	await seedOrg();
+	await queuePendingReversal('ch_legacy', 'refund');
+	await db.update(stripePendingReversals).set({ createdAt: '2026-09-30T12:00:00.000Z', occurredAt: null });
+	await db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupConsentedAt: '2026-09-30T12:10:00.000Z' });
+	await applyLedgerDelta(db, { orgId: 'org-1', delta: 100, reason: 'purchase', refType: 'checkout_session', refId: 'cs_legacy', chargeId: 'ch_legacy' });
+	await drainPendingReversals('ch_legacy');
+	expect(await getCredits('org-1')).toBe(0);
+	expect((await db.select().from(organizations).get())?.autoTopupEnabled).toBe(1);
+});
+
+test('a failed refund mutation rolls back the credit ledger and automatic top-up pause together', async () => {
+	await seedOrg('org-1', 500);
+	await db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle' });
+	await testDb().client.execute("CREATE TRIGGER fail_refund_balance BEFORE UPDATE OF credits_remaining ON organizations BEGIN SELECT RAISE(ABORT, 'refund write failed'); END");
+	try {
+		await expect(applyLedgerDelta(db, { orgId: 'org-1', delta: -500, reason: 'refund', refType: 'refund', refId: 'ch_rollback' })).rejects.toThrow('Failed query');
+		expect(await getCredits('org-1')).toBe(500);
+		expect(await db.select().from(creditTransactions)).toEqual([]);
+		expect((await db.select().from(organizations).get())?.autoTopupEnabled).toBe(1);
+	} finally { await testDb().client.execute('DROP TRIGGER fail_refund_balance'); }
+});
+
+
+test.each([false, true])('an older observed refund retains completed-payment recovery and newer consent (resumed: %s)', async (resumed) => {
+	await seedOrg('org-1', 100, 'cus_1');
+	await db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle' });
+	await db.insert(creditTransactions).values({ orgId: 'org-1', delta: 100, reason: 'auto_topup', refType: 'payment_intent', refId: 'pi_replacement', paymentIntentId: 'pi_replacement', chargeId: 'ch_replacement', createdAt: '2026-09-30T13:10:30.000Z' });
+	await pauseForObservedStripeRefund(db, 'org-1', 'ch_purchase', 200, '2026-09-30T13:11:00.000Z');
+	if (resumed) await db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupConsentedAt: '2026-09-30T13:12:00.000Z' });
+	await pauseForObservedStripeRefund(db, 'org-1', 'ch_purchase', 100, '2026-09-30T13:10:00.000Z');
+	expect((await db.select().from(stripeAutoTopupRecoveries)).map(row => row.paymentIntentId)).toEqual(resumed ? [] : ['pi_replacement']);
+	expect((await db.select().from(organizations).get())?.autoTopupEnabled).toBe(resumed ? 1 : 0);
 });

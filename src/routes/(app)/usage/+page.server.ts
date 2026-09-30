@@ -18,7 +18,7 @@ import { db } from '$lib/server/db';
 import { resolveOpenAiKey } from '$lib/server/openaiKey';
 import { organizations, stripeAutoTopupRecoveries } from '$lib/server/db/schema';
 import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
-import { configuredBundles } from '$lib/server/stripe/bundles';
+import { configuredAutoTopupBundles, configuredBundles } from '$lib/server/stripe/bundles';
 import { getStripe } from '$lib/server/stripe/client';
 import { requireOrgRole } from '$lib/server/ownership';
 import { requireUser } from '$lib/server/session';
@@ -52,6 +52,7 @@ function maintenanceData() {
 		history: [],
 		bundles: [],
 		autoTopup: null,
+		autoTopupBundles: [],
 		autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
 		stripeConfigured: Boolean(env.STRIPE_SECRET_KEY),
 		plans: { hosted: Boolean(env.STRIPE_PRICE_HOSTED_MONTHLY), lifetime: Boolean(env.STRIPE_PRICE_LIFETIME) },
@@ -133,6 +134,7 @@ export const load: PageServerLoad = async ({ locals }) => {
 			.select({
 				autoTopupEnabled: organizations.autoTopupEnabled,
 				autoTopupThreshold: organizations.autoTopupThreshold,
+				autoTopupBundle: organizations.autoTopupBundle,
 				autoTopupState: organizations.autoTopupState,
 				autoTopupFailures: organizations.autoTopupFailures,
 				autoTopupLastAttemptAt: organizations.autoTopupLastAttemptAt,
@@ -184,9 +186,11 @@ export const load: PageServerLoad = async ({ locals }) => {
 				createdAt: row.createdAt
 			})),
 			bundles: configuredBundles(),
+			autoTopupBundles: configuredAutoTopupBundles(),
 			autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
 			autoTopup: {
 				enabled: org.autoTopupEnabled === 1,
+				bundle: org.autoTopupBundle,
 				threshold: org.autoTopupThreshold ?? AUTO_TOPUP_DEFAULT_THRESHOLD,
 				state: org.autoTopupState ?? 'idle',
 				failures: org.autoTopupFailures ?? 0,
@@ -256,6 +260,8 @@ export const actions: Actions = {
 		} catch (cause) {
 			if (isRedirect(cause) || isHttpError(cause)) throw cause;
 			console.error('usage: Mercado Pago checkout failed for org %s:', user.orgId, cause);
+			const rejection = checkoutRejectionMessage(cause);
+			if (rejection) return fail(400, { error: rejection });
 			return fail(400, { error: 'Could not start Mercado Pago checkout — please try again.' });
 		}
 	},
@@ -292,6 +298,7 @@ export const actions: Actions = {
 		requireOrgRole(user, 'owner');
 		const form = await request.formData();
 		const enabled = form.get('enabled') === 'on';
+		const bundle = String(form.get('bundle') ?? '');
 		const thresholdRaw = String(form.get('threshold') ?? '');
 		// The threshold is required only when ENABLING: an absent field must
 		// fail, not silently become 0 (Number('') === 0 would set "top up
@@ -318,6 +325,8 @@ export const actions: Actions = {
 				autoTopupEnabled: organizations.autoTopupEnabled,
 					autoTopupState: organizations.autoTopupState,
 					autoTopupPausedAt: organizations.autoTopupPausedAt,
+				autoTopupBundle: organizations.autoTopupBundle,
+				autoTopupAttemptAt: organizations.autoTopupAttemptAt,
 				plan: organizations.plan
 			})
 			.from(organizations)
@@ -335,6 +344,14 @@ export const actions: Actions = {
 			return fail(400, { error: 'You must tick the consent checkbox to enable automatic top-up.' });
 		}
 		if (enabled) {
+			if (!configuredAutoTopupBundles().some((option) => option.id === bundle)) {
+				console.error(`auto top-up settings rejected for org ${user.orgId}: unavailable bundle`);
+				return fail(400, { error: 'Choose an available automatic top-up bundle (500 or 2,000 comments).' });
+			}
+			if (bundle !== current?.autoTopupBundle && (current?.autoTopupState === 'in_flight' || current?.autoTopupAttemptAt)) {
+				console.error(`auto top-up settings rejected for org ${user.orgId}: bundle change during unresolved payment`);
+				return fail(409, { error: 'Wait for the current automatic payment to resolve before changing its bundle.' });
+			}
 			if (current?.autoTopupPausedAt && form.get('pausedAt') !== current.autoTopupPausedAt) {
 				console.error(`auto top-up enable rejected for org ${user.orgId}: stale form after refund pause`);
 				return fail(409, { error: 'Your automatic top-up settings changed after a refund. Reload Usage and give fresh consent to resume.' });
@@ -375,6 +392,7 @@ export const actions: Actions = {
 				.set({
 					autoTopupEnabled: 1,
 					autoTopupThreshold: threshold,
+					autoTopupBundle: bundle,
 					autoTopupPauseReason: null,
 					...(resetClaim ? { autoTopupState: 'idle', autoTopupFailures: 0 } : {}),
 					...evidence
@@ -382,7 +400,12 @@ export const actions: Actions = {
 				.where(and(eq(organizations.id, user.orgId), ne(organizations.plan, 'lifetime'),
 					current?.autoTopupEnabled == null ? isNull(organizations.autoTopupEnabled) : eq(organizations.autoTopupEnabled, current.autoTopupEnabled),
 					current?.autoTopupPausedAt == null ? isNull(organizations.autoTopupPausedAt) : eq(organizations.autoTopupPausedAt, current.autoTopupPausedAt),
-					notExists(unresolved)))
+					notExists(unresolved),
+					current?.autoTopupBundle == null ? isNull(organizations.autoTopupBundle) : eq(organizations.autoTopupBundle, current.autoTopupBundle),
+					...(bundle !== current?.autoTopupBundle ? [
+						isNull(organizations.autoTopupAttemptAt),
+						sql`COALESCE(${organizations.autoTopupState}, 'idle') != 'in_flight'`
+					] : [])))
 				.returning({ id: organizations.id });
 			if (written.length !== 1) {
 				console.error(`setAutoTopup rejected concurrent billing changes for org ${user.orgId}`);

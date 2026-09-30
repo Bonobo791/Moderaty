@@ -293,3 +293,13 @@ describe('early entitlement refunds retain the original pause obligation', () =>
 		expect(await testDb().db.select().from(organizations).get()).toMatchObject({ autoTopupEnabled: 1, autoTopupPauseReason: null });
 	});
 });
+
+test.each(['subscription', 'lifetime'])('a pending %s refund pauses automatic top-up when the late grant consumes it', async (kind) => {
+	await seedOrg();
+	await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle' });
+	await testDb().db.insert(stripePendingReversals).values({ chargeId: 'ch_early', reason: 'refund' });
+	if (kind === 'subscription') await grantSubscriptionPeriod({ orgId: 'org-1', subscriptionId: 'sub-early', invoiceId: 'in-early', chargeId: 'ch_early', periodKey: 'early', periodStart: '2026-09-01T00:00:00.000Z', periodEnd: '2026-10-01T00:00:00.000Z', eventCreated: 100, eventId: 'evt-early' });
+	else await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs_early', chargeId: 'ch_early' });
+	expect((await testDb().db.select().from(organizations).get())?.autoTopupEnabled).toBe(0);
+	expect(await testDb().db.select().from(stripePendingReversals)).toEqual([]);
+});

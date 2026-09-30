@@ -57,6 +57,8 @@ export function isTestCheckoutOperator(user: Pick<SessionUser, 'email'>): boolea
 export function checkoutRejectionMessage(error: unknown): string | null {
 	if (!(error instanceof Error)) return null;
 	switch (error.message) {
+		case 'credit bundle credits_100 is not available for purchase':
+			return 'The 100-comment bundle is no longer available. Choose 500 or 2,000 comments.';
 		case HOSTED_PLAN_EXISTS_ERROR:
 			return 'Your organization already has an active hosted subscription — manage it via the customer portal below.';
 		case ACTIVE_HOSTED_PLAN_ERROR:

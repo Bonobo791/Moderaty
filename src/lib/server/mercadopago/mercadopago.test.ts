@@ -683,3 +683,30 @@ test('the checkout idempotency key is namespaced per org — an attempt id reuse
 	expect(secondKey).toMatch(/^[0-9a-f]{64}$/);
 	expect(secondKey).not.toBe(firstKey);
 });
+
+test('a stale zero-refund approval cannot grant after a partial refund was observed', async () => {
+	await expect(fulfillMercadoPagoPayment({ ...payment, refundedAmount: 2 })).rejects.toThrow(/partial refund/);
+	await expect(fulfillMercadoPagoPayment(payment)).rejects.toThrow(/partial refund|changed while fulfilling/);
+	expect((await testDb().db.select().from(organizations).get())?.creditsRemaining).toBe(0);
+});
+
+test('a legacy refunded attempt still pauses once, then respects resumed consent', async () => {
+	await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle' });
+	await testDb().db.update(mercadoPagoCheckoutAttempts).set({ status: 'refunded', paymentId: payment.id });
+	const refund = { ...payment, status: 'refunded', refundedAmount: 5 };
+	await processMercadoPagoPayment(refund);
+	expect((await testDb().db.select().from(organizations).get())?.autoTopupEnabled).toBe(0);
+	await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupPauseReason: null });
+	await processMercadoPagoPayment(refund);
+	expect((await testDb().db.select().from(organizations).get())?.autoTopupEnabled).toBe(1);
+});
+
+test('missing Mercado Pago webhook configuration fails before any database access', async () => {
+	const previous = mocks.env.MERCADOPAGO_WEBHOOK_SECRET;
+	const select = vi.spyOn(testDb().db, 'select');
+	try {
+		delete (mocks.env as Partial<typeof mocks.env>).MERCADOPAGO_WEBHOOK_SECRET;
+		await expect(createMercadoPagoCreditCheckout('org-1', TEST_OWNER, 'credits_500')).rejects.toThrow(/WEBHOOK_SECRET/);
+		expect(select).not.toHaveBeenCalled();
+	} finally { mocks.env.MERCADOPAGO_WEBHOOK_SECRET = previous; select.mockRestore(); }
+});

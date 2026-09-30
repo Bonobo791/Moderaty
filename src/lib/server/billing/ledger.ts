@@ -7,7 +7,7 @@
 
 import { and, asc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import { db } from '$lib/server/db';
-import { creditTransactions, organizations, stripePendingReversals, stripeSubscriptionPeriods, stripeDisputeReversals, stripeAutoTopupRecoveries } from '$lib/server/db/schema';
+import { creditTransactions, organizations, stripePendingReversals, stripeSubscriptionPeriods, stripeDisputeReversals, stripeAutoTopupRecoveries, stripeRefundObservations } from '$lib/server/db/schema';
 
 export type CreditReason = 'consume' | 'purchase' | 'auto_topup' | 'refund' | 'dispute' | 'adjust';
 // 'refund' and 'dispute' are reversal refTypes anchored on the charge id —
@@ -182,7 +182,7 @@ export async function assertCreditsPurchasable(orgId: string): Promise<void> {
 export const UNMETERED_CREDIT_GRANT_ERROR = 'an unmetered plan cannot receive credit grants';
 
 /** Caller supplies a transaction when the pause accompanies a credit reversal. */
-export async function pauseAutoTopupForRefund(handle: LedgerHandle, orgId: string, occurredAt?: string): Promise<void> {
+export async function pauseAutoTopupForRefund(handle: LedgerHandle, orgId: string, occurredAt?: string, refundedChargeId?: string): Promise<void> {
 	return inLedgerTx(handle, async (tx) => {
 		const org = await tx.select({ state: organizations.autoTopupState, lastAttemptAt: organizations.autoTopupLastAttemptAt, attemptAt: organizations.autoTopupAttemptAt, submittedAt: organizations.autoTopupSubmittedAt, customerId: organizations.stripeCustomerId, pauseReason: organizations.autoTopupPauseReason, pausedAt: organizations.autoTopupPausedAt }).from(organizations).where(eq(organizations.id, orgId)).get();
 		if (!org) throw new Error(`org not found: ${orgId}`);
@@ -212,6 +212,8 @@ export async function pauseAutoTopupForRefund(handle: LedgerHandle, orgId: strin
 				WHERE ${creditTransactions.orgId} = ${orgId} AND ${creditTransactions.reason} = 'auto_topup'
 					AND ${creditTransactions.delta} > 0 AND ${creditTransactions.createdAt} >= ${occurredAt}
 					AND ${creditTransactions.paymentIntentId} IS NOT NULL
+					AND (${refundedChargeId ?? null} IS NULL OR ${creditTransactions.chargeId} IS NULL
+						OR ${creditTransactions.chargeId} != ${refundedChargeId ?? null})
 					AND NOT EXISTS (SELECT 1 FROM ${stripeAutoTopupRecoveries}
 						WHERE ${stripeAutoTopupRecoveries.orgId} = ${orgId}
 						AND ${stripeAutoTopupRecoveries.paymentIntentId} = ${creditTransactions.paymentIntentId})
@@ -219,6 +221,28 @@ export async function pauseAutoTopupForRefund(handle: LedgerHandle, orgId: strin
 			`);
 		}
 		console.error(`auto top-up paused for org ${orgId}: payment refunded — fresh owner consent required`);
+	});
+}
+
+/** Each increase pauses once; unknown purchase links wait durably for the grant. */
+export async function pauseForObservedStripeRefund(handle: LedgerHandle, orgId: string | undefined, chargeId: string, refundedAmountCents?: number, occurredAt?: string): Promise<void> {
+	return inLedgerTx(handle, async (tx) => {
+		if (refundedAmountCents !== undefined) {
+			await tx.insert(stripeRefundObservations).values({ chargeId, refundedAmountCents, occurredAt: occurredAt ?? new Date().toISOString() }).onConflictDoUpdate({
+				target: stripeRefundObservations.chargeId,
+				set: { refundedAmountCents, occurredAt: occurredAt ?? new Date().toISOString(), orgId: null },
+				setWhere: lt(stripeRefundObservations.refundedAmountCents, refundedAmountCents)
+			});
+		}
+		const observation = await tx.select().from(stripeRefundObservations).where(eq(stripeRefundObservations.chargeId, chargeId)).get();
+		// An earlier event can reveal replacement charges before the latest refund.
+		// Keep the cumulative amount's replay anchor and still honor later consent.
+		if (observation && orgId && occurredAt && Date.parse(occurredAt) < Date.parse(observation.occurredAt)) {
+			await pauseAutoTopupForRefund(tx, orgId, occurredAt, chargeId);
+		}
+		if (!observation || observation.orgId || !orgId) return;
+		await pauseAutoTopupForRefund(tx, orgId, observation.occurredAt, chargeId);
+		await tx.update(stripeRefundObservations).set({ orgId }).where(eq(stripeRefundObservations.chargeId, chargeId));
 	});
 }
 
@@ -271,7 +295,8 @@ export async function applyLedgerDelta(
 			.onConflictDoNothing({ target: UNIQUE_TARGET })
 			.returning({ id: creditTransactions.id });
 		if (inserted.length === 0) return false; // already applied — idempotent no-op
-		if (reason === 'refund' && 0 > delta) await pauseAutoTopupForRefund(tx, orgId, refundOccurredAt);
+		if (reason === 'refund' && 0 > delta) await pauseAutoTopupForRefund(tx, orgId, refundOccurredAt, chargeId);
+		if (delta > 0 && reason !== 'auto_topup' && chargeId) await pauseForObservedStripeRefund(tx, orgId, chargeId);
 		const updated = await tx
 			.update(organizations)
 			// COALESCE: pre-billing orgs carry NULL credits (I7 nullable-first);
@@ -703,7 +728,7 @@ export async function drainPendingReversals(chargeId: string): Promise<number> {
 				refType: row.reason === 'refund' ? 'refund' : 'dispute',
 				refId: chargeId,
 				chargeId,
-				refundOccurredAt: row.occurredAt ?? undefined
+				refundOccurredAt: row.occurredAt ?? row.createdAt
 			});
 			if (row.reason === 'dispute' && row.disputeId) await tx.update(stripeDisputeReversals).set({ source: 'credits', status: 'reversed' }).where(eq(stripeDisputeReversals.disputeId, row.disputeId));
 			// Satisfied (whether applied now or by a concurrent path): the anchor

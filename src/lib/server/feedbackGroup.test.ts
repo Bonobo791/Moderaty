@@ -41,6 +41,16 @@ describe('normalizeClaimKey', () => {
 });
 
 describe('groupFeedback', () => {
+	test('original-claim fallback cannot join a theme just because the wording matches', () => {
+		const { findings, pooled } = groupFeedback([
+			...supporters('visa procedures', 2, 'theme', { groupingSource: 'theme' }),
+			...supporters('visa procedures', 3, 'original', { groupingSource: 'original' })
+		]);
+		expect(findings).toHaveLength(1);
+		expect(findings[0]).toMatchObject({ supporterCount: 3 });
+		expect(findings[0].evidence.map((entry) => entry.commentId)).toEqual(['original0', 'original1', 'original2']);
+		expect(pooled).toBe(2);
+	});
 	test('groups same-theme comments into one finding per category', () => {
 		const { findings } = groupFeedback([
 			...supporters('when is the next video', 3),

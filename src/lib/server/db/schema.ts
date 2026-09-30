@@ -413,6 +413,7 @@ export const feedbackDigests = sqliteTable('feedback_digests', {
 	status: text('status').notNull(), // 'complete' | 'failed' | 'deferred'
 	commentsClassified: integer('comments_classified').notNull().default(0),
 	commentsFailed: integer('comments_failed').notNull().default(0), // per-comment classifier failures, skipped and counted (I1)
+	clusteringDegraded: integer('clustering_degraded'),
 	pooledCount: integer('pooled_count').notNull().default(0), // feedback comments that fell below the evidence threshold
 	creditsUsed: integer('credits_used'), // metered credits charged for this run; null = unmetered/none
 	error: text('error'), // sanitized failure category only — raw provider detail stays in the server log

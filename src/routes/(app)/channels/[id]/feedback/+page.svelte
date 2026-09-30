@@ -103,6 +103,10 @@
 	}
 </script>
 
+{#snippet clusteringNotice()}
+	<p class="muted" role="status">Some comments could not be grouped reliably. Those comments were analyzed using their original extracted claims, so similar feedback may be undercounted.</p>
+{/snippet}
+
 <svelte:head>
 	<title>Moderaty — Feedback</title>
 </svelte:head>
@@ -209,6 +213,7 @@
 				</form>
 			{/if}
 			{#if shown}
+				{#if shown.clusteringDegraded}{@render clusteringNotice()}{/if}
 				<p class="muted">
 					Window {windowLabel(shown)} · {shown.commentsClassified} classified{#if shown.commentsFailed}
 						· {shown.commentsFailed} failed{/if} · {shown.creditsUsed === null ? 'unmetered' : `${shown.creditsUsed} credits used`} · generated {relativeTime(shown.createdAt)}
@@ -321,10 +326,10 @@
 					recurring theme.
 				</p>
 			{/if}
-			{#if !grouped.length && !shown.pooledCount}
+			{#if !grouped.length}
 				<EmptyState
-					title="No recurring feedback this window"
-					hint="Nothing met the minimum-comments threshold — below-threshold feedback would show as the pooled count."
+					title="No recurring feedback found in these comments."
+					hint="No themes met the minimum-comments threshold."
 				/>
 			{/if}
 		{:else if !newestAttention}
@@ -411,6 +416,7 @@
 		{#if feedbackPreview}
 			<section class="preview-results" aria-label="Feedback dry-run results">
 				<h4>Feedback dry-run preview</h4>
+				{#if feedbackPreview.clusteringDegraded}{@render clusteringNotice()}{/if}
 				<p class="muted">{feedbackPreview.commentsClassified} classified · {feedbackPreview.commentsFailed} failed · {feedbackPreview.pooled} pooled · 0 credits used</p>
 				<p class="muted">Run a history scan to cover the full window.</p>
 				{#if feedbackPreview.hasMore}<p class="muted">More comments are available beyond this preview page.</p>{/if}
@@ -430,7 +436,7 @@
 						</div>
 					{/each}
 				{:else}
-					<EmptyState title="No grouped findings in this preview" hint="No themes met the feedback settings threshold on this page." />
+					<EmptyState title="No recurring feedback found in these comments." hint="No themes met the feedback settings threshold on this page." />
 				{/if}
 			</section>
 		{/if}

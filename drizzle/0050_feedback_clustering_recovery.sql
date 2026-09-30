@@ -1,0 +1,1 @@
+ALTER TABLE `feedback_digests` ADD `clustering_degraded` integer;

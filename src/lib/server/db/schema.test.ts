@@ -560,6 +560,7 @@ describe('feedback_digests', () => {
 			status: { notNull: true },
 			comments_classified: { notNull: true, hasDefault: true },
 			comments_failed: { notNull: true, hasDefault: true },
+			clustering_degraded: { notNull: false },
 			pooled_count: { notNull: true, hasDefault: true },
 			credits_used: { notNull: false },
 			error: { notNull: false },

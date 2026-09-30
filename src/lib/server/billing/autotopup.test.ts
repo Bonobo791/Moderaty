@@ -87,6 +87,29 @@ test('auto-top-up trigger documentation uses the effective balance', () => {
 	expect(trigger).toContain('effective balance (purchased credits + unused active subscription allowance) < threshold');
 });
 
+test.each([false, true])('a delayed refund recovers completed replacement top-ups exactly once (later refund delivered first: %s)', async (laterRefundFirst) => {
+	await seedOrg();
+	const occurredAt = new Date(Date.now() - 60_000).toISOString();
+	for (const id of ['pi_completed_1', 'pi_completed_2']) {
+		await grantAutoTopupCredits('org-1', { id, status: 'succeeded', latest_charge: `ch_${id}`, metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_100' } });
+	}
+	await testDb().db.update(creditTransactions).set({ createdAt: new Date().toISOString() });
+	await applyLedgerDelta(testDb().db, { orgId: 'org-1', delta: 100, reason: 'auto_topup', refType: 'payment_intent', refId: 'pi_older', paymentIntentId: 'pi_older' });
+	await testDb().db.update(creditTransactions).set({ createdAt: new Date(Date.parse(occurredAt) - 60_000).toISOString() }).where(eq(creditTransactions.refId, 'pi_older'));
+	if (laterRefundFirst) await pauseAutoTopupForRefund(testDb().db, 'org-1', new Date(Date.now() + 60_000).toISOString());
+	await pauseAutoTopupForRefund(testDb().db, 'org-1', occurredAt);
+	await pauseAutoTopupForRefund(testDb().db, 'org-1', occurredAt);
+	expect(await testDb().db.select().from(stripeAutoTopupRecoveries)).toEqual(expect.arrayContaining([
+		expect.objectContaining({ paymentIntentId: 'pi_completed_1', resolvedAt: null }),
+		expect.objectContaining({ paymentIntentId: 'pi_completed_2', resolvedAt: null })
+	]));
+	expect(await testDb().db.select().from(stripeAutoTopupRecoveries)).toHaveLength(2);
+	mocks.paymentIntentsRetrieve.mockImplementation(async (id: string) => ({ id, status: 'succeeded', metadata: { type: 'auto_topup', org_id: 'org-1' } }));
+	expect(await sweepPausedTopups(10)).toBe(2);
+	expect(mocks.refundsCreate.mock.calls.map(([args]) => args.payment_intent).sort()).toEqual(['pi_completed_1', 'pi_completed_2']);
+	expect((await testDb().db.select().from(stripeAutoTopupRecoveries)).every(row => row.resolvedAt !== null)).toBe(true);
+});
+
 describe('maybeTriggerAutoTopUp', () => {
 	test('a definitive card failure ends the logical attempt before a later charge', async () => {
 		await seedOrg({ creditsRemaining: 0 });

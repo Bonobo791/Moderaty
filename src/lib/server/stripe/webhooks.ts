@@ -633,13 +633,52 @@ async function reverseCreditGrant(chargeId: string, reason: 'refund' | 'dispute'
 	return applied;
 }
 
+/** The durable attempt also identifies a purchase before its grant exists. */
+async function refundCheckoutOrg(session: Stripe.Checkout.Session, paymentIntentId: string): Promise<{ orgId: string } | undefined> {
+	if (!stripeId(session) || stripeId(session.payment_intent) !== paymentIntentId) {
+		console.error('stripe: skipped malformed refund checkout link', { paymentIntentId });
+		return undefined;
+	}
+	const attempt = await db.select({ orgId: stripeCheckoutAttempts.orgId }).from(stripeCheckoutAttempts).where(eq(stripeCheckoutAttempts.stripeSessionId, session.id)).get();
+	if (attempt) return attempt;
+	// A lost create response can leave the attempt's session ID unset.
+	const orgId = session.metadata?.org_id;
+	const customerId = stripeId(session.customer);
+	if (typeof orgId !== 'string' || !customerId) return undefined;
+	const product = session.metadata?.product;
+	const bundle = session.metadata?.bundle;
+	const ours = product === 'lifetime' || product === 'hosted' || product === TEST_CHECKOUT_PRODUCT || (typeof bundle === 'string' && loadBundle(bundle, session.id));
+	if (!ours) return undefined;
+	return db.select({ orgId: organizations.id }).from(organizations).where(and(eq(organizations.id, orgId), eq(organizations.stripeCustomerId, customerId))).get();
+}
+
+/** Resolve server-created purchase links when the refund beats local fulfillment. */
+async function refundOrgBeforeFulfillment(charge: Stripe.Charge, paymentIntentId?: string): Promise<{ orgId: string } | undefined> {
+	if (!paymentIntentId) return undefined;
+	const pi = optionalRecord(charge.payment_intent);
+	const metadata = optionalRecord(pi?.metadata);
+	if (metadata?.type === 'auto_topup' && typeof metadata.org_id === 'string') {
+		const customerId = stripeId(charge.customer) ?? stripeId(pi?.customer);
+		if (customerId) return db.select({ orgId: organizations.id }).from(organizations).where(and(eq(organizations.id, metadata.org_id), eq(organizations.stripeCustomerId, customerId))).get();
+	}
+	const sessions = await getStripe().checkout.sessions.list({ payment_intent: paymentIntentId, limit: 2 });
+	if (!Array.isArray(sessions.data) || sessions.has_more || sessions.data.length > 1) throw new Error('Stripe refund has invalid or ambiguous checkout ownership');
+	if (sessions.data[0]) {
+		const org = await refundCheckoutOrg(sessions.data[0], paymentIntentId);
+		if (org) return org;
+	}
+	const subscription = await refundedSubscription(charge.id, paymentIntentId);
+	return subscription?.orgId ? { orgId: subscription.orgId } : undefined;
+}
+
 /** Only a payment associated with a Moderaty purchase can revoke its authorization. */
 async function pauseRefundedCharge(charge: Stripe.Charge, paymentIntentId: string | undefined, occurredAt?: string): Promise<void> {
 	if (typeof charge.amount_refunded !== 'number' || charge.amount_refunded <= 0) return;
 	const chargeId = charge.id;
 	const org = await findGrantForStripe(db, { chargeId, paymentIntentId })
 		?? await db.select({ orgId: stripeSubscriptionPeriods.orgId }).from(stripeSubscriptionPeriods).where(stripeIdentifierPredicate({ chargeId, paymentIntentId }, stripeSubscriptionPeriods.paymentIntentId, stripeSubscriptionPeriods.chargeId)).get()
-		?? await db.select({ orgId: stripeLifetimeEntitlements.orgId }).from(stripeLifetimeEntitlements).where(stripeIdentifierPredicate({ chargeId, paymentIntentId }, stripeLifetimeEntitlements.paymentIntentId, stripeLifetimeEntitlements.chargeId)).get();
+		?? await db.select({ orgId: stripeLifetimeEntitlements.orgId }).from(stripeLifetimeEntitlements).where(stripeIdentifierPredicate({ chargeId, paymentIntentId }, stripeLifetimeEntitlements.paymentIntentId, stripeLifetimeEntitlements.chargeId)).get()
+		?? await refundOrgBeforeFulfillment(charge, paymentIntentId);
 	if (!org) return;
 	const reversed = await db.select({ id: creditTransactions.id }).from(creditTransactions).where(and(eq(creditTransactions.orgId, org.orgId), eq(creditTransactions.refType, 'refund'), eq(creditTransactions.refId, chargeId))).get();
 	if (!reversed) await pauseAutoTopupForRefund(db, org.orgId, occurredAt);
@@ -707,7 +746,17 @@ async function refundedSubscription(chargeId: string, paymentIntentId?: string):
 	const invoice = asRecord(await getStripe().invoices.retrieve(invoiceId));
 	const subscriptionId = invoiceSubscriptionId(invoice);
 	if (!subscriptionId) return null; // a one-off invoice, not subscription billing
-	return { subscriptionId, orgId: (await findOrgForStripe(subscriptionId))?.id };
+	let orgId = (await findOrgForStripe(subscriptionId))?.id;
+	if (!orgId) {
+		const subscription = await fetchLiveSubscription(subscriptionId);
+		const metadata = optionalRecord(subscription?.metadata);
+		const customerId = stripeId(subscription?.customer);
+		if (customerId && (metadata?.product === 'hosted' || metadata?.product === TEST_CHECKOUT_PRODUCT)) {
+			const org = await findOrgForStripe(undefined, customerId);
+			if (org?.id === metadata.org_id) orgId = org?.id;
+		}
+	}
+	return { subscriptionId, orgId };
 }
 
 /**

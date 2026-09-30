@@ -1,5 +1,5 @@
 import { eq } from 'drizzle-orm';
-import { beforeEach, describe, expect, test } from 'vitest';
+import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { organizations, stripeLifetimeEntitlements, stripeLifetimeSlots, stripeSubscriptionPeriods, stripePendingReversals, stripeDisputeReversals } from '$lib/server/db/schema';
@@ -7,7 +7,7 @@ import { claimLifetimeSlot, grantSubscriptionPeriod, lifetimeSlotsRemaining, rel
 import { consumeCredit, getCredits } from './ledger';
 import { LIFETIME_SLOT_LIMIT } from './plans';
 
-setupTestDb(['organizations', 'stripe_subscription_periods', 'stripe_lifetime_entitlements', 'stripe_lifetime_slots', 'stripe_pending_reversals', 'stripe_dispute_reversals']);
+setupTestDb(['organizations', 'stripe_subscription_periods', 'stripe_lifetime_entitlements', 'stripe_lifetime_slots', 'stripe_pending_reversals', 'stripe_dispute_reversals', 'credit_transactions', 'stripe_auto_topup_recoveries']);
 
 async function seedOrg(id = 'org-1') {
 	await testDb().db.insert(organizations).values({ id, name: id });
@@ -267,5 +267,29 @@ describe('lifetime entitlements', () => {
 		await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs-2', paymentIntentId: 'pi-2', chargeId: 'ch-2' });
 		await revokeLifetimeForDispute({ paymentIntentId: 'pi-2', chargeId: 'ch-2' });
 		expect(await lifetimeSlotsRemaining()).toBe(LIFETIME_SLOT_LIMIT - 1);
+	});
+});
+
+
+describe('early entitlement refunds retain the original pause obligation', () => {
+	test.each(['subscription', 'lifetime'])('pending %s refund pauses charging during fulfillment', async (kind) => {
+		await seedOrg();
+		await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle' });
+		await testDb().db.insert(stripePendingReversals).values({ chargeId: 'ch_early', reason: 'refund', occurredAt: '2026-09-30T13:10:00.000Z' });
+		const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			if (kind === 'subscription') await grantSubscriptionPeriod({ orgId: 'org-1', subscriptionId: 'sub_early', invoiceId: 'in_early', chargeId: 'ch_early', periodKey: 'period', periodStart: '2026-09-01', periodEnd: '2026-10-01', eventCreated: 100, eventId: 'evt_early' });
+			else await claimLifetimeSlot({ orgId: 'org-1', checkoutSessionId: 'cs_early', chargeId: 'ch_early' });
+		} finally { log.mockRestore(); }
+		expect(await testDb().db.select().from(organizations).get()).toMatchObject({ autoTopupEnabled: 0, autoTopupPauseReason: 'refund' });
+		expect(await testDb().db.select().from(stripePendingReversals)).toHaveLength(0);
+	});
+
+	test('a pending subscription refund respects owner consent given after its event time', async () => {
+		await seedOrg();
+		await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupConsentedAt: '2026-09-30T13:11:00.000Z' });
+		await testDb().db.insert(stripePendingReversals).values({ chargeId: 'ch_early', reason: 'refund', occurredAt: '2026-09-30T13:10:00.000Z' });
+		await grantSubscriptionPeriod({ orgId: 'org-1', subscriptionId: 'sub_early', invoiceId: 'in_early', chargeId: 'ch_early', periodKey: 'period', periodStart: '2026-09-01', periodEnd: '2026-10-01', eventCreated: 100, eventId: 'evt_early' });
+		expect(await testDb().db.select().from(organizations).get()).toMatchObject({ autoTopupEnabled: 1, autoTopupPauseReason: null });
 	});
 });

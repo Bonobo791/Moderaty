@@ -9,6 +9,7 @@ import { claimEvent, fulfillAutoTopup, fulfillCheckout, handleStripeEvent, markE
 
 const mocks = vi.hoisted(() => ({
 	sessionsRetrieve: vi.fn(),
+	sessionsList: vi.fn(),
 	paymentIntentsRetrieve: vi.fn(),
 	chargesRetrieve: vi.fn(),
 	disputesRetrieve: vi.fn(),
@@ -26,7 +27,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('$lib/server/stripe/client', () => ({
 	getStripe: () => ({
-		checkout: { sessions: { retrieve: mocks.sessionsRetrieve } },
+		checkout: { sessions: { retrieve: mocks.sessionsRetrieve, list: mocks.sessionsList } },
 		paymentIntents: { retrieve: mocks.paymentIntentsRetrieve },
 		charges: { retrieve: mocks.chargesRetrieve },
 		disputes: { retrieve: mocks.disputesRetrieve },
@@ -86,6 +87,7 @@ async function seedSubscribedOrgAndFulfillLifetime(opts: { cachedStatus: string;
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	mocks.sessionsList.mockReset().mockResolvedValue({ data: [], has_more: false });
 	// clearAllMocks resets call history but NOT implementations — a test that
 	// forgets to stub a Stripe read would otherwise inherit whatever the
 	// previous test configured (cubic). Give the read mocks neutral defaults;
@@ -1290,6 +1292,53 @@ describe('fulfillAutoTopup', () => {
 });
 
 describe('reverseCharge / reverseDispute', () => {
+	test.each(['credits_500', 'lifetime'])('an early partial %s refund pauses through its checkout link before fulfillment', async (product) => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		await testDb().db.insert(stripeCheckoutAttempts).values({ orgId: 'org-1', attemptId: 'attempt-1', product, idempotencyKey: 'key-1', stripeSessionId: 'cs_early' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_early', payment_intent: 'pi_early', amount: 500, amount_refunded: 100 });
+		mocks.sessionsList.mockResolvedValue({ data: [session({ id: 'cs_early', metadata: { org_id: 'org-1', product }, payment_intent: 'pi_early' })], has_more: false });
+		const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try { expect(await reverseCharge('ch_early', 'refund', undefined, '2026-09-30T13:10:00.000Z')).toBe(false); } finally { log.mockRestore(); }
+		expect(mocks.sessionsList).toHaveBeenCalledWith({ payment_intent: 'pi_early', limit: 2 });
+		expect(await testDb().db.select().from(organizations).get()).toMatchObject({ autoTopupEnabled: 0, autoTopupPauseReason: 'refund' });
+	});
+
+	test.each(['cus_1', 'cus_other'])('a refund with an unsaved checkout response uses matching product and customer metadata: %s', async (customer) => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_early', payment_intent: 'pi_early', amount: 500, amount_refunded: 100 });
+		mocks.sessionsList.mockResolvedValue({ data: [session({ metadata: { org_id: 'org-1', bundle: 'credits_500' }, customer, payment_intent: 'pi_early' })], has_more: false });
+		const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try { await reverseCharge('ch_early', 'refund'); } finally { log.mockRestore(); }
+		expect((await testDb().db.select().from(organizations).get())?.autoTopupEnabled).toBe(customer === 'cus_1' ? 0 : 1);
+	});
+
+	test.each([{ data: null }, { data: [session(), session()] }, { data: [], has_more: true }])('invalid or ambiguous early refund ownership fails for webhook retry: %j', async (response) => {
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_early', payment_intent: 'pi_early', amount: 500, amount_refunded: 100 });
+		mocks.sessionsList.mockResolvedValue(response);
+		await expect(reverseCharge('ch_early', 'refund')).rejects.toThrow('invalid or ambiguous checkout ownership');
+	});
+
+	test('an early refunded automatic top-up pauses using its payment metadata and matching customer', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_early', customer: 'cus_1', payment_intent: { id: 'pi_early', metadata: { type: 'auto_topup', org_id: 'org-1' } }, amount: 500, amount_refunded: 100 });
+		const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try { await reverseCharge('ch_early', 'refund'); } finally { log.mockRestore(); }
+		expect(await testDb().db.select().from(organizations).get()).toMatchObject({ autoTopupEnabled: 0, autoTopupPauseReason: 'refund' });
+		expect(mocks.sessionsList).not.toHaveBeenCalled();
+	});
+
+	test.each([true, false])('an early partial subscription refund pauses through invoice ownership (subscription cached: %s)', async (cached) => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', stripeSubscriptionId: cached ? 'sub_early' : null, autoTopupEnabled: 1, autoTopupState: 'idle' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_early', payment_intent: 'pi_early', amount: 500, amount_refunded: 100 });
+		mocks.invoicePaymentsList.mockResolvedValue({ data: [{ invoice: 'in_early' }] });
+		mocks.invoicesRetrieve.mockResolvedValue({ id: 'in_early', parent: { type: 'subscription_details', subscription_details: { subscription: 'sub_early' } } });
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_early', customer: 'cus_1', metadata: { org_id: 'org-1', product: 'hosted' } });
+		const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try { await reverseCharge('ch_early', 'refund'); } finally { log.mockRestore(); }
+		expect(await testDb().db.select().from(organizations).get()).toMatchObject({ autoTopupEnabled: 0, autoTopupPauseReason: 'refund' });
+		expect(mocks.subscriptionsCancel).not.toHaveBeenCalled();
+	});
+
 	test('a full refund retry reverses credits without overriding later owner consent', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupConsentedAt: '2026-09-30T13:11:00.000Z' });
 		await applyLedgerDelta(db, { orgId: 'org-1', delta: 100, reason: 'purchase', refType: 'checkout_session', refId: 'cs_retry', chargeId: 'ch_retry' });

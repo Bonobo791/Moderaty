@@ -8,6 +8,7 @@ import {
 	stripePendingReversals,
 	stripeDisputeReversals
 } from '$lib/server/db/schema';
+import { pauseAutoTopupForRefund } from './ledger';
 import { HOSTED_INCLUDED_CREDITS, isActiveSubscriptionStatus } from './plans';
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -18,7 +19,7 @@ const LIFETIME_SLOT_RACE_ERROR = 'lifetime slot claim lost its race';
 const PAYMENT_REFERENCE_REQUIRED_ERROR = 'payment intent or charge id is required';
 
 type PendingReversalState = {
-	pending: Array<{ reason: string; disputeId: string | null }>;
+	pending: Array<{ reason: string; disputeId: string | null; occurredAt: string | null }>;
 	hasRefund: boolean;
 	disputeId?: string;
 	wonDispute: boolean;
@@ -131,10 +132,12 @@ export interface SubscriptionPeriodGrant {
 	eventId: string;
 }
 
-async function pendingReversalState(tx: Tx, chargeId?: string): Promise<PendingReversalState> {
+async function pendingReversalState(tx: Tx, orgId: string, chargeId?: string): Promise<PendingReversalState> {
 	if (!chargeId) return { pending: [], hasRefund: false, wonDispute: false };
-	const pending = await tx.select({ reason: stripePendingReversals.reason, disputeId: stripePendingReversals.disputeId }).from(stripePendingReversals).where(eq(stripePendingReversals.chargeId, chargeId)).all();
-	const hasRefund = pending.some((row) => row.reason === 'refund');
+	const pending = await tx.select({ reason: stripePendingReversals.reason, disputeId: stripePendingReversals.disputeId, occurredAt: stripePendingReversals.occurredAt }).from(stripePendingReversals).where(eq(stripePendingReversals.chargeId, chargeId)).all();
+	const refund = pending.find((row) => row.reason === 'refund');
+	const hasRefund = Boolean(refund);
+	if (refund) await pauseAutoTopupForRefund(tx, orgId, refund.occurredAt ?? undefined);
 	const disputeId = pending.find((row) => row.reason === 'dispute' && row.disputeId)?.disputeId ?? undefined;
 	const wonDispute = Boolean(disputeId && await tx.select({ id: stripeDisputeReversals.id }).from(stripeDisputeReversals).where(and(eq(stripeDisputeReversals.status, 'won'), eq(stripeDisputeReversals.disputeId, disputeId))).get());
 	return { pending, hasRefund, disputeId, wonDispute };
@@ -145,7 +148,7 @@ export async function grantSubscriptionPeriod(input: SubscriptionPeriodGrant): P
 	return db.transaction(async (tx) => {
 		const org = await tx.select({ id: organizations.id }).from(organizations).where(eq(organizations.id, input.orgId)).get();
 		if (!org) throw new Error(`org not found: ${input.orgId}`);
-		const reversal = await pendingReversalState(tx, input.chargeId);
+		const reversal = await pendingReversalState(tx, input.orgId, input.chargeId);
 		const periodStatus = reversal.hasRefund ? 'refunded' : reversal.wonDispute || !reversal.disputeId ? 'paid' : 'disputed';
 		const inserted = await tx.insert(stripeSubscriptionPeriods).values({ orgId: input.orgId, subscriptionId: input.subscriptionId, invoiceId: input.invoiceId, paymentIntentId: input.paymentIntentId, chargeId: input.chargeId, periodKey: input.periodKey, periodStart: input.periodStart, periodEnd: input.periodEnd, includedCredits: HOSTED_INCLUDED_CREDITS, consumedCredits: 0, status: periodStatus }).onConflictDoNothing().returning({ id: stripeSubscriptionPeriods.id });
 		if (reversal.pending.length && input.chargeId) await tx.delete(stripePendingReversals).where(eq(stripePendingReversals.chargeId, input.chargeId));
@@ -239,7 +242,7 @@ export async function claimLifetimeSlot(input: LifetimeClaim): Promise<LifetimeC
 			.where(and(eq(stripeLifetimeSlots.slot, slot.slot), isNull(stripeLifetimeSlots.activeOrgId)))
 			.returning({ slot: stripeLifetimeSlots.slot });
 		if (claimed.length !== 1) throw new Error(LIFETIME_SLOT_RACE_ERROR);
-		const reversal = await pendingReversalState(tx, input.chargeId);
+		const reversal = await pendingReversalState(tx, input.orgId, input.chargeId);
 		const pendingResult = await applyPendingLifetimeReversal(tx, input, slot.slot, inserted[0].id, reversal);
 		if (pendingResult) return pendingResult;
 		if (reversal.wonDispute) {

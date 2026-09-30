@@ -78,10 +78,30 @@ function channelResultEntries(payload) {
  * channel run forces `ok:false` on its 500 body, which says nothing about
  * the sweeps; on a 200 the caller checks `ok` itself.
  */
+/**
+ * A 200's payload must be the cron endpoint's shape — `{ ok: boolean,
+ * results: {...} }` — before any field can be classified. A proxy or
+ * malformed response answering `[]`, `42`, or `{}` would otherwise read as
+ * a healthy tick (cubic).
+ */
+export function validTickPayload(payload) {
+	return (
+		payload !== null &&
+		typeof payload === 'object' &&
+		!Array.isArray(payload) &&
+		typeof payload.ok === 'boolean' &&
+		payload.results !== null &&
+		typeof payload.results === 'object' &&
+		!Array.isArray(payload.results)
+	);
+}
+
 function detailProblems(payload) {
 	const problems = [];
 	for (const field of SWEEP_ERROR_FIELDS) {
-		if (payload[field]) problems.push(`${field}: ${String(payload[field]).slice(0, 120)}`);
+		// Sweep error text interpolates into a thrown Error the driver logs —
+		// flatten CR/LF or a hostile body forges extra log lines (cubic).
+		if (payload[field]) problems.push(`${field}: ${String(payload[field]).replaceAll(/[\r\n]+/g, ' ').slice(0, 120)}`);
 	}
 	if (payload.budgetExhausted) problems.push('sweeps consumed the run budget — no channel claimed');
 	if (payload.bookkeepingError) problems.push('run-health bookkeeping write failed');
@@ -93,7 +113,15 @@ function detailProblems(payload) {
 	}
 	for (const entry of channelResultEntries(payload)) {
 		if (typeof entry.error === 'string' && !USER_ACTIONABLE_CATEGORIES.has(entry.error)) {
-			problems.push(`channel run failed: ${entry.error}`);
+			problems.push(`channel run failed: ${entry.error.replaceAll(/[\r\n]+/g, ' ')}`);
+		}
+		// A channel run that ended partial on the tick deadline returns inside
+		// a 200 payload — without this check a moderation run that never
+		// finished classifies as a healthy tick (codex). 'deactivated' stops
+		// are owner-actionable (channel paused mid-run) and stay exempt, as
+		// does `outOfCredits` (billing — dashboard-visible).
+		if (entry.partial === true && entry.stoppedReason !== 'deactivated') {
+			problems.push('channel run timed out before completing (partial)');
 		}
 	}
 	return problems;
@@ -165,8 +193,8 @@ export async function tickOnce(fetchImpl = fetch) {
 		}
 		throw new Error(`cron endpoint answered ${res.status}: ${renderTick(payload, rawText)}`);
 	}
-	if (payload === null) {
-		throw new Error('cron endpoint returned a non-JSON body');
+	if (!validTickPayload(payload)) {
+		throw new Error('cron endpoint returned a non-JSON or invalid body');
 	}
 	if (problems.length) {
 		throw new Error(`cron tick reported failure(s): ${problems.join('; ')}`);
@@ -196,7 +224,9 @@ export async function pingHealthcheck(fetchImpl = fetch) {
  * Parses driver flags into { once, intervalMs }, or returns null on any
  * malformed input — the caller prints usage and exits non-zero. A
  * non-positive interval is rejected: `setInterval(tick, 0)` would hot-loop
- * the endpoint and the local system (codeant).
+ * the endpoint and the local system (codeant); an interval past Node's
+ * signed 32-bit timer limit is clamped to 1 ms by setTimeout — a typo like
+ * 2147483648 would hot-loop the same way (cubic).
  */
 export function parseDriverArgs(argv) {
 	const once = argv.includes('--once');
@@ -206,7 +236,8 @@ export function parseDriverArgs(argv) {
 	if (
 		argv.some((a) => a !== '--once' && a !== '--interval-ms' && a !== String(intervalMs)) ||
 		Number.isNaN(intervalMs) ||
-		intervalMs <= 0
+		intervalMs <= 0 ||
+		intervalMs > 2_147_483_647
 	) {
 		return null;
 	}

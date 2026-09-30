@@ -122,3 +122,19 @@ test('the failure log never carries a raw payment id (CRLF-safe, bounded)', asyn
 	expect(logged[0]).toContain('pay-1');
 	expect(logged[0].length).toBeLessThan(800);
 });
+
+test('the failure log bound holds against a real worst-case error — not just a short one', async () => {
+	// cubic: the cap is 128 (payment id) + 512 (error) + ~52 of literal text —
+	// ≈692 rendered chars. A 'boom'-length error leaves ~120 of slack, so the
+	// bound must be exercised by an error that actually overflows it.
+	mocks.retrievePayment.mockRejectedValue(new Error(`forged: ${'e'.repeat(2000)}\nsecond line`));
+	const logged = captureErrors();
+
+	await POST({ request: webhookRequest(`pay-${'9'.repeat(500)}`) } as never);
+
+	expect(logged).toHaveLength(1);
+	expect(logged[0]).not.toMatch(/[\r\n]/);
+	// Literal text + 128-char id cap + ': ' + 512-char error cap = ~694.
+	expect(logged[0].length).toBeLessThan(700);
+	expect(logged[0]).toContain('forged'); // flattened content survives the cut
+});

@@ -68,6 +68,36 @@ describe('dev cron tick', () => {
 		await expect(tickOnce()).rejects.toThrow('non-JSON');
 	});
 
+	it.each([
+		['a JSON array', '[]'],
+		['a JSON scalar', '42'],
+		['a JSON string', '"ok"'],
+		['a boolean', 'true'],
+		['an object without the cron shape', '{}'],
+		['a non-boolean ok', '{"ok":"yes","results":{}}'],
+		['an array results', '{"ok":true,"results":[]}']
+	])('throws on a 200 carrying %s — a healthy read would hide a proxy failure', async (_label, body) => {
+		// cubic: only the full `{ ok: boolean, results: object }` shape counts
+		// as an answered tick — anything else is a malformed/proxy response
+		// and must fail the invocation (and skip the healthcheck ping).
+		vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status: 200 })));
+
+		await expect(tickOnce()).rejects.toThrow('invalid');
+	});
+
+	it('strips CR/LF from sweep error text before it reaches the thrown Error', async () => {
+		// cubic: detailProblems interpolates error text into the thrown Error —
+		// a response carrying newlines would forge extra log lines even though
+		// renderTick sanitizes the response log.
+		const payload = { ok: false, sweepError: 'sweep blew up\n[INFO] all clear', results: {} };
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
+
+		const thrown = await tickOnce().catch((e) => e);
+		expect(thrown).toBeInstanceOf(Error);
+		expect(thrown.message).not.toMatch(/[\r\n]/);
+		expect(thrown.message).toContain('sweep blew up');
+	});
+
 	it('does not fail the tick when every channel failure is owner-actionable', async () => {
 		// A thrown channel run answers 500 with a sanitized category; 'token'
 		// means the owner must reconnect — persistent and dashboard-visible,
@@ -104,6 +134,23 @@ describe('dev cron tick', () => {
 
 	it('an out-of-credits channel result on a 200 is a healthy tick', async () => {
 		const payload = { ok: true, results: { UC1: { fetched: 2, outOfCredits: true } } };
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
+
+		await expect(tickOnce()).resolves.toEqual(payload);
+	});
+
+	it('fails the tick when a channel run ended partial on the tick deadline', async () => {
+		// codex: a partial deadline return rides the 200 payload — classifying
+		// only `entry.error` let a moderation run that never finished read as
+		// a healthy tick to the dead-man ping.
+		const payload = { ok: true, results: { UC1: { fetched: 2, acted: 1, partial: true, stoppedReason: 'deadline' } } };
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
+
+		await expect(tickOnce()).rejects.toThrow('timed out');
+	});
+
+	it('does not fail the tick for a channel paused mid-run — deactivation is owner-actionable', async () => {
+		const payload = { ok: true, results: { UC1: { partial: true, stoppedReason: 'deactivated' } } };
 		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
 
 		await expect(tickOnce()).resolves.toEqual(payload);
@@ -169,6 +216,13 @@ describe('driver args', () => {
 	it('rejects a zero or negative interval — setInterval(0) would hot-loop the endpoint', async () => {
 		expect(parseDriverArgs(['--interval-ms', '0'])).toBeNull();
 		expect(parseDriverArgs(['--interval-ms', '-5000'])).toBeNull();
+	});
+
+	it('rejects an interval past the signed 32-bit timer limit — setTimeout clamps it to 1 ms', async () => {
+		// cubic: --interval-ms 2147483648 parses fine but Node folds it to a
+		// 1 ms delay, hot-looping /api/cron instead of running daily.
+		expect(parseDriverArgs(['--interval-ms', '2147483647'])).toEqual({ once: false, intervalMs: 2147483647 });
+		expect(parseDriverArgs(['--interval-ms', '2147483648'])).toBeNull();
 	});
 
 	it('rejects a non-numeric or missing interval value', async () => {

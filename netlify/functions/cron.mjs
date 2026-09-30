@@ -2,7 +2,7 @@
 // (scripts/dev-cron.mjs): a 200 reporting `ok:false`, an exhausted budget,
 // a failed sweep, or a non-owner channel error must fail the invocation —
 // HTTP status alone cannot see them (codex).
-import { evaluateTick } from '../../scripts/dev-cron.mjs';
+import { evaluateTick, validTickPayload } from '../../scripts/dev-cron.mjs';
 
 /**
  * Netlify Scheduled Function: triggers one bounded moderation run by
@@ -57,7 +57,9 @@ export default async function cron() {
 		}
 		throw new Error(`cron endpoint failed: ${res.status} ${body}`);
 	}
-	if (payload === null) throw new Error(`cron endpoint returned a non-JSON body: ${body}`);
+	// A 200 answering a scalar/array/foreign object is not the cron payload —
+	// classifying it healthy would hide a proxy or scheduler failure (cubic).
+	if (!validTickPayload(payload)) throw new Error(`cron endpoint returned a non-JSON or invalid body: ${body}`);
 	// A 200 can still report failure — `ok:false`, an exhausted run budget,
 	// a failed sweep — none of which HTTP status exposes (codex).
 	if (problems.length) throw new Error(`cron tick reported failure(s): ${problems.join('; ')}`);

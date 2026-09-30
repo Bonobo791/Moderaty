@@ -103,13 +103,13 @@ describe('scheduled cron trigger', () => {
 	it('fails the invocation when a 200 payload reports a sweep failure', async () => {
 		// codex: HTTP 200 alone cannot see an ops failure — `ok:false`, a
 		// spent budget, or a sweep error all hide inside the JSON body.
-		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ok: false, zeroCreditSweepError: 'db exploded' })));
+		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ok: false, zeroCreditSweepError: 'db exploded', results: {} })));
 
 		await expect(handler()).rejects.toThrow(/zeroCreditSweepError/);
 	});
 
 	it('fails the invocation when a 200 reports an exhausted run budget', async () => {
-		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ok: true, budgetExhausted: true })));
+		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ok: true, budgetExhausted: true, results: {} })));
 
 		await expect(handler()).rejects.toThrow(/budget/);
 	});
@@ -124,6 +124,20 @@ describe('scheduled cron trigger', () => {
 		vi.stubGlobal('fetch', vi.fn(async () => new Response('<html>maintenance</html>', { status: 200 })));
 
 		await expect(handler()).rejects.toThrow(/non-JSON/);
+	});
+
+	it.each([
+		['a JSON scalar', '42'],
+		['a JSON string', '"ok"'],
+		['a JSON boolean', 'true'],
+		['a JSON array', '[]'],
+		['an object missing the cron fields', '{}']
+	])('fails the invocation on a 200 answering %s', async (_label, body) => {
+		// cubic: a malformed-but-parseable response is not a healthy tick —
+		// classifying it as one would hide a proxy/scheduler failure.
+		vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status: 200 })));
+
+		await expect(handler()).rejects.toThrow(/invalid/);
 	});
 
 	it('suppresses a non-OK whose only failures are channel-owner categories', async () => {

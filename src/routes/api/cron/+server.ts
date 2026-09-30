@@ -4,7 +4,7 @@ import { and, asc, desc, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
-import { nullExpiredConsentEmails, nullExpiredHandles, retryGoogleRevocations, retryStripeCustomerDeletions } from '$lib/server/deletion';
+import { nullExpiredConsentEmails, nullExpiredHandles, retryGoogleRevocations, retryStripeCustomerDeletions, retryStripeCustomerScrubs } from '$lib/server/deletion';
 import { sweepAutoTopUp } from '$lib/server/billing/autotopup';
 import { sweepStalePendingReversals } from '$lib/server/billing/ledger';
 import { DeadlineExceededError } from '$lib/server/http';
@@ -190,6 +190,10 @@ const runCronSweeps = async (dryRun: boolean, deadline: number, startedAt: numbe
 	// teardown are durable BEFORE the channel dies — a killed post-commit
 	// drain must never orphan a live grant (codex). Bounded per invocation.
 	const googleRevocations = await runSweep(dryRun, 'google revocation outbox retry', () => retryGoogleRevocations(10, deadline));
+	// Stripe scrub outbox retry: surviving-org customers still carrying a
+	// deleted user's e-mail — durable before commit, so a deadline-killed
+	// post-commit drain retries here until Stripe confirms (codex). Bounded.
+	const stripeScrubs = await runSweep(dryRun, 'stripe scrub outbox retry', () => retryStripeCustomerScrubs(10, deadline));
 	// Stale pending-reversal sweep: refund/dispute obligations whose grant
 	// never arrived within 14 days are dead weight — dropped loudly, bounded.
 	const reversals = await runSweep(dryRun, 'pending-reversal sweep', () => sweepStalePendingReversals());
@@ -204,7 +208,7 @@ const runCronSweeps = async (dryRun: boolean, deadline: number, startedAt: numbe
 	// an answered 200 by design, so without them in `ok` a permanently
 	// throwing evaluation would retry forever, invisible (codeant).
 	const base = {
-		ok: !consent.error && !handles.error && !autoTopup.error && !stripeDeletions.error && !googleRevocations.error && !reversals.error && !zeroCredit.error && !zeroCredit.value?.errors,
+		ok: !consent.error && !handles.error && !autoTopup.error && !stripeDeletions.error && !googleRevocations.error && !stripeScrubs.error && !reversals.error && !zeroCredit.error && !zeroCredit.value?.errors,
 		dryRun,
 		consentEmailsNulled: orZero(consent.value),
 		sweepError: consent.error,
@@ -217,6 +221,8 @@ const runCronSweeps = async (dryRun: boolean, deadline: number, startedAt: numbe
 		stripeDeletionSweepError: stripeDeletions.error,
 		googleGrantsRevoked: orZero(googleRevocations.value),
 		googleRevocationSweepError: googleRevocations.error,
+		stripeCustomersScrubbed: orZero(stripeScrubs.value),
+		stripeScrubSweepError: stripeScrubs.error,
 		pendingReversalsDropped: orZero(reversals.value),
 		pendingReversalSweepError: reversals.error,
 		zeroCreditAccountsChecked: orZero(zeroCredit.value?.evaluated),

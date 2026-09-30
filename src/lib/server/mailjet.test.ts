@@ -156,7 +156,10 @@ test('a deadline expiring during the response-body read throws DeadlineExceededE
 	// coderabbit: fetch resolving only means the HEADERS arrived — the body
 	// can still be streaming, and an abort mid-read rejects text(). That
 	// rejection must classify as a spent budget, not a provider failure.
-	fetchMock(
+	// cubic: assert fetch actually ran — a deadline spent in the prologue
+	// would still throw DeadlineExceededError while never exercising the
+	// mid-read classification this test exists to pin.
+	const fetchSpy = fetchMock(
 		async () =>
 			({
 				ok: true,
@@ -167,7 +170,8 @@ test('a deadline expiring during the response-body read throws DeadlineExceededE
 				}
 			}) as unknown as Response
 	);
-	await expect(sendMailjetMessage(MESSAGE, Date.now() + 10)).rejects.toBeInstanceOf(DeadlineExceededError);
+	await expect(sendMailjetMessage(MESSAGE, Date.now() + 25)).rejects.toBeInstanceOf(DeadlineExceededError);
+	expect(fetchSpy).toHaveBeenCalled();
 });
 
 test('a body-read failure without a spent deadline reports a network failure', async () => {

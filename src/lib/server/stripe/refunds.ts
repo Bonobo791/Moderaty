@@ -22,7 +22,7 @@ export async function refundUngrantablePayment(input: {
 	/** Persisted on the refund so the terminal charge.refund.updated event routes back to our records. */
 	orgId: string;
 	checkoutSessionId?: string;
-}): Promise<void> {
+}): Promise<{ id: string; status: 'succeeded' | 'pending' | 'requires_action' }> {
 	try {
 		// The tags persisted ON the refund let a later terminal-status event
 		// (charge.refund.updated → failed/canceled) identify OUR ungrantable
@@ -50,6 +50,7 @@ export async function refundUngrantablePayment(input: {
 			throw new Error(`refund ${refund.id} resolved ${refund.status ?? 'no status'} — MANUAL REFUND REQUIRED`);
 		}
 		console.error(`stripe: ${input.label} — auto-refunded payment intent ${input.paymentIntentId} (refund ${refund.id}, status ${refund.status})`);
+		return { id: refund.id, status: refund.status };
 	} catch (error) {
 		console.error(`stripe: ${input.label} — auto-refund FAILED, MANUAL REFUND REQUIRED: ${error instanceof Error ? error.message : String(error)}`);
 		throw error;

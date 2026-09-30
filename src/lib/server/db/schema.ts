@@ -552,6 +552,20 @@ export const creditTransactions = sqliteTable('credit_transactions', {
 // that granted it). charge_id UNIQUE: one reversal per charge, first event
 // wins. A grant that lands later drains the row (drainPendingReversals);
 // the cron sweep drops rows whose grant never arrived.
+// Canceled auto-top-up authorization: durable until Stripe cancellation/refund
+// completes, retained afterwards to reject delayed duplicate success events.
+export const stripeAutoTopupRecoveries = sqliteTable('stripe_auto_topup_recoveries', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	orgId: text('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+	attemptAt: text('attempt_at').notNull(),
+	paymentIntentId: text('payment_intent_id'),
+	refundId: text('refund_id'),
+	lastCheckedAt: text('last_checked_at'),
+	lastError: text('last_error'),
+	resolvedAt: text('resolved_at')
+}, (table) => [uniqueIndex('stripe_auto_topup_recoveries_attempt_idx').on(table.orgId, table.attemptAt),
+	index('stripe_auto_topup_recoveries_pending_idx').on(table.resolvedAt, table.lastCheckedAt)]);
+
 export const stripePendingReversals = sqliteTable(
 	'stripe_pending_reversals',
 	{

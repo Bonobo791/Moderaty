@@ -7,7 +7,7 @@
 
 import { and, asc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import { db } from '$lib/server/db';
-import { creditTransactions, organizations, stripePendingReversals, stripeSubscriptionPeriods, stripeDisputeReversals } from '$lib/server/db/schema';
+import { creditTransactions, organizations, stripePendingReversals, stripeSubscriptionPeriods, stripeDisputeReversals, stripeAutoTopupRecoveries } from '$lib/server/db/schema';
 
 export type CreditReason = 'consume' | 'purchase' | 'auto_topup' | 'refund' | 'dispute' | 'adjust';
 // 'refund' and 'dispute' are reversal refTypes anchored on the charge id —
@@ -179,23 +179,28 @@ export async function assertCreditsPurchasable(orgId: string): Promise<void> {
 
 export const UNMETERED_CREDIT_GRANT_ERROR = 'an unmetered plan cannot receive credit grants';
 
-/**
- * Applies a credit ledger adjustment exactly once.
- *
- * @returns `true` if this call applied the adjustment, `false` if it was already applied.
- */
 /** Caller supplies a transaction when the pause accompanies a credit reversal. */
 export async function pauseAutoTopupForRefund(handle: LedgerHandle, orgId: string, occurredAt?: string): Promise<void> {
-	const paused = await handle.update(organizations)
-		.set({ autoTopupEnabled: 0, autoTopupState: 'disabled', autoTopupPauseReason: 'refund', autoTopupPausedAt: new Date().toISOString() })
-		.where(and(eq(organizations.id, orgId),
-			// A delayed replay must respect consent explicitly given AFTER this refund.
-			occurredAt ? or(isNull(organizations.autoTopupConsentedAt), sql`${organizations.autoTopupConsentedAt} <= ${occurredAt}`) : undefined,
-			or(ne(organizations.autoTopupPauseReason, 'refund'), isNull(organizations.autoTopupPauseReason), eq(organizations.autoTopupEnabled, 1))))
-		.returning({ id: organizations.id });
-	if (paused.length) console.error(`auto top-up paused for org ${orgId}: payment refunded — fresh owner consent required`);
+	return inLedgerTx(handle, async (tx) => {
+		const org = await tx.select({ state: organizations.autoTopupState, attemptAt: organizations.autoTopupLastAttemptAt }).from(organizations).where(eq(organizations.id, orgId)).get();
+		if (!org) throw new Error(`org not found: ${orgId}`);
+		const paused = await tx.update(organizations)
+			.set({ autoTopupEnabled: 0, autoTopupState: 'disabled', autoTopupPauseReason: 'refund', autoTopupPausedAt: new Date().toISOString() })
+			.where(and(eq(organizations.id, orgId),
+				// A delayed replay must respect consent explicitly given AFTER this refund.
+				occurredAt ? or(isNull(organizations.autoTopupConsentedAt), sql`${organizations.autoTopupConsentedAt} <= ${occurredAt}`) : undefined,
+				or(ne(organizations.autoTopupPauseReason, 'refund'), isNull(organizations.autoTopupPauseReason), eq(organizations.autoTopupEnabled, 1))))
+			.returning({ id: organizations.id });
+		if (!paused.length) return;
+		if (org.state === 'in_flight') {
+			if (!org.attemptAt) throw new Error(`auto top-up claim for org ${orgId} has no attempt timestamp`);
+			await tx.insert(stripeAutoTopupRecoveries).values({ orgId, attemptAt: org.attemptAt }).onConflictDoNothing();
+		}
+		console.error(`auto top-up paused for org ${orgId}: payment refunded — fresh owner consent required`);
+	});
 }
 
+/** Applies a credit adjustment exactly once; duplicate anchors return false. */
 export async function applyLedgerDelta(
 	handle: LedgerHandle,
 	{ orgId, delta, reason, refType, refId, paymentIntentId, chargeId }: LedgerDelta

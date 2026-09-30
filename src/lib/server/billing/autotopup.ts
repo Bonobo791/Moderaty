@@ -20,6 +20,8 @@ import { creditTransactions, organizations } from '$lib/server/db/schema';
 import { autoTopupBundle, bundleById, priceIdFor } from '$lib/server/stripe/bundles';
 import { getStripe } from '$lib/server/stripe/client';
 import { refundUngrantablePayment } from '$lib/server/stripe/refunds';
+import { findPausedTopup, recoverPausedTopup, sweepPausedTopups } from './autoTopupRecovery';
+import { stripeAutoTopupRecoveries } from '$lib/server/db/schema';
 
 export const AUTO_TOPUP_DEFAULT_THRESHOLD = 100;
 const COOLDOWN_MS = 24 * 60 * 60 * 1000;
@@ -240,7 +242,7 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 	const claimNowIso = new Date().toISOString();
 	const claimed = await db
 		.update(organizations)
-		.set({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: new Date().toISOString() })
+		.set({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: claimNowIso })
 		.where(
 			and(
 				eq(organizations.id, orgId),
@@ -280,7 +282,14 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 
 	const idempotencyKey = `autotopup:${customerId}:${startOfUtcDayIso(0)}:${dayCount + 1}`;
 	try {
-		await getStripe().paymentIntents.create(
+		const current = await readAutoTopupState(orgId);
+		if (current.enabled !== 1 || current.state !== 'in_flight' || current.lastAttemptAt !== claimNowIso) {
+			// This caller has not submitted a payment yet: its canceled claim is satisfied.
+			await db.update(stripeAutoTopupRecoveries).set({ resolvedAt: new Date().toISOString() })
+				.where(and(eq(stripeAutoTopupRecoveries.orgId, orgId), eq(stripeAutoTopupRecoveries.attemptAt, claimNowIso), isNull(stripeAutoTopupRecoveries.paymentIntentId)));
+			return false;
+		}
+		const pi = await getStripe().paymentIntents.create(
 			{
 				amount,
 				currency: 'usd',
@@ -288,10 +297,16 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 				payment_method: defaultPmId,
 				off_session: true,
 				confirm: true,
-				metadata: { type: 'auto_topup', org_id: orgId, bundle: bundle.id }
+				metadata: { type: 'auto_topup', org_id: orgId, bundle: bundle.id, auto_topup_attempt_at: claimNowIso }
 			},
 			{ idempotencyKey }
 		);
+		const payment = { ...pi, metadata: { type: 'auto_topup', org_id: orgId, bundle: bundle.id, auto_topup_attempt_at: claimNowIso } };
+		const canceled = await findPausedTopup(db, orgId, payment);
+		if (canceled) {
+			await recoverPausedTopup(canceled, payment);
+			return false;
+		}
 		console.info(`auto top-up initiated for org ${orgId}: bundle ${bundle.id} (${idempotencyKey})`);
 		return true;
 	} catch (error) {
@@ -423,16 +438,36 @@ export async function grantAutoTopupCredits(
 	}
 	const bundle = bundleById(bundleId);
 	let applied: boolean;
+	let canceled: Awaited<ReturnType<typeof findPausedTopup>>;
 	try {
-		applied = await applyLedgerDelta(db, {
-			orgId,
-			delta: bundle.credits,
-			reason: 'auto_topup',
-			refType: 'payment_intent',
-			refId: pi.id,
-			paymentIntentId: pi.id,
-			chargeId: typeof pi.latest_charge === 'string' ? pi.latest_charge : undefined
+		const result = await db.transaction(async (tx) => {
+			const existing = await tx.select({ id: creditTransactions.id }).from(creditTransactions).where(and(eq(creditTransactions.orgId, orgId), eq(creditTransactions.refType, 'payment_intent'), eq(creditTransactions.refId, pi.id))).get();
+			if (existing) return { applied: false, canceled: undefined };
+			const canceled = await findPausedTopup(tx, orgId, pi);
+			if (canceled) return { applied: false, canceled };
+			const applied = await applyLedgerDelta(tx, {
+				orgId,
+				delta: bundle.credits,
+				reason: 'auto_topup',
+				refType: 'payment_intent',
+				refId: pi.id,
+				paymentIntentId: pi.id,
+				chargeId: typeof pi.latest_charge === 'string' ? pi.latest_charge : undefined
+			});
+			// Commit claim release WITH the grant, before a refund can observe it.
+			const attemptAt = pi.metadata?.auto_topup_attempt_at;
+			const createdMs = pi.created ? pi.created * 1000 : undefined;
+			const correlation = attemptAt ? eq(organizations.autoTopupLastAttemptAt, attemptAt) : createdMs ? and(
+				gte(organizations.autoTopupLastAttemptAt, new Date(createdMs - 60_000).toISOString()),
+				sql`${organizations.autoTopupLastAttemptAt} <= ${new Date(createdMs + 60_000).toISOString()}`
+			) : undefined;
+			await tx.update(organizations).set({ autoTopupState: 'idle', autoTopupFailures: 0 })
+				.where(and(eq(organizations.id, orgId), or(ne(organizations.autoTopupState, 'disabled'), isNull(organizations.autoTopupState)),
+					or(eq(organizations.autoTopupState, 'idle'), isNull(organizations.autoTopupLastAttemptAt), correlation)));
+			return { applied, canceled: undefined };
 		});
+		applied = result.applied;
+		canceled = result.canceled;
 	} catch (error) {
 		// The claim re-checks the plan before charging, but an upgrade to
 		// lifetime can land between the off-session charge and this delivery:
@@ -446,6 +481,10 @@ export async function grantAutoTopupCredits(
 			orgId
 		});
 		await releaseClaimForPi(orgId, pi);
+		return false;
+	}
+	if (canceled) {
+		await recoverPausedTopup(canceled, pi);
 		return false;
 	}
 	if (!applied) {
@@ -466,12 +505,6 @@ export async function grantAutoTopupCredits(
 		const drained = await drainPendingReversals(chargeId);
 		if (drained > 0) console.error(`stripe: auto-topup grant ${pi.id} immediately drained ${drained} pending reversal(s) for ${chargeId}`);
 	}
-	// The charge succeeded: release the in-flight claim, reset the failure
-	// counter (last_attempt_at stays — it is the cooldown anchor).
-	await db
-		.update(organizations)
-		.set({ autoTopupState: 'idle', autoTopupFailures: 0 })
-		.where(eq(organizations.id, orgId));
 	return true;
 }
 
@@ -496,7 +529,7 @@ async function releaseClaimForPi(
 	await db
 		.update(organizations)
 		.set({ autoTopupState: 'idle', autoTopupFailures: 0 })
-		.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight')));
+		.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight'), eq(organizations.autoTopupLastAttemptAt, org.lastAttemptAt)));
 }
 
 /**
@@ -545,6 +578,9 @@ export async function reconcileAutoTopup(orgId: string): Promise<{ recovered: nu
  * @returns The number of newly initiated top-ups
  */
 export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<number> {
+	const recovering = await sweepPausedTopups(limit > 1 ? Math.ceil(limit / 2) : limit, deadline);
+	if (recovering >= limit) return 0;
+	limit -= recovering;
 	// Unstick stale in-flight claims first: a webhook delivery lost past
 	// Stripe's 3-day retry horizon would otherwise wedge auto top-up forever.
 	await db

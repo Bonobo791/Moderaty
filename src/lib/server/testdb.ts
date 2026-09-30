@@ -362,6 +362,17 @@ export async function createTestDb(): Promise<TestDb> {
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE UNIQUE INDEX stripe_pending_reversals_charge_reason_idx ON stripe_pending_reversals (charge_id, reason)`,
+		`CREATE TABLE stripe_auto_topup_recoveries (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+			attempt_at TEXT NOT NULL,
+			payment_intent_id TEXT,
+			refund_id TEXT,
+			last_checked_at TEXT,
+			last_error TEXT,
+			resolved_at TEXT,
+			UNIQUE(org_id, attempt_at)
+		)`,
 		`CREATE TABLE stripe_dispute_reversals (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			dispute_id TEXT NOT NULL UNIQUE,

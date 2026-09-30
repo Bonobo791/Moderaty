@@ -3,8 +3,8 @@ import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
-import { creditTransactions, organizations, stripeSubscriptionPeriods } from '$lib/server/db/schema';
-import { getCredits } from '$lib/server/billing/ledger';
+import { creditTransactions, organizations, stripeSubscriptionPeriods, stripeAutoTopupRecoveries } from '$lib/server/db/schema';
+import { applyLedgerDelta, getCredits, pauseAutoTopupForRefund } from '$lib/server/billing/ledger';
 import { grantAutoTopupCredits, handleAutoTopupFailure, maybeTriggerAutoTopUp, readAutoTopupState, recordAutoTopupFailure, stripeErrorCode, sweepAutoTopUp } from './autotopup';
 
 const mocks = vi.hoisted(() => ({
@@ -12,21 +12,21 @@ const mocks = vi.hoisted(() => ({
 	paymentIntentsRetrieve: vi.fn(),
 	paymentIntentsList: vi.fn(),
 	pricesRetrieve: vi.fn(),
-	refundsCreate: vi.fn()
+	refundsCreate: vi.fn(), paymentIntentsCancel: vi.fn(), refundsRetrieve: vi.fn()
 }));
 
 vi.mock('$lib/server/stripe/client', () => ({
 	getStripe: () => ({
-		paymentIntents: { create: mocks.paymentIntentsCreate, retrieve: mocks.paymentIntentsRetrieve, list: mocks.paymentIntentsList },
+		paymentIntents: { create: mocks.paymentIntentsCreate, retrieve: mocks.paymentIntentsRetrieve, list: mocks.paymentIntentsList, cancel: mocks.paymentIntentsCancel },
 		prices: { retrieve: mocks.pricesRetrieve },
-		refunds: { create: mocks.refundsCreate }
+		refunds: { create: mocks.refundsCreate, retrieve: mocks.refundsRetrieve }
 	})
 }));
 vi.mock('$env/dynamic/private', () => ({
 	env: { STRIPE_PRICE_CREDITS_100: 'price_100', STRIPE_PRICE_CREDITS_500: 'price_500', STRIPE_PRICE_CREDITS_2000: 'price_2000' }
 }));
 
-setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_subscription_periods']);
+setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_subscription_periods', 'stripe_auto_topup_recoveries']);
 
 async function seedOrg(overrides: Record<string, unknown> = {}): Promise<void> {
 	await testDb().db.insert(organizations).values({
@@ -84,6 +84,93 @@ test('auto-top-up trigger documentation uses the effective balance', () => {
 });
 
 describe('maybeTriggerAutoTopUp', () => {
+	test('a delayed first success for an older payment preserves a newer in-flight claim', async () => {
+		const now = new Date().toISOString();
+		await seedOrg({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: now });
+		expect(await grantAutoTopupCredits('org-1', { id: 'pi_old', status: 'succeeded', created: Math.floor(Date.now() / 1000) - 172800, metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_100' } })).toBe(true);
+		expect(await getCredits('org-1')).toBe(150);
+		expect(await orgRow()).toMatchObject({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: now });
+	});
+
+	test('a malformed payment item does not prevent cron from canceling the valid paused payment', async () => {
+		await seedOrg({ creditsRemaining: 0 });
+		await maybeTriggerAutoTopUp('org-1');
+		await pauseAutoTopupForRefund(testDb().db, 'org-1');
+		const pi = { id: 'pi_new', status: 'requires_action', created: Math.floor(Date.now() / 1000), metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_100' } };
+		mocks.paymentIntentsList.mockResolvedValueOnce({ data: [null, pi], has_more: false });
+		mocks.paymentIntentsCancel.mockResolvedValueOnce({ ...pi, status: 'canceled' });
+		await sweepAutoTopUp(5);
+		expect((await testDb().db.select().from(stripeAutoTopupRecoveries).get())?.resolvedAt).toEqual(expect.any(String));
+		expect(mocks.paymentIntentsCancel).toHaveBeenCalledTimes(1);
+	});
+
+	test('the reported two-refund sequence leaves cron unable to charge again', async () => {
+		await seedOrg({ creditsRemaining: 0 });
+		for (const [id, credits] of [['1', 500], ['2', 100]] as const) {
+			await applyLedgerDelta(testDb().db, { orgId: 'org-1', delta: credits, reason: 'purchase', refType: 'checkout_session', refId: `cs_${id}` });
+		}
+		await applyLedgerDelta(testDb().db, { orgId: 'org-1', delta: -500, reason: 'refund', refType: 'refund', refId: 'ch_1' });
+		await applyLedgerDelta(testDb().db, { orgId: 'org-1', delta: -100, reason: 'refund', refType: 'refund', refId: 'ch_2' });
+		expect(await sweepAutoTopUp(5)).toBe(0);
+		expect(await getCredits('org-1')).toBe(0);
+		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+	});
+
+	test('a pending compensation is persisted and resolved by retrieving the refund on a later cron tick', async () => {
+		await seedOrg({ creditsRemaining: 0 });
+		await maybeTriggerAutoTopUp('org-1');
+		await pauseAutoTopupForRefund(testDb().db, 'org-1');
+		const pi = { id: 'pi_new', status: 'succeeded', created: Math.floor(Date.now() / 1000), metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_100' } };
+		mocks.refundsCreate.mockResolvedValueOnce({ id: 're_pending', status: 'pending' });
+		expect(await grantAutoTopupCredits('org-1', pi)).toBe(false);
+		expect(await testDb().db.select().from(stripeAutoTopupRecoveries).get()).toMatchObject({ paymentIntentId: 'pi_new', refundId: 're_pending', resolvedAt: null });
+		mocks.paymentIntentsRetrieve.mockResolvedValueOnce(pi);
+		mocks.refundsRetrieve.mockResolvedValueOnce({ id: 're_pending', status: 'succeeded' });
+		await sweepAutoTopUp(5);
+		expect((await testDb().db.select().from(stripeAutoTopupRecoveries).get())?.resolvedAt).toEqual(expect.any(String));
+		expect(mocks.refundsCreate).toHaveBeenCalledTimes(1);
+		expect(await getCredits('org-1')).toBe(0);
+	});
+
+	test('failed compensation keeps a durable visible error and never grants credits', async () => {
+		await seedOrg({ creditsRemaining: 0 });
+		await maybeTriggerAutoTopUp('org-1');
+		await pauseAutoTopupForRefund(testDb().db, 'org-1');
+		mocks.refundsCreate.mockRejectedValueOnce(new Error('network unavailable'));
+		const pi = { id: 'pi_new', status: 'succeeded', created: Math.floor(Date.now() / 1000), metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_100' } };
+		await expect(grantAutoTopupCredits('org-1', pi)).rejects.toThrow('network unavailable');
+		expect(await testDb().db.select().from(stripeAutoTopupRecoveries).get()).toMatchObject({ paymentIntentId: 'pi_new', resolvedAt: null, lastError: 'refund_or_cancellation_failed' });
+		expect(await getCredits('org-1')).toBe(0);
+		expect((await orgRow()).autoTopupState).toBe('disabled');
+	});
+
+	test('a refund during payment creation refunds the charge and never grants replacement credits', async () => {
+		await seedOrg({ creditsRemaining: 0 });
+		const created = Math.floor(Date.now() / 1000);
+		const pi = { id: 'pi_race', status: 'succeeded', created, metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_100' } };
+		mocks.paymentIntentsCreate.mockImplementationOnce(async () => {
+			await pauseAutoTopupForRefund(testDb().db, 'org-1');
+			return pi;
+		});
+		await maybeTriggerAutoTopUp('org-1');
+		expect(await grantAutoTopupCredits('org-1', pi)).toBe(false);
+		expect(await getCredits('org-1')).toBe(0);
+		expect(mocks.refundsCreate).toHaveBeenCalledWith(expect.objectContaining({ payment_intent: 'pi_race' }), expect.objectContaining({ idempotencyKey: 'refund:autotopup-paused:pi_race' }));
+		expect(await orgRow()).toMatchObject({ autoTopupEnabled: 0, autoTopupState: 'disabled', autoTopupPauseReason: 'refund' });
+	});
+
+	test('cron cancels a paused payment when its success webhook never arrives', async () => {
+		await seedOrg({ creditsRemaining: 0 });
+		await maybeTriggerAutoTopUp('org-1');
+		await pauseAutoTopupForRefund(testDb().db, 'org-1');
+		const pi = { id: 'pi_new', status: 'requires_action', created: Math.floor(Date.now() / 1000), metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_100' } };
+		mocks.paymentIntentsList.mockResolvedValueOnce({ data: [pi], has_more: false });
+		mocks.paymentIntentsCancel.mockResolvedValueOnce({ ...pi, status: 'canceled' });
+		expect(await sweepAutoTopUp(5)).toBe(0);
+		expect(mocks.paymentIntentsCancel).toHaveBeenCalledWith('pi_new', { cancellation_reason: 'requested_by_customer' });
+		expect((await orgRow()).autoTopupEnabled).toBe(0);
+	});
+
 	test('charges the saved card off-session when below threshold, with an idempotency key', async () => {
 		await seedOrg();
 

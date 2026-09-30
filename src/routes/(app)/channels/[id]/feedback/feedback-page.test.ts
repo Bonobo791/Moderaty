@@ -49,11 +49,26 @@ function pageData(over: Record<string, unknown> = {}) {
 }
 
 describe('feedback page role gating (SSR)', () => {
+	it('does not mistake feedback excluded by category settings for below-threshold themes', () => {
+		const settings = { ...SETTINGS, categories: ['question'] };
+		const digest = { ...COMPLETE_DIGEST, commentsClassified: 4, pooledCount: 4 };
+		const preview = { commentsClassified: 4, commentsFailed: 0, pooled: 4, hasMore: false, findings: [] };
+		for (const body of [
+			renderFeedback(pageData({ settings, latest: digest })),
+			renderFeedback(pageData({ settings }), { scope: 'feedbackDryRun', ok: true, preview })
+		]) {
+			expect(body).toContain('No recurring feedback to show.');
+			expect(body).toContain('Themes may be below the minimum-comments threshold or in categories excluded by the feedback settings.');
+			expect(body).not.toContain('No themes met');
+			expect(body).not.toContain('No recurring feedback found in these comments.');
+		}
+	});
+
 	it('shows an informational recovery notice and an empty state even with pooled comments', () => {
 		const digest = { ...COMPLETE_DIGEST, clusteringDegraded: 1 };
 		const body = renderFeedback(pageData({ latest: digest, digests: [digest] }));
 		expect(body).toContain('Some comments could not be grouped reliably.');
-		expect(body).toContain('No recurring feedback found in these comments.');
+		expect(body).toContain('No recurring feedback to show.');
 		expect(body).toContain('Plus 1 other comment');
 		expect(body).not.toContain('Latest digest run failed');
 	});
@@ -71,7 +86,7 @@ describe('feedback page role gating (SSR)', () => {
 			commentsClassified: 3, commentsFailed: 0, clusteringDegraded: true, pooled: 3, hasMore: false, findings: []
 		} });
 		expect(body).toContain('Some comments could not be grouped reliably.');
-		expect(body).toContain('No recurring feedback found in these comments.');
+		expect(body).toContain('No recurring feedback to show.');
 		expect(body).toContain('role="status"');
 		expect(body).not.toContain('Latest digest run failed');
 	});
@@ -169,7 +184,7 @@ describe('feedback page role gating (SSR)', () => {
 			ok: true,
 			preview: { commentsClassified: 0, commentsFailed: 0, pooled: 0, hasMore: false, findings: [] }
 		});
-		expect(body).toContain('No recurring feedback found in these comments.');
+		expect(body).toContain('No recurring feedback to show.');
 		expect(body).toContain('scores only the first YouTube page (up to 100 comments)');
 		expect(body).toContain('Run a history scan to cover the full window.');
 	});
@@ -313,7 +328,7 @@ describe('feedback page I12 states (SSR)', () => {
 
 		const latest = { ...COMPLETE_DIGEST, pooledCount: 0 };
 		const noFindings = renderFeedback(pageData({ digests: [latest], latest }));
-		expect(noFindings).toContain('No recurring feedback found in these comments.');
+		expect(noFindings).toContain('No recurring feedback to show.');
 	});
 
 	it('renders form and newest-run errors as accessible error boxes', () => {

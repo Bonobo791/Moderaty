@@ -107,6 +107,13 @@
 	<p class="muted" role="status">Some comments could not be grouped reliably. Those comments were analyzed using their original extracted claims, so similar feedback may be undercounted.</p>
 {/snippet}
 
+{#snippet noFeedback()}
+	<EmptyState
+		title="No recurring feedback to show."
+		hint="Themes may be below the minimum-comments threshold or in categories excluded by the feedback settings."
+	/>
+{/snippet}
+
 <svelte:head>
 	<title>Moderaty — Feedback</title>
 </svelte:head>
@@ -327,10 +334,7 @@
 				</p>
 			{/if}
 			{#if !grouped.length}
-				<EmptyState
-					title="No recurring feedback found in these comments."
-					hint="No themes met the minimum-comments threshold."
-				/>
+				{@render noFeedback()}
 			{/if}
 		{:else if !newestAttention}
 			<EmptyState
@@ -436,7 +440,7 @@
 						</div>
 					{/each}
 				{:else}
-					<EmptyState title="No recurring feedback found in these comments." hint="No themes met the feedback settings threshold on this page." />
+					{@render noFeedback()}
 				{/if}
 			</section>
 		{/if}

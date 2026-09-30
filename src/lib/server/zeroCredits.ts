@@ -14,13 +14,13 @@
 // never-evaluated users go first). Cron may overlap itself, so every
 // transition is a conditional UPDATE — the loser matches 0 rows.
 
-import { and, asc, eq, isNull, notLike, or, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, inArray, isNotNull, isNull, notInArray, notLike, or, sql } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 
 import { effectiveBalanceSql, isUnmeteredPlan, paidSubscriptionPeriodExistsSql } from '$lib/server/billing/ledger';
 import { isActiveSubscriptionStatus } from '$lib/server/billing/plans';
 import { db } from '$lib/server/db';
-import { memberships, organizations, users } from '$lib/server/db/schema';
+import { memberships, mercadoPagoCheckoutAttempts, organizations, stripeCheckoutAttempts, users } from '$lib/server/db/schema';
 import { deleteUserRecords, revokeChannelGrants, type DeletionTx, type ErasedChannelGrant } from '$lib/server/deletion';
 import { escapeHtml } from '$lib/server/emailText';
 import { assertBeforeDeadline, DeadlineExceededError } from '$lib/server/http';
@@ -119,6 +119,7 @@ interface SweepUser {
 	displayName: string;
 	since: string | null;
 	notifiedAt: string | null;
+	warnedAt: string | null;
 }
 
 type EvalOutcome = 'idle' | 'stamped' | 'cleared' | 'warned' | 'deleted';
@@ -138,6 +139,78 @@ async function sendMail(toEmail: string, toName: string, email: ZeroCreditEmail,
 
 /** The in-transaction funding guard found a funded account mid-erase. */
 class AccountFundedError extends Error {}
+
+/** A payment attempt in flight mid-erase — money may still land. */
+class PaymentInFlightError extends Error {}
+
+/**
+ * A checkout opened recently can already be paid at the provider while the
+ * webhook fulfillment is still in flight: the local balance and subscription
+ * state `fundingState` reads have not caught up, so the account looks broke
+ * — erasing now would strand the payment (no org left to credit, no refund
+ * path) and destroy exactly the purchase meant to save it (codex).
+ *
+ * The shield is bounded by the provider's delivery window: Stripe Checkout
+ * sessions live 24h and webhooks retry for ~3 days, so a 'pending'/'open'
+ * attempt stops deferring 72h after its last local touch — an abandoned
+ * checkout can never hold the account hostage forever. Two states shield
+ * unconditionally: `manual_refund_required` (money arrived, never granted —
+ * the obligation survives until a human resolves it) and a Mercado Pago
+ * attempt carrying a `paidAt` in an unresolved status (the provider told us
+ * the payment exists; the row just has not been fulfilled).
+ */
+const IN_FLIGHT_CHECKOUT_WINDOW_MS = 72 * 60 * 60 * 1000;
+
+async function hasInFlightPayment(
+	userId: string,
+	nowMs: number,
+	handle: Pick<typeof db, 'select'> | DeletionTx = db
+): Promise<boolean> {
+	const orgIds = (
+		await handle
+			.select({ id: organizations.id })
+			.from(memberships)
+			.innerJoin(organizations, eq(memberships.orgId, organizations.id))
+			.where(eq(memberships.userId, userId))
+			.all()
+	).map((row) => row.id);
+	if (!orgIds.length) return false;
+	const cutoffIso = new Date(nowMs - IN_FLIGHT_CHECKOUT_WINDOW_MS).toISOString();
+	const stripeInFlight = await handle
+		.select({ id: stripeCheckoutAttempts.id })
+		.from(stripeCheckoutAttempts)
+		.where(
+			and(
+				inArray(stripeCheckoutAttempts.orgId, orgIds),
+				or(
+					eq(stripeCheckoutAttempts.status, 'manual_refund_required'),
+					and(inArray(stripeCheckoutAttempts.status, ['pending', 'open']), gte(stripeCheckoutAttempts.updatedAt, cutoffIso))
+				)
+			)
+		)
+		.get();
+	if (stripeInFlight) return true;
+	const mpInFlight = await handle
+		.select({ id: mercadoPagoCheckoutAttempts.id })
+		.from(mercadoPagoCheckoutAttempts)
+		.where(
+			and(
+				inArray(mercadoPagoCheckoutAttempts.orgId, orgIds),
+				or(
+					eq(mercadoPagoCheckoutAttempts.status, 'manual_refund_required'),
+					and(inArray(mercadoPagoCheckoutAttempts.status, ['pending', 'open']), gte(mercadoPagoCheckoutAttempts.updatedAt, cutoffIso)),
+					// Provider-confirmed payment still unresolved: paidAt stamped but
+					// the row never reached a terminal state — the money exists.
+					and(
+						isNotNull(mercadoPagoCheckoutAttempts.paidAt),
+						notInArray(mercadoPagoCheckoutAttempts.status, ['fulfilled', 'refunded', 'disputed'])
+					)
+				)
+			)
+		)
+		.get();
+	return Boolean(mpInFlight);
+}
 
 /**
  * Reads the user's org funding and applies the metered/broke predicate.
@@ -198,6 +271,11 @@ async function releaseWarningClaim(user: SweepUser, nowIso: string): Promise<voi
  * sweep's funded-clear revokes it. A failed send RESTORES the prior claim so
  * the warning retries next rotation — the milestone is never silently
  * consumed.
+ *
+ * `notified_at` is the CLAIM (a lease), never proof of delivery: a crash
+ * between the claim and `sendMail` leaves it stamped with no mail sent —
+ * that is why the deletion gate reads `warned_at`, which is stamped only
+ * after the provider accepted the message (codex).
  */
 async function claimAndWarn(user: SweepUser, since: string, sinceMs: number, nowIso: string, deadline?: number): Promise<EvalOutcome> {
 	const cutoffIso = new Date(Date.now() - ZERO_CREDIT_NOTICE_MS).toISOString();
@@ -232,7 +310,7 @@ async function claimAndWarn(user: SweepUser, since: string, sinceMs: number, now
 		// ourselves — the funded path would do it one rotation later anyway.
 		await db
 			.update(users)
-			.set({ zeroCreditsSince: null, zeroCreditsNotifiedAt: null })
+			.set({ zeroCreditsSince: null, zeroCreditsNotifiedAt: null, zeroCreditsWarnedAt: null })
 			.where(and(eq(users.id, user.id), eq(users.zeroCreditsSince, since)));
 		console.info(`zero-credit sweep: user ${user.id} funded mid-warning — countdown cleared, no e-mail sent`);
 		return 'cleared';
@@ -253,6 +331,19 @@ async function claimAndWarn(user: SweepUser, since: string, sinceMs: number, now
 		await releaseWarningClaim(user, nowIso);
 		throw cause;
 	}
+	// The provider accepted the message — record DELIVERY, distinct from the
+	// claim. CAS on both stamps: a funded-clear or restamp that landed during
+	// the send leaves the delivery unmarked rather than satisfying a
+	// countdown that never got its warning (codex). A missed mark is safe:
+	// the deletion gate reads `warned_at`, fails, and restarts the window.
+	const marked = await db
+		.update(users)
+		.set({ zeroCreditsWarnedAt: nowIso })
+		.where(and(eq(users.id, user.id), eq(users.zeroCreditsSince, since), eq(users.zeroCreditsNotifiedAt, nowIso)))
+		.returning({ id: users.id });
+	if (!marked.length) {
+		console.warn(`zero-credit sweep: warning delivered to user ${user.id} but the countdown moved mid-send — delivery left unmarked`);
+	}
 	return 'warned';
 }
 
@@ -267,13 +358,20 @@ async function claimAndWarn(user: SweepUser, since: string, sinceMs: number, now
  */
 async function claimAndDelete(user: SweepUser, since: string, ageMs: number, deadline?: number): Promise<EvalOutcome> {
 	assertBeforeDeadline(deadline); // nothing claimed yet — a spent budget defers cleanly
-	// The claim clears BOTH stamps: every survivor of this path (funded,
-	// abort, deadline) starts the next countdown with a clean slate — a kept
-	// notifiedAt would satisfy the next window's deletion gate with no fresh
-	// warning ever sent (coderabbit).
+	// A payment in flight can still fulfill — the webhook lands on an org this
+	// erase would destroy. Deferring BEFORE the claim keeps the countdown
+	// intact: if the attempt expires unpaid, the same clock still applies.
+	if (await hasInFlightPayment(user.id, Date.now())) {
+		console.info(`zero-credit sweep: user ${user.id} has a payment in flight — deletion deferred, countdown preserved`);
+		return 'idle';
+	}
+	// The claim clears all three stamps: every survivor of this path (funded,
+	// abort, deadline, in-flight payment) starts the next countdown with a
+	// clean slate — a kept claim or delivery marker would satisfy the next
+	// window's deletion gate with no fresh warning ever sent (coderabbit).
 	const claimed = await db
 		.update(users)
-		.set({ zeroCreditsSince: null, zeroCreditsNotifiedAt: null })
+		.set({ zeroCreditsSince: null, zeroCreditsNotifiedAt: null, zeroCreditsWarnedAt: null })
 		.where(and(eq(users.id, user.id), eq(users.zeroCreditsSince, since)))
 		.returning({ id: users.id });
 	if (!claimed.length) return 'idle'; // funded mid-read, or a concurrent run owns the deletion
@@ -302,12 +400,31 @@ async function claimAndDelete(user: SweepUser, since: string, ageMs: number, dea
 				if ((await fundingState(user.id, new Date().toISOString(), tx)) !== 'broke') {
 					throw new AccountFundedError();
 				}
+				// Same race one level down: a checkout opened between the
+				// pre-claim check and the erase commits under this lock — the
+				// predicate re-runs on the tx handle so it sees (or blocks)
+				// that write (codex).
+				if (await hasInFlightPayment(user.id, Date.now(), tx)) {
+					throw new PaymentInFlightError();
+				}
 			}
 		});
 	} catch (cause) {
 		if (cause instanceof AccountFundedError) {
 			console.info(`zero-credit sweep: user ${user.id} funded mid-deletion — erase aborted, account survives`);
 			return 'cleared';
+		}
+		if (cause instanceof PaymentInFlightError) {
+			// The claim already cleared both stamps — restore them so an
+			// attempt that expires unpaid resumes the SAME countdown instead of
+			// buying a fresh 30 days per deferral (codex). The CAS only fires
+			// while the claim's cleared state still stands.
+			await db
+				.update(users)
+				.set({ zeroCreditsSince: since, zeroCreditsNotifiedAt: user.notifiedAt, zeroCreditsWarnedAt: user.warnedAt })
+				.where(and(eq(users.id, user.id), isNull(users.zeroCreditsSince), isNull(users.zeroCreditsNotifiedAt), isNull(users.zeroCreditsWarnedAt)));
+			console.info(`zero-credit sweep: user ${user.id} payment arrived mid-deletion — erase aborted, countdown restored`);
+			return 'idle';
 		}
 		throw cause;
 	}
@@ -318,7 +435,7 @@ async function claimAndDelete(user: SweepUser, since: string, ageMs: number, dea
 	// The completion notice is best-effort — the erase is already committed;
 	// a mail failure must not masquerade as a failed deletion.
 	try {
-		await sendMail(user.email, user.displayName, buildZeroCreditDeletedEmail({ name: user.displayName }));
+		await sendMail(user.email, user.displayName, buildZeroCreditDeletedEmail({ name: user.displayName }), deadline);
 	} catch (cause) {
 		console.error('zero-credit sweep: post-deletion notice for user %s failed:', user.id, cause);
 	}
@@ -345,10 +462,13 @@ async function evaluateUser(user: SweepUser, deadline?: number): Promise<EvalOut
 	}
 	if (state === 'funded') {
 		if (user.since === null) return 'idle';
+		// Clear only the countdown THIS evaluation read: a concurrent tick
+		// that re-stamped `since` between the funding read and now owns a
+		// fresh countdown this sweep must not erase (cubic).
 		await db
 			.update(users)
-			.set({ zeroCreditsSince: null, zeroCreditsNotifiedAt: null })
-			.where(eq(users.id, user.id));
+			.set({ zeroCreditsSince: null, zeroCreditsNotifiedAt: null, zeroCreditsWarnedAt: null })
+			.where(and(eq(users.id, user.id), eq(users.zeroCreditsSince, user.since)));
 		console.info(`zero-credit sweep: user ${user.id} is funded again — countdown cleared`);
 		return 'cleared';
 	}
@@ -358,7 +478,7 @@ async function evaluateUser(user: SweepUser, deadline?: number): Promise<EvalOut
 		// over from a previous countdown dies with the new clock (coderabbit).
 		await db
 			.update(users)
-			.set({ zeroCreditsSince: nowIso, zeroCreditsNotifiedAt: null })
+			.set({ zeroCreditsSince: nowIso, zeroCreditsNotifiedAt: null, zeroCreditsWarnedAt: null })
 			.where(and(eq(users.id, user.id), isNull(users.zeroCreditsSince)));
 		return 'stamped';
 	}
@@ -372,10 +492,17 @@ async function evaluateUser(user: SweepUser, deadline?: number): Promise<EvalOut
 		console.error(`zero-credit sweep: user ${user.id} has an unparseable zero_credits_notified_at (${user.notifiedAt}) — skipped`);
 		return 'idle';
 	}
+	if (user.warnedAt !== null && Number.isNaN(Date.parse(user.warnedAt))) {
+		console.error(`zero-credit sweep: user ${user.id} has an unparseable zero_credits_warned_at (${user.warnedAt}) — skipped`);
+		return 'idle';
+	}
 	if (ageMs >= ZERO_CREDIT_GRACE_MS) {
-		// A stamp older than the current countdown belongs to an earlier
-		// cycle — no warning was delivered in THIS window (coderabbit).
-		const neverWarned = user.notifiedAt === null || Date.parse(user.notifiedAt) < sinceMs;
+		// The gate is `warned_at` — the DELIVERY marker, not the claim: a
+		// crash after the claim but before the send leaves notified_at
+		// stamped with no mail out, so trusting it would delete unwarned
+		// accounts (codex). A stamp older than this countdown belongs to an
+		// earlier cycle either way.
+		const neverWarned = user.warnedAt === null || Date.parse(user.warnedAt) < sinceMs;
 		if (neverWarned) {
 			// Deletion requires a delivered warning — an account whose warnings
 			// all failed to send (APP_URL missing, Mailjet down) must not be
@@ -384,7 +511,7 @@ async function evaluateUser(user: SweepUser, deadline?: number): Promise<EvalOut
 			// sweep's warning claim still wins (codex+coderabbit).
 			const restamped = await db
 				.update(users)
-				.set({ zeroCreditsSince: nowIso, zeroCreditsNotifiedAt: null })
+				.set({ zeroCreditsSince: nowIso, zeroCreditsNotifiedAt: null, zeroCreditsWarnedAt: null })
 				.where(
 					and(
 						eq(users.id, user.id),
@@ -428,7 +555,8 @@ export async function sweepZeroCreditAccounts(limit = ZERO_CREDIT_SWEEP_BATCH, d
 			email: users.email,
 			displayName: users.displayName,
 			since: users.zeroCreditsSince,
-			notifiedAt: users.zeroCreditsNotifiedAt
+			notifiedAt: users.zeroCreditsNotifiedAt,
+			warnedAt: users.zeroCreditsWarnedAt
 		})
 		.from(users)
 		// Tombstones are excluded by their google_sub marker, not by flags —

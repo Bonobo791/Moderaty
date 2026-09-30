@@ -18,7 +18,7 @@ vi.mock('./google', () => ({ revokeGoogleToken: mocks.revokeGoogleToken }));
 
 import { encrypt } from './crypto';
 import { setupTestDb, testDb } from './testdb';
-import { channels, googleRevocationOutbox, memberships, organizations, stripeSubscriptionPeriods, users } from './db/schema';
+import { channels, googleRevocationOutbox, memberships, mercadoPagoCheckoutAttempts, organizations, stripeCheckoutAttempts, stripeSubscriptionPeriods, users } from './db/schema';
 import { DeadlineExceededError } from './http';
 import { buildZeroCreditDeletedEmail, buildZeroCreditWarningEmail, sweepZeroCreditAccounts } from './zeroCredits';
 
@@ -38,6 +38,9 @@ setupTestDb([
 	'credit_transactions',
 	'stripe_deletion_outbox',
 	'google_revocation_outbox',
+	'stripe_scrub_outbox',
+	'stripe_checkout_attempts',
+	'mercado_pago_checkout_attempts',
 	'stripe_subscription_periods',
 	'stripe_lifetime_slots',
 	'stripe_lifetime_entitlements',
@@ -217,7 +220,7 @@ describe('eligibility', () => {
 		await seedSharedOrg('u1', 'org-lifetime', { plan: 'lifetime' });
 		await testDb().db
 			.update(users)
-			.set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7) })
+			.set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7), zeroCreditsWarnedAt: daysAgo(7) })
 			.where(eq(users.id, 'u1'));
 		const result = await sweepZeroCreditAccounts();
 		expect(result).toMatchObject({ deleted: 0, errors: 0 });
@@ -259,12 +262,94 @@ describe('warning cadence', () => {
 			toEmail: 'u1@example.com',
 			subject: expect.stringContaining('22 days') // ~30 - 8
 		});
-		expect((await userRow('u1'))!.zeroCreditsNotifiedAt).not.toBeNull();
+		const warned = (await userRow('u1'))!;
+		expect(warned.zeroCreditsNotifiedAt).not.toBeNull(); // claim stamp
+		expect(warned.zeroCreditsWarnedAt).not.toBeNull(); // DELIVERY stamp — set only after sendMail resolved (codex)
 
 		// Same tick / same milestone: the claim already stands — no re-send.
 		const second = await sweepZeroCreditAccounts();
 		expect(second.warned).toBe(0);
 		expect(mocks.sendMailjetMessage).toHaveBeenCalledTimes(1);
+	});
+
+	test('a claim without delivery never satisfies the deletion gate — the crash window stays safe', async () => {
+		// codex: claimAndWarn stamps notified_at BEFORE sendMail confirms — a
+		// crash between them left the account looking warned. The gate reads
+		// warned_at (set only on confirmed delivery), so this state restarts
+		// the warning window instead of erasing an unwarned account.
+		await seedAccount('u1', { creditsRemaining: 0 });
+		await testDb().db
+			.update(users)
+			.set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(1) }) // claim taken, send never completed
+			.where(eq(users.id, 'u1'));
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const result = await sweepZeroCreditAccounts();
+			expect(result).toMatchObject({ deleted: 0, errors: 0 });
+			const row = (await userRow('u1'))!;
+			expect(row.googleSub).toBe('sub-u1'); // alive — never warned
+			expect(Date.parse(row.zeroCreditsSince!)).toBeGreaterThan(Date.now() - 60_000); // window restarted
+			expect(row.zeroCreditsWarnedAt).toBeNull();
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('no delivered warning'));
+		} finally {
+			errorSpy.mockRestore();
+		}
+		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+	});
+
+	test('a crashed claim becomes retryable — the lease expires and the next sweep redelivers', async () => {
+		// The claim blocks re-sends for one cadence interval; once it ages out
+		// the milestone is due again and delivery is confirmed this time.
+		await seedAccount('u1', { creditsRemaining: 0 });
+		await testDb().db
+			.update(users)
+			.set({ zeroCreditsSince: daysAgo(15), zeroCreditsNotifiedAt: daysAgo(8) }) // crashed claim, stale lease
+			.where(eq(users.id, 'u1'));
+
+		const result = await sweepZeroCreditAccounts();
+		expect(result).toMatchObject({ warned: 1, errors: 0 });
+		expect(mocks.sendMailjetMessage).toHaveBeenCalledTimes(1);
+		expect((await userRow('u1'))!.zeroCreditsWarnedAt).not.toBeNull();
+	});
+
+	test('a delivered warning that lands after the countdown moved is NOT marked — the gate stays honest', async () => {
+		// codex CAS: the send resolves but a funded-clear/restamp replaced the
+		// countdown mid-flight — marking warned_at now would credit a warning
+		// for a countdown that no longer exists.
+		await seedAccount('u1', { creditsRemaining: 0 });
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(8) }).where(eq(users.id, 'u1'));
+		mocks.sendMailjetMessage.mockImplementationOnce(async () => {
+			// A fresh countdown commits while the warning is in flight.
+			await testDb().db.update(users).set({ zeroCreditsSince: new Date().toISOString() }).where(eq(users.id, 'u1'));
+		});
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const result = await sweepZeroCreditAccounts();
+			expect(result).toMatchObject({ warned: 1, errors: 0 });
+			expect(mocks.sendMailjetMessage).toHaveBeenCalledTimes(1);
+			const row = (await userRow('u1'))!;
+			expect(row.zeroCreditsWarnedAt).toBeNull(); // delivery not credited to the new countdown
+			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('delivery left unmarked'));
+		} finally {
+			warnSpy.mockRestore();
+		}
+	});
+
+	test('a corrupt warned_at stamp is loud and never unlocks deletion', async () => {
+		await seedAccount('u1', { creditsRemaining: 0 });
+		await testDb().db
+			.update(users)
+			.set({ zeroCreditsSince: daysAgo(31), zeroCreditsWarnedAt: 'not-a-date' })
+			.where(eq(users.id, 'u1'));
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const result = await sweepZeroCreditAccounts();
+			expect(result).toMatchObject({ deleted: 0, errors: 0 });
+			expect((await userRow('u1'))!.googleSub).toBe('sub-u1');
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('unparseable'));
+		} finally {
+			errorSpy.mockRestore();
+		}
 	});
 
 	test('warnings repeat at 14, 21, and 28 days — each exactly once', async () => {
@@ -376,7 +461,7 @@ describe('countdown reset', () => {
 describe('deletion', () => {
 	test('30 days at zero deletes the account via the shared tombstone path', async () => {
 		await seedAccount('u1', { creditsRemaining: 0 });
-		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7), zeroCreditsWarnedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
 
 		const result = await sweepZeroCreditAccounts();
 		expect(result).toMatchObject({ deleted: 1, errors: 0 });
@@ -393,7 +478,7 @@ describe('deletion', () => {
 
 	test('the countdown claim makes a concurrent/second deletion a no-op', async () => {
 		await seedAccount('u1', { creditsRemaining: 0 });
-		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7), zeroCreditsWarnedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
 		await sweepZeroCreditAccounts();
 		// Tombstoned users never enter the batch again.
 		const second = await sweepZeroCreditAccounts();
@@ -403,7 +488,7 @@ describe('deletion', () => {
 
 	test('a final-notice failure does not block the deletion', async () => {
 		await seedAccount('u1', { creditsRemaining: 0 });
-		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7), zeroCreditsWarnedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
 		mocks.sendMailjetMessage.mockRejectedValueOnce(new Error('mailjet down'));
 		vi.spyOn(console, 'error').mockImplementation(() => {});
 		const result = await sweepZeroCreditAccounts();
@@ -418,7 +503,7 @@ describe('deletion', () => {
 		// erase a now-funded account. The claim's own UPDATE fires the trigger
 		// that lands the purchase.
 		await seedAccount('u1', { creditsRemaining: 0 });
-		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7), zeroCreditsWarnedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
 		await testDb().client.execute(
 			`CREATE TRIGGER racing_topup AFTER UPDATE OF zero_credits_since ON users
 			 WHEN NEW.zero_credits_since IS NULL
@@ -446,7 +531,7 @@ describe('deletion', () => {
 		// success and carries the caller's deadline through to the request.
 		await seedAccount('u1', { creditsRemaining: 0 });
 		await testDb().db.insert(channels).values({ id: 'UC-1', userId: 'u1', orgId: 'org-u1', title: 'chan', refreshTokenEnc: encrypt('grant-token') });
-		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7), zeroCreditsWarnedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
 		mocks.revokeGoogleToken.mockResolvedValue(undefined);
 
 		const deadline = Date.now() + 60_000;
@@ -466,7 +551,7 @@ describe('deletion', () => {
 			{ id: 'UC-1', userId: 'u1', orgId: 'org-u1', title: 'one', refreshTokenEnc: encrypt('tok-1') },
 			{ id: 'UC-2', userId: 'u1', orgId: 'org-u1', title: 'two', refreshTokenEnc: encrypt('tok-2') }
 		]);
-		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7), zeroCreditsWarnedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
 		let clock = Date.now();
 		const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => clock);
 		// The first revocation resolves but burns the rest of the budget.
@@ -492,7 +577,7 @@ describe('deletion', () => {
 		// guard's lock write inside deleteUserRecords' transaction fires this
 		// trigger — a purchase landing mid-erase — and the guard must see it.
 		await seedAccount('u1', { creditsRemaining: 0 });
-		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7), zeroCreditsWarnedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
 		await testDb().client.execute(
 			`CREATE TRIGGER topup_mid_delete AFTER UPDATE OF google_sub ON users
 			 BEGIN UPDATE organizations SET credits_remaining = 50; END`
@@ -530,13 +615,13 @@ describe('deletion', () => {
 	});
 
 	test('a warning stamp from an earlier countdown cannot satisfy the deletion gate', async () => {
-		// coderabbit: notifiedAt=60d predates this countdown's since=31d — no
-		// warning was ever delivered in the current window, so the gate must
-		// treat it as never-warned and restart, not erase the account.
+		// coderabbit: delivered 60d ago but the countdown restarted 31d ago —
+		// the warning predates the CURRENT window, so the gate must treat the
+		// account as never-warned and restart, not erase it.
 		await seedAccount('u1', { creditsRemaining: 0 });
 		await testDb().db
 			.update(users)
-			.set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(60) })
+			.set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(60), zeroCreditsWarnedAt: daysAgo(60) })
 			.where(eq(users.id, 'u1'));
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		try {
@@ -545,7 +630,8 @@ describe('deletion', () => {
 			const row = (await userRow('u1'))!;
 			expect(row.googleSub).toBe('sub-u1');
 			expect(Date.parse(row.zeroCreditsSince!)).toBeGreaterThan(Date.now() - 60_000);
-			expect(row.zeroCreditsNotifiedAt).toBeNull(); // stale stamp cleared with the restart
+			expect(row.zeroCreditsNotifiedAt).toBeNull(); // stale claim cleared with the restart
+			expect(row.zeroCreditsWarnedAt).toBeNull(); // stale delivery marker cleared too
 		} finally {
 			errorSpy.mockRestore();
 		}
@@ -553,17 +639,19 @@ describe('deletion', () => {
 	});
 
 	test('a leftover warning stamp is cleared when a new countdown starts', async () => {
-		// coderabbit: a stamp can outlive its countdown (claim-abort paths used
-		// to clear only `since`). Re-stamping the clock must clear it, or the
-		// stale stamp would shorten the new countdown's warning cadence.
+		// coderabbit: stamps can outlive their countdown (claim-abort paths
+		// used to clear only `since`). Re-stamping the clock must clear BOTH —
+		// a stale claim would shorten the new cadence, and a stale delivery
+		// marker would satisfy the deletion gate with no fresh warning (codex).
 		await seedAccount('u1', { creditsRemaining: 0 });
-		await testDb().db.update(users).set({ zeroCreditsNotifiedAt: daysAgo(40) }).where(eq(users.id, 'u1'));
+		await testDb().db.update(users).set({ zeroCreditsNotifiedAt: daysAgo(40), zeroCreditsWarnedAt: daysAgo(40) }).where(eq(users.id, 'u1'));
 
 		const result = await sweepZeroCreditAccounts();
 		expect(result).toMatchObject({ evaluated: 1, errors: 0 });
 		const row = (await userRow('u1'))!;
 		expect(Date.parse(row.zeroCreditsSince!)).toBeGreaterThan(Date.now() - 60_000);
 		expect(row.zeroCreditsNotifiedAt).toBeNull();
+		expect(row.zeroCreditsWarnedAt).toBeNull();
 	});
 
 	test('a corrupt notified_at stamp must never unlock deletion', async () => {
@@ -585,7 +673,7 @@ describe('deletion', () => {
 
 	test('the completion notice is sent only after the erase commits', async () => {
 		await seedAccount('u1', { creditsRemaining: 0 });
-		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7), zeroCreditsWarnedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
 		// codex+coderabbit: the notice used to precede the erase — a failed
 		// deletion would tell the user their account is gone while it lives.
 		mocks.sendMailjetMessage.mockImplementation(async () => {
@@ -599,7 +687,7 @@ describe('deletion', () => {
 
 	test('a failed deletion sends no completed-notice e-mail', async () => {
 		await seedAccount('u1', { creditsRemaining: 0 });
-		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7), zeroCreditsWarnedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
 		// Multi-member personal org → deleteUserRecords' tenancy guard refuses.
 		await testDb().db.insert(users).values({ id: 'u2', googleSub: 'sub-u2', email: 'u2@x.com', displayName: 'u2' });
 		await testDb().db.insert(memberships).values({ userId: 'u2', orgId: 'org-u1', role: 'member' });
@@ -616,7 +704,7 @@ describe('deletion', () => {
 
 	test('a deletion failure is loud, counted, and retryable — the clock restarts', async () => {
 		await seedAccount('u1', { creditsRemaining: 0 });
-		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7), zeroCreditsWarnedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
 		// Corrupt the personal org into multi-member: deleteUserRecords' own
 		// data-bug guard must refuse, and the sweep must surface it.
 		await testDb().db.insert(users).values({ id: 'u2', googleSub: 'sub-u2', email: 'u2@x.com', displayName: 'u2' });
@@ -626,7 +714,190 @@ describe('deletion', () => {
 		const failed = await sweepZeroCreditAccounts();
 		expect(failed).toMatchObject({ deleted: 0, errors: 1 });
 		expect((await userRow('u1'))!.googleSub).toBe('sub-u1'); // still alive
+		// cubic: the retryability IS the safety property — the deletion claim
+		// must have cleared both stamps so the survivor re-enters a fresh
+		// 30-day window instead of being re-attempted on the next tick.
+		expect((await userRow('u1'))!.zeroCreditsSince).toBeNull();
+		expect((await userRow('u1'))!.zeroCreditsNotifiedAt).toBeNull();
 		vi.restoreAllMocks();
+	});
+
+	test('a funded clear never erases a countdown stamped after the funding read', async () => {
+		// cubic: the clear's WHERE clause must pin `since` to the value the
+		// evaluation read — an unguarded clear would erase a fresh countdown
+		// a concurrent tick stamped between the funding read and the write.
+		await seedAccount('u1', { creditsRemaining: 0 });
+		const staleStamp = daysAgo(3);
+		await testDb().db.update(users).set({ zeroCreditsSince: staleStamp, zeroCreditsNotifiedAt: daysAgo(1) }).where(eq(users.id, 'u1'));
+		// Make the account funded so evaluateUser takes the funded-clear path…
+		await testDb().db.update(organizations).set({ creditsRemaining: 50 }).where(eq(organizations.id, 'org-u1'));
+		// …then stamp a NEW countdown in the gap between the funding read and
+		// the clear: intercept the clear's UPDATE (it is the one writing
+		// zeroCreditsSince) and restamp first, mimicking the concurrent tick.
+		const freshStamp = '2030-05-05T00:00:00.000Z';
+		const realUpdate = testDb().db.update.bind(testDb().db) as (t: unknown) => {
+			set: (v: Record<string, unknown>) => { where: (w: unknown) => Promise<unknown> };
+		};
+		const updateSpy = vi.spyOn(testDb().db, 'update').mockImplementation(((table: unknown) => {
+			const builder = realUpdate(table);
+			const realSet = builder.set.bind(builder);
+			builder.set = (values: Record<string, unknown>) => {
+				const whereable = realSet(values);
+				if ('zeroCreditsSince' in values) {
+					const realWhere = whereable.where.bind(whereable);
+					whereable.where = async (w: unknown) => {
+						// The "concurrent" tick: a fresh countdown lands before the
+						// funded clear commits. An unguarded UPDATE erases it.
+						// realUpdate bypasses the spy — the injected write isn't re-intercepted.
+						await realUpdate(users).set({ zeroCreditsSince: freshStamp, zeroCreditsNotifiedAt: null }).where(eq(users.id, 'u1'));
+						return realWhere(w as never);
+					};
+				}
+				return whereable;
+			};
+			return builder;
+		}) as never);
+		try {
+			const result = await sweepZeroCreditAccounts();
+			expect(result).toMatchObject({ evaluated: 1, deleted: 0, errors: 0 });
+		} finally {
+			updateSpy.mockRestore();
+		}
+		// The fresh countdown survives — the clear's CAS saw a different
+		// `since` than the one the evaluation read and no-op'd.
+		expect((await userRow('u1'))!.zeroCreditsSince).toBe(freshStamp);
+		expect((await userRow('u1'))!.zeroCreditsNotifiedAt).toBeNull();
+	});
+
+	test('a checkout opened recently defers deletion — the paid webhook can still land', async () => {
+		// codex: Stripe marks nothing locally until the webhook fulfills the
+		// attempt — an 'open' session paid at the provider is indistinguishable
+		// from an abandoned one, and erasing the org strands the incoming
+		// grant with no refund path. Defer, and keep the countdown.
+		await seedAccount('u1', { creditsRemaining: 0 });
+		const since = daysAgo(31);
+		await testDb().db
+			.update(users)
+			.set({ zeroCreditsSince: since, zeroCreditsNotifiedAt: daysAgo(7), zeroCreditsWarnedAt: daysAgo(7) })
+			.where(eq(users.id, 'u1'));
+		await testDb().db.insert(stripeCheckoutAttempts).values({
+			attemptId: 'att-1',
+			orgId: 'org-u1',
+			product: 'credits_500',
+			idempotencyKey: 'idem-1',
+			stripeSessionId: 'cs_live',
+			status: 'open'
+		});
+
+		const result = await sweepZeroCreditAccounts();
+		expect(result).toMatchObject({ deleted: 0, errors: 0 });
+		const row = (await userRow('u1'))!;
+		expect(row.googleSub).toBe('sub-u1'); // alive — payment may still arrive
+		expect(row.zeroCreditsSince).toBe(since); // countdown PRESERVED, not restarted
+		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+	});
+
+	test('a stale open checkout no longer shields the account once the provider window has passed', async () => {
+		// The shield is bounded: an 'open' attempt untouched for >72h can no
+		// longer fulfill (Stripe sessions live 24h, webhooks retry ~3 days) —
+		// deletion proceeds on the same countdown.
+		await seedAccount('u1', { creditsRemaining: 0 });
+		await testDb().db
+			.update(users)
+			.set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7), zeroCreditsWarnedAt: daysAgo(7) })
+			.where(eq(users.id, 'u1'));
+		await testDb().db.insert(stripeCheckoutAttempts).values({
+			attemptId: 'att-stale',
+			orgId: 'org-u1',
+			product: 'credits_500',
+			idempotencyKey: 'idem-stale',
+			stripeSessionId: 'cs_stale',
+			status: 'open',
+			updatedAt: daysAgo(4)
+		});
+
+		const result = await sweepZeroCreditAccounts();
+		expect(result).toMatchObject({ deleted: 1, errors: 0 });
+		expect((await userRow('u1'))!.googleSub).toBe('deleted:u1');
+	});
+
+	test('a paid-but-unfulfilled attempt shields unconditionally — manual_refund_required never erases', async () => {
+		// Money arrived but the grant never landed: the attempt row is the
+		// refund trail — deleting the account destroys it (codex).
+		await seedAccount('u1', { creditsRemaining: 0 });
+		await testDb().db
+			.update(users)
+			.set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7), zeroCreditsWarnedAt: daysAgo(7) })
+			.where(eq(users.id, 'u1'));
+		await testDb().db.insert(stripeCheckoutAttempts).values({
+			attemptId: 'att-paid',
+			orgId: 'org-u1',
+			product: 'credits_500',
+			idempotencyKey: 'idem-paid',
+			status: 'manual_refund_required',
+			updatedAt: daysAgo(30) // age does not matter — the obligation is real
+		});
+
+		const result = await sweepZeroCreditAccounts();
+		expect(result).toMatchObject({ deleted: 0, errors: 0 });
+		expect((await userRow('u1'))!.googleSub).toBe('sub-u1');
+	});
+
+	test('a Mercado Pago attempt with a paid stamp but no fulfillment defers the erase', async () => {
+		// The webhook saw the payment (paidAt written) but fulfillment never
+		// completed — provider truth says money exists even though the local
+		// balance does not.
+		await seedAccount('u1', { creditsRemaining: 0 });
+		await testDb().db
+			.update(users)
+			.set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7), zeroCreditsWarnedAt: daysAgo(7) })
+			.where(eq(users.id, 'u1'));
+		await testDb().db.insert(mercadoPagoCheckoutAttempts).values({
+			attemptId: 'mp-1',
+			orgId: 'org-u1',
+			bundleId: 'credits_500',
+			idempotencyKey: 'mp-idem-1',
+			status: 'open',
+			amountCents: 500,
+			paymentId: 'pay-1',
+			paidAt: daysAgo(5), // provider confirmed — but never fulfilled
+			updatedAt: daysAgo(5)
+		});
+
+		const result = await sweepZeroCreditAccounts();
+		expect(result).toMatchObject({ deleted: 0, errors: 0 });
+		expect((await userRow('u1'))!.googleSub).toBe('sub-u1');
+	});
+
+	test('a checkout opened between the pre-check and the erase aborts under the write lock', async () => {
+		// codex race: the pre-claim check ran clean, then a checkout opened
+		// before the erase transaction committed — the in-tx predicate must
+		// catch it and the countdown must be RESTORED, not silently cleared.
+		await seedAccount('u1', { creditsRemaining: 0 });
+		const since = daysAgo(31);
+		await testDb().db
+			.update(users)
+			.set({ zeroCreditsSince: since, zeroCreditsNotifiedAt: daysAgo(7), zeroCreditsWarnedAt: daysAgo(7) })
+			.where(eq(users.id, 'u1'));
+		// The lock write inside deleteUserRecords' assertDeletable fires this
+		// trigger — mimicking a checkout session opening mid-erase.
+		await testDb().client.execute(
+			`CREATE TRIGGER checkout_mid_delete AFTER UPDATE OF google_sub ON users
+			 BEGIN INSERT INTO stripe_checkout_attempts (attempt_id, org_id, product, idempotency_key, status, updated_at)
+			 VALUES ('att-mid', 'org-u1', 'credits_500', 'idem-mid', 'open', strftime('%Y-%m-%dT%H:%M:%fZ', 'now')); END`
+		);
+		const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+		try {
+			const result = await sweepZeroCreditAccounts();
+			expect(result).toMatchObject({ deleted: 0, errors: 0 });
+			expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('countdown restored'));
+			const row = (await userRow('u1'))!;
+			expect(row.googleSub).toBe('sub-u1'); // still alive
+			expect(row.zeroCreditsSince).toBe(since); // countdown RESTORED, not restarted
+		} finally {
+			await testDb().client.execute('DROP TRIGGER checkout_mid_delete');
+			infoSpy.mockRestore();
+		}
 	});
 });
 
@@ -638,12 +909,17 @@ describe('batching', () => {
 		// u2 was never checked (NULL sorts first) — evaluated before u1.
 		const first = await sweepZeroCreditAccounts(1);
 		expect(first.evaluated).toBe(1);
-		expect((await userRow('u2'))!.zeroCreditsCheckedAt).not.toBeNull();
+		const u2Stamp = (await userRow('u2'))!.zeroCreditsCheckedAt;
+		expect(u2Stamp).not.toBeNull();
 		const second = await sweepZeroCreditAccounts(1);
 		expect(second.evaluated).toBe(1);
-		// Both checked_at stamps now exist and differ — the rotation moved.
-		const stamps = (await testDb().db.select({ checked: users.zeroCreditsCheckedAt }).from(users).all()).map((r) => r.checked);
-		expect(stamps.every((s) => s !== null)).toBe(true);
+		// cubic: the rotation must actually move — u2's stamp stays untouched
+		// while u1's is refreshed. Re-selecting u2 would pass the old
+		// non-null check while the round-robin regressed.
+		expect((await userRow('u2'))!.zeroCreditsCheckedAt).toBe(u2Stamp);
+		const u1Stamp = (await userRow('u1'))!.zeroCreditsCheckedAt;
+		expect(u1Stamp).not.toBeNull();
+		expect(Date.parse(u1Stamp!)).toBeGreaterThan(Date.parse(daysAgo(1)));
 	});
 
 	test('an expired deadline bounds the batch without aborting the sweep', async () => {
@@ -709,7 +985,7 @@ describe('loud failure logging', () => {
 
 	test('a final-notice failure logs the user id verbatim', async () => {
 		await seedAccount('d%s-1', { creditsRemaining: 0 });
-		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7) }).where(eq(users.id, 'd%s-1'));
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7), zeroCreditsWarnedAt: daysAgo(7) }).where(eq(users.id, 'd%s-1'));
 		mocks.sendMailjetMessage.mockRejectedValueOnce(new Error('mailjet down'));
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 

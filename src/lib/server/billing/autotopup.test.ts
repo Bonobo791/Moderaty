@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
@@ -74,6 +75,12 @@ beforeEach(() => {
 	mocks.paymentIntentsList.mockResolvedValue({ data: [] });
 	mocks.pricesRetrieve.mockResolvedValue({ id: 'price_100', unit_amount: 500, active: true, currency: 'usd', type: 'one_time' });
 	mocks.refundsCreate.mockResolvedValue({ id: 're_1', status: 'succeeded' });
+});
+
+test('auto-top-up trigger documentation uses the effective balance', () => {
+	const documentation = readFileSync(new URL('../../../../docs/stripe-auto-topup.md', import.meta.url), 'utf8');
+	const trigger = documentation.split('\n').find((line) => line.startsWith('1. **Trigger:**'));
+	expect(trigger).toContain('effective balance (purchased credits + unused active subscription allowance) < threshold');
 });
 
 describe('maybeTriggerAutoTopUp', () => {

@@ -30,8 +30,10 @@
 	function submitting() {
 		pending = true;
 		return async ({ update }: { update: (opts?: { reset?: boolean }) => Promise<void> }) => {
-			await update({ reset: true });
+			// External redirects never resolve update(); unlock before navigation
+			// so browser Back cannot restore every purchase button as disabled.
 			pending = false;
+			await update({ reset: true });
 		};
 	}
 </script>

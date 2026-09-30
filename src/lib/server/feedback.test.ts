@@ -1,9 +1,10 @@
 import { afterEach, expect, test, vi } from 'vitest';
 
 vi.mock('$env/dynamic/private', () => ({
-	env: { OPENAI_API_KEY: 'test-openai-key' }
+	env: { OPENAI_API_KEY: 'test-openai-key' } as Record<string, string | undefined>
 }));
 
+import { env } from '$env/dynamic/private';
 import { classifyFeedback } from './feedback';
 import { FEEDBACK_PROMPT } from '$lib/server/feedbackPrompt.js';
 
@@ -29,8 +30,11 @@ test('returns the classification and sends context, model, and the taxonomy rubr
 
 	expect(result).toEqual({ category: 'question', hasAbuse: false, claim: 'when is the next video' });
 	const body = JSON.parse(String(fetch.mock.calls[0]?.[1]?.body));
-	expect(body.model).toBe('gpt-4.1-nano');
-	expect(body.temperature).toBe(0);
+	expect(body.model).toBe('gpt-6-luna');
+	// gpt-6-luna is a reasoning model — it rejects temperature, so the
+	// request carries a none-effort pass instead.
+	expect(body.temperature).toBeUndefined();
+	expect(body.reasoning_effort).toBe('none');
 	expect(body.response_format).toEqual({ type: 'json_object' });
 	const prompt = body.messages.map((message: { content: string }) => message.content).join('\n');
 	expect(body.messages[0].content.startsWith(FEEDBACK_PROMPT)).toBe(true);
@@ -43,6 +47,24 @@ test('returns the classification and sends context, model, and the taxonomy rubr
 	}
 	// The rubric's core safety rule must ship verbatim.
 	expect(prompt).toContain('Extract the safe claim, never the abuse');
+});
+
+test('a non-reasoning OPENAI_FEEDBACK_MODEL override keeps temperature 0', async () => {
+	const fetch = vi
+		.fn()
+		.mockResolvedValue(chatResponse('{"category": "none", "hasAbuse": false, "claim": ""}'));
+	vi.stubGlobal('fetch', fetch);
+	env.OPENAI_FEEDBACK_MODEL = 'gpt-4.1-nano';
+	try {
+		await classifyFeedback('a comment', CONTEXT, undefined, 'key');
+	} finally {
+		delete env.OPENAI_FEEDBACK_MODEL;
+	}
+
+	const body = JSON.parse(String(fetch.mock.calls[0]?.[1]?.body));
+	expect(body.model).toBe('gpt-4.1-nano');
+	expect(body.temperature).toBe(0);
+	expect(body.reasoning_effort).toBeUndefined();
 });
 
 test.each(['question', 'criticism', 'correction', 'request'])(

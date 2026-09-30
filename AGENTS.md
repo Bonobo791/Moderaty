@@ -225,7 +225,7 @@ scoring: allowlisted and rule-matched comments bypass it, while other comments
 are screened with their explicitly resolved organization key. Flagged comments
 are held for human review, never auto-rejected or deleted. Detector failures
 queue through `aiUnavailable`; deadline expiry aborts the run instead. The
-optional `OPENAI_JAILBREAK_MODEL` defaults to `gpt-4.1-mini`.
+optional `OPENAI_JAILBREAK_MODEL` defaults to `gpt-6-luna`.
 
 ## Environments
 

@@ -219,6 +219,17 @@ test.each([
 	expect(result.assignments.map((assignment) => assignment.claim)).toEqual(expected);
 });
 
+test('the merge request defaults to gpt-6-luna with a none-effort pass', async () => {
+	stubMerge({ themes: [{ claim: 'a', members: [0, 1] }] });
+	await clusterClaims([q('a'), q('b')], undefined, 'test-openai-key');
+	const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0]?.[1]?.body));
+	expect(body.model).toBe('gpt-6-luna');
+	// gpt-6-luna is a reasoning model — it rejects temperature, so the
+	// request carries a none-effort pass instead.
+	expect(body.temperature).toBeUndefined();
+	expect(body.reasoning_effort).toBe('none');
+});
+
 test('a non-OK provider response recovers with original claims', async () => {
 	vi.stubGlobal('fetch', vi.fn(async () => new Response('quota exceeded', { status: 403 })));
 	expect(await clusterClaims([q('a'), q('b')], undefined, 'test-openai-key')).toEqual({ degraded: true, assignments: [

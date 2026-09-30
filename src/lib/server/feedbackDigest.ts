@@ -741,14 +741,20 @@ export async function generateFeedbackDigest(
 		if (!channel) throw new Error(`channel not found: ${channelId}`);
 		phase = 'gate';
 		const gated = await digestGateResult(channel, channelId, force, forceDryRun);
-		if (gated) return outcome = gated;
+		if (gated) {
+			outcome = gated;
+			return outcome;
+		}
 
 		const nowIso = new Date().toISOString();
 		phase = 'selection';
 		const selection = channel.feedbackHistoryBoundary
 			? await selectHistoryBatch(channel, channelId, nowIso, deadline)
 			: await selectStoredBatch(channelId, nowIso);
-		if ('status' in selection) return outcome = selection;
+		if ('status' in selection) {
+			outcome = selection;
+			return outcome;
+		}
 		const { batch, windowStart, windowEnd, historyPage, historyScanScope } = selection;
 		batchSize = batch.length;
 
@@ -760,7 +766,8 @@ export async function generateFeedbackDigest(
 		if (!apiKey) {
 			console.error(`feedback digest for ${channelId}: no OpenAI key resolved — marking failed`);
 			await markDigestState(channelId, windowStart, windowEnd, 'failed', 'scoring', channel);
-			return outcome = { status: 'failed', reason: 'no-key', ...(historyPage ? { historyRemaining: true } : {}) };
+			outcome = { status: 'failed', reason: 'no-key', ...(historyPage ? { historyRemaining: true } : {}) };
+			return outcome;
 		}
 
 		phase = 'metering';
@@ -827,7 +834,7 @@ export async function generateFeedbackDigest(
 					historyPage
 				})
 			);
-			return outcome = {
+			outcome = {
 				status: 'complete',
 				digestId: result.digestId,
 				commentsClassified: classified.length,
@@ -838,8 +845,10 @@ export async function generateFeedbackDigest(
 				creditsUsed: creditsCharged,
 				...(historyPage ? { historyRemaining: !historyPage.complete } : {})
 			};
+			return outcome;
 		} catch (cause) {
-			return outcome = await digestFailureResult(cause, channel, channelId, windowStart, windowEnd, historyPage);
+			outcome = await digestFailureResult(cause, channel, channelId, windowStart, windowEnd, historyPage);
+			return outcome;
 		}
 	} finally {
 		if (!outcome || outcome.status === 'failed' || outcome.status === 'deferred') {

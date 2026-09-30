@@ -3,6 +3,7 @@
 // codex), and a recorded deferral must surface as a banner instead of a
 // silent "No digest yet" (codex). Render is lazy — assert on .body.
 
+import { readFileSync } from 'node:fs';
 import { render } from 'svelte/server';
 import { describe, expect, it } from 'vitest';
 
@@ -176,6 +177,28 @@ describe('feedback page role gating (SSR)', () => {
 		expect(body).toContain('When is the next stream?');
 		expect(body).not.toContain('action="?/reveal"');
 		expect(body).not.toContain('Show original comment');
+	});
+
+	it('keeps recovered preview findings distinct when category and summary match', () => {
+		const findings = ['Theme evidence', 'Original claim evidence'].map((sanitizedExcerpt) => ({
+			category: 'question',
+			summary: '3 comments asked: visa procedures',
+			supporterCount: 3,
+			evidence: [{ sanitizedExcerpt, hasAbuse: 0 }]
+		}));
+		const body = renderFeedback(pageData(), {
+			scope: 'feedbackDryRun',
+			ok: true,
+			preview: {
+				commentsClassified: 6, commentsFailed: 0, pooled: 0,
+				hasMore: false, clusteringDegraded: true, findings
+			}
+		});
+		expect(body.match(/question: 3 comments asked: visa procedures/g)).toHaveLength(2);
+		expect(body).toContain('Theme evidence');
+		expect(body).toContain('Original claim evidence');
+		const source = readFileSync(new URL('./+page.svelte', import.meta.url), 'utf8');
+		expect(source).toContain('{#each feedbackPreview.findings as finding, index (index)}');
 	});
 
 	it('renders an empty feedback preview without implying a full-history scan', () => {

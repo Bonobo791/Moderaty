@@ -425,7 +425,7 @@
 				<p class="muted">Run a history scan to cover the full window.</p>
 				{#if feedbackPreview.hasMore}<p class="muted">More comments are available beyond this preview page.</p>{/if}
 				{#if feedbackPreview.findings.length}
-					{#each feedbackPreview.findings as finding, index (finding.category + finding.summary)}
+					{#each feedbackPreview.findings as finding, index (index)}
 						<div class="preview-finding">
 							<h5>{finding.category}: {finding.summary}</h5>
 						<p class="muted">{finding.supporterCount} supporting comments</p>

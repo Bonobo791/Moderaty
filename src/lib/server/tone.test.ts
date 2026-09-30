@@ -1,9 +1,10 @@
 import { afterEach, expect, test, vi } from 'vitest';
 
 vi.mock('$env/dynamic/private', () => ({
-	env: { OPENAI_API_KEY: 'test-openai-key' }
+	env: { OPENAI_API_KEY: 'test-openai-key' } as Record<string, string | undefined>
 }));
 
+import { env } from '$env/dynamic/private';
 import { scoreTone } from './tone';
 import { LGBTQIA_PROTECTION_SECTION, TONE_PROMPT } from '$lib/server/tonePrompt.js';
 
@@ -25,8 +26,11 @@ test('returns the tone score and sends context, model, and the calibrated rubric
 
 	expect(result).toEqual({ score: 0.82 });
 	const body = JSON.parse(String(fetch.mock.calls[0]?.[1]?.body));
-	expect(body.model).toBe('gpt-4.1-nano');
-	expect(body.temperature).toBe(0);
+	expect(body.model).toBe('gpt-6-luna');
+	// gpt-6-luna is a reasoning model — it rejects temperature, so the
+	// request carries a low-effort pass instead.
+	expect(body.temperature).toBeUndefined();
+	expect(body.reasoning_effort).toBe('low');
 	expect(body.response_format).toEqual({ type: 'json_object' });
 	const prompt = body.messages.map((message: { content: string }) => message.content).join('\n');
 	expect(prompt).toContain('My video');
@@ -47,6 +51,22 @@ test('returns the tone score and sends context, model, and the calibrated rubric
 	// anchored in the reject band (0.76-0.94).
 	expect(prompt).toContain('lol are you kidding? This is it? Not a great video.');
 	expect(prompt).toContain('0.85');
+});
+
+test('a non-reasoning OPENAI_TONE_MODEL override keeps temperature 0', async () => {
+	const fetch = vi.fn().mockResolvedValue(chatResponse('{"score": 0.5}'));
+	vi.stubGlobal('fetch', fetch);
+	env.OPENAI_TONE_MODEL = 'gpt-4.1-nano';
+	try {
+		await scoreTone('a comment', CONTEXT, undefined, {}, 'test-openai-key');
+	} finally {
+		delete env.OPENAI_TONE_MODEL;
+	}
+
+	const body = JSON.parse(String(fetch.mock.calls[0]?.[1]?.body));
+	expect(body.model).toBe('gpt-4.1-nano');
+	expect(body.temperature).toBe(0);
+	expect(body.reasoning_effort).toBeUndefined();
 });
 
 test('fails loudly when the chat request fails', async () => {

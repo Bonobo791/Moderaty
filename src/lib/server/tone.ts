@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { env } from '$env/dynamic/private';
 import { fetchWithRetry, jsonResponse } from '$lib/server/http';
+import { samplingParams } from '$lib/server/openaiChat';
 import { buildTonePrompt } from '$lib/server/tonePrompt';
 
 export interface ToneContext {
@@ -47,6 +48,7 @@ export async function scoreTone(
 	// structural backstop: a hijacked response that is not one valid score throws and
 	// the comment lands in the human review queue (I11), never auto-approved.
 	const tag = `data-${randomBytes(8).toString('hex')}`;
+	const model = env.OPENAI_TONE_MODEL ?? 'gpt-6-luna';
 	const res = await fetchWithRetry('https://api.openai.com/v1/chat/completions', {
 		method: 'POST',
 		headers: {
@@ -54,8 +56,8 @@ export async function scoreTone(
 			'Content-Type': 'application/json'
 		},
 		body: JSON.stringify({
-			model: env.OPENAI_TONE_MODEL ?? 'gpt-4.1-nano',
-			temperature: 0,
+			model,
+			...samplingParams(model),
 			response_format: { type: 'json_object' },
 			messages: [
 				{

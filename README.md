@@ -120,7 +120,7 @@ Copy [.env.example](.env.example) and provide these values as appropriate:
 | `APP_URL` | Canonical app URL used for OAuth redirects |
 | `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` | Local SQLite or production Turso connection |
 | `OPENAI_API_KEY` | AI moderation and tone scoring |
-| `OPENAI_TONE_MODEL` | Optional tone model; defaults to `gpt-4.1-nano` |
+| `OPENAI_TONE_MODEL` | Optional tone model; defaults to `gpt-6-luna` |
 | `CRON_SECRET` | Secret for scheduled and manual cron requests |
 | `ENCRYPTION_KEY` | Key used to encrypt stored YouTube refresh tokens |
 | `DRY_RUN` | Must be `true` or `false`; `true` records audit previews without durable moderation changes |

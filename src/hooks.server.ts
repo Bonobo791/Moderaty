@@ -1,6 +1,7 @@
 import type { Handle } from '@sveltejs/kit';
 
 import { isHttpError } from '@sveltejs/kit';
+import { DrizzleQueryError } from 'drizzle-orm';
 
 import { cookieSecure } from '$lib/server/oauthState';
 import { LOCALE_COOKIE, isBilingualPath, resolveLocale } from '$lib/i18n/locale';
@@ -84,7 +85,9 @@ export const handle: Handle = async ({ event, resolve }) => {
 		// is NOT an outage: let it fail loudly instead of masking it as
 		// maintenance and signing the user out.
 		if (isHttpError(e)) throw e;
-		console.error('session lookup failed:', e);
+		// Drizzle's wrapper includes bound parameters, including the session
+		// cookie. Keep the provider cause in the log without those credentials.
+		console.error('session lookup failed:', e instanceof DrizzleQueryError ? e.cause ?? 'database query failed' : e);
 		event.locals.dbDown = true;
 		event.locals.user = null;
 	}

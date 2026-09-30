@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { env } from '$env/dynamic/private';
 import { fetchWithRetry, jsonResponse } from '$lib/server/http';
+import { samplingParams } from '$lib/server/openaiChat';
 import { FEEDBACK_CATEGORIES, buildFeedbackPrompt } from '$lib/server/feedbackPrompt';
 
 export type FeedbackCategory = (typeof FEEDBACK_CATEGORIES)[number];
@@ -52,6 +53,7 @@ export async function classifyFeedback(
 	// throws, the comment is skipped, and the run is marked failed — never
 	// silently trusted.
 	const tag = `data-${randomBytes(8).toString('hex')}`;
+	const model = env.OPENAI_FEEDBACK_MODEL ?? 'gpt-6-luna';
 	const res = await fetchWithRetry(
 		'https://api.openai.com/v1/chat/completions',
 		{
@@ -61,8 +63,8 @@ export async function classifyFeedback(
 				'Content-Type': 'application/json'
 			},
 			body: JSON.stringify({
-				model: env.OPENAI_FEEDBACK_MODEL ?? 'gpt-4.1-nano',
-				temperature: 0,
+				model,
+				...samplingParams(model),
 				response_format: { type: 'json_object' },
 				messages: [
 					{

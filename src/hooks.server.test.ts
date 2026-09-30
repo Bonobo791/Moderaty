@@ -1,5 +1,6 @@
 import { beforeEach, expect, test, vi } from 'vitest';
 import { error } from '@sveltejs/kit';
+import { DrizzleQueryError } from 'drizzle-orm';
 
 const mocks = vi.hoisted(() => ({
 	getSessionUser: vi.fn(),
@@ -94,6 +95,22 @@ test('a database failure during session lookup degrades to maintenance mode, nev
 	expect(event.locals.dbDown).toBe(true);
 	// Loud on the server even though the user gets a maintenance page.
 	expect(console.error).toHaveBeenCalled();
+});
+
+test.each([new Error('SQLITE_UNKNOWN: S3 storage returned HTTP 500'), undefined])('session query failures log their cause without the cookie token: %s', async (cause) => {
+	const token = 'synthetic-session-cookie';
+	mocks.getSessionUser.mockRejectedValue(new DrizzleQueryError('select * from sessions where id = ?', [token], cause));
+	const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+	const event = { ...makeEvent(), cookies: { get: () => token, set: vi.fn() } };
+
+	await handle({ event, resolve: async () => new Response('maintenance') } as never);
+
+	expect(mocks.getSessionUser).toHaveBeenCalledWith(token);
+	expect(event.locals.dbDown).toBe(true);
+	expect(event.locals.user).toBeNull();
+	expect(event.cookies.set).not.toHaveBeenCalled();
+	expect(log).toHaveBeenCalledWith('session lookup failed:', cause ?? 'database query failed');
+	expect(JSON.stringify(log.mock.calls)).not.toContain(token);
 });
 
 test('a resolved session user populates locals.user', async () => {

@@ -732,99 +732,132 @@ export async function generateFeedbackDigest(
 	channelId: string,
 	{ deadline, force = false, forceDryRun = false }: DigestOptions = {}
 ): Promise<DigestResult> {
-	const channel = await db.select().from(channels).where(eq(channels.id, channelId)).get();
-	if (!channel) throw new Error(`channel not found: ${channelId}`);
-	const gated = await digestGateResult(channel, channelId, force, forceDryRun);
-	if (gated) return gated;
-
-	const nowIso = new Date().toISOString();
-	const selection = channel.feedbackHistoryBoundary
-		? await selectHistoryBatch(channel, channelId, nowIso, deadline)
-		: await selectStoredBatch(channelId, nowIso);
-	if ('status' in selection) return selection;
-	const { batch, windowStart, windowEnd, historyPage, historyScanScope } = selection;
-
-	// The OpenAI key comes from the org's BYOK resolution — a lifetime org
-	// without a usable key gets NO deployment-key fallback (openaiKey.ts);
-	// the run fails loudly instead of burning operator money.
-	const apiKey = await resolveOpenAiKey(channel.orgId);
-	if (!apiKey) {
-		console.error(`feedback digest for ${channelId}: no OpenAI key resolved — marking failed`);
-		await markDigestState(channelId, windowStart, windowEnd, 'failed', 'scoring', channel);
-		return { status: 'failed', reason: 'no-key', ...(historyPage ? { historyRemaining: true } : {}) };
-	}
-
-	const metered = channel.orgId ? await orgIsMetered(channel.orgId) : false;
-
+	const startedAt = Date.now();
+	let phase = 'load';
+	let batchSize = 0;
+	let outcome: DigestResult | undefined;
 	try {
-		const creditsCharged =
-			metered && channel.orgId ? await chargeFeedbackBatch(channel.orgId, batch, historyScanScope, deadline) : 0;
-
-		// Per-comment failures are counted and skipped (I1); a deadline aborts
-		// the whole run so the tick can defer cleanly.
-		const { classified, failed } = await classifyBatch(batch, deadline, apiKey);
-		// Every comment failing is a job failure, not an empty digest —
-		// 'complete' would mark them digested and permanently skip coverage.
-		// Throw so the run is marked failed and the next tick retries.
-		if (failed > 0 && classified.length === 0) {
-			throw new Error(`classification failed for all ${failed} comments`);
+		const channel = await db.select().from(channels).where(eq(channels.id, channelId)).get();
+		if (!channel) throw new Error(`channel not found: ${channelId}`);
+		phase = 'gate';
+		const gated = await digestGateResult(channel, channelId, force, forceDryRun);
+		if (gated) {
+			outcome = gated;
+			return outcome;
 		}
 
-		const threshold = channel.feedbackThreshold ?? 3;
-		const categories = enabledCategories(channel);
-		// The AI theme pass merges differently-worded claims for the same
-		// recurring feedback BEFORE grouping — otherwise exact claim matching
-		// undercounts what actually comes up most. The merge runs one call
-		// per category: themes never merge across categories anyway, so a
-		// mixed batch only let the model emit a malformed cross-category
-		// theme. Unusable assignments retain their original claims and
-		// complete with a visible reduced-grouping notice.
-		// Its request is bounded by the write reserve so the model call can
-		// never consume the headroom the persistence tx needs (codex/cubic).
-		const clusterDeadline = deadline === undefined ? undefined : deadline - WRITE_RESERVE_MS;
-		const { classified: themed, clusteringDegraded } = themePassCanMatter(classified, categories, threshold)
-			? await clusterClassifiedClaims(classified, categories, threshold, clusterDeadline, apiKey)
-			: { classified, clusteringDegraded: false };
-		const { findings, pooled } = groupFeedback(themed, { categories, threshold });
-
-		// Reserve write headroom, not just the deadline edge: the persistence
-		// tx is the slowest remaining phase and a kill mid-transaction would
-		// force the (charged) classifications to be repeated next run.
-		if (deadline !== undefined && Date.now() > deadline - WRITE_RESERVE_MS) {
-			throw new DeadlineExceededError();
+		const nowIso = new Date().toISOString();
+		phase = 'selection';
+		const selection = channel.feedbackHistoryBoundary
+			? await selectHistoryBatch(channel, channelId, nowIso, deadline)
+			: await selectStoredBatch(channelId, nowIso);
+		if ('status' in selection) {
+			outcome = selection;
+			return outcome;
 		}
-		const result = await withBusyRetry(() =>
-			writeDigestRun({
-				channel,
-				channelId,
-				nowIso,
-				windowStart,
-				windowEnd,
-				batch,
-				batchIds: new Set(batch.map((c) => c.id)),
-				classified,
-				failed,
-				clusteringDegraded,
-				findings,
+		const { batch, windowStart, windowEnd, historyPage, historyScanScope } = selection;
+		batchSize = batch.length;
+
+		// The OpenAI key comes from the org's BYOK resolution — a lifetime org
+		// without a usable key gets NO deployment-key fallback (openaiKey.ts);
+		// the run fails loudly instead of burning operator money.
+		phase = 'key-resolution';
+		const apiKey = await resolveOpenAiKey(channel.orgId);
+		if (!apiKey) {
+			console.error(`feedback digest for ${channelId}: no OpenAI key resolved — marking failed`);
+			await markDigestState(channelId, windowStart, windowEnd, 'failed', 'scoring', channel);
+			outcome = { status: 'failed', reason: 'no-key', ...(historyPage ? { historyRemaining: true } : {}) };
+			return outcome;
+		}
+
+		phase = 'metering';
+		const metered = channel.orgId ? await orgIsMetered(channel.orgId) : false;
+
+		phase = 'billing';
+		try {
+			const creditsCharged =
+				metered && channel.orgId ? await chargeFeedbackBatch(channel.orgId, batch, historyScanScope, deadline) : 0;
+
+			// Per-comment failures are counted and skipped (I1); a deadline aborts
+			// the whole run so the tick can defer cleanly.
+			phase = 'classification';
+			const { classified, failed } = await classifyBatch(batch, deadline, apiKey);
+			// Every comment failing is a job failure, not an empty digest —
+			// 'complete' would mark them digested and permanently skip coverage.
+			// Throw so the run is marked failed and the next tick retries.
+			if (failed > 0 && classified.length === 0) {
+				throw new Error(`classification failed for all ${failed} comments`);
+			}
+
+			const threshold = channel.feedbackThreshold ?? 3;
+			const categories = enabledCategories(channel);
+			// The AI theme pass merges differently-worded claims for the same
+			// recurring feedback BEFORE grouping — otherwise exact claim matching
+			// undercounts what actually comes up most. The merge runs one call
+			// per category: themes never merge across categories anyway, so a
+			// mixed batch only let the model emit a malformed cross-category
+			// theme. Unusable assignments retain their original claims and
+			// complete with a visible reduced-grouping notice.
+			// Its request is bounded by the write reserve so the model call can
+			// never consume the headroom the persistence tx needs (codex/cubic).
+			const clusterDeadline = deadline === undefined ? undefined : deadline - WRITE_RESERVE_MS;
+			phase = 'clustering';
+			const { classified: themed, clusteringDegraded } = themePassCanMatter(classified, categories, threshold)
+				? await clusterClassifiedClaims(classified, categories, threshold, clusterDeadline, apiKey)
+				: { classified, clusteringDegraded: false };
+			const { findings, pooled } = groupFeedback(themed, { categories, threshold });
+
+			// Reserve write headroom, not just the deadline edge: the persistence
+			// tx is the slowest remaining phase and a kill mid-transaction would
+			// force the (charged) classifications to be repeated next run.
+			phase = 'write-reserve';
+			if (deadline !== undefined && Date.now() > deadline - WRITE_RESERVE_MS) {
+				throw new DeadlineExceededError();
+			}
+			phase = 'write';
+			const result = await withBusyRetry(() =>
+				writeDigestRun({
+					channel,
+					channelId,
+					nowIso,
+					windowStart,
+					windowEnd,
+					batch,
+					batchIds: new Set(batch.map((c) => c.id)),
+					classified,
+					failed,
+					clusteringDegraded,
+					findings,
+					pooled,
+					metered,
+					creditsCharged,
+					historyPage
+				})
+			);
+			outcome = {
+				status: 'complete',
+				digestId: result.digestId,
+				commentsClassified: classified.length,
+				commentsFailed: failed,
+				...(clusteringDegraded ? { clusteringDegraded: true } : {}),
+				findings: findings.length,
 				pooled,
-				metered,
-				creditsCharged,
-				historyPage
-			})
-		);
-		return {
-			status: 'complete',
-			digestId: result.digestId,
-			commentsClassified: classified.length,
-			commentsFailed: failed,
-			...(clusteringDegraded ? { clusteringDegraded: true } : {}),
-			findings: findings.length,
-			pooled,
-			creditsUsed: creditsCharged,
-			...(historyPage ? { historyRemaining: !historyPage.complete } : {})
-		};
-	} catch (cause) {
-		return digestFailureResult(cause, channel, channelId, windowStart, windowEnd, historyPage);
+				creditsUsed: creditsCharged,
+				...(historyPage ? { historyRemaining: !historyPage.complete } : {})
+			};
+			return outcome;
+		} catch (cause) {
+			outcome = await digestFailureResult(cause, channel, channelId, windowStart, windowEnd, historyPage);
+			return outcome;
+		}
+	} finally {
+		if (!outcome || outcome.status === 'failed' || outcome.status === 'deferred') {
+			const stoppedAt = Date.now();
+			console.info('feedback digest stopped:', {
+				channelId, phase, elapsedMs: stoppedAt - startedAt,
+				remainingMs: deadline === undefined ? null : deadline - stoppedAt, batchSize
+			});
+		}
 	}
 }
 

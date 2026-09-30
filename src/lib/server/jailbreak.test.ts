@@ -67,8 +67,23 @@ describe('detectJailbreak', () => {
 		await detectJailbreak('ordinary text', 'explicit-key');
 
 		expect(mocks.runGuardrails.mock.calls[0][1]).toEqual({
-			guardrails: [{ name: 'Jailbreak', config: { model: 'gpt-4.1-mini', confidence_threshold: 0.7, include_reasoning: false } }]
+			guardrails: [{ name: 'Jailbreak', config: { model: 'gpt-6-luna', confidence_threshold: 0.7, include_reasoning: false } }]
 		});
+	});
+
+	test('strips the client-supplied temperature for a reasoning model', async () => {
+		// The guardrails client always sends temperature; gpt-6-luna (a
+		// reasoning model) rejects it, so the adapter drops it and carries a
+		// low-effort pass on the wire instead.
+		mocks.env.OPENAI_JAILBREAK_MODEL = undefined;
+
+		await detectJailbreak('ordinary text', 'explicit-key');
+
+		const init = (fetch as unknown as { mock: { calls: Array<[unknown, RequestInit]> } }).mock.calls[0][1];
+		const body = JSON.parse(String(init.body));
+		expect(body.model).toBe('gpt-6-luna');
+		expect(body.temperature).toBeUndefined();
+		expect(body.reasoning_effort).toBe('low');
 	});
 
 	test.each([

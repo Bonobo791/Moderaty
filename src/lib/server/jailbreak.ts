@@ -7,6 +7,7 @@ import {
 } from '@openai/guardrails';
 
 import { assertBeforeDeadline, DeadlineExceededError, fetchWithRetry, jsonResponse } from '$lib/server/http';
+import { isReasoningModel } from '$lib/server/openaiChat';
 
 const CONFIDENCE_THRESHOLD = 0.7;
 const CHAT_COMPLETIONS_URL = new URL('/v1/chat/completions', 'https://api.openai.com');
@@ -31,13 +32,20 @@ function llmContext(apiKey: string, deadline?: number): GuardrailLLMContext {
 		chat: {
 			completions: {
 				create: async (params, init) => {
+					// The guardrails client always sends temperature; reasoning
+					// models reject it outright, so swap it for a low-effort pass.
+					const body = { ...(params as Record<string, unknown>) };
+					if (isReasoningModel(typeof body.model === 'string' ? body.model : '')) {
+						delete body.temperature;
+						body.reasoning_effort = 'low';
+					}
 					const requestInit: RequestInit = {
 						method: 'POST',
 						headers: {
 							Authorization: `Bearer ${apiKey}`,
 							'Content-Type': 'application/json'
 						},
-						body: JSON.stringify(params),
+						body: JSON.stringify(body),
 						...(init?.signal ? { signal: init.signal } : {})
 					};
 					const response = await fetchWithRetry(CHAT_COMPLETIONS_URL, requestInit, deadline);
@@ -55,7 +63,7 @@ function jailbreakBundle(): GuardrailBundle {
 			{
 				name: 'Jailbreak',
 				config: {
-					model: env.OPENAI_JAILBREAK_MODEL ?? 'gpt-4.1-mini',
+					model: env.OPENAI_JAILBREAK_MODEL ?? 'gpt-6-luna',
 					confidence_threshold: CONFIDENCE_THRESHOLD,
 					include_reasoning: false
 				}

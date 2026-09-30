@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { env } from '$env/dynamic/private';
 import { assertBeforeDeadline, DeadlineExceededError, fetchWithRetry, HttpResponseError, HttpTransportError, jsonResponse } from '$lib/server/http';
+import { samplingParams } from '$lib/server/openaiChat';
 import { buildClusterPrompt } from '$lib/server/feedbackPrompt';
 import { CLAIM_MAX_LENGTH, type FeedbackCategory } from '$lib/server/feedback';
 import { normalizeClaimKey } from '$lib/server/feedbackGroup';
@@ -82,6 +83,7 @@ function clusterMessages(items: { i: number; category: string; claim: string }[]
 
 /** Builds the chat-completions request for the theme-merge call. */
 function clusterRequestInit(items: { i: number; category: string; claim: string }[], tag: string, apiKey: string): RequestInit {
+	const model = env.OPENAI_FEEDBACK_CLUSTER_MODEL ?? env.OPENAI_FEEDBACK_MODEL ?? 'gpt-6-luna';
 	return {
 		method: 'POST',
 		headers: {
@@ -89,8 +91,8 @@ function clusterRequestInit(items: { i: number; category: string; claim: string 
 			'Content-Type': 'application/json'
 		},
 		body: JSON.stringify({
-			model: env.OPENAI_FEEDBACK_CLUSTER_MODEL ?? env.OPENAI_FEEDBACK_MODEL ?? 'gpt-4.1-nano',
-			temperature: 0,
+			model,
+			...samplingParams(model),
 			response_format: { type: 'json_object' },
 			messages: clusterMessages(items, tag)
 		})

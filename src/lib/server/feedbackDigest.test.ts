@@ -18,6 +18,7 @@ import { countDbStatements, setupTestDb, testDb } from '$lib/server/testdb';
 import { channels, comments, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, organizations } from '$lib/server/db/schema';
 import { digestDue, generateFeedbackDigest, previewFeedbackDigest } from './feedbackDigest';
 import { CONCEALED_MESSAGE } from './feedbackSanitize';
+import * as ledger from './billing/ledger';
 
 setupTestDb(['finding_evidence', 'feedback_findings', 'feedback_digests', 'feedback_history_comments', 'comments', 'channels', 'organizations', 'credit_transactions']);
 
@@ -322,6 +323,62 @@ test('the theme pass is bounded by the write reserve — a spent reserve aborts 
 	const result = await generateFeedbackDigest('UC1', { force: true, deadline: Date.now() + 2_000 });
 	expect(result).toMatchObject({ status: 'deferred', reason: 'deadline' });
 	expect(mergeCallBodies()).toHaveLength(0);
+});
+
+test.each(['clustering', 'write-reserve'])('deadline diagnostics identify the %s phase without advancing coverage', async (phase) => {
+	await seedChannel('UC1', { feedbackEnabled: 1 });
+	if (phase === 'clustering') await seedCommentBatch(THREE_THEMES);
+	else await seedComment('c1', 'UC1', 'no useful feedback', '2026-01-01T00:00:00.000Z');
+	const startedAt = Date.now();
+	const clock = vi.spyOn(Date, 'now').mockReturnValue(startedAt);
+	const log = vi.spyOn(console, 'info').mockImplementation(() => {});
+	beforeClassify = async () => { clock.mockReturnValue(startedAt + 6_000); };
+	try {
+		const result = await generateFeedbackDigest('UC1', { force: true, deadline: startedAt + 10_000 });
+
+		expect(result).toMatchObject({ status: 'deferred', reason: 'deadline' });
+		expect(log).toHaveBeenCalledWith('feedback digest stopped:', {
+			channelId: 'UC1', phase, elapsedMs: 6_000, remainingMs: 4_000, batchSize: phase === 'clustering' ? 3 : 1
+		});
+		expect(await testDb().db.select().from(feedbackDigests).all()).toMatchObject([{ status: 'deferred', error: 'deadline' }]);
+		expect(await testDb().db.select().from(comments).where(isNull(comments.feedbackDigestedAt)).all()).toHaveLength(phase === 'clustering' ? 3 : 1);
+		expect((await testDb().db.select().from(channels).get())?.feedbackLastDigestAt).toBeNull();
+	} finally {
+		clock.mockRestore();
+		log.mockRestore();
+	}
+});
+
+test.each(['selection', 'key-resolution', 'metering'])('stopped diagnostics cover the early %s phase', async (phase) => {
+	await seedChannel('UC1', { feedbackEnabled: 1 });
+	await seedComment('c1', 'UC1', 'when is the next video', '2026-01-01T00:00:00.000Z');
+	const failure = new Error('database read unavailable');
+	const database = testDb().db;
+	const originalSelect = database.select.bind(database);
+	const dependency = phase === 'selection'
+		? vi.spyOn(database, 'select').mockImplementation((fields) => {
+			if (fields && 'text' in fields) throw failure;
+			return originalSelect(fields);
+		})
+		: phase === 'metering' ? vi.spyOn(ledger, 'orgIsMetered').mockRejectedValue(failure) : undefined;
+	if (phase === 'key-resolution') await database.update(organizations).set({ plan: 'lifetime' }).where(eq(organizations.id, 'org-1'));
+	const log = vi.spyOn(console, 'info').mockImplementation(() => {});
+	try {
+		if (phase === 'key-resolution') {
+			expect(await generateFeedbackDigest('UC1', { force: true })).toMatchObject({ status: 'failed', reason: 'no-key' });
+		} else {
+			await expect(generateFeedbackDigest('UC1', { force: true })).rejects.toBe(failure);
+		}
+		expect(log).toHaveBeenCalledWith('feedback digest stopped:', {
+			channelId: 'UC1', phase, elapsedMs: expect.any(Number), remainingMs: null, batchSize: phase === 'selection' ? 0 : 1
+		});
+	} finally {
+		dependency?.mockRestore();
+		log.mockRestore();
+	}
+	expect(await database.select().from(comments).where(isNull(comments.feedbackDigestedAt)).all()).toHaveLength(1);
+	expect(await database.select().from(creditTransactions).all()).toHaveLength(0);
+	expect((await database.select().from(channels).get())?.feedbackLastDigestAt).toBeNull();
 });
 
 test('a batch below the threshold in every enabled category skips the theme-merge call', async () => {

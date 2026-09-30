@@ -573,7 +573,7 @@ describe('AI-cost claims match implementation', () => {
 	});
 
 	it('no surface names the moderation endpoint, the model, or token pricing', () => {
-		const MECHANISM = [/moderation endpoint/i, /gpt-4\.1-nano/i, /v1\/moderations/i, /fractions of a cent/i];
+		const MECHANISM = [/moderation endpoint/i, /gpt-4\.1-nano/i, /gpt-6-luna/i, /v1\/moderations/i, /fractions of a cent/i];
 		for (const [name, text] of Object.entries(aiCostSurfaces)) {
 			for (const pattern of MECHANISM) {
 				expect(text, `${name} still names AI internals: ${pattern}`).not.toMatch(pattern);

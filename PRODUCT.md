@@ -56,7 +56,7 @@ Category line: "Comment protection for YouTube creators."
   auto-reject, 0.51–0.75 human queue, ≤0.50 approved. AI failure always routes
   to the human queue — never auto-approve, never auto-reject.
 - Tone pass (per-channel sensitivity level 2, "Edge lord + Ackchyually…"):
-  a prompted `gpt-4.1-nano` classifier scores demeaning/condescending/sarcastic
+  a prompted `gpt-6-luna` classifier scores demeaning/condescending/sarcastic
   tone with the video's title and description as context, on the same bands
   (tone ≥0.95 bans — reserved for genuine harm without verbal abuse). Level 1
   ("Edge Lord") runs the omni pass only. The stronger signal decides; the tone

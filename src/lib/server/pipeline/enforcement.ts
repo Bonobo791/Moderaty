@@ -266,6 +266,29 @@ async function convergeHolds(
 					.where(and(eq(comments.id, action.commentId), inArray(comments.status, ['approved', 'rejected'])))
 					.returning({ id: comments.id });
 				if (!flipped.length) continue;
+			} else {
+				// The corrective write landed — but the status this loop read was
+				// taken BEFORE it. A concurrent decider moving the comment while
+				// the write was in flight (a 'restoring' claim, or a rescan's fresh
+				// verdict) makes its ordering unprovable: terminalizing here leaves
+				// remote truth diverged with nothing outstanding to reconcile it
+				// (codex). A changed status keeps the row 'cancelling' so the next
+				// sweep converges the CURRENT decision; a vanished row has nothing
+				// left to protect, so it still converges.
+				const current = await db
+					.select({ status: comments.status })
+					.from(comments)
+					.where(inArray(comments.id, [action.commentId]))
+					.all();
+				if (current[0] !== undefined && current[0].status !== status) {
+					console.warn(
+						'convergence for comment %s superseded mid-write (status %s → %s) — action stays outstanding',
+						action.commentId,
+						status,
+						current[0].status
+					);
+					continue;
+				}
 			}
 			converged.add(action.commentId);
 		} catch (error) {
@@ -578,10 +601,21 @@ export async function finalizeHumanIntent(
 	const agreeing = (Object.keys(ACTION_OUTCOME) as YoutubeAction[]).filter((verb) => ACTION_OUTCOME[verb] === status);
 	await db.transaction(async (transaction) => {
 		await assertChannelActive(channelId, transaction, expected);
-		await transaction
+		const claimed = await transaction
 			.update(comments)
 			.set({ status, decidedBy: 'human' })
-			.where(and(eq(comments.id, commentId), eq(comments.status, 'restoring')));
+			.where(and(eq(comments.id, commentId), eq(comments.status, 'restoring')))
+			.returning({ id: comments.id });
+		if (!claimed.length) {
+			// The 'restoring' claim was replaced while the remote write was in
+			// flight (a rescan staged a fresh verdict, or another flow owns the
+			// comment now). Proceeding would terminalize action rows belonging
+			// to the NEW owner — leave them for the claim that superseded this
+			// one (codex). The human's remote write already landed; whatever
+			// verdict owns the row reconciles the ordering on its own path.
+			console.warn(`finalize: comment ${commentId} left 'restoring' mid-flight — leaving its action rows to the current owner`);
+			return;
+		}
 		const dispatched = agreeing.length
 			? await transaction
 					.update(moderationActions)

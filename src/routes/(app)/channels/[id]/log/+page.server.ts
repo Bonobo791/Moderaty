@@ -3,7 +3,7 @@ import { auditLog, comments, moderationActions } from '$lib/server/db/schema';
 import { ownedChannel } from '$lib/server/ownership';
 import { requireUser } from '$lib/server/session';
 import { refreshAccessToken } from '$lib/server/youtube';
-import { applyHumanIntent, finalizeHumanIntent } from '$lib/server/pipeline/enforcement';
+import { applyHumanIntent, assertChannelActive, finalizeHumanIntent } from '$lib/server/pipeline/enforcement';
 import { decrypt } from '$lib/server/crypto';
 import { env } from '$env/dynamic/private';
 import { error, fail } from '@sveltejs/kit';
@@ -221,6 +221,11 @@ export const actions = {
 		// restore, so the honest outcome to finalize is 'deleted' (codex).
 		let remoteMissing = false;
 		try {
+			// Revalidate the connector identity before spending the grant:
+			// account deletion can have detached the channel since ownedChannel
+			// loaded it, and a remote write must never fire on a dead channel
+			// (cubic). The catch releases a fresh claim like any remote failure.
+			await assertChannelActive(params.id, db, ch);
 			const token = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
 			remoteMissing = (await applyHumanIntent(commentId, 'restore', token)) === 'missing';
 		} catch (e) {
@@ -245,7 +250,7 @@ export const actions = {
 		// repair the desync (codeant). 'restoring' + the durable intent row
 		// are exactly what the reconcile sweep needs to finish the commit.
 		try {
-			await finalizeHumanIntent(params.id, commentId, remoteMissing ? 'delete' : 'restore');
+			await finalizeHumanIntent(params.id, commentId, remoteMissing ? 'delete' : 'restore', ch);
 		} catch (e) {
 			// Remote succeeded, local commit failed: keep the claim and the
 			// intent row for the reconcile sweep, and tell the user it

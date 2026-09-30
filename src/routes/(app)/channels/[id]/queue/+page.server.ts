@@ -2,7 +2,7 @@ import { db, withBusyRetry } from '$lib/server/db';
 import { comments, auditLog, moderationActions } from '$lib/server/db/schema';
 import { and, eq, desc } from 'drizzle-orm';
 import { refreshAccessToken } from '$lib/server/youtube';
-import { applyHumanIntent, finalizeHumanIntent } from '$lib/server/pipeline/enforcement';
+import { applyHumanIntent, assertChannelActive, finalizeHumanIntent } from '$lib/server/pipeline/enforcement';
 import { decrypt } from '$lib/server/crypto';
 import { ownedChannel } from '$lib/server/ownership';
 import { requireUser } from '$lib/server/session';
@@ -116,6 +116,11 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
 	// 'deleted', not the verb the user clicked (codex).
 	let remoteMissing = false;
 	try {
+		// The channel snapshot was loaded before the claim — account deletion
+		// can have detached it since. Revalidate the connector identity before
+		// spending the grant, or a remote write fires on a dead channel
+		// (cubic). The catch releases the claim like any remote failure.
+		await assertChannelActive(paramsId, db, ch);
 		const token = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
 		remoteMissing = (await applyHumanIntent(commentId, action, token)) === 'missing';
 	} catch (e) {
@@ -155,7 +160,7 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
 	// the durable intent row; the reconcile sweep re-applies the idempotent
 	// write and commits the final status on its next run.
 	try {
-		await finalizeHumanIntent(paramsId, commentId, remoteMissing ? 'delete' : action);
+		await finalizeHumanIntent(paramsId, commentId, remoteMissing ? 'delete' : action, ch);
 	} catch (e) {
 		console.error('[queue] %s reached YouTube but finalize failed for comment %s — the reconcile sweep will finish it', action, commentId, e);
 		return fail(500, { error: 'The action reached YouTube but is still being recorded — it resolves automatically.' });

@@ -384,6 +384,48 @@ test('a dispatched action AGREEING with the human outcome completes at finalize'
 	expect(mocks.state.insertedAudits).toContainEqual(expect.objectContaining({ commentId: 'comment', action: 'reject', actor: 'system' }));
 });
 
+test('a comment claimed mid-convergence keeps its cancelling action outstanding', async () => {
+	// codex: the corrective write lands, but a human restore claims the
+	// comment ('restoring') while it was in flight — the pre-write status read
+	// is stale. Superseding now would leave nothing outstanding while the two
+	// remote writes' ordering is unprovable; the row must stay 'cancelling'
+	// for the next sweep (or the human flow) to resolve.
+	mocks.state.existingIds = ['comment'];
+	mocks.state.commentStatuses = { comment: 'rejected' };
+	mocks.state.moderationActions = [dispatchedAction({ action: 'hold', state: 'cancelling' })];
+	mocks.setModerationStatus.mockImplementationOnce(async () => {
+		mocks.state.commentStatuses.comment = 'restoring';
+	});
+
+	await runChannel('channel');
+
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['comment'], 'rejected', false, 'access-token', undefined);
+	expectActionState('cancelling');
+});
+
+test('a rescan replacing the restoring claim keeps its freshly staged action', async () => {
+	// codex: finalizeHumanIntent guards its comment update on 'restoring' but
+	// never checked whether a row matched — a rescan that replaced the claim
+	// mid-write would still see its fresh pending action superseded.
+	mocks.state.existingIds = ['comment'];
+	mocks.state.commentStatuses = { comment: 'restoring' };
+	mocks.state.insertedAudits = [
+		{ channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'queue UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
+	];
+	mocks.setModerationStatus.mockImplementationOnce(async () => {
+		// The rescan stages a fresh verdict + action while the human's remote
+		// write is in flight — the claim finalize relied on is gone.
+		mocks.state.commentStatuses.comment = 'pending';
+		mocks.state.moderationActions = [dispatchedAction({ action: 'reject', state: 'pending' })];
+	});
+
+	await runChannel('channel');
+
+	// The rescan's pending reject survives: finalize owned no claim, so it
+	// must not have terminalized the newer action row.
+	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({ commentId: 'comment', action: 'reject', state: 'pending' })]);
+});
+
 test('acted counts only rows this run terminalized — a failed corrective write is not counted', async () => {
 	// codex: applicable.length was added wholesale — a hold whose corrective
 	// write failed stayed outstanding yet still counted. It counts when a

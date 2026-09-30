@@ -24,7 +24,10 @@ vi.mock('$lib/server/youtube', () => ({
 	refreshAccessToken: mocks.refreshAccessToken,
 	setModerationStatus: mocks.setModerationStatus,
 	deleteComment: mocks.deleteComment,
-	CommentNotFoundError: mocks.CommentNotFoundError
+	CommentNotFoundError: mocks.CommentNotFoundError,
+	// enforcement.ts imports this — mirror the real constant or a seeded
+	// action batch silently slices to empty (cubic).
+	YOUTUBE_ID_BATCH_SIZE: 50
 }));
 
 import { actions } from './+page.server';
@@ -72,6 +75,18 @@ function undo(commentId: string | null, channelId = 'UC1', user: typeof OWNER | 
 async function commentRow(id: string) {
 	return testDb().db.select().from(comments).where(eq(comments.id, id)).get();
 }
+
+test('a channel deactivated between load and the write never reaches YouTube', async () => {
+	// cubic: ownedChannel loads before the claim; account deletion can
+	// deactivate the connector in between. The pre-write revalidation must
+	// abort — never refresh a dead grant or spend it on YouTube.
+	await seedComment('c1', 'rejected', 'reject');
+	await testDb().db.update(channels).set({ active: 0 }).where(eq(channels.id, 'UC1'));
+	await expect(undo('c1')).rejects.toThrow();
+	expect(mocks.refreshAccessToken).not.toHaveBeenCalled();
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	expect((await commentRow('c1'))?.status).toBe('rejected'); // claim released
+});
 
 test('undo restores a rejected comment at YouTube and records the restore', async () => {
 	await seedComment('c1', 'rejected', 'reject');
@@ -137,14 +152,17 @@ test('a missing YouTube comment finalizes a restore as deleted — nothing exist
 	await seedComment('c1', 'rejected', 'reject');
 	mocks.setModerationStatus.mockRejectedValueOnce(new mocks.CommentNotFoundError(['c1']));
 	const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+	try {
+		const res = await undo('c1');
 
-	const res = await undo('c1');
-
-	expect(res).toMatchObject({ success: 'The comment no longer exists on YouTube — recorded as deleted.' });
-	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined);
-	expect(await commentRow('c1')).toMatchObject({ status: 'deleted', decidedBy: 'human' });
-	expect(warning).toHaveBeenCalledWith('comment c1 no longer exists on YouTube — completing restore');
+		expect(res).toMatchObject({ success: 'The comment no longer exists on YouTube — recorded as deleted.' });
+		expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
+		expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined);
+		expect(await commentRow('c1')).toMatchObject({ status: 'deleted', decidedBy: 'human' });
+		expect(warning).toHaveBeenCalledWith('comment c1 no longer exists on YouTube — completing restore');
+	} finally {
+		warning.mockRestore();
+	}
 });
 
 test('a dry run records a dry-run audit row and makes no YouTube call', async () => {

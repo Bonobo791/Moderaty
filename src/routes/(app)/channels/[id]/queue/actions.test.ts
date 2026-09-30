@@ -23,7 +23,10 @@ vi.mock('$lib/server/youtube', () => ({
 	refreshAccessToken: mocks.refreshAccessToken,
 	setModerationStatus: mocks.setModerationStatus,
 	deleteComment: mocks.deleteComment,
-	CommentNotFoundError: mocks.CommentNotFoundError
+	CommentNotFoundError: mocks.CommentNotFoundError,
+	// enforcement.ts imports this — mirror the real constant or a seeded
+	// action batch silently slices to empty (cubic).
+	YOUTUBE_ID_BATCH_SIZE: 50
 }));
 
 import { actions, load } from './+page.server';
@@ -436,6 +439,43 @@ test('ban outside DRY_RUN rejects with the author ban on YouTube and audits ban'
 	const audits = await auditRows();
 	expect(audits).toHaveLength(1);
 	expect(audits[0]).toMatchObject({ channelId: 'UC1', commentId: 'c1', action: 'ban', reason: 'manual review', actor: 'user' });
+});
+
+test('a channel deactivated between load and the write never reaches YouTube', async () => {
+	// cubic: ownedChannel loads before the claim; account deletion can
+	// deactivate the connector in between. The pre-write revalidation must
+	// abort — never refresh a dead grant or spend it on YouTube.
+	mocks.env.DRY_RUN = 'false';
+	await seedComment('c1', 'UC1');
+	await testDb().db.update(channels).set({ active: 0 }).where(eq(channels.id, 'UC1'));
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		const res = await act('approve', { commentId: 'c1' });
+		expect(res).toMatchObject({ status: 500 });
+	} finally {
+		errorSpy.mockRestore();
+	}
+	expect(mocks.refreshAccessToken).not.toHaveBeenCalled();
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	expect((await commentRow('c1'))?.status).toBe('pending'); // claim released
+});
+
+test('a connector detached between the remote write and finalize keeps the claim', async () => {
+	// cubic: finalizeHumanIntent must re-check the connector identity — a
+	// detached channel can't have a decision committed against it.
+	mocks.env.DRY_RUN = 'false';
+	await seedComment('c1', 'UC1');
+	mocks.setModerationStatus.mockImplementationOnce(async () => {
+		await testDb().db.update(channels).set({ active: 0 }).where(eq(channels.id, 'UC1'));
+	});
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		const res = await act('approve', { commentId: 'c1' });
+		expect(res).toMatchObject({ status: 500 });
+	} finally {
+		errorSpy.mockRestore();
+	}
+	expect((await commentRow('c1'))?.status).toBe('restoring'); // claim kept for reconcile
 });
 
 test('load surfaces the real hold state per queued comment', async () => {

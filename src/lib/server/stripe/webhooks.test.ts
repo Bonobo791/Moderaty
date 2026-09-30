@@ -66,7 +66,7 @@ function session(overrides: Record<string, unknown> = {}): Record<string, unknow
 }
 
 function event(type: string, id: string, object: Record<string, unknown>, created?: number): { id: string; type: string; created?: number; data: { object: unknown } } {
-	return { id, type, ...(created === undefined ? {} : { created }), data: { object: { id, object: 'test', ...object } } };
+	return { id, type, ...(created === undefined ? (type === 'charge.refunded' ? { created: Math.floor(Date.now() / 1000) } : {}) : { created }), data: { object: { id, object: 'test', ...object } } };
 }
 
 // Shared arrange+act for the live-check lifetime tests: seed an org with
@@ -2327,4 +2327,21 @@ test('a refund recorded before observation tracking preserves later consent on r
 	await reverseCharge('ch_legacy_refund', 'refund');
 	expect((await db.select().from(organizations).get())?.autoTopupEnabled).toBe(1);
 	expect(await getCredits('org-1')).toBe(0);
+});
+
+test.each([undefined, '1800000000', -1, 0, 0.5, Date.now() / 1000 + 172800])('refund event rejects invalid creation time %s before side effects', async (created) => {
+	await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', autoTopupEnabled: 1 });
+	mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_invalid_time', amount: 500, amount_refunded: 500 });
+	await expect(handleStripeEvent({ ...event('charge.refunded', 'evt_invalid_time', { id: 'ch_invalid_time' }), created } as never)).rejects.toThrow(/created timestamp/);
+	expect(mocks.chargesRetrieve).not.toHaveBeenCalled();
+	expect((await testDb().db.select().from(organizations).get())?.autoTopupEnabled).toBe(1);
+});
+
+test('async checkout failure corrects credits without pausing unrelated automatic top-up', async () => {
+	await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', autoTopupEnabled: 1, autoTopupState: 'in_flight', autoTopupAttemptAt: '2026-09-30T10:00:00.000Z', autoTopupSubmittedAt: '2026-09-30T10:00:00.000Z' });
+	await applyLedgerDelta(db, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_123', paymentIntentId: 'pi_1', chargeId: 'ch_1' });
+	mocks.sessionsRetrieve.mockResolvedValue(session());
+	expect(await handleStripeEvent(event('checkout.session.async_payment_failed', 'evt_async_fail', { id: 'cs_123' }) as never)).toBe(true);
+	expect(await getCredits('org-1')).toBe(0);
+	expect(await testDb().db.select().from(organizations).get()).toMatchObject({ autoTopupEnabled: 1, autoTopupState: 'in_flight', autoTopupPauseReason: null, autoTopupSubmittedAt: '2026-09-30T10:00:00.000Z' });
 });

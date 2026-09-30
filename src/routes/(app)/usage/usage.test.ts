@@ -59,6 +59,7 @@ async function seedOrg(overrides: Record<string, unknown> = {}): Promise<void> {
 		id: 'org-1',
 		name: 'One',
 		creditsRemaining: 0,
+		autoTopupBundle: 'credits_500',
 		...overrides
 	});
 }
@@ -110,7 +111,7 @@ describe('usage load', () => {
 		expect(body).toContain('name="bundle"');
 	});
 	test('an unconfigured selection fails without changing settings', async () => {
-		await seedOrg();
+		await seedOrg({ autoTopupBundle: null });
 		const saved = env.STRIPE_PRICE_CREDITS_2000;
 		delete (env as Record<string, unknown>).STRIPE_PRICE_CREDITS_2000;
 		try {
@@ -1370,4 +1371,20 @@ test('malformed Stripe price configuration is logged and excluded from automatic
 		expect(configuredAutoTopupBundles().map((bundle) => bundle.id)).toEqual(['credits_2000']);
 		expect(log).toHaveBeenCalledWith(expect.stringContaining('STRIPE_PRICE_CREDITS_500'), expect.any(Error));
 	} finally { env.STRIPE_PRICE_CREDITS_500 = previous; log.mockRestore(); }
+});
+
+test('owner disabling a submitted attempt records recovery before returning', async () => {
+	const attemptAt = '2026-09-30T10:00:00.000Z';
+	await seedOrg({ autoTopupEnabled: 1, autoTopupState: 'in_flight', autoTopupAttemptAt: attemptAt, autoTopupLastAttemptAt: attemptAt, autoTopupSubmittedAt: attemptAt });
+	expect(await setAutoTopup({})).toEqual({ ok: true });
+	expect(await testDb().db.select().from(stripeAutoTopupRecoveries).get()).toMatchObject({ orgId: 'org-1', attemptAt, resolvedAt: null });
+	expect(await testDb().db.select().from(organizations).get()).toMatchObject({ autoTopupEnabled: 0, autoTopupState: 'disabled', autoTopupAttemptAt: null, autoTopupSubmittedAt: null, autoTopupPauseReason: null });
+});
+
+test('assigning a bundle to an enabled legacy setting requires fresh consent evidence', async () => {
+	await seedOrg({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupBundle: null, autoTopupConsentVersion: 'old' });
+	expect(await setAutoTopup({ enabled: 'on', threshold: '100' })).toMatchObject({ status: 400 });
+	expect((await testDb().db.select().from(organizations).get())?.autoTopupBundle).toBeNull();
+	expect(await setAutoTopup({ enabled: 'on', threshold: '100', consent: 'on' })).toEqual({ ok: true });
+	expect(await testDb().db.select().from(organizations).get()).toMatchObject({ autoTopupBundle: 'credits_500', autoTopupConsentVersion: LEGAL_VERSION, autoTopupConsentedBy: OWNER.id, autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT, autoTopupConsentedAt: expect.any(String) });
 });

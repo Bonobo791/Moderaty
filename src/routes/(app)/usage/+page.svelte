@@ -315,7 +315,7 @@
 				/>
 				<span>credits</span>
 			</div>
-			{#if !hasAutoTopup}
+			{#if !hasAutoTopup || !storedBundleAvailable}
 				<p class="muted">If your balance is below the threshold, enabling auto top-up may charge your saved card on the next billing check.</p>
 				<label for="auto-topup-consent" class="consent-label">
 					<input id="auto-topup-consent" type="checkbox" name="consent" />

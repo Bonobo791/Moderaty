@@ -19,7 +19,7 @@ vi.mock('$env/dynamic/private', () => ({ env: { ENCRYPTION_KEY: 'deletion-test-k
 
 import { encrypt } from './crypto';
 import { DAY_MS, seedConsent, seedUser as seedBareUser, setupTestDb, testDb } from './testdb';
-import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, googleRevocationOutbox, invites, memberships, moderationActions, organizations, rules, sessions, stripeAutoTopupRecoveries, stripeDeletionOutbox, stripeLifetimeEntitlements, stripeLifetimeSlots, stripeScrubOutbox, users } from './db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, googleRevocationOutbox, invites, memberships, moderationActions, organizations, rules, sessions, stripeAutoTopupRecoveries, stripeRefundObservations, stripeDeletionOutbox, stripeLifetimeEntitlements, stripeLifetimeSlots, stripeScrubOutbox, users } from './db/schema';
 import {
 	AUDIT_HANDLE_RETENTION_MS,
 	CONSENT_EMAIL_RETENTION_MS,
@@ -38,7 +38,7 @@ import {
 	nullExpiredModerationActionHandles
 } from './deletion';
 
-setupTestDb(['moderation_actions', 'comments', 'audit_log', 'channel_allowed_handles', 'rules', 'channels', 'sessions', 'consents', 'invites', 'memberships', 'organizations', 'users', 'credit_transactions', 'stripe_auto_topup_recoveries', 'stripe_deletion_outbox', 'google_revocation_outbox', 'stripe_scrub_outbox', 'stripe_lifetime_slots', 'stripe_lifetime_entitlements', 'feedback_digests', 'feedback_findings', 'finding_evidence', 'feedback_history_comments']);
+setupTestDb(['moderation_actions', 'comments', 'audit_log', 'channel_allowed_handles', 'rules', 'channels', 'sessions', 'consents', 'invites', 'memberships', 'organizations', 'users', 'credit_transactions', 'stripe_auto_topup_recoveries', 'stripe_refund_observations', 'stripe_deletion_outbox', 'google_revocation_outbox', 'stripe_scrub_outbox', 'stripe_lifetime_slots', 'stripe_lifetime_entitlements', 'feedback_digests', 'feedback_findings', 'finding_evidence', 'feedback_history_comments']);
 
 test('account deletion retains unresolved payment recovery and defers Stripe customer deletion', async () => {
 	const userId = await seedUser('gone');
@@ -1573,4 +1573,12 @@ test('a retry after Stripe already erased its customer clears the local outbox a
 		expect(await testDb().db.select().from(stripeAutoTopupRecoveries)).toEqual([]);
 		expect(log).toHaveBeenCalledWith(expect.stringContaining('already deleted'), 'cus_erased');
 	} finally { log.mockRestore(); }
+});
+
+test('account deletion erases unassigned refund observations linked to its ledger only', async () => {
+	const userId = await seedUser('gone');
+	await testDb().db.insert(creditTransactions).values({ orgId: 'org-gone', delta: 100, reason: 'purchase', refType: 'checkout_session', refId: 'cs_gone', chargeId: 'ch_gone' });
+	for (const chargeId of ['ch_gone', 'ch_unknown']) await testDb().db.insert(stripeRefundObservations).values({ chargeId, refundedAmountCents: 100, occurredAt: new Date().toISOString() });
+	await deleteUserRecords(userId);
+	expect((await testDb().db.select().from(stripeRefundObservations)).map(row => row.chargeId)).toEqual(['ch_unknown']);
 });

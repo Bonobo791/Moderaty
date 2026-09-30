@@ -1065,7 +1065,7 @@ function assertEventCreated(eventCreated: number | undefined, eventId: string): 
 		eventCreated <= 0 ||
 		eventCreated > Math.floor(Date.now() / 1000) + 86_400
 	) {
-		throw new Error(`customer.updated ${eventId} carries an invalid envelope created timestamp: ${eventCreated}`);
+		throw new Error(`stripe event ${eventId} carries an invalid envelope created timestamp: ${eventCreated}`);
 	}
 }
 
@@ -1747,7 +1747,8 @@ const dispatchChargeEvent = async (event: Stripe.Event): Promise<boolean> => {
 	// negative balance — both documented v1 limitations
 	// (docs/stripe-checkout-webhooks.md §7).
 	if (event.type === 'charge.refunded') {
-		await reverseCharge(event.data.object.id, 'refund', undefined, event.created ? new Date(event.created * 1000).toISOString() : undefined);
+		assertEventCreated(event.created, event.id);
+		await reverseCharge(event.data.object.id, 'refund', undefined, new Date(event.created * 1000).toISOString());
 		return true;
 	}
 	if (event.type === 'charge.refund.updated' || event.type === 'refund.updated' || event.type === 'refund.failed') {
@@ -1839,7 +1840,7 @@ async function reverseSessionGrant(sessionId: string): Promise<boolean> {
 	return applyLedgerDelta(db, {
 		orgId: match.orgId,
 		delta: -match.credits,
-		reason: 'refund',
+		reason: 'adjust',
 		refType: 'charge',
 		refId: typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : sessionId,
 		chargeId: typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : undefined,

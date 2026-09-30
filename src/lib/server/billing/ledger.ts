@@ -184,7 +184,7 @@ export const UNMETERED_CREDIT_GRANT_ERROR = 'an unmetered plan cannot receive cr
 /** Caller supplies a transaction when the pause accompanies a credit reversal. */
 export async function pauseAutoTopupForRefund(handle: LedgerHandle, orgId: string, occurredAt?: string, refundedChargeId?: string): Promise<void> {
 	return inLedgerTx(handle, async (tx) => {
-		const org = await tx.select({ state: organizations.autoTopupState, lastAttemptAt: organizations.autoTopupLastAttemptAt, attemptAt: organizations.autoTopupAttemptAt, submittedAt: organizations.autoTopupSubmittedAt, customerId: organizations.stripeCustomerId, pauseReason: organizations.autoTopupPauseReason, pausedAt: organizations.autoTopupPausedAt }).from(organizations).where(eq(organizations.id, orgId)).get();
+		const org = await tx.select({ state: organizations.autoTopupState, lastAttemptAt: organizations.autoTopupLastAttemptAt, attemptAt: organizations.autoTopupAttemptAt, submittedAt: organizations.autoTopupSubmittedAt, customerId: organizations.stripeCustomerId, pauseReason: organizations.autoTopupPauseReason, pausedAt: organizations.autoTopupPausedAt, consentedAt: organizations.autoTopupConsentedAt }).from(organizations).where(eq(organizations.id, orgId)).get();
 		if (!org) throw new Error(`org not found: ${orgId}`);
 		const paused = await tx.update(organizations)
 			.set({ autoTopupEnabled: 0, autoTopupState: 'disabled', autoTopupPauseReason: 'refund', autoTopupPausedAt: org.pauseReason === 'refund' && org.pausedAt ? org.pausedAt : new Date().toISOString(), autoTopupAttemptAt: null, autoTopupSubmittedAt: null })
@@ -192,8 +192,7 @@ export async function pauseAutoTopupForRefund(handle: LedgerHandle, orgId: strin
 				// A delayed replay must respect consent explicitly given AFTER this refund.
 				occurredAt ? or(isNull(organizations.autoTopupConsentedAt), sql`strftime('%s', ${organizations.autoTopupConsentedAt}) <= strftime('%s', ${occurredAt})`) : undefined))
 			.returning({ id: organizations.id });
-		if (!paused.length) return;
-		if (org.state === 'in_flight' || org.attemptAt) {
+		if (paused.length && (org.state === 'in_flight' || org.attemptAt)) {
 			const attemptAt = org.attemptAt ?? org.lastAttemptAt;
 			if (!attemptAt) throw new Error(`auto top-up claim for org ${orgId} has no attempt timestamp`);
 			await tx.insert(stripeAutoTopupRecoveries).values({ orgId, attemptAt, customerId: org.customerId,
@@ -212,6 +211,8 @@ export async function pauseAutoTopupForRefund(handle: LedgerHandle, orgId: strin
 				WHERE ${creditTransactions.orgId} = ${orgId} AND ${creditTransactions.reason} = 'auto_topup'
 					AND ${creditTransactions.delta} > 0 AND ${creditTransactions.createdAt} >= ${occurredAt}
 					AND ${creditTransactions.paymentIntentId} IS NOT NULL
+					AND (${paused.length ? null : org.consentedAt} IS NULL
+						OR ${creditTransactions.createdAt} < ${paused.length ? null : org.consentedAt})
 					AND (${refundedChargeId ?? null} IS NULL OR ${creditTransactions.chargeId} IS NULL
 						OR ${creditTransactions.chargeId} != ${refundedChargeId ?? null})
 					AND NOT EXISTS (SELECT 1 FROM ${stripeAutoTopupRecoveries}
@@ -220,7 +221,7 @@ export async function pauseAutoTopupForRefund(handle: LedgerHandle, orgId: strin
 				ON CONFLICT DO NOTHING
 			`);
 		}
-		console.error(`auto top-up paused for org ${orgId}: payment refunded — fresh owner consent required`);
+		if (paused.length) console.error(`auto top-up paused for org ${orgId}: automatic payments stopped — fresh owner consent required`);
 	});
 }
 

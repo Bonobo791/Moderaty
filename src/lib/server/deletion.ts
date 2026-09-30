@@ -17,7 +17,7 @@ import { and, asc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizz
 import type Stripe from 'stripe';
 
 import { db } from '$lib/server/db';
-import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, googleRevocationOutbox, invites, memberships, moderationActions, organizations, rules, sessions, stripeAutoTopupRecoveries, stripeRefundObservations, stripeDeletionOutbox, stripeLifetimeSlots, stripeScrubOutbox, users } from '$lib/server/db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, googleRevocationOutbox, invites, memberships, moderationActions, organizations, rules, sessions, stripeAutoTopupRecoveries, stripeRefundObservations, stripeDeletionOutbox, stripeLifetimeSlots, stripeLifetimeEntitlements, stripeSubscriptionPeriods, stripeScrubOutbox, users } from '$lib/server/db/schema';
 import { pauseAutoTopupForRefund } from '$lib/server/billing/ledger';
 import { decrypt } from '$lib/server/crypto';
 import { revokeGoogleToken } from '$lib/server/google';
@@ -400,7 +400,14 @@ async function dissolveOrgs(tx: DeletionTx, dissolveOrgIds: string[]): Promise<s
 	// The credit ledger is part of the org's records: comment ids,
 	// Checkout Session ids, PaymentIntent ids, and charge ids must not
 	// survive an "immediate and permanent" deletion as orphans.
-	await tx.delete(stripeRefundObservations).where(inArray(stripeRefundObservations.orgId, dissolveOrgIds));
+	await tx.delete(stripeRefundObservations).where(or(
+		inArray(stripeRefundObservations.orgId, dissolveOrgIds),
+		and(isNull(stripeRefundObservations.orgId), or(
+			inArray(stripeRefundObservations.chargeId, tx.select({ chargeId: creditTransactions.chargeId }).from(creditTransactions).where(inArray(creditTransactions.orgId, dissolveOrgIds))),
+			inArray(stripeRefundObservations.chargeId, tx.select({ chargeId: stripeLifetimeEntitlements.chargeId }).from(stripeLifetimeEntitlements).where(inArray(stripeLifetimeEntitlements.orgId, dissolveOrgIds))),
+			inArray(stripeRefundObservations.chargeId, tx.select({ chargeId: stripeSubscriptionPeriods.chargeId }).from(stripeSubscriptionPeriods).where(inArray(stripeSubscriptionPeriods.orgId, dissolveOrgIds)))
+		))
+	));
 	await tx.delete(creditTransactions).where(inArray(creditTransactions.orgId, dissolveOrgIds));
 	await tx.delete(organizations).where(inArray(organizations.id, dissolveOrgIds));
 	return stripeCustomerIds;

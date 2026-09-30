@@ -497,7 +497,7 @@ export async function grantAutoTopupCredits(
 			label: `auto-topup PI ${pi.id} for org ${orgId} succeeded but the org is unmetered`,
 			orgId
 		});
-		await releaseClaimForPi(orgId, pi);
+		await releaseClaimForPi(orgId, pi, true);
 		return false;
 	}
 	if (canceled) {
@@ -535,17 +535,18 @@ export async function grantAutoTopupCredits(
  */
 async function releaseClaimForPi(
 	orgId: string,
-	pi: { id: string; created?: number | null; metadata?: Record<string, string> | null }
+	pi: { id: string; created?: number | null; metadata?: Record<string, string> | null },
+	allowIdle = false
 ): Promise<void> {
 	const correlation = topupAttemptCorrelation({ ...pi, metadata: pi.metadata ?? null }, organizations.autoTopupLastAttemptAt);
 	if (!correlation) return; // cannot correlate — leave it for the stale sweep
 	const org = await readAutoTopupState(orgId);
-	if (org.state !== 'in_flight') return;
+	if (org.state !== 'in_flight' && !(allowIdle && org.state === 'idle')) return;
 	if (!org.lastAttemptAt) return;
 	await db
 		.update(organizations)
 		.set({ autoTopupState: 'idle', autoTopupFailures: 0, autoTopupAttemptAt: null, autoTopupSubmittedAt: null })
-		.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight'), eq(organizations.autoTopupLastAttemptAt, org.lastAttemptAt), correlation));
+		.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, org.state), eq(organizations.autoTopupLastAttemptAt, org.lastAttemptAt), correlation));
 }
 
 /**

@@ -679,7 +679,7 @@ describe('sweepPausedTopups', () => {
 		const attemptAt = new Date().toISOString();
 		await seedOrg({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: attemptAt });
 		await pauseAutoTopupForRefund(testDb().db, 'org-1');
-		const pi = { id: 'pi_one', status: 'succeeded', metadata: { type: 'auto_topup', org_id: 'org-1', auto_topup_attempt_day: attemptAt.slice(0, 10) } };
+		const pi = { id: 'pi_one', created: Math.floor(Date.parse(attemptAt) / 1000), status: 'succeeded', metadata: { type: 'auto_topup', org_id: 'org-1', auto_topup_attempt_day: attemptAt.slice(0, 10) } };
 		mocks.paymentIntentsList.mockResolvedValueOnce({ data: [pi, { ...pi, id: 'pi_two' }], has_more: false });
 		await sweepPausedTopups(1);
 		expect(mocks.refundsCreate).not.toHaveBeenCalled();
@@ -1534,4 +1534,52 @@ test('an invalid-request response naming a possibly created payment retains its 
 	mocks.paymentIntentsCreate.mockRejectedValueOnce({ type: 'StripeInvalidRequestError', statusCode: 400, code: 'resource_missing', raw: { payment_intent: { id: 'pi_uncertain' } } });
 	await maybeTriggerAutoTopUp('org-1');
 	expect(await orgRow()).toMatchObject({ autoTopupAttemptAt: expect.any(String), autoTopupSubmittedAt: expect.any(String) });
+});
+
+test('every recovery Stripe request uses the remaining deadline without retries', async () => {
+	vi.useFakeTimers({ toFake: ['Date'] });
+	try {
+		vi.setSystemTime('2026-09-30T13:10:00.000Z');
+		const attemptAt = new Date().toISOString();
+		await seedOrg({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: attemptAt });
+		await pauseAutoTopupForRefund(testDb().db, 'org-1');
+		const pi = { id: 'pi_budget', status: 'succeeded', metadata: { type: 'auto_topup', org_id: 'org-1', auto_topup_attempt_at: attemptAt } };
+		mocks.paymentIntentsList.mockImplementationOnce(async () => { vi.setSystemTime(Date.now() + 100); return { data: [pi], has_more: false }; });
+		mocks.chargesList.mockImplementationOnce(async () => { vi.setSystemTime(Date.now() + 100); return { data: [{ id: 'ch_budget', amount: 100, amount_refunded: 0 }] }; });
+		await sweepPausedTopups(1, Date.now() + 1000);
+		expect(mocks.paymentIntentsList).toHaveBeenCalledWith(expect.anything(), { timeout: 1000, maxNetworkRetries: 0 });
+		expect(mocks.chargesList).toHaveBeenCalledWith(expect.anything(), { timeout: 900, maxNetworkRetries: 0 });
+		expect(mocks.refundsCreate).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ timeout: 800, maxNetworkRetries: 0 }));
+	} finally { vi.useRealTimers(); }
+});
+
+test('an expired recovery budget stops before the next remote call', async () => {
+	await seedOrg({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: new Date().toISOString() });
+	await pauseAutoTopupForRefund(testDb().db, 'org-1');
+	const pi = { id: 'pi_expired', status: 'succeeded', metadata: { type: 'auto_topup', org_id: 'org-1' } };
+	mocks.paymentIntentsRetrieve.mockResolvedValue(pi);
+	await testDb().db.update(stripeAutoTopupRecoveries).set({ paymentIntentId: pi.id });
+	mocks.chargesList.mockImplementationOnce(async () => { return { data: [{ id: 'ch_expired', amount: 100, amount_refunded: 0 }] }; });
+	await expect(recoverPausedTopup((await testDb().db.select().from(stripeAutoTopupRecoveries).get())!, pi, Date.now() - 1)).rejects.toThrow('deadline');
+	expect(mocks.chargesList).not.toHaveBeenCalled();
+	expect(mocks.refundsCreate).not.toHaveBeenCalled();
+});
+
+test.each([false, true])('a refunded lifetime top-up clears only its own idle logical attempt (newer: %s)', async (newer) => {
+	const original = '2026-09-30T10:00:00.000Z';
+	const current = newer ? '2026-09-30T11:00:00.000Z' : original;
+	await seedOrg({ plan: 'lifetime', autoTopupState: 'idle', autoTopupLastAttemptAt: current, autoTopupAttemptAt: current, autoTopupSubmittedAt: current });
+	await grantAutoTopupCredits('org-1', { id: 'pi_lifetime', status: 'succeeded', metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_500', auto_topup_attempt_at: original } });
+	expect(mocks.refundsCreate).toHaveBeenCalledTimes(1);
+	expect(await orgRow()).toMatchObject({ autoTopupAttemptAt: newer ? current : null, autoTopupSubmittedAt: newer ? current : null });
+});
+
+test('a later legacy same-day payment cannot be refunded for an older attempt', async () => {
+	const attemptAt = '2026-09-30T10:00:00.000Z';
+	await seedOrg({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: attemptAt });
+	await pauseAutoTopupForRefund(testDb().db, 'org-1');
+	mocks.paymentIntentsList.mockResolvedValueOnce({ data: [{ id: 'pi_later', created: Date.parse('2026-09-30T12:00:00.000Z') / 1000, status: 'succeeded', metadata: { type: 'auto_topup', org_id: 'org-1', auto_topup_attempt_day: '2026-09-30' } }], has_more: false });
+	await sweepPausedTopups(1);
+	expect(mocks.refundsCreate).not.toHaveBeenCalled();
+	expect((await testDb().db.select().from(stripeAutoTopupRecoveries).get())?.paymentIntentId).toBeNull();
 });

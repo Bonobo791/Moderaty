@@ -12,7 +12,7 @@ import { checkoutRejectionMessage, createCreditCheckout, createPlanCheckout, cre
 import { lifetimeSlotsRemaining } from '$lib/server/billing/entitlements';
 import { createMercadoPagoCreditCheckout } from '$lib/server/mercadopago/checkout';
 import { configuredMercadoPagoBundles } from '$lib/server/mercadopago/bundles';
-import { isUnmeteredPlan, listCreditTransactions, orgIsMetered, usageSummary } from '$lib/server/billing/ledger';
+import { isUnmeteredPlan, listCreditTransactions, orgIsMetered, pauseAutoTopupForRefund, usageSummary } from '$lib/server/billing/ledger';
 import { isActiveSubscriptionStatus } from '$lib/server/billing/plans';
 import { db } from '$lib/server/db';
 import { resolveOpenAiKey } from '$lib/server/openaiKey';
@@ -315,8 +315,8 @@ export const actions: Actions = {
 				return fail(400, { error: 'Auto top-up threshold must be a whole number of credits between 0 and 1,000,000.' });
 			}
 		}
-		// Consent is required only on the disabled→enabled TRANSITION: the page
-		// hides the checkbox once enabled, so an already-enabled org updating
+		// Consent is required on enable and when replacing an unavailable legacy bundle: the page
+		// hides the checkbox for an available enabled bundle, so an org updating
 		// its threshold submits enabled=on without consent and must never 400.
 		// The evidence is also written once, on that same transition — a
 		// threshold tweak must not rewrite the original authorization record.
@@ -333,6 +333,7 @@ export const actions: Actions = {
 			.where(eq(organizations.id, user.orgId))
 			.get();
 		const wasEnabled = current?.autoTopupEnabled === 1;
+		const needsConsent = !wasEnabled || !configuredAutoTopupBundles().some((option) => option.id === current?.autoTopupBundle);
 		// A lifetime org's scoring is already unlimited — enabling (or a
 		// threshold update while a stale flag survives) would charge a real
 		// card for credits it can never need. Disabling stays allowed so a
@@ -340,7 +341,7 @@ export const actions: Actions = {
 		if (enabled && isUnmeteredPlan(current?.plan)) {
 			return fail(400, { error: 'Your lifetime plan includes unlimited moderated comments — auto top-up is not needed.' });
 		}
-		if (enabled && !wasEnabled && form.get('consent') !== 'on') {
+		if (enabled && needsConsent && form.get('consent') !== 'on') {
 			return fail(400, { error: 'You must tick the consent checkbox to enable automatic top-up.' });
 		}
 		if (enabled) {
@@ -371,7 +372,7 @@ export const actions: Actions = {
 			// for dispute defense.
 			// Re-enabling after SCA/decline failures starts from a clean slate.
 			const evidence =
-				!wasEnabled
+				needsConsent
 					? {
 							autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
 							autoTopupConsentVersion: LEGAL_VERSION,
@@ -414,10 +415,13 @@ export const actions: Actions = {
 				return fail(409, { error: 'Your billing settings changed. Reload Usage before enabling automatic top-up.' });
 			}
 		} else {
-			await db
-				.update(organizations)
-				.set({ autoTopupEnabled: 0 })
-				.where(eq(organizations.id, user.orgId));
+			await db.transaction(async (tx) => {
+				const org = await tx.select().from(organizations).where(eq(organizations.id, user.orgId)).get();
+				if (!org) throw new Error('Organization disappeared while disabling automatic top-up');
+				// Reuse durable payment recovery, retaining the owner's existing pause explanation.
+				if (org.autoTopupState === 'in_flight' || org.autoTopupAttemptAt) await pauseAutoTopupForRefund(tx, user.orgId);
+				await tx.update(organizations).set({ autoTopupEnabled: 0, autoTopupState: 'disabled', autoTopupPauseReason: org.autoTopupPauseReason, autoTopupPausedAt: org.autoTopupPausedAt }).where(eq(organizations.id, user.orgId));
+			});
 		}
 		return { ok: true };
 	},

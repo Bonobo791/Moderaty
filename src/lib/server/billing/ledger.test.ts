@@ -640,6 +640,17 @@ test.each([false, true])('an older observed refund retains completed-payment rec
 	await pauseForObservedStripeRefund(db, 'org-1', 'ch_purchase', 200, '2026-09-30T13:11:00.000Z');
 	if (resumed) await db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupConsentedAt: '2026-09-30T13:12:00.000Z' });
 	await pauseForObservedStripeRefund(db, 'org-1', 'ch_purchase', 100, '2026-09-30T13:10:00.000Z');
-	expect((await db.select().from(stripeAutoTopupRecoveries)).map(row => row.paymentIntentId)).toEqual(resumed ? [] : ['pi_replacement']);
+	expect((await db.select().from(stripeAutoTopupRecoveries)).map(row => row.paymentIntentId)).toEqual(['pi_replacement']);
 	expect((await db.select().from(organizations).get())?.autoTopupEnabled).toBe(resumed ? 1 : 0);
+});
+
+test('later consent preserves charging while recovering replacements completed before consent', async () => {
+	await seedOrg('org-1', 200, 'cus_1');
+	await db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupConsentedAt: '2026-09-30T13:12:00.000Z' });
+	for (const [id, at] of [['before', '2026-09-30T13:11:00.000Z'], ['after', '2026-09-30T13:13:00.000Z']]) {
+		await db.insert(creditTransactions).values({ orgId: 'org-1', delta: 100, reason: 'auto_topup', refType: 'payment_intent', refId: id, paymentIntentId: id, createdAt: at });
+	}
+	await pauseForObservedStripeRefund(db, 'org-1', 'ch_original', 100, '2026-09-30T13:10:00.000Z');
+	expect((await db.select().from(stripeAutoTopupRecoveries)).map(row => row.paymentIntentId)).toEqual(['before']);
+	expect((await db.select().from(organizations).get())?.autoTopupEnabled).toBe(1);
 });

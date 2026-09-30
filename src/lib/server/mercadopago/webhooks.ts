@@ -111,7 +111,7 @@ export async function fulfillMercadoPagoPayment(payment: MercadoPagoPayment): Pr
 					or(isNull(mercadoPagoCheckoutAttempts.paymentId), eq(mercadoPagoCheckoutAttempts.paymentId, payment.id)),
 					sql`COALESCE(${mercadoPagoCheckoutAttempts.refundedAmountCents}, 0) < ${paymentAmountCents(payment.refundedAmount)}`))
 				.returning({ id: mercadoPagoCheckoutAttempts.id });
-			if (observed.length) await pauseAutoTopupForRefund(tx, orgId);
+			if (observed.length) await pauseAutoTopupForRefund(tx, orgId, payment.refundOccurredAt);
 		});
 		throw new Error('Mercado Pago payment has a partial refund — rejected for manual review');
 	}
@@ -227,7 +227,7 @@ async function reverseMercadoPagoPayment(payment: MercadoPagoPayment, reason: 'r
 			if (reason === 'refund') {
 				// Read in this transaction: a duplicate refund must respect a later resume.
 				const current = await tx.select({ refundedAmountCents: mercadoPagoCheckoutAttempts.refundedAmountCents }).from(mercadoPagoCheckoutAttempts).where(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId)).get();
-				if ((current?.refundedAmountCents ?? 0) < paymentAmountCents(payment.refundedAmount)) await pauseAutoTopupForRefund(tx, orgId);
+				if ((current?.refundedAmountCents ?? 0) < paymentAmountCents(payment.refundedAmount)) await pauseAutoTopupForRefund(tx, orgId, payment.refundOccurredAt);
 				return;
 			}
 			await tx.update(organizations).set({ autoTopupEnabled: 0, autoTopupState: 'disabled' }).where(eq(organizations.id, orgId));
@@ -267,7 +267,8 @@ async function reverseMercadoPagoPayment(payment: MercadoPagoPayment, reason: 'r
 			delta: -grant.delta,
 			reason,
 			refType: reason,
-			refId: providerLedgerRef('mercadopago', payment.id)
+			refId: providerLedgerRef('mercadopago', payment.id),
+			refundOccurredAt: payment.refundOccurredAt
 		});
 		await markTerminal();
 		return reversed;

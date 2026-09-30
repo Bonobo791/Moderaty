@@ -1,3 +1,4 @@
+import type Stripe from 'stripe';
 import { getStripe } from './client';
 
 /** True when the full charge amount was refunded; partial refunds retain their purchase. */
@@ -27,6 +28,7 @@ export async function refundUngrantablePayment(input: {
 	/** Persisted on the refund so the terminal charge.refund.updated event routes back to our records. */
 	orgId: string;
 	checkoutSessionId?: string;
+	requestOptions?: Stripe.RequestOptions;
 }): Promise<{ id: string; status: 'succeeded' | 'pending' | 'requires_action' }> {
 	try {
 		// The tags persisted ON the refund let a later terminal-status event
@@ -42,7 +44,7 @@ export async function refundUngrantablePayment(input: {
 					...(input.checkoutSessionId ? { checkout_session_id: input.checkoutSessionId } : {})
 				}
 			},
-			{ idempotencyKey: input.idempotencyKey }
+			{ ...input.requestOptions, idempotencyKey: input.idempotencyKey }
 		);
 		// Validate the boundary response (I2): refunds.create can RESOLVE a
 		// failed/canceled refund — logging success would ACK the delivery and

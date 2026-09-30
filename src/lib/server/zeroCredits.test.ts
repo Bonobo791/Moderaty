@@ -948,7 +948,7 @@ describe('deletion', () => {
 		expect(await handleStripeEvent(event as never)).toBe(true);
 		expect(await testDb().db.select({ status: stripeCheckoutAttempts.status }).from(stripeCheckoutAttempts).get()).toEqual({ status: 'expired' });
 		expect(await testDb().db.select({ credits: organizations.creditsRemaining }).from(organizations).get()).toEqual({ credits: 0 });
-		expect(await testDb().db.select({ delta: creditTransactions.delta }).from(creditTransactions).where(eq(creditTransactions.reason, 'refund'))).toEqual([{ delta: -500 }]);
+		expect(await testDb().db.select({ delta: creditTransactions.delta }).from(creditTransactions).where(eq(creditTransactions.reason, 'adjust'))).toEqual([{ delta: -500 }]);
 		expect(mocks.sessionsRetrieve).toHaveBeenCalledTimes(2);
 		expect(await sweepZeroCreditAccounts()).toMatchObject({ deleted: 1, errors: 0 });
 		expect((await userRow('u1'))!.googleSub).toBe('deleted:u1');

@@ -487,9 +487,12 @@ async function chargeFeedbackBatch(
 	await db.transaction(async (tx) => {
 		const refs = batch.map((comment) => historyScanScope ? `${comment.id}#${historyScanScope}` : comment.id);
 		assertBeforeDeadline(deadline);
-		const { charged, covered, uncharged } = await consumeCreditsBulk(tx, orgId, 'feedback', refs);
+		const { charged, covered, uncharged, metered } = await consumeCreditsBulk(tx, orgId, 'feedback', refs);
 		assertBeforeDeadline(deadline);
-		if (uncharged.length) throw new InsufficientCreditsError();
+		// `metered` is the org state read in THIS transaction: a concurrent
+		// lifetime-plan change reports uncharged refs without a shortfall —
+		// the org is unmetered, so nothing is owed (cubic).
+		if (uncharged.length && metered) throw new InsufficientCreditsError();
 		creditsCharged = charged.length + covered.length;
 	});
 	return creditsCharged;
@@ -582,7 +585,13 @@ async function markBatchCovered(tx: LedgerHandle, run: DigestRun): Promise<void>
 	if (historyPage) {
 		await tx
 			.insert(feedbackHistoryComments)
-			.values(historyPage.batch.map((comment) => ({ ...comment, channelId, scanId: channel.feedbackHistoryScanId })))
+			// Refresh only the rows THIS page classified: the unfiltered page
+			// can re-serve comments an earlier page of the same scan already
+			// committed, and stamping them with the current text would let a
+			// reveal show words no digest analyzed (cubic). Pre-nonce drains
+			// (scanId null) keep the all-page refresh — they cannot tell the
+			// scans apart.
+			.values((channel.feedbackHistoryScanId === null ? historyPage.batch : run.batch).map((comment) => ({ ...comment, channelId, scanId: channel.feedbackHistoryScanId })))
 			// The snapshot is what reveal/evidence prefers — a rescan that
 			// classified edited text must refresh the row, or the page
 			// shows words this scan never analyzed (codex+cubic). The

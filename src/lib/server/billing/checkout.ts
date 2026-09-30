@@ -251,7 +251,9 @@ async function resolveExistingCheckout(attempt: CheckoutAttempt): Promise<{ url?
 		return { url: session.url, idempotencyKey: attempt.idempotencyKey };
 	}
 	if (session.status === 'complete') {
-		await db.update(stripeCheckoutAttempts).set({ status: 'fulfilled', updatedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` }).where(eq(stripeCheckoutAttempts.attemptId, attempt.attemptId));
+		// Provider completion does not prove local fulfillment (or even a
+		// settled delayed payment). Only a successful fulfillment may mark
+		// this attempt fulfilled and release its account-deletion shield.
 		throw new Error('checkout attempt has already completed');
 	}
 	if (session.status === 'expired') {

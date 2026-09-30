@@ -189,6 +189,30 @@ describe('dev cron tick', () => {
 		await expect(netlifyCron()).rejects.toThrow('stripeScrubSweepError');
 	});
 
+	it.each(['dryRunWindow', 'digest'])('fails the tick when the %s job reports an error on a 200', async (field) => {
+		// codex: the aux jobs catch their failures into top-level `{error}`
+		// fields — a classifier that only inspects sweeps + results lets a
+		// digest that fails every rotation read as a healthy tick forever.
+		const payload = { ok: true, results: { UC1: { fetched: 3 } }, [field]: { error: 'openai blew up' } };
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
+
+		await expect(tickOnce()).rejects.toThrow(field);
+	});
+
+	it('does not suppress an aux-job failure behind an owner-actionable channel error', async () => {
+		const payload = { ok: false, results: { UC1: { error: 'token' } }, digest: { error: 'error' } };
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, 500)));
+
+		await expect(tickOnce()).rejects.toThrow('digest');
+	});
+
+	it('treats successful aux-job results as healthy', async () => {
+		const payload = { ok: true, results: { UC1: { fetched: 3 } }, dryRunWindow: { fetched: 5, windowComplete: true }, digest: { generated: true } };
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
+
+		await expect(tickOnce()).resolves.toEqual(payload);
+	});
+
 	it('fails the tick when sweeps consumed the whole run budget', async () => {
 		const payload = { ok: true, budgetExhausted: true, results: {} };
 		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));

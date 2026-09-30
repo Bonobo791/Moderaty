@@ -20,6 +20,7 @@ export const DEFAULT_THRESHOLD = 3;
  * @property {string} category - 'question' | 'criticism' | 'correction' | 'request' | 'none'
  * @property {boolean} hasAbuse - classifier concealment flag
  * @property {string} claim - neutral claim wording ('' for 'none')
+ * @property {'theme' | 'original'} [groupingSource]
  */
 
 /**
@@ -112,7 +113,7 @@ export function groupFeedback(comments, { categories, threshold = DEFAULT_THRESH
 			pooled++;
 			return;
 		}
-		const key = `${comment.category}\u0000${claimKey}`;
+		const key = `${comment.category}\u0000${comment.groupingSource ?? 'original'}\u0000${claimKey}`;
 		const group = groups.get(key) ?? { category: comment.category, claim, members: new Map() };
 		groups.set(key, group);
 		// Distinct comment ids only — one comment must never count twice

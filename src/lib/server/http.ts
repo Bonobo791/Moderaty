@@ -7,6 +7,16 @@ export class DeadlineExceededError extends Error {
 	}
 }
 
+export class HttpResponseError extends Error {}
+export class HttpTransportError extends Error {}
+
+function transportFailure(cause: unknown): HttpTransportError {
+	if (cause instanceof TypeError || (cause instanceof DOMException && ['AbortError', 'TimeoutError', 'NetworkError'].includes(cause.name))) {
+		return new HttpTransportError(cause.message, { cause });
+	}
+	throw cause;
+}
+
 /**
  * Reads a response body as JSON, failing loudly on transport or parse errors.
  *
@@ -16,12 +26,18 @@ export class DeadlineExceededError extends Error {
  * @throws If the response status is not OK or the body is not valid JSON.
  */
 export async function jsonResponse(response: Response, label: string): Promise<unknown> {
-	const body = await response.text();
-	if (!response.ok) throw new Error(`${label} failed: ${response.status} ${body}`);
+	let body: string;
+	try {
+		body = await response.text();
+	} catch (cause) {
+		throw transportFailure(cause);
+	}
+	if (!response.ok) throw new HttpResponseError(`${label} failed: ${response.status} ${body}`);
 	try {
 		return JSON.parse(body) as unknown;
-	} catch {
-		throw new Error(`${label} returned invalid JSON`);
+	} catch (cause) {
+		if (!(cause instanceof SyntaxError)) throw cause;
+		throw new HttpResponseError(`${label} returned invalid JSON`);
 	}
 }
 
@@ -92,7 +108,7 @@ async function fetchAttempt(input: RequestInfo | URL, init: RequestInit, deadlin
 			deadline !== undefined &&
 			Date.now() >= deadline
 		) throw new DeadlineExceededError();
-		return { error };
+		return { error: transportFailure(error) };
 	}
 }
 

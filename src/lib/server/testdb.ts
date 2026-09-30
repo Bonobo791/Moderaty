@@ -522,6 +522,7 @@ export async function createTestDb(): Promise<TestDb> {
 			status TEXT NOT NULL,
 			comments_classified INTEGER NOT NULL DEFAULT 0,
 			comments_failed INTEGER NOT NULL DEFAULT 0,
+			clustering_degraded INTEGER,
 			pooled_count INTEGER NOT NULL DEFAULT 0,
 			credits_used INTEGER,
 			error TEXT,

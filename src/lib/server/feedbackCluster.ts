@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { env } from '$env/dynamic/private';
-import { fetchWithRetry, jsonResponse } from '$lib/server/http';
+import { assertBeforeDeadline, DeadlineExceededError, fetchWithRetry, HttpResponseError, HttpTransportError, jsonResponse } from '$lib/server/http';
 import { buildClusterPrompt } from '$lib/server/feedbackPrompt';
 import { CLAIM_MAX_LENGTH, type FeedbackCategory } from '$lib/server/feedback';
 import { normalizeClaimKey } from '$lib/server/feedbackGroup';
@@ -13,13 +13,24 @@ import { sanitizeClaim } from '$lib/server/feedbackSanitize.js';
  * so "what comes up most" is counted on real themes, not phrasing luck
  * (MOD-69's LLM-assisted clustering option). Members travel as input
  * indices, never comment ids: a merged theme can only ever reference rows
- * this batch actually classified, and strict coverage validation turns any
- * malformed response into a loud failure (I2) instead of a wrong digest.
+ * this batch actually classified. Unusable assignments retain the original
+ * classified claims and are reported as reduced grouping coverage.
  */
 
 export interface ClusterableClaim {
 	category: FeedbackCategory;
 	claim: string;
+	groupingSource?: 'theme' | 'original';
+}
+
+export interface ClusterAssignment {
+	claim: string;
+	groupingSource: 'theme' | 'original';
+}
+
+export interface ClusterResult {
+	assignments: ClusterAssignment[];
+	degraded: boolean;
 }
 
 /** One theme in the model's response: canonical wording plus member indices. */
@@ -34,15 +45,17 @@ interface ClusterTheme {
 // valid input, not just malformed output.
 const ERR_MALFORMED = 'feedback clustering response has missing or invalid themes';
 
-/** Every malformed-response throw names the violated invariant so a server log says WHAT the model broke, not just that it did. */
-const malformed = (detail: string): TypeError => new TypeError(`${ERR_MALFORMED} — ${detail}`);
+class ClusterResponseError extends TypeError {}
+class ClusterProviderError extends Error {}
+
+const malformed = (detail: string): ClusterResponseError => new ClusterResponseError(`${ERR_MALFORMED} — ${detail}`);
 
 /** The identity groupFeedback pools on: abuse stripped, then normalized ('' pools). */
 function groupKey(text: string): string {
 	return normalizeClaimKey(sanitizeClaim(text));
 }
 
-function parseThemes(content: unknown): ClusterTheme[] {
+function parseThemes(content: unknown): unknown[] {
 	let parsed: { themes?: unknown };
 	try {
 		parsed = JSON.parse(typeof content === 'string' ? content : '') as typeof parsed;
@@ -50,7 +63,7 @@ function parseThemes(content: unknown): ClusterTheme[] {
 		throw malformed('response content is not JSON');
 	}
 	if (!Array.isArray(parsed?.themes)) throw malformed('themes field is missing or not an array');
-	return parsed.themes as ClusterTheme[];
+	return parsed.themes;
 }
 
 /** The system + user messages carrying the claims behind the random delimiter. */
@@ -94,43 +107,51 @@ function clusterRequestInit(items: { i: number; category: string; claim: string 
 async function requestThemeContent(rows: ClusterableClaim[], deadline: number | undefined, apiKey: string): Promise<unknown> {
 	const tag = `data-${randomBytes(8).toString('hex')}`;
 	const items = rows.map((row, i) => ({ i, category: row.category, claim: row.claim }));
-	const res = await fetchWithRetry('https://api.openai.com/v1/chat/completions', clusterRequestInit(items, tag, apiKey), deadline);
-	const response = await jsonResponse(res, 'feedback clustering');
-	return (response as { choices?: Array<{ message?: { content?: unknown } }> }).choices?.at(0)
-		?.message?.content;
+	const init = clusterRequestInit(items, tag, apiKey);
+	let response: unknown;
+	try {
+		const res = await fetchWithRetry('https://api.openai.com/v1/chat/completions', init, deadline);
+		response = await jsonResponse(res, 'feedback clustering');
+	} catch (cause) {
+		if (cause instanceof DeadlineExceededError) throw cause;
+		assertBeforeDeadline(deadline);
+		if (!(cause instanceof HttpResponseError || cause instanceof HttpTransportError)) throw cause;
+		throw new ClusterProviderError('feedback clustering request failed', { cause });
+	}
+	assertBeforeDeadline(deadline);
+	if (!response || typeof response !== 'object' || !('choices' in response) || !Array.isArray(response.choices)) {
+		throw malformed('provider response has no choices array');
+	}
+	const choice: unknown = response.choices.at(0);
+	if (!choice || typeof choice !== 'object' || !('message' in choice)) throw malformed('provider response has no message');
+	const message = choice.message;
+	if (!message || typeof message !== 'object' || !('content' in message)) throw malformed('provider response has no content');
+	return message.content;
 }
 
-/** A theme's shape: non-empty canonical claim and a non-empty members array. */
-function validateTheme(theme: ClusterTheme, themeIndex: number): void {
-	if (
-		typeof theme?.claim !== 'string' ||
-		!theme.claim.trim() ||
-		theme.claim.length > CLAIM_MAX_LENGTH ||
-		!Array.isArray(theme.members) ||
-		!theme.members.length
-	) {
-		throw malformed(`theme ${themeIndex} has a missing, blank, or oversized claim, or no members`);
+/** Keeps usable member references only; mixed categories and unusable labels reject a theme. */
+function usableTheme(value: unknown, rows: ClusterableClaim[], issues: Set<string>): ClusterTheme | undefined {
+	if (!value || typeof value !== 'object' || !('claim' in value) || !('members' in value) ||
+		typeof value.claim !== 'string' || !value.claim.trim() || value.claim.length > CLAIM_MAX_LENGTH ||
+		!Array.isArray(value.members) || !value.members.length) {
+		issues.add('invalid-theme');
+		return;
 	}
-}
-
-/**
- * Validates one member reference and returns its row. A canonical label
- * that pools at regrouping — normalizes or sanitizes to nothing, e.g.
- * pure abuse — is malformed unless the input it covers was already
- * content-free: echoing junk back lets it pool downstream, while
- * inventing it would silently drop a real claim at regrouping (codex).
- */
-function memberRow(member: number, theme: ClusterTheme, rows: ClusterableClaim[], canonical: Map<number, string>): ClusterableClaim {
-	if (!Number.isInteger(member) || member < 0 || member >= rows.length) {
-		throw malformed(`member ${JSON.stringify(member)} is not a valid input index`);
+	const members = new Set<number>();
+	for (const member of value.members) {
+		if (!Number.isInteger(member) || member < 0 || member >= rows.length) {
+			issues.add('invalid-reference');
+			continue;
+		}
+		if (members.has(member)) issues.add('repeated-reference');
+		members.add(member);
 	}
-	if (canonical.has(member)) throw malformed(`input index ${member} appears in more than one theme`);
-	const row = rows.at(member);
-	if (row === undefined) throw malformed(`member ${member} has no input row`);
-	if (!groupKey(theme.claim) && groupKey(row.claim)) {
-		throw malformed(`canonical claim ${JSON.stringify(theme.claim)} pools at regrouping but covers real input claims`);
+	const categories = new Set([...members].map((member) => rows[member].category));
+	if (categories.size > 1 || (!groupKey(value.claim) && [...members].some((member) => groupKey(rows[member].claim)))) {
+		issues.add('unusable-theme');
+		return;
 	}
-	return row;
+	return { claim: value.claim, members: [...members] };
 }
 
 /** Disjoint-set find over theme indexes. */
@@ -156,7 +177,7 @@ function unionLinkedThemes(themeOf: Map<number, number>, rows: ClusterableClaim[
 	const themeByInput = new Map<string, number>();
 	rows.forEach((row, i) => {
 		const themeIdx = themeOf.get(i);
-		if (themeIdx === undefined) throw malformed(`input index ${i} has no covering theme`);
+		if (themeIdx === undefined) return;
 		const norm = groupKey(row.claim);
 		// An input that would pool at regrouping cannot prove two themes
 		// equivalent — '...' and '!!!' share no semantics. Linking on the
@@ -181,18 +202,17 @@ function unionLinkedThemes(themeOf: Map<number, number>, rows: ClusterableClaim[
  * themes takes the wording of its lowest-indexed member's theme; a
  * canonical label emitted by two separate components would collapse
  * provably distinct input groups into a false recurrence at regrouping,
- * so it is rejected as malformed (codex).
+ * so those components retain original claims instead (codex).
  */
-function reconcileThemes(canonical: Map<number, string>, themeOf: Map<number, number>, rows: ClusterableClaim[]): string[] {
+function reconcileThemes(canonical: Map<number, string>, themeOf: Map<number, number>, rows: ClusterableClaim[], issues: Set<string>): ClusterAssignment[] {
 	const parent = unionLinkedThemes(themeOf, rows);
 	const labelByComponent = new Map<number, string>();
 	const componentByLabel = new Map<string, number>();
-	return rows.map((row, i) => {
+	const collisions = new Set<number>();
+	rows.forEach((row, i) => {
 		const claim = canonical.get(i);
 		const themeIdx = themeOf.get(i);
-		if (claim === undefined || themeIdx === undefined) {
-			throw malformed(`input index ${i} has no canonical claim or covering theme`);
-		}
+		if (claim === undefined || themeIdx === undefined) return;
 		const component = findRoot(parent, themeIdx);
 		const label = labelByComponent.get(component) ?? claim;
 		labelByComponent.set(component, label);
@@ -204,50 +224,63 @@ function reconcileThemes(canonical: Map<number, string>, themeOf: Map<number, nu
 			const labelKey = `${row.category} ${labelNorm}`;
 			const owner = componentByLabel.get(labelKey);
 			if (owner !== undefined && owner !== component) {
-				throw malformed(`canonical claim ${JSON.stringify(label)} was emitted by two separate themes`);
+				collisions.add(owner);
+				collisions.add(component);
+				issues.add('label-collision');
 			}
 			componentByLabel.set(labelKey, component);
 		}
-		return label;
+	});
+	return rows.map((row, index) => {
+		const theme = themeOf.get(index);
+		const component = theme === undefined ? undefined : findRoot(parent, theme);
+		const claim = component === undefined || collisions.has(component) ? undefined : labelByComponent.get(component);
+		return claim === undefined ? { claim: row.claim, groupingSource: 'original' } : { claim, groupingSource: 'theme' };
 	});
 }
 
 /**
  * Applies the model's theme list to the input rows: every member index is
- * validated, every input index must be covered exactly once, and no theme
- * may merge across categories. Returns the canonical claim per input index.
+ * validated, overlapping references are removed, and no theme may merge
+ * across categories. Unassigned inputs retain their original claims.
  */
-function applyThemes(themes: ClusterTheme[], rows: ClusterableClaim[]): string[] {
+function applyThemes(values: unknown[], rows: ClusterableClaim[], issues: Set<string>): ClusterAssignment[] {
 	/** Canonical claim per covered input index. */
 	const canonical = new Map<number, string>();
 	/** Which theme object covered each member — the label check needs it. */
 	const themeOf = new Map<number, number>();
-	for (const [themeIndex, theme] of themes.entries()) {
-		validateTheme(theme, themeIndex);
-		// The first member anchors the theme's category — a cross-category
-		// merge can never represent one claim; the prompt forbids it and
-		// here it is enforced (I2). clusterClassifiedClaims already calls
-		// per category, so this is the invariant's backstop for direct
-		// clusterClaims callers.
-		let anchorCategory: string | undefined;
+	const ambiguous = new Set<number>();
+	for (const [themeIndex, value] of values.entries()) {
+		const theme = usableTheme(value, rows, issues);
+		if (!theme) continue;
 		for (const member of theme.members) {
-			const row = memberRow(member, theme, rows, canonical);
-			anchorCategory ??= row.category;
-			if (row.category !== anchorCategory) {
-				throw malformed(`theme ${themeIndex} merges ${row.category} with ${anchorCategory} — themes can never merge across categories`);
-			}
+			if (themeOf.has(member)) ambiguous.add(member);
 			canonical.set(member, theme.claim);
 			themeOf.set(member, themeIndex);
 		}
 	}
-	// Coverage is exact only when every in-range index was assigned —
-	// members were deduped and range-checked on set, so a size shortfall
-	// means the response dropped an index.
-	if (canonical.size !== rows.length) {
-		const missing = rows.map((_, i) => i).filter((i) => !canonical.has(i));
-		throw malformed(`input indexes uncovered: ${missing.slice(0, 10).join(',')}${missing.length > 10 ? '…' : ''}`);
+	for (const member of ambiguous) {
+		canonical.delete(member);
+		themeOf.delete(member);
 	}
-	return reconcileThemes(canonical, themeOf, rows);
+	if (ambiguous.size) issues.add('overlapping-inputs');
+	if (canonical.size !== rows.length) {
+		issues.add('unassigned-inputs');
+	}
+	return reconcileThemes(canonical, themeOf, rows, issues);
+}
+
+function originalAssignments(rows: ClusterableClaim[]): ClusterAssignment[] {
+	return rows.map((row) => ({ claim: row.claim, groupingSource: 'original' }));
+}
+
+function logRecovery(rows: ClusterableClaim[], assignments: ClusterAssignment[], reasons: string[]): void {
+	console.warn('feedback clustering recovered:', {
+		category: rows[0]?.category,
+		reasons,
+		fallbackComments: assignments.filter((assignment) => assignment.groupingSource === 'original').length,
+		inputComments: rows.length
+	});
 }
 
 /**
@@ -257,34 +290,30 @@ function applyThemes(themes: ClusterTheme[], rows: ClusterableClaim[]): string[]
  * @param deadline - Optional abort deadline for the request.
  * @param apiKey - The resolved OpenAI key — deliberately not defaulted to the
  * env var, for the same key-boundary reason as classifyFeedback.
- * @returns The canonical claim per input index (same order as `rows`).
- * @throws If the key is missing, the request fails, or the response is
- * malformed: indexes missing, duplicated, out of range, merged across
- * categories, or a wrong-typed/oversized canonical claim.
+ * @returns One assignment per input index, with provenance and degradation metadata.
+ * @throws If the key is missing, the deadline expires, or internal logic fails.
  */
 export async function clusterClaims(
 	rows: ClusterableClaim[],
 	deadline?: number,
 	apiKey?: string
-): Promise<string[]> {
+): Promise<ClusterResult> {
 	// Fewer than two claims cannot merge — skip the provider call entirely.
-	if (rows.length < 2) return rows.map((row) => row.claim);
+	if (rows.length < 2) return { assignments: originalAssignments(rows), degraded: false };
 	if (!apiKey) throw new TypeError('OPENAI_API_KEY is required');
-	const content = await requestThemeContent(rows, deadline, apiKey);
+	let themes: unknown[];
 	try {
-		return applyThemes(parseThemes(content), rows);
+		themes = parseThemes(await requestThemeContent(rows, deadline, apiKey));
 	} catch (cause) {
-		// The digest's catch already marks the run failed; this log names
-		// the violated invariant and pins the raw response so a malformed
-		// output is diagnosable instead of re-parsed blind.
-		console.error(
-			'feedback clustering response rejected:',
-			cause instanceof Error ? cause.message : cause,
-			'| raw response:',
-			String(content).slice(0, 1000)
-		);
-		throw cause;
+		if (!(cause instanceof ClusterProviderError || cause instanceof ClusterResponseError)) throw cause;
+		const assignments = originalAssignments(rows);
+		logRecovery(rows, assignments, [String(cause instanceof ClusterProviderError ? cause.cause : cause).slice(0, 1000)]);
+		return { assignments, degraded: true };
 	}
+	const issues = new Set<string>();
+	const assignments = applyThemes(themes, rows, issues);
+	if (issues.size) logRecovery(rows, assignments, [...issues]);
+	return { assignments, degraded: issues.size > 0 };
 }
 
 /**
@@ -311,12 +340,12 @@ export const clusterClassifiedClaims = async <T extends ClusterableClaim>(
 	threshold: number,
 	deadline?: number,
 	apiKey?: string
-): Promise<T[]> => {
+): Promise<{ classified: T[]; clusteringDegraded: boolean }> => {
 	const enabled = new Set<string>(categories);
 	const feedbackIndexes = classified
 		.map((row, i) => (enabled.has(row.category) ? i : -1))
 		.filter((i) => i >= 0);
-	if (feedbackIndexes.length < 2) return classified;
+	if (feedbackIndexes.length < 2) return { classified, clusteringDegraded: false };
 	// One merge call per category, run in parallel — each call's member
 	// indexes are local to its own row subset.
 	const byCategory = new Map<string, { index: number; row: ClusterableClaim }[]>();
@@ -327,8 +356,8 @@ export const clusterClassifiedClaims = async <T extends ClusterableClaim>(
 		list.push({ index, row: { category: row.category, claim: row.claim } });
 		byCategory.set(row.category, list);
 	}
-	const canonicalByIndex = new Map<number, string>();
-	await Promise.all(
+	const canonicalByIndex = new Map<number, ClusterAssignment>();
+	const results = await Promise.all(
 		[...byCategory.values()].map(async (entries) => {
 			if (entries.length < threshold) return; // cannot reach the finding bar — no provider spend (codex)
 			const canonical = await clusterClaims(
@@ -337,16 +366,18 @@ export const clusterClassifiedClaims = async <T extends ClusterableClaim>(
 				apiKey
 			);
 			entries.forEach((entry, k) => {
-				const claim = canonical.at(k);
-				if (claim === undefined) throw malformed(`category call returned no claim for input index ${entry.index}`);
-				canonicalByIndex.set(entry.index, claim);
+				const assignment = canonical.assignments.at(k);
+				if (assignment === undefined) throw new Error(`category call returned no claim for input index ${entry.index}`);
+				canonicalByIndex.set(entry.index, assignment);
 			});
+			return canonical.degraded;
 		})
 	);
-	return classified.map((row, i) => {
-		const claim = canonicalByIndex.get(i);
-		// 'none' rows were never clustered — they pass through by design;
-		// feedback rows are all in canonicalByIndex by construction.
-		return claim === undefined ? row : { ...row, claim };
-	});
+	return {
+		classified: classified.map((row, index) => {
+			const assignment = canonicalByIndex.get(index);
+			return assignment === undefined ? row : { ...row, ...assignment };
+		}),
+		clusteringDegraded: results.some((degraded) => degraded === true)
+	};
 };

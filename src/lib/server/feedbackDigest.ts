@@ -65,6 +65,7 @@ export interface DigestResult {
 	digestId?: number;
 	commentsClassified?: number;
 	commentsFailed?: number;
+	clusteringDegraded?: boolean;
 	findings?: number;
 	pooled?: number;
 	creditsUsed?: number;
@@ -510,6 +511,7 @@ interface DigestRun {
 	classified: ClassifiedRow[];
 	failed: number;
 	findings: ReturnType<typeof groupFeedback>['findings'];
+	clusteringDegraded: boolean;
 	pooled: number;
 	metered: boolean;
 	creditsCharged: number;
@@ -533,6 +535,7 @@ async function insertDigestFindings(tx: LedgerHandle, run: DigestRun): Promise<n
 			status: 'complete',
 			commentsClassified: run.classified.length,
 			commentsFailed: run.failed,
+			clusteringDegraded: Number(run.clusteringDegraded),
 			pooledCount: run.pooled,
 			creditsUsed: run.metered ? run.creditsCharged : null
 		})
@@ -774,15 +777,14 @@ export async function generateFeedbackDigest(
 		// undercounts what actually comes up most. The merge runs one call
 		// per category: themes never merge across categories anyway, so a
 		// mixed batch only let the model emit a malformed cross-category
-		// theme. A malformed merge response still throws: the run fails
-		// loudly and retries next tick (markers never moved), it never
-		// writes a wrong digest.
+		// theme. Unusable assignments retain their original claims and
+		// complete with a visible reduced-grouping notice.
 		// Its request is bounded by the write reserve so the model call can
 		// never consume the headroom the persistence tx needs (codex/cubic).
 		const clusterDeadline = deadline === undefined ? undefined : deadline - WRITE_RESERVE_MS;
-		const themed = themePassCanMatter(classified, categories, threshold)
+		const { classified: themed, clusteringDegraded } = themePassCanMatter(classified, categories, threshold)
 			? await clusterClassifiedClaims(classified, categories, threshold, clusterDeadline, apiKey)
-			: classified;
+			: { classified, clusteringDegraded: false };
 		const { findings, pooled } = groupFeedback(themed, { categories, threshold });
 
 		// Reserve write headroom, not just the deadline edge: the persistence
@@ -802,6 +804,7 @@ export async function generateFeedbackDigest(
 				batchIds: new Set(batch.map((c) => c.id)),
 				classified,
 				failed,
+				clusteringDegraded,
 				findings,
 				pooled,
 				metered,
@@ -814,6 +817,7 @@ export async function generateFeedbackDigest(
 			digestId: result.digestId,
 			commentsClassified: classified.length,
 			commentsFailed: failed,
+			...(clusteringDegraded ? { clusteringDegraded: true } : {}),
 			findings: findings.length,
 			pooled,
 			creditsUsed: creditsCharged,
@@ -827,6 +831,7 @@ export async function generateFeedbackDigest(
 export interface FeedbackPreview {
 	commentsClassified: number;
 	commentsFailed: number;
+	clusteringDegraded?: boolean;
 	pooled: number;
 	hasMore: boolean;
 	findings: {
@@ -858,13 +863,14 @@ export async function previewFeedbackDigest(
 	if (failed > 0 && classified.length === 0) throw new Error(`classification failed for all ${failed} preview comments`);
 	const categories = enabledCategories(channel);
 	const threshold = channel.feedbackThreshold ?? 3;
-	const themed = themePassCanMatter(classified, categories, threshold)
+	const { classified: themed, clusteringDegraded } = themePassCanMatter(classified, categories, threshold)
 		? await clusterClassifiedClaims(classified, categories, threshold, deadline, apiKey)
-		: classified;
+		: { classified, clusteringDegraded: false };
 	const { findings, pooled } = groupFeedback(themed, { categories, threshold });
 	return {
 		commentsClassified: classified.length,
 		commentsFailed: failed,
+		...(clusteringDegraded ? { clusteringDegraded: true } : {}),
 		pooled,
 		hasMore: !page.complete,
 		findings: findings.map((finding) => ({

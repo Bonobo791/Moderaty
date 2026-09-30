@@ -240,16 +240,61 @@ test('the AI theme pass merges differently-worded claims into one finding', asyn
 	expect(finding).toMatchObject({ category: 'question', supporterCount: 3, summary: '3 comments asked: when is the next video' });
 });
 
-test('a malformed theme-merge response fails the run loudly instead of writing a wrong digest', async () => {
+test('a malformed theme-merge response completes with original claims and a durable notice', async () => {
 	await seedChannel('UC1', { feedbackEnabled: 1 });
 	await seedCommentBatch(THREE_THEMES);
 	CLUSTER_RAW = 'not json';
 	const result = await generateFeedbackDigest('UC1', { force: true });
-	expect(result).toMatchObject({ status: 'failed' });
+	expect(result).toMatchObject({ status: 'complete', findings: 0, pooled: 3, clusteringDegraded: true });
 	const digest = await testDb().db.select().from(feedbackDigests).get();
-	expect(digest?.status).toBe('failed');
-	// The batch stays unprocessed — the next tick retries the same comments.
+	expect(digest).toMatchObject({ status: 'complete', clusteringDegraded: 1, commentsFailed: 0 });
+	expect(await testDb().db.select().from(comments).where(isNull(comments.feedbackDigestedAt)).all()).toHaveLength(0);
+});
+
+test('original-claim recovery produces exact findings, advances the batch, and charges it only once', async () => {
+	await testDb().db.update(organizations).set({ creditsRemaining: 10 }).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC1', { feedbackEnabled: 1 });
+	await seedClaims(['one', 'same request'], ['two', 'same request'], ['three', 'same request']);
+	CLUSTER_RAW = 'not json';
+	expect(await generateFeedbackDigest('UC1', { force: true })).toMatchObject({ status: 'complete', findings: 1, pooled: 0, creditsUsed: 3, clusteringDegraded: true });
+	expect(await testDb().db.select().from(feedbackFindings).all()).toMatchObject([{ supporterCount: 3, summary: '3 comments asked: same request' }]);
+	expect(await testDb().db.select().from(feedbackDigests).all()).toMatchObject([{ status: 'complete', clusteringDegraded: 1 }]);
+	const calls = vi.mocked(fetch).mock.calls.length;
+	expect(await generateFeedbackDigest('UC1', { force: true })).toMatchObject({ status: 'empty' });
+	expect(fetch).toHaveBeenCalledTimes(calls);
+	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(3);
+	expect((await testDb().db.select().from(organizations).get())?.creditsRemaining).toBe(7);
+});
+
+test('comments with no feedback complete normally without clustering or degradation', async () => {
+	await seedChannel('UC1', { feedbackEnabled: 1 });
+	for (const index of [1, 2, 3]) await seedComment(`c${index}`, 'UC1', `no feedback ${index}`, '2026-01-01T00:00:00.000Z');
+	expect(await generateFeedbackDigest('UC1', { force: true })).toMatchObject({ status: 'complete', findings: 0, pooled: 0, commentsClassified: 3, commentsFailed: 0 });
+	expect(mergeCallBodies()).toHaveLength(0);
+	expect(await testDb().db.select().from(feedbackDigests).all()).toMatchObject([{ clusteringDegraded: 0 }]);
+});
+
+test('an analysis where every classification fails remains unavailable rather than empty', async () => {
+	await seedChannel('UC1', { feedbackEnabled: 1 });
+	await seedCommentBatch(THREE_THEMES);
+	fetchFailures = Object.fromEntries(THREE_THEMES.map((entry) => [entry.text, 'unavailable']));
+	expect(await generateFeedbackDigest('UC1', { force: true })).toMatchObject({ status: 'failed' });
+	expect(await testDb().db.select().from(feedbackFindings).all()).toHaveLength(0);
 	expect(await testDb().db.select().from(comments).where(isNull(comments.feedbackDigestedAt)).all()).toHaveLength(3);
+});
+
+test('preview uses original-claim recovery without durable writes or charges', async () => {
+	await seedChannel('UC1', { feedbackThreshold: 3 });
+	const texts = ['preview one', 'preview two', 'preview three'];
+	mocks.fetchNewComments.mockResolvedValue({ comments: texts.map((text, index) => ({ id: `p${index}`, text, publishedAt: '2026-01-01T00:00:00.000Z' })), nextPageToken: null, reachedCursor: true });
+	RESPONSES = Object.fromEntries(texts.map((text) => [text, { category: 'question', claim: 'same question', hasAbuse: false }]));
+	CLUSTER_RAW = 'not json';
+	const preview = await previewFeedbackDigest('UC1', { boundary: '2025-01-01T00:00:00.000Z' });
+	expect(preview).toMatchObject({ commentsClassified: 3, commentsFailed: 0, clusteringDegraded: true, pooled: 0, hasMore: false });
+	expect(preview.findings).toMatchObject([{ supporterCount: 3, summary: '3 comments asked: same question' }]);
+	for (const table of [feedbackDigests, feedbackFindings, findingEvidence, feedbackHistoryComments, comments, creditTransactions]) {
+		expect(await testDb().db.select().from(table).all()).toHaveLength(0);
+	}
 });
 
 test('reposted identical text counts as separate supporters toward the threshold', async () => {
@@ -1408,4 +1453,3 @@ test('digestDue: per_100 needs ≥100 comments past the last window', async () =
 	const after = (await testDb().db.select().from(channels).get())!;
 	expect(await digestDue(after)).toBe(true);
 });
-

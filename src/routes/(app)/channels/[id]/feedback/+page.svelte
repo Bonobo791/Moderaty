@@ -103,6 +103,17 @@
 	}
 </script>
 
+{#snippet clusteringNotice()}
+	<p class="muted" role="status">Some comments could not be grouped reliably. Those comments were analyzed using their original extracted claims, so similar feedback may be undercounted.</p>
+{/snippet}
+
+{#snippet noFeedback()}
+	<EmptyState
+		title="No recurring feedback to show."
+		hint="Themes may be below the minimum-comments threshold or in categories excluded by the feedback settings."
+	/>
+{/snippet}
+
 <svelte:head>
 	<title>Moderaty — Feedback</title>
 </svelte:head>
@@ -209,6 +220,7 @@
 				</form>
 			{/if}
 			{#if shown}
+				{#if shown.clusteringDegraded}{@render clusteringNotice()}{/if}
 				<p class="muted">
 					Window {windowLabel(shown)} · {shown.commentsClassified} classified{#if shown.commentsFailed}
 						· {shown.commentsFailed} failed{/if} · {shown.creditsUsed === null ? 'unmetered' : `${shown.creditsUsed} credits used`} · generated {relativeTime(shown.createdAt)}
@@ -321,11 +333,8 @@
 					recurring theme.
 				</p>
 			{/if}
-			{#if !grouped.length && !shown.pooledCount}
-				<EmptyState
-					title="No recurring feedback this window"
-					hint="Nothing met the minimum-comments threshold — below-threshold feedback would show as the pooled count."
-				/>
+			{#if !grouped.length}
+				{@render noFeedback()}
 			{/if}
 		{:else if !newestAttention}
 			<EmptyState
@@ -411,11 +420,12 @@
 		{#if feedbackPreview}
 			<section class="preview-results" aria-label="Feedback dry-run results">
 				<h4>Feedback dry-run preview</h4>
+				{#if feedbackPreview.clusteringDegraded}{@render clusteringNotice()}{/if}
 				<p class="muted">{feedbackPreview.commentsClassified} classified · {feedbackPreview.commentsFailed} failed · {feedbackPreview.pooled} pooled · 0 credits used</p>
 				<p class="muted">Run a history scan to cover the full window.</p>
 				{#if feedbackPreview.hasMore}<p class="muted">More comments are available beyond this preview page.</p>{/if}
 				{#if feedbackPreview.findings.length}
-					{#each feedbackPreview.findings as finding, index (finding.category + finding.summary)}
+					{#each feedbackPreview.findings as finding, index (index)}
 						<div class="preview-finding">
 							<h5>{finding.category}: {finding.summary}</h5>
 						<p class="muted">{finding.supporterCount} supporting comments</p>
@@ -430,7 +440,7 @@
 						</div>
 					{/each}
 				{:else}
-					<EmptyState title="No grouped findings in this preview" hint="No themes met the feedback settings threshold on this page." />
+					{@render noFeedback()}
 				{/if}
 			</section>
 		{/if}

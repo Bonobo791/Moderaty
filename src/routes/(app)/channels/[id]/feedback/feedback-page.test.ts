@@ -3,6 +3,7 @@
 // codex), and a recorded deferral must surface as a banner instead of a
 // silent "No digest yet" (codex). Render is lazy — assert on .body.
 
+import { readFileSync } from 'node:fs';
 import { render } from 'svelte/server';
 import { describe, expect, it } from 'vitest';
 
@@ -49,6 +50,47 @@ function pageData(over: Record<string, unknown> = {}) {
 }
 
 describe('feedback page role gating (SSR)', () => {
+	it('does not mistake feedback excluded by category settings for below-threshold themes', () => {
+		const settings = { ...SETTINGS, categories: ['question'] };
+		const digest = { ...COMPLETE_DIGEST, commentsClassified: 4, pooledCount: 4 };
+		const preview = { commentsClassified: 4, commentsFailed: 0, pooled: 4, hasMore: false, findings: [] };
+		for (const body of [
+			renderFeedback(pageData({ settings, latest: digest })),
+			renderFeedback(pageData({ settings }), { scope: 'feedbackDryRun', ok: true, preview })
+		]) {
+			expect(body).toContain('No recurring feedback to show.');
+			expect(body).toContain('Themes may be below the minimum-comments threshold or in categories excluded by the feedback settings.');
+			expect(body).not.toContain('No themes met');
+			expect(body).not.toContain('No recurring feedback found in these comments.');
+		}
+	});
+
+	it('shows an informational recovery notice and an empty state even with pooled comments', () => {
+		const digest = { ...COMPLETE_DIGEST, clusteringDegraded: 1 };
+		const body = renderFeedback(pageData({ latest: digest, digests: [digest] }));
+		expect(body).toContain('Some comments could not be grouped reliably.');
+		expect(body).toContain('No recurring feedback to show.');
+		expect(body).toContain('Plus 1 other comment');
+		expect(body).not.toContain('Latest digest run failed');
+	});
+
+	it('reads the recovery notice from the selected historical digest, not the latest digest', () => {
+		const degraded = { ...COMPLETE_DIGEST, clusteringDegraded: 1 };
+		const healthy = { ...COMPLETE_DIGEST, id: 8, clusteringDegraded: 0 };
+		expect(renderFeedback(pageData({ latest: healthy, selected: degraded }))).toContain('Some comments could not be grouped reliably.');
+		expect(renderFeedback(pageData({ latest: degraded, selected: healthy }))).not.toContain('Some comments could not be grouped reliably.');
+		expect(renderFeedback(pageData({ latest: { ...COMPLETE_DIGEST, clusteringDegraded: null } }))).not.toContain('Some comments could not be grouped reliably.');
+	});
+
+	it('shows recovery information in an empty preview without the failed-run banner', () => {
+		const body = renderFeedback(pageData(), { scope: 'feedbackDryRun', ok: true, preview: {
+			commentsClassified: 3, commentsFailed: 0, clusteringDegraded: true, pooled: 3, hasMore: false, findings: []
+		} });
+		expect(body).toContain('Some comments could not be grouped reliably.');
+		expect(body).toContain('No recurring feedback to show.');
+		expect(body).toContain('role="status"');
+		expect(body).not.toContain('Latest digest run failed');
+	});
 	it('hides Generate now and the settings form from a member — both actions 403 anyway', () => {
 		const body = renderFeedback(pageData({ orgRole: 'member' }));
 		expect(body).not.toContain('action="?/generate"');
@@ -137,13 +179,35 @@ describe('feedback page role gating (SSR)', () => {
 		expect(body).not.toContain('Show original comment');
 	});
 
+	it('keeps recovered preview findings distinct when category and summary match', () => {
+		const findings = ['Theme evidence', 'Original claim evidence'].map((sanitizedExcerpt) => ({
+			category: 'question',
+			summary: '3 comments asked: visa procedures',
+			supporterCount: 3,
+			evidence: [{ sanitizedExcerpt, hasAbuse: 0 }]
+		}));
+		const body = renderFeedback(pageData(), {
+			scope: 'feedbackDryRun',
+			ok: true,
+			preview: {
+				commentsClassified: 6, commentsFailed: 0, pooled: 0,
+				hasMore: false, clusteringDegraded: true, findings
+			}
+		});
+		expect(body.match(/question: 3 comments asked: visa procedures/g)).toHaveLength(2);
+		expect(body).toContain('Theme evidence');
+		expect(body).toContain('Original claim evidence');
+		const source = readFileSync(new URL('./+page.svelte', import.meta.url), 'utf8');
+		expect(source).toContain('{#each feedbackPreview.findings as finding, index (index)}');
+	});
+
 	it('renders an empty feedback preview without implying a full-history scan', () => {
 		const body = renderFeedback(pageData(), {
 			scope: 'feedbackDryRun',
 			ok: true,
 			preview: { commentsClassified: 0, commentsFailed: 0, pooled: 0, hasMore: false, findings: [] }
 		});
-		expect(body).toContain('No grouped findings in this preview');
+		expect(body).toContain('No recurring feedback to show.');
 		expect(body).toContain('scores only the first YouTube page (up to 100 comments)');
 		expect(body).toContain('Run a history scan to cover the full window.');
 	});
@@ -287,7 +351,7 @@ describe('feedback page I12 states (SSR)', () => {
 
 		const latest = { ...COMPLETE_DIGEST, pooledCount: 0 };
 		const noFindings = renderFeedback(pageData({ digests: [latest], latest }));
-		expect(noFindings).toContain('No recurring feedback this window');
+		expect(noFindings).toContain('No recurring feedback to show.');
 	});
 
 	it('renders form and newest-run errors as accessible error boxes', () => {

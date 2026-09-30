@@ -1641,6 +1641,14 @@ const dispatchCheckoutEvent = async (event: Stripe.Event): Promise<boolean> => {
 		// A delayed-notification method finally failed: reverse whatever the
 		// session may have granted (idempotent — see reverseCharge).
 		await reverseSessionGrant(event.data.object.id);
+	}
+	if (event.type === 'checkout.session.expired' || event.type === 'checkout.session.async_payment_failed') {
+		await db.update(stripeCheckoutAttempts)
+			.set({ status: 'expired', updatedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` })
+			.where(and(
+				eq(stripeCheckoutAttempts.stripeSessionId, event.data.object.id),
+				or(eq(stripeCheckoutAttempts.status, 'pending'), eq(stripeCheckoutAttempts.status, 'open'))
+			));
 		return true;
 	}
 	return false;

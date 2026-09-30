@@ -28,6 +28,7 @@ const DIGEST_FIELDS = {
 	status: feedbackDigests.status,
 	commentsClassified: feedbackDigests.commentsClassified,
 	commentsFailed: feedbackDigests.commentsFailed,
+	clusteringDegraded: feedbackDigests.clusteringDegraded,
 	pooledCount: feedbackDigests.pooledCount,
 	creditsUsed: feedbackDigests.creditsUsed,
 	error: feedbackDigests.error,

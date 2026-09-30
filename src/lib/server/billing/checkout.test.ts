@@ -286,6 +286,27 @@ describe('createCreditCheckout', () => {
 		await expect(createCreditCheckout('org-1', owner(), 'credits_100')).rejects.toThrow('not available for purchase');
 		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
 	});
+
+	test('a still-open hidden-bundle attempt resumes — the guard only covers new attempts', async () => {
+		// cubic: a credits_100 checkout started before the bundle was hidden
+		// must resolve idempotently; rejecting it strands the buyer
+		// mid-checkout.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.insert(stripeCheckoutAttempts).values({
+			attemptId: 'attempt-legacy',
+			orgId: 'org-1',
+			product: 'credits_100',
+			idempotencyKey: 'checkout:attempt-legacy:key',
+			stripeSessionId: 'cs_legacy',
+			status: 'open'
+		});
+		mocks.sessionsRetrieve.mockResolvedValue({ id: 'cs_legacy', status: 'open', url: 'https://checkout.stripe.com/c/pay/cs_legacy' });
+
+		const url = await createCreditCheckout('org-1', owner(), 'credits_100', 'attempt-legacy');
+
+		expect(url).toBe('https://checkout.stripe.com/c/pay/cs_legacy');
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
 });
 
 describe('createTestCheckout', () => {

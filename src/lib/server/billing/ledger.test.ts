@@ -269,6 +269,49 @@ describe('consumeCreditsBulk', () => {
 		expect(await testDb().db.select().from(creditTransactions)).toHaveLength(3);
 	});
 
+	test('consumes the earliest-EXPIRING period first, not the newest-starting one', async () => {
+		// codex: ordering by period_start DESC spent the newest period's
+		// allowance first — the older period's included credits could expire
+		// unused while the org burned fresh allowance it would have had anyway.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Hosted', plan: 'hosted', creditsRemaining: null });
+		const now = Date.now();
+		// A started earlier AND expires earlier (the renewal tail of an old
+		// subscription); B started later and outlives A.
+		await testDb().db.insert(stripeSubscriptionPeriods).values([
+			{
+				orgId: 'org-1',
+				subscriptionId: 'sub-old',
+				invoiceId: 'in-old',
+				periodKey: 'period-old',
+				periodStart: new Date(now - 30 * 86_400_000).toISOString(),
+				periodEnd: new Date(now + 3_600_000).toISOString(),
+				includedCredits: 10,
+				consumedCredits: 0,
+				status: 'paid'
+			},
+			{
+				orgId: 'org-1',
+				subscriptionId: 'sub-new',
+				invoiceId: 'in-new',
+				periodKey: 'period-new',
+				periodStart: new Date(now - 86_400_000).toISOString(),
+				periodEnd: new Date(now + 30 * 86_400_000).toISOString(),
+				includedCredits: 10,
+				consumedCredits: 0,
+				status: 'paid'
+			}
+		]);
+
+		const result = await consumeCreditsBulk(db, 'org-1', 'comment', ['a', 'b', 'c']);
+
+		expect(result).toEqual({ charged: ['a', 'b', 'c'], covered: [], uncharged: [], metered: true });
+		const periods = await testDb().db.select().from(stripeSubscriptionPeriods).orderBy(asc(stripeSubscriptionPeriods.id)).all();
+		expect(periods.map((period) => [period.periodKey, period.consumedCredits])).toEqual([
+			['period-old', 3], // expires first — consumed first
+			['period-new', 0]
+		]);
+	});
+
 	test('returns the ordered shortfall after using the available allowance and purchased credits', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Hosted', plan: 'hosted', creditsRemaining: 2 });
 		await seedHostedPeriod(3, 2);

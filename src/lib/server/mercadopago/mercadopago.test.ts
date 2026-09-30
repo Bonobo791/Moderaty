@@ -536,6 +536,29 @@ test('a hidden bundle is never sold through manual checkout', async () => {
 	expect(planted).toBeUndefined();
 });
 
+test('a still-open hidden-bundle attempt resumes idempotently — the guard only covers new attempts', async () => {
+	// cubic: a credits_100 checkout started before the bundle was hidden is
+	// stranded forever if the purchasable gate runs before the idempotency
+	// lookup. The stored initPoint must come back without a new preference.
+	const fetchSpy = vi.fn();
+	vi.stubGlobal('fetch', fetchSpy);
+	await testDb().db.insert(mercadoPagoCheckoutAttempts).values({
+		attemptId: 'attempt_legacy',
+		orgId: 'org-1',
+		bundleId: 'credits_100',
+		idempotencyKey: 'mp-key-legacy',
+		amountCents: 500,
+		credits: 100,
+		status: 'open',
+		initPoint: 'https://mp.test/legacy'
+	});
+
+	const initPoint = await createMercadoPagoCreditCheckout('org-1', TEST_OWNER, 'credits_100', 'attempt_legacy');
+
+	expect(initPoint).toBe('https://mp.test/legacy');
+	expect(fetchSpy).not.toHaveBeenCalled();
+});
+
 // --- Checkout snapshot and idempotency key (PR #136 round 3) ------------------
 
 test('resuming a pending checkout advertises the credits persisted on the attempt, not the live catalog', async () => {

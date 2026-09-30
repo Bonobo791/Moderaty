@@ -100,7 +100,18 @@ export async function createMercadoPagoCreditCheckout(
 	// attempt or creating the preference; the access token and bundle price are
 	// validated by createCreditPreference/mercadoPagoBundleById respectively.
 	webhookSecret();
-	const bundle = purchasableMercadoPagoBundleById(bundleId);
+	// The hidden-bundle guard applies only when this call CREATES the attempt:
+	// a still-open pre-deploy attempt (e.g. a credits_100 checkout started
+	// before the bundle was hidden) must resolve idempotently, not strand the
+	// buyer mid-payment (cubic).
+	const existing = attemptId === undefined || attemptId === ''
+		? undefined
+		: await db
+				.select(ATTEMPT_PROJECTION)
+				.from(mercadoPagoCheckoutAttempts)
+				.where(eq(mercadoPagoCheckoutAttempts.attemptId, normalizedAttemptId(attemptId)))
+				.get();
+	const bundle = existing ? mercadoPagoBundleById(bundleId) : purchasableMercadoPagoBundleById(bundleId);
 	const attempt = await loadOrCreateAttempt(orgId, bundle, attemptId);
 	if (attempt.status === 'fulfilled') throw new Error('Mercado Pago checkout attempt has already completed');
 	// A reversed attempt is terminal too — reopening its initPoint would sell

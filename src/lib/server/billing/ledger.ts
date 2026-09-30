@@ -5,7 +5,7 @@
 // idempotent (a comment is consumed once, a checkout session granted once —
 // webhooks and retries can never double-apply).
 
-import { and, asc, desc, eq, gt, gte, inArray, lt, ne, or, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, gte, inArray, lt, ne, or, sql } from 'drizzle-orm';
 import { db } from '$lib/server/db';
 import { creditTransactions, organizations, stripePendingReversals, stripeSubscriptionPeriods, stripeDisputeReversals } from '$lib/server/db/schema';
 
@@ -311,9 +311,11 @@ async function listAnchoredRefIds(
 
 /**
  * Funds up to `needed` charges from paid, in-window subscription periods —
- * newest period first. Each period's conditional UPDATE claims the credits
- * atomically; a concurrent change aborts the charge loudly instead of
- * overdrawing the allowance.
+ * the period whose allowance expires FIRST is consumed first: spending the
+ * newest period's included credits first would let the older period's
+ * allowance lapse unused while fresh runway is burned (codex). Each
+ * period's conditional UPDATE claims the credits atomically; a concurrent
+ * change aborts the charge loudly instead of overdrawing the allowance.
  *
  * @returns The number of charges covered by subscription allowance
  */
@@ -329,7 +331,7 @@ async function consumeSubscriptionAllowance(tx: LedgerHandle, orgId: string, nee
 			gt(stripeSubscriptionPeriods.periodEnd, now),
 			sql`${stripeSubscriptionPeriods.consumedCredits} < ${stripeSubscriptionPeriods.includedCredits}`
 		))
-		.orderBy(desc(stripeSubscriptionPeriods.periodStart), asc(stripeSubscriptionPeriods.id))
+		.orderBy(asc(stripeSubscriptionPeriods.periodEnd), asc(stripeSubscriptionPeriods.id))
 		.all();
 	let funded = 0;
 	for (const period of periods) {

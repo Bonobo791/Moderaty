@@ -426,6 +426,60 @@ test('a rescan replacing the restoring claim keeps its freshly staged action', a
 	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({ commentId: 'comment', action: 'reject', state: 'pending' })]);
 });
 
+test.each([
+	['hold', 'held', 'heldForReview'],
+	['hold', 'pending', 'heldForReview'],
+	['reject', 'rejected', 'rejected'],
+	['ban', 'rejected', 'rejected'],
+	['delete', 'deleted', 'deleted']
+] as const)('a completed replacement %s for a %s comment reconciles after a late human publish', async (action, status, remoteOutcome) => {
+	mocks.state.existingIds = ['comment'];
+	mocks.state.commentStatuses = { comment: 'restoring' };
+	mocks.state.insertedAudits = [
+		{ channelId: 'channel', commentId: 'comment', action: 'restore', reason: 'log UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
+	];
+	let remoteStatus = 'rejected';
+	mocks.setModerationStatus.mockImplementation(async (_ids, moderationStatus) => {
+		remoteStatus = moderationStatus;
+	});
+	mocks.setModerationStatus.mockImplementationOnce(async () => {
+		mocks.state.commentStatuses.comment = status;
+		mocks.state.moderationActions = [dispatchedAction({ action, state: 'completed' })];
+		remoteStatus = 'published';
+	});
+	mocks.deleteComment.mockImplementation(async () => {
+		remoteStatus = 'deleted';
+	});
+
+	await runChannel('channel');
+
+	expect(remoteStatus).toBe('published');
+	expect(mocks.state.commentStatuses.comment).toBe(status);
+	expectActionState(status === 'held' || status === 'pending' ? 'pending' : 'cancelling');
+
+	await runChannel('channel');
+
+	expect(remoteStatus).toBe(remoteOutcome);
+	expectActionState(status === 'held' || status === 'pending' ? 'completed' : 'superseded');
+});
+
+test('a completed replacement already agreeing with the landed human write stays completed', async () => {
+	mocks.state.existingIds = ['comment'];
+	mocks.state.commentStatuses = { comment: 'restoring' };
+	mocks.state.insertedAudits = [
+		{ channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'queue UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
+	];
+	mocks.setModerationStatus.mockImplementationOnce(async () => {
+		mocks.state.commentStatuses.comment = 'rejected';
+		mocks.state.moderationActions = [dispatchedAction({ action: 'reject', state: 'completed' })];
+	});
+
+	await runChannel('channel');
+
+	expect(mocks.state.commentStatuses.comment).toBe('rejected');
+	expectActionState('completed');
+});
+
 test('acted counts only rows this run terminalized — a failed corrective write is not counted', async () => {
 	// codex: applicable.length was added wholesale — a hold whose corrective
 	// write failed stayed outstanding yet still counted. It counts when a

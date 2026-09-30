@@ -180,6 +180,15 @@ describe('dev cron tick', () => {
 		await expect(tickOnce()).rejects.toThrow('zeroCreditSweepError: db down');
 	});
 
+	it.each(['token', 'credits'])('does not suppress Stripe scrub failures behind %s errors in either scheduler', async (category) => {
+		const payload = { ok: false, results: { UC1: { error: category } }, stripeScrubSweepError: 'scrub failed' };
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, 500)));
+		const { default: netlifyCron } = await import('../netlify/functions/cron.mjs');
+
+		await expect(tickOnce()).rejects.toThrow('stripeScrubSweepError');
+		await expect(netlifyCron()).rejects.toThrow('stripeScrubSweepError');
+	});
+
 	it('fails the tick when sweeps consumed the whole run budget', async () => {
 		const payload = { ok: true, budgetExhausted: true, results: {} };
 		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));

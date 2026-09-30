@@ -49,6 +49,7 @@ const SWEEP_ERROR_FIELDS = [
 	'handleSweepError',
 	'autoTopupSweepError',
 	'stripeDeletionSweepError',
+	'stripeScrubSweepError',
 	'googleRevocationSweepError',
 	'pendingReversalSweepError',
 	'zeroCreditSweepError'

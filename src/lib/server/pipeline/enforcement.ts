@@ -607,13 +607,18 @@ export async function finalizeHumanIntent(
 			.where(and(eq(comments.id, commentId), eq(comments.status, 'restoring')))
 			.returning({ id: comments.id });
 		if (!claimed.length) {
-			// The 'restoring' claim was replaced while the remote write was in
-			// flight (a rescan staged a fresh verdict, or another flow owns the
-			// comment now). Proceeding would terminalize action rows belonging
-			// to the NEW owner — leave them for the claim that superseded this
-			// one (codex). The human's remote write already landed; whatever
-			// verdict owns the row reconciles the ordering on its own path.
-			console.warn(`finalize: comment ${commentId} left 'restoring' mid-flight — leaving its action rows to the current owner`);
+			const current = await transaction
+				.select({ status: comments.status })
+				.from(comments)
+				.where(inArray(comments.id, [commentId]))
+				.all();
+			if (current[0] && current[0].status !== status) {
+				await transaction
+					.update(moderationActions)
+					.set({ state: current[0].status === 'pending' || current[0].status === 'held' ? 'pending' : 'cancelling' })
+					.where(and(eq(moderationActions.commentId, commentId), eq(moderationActions.state, 'completed')));
+			}
+			console.warn('finalize: comment %s left restoring mid-flight — conflicting completed actions re-armed for reconciliation', commentId);
 			return;
 		}
 		const dispatched = agreeing.length

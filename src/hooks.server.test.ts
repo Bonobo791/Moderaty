@@ -101,10 +101,11 @@ test.each([new Error('SQLITE_UNKNOWN: S3 storage returned HTTP 500'), undefined]
 	const token = 'synthetic-session-cookie';
 	mocks.getSessionUser.mockRejectedValue(new DrizzleQueryError('select * from sessions where id = ?', [token], cause));
 	const log = vi.spyOn(console, 'error').mockImplementation(() => {});
-	const event = makeEvent();
+	const event = { ...makeEvent(), cookies: { get: () => token, set: vi.fn() } };
 
 	await handle({ event, resolve: async () => new Response('maintenance') } as never);
 
+	expect(mocks.getSessionUser).toHaveBeenCalledWith(token);
 	expect(event.locals.dbDown).toBe(true);
 	expect(event.locals.user).toBeNull();
 	expect(event.cookies.set).not.toHaveBeenCalled();

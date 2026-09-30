@@ -567,13 +567,25 @@ export const stripeAutoTopupRecoveries = sqliteTable('stripe_auto_topup_recoveri
 	attemptAt: text('attempt_at').notNull(),
 	paymentIntentId: text('payment_intent_id'),
 	paymentLookupCursor: text('payment_lookup_cursor'),
+	// Retained from the already-applied 0057 migration; current recovery uses paymentLookupCursor.
+	lookupCursor: text('lookup_cursor'),
+	lookupCandidateId: text('lookup_candidate_id'),
 	refundId: text('refund_id'),
 	lastCheckedAt: text('last_checked_at'),
 	lastError: text('last_error'),
 	resolvedAt: text('resolved_at')
 }, (table) => [uniqueIndex('stripe_auto_topup_recoveries_attempt_idx').on(table.orgId, table.attemptAt),
 	index('stripe_auto_topup_recoveries_payment_idx').on(table.orgId, table.paymentIntentId),
-	index('stripe_auto_topup_recoveries_pending_idx').on(table.resolvedAt, table.lastCheckedAt)]);
+	index('stripe_auto_topup_recoveries_pending_idx').on(table.resolvedAt, table.lastCheckedAt),
+	index('stripe_auto_topup_recoveries_customer_idx').on(table.customerId, table.resolvedAt)]);
+
+// Preserves dev-applied history from 0057; no runtime writer is enabled here.
+export const stripeRefundObservations = sqliteTable('stripe_refund_observations', {
+	chargeId: text('charge_id').primaryKey(),
+	refundedAmountCents: integer('refunded_amount_cents').notNull(),
+	occurredAt: text('occurred_at').notNull(),
+	orgId: text('org_id')
+});
 
 export const stripePendingReversals = sqliteTable(
 	'stripe_pending_reversals',

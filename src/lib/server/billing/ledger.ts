@@ -19,7 +19,7 @@ export type CreditReason = 'consume' | 'purchase' | 'auto_topup' | 'refund' | 'd
 export type CreditRefType = 'comment' | 'feedback' | 'checkout_session' | 'payment_intent' | 'charge' | 'refund' | 'dispute' | 'admin';
 
 /** The DB surface the ledger needs; both `db` and a transaction satisfy it. */
-export type LedgerHandle = Pick<typeof db, 'insert' | 'update' | 'select' | 'delete'>;
+export type LedgerHandle = Pick<typeof db, 'insert' | 'update' | 'select' | 'delete' | 'run'>;
 
 /**
  * Executes a ledger mutation within the available transaction context.
@@ -204,10 +204,10 @@ export async function pauseAutoTopupForRefund(handle: LedgerHandle, orgId: strin
 			// Revisit history even if a later refund already paused this org.
 			// Completed grants are already durable. Bound recoveries use their PI
 			// as the key; only unbound attempts need a timestamp for Stripe lookup.
-			await tx.insert(stripeAutoTopupRecoveries).select(sql`
-				SELECT NULL, ${creditTransactions.orgId}, ${org.customerId},
-					'completed:' || ${creditTransactions.paymentIntentId}, ${creditTransactions.paymentIntentId},
-					NULL, NULL, NULL, NULL, NULL
+			await tx.run(sql`
+				INSERT INTO ${stripeAutoTopupRecoveries} (org_id, customer_id, attempt_at, payment_intent_id)
+				SELECT ${creditTransactions.orgId}, ${org.customerId},
+					'completed:' || ${creditTransactions.paymentIntentId}, ${creditTransactions.paymentIntentId}
 				FROM ${creditTransactions}
 				WHERE ${creditTransactions.orgId} = ${orgId} AND ${creditTransactions.reason} = 'auto_topup'
 					AND ${creditTransactions.delta} > 0 AND ${creditTransactions.createdAt} >= ${occurredAt}
@@ -215,7 +215,8 @@ export async function pauseAutoTopupForRefund(handle: LedgerHandle, orgId: strin
 					AND NOT EXISTS (SELECT 1 FROM ${stripeAutoTopupRecoveries}
 						WHERE ${stripeAutoTopupRecoveries.orgId} = ${orgId}
 						AND ${stripeAutoTopupRecoveries.paymentIntentId} = ${creditTransactions.paymentIntentId})
-			`).onConflictDoNothing();
+				ON CONFLICT DO NOTHING
+			`);
 		}
 		console.error(`auto top-up paused for org ${orgId}: payment refunded — fresh owner consent required`);
 	});

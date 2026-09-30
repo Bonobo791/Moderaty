@@ -219,7 +219,7 @@ export function consentEmailCutoffIso(now?: number): string {
  * @throws If the user does not exist or is already tombstoned
  */
 
-export type DeletionTx = Pick<typeof db, 'select' | 'insert' | 'update' | 'delete'>;
+export type DeletionTx = Pick<typeof db, 'select' | 'insert' | 'update' | 'delete' | 'run'>;
 
 /**
  * Caller hooks for `deleteUserRecords`.

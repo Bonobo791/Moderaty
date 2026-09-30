@@ -373,6 +373,8 @@ export async function createTestDb(): Promise<TestDb> {
 			attempt_at TEXT NOT NULL,
 			payment_intent_id TEXT,
 			payment_lookup_cursor TEXT,
+			lookup_cursor TEXT,
+			lookup_candidate_id TEXT,
 			refund_id TEXT,
 			last_checked_at TEXT,
 			last_error TEXT,
@@ -381,6 +383,13 @@ export async function createTestDb(): Promise<TestDb> {
 		)`,
 		`CREATE INDEX stripe_auto_topup_recoveries_pending_idx ON stripe_auto_topup_recoveries (resolved_at, last_checked_at)`,
 		`CREATE INDEX stripe_auto_topup_recoveries_payment_idx ON stripe_auto_topup_recoveries (org_id, payment_intent_id)`,
+		`CREATE INDEX stripe_auto_topup_recoveries_customer_idx ON stripe_auto_topup_recoveries (customer_id, resolved_at)`,
+		`CREATE TABLE stripe_refund_observations (
+			charge_id TEXT PRIMARY KEY NOT NULL,
+			refunded_amount_cents INTEGER NOT NULL,
+			occurred_at TEXT NOT NULL,
+			org_id TEXT
+		)`,
 		`CREATE TABLE stripe_dispute_reversals (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			dispute_id TEXT NOT NULL UNIQUE,

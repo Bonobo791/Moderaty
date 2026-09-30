@@ -56,6 +56,16 @@ async function seedHostedPeriod(includedCredits: number, consumedCredits = 0, or
 }
 
 describe('drainPendingReversals crash-consistency', () => {
+	test('a delayed refund disables auto top-up in the transaction that removes its credits', async () => {
+		await seedOrg('org-1', 100);
+		await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle' }).where(eq(organizations.id, 'org-1'));
+		await seedChargeGrant('ch_1');
+		await queuePendingReversal('ch_1', 'refund');
+		expect(await drainPendingReversals('ch_1')).toBe(1);
+		expect(await getCredits('org-1')).toBe(0);
+		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.autoTopupEnabled).toBe(0);
+	});
+
 	test('a stop between the first and second reversal keeps the second obligation durable for a retry', async () => {
 		// Both a refund AND a dispute can be pending for one charge (delayed
 		// grant). The old code deleted EVERY pending row for the charge right

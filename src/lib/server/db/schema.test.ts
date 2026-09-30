@@ -177,6 +177,8 @@ describe('organizations', () => {
 			auto_topup_state: { notNull: false },
 			auto_topup_last_attempt_at: { notNull: false },
 			auto_topup_failures: { notNull: false },
+			auto_topup_pause_reason: { notNull: false },
+			auto_topup_paused_at: { notNull: false },
 			auto_topup_consent_text: { notNull: false },
 			auto_topup_consent_version: { notNull: false },
 			auto_topup_consented_by: { notNull: false },

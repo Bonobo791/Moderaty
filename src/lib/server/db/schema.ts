@@ -75,6 +75,8 @@ export const organizations = sqliteTable('organizations', {
 	autoTopupState: text('auto_topup_state'),
 	autoTopupLastAttemptAt: text('auto_topup_last_attempt_at'),
 	autoTopupFailures: integer('auto_topup_failures'),
+	autoTopupPauseReason: text('auto_topup_pause_reason'),
+	autoTopupPausedAt: text('auto_topup_paused_at'),
 	// Auto top-up authorization evidence (Stripe save-and-reuse compliance:
 	// keep a record of the written agreement). Written once on the
 	// disabled→enabled transition and NEVER cleared by disabling — the record

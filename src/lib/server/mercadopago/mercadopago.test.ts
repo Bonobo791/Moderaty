@@ -308,16 +308,14 @@ test('a chargeback whose credits were never granted still disables auto top-up',
 	expect((await attemptRow())?.status).toBe('disputed');
 });
 
-test('a refund whose credits were never granted does not touch auto top-up', async () => {
-	// Only DISPUTES disable off-session charging — a plain refund is not a
-	// chargeback signal.
+test('a refund whose credits were never granted still pauses auto top-up', async () => {
 	await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'active' }).where(eq(organizations.id, 'org-1'));
 
 	expect(await processMercadoPagoPayment({ ...payment, status: 'refunded', refundedAmount: 5 })).toBe(false);
 
 	const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
-	expect(org?.autoTopupEnabled).toBe(1);
-	expect(org?.autoTopupState).toBe('active');
+	expect(org?.autoTopupEnabled).toBe(0);
+	expect(org?.autoTopupState).toBe('disabled');
 });
 
 test('a reversal whose payment amount does not match the persisted attempt fails loudly and touches nothing', async () => {

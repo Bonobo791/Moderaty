@@ -5,7 +5,7 @@
 // idempotent (a comment is consumed once, a checkout session granted once —
 // webhooks and retries can never double-apply).
 
-import { and, asc, eq, gt, gte, inArray, lt, ne, or, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import { db } from '$lib/server/db';
 import { creditTransactions, organizations, stripePendingReversals, stripeSubscriptionPeriods, stripeDisputeReversals } from '$lib/server/db/schema';
 
@@ -184,6 +184,18 @@ export const UNMETERED_CREDIT_GRANT_ERROR = 'an unmetered plan cannot receive cr
  *
  * @returns `true` if this call applied the adjustment, `false` if it was already applied.
  */
+/** Caller supplies a transaction when the pause accompanies a credit reversal. */
+export async function pauseAutoTopupForRefund(handle: LedgerHandle, orgId: string, occurredAt?: string): Promise<void> {
+	const paused = await handle.update(organizations)
+		.set({ autoTopupEnabled: 0, autoTopupState: 'disabled', autoTopupPauseReason: 'refund', autoTopupPausedAt: new Date().toISOString() })
+		.where(and(eq(organizations.id, orgId),
+			// A delayed replay must respect consent explicitly given AFTER this refund.
+			occurredAt ? or(isNull(organizations.autoTopupConsentedAt), sql`${organizations.autoTopupConsentedAt} <= ${occurredAt}`) : undefined,
+			or(ne(organizations.autoTopupPauseReason, 'refund'), isNull(organizations.autoTopupPauseReason), eq(organizations.autoTopupEnabled, 1))))
+		.returning({ id: organizations.id });
+	if (paused.length) console.error(`auto top-up paused for org ${orgId}: payment refunded — fresh owner consent required`);
+}
+
 export async function applyLedgerDelta(
 	handle: LedgerHandle,
 	{ orgId, delta, reason, refType, refId, paymentIntentId, chargeId }: LedgerDelta
@@ -232,6 +244,7 @@ export async function applyLedgerDelta(
 			.onConflictDoNothing({ target: UNIQUE_TARGET })
 			.returning({ id: creditTransactions.id });
 		if (inserted.length === 0) return false; // already applied — idempotent no-op
+		if (reason === 'refund' && delta < 0) await pauseAutoTopupForRefund(tx, orgId);
 		const updated = await tx
 			.update(organizations)
 			// COALESCE: pre-billing orgs carry NULL credits (I7 nullable-first);

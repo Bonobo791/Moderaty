@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 
 import { db } from '$lib/server/db';
 import { organizations, creditTransactions, stripeEvents, stripeLifetimeEntitlements, stripeDisputeReversals, stripeCheckoutAttempts, stripeSubscriptionPeriods } from '$lib/server/db/schema';
-import { applyLedgerDelta, drainPendingReversals, findGrantForStripe, queuePendingReversal, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
+import { applyLedgerDelta, drainPendingReversals, findGrantForStripe, pauseAutoTopupForRefund, queuePendingReversal, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
 import { grantAutoTopupCredits, handleAutoTopupFailure } from '$lib/server/billing/autotopup';
 import { claimLifetimeSlot, grantSubscriptionPeriod, refundSubscriptionPeriod, disputeSubscriptionPeriod, releaseLifetimeForPayment, applySubscriptionSnapshot, revokeLifetimeForDispute, restoreLifetimeForDispute, restoreDisputedSubscriptionPeriod, stripeIdentifierPredicate, LIFETIME_SOLD_OUT_ERROR } from '$lib/server/billing/entitlements';
 import { bundleById, type CreditBundle } from '$lib/server/stripe/bundles';
@@ -648,9 +648,18 @@ async function reverseCreditGrant(chargeId: string, reason: 'refund' | 'dispute'
  * @param reason - Whether the reversal is for a refund or dispute
  * @returns `true` if a reversal was applied, `false` if no matching credit grant was found or the reversal was already recorded
  */
-export async function reverseCharge(chargeId: string, reason: 'refund' | 'dispute', disputeId?: string): Promise<boolean> {
+export async function reverseCharge(chargeId: string, reason: 'refund' | 'dispute', disputeId?: string, occurredAt?: string): Promise<boolean> {
 	const charge = await getStripe().charges.retrieve(chargeId, { expand: ['payment_intent'] });
 	const paymentIntentId = typeof charge.payment_intent === 'string' ? charge.payment_intent : charge.payment_intent?.id;
+	if (reason === 'refund' && typeof charge.amount_refunded === 'number' && charge.amount_refunded > 0) {
+		const grant = await findGrantForStripe(db, { chargeId, paymentIntentId });
+		const customerId = typeof charge.customer === 'string' ? charge.customer : charge.customer?.id;
+		const org = grant ?? (customerId ? await db.select({ orgId: organizations.id }).from(organizations).where(eq(organizations.stripeCustomerId, customerId)).get() : undefined);
+		if (org) {
+			const reversed = await db.select({ id: creditTransactions.id }).from(creditTransactions).where(and(eq(creditTransactions.orgId, org.orgId), eq(creditTransactions.refType, 'refund'), eq(creditTransactions.refId, chargeId))).get();
+			if (!reversed) await pauseAutoTopupForRefund(db, org.orgId, occurredAt);
+		}
+	}
 	if (reason === 'refund' && (typeof charge.amount_refunded !== 'number' || typeof charge.amount !== 'number' || charge.amount_refunded < charge.amount)) {
 		console.error(`stripe: refund for ${chargeId} is not a full refund (refunded ${charge.amount_refunded ?? 'unknown'} of ${charge.amount ?? 'unknown'}) — credits kept (v1 reverses only full refunds)`);
 		return false;
@@ -1685,7 +1694,7 @@ const dispatchChargeEvent = async (event: Stripe.Event): Promise<boolean> => {
 	// negative balance — both documented v1 limitations
 	// (docs/stripe-checkout-webhooks.md §7).
 	if (event.type === 'charge.refunded') {
-		await reverseCharge(event.data.object.id, 'refund');
+		await reverseCharge(event.data.object.id, 'refund', undefined, event.created ? new Date(event.created * 1000).toISOString() : undefined);
 		return true;
 	}
 	if (event.type === 'charge.refund.updated' || event.type === 'refund.updated' || event.type === 'refund.failed') {

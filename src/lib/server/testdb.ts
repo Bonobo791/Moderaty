@@ -319,6 +319,8 @@ export async function createTestDb(): Promise<TestDb> {
 			auto_topup_state TEXT,
 			auto_topup_last_attempt_at TEXT,
 			auto_topup_failures INTEGER,
+			auto_topup_pause_reason TEXT,
+			auto_topup_paused_at TEXT,
 			auto_topup_consent_text TEXT,
 			auto_topup_consent_version TEXT,
 			auto_topup_consented_by TEXT,

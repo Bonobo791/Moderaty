@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { and, eq, gt, isNull, lt, notInArray, or, sql } from 'drizzle-orm';
 
 import { env } from '$env/dynamic/private';
-import { applyLedgerDelta, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
+import { applyLedgerDelta, pauseAutoTopupForRefund, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
 import { providerLedgerRef } from '$lib/server/billing/providers';
 import { db } from '$lib/server/db';
 import { creditTransactions, mercadoPagoCheckoutAttempts, organizations } from '$lib/server/db/schema';
@@ -104,6 +104,7 @@ export async function fulfillMercadoPagoPayment(payment: MercadoPagoPayment): Pr
 		if (paymentAmountCents(payment.refundedAmount) >= paymentAmountCents(payment.transactionAmount)) {
 			throw new Error('Mercado Pago approved payment has an out-of-contract refunded amount');
 		}
+		await pauseAutoTopupForRefund(db, orgId);
 		throw new Error('Mercado Pago payment has a partial refund — rejected for manual review');
 	}
 	// Pre-column attempts (credits NULL) fall back to the live catalog.
@@ -242,6 +243,7 @@ async function reverseMercadoPagoPayment(payment: MercadoPagoPayment, reason: 'r
 		// dispute side effect still applies: a chargeback with no grant is a
 		// chargeback all the same (codex/cubic, round 4).
 		if (!grant) {
+			if (reason === 'refund') await pauseAutoTopupForRefund(tx, orgId);
 			await disableAutoTopup();
 			await markTerminal();
 			return false;

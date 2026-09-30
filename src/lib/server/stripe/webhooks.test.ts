@@ -1278,6 +1278,27 @@ describe('fulfillAutoTopup', () => {
 });
 
 describe('reverseCharge / reverseDispute', () => {
+	test('two refunds turn auto top-up off before the emptied balance can be replenished', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		for (const [id, credits] of [['1', 500], ['2', 100]] as const) {
+			await applyLedgerDelta(db, { orgId: 'org-1', delta: credits, reason: 'purchase', refType: 'checkout_session', refId: `cs_${id}`, chargeId: `ch_${id}` });
+		}
+		mocks.chargesRetrieve.mockImplementation(async (id: string) => ({ id, amount: 500, amount_refunded: 500 }));
+		await reverseCharge('ch_1', 'refund');
+		await reverseCharge('ch_2', 'refund');
+		expect(await getCredits('org-1')).toBe(0);
+		expect(await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get()).toMatchObject({ autoTopupEnabled: 0, autoTopupState: 'disabled' });
+	});
+
+	test('partial refunds pause automatic purchases while preserving the current credit accounting', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', chargeId: 'ch_1' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', amount: 500, amount_refunded: 100 });
+		expect(await reverseCharge('ch_1', 'refund')).toBe(false);
+		expect(await getCredits('org-1')).toBe(500);
+		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.autoTopupEnabled).toBe(0);
+	});
+
 	test('a refund reverses the grant it maps to, once', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 		await applyLedgerDelta(db, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', paymentIntentId: 'pi_1', chargeId: 'ch_1' });

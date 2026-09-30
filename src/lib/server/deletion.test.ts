@@ -421,6 +421,52 @@ test('a failed Stripe customer deletion is persisted to the outbox for cron retr
 	}
 });
 
+test('a confirmed Stripe customer deletion clears its queued scrub obligation', async () => {
+	// A scrub row for a customer Stripe no longer has can never succeed —
+	// customers.update 404s every retry and the row would sit in the bounded
+	// queue forever (codex). Deletion is the stronger outcome: the PII is
+	// gone with the customer, so the scrub obligation is discharged.
+	await testDb().db.insert(stripeScrubOutbox).values({ customerId: 'cus_doomed', orgId: 'org-x' });
+	await testDb().db.insert(stripeDeletionOutbox).values({ customerId: 'cus_doomed' });
+	mocks.customersDel.mockResolvedValue({ id: 'cus_doomed', deleted: true });
+
+	expect(await retryStripeCustomerDeletions()).toBe(1);
+	expect(await testDb().db.select().from(stripeDeletionOutbox).all()).toEqual([]);
+	expect(await testDb().db.select().from(stripeScrubOutbox).all()).toEqual([]);
+});
+
+test('an immediate Stripe customer deletion clears its queued scrub obligation', async () => {
+	// Same discharge on the post-commit path: the org survived an earlier
+	// deletion (leaving a queued scrub), then lost its final member — the
+	// confirmed customers.del makes the scrub row unreachable (codex).
+	const userId = await seedUser('doomed');
+	await testDb().db.update(organizations).set({ stripeCustomerId: 'cus_doomed' }).where(eq(organizations.id, 'org-doomed'));
+	await testDb().db.insert(stripeScrubOutbox).values({ customerId: 'cus_doomed', orgId: 'org-doomed' });
+	mocks.customersDel.mockResolvedValue({ id: 'cus_doomed', deleted: true });
+
+	await deleteUserRecords(userId);
+
+	expect(await testDb().db.select().from(stripeDeletionOutbox).all()).toEqual([]);
+	expect(await testDb().db.select().from(stripeScrubOutbox).all()).toEqual([]);
+});
+
+test('a scrub retry against an already-deleted customer discharges the row instead of retrying forever', async () => {
+	// The customer may have been deleted through a path that predates the
+	// discharge (or directly at Stripe): resource_missing is a terminal
+	// answer — deletion is the stronger erasure outcome, so the obligation
+	// is discharged loudly, not retried until the queue clogs (codex).
+	await testDb().db.insert(stripeScrubOutbox).values({ customerId: 'cus_gone_already', orgId: 'org-x' });
+	mocks.customersUpdate.mockRejectedValue(Object.assign(new Error('No such customer'), { code: 'resource_missing' }));
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		await retryStripeCustomerScrubs(10);
+
+		expect(await testDb().db.select().from(stripeScrubOutbox).all()).toEqual([]);
+	} finally {
+		errorSpy.mockRestore();
+	}
+});
+
 test('deleteUserRecords anonymizes the Stripe customer of a surviving team org whose last owner leaves', async () => {
 	// The org survives (a co-member is promoted to owner), but its Stripe
 	// Customer was created with the DEPARTING user's e-mail and holds their

@@ -588,6 +588,11 @@ export async function deleteUserRecords(userId: string, options?: DeleteUserOpti
 				await getStripe().customers.del(customerId);
 			}
 			await db.delete(stripeDeletionOutbox).where(eq(stripeDeletionOutbox.customerId, customerId));
+			// A scrub obligation queued for this customer (from an earlier
+			// deletion where its org still survived) is discharged by the
+			// deletion itself — customers.update on a deleted customer would
+			// 404 forever and occupy the bounded retry queue (codex).
+			await db.delete(stripeScrubOutbox).where(eq(stripeScrubOutbox.customerId, customerId));
 		} catch (error) {
 			console.error(
 				`account deletion: could not delete Stripe customer ${customerId}: ${error instanceof Error ? error.message : String(error)} — queued in the deletion outbox for cron retry`
@@ -705,6 +710,10 @@ export async function retryStripeCustomerDeletions(limit = 10, deadline?: number
 				await getStripe().customers.del(row.customerId, undefined, requestOptions?.());
 			}
 			await db.delete(stripeDeletionOutbox).where(eq(stripeDeletionOutbox.id, row.id));
+			// Discharge any queued scrub for the deleted customer — the PII is
+			// gone with the customer; retrying customers.update would 404
+			// forever in the bounded queue (codex).
+			await db.delete(stripeScrubOutbox).where(eq(stripeScrubOutbox.customerId, row.customerId));
 			deleted += 1;
 		} catch (error) {
 			const attempts = row.attempts + 1;
@@ -768,6 +777,14 @@ export async function retryStripeCustomerScrubs(limit = 10, deadline?: number): 
 			await db.delete(stripeScrubOutbox).where(eq(stripeScrubOutbox.id, row.id));
 			scrubbed += 1;
 		} catch (error) {
+			if ((error as { code?: unknown })?.code === 'resource_missing') {
+				// The customer is already gone — deletion is the stronger
+				// erasure outcome, so the obligation is discharged loudly
+				// instead of retrying a 404 forever (codex).
+				await db.delete(stripeScrubOutbox).where(eq(stripeScrubOutbox.id, row.id));
+				console.error(`stripe scrub for customer ${row.customerId} discharged: customer no longer exists at Stripe`);
+				continue;
+			}
 			const attempts = row.attempts + 1;
 			await db
 				.update(stripeScrubOutbox)

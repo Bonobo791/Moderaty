@@ -191,6 +191,7 @@ export async function createTestDb(): Promise<TestDb> {
 			plan TEXT NOT NULL DEFAULT 'free',
 			zero_credits_since TEXT,
 			zero_credits_notified_at TEXT,
+			zero_credits_warned_at TEXT,
 			zero_credits_checked_at TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
@@ -381,6 +382,14 @@ export async function createTestDb(): Promise<TestDb> {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			channel_id TEXT NOT NULL,
 			refresh_token_enc TEXT NOT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			last_attempt_at TEXT,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`,
+		`CREATE TABLE stripe_scrub_outbox (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			customer_id TEXT NOT NULL UNIQUE,
+			org_id TEXT NOT NULL,
 			attempts INTEGER NOT NULL DEFAULT 0,
 			last_attempt_at TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))

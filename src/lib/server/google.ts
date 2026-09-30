@@ -5,6 +5,8 @@ import { error } from '@sveltejs/kit';
 
 import { env } from '$env/dynamic/private';
 
+import { assertBeforeDeadline } from '$lib/server/http';
+
 export interface GoogleTokens {
 	accessToken: string;
 	refreshToken?: string;
@@ -38,6 +40,10 @@ async function postGoogleForm(
 	makeError: () => Error,
 	deadline?: number
 ): Promise<string> {
+	// A spent shared budget must not fire a request at all — clamping to 1ms
+	// would still call Google (and could outlive the caller's window). Throw
+	// before fetch so the caller's DeadlineExceededError path stays honest.
+	assertBeforeDeadline(deadline);
 	let res: Response;
 	let text: string;
 	try {

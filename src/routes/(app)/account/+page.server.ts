@@ -53,7 +53,15 @@ export const actions = {
 		// API ToS) — the helper logs failures loudly without blocking the
 		// erase (the ciphertext is already gone, orphaning the grant).
 		const grants = await deleteUserRecords(user.id);
-		await revokeChannelGrants(grants, 'account deletion');
+		// The account is already erased — a drain failure here (Google error,
+		// bookkeeping write) must not 500 a deleted account. The obligations
+		// are durable in the revocation outbox and the cron retry converges
+		// them (cubic).
+		try {
+			await revokeChannelGrants(grants, 'account deletion');
+		} catch (cause) {
+			console.error('account deletion: grant revocation drain failed:', cause);
+		}
 		cookies.delete(SESSION_COOKIE, { path: '/' });
 		// The session is gone, so land on the public confirmation page — never
 		// back on an (app) page that would just bounce to /login.

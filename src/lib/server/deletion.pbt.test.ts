@@ -2,7 +2,7 @@ import fc from 'fast-check';
 import { expect, test, vi } from 'vitest';
 
 import { setupTestDb, testDb, wipeTables } from './testdb';
-import { auditLog, channels, comments, consents, invites, memberships, moderationActions, organizations, rules, sessions, users } from './db/schema';
+import { auditLog, channels, comments, consents, googleRevocationOutbox, invites, memberships, moderationActions, organizations, rules, sessions, users } from './db/schema';
 import { CONSENT_EMAIL_RETENTION_MS, WIPED_REFRESH_TOKEN, deleteUserRecords, nullExpiredConsentEmails } from './deletion';
 import {
 	COMMENT_DECIDERS,
@@ -85,10 +85,12 @@ const graphRunArb = orgGraphArb.chain((graph) => {
 
 type GraphRun = typeof graphRunArb extends fc.Arbitrary<infer T> ? T : never;
 
+type FullSnapshot = Awaited<ReturnType<typeof snapshotAll>>;
 type Snapshot = {
-	[K in 'users' | 'organizations' | 'memberships' | 'channels' | 'sessions' | 'consents' | 'invites' | 'comments' | 'moderationActions' | 'auditLog' | 'rules']: Awaited<
-		ReturnType<typeof snapshotAll>
-	>[K];
+	[K in keyof FullSnapshot]: K extends 'googleRevocationOutbox'
+		? // id + createdAt are server-assigned — the oracle compares payloads only
+			Omit<FullSnapshot[K][number], 'id' | 'createdAt'>[]
+		: FullSnapshot[K];
 };
 
 /** Reads every row of every tenancy/moderation table. */
@@ -105,7 +107,8 @@ async function snapshotAll() {
 		comments: await db.select().from(comments).all(),
 		moderationActions: await db.select().from(moderationActions).all(),
 		auditLog: await db.select().from(auditLog).all(),
-		rules: await db.select().from(rules).all()
+		rules: await db.select().from(rules).all(),
+		googleRevocationOutbox: await db.select().from(googleRevocationOutbox).all()
 	};
 }
 
@@ -166,7 +169,19 @@ function expectedAfterDeletion(before: Snapshot, targetUserId: string): Snapshot
 		comments: before.comments.filter((row) => !deletedChannelIds.has(row.channelId)),
 		moderationActions: before.moderationActions.filter((row) => !deletedChannelIds.has(row.channelId)),
 		auditLog: before.auditLog.filter((row) => !deletedChannelIds.has(row.channelId)),
-		rules: before.rules.filter((row) => !deletedChannelIds.has(row.channelId))
+		rules: before.rules.filter((row) => !deletedChannelIds.has(row.channelId)),
+		// One revocation obligation per erased/detached grant (cubic): every
+		// channel dying with a dissolved org, plus every channel the target
+		// connected in a surviving org — provided its ciphertext was not
+		// already wiped. The id is autoincrement, so the comparison maps to
+		// the persisted payload shape.
+		googleRevocationOutbox: before.channels
+			.filter(
+				(row) =>
+					row.refreshTokenEnc !== WIPED_REFRESH_TOKEN &&
+					(row.userId === targetUserId || (row.orgId !== null && dissolvedOrgIds.has(row.orgId)))
+			)
+			.map((row) => ({ channelId: row.id, refreshTokenEnc: row.refreshTokenEnc, attempts: 0, lastAttemptAt: null }))
 	};
 }
 
@@ -287,6 +302,13 @@ test('conservation: deleteUserRecords erases exactly the target user\'s tenancy 
 				);
 				expect(sortBy(after.auditLog, (row) => row.id)).toEqual(sortBy(expected.auditLog, (row) => row.id));
 				expect(sortBy(after.rules, (row) => row.id)).toEqual(sortBy(expected.rules, (row) => row.id));
+				// The outbox id + createdAt are server-assigned — compare the persisted payload.
+				expect(
+					sortBy(
+						after.googleRevocationOutbox.map(({ id: _id, createdAt: _createdAt, ...rest }) => rest),
+						(row) => row.channelId
+					)
+				).toEqual(sortBy(expected.googleRevocationOutbox, (row) => row.channelId));
 			})
 		);
 	} finally {

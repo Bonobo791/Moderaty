@@ -17,7 +17,7 @@ import { and, asc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizz
 import type Stripe from 'stripe';
 
 import { db } from '$lib/server/db';
-import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, googleRevocationOutbox, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, stripeLifetimeSlots, users } from '$lib/server/db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, googleRevocationOutbox, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, stripeLifetimeSlots, stripeScrubOutbox, users } from '$lib/server/db/schema';
 import { decrypt } from '$lib/server/crypto';
 import { revokeGoogleToken } from '$lib/server/google';
 import { getStripe } from '$lib/server/stripe/client';
@@ -75,7 +75,15 @@ export async function revokeChannelGrants(grants: ErasedChannelGrant[], context:
 			await revokeGoogleToken(decrypt(ch.refreshTokenEnc), `${context} channel ${ch.id}`, deadline);
 			await db.delete(googleRevocationOutbox).where(eq(googleRevocationOutbox.id, ch.outboxId));
 		} catch (cause) {
-			await markRevocationAttempt(ch.outboxId);
+			// The bookkeeping write itself can fail — a retry-mark hiccup must
+			// not abort the drain or the account deletion above it: the
+			// obligation row is durable and the cron retry converges it
+			// regardless of whether the attempt counter advanced (cubic).
+			try {
+				await markRevocationAttempt(ch.outboxId);
+			} catch (markCause) {
+				console.error('could not record token revocation attempt:', ch.id, markCause);
+			}
 			console.error('token revocation failed for channel, deleting anyway:', ch.id, cause);
 		}
 	}
@@ -428,6 +436,18 @@ export async function deleteUserRecords(userId: string, options?: DeleteUserOpti
 						.all()
 				).flatMap((org) => (org.stripeCustomerId ? [{ orgId: org.orgId, stripeCustomerId: org.stripeCustomerId }] : []))
 			: [];
+		// Persist the anonymization obligation inside the erase transaction:
+		// the scrub is a post-commit Stripe write, so without this row a spent
+		// deadline or a Stripe outage leaves the deleted user's e-mail at
+		// Stripe permanently (codex). Drained post-commit below and retried by
+		// `retryStripeCustomerScrubs`; a row conflicts away when an earlier
+		// departure already queued it.
+		if (survivingStripeCustomers.length) {
+			await tx
+				.insert(stripeScrubOutbox)
+				.values(survivingStripeCustomers.map((customer) => ({ customerId: customer.stripeCustomerId, orgId: customer.orgId })))
+				.onConflictDoNothing();
+		}
 		const channelIds = dissolveOrgIds.length
 			? (
 					await tx.select({ id: channels.id }).from(channels).where(inArray(channels.orgId, dissolveOrgIds)).all()
@@ -511,13 +531,14 @@ export async function deleteUserRecords(userId: string, options?: DeleteUserOpti
 	// org name and saved card stay for the successor.
 	for (let i = 0; i < survivingStripeCustomers.length; i += 1) {
 		const { orgId, stripeCustomerId } = survivingStripeCustomers[i];
-		// The anonymization pass has no durable retry — a spent budget must log
-		// the deferred orgs loudly rather than silently skip the PII scrub
-		// (coderabbit). The deadline is checked per org, not once: each call
-		// can consume the rest of the budget.
+		// The anonymization pass has a durable retry — the outbox row written
+		// in the erase transaction — so a spent budget logs the deferral
+		// loudly rather than silently skipping the PII scrub (coderabbit). The
+		// deadline is checked per org, not once: each call can consume the
+		// rest of the budget.
 		if (options?.deadline !== undefined && Date.now() >= options.deadline) {
 			console.error(
-				`account deletion: shared deadline reached — Stripe customer anonymization deferred for ${survivingStripeCustomers.length - i} org(s): ${survivingStripeCustomers
+				`account deletion: shared deadline reached — Stripe customer anonymization stays queued in the scrub outbox for ${survivingStripeCustomers.length - i} org(s): ${survivingStripeCustomers
 					.slice(i)
 					.map((o) => o.orgId)
 					.join(', ')}`
@@ -533,9 +554,13 @@ export async function deleteUserRecords(userId: string, options?: DeleteUserOpti
 			} else {
 				await getStripe().customers.update(stripeCustomerId, { email: '' });
 			}
+			// Confirmed scrubbed — the durable obligation is discharged. If
+			// THIS delete fails the row stays queued: the retry re-scrubs
+			// idempotently (email '' twice is the same outcome).
+			await db.delete(stripeScrubOutbox).where(eq(stripeScrubOutbox.customerId, stripeCustomerId));
 		} catch (error) {
 			console.error(
-				`account deletion: could not anonymize Stripe customer ${stripeCustomerId} for surviving org ${orgId}: ${error instanceof Error ? error.message : String(error)}`
+				`account deletion: could not anonymize Stripe customer ${stripeCustomerId} for surviving org ${orgId}: ${error instanceof Error ? error.message : String(error)} — queued in the scrub outbox for cron retry`
 			);
 		}
 	}
@@ -618,7 +643,14 @@ export async function retryGoogleRevocations(limit = 10, deadline?: number): Pro
 			await db.delete(googleRevocationOutbox).where(eq(googleRevocationOutbox.id, row.id));
 			revoked += 1;
 		} catch (error) {
-			await markRevocationAttempt(row.id, row.attempts);
+			// The bookkeeping write itself can fail — a retry-mark hiccup must
+			// not abort the rest of the batch: the row is durable and the next
+			// invocation converges it either way (cubic).
+			try {
+				await markRevocationAttempt(row.id, row.attempts);
+			} catch (markCause) {
+				console.error('could not record google revocation retry attempt:', row.channelId, markCause);
+			}
 			console.error(`google revocation retry ${row.attempts + 1} failed for channel ${row.channelId}: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
@@ -686,6 +718,67 @@ export async function retryStripeCustomerDeletions(limit = 10, deadline?: number
 		}
 	}
 	return deleted;
+}
+
+/**
+ * Retries the Stripe customer anonymizations owed by account teardowns — the
+ * outbox row was written inside the erase transaction, so a spent post-commit
+ * deadline or a Stripe outage can never leave a deleted user's e-mail on a
+ * surviving org's customer permanently (codex). Same contract as
+ * `retryStripeCustomerDeletions`: bounded, oldest-due first with the shared
+ * hourly backoff, the row deleted only after Stripe confirms the scrub.
+ *
+ * @returns The number of customers confirmed anonymized
+ */
+export async function retryStripeCustomerScrubs(limit = 10, deadline?: number): Promise<number> {
+	const backoffCutoff = new Date(Date.now() - DELETION_RETRY_BACKOFF_MS).toISOString();
+	const rows = await db
+		.select()
+		.from(stripeScrubOutbox)
+		.where(or(isNull(stripeScrubOutbox.lastAttemptAt), lt(stripeScrubOutbox.lastAttemptAt, backoffCutoff)))
+		.orderBy(asc(stripeScrubOutbox.lastAttemptAt), asc(stripeScrubOutbox.id))
+		.limit(limit)
+		.all();
+	let scrubbed = 0;
+	for (const row of rows) {
+		const remainingMs = deadline === undefined ? undefined : deadline - Date.now();
+		if (remainingMs !== undefined && remainingMs <= 0) {
+			console.error(
+				`stripe scrub outbox stopped early: shared deadline expired — ${rows.length - rows.indexOf(row) - 1} row(s) deferred to the next invocation`
+			);
+			break;
+		}
+		try {
+			// Same request-bounding contract as the deletion retry: the shared
+			// client's retries are disabled and the timeout is the remaining
+			// budget, so one hanging call cannot blow the cron window.
+			const requestOptions: StripeRequestOptionsFactory | undefined =
+				deadline === undefined
+					? undefined
+					: () => {
+							const remaining = deadline - Date.now();
+							if (remaining <= 0) throw new Error('stripe scrub shared deadline expired');
+							return { timeout: remaining, maxNetworkRetries: 0 };
+						};
+			if (requestOptions) {
+				await getStripe().customers.update(row.customerId, { email: '' }, requestOptions());
+			} else {
+				await getStripe().customers.update(row.customerId, { email: '' });
+			}
+			await db.delete(stripeScrubOutbox).where(eq(stripeScrubOutbox.id, row.id));
+			scrubbed += 1;
+		} catch (error) {
+			const attempts = row.attempts + 1;
+			await db
+				.update(stripeScrubOutbox)
+				.set({ attempts, lastAttemptAt: new Date().toISOString() })
+				.where(eq(stripeScrubOutbox.id, row.id));
+			console.error(
+				`stripe scrub retry ${attempts} failed for customer ${row.customerId} (org ${row.orgId}): ${error instanceof Error ? error.message : String(error)}`
+			);
+		}
+	}
+	return scrubbed;
 }
 
 /**

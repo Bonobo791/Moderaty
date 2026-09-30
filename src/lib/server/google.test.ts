@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
 import { exchangeGoogleCode, revokeGoogleToken } from './google';
+import { DeadlineExceededError } from './http';
 
 const PREFIX = 'google login token exchange';
 const USER_ERROR = 'Google sign-in failed — please retry';
@@ -232,6 +233,28 @@ test('revoke logs with the revocation prefix and throws a descriptive error on a
 		'Google token revocation failed'
 	);
 	expect(errorSpy).toHaveBeenCalledWith('account deletion channel UC1 revocation failed: 400 invalid_token');
+});
+
+test('revoke honors the shared deadline — an expired budget fails loudly without a request', async () => {
+	// cubic: a deadline-clamped timeout must surface as deadline failure, and a
+	// spent budget must never even reach the wire — a silent success would
+	// report a revocation that never happened.
+	const fetchSpy = fetchMock(async () => tokenResponse('', 200));
+
+	await expect(revokeGoogleToken('tok', 'account deletion channel UC1', Date.now() - 1)).rejects.toThrow(DeadlineExceededError);
+	expect(fetchSpy).not.toHaveBeenCalled();
+});
+
+test('revoke clamps its fetch timeout to the remaining deadline budget', async () => {
+	fetchMock(async () => tokenResponse('', 200));
+	const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+
+	await revokeGoogleToken('tok', 'account deletion channel UC1', Date.now() + 500);
+
+	// Without the deadline-aware clamp the request gets the full 10s budget.
+	const budget = timeoutSpy.mock.calls[0][0];
+	expect(budget).toBeGreaterThan(0);
+	expect(budget).toBeLessThanOrEqual(500);
 });
 
 test('revoke throws a descriptive error on a network failure', async () => {

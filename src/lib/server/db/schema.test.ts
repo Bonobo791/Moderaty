@@ -115,6 +115,7 @@ describe('users', () => {
 			plan: { notNull: true, hasDefault: true },
 			zero_credits_since: { notNull: false },
 			zero_credits_notified_at: { notNull: false },
+			zero_credits_warned_at: { notNull: false },
 			zero_credits_checked_at: { notNull: false },
 			created_at: { notNull: true, hasDefault: true }
 		});

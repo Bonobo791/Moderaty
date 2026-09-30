@@ -20,8 +20,7 @@ import { creditTransactions, organizations } from '$lib/server/db/schema';
 import { autoTopupBundle, bundleById, priceIdFor } from '$lib/server/stripe/bundles';
 import { getStripe } from '$lib/server/stripe/client';
 import { refundUngrantablePayment } from '$lib/server/stripe/refunds';
-import { findPausedTopup, recoverPausedTopup, sweepPausedTopups } from './autoTopupRecovery';
-import { stripeAutoTopupRecoveries } from '$lib/server/db/schema';
+import { findPausedTopup, recoverPausedTopup, sweepPausedTopups, topupAttemptCorrelation } from './autoTopupRecovery';
 
 export const AUTO_TOPUP_DEFAULT_THRESHOLD = 100;
 const COOLDOWN_MS = 24 * 60 * 60 * 1000;
@@ -242,7 +241,7 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 	const claimNowIso = new Date().toISOString();
 	const claimed = await db
 		.update(organizations)
-		.set({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: claimNowIso })
+		.set({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: sql`COALESCE(${organizations.autoTopupAttemptAt}, ${claimNowIso})`, autoTopupAttemptAt: sql`COALESCE(${organizations.autoTopupAttemptAt}, ${claimNowIso})` })
 		.where(
 			and(
 				eq(organizations.id, orgId),
@@ -259,6 +258,7 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 		)
 		.returning({
 			id: organizations.id,
+			attemptAt: organizations.autoTopupAttemptAt,
 			customerId: organizations.stripeCustomerId,
 			defaultPmId: organizations.stripeDefaultPmId
 		});
@@ -280,15 +280,19 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 		throw new Error('auto top-up claim returned incomplete payment identifiers');
 	}
 
-	const idempotencyKey = `autotopup:${customerId}:${startOfUtcDayIso(0)}:${dayCount + 1}`;
+	const attemptAt = claim.attemptAt;
+	if (!attemptAt) throw new Error('auto top-up claim returned no logical attempt');
+	const idempotencyKey = `autotopup:${customerId}:${attemptAt}`;
 	try {
 		const current = await readAutoTopupState(orgId);
-		if (current.enabled !== 1 || current.state !== 'in_flight' || current.lastAttemptAt !== claimNowIso) {
-			// This caller has not submitted a payment yet: its canceled claim is satisfied.
-			await db.update(stripeAutoTopupRecoveries).set({ resolvedAt: new Date().toISOString() })
-				.where(and(eq(stripeAutoTopupRecoveries.orgId, orgId), eq(stripeAutoTopupRecoveries.attemptAt, claimNowIso), isNull(stripeAutoTopupRecoveries.paymentIntentId)));
-			return false;
-		}
+		if (current.enabled !== 1 || current.state !== 'in_flight' || current.lastAttemptAt !== attemptAt) return false;
+		// Persist possible submission BEFORE Stripe. Refunds atomically revoke
+		// this predicate; infrastructure retries preserve the same logical attempt.
+		const submitted = await db.update(organizations).set({ autoTopupSubmittedAt: sql`COALESCE(${organizations.autoTopupSubmittedAt}, ${new Date().toISOString()})` })
+			.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight'), eq(organizations.autoTopupEnabled, 1), eq(organizations.autoTopupAttemptAt, attemptAt)))
+			.returning({ id: organizations.id });
+		if (!submitted.length) return false;
+		const metadata = { type: 'auto_topup', org_id: orgId, bundle: bundle.id, auto_topup_attempt_day: attemptAt.slice(0, 10), auto_topup_attempt_at: attemptAt };
 		const pi = await getStripe().paymentIntents.create(
 			{
 				amount,
@@ -297,11 +301,11 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 				payment_method: defaultPmId,
 				off_session: true,
 				confirm: true,
-				metadata: { type: 'auto_topup', org_id: orgId, bundle: bundle.id, auto_topup_attempt_day: claimNowIso.slice(0, 10) }
+				metadata
 			},
 			{ idempotencyKey }
 		);
-		const payment = { ...pi, metadata: { type: 'auto_topup', org_id: orgId, bundle: bundle.id, auto_topup_attempt_day: claimNowIso.slice(0, 10) } };
+		const payment = { ...pi, metadata };
 		const canceled = await findPausedTopup(db, orgId, payment);
 		if (canceled) {
 			await recoverPausedTopup(canceled, payment);
@@ -330,7 +334,7 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 			await db
 				.update(organizations)
 				.set({ autoTopupState: 'idle', autoTopupLastAttemptAt: null })
-				.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight')));
+				.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight'), eq(organizations.autoTopupAttemptAt, attemptAt)));
 			console.error(
 				`auto top-up infra failure for org ${orgId}: ${error instanceof Error ? error.message : String(error)} — claim released, no decline counted, no cooldown`
 			);
@@ -376,7 +380,7 @@ export async function recordAutoTopupFailure(orgId: string, code: string, piCrea
 	// races between two concurrent deliveries.
 	const updated = await db
 		.update(organizations)
-		.set({ autoTopupState: nextState, autoTopupFailures: nextFailures, autoTopupLastAttemptAt: new Date().toISOString() })
+		.set({ autoTopupState: nextState, autoTopupFailures: nextFailures, autoTopupLastAttemptAt: new Date().toISOString(), autoTopupAttemptAt: null, autoTopupSubmittedAt: null })
 		.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight')))
 		.returning({ id: organizations.id });
 	if (updated.length === 0) {
@@ -455,13 +459,8 @@ export async function grantAutoTopupCredits(
 				chargeId: typeof pi.latest_charge === 'string' ? pi.latest_charge : undefined
 			});
 			// Commit claim release WITH the grant, before a refund can observe it.
-			const attemptDay = pi.metadata?.auto_topup_attempt_day;
-			const createdMs = pi.created ? pi.created * 1000 : undefined;
-			const correlation = attemptDay ? sql`substr(${organizations.autoTopupLastAttemptAt}, 1, 10) = ${attemptDay}` : createdMs ? and(
-				gte(organizations.autoTopupLastAttemptAt, new Date(createdMs - 60_000).toISOString()),
-				sql`${organizations.autoTopupLastAttemptAt} <= ${new Date(createdMs + 60_000).toISOString()}`
-			) : undefined;
-			await tx.update(organizations).set({ autoTopupState: 'idle', autoTopupFailures: 0 })
+			const correlation = topupAttemptCorrelation(pi, organizations.autoTopupLastAttemptAt);
+			await tx.update(organizations).set({ autoTopupState: 'idle', autoTopupFailures: 0, autoTopupAttemptAt: null, autoTopupSubmittedAt: null })
 				.where(and(eq(organizations.id, orgId), or(ne(organizations.autoTopupState, 'disabled'), isNull(organizations.autoTopupState)),
 					or(eq(organizations.autoTopupState, 'idle'), isNull(organizations.autoTopupLastAttemptAt), correlation)));
 			return { applied, canceled: undefined };
@@ -518,18 +517,17 @@ export async function grantAutoTopupCredits(
  */
 async function releaseClaimForPi(
 	orgId: string,
-	pi: { id: string; created?: number | null }
+	pi: { id: string; created?: number | null; metadata?: Record<string, string> | null }
 ): Promise<void> {
-	if (!pi.created) return; // cannot correlate — leave it for the stale sweep
+	const correlation = topupAttemptCorrelation({ ...pi, metadata: pi.metadata ?? null }, organizations.autoTopupLastAttemptAt);
+	if (!correlation) return; // cannot correlate — leave it for the stale sweep
 	const org = await readAutoTopupState(orgId);
 	if (org.state !== 'in_flight') return;
 	if (!org.lastAttemptAt) return;
-	const drift = Math.abs(pi.created * 1000 - Date.parse(org.lastAttemptAt));
-	if (drift > 60_000) return; // a different (newer) claim owns in_flight
 	await db
 		.update(organizations)
-		.set({ autoTopupState: 'idle', autoTopupFailures: 0 })
-		.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight'), eq(organizations.autoTopupLastAttemptAt, org.lastAttemptAt)));
+		.set({ autoTopupState: 'idle', autoTopupFailures: 0, autoTopupAttemptAt: null, autoTopupSubmittedAt: null })
+		.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight'), eq(organizations.autoTopupLastAttemptAt, org.lastAttemptAt), correlation));
 }
 
 /**

@@ -46,6 +46,8 @@ export interface LedgerDelta {
 	/** Stripe reconciliation anchors (purchase/auto_topup rows). */
 	paymentIntentId?: string;
 	chargeId?: string;
+	/** Original refund time, including when a reversal waits for its grant. */
+	refundOccurredAt?: string;
 }
 
 const UNIQUE_TARGET: [typeof creditTransactions.orgId, typeof creditTransactions.refType, typeof creditTransactions.refId] = [
@@ -182,19 +184,22 @@ export const UNMETERED_CREDIT_GRANT_ERROR = 'an unmetered plan cannot receive cr
 /** Caller supplies a transaction when the pause accompanies a credit reversal. */
 export async function pauseAutoTopupForRefund(handle: LedgerHandle, orgId: string, occurredAt?: string): Promise<void> {
 	return inLedgerTx(handle, async (tx) => {
-		const org = await tx.select({ state: organizations.autoTopupState, attemptAt: organizations.autoTopupLastAttemptAt }).from(organizations).where(eq(organizations.id, orgId)).get();
+		const org = await tx.select({ state: organizations.autoTopupState, lastAttemptAt: organizations.autoTopupLastAttemptAt, attemptAt: organizations.autoTopupAttemptAt, submittedAt: organizations.autoTopupSubmittedAt, customerId: organizations.stripeCustomerId }).from(organizations).where(eq(organizations.id, orgId)).get();
 		if (!org) throw new Error(`org not found: ${orgId}`);
 		const paused = await tx.update(organizations)
-			.set({ autoTopupEnabled: 0, autoTopupState: 'disabled', autoTopupPauseReason: 'refund', autoTopupPausedAt: new Date().toISOString() })
+			.set({ autoTopupEnabled: 0, autoTopupState: 'disabled', autoTopupPauseReason: 'refund', autoTopupPausedAt: new Date().toISOString(), autoTopupAttemptAt: null, autoTopupSubmittedAt: null })
 			.where(and(eq(organizations.id, orgId),
 				// A delayed replay must respect consent explicitly given AFTER this refund.
 				occurredAt ? or(isNull(organizations.autoTopupConsentedAt), sql`strftime('%s', ${organizations.autoTopupConsentedAt}) <= strftime('%s', ${occurredAt})`) : undefined,
 				or(ne(organizations.autoTopupPauseReason, 'refund'), isNull(organizations.autoTopupPauseReason), eq(organizations.autoTopupEnabled, 1))))
 			.returning({ id: organizations.id });
 		if (!paused.length) return;
-		if (org.state === 'in_flight') {
-			if (!org.attemptAt) throw new Error(`auto top-up claim for org ${orgId} has no attempt timestamp`);
-			await tx.insert(stripeAutoTopupRecoveries).values({ orgId, attemptAt: org.attemptAt }).onConflictDoNothing();
+		if (org.state === 'in_flight' || org.attemptAt) {
+			const attemptAt = org.attemptAt ?? org.lastAttemptAt;
+			if (!attemptAt) throw new Error(`auto top-up claim for org ${orgId} has no attempt timestamp`);
+			await tx.insert(stripeAutoTopupRecoveries).values({ orgId, attemptAt, customerId: org.customerId,
+				// Only a new logical attempt with no submission marker is provably unsent.
+				resolvedAt: org.attemptAt && !org.submittedAt ? new Date().toISOString() : null }).onConflictDoNothing();
 		}
 		console.error(`auto top-up paused for org ${orgId}: payment refunded — fresh owner consent required`);
 	});
@@ -203,7 +208,7 @@ export async function pauseAutoTopupForRefund(handle: LedgerHandle, orgId: strin
 /** Applies a credit adjustment exactly once; duplicate anchors return false. */
 export async function applyLedgerDelta(
 	handle: LedgerHandle,
-	{ orgId, delta, reason, refType, refId, paymentIntentId, chargeId }: LedgerDelta
+	{ orgId, delta, reason, refType, refId, paymentIntentId, chargeId, refundOccurredAt }: LedgerDelta
 ): Promise<boolean> {
 	return inLedgerTx(handle, async (tx) => {
 		// Existence check first (mirrors consumeCredit): an unknown org is a
@@ -249,7 +254,7 @@ export async function applyLedgerDelta(
 			.onConflictDoNothing({ target: UNIQUE_TARGET })
 			.returning({ id: creditTransactions.id });
 		if (inserted.length === 0) return false; // already applied — idempotent no-op
-		if (reason === 'refund' && delta < 0) await pauseAutoTopupForRefund(tx, orgId);
+		if (reason === 'refund' && 0 > delta) await pauseAutoTopupForRefund(tx, orgId, refundOccurredAt);
 		const updated = await tx
 			.update(organizations)
 			// COALESCE: pre-billing orgs carry NULL credits (I7 nullable-first);
@@ -602,7 +607,7 @@ export async function listCreditTransactions(orgId: string, limit = 50) {
  * grant had not yet arrived (Stripe webhook delivery order is not
  * guaranteed). charge_id UNIQUE: one reversal per charge, first event wins.
  */
-export async function queuePendingReversal(chargeId: string, reason: 'refund' | 'dispute', disputeId?: string): Promise<void> {
+export async function queuePendingReversal(chargeId: string, reason: 'refund' | 'dispute', disputeId?: string, occurredAt?: string): Promise<void> {
 	// UNIQUE(charge_id, reason) — NOT charge_id alone: a dispute AND a later
 	// full refund can both arrive before the delayed grant, and each
 	// obligation must survive to drain on its own ledger anchor (a won-dispute
@@ -611,10 +616,10 @@ export async function queuePendingReversal(chargeId: string, reason: 'refund' | 
 	// second (codex review).
 	await db
 		.insert(stripePendingReversals)
-		.values({ chargeId, reason, disputeId })
+		.values({ chargeId, reason, disputeId, occurredAt })
 		.onConflictDoUpdate({
 			target: [stripePendingReversals.chargeId, stripePendingReversals.reason],
-			set: { disputeId: sql`COALESCE(${stripePendingReversals.disputeId}, excluded.dispute_id)` }
+			set: { disputeId: sql`COALESCE(${stripePendingReversals.disputeId}, excluded.dispute_id)`, occurredAt: sql`COALESCE(${stripePendingReversals.occurredAt}, excluded.occurred_at)` }
 		});
 }
 
@@ -680,7 +685,8 @@ export async function drainPendingReversals(chargeId: string): Promise<number> {
 				reason: row.reason === 'dispute' ? 'dispute' : 'refund',
 				refType: row.reason === 'refund' ? 'refund' : 'dispute',
 				refId: chargeId,
-				chargeId
+				chargeId,
+				refundOccurredAt: row.occurredAt ?? undefined
 			});
 			if (row.reason === 'dispute' && row.disputeId) await tx.update(stripeDisputeReversals).set({ source: 'credits', status: 'reversed' }).where(eq(stripeDisputeReversals.disputeId, row.disputeId));
 			// Satisfied (whether applied now or by a concurrent path): the anchor

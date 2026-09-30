@@ -1278,6 +1278,23 @@ describe('fulfillAutoTopup', () => {
 });
 
 describe('reverseCharge / reverseDispute', () => {
+	test('a full refund retry reverses credits without overriding later owner consent', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupConsentedAt: '2026-09-30T13:11:00.000Z' });
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: 100, reason: 'purchase', refType: 'checkout_session', refId: 'cs_retry', chargeId: 'ch_retry' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_retry', amount: 500, amount_refunded: 500 });
+		expect(await reverseCharge('ch_retry', 'refund', undefined, '2026-09-30T13:10:00.000Z')).toBe(true);
+		expect(await getCredits('org-1')).toBe(0);
+		expect(await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get()).toMatchObject({ autoTopupEnabled: 1, autoTopupState: 'idle' });
+	});
+
+	test('an unrelated charge on the same Stripe customer does not pause auto top-up', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', stripeCustomerId: 'cus_1', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_unrelated', customer: 'cus_1', amount: 500, amount_refunded: 100 });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try { await reverseCharge('ch_unrelated', 'refund'); } finally { errorSpy.mockRestore(); }
+		expect(await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get()).toMatchObject({ autoTopupEnabled: 1, autoTopupState: 'idle' });
+	});
+
 	test('a refunded subscription payment pauses top-up using its locally stored payment link', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', autoTopupEnabled: 1, autoTopupState: 'idle' });
 		await testDb().db.insert(stripeSubscriptionPeriods).values({ orgId: 'org-1', subscriptionId: 'sub_1', invoiceId: 'in_1', periodKey: 'period_1', periodStart: '2026-09-01T00:00:00.000Z', periodEnd: '2026-10-01T00:00:00.000Z', chargeId: 'ch_sub', paymentIntentId: 'pi_sub', includedCredits: 100 });
@@ -1291,7 +1308,11 @@ describe('reverseCharge / reverseDispute', () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupConsentedAt: '2026-09-30T13:10:00.100Z' });
 		await applyLedgerDelta(db, { orgId: 'org-1', delta: 100, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', chargeId: 'ch_1' });
 		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', amount: 500, amount_refunded: 100 });
-		await reverseCharge('ch_1', 'refund', undefined, '2026-09-30T13:10:00.000Z');
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			await reverseCharge('ch_1', 'refund', undefined, '2026-09-30T13:10:00.000Z');
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('not a full refund'));
+		} finally { errorSpy.mockRestore(); }
 		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.autoTopupEnabled).toBe(0);
 	});
 
@@ -1311,7 +1332,11 @@ describe('reverseCharge / reverseDispute', () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', autoTopupEnabled: 1, autoTopupState: 'idle' });
 		await applyLedgerDelta(db, { orgId: 'org-1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', chargeId: 'ch_1' });
 		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', amount: 500, amount_refunded: 100 });
-		expect(await reverseCharge('ch_1', 'refund')).toBe(false);
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			expect(await reverseCharge('ch_1', 'refund')).toBe(false);
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('not a full refund'));
+		} finally { errorSpy.mockRestore(); }
 		expect(await getCredits('org-1')).toBe(500);
 		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.autoTopupEnabled).toBe(0);
 	});

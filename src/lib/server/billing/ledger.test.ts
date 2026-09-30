@@ -56,6 +56,16 @@ async function seedHostedPeriod(includedCredits: number, consumedCredits = 0, or
 }
 
 describe('drainPendingReversals crash-consistency', () => {
+	test('a delayed grant drains an earlier refund without overriding newer consent', async () => {
+		await seedOrg('org-1', 100);
+		await queuePendingReversal('ch_1', 'refund', undefined, '2026-09-30T13:10:00.000Z');
+		await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupConsentedAt: '2026-09-30T13:11:00.000Z' }).where(eq(organizations.id, 'org-1'));
+		await seedChargeGrant('ch_1');
+		expect(await drainPendingReversals('ch_1')).toBe(1);
+		expect(await getCredits('org-1')).toBe(0);
+		expect(await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get()).toMatchObject({ autoTopupEnabled: 1, autoTopupState: 'idle' });
+	});
+
 	test('a delayed refund disables auto top-up in the transaction that removes its credits', async () => {
 		await seedOrg('org-1', 100);
 		await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle' }).where(eq(organizations.id, 'org-1'));
@@ -63,7 +73,7 @@ describe('drainPendingReversals crash-consistency', () => {
 		await queuePendingReversal('ch_1', 'refund');
 		expect(await drainPendingReversals('ch_1')).toBe(1);
 		expect(await getCredits('org-1')).toBe(0);
-		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.autoTopupEnabled).toBe(0);
+		expect(await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get()).toMatchObject({ autoTopupEnabled: 0, autoTopupState: 'disabled', autoTopupPauseReason: 'refund' });
 	});
 
 	test('a stop between the first and second reversal keeps the second obligation durable for a retry', async () => {

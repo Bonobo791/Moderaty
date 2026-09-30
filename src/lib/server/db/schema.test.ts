@@ -176,6 +176,8 @@ describe('organizations', () => {
 			auto_topup_threshold: { notNull: false },
 			auto_topup_state: { notNull: false },
 			auto_topup_last_attempt_at: { notNull: false },
+			auto_topup_attempt_at: { notNull: false },
+			auto_topup_submitted_at: { notNull: false },
 			auto_topup_failures: { notNull: false },
 			auto_topup_pause_reason: { notNull: false },
 			auto_topup_paused_at: { notNull: false },

@@ -321,6 +321,8 @@ export async function createTestDb(): Promise<TestDb> {
 			auto_topup_failures INTEGER,
 			auto_topup_pause_reason TEXT,
 			auto_topup_paused_at TEXT,
+			auto_topup_attempt_at TEXT,
+			auto_topup_submitted_at TEXT,
 			auto_topup_consent_text TEXT,
 			auto_topup_consent_version TEXT,
 			auto_topup_consented_by TEXT,
@@ -359,12 +361,14 @@ export async function createTestDb(): Promise<TestDb> {
 			charge_id TEXT NOT NULL,
 			reason TEXT NOT NULL,
 			dispute_id TEXT,
+			occurred_at TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE UNIQUE INDEX stripe_pending_reversals_charge_reason_idx ON stripe_pending_reversals (charge_id, reason)`,
 		`CREATE TABLE stripe_auto_topup_recoveries (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+			org_id TEXT NOT NULL,
+			customer_id TEXT,
 			attempt_at TEXT NOT NULL,
 			payment_intent_id TEXT,
 			refund_id TEXT,
@@ -373,6 +377,8 @@ export async function createTestDb(): Promise<TestDb> {
 			resolved_at TEXT,
 			UNIQUE(org_id, attempt_at)
 		)`,
+		`CREATE INDEX stripe_auto_topup_recoveries_pending_idx ON stripe_auto_topup_recoveries (resolved_at, last_checked_at)`,
+		`CREATE INDEX stripe_auto_topup_recoveries_payment_idx ON stripe_auto_topup_recoveries (org_id, payment_intent_id)`,
 		`CREATE TABLE stripe_dispute_reversals (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			dispute_id TEXT NOT NULL UNIQUE,
@@ -488,6 +494,7 @@ export async function createTestDb(): Promise<TestDb> {
 			amount_cents INTEGER NOT NULL,
 			credits INTEGER,
 			payment_id TEXT UNIQUE,
+			refunded_amount_cents INTEGER,
 			paid_at TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
 			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))

@@ -104,7 +104,15 @@ export async function fulfillMercadoPagoPayment(payment: MercadoPagoPayment): Pr
 		if (paymentAmountCents(payment.refundedAmount) >= paymentAmountCents(payment.transactionAmount)) {
 			throw new Error('Mercado Pago approved payment has an out-of-contract refunded amount');
 		}
-		await pauseAutoTopupForRefund(db, orgId);
+		await db.transaction(async (tx) => {
+			const observed = await tx.update(mercadoPagoCheckoutAttempts)
+				.set({ refundedAmountCents: paymentAmountCents(payment.refundedAmount), paymentId: payment.id })
+				.where(and(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId),
+					or(isNull(mercadoPagoCheckoutAttempts.paymentId), eq(mercadoPagoCheckoutAttempts.paymentId, payment.id)),
+					sql`COALESCE(${mercadoPagoCheckoutAttempts.refundedAmountCents}, 0) < ${paymentAmountCents(payment.refundedAmount)}`))
+				.returning({ id: mercadoPagoCheckoutAttempts.id });
+			if (observed.length) await pauseAutoTopupForRefund(tx, orgId);
+		});
 		throw new Error('Mercado Pago payment has a partial refund — rejected for manual review');
 	}
 	// Pre-column attempts (credits NULL) fall back to the live catalog.

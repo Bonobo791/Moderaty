@@ -142,6 +142,17 @@ test('rejects a payment whose amount does not match the persisted attempt', asyn
 	expect(org?.creditsRemaining).toBe(0);
 });
 
+test('a repeated partial refund preserves fresh consent, while an increased refund pauses again', async () => {
+	await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle' }).where(eq(organizations.id, 'org-1'));
+	await expect(fulfillMercadoPagoPayment({ ...payment, refundedAmount: 2 })).rejects.toThrow(/partial refund/);
+	expect((await testDb().db.select().from(organizations).get())?.autoTopupEnabled).toBe(0);
+	await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupPauseReason: null }).where(eq(organizations.id, 'org-1'));
+	await expect(fulfillMercadoPagoPayment({ ...payment, refundedAmount: 2 })).rejects.toThrow(/partial refund/);
+	expect((await testDb().db.select().from(organizations).get())?.autoTopupEnabled).toBe(1);
+	await expect(fulfillMercadoPagoPayment({ ...payment, refundedAmount: 3 })).rejects.toThrow(/partial refund/);
+	expect((await testDb().db.select().from(organizations).get())?.autoTopupEnabled).toBe(0);
+});
+
 test('an approved payment carrying a partial refund is rejected loudly — never fulfilled', async () => {
 	// Mercado Pago reports a partial refund as `approved` with
 	// 0 < refunded_amount < transaction_amount; granting the full credits would
@@ -508,7 +519,7 @@ test('checkout refuses when MERCADOPAGO_WEBHOOK_SECRET is missing — no prefere
 	const fetchSpy = vi.fn();
 	vi.stubGlobal('fetch', fetchSpy);
 	try {
-		await expect(createMercadoPagoCreditCheckout('org-1', TEST_OWNER, 'credits_100', 'attempt_secret')).rejects.toThrow(
+		await expect(createMercadoPagoCreditCheckout('org-1', TEST_OWNER, 'credits_500', 'attempt_secret')).rejects.toThrow(
 			/MERCADOPAGO_WEBHOOK_SECRET is not configured/
 		);
 	} finally {

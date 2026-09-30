@@ -17,7 +17,8 @@ import { and, asc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizz
 import type Stripe from 'stripe';
 
 import { db } from '$lib/server/db';
-import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, googleRevocationOutbox, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, stripeLifetimeSlots, stripeScrubOutbox, users } from '$lib/server/db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, googleRevocationOutbox, invites, memberships, moderationActions, organizations, rules, sessions, stripeAutoTopupRecoveries, stripeDeletionOutbox, stripeLifetimeSlots, stripeScrubOutbox, users } from '$lib/server/db/schema';
+import { pauseAutoTopupForRefund } from '$lib/server/billing/ledger';
 import { decrypt } from '$lib/server/crypto';
 import { revokeGoogleToken } from '$lib/server/google';
 import { getStripe } from '$lib/server/stripe/client';
@@ -105,6 +106,19 @@ async function cancelCustomerSubscriptions(customerId: string, options?: StripeR
 		}
 		if (subscription.status !== 'canceled' && subscription.status !== 'incomplete_expired') await getStripe().subscriptions.cancel(subscription.id, undefined, options?.());
 	}
+	// Keep the customer discoverable until its overlapping payment is canceled
+	// or refunded. Local account erasure has already completed independently.
+	const pending = await db.select({ id: stripeAutoTopupRecoveries.id }).from(stripeAutoTopupRecoveries)
+		.where(and(eq(stripeAutoTopupRecoveries.customerId, customerId), isNull(stripeAutoTopupRecoveries.resolvedAt))).get();
+	if (pending) throw new Error('Stripe customer has unresolved automatic payment recovery — deletion deferred');
+}
+
+/** Erase the Stripe customer and completed recovery identifiers together. */
+async function deleteStripeCustomer(customerId: string, options?: StripeRequestOptionsFactory): Promise<void> {
+	await cancelCustomerSubscriptions(customerId, options);
+	if (options) await getStripe().customers.del(customerId, undefined, options());
+	else await getStripe().customers.del(customerId);
+	await db.delete(stripeAutoTopupRecoveries).where(and(eq(stripeAutoTopupRecoveries.customerId, customerId), isNotNull(stripeAutoTopupRecoveries.resolvedAt)));
 }
 
 /**
@@ -349,17 +363,23 @@ async function dissolveOrgs(tx: DeletionTx, dissolveOrgIds: string[]): Promise<s
 	// Capture the Stripe customers BEFORE the org rows die — the id is
 	// needed for the post-transaction erasure.
 	const dissolvedOrgs = await tx
-		.select({ stripeCustomerId: organizations.stripeCustomerId })
+		.select({ id: organizations.id, stripeCustomerId: organizations.stripeCustomerId, state: organizations.autoTopupState, attemptAt: organizations.autoTopupAttemptAt })
 		.from(organizations)
 		.where(inArray(organizations.id, dissolveOrgIds))
 		.all();
 	for (const org of dissolvedOrgs) {
+		if (org.state === 'in_flight' || org.attemptAt) await pauseAutoTopupForRefund(tx, org.id);
+		await tx.update(stripeAutoTopupRecoveries).set({ customerId: org.stripeCustomerId })
+			.where(and(eq(stripeAutoTopupRecoveries.orgId, org.id), isNull(stripeAutoTopupRecoveries.customerId)));
 		if (!org.stripeCustomerId) continue;
 		stripeCustomerIds.push(org.stripeCustomerId);
 		// The outbox row is the durable obligation; it is deleted once
 		// Stripe confirms (below or by the cron retry).
 		await tx.insert(stripeDeletionOutbox).values({ customerId: org.stripeCustomerId }).onConflictDoNothing();
 	}
+	// Completed attempts are no longer needed once the account is erased;
+	// unresolved financial obligations retain only their payment routing data.
+	await tx.delete(stripeAutoTopupRecoveries).where(and(inArray(stripeAutoTopupRecoveries.orgId, dissolveOrgIds), isNotNull(stripeAutoTopupRecoveries.resolvedAt)));
 	await tx.delete(invites).where(inArray(invites.orgId, dissolveOrgIds));
 	await tx.update(stripeLifetimeSlots).set({ activeOrgId: null, activeEntitlementId: null }).where(inArray(stripeLifetimeSlots.activeOrgId, dissolveOrgIds));
 	await tx.delete(memberships).where(inArray(memberships.orgId, dissolveOrgIds));
@@ -581,12 +601,7 @@ export async function deleteUserRecords(userId: string, options?: DeleteUserOpti
 			break;
 		}
 		try {
-			await cancelCustomerSubscriptions(customerId, requestOptions);
-			if (requestOptions) {
-				await getStripe().customers.del(customerId, undefined, requestOptions());
-			} else {
-				await getStripe().customers.del(customerId);
-			}
+			await deleteStripeCustomer(customerId, requestOptions);
 			await db.delete(stripeDeletionOutbox).where(eq(stripeDeletionOutbox.customerId, customerId));
 			// A scrub obligation queued for this customer (from an earlier
 			// deletion where its org still survived) is discharged by the
@@ -703,12 +718,7 @@ export async function retryStripeCustomerDeletions(limit = 10, deadline?: number
 					if (remaining <= 0) throw new Error('stripe deletion shared deadline expired');
 					return { timeout: remaining, maxNetworkRetries: 0 };
 				};
-			await cancelCustomerSubscriptions(row.customerId, requestOptions);
-			if (deadline === undefined) {
-				await getStripe().customers.del(row.customerId);
-			} else {
-				await getStripe().customers.del(row.customerId, undefined, requestOptions?.());
-			}
+			await deleteStripeCustomer(row.customerId, requestOptions);
 			await db.delete(stripeDeletionOutbox).where(eq(stripeDeletionOutbox.id, row.id));
 			// Discharge any queued scrub for the deleted customer — the PII is
 			// gone with the customer; retrying customers.update would 404

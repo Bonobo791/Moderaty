@@ -324,6 +324,30 @@ test('the theme pass is bounded by the write reserve — a spent reserve aborts 
 	expect(mergeCallBodies()).toHaveLength(0);
 });
 
+test.each(['clustering', 'write-reserve'])('deadline diagnostics identify the %s phase without advancing coverage', async (phase) => {
+	await seedChannel('UC1', { feedbackEnabled: 1 });
+	if (phase === 'clustering') await seedCommentBatch(THREE_THEMES);
+	else await seedComment('c1', 'UC1', 'no useful feedback', '2026-01-01T00:00:00.000Z');
+	const startedAt = Date.now();
+	const clock = vi.spyOn(Date, 'now').mockReturnValue(startedAt);
+	const log = vi.spyOn(console, 'info').mockImplementation(() => {});
+	beforeClassify = async () => { clock.mockReturnValue(startedAt + 6_000); };
+	try {
+		const result = await generateFeedbackDigest('UC1', { force: true, deadline: startedAt + 10_000 });
+
+		expect(result).toMatchObject({ status: 'deferred', reason: 'deadline' });
+		expect(log).toHaveBeenCalledWith('feedback digest stopped:', {
+			channelId: 'UC1', phase, elapsedMs: 6_000, remainingMs: 4_000, batchSize: phase === 'clustering' ? 3 : 1
+		});
+		expect(await testDb().db.select().from(feedbackDigests).all()).toMatchObject([{ status: 'deferred', error: 'deadline' }]);
+		expect(await testDb().db.select().from(comments).where(isNull(comments.feedbackDigestedAt)).all()).toHaveLength(phase === 'clustering' ? 3 : 1);
+		expect((await testDb().db.select().from(channels).get())?.feedbackLastDigestAt).toBeNull();
+	} finally {
+		clock.mockRestore();
+		log.mockRestore();
+	}
+});
+
 test('a batch below the threshold in every enabled category skips the theme-merge call', async () => {
 	// 2 questions + 1 criticism at threshold 3 can never surface a finding —
 	// the merge call is wasted spend, and a malformed response would fail a

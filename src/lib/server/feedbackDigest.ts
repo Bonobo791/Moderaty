@@ -732,6 +732,7 @@ export async function generateFeedbackDigest(
 	channelId: string,
 	{ deadline, force = false, forceDryRun = false }: DigestOptions = {}
 ): Promise<DigestResult> {
+	const startedAt = Date.now();
 	const channel = await db.select().from(channels).where(eq(channels.id, channelId)).get();
 	if (!channel) throw new Error(`channel not found: ${channelId}`);
 	const gated = await digestGateResult(channel, channelId, force, forceDryRun);
@@ -756,12 +757,14 @@ export async function generateFeedbackDigest(
 
 	const metered = channel.orgId ? await orgIsMetered(channel.orgId) : false;
 
+	let phase = 'billing';
 	try {
 		const creditsCharged =
 			metered && channel.orgId ? await chargeFeedbackBatch(channel.orgId, batch, historyScanScope, deadline) : 0;
 
 		// Per-comment failures are counted and skipped (I1); a deadline aborts
 		// the whole run so the tick can defer cleanly.
+		phase = 'classification';
 		const { classified, failed } = await classifyBatch(batch, deadline, apiKey);
 		// Every comment failing is a job failure, not an empty digest —
 		// 'complete' would mark them digested and permanently skip coverage.
@@ -782,6 +785,7 @@ export async function generateFeedbackDigest(
 		// Its request is bounded by the write reserve so the model call can
 		// never consume the headroom the persistence tx needs (codex/cubic).
 		const clusterDeadline = deadline === undefined ? undefined : deadline - WRITE_RESERVE_MS;
+		phase = 'clustering';
 		const { classified: themed, clusteringDegraded } = themePassCanMatter(classified, categories, threshold)
 			? await clusterClassifiedClaims(classified, categories, threshold, clusterDeadline, apiKey)
 			: { classified, clusteringDegraded: false };
@@ -790,9 +794,11 @@ export async function generateFeedbackDigest(
 		// Reserve write headroom, not just the deadline edge: the persistence
 		// tx is the slowest remaining phase and a kill mid-transaction would
 		// force the (charged) classifications to be repeated next run.
+		phase = 'write-reserve';
 		if (deadline !== undefined && Date.now() > deadline - WRITE_RESERVE_MS) {
 			throw new DeadlineExceededError();
 		}
+		phase = 'write';
 		const result = await withBusyRetry(() =>
 			writeDigestRun({
 				channel,
@@ -824,6 +830,11 @@ export async function generateFeedbackDigest(
 			...(historyPage ? { historyRemaining: !historyPage.complete } : {})
 		};
 	} catch (cause) {
+		const stoppedAt = Date.now();
+		console.info('feedback digest stopped:', {
+			channelId, phase, elapsedMs: stoppedAt - startedAt,
+			remainingMs: deadline === undefined ? null : deadline - stoppedAt, batchSize: batch.length
+		});
 		return digestFailureResult(cause, channel, channelId, windowStart, windowEnd, historyPage);
 	}
 }

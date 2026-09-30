@@ -249,6 +249,21 @@
 				re-authentication. Buy a bundle manually, then re-enable auto top-up below.
 			</p>
 		{/if}
+		{#if data.autoTopup?.pauseReason === 'refund'}
+			<p class="error-box" role="alert">
+				Auto top-up was turned off because a payment was refunded. You can still buy credits manually.
+				Enable auto top-up again only if you want future automatic charges.
+			</p>
+		{/if}
+		{#if data.autoTopup?.recoveryPending}
+			<p class="error-box" role="alert">
+				{#if data.autoTopup.recoveryFailed}
+					An automatic payment could not be canceled or refunded. Automatic top-up stays off. Contact support; recovery will continue to retry.
+				{:else}
+					An automatic payment is being canceled or refunded. Wait for it to finish before enabling auto top-up again.
+				{/if}
+			</p>
+		{/if}
 		{#if hasAutoTopup && !data.autoTopup?.hasCard}
 			<p class="error-box" role="alert">
 				Auto top-up is enabled but no card is saved yet — buy any bundle once and your
@@ -256,6 +271,7 @@
 			</p>
 		{/if}
 		<form method="POST" action="?/setAutoTopup" use:enhance={submitting}>
+			<input type="hidden" name="pausedAt" value={data.autoTopup?.pausedAt ?? ''} />
 			<label for="auto-topup-enabled">
 				<input id="auto-topup-enabled" type="checkbox" name="enabled" checked={hasAutoTopup} />
 				Enable automatic top-up
@@ -275,12 +291,13 @@
 				<span>credits</span>
 			</div>
 			{#if !hasAutoTopup}
+				<p class="muted">If your balance is below the threshold, enabling auto top-up may charge your saved card on the next billing check.</p>
 				<label for="auto-topup-consent" class="consent-label">
 					<input id="auto-topup-consent" type="checkbox" name="consent" />
 					{data.autoTopupConsentText}
 				</label>
 			{/if}
-			<button class="btn secondary small" type="submit" disabled={pending}>
+			<button class="btn secondary small" type="submit" disabled={pending || data.autoTopup?.recoveryPending}>
 				{hasAutoTopup ? 'Update auto top-up' : 'Enable auto top-up'}
 			</button>
 		</form>

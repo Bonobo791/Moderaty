@@ -1,4 +1,4 @@
-import { and, asc, eq, gte, isNull, lte, or } from 'drizzle-orm';
+import { and, asc, eq, gte, isNull, lte, or, sql } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
 import { organizations, stripeAutoTopupRecoveries } from '$lib/server/db/schema';
@@ -14,11 +14,13 @@ export interface TopupPayment {
 	metadata: Record<string, string> | null;
 }
 
-/** Exact metadata for new attempts; the existing 60-second correlation for legacy PIs. */
+/** Stable daily identity for new attempts; existing time correlation for legacy PIs. */
 export async function findPausedTopup(handle: LedgerHandle, orgId: string, pi: TopupPayment): Promise<Recovery | undefined> {
-	const attemptAt = pi.metadata?.auto_topup_attempt_at;
+	const attemptDay = pi.metadata?.auto_topup_attempt_day;
+	if (attemptDay && (!/^\d{4}-\d{2}-\d{2}$/.test(attemptDay) || !Number.isFinite(Date.parse(attemptDay)) || new Date(attemptDay).toISOString().slice(0, 10) !== attemptDay)) throw new Error('Auto top-up payment has an invalid attempt date');
 	const createdMs = typeof pi.created === 'number' && Number.isFinite(pi.created) && pi.created > 0 ? pi.created * 1000 : undefined;
-	const correlation = attemptAt ? eq(stripeAutoTopupRecoveries.attemptAt, attemptAt) : createdMs ? and(
+	// ponytail: one charge/day; persist individual attempt IDs if the daily cap changes.
+	const correlation = attemptDay ? sql`substr(${stripeAutoTopupRecoveries.attemptAt}, 1, 10) = ${attemptDay}` : createdMs ? and(
 		gte(stripeAutoTopupRecoveries.attemptAt, new Date(createdMs - 60_000).toISOString()),
 		lte(stripeAutoTopupRecoveries.attemptAt, new Date(createdMs + 60_000).toISOString())
 	) : undefined;
@@ -27,7 +29,11 @@ export async function findPausedTopup(handle: LedgerHandle, orgId: string, pi: T
 		or(eq(stripeAutoTopupRecoveries.paymentIntentId, pi.id), correlation)
 	)).limit(2).all();
 	if (rows.length > 1) throw new Error(`auto top-up ${pi.id} matches multiple canceled attempts`);
-	if (rows.length && !correlation && rows[0].paymentIntentId !== pi.id) throw new Error(`auto top-up ${pi.id} cannot be correlated to a canceled attempt`);
+	if (!rows.length && !correlation) {
+		const pending = await handle.select({ id: stripeAutoTopupRecoveries.id }).from(stripeAutoTopupRecoveries)
+			.where(and(eq(stripeAutoTopupRecoveries.orgId, orgId), isNull(stripeAutoTopupRecoveries.resolvedAt))).get();
+		if (pending) throw new Error(`auto top-up ${pi.id} cannot be correlated to a canceled attempt`);
+	}
 	return rows[0];
 }
 

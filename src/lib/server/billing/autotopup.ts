@@ -297,11 +297,11 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 				payment_method: defaultPmId,
 				off_session: true,
 				confirm: true,
-				metadata: { type: 'auto_topup', org_id: orgId, bundle: bundle.id, auto_topup_attempt_at: claimNowIso }
+				metadata: { type: 'auto_topup', org_id: orgId, bundle: bundle.id, auto_topup_attempt_day: claimNowIso.slice(0, 10) }
 			},
 			{ idempotencyKey }
 		);
-		const payment = { ...pi, metadata: { type: 'auto_topup', org_id: orgId, bundle: bundle.id, auto_topup_attempt_at: claimNowIso } };
+		const payment = { ...pi, metadata: { type: 'auto_topup', org_id: orgId, bundle: bundle.id, auto_topup_attempt_day: claimNowIso.slice(0, 10) } };
 		const canceled = await findPausedTopup(db, orgId, payment);
 		if (canceled) {
 			await recoverPausedTopup(canceled, payment);
@@ -455,9 +455,9 @@ export async function grantAutoTopupCredits(
 				chargeId: typeof pi.latest_charge === 'string' ? pi.latest_charge : undefined
 			});
 			// Commit claim release WITH the grant, before a refund can observe it.
-			const attemptAt = pi.metadata?.auto_topup_attempt_at;
+			const attemptDay = pi.metadata?.auto_topup_attempt_day;
 			const createdMs = pi.created ? pi.created * 1000 : undefined;
-			const correlation = attemptAt ? eq(organizations.autoTopupLastAttemptAt, attemptAt) : createdMs ? and(
+			const correlation = attemptDay ? sql`substr(${organizations.autoTopupLastAttemptAt}, 1, 10) = ${attemptDay}` : createdMs ? and(
 				gte(organizations.autoTopupLastAttemptAt, new Date(createdMs - 60_000).toISOString()),
 				sql`${organizations.autoTopupLastAttemptAt} <= ${new Date(createdMs + 60_000).toISOString()}`
 			) : undefined;

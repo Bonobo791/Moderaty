@@ -5,7 +5,7 @@
 
 import { error, fail, isHttpError, isRedirect, redirect } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
-import { and, eq, ne } from 'drizzle-orm';
+import { and, count, eq, isNull, ne, notExists, sql } from 'drizzle-orm';
 
 import { AUTO_TOPUP_DEFAULT_THRESHOLD } from '$lib/server/billing/autotopup';
 import { checkoutRejectionMessage, createCreditCheckout, createPlanCheckout, createTestCheckout, getOrCreateStripeCustomer, isTestCheckoutOperator } from '$lib/server/billing/checkout';
@@ -16,7 +16,7 @@ import { isUnmeteredPlan, listCreditTransactions, orgIsMetered, usageSummary } f
 import { isActiveSubscriptionStatus } from '$lib/server/billing/plans';
 import { db } from '$lib/server/db';
 import { resolveOpenAiKey } from '$lib/server/openaiKey';
-import { organizations } from '$lib/server/db/schema';
+import { organizations, stripeAutoTopupRecoveries } from '$lib/server/db/schema';
 import { AUTO_TOPUP_CONSENT_TEXT, LEGAL_VERSION } from '$lib/server/legal';
 import { configuredBundles } from '$lib/server/stripe/bundles';
 import { getStripe } from '$lib/server/stripe/client';
@@ -136,6 +136,8 @@ export const load: PageServerLoad = async ({ locals }) => {
 				autoTopupState: organizations.autoTopupState,
 				autoTopupFailures: organizations.autoTopupFailures,
 				autoTopupLastAttemptAt: organizations.autoTopupLastAttemptAt,
+				autoTopupPauseReason: organizations.autoTopupPauseReason,
+				autoTopupPausedAt: organizations.autoTopupPausedAt,
 				stripeDefaultPmId: organizations.stripeDefaultPmId,
 				creditsRemaining: organizations.creditsRemaining,
 				plan: organizations.plan,
@@ -164,6 +166,8 @@ export const load: PageServerLoad = async ({ locals }) => {
 			// stored-but-ignored either way.
 			org.plan === 'lifetime' ? resolveOpenAiKey(user.orgId) : Promise.resolve(undefined)
 		]);
+		const recovery = await db.select({ pending: count(), failed: sql<number>`sum(CASE WHEN ${stripeAutoTopupRecoveries.lastError} IS NOT NULL THEN 1 ELSE 0 END)` })
+			.from(stripeAutoTopupRecoveries).where(and(eq(stripeAutoTopupRecoveries.orgId, user.orgId), isNull(stripeAutoTopupRecoveries.resolvedAt))).get();
 		return {
 			maintenance: false,
 			user,
@@ -187,6 +191,10 @@ export const load: PageServerLoad = async ({ locals }) => {
 				state: org.autoTopupState ?? 'idle',
 				failures: org.autoTopupFailures ?? 0,
 				lastAttemptAt: org.autoTopupLastAttemptAt,
+				pauseReason: org.autoTopupPauseReason,
+				pausedAt: org.autoTopupPausedAt,
+				recoveryPending: (recovery?.pending ?? 0) > 0,
+				recoveryFailed: (recovery?.failed ?? 0) > 0,
 				hasCard: Boolean(org.stripeDefaultPmId),
 				card: savedCard
 			},
@@ -308,7 +316,8 @@ export const actions: Actions = {
 		const current = await db
 			.select({
 				autoTopupEnabled: organizations.autoTopupEnabled,
-				autoTopupState: organizations.autoTopupState,
+					autoTopupState: organizations.autoTopupState,
+					autoTopupPausedAt: organizations.autoTopupPausedAt,
 				plan: organizations.plan
 			})
 			.from(organizations)
@@ -326,6 +335,16 @@ export const actions: Actions = {
 			return fail(400, { error: 'You must tick the consent checkbox to enable automatic top-up.' });
 		}
 		if (enabled) {
+			if (current?.autoTopupPausedAt && form.get('pausedAt') !== current.autoTopupPausedAt) {
+				console.error(`auto top-up enable rejected for org ${user.orgId}: stale form after refund pause`);
+				return fail(409, { error: 'Your automatic top-up settings changed after a refund. Reload Usage and give fresh consent to resume.' });
+			}
+			const unresolved = db.select({ id: stripeAutoTopupRecoveries.id }).from(stripeAutoTopupRecoveries)
+				.where(and(eq(stripeAutoTopupRecoveries.orgId, user.orgId), isNull(stripeAutoTopupRecoveries.resolvedAt)));
+			if (await unresolved.get()) {
+				console.error(`auto top-up enable rejected for org ${user.orgId}: payment recovery is unresolved`);
+				return fail(409, { error: 'An automatic payment is still being canceled or refunded. Wait for it to finish before enabling auto top-up. Contact support if it needs attention.' });
+			}
 			// Consent evidence — Stripe's save-and-reuse compliance: keep a
 			// record of the written agreement. The exact checkbox sentence
 			// (rendered from AUTO_TOPUP_CONSENT_TEXT itself so the form can
@@ -349,23 +368,27 @@ export const actions: Actions = {
 			// preserve the claim — resetting it would let the sweep create a
 			// second PaymentIntent for the same shortage (coderabbit).
 			const resetClaim = !wasEnabled || current?.autoTopupState === 'disabled';
-			// The plan check above is a pre-read — an upgrade to lifetime can
-			// land between it and this write, so the update stays conditional:
-			// a 0-row result means the org went unmetered mid-submit and the
-			// enable must fail loudly, never silently arm a stale flag (review).
+			// Recheck plan, enable state, refund version, and recovery in the write:
+			// a concurrent refund or upgrade must win over this stale form.
 			const written = await db
 				.update(organizations)
 				.set({
 					autoTopupEnabled: 1,
 					autoTopupThreshold: threshold,
+					autoTopupPauseReason: null,
 					...(resetClaim ? { autoTopupState: 'idle', autoTopupFailures: 0 } : {}),
 					...evidence
 				})
-				.where(and(eq(organizations.id, user.orgId), ne(organizations.plan, 'lifetime')))
+				.where(and(eq(organizations.id, user.orgId), ne(organizations.plan, 'lifetime'),
+					current?.autoTopupEnabled == null ? isNull(organizations.autoTopupEnabled) : eq(organizations.autoTopupEnabled, current.autoTopupEnabled),
+					current?.autoTopupPausedAt == null ? isNull(organizations.autoTopupPausedAt) : eq(organizations.autoTopupPausedAt, current.autoTopupPausedAt),
+					notExists(unresolved)))
 				.returning({ id: organizations.id });
 			if (written.length !== 1) {
-				console.error(`setAutoTopup lost a plan race for org ${user.orgId}: the org went lifetime mid-submit — enable rejected`);
-				return fail(400, { error: 'Your lifetime plan includes unlimited moderated comments — auto top-up is not needed.' });
+				console.error(`setAutoTopup rejected concurrent billing changes for org ${user.orgId}`);
+				const changed = await db.select({ plan: organizations.plan }).from(organizations).where(eq(organizations.id, user.orgId)).get();
+				if (isUnmeteredPlan(changed?.plan)) return fail(400, { error: 'Your lifetime plan includes unlimited moderated comments — auto top-up is not needed.' });
+				return fail(409, { error: 'Your billing settings changed. Reload Usage before enabling automatic top-up.' });
 			}
 		} else {
 			await db

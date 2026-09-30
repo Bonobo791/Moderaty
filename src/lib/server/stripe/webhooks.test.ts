@@ -1278,6 +1278,23 @@ describe('fulfillAutoTopup', () => {
 });
 
 describe('reverseCharge / reverseDispute', () => {
+	test('a refunded subscription payment pauses top-up using its locally stored payment link', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', autoTopupEnabled: 1, autoTopupState: 'idle' });
+		await testDb().db.insert(stripeSubscriptionPeriods).values({ orgId: 'org-1', subscriptionId: 'sub_1', invoiceId: 'in_1', periodKey: 'period_1', periodStart: '2026-09-01T00:00:00.000Z', periodEnd: '2026-10-01T00:00:00.000Z', chargeId: 'ch_sub', paymentIntentId: 'pi_sub', includedCredits: 100 });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_sub', payment_intent: 'pi_sub', amount: 500, amount_refunded: 500 });
+		mocks.subscriptionsRetrieve.mockResolvedValue({ id: 'sub_1', status: 'canceled' });
+		expect(await reverseCharge('ch_sub', 'refund')).toBe(true);
+		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.autoTopupEnabled).toBe(0);
+	});
+
+	test('a partial refund in the consent second still pauses automatic charging', async () => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupConsentedAt: '2026-09-30T13:10:00.100Z' });
+		await applyLedgerDelta(db, { orgId: 'org-1', delta: 100, reason: 'purchase', refType: 'checkout_session', refId: 'cs_1', chargeId: 'ch_1' });
+		mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_1', amount: 500, amount_refunded: 100 });
+		await reverseCharge('ch_1', 'refund', undefined, '2026-09-30T13:10:00.000Z');
+		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.autoTopupEnabled).toBe(0);
+	});
+
 	test('two refunds turn auto top-up off before the emptied balance can be replenished', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', autoTopupEnabled: 1, autoTopupState: 'idle' });
 		for (const [id, credits] of [['1', 500], ['2', 100]] as const) {

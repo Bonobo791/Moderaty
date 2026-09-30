@@ -654,7 +654,10 @@ export async function reverseCharge(chargeId: string, reason: 'refund' | 'disput
 	if (reason === 'refund' && typeof charge.amount_refunded === 'number' && charge.amount_refunded > 0) {
 		const grant = await findGrantForStripe(db, { chargeId, paymentIntentId });
 		const customerId = typeof charge.customer === 'string' ? charge.customer : charge.customer?.id;
-		const org = grant ?? (customerId ? await db.select({ orgId: organizations.id }).from(organizations).where(eq(organizations.stripeCustomerId, customerId)).get() : undefined);
+		const org = grant
+			?? (customerId ? await db.select({ orgId: organizations.id }).from(organizations).where(eq(organizations.stripeCustomerId, customerId)).get() : undefined)
+			?? await db.select({ orgId: stripeSubscriptionPeriods.orgId }).from(stripeSubscriptionPeriods).where(stripeIdentifierPredicate({ chargeId, paymentIntentId }, stripeSubscriptionPeriods.paymentIntentId, stripeSubscriptionPeriods.chargeId)).get()
+			?? await db.select({ orgId: stripeLifetimeEntitlements.orgId }).from(stripeLifetimeEntitlements).where(stripeIdentifierPredicate({ chargeId, paymentIntentId }, stripeLifetimeEntitlements.paymentIntentId, stripeLifetimeEntitlements.chargeId)).get();
 		if (org) {
 			const reversed = await db.select({ id: creditTransactions.id }).from(creditTransactions).where(and(eq(creditTransactions.orgId, org.orgId), eq(creditTransactions.refType, 'refund'), eq(creditTransactions.refId, chargeId))).get();
 			if (!reversed) await pauseAutoTopupForRefund(db, org.orgId, occurredAt);

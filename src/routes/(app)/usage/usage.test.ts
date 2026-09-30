@@ -2,7 +2,7 @@ import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
-import { mercadoPagoCheckoutAttempts, organizations, stripeCheckoutAttempts, stripeLifetimeSlots } from '$lib/server/db/schema';
+import { mercadoPagoCheckoutAttempts, organizations, stripeCheckoutAttempts, stripeLifetimeSlots, stripeAutoTopupRecoveries } from '$lib/server/db/schema';
 import type { SessionUser } from '$lib/server/session';
 import { TEST_CHECKOUT_OPERATOR_EMAIL } from '$lib/server/billing/checkout';
 import { applyLedgerDelta, consumeCredit } from '$lib/server/billing/ledger';
@@ -46,7 +46,7 @@ import { render } from 'svelte/server';
 import Page from './+page.svelte';
 import { actions, load } from './+page.server';
 
-setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_checkout_attempts', 'mercado_pago_checkout_attempts', 'stripe_lifetime_entitlements', 'stripe_lifetime_slots', 'stripe_pending_reversals', 'stripe_dispute_reversals']);
+setupTestDb(['organizations', 'credit_transactions', 'stripe_events', 'stripe_checkout_attempts', 'mercado_pago_checkout_attempts', 'stripe_lifetime_entitlements', 'stripe_lifetime_slots', 'stripe_pending_reversals', 'stripe_dispute_reversals', 'stripe_auto_topup_recoveries']);
 
 const OWNER = TEST_OWNER;
 // The test checkout is gated to the operator account — TEST_OWNER's email is
@@ -117,6 +117,30 @@ describe('usage load', () => {
 			testProduct: true
 		};
 	}
+
+	test('a refund pause is visible and resuming warns about an immediate automatic purchase', async () => {
+		const pausedAt = '2026-09-30T13:10:00.000Z';
+		await seedOrg({ autoTopupEnabled: 0, autoTopupState: 'disabled', autoTopupPauseReason: 'refund', autoTopupPausedAt: pausedAt });
+		const data = await load({ locals: { user: OWNER } } as never);
+		if (!data) throw new Error('Usage load returned no page data');
+		expect(data.autoTopup).toMatchObject({ pauseReason: 'refund', pausedAt, recoveryPending: false });
+		const { body } = render(Page, { props: { data, form: null } as never });
+		expect(body).toContain('turned off because a payment was refunded');
+		expect(body).toContain('may charge your saved card on the next billing check');
+		expect(body).toContain('name="pausedAt"');
+		expect(body).not.toContain('last attempt failed');
+	});
+
+	test('unresolved payment recovery displays a generic support error without provider details', async () => {
+		await seedOrg({ autoTopupEnabled: 0, autoTopupState: 'disabled', autoTopupPauseReason: 'refund' });
+		await testDb().db.insert(stripeAutoTopupRecoveries).values({ orgId: 'org-1', attemptAt: new Date().toISOString(), lastError: 'refund_or_cancellation_failed', paymentIntentId: 'pi_private' });
+		const data = await load({ locals: { user: OWNER } } as never);
+		if (!data) throw new Error('Usage load returned no page data');
+		expect(data.autoTopup).toMatchObject({ recoveryPending: true, recoveryFailed: true });
+		const { body } = render(Page, { props: { data, form: null } as never });
+		expect(body).toContain('Contact support');
+		expect(body).not.toContain('pi_private');
+	});
 
 	test('a database failure mid-load degrades to the maintenance payload and logs loudly', async () => {
 		// The layout renders the maintenance overlay for this shape — the page
@@ -715,6 +739,46 @@ describe('usage buyTest action', () => {
 });
 
 describe('usage setAutoTopup action', () => {
+	test('a refund between reading settings and writing enable wins the concurrent update', async () => {
+		await seedOrg({ autoTopupEnabled: 1, autoTopupState: 'idle' });
+		const client = testDb().client;
+		const execute = client.execute.bind(client);
+		client.execute = (async (stmt: unknown) => {
+			const text = String((stmt as { sql?: string }).sql ?? stmt);
+			if (/update "organizations" set/i.test(text) && text.includes('auto_topup_enabled')) {
+				await execute("update organizations set auto_topup_enabled = 0, auto_topup_state = 'disabled', auto_topup_pause_reason = 'refund', auto_topup_paused_at = '2026-09-30T13:10:00.000Z' where id = 'org-1'");
+			}
+			return execute(stmt as never);
+		}) as never;
+		try {
+			expect(await setAutoTopup({ enabled: 'on', threshold: '100' })).toMatchObject({ status: 409 });
+		} finally {
+			client.execute = execute;
+		}
+		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.autoTopupEnabled).toBe(0);
+	});
+
+	test('a stale enable form cannot override a refund pause even with old consent checked', async () => {
+		await seedOrg({ autoTopupEnabled: 0, autoTopupState: 'disabled', autoTopupPauseReason: 'refund', autoTopupPausedAt: '2026-09-30T13:10:00.000Z' });
+		const result = await setAutoTopup({ enabled: 'on', threshold: '100', consent: 'on' });
+		expect(result).toMatchObject({ status: 409 });
+		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.autoTopupEnabled).toBe(0);
+	});
+
+	test('an owner can resume a resolved refund pause with newly checked consent', async () => {
+		const pausedAt = '2026-09-30T13:10:00.000Z';
+		await seedOrg({ autoTopupEnabled: 0, autoTopupState: 'disabled', autoTopupPauseReason: 'refund', autoTopupPausedAt: pausedAt });
+		expect(await setAutoTopup({ enabled: 'on', threshold: '100', consent: 'on', pausedAt })).toEqual({ ok: true });
+		expect(await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get()).toMatchObject({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupPauseReason: null, autoTopupPausedAt: pausedAt, autoTopupConsentedBy: OWNER.id });
+	});
+
+	test('fresh consent cannot resume charging while an overlapping payment is unresolved', async () => {
+		await seedOrg({ autoTopupEnabled: 0, autoTopupState: 'disabled' });
+		await testDb().db.insert(stripeAutoTopupRecoveries).values({ orgId: 'org-1', attemptAt: new Date().toISOString() });
+		expect(await setAutoTopup({ enabled: 'on', threshold: '100', consent: 'on' })).toMatchObject({ status: 409 });
+		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.autoTopupEnabled).toBe(0);
+	});
+
 	test('enabling requires the consent checkbox and saves threshold + state', async () => {
 		await seedOrg();
 

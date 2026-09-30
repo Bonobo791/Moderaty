@@ -188,7 +188,7 @@ export async function pauseAutoTopupForRefund(handle: LedgerHandle, orgId: strin
 			.set({ autoTopupEnabled: 0, autoTopupState: 'disabled', autoTopupPauseReason: 'refund', autoTopupPausedAt: new Date().toISOString() })
 			.where(and(eq(organizations.id, orgId),
 				// A delayed replay must respect consent explicitly given AFTER this refund.
-				occurredAt ? or(isNull(organizations.autoTopupConsentedAt), sql`${organizations.autoTopupConsentedAt} <= ${occurredAt}`) : undefined,
+				occurredAt ? or(isNull(organizations.autoTopupConsentedAt), sql`strftime('%s', ${organizations.autoTopupConsentedAt}) <= strftime('%s', ${occurredAt})`) : undefined,
 				or(ne(organizations.autoTopupPauseReason, 'refund'), isNull(organizations.autoTopupPauseReason), eq(organizations.autoTopupEnabled, 1))))
 			.returning({ id: organizations.id });
 		if (!paused.length) return;

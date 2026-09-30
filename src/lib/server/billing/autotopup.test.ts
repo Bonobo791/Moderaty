@@ -84,6 +84,28 @@ test('auto-top-up trigger documentation uses the effective balance', () => {
 });
 
 describe('maybeTriggerAutoTopUp', () => {
+	test('infrastructure retries reuse exactly the same Stripe parameters with the same idempotency key', async () => {
+		await seedOrg({ creditsRemaining: 0 });
+		vi.useFakeTimers({ toFake: ['Date'] });
+		try {
+			mocks.paymentIntentsCreate.mockRejectedValueOnce({ type: 'api_error', code: 'api_error' }).mockResolvedValueOnce({ id: 'pi_retry' });
+			expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+			vi.setSystemTime(new Date(Date.now() + 60_000));
+			expect(await maybeTriggerAutoTopUp('org-1')).toBe(true);
+			expect(mocks.paymentIntentsCreate.mock.calls[1]).toEqual(mocks.paymentIntentsCreate.mock.calls[0]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test('missing payment correlation never grants credits while a canceled attempt is unresolved', async () => {
+		await seedOrg({ creditsRemaining: 0 });
+		await maybeTriggerAutoTopUp('org-1');
+		await pauseAutoTopupForRefund(testDb().db, 'org-1');
+		await expect(grantAutoTopupCredits('org-1', { id: 'pi_missing_time', status: 'succeeded', metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_100' } })).rejects.toThrow(/cannot be correlated/);
+		expect(await getCredits('org-1')).toBe(0);
+	});
+
 	test('a delayed first success for an older payment preserves a newer in-flight claim', async () => {
 		const now = new Date().toISOString();
 		await seedOrg({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: now });

@@ -308,6 +308,13 @@ test('a chargeback whose credits were never granted still disables auto top-up',
 	expect((await attemptRow())?.status).toBe('disputed');
 });
 
+test('a duplicate ungranted refund respects the owner explicitly resuming afterward', async () => {
+	await processMercadoPagoPayment({ ...payment, status: 'refunded', refundedAmount: 5 });
+	await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupPauseReason: null, autoTopupConsentedAt: new Date().toISOString() }).where(eq(organizations.id, 'org-1'));
+	await processMercadoPagoPayment({ ...payment, status: 'refunded', refundedAmount: 5 });
+	expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.autoTopupEnabled).toBe(1);
+});
+
 test('a refund whose credits were never granted still pauses auto top-up', async () => {
 	await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'active' }).where(eq(organizations.id, 'org-1'));
 

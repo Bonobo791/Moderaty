@@ -215,7 +215,12 @@ async function reverseMercadoPagoPayment(payment: MercadoPagoPayment, reason: 'r
 		// where skipping it would leave the org eligible after a chargeback
 		// (codex, round 3).
 		const disableAutoTopup = async () => {
-			if (reason !== 'dispute') return;
+			if (reason === 'refund') {
+				// Read in this transaction: a duplicate refund must respect a later resume.
+				const current = await tx.select({ status: mercadoPagoCheckoutAttempts.status }).from(mercadoPagoCheckoutAttempts).where(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId)).get();
+				if (current?.status !== 'refunded') await pauseAutoTopupForRefund(tx, orgId);
+				return;
+			}
 			await tx.update(organizations).set({ autoTopupEnabled: 0, autoTopupState: 'disabled' }).where(eq(organizations.id, orgId));
 		};
 		// A payment can be BOTH charged back and refunded — the reversal is keyed
@@ -243,7 +248,6 @@ async function reverseMercadoPagoPayment(payment: MercadoPagoPayment, reason: 'r
 		// dispute side effect still applies: a chargeback with no grant is a
 		// chargeback all the same (codex/cubic, round 4).
 		if (!grant) {
-			if (reason === 'refund') await pauseAutoTopupForRefund(tx, orgId);
 			await disableAutoTopup();
 			await markTerminal();
 			return false;

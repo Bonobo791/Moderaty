@@ -5,13 +5,14 @@ import { randomBytes } from 'node:crypto';
 import { env } from '$env/dynamic/private';
 import { createChannelState } from '$lib/server/channelConnect';
 import { readPendingStates, storePendingStates } from '$lib/server/oauthState';
+import type { Cookies } from '@sveltejs/kit';
 import type { SessionUser } from '$lib/server/session';
 
 export function GET({
 	cookies,
 	locals
 }: {
-	cookies: import('@sveltejs/kit').Cookies;
+	cookies: Cookies;
 	locals: { user: SessionUser | null };
 }) {
 	if (!env.GOOGLE_CLIENT_ID) throw error(500, 'GOOGLE_CLIENT_ID is not configured');

@@ -1,14 +1,25 @@
 import { and, eq } from 'drizzle-orm';
 import { afterEach, expect, test, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ customersDel: vi.fn(), customersUpdate: vi.fn(), subscriptionsList: vi.fn().mockResolvedValue({ data: [], has_more: false }), subscriptionsCancel: vi.fn().mockResolvedValue({}) }));
+const mocks = vi.hoisted(() => ({
+	customersDel: vi.fn(),
+	customersUpdate: vi.fn(),
+	subscriptionsList: vi.fn().mockResolvedValue({ data: [], has_more: false }),
+	subscriptionsCancel: vi.fn().mockResolvedValue({}),
+	revokeGoogleToken: vi.fn()
+}));
 
 vi.mock('$lib/server/stripe/client', () => ({
 	getStripe: () => ({ customers: { del: mocks.customersDel, update: mocks.customersUpdate }, subscriptions: { list: mocks.subscriptionsList, cancel: mocks.subscriptionsCancel } })
 }));
 
+vi.mock('./google', () => ({ revokeGoogleToken: mocks.revokeGoogleToken }));
+
+vi.mock('$env/dynamic/private', () => ({ env: { ENCRYPTION_KEY: 'deletion-test-key' } }));
+
+import { encrypt } from './crypto';
 import { DAY_MS, seedConsent, seedUser as seedBareUser, setupTestDb, testDb } from './testdb';
-import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, stripeLifetimeEntitlements, stripeLifetimeSlots, users } from './db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, googleRevocationOutbox, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, stripeLifetimeEntitlements, stripeLifetimeSlots, stripeScrubOutbox, users } from './db/schema';
 import {
 	AUDIT_HANDLE_RETENTION_MS,
 	CONSENT_EMAIL_RETENTION_MS,
@@ -17,14 +28,17 @@ import {
 	consentEmailCutoffIso,
 	deleteChannelRecords,
 	deleteUserRecords,
+	retryGoogleRevocations,
 	retryStripeCustomerDeletions,
+	retryStripeCustomerScrubs,
+	revokeChannelGrants,
 	nullExpiredAuditLogHandles,
 	nullExpiredConsentEmails,
 	nullExpiredHandles,
 	nullExpiredModerationActionHandles
 } from './deletion';
 
-setupTestDb(['moderation_actions', 'comments', 'audit_log', 'channel_allowed_handles', 'rules', 'channels', 'sessions', 'consents', 'invites', 'memberships', 'organizations', 'users', 'credit_transactions', 'stripe_deletion_outbox', 'stripe_lifetime_slots', 'stripe_lifetime_entitlements', 'feedback_digests', 'feedback_findings', 'finding_evidence', 'feedback_history_comments']);
+setupTestDb(['moderation_actions', 'comments', 'audit_log', 'channel_allowed_handles', 'rules', 'channels', 'sessions', 'consents', 'invites', 'memberships', 'organizations', 'users', 'credit_transactions', 'stripe_deletion_outbox', 'google_revocation_outbox', 'stripe_scrub_outbox', 'stripe_lifetime_slots', 'stripe_lifetime_entitlements', 'feedback_digests', 'feedback_findings', 'finding_evidence', 'feedback_history_comments']);
 
 afterEach(() => {
 	vi.clearAllMocks();
@@ -255,7 +269,7 @@ async function expectAllTablesEmpty() {
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		mocks.customersDel.mockRejectedValue(new Error('stripe is down'));
 
-		await expect(deleteUserRecords(userId)).resolves.toBeUndefined();
+		await expect(deleteUserRecords(userId)).resolves.toEqual([expect.objectContaining({ id: 'UC-gone', refreshTokenEnc: 'enc' })]);
 		// The deletion completed: the tombstone is written even though the
 		// Stripe erasure failed (privacy is not held hostage by Stripe uptime).
 		expect(await userRow(userId)).toMatchObject({ googleSub: `deleted:${userId}` });
@@ -429,6 +443,187 @@ test('deleteUserRecords anonymizes the Stripe customer of a surviving team org w
 	expect(mocks.customersDel).not.toHaveBeenCalledWith('cus_shared');
 });
 
+test('deleteUserRecords caps every post-commit Stripe request to the remaining deadline', async () => {
+	// coderabbit: the shared client retries each request twice — an unbounded
+	// surviving-org update or customer deletion can outlive the cron budget
+	// and keep the caller's grant revocations from ever running.
+	const userId = await seedUser('gone');
+	const coMember = await seedBareUser('staying');
+	await testDb().db.update(organizations).set({ stripeCustomerId: 'cus_gone' }).where(eq(organizations.id, 'org-gone'));
+	await testDb().db.insert(organizations).values({ id: 'org-shared', name: 'Shared', stripeCustomerId: 'cus_shared' });
+	await testDb().db.insert(memberships).values({ userId, orgId: 'org-shared', role: 'owner' });
+	await testDb().db.insert(memberships).values({ userId: coMember, orgId: 'org-shared', role: 'member' });
+	mocks.customersUpdate.mockClear();
+	mocks.customersDel.mockClear();
+	mocks.customersUpdate.mockResolvedValue({ id: 'cus_shared' });
+	mocks.customersDel.mockResolvedValue({ id: 'cus_gone', deleted: true });
+	mocks.subscriptionsList.mockResolvedValue({ data: [], has_more: false });
+
+	const now = Date.now();
+	const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+	try {
+		await deleteUserRecords(userId, { deadline: now + 10_000 });
+	} finally {
+		nowSpy.mockRestore();
+	}
+	expect(mocks.customersUpdate).toHaveBeenCalledWith('cus_shared', { email: '' }, { timeout: 10_000, maxNetworkRetries: 0 });
+	expect(mocks.customersDel).toHaveBeenCalledWith('cus_gone', undefined, { timeout: 10_000, maxNetworkRetries: 0 });
+});
+
+test('a spent deadline defers post-commit Stripe work loudly', async () => {
+	// coderabbit: dissolved-customer erasure survives in the outbox, but the
+	// surviving-org anonymization has no durable retry — the deferral must
+	// name what was skipped rather than silently drop the PII scrub.
+	const userId = await seedUser('gone');
+	const coMember = await seedBareUser('staying');
+	await testDb().db.update(organizations).set({ stripeCustomerId: 'cus_gone' }).where(eq(organizations.id, 'org-gone'));
+	await testDb().db.insert(organizations).values({ id: 'org-shared', name: 'Shared', stripeCustomerId: 'cus_shared' });
+	await testDb().db.insert(memberships).values({ userId, orgId: 'org-shared', role: 'owner' });
+	await testDb().db.insert(memberships).values({ userId: coMember, orgId: 'org-shared', role: 'member' });
+	mocks.customersUpdate.mockClear();
+	mocks.customersDel.mockClear();
+
+	const now = Date.now();
+	const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		await deleteUserRecords(userId, { deadline: now }); // already spent
+		expect(mocks.customersUpdate).not.toHaveBeenCalled();
+		expect(mocks.customersDel).not.toHaveBeenCalled();
+		expect(await testDb().db.select().from(stripeDeletionOutbox).all()).toHaveLength(1);
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('anonymization stays queued in the scrub outbox for 1 org(s): org-shared'));
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('1 Stripe customer erasure(s) stay queued'));
+	} finally {
+		errorSpy.mockRestore();
+		nowSpy.mockRestore();
+	}
+});
+
+test('a spent deadline leaves the PII scrub durable — the cron retry scrubs it later', async () => {
+	// codex: the surviving-org anonymization used to be post-commit only, so
+	// a deadline-killed drain dropped the scrub forever — the deleted user's
+	// e-mail stayed at Stripe indefinitely. The obligation must persist.
+	const userId = await seedUser('gone');
+	const coMember = await seedBareUser('staying');
+	await testDb().db.insert(organizations).values({ id: 'org-shared', name: 'Shared', stripeCustomerId: 'cus_shared' });
+	await testDb().db.insert(memberships).values({ userId, orgId: 'org-shared', role: 'owner' });
+	await testDb().db.insert(memberships).values({ userId: coMember, orgId: 'org-shared', role: 'member' });
+	mocks.customersUpdate.mockClear();
+
+	const now = Date.now();
+	const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		await deleteUserRecords(userId, { deadline: now }); // already spent
+		expect(mocks.customersUpdate).not.toHaveBeenCalled();
+		// The obligation survived the deferred drain.
+		expect(await testDb().db.select().from(stripeScrubOutbox).all()).toEqual([
+			expect.objectContaining({ customerId: 'cus_shared', orgId: 'org-shared' })
+		]);
+	} finally {
+		errorSpy.mockRestore();
+		nowSpy.mockRestore();
+	}
+
+	// The cron retry drains it — the row is deleted only once Stripe confirms.
+	mocks.customersUpdate.mockResolvedValue({ id: 'cus_shared' });
+	expect(await retryStripeCustomerScrubs(10)).toBe(1);
+	expect(mocks.customersUpdate).toHaveBeenCalledWith('cus_shared', { email: '' });
+	expect(await testDb().db.select().from(stripeScrubOutbox).all()).toHaveLength(0);
+});
+
+test('a failed anonymization stays queued for the cron retry', async () => {
+	// The post-commit Stripe write failing must not lose the scrub — the
+	// outbox row written in the erase transaction is the durable obligation.
+	const userId = await seedUser('departing');
+	const coMember = await seedBareUser('staying');
+	await testDb().db.insert(organizations).values({ id: 'org-shared', name: 'Shared', stripeCustomerId: 'cus_shared' });
+	await testDb().db.insert(memberships).values({ userId, orgId: 'org-shared', role: 'owner' });
+	await testDb().db.insert(memberships).values({ userId: coMember, orgId: 'org-shared', role: 'member' });
+	mocks.customersUpdate.mockClear();
+	mocks.customersUpdate.mockRejectedValue(new Error('stripe is down'));
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		await deleteUserRecords(userId);
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('queued in the scrub outbox for cron retry'));
+		expect(await testDb().db.select().from(stripeScrubOutbox).all()).toEqual([
+			expect.objectContaining({ customerId: 'cus_shared', orgId: 'org-shared' })
+		]);
+	} finally {
+		errorSpy.mockRestore();
+	}
+});
+
+test('a confirmed scrub deletes its outbox row — the drain is idempotent on retry', async () => {
+	// Codex contract: the row is removed only after Stripe confirms, so a
+	// successful post-commit scrub leaves nothing for the cron to replay.
+	const userId = await seedUser('departing');
+	const coMember = await seedBareUser('staying');
+	await testDb().db.insert(organizations).values({ id: 'org-shared', name: 'Shared', stripeCustomerId: 'cus_shared' });
+	await testDb().db.insert(memberships).values({ userId, orgId: 'org-shared', role: 'owner' });
+	await testDb().db.insert(memberships).values({ userId: coMember, orgId: 'org-shared', role: 'member' });
+	mocks.customersUpdate.mockClear();
+	mocks.customersUpdate.mockResolvedValue({ id: 'cus_shared' });
+
+	await deleteUserRecords(userId);
+
+	expect(mocks.customersUpdate).toHaveBeenCalledWith('cus_shared', { email: '' });
+	expect(await testDb().db.select().from(stripeScrubOutbox).all()).toHaveLength(0);
+	// And nothing remains for the retry sweep to re-scrub.
+	mocks.customersUpdate.mockClear();
+	expect(await retryStripeCustomerScrubs(10)).toBe(0);
+	expect(mocks.customersUpdate).not.toHaveBeenCalled();
+});
+
+test('the deadline deferral reports the erasures still queued, not the total', async () => {
+	// coderabbit: two dissolved customers — the first erasure lands, then the
+	// clock passes the deadline; the loud deferral must count the REST.
+	const userId = await seedUser('gone');
+	await testDb().db.update(organizations).set({ stripeCustomerId: 'cus_gone' }).where(eq(organizations.id, 'org-gone'));
+	await testDb().db.insert(organizations).values({ id: 'org-gone2', name: 'G2', stripeCustomerId: 'cus_gone2' });
+	await testDb().db.insert(memberships).values({ userId, orgId: 'org-gone2', role: 'owner' });
+	mocks.customersDel.mockClear();
+	mocks.subscriptionsList.mockResolvedValue({ data: [], has_more: false });
+	const now = Date.now();
+	const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+	// The first deletion succeeds, then the clock passes the deadline.
+	mocks.customersDel.mockImplementation(async (id: string) => {
+		nowSpy.mockReturnValue(now + 60_000);
+		return { id, deleted: true };
+	});
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		await deleteUserRecords(userId, { deadline: now + 10_000 });
+		expect(await testDb().db.select().from(stripeDeletionOutbox).all()).toHaveLength(1);
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('1 Stripe customer erasure(s) stay queued'));
+	} finally {
+		errorSpy.mockRestore();
+		nowSpy.mockRestore();
+	}
+});
+
+test('a post-commit Stripe failure cannot strand the erased channel grants', async () => {
+	// coderabbit: the surviving-org customer lookup used to run AFTER the
+	// erase committed — a failure there rejected the call before the caller
+	// received the captured grants, so live Google tokens were never
+	// revoked. The lookup now happens inside the transaction; post-commit
+	// work is Stripe calls only, each failure isolated.
+	const userId = await seedUser('departing');
+	const coMember = await seedBareUser('staying');
+	await testDb().db.insert(organizations).values({ id: 'org-shared', name: 'Shared', stripeCustomerId: 'cus_shared' });
+	await testDb().db.insert(memberships).values({ userId, orgId: 'org-shared', role: 'owner' });
+	await testDb().db.insert(memberships).values({ userId: coMember, orgId: 'org-shared', role: 'member' });
+	mocks.customersUpdate.mockRejectedValue(new Error('stripe is down'));
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		const grants = await deleteUserRecords(userId);
+		expect(grants).toEqual([expect.objectContaining({ id: `UC-${userId}`, refreshTokenEnc: 'enc' })]);
+		expect((await userRow(userId))!.googleSub).toBe(`deleted:${userId}`);
+	} finally {
+		errorSpy.mockRestore();
+	}
+});
+
 test('deleteUserRecords scrubs the Stripe email even when the departing user was NOT the last owner (no promotion)', async () => {
 	// The checkout flow lets ANY owner create the team's Stripe customer —
 	// "last owner leaves" (promotion) is an unreliable proxy for whose PII the
@@ -534,7 +729,16 @@ test('deleteUserRecords keeps team channels the user merely connected, wiping th
 	await seedChannel('UC-team', userId, 'org-team', 'team channel');
 	await seedModerationData('UC-team', 'team');
 
-	await deleteUserRecords(userId);
+	const grants = await deleteUserRecords(userId);
+
+	// Both erased grants are handed back for post-commit revocation: the
+	// dissolved personal org's channel AND the connected team channel about
+	// to be wiped (codeant: the capture happens inside the transaction, so a
+	// channel connected concurrently can never be wiped un-revoked).
+	expect(grants.sort((a, b) => a.id.localeCompare(b.id))).toEqual([
+		expect.objectContaining({ id: 'UC-gone', refreshTokenEnc: 'enc' }),
+		expect.objectContaining({ id: 'UC-team', refreshTokenEnc: 'enc' })
+	]);
 
 	// The team channel survives, detached: connector nulled, token wiped with
 	// the exact sentinel so cron fails loudly instead of silently moderating
@@ -1156,4 +1360,139 @@ test('nullExpiredHandles sweeps both handle-bearing tables and reports each coun
 	});
 	const actions = await testDb().db.select().from(moderationActions).all();
 	expect(actions.every((row) => row.authorHandle === null)).toBe(true);
+});
+
+test('the erase persists each grant revocation obligation in the outbox before the channel dies', async () => {
+	// codex: the ciphertext is wiped by the erase, so without a durable row a
+	// post-commit crash (or a deadline-killed drain) orphans live Google
+	// grants forever — the obligation must land inside the transaction.
+	const userId = await seedUser('gone');
+
+	const grants = await deleteUserRecords(userId);
+
+	const rows = await testDb().db.select().from(googleRevocationOutbox).all();
+	expect(rows).toHaveLength(1);
+	expect(rows[0]).toMatchObject({ channelId: 'UC-gone', refreshTokenEnc: 'enc', attempts: 0, lastAttemptAt: null });
+	// The returned grant carries its obligation row so the post-commit drain
+	// closes exactly it — never another erasure's row for the same channel.
+	expect(grants).toEqual([expect.objectContaining({ id: 'UC-gone', outboxId: rows[0].id })]);
+});
+
+test('revokeChannelGrants clears the outbox row once Google confirms', async () => {
+	const userId = await seedUser('gone');
+	await testDb().db.update(channels).set({ refreshTokenEnc: encrypt('grant-token') }).where(eq(channels.id, 'UC-gone'));
+	const grants = await deleteUserRecords(userId);
+	mocks.revokeGoogleToken.mockResolvedValue(undefined);
+
+	await revokeChannelGrants(grants, 'account deletion');
+
+	expect(mocks.revokeGoogleToken).toHaveBeenCalledWith('grant-token', expect.stringContaining('UC-gone'), undefined);
+	expect(await testDb().db.select().from(googleRevocationOutbox).all()).toEqual([]);
+});
+
+test('a failed revocation keeps the obligation and records the attempt for backoff', async () => {
+	const userId = await seedUser('gone');
+	await testDb().db.update(channels).set({ refreshTokenEnc: encrypt('grant-token') }).where(eq(channels.id, 'UC-gone'));
+	const grants = await deleteUserRecords(userId);
+	mocks.revokeGoogleToken.mockRejectedValue(new Error('google is down'));
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		await revokeChannelGrants(grants, 'account deletion');
+
+		const row = (await testDb().db.select().from(googleRevocationOutbox).all())[0];
+		expect(row).toMatchObject({ channelId: 'UC-gone', attempts: 1 });
+		expect(row.lastAttemptAt).not.toBeNull();
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('token revocation failed'), 'UC-gone', expect.anything());
+	} finally {
+		errorSpy.mockRestore();
+	}
+});
+
+test('a spent deadline defers remaining revocations to the outbox — never a silent orphan', async () => {
+	// codex: the drain used to run unbounded — a function killed mid-loop
+	// left live grants with wiped ciphertexts and no way to retry. With the
+	// obligation durable, a spent budget must stop loudly and leave the
+	// rows queued for `retryGoogleRevocations`.
+	const userId = await seedUser('gone');
+	await testDb().db.insert(channels).values({ id: 'UC-gone-2', userId, orgId: 'org-gone', title: 'second', refreshTokenEnc: encrypt('tok-2') });
+	const grants = await deleteUserRecords(userId);
+	expect(grants).toHaveLength(2);
+	mocks.revokeGoogleToken.mockResolvedValue(undefined);
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		await revokeChannelGrants(grants, 'zero-credit deletion', Date.now() - 1000); // already spent
+
+		expect(mocks.revokeGoogleToken).not.toHaveBeenCalled();
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('2 grant revocation(s) stay queued'));
+		expect(await testDb().db.select().from(googleRevocationOutbox).all()).toHaveLength(2);
+	} finally {
+		errorSpy.mockRestore();
+	}
+});
+
+test('retryGoogleRevocations drains due rows and leaves backed-off rows for later', async () => {
+	await testDb().db.insert(googleRevocationOutbox).values([
+		{ channelId: 'UC-a', refreshTokenEnc: encrypt('tok-a') },
+		{ channelId: 'UC-warm', refreshTokenEnc: encrypt('tok-warm'), attempts: 1, lastAttemptAt: new Date(Date.now() - 60_000).toISOString() }
+	]);
+	mocks.revokeGoogleToken.mockResolvedValue(undefined);
+
+	const revoked = await retryGoogleRevocations(10);
+
+	expect(revoked).toBe(1);
+	expect(mocks.revokeGoogleToken).toHaveBeenCalledWith('tok-a', expect.any(String), undefined);
+	expect(mocks.revokeGoogleToken).not.toHaveBeenCalledWith('tok-warm', expect.any(String), undefined);
+	expect((await testDb().db.select().from(googleRevocationOutbox).all()).map((r) => r.channelId)).toEqual(['UC-warm']);
+});
+
+test('retryGoogleRevocations re-marks a failed row and honors the shared deadline', async () => {
+	await testDb().db.insert(googleRevocationOutbox).values([
+		{ channelId: 'UC-fail', refreshTokenEnc: encrypt('tok-fail') },
+		{ channelId: 'UC-next', refreshTokenEnc: encrypt('tok-next') }
+	]);
+	mocks.revokeGoogleToken.mockRejectedValue(new Error('google is down'));
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		expect(await retryGoogleRevocations(10)).toBe(0);
+		const rows = await testDb().db.select().from(googleRevocationOutbox).all();
+		expect(rows).toHaveLength(2);
+		expect(rows[0]).toMatchObject({ attempts: 1 });
+		expect(rows[0].lastAttemptAt).not.toBeNull();
+
+		// A spent budget never starts a revocation — the due row stays queued.
+		mocks.revokeGoogleToken.mockClear();
+		await testDb().db.insert(googleRevocationOutbox).values({ channelId: 'UC-due', refreshTokenEnc: encrypt('tok-due') });
+		expect(await retryGoogleRevocations(10, Date.now() - 1)).toBe(0);
+		expect(mocks.revokeGoogleToken).not.toHaveBeenCalled();
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('shared deadline expired'));
+	} finally {
+		errorSpy.mockRestore();
+	}
+});
+
+test('a bookkeeping failure mid-drain does not strand the rest of the outbox', async () => {
+	// cubic: markRevocationAttempt hitting a DB hiccup used to escape the
+	// catch and abort the whole sweep, stranding every later row. Each
+	// obligation is durable — the drain must continue and log loudly.
+	await testDb().db.insert(googleRevocationOutbox).values([
+		{ channelId: 'UC-fail', refreshTokenEnc: encrypt('tok-fail') },
+		{ channelId: 'UC-next', refreshTokenEnc: encrypt('tok-next') }
+	]);
+	mocks.revokeGoogleToken.mockRejectedValue(new Error('google is down'));
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	// Break only the bookkeeping write: SELECT still reads the batch, DELETE
+	// still clears successful rows — UPDATEs (markRevocationAttempt) abort.
+	await testDb().client.execute(
+		`CREATE TRIGGER break_revocation_mark BEFORE UPDATE ON google_revocation_outbox BEGIN SELECT RAISE(ABORT, 'bookkeeping broken'); END`
+	);
+	try {
+		await retryGoogleRevocations(10);
+
+		expect(mocks.revokeGoogleToken).toHaveBeenCalledWith('tok-fail', expect.any(String), undefined);
+		expect(mocks.revokeGoogleToken).toHaveBeenCalledWith('tok-next', expect.any(String), undefined);
+		expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('could not record google revocation retry attempt'), 'UC-fail', expect.anything());
+	} finally {
+		await testDb().client.execute('DROP TRIGGER break_revocation_mark');
+		errorSpy.mockRestore();
+	}
 });

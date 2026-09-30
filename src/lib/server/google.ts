@@ -5,6 +5,8 @@ import { error } from '@sveltejs/kit';
 
 import { env } from '$env/dynamic/private';
 
+import { assertBeforeDeadline } from '$lib/server/http';
+
 export interface GoogleTokens {
 	accessToken: string;
 	refreshToken?: string;
@@ -25,14 +27,23 @@ export interface GoogleTokens {
  * @param body - The form parameters to POST.
  * @param logPrefix - Server-log prefix identifying the flow.
  * @param makeError - Builds the error thrown on any failure.
+ * @param deadline - Optional shared run budget (ms epoch): the fetch timeout
+ *   tightens to the remaining budget so a revocation drain can never outlive
+ *   the cron window (codex). Callers check the budget BETWEEN items; the
+ *   cap here keeps a single call from overshooting it.
  * @returns The raw response text of the OK response.
  */
 async function postGoogleForm(
 	url: 'https://oauth2.googleapis.com/token' | 'https://oauth2.googleapis.com/revoke',
 	body: URLSearchParams,
 	logPrefix: string,
-	makeError: () => Error
+	makeError: () => Error,
+	deadline?: number
 ): Promise<string> {
+	// A spent shared budget must not fire a request at all — clamping to 1ms
+	// would still call Google (and could outlive the caller's window). Throw
+	// before fetch so the caller's DeadlineExceededError path stays honest.
+	assertBeforeDeadline(deadline);
 	let res: Response;
 	let text: string;
 	try {
@@ -40,7 +51,7 @@ async function postGoogleForm(
 			method: 'POST',
 			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
 			body,
-			signal: AbortSignal.timeout(10_000)
+			signal: AbortSignal.timeout(deadline === undefined ? 10_000 : Math.min(10_000, Math.max(1, deadline - Date.now())))
 		});
 		text = await res.text();
 	} catch (e) {
@@ -137,12 +148,14 @@ export async function exchangeGoogleCode(
  *
  * @param token - The refresh (or access) token to revoke.
  * @param logPrefix - Server-log prefix identifying the context (e.g. 'account deletion channel UC...').
+ * @param deadline - Optional shared run budget (ms epoch) bounding the request.
  */
-export async function revokeGoogleToken(token: string, logPrefix: string): Promise<void> {
+export async function revokeGoogleToken(token: string, logPrefix: string, deadline?: number): Promise<void> {
 	await postGoogleForm(
 		'https://oauth2.googleapis.com/revoke',
 		new URLSearchParams({ token }),
 		`${logPrefix} revocation`,
-		() => new Error('Google token revocation failed')
+		() => new Error('Google token revocation failed'),
+		deadline
 	);
 }

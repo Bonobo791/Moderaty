@@ -8,6 +8,6 @@ export function parseHistoryWindow(value: string | null, allowAll = false): Hist
 	return Number(value) as (typeof HISTORY_MONTH_PRESETS)[number];
 }
 
-export function historyWindowBoundary(window: HistoryWindow, now = Date.now()): string {
-	return window === 'all' ? '1970-01-01T00:00:00.000Z' : new Date(now - window * 30 * 24 * 60 * 60 * 1000).toISOString();
+export function historyWindowBoundary(window: HistoryWindow, now?: number): string {
+	return window === 'all' ? '1970-01-01T00:00:00.000Z' : new Date((now ?? Date.now()) - window * 30 * 24 * 60 * 60 * 1000).toISOString();
 }

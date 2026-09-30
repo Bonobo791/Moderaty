@@ -5,7 +5,7 @@ const YT = 'https://www.googleapis.com/youtube/v3';
 
 /**
  * YouTube caps comma-separated `id` list parameters at 50 per request
- * (videos.list, comments.setModerationStatus, comments.list). Every batching
+ * (videos.list, comments.setModerationStatus). Every batching
  * loop that talks to those endpoints must share this bound.
  */
 export const YOUTUBE_ID_BATCH_SIZE = 50;
@@ -35,6 +35,16 @@ export interface CommentPage {
 }
 
 export type CommentModerationStatus = 'heldForReview' | 'rejected' | 'published' | 'likelySpam';
+
+export class CommentNotFoundError extends Error {
+	commentIds: string[];
+
+	constructor(commentIds: string[]) {
+		super(`comments not found on YouTube: ${commentIds.join(', ')}`);
+		this.name = 'CommentNotFoundError';
+		this.commentIds = [...commentIds];
+	}
+}
 
 function object(value: unknown, context: string): JsonObject {
 	if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -320,40 +330,12 @@ export async function setModerationStatus(
 			{ method: 'POST' },
 			deadline
 		);
+		if (res.status === 404) throw new CommentNotFoundError(batch);
 		if (!res.ok) {
 			const body = await res.text();
 			throw new Error(`setModerationStatus failed: ${res.status} ${body}`);
 		}
 	}
-}
-
-/**
- * Returns a comment's current moderation status, or null when it no longer exists.
- *
- * @param id - The YouTube comment ID.
- * @param accessToken - The OAuth access token for the YouTube API.
- * @param deadline - Optional request deadline.
- */
-export async function getCommentModerationStatus(
-	id: string,
-	accessToken: string,
-	deadline?: number
-): Promise<CommentModerationStatus | null> {
-	const params = new URLSearchParams({ part: 'snippet', id });
-	const res = await ytFetch(`/comments?${params}`, accessToken, undefined, deadline);
-	if (res.status === 404) return null;
-	const data = object(await jsonResponse(res, 'comments.list'), 'comments.list response');
-	if (!Array.isArray(data.items)) throw new Error('comments.list response items is missing or invalid');
-	if (!data.items.length) return null;
-	if (data.items.length !== 1) throw new Error('comments.list response returned multiple comments');
-	const status = requiredString(
-		object(object(data.items[0], 'comments.list response item').snippet, 'comments.list response item snippet').moderationStatus,
-		'comments.list response moderationStatus'
-	);
-	if (status !== 'heldForReview' && status !== 'rejected' && status !== 'published' && status !== 'likelySpam') {
-		throw new Error(`comments.list response moderationStatus is unsupported: ${status}`);
-	}
-	return status;
 }
 
 /**

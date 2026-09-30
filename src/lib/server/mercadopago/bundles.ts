@@ -1,6 +1,6 @@
 import { env } from '$env/dynamic/private';
 
-import { bundleById, CREDIT_BUNDLES, type CreditBundle } from '$lib/server/stripe/bundles';
+import { bundleById, CREDIT_BUNDLES, purchasableBundleById, type CreditBundle } from '$lib/server/stripe/bundles';
 
 export type MercadoPagoBundle = CreditBundle & { amountCents: number; priceEnv: string };
 
@@ -32,8 +32,20 @@ export function mercadoPagoBundleById(id: string): MercadoPagoBundle {
 	return { ...bundle, amountCents: amountCentsFor(bundle), priceEnv: priceEnvFor(bundle) };
 }
 
+/**
+ * Resolves a bundle for a MANUAL Mercado Pago purchase — same
+ * `hiddenFromPurchase` guard as `purchasableBundleById`, so a crafted POST
+ * cannot buy a bundle the grid never offered (codeant). The webhook grant
+ * path keeps using `mercadoPagoBundleById` for idempotent fulfillment.
+ */
+export function purchasableMercadoPagoBundleById(id: string): MercadoPagoBundle {
+	const bundle = purchasableBundleById(id);
+	return { ...bundle, amountCents: amountCentsFor(bundle), priceEnv: priceEnvFor(bundle) };
+}
+
 export function configuredMercadoPagoBundles(): MercadoPagoBundle[] {
 	return CREDIT_BUNDLES.flatMap((bundle) => {
+		if (bundle.hiddenFromPurchase) return [];
 		const priceEnv = PRICE_ENV_BY_BUNDLE[bundle.id];
 		if (!priceEnv) {
 			console.error(`mercadopago: no price env mapping for bundle ${bundle.id} — excluded from the catalog`);
@@ -45,7 +57,7 @@ export function configuredMercadoPagoBundles(): MercadoPagoBundle[] {
 		try {
 			return [{ ...bundle, amountCents: amountCentsFor(bundle), priceEnv }];
 		} catch (cause) {
-			console.error(`mercadopago: bundle ${bundle.id} has a malformed ${priceEnv} — excluded from the catalog:`, cause);
+			console.error('mercadopago: bundle %s has a malformed %s — excluded from the catalog:', bundle.id, priceEnv, cause);
 			return [];
 		}
 	});

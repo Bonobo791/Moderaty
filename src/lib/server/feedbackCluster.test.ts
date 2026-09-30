@@ -147,12 +147,40 @@ test('a content-free canonical label over real input claims is malformed', async
 	).rejects.toThrow('feedback clustering response has missing or invalid themes');
 });
 
+test('a canonical label that sanitizes to nothing is malformed over real claims', async () => {
+	// 'fucking shit' is nonblank with a nonempty normalized key, but
+	// groupFeedback sanitizes it to '' and would pool every member —
+	// the same silent loss a content-free label causes (codex).
+	stubMerge({ themes: [{ claim: 'fucking shit', members: [0, 1] }] });
+	await expect(
+		clusterClaims([q('the audio is broken'), q('sound keeps cutting out')], undefined, 'test-openai-key')
+	).rejects.toThrow('feedback clustering response has missing or invalid themes');
+});
+
 test('a content-free canonical label may echo already content-free input claims', async () => {
 	// The classifier can emit '...' — echoing it back is pass-through that
 	// pools downstream, not a malformed response.
 	stubMerge({ themes: [{ claim: '...', members: [0, 1] }] });
 	const canonical = await clusterClaims([q('...'), q('!!!')], undefined, 'test-openai-key');
 	expect(canonical).toEqual(['...', '...']);
+});
+
+test('content-free inputs cannot bridge themes — a junk label never reaches real claims', async () => {
+	// '...' and '!!!' normalize to the same empty key, but they share no
+	// semantics: linking them would let the junk-labeled theme win the
+	// component and pool the real recurrence 'audio is broken' (codex).
+	stubMerge({
+		themes: [
+			{ claim: '...', members: [0] },
+			{ claim: 'audio is broken', members: [1, 2, 3] }
+		]
+	});
+	const canonical = await clusterClaims(
+		[q('...'), q('!!!'), q('the audio is broken'), q('sound keeps cutting out')],
+		undefined,
+		'test-openai-key'
+	);
+	expect(canonical).toEqual(['...', 'audio is broken', 'audio is broken', 'audio is broken']);
 });
 
 test('equivalent inputs pull every member of the linked themes into one label', async () => {
@@ -173,6 +201,106 @@ test('equivalent inputs pull every member of the linked themes into one label', 
 	expect(canonical).toEqual(['label a', 'label a', 'label a']);
 });
 
+test('clusterClassifiedClaims merges per category — the provider never sees a mixed-category batch', async () => {
+	// Reproduces the wedged digest: the model merged request index 0 with
+	// criticism index 1 ("make the sound louder" + "the audio is too quiet")
+	// and strict validation threw every tick. Merging per category makes a
+	// cross-category theme impossible to emit — the request row never even
+	// reaches the provider.
+	const seen: { i: number; category: string; claim: string }[][] = [];
+	vi.stubGlobal(
+		'fetch',
+		vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+			const body = JSON.parse(String(init?.body));
+			const user: string = body.messages.find((m: { role: string }) => m.role === 'user')?.content;
+			const items = JSON.parse(user.replace(/^<data-[0-9a-f]+>\n|\n<\/data-[0-9a-f]+>$/g, '')) as {
+				i: number;
+				category: string;
+				claim: string;
+			}[];
+			seen.push(items);
+			// Mirror the production failure: a mixed-category batch lets the
+			// model merge across categories — a response validation rejects.
+			const categories = new Set(items.map((item) => item.category));
+			const themes =
+				categories.size > 1
+					? [{ claim: 'one shared issue', members: items.map((item) => item.i) }]
+					: [{ claim: 'merged theme', members: items.map((item) => item.i) }];
+			return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ themes }) } }] }), {
+				status: 200
+			});
+		})
+	);
+	const merged = await clusterClassifiedClaims(
+		[
+			{ commentId: 'r', category: 'request' as const, claim: 'make the sound louder' },
+			{ commentId: 'c1', category: 'criticism' as const, claim: 'the audio is too quiet' },
+			{ commentId: 'c2', category: 'criticism' as const, claim: 'the sound is off' }
+		],
+		['question', 'criticism', 'correction', 'request'],
+		2,
+		undefined,
+		'test-openai-key'
+	);
+	expect(merged.map((row) => row.claim)).toEqual(['make the sound louder', 'merged theme', 'merged theme']);
+	expect(seen.length).toBe(1);
+	for (const items of seen) expect(new Set(items.map((item) => item.category)).size).toBe(1);
+});
+
+test('clusterClassifiedClaims issues one merge call per category and stitches canonical claims back', async () => {
+	vi.stubGlobal(
+		'fetch',
+		vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+			const body = JSON.parse(String(init?.body));
+			const user: string = body.messages.find((m: { role: string }) => m.role === 'user')?.content;
+			const items = JSON.parse(user.replace(/^<data-[0-9a-f]+>\n|\n<\/data-[0-9a-f]+>$/g, '')) as {
+				i: number;
+				category: string;
+			}[];
+			const themes = [{ claim: `merged ${items[0].category}`, members: items.map((item) => item.i) }];
+			return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ themes }) } }] }), {
+				status: 200
+			});
+		})
+	);
+	const merged = await clusterClassifiedClaims(
+		[
+			{ commentId: 'a', category: 'request' as const, claim: 'r1' },
+			{ commentId: 'b', category: 'criticism' as const, claim: 'c1' },
+			{ commentId: 'c', category: 'request' as const, claim: 'r2' },
+			{ commentId: 'd', category: 'criticism' as const, claim: 'c2' }
+		],
+		['criticism', 'request'],
+		2,
+		undefined,
+		'test-openai-key'
+	);
+	expect(merged.map((row) => row.claim)).toEqual([
+		'merged request',
+		'merged criticism',
+		'merged request',
+		'merged criticism'
+	]);
+	expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
+});
+
+test('clusterClassifiedClaims skips the provider when no category has two feedback rows', async () => {
+	vi.stubGlobal('fetch', vi.fn());
+	const merged = await clusterClassifiedClaims(
+		[
+			{ commentId: 'a', category: 'request' as const, claim: 'r1' },
+			{ commentId: 'b', category: 'criticism' as const, claim: 'c1' },
+			{ commentId: 'n', category: 'none' as const, claim: '' }
+		],
+		['criticism', 'request'],
+		2,
+		undefined,
+		'test-openai-key'
+	);
+	expect(merged.map((row) => row.claim)).toEqual(['r1', 'c1', '']);
+	expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+});
+
 test('clusterClassifiedClaims rewrites feedback rows and leaves none rows untouched', async () => {
 	stubMerge({ themes: [{ claim: 'shared theme', members: [0, 1] }] });
 	const merged = await clusterClassifiedClaims(
@@ -182,6 +310,7 @@ test('clusterClassifiedClaims rewrites feedback rows and leaves none rows untouc
 			{ commentId: 'n', category: 'none' as const, claim: '' }
 		],
 		['question'],
+		2,
 		undefined,
 		'test-openai-key'
 	);
@@ -194,6 +323,36 @@ test('clusterClassifiedClaims rewrites feedback rows and leaves none rows untouc
 	expect(user).not.toContain('"i":2');
 });
 
+test('clusterClassifiedClaims skips provider calls for categories below the finding threshold', async () => {
+	// codex: a category that cannot reach the supporters bar is pure provider
+	// spend — grouping pools its rows identically clustered or not. Its rows
+	// pass through unchanged; only the qualifying category is sent.
+	vi.stubGlobal(
+		'fetch',
+		vi.fn(async () =>
+			new Response(
+				JSON.stringify({ choices: [{ message: { content: JSON.stringify({ themes: [{ claim: 'merged theme', members: [0, 1, 2] }] }) } }] }),
+				{ status: 200 }
+			)
+		)
+	);
+	const merged = await clusterClassifiedClaims(
+		[
+			{ commentId: 'a', category: 'question' as const, claim: 'q1' },
+			{ commentId: 'b', category: 'question' as const, claim: 'q2' },
+			{ commentId: 'c', category: 'question' as const, claim: 'q3' },
+			{ commentId: 'd', category: 'request' as const, claim: 'r1' },
+			{ commentId: 'e', category: 'request' as const, claim: 'r2' }
+		],
+		['question', 'request'],
+		3,
+		undefined,
+		'test-openai-key'
+	);
+	expect(merged.map((row) => row.claim)).toEqual(['merged theme', 'merged theme', 'merged theme', 'r1', 'r2']);
+	expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1); // 'question' alone qualifies (3 ≥ 3)
+});
+
 test('clusterClassifiedClaims never sends disabled-category rows to the provider', async () => {
 	stubMerge({ themes: [{ claim: 'shared theme', members: [0, 1] }] });
 	const merged = await clusterClassifiedClaims(
@@ -203,6 +362,7 @@ test('clusterClassifiedClaims never sends disabled-category rows to the provider
 			{ commentId: 'c', category: 'criticism' as const, claim: 'disabled critique' }
 		],
 		['question'],
+		2,
 		undefined,
 		'test-openai-key'
 	);

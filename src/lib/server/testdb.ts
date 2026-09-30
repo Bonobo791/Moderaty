@@ -94,6 +94,54 @@ export function testDb(): TestDb {
 	return holder.current;
 }
 
+/** Counts SQL operations issued through a Drizzle handle and nested transaction handles. */
+export async function countDbStatements<T>(database: LibSQLDatabase<typeof schema>, run: () => Promise<T>): Promise<{ value: T; count: number }> {
+	let count = 0;
+	const queryMethods = new Set(['select', 'insert', 'update', 'delete']);
+	const track = (target: object): object =>
+		new Proxy(target, {
+			get(inner, property) {
+				const value = Reflect.get(inner, property, inner);
+				if (property === 'transaction' && typeof value === 'function') {
+					return (callback: (tx: object) => unknown, ...args: unknown[]) => {
+						count++;
+						return Reflect.apply(value, inner, [(tx: object) => callback(track(tx)), ...args]);
+					};
+				}
+				if (queryMethods.has(String(property)) && typeof value === 'function') {
+					return (...args: unknown[]) => {
+						count++;
+						return Reflect.apply(value, inner, args);
+					};
+				}
+				return typeof value === 'function' ? value.bind(inner) : value;
+			}
+		});
+	const raw = database as unknown as Record<string, unknown>;
+	const originalMethods = new Map<string, unknown>();
+	for (const method of queryMethods) {
+		const original = raw[method];
+		if (typeof original !== 'function') throw new Error(`countDbStatements: missing ${method} method`);
+		originalMethods.set(method, original);
+		raw[method] = (...args: unknown[]) => {
+			count++;
+			return Reflect.apply(original, database, args);
+		};
+	}
+	const originalTransaction = raw.transaction;
+	if (typeof originalTransaction !== 'function') throw new Error('countDbStatements: missing transaction method');
+	raw.transaction = (callback: (tx: object) => unknown, ...args: unknown[]) => {
+		count++;
+		return Reflect.apply(originalTransaction, database, [(tx: object) => callback(track(tx)), ...args]);
+	};
+	try {
+		return { value: await run(), count };
+	} finally {
+		for (const [method, original] of originalMethods) raw[method] = original;
+		raw.transaction = originalTransaction;
+	}
+}
+
 export function postForm(fields: Record<string, string>, url = 'http://localhost/'): Request {
 	const form = new FormData();
 	for (const [key, value] of Object.entries(fields)) form.set(key, value);
@@ -141,8 +189,13 @@ export async function createTestDb(): Promise<TestDb> {
 			email TEXT NOT NULL,
 			display_name TEXT NOT NULL,
 			plan TEXT NOT NULL DEFAULT 'free',
+			zero_credits_since TEXT,
+			zero_credits_notified_at TEXT,
+			zero_credits_warned_at TEXT,
+			zero_credits_checked_at TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
+		`CREATE INDEX users_zero_credits_checked_idx ON users (zero_credits_checked_at)`,
 		`CREATE TABLE sessions (
 			id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -321,6 +374,22 @@ export async function createTestDb(): Promise<TestDb> {
 		`CREATE TABLE stripe_deletion_outbox (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			customer_id TEXT NOT NULL UNIQUE,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			last_attempt_at TEXT,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`,
+		`CREATE TABLE google_revocation_outbox (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			channel_id TEXT NOT NULL,
+			refresh_token_enc TEXT NOT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			last_attempt_at TEXT,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		)`,
+		`CREATE TABLE stripe_scrub_outbox (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			customer_id TEXT NOT NULL UNIQUE,
+			org_id TEXT NOT NULL,
 			attempts INTEGER NOT NULL DEFAULT 0,
 			last_attempt_at TEXT,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))

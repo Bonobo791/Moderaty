@@ -58,6 +58,27 @@ test('credit charge updates the fake balance across runs', async () => {
 	expect(mocks.state.insertedComments).toHaveLength(1);
 });
 
+test('logs exact live counts including already-stored comments and the completed scan cursor', async () => {
+	mocks.state.existingIds = ['seen'];
+	mocks.scoreComment.mockResolvedValue(moderation(0.1));
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ id: 'seen' }), newComment({ id: 'first' }), newComment({ id: 'second' })],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+	const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+
+	try {
+		await runChannel('channel');
+
+		expect(infoSpy).toHaveBeenCalledWith(
+			'run channel: fetched=3 skippedAlreadySeen=1 staged=2 deferred=0 acted=0 queued=0 rescan=false; scan complete — cursor now 2026-01-04T00:00:00.000Z'
+		);
+	} finally {
+		infoSpy.mockRestore();
+	}
+});
+
 test('persists the chronologically newest timestamp when UTC offsets differ', async () => {
 	mocks.scoreComment.mockResolvedValue(moderation(0));
 	mocks.fetchNewComments.mockResolvedValue({
@@ -204,15 +225,76 @@ test('a planted history boundary rescores stored comments and charges under the 
 	mocks.state.channel.historyScanId = 'scan-req-1';
 	mocks.state.existingIds = ['comment'];
 	mocks.scoreComment.mockResolvedValue(moderation(0.9));
+	const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+
+	try {
+		const result = await runChannel('channel');
+
+		expect(result).toMatchObject({ fetched: 1, acted: 1, dryRun: false });
+		expect(mocks.scoreComment).toHaveBeenCalled();
+		expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', decidedBy: 'ai' })]);
+		expect(mocks.state.insertedCredits).toEqual([expect.objectContaining({ refType: 'comment', refId: 'comment#scan-req-1' })]);
+		expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('rescan=true; scan complete — cursor now'));
+		// Completion clears the boundary AND its nonce together.
+		expect(mocks.state.channelUpdates).toContainEqual(expect.objectContaining({ historyBoundary: null, historyScanId: null }));
+	} finally {
+		infoSpy.mockRestore();
+	}
+});
+
+test('a completed history scan is not rescored by the next ordinary run', async () => {
+	mocks.state.channel.orgId = 'org-1';
+	mocks.state.credits = 10;
+	mocks.state.channel.historyBoundary = '2026-01-01T00:00:00.000Z';
+	mocks.state.channel.historyScanId = 'scan-req-1';
+	mocks.state.existingIds = ['A', 'B'];
+	mocks.scoreComment.mockResolvedValue(moderation(0.1));
+	const page = {
+		comments: [newComment({ id: 'A', text: 'Comment A' }), newComment({ id: 'B', text: 'Comment B' })],
+		nextPageToken: null,
+		reachedCursor: true
+	};
+	mocks.fetchNewComments.mockResolvedValue(page);
+
+	const first = await runChannel('channel');
+
+	expect(first).toMatchObject({ fetched: 2, partial: false, dryRun: false });
+	expect(mocks.scoreComment).toHaveBeenCalledTimes(2);
+	expect(mocks.state.insertedCredits.map((row) => row.refId)).toEqual(['A#scan-req-1', 'B#scan-req-1']);
+	expect(mocks.state.channelUpdates).toContainEqual(expect.objectContaining({ historyBoundary: null, historyScanId: null }));
+	const commentsAfterRescan = [...mocks.state.insertedComments];
+	const auditsAfterRescan = [...mocks.state.insertedAudits];
+	const creditsAfterRescan = [...mocks.state.insertedCredits];
+
+	// The fake database records writes separately from the channel row. Apply
+	// the completed checkpoint so the next invocation observes the persisted state.
+	mocks.state.channel = { ...mocks.state.channel, historyBoundary: null, historyScanId: null };
+	mocks.fetchNewComments.mockResolvedValue(page);
+	const second = await runChannel('channel');
+
+	expect(second).toMatchObject({ fetched: 2, partial: false, dryRun: false });
+	expect(mocks.scoreComment).toHaveBeenCalledTimes(2);
+	expect(mocks.state.insertedComments).toEqual(commentsAfterRescan);
+	expect(mocks.state.insertedAudits).toEqual(auditsAfterRescan);
+	expect(mocks.state.insertedCredits).toEqual(creditsAfterRescan);
+});
+
+test('a live page of already-stored comments is not scored or charged', async () => {
+	mocks.state.channel.orgId = 'org-1';
+	mocks.state.credits = 10;
+	mocks.state.existingIds = ['stored-A', 'stored-B'];
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ id: 'stored-A' }), newComment({ id: 'stored-B' })],
+		nextPageToken: null,
+		reachedCursor: true
+	});
 
 	const result = await runChannel('channel');
 
-	expect(result).toMatchObject({ fetched: 1, acted: 1, dryRun: false });
-	expect(mocks.scoreComment).toHaveBeenCalled();
-	expect(mocks.state.insertedComments).toEqual([expect.objectContaining({ id: 'comment', decidedBy: 'ai' })]);
-	expect(mocks.state.insertedCredits).toEqual([expect.objectContaining({ refType: 'comment', refId: 'comment#scan-req-1' })]);
-	// Completion clears the boundary AND its nonce together.
-	expect(mocks.state.channelUpdates).toContainEqual(expect.objectContaining({ historyBoundary: null, historyScanId: null }));
+	expect(result).toMatchObject({ fetched: 2, partial: false, skipped: false, dryRun: false });
+	expect(mocks.scoreComment).not.toHaveBeenCalled();
+	expect(mocks.state.insertedCredits).toEqual([]);
+	expect(mocks.state.insertedComments).toEqual([]);
 });
 
 test('a rescan channel with no scan id keeps the legacy plain comment anchor', async () => {
@@ -320,17 +402,68 @@ test('a parked rescan page skips comments this scan already staged — no repeat
 		nextPageToken: 'page-2',
 		reachedCursor: false
 	});
-	mocks.getCommentModerationStatus.mockResolvedValue(null);
-
 	const result = await runChannel('channel');
 
 	expect(result.outOfCredits).toBe(true);
 	expect(mocks.scoreComment).not.toHaveBeenCalled();
 	expect(mocks.state.insertedComments).toHaveLength(1);
 	expect(mocks.state.insertedCredits).toHaveLength(1);
-	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({ commentId: 'paid', state: 'completed' })]);
+	// The delete resolved while 'paid' is locally approved — ordering vs the
+	// approval is unprovable, so the row stays outstanding ('cancelling') and
+	// the next sweep's corrective publish lands last (codex).
+	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({ commentId: 'paid', state: 'cancelling' })]);
 	// The page stays parked — only a top-up advances the checkpoint.
 	expect(mocks.state.channelUpdates).toEqual([]);
+
+	await runChannel('channel');
+	expect(mocks.setModerationStatus).toHaveBeenLastCalledWith(['paid'], 'published', false, 'access-token', undefined);
+	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({ commentId: 'paid', state: 'superseded' })]);
+});
+
+test('an incomplete history page preserves its scan and the next run scores only unstaged comments', async () => {
+	mocks.state.channel.orgId = 'org-1';
+	mocks.state.credits = 10;
+	mocks.state.channel.historyBoundary = '2026-01-01T00:00:00.000Z';
+	mocks.state.channel.historyScanId = 'scan-req-1';
+	mocks.state.existingIds = ['A', 'B', 'C'];
+	mocks.scoreComment.mockResolvedValue(moderation(0.1));
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [newComment({ id: 'A', text: 'Comment A' }), newComment({ id: 'B', text: 'Comment B' })],
+		nextPageToken: 'page-2',
+		reachedCursor: false
+	});
+
+	const first = await runChannel('channel');
+
+	expect(first).toMatchObject({ fetched: 2, partial: false, dryRun: false });
+	expect(mocks.scoreComment).toHaveBeenCalledTimes(2);
+	expect(mocks.state.channelUpdates).toContainEqual(expect.objectContaining({
+		nextPageToken: 'page-2',
+		scanCursor: '2026-01-04T00:00:00.000Z'
+	}));
+	expect(mocks.state.channelUpdates).not.toContainEqual(expect.objectContaining({ historyBoundary: null, historyScanId: null }));
+	expect(mocks.state.insertedComments.map((comment) => comment.scanId)).toEqual(['scan-req-1', 'scan-req-1']);
+
+	// Persist the page checkpoint in the fake row before the next invocation.
+	mocks.state.channel = { ...mocks.state.channel, nextPageToken: 'page-2', scanCursor: '2026-01-04T00:00:00.000Z' };
+	mocks.scoreComment.mockClear();
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [
+			newComment({ id: 'A', text: 'Comment A' }),
+			newComment({ id: 'B', text: 'Comment B' }),
+			newComment({ id: 'C', text: 'Comment C' })
+		],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	const second = await runChannel('channel');
+
+	expect(second).toMatchObject({ fetched: 3, partial: false, dryRun: false });
+	expect(mocks.scoreComment).toHaveBeenCalledTimes(1);
+	expect(mocks.scoreComment).toHaveBeenCalledWith('Comment C', undefined, 'sk-resolved-key');
+	expect(mocks.state.insertedCredits.map((row) => row.refId)).toEqual(['A#scan-req-1', 'B#scan-req-1', 'C#scan-req-1']);
+	expect(mocks.state.insertedComments.map((comment) => comment.id)).toEqual(['A', 'B', 'C']);
 });
 
 test('a parked rescan page also skips rule-matched comments this scan staged — they mint no credit anchor', async () => {
@@ -393,13 +526,19 @@ test('a rescan retry on an unmetered org also skips already-staged comments — 
 
 test('skips an inactive channel without fetching or scoring', async () => {
 	mocks.state.channel = { ...mocks.state.channel, active: 0 };
+	const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 
-	const result = await runChannel('channel');
+	try {
+		const result = await runChannel('channel');
 
-	expect(result).toEqual({ fetched: 0, acted: 0, queued: 0, partial: false, skipped: true, dryRun: false });
-	expect(mocks.refreshAccessToken).not.toHaveBeenCalled();
-	expect(mocks.fetchNewComments).not.toHaveBeenCalled();
-	expect(mocks.scoreComment).not.toHaveBeenCalled();
+		expect(result).toEqual({ fetched: 0, acted: 0, queued: 0, partial: false, skipped: true, dryRun: false });
+		expect(mocks.refreshAccessToken).not.toHaveBeenCalled();
+		expect(mocks.fetchNewComments).not.toHaveBeenCalled();
+		expect(mocks.scoreComment).not.toHaveBeenCalled();
+		expect(infoSpy).toHaveBeenCalledWith('run channel: skipped — channel inactive');
+	} finally {
+		infoSpy.mockRestore();
+	}
 });
 
 test('a preview whose claimed row was swapped aborts before any provider call', async () => {
@@ -543,12 +682,18 @@ test('treats a vanished channel row as deactivated mid-run, logging and stopping
 
 test('returns a partial result when the deadline hits during comment fetch', async () => {
 	mocks.fetchNewComments.mockRejectedValue(new mocks.DeadlineExceededError('out of time'));
+	const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-	const result = await runChannel('channel');
+	try {
+		const result = await runChannel('channel');
 
-	expect(result).toEqual({ fetched: 0, acted: 0, queued: 0, partial: true, skipped: false, dryRun: false, stoppedReason: 'deadline' });
-	expect(mocks.state.insertedComments).toEqual([]);
-	expect(mocks.state.channelUpdates).toEqual([]);
+		expect(result).toEqual({ fetched: 0, acted: 0, queued: 0, partial: true, skipped: false, dryRun: false, stoppedReason: 'deadline' });
+		expect(mocks.state.insertedComments).toEqual([]);
+		expect(mocks.state.channelUpdates).toEqual([]);
+		expect(warnSpy).toHaveBeenCalledWith('run channel: deadline reached — partial (fetched=0)');
+	} finally {
+		warnSpy.mockRestore();
+	}
 });
 
 test('returns a partial result when the deadline hits during video metadata fetch', async () => {
@@ -563,7 +708,7 @@ test('returns a partial result when the deadline hits during video metadata fetc
 });
 
 test('returns a partial result when the deadline hits during omni scoring — nothing is queued or staged', async () => {
-	// The scoring path must abort like the fetch/metadata/verification paths:
+	// The scoring path must abort like fetch, metadata, and provider-call paths:
 	// a deadline-expired score is NOT an AI failure to queue (I11), it is a
 	// bounded-run abort (I10). Queuing it would dump the whole unprocessed
 	// tail of a burst into the review queue and advance the cursor past it.
@@ -658,6 +803,23 @@ test('window mode without dry-run semantics fails loudly — it can never go liv
 });
 
 describe('credit consumption (billing)', () => {
+	test('logs the number of comments deferred when credits are exhausted', async () => {
+		mocks.state.channel.orgId = 'org-1';
+		mocks.state.credits = 0;
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+		try {
+			const result = await runChannel('channel');
+
+			expect(result.outOfCredits).toBe(true);
+			expect(warnSpy).toHaveBeenCalledWith(
+				'run channel: out of credits — 1 comment(s) deferred, cursor parked; fetched=1 skippedAlreadySeen=0 rescan=false'
+			);
+		} finally {
+			warnSpy.mockRestore();
+		}
+	});
+
 	test('consumes one credit per staged comment on a live run and advances the cursor', async () => {
 		mocks.state.channel.orgId = 'org-1';
 		mocks.state.credits = 5;
@@ -802,11 +964,9 @@ describe('credit consumption (billing)', () => {
 	test('a comment whose credit charge FAILS (balance exhausted concurrently) aborts the staging — never stages free', async () => {
 		// Two concurrent cron invocations on different channels of the same
 		// metered org can both read the same balance into their in-memory AI
-		// budget. Once one transaction exhausts the balance, the other's
-		// consumeCredit returns false — and that decision must NOT stage for
-		// free: the batch aborts loudly (nothing durable), the comments stay
-		// unprocessed, and the next run retries them once the org tops up
-		// (codex review).
+		// budget. If another charge exhausts it first, the guarded bulk balance
+		// update aborts the transaction — the comments never stage free and the
+		// next run retries them after a top-up (codex review).
 		mocks.state.channel.orgId = 'org-1';
 		mocks.state.credits = 5; // the in-memory AI budget reads 5...
 		mocks.state.failCharges = true; // ...but the atomic charge finds 0
@@ -818,7 +978,7 @@ describe('credit consumption (billing)', () => {
 		});
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-		await expect(runChannel('channel')).rejects.toThrow(/credit charge failed/);
+		await expect(runChannel('channel')).rejects.toThrow('credit balance changed concurrently — charge aborted');
 
 		// No ledger or staging rows were committed; the run did not advance.
 		expect(mocks.state.insertedCredits).toEqual([]);

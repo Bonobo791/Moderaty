@@ -337,7 +337,8 @@
 	remains in force for the duration of the processing.
 </p>
 <p>
-	<strong>17.2</strong> Upon termination of the Service, the Processor shall delete any
+	<strong>17.2</strong> Upon termination of the Service — including automatic deletion of a
+	dormant zero-credit account under Terms §17.3 — the Processor shall delete any
 	remaining Comment Data within 30 days, except the statutory logs under Section 15, and shall
 	certify the deletion upon the Controller's written request.
 </p>

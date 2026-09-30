@@ -19,6 +19,18 @@ const mocks = getMocks();
 beforeEach(resetPipelineMocks);
 afterEach(restoreDryRun);
 
+test('the organizations fake reports no row for an org that was never seeded', async () => {
+	// The real ledger throws `org not found` for an unknown org — a fake that
+	// invents a row for every id lets a run charge an org the harness never
+	// seeded instead of failing loudly (codeant nitpick).
+	mocks.state.channel.orgId = 'org-1';
+	// Dynamic import like runChannel: a static top-level import evaluates the
+	// ledger before this module's vi.mock('$lib/server/db') registers.
+	const { orgIsMetered } = await import('$lib/server/billing/ledger');
+	await expect(orgIsMetered('org-missing')).rejects.toThrow('org not found: org-missing');
+	await expect(orgIsMetered('org-1')).resolves.toBe(true);
+});
+
 test('writes an approval audit entry for a low-risk AI decision', async () => {
 	mocks.scoreComment.mockResolvedValue(moderation(0.34));
 

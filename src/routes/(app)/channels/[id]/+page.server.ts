@@ -19,17 +19,16 @@ import { error, fail, redirect } from '@sveltejs/kit';
  * Tenancy-scoped channel update shared by the card actions: another team's
  * channel reads as "not found" (zero rows updated, never a leak).
  */
-async function updateOwnChannel(
-	orgId: string,
-	channelId: string,
-	values: {
-		// Each writable column accepts its insert type or a SQL fragment
-		// (drizzle .set() supports both — a conditional CASE needs the latter).
-		[K in 'toneLevel' | 'protectLgbtqia' | 'protectWomen' | 'active' | 'lastRunStatus' | 'lastRunError']?:
-			| (typeof channels.$inferInsert)[K]
-			| SQL;
-	}
-) {	return db
+// Each writable column accepts its insert type or a SQL fragment
+// (drizzle .set() supports both — a conditional CASE needs the latter).
+type WritableChannelValues = {
+	[K in 'toneLevel' | 'protectLgbtqia' | 'protectWomen' | 'active' | 'lastRunStatus' | 'lastRunError']?:
+		| (typeof channels.$inferInsert)[K]
+		| SQL;
+};
+
+async function updateOwnChannel(orgId: string, channelId: string, values: WritableChannelValues) {
+	return db
 		.update(channels)
 		.set(values)
 		.where(and(eq(channels.id, channelId), eq(channels.orgId, orgId)))
@@ -114,7 +113,7 @@ export const actions = {
 		const f = await request.formData();
 		const channelId = String(f.get('channelId') ?? '');
 		const rawMonths = f.get('months');
-		// Preset windows only — the scan drains newest-first at 300 comments per
+		// Preset windows only — the scan drains newest-first at 100 comments per
 		// run, so an unbounded window is an unbounded API/AI cost (I10).
 		const months = parseHistoryWindow(typeof rawMonths === 'string' ? rawMonths : null);
 		if (months === null) {

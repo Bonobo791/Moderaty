@@ -13,6 +13,7 @@ import { and, eq, gt } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
 import { contactSubmissions } from '$lib/server/db/schema';
+import { escapeHtml } from './emailText';
 import { sendMailjetMessage } from './mailjet';
 
 /**
@@ -303,22 +304,4 @@ export async function submitContactRequest(input: {
 		htmlPart: email.htmlPart
 	});
 	return { ...submission, verifyUrl: verifyUrl.toString() };
-}
-
-/** Minimal HTML escaping for the recipient's name in the e-mail body. */
-function escapeHtml(value: string): string {
-	return value.replace(/[&<>"']/g, (ch) => {
-		switch (ch) {
-			case '&':
-				return '&amp;';
-			case '<':
-				return '&lt;';
-			case '>':
-				return '&gt;';
-			case '"':
-				return '&quot;';
-			default:
-				return '&#39;';
-		}
-	});
 }

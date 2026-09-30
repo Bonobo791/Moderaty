@@ -30,7 +30,7 @@ function signaturePart(signature: string, name: string): string | null {
 	return part ? part.trim().slice(name.length + 1) : null;
 }
 
-export function verifyWebhookSignature(headers: Headers, paymentId: string, now = Date.now()): void {
+export function verifyWebhookSignature(headers: Headers, paymentId: string, now?: number): void {
 	const signature = headers.get('x-signature');
 	const requestId = headers.get('x-request-id');
 	if (!signature || !requestId) throw new MercadoPagoWebhookSignatureError('Mercado Pago webhook signature headers are missing');
@@ -38,7 +38,7 @@ export function verifyWebhookSignature(headers: Headers, paymentId: string, now 
 	const provided = signaturePart(signature, 'v1');
 	const timestampNumber = Number(timestamp);
 	if (!timestamp || !provided || !Number.isSafeInteger(timestampNumber)) throw new MercadoPagoWebhookSignatureError('Mercado Pago webhook signature is malformed');
-	if (Math.abs(now - timestampNumber * 1000) > MAX_SIGNATURE_AGE_MS) throw new MercadoPagoWebhookSignatureError('Mercado Pago webhook signature is expired');
+	if (Math.abs((now ?? Date.now()) - timestampNumber * 1000) > MAX_SIGNATURE_AGE_MS) throw new MercadoPagoWebhookSignatureError('Mercado Pago webhook signature is expired');
 	const manifest = `id:${paymentId};request-id:${requestId};ts:${timestamp};`;
 	const expected = createHmac('sha256', webhookSecret()).update(manifest).digest('hex');
 	const expectedBytes = Buffer.from(expected, 'utf8');

@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import { error, fail } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
 import { randomUUID } from 'node:crypto';
@@ -18,50 +18,94 @@ const VALID_CATEGORIES = ['question', 'criticism', 'correction', 'request'] as c
 /** Manual runs share the cron bounding idea: a hard ceiling, then a clean defer. */
 const MANUAL_RUN_BUDGET_MS = 15_000;
 
+/** Digest rows a history page lists — older ones paginate off behind a cursor. */
+const HISTORY_PAGE_SIZE = 25;
+
+const DIGEST_FIELDS = {
+	id: feedbackDigests.id,
+	windowStart: feedbackDigests.windowStart,
+	windowEnd: feedbackDigests.windowEnd,
+	status: feedbackDigests.status,
+	commentsClassified: feedbackDigests.commentsClassified,
+	commentsFailed: feedbackDigests.commentsFailed,
+	pooledCount: feedbackDigests.pooledCount,
+	creditsUsed: feedbackDigests.creditsUsed,
+	error: feedbackDigests.error,
+	createdAt: feedbackDigests.createdAt
+} as const;
+
+/**
+ * One page of a channel's digest history, newest first: complete digests —
+ * each a paid batch whose findings stay selectable — plus transient rows
+ * newer than the newest complete (the current attempt state; older
+ * transient leftovers are resolved noise). `before` is the cursor — the
+ * oldest id of the previous page — so a high-volume channel's backlog
+ * never loads, serializes, and renders all at once (codex #155). Ids are
+ * monotonic; createdAt can tie within a millisecond.
+ */
+async function digestHistoryPage(channelId: string, latestCompleteId: number, before?: number) {
+	const rows = await db
+		.select(DIGEST_FIELDS)
+		.from(feedbackDigests)
+		.where(
+			and(
+				eq(feedbackDigests.channelId, channelId),
+				or(eq(feedbackDigests.status, 'complete'), gt(feedbackDigests.id, latestCompleteId)),
+				before === undefined ? undefined : lt(feedbackDigests.id, before)
+			)
+		)
+		.orderBy(desc(feedbackDigests.id))
+		.limit(HISTORY_PAGE_SIZE + 1)
+		.all();
+	const digests = rows.slice(0, HISTORY_PAGE_SIZE);
+	return { digests, next: rows.length > HISTORY_PAGE_SIZE ? (digests.at(-1)?.id ?? null) : null };
+}
+
 export async function load({ params, locals, url }) {
 	// Database outage: the layout renders the overlay; this load must not 401
 	// on the null-user outage shape.
 	if (locals.dbDown) return { ch: { id: params.id, title: '' }, maintenance: true };
 	const ch = await ownedChannel(params.id, locals);
-	const digestFields = {
-		id: feedbackDigests.id,
-		windowStart: feedbackDigests.windowStart,
-		windowEnd: feedbackDigests.windowEnd,
-		status: feedbackDigests.status,
-		commentsClassified: feedbackDigests.commentsClassified,
-		commentsFailed: feedbackDigests.commentsFailed,
-		pooledCount: feedbackDigests.pooledCount,
-		creditsUsed: feedbackDigests.creditsUsed,
-		error: feedbackDigests.error,
-		createdAt: feedbackDigests.createdAt
-	} as const;
 	// The newest COMPLETE digest is its own query: a streak of failed rows
 	// must not bury it and make the page claim none exists (codex).
 	const latest =
 		(await db
-			.select(digestFields)
+			.select(DIGEST_FIELDS)
 			.from(feedbackDigests)
 			.where(and(eq(feedbackDigests.channelId, params.id), eq(feedbackDigests.status, 'complete')))
 			// id is monotonic — createdAt can tie within a millisecond (cubic).
 			.orderBy(desc(feedbackDigests.id))
 			.limit(1)
 			.get()) ?? null;
-	// The history list is every complete digest — each one is a paid batch
-	// whose findings stay selectable — plus transient rows newer than the
-	// newest complete (the current attempt state; older transient leftovers
-	// are resolved noise). Row count is bounded by digest cadence itself.
-	const digests = await db
-		.select(digestFields)
-		.from(feedbackDigests)
-		.where(
-			and(
-				eq(feedbackDigests.channelId, params.id),
-				or(eq(feedbackDigests.status, 'complete'), gt(feedbackDigests.id, latest?.id ?? -1))
-			)
-		)
-		.orderBy(desc(feedbackDigests.id))
-		.all();
+	// ?history=<id> pages the history list behind a cursor; ?digest=<id>
+	// still selects any complete digest directly regardless of page (codex).
+	// Only a positive safe integer is a cursor: Number('') and '0' parse to 0,
+	// which would turn the id < before filter into an empty, un-navigable
+	// page — malformed input falls back to the first page (cubic/coderabbit).
+	const historyCursor = url.searchParams.get('history');
+	const parsedCursor = historyCursor === null ? NaN : Number(historyCursor);
+	const historyBefore =
+		Number.isSafeInteger(parsedCursor) && parsedCursor > 0 ? parsedCursor : undefined;
+	const historyPage = await digestHistoryPage(params.id, latest?.id ?? -1, historyBefore);
+	const digests = historyPage.digests;
 	const latestComplete = latest;
+	// The status banner's transient row (failed/deferred current attempt) is
+	// its own query: on an older ?history= page the row is not in `digests`
+	// at all, and paging must not hide the live warning (coderabbit/cubic).
+	const currentAttempt =
+		(await db
+			.select(DIGEST_FIELDS)
+			.from(feedbackDigests)
+			.where(
+				and(
+					eq(feedbackDigests.channelId, params.id),
+					ne(feedbackDigests.status, 'complete'),
+					gt(feedbackDigests.id, latest?.id ?? -1)
+				)
+			)
+			.orderBy(desc(feedbackDigests.id))
+			.limit(1)
+			.get()) ?? null;
 	// Every complete digest is selectable (?digest=N): a multi-page history
 	// drain writes one digest per bounded batch, and the paid findings on
 	// earlier pages stay reachable instead of being replaced by the newest
@@ -71,7 +115,7 @@ export async function load({ params, locals, url }) {
 	const selected =
 		(Number.isInteger(digestParam) &&
 			(await db
-				.select(digestFields)
+				.select(DIGEST_FIELDS)
 				.from(feedbackDigests)
 				.where(
 					and(
@@ -128,6 +172,9 @@ export async function load({ params, locals, url }) {
 		dryRunUsed: Boolean(ch.feedbackDryRunUsedAt),
 		dryRunDeployment: env.DRY_RUN === 'true',
 		digests,
+		currentAttempt,
+		historyCursor: historyBefore ?? null,
+		historyNext: historyPage.next,
 		latest: latestComplete,
 		selected,
 		findings,
@@ -175,9 +222,9 @@ export const actions = {
 		const window = parseHistoryWindow(rawWindow instanceof File ? null : rawWindow ?? '3');
 		if (window === null) return fail(400, { scope: 'history', error: 'Choose a history window of 1, 3, 6, 12, or 24 months.' });
 		if (env.DRY_RUN !== 'true' && env.DRY_RUN !== 'false') throw error(500, 'DRY_RUN must be true or false');
-		if (env.DRY_RUN === 'true') return fail(409, { scope: 'history', error: 'Historical feedback analysis is unavailable while this deployment is in dry-run mode.' });
+		if (env.DRY_RUN === 'true') return fail(409, { scope: 'history', error: 'History scans are unavailable while this deployment is in dry-run mode.' });
 		if (!ch.active || ch.feedbackEnabled !== 1) {
-			return fail(409, { scope: 'history', error: 'Resume the channel and enable feedback before analyzing history.' });
+			return fail(409, { scope: 'history', error: 'Resume the channel and enable feedback before starting a history scan.' });
 		}
 		// Same gate as moderation history: every classified comment spends a
 		// credit (or the org's own key), so a checkpoint must never plant for an
@@ -190,13 +237,13 @@ export const actions = {
 					scope: 'history',
 					historyAccess,
 					error: historyAccess === 'key'
-						? 'Your lifetime deal requires your own OpenAI API key. An organization owner must add it on the Team page before analyzing feedback history.'
-						: 'To analyze feedback history, purchase credits, subscribe, or buy the lifetime deal and add your own OpenAI API key. If your credits or subscription allowance are exhausted, purchase more credits to continue.'
+						? 'Your lifetime deal requires your own OpenAI API key. An organization owner must add it on the Team page before starting a history scan.'
+						: 'To run a history scan, purchase credits, subscribe, or buy the lifetime deal and add your own OpenAI API key. If your credits or subscription allowance are exhausted, purchase more credits to continue.'
 				});
 			}
 		} catch (cause) {
 			console.error('feedback history access check failed:', params.id, cause);
-			return fail(503, { scope: 'history', error: 'Could not verify access to feedback history analysis. Please try again.' });
+			return fail(503, { scope: 'history', error: 'Could not verify access to history scans. Please try again.' });
 		}
 		const now = new Date().toISOString();
 		const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, now));
@@ -209,11 +256,11 @@ export const actions = {
 			.set({ feedbackHistoryBoundary: historyWindowBoundary(window), feedbackHistoryPageToken: null, feedbackHistoryScanId: randomUUID() })
 			.where(and(eq(channels.id, params.id), eq(channels.orgId, user.orgId), eq(channels.active, 1), eq(channels.feedbackEnabled, 1), isNull(channels.feedbackHistoryBoundary), claimable))
 			.returning({ id: channels.id });
-		if (!updated.length) return fail(409, { scope: 'history', error: 'Feedback history is already running or this channel is busy.' });
+		if (!updated.length) return fail(409, { scope: 'history', error: 'A history scan is already running or this channel is busy.' });
 		return {
 			ok: true,
 			scope: 'history',
-			message: 'Historical feedback analysis queued. Cron processes up to 100 comments per batch without changing moderation.'
+			message: 'History scan started — up to 100 comments per background batch, and nothing is moderated. Each batch adds a digest below.'
 		};
 	},
 	dryRun: async ({ params, request, locals }) => {
@@ -305,7 +352,7 @@ export const actions = {
 		// A 'manual' cadence never gets a cron retry — don't promise one.
 		const retryHint =
 			ch.feedbackHistoryBoundary || ch.feedbackCadence !== 'manual'
-				? 'it will retry on the next cron tick.'
+				? 'it will retry automatically.'
 				: 'retry with Generate now.';
 		try {
 			const result: DigestResult = await generateFeedbackDigest(params.id, {
@@ -317,14 +364,14 @@ export const actions = {
 					return {
 						ok: true,
 						scope: 'digest',
-						message: `Digest generated — ${result.findings} finding(s) from ${result.commentsClassified} comment(s).${result.historyRemaining ? ' Historical analysis continues in the background on the next cron tick.' : ''}`
+						message: `Digest generated — ${result.findings} finding(s) from ${result.commentsClassified} comment(s).${result.historyRemaining ? ' The history scan continues in the background.' : ''}`
 					};
 				case 'empty':
 					return {
 						ok: true,
 						scope: 'digest',
 						message: result.historyRemaining
-							? 'This history page was scanned. The next page continues on the next cron tick.'
+							? 'This history batch was scanned. The next batch runs automatically.'
 							: 'No new comments since the last digest window.'
 					};
 				case 'dry-run':

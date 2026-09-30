@@ -7,6 +7,8 @@
 
 import { env } from '$env/dynamic/private';
 
+import { DeadlineExceededError } from './http';
+
 const MAILJET_SEND_URL = 'https://api.mailjet.com/v3.1/send';
 const MAILJET_TIMEOUT_MS = 10_000;
 const DEFAULT_FROM_NAME = 'Moderaty';
@@ -61,8 +63,15 @@ export interface MailjetSendResult {
  * @param message - The recipient, subject, and text/HTML parts.
  * @returns MailJet's message identifiers for audit, when provided.
  */
-export async function sendMailjetMessage(message: MailjetMessage): Promise<MailjetSendResult> {
+export async function sendMailjetMessage(message: MailjetMessage, deadline?: number): Promise<MailjetSendResult> {
 	const config = loadMailjetConfig();
+	// The caller's run budget composes with (never widens) the client timeout:
+	// the request aborts at whichever lands first, and a spent budget surfaces
+	// as DeadlineExceededError so the sweep defers instead of counting a
+	// provider failure (codex).
+	const timeoutMs =
+		deadline === undefined ? MAILJET_TIMEOUT_MS : Math.min(MAILJET_TIMEOUT_MS, deadline - Date.now());
+	if (timeoutMs <= 0) throw new DeadlineExceededError();
 	const payload = {
 		Messages: [
 			{
@@ -77,6 +86,7 @@ export async function sendMailjetMessage(message: MailjetMessage): Promise<Mailj
 	const credentials = Buffer.from(`${config.apiKey}:${config.secretKey}`).toString('base64');
 
 	let response: Response;
+	let body: string;
 	try {
 		response = await fetch(MAILJET_SEND_URL, {
 			method: 'POST',
@@ -85,16 +95,23 @@ export async function sendMailjetMessage(message: MailjetMessage): Promise<Mailj
 				Authorization: `Basic ${credentials}`
 			},
 			body: JSON.stringify(payload),
-			signal: AbortSignal.timeout(MAILJET_TIMEOUT_MS)
+			signal: AbortSignal.timeout(timeoutMs)
 		});
+		// fetch resolving means the HEADERS arrived — the body can still be
+		// streaming, and the composed signal firing mid-read rejects text()
+		// here. The deadline check below must cover this read or a spent
+		// budget escapes as an unclassified provider failure (coderabbit).
+		body = await response.text();
 	} catch (error) {
-		// fetch throws on DNS/connection failure and on our own timeout.
+		// A spent budget is a scheduling condition, not a provider failure —
+		// keep it distinguishable so callers (the sweep) can defer cleanly.
+		if (deadline !== undefined && Date.now() >= deadline) throw new DeadlineExceededError();
+		// fetch throws on DNS/connection failure, on our own timeout, and
+		// response.text() throws on a mid-read abort or stream error.
 		// Stryker disable next-line StringLiteral: log-only message — mutating it changes no observable behavior
 		console.error('mailjet send failed (network):', error);
 		throw new Error('verification e-mail could not be sent (network failure)');
 	}
-
-	const body = await response.text();
 	if (!response.ok) {
 		// Stryker disable next-line StringLiteral: log-only message — mutating it changes no observable behavior
 		console.error(`mailjet send failed: HTTP ${response.status} ${body}`);

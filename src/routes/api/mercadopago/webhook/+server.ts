@@ -9,6 +9,15 @@ function loggablePaymentId(value: string): string {
 	return value.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128) || '[invalid]';
 }
 
+// A caught error renders with its stack — and upstream failures can embed
+// response bodies — so logging the object directly writes multiline,
+// unbounded text an attacker can turn into forged log entries (CWE-117).
+// Flatten to one bounded line.
+function loggableError(cause: unknown): string {
+	const value = cause instanceof Error ? (cause.stack ?? cause.message) : String(cause);
+	return value.replace(/[\r\n]+/g, ' ').slice(0, 512);
+}
+
 export async function POST({ request }) {
 	let payload: unknown;
 	try {
@@ -34,10 +43,10 @@ export async function POST({ request }) {
 		verifyWebhookSignature(request.headers, paymentId);
 	} catch (cause) {
 		if (cause instanceof MercadoPagoWebhookSignatureError) {
-			console.error(`Mercado Pago webhook signature rejected for payment ${loggablePaymentId(paymentId)}:`, cause);
+			console.error('Mercado Pago webhook signature rejected for payment %s: %s', loggablePaymentId(paymentId), loggableError(cause));
 			return json({ error: 'Mercado Pago webhook signature rejected' }, { status: 400 });
 		}
-		console.error(`Mercado Pago webhook signature could not be verified for payment ${loggablePaymentId(paymentId)}:`, cause);
+		console.error('Mercado Pago webhook signature could not be verified for payment %s: %s', loggablePaymentId(paymentId), loggableError(cause));
 		return json({ error: 'Mercado Pago webhook processing failed' }, { status: 500 });
 	}
 	try {
@@ -45,7 +54,7 @@ export async function POST({ request }) {
 		const applied = await processMercadoPagoPayment(payment);
 		return json({ ok: true, applied });
 	} catch (cause) {
-		console.error(`Mercado Pago webhook failed for payment ${loggablePaymentId(paymentId)}:`, cause);
+		console.error('Mercado Pago webhook failed for payment %s: %s', loggablePaymentId(paymentId), loggableError(cause));
 		return json({ error: 'Mercado Pago webhook processing failed' }, { status: 500 });
 	}
 }

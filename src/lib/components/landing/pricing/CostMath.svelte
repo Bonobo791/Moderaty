@@ -42,7 +42,7 @@
 				<div class="terminal-body">
 					<div><span class="t-dim">comments last month</span> <span class="t-lit">see YouTube Studio</span></div>
 					<div><span class="t-dim">covered by the plan</span> <span class="t-lit">first 100 ($5/mo)</span></div>
-					<div><span class="t-dim">top-up beyond that</span> <span class="t-lit">bundles of 100 / 500 / 2,000 — $5 / $20.40 / $64.65</span></div>
+					<div><span class="t-dim">top-up beyond that</span> <span class="t-lit">bundles of 500 / 2,000 — $20.40 / $64.65</span></div>
 					<div><span class="t-dim">nights reading hate</span> <span class="t-mint">0</span></div>
 					<div class="t-note">$5/mo renews. automatic top-up is opt-in.</div>
 				</div>

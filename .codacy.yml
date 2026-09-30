@@ -25,9 +25,16 @@ engines:
       - '**/*.test.ts'
   # Same rationale as opengrep: complexity budgets (method length,
   # cyclomatic complexity, file size) target production code — seed
-  # helpers and long assertion blocks are normal in tests.
+  # helpers and long assertion blocks are normal in tests. testdb.ts is
+  # test-only scaffolding (schema DDL + statement counting); the lockfile
+  # is generated, not authored.
   lizard:
     exclude_paths:
       - '**/*.test.ts'
       - '**/*.test.mjs'
+      - 'src/lib/server/testdb.ts'
+      - 'src/lib/server/testarbitraries.ts'
+      - 'src/lib/server/pbt-support.ts'
+      - 'src/lib/server/pipeline/test-support.ts'
+      - 'package-lock.json'
 

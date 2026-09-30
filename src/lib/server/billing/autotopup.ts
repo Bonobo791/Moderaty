@@ -5,7 +5,7 @@
 //    concurrent triggers cannot both charge;
 //  - idempotency key per customer per day (`autotopup:{cus}:{date}:{attempt}`)
 //    so even a lost race collapses into one charge;
-//  - cooldown ≥24h and caps of 1/day, 3/month;
+//  - cooldown ≥24h and caps of 1/day, 30/month;
 //  - credits are granted ONLY by the payment_intent.succeeded webhook
 //    (fulfillAutoTopup), never at charge-creation time;
 //  - authentication_required (SCA) can never be retried off-session — the
@@ -15,7 +15,7 @@
 import { and, asc, count, eq, gte, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
-import { applyLedgerDelta, drainPendingReversals, isUnmeteredPlan, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
+import { activeAllowanceSql, applyLedgerDelta, drainPendingReversals, effectiveBalanceSql, isUnmeteredPlan, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
 import { creditTransactions, organizations } from '$lib/server/db/schema';
 import { autoTopupBundle, bundleById, priceIdFor } from '$lib/server/stripe/bundles';
 import { getStripe } from '$lib/server/stripe/client';
@@ -24,7 +24,7 @@ import { refundUngrantablePayment } from '$lib/server/stripe/refunds';
 export const AUTO_TOPUP_DEFAULT_THRESHOLD = 100;
 const COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const MAX_PER_DAY = 1;
-const MAX_PER_MONTH = 3;
+const MAX_PER_MONTH = 30;
 const MAX_CONSECUTIVE_FAILURES = 2;
 // Stripe retries webhook deliveries for up to 3 days; a claim left in_flight
 // past that horizon means the webhook is definitively lost, so the sweep
@@ -33,7 +33,7 @@ const MAX_CONSECUTIVE_FAILURES = 2;
 const STALE_CLAIM_MS = 3 * 24 * 60 * 60 * 1000;
 // The reconciliation window must EXCEED the stale-claim horizon: a claim
 // only becomes stale at 72h, so the very PI it exists to recover was created
-// BEFORE the window. 7 days keeps the list tiny (3/month cap).
+// BEFORE the window. 7 days keeps the list tiny (30/month cap).
 const RECONCILE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface AutoTopupState {
@@ -45,6 +45,7 @@ export interface AutoTopupState {
 	customerId: string | null;
 	defaultPmId: string | null;
 	creditsRemaining: number | null;
+	allowanceRemaining: number;
 	plan: string | null;
 }
 
@@ -56,6 +57,7 @@ export interface AutoTopupState {
  * @throws Error if the organization does not exist
  */
 export async function readAutoTopupState(orgId: string): Promise<AutoTopupState> {
+	const nowIso = new Date().toISOString();
 	const org = await db
 		.select({
 			enabled: organizations.autoTopupEnabled,
@@ -66,6 +68,7 @@ export async function readAutoTopupState(orgId: string): Promise<AutoTopupState>
 			customerId: organizations.stripeCustomerId,
 			defaultPmId: organizations.stripeDefaultPmId,
 			creditsRemaining: organizations.creditsRemaining,
+			allowanceRemaining: activeAllowanceSql(nowIso),
 			plan: organizations.plan
 		})
 		.from(organizations)
@@ -180,7 +183,7 @@ function basicEligibility(org: AutoTopupState): boolean {
 		return false;
 	}
 	if (org.enabled !== 1) return false;
-	if ((org.creditsRemaining ?? 0) >= (org.threshold ?? AUTO_TOPUP_DEFAULT_THRESHOLD)) return false;
+	if ((org.creditsRemaining ?? 0) + org.allowanceRemaining >= (org.threshold ?? AUTO_TOPUP_DEFAULT_THRESHOLD)) return false;
 	if (org.state === 'disabled') {
 		console.error(`auto top-up skipped for org ${org.customerId ?? org.defaultPmId ?? 'unknown'}: disabled (re-authentication or repeated failures)`);
 		return false;
@@ -234,6 +237,7 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 	// price lookup: a manual Checkout grant or a disable can land in between,
 	// and the claim must never charge a card the org no longer needs or has
 	// just disabled (codex review).
+	const claimNowIso = new Date().toISOString();
 	const claimed = await db
 		.update(organizations)
 		.set({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: new Date().toISOString() })
@@ -246,7 +250,7 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 				// lifetime between the eligibility read and this claim must
 				// never be charged for credits it cannot need (MOD-35).
 				ne(organizations.plan, 'lifetime'),
-				sql`COALESCE(${organizations.creditsRemaining}, 0) < COALESCE(${organizations.autoTopupThreshold}, ${AUTO_TOPUP_DEFAULT_THRESHOLD})`,
+				sql`${effectiveBalanceSql(claimNowIso)} < COALESCE(${organizations.autoTopupThreshold}, ${AUTO_TOPUP_DEFAULT_THRESHOLD})`,
 				isNotNull(organizations.stripeCustomerId),
 				isNotNull(organizations.stripeDefaultPmId)
 			)
@@ -607,6 +611,7 @@ export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<numb
 			console.error(`auto top-up sweep failed for org ${row.id}: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
+	const nowIso = new Date().toISOString();
 	const rows = await db
 		.select({ id: organizations.id })
 		.from(organizations)
@@ -619,9 +624,7 @@ export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<numb
 				// it must never be SELECTED either, or enough stale rows fill
 				// the bounded batch and starve metered orgs (I10, review).
 				ne(organizations.plan, 'lifetime'),
-				// COALESCE both sides: a NULL balance (pre-billing org) must read
-				// as 0 here, or SQL NULL comparison silently drops the org.
-				sql`COALESCE(${organizations.creditsRemaining}, 0) < COALESCE(${organizations.autoTopupThreshold}, ${AUTO_TOPUP_DEFAULT_THRESHOLD})`,
+				sql`${effectiveBalanceSql(nowIso)} < COALESCE(${organizations.autoTopupThreshold}, ${AUTO_TOPUP_DEFAULT_THRESHOLD})`,
 				// A cardless org can never be charged (maybeTriggerAutoTopUp
 				// returns false) — excluding it here keeps the bounded batch
 				// full of chargeable orgs: otherwise N ineligible rows could

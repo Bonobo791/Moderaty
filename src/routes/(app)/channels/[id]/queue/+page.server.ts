@@ -1,8 +1,8 @@
 import { db, withBusyRetry } from '$lib/server/db';
 import { comments, auditLog, moderationActions } from '$lib/server/db/schema';
 import { and, eq, desc } from 'drizzle-orm';
-import { refreshAccessToken, getCommentModerationStatus } from '$lib/server/youtube';
-import { applyHumanIntent, finalizeHumanIntent } from '$lib/server/pipeline/enforcement';
+import { refreshAccessToken } from '$lib/server/youtube';
+import { applyHumanIntent, assertChannelActive, finalizeHumanIntent } from '$lib/server/pipeline/enforcement';
 import { decrypt } from '$lib/server/crypto';
 import { ownedChannel } from '$lib/server/ownership';
 import { requireUser } from '$lib/server/session';
@@ -111,22 +111,27 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
 		return { intentId: intent[0].id };
 	}));
 	if (!claim) throw error(404, 'pending comment not found in this channel');
+	// 'missing' means YouTube reports the comment gone — the requested intent
+	// can never be true remotely, so the honest outcome to finalize is
+	// 'deleted', not the verb the user clicked (codex).
+	let remoteMissing = false;
 	try {
+		// The channel snapshot was loaded before the claim — account deletion
+		// can have detached it since. Revalidate the connector identity before
+		// spending the grant, or a remote write fires on a dead channel
+		// (cubic). The catch releases the claim like any remote failure.
+		await assertChannelActive(paramsId, db, ch);
 		const token = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
-		// Preflight the real remote state: approve publishes ANY non-public
-		// state, a landed hold is audited at finalize, and the post-write
-		// verify converges an in-flight hold landing after the decision.
-		const remote = await getCommentModerationStatus(commentId, token);
-		const { holdLanded } = await applyHumanIntent(commentId, action, remote, token);
-		await finalizeHumanIntent(paramsId, commentId, action, holdLanded);
+		remoteMissing = (await applyHumanIntent(commentId, action, token)) === 'missing';
 	} catch (e) {
-		// Release the claim: the comment returns to 'pending', the staged
-		// intent row is dropped (nothing committed), and any hold a concurrent
-		// enforcement superseded on the strength of the claim is re-armed —
-		// one transaction, or the comment can sit 'pending' with a terminally-
-		// superseded hold: public on YouTube while the queue calls it held.
-		// A 'dispatched' hold stays dispatched — the reconcile loop re-verifies
-		// it against the restored 'pending'.
+		// The remote write did not land: release the claim — the comment
+		// returns to 'pending', the staged intent row is dropped (nothing
+		// committed), and any hold a concurrent enforcement superseded on
+		// the strength of the claim is re-armed — one transaction, or the
+		// comment can sit 'pending' with a terminally-superseded hold:
+		// public on YouTube while the queue calls it held. A 'dispatched'
+		// hold stays dispatched — the reconcile loop re-applies it against
+		// the restored 'pending'.
 		await db.transaction(async (transaction) => {
 			await transaction
 				.update(comments)
@@ -146,10 +151,21 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
 		});
 		// Full error detail stays server-side; the client gets a generic
 		// message in the error-box instead of a bare 500 page (I12).
-		console.error(`[queue] ${action} failed for comment ${commentId}`, e);
+		console.error('[queue] %s failed for comment %s', action, commentId, e);
 		return fail(500, { error: 'The YouTube action failed — the comment is back in the queue. Try again.' });
 	}
-	return { success: SUCCESS_TEXT[action] };
+	// The remote write landed — releasing the claim now would revert the
+	// local row and drop the intent while YouTube already reflects the
+	// action: a desync nothing could repair (codeant). Keep 'restoring' +
+	// the durable intent row; the reconcile sweep re-applies the idempotent
+	// write and commits the final status on its next run.
+	try {
+		await finalizeHumanIntent(paramsId, commentId, remoteMissing ? 'delete' : action, ch);
+	} catch (e) {
+		console.error('[queue] %s reached YouTube but finalize failed for comment %s — the reconcile sweep will finish it', action, commentId, e);
+		return fail(500, { error: 'The action reached YouTube but is still being recorded — it resolves automatically.' });
+	}
+	return { success: remoteMissing ? 'The comment no longer exists on YouTube — recorded as deleted.' : SUCCESS_TEXT[action] };
 }
 
 function commentIdFrom(formData: FormData): string | null {

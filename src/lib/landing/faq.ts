@@ -22,6 +22,18 @@ export const FAQ_ENTRIES: FaqEntry[] = [
 		a: 'No. Moderaty is protection-only. It holds, hides, deletes, and bans. It never writes replies, never posts under your name, and never does growth automation.'
 	},
 	{
+		q: 'What is the feedback digest?',
+		a: 'An opt-in report per channel that groups your comments into what keeps coming up: recurring questions, substantive criticism, corrections, and requests. A theme is listed only once enough comments raise it (2 to 10, your threshold). Abusive wording stays concealed inside the digest, which is read-only: it never replies, never posts, and never changes a comment\'s moderation. Run it weekly, every 100 new comments, or only when you ask, and scan back up to 24 months of history. On metered plans each comment it classifies costs one credit, the same as AI scoring.'
+	},
+	{
+		q: 'Can Moderaty clean up comments that are already there?',
+		a: 'Yes. Analyze history re-decides up to 24 months of backlog with the same rules and AI: hold, reject, delete, or ban, exactly as it would on a new comment, drained in background batches. It is a moderation run, so it needs credits or a plan. For read-only insight instead, the feedback digest\'s own history scan covers the same windows and touches nothing.'
+	},
+	{
+		q: 'Can my team help moderate?',
+		a: 'Yes. Invite people to your team with a role. Members moderate: they can work the review queue, write rules, and read the audit log. Admins can also manage channels and invites. Billing and feedback settings stay with the owner.'
+	},
+	{
 		q: 'What YouTube account access does Moderaty need?',
 		a: 'Google\'s standard YouTube permission, the youtube.force-ssl scope; YouTube offers no comments-only permission. Moderaty uses it only to read and moderate comments on the channels you connect, to read your videos\' titles and descriptions as context for the AI\'s tone analysis, and, during setup, to list the channels your Google account owns (titles and IDs) so you can pick which one to connect. If you own several, that list is held briefly in an encrypted cookie while you choose, then discarded. Nothing else. The code is open source under PolyForm Shield, so you can verify exactly what it does with that access.'
 	},

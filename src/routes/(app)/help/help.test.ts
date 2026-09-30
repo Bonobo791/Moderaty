@@ -25,9 +25,9 @@ describe('help tab (reversibility disclosure)', () => {
 
 	it('distinguishes moderation history from read-only feedback history and states preview limits', () => {
 		expect(helpPage).toMatch(/Analyze history on the Overview tab can apply moderation actions to older comments/i);
-		expect(helpPage).toMatch(/Analyze feedback history on the Feedback tab only reads comments and groups feedback; it never changes moderation/i);
+		expect(helpPage).toMatch(/a history scan on the Feedback tab only reads comments and groups feedback; it never changes moderation/i);
 		expect(helpPage).toMatch(/choose 1, 3, 6, 12, or 24 months/i);
-		expect(helpPage).toMatch(/batches of up to 100 comments and continues automatically, even with manual digest cadence/i);
+		expect(helpPage).toMatch(/batches of up to 100 comments and keeps going automatically, even when digests are set to manual/i);
 		expect(helpPage).toMatch(/comments already included in a digest are skipped, and retries are not charged twice/i);
 		expect(helpPage).toMatch(/turning feedback off pauses the scan; re-enabling it resumes where it stopped/i);
 		expect(helpPage).toMatch(/1 free moderation dry run and 1 free feedback dry run/i);

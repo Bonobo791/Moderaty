@@ -14,7 +14,7 @@ vi.mock('$lib/server/youtube', () => ({
 	fetchNewComments: mocks.fetchNewComments
 }));
 
-import { setupTestDb, testDb } from '$lib/server/testdb';
+import { countDbStatements, setupTestDb, testDb } from '$lib/server/testdb';
 import { channels, comments, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, organizations } from '$lib/server/db/schema';
 import { digestDue, generateFeedbackDigest, previewFeedbackDigest } from './feedbackDigest';
 import { CONCEALED_MESSAGE } from './feedbackSanitize';
@@ -417,6 +417,41 @@ test('metered orgs pay one credit per attempted comment, inside the same transac
 	expect(after).toHaveLength(3);
 	const orgAfter = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
 	expect(orgAfter?.creditsRemaining).toBe(7);
+});
+
+test('a 100-comment digest uses the same SQL statement count as a one-comment batch', async () => {
+	await testDb().db.update(organizations).set({ creditsRemaining: 500 }).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC-small', { feedbackEnabled: 1, feedbackThreshold: 101 });
+	await seedChannel('UC-large', { feedbackEnabled: 1, feedbackThreshold: 101 });
+	await seedComment('small-1', 'UC-small', 'small batch comment', '2026-01-01T00:00:00.000Z');
+	RESPONSES['small batch comment'] = { category: 'question', hasAbuse: false, claim: 'small claim' };
+	for (let i = 0; i < 100; i++) {
+		const text = `large batch comment ${i}`;
+		await seedComment(`large-${i}`, 'UC-large', text, new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString());
+		RESPONSES[text] = { category: 'question', hasAbuse: false, claim: `claim ${i}` };
+	}
+
+	const small = await countDbStatements(testDb().db, () => generateFeedbackDigest('UC-small', { force: true }));
+	const large = await countDbStatements(testDb().db, () => generateFeedbackDigest('UC-large', { force: true }));
+	expect(small.value).toMatchObject({ status: 'complete', commentsClassified: 1, creditsUsed: 1 });
+	expect(large.value).toMatchObject({ status: 'complete', commentsClassified: 100, creditsUsed: 100 });
+	expect(small.count).toBe(19);
+	expect(large.count).toBe(small.count);
+});
+
+test('a 100-comment credit shortfall defers without changing the balance or ledger', async () => {
+	await testDb().db.update(organizations).set({ creditsRemaining: 99 }).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC-shortfall', { feedbackEnabled: 1 });
+	for (let i = 0; i < 100; i++) {
+		await seedComment(`short-${i}`, 'UC-shortfall', `shortfall comment ${i}`, new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString());
+	}
+
+	const result = await generateFeedbackDigest('UC-shortfall', { force: true });
+
+	expect(result).toMatchObject({ status: 'deferred', reason: 'credits' });
+	expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBe(99);
+	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(0);
+	expect(vi.mocked(fetch)).not.toHaveBeenCalled();
 });
 
 test('a run interrupted after charging re-anchors instead of re-charging', async () => {
@@ -1009,6 +1044,117 @@ test('a resumed pre-nonce drain keeps the old coverage filter — covered commen
 
 	expect(result).toMatchObject({ status: 'complete', commentsClassified: 1 });
 	expect((await testDb().db.select().from(feedbackHistoryComments).where(eq(feedbackHistoryComments.id, 'fresh')).get())).toBeDefined();
+});
+
+test('a nonce-scan page re-serving a committed row never refreshes its stored snapshot', async () => {
+	// cubic: the unfiltered history page can re-serve a comment an earlier
+	// page of the SAME scan already committed; `run.batch` excludes it while
+	// `historyPage.batch` still carries it. Refreshing the stored snapshot
+	// with the page's (possibly edited) text would let the reveal show words
+	// no digest ever analyzed.
+	await testDb().db.update(organizations).set({ creditsRemaining: 10 }).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC1', {
+		feedbackEnabled: 1,
+		feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z',
+		feedbackHistoryScanId: 'scan-a',
+		feedbackHistoryPageToken: 'page-2'
+	});
+	// h1 was committed by an earlier page of THIS scan with the analyzed text.
+	await testDb().db.insert(feedbackHistoryComments).values({
+		id: 'h1',
+		channelId: 'UC1',
+		text: 'the words the digest analyzed',
+		publishedAt: '2024-01-01T00:00:00.000Z',
+		scanId: 'scan-a'
+	});
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [
+			// The boundary re-serve: same id, different text — filtered from
+			// the batch by the same-scan coverage check.
+			{ id: 'h1', text: 'edited after analysis — never classified', publishedAt: '2024-01-01T00:00:00.000Z' },
+			{ id: 'h2', text: 'fresh history comment', publishedAt: '2024-01-02T00:00:00.000Z' }
+		],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	const result = await generateFeedbackDigest('UC1');
+
+	expect(result).toMatchObject({ status: 'complete', commentsClassified: 1 });
+	const rows = await testDb().db.select().from(feedbackHistoryComments).where(eq(feedbackHistoryComments.channelId, 'UC1')).all();
+	expect(rows.find((row) => row.id === 'h1')?.text).toBe('the words the digest analyzed');
+	expect(rows.find((row) => row.id === 'h2')).toMatchObject({ text: 'fresh history comment', scanId: 'scan-a' });
+});
+
+test('a pre-nonce drain still refreshes the whole re-served page', async () => {
+	// The legacy path (feedbackHistoryScanId NULL — planted before scan ids
+	// existed) cannot tell scans apart, so the all-page refresh stays:
+	// partial refresh would leave stale snapshots a pre-nonce retry can
+	// never repair (cubic).
+	await testDb().db.update(organizations).set({ creditsRemaining: 10 }).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC1', {
+		feedbackEnabled: 1,
+		feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z',
+		feedbackHistoryScanId: null,
+		feedbackHistoryPageToken: 'page-2'
+	});
+	await testDb().db.insert(feedbackHistoryComments).values({
+		id: 'h1',
+		channelId: 'UC1',
+		text: 'committed words',
+		publishedAt: '2024-01-01T00:00:00.000Z',
+		scanId: null
+	});
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [
+			{ id: 'h1', text: 'h1 text refreshed', publishedAt: '2024-01-01T00:00:00.000Z' },
+			{ id: 'h2', text: 'fresh history comment', publishedAt: '2024-01-02T00:00:00.000Z' }
+		],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+
+	const result = await generateFeedbackDigest('UC1');
+
+	expect(result).toMatchObject({ status: 'complete' });
+	const rows = await testDb().db.select().from(feedbackHistoryComments).where(eq(feedbackHistoryComments.channelId, 'UC1')).all();
+	expect(rows.find((row) => row.id === 'h1')?.text).toBe('h1 text refreshed');
+});
+
+test('an org turning unmetered mid-run reports uncharged refs without a credit shortfall', async () => {
+	// cubic: `consumeCreditsBulk` reports the org's metered state read inside
+	// the charge transaction — a concurrent lifetime-plan change produces
+	// uncharged refs with no shortfall owed. Treating every uncharged batch
+	// as InsufficientCreditsError would defer the run needlessly.
+	await testDb().db.update(organizations).set({ creditsRemaining: 0, plan: 'metered' }).where(eq(organizations.id, 'org-1'));
+	await seedChannel('UC1', { feedbackEnabled: 1 });
+	await seedComment('c1', 'UC1', 'when is the next video', '2026-01-05T00:00:00.000Z');
+	// The concurrent plan change: orgIsMetered reads 'metered', then the
+	// upgrade commits before the charge transaction's org read. The first
+	// db.transaction on this path IS chargeFeedbackBatch's — an earlier
+	// transaction appearing would flip the org too soon and this test must
+	// catch that ordering change loudly.
+	type Tx = Parameters<Parameters<ReturnType<typeof testDb>['db']['transaction']>[0]>[0];
+	const realTransaction = testDb().db.transaction.bind(testDb().db);
+	let flipped = false;
+	const txSpy = vi.spyOn(testDb().db, 'transaction').mockImplementation((cb: (tx: Tx) => unknown) =>
+		realTransaction(async (tx: Tx) => {
+			if (!flipped) {
+				flipped = true;
+				await tx.update(organizations).set({ plan: 'lifetime' }).where(eq(organizations.id, 'org-1'));
+			}
+			return cb(tx);
+		}) as never
+	);
+	try {
+		const result = await generateFeedbackDigest('UC1', { force: true });
+
+		expect(result).toMatchObject({ status: 'complete', creditsUsed: 0 });
+		expect(txSpy).toHaveBeenCalledTimes(2); // charge tx + write tx — nothing earlier
+	} finally {
+		txSpy.mockRestore();
+	}
+	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(0);
 });
 
 test('a history source inserted later by moderation is skipped by the ordinary stored digest', async () => {

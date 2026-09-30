@@ -63,10 +63,21 @@ const mocks = vi.hoisted(() => {
 					const channelId = state.channel && typeof state.channel.id === 'string' ? state.channel.id : null;
 					return channelId && (!params.length || params.includes(channelId)) ? state.channel : undefined;
 				}
-				// Ledger balance + metering lookup (consumeCredit's org existence
-				// check and the orgIsMetered gate).
+				// Ledger balance + metering lookup, with the active period balance
+				// absent in this harness. Only the channel's org exists: a lookup
+				// for any other id returns undefined so the ledger's `org not
+				// found` throw fires exactly like production (codeant nitpick).
 				if (table === state.tables.organizations) {
-					return { creditsRemaining: state.credits, plan: state.plan, stripeSubscriptionId: state.stripeSubscriptionId, stripeCustomerId: state.customerId };
+					const params = queryParams(condition);
+					const orgId = state.channel?.orgId;
+					if (typeof orgId !== 'string' || !params.includes(orgId)) return undefined;
+					return {
+						creditsRemaining: state.credits,
+						remaining: state.credits ?? 0,
+						plan: state.plan,
+						stripeSubscriptionId: state.stripeSubscriptionId,
+						stripeCustomerId: state.customerId
+					};
 				}
 				// The ledger's paid-period queries (getCredits' included-credit
 				// sum, consumeCredit's allowance row). The fake seeds no
@@ -191,7 +202,8 @@ const mocks = vi.hoisted(() => {
 								return { returning: async () => [] as Record<string, unknown>[] };
 							}
 						}
-						return { returning: async () => [{ id: 1 }] };
+						const insertedRows = valueRows(values);
+						return { returning: async () => insertedRows.map((row, index) => ({ id: index + 1, refId: row.refId })) };
 					},
 					// Upsert mode (rescans): emulate the real conflict resolution —
 					// a row whose PK already exists merges into the stored row, so
@@ -219,14 +231,12 @@ const mocks = vi.hoisted(() => {
 				where: (condition?: unknown) => {
 					const none = { returning: async () => [] as Record<string, unknown>[] };
 					if (table === state.tables.organizations) {
-						// Ledger balance decrement simulates the real guard: at balance 0
-						// the UPDATE matches nothing (comment stages free — consumeCredit
-						// deletes its row and returns false); otherwise one credit lower.
-						// failCharges forces the same rejection regardless of the balance:
-						// another run exhausted the credits between the budget read and
-						// the atomic charge.
-						if (state.failCharges || (state.credits ?? 0) <= 0) return { returning: async () => [] as Record<string, unknown>[] };
-						state.credits = Math.max(0, (state.credits ?? 0) - 1);
+						// Ledger balance decrement simulates the real guard: when the
+						// balance cannot cover the atomic charge, the update matches
+						// nothing. failCharges forces the concurrent-shortfall path.
+						const amount = queryParams(values.creditsRemaining).find((param): param is number => typeof param === 'number') ?? 1;
+						if (state.failCharges || (state.credits ?? 0) < amount) return { returning: async () => [] as Record<string, unknown>[] };
+						state.credits = Math.max(0, (state.credits ?? 0) - amount);
 						return { returning: async () => [{ creditsRemaining: state.credits }] };
 					}
 					if (table === state.tables.channels) {
@@ -258,16 +268,18 @@ const mocks = vi.hoisted(() => {
 					}
 					if (table === state.tables.comments) {
 						// Status/decidedBy writes honor the where: id predicates AND
-						// status predicates (eq 'restoring' guards the finalize).
+						// status predicates (eq 'restoring' guards the finalize; the
+						// decided-status inArray guards the missing-target converge
+						// flip). RETURNING reports the rows the CAS actually matched.
 						const params = queryParams(condition);
 						const statusFilter = params.filter((param) => COMMENT_STATUSES.has(param as string));
+						const applied: Record<string, unknown>[] = [];
 						const apply = (row: Record<string, unknown>) => {
 							const current = row.status as string;
 							if (params.includes(queryKey(row.id)) && (!statusFilter.length || statusFilter.includes(current))) {
 								Object.assign(row, values);
-								return true;
+								applied.push(row);
 							}
-							return false;
 						};
 						state.insertedComments.forEach(apply);
 						for (const id of state.existingIds) {
@@ -275,9 +287,15 @@ const mocks = vi.hoisted(() => {
 							if (params.includes(id) && (!statusFilter.length || statusFilter.includes(current))) {
 								if ('status' in values) state.commentStatuses[id] = values.status as string;
 								if ('decidedBy' in values) state.commentDecidedBy[id] = values.decidedBy as string;
+								applied.push({ id });
 							}
 						}
-						return none;
+						return {
+							returning: async (fields: unknown) =>
+								fields && typeof fields === 'object'
+									? applied.map((row) => Object.fromEntries(Object.keys(fields).map((key) => [key, row[key]])))
+									: []
+						};
 					}
 					if (table !== state.tables.moderationActions || !('state' in values)) return none;
 					if (values.state === 'dispatched' && !('lastAttemptAt' in values)) {
@@ -300,18 +318,21 @@ const mocks = vi.hoisted(() => {
 							fields && typeof fields === 'object' && 'commentId' in fields ? claimedCommentIds : [];
 						return { returning: returningClaimedIds };
 					}
-					// markDispatched / completeActions / markSuperseded: honor
-					// inArray(commentId, ...) AND any state predicate — transitions
-					// only move rows still in an allowed predecessor state, and
+					// markDispatched / completeActions / markSuperseded / finalize:
+					// honor inArray(commentId, ...) plus any state AND action
+					// predicates — transitions only move rows still in an allowed
+					// predecessor state whose action the query selects, and
 					// RETURNING reports the rows that actually transitioned so
 					// completeActions can gate its audit insert on the rowcount.
 					const params = queryParams(condition);
 					const stateFilter = params.filter((param) => ACTION_STATES.has(param as string));
+					const actionFilter = params.filter((param) => ACTION_VALUES.has(param as string));
 					const transitioned: Record<string, unknown>[] = [];
 					state.moderationActions.forEach((item) => {
 						if (
 							params.includes(queryKey(item.commentId)) &&
-							(!stateFilter.length || stateFilter.includes(item.state))
+							(!stateFilter.length || stateFilter.includes(item.state)) &&
+							(!actionFilter.length || actionFilter.includes(item.action))
 						) {
 							Object.assign(item, values);
 							transitioned.push(item);
@@ -370,7 +391,6 @@ const mocks = vi.hoisted(() => {
 		refreshAccessToken: vi.fn(),
 		fetchNewComments: vi.fn(),
 		fetchVideoMetadata: vi.fn(),
-		getCommentModerationStatus: vi.fn(),
 		setModerationStatus: vi.fn(),
 		deleteComment: vi.fn(),
 		scoreComment: vi.fn(),
@@ -417,7 +437,6 @@ vi.mock('$lib/server/youtube', async (importOriginal) => ({
 	refreshAccessToken: mocks.refreshAccessToken,
 	fetchNewComments: mocks.fetchNewComments,
 	fetchVideoMetadata: mocks.fetchVideoMetadata,
-	getCommentModerationStatus: mocks.getCommentModerationStatus,
 	setModerationStatus: mocks.setModerationStatus,
 	deleteComment: mocks.deleteComment
 }));
@@ -430,6 +449,7 @@ const dialect = new SQLiteSyncDialect();
 
 const COMMENT_STATUSES = new Set(['pending', 'approved', 'held', 'rejected', 'deleted', 'restoring']);
 const ACTION_STATES = new Set(['pending', 'dispatched', 'cancelling', 'completed', 'superseded', 'manual_review']);
+const ACTION_VALUES = new Set(['hold', 'reject', 'ban', 'delete']);
 
 /** Binds the parameters of a real drizzle where-condition so the fake store
  * honors which rows a query actually targets. */
@@ -608,7 +628,6 @@ export function resetPipelineMocks() {
 		mocks.refreshAccessToken,
 		mocks.fetchNewComments,
 		mocks.fetchVideoMetadata,
-		mocks.getCommentModerationStatus,
 		mocks.setModerationStatus,
 		mocks.deleteComment,
 		mocks.scoreComment,
@@ -662,7 +681,6 @@ export function resetPipelineMocks() {
 	mocks.scoreComment.mockResolvedValue(moderation(0.1));
 	mocks.setModerationStatus.mockResolvedValue(undefined);
 	mocks.deleteComment.mockResolvedValue(undefined);
-	mocks.getCommentModerationStatus.mockResolvedValue('rejected');
 	mocks.serializeScores.mockReturnValue('{}');
 	mocks.scoreTone.mockResolvedValue({ score: 0 });
 	mocks.detectJailbreak.mockResolvedValue({ flagged: false, confidence: 0.1 });

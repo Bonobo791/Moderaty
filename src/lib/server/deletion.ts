@@ -13,11 +13,13 @@
 // erases them after 30 days, keeping the row (and its moderation outcome)
 // as the record.
 
-import { and, asc, eq, inArray, isNotNull, isNull, lt, ne, or } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import type Stripe from 'stripe';
 
 import { db } from '$lib/server/db';
-import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, stripeLifetimeSlots, users } from '$lib/server/db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, googleRevocationOutbox, invites, memberships, moderationActions, organizations, rules, sessions, stripeDeletionOutbox, stripeLifetimeSlots, stripeScrubOutbox, users } from '$lib/server/db/schema';
+import { decrypt } from '$lib/server/crypto';
+import { revokeGoogleToken } from '$lib/server/google';
 import { getStripe } from '$lib/server/stripe/client';
 
 export const CONSENT_EMAIL_RETENTION_MS = 10 * 365.25 * 24 * 60 * 60 * 1000; // 10 years
@@ -28,6 +30,64 @@ const AUDIT_HANDLE_SWEEP_BATCH = 50; // same drain-across-runs bound as the cons
 
 /** Placeholder for an erased refresh token — never valid ciphertext, so decrypt fails loudly in cron (AGENTS.md). */
 export const WIPED_REFRESH_TOKEN = 'erased:account-deletion';
+
+/** A channel grant captured by `deleteUserRecords` before the row was erased or wiped. */
+export interface ErasedChannelGrant {
+	id: string;
+	refreshTokenEnc: string;
+	/** The durable revocation-obligation row written inside the erase transaction — deleted once Google confirms. */
+	outboxId: number;
+}
+
+/** Records a failed revocation attempt so the outbox row backs off for the next pass. */
+async function markRevocationAttempt(outboxId: number, attempts = 0): Promise<void> {
+	await db
+		.update(googleRevocationOutbox)
+		.set({ attempts: attempts + 1, lastAttemptAt: new Date().toISOString() })
+		.where(eq(googleRevocationOutbox.id, outboxId));
+}
+
+/**
+ * Revokes at Google each grant captured by `deleteUserRecords`
+ * (channels.userId plus every channel in a dissolved org — those grants
+ * belong to THIS user), honoring the YouTube API ToS. Shared by the
+ * account page's immediate deletion and the zero-credit retention sweep.
+ * A revocation failure is logged loudly and its outbox row marked — the
+ * obligation is durable, so the cron retry (`retryGoogleRevocations`)
+ * converges it instead of orphaning the grant. Channels in surviving team
+ * orgs keep their rows; their dead token fails loudly in cron until a
+ * teammate reconnects.
+ *
+ * @param grants - The grants `deleteUserRecords` captured inside its transaction
+ * @param context - Server-log prefix identifying the caller (e.g. 'account deletion')
+ * @param deadline - Shared run budget: a spent budget defers the remaining
+ *   grants to the outbox (loudly) rather than dying mid-drain on a
+ *   serverless hard limit (codex).
+ */
+export async function revokeChannelGrants(grants: ErasedChannelGrant[], context: string, deadline?: number): Promise<void> {
+	for (let i = 0; i < grants.length; i += 1) {
+		const ch = grants[i];
+		if (deadline !== undefined && Date.now() >= deadline) {
+			console.error(`${context}: shared deadline reached — ${grants.length - i} grant revocation(s) stay queued in the revocation outbox`);
+			break;
+		}
+		try {
+			await revokeGoogleToken(decrypt(ch.refreshTokenEnc), `${context} channel ${ch.id}`, deadline);
+			await db.delete(googleRevocationOutbox).where(eq(googleRevocationOutbox.id, ch.outboxId));
+		} catch (cause) {
+			// The bookkeeping write itself can fail — a retry-mark hiccup must
+			// not abort the drain or the account deletion above it: the
+			// obligation row is durable and the cron retry converges it
+			// regardless of whether the attempt counter advanced (cubic).
+			try {
+				await markRevocationAttempt(ch.outboxId);
+			} catch (markCause) {
+				console.error('could not record token revocation attempt:', ch.id, markCause);
+			}
+			console.error('token revocation failed for channel, deleting anyway:', ch.id, cause);
+		}
+	}
+}
 
 
 type StripeRequestOptionsFactory = () => Stripe.RequestOptions | undefined;
@@ -113,8 +173,8 @@ export async function deleteChannelRecords(
  * @param now - The reference time in milliseconds since the Unix epoch
  * @returns The ISO timestamp 10 years before `now`
  */
-export function consentEmailCutoffIso(now = Date.now()): string {
-	return new Date(now - CONSENT_EMAIL_RETENTION_MS).toISOString();
+export function consentEmailCutoffIso(now?: number): string {
+	return new Date((now ?? Date.now()) - CONSENT_EMAIL_RETENTION_MS).toISOString();
 }
 
 /**
@@ -145,7 +205,28 @@ export function consentEmailCutoffIso(now = Date.now()): string {
  * @throws If the user does not exist or is already tombstoned
  */
 
-type DeletionTx = Pick<typeof db, 'select' | 'insert' | 'update' | 'delete'>;
+export type DeletionTx = Pick<typeof db, 'select' | 'insert' | 'update' | 'delete'>;
+
+/**
+ * Caller hooks for `deleteUserRecords`.
+ */
+export interface DeleteUserOptions {
+	/**
+	 * Runs inside the erase transaction, after the RESERVED write lock is
+	 * taken but before any row is touched. Throw to abort the whole erase
+	 * atomically — the zero-credit sweep uses this to re-verify "still
+	 * unfunded" at the commit boundary: a purchase committed between the
+	 * sweep's pre-check and the erase would otherwise delete a funded
+	 * account (codex+coderabbit).
+	 */
+	assertDeletable?: (tx: DeletionTx) => Promise<void>;
+	/**
+	 * Shared run budget (cron). Post-commit Stripe customer erasure stops
+	 * at the deadline — every skipped customer stays durable in the
+	 * deletion outbox and is retried by `retryStripeCustomerDeletions`.
+	 */
+	deadline?: number;
+}
 
 /**
  * Data-bug guard: a personal org is single-member by definition, but the schema
@@ -290,7 +371,7 @@ async function dissolveOrgs(tx: DeletionTx, dissolveOrgIds: string[]): Promise<s
 	return stripeCustomerIds;
 }
 
-export async function deleteUserRecords(userId: string): Promise<void> {
+export async function deleteUserRecords(userId: string, options?: DeleteUserOptions): Promise<ErasedChannelGrant[]> {
 	// Promotions are logged only AFTER the transaction commits — a pre-commit
 	// log would claim a succession that a rollback erased. The promoted org's
 	// Stripe customer must be anonymized post-commit (the departing last owner
@@ -309,6 +390,15 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 	// the promoted ones: "last owner leaves" is an unreliable proxy for whose
 	// PII the customer holds (codex review).
 	const survivingOrgIds: string[] = [];
+	// Grants being erased — captured INSIDE the transaction so the caller can
+	// revoke them at Google post-commit. Selecting them outside the
+	// transaction would leave a window where a concurrently connected channel
+	// is wiped without its grant ever being revoked (codeant).
+	let erasedGrants: ErasedChannelGrant[] = [];
+	// Surviving orgs' Stripe customers — captured INSIDE the transaction.
+	// Reading them post-commit could fail before the caller ever receives
+	// `erasedGrants`, stranding live Google grants unrevoked (coderabbit).
+	let survivingStripeCustomers: { orgId: string; stripeCustomerId: string }[] = [];
 	await db.transaction(async (tx) => {
 		const user = await tx
 			.select({ googleSub: users.googleSub })
@@ -317,6 +407,15 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 			.get();
 		if (!user || user.googleSub.startsWith('deleted:')) {
 			throw new Error(`deleteUserRecords: user ${userId} not found or already deleted`);
+		}
+		if (options?.assertDeletable) {
+			// Take the RESERVED write lock BEFORE the predicate reads: a
+			// deferred transaction's SELECT leaves a window where a
+			// concurrent purchase commits unseen between the check and the
+			// first DELETE. The self-assign UPDATE makes guard-and-erase
+			// atomic (same pattern as assertChannelActive).
+			await tx.update(users).set({ googleSub: sql`${users.googleSub}` }).where(eq(users.id, userId));
+			await options.assertDeletable(tx);
 		}
 		const personalOrgIds = (
 			await tx.select({ id: organizations.id }).from(organizations).where(eq(organizations.personalFor, userId)).all()
@@ -328,11 +427,68 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 		for (const membership of userMemberships) {
 			if (!dissolveOrgIds.includes(membership.orgId)) survivingOrgIds.push(membership.orgId);
 		}
+		survivingStripeCustomers = survivingOrgIds.length
+			? (
+					await tx
+						.select({ orgId: organizations.id, stripeCustomerId: organizations.stripeCustomerId })
+						.from(organizations)
+						.where(inArray(organizations.id, survivingOrgIds))
+						.all()
+				).flatMap((org) => (org.stripeCustomerId ? [{ orgId: org.orgId, stripeCustomerId: org.stripeCustomerId }] : []))
+			: [];
+		// Persist the anonymization obligation inside the erase transaction:
+		// the scrub is a post-commit Stripe write, so without this row a spent
+		// deadline or a Stripe outage leaves the deleted user's e-mail at
+		// Stripe permanently (codex). Drained post-commit below and retried by
+		// `retryStripeCustomerScrubs`; a row conflicts away when an earlier
+		// departure already queued it.
+		if (survivingStripeCustomers.length) {
+			await tx
+				.insert(stripeScrubOutbox)
+				.values(survivingStripeCustomers.map((customer) => ({ customerId: customer.stripeCustomerId, orgId: customer.orgId })))
+				.onConflictDoNothing();
+		}
 		const channelIds = dissolveOrgIds.length
 			? (
 					await tx.select({ id: channels.id }).from(channels).where(inArray(channels.orgId, dissolveOrgIds)).all()
 				).map((ch) => ch.id)
 			: [];
+		// Capture BEFORE the channel rows are deleted or wiped: the dissolved
+		// orgs' channels (connected or orphan — a dissolving org is
+		// sole-member, so every grant in it belongs to this user) plus every
+		// channel this account connected into a surviving org.
+		const capturedGrants = await tx
+			.select({ id: channels.id, refreshTokenEnc: channels.refreshTokenEnc })
+			.from(channels)
+			.where(
+				and(
+					or(
+						eq(channels.userId, userId),
+						dissolveOrgIds.length ? inArray(channels.orgId, dissolveOrgIds) : undefined
+					),
+					ne(channels.refreshTokenEnc, WIPED_REFRESH_TOKEN)
+				)
+			)
+			.all();
+		// Persist the revocation obligation BEFORE the channel rows die: the
+		// ciphertext is the only thing that can revoke the grant at Google,
+		// so without this row a post-commit crash (or a deadline-killed
+		// drain) orphans a live grant forever (codex). Drained post-commit by
+		// `revokeChannelGrants` and retried by `retryGoogleRevocations`.
+		if (capturedGrants.length) {
+			const queued = await tx
+				.insert(googleRevocationOutbox)
+				.values(capturedGrants.map((g) => ({ channelId: g.id, refreshTokenEnc: g.refreshTokenEnc })))
+				.returning({ id: googleRevocationOutbox.id, channelId: googleRevocationOutbox.channelId });
+			const outboxByChannel = new Map(queued.map((row) => [row.channelId, row.id]));
+			erasedGrants = capturedGrants.map((grant) => {
+				const outboxId = outboxByChannel.get(grant.id);
+				// A missing obligation row means the insert silently dropped the
+				// grant — abort the whole erase rather than orphan it.
+				if (outboxId === undefined) throw new Error(`account deletion: revocation outbox insert dropped channel ${grant.id}`);
+				return { ...grant, outboxId };
+			});
+		}
 		await deleteChannelRecords(tx, channelIds);
 		// Detach team channels this account connected: the row and history stay
 		// with the team; the dead grant is wiped so nothing silently moderates.
@@ -354,27 +510,57 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 			`account deletion: promoted user ${promotion.successorId} to owner of org ${promotion.orgId} (last owner ${userId} was deleted)`
 		);
 	}
+	// Bound every post-commit Stripe call by the caller's deadline: the shared
+	// client retries each request up to twice, so an unbounded call can outlive
+	// the cron budget and keep the caller's grant revocations from ever running
+	// (coderabbit). The factory throws once the budget is spent so no request
+	// starts after it — the same contract as retryStripeCustomerDeletions.
+	const requestOptions: StripeRequestOptionsFactory | undefined =
+		options?.deadline === undefined
+			? undefined
+			: () => {
+					const remaining = options.deadline! - Date.now();
+					if (remaining <= 0) throw new Error('account deletion shared deadline expired');
+					return { timeout: remaining, maxNetworkRetries: 0 };
+				};
 	// Surviving orgs keep their Stripe customer (the team still bills), but
 	// the customer may have been created by the DEPARTING user (any owner can
 	// open Checkout) with their e-mail — that PII must not outlive the
 	// account. Anonymize best-effort for EVERY surviving org the user belonged
 	// to (not just promoted ones — codex review): the e-mail is scrubbed, the
 	// org name and saved card stay for the successor.
-	for (const orgId of survivingOrgIds) {
-		const org = await db
-			.select({ stripeCustomerId: organizations.stripeCustomerId })
-			.from(organizations)
-			.where(eq(organizations.id, orgId))
-			.get();
-		if (!org?.stripeCustomerId) continue;
+	for (let i = 0; i < survivingStripeCustomers.length; i += 1) {
+		const { orgId, stripeCustomerId } = survivingStripeCustomers[i];
+		// The anonymization pass has a durable retry — the outbox row written
+		// in the erase transaction — so a spent budget logs the deferral
+		// loudly rather than silently skipping the PII scrub (coderabbit). The
+		// deadline is checked per org, not once: each call can consume the
+		// rest of the budget.
+		if (options?.deadline !== undefined && Date.now() >= options.deadline) {
+			console.error(
+				`account deletion: shared deadline reached — Stripe customer anonymization stays queued in the scrub outbox for ${survivingStripeCustomers.length - i} org(s): ${survivingStripeCustomers
+					.slice(i)
+					.map((o) => o.orgId)
+					.join(', ')}`
+			);
+			break;
+		}
 		try {
 			// The typed SDK accepts `string | undefined` — an undefined value
 			// would OMIT the field (a no-op), so the identifier is scrubbed
 			// with an empty string instead of null.
-			await getStripe().customers.update(org.stripeCustomerId, { email: '' });
+			if (requestOptions) {
+				await getStripe().customers.update(stripeCustomerId, { email: '' }, requestOptions());
+			} else {
+				await getStripe().customers.update(stripeCustomerId, { email: '' });
+			}
+			// Confirmed scrubbed — the durable obligation is discharged. If
+			// THIS delete fails the row stays queued: the retry re-scrubs
+			// idempotently (email '' twice is the same outcome).
+			await db.delete(stripeScrubOutbox).where(eq(stripeScrubOutbox.customerId, stripeCustomerId));
 		} catch (error) {
 			console.error(
-				`account deletion: could not anonymize Stripe customer ${org.stripeCustomerId} for surviving org ${orgId}: ${error instanceof Error ? error.message : String(error)}`
+				`account deletion: could not anonymize Stripe customer ${stripeCustomerId} for surviving org ${orgId}: ${error instanceof Error ? error.message : String(error)} — queued in the scrub outbox for cron retry`
 			);
 		}
 	}
@@ -384,10 +570,23 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 	// privacy must not be held hostage by Stripe availability (the same
 	// contract as revokeGoogleToken on channel grants). The OUTBOX row keeps
 	// the obligation durable: the cron retry erases it once Stripe confirms.
-	for (const customerId of stripeCustomerIds) {
+	for (let i = 0; i < stripeCustomerIds.length; i += 1) {
+		const customerId = stripeCustomerIds[i];
+		// The outbox row is the durable obligation — stopping here on a spent
+		// deadline loses nothing; the next sweep retries (codex).
+		if (options?.deadline !== undefined && Date.now() >= options.deadline) {
+			console.error(
+				`account deletion: shared deadline reached — ${stripeCustomerIds.length - i} Stripe customer erasure(s) stay queued in the outbox`
+			);
+			break;
+		}
 		try {
-			await cancelCustomerSubscriptions(customerId);
-			await getStripe().customers.del(customerId);
+			await cancelCustomerSubscriptions(customerId, requestOptions);
+			if (requestOptions) {
+				await getStripe().customers.del(customerId, undefined, requestOptions());
+			} else {
+				await getStripe().customers.del(customerId);
+			}
 			await db.delete(stripeDeletionOutbox).where(eq(stripeDeletionOutbox.customerId, customerId));
 		} catch (error) {
 			console.error(
@@ -395,6 +594,7 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 			);
 		}
 	}
+	return erasedGrants;
 }
 
 /**
@@ -409,6 +609,53 @@ export async function deleteUserRecords(userId: string): Promise<void> {
 // (wrong Stripe mode, already-deleted customer) must not occupy the bounded
 // batch on every invocation and starve newer obligations.
 const DELETION_RETRY_BACKOFF_MS = 60 * 60 * 1000;
+
+/**
+ * Retries Google grant revocations owed by account teardowns — the outbox
+ * row was written inside the erase transaction, so a post-commit crash or a
+ * deadline-killed drain can never orphan a live grant (codex). Bounded per
+ * invocation (I10), oldest-due first with the shared hourly backoff; a row
+ * is removed only after Google confirms the revocation.
+ *
+ * @returns The number of grants confirmed revoked
+ */
+export async function retryGoogleRevocations(limit = 10, deadline?: number): Promise<number> {
+	const backoffCutoff = new Date(Date.now() - DELETION_RETRY_BACKOFF_MS).toISOString();
+	const rows = await db
+		.select()
+		.from(googleRevocationOutbox)
+		.where(or(isNull(googleRevocationOutbox.lastAttemptAt), lt(googleRevocationOutbox.lastAttemptAt, backoffCutoff)))
+		.orderBy(asc(googleRevocationOutbox.lastAttemptAt), asc(googleRevocationOutbox.id))
+		.limit(limit)
+		.all();
+	let revoked = 0;
+	for (let i = 0; i < rows.length; i += 1) {
+		const row = rows[i];
+		// Same shared-budget guard as the Stripe outbox: each revocation has
+		// its own timeout, so the sweep must stop before the remaining calls
+		// would eat the whole serverless window (codex).
+		if (deadline !== undefined && Date.now() >= deadline) {
+			console.error(`google revocation outbox stopped early: shared deadline expired — ${rows.length - i} row(s) deferred to the next invocation`);
+			break;
+		}
+		try {
+			await revokeGoogleToken(decrypt(row.refreshTokenEnc), `google revocation retry channel ${row.channelId}`, deadline);
+			await db.delete(googleRevocationOutbox).where(eq(googleRevocationOutbox.id, row.id));
+			revoked += 1;
+		} catch (error) {
+			// The bookkeeping write itself can fail — a retry-mark hiccup must
+			// not abort the rest of the batch: the row is durable and the next
+			// invocation converges it either way (cubic).
+			try {
+				await markRevocationAttempt(row.id, row.attempts);
+			} catch (markCause) {
+				console.error('could not record google revocation retry attempt:', row.channelId, markCause);
+			}
+			console.error(`google revocation retry ${row.attempts + 1} failed for channel ${row.channelId}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+	return revoked;
+}
 
 export async function retryStripeCustomerDeletions(limit = 10, deadline?: number): Promise<number> {
 	// Fair rotation (codex): never-attempted rows first (NULL lastAttemptAt —
@@ -474,6 +721,67 @@ export async function retryStripeCustomerDeletions(limit = 10, deadline?: number
 }
 
 /**
+ * Retries the Stripe customer anonymizations owed by account teardowns — the
+ * outbox row was written inside the erase transaction, so a spent post-commit
+ * deadline or a Stripe outage can never leave a deleted user's e-mail on a
+ * surviving org's customer permanently (codex). Same contract as
+ * `retryStripeCustomerDeletions`: bounded, oldest-due first with the shared
+ * hourly backoff, the row deleted only after Stripe confirms the scrub.
+ *
+ * @returns The number of customers confirmed anonymized
+ */
+export async function retryStripeCustomerScrubs(limit = 10, deadline?: number): Promise<number> {
+	const backoffCutoff = new Date(Date.now() - DELETION_RETRY_BACKOFF_MS).toISOString();
+	const rows = await db
+		.select()
+		.from(stripeScrubOutbox)
+		.where(or(isNull(stripeScrubOutbox.lastAttemptAt), lt(stripeScrubOutbox.lastAttemptAt, backoffCutoff)))
+		.orderBy(asc(stripeScrubOutbox.lastAttemptAt), asc(stripeScrubOutbox.id))
+		.limit(limit)
+		.all();
+	let scrubbed = 0;
+	for (const row of rows) {
+		const remainingMs = deadline === undefined ? undefined : deadline - Date.now();
+		if (remainingMs !== undefined && remainingMs <= 0) {
+			console.error(
+				`stripe scrub outbox stopped early: shared deadline expired — ${rows.length - rows.indexOf(row) - 1} row(s) deferred to the next invocation`
+			);
+			break;
+		}
+		try {
+			// Same request-bounding contract as the deletion retry: the shared
+			// client's retries are disabled and the timeout is the remaining
+			// budget, so one hanging call cannot blow the cron window.
+			const requestOptions: StripeRequestOptionsFactory | undefined =
+				deadline === undefined
+					? undefined
+					: () => {
+							const remaining = deadline - Date.now();
+							if (remaining <= 0) throw new Error('stripe scrub shared deadline expired');
+							return { timeout: remaining, maxNetworkRetries: 0 };
+						};
+			if (requestOptions) {
+				await getStripe().customers.update(row.customerId, { email: '' }, requestOptions());
+			} else {
+				await getStripe().customers.update(row.customerId, { email: '' });
+			}
+			await db.delete(stripeScrubOutbox).where(eq(stripeScrubOutbox.id, row.id));
+			scrubbed += 1;
+		} catch (error) {
+			const attempts = row.attempts + 1;
+			await db
+				.update(stripeScrubOutbox)
+				.set({ attempts, lastAttemptAt: new Date().toISOString() })
+				.where(eq(stripeScrubOutbox.id, row.id));
+			console.error(
+				`stripe scrub retry ${attempts} failed for customer ${row.customerId} (org ${row.orgId}): ${error instanceof Error ? error.message : String(error)}`
+			);
+		}
+	}
+	return scrubbed;
+}
+
+/**
  * Erases the e-mail from consent records older than the 10-year retention period.
  *
  * The consent ROW is kept (document version, checkbox text, timestamps stay
@@ -510,8 +818,8 @@ export async function nullExpiredConsentEmails(): Promise<number> {
  * @param now - The reference time in milliseconds since the Unix epoch
  * @returns The ISO timestamp 30 days before `now`
  */
-export function auditHandleCutoffIso(now = Date.now()): string {
-	return new Date(now - AUDIT_HANDLE_RETENTION_MS).toISOString();
+export function auditHandleCutoffIso(now?: number): string {
+	return new Date((now ?? Date.now()) - AUDIT_HANDLE_RETENTION_MS).toISOString();
 }
 
 /**
@@ -521,16 +829,16 @@ export function auditHandleCutoffIso(now = Date.now()): string {
  * (audit_log's INTEGER id, moderation_actions' TEXT commentId) so each
  * handle-bearing table is a thin wrapper calling this helper.
  */
-async function nullExpiredHandlesBatch<Id>(
+const nullExpiredHandlesBatch = async <Id>(
 	selectExpiredIds: (cutoffIso: string) => Promise<{ id: Id }[]>,
 	nullHandlesByIds: (ids: Id[]) => Promise<unknown>
-): Promise<number> {
+): Promise<number> => {
 	const expired = await selectExpiredIds(auditHandleCutoffIso());
 	// Stryker disable next-line ConditionalExpression: false equivalent — with zero expired rows the update runs inArray([]) (drizzle compiles to `false`, no rows updated) and expired.length is 0, so the skipped early return returns the same 0.
 	if (!expired.length) return 0;
 	await nullHandlesByIds(expired.map((row) => row.id));
 	return expired.length;
-}
+};
 
 /**
  * Erases stored commenter handles from audit rows older than the 30-day

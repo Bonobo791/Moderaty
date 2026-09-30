@@ -204,8 +204,18 @@ One-time setup (human, in the Coolify dashboard):
 5. **Scheduled Task** (Scheduled Tasks → application): expression `* * * * *`,
    command `APP_URL=http://127.0.0.1:3000 node scripts/dev-cron.mjs --once`.
    One task replaces the Netlify Scheduled Function; N channels ⇒ each
-   channel scanned every N minutes, exactly as on Netlify. Failures appear as
-   failed tasks — loud, never silent.
+   channel scanned every N minutes, exactly as on Netlify. The script exits
+   non-zero (→ Coolify's task-failure notification) only for
+   operator-actionable failures: the endpoint unreachable/non-OK, a failed
+   sweep (`ok:false`), `budgetExhausted`, a lost run-health write, or a
+   channel error category the owner cannot fix. Channel-owner states —
+   `credits` (top-up needed) and `token` (reconnect needed) — are persistent
+   and already surfaced on the dashboard, so they log a warning and keep the
+   task green instead of emailing once a minute until the owner acts.
+   Optionally set **`HEALTHCHECK_PING_URL`** (Runtime Variable; healthchecks.io
+   or a Uptime Kuma push monitor) — every answered tick pings it, a thrown
+   tick stays silent, so the monitor alerts once per outage and also catches
+   the task never running at all, which an exit code can't report.
 6. **Domain**: the app's fqdn is the *origin* hostname (e.g.
    `moderaty-prod.<server>`); the public domain points at Bunny (§5), not at
    the app.

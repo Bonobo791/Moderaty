@@ -113,8 +113,17 @@ describe('users', () => {
 			email: { notNull: true },
 			display_name: { notNull: true },
 			plan: { notNull: true, hasDefault: true },
+			zero_credits_since: { notNull: false },
+			zero_credits_notified_at: { notNull: false },
+			zero_credits_warned_at: { notNull: false },
+			zero_credits_checked_at: { notNull: false },
 			created_at: { notNull: true, hasDefault: true }
 		});
+	});
+
+	test('zero-credit countdown columns are nullable and rotation-indexed', async () => {
+		const { users } = await loadSchema();
+		expectIndex(users, 'users_zero_credits_checked_idx', ['zero_credits_checked_at']);
 	});
 
 	test('google_sub is unique and plan defaults to free', async () => {

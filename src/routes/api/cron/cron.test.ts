@@ -10,7 +10,8 @@ const mocks = vi.hoisted(() => ({
 	env: { CRON_SECRET: 'test-secret', DRY_RUN: 'true' } as Record<string, string | undefined>,
 	runChannel: vi.fn(),
 	generateFeedbackDigest: vi.fn(),
-	retryStripeCustomerDeletions: vi.fn(async (_limit: number, _deadline: number) => 0)
+	retryStripeCustomerDeletions: vi.fn(async (_limit: number, _deadline: number) => 0),
+	sweepZeroCreditAccounts: vi.fn(async (_limit: number, _deadline: number) => ({ evaluated: 0, warned: 0, deleted: 0, errors: 0 }))
 }));
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
@@ -24,6 +25,12 @@ vi.mock('$lib/server/deletion', async (importOriginal) => {
 	// Spy on just the outbox retry (the other deletion sweeps stay real) so a
 	// test can pin the shared deadline the route hands it.
 	return { ...actual, retryStripeCustomerDeletions: mocks.retryStripeCustomerDeletions };
+});
+vi.mock('$lib/server/zeroCredits', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('$lib/server/zeroCredits')>();
+	// The sweep itself is unit-tested in zeroCredits.test.ts; here the mock
+	// pins the cron wiring (deadline hand-off, payload fields, error surfacing).
+	return { ...actual, sweepZeroCreditAccounts: mocks.sweepZeroCreditAccounts };
 });
 
 import { GET } from './+server';
@@ -110,7 +117,14 @@ function expectDrainState(row: Awaited<ReturnType<typeof channelRow>>, boundary:
 }
 
 test('rejects a request with no secret at all', async () => {
-	await expectUnauthorized();
+	const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+	try {
+		await expectUnauthorized();
+		expect(warnSpy).toHaveBeenCalledWith('cron: rejected request — no credentials');
+	} finally {
+		warnSpy.mockRestore();
+	}
 });
 
 test('the stripe deletion outbox retry shares the cron deadline (bounded, never eats the moderation window)', async () => {
@@ -129,9 +143,67 @@ test('the stripe deletion outbox retry shares the cron deadline (bounded, never 
 	expect(deadline).toBeGreaterThan(Date.now() - 30_000); // a live budget, not the past
 });
 
-test('rejects a wrong secret in both query and header', async () => {
-	await expectUnauthorized({ query: 'wrong' });
-	await expectUnauthorized({ bearer: 'wrong' });
+test('the zero-credit sweep shares the cron deadline and reports its counts', async () => {
+	mocks.env.DRY_RUN = 'false';
+	mocks.sweepZeroCreditAccounts.mockClear();
+	mocks.sweepZeroCreditAccounts.mockResolvedValueOnce({ evaluated: 12, warned: 3, deleted: 1, errors: 2 });
+
+	const res = await call({ query: 'test-secret' });
+
+	expect(mocks.sweepZeroCreditAccounts).toHaveBeenCalledTimes(1);
+	const [limit, deadline] = mocks.sweepZeroCreditAccounts.mock.calls[0] as [number, number];
+	expect(limit).toBe(25);
+	expect(typeof deadline).toBe('number');
+	expect(deadline).toBeGreaterThan(Date.now() - 30_000);
+	expect(await res.json()).toMatchObject({
+		// codeant: per-account eval failures must mark the tick failed —
+		// an ok:true response lets a permanently throwing evaluation retry
+		// forever, invisible to every scheduler.
+		ok: false,
+		zeroCreditAccountsChecked: 12,
+		zeroCreditWarningsSent: 3,
+		zeroCreditAccountsDeleted: 1,
+		zeroCreditItemErrors: 2,
+		zeroCreditSweepError: null
+	});
+});
+
+test('a zero-credit sweep failure surfaces in the payload without stopping moderation', async () => {
+	mocks.env.DRY_RUN = 'false';
+	mocks.sweepZeroCreditAccounts.mockRejectedValueOnce(new Error('db exploded'));
+	await seedChannel('UC1');
+	mocks.runChannel.mockResolvedValue(runResult());
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+	try {
+		const res = await call({ bearer: 'test-secret' });
+		expect(await res.json()).toMatchObject({ ok: false, zeroCreditSweepError: 'db exploded' });
+		// The sweep threw but the channel still ran — retention must never
+		// starve scheduled moderation.
+		expect(mocks.runChannel).toHaveBeenCalledWith('UC1', expect.anything());
+	} finally {
+		errorSpy.mockRestore();
+	}
+});
+
+test('rejects a wrong secret in both query and header without logging the provided value', async () => {
+	const providedSecret = 'never-log-this-secret-value';
+	const consoleSpies = [
+		vi.spyOn(console, 'info').mockImplementation(() => {}),
+		vi.spyOn(console, 'warn').mockImplementation(() => {}),
+		vi.spyOn(console, 'error').mockImplementation(() => {})
+	];
+
+	try {
+		await expectUnauthorized({ query: 'wrong' });
+		await expectUnauthorized({ bearer: providedSecret });
+
+		expect(consoleSpies[1]).toHaveBeenCalledWith('cron: rejected request — secret mismatch');
+		const loggedArguments = consoleSpies.flatMap((spy) => spy.mock.calls.flat().map(String));
+		expect(loggedArguments.join(' ')).not.toContain(providedSecret);
+	} finally {
+		consoleSpies.forEach((spy) => spy.mockRestore());
+	}
 });
 
 test('rejects length-mismatched secrets without throwing a 500', async () => {
@@ -142,23 +214,35 @@ test('rejects length-mismatched secrets without throwing a 500', async () => {
 
 test('fails loudly when CRON_SECRET is not configured', async () => {
 	delete mocks.env.CRON_SECRET;
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-	// Exact message: an emptied message stayed green in the mutation audit —
-	// "fail loudly" means a clear message, not just any 500.
-	await expect(call({ bearer: 'anything' })).rejects.toMatchObject({
-		status: 500,
-		body: { message: 'CRON_SECRET is not configured' }
-	});
+	try {
+		// Exact message: an emptied message stayed green in the mutation audit —
+		// "fail loudly" means a clear message, not just any 500.
+		await expect(call({ bearer: 'anything' })).rejects.toMatchObject({
+			status: 500,
+			body: { message: 'CRON_SECRET is not configured' }
+		});
+		expect(errorSpy).toHaveBeenCalledWith('cron: CRON_SECRET is not configured');
+	} finally {
+		errorSpy.mockRestore();
+	}
 });
 
 test('rejects a malformed Authorization header even with a valid query secret', async () => {
 	const url = new URL('http://localhost/api/cron?secret=test-secret');
 	const request = new Request(url, { headers: { authorization: 'Basic anything' } });
+	const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-	await expect(GET({ url, request } as never)).rejects.toMatchObject({
-		status: 401,
-		body: { message: 'bad secret' }
-	});
+	try {
+		await expect(GET({ url, request } as never)).rejects.toMatchObject({
+			status: 401,
+			body: { message: 'bad secret' }
+		});
+		expect(warnSpy).toHaveBeenCalledWith('cron: rejected request — malformed Authorization header');
+	} finally {
+		warnSpy.mockRestore();
+	}
 });
 
 test('rejects a non-Bearer scheme even when its tail is the secret', async () => {
@@ -188,6 +272,56 @@ test.each(SECRET_FORMS)('accepts the $label', async ({ secret }) => {
 	expect(await res.json()).toMatchObject({ ok: true, results: {} });
 });
 
+test('logs when there is no active, unleased channel to run', async () => {
+	const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+
+	try {
+		await call({ bearer: 'test-secret' });
+		expect(infoSpy).toHaveBeenCalledWith('cron: no active, unleased channel to run');
+	} finally {
+		infoSpy.mockRestore();
+	}
+});
+
+test('logs the claimed channel id and resume state', async () => {
+	await seedChannel('UC-claimed');
+	mocks.runChannel.mockResolvedValue(runResult());
+	const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+
+	try {
+		await call({ bearer: 'test-secret' });
+		expect(infoSpy).toHaveBeenCalledWith(
+			'cron: claimed channel UC-claimed (lastRunAt=never, cursor=none, resumingPage=false, dryRunDrain=false)'
+		);
+		expect(infoSpy).toHaveBeenCalledWith(expect.stringMatching(/^cron: channel UC-claimed finished in \d+ms — health=none$/));
+	} finally {
+		infoSpy.mockRestore();
+	}
+});
+
+test('reports when sweeps consume the run budget and marks the payload exhausted', async () => {
+	vi.useFakeTimers();
+	vi.setSystemTime(new Date(1_000));
+	const infoSpy = vi.spyOn(console, 'info').mockImplementation((message) => {
+		if (message === 'dry run: consent e-mail retention sweep skipped') vi.setSystemTime(new Date(21_025));
+	});
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+	try {
+		const response = await call({ bearer: 'test-secret' });
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toMatchObject({ ok: true, budgetExhausted: true, results: {} });
+		expect(errorSpy).toHaveBeenCalledWith(
+			'cron: sweeps consumed the 20000ms run budget (20025ms) — no channel claimed this tick'
+		);
+	} finally {
+		infoSpy.mockRestore();
+		errorSpy.mockRestore();
+		vi.useRealTimers();
+	}
+});
+
 test('runs the channel with a server-side deadline inside the caller abort window', async () => {
 	await seedChannel('UC1');
 	const before = Date.now();
@@ -196,7 +330,8 @@ test('runs the channel with a server-side deadline inside the caller abort windo
 
 	expect(mocks.runChannel).toHaveBeenCalledWith('UC1', expect.objectContaining({
 		// The scheduled function aborts at 25s; the server must stop before that.
-		deadline: expect.any(Number)
+		deadline: expect.any(Number),
+		maxPages: 1
 	}));
 	const deadline = mocks.runChannel.mock.calls[0][1].deadline;
 	const windowMs = deadline - before;
@@ -244,12 +379,15 @@ test('exits cleanly when the atomic claim matches 0 rows (concurrent claimant)',
 		 WHEN NEW.lease_expires_at IS NOT NULL
 		 BEGIN SELECT RAISE(IGNORE); END`
 	);
+	const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
 	try {
 		const res = await call({ bearer: 'test-secret' });
 
 		expect(await res.json()).toMatchObject({ ok: true, claimed: false, results: {} });
 		expect(mocks.runChannel).not.toHaveBeenCalled();
+		expect(infoSpy).toHaveBeenCalledWith('cron: lost claim race for channel UC-race');
 	} finally {
+		infoSpy.mockRestore();
 		await testDb().client.execute('DROP TRIGGER ignore_channel_claim');
 	}
 });
@@ -392,7 +530,7 @@ test('a failing channel run reports failure, never success', async () => {
 		expect(await res.json()).toMatchObject({ ok: false, results: { 'UC-bad': { error: 'quota' } } });
 		// The failure is logged loudly with the channel id (an emptied log
 		// message stayed green in the mutation audit).
-		expect(errorSpy).toHaveBeenCalledWith('channel run UC-bad failed:', expect.any(Error));
+		expect(errorSpy).toHaveBeenCalledWith('channel run %s failed:', 'UC-bad', expect.any(Error));
 		// The run is still recorded, so a failing channel cannot starve the others.
 		const row = await testDb().db.select().from(channels).where(eq(channels.id, 'UC-bad')).get();
 		expect(row?.lastRunAt).not.toBeNull();
@@ -485,10 +623,9 @@ test.each([
 	// cubic+coderabbit, PR #142: a YouTube pagination failure is NOT an auth
 	// failure — "reconnect the channel" would send the user on a false errand.
 	{ label: 'expired page token', message: 'The request specifies an invalid page token.', category: 'error' },
-	// cubic, PR #142: a YouTube moderation-action verification failure is not
-	// an AI scoring failure — the word "moderation" alone must not win.
-	{ label: 'action verification', message: 'moderation action c1 verification failed: 500 Internal Server Error', category: 'error' },
-	{ label: 'moderationStatus validation', message: 'comments.list response moderationStatus is unsupported: x', category: 'error' }
+	// YouTube moderation write failures are provider errors, not AI scoring
+	// failures — the word "moderation" alone must not win.
+	{ label: 'moderation write', message: 'setModerationStatus failed: 500 Internal Server Error', category: 'error' }
 ])('a failed run persists failed health for a $label failure and never touches the success fields', async ({ message, category }) => {
 	// MOD-7: a failed run must not update the success timestamp/status — the
 	// dashboard's "last checked" freshness used to lie because only
@@ -628,7 +765,7 @@ test('a sweep failure is reported and does not stop the channel run', async () =
 		expect(mocks.runChannel).toHaveBeenCalledWith('UC-live', expect.objectContaining({ deadline: expect.any(Number) }));
 		// The sweep failure is logged loudly (an emptied log message stayed
 		// green in the mutation audit).
-		expect(errorSpy).toHaveBeenCalledWith('consent e-mail retention sweep failed:', expect.any(Error));
+		expect(errorSpy).toHaveBeenCalledWith('%s failed:', 'consent e-mail retention sweep', expect.any(Error));
 	} finally {
 		errorSpy.mockRestore();
 		await testDb().client.execute('DROP TRIGGER fail_consent_update');
@@ -717,7 +854,7 @@ test('a handle sweep failure is reported and does not stop the channel run', asy
 		expect(body.actionHandlesNulled).toBe(0);
 		expect(mocks.runChannel).toHaveBeenCalledWith('UC-live', expect.objectContaining({ deadline: expect.any(Number) }));
 		// The sweep failure is logged loudly.
-		expect(errorSpy).toHaveBeenCalledWith('commenter-handle retention sweep failed:', expect.any(Error));
+		expect(errorSpy).toHaveBeenCalledWith('%s failed:', 'commenter-handle retention sweep', expect.any(Error));
 	} finally {
 		errorSpy.mockRestore();
 		await testDb().client.execute('DROP TRIGGER fail_audit_handle_update');

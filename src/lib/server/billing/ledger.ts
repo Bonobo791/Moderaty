@@ -5,7 +5,7 @@
 // idempotent (a comment is consumed once, a checkout session granted once —
 // webhooks and retries can never double-apply).
 
-import { and, asc, desc, eq, gt, gte, inArray, lt, ne, or, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, gte, inArray, lt, ne, or, sql } from 'drizzle-orm';
 import { db } from '$lib/server/db';
 import { creditTransactions, organizations, stripePendingReversals, stripeSubscriptionPeriods, stripeDisputeReversals } from '$lib/server/db/schema';
 
@@ -28,13 +28,13 @@ export type LedgerHandle = Pick<typeof db, 'insert' | 'update' | 'select' | 'del
  * @param run - The mutation callback to execute
  * @returns The value produced by the mutation callback
  */
-async function inLedgerTx<T>(handle: LedgerHandle, run: (tx: LedgerHandle) => Promise<T>): Promise<T> {
+const inLedgerTx = async <T>(handle: LedgerHandle, run: (tx: LedgerHandle) => Promise<T>): Promise<T> => {
 	const withTx = (handle as { transaction?: (cb: (tx: LedgerHandle) => Promise<T>) => Promise<T> }).transaction;
 	// .call(handle): drizzle's transaction() reads this.session — an unbound
 	// method reference would crash on `this`.
 	if (withTx) return withTx.call(handle, (tx) => run(tx as LedgerHandle));
 	return run(handle);
-}
+};
 
 export interface LedgerDelta {
 	orgId: string;
@@ -58,6 +58,41 @@ export function hasHostedEntitlement(input: { plan: string; stripeSubscriptionId
 	return input.plan === 'hosted' || (input.plan !== 'lifetime' && typeof input.stripeSubscriptionId === 'string');
 }
 
+// A paid, in-window subscription period always contributes its unconsumed
+// included comments — the org paid for them and they were never refunded,
+// whatever the current plan (a cancel→lifetime upgrade keeps the hosted
+// period live until it ends). No plan gate here: the period row's status +
+// window is the authority.
+export function activeAllowanceSql(nowIso: string) {
+	return sql<number>`COALESCE((
+		SELECT SUM(p.included_credits - p.consumed_credits)
+		FROM stripe_subscription_periods AS p
+		WHERE p.org_id = organizations.id
+			AND p.status = 'paid'
+			AND p.period_start <= ${nowIso}
+			AND p.period_end > ${nowIso}
+	), 0)`;
+}
+
+export function effectiveBalanceSql(nowIso: string) {
+	return sql<number>`COALESCE(${organizations.creditsRemaining}, 0) + ${activeAllowanceSql(nowIso)}`;
+}
+
+/**
+ * True when the org ever received a paid subscription period — the durable
+ * receipt of billing engagement. A bare `stripeSubscriptionId` is NOT:
+ * `customer.subscription.created` stores it even for 'incomplete' subs whose
+ * payment never ran, so the id alone must never mark an account as having
+ * purchased (codex — the never-purchased retention exemption depends on it).
+ * A 'void' period proves nothing; paid/disputed/refunded all mean money moved.
+ */
+export function paidSubscriptionPeriodExistsSql() {
+	return sql<number>`EXISTS (
+		SELECT 1 FROM stripe_subscription_periods AS p
+		WHERE p.org_id = organizations.id AND p.status != 'void'
+	)`;
+}
+
 /**
  * Retrieves an organization's current credit balance.
  *
@@ -65,24 +100,14 @@ export function hasHostedEntitlement(input: { plan: string; stripeSubscriptionId
  * @returns The remaining credit balance, treating a missing balance as zero
  */
 export async function getCredits(orgId: string): Promise<number> {
+	const nowIso = new Date().toISOString();
 	const row = await db
-		.select({ creditsRemaining: organizations.creditsRemaining })
+		.select({ remaining: effectiveBalanceSql(nowIso) })
 		.from(organizations)
 		.where(eq(organizations.id, orgId))
 		.get();
 	if (!row) throw new Error(`org not found: ${orgId}`);
-	// A paid, in-window subscription period always contributes its
-	// unconsumed included comments — the org paid for them and they were
-	// never refunded, whatever the current plan (a cancel→lifetime upgrade
-	// keeps the hosted period live until it ends). No plan gate here: the
-	// period row's status + window is the authority.
-	const now = new Date().toISOString();
-	const period = await db
-		.select({ remaining: sql<number>`COALESCE(SUM(${stripeSubscriptionPeriods.includedCredits} - ${stripeSubscriptionPeriods.consumedCredits}), 0)` })
-		.from(stripeSubscriptionPeriods)
-		.where(and(eq(stripeSubscriptionPeriods.orgId, orgId), eq(stripeSubscriptionPeriods.status, 'paid'), sql`${stripeSubscriptionPeriods.periodStart} <= ${now}`, gt(stripeSubscriptionPeriods.periodEnd, now)))
-		.get();
-	return (row.creditsRemaining ?? 0) + (period?.remaining ?? 0);
+	return row.remaining;
 }
 
 /**
@@ -107,6 +132,21 @@ export function isUnmeteredPlan(plan: string | null | undefined): boolean {
 	return UNMETERED_PLANS.has(plan ?? '');
 }
 
+/**
+ * The metered predicate on an already-loaded org row — shared by
+ * `orgIsMetered` and the zero-credit retention sweep so both classify the
+ * same row identically (a metered org is billing-engaged: hosted plan,
+ * subscription id, or a credit balance ever granted).
+ */
+export function orgRowIsMetered(row: {
+	plan: string;
+	stripeSubscriptionId: string | null;
+	creditsRemaining: number | null;
+}): boolean {
+	if (isUnmeteredPlan(row.plan)) return false;
+	return hasHostedEntitlement(row) || row.creditsRemaining !== null;
+}
+
 export async function orgIsMetered(orgId: string): Promise<boolean> {
 	const row = await db
 		.select({ creditsRemaining: organizations.creditsRemaining, plan: organizations.plan, stripeSubscriptionId: organizations.stripeSubscriptionId })
@@ -114,8 +154,7 @@ export async function orgIsMetered(orgId: string): Promise<boolean> {
 		.where(eq(organizations.id, orgId))
 		.get();
 	if (!row) throw new Error(`org not found: ${orgId}`);
-	if (isUnmeteredPlan(row.plan)) return false;
-	return hasHostedEntitlement(row) || row.creditsRemaining !== null;
+	return orgRowIsMetered(row);
 }
 
 export const UNMETERED_CREDIT_PURCHASE_ERROR = 'the lifetime plan includes unlimited moderated comments — credit purchases are not available';
@@ -205,7 +244,10 @@ export async function applyLedgerDelta(
 			// only math that restores correctly.
 			.set({
 				creditsRemaining:
-					delta < 0 && reason === 'refund'
+					// `0 > delta` reads backwards on purpose: Codacy's lizard parser
+					// treats `delta <` as a generic-arguments opener and desyncs the
+					// file's brace accounting (this callback then "spans" to EOF).
+					0 > delta && reason === 'refund'
 						? sql`MAX(0, COALESCE(${organizations.creditsRemaining}, 0) + ${delta})`
 						: sql`COALESCE(${organizations.creditsRemaining}, 0) + ${delta}`
 			})
@@ -252,13 +294,134 @@ export async function hasChargeAnchor(
 	return Boolean(prior);
 }
 
+/** RefIds already anchored in the ledger — retries of an earlier charge. */
+async function listAnchoredRefIds(
+	tx: LedgerHandle,
+	orgId: string,
+	refType: 'comment' | 'feedback',
+	refIds: string[]
+): Promise<Set<string>> {
+	const existing = await tx
+		.select({ refId: creditTransactions.refId })
+		.from(creditTransactions)
+		.where(and(eq(creditTransactions.orgId, orgId), eq(creditTransactions.refType, refType), inArray(creditTransactions.refId, refIds)))
+		.all();
+	return new Set(existing.map((row) => row.refId));
+}
+
 /**
- * Charges one available credit anchored on (refType, refId).
+ * Funds up to `needed` charges from paid, in-window subscription periods —
+ * the period whose allowance expires FIRST is consumed first: spending the
+ * newest period's included credits first would let the older period's
+ * allowance lapse unused while fresh runway is burned (codex). Each
+ * period's conditional UPDATE claims the credits atomically; a concurrent
+ * change aborts the charge loudly instead of overdrawing the allowance.
  *
- * @returns `true` if this call charged, `false` if it was already charged or no credit was available
- * @throws Error if the organization does not exist
+ * @returns The number of charges covered by subscription allowance
  */
-async function consumeOneCredit(handle: LedgerHandle, orgId: string, refType: 'comment' | 'feedback', refId: string): Promise<boolean> {
+async function consumeSubscriptionAllowance(tx: LedgerHandle, orgId: string, needed: number): Promise<number> {
+	const now = new Date().toISOString();
+	const periods = await tx
+		.select({ id: stripeSubscriptionPeriods.id, includedCredits: stripeSubscriptionPeriods.includedCredits, consumedCredits: stripeSubscriptionPeriods.consumedCredits })
+		.from(stripeSubscriptionPeriods)
+		.where(and(
+			eq(stripeSubscriptionPeriods.orgId, orgId),
+			eq(stripeSubscriptionPeriods.status, 'paid'),
+			sql`${stripeSubscriptionPeriods.periodStart} <= ${now}`,
+			gt(stripeSubscriptionPeriods.periodEnd, now),
+			sql`${stripeSubscriptionPeriods.consumedCredits} < ${stripeSubscriptionPeriods.includedCredits}`
+		))
+		.orderBy(asc(stripeSubscriptionPeriods.periodEnd), asc(stripeSubscriptionPeriods.id))
+		.all();
+	let funded = 0;
+	for (const period of periods) {
+		const available = Math.max(0, period.includedCredits - period.consumedCredits);
+		const count = Math.min(needed - funded, available);
+		if (count === 0) continue;
+		const consumed = await tx
+			.update(stripeSubscriptionPeriods)
+			.set({ consumedCredits: sql`${stripeSubscriptionPeriods.consumedCredits} + ${count}` })
+			.where(and(
+				eq(stripeSubscriptionPeriods.id, period.id),
+				sql`${stripeSubscriptionPeriods.consumedCredits} + ${count} <= ${stripeSubscriptionPeriods.includedCredits}`
+			))
+			.returning({ id: stripeSubscriptionPeriods.id });
+		if (!consumed.length) throw new Error('subscription allowance changed concurrently — charge aborted');
+		funded += count;
+		if (funded === needed) break;
+	}
+	return funded;
+}
+
+/**
+ * Funds up to `needed` charges from the org's purchased balance. The
+ * conditional UPDATE claims the credits atomically — a concurrent debit
+ * aborts loudly instead of double-spending.
+ *
+ * @returns The number of charges covered by the purchased balance
+ */
+async function consumePurchasedBalance(tx: LedgerHandle, orgId: string, creditsRemaining: number | null, needed: number): Promise<number> {
+	const funded = Math.min(needed, Math.max(0, creditsRemaining ?? 0));
+	if (funded === 0) return 0;
+	const updated = await tx
+		.update(organizations)
+		.set({ creditsRemaining: sql`${organizations.creditsRemaining} - ${funded}` })
+		.where(and(eq(organizations.id, orgId), sql`${organizations.creditsRemaining} >= ${funded}`))
+		.returning({ creditsRemaining: organizations.creditsRemaining });
+	if (!updated.length) throw new Error('credit balance changed concurrently — charge aborted');
+	return funded;
+}
+
+/**
+ * Writes one `consume` ledger row per charged ref. Period-funded rows record
+ * the balance BEFORE this batch's purchased debit (allowance spend never
+ * touched it); purchased-funded rows record the running balance after each
+ * decrement. onConflictDoNothing + the row-count check catch a concurrent
+ * charge that raced past the anchor read.
+ */
+async function insertConsumeRows(
+	tx: LedgerHandle,
+	orgId: string,
+	refType: 'comment' | 'feedback',
+	charged: string[],
+	periodFunded: number,
+	startingBalance: number | null
+): Promise<void> {
+	if (!charged.length) return;
+	const rows = charged.map((refId, index) => ({
+		orgId,
+		delta: -1,
+		reason: 'consume' as const,
+		refType,
+		refId,
+		balanceAfter:
+			// `periodFunded > index`, not `index < periodFunded`: lizard (Codacy)
+			// misparses `identifier <` as a generic-arguments open.
+			periodFunded > index
+				? startingBalance
+				: (startingBalance ?? 0) - (index - periodFunded + 1)
+	}));
+	const inserted = await tx
+		.insert(creditTransactions)
+		.values(rows)
+		.onConflictDoNothing({ target: UNIQUE_TARGET })
+		.returning({ refId: creditTransactions.refId });
+	if (inserted.length !== rows.length) throw new Error('charge anchor inserted concurrently — charge aborted');
+}
+
+export async function consumeCreditsBulk(
+	handle: LedgerHandle,
+	orgId: string,
+	refType: 'comment' | 'feedback',
+	refIds: string[]
+	// `metered` reports the org's plan state read in THIS transaction — callers
+	// deciding whether an `uncharged` shortfall aborts must use it, not a
+	// second out-of-tx read that can disagree under a concurrent billing
+	// change (codeant). Absent when no charge was attempted (empty refIds).
+): Promise<{ charged: string[]; covered: string[]; uncharged: string[]; metered?: boolean }> {
+	const uniqueRefIds = [...new Set(refIds)];
+	if (!uniqueRefIds.length) return { charged: [], covered: [], uncharged: [] };
+
 	return inLedgerTx(handle, async (tx) => {
 		// Existence check first: an unknown org is a data bug and must fail loudly,
 		// not silently stage comments free.
@@ -268,66 +431,41 @@ async function consumeOneCredit(handle: LedgerHandle, orgId: string, refType: 'c
 			.where(eq(organizations.id, orgId))
 			.get();
 		if (!org) throw new Error(`org not found: ${orgId}`);
-		// Unmetered plans (lifetime) never consume: their scoring is already
-		// unlimited, so a stranded pre-upgrade balance must not burn 1-per-
-		// comment for nothing — it freezes until the org is metered again
-		// (MOD-36). Returns false like an exhausted balance; staging only
-		// treats that as fatal for METERED orgs.
-		if (isUnmeteredPlan(org.plan)) return false;
-		const inserted = await tx
-			.insert(creditTransactions)
-			.values({
-				orgId,
-				delta: -1,
-				reason: 'consume',
-				refType,
-				refId,
-				balanceAfter: null
-			})
-			.onConflictDoNothing({ target: UNIQUE_TARGET })
-			.returning({ id: creditTransactions.id });
-		if (inserted.length === 0) return false; // already consumed — duplicate delivery
+		// Unmetered orgs (lifetime plans, and pre-billing orgs with no hosted
+		// entitlement or granted balance) never consume: their scoring is
+		// already unlimited, so a stranded balance must not burn 1-per-comment
+		// for nothing — it freezes until the org is metered again (MOD-36).
+		// Reported as uncharged like an exhausted balance; staging only
+		// treats that as fatal for METERED orgs. The predicate is the shared
+		// orgRowIsMetered so this classification matches orgIsMetered exactly.
+		if (!orgRowIsMetered(org)) return { charged: [], covered: [], uncharged: uniqueRefIds, metered: false };
 
-		const now = new Date().toISOString();
-		const period = hasHostedEntitlement(org) ? await (tx
-			.select({ id: stripeSubscriptionPeriods.id })
-			.from(stripeSubscriptionPeriods)
-			.where(and(
-				eq(stripeSubscriptionPeriods.orgId, orgId),
-				eq(stripeSubscriptionPeriods.status, 'paid'),
-				sql`${stripeSubscriptionPeriods.periodStart} <= ${now}`,
-				gt(stripeSubscriptionPeriods.periodEnd, now),
-				sql`${stripeSubscriptionPeriods.consumedCredits} < ${stripeSubscriptionPeriods.includedCredits}`
-			))
-			.orderBy(desc(stripeSubscriptionPeriods.periodStart), asc(stripeSubscriptionPeriods.id))
-			.limit(1)
-			.get()) : undefined;
-		if (period) {
-			const consumed = await tx
-				.update(stripeSubscriptionPeriods)
-				.set({ consumedCredits: sql`${stripeSubscriptionPeriods.consumedCredits} + 1` })
-				.where(and(eq(stripeSubscriptionPeriods.id, period.id), sql`${stripeSubscriptionPeriods.consumedCredits} < ${stripeSubscriptionPeriods.includedCredits}`))
-				.returning({ id: stripeSubscriptionPeriods.id });
-			if (consumed.length === 1) {
-				await tx.update(creditTransactions).set({ balanceAfter: org.creditsRemaining }).where(eq(creditTransactions.id, inserted[0].id));
-				return true;
-			}
-		}
+		const anchoredRefIds = await listAnchoredRefIds(tx, orgId, refType, uniqueRefIds);
+		const covered = uniqueRefIds.filter((refId) => anchoredRefIds.has(refId));
+		const toCharge = uniqueRefIds.filter((refId) => !anchoredRefIds.has(refId));
+		if (!toCharge.length) return { charged: [], covered, uncharged: [], metered: true };
 
-		// Once the paid monthly allowance is exhausted, consume purchased
-		// overage atomically. Hosted orgs without a paid period remain metered.
-		const updated = await tx
-			.update(organizations)
-			.set({ creditsRemaining: sql`${organizations.creditsRemaining} - 1` })
-			.where(and(eq(organizations.id, orgId), sql`${organizations.creditsRemaining} > 0`))
-			.returning({ balance: organizations.creditsRemaining });
-		if (updated.length === 0) {
-			await tx.delete(creditTransactions).where(and(eq(creditTransactions.orgId, orgId), eq(creditTransactions.refType, refType), eq(creditTransactions.refId, refId)));
-			return false;
-		}
-		await tx.update(creditTransactions).set({ balanceAfter: updated[0].balance }).where(eq(creditTransactions.id, inserted[0].id));
-		return true;
+		// Subscription allowance funds first — the org already paid for those
+		// included comments; the purchased balance covers the remainder.
+		const periodFunded = hasHostedEntitlement(org)
+			? await consumeSubscriptionAllowance(tx, orgId, toCharge.length)
+			: 0;
+		const purchasedFunded = await consumePurchasedBalance(tx, orgId, org.creditsRemaining, toCharge.length - periodFunded);
+		const charged = toCharge.slice(0, periodFunded + purchasedFunded);
+		await insertConsumeRows(tx, orgId, refType, charged, periodFunded, org.creditsRemaining);
+		return { charged, covered, uncharged: toCharge.slice(charged.length), metered: true };
 	});
+}
+
+/**
+ * Charges one available credit anchored on (refType, refId).
+ *
+ * @returns `true` if this call charged, `false` if it was already charged or no credit was available
+ * @throws Error if the organization does not exist
+ */
+async function consumeOneCredit(handle: LedgerHandle, orgId: string, refType: 'comment' | 'feedback', refId: string): Promise<boolean> {
+	const result = await consumeCreditsBulk(handle, orgId, refType, [refId]);
+	return result.charged.length === 1;
 }
 
 /**
@@ -340,22 +478,6 @@ async function consumeOneCredit(handle: LedgerHandle, orgId: string, refType: 'c
  */
 export async function consumeCredit(handle: LedgerHandle, orgId: string, commentId: string): Promise<boolean> {
 	return consumeOneCredit(handle, orgId, 'comment', commentId);
-}
-
-/**
- * Charges one credit for a feedback-digest classification, anchored on the
- * comment id under refType 'feedback' — the digest's charge is distinct
- * from moderation's 'comment' charge so a comment can pay for both without
- * the unique anchor colliding, and an overlap-safe digest re-run never
- * double-charges a comment it already classified.
- *
- * @param orgId - The organization whose credits are charged
- * @param commentId - The comment the digest classified
- * @returns `true` if this call charged, `false` if already charged or no credit was available
- * @throws Error if the organization does not exist
- */
-export async function consumeFeedbackCredit(handle: LedgerHandle, orgId: string, commentId: string): Promise<boolean> {
-	return consumeOneCredit(handle, orgId, 'feedback', commentId);
 }
 
 export interface GrantMatch {

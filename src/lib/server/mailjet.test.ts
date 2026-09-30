@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
+import { DeadlineExceededError } from './http';
 import { sendMailjetMessage, type MailjetMessage } from './mailjet';
 
 const MESSAGE: MailjetMessage = {
@@ -149,4 +150,40 @@ test('fails loudly on a network failure and never surfaces the raw body', async 
 		throw new TypeError('fetch failed');
 	});
 	await expectSendThrows('network');
+});
+
+test('a deadline expiring during the response-body read throws DeadlineExceededError', async () => {
+	// coderabbit: fetch resolving only means the HEADERS arrived — the body
+	// can still be streaming, and an abort mid-read rejects text(). That
+	// rejection must classify as a spent budget, not a provider failure.
+	// cubic: assert fetch actually ran — a deadline spent in the prologue
+	// would still throw DeadlineExceededError while never exercising the
+	// mid-read classification this test exists to pin.
+	const fetchSpy = fetchMock(
+		async () =>
+			({
+				ok: true,
+				status: 200,
+				text: async () => {
+					await new Promise((resolve) => setTimeout(resolve, 30));
+					throw new DOMException('The operation was aborted.', 'AbortError');
+				}
+			}) as unknown as Response
+	);
+	await expect(sendMailjetMessage(MESSAGE, Date.now() + 25)).rejects.toBeInstanceOf(DeadlineExceededError);
+	expect(fetchSpy).toHaveBeenCalled();
+});
+
+test('a body-read failure without a spent deadline reports a network failure', async () => {
+	fetchMock(
+		async () =>
+			({
+				ok: true,
+				status: 200,
+				text: async () => {
+					throw new TypeError('stream error');
+				}
+			}) as unknown as Response
+	);
+	await expectSendThrows('body read');
 });

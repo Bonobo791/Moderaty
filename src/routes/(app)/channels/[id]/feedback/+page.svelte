@@ -78,15 +78,24 @@
 
 	// The newest row that is not a successful digest — 'failed' or a
 	// 'deferred' row the job records when it cannot run (out of credits /
-	// budget gone). Anything older than the latest complete digest is stale.
-	const newestAttention = $derived(
-		(data.digests ?? []).find((d) => d.status !== 'complete' && (!data.latest || d.id > data.latest.id)) ?? null
-	);
+	// budget gone). Loaded separately from the paginated list: on an older
+	// ?history= page the attempt is still current even though it isn't in
+	// data.digests (coderabbit/cubic). Older than the latest complete = stale.
+	const newestAttention = $derived(data.currentAttempt ?? null);
 	// The digest whose findings render — ?digest=N selects any complete
 	// digest in history; it defaults to the latest complete (codex: a
 	// multi-page history drain must keep every page's findings reachable).
 	const shown = $derived(data.selected ?? data.latest ?? null);
 	const canOperate = $derived(data.orgRole === 'owner');
+
+	// History pagination links keep the selected digest's findings in view —
+	// ?digest= is the deep link, ?history= is only the list's position.
+	const digestParam = $derived(
+		shown && data.latest && shown.id !== data.latest.id ? `digest=${shown.id}&` : ''
+	);
+	const digestHref = (id: number) => `?digest=${id}${data.historyCursor ? `&history=${data.historyCursor}` : ''}`;
+	const newerHistoryHref = $derived(`?${digestParam}`.replace(/&$/, ''));
+	const olderHistoryHref = $derived(`?${digestParam}history=${data.historyNext}`);
 
 	function windowLabel(digest: { windowStart: string; windowEnd: string }): string {
 		const start = digest.windowStart === '1970-01-01T00:00:00.000Z' ? 'the beginning' : relativeTime(digest.windowStart);
@@ -121,16 +130,12 @@
 	{/if}
 	{#if form?.scope !== 'reveal' && form?.message}<div class="flash" role="status">{form.message}</div>{/if}
 
-	<div class="credit-notice" role="note">
-		<strong>Feedback uses 1 credit per comment processed on metered plans, in addition to moderation. Historical analysis uses the same credits.</strong>
-		<p>Lifetime-plan and self-hosted unmetered accounts are not charged credits.</p>
-	</div>
 	{#if data.history.active}
 		<div class="flash history-status" role="status">
 			{#if !data.ch.active || !data.settings.enabled}
-				Historical feedback analysis is paused while this channel is paused or feedback is turned off. Re-enable both to resume the saved checkpoint.
+				History scan paused — resume the channel and re-enable feedback to continue from where it stopped.
 			{:else}
-				Historical feedback analysis is continuing in the background under cron, including on manual digest cadence.
+				History scan in progress — the next batch runs automatically, even while digests are set to manual. No action needed.
 			{/if}
 		</div>
 	{/if}
@@ -148,10 +153,10 @@
 			<div class="error-box" role="alert">
 				<strong>Latest digest run failed</strong> —
 				{data.history.active
-					? 'historical analysis continues on the next cron tick.'
+					? 'the history scan continues automatically.'
 					: data.settings.cadence === 'manual'
 						? 'use Generate now to retry.'
-						: 'it will retry on the next cron tick.'}
+						: 'it will retry automatically.'}
 				{data.latest
 					? `The digest below is the last complete one (window ended ${relativeTime(data.latest.windowEnd)}).`
 					: 'No complete digest exists yet.'}
@@ -161,22 +166,22 @@
 				<strong>Latest digest run deferred</strong> —
 				{#if data.history.active}
 					{#if newestAttention.error === 'credits'}
-						There are not enough credits for this batch. <a href="/usage">Add credits on the Usage page; historical analysis retries automatically.</a>
+						There are not enough credits for this batch. <a href="/usage">Add credits on the Usage page; the history scan retries automatically.</a>
 					{:else if newestAttention.error === 'deadline'}
-						The time limit was reached. Historical analysis retries on the next cron tick.
+						The time limit was reached. The history scan retries automatically.
 					{:else}
-						Historical analysis retries on the next cron tick.
+						The history scan retries automatically.
 					{/if}
 				{:else if newestAttention.error === 'credits'}
 					{#if data.settings.cadence === 'manual'}
 						There are not enough credits for this batch. <a href="/usage">Add credits on the Usage page</a>, then use Generate now.
 					{:else}
-						There are not enough credits for this batch. <a href="/usage">Add credits on the Usage page</a>; it retries on the next cron tick.
+						There are not enough credits for this batch. <a href="/usage">Add credits on the Usage page</a>; it retries automatically.
 					{/if}
 				{:else if data.settings.cadence === 'manual'}
 					The time limit was reached. Use Generate now to retry.
 				{:else}
-					The time limit was reached and will retry on the next cron tick.
+					The time limit was reached and will retry automatically.
 				{/if}
 				{data.latest
 					? `The digest below is the last complete one (window ended ${relativeTime(data.latest.windowEnd)}).`
@@ -327,18 +332,18 @@
 				title="No digest yet"
 				hint={!canOperate
 					? data.settings.cadence === 'manual'
-						? 'Manual cadence — an owner runs it with Generate now.'
-						: 'The next cron tick generates one automatically.'
+						? 'Digests are set to manual — an owner runs it with Generate now.'
+						: 'The next scheduled run generates one.'
 					: data.settings.cadence === 'manual'
-						? 'Manual cadence — use Generate now to run the first one.'
-						: 'The next cron tick generates one automatically — or use Generate now.'}
+						? 'Digests are set to manual — use Generate now to run the first one.'
+						: 'The next scheduled run generates one — or use Generate now.'}
 			/>
 		{/if}
 	{/if}
 
-	<section class="card history-tools" aria-label="Historical feedback and preview">
-		<h3 class="caps-label">Historical feedback and preview</h3>
-		<p class="muted">Historical analysis reads YouTube comments without changing moderation. It processes up to 100 comments per cron batch and charges the same per-comment credit as the live feedback digest on metered plans.</p>
+	<section class="card history-tools" aria-label="History scan and preview">
+		<h3 class="caps-label">History scan and preview</h3>
+		<p class="muted">A history scan reads your YouTube comments without changing moderation. It works in background batches of up to 100 comments and uses the same per-comment credit as the regular digest on metered plans.</p>
 		{#if canOperate}
 			<div class="history-tool-grid">
 				<form
@@ -357,16 +362,16 @@
 					}}
 				>
 					<label class="field">
-						<span>Analyze feedback history window</span>
+						<span>Scan comments from the last</span>
 						<select name="months" disabled={analyzingHistory}>
 							{#each HISTORY_WINDOWS as window (window.value)}
 								<option value={window.value} selected={window.value === '3'}>{window.label}</option>
 							{/each}
 						</select>
 					</label>
-					<p class="muted settings-note">Requires enough credits for each complete batch. Turning feedback off pauses this checkpoint; it does not erase it.</p>
+					<p class="muted settings-note">Requires enough credits for each batch. Turning feedback off pauses the scan; it does not erase progress.</p>
 					<button class="btn small" disabled={analyzingHistory || data.history.active || !data.ch.active || !data.settings.enabled || data.dryRunDeployment}>
-						{analyzingHistory ? 'Queueing…' : data.history.active ? 'History analysis active' : 'Analyze feedback history'}
+						{analyzingHistory ? 'Starting…' : data.history.active ? 'History scan in progress' : 'Start history scan'}
 					</button>
 				</form>
 				<form
@@ -400,14 +405,14 @@
 				</form>
 			</div>
 		{/if}
-		{#if !canOperate}<p class="muted settings-note">Only an organization owner can start historical analysis or use the feedback dry run.</p>{/if}
+		{#if !canOperate}<p class="muted settings-note">Only an organization owner can start a history scan or run the feedback preview.</p>{/if}
 		{#if analyzingHistory}<div class="preview-loading" role="status" aria-busy="true"><Skeleton rows={1} /></div>{/if}
 		{#if previewingFeedback}<div class="preview-loading" role="status" aria-busy="true"><Skeleton rows={2} /></div>{/if}
 		{#if feedbackPreview}
 			<section class="preview-results" aria-label="Feedback dry-run results">
 				<h4>Feedback dry-run preview</h4>
 				<p class="muted">{feedbackPreview.commentsClassified} classified · {feedbackPreview.commentsFailed} failed · {feedbackPreview.pooled} pooled · 0 credits used</p>
-				<p class="muted">Run historical analysis for the full window.</p>
+				<p class="muted">Run a history scan to cover the full window.</p>
 				{#if feedbackPreview.hasMore}<p class="muted">More comments are available beyond this preview page.</p>{/if}
 				{#if feedbackPreview.findings.length}
 					{#each feedbackPreview.findings as finding, index (finding.category + finding.summary)}
@@ -485,14 +490,14 @@
 		{/if}
 	</section>
 
-	{#if data.digests.length > 1}
+	{#if data.digests.length > 1 || data.historyCursor || data.historyNext}
 		<section class="history" aria-label="Digest history">
 			<h3 class="caps-label">Recent digests</h3>
 			<ul class="history-list">
 				{#each data.digests as d (d.id)}
 					<li class="muted">
 						{#if d.status === 'complete'}
-							<a href="?digest={d.id}" aria-current={shown?.id === d.id ? 'true' : undefined}>
+							<a href={digestHref(d.id)} aria-current={shown?.id === d.id ? 'true' : undefined}>
 								{relativeTime(d.createdAt)} — {d.status}, {d.commentsClassified} classified{#if d.pooledCount}
 									, {d.pooledCount} pooled{/if}, {d.creditsUsed === null ? 'unmetered' : `${d.creditsUsed} credits used`}
 							</a>
@@ -503,6 +508,12 @@
 					</li>
 				{/each}
 			</ul>
+			{#if data.historyCursor}
+				<p class="muted"><a href={newerHistoryHref}>← Newest digests</a></p>
+			{/if}
+			{#if data.historyNext}
+				<p class="muted"><a href={olderHistoryHref}>Older digests →</a></p>
+			{/if}
 		</section>
 	{/if}
 {/if}
@@ -570,19 +581,6 @@
 	}
 	.settings-note {
 		margin: 0;
-		font-size: 13px;
-	}
-	.credit-notice {
-		padding: 16px 18px;
-		margin: 0 0 24px;
-		border: 1px solid var(--line);
-		border-radius: 8px;
-		background: var(--surface);
-		line-height: 1.5;
-	}
-	.credit-notice p {
-		margin: 6px 0 0;
-		color: var(--text-2);
 		font-size: 13px;
 	}
 	.history-status {

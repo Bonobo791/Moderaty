@@ -5,7 +5,7 @@
 export const PRICING_FAQ_ENTRIES: { q: string; a: string }[] = [
 	{
 		q: 'Is there a subscription?',
-		a: 'Yes, exactly one: $5 a month, auto-renewed, with 100 moderated comments included. Everything else is opt-in and off by default: automatic top-up that charges your saved card for a comment bundle whenever your balance drops below the threshold you set.'
+		a: 'Yes, exactly one: $5 a month, auto-renewed, with 100 AI-scored comments included; live moderation and enabled feedback digests share that allowance. Everything else is opt-in and off by default: automatic top-up that charges your saved card for a comment bundle whenever your balance drops below the threshold you set.'
 	},
 	{
 		q: 'What is the $49 lifetime deal?',
@@ -21,7 +21,11 @@ export const PRICING_FAQ_ENTRIES: { q: string; a: string }[] = [
 	},
 	{
 		q: 'What happens when my 100 comments run out?',
-		a: 'Buy a bundle of 100, 500, or 2,000 comments; every comment your channel processes with AI scoring on a live run consumes one from your balance (rules and protected handles are free), and the Usage tab shows exactly how many are left. Top up manually any time, or switch on automatic top-up and we charge your saved card for the smallest bundle whenever your balance drops below the threshold you set.'
+		a: 'Buy a bundle of 500 or 2,000 comments; every comment your channel processes with AI scoring on a live run, and again when an enabled feedback digest classifies it, consumes one from your balance (rules and protected handles are free), and the Usage tab shows exactly how many are left. Top up manually any time, or switch on automatic top-up and we charge your saved card for the smallest bundle whenever your balance drops below the threshold you set.'
+	},
+	{
+		q: 'Can I pay in Brazilian reais?',
+		a: 'Yes. Comment bundles are also sold through Mercado Pago in reais, and the bundle lands on your balance once the payment confirms. The $5 subscription and automatic top-up run on your saved card through Stripe.'
 	},
 	{
 		q: 'Which one should I pick?',

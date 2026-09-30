@@ -1,8 +1,6 @@
 import { db } from '$lib/server/db';
 import { channels } from '$lib/server/db/schema';
-import { decrypt } from '$lib/server/crypto';
-import { deleteUserRecords } from '$lib/server/deletion';
-import { revokeGoogleToken } from '$lib/server/google';
+import { deleteUserRecords, revokeChannelGrants } from '$lib/server/deletion';
 import { requireUser, SESSION_COOKIE } from '$lib/server/session';
 import { eq } from 'drizzle-orm';
 import { fail, isHttpError, redirect } from '@sveltejs/kit';
@@ -50,27 +48,20 @@ export const actions = {
 			return fail(400, { error: 'You must confirm account deletion to continue.' });
 		}
 		// Immediate deletion: everything is erased NOW except the evidentiary
-		// consent log (statutory retention, LGPD Art. 16, III). Each channel's
-		// YouTube grant is revoked at Google first (YouTube API ToS); a
-		// revocation failure is logged loudly but does not block deletion — the
-		// encrypted token is erased either way, orphaning the grant.
-		// Revocation is connector-scoped (channels.userId = the account being
-		// deleted): those Google grants belong to THIS user. Channels in teams
-		// that survive the deletion keep their rows; their dead token will fail
-		// loudly in cron until a teammate reconnects the channel.
-		const owned = await db
-			.select({ id: channels.id, refreshTokenEnc: channels.refreshTokenEnc })
-			.from(channels)
-			.where(eq(channels.userId, user.id))
-			.all();
-		for (const ch of owned) {
-			try {
-				await revokeGoogleToken(decrypt(ch.refreshTokenEnc), `account deletion channel ${ch.id}`);
-			} catch (cause) {
-				console.error('token revocation failed for channel, deleting anyway:', ch.id, cause);
-			}
+		// consent log (statutory retention, LGPD Art. 16, III). The channel
+		// grants the transaction erases are revoked at Google next (YouTube
+		// API ToS) — the helper logs failures loudly without blocking the
+		// erase (the ciphertext is already gone, orphaning the grant).
+		const grants = await deleteUserRecords(user.id);
+		// The account is already erased — a drain failure here (Google error,
+		// bookkeeping write) must not 500 a deleted account. The obligations
+		// are durable in the revocation outbox and the cron retry converges
+		// them (cubic).
+		try {
+			await revokeChannelGrants(grants, 'account deletion');
+		} catch (cause) {
+			console.error('account deletion: grant revocation drain failed:', cause);
 		}
-		await deleteUserRecords(user.id);
 		cookies.delete(SESSION_COOKIE, { path: '/' });
 		// The session is gone, so land on the public confirmation page — never
 		// back on an (app) page that would just bounce to /login.

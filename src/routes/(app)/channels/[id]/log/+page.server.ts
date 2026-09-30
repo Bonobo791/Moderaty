@@ -2,8 +2,8 @@ import { db, withBusyRetry } from '$lib/server/db';
 import { auditLog, comments, moderationActions } from '$lib/server/db/schema';
 import { ownedChannel } from '$lib/server/ownership';
 import { requireUser } from '$lib/server/session';
-import { refreshAccessToken, getCommentModerationStatus } from '$lib/server/youtube';
-import { applyHumanIntent, finalizeHumanIntent } from '$lib/server/pipeline/enforcement';
+import { refreshAccessToken } from '$lib/server/youtube';
+import { applyHumanIntent, assertChannelActive, finalizeHumanIntent } from '$lib/server/pipeline/enforcement';
 import { decrypt } from '$lib/server/crypto';
 import { env } from '$env/dynamic/private';
 import { error, fail } from '@sveltejs/kit';
@@ -217,16 +217,23 @@ export const actions = {
 			return { intentId: intent[0].id };
 		}));
 		if (!claim) throw error(404, 'reversible comment not found in this channel');
+		// 'missing' means YouTube reports the comment gone — nothing exists to
+		// restore, so the honest outcome to finalize is 'deleted' (codex).
+		let remoteMissing = false;
 		try {
+			// Revalidate the connector identity before spending the grant:
+			// account deletion can have detached the channel since ownedChannel
+			// loaded it, and a remote write must never fire on a dead channel
+			// (cubic). The catch releases a fresh claim like any remote failure.
+			await assertChannelActive(params.id, db, ch);
 			const token = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
-			const remote = await getCommentModerationStatus(commentId, token);
-			const { holdLanded } = await applyHumanIntent(commentId, 'restore', remote, token);
-			await finalizeHumanIntent(params.id, commentId, 'restore', holdLanded);
+			remoteMissing = (await applyHumanIntent(commentId, 'restore', token)) === 'missing';
 		} catch (e) {
-			// Release a fresh claim so the failed restore stays retryable and
-			// drop its staged intent row — nothing committed. A resumed attempt
-			// keeps its claim and its intent row: they belong to the earlier
-			// crash the reconcile sweep still owes a finish.
+			// The remote write did not land: release a fresh claim so the
+			// failed restore stays retryable and drop its staged intent row —
+			// nothing committed. A resumed attempt keeps its claim and its
+			// intent row: they belong to the earlier crash the reconcile
+			// sweep still owes a finish.
 			if (!resuming) {
 				await db.transaction(async (tx) => {
 					await tx
@@ -238,7 +245,21 @@ export const actions = {
 			}
 			throw e;
 		}
-		return { success: 'Restored — recorded in audit log.' };
+		// The publish landed — releasing the claim now would revert the local
+		// row while YouTube already shows the comment, with no record left to
+		// repair the desync (codeant). 'restoring' + the durable intent row
+		// are exactly what the reconcile sweep needs to finish the commit.
+		try {
+			await finalizeHumanIntent(params.id, commentId, remoteMissing ? 'delete' : 'restore', ch);
+		} catch (e) {
+			// Remote succeeded, local commit failed: keep the claim and the
+			// intent row for the reconcile sweep, and tell the user it
+			// resolves itself — an uncaught throw would surface the same 500
+			// without explaining the self-heal (codex).
+			console.error('log undo: finalize failed for comment %s — reconcile sweep will finish it:', commentId, e);
+			return fail(500, { error: 'The restore reached YouTube but saving it failed — it will finish automatically on the next moderation run.' });
+		}
+		return { success: remoteMissing ? 'The comment no longer exists on YouTube — recorded as deleted.' : 'Restored — recorded in audit log.' };
 	},
 	/**
 	 * Erases every stored commenter handle on this channel immediately, ahead

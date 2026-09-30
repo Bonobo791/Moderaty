@@ -1,3 +1,9 @@
+// The tick-health classifier is shared with the local driver
+// (scripts/dev-cron.mjs): a 200 reporting `ok:false`, an exhausted budget,
+// a failed sweep, or a non-owner channel error must fail the invocation —
+// HTTP status alone cannot see them (codex).
+import { evaluateTick, validTickPayload } from '../../scripts/dev-cron.mjs';
+
 /**
  * Netlify Scheduled Function: triggers one bounded moderation run by
  * calling the app's cron endpoint on the deployed site (see the schedule
@@ -32,8 +38,31 @@ export default async function cron() {
 		clearTimeout(timer);
 	}
 	// Bound what lands in Netlify logs; pipeline error bodies can be long.
-	const body = (await res.text()).slice(0, 500);
-	if (!res.ok) throw new Error(`cron endpoint failed: ${res.status} ${body}`);
+	const rawText = await res.text();
+	const body = rawText.slice(0, 500);
+	let payload = null;
+	try {
+		payload = JSON.parse(rawText);
+	} catch {
+		payload = null;
+	}
+	const { ownerActionableOnly, problems } = evaluateTick(res.ok, payload);
+	if (!res.ok) {
+		// A run whose only failures are channel-owner categories (credits/
+		// token) is dashboard-visible and self-resolving — suppress the
+		// invocation failure, same contract as the local driver.
+		if (ownerActionableOnly && problems.length === 0) {
+			console.warn(`cron endpoint answered ${res.status} with only channel-owner failure(s) — suppressing`);
+			return;
+		}
+		throw new Error(`cron endpoint failed: ${res.status} ${body}`);
+	}
+	// A 200 answering a scalar/array/foreign object is not the cron payload —
+	// classifying it healthy would hide a proxy or scheduler failure (cubic).
+	if (!validTickPayload(payload)) throw new Error(`cron endpoint returned a non-JSON or invalid body: ${body}`);
+	// A 200 can still report failure — `ok:false`, an exhausted run budget,
+	// a failed sweep — none of which HTTP status exposes (codex).
+	if (problems.length) throw new Error(`cron tick reported failure(s): ${problems.join('; ')}`);
 	console.log(`cron endpoint ok: ${body}`);
 }
 

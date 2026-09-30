@@ -4,6 +4,7 @@
 
 	const LINKS = [
 		{ label: 'How it works', href: '/#how-it-works' },
+		{ label: 'The digest', href: '/#digest' },
 		{ label: 'Who gets bonked', href: '/#regulars' },
 		{ label: 'The numbers', href: '/#numbers' },
 		{ label: 'Pricing', href: '/pricing' },

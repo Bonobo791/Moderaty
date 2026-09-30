@@ -323,11 +323,14 @@ they re-accept in place (consent row only, no new session).
 
 Account deletion is **immediate and permanent** (no restore window): the
 dashboard `deleteAccount` action (confirmation checkbox, `requireUser`)
-revokes each owned channel's YouTube grant at Google
-(`revokeGoogleToken` in `src/lib/server/google.ts` — a per-channel failure
-is logged loudly but never blocks deletion, since the encrypted token is
-erased either way), then `deleteUserRecords` (`src/lib/server/deletion.ts`)
-erases in one transaction: moderation actions, comments, audit rows, and
+calls `deleteUserRecords` (`src/lib/server/deletion.ts`), which captures
+the channel grants it erases INSIDE its transaction — so a channel
+connected concurrently can never slip past revocation — then erases in
+that same transaction. The caller revokes the captured grants at Google
+post-commit (`revokeChannelGrants` → `revokeGoogleToken` in
+`src/lib/server/google.ts` — a per-channel failure is logged loudly but
+never blocks deletion, since the encrypted token is erased either way).
+The transaction erases: moderation actions, comments, audit rows, and
 rules for the user's PERSONAL-org channels; those channels themselves; the
 personal org, every membership, and invites the user created; every session.
 A channel the user merely CONNECTED (`channels.user_id`) in a surviving team

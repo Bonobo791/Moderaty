@@ -1,4 +1,5 @@
 import { redirect, error } from '@sveltejs/kit';
+import type { Cookies } from '@sveltejs/kit';
 
 import {
 	decodeChannelState,
@@ -10,6 +11,7 @@ import { fetchWithRetry } from '$lib/server/http';
 import { readPendingStates, storePendingStates } from '$lib/server/oauthState';
 import { requireOrgRole } from '$lib/server/ownership';
 import { requireUser } from '$lib/server/session';
+import type { SessionUser } from '$lib/server/session';
 
 // Bounds the listing walk so a pathological pageToken loop cannot keep a
 // serverless invocation alive. 10 pages × 50 items = 500 channels, far past
@@ -105,7 +107,7 @@ function finish(found: ListedChannel[], skipped: number): ListedChannel[] {
 	return found;
 }
 
-export async function GET({ url, cookies, locals }: { url: URL; cookies: import('@sveltejs/kit').Cookies; locals: { user: import('$lib/server/session').SessionUser | null } }) {
+export async function GET({ url, cookies, locals }: { url: URL; cookies: Cookies; locals: { user: SessionUser | null } }) {
 	// Connecting a channel requires a signed-in account to attach it to — and
 	// an admin+ role in the ACTIVE team (members moderate; they don't connect).
 	const user = requireUser(locals);

@@ -4,6 +4,7 @@
 	import TrustBar from '$lib/components/landing/TrustBar.svelte';
 	import Benefits from '$lib/components/landing/Benefits.svelte';
 	import HowItWorks from '$lib/components/landing/HowItWorks.svelte';
+	import Digest from '$lib/components/landing/Digest.svelte';
 	import Numbers from '$lib/components/landing/Numbers.svelte';
 	import Regulars from '$lib/components/landing/Regulars.svelte';
 	import Manifesto from '$lib/components/landing/Manifesto.svelte';
@@ -22,7 +23,7 @@
 		applicationCategory: 'SecurityApplication',
 		operatingSystem: 'Web',
 		description:
-			'Comment protection for YouTube creators. Reads every comment, enforces your rules instantly, scores the rest with AI across 13 toxicity categories, and holds the borderline for one-click review.',
+			'Comment protection for YouTube creators. Reads every comment, enforces your rules instantly, scores the rest with AI across 13 toxicity categories, holds the borderline for one-click review, and digests the themes your viewers keep raising.',
 		offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
 		license: 'https://polyformproject.org/licenses/shield/1.0.0'
 	};
@@ -42,7 +43,7 @@
 	<title>Moderaty | Comment Protection for YouTube Creators</title>
 	<meta
 		name="description"
-		content="Moderaty reads every YouTube comment so you never have to. Your rules plus AI enforce your norms around the clock, hold the borderline, and log everything. Free, open source."
+		content="Moderaty reads every YouTube comment so you never have to. Your rules plus AI enforce your norms around the clock, hold the borderline, log everything, and digest the themes your viewers keep raising. Free, open source."
 	/>
 	<meta property="og:type" content="website" />
 	<meta property="og:title" content="Never read another hate comment." />
@@ -64,6 +65,7 @@
 	<TrustBar />
 	<Benefits />
 	<HowItWorks />
+	<Digest />
 	<Numbers />
 	<Regulars />
 	<Manifesto />

@@ -1,6 +1,6 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { normalizeHandle } from '$lib/server/allowlist';
-import { commentChargeRef, consumeCredit, hasChargeAnchor, orgIsMetered, type LedgerHandle } from '$lib/server/billing/ledger';
+import { commentChargeRef, consumeCreditsBulk, type LedgerHandle } from '$lib/server/billing/ledger';
 import { db } from '$lib/server/db';
 import { auditLog, comments, moderationActions } from '$lib/server/db/schema';
 import { assertChannelActive, type ChannelIdentity } from './enforcement';
@@ -150,9 +150,8 @@ async function upsertRescanActionRows(transaction: LedgerHandle, actions: Return
  * rows stay: they record actions that already reached YouTube, which no new
  * verdict can undo. 'pending' never reached YouTube — cancel outright. A
  * 'dispatched' call may already have landed remotely, so it goes 'cancelling'
- * and the sweep's verification resolves it (codex): landed → completed with
- * its audit row; never landed → superseded — never retried with the stale
- * intent. */
+ * and the next sweep supersedes it without retrying or changing remote state;
+ * the owner can choose a new action from the queue or log. */
 async function supersedeStaleActionRows(transaction: LedgerHandle, commentIds: string[]): Promise<void> {
 	if (!commentIds.length) return;
 	await transaction
@@ -211,34 +210,30 @@ async function chargeBillableDecisions(
 	chargeScope: string | null | undefined
 ): Promise<void> {
 	if (!orgId) return;
-	// Unmetered orgs (self-hosted, lifetime, pre-billing) are unlimited:
-	// their consumeCredit attempts are DESIGNED no-ops (the NULL-balance
-	// guard or the unmetered-plan early return rejects the charge), so
-	// only a METERED org's failed charge is an anomaly worth aborting for.
-	const metered = await orgIsMetered(orgId);
-	for (const decision of decisions) {
-		if (!decision.billable) continue;
-		// A rescan charges again per comment: the anchor is scoped to
-		// the scan id planted for THIS request, so each requested scan
-		// debits once while a retry of the SAME scan hits the anchor and
-		// stages covered instead of double-charging (I4). A null scope is
-		// a pre-nonce drain — its earlier pages charged the plain comment
-		// id, so the anchor stays plain or the retry double-charges
-		// (codex).
-		const refId = commentChargeRef(decision.comment.id, chargeScope);
-		const charged = await consumeCredit(transaction, orgId, refId);
-		if (charged || !metered) continue;
-		if (await hasChargeAnchor(transaction, orgId, 'comment', refId)) continue;
-		// The balance was exhausted CONCURRENTLY (another run of the same
-		// org spent the credits between this run's budget read and the
-		// atomic charge) — an existing anchor is the other false case and
-		// means this exact charge already committed. The decision must
-		// NEVER stage free on a shortfall: abort the staging transaction —
-		// the rollback leaves the comments unprocessed, so the next run
-		// re-fetches them once the org tops up (codex review). Loud: the
-		// caller sees the run fail and the cron answers 500.
+	const billable = decisions.filter((decision) => decision.billable);
+	if (!billable.length) return;
+	// A rescan charges again per comment: the anchor is scoped to the scan id
+	// planted for THIS request, so each requested scan debits once while a
+	// retry of the SAME scan hits the anchor and stages covered instead of
+	// double-charging (I4). A null scope is a pre-nonce drain — its earlier
+	// pages charged the plain comment id, so the anchor stays plain or the
+	// retry double-charges (codex).
+	const refIds = billable.map((decision) => commentChargeRef(decision.comment.id, chargeScope));
+	// `metered` comes back read inside the charge transaction — a separate
+	// orgIsMetered read could disagree with the charge under a concurrent
+	// billing change (unmetered→metered stages free; metered→unmetered aborts
+	// an unlimited run). Unmetered orgs (self-hosted, lifetime, pre-billing)
+	// are unlimited: only a metered org's uncharged refs indicate a balance
+	// exhausted concurrently with this run's AI budget read (codeant).
+	const { uncharged, metered } = await consumeCreditsBulk(transaction, orgId, 'comment', refIds);
+	if (metered && uncharged.length) {
+		const failedIndex = refIds.indexOf(uncharged[0]);
+		const failedDecision = billable[failedIndex];
+		if (!failedDecision) throw new Error('bulk charge returned an unknown comment reference — staging aborted');
+		// A shortfall must NEVER stage free: abort the staging transaction so
+		// the comments stay unprocessed and retry after the org tops up.
 		throw new Error(
-			`credit charge failed for comment ${decision.comment.id} (org ${orgId}) — staging aborted, balance exhausted concurrently`
+			`credit charge failed for comment ${failedDecision.comment.id} (org ${orgId}) — staging aborted, balance exhausted concurrently`
 		);
 	}
 }

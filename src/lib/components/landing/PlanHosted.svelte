@@ -23,8 +23,9 @@
 	ticks={detailed ? TICKS_HOSTED_DETAILED : TICKS_HOSTED}
 >
 	{#snippet body()}
-		Same engine, our servers. 100 moderated comments every month, renewed automatically. Run out
-		and top up — a nickel a comment to start, less at volume.
+		Same engine, our servers. 100 AI-scored comments every month, renewed automatically and shared
+		with an enabled feedback digest. Run out and top up — a nickel a comment to start, less at
+		volume.
 	{/snippet}
 	{#snippet cta()}
 		<a href={LOGIN_URL} class="btn-press primary-btn">Connect YouTube channel</a>

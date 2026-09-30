@@ -18,8 +18,18 @@ export const users = sqliteTable('users', {
 	displayName: text('display_name').notNull(),
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	plan: text('plan').notNull().default('free'), // LEGACY — billing hooks live on organizations.plan; read nowhere
+	// Zero-credit retention countdown (zeroCredits.ts cron sweep). All nullable
+	// per I7 — NULL since = not in countdown. Only billing-engaged accounts
+	// (every membership org metered AND unfunded) get stamped; unmetered
+	// orgs (never-purchased, lifetime) can never start the clock.
+	zeroCreditsSince: text('zero_credits_since'), // ISO of first broke observation; account deleted after 30 days
+	zeroCreditsNotifiedAt: text('zero_credits_notified_at'), // ISO of last warning CLAIM — the idempotency lease for the 7-day cadence
+	zeroCreditsWarnedAt: text('zero_credits_warned_at'), // ISO a warning was CONFIRMED delivered — the deletion gate requires this ≥ since (codex)
+	zeroCreditsCheckedAt: text('zero_credits_checked_at'), // last sweep evaluation — drives the round-robin batch (NULLs sort first)
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
-});
+}, (table) => [
+	index('users_zero_credits_checked_idx').on(table.zeroCreditsCheckedAt)
+]);
 
 export const sessions = sqliteTable('sessions', {
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
@@ -580,6 +590,43 @@ export const stripeDeletionOutbox = sqliteTable('stripe_deletion_outbox', {
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	id: integer('id').primaryKey({ autoIncrement: true }),
 	customerId: text('customer_id').notNull().unique(), // cus_...
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	attempts: integer('attempts').notNull().default(0),
+	lastAttemptAt: text('last_attempt_at'),
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+});
+
+// Google refresh-token revocations still owed after account teardown — the
+// same durability contract as stripe_deletion_outbox: the encrypted grant
+// is the only thing that can revoke the grant, so the erase transaction
+// persists it here BEFORE the channel row dies; a post-commit crash or a
+// deadline-killed drain can then never orphan a live grant (codex). The
+// row is deleted once Google confirms; the cron sweep retries failures.
+// NOT unique on channelId: a detached channel reconnected by a teammate and
+// erased again owes a second, independent revocation.
+export const googleRevocationOutbox = sqliteTable('google_revocation_outbox', {
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	channelId: text('channel_id').notNull(), // erased channel — log identity only
+	refreshTokenEnc: text('refresh_token_enc').notNull(), // AES-GCM ciphertext, deleted with the row on success
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	attempts: integer('attempts').notNull().default(0),
+	lastAttemptAt: text('last_attempt_at'),
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+});
+
+// Stripe customer anonymizations still owed on SURVIVING orgs after account
+// teardown — the shared org keeps its customer (the team still bills), but a
+// departing owner may have created it with their e-mail. The scrub is a
+// post-commit Stripe write, so the obligation is persisted inside the erase
+// transaction: a spent deadline or an outage can never leave the deleted
+// user's PII at Stripe permanently (codex). UNIQUE on customerId — one scrub
+// per customer; onConflictDoNothing makes re-queuing idempotent.
+export const stripeScrubOutbox = sqliteTable('stripe_scrub_outbox', {
+	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	customerId: text('customer_id').notNull().unique(), // cus_...
+	orgId: text('org_id').notNull(), // surviving org — log identity only
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	attempts: integer('attempts').notNull().default(0),
 	lastAttemptAt: text('last_attempt_at'),

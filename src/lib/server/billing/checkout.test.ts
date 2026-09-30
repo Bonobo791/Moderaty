@@ -276,6 +276,37 @@ describe('createCreditCheckout', () => {
 			expect.anything()
 		);
 	});
+
+	test('a hidden bundle is never sold through manual checkout', async () => {
+		// codeant: credits_100 stays in the catalog for auto top-up and
+		// idempotent webhook grants, but its buy button never renders — a
+		// crafted POST naming it must not reach Stripe.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+
+		await expect(createCreditCheckout('org-1', owner(), 'credits_100')).rejects.toThrow('not available for purchase');
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
+
+	test('a still-open hidden-bundle attempt resumes — the guard only covers new attempts', async () => {
+		// cubic: a credits_100 checkout started before the bundle was hidden
+		// must resolve idempotently; rejecting it strands the buyer
+		// mid-checkout.
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.insert(stripeCheckoutAttempts).values({
+			attemptId: 'attempt-legacy',
+			orgId: 'org-1',
+			product: 'credits_100',
+			idempotencyKey: 'checkout:attempt-legacy:key',
+			stripeSessionId: 'cs_legacy',
+			status: 'open'
+		});
+		mocks.sessionsRetrieve.mockResolvedValue({ id: 'cs_legacy', status: 'open', url: 'https://checkout.stripe.com/c/pay/cs_legacy' });
+
+		const url = await createCreditCheckout('org-1', owner(), 'credits_100', 'attempt-legacy');
+
+		expect(url).toBe('https://checkout.stripe.com/c/pay/cs_legacy');
+		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
+	});
 });
 
 describe('createTestCheckout', () => {
@@ -496,7 +527,7 @@ describe('checkout configuration validation', () => {
 			const previous = env.APP_URL;
 			env.APP_URL = bad;
 			try {
-				await expect(createCreditCheckout('org-1', owner(), 'credits_100')).rejects.toThrow('valid absolute http(s) URL');
+				await expect(createCreditCheckout('org-1', owner(), 'credits_500')).rejects.toThrow('valid absolute http(s) URL');
 				await expect(createPlanCheckout('org-1', owner(), 'hosted')).rejects.toThrow('valid absolute http(s) URL');
 				await expect(createTestCheckout('org-1', operator())).rejects.toThrow('valid absolute http(s) URL');
 			} finally {

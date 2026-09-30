@@ -157,7 +157,10 @@ describe('usage load', () => {
 		};
 
 		expect(data.summary).toMatchObject({ remaining: 619, usedLifetime: 1, usedThisMonth: 1 });
-		expect(data.bundles.map((bundle) => bundle.id)).toEqual(['credits_100', 'credits_500', 'credits_2000']);
+		// credits_100 is configured (STRIPE_PRICE_CREDITS_100 is set) but
+		// hiddenFromPurchase — auto top-up still charges it, the usage page
+		// no longer offers it as a one-time purchase.
+		expect(data.bundles.map((bundle) => bundle.id)).toEqual(['credits_500', 'credits_2000']);
 		expect(data.autoTopup).toMatchObject({ enabled: true, threshold: 100, state: 'idle', hasCard: true });
 		expect(data.history).toHaveLength(2);
 		// The history contract: every row carries the full record — id, delta,
@@ -290,7 +293,7 @@ describe('usage load', () => {
 		const body = render(Page, {
 			props: { data: { ...usagePageData(), bundles: configuredBundles() }, form: null } as never
 		}).body;
-		expect(body).toMatch(/Buy 100 comments[\s\S]*?<\/button>/);
+		expect(body).not.toContain('Buy 100 comments');
 		expect(body).toMatch(/Buy 500 comments[\s\S]*?· 18% off[\s\S]*?<\/button>/);
 		expect(body).toMatch(/Buy 2,000 comments[\s\S]*?· 35% off[\s\S]*?<\/button>/);
 	});
@@ -518,7 +521,7 @@ describe('usage buy action', () => {
 	test('a second purchase reuses the saved customer', async () => {
 		await seedOrg({ stripeCustomerId: 'cus_existing' });
 
-		await expect(buy('credits_100')).rejects.toMatchObject({ status: 303 });
+		await expect(buy('credits_500')).rejects.toMatchObject({ status: 303 });
 
 		expect(mocks.customersCreate).not.toHaveBeenCalled();
 		expect(mocks.sessionsCreate.mock.calls[0][0].customer).toBe('cus_existing');
@@ -545,7 +548,7 @@ describe('usage buy action', () => {
 		await seedOrg();
 		const member = { ...OWNER, orgRole: 'member' as const };
 
-		await expect(buy('credits_100', member)).rejects.toMatchObject({ status: 403 });
+		await expect(buy('credits_500', member)).rejects.toMatchObject({ status: 403 });
 		expect(mocks.sessionsCreate).not.toHaveBeenCalled();
 	});
 
@@ -614,7 +617,7 @@ describe('usage buy action', () => {
 		// is a KNOWN domain rejection, so the response carries the real reason
 		// (400), not the generic defect message.
 		await seedOrg({ plan: 'lifetime' });
-		const result = await buy('credits_100');
+		const result = await buy('credits_500');
 		expect(result).toMatchObject({ status: 400 });
 		expect(JSON.stringify(result)).toContain('unlimited moderated comments');
 		expect(mocks.sessionsCreate).not.toHaveBeenCalled();

@@ -39,9 +39,10 @@
 			<div class="step-text">
 				<h3 class="step-title">The AI scores what your rules miss.</h3>
 				<p class="step-body">
-					Everything your rules don't catch is scored by OpenAI's moderation model across 13
-					toxicity categories. The highest score decides. If the AI can't score a comment, it
-					lands in your queue: never auto-approved, never auto-rejected.
+					Everything your rules don't catch is screened for prompt-injection tricks, then
+					scored by OpenAI's moderation model across 13 toxicity categories. The highest score
+					decides. If the AI can't score a comment, it lands in your queue: never auto-approved,
+					never auto-rejected.
 				</p>
 			</div>
 			{@render terminal('score ladder', ladder)}

@@ -40,18 +40,21 @@ describe('credit volume pricing', () => {
 	test('purchasableCreditCostUsd prices only real bundle combinations — never unpurchasable marginal rates', () => {
 		// The progressive rate past 500 cannot actually be bought: the codex
 		// example — 1,000 credits forecast at $35.15 understates the cheapest
-		// real purchase, two 500-bundles at $40.80.
+		// real purchase, two 500-bundles at $40.80. Neither can the 100-bundle:
+		// it is auto-top-up only (hiddenFromPurchase), so the forecast's
+		// purchasable set is 500/2,000 and never understates a manual buyer
+		// (codex).
 		expect(purchasableCreditCostUsd(0)).toBe(0);
-		expect(purchasableCreditCostUsd(50)).toBe(5); // smallest bundle covers
-		expect(purchasableCreditCostUsd(100)).toBe(5);
-		expect(purchasableCreditCostUsd(450)).toBeCloseTo(20.4, 5); // overshoot: one 500 beats five 100s
+		expect(purchasableCreditCostUsd(50)).toBeCloseTo(20.4, 5); // smallest purchasable bundle covers
+		expect(purchasableCreditCostUsd(100)).toBeCloseTo(20.4, 5);
+		expect(purchasableCreditCostUsd(450)).toBeCloseTo(20.4, 5);
 		expect(purchasableCreditCostUsd(500)).toBeCloseTo(20.4, 5);
-		expect(purchasableCreditCostUsd(600)).toBeCloseTo(25.4, 5); // 500 + 100
+		expect(purchasableCreditCostUsd(600)).toBeCloseTo(40.8, 5); // two 500s
 		expect(purchasableCreditCostUsd(1000)).toBeCloseTo(40.8, 5); // two 500s — NOT $35.15
 		expect(purchasableCreditCostUsd(1900)).toBeCloseTo(64.65, 5); // one 2,000 covers it cheaper than exact smalls
 		expect(purchasableCreditCostUsd(2000)).toBeCloseTo(64.65, 5);
-		expect(purchasableCreditCostUsd(2100)).toBeCloseTo(69.65, 5); // 2,000 + 100
-		expect(purchasableCreditCostUsd(2900)).toBeCloseTo(105.05, 5); // 2,000 + 500 + 4×100
+		expect(purchasableCreditCostUsd(2100)).toBeCloseTo(85.05, 5); // 2,000 + 500
+		expect(purchasableCreditCostUsd(2900)).toBeCloseTo(105.45, 5); // 2,000 + 500 + 500
 		expect(purchasableCreditCostUsd(10_000)).toBeCloseTo(5 * 64.65, 5); // five 2,000s
 	});
 

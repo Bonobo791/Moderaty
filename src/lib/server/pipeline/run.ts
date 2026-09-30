@@ -45,6 +45,7 @@ async function persistResults(
 	) ?? channel.cursor;
 	const scanCursor = channel.scanCursor ?? newest;
 	const complete = page.reachedCursor || !page.nextPageToken;
+	const cursor = complete ? scanCursor : channel.cursor;
 	await db.transaction(async (transaction) => {
 		await assertChannelActive(channelId, transaction, channel);
 		// The checkpoint write carries THIS run's scan identity: a replant
@@ -73,6 +74,7 @@ async function persistResults(
 			.returning({ id: channels.id });
 		if (!updated.length) throw new Error(`history checkpoint changed for channel ${channelId} — aborting checkpoint write`);
 	});
+	return { complete, cursor };
 }
 
 /** Window-mode dry-run finish: reported, never persisted (I8 — the caller owns the drain state). */
@@ -117,7 +119,10 @@ async function loadChannelForRun(
 	if (claim && !channelMatchesClaim(channel, claim)) {
 		throw new Error(`channel ${channelId} changed under the dry-run claim — aborting the preview`);
 	}
-	if (!channel.active) return { kind: 'skip', result: emptyResult() };
+	if (!channel.active) {
+		console.info(`run ${channelId}: skipped — channel inactive`);
+		return { kind: 'skip', result: emptyResult() };
+	}
 	if (env.DRY_RUN !== 'true' && env.DRY_RUN !== 'false') {
 		throw new Error('DRY_RUN must be true or false');
 	}
@@ -135,6 +140,68 @@ async function loadChannelForRun(
  * @returns Counts and execution state, including whether the run was partial, simulated, skipped, or stopped by insufficient credits
  * @throws When the channel or dry-run configuration is invalid, or when comment processing or staging fails
  */
+/**
+ * Score the fetched page and stage the resulting decisions (or audit them on
+ * a dry run). Throwing on scoring failures happens only AFTER successful
+ * decisions are staged and BEFORE the cursor advances, so the next run
+ * retries just the failed comments.
+ */
+const decideAndStage = async (
+	channelId: string,
+	page: CommentPage,
+	fetched: number,
+	ctx: {
+		channel: typeof channels.$inferSelect;
+		accessToken: string;
+		deadline?: number;
+		dryRun: boolean;
+		window: RunChannelOptions['window'];
+		rescan: { chargeScope: string | null; scanStamp: string } | undefined;
+	}
+): Promise<{ acted: number; queued: number; skipped: number; deferred: number; stagedCount: number }> => {
+	const { channel, accessToken, deadline, dryRun, window, rescan } = ctx;
+	const { decisions, failures, deferred } = await decideNewComments(channelId, page, {
+		accessToken,
+		toneLevel: channel.toneLevel ?? TONE_LEVEL_OMNI_ONLY,
+		protections: {
+			protectLgbtqia: channel.protectLgbtqia ?? 0,
+			protectWomen: channel.protectWomen ?? 0
+		},
+		// Per-org BYOK (lifetime plan): the org's own OpenAI key when
+		// stored, the deployment's env key for metered plans only — a
+		// lifetime org without one resolves undefined and the comments
+		// queue unscored (I11; openaiKey.ts).
+		openAiKey: await resolveOpenAiKey(channel.orgId),
+		deadline,
+		// Rescore every fetched comment, skipping the stored-IDs dedupe:
+		// dry-run windows by design, and user-requested history rescans —
+		// the planted historyBoundary means the owner asked to re-analyze
+		// the window, so stored comments get a fresh decision (their rows
+		// upsert) instead of being skipped.
+		rescore: window !== undefined || channel.historyBoundary !== null,
+		orgId: channel.orgId,
+		// The rescan's staging marker lets the scorer skip comments this
+		// scan already committed instead of re-scoring them on a parked
+		// page or a crash retry — billing-independent (codex).
+		scanStamp: rescan?.scanStamp,
+		// Live runs consume credits (and gate AI on them); dry runs never do.
+		consumeCredits: !dryRun
+	});
+	const skipped = fetched - decisions.length - failures.length - deferred;
+	const queued = decisions.filter((decision) => decision.auditAction === 'queue').length;
+
+	// Deletion may have committed during the YouTube/AI calls above: re-check
+	// before any durable write (I3) so a deleted account gets no new rows.
+	await assertChannelActive(channelId, db, channel);
+	const acted = await stageOrAuditDecisions(channelId, decisions, dryRun, { orgId: channel.orgId, expected: channel, rescan });
+	// Fail loudly only after successful decisions are staged, and before the
+	// cursor advances, so the next run retries just the failed comments.
+	if (failures.length) {
+		throw new Error(`moderation decision failed for ${failures.length} comment(s): ${failures.join('; ')}`);
+	}
+	return { acted, queued, skipped, deferred, stagedCount: decisions.length };
+};
+
 export async function runChannel(
 	channelId: string,
 	{ maxPages = 3, deadline, forceDryRun, window, claim }: RunChannelOptions = {}
@@ -180,57 +247,31 @@ export async function runChannel(
 						scanStamp: channel.historyScanId ?? channel.historyBoundary
 					};
 
-		const { decisions, failures, deferred } = await decideNewComments(channelId, page, {
-			accessToken,
-			toneLevel: channel.toneLevel ?? TONE_LEVEL_OMNI_ONLY,
-			protections: {
-				protectLgbtqia: channel.protectLgbtqia ?? 0,
-				protectWomen: channel.protectWomen ?? 0
-			},
-			// Per-org BYOK (lifetime plan): the org's own OpenAI key when
-			// stored, the deployment's env key for metered plans only — a
-			// lifetime org without one resolves undefined and the comments
-			// queue unscored (I11; openaiKey.ts).
-			openAiKey: await resolveOpenAiKey(channel.orgId),
-			deadline,
-			// Rescore every fetched comment, skipping the stored-IDs dedupe:
-			// dry-run windows by design, and user-requested history rescans —
-			// the planted historyBoundary means the owner asked to re-analyze
-			// the window, so stored comments get a fresh decision (their rows
-			// upsert) instead of being skipped.
-			rescore: window !== undefined || channel.historyBoundary !== null,
-			orgId: channel.orgId,
-			// The rescan's staging marker lets the scorer skip comments this
-			// scan already committed instead of re-scoring them on a parked
-			// page or a crash retry — billing-independent (codex).
-			scanStamp: rescan?.scanStamp,
-			// Live runs consume credits (and gate AI on them); dry runs never do.
-			consumeCredits: !dryRun
-		});
-		queued = decisions.filter((decision) => decision.auditAction === 'queue').length;
-
-		// Deletion may have committed during the YouTube/AI calls above: re-check
-		// before any durable write (I3) so a deleted account gets no new rows.
-		await assertChannelActive(channelId, db, channel);
-		acted = await stageOrAuditDecisions(channelId, decisions, dryRun, { orgId: channel.orgId, expected: channel, rescan });
-		// Fail loudly only after successful decisions are staged, and before the
-		// cursor advances, so the next run retries just the failed comments.
-		if (failures.length) {
-			throw new Error(`moderation decision failed for ${failures.length} comment(s): ${failures.join('; ')}`);
-		}
+		const staged = await decideAndStage(channelId, page, fetched, { channel, accessToken, deadline, dryRun, window, rescan });
+		const { skipped, deferred } = staged;
+		acted = staged.acted;
+		queued = staged.queued;
 		if (dryRun) {
+			console.info(`run ${channelId}: dry run — fetched=${fetched} skippedAlreadySeen=${skipped} rescan=${rescan !== undefined} audited=${acted}`);
 			return finishDryRun(window, page, { fetched, acted, queued });
 		}
 
 		const enforcement = await runEnforcement(channelId, accessToken, deadline, channel.orgId, deferred, channel);
 		acted = enforcement.acted;
 		if (enforcement.outOfCredits) {
+			console.warn(
+				`run ${channelId}: out of credits — ${deferred} comment(s) deferred, cursor parked; fetched=${fetched} skippedAlreadySeen=${skipped} rescan=${rescan !== undefined}`
+			);
 			return { fetched, acted, queued, partial: false, skipped: false, dryRun, outOfCredits: true };
 		}
-		await persistResults(channelId, channel, page);
+		const { complete, cursor: newCursor } = await persistResults(channelId, channel, page);
+		console.info(
+			`run ${channelId}: fetched=${fetched} skippedAlreadySeen=${skipped} staged=${staged.stagedCount} deferred=${deferred} acted=${acted} queued=${queued} rescan=${rescan !== undefined}; scan ${complete ? `complete — cursor now ${newCursor}` : `continues next run (boundary ${channel.cursor})`}`
+		);
 		return { fetched, acted, queued, partial: false, skipped: false, dryRun };
 	} catch (error) {
 		if (error instanceof DeadlineExceededError) {
+			console.warn(`run ${channelId}: deadline reached — partial (fetched=${fetched})`);
 			return { fetched, acted, queued, partial: true, skipped: false, dryRun, stoppedReason: 'deadline' };
 		}
 		if (error instanceof ChannelDeactivatedError) {

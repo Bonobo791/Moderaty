@@ -247,7 +247,7 @@ export const actions: Actions = {
 			throw redirect(303, url);
 		} catch (cause) {
 			if (isRedirect(cause) || isHttpError(cause)) throw cause;
-			console.error(`usage: Mercado Pago checkout failed for org ${user.orgId}:`, cause);
+			console.error('usage: Mercado Pago checkout failed for org %s:', user.orgId, cause);
 			return fail(400, { error: 'Could not start Mercado Pago checkout — please try again.' });
 		}
 	},

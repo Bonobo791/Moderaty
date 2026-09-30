@@ -892,6 +892,69 @@ describe('deletion', () => {
 	});
 
 	test.each([
+		['checkout.session.expired', 'pending'],
+		['checkout.session.expired', 'open'],
+		['checkout.session.async_payment_failed', 'pending'],
+		['checkout.session.async_payment_failed', 'open']
+	])('a terminal %s event resolves a %s attempt and releases the deletion shield', async (eventType, status) => {
+		await seedAccount('u1', { creditsRemaining: 0 });
+		const countdown = { zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7), zeroCreditsWarnedAt: daysAgo(7) };
+		await testDb().db.update(users).set(countdown).where(eq(users.id, 'u1'));
+		await seedOldCheckout('Stripe', status);
+		await testDb().db.update(stripeCheckoutAttempts).set({ stripeSessionId: 'cs_terminal' });
+		mocks.sessionsRetrieve.mockResolvedValue({ id: 'cs_terminal', metadata: { org_id: 'org-u1' }, payment_intent: null });
+		expect(await sweepZeroCreditAccounts()).toMatchObject({ deleted: 0, errors: 0 });
+		const event = { id: 'evt_terminal', type: eventType, data: { object: { id: 'cs_terminal', object: 'checkout.session' } } };
+		expect(await handleStripeEvent(event as never)).toBe(true);
+		expect(await testDb().db.select({ status: stripeCheckoutAttempts.status }).from(stripeCheckoutAttempts).get()).toEqual({ status: 'expired' });
+		expect(await userRow('u1')).toMatchObject(countdown);
+		expect(await handleStripeEvent(event as never)).toBe(true);
+		expect(mocks.sessionsRetrieve).toHaveBeenCalledTimes(eventType === 'checkout.session.async_payment_failed' ? 1 : 0);
+		expect(await sweepZeroCreditAccounts()).toMatchObject({ deleted: 1, errors: 0 });
+		expect((await userRow('u1'))!.googleSub).toBe('deleted:u1');
+	});
+
+	test.each(['checkout.session.expired', 'checkout.session.async_payment_failed'])('a %s event does not clear fulfilled, refund-required, or replacement sessions', async (eventType) => {
+		await seedAccount('u1', { creditsRemaining: 0 });
+		const attempts = [
+			{ attemptId: 'att-fulfilled', stripeSessionId: 'cs_fulfilled', status: 'fulfilled' },
+			{ attemptId: 'att-refund', stripeSessionId: 'cs_refund', status: 'manual_refund_required' },
+			{ attemptId: 'att-replacement', stripeSessionId: 'cs_new', status: 'open' }
+		];
+		await testDb().db.insert(stripeCheckoutAttempts).values(attempts.map((attempt) => ({
+			...attempt, orgId: 'org-u1', product: 'credits_500', idempotencyKey: attempt.attemptId
+		})));
+		mocks.sessionsRetrieve.mockImplementation(async (sessionId: string) => ({ id: sessionId, metadata: null }));
+		const before = await testDb().db.select().from(stripeCheckoutAttempts);
+		for (const sessionId of ['cs_fulfilled', 'cs_refund', 'cs_old']) {
+			expect(await handleStripeEvent({ id: `evt_${sessionId}`, type: eventType, data: { object: { id: sessionId, object: 'checkout.session' } } } as never)).toBe(true);
+		}
+		expect(await testDb().db.select().from(stripeCheckoutAttempts)).toEqual(before);
+	});
+
+	test('a failed async reversal keeps the deletion shield for a webhook retry', async () => {
+		await seedAccount('u1', { creditsRemaining: 500 });
+		await testDb().db.insert(creditTransactions).values({ orgId: 'org-u1', delta: 500, reason: 'purchase', refType: 'checkout_session', refId: 'cs_terminal', paymentIntentId: 'pi_terminal', chargeId: 'ch_terminal' });
+		await seedOldCheckout('Stripe', 'open');
+		await testDb().db.update(stripeCheckoutAttempts).set({ stripeSessionId: 'cs_terminal' });
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7), zeroCreditsWarnedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
+		const event = { id: 'evt_terminal', type: 'checkout.session.async_payment_failed', data: { object: { id: 'cs_terminal', object: 'checkout.session' } } };
+		mocks.sessionsRetrieve.mockRejectedValue(new Error('Stripe unavailable'));
+		await expect(handleStripeEvent(event as never)).rejects.toThrow('Stripe unavailable');
+		expect(await testDb().db.select({ status: stripeCheckoutAttempts.status }).from(stripeCheckoutAttempts).get()).toEqual({ status: 'open' });
+		expect(await testDb().db.select({ credits: organizations.creditsRemaining }).from(organizations).get()).toEqual({ credits: 500 });
+		mocks.sessionsRetrieve.mockResolvedValue({ id: 'cs_terminal', metadata: { org_id: 'org-u1' }, payment_intent: { id: 'pi_terminal', latest_charge: 'ch_terminal' } });
+		expect(await handleStripeEvent(event as never)).toBe(true);
+		expect(await handleStripeEvent(event as never)).toBe(true);
+		expect(await testDb().db.select({ status: stripeCheckoutAttempts.status }).from(stripeCheckoutAttempts).get()).toEqual({ status: 'expired' });
+		expect(await testDb().db.select({ credits: organizations.creditsRemaining }).from(organizations).get()).toEqual({ credits: 0 });
+		expect(await testDb().db.select({ delta: creditTransactions.delta }).from(creditTransactions).where(eq(creditTransactions.reason, 'refund'))).toEqual([{ delta: -500 }]);
+		expect(mocks.sessionsRetrieve).toHaveBeenCalledTimes(2);
+		expect(await sweepZeroCreditAccounts()).toMatchObject({ deleted: 1, errors: 0 });
+		expect((await userRow('u1'))!.googleSub).toBe('deleted:u1');
+	});
+
+	test.each([
 		['Stripe', 'expired'],
 		['Stripe', 'fulfilled'],
 		['Mercado Pago', 'fulfilled'],

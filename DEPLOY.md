@@ -171,7 +171,7 @@ the site exists), local work, and outage recovery.
   `src/lib/server/stripe/client.ts`) — event payloads follow the endpoint's
   pinned version — and subscribe it to: `checkout.session.completed`,
   `checkout.session.async_payment_succeeded`,
-  `checkout.session.async_payment_failed`, `invoice.paid`,
+  `checkout.session.async_payment_failed`, `checkout.session.expired`, `invoice.paid`,
   `invoice.payment_failed`, `customer.subscription.created`,
   `customer.subscription.updated`, `customer.subscription.deleted`,
   `payment_intent.succeeded`, `payment_intent.payment_failed`,

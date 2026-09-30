@@ -112,7 +112,6 @@ export async function createMercadoPagoCreditCheckout(
 				.where(eq(mercadoPagoCheckoutAttempts.attemptId, normalizedAttemptId(attemptId)))
 				.get();
 	const bundle = existing ? mercadoPagoBundleById(bundleId) : purchasableMercadoPagoBundleById(bundleId);
-	webhookSecret();
 	const attempt = await loadOrCreateAttempt(orgId, bundle, attemptId);
 	if (attempt.status === 'fulfilled') throw new Error('Mercado Pago checkout attempt has already completed');
 	// A reversed attempt is terminal too — reopening its initPoint would sell

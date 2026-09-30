@@ -219,6 +219,22 @@ describe('createPlanCheckout', () => {
 });
 
 describe('createCreditCheckout', () => {
+	test.each(['paid', 'unpaid'])('a complete %s session does not mark an unfulfilled retry as fulfilled', async (paymentStatus) => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org', creditsRemaining: 0 });
+		await createCreditCheckout('org-1', owner(), 'credits_500', 'attempt-complete');
+		const before = await testDb().db.select().from(stripeCheckoutAttempts).where(eq(stripeCheckoutAttempts.attemptId, 'attempt-complete')).get();
+		mocks.sessionsRetrieve.mockResolvedValue({ id: 'cs_1', status: 'complete', payment_status: paymentStatus });
+
+		await expect(createCreditCheckout('org-1', owner(), 'credits_500', 'attempt-complete')).rejects.toThrow('checkout attempt has already completed');
+
+		// Provider completion is not a local credit grant. Only fulfillment
+		// may release the attempt's account-deletion protection.
+		expect(await testDb().db.select().from(stripeCheckoutAttempts).where(eq(stripeCheckoutAttempts.attemptId, 'attempt-complete')).get()).toEqual(before);
+		expect(before?.status).toBe('open');
+		expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.creditsRemaining).toBe(0);
+		expect(mocks.sessionsCreate).toHaveBeenCalledTimes(1);
+	});
+
 	test('creates the session for the org with bundle metadata and new-URL-built redirects', async () => {
 		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
 

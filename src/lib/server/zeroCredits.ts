@@ -14,7 +14,7 @@
 // never-evaluated users go first). Cron may overlap itself, so every
 // transition is a conditional UPDATE — the loser matches 0 rows.
 
-import { and, asc, eq, gte, inArray, isNotNull, isNull, notInArray, notLike, or, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNotNull, isNull, notInArray, notLike, or, sql } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 
 import { effectiveBalanceSql, isUnmeteredPlan, paidSubscriptionPeriodExistsSql } from '$lib/server/billing/ledger';
@@ -144,26 +144,19 @@ class AccountFundedError extends Error {}
 class PaymentInFlightError extends Error {}
 
 /**
- * A checkout opened recently can already be paid at the provider while the
- * webhook fulfillment is still in flight: the local balance and subscription
- * state `fundingState` reads have not caught up, so the account looks broke
- * — erasing now would strand the payment (no org left to credit, no refund
- * path) and destroy exactly the purchase meant to save it (codex).
+ * An unresolved checkout can already be paid at the provider while local
+ * fulfillment has not caught up. Its age cannot prove that it is unpaid:
+ * delivery can fail beyond the provider's retry window, and a later retry
+ * must still have an organization to credit or a refund obligation to resolve.
  *
- * The shield is bounded by the provider's delivery window: Stripe Checkout
- * sessions live 24h and webhooks retry for ~3 days, so a 'pending'/'open'
- * attempt stops deferring 72h after its last local touch — an abandoned
- * checkout can never hold the account hostage forever. Two states shield
- * unconditionally: `manual_refund_required` (money arrived, never granted —
- * the obligation survives until a human resolves it) and a Mercado Pago
- * attempt carrying a `paidAt` in an unresolved status (the provider told us
- * the payment exists; the row just has not been fulfilled).
+ * Pending/open attempts shield until explicitly resolved, even if abandoned.
+ * Never infer resolution from updatedAt. Keep this guard local so it can run
+ * again under the erase transaction's write lock without remote calls.
+ * Manual-refund obligations and unresolved Mercado Pago paid stamps also
+ * protect the account regardless of age.
  */
-const IN_FLIGHT_CHECKOUT_WINDOW_MS = 72 * 60 * 60 * 1000;
-
 async function hasInFlightPayment(
 	userId: string,
-	nowMs: number,
 	handle: Pick<typeof db, 'select'> | DeletionTx = db
 ): Promise<boolean> {
 	const orgIds = (
@@ -175,17 +168,13 @@ async function hasInFlightPayment(
 			.all()
 	).map((row) => row.id);
 	if (!orgIds.length) return false;
-	const cutoffIso = new Date(nowMs - IN_FLIGHT_CHECKOUT_WINDOW_MS).toISOString();
 	const stripeInFlight = await handle
 		.select({ id: stripeCheckoutAttempts.id })
 		.from(stripeCheckoutAttempts)
 		.where(
 			and(
 				inArray(stripeCheckoutAttempts.orgId, orgIds),
-				or(
-					eq(stripeCheckoutAttempts.status, 'manual_refund_required'),
-					and(inArray(stripeCheckoutAttempts.status, ['pending', 'open']), gte(stripeCheckoutAttempts.updatedAt, cutoffIso))
-				)
+				inArray(stripeCheckoutAttempts.status, ['pending', 'open', 'manual_refund_required'])
 			)
 		)
 		.get();
@@ -197,8 +186,7 @@ async function hasInFlightPayment(
 			and(
 				inArray(mercadoPagoCheckoutAttempts.orgId, orgIds),
 				or(
-					eq(mercadoPagoCheckoutAttempts.status, 'manual_refund_required'),
-					and(inArray(mercadoPagoCheckoutAttempts.status, ['pending', 'open']), gte(mercadoPagoCheckoutAttempts.updatedAt, cutoffIso)),
+					inArray(mercadoPagoCheckoutAttempts.status, ['pending', 'open', 'manual_refund_required']),
 					// Provider-confirmed payment still unresolved: paidAt stamped but
 					// the row never reached a terminal state — the money exists.
 					and(
@@ -361,7 +349,7 @@ async function claimAndDelete(user: SweepUser, since: string, ageMs: number, dea
 	// A payment in flight can still fulfill — the webhook lands on an org this
 	// erase would destroy. Deferring BEFORE the claim keeps the countdown
 	// intact: if the attempt expires unpaid, the same clock still applies.
-	if (await hasInFlightPayment(user.id, Date.now())) {
+	if (await hasInFlightPayment(user.id)) {
 		console.info(`zero-credit sweep: user ${user.id} has a payment in flight — deletion deferred, countdown preserved`);
 		return 'idle';
 	}
@@ -404,7 +392,7 @@ async function claimAndDelete(user: SweepUser, since: string, ageMs: number, dea
 				// pre-claim check and the erase commits under this lock — the
 				// predicate re-runs on the tx handle so it sees (or blocks)
 				// that write (codex).
-				if (await hasInFlightPayment(user.id, Date.now(), tx)) {
+				if (await hasInFlightPayment(user.id, tx)) {
 					throw new PaymentInFlightError();
 				}
 			}

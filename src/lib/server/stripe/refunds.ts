@@ -1,5 +1,10 @@
 import { getStripe } from './client';
 
+/** True when the full charge amount was refunded; partial refunds retain their purchase. */
+export function chargeFullyRefunded(charge: { amount?: unknown; amount_refunded?: unknown }): boolean {
+	return typeof charge.amount === 'number' && charge.amount > 0 && typeof charge.amount_refunded === 'number' && charge.amount_refunded >= charge.amount;
+}
+
 /**
  * Refunds a payment intent for a charge that can never grant its purchase —
  * loudly and idempotently. Shared by every "paid but ungrantable" path:
@@ -46,6 +51,7 @@ export async function refundUngrantablePayment(input: {
 		// (retrying under the same idempotency key returns the same object, so
 		// treating them as failures would storm forever); anything else means
 		// the refund did not and will not happen — loud and retryable.
+		if (typeof refund.id !== 'string' || !refund.id.trim()) throw new Error('Stripe returned an invalid refund ID — MANUAL REFUND REQUIRED');
 		if (refund.status !== 'succeeded' && refund.status !== 'pending' && refund.status !== 'requires_action') {
 			throw new Error(`refund ${refund.id} resolved ${refund.status ?? 'no status'} — MANUAL REFUND REQUIRED`);
 		}

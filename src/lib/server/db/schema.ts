@@ -68,6 +68,7 @@ export const organizations = sqliteTable('organizations', {
 	stripeCustomerId: text('stripe_customer_id'), // Stripe Customer for this org
 	stripeDefaultPmId: text('stripe_default_pm_id'), // card saved for off-session auto top-up
 	autoTopupEnabled: integer('auto_topup_enabled'),
+	autoTopupBundle: text('auto_topup_bundle'), // Reserved by applied migration 0055; selection UI is separate work.
 	autoTopupThreshold: integer('auto_topup_threshold'), // top up when credits < threshold
 	// 'idle' | 'in_flight' | 'disabled' — in_flight is the atomic claim against
 	// concurrent triggers; disabled after SCA/decline failures until the
@@ -565,6 +566,7 @@ export const stripeAutoTopupRecoveries = sqliteTable('stripe_auto_topup_recoveri
 	customerId: text('customer_id'),
 	attemptAt: text('attempt_at').notNull(),
 	paymentIntentId: text('payment_intent_id'),
+	paymentLookupCursor: text('payment_lookup_cursor'),
 	refundId: text('refund_id'),
 	lastCheckedAt: text('last_checked_at'),
 	lastError: text('last_error'),

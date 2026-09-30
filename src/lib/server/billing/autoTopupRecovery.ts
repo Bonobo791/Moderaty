@@ -1,11 +1,12 @@
 import { and, asc, eq, gte, isNull, lte, or, sql } from 'drizzle-orm';
 import type { AnySQLiteColumn } from 'drizzle-orm/sqlite-core';
+import type Stripe from 'stripe';
 
 import { db } from '$lib/server/db';
 import { organizations, stripeAutoTopupRecoveries } from '$lib/server/db/schema';
 import type { LedgerHandle } from './ledger';
 import { getStripe } from '$lib/server/stripe/client';
-import { refundUngrantablePayment } from '$lib/server/stripe/refunds';
+import { chargeFullyRefunded, refundUngrantablePayment } from '$lib/server/stripe/refunds';
 
 type Recovery = typeof stripeAutoTopupRecoveries.$inferSelect;
 export interface TopupPayment {
@@ -52,6 +53,36 @@ export async function findPausedTopup(handle: LedgerHandle, orgId: string, pi: T
 	return rows[0];
 }
 
+/** Validate the latest charge's integer amounts before confirming existing refunds. */
+function recoveryCharge(charges: Stripe.ApiList<Stripe.Charge>) {
+	const charge = charges.data?.[0];
+	if (!Array.isArray(charges.data) || charges.data.length !== 1 || !charge || typeof charge.id !== 'string' || !charge.id || !Number.isSafeInteger(charge.amount) || charge.amount <= 0 || !Number.isSafeInteger(charge.amount_refunded) || charge.amount_refunded < 0 || charge.amount_refunded > charge.amount) throw new Error('Canceled auto top-up has an invalid charge');
+	return charge;
+}
+
+/** Reject malformed refund records before using their amounts to confirm repayment. */
+function validateExistingRefund(refund: Stripe.Refund) {
+	if (!refund || typeof refund.id !== 'string' || !refund.id.trim() || !Number.isSafeInteger(refund.amount) || refund.amount <= 0 || !['succeeded', 'pending', 'requires_action', 'failed', 'canceled'].includes(refund.status ?? '')) throw new Error('Stripe returned an invalid existing refund');
+}
+
+/** Existing full refunds resolve only after Stripe confirms the returned amount. */
+async function existingRefundOutcome(paymentIntentId: string): Promise<boolean | undefined> {
+	const charge = recoveryCharge(await getStripe().charges.list({ payment_intent: paymentIntentId, limit: 1 }));
+	if (!chargeFullyRefunded(charge)) return undefined;
+	// ponytail: one refund page; over 100 refunds requires manual reconciliation.
+	const refunds = await getStripe().refunds.list({ charge: charge.id, limit: 100 });
+	if (!Array.isArray(refunds.data) || refunds.has_more) throw new Error('Existing auto top-up refunds need manual reconciliation');
+	let completed = 0;
+	let pending = 0;
+	for (const refund of refunds.data) {
+		validateExistingRefund(refund);
+		if (refund.status === 'succeeded') completed += refund.amount;
+		if (refund.status === 'pending' || refund.status === 'requires_action') pending += refund.amount;
+	}
+	if (completed + pending !== charge.amount) throw new Error('Existing full refund could not be confirmed — manual reconciliation required');
+	return completed === charge.amount;
+}
+
 /** Persist the refund identity until Stripe confirms its terminal outcome. */
 async function cancelOrRefund(row: Recovery, pi: TopupPayment): Promise<boolean> {
 	if (pi.status === 'canceled') return true;
@@ -61,10 +92,12 @@ async function cancelOrRefund(row: Recovery, pi: TopupPayment): Promise<boolean>
 		if (canceled.status !== 'canceled') throw new Error('Auto top-up cancellation did not complete');
 		return true;
 	}
+	const existing = await existingRefundOutcome(pi.id);
+	if (existing !== undefined) return existing;
 	const refund = row.refundId
 		? await getStripe().refunds.retrieve(row.refundId)
 		: await refundUngrantablePayment({ paymentIntentId: pi.id, orgId: row.orgId, idempotencyKey: `refund:autotopup-paused:${pi.id}`, label: `auto top-up ${pi.id} overlapped a refund pause` });
-	if (!refund.id || !['succeeded', 'pending', 'requires_action'].includes(refund.status ?? '')) throw new Error('MANUAL REFUND REQUIRED: canceled auto top-up refund failed');
+	if (typeof refund.id !== 'string' || !refund.id.trim() || !['succeeded', 'pending', 'requires_action'].includes(refund.status ?? '')) throw new Error('MANUAL REFUND REQUIRED: canceled auto top-up refund failed');
 	await db.update(stripeAutoTopupRecoveries).set({ refundId: refund.id }).where(eq(stripeAutoTopupRecoveries.id, row.id));
 	return refund.status === 'succeeded';
 }
@@ -77,7 +110,7 @@ export async function recoverPausedTopup(row: Recovery, pi: TopupPayment): Promi
 	if (!current) throw new Error('Canceled auto top-up recovery was not found');
 	if (current.paymentIntentId && current.paymentIntentId !== pi.id) throw new Error('Canceled auto top-up has a different payment intent');
 	if (current.resolvedAt) return true;
-	const bound = await db.update(stripeAutoTopupRecoveries).set({ paymentIntentId: pi.id, lastCheckedAt: new Date().toISOString() }).where(and(predicate, or(isNull(stripeAutoTopupRecoveries.paymentIntentId), eq(stripeAutoTopupRecoveries.paymentIntentId, pi.id)))).returning({ id: stripeAutoTopupRecoveries.id });
+	const bound = await db.update(stripeAutoTopupRecoveries).set({ paymentIntentId: pi.id, paymentLookupCursor: null, lastCheckedAt: new Date().toISOString() }).where(and(predicate, or(isNull(stripeAutoTopupRecoveries.paymentIntentId), eq(stripeAutoTopupRecoveries.paymentIntentId, pi.id)))).returning({ id: stripeAutoTopupRecoveries.id });
 	if (!bound.length) throw new Error('Canceled auto top-up was bound to another payment');
 	try {
 		const resolved = await cancelOrRefund(current, pi);
@@ -101,13 +134,20 @@ async function recoverCandidate(row: Recovery, pi: TopupPayment | null): Promise
 	return true;
 }
 
+/** Advance only if another worker has not bound, resolved, or advanced this row. */
+async function advanceRecoveryLookup(row: Recovery, list: Stripe.ApiList<Stripe.PaymentIntent>): Promise<void> {
+	const cursor = list.has_more ? list.data.at(-1)?.id : null;
+	if (list.has_more && (typeof cursor !== 'string' || !cursor || cursor === row.paymentLookupCursor)) throw new Error('Canceled auto top-up lookup returned an invalid page cursor');
+	await db.update(stripeAutoTopupRecoveries).set({ paymentLookupCursor: cursor, lastError: null }).where(and(eq(stripeAutoTopupRecoveries.id, row.id), isNull(stripeAutoTopupRecoveries.resolvedAt), isNull(stripeAutoTopupRecoveries.paymentIntentId), row.paymentLookupCursor ? eq(stripeAutoTopupRecoveries.paymentLookupCursor, row.paymentLookupCursor) : isNull(stripeAutoTopupRecoveries.paymentLookupCursor)));
+}
+
 /** A malformed item cannot hide the matching payment later in Stripe's list. */
 async function recoverListedPayment(row: Recovery): Promise<void> {
 	const customerId = row.customerId ?? (await db.select({ customerId: organizations.stripeCustomerId }).from(organizations).where(eq(organizations.id, row.orgId)).get())?.customerId;
 	if (!customerId) throw new Error('Canceled auto top-up organization has no Stripe customer');
 	const attemptMs = Date.parse(row.attemptAt);
 	if (!Number.isFinite(attemptMs)) throw new Error('Canceled auto top-up has an invalid attempt timestamp');
-	const list = await getStripe().paymentIntents.list({ customer: customerId, created: { gte: Math.floor((attemptMs - 60_000) / 1000) }, limit: 100 });
+	const list = await getStripe().paymentIntents.list({ customer: customerId, ...(row.paymentLookupCursor ? { starting_after: row.paymentLookupCursor } : {}), created: { gte: Math.floor((attemptMs - 60_000) / 1000) }, limit: 100 });
 	if (!Array.isArray(list.data)) throw new Error('Stripe returned an invalid payment intent list');
 	let skipped = 0;
 	let found = false;
@@ -121,7 +161,9 @@ async function recoverListedPayment(row: Recovery): Promise<void> {
 		}
 	}
 	if (skipped) console.error('auto top-up recovery skipped malformed payment items', { orgId: row.orgId, skipped });
-	if (!found) throw new Error(list.has_more ? 'Canceled auto top-up lookup needs manual reconciliation: payment list truncated' : 'Canceled auto top-up payment not found yet — retry or manual reconciliation required');
+	if (found) return;
+	await advanceRecoveryLookup(row, list);
+	if (!list.has_more) throw new Error('Canceled auto top-up payment not found yet — retry or manual reconciliation required');
 }
 
 /** Count attempted work (including failures), excluding rows skipped at the deadline. */

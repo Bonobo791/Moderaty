@@ -173,6 +173,7 @@ describe('organizations', () => {
 			stripe_customer_id: { notNull: false },
 			stripe_default_pm_id: { notNull: false },
 			auto_topup_enabled: { notNull: false },
+			auto_topup_bundle: { notNull: false },
 			auto_topup_threshold: { notNull: false },
 			auto_topup_state: { notNull: false },
 			auto_topup_last_attempt_at: { notNull: false },

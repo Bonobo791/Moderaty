@@ -354,6 +354,18 @@ describe('paid hosted products', () => {
 		}
 	});
 
+	test.each([undefined, null, '', 123, {}])('a paid ungrantable checkout rejects malformed refund ID %s', async (id) => {
+		await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Org' });
+		await testDb().db.update(stripeLifetimeSlots).set({ activeOrgId: 'org-1' });
+		mocks.sessionsRetrieve.mockResolvedValue(session({ id: 'cs_lifetime', metadata: { org_id: 'org-1', product: 'lifetime' }, payment_intent: { id: 'pi_1', latest_charge: 'ch_1' } }));
+		mocks.refundsCreate.mockResolvedValue({ id, status: 'pending' });
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			await expect(fulfillCheckout('cs_lifetime')).rejects.toThrow(/MANUAL REFUND REQUIRED/);
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('MANUAL REFUND REQUIRED'));
+		} finally { errorSpy.mockRestore(); }
+	});
+
 	test('a pending refund is accepted — the money is genuinely in flight', async () => {
 		// Retrying a pending refund under the same idempotency key returns the
 		// same pending object forever — treating it as a failure would retry a

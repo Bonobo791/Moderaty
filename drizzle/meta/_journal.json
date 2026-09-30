@@ -386,6 +386,20 @@
       "when": 1790795324498,
       "tag": "0054_backfill_refund_recovery_customers",
       "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "6",
+      "when": 1790796010834,
+      "tag": "0055_auto_topup_bundle",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "6",
+      "when": 1790799229984,
+      "tag": "0056_auto_topup_recovery_cursor",
+      "breakpoints": true
     }
   ]
 }

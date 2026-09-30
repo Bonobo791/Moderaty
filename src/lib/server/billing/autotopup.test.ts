@@ -14,14 +14,15 @@ const mocks = vi.hoisted(() => ({
 	paymentIntentsRetrieve: vi.fn(),
 	paymentIntentsList: vi.fn(),
 	pricesRetrieve: vi.fn(),
-	refundsCreate: vi.fn(), paymentIntentsCancel: vi.fn(), refundsRetrieve: vi.fn()
+	refundsCreate: vi.fn(), paymentIntentsCancel: vi.fn(), refundsRetrieve: vi.fn(), chargesList: vi.fn(), refundsList: vi.fn()
 }));
 
 vi.mock('$lib/server/stripe/client', () => ({
 	getStripe: () => ({
 		paymentIntents: { create: mocks.paymentIntentsCreate, retrieve: mocks.paymentIntentsRetrieve, list: mocks.paymentIntentsList, cancel: mocks.paymentIntentsCancel },
 		prices: { retrieve: mocks.pricesRetrieve },
-		refunds: { create: mocks.refundsCreate, retrieve: mocks.refundsRetrieve }
+		refunds: { create: mocks.refundsCreate, retrieve: mocks.refundsRetrieve, list: mocks.refundsList },
+		charges: { list: mocks.chargesList }
 	})
 }));
 vi.mock('$env/dynamic/private', () => ({
@@ -77,6 +78,7 @@ beforeEach(() => {
 	mocks.paymentIntentsList.mockResolvedValue({ data: [] });
 	mocks.pricesRetrieve.mockResolvedValue({ id: 'price_100', unit_amount: 500, active: true, currency: 'usd', type: 'one_time' });
 	mocks.refundsCreate.mockResolvedValue({ id: 're_1', status: 'succeeded' });
+	mocks.chargesList.mockResolvedValue({ data: [{ id: 'ch_1', amount: 100, amount_refunded: 0 }] });
 });
 
 test('auto-top-up trigger documentation uses the effective balance', () => {
@@ -552,6 +554,49 @@ describe('maybeTriggerAutoTopUp', () => {
 });
 
 describe('sweepPausedTopups', () => {
+	test.each(['succeeded', 'pending'])('an existing full %s refund is reconciled without issuing another refund', async (status) => {
+		await seedOrg({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: new Date().toISOString() });
+		await pauseAutoTopupForRefund(testDb().db, 'org-1');
+		const row = (await testDb().db.select().from(stripeAutoTopupRecoveries).get())!;
+		mocks.chargesList.mockResolvedValueOnce({ data: [{ id: 'ch_1', amount: 100, amount_refunded: 100 }] });
+		mocks.refundsList.mockResolvedValueOnce({ data: [{ id: 're_original', amount: 100, status }], has_more: false });
+		expect(await recoverPausedTopup(row, { id: 'pi_original', status: 'succeeded', metadata: { type: 'auto_topup', org_id: 'org-1' } })).toBe(status === 'succeeded');
+		expect(mocks.refundsCreate).not.toHaveBeenCalled();
+		expect((await testDb().db.select().from(stripeAutoTopupRecoveries).get())?.resolvedAt).toEqual(status === 'succeeded' ? expect.any(String) : null);
+	});
+
+	test.each([
+		{ id: 're_incomplete', amount: 50, status: 'succeeded' },
+		{ id: '', amount: 100, status: 'succeeded' },
+		{ id: 're_failed', amount: 100, status: 'failed' }
+	])('an unconfirmed existing full refund fails loudly without issuing another refund: %s', async (refund) => {
+		await seedOrg({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: new Date().toISOString() });
+		await pauseAutoTopupForRefund(testDb().db, 'org-1');
+		const row = (await testDb().db.select().from(stripeAutoTopupRecoveries).get())!;
+		mocks.chargesList.mockResolvedValueOnce({ data: [{ id: 'ch_1', amount: 100, amount_refunded: 100 }] });
+		mocks.refundsList.mockResolvedValueOnce({ data: [refund], has_more: false });
+		await expect(recoverPausedTopup(row, { id: 'pi_original', status: 'succeeded', metadata: { type: 'auto_topup', org_id: 'org-1' } })).rejects.toThrow();
+		expect(mocks.refundsCreate).not.toHaveBeenCalled();
+		expect((await testDb().db.select().from(stripeAutoTopupRecoveries).get())?.resolvedAt).toBeNull();
+	});
+
+	test('payment lookup persists its next page across bounded sweep invocations', async () => {
+		const attemptAt = new Date(Date.now() - 3600_000).toISOString();
+		await seedOrg({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: attemptAt });
+		await pauseAutoTopupForRefund(testDb().db, 'org-1');
+		const later = Array.from({ length: 100 }, (_, i) => ({ id: `pi_later_${i}`, status: 'succeeded', metadata: { type: 'auto_topup', org_id: 'org-1', auto_topup_attempt_at: new Date().toISOString() } }));
+		mocks.paymentIntentsList.mockResolvedValueOnce({ data: later, has_more: true });
+		expect(await sweepPausedTopups(1)).toBe(1);
+		expect((await testDb().db.select().from(stripeAutoTopupRecoveries).get())?.paymentLookupCursor).toBe('pi_later_99');
+		expect(mocks.refundsCreate).not.toHaveBeenCalled();
+		const original = { id: 'pi_original', status: 'succeeded', metadata: { type: 'auto_topup', org_id: 'org-1', auto_topup_attempt_at: attemptAt } };
+		mocks.paymentIntentsList.mockResolvedValueOnce({ data: [original], has_more: false });
+		expect(await sweepPausedTopups(1)).toBe(1);
+		expect(mocks.paymentIntentsList).toHaveBeenLastCalledWith(expect.objectContaining({ starting_after: 'pi_later_99', limit: 100 }));
+		expect(mocks.refundsCreate).toHaveBeenCalledTimes(1);
+		expect((await testDb().db.select().from(stripeAutoTopupRecoveries).get())?.resolvedAt).toEqual(expect.any(String));
+	});
+
 	test('a payment refund can finish after its organization has been erased', async () => {
 		await seedOrg({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: new Date().toISOString() });
 		await pauseAutoTopupForRefund(testDb().db, 'org-1');

@@ -18,6 +18,10 @@ test('refund recovery migrations preserve obligations, backfill customers, and r
 	expect((await read()).rows[0]).toMatchObject({ id: 7, org_id: 'org-1', customer_id: null, payment_intent_id: 'pi_1', refund_id: 're_pending', resolved_at: null, last_error: 'refund_or_cancellation_failed' });
 	for (const statement of migrationStatements('0054_backfill_refund_recovery_customers.sql')) await client.execute(statement);
 	expect((await read()).rows[0].customer_id).toBe('cus_1');
+	for (const statement of migrationStatements('0056_auto_topup_recovery_cursor.sql')) await client.execute(statement);
+	expect((await read()).rows[0]).toMatchObject({ payment_lookup_cursor: null, payment_intent_id: 'pi_1', refund_id: 're_pending' });
+	await client.execute("UPDATE stripe_auto_topup_recoveries SET payment_lookup_cursor = 'pi_last_page' WHERE id = 7");
+	expect((await read()).rows[0].payment_lookup_cursor).toBe('pi_last_page');
 	await client.execute("UPDATE organizations SET stripe_customer_id = 'cus_changed'");
 	for (const statement of migrationStatements('0054_backfill_refund_recovery_customers.sql')) await client.execute(statement);
 	expect((await read()).rows[0].customer_id).toBe('cus_1');

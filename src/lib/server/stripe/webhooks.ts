@@ -19,7 +19,8 @@ import { bundleById, type CreditBundle } from '$lib/server/stripe/bundles';
 import { isActiveSubscriptionStatus } from '$lib/server/billing/plans';
 import { markCheckoutAttemptFulfilled, TEST_CHECKOUT_PRODUCT } from '$lib/server/billing/checkout';
 import { getStripe } from '$lib/server/stripe/client';
-import { refundUngrantablePayment } from '$lib/server/stripe/refunds';
+import { chargeFullyRefunded, refundUngrantablePayment } from '$lib/server/stripe/refunds';
+export { chargeFullyRefunded } from '$lib/server/stripe/refunds';
 
 /**
  * Records a Stripe event when it has not already been recorded.
@@ -464,10 +465,6 @@ export function getPaymentIntentAndCharge(session: Stripe.Checkout.Session): {
  * success page renders — while a disputed one stays 'rejected' (the money
  * outcome is unresolved, not returned).
  */
-/** True when the charge's full amount was refunded — partial refunds keep their purchase (documented v1 scope). */
-export function chargeFullyRefunded(charge: { amount?: unknown; amount_refunded?: unknown }): boolean {
-	return typeof charge.amount === 'number' && charge.amount > 0 && typeof charge.amount_refunded === 'number' && charge.amount_refunded >= charge.amount;
-}
 
 function lateGrantVerdict(session: Stripe.Checkout.Session, sessionId: string): 'refunded' | 'rejected' | null {
 	const { charge } = getPaymentIntentAndCharge(session);

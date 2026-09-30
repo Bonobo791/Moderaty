@@ -74,7 +74,7 @@ describe('detectJailbreak', () => {
 	test('strips the client-supplied temperature for a reasoning model', async () => {
 		// The guardrails client always sends temperature; gpt-6-luna (a
 		// reasoning model) rejects it, so the adapter drops it and carries a
-		// none-effort pass on the wire instead.
+		// low-effort pass on the wire instead.
 		mocks.env.OPENAI_JAILBREAK_MODEL = undefined;
 
 		await detectJailbreak('ordinary text', 'explicit-key');
@@ -83,7 +83,7 @@ describe('detectJailbreak', () => {
 		const body = JSON.parse(String(init.body));
 		expect(body.model).toBe('gpt-6-luna');
 		expect(body.temperature).toBeUndefined();
-		expect(body.reasoning_effort).toBe('none');
+		expect(body.reasoning_effort).toBe('low');
 	});
 
 	test.each([

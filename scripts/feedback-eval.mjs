@@ -118,7 +118,7 @@ export function categoryMetrics(pairs) {
 async function classify(text, apiKey, model) {
 	const tag = `data-${randomBytes(8).toString('hex')}`;
 	// Reasoning models reject temperature — see src/lib/server/openaiChat.ts.
-	const sampling = /^(o\d|gpt-[56])/.test(model) ? { reasoning_effort: 'none' } : { temperature: 0 };
+	const sampling = /^(o\d|gpt-[56])/.test(model) ? { reasoning_effort: 'low' } : { temperature: 0 };
 	const res = await fetch('https://api.openai.com/v1/chat/completions', {
 		method: 'POST',
 		headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },

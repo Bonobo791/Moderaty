@@ -33,11 +33,11 @@ function llmContext(apiKey: string, deadline?: number): GuardrailLLMContext {
 			completions: {
 				create: async (params, init) => {
 					// The guardrails client always sends temperature; reasoning
-					// models reject it outright, so swap it for a none-effort pass.
+					// models reject it outright, so swap it for a low-effort pass.
 					const body = { ...(params as Record<string, unknown>) };
 					if (isReasoningModel(typeof body.model === 'string' ? body.model : '')) {
 						delete body.temperature;
-						body.reasoning_effort = 'none';
+						body.reasoning_effort = 'low';
 					}
 					const requestInit: RequestInit = {
 						method: 'POST',

@@ -225,9 +225,9 @@ test('the merge request defaults to gpt-6-luna with a none-effort pass', async (
 	const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0]?.[1]?.body));
 	expect(body.model).toBe('gpt-6-luna');
 	// gpt-6-luna is a reasoning model — it rejects temperature, so the
-	// request carries a none-effort pass instead.
+	// request carries a low-effort pass instead.
 	expect(body.temperature).toBeUndefined();
-	expect(body.reasoning_effort).toBe('none');
+	expect(body.reasoning_effort).toBe('low');
 });
 
 test('a non-OK provider response recovers with original claims', async () => {

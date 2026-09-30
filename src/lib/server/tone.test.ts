@@ -28,9 +28,9 @@ test('returns the tone score and sends context, model, and the calibrated rubric
 	const body = JSON.parse(String(fetch.mock.calls[0]?.[1]?.body));
 	expect(body.model).toBe('gpt-6-luna');
 	// gpt-6-luna is a reasoning model — it rejects temperature, so the
-	// request carries a none-effort pass instead.
+	// request carries a low-effort pass instead.
 	expect(body.temperature).toBeUndefined();
-	expect(body.reasoning_effort).toBe('none');
+	expect(body.reasoning_effort).toBe('low');
 	expect(body.response_format).toEqual({ type: 'json_object' });
 	const prompt = body.messages.map((message: { content: string }) => message.content).join('\n');
 	expect(prompt).toContain('My video');

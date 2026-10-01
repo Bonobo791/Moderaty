@@ -41,7 +41,7 @@ describe('credit volume pricing', () => {
 		// The progressive rate past 500 cannot actually be bought: the codex
 		// example — 1,000 credits forecast at $35.15 understates the cheapest
 		// real purchase, two 500-bundles at $40.80. Neither can the 100-bundle:
-		// it is auto-top-up only (hiddenFromPurchase), so the forecast's
+		// it is retained only for historical grants (hiddenFromPurchase), so the forecast's
 		// purchasable set is 500/2,000 and never understates a manual buyer
 		// (codex).
 		expect(purchasableCreditCostUsd(0)).toBe(0);

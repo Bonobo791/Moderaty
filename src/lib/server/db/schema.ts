@@ -68,13 +68,20 @@ export const organizations = sqliteTable('organizations', {
 	stripeCustomerId: text('stripe_customer_id'), // Stripe Customer for this org
 	stripeDefaultPmId: text('stripe_default_pm_id'), // card saved for off-session auto top-up
 	autoTopupEnabled: integer('auto_topup_enabled'),
+	autoTopupBundle: text('auto_topup_bundle'),
 	autoTopupThreshold: integer('auto_topup_threshold'), // top up when credits < threshold
 	// 'idle' | 'in_flight' | 'disabled' — in_flight is the atomic claim against
 	// concurrent triggers; disabled after SCA/decline failures until the
 	// customer re-authenticates (never blind-retried off-session).
 	autoTopupState: text('auto_topup_state'),
 	autoTopupLastAttemptAt: text('auto_topup_last_attempt_at'),
+	// Logical attempt survives an indeterminate Stripe create response. Submission
+	// is recorded before the remote call so an unsent attempt can be proven safe.
+	autoTopupAttemptAt: text('auto_topup_attempt_at'),
+	autoTopupSubmittedAt: text('auto_topup_submitted_at'),
 	autoTopupFailures: integer('auto_topup_failures'),
+	autoTopupPauseReason: text('auto_topup_pause_reason'),
+	autoTopupPausedAt: text('auto_topup_paused_at'),
 	// Auto top-up authorization evidence (Stripe save-and-reuse compliance:
 	// keep a record of the written agreement). Written once on the
 	// disabled→enabled transition and NEVER cleared by disabling — the record
@@ -186,6 +193,7 @@ export const mercadoPagoCheckoutAttempts = sqliteTable('mercado_pago_checkout_at
 	// change between checkout and the webhook.
 	credits: integer('credits'),
 	paymentId: text('payment_id').unique(),
+	refundedAmountCents: integer('refunded_amount_cents'),
 	paidAt: text('paid_at'),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`),
 	updatedAt: text('updated_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
@@ -550,6 +558,36 @@ export const creditTransactions = sqliteTable('credit_transactions', {
 // that granted it). charge_id UNIQUE: one reversal per charge, first event
 // wins. A grant that lands later drains the row (drainPendingReversals);
 // the cron sweep drops rows whose grant never arrived.
+// Canceled auto-top-up authorization: durable until Stripe cancellation/refund
+// completes, retained afterwards to reject delayed duplicate success events.
+export const stripeAutoTopupRecoveries = sqliteTable('stripe_auto_topup_recoveries', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	orgId: text('org_id').notNull(), // payment routing only; unresolved obligations survive account deletion
+	customerId: text('customer_id'),
+	attemptAt: text('attempt_at').notNull(),
+	paymentIntentId: text('payment_intent_id'),
+	paymentLookupCursor: text('payment_lookup_cursor'),
+	// Retained from the already-applied 0057 migration; current recovery uses paymentLookupCursor.
+	lookupCursor: text('lookup_cursor'),
+	lookupCandidateId: text('lookup_candidate_id'),
+	refundOccurredAt: text('refund_occurred_at'),
+	refundId: text('refund_id'),
+	lastCheckedAt: text('last_checked_at'),
+	lastError: text('last_error'),
+	resolvedAt: text('resolved_at')
+}, (table) => [uniqueIndex('stripe_auto_topup_recoveries_attempt_idx').on(table.orgId, table.attemptAt),
+	index('stripe_auto_topup_recoveries_payment_idx').on(table.orgId, table.paymentIntentId),
+	index('stripe_auto_topup_recoveries_pending_idx').on(table.resolvedAt, table.lastCheckedAt),
+	index('stripe_auto_topup_recoveries_customer_idx').on(table.customerId, table.resolvedAt)]);
+
+// Monotonic refund observations survive out-of-order grants and dedupe consent revocation.
+export const stripeRefundObservations = sqliteTable('stripe_refund_observations', {
+	chargeId: text('charge_id').primaryKey(),
+	refundedAmountCents: integer('refunded_amount_cents').notNull(),
+	occurredAt: text('occurred_at').notNull(),
+	orgId: text('org_id') // NULL until the local purchase is known and its pause is applied
+});
+
 export const stripePendingReversals = sqliteTable(
 	'stripe_pending_reversals',
 	{
@@ -559,6 +597,7 @@ export const stripePendingReversals = sqliteTable(
 		// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 		reason: text('reason').notNull(), // 'refund' | 'dispute'
 		disputeId: text('dispute_id'),
+		occurredAt: text('occurred_at'),
 		createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 	},
 	// UNIQUE(charge_id, reason), NOT charge_id alone: a dispute AND a later

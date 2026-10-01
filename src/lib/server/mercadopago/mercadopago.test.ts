@@ -2,7 +2,7 @@ import { createHmac } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { organizations, mercadoPagoCheckoutAttempts, creditTransactions } from '$lib/server/db/schema';
+import { organizations, mercadoPagoCheckoutAttempts, creditTransactions, stripeAutoTopupRecoveries } from '$lib/server/db/schema';
 import { setupTestDb, testDb, TEST_OWNER } from '$lib/server/testdb';
 import { providerLedgerRef } from '$lib/server/billing/providers';
 
@@ -25,7 +25,7 @@ import { configuredMercadoPagoBundles } from './bundles';
 import { createMercadoPagoCreditCheckout } from './checkout';
 import { fulfillMercadoPagoPayment, processMercadoPagoPayment, verifyWebhookSignature } from './webhooks';
 
-setupTestDb(['organizations', 'credit_transactions', 'mercado_pago_checkout_attempts']);
+setupTestDb(['stripe_auto_topup_recoveries', 'organizations', 'credit_transactions', 'mercado_pago_checkout_attempts']);
 
 const payment = {
 	id: 'pay-1',
@@ -140,6 +140,17 @@ test('rejects a payment whose amount does not match the persisted attempt', asyn
 	await expect(fulfillMercadoPagoPayment({ ...payment, transactionAmount: 4.99 })).rejects.toThrow(/amount does not match/);
 	const org = await testDb().db.select({ creditsRemaining: organizations.creditsRemaining }).from(organizations).where(eq(organizations.id, 'org-1')).get();
 	expect(org?.creditsRemaining).toBe(0);
+});
+
+test('a repeated partial refund preserves fresh consent, while an increased refund pauses again', async () => {
+	await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle' }).where(eq(organizations.id, 'org-1'));
+	await expect(fulfillMercadoPagoPayment({ ...payment, refundedAmount: 2 })).rejects.toThrow(/partial refund/);
+	expect((await testDb().db.select().from(organizations).get())?.autoTopupEnabled).toBe(0);
+	await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupPauseReason: null }).where(eq(organizations.id, 'org-1'));
+	await expect(fulfillMercadoPagoPayment({ ...payment, refundedAmount: 2 })).rejects.toThrow(/partial refund/);
+	expect((await testDb().db.select().from(organizations).get())?.autoTopupEnabled).toBe(1);
+	await expect(fulfillMercadoPagoPayment({ ...payment, refundedAmount: 3 })).rejects.toThrow(/partial refund/);
+	expect((await testDb().db.select().from(organizations).get())?.autoTopupEnabled).toBe(0);
 });
 
 test('an approved payment carrying a partial refund is rejected loudly — never fulfilled', async () => {
@@ -308,16 +319,21 @@ test('a chargeback whose credits were never granted still disables auto top-up',
 	expect((await attemptRow())?.status).toBe('disputed');
 });
 
-test('a refund whose credits were never granted does not touch auto top-up', async () => {
-	// Only DISPUTES disable off-session charging — a plain refund is not a
-	// chargeback signal.
+test('a duplicate ungranted refund respects the owner explicitly resuming afterward', async () => {
+	await processMercadoPagoPayment({ ...payment, status: 'refunded', refundedAmount: 5 });
+	await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupPauseReason: null, autoTopupConsentedAt: new Date().toISOString() }).where(eq(organizations.id, 'org-1'));
+	await processMercadoPagoPayment({ ...payment, status: 'refunded', refundedAmount: 5 });
+	expect((await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get())?.autoTopupEnabled).toBe(1);
+});
+
+test('a refund whose credits were never granted still pauses auto top-up', async () => {
 	await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'active' }).where(eq(organizations.id, 'org-1'));
 
 	expect(await processMercadoPagoPayment({ ...payment, status: 'refunded', refundedAmount: 5 })).toBe(false);
 
 	const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
-	expect(org?.autoTopupEnabled).toBe(1);
-	expect(org?.autoTopupState).toBe('active');
+	expect(org?.autoTopupEnabled).toBe(0);
+	expect(org?.autoTopupState).toBe('disabled');
 });
 
 test('a reversal whose payment amount does not match the persisted attempt fails loudly and touches nothing', async () => {
@@ -503,7 +519,7 @@ test('checkout refuses when MERCADOPAGO_WEBHOOK_SECRET is missing — no prefere
 	const fetchSpy = vi.fn();
 	vi.stubGlobal('fetch', fetchSpy);
 	try {
-		await expect(createMercadoPagoCreditCheckout('org-1', TEST_OWNER, 'credits_100', 'attempt_secret')).rejects.toThrow(
+		await expect(createMercadoPagoCreditCheckout('org-1', TEST_OWNER, 'credits_500', 'attempt_secret')).rejects.toThrow(
 			/MERCADOPAGO_WEBHOOK_SECRET is not configured/
 		);
 	} finally {
@@ -666,4 +682,91 @@ test('the checkout idempotency key is namespaced per org — an attempt id reuse
 	expect(firstKey).toMatch(/^[0-9a-f]{64}$/);
 	expect(secondKey).toMatch(/^[0-9a-f]{64}$/);
 	expect(secondKey).not.toBe(firstKey);
+});
+
+test('a stale zero-refund approval cannot grant after a partial refund was observed', async () => {
+	await expect(fulfillMercadoPagoPayment({ ...payment, refundedAmount: 2 })).rejects.toThrow(/partial refund/);
+	await expect(fulfillMercadoPagoPayment(payment)).rejects.toThrow(/partial refund|changed while fulfilling/);
+	expect((await testDb().db.select().from(organizations).get())?.creditsRemaining).toBe(0);
+});
+
+test('a legacy refunded attempt still pauses once, then respects resumed consent', async () => {
+	await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle' });
+	await testDb().db.update(mercadoPagoCheckoutAttempts).set({ status: 'refunded', paymentId: payment.id });
+	const refund = { ...payment, status: 'refunded', refundedAmount: 5 };
+	await processMercadoPagoPayment(refund);
+	expect((await testDb().db.select().from(organizations).get())?.autoTopupEnabled).toBe(0);
+	await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupPauseReason: null });
+	await processMercadoPagoPayment(refund);
+	expect((await testDb().db.select().from(organizations).get())?.autoTopupEnabled).toBe(1);
+});
+
+test('missing Mercado Pago webhook configuration fails before any database access', async () => {
+	const previous = mocks.env.MERCADOPAGO_WEBHOOK_SECRET;
+	const select = vi.spyOn(testDb().db, 'select');
+	try {
+		delete (mocks.env as Partial<typeof mocks.env>).MERCADOPAGO_WEBHOOK_SECRET;
+		await expect(createMercadoPagoCreditCheckout('org-1', TEST_OWNER, 'credits_500')).rejects.toThrow(/WEBHOOK_SECRET/);
+		expect(select).not.toHaveBeenCalled();
+	} finally { mocks.env.MERCADOPAGO_WEBHOOK_SECRET = previous; select.mockRestore(); }
+});
+
+test.each(['approved', 'refunded'])('a delayed %s refund preserves newer consent while reversing money', async (status) => {
+	await processMercadoPagoPayment(payment);
+	await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupConsentedAt: '2026-09-30T12:00:00.000Z' }).where(eq(organizations.id, 'org-1'));
+	const refund = { ...payment, status, refundedAmount: status === 'approved' ? 2 : 5, refundOccurredAt: '2026-09-30T11:00:00.000Z' };
+	if (status === 'approved') await expect(processMercadoPagoPayment(refund)).rejects.toThrow(/partial refund/);
+	else expect(await processMercadoPagoPayment(refund)).toBe(true);
+	expect((await testDb().db.select().from(organizations).get())?.autoTopupEnabled).toBe(1);
+});
+
+test('payment lookup uses the actual latest approved refund date, not payment update time', async () => {
+	const fetchMock = vi.fn()
+		.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'refunded', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 5, currency_id: 'BRL', date_last_updated: '2026-09-30T13:00:00Z' })))
+		.mockResolvedValueOnce(new Response(JSON.stringify([{ id: 2, payment_id: 'pay-1', amount: 3, status: 'approved', date_created: '2026-09-30T11:00:00-03:00' }, { id: 1, payment_id: 'pay-1', amount: 2, status: 'approved', date_created: '2026-09-30T10:00:00-03:00' }])));
+	vi.stubGlobal('fetch', fetchMock);
+	expect(await retrievePayment('pay-1')).toMatchObject({ refundOccurredAt: '2026-09-30T14:00:00.000Z', refundBoundaries: ['2026-09-30T13:00:00.000Z', '2026-09-30T14:00:00.000Z'] });
+	expect(String(fetchMock.mock.calls[1][0])).toBe('https://api.mercadopago.com/v1/payments/pay-1/refunds');
+});
+
+test.each(['2026-02-30T10:00:00Z', '2026-09-30 10:00:00Z'])('refund lookup rejects impossible or non-ISO timestamp %s', async (dateCreated) => {
+	vi.stubGlobal('fetch', vi.fn()
+		.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'refunded', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 5, currency_id: 'BRL' })))
+		.mockResolvedValueOnce(new Response(JSON.stringify([{ payment_id: 'pay-1', amount: 5, status: 'approved', date_created: dateCreated }]))));
+	await expect(retrievePayment('pay-1')).rejects.toThrow(/refund records/);
+});
+
+test('refund lookup rejects a wrong-typed refund payment id', async () => {
+	vi.stubGlobal('fetch', vi.fn()
+		.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'refunded', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 5, currency_id: 'BRL' })))
+		.mockResolvedValueOnce(new Response(JSON.stringify([{ payment_id: ['pay-1'], amount: 5, status: 'approved', date_created: '2026-09-30T10:00:00Z' }]))));
+	await expect(retrievePayment('pay-1')).rejects.toThrow(/refund records/);
+});
+
+test('a new Mercado Pago refund after consent pauses automatic top-up', async () => {
+	await processMercadoPagoPayment(payment);
+	await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupConsentedAt: '2026-09-30T12:00:00.000Z' }).where(eq(organizations.id, 'org-1'));
+	await processMercadoPagoPayment({ ...payment, status: 'refunded', refundedAmount: 5, refundOccurredAt: '2026-09-30T13:00:00.000Z' });
+	expect((await testDb().db.select().from(organizations).get())?.autoTopupEnabled).toBe(0);
+});
+
+test('multiple provider refunds recover the interval before later owner consent', async () => {
+	await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupConsentedAt: '2026-09-30T12:00:00.000Z' });
+	for (const [id, at] of [['pi_before_consent', '2026-09-30T11:00:00.000Z'], ['pi_after_consent', '2026-09-30T13:00:00.000Z']]) await testDb().db.insert(creditTransactions).values({ orgId: 'org-1', delta: 100, reason: 'auto_topup', refType: 'payment_intent', refId: id, paymentIntentId: id, createdAt: at });
+	const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'approved', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 2, currency_id: 'BRL' })))
+		.mockResolvedValueOnce(new Response(JSON.stringify(['2026-09-30T10:00:00Z', '2026-09-30T14:00:00Z'].map(date_created => ({ payment_id: 'pay-1', amount: 1, status: 'approved', date_created })))));
+	vi.stubGlobal('fetch', fetchMock);
+	await expect(processMercadoPagoPayment(await retrievePayment('pay-1'))).rejects.toThrow(/partial refund/);
+	// pi_after_consent queues too: its ledger write post-dates consent, but only
+	// the provider payment timestamp can prove the charge itself post-dates it.
+	expect((await testDb().db.select().from(stripeAutoTopupRecoveries)).map(row => row.paymentIntentId).sort()).toEqual(['pi_after_consent', 'pi_before_consent']);
+	expect((await testDb().db.select().from(organizations).get())?.autoTopupEnabled).toBe(0);
+});
+
+test('refund lookup rejects a future provider refund timestamp', async () => {
+	const date_created = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
+	vi.stubGlobal('fetch', vi.fn()
+		.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'refunded', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 5, currency_id: 'BRL' })))
+		.mockResolvedValueOnce(new Response(JSON.stringify([{ payment_id: 'pay-1', amount: 5, status: 'approved', date_created }]))));
+	await expect(retrievePayment('pay-1')).rejects.toThrow(/refund records/);
 });

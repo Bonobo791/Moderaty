@@ -143,43 +143,49 @@ async function classify(text, apiKey, model) {
 	return parseVerdict((await res.json()).choices?.[0]?.message?.content);
 }
 
-async function main() {
-	loadEnvIfPresent(root);
-	const apiKey = process.env.OPENAI_API_KEY;
-	if (!apiKey) fail('OPENAI_API_KEY is required (set it in .env or the environment)');
-	const model = process.env.OPENAI_FEEDBACK_MODEL || 'gpt-6-luna';
+async function classifyOne(testCase, apiKey, model) {
+	try {
+		return await classify(testCase.text, apiKey, model);
+	} catch (e) {
+		console.log(`FAIL  "${testCase.text.slice(0, 50)}"  (${testCase.note}) — ${e.message}`);
+		return null;
+	}
+}
 
-	console.log(`feedback-eval: model=${model} cases=${FEEDBACK_CORPUS.length}\n`);
+function reportCaseResult(testCase, verdict) {
+	const faithful =
+		verdict.category === testCase.expected.category && verdict.hasAbuse === testCase.expected.hasAbuse;
+	const leaks = abuseLeaks(testCase.text, verdict);
+	const pass = faithful && leaks.length === 0;
+	const excerpt = testCase.text.length > 45 ? `${testCase.text.slice(0, 42)}...` : testCase.text;
+	console.log(
+		`${pass ? 'PASS' : 'FAIL'}  [${testCase.lang}] ${verdict.category}/${verdict.hasAbuse ? 'abuse' : 'clean'}  ` +
+			`expected=${testCase.expected.category}/${testCase.expected.hasAbuse ? 'abuse' : 'clean'}  "${excerpt}"  (${testCase.note})` +
+			(leaks.length ? `\n      leak: ${leaks.join('; ')}` : '')
+	);
+	return pass;
+}
 
+async function classifyCorpus(apiKey, model) {
 	let failures = 0;
 	const classified = [];
 	const pairs = [];
 	for (const testCase of FEEDBACK_CORPUS) {
-		let verdict;
-		try {
-			verdict = await classify(testCase.text, apiKey, model);
-		} catch (e) {
+		const verdict = await classifyOne(testCase, apiKey, model);
+		if (verdict === null) {
 			failures += 1;
-			console.log(`FAIL  "${testCase.text.slice(0, 50)}"  (${testCase.note}) — ${e.message}`);
 			continue;
 		}
 		pairs.push({ expected: testCase.expected.category, predicted: verdict.category });
-		const faithful =
-			verdict.category === testCase.expected.category && verdict.hasAbuse === testCase.expected.hasAbuse;
-		const leaks = abuseLeaks(testCase.text, verdict);
-		const pass = faithful && leaks.length === 0;
-		if (!pass) failures += 1;
-		const excerpt = testCase.text.length > 45 ? `${testCase.text.slice(0, 42)}...` : testCase.text;
-		console.log(
-			`${pass ? 'PASS' : 'FAIL'}  [${testCase.lang}] ${verdict.category}/${verdict.hasAbuse ? 'abuse' : 'clean'}  ` +
-				`expected=${testCase.expected.category}/${testCase.expected.hasAbuse ? 'abuse' : 'clean'}  "${excerpt}"  (${testCase.note})` +
-				(leaks.length ? `\n      leak: ${leaks.join('; ')}` : '')
-		);
+		if (!reportCaseResult(testCase, verdict)) failures += 1;
 		if (verdict.category !== 'none') {
 			classified.push({ commentId: `corpus-${classified.length}`, text: testCase.text, publishedAt: new Date().toISOString(), ...verdict });
 		}
 	}
+	return { failures, classified, pairs };
+}
 
+function reportGroupLeaks(classified) {
 	// End-to-end: the surviving classifications group and every stored
 	// finding summary is lexicon-clean — a claim that slips the per-case
 	// check still cannot leak through the digest text.
@@ -191,6 +197,10 @@ async function main() {
 			console.log(`LEAK  summary contains an abuse term: ${JSON.stringify(finding.summary)}`);
 		}
 	}
+	return { findings, groupLeaks };
+}
+
+function printCategoryMetrics(pairs) {
 	const pctFormat = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 1, maximumFractionDigits: 1 });
 	const pct = (v) => (v === null ? 'n/a' : pctFormat.format(v));
 	console.log('\nper-category classification (over successfully parsed cases):');
@@ -199,6 +209,19 @@ async function main() {
 			`  ${category.padEnd(10)} precision=${pct(m.precision)} (${m.tp}/${m.predicted})  recall=${pct(m.recall)} (${m.tp}/${m.expected})`
 		);
 	}
+}
+
+async function main() {
+	loadEnvIfPresent(root);
+	const apiKey = process.env.OPENAI_API_KEY;
+	if (!apiKey) fail('OPENAI_API_KEY is required (set it in .env or the environment)');
+	const model = process.env.OPENAI_FEEDBACK_MODEL || 'gpt-6-luna';
+
+	console.log(`feedback-eval: model=${model} cases=${FEEDBACK_CORPUS.length}\n`);
+
+	const { failures, classified, pairs } = await classifyCorpus(apiKey, model);
+	const { findings, groupLeaks } = reportGroupLeaks(classified);
+	printCategoryMetrics(pairs);
 
 	if (groupLeaks) fail(`${groupLeaks} finding summary(ies) leak abuse terms`);
 

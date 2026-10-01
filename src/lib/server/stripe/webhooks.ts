@@ -12,14 +12,15 @@ import { randomUUID } from 'node:crypto';
 
 import { db } from '$lib/server/db';
 import { organizations, creditTransactions, stripeEvents, stripeLifetimeEntitlements, stripeDisputeReversals, stripeCheckoutAttempts, stripeSubscriptionPeriods } from '$lib/server/db/schema';
-import { applyLedgerDelta, drainPendingReversals, findGrantForStripe, queuePendingReversal, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
+import { applyLedgerDelta, drainPendingReversals, findGrantForStripe, pauseForObservedStripeRefund, queuePendingReversal, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
 import { grantAutoTopupCredits, handleAutoTopupFailure } from '$lib/server/billing/autotopup';
 import { claimLifetimeSlot, grantSubscriptionPeriod, refundSubscriptionPeriod, disputeSubscriptionPeriod, releaseLifetimeForPayment, applySubscriptionSnapshot, revokeLifetimeForDispute, restoreLifetimeForDispute, restoreDisputedSubscriptionPeriod, stripeIdentifierPredicate, LIFETIME_SOLD_OUT_ERROR } from '$lib/server/billing/entitlements';
 import { bundleById, type CreditBundle } from '$lib/server/stripe/bundles';
 import { isActiveSubscriptionStatus } from '$lib/server/billing/plans';
 import { markCheckoutAttemptFulfilled, TEST_CHECKOUT_PRODUCT } from '$lib/server/billing/checkout';
 import { getStripe } from '$lib/server/stripe/client';
-import { refundUngrantablePayment } from '$lib/server/stripe/refunds';
+import { chargeFullyRefunded, refundUngrantablePayment } from '$lib/server/stripe/refunds';
+export { chargeFullyRefunded } from '$lib/server/stripe/refunds';
 
 /**
  * Records a Stripe event when it has not already been recorded.
@@ -165,6 +166,26 @@ export async function fulfillCheckout(sessionId: string): Promise<'granted' | 'a
 type CheckoutVerdict = 'granted' | 'already' | 'rejected' | 'refunded';
 
 /**
+ * One live subscription per org. The stored status is only a cache — it is
+ * null until a subscription webhook lands and stale whenever deliveries
+ * fail — so exclusivity is decided by the LIVE Stripe status of the stored
+ * subscription. A live one means this paid checkout minted a duplicate:
+ * cancel it and refund its first invoice instead of keeping the money for
+ * a sub we never honor.
+ */
+async function storedSubscriptionIsDuplicate(storedId: string | null, subscriptionId: string, sessionId: string, orgId: string): Promise<boolean> {
+	if (!storedId || storedId === subscriptionId) return false;
+	const liveStatus = await liveSubscriptionStatus(storedId);
+	if (subscriptionStatusMeaning(storedId, liveStatus) === 'live') {
+		console.error(`stripe: hosted checkout ${sessionId} for org ${orgId} would overlap live subscription ${storedId} (${liveStatus}) — tearing down duplicate ${subscriptionId}`);
+		await teardownDuplicateSubscription(subscriptionId, orgId, { checkoutSessionId: sessionId, paymentExpected: true });
+		return true;
+	}
+	console.info(`stripe: stored subscription ${storedId} for org ${orgId} is ${liveStatus} — checkout ${sessionId} replaces it`);
+	return false;
+}
+
+/**
  * Hosted checkout fulfillment: one live subscription per org, ever — the
  * org row is claimed CONDITIONALLY so a concurrent fulfillment losing the
  * race tears down and refunds its own duplicate instead of orphaning a
@@ -190,21 +211,7 @@ async function fulfillHostedCheckout(session: Stripe.Checkout.Session, sessionId
 		await teardownDuplicateSubscription(subscriptionId, orgId, { checkoutSessionId: sessionId, paymentExpected: true });
 		return 'refunded';
 	}
-	// One live subscription per org. The stored status is only a cache —
-	// it is null until a subscription webhook lands and stale whenever
-	// deliveries fail — so exclusivity is decided by the LIVE Stripe
-	// status of the stored subscription. A live one means this paid
-	// checkout minted a duplicate: cancel it and refund its first
-	// invoice instead of keeping the money for a sub we never honor.
-	if (existing.stripeSubscriptionId && existing.stripeSubscriptionId !== subscriptionId) {
-		const liveStatus = await liveSubscriptionStatus(existing.stripeSubscriptionId);
-		if (subscriptionStatusMeaning(existing.stripeSubscriptionId, liveStatus) === 'live') {
-			console.error(`stripe: hosted checkout ${sessionId} for org ${orgId} would overlap live subscription ${existing.stripeSubscriptionId} (${liveStatus}) — tearing down duplicate ${subscriptionId}`);
-			await teardownDuplicateSubscription(subscriptionId, orgId, { checkoutSessionId: sessionId, paymentExpected: true });
-			return 'refunded';
-		}
-		console.info(`stripe: stored subscription ${existing.stripeSubscriptionId} for org ${orgId} is ${liveStatus} — checkout ${sessionId} replaces it`);
-	}
+	if (await storedSubscriptionIsDuplicate(existing.stripeSubscriptionId, subscriptionId, sessionId, orgId)) return 'refunded';
 	if (existing.stripeCustomerId && customerId && existing.stripeCustomerId !== customerId) {
 		console.error(`stripe: hosted checkout ${sessionId} customer does not belong to org ${orgId}`);
 		return 'rejected';
@@ -284,25 +291,31 @@ async function fulfillLifetimeCheckout(session: Stripe.Checkout.Session, session
 			chargeId: typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : charge?.id
 		});
 	} catch (error) {
-		if (!(error instanceof Error && error.message === LIFETIME_SOLD_OUT_ERROR)) {
-			// A concurrent same-org claim loses on the unique active-org
-			// index; the aborted tx's snapshot could not see the winner, so
-			// re-read fresh — a winner means this was a paid duplicate and
-			// falls into the same refund path, anything else is a real error.
-			const winner = await db.select({ id: stripeLifetimeEntitlements.id, checkoutSessionId: stripeLifetimeEntitlements.checkoutSessionId }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
-			if (!winner) throw error;
-			// The winner may be THIS session's own claim — a duplicate
-			// delivery (success redirect + webhook) that lost on the
-			// index. ACK as 'already'; refunding it would leave the org
-			// with lifetime access it never paid for (codex P1).
-			if (winner.checkoutSessionId === sessionId) return 'already';
-		}
-		await refundUngrantableCheckout(sessionId, orgId, paymentIntent, charge, 'claimed no slot');
-		return 'refunded';
+		return resolveLifetimeClaimFailure(error, orgId, sessionId, paymentIntent, charge);
 	}
 	if (result.status === 'active' && result.slot > 0) return 'granted';
 	console.error(`stripe: lifetime checkout ${sessionId} for org ${orgId} was PAID but claimed no slot (status ${result.status}, slot ${result.slot}) — manual refund required`);
 	return 'rejected';
+}
+
+/**
+ * A claim failure is either the documented sold-out sentinel or a
+ * concurrent same-org claim losing the unique active-org index. A
+ * concurrent loser re-reads fresh — its aborted tx's snapshot could not
+ * see the winner; a winner means this was a paid duplicate and falls into
+ * the same refund path, anything else is a real error. The winner may be
+ * THIS session's own claim — a duplicate delivery (success redirect +
+ * webhook) that lost on the index. ACK as 'already'; refunding it would
+ * leave the org with lifetime access it never paid for (codex P1).
+ */
+async function resolveLifetimeClaimFailure(error: unknown, orgId: string, sessionId: string, paymentIntent: Stripe.PaymentIntent | null, charge: Stripe.Charge | null | undefined): Promise<CheckoutVerdict> {
+	if (!(error instanceof Error && error.message === LIFETIME_SOLD_OUT_ERROR)) {
+		const winner = await db.select({ id: stripeLifetimeEntitlements.id, checkoutSessionId: stripeLifetimeEntitlements.checkoutSessionId }).from(stripeLifetimeEntitlements).where(and(eq(stripeLifetimeEntitlements.orgId, orgId), eq(stripeLifetimeEntitlements.status, 'active'))).get();
+		if (!winner) throw error;
+		if (winner.checkoutSessionId === sessionId) return 'already';
+	}
+	await refundUngrantableCheckout(sessionId, orgId, paymentIntent, charge, 'claimed no slot');
+	return 'refunded';
 }
 
 /**
@@ -464,10 +477,6 @@ export function getPaymentIntentAndCharge(session: Stripe.Checkout.Session): {
  * success page renders — while a disputed one stays 'rejected' (the money
  * outcome is unresolved, not returned).
  */
-/** True when the charge's full amount was refunded — partial refunds keep their purchase (documented v1 scope). */
-export function chargeFullyRefunded(charge: { amount?: unknown; amount_refunded?: unknown }): boolean {
-	return typeof charge.amount === 'number' && charge.amount > 0 && typeof charge.amount_refunded === 'number' && charge.amount_refunded >= charge.amount;
-}
 
 function lateGrantVerdict(session: Stripe.Checkout.Session, sessionId: string): 'refunded' | 'rejected' | null {
 	const { charge } = getPaymentIntentAndCharge(session);
@@ -607,10 +616,10 @@ async function reverseEntitlements(chargeId: string, reason: 'refund' | 'dispute
 	return periodChanged;
 }
 
-async function reverseCreditGrant(chargeId: string, reason: 'refund' | 'dispute', disputeId: string | undefined, paymentIntentId: string | undefined): Promise<boolean> {
+async function reverseCreditGrant(chargeId: string, reason: 'refund' | 'dispute', disputeId: string | undefined, paymentIntentId: string | undefined, occurredAt?: string): Promise<boolean> {
 	const match = await findGrantForStripe(db, { chargeId, paymentIntentId });
 	if (!match) {
-		await queuePendingReversal(chargeId, reason, disputeId);
+		await queuePendingReversal(chargeId, reason, disputeId, occurredAt);
 		console.error(`stripe: ${reason} for ${chargeId} matched no credit grant — queued as pending reversal for when the grant lands`);
 		return false;
 	}
@@ -621,7 +630,8 @@ async function reverseCreditGrant(chargeId: string, reason: 'refund' | 'dispute'
 		refType: reason === 'refund' ? 'refund' : 'dispute',
 		refId: chargeId,
 		chargeId,
-		paymentIntentId
+		paymentIntentId,
+		refundOccurredAt: occurredAt
 	});
 	if (disputeId) {
 		let status: DisputeReversalStatus = applied ? 'reversed' : 'ignored';
@@ -633,6 +643,71 @@ async function reverseCreditGrant(chargeId: string, reason: 'refund' | 'dispute'
 		await updateDisputeReversal(disputeId, { status, source: 'credits' });
 	}
 	return applied;
+}
+
+/** The durable attempt also identifies a purchase before its grant exists. */
+async function refundCheckoutOrg(session: Stripe.Checkout.Session, paymentIntentId: string): Promise<{ orgId: string } | undefined> {
+	if (!stripeId(session) || stripeId(session.payment_intent) !== paymentIntentId) {
+		console.error('stripe: skipped malformed refund checkout link', { paymentIntentId });
+		return undefined;
+	}
+	const attempt = await db.select({ orgId: stripeCheckoutAttempts.orgId }).from(stripeCheckoutAttempts).where(eq(stripeCheckoutAttempts.stripeSessionId, session.id)).get();
+	if (attempt) return attempt;
+	// A lost create response can leave the attempt's session ID unset.
+	const orgId = session.metadata?.org_id;
+	const customerId = stripeId(session.customer);
+	if (typeof orgId !== 'string' || !customerId) return undefined;
+	const product = session.metadata?.product;
+	const bundle = session.metadata?.bundle;
+	const ours = product === 'lifetime' || product === 'hosted' || product === TEST_CHECKOUT_PRODUCT || (typeof bundle === 'string' && loadBundle(bundle, session.id));
+	if (!ours) return undefined;
+	return db.select({ orgId: organizations.id }).from(organizations).where(and(eq(organizations.id, orgId), eq(organizations.stripeCustomerId, customerId))).get();
+}
+
+/** Resolve server-created purchase links when the refund beats local fulfillment. */
+async function refundOrgBeforeFulfillment(charge: Stripe.Charge, paymentIntentId?: string): Promise<{ orgId: string } | undefined> {
+	if (!paymentIntentId) return undefined;
+	const pi = optionalRecord(charge.payment_intent);
+	const metadata = optionalRecord(pi?.metadata);
+	if (metadata?.type === 'auto_topup' && typeof metadata.org_id === 'string') {
+		const customerId = stripeId(charge.customer) ?? stripeId(pi?.customer);
+		if (customerId) return db.select({ orgId: organizations.id }).from(organizations).where(and(eq(organizations.id, metadata.org_id), eq(organizations.stripeCustomerId, customerId))).get();
+	}
+	const sessions = await getStripe().checkout.sessions.list({ payment_intent: paymentIntentId, limit: 2 });
+	if (!Array.isArray(sessions.data) || sessions.has_more || sessions.data.length > 1) throw new Error('Stripe refund has invalid or ambiguous checkout ownership');
+	if (sessions.data[0]) {
+		const org = await refundCheckoutOrg(sessions.data[0], paymentIntentId);
+		if (org) return org;
+	}
+	const subscription = await refundedSubscription(charge.id, paymentIntentId);
+	return subscription?.orgId ? { orgId: subscription.orgId } : undefined;
+}
+
+async function refundCustomerDeleted(charge: Stripe.Charge): Promise<boolean> {
+	const customerId = stripeId(charge.customer);
+	if (!customerId) return false;
+	const customer = await getStripe().customers.retrieve(customerId);
+	if (!customer || customer.id !== customerId) throw new Error('Stripe refund customer lookup returned an invalid customer');
+	return customer.deleted === true;
+}
+
+/** Only a payment associated with a Moderaty purchase can revoke its authorization. */
+async function pauseRefundedCharge(charge: Stripe.Charge, paymentIntentId: string | undefined, occurredAt?: string): Promise<boolean> {
+	if (!Number.isSafeInteger(charge.amount) || charge.amount <= 0 || !Number.isSafeInteger(charge.amount_refunded) || charge.amount_refunded < 0 || charge.amount_refunded > charge.amount) throw new Error('Stripe refund has an invalid amount');
+	if (charge.amount_refunded === 0) return false;
+	const chargeId = charge.id;
+	const org = await findGrantForStripe(db, { chargeId, paymentIntentId })
+		?? await db.select({ orgId: stripeSubscriptionPeriods.orgId }).from(stripeSubscriptionPeriods).where(stripeIdentifierPredicate({ chargeId, paymentIntentId }, stripeSubscriptionPeriods.paymentIntentId, stripeSubscriptionPeriods.chargeId)).get()
+		?? await db.select({ orgId: stripeLifetimeEntitlements.orgId }).from(stripeLifetimeEntitlements).where(stripeIdentifierPredicate({ chargeId, paymentIntentId }, stripeLifetimeEntitlements.paymentIntentId, stripeLifetimeEntitlements.chargeId)).get()
+		?? await refundOrgBeforeFulfillment(charge, paymentIntentId);
+	if (!org && await refundCustomerDeleted(charge)) return true;
+	// Refunds recorded before observation tracking retain their original replay anchor.
+	const recordedRefund = org ? await db.select({ createdAt: creditTransactions.createdAt }).from(creditTransactions)
+		.where(and(eq(creditTransactions.orgId, org.orgId), eq(creditTransactions.refType, 'refund'), eq(creditTransactions.refId, chargeId))).get() : undefined;
+	const expandedPayment = typeof charge.payment_intent === 'object' ? charge.payment_intent : undefined;
+	const payment = expandedPayment ?? (paymentIntentId ? { id: paymentIntentId, metadata: null } : undefined);
+	await pauseForObservedStripeRefund(db, org?.orgId, chargeId, charge.amount_refunded, occurredAt ?? recordedRefund?.createdAt, payment);
+	return false;
 }
 
 /**
@@ -648,9 +723,10 @@ async function reverseCreditGrant(chargeId: string, reason: 'refund' | 'dispute'
  * @param reason - Whether the reversal is for a refund or dispute
  * @returns `true` if a reversal was applied, `false` if no matching credit grant was found or the reversal was already recorded
  */
-export async function reverseCharge(chargeId: string, reason: 'refund' | 'dispute', disputeId?: string): Promise<boolean> {
+export async function reverseCharge(chargeId: string, reason: 'refund' | 'dispute', disputeId?: string, occurredAt?: string): Promise<boolean> {
 	const charge = await getStripe().charges.retrieve(chargeId, { expand: ['payment_intent'] });
 	const paymentIntentId = typeof charge.payment_intent === 'string' ? charge.payment_intent : charge.payment_intent?.id;
+	if (reason === 'refund' && await pauseRefundedCharge(charge, paymentIntentId, occurredAt)) return false;
 	if (reason === 'refund' && (typeof charge.amount_refunded !== 'number' || typeof charge.amount !== 'number' || charge.amount_refunded < charge.amount)) {
 		console.error(`stripe: refund for ${chargeId} is not a full refund (refunded ${charge.amount_refunded ?? 'unknown'} of ${charge.amount ?? 'unknown'}) — credits kept (v1 reverses only full refunds)`);
 		return false;
@@ -666,7 +742,7 @@ export async function reverseCharge(chargeId: string, reason: 'refund' | 'disput
 	// can still be won).
 	if (reason === 'refund') await cancelRefundedSubscription(chargeId, paymentIntentId);
 	if (entitlementsReversed) return true;
-	return reverseCreditGrant(chargeId, reason, disputeId, paymentIntentId);
+	return reverseCreditGrant(chargeId, reason, disputeId, paymentIntentId, occurredAt);
 }
 
 /**
@@ -696,7 +772,17 @@ async function refundedSubscription(chargeId: string, paymentIntentId?: string):
 	const invoice = asRecord(await getStripe().invoices.retrieve(invoiceId));
 	const subscriptionId = invoiceSubscriptionId(invoice);
 	if (!subscriptionId) return null; // a one-off invoice, not subscription billing
-	return { subscriptionId, orgId: (await findOrgForStripe(subscriptionId))?.id };
+	let orgId = (await findOrgForStripe(subscriptionId))?.id;
+	if (!orgId) {
+		const subscription = await fetchLiveSubscription(subscriptionId);
+		const metadata = optionalRecord(subscription?.metadata);
+		const customerId = stripeId(subscription?.customer);
+		if (customerId && (metadata?.product === 'hosted' || metadata?.product === TEST_CHECKOUT_PRODUCT)) {
+			const org = await findOrgForStripe(undefined, customerId);
+			if (org?.id === metadata.org_id) orgId = org?.id;
+		}
+	}
+	return { subscriptionId, orgId };
 }
 
 /**
@@ -786,32 +872,34 @@ export async function restoreWonDispute(disputeId: string): Promise<boolean> {
 	let restored = false;
 	if (reversal.source === 'lifetime') restored = await restoreLifetimeForDispute(identifiers);
 	else if (reversal.source === 'subscription') restored = await restoreDisputedSubscriptionPeriod(identifiers);
-	else if (reversal.source === 'credits') {
-		const match = await findGrantForStripe(db, identifiers);
-		if (match) {
-			const disputeReversal = await db.select({ id: creditTransactions.id }).from(creditTransactions).where(and(eq(creditTransactions.orgId, match.orgId), eq(creditTransactions.reason, 'dispute'), eq(creditTransactions.chargeId, reversal.chargeId))).get();
-			if (disputeReversal) {
-				try {
-					// Dedup-first means a false return is "a previous call already
-					// committed this restoration" (a crash between the ledger write
-					// and the reversal mark below) — still 'restored', never a wedge.
-					await applyLedgerDelta(db, { orgId: match.orgId, delta: match.credits, reason: 'adjust', refType: 'dispute', refId: disputeId, chargeId: reversal.chargeId });
-					restored = true;
-				} catch (error) {
-					// An upgrade to lifetime between the dispute and its win makes
-					// the org unmetered — it cannot hold credits, so the honest
-					// resolution is "nothing to restore": close the reversal
-					// loudly instead of wedging the webhook on the grant guard.
-					if (!(error instanceof Error && error.message === UNMETERED_CREDIT_GRANT_ERROR)) throw error;
-					console.error(`stripe: won dispute ${disputeId} for unmetered org ${match.orgId} — closing the reversal without re-granting credits`);
-					restored = true;
-				}
-			}
-		}
-	}
+	else if (reversal.source === 'credits') restored = await restoreDisputedCredits(disputeId, identifiers);
 	if (!restored) return false;
 	await db.update(stripeDisputeReversals).set({ status: 'restored', restoredAt: new Date().toISOString() }).where(eq(stripeDisputeReversals.disputeId, disputeId));
 	return true;
+}
+
+/**
+ * Restores credits reversed by a now-won dispute. Dedup-first means a
+ * false return is "a previous call already committed this restoration"
+ * (a crash between the ledger write and the reversal mark) — still
+ * 'restored', never a wedge. An upgrade to lifetime between the dispute
+ * and its win makes the org unmetered — it cannot hold credits, so the
+ * honest resolution is "nothing to restore": close the reversal loudly
+ * instead of wedging the webhook on the grant guard.
+ */
+async function restoreDisputedCredits(disputeId: string, identifiers: { paymentIntentId?: string; chargeId: string }): Promise<boolean> {
+	const match = await findGrantForStripe(db, identifiers);
+	if (!match) return false;
+	const disputeReversal = await db.select({ id: creditTransactions.id }).from(creditTransactions).where(and(eq(creditTransactions.orgId, match.orgId), eq(creditTransactions.reason, 'dispute'), eq(creditTransactions.chargeId, identifiers.chargeId))).get();
+	if (!disputeReversal) return false;
+	try {
+		await applyLedgerDelta(db, { orgId: match.orgId, delta: match.credits, reason: 'adjust', refType: 'dispute', refId: disputeId, chargeId: identifiers.chargeId });
+		return true;
+	} catch (error) {
+		if (!(error instanceof Error && error.message === UNMETERED_CREDIT_GRANT_ERROR)) throw error;
+		console.error(`stripe: won dispute ${disputeId} for unmetered org ${match.orgId} — closing the reversal without re-granting credits`);
+		return true;
+	}
 }
 
 
@@ -1003,7 +1091,7 @@ function assertEventCreated(eventCreated: number | undefined, eventId: string): 
 		eventCreated <= 0 ||
 		eventCreated > Math.floor(Date.now() / 1000) + 86_400
 	) {
-		throw new Error(`customer.updated ${eventId} carries an invalid envelope created timestamp: ${eventCreated}`);
+		throw new Error(`stripe event ${eventId} carries an invalid envelope created timestamp: ${eventCreated}`);
 	}
 }
 
@@ -1553,24 +1641,7 @@ async function handleSubscriptionEvent(event: Stripe.Event): Promise<void> {
 		eventId: event.id
 	});
 	if (!applied) {
-		// A strictly-older event is provably stale — acknowledge quietly. But
-		// a SAME-SECOND tie is decided by opaque event-id order, which carries
-		// no causality: a portal resume whose id sorts lower is dropped even
-		// though Stripe's live record may already show the subscription
-		// billing again (codex P1). Before trusting the drop, reconcile the
-		// enforcement decision from the LIVE subscription — the same rule
-		// customer.updated applies to its card pointer.
-		const cursor = await db.select({ created: organizations.stripeSubscriptionLastEventCreated }).from(organizations).where(eq(organizations.id, org.id)).get();
-		if (cursor?.created === event.created) {
-			const live = await fetchLiveSubscription(subscriptionId);
-			if (live) {
-				const liveStatus = typeof live.status === 'string' && live.status.length > 0 ? live.status : undefined;
-				if (!liveStatus) throw new Error(`Stripe subscription ${subscriptionId} carries no usable status`);
-				if (subscriptionStatusMeaning(subscriptionId, liveStatus) === 'live') {
-					await endSubscriptionOnLifetimeOrg(org.id, subscriptionId, event, liveStatus, subscriptionCancelScheduled(live, event.id));
-				}
-			}
-		}
+		await reconcileStaleSubscriptionEvent(org.id, subscriptionId, event);
 		console.info(`stripe: ${event.type} ${event.id} for subscription ${subscriptionId} is stale — a same-or-newer snapshot already applied`);
 		return;
 	}
@@ -1578,6 +1649,27 @@ async function handleSubscriptionEvent(event: Stripe.Event): Promise<void> {
 	// event's payment method is equally stale.
 	if (pmId) await applySubscriptionDefaultPm(org.id, pmId, event.created);
 	await endSubscriptionOnLifetimeOrg(org.id, subscriptionId, event, status, canceling);
+}
+
+/**
+ * A strictly-older event is provably stale — acknowledge quietly. But a
+ * SAME-SECOND tie is decided by opaque event-id order, which carries no
+ * causality: a portal resume whose id sorts lower is dropped even though
+ * Stripe's live record may already show the subscription billing again
+ * (codex P1). Before trusting the drop, reconcile the enforcement decision
+ * from the LIVE subscription — the same rule customer.updated applies to
+ * its card pointer.
+ */
+async function reconcileStaleSubscriptionEvent(orgId: string, subscriptionId: string, event: Stripe.Event): Promise<void> {
+	const cursor = await db.select({ created: organizations.stripeSubscriptionLastEventCreated }).from(organizations).where(eq(organizations.id, orgId)).get();
+	if (cursor?.created !== event.created) return;
+	const live = await fetchLiveSubscription(subscriptionId);
+	if (!live) return;
+	const liveStatus = typeof live.status === 'string' && live.status.length > 0 ? live.status : undefined;
+	if (!liveStatus) throw new Error(`Stripe subscription ${subscriptionId} carries no usable status`);
+	if (subscriptionStatusMeaning(subscriptionId, liveStatus) === 'live') {
+		await endSubscriptionOnLifetimeOrg(orgId, subscriptionId, event, liveStatus, subscriptionCancelScheduled(live, event.id));
+	}
 }
 
 /**
@@ -1685,7 +1777,8 @@ const dispatchChargeEvent = async (event: Stripe.Event): Promise<boolean> => {
 	// negative balance — both documented v1 limitations
 	// (docs/stripe-checkout-webhooks.md §7).
 	if (event.type === 'charge.refunded') {
-		await reverseCharge(event.data.object.id, 'refund');
+		assertEventCreated(event.created, event.id);
+		await reverseCharge(event.data.object.id, 'refund', undefined, new Date(event.created * 1000).toISOString());
 		return true;
 	}
 	if (event.type === 'charge.refund.updated' || event.type === 'refund.updated' || event.type === 'refund.failed') {
@@ -1777,7 +1870,8 @@ async function reverseSessionGrant(sessionId: string): Promise<boolean> {
 	return applyLedgerDelta(db, {
 		orgId: match.orgId,
 		delta: -match.credits,
-		reason: 'refund',
+		reason: 'adjust',
+		floorAtZero: true,
 		refType: 'charge',
 		refId: typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : sessionId,
 		chargeId: typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : undefined,

@@ -16,6 +16,8 @@ export type MercadoPagoPayment = {
 	externalReference: string;
 	transactionAmount: number;
 	refundedAmount: number;
+	refundOccurredAt?: string;
+	refundBoundaries?: string[];
 	currencyId: string;
 };
 
@@ -143,6 +145,42 @@ export const mercadoPagoProvider: PrepaidCreditProvider = {
 	}
 };
 
+function refundTimestamp(value: unknown): number {
+	if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return Number.NaN;
+	const date = Date.parse(value);
+	if (!Number.isFinite(date) || date > Date.now() + 5 * 60_000) return Number.NaN;
+	if (new Date(value.slice(0, 10)).toISOString().slice(0, 10) !== value.slice(0, 10)) return Number.NaN;
+	return date;
+}
+
+/** A payment update time is not a refund time: read the provider's refund records. */
+async function refundOccurredAt(paymentId: string, refundedAmount: number): Promise<Pick<MercadoPagoPayment, 'refundOccurredAt' | 'refundBoundaries'>> {
+	const response = await fetchWithRetry(apiUrl(`/v1/payments/${encodeURIComponent(paymentId)}/refunds`), {
+		headers: { Authorization: `Bearer ${accessToken()}` }
+	});
+	const body: unknown = await jsonResponse(response, 'Mercado Pago refund lookup');
+	if (!Array.isArray(body)) throw new Error('Mercado Pago refund lookup returned an invalid list');
+	let totalCents = 0;
+	const boundaries: string[] = [];
+	let skipped = 0;
+	for (const value of body) {
+		if (!value || typeof value !== 'object' || Array.isArray(value)) { skipped++; continue; }
+		const refund = value as Record<string, unknown>;
+		if (refund.status !== 'approved') { skipped++; continue; }
+		if (typeof refund.payment_id !== 'string' && typeof refund.payment_id !== 'number') { skipped++; continue; }
+		const cents = typeof refund.amount === 'number' ? Math.round(refund.amount * 100) : Number.NaN;
+		const date = refundTimestamp(refund.date_created);
+		if (String(refund.payment_id) !== paymentId || !Number.isSafeInteger(cents) || cents <= 0 || typeof refund.amount !== 'number' || Math.abs(refund.amount * 100 - cents) > 1e-6 || !Number.isFinite(date)) { skipped++; continue; }
+		totalCents += cents;
+		const occurredAt = new Date(date).toISOString();
+		boundaries.push(occurredAt);
+	}
+	if (skipped) console.error(`Mercado Pago refund lookup skipped ${skipped} invalid or unapproved item(s)`);
+	if (!boundaries.length || totalCents !== Math.round(refundedAmount * 100)) throw new Error('Mercado Pago refund records do not match the refunded payment amount');
+	const refundBoundaries = [...new Set(boundaries)].sort((left, right) => left.localeCompare(right));
+	return { refundBoundaries, refundOccurredAt: refundBoundaries.at(-1) };
+}
+
 export async function retrievePayment(paymentId: string): Promise<MercadoPagoPayment> {
 	if (!/^[A-Za-z0-9_-]{1,128}$/.test(paymentId)) throw new Error('Mercado Pago payment id is invalid');
 	const response = await fetchWithRetry(apiUrl(`/v1/payments/${encodeURIComponent(paymentId)}`), {
@@ -163,6 +201,7 @@ export async function retrievePayment(paymentId: string): Promise<MercadoPagoPay
 		externalReference: body.external_reference,
 		transactionAmount: body.transaction_amount,
 		refundedAmount: refundedAmount ?? 0,
+		...((refundedAmount ?? 0) > 0 ? await refundOccurredAt(paymentId, refundedAmount as number) : {}),
 		currencyId: body.currency_id
 	};
 }

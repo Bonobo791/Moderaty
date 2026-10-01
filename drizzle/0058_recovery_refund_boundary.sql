@@ -1,0 +1,1 @@
+ALTER TABLE `stripe_auto_topup_recoveries` ADD `refund_occurred_at` text;

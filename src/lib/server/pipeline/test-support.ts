@@ -54,123 +54,127 @@ const mocks = vi.hoisted(() => {
 		if (table === state.tables.moderationActions) state.moderationActions.push(...rows);
 		if (table === state.tables.creditTransactions) state.insertedCredits.push(...rows);
 	};
+	const commentRowFor = (id: string) => {
+		// Status resolution order: the staged row wins (it carries the
+		// status stageDecisions wrote), then a test-seeded status for
+		// pre-stored ids, then 'held' — the status a legacy dispatched
+		// hold's comment carries.
+		const staged = state.insertedComments.find((comment) => comment.id === id);
+		return {
+			id,
+			status: staged?.status ?? state.commentStatuses[id] ?? 'held',
+			decidedBy: staged?.decidedBy ?? state.commentDecidedBy[id] ?? 'ai',
+			scanId: staged?.scanId ?? null
+		};
+	};
+	const commentsAll = (condition: unknown) => {
+		// Honor the inArray(comments.id, ...) condition: a row only counts as
+		// already-stored when the query actually selects its id. A query
+		// carrying status values (eq/inArray on comments.status) instead
+		// matches rows BY that status (the reconcile sweep's shape).
+		state.commentsSelectCalls += 1;
+		state.onCommentsSelect?.(state.commentsSelectCalls);
+		const params = queryParams(condition);
+		const statusFilter = params.filter((param) => COMMENT_STATUSES.has(param as string));
+		// The rescan staged-marker read (eq comments.scan_id = stamp): a
+		// row only matches when its stamp equals the bound value — NULL
+		// never equals, like real SQL.
+		const scanFiltered = querySql(condition).includes('"comments"."scan_id"');
+		return [...new Set([
+			...state.existingIds,
+			...state.insertedComments.map((comment) => queryKey(comment.id))
+		])].map((id) => commentRowFor(id)).filter((row) =>
+			(params.includes(row.id) || (statusFilter.length > 0 && statusFilter.includes(row.status)))
+			&& (!scanFiltered || params.includes(row.scanId)));
+	};
+	const selectGet = async (table: unknown, condition: unknown) => {
+		if (table === state.tables.channels) {
+			const params = queryParams(condition);
+			const channelId = state.channel && typeof state.channel.id === 'string' ? state.channel.id : null;
+			return channelId && (!params.length || params.includes(channelId)) ? state.channel : undefined;
+		}
+		// Ledger balance + metering lookup, with the active period balance
+		// absent in this harness. Only the channel's org exists: a lookup
+		// for any other id returns undefined so the ledger's `org not
+		// found` throw fires exactly like production (codeant nitpick).
+		if (table === state.tables.organizations) {
+			const params = queryParams(condition);
+			const orgId = state.channel?.orgId;
+			if (typeof orgId !== 'string' || !params.includes(orgId)) return undefined;
+			return {
+				creditsRemaining: state.credits,
+				remaining: state.credits ?? 0,
+				plan: state.plan,
+				stripeSubscriptionId: state.stripeSubscriptionId,
+				stripeCustomerId: state.customerId
+			};
+		}
+		// The ledger's paid-period queries (getCredits' included-credit
+		// sum, consumeCredit's allowance row). The fake seeds no
+		// subscription periods, so no row matches — the honest answer.
+		if (table === state.tables.stripeSubscriptionPeriods) return undefined;
+		if (table === state.tables.auditLog) {
+			// "Latest" reads sort createdAt/id desc — approximate by
+			// returning the last inserted row matching both eq()s.
+			const params = queryParams(condition);
+			const matches = state.insertedAudits.filter((row) =>
+				params.includes(queryKey(row.commentId)) && params.includes(queryKey(row.channelId)));
+			return matches.at(-1);
+		}
+		if (table === state.tables.creditTransactions) {
+			// hasChargeAnchor's (org_id, ref_type, ref_id) lookup: a row only
+			// exists when an earlier charge actually committed one.
+			const params = queryParams(condition);
+			return state.insertedCredits.find((row) =>
+				params.includes(queryKey(row.orgId)) && params.includes(queryKey(row.refType)) && params.includes(queryKey(row.refId)));
+		}
+		throw new Error('unexpected get query');
+	};
+	const selectAll = async (table: unknown, condition: unknown) => {
+		if (table === state.tables.comments) return commentsAll(condition);
+		if (table === state.tables.auditLog) {
+			// Honor eq(channelId)/eq(commentId): rows matching both come back,
+			// insertion-ordered (callers asking for "latest" take the last).
+			const params = queryParams(condition);
+			return state.insertedAudits.filter((row) =>
+				params.includes(queryKey(row.commentId)) && params.includes(queryKey(row.channelId)));
+		}
+		if (table === state.tables.rules) {
+			const params = queryParams(condition);
+			return state.ruleRows.filter((row) => {
+				if (!row || typeof row !== 'object' || !('channelId' in row)) {
+					throw new Error('rule mock row is missing channelId');
+				}
+				return params.includes(queryKey((row as { channelId: unknown }).channelId));
+			});
+		}
+		if (table === state.tables.channelAllowedHandles) {
+			// Honor eq(channelId, ...): only rows for the queried channel come back.
+			const params = queryParams(condition);
+			return state.handleRows.filter((row) => params.includes(queryKey(row.channelId)));
+		}
+		if (table === state.tables.moderationActions) {
+			// Honor eq(channelId, ...) + inArray(state, [...]): only rows whose
+			// channel and state the query actually selects come back.
+			const params = queryParams(condition);
+			return state.moderationActions.filter((action) =>
+				params.includes(queryKey(action.channelId)) && params.includes(queryKey(action.state)));
+		}
+		if (table === state.tables.creditTransactions) {
+			// The rescan prepaid-anchor read (eq org_id + eq ref_type +
+			// inArray(ref_id, ...)): a row only counts when an earlier
+			// charge actually committed that anchor.
+			const params = queryParams(condition);
+			return state.insertedCredits.filter((row) =>
+				params.includes(queryKey(row.orgId)) && params.includes(queryKey(row.refType)) && params.includes(queryKey(row.refId)));
+		}
+		throw new Error('unexpected all query');
+	};
 	const query = (table: unknown) => ({
 		where: (condition?: unknown) => {
 			const inner = {
-			get: async () => {
-				if (table === state.tables.channels) {
-					const params = queryParams(condition);
-					const channelId = state.channel && typeof state.channel.id === 'string' ? state.channel.id : null;
-					return channelId && (!params.length || params.includes(channelId)) ? state.channel : undefined;
-				}
-				// Ledger balance + metering lookup, with the active period balance
-				// absent in this harness. Only the channel's org exists: a lookup
-				// for any other id returns undefined so the ledger's `org not
-				// found` throw fires exactly like production (codeant nitpick).
-				if (table === state.tables.organizations) {
-					const params = queryParams(condition);
-					const orgId = state.channel?.orgId;
-					if (typeof orgId !== 'string' || !params.includes(orgId)) return undefined;
-					return {
-						creditsRemaining: state.credits,
-						remaining: state.credits ?? 0,
-						plan: state.plan,
-						stripeSubscriptionId: state.stripeSubscriptionId,
-						stripeCustomerId: state.customerId
-					};
-				}
-				// The ledger's paid-period queries (getCredits' included-credit
-				// sum, consumeCredit's allowance row). The fake seeds no
-				// subscription periods, so no row matches — the honest answer.
-				if (table === state.tables.stripeSubscriptionPeriods) return undefined;
-				if (table === state.tables.auditLog) {
-					// "Latest" reads sort createdAt/id desc — approximate by
-					// returning the last inserted row matching both eq()s.
-					const params = queryParams(condition);
-					const matches = state.insertedAudits.filter((row) =>
-						params.includes(queryKey(row.commentId)) && params.includes(queryKey(row.channelId)));
-					return matches.at(-1);
-				}
-				if (table === state.tables.creditTransactions) {
-					// hasChargeAnchor's (org_id, ref_type, ref_id) lookup: a row only
-					// exists when an earlier charge actually committed one.
-					const params = queryParams(condition);
-					return state.insertedCredits.find((row) =>
-						params.includes(queryKey(row.orgId)) && params.includes(queryKey(row.refType)) && params.includes(queryKey(row.refId)));
-				}
-				throw new Error('unexpected get query');
-			},
-			all: async () => {
-				if (table === state.tables.comments) {
-					// Honor the inArray(comments.id, ...) condition: a row only counts as
-					// already-stored when the query actually selects its id. A query
-					// carrying status values (eq/inArray on comments.status) instead
-					// matches rows BY that status (the reconcile sweep's shape).
-					state.commentsSelectCalls += 1;
-					state.onCommentsSelect?.(state.commentsSelectCalls);
-					const params = queryParams(condition);
-					const statusFilter = params.filter((param) => COMMENT_STATUSES.has(param as string));
-					// The rescan staged-marker read (eq comments.scan_id = stamp): a
-					// row only matches when its stamp equals the bound value — NULL
-					// never equals, like real SQL.
-					const scanFiltered = querySql(condition).includes('"comments"."scan_id"');
-					return [...new Set([
-						...state.existingIds,
-						...state.insertedComments.map((comment) => queryKey(comment.id))
-					])].map((id) => {
-						// Status resolution order: the staged row wins (it carries the
-						// status stageDecisions wrote), then a test-seeded status for
-						// pre-stored ids, then 'held' — the status a legacy dispatched
-						// hold's comment carries.
-						const staged = state.insertedComments.find((comment) => comment.id === id);
-						return {
-							id,
-							status: staged?.status ?? state.commentStatuses[id] ?? 'held',
-							decidedBy: staged?.decidedBy ?? state.commentDecidedBy[id] ?? 'ai',
-							scanId: staged?.scanId ?? null
-						};
-					}).filter((row) =>
-						(params.includes(row.id) || (statusFilter.length > 0 && statusFilter.includes(row.status)))
-						&& (!scanFiltered || params.includes(row.scanId)));
-				}
-				if (table === state.tables.auditLog) {
-					// Honor eq(channelId)/eq(commentId): rows matching both come back,
-					// insertion-ordered (callers asking for "latest" take the last).
-					const params = queryParams(condition);
-					return state.insertedAudits.filter((row) =>
-						params.includes(queryKey(row.commentId)) && params.includes(queryKey(row.channelId)));
-				}
-				if (table === state.tables.rules) {
-					const params = queryParams(condition);
-					return state.ruleRows.filter((row) => {
-						if (!row || typeof row !== 'object' || !('channelId' in row)) {
-							throw new Error('rule mock row is missing channelId');
-						}
-						return params.includes(queryKey((row as { channelId: unknown }).channelId));
-					});
-				}
-				if (table === state.tables.channelAllowedHandles) {
-					// Honor eq(channelId, ...): only rows for the queried channel come back.
-					const params = queryParams(condition);
-					return state.handleRows.filter((row) => params.includes(queryKey(row.channelId)));
-				}
-				if (table === state.tables.moderationActions) {
-					// Honor eq(channelId, ...) + inArray(state, [...]): only rows whose
-					// channel and state the query actually selects come back.
-					const params = queryParams(condition);
-					return state.moderationActions.filter((action) =>
-						params.includes(queryKey(action.channelId)) && params.includes(queryKey(action.state)));
-				}
-				if (table === state.tables.creditTransactions) {
-					// The rescan prepaid-anchor read (eq org_id + eq ref_type +
-					// inArray(ref_id, ...)): a row only counts when an earlier
-					// charge actually committed that anchor.
-					const params = queryParams(condition);
-					return state.insertedCredits.filter((row) =>
-						params.includes(queryKey(row.orgId)) && params.includes(queryKey(row.refType)) && params.includes(queryKey(row.refId)));
-				}
-				throw new Error('unexpected all query');
-			}
+			get: async () => selectGet(table, condition),
+			all: async () => selectAll(table, condition)
 			};
 			// The fake stores no sort order — orderBy/limit pass through so
 			// query-builder chains keep working, returning the same shape.
@@ -178,6 +182,150 @@ const mocks = vi.hoisted(() => {
 			return chain;
 		}
 	});
+	/** The UPDATE emulation behind `update(table).set(values).where(condition)`. */
+	const updateOrganizations = (values: Record<string, unknown>) => {
+		// Ledger balance decrement simulates the real guard: when the
+		// balance cannot cover the atomic charge, the update matches
+		// nothing. failCharges forces the concurrent-shortfall path.
+		const amount = queryParams(values.creditsRemaining).find((param): param is number => typeof param === 'number') ?? 1;
+		if (state.failCharges || (state.credits ?? 0) < amount) return { returning: async () => [] as Record<string, unknown>[] };
+		state.credits = Math.max(0, (state.credits ?? 0) - amount);
+		return { returning: async () => [{ creditsRemaining: state.credits }] };
+	};
+	const updateChannels = (values: Record<string, unknown>, condition: unknown) => {
+		// The active=active no-op is the atomic channel guard. It must
+		// return no row for a deleted/inactive channel and must not be
+		// confused with a cursor update in assertions.
+		if ('active' in values) {
+			const params = queryParams(condition);
+			const identityMatches = params.length <= 2 || params.includes(state.channel?.refreshTokenEnc);
+			return { returning: async () => state.channel?.active && identityMatches ? [{ id: state.channel.id }] : [] };
+		}
+		// persistResults' scan-identity checkpoint guard: the WHERE
+		// binds the run's read values (eq) or asserts the column null
+		// (isNull). Compare against the LIVE row — a mid-run replant
+		// mismatches, the real UPDATE affects 0 rows, and nothing
+		// records (codeant race).
+		const scanGuard = (column: 'history_scan_id' | 'history_boundary'): boolean => {
+			const bound = boundParam(condition, column);
+			const live = column === 'history_scan_id' ? state.channel?.historyScanId : state.channel?.historyBoundary;
+			if (bound.kind === 'eq') return bound.value === live;
+			if (bound.kind === 'isNull') return live == null;
+			return true;
+		};
+		if (!scanGuard('history_scan_id') || !scanGuard('history_boundary')) {
+			return { returning: async () => [] as Record<string, unknown>[] };
+		}
+		state.channelUpdates.push(values);
+		return { returning: async () => [{ id: state.channel.id }] };
+	};
+	const updateComments = (values: Record<string, unknown>, condition: unknown) => {
+		// Status/decidedBy writes honor the where: id predicates AND
+		// status predicates (eq 'restoring' guards the finalize; the
+		// decided-status inArray guards the missing-target converge
+		// flip). RETURNING reports the rows the CAS actually matched.
+		const params = queryParams(condition);
+		const statusFilter = params.filter((param) => COMMENT_STATUSES.has(param as string));
+		const applied: Record<string, unknown>[] = [];
+		const apply = (row: Record<string, unknown>) => {
+			const current = row.status as string;
+			if (params.includes(queryKey(row.id)) && (!statusFilter.length || statusFilter.includes(current))) {
+				Object.assign(row, values);
+				applied.push(row);
+			}
+		};
+		state.insertedComments.forEach(apply);
+		for (const id of state.existingIds) {
+			const current = state.commentStatuses[id] ?? 'held';
+			if (params.includes(id) && (!statusFilter.length || statusFilter.includes(current))) {
+				if ('status' in values) state.commentStatuses[id] = values.status as string;
+				if ('decidedBy' in values) state.commentDecidedBy[id] = values.decidedBy as string;
+				applied.push({ id });
+			}
+		}
+		return {
+			returning: async (fields: unknown) =>
+				fields && typeof fields === 'object'
+					? applied.map((row) => Object.fromEntries(Object.keys(fields).map((key) => [key, row[key]])))
+					: []
+		};
+	};
+	const claimActionRows = (values: Record<string, unknown>, condition: unknown) => {
+		// Atomic claim: only pending rows transition, and the claimed ids
+		// come back via RETURNING. Ids in unclaimedIds simulate a
+		// concurrent run that claimed the row first. The where-clause is
+		// honored: ids the query does not select are never claimed, and
+		// without eq(state, 'pending') no row transitions at all.
+		const params = queryParams(condition);
+		if (!params.includes('pending')) return { returning: async () => [] as Record<string, unknown>[] };
+		const claimed = state.moderationActions.filter((item) =>
+			item.state === 'pending' &&
+			params.includes(queryKey(item.commentId)) &&
+			!state.unclaimedIds.includes(queryKey(item.commentId)));
+		claimed.forEach((item) => {
+			Object.assign(item, values);
+		});
+		const claimedCommentIds = claimed.map((item) => ({ commentId: item.commentId }));
+		const returningClaimedIds = async (fields: unknown) =>
+			fields && typeof fields === 'object' && 'commentId' in fields ? claimedCommentIds : [];
+		return { returning: returningClaimedIds };
+	};
+	const updateActionRows = (values: Record<string, unknown>, condition: unknown) => {
+		// markDispatched / completeActions / markSuperseded / finalize:
+		// honor inArray(commentId, ...) plus any state AND action
+		// predicates — transitions only move rows still in an allowed
+		// predecessor state whose action the query selects, and
+		// RETURNING reports the rows that actually transitioned so
+		// completeActions can gate its audit insert on the rowcount.
+		const params = queryParams(condition);
+		const stateFilter = params.filter((param) => ACTION_STATES.has(param as string));
+		const actionFilter = params.filter((param) => ACTION_VALUES.has(param as string));
+		const transitioned: Record<string, unknown>[] = [];
+		state.moderationActions.forEach((item) => {
+			if (
+				params.includes(queryKey(item.commentId)) &&
+				(!stateFilter.length || stateFilter.includes(item.state)) &&
+				(!actionFilter.length || actionFilter.includes(item.action))
+			) {
+				Object.assign(item, values);
+				transitioned.push(item);
+			}
+		});
+		return {
+			returning: async (fields: unknown) =>
+				fields && typeof fields === 'object'
+					? transitioned.map((item) =>
+							Object.fromEntries(Object.keys(fields).map((key) => [key, item[key]]))
+						)
+					: []
+		};
+	};
+	const applyUpdate = (table: unknown, values: Record<string, unknown>, condition: unknown) => {
+		const none = { returning: async () => [] as Record<string, unknown>[] };
+		if (table === state.tables.organizations) return updateOrganizations(values);
+		if (table === state.tables.channels) return updateChannels(values, condition);
+		if (table === state.tables.comments) return updateComments(values, condition);
+		if (table !== state.tables.moderationActions || !('state' in values)) return none;
+		if (values.state === 'dispatched' && !('lastAttemptAt' in values)) return claimActionRows(values, condition);
+		return updateActionRows(values, condition);
+	};
+	const insertNoopConflict = (table: unknown, values: unknown) => {
+		if (table === state.tables.creditTransactions) {
+			// Honor UNIQUE(org_id, ref_type, ref_id): an anchor committed
+			// by an earlier charge makes THIS insert conflict — nothing
+			// records and returning() comes back empty, exactly like
+			// the real constraint (rescan retries depend on it).
+			const rows = valueRows(values);
+			const priors = state.insertedCredits.slice(0, state.insertedCredits.length - rows.length);
+			if (creditAnchorConflict(priors, rows)) {
+				state.insertedCredits.splice(priors.length, rows.length);
+				return { returning: async () => [] as Record<string, unknown>[] };
+			}
+		}
+		const insertedRows = valueRows(values);
+		return { returning: async () => insertedRows.map((row, index) => ({ id: index + 1, refId: row.refId })) };
+	};
+
 	const transaction = {
 		insert: vi.fn((table: unknown) => ({
 			values: (values: unknown) => {
@@ -189,22 +337,7 @@ const mocks = vi.hoisted(() => {
 				// the mock records the staged row either way (conflict resolution is
 				// a SQL concern the in-memory store does not emulate).
 				return {
-					onConflictDoNothing: () => {
-						if (table === state.tables.creditTransactions) {
-							// Honor UNIQUE(org_id, ref_type, ref_id): an anchor committed
-							// by an earlier charge makes THIS insert conflict — nothing
-							// records and returning() comes back empty, exactly like
-							// the real constraint (rescan retries depend on it).
-							const rows = valueRows(values);
-							const priors = state.insertedCredits.slice(0, state.insertedCredits.length - rows.length);
-							if (creditAnchorConflict(priors, rows)) {
-								state.insertedCredits.splice(priors.length, rows.length);
-								return { returning: async () => [] as Record<string, unknown>[] };
-							}
-						}
-						const insertedRows = valueRows(values);
-						return { returning: async () => insertedRows.map((row, index) => ({ id: index + 1, refId: row.refId })) };
-					},
+					onConflictDoNothing: () => insertNoopConflict(table, values),
 					// Upsert mode (rescans): emulate the real conflict resolution —
 					// a row whose PK already exists merges into the stored row, so
 					// assertions see one row per id and wrong upsert code fails.
@@ -228,125 +361,7 @@ const mocks = vi.hoisted(() => {
 		})),
 		update: vi.fn((table: unknown) => ({
 			set: (values: Record<string, unknown>) => ({
-				where: (condition?: unknown) => {
-					const none = { returning: async () => [] as Record<string, unknown>[] };
-					if (table === state.tables.organizations) {
-						// Ledger balance decrement simulates the real guard: when the
-						// balance cannot cover the atomic charge, the update matches
-						// nothing. failCharges forces the concurrent-shortfall path.
-						const amount = queryParams(values.creditsRemaining).find((param): param is number => typeof param === 'number') ?? 1;
-						if (state.failCharges || (state.credits ?? 0) < amount) return { returning: async () => [] as Record<string, unknown>[] };
-						state.credits = Math.max(0, (state.credits ?? 0) - amount);
-						return { returning: async () => [{ creditsRemaining: state.credits }] };
-					}
-					if (table === state.tables.channels) {
-						// The active=active no-op is the atomic channel guard. It must
-						// return no row for a deleted/inactive channel and must not be
-						// confused with a cursor update in assertions.
-						if ('active' in values) {
-							const params = queryParams(condition);
-							const identityMatches = params.length <= 2 || params.includes(state.channel?.refreshTokenEnc);
-							return { returning: async () => state.channel?.active && identityMatches ? [{ id: state.channel.id }] : [] };
-						}
-						// persistResults' scan-identity checkpoint guard: the WHERE
-						// binds the run's read values (eq) or asserts the column null
-						// (isNull). Compare against the LIVE row — a mid-run replant
-						// mismatches, the real UPDATE affects 0 rows, and nothing
-						// records (codeant race).
-						const scanGuard = (column: 'history_scan_id' | 'history_boundary'): boolean => {
-							const bound = boundParam(condition, column);
-							const live = column === 'history_scan_id' ? state.channel?.historyScanId : state.channel?.historyBoundary;
-							if (bound.kind === 'eq') return bound.value === live;
-							if (bound.kind === 'isNull') return live == null;
-							return true;
-						};
-						if (!scanGuard('history_scan_id') || !scanGuard('history_boundary')) {
-							return { returning: async () => [] as Record<string, unknown>[] };
-						}
-						state.channelUpdates.push(values);
-						return { returning: async () => [{ id: state.channel.id }] };
-					}
-					if (table === state.tables.comments) {
-						// Status/decidedBy writes honor the where: id predicates AND
-						// status predicates (eq 'restoring' guards the finalize; the
-						// decided-status inArray guards the missing-target converge
-						// flip). RETURNING reports the rows the CAS actually matched.
-						const params = queryParams(condition);
-						const statusFilter = params.filter((param) => COMMENT_STATUSES.has(param as string));
-						const applied: Record<string, unknown>[] = [];
-						const apply = (row: Record<string, unknown>) => {
-							const current = row.status as string;
-							if (params.includes(queryKey(row.id)) && (!statusFilter.length || statusFilter.includes(current))) {
-								Object.assign(row, values);
-								applied.push(row);
-							}
-						};
-						state.insertedComments.forEach(apply);
-						for (const id of state.existingIds) {
-							const current = state.commentStatuses[id] ?? 'held';
-							if (params.includes(id) && (!statusFilter.length || statusFilter.includes(current))) {
-								if ('status' in values) state.commentStatuses[id] = values.status as string;
-								if ('decidedBy' in values) state.commentDecidedBy[id] = values.decidedBy as string;
-								applied.push({ id });
-							}
-						}
-						return {
-							returning: async (fields: unknown) =>
-								fields && typeof fields === 'object'
-									? applied.map((row) => Object.fromEntries(Object.keys(fields).map((key) => [key, row[key]])))
-									: []
-						};
-					}
-					if (table !== state.tables.moderationActions || !('state' in values)) return none;
-					if (values.state === 'dispatched' && !('lastAttemptAt' in values)) {
-						// Atomic claim: only pending rows transition, and the claimed ids
-						// come back via RETURNING. Ids in unclaimedIds simulate a
-						// concurrent run that claimed the row first. The where-clause is
-						// honored: ids the query does not select are never claimed, and
-						// without eq(state, 'pending') no row transitions at all.
-						const params = queryParams(condition);
-						if (!params.includes('pending')) return { returning: async () => [] as Record<string, unknown>[] };
-						const claimed = state.moderationActions.filter((item) =>
-							item.state === 'pending' &&
-							params.includes(queryKey(item.commentId)) &&
-							!state.unclaimedIds.includes(queryKey(item.commentId)));
-						claimed.forEach((item) => {
-							Object.assign(item, values);
-						});
-						const claimedCommentIds = claimed.map((item) => ({ commentId: item.commentId }));
-						const returningClaimedIds = async (fields: unknown) =>
-							fields && typeof fields === 'object' && 'commentId' in fields ? claimedCommentIds : [];
-						return { returning: returningClaimedIds };
-					}
-					// markDispatched / completeActions / markSuperseded / finalize:
-					// honor inArray(commentId, ...) plus any state AND action
-					// predicates — transitions only move rows still in an allowed
-					// predecessor state whose action the query selects, and
-					// RETURNING reports the rows that actually transitioned so
-					// completeActions can gate its audit insert on the rowcount.
-					const params = queryParams(condition);
-					const stateFilter = params.filter((param) => ACTION_STATES.has(param as string));
-					const actionFilter = params.filter((param) => ACTION_VALUES.has(param as string));
-					const transitioned: Record<string, unknown>[] = [];
-					state.moderationActions.forEach((item) => {
-						if (
-							params.includes(queryKey(item.commentId)) &&
-							(!stateFilter.length || stateFilter.includes(item.state)) &&
-							(!actionFilter.length || actionFilter.includes(item.action))
-						) {
-							Object.assign(item, values);
-							transitioned.push(item);
-						}
-					});
-					return {
-						returning: async (fields: unknown) =>
-							fields && typeof fields === 'object'
-								? transitioned.map((item) =>
-										Object.fromEntries(Object.keys(fields).map((key) => [key, item[key]]))
-									)
-								: []
-					};
-				}
+				where: (condition?: unknown) => applyUpdate(table, values, condition)
 			})
 		}))
 	};

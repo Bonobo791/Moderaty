@@ -31,7 +31,7 @@ describe('LEGAL_DOCS', () => {
 		// must bump LEGAL_VERSION so the re-consent gate (hasCurrentConsent)
 		// routes every user back through /consent. Never let legal changes ride
 		// along under an old version.
-		expect(LEGAL_VERSION).toBe('1.14');
+		expect(LEGAL_VERSION).toBe('1.15');
 	});
 
 	it('lists exactly the three published legal documents', () => {
@@ -724,4 +724,24 @@ describe('zero-credit account retention disclosure (1.14)', () => {
 		const s172 = dpa.slice(dpa.indexOf('<strong>17.2</strong>'), dpa.indexOf('<h2 id="s18">'));
 		expect(s172).toMatch(/zero-credit|Terms §17\.3/);
 	});
+});
+
+
+describe('automatic top-up terms', () => {
+	it('Terms disclose owner-selected offered bundles for automatic top-up', () => {
+		const terms = readComponent('terms');
+		const section = terms.split('<strong>6.2</strong>')[1].split('</p>')[0];
+		expect(section).toContain('credit bundle you select (500 or 2,000 comments)');
+		expect(section).not.toContain('smallest');
+		expect(section).not.toContain('100, 500');
+	});
+
+	it('Terms disclose refund pauses, fresh consent, and automatic charge limits', () => {
+		const section = readComponent('terms').split('<strong>6.2</strong>')[1].split('</p>')[0];
+		expect(section).toMatch(/refund[^.]*paus/i);
+		expect(section).toMatch(/fresh[^.]*consent/i);
+		expect(section).toMatch(/24 hours/);
+		expect(section).toMatch(/30[^.]*calendar month/);
+	});
+
 });

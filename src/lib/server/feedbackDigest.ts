@@ -720,6 +720,105 @@ async function digestFailureResult(
 }
 
 /**
+ * The digest pipeline body: charge the batch, classify, merge recurring
+ * themes, then write the run transactionally. `setPhase` reports the phase
+ * boundary each stage enters so the caller's stopped-log names the real
+ * phase that failed or was interrupted.
+ */
+async function runDigestPipeline({
+	channel,
+	channelId,
+	selection,
+	metered,
+	apiKey,
+	deadline,
+	nowIso,
+	setPhase
+}: {
+	channel: typeof channels.$inferSelect;
+	channelId: string;
+	selection: SelectedBatch;
+	metered: boolean;
+	apiKey: string;
+	deadline: number | undefined;
+	nowIso: string;
+	setPhase: (phase: string) => void;
+}): Promise<DigestResult> {
+	const { batch, windowStart, windowEnd, historyPage, historyScanScope } = selection;
+	setPhase('billing');
+	const creditsCharged =
+		metered && channel.orgId ? await chargeFeedbackBatch(channel.orgId, batch, historyScanScope, deadline) : 0;
+
+	// Per-comment failures are counted and skipped (I1); a deadline aborts
+	// the whole run so the tick can defer cleanly.
+	setPhase('classification');
+	const { classified, failed } = await classifyBatch(batch, deadline, apiKey);
+	// Every comment failing is a job failure, not an empty digest —
+	// 'complete' would mark them digested and permanently skip coverage.
+	// Throw so the run is marked failed and the next tick retries.
+	if (failed > 0 && classified.length === 0) {
+		throw new Error(`classification failed for all ${failed} comments`);
+	}
+
+	const threshold = channel.feedbackThreshold ?? 3;
+	const categories = enabledCategories(channel);
+	// The AI theme pass merges differently-worded claims for the same
+	// recurring feedback BEFORE grouping — otherwise exact claim matching
+	// undercounts what actually comes up most. The merge runs one call
+	// per category: themes never merge across categories anyway, so a
+	// mixed batch only let the model emit a malformed cross-category
+	// theme. Unusable assignments retain their original claims and
+	// complete with a visible reduced-grouping notice.
+	// Its request is bounded by the write reserve so the model call can
+	// never consume the headroom the persistence tx needs (codex/cubic).
+	const clusterDeadline = deadline === undefined ? undefined : deadline - WRITE_RESERVE_MS;
+	setPhase('clustering');
+	const { classified: themed, clusteringDegraded } = themePassCanMatter(classified, categories, threshold)
+		? await clusterClassifiedClaims(classified, categories, threshold, clusterDeadline, apiKey)
+		: { classified, clusteringDegraded: false };
+	const { findings, pooled } = groupFeedback(themed, { categories, threshold });
+
+	// Reserve write headroom, not just the deadline edge: the persistence
+	// tx is the slowest remaining phase and a kill mid-transaction would
+	// force the (charged) classifications to be repeated next run.
+	setPhase('write-reserve');
+	if (deadline !== undefined && Date.now() > deadline - WRITE_RESERVE_MS) {
+		throw new DeadlineExceededError();
+	}
+	setPhase('write');
+	const result = await withBusyRetry(() =>
+		writeDigestRun({
+			channel,
+			channelId,
+			nowIso,
+			windowStart,
+			windowEnd,
+			batch,
+			batchIds: new Set(batch.map((c) => c.id)),
+			classified,
+			failed,
+			clusteringDegraded,
+			findings,
+			pooled,
+			metered,
+			creditsCharged,
+			historyPage
+		})
+	);
+	return {
+		status: 'complete',
+		digestId: result.digestId,
+		commentsClassified: classified.length,
+		commentsFailed: failed,
+		...(clusteringDegraded ? { clusteringDegraded: true } : {}),
+		findings: findings.length,
+		pooled,
+		creditsUsed: creditsCharged,
+		...(historyPage ? { historyRemaining: !historyPage.complete } : {})
+	};
+}
+
+/**
  * Generates the feedback digest for one channel over the window since the
  * last complete digest. Bounded (≤ DIGEST_COMMENT_CAP comments, oldest
  * first so bursts drain forward), metered per classified comment for
@@ -775,76 +874,16 @@ export async function generateFeedbackDigest(
 
 		phase = 'billing';
 		try {
-			const creditsCharged =
-				metered && channel.orgId ? await chargeFeedbackBatch(channel.orgId, batch, historyScanScope, deadline) : 0;
-
-			// Per-comment failures are counted and skipped (I1); a deadline aborts
-			// the whole run so the tick can defer cleanly.
-			phase = 'classification';
-			const { classified, failed } = await classifyBatch(batch, deadline, apiKey);
-			// Every comment failing is a job failure, not an empty digest —
-			// 'complete' would mark them digested and permanently skip coverage.
-			// Throw so the run is marked failed and the next tick retries.
-			if (failed > 0 && classified.length === 0) {
-				throw new Error(`classification failed for all ${failed} comments`);
-			}
-
-			const threshold = channel.feedbackThreshold ?? 3;
-			const categories = enabledCategories(channel);
-			// The AI theme pass merges differently-worded claims for the same
-			// recurring feedback BEFORE grouping — otherwise exact claim matching
-			// undercounts what actually comes up most. The merge runs one call
-			// per category: themes never merge across categories anyway, so a
-			// mixed batch only let the model emit a malformed cross-category
-			// theme. Unusable assignments retain their original claims and
-			// complete with a visible reduced-grouping notice.
-			// Its request is bounded by the write reserve so the model call can
-			// never consume the headroom the persistence tx needs (codex/cubic).
-			const clusterDeadline = deadline === undefined ? undefined : deadline - WRITE_RESERVE_MS;
-			phase = 'clustering';
-			const { classified: themed, clusteringDegraded } = themePassCanMatter(classified, categories, threshold)
-				? await clusterClassifiedClaims(classified, categories, threshold, clusterDeadline, apiKey)
-				: { classified, clusteringDegraded: false };
-			const { findings, pooled } = groupFeedback(themed, { categories, threshold });
-
-			// Reserve write headroom, not just the deadline edge: the persistence
-			// tx is the slowest remaining phase and a kill mid-transaction would
-			// force the (charged) classifications to be repeated next run.
-			phase = 'write-reserve';
-			if (deadline !== undefined && Date.now() > deadline - WRITE_RESERVE_MS) {
-				throw new DeadlineExceededError();
-			}
-			phase = 'write';
-			const result = await withBusyRetry(() =>
-				writeDigestRun({
-					channel,
-					channelId,
-					nowIso,
-					windowStart,
-					windowEnd,
-					batch,
-					batchIds: new Set(batch.map((c) => c.id)),
-					classified,
-					failed,
-					clusteringDegraded,
-					findings,
-					pooled,
-					metered,
-					creditsCharged,
-					historyPage
-				})
-			);
-			outcome = {
-				status: 'complete',
-				digestId: result.digestId,
-				commentsClassified: classified.length,
-				commentsFailed: failed,
-				...(clusteringDegraded ? { clusteringDegraded: true } : {}),
-				findings: findings.length,
-				pooled,
-				creditsUsed: creditsCharged,
-				...(historyPage ? { historyRemaining: !historyPage.complete } : {})
-			};
+			outcome = await runDigestPipeline({
+				channel,
+				channelId,
+				selection,
+				metered,
+				apiKey,
+				deadline,
+				nowIso,
+				setPhase: (p) => { phase = p; }
+			});
 			return outcome;
 		} catch (cause) {
 			outcome = await digestFailureResult(cause, channel, channelId, windowStart, windowEnd, historyPage);

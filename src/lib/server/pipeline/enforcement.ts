@@ -218,6 +218,11 @@ const ACTION_OUTCOME: Record<YoutubeAction, 'held' | 'rejected' | 'deleted'> = {
  */
 const CONTESTED_STATUSES = new Set(['approved', 'rejected', 'deleted', 'restoring']);
 
+/** The decided intent a comment's current status re-asserts, if any. */
+function decidedIntentFor(status: string | undefined, mayHaveLanded: boolean): 'approve' | 'reject' | 'delete' | undefined {
+	return status === undefined || !mayHaveLanded ? undefined : DECIDED_INTENT[status];
+}
+
 async function convergeHolds(
 	actions: OutstandingAction[],
 	accessToken: string,
@@ -237,8 +242,7 @@ async function convergeHolds(
 		const status = statusById.get(action.commentId);
 		// A row that was only ever 'pending' never reached YouTube — the
 		// deciding path already wrote remotely, so nothing needs re-applying.
-		const mayHaveLanded = applied || action.state !== 'pending';
-		const intent = status === undefined || !mayHaveLanded ? undefined : DECIDED_INTENT[status];
+		const intent = decidedIntentFor(status, applied || action.state !== 'pending');
 		if (!intent) {
 			// 'restoring' belongs to the human flow: reconcile replays the
 			// recorded intent and finalizeHumanIntent commits the decided
@@ -249,48 +253,7 @@ async function convergeHolds(
 			continue;
 		}
 		try {
-			await assertChannelActive(action.channelId, db, expected);
-			const outcome = await applyHumanIntent(action.commentId, intent, accessToken, deadline);
-			if (outcome === 'missing' && intent !== 'delete') {
-				// The corrective write 404'd: YouTube has no comment to publish
-				// or reject — a dispatched delete already landed (or the owner
-				// removed it) before this verdict. 'approved'/'rejected' can
-				// never be true remotely, so the local row converges to the
-				// REAL outcome ('deleted') instead of superseding the action
-				// over a local-approved/remote-deleted lie (codex). The
-				// status guard keeps a mid-flight 'restoring' claim owned by
-				// the human flow — no match leaves the action outstanding.
-				const flipped = await db
-					.update(comments)
-					.set({ status: 'deleted' })
-					.where(and(eq(comments.id, action.commentId), inArray(comments.status, ['approved', 'rejected'])))
-					.returning({ id: comments.id });
-				if (!flipped.length) continue;
-			} else {
-				// The corrective write landed — but the status this loop read was
-				// taken BEFORE it. A concurrent decider moving the comment while
-				// the write was in flight (a 'restoring' claim, or a rescan's fresh
-				// verdict) makes its ordering unprovable: terminalizing here leaves
-				// remote truth diverged with nothing outstanding to reconcile it
-				// (codex). A changed status keeps the row 'cancelling' so the next
-				// sweep converges the CURRENT decision; a vanished row has nothing
-				// left to protect, so it still converges.
-				const current = await db
-					.select({ status: comments.status })
-					.from(comments)
-					.where(inArray(comments.id, [action.commentId]))
-					.all();
-				if (current[0] !== undefined && current[0].status !== status) {
-					console.warn(
-						'convergence for comment %s superseded mid-write (status %s → %s) — action stays outstanding',
-						action.commentId,
-						status,
-						current[0].status
-					);
-					continue;
-				}
-			}
-			converged.add(action.commentId);
+			if (await convergeOneHold(action, status, intent, accessToken, deadline, expected)) converged.add(action.commentId);
 		} catch (error) {
 			if (error instanceof DeadlineExceededError || error instanceof ChannelDeactivatedError) throw error;
 			// Loud per-item failure (I1): the row stays outstanding so a later
@@ -299,6 +262,64 @@ async function convergeHolds(
 		}
 	}
 	return converged;
+}
+
+/**
+ * Applies one corrective write and proves its ordering: the comment's local
+ * status is re-read after the remote call because a concurrent decider moving
+ * it mid-write makes ordering unprovable (codex).
+ *
+ * @returns `true` when the action's comment converged to its real outcome.
+ */
+async function convergeOneHold(
+	action: OutstandingAction,
+	status: string | undefined,
+	intent: 'approve' | 'reject' | 'delete',
+	accessToken: string,
+	deadline: number | undefined,
+	expected?: ChannelIdentity
+): Promise<boolean> {
+	await assertChannelActive(action.channelId, db, expected);
+	const outcome = await applyHumanIntent(action.commentId, intent, accessToken, deadline);
+	if (outcome === 'missing' && intent !== 'delete') {
+		// The corrective write 404'd: YouTube has no comment to publish
+		// or reject — a dispatched delete already landed (or the owner
+		// removed it) before this verdict. 'approved'/'rejected' can
+		// never be true remotely, so the local row converges to the
+		// REAL outcome ('deleted') instead of superseding the action
+		// over a local-approved/remote-deleted lie (codex). The
+		// status guard keeps a mid-flight 'restoring' claim owned by
+		// the human flow — no match leaves the action outstanding.
+		const flipped = await db
+			.update(comments)
+			.set({ status: 'deleted' })
+			.where(and(eq(comments.id, action.commentId), inArray(comments.status, ['approved', 'rejected'])))
+			.returning({ id: comments.id });
+		return flipped.length > 0;
+	}
+	// The corrective write landed — but the status this loop read was
+	// taken BEFORE it. A concurrent decider moving the comment while
+	// the write was in flight (a 'restoring' claim, or a rescan's fresh
+	// verdict) makes its ordering unprovable: terminalizing here leaves
+	// remote truth diverged with nothing outstanding to reconcile it
+	// (codex). A changed status keeps the row 'cancelling' so the next
+	// sweep converges the CURRENT decision; a vanished row has nothing
+	// left to protect, so it still converges.
+	const current = await db
+		.select({ status: comments.status })
+		.from(comments)
+		.where(inArray(comments.id, [action.commentId]))
+		.all();
+	if (current[0] !== undefined && current[0].status !== status) {
+		console.warn(
+			'convergence for comment %s superseded mid-write (status %s → %s) — action stays outstanding',
+			action.commentId,
+			status,
+			current[0].status
+		);
+		return false;
+	}
+	return true;
 }
 
 async function completeActions(actions: OutstandingAction[], expected?: ChannelIdentity): Promise<number> {
@@ -427,30 +448,48 @@ async function applyModerationAction(
 		const releasable = await convergeHolds(superseded, accessToken, deadline, expected);
 		await markSuperseded(superseded.filter((action) => releasable.has(action.commentId)), expected);
 		if (!applicable.length) continue;
-		try {
-			await setModerationStatus(applicable.map((action) => action.commentId), status, banAuthor, accessToken, deadline);
-		} catch (error) {
-			if (!(error instanceof CommentNotFoundError)) throw error;
-			if (applicable.length === 1) {
-				await completeMissingAction(applicable[0], expected);
-				continue;
-			}
-			for (const action of applicable) {
-				if (await applyOneModerationAction(action, status, banAuthor, accessToken, deadline, expected)) acted += 1;
-			}
-			continue;
-		}
-		// The hold write resolved — but a human decision committed while it was
-		// in flight needs its state written last, or the late hold wins remotely.
-		const finished = status === 'heldForReview'
-			? await convergeHolds(applicable, accessToken, deadline, expected, true)
-			: new Set(applicable.map((action) => action.commentId));
-		// Count only rows this run actually terminalized — a hold whose
-		// corrective write failed stays outstanding and counts when a later
-		// sweep completes it (codex).
-		acted += await completeActions(applicable.filter((action) => finished.has(action.commentId)), expected);
+		acted += await applyModerationBatch(applicable, status, banAuthor, accessToken, deadline, expected);
 	}
 	return acted;
+}
+
+/**
+ * Applies one batched YouTube moderation write, then terminalizes the rows
+ * whose outcome is provable. A batch 404 falls back to per-action handling;
+ * a hold write is provisional until its post-write convergence check proves
+ * no human decision landed mid-flight.
+ */
+async function applyModerationBatch(
+	applicable: OutstandingAction[],
+	status: 'heldForReview' | 'rejected',
+	banAuthor: boolean,
+	accessToken: string,
+	deadline: number | undefined,
+	expected?: ChannelIdentity
+): Promise<number> {
+	try {
+		await setModerationStatus(applicable.map((action) => action.commentId), status, banAuthor, accessToken, deadline);
+	} catch (error) {
+		if (!(error instanceof CommentNotFoundError)) throw error;
+		if (applicable.length === 1) {
+			await completeMissingAction(applicable[0], expected);
+			return 0;
+		}
+		let acted = 0;
+		for (const action of applicable) {
+			if (await applyOneModerationAction(action, status, banAuthor, accessToken, deadline, expected)) acted += 1;
+		}
+		return acted;
+	}
+	// The hold write resolved — but a human decision committed while it was
+	// in flight needs its state written last, or the late hold wins remotely.
+	const finished = status === 'heldForReview'
+		? await convergeHolds(applicable, accessToken, deadline, expected, true)
+		: new Set(applicable.map((action) => action.commentId));
+	// Count only rows this run actually terminalized — a hold whose
+	// corrective write failed stays outstanding and counts when a later
+	// sweep completes it (codex).
+	return completeActions(applicable.filter((action) => finished.has(action.commentId)), expected);
 }
 
 async function applyYoutubeActions(

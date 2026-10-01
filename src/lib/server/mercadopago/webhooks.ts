@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { and, eq, gt, isNull, lt, notInArray, or, sql } from 'drizzle-orm';
 
 import { env } from '$env/dynamic/private';
-import { applyLedgerDelta, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
+import { applyLedgerDelta, pauseAutoTopupForRefund, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
 import { providerLedgerRef } from '$lib/server/billing/providers';
 import { db } from '$lib/server/db';
 import { creditTransactions, mercadoPagoCheckoutAttempts, organizations } from '$lib/server/db/schema';
@@ -72,6 +72,11 @@ function paymentAmountCents(transactionAmount: number): number {
 	return rounded;
 }
 
+/** Process every provider boundary; later consent excludes only its authorized interval. */
+async function pauseForRefundBoundaries(tx: Parameters<typeof pauseAutoTopupForRefund>[0], orgId: string, payment: MercadoPagoPayment): Promise<void> {
+	for (const occurredAt of payment.refundBoundaries ?? [payment.refundOccurredAt]) await pauseAutoTopupForRefund(tx, orgId, occurredAt);
+}
+
 export async function fulfillMercadoPagoPayment(payment: MercadoPagoPayment): Promise<boolean> {
 	if (payment.status !== 'approved') return false;
 	if (payment.currencyId !== 'BRL') throw new Error('Mercado Pago payment currency is not BRL');
@@ -104,6 +109,15 @@ export async function fulfillMercadoPagoPayment(payment: MercadoPagoPayment): Pr
 		if (paymentAmountCents(payment.refundedAmount) >= paymentAmountCents(payment.transactionAmount)) {
 			throw new Error('Mercado Pago approved payment has an out-of-contract refunded amount');
 		}
+		await db.transaction(async (tx) => {
+			const observed = await tx.update(mercadoPagoCheckoutAttempts)
+				.set({ refundedAmountCents: paymentAmountCents(payment.refundedAmount), paymentId: payment.id })
+				.where(and(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId),
+					or(isNull(mercadoPagoCheckoutAttempts.paymentId), eq(mercadoPagoCheckoutAttempts.paymentId, payment.id)),
+					sql`COALESCE(${mercadoPagoCheckoutAttempts.refundedAmountCents}, 0) < ${paymentAmountCents(payment.refundedAmount)}`))
+				.returning({ id: mercadoPagoCheckoutAttempts.id });
+			if (observed.length) await pauseForRefundBoundaries(tx, orgId, payment);
+		});
 		throw new Error('Mercado Pago payment has a partial refund — rejected for manual review');
 	}
 	// Pre-column attempts (credits NULL) fall back to the live catalog.
@@ -123,6 +137,7 @@ export async function fulfillMercadoPagoPayment(payment: MercadoPagoPayment): Pr
 					and(
 						eq(mercadoPagoCheckoutAttempts.attemptId, attemptId),
 						or(isNull(mercadoPagoCheckoutAttempts.paymentId), eq(mercadoPagoCheckoutAttempts.paymentId, payment.id)),
+						sql`COALESCE(${mercadoPagoCheckoutAttempts.refundedAmountCents}, 0) = 0`,
 						notInArray(mercadoPagoCheckoutAttempts.status, ['refunded', 'disputed', 'manual_refund_required'])
 					)
 				)
@@ -207,14 +222,19 @@ async function reverseMercadoPagoPayment(payment: MercadoPagoPayment, reason: 'r
 		const markTerminal = () =>
 			tx
 				.update(mercadoPagoCheckoutAttempts)
-				.set({ paymentId: payment.id, status, updatedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` })
+				.set({ paymentId: payment.id, status, ...(reason === 'refund' ? { refundedAmountCents: paymentAmountCents(payment.refundedAmount) } : {}), updatedAt: sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` })
 				.where(and(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId), or(isNull(mercadoPagoCheckoutAttempts.paymentId), eq(mercadoPagoCheckoutAttempts.paymentId, payment.id))));
 		// A disputed customer must never be re-charged off-session. This applies
 		// on EVERY dispute delivery — including one deduped by a prior refund,
 		// where skipping it would leave the org eligible after a chargeback
 		// (codex, round 3).
 		const disableAutoTopup = async () => {
-			if (reason !== 'dispute') return;
+			if (reason === 'refund') {
+				// Read in this transaction: a duplicate refund must respect a later resume.
+				const current = await tx.select({ refundedAmountCents: mercadoPagoCheckoutAttempts.refundedAmountCents }).from(mercadoPagoCheckoutAttempts).where(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId)).get();
+				if ((current?.refundedAmountCents ?? 0) < paymentAmountCents(payment.refundedAmount)) await pauseForRefundBoundaries(tx, orgId, payment);
+				return;
+			}
 			await tx.update(organizations).set({ autoTopupEnabled: 0, autoTopupState: 'disabled' }).where(eq(organizations.id, orgId));
 		};
 		// A payment can be BOTH charged back and refunded — the reversal is keyed
@@ -252,7 +272,8 @@ async function reverseMercadoPagoPayment(payment: MercadoPagoPayment, reason: 'r
 			delta: -grant.delta,
 			reason,
 			refType: reason,
-			refId: providerLedgerRef('mercadopago', payment.id)
+			refId: providerLedgerRef('mercadopago', payment.id),
+			refundOccurredAt: payment.refundOccurredAt
 		});
 		await markTerminal();
 		return reversed;

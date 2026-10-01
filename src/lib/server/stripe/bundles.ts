@@ -19,34 +19,30 @@ export interface CreditBundle {
 	discountPercent?: number;
 	/** Env var holding the Stripe Price id for this bundle. */
 	priceEnv: string;
-	/**
-	 * When true the bundle stays in the catalog — auto top-up still charges
-	 * it and `bundleById` still resolves it for idempotent grants — but it is
-	 * not offered as a manual one-time purchase on the usage page.
-	 */
+	/** Retained for historical grants, excluded from new manual purchases. */
 	hiddenFromPurchase?: boolean;
+	autoTopupEligible?: boolean;
 }
 
 export const CREDIT_BUNDLES: CreditBundle[] = [
 	{ id: 'credits_100', credits: 100, label: '100 comments', discountPercent: bundleDiscountPercent(100), priceEnv: 'STRIPE_PRICE_CREDITS_100', hiddenFromPurchase: true },
-	{ id: 'credits_500', credits: 500, label: '500 comments', discountPercent: bundleDiscountPercent(500), priceEnv: 'STRIPE_PRICE_CREDITS_500' },
-	{ id: 'credits_2000', credits: 2000, label: '2,000 comments', discountPercent: bundleDiscountPercent(2000), priceEnv: 'STRIPE_PRICE_CREDITS_2000' }
+	{ id: 'credits_500', credits: 500, label: '500 comments', discountPercent: bundleDiscountPercent(500), priceEnv: 'STRIPE_PRICE_CREDITS_500', autoTopupEligible: true },
+	{ id: 'credits_2000', credits: 2000, label: '2,000 comments', discountPercent: bundleDiscountPercent(2000), priceEnv: 'STRIPE_PRICE_CREDITS_2000', autoTopupEligible: true }
 ];
 
-/**
- * Selects the smallest configured credit bundle for automatic top-ups.
- *
- * @returns The configured bundle with the fewest credits
- * @throws {Error} If no credit bundle is configured
- */
-export function autoTopupBundle(): CreditBundle {
-	const configured = CREDIT_BUNDLES.filter((bundle) => env[bundle.priceEnv]);
-	const smallest = configured.reduce<CreditBundle | null>(
-		(best, bundle) => (best === null || bundle.credits < best.credits ? bundle : best),
-		null
-	);
-	if (!smallest) throw new Error('no credit bundle is configured — set a STRIPE_PRICE_CREDITS_* env var');
-	return smallest;
+export function configuredAutoTopupBundles(): CreditBundle[] {
+	return CREDIT_BUNDLES.filter((bundle) => {
+		if (!bundle.autoTopupEligible || !env[bundle.priceEnv]) return false;
+		try { priceIdFor(bundle); return true; }
+		catch (cause) { console.error(`auto top-up bundle unavailable: ${bundle.priceEnv} is invalid`, cause); return false; }
+	});
+}
+
+/** Missing/retired selections pause; missing deployment configuration throws before claiming. */
+export function autoTopupBundle(choice: string | null): CreditBundle | null {
+	const configured = configuredAutoTopupBundles();
+	if (!configured.length) throw new Error('no eligible auto top-up bundle is configured — set a STRIPE_PRICE_CREDITS_500 or STRIPE_PRICE_CREDITS_2000 env var');
+	return configured.find((bundle) => bundle.id === choice) ?? null;
 }
 
 /**

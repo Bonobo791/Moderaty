@@ -57,6 +57,8 @@ export function isTestCheckoutOperator(user: Pick<SessionUser, 'email'>): boolea
 export function checkoutRejectionMessage(error: unknown): string | null {
 	if (!(error instanceof Error)) return null;
 	switch (error.message) {
+		case 'credit bundle credits_100 is not available for purchase':
+			return 'The 100-comment bundle is no longer available. Choose 500 or 2,000 comments.';
 		case HOSTED_PLAN_EXISTS_ERROR:
 			return 'Your organization already has an active hosted subscription — manage it via the customer portal below.';
 		case ACTIVE_HOSTED_PLAN_ERROR:
@@ -362,24 +364,22 @@ export async function createPlanCheckout(orgId: string, user: SessionUser, plan:
  * no amount or activity checks — the only thing the app needs from the Price
  * is whether the session runs in payment or subscription mode.
  */
+async function resolveProductDefaultPrice(productId: string): Promise<string> {
+	const product = await getStripe().products.retrieve(productId);
+	const defaultPrice = typeof product.default_price === 'string' ? product.default_price : product.default_price?.id;
+	if (defaultPrice) return defaultPrice;
+	const prices = await getStripe().prices.list({ product: productId, active: true, limit: 2 });
+	if (prices.data.length !== 1) {
+		throw new Error(`STRIPE_TEST_PRODUCT product has no default price and ${prices.data.length} active prices — set a default price or configure the Price id directly`);
+	}
+	return prices.data[0].id;
+}
+
 async function testProductPrice(): Promise<{ priceId: string; recurring: boolean }> {
 	const configured = env.STRIPE_TEST_PRODUCT;
 	if (!configured) throw new Error('STRIPE_TEST_PRODUCT is not configured');
 	try {
-		let priceId = configured;
-		if (configured.startsWith('prod_')) {
-			const product = await getStripe().products.retrieve(configured);
-			const defaultPrice = typeof product.default_price === 'string' ? product.default_price : product.default_price?.id;
-			if (defaultPrice) {
-				priceId = defaultPrice;
-			} else {
-				const prices = await getStripe().prices.list({ product: configured, active: true, limit: 2 });
-				if (prices.data.length !== 1) {
-					throw new Error(`STRIPE_TEST_PRODUCT product has no default price and ${prices.data.length} active prices — set a default price or configure the Price id directly`);
-				}
-				priceId = prices.data[0].id;
-			}
-		}
+		const priceId = configured.startsWith('prod_') ? await resolveProductDefaultPrice(configured) : configured;
 		if (!priceId.startsWith('price_')) throw new Error('STRIPE_TEST_PRODUCT must be a Stripe Product (prod_...) or Price (price_...) id');
 		const price = await getStripe().prices.retrieve(priceId);
 		return { priceId, recurring: price.type === 'recurring' };

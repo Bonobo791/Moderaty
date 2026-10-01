@@ -1,0 +1,1 @@
+ALTER TABLE `stripe_auto_topup_recoveries` ADD `payment_lookup_cursor` text;

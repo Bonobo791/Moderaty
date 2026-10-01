@@ -1,0 +1,1 @@
+ALTER TABLE `organizations` ADD `auto_topup_bundle` text;

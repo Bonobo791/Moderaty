@@ -21,7 +21,7 @@ export const PRICING_FAQ_ENTRIES: { q: string; a: string }[] = [
 	},
 	{
 		q: 'What happens when my 100 comments run out?',
-		a: 'Buy a bundle of 500 or 2,000 comments; every comment your channel processes with AI scoring on a live run, and again when an enabled feedback digest classifies it, consumes one from your balance (rules and protected handles are free), and the Usage tab shows exactly how many are left. Top up manually any time, or switch on automatic top-up and we charge your saved card for the smallest bundle whenever your balance drops below the threshold you set.'
+		a: 'Buy a bundle of 500 or 2,000 comments; every comment your channel processes with AI scoring on a live run, and again when an enabled feedback digest classifies it, consumes one from your balance (rules and protected handles are free), and the Usage tab shows exactly how many are left. Top up manually any time, or switch on automatic top-up and we charge your saved card for the bundle you select (500 or 2,000 comments) whenever your balance drops below the threshold you set.'
 	},
 	{
 		q: 'Can I pay in Brazilian reais?',

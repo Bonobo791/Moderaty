@@ -7,6 +7,10 @@
 
 	const isOwner = $derived(data.user?.orgRole === 'owner');
 	const hasAutoTopup = $derived(data.autoTopup?.enabled ?? false);
+	let enableTopup = $state<boolean | undefined>(undefined);
+	const topupEnabled = $derived(enableTopup ?? hasAutoTopup);
+	const autoTopupBundles = $derived(data.autoTopupBundles ?? []);
+	const storedBundleAvailable = $derived(autoTopupBundles.some((bundle: { id: string }) => bundle.id === data.autoTopup?.bundle));
 	const autoTopupState = $derived(data.autoTopup?.state ?? 'idle');
 	const mercadoPagoBundles = $derived(data.mercadoPagoBundles ?? []);
 	const brl = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -30,8 +34,11 @@
 	function submitting() {
 		pending = true;
 		return async ({ update }: { update: (opts?: { reset?: boolean }) => Promise<void> }) => {
-			await update({ reset: true });
+			// External redirects never resolve update(); unlock before navigation
+			// so browser Back cannot restore every purchase button as disabled.
 			pending = false;
+			enableTopup = undefined;
+			await update({ reset: true });
 		};
 	}
 </script>
@@ -235,18 +242,36 @@
 		<h2 style="margin-top:0">Automatic top-up</h2>
 		<p class="muted">
 			When your balance drops below the threshold, we charge your saved card for the
-			smallest configured bundle and the credits land on your balance automatically.
+			bundle you choose and the credits land on your balance automatically.
 		</p>
 		<p class="muted">
 			Automatic charges are processed at most once every 24 hours (and up to 30 times per
 			month). Expecting a large volume of comments? Buy credits in advance so scoring
 			isn't paused waiting on a top-up.
 		</p>
+		{#if hasAutoTopup && !storedBundleAvailable}
+			<p class="error-box" role="alert">Auto top-up is paused until you choose a bundle that is currently available.</p>
+		{/if}
 		{#if hasAutoTopup && autoTopupState === 'disabled'}
 			<p class="error-box" role="alert">
 				Auto top-up is paused: the last attempt failed ({data.autoTopup?.failures ?? 0}{' '}
 				consecutive failures). Your card issuer may have declined the charge or required
 				re-authentication. Buy a bundle manually, then re-enable auto top-up below.
+			</p>
+		{/if}
+		{#if data.autoTopup?.pauseReason === 'refund'}
+			<p class="error-box" role="alert">
+				Auto top-up was turned off because a payment was refunded. You can still buy credits manually.
+				Enable auto top-up again only if you want future automatic charges.
+			</p>
+		{/if}
+		{#if data.autoTopup?.recoveryPending}
+			<p class="error-box" role="alert">
+				{#if data.autoTopup.recoveryFailed}
+					An automatic payment could not be canceled or refunded. Automatic top-up stays off. Contact support; recovery will continue to retry.
+				{:else}
+					An automatic payment is being canceled or refunded. Wait for it to finish before enabling auto top-up again.
+				{/if}
 			</p>
 		{/if}
 		{#if hasAutoTopup && !data.autoTopup?.hasCard}
@@ -256,10 +281,26 @@
 			</p>
 		{/if}
 		<form method="POST" action="?/setAutoTopup" use:enhance={submitting}>
+			<input type="hidden" name="pausedAt" value={data.autoTopup?.pausedAt ?? ''} />
 			<label for="auto-topup-enabled">
-				<input id="auto-topup-enabled" type="checkbox" name="enabled" checked={hasAutoTopup} />
+				<input id="auto-topup-enabled" type="checkbox" name="enabled" checked={topupEnabled} onchange={(event) => { enableTopup = event.currentTarget.checked; }} />
 				Enable automatic top-up
 			</label>
+			{#if autoTopupBundles.length > 0}
+				<div class="field-row">
+					<label for="auto-topup-bundle">Automatic top-up bundle</label>
+					<select id="auto-topup-bundle" name="bundle" required={topupEnabled}>
+						<option value="" disabled selected={!storedBundleAvailable}>Choose a bundle</option>
+						{#each autoTopupBundles as bundle (bundle.id)}
+							<option value={bundle.id} selected={data.autoTopup?.bundle === bundle.id}>
+								{bundle.label}{bundle.discountPercent ? ` · ${bundle.discountPercent}% off` : ''}
+							</option>
+						{/each}
+					</select>
+				</div>
+			{:else}
+				<p class="muted">No automatic top-up bundles are configured. Contact support to enable automatic charges.</p>
+			{/if}
 			<div class="field-row">
 				<label for="auto-topup-threshold">Top up when my balance drops below</label>
 				<input
@@ -274,13 +315,14 @@
 				/>
 				<span>credits</span>
 			</div>
-			{#if !hasAutoTopup}
+			{#if !hasAutoTopup || !storedBundleAvailable}
+				<p class="muted">If your balance is below the threshold, enabling auto top-up may charge your saved card on the next billing check.</p>
 				<label for="auto-topup-consent" class="consent-label">
 					<input id="auto-topup-consent" type="checkbox" name="consent" />
 					{data.autoTopupConsentText}
 				</label>
 			{/if}
-			<button class="btn secondary small" type="submit" disabled={pending}>
+			<button class="btn secondary small" type="submit" disabled={pending || data.autoTopup?.recoveryPending}>
 				{hasAutoTopup ? 'Update auto top-up' : 'Enable auto top-up'}
 			</button>
 		</form>

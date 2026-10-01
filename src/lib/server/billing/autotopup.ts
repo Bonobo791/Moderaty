@@ -12,14 +12,15 @@
 //    state flips to 'disabled' and the customer must re-authenticate via a
 //    fresh Checkout. Other declines disable after 2 consecutive failures.
 
-import { and, asc, count, eq, gte, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
+import { and, asc, count, eq, gte, inArray, isNotNull, isNull, ne, not, or, sql } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
-import { activeAllowanceSql, applyLedgerDelta, drainPendingReversals, effectiveBalanceSql, isUnmeteredPlan, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
+import { activeAllowanceSql, applyLedgerDelta, pauseForObservedStripeRefund, drainPendingReversals, effectiveBalanceSql, isUnmeteredPlan, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
 import { creditTransactions, organizations } from '$lib/server/db/schema';
-import { autoTopupBundle, bundleById, priceIdFor } from '$lib/server/stripe/bundles';
+import { autoTopupBundle, bundleById, configuredAutoTopupBundles, priceIdFor } from '$lib/server/stripe/bundles';
 import { getStripe } from '$lib/server/stripe/client';
 import { refundUngrantablePayment } from '$lib/server/stripe/refunds';
+import { findPausedTopup, recoverPausedTopup, sweepPausedTopups, topupAttemptCorrelation } from './autoTopupRecovery';
 
 export const AUTO_TOPUP_DEFAULT_THRESHOLD = 100;
 const COOLDOWN_MS = 24 * 60 * 60 * 1000;
@@ -39,6 +40,7 @@ const RECONCILE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 export interface AutoTopupState {
 	enabled: number | null;
 	threshold: number | null;
+	bundle: string | null;
 	state: string | null;
 	lastAttemptAt: string | null;
 	failures: number | null;
@@ -62,6 +64,7 @@ export async function readAutoTopupState(orgId: string): Promise<AutoTopupState>
 		.select({
 			enabled: organizations.autoTopupEnabled,
 			threshold: organizations.autoTopupThreshold,
+			bundle: organizations.autoTopupBundle,
 			state: organizations.autoTopupState,
 			lastAttemptAt: organizations.autoTopupLastAttemptAt,
 			failures: organizations.autoTopupFailures,
@@ -200,6 +203,36 @@ function rateLimited(dayCount: number, monthCount: number): boolean {
 	return dayCount >= MAX_PER_DAY || monthCount >= MAX_PER_MONTH;
 }
 
+async function handleTopupFailure(orgId: string, attemptAt: string, error: unknown, paymentCreated: boolean): Promise<void> {
+	// Classification matters: a CARD failure (decline/SCA) records against
+	// the org — repeated failures disable auto top-up. An infrastructure
+	// failure (timeout, outage, rate limit, invalid request) is not the
+	// customer's card: release the claim back to idle WITHOUT counting it,
+	// so the next sweep retries normally and auto top-up is never disabled
+	// by two unrelated API outages. Either way the failure is loud.
+	if (isCardFailure(error)) {
+		// A create-time confirmation failure (decline, expired card...) never
+		// fires payment_failed — record it here with the real Stripe error
+		// CODE (never the message: SCA codes like authentication_required
+		// must disable auto top-up, and messages are locale-dependent).
+		await recordAutoTopupFailure(orgId, stripeErrorCode(error));
+	} else {
+		const rejected = error as { type?: unknown; statusCode?: unknown; code?: unknown; raw?: { payment_intent?: unknown } };
+		const definitelyUncreated = !paymentCreated && rejected?.type === 'StripeInvalidRequestError' && rejected.statusCode === 400 && !rejected.raw?.payment_intent;
+		// The attempt timestamp clears with the claim: the failure was not
+		// the customer's card, so the 24h cooldown must not stall the next
+		// sweep. A declined card keeps its timestamp (don't hammer a bad
+		// card for a day); an outage must be retried as soon as it clears.
+		await db
+			.update(organizations)
+			.set({ autoTopupState: 'idle', autoTopupLastAttemptAt: null, ...(definitelyUncreated ? { autoTopupAttemptAt: null, autoTopupSubmittedAt: null } : {}) })
+			.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight'), eq(organizations.autoTopupAttemptAt, attemptAt)));
+		console.error(
+			`auto top-up infra failure for org ${orgId} — claim released, no decline counted, no cooldown`, error
+		);
+	}
+}
+
 export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 	const org = await readAutoTopupState(orgId);
 	if (!basicEligibility(org)) return false;
@@ -213,7 +246,11 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 	// (missing env config, Stripe network/API error) must never leave the org
 	// wedged in in_flight. The claim is taken only once a charge is about to be
 	// attempted, so a failure here leaves the org idle for the next sweep.
-	const bundle = autoTopupBundle();
+	const bundle = autoTopupBundle(org.bundle);
+	if (!bundle) {
+		console.error(`auto top-up paused for org ${orgId}: ${org.bundle === null ? 'no bundle chosen' : 'stored bundle is not a configured option'}`);
+		return false;
+	}
 	const price = await getStripe().prices.retrieve(priceIdFor(bundle));
 	// Validate the configured Price BEFORE claiming: manual Checkout rejects
 	// archived prices at session creation, but the auto-charge path copies
@@ -240,12 +277,13 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 	const claimNowIso = new Date().toISOString();
 	const claimed = await db
 		.update(organizations)
-		.set({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: new Date().toISOString() })
+		.set({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: sql`COALESCE(${organizations.autoTopupAttemptAt}, ${claimNowIso})`, autoTopupAttemptAt: sql`COALESCE(${organizations.autoTopupAttemptAt}, ${claimNowIso})` })
 		.where(
 			and(
 				eq(organizations.id, orgId),
 				eq(organizations.autoTopupState, 'idle'),
 				eq(organizations.autoTopupEnabled, 1),
+				eq(organizations.autoTopupBundle, bundle.id),
 				// Mirror of UNMETERED_PLANS (ledger.ts): an org upgraded to
 				// lifetime between the eligibility read and this claim must
 				// never be charged for credits it cannot need (MOD-35).
@@ -257,6 +295,7 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 		)
 		.returning({
 			id: organizations.id,
+			attemptAt: organizations.autoTopupAttemptAt,
 			customerId: organizations.stripeCustomerId,
 			defaultPmId: organizations.stripeDefaultPmId
 		});
@@ -278,9 +317,27 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 		throw new Error('auto top-up claim returned incomplete payment identifiers');
 	}
 
-	const idempotencyKey = `autotopup:${customerId}:${startOfUtcDayIso(0)}:${dayCount + 1}`;
+	const attemptAt = claim.attemptAt;
+	if (!attemptAt) throw new Error('auto top-up claim returned no logical attempt');
+	const idempotencyKey = `autotopup:${customerId}:${attemptAt}`;
+	let paymentCreated = false;
 	try {
-		await getStripe().paymentIntents.create(
+		const current = await readAutoTopupState(orgId);
+		if (current.enabled !== 1 || current.state !== 'in_flight' || current.lastAttemptAt !== attemptAt) {
+			await db.update(organizations).set({ autoTopupState: 'idle' }).where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight'), eq(organizations.autoTopupAttemptAt, attemptAt)));
+			return false;
+		}
+		// Persist possible submission BEFORE Stripe. Refunds atomically revoke
+		// this predicate; infrastructure retries preserve the same logical attempt.
+		const submitted = await db.update(organizations).set({ autoTopupSubmittedAt: sql`COALESCE(${organizations.autoTopupSubmittedAt}, ${new Date().toISOString()})` })
+			.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight'), eq(organizations.autoTopupEnabled, 1), eq(organizations.autoTopupAttemptAt, attemptAt)))
+			.returning({ id: organizations.id });
+		if (!submitted.length) {
+			await db.update(organizations).set({ autoTopupState: 'idle' }).where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight'), eq(organizations.autoTopupAttemptAt, attemptAt)));
+			return false;
+		}
+		const metadata = { type: 'auto_topup', org_id: orgId, bundle: bundle.id, auto_topup_attempt_day: attemptAt.slice(0, 10), auto_topup_attempt_at: attemptAt };
+		const pi = await getStripe().paymentIntents.create(
 			{
 				amount,
 				currency: 'usd',
@@ -288,38 +345,21 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 				payment_method: defaultPmId,
 				off_session: true,
 				confirm: true,
-				metadata: { type: 'auto_topup', org_id: orgId, bundle: bundle.id }
+				metadata
 			},
 			{ idempotencyKey }
 		);
+		paymentCreated = true;
+		const payment = { ...pi, metadata };
+		const canceled = await findPausedTopup(db, orgId, payment);
+		if (canceled) {
+			await recoverPausedTopup(canceled, payment);
+			return false;
+		}
 		console.info(`auto top-up initiated for org ${orgId}: bundle ${bundle.id} (${idempotencyKey})`);
 		return true;
 	} catch (error) {
-		// Classification matters: a CARD failure (decline/SCA) records against
-		// the org — repeated failures disable auto top-up. An infrastructure
-		// failure (timeout, outage, rate limit, invalid request) is not the
-		// customer's card: release the claim back to idle WITHOUT counting it,
-		// so the next sweep retries normally and auto top-up is never disabled
-		// by two unrelated API outages. Either way the failure is loud.
-		if (isCardFailure(error)) {
-			// A create-time confirmation failure (decline, expired card...) never
-			// fires payment_failed — record it here with the real Stripe error
-			// CODE (never the message: SCA codes like authentication_required
-			// must disable auto top-up, and messages are locale-dependent).
-			await recordAutoTopupFailure(orgId, stripeErrorCode(error));
-		} else {
-			// The attempt timestamp clears with the claim: the failure was not
-			// the customer's card, so the 24h cooldown must not stall the next
-			// sweep. A declined card keeps its timestamp (don't hammer a bad
-			// card for a day); an outage must be retried as soon as it clears.
-			await db
-				.update(organizations)
-				.set({ autoTopupState: 'idle', autoTopupLastAttemptAt: null })
-				.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight')));
-			console.error(
-				`auto top-up infra failure for org ${orgId}: ${error instanceof Error ? error.message : String(error)} — claim released, no decline counted, no cooldown`
-			);
-		}
+		await handleTopupFailure(orgId, attemptAt, error, paymentCreated);
 		return false;
 	}
 }
@@ -361,8 +401,8 @@ export async function recordAutoTopupFailure(orgId: string, code: string, piCrea
 	// races between two concurrent deliveries.
 	const updated = await db
 		.update(organizations)
-		.set({ autoTopupState: nextState, autoTopupFailures: nextFailures, autoTopupLastAttemptAt: new Date().toISOString() })
-		.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight')))
+		.set({ autoTopupState: nextState, autoTopupFailures: nextFailures, autoTopupLastAttemptAt: new Date().toISOString(), autoTopupAttemptAt: null, autoTopupSubmittedAt: null })
+		.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight'), org.lastAttemptAt ? eq(organizations.autoTopupLastAttemptAt, org.lastAttemptAt) : isNull(organizations.autoTopupLastAttemptAt)))
 		.returning({ id: organizations.id });
 	if (updated.length === 0) {
 		console.error(`auto top-up failure for org ${orgId} arrived without an in-flight claim — ignored (duplicate or stale delivery)`);
@@ -400,17 +440,16 @@ export async function handleAutoTopupFailure(paymentIntentId: string): Promise<v
  * @param pi - The PaymentIntent to validate and fulfill
  * @returns `true` if credits were applied, `false` if the PaymentIntent is invalid or was already fulfilled
  */
-export async function grantAutoTopupCredits(
-	orgId: string,
-	pi: {
-		id: string;
-		status?: string | null;
-		latest_charge?: string | { id: string } | null;
-		/** Unix seconds — correlates a duplicate delivery to the claim it belongs to. */
-		created?: number | null;
-		metadata: Record<string, string> | null;
-	}
-): Promise<boolean> {
+type AutoTopupPi = {
+	id: string;
+	status?: string | null;
+	latest_charge?: string | { id: string } | null;
+	/** Unix seconds — correlates a duplicate delivery to the claim it belongs to. */
+	created?: number | null;
+	metadata: Record<string, string> | null;
+};
+
+export async function grantAutoTopupCredits(orgId: string, pi: AutoTopupPi): Promise<boolean> {
 	// The contract lives HERE, not with the callers: only a succeeded charge
 	// of ours can be granted.
 	if (pi.status !== 'succeeded') return false;
@@ -423,16 +462,9 @@ export async function grantAutoTopupCredits(
 	}
 	const bundle = bundleById(bundleId);
 	let applied: boolean;
+	let canceled: Awaited<ReturnType<typeof findPausedTopup>>;
 	try {
-		applied = await applyLedgerDelta(db, {
-			orgId,
-			delta: bundle.credits,
-			reason: 'auto_topup',
-			refType: 'payment_intent',
-			refId: pi.id,
-			paymentIntentId: pi.id,
-			chargeId: typeof pi.latest_charge === 'string' ? pi.latest_charge : undefined
-		});
+		({ applied, canceled } = await grantTopupInTransaction(orgId, pi, bundle.credits));
 	} catch (error) {
 		// The claim re-checks the plan before charging, but an upgrade to
 		// lifetime can land between the off-session charge and this delivery:
@@ -445,20 +477,10 @@ export async function grantAutoTopupCredits(
 			label: `auto-topup PI ${pi.id} for org ${orgId} succeeded but the org is unmetered`,
 			orgId
 		});
-		await releaseClaimForPi(orgId, pi);
+		await releaseClaimForPi(orgId, pi, true);
 		return false;
 	}
-	if (!applied) {
-		// Duplicate delivery — the grant already committed on the FIRST
-		// delivery. That delivery's org-state reset may have failed (a crash
-		// between the ledger commit and the state update), which would leave
-		// the claim in_flight until the 72h stale-claim sweep and block auto
-		// top-up for three days. Release the claim now — but ONLY when the
-		// in-flight claim belongs to THIS PI (drift guard): a late duplicate
-		// delivery of an older PI must never clear a NEWER claim (codex).
-		await releaseClaimForPi(orgId, pi);
-		return false;
-	}
+	if (!(await postGrantFollowup(orgId, pi, applied, canceled))) return false;
 	// A refund/dispute may have beaten this grant's delivery: drain the
 	// queued reversal in the same breath as the grant (codex 6153).
 	const chargeId = typeof pi.latest_charge === 'string' ? pi.latest_charge : undefined;
@@ -466,13 +488,75 @@ export async function grantAutoTopupCredits(
 		const drained = await drainPendingReversals(chargeId);
 		if (drained > 0) console.error(`stripe: auto-topup grant ${pi.id} immediately drained ${drained} pending reversal(s) for ${chargeId}`);
 	}
-	// The charge succeeded: release the in-flight claim, reset the failure
-	// counter (last_attempt_at stays — it is the cooldown anchor).
-	await db
-		.update(organizations)
-		.set({ autoTopupState: 'idle', autoTopupFailures: 0 })
-		.where(eq(organizations.id, orgId));
 	return true;
+}
+
+/**
+ * Post-grant branches: a paused recovery wins over the grant (recover, then
+ * retry the grant once the pause is gone); an unapplied grant on a SUCCEEDED
+ * PI is a duplicate delivery — the grant already committed on the FIRST
+ * delivery. That delivery's org-state reset may have failed (a crash between
+ * the ledger commit and the state update), which would leave the claim
+ * in_flight until the 72h stale-claim sweep and block auto top-up for three
+ * days. Release the claim now — but ONLY when the in-flight claim belongs
+ * to THIS PI (drift guard): a late duplicate delivery of an older PI must
+ * never clear a NEWER claim (codex).
+ *
+ * @returns `true` when the grant committed and the caller should drain
+ *   queued reversals, `false` for every non-grant outcome.
+ */
+async function postGrantFollowup(
+	orgId: string,
+	pi: AutoTopupPi,
+	applied: boolean,
+	canceled: Awaited<ReturnType<typeof findPausedTopup>>
+): Promise<boolean> {
+	if (canceled) {
+		await recoverPausedTopup(canceled, pi);
+		if (!(await findPausedTopup(db, orgId, pi))) return grantAutoTopupCredits(orgId, pi);
+		return false;
+	}
+	if (!applied) {
+		await releaseClaimForPi(orgId, pi);
+		return false;
+	}
+	return true;
+}
+
+/**
+ * The grant transaction: dedupe on the PI ref, defer to a paused recovery,
+ * apply the ledger delta, then commit the claim release WITH the grant
+ * before a refund can observe it — and release this payment's claim before
+ * its refund pause can record overlap.
+ */
+async function grantTopupInTransaction(
+	orgId: string,
+	pi: AutoTopupPi,
+	credits: number
+): Promise<{ applied: boolean; canceled: Awaited<ReturnType<typeof findPausedTopup>> }> {
+	return db.transaction(async (tx) => {
+		const existing = await tx.select({ id: creditTransactions.id }).from(creditTransactions).where(and(eq(creditTransactions.orgId, orgId), eq(creditTransactions.refType, 'payment_intent'), eq(creditTransactions.refId, pi.id))).get();
+		if (existing) return { applied: false, canceled: undefined };
+		const canceled = await findPausedTopup(tx, orgId, pi);
+		if (canceled) return { applied: false, canceled };
+		const applied = await applyLedgerDelta(tx, {
+			orgId,
+			delta: credits,
+			reason: 'auto_topup',
+			refType: 'payment_intent',
+			refId: pi.id,
+			paymentIntentId: pi.id,
+			chargeId: typeof pi.latest_charge === 'string' ? pi.latest_charge : undefined
+		});
+		// Commit claim release WITH the grant, before a refund can observe it.
+		const correlation = topupAttemptCorrelation(pi, organizations.autoTopupLastAttemptAt);
+		await tx.update(organizations).set({ autoTopupState: sql`CASE WHEN ${organizations.autoTopupState} = 'disabled' THEN 'disabled' ELSE 'idle' END`, autoTopupFailures: 0, autoTopupAttemptAt: null, autoTopupSubmittedAt: null })
+			.where(and(eq(organizations.id, orgId), or(and(or(ne(organizations.autoTopupState, 'disabled'), isNull(organizations.autoTopupState)), or(eq(organizations.autoTopupState, 'idle'), isNull(organizations.autoTopupLastAttemptAt))), correlation)));
+		// Release this payment's claim before its refund pause can record overlap.
+		const chargeId = typeof pi.latest_charge === 'string' ? pi.latest_charge : undefined;
+		if (chargeId) await pauseForObservedStripeRefund(tx, orgId, chargeId, undefined, undefined, pi);
+		return { applied, canceled: undefined };
+	});
 }
 
 /**
@@ -485,18 +569,18 @@ export async function grantAutoTopupCredits(
  */
 async function releaseClaimForPi(
 	orgId: string,
-	pi: { id: string; created?: number | null }
+	pi: { id: string; created?: number | null; metadata?: Record<string, string> | null },
+	allowIdle = false
 ): Promise<void> {
-	if (!pi.created) return; // cannot correlate — leave it for the stale sweep
+	const correlation = topupAttemptCorrelation({ ...pi, metadata: pi.metadata ?? null }, organizations.autoTopupLastAttemptAt);
+	if (!correlation) return; // cannot correlate — leave it for the stale sweep
 	const org = await readAutoTopupState(orgId);
-	if (org.state !== 'in_flight') return;
+	if (org.state !== 'in_flight' && org.state !== 'disabled' && !(allowIdle && org.state === 'idle')) return;
 	if (!org.lastAttemptAt) return;
-	const drift = Math.abs(pi.created * 1000 - Date.parse(org.lastAttemptAt));
-	if (drift > 60_000) return; // a different (newer) claim owns in_flight
 	await db
 		.update(organizations)
-		.set({ autoTopupState: 'idle', autoTopupFailures: 0 })
-		.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight')));
+		.set({ autoTopupState: sql`CASE WHEN ${organizations.autoTopupState} = 'disabled' THEN 'disabled' ELSE 'idle' END`, autoTopupFailures: 0, autoTopupAttemptAt: null, autoTopupSubmittedAt: null })
+		.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, org.state), eq(organizations.autoTopupLastAttemptAt, org.lastAttemptAt), correlation));
 }
 
 /**
@@ -545,8 +629,20 @@ export async function reconcileAutoTopup(orgId: string): Promise<{ recovered: nu
  * @returns The number of newly initiated top-ups
  */
 export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<number> {
+	const recovering = await sweepPausedTopups(limit > 1 ? Math.floor(limit / 2) : limit, deadline);
+	if (recovering >= limit) return 0;
+	limit -= recovering;
 	// Unstick stale in-flight claims first: a webhook delivery lost past
 	// Stripe's 3-day retry horizon would otherwise wedge auto top-up forever.
+	await releaseStaleTopupClaims();
+	const reconcileCutoff = new Date(Date.now() - RECONCILE_WINDOW_MS).toISOString();
+	const reconciled = await reconcileStaleLifetimeRows(limit, reconcileCutoff, deadline);
+	const offeredBundles = configuredAutoTopupBundles().map((bundle) => bundle.id);
+	await warnPausedTopupOrgs(offeredBundles);
+	return triggerEligibleTopups(limit - reconciled, offeredBundles, reconcileCutoff, deadline);
+}
+
+async function releaseStaleTopupClaims(): Promise<void> {
 	await db
 		.update(organizations)
 		.set({ autoTopupState: 'idle' })
@@ -559,20 +655,27 @@ export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<numb
 				)
 			)
 		);
-	// Owed refunds outrank new charges: the stale-lifetime reconcile pass
-	// runs FIRST on the shared budget. The set is finite and self-draining —
-	// a processed row clears both selection markers, so the anomaly is gone
-	// permanently within a few invocations while metered work simply waits
-	// (it recurs anyway). Metered-first would let a perpetually full charge
-	// batch starve these rows past the 7-day reconcile window with their
-	// paid charges never refunded (codex P1).
-	//
-	// Selection is a surviving enabled flag OR a last-attempt timestamp
-	// inside the reconcile window: claimLifetimeSlot clears the flag
-	// atomically at grant, so the NORMAL upgrade path leaves enabled=0 rows
-	// whose only surviving marker is the attempt timestamp — a flag-only
-	// predicate would never discover their lost-webhook charges (codex P1).
-	const reconcileCutoff = new Date(Date.now() - RECONCILE_WINDOW_MS).toISOString();
+}
+
+/**
+ * Owed refunds outrank new charges: the stale-lifetime reconcile pass runs
+ * FIRST on the shared budget. The set is finite and self-draining — a
+ * processed row clears both selection markers, so the anomaly is gone
+ * permanently within a few invocations while metered work simply waits (it
+ * recurs anyway). Metered-first would let a perpetually full charge batch
+ * starve these rows past the 7-day reconcile window with their paid charges
+ * never refunded (codex P1).
+ *
+ * Selection is a surviving enabled flag OR a last-attempt timestamp inside
+ * the reconcile window: claimLifetimeSlot clears the flag atomically at
+ * grant, so the NORMAL upgrade path leaves enabled=0 rows whose only
+ * surviving marker is the attempt timestamp — a flag-only predicate would
+ * never discover their lost-webhook charges (codex P1).
+ *
+ * @returns The number of candidate rows selected — they share the sweep's
+ *   bounded budget whether or not each was reconciled before the deadline.
+ */
+async function reconcileStaleLifetimeRows(limit: number, reconcileCutoff: string, deadline?: number): Promise<number> {
 	const staleLifetime = await db
 		.select({ id: organizations.id, enabled: organizations.autoTopupEnabled })
 		.from(organizations)
@@ -608,17 +711,39 @@ export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<numb
 				if (cleared.length === 1 && row.enabled === 1) console.error(`auto top-up: cleared a stale enabled flag on lifetime org ${row.id}`);
 			}
 		} catch (error) {
-			console.error(`auto top-up sweep failed for org ${row.id}: ${error instanceof Error ? error.message : String(error)}`);
+			console.error(`auto top-up sweep failed for org ${row.id}`, error);
 		}
 	}
+	return staleLifetime.length;
+}
+
+async function warnPausedTopupOrgs(offeredBundles: string[]): Promise<void> {
+	const paused = await db.select({ n: count() }).from(organizations)
+		.where(and(eq(organizations.autoTopupEnabled, 1), ne(organizations.plan, 'lifetime'),
+			or(isNull(organizations.autoTopupBundle), not(inArray(organizations.autoTopupBundle, offeredBundles)))))
+		.get();
+	if (paused?.n) console.error(`auto top-up: ${paused.n} organizations paused until an owner chooses an available bundle`);
+}
+
+/**
+ * Reconciles each eligible org's recent charges, then attempts its top-up,
+ * one org at a time on the shared deadline budget (bounded, I10).
+ *
+ * @returns The number of newly initiated top-ups
+ */
+async function triggerEligibleTopups(limit: number, offeredBundles: string[], reconcileCutoff: string, deadline?: number): Promise<number> {
 	const nowIso = new Date().toISOString();
 	const rows = await db
-		.select({ id: organizations.id })
+		.select({ id: organizations.id, bundle: organizations.autoTopupBundle, lastAttemptAt: organizations.autoTopupLastAttemptAt })
 		.from(organizations)
 		.where(
 			and(
 				eq(organizations.autoTopupEnabled, 1),
 				eq(organizations.autoTopupState, 'idle'),
+				// Paused legacy settings must not fill the charging batch. Keep
+				// recent attempts discoverable for lost-webhook reconciliation.
+				or(inArray(organizations.autoTopupBundle, offeredBundles),
+					sql`${organizations.autoTopupLastAttemptAt} >= ${reconcileCutoff}`),
 				// Mirror of the atomic claim's plan predicate: a lifetime org
 				// with a stale enabled flag is skipped loudly downstream — but
 				// it must never be SELECTED either, or enough stale rows fill
@@ -636,7 +761,7 @@ export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<numb
 			)
 		)
 		.orderBy(asc(organizations.autoTopupLastAttemptAt), asc(organizations.id))
-		.limit(limit - staleLifetime.length)
+		.limit(limit)
 		.all();
 	let triggered = 0;
 	for (const row of rows) {
@@ -651,10 +776,18 @@ export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<numb
 			// Reconcile first: a lost webhook for a SUCCEEDED charge must grant
 			// its credits before any new charge is considered (no double charge,
 			// no lost money). Idempotent and cheap — one list call per org.
-			await reconcileAutoTopup(row.id);
+			const { inFlight } = await reconcileAutoTopup(row.id);
+			if (!offeredBundles.includes(row.bundle ?? '') && !inFlight && row.lastAttemptAt) {
+				// Once old payments are reconciled, release the bounded budget. A
+				// concurrent setting/attempt must retain its reconciliation marker.
+				await db.update(organizations).set({ autoTopupLastAttemptAt: null })
+					.where(and(eq(organizations.id, row.id), eq(organizations.autoTopupLastAttemptAt, row.lastAttemptAt),
+						row.bundle === null ? isNull(organizations.autoTopupBundle) : eq(organizations.autoTopupBundle, row.bundle),
+						eq(organizations.autoTopupState, 'idle'), isNull(organizations.autoTopupAttemptAt)));
+			}
 			if (await maybeTriggerAutoTopUp(row.id)) triggered += 1;
 		} catch (error) {
-			console.error(`auto top-up sweep failed for org ${row.id}: ${error instanceof Error ? error.message : String(error)}`);
+			console.error(`auto top-up sweep failed for org ${row.id}`, error);
 		}
 	}
 	return triggered;

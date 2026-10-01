@@ -282,6 +282,49 @@ test('an unconfirmed result discovered after the deadline still defers', async (
 	await expect(sendProtonMailEmail(MESSAGE, Date.now() + 1_000)).rejects.toBeInstanceOf(DeadlineExceededError);
 });
 
+test('the guard destroys the live SMTP socket so a late acceptance can never complete', async () => {
+	vi.useFakeTimers();
+	const sockets: { destroyed: boolean }[] = [];
+	// Mirror real nodemailer: the transport obtains its socket through the
+	// supplied getSocket seam, then holds the provider response until the
+	// socket dies — the only settlement a real server can still deliver.
+	mocks.createTransport.mockImplementationOnce((options: Record<string, unknown>) => ({
+		close: mocks.close,
+		sendMail: vi.fn(
+			() =>
+				new Promise((resolve) => {
+					(options.getSocket as (o: unknown, cb: (e: Error | null, so?: { socket: { destroyed: boolean } }) => void) => void)(
+						{},
+						(_e, so) => sockets.push(so!.socket)
+					);
+					const waiter = setInterval(() => {
+						if (sockets[0].destroyed) {
+							clearInterval(waiter);
+							resolve(acceptedInfo());
+						}
+					}, 5);
+				})
+		)
+	}));
+
+	const promise = sendProtonMailEmail(MESSAGE);
+	const assertion = expect(promise).rejects.toThrow('e-mail could not be sent (send timed out)');
+	await vi.advanceTimersByTimeAsync(11_000);
+	await assertion;
+	expect(sockets).toHaveLength(1);
+	expect(sockets[0].destroyed).toBe(true);
+});
+
+test('a deadline spent during transport setup never opens an SMTP connection', async () => {
+	vi.useFakeTimers();
+	mocks.createTransport.mockImplementationOnce(() => {
+		vi.setSystemTime(Date.now() + 5_000);
+		return { sendMail: mocks.sendMail, close: mocks.close };
+	});
+	await expect(sendProtonMailEmail(MESSAGE, Date.now() + 1_000)).rejects.toBeInstanceOf(DeadlineExceededError);
+	expect(mocks.sendMail).not.toHaveBeenCalled();
+});
+
 test('a late acceptance after the deadline is never reported as success', async () => {
 	vi.useFakeTimers();
 	mocks.sendMail.mockImplementation(

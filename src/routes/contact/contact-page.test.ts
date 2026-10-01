@@ -143,12 +143,16 @@ describe('contact action', () => {
 	});
 
 	test('fails loudly (500) with a generic message when the send fails, keeping the pending row for retry', async () => {
-		mocks.sendProtonMailEmail.mockRejectedValue(new Error('e-mail could not be sent (SMTP failure)'));
+		// Reject with provider-shaped detail a leaked error would carry — the
+		// visible message must be exactly the generic string, not merely free
+		// of one pattern (cubic).
+		mocks.sendProtonMailEmail.mockRejectedValue(new Error('SMTP 535 5.7.8 authentication failed for smtp-token'));
 		const outcome = await captureAction(VALID);
 		expect(outcome).toMatchObject({ status: 500 });
 		const data = outcome as { data?: { error?: string } };
-		expect(data.data?.error).toContain('could not send the verification e-mail');
-		expect(data.data?.error).not.toContain('HTTP 500');
+		expect(data.data?.error).toBe(
+			'We could not send the verification e-mail right now — please try again in a few minutes.'
+		);
 
 		const rows = await pendingRows();
 		expect(rows).toHaveLength(1);

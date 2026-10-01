@@ -779,7 +779,20 @@ test('refund lookup rejects a refund timestamp that precedes the payment itself'
 	vi.stubGlobal('fetch', vi.fn()
 		.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'refunded', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 5, currency_id: 'BRL', date_created: '2026-09-30T12:00:00Z' })))
 		.mockResolvedValueOnce(new Response(JSON.stringify([{ payment_id: 'pay-1', amount: 5, status: 'approved', date_created: '2026-09-30T10:00:00Z' }]))));
-	await expect(retrievePayment('pay-1')).rejects.toThrow(/refund records/);
+	await expect(retrievePayment('pay-1')).rejects.toThrow(/predates payment/);
+});
+
+test('a pre-payment refund record fails loudly even when valid refunds cover the reported total', async () => {
+	// Skipping the corrupt record is not enough: a second record summing to
+	// transaction_amount_refunded would hide it behind the aggregate check
+	// (cubic) — the corrupt item must throw in its own right.
+	vi.stubGlobal('fetch', vi.fn()
+		.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'refunded', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 5, currency_id: 'BRL', date_created: '2026-09-30T12:00:00Z' })))
+		.mockResolvedValueOnce(new Response(JSON.stringify([
+			{ payment_id: 'pay-1', amount: 5, status: 'approved', date_created: '2026-09-30T10:00:00Z' },
+			{ payment_id: 'pay-1', amount: 5, status: 'approved', date_created: '2026-09-30T13:00:00Z' }
+		]))));
+	await expect(retrievePayment('pay-1')).rejects.toThrow(/predates payment/);
 });
 
 test('a refunded payment without a creation date fails loudly — the refund boundary cannot be trusted', async () => {

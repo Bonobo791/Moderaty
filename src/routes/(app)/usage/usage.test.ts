@@ -978,7 +978,7 @@ describe('usage setAutoTopup action', () => {
 
 		expect(result).toMatchObject({ ok: true });
 		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
-		expect(org).toMatchObject({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupFailures: 0, autoTopupAttemptAt: null, autoTopupSubmittedAt: null });
+		expect(org).toMatchObject({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupFailures: 0, autoTopupAttemptAt: null, autoTopupSubmittedAt: null, autoTopupLastAttemptAt: attempt });
 	});
 
 	test('non-owners cannot change auto top-up (403)', async () => {

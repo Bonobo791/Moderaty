@@ -320,6 +320,24 @@ describe('maybeTriggerAutoTopUp', () => {
 		expect(mocks.paymentIntentsCreate).toHaveBeenCalledOnce();
 	});
 
+	test.each(['requires_future_thing', undefined])('an unrecognized PI status (%s) still defers the next charge', async (status) => {
+		// Stripe can introduce a nonterminal status this build has never seen
+		// (or omit status in a partial response). Treating the allowlist miss
+		// as safe would mint a sibling PI that double-charges when the unknown
+		// one settles (codex PR #168): only the verified-dead
+		// requires_payment_method is exempt from deferral.
+		const stale = new Date(Date.now() - 4 * 24 * 60 * 60_000).toISOString();
+		await seedOrg({ creditsRemaining: 0, autoTopupState: 'idle', autoTopupAttemptAt: stale, autoTopupSubmittedAt: stale, autoTopupLastAttemptAt: stale });
+		mocks.paymentIntentsList.mockResolvedValue({
+			data: [{ id: 'pi_unknown', status, created: Math.floor(Date.parse(stale) / 1000), metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_500', auto_topup_attempt_at: stale } }],
+			has_more: false
+		});
+
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+		expect((await orgRow()).autoTopupState).toBe('idle');
+	});
+
 	test('never triggers when the balance is at or above the threshold', async () => {
 		await seedOrg({ creditsRemaining: 150 });
 		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);

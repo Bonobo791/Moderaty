@@ -570,6 +570,7 @@ export const stripeAutoTopupRecoveries = sqliteTable('stripe_auto_topup_recoveri
 	// Retained from the already-applied 0057 migration; current recovery uses paymentLookupCursor.
 	lookupCursor: text('lookup_cursor'),
 	lookupCandidateId: text('lookup_candidate_id'),
+	refundOccurredAt: text('refund_occurred_at'),
 	refundId: text('refund_id'),
 	lastCheckedAt: text('last_checked_at'),
 	lastError: text('last_error'),

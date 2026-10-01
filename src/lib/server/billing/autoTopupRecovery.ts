@@ -25,7 +25,7 @@ function recoveryOptions(deadline?: number): [] | [Stripe.RequestOptions] {
 export async function findPausedTopup(handle: LedgerHandle, orgId: string, pi: TopupPayment): Promise<Recovery | undefined> {
 	const correlation = topupAttemptCorrelation(pi, stripeAutoTopupRecoveries.attemptAt);
 	const known = await handle.select().from(stripeAutoTopupRecoveries).where(and(eq(stripeAutoTopupRecoveries.orgId, orgId), eq(stripeAutoTopupRecoveries.paymentIntentId, pi.id))).get();
-	if (known) return known;
+	if (known) return known.lastError === 'payment_precedes_refund' && known.resolvedAt ? undefined : known;
 	if (!correlation) {
 		const pending = await handle.select({ id: stripeAutoTopupRecoveries.id }).from(stripeAutoTopupRecoveries).where(and(eq(stripeAutoTopupRecoveries.orgId, orgId), isNull(stripeAutoTopupRecoveries.resolvedAt))).get();
 		if (pending) throw new Error(`auto top-up ${pi.id} cannot be correlated to a canceled attempt`);
@@ -49,9 +49,9 @@ function validateExistingRefund(refund: Stripe.Refund) {
 }
 
 /** Existing full refunds resolve only after Stripe confirms the returned amount. */
-async function existingRefundOutcome(paymentIntentId: string, deadline?: number): Promise<{ chargeId: string; resolved?: boolean }> {
+async function existingRefundOutcome(paymentIntentId: string, deadline?: number): Promise<{ chargeId: string; created: number; resolved?: boolean }> {
 	const charge = recoveryCharge(await getStripe().charges.list({ payment_intent: paymentIntentId, limit: 1 }, ...recoveryOptions(deadline)));
-	if (!chargeFullyRefunded(charge)) return { chargeId: charge.id };
+	if (!chargeFullyRefunded(charge)) return { chargeId: charge.id, created: charge.created };
 	// ponytail: one refund page; over 100 refunds requires manual reconciliation.
 	const refunds = await getStripe().refunds.list({ charge: charge.id, limit: 100 }, ...recoveryOptions(deadline));
 	if (!Array.isArray(refunds.data) || refunds.has_more) throw new Error('Existing auto top-up refunds need manual reconciliation');
@@ -63,11 +63,22 @@ async function existingRefundOutcome(paymentIntentId: string, deadline?: number)
 		if (refund.status === 'pending' || refund.status === 'requires_action') pending += refund.amount;
 	}
 	if (completed + pending !== charge.amount) throw new Error('Existing full refund could not be confirmed — manual reconciliation required');
-	return { chargeId: charge.id, resolved: completed === charge.amount };
+	return { chargeId: charge.id, created: charge.created, resolved: completed === charge.amount };
+}
+
+async function paymentPrecedesRefund(row: Recovery, created: number): Promise<boolean> {
+	if (!row.refundOccurredAt) return false;
+	const org = await db.select({ consentedAt: organizations.autoTopupConsentedAt }).from(organizations).where(eq(organizations.id, row.orgId)).get();
+	if (!org) return false;
+	const refundAt = Date.parse(row.refundOccurredAt);
+	const consentedAt = org.consentedAt === null ? Number.NaN : Date.parse(org.consentedAt);
+	if (!Number.isSafeInteger(created) || created <= 0 || created * 1000 > Date.now() + 5 * 60_000 || !Number.isFinite(refundAt) || (org.consentedAt !== null && !Number.isFinite(consentedAt))) throw new InvalidTopupPayment('Recovery has an invalid payment or refund timestamp');
+	// Consent granted after this refund authorizes only payments charged under it.
+	return created * 1000 < refundAt || (consentedAt > refundAt && created * 1000 >= consentedAt);
 }
 
 /** Persist the refund identity until Stripe confirms its terminal outcome. */
-async function cancelOrRefund(row: Recovery, pi: TopupPayment, deadline?: number): Promise<{ resolved: boolean; chargeId?: string }> {
+async function cancelOrRefund(row: Recovery, pi: TopupPayment, deadline?: number): Promise<{ resolved: boolean; chargeId?: string; preserved?: boolean }> {
 	if (pi.status === 'canceled') return { resolved: true };
 	if (pi.status !== 'succeeded') {
 		if (!['requires_payment_method', 'requires_capture', 'requires_confirmation', 'requires_action', 'processing'].includes(pi.status ?? '')) throw new InvalidTopupPayment('Canceled auto top-up has an invalid payment status');
@@ -76,6 +87,7 @@ async function cancelOrRefund(row: Recovery, pi: TopupPayment, deadline?: number
 		return { resolved: true };
 	}
 	const existing = await existingRefundOutcome(pi.id, deadline);
+	if (await paymentPrecedesRefund(row, existing.created)) return { resolved: true, preserved: true };
 	if (existing.resolved !== undefined) return { chargeId: existing.chargeId, resolved: existing.resolved };
 	const refund = row.refundId
 		? await getStripe().refunds.retrieve(row.refundId, undefined, ...recoveryOptions(deadline))
@@ -85,7 +97,7 @@ async function cancelOrRefund(row: Recovery, pi: TopupPayment, deadline?: number
 	return { chargeId: existing.chargeId, resolved: refund.status === 'succeeded' };
 }
 
-/** Returns true only when the cancellation/refund is finished. Never grants credits. */
+/** Returns true when recovery is resolved. Never grants credits. */
 export async function recoverPausedTopup(row: Recovery, pi: TopupPayment, deadline?: number): Promise<boolean> {
 	if (pi.metadata?.type !== 'auto_topup' || pi.metadata.org_id !== row.orgId) throw new Error('Canceled auto top-up payment has invalid organization metadata');
 	const predicate = eq(stripeAutoTopupRecoveries.id, row.id);
@@ -107,7 +119,9 @@ export async function recoverPausedTopup(row: Recovery, pi: TopupPayment, deadli
 					await applyLedgerDelta(tx, { orgId: row.orgId, delta: -grant.delta, reason: 'refund', refType: 'refund', refId: result.chargeId, chargeId: result.chargeId, paymentIntentId: pi.id, refundRecovery: true });
 				}
 			}
-			await tx.update(stripeAutoTopupRecoveries).set({ lastError: null, ...(result.resolved ? { resolvedAt: new Date().toISOString() } : {}) }).where(predicate);
+			const unchangedBoundary = current.refundOccurredAt ? eq(stripeAutoTopupRecoveries.refundOccurredAt, current.refundOccurredAt) : isNull(stripeAutoTopupRecoveries.refundOccurredAt);
+			const recorded = await tx.update(stripeAutoTopupRecoveries).set({ lastError: result.preserved ? 'payment_precedes_refund' : null, ...(result.resolved ? { resolvedAt: new Date().toISOString() } : {}) }).where(result.preserved ? and(predicate, unchangedBoundary) : predicate).returning({ id: stripeAutoTopupRecoveries.id });
+			if (!recorded.length) throw new Error('Refund boundary changed during recovery — retry required');
 		});
 		return result.resolved;
 	} catch (error) {
@@ -147,15 +161,20 @@ async function selectListedCandidate(row: Recovery, payments: TopupPayment[]) {
 	return { candidateId, candidate };
 }
 
-/** Scan one page per tick, choosing only after the entire result is unambiguous. */
-async function recoverListedPayment(row: Recovery, deadline?: number): Promise<void> {
-	if (row.lastError === 'ambiguous_payment') throw new Error('Canceled auto top-up matches multiple payments — manual reconciliation required');
+async function listRecoveryPayments(row: Recovery, deadline?: number) {
 	const customerId = row.customerId ?? (await db.select({ customerId: organizations.stripeCustomerId }).from(organizations).where(eq(organizations.id, row.orgId)).get())?.customerId;
 	if (!customerId) throw new Error('Canceled auto top-up organization has no Stripe customer');
 	const attemptMs = Date.parse(row.attemptAt);
 	if (!Number.isFinite(attemptMs)) throw new Error('Canceled auto top-up has an invalid attempt timestamp');
 	const list = await getStripe().paymentIntents.list({ customer: customerId, created: { gte: Math.floor((attemptMs - 60_000) / 1000) }, limit: 100, ...(row.paymentLookupCursor ? { starting_after: row.paymentLookupCursor } : {}) }, ...recoveryOptions(deadline));
 	if (!list || !Array.isArray(list.data) || typeof list.has_more !== 'boolean') throw new Error('Stripe returned an invalid payment intent list');
+	return list;
+}
+
+/** Scan one page per tick, choosing only after the entire result is unambiguous. */
+async function recoverListedPayment(row: Recovery, deadline?: number): Promise<void> {
+	if (row.lastError === 'ambiguous_payment') throw new Error('Canceled auto top-up matches multiple payments — manual reconciliation required');
+	const list = await listRecoveryPayments(row, deadline);
 	const progressPredicate = and(eq(stripeAutoTopupRecoveries.id, row.id), isNull(stripeAutoTopupRecoveries.resolvedAt), isNull(stripeAutoTopupRecoveries.paymentIntentId), or(isNull(stripeAutoTopupRecoveries.lastError), ne(stripeAutoTopupRecoveries.lastError, 'ambiguous_payment')), row.paymentLookupCursor ? eq(stripeAutoTopupRecoveries.paymentLookupCursor, row.paymentLookupCursor) : isNull(stripeAutoTopupRecoveries.paymentLookupCursor));
 	const { candidateId, candidate } = await selectListedCandidate(row, list.data);
 	if (list.has_more) {

@@ -760,3 +760,11 @@ test('multiple provider refunds recover the interval before later owner consent'
 	expect((await testDb().db.select().from(stripeAutoTopupRecoveries)).map(row => row.paymentIntentId)).toEqual(['pi_before_consent']);
 	expect((await testDb().db.select().from(organizations).get())?.autoTopupEnabled).toBe(0);
 });
+
+test('refund lookup rejects a future provider refund timestamp', async () => {
+	const date_created = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
+	vi.stubGlobal('fetch', vi.fn()
+		.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'refunded', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 5, currency_id: 'BRL' })))
+		.mockResolvedValueOnce(new Response(JSON.stringify([{ payment_id: 'pay-1', amount: 5, status: 'approved', date_created }]))));
+	await expect(retrievePayment('pay-1')).rejects.toThrow(/refund records/);
+});

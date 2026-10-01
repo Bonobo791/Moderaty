@@ -191,12 +191,12 @@ function refundPauseVersion(previous: string | null, advanceVersion?: boolean): 
 	return new Date(Math.max(Date.now(), previous ? Date.parse(previous) + 1 : 0)).toISOString();
 }
 
-async function recordPausedAttempt(tx: LedgerHandle, orgId: string, org: { attemptAt: string | null; lastAttemptAt: string | null; submittedAt: string | null; customerId: string | null }, payment?: TopupPayment): Promise<void> {
+async function recordPausedAttempt(tx: LedgerHandle, orgId: string, org: { attemptAt: string | null; lastAttemptAt: string | null; submittedAt: string | null; customerId: string | null }, { payment, occurredAt }: { payment?: TopupPayment; occurredAt?: string }): Promise<void> {
 	const attemptAt = org.attemptAt ?? org.lastAttemptAt;
 	if (!attemptAt) throw new Error(`auto top-up claim for org ${orgId} has no attempt timestamp`);
 	const correlation = payment ? topupAttemptCorrelation(payment, organizations.autoTopupLastAttemptAt) : undefined;
 	const refundedAttempt = correlation ? await tx.select({ id: organizations.id }).from(organizations).where(and(eq(organizations.id, orgId), correlation)).get() : undefined;
-	if (!refundedAttempt) await tx.insert(stripeAutoTopupRecoveries).values({ orgId, attemptAt, customerId: org.customerId,
+	if (!refundedAttempt) await tx.insert(stripeAutoTopupRecoveries).values({ orgId, attemptAt, customerId: org.customerId, refundOccurredAt: occurredAt,
 		// Only a new logical attempt with no submission marker is provably unsent.
 		resolvedAt: org.attemptAt && !org.submittedAt ? new Date().toISOString() : null }).onConflictDoNothing();
 }
@@ -212,15 +212,15 @@ export async function pauseAutoTopupForRefund(handle: LedgerHandle, orgId: strin
 				// A delayed replay must respect consent explicitly given AFTER this refund.
 				occurredAt ? or(isNull(organizations.autoTopupConsentedAt), sql`julianday(${organizations.autoTopupConsentedAt}) <= julianday(${occurredAt})`) : undefined))
 			.returning({ id: organizations.id });
-		if (paused.length && (org.state === 'in_flight' || org.attemptAt)) await recordPausedAttempt(tx, orgId, org, options.payment);
+		if (paused.length && (org.state === 'in_flight' || org.attemptAt)) await recordPausedAttempt(tx, orgId, org, { payment: options.payment, occurredAt });
 		if (occurredAt) {
 			// Revisit history even if a later refund already paused this org.
 			// Completed grants are already durable. Bound recoveries use their PI
 			// as the key; only unbound attempts need a timestamp for Stripe lookup.
 			await tx.run(sql`
-				INSERT INTO ${stripeAutoTopupRecoveries} (org_id, customer_id, attempt_at, payment_intent_id)
+				INSERT INTO ${stripeAutoTopupRecoveries} (org_id, customer_id, attempt_at, payment_intent_id, refund_occurred_at)
 				SELECT ${creditTransactions.orgId}, ${org.customerId},
-					'completed:' || ${creditTransactions.paymentIntentId}, ${creditTransactions.paymentIntentId}
+					'completed:' || ${creditTransactions.paymentIntentId}, ${creditTransactions.paymentIntentId}, ${occurredAt}
 				FROM ${creditTransactions}
 				WHERE ${creditTransactions.orgId} = ${orgId} AND ${creditTransactions.reason} = 'auto_topup'
 					AND ${creditTransactions.delta} > 0 AND ${creditTransactions.createdAt} >= ${occurredAt}
@@ -235,14 +235,27 @@ export async function pauseAutoTopupForRefund(handle: LedgerHandle, orgId: strin
 						AND ${stripeAutoTopupRecoveries.paymentIntentId} = ${creditTransactions.paymentIntentId})
 				ON CONFLICT DO NOTHING
 			`);
+			// An earlier replay can prove a previously protected payment was a replacement.
+			await tx.update(stripeAutoTopupRecoveries).set({ refundOccurredAt: occurredAt,
+				resolvedAt: sql`CASE WHEN ${stripeAutoTopupRecoveries.lastError} = 'payment_precedes_refund' THEN NULL ELSE ${stripeAutoTopupRecoveries.resolvedAt} END`,
+				lastError: sql`CASE WHEN ${stripeAutoTopupRecoveries.lastError} = 'payment_precedes_refund' THEN NULL ELSE ${stripeAutoTopupRecoveries.lastError} END`
+			}).where(and(eq(stripeAutoTopupRecoveries.orgId, orgId), gt(stripeAutoTopupRecoveries.refundOccurredAt, occurredAt)));
 		}
 		if (paused.length) console.error(`auto top-up paused for org ${orgId}: automatic payments stopped — fresh owner consent required`);
 	});
 }
 
+async function refundOwnerErased(tx: LedgerHandle, payment?: TopupPayment): Promise<boolean> {
+	if (!payment) return false;
+	const recovery = await tx.select({ orgId: stripeAutoTopupRecoveries.orgId }).from(stripeAutoTopupRecoveries).where(eq(stripeAutoTopupRecoveries.paymentIntentId, payment.id)).get();
+	if (!recovery) return false;
+	return !(await tx.select({ id: organizations.id }).from(organizations).where(eq(organizations.id, recovery.orgId)).get());
+}
+
 /** Each increase pauses once; unknown purchase links wait durably for the grant. */
 export async function pauseForObservedStripeRefund(handle: LedgerHandle, orgId: string | undefined, chargeId: string, refundedAmountCents?: number, occurredAt?: string, payment?: TopupPayment): Promise<void> {
 	return inLedgerTx(handle, async (tx) => {
+		if (!orgId && await refundOwnerErased(tx, payment)) return;
 		if (refundedAmountCents !== undefined) {
 			await tx.insert(stripeRefundObservations).values({ chargeId, refundedAmountCents, occurredAt: occurredAt ?? new Date().toISOString() }).onConflictDoUpdate({
 				target: stripeRefundObservations.chargeId,

@@ -671,21 +671,31 @@ async function refundOrgBeforeFulfillment(charge: Stripe.Charge, paymentIntentId
 	return subscription?.orgId ? { orgId: subscription.orgId } : undefined;
 }
 
+async function refundCustomerDeleted(charge: Stripe.Charge): Promise<boolean> {
+	const customerId = stripeId(charge.customer);
+	if (!customerId) return false;
+	const customer = await getStripe().customers.retrieve(customerId);
+	if (!customer || customer.id !== customerId) throw new Error('Stripe refund customer lookup returned an invalid customer');
+	return customer.deleted === true;
+}
+
 /** Only a payment associated with a Moderaty purchase can revoke its authorization. */
-async function pauseRefundedCharge(charge: Stripe.Charge, paymentIntentId: string | undefined, occurredAt?: string): Promise<void> {
+async function pauseRefundedCharge(charge: Stripe.Charge, paymentIntentId: string | undefined, occurredAt?: string): Promise<boolean> {
 	if (!Number.isSafeInteger(charge.amount) || charge.amount <= 0 || !Number.isSafeInteger(charge.amount_refunded) || charge.amount_refunded < 0 || charge.amount_refunded > charge.amount) throw new Error('Stripe refund has an invalid amount');
-	if (charge.amount_refunded === 0) return;
+	if (charge.amount_refunded === 0) return false;
 	const chargeId = charge.id;
 	const org = await findGrantForStripe(db, { chargeId, paymentIntentId })
 		?? await db.select({ orgId: stripeSubscriptionPeriods.orgId }).from(stripeSubscriptionPeriods).where(stripeIdentifierPredicate({ chargeId, paymentIntentId }, stripeSubscriptionPeriods.paymentIntentId, stripeSubscriptionPeriods.chargeId)).get()
 		?? await db.select({ orgId: stripeLifetimeEntitlements.orgId }).from(stripeLifetimeEntitlements).where(stripeIdentifierPredicate({ chargeId, paymentIntentId }, stripeLifetimeEntitlements.paymentIntentId, stripeLifetimeEntitlements.chargeId)).get()
 		?? await refundOrgBeforeFulfillment(charge, paymentIntentId);
+	if (!org && await refundCustomerDeleted(charge)) return true;
 	// Refunds recorded before observation tracking retain their original replay anchor.
 	const recordedRefund = org ? await db.select({ createdAt: creditTransactions.createdAt }).from(creditTransactions)
 		.where(and(eq(creditTransactions.orgId, org.orgId), eq(creditTransactions.refType, 'refund'), eq(creditTransactions.refId, chargeId))).get() : undefined;
 	const expandedPayment = typeof charge.payment_intent === 'object' ? charge.payment_intent : undefined;
 	const payment = expandedPayment ?? (paymentIntentId ? { id: paymentIntentId, metadata: null } : undefined);
 	await pauseForObservedStripeRefund(db, org?.orgId, chargeId, charge.amount_refunded, occurredAt ?? recordedRefund?.createdAt, payment);
+	return false;
 }
 
 /**
@@ -704,7 +714,7 @@ async function pauseRefundedCharge(charge: Stripe.Charge, paymentIntentId: strin
 export async function reverseCharge(chargeId: string, reason: 'refund' | 'dispute', disputeId?: string, occurredAt?: string): Promise<boolean> {
 	const charge = await getStripe().charges.retrieve(chargeId, { expand: ['payment_intent'] });
 	const paymentIntentId = typeof charge.payment_intent === 'string' ? charge.payment_intent : charge.payment_intent?.id;
-	if (reason === 'refund') await pauseRefundedCharge(charge, paymentIntentId, occurredAt);
+	if (reason === 'refund' && await pauseRefundedCharge(charge, paymentIntentId, occurredAt)) return false;
 	if (reason === 'refund' && (typeof charge.amount_refunded !== 'number' || typeof charge.amount !== 'number' || charge.amount_refunded < charge.amount)) {
 		console.error(`stripe: refund for ${chargeId} is not a full refund (refunded ${charge.amount_refunded ?? 'unknown'} of ${charge.amount ?? 'unknown'}) — credits kept (v1 reverses only full refunds)`);
 		return false;

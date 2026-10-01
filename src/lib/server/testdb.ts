@@ -375,6 +375,7 @@ export async function createTestDb(): Promise<TestDb> {
 			payment_lookup_cursor TEXT,
 			lookup_cursor TEXT,
 			lookup_candidate_id TEXT,
+			refund_occurred_at TEXT,
 			refund_id TEXT,
 			last_checked_at TEXT,
 			last_error TEXT,

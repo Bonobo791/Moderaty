@@ -3,7 +3,7 @@ import { describe, expect, test, vi } from 'vitest';
 
 import { countDbStatements, setupTestDb, testDb } from '$lib/server/testdb';
 import { db } from '$lib/server/db';
-import { creditTransactions, organizations, stripePendingReversals, stripeSubscriptionPeriods, stripeAutoTopupRecoveries } from '$lib/server/db/schema';
+import { creditTransactions, organizations, stripePendingReversals, stripeSubscriptionPeriods, stripeAutoTopupRecoveries, stripeRefundObservations } from '$lib/server/db/schema';
 import {
 	applyLedgerDelta,
 	assertCreditsPurchasable,
@@ -673,4 +673,12 @@ test('each distinct refund changes the pause version but a duplicate preserves i
 	expect(second).not.toBe(first);
 	await pauseForObservedStripeRefund(db, 'org-1', 'ch_second', 100, '2026-09-30T11:00:00.000Z');
 	expect((await db.select().from(organizations).get())!.autoTopupPausedAt).toBe(second);
+});
+
+test('late recovery refunds do not recreate observations for a deleted organization', async () => {
+	await seedOrg();
+	await db.insert(stripeAutoTopupRecoveries).values({ orgId: 'org-1', attemptAt: 'completed:pi_deleted', paymentIntentId: 'pi_deleted', resolvedAt: new Date().toISOString() });
+	await db.delete(organizations).where(eq(organizations.id, 'org-1'));
+	await pauseForObservedStripeRefund(db, undefined, 'ch_deleted', 100, new Date().toISOString(), { id: 'pi_deleted', metadata: null });
+	expect(await db.select().from(stripeRefundObservations)).toEqual([]);
 });

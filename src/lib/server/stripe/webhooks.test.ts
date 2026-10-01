@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, test, vi, type MockInstance } from 'vites
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { db } from '$lib/server/db';
-import { organizations, creditTransactions, stripeEvents, stripePendingReversals, stripeLifetimeEntitlements, stripeLifetimeSlots, stripeSubscriptionPeriods, stripeDisputeReversals, stripeCheckoutAttempts, stripeAutoTopupRecoveries } from '$lib/server/db/schema';
+import { organizations, creditTransactions, stripeEvents, stripePendingReversals, stripeLifetimeEntitlements, stripeLifetimeSlots, stripeSubscriptionPeriods, stripeDisputeReversals, stripeCheckoutAttempts, stripeAutoTopupRecoveries, stripeRefundObservations } from '$lib/server/db/schema';
 import { applyLedgerDelta, getCredits } from '$lib/server/billing/ledger';
 import { claimEvent, fulfillAutoTopup, fulfillCheckout, handleStripeEvent, markEventProcessed, restoreWonDispute, reverseCharge, reverseDispute } from './webhooks';
 
@@ -88,6 +88,7 @@ async function seedSubscribedOrgAndFulfillLifetime(opts: { cachedStatus: string;
 beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.sessionsList.mockReset().mockResolvedValue({ data: [], has_more: false });
+	mocks.customersRetrieve.mockReset().mockResolvedValue({ id: 'cus_1' });
 	// clearAllMocks resets call history but NOT implementations — a test that
 	// forgets to stub a Stripe read would otherwise inherit whatever the
 	// previous test configured (cubic). Give the read mocks neutral defaults;
@@ -2367,4 +2368,13 @@ test('async failure removes a spent grant without creating a negative balance or
 	expect((await testDb().db.select().from(organizations).get())?.autoTopupEnabled).toBe(1);
 	expect(await handleStripeEvent(event('checkout.session.async_payment_failed', 'evt_spent_failure_replay', { id: 'cs_123' }) as never)).toBe(true);
 	expect(await getCredits('org-1')).toBe(0);
+});
+
+
+test('a late refund after Stripe customer deletion leaves no financial observation', async () => {
+	mocks.chargesRetrieve.mockResolvedValue({ id: 'ch_erased', amount: 100, amount_refunded: 100, customer: 'cus_erased', payment_intent: { id: 'pi_erased', customer: 'cus_erased', metadata: { type: 'auto_topup', org_id: 'org-erased' } } });
+	mocks.customersRetrieve.mockResolvedValue({ id: 'cus_erased', deleted: true });
+	await reverseCharge('ch_erased', 'refund');
+	expect(await db.select().from(stripeRefundObservations)).toEqual([]);
+	expect(await db.select().from(stripePendingReversals)).toEqual([]);
 });

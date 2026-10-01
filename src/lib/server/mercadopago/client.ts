@@ -148,7 +148,7 @@ export const mercadoPagoProvider: PrepaidCreditProvider = {
 function refundTimestamp(value: unknown): number {
 	if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return Number.NaN;
 	const date = Date.parse(value);
-	if (!Number.isFinite(date)) return Number.NaN;
+	if (!Number.isFinite(date) || date > Date.now() + 5 * 60_000) return Number.NaN;
 	if (new Date(value.slice(0, 10)).toISOString().slice(0, 10) !== value.slice(0, 10)) return Number.NaN;
 	return date;
 }

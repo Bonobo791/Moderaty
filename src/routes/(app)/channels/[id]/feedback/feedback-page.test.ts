@@ -120,7 +120,7 @@ describe('feedback page role gating (SSR)', () => {
 				expect(body).toContain('action="?/dryRun"');
 				// The one dry-run message: allowance, first-page scope, and the
 				// used-on-start rule consolidated into a single note.
-				expect(body).toContain('1 free feedback dry run per channel — scores only the first YouTube page (up to 100 comments) and saves no digest, history, or moderation state. Used when it starts, even if it fails. No credits are charged.');
+				expect(body).toContain('1 free feedback dry run per channel — scores only the first YouTube page (up to 100 comments) and changes no moderation state. Used when it starts, even if it fails. No credits are charged.');
 			} else {
 				expect(body).not.toContain('action="?/analyzeHistory"');
 				expect(body).not.toContain('action="?/dryRun"');

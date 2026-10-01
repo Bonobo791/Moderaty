@@ -304,6 +304,22 @@ describe('maybeTriggerAutoTopUp', () => {
 		expect((await orgRow()).autoTopupState).toBe('idle');
 	});
 
+	test('a declined attempt PI (requires_payment_method) does not block the next charge', async () => {
+		// Stripe leaves a declined off-session PI in requires_payment_method and
+		// the code never cancels it — but it cannot settle without a
+		// re-confirmation we never send, so it must not defer the post-cooldown
+		// retry (gitar: a 7-day lockout would replace the 24h cooldown).
+		const declined = new Date(Date.now() - 25 * 60 * 60_000).toISOString();
+		await seedOrg({ creditsRemaining: 0, autoTopupLastAttemptAt: declined });
+		mocks.paymentIntentsList.mockResolvedValue({
+			data: [{ id: 'pi_declined', status: 'requires_payment_method', created: Math.floor(Date.parse(declined) / 1000), metadata: { type: 'auto_topup', org_id: 'org-1', auto_topup_attempt_at: declined } }],
+			has_more: false
+		});
+
+		expect(await sweepAutoTopUp(5)).toBe(1);
+		expect(mocks.paymentIntentsCreate).toHaveBeenCalledOnce();
+	});
+
 	test('never triggers when the balance is at or above the threshold', async () => {
 		await seedOrg({ creditsRemaining: 150 });
 		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);

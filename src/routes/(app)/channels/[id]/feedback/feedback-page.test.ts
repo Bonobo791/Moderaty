@@ -335,6 +335,86 @@ describe('feedback page digest history links (SSR)', () => {
 		);
 		expect(body).toContain('Back to latest digest');
 	});
+
+	it('links a finished preview row to its findings and labels preview lifecycle rows', () => {
+		// A completed dry run is a real, selectable result; pending/failed
+		// previews have no findings to show and stay unlinked text (MOD-232).
+		const preview = { ...COMPLETE_DIGEST, id: 9, status: 'dry-run', creditsUsed: null };
+		const pending = { ...COMPLETE_DIGEST, id: 10, status: 'dry-run-pending', creditsUsed: null };
+		const failedPreview = { ...COMPLETE_DIGEST, id: 11, status: 'dry-run-failed', error: 'preview', creditsUsed: null };
+		const body = renderFeedback(
+			pageData({
+				latest: COMPLETE_DIGEST,
+				selected: COMPLETE_DIGEST,
+				digests: [failedPreview, pending, preview, COMPLETE_DIGEST],
+				findings: []
+			})
+		);
+		expect(body).toContain('href="?digest=9"');
+		expect(body).not.toContain('?digest=10');
+		expect(body).not.toContain('?digest=11');
+		expect(body).toContain('free preview');
+		expect(body).toContain('preview in progress');
+		expect(body).toContain('preview failed');
+	});
+
+	it('labels a selected preview as a free preview instead of unmetered', () => {
+		// creditsUsed is null on preview rows — rendering it as "unmetered"
+		// would read as a BYOK run; the preview never touched credits.
+		const preview = { ...COMPLETE_DIGEST, id: 9, status: 'dry-run', creditsUsed: null };
+		const body = renderFeedback(pageData({ digests: [preview], selected: preview, findings: [] }));
+		expect(body).toContain('free preview');
+		expect(body).not.toContain('unmetered');
+	});
+
+	it('renders a lone pending or failed preview row — the one-time preview is never invisible', () => {
+		// With no selectable digest, `selected`/`currentAttempt` are null and
+		// the old digests.length > 1 gate hid the only lifecycle row — after
+		// reload the failed/running preview left no trace (codex/cubic).
+		const failed = { ...COMPLETE_DIGEST, id: 9, status: 'dry-run-failed', error: 'preview', creditsUsed: null };
+		const pending = { ...COMPLETE_DIGEST, id: 10, status: 'dry-run-pending', creditsUsed: null };
+		const body = renderFeedback(pageData({ digests: [failed] }));
+		expect(body).toContain('Digest history');
+		expect(body).toContain('preview failed');
+		expect(renderFeedback(pageData({ digests: [pending] }))).toContain('preview in progress');
+		// A sole FINISHED preview gets a (self-pointing) history entry too —
+		// only a lone complete digest stays list-free (cubic).
+		const finished = { ...COMPLETE_DIGEST, id: 11, status: 'dry-run', creditsUsed: null };
+		const solo = renderFeedback(pageData({ digests: [finished], selected: finished }));
+		expect(solo).toContain('Digest history');
+		expect(solo).toContain('href="?digest=11"');
+	});
+
+	it('renders a saved preview while feedback is disabled — the one-time result survives reload', () => {
+		// The dry-run action only needs an active channel — settings.enabled
+		// can stay off — so a preview run before enabling must not vanish
+		// behind the "digest is off" card after reload (codex).
+		const preview = { ...COMPLETE_DIGEST, id: 9, status: 'dry-run', creditsUsed: null };
+		const body = renderFeedback(
+			pageData({
+				settings: { ...SETTINGS, enabled: false },
+				digests: [preview],
+				selected: preview,
+				findings: POPULATED_FINDINGS
+			})
+		);
+		expect(body).toContain('Feedback digest is off for this channel.');
+		expect(body).toContain('free preview');
+		expect(body).toContain('Two viewers asked when the next stream starts');
+		// The enabled-only generate form must NOT leak into the disabled view.
+		expect(body).not.toContain('action="?/generate"');
+	});
+
+	it('keeps the selected digest in history pagination links when no complete digest exists', () => {
+		// With no paid digest, `selected` is a preview — paging the list must
+		// keep ?digest= or the load falls back to a different row (cubic).
+		const preview = { ...COMPLETE_DIGEST, id: 9, status: 'dry-run', creditsUsed: null };
+		const older = { ...COMPLETE_DIGEST, id: 5, status: 'dry-run', creditsUsed: null };
+		const body = renderFeedback(
+			pageData({ digests: [preview, older], selected: preview, latest: null, historyNext: 5, findings: [] })
+		);
+		expect(body).toContain('?digest=9&amp;history=5');
+	});
 });
 
 describe('feedback page I12 states (SSR)', () => {

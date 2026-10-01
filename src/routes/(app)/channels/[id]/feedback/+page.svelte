@@ -89,10 +89,10 @@
 	const canOperate = $derived(data.orgRole === 'owner');
 
 	// History pagination links keep the selected digest's findings in view —
-	// ?digest= is the deep link, ?history= is only the list's position.
-	const digestParam = $derived(
-		shown && data.latest && shown.id !== data.latest.id ? `digest=${shown.id}&` : ''
-	);
+	// ?digest= is the deep link, ?history= is only the list's position. The
+	// param survives whenever shown isn't the latest complete — including a
+	// selected preview while no paid digest exists yet (cubic).
+	const digestParam = $derived(shown && shown.id !== data.latest?.id ? `digest=${shown.id}&` : '');
 	const digestHref = (id: number) => `?digest=${id}${data.historyCursor ? `&history=${data.historyCursor}` : ''}`;
 	const newerHistoryHref = $derived(`?${digestParam}`.replace(/&$/, ''));
 	const olderHistoryHref = $derived(`?${digestParam}history=${data.historyNext}`);
@@ -159,8 +159,11 @@
 				and requests — without ever showing you the abusive wording.
 			</p>
 		</div>
-	{:else}
-		{#if newestAttention?.status === 'failed'}
+	{/if}
+	<!-- The dry-run action only needs an active channel — a saved preview
+	     must still render its findings while the digest is off (codex). -->
+	{#if data.settings.enabled || shown?.status === 'dry-run'}
+		{#if data.settings.enabled && newestAttention?.status === 'failed'}
 			<div class="error-box" role="alert">
 				<strong>Latest digest run failed</strong> —
 				{data.history.active
@@ -172,7 +175,7 @@
 					? `The digest below is the last complete one (window ended ${relativeTime(data.latest.windowEnd)}).`
 					: 'No complete digest exists yet.'}
 			</div>
-		{:else if newestAttention?.status === 'deferred'}
+		{:else if data.settings.enabled && newestAttention?.status === 'deferred'}
 			<div class="error-box" role="alert">
 				<strong>Latest digest run deferred</strong> —
 				{#if data.history.active}
@@ -201,7 +204,7 @@
 		{/if}
 
 		<div class="digest-head">
-			{#if canOperate}
+			{#if canOperate && data.settings.enabled}
 				<form
 					class="inline"
 					method="POST"
@@ -223,7 +226,7 @@
 				{#if shown.clusteringDegraded}{@render clusteringNotice()}{/if}
 				<p class="muted">
 					Window {windowLabel(shown)} · {shown.commentsClassified} classified{#if shown.commentsFailed}
-						· {shown.commentsFailed} failed{/if} · {shown.creditsUsed === null ? 'unmetered' : `${shown.creditsUsed} credits used`} · generated {relativeTime(shown.createdAt)}
+						· {shown.commentsFailed} failed{/if} · {shown.status === 'dry-run' ? 'free preview' : shown.creditsUsed === null ? 'unmetered' : `${shown.creditsUsed} credits used`} · generated {relativeTime(shown.createdAt)}
 					{#if data.latest && shown.id !== data.latest.id}
 						· <a href="?">Back to latest digest</a>
 					{/if}
@@ -500,19 +503,19 @@
 		{/if}
 	</section>
 
-	{#if data.digests.length > 1 || data.historyCursor || data.historyNext}
+	{#if data.digests.length > 1 || data.digests.some((d) => d.status === 'dry-run' || d.status === 'dry-run-pending' || d.status === 'dry-run-failed') || data.historyCursor || data.historyNext}
 		<section class="history" aria-label="Digest history">
 			<h3 class="caps-label">Recent digests</h3>
 			<ul class="history-list">
 				{#each data.digests as d (d.id)}
 					<li class="muted">
-						{#if d.status === 'complete'}
+						{#if d.status === 'complete' || d.status === 'dry-run'}
 							<a href={digestHref(d.id)} aria-current={shown?.id === d.id ? 'true' : undefined}>
-								{relativeTime(d.createdAt)} — {d.status}, {d.commentsClassified} classified{#if d.pooledCount}
-									, {d.pooledCount} pooled{/if}, {d.creditsUsed === null ? 'unmetered' : `${d.creditsUsed} credits used`}
+								{relativeTime(d.createdAt)} — {d.status === 'dry-run' ? 'free preview' : 'complete'}, {d.commentsClassified} classified{#if d.pooledCount}
+									, {d.pooledCount} pooled{/if}{#if d.status === 'complete'}, {d.creditsUsed === null ? 'unmetered' : `${d.creditsUsed} credits used`}{/if}
 							</a>
 						{:else}
-							{relativeTime(d.createdAt)} — {d.status}{#if d.status === 'failed'}
+							{relativeTime(d.createdAt)} — {d.status === 'dry-run-pending' ? 'preview in progress' : d.status === 'dry-run-failed' ? 'preview failed' : d.status}{#if d.status === 'failed'}
 								({d.error ?? 'error'}){/if}
 						{/if}
 					</li>

@@ -645,10 +645,18 @@
 				<td>ANPD SCCs (Annex IV)</td>
 			</tr>
 			<tr>
-				<td>Mailjet (Mailjet SAS)</td>
-				<td>Transactional e-mail (notices, receipts, security alerts, contact-form verification)</td>
-				<td>European Union (France)</td>
-				<td>ANPD SCCs (Annex IV) if outside Brazil</td>
+				<td>Proton AG</td>
+				<td>
+					Transactional e-mail — contact-form verification and service notices,
+					including zero-credit account warnings; processes the recipient e-mail
+					address and message content over TLS-protected SMTP (not end-to-end
+					encrypted; a copy is retained in the provider's Sent mailbox)
+				</td>
+				<td>
+					Switzerland — Proton's data processing terms confine processing to
+					Switzerland, the EU, and adequacy-decision countries
+				</td>
+				<td>ANPD SCCs (Annex IV)</td>
 			</tr>
 		</tbody>
 	</table>

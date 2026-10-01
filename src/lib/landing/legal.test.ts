@@ -27,11 +27,14 @@ describe('LEGAL_DOCS', () => {
 		// 1.10 was the PolyForm license swap; 1.11 was the lifetime-BYOK
 		// requirement; 1.12 was the digest credit disclosure; 1.13 identifies
 		// the legal operator and updates its contact details; 1.14 adds the
-		// dormant zero-credit account deletion (Terms §17.3). Material changes
-		// must bump LEGAL_VERSION so the re-consent gate (hasCurrentConsent)
-		// routes every user back through /consent. Never let legal changes ride
-		// along under an old version.
-		expect(LEGAL_VERSION).toBe('1.15');
+		// dormant zero-credit account deletion (Terms §17.3); 1.15 introduced
+		// the owner-selected credit bundles; 1.16 corrects the transactional
+		// e-mail provider disclosure to Proton AG (Mailjet was disclosed since
+		// 1.9 but never provisioned). Material changes must bump LEGAL_VERSION
+		// so the re-consent gate (hasCurrentConsent) routes every user back
+		// through /consent. Never let legal changes ride along under an old
+		// version.
+		expect(LEGAL_VERSION).toBe('1.16');
 	});
 
 	it('lists exactly the three published legal documents', () => {
@@ -94,8 +97,10 @@ describe('legal page content (PR #35 review)', () => {
 
 	it('discloses the same sub-processors in the Privacy Policy as in DPA Annex III', () => {
 		const privacy = readComponent('privacy');
-		for (const provider of ['Netlify', 'Turso', 'OpenAI', 'Stripe']) {
+		const dpa = readComponent('dpa');
+		for (const provider of ['Netlify', 'Turso', 'OpenAI', 'Stripe', 'Proton']) {
 			expect(privacy).toContain(provider);
+			expect(dpa).toContain(provider);
 		}
 	});
 
@@ -690,6 +695,53 @@ describe('lifetime BYOK disclosure matches the required-key Terms', () => {
 		expect(byok, 'BYOK FAQ entry missing').toBeDefined();
 		expect(byok?.a).toMatch(/self-host/i);
 		expect(byok?.a).toMatch(/lifetime/i);
+	});
+});
+
+// LEGAL_VERSION 1.16: the disclosed transactional e-mail provider is Proton
+// AG (Switzerland). Mailjet was named since 1.9 but never provisioned, so
+// this corrects a disclosed-but-never-used provider rather than recording a
+// live-provider switch. The disclosure must cover the purposes
+// (contact-form verification and service notices, including zero-credit
+// account warnings), the data processed (recipient e-mail and message
+// content), the processing location, the ANPD SCC transfer mechanism, and
+// the transport reality: SMTP-submitted messages are not end-to-end
+// encrypted and a copy is retained in the provider's Sent mailbox.
+describe('transactional e-mail provider disclosure (1.16)', () => {
+	it('Privacy §5(a) names Proton AG with purposes, data, and Switzerland', () => {
+		const privacy = readComponent('privacy');
+		const s5a = privacy.match(/\(a\) Infrastructure([\s\S]*?)<\/li>/)?.[1] ?? '';
+		expect(s5a).toMatch(/Proton AG \(transactional e-mail/);
+		expect(s5a).toMatch(/contact-form verification/i);
+		expect(s5a).toMatch(/zero-credit/i);
+		expect(s5a).toMatch(/Switzerland/);
+	});
+
+	it('Privacy discloses SMTP transport limits and Sent-mailbox retention', () => {
+		const privacy = readComponent('privacy');
+		expect(privacy).toMatch(/not end-to-end encrypted/i);
+		expect(privacy).toMatch(/Sent (mailbox|folder)/i);
+	});
+
+	it('Privacy §6.3 records Proton AG as a Switzerland transfer recipient', () => {
+		const s63 =
+			readComponent('privacy').match(/<strong>6\.3<\/strong>([\s\S]*?)<\/p>/)?.[1] ?? '';
+		expect(s63).toMatch(/Proton AG \(Switzerland\)/);
+	});
+
+	it('DPA Annex III lists Proton AG in Switzerland under ANPD SCCs', () => {
+		const dpa = readComponent('dpa');
+		const annex3 = dpa.slice(dpa.indexOf('id="annex-3"'), dpa.indexOf('id="annex-4"'));
+		const row = annex3.match(/<td>Proton AG<\/td>([\s\S]*?)<\/tr>/)?.[1] ?? '';
+		expect(row, 'Annex III Proton row not found').not.toBe('');
+		expect(row).toMatch(/contact-form verification/i);
+		expect(row).toMatch(/Switzerland/);
+		expect(row).toMatch(/ANPD SCCs \(Annex IV\)/);
+	});
+
+	it('no live disclosure still names Mailjet as the provider', () => {
+		expect(readComponent('privacy')).not.toMatch(/Mailjet/i);
+		expect(readComponent('dpa')).not.toMatch(/Mailjet/i);
 	});
 });
 

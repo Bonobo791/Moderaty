@@ -204,13 +204,32 @@ Maintainer decisions (2026-10-01):
   it exposes no public homologation portal. Focus already wraps all of that;
   there is no reason to build it.
 
+Accountant decisions (2026-10-01, relayed by maintainer — partial MOD-178 ruling):
+
+- **CNAE confirmed** as correct for the issuer's activity.
+- **Service classification approved**: national tax code
+  `codigo_tributacao_nacional_iss = 01.05.01` (licenciamento ou cessão de
+  direito de uso de programas de computação) with São Paulo municipal service
+  code `02800`, ISS 2,9% — SP's SaaS framing per Parecer Normativo SF nº
+  1/2017. The same codes apply to subscription and one-time purchases. This
+  supersedes the `03115` assessoria/consultoria code used on the historical
+  note below.
+- `01.03.01`/`01.03.02` (hospedagem/processamento de dados) apply only if
+  hosting or data processing is sold as a separate service — not applicable
+  to the current product.
+- **Foreign sales change the note**: exportação de serviço with no ISS — the
+  accountant asked to be notified when foreign customers exist. Foreign sales
+  DO occur (the WISE INC note below), so the export parameters must be
+  confirmed with the accountant before any foreign-recipient issuance.
+  Schema-side support is `tributacao_iss = 3` + `codigo_pais_exportacao` (§2).
+
 Confirmed from a real emitted note (municipal NFS-e nº 3, RPS nº 5, 2026-09-10):
 
 - Issuer identifiers for `POST /v2/empresas`: CNPJ `68.425.709/0001-72`,
   Inscrição Municipal `0.432.564-8`, Av. Paulista 777, 15th floor, Bela Vista,
   CEP 01311-914, São Paulo/SP.
-- Service code in use: `03115` (LC 116 item 3.11.5 — assessoria/consultoria);
-  the accountant maps it to `codigo_tributacao_nacional_iss` under MOD-178/179.
+- Service code on that note: `03115` (LC 116 item 3.11.5 — assessoria/consultoria) —
+  superseded by the accountant's `01.05.01` / SP `02800` ruling above.
 - Past foreign-recipient practice: tomador emitted with **name only**
   (WISE INC — all ID/address fields blank), annotated as service export. On the
   national route the equivalent is `razao_social_tomador` +
@@ -233,9 +252,13 @@ Recorded decisions/constraints to carry into dependent issues:
 4. **Ref strategy**: derive `ref` from the fiscal ledger row (stable, alphanumeric); never reuse a
    ref after authorization — a correction is a new ref + substitution/cancellation per MOD-191.
 5. **Open items to resolve before/during setup** (not blockers to the route decision):
-   - MOD-178 outstanding: regime is maintainer-confirmed (Simples Nacional Anexo III, §5) — the
-     accountant formalizes it plus the Anexo-III-driven ISS/export parameters, and IM status in the
-     national environment (omit `inscricao_municipal_prestador` if absent).
+   - MOD-178 outstanding (partially answered 2026-10-01): service codes are now
+     accountant-approved (`01.05.01` national / `02800` SP municipal, ISS 2,9%).
+     Still open: the regime formalization is maintainer-confirmed; the accountant
+     still owns export parameters for foreign sales (`tributacao_iss = 3` +
+     `codigo_pais_exportacao` + minimum foreign-recipient data — they asked to be
+     notified), refund/cancellation treatment, and IM status in the national
+     environment (omit `inscricao_municipal_prestador` if absent).
    - Whether SP/Focus already accept national issuance from this prestador before the 2026-11-01
      enforcement date (voluntary early use for go-live before the mandate) — exercise in
      homologation (MOD-193).

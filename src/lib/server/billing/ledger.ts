@@ -204,7 +204,7 @@ async function recordPausedAttempt(tx: LedgerHandle, orgId: string, org: { attem
 /** Caller supplies a transaction when the pause accompanies a credit reversal. */
 export async function pauseAutoTopupForRefund(handle: LedgerHandle, orgId: string, occurredAt?: string, options: { chargeId?: string; payment?: TopupPayment; advanceVersion?: boolean } = {}): Promise<void> {
 	return inLedgerTx(handle, async (tx) => {
-		const org = await tx.select({ state: organizations.autoTopupState, lastAttemptAt: organizations.autoTopupLastAttemptAt, attemptAt: organizations.autoTopupAttemptAt, submittedAt: organizations.autoTopupSubmittedAt, customerId: organizations.stripeCustomerId, pauseReason: organizations.autoTopupPauseReason, pausedAt: organizations.autoTopupPausedAt, consentedAt: organizations.autoTopupConsentedAt }).from(organizations).where(eq(organizations.id, orgId)).get();
+		const org = await tx.select({ state: organizations.autoTopupState, lastAttemptAt: organizations.autoTopupLastAttemptAt, attemptAt: organizations.autoTopupAttemptAt, submittedAt: organizations.autoTopupSubmittedAt, customerId: organizations.stripeCustomerId, pauseReason: organizations.autoTopupPauseReason, pausedAt: organizations.autoTopupPausedAt }).from(organizations).where(eq(organizations.id, orgId)).get();
 		if (!org) throw new Error(`org not found: ${orgId}`);
 		const paused = await tx.update(organizations)
 			.set({ autoTopupEnabled: 0, autoTopupState: 'disabled', autoTopupPauseReason: 'refund', autoTopupPausedAt: refundPauseVersion(org.pausedAt, options.advanceVersion), autoTopupAttemptAt: null, autoTopupSubmittedAt: null })
@@ -226,8 +226,9 @@ export async function pauseAutoTopupForRefund(handle: LedgerHandle, orgId: strin
 					AND ${creditTransactions.delta} > 0 AND ${creditTransactions.createdAt} >= ${occurredAt}
 					AND ${creditTransactions.paymentIntentId} IS NOT NULL
 					AND (${options.payment?.id ?? null} IS NULL OR ${creditTransactions.paymentIntentId} != ${options.payment?.id ?? null})
-					AND (${paused.length ? null : org.consentedAt} IS NULL
-						OR ${creditTransactions.createdAt} < ${paused.length ? null : org.consentedAt})
+					-- Consent cannot filter candidates: createdAt is grant-write
+					-- (webhook) time, not charge time. Recovery arbitrates consent
+					-- against the PaymentIntent's own provider-created timestamp.
 					AND (${options.chargeId ?? null} IS NULL OR ${creditTransactions.chargeId} IS NULL
 						OR ${creditTransactions.chargeId} != ${options.chargeId ?? null})
 					AND NOT EXISTS (SELECT 1 FROM ${stripeAutoTopupRecoveries}
@@ -257,10 +258,21 @@ export async function pauseForObservedStripeRefund(handle: LedgerHandle, orgId: 
 	return inLedgerTx(handle, async (tx) => {
 		if (!orgId && await refundOwnerErased(tx, payment)) return;
 		if (refundedAmountCents !== undefined) {
-			await tx.insert(stripeRefundObservations).values({ chargeId, refundedAmountCents, occurredAt: occurredAt ?? new Date().toISOString() }).onConflictDoUpdate({
+			const effectiveAt = occurredAt ?? new Date().toISOString();
+			await tx.insert(stripeRefundObservations).values({ chargeId, refundedAmountCents, occurredAt: effectiveAt }).onConflictDoUpdate({
 				target: stripeRefundObservations.chargeId,
-				set: { refundedAmountCents, occurredAt: occurredAt ?? new Date().toISOString(), orgId: null },
-				setWhere: lt(stripeRefundObservations.refundedAmountCents, refundedAmountCents)
+				set: { refundedAmountCents, occurredAt: sql`MAX(${stripeRefundObservations.occurredAt}, ${effectiveAt})`, orgId: null },
+				// The cumulative amount cannot distinguish a genuinely later
+				// refund from a replay once Stripe reports the final total on an
+				// earlier event; only a provider-supplied occurredAt can. And a
+				// delayed earlier event may carry a larger cumulative amount with
+				// an earlier time, so the boundary itself never regresses.
+				setWhere: occurredAt === undefined
+					? lt(stripeRefundObservations.refundedAmountCents, refundedAmountCents)
+					: or(
+						lt(stripeRefundObservations.refundedAmountCents, refundedAmountCents),
+						and(eq(stripeRefundObservations.refundedAmountCents, refundedAmountCents), lt(stripeRefundObservations.occurredAt, occurredAt))
+					)
 			});
 		}
 		const observation = await tx.select().from(stripeRefundObservations).where(eq(stripeRefundObservations.chargeId, chargeId)).get();

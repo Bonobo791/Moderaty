@@ -651,17 +651,31 @@ test('later consent preserves charging while recovering replacements completed b
 		await db.insert(creditTransactions).values({ orgId: 'org-1', delta: 100, reason: 'auto_topup', refType: 'payment_intent', refId: id, paymentIntentId: id, createdAt: at });
 	}
 	await pauseForObservedStripeRefund(db, 'org-1', 'ch_original', 100, '2026-09-30T13:10:00.000Z');
-	expect((await db.select().from(stripeAutoTopupRecoveries)).map(row => row.paymentIntentId)).toEqual(['before']);
+	// 'after' is queued too: its ledger row was written post-consent, but the
+	// PaymentIntent's own created time decides at recovery whether consent
+	// covered the charge — grant-processing time cannot answer that.
+	expect((await db.select().from(stripeAutoTopupRecoveries)).map(row => row.paymentIntentId).sort()).toEqual(['after', 'before']);
 	expect((await db.select().from(organizations).get())?.autoTopupEnabled).toBe(1);
 });
 
-test('consent later in the same second protects charging and post-consent payments', async () => {
+test('consent later in the same second protects charging while post-consent deliveries are arbitrated', async () => {
 	await seedOrg('org-1', 100, 'cus_1');
 	await db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupConsentedAt: '2026-09-30T13:10:00.500Z' });
 	await db.insert(creditTransactions).values({ orgId: 'org-1', delta: 100, reason: 'auto_topup', refType: 'payment_intent', refId: 'pi_after', paymentIntentId: 'pi_after', createdAt: '2026-09-30T13:10:00.750Z' });
 	await pauseForObservedStripeRefund(db, 'org-1', 'ch_original', 100, '2026-09-30T13:10:00.000Z');
 	expect((await db.select().from(organizations).get())?.autoTopupEnabled).toBe(1);
-	expect(await db.select().from(stripeAutoTopupRecoveries)).toEqual([]);
+	expect(await db.select().from(stripeAutoTopupRecoveries)).toEqual([expect.objectContaining({ paymentIntentId: 'pi_after' })]);
+});
+
+test('a grant delivered after consent still queues so the provider timestamp arbitrates consent', async () => {
+	await seedOrg('org-1', 200, 'cus_1');
+	await db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupConsentedAt: '2026-09-30T13:12:00.000Z' });
+	// This webhook arrived after consent, but the PaymentIntent could have been
+	// created before it — only Stripe's own created time can tell.
+	await db.insert(creditTransactions).values({ orgId: 'org-1', delta: 100, reason: 'auto_topup', refType: 'payment_intent', refId: 'pi_delayed', paymentIntentId: 'pi_delayed', createdAt: '2026-09-30T13:14:00.000Z' });
+	await pauseForObservedStripeRefund(db, 'org-1', 'ch_original', 100, '2026-09-30T13:10:00.000Z');
+	expect((await db.select().from(organizations).get())?.autoTopupEnabled).toBe(1);
+	expect((await db.select().from(stripeAutoTopupRecoveries)).map(row => row.paymentIntentId)).toEqual(['pi_delayed']);
 });
 
 test('each distinct refund changes the pause version but a duplicate preserves it', async () => {
@@ -673,6 +687,22 @@ test('each distinct refund changes the pause version but a duplicate preserves i
 	expect(second).not.toBe(first);
 	await pauseForObservedStripeRefund(db, 'org-1', 'ch_second', 100, '2026-09-30T11:00:00.000Z');
 	expect((await db.select().from(organizations).get())!.autoTopupPausedAt).toBe(second);
+});
+
+test('a later refund event at the same cumulative amount still moves the pause boundary past consent', async () => {
+	await seedOrg('org-1', 100, 'cus_1');
+	await db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupConsentedAt: '2026-09-30T13:12:00.000Z' });
+	// Both partial refunds posted before either event was processed, so the
+	// earlier event already reports the final cumulative amount.
+	await pauseForObservedStripeRefund(db, 'org-1', 'ch_split', 200, '2026-09-30T13:11:00.000Z');
+	expect((await db.select().from(organizations).get())?.autoTopupEnabled).toBe(1);
+	await pauseForObservedStripeRefund(db, 'org-1', 'ch_split', 200, '2026-09-30T13:13:00.000Z');
+	expect((await db.select().from(organizations).get())?.autoTopupEnabled).toBe(0);
+	expect((await db.select().from(stripeRefundObservations).get())).toMatchObject({ refundedAmountCents: 200, occurredAt: '2026-09-30T13:13:00.000Z' });
+	// Replays — the same event again or a delivery with no provider time — are no-ops.
+	await pauseForObservedStripeRefund(db, 'org-1', 'ch_split', 200, '2026-09-30T13:13:00.000Z');
+	await pauseForObservedStripeRefund(db, 'org-1', 'ch_split', 200);
+	expect((await db.select().from(stripeRefundObservations).get())?.occurredAt).toBe('2026-09-30T13:13:00.000Z');
 });
 
 test('late recovery refunds do not recreate observations for a deleted organization', async () => {

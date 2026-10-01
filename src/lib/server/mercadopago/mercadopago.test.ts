@@ -757,7 +757,9 @@ test('multiple provider refunds recover the interval before later owner consent'
 		.mockResolvedValueOnce(new Response(JSON.stringify(['2026-09-30T10:00:00Z', '2026-09-30T14:00:00Z'].map(date_created => ({ payment_id: 'pay-1', amount: 1, status: 'approved', date_created })))));
 	vi.stubGlobal('fetch', fetchMock);
 	await expect(processMercadoPagoPayment(await retrievePayment('pay-1'))).rejects.toThrow(/partial refund/);
-	expect((await testDb().db.select().from(stripeAutoTopupRecoveries)).map(row => row.paymentIntentId)).toEqual(['pi_before_consent']);
+	// pi_after_consent queues too: its ledger write post-dates consent, but only
+	// the provider payment timestamp can prove the charge itself post-dates it.
+	expect((await testDb().db.select().from(stripeAutoTopupRecoveries)).map(row => row.paymentIntentId).sort()).toEqual(['pi_after_consent', 'pi_before_consent']);
 	expect((await testDb().db.select().from(organizations).get())?.autoTopupEnabled).toBe(0);
 });
 

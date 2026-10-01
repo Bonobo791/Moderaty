@@ -36,10 +36,12 @@ export async function findPausedTopup(handle: LedgerHandle, orgId: string, pi: T
 	return rows[0];
 }
 
-/** Validate the latest charge's integer amounts before confirming existing refunds. */
-function recoveryCharge(charges: Stripe.ApiList<Stripe.Charge>) {
+/** Validate the latest charge's identity and integer amounts before confirming existing refunds. */
+function recoveryCharge(charges: Stripe.ApiList<Stripe.Charge>, paymentIntentId: string) {
 	const charge = charges.data?.[0];
-	if (!Array.isArray(charges.data) || charges.data.length !== 1 || !charge || typeof charge.id !== 'string' || !charge.id || !Number.isSafeInteger(charge.amount) || charge.amount <= 0 || !Number.isSafeInteger(charge.amount_refunded) || charge.amount_refunded < 0 || charge.amount_refunded > charge.amount) throw new Error('Canceled auto top-up has an invalid charge');
+	const paymentRef = charge?.payment_intent;
+	const chargeIntent = typeof paymentRef === 'string' ? paymentRef : paymentRef && typeof paymentRef === 'object' ? paymentRef.id : undefined;
+	if (!Array.isArray(charges.data) || charges.data.length !== 1 || !charge || typeof charge.id !== 'string' || !charge.id || chargeIntent !== paymentIntentId || !Number.isSafeInteger(charge.amount) || charge.amount <= 0 || !Number.isSafeInteger(charge.amount_refunded) || charge.amount_refunded < 0 || charge.amount_refunded > charge.amount) throw new Error('Canceled auto top-up has an invalid charge');
 	return charge;
 }
 
@@ -50,7 +52,7 @@ function validateExistingRefund(refund: Stripe.Refund) {
 
 /** Existing full refunds resolve only after Stripe confirms the returned amount. */
 async function existingRefundOutcome(paymentIntentId: string, deadline?: number): Promise<{ chargeId: string; created: number; resolved?: boolean }> {
-	const charge = recoveryCharge(await getStripe().charges.list({ payment_intent: paymentIntentId, limit: 1 }, ...recoveryOptions(deadline)));
+	const charge = recoveryCharge(await getStripe().charges.list({ payment_intent: paymentIntentId, limit: 1 }, ...recoveryOptions(deadline)), paymentIntentId);
 	if (!chargeFullyRefunded(charge)) return { chargeId: charge.id, created: charge.created };
 	// ponytail: one refund page; over 100 refunds requires manual reconciliation.
 	const refunds = await getStripe().refunds.list({ charge: charge.id, limit: 100 }, ...recoveryOptions(deadline));

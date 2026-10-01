@@ -16,7 +16,7 @@ vi.mock('$lib/server/youtube', () => ({
 
 import { countDbStatements, setupTestDb, testDb } from '$lib/server/testdb';
 import { channels, comments, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, organizations } from '$lib/server/db/schema';
-import { digestDue, generateFeedbackDigest, previewFeedbackDigest } from './feedbackDigest';
+import { digestDue, generateFeedbackDigest, previewFeedbackDigest, runFeedbackPreview, startFeedbackPreview } from './feedbackDigest';
 import { CONCEALED_MESSAGE } from './feedbackSanitize';
 import * as ledger from './billing/ledger';
 
@@ -284,7 +284,7 @@ test('an analysis where every classification fails remains unavailable rather th
 	expect(await testDb().db.select().from(comments).where(isNull(comments.feedbackDigestedAt)).all()).toHaveLength(3);
 });
 
-test('preview uses original-claim recovery without durable writes or charges', async () => {
+test('preview uses original-claim recovery and persists a dry-run row without coverage or charges', async () => {
 	await seedChannel('UC1', { feedbackThreshold: 3 });
 	const texts = ['preview one', 'preview two', 'preview three'];
 	mocks.fetchNewComments.mockResolvedValue({ comments: texts.map((text, index) => ({ id: `p${index}`, text, publishedAt: '2026-01-01T00:00:00.000Z' })), nextPageToken: null, reachedCursor: true });
@@ -293,7 +293,19 @@ test('preview uses original-claim recovery without durable writes or charges', a
 	const preview = await previewFeedbackDigest('UC1', { boundary: '2025-01-01T00:00:00.000Z' });
 	expect(preview).toMatchObject({ commentsClassified: 3, commentsFailed: 0, clusteringDegraded: true, pooled: 0, hasMore: false });
 	expect(preview.findings).toMatchObject([{ supporterCount: 3, summary: '3 comments asked: same question' }]);
-	for (const table of [feedbackDigests, feedbackFindings, findingEvidence, feedbackHistoryComments, comments, creditTransactions]) {
+	// The preview persists as a 'dry-run' digest row with its findings —
+	// coverage markers, history snapshots, and credits stay untouched (I8/I4).
+	expect(await testDb().db.select().from(feedbackDigests).all()).toMatchObject([
+		{ status: 'dry-run', windowStart: '2025-01-01T00:00:00.000Z', commentsClassified: 3, commentsFailed: 0, pooledCount: 0, clusteringDegraded: 1, creditsUsed: null }
+	]);
+	const findings = await testDb().db.select().from(feedbackFindings).all();
+	expect(findings).toHaveLength(1);
+	const evidence = await testDb().db.select().from(findingEvidence).all();
+	expect(evidence).toHaveLength(3);
+	// Preview comments live in neither comments nor feedback_history_comments —
+	// the pinned sourceText is the only guaranteed home of the analyzed text.
+	expect(evidence.map((row) => row.sourceText).sort()).toEqual([...texts].sort());
+	for (const table of [feedbackHistoryComments, comments, creditTransactions]) {
 		expect(await testDb().db.select().from(table).all()).toHaveLength(0);
 	}
 });
@@ -1420,7 +1432,7 @@ test('a historical credit shortfall defers the whole page before classification 
 	expect((await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())).toMatchObject({ feedbackHistoryBoundary: '2025-01-01T00:00:00.000Z', feedbackHistoryPageToken: 'page-1' });
 });
 
-test('feedback dry-run handles an empty first page without writes or credits', async () => {
+test('feedback dry-run resolves an empty first page to a dry-run row without credits', async () => {
 	await seedChannel('UC1');
 	mocks.fetchNewComments.mockResolvedValue({ comments: [], nextPageToken: null, reachedCursor: true });
 
@@ -1428,12 +1440,15 @@ test('feedback dry-run handles an empty first page without writes or credits', a
 
 	expect(preview).toEqual({ commentsClassified: 0, commentsFailed: 0, pooled: 0, hasMore: false, findings: [] });
 	expect(vi.mocked(fetch)).not.toHaveBeenCalled();
-	expect(await testDb().db.select().from(feedbackDigests).all()).toHaveLength(0);
+	expect(await testDb().db.select().from(feedbackDigests).all()).toMatchObject([
+		{ status: 'dry-run', windowStart: '2025-01-01T00:00:00.000Z', commentsClassified: 0, commentsFailed: 0, pooledCount: 0, creditsUsed: null }
+	]);
+	expect(await testDb().db.select().from(feedbackFindings).all()).toHaveLength(0);
 	expect(await testDb().db.select().from(feedbackHistoryComments).all()).toHaveLength(0);
 	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(0);
 });
 
-test('feedback dry-run builds grouped sanitized findings without writing or charging', async () => {
+test('feedback dry-run persists grouped sanitized findings without coverage or charges', async () => {
 	await testDb().db.update(organizations).set({ creditsRemaining: 8 }).where(eq(organizations.id, 'org-1'));
 	await seedChannel('UC1', { feedbackThreshold: 3, cursor: '2026-01-01T00:00:00.000Z' });
 	const texts = ['when is the next stream?', 'when does the next stream start?', 'when will the next stream happen?'];
@@ -1452,7 +1467,18 @@ test('feedback dry-run builds grouped sanitized findings without writing or char
 	expect(preview.findings[0]).toMatchObject({ category: 'question', supporterCount: 3 });
 	expect(JSON.stringify(preview)).not.toContain(texts[2]);
 	expect(preview.findings[0].evidence.some((item) => item.hasAbuse === 1 && item.sanitizedExcerpt === CONCEALED_MESSAGE)).toBe(true);
-	expect(await testDb().db.select().from(feedbackDigests).all()).toHaveLength(0);
+	// One persisted 'dry-run' row whose window ends at the batch's newest
+	// comment; its evidence pins the analyzed text (these comment ids are in
+	// neither comments nor feedback_history_comments).
+	expect(await testDb().db.select().from(feedbackDigests).all()).toMatchObject([
+		{ status: 'dry-run', windowStart: '2025-12-01T00:00:00.000Z', windowEnd: '2026-01-03T00:00:00.000Z', commentsClassified: 3, commentsFailed: 0, pooledCount: 0, creditsUsed: null }
+	]);
+	const [finding] = await testDb().db.select().from(feedbackFindings).all();
+	expect(finding).toMatchObject({ category: 'question', supporterCount: 3 });
+	const evidence = await testDb().db.select().from(findingEvidence).where(eq(findingEvidence.findingId, finding.id)).all();
+	expect(evidence).toHaveLength(3);
+	expect(evidence.map((row) => row.sourceText).sort()).toEqual([...texts].sort());
+	expect(evidence.some((row) => row.hasAbuse === 1 && row.sanitizedExcerpt === CONCEALED_MESSAGE)).toBe(true);
 	expect(await testDb().db.select().from(feedbackHistoryComments).all()).toHaveLength(0);
 	expect(await testDb().db.select().from(comments).all()).toHaveLength(0);
 	expect(await testDb().db.select().from(creditTransactions).all()).toHaveLength(0);
@@ -1474,6 +1500,160 @@ test('a feedback preview aborts when its claimed row was swapped mid-claim', asy
 		previewFeedbackDigest('UC1', { boundary: '2025-01-01T00:00:00.000Z', claim })
 	).rejects.toThrow('changed under the dry-run claim');
 	expect(mocks.fetchNewComments).not.toHaveBeenCalled();
+	// The claim check precedes the plant — no pending row leaks.
+	expect(await testDb().db.select().from(feedbackDigests).all()).toHaveLength(0);
+});
+
+// ---- dry-run preview lifecycle: plant → run → persisted row ----
+
+test('startFeedbackPreview plants a dry-run-pending row anchored to the requested boundary', async () => {
+	await seedChannel('UC1');
+
+	const digestId = await startFeedbackPreview('UC1', { boundary: '2025-01-01T00:00:00.000Z' });
+
+	const rows = await testDb().db.select().from(feedbackDigests).all();
+	expect(rows).toHaveLength(1);
+	expect(rows[0]).toMatchObject({
+		id: digestId,
+		channelId: 'UC1',
+		status: 'dry-run-pending',
+		windowStart: '2025-01-01T00:00:00.000Z',
+		commentsClassified: 0,
+		commentsFailed: 0,
+		pooledCount: 0,
+		creditsUsed: null
+	});
+	// windowEnd doubles as the plant stamp — the drainer's age marker.
+	expect(Date.parse(rows[0].windowEnd)).toBeGreaterThan(Date.parse('2026-01-01T00:00:00.000Z'));
+	expect(mocks.fetchNewComments).not.toHaveBeenCalled();
+});
+
+test('startFeedbackPreview refuses a paused channel or a swapped claim without planting', async () => {
+	await seedChannel('UC1', { active: 0 });
+	await expect(startFeedbackPreview('UC1', { boundary: '2025-01-01T00:00:00.000Z' })).rejects.toThrow('channel is paused');
+
+	await testDb().db.update(channels).set({ active: 1, leaseExpiresAt: '2099-01-01T00:00:00.000Z' }).where(eq(channels.id, 'UC1'));
+	const claim = { orgId: 'org-1', refreshTokenEnc: 'other-enc', leaseExpiresAt: '2099-01-01T00:00:00.000Z' };
+	await expect(startFeedbackPreview('UC1', { boundary: '2025-01-01T00:00:00.000Z', claim })).rejects.toThrow('changed under the dry-run claim');
+
+	expect(await testDb().db.select().from(feedbackDigests).all()).toHaveLength(0);
+});
+
+test('a preview aborted by the deadline leaves the pending row for the drainer', async () => {
+	await seedChannel('UC1');
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [{ id: 'p1', text: 'preview one', publishedAt: '2026-01-01T00:00:00.000Z' }],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+	const digestId = await startFeedbackPreview('UC1', { boundary: '2025-01-01T00:00:00.000Z' });
+
+	// An already-spent deadline throws DeadlineExceededError inside the first
+	// classification call — an abort, not a failure: the row stays pending so
+	// the cron drainer can retry it (I3).
+	await expect(
+		runFeedbackPreview('UC1', digestId, { boundary: '2025-01-01T00:00:00.000Z', deadline: Date.now() - 1 })
+	).rejects.toThrow('deadline exceeded');
+	expect((await testDb().db.select().from(feedbackDigests).all())[0]).toMatchObject({ id: digestId, status: 'dry-run-pending' });
+});
+
+test('a failed preview flips its row to failed with the preview error tag', async () => {
+	await seedChannel('UC1');
+	mocks.fetchNewComments.mockRejectedValue(new Error('youtube exploded'));
+	const digestId = await startFeedbackPreview('UC1', { boundary: '2025-01-01T00:00:00.000Z' });
+
+	await expect(runFeedbackPreview('UC1', digestId, { boundary: '2025-01-01T00:00:00.000Z' })).rejects.toThrow('youtube exploded');
+	expect((await testDb().db.select().from(feedbackDigests).all())[0]).toMatchObject({ id: digestId, status: 'failed', error: 'preview' });
+});
+
+test('a preview where every classification fails flips the row to failed', async () => {
+	await seedChannel('UC1');
+	const texts = ['one', 'two'];
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: texts.map((text, index) => ({ id: `p${index}`, text, publishedAt: '2026-01-01T00:00:00.000Z' })),
+		nextPageToken: null,
+		reachedCursor: true
+	});
+	fetchFailures = Object.fromEntries(texts.map((text) => [text, 'bad']));
+	const digestId = await startFeedbackPreview('UC1', { boundary: '2025-01-01T00:00:00.000Z' });
+
+	await expect(runFeedbackPreview('UC1', digestId, { boundary: '2025-01-01T00:00:00.000Z' })).rejects.toThrow('classification failed for all 2 preview comments');
+	expect((await testDb().db.select().from(feedbackDigests).all())[0]).toMatchObject({ status: 'failed', error: 'preview', commentsClassified: 0 });
+	expect(await testDb().db.select().from(feedbackFindings).all()).toHaveLength(0);
+});
+
+test('a preview aborted mid-flight by a swapped claim fails its row loudly', async () => {
+	// The run re-verifies the claim: a reconnect between plant and run must not
+	// spend the impostor connector's quota (cubic+codeant).
+	await seedChannel('UC1', { feedbackEnabled: 1, leaseExpiresAt: '2099-01-01T00:00:00.000Z' });
+	const claim = { orgId: 'org-1', refreshTokenEnc: 'enc', leaseExpiresAt: '2099-01-01T00:00:00.000Z' };
+	const digestId = await startFeedbackPreview('UC1', { boundary: '2025-01-01T00:00:00.000Z', claim });
+	await testDb().db.delete(channels).where(eq(channels.id, 'UC1'));
+	await seedChannel('UC1', { feedbackEnabled: 1, refreshTokenEnc: 'enc-reconnected' });
+
+	await expect(runFeedbackPreview('UC1', digestId, { boundary: '2025-01-01T00:00:00.000Z', claim })).rejects.toThrow('changed under the dry-run claim');
+	expect(mocks.fetchNewComments).not.toHaveBeenCalled();
+	expect((await testDb().db.select().from(feedbackDigests).all())[0]).toMatchObject({ status: 'failed', error: 'preview' });
+});
+
+test('runFeedbackPreview refuses another channel\'s pending row without clobbering it', async () => {
+	await seedChannel('UC1');
+	await seedChannel('UC2');
+	const otherId = await startFeedbackPreview('UC2', { boundary: '2025-01-01T00:00:00.000Z' });
+
+	await expect(runFeedbackPreview('UC1', otherId, { boundary: '2025-01-01T00:00:00.000Z' })).rejects.toThrow('not found');
+	expect(mocks.fetchNewComments).not.toHaveBeenCalled();
+	expect((await testDb().db.select().from(feedbackDigests).where(eq(feedbackDigests.id, otherId)).get())?.status).toBe('dry-run-pending');
+});
+
+test('runFeedbackPreview refuses a boundary that is not the planted one', async () => {
+	await seedChannel('UC1');
+	const digestId = await startFeedbackPreview('UC1', { boundary: '2025-01-01T00:00:00.000Z' });
+
+	await expect(runFeedbackPreview('UC1', digestId, { boundary: '2025-06-01T00:00:00.000Z' })).rejects.toThrow('boundary mismatch');
+	expect(mocks.fetchNewComments).not.toHaveBeenCalled();
+});
+
+test.each(['dry-run', 'failed', 'complete'])('runFeedbackPreview refuses an already-%s row and leaves it untouched', async (status) => {
+	await seedChannel('UC1');
+	const digestId = await startFeedbackPreview('UC1', { boundary: '2025-01-01T00:00:00.000Z' });
+	await testDb().db.update(feedbackDigests).set({ status }).where(eq(feedbackDigests.id, digestId));
+
+	await expect(runFeedbackPreview('UC1', digestId, { boundary: '2025-01-01T00:00:00.000Z' })).rejects.toThrow('not pending');
+	expect(mocks.fetchNewComments).not.toHaveBeenCalled();
+	expect((await testDb().db.select().from(feedbackDigests).all())[0]).toMatchObject({ id: digestId, status });
+});
+
+test('digest-run transient cleanup preserves preview rows', async () => {
+	// 'dry-run' rows are permanent feed entries and 'dry-run-pending' rows are
+	// the drainer's resume records — neither is digest attempt state, so a
+	// complete run's cleanup must not delete them (MOD-229).
+	await seedChannel('UC1', { feedbackEnabled: 1 });
+	const doneId = await startFeedbackPreview('UC1', { boundary: '2025-01-01T00:00:00.000Z' });
+	await testDb().db.update(feedbackDigests).set({ status: 'dry-run' }).where(eq(feedbackDigests.id, doneId));
+	const pendingId = await startFeedbackPreview('UC1', { boundary: '2025-02-01T00:00:00.000Z' });
+	await seedComment('c1', 'UC1', 'when is the next video', '2026-01-05T00:00:00.000Z');
+	RESPONSES['when is the next video'] = { category: 'question', hasAbuse: false, claim: 'next video' };
+
+	expect(await generateFeedbackDigest('UC1', { force: true })).toMatchObject({ status: 'complete' });
+
+	const rows = await testDb().db.select({ id: feedbackDigests.id, status: feedbackDigests.status }).from(feedbackDigests).orderBy(feedbackDigests.id).all();
+	expect(rows).toEqual([
+		{ id: doneId, status: 'dry-run' },
+		{ id: pendingId, status: 'dry-run-pending' },
+		{ id: expect.any(Number), status: 'complete' }
+	]);
+});
+
+test('a failed digest run leaves preview rows untouched too', async () => {
+	await seedChannel('UC1', { feedbackEnabled: 1 });
+	const pendingId = await startFeedbackPreview('UC1', { boundary: '2025-01-01T00:00:00.000Z' });
+	await seedCommentBatch(THREE_THEMES);
+	fetchFailures = Object.fromEntries(THREE_THEMES.map((entry) => [entry.text, 'x']));
+
+	expect(await generateFeedbackDigest('UC1', { force: true })).toMatchObject({ status: 'failed' });
+
+	expect(await testDb().db.select().from(feedbackDigests).where(eq(feedbackDigests.id, pendingId)).get()).toMatchObject({ status: 'dry-run-pending' });
 });
 
 // ---- cadence + rotation ----

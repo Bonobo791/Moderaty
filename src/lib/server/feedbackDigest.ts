@@ -10,7 +10,7 @@
 // row so the page can say so instead of silently showing stale data —
 // both are transient state a terminal outcome clears.
 
-import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { db, withBusyRetry } from '$lib/server/db';
 import { channels, comments, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence } from '$lib/server/db/schema';
@@ -45,6 +45,14 @@ export const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 export const PER_100_COUNT = 100;
 
 const EPOCH = '1970-01-01T00:00:00.000Z';
+
+/**
+ * Digest rows that are ATTEMPT STATE a resolved run supersedes. Preview rows
+ * are deliberately absent: 'dry-run' is a permanent feed entry and
+ * 'dry-run-pending' is the drainer's resume record (I3) — neither may be
+ * deleted or reused as a digest run's window anchor.
+ */
+const TRANSIENT_DIGEST_STATUSES = ['failed', 'deferred'] as const;
 
 /** A metered org ran out of feedback credits mid-charge — a distinct class so
  * the run's catch matches the type instead of regex-sniffing message text. */
@@ -210,13 +218,15 @@ export async function digestDue(channel: typeof channels.$inferSelect, now?: num
  * children. 'complete' rows are untouched: a complete row at the same
  * window is a DIFFERENT capped batch (coverage lives in the per-comment
  * markers, so a re-run of the same comments is impossible): deleting it
- * would silently drop a processed batch from history (codex).
+ * would silently drop a processed batch from history (codex). Preview rows
+ * ('dry-run'/'dry-run-pending') are likewise permanent/lifecycle state —
+ * a digest run must never delete them (MOD-229).
  */
 async function clearTransientDigests(tx: LedgerHandle, channelId: string): Promise<void> {
 	const existing = await tx
 		.select({ id: feedbackDigests.id })
 		.from(feedbackDigests)
-		.where(and(eq(feedbackDigests.channelId, channelId), ne(feedbackDigests.status, 'complete')))
+		.where(and(eq(feedbackDigests.channelId, channelId), inArray(feedbackDigests.status, TRANSIENT_DIGEST_STATUSES)))
 		.all();
 	if (!existing.length) return;
 	const digestIds = existing.map((d) => d.id);
@@ -277,7 +287,7 @@ async function markDigestState(
 			const prior = await tx
 				.select({ windowStart: feedbackDigests.windowStart, windowEnd: feedbackDigests.windowEnd })
 				.from(feedbackDigests)
-				.where(and(eq(feedbackDigests.channelId, channelId), ne(feedbackDigests.status, 'complete')))
+				.where(and(eq(feedbackDigests.channelId, channelId), inArray(feedbackDigests.status, TRANSIENT_DIGEST_STATUSES)))
 				.orderBy(desc(feedbackDigests.id))
 				.get();
 			await clearTransientDigests(tx, channelId);
@@ -519,6 +529,56 @@ interface DigestRun {
 }
 
 /**
+ * Inserts one finding row per grouped theme plus its sanitized evidence rows
+ * under the given digest, inside the caller's transaction. Every evidence
+ * row pins the analyzed text on the row itself (sourceText): a later rescan
+ * can refresh the shared snapshot, and a preview's comments may never be
+ * stored anywhere else — the evidence row is the only guaranteed home of
+ * the text the classifier saw.
+ */
+async function insertFindings(
+	tx: LedgerHandle,
+	digestId: number,
+	findings: DigestRun['findings'],
+	batchIds: Set<string>
+): Promise<void> {
+	for (const finding of findings) {
+		const [row] = await tx
+			.insert(feedbackFindings)
+			.values({
+				digestId,
+				category: finding.category,
+				summary: finding.summary,
+				supporterCount: finding.supporterCount
+			})
+			.returning({ id: feedbackFindings.id });
+		const evidenceRows = finding.evidence.map((evidence) => {
+			// Evidence ids come from the classified batch itself — a
+			// hallucinated id is impossible by construction, and this
+			// assertion is the loud backstop (I2).
+			if (!batchIds.has(evidence.commentId)) {
+				throw new Error(`feedback digest: evidence ${evidence.commentId} is not in the classified batch`);
+			}
+			const concealed = concealEvidence(evidence.text.slice(0, EXCERPT_MAX), {
+				hasAbuse: evidence.hasAbuse
+			});
+			return {
+				findingId: row.id,
+				commentId: evidence.commentId,
+				sanitizedExcerpt: concealed.text,
+				hasAbuse: evidence.hasAbuse ? 1 : 0,
+				// The text THIS digest classified, pinned on the evidence
+				// row: a later rescan refreshes the shared snapshot, and
+				// an older completed digest must still reveal the words
+				// it actually analyzed (codex).
+				sourceText: evidence.text
+			};
+		});
+		if (evidenceRows.length) await tx.insert(findingEvidence).values(evidenceRows);
+	}
+}
+
+/**
  * Writes the complete digest row plus its finding/evidence children, inside
  * the write transaction the caller wraps. Returns the new digest id.
  */
@@ -540,40 +600,7 @@ async function insertDigestFindings(tx: LedgerHandle, run: DigestRun): Promise<n
 			creditsUsed: run.metered ? run.creditsCharged : null
 		})
 		.returning({ id: feedbackDigests.id });
-	for (const finding of run.findings) {
-		const [row] = await tx
-			.insert(feedbackFindings)
-			.values({
-				digestId: digest.id,
-				category: finding.category,
-				summary: finding.summary,
-				supporterCount: finding.supporterCount
-			})
-			.returning({ id: feedbackFindings.id });
-		const evidenceRows = finding.evidence.map((evidence) => {
-			// Evidence ids come from the classified batch itself — a
-			// hallucinated id is impossible by construction, and this
-			// assertion is the loud backstop (I2).
-			if (!run.batchIds.has(evidence.commentId)) {
-				throw new Error(`feedback digest: evidence ${evidence.commentId} is not a stored comment`);
-			}
-			const concealed = concealEvidence(evidence.text.slice(0, EXCERPT_MAX), {
-				hasAbuse: evidence.hasAbuse
-			});
-			return {
-				findingId: row.id,
-				commentId: evidence.commentId,
-				sanitizedExcerpt: concealed.text,
-				hasAbuse: evidence.hasAbuse ? 1 : 0,
-				// The text THIS digest classified, pinned on the evidence
-				// row: a later rescan refreshes the shared snapshot, and
-				// an older completed digest must still reveal the words
-				// it actually analyzed (codex).
-				sourceText: evidence.text
-			};
-		});
-		if (evidenceRows.length) await tx.insert(findingEvidence).values(evidenceRows);
-	}
+	await insertFindings(tx, digest.id, run.findings, run.batchIds);
 	return digest.id;
 }
 
@@ -914,45 +941,169 @@ export interface FeedbackPreview {
 	}[];
 }
 
+/**
+ * The free feedback dry-run preview, split into plant + execute-and-persist
+ * (MOD-229): startFeedbackPreview writes the 'dry-run-pending' row BEFORE
+ * any provider call — the row is the resume record a crashed run leaves for
+ * the cron drainer (I3) — then runFeedbackPreview executes the usual
+ * pipeline and flips the same row to 'dry-run' with its findings in ONE
+ * transaction. A preview consumes no coverage and no credits: it never
+ * stamps comments.feedback_digested_at or feedback_history_comments, never
+ * calls chargeFeedbackBatch, and persists creditsUsed=null (I8/I4).
+ */
+export async function startFeedbackPreview(
+	channelId: string,
+	{ boundary, claim }: { boundary: string; claim?: DryRunClaim }
+): Promise<number> {
+	return db.transaction(async (tx) => {
+		const channel = await tx.select().from(channels).where(eq(channels.id, channelId)).get();
+		if (!channel) throw new Error(`channel not found: ${channelId}`);
+		// Same binding as the moderation preview: the row loaded here must be
+		// the row the allowance claimed, or a delete/reconnect slipped in a
+		// fresh connector under the same id (cubic+codeant).
+		if (claim && !channelMatchesClaim(channel, claim)) {
+			throw new Error(`channel ${channelId} changed under the dry-run claim — aborting the preview`);
+		}
+		if (!channel.active) throw new Error(ERR_PREVIEW_PAUSED);
+		// windowEnd starts as the plant time — it doubles as the row's age
+		// marker for the drainer's stale age-out and is replaced by the
+		// batch's newest publishedAt when the run completes.
+		const [row] = await tx
+			.insert(feedbackDigests)
+			.values({
+				channelId,
+				windowStart: boundary,
+				windowEnd: new Date().toISOString(),
+				status: 'dry-run-pending'
+			})
+			.returning({ id: feedbackDigests.id });
+		return row.id;
+	});
+}
+
+/**
+ * Executes the preview against a planted 'dry-run-pending' row and resolves
+ * it transactionally: 'dry-run' with its findings on success, 'failed' with
+ * error='preview' on a run error — while a deadline abort leaves the row
+ * pending so the cron drainer retries it (I3). The pending row IS the
+ * request: its windowStart stores the boundary the claimant asked for, so a
+ * mismatched argument is a caller bug and fails loudly.
+ */
+export async function runFeedbackPreview(
+	channelId: string,
+	digestId: number,
+	{ boundary, deadline, claim }: { boundary: string; deadline?: number; claim?: DryRunClaim }
+): Promise<FeedbackPreview> {
+	try {
+		const channel = await db.select().from(channels).where(eq(channels.id, channelId)).get();
+		if (!channel) throw new Error(`channel not found: ${channelId}`);
+		// Re-verified between plant and run — a reconnect may have swapped the
+		// connector while this preview waited in the queue.
+		if (claim && !channelMatchesClaim(channel, claim)) {
+			throw new Error(`channel ${channelId} changed under the dry-run claim — aborting the preview`);
+		}
+		if (!channel.active) throw new Error(ERR_PREVIEW_PAUSED);
+		const pending = await db.select().from(feedbackDigests).where(eq(feedbackDigests.id, digestId)).get();
+		if (!pending || pending.channelId !== channelId) {
+			throw new Error(`preview digest ${digestId} not found for channel ${channelId}`);
+		}
+		if (pending.status !== 'dry-run-pending') {
+			throw new Error(`preview digest ${digestId} is ${pending.status}, not pending — refusing to rerun`);
+		}
+		if (pending.windowStart !== boundary) {
+			throw new Error(`preview digest ${digestId} boundary mismatch: planted ${pending.windowStart}, requested ${boundary}`);
+		}
+		const apiKey = await resolveOpenAiKey(channel.orgId);
+		if (!apiKey) throw new Error(ERR_PREVIEW_NO_KEY);
+		const page = await fetchFeedbackPage(channel, boundary, null, deadline);
+		const { classified, failed } = page.batch.length
+			? await classifyBatch(page.batch, deadline, apiKey)
+			: { classified: [], failed: 0 };
+		if (failed > 0 && classified.length === 0) throw new Error(`classification failed for all ${failed} preview comments`);
+		const categories = enabledCategories(channel);
+		const threshold = channel.feedbackThreshold ?? 3;
+		const { classified: themed, clusteringDegraded } = themePassCanMatter(classified, categories, threshold)
+			? await clusterClassifiedClaims(classified, categories, threshold, deadline, apiKey)
+			: { classified, clusteringDegraded: false };
+		const { findings, pooled } = groupFeedback(themed, { categories, threshold });
+		const batchIds = new Set(page.batch.map((comment) => comment.id));
+		// ONE transaction resolves the row and writes its children — never a
+		// partial preview. The guarded UPDATE is the idempotency backstop: a
+		// second runner (expired lease → cron pickup) finds the row no longer
+		// pending and aborts instead of double-writing findings (I4).
+		await withBusyRetry(() =>
+			db.transaction(async (tx) => {
+				const flipped = await tx
+					.update(feedbackDigests)
+					.set({
+						status: 'dry-run',
+						// An empty batch has no newest publishedAt — keep the plant stamp.
+						windowEnd: page.batch.at(-1)?.publishedAt ?? pending.windowEnd,
+						commentsClassified: classified.length,
+						commentsFailed: failed,
+						clusteringDegraded: Number(clusteringDegraded),
+						pooledCount: pooled
+					})
+					.where(
+						and(
+							eq(feedbackDigests.id, digestId),
+							eq(feedbackDigests.channelId, channelId),
+							eq(feedbackDigests.status, 'dry-run-pending')
+						)
+					)
+					.returning({ id: feedbackDigests.id });
+				if (!flipped.length) throw new Error(`preview digest ${digestId} left pending state mid-run — aborting the write`);
+				await insertFindings(tx, digestId, findings, batchIds);
+			})
+		);
+		return {
+			commentsClassified: classified.length,
+			commentsFailed: failed,
+			...(clusteringDegraded ? { clusteringDegraded: true } : {}),
+			pooled,
+			hasMore: !page.complete,
+			findings: findings.map((finding) => ({
+				category: finding.category,
+				summary: finding.summary,
+				supporterCount: finding.supporterCount,
+				evidence: finding.evidence.map((evidence) => ({
+					sanitizedExcerpt: concealEvidence(evidence.text.slice(0, EXCERPT_MAX), { hasAbuse: evidence.hasAbuse }).text,
+					hasAbuse: evidence.hasAbuse ? 1 : 0
+				}))
+			}))
+		};
+	} catch (cause) {
+		if (cause instanceof DeadlineExceededError) throw cause;
+		console.error('feedback preview failed for channel %s (digest %s):', channelId, digestId, cause);
+		try {
+			// Scoped to THIS channel's pending row: a wrong-id call must not
+			// clobber another channel's in-flight preview.
+			await db
+				.update(feedbackDigests)
+				.set({ status: 'failed', error: 'preview' })
+				.where(
+					and(
+						eq(feedbackDigests.id, digestId),
+						eq(feedbackDigests.channelId, channelId),
+						eq(feedbackDigests.status, 'dry-run-pending')
+					)
+				);
+		} catch (markCause) {
+			console.error('could not record preview failure for digest %s:', digestId, markCause);
+		}
+		throw cause;
+	}
+}
+
+/**
+ * The synchronous entry point — plant + run in one call. The dashboard's
+ * dryRun action uses it while the inline preview render exists; the async
+ * path calls the two halves separately (action plants, cron drains).
+ */
 export async function previewFeedbackDigest(
 	channelId: string,
 	{ boundary, deadline, claim }: { boundary: string; deadline?: number; claim?: DryRunClaim }
 ): Promise<FeedbackPreview> {
-	const channel = await db.select().from(channels).where(eq(channels.id, channelId)).get();
-	if (!channel) throw new Error(`channel not found: ${channelId}`);
-	// Same binding as the moderation preview: the row loaded here must be the
-	// row the allowance claimed, or a delete/reconnect slipped in a fresh
-	// connector under the same id (cubic+codeant).
-	if (claim && !channelMatchesClaim(channel, claim)) {
-		throw new Error(`channel ${channelId} changed under the dry-run claim — aborting the preview`);
-	}
-	if (!channel.active) throw new Error(ERR_PREVIEW_PAUSED);
-	const apiKey = await resolveOpenAiKey(channel.orgId);
-	if (!apiKey) throw new Error(ERR_PREVIEW_NO_KEY);
-	const page = await fetchFeedbackPage(channel, boundary, null, deadline);
-	if (!page.batch.length) return { commentsClassified: 0, commentsFailed: 0, pooled: 0, hasMore: !page.complete, findings: [] };
-	const { classified, failed } = await classifyBatch(page.batch, deadline, apiKey);
-	if (failed > 0 && classified.length === 0) throw new Error(`classification failed for all ${failed} preview comments`);
-	const categories = enabledCategories(channel);
-	const threshold = channel.feedbackThreshold ?? 3;
-	const { classified: themed, clusteringDegraded } = themePassCanMatter(classified, categories, threshold)
-		? await clusterClassifiedClaims(classified, categories, threshold, deadline, apiKey)
-		: { classified, clusteringDegraded: false };
-	const { findings, pooled } = groupFeedback(themed, { categories, threshold });
-	return {
-		commentsClassified: classified.length,
-		commentsFailed: failed,
-		...(clusteringDegraded ? { clusteringDegraded: true } : {}),
-		pooled,
-		hasMore: !page.complete,
-		findings: findings.map((finding) => ({
-			category: finding.category,
-			summary: finding.summary,
-			supporterCount: finding.supporterCount,
-			evidence: finding.evidence.map((evidence) => ({
-				sanitizedExcerpt: concealEvidence(evidence.text.slice(0, EXCERPT_MAX), { hasAbuse: evidence.hasAbuse }).text,
-				hasAbuse: evidence.hasAbuse ? 1 : 0
-			}))
-		}))
-	};
+	const digestId = await startFeedbackPreview(channelId, { boundary, claim });
+	return runFeedbackPreview(channelId, digestId, { boundary, deadline, claim });
 }

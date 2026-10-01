@@ -683,7 +683,7 @@ async function pauseRefundedCharge(charge: Stripe.Charge, paymentIntentId: strin
 	// Refunds recorded before observation tracking retain their original replay anchor.
 	const recordedRefund = org ? await db.select({ createdAt: creditTransactions.createdAt }).from(creditTransactions)
 		.where(and(eq(creditTransactions.orgId, org.orgId), eq(creditTransactions.refType, 'refund'), eq(creditTransactions.refId, chargeId))).get() : undefined;
-	await pauseForObservedStripeRefund(db, org?.orgId, chargeId, charge.amount_refunded, occurredAt ?? recordedRefund?.createdAt);
+	await pauseForObservedStripeRefund(db, org?.orgId, chargeId, charge.amount_refunded, occurredAt ?? recordedRefund?.createdAt, typeof charge.payment_intent === 'object' && charge.payment_intent ? charge.payment_intent : paymentIntentId ? { id: paymentIntentId, metadata: null } : undefined);
 }
 
 /**
@@ -1841,6 +1841,7 @@ async function reverseSessionGrant(sessionId: string): Promise<boolean> {
 		orgId: match.orgId,
 		delta: -match.credits,
 		reason: 'adjust',
+		floorAtZero: true,
 		refType: 'charge',
 		refId: typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : sessionId,
 		chargeId: typeof paymentIntent?.latest_charge === 'string' ? paymentIntent.latest_charge : undefined,

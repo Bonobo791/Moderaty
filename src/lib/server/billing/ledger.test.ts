@@ -654,3 +654,23 @@ test('later consent preserves charging while recovering replacements completed b
 	expect((await db.select().from(stripeAutoTopupRecoveries)).map(row => row.paymentIntentId)).toEqual(['before']);
 	expect((await db.select().from(organizations).get())?.autoTopupEnabled).toBe(1);
 });
+
+test('consent later in the same second protects charging and post-consent payments', async () => {
+	await seedOrg('org-1', 100, 'cus_1');
+	await db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupConsentedAt: '2026-09-30T13:10:00.500Z' });
+	await db.insert(creditTransactions).values({ orgId: 'org-1', delta: 100, reason: 'auto_topup', refType: 'payment_intent', refId: 'pi_after', paymentIntentId: 'pi_after', createdAt: '2026-09-30T13:10:00.750Z' });
+	await pauseForObservedStripeRefund(db, 'org-1', 'ch_original', 100, '2026-09-30T13:10:00.000Z');
+	expect((await db.select().from(organizations).get())?.autoTopupEnabled).toBe(1);
+	expect(await db.select().from(stripeAutoTopupRecoveries)).toEqual([]);
+});
+
+test('each distinct refund changes the pause version but a duplicate preserves it', async () => {
+	await seedOrg('org-1', 100, 'cus_1');
+	await pauseForObservedStripeRefund(db, 'org-1', 'ch_first', 100, '2026-09-30T10:00:00.000Z');
+	const first = (await db.select().from(organizations).get())!.autoTopupPausedAt;
+	await pauseForObservedStripeRefund(db, 'org-1', 'ch_second', 100, '2026-09-30T11:00:00.000Z');
+	const second = (await db.select().from(organizations).get())!.autoTopupPausedAt;
+	expect(second).not.toBe(first);
+	await pauseForObservedStripeRefund(db, 'org-1', 'ch_second', 100, '2026-09-30T11:00:00.000Z');
+	expect((await db.select().from(organizations).get())!.autoTopupPausedAt).toBe(second);
+});

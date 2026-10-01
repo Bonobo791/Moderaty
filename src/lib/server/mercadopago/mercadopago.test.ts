@@ -2,7 +2,7 @@ import { createHmac } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { organizations, mercadoPagoCheckoutAttempts, creditTransactions } from '$lib/server/db/schema';
+import { organizations, mercadoPagoCheckoutAttempts, creditTransactions, stripeAutoTopupRecoveries } from '$lib/server/db/schema';
 import { setupTestDb, testDb, TEST_OWNER } from '$lib/server/testdb';
 import { providerLedgerRef } from '$lib/server/billing/providers';
 
@@ -25,7 +25,7 @@ import { configuredMercadoPagoBundles } from './bundles';
 import { createMercadoPagoCreditCheckout } from './checkout';
 import { fulfillMercadoPagoPayment, processMercadoPagoPayment, verifyWebhookSignature } from './webhooks';
 
-setupTestDb(['organizations', 'credit_transactions', 'mercado_pago_checkout_attempts']);
+setupTestDb(['stripe_auto_topup_recoveries', 'organizations', 'credit_transactions', 'mercado_pago_checkout_attempts']);
 
 const payment = {
 	id: 'pay-1',
@@ -740,5 +740,16 @@ test('a new Mercado Pago refund after consent pauses automatic top-up', async ()
 	await processMercadoPagoPayment(payment);
 	await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupConsentedAt: '2026-09-30T12:00:00.000Z' }).where(eq(organizations.id, 'org-1'));
 	await processMercadoPagoPayment({ ...payment, status: 'refunded', refundedAmount: 5, refundOccurredAt: '2026-09-30T13:00:00.000Z' });
+	expect((await testDb().db.select().from(organizations).get())?.autoTopupEnabled).toBe(0);
+});
+
+test('multiple provider refunds recover the interval before later owner consent', async () => {
+	await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupConsentedAt: '2026-09-30T12:00:00.000Z' });
+	for (const [id, at] of [['pi_before_consent', '2026-09-30T11:00:00.000Z'], ['pi_after_consent', '2026-09-30T13:00:00.000Z']]) await testDb().db.insert(creditTransactions).values({ orgId: 'org-1', delta: 100, reason: 'auto_topup', refType: 'payment_intent', refId: id, paymentIntentId: id, createdAt: at });
+	const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'approved', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 2, currency_id: 'BRL' })))
+		.mockResolvedValueOnce(new Response(JSON.stringify(['2026-09-30T10:00:00Z', '2026-09-30T14:00:00Z'].map(date_created => ({ payment_id: 'pay-1', amount: 1, status: 'approved', date_created })))));
+	vi.stubGlobal('fetch', fetchMock);
+	await expect(processMercadoPagoPayment(await retrievePayment('pay-1'))).rejects.toThrow(/partial refund/);
+	expect((await testDb().db.select().from(stripeAutoTopupRecoveries)).map(row => row.paymentIntentId)).toEqual(['pi_before_consent']);
 	expect((await testDb().db.select().from(organizations).get())?.autoTopupEnabled).toBe(0);
 });

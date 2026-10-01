@@ -106,6 +106,7 @@ test.each([false, true])('a delayed refund recovers completed replacement top-up
 	]));
 	expect(await testDb().db.select().from(stripeAutoTopupRecoveries)).toHaveLength(2);
 	mocks.paymentIntentsRetrieve.mockImplementation(async (id: string) => ({ id, status: 'succeeded', metadata: { type: 'auto_topup', org_id: 'org-1' } }));
+	mocks.chargesList.mockImplementation(async ({ payment_intent }: { payment_intent: string }) => ({ data: [{ id: `ch_${payment_intent}`, amount: 100, amount_refunded: 0 }] }));
 	expect(await sweepPausedTopups(10)).toBe(2);
 	expect(mocks.refundsCreate.mock.calls.map(([args]) => args.payment_intent).sort()).toEqual(['pi_completed_1', 'pi_completed_2']);
 	expect((await testDb().db.select().from(stripeAutoTopupRecoveries)).every(row => row.resolvedAt !== null)).toBe(true);
@@ -1582,4 +1583,58 @@ test('a later legacy same-day payment cannot be refunded for an older attempt', 
 	await sweepPausedTopups(1);
 	expect(mocks.refundsCreate).not.toHaveBeenCalled();
 	expect((await testDb().db.select().from(stripeAutoTopupRecoveries).get())?.paymentIntentId).toBeNull();
+});
+
+test('completed top-up recovery reverses credits before resolving without a refund webhook', async () => {
+	await seedOrg({ creditsRemaining: 100 });
+	await testDb().db.insert(creditTransactions).values({ orgId: 'org-1', delta: 100, reason: 'auto_topup', refType: 'payment_intent', refId: 'pi_completed', paymentIntentId: 'pi_completed', chargeId: 'ch_1' });
+	await testDb().db.insert(stripeAutoTopupRecoveries).values({ orgId: 'org-1', attemptAt: 'completed:pi_completed', paymentIntentId: 'pi_completed' });
+	const row = (await testDb().db.select().from(stripeAutoTopupRecoveries).get())!;
+	const pi = { id: 'pi_completed', status: 'succeeded', metadata: { type: 'auto_topup', org_id: 'org-1' } };
+	expect(await recoverPausedTopup(row, pi)).toBe(true);
+	expect(await getCredits('org-1')).toBe(0);
+	expect(await testDb().db.select().from(creditTransactions).where(eq(creditTransactions.reason, 'refund'))).toEqual([expect.objectContaining({ delta: -100, refType: 'refund', refId: 'ch_1' })]);
+	expect(await recoverPausedTopup(row, pi)).toBe(true);
+	expect(await getCredits('org-1')).toBe(0);
+});
+
+test('a failed recovery debit remains retryable and confirmed refunds preserve newer consent', async () => {
+	await seedOrg({ creditsRemaining: 100, autoTopupConsentedAt: '2026-09-30T12:00:00.000Z' });
+	await testDb().db.insert(creditTransactions).values({ orgId: 'org-1', delta: 100, reason: 'auto_topup', refType: 'payment_intent', refId: 'pi_completed', paymentIntentId: 'pi_completed', chargeId: 'ch_1' });
+	await testDb().db.insert(stripeAutoTopupRecoveries).values({ orgId: 'org-1', attemptAt: 'completed:pi_completed', paymentIntentId: 'pi_completed' });
+	const row = (await testDb().db.select().from(stripeAutoTopupRecoveries).get())!;
+	const pi = { id: 'pi_completed', status: 'succeeded', metadata: { type: 'auto_topup', org_id: 'org-1' } };
+	await testDb().client.execute("CREATE TRIGGER fail_recovery_debit BEFORE UPDATE OF credits_remaining ON organizations BEGIN SELECT RAISE(ABORT, 'debit unavailable'); END");
+	try {
+		await expect(recoverPausedTopup(row, pi)).rejects.toThrow();
+		expect((await testDb().db.select().from(stripeAutoTopupRecoveries).get())?.resolvedAt).toBeNull();
+		expect(await getCredits('org-1')).toBe(100);
+	} finally { await testDb().client.execute('DROP TRIGGER fail_recovery_debit'); }
+	mocks.chargesList.mockResolvedValue({ data: [{ id: 'ch_1', amount: 100, amount_refunded: 100 }] });
+	mocks.refundsList.mockResolvedValue({ data: [{ id: 're_confirmed', amount: 100, status: 'succeeded' }], has_more: false });
+	expect(await recoverPausedTopup(row, pi)).toBe(true);
+	expect(await getCredits('org-1')).toBe(0);
+	expect((await testDb().db.select().from(organizations).get())?.autoTopupEnabled).toBe(1);
+	expect(await applyLedgerDelta(testDb().db, { orgId: 'org-1', delta: -100, reason: 'refund', refType: 'refund', refId: 'ch_1', chargeId: 'ch_1', paymentIntentId: pi.id })).toBe(false);
+	expect(await getCredits('org-1')).toBe(0);
+});
+
+test('an odd five-item sweep reserves three slots for charging while recovery is pending', async () => {
+	await seedOrg({ autoTopupEnabled: 0 });
+	for (let index = 1; index <= 3; index++) await testDb().db.insert(stripeAutoTopupRecoveries).values({ orgId: 'org-1', attemptAt: `completed:pi_pending_${index}`, paymentIntentId: `pi_pending_${index}` });
+	for (let index = 2; index <= 4; index++) await seedOrg({ id: `org-${index}`, stripeCustomerId: `cus_${index}` });
+	mocks.paymentIntentsRetrieve.mockImplementation(async (id: string) => ({ id, status: 'succeeded', metadata: { type: 'auto_topup', org_id: 'org-1' } }));
+	mocks.refundsCreate.mockResolvedValue({ id: 're_pending', status: 'pending' });
+	expect(await sweepAutoTopUp(5)).toBe(3);
+	expect(mocks.paymentIntentsRetrieve).toHaveBeenCalledTimes(2);
+	expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(3);
+});
+
+test('manual ambiguity consumes no recovery slot while null and transient errors remain eligible', async () => {
+	await seedOrg({ autoTopupEnabled: 0 });
+	for (const [id, lastError] of [['pi_ambiguous', 'ambiguous_payment'], ['pi_normal', null], ['pi_retry', 'refund_or_cancellation_failed']]) await testDb().db.insert(stripeAutoTopupRecoveries).values({ orgId: 'org-1', attemptAt: `completed:${id}`, paymentIntentId: id, lastError });
+	mocks.paymentIntentsRetrieve.mockImplementation(async (id: string) => ({ id, status: 'canceled', metadata: { type: 'auto_topup', org_id: 'org-1' } }));
+	expect(await sweepPausedTopups(3)).toBe(2);
+	expect(mocks.paymentIntentsRetrieve.mock.calls.map(([id]) => id).sort()).toEqual(['pi_normal', 'pi_retry']);
+	expect((await testDb().db.select().from(stripeAutoTopupRecoveries).where(eq(stripeAutoTopupRecoveries.paymentIntentId, 'pi_ambiguous')).get())?.lastCheckedAt).toBeNull();
 });

@@ -72,6 +72,11 @@ function paymentAmountCents(transactionAmount: number): number {
 	return rounded;
 }
 
+/** Process every provider boundary; later consent excludes only its authorized interval. */
+async function pauseForRefundBoundaries(tx: Parameters<typeof pauseAutoTopupForRefund>[0], orgId: string, payment: MercadoPagoPayment): Promise<void> {
+	for (const occurredAt of payment.refundBoundaries ?? [payment.refundOccurredAt]) await pauseAutoTopupForRefund(tx, orgId, occurredAt);
+}
+
 export async function fulfillMercadoPagoPayment(payment: MercadoPagoPayment): Promise<boolean> {
 	if (payment.status !== 'approved') return false;
 	if (payment.currencyId !== 'BRL') throw new Error('Mercado Pago payment currency is not BRL');
@@ -111,7 +116,7 @@ export async function fulfillMercadoPagoPayment(payment: MercadoPagoPayment): Pr
 					or(isNull(mercadoPagoCheckoutAttempts.paymentId), eq(mercadoPagoCheckoutAttempts.paymentId, payment.id)),
 					sql`COALESCE(${mercadoPagoCheckoutAttempts.refundedAmountCents}, 0) < ${paymentAmountCents(payment.refundedAmount)}`))
 				.returning({ id: mercadoPagoCheckoutAttempts.id });
-			if (observed.length) await pauseAutoTopupForRefund(tx, orgId, payment.refundOccurredAt);
+			if (observed.length) await pauseForRefundBoundaries(tx, orgId, payment);
 		});
 		throw new Error('Mercado Pago payment has a partial refund — rejected for manual review');
 	}
@@ -227,7 +232,7 @@ async function reverseMercadoPagoPayment(payment: MercadoPagoPayment, reason: 'r
 			if (reason === 'refund') {
 				// Read in this transaction: a duplicate refund must respect a later resume.
 				const current = await tx.select({ refundedAmountCents: mercadoPagoCheckoutAttempts.refundedAmountCents }).from(mercadoPagoCheckoutAttempts).where(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId)).get();
-				if ((current?.refundedAmountCents ?? 0) < paymentAmountCents(payment.refundedAmount)) await pauseAutoTopupForRefund(tx, orgId, payment.refundOccurredAt);
+				if ((current?.refundedAmountCents ?? 0) < paymentAmountCents(payment.refundedAmount)) await pauseForRefundBoundaries(tx, orgId, payment);
 				return;
 			}
 			await tx.update(organizations).set({ autoTopupEnabled: 0, autoTopupState: 'disabled' }).where(eq(organizations.id, orgId));

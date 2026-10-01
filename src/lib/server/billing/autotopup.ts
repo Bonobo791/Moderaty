@@ -480,7 +480,7 @@ export async function grantAutoTopupCredits(
 					or(eq(organizations.autoTopupState, 'idle'), isNull(organizations.autoTopupLastAttemptAt), correlation)));
 			// Release this payment's claim before its refund pause can record overlap.
 			const chargeId = typeof pi.latest_charge === 'string' ? pi.latest_charge : undefined;
-			if (chargeId) await pauseForObservedStripeRefund(tx, orgId, chargeId);
+			if (chargeId) await pauseForObservedStripeRefund(tx, orgId, chargeId, undefined, undefined, pi);
 			return { applied, canceled: undefined };
 		});
 		applied = result.applied;
@@ -595,7 +595,7 @@ export async function reconcileAutoTopup(orgId: string): Promise<{ recovered: nu
  * @returns The number of newly initiated top-ups
  */
 export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<number> {
-	const recovering = await sweepPausedTopups(limit > 1 ? Math.ceil(limit / 2) : limit, deadline);
+	const recovering = await sweepPausedTopups(limit > 1 ? Math.floor(limit / 2) : limit, deadline);
 	if (recovering >= limit) return 0;
 	limit -= recovering;
 	// Unstick stale in-flight claims first: a webhook delivery lost past

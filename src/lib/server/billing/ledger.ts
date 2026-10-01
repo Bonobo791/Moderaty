@@ -7,6 +7,7 @@
 
 import { and, asc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import { db } from '$lib/server/db';
+import { topupAttemptCorrelation, type TopupPayment } from './topupCorrelation';
 import { creditTransactions, organizations, stripePendingReversals, stripeSubscriptionPeriods, stripeDisputeReversals, stripeAutoTopupRecoveries, stripeRefundObservations } from '$lib/server/db/schema';
 
 export type CreditReason = 'consume' | 'purchase' | 'auto_topup' | 'refund' | 'dispute' | 'adjust';
@@ -48,6 +49,10 @@ export interface LedgerDelta {
 	chargeId?: string;
 	/** Original refund time, including when a reversal waits for its grant. */
 	refundOccurredAt?: string;
+	/** Recovery already carries the original refund intent; do not revoke later consent. */
+	refundRecovery?: boolean;
+	/** Terminal payment failures erase the grant without creating a credit debt. */
+	floorAtZero?: boolean;
 }
 
 const UNIQUE_TARGET: [typeof creditTransactions.orgId, typeof creditTransactions.refType, typeof creditTransactions.refId] = [
@@ -182,20 +187,22 @@ export async function assertCreditsPurchasable(orgId: string): Promise<void> {
 export const UNMETERED_CREDIT_GRANT_ERROR = 'an unmetered plan cannot receive credit grants';
 
 /** Caller supplies a transaction when the pause accompanies a credit reversal. */
-export async function pauseAutoTopupForRefund(handle: LedgerHandle, orgId: string, occurredAt?: string, refundedChargeId?: string): Promise<void> {
+export async function pauseAutoTopupForRefund(handle: LedgerHandle, orgId: string, occurredAt?: string, options: { chargeId?: string; payment?: TopupPayment; advanceVersion?: boolean } = {}): Promise<void> {
 	return inLedgerTx(handle, async (tx) => {
 		const org = await tx.select({ state: organizations.autoTopupState, lastAttemptAt: organizations.autoTopupLastAttemptAt, attemptAt: organizations.autoTopupAttemptAt, submittedAt: organizations.autoTopupSubmittedAt, customerId: organizations.stripeCustomerId, pauseReason: organizations.autoTopupPauseReason, pausedAt: organizations.autoTopupPausedAt, consentedAt: organizations.autoTopupConsentedAt }).from(organizations).where(eq(organizations.id, orgId)).get();
 		if (!org) throw new Error(`org not found: ${orgId}`);
 		const paused = await tx.update(organizations)
-			.set({ autoTopupEnabled: 0, autoTopupState: 'disabled', autoTopupPauseReason: 'refund', autoTopupPausedAt: org.pauseReason === 'refund' && org.pausedAt ? org.pausedAt : new Date().toISOString(), autoTopupAttemptAt: null, autoTopupSubmittedAt: null })
+			.set({ autoTopupEnabled: 0, autoTopupState: 'disabled', autoTopupPauseReason: 'refund', autoTopupPausedAt: options.advanceVersion === false && org.pausedAt ? org.pausedAt : new Date(Math.max(Date.now(), org.pausedAt ? Date.parse(org.pausedAt) + 1 : 0)).toISOString(), autoTopupAttemptAt: null, autoTopupSubmittedAt: null })
 			.where(and(eq(organizations.id, orgId),
 				// A delayed replay must respect consent explicitly given AFTER this refund.
-				occurredAt ? or(isNull(organizations.autoTopupConsentedAt), sql`strftime('%s', ${organizations.autoTopupConsentedAt}) <= strftime('%s', ${occurredAt})`) : undefined))
+				occurredAt ? or(isNull(organizations.autoTopupConsentedAt), sql`julianday(${organizations.autoTopupConsentedAt}) <= julianday(${occurredAt})`) : undefined))
 			.returning({ id: organizations.id });
 		if (paused.length && (org.state === 'in_flight' || org.attemptAt)) {
 			const attemptAt = org.attemptAt ?? org.lastAttemptAt;
 			if (!attemptAt) throw new Error(`auto top-up claim for org ${orgId} has no attempt timestamp`);
-			await tx.insert(stripeAutoTopupRecoveries).values({ orgId, attemptAt, customerId: org.customerId,
+			const correlation = options.payment ? topupAttemptCorrelation(options.payment, organizations.autoTopupLastAttemptAt) : undefined;
+			const refundedAttempt = correlation ? await tx.select({ id: organizations.id }).from(organizations).where(and(eq(organizations.id, orgId), correlation)).get() : undefined;
+			if (!refundedAttempt) await tx.insert(stripeAutoTopupRecoveries).values({ orgId, attemptAt, customerId: org.customerId,
 				// Only a new logical attempt with no submission marker is provably unsent.
 				resolvedAt: org.attemptAt && !org.submittedAt ? new Date().toISOString() : null }).onConflictDoNothing();
 		}
@@ -211,10 +218,11 @@ export async function pauseAutoTopupForRefund(handle: LedgerHandle, orgId: strin
 				WHERE ${creditTransactions.orgId} = ${orgId} AND ${creditTransactions.reason} = 'auto_topup'
 					AND ${creditTransactions.delta} > 0 AND ${creditTransactions.createdAt} >= ${occurredAt}
 					AND ${creditTransactions.paymentIntentId} IS NOT NULL
+					AND (${options.payment?.id ?? null} IS NULL OR ${creditTransactions.paymentIntentId} != ${options.payment?.id ?? null})
 					AND (${paused.length ? null : org.consentedAt} IS NULL
 						OR ${creditTransactions.createdAt} < ${paused.length ? null : org.consentedAt})
-					AND (${refundedChargeId ?? null} IS NULL OR ${creditTransactions.chargeId} IS NULL
-						OR ${creditTransactions.chargeId} != ${refundedChargeId ?? null})
+					AND (${options.chargeId ?? null} IS NULL OR ${creditTransactions.chargeId} IS NULL
+						OR ${creditTransactions.chargeId} != ${options.chargeId ?? null})
 					AND NOT EXISTS (SELECT 1 FROM ${stripeAutoTopupRecoveries}
 						WHERE ${stripeAutoTopupRecoveries.orgId} = ${orgId}
 						AND ${stripeAutoTopupRecoveries.paymentIntentId} = ${creditTransactions.paymentIntentId})
@@ -226,7 +234,7 @@ export async function pauseAutoTopupForRefund(handle: LedgerHandle, orgId: strin
 }
 
 /** Each increase pauses once; unknown purchase links wait durably for the grant. */
-export async function pauseForObservedStripeRefund(handle: LedgerHandle, orgId: string | undefined, chargeId: string, refundedAmountCents?: number, occurredAt?: string): Promise<void> {
+export async function pauseForObservedStripeRefund(handle: LedgerHandle, orgId: string | undefined, chargeId: string, refundedAmountCents?: number, occurredAt?: string, payment?: TopupPayment): Promise<void> {
 	return inLedgerTx(handle, async (tx) => {
 		if (refundedAmountCents !== undefined) {
 			await tx.insert(stripeRefundObservations).values({ chargeId, refundedAmountCents, occurredAt: occurredAt ?? new Date().toISOString() }).onConflictDoUpdate({
@@ -239,10 +247,10 @@ export async function pauseForObservedStripeRefund(handle: LedgerHandle, orgId: 
 		// An earlier event can reveal replacement charges before the latest refund.
 		// Keep the cumulative amount's replay anchor and still honor later consent.
 		if (observation && orgId && occurredAt && Date.parse(occurredAt) < Date.parse(observation.occurredAt)) {
-			await pauseAutoTopupForRefund(tx, orgId, occurredAt, chargeId);
+			await pauseAutoTopupForRefund(tx, orgId, occurredAt, { chargeId, payment, advanceVersion: false });
 		}
 		if (!observation || observation.orgId || !orgId) return;
-		await pauseAutoTopupForRefund(tx, orgId, observation.occurredAt, chargeId);
+		await pauseAutoTopupForRefund(tx, orgId, observation.occurredAt, { chargeId, payment });
 		await tx.update(stripeRefundObservations).set({ orgId }).where(eq(stripeRefundObservations.chargeId, chargeId));
 	});
 }
@@ -250,7 +258,7 @@ export async function pauseForObservedStripeRefund(handle: LedgerHandle, orgId: 
 /** Applies a credit adjustment exactly once; duplicate anchors return false. */
 export async function applyLedgerDelta(
 	handle: LedgerHandle,
-	{ orgId, delta, reason, refType, refId, paymentIntentId, chargeId, refundOccurredAt }: LedgerDelta
+	{ orgId, delta, reason, refType, refId, paymentIntentId, chargeId, refundOccurredAt, refundRecovery, floorAtZero }: LedgerDelta
 ): Promise<boolean> {
 	return inLedgerTx(handle, async (tx) => {
 		// Existence check first (mirrors consumeCredit): an unknown org is a
@@ -296,8 +304,8 @@ export async function applyLedgerDelta(
 			.onConflictDoNothing({ target: UNIQUE_TARGET })
 			.returning({ id: creditTransactions.id });
 		if (inserted.length === 0) return false; // already applied — idempotent no-op
-		if (reason === 'refund' && 0 > delta) await pauseAutoTopupForRefund(tx, orgId, refundOccurredAt, chargeId);
-		if (delta > 0 && reason !== 'auto_topup' && chargeId) await pauseForObservedStripeRefund(tx, orgId, chargeId);
+		if (reason === 'refund' && 0 > delta && !refundRecovery) await pauseAutoTopupForRefund(tx, orgId, refundOccurredAt, { chargeId, payment: paymentIntentId ? { id: paymentIntentId, metadata: null } : undefined });
+		if (delta > 0 && reason !== 'auto_topup' && chargeId) await pauseForObservedStripeRefund(tx, orgId, chargeId, undefined, undefined, paymentIntentId ? { id: paymentIntentId, metadata: null } : undefined);
 		const updated = await tx
 			.update(organizations)
 			// COALESCE: pre-billing orgs carry NULL credits (I7 nullable-first);
@@ -313,7 +321,7 @@ export async function applyLedgerDelta(
 					// `0 > delta` reads backwards on purpose: Codacy's lizard parser
 					// treats `delta <` as a generic-arguments opener and desyncs the
 					// file's brace accounting (this callback then "spans" to EOF).
-					0 > delta && reason === 'refund'
+					0 > delta && (reason === 'refund' || floorAtZero)
 						? sql`MAX(0, COALESCE(${organizations.creditsRemaining}, 0) + ${delta})`
 						: sql`COALESCE(${organizations.creditsRemaining}, 0) + ${delta}`
 			})

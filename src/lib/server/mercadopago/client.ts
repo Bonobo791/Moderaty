@@ -17,6 +17,7 @@ export type MercadoPagoPayment = {
 	transactionAmount: number;
 	refundedAmount: number;
 	refundOccurredAt?: string;
+	refundBoundaries?: string[];
 	currencyId: string;
 };
 
@@ -145,14 +146,14 @@ export const mercadoPagoProvider: PrepaidCreditProvider = {
 };
 
 /** A payment update time is not a refund time: read the provider's refund records. */
-async function refundOccurredAt(paymentId: string, refundedAmount: number): Promise<string> {
+async function refundOccurredAt(paymentId: string, refundedAmount: number): Promise<Pick<MercadoPagoPayment, 'refundOccurredAt' | 'refundBoundaries'>> {
 	const response = await fetchWithRetry(apiUrl(`/v1/payments/${encodeURIComponent(paymentId)}/refunds`), {
 		headers: { Authorization: `Bearer ${accessToken()}` }
 	});
 	const body: unknown = await jsonResponse(response, 'Mercado Pago refund lookup');
 	if (!Array.isArray(body)) throw new Error('Mercado Pago refund lookup returned an invalid list');
 	let totalCents = 0;
-	let latest = '';
+	const boundaries: string[] = [];
 	let skipped = 0;
 	for (const value of body) {
 		if (!value || typeof value !== 'object' || Array.isArray(value)) { skipped++; continue; }
@@ -163,11 +164,12 @@ async function refundOccurredAt(paymentId: string, refundedAmount: number): Prom
 		if (String(refund.payment_id) !== paymentId || !Number.isSafeInteger(cents) || cents <= 0 || typeof refund.amount !== 'number' || Math.abs(refund.amount * 100 - cents) > 1e-6 || !Number.isFinite(date) || new Date(String(refund.date_created).slice(0, 10)).toISOString().slice(0, 10) !== String(refund.date_created).slice(0, 10)) { skipped++; continue; }
 		totalCents += cents;
 		const occurredAt = new Date(date).toISOString();
-		if (occurredAt > latest) latest = occurredAt;
+		boundaries.push(occurredAt);
 	}
 	if (skipped) console.error(`Mercado Pago refund lookup skipped ${skipped} invalid or unapproved item(s)`);
-	if (!latest || totalCents !== Math.round(refundedAmount * 100)) throw new Error('Mercado Pago refund records do not match the refunded payment amount');
-	return latest;
+	if (!boundaries.length || totalCents !== Math.round(refundedAmount * 100)) throw new Error('Mercado Pago refund records do not match the refunded payment amount');
+	const refundBoundaries = [...new Set(boundaries)].sort();
+	return { refundBoundaries, refundOccurredAt: refundBoundaries[refundBoundaries.length - 1] };
 }
 
 export async function retrievePayment(paymentId: string): Promise<MercadoPagoPayment> {
@@ -190,7 +192,7 @@ export async function retrievePayment(paymentId: string): Promise<MercadoPagoPay
 		externalReference: body.external_reference,
 		transactionAmount: body.transaction_amount,
 		refundedAmount: refundedAmount ?? 0,
-		...((refundedAmount ?? 0) > 0 ? { refundOccurredAt: await refundOccurredAt(paymentId, refundedAmount as number) } : {}),
+		...((refundedAmount ?? 0) > 0 ? await refundOccurredAt(paymentId, refundedAmount as number) : {}),
 		currencyId: body.currency_id
 	};
 }

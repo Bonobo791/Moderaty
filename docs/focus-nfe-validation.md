@@ -9,12 +9,12 @@ certificate upload, or live fiscal action (see §6).
 
 ## Decision summary
 
-- **Route: NFS-e Nacional (`POST /v2/nfsen`) — conditional on issuer eligibility.**
-  São Paulo mandates the national issuer for Simples Nacional issuers from 2026-11-01; after that
-  date SP's municipal systems serve only queries and retroactive emissions for covered issuers.
-  Building on the municipal route would be a legacy design with a hard expiry. For a non-Simples
-  issuer, SP/Focus acceptance of national issuance is UNVERIFIED — MOD-178's regime decision and
-  homologation (MOD-183) gate this choice (§1, §5.1).
+- **Route: NFS-e Nacional (`POST /v2/nfsen`) — confirmed.**
+  The issuer is maintainer-confirmed as a Simples Nacional optant (Anexo III) in São Paulo, where
+  the national issuer is **mandatory for Simples issuers from 2026-11-01** — one month out; after
+  that date SP's municipal systems serve only queries and retroactive emissions for covered
+  issuers. The municipal route is a legacy design with a hard expiry on top. Formal accountant
+  sign-off on regime and tax parameters remains under MOD-178.
 - **Plan fit: Focus Solo** (1 CNPJ, 100 notes/mo, R$89.90 + R$0.10/extra note) fits a single-issuer
   deployment at current volume. Pricing is context only — purchase requires separate approval.
 - **No blocking unsupported requirement found.** Open items for dependent issues are listed in §5.
@@ -66,10 +66,14 @@ focusnfe.com.br/guides/nfse/municipios-integrados/municipios-da-nfse-nacional/.
   11/08/2026). After the deadline, SP municipal systems remain only for consultas and emissões
   retroativas.
 - MEI: national issuer already mandatory since 2023-09 (gov.br/nfse).
+- **Issuer regime confirmed: ADM LTDA is a Simples Nacional optant, Anexo III** (maintainer
+  decision, §5) — so the mandate applies to this issuer: the national issuer is its route, and only
+  the timing of early voluntary use remains a homologation check (whether SP/Focus already accept
+  national issuance from this prestador before the 2026-11-01 enforcement date). The non-Simples
+  scenario below is recorded for completeness only.
 - For **non-Simples** issuers, São Paulo keeps its own municipal issuer (it shares data with the
   Ambiente de Dados Nacional per LC 214/2025). Whether SP accepts national issuance for non-Simples
-  issuers today is **UNVERIFIED** — confirm with the accountant (MOD-178 regime decision) and Focus
-  support/homologation (MOD-183) if ADM LTDA is not a Simples optant.
+  issuers today is **UNVERIFIED** — moot for ADM LTDA unless MOD-178 overturns the stated regime.
 - National-guide caveats that must be re-verified at setup: (a) if the prefeitura has not registered
   the prestador's Inscrição Municipal in the national environment, `inscricao_municipal_prestador`
   must be **omitted** — sending it causes rejection; (b) municipalities can parametrize schema-
@@ -101,8 +105,9 @@ main fields also in the `/v2/nfsen` OpenAPI schema) supports every required reci
   `movimentacao_temporaria_bens`. (Whether a given sale qualifies as export is a MOD-178/MOD-179
   accountant decision — foreign residence alone does not select it.)
 - **Issuer (prestador)** supports `cnpj_prestador`/`cpf_prestador`/`nif_prestador`,
-  `inscricao_municipal_prestador`, `codigo_opcao_simples_nacional` (1 não optante, 2 MEI, 3 ME/EPP),
-  `regime_tributario_simples_nacional`, `regime_especial_tributacao`.
+  `inscricao_municipal_prestador`, `codigo_opcao_simples_nacional` (1 não optante, 2 MEI, 3 ME/EPP —
+  a Simples-optant LTDA emits `3`), `regime_tributario_simples_nacional`,
+  `regime_especial_tributacao`.
 - An `intermediario` group exists with the same ID/address structure (not needed by Moderaty).
 
 Municipal-route comparison (evidence for "avoid legacy SP-only design"): `tomador` is schema-required
@@ -186,8 +191,12 @@ Maintainer decisions (2026-10-01):
 
 - **Issuer municipality confirmed: São Paulo/SP** (IBGE 3550308). This pins the
   cutover analysis in §1: if ADM LTDA is a Simples Nacional optant, the national
-  issuer is mandatory from 2026-11-01; regime confirmation stays with the
-  accountant under MOD-178.
+  issuer is mandatory from 2026-11-01.
+- **Issuer regime confirmed: Simples Nacional, Anexo III** — which lands the mandate: the national
+  issuer is mandatory for this issuer from 2026-11-01, so `/v2/nfsen` is the selected route, not
+  just the conditional target. Anexo III is the services annex — it informs the accountant's
+  ISS/export classification (MOD-178/MOD-179), not a DPS field; `codigo_opcao_simples_nacional`
+  carries the regime instead (§2). Formal accountant sign-off still lives in MOD-178.
 - **Integration path confirmed: Focus NFe abstraction** over a direct prefeitura
   webservice integration. The São Paulo municipal webservice would require
   owning its proprietary XML layout, e-CNPJ A1 mutual-TLS/signature auth, the
@@ -197,13 +206,12 @@ Maintainer decisions (2026-10-01):
 
 Recorded decisions/constraints to carry into dependent issues:
 
-1. **Route decision conditional on issuer eligibility.** `/v2/nfsen` + `habilita_nfsen_*` is the
-   design target — production mutual-exclusion with `habilita_nfse` makes a dual-route company
-   configuration impossible anyway — but it binds only after MOD-178 confirms ADM LTDA's regime and
-   Focus/SP acceptance of national issuance for it. If the issuer turns out ineligible (non-Simples
-   without SP national support), the municipal `/v2/nfse` route becomes the fallback and its
-   foreign-recipient limitations (§2) must be re-scoped with the accountant before any emission
-   work.
+1. **Route decided: national** (`/v2/nfsen`, `habilita_nfsen_*`). The issuer is a confirmed
+   Simples Nacional optant in SP, where the national issuer is mandatory from 2026-11-01 — and the
+   design avoids the municipal `/v2/nfse` path regardless (production mutual-exclusion with
+   `habilita_nfse` makes a dual-route company configuration impossible anyway, and municipal has no
+   foreign-recipient model, §2). Only an accountant finding a different regime under MOD-178 could
+   reopen this — in that case the municipal fallback's limitations must be re-scoped first.
 2. **Persist the XML ourselves** — the Backups API does not cover NFS-e; fetch
    `caminho_xml_nota_fiscal`/`url_danfse` at authorization time.
 3. **Authenticate webhooks** with `authorization`/`authorization_header` shared secret and treat
@@ -211,8 +219,12 @@ Recorded decisions/constraints to carry into dependent issues:
 4. **Ref strategy**: derive `ref` from the fiscal ledger row (stable, alphanumeric); never reuse a
    ref after authorization — a correction is a new ref + substitution/cancellation per MOD-191.
 5. **Open items to resolve before/during setup** (not blockers to the route decision):
-   - MOD-178 outstanding: confirm ADM LTDA's regime (Simples ⇒ national mandatory 2026-11-01 in SP)
-     and IM status in the national environment (omit `inscricao_municipal_prestador` if absent).
+   - MOD-178 outstanding: regime is maintainer-confirmed (Simples Nacional Anexo III, §5) — the
+     accountant formalizes it plus the Anexo-III-driven ISS/export parameters, and IM status in the
+     national environment (omit `inscricao_municipal_prestador` if absent).
+   - Whether SP/Focus already accept national issuance from this prestador before the 2026-11-01
+     enforcement date (voluntary early use for go-live before the mandate) — exercise in
+     homologation (MOD-193).
    - SP's national parametrization (required-optional fields, cancellation deadline) — exercise in
      homologation (MOD-193).
    - Homologation certificate requirements — UNVERIFIED (§4).

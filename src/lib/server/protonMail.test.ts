@@ -352,6 +352,10 @@ describe('local SMTP integration', () => {
 	let sockets: Socket[];
 	let greet: boolean;
 	let authOk: boolean;
+	// When true the server never finishes the DATA verdict: it keeps the
+	// socket busy with '451-' continuation lines so only the client's own
+	// teardown (never a socket-inactivity timeout) can end the send.
+	let stallVerdict: boolean;
 
 	beforeAll(async () => {
 		realCreateTransport = (await vi.importActual<typeof import('nodemailer')>('nodemailer')).createTransport;
@@ -375,6 +379,7 @@ describe('local SMTP integration', () => {
 		sockets = [];
 		greet = true;
 		authOk = true;
+		stallVerdict = false;
 		server = createServer((socket) => {
 			sockets.push(socket);
 			const session: SmtpSession = {
@@ -463,7 +468,15 @@ describe('local SMTP integration', () => {
 					if (inData) {
 						if (line === '.') {
 							inData = false;
-							write('250 2.0.0 Ok: queued as TEST-QUEUE-1');
+							if (stallVerdict) {
+								// An unfinished '451-' continuation keeps replying
+								// without a verdict — the socket stays active, so a
+								// socket-inactivity timeout could never fire here.
+								const keepalive = setInterval(() => write('451-queued, still deciding'), 40);
+								socket.once('close', () => clearInterval(keepalive));
+							} else {
+								write('250 2.0.0 Ok: queued as TEST-QUEUE-1');
+							}
 						} else {
 							session.data += line + '\n';
 						}
@@ -534,7 +547,24 @@ describe('local SMTP integration', () => {
 		const send = sendProtonMailEmail(MESSAGE, Date.now() + 300);
 		await expect(send).rejects.toBeInstanceOf(DeadlineExceededError);
 		expect(sessions).toHaveLength(1);
-		await sessions[0].ended; // transport.close() destroyed the socket
+		await sessions[0].ended; // socket.destroy() / transport close tore it down
 		expect(sessions[0].commands).toHaveLength(0);
+	});
+
+	test('a caller deadline mid-DATA-verdict destroys the held socket even while the server keeps it busy', async () => {
+		// The guard must cancel the wire itself: transport.close() on a
+		// non-pooled send only emits 'close' and cannot abort the in-flight
+		// SMTPConnection (codex/cubic PR #170/#172). The server stalls the
+		// DATA verdict with '451-' keepalives, so the socket is never idle —
+		// nodemailer's own socketTimeout can never fire; if the session's
+		// socket closes here, our destroy did it.
+		stallVerdict = true;
+		const send = sendProtonMailEmail(MESSAGE, Date.now() + 400);
+		await expect(send).rejects.toBeInstanceOf(DeadlineExceededError);
+		expect(sessions).toHaveLength(1);
+		const session = sessions[0];
+		expect(session.rcptTo).toEqual(['fan@example.com']);
+		expect(session.data).toContain('To: fan@example.com'); // DATA was in flight
+		await session.ended; // the held socket was destroyed mid-send
 	});
 });

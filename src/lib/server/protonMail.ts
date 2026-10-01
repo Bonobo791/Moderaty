@@ -5,6 +5,8 @@
 // account's dedicated SMTP token (PLAIN/LOGIN), never the mailbox password
 // and never Proton Mail Bridge.
 
+import { Socket } from 'node:net';
+
 import { env } from '$env/dynamic/private';
 
 import nodemailer from 'nodemailer';
@@ -165,12 +167,22 @@ function validatedMessageId(info: unknown, toEmail: string): string {
  * — never the token, message bodies, links, or the server's raw reply text.
  */
 function smtpFailure(error: unknown): Error {
-	const detail = (error ?? {}) as { code?: unknown; responseCode?: unknown; command?: unknown };
+	const detail = (error ?? {}) as {
+		code?: unknown;
+		responseCode?: unknown;
+		command?: unknown;
+		response?: unknown;
+	};
 	const code = typeof detail.code === 'string' ? detail.code : undefined;
 	const responseCode = typeof detail.responseCode === 'number' ? detail.responseCode : undefined;
 	const command = typeof detail.command === 'string' ? detail.command : undefined;
+	// The server's SMTP reply text and the original error message stay in the
+	// server log — without them two distinct provider failures sharing a code
+	// are indistinguishable in production. Client-facing text stays generic.
+	const response = typeof detail.response === 'string' ? detail.response : undefined;
+	const message = error instanceof Error ? error.message : undefined;
 	// Stryker disable next-line StringLiteral: log-only message — mutating it changes no observable behavior
-	console.error('proton mail send failed:', JSON.stringify({ code, responseCode, command }));
+	console.error('proton mail send failed:', JSON.stringify({ code, responseCode, command, response, message }));
 	if (code === 'EAUTH') return new Error('e-mail could not be sent (authentication failure)');
 	if (code === 'ETIMEDOUT' || code === 'ESOCKETTIMEOUT') return new Error('e-mail could not be sent (send timed out)');
 	if (code === 'EENVELOPE') return new Error('e-mail could not be sent (recipient rejected)');
@@ -214,9 +226,16 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 	// Per-send transport — no pooling (MOD-116). secure:false + requireTLS
 	// means STARTTLS is mandatory: the send fails rather than authenticating
 	// on a plaintext socket, and Node's default CA verification stays on.
+	// The socket is injected and held: transport.close() on a non-pooled send
+	// only emits 'close' and cannot cancel the in-flight SMTPConnection, so
+	// the guard below must destroy the wire itself — a "timed out" send that
+	// kept a live socket could still deliver, and the retry would duplicate
+	// the mail.
+	const socket = new Socket();
 	const transport = nodemailer.createTransport({
 		host: PROTON_SMTP_HOST,
 		port: PROTON_SMTP_PORT,
+		socket,
 		secure: false,
 		requireTLS: true,
 		auth: { user: config.username, pass: config.token },
@@ -232,10 +251,11 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const guard = new Promise<never>((_, reject) => {
 		timer = setTimeout(() => {
-			// Close the real socket BEFORE rejecting so an in-flight DATA
+			// Destroy the held socket BEFORE rejecting so an in-flight DATA
 			// acceptance can never outlive the budget; the send's late
 			// settlement is swallowed by the race (handled, ignored).
 			try {
+				socket.destroy();
 				transport.close();
 			} catch {
 				// Stryker disable next-line StringLiteral: log-only message — mutating it changes no observable behavior
@@ -271,6 +291,7 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 		throw smtpFailure(error);
 	} finally {
 		if (timer !== undefined) clearTimeout(timer);
+		socket.destroy();
 		transport.close();
 	}
 	// A resolved sendMail with a proven 250 acceptance means the message

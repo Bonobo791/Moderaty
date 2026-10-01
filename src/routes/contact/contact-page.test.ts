@@ -143,12 +143,17 @@ describe('contact action', () => {
 	});
 
 	test('fails loudly (500) with a generic message when the send fails, keeping the pending row for retry', async () => {
-		mocks.sendProtonMailEmail.mockRejectedValue(new Error('e-mail could not be sent (SMTP failure)'));
+		// The rejection carries raw provider detail — the client must see only
+		// the generic message, so the assertion proves sanitization holds.
+		mocks.sendProtonMailEmail.mockRejectedValue(
+			new Error('proton mail send failed: SMTP 554 5.7.1 domain has no valid MX record')
+		);
 		const outcome = await captureAction(VALID);
 		expect(outcome).toMatchObject({ status: 500 });
 		const data = outcome as { data?: { error?: string } };
 		expect(data.data?.error).toContain('could not send the verification e-mail');
-		expect(data.data?.error).not.toContain('HTTP 500');
+		expect(data.data?.error).not.toContain('554');
+		expect(data.data?.error).not.toContain('MX record');
 
 		const rows = await pendingRows();
 		expect(rows).toHaveLength(1);

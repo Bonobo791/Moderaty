@@ -228,7 +228,7 @@ async function handleTopupFailure(orgId: string, attemptAt: string, error: unkno
 			.set({ autoTopupState: 'idle', autoTopupLastAttemptAt: null, ...(definitelyUncreated ? { autoTopupAttemptAt: null, autoTopupSubmittedAt: null } : {}) })
 			.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight'), eq(organizations.autoTopupAttemptAt, attemptAt)));
 		console.error(
-			`auto top-up infra failure for org ${orgId}: ${error instanceof Error ? error.message : String(error)} — claim released, no decline counted, no cooldown`
+			`auto top-up infra failure for org ${orgId} — claim released, no decline counted, no cooldown`, error
 		);
 	}
 }
@@ -667,7 +667,7 @@ export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<numb
 				if (cleared.length === 1 && row.enabled === 1) console.error(`auto top-up: cleared a stale enabled flag on lifetime org ${row.id}`);
 			}
 		} catch (error) {
-			console.error(`auto top-up sweep failed for org ${row.id}: ${error instanceof Error ? error.message : String(error)}`);
+			console.error(`auto top-up sweep failed for org ${row.id}`, error);
 		}
 	}
 	const nowIso = new Date().toISOString();
@@ -731,7 +731,7 @@ export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<numb
 			}
 			if (await maybeTriggerAutoTopUp(row.id)) triggered += 1;
 		} catch (error) {
-			console.error(`auto top-up sweep failed for org ${row.id}: ${error instanceof Error ? error.message : String(error)}`);
+			console.error(`auto top-up sweep failed for org ${row.id}`, error);
 		}
 	}
 	return triggered;

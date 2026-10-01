@@ -1655,9 +1655,12 @@ test('a pre-refund charge with delayed ledger delivery keeps its credits', async
 
 test('a deterministic amount validation failure releases the uncreated attempt', async () => {
 	await seedOrg();
-	mocks.paymentIntentsCreate.mockRejectedValue({ type: 'StripeInvalidRequestError', statusCode: 400, code: 'amount_too_small' });
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	const rejection = { type: 'StripeInvalidRequestError', statusCode: 400, code: 'amount_too_small' };
+	mocks.paymentIntentsCreate.mockRejectedValue(rejection);
 	expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
 	expect(await orgRow()).toMatchObject({ autoTopupState: 'idle', autoTopupAttemptAt: null, autoTopupSubmittedAt: null });
+	expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('infra failure'), rejection);
 	await pauseAutoTopupForRefund(testDb().db, 'org-1');
 	expect(await testDb().db.select().from(stripeAutoTopupRecoveries)).toEqual([]);
 });

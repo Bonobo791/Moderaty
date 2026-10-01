@@ -146,9 +146,8 @@ the site exists), local work, and outage recovery.
   | `STRIPE_TEST_PRODUCT` | optional — a Stripe Product (`prod_…`) or Price (`price_…`) id; when set, a "Test checkout" card on the usage page runs a real purchase end-to-end and grants 1 credit — visible only to the operator account hardcoded in `src/lib/server/billing/checkout.ts` (`TEST_CHECKOUT_OPERATOR_EMAIL`), never to other users |
   | `ENCRYPTION_KEY` | `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
   | `CRON_SECRET` | any long random string; also used to trigger cron manually |
-  | `MJ_APIKEY_PUBLIC` / `MJ_APIKEY_PRIVATE` | MailJet REST API key and secret key (contact-form verification e-mails) |
-  | `MAILJET_FROM_EMAIL` | sender of the verification e-mails — must be verified in the Mailjet account (`https://app.mailjet.com/account/sender`) |
-  | `MAILJET_FROM_NAME` | sender display name, e.g. `Moderaty` |
+  | `PROTON_SMTP_USERNAME` / `PROTON_SMTP_TOKEN` | Proton Mail SMTP submission credentials — the account e-mail (also the From address) and the dedicated SMTP token from the Proton account's security settings (never the mailbox password) — for contact-form verification e-mails and zero-credit notices |
+  | `PROTON_FROM_NAME` | optional sender display name, defaults to `Moderaty` |
   | `APP_URL` | the deployed site URL, e.g. `https://moderaty.netlify.app` |
   | `DRY_RUN` | start with `true`; flip to `false` after verifying a dry run |
 

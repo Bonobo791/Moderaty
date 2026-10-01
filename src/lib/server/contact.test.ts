@@ -11,7 +11,8 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
-vi.mock('./protonMail', () => ({
+vi.mock('./protonMail', async (importOriginal) => ({
+	...(await importOriginal<typeof import('./protonMail')>()),
 	sendProtonMailEmail: mocks.sendProtonMailEmail
 }));
 
@@ -83,18 +84,35 @@ describe('parseContactForm', () => {
 		if (!result.ok) expect(result.error).toMatch(/201|characters/);
 	});
 
-	test.each(['not-an-email', 'a@b', 'a b@example.com', '@example.com', 'a@'])(
-		'rejects invalid e-mail %s',
-		(email) => {
-			const form = new FormData();
-			form.set('name', 'Fan');
-			form.set('email', email);
-			form.set('opt_in', 'on');
-			const result = parseContactForm(form);
-			expect(result.ok).toBe(false);
-			if (!result.ok) expect(result.error).toMatch(/e-mail/i);
-		}
-	);
+	test.each([
+		'not-an-email',
+		'a@b',
+		'a b@example.com',
+		'@example.com',
+		'a@',
+		'a@b.example,c@d.example', // address list the transport guard rejects
+		'a@b.example;c@d.example', // semicolon list
+		'Fan <fan@example.com>' // display-name form
+	])('rejects invalid e-mail %s', (email) => {
+		const form = new FormData();
+		form.set('name', 'Fan');
+		form.set('email', email);
+		form.set('opt_in', 'on');
+		const result = parseContactForm(form);
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error).toMatch(/e-mail/i);
+	});
+
+	test("accepts a legal apostrophe local part — the transport can send it", () => {
+		// The form and the SMTP recipient guard must agree: a persisted pending
+		// row whose verification e-mail can never send is a permanent 500 loop
+		// (cubic/codex PR #171).
+		const form = new FormData();
+		form.set('name', 'Fan');
+		form.set('email', "o'connor@example.com");
+		form.set('opt_in', 'on');
+		expect(parseContactForm(form)).toEqual({ ok: true, name: 'Fan', email: "o'connor@example.com" });
+	});
 
 	test('keeps submitted values on error so the form can re-render them', () => {
 		const form = new FormData();

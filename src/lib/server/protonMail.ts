@@ -18,10 +18,18 @@ const DEFAULT_FROM_NAME = 'Moderaty';
 
 // Envelope/header injection guard: a bare mailbox only — no whitespace
 // (covers CR/LF folding), no control characters, and none of the
-// address-list or display-name vectors (`,` `;` `<` `>` `"` `'` `(` `)` `[`
-// `]` `\` `:`). Deliberately stricter than the /contact form's
-// EMAIL_PATTERN, whose `[^\s@]` still admits `a@b,c@d` lists.
-const BARE_ADDRESS = /^[^\s@,;:<>"'()[\]\\:\x00-\x1f\x7f]+@[^\s@,;:<>"'()[\]\\:\x00-\x1f\x7f]+$/i;
+// address-list or display-name vectors (`,` `;` `<` `>` `"` `(` `)` `[` `]`
+// `\` `:`). `'` stays legal — it is a valid RFC 5321 local-part character
+// (`o'connor@…`), and a quoted-pair display name never reaches this point.
+// Deliberately stricter than the /contact form's EMAIL_PATTERN, whose
+// `[^\s@]` still admits `a@b,c@d` lists — the form reuses
+// `isSendableRecipient` so persisted rows can always be sent.
+const BARE_ADDRESS = /^[^\s@,;<>"()[\]\\:\x00-\x1f\x7f]+@[^\s@,;<>"()[\]\\:\x00-\x1f\x7f]+$/i;
+
+/** What the transport can put on the wire: one bare mailbox, length-bounded. */
+export function isSendableRecipient(email: unknown): email is string {
+	return typeof email === 'string' && email.length > 0 && email.length <= 254 && BARE_ADDRESS.test(email);
+}
 
 // Any value that lands inside an SMTP header line (subject, display names)
 // must not carry control characters — folding is where header injection
@@ -75,12 +83,7 @@ export interface ProtonMailSendResult {
  * header-safe line, and both body parts must be present.
  */
 function validateMessage(message: ProtonMailMessage): void {
-	if (
-		typeof message.toEmail !== 'string' ||
-		message.toEmail.length === 0 ||
-		message.toEmail.length > 254 ||
-		!BARE_ADDRESS.test(message.toEmail)
-	) {
+	if (!isSendableRecipient(message.toEmail)) {
 		throw new Error('e-mail could not be sent (invalid recipient address)');
 	}
 	if (typeof message.subject !== 'string' || message.subject.length === 0 || HEADER_UNSAFE.test(message.subject)) {
@@ -101,6 +104,27 @@ function addressText(entry: unknown): string {
 	if (typeof entry === 'string') return entry;
 	const address = (entry as { address?: unknown } | null)?.address;
 	return typeof address === 'string' ? address : '';
+}
+
+/**
+ * Whether the provider verdict proves acceptance: the intended recipient is
+ * the sole accepted envelope, nothing was rejected, DATA closed with a 250,
+ * and a message id came back. Shared with the post-send deadline decision —
+ * only this proof may skip the defer check.
+ */
+function acceptanceProven(info: unknown, toEmail: string): boolean {
+	const verdict = (info ?? {}) as { accepted?: unknown; rejected?: unknown; response?: unknown; messageId?: unknown };
+	const rejected = Array.isArray(verdict.rejected) ? verdict.rejected : [];
+	const accepted = Array.isArray(verdict.accepted) ? verdict.accepted : [];
+	const finalResponse = typeof verdict.response === 'string' ? verdict.response : '';
+	return (
+		rejected.length === 0 &&
+		accepted.length === 1 &&
+		addressText(accepted[0]).toLowerCase() === toEmail.toLowerCase() &&
+		/^250[\s-]/.test(finalResponse) &&
+		typeof verdict.messageId === 'string' &&
+		verdict.messageId.length > 0
+	);
 }
 
 /**
@@ -249,6 +273,13 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 		if (timer !== undefined) clearTimeout(timer);
 		transport.close();
 	}
-	if (deadline !== undefined && Date.now() >= deadline) throw new DeadlineExceededError();
+	// A resolved sendMail with a proven 250 acceptance means the message
+	// already left — a deadline that expired mid-return must not reclassify
+	// delivered mail as deferrable (the caller would release its claim and
+	// send a duplicate). Any other verdict keeps the old semantics: expired
+	// deadline defers, otherwise the acceptance check fails loudly.
+	if (!acceptanceProven(info, message.toEmail) && deadline !== undefined && Date.now() >= deadline) {
+		throw new DeadlineExceededError();
+	}
 	return { messageId: validatedMessageId(info, message.toEmail) };
 }

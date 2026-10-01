@@ -12,7 +12,10 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
-vi.mock('$lib/server/protonMail', () => ({ sendProtonMailEmail: mocks.sendProtonMailEmail }));
+vi.mock('$lib/server/protonMail', async (importOriginal) => ({
+	...(await importOriginal<typeof import('$lib/server/protonMail')>()),
+	sendProtonMailEmail: mocks.sendProtonMailEmail
+}));
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { contactSubmissions } from '$lib/server/db/schema';

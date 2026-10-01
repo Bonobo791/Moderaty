@@ -16,6 +16,10 @@ export type LegalDoc = {
 };
 
 export const LEGAL_EFFECTIVE_DATE = '22 October 2026';
+// 1.16: E-MAIL PROVIDER SWAP — the transactional e-mail sub-processor
+// changed from Mailjet to Proton (Proton AG — Switzerland): Privacy §5
+// sharing list and DPA Annex III updated. Material change: users without a
+// 1.16 consent row are routed back through /consent.
 // 1.15: CREDIT BUNDLES — new purchases offer 500 or 2,000 comments;
 // automatic top-up charges the bundle selected by the owner. Existing
 // auto top-up without a selected bundle pauses until explicitly configured.
@@ -66,7 +70,7 @@ export const LEGAL_EFFECTIVE_DATE = '22 October 2026';
 // 1.5: Terms §6.1(c) corrected — the lifetime hosted plan has no per-account
 // key flow (hosted scoring runs on the deployment's OPENAI_API_KEY), so the
 // "your own OpenAI key" promise was removed from the lifetime clause.
-export const LEGAL_VERSION = '1.15';
+export const LEGAL_VERSION = '1.16';
 export const LEGAL_KICKER = 'YouTube Comment Moderation Service';
 
 /**

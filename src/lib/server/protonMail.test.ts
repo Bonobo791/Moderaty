@@ -153,6 +153,31 @@ test.each([
 	expect(mocks.createTransport).not.toHaveBeenCalled();
 });
 
+test('accepts an apostrophe in the recipient local part — a legal bare address', async () => {
+	// RFC 5321 local parts admit '\''; rejecting one after the contact form
+	// persisted its pending row made every resend throw (codex/cubic PR #171).
+	const toEmail = "o'connor@example.com";
+	mocks.sendMail.mockResolvedValue(acceptedInfo({ accepted: [toEmail] }));
+
+	const result = await sendProtonMailEmail({ ...MESSAGE, toEmail });
+
+	expect(mocks.sendMail).toHaveBeenCalledWith(expect.objectContaining({ to: toEmail }));
+	expect(result.messageId).toBe('<msg-1@moderaty.app>');
+});
+
+test("accepts an apostrophe in the recipient local part (a legal RFC mailbox)", async () => {
+	const toEmail = "o'connor@example.com";
+	mocks.sendMail.mockResolvedValue(
+		acceptedInfo({ accepted: [toEmail], envelope: { from: 'no-reply@moderaty.app', to: [toEmail] } })
+	);
+
+	const result = await sendProtonMailEmail({ ...MESSAGE, toEmail });
+
+	expect(mocks.sendMail).toHaveBeenCalledTimes(1);
+	expect((mocks.sendMail.mock.calls[0][0] as { to: string }).to).toBe(toEmail);
+	expect(result).toEqual({ messageId: '<msg-1@moderaty.app>' });
+});
+
 test('rejects CR/LF in the subject before any connection', async () => {
 	await expect(sendProtonMailEmail({ ...MESSAGE, subject: 'Hi\r\nBcc: mallory@evil.example' })).rejects.toThrow(
 		/could not be sent/
@@ -242,6 +267,46 @@ test('a caller deadline expiring mid-send rejects DeadlineExceededError and tear
 	await vi.advanceTimersByTimeAsync(1_001);
 	await assertion;
 	expect(mocks.close).toHaveBeenCalled();
+});
+
+test('a proven SMTP acceptance still counts as delivered when the deadline lands mid-return', async () => {
+	// sendMail resolved with a 250 acceptance — the message provably left.
+	// Reclassifying it as deferrable made the zero-credit sweep release its
+	// claim and send the same warning again (codex/codeant PR #171).
+	const deadline = Date.now() + 60_000;
+	const send = sendProtonMailEmail(MESSAGE, deadline);
+	const spy = vi.spyOn(Date, 'now').mockReturnValue(deadline + 1);
+	try {
+		const result = await send;
+		expect(result.messageId).toBe('<msg-1@moderaty.app>');
+	} finally {
+		spy.mockRestore();
+	}
+});
+
+test('an acceptance committed while the deadline passes still counts as delivered', async () => {
+	vi.useFakeTimers();
+	mocks.sendMail.mockImplementation(async () => {
+		// The provider accepted the message; the clock then moved past the
+		// caller deadline before the post-send check ran. A confirmed side
+		// effect reported as a deferral makes the sweep resend a delivered
+		// warning (codex).
+		vi.setSystemTime(Date.now() + 2_000);
+		return acceptedInfo();
+	});
+
+	const result = await sendProtonMailEmail(MESSAGE, Date.now() + 1_000);
+	expect(result).toEqual({ messageId: '<msg-1@moderaty.app>' });
+});
+
+test('an unconfirmed result discovered after the deadline still defers', async () => {
+	vi.useFakeTimers();
+	mocks.sendMail.mockImplementation(async () => {
+		vi.setSystemTime(Date.now() + 2_000);
+		return { messageId: '<x>' }; // no envelope verdicts — acceptance unproven
+	});
+
+	await expect(sendProtonMailEmail(MESSAGE, Date.now() + 1_000)).rejects.toBeInstanceOf(DeadlineExceededError);
 });
 
 test('a late acceptance after the deadline is never reported as success', async () => {

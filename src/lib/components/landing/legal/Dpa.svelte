@@ -645,9 +645,9 @@
 				<td>ANPD SCCs (Annex IV)</td>
 			</tr>
 			<tr>
-				<td>Mailjet (Mailjet SAS)</td>
+				<td>Proton (Proton AG)</td>
 				<td>Transactional e-mail (notices, receipts, security alerts, contact-form verification)</td>
-				<td>European Union (France)</td>
+				<td>Switzerland</td>
 				<td>ANPD SCCs (Annex IV) if outside Brazil</td>
 			</tr>
 		</tbody>

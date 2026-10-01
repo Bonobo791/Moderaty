@@ -212,7 +212,9 @@ Approved dependencies only (execution plan v3): `drizzle-orm`,
 (runtime — server-only payment SDK, maintainer-approved for the billing
 integration; never import it into client code); `@openai/guardrails`
 (runtime — maintainer-approved jailbreak detection, server-only; its
-transitive OpenAI SDK must never be imported into client code); `drizzle-kit`,
+transitive OpenAI SDK must never be imported into client code); `nodemailer`
+(runtime — server-only SMTP transport for Proton Mail transactional e-mail);
+`drizzle-kit`,
 `vitest`, `@stryker-mutator/core`, `@stryker-mutator/vitest-runner`,
 `fast-check` (dev — property-based testing, maintainer-approved; the
 `@fast-check/vitest` connector stays optional, plain `fc.assert` in vitest

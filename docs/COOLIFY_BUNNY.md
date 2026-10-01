@@ -106,7 +106,7 @@ One-time setup (human, in the Coolify dashboard):
    | `STRIPE_TEST_PRODUCT` | optional | optional | a Product (`prod_…`) or Price (`price_…`) id in the app's own Stripe environment — enables the "Test checkout" card that smoke-tests the billing pipeline with a real purchase (grants 1 credit); the card renders only for the operator account hardcoded in `src/lib/server/billing/checkout.ts`, never for other users |
    | `MERCADOPAGO_ACCESS_TOKEN` / `MERCADOPAGO_WEBHOOK_SECRET` | production | dev | optional BRL prepaid credit checkout; webhook fulfillment is signed and idempotent |
    | `MERCADOPAGO_ENVIRONMENT` / `MERCADOPAGO_PRICE_CREDITS_*_BRL_CENTS` | production | sandbox | optional Mercado Pago sandbox/production mode and BRL bundle prices in cents |
-   | `MJ_APIKEY_PUBLIC` / `MJ_APIKEY_PRIVATE` / `MAILJET_FROM_EMAIL` / `MAILJET_FROM_NAME` | production | dev | MailJet credentials for the contact form's verification e-mails (`MAILJET_FROM_EMAIL` must be a sender verified in the Mailjet account) |
+   | `PROTON_SMTP_USERNAME` / `PROTON_SMTP_TOKEN` / `PROTON_FROM_NAME` | production | dev | Proton Mail SMTP submission credentials for contact-form verification e-mails and zero-credit notices (`PROTON_SMTP_USERNAME` is the Proton account e-mail and doubles as the From address; the token is the account's dedicated SMTP token, not the mailbox password) |
 
    **Stripe webhook endpoint is per-environment, per-sandbox.** Register
    `https://<app-domain>/api/stripe/webhook` under **Developers → Webhooks**
@@ -197,7 +197,7 @@ One-time setup (human, in the Coolify dashboard):
    why the runtime secrets must be Runtime-only). Keep Build Variable ON only
    for `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`; every other secret
    (`CRON_SECRET`, `ENCRYPTION_KEY`, `GOOGLE_CLIENT_SECRET`, `OPENAI_API_KEY`,
-   `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `MJ_APIKEY_PRIVATE`, …)
+   `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `PROTON_SMTP_TOKEN`, …)
    should be **Runtime Variable only**, so they never travel as build args
    and no injected `ARG` block appears.
 

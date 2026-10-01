@@ -274,7 +274,7 @@ export const channels = sqliteTable('channels', {
 	feedbackCadence: text('feedback_cadence'), // 'weekly' | 'per_100' | 'manual'; null = weekly
 	feedbackCategories: text('feedback_categories'), // comma list of enabled categories; null = all
 	feedbackThreshold: integer('feedback_threshold'), // min supporters per finding; null = 3
-	feedbackEmail: integer('feedback_email'), // 1 = also e-mail each digest — RESERVED, unwired until MOD-92 (no Mailjet path writes/reads it yet)
+	feedbackEmail: integer('feedback_email'), // 1 = also e-mail each digest — RESERVED, unwired until MOD-92 (no e-mail path writes/reads it yet)
 	feedbackLastDigestAt: text('feedback_last_digest_at'), // rotation ordering; NULLs generate first
 	moderationDryRunUsedAt: text('moderation_dry_run_used_at'),
 	feedbackDryRunUsedAt: text('feedback_dry_run_used_at'),

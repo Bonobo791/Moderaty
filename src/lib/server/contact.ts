@@ -14,7 +14,7 @@ import { and, eq, gt } from 'drizzle-orm';
 import { db } from '$lib/server/db';
 import { contactSubmissions } from '$lib/server/db/schema';
 import { escapeHtml } from './emailText';
-import { sendProtonMailEmail } from './protonMail';
+import { isSendableRecipient, sendProtonMailEmail } from './protonMail';
 
 /**
  * The exact opt-in checkbox sentence, shown on the form and stored verbatim
@@ -31,7 +31,9 @@ export const MAX_NAME_LENGTH = 200;
 // Deliberately simple RFC-5322-ish shape check: no zod (banned), and the
 // real gate is the verification e-mail itself — a wrong address simply never
 // confirms. The /^[^\s@]+@[^\s@]+\.[^\s@]+$/ check rejects whitespace,
-// missing @, missing domain dot, and empty parts.
+// missing @, missing domain dot, and empty parts; isSendableRecipient adds
+// the transport's own bare-address rules so a persisted pending row can
+// always be sent — a list like `a@b,c@d` fails HERE, not at RCPT TO.
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export type ContactParse =
@@ -58,7 +60,7 @@ export function parseContactForm(form: FormData): ContactParse {
 	if (name.length > MAX_NAME_LENGTH) {
 		return { ok: false, error: `Name must be ${MAX_NAME_LENGTH} characters or fewer.`, name, email };
 	}
-	if (email.length === 0 || email.length > 254 || !EMAIL_PATTERN.test(email)) {
+	if (email.length === 0 || !EMAIL_PATTERN.test(email) || !isSendableRecipient(email)) {
 		return { ok: false, error: 'Please enter a valid e-mail address.', name, email };
 	}
 	return { ok: true, name, email: email.toLowerCase() };

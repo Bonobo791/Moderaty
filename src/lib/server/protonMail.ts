@@ -182,7 +182,7 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 	validateMessage(message);
 	// The caller's run budget composes with (never widens) the 10s client
 	// timeout; a spent budget surfaces as DeadlineExceededError so the sweep
-	// defers instead of counting a provider failure (mirrors mailjet.ts).
+	// defers instead of counting a provider failure (http.ts convention).
 	const timeoutMs =
 		deadline === undefined ? PROTON_TIMEOUT_MS : Math.min(PROTON_TIMEOUT_MS, deadline - Date.now());
 	if (timeoutMs <= 0) throw new DeadlineExceededError();

@@ -6,7 +6,7 @@ import { eq } from 'drizzle-orm';
 
 const mocks = vi.hoisted(() => ({
 	env: { APP_URL: 'https://moderaty.app', ENCRYPTION_KEY: 'zc-test-key', STRIPE_PRICE_CREDITS_500: 'price_test_500' } as Record<string, string | undefined>,
-	sendMailjetMessage: vi.fn(),
+	sendProtonMailEmail: vi.fn(),
 	revokeGoogleToken: vi.fn(),
 	sessionsRetrieve: vi.fn(),
 	customersUpdate: vi.fn()
@@ -14,7 +14,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
-vi.mock('./mailjet', () => ({ sendMailjetMessage: mocks.sendMailjetMessage }));
+vi.mock('./protonMail', () => ({ sendProtonMailEmail: mocks.sendProtonMailEmail }));
 
 vi.mock('./google', () => ({ revokeGoogleToken: mocks.revokeGoogleToken }));
 
@@ -124,8 +124,8 @@ async function userRow(userId: string) {
 
 beforeEach(() => {
 	mocks.env.APP_URL = 'https://moderaty.app';
-	mocks.sendMailjetMessage.mockReset();
-	mocks.sendMailjetMessage.mockResolvedValue({ messageId: 1, messageUuid: 'uuid-1' });
+	mocks.sendProtonMailEmail.mockReset();
+	mocks.sendProtonMailEmail.mockResolvedValue({ messageId: '<msg-1@moderaty.app>' });
 	mocks.revokeGoogleToken.mockReset();
 	mocks.revokeGoogleToken.mockResolvedValue(undefined);
 	mocks.sessionsRetrieve.mockReset();
@@ -138,7 +138,7 @@ describe('eligibility', () => {
 		const result = await sweepZeroCreditAccounts();
 		expect(result).toMatchObject({ evaluated: 1, warned: 0, deleted: 0, errors: 0 });
 		expect(await userRow('u1')).toMatchObject({ zeroCreditsSince: null, zeroCreditsNotifiedAt: null });
-		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+		expect(mocks.sendProtonMailEmail).not.toHaveBeenCalled();
 	});
 
 	test('a lifetime org is unmetered — never enters the countdown', async () => {
@@ -146,7 +146,7 @@ describe('eligibility', () => {
 		const result = await sweepZeroCreditAccounts();
 		expect(result.errors).toBe(0);
 		expect(await userRow('u1')).toMatchObject({ zeroCreditsSince: null });
-		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+		expect(mocks.sendProtonMailEmail).not.toHaveBeenCalled();
 	});
 
 	test.each(['active', 'trialing', 'past_due'])(
@@ -155,7 +155,7 @@ describe('eligibility', () => {
 			await seedAccount('u1', { creditsRemaining: 0, stripeSubscriptionId: 'sub_1', subscriptionStatus: status });
 			await sweepZeroCreditAccounts();
 			expect(await userRow('u1')).toMatchObject({ zeroCreditsSince: null });
-			expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+			expect(mocks.sendProtonMailEmail).not.toHaveBeenCalled();
 		}
 	);
 
@@ -179,7 +179,7 @@ describe('eligibility', () => {
 		const result = await sweepZeroCreditAccounts();
 		expect(result.errors).toBe(0);
 		expect(await userRow('u1')).toMatchObject({ zeroCreditsSince: null, zeroCreditsNotifiedAt: null });
-		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+		expect(mocks.sendProtonMailEmail).not.toHaveBeenCalled();
 	});
 
 	test('a canceled subscription WITH a paid period is still billing-engaged — the countdown applies', async () => {
@@ -209,7 +209,7 @@ describe('eligibility', () => {
 		const row = await userRow('u1');
 		expect(Date.parse(row!.zeroCreditsSince!)).toBeGreaterThan(Date.now() - 60_000);
 		expect(row!.zeroCreditsNotifiedAt).toBeNull();
-		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+		expect(mocks.sendProtonMailEmail).not.toHaveBeenCalled();
 	});
 
 	test('one funded metered org keeps a multi-org account alive', async () => {
@@ -242,7 +242,7 @@ describe('eligibility', () => {
 		const result = await sweepZeroCreditAccounts();
 		expect(result).toMatchObject({ evaluated: 1, warned: 0, deleted: 0, errors: 0 });
 		expect(await userRow('u1')).toMatchObject({ zeroCreditsSince: null, zeroCreditsNotifiedAt: null });
-		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+		expect(mocks.sendProtonMailEmail).not.toHaveBeenCalled();
 	});
 
 	test('a lifetime org acquired mid-countdown clears the clock — the account is never erased', async () => {
@@ -287,8 +287,8 @@ describe('warning cadence', () => {
 
 		const first = await sweepZeroCreditAccounts();
 		expect(first).toMatchObject({ warned: 1, deleted: 0 });
-		expect(mocks.sendMailjetMessage).toHaveBeenCalledTimes(1);
-		expect(mocks.sendMailjetMessage.mock.calls[0][0]).toMatchObject({
+		expect(mocks.sendProtonMailEmail).toHaveBeenCalledTimes(1);
+		expect(mocks.sendProtonMailEmail.mock.calls[0][0]).toMatchObject({
 			toEmail: 'u1@example.com',
 			subject: expect.stringContaining('22 days') // ~30 - 8
 		});
@@ -299,7 +299,7 @@ describe('warning cadence', () => {
 		// Same tick / same milestone: the claim already stands — no re-send.
 		const second = await sweepZeroCreditAccounts();
 		expect(second.warned).toBe(0);
-		expect(mocks.sendMailjetMessage).toHaveBeenCalledTimes(1);
+		expect(mocks.sendProtonMailEmail).toHaveBeenCalledTimes(1);
 	});
 
 	test('a claim without delivery never satisfies the deletion gate — the crash window stays safe', async () => {
@@ -324,7 +324,7 @@ describe('warning cadence', () => {
 		} finally {
 			errorSpy.mockRestore();
 		}
-		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+		expect(mocks.sendProtonMailEmail).not.toHaveBeenCalled();
 	});
 
 	test('a crashed claim becomes retryable — the lease expires and the next sweep redelivers', async () => {
@@ -338,7 +338,7 @@ describe('warning cadence', () => {
 
 		const result = await sweepZeroCreditAccounts();
 		expect(result).toMatchObject({ warned: 1, errors: 0 });
-		expect(mocks.sendMailjetMessage).toHaveBeenCalledTimes(1);
+		expect(mocks.sendProtonMailEmail).toHaveBeenCalledTimes(1);
 		expect((await userRow('u1'))!.zeroCreditsWarnedAt).not.toBeNull();
 	});
 
@@ -348,7 +348,7 @@ describe('warning cadence', () => {
 		// for a countdown that no longer exists.
 		await seedAccount('u1', { creditsRemaining: 0 });
 		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(8) }).where(eq(users.id, 'u1'));
-		mocks.sendMailjetMessage.mockImplementationOnce(async () => {
+		mocks.sendProtonMailEmail.mockImplementationOnce(async () => {
 			// A fresh countdown commits while the warning is in flight.
 			await testDb().db.update(users).set({ zeroCreditsSince: new Date().toISOString() }).where(eq(users.id, 'u1'));
 		});
@@ -356,7 +356,7 @@ describe('warning cadence', () => {
 		try {
 			const result = await sweepZeroCreditAccounts();
 			expect(result).toMatchObject({ warned: 1, errors: 0 });
-			expect(mocks.sendMailjetMessage).toHaveBeenCalledTimes(1);
+			expect(mocks.sendProtonMailEmail).toHaveBeenCalledTimes(1);
 			const row = (await userRow('u1'))!;
 			expect(row.zeroCreditsWarnedAt).toBeNull(); // delivery not credited to the new countdown
 			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('delivery left unmarked'));
@@ -391,8 +391,8 @@ describe('warning cadence', () => {
 			const result = await sweepZeroCreditAccounts();
 			expect(result.warned).toBe(1);
 		}
-		expect(mocks.sendMailjetMessage).toHaveBeenCalledTimes(3);
-		expect(mocks.sendMailjetMessage.mock.calls[2][0].subject).toContain('1 day'); // day 29 → 1 day left
+		expect(mocks.sendProtonMailEmail).toHaveBeenCalledTimes(3);
+		expect(mocks.sendProtonMailEmail.mock.calls[2][0].subject).toContain('1 day'); // day 29 → 1 day left
 	});
 
 	test('no warning while inside a 7-day interval', async () => {
@@ -403,7 +403,7 @@ describe('warning cadence', () => {
 			.where(eq(users.id, 'u1'));
 		const result = await sweepZeroCreditAccounts();
 		expect(result.warned).toBe(0);
-		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+		expect(mocks.sendProtonMailEmail).not.toHaveBeenCalled();
 	});
 
 	test('a missing APP_URL never consumes the milestone — the warning retries once configured', async () => {
@@ -417,19 +417,19 @@ describe('warning cadence', () => {
 		// The claim must NOT stand: the milestone was never mailed, so the
 		// row stays due — the "never silently consumed" guarantee.
 		expect((await userRow('u1'))!.zeroCreditsNotifiedAt).toBeNull();
-		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+		expect(mocks.sendProtonMailEmail).not.toHaveBeenCalled();
 
 		mocks.env.APP_URL = 'https://moderaty.app';
 		const retried = await sweepZeroCreditAccounts();
 		expect(retried).toMatchObject({ warned: 1, errors: 0 });
-		expect(mocks.sendMailjetMessage).toHaveBeenCalledTimes(1);
+		expect(mocks.sendProtonMailEmail).toHaveBeenCalledTimes(1);
 		errorSpy.mockRestore();
 	});
 
 	test('a failed send releases the claim so the milestone retries next sweep', async () => {
 		await seedAccount('u1', { creditsRemaining: 0 });
 		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(8) }).where(eq(users.id, 'u1'));
-		mocks.sendMailjetMessage.mockRejectedValueOnce(new Error('mailjet down'));
+		mocks.sendProtonMailEmail.mockRejectedValueOnce(new Error('smtp provider down'));
 
 		const failed = await sweepZeroCreditAccounts();
 		expect(failed).toMatchObject({ warned: 0, errors: 1 });
@@ -437,7 +437,7 @@ describe('warning cadence', () => {
 
 		const retried = await sweepZeroCreditAccounts();
 		expect(retried).toMatchObject({ warned: 1, errors: 0 });
-		expect(mocks.sendMailjetMessage).toHaveBeenCalledTimes(2);
+		expect(mocks.sendProtonMailEmail).toHaveBeenCalledTimes(2);
 	});
 
 	test('a purchase between evaluation and the warning claim suppresses the e-mail and clears the clock', async () => {
@@ -457,7 +457,7 @@ describe('warning cadence', () => {
 		} finally {
 			await testDb().client.execute('DROP TRIGGER racing_topup');
 		}
-		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+		expect(mocks.sendProtonMailEmail).not.toHaveBeenCalled();
 		// The funded state is discovered post-claim: the clock clears now —
 		// the funded path would do the same on the next rotation.
 		expect(await userRow('u1')).toMatchObject({ zeroCreditsSince: null, zeroCreditsNotifiedAt: null });
@@ -484,7 +484,7 @@ describe('countdown reset', () => {
 		await sweepZeroCreditAccounts();
 		const row = await userRow('u1');
 		expect(Date.parse(row!.zeroCreditsSince!)).toBeGreaterThan(Date.now() - 60_000);
-		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+		expect(mocks.sendProtonMailEmail).not.toHaveBeenCalled();
 	});
 });
 
@@ -496,8 +496,8 @@ describe('deletion', () => {
 		const result = await sweepZeroCreditAccounts();
 		expect(result).toMatchObject({ deleted: 1, errors: 0 });
 		// Final notice went out before the erase.
-		expect(mocks.sendMailjetMessage).toHaveBeenCalledTimes(1);
-		expect(mocks.sendMailjetMessage.mock.calls[0][0].subject).toContain('has been deleted');
+		expect(mocks.sendProtonMailEmail).toHaveBeenCalledTimes(1);
+		expect(mocks.sendProtonMailEmail.mock.calls[0][0].subject).toContain('has been deleted');
 
 		const tombstone = await userRow('u1');
 		expect(tombstone).toMatchObject({ googleSub: 'deleted:u1', email: '[deleted]', displayName: '[deleted]' });
@@ -513,13 +513,13 @@ describe('deletion', () => {
 		// Tombstoned users never enter the batch again.
 		const second = await sweepZeroCreditAccounts();
 		expect(second).toMatchObject({ evaluated: 0, deleted: 0 });
-		expect(mocks.sendMailjetMessage).toHaveBeenCalledTimes(1);
+		expect(mocks.sendProtonMailEmail).toHaveBeenCalledTimes(1);
 	});
 
 	test('a final-notice failure does not block the deletion', async () => {
 		await seedAccount('u1', { creditsRemaining: 0 });
 		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7), zeroCreditsWarnedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
-		mocks.sendMailjetMessage.mockRejectedValueOnce(new Error('mailjet down'));
+		mocks.sendProtonMailEmail.mockRejectedValueOnce(new Error('smtp provider down'));
 		vi.spyOn(console, 'error').mockImplementation(() => {});
 		const result = await sweepZeroCreditAccounts();
 		expect(result).toMatchObject({ deleted: 1, errors: 0 });
@@ -545,7 +545,7 @@ describe('deletion', () => {
 		} finally {
 			await testDb().client.execute('DROP TRIGGER racing_topup');
 		}
-		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+		expect(mocks.sendProtonMailEmail).not.toHaveBeenCalled();
 		const user = await userRow('u1');
 		expect(user?.googleSub).toBe('sub-u1'); // still alive — never tombstoned
 		expect(user?.zeroCreditsSince).toBeNull(); // clock cleared by the claim
@@ -620,13 +620,13 @@ describe('deletion', () => {
 		} finally {
 			await testDb().client.execute('DROP TRIGGER topup_mid_delete');
 		}
-		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled(); // no "deleted" notice — nothing was deleted
+		expect(mocks.sendProtonMailEmail).not.toHaveBeenCalled(); // no "deleted" notice — nothing was deleted
 		expect((await userRow('u1'))!.googleSub).toBe('sub-u1'); // still alive — never tombstoned
 		expect(await testDb().db.select().from(organizations).all()).toHaveLength(1);
 	});
 
 	test('a day-30 account that was never warned is NOT deleted — the warning window restarts', async () => {
-		// codex+coderabbit: APP_URL missing or every Mailjet send failing
+		// codex+coderabbit: APP_URL missing or every e-mail send failing
 		// leaves zeroCreditsNotifiedAt NULL; the bare clock must never erase
 		// an account that got none of the warnings Terms §17.3 promises.
 		await seedAccount('u1', { creditsRemaining: 0 });
@@ -643,7 +643,7 @@ describe('deletion', () => {
 		} finally {
 			errorSpy.mockRestore();
 		}
-		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+		expect(mocks.sendProtonMailEmail).not.toHaveBeenCalled();
 	});
 
 	test('a warning stamp from an earlier countdown cannot satisfy the deletion gate', async () => {
@@ -667,7 +667,7 @@ describe('deletion', () => {
 		} finally {
 			errorSpy.mockRestore();
 		}
-		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+		expect(mocks.sendProtonMailEmail).not.toHaveBeenCalled();
 	});
 
 	test('a leftover warning stamp is cleared when a new countdown starts', async () => {
@@ -708,13 +708,13 @@ describe('deletion', () => {
 		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7), zeroCreditsWarnedAt: daysAgo(7) }).where(eq(users.id, 'u1'));
 		// codex+coderabbit: the notice used to precede the erase — a failed
 		// deletion would tell the user their account is gone while it lives.
-		mocks.sendMailjetMessage.mockImplementation(async () => {
+		mocks.sendProtonMailEmail.mockImplementation(async () => {
 			expect((await userRow('u1'))!.googleSub).toBe('deleted:u1'); // already committed
-			return { messageId: 1, messageUuid: 'uuid-1' };
+			return { messageId: '<msg-1@moderaty.app>' };
 		});
 		const result = await sweepZeroCreditAccounts();
 		expect(result).toMatchObject({ deleted: 1, errors: 0 });
-		expect(mocks.sendMailjetMessage).toHaveBeenCalledTimes(1);
+		expect(mocks.sendProtonMailEmail).toHaveBeenCalledTimes(1);
 	});
 
 	test('a failed deletion sends no completed-notice e-mail', async () => {
@@ -730,7 +730,7 @@ describe('deletion', () => {
 		} finally {
 			vi.restoreAllMocks();
 		}
-		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+		expect(mocks.sendProtonMailEmail).not.toHaveBeenCalled();
 		expect((await userRow('u1'))!.googleSub).toBe('sub-u1');
 	});
 
@@ -826,7 +826,7 @@ describe('deletion', () => {
 		const row = (await userRow('u1'))!;
 		expect(row.googleSub).toBe('sub-u1'); // alive — payment may still arrive
 		expect(row.zeroCreditsSince).toBe(since); // countdown PRESERVED, not restarted
-		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+		expect(mocks.sendProtonMailEmail).not.toHaveBeenCalled();
 	});
 
 	test.each([
@@ -851,7 +851,7 @@ describe('deletion', () => {
 		expect(await userRow('u1')).toMatchObject({ googleSub: 'sub-u1', ...countdown });
 		expect(await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-u1')).get()).toBeDefined();
 		expect(await testDb().db.select({ status: table.status }).from(table).where(eq(table.attemptId, 'att-stale')).get()).toEqual({ status });
-		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+		expect(mocks.sendProtonMailEmail).not.toHaveBeenCalled();
 		expect(mocks.sessionsRetrieve).not.toHaveBeenCalled(); // retention never makes remote calls under its write lock
 	});
 
@@ -1086,8 +1086,8 @@ describe('batching', () => {
 	});
 
 	test('a deadline that expires mid-warning defers the rest of the sweep without an error', async () => {
-		// codex: the deadline used to be checked only between users — Mailjet,
-		// the erase, and Stripe cleanup could run unbounded past the budget.
+		// codex: the deadline used to be checked only between users — the mail
+		// send, the erase, and Stripe cleanup could run unbounded past the budget.
 		// DeadlineExceededError is a scheduling condition, not a per-account
 		// failure: the claim releases (milestone survives for next tick) and
 		// the sweep stops cleanly.
@@ -1096,7 +1096,7 @@ describe('batching', () => {
 		await seedAccount('u2', { creditsRemaining: 0 });
 		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(8) }).where(eq(users.id, 'u1'));
 		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(8) }).where(eq(users.id, 'u2'));
-		mocks.sendMailjetMessage.mockImplementation(async (_msg: unknown, given?: number) => {
+		mocks.sendProtonMailEmail.mockImplementation(async (_msg: unknown, given?: number) => {
 			expect(given).toBe(deadline); // the shared budget reaches the provider call
 			throw new DeadlineExceededError();
 		});
@@ -1104,7 +1104,7 @@ describe('batching', () => {
 		try {
 			const result = await sweepZeroCreditAccounts(1_000, deadline);
 			expect(result).toMatchObject({ deleted: 0, errors: 0 });
-			expect(mocks.sendMailjetMessage).toHaveBeenCalledTimes(1); // u2 never reached the provider
+			expect(mocks.sendProtonMailEmail).toHaveBeenCalledTimes(1); // u2 never reached the provider
 			expect((await userRow('u1'))!.zeroCreditsNotifiedAt).toBeNull(); // claim released — no milestone consumed
 			expect((await userRow('u2'))!.zeroCreditsNotifiedAt).toBeNull();
 			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('deadline'));
@@ -1127,7 +1127,7 @@ describe('loud failure logging', () => {
 		// consumes the trailing error and hides the real failure (codeant).
 		await seedAccount('u%s-1', { creditsRemaining: 0 });
 		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(8) }).where(eq(users.id, 'u%s-1'));
-		mocks.sendMailjetMessage.mockRejectedValueOnce(new Error('mailjet down'));
+		mocks.sendProtonMailEmail.mockRejectedValueOnce(new Error('smtp provider down'));
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
 		const result = await sweepZeroCreditAccounts();
@@ -1136,14 +1136,14 @@ describe('loud failure logging', () => {
 		const call = errorSpy.mock.calls.find((args) => String(args[0]).includes('evaluation failed'));
 		expect(call).toBeDefined();
 		expect(format(...call!)).toContain('u%s-1');
-		expect(format(...call!)).toContain('mailjet down');
+		expect(format(...call!)).toContain('smtp provider down');
 		errorSpy.mockRestore();
 	});
 
 	test('a final-notice failure logs the user id verbatim', async () => {
 		await seedAccount('d%s-1', { creditsRemaining: 0 });
 		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(31), zeroCreditsNotifiedAt: daysAgo(7), zeroCreditsWarnedAt: daysAgo(7) }).where(eq(users.id, 'd%s-1'));
-		mocks.sendMailjetMessage.mockRejectedValueOnce(new Error('mailjet down'));
+		mocks.sendProtonMailEmail.mockRejectedValueOnce(new Error('smtp provider down'));
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
 		const result = await sweepZeroCreditAccounts();

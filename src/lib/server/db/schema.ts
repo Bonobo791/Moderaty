@@ -418,7 +418,7 @@ export const feedbackDigests = sqliteTable('feedback_digests', {
 	windowStart: text('window_start').notNull(), // ISO; last complete digest's window_end (epoch for the first)
 	windowEnd: text('window_end').notNull(), // ISO; published_at of the newest classified comment
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
-	status: text('status').notNull(), // 'complete' | 'failed' | 'deferred'
+	status: text('status').notNull(), // 'complete' | 'failed' | 'deferred' | 'dry-run' | 'dry-run-pending' | 'dry-run-failed'
 	commentsClassified: integer('comments_classified').notNull().default(0),
 	commentsFailed: integer('comments_failed').notNull().default(0), // per-comment classifier failures, skipped and counted (I1)
 	clusteringDegraded: integer('clustering_degraded'),
@@ -460,7 +460,7 @@ export const findingEvidence = sqliteTable('finding_evidence', {
 	findingId: integer('finding_id')
 		.notNull()
 		.references(() => feedbackFindings.id, { onDelete: 'cascade' }),
-	commentId: text('comment_id').notNull(), // real comments.id — validated at write time; reveal path re-checks tenancy
+	commentId: text('comment_id').notNull(), // YouTube comment id — validated at write time; a dry-run preview's id may exist nowhere else (sourceText carries its text); reveal path re-checks tenancy
 	sanitizedExcerpt: text('sanitized_excerpt').notNull(), // concealEvidence() output — the only text the default render shows
 	hasAbuse: integer('has_abuse').notNull().default(0), // 1 = classifier flagged abuse; drives the reveal warning
 	sourceText: text('source_text'), // the exact text this digest classified — pinned per evidence row so a later scan refreshing the shared snapshot can't change what an older digest's reveal shows (codex). Null on rows written before the column existed: reveal falls back to the snapshot/live join.

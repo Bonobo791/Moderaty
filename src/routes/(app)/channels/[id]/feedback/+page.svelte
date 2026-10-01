@@ -407,7 +407,7 @@
 							<option value="all">All time</option>
 						</select>
 					</label>
-					<p class="muted settings-note">1 free feedback dry run per channel — scores only the first YouTube page (up to 100 comments) and saves no digest, history, or moderation state. Used when it starts, even if it fails. No credits are charged.</p>
+					<p class="muted settings-note">1 free feedback dry run per channel — scores only the first YouTube page (up to 100 comments) and changes no moderation state. Used when it starts, even if it fails. No credits are charged.</p>
 					<button class="btn small" disabled={previewingFeedback || feedbackPreviewUsed || !data.ch.active}>
 						{previewingFeedback ? 'Previewing…' : feedbackPreviewUsed ? 'Feedback preview already used' : 'Run feedback dry run'}
 					</button>

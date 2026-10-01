@@ -14,7 +14,7 @@ import { and, eq, gt } from 'drizzle-orm';
 import { db } from '$lib/server/db';
 import { contactSubmissions } from '$lib/server/db/schema';
 import { escapeHtml } from './emailText';
-import { sendMailjetMessage } from './mailjet';
+import { sendProtonMailEmail } from './protonMail';
 
 /**
  * The exact opt-in checkbox sentence, shown on the form and stored verbatim
@@ -296,9 +296,8 @@ export async function submitContactRequest(input: {
 	const verifyUrl = new URL('/contact/verify', appUrl);
 	verifyUrl.searchParams.set('token', submission.verificationToken);
 	const email = buildVerificationEmail({ name: submission.name, verifyUrl: verifyUrl.toString() });
-	await sendMailjetMessage({
+	await sendProtonMailEmail({
 		toEmail: submission.email,
-		toName: submission.name,
 		subject: email.subject,
 		textPart: email.textPart,
 		htmlPart: email.htmlPart

@@ -24,7 +24,7 @@ import { memberships, mercadoPagoCheckoutAttempts, organizations, stripeCheckout
 import { deleteUserRecords, revokeChannelGrants, type DeletionTx, type ErasedChannelGrant } from '$lib/server/deletion';
 import { escapeHtml } from '$lib/server/emailText';
 import { assertBeforeDeadline, DeadlineExceededError } from '$lib/server/http';
-import { sendMailjetMessage } from '$lib/server/mailjet';
+import { sendProtonMailEmail } from '$lib/server/protonMail';
 
 export const ZERO_CREDIT_GRACE_MS = 30 * 24 * 60 * 60 * 1000; // countdown length (Terms §17)
 export const ZERO_CREDIT_NOTICE_MS = 7 * 24 * 60 * 60 * 1000; // warning cadence — first at day 7, never at day 0
@@ -130,9 +130,9 @@ function usageUrl(): string {
 	return new URL('/usage', appUrl).toString();
 }
 
-async function sendMail(toEmail: string, toName: string, email: ZeroCreditEmail, deadline?: number): Promise<void> {
-	await sendMailjetMessage(
-		{ toEmail, toName, subject: email.subject, textPart: email.textPart, htmlPart: email.htmlPart },
+async function sendMail(toEmail: string, email: ZeroCreditEmail, deadline?: number): Promise<void> {
+	await sendProtonMailEmail(
+		{ toEmail, subject: email.subject, textPart: email.textPart, htmlPart: email.htmlPart },
 		deadline
 	);
 }
@@ -314,7 +314,7 @@ async function claimAndWarn(user: SweepUser, since: string, sinceMs: number, now
 		// A spent budget throws here too — inside the try — so the milestone
 		// claim releases and the warning retries next tick (codex).
 		assertBeforeDeadline(deadline);
-		await sendMail(user.email, user.displayName, email, deadline);
+		await sendMail(user.email, email, deadline);
 	} catch (cause) {
 		await releaseWarningClaim(user, nowIso);
 		throw cause;
@@ -423,7 +423,7 @@ async function claimAndDelete(user: SweepUser, since: string, ageMs: number, dea
 	// The completion notice is best-effort — the erase is already committed;
 	// a mail failure must not masquerade as a failed deletion.
 	try {
-		await sendMail(user.email, user.displayName, buildZeroCreditDeletedEmail({ name: user.displayName }), deadline);
+		await sendMail(user.email, buildZeroCreditDeletedEmail({ name: user.displayName }), deadline);
 	} catch (cause) {
 		console.error('zero-credit sweep: post-deletion notice for user %s failed:', user.id, cause);
 	}
@@ -502,7 +502,7 @@ async function resolveGraceExpiry(user: SweepUser, since: string, sinceMs: numbe
 	const neverWarned = user.warnedAt === null || Date.parse(user.warnedAt) < sinceMs;
 	if (!neverWarned) return claimAndDelete(user, since, ageMs, deadline);
 	// Deletion requires a delivered warning — an account whose warnings
-	// all failed to send (APP_URL missing, Mailjet down) must not be
+	// all failed to send (APP_URL missing, mail transport down) must not be
 	// erased on the bare clock. Restart the window so the promised
 	// cadence can run; the release is conditional so a concurrent
 	// sweep's warning claim still wins (codex+coderabbit).

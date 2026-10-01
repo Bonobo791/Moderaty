@@ -4,18 +4,15 @@ import { eq } from 'drizzle-orm';
 
 const mocks = vi.hoisted(() => ({
 	env: {
-		APP_URL: 'https://moderaty.app',
-		MJ_APIKEY_PUBLIC: 'api-key',
-		MJ_APIKEY_PRIVATE: 'secret-key',
-		MAILJET_FROM_EMAIL: 'no-reply@moderaty.app'
+		APP_URL: 'https://moderaty.app'
 	} as Record<string, string | undefined>,
-	sendMailjetMessage: vi.fn()
+	sendProtonMailEmail: vi.fn()
 }));
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
-vi.mock('./mailjet', () => ({
-	sendMailjetMessage: mocks.sendMailjetMessage
+vi.mock('./protonMail', () => ({
+	sendProtonMailEmail: mocks.sendProtonMailEmail
 }));
 
 import { setupTestDb, testDb } from './testdb';
@@ -40,8 +37,8 @@ async function rows() {
 
 beforeEach(() => {
 	mocks.env.APP_URL = 'https://moderaty.app';
-	mocks.sendMailjetMessage.mockReset();
-	mocks.sendMailjetMessage.mockResolvedValue({ messageId: 1, messageUuid: 'uuid-1' });
+	mocks.sendProtonMailEmail.mockReset();
+	mocks.sendProtonMailEmail.mockResolvedValue({ messageId: '<msg-1@moderaty.app>' });
 });
 
 afterEach(() => {
@@ -329,10 +326,12 @@ describe('submitContactRequest', () => {
 	test('records the pending row FIRST, then sends the verification e-mail with the APP_URL link', async () => {
 		const result = await submitContactRequest(SUBMIT);
 
-		expect(mocks.sendMailjetMessage).toHaveBeenCalledTimes(1);
-		const sent = mocks.sendMailjetMessage.mock.calls[0][0];
+		expect(mocks.sendProtonMailEmail).toHaveBeenCalledTimes(1);
+		const sent = mocks.sendProtonMailEmail.mock.calls[0][0];
 		expect(sent.toEmail).toBe('fan@example.com');
-		expect(sent.toName).toBe('Fan');
+		// The transport contract carries no recipient display name — names stay
+		// in the escaped body, never in a header (MOD-116).
+		expect(sent).not.toHaveProperty('toName');
 		expect(sent.subject).toContain('Confirm');
 		const expectedUrl = `https://moderaty.app/contact/verify?token=${result.verificationToken}`;
 		expect(sent.textPart).toContain(expectedUrl);
@@ -342,7 +341,7 @@ describe('submitContactRequest', () => {
 	});
 
 	test('propagates a send failure loudly and leaves the pending row for retry', async () => {
-		mocks.sendMailjetMessage.mockRejectedValue(new Error('verification e-mail could not be sent (HTTP 500)'));
+		mocks.sendProtonMailEmail.mockRejectedValue(new Error('e-mail could not be sent (SMTP failure)'));
 		await expect(submitContactRequest(SUBMIT)).rejects.toThrow(/could not be sent/);
 		const stored = await rows();
 		expect(stored).toHaveLength(1);
@@ -353,7 +352,7 @@ describe('submitContactRequest', () => {
 		mocks.env.APP_URL = undefined;
 		await expect(submitContactRequest(SUBMIT)).rejects.toThrow(/APP_URL is not configured/);
 		expect(await rows()).toHaveLength(0);
-		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+		expect(mocks.sendProtonMailEmail).not.toHaveBeenCalled();
 	});
 });
 

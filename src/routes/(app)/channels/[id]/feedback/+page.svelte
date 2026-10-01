@@ -223,7 +223,7 @@
 				{#if shown.clusteringDegraded}{@render clusteringNotice()}{/if}
 				<p class="muted">
 					Window {windowLabel(shown)} · {shown.commentsClassified} classified{#if shown.commentsFailed}
-						· {shown.commentsFailed} failed{/if} · {shown.creditsUsed === null ? 'unmetered' : `${shown.creditsUsed} credits used`} · generated {relativeTime(shown.createdAt)}
+						· {shown.commentsFailed} failed{/if} · {shown.status === 'dry-run' ? 'free preview' : shown.creditsUsed === null ? 'unmetered' : `${shown.creditsUsed} credits used`} · generated {relativeTime(shown.createdAt)}
 					{#if data.latest && shown.id !== data.latest.id}
 						· <a href="?">Back to latest digest</a>
 					{/if}
@@ -506,13 +506,13 @@
 			<ul class="history-list">
 				{#each data.digests as d (d.id)}
 					<li class="muted">
-						{#if d.status === 'complete'}
+						{#if d.status === 'complete' || d.status === 'dry-run'}
 							<a href={digestHref(d.id)} aria-current={shown?.id === d.id ? 'true' : undefined}>
-								{relativeTime(d.createdAt)} — {d.status}, {d.commentsClassified} classified{#if d.pooledCount}
-									, {d.pooledCount} pooled{/if}, {d.creditsUsed === null ? 'unmetered' : `${d.creditsUsed} credits used`}
+								{relativeTime(d.createdAt)} — {d.status === 'dry-run' ? 'free preview' : 'complete'}, {d.commentsClassified} classified{#if d.pooledCount}
+									, {d.pooledCount} pooled{/if}{#if d.status === 'complete'}, {d.creditsUsed === null ? 'unmetered' : `${d.creditsUsed} credits used`}{/if}
 							</a>
 						{:else}
-							{relativeTime(d.createdAt)} — {d.status}{#if d.status === 'failed'}
+							{relativeTime(d.createdAt)} — {d.status === 'dry-run-pending' ? 'preview in progress' : d.status === 'dry-run-failed' ? 'preview failed' : d.status}{#if d.status === 'failed'}
 								({d.error ?? 'error'}){/if}
 						{/if}
 					</li>

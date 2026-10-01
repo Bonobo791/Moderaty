@@ -335,6 +335,37 @@ describe('feedback page digest history links (SSR)', () => {
 		);
 		expect(body).toContain('Back to latest digest');
 	});
+
+	it('links a finished preview row to its findings and labels preview lifecycle rows', () => {
+		// A completed dry run is a real, selectable result; pending/failed
+		// previews have no findings to show and stay unlinked text (MOD-232).
+		const preview = { ...COMPLETE_DIGEST, id: 9, status: 'dry-run', creditsUsed: null };
+		const pending = { ...COMPLETE_DIGEST, id: 10, status: 'dry-run-pending', creditsUsed: null };
+		const failedPreview = { ...COMPLETE_DIGEST, id: 11, status: 'dry-run-failed', error: 'preview', creditsUsed: null };
+		const body = renderFeedback(
+			pageData({
+				latest: COMPLETE_DIGEST,
+				selected: COMPLETE_DIGEST,
+				digests: [failedPreview, pending, preview, COMPLETE_DIGEST],
+				findings: []
+			})
+		);
+		expect(body).toContain('href="?digest=9"');
+		expect(body).not.toContain('?digest=10');
+		expect(body).not.toContain('?digest=11');
+		expect(body).toContain('free preview');
+		expect(body).toContain('preview in progress');
+		expect(body).toContain('preview failed');
+	});
+
+	it('labels a selected preview as a free preview instead of unmetered', () => {
+		// creditsUsed is null on preview rows — rendering it as "unmetered"
+		// would read as a BYOK run; the preview never touched credits.
+		const preview = { ...COMPLETE_DIGEST, id: 9, status: 'dry-run', creditsUsed: null };
+		const body = renderFeedback(pageData({ digests: [preview], selected: preview, findings: [] }));
+		expect(body).toContain('free preview');
+		expect(body).not.toContain('unmetered');
+	});
 });
 
 describe('feedback page I12 states (SSR)', () => {

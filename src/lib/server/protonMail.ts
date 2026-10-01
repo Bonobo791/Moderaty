@@ -11,7 +11,7 @@ import { env } from '$env/dynamic/private';
 
 import nodemailer from 'nodemailer';
 
-import { DeadlineExceededError } from './http';
+import { assertBeforeDeadline, DeadlineExceededError } from './http';
 
 const PROTON_SMTP_HOST = 'smtp.protonmail.ch';
 const PROTON_SMTP_PORT = 587;
@@ -248,8 +248,15 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 		tls: { rejectUnauthorized: true }
 	});
 
+	// Transport setup above took real time — re-verify the caller's budget
+	// before arming anything so an expired deadline never starts SMTP, and arm
+	// the guard with a fresh delay so it fires AT the deadline rather than
+	// deadline + setup skew.
+	assertBeforeDeadline(deadline);
+
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const guard = new Promise<never>((_, reject) => {
+		const guardMs = Math.max(0, Math.min(PROTON_TIMEOUT_MS, (deadline ?? Infinity) - Date.now()));
 		timer = setTimeout(() => {
 			// Destroy the held socket BEFORE rejecting so an in-flight DATA
 			// acceptance can never outlive the budget; the send's late

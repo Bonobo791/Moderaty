@@ -24,6 +24,8 @@ import { findPausedTopup, recoverPausedTopup, sweepPausedTopups, topupAttemptCor
 
 export const AUTO_TOPUP_DEFAULT_THRESHOLD = 100;
 const COOLDOWN_MS = 24 * 60 * 60 * 1000;
+/** PI statuses that can still settle on their own — a new charge while one exists could double-charge. `requires_payment_method` is excluded: Stripe leaves a declined off-session PI there, and it cannot settle without a re-confirmation this code never sends. */
+const SETTLING_PI_STATUSES = new Set(['processing', 'requires_capture', 'requires_confirmation', 'requires_action']);
 const MAX_PER_DAY = 1;
 const MAX_PER_MONTH = 30;
 const MAX_CONSECUTIVE_FAILURES = 2;
@@ -243,7 +245,7 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 	// attempt. A PaymentIntent still in a nonterminal status defers this
 	// charge — a second PI could double-charge when the first settles (codex
 	// P1). Orgs with no marker have no prior attempt: skip the Stripe call.
-	if (org.attemptAt && (await reconcileAutoTopup(orgId)).inFlight) {
+	if (org.attemptAt && (await reconcileAutoTopup(orgId)).settling) {
 		console.error(`auto top-up deferred for org ${orgId}: a previous payment is still in flight — not charging until it resolves`);
 		return false;
 	}
@@ -615,10 +617,14 @@ async function releaseClaimForPi(
  *   is still in a non-terminal Stripe status (processing/requires_*): callers
  *   must not clear the row's reconciliation markers yet, or a PI that
  *   succeeds later with a lost webhook becomes undiscoverable (codex P1).
+ *   `settling` — the subset that can still move money (a declined
+ *   requires_payment_method PI is dead: it cannot settle without a
+ *   re-confirmation this code never sends, so it must not gate new charges —
+ *   gitar).
  */
-export async function reconcileAutoTopup(orgId: string): Promise<{ recovered: number; inFlight: boolean }> {
+export async function reconcileAutoTopup(orgId: string): Promise<{ recovered: number; inFlight: boolean; settling: boolean }> {
 	const org = await readAutoTopupState(orgId);
-	if (!org.customerId) return { recovered: 0, inFlight: false };
+	if (!org.customerId) return { recovered: 0, inFlight: false, settling: false };
 	const sinceSeconds = Math.floor((Date.now() - RECONCILE_WINDOW_MS) / 1000);
 	const list = await getStripe().paymentIntents.list({
 		customer: org.customerId,
@@ -627,11 +633,15 @@ export async function reconcileAutoTopup(orgId: string): Promise<{ recovered: nu
 	});
 	let granted = 0;
 	let inFlight = false;
+	let settling = false;
 	for (const pi of list.data) {
 		if (pi.status !== 'succeeded') {
 			// Only OUR still-unresolved top-up PIs pin the marker — a terminal
 			// (canceled) or unrelated PI must not keep the row selected.
-			if (pi.status !== 'canceled' && pi.metadata?.type === 'auto_topup' && pi.metadata?.org_id === orgId) inFlight = true;
+			if (pi.status !== 'canceled' && pi.metadata?.type === 'auto_topup' && pi.metadata?.org_id === orgId) {
+				inFlight = true;
+				if (SETTLING_PI_STATUSES.has(pi.status)) settling = true;
+			}
 			continue;
 		}
 		if (await grantAutoTopupCredits(orgId, pi)) granted += 1;
@@ -639,7 +649,7 @@ export async function reconcileAutoTopup(orgId: string): Promise<{ recovered: nu
 	if (granted > 0) {
 		console.info(`auto top-up reconciliation granted ${granted} recovered charge(s) for org ${orgId}`);
 	}
-	return { recovered: granted, inFlight };
+	return { recovered: granted, inFlight, settling };
 }
 
 /**
@@ -801,7 +811,7 @@ async function triggerEligibleTopups(limit: number, offeredBundles: string[], re
 			// Reconcile first: a lost webhook for a SUCCEEDED charge must grant
 			// its credits before any new charge is considered (no double charge,
 			// no lost money). Idempotent and cheap — one list call per org.
-			const { inFlight } = await reconcileAutoTopup(row.id);
+			const { inFlight, settling } = await reconcileAutoTopup(row.id);
 			if (!offeredBundles.includes(row.bundle ?? '') && !inFlight && row.lastAttemptAt) {
 				// Once old payments are reconciled, release the bounded budget. A
 				// concurrent setting/attempt must retain its reconciliation marker.
@@ -812,9 +822,10 @@ async function triggerEligibleTopups(limit: number, offeredBundles: string[], re
 			}
 			// A PaymentIntent still resolving at Stripe defers the new charge —
 			// minting a sibling under a fresh key could double-charge when the
-			// first settles (codex P1). maybeTriggerAutoTopUp re-checks this
-			// itself for non-sweep callers.
-			if (inFlight) {
+			// first settles (codex P1). Dead statuses (requires_payment_method)
+			// pin the marker but cannot settle, so they don't defer (gitar).
+			// maybeTriggerAutoTopUp re-checks this itself for non-sweep callers.
+			if (settling) {
 				console.error(`auto top-up deferred for org ${row.id}: a previous payment is still in flight — not charging until it resolves`);
 			} else if (await maybeTriggerAutoTopUp(row.id)) triggered += 1;
 		} catch (error) {

@@ -27,9 +27,15 @@ const COOLDOWN_MS = 24 * 60 * 60 * 1000;
 // The ONLY nonterminal PI status that can never settle: Stripe leaves a
 // declined off-session PI in requires_payment_method, and it cannot move
 // without a re-confirmation this code never sends. Every other non-canceled
-// status — including one this build does not recognize — can still settle,
-// so it must defer a new charge (a second PI could double-charge).
+// status defers a new charge (a second PI could double-charge).
 const DEAD_PI_STATUS = 'requires_payment_method';
+// Every PaymentIntent status Stripe documents today (the SDK's
+// PaymentIntent.Status union). An out-of-enum value — missing, renamed, or
+// brand-new — means the response can no longer be trusted to mean what this
+// code assumes about money movement, so the API call fails loudly (I2)
+// rather than guessing: guessing "dead" risks a double charge; guessing
+// "settling" starves the org silently for the whole reconcile window.
+const KNOWN_PI_STATUSES = new Set([DEAD_PI_STATUS, 'requires_confirmation', 'requires_action', 'processing', 'requires_capture', 'canceled', 'succeeded']);
 const MAX_PER_DAY = 1;
 const MAX_PER_MONTH = 30;
 const MAX_CONSECUTIVE_FAILURES = 2;
@@ -624,8 +630,9 @@ async function releaseClaimForPi(
  *   `settling` — the subset that can still move money: every non-canceled
  *   status EXCEPT requires_payment_method (a declined PI is dead: it cannot
  *   settle without a re-confirmation this code never sends, so it must not
- *   gate new charges — gitar). A missing or never-before-seen status
- *   defers rather than risking a double charge (codex PR #168).
+ *   gate new charges — gitar). A missing or never-before-seen status fails
+ *   loudly as an API contract violation rather than guessing settleability
+ *   (codex PR #168/#169).
  */
 export async function reconcileAutoTopup(orgId: string): Promise<{ recovered: number; inFlight: boolean; settling: boolean }> {
 	const org = await readAutoTopupState(orgId);
@@ -640,6 +647,12 @@ export async function reconcileAutoTopup(orgId: string): Promise<{ recovered: nu
 	let inFlight = false;
 	let settling = false;
 	for (const pi of list.data) {
+		// Validate at the boundary (I2): a missing or unrecognized status is
+		// wrong-typed external data — the API call failed. Every caller path
+		// catches and logs this loudly and retries next invocation.
+		if (typeof pi.status !== 'string' || !KNOWN_PI_STATUSES.has(pi.status)) {
+			throw new Error(`unrecognized PaymentIntent status ${JSON.stringify(pi.status)} on ${pi.id} — cannot tell whether it can still settle`);
+		}
 		if (pi.status !== 'succeeded') {
 			// Only OUR still-unresolved top-up PIs pin the marker — a terminal
 			// (canceled) or unrelated PI must not keep the row selected.

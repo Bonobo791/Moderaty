@@ -320,12 +320,14 @@ describe('maybeTriggerAutoTopUp', () => {
 		expect(mocks.paymentIntentsCreate).toHaveBeenCalledOnce();
 	});
 
-	test.each(['requires_future_thing', undefined])('an unrecognized PI status (%s) still defers the next charge', async (status) => {
-		// Stripe can introduce a nonterminal status this build has never seen
-		// (or omit status in a partial response). Treating the allowlist miss
-		// as safe would mint a sibling PI that double-charges when the unknown
-		// one settles (codex PR #168): only the verified-dead
-		// requires_payment_method is exempt from deferral.
+	test.each(['requires_future_thing', undefined])('an unrecognized PI status (%s) fails loudly instead of guessing settleability', async (status) => {
+		// Stripe can introduce a status this build has never seen (or omit
+		// status in a partial response). An out-of-enum value means the
+		// response no longer means what the code assumes: treating it as safe
+		// could double-charge (codex PR #168), and classifying it as settling
+		// would starve the org silently for the whole reconcile window while
+		// logging "still in flight" (codex PR #169). Wrong-typed external
+		// data = the API call failed (I2).
 		const stale = new Date(Date.now() - 4 * 24 * 60 * 60_000).toISOString();
 		await seedOrg({ creditsRemaining: 0, autoTopupState: 'idle', autoTopupAttemptAt: stale, autoTopupSubmittedAt: stale, autoTopupLastAttemptAt: stale });
 		mocks.paymentIntentsList.mockResolvedValue({
@@ -333,9 +335,27 @@ describe('maybeTriggerAutoTopUp', () => {
 			has_more: false
 		});
 
-		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+		await expect(maybeTriggerAutoTopUp('org-1')).rejects.toThrow('unrecognized PaymentIntent status');
 		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
 		expect((await orgRow()).autoTopupState).toBe('idle');
+	});
+
+	test('an unrecognized PI status fails the sweep loudly without charging', async () => {
+		// The sweep isolates per-org failures: the unknown status surfaces as
+		// a logged reconcile failure (retried next invocation), never as a
+		// silent settle/dead classification.
+		const stale = new Date(Date.now() - 4 * 24 * 60 * 60_000).toISOString();
+		await seedOrg({ creditsRemaining: 0, autoTopupState: 'idle', autoTopupAttemptAt: stale, autoTopupSubmittedAt: stale, autoTopupLastAttemptAt: stale });
+		mocks.paymentIntentsList.mockResolvedValue({
+			data: [{ id: 'pi_unknown', status: 'requires_future_thing', created: Math.floor(Date.parse(stale) / 1000), metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_500', auto_topup_attempt_at: stale } }],
+			has_more: false
+		});
+		const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			expect(await sweepAutoTopUp(5)).toBe(0);
+			expect(log).toHaveBeenCalledWith(expect.stringContaining('sweep failed for org org-1'), expect.anything());
+			expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+		} finally { log.mockRestore(); }
 	});
 
 	test('never triggers when the balance is at or above the threshold', async () => {

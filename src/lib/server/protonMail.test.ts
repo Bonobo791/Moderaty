@@ -136,6 +136,7 @@ test.each([
 	['Fan <fan@example.com>', 'display name'],
 	['fan@example.com\r\nRCPT TO:<mallory@evil.example>', 'CRLF injection'],
 	['a b@example.com', 'embedded whitespace'],
+	['fan:extra@example.com', 'colon in the local part'],
 	['fan@example.com ', 'trailing whitespace'],
 	['fan@example.com\x00', 'NUL control character'],
 	[`${'a'.repeat(250)}@b.co`, 'over 254 characters'],
@@ -235,6 +236,15 @@ test('a caller deadline expiring mid-send rejects DeadlineExceededError and tear
 	await vi.advanceTimersByTimeAsync(1_001);
 	await assertion;
 	expect(mocks.close).toHaveBeenCalled();
+});
+
+test('an acceptance resolved as the deadline lands still returns the message — the provider already has it', async () => {
+	// sendMail won the race; the server's 250 verdict is definitive. Throwing
+	// DeadlineExceededError after that point would tell the caller to defer
+	// and retry a message that was already accepted (codex PR 170).
+	const t0 = Date.now();
+	vi.spyOn(Date, 'now').mockReturnValueOnce(t0).mockReturnValue(t0 + 60_000);
+	await expect(sendProtonMailEmail(MESSAGE, t0 + 1_000)).resolves.toEqual({ messageId: '<msg-1@moderaty.app>' });
 });
 
 test('a late acceptance after the deadline is never reported as success', async () => {

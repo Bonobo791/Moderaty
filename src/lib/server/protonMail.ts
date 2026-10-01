@@ -21,7 +21,8 @@ const DEFAULT_FROM_NAME = 'Moderaty';
 // address-list or display-name vectors (`,` `;` `<` `>` `"` `'` `(` `)` `[`
 // `]` `\` `:`). Deliberately stricter than the /contact form's
 // EMAIL_PATTERN, whose `[^\s@]` still admits `a@b,c@d` lists.
-const BARE_ADDRESS = /^[^\s@,;:<>"'()[\]\\:\x00-\x1f\x7f]+@[^\s@,;:<>"'()[\]\\:\x00-\x1f\x7f]+$/i;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: the control-character ranges are the injection guard — they reject CR/LF folding, not match it
+const BARE_ADDRESS = /^[^\s@,;:<>"'()[\]\\\x00-\x1f\x7f]+@[^\s@,;:<>"'()[\]\\\x00-\x1f\x7f]+$/i;
 
 // Any value that lands inside an SMTP header line (subject, display names)
 // must not carry control characters — folding is where header injection
@@ -249,6 +250,9 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 		if (timer !== undefined) clearTimeout(timer);
 		transport.close();
 	}
-	if (deadline !== undefined && Date.now() >= deadline) throw new DeadlineExceededError();
+	// No deadline check past this point: sendMail resolving means the server
+	// already holds the message — surfacing DeadlineExceededError would tell
+	// the caller to defer and re-send an accepted e-mail (codex PR 170). A
+	// malformed acceptance still fails loudly inside validatedMessageId.
 	return { messageId: validatedMessageId(info, message.toEmail) };
 }

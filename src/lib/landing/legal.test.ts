@@ -714,6 +714,10 @@ describe('transactional e-mail provider disclosure (1.16)', () => {
 		expect(s5a).toMatch(/Proton AG \(transactional e-mail/);
 		expect(s5a).toMatch(/contact-form verification/i);
 		expect(s5a).toMatch(/zero-credit/i);
+		// The data categories must be pinned too — dropping them from §5(a)
+		// must fail the guard (cubic).
+		expect(s5a).toMatch(/recipient e-mail address/i);
+		expect(s5a).toMatch(/message content/i);
 		expect(s5a).toMatch(/Switzerland/);
 	});
 
@@ -723,20 +727,45 @@ describe('transactional e-mail provider disclosure (1.16)', () => {
 		expect(privacy).toMatch(/Sent (mailbox|folder)/i);
 	});
 
+	it('Privacy qualifies Proton processing geography — no unsupported confinement claim', () => {
+		// Proton's DPA §11 permits safeguarded transfers outside Switzerland,
+		// the EU, and adequacy-decision countries — the disclosure must not
+		// claim processing is confined to those regions (coderabbit/cubic).
+		const privacy = readComponent('privacy');
+		const para = privacy.match(/E-mail submitted to Proton([\s\S]*?)<\/p>/)?.[1] ?? '';
+		expect(para, '§5 Proton transport paragraph not found').not.toBe('');
+		expect(para).not.toMatch(/confine processing to/i);
+		expect(para).toMatch(/safeguarded transfers/i);
+		expect(para).toMatch(/Switzerland/);
+	});
+
+	it('Privacy states a deletion period for the Proton Sent-mailbox copies', () => {
+		// §7.1 promises retention only for the periods in §2 — the Sent copy
+		// needs a stated period, tied to the record it documents (cubic).
+		const privacy = readComponent('privacy');
+		const para = privacy.match(/E-mail submitted to Proton([\s\S]*?)<\/p>/)?.[1] ?? '';
+		expect(para).toMatch(/submission record/i);
+		expect(para).toMatch(/account closure/i);
+		expect(para).toMatch(/2 years/i);
+	});
+
 	it('Privacy §6.3 records Proton AG as a Switzerland transfer recipient', () => {
 		const s63 =
 			readComponent('privacy').match(/<strong>6\.3<\/strong>([\s\S]*?)<\/p>/)?.[1] ?? '';
 		expect(s63).toMatch(/Proton AG \(Switzerland\)/);
 	});
 
-	it('DPA Annex III lists Proton AG in Switzerland under ANPD SCCs', () => {
+	it('DPA Annex III keeps Proton out of scope — it processes no Comment Data', () => {
+		// §1.2 excludes the Controller's own contact/account data from this
+		// DPA. Proton handles exactly that (contact verification and service
+		// notices), so it belongs in the out-of-scope note, not the
+		// authorized-sub-processor table (cubic).
 		const dpa = readComponent('dpa');
 		const annex3 = dpa.slice(dpa.indexOf('id="annex-3"'), dpa.indexOf('id="annex-4"'));
-		const row = annex3.match(/<td>Proton AG<\/td>([\s\S]*?)<\/tr>/)?.[1] ?? '';
-		expect(row, 'Annex III Proton row not found').not.toBe('');
-		expect(row).toMatch(/contact-form verification/i);
-		expect(row).toMatch(/Switzerland/);
-		expect(row).toMatch(/ANPD SCCs \(Annex IV\)/);
+		expect(annex3).not.toMatch(/<td>Proton AG<\/td>/);
+		expect(annex3).toMatch(/Proton AG/);
+		expect(annex3).toMatch(/Switzerland/);
+		expect(annex3).toMatch(/no Comment Data/i);
 	});
 
 	it('no live disclosure still names Mailjet as the provider', () => {

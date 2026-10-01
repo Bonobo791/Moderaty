@@ -644,27 +644,14 @@
 				</td>
 				<td>ANPD SCCs (Annex IV)</td>
 			</tr>
-			<tr>
-				<td>Proton AG</td>
-				<td>
-					Transactional e-mail — contact-form verification and service notices,
-					including zero-credit account warnings; processes the recipient e-mail
-					address and message content over TLS-protected SMTP (not end-to-end
-					encrypted; a copy is retained in the provider's Sent mailbox)
-				</td>
-				<td>
-					Switzerland — Proton's data processing terms confine processing to
-					Switzerland, the EU, and adequacy-decision countries
-				</td>
-				<td>ANPD SCCs (Annex IV)</td>
-			</tr>
 		</tbody>
 	</table>
 </div>
 <p>
 	Additions or replacements follow the notice-and-objection procedure of Clause 10.1. Billing
-	processors (currently Stripe, Inc. — United States) process the Controller's billing data on
-	the Processor's behalf, for which the Processor is the controller (see the Privacy Policy);
+	processors (currently Stripe, Inc. — United States) and the transactional e-mail provider
+	(Proton AG — Switzerland) process the Controller's billing and contact data on the
+	Processor's behalf, for which the Processor is the controller (see the Privacy Policy);
 	they receive no Comment Data and are outside the scope of this DPA.
 </p>
 

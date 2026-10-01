@@ -146,16 +146,19 @@ One-time setup (human, in the Coolify dashboard):
    (`src/lib/server/protonMail.ts`). Set `PROTON_SMTP_USERNAME`,
    `PROTON_SMTP_TOKEN`, and `PROTON_FROM_NAME` as Runtime Variables BEFORE
    the deploy that sends e-mail reaches the app; the transport fails loudly
-   (`PROTON_SMTP_USERNAME is not configured`) until both required vars
-   exist, so env-before-code ordering makes the switch a config step, not
-   an outage. The container must egress outbound **TCP 587** — verify on
-   the actual deployment by submitting the contact form once and expecting
-   the verification e-mail (or a loud `500 e-mail could not be sent (...)`);
-   a copy lands in the Proton mailbox's Sent folder as the delivery record.
-   Failure mapping is generic-to-client with sanitized codes in the server
+   with a variable-specific `is not configured` error until both required
+   vars exist, so env-before-code ordering makes the switch a config step,
+   not an outage. The container must egress outbound **TCP 587** — verify
+   on the actual deployment by submitting the contact form once and
+   expecting the verification e-mail (or a loud `500 e-mail could not be
+   sent (...)`); a copy lands in the Proton mailbox's Sent folder as the
+   submission record (SMTP acceptance, not recipient delivery — there are
+   no delivery webhooks on this transport). Failure mapping is
+   generic-to-client with sanitized codes in the server
    log: `authentication failure` (bad/absent/expired token), `TLS failure`,
-   `provider throttled the request` (Proton 4xx — Proton is a mailbox
-   service with paid-account send limits, not a bulk-mail platform),
+   `provider throttled the request` (every Proton 4xx maps to this label —
+   check the logged response code before assuming a send limit; Proton is
+   a mailbox service, not a bulk-mail platform),
    `provider rejected the request` (5xx), `send timed out`. Token rotation:
    mint the new SMTP token, update the var, verify a send, THEN revoke the
    old one. Rollback: redeploy the previous release and remove the

@@ -196,9 +196,9 @@ the site exists), local work, and outage recovery.
     Bridge.
   - *Ordering:* set `PROTON_SMTP_USERNAME` and `PROTON_SMTP_TOKEN` on the
     environment BEFORE deploying a build that sends e-mail. The transport
-    fails loudly (`PROTON_SMTP_USERNAME is not configured`) until both
-    exist, so env-before-code ordering makes cutover a config step rather
-    than an outage.
+    fails loudly with a variable-specific `is not configured` error until
+    both exist, so env-before-code ordering makes cutover a config step
+    rather than an outage.
   - *Egress:* the app opens outbound TCP 587 — on Netlify, verify the
     functions runtime permits it before relying on delivery: submit the
     contact form once and expect either the verification e-mail or a loud
@@ -207,16 +207,18 @@ the site exists), local work, and outage recovery.
   - *Failure modes:* every failure is loud and generic to the client —
     missing env, `authentication failure` (bad/absent token — rotate or
     check the token), `TLS failure` (STARTTLS/cert negotiation — check
-    interception middleboxes), `provider throttled the request` (Proton
-    4xx rate/send limit — back off; Proton is a mailbox service, not a
-    bulk-mail platform, and paid-account send limits apply), `provider
+    interception middleboxes), `provider throttled the request` (every
+    Proton 4xx maps to this label — check the logged response code before
+    assuming a send limit; Proton is a mailbox service, not a bulk-mail
+    platform, and paid-account send limits apply), `provider
     rejected the request` (5xx), and `send timed out`. Sanitized codes land
     in the server log only.
   - *Staged delivery check:* after configuring, submit the contact form
     and confirm the verification e-mail arrives; a copy lands in the
-    Proton mailbox's **Sent** folder, which is the delivery record (there
+    Proton mailbox's **Sent** folder, which is the submission record (there
     are no delivery webhooks or an analytics dashboard on this transport —
-    Sent retention is the audit trail).
+    SMTP acceptance is not recipient delivery, and Sent retention is the
+    audit trail).
   - *Token rotation:* generate the replacement token first, update the env
     var and redeploy, verify a send, THEN revoke the old token — revoking
     first guarantees an authentication-failure window.

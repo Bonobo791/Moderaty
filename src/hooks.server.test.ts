@@ -423,7 +423,11 @@ test('a client that disconnects mid-request logs a warn line, not a fake 500', a
 		message: 'Internal Error'
 	});
 
-	expect(warn).toHaveBeenCalledWith(expect.stringContaining('request aborted: POST /channels/UC1/feedback'));
+	expect(warn).toHaveBeenCalledWith(
+		'request aborted: %s %s — the client disconnected before a response could be sent',
+		'POST',
+		'/channels/UC1/feedback'
+	);
 	expect(err).not.toHaveBeenCalled();
 	expect(result).toEqual({ message: 'Internal Error' });
 });
@@ -440,9 +444,29 @@ test('a real unexpected error keeps the loud [500] + stack log', async () => {
 		message: 'Internal Error'
 	});
 
-	expect(err).toHaveBeenCalledWith('[500] POST /channels/UC1/feedback', boom);
+	expect(err).toHaveBeenCalledWith('[%d] %s %s', 500, 'POST', '/channels/UC1/feedback', boom);
 	expect(warn).not.toHaveBeenCalled();
 	expect(result).toEqual({ message: 'Internal Error' });
+});
+
+test('a framework 404 logs a short warn line, not an error with a stack', async () => {
+	// Unmatched routes and missing data requests reach handleError as
+	// SvelteKitError(status 404) — scanner hits like /wp-admin would print a
+	// stack on the error channel every time (gitar). The default logger prints
+	// only the request line for them; the override must not regress that.
+	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+	const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+	const result = await handleError({
+		error: new Error('Not found: /wp-admin'),
+		event: abortedRequestEvent(false) as never,
+		status: 404,
+		message: 'Not Found'
+	});
+
+	expect(warn).toHaveBeenCalledWith('[%d] %s %s', 404, 'POST', '/channels/UC1/feedback');
+	expect(err).not.toHaveBeenCalled();
+	expect(result).toEqual({ message: 'Not Found' });
 });
 
 test('an abort-shaped error on a live connection still logs as a 500', async () => {

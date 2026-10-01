@@ -114,10 +114,17 @@ export const handleError: HandleServerError = ({ error, event, status, message }
 			(error as { code?: string }).code === 'ECONNRESET');
 	if (event.request.signal.aborted && abortLike) {
 		console.warn(
-			`request aborted: ${event.request.method} ${event.url.pathname} — the client disconnected before a response could be sent`
+			'request aborted: %s %s — the client disconnected before a response could be sent',
+			event.request.method,
+			event.url.pathname
 		);
+	} else if (status === 404) {
+		// Framework 404s (unmatched routes, missing data requests) land here as
+		// SvelteKitError — scanner noise, not a defect. The default logger prints
+		// just the request line for them; match that, at warn level.
+		console.warn('[%d] %s %s', status, event.request.method, event.url.pathname);
 	} else {
-		console.error(`[${status}] ${event.request.method} ${event.url.pathname}`, error);
+		console.error('[%d] %s %s', status, event.request.method, event.url.pathname, error);
 	}
 	return { message };
 };

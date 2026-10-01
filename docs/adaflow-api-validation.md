@@ -38,16 +38,29 @@ Verified by direct probes on 2026-10-01:
 | `POST /mcp` (and `/mcp/sse`, `/mcp/messages`) | `401 {"jsonrpc":"2.0","error":{"code":-32001,"message":"Não autorizado. Forneça um token Bearer válido."}}` — **MCP endpoint exists, auth = `Authorization: Bearer <token>`** |
 | `GET /api/v1/me` | `401` — REST API base confirmed at `/api/v1` |
 | `POST /api/v1/nfses` | `401` — NFSe create route exists |
-| `GET|POST /api/v1/nfses/import` | `401` — **the `createNfseImport` route** (tag `NFSes`) |
+| `GET` and `POST /api/v1/nfses/import` | `401` — the import route behind the `createNfseImport` docs anchor (see provenance note below) |
 | `GET /api/v1/nfses/import_file` | `401` — file-upload variant exists |
 | `GET /api/v1/nfses/imports` | `401` GET / `404` POST — import listing exists |
 | `POST /api/v1/users` | `422` — exists (signup); validates input |
 | `api.adaflow.com`, `mcp.adaflow.com`, `developers.adaflow.com`, `docs.adaflow.com` | DNS/connection fails — no dedicated host; everything lives on `app.adaflow.com` |
 | `app.adaflow.com.br` | `301` → `app.adaflow.com` |
 
-- **Auth**: Bearer token for the programmatic surface (per the `/mcp` challenge). Whether the REST
-  `/api/v1/*` routes accept the same Bearer token or session cookie is UNVERIFIED until a token is
-  issued — expected to be Bearer, consistent with MCP and rswag-style `createNfseImport` naming.
+A `401` alone does not prove route registration — authentication could run before routing. The
+counter-evidence is the asymmetry in the table itself: `POST /api/v1/nfses/imports` returns `404`
+while `GET` returns `401`, so dispatch happens before the auth check and each `401` path is a real,
+matched route. What remains UNVERIFIED is the per-method behavior (which verbs each path accepts)
+and the exact auth scheme each route requires — both close when the spec is pulled.
+
+**`createNfseImport` provenance**: the operation id and `NFSes` tag come from the official docs URL
+shared with us — `app.adaflow.com/api_docs#tag/NFSes/operation/createNfseImport` — so the name is
+sourced from AdaFlow's own docs UI. Mapping that operation id to `/api/v1/nfses/import` is our
+inference from the path shape and is UNVERIFIED until `/api_docs.json` is accessible; MOD-227 must
+not hard-code the operation↔path mapping before then.
+
+- **Auth**: Bearer token is confirmed only for `/mcp` (its JSON-RPC error asks for
+  `Authorization: Bearer` verbatim). Whether the REST `/api/v1/*` routes accept the same Bearer
+  token or a session cookie is UNVERIFIED until a token is issued — expected to be Bearer,
+  consistent with MCP and rswag-style `createNfseImport` naming.
 - **Credential provisioning**: per ToS §4.7 API access is granted "a clientes selecionados" and
   credentials are personal and revocable; marketing pages state API/MCP integrations ship in every
   client plan since 2026. Path: log into app.adaflow.com and look for an Integrações/API section to
@@ -56,8 +69,9 @@ Verified by direct probes on 2026-10-01:
 
 ## 2. `createNfseImport` contract (AC: payload + note identity)
 
-Verified: the operation lives under tag `NFSes` and maps to routes that exist
-(`/api/v1/nfses/import`, `/api/v1/nfses/import_file`, `/api/v1/nfses/imports`). The presence of both
+The operation id/tag are sourced from the official docs URL anchor (§1 provenance note) and the
+candidate routes exist (`/api/v1/nfses/import`, `/api/v1/nfses/import_file`,
+`/api/v1/nfses/imports`). The presence of both
 `import` and `import_file` suggests structured-JSON and file-upload (XML) variants — **UNVERIFIED**
 which accepts what, and what fields identify a note (chave de acesso, NFS-e number, verification
 code). The full OpenAPI spec must be pulled from `/api_docs.json` once a session/token exists.
@@ -82,8 +96,9 @@ All **UNVERIFIED** — gated behind the docs login:
 
 **None blocking found.** The remaining unknowns are contract details, not capability gaps:
 
-1. **Route exists** — `POST /api/v1/nfses/import[_file]` confirmed live; REST + Bearer auth is the
-   integration mechanism, with `/mcp` as a possible alternative surface.
+1. **Route exists** — `POST /api/v1/nfses/import[_file]` confirmed live (401-vs-404 dispatch
+   evidence, §1). The REST auth scheme is UNVERIFIED until an issued token succeeds against
+   `/api/v1` — Bearer is expected (the `/mcp` challenge asks for it verbatim) but not yet proven.
 2. **Spec retrieval is the next step** — pull `/api_docs.json` under the client account immediately
    after token issuance; the spec closes every UNVERIFIED item above in one step.
 3. **Design constraint for MOD-227** (recorded): export only after Focus `autorizado`; dedupe key =

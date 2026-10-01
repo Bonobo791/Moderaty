@@ -125,7 +125,12 @@ describe('usage load', () => {
 		const { body } = render(Page, { props: { data, form: null } as never });
 		expect(body).toContain('Update auto top-up');
 		expect(body).toContain('Disable automatic top-up');
-		expect(body).toContain('name="enabled"');
+		// The server reads form.get('enabled') === 'on' — assert the value, not
+		// just the attribute name (cubic), and that exactly one enabled input
+		// exists: a stray one inside the Disable form would still pass a plain
+		// toContain (codeant) while silently disabling on Update.
+		expect(body).toContain('name="enabled" value="on"');
+		expect(body.match(/name="enabled"/g)).toHaveLength(1);
 		expect(body).not.toContain('Enable automatic top-up');
 	});
 	test('an unconfigured selection fails without changing settings', async () => {

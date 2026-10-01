@@ -275,9 +275,18 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 	// and the claim must never charge a card the org no longer needs or has
 	// just disabled (codex review).
 	const claimNowIso = new Date().toISOString();
+	// A surviving attempt marker is reused only while that attempt is still
+	// inside the stale-claim window — the same-attempt retry path. The stale
+	// sweep releases wedged claims without clearing the marker (it anchors
+	// refund/recovery correlation), so an idle org can carry a marker older
+	// than the window: reusing it would stamp a NEW PaymentIntent with the
+	// dead attempt's idempotency key and auto_topup_attempt_at metadata —
+	// repeated charges and ambiguous recovery correlation (gitar).
+	const staleAttemptIso = new Date(Date.now() - STALE_CLAIM_MS).toISOString();
+	const nextAttempt = sql`CASE WHEN ${organizations.autoTopupAttemptAt} IS NULL OR ${organizations.autoTopupAttemptAt} < ${staleAttemptIso} THEN ${claimNowIso} ELSE ${organizations.autoTopupAttemptAt} END`;
 	const claimed = await db
 		.update(organizations)
-		.set({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: sql`COALESCE(${organizations.autoTopupAttemptAt}, ${claimNowIso})`, autoTopupAttemptAt: sql`COALESCE(${organizations.autoTopupAttemptAt}, ${claimNowIso})` })
+		.set({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: nextAttempt, autoTopupAttemptAt: nextAttempt })
 		.where(
 			and(
 				eq(organizations.id, orgId),

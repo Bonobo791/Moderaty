@@ -297,7 +297,13 @@ async function applyAutoTopupEnable(user: SessionUser, form: FormData, bundle: s
 	// failure-disabled org) starts from a clean slate, but a threshold-only
 	// update while a charge is IN FLIGHT must preserve the claim — resetting
 	// it would let the sweep create a second PaymentIntent for the same
-	// shortage (coderabbit).
+	// shortage (coderabbit). The clean slate also discards the DEAD attempt's
+	// markers: a card-change disable (customer.updated, payment_method.detached)
+	// leaves autoTopupAttemptAt set with no recovery row, and reusing it would
+	// retry `autotopup:<cus>:<attemptAt>` with a different payment method —
+	// Stripe rejects the changed parameters under the same key (codex P1). The
+	// orphaned PaymentIntent stays discoverable via lastAttemptAt correlation
+	// and the sweep's customer-window reconciliation.
 	const resetClaim = !wasEnabled || current?.autoTopupState === 'disabled';
 	// Recheck plan, enable state, refund version, and recovery in the write:
 	// a concurrent refund or upgrade must win over this stale form.
@@ -308,7 +314,7 @@ async function applyAutoTopupEnable(user: SessionUser, form: FormData, bundle: s
 			autoTopupThreshold: threshold,
 			autoTopupBundle: bundle,
 			autoTopupPauseReason: null,
-			...(resetClaim ? { autoTopupState: 'idle', autoTopupFailures: 0 } : {}),
+			...(resetClaim ? { autoTopupState: 'idle', autoTopupFailures: 0, autoTopupAttemptAt: null, autoTopupSubmittedAt: null } : {}),
 			...evidence
 		})
 		.where(and(eq(organizations.id, user.orgId), ne(organizations.plan, 'lifetime'),

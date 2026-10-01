@@ -744,6 +744,29 @@ test('a reveal returns the text its digest classified when a later scan refreshe
 	});
 });
 
+test('a reveal serves pinned sourceText when the comment exists in neither store — the preview case', async () => {
+	// Preview comments are never inserted into comments or
+	// feedback_history_comments, so the evidence row's sourceText is the only
+	// copy of the analyzed text. A reveal guarded on a live store row would
+	// 404 despite having the text on hand (codeant PR 170).
+	await seedChannel('UC1');
+	const digestId = await seedDigest('UC1', { status: 'dry-run' });
+	const [finding] = await testDb().db
+		.insert(feedbackFindings)
+		.values({ digestId, category: 'question', summary: 'A viewer asked about pacing', supporterCount: 1 })
+		.returning({ id: feedbackFindings.id });
+	const [evidence] = await testDb().db
+		.insert(findingEvidence)
+		.values({ findingId: finding.id, commentId: 'preview-only', sanitizedExcerpt: 'concealed', hasAbuse: 0, sourceText: 'the pinned preview text' })
+		.returning({ id: findingEvidence.id });
+
+	await expect(postReveal('UC1', String(evidence.id))).resolves.toEqual({
+		scope: 'reveal',
+		evidenceId: evidence.id,
+		text: 'the pinned preview text'
+	});
+});
+
 test('a reveal prefers the historical snapshot when the comment exists in both stores (cubic)', async () => {
 	// The digest classified the snapshot's text — when moderation later
 	// re-stores the same comment (possibly edited since), the reveal must

@@ -107,6 +107,41 @@ test('the current failed/deferred attempt is reported independently of the histo
 	expect(older.currentAttempt).toMatchObject({ id: failed.id, status: 'failed' });
 });
 
+test('preview rows never become the attempt banner or digest feed entries', async () => {
+	// 'dry-run'/'dry-run-pending'/'dry-run-failed' rows are preview lifecycle
+	// state, not digest attempts (MOD-229): they must not hijack the
+	// failed/deferred banner, suppress the empty state, or list as feed rows
+	// until the feed renders them deliberately (MOD-232/233).
+	await seedChannel();
+	const [failed] = await testDb()
+		.db.insert(feedbackDigests)
+		.values({ channelId: 'UC1', windowStart: '2026-01-01', windowEnd: '2026-02-01', status: 'failed', error: 'error' })
+		.returning({ id: feedbackDigests.id });
+	for (const status of ['dry-run', 'dry-run-pending', 'dry-run-failed']) {
+		await testDb()
+			.db.insert(feedbackDigests)
+			.values({ channelId: 'UC1', windowStart: '2026-03-01', windowEnd: '2026-04-01', status });
+	}
+
+	const page = await callLoad(PAGE_URL);
+	expect(page.currentAttempt).toMatchObject({ id: failed.id, status: 'failed' });
+	expect(page.digests.map((d) => d.status)).toEqual(['failed']);
+});
+
+test('a channel with only preview rows keeps the empty state — no phantom attempt', async () => {
+	await seedChannel();
+	for (const status of ['dry-run', 'dry-run-pending', 'dry-run-failed']) {
+		await testDb()
+			.db.insert(feedbackDigests)
+			.values({ channelId: 'UC1', windowStart: '2026-03-01', windowEnd: '2026-04-01', status });
+	}
+
+	const page = await callLoad(PAGE_URL);
+	expect(page.currentAttempt).toBeNull();
+	expect(page.digests).toEqual([]);
+	expect(page.latest).toBeNull();
+});
+
 test('the history query fetches a bounded page, not the whole backlog', async () => {
 	// Pin the bound itself (cubic): removing digestHistoryPage's .limit()
 	// would slice AFTER the fetch — every assertion on page shape, cursors,

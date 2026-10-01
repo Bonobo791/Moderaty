@@ -203,6 +203,36 @@ function rateLimited(dayCount: number, monthCount: number): boolean {
 	return dayCount >= MAX_PER_DAY || monthCount >= MAX_PER_MONTH;
 }
 
+async function handleTopupFailure(orgId: string, attemptAt: string, error: unknown): Promise<void> {
+	// Classification matters: a CARD failure (decline/SCA) records against
+	// the org — repeated failures disable auto top-up. An infrastructure
+	// failure (timeout, outage, rate limit, invalid request) is not the
+	// customer's card: release the claim back to idle WITHOUT counting it,
+	// so the next sweep retries normally and auto top-up is never disabled
+	// by two unrelated API outages. Either way the failure is loud.
+	if (isCardFailure(error)) {
+		// A create-time confirmation failure (decline, expired card...) never
+		// fires payment_failed — record it here with the real Stripe error
+		// CODE (never the message: SCA codes like authentication_required
+		// must disable auto top-up, and messages are locale-dependent).
+		await recordAutoTopupFailure(orgId, stripeErrorCode(error));
+	} else {
+		const rejected = error as { type?: unknown; statusCode?: unknown; code?: unknown; raw?: { payment_intent?: unknown } };
+		const definitelyUncreated = rejected?.type === 'StripeInvalidRequestError' && rejected.statusCode === 400 && !rejected.raw?.payment_intent && (rejected.code === 'resource_missing' || typeof rejected.code === 'string' && rejected.code.startsWith('parameter_'));
+		// The attempt timestamp clears with the claim: the failure was not
+		// the customer's card, so the 24h cooldown must not stall the next
+		// sweep. A declined card keeps its timestamp (don't hammer a bad
+		// card for a day); an outage must be retried as soon as it clears.
+		await db
+			.update(organizations)
+			.set({ autoTopupState: 'idle', autoTopupLastAttemptAt: null, ...(definitelyUncreated ? { autoTopupAttemptAt: null, autoTopupSubmittedAt: null } : {}) })
+			.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight'), eq(organizations.autoTopupAttemptAt, attemptAt)));
+		console.error(
+			`auto top-up infra failure for org ${orgId}: ${error instanceof Error ? error.message : String(error)} — claim released, no decline counted, no cooldown`
+		);
+	}
+}
+
 export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 	const org = await readAutoTopupState(orgId);
 	if (!basicEligibility(org)) return false;
@@ -327,33 +357,7 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 		console.info(`auto top-up initiated for org ${orgId}: bundle ${bundle.id} (${idempotencyKey})`);
 		return true;
 	} catch (error) {
-		// Classification matters: a CARD failure (decline/SCA) records against
-		// the org — repeated failures disable auto top-up. An infrastructure
-		// failure (timeout, outage, rate limit, invalid request) is not the
-		// customer's card: release the claim back to idle WITHOUT counting it,
-		// so the next sweep retries normally and auto top-up is never disabled
-		// by two unrelated API outages. Either way the failure is loud.
-		if (isCardFailure(error)) {
-			// A create-time confirmation failure (decline, expired card...) never
-			// fires payment_failed — record it here with the real Stripe error
-			// CODE (never the message: SCA codes like authentication_required
-			// must disable auto top-up, and messages are locale-dependent).
-			await recordAutoTopupFailure(orgId, stripeErrorCode(error));
-		} else {
-			const rejected = error as { type?: unknown; statusCode?: unknown; code?: unknown; raw?: { payment_intent?: unknown } };
-			const definitelyUncreated = rejected?.type === 'StripeInvalidRequestError' && rejected.statusCode === 400 && !rejected.raw?.payment_intent && (rejected.code === 'resource_missing' || typeof rejected.code === 'string' && rejected.code.startsWith('parameter_'));
-			// The attempt timestamp clears with the claim: the failure was not
-			// the customer's card, so the 24h cooldown must not stall the next
-			// sweep. A declined card keeps its timestamp (don't hammer a bad
-			// card for a day); an outage must be retried as soon as it clears.
-			await db
-				.update(organizations)
-				.set({ autoTopupState: 'idle', autoTopupLastAttemptAt: null, ...(definitelyUncreated ? { autoTopupAttemptAt: null, autoTopupSubmittedAt: null } : {}) })
-				.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight'), eq(organizations.autoTopupAttemptAt, attemptAt)));
-			console.error(
-				`auto top-up infra failure for org ${orgId}: ${error instanceof Error ? error.message : String(error)} — claim released, no decline counted, no cooldown`
-			);
-		}
+		await handleTopupFailure(orgId, attemptAt, error);
 		return false;
 	}
 }

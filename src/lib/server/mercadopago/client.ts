@@ -145,6 +145,14 @@ export const mercadoPagoProvider: PrepaidCreditProvider = {
 	}
 };
 
+function refundTimestamp(value: unknown): number {
+	if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return Number.NaN;
+	const date = Date.parse(value);
+	if (!Number.isFinite(date)) return Number.NaN;
+	if (new Date(value.slice(0, 10)).toISOString().slice(0, 10) !== value.slice(0, 10)) return Number.NaN;
+	return date;
+}
+
 /** A payment update time is not a refund time: read the provider's refund records. */
 async function refundOccurredAt(paymentId: string, refundedAmount: number): Promise<Pick<MercadoPagoPayment, 'refundOccurredAt' | 'refundBoundaries'>> {
 	const response = await fetchWithRetry(apiUrl(`/v1/payments/${encodeURIComponent(paymentId)}/refunds`), {
@@ -159,17 +167,18 @@ async function refundOccurredAt(paymentId: string, refundedAmount: number): Prom
 		if (!value || typeof value !== 'object' || Array.isArray(value)) { skipped++; continue; }
 		const refund = value as Record<string, unknown>;
 		if (refund.status !== 'approved') { skipped++; continue; }
-		const cents = typeof refund.amount === 'number' ? Math.round(refund.amount * 100) : NaN;
-		const date = typeof refund.date_created === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(refund.date_created) ? Date.parse(refund.date_created) : NaN;
-		if (String(refund.payment_id) !== paymentId || !Number.isSafeInteger(cents) || cents <= 0 || typeof refund.amount !== 'number' || Math.abs(refund.amount * 100 - cents) > 1e-6 || !Number.isFinite(date) || new Date(String(refund.date_created).slice(0, 10)).toISOString().slice(0, 10) !== String(refund.date_created).slice(0, 10)) { skipped++; continue; }
+		if (typeof refund.payment_id !== 'string' && typeof refund.payment_id !== 'number') { skipped++; continue; }
+		const cents = typeof refund.amount === 'number' ? Math.round(refund.amount * 100) : Number.NaN;
+		const date = refundTimestamp(refund.date_created);
+		if (String(refund.payment_id) !== paymentId || !Number.isSafeInteger(cents) || cents <= 0 || typeof refund.amount !== 'number' || Math.abs(refund.amount * 100 - cents) > 1e-6 || !Number.isFinite(date)) { skipped++; continue; }
 		totalCents += cents;
 		const occurredAt = new Date(date).toISOString();
 		boundaries.push(occurredAt);
 	}
 	if (skipped) console.error(`Mercado Pago refund lookup skipped ${skipped} invalid or unapproved item(s)`);
 	if (!boundaries.length || totalCents !== Math.round(refundedAmount * 100)) throw new Error('Mercado Pago refund records do not match the refunded payment amount');
-	const refundBoundaries = [...new Set(boundaries)].sort();
-	return { refundBoundaries, refundOccurredAt: refundBoundaries[refundBoundaries.length - 1] };
+	const refundBoundaries = [...new Set(boundaries)].sort((left, right) => left.localeCompare(right));
+	return { refundBoundaries, refundOccurredAt: refundBoundaries.at(-1) };
 }
 
 export async function retrievePayment(paymentId: string): Promise<MercadoPagoPayment> {

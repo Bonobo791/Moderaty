@@ -118,26 +118,20 @@ export async function recoverPausedTopup(row: Recovery, pi: TopupPayment, deadli
 	}
 }
 
-/** Scan one page per tick, choosing only after the entire result is unambiguous. */
-async function recoverListedPayment(row: Recovery, deadline?: number): Promise<void> {
-	if (row.lastError === 'ambiguous_payment') throw new Error('Canceled auto top-up matches multiple payments — manual reconciliation required');
-	const customerId = row.customerId ?? (await db.select({ customerId: organizations.stripeCustomerId }).from(organizations).where(eq(organizations.id, row.orgId)).get())?.customerId;
-	if (!customerId) throw new Error('Canceled auto top-up organization has no Stripe customer');
-	const attemptMs = Date.parse(row.attemptAt);
-	if (!Number.isFinite(attemptMs)) throw new Error('Canceled auto top-up has an invalid attempt timestamp');
-	const list = await getStripe().paymentIntents.list({ customer: customerId, created: { gte: Math.floor((attemptMs - 60_000) / 1000) }, limit: 100, ...(row.paymentLookupCursor ? { starting_after: row.paymentLookupCursor } : {}) }, ...recoveryOptions(deadline));
-	if (!list || !Array.isArray(list.data) || typeof list.has_more !== 'boolean') throw new Error('Stripe returned an invalid payment intent list');
-	const progressPredicate = and(eq(stripeAutoTopupRecoveries.id, row.id), isNull(stripeAutoTopupRecoveries.resolvedAt), isNull(stripeAutoTopupRecoveries.paymentIntentId), or(isNull(stripeAutoTopupRecoveries.lastError), ne(stripeAutoTopupRecoveries.lastError, 'ambiguous_payment')), row.paymentLookupCursor ? eq(stripeAutoTopupRecoveries.paymentLookupCursor, row.paymentLookupCursor) : isNull(stripeAutoTopupRecoveries.paymentLookupCursor));
+async function matchingListedPayment(row: Recovery, pi: TopupPayment): Promise<boolean> {
+	if (!pi || typeof pi.id !== 'string' || !pi.id || !['succeeded', 'canceled', 'requires_payment_method', 'requires_capture', 'requires_confirmation', 'requires_action', 'processing'].includes(pi.status ?? '')) throw new InvalidTopupPayment('Malformed payment intent');
+	if (pi.metadata?.type !== 'auto_topup' || pi.metadata.org_id !== row.orgId) return false;
+	if (!topupAttemptCorrelation(pi, stripeAutoTopupRecoveries.attemptAt)) throw new InvalidTopupPayment('Payment intent has no attempt correlation');
+	return (await findPausedTopup(db, row.orgId, pi))?.id === row.id;
+}
+
+async function selectListedCandidate(row: Recovery, payments: TopupPayment[]) {
 	let skipped = 0;
 	let candidateId = row.lookupCandidateId;
 	let candidate: TopupPayment | undefined;
-	for (const pi of list.data) {
+	for (const pi of payments) {
 		try {
-			if (!pi || typeof pi.id !== 'string' || !pi.id || !['succeeded', 'canceled', 'requires_payment_method', 'requires_capture', 'requires_confirmation', 'requires_action', 'processing'].includes(pi.status ?? '')) throw new InvalidTopupPayment('Malformed payment intent');
-			if (pi.metadata?.type !== 'auto_topup' || pi.metadata.org_id !== row.orgId) continue;
-			if (!topupAttemptCorrelation(pi, stripeAutoTopupRecoveries.attemptAt)) throw new InvalidTopupPayment('Payment intent has no attempt correlation');
-			const match = await findPausedTopup(db, row.orgId, pi);
-			if (match?.id !== row.id) continue;
+			if (!(await matchingListedPayment(row, pi))) continue;
 			if (candidateId && candidateId !== pi.id) {
 				await db.update(stripeAutoTopupRecoveries).set({ lastError: 'ambiguous_payment' }).where(eq(stripeAutoTopupRecoveries.id, row.id));
 				throw new Error('Canceled auto top-up matches multiple payments — manual reconciliation required');
@@ -150,6 +144,20 @@ async function recoverListedPayment(row: Recovery, deadline?: number): Promise<v
 		}
 	}
 	if (skipped) console.error('auto top-up recovery skipped malformed payment items', { orgId: row.orgId, skipped });
+	return { candidateId, candidate };
+}
+
+/** Scan one page per tick, choosing only after the entire result is unambiguous. */
+async function recoverListedPayment(row: Recovery, deadline?: number): Promise<void> {
+	if (row.lastError === 'ambiguous_payment') throw new Error('Canceled auto top-up matches multiple payments — manual reconciliation required');
+	const customerId = row.customerId ?? (await db.select({ customerId: organizations.stripeCustomerId }).from(organizations).where(eq(organizations.id, row.orgId)).get())?.customerId;
+	if (!customerId) throw new Error('Canceled auto top-up organization has no Stripe customer');
+	const attemptMs = Date.parse(row.attemptAt);
+	if (!Number.isFinite(attemptMs)) throw new Error('Canceled auto top-up has an invalid attempt timestamp');
+	const list = await getStripe().paymentIntents.list({ customer: customerId, created: { gte: Math.floor((attemptMs - 60_000) / 1000) }, limit: 100, ...(row.paymentLookupCursor ? { starting_after: row.paymentLookupCursor } : {}) }, ...recoveryOptions(deadline));
+	if (!list || !Array.isArray(list.data) || typeof list.has_more !== 'boolean') throw new Error('Stripe returned an invalid payment intent list');
+	const progressPredicate = and(eq(stripeAutoTopupRecoveries.id, row.id), isNull(stripeAutoTopupRecoveries.resolvedAt), isNull(stripeAutoTopupRecoveries.paymentIntentId), or(isNull(stripeAutoTopupRecoveries.lastError), ne(stripeAutoTopupRecoveries.lastError, 'ambiguous_payment')), row.paymentLookupCursor ? eq(stripeAutoTopupRecoveries.paymentLookupCursor, row.paymentLookupCursor) : isNull(stripeAutoTopupRecoveries.paymentLookupCursor));
+	const { candidateId, candidate } = await selectListedCandidate(row, list.data);
 	if (list.has_more) {
 		const cursor = list.data.at(-1)?.id;
 		if (typeof cursor !== 'string' || !cursor || cursor === row.paymentLookupCursor) throw new Error('Stripe returned an invalid recovery pagination cursor');

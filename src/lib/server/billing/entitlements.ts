@@ -205,6 +205,13 @@ async function applyPendingLifetimeReversal(tx: Tx, input: LifetimeClaim, slot: 
 	return { slot, status: pendingStatus === 'disputed' ? 'active' : 'released' };
 }
 
+async function restoreWonLifetimeDispute(tx: Tx, input: LifetimeClaim, reversal: PendingReversalState): Promise<void> {
+	if (!reversal.wonDispute) return;
+	if (reversal.disputeId) await tx.update(stripeDisputeReversals).set({ source: 'lifetime', status: 'restored' }).where(eq(stripeDisputeReversals.disputeId, reversal.disputeId));
+	if (!input.chargeId) throw new Error('won dispute reconciliation requires a charge id');
+	await tx.delete(stripePendingReversals).where(eq(stripePendingReversals.chargeId, input.chargeId));
+}
+
 /** Claims the lowest free slot inside the transaction that records the purchase. */
 export async function claimLifetimeSlot(input: LifetimeClaim): Promise<LifetimeClaimResult> {
 	return db.transaction(async (tx) => {
@@ -246,11 +253,7 @@ export async function claimLifetimeSlot(input: LifetimeClaim): Promise<LifetimeC
 		if (input.chargeId) await pauseForObservedStripeRefund(tx, input.orgId, input.chargeId, undefined, undefined, input.paymentIntentId ? { id: input.paymentIntentId, metadata: null } : undefined);
 		const pendingResult = await applyPendingLifetimeReversal(tx, input, slot.slot, inserted[0].id, reversal);
 		if (pendingResult) return pendingResult;
-		if (reversal.wonDispute) {
-			if (reversal.disputeId) await tx.update(stripeDisputeReversals).set({ source: 'lifetime', status: 'restored' }).where(eq(stripeDisputeReversals.disputeId, reversal.disputeId));
-			if (!input.chargeId) throw new Error('won dispute reconciliation requires a charge id');
-			await tx.delete(stripePendingReversals).where(eq(stripePendingReversals.chargeId, input.chargeId));
-		}
+		await restoreWonLifetimeDispute(tx, input, reversal);
 		// Clear any stale auto top-up authorization atomically with the plan
 		// flip — a lifetime org's scoring is unmetered, so a surviving enabled
 		// flag is a live off-session charge mandate for credits it can never

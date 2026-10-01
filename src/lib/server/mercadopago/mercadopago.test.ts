@@ -723,9 +723,9 @@ test.each(['approved', 'refunded'])('a delayed %s refund preserves newer consent
 test('payment lookup uses the actual latest approved refund date, not payment update time', async () => {
 	const fetchMock = vi.fn()
 		.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'refunded', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 5, currency_id: 'BRL', date_last_updated: '2026-09-30T13:00:00Z' })))
-		.mockResolvedValueOnce(new Response(JSON.stringify([{ id: 1, payment_id: 'pay-1', amount: 2, status: 'approved', date_created: '2026-09-30T10:00:00-03:00' }, { id: 2, payment_id: 'pay-1', amount: 3, status: 'approved', date_created: '2026-09-30T11:00:00-03:00' }])));
+		.mockResolvedValueOnce(new Response(JSON.stringify([{ id: 2, payment_id: 'pay-1', amount: 3, status: 'approved', date_created: '2026-09-30T11:00:00-03:00' }, { id: 1, payment_id: 'pay-1', amount: 2, status: 'approved', date_created: '2026-09-30T10:00:00-03:00' }])));
 	vi.stubGlobal('fetch', fetchMock);
-	expect(await retrievePayment('pay-1')).toMatchObject({ refundOccurredAt: '2026-09-30T14:00:00.000Z' });
+	expect(await retrievePayment('pay-1')).toMatchObject({ refundOccurredAt: '2026-09-30T14:00:00.000Z', refundBoundaries: ['2026-09-30T13:00:00.000Z', '2026-09-30T14:00:00.000Z'] });
 	expect(String(fetchMock.mock.calls[1][0])).toBe('https://api.mercadopago.com/v1/payments/pay-1/refunds');
 });
 
@@ -733,6 +733,13 @@ test.each(['2026-02-30T10:00:00Z', '2026-09-30 10:00:00Z'])('refund lookup rejec
 	vi.stubGlobal('fetch', vi.fn()
 		.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'refunded', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 5, currency_id: 'BRL' })))
 		.mockResolvedValueOnce(new Response(JSON.stringify([{ payment_id: 'pay-1', amount: 5, status: 'approved', date_created: dateCreated }]))));
+	await expect(retrievePayment('pay-1')).rejects.toThrow(/refund records/);
+});
+
+test('refund lookup rejects a wrong-typed refund payment id', async () => {
+	vi.stubGlobal('fetch', vi.fn()
+		.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'refunded', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 5, currency_id: 'BRL' })))
+		.mockResolvedValueOnce(new Response(JSON.stringify([{ payment_id: ['pay-1'], amount: 5, status: 'approved', date_created: '2026-09-30T10:00:00Z' }]))));
 	await expect(retrievePayment('pay-1')).rejects.toThrow(/refund records/);
 });
 

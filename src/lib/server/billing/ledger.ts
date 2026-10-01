@@ -186,26 +186,33 @@ export async function assertCreditsPurchasable(orgId: string): Promise<void> {
 
 export const UNMETERED_CREDIT_GRANT_ERROR = 'an unmetered plan cannot receive credit grants';
 
+function refundPauseVersion(previous: string | null, advanceVersion?: boolean): string {
+	if (advanceVersion === false && previous) return previous;
+	return new Date(Math.max(Date.now(), previous ? Date.parse(previous) + 1 : 0)).toISOString();
+}
+
+async function recordPausedAttempt(tx: LedgerHandle, orgId: string, org: { attemptAt: string | null; lastAttemptAt: string | null; submittedAt: string | null; customerId: string | null }, payment?: TopupPayment): Promise<void> {
+	const attemptAt = org.attemptAt ?? org.lastAttemptAt;
+	if (!attemptAt) throw new Error(`auto top-up claim for org ${orgId} has no attempt timestamp`);
+	const correlation = payment ? topupAttemptCorrelation(payment, organizations.autoTopupLastAttemptAt) : undefined;
+	const refundedAttempt = correlation ? await tx.select({ id: organizations.id }).from(organizations).where(and(eq(organizations.id, orgId), correlation)).get() : undefined;
+	if (!refundedAttempt) await tx.insert(stripeAutoTopupRecoveries).values({ orgId, attemptAt, customerId: org.customerId,
+		// Only a new logical attempt with no submission marker is provably unsent.
+		resolvedAt: org.attemptAt && !org.submittedAt ? new Date().toISOString() : null }).onConflictDoNothing();
+}
+
 /** Caller supplies a transaction when the pause accompanies a credit reversal. */
 export async function pauseAutoTopupForRefund(handle: LedgerHandle, orgId: string, occurredAt?: string, options: { chargeId?: string; payment?: TopupPayment; advanceVersion?: boolean } = {}): Promise<void> {
 	return inLedgerTx(handle, async (tx) => {
 		const org = await tx.select({ state: organizations.autoTopupState, lastAttemptAt: organizations.autoTopupLastAttemptAt, attemptAt: organizations.autoTopupAttemptAt, submittedAt: organizations.autoTopupSubmittedAt, customerId: organizations.stripeCustomerId, pauseReason: organizations.autoTopupPauseReason, pausedAt: organizations.autoTopupPausedAt, consentedAt: organizations.autoTopupConsentedAt }).from(organizations).where(eq(organizations.id, orgId)).get();
 		if (!org) throw new Error(`org not found: ${orgId}`);
 		const paused = await tx.update(organizations)
-			.set({ autoTopupEnabled: 0, autoTopupState: 'disabled', autoTopupPauseReason: 'refund', autoTopupPausedAt: options.advanceVersion === false && org.pausedAt ? org.pausedAt : new Date(Math.max(Date.now(), org.pausedAt ? Date.parse(org.pausedAt) + 1 : 0)).toISOString(), autoTopupAttemptAt: null, autoTopupSubmittedAt: null })
+			.set({ autoTopupEnabled: 0, autoTopupState: 'disabled', autoTopupPauseReason: 'refund', autoTopupPausedAt: refundPauseVersion(org.pausedAt, options.advanceVersion), autoTopupAttemptAt: null, autoTopupSubmittedAt: null })
 			.where(and(eq(organizations.id, orgId),
 				// A delayed replay must respect consent explicitly given AFTER this refund.
 				occurredAt ? or(isNull(organizations.autoTopupConsentedAt), sql`julianday(${organizations.autoTopupConsentedAt}) <= julianday(${occurredAt})`) : undefined))
 			.returning({ id: organizations.id });
-		if (paused.length && (org.state === 'in_flight' || org.attemptAt)) {
-			const attemptAt = org.attemptAt ?? org.lastAttemptAt;
-			if (!attemptAt) throw new Error(`auto top-up claim for org ${orgId} has no attempt timestamp`);
-			const correlation = options.payment ? topupAttemptCorrelation(options.payment, organizations.autoTopupLastAttemptAt) : undefined;
-			const refundedAttempt = correlation ? await tx.select({ id: organizations.id }).from(organizations).where(and(eq(organizations.id, orgId), correlation)).get() : undefined;
-			if (!refundedAttempt) await tx.insert(stripeAutoTopupRecoveries).values({ orgId, attemptAt, customerId: org.customerId,
-				// Only a new logical attempt with no submission marker is provably unsent.
-				resolvedAt: org.attemptAt && !org.submittedAt ? new Date().toISOString() : null }).onConflictDoNothing();
-		}
+		if (paused.length && (org.state === 'in_flight' || org.attemptAt)) await recordPausedAttempt(tx, orgId, org, options.payment);
 		if (occurredAt) {
 			// Revisit history even if a later refund already paused this org.
 			// Completed grants are already durable. Bound recoveries use their PI
@@ -253,6 +260,12 @@ export async function pauseForObservedStripeRefund(handle: LedgerHandle, orgId: 
 		await pauseAutoTopupForRefund(tx, orgId, observation.occurredAt, { chargeId, payment });
 		await tx.update(stripeRefundObservations).set({ orgId }).where(eq(stripeRefundObservations.chargeId, chargeId));
 	});
+}
+
+function adjustedCreditBalance(delta: number, reason: CreditReason, floorAtZero?: boolean) {
+	// Keep the comparison reversed for Codacy's TypeScript parser.
+	if (0 > delta && (reason === 'refund' || floorAtZero)) return sql`MAX(0, COALESCE(${organizations.creditsRemaining}, 0) + ${delta})`;
+	return sql`COALESCE(${organizations.creditsRemaining}, 0) + ${delta}`;
 }
 
 /** Applies a credit adjustment exactly once; duplicate anchors return false. */
@@ -318,12 +331,7 @@ export async function applyLedgerDelta(
 			// only math that restores correctly.
 			.set({
 				creditsRemaining:
-					// `0 > delta` reads backwards on purpose: Codacy's lizard parser
-					// treats `delta <` as a generic-arguments opener and desyncs the
-					// file's brace accounting (this callback then "spans" to EOF).
-					0 > delta && (reason === 'refund' || floorAtZero)
-						? sql`MAX(0, COALESCE(${organizations.creditsRemaining}, 0) + ${delta})`
-						: sql`COALESCE(${organizations.creditsRemaining}, 0) + ${delta}`
+					adjustedCreditBalance(delta, reason, floorAtZero)
 			})
 			.where(eq(organizations.id, orgId))
 			.returning({ balance: organizations.creditsRemaining });

@@ -426,6 +426,32 @@ describe('warning cadence', () => {
 		errorSpy.mockRestore();
 	});
 
+	test('a delivery-marker write failure after an accepted send releases the claim too', async () => {
+		// codeant: the provider accepted the mail but zero_credits_warned_at
+		// could not be written — leaving notified_at stamped would block the
+		// milestone for a cadence interval and could restart the countdown at
+		// grace expiry with no marker. The claim must release like a failed
+		// send so the next rotation re-delivers.
+		await seedAccount('u1', { creditsRemaining: 0 });
+		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(8) }).where(eq(users.id, 'u1'));
+		await testDb().client.execute(
+			`CREATE TRIGGER fail_warned_mark BEFORE UPDATE OF zero_credits_warned_at ON users
+			 WHEN NEW.zero_credits_warned_at IS NOT NULL
+			 BEGIN SELECT RAISE(ABORT, 'simulated marker write failure'); END`
+		);
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const result = await sweepZeroCreditAccounts();
+			expect(result).toMatchObject({ warned: 0, errors: 1 });
+			expect((await userRow('u1'))!.zeroCreditsNotifiedAt).toBeNull(); // claim released
+			expect((await userRow('u1'))!.zeroCreditsWarnedAt).toBeNull();
+		} finally {
+			errorSpy.mockRestore();
+			await testDb().client.execute('DROP TRIGGER fail_warned_mark');
+		}
+		expect(mocks.sendProtonMailEmail).toHaveBeenCalledTimes(1); // the send itself succeeded
+	});
+
 	test('a failed send releases the claim so the milestone retries next sweep', async () => {
 		await seedAccount('u1', { creditsRemaining: 0 });
 		await testDb().db.update(users).set({ zeroCreditsSince: daysAgo(8) }).where(eq(users.id, 'u1'));

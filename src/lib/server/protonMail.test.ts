@@ -153,6 +153,19 @@ test.each([
 	expect(mocks.createTransport).not.toHaveBeenCalled();
 });
 
+test("accepts an apostrophe in the recipient local part (a legal RFC mailbox)", async () => {
+	const toEmail = "o'connor@example.com";
+	mocks.sendMail.mockResolvedValue(
+		acceptedInfo({ accepted: [toEmail], envelope: { from: 'no-reply@moderaty.app', to: [toEmail] } })
+	);
+
+	const result = await sendProtonMailEmail({ ...MESSAGE, toEmail });
+
+	expect(mocks.sendMail).toHaveBeenCalledTimes(1);
+	expect((mocks.sendMail.mock.calls[0][0] as { to: string }).to).toBe(toEmail);
+	expect(result).toEqual({ messageId: '<msg-1@moderaty.app>' });
+});
+
 test('rejects CR/LF in the subject before any connection', async () => {
 	await expect(sendProtonMailEmail({ ...MESSAGE, subject: 'Hi\r\nBcc: mallory@evil.example' })).rejects.toThrow(
 		/could not be sent/
@@ -242,6 +255,31 @@ test('a caller deadline expiring mid-send rejects DeadlineExceededError and tear
 	await vi.advanceTimersByTimeAsync(1_001);
 	await assertion;
 	expect(mocks.close).toHaveBeenCalled();
+});
+
+test('an acceptance committed while the deadline passes still counts as delivered', async () => {
+	vi.useFakeTimers();
+	mocks.sendMail.mockImplementation(async () => {
+		// The provider accepted the message; the clock then moved past the
+		// caller deadline before the post-send check ran. A confirmed side
+		// effect reported as a deferral makes the sweep resend a delivered
+		// warning (codex).
+		vi.setSystemTime(Date.now() + 2_000);
+		return acceptedInfo();
+	});
+
+	const result = await sendProtonMailEmail(MESSAGE, Date.now() + 1_000);
+	expect(result).toEqual({ messageId: '<msg-1@moderaty.app>' });
+});
+
+test('an unconfirmed result discovered after the deadline still defers', async () => {
+	vi.useFakeTimers();
+	mocks.sendMail.mockImplementation(async () => {
+		vi.setSystemTime(Date.now() + 2_000);
+		return { messageId: '<x>' }; // no envelope verdicts — acceptance unproven
+	});
+
+	await expect(sendProtonMailEmail(MESSAGE, Date.now() + 1_000)).rejects.toBeInstanceOf(DeadlineExceededError);
 });
 
 test('a late acceptance after the deadline is never reported as success', async () => {

@@ -324,11 +324,20 @@ async function claimAndWarn(user: SweepUser, since: string, sinceMs: number, now
 	// the send leaves the delivery unmarked rather than satisfying a
 	// countdown that never got its warning (codex). A missed mark is safe:
 	// the deletion gate reads `warned_at`, fails, and restarts the window.
-	const marked = await db
-		.update(users)
-		.set({ zeroCreditsWarnedAt: nowIso })
-		.where(and(eq(users.id, user.id), eq(users.zeroCreditsSince, since), eq(users.zeroCreditsNotifiedAt, nowIso)))
-		.returning({ id: users.id });
+	let marked: { id: string }[];
+	try {
+		marked = await db
+			.update(users)
+			.set({ zeroCreditsWarnedAt: nowIso })
+			.where(and(eq(users.id, user.id), eq(users.zeroCreditsSince, since), eq(users.zeroCreditsNotifiedAt, nowIso)))
+			.returning({ id: users.id });
+	} catch (cause) {
+		// The marker write itself failed — release the claim so the milestone
+		// re-sends next rotation instead of sitting stamped-but-unproven for
+		// a cadence interval, then restarting the countdown unwarned (codeant).
+		await releaseWarningClaim(user, nowIso);
+		throw cause;
+	}
 	if (!marked.length) {
 		console.warn(`zero-credit sweep: warning delivered to user ${user.id} but the countdown moved mid-send — delivery left unmarked`);
 	}

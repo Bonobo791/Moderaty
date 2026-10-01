@@ -6,16 +6,13 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
 	env: {
-		APP_URL: 'http://localhost:5173',
-		MJ_APIKEY_PUBLIC: 'api-key',
-		MJ_APIKEY_PRIVATE: 'secret-key',
-		MAILJET_FROM_EMAIL: 'no-reply@moderaty.app'
+		APP_URL: 'http://localhost:5173'
 	} as Record<string, string | undefined>,
-	sendMailjetMessage: vi.fn()
+	sendProtonMailEmail: vi.fn()
 }));
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
-vi.mock('$lib/server/mailjet', () => ({ sendMailjetMessage: mocks.sendMailjetMessage }));
+vi.mock('$lib/server/protonMail', () => ({ sendProtonMailEmail: mocks.sendProtonMailEmail }));
 
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { contactSubmissions } from '$lib/server/db/schema';
@@ -58,8 +55,8 @@ async function pendingRows() {
 
 beforeEach(() => {
 	mocks.env.APP_URL = 'http://localhost:5173';
-	mocks.sendMailjetMessage.mockReset();
-	mocks.sendMailjetMessage.mockResolvedValue({ messageId: 1, messageUuid: 'uuid-1' });
+	mocks.sendProtonMailEmail.mockReset();
+	mocks.sendProtonMailEmail.mockResolvedValue({ messageId: '<msg-1@moderaty.app>' });
 });
 
 describe('contact page source', () => {
@@ -122,8 +119,8 @@ describe('contact action', () => {
 			userAgent: 'moderaty-test/1.0'
 		});
 
-		expect(mocks.sendMailjetMessage).toHaveBeenCalledTimes(1);
-		const sent = mocks.sendMailjetMessage.mock.calls[0][0];
+		expect(mocks.sendProtonMailEmail).toHaveBeenCalledTimes(1);
+		const sent = mocks.sendProtonMailEmail.mock.calls[0][0];
 		expect(sent.toEmail).toBe('fan@example.com');
 		expect(sent.textPart).toContain(`http://localhost:5173/contact/verify?token=${rows[0].verificationToken}`);
 	});
@@ -132,18 +129,18 @@ describe('contact action', () => {
 		const outcome = await captureAction({ name: 'Fan', email: 'fan@example.com' });
 		expect(outcome).toMatchObject({ status: 400 });
 		expect(await pendingRows()).toHaveLength(0);
-		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+		expect(mocks.sendProtonMailEmail).not.toHaveBeenCalled();
 	});
 
 	test('rejects an invalid e-mail (400) and writes nothing', async () => {
 		const outcome = await captureAction({ name: 'Fan', email: 'not-an-email', opt_in: 'on' });
 		expect(outcome).toMatchObject({ status: 400 });
 		expect(await pendingRows()).toHaveLength(0);
-		expect(mocks.sendMailjetMessage).not.toHaveBeenCalled();
+		expect(mocks.sendProtonMailEmail).not.toHaveBeenCalled();
 	});
 
 	test('fails loudly (500) with a generic message when the send fails, keeping the pending row for retry', async () => {
-		mocks.sendMailjetMessage.mockRejectedValue(new Error('verification e-mail could not be sent (HTTP 500)'));
+		mocks.sendProtonMailEmail.mockRejectedValue(new Error('e-mail could not be sent (SMTP failure)'));
 		const outcome = await captureAction(VALID);
 		expect(outcome).toMatchObject({ status: 500 });
 		const data = outcome as { data?: { error?: string } };
@@ -166,6 +163,6 @@ describe('contact action', () => {
 		expect(rows[0].id).toBe(firstRows[0].id);
 		expect(rows[0].verificationToken).toBe(firstRows[0].verificationToken);
 		expect(rows[0].name).toBe('Fan Two');
-		expect(mocks.sendMailjetMessage).toHaveBeenCalledTimes(2);
+		expect(mocks.sendProtonMailEmail).toHaveBeenCalledTimes(2);
 	});
 });

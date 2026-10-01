@@ -630,9 +630,9 @@ async function releaseClaimForPi(
  *   `settling` — the subset that can still move money: every non-canceled
  *   status EXCEPT requires_payment_method (a declined PI is dead: it cannot
  *   settle without a re-confirmation this code never sends, so it must not
- *   gate new charges — gitar). A missing or never-before-seen status fails
- *   loudly as an API contract violation rather than guessing settleability
- *   (codex PR #168/#169).
+ *   gate new charges — gitar). A missing or never-before-seen status ON OUR
+ *   OWN PIs fails loudly as an API contract violation rather than guessing
+ *   settleability (codex PR #168/#169); unrelated PIs are never inspected.
  */
 export async function reconcileAutoTopup(orgId: string): Promise<{ recovered: number; inFlight: boolean; settling: boolean }> {
 	const org = await readAutoTopupState(orgId);
@@ -646,24 +646,35 @@ export async function reconcileAutoTopup(orgId: string): Promise<{ recovered: nu
 	let granted = 0;
 	let inFlight = false;
 	let settling = false;
+	let invalid: Error | undefined;
 	for (const pi of list.data) {
+		// Only OUR top-up PIs drive settle/grant decisions. The list is
+		// customer-scoped, so unrelated PIs (manual Checkout purchases,
+		// subscription invoices) are ignored entirely — status included
+		// (gitar PR #169).
+		const ours = pi.metadata?.type === 'auto_topup' && pi.metadata?.org_id === orgId;
+		if (!ours) continue;
 		// Validate at the boundary (I2): a missing or unrecognized status is
-		// wrong-typed external data — the API call failed. Every caller path
-		// catches and logs this loudly and retries next invocation.
+		// wrong-typed external data — the API call failed. The throw is
+		// DEFERRED until every provably-safe grant in this page has
+		// committed, so one bad item never stalls lost-webhook recovery of
+		// a succeeded charge listed after it. Every caller path then logs
+		// the failure loudly and retries next invocation.
 		if (typeof pi.status !== 'string' || !KNOWN_PI_STATUSES.has(pi.status)) {
-			throw new Error(`unrecognized PaymentIntent status ${JSON.stringify(pi.status)} on ${pi.id} — cannot tell whether it can still settle`);
-		}
-		if (pi.status !== 'succeeded') {
-			// Only OUR still-unresolved top-up PIs pin the marker — a terminal
-			// (canceled) or unrelated PI must not keep the row selected.
-			if (pi.status !== 'canceled' && pi.metadata?.type === 'auto_topup' && pi.metadata?.org_id === orgId) {
-				inFlight = true;
-				if (pi.status !== DEAD_PI_STATUS) settling = true;
-			}
+			invalid ??= new Error(`unrecognized PaymentIntent status ${JSON.stringify(pi.status)} on ${pi.id} — cannot tell whether it can still settle`);
 			continue;
 		}
-		if (await grantAutoTopupCredits(orgId, pi)) granted += 1;
+		if (pi.status === 'succeeded') {
+			if (await grantAutoTopupCredits(orgId, pi)) granted += 1;
+			continue;
+		}
+		// A terminal (canceled) PI must not keep the row selected.
+		if (pi.status !== 'canceled') {
+			inFlight = true;
+			if (pi.status !== DEAD_PI_STATUS) settling = true;
+		}
 	}
+	if (invalid) throw invalid;
 	if (granted > 0) {
 		console.info(`auto top-up reconciliation granted ${granted} recovered charge(s) for org ${orgId}`);
 	}

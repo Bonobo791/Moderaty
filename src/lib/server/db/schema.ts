@@ -418,7 +418,7 @@ export const feedbackDigests = sqliteTable('feedback_digests', {
 	windowStart: text('window_start').notNull(), // ISO; last complete digest's window_end (epoch for the first)
 	windowEnd: text('window_end').notNull(), // ISO; published_at of the newest classified comment
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
-	status: text('status').notNull(), // 'complete' | 'failed' | 'deferred' | 'dry-run' | 'dry-run-pending'
+	status: text('status').notNull(), // 'complete' | 'failed' | 'deferred' | 'dry-run' | 'dry-run-pending' | 'dry-run-failed'
 	commentsClassified: integer('comments_classified').notNull().default(0),
 	commentsFailed: integer('comments_failed').notNull().default(0), // per-comment classifier failures, skipped and counted (I1)
 	clusteringDegraded: integer('clustering_degraded'),

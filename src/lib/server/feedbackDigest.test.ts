@@ -1557,16 +1557,16 @@ test('a preview aborted by the deadline leaves the pending row for the drainer',
 	expect((await testDb().db.select().from(feedbackDigests).all())[0]).toMatchObject({ id: digestId, status: 'dry-run-pending' });
 });
 
-test('a failed preview flips its row to failed with the preview error tag', async () => {
+test('a failed preview flips its row to dry-run-failed with the preview error tag', async () => {
 	await seedChannel('UC1');
 	mocks.fetchNewComments.mockRejectedValue(new Error('youtube exploded'));
 	const digestId = await startFeedbackPreview('UC1', { boundary: '2025-01-01T00:00:00.000Z' });
 
 	await expect(runFeedbackPreview('UC1', digestId, { boundary: '2025-01-01T00:00:00.000Z' })).rejects.toThrow('youtube exploded');
-	expect((await testDb().db.select().from(feedbackDigests).all())[0]).toMatchObject({ id: digestId, status: 'failed', error: 'preview' });
+	expect((await testDb().db.select().from(feedbackDigests).all())[0]).toMatchObject({ id: digestId, status: 'dry-run-failed', error: 'preview' });
 });
 
-test('a preview where every classification fails flips the row to failed', async () => {
+test('a preview where every classification fails flips the row to dry-run-failed', async () => {
 	await seedChannel('UC1');
 	const texts = ['one', 'two'];
 	mocks.fetchNewComments.mockResolvedValue({
@@ -1578,7 +1578,7 @@ test('a preview where every classification fails flips the row to failed', async
 	const digestId = await startFeedbackPreview('UC1', { boundary: '2025-01-01T00:00:00.000Z' });
 
 	await expect(runFeedbackPreview('UC1', digestId, { boundary: '2025-01-01T00:00:00.000Z' })).rejects.toThrow('classification failed for all 2 preview comments');
-	expect((await testDb().db.select().from(feedbackDigests).all())[0]).toMatchObject({ status: 'failed', error: 'preview', commentsClassified: 0 });
+	expect((await testDb().db.select().from(feedbackDigests).all())[0]).toMatchObject({ status: 'dry-run-failed', error: 'preview', commentsClassified: 0 });
 	expect(await testDb().db.select().from(feedbackFindings).all()).toHaveLength(0);
 });
 
@@ -1593,7 +1593,7 @@ test('a preview aborted mid-flight by a swapped claim fails its row loudly', asy
 
 	await expect(runFeedbackPreview('UC1', digestId, { boundary: '2025-01-01T00:00:00.000Z', claim })).rejects.toThrow('changed under the dry-run claim');
 	expect(mocks.fetchNewComments).not.toHaveBeenCalled();
-	expect((await testDb().db.select().from(feedbackDigests).all())[0]).toMatchObject({ status: 'failed', error: 'preview' });
+	expect((await testDb().db.select().from(feedbackDigests).all())[0]).toMatchObject({ status: 'dry-run-failed', error: 'preview' });
 });
 
 test('runFeedbackPreview refuses another channel\'s pending row without clobbering it', async () => {
@@ -1614,7 +1614,7 @@ test('runFeedbackPreview refuses a boundary that is not the planted one', async 
 	expect(mocks.fetchNewComments).not.toHaveBeenCalled();
 });
 
-test.each(['dry-run', 'failed', 'complete'])('runFeedbackPreview refuses an already-%s row and leaves it untouched', async (status) => {
+test.each(['dry-run', 'dry-run-failed', 'failed', 'complete'])('runFeedbackPreview refuses an already-%s row and leaves it untouched', async (status) => {
 	await seedChannel('UC1');
 	const digestId = await startFeedbackPreview('UC1', { boundary: '2025-01-01T00:00:00.000Z' });
 	await testDb().db.update(feedbackDigests).set({ status }).where(eq(feedbackDigests.id, digestId));
@@ -1654,6 +1654,32 @@ test('a failed digest run leaves preview rows untouched too', async () => {
 	expect(await generateFeedbackDigest('UC1', { force: true })).toMatchObject({ status: 'failed' });
 
 	expect(await testDb().db.select().from(feedbackDigests).where(eq(feedbackDigests.id, pendingId)).get()).toMatchObject({ status: 'dry-run-pending' });
+});
+
+test('a failed preview row is permanent — a later digest run neither deletes it nor anchors on its window', async () => {
+	// A failed preview marked status='failed' would sit inside the transient
+	// set: the next run would reuse its planted window as the failure row's
+	// anchor and then delete it (gitar PR 170). 'dry-run-failed' keeps it out
+	// of attempt state entirely.
+	await seedChannel('UC1', { feedbackEnabled: 1 });
+	mocks.fetchNewComments.mockRejectedValueOnce(new Error('youtube exploded'));
+	const previewId = await startFeedbackPreview('UC1', { boundary: '2025-01-01T00:00:00.000Z' });
+	await expect(runFeedbackPreview('UC1', previewId, { boundary: '2025-01-01T00:00:00.000Z' })).rejects.toThrow('youtube exploded');
+
+	await seedCommentBatch(THREE_THEMES);
+	fetchFailures = Object.fromEntries(THREE_THEMES.map((entry) => [entry.text, 'x']));
+	expect(await generateFeedbackDigest('UC1', { force: true })).toMatchObject({ status: 'failed' });
+
+	const rows = await testDb().db
+		.select({ id: feedbackDigests.id, status: feedbackDigests.status, windowStart: feedbackDigests.windowStart, error: feedbackDigests.error })
+		.from(feedbackDigests)
+		.orderBy(feedbackDigests.id)
+		.all();
+	expect(rows).toEqual([
+		{ id: previewId, status: 'dry-run-failed', windowStart: '2025-01-01T00:00:00.000Z', error: 'preview' },
+		// The run's own window — not the preview boundary the transient anchor would have reused.
+		{ id: expect.any(Number), status: 'failed', windowStart: '1970-01-01T00:00:00.000Z', error: 'error' }
+	]);
 });
 
 // ---- cadence + rotation ----

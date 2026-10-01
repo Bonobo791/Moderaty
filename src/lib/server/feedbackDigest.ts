@@ -48,11 +48,13 @@ const EPOCH = '1970-01-01T00:00:00.000Z';
 
 /**
  * Digest rows that are ATTEMPT STATE a resolved run supersedes. Preview rows
- * are deliberately absent: 'dry-run' is a permanent feed entry and
- * 'dry-run-pending' is the drainer's resume record (I3) — neither may be
- * deleted or reused as a digest run's window anchor.
+ * are deliberately absent: 'dry-run' is a permanent feed entry,
+ * 'dry-run-pending' is the drainer's resume record (I3), and 'dry-run-failed'
+ * is the terminal preview failure — none may be deleted or reused as a
+ * digest run's window anchor, so the set is exported for the feed's own
+ * attempt/history queries to share.
  */
-const TRANSIENT_DIGEST_STATUSES = ['failed', 'deferred'] as const;
+export const TRANSIENT_DIGEST_STATUSES = ['failed', 'deferred'] as const;
 
 /** A metered org ran out of feedback credits mid-charge — a distinct class so
  * the run's catch matches the type instead of regex-sniffing message text. */
@@ -983,8 +985,10 @@ export async function startFeedbackPreview(
 
 /**
  * Executes the preview against a planted 'dry-run-pending' row and resolves
- * it transactionally: 'dry-run' with its findings on success, 'failed' with
- * error='preview' on a run error — while a deadline abort leaves the row
+ * it transactionally: 'dry-run' with its findings on success,
+ * 'dry-run-failed' with error='preview' on a run error — a distinct terminal
+ * status so transient cleanup and window anchoring never treat a dead
+ * preview as digest attempt state — while a deadline abort leaves the row
  * pending so the cron drainer retries it (I3). The pending row IS the
  * request: its windowStart stores the boundary the claimant asked for, so a
  * mismatched argument is a caller bug and fails loudly.
@@ -1077,10 +1081,12 @@ export async function runFeedbackPreview(
 		console.error('feedback preview failed for channel %s (digest %s):', channelId, digestId, cause);
 		try {
 			// Scoped to THIS channel's pending row: a wrong-id call must not
-			// clobber another channel's in-flight preview.
+			// clobber another channel's in-flight preview. 'dry-run-failed' is
+			// NOT a transient status — the row survives later runs' cleanup and
+			// never anchors their windows (gitar PR 170).
 			await db
 				.update(feedbackDigests)
-				.set({ status: 'failed', error: 'preview' })
+				.set({ status: 'dry-run-failed', error: 'preview' })
 				.where(
 					and(
 						eq(feedbackDigests.id, digestId),

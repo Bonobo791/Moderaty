@@ -46,10 +46,13 @@ Verified by direct probes on 2026-10-01:
 | `app.adaflow.com.br` | `301` → `app.adaflow.com` |
 
 A `401` alone does not prove route registration — authentication could run before routing. The
-counter-evidence is the asymmetry in the table itself: `POST /api/v1/nfses/imports` returns `404`
-while `GET` returns `401`, so dispatch happens before the auth check and each `401` path is a real,
-matched route. What remains UNVERIFIED is the per-method behavior (which verbs each path accepts)
-and the exact auth scheme each route requires — both close when the spec is pulled.
+strongest counter-evidence is the asymmetry in the table itself: `POST /api/v1/nfses/imports`
+returns `404` while `GET` returns `401`, which is consistent with dispatch happening before the
+auth check — but it is not proof, since method-specific middleware or a gateway could produce the
+same split. Route registration therefore stays UNVERIFIED until an issued token reaches a handler;
+what is established is only that these paths answer under `/api/v1`. The per-method behavior (which
+verbs each path accepts) and the exact auth scheme each route requires are likewise UNVERIFIED —
+both close when the spec is pulled.
 
 **`createNfseImport` provenance**: the operation id and `NFSes` tag come from the official docs URL
 shared with us — `app.adaflow.com/api_docs#tag/NFSes/operation/createNfseImport` — so the name is
@@ -70,8 +73,8 @@ not hard-code the operation↔path mapping before then.
 ## 2. `createNfseImport` contract (AC: payload + note identity)
 
 The operation id/tag are sourced from the official docs URL anchor (§1 provenance note) and the
-candidate routes exist (`/api/v1/nfses/import`, `/api/v1/nfses/import_file`,
-`/api/v1/nfses/imports`). The presence of both
+candidate routes respond under `/api/v1` (`/api/v1/nfses/import`, `/api/v1/nfses/import_file`,
+`/api/v1/nfses/imports`) — registration is strongly indicated, not proven (§1). The presence of both
 `import` and `import_file` suggests structured-JSON and file-upload (XML) variants — **UNVERIFIED**
 which accepts what, and what fields identify a note (chave de acesso, NFS-e number, verification
 code). The full OpenAPI spec must be pulled from `/api_docs.json` once a session/token exists.
@@ -96,9 +99,10 @@ All **UNVERIFIED** — gated behind the docs login:
 
 **None blocking found.** The remaining unknowns are contract details, not capability gaps:
 
-1. **Route exists** — `POST /api/v1/nfses/import[_file]` confirmed live (401-vs-404 dispatch
-   evidence, §1). The REST auth scheme is UNVERIFIED until an issued token succeeds against
-   `/api/v1` — Bearer is expected (the `/mcp` challenge asks for it verbatim) but not yet proven.
+1. **Route presence strongly indicated** — `POST /api/v1/nfses/import[_file]` answers under
+   `/api/v1` (401-vs-404 dispatch evidence, §1), but registration is UNVERIFIED until a token
+   reaches a handler. The REST auth scheme is likewise UNVERIFIED — Bearer is expected (the `/mcp`
+   challenge asks for it verbatim) but not yet proven.
 2. **Spec retrieval is the next step** — pull `/api_docs.json` under the client account immediately
    after token issuance; the spec closes every UNVERIFIED item above in one step.
 3. **Design constraint for MOD-227** (recorded): export only after Focus `autorizado`; dedupe key =

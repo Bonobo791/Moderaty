@@ -22,7 +22,7 @@ vi.mock('$lib/server/migrationGuard', () => ({
 }));
 
 import { LOCALE_COOKIE } from '$lib/i18n/locale';
-import { handle } from './hooks.server';
+import { handle, handleError } from './hooks.server';
 
 beforeEach(() => {
 	// Drop lingering console.error spies so per-test call assertions are clean.
@@ -396,6 +396,71 @@ test('the noindex header marks auth-gate redirects, not just rendered pages', as
 
 	expect(response.status).toBe(302);
 	expect(response.headers.get('x-robots-tag')).toBe('noindex');
+});
+
+function abortedRequestEvent(aborted: boolean) {
+	const controller = new AbortController();
+	if (aborted) controller.abort();
+	return {
+		request: new Request('http://localhost/channels/UC1/feedback', { method: 'POST', signal: controller.signal }),
+		url: new URL('http://localhost/channels/UC1/feedback'),
+		route: { id: '/(app)/channels/[id]/feedback' }
+	};
+}
+
+test('a client that disconnects mid-request logs a warn line, not a fake 500', async () => {
+	// 2026-10-01 dev log: a socket close during a form POST surfaced as
+	// `[500] POST /channels/…/feedback — Error: aborted` via the default
+	// handleError. A gone client is not a server defect — demote it so real
+	// 500s stay greppable.
+	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+	const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+	const result = await handleError({
+		error: new Error('aborted'),
+		event: abortedRequestEvent(true) as never,
+		status: 500,
+		message: 'Internal Error'
+	});
+
+	expect(warn).toHaveBeenCalledWith(expect.stringContaining('request aborted: POST /channels/UC1/feedback'));
+	expect(err).not.toHaveBeenCalled();
+	expect(result).toEqual({ message: 'Internal Error' });
+});
+
+test('a real unexpected error keeps the loud [500] + stack log', async () => {
+	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+	const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+	const boom = new Error('db exploded');
+
+	const result = await handleError({
+		error: boom,
+		event: abortedRequestEvent(false) as never,
+		status: 500,
+		message: 'Internal Error'
+	});
+
+	expect(err).toHaveBeenCalledWith('[500] POST /channels/UC1/feedback', boom);
+	expect(warn).not.toHaveBeenCalled();
+	expect(result).toEqual({ message: 'Internal Error' });
+});
+
+test('an abort-shaped error on a live connection still logs as a 500', async () => {
+	// The request-signal guard distinguishes a client disconnect from an
+	// abort raised by our own code (e.g. a fetch timeout inside an action) —
+	// only a dead request demotes.
+	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+	const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+	await handleError({
+		error: new Error('aborted'),
+		event: abortedRequestEvent(false) as never,
+		status: 500,
+		message: 'Internal Error'
+	});
+
+	expect(err).toHaveBeenCalled();
+	expect(warn).not.toHaveBeenCalled();
 });
 
 test('the /api/health early return also carries the noindex header', async () => {

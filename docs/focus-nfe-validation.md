@@ -204,6 +204,20 @@ Maintainer decisions (2026-10-01):
   it exposes no public homologation portal. Focus already wraps all of that;
   there is no reason to build it.
 
+Confirmed from a real emitted note (municipal NFS-e nº 3, RPS nº 5, 2026-09-10):
+
+- Issuer identifiers for `POST /v2/empresas`: CNPJ `68.425.709/0001-72`,
+  Inscrição Municipal `0.432.564-8`, Av. Paulista 777, 15th floor, Bela Vista,
+  CEP 01311-914, São Paulo/SP.
+- Service code in use: `03115` (LC 116 item 3.11.5 — assessoria/consultoria);
+  the accountant maps it to `codigo_tributacao_nacional_iss` under MOD-178/179.
+- Past foreign-recipient practice: tomador emitted with **name only**
+  (WISE INC — all ID/address fields blank), annotated as service export. On the
+  national route the equivalent is `razao_social_tomador` +
+  `motivo_ausencia_nif_tomador` (and the `_ext` address group if collected);
+  whether to start collecting NIF/address beyond that is a MOD-178/181
+  decision, not a schema constraint.
+
 Recorded decisions/constraints to carry into dependent issues:
 
 1. **Route decided: national** (`/v2/nfsen`, `habilita_nfsen_*`). The issuer is a confirmed

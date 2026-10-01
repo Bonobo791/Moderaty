@@ -282,10 +282,18 @@
 		{/if}
 		<form method="POST" action="?/setAutoTopup" use:enhance={submitting}>
 			<input type="hidden" name="pausedAt" value={data.autoTopup?.pausedAt ?? ''} />
-			<label for="auto-topup-enabled">
-				<input id="auto-topup-enabled" type="checkbox" name="enabled" checked={topupEnabled} onchange={(event) => { enableTopup = event.currentTarget.checked; }} />
-				Enable automatic top-up
-			</label>
+			{#if hasAutoTopup}
+				<!-- An unchecked checkbox posts NOTHING, so once enabled the flag
+					must travel as a hidden input — without it an "Update" submit
+					would be read server-side as a disable. Disabling gets its own
+					explicit button below (same bare POST the lifetime card uses). -->
+				<input type="hidden" name="enabled" value="on" />
+			{:else}
+				<label for="auto-topup-enabled">
+					<input id="auto-topup-enabled" type="checkbox" name="enabled" checked={topupEnabled} onchange={(event) => { enableTopup = event.currentTarget.checked; }} />
+					Enable automatic top-up
+				</label>
+			{/if}
 			{#if autoTopupBundles.length > 0}
 				<div class="field-row">
 					<label for="auto-topup-bundle">Automatic top-up bundle</label>
@@ -326,6 +334,12 @@
 				{hasAutoTopup ? 'Update auto top-up' : 'Enable auto top-up'}
 			</button>
 		</form>
+		{#if hasAutoTopup}
+			<p class="muted">To stop automatic charges entirely, disable auto top-up — your bundle and threshold are kept if you turn it back on.</p>
+			<form method="POST" action="?/setAutoTopup" use:enhance={submitting}>
+				<button class="btn secondary small" type="submit" disabled={pending}>Disable automatic top-up</button>
+			</form>
+		{/if}
 	</div>
 	{/if}
 

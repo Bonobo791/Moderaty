@@ -13,7 +13,11 @@ COPY package.json package-lock.json ./
 # optionalDependency (its install script is only a validator) and fsevents is
 # macOS-only; the root `prepare` (svelte-kit sync) is skipped too, but the
 # SvelteKit vite plugin regenerates .svelte-kit itself during `vite build`.
-RUN npm ci --ignore-scripts
+# Retry flags: a single ECONNRESET from the registry must not kill the deploy.
+RUN npm ci --ignore-scripts \
+	--fetch-retries=5 --fetch-retry-factor=2 \
+	--fetch-retry-mintimeout=10000 --fetch-retry-maxtimeout=120000 \
+	--fetch-timeout=300000
 COPY . .
 # Same deploy gate as Netlify (scripts/netlify-migrate.mjs): migrate + verify
 # the database BEFORE building, so an image can never be built against an

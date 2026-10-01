@@ -1,4 +1,4 @@
-import type { Handle } from '@sveltejs/kit';
+import type { Handle, HandleServerError } from '@sveltejs/kit';
 
 import { isHttpError } from '@sveltejs/kit';
 import { DrizzleQueryError } from 'drizzle-orm';
@@ -92,4 +92,39 @@ export const handle: Handle = async ({ event, resolve }) => {
 		event.locals.user = null;
 	}
 	return respond(resolveLocalized());
+};
+
+/**
+ * SvelteKit's default handleError prints every unexpected error as a
+ * `[500] METHOD path` + stack — including clients that closed the socket
+ * mid-request (adapter-node aborts event.request.signal on disconnect,
+ * which surfaces here as `Error: aborted` / ECONNRESET). A gone client is
+ * not a server defect, and fake 500s bury real ones in ops logs — demote
+ * the abort-shaped subset to a warn line that still names the request.
+ * The request-signal check keeps OUR in-flight aborts (fetch timeouts
+ * inside actions) on the error path: only a dead connection downgrades.
+ * Redirects and deliberate HttpErrors never reach this hook.
+ */
+export const handleError: HandleServerError = ({ error, event, status, message }) => {
+	const abortLike =
+		error !== null &&
+		typeof error === 'object' &&
+		((error as Error).message === 'aborted' ||
+			(error as Error).name === 'AbortError' ||
+			(error as { code?: string }).code === 'ECONNRESET');
+	if (event.request.signal.aborted && abortLike) {
+		console.warn(
+			'request aborted: %s %s — the client disconnected before a response could be sent',
+			event.request.method,
+			event.url.pathname
+		);
+	} else if (status === 404) {
+		// Framework 404s (unmatched routes, missing data requests) land here as
+		// SvelteKitError — scanner noise, not a defect. The default logger prints
+		// just the request line for them; match that, at warn level.
+		console.warn('[%d] %s %s', status, event.request.method, event.url.pathname);
+	} else {
+		console.error('[%d] %s %s', status, event.request.method, event.url.pathname, error);
+	}
+	return { message };
 };

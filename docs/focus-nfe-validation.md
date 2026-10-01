@@ -9,10 +9,12 @@ certificate upload, or live fiscal action (see §6).
 
 ## Decision summary
 
-- **Route: NFS-e Nacional (`POST /v2/nfsen`), not the municipal `POST /v2/nfse` route.**
+- **Route: NFS-e Nacional (`POST /v2/nfsen`) — conditional on issuer eligibility.**
   São Paulo mandates the national issuer for Simples Nacional issuers from 2026-11-01; after that
   date SP's municipal systems serve only queries and retroactive emissions for covered issuers.
-  Building on the municipal route would be a legacy design with a hard expiry.
+  Building on the municipal route would be a legacy design with a hard expiry. For a non-Simples
+  issuer, SP/Focus acceptance of national issuance is UNVERIFIED — MOD-178's regime decision and
+  homologation (MOD-183) gate this choice (§1, §5.1).
 - **Plan fit: Focus Solo** (1 CNPJ, 100 notes/mo, R$89.90 + R$0.10/extra note) fits a single-issuer
   deployment at current volume. Pricing is context only — purchase requires separate approval.
 - **No blocking unsupported requirement found.** Open items for dependent issues are listed in §5.
@@ -51,8 +53,10 @@ focusnfe.com.br/guides/nfse/municipios-integrados/municipios-da-nfse-nacional/.
 **Municipality coverage / cutover:**
 
 - The national route only works where the establishment municipality has adhered to the Emissor
-  Nacional. Official coverage: gov.br/nfse "Monitoramento de Adesões" (all 5,571 municipalities in
-  the convênio; every capital and every city >500k). Focus forwards to the same dashboard.
+  Nacional. Official coverage: gov.br/nfse "Monitoramento de Adesões" — the headline 5,571 figure
+  is municipalities participating in the national NFS-e platform (the convênio); what gates route
+  availability is the filtered "Adesão ao Emissor Nacional" (`AderenteEmissorNacional`) subset,
+  checked per municipality — not the raw count. Focus forwards to the same dashboard.
 - São Paulo/SP: Secretaria da Fazenda page "Uso do Emissor Nacional da NFS-e será obrigatório"
   (prefeitura.sp.gov.br/web/fazenda/w/usoemissornacional, fetched 2026-10-01 — page returned 403 to
   the fetcher; content verified via search-indexed copy) states the national issuer is mandatory for
@@ -78,15 +82,17 @@ NFS-e Nacional DPS schema (campos.focusnfe.com.br/nfse_nacional/EmissaoDPSXml.ht
 main fields also in the `/v2/nfsen` OpenAPI schema) supports every required recipient combination:
 
 - **Domestic PJ**: `cnpj_tomador` + `razao_social_tomador` + BR address (`codigo_municipio_tomador`
-  IBGE-7, `cep_tomador`, `logradouro`, `numero`, `complemento`, `bairro`), optional
-  `inscricao_municipal_tomador`, `telefone_tomador`, `email_tomador`.
-- **Domestic PF**: `cpf_tomador` (11 digits) + same address fields.
+  IBGE-7, `cep_tomador`, `logradouro_tomador`, `numero_tomador`, `complemento_tomador`,
+  `bairro_tomador`), optional `inscricao_municipal_tomador`, `telefone_tomador`, `email_tomador`.
+- **Domestic PF**: `cpf_tomador` (11 digits) + same `_tomador`-suffixed address fields.
 - **Foreign PF/PJ**: `nif_tomador` (up to 40 chars) **or** `motivo_ausencia_nif_tomador`
   (0 = não informado na nota de origem, 1 = dispensado do NIF, 2 = não exigência do NIF — the
   legitimate-absence mechanism the project requires, so no foreign customer is forced to supply a
   Brazilian CPF); foreign address via `codigo_pais_ext_tomador` (ISO country), `cep_ext_tomador`,
-  `nome_cidade_ext_tomador`, `regiao_ext_tomador`, plus the shared street/number/complement/bairro
-  fields. Focus publishes a complete "Tomador Estrangeiro" example payload on the national guide.
+  `nome_cidade_ext_tomador`, `regiao_ext_tomador`, plus the same `logradouro_tomador`/
+  `numero_tomador`/`complemento_tomador`/`bairro_tomador` street fields (no `_ext` street variants
+  exist in the schema). Focus publishes a complete "Tomador Estrangeiro" example payload on the
+  national guide.
 - **Unidentified tomador**: the national model allows emitting with no tomador identification
   (Focus national guide, "Emissão sem tomador identificado").
 - **Service export**: `tributacao_iss = 3` (Exportação de serviço) + `codigo_pais_exportacao`;
@@ -123,8 +129,9 @@ municipalities may ignore. Foreign recipients are first-class only on the nation
 - **Callbacks (gatilhos/webhooks)**: `POST /v2/hooks` registers `{event:"nfsen", url, cnpj, ...}`.
   Optional `authorization` + `authorization_header` set a caller-defined header value on every
   delivery — the provider-supported mechanism to authenticate callbacks (use it for a shared
-  secret). Failed deliveries retry at 1 min / 30 min / 1 h / 3 h / 24 h, then stop; a lost
-  notification can be replayed via `POST /v2/nfse/{ref}/hooks` equivalent —
+  secret). Since the shared secret travels on every delivery, register only an `https://` callback
+  URL. Failed deliveries retry at 1 min / 30 min / 1 h / 3 h / 24 h, then stop; a lost
+  notification can be replayed via `POST /v2/nfsen/{referencia}/hook` —
   `reenviar_hook_nfsen` ("Solicitar reenvio de notificação").
 - **Email**: `reenviar_email_nfsen` resends the note to a different email (sync confirm, async
   delivery); `enviar_email_destinatario` automates tomador delivery in production.
@@ -175,11 +182,28 @@ foreign PF/PJ recipients, async authorization with ref idempotency, status callb
 retrieval, cancellation and substitution, homologation environment. The design avoids the legacy
 São Paulo-only route entirely.
 
+Maintainer decisions (2026-10-01):
+
+- **Issuer municipality confirmed: São Paulo/SP** (IBGE 3550308). This pins the
+  cutover analysis in §1: if ADM LTDA is a Simples Nacional optant, the national
+  issuer is mandatory from 2026-11-01; regime confirmation stays with the
+  accountant under MOD-178.
+- **Integration path confirmed: Focus NFe abstraction** over a direct prefeitura
+  webservice integration. The São Paulo municipal webservice would require
+  owning its proprietary XML layout, e-CNPJ A1 mutual-TLS/signature auth, the
+  RPS→NFS-e numbering lifecycle, and sync/async batch interfaces directly, and
+  it exposes no public homologation portal. Focus already wraps all of that;
+  there is no reason to build it.
+
 Recorded decisions/constraints to carry into dependent issues:
 
-1. **Target the national route exclusively** (`/v2/nfsen`, `habilita_nfsen_*`). Do not implement the
-   municipal `/v2/nfse` path; production mutual-exclusion with `habilita_nfse` makes a dual-route
-   company configuration impossible anyway.
+1. **Route decision conditional on issuer eligibility.** `/v2/nfsen` + `habilita_nfsen_*` is the
+   design target — production mutual-exclusion with `habilita_nfse` makes a dual-route company
+   configuration impossible anyway — but it binds only after MOD-178 confirms ADM LTDA's regime and
+   Focus/SP acceptance of national issuance for it. If the issuer turns out ineligible (non-Simples
+   without SP national support), the municipal `/v2/nfse` route becomes the fallback and its
+   foreign-recipient limitations (§2) must be re-scoped with the accountant before any emission
+   work.
 2. **Persist the XML ourselves** — the Backups API does not cover NFS-e; fetch
    `caminho_xml_nota_fiscal`/`url_danfse` at authorization time.
 3. **Authenticate webhooks** with `authorization`/`authorization_header` shared secret and treat

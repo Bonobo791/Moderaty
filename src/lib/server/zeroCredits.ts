@@ -484,42 +484,44 @@ async function evaluateUser(user: SweepUser, deadline?: number): Promise<EvalOut
 		console.error(`zero-credit sweep: user ${user.id} has an unparseable zero_credits_warned_at (${user.warnedAt}) — skipped`);
 		return 'idle';
 	}
-	if (ageMs >= ZERO_CREDIT_GRACE_MS) {
-		// The gate is `warned_at` — the DELIVERY marker, not the claim: a
-		// crash after the claim but before the send leaves notified_at
-		// stamped with no mail out, so trusting it would delete unwarned
-		// accounts (codex). A stamp older than this countdown belongs to an
-		// earlier cycle either way.
-		const neverWarned = user.warnedAt === null || Date.parse(user.warnedAt) < sinceMs;
-		if (neverWarned) {
-			// Deletion requires a delivered warning — an account whose warnings
-			// all failed to send (APP_URL missing, Mailjet down) must not be
-			// erased on the bare clock. Restart the window so the promised
-			// cadence can run; the release is conditional so a concurrent
-			// sweep's warning claim still wins (codex+coderabbit).
-			const restamped = await db
-				.update(users)
-				.set({ zeroCreditsSince: nowIso, zeroCreditsNotifiedAt: null, zeroCreditsWarnedAt: null })
-				.where(
-					and(
-						eq(users.id, user.id),
-						eq(users.zeroCreditsSince, user.since),
-						user.notifiedAt === null
-							? isNull(users.zeroCreditsNotifiedAt)
-							: eq(users.zeroCreditsNotifiedAt, user.notifiedAt)
-					)
-				)
-				.returning({ id: users.id });
-			if (!restamped.length) return 'idle'; // a concurrent run claimed the milestone — it owns the outcome
-			console.error(`zero-credit sweep: user ${user.id} reached the grace expiry with no delivered warning — restarting the warning window`);
-			return 'stamped';
-		}
-		return claimAndDelete(user, user.since, ageMs, deadline);
-	}
+	if (ageMs >= ZERO_CREDIT_GRACE_MS) return resolveGraceExpiry(user, user.since, sinceMs, ageMs, nowIso, deadline);
 	if (ageMs >= ZERO_CREDIT_NOTICE_MS && (user.notifiedAt === null || Date.now() - Date.parse(user.notifiedAt) >= ZERO_CREDIT_NOTICE_MS)) {
 		return claimAndWarn(user, user.since, sinceMs, nowIso, deadline);
 	}
 	return 'idle';
+}
+
+/**
+ * Grace-expiry resolution. The gate is `warned_at` — the DELIVERY marker,
+ * not the claim: a crash after the claim but before the send leaves
+ * notified_at stamped with no mail out, so trusting it would delete
+ * unwarned accounts (codex). A stamp older than this countdown belongs to
+ * an earlier cycle either way.
+ */
+async function resolveGraceExpiry(user: SweepUser, since: string, sinceMs: number, ageMs: number, nowIso: string, deadline?: number): Promise<EvalOutcome> {
+	const neverWarned = user.warnedAt === null || Date.parse(user.warnedAt) < sinceMs;
+	if (!neverWarned) return claimAndDelete(user, since, ageMs, deadline);
+	// Deletion requires a delivered warning — an account whose warnings
+	// all failed to send (APP_URL missing, Mailjet down) must not be
+	// erased on the bare clock. Restart the window so the promised
+	// cadence can run; the release is conditional so a concurrent
+	// sweep's warning claim still wins (codex+coderabbit).
+	const restamped = await db
+		.update(users)
+		.set({ zeroCreditsSince: nowIso, zeroCreditsNotifiedAt: null, zeroCreditsWarnedAt: null })
+		.where(
+			and(
+				eq(users.id, user.id),
+				eq(users.zeroCreditsSince, since),
+				user.notifiedAt === null
+					? isNull(users.zeroCreditsNotifiedAt)
+					: eq(users.zeroCreditsNotifiedAt, user.notifiedAt)
+			)
+		)
+		.returning({ id: users.id });
+	if (!restamped.length) return 'idle'; // a concurrent run claimed the milestone — it owns the outcome
+	console.error(`zero-credit sweep: user ${user.id} reached the grace expiry with no delivered warning — restarting the warning window`);
+	return 'stamped';
 }
 
 export interface ZeroCreditSweepResult {

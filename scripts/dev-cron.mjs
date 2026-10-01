@@ -122,6 +122,12 @@ function detailProblems(payload) {
 	if (typeof payload.zeroCreditItemErrors === 'number' && payload.zeroCreditItemErrors > 0) {
 		problems.push(`zeroCreditItemErrors: ${payload.zeroCreditItemErrors} account evaluation(s) failed`);
 	}
+	problems.push(...channelRunProblems(payload));
+	return problems;
+}
+
+function channelRunProblems(payload) {
+	const problems = [];
 	for (const entry of channelResultEntries(payload)) {
 		if (typeof entry.error === 'string' && !USER_ACTIONABLE_CATEGORIES.has(entry.error)) {
 			problems.push(`channel run failed: ${entry.error.replaceAll(/[\r\n]+/g, ' ')}`);

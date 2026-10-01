@@ -64,11 +64,11 @@ parse_bool() {
 require_value() {
   local option="$1"
   local value="${2:-}"
-  [ -n "$value" ] || fail "$option requires a value"
+  [[ -n "$value" ]] || fail "$option requires a value"
 }
 
 cleanup() {
-  if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
+  if [[ -n "$TEMP_DIR" ]] && [[ -d "$TEMP_DIR" ]]; then
     rm -rf "$TEMP_DIR"
   fi
 }
@@ -85,7 +85,7 @@ INSTALL_SERVICE="$(parse_bool PAPERCLIP_INSTALL_INSTALL_SERVICE "${PAPERCLIP_INS
 DRY_RUN="$(parse_bool PAPERCLIP_INSTALL_DRY_RUN "${PAPERCLIP_INSTALL_DRY_RUN:-}")"
 VERBOSE="$(parse_bool PAPERCLIP_INSTALL_VERBOSE "${PAPERCLIP_INSTALL_VERBOSE:-}")"
 
-while [ "$#" -gt 0 ]; do
+while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --canary)
       CANARY=1
@@ -140,17 +140,17 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-[ "$#" -eq 0 ] || fail "unexpected argument: $1"
+[[ "$#" -eq 0 ]] || fail "unexpected argument: $1"
 
-if [ "$CANARY" = "1" ] && [ -n "$VERSION" ]; then
+if [[ "$CANARY" = "1" ]] && [[ -n "$VERSION" ]]; then
   fail "--canary and --version cannot be used together"
 fi
 
-if [ ! -t 0 ] || [ ! -t 1 ]; then
+if [[ ! -t 0 ]] || [[ ! -t 1 ]]; then
   NO_PROMPT=1
 fi
 
-if [ "$VERBOSE" = "1" ]; then
+if [[ "$VERBOSE" = "1" ]]; then
   set -x
 fi
 
@@ -183,7 +183,7 @@ has_supported_node() {
   command -v node >/dev/null 2>&1 || return 1
   major="$(node_major)"
   [[ "$major" =~ ^[0-9]+$ ]] || return 1
-  [ "$major" -ge "$MIN_NODE_MAJOR" ] || return 1
+  [[ "$major" -ge "$MIN_NODE_MAJOR" ]] || return 1
   command -v npm >/dev/null 2>&1 || return 1
   command -v npx >/dev/null 2>&1 || return 1
 }
@@ -196,7 +196,7 @@ print_command() {
 
 confirm_command() {
   print_command "$@"
-  if [ "$NO_PROMPT" = "1" ]; then
+  if [[ "$NO_PROMPT" = "1" ]]; then
     return 0
   fi
 
@@ -215,7 +215,7 @@ run_command() {
 }
 
 run_privileged() {
-  if [ "$(id -u)" -eq 0 ]; then
+  if [[ "$(id -u)" -eq 0 ]]; then
     run_command "$@"
     return
   fi
@@ -225,7 +225,7 @@ run_privileged() {
 }
 
 ensure_temp_dir() {
-  if [ -z "$TEMP_DIR" ]; then
+  if [[ -z "$TEMP_DIR" ]]; then
     TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/paperclip-install.XXXXXX")"
   fi
 }
@@ -236,16 +236,16 @@ download_checked_script() {
 
   command -v curl >/dev/null 2>&1 || fail "curl is required to bootstrap Node.js"
   curl --proto '=https' --tlsv1.2 -fsSL "$url" -o "$destination"
-  [ -s "$destination" ] || fail "downloaded script is empty: $url"
-  [ "$(head -c 2 "$destination")" = '#!' ] || fail "downloaded file is not an executable script: $url"
+  [[ -s "$destination" ]] || fail "downloaded script is empty: $url"
+  [[ "$(head -c 2 "$destination")" = '#!' ]] || fail "downloaded file is not an executable script: $url"
   bash -n "$destination" || fail "downloaded script failed syntax validation: $url"
 }
 
 check_version_manager() {
-  if [ -n "${NVM_DIR:-}" ] || [ -d "${HOME:-}/.nvm" ]; then
+  if [[ -n "${NVM_DIR:-}" ]] || [[ -d "${HOME:-}/.nvm" ]]; then
     fail "nvm was detected. Run 'nvm install ${DEFAULT_NODE_MAJOR}' and retry this installer."
   fi
-  if command -v asdf >/dev/null 2>&1 || [ -d "${HOME:-}/.asdf" ]; then
+  if command -v asdf >/dev/null 2>&1 || [[ -d "${HOME:-}/.asdf" ]]; then
     fail "asdf was detected. Run 'asdf install nodejs ${DEFAULT_NODE_MAJOR}' and retry this installer."
   fi
 }
@@ -256,15 +256,15 @@ install_node_macos() {
     local brew_installer="$TEMP_DIR/homebrew-install.sh"
     log "Homebrew is required to install Node.js"
     download_checked_script "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh" "$brew_installer"
-    if [ "$NO_PROMPT" = "1" ]; then
+    if [[ "$NO_PROMPT" = "1" ]]; then
       run_command env NONINTERACTIVE=1 /bin/bash "$brew_installer"
     else
       run_command /bin/bash "$brew_installer"
     fi
 
-    if [ -x /opt/homebrew/bin/brew ]; then
+    if [[ -x /opt/homebrew/bin/brew ]]; then
       eval "$(/opt/homebrew/bin/brew shellenv)"
-    elif [ -x /usr/local/bin/brew ]; then
+    elif [[ -x /usr/local/bin/brew ]]; then
       eval "$(/usr/local/bin/brew shellenv)"
     fi
   fi
@@ -316,7 +316,7 @@ else
   fi
   check_version_manager
   log "Installing Node.js $DEFAULT_NODE_MAJOR"
-  if [ "$OS_NAME" = "macos" ]; then
+  if [[ "$OS_NAME" = "macos" ]]; then
     install_node_macos
   else
     install_node_linux
@@ -326,41 +326,41 @@ else
 fi
 
 PACKAGE_SPEC="$PAPERCLIP_PACKAGE@latest"
-if [ "$CANARY" = "1" ]; then
+if [[ "$CANARY" = "1" ]]; then
   PACKAGE_SPEC="$PAPERCLIP_PACKAGE@canary"
-elif [ -n "$VERSION" ]; then
+elif [[ -n "$VERSION" ]]; then
   PACKAGE_SPEC="$PAPERCLIP_PACKAGE@$VERSION"
 fi
 
 INSTALL_ARGS=(install)
-[ "$CANARY" = "1" ] && INSTALL_ARGS+=(--canary)
-[ -n "$VERSION" ] && INSTALL_ARGS+=(--version "$VERSION")
-[ -n "$REF" ] && INSTALL_ARGS+=(--ref "$REF")
-[ -n "$REPO" ] && INSTALL_ARGS+=(--repo "$REPO")
-[ "$NO_PROMPT" = "1" ] && INSTALL_ARGS+=(--no-prompt)
-[ "$INSTALL_SERVICE" = "1" ] && INSTALL_ARGS+=(--install-service)
-[ "$DRY_RUN" = "1" ] && INSTALL_ARGS+=(--dry-run)
-[ "$VERBOSE" = "1" ] && INSTALL_ARGS+=(--verbose)
+[[ "$CANARY" = "1" ]] && INSTALL_ARGS+=(--canary)
+[[ -n "$VERSION" ]] && INSTALL_ARGS+=(--version "$VERSION")
+[[ -n "$REF" ]] && INSTALL_ARGS+=(--ref "$REF")
+[[ -n "$REPO" ]] && INSTALL_ARGS+=(--repo "$REPO")
+[[ "$NO_PROMPT" = "1" ]] && INSTALL_ARGS+=(--no-prompt)
+[[ "$INSTALL_SERVICE" = "1" ]] && INSTALL_ARGS+=(--install-service)
+[[ "$DRY_RUN" = "1" ]] && INSTALL_ARGS+=(--dry-run)
+[[ "$VERBOSE" = "1" ]] && INSTALL_ARGS+=(--verbose)
 
 log "Delegating to the Paperclip CLI"
 print_command npx --yes "$PACKAGE_SPEC" "${INSTALL_ARGS[@]}"
 npx --yes "$PACKAGE_SPEC" "${INSTALL_ARGS[@]}"
 
-if [ "$DRY_RUN" = "1" ]; then
+if [[ "$DRY_RUN" = "1" ]]; then
   exit 0
 fi
 
-if [ "$NO_ONBOARD" = "0" ] && [ -t 0 ] && [ -t 1 ]; then
+if [[ "$NO_ONBOARD" = "0" ]] && [[ -t 0 ]] && [[ -t 1 ]]; then
   if command -v paperclipai >/dev/null 2>&1; then
     exec paperclipai onboard
-  elif [ -x "${HOME:-}/.local/bin/paperclipai" ]; then
+  elif [[ -x "${HOME:-}/.local/bin/paperclipai" ]]; then
     exec "${HOME}/.local/bin/paperclipai" onboard
   else
     fail "Paperclip was installed, but 'paperclipai' is not available on PATH. Open a new shell and run 'paperclipai onboard'."
   fi
 fi
 
-if [ "$NO_ONBOARD" = "0" ]; then
+if [[ "$NO_ONBOARD" = "0" ]]; then
   log "Installation complete. Next: paperclipai onboard"
 else
   log "Installation complete."

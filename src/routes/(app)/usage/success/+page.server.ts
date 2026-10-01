@@ -43,6 +43,21 @@ type SuccessState = {
  * attempt → failed; already fulfilled → granted; paid but unfulfilled → run
  * the same idempotent processor the webhook uses; otherwise still pending.
  */
+// A reversed attempt is terminal: there is no fulfillment left to wait
+// for — never leave the page pending (codex). A refund means the money
+// went back, so show that deliberately; a chargeback reads as failed. A
+// paid payment that can never be granted (the org went lifetime between
+// checkout and approval) is a durable terminal record — the buyer is still
+// charged, so the dedicated manual-refund state replaces "almost there"
+// (codex P1).
+function terminalAttemptState(status: string | undefined): Pick<SuccessState, 'granted' | 'pending' | 'failed' | 'refunded' | 'manualRefund'> | undefined {
+	if (status === 'fulfilled') return { granted: true, pending: false, failed: false, refunded: false, manualRefund: false };
+	if (status === 'refunded') return { granted: false, pending: false, failed: false, refunded: true, manualRefund: false };
+	if (status === 'disputed') return { granted: false, pending: false, failed: true, refunded: false, manualRefund: false };
+	if (status === 'manual_refund_required') return { granted: false, pending: false, failed: false, refunded: false, manualRefund: true };
+	return undefined;
+}
+
 async function mercadoPagoSuccess(user: SessionUser, attemptId: string): Promise<SuccessState> {
 	const attempt = await db
 		.select({ status: mercadoPagoCheckoutAttempts.status, paymentId: mercadoPagoCheckoutAttempts.paymentId })
@@ -50,23 +65,8 @@ async function mercadoPagoSuccess(user: SessionUser, attemptId: string): Promise
 		.where(and(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId), eq(mercadoPagoCheckoutAttempts.orgId, user.orgId)))
 		.get();
 	if (!attempt) return { maintenance: false, user, sessionId: attemptId, granted: false, pending: false, failed: true, refunded: false, manualRefund: false };
-	if (attempt.status === 'fulfilled') return { maintenance: false, user, sessionId: attemptId, granted: true, pending: false, failed: false, refunded: false, manualRefund: false };
-	// A reversed attempt is terminal: there is no fulfillment left to wait
-	// for — never leave the page pending (codex). A refund means the money
-	// went back, so show that deliberately; a chargeback reads as failed.
-	if (attempt.status === 'refunded') {
-		return { maintenance: false, user, sessionId: attemptId, granted: false, pending: false, failed: false, refunded: true, manualRefund: false };
-	}
-	if (attempt.status === 'disputed') {
-		return { maintenance: false, user, sessionId: attemptId, granted: false, pending: false, failed: true, refunded: false, manualRefund: false };
-	}
-	// A paid payment that can never be granted (the org went lifetime between
-	// checkout and approval) is a durable terminal record — the buyer is still
-	// charged, so the dedicated manual-refund state replaces "almost there"
-	// (codex P1).
-	if (attempt.status === 'manual_refund_required') {
-		return { maintenance: false, user, sessionId: attemptId, granted: false, pending: false, failed: false, refunded: false, manualRefund: true };
-	}
+	const terminal = terminalAttemptState(attempt.status);
+	if (terminal) return { maintenance: false, user, sessionId: attemptId, ...terminal };
 	if (attempt.paymentId) {
 		try {
 			await processMercadoPagoPayment(await retrievePayment(attempt.paymentId));
@@ -78,16 +78,8 @@ async function mercadoPagoSuccess(user: SessionUser, attemptId: string): Promise
 				.from(mercadoPagoCheckoutAttempts)
 				.where(and(eq(mercadoPagoCheckoutAttempts.attemptId, attemptId), eq(mercadoPagoCheckoutAttempts.orgId, user.orgId)))
 				.get();
-			if (fresh?.status === 'fulfilled') return { maintenance: false, user, sessionId: attemptId, granted: true, pending: false, failed: false, refunded: false, manualRefund: false };
-			if (fresh?.status === 'refunded') {
-				return { maintenance: false, user, sessionId: attemptId, granted: false, pending: false, failed: false, refunded: true, manualRefund: false };
-			}
-			if (fresh?.status === 'disputed') {
-				return { maintenance: false, user, sessionId: attemptId, granted: false, pending: false, failed: true, refunded: false, manualRefund: false };
-			}
-			if (fresh?.status === 'manual_refund_required') {
-				return { maintenance: false, user, sessionId: attemptId, granted: false, pending: false, failed: false, refunded: false, manualRefund: true };
-			}
+			const freshTerminal = terminalAttemptState(fresh?.status);
+			if (freshTerminal) return { maintenance: false, user, sessionId: attemptId, ...freshTerminal };
 		} catch (cause) {
 			console.error('usage/success: Mercado Pago fulfillment retry failed:', cause);
 		}
@@ -198,53 +190,58 @@ async function stripeSuccess(user: SessionUser, sessionId: string): Promise<Succ
 			if (granted) await markCheckoutAttemptFulfilled(sessionId);
 		}
 	} catch (cause) {
-		// A session id that does not EXIST is a definitive no-purchase, not a
-		// pending payment: Stripe answers an StripeInvalidRequestError with
-		// code resource_missing for unknown ids, and the webhook will never
-		// fulfill it either — the page must show the failed/no-purchase state
-		// instead of claiming "Payment received" for a session that never was
-		// (codex review).
-		const isMissingSession =
-			cause !== null &&
-			typeof cause === 'object' &&
-			(cause as { type?: unknown }).type === 'StripeInvalidRequestError' &&
-			(cause as { code?: unknown }).code === 'resource_missing';
-		if (isMissingSession) {
-			console.error(
-				`usage/success: checkout session ${createHash('sha256').update(sessionId).digest('hex').slice(0, 12)}… does not exist — no purchase to show`
-			);
-			return { maintenance: false, user, sessionId, granted: false, pending: false, failed: true, refunded: false, manualRefund: false };
-		}
-		// A failed or impossible automatic refund is its own state, not the
-		// generic failure: 'pending' would claim money is coming back when none
-		// is, and 'No purchase found' tells a still-charged buyer nothing — the
-		// attempt row is marked manual_refund_required by the refund.updated
-		// handler and ops is already screaming (codex P1, round 8).
-		if (cause instanceof Error && cause.message.includes('MANUAL REFUND REQUIRED')) {
-			return { maintenance: false, user, sessionId, granted: false, pending: false, failed: false, refunded: false, manualRefund: true };
-		}
-		// A transient Stripe failure can mask a terminal outcome the webhook
-		// already persisted — the durable attempt record outranks the generic
-		// pending fallback (codex P1, round 8).
-		const attempt = await db
-			.select({ status: stripeCheckoutAttempts.status })
-			.from(stripeCheckoutAttempts)
-			.where(and(eq(stripeCheckoutAttempts.stripeSessionId, sessionId), eq(stripeCheckoutAttempts.orgId, user.orgId)))
-			.get();
-		if (attempt?.status === 'manual_refund_required') {
-			return { maintenance: false, user, sessionId, granted: false, pending: false, failed: false, refunded: false, manualRefund: true };
-		}
-		// A TRANSIENT retrieval failure is different: the webhook remains the
-		// source of truth; log loudly and show pending. The session id is
-		// query-controlled and the provider error can carry payment details —
-		// the log stays restricted: a fixed failure category and a short hash
-		// of the id for correlation, never the raw error text (coderabbit).
-		console.error(
-			`usage/success: could not fulfill checkout (session ${createHash('sha256').update(sessionId).digest('hex').slice(0, 12)}…) — see the stripe webhook logs`
-		);
-		pending = true;
+		return checkoutFailureState(user, sessionId, cause);
 	}
 	return { maintenance: false, user, sessionId, granted, pending, failed: failed || (!granted && !pending && !refunded && !manualRefund), refunded, manualRefund, test };
+}
+
+/**
+ * Failure classification for the Stripe branch. A session id that does not
+ * EXIST is a definitive no-purchase, not a pending payment: Stripe answers
+ * an StripeInvalidRequestError with code resource_missing for unknown ids,
+ * and the webhook will never fulfill it either — the page must show the
+ * failed/no-purchase state instead of claiming "Payment received" for a
+ * session that never was (codex review). A failed or impossible automatic
+ * refund is its own state, not the generic failure: 'pending' would claim
+ * money is coming back when none is, and 'No purchase found' tells a
+ * still-charged buyer nothing — the attempt row is marked
+ * manual_refund_required by the refund.updated handler and ops is already
+ * screaming (codex P1, round 8). A transient Stripe failure can mask a
+ * terminal outcome the webhook already persisted — the durable attempt
+ * record outranks the generic pending fallback (codex P1, round 8). A
+ * TRANSIENT retrieval failure is different: the webhook remains the source
+ * of truth; log loudly and show pending. The session id is query-controlled
+ * and the provider error can carry payment details — the log stays
+ * restricted: a fixed failure category and a short hash of the id for
+ * correlation, never the raw error text (coderabbit).
+ */
+async function checkoutFailureState(user: SessionUser, sessionId: string, cause: unknown): Promise<SuccessState> {
+	const isMissingSession =
+		cause !== null &&
+		typeof cause === 'object' &&
+		(cause as { type?: unknown }).type === 'StripeInvalidRequestError' &&
+		(cause as { code?: unknown }).code === 'resource_missing';
+	if (isMissingSession) {
+		console.error(
+			`usage/success: checkout session ${createHash('sha256').update(sessionId).digest('hex').slice(0, 12)}… does not exist — no purchase to show`
+		);
+		return { maintenance: false, user, sessionId, granted: false, pending: false, failed: true, refunded: false, manualRefund: false };
+	}
+	if (cause instanceof Error && cause.message.includes('MANUAL REFUND REQUIRED')) {
+		return { maintenance: false, user, sessionId, granted: false, pending: false, failed: false, refunded: false, manualRefund: true };
+	}
+	const attempt = await db
+		.select({ status: stripeCheckoutAttempts.status })
+		.from(stripeCheckoutAttempts)
+		.where(and(eq(stripeCheckoutAttempts.stripeSessionId, sessionId), eq(stripeCheckoutAttempts.orgId, user.orgId)))
+		.get();
+	if (attempt?.status === 'manual_refund_required') {
+		return { maintenance: false, user, sessionId, granted: false, pending: false, failed: false, refunded: false, manualRefund: true };
+	}
+	console.error(
+		`usage/success: could not fulfill checkout (session ${createHash('sha256').update(sessionId).digest('hex').slice(0, 12)}…) — see the stripe webhook logs`
+	);
+	return { maintenance: false, user, sessionId, granted: false, pending: true, failed: false, refunded: false, manualRefund: false };
 }
 
 export const load: PageServerLoad = async ({ locals, url }) => {

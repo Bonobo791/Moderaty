@@ -27,13 +27,7 @@ export default async function cron() {
 			signal: controller.signal
 		});
 	} catch (error) {
-		// undici hides the real network reason (DNS, TLS, refused) in `cause`;
-		// surface it so failed invocations are diagnosable from the logs alone.
-		const cause = error instanceof Error ? error.cause : undefined;
-		const detail = cause instanceof Error ? `${cause.code ?? cause.name}: ${cause.message}` : 'no cause';
-		throw new Error(
-			`cron endpoint unreachable: ${error instanceof Error ? error.message : String(error)} (${detail})`
-		);
+		throw unreachableError(error);
 	} finally {
 		clearTimeout(timer);
 	}
@@ -67,6 +61,16 @@ export default async function cron() {
 }
 
 const TIMEOUT_MS = 25_000; // below Netlify's 26s function limit; the endpoint's own run budget is 20s
+
+// undici hides the real network reason (DNS, TLS, refused) in `cause`;
+// surface it so failed invocations are diagnosable from the logs alone.
+function unreachableError(error) {
+	const cause = error instanceof Error ? error.cause : undefined;
+	const detail = cause instanceof Error ? `${cause.code ?? cause.name}: ${cause.message}` : 'no cause';
+	return new Error(
+		`cron endpoint unreachable: ${error instanceof Error ? error.message : String(error)} (${detail})`
+	);
+}
 
 // The schedule is every minute while the app is in early operation; raise to
 // '*/15 * * * *' when user volume grows. The endpoint itself enforces one

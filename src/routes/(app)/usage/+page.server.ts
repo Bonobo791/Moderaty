@@ -239,6 +239,107 @@ export const load: PageServerLoad = async ({ locals }) => {
 	}
 };
 
+type SessionUser = ReturnType<typeof requireUser>;
+
+function topupSnapshot(orgId: string) {
+	return db
+		.select({
+			autoTopupEnabled: organizations.autoTopupEnabled,
+			autoTopupState: organizations.autoTopupState,
+			autoTopupPausedAt: organizations.autoTopupPausedAt,
+			autoTopupBundle: organizations.autoTopupBundle,
+			autoTopupAttemptAt: organizations.autoTopupAttemptAt,
+			plan: organizations.plan
+		})
+		.from(organizations)
+		.where(eq(organizations.id, orgId))
+		.get();
+}
+
+type TopupSnapshot = Awaited<ReturnType<typeof topupSnapshot>>;
+
+async function applyAutoTopupEnable(user: SessionUser, form: FormData, bundle: string, threshold: number, current: TopupSnapshot, wasEnabled: boolean, needsConsent: boolean) {
+	if (!configuredAutoTopupBundles().some((option) => option.id === bundle)) {
+		console.error(`auto top-up settings rejected for org ${user.orgId}: unavailable bundle`);
+		return fail(400, { error: 'Choose an available automatic top-up bundle (500 or 2,000 comments).' });
+	}
+	if (bundle !== current?.autoTopupBundle && (current?.autoTopupState === 'in_flight' || current?.autoTopupAttemptAt)) {
+		console.error(`auto top-up settings rejected for org ${user.orgId}: bundle change during unresolved payment`);
+		return fail(409, { error: 'Wait for the current automatic payment to resolve before changing its bundle.' });
+	}
+	if (current?.autoTopupPausedAt && form.get('pausedAt') !== current.autoTopupPausedAt) {
+		console.error(`auto top-up enable rejected for org ${user.orgId}: stale form after refund pause`);
+		return fail(409, { error: 'Your automatic top-up settings changed after a refund. Reload Usage and give fresh consent to resume.' });
+	}
+	const unresolved = db.select({ id: stripeAutoTopupRecoveries.id }).from(stripeAutoTopupRecoveries)
+		.where(and(eq(stripeAutoTopupRecoveries.orgId, user.orgId), isNull(stripeAutoTopupRecoveries.resolvedAt)));
+	if (await unresolved.get()) {
+		console.error(`auto top-up enable rejected for org ${user.orgId}: payment recovery is unresolved`);
+		return fail(409, { error: 'An automatic payment is still being canceled or refunded. Wait for it to finish before enabling auto top-up. Contact support if it needs attention.' });
+	}
+	// Consent evidence — Stripe's save-and-reuse compliance: keep a record
+	// of the written agreement. The exact checkbox sentence (rendered from
+	// AUTO_TOPUP_CONSENT_TEXT itself so the form can never drift), the legal
+	// version it was rendered under, the user who ticked it, and when.
+	// Written on the enable transition and NEVER cleared by disabling — the
+	// authorization record survives for dispute defense. Re-enabling after
+	// SCA/decline failures starts from a clean slate.
+	const evidence =
+		needsConsent
+			? {
+					autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
+					autoTopupConsentVersion: LEGAL_VERSION,
+					autoTopupConsentedBy: user.id,
+					autoTopupConsentedAt: new Date().toISOString()
+				}
+			: {};
+	// The claim reset is scoped: the enable TRANSITION (and the recovery of a
+	// failure-disabled org) starts from a clean slate, but a threshold-only
+	// update while a charge is IN FLIGHT must preserve the claim — resetting
+	// it would let the sweep create a second PaymentIntent for the same
+	// shortage (coderabbit).
+	const resetClaim = !wasEnabled || current?.autoTopupState === 'disabled';
+	// Recheck plan, enable state, refund version, and recovery in the write:
+	// a concurrent refund or upgrade must win over this stale form.
+	const written = await db
+		.update(organizations)
+		.set({
+			autoTopupEnabled: 1,
+			autoTopupThreshold: threshold,
+			autoTopupBundle: bundle,
+			autoTopupPauseReason: null,
+			...(resetClaim ? { autoTopupState: 'idle', autoTopupFailures: 0 } : {}),
+			...evidence
+		})
+		.where(and(eq(organizations.id, user.orgId), ne(organizations.plan, 'lifetime'),
+			current?.autoTopupEnabled == null ? isNull(organizations.autoTopupEnabled) : eq(organizations.autoTopupEnabled, current.autoTopupEnabled),
+			current?.autoTopupPausedAt == null ? isNull(organizations.autoTopupPausedAt) : eq(organizations.autoTopupPausedAt, current.autoTopupPausedAt),
+			notExists(unresolved),
+			current?.autoTopupBundle == null ? isNull(organizations.autoTopupBundle) : eq(organizations.autoTopupBundle, current.autoTopupBundle),
+			...(bundle !== current?.autoTopupBundle ? [
+				isNull(organizations.autoTopupAttemptAt),
+				sql`COALESCE(${organizations.autoTopupState}, 'idle') != 'in_flight'`
+			] : [])))
+		.returning({ id: organizations.id });
+	if (written.length !== 1) {
+		console.error(`setAutoTopup rejected concurrent billing changes for org ${user.orgId}`);
+		const changed = await db.select({ plan: organizations.plan }).from(organizations).where(eq(organizations.id, user.orgId)).get();
+		if (isUnmeteredPlan(changed?.plan)) return fail(400, { error: 'Your lifetime plan includes unlimited moderated comments — auto top-up is not needed.' });
+		return fail(409, { error: 'Your billing settings changed. Reload Usage before enabling automatic top-up.' });
+	}
+	return undefined;
+}
+
+async function disableAutoTopup(orgId: string) {
+	await db.transaction(async (tx) => {
+		const org = await tx.select().from(organizations).where(eq(organizations.id, orgId)).get();
+		if (!org) throw new Error('Organization disappeared while disabling automatic top-up');
+		// Reuse durable payment recovery, retaining the owner's existing pause explanation.
+		if (org.autoTopupState === 'in_flight' || org.autoTopupAttemptAt) await pauseAutoTopupForRefund(tx, orgId);
+		await tx.update(organizations).set({ autoTopupEnabled: 0, autoTopupState: 'disabled', autoTopupPauseReason: org.autoTopupPauseReason, autoTopupPausedAt: org.autoTopupPausedAt }).where(eq(organizations.id, orgId));
+	});
+}
+
 export const actions: Actions = {
 	/** Owner-only: creates a Stripe Checkout for one credit bundle. */
 	buy: async ({ request, locals }) => {
@@ -320,18 +421,7 @@ export const actions: Actions = {
 		// its threshold submits enabled=on without consent and must never 400.
 		// The evidence is also written once, on that same transition — a
 		// threshold tweak must not rewrite the original authorization record.
-		const current = await db
-			.select({
-				autoTopupEnabled: organizations.autoTopupEnabled,
-					autoTopupState: organizations.autoTopupState,
-					autoTopupPausedAt: organizations.autoTopupPausedAt,
-				autoTopupBundle: organizations.autoTopupBundle,
-				autoTopupAttemptAt: organizations.autoTopupAttemptAt,
-				plan: organizations.plan
-			})
-			.from(organizations)
-			.where(eq(organizations.id, user.orgId))
-			.get();
+		const current = await topupSnapshot(user.orgId);
 		const wasEnabled = current?.autoTopupEnabled === 1;
 		const needsConsent = !wasEnabled || !configuredAutoTopupBundles().some((option) => option.id === current?.autoTopupBundle);
 		// A lifetime org's scoring is already unlimited — enabling (or a
@@ -345,83 +435,10 @@ export const actions: Actions = {
 			return fail(400, { error: 'You must tick the consent checkbox to enable automatic top-up.' });
 		}
 		if (enabled) {
-			if (!configuredAutoTopupBundles().some((option) => option.id === bundle)) {
-				console.error(`auto top-up settings rejected for org ${user.orgId}: unavailable bundle`);
-				return fail(400, { error: 'Choose an available automatic top-up bundle (500 or 2,000 comments).' });
-			}
-			if (bundle !== current?.autoTopupBundle && (current?.autoTopupState === 'in_flight' || current?.autoTopupAttemptAt)) {
-				console.error(`auto top-up settings rejected for org ${user.orgId}: bundle change during unresolved payment`);
-				return fail(409, { error: 'Wait for the current automatic payment to resolve before changing its bundle.' });
-			}
-			if (current?.autoTopupPausedAt && form.get('pausedAt') !== current.autoTopupPausedAt) {
-				console.error(`auto top-up enable rejected for org ${user.orgId}: stale form after refund pause`);
-				return fail(409, { error: 'Your automatic top-up settings changed after a refund. Reload Usage and give fresh consent to resume.' });
-			}
-			const unresolved = db.select({ id: stripeAutoTopupRecoveries.id }).from(stripeAutoTopupRecoveries)
-				.where(and(eq(stripeAutoTopupRecoveries.orgId, user.orgId), isNull(stripeAutoTopupRecoveries.resolvedAt)));
-			if (await unresolved.get()) {
-				console.error(`auto top-up enable rejected for org ${user.orgId}: payment recovery is unresolved`);
-				return fail(409, { error: 'An automatic payment is still being canceled or refunded. Wait for it to finish before enabling auto top-up. Contact support if it needs attention.' });
-			}
-			// Consent evidence — Stripe's save-and-reuse compliance: keep a
-			// record of the written agreement. The exact checkbox sentence
-			// (rendered from AUTO_TOPUP_CONSENT_TEXT itself so the form can
-			// never drift), the legal version it was rendered under, the user
-			// who ticked it, and when. Written on the enable transition and
-			// NEVER cleared by disabling — the authorization record survives
-			// for dispute defense.
-			// Re-enabling after SCA/decline failures starts from a clean slate.
-			const evidence =
-				needsConsent
-					? {
-							autoTopupConsentText: AUTO_TOPUP_CONSENT_TEXT,
-							autoTopupConsentVersion: LEGAL_VERSION,
-							autoTopupConsentedBy: user.id,
-							autoTopupConsentedAt: new Date().toISOString()
-						}
-					: {};
-			// The claim reset is scoped: the enable TRANSITION (and the
-			// recovery of a failure-disabled org) starts from a clean slate,
-			// but a threshold-only update while a charge is IN FLIGHT must
-			// preserve the claim — resetting it would let the sweep create a
-			// second PaymentIntent for the same shortage (coderabbit).
-			const resetClaim = !wasEnabled || current?.autoTopupState === 'disabled';
-			// Recheck plan, enable state, refund version, and recovery in the write:
-			// a concurrent refund or upgrade must win over this stale form.
-			const written = await db
-				.update(organizations)
-				.set({
-					autoTopupEnabled: 1,
-					autoTopupThreshold: threshold,
-					autoTopupBundle: bundle,
-					autoTopupPauseReason: null,
-					...(resetClaim ? { autoTopupState: 'idle', autoTopupFailures: 0 } : {}),
-					...evidence
-				})
-				.where(and(eq(organizations.id, user.orgId), ne(organizations.plan, 'lifetime'),
-					current?.autoTopupEnabled == null ? isNull(organizations.autoTopupEnabled) : eq(organizations.autoTopupEnabled, current.autoTopupEnabled),
-					current?.autoTopupPausedAt == null ? isNull(organizations.autoTopupPausedAt) : eq(organizations.autoTopupPausedAt, current.autoTopupPausedAt),
-					notExists(unresolved),
-					current?.autoTopupBundle == null ? isNull(organizations.autoTopupBundle) : eq(organizations.autoTopupBundle, current.autoTopupBundle),
-					...(bundle !== current?.autoTopupBundle ? [
-						isNull(organizations.autoTopupAttemptAt),
-						sql`COALESCE(${organizations.autoTopupState}, 'idle') != 'in_flight'`
-					] : [])))
-				.returning({ id: organizations.id });
-			if (written.length !== 1) {
-				console.error(`setAutoTopup rejected concurrent billing changes for org ${user.orgId}`);
-				const changed = await db.select({ plan: organizations.plan }).from(organizations).where(eq(organizations.id, user.orgId)).get();
-				if (isUnmeteredPlan(changed?.plan)) return fail(400, { error: 'Your lifetime plan includes unlimited moderated comments — auto top-up is not needed.' });
-				return fail(409, { error: 'Your billing settings changed. Reload Usage before enabling automatic top-up.' });
-			}
+			const rejected = await applyAutoTopupEnable(user, form, bundle, threshold, current, wasEnabled, needsConsent);
+			if (rejected) return rejected;
 		} else {
-			await db.transaction(async (tx) => {
-				const org = await tx.select().from(organizations).where(eq(organizations.id, user.orgId)).get();
-				if (!org) throw new Error('Organization disappeared while disabling automatic top-up');
-				// Reuse durable payment recovery, retaining the owner's existing pause explanation.
-				if (org.autoTopupState === 'in_flight' || org.autoTopupAttemptAt) await pauseAutoTopupForRefund(tx, user.orgId);
-				await tx.update(organizations).set({ autoTopupEnabled: 0, autoTopupState: 'disabled', autoTopupPauseReason: org.autoTopupPauseReason, autoTopupPausedAt: org.autoTopupPausedAt }).where(eq(organizations.id, user.orgId));
-			});
+			await disableAutoTopup(user.orgId);
 		}
 		return { ok: true };
 	},

@@ -440,17 +440,16 @@ export async function handleAutoTopupFailure(paymentIntentId: string): Promise<v
  * @param pi - The PaymentIntent to validate and fulfill
  * @returns `true` if credits were applied, `false` if the PaymentIntent is invalid or was already fulfilled
  */
-export async function grantAutoTopupCredits(
-	orgId: string,
-	pi: {
-		id: string;
-		status?: string | null;
-		latest_charge?: string | { id: string } | null;
-		/** Unix seconds — correlates a duplicate delivery to the claim it belongs to. */
-		created?: number | null;
-		metadata: Record<string, string> | null;
-	}
-): Promise<boolean> {
+type AutoTopupPi = {
+	id: string;
+	status?: string | null;
+	latest_charge?: string | { id: string } | null;
+	/** Unix seconds — correlates a duplicate delivery to the claim it belongs to. */
+	created?: number | null;
+	metadata: Record<string, string> | null;
+};
+
+export async function grantAutoTopupCredits(orgId: string, pi: AutoTopupPi): Promise<boolean> {
 	// The contract lives HERE, not with the callers: only a succeeded charge
 	// of ours can be granted.
 	if (pi.status !== 'succeeded') return false;
@@ -465,31 +464,7 @@ export async function grantAutoTopupCredits(
 	let applied: boolean;
 	let canceled: Awaited<ReturnType<typeof findPausedTopup>>;
 	try {
-		const result = await db.transaction(async (tx) => {
-			const existing = await tx.select({ id: creditTransactions.id }).from(creditTransactions).where(and(eq(creditTransactions.orgId, orgId), eq(creditTransactions.refType, 'payment_intent'), eq(creditTransactions.refId, pi.id))).get();
-			if (existing) return { applied: false, canceled: undefined };
-			const canceled = await findPausedTopup(tx, orgId, pi);
-			if (canceled) return { applied: false, canceled };
-			const applied = await applyLedgerDelta(tx, {
-				orgId,
-				delta: bundle.credits,
-				reason: 'auto_topup',
-				refType: 'payment_intent',
-				refId: pi.id,
-				paymentIntentId: pi.id,
-				chargeId: typeof pi.latest_charge === 'string' ? pi.latest_charge : undefined
-			});
-			// Commit claim release WITH the grant, before a refund can observe it.
-			const correlation = topupAttemptCorrelation(pi, organizations.autoTopupLastAttemptAt);
-			await tx.update(organizations).set({ autoTopupState: sql`CASE WHEN ${organizations.autoTopupState} = 'disabled' THEN 'disabled' ELSE 'idle' END`, autoTopupFailures: 0, autoTopupAttemptAt: null, autoTopupSubmittedAt: null })
-				.where(and(eq(organizations.id, orgId), or(and(or(ne(organizations.autoTopupState, 'disabled'), isNull(organizations.autoTopupState)), or(eq(organizations.autoTopupState, 'idle'), isNull(organizations.autoTopupLastAttemptAt))), correlation)));
-			// Release this payment's claim before its refund pause can record overlap.
-			const chargeId = typeof pi.latest_charge === 'string' ? pi.latest_charge : undefined;
-			if (chargeId) await pauseForObservedStripeRefund(tx, orgId, chargeId, undefined, undefined, pi);
-			return { applied, canceled: undefined };
-		});
-		applied = result.applied;
-		canceled = result.canceled;
+		({ applied, canceled } = await grantTopupInTransaction(orgId, pi, bundle.credits));
 	} catch (error) {
 		// The claim re-checks the plan before charging, but an upgrade to
 		// lifetime can land between the off-session charge and this delivery:
@@ -505,22 +480,7 @@ export async function grantAutoTopupCredits(
 		await releaseClaimForPi(orgId, pi, true);
 		return false;
 	}
-	if (canceled) {
-		await recoverPausedTopup(canceled, pi);
-		if (!(await findPausedTopup(db, orgId, pi))) return grantAutoTopupCredits(orgId, pi);
-		return false;
-	}
-	if (!applied) {
-		// Duplicate delivery — the grant already committed on the FIRST
-		// delivery. That delivery's org-state reset may have failed (a crash
-		// between the ledger commit and the state update), which would leave
-		// the claim in_flight until the 72h stale-claim sweep and block auto
-		// top-up for three days. Release the claim now — but ONLY when the
-		// in-flight claim belongs to THIS PI (drift guard): a late duplicate
-		// delivery of an older PI must never clear a NEWER claim (codex).
-		await releaseClaimForPi(orgId, pi);
-		return false;
-	}
+	if (!(await postGrantFollowup(orgId, pi, applied, canceled))) return false;
 	// A refund/dispute may have beaten this grant's delivery: drain the
 	// queued reversal in the same breath as the grant (codex 6153).
 	const chargeId = typeof pi.latest_charge === 'string' ? pi.latest_charge : undefined;
@@ -529,6 +489,74 @@ export async function grantAutoTopupCredits(
 		if (drained > 0) console.error(`stripe: auto-topup grant ${pi.id} immediately drained ${drained} pending reversal(s) for ${chargeId}`);
 	}
 	return true;
+}
+
+/**
+ * Post-grant branches: a paused recovery wins over the grant (recover, then
+ * retry the grant once the pause is gone); an unapplied grant on a SUCCEEDED
+ * PI is a duplicate delivery — the grant already committed on the FIRST
+ * delivery. That delivery's org-state reset may have failed (a crash between
+ * the ledger commit and the state update), which would leave the claim
+ * in_flight until the 72h stale-claim sweep and block auto top-up for three
+ * days. Release the claim now — but ONLY when the in-flight claim belongs
+ * to THIS PI (drift guard): a late duplicate delivery of an older PI must
+ * never clear a NEWER claim (codex).
+ *
+ * @returns `true` when the grant committed and the caller should drain
+ *   queued reversals, `false` for every non-grant outcome.
+ */
+async function postGrantFollowup(
+	orgId: string,
+	pi: AutoTopupPi,
+	applied: boolean,
+	canceled: Awaited<ReturnType<typeof findPausedTopup>>
+): Promise<boolean> {
+	if (canceled) {
+		await recoverPausedTopup(canceled, pi);
+		if (!(await findPausedTopup(db, orgId, pi))) return grantAutoTopupCredits(orgId, pi);
+		return false;
+	}
+	if (!applied) {
+		await releaseClaimForPi(orgId, pi);
+		return false;
+	}
+	return true;
+}
+
+/**
+ * The grant transaction: dedupe on the PI ref, defer to a paused recovery,
+ * apply the ledger delta, then commit the claim release WITH the grant
+ * before a refund can observe it — and release this payment's claim before
+ * its refund pause can record overlap.
+ */
+async function grantTopupInTransaction(
+	orgId: string,
+	pi: AutoTopupPi,
+	credits: number
+): Promise<{ applied: boolean; canceled: Awaited<ReturnType<typeof findPausedTopup>> }> {
+	return db.transaction(async (tx) => {
+		const existing = await tx.select({ id: creditTransactions.id }).from(creditTransactions).where(and(eq(creditTransactions.orgId, orgId), eq(creditTransactions.refType, 'payment_intent'), eq(creditTransactions.refId, pi.id))).get();
+		if (existing) return { applied: false, canceled: undefined };
+		const canceled = await findPausedTopup(tx, orgId, pi);
+		if (canceled) return { applied: false, canceled };
+		const applied = await applyLedgerDelta(tx, {
+			orgId,
+			delta: credits,
+			reason: 'auto_topup',
+			refType: 'payment_intent',
+			refId: pi.id,
+			paymentIntentId: pi.id,
+			chargeId: typeof pi.latest_charge === 'string' ? pi.latest_charge : undefined
+		});
+		// Commit claim release WITH the grant, before a refund can observe it.
+		const correlation = topupAttemptCorrelation(pi, organizations.autoTopupLastAttemptAt);
+		await tx.update(organizations).set({ autoTopupState: sql`CASE WHEN ${organizations.autoTopupState} = 'disabled' THEN 'disabled' ELSE 'idle' END`, autoTopupFailures: 0, autoTopupAttemptAt: null, autoTopupSubmittedAt: null })
+			.where(and(eq(organizations.id, orgId), or(and(or(ne(organizations.autoTopupState, 'disabled'), isNull(organizations.autoTopupState)), or(eq(organizations.autoTopupState, 'idle'), isNull(organizations.autoTopupLastAttemptAt))), correlation)));
+		// Release this payment's claim before its refund pause can record overlap.
+		const chargeId = typeof pi.latest_charge === 'string' ? pi.latest_charge : undefined;
+		if (chargeId) await pauseForObservedStripeRefund(tx, orgId, chargeId, undefined, undefined, pi);
+		return { applied, canceled: undefined };
+	});
 }
 
 /**
@@ -606,6 +634,15 @@ export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<numb
 	limit -= recovering;
 	// Unstick stale in-flight claims first: a webhook delivery lost past
 	// Stripe's 3-day retry horizon would otherwise wedge auto top-up forever.
+	await releaseStaleTopupClaims();
+	const reconcileCutoff = new Date(Date.now() - RECONCILE_WINDOW_MS).toISOString();
+	const reconciled = await reconcileStaleLifetimeRows(limit, reconcileCutoff, deadline);
+	const offeredBundles = configuredAutoTopupBundles().map((bundle) => bundle.id);
+	await warnPausedTopupOrgs(offeredBundles);
+	return triggerEligibleTopups(limit - reconciled, offeredBundles, reconcileCutoff, deadline);
+}
+
+async function releaseStaleTopupClaims(): Promise<void> {
 	await db
 		.update(organizations)
 		.set({ autoTopupState: 'idle' })
@@ -618,20 +655,27 @@ export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<numb
 				)
 			)
 		);
-	// Owed refunds outrank new charges: the stale-lifetime reconcile pass
-	// runs FIRST on the shared budget. The set is finite and self-draining —
-	// a processed row clears both selection markers, so the anomaly is gone
-	// permanently within a few invocations while metered work simply waits
-	// (it recurs anyway). Metered-first would let a perpetually full charge
-	// batch starve these rows past the 7-day reconcile window with their
-	// paid charges never refunded (codex P1).
-	//
-	// Selection is a surviving enabled flag OR a last-attempt timestamp
-	// inside the reconcile window: claimLifetimeSlot clears the flag
-	// atomically at grant, so the NORMAL upgrade path leaves enabled=0 rows
-	// whose only surviving marker is the attempt timestamp — a flag-only
-	// predicate would never discover their lost-webhook charges (codex P1).
-	const reconcileCutoff = new Date(Date.now() - RECONCILE_WINDOW_MS).toISOString();
+}
+
+/**
+ * Owed refunds outrank new charges: the stale-lifetime reconcile pass runs
+ * FIRST on the shared budget. The set is finite and self-draining — a
+ * processed row clears both selection markers, so the anomaly is gone
+ * permanently within a few invocations while metered work simply waits (it
+ * recurs anyway). Metered-first would let a perpetually full charge batch
+ * starve these rows past the 7-day reconcile window with their paid charges
+ * never refunded (codex P1).
+ *
+ * Selection is a surviving enabled flag OR a last-attempt timestamp inside
+ * the reconcile window: claimLifetimeSlot clears the flag atomically at
+ * grant, so the NORMAL upgrade path leaves enabled=0 rows whose only
+ * surviving marker is the attempt timestamp — a flag-only predicate would
+ * never discover their lost-webhook charges (codex P1).
+ *
+ * @returns The number of candidate rows selected — they share the sweep's
+ *   bounded budget whether or not each was reconciled before the deadline.
+ */
+async function reconcileStaleLifetimeRows(limit: number, reconcileCutoff: string, deadline?: number): Promise<number> {
 	const staleLifetime = await db
 		.select({ id: organizations.id, enabled: organizations.autoTopupEnabled })
 		.from(organizations)
@@ -670,13 +714,25 @@ export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<numb
 			console.error(`auto top-up sweep failed for org ${row.id}`, error);
 		}
 	}
-	const nowIso = new Date().toISOString();
-	const offeredBundles = configuredAutoTopupBundles().map((bundle) => bundle.id);
+	return staleLifetime.length;
+}
+
+async function warnPausedTopupOrgs(offeredBundles: string[]): Promise<void> {
 	const paused = await db.select({ n: count() }).from(organizations)
 		.where(and(eq(organizations.autoTopupEnabled, 1), ne(organizations.plan, 'lifetime'),
 			or(isNull(organizations.autoTopupBundle), not(inArray(organizations.autoTopupBundle, offeredBundles)))))
 		.get();
 	if (paused?.n) console.error(`auto top-up: ${paused.n} organizations paused until an owner chooses an available bundle`);
+}
+
+/**
+ * Reconciles each eligible org's recent charges, then attempts its top-up,
+ * one org at a time on the shared deadline budget (bounded, I10).
+ *
+ * @returns The number of newly initiated top-ups
+ */
+async function triggerEligibleTopups(limit: number, offeredBundles: string[], reconcileCutoff: string, deadline?: number): Promise<number> {
+	const nowIso = new Date().toISOString();
 	const rows = await db
 		.select({ id: organizations.id, bundle: organizations.autoTopupBundle, lastAttemptAt: organizations.autoTopupLastAttemptAt })
 		.from(organizations)
@@ -705,7 +761,7 @@ export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<numb
 			)
 		)
 		.orderBy(asc(organizations.autoTopupLastAttemptAt), asc(organizations.id))
-		.limit(limit - staleLifetime.length)
+		.limit(limit)
 		.all();
 	let triggered = 0;
 	for (const row of rows) {

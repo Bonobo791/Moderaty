@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { createServer, type Server, type Socket } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createSecureContext, TLSSocket, type SecureContext } from 'node:tls';
+
+import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
 	env: {
@@ -248,4 +255,221 @@ test('a late acceptance after the deadline is never reported as success', async 
 	await vi.advanceTimersByTimeAsync(6_000);
 	await assertion;
 	expect(mocks.close).toHaveBeenCalled();
+});
+
+/**
+ * Controlled local SMTP integration check (MOD-118): mocked sendMail alone
+ * cannot prove the transport negotiates STARTTLS or that the deadline guard
+ * tears down a real socket. The nodemailer factory is swapped for a REAL
+ * transport redirected to an in-process server — host, port and the trust
+ * root are the only overrides; every other option (requireTLS, token auth,
+ * phase budgets) is the production value, and all of sendProtonMailEmail's
+ * own validation, timing and acceptance logic runs unmodified.
+ */
+describe('local SMTP integration', () => {
+	interface SmtpSession {
+		commands: string[]; // every client line, pre- and post-TLS
+		sawStarttls: boolean;
+		sawPostTlsEhlo: boolean;
+		authUser: string | null;
+		authSecret: string | null;
+		mailFrom: string | null;
+		rcptTo: string[];
+		data: string;
+		ended: Promise<void>; // resolves when the client socket fully closes
+	}
+
+	let secureContext: SecureContext;
+	let realCreateTransport: typeof import('nodemailer').createTransport;
+	let server: Server;
+	let serverPort: number;
+	let sessions: SmtpSession[];
+	let sockets: Socket[];
+	let greet: boolean;
+	let authOk: boolean;
+
+	beforeAll(async () => {
+		realCreateTransport = (await vi.importActual<typeof import('nodemailer')>('nodemailer')).createTransport;
+		// Throwaway self-signed cert, generated per run and deleted with the
+		// tmpdir — the client still disables verification explicitly below.
+		const dir = mkdtempSync(join(tmpdir(), 'proton-mail-test-'));
+		try {
+			execFileSync(
+				'openssl',
+				['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', join(dir, 'key.pem'), '-out', join(dir, 'cert.pem'), '-days', '2', '-subj', '/CN=localhost'],
+				{ stdio: 'pipe' }
+			);
+			secureContext = createSecureContext({ key: readFileSync(join(dir, 'key.pem')), cert: readFileSync(join(dir, 'cert.pem')) });
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	beforeEach(async () => {
+		sessions = [];
+		sockets = [];
+		greet = true;
+		authOk = true;
+		server = createServer((socket) => {
+			sockets.push(socket);
+			const session: SmtpSession = {
+				commands: [],
+				sawStarttls: false,
+				sawPostTlsEhlo: false,
+				authUser: null,
+				authSecret: null,
+				mailFrom: null,
+				rcptTo: [],
+				data: '',
+				ended: new Promise((resolve) => socket.once('close', resolve))
+			};
+			sessions.push(session);
+			let tls = false;
+			let inData = false;
+			let buffer = '';
+			let tlsSocket: TLSSocket | undefined;
+			const wire = () => (tls ? tlsSocket! : socket);
+			const write = (line: string) => wire().write(line + '\r\n');
+			const command = (line: string) => {
+				session.commands.push(line);
+				const verb = line.split(' ')[0].toUpperCase();
+				switch (verb) {
+					case 'EHLO':
+					case 'HELO':
+						if (!tls) {
+							// AUTH is advertised ONLY post-TLS, so a client that
+							// skipped STARTTLS cannot reach credentials.
+							write('250-localhost');
+							write('250-STARTTLS');
+							write('250 8BITMIME');
+						} else {
+							session.sawPostTlsEhlo = true;
+							write('250-localhost');
+							write('250-AUTH PLAIN LOGIN');
+							write('250 8BITMIME');
+						}
+						return;
+					case 'STARTTLS':
+						session.sawStarttls = true;
+						write('220 2.0.0 Ready to start TLS');
+						socket.removeListener('data', feed);
+						tlsSocket = new TLSSocket(socket, { isServer: true, secureContext });
+						tlsSocket.on('data', feed);
+						tls = true;
+						return;
+					case 'AUTH': {
+						if (!tls) return write('530 5.7.0 Must issue a STARTTLS command first');
+						const parts = Buffer.from(line.split(' ')[2] ?? '', 'base64')
+							.toString('utf8')
+							.split('\0');
+						session.authUser = parts[1] ?? null;
+						session.authSecret = parts[2] ?? null;
+						write(authOk ? '235 2.7.0 Authentication succeeded' : '535 5.7.8 Authentication credentials invalid');
+						return;
+					}
+					case 'MAIL':
+						if (!tls) return write('530 5.7.0 Must issue a STARTTLS command first');
+						session.mailFrom = /<([^>]*)>/.exec(line)?.[1] ?? null;
+						return write('250 2.1.0 OK');
+					case 'RCPT':
+						if (!tls) return write('530 5.7.0 Must issue a STARTTLS command first');
+						session.rcptTo.push(/<([^>]*)>/.exec(line)?.[1] ?? line);
+						return write('250 2.1.5 OK');
+					case 'DATA':
+						if (!tls) return write('530 5.7.0 Must issue a STARTTLS command first');
+						inData = true;
+						return write('354 End data with <CR><LF>.<CR><LF>');
+					case 'RSET':
+					case 'NOOP':
+						return write('250 2.0.0 OK');
+					case 'QUIT':
+						write('221 2.0.0 Bye');
+						return wire().end();
+					default:
+						return write('502 5.5.2 Command not recognized');
+				}
+			};
+			const feed = (chunk: Buffer) => {
+				buffer += chunk.toString('utf8');
+				let boundary;
+				while ((boundary = buffer.indexOf('\r\n')) >= 0) {
+					const line = buffer.slice(0, boundary);
+					buffer = buffer.slice(boundary + 2);
+					if (inData) {
+						if (line === '.') {
+							inData = false;
+							write('250 2.0.0 Ok: queued as TEST-QUEUE-1');
+						} else {
+							session.data += line + '\n';
+						}
+					} else {
+						command(line);
+					}
+				}
+			};
+			socket.on('data', feed);
+			if (greet) write('220 localhost ESMTP test server');
+		});
+		await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+		serverPort = (server.address() as { port: number }).port;
+		// Same interception point as the unit tests, but the factory now builds
+		// a genuine transport against the local server instead of a stub.
+		mocks.createTransport.mockImplementation((options: Record<string, unknown>) =>
+			realCreateTransport({
+				...options,
+				host: '127.0.0.1',
+				port: serverPort,
+				tls: { ...(options.tls as Record<string, unknown>), rejectUnauthorized: false }
+			})
+		);
+	});
+
+	afterEach(async () => {
+		for (const socket of sockets) socket.destroy();
+		await new Promise((resolve) => server.close(resolve));
+	});
+
+	test('negotiates STARTTLS, authenticates with the SMTP token and delivers DATA over the TLS socket', async () => {
+		const result = await sendProtonMailEmail(MESSAGE);
+
+		expect(result.messageId).toMatch(/^<.+@moderaty\.app>$/);
+		expect(sessions).toHaveLength(1);
+		const session = sessions[0];
+		// STARTTLS really ran: credentials and the envelope only exist post-TLS
+		// (the server would have answered 530 to anything sent in plaintext).
+		expect(session.sawStarttls).toBe(true);
+		expect(session.sawPostTlsEhlo).toBe(true);
+		expect(session.authUser).toBe('no-reply@moderaty.app');
+		expect(session.authSecret).toBe('smtp-token');
+		expect(session.mailFrom).toBe('no-reply@moderaty.app');
+		expect(session.rcptTo).toEqual(['fan@example.com']);
+		// The RFC822 body reached DATA intact: both MIME parts and headers.
+		expect(session.data).toContain('To: fan@example.com');
+		expect(session.data).toContain('text/plain');
+		expect(session.data).toContain('text/html');
+		await session.ended; // transport.close() terminated the conversation
+	});
+
+	test('fails loudly on a wire-level auth rejection', async () => {
+		authOk = false;
+		const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			await expect(sendProtonMailEmail(MESSAGE)).rejects.toThrow(/authentication failure/);
+		} finally {
+			errSpy.mockRestore();
+		}
+		const session = sessions[0];
+		expect(session.sawStarttls).toBe(true);
+		expect(session.authUser).toBe('no-reply@moderaty.app');
+		expect(session.mailFrom).toBeNull(); // the envelope never started
+	});
+
+	test('a caller deadline mid-greeting tears down the real socket before any SMTP command', async () => {
+		greet = false; // the server accepts the TCP connection but never speaks
+		const send = sendProtonMailEmail(MESSAGE, Date.now() + 300);
+		await expect(send).rejects.toBeInstanceOf(DeadlineExceededError);
+		expect(sessions).toHaveLength(1);
+		await sessions[0].ended; // transport.close() destroyed the socket
+		expect(sessions[0].commands).toHaveLength(0);
+	});
 });

@@ -324,6 +324,13 @@ describe('verifyContactToken', () => {
 
 describe('submitContactRequest', () => {
 	test('records the pending row FIRST, then sends the verification e-mail with the APP_URL link', async () => {
+		// Ordering is asserted from inside the send: the durable row must
+		// already exist when the provider call runs — a send that precedes
+		// the write would leave a delivered link with no row to verify.
+		mocks.sendProtonMailEmail.mockImplementation(async () => {
+			expect(await rows()).toHaveLength(1);
+			return { messageId: '<msg-1@moderaty.app>' };
+		});
 		const result = await submitContactRequest(SUBMIT);
 
 		expect(mocks.sendProtonMailEmail).toHaveBeenCalledTimes(1);

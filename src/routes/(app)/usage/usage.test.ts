@@ -109,6 +109,24 @@ describe('usage load', () => {
 		expect(body).toContain('paused until you choose a bundle');
 		expect(body).toContain('for="auto-topup-bundle"');
 		expect(body).toContain('name="bundle"');
+		// The paused org must also be able to STOP the automation — an
+		// explicit Disable control, not an unlabelled checkbox toggle.
+		expect(body).toContain('Disable automatic top-up');
+	});
+
+	test('an enabled org gets an explicit Disable control and Update still posts enabled=on', async () => {
+		// Unchecked checkboxes submit nothing, so once auto top-up is on the
+		// enable flag travels as a hidden input — an "Update" submit without it
+		// would be read server-side as a DISABLE. Disabling is a separate bare
+		// POST to ?/setAutoTopup, the same contract as the lifetime card's
+		// disable button.
+		await seedOrg({ autoTopupEnabled: 1, autoTopupThreshold: 100, autoTopupState: 'idle', stripeDefaultPmId: 'pm_1' });
+		const data = await load({ locals: { user: OWNER } } as never);
+		const { body } = render(Page, { props: { data, form: null } as never });
+		expect(body).toContain('Update auto top-up');
+		expect(body).toContain('Disable automatic top-up');
+		expect(body).toContain('name="enabled"');
+		expect(body).not.toContain('Enable automatic top-up');
 	});
 	test('an unconfigured selection fails without changing settings', async () => {
 		await seedOrg({ autoTopupBundle: null });

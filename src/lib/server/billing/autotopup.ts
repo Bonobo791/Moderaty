@@ -43,6 +43,7 @@ export interface AutoTopupState {
 	bundle: string | null;
 	state: string | null;
 	lastAttemptAt: string | null;
+	attemptAt: string | null;
 	failures: number | null;
 	customerId: string | null;
 	defaultPmId: string | null;
@@ -67,6 +68,7 @@ export async function readAutoTopupState(orgId: string): Promise<AutoTopupState>
 			bundle: organizations.autoTopupBundle,
 			state: organizations.autoTopupState,
 			lastAttemptAt: organizations.autoTopupLastAttemptAt,
+			attemptAt: organizations.autoTopupAttemptAt,
 			failures: organizations.autoTopupFailures,
 			customerId: organizations.stripeCustomerId,
 			defaultPmId: organizations.stripeDefaultPmId,
@@ -236,6 +238,15 @@ async function handleTopupFailure(orgId: string, attemptAt: string, error: unkno
 export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 	const org = await readAutoTopupState(orgId);
 	if (!basicEligibility(org)) return false;
+	// A surviving attempt marker means a previous charge may still be live at
+	// Stripe even after the claim released: reconcile before minting a new
+	// attempt. A PaymentIntent still in a nonterminal status defers this
+	// charge — a second PI could double-charge when the first settles (codex
+	// P1). Orgs with no marker have no prior attempt: skip the Stripe call.
+	if (org.attemptAt && (await reconcileAutoTopup(orgId)).inFlight) {
+		console.error(`auto top-up deferred for org ${orgId}: a previous payment is still in flight — not charging until it resolves`);
+		return false;
+	}
 	const dayStart = `${startOfUtcDayIso(0)}T00:00:00.000Z`;
 	const monthStart = `${startOfUtcDayIso(0).slice(0, 8)}01T00:00:00.000Z`;
 	const dayCount = await topupCountsSince(orgId, dayStart);
@@ -275,9 +286,23 @@ export async function maybeTriggerAutoTopUp(orgId: string): Promise<boolean> {
 	// and the claim must never charge a card the org no longer needs or has
 	// just disabled (codex review).
 	const claimNowIso = new Date().toISOString();
+	// A surviving attempt marker is reused only while that attempt is still
+	// inside the stale-claim window — the same-attempt retry path. The stale
+	// sweep releases wedged claims without clearing the marker (it anchors
+	// refund/recovery correlation), so an idle org can carry a marker older
+	// than the window: reusing it would stamp a NEW PaymentIntent with the
+	// dead attempt's idempotency key and auto_topup_attempt_at metadata —
+	// repeated charges and ambiguous recovery correlation (gitar). A minted
+	// attempt also starts UNSUBMITTED: retaining the dead attempt's
+	// submittedAt would make a pause before the Stripe call record an
+	// unresolved recovery for a payment that never reached Stripe (codex P2).
+	const staleAttemptIso = new Date(Date.now() - STALE_CLAIM_MS).toISOString();
+	const mintsNewAttempt = sql`${organizations.autoTopupAttemptAt} IS NULL OR ${organizations.autoTopupAttemptAt} < ${staleAttemptIso}`;
+	const nextAttempt = sql`CASE WHEN ${mintsNewAttempt} THEN ${claimNowIso} ELSE ${organizations.autoTopupAttemptAt} END`;
 	const claimed = await db
 		.update(organizations)
-		.set({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: sql`COALESCE(${organizations.autoTopupAttemptAt}, ${claimNowIso})`, autoTopupAttemptAt: sql`COALESCE(${organizations.autoTopupAttemptAt}, ${claimNowIso})` })
+		.set({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: nextAttempt, autoTopupAttemptAt: nextAttempt,
+			autoTopupSubmittedAt: sql`CASE WHEN ${mintsNewAttempt} THEN NULL ELSE ${organizations.autoTopupSubmittedAt} END` })
 		.where(
 			and(
 				eq(organizations.id, orgId),
@@ -785,7 +810,13 @@ async function triggerEligibleTopups(limit: number, offeredBundles: string[], re
 						row.bundle === null ? isNull(organizations.autoTopupBundle) : eq(organizations.autoTopupBundle, row.bundle),
 						eq(organizations.autoTopupState, 'idle'), isNull(organizations.autoTopupAttemptAt)));
 			}
-			if (await maybeTriggerAutoTopUp(row.id)) triggered += 1;
+			// A PaymentIntent still resolving at Stripe defers the new charge —
+			// minting a sibling under a fresh key could double-charge when the
+			// first settles (codex P1). maybeTriggerAutoTopUp re-checks this
+			// itself for non-sweep callers.
+			if (inFlight) {
+				console.error(`auto top-up deferred for org ${row.id}: a previous payment is still in flight — not charging until it resolves`);
+			} else if (await maybeTriggerAutoTopUp(row.id)) triggered += 1;
 		} catch (error) {
 			console.error(`auto top-up sweep failed for org ${row.id}`, error);
 		}

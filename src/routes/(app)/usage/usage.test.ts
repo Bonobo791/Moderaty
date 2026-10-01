@@ -954,6 +954,33 @@ describe('usage setAutoTopup action', () => {
 		expect(org?.autoTopupFailures).toBe(0);
 	});
 
+	test('re-enabling after a card-change disable discards the dead attempt markers', async () => {
+		// customer.updated / payment_method.detached disable auto top-up while
+		// a PaymentIntent is unresolved, leaving autoTopupAttemptAt +
+		// autoTopupSubmittedAt set with no recovery row. If the re-enable left
+		// them in place, the next claim would reuse `autotopup:<cus>:<old>` —
+		// a PaymentIntent created under the OLD card whose idempotency key now
+		// maps to different parameters (codex P1). Fresh consent starts a
+		// fresh logical attempt; the orphaned PI stays discoverable through
+		// lastAttemptAt and the sweep's customer-window reconciliation.
+		const attempt = '2026-09-30T10:00:00.000Z';
+		await seedOrg({
+			autoTopupEnabled: 0,
+			autoTopupState: 'disabled',
+			autoTopupAttemptAt: attempt,
+			autoTopupSubmittedAt: attempt,
+			autoTopupLastAttemptAt: attempt,
+			stripeCustomerId: 'cus_1',
+			stripeDefaultPmId: 'pm_1'
+		});
+
+		const result = await setAutoTopup({ enabled: 'on', threshold: '100', consent: 'on' });
+
+		expect(result).toMatchObject({ ok: true });
+		const org = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
+		expect(org).toMatchObject({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupFailures: 0, autoTopupAttemptAt: null, autoTopupSubmittedAt: null, autoTopupLastAttemptAt: attempt });
+	});
+
 	test('non-owners cannot change auto top-up (403)', async () => {
 		await seedOrg();
 		const member = { ...OWNER, orgRole: 'member' as const };

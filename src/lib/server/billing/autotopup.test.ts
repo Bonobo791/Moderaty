@@ -261,6 +261,49 @@ describe('maybeTriggerAutoTopUp', () => {
 		expect((await orgRow()).autoTopupState).toBe('in_flight');
 	});
 
+	test('a stale released claim mints a new logical attempt — never reusing the dead attempt\'s key', async () => {
+		// The 72h stale sweep releases a wedged in-flight claim to idle but
+		// keeps its attempt markers for reconciliation. If the next claim
+		// COALESCE-reused that stale marker, every release→reclaim cycle past
+		// Stripe's idempotency retention would mint ANOTHER PaymentIntent under
+		// the same auto_topup_attempt_at — ambiguous recovery and repeated
+		// charges (gitar).
+		const stale = new Date(Date.now() - 4 * 24 * 60 * 60_000).toISOString();
+		await seedOrg({ creditsRemaining: 0, autoTopupState: 'in_flight', autoTopupAttemptAt: stale, autoTopupSubmittedAt: stale, autoTopupLastAttemptAt: stale });
+
+		await sweepAutoTopUp(5);
+
+		expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(1);
+		const [params, options] = mocks.paymentIntentsCreate.mock.calls[0];
+		expect(params.metadata.auto_topup_attempt_at).not.toBe(stale);
+		expect(options.idempotencyKey).toBe(`autotopup:cus_1:${params.metadata.auto_topup_attempt_at}`);
+		// A minted attempt starts unsubmitted: keeping the dead attempt's
+		// submittedAt would make a pause before the Stripe call record an
+		// unresolved recovery for a payment that never reached Stripe (gitar/
+		// codex P2).
+		const org = await orgRow();
+		expect(org).toMatchObject({ autoTopupAttemptAt: params.metadata.auto_topup_attempt_at, autoTopupLastAttemptAt: params.metadata.auto_topup_attempt_at });
+		expect(org.autoTopupSubmittedAt).not.toBe(stale);
+		expect(Date.parse(org.autoTopupSubmittedAt ?? '')).toBeGreaterThan(Date.parse(stale));
+	});
+
+	test('a still-resolving Stripe payment defers the next charge instead of minting a sibling', async () => {
+		// A released claim keeps its attempt marker; while Stripe still reports
+		// that PaymentIntent as nonterminal, minting a new attempt would create
+		// a second chargeable PI — a double charge if the first settles
+		// (codex P1). The marker is the trigger: no marker, no Stripe call.
+		const stale = new Date(Date.now() - 4 * 24 * 60 * 60_000).toISOString();
+		await seedOrg({ creditsRemaining: 0, autoTopupState: 'idle', autoTopupAttemptAt: stale, autoTopupSubmittedAt: stale, autoTopupLastAttemptAt: stale });
+		mocks.paymentIntentsList.mockResolvedValue({
+			data: [{ id: 'pi_processing', status: 'processing', created: Math.floor(Date.parse(stale) / 1000), metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_500', auto_topup_attempt_at: stale } }],
+			has_more: false
+		});
+
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+		expect((await orgRow()).autoTopupState).toBe('idle');
+	});
+
 	test('never triggers when the balance is at or above the threshold', async () => {
 		await seedOrg({ creditsRemaining: 150 });
 		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);

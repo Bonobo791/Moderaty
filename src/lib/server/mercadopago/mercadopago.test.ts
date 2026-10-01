@@ -722,7 +722,7 @@ test.each(['approved', 'refunded'])('a delayed %s refund preserves newer consent
 
 test('payment lookup uses the actual latest approved refund date, not payment update time', async () => {
 	const fetchMock = vi.fn()
-		.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'refunded', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 5, currency_id: 'BRL', date_last_updated: '2026-09-30T13:00:00Z' })))
+		.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'refunded', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 5, currency_id: 'BRL', date_created: '2026-09-30T09:00:00-03:00', date_last_updated: '2026-09-30T13:00:00Z' })))
 		.mockResolvedValueOnce(new Response(JSON.stringify([{ id: 2, payment_id: 'pay-1', amount: 3, status: 'approved', date_created: '2026-09-30T11:00:00-03:00' }, { id: 1, payment_id: 'pay-1', amount: 2, status: 'approved', date_created: '2026-09-30T10:00:00-03:00' }])));
 	vi.stubGlobal('fetch', fetchMock);
 	expect(await retrievePayment('pay-1')).toMatchObject({ refundOccurredAt: '2026-09-30T14:00:00.000Z', refundBoundaries: ['2026-09-30T13:00:00.000Z', '2026-09-30T14:00:00.000Z'] });
@@ -731,14 +731,14 @@ test('payment lookup uses the actual latest approved refund date, not payment up
 
 test.each(['2026-02-30T10:00:00Z', '2026-09-30 10:00:00Z'])('refund lookup rejects impossible or non-ISO timestamp %s', async (dateCreated) => {
 	vi.stubGlobal('fetch', vi.fn()
-		.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'refunded', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 5, currency_id: 'BRL' })))
+		.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'refunded', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 5, currency_id: 'BRL', date_created: '2026-09-30T09:00:00Z' })))
 		.mockResolvedValueOnce(new Response(JSON.stringify([{ payment_id: 'pay-1', amount: 5, status: 'approved', date_created: dateCreated }]))));
 	await expect(retrievePayment('pay-1')).rejects.toThrow(/refund records/);
 });
 
 test('refund lookup rejects a wrong-typed refund payment id', async () => {
 	vi.stubGlobal('fetch', vi.fn()
-		.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'refunded', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 5, currency_id: 'BRL' })))
+		.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'refunded', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 5, currency_id: 'BRL', date_created: '2026-09-30T09:00:00Z' })))
 		.mockResolvedValueOnce(new Response(JSON.stringify([{ payment_id: ['pay-1'], amount: 5, status: 'approved', date_created: '2026-09-30T10:00:00Z' }]))));
 	await expect(retrievePayment('pay-1')).rejects.toThrow(/refund records/);
 });
@@ -753,7 +753,7 @@ test('a new Mercado Pago refund after consent pauses automatic top-up', async ()
 test('multiple provider refunds recover the interval before later owner consent', async () => {
 	await testDb().db.update(organizations).set({ autoTopupEnabled: 1, autoTopupState: 'idle', autoTopupConsentedAt: '2026-09-30T12:00:00.000Z' });
 	for (const [id, at] of [['pi_before_consent', '2026-09-30T11:00:00.000Z'], ['pi_after_consent', '2026-09-30T13:00:00.000Z']]) await testDb().db.insert(creditTransactions).values({ orgId: 'org-1', delta: 100, reason: 'auto_topup', refType: 'payment_intent', refId: id, paymentIntentId: id, createdAt: at });
-	const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'approved', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 2, currency_id: 'BRL' })))
+	const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'approved', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 2, currency_id: 'BRL', date_created: '2026-09-30T09:00:00Z' })))
 		.mockResolvedValueOnce(new Response(JSON.stringify(['2026-09-30T10:00:00Z', '2026-09-30T14:00:00Z'].map(date_created => ({ payment_id: 'pay-1', amount: 1, status: 'approved', date_created })))));
 	vi.stubGlobal('fetch', fetchMock);
 	await expect(processMercadoPagoPayment(await retrievePayment('pay-1'))).rejects.toThrow(/partial refund/);
@@ -766,7 +766,40 @@ test('multiple provider refunds recover the interval before later owner consent'
 test('refund lookup rejects a future provider refund timestamp', async () => {
 	const date_created = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
 	vi.stubGlobal('fetch', vi.fn()
-		.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'refunded', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 5, currency_id: 'BRL' })))
+		.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'refunded', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 5, currency_id: 'BRL', date_created: '2026-09-30T09:00:00Z' })))
 		.mockResolvedValueOnce(new Response(JSON.stringify([{ payment_id: 'pay-1', amount: 5, status: 'approved', date_created }]))));
 	await expect(retrievePayment('pay-1')).rejects.toThrow(/refund records/);
+});
+
+test('refund lookup rejects a refund timestamp that precedes the payment itself', async () => {
+	// A refund cannot predate its payment — a record that does is corrupt
+	// provider data and must never become an accepted refund boundary
+	// (codex P2): the consent/pause semantics would be driven by a timestamp
+	// before the charge existed.
+	vi.stubGlobal('fetch', vi.fn()
+		.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'refunded', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 5, currency_id: 'BRL', date_created: '2026-09-30T12:00:00Z' })))
+		.mockResolvedValueOnce(new Response(JSON.stringify([{ payment_id: 'pay-1', amount: 5, status: 'approved', date_created: '2026-09-30T10:00:00Z' }]))));
+	await expect(retrievePayment('pay-1')).rejects.toThrow(/predates payment/);
+});
+
+test('a pre-payment refund record fails loudly even when valid refunds cover the reported total', async () => {
+	// Skipping the corrupt record is not enough: a second record summing to
+	// transaction_amount_refunded would hide it behind the aggregate check
+	// (cubic) — the corrupt item must throw in its own right.
+	vi.stubGlobal('fetch', vi.fn()
+		.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'refunded', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 5, currency_id: 'BRL', date_created: '2026-09-30T12:00:00Z' })))
+		.mockResolvedValueOnce(new Response(JSON.stringify([
+			{ payment_id: 'pay-1', amount: 5, status: 'approved', date_created: '2026-09-30T10:00:00Z' },
+			{ payment_id: 'pay-1', amount: 5, status: 'approved', date_created: '2026-09-30T13:00:00Z' }
+		]))));
+	await expect(retrievePayment('pay-1')).rejects.toThrow(/predates payment/);
+});
+
+test('a refunded payment without a creation date fails loudly — the refund boundary cannot be trusted', async () => {
+	// transaction_amount_refunded > 0 demands the payment's own date_created
+	// to bound the refund records; without it the boundary is unverifiable —
+	// loud failure, never a silent pass (I2).
+	vi.stubGlobal('fetch', vi.fn()
+		.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'pay-1', status: 'refunded', external_reference: 'org-1:attempt_1', transaction_amount: 5, transaction_amount_refunded: 5, currency_id: 'BRL' }))));
+	await expect(retrievePayment('pay-1')).rejects.toThrow(/creation date/);
 });

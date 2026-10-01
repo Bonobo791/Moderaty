@@ -168,6 +168,27 @@ test('the zero-credit sweep shares the cron deadline and reports its counts', as
 	});
 });
 
+test('a dry run skips the zero-credit account sweep entirely (I8)', async () => {
+	// The skipped sweep is announced loudly — same guarantee as the consent
+	// and handle sweeps: DRY_RUN must never stamp, warn, or delete accounts.
+	const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+	try {
+		const res = await call({ bearer: 'test-secret' });
+
+		expect(await res.json()).toMatchObject({
+			ok: true,
+			dryRun: true,
+			zeroCreditAccountsChecked: 0,
+			zeroCreditWarningsSent: 0,
+			zeroCreditAccountsDeleted: 0
+		});
+		expect(infoSpy).toHaveBeenCalledWith('dry run: zero-credit account sweep skipped');
+	} finally {
+		infoSpy.mockRestore();
+	}
+	expect(mocks.sweepZeroCreditAccounts).not.toHaveBeenCalled();
+});
+
 test('a zero-credit sweep failure surfaces in the payload without stopping moderation', async () => {
 	mocks.env.DRY_RUN = 'false';
 	mocks.sweepZeroCreditAccounts.mockRejectedValueOnce(new Error('db exploded'));

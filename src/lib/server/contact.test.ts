@@ -11,7 +11,8 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
-vi.mock('./protonMail', () => ({
+vi.mock('./protonMail', async (importOriginal) => ({
+	...(await importOriginal<typeof import('./protonMail')>()),
 	sendProtonMailEmail: mocks.sendProtonMailEmail
 }));
 
@@ -103,6 +104,30 @@ describe('parseContactForm', () => {
 		form.set('opt_in', 'on');
 		const result = parseContactForm(form);
 		expect(result).toEqual({ ok: false, error: expect.any(String), name: 'Fan', email: 'bad-address' });
+	});
+
+	test.each(['a,b@example.com', 'a;b@example.com', 'x"y@example.com', 'a\\b@example.com'])(
+		'rejects a transport-unsafe address (%s) at the form instead of failing the send later',
+		(email) => {
+			// The submit path validates the same contract the sender enforces —
+			// a form-accepted address the transport rejects would 500 on every
+			// retry with the pending row already written (codex+cubic+codeant).
+			const form = new FormData();
+			form.set('name', 'Fan');
+			form.set('email', email);
+			form.set('opt_in', 'on');
+			const result = parseContactForm(form);
+			expect(result.ok).toBe(false);
+			if (!result.ok) expect(result.error).toMatch(/e-mail/i);
+		}
+	);
+
+	test('accepts an apostrophe local part — a legal mailbox the transport also sends', () => {
+		const form = new FormData();
+		form.set('name', 'Fan');
+		form.set('email', "o'connor@example.com");
+		form.set('opt_in', 'on');
+		expect(parseContactForm(form)).toEqual({ ok: true, name: 'Fan', email: "o'connor@example.com" });
 	});
 });
 
@@ -324,6 +349,13 @@ describe('verifyContactToken', () => {
 
 describe('submitContactRequest', () => {
 	test('records the pending row FIRST, then sends the verification e-mail with the APP_URL link', async () => {
+		// Ordering is asserted from inside the send: the durable row must
+		// already exist when the provider call runs — a send that precedes
+		// the write would leave a delivered link with no row to verify.
+		mocks.sendProtonMailEmail.mockImplementation(async () => {
+			expect(await rows()).toHaveLength(1);
+			return { messageId: '<msg-1@moderaty.app>' };
+		});
 		const result = await submitContactRequest(SUBMIT);
 
 		expect(mocks.sendProtonMailEmail).toHaveBeenCalledTimes(1);

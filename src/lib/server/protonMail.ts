@@ -5,6 +5,8 @@
 // account's dedicated SMTP token (PLAIN/LOGIN), never the mailbox password
 // and never Proton Mail Bridge.
 
+import { Socket } from 'node:net';
+
 import { env } from '$env/dynamic/private';
 
 import nodemailer from 'nodemailer';
@@ -18,10 +20,20 @@ const DEFAULT_FROM_NAME = 'Moderaty';
 
 // Envelope/header injection guard: a bare mailbox only — no whitespace
 // (covers CR/LF folding), no control characters, and none of the
-// address-list or display-name vectors (`,` `;` `<` `>` `"` `'` `(` `)` `[`
-// `]` `\` `:`). Deliberately stricter than the /contact form's
-// EMAIL_PATTERN, whose `[^\s@]` still admits `a@b,c@d` lists.
-const BARE_ADDRESS = /^[^\s@,;:<>"'()[\]\\:\x00-\x1f\x7f]+@[^\s@,;:<>"'()[\]\\:\x00-\x1f\x7f]+$/i;
+// address-list or display-name vectors (`,` `;` `<` `>` `"` `(` `)` `[` `]`
+// `\` `:`). An apostrophe is legal in an RFC local part and stays allowed —
+// the /contact form accepts it (codex+cubic). Deliberately stricter than
+// the form's EMAIL_PATTERN, whose `[^\s@]` still admits `a,b@example.com`.
+const BARE_ADDRESS = /^[^\s@,;:<>"()[\]\\\x00-\x1f\x7f]+@[^\s@,;:<>"()[\]\\\x00-\x1f\x7f]+$/i;
+
+/**
+ * True when `email` is a single bare mailbox this transport will accept —
+ * the shared contract the /contact form enforces at validation time, so a
+ * submitted address can never fail the send with a 500 (codex).
+ */
+export function isBareAddress(email: string): boolean {
+	return email.length > 0 && email.length <= 254 && BARE_ADDRESS.test(email);
+}
 
 // Any value that lands inside an SMTP header line (subject, display names)
 // must not carry control characters — folding is where header injection
@@ -51,7 +63,7 @@ export function loadProtonMailConfig(): ProtonMailConfig {
 	const token = env.PROTON_SMTP_TOKEN;
 	if (!username) throw new Error('PROTON_SMTP_USERNAME is not configured');
 	if (!token) throw new Error('PROTON_SMTP_TOKEN is not configured');
-	if (!BARE_ADDRESS.test(username)) throw new Error('PROTON_SMTP_USERNAME must be a bare e-mail address');
+	if (!isBareAddress(username)) throw new Error('PROTON_SMTP_USERNAME must be a bare e-mail address');
 	const fromName = env.PROTON_FROM_NAME?.trim() || DEFAULT_FROM_NAME;
 	if (HEADER_UNSAFE.test(fromName)) throw new Error('PROTON_FROM_NAME must not contain control characters');
 	return { username, token, fromName };
@@ -75,12 +87,7 @@ export interface ProtonMailSendResult {
  * header-safe line, and both body parts must be present.
  */
 function validateMessage(message: ProtonMailMessage): void {
-	if (
-		typeof message.toEmail !== 'string' ||
-		message.toEmail.length === 0 ||
-		message.toEmail.length > 254 ||
-		!BARE_ADDRESS.test(message.toEmail)
-	) {
+	if (typeof message.toEmail !== 'string' || !isBareAddress(message.toEmail)) {
 		throw new Error('e-mail could not be sent (invalid recipient address)');
 	}
 	if (typeof message.subject !== 'string' || message.subject.length === 0 || HEADER_UNSAFE.test(message.subject)) {
@@ -190,6 +197,7 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 	// Per-send transport — no pooling (MOD-116). secure:false + requireTLS
 	// means STARTTLS is mandatory: the send fails rather than authenticating
 	// on a plaintext socket, and Node's default CA verification stays on.
+	let smtpSocket: Socket | undefined;
 	const transport = nodemailer.createTransport({
 		host: PROTON_SMTP_HOST,
 		port: PROTON_SMTP_PORT,
@@ -202,15 +210,34 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 		greetingTimeout: timeoutMs,
 		socketTimeout: timeoutMs,
 		dnsTimeout: timeoutMs,
-		tls: { rejectUnauthorized: true }
+		tls: { rejectUnauthorized: true },
+		// A non-pooled transport's close() only emits 'close' — it cannot
+		// reach the live SMTPConnection, so an expired guard would reject
+		// while sendMail kept streaming and could still be accepted (codex).
+		// Supplying the socket through nodemailer's getSocket seam keeps a
+		// reference the guard can destroy; after STARTTLS the TLS socket
+		// wraps this handle, so destroy() kills the session either way.
+		getSocket: (_options, callback) => {
+			smtpSocket = new Socket();
+			callback(null, { socket: smtpSocket });
+		}
 	});
+
+	// Setup is synchronous but the budget can still be spent between the
+	// pre-check above and here — recheck so an exhausted caller deadline
+	// never opens an SMTP connection (cubic).
+	if (deadline !== undefined && Date.now() >= deadline) {
+		transport.close();
+		throw new DeadlineExceededError();
+	}
 
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const guard = new Promise<never>((_, reject) => {
 		timer = setTimeout(() => {
-			// Close the real socket BEFORE rejecting so an in-flight DATA
+			// Destroy the real socket BEFORE rejecting so an in-flight DATA
 			// acceptance can never outlive the budget; the send's late
 			// settlement is swallowed by the race (handled, ignored).
+			smtpSocket?.destroy();
 			try {
 				transport.close();
 			} catch {
@@ -247,8 +274,19 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 		throw smtpFailure(error);
 	} finally {
 		if (timer !== undefined) clearTimeout(timer);
+		smtpSocket?.destroy();
 		transport.close();
 	}
-	if (deadline !== undefined && Date.now() >= deadline) throw new DeadlineExceededError();
+	if (deadline !== undefined && Date.now() >= deadline) {
+		// The provider already accepted the message — a confirmed side effect
+		// must not be reported as a deferral, which would resend the delivered
+		// mail (codex). Only an unconfirmed or malformed result degrades to
+		// the deferral; validatedMessageId already logged its diagnostic.
+		try {
+			return { messageId: validatedMessageId(info, message.toEmail) };
+		} catch {
+			throw new DeadlineExceededError();
+		}
+	}
 	return { messageId: validatedMessageId(info, message.toEmail) };
 }

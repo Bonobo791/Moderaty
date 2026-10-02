@@ -72,6 +72,10 @@ Linked-object collapse (MOD-182's "map linked objects to the same transaction"):
   `payment_intent.succeeded` share one PaymentIntent → one sale.
 - Out-of-order delivery is handled by keying on the payment object, never on event
   order or event id.
+- A `review:out_of_band` invoice (§3) has no payment object yet — its provisional
+  key is the **Stripe Invoice id**. When receipt evidence later arrives, the sale
+  re-keys to that payment object and the evidence merges into the same sale row —
+  never a second sale.
 
 ## 3. Non-eligible and manual-review events
 
@@ -120,6 +124,18 @@ competence never diverge. If the accountant reports regime de competência inste
 subscription competence moves to the service-period month and prepaid-credit
 recognition must be re-ruled — that is exactly the accountant question Q1, and it is
 the single decision everything else in this section hangs on.
+
+Two distinct dates sit under this proposal and must not be conflated:
+
+- `data_competencia` on the note is defined by the national emitter guide as the
+  **date the service was provided**. For a monthly subscription that is effectively
+  the invoice's service month; for prepaid credits and lifetime the service is
+  consumed over time, so receipt and provision can diverge.
+- The **Simples apuração month** is the PGDAS-D regime question. Resolução CGSN
+  nº 190/2026 (DOU 2026-08-10) ends the monthly regime-de-caixa option from
+  2027-01-01 — receipts are apurados on faturamento (issuance) thereafter — so
+  "note competence and tax competence never diverge" only holds inside the caixa
+  window. The Q1 ruling must answer for both dates and for the 2027 changeover.
 
 ## 5. Issuance timing
 
@@ -202,7 +218,10 @@ Every USD receipt needs a recorded, reproducible BRL figure — for the note's
 - **Q1 — Regime**: does ADM LTDA apura Simples under regime de caixa in PGDAS-D?
   Under caixa, all rules above stand as written. Under competência, subscription
   competence moves to the service-period month and prepaid credit recognition needs
-  a new ruling.
+  a new ruling. The ruling must cover both dates — `data_competencia` on the note
+  (national guide: the service-provision date) and the PGDAS-D apuração month — and
+  Resolução CGSN nº 190/2026 ends the monthly regime-de-caixa option from
+  2027-01-01, so the answer needs a 2027 position, not just today's.
 - **Q2 — FX convention**: PTAX `cotacaoVenda` closing of the receipt date (prior
   business day when none) as proposed, or the Stripe realized `exchange_rate`?
   Requires knowing the Stripe account's settlement currency — maintainer to supply.
@@ -257,6 +276,8 @@ PTAX examples use the verified 2026-09-30 closing sell rate **5.18090**.
 - BCB PTAX — olinda.bcb.gov.br `CotacaoDolarDia`, live-verified 2026-10-01.
 - MOD-178 accountant rulings — `docs/focus-nfe-validation.md` §5 (service codes,
   export treatment, refund/cancellation decoupling, original-competence correction).
+- Resolução CGSN nº 190/2026 (DOU 2026-08-10) — ends the monthly regime-de-caixa
+  option for Simples apuração from 2027-01-01.
 - Code anchors: `src/lib/server/billing/checkout.ts`, `billing/autotopup.ts`,
   `billing/entitlements.ts`, `stripe/webhooks.ts`, `mercadopago/webhooks.ts`,
   `stripe/bundles.ts`, `src/lib/credit-pricing.ts`.

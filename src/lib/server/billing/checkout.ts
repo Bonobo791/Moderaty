@@ -168,8 +168,10 @@ function checkoutRedirectUrls(appUrl: URL): { success_url: string; cancel_url: s
 
 /**
  * Fiscal collection on every real Checkout Session (MOD-236): Stripe
- * natively collects the billing address and a typed tax ID (CPF/CNPJ/NIF)
- * so the org fiscal profile is seeded from processor data instead of
+ * natively collects the billing address and a business tax ID on its
+ * supported-types list (BR CPF/CNPJ are not on it — Brazilian recipients
+ * get their identifiers through the MOD-181 fiscal profile instead), so
+ * the org fiscal profile is seeded from processor data instead of
  * re-asking the customer. The operator test checkout skips these — a smoke
  * test is not a sale and never feeds the fiscal profile.
  */

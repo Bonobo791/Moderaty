@@ -106,11 +106,11 @@ function detailProblems(payload) {
 	}
 	if (payload.budgetExhausted) problems.push('sweeps consumed the run budget — no channel claimed');
 	if (payload.bookkeepingError) problems.push('run-health bookkeeping write failed');
-	// The dry-run drain and feedback digest ride the same 200 as top-level
-	// fields; both catch their failures into `{ error }` so a broken aux job
-	// must not read as a healthy tick (codex). Success objects have no
-	// `error` key; absent fields classify as not-run.
-	for (const field of ['dryRunWindow', 'digest']) {
+	// The dry-run drain, feedback digest, and pending-preview drain ride the
+	// same 200 as top-level fields; all catch their failures into `{ error }`
+	// so a broken aux job must not read as a healthy tick (codex). Success
+	// objects have no `error` key; absent fields classify as not-run.
+	for (const field of ['dryRunWindow', 'digest', 'feedbackPreview']) {
 		const outcome = payload[field];
 		if (outcome && typeof outcome === 'object' && typeof outcome.error === 'string') {
 			problems.push(`${field}: ${outcome.error.replaceAll(/[\r\n]+/g, ' ').slice(0, 120)}`);

@@ -195,12 +195,22 @@ async function drainPendingFeedbackPreview(nowIso: string, deadline: number): Pr
 	const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, nowIso));
 	// Oldest pending row on a claimable, active channel — a fresh row's own
 	// 60s plant lease keeps it out until expiry (or its kicked runner), and a
-	// busy channel's row waits rather than pinning the queue.
+	// busy channel's row waits rather than pinning the queue. Rows past the
+	// stale window are dead leftovers the bounded sweep finalizes across
+	// ticks — draining one would run remote work on a row the sweep already
+	// declared dead (codex).
 	const pending = await db
 		.select({ digest: feedbackDigests, channel: channels })
 		.from(feedbackDigests)
 		.innerJoin(channels, eq(feedbackDigests.channelId, channels.id))
-		.where(and(eq(feedbackDigests.status, 'dry-run-pending'), eq(channels.active, 1), claimable))
+		.where(
+			and(
+				eq(feedbackDigests.status, 'dry-run-pending'),
+				eq(channels.active, 1),
+				claimable,
+				gte(feedbackDigests.windowEnd, staleBefore)
+			)
+		)
 		.orderBy(asc(feedbackDigests.id))
 		.limit(1)
 		.get();
@@ -230,7 +240,21 @@ async function drainPendingFeedbackPreview(nowIso: string, deadline: number): Pr
 			}
 		});
 		console.info('cron: feedback preview %s for %s finished — classified=%d', pending.digest.id, pending.channel.id, preview.commentsClassified);
-		return { ran: true, payload: { ...preview, ...stalePayload } };
+		return {
+			ran: true,
+			payload: {
+				// Operational counts only — `findings` carry near-verbatim
+				// commenter excerpts persisted for the feed; the scheduler
+				// drivers log this response, so evidence never crosses the
+				// cron boundary (codex).
+				commentsClassified: preview.commentsClassified,
+				commentsFailed: preview.commentsFailed,
+				...(preview.clusteringDegraded ? { clusteringDegraded: true } : {}),
+				pooled: preview.pooled,
+				hasMore: preview.hasMore,
+				...stalePayload
+			}
+		};
 	} catch (cause) {
 		// DeadlineExceededError leaves the row pending — a later tick resumes
 		// it until the stale age-out stops a dead run retrying forever. Other
@@ -240,11 +264,17 @@ async function drainPendingFeedbackPreview(nowIso: string, deadline: number): Pr
 		return { ran: true, payload: { error: cause instanceof DeadlineExceededError ? 'timeout' : 'error', ...stalePayload } };
 	} finally {
 		// Release only OUR lease — an expired lease reclaimed by the rotation
-		// or another tick is untouched.
-		await db
-			.update(channels)
-			.set({ leaseExpiresAt: null })
-			.where(and(eq(channels.id, pending.channel.id), eq(channels.leaseExpiresAt, lease)));
+		// or another tick is untouched. A release failure must not override
+		// the result: the lease self-expires, but losing `ran` would let the
+		// handler claim a second channel's remote work this tick (codex).
+		try {
+			await db
+				.update(channels)
+				.set({ leaseExpiresAt: null })
+				.where(and(eq(channels.id, pending.channel.id), eq(channels.leaseExpiresAt, lease)));
+		} catch (releaseCause) {
+			console.error('cron: feedback preview %s lease release failed for channel %s:', pending.digest.id, pending.channel.id, releaseCause);
+		}
 	}
 }
 

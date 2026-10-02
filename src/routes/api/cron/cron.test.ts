@@ -1021,7 +1021,20 @@ async function seedPendingPreview(channelId: string, opts: { boundary?: string; 
 test('drains the oldest pending feedback preview under a fresh lease — the rotation waits a tick', async () => {
 	await seedChannel('UC-prev');
 	const digestId = await seedPendingPreview('UC-prev');
-	const preview = { commentsClassified: 2, commentsFailed: 0, pooled: 0, hasMore: false, findings: [] };
+	const preview = {
+		commentsClassified: 2,
+		commentsFailed: 0,
+		pooled: 0,
+		hasMore: false,
+		findings: [
+			{
+				category: 'question',
+				summary: 'marker-summary-xyz',
+				supporterCount: 1,
+				evidence: [{ sanitizedExcerpt: 'marker-excerpt-abc', hasAbuse: 0 }]
+			}
+		]
+	};
 	// Capture the live lease mid-run: the claim fingerprint the drainer hands
 	// the runner must be the lease it stamped (cubic, PR #178).
 	let leaseDuringRun: string | null = null;
@@ -1044,7 +1057,17 @@ test('drains the oldest pending feedback preview under a fresh lease — the rot
 		claim: { orgId: null, refreshTokenEnc: 'enc', leaseExpiresAt: leaseDuringRun }
 	});
 	const body = await res.json();
-	expect(body).toMatchObject({ ok: true, feedbackPreview: preview, results: {} });
+	// Operational counts only: `findings` carry near-verbatim commenter
+	// excerpts persisted for the feed — the scheduler drivers log this
+	// response, so evidence must never cross the cron boundary (codex).
+	expect(body).toMatchObject({
+		ok: true,
+		feedbackPreview: { commentsClassified: 2, commentsFailed: 0, pooled: 0, hasMore: false },
+		results: {}
+	});
+	expect(body.feedbackPreview).not.toHaveProperty('findings');
+	expect(JSON.stringify(body)).not.toContain('marker-excerpt-abc');
+	expect(JSON.stringify(body)).not.toContain('marker-summary-xyz');
 	// The drainer's lease is released after the run.
 	expect((await channelRow('UC-prev'))?.leaseExpiresAt).toBeNull();
 	// One claimed workload per invocation (I10): the drained preview IS this
@@ -1210,6 +1233,7 @@ test('the stale sweep is bounded — an outage backlog finalizes across ticks', 
 	await seedChannel('UC-stale');
 	for (let i = 0; i < 30; i++) await seedPendingPreview('UC-stale', { plantAge: 11 * 60 * 1000 });
 	mocks.runFeedbackPreview.mockResolvedValue({ commentsClassified: 0, commentsFailed: 0, pooled: 0, hasMore: false, findings: [] });
+	mocks.runChannel.mockResolvedValue(runResult());
 	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 	onTestFinished(() => errorSpy.mockRestore());
 
@@ -1217,11 +1241,62 @@ test('the stale sweep is bounded — an outage backlog finalizes across ticks', 
 
 	const rows = await testDb().db.select().from(feedbackDigests).all();
 	expect(rows.filter((r) => r.status === 'dry-run-failed')).toHaveLength(25);
-	// The leftovers stay pending — the oldest one is still a resume record and
-	// the drainer runs it this same tick; the rest finalize on later ticks.
+	// The leftovers are stale — dead rows belong to the sweep, which reaches
+	// them on later ticks; the drainer must never run one as a live preview
+	// (codex, PR #178).
 	expect(rows.filter((r) => r.status === 'dry-run-pending')).toHaveLength(5);
-	expect(mocks.runFeedbackPreview).toHaveBeenCalledTimes(1);
+	expect(mocks.runFeedbackPreview).not.toHaveBeenCalled();
 	expect((await res.json()).feedbackPreview).toMatchObject({ staleFailed: 25 });
+	// With no live preview drained, the tick's workload is the rotation run.
+	expect(mocks.runChannel).toHaveBeenCalledWith('UC-stale', expect.objectContaining({ maxPages: 1 }));
+});
+
+test('a lease-release failure after a drained preview still counts the tick as worked', async () => {
+	// The finally's UPDATE can transiently reject; if the rejection escaped
+	// it would override `{ ran: true }`, letting the handler claim a second
+	// channel's remote work on the spent deadline (codex, PR #178). The
+	// release must fail loudly and preserve the result — the stale lease
+	// self-expires anyway.
+	await seedChannel('UC-prev');
+	await seedChannel('UC-rot');
+	await seedPendingPreview('UC-prev');
+	mocks.runFeedbackPreview.mockResolvedValue({ commentsClassified: 1, commentsFailed: 0, pooled: 0, hasMore: false, findings: [] });
+	mocks.runChannel.mockResolvedValue(runResult());
+	const realUpdate = testDb().db.update.bind(testDb().db);
+	const updateSpy = vi.spyOn(testDb().db, 'update').mockImplementation(((table: unknown) => {
+		const builder = realUpdate(table as never) as {
+			set: (v: Record<string, unknown>) => { where: (w: unknown) => Promise<unknown> };
+		};
+		const realSet = builder.set.bind(builder);
+		builder.set = (values: Record<string, unknown>) => {
+			const whereable = realSet(values);
+			if (table === channels && 'leaseExpiresAt' in values && values.leaseExpiresAt === null) {
+				whereable.where = async () => {
+					throw new Error('sqlite exploded mid-release');
+				};
+			}
+			return whereable;
+		};
+		return builder;
+	}) as never);
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	onTestFinished(() => {
+		updateSpy.mockRestore();
+		errorSpy.mockRestore();
+	});
+
+	const res = await call({ bearer: 'test-secret' });
+
+	expect(mocks.runFeedbackPreview).toHaveBeenCalledTimes(1);
+	// `ran` survived the release failure — no second workload this tick.
+	expect(mocks.runChannel).not.toHaveBeenCalled();
+	const body = await res.json();
+	expect(body).toMatchObject({ ok: true, results: {} });
+	expect(body.feedbackPreview).toMatchObject({ commentsClassified: 1 });
+	// Loud, not silent — and the failed release leaves the lease in place
+	// (it self-expires; the channel is not pinned forever).
+	expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('lease release'), expect.anything(), expect.anything(), expect.anything());
+	expect((await channelRow('UC-prev'))?.leaseExpiresAt).toBeTruthy();
 });
 
 test('a preview drain that spends the budget never claims a channel onto a dead deadline', async () => {

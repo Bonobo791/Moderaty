@@ -1,74 +1,60 @@
 #!/usr/bin/env node
-// Database backup: dumps a Turso database via the turso CLI and writes a
-// gzipped SQL dump to a timestamped file. Read-only against the database —
-// safe to run against production. Auth comes from the turso CLI login
-// (local) or TURSO_API_TOKEN (CI); never from .env, so prod credentials are
-// not read by this script.
-//
-// Usage:
-//   node scripts/backup-db.mjs <turso-db-name> [output-dir]
-// Example:
-//   node scripts/backup-db.mjs moderaty backups
-
-import { execFile } from 'node:child_process';
-import { mkdirSync, rmSync, createWriteStream, statSync } from 'node:fs';
+// Encrypted-only backup. No SQL, source responses, secrets or decrypted files
+// are written to disk/logs. Production credentials remain an operator gate.
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { Readable } from 'node:stream';
-import { promisify } from 'node:util';
-import { createGzip } from 'node:zlib';
-import { pipeline } from 'node:stream/promises';
+import { randomUUID } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
+import { BackupError, cancellation, reportError, safeId, sha256 } from './backup-lib/common.mjs';
+import { exportDump } from './backup-lib/export.mjs';
+import { loadContract, validateDump } from './backup-lib/schema.mjs';
+import { recipientConfig, encryptDump } from './backup-lib/encryption.mjs';
+import { s3Store, storageConfig, verifyObject, enforceRetention } from './backup-lib/storage.mjs';
 
-const execFileAsync = promisify(execFile);
-
-// Validate the full argument list BEFORE any work: unknown or extra
-// arguments are a loud usage error, never a silent fallthrough.
-const argv = process.argv.slice(2);
-if (argv.length < 1 || argv.length > 2) {
-	console.error('Usage: node scripts/backup-db.mjs <turso-db-name> [output-dir]');
-	process.exit(1);
-}
-const [dbName, outDir = 'backups'] = argv;
-// The name is interpolated into a turso CLI argument; only accept the shape
-// turso itself allows so a typo cannot smuggle flags or shell syntax.
-if (!/^[a-z0-9][a-z0-9-]*$/.test(dbName)) {
-	console.error(`Invalid Turso database name "${dbName}" (expected lowercase letters, digits, dashes).`);
-	process.exit(1);
-}
-
-let dump;
-try {
-	// 64 MiB buffer: .dump streams the whole database to stdout.
-	({ stdout: dump } = await execFileAsync('turso', ['db', 'shell', dbName, '.dump'], {
-		maxBuffer: 64 * 1024 * 1024
-	}));
-} catch (err) {
-	console.error(`turso db shell ${dbName} .dump failed: ${err.stderr?.trim() || err.message}`);
-	process.exit(1);
-}
-
-// Never write an empty or schema-less dump: it would look like a valid
-// backup until the day a restore is attempted.
-if (!dump.includes('CREATE TABLE')) {
-	console.error(`Dump of ${dbName} contains no CREATE TABLE statements — refusing to write a useless backup.`);
-	process.exit(1);
-}
-
-const stamp = new Date().toISOString().replace(/[-:]|\.\d{3}/g, '');
-const file = join(outDir, `${dbName}-${stamp}.sql.gz`);
-try {
-	mkdirSync(outDir, { recursive: true });
-	await pipeline(Readable.from([dump]), createGzip(), createWriteStream(file));
-	console.log(`Wrote ${file} (${statSync(file).size} bytes gzipped, ${dump.length} bytes SQL).`);
-} catch (err) {
-	// Never leave a partial file behind: a truncated gzip looks like a valid
-	// backup until the day a restore is attempted. Best-effort — when the
-	// output path itself is the problem (e.g. ENOTDIR) there is nothing to
-	// clean, and the loud error below is what matters.
-	try {
-		rmSync(file, { force: true });
-	} catch {
-		// Nothing to remove or nothing removable; the failure is reported below.
+export async function backup(database, outDir, { env = process.env, signal, contract = loadContract(), exportData = exportDump, encrypt = encryptDump, store } = {}) {
+	safeId(database, 'Turso database name');
+	const scope = safeId(env.BACKUP_SCOPE, 'backup scope');
+	const { recipient, keyId } = recipientConfig(env);
+	const remote = outDir === '--upload';
+	if (remote && env.BACKUP_PRODUCTION_ENABLED !== 'true') throw new BackupError('configuration', 'Remote backup activation has not been approved/enabled.');
+	const config = remote ? storageConfig(env) : null;
+	const destination = remote ? store ?? s3Store(config, { env, signal }) : null;
+	if (destination) await destination.preflight();
+	const startedAt = new Date().toISOString();
+	const id = `${startedAt.replace(/[-:.]/g, '')}-${randomUUID()}`;
+	const { dump, tool } = await exportData(database, { env, signal });
+	const schema = validateDump(dump, contract);
+	let encrypted;
+	try { encrypted = await encrypt(dump, recipient, { signal }); }
+	finally { dump.fill(0); }
+	signal?.throwIfAborted();
+	const manifest = { format: 1, id, scope, startedAt, completedAt: new Date().toISOString(), schemaVersion: schema.version, schemaHash: schema.schemaHash, exportTool: tool, encryption: 'age-x25519-v1+gzip', keyId, bytes: encrypted.length, sha256: sha256(encrypted) };
+	const metadata = Buffer.from(`${JSON.stringify(manifest)}\n`);
+	if (destination) {
+		const prefix = `${config.prefix}${id}/`;
+		await destination.put(`${prefix}payload.sql.gz.age`, encrypted, 'application/octet-stream');
+		await verifyObject(destination, `${prefix}payload.sql.gz.age`, manifest);
+		signal?.throwIfAborted();
+		await destination.put(`${prefix}complete.json`, metadata, 'application/json');
+		if (!(await destination.get(`${prefix}complete.json`)).equals(metadata)) throw new BackupError('integrity', 'Stored completion marker mismatch.');
+		await enforceRetention(destination, config, manifest);
+	} else {
+		mkdirSync(outDir, { recursive: true, mode: 0o700 });
+		const dir = join(outDir, id); mkdirSync(dir, { mode: 0o700 });
+		try {
+			writeFileSync(join(dir, 'payload.sql.gz.age'), encrypted, { mode: 0o600, flag: 'wx' });
+			writeFileSync(join(dir, 'complete.json'), metadata, { mode: 0o600, flag: 'wx' });
+		} catch { rmSync(dir, { recursive: true, force: true }); throw new BackupError('output', 'Could not write encrypted backup; incomplete output removed.'); }
 	}
-	console.error(`Failed to write backup to ${file}: ${err.message}`);
-	process.exit(1);
+	return manifest;
+}
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+	const stop = cancellation(); process.umask(0o077);
+	try {
+		const args = process.argv.slice(2);
+		if (args.length !== 2) throw new BackupError('usage', 'Usage: node scripts/backup-db.mjs <turso-db-name> <output-dir|--upload>');
+		const result = await backup(...args, { signal: stop.signal });
+		console.log(`backup: encrypted backup verified (${result.id}).`);
+	} catch (error) { reportError(error); }
+	finally { stop.dispose(); }
 }

@@ -1,10 +1,5 @@
-# Daily production database backup. Dumps the `moderaty` Turso database with
-# scripts/backup-db.mjs and keeps the gzipped dump as a workflow artifact for
-# 30 days. Requires a TURSO_API_TOKEN repository secret (a Turso platform API
-# token — mint one with `turso auth api-tokens mint`); without it the dump
-# step fails loudly, which is the intended behavior. Restore instructions
-# live in DEPLOY.md §6.
-
+# Activation and secrets are deliberately separate owner-controlled gates.
+# No GitHub artifacts/caches are permitted for database payloads.
 name: db-backup
 
 permissions:
@@ -12,54 +7,49 @@ permissions:
 
 on:
   schedule:
-    # Daily at 03:23 UTC — off the top-of-hour herd.
-    - cron: '23 3 * * *'
+    - cron: '23 3 * * *' # Daily 03:23 UTC; default branch only.
   workflow_dispatch:
 
+concurrency:
+  group: database-backup-production
+  cancel-in-progress: false
+
 jobs:
-  dump:
-    runs-on: ubuntu-latest
+  backup:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && vars.BACKUP_PRODUCTION_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: production-backups
     steps:
-      # Supply-chain pinning (codeql): immutable commit SHA, not the mutable v4 tag.
-      # actions/checkout@v4 == 11d5960a326750d5838078e36cf38b85af677262
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-
-      # actions/setup-node@v4 == 49933ea5288caeca8642d1e84afbd3f7d6820020
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: 24
-
-      # Pinned version with checksum verification (PR #83 review, CWE-494):
-      # never pipe a remote install script to bash in a job that holds
-      # TURSO_API_TOKEN. The layout below was verified against the v1.0.31
-      # release: checksums.txt is sha256sum-compatible and the tarball holds
-      # the `turso` binary at its root.
-      - name: Install Turso CLI (pinned, checksum-verified)
-        run: |
-          set -euo pipefail
-          VERSION=v1.0.31
-          ASSET=turso-cli_Linux_x86_64.tar.gz
-          BASE="https://github.com/tursodatabase/turso-cli/releases/download/$VERSION"
-          curl --proto '=https' --tlsv1.2 -sSfLO "$BASE/$ASSET"
-          curl --proto '=https' --tlsv1.2 -sSfLO "$BASE/checksums.txt"
-          grep " $ASSET$" checksums.txt | sha256sum -c -
-          mkdir -p "$HOME/.turso-bin"
-          tar -xzf "$ASSET" -C "$HOME/.turso-bin"
-          echo "$HOME/.turso-bin" >> "$GITHUB_PATH"
-
-      - name: Dump production database
+          node-version: '24.19.0'
+      - name: Install checksum-pinned backup tools
+        run: bash scripts/install-backup-tools.sh
+      - name: Validate, encrypt, upload, verify and expire approved backups
+        id: run
         env:
-          TURSO_API_TOKEN: ${{ secrets.TURSO_API_TOKEN }}
-        run: node scripts/backup-db.mjs moderaty backups
-
-      - name: Upload dump artifact
-        # actions/upload-artifact@v4 == ea165f8d65b6e75b540449e92b4886f43607fa02
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: moderaty-dump-${{ github.run_id }}
-          path: backups/*.sql.gz
-          retention-days: 30
-          # A backup run that produced no file is a failure, not a success.
-          if-no-files-found: error
+          BACKUP_PRODUCTION_ENABLED: ${{ vars.BACKUP_PRODUCTION_ENABLED }}
+          BACKUP_SCOPE: ${{ vars.BACKUP_SCOPE }}
+          BACKUP_DATABASE_NAME: ${{ vars.BACKUP_DATABASE_NAME }}
+          BACKUP_DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+          BACKUP_EXPECTED_DATABASE_HOST: ${{ vars.BACKUP_EXPECTED_DATABASE_HOST }}
+          BACKUP_DATABASE_AUTH_TOKEN: ${{ secrets.BACKUP_DATABASE_AUTH_TOKEN }}
+          BACKUP_AGE_RECIPIENT: ${{ vars.BACKUP_AGE_RECIPIENT }}
+          BACKUP_S3_BUCKET: ${{ vars.BACKUP_S3_BUCKET }}
+          BACKUP_S3_ACCOUNT_ID: ${{ vars.BACKUP_S3_ACCOUNT_ID }}
+          BACKUP_S3_REGION: ${{ vars.BACKUP_S3_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.BACKUP_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.BACKUP_AWS_SESSION_TOKEN }}
+          BACKUP_ALERT_WEBHOOK_URL: ${{ secrets.BACKUP_ALERT_WEBHOOK_URL }}
+        run: node scripts/run-backup.mjs "$BACKUP_DATABASE_NAME"
+      - name: Report setup failure
+        if: failure() && steps.run.outcome != 'failure'
+        env:
+          BACKUP_SCOPE: ${{ vars.BACKUP_SCOPE }}
+          BACKUP_ALERT_WEBHOOK_URL: ${{ secrets.BACKUP_ALERT_WEBHOOK_URL }}
+        run: node --input-type=module -e "import { notify } from './scripts/backup-lib/alerts.mjs'; import { reportError } from './scripts/backup-lib/common.mjs'; try { await notify({ stage:'configuration' }); } catch (e) { reportError(e); }"

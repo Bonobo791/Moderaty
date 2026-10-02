@@ -304,23 +304,23 @@ the site exists), local work, and outage recovery.
 
 ## 7. Backups
 
-- **Automated:** `.github/workflows/db-backup.yml` dumps the production
-  database daily at 03:23 UTC and keeps the gzipped SQL dump as a workflow
-  artifact for 30 days. One-time setup: mint a Turso platform API token
-  (`turso auth api-tokens mint <name>`) and add it to the repo as the
-  `TURSO_API_TOKEN` secret (Settings → Secrets and variables → Actions).
-  A run without the secret, or one that produces no dump, fails loudly.
-- **Manual:** with the turso CLI logged in,
-  `node scripts/backup-db.mjs moderaty backups` writes
-  `backups/moderaty-<timestamp>.sql.gz` (the `backups/` dir is gitignored).
-  The script is read-only against the database and refuses to write an empty
-  or schema-less dump.
-- **Restore:** create a fresh Turso database, then load the dump:
-  `gunzip -c backups/moderaty-<timestamp>.sql.gz | turso db shell <new-db>`.
-  Point `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN` at the new database in
-  Netlify env vars, redeploy, and re-run `npm run db:migrate` only if the
-  dump predates a newer migration (the dump includes `__drizzle_migrations`,
-  so drizzle-kit applies just the gap). Verify per §1 afterwards.
+The encrypted-only backup workflow and isolated recovery procedure are documented
+in [docs/BACKUP_RECOVERY.md](docs/BACKUP_RECOVERY.md). Production activation is
+owner-gated: choose/approve the private destination, separate key custody,
+least-privilege access, alerts, retention and recovery objectives before configuring
+credentials. No database dump is stored in a GitHub artifact or cache.
+
+For an authorized local export with the reviewed Turso CLI already logged in:
+
+```sh
+BACKUP_SCOPE='<safe-scope>' BACKUP_AGE_RECIPIENT='<approved-public-recipient>' \
+  node scripts/backup-db.mjs '<database-name>' backups
+```
+
+The result is an age-encrypted gzip SQL payload and safe checksum manifest.
+Use the runbook's offline verification and isolated restore instructions; do not
+repoint or overwrite production as part of a drill. A manual success alone does
+not establish working scheduled backups or verified recovery readiness.
 
 ## 8. Database outage runbook
 

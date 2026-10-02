@@ -311,7 +311,7 @@ export function buildVerificationEmail(input: { name: string; verifyUrl: string 
 	const htmlPart = [
 		`<p>Hi ${escapeHtml(input.name)},</p>`,
 		'<p>Someone (hopefully you) asked Moderaty to contact them using this e-mail address.</p>',
-		`<p>Open this link, then choose Confirm contact request: <a href="${escapeHtml(input.verifyUrl)}">${escapeHtml(input.verifyUrl)}</a></p>`,
+		['<p>Open this link, then choose Confirm contact request: <a href="', escapeHtml(input.verifyUrl), '">', escapeHtml(input.verifyUrl), '</a></p>'].join(''),
 		'<p>The link is valid for 7 days. If you did not submit this request, ignore this e-mail.</p>',
 		'<p>— Moderaty</p>'
 	].join('');

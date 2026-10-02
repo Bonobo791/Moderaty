@@ -1,416 +1,171 @@
-# Encrypted database backup and recovery
+# Turso-native backups and recovery
 
-Status: implementation for review; **production activation is blocked** until the
-owner completes the approval checklist below. A merged workflow, a green test,
-or this document is not evidence of an operational production backup.
-No production data, credentials, security settings, plans or infrastructure are
-changed by the implementation or synthetic rehearsal.
+## Scope and current evidence
 
-## 1. Supported design and decision record
+Moderaty uses Turso-managed backups and native point-in-time recovery (PITR).
+Turso automatically captures committed changes; there is no Moderaty backup cron,
+export pipeline, storage account, encryption-key setup or artifact retention job.
+The previous dump/artifact workflow and custom backup tools are retired in this
+branch. That retirement reaches the deployed/default branch only after the human
+merges the change. Repository CI is code validation, not a backup-success signal.
 
-- Daily independent logical export, authenticated **age X25519** encryption of
-  gzip SQL, private storage, 30-day retention. No plaintext GitHub artifacts,
-  caches, dump logging, or fallback destination.
-- The implemented remote adapter supports **AWS S3 only**, with bucket-owner
-  enforced ownership, all four public-access blocks, a pinned account/region,
-  SSE-S3 encryption (in addition to client-side age), and versioning **never enabled**. Versioning/suspended buckets and Object Lock
-  need a separate version-aware retention design and are rejected. This is a
-  reviewable implementation default, not an approved vendor or data transfer.
-- CI uses an existing database-scoped token through HTTPS `/dump`; it does not
-  mint credentials. The operator must prove that the scoped read-only token and
-  approved database engine support this endpoint. Unsupported features fail
-  closed. A local logged-in Turso CLI remains available for an authorized
-  operator; CLI 1.0.31 may mint/cache broader database tokens internally, so
-  its use needs separately approved access. Never put a platform token in CI
-  for this workflow.
-- Proposed independent-backup RPO: <=24 hours after successive successful daily
-  exports. Missing the next scheduled run breaks that objective immediately;
-  a 26-hour alert threshold is a notification grace period, not a 26-hour RPO.
-  Proposed RTO: 4 hours including isolation and billing reconciliation. Neither
-  objective is approved or measured against production yet.
-- Proposed monitor: hourly on a separate operator-controlled host/account,
-  26-hour maximum backup age, private read-only storage access, independent
-  alert delivery. An additional GitHub schedule alone cannot detect GitHub-wide
-  outages. The monitor's own scheduler requires an external dead-man check.
-- No storage destination, region, spending cap, alert audience, key custodians
-  or operational owners have been selected by this change.
+The current organization plan, usable recovery points, operator permissions and
+live restore have **not been verified**. Do not declare recovery ready from this
+document or a passing build. This design relies on Turso and access to its account;
+a provider/account outage or an expired recovery window can prevent recovery.
 
-### Cost and native-recovery decisions (owner required)
+## 1. Verify the native recovery window
 
-Measure database size, encrypted daily export size `S`, growth, quota headroom,
-region and expected monthly restore/download count in a **restricted** record.
-Budget at least `30 * S` steady-state bytes plus one in-flight object, manifests,
-failed-upload allowance, and growth. Hourly freshness checks read small manifests
-and authenticated S3 full-object checksum/size metadata, without repeatedly
-downloading the payload. Include about `30 * S` monthly upload readback transfer
-plus approved restore/integrity drills, manifest traffic and requests in the budget. Restrict the monitor to the same approved region
-where appropriate; do not assume free transfer. Price storage, requests,
-retrieval, transfer, logs, tax and alert service together, with a numeric cap and
-cost alarm chosen by the owner.
+Public Turso documentation checked on 2026-10-02:
 
-Compare the existing private storage account first. AWS S3 offers the reviewed
-adapter and account/private-access controls. Cloudflare R2 is an alternative
-with different regional/compliance and request/transfer terms, but is **not
-supported by this adapter** and must not be enabled via an endpoint override.
-A second provider requires its own access, integrity and retention tests.
-For a concrete example only, US East (N. Virginia) Standard currently lists
-$0.023/GB-month, $0.005/1,000 PUT/COPY/POST/LIST, and $0.0004/1,000 GET/HEAD
-([official regional price list](https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonS3/current/us-east-1/index.json), published 2026-09-28).
-A hypothetical 10 MiB encrypted daily copy retained 30 days is about 0.293 GiB,
-or $0.0067/month storage, plus roughly 1–2 cents of normal requests. Full upload
-readbacks transfer about 0.293 GiB/month; drills add their payload size. Transfer,
-monitor hosting and taxes are separate. Propose a $5/month budget alarm pending
-measured usage and approval; an alarm is not a hard spending cap. US East is a
-pricing example: current repo documentation does not establish Turso's region,
-so residency alignment must be confirmed before selecting the bucket region.
-Current source links: [S3 pricing](https://aws.amazon.com/s3/pricing/) and
-[R2 pricing](https://developers.cloudflare.com/r2/pricing/).
+| Plan | PITR window | Deleted-database recovery |
+| --- | --- | --- |
+| Free | 24 hours | Unavailable |
+| Developer | 10 days | Up to 5 days, subject to prerequisites |
 
-[Turso monthly pricing](https://turso.tech/pricing?frequency=monthly), checked
-2026-10-02, lists Developer at US$5.99/month and 10-day PITR. Existing entitlement,
-usage, taxes/fees and the actual checkout/terms must be verified before an owner
-approves any recurring charge. Free currently lists 1-day PITR; an upgrade does
-not establish historical recovery points. No plan purchase is required to test
-this code. Independent backups also cover loss of access to the database/CI
-provider; native recovery remains a separate layer.
+Backups occur at `COMMIT`; no custom backup schedule needs activation. PITR creates
+another database, not an in-place rollback. Recovery targets consume database
+quota and require approved connection/access setup. A plan's nominal window does
+not prove that a particular requested timestamp is available. See
+[Turso PITR](https://docs.turso.tech/features/point-in-time-recovery).
 
-## 2. Export contract and limits
+Keep the current plan if its confirmed window meets the owner's needs. If Free's
+24 hours is too short, Developer is the lowest listed paid tier: **US$5.99/month
+billed monthly**, or $59.88 prepaid yearly ($4.99/month equivalent). Usage, taxes
+and checkout terms may add cost; check the actual account first. No upgrade or
+purchase is approved by this runbook. Sources: [pricing](https://turso.tech/pricing)
+and [published price table](https://turso.tech/pricing.md).
 
-Node 24.19.0, age 1.2.1 and AWS CLI 2.37.8 are pinned by the workflow; release
-archives have committed SHA-256 checksums in `scripts/install-backup-tools.sh`.
-Review release provenance/security changes before updating pins. The local CLI
-path additionally requires Turso 1.0.31. Production and test jobs use immutable
-checkout/setup-node action commits, contents-read permissions and no cache.
+Record these in a restricted operator record, never a public issue:
 
-The export must be a complete UTF-8 SQL transaction ending in COMMIT. HTTP
-status, redirects, output bounds and database hostname are checked independently
-of process exit status. The local CLI preflight must return an expected HTTPS
-host; login text cannot masquerade as a dump. Timeouts close/kill subprocesses,
-and their stdout/stderr are never included in errors.
+- Correct organization, database, group, region, actual plan and account owner.
+- Current usable recovery range, available target quota, database size and CLI
+  version. Use the dashboard and existing authorized access; `turso plan show`
+  reports the current plan ([reference](https://docs.turso.tech/cli/plan/show)).
+- Who can perform recovery and how the operator can access the account during an
+  incident. Confirm secure availability of the application's existing encryption
+  keys/configuration; a database restore alone cannot decrypt stored app secrets.
+- Current delete protection and, if applicable, organization **Allow restore**
+  setting. Changing permissions, credentials or security settings requires
+  separate approval. Do not make those changes merely to fill this checklist.
+- Accepted recovery window, maximum acceptable data loss (RPO), recovery-time
+  target (RTO), primary responder and escalation contact. Retention is not RPO;
+  measure recoverable commits and incident response rather than promising zero
+  loss. A four-hour RTO is a proposal until an actual timed drill establishes it.
 
-A fresh, in-memory SQLite database imports application schema/data from each
-dump under an authorizer that
-rejects filesystem attachment, extensions, arbitrary functions, views, triggers,
-virtual tables and unsupported pragmas. Validation checks transaction completion,
-integrity, foreign keys, exact table/column/index/FK shapes, defaults, supported
-CHECK/unique/autoincrement behavior and every migration hash/timestamp against
-this checkout's latest Drizzle snapshot and immutable migration files.
-Migration timestamps are not assumed to be monotonically ordered. Empty
-application tables are valid; an empty or schema-less response is not.
+## 2. Human-approved isolated PITR drill
 
-Current supported scope is this repository's ordinary SQLite tables and indexes.
-Any new triggers/views, generated columns, extension/vector/virtual objects,
-partial/expression indexes, engine changes or schema changes require expanding
-and revalidating the contract, including an actual export/restore drill. Public libSQL [dump authorization](https://github.com/tursodatabase/libsql/blob/main/libsql-server/src/http/user/dump.rs)
-and [exporter source](https://github.com/tursodatabase/libsql/blob/main/libsql-server/src/connection/dump/exporter.rs)
-show read-authorized primary export inside a SQLite transaction. Hosted engine
-compatibility still needs an approved canary before activation. Source-shaped
-fixtures cover CR/LF `replace`/`char` expressions; only those safe SQL functions
-are enabled. Optimizer-stat initialization/inserts are omitted from the isolated
-validator using comment/string-aware token boundaries because local SQLite may
-lack STAT4 support. The encrypted payload preserves those original statements;
-statistics are not application records, and application schema/data/integrity
-validation still runs. Restoring into a different SQLite build may require
-rebuilding optimizer statistics under an approved compatible restore procedure.
-Do not substitute `turso db export` blindly: its documented snapshot may lag the
-latest database changes.
+Start with a disposable source containing only synthetic data. A later drill
+using real data needs explicit approval for its source, target, region, access,
+cost and cleanup. Creating a target or granting credentials is not authorized by
+reading this procedure. Never test by corrupting or deleting production.
 
-Exports are bounded to 64 MiB uncompressed; larger databases fail closed and need
-a reviewed streaming design. Plaintext exists only in process memory, and SQL is
-validated before compression/encryption. JavaScript strings cannot be reliably
-zeroized; use a trusted ephemeral, non-swapping runner without core dumps or
-memory diagnostics. Never use an untrusted/self-hosted shared runner. SIGKILL,
-power loss and compromised runners are outside application cleanup guarantees.
-Only ciphertext and a small allowlisted manifest ever reach temporary disk.
-Temporary directories are private; normal/error/cancellation cleanup is bounded.
-No application dependencies are installed in the credential-bearing backup job.
-
-## 3. Keys and least-privilege access
-
-CI receives one native age **public recipient**, never a private identity or
-passphrase. Native X25519 recipients only; age plugins, SSH recipients and
-recipient files are deliberately unsupported. Key ID is a public-recipient
-SHA-256 prefix. Backups use a unique UTC timestamp plus random UUID, immutable
-conditional uploads, encrypted payload SHA-256/size, schema/tool/key identifiers,
-and no record contents or secret values in metadata.
-
-The owner generates production keys through an approved secure process. Keep
-the private identity in an independent approved vault/offline custody and an
-approved emergency recovery copy outside CI, storage and the production host.
-Name primary and backup custodians; test emergency retrieval without routine CI
-access. Do not paste keys/tokens into issues, chat, logs or this repository.
-Keep old identities for all backups encrypted under them, plus any explicitly
-approved retention exception; verify decryption before retiring a key. Rotation
-creates a new key ID; never overwrite an old key or re-encrypt in place. Suspected
-exposure requires owner-led incident assessment, access revocation/rotation and
-preservation of recovery capability, not indiscriminate key destruction.
-
-The S3 writer needs scoped ListBucket, GetBucketPublicAccessBlock,
-GetBucketOwnershipControls, GetBucketVersioning, PutObject, GetObject (readback)
-and DeleteObject (retention), only for `moderaty-backups/<scope>/` objects and the
-selected bucket metadata. This combined uploader/retention role can delete
-backups: **explicitly accept that limitation or separate retention into a reviewed
-role/job before activation**. It needs no bucket/security/IAM management rights,
-no object ACL writes, and no decryption key. A restore operator and independent
-monitor use separate GetObject/ListBucket and read-only bucket metadata access;
-only the recovery operator has separate private-key access. Scope any database
-token to the one approved database and read-only export capability. Verify
-positive and negative permission tests; never assume a token label proves scope.
-
-No endpoint override, ambient AWS profile or credential-process configuration is
-used. This implementation reads the explicitly approved AWS credential env vars;
-OIDC or another ongoing-access setup is a separately approved security change.
-
-## 4. Activation checklist and environment mapping
-
-Complete the Linear project gates before setting BACKUP_PRODUCTION_ENABLED=true:
-
-- [ ] Restricted inventory: exact scope, live engine/schema, plan, size, region,
-      available PITR timestamps, quota headroom, operator and current safeguards
-- [ ] Owner approval: destination/data transfer, region/privacy, total budget,
-      RPO/RTO/grace, key custody, retention and alert recipient/fallback
-- [ ] Live export contract proven with approved disposable data and scoped token
-- [ ] Private S3 anonymous read/list denied, bucket controls verified, writer vs
-      monitor/recovery negative permission tests and retention design accepted
-- [ ] Separately held key and emergency custody recovered using synthetic data
-- [ ] Failure, missing/stale, recovery and alert-delivery failure exercised with
-      approved test signals; verified recipient receipt and external dead-man
-- [ ] Human security reviewer signs exact commit, permissions and remaining risk
-- [ ] Owner configures credentials/settings after applicable action-time approval
-- [ ] First approved production export, private object/readback/manifest verified
-- [ ] That production backup restored in an approved isolated environment;
-      integrity, schema, application assertions, billing and elapsed RTO verified
-- [ ] Next real scheduled run and independent monitor delivery observed; no
-      plaintext logs/artifacts; retention boundary tests linked
-- [ ] Operator handover accepted; recurring tasks/cadence separately approved
-
-Use a restricted GitHub environment named `production-backups` with default-branch
-restriction and an appropriate approval/security policy. Creating/configuring
-that environment or credentials is an operator action. The workflow also checks
-default-branch ref and a repository activation variable; PRs/forks never receive
-these credentials. Review all changes before they reach the default branch.
-Feature-branch manual runs cannot access the production job.
-
-Variables: BACKUP_PRODUCTION_ENABLED, BACKUP_SCOPE (safe alias),
-BACKUP_DATABASE_NAME, BACKUP_EXPECTED_DATABASE_HOST, BACKUP_AGE_RECIPIENT (public),
-BACKUP_S3_BUCKET, BACKUP_S3_ACCOUNT_ID, BACKUP_S3_REGION.
-Secrets: BACKUP_DATABASE_URL, BACKUP_DATABASE_AUTH_TOKEN,
-BACKUP_AWS_ACCESS_KEY_ID, BACKUP_AWS_SECRET_ACCESS_KEY, optional
-BACKUP_AWS_SESSION_TOKEN, BACKUP_ALERT_WEBHOOK_URL.
-Never configure legacy platform export credentials as a workaround for a scoped
-export failure. Determine the supported read-only interface first.
-
-The independent monitor needs only the storage config/read-only credentials,
-BACKUP_SCOPE, BACKUP_ALERT_WEBHOOK_URL and optional BACKUP_MAX_AGE_HOURS (26 by
-default, allowed 24–48). It never receives database credentials or a decrypting
-key. Install the reviewed tools/source separately and run:
-
-```sh
-node scripts/monitor-backups.mjs
-```
-
-## 5. Success, retention and alert semantics
-
-Daily schedule: 03:23 UTC; default branch only; manual workflow dispatch on that
-branch; 20-minute job timeout; one concurrency group, no cancellation of an
-in-progress backup. GitHub can delay/drop scheduled jobs and can disable inactive
-public-repository schedules: the external monitor is mandatory.
-
-Success requires schema validation, encryption, immutable S3 upload, downloaded
-ciphertext checksum/size match, completion manifest uploaded/read-back verified,
-and retention success. A green process or job-start heartbeat is insufficient.
-A partial upload without a valid completion manifest cannot count as a backup.
-The hourly monitor checks authenticated S3 HEAD metadata with ENABLED checksum
-mode against the manifest: exact size, full-object SHA-256 and supported SSE-S3
-encryption. Missing/composite/mismatched checksum metadata fails closed. It also
-validates timestamps and reports retention violations. Uploads still download
-and hash the entire ciphertext once before completion, and scheduled isolated
-restore/integrity drills repeat full download/decryption. Metadata checks do not
-replace those drills. SSE-KMS is not configured or granted extra decrypt rights
-by this adapter; its use needs a separately approved design. The checksum is a transfer-integrity check, not a signature;
-age authentication is verified during restore. An attacker controlling the
-writer/storage can destroy or substitute files; separate key custody protects
-confidentiality, not availability against that attacker.
-
-Expiration uses UTC age strictly greater than 30*24 hours; the exact boundary is
-retained. The current new backup must be verified before deleting old recovery
-copies. Completion markers are deleted before old ciphertext so interrupted
-cleanup cannot advertise missing payloads. Orphan ciphertext older than 30 days
-is also removed. Deletion errors make the job fail. No automatic lifecycle rule
-should silently erase the sole recovery point. If no recent valid recovery copy
-exists, cleanup refuses and the monitor raises stale/retention alarms. This is an
-incident requiring an owner decision; **no indefinite privacy exception is
-approved**. Before activation approve a maximum bounded last-good extension (or
-an explicit hard-deletion policy) with escalation/cleanup ownership. Review legal
-retention, erasure requests and restored deleted users before any cutover.
-
-Coordinate receiver/channel selection with MOD-102 and the external scheduler/
-dead-man checks with MOD-113; both decisions remain open. Reuse that approved
-setup when available without tying minimum backup alerts to unrelated telemetry.
-The alert receiver is an owner-approved HTTPS endpoint accepting the safe JSON
-contract in `backup-lib/alerts.mjs`; an arbitrary Slack/email webhook is not
-assumed compatible. It must route to the approved audience, deduplicate by
-service/scope/stage, close the scope's outstanding alerts on a recovery event,
-repeat unresolved alerts at the agreed cadence, and escalate to the named
-fallback after the agreed acknowledgement window. Defaults proposed for approval:
-immediate failure/staleness alert, hourly repeat, escalation after 1 hour, daily
-unresolved summary. Receiver delivery confirmation, not HTTP acceptance alone,
-is the activation evidence. The client retries three times with 10-second request
-timeouts and suppresses response bodies. Delivery failure is a nonzero exit and
-requires the independent dead-man/fallback channel. Maintenance suppression must
-be time-bounded, owner-approved and auto-expire; never fake a completion marker.
-
-## 6. Isolated recovery procedure
-
-1. Declare incident and record detection, last known write, candidate recovery
-   points and decision owner. Do not delete/recreate production. Preserve safe
-   incident evidence in a restricted record, not public issues.
-2. Choose latest independently verified backup preceding corruption, or an
-   approved native PITR point. Record expected lost interval and approve data
-   exposure/region/cost for the isolated environment and operator.
-3. Obtain the ciphertext and complete.json with separate read-only recovery
-   access. Verify SHA-256/size and manifest scope. Retrieve the matching private
-   key from approved independent custody; exercise emergency custody if primary
-   retrieval is unavailable. Restore from a reviewed checkout matching the
-   manifest schema version/hash, not today's unrelated schema.
-4. Use a clean host with egress denied, no production network, no payment/email/
-   Google/YouTube/OpenAI credentials, no live webhook endpoint, no cron/outbox
-   scheduler and no app startup. Keep decrypted data off shared disks, terminals,
-   shell history, logs, artifacts and backups. Memory-only verification:
+1. Confirm the source identity, plan window, quota and approved target isolation.
+   Record incident/drill start time and the schema/application revision. For a
+   synthetic test, commit a known fixture, choose and record a UTC timestamp after
+   that commit, then commit a distinguishable later change. The expected restored
+   state must contain the first fixture and exclude the later change.
+2. A human uses the installed official CLI to create a **new, unused** target.
+   Confirm supported arguments with `turso db create --help`. Example only:
 
    ```sh
-   BACKUP_SCOPE='<approved-scope>' node scripts/verify-backup.mjs \
-     '<downloaded-backup-directory>' '<private-identity-file>'
+   turso db create '<new-isolated-target>' \
+     --from-db '<approved-source>' --timestamp '<approved-RFC3339-UTC-point>'
    ```
 
-   This actually decrypts and imports into isolated in-memory SQLite and runs
-   integrity/schema/migration checks. It never connects to production or starts
-   Moderaty. Wrong key, corrupt payload, schema drift and incomplete dumps fail.
-5. For an owner-approved full app drill, import into a **new disposable compatible
-   database**, through a protected stream on the isolated host, using reviewed
-   age/gzip/SQLite tooling. No existing target may be overwritten. Keep DB/token
-   creation and any plaintext persistence under separate approval. Example for
-   an offline, previously nonexistent file using a compatible engine with the
-required STAT4/extension support (human operation; generic SQLite is not always
-compatible):
+   Select the approved group/region as supported by the account and CLI. See the
+   [official create reference](https://docs.turso.tech/cli/db/create). Stop if the
+   timestamp is unavailable; never silently substitute the current database.
+3. Verify the returned target identity and timestamp. Keep it disconnected from
+   production deployments, cron, webhooks, outboxes and payment/moderation jobs.
+   Use approved target-only access, not production application credentials. Do
+   not start the app or run deployment migrations automatically.
+4. Check `PRAGMA integrity_check`, `PRAGMA foreign_key_check`, expected tables,
+   constraints, row invariants and the fixture boundary. Match the migration
+   history to the source revision at the recovery point. The existing read-only
+   `scripts/verify-migrations.mjs` can check that revision with an explicitly
+   isolated target configuration. Do not load a production `.env`. A mismatch
+   requires investigation, not immediate migration. Keep outputs restricted.
+5. Before app smoke tests, quarantine restored sessions, OAuth grants, saved
+   payment references and organization secrets. Use synthetic/test keys and a
+   deny-by-default egress policy that permits only the approved recovery target.
+   Disable cron, webhook ingestion, billing, auto-top-up, email and moderation.
+   `DRY_RUN` alone does not disable every external side effect. Existing tenancy
+   probes perform writes and may print records; use only a separately approved
+   isolated target and restricted logs.
+6. Exercise login, dashboard, ownership boundaries, usage and the reconciliation
+   cases below with test fixtures. Measure elapsed time through access, restore,
+   validation and reconciliation readiness. Record actual recovered point and
+   lost interval; a successful create command alone is not recovery evidence.
+7. Record safe pass/fail assertions, timestamps, revision and operator sign-off.
+   Keep real records, SQL, URLs containing credentials and tokens out of issues,
+   terminals captured by CI and public logs. Clean up disposable resources and
+   access only through the approved process; deletion needs its own confirmation.
 
-   ```sh
-   set -o pipefail
-   age --decrypt --identity '<private-identity-file>' '<payload.sql.gz.age>' |
-     gzip --decompress --stdout | sqlite3 '<new-isolated-file.sqlite>'
-   ```
+## 3. Billing and external-state reconciliation
 
-   A failed pipeline leaves an untrusted partial target: discard it through the
-   approved cleanup process; never resume it or treat it as a restore.
-6. Quarantine sessions, OAuth grants, encrypted organization API keys and payment
-   identifiers before any app access. Network isolation is the primary barrier;
-   DRY_RUN alone does not disable every payment/email/outbox path. Use test-only
-   application keys and fixtures, disable cron/webhooks/invoicing/outboxes/auto
-   top-up/moderation, and never run deploy scripts, migrations or tenancy probes
-   against production. Validate expected schema, foreign keys, row invariants,
-   ownership boundaries, login/dashboard/usage behavior and reconciliation below.
-7. Measure export age and elapsed recovery time from incident declaration through
-   isolation, key retrieval, download, validation, reconciliation and readiness.
-   A milliseconds-long local fixture check is not a measured production RTO.
-8. Record only safe commit/run/backup identifiers, sizes/checksums, stage timing,
-   assertions and unresolved gaps in a restricted operator record. Approved
-   cleanup must remove decrypted targets, temporary credentials, identities and
-   copies according to retention policy; verify no background jobs or accounts
-   remain active. Never include real records in a public issue or PR.
+Restoring the database does not rewind payment providers, YouTube, Google, email
+or fiscal services. Freeze external writes until an approved operator reconciles
+provider state. Use synthetic cases for drills; live replay, refunds and charges
+require separate approval.
 
-### Billing, replay and external-side-effect reconciliation
+- Compare credit balances, reservations and `credit_transactions` with stable
+  provider transaction IDs. A payment after the recovery point can exist remotely
+  but be missing locally. Prevent duplicate grants across different event IDs.
+- Reconcile paid, refunded, partially refunded and disputed purchases, checkout
+  attempts and out-of-order webhooks. Confirm subscriptions, period boundaries,
+  invoices, entitlements and lifetime slots before changing access or credits.
+- Pause auto-top-up. Reconcile payment intents, saved-card consent, recovery
+  cursors, pauses and retry/refund observations. Do not resubmit old charges with
+  new idempotency keys or assume provider deduplication covers the PITR window.
+- Reconcile webhook checkpoints, invoice/fiscal/email outboxes and pending
+  moderation actions. Approve a bounded replay plan; never blindly replay all
+  events or mark all events complete.
+- Reapply post-recovery-point erasure and revocation decisions before reopening
+  the app. Do not resurrect deleted accounts, revoked grants or scrubbed data.
+- Test duplicate purchase/credit, refund-after-restore-point, in-flight top-up,
+  subscription change and out-of-order delivery. Existing billing tests validate
+  mechanisms; they do not prove a real post-restore reconciliation succeeded.
 
-A database rollback does not roll back Stripe, Mercado Pago, Google, YouTube,
-email or fiscal providers. Freeze all such writes until authoritative provider
-state has been reconciled by an approved operator. Use test fixtures for drills;
-provider writes, refunds and live replay require separate approval.
+## 4. Deleted-database recovery is a separate path
 
-- Compare `credit_transactions` (delta, balance, reference/idempotency keys),
-  organization balances/reservations and moderation usage with authoritative
-  payment/fulfillment records. A purchase after the backup may be paid remotely
-  but absent locally; a prior fulfilled event may be redelivered. Reconcile by
-  stable provider transaction IDs, never by adding the visible amount again.
-- Reconcile Stripe and Mercado Pago checkout attempts, paid/refunded/disputed
-  purchases, pending reversals and refund observations. Include partial/multiple
-  refunds and out-of-order deliveries. Verify duplicate event and business-level
-  idempotency; event-ID dedupe alone is insufficient across different events
-  describing the same payment. Compare existing ledger/checkout/webhook tests.
-- Reconcile subscriptions, period start/end, invoices and entitlements/lifetime
-  slots against Stripe before granting allowance or changing access. Preserve
-  one grant per authoritative period/purchase; investigate rather than guess
-  when the snapshot predates a change.
-- Pause auto-top-up and invalidate in-flight assumptions. Reconcile payment
-  intents, the recovery cursor, recovery/refund observations, saved-card consent,
-  pauses and retry state before any new charge. Do not retry an old request with
-  a new idempotency key, and do not assume provider idempotency retention lasts
-  as long as the 30-day backup window.
-- Reconcile webhook receipts/processing checkpoints and invoice/fiscal/outbox
-  state. Do not bulk-mark events done or replay every event blindly. Document a
-  bounded replay window, verify provider signatures using approved test/live
-  environment separation, and check every side effect independently.
-- Review Google revocation, Stripe deletion/scrub and fiscal/invoice outboxes.
-  Restored deleted accounts must remain deleted; reapply approved erasure and
-  revocation decisions before reopening the app. Do not resurrect revoked grants.
-- Exercise duplicate purchase/credit, refund-after-snapshot, out-of-order webhook,
-  in-flight top-up and subscription-change cases in fixtures. Existing billing
-  regression tests cover these mechanisms; a real post-restore reconciliation
-  rehearsal and owner sign-off are still required before operational readiness.
+Paid-plan recovery can restore eligible deleted databases for up to five days.
+The organization must have been paid **when deletion occurred**, the operator
+must be an admin/owner, Allow restore must be enabled, and the region must support
+recovery. A deleted listing alone is not proof of recoverability; upgrading after
+a Free-plan deletion does not establish eligibility.
 
-## 7. Native PITR and deleted-database recovery
+For an approved disposable test only, use the dashboard's Restore page and verify
+the exact database UUID, contents and target identity. Recovery returns the state
+at deletion; it is distinct from choosing an earlier PITR point. A reused name can
+require a different target name. Do not delete production to test this or toggle
+security settings without approval. Follow the current
+[deleted recovery instructions](https://docs.turso.tech/features/recover-deleted-databases).
 
-Read-only inventory must establish actual timestamps, entitlement, primary region,
-Allow restore/delete-protection settings and available quota. Documentation:
-[PITR](https://docs.turso.tech/features/point-in-time-recovery) and
-[deleted database recovery](https://docs.turso.tech/features/recover-deleted-databases).
-PITR creates a new database and requires an approved connection/token setup;
-never repoint production during a drill. A requested timestamp within a plan's
-nominal window is not evidence that a usable recovery point exists.
+## 5. Production cutover and operational handover
 
-For an approved disposable test database only, a human may create a distinct
-restore target with `turso db create <new-isolated-target> --from-db <test-source>
---timestamp <approved-UTC-point>`, check contents/time and clean up the disposable
-resources. Creating ongoing access or changing security settings needs its own
-approval. Do not test deletion recovery by deleting production. Confirm the
-paid-plan-at-deletion and regional prerequisites, the currently documented
-five-day deleted-database window and actual operator permissions before relying
-on that path. Keep independent encrypted recovery available if Turso or its
-account is unavailable.
+Production cutover is human-only, separate from the drill. Approve the recovery
+point and expected loss, freeze old writers, finish external-state reconciliation,
+validate one target, and approve connection/access changes before routing traffic.
+Preserve the original database and rollback evidence. Verify no dual writers. If
+checks fail before new writes, the owner can approve reverting routing. After new
+writes, reconcile divergence before any rollback; do not blindly switch back.
 
-## 8. Controlled cutover, rollback and handover
+Before marking operational acceptance complete:
 
-Cutover is human-only and is never included in a drill. Agree a write freeze,
-recovery-point/data-loss assessment, final external-state reconciliation,
-connection/credential changes, application smoke tests and explicit approval.
-Preserve the original database and rollback evidence. Freeze old writers, route
-one validated target, observe reads/writes/queues and verify there are no dual
-writers. If checks fail before new writes, the owner may approve reverting the
-routing. After new writes, do not blindly switch backward: reconcile divergence
-and approve forward recovery or a new freeze/replay plan. No automated production
-replacement/deletion/cutover is implemented here.
+- Confirm entitlement, a usable recovery point and accepted provider/account
+  dependency; record the decision if the existing plan's window is sufficient.
+- Approve operator access, security review and the isolated native drill; obtain
+  a measured restore/reconciliation result against the agreed RPO/RTO.
+- Name the responder/escalation contacts and keep this runbook reachable during
+  an outage. Use existing incident monitoring; no custom backup-freshness monitor
+  is needed. Escalate inaccessible recovery, shrinking/unavailable windows, plan
+  changes or failed drills to the owner.
+- Approve a proportionate drill/access review cadence (quarterly proposed) and
+  revalidate after material schema, account, plan or recovery changes. Reconfirm
+  the native window before high-risk changes rather than relying on old evidence.
 
-Record named primary responder, recovery operator, key custodians and escalation
-contact without assigning people implicitly. Proposed cadence for owner approval:
-monthly isolated encrypted restore, quarterly PITR and emergency-key retrieval,
-monthly alert/cost/retention check, quarterly least-privilege access review, and
-immediate revalidation after schema/export/encryption/storage changes or incidents.
-Token/key rotation follows provider expiry and the accepted incident policy;
-retain decrypting capability for every retained backup. Keep this runbook and a
-reviewed source/tool copy reachable independently of CI and production. Create
-recurring operational tasks only after schedule/audience/action approval.
-
-## 9. Verification and project completion
-
-Run `npm run check`, `npm run build`, `npm test` and
-`node scripts/rehearse-backup.mjs` with the pinned age binaries in PATH. The
-rehearsal generates only ephemeral test identities, encrypts synthetic records
-and the full empty application schema, verifies actual SQLite restoration,
-rejects corrupt/wrong/missing keys, and proves an independent emergency key copy.
-It deletes its temporary ciphertext/test identities afterward. It does not
-exercise a real private bucket, live Turso scope, actual operator custody, native
-PITR or notification receipt; those remain gated evidence.
-
-Implementation and passing synthetic tests support review of MOD-244/246/247,
-MOD-248/249/250 and the runbook MOD-251. Do not mark production acceptance,
-security sign-off, ownership or the overall project complete from this evidence.
-MOD-241/242/243/245/252/253/254/255/256/257 still require the live inventory,
-owner/security decisions and/or authorized operational proofs listed above.
+No production database, account setting, credential or plan was changed to create
+this runbook. `npm run check`, `npm run build` and `npm test` validate the repository
+only. The native account checks and live drill remain open until a human provides
+or authorizes their evidence.

@@ -1,14 +1,16 @@
-name: backup-tests
+name: checks
+
 on:
   pull_request:
     branches: [dev, main]
-    paths: ['scripts/backup*', 'scripts/backup-lib/**', 'scripts/*backup*.mjs', 'scripts/install-backup-tools.sh', '.github/workflows/*backup*.yml', 'drizzle/**', 'package*.json']
   push:
     branches: ['feat/secure-database-backups-recovery']
+
 permissions:
   contents: read
+
 jobs:
-  synthetic:
+  validate:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -21,9 +23,6 @@ jobs:
         with:
           node-version: '24.19.0'
       - run: npm ci
-      - run: bash scripts/install-backup-tools.sh
       - run: npm run check
       - run: npm run build
       - run: npm test
-      - name: Offline encrypted recovery rehearsal
-        run: node scripts/rehearse-backup.mjs

@@ -302,25 +302,17 @@ the site exists), local work, and outage recovery.
   top-up" — or "A card is saved" while details are still resolving).
 - Watch the next scheduled invocation succeed in the Netlify function logs.
 
-## 7. Backups
+## 7. Turso backups and recovery
 
-The encrypted-only backup workflow and isolated recovery procedure are documented
-in [docs/BACKUP_RECOVERY.md](docs/BACKUP_RECOVERY.md). Production activation is
-owner-gated: choose/approve the private destination, separate key custody,
-least-privilege access, alerts, retention and recovery objectives before configuring
-credentials. No database dump is stored in a GitHub artifact or cache.
+Use Turso's automatic commit-time backups and native point-in-time recovery.
+No custom backup schedule, export script or workflow artifact is required.
+Free includes a 24-hour recovery window; Developer includes 10 days. Confirm
+the actual account plan and available recovery points before relying on them.
 
-For an authorized local export with the reviewed Turso CLI already logged in:
-
-```sh
-BACKUP_SCOPE='<safe-scope>' BACKUP_AGE_RECIPIENT='<approved-public-recipient>' \
-  node scripts/backup-db.mjs '<database-name>' backups
-```
-
-The result is an age-encrypted gzip SQL payload and safe checksum manifest.
-Use the runbook's offline verification and isolated restore instructions; do not
-repoint or overwrite production as part of a drill. A manual success alone does
-not establish working scheduled backups or verified recovery readiness.
+[docs/BACKUP_RECOVERY.md](docs/BACKUP_RECOVERY.md) covers entitlement checks,
+isolated restore drills, billing reconciliation and human-approved cutover.
+The former scheduled dump/artifact workflow is retired in this change. Normal
+CI checks the repository only; it does not prove a usable native recovery point.
 
 ## 8. Database outage runbook
 

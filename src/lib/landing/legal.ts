@@ -16,10 +16,16 @@ export type LegalDoc = {
 };
 
 export const LEGAL_EFFECTIVE_DATE = '22 October 2026';
-// 1.16: E-MAIL PROVIDER SWAP — the transactional e-mail sub-processor
-// changed from Mailjet to Proton (Proton AG — Switzerland): Privacy §5
-// sharing list and DPA Annex III updated. Material change: users without a
-// 1.16 consent row are routed back through /consent.
+// 1.16: E-MAIL PROVIDER — the disclosed transactional e-mail provider is
+// Proton AG (Switzerland), replacing the Mailjet disclosure made in 1.9.
+// This is a correction, not a live-provider switch: Mailjet was named but
+// never provisioned; Proton Mail SMTP is the first transport actually
+// deployed (contact-form verification and service notices, including the
+// zero-credit account warnings). Privacy §5(a) and §6.3 and DPA Annex III
+// updated; Privacy §5 now also discloses that SMTP-submitted messages are
+// TLS-protected in transit, not end-to-end encrypted, and retained in the
+// provider's Sent mailbox. Material change: users without a 1.16 consent
+// row are routed back through /consent.
 // 1.15: CREDIT BUNDLES — new purchases offer 500 or 2,000 comments;
 // automatic top-up charges the bundle selected by the owner. Existing
 // auto top-up without a selected bundle pauses until explicitly configured.

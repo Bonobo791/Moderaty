@@ -4,7 +4,7 @@
 
 import { expect, test, vi } from 'vitest';
 import { TEST_OWNER, setupTestDb, testDb } from '$lib/server/testdb';
-import { channels, feedbackDigests } from '$lib/server/db/schema';
+import { channels, feedbackDigests, feedbackFindings, findingEvidence } from '$lib/server/db/schema';
 
 import { load } from './+page.server';
 
@@ -16,10 +16,11 @@ const ctx = (url: URL) => ({ params: { id: 'UC1' }, locals: { user: TEST_OWNER }
 type HistoryResult = {
 	digests: { id: number; status: string }[];
 	latest: { id: number } | null;
-	selected: { id: number } | null;
+	selected: { id: number; status: string } | null;
 	currentAttempt: { id: number; status: string } | null;
 	historyCursor: number | null;
 	historyNext: number | null;
+	findings: { summary: string; evidence: { sanitizedExcerpt: string }[] }[];
 };
 const callLoad = async (url: URL) => (await load(ctx(url))) as HistoryResult;
 
@@ -105,6 +106,113 @@ test('the current failed/deferred attempt is reported independently of the histo
 	const older = await callLoad(new URL(`${PAGE_URL}?history=${first.historyNext}`));
 	expect(older.digests.every((d) => d.status === 'complete')).toBe(true);
 	expect(older.currentAttempt).toMatchObject({ id: failed.id, status: 'failed' });
+});
+
+test('preview rows list in the feed but never become the attempt banner', async () => {
+	// 'dry-run' is a permanent feed row; 'dry-run-pending'/'dry-run-failed'
+	// list while newer than the latest complete (MOD-232). None is attempt
+	// state (MOD-229): they must not hijack the failed/deferred banner.
+	await seedChannel();
+	const [failed] = await testDb()
+		.db.insert(feedbackDigests)
+		.values({ channelId: 'UC1', windowStart: '2026-01-01', windowEnd: '2026-02-01', status: 'failed', error: 'error' })
+		.returning({ id: feedbackDigests.id });
+	for (const status of ['dry-run', 'dry-run-pending', 'dry-run-failed']) {
+		await testDb()
+			.db.insert(feedbackDigests)
+			.values({ channelId: 'UC1', windowStart: '2026-03-01', windowEnd: '2026-04-01', status });
+	}
+
+	const page = await callLoad(PAGE_URL);
+	expect(page.currentAttempt).toMatchObject({ id: failed.id, status: 'failed' });
+	// No complete digest → every row is newer than the latest complete.
+	expect(page.digests.map((d) => d.status)).toEqual(['dry-run-failed', 'dry-run-pending', 'dry-run', 'failed']);
+});
+
+test('a finished preview stays in the feed after later complete digests land', async () => {
+	// 'dry-run' is permanent history — a paid run landing after the preview
+	// must not push the free result out of the feed (MOD-232).
+	await seedChannel();
+	await testDb()
+		.db.insert(feedbackDigests)
+		.values({ channelId: 'UC1', windowStart: '2026-01-01', windowEnd: '2026-02-01', status: 'dry-run' });
+	await seedDigests(1);
+
+	const page = await callLoad(PAGE_URL);
+	expect(page.digests.map((d) => d.status)).toEqual(['complete', 'dry-run']);
+});
+
+test('pending and failed previews ride page 1 only, like other transient rows', async () => {
+	// Preview lifecycle rows are not permanent feed rows — they surface only
+	// while newer than the latest complete digest (MOD-232).
+	await seedChannel();
+	await seedDigests(26);
+	for (const status of ['dry-run-pending', 'dry-run-failed']) {
+		await testDb()
+			.db.insert(feedbackDigests)
+			.values({ channelId: 'UC1', windowStart: '2026-03-01', windowEnd: '2026-04-01', status });
+	}
+
+	const first = await callLoad(PAGE_URL);
+	expect(first.digests).toHaveLength(25);
+	expect(first.digests.slice(0, 2).map((d) => d.status)).toEqual(['dry-run-failed', 'dry-run-pending']);
+
+	const second = await callLoad(new URL(`${PAGE_URL}?history=${first.historyNext}`));
+	expect(second.digests.every((d) => d.status === 'complete')).toBe(true);
+});
+
+test('?digest= selects a finished preview; a pending or unknown id falls back', async () => {
+	await seedChannel();
+	const [complete] = await testDb()
+		.db.insert(feedbackDigests)
+		.values({ channelId: 'UC1', windowStart: '2026-01-01', windowEnd: '2026-02-01', status: 'complete' })
+		.returning({ id: feedbackDigests.id });
+	const [dryRun] = await testDb()
+		.db.insert(feedbackDigests)
+		.values({ channelId: 'UC1', windowStart: '2026-02-01', windowEnd: '2026-03-01', status: 'dry-run' })
+		.returning({ id: feedbackDigests.id });
+	const [pending] = await testDb()
+		.db.insert(feedbackDigests)
+		.values({ channelId: 'UC1', windowStart: '2026-03-01', windowEnd: '2026-04-01', status: 'dry-run-pending' })
+		.returning({ id: feedbackDigests.id });
+
+	expect((await callLoad(new URL(`${PAGE_URL}?digest=${dryRun.id}`))).selected?.id).toBe(dryRun.id);
+	// A pending preview is not a finished result — never selectable; the
+	// forged/unknown id falls back to the latest valid selection.
+	expect((await callLoad(new URL(`${PAGE_URL}?digest=${pending.id}`))).selected?.id).toBe(complete.id);
+	expect((await callLoad(new URL(`${PAGE_URL}?digest=99999`))).selected?.id).toBe(complete.id);
+});
+
+test('with no complete digest the newest finished preview is selected and its findings render', async () => {
+	// The free dry run is the channel's first digest view: without a paid
+	// digest the newest 'dry-run' row is selected so its findings render
+	// without needing a ?digest= deep link (MOD-232).
+	await seedChannel();
+	const [older] = await testDb()
+		.db.insert(feedbackDigests)
+		.values({ channelId: 'UC1', windowStart: '2026-01-01', windowEnd: '2026-02-01', status: 'dry-run' })
+		.returning({ id: feedbackDigests.id });
+	const [dryRun] = await testDb()
+		.db.insert(feedbackDigests)
+		.values({ channelId: 'UC1', windowStart: '2026-02-01', windowEnd: '2026-03-01', status: 'dry-run' })
+		.returning({ id: feedbackDigests.id });
+	const [finding] = await testDb()
+		.db.insert(feedbackFindings)
+		.values({ digestId: dryRun.id, category: 'question', summary: 'preview finding', supporterCount: 2 })
+		.returning({ id: feedbackFindings.id });
+	await testDb()
+		.db.insert(findingEvidence)
+		.values({ findingId: finding.id, commentId: 'preview-only', sanitizedExcerpt: 'preview evidence', hasAbuse: 0, sourceText: 'raw preview text' });
+
+	const page = await callLoad(PAGE_URL);
+	expect(page.currentAttempt).toBeNull();
+	expect(page.latest).toBeNull();
+	expect(page.selected).toMatchObject({ id: dryRun.id, status: 'dry-run' });
+	expect(page.selected?.id).not.toBe(older.id);
+	expect(page.findings).toHaveLength(1);
+	expect(page.findings[0].evidence[0].sanitizedExcerpt).toBe('preview evidence');
+	// The default load stays concealed-only — pinned sourceText never ships.
+	expect(JSON.stringify(page)).not.toContain('raw preview text');
 });
 
 test('the history query fetches a bounded page, not the whole backlog', async () => {

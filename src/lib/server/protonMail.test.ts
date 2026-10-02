@@ -153,18 +153,6 @@ test.each([
 	expect(mocks.createTransport).not.toHaveBeenCalled();
 });
 
-test('accepts an apostrophe in the recipient local part — a legal bare address', async () => {
-	// RFC 5321 local parts admit '\''; rejecting one after the contact form
-	// persisted its pending row made every resend throw (codex/cubic PR #171).
-	const toEmail = "o'connor@example.com";
-	mocks.sendMail.mockResolvedValue(acceptedInfo({ accepted: [toEmail] }));
-
-	const result = await sendProtonMailEmail({ ...MESSAGE, toEmail });
-
-	expect(mocks.sendMail).toHaveBeenCalledWith(expect.objectContaining({ to: toEmail }));
-	expect(result.messageId).toBe('<msg-1@moderaty.app>');
-});
-
 test("accepts an apostrophe in the recipient local part (a legal RFC mailbox)", async () => {
 	const toEmail = "o'connor@example.com";
 	mocks.sendMail.mockResolvedValue(
@@ -269,21 +257,6 @@ test('a caller deadline expiring mid-send rejects DeadlineExceededError and tear
 	expect(mocks.close).toHaveBeenCalled();
 });
 
-test('a proven SMTP acceptance still counts as delivered when the deadline lands mid-return', async () => {
-	// sendMail resolved with a 250 acceptance — the message provably left.
-	// Reclassifying it as deferrable made the zero-credit sweep release its
-	// claim and send the same warning again (codex/codeant PR #171).
-	const deadline = Date.now() + 60_000;
-	const send = sendProtonMailEmail(MESSAGE, deadline);
-	const spy = vi.spyOn(Date, 'now').mockReturnValue(deadline + 1);
-	try {
-		const result = await send;
-		expect(result.messageId).toBe('<msg-1@moderaty.app>');
-	} finally {
-		spy.mockRestore();
-	}
-});
-
 test('an acceptance committed while the deadline passes still counts as delivered', async () => {
 	vi.useFakeTimers();
 	mocks.sendMail.mockImplementation(async () => {
@@ -307,6 +280,49 @@ test('an unconfirmed result discovered after the deadline still defers', async (
 	});
 
 	await expect(sendProtonMailEmail(MESSAGE, Date.now() + 1_000)).rejects.toBeInstanceOf(DeadlineExceededError);
+});
+
+test('the guard destroys the live SMTP socket so a late acceptance can never complete', async () => {
+	vi.useFakeTimers();
+	const sockets: { destroyed: boolean }[] = [];
+	// Mirror real nodemailer: the transport obtains its socket through the
+	// supplied getSocket seam, then holds the provider response until the
+	// socket dies — the only settlement a real server can still deliver.
+	mocks.createTransport.mockImplementationOnce((options: Record<string, unknown>) => ({
+		close: mocks.close,
+		sendMail: vi.fn(
+			() =>
+				new Promise((resolve) => {
+					(options.getSocket as (o: unknown, cb: (e: Error | null, so?: { socket: { destroyed: boolean } }) => void) => void)(
+						{},
+						(_e, so) => sockets.push(so!.socket)
+					);
+					const waiter = setInterval(() => {
+						if (sockets[0].destroyed) {
+							clearInterval(waiter);
+							resolve(acceptedInfo());
+						}
+					}, 5);
+				})
+		)
+	}));
+
+	const promise = sendProtonMailEmail(MESSAGE);
+	const assertion = expect(promise).rejects.toThrow('e-mail could not be sent (send timed out)');
+	await vi.advanceTimersByTimeAsync(11_000);
+	await assertion;
+	expect(sockets).toHaveLength(1);
+	expect(sockets[0].destroyed).toBe(true);
+});
+
+test('a deadline spent during transport setup never opens an SMTP connection', async () => {
+	vi.useFakeTimers();
+	mocks.createTransport.mockImplementationOnce(() => {
+		vi.setSystemTime(Date.now() + 5_000);
+		return { sendMail: mocks.sendMail, close: mocks.close };
+	});
+	await expect(sendProtonMailEmail(MESSAGE, Date.now() + 1_000)).rejects.toBeInstanceOf(DeadlineExceededError);
+	expect(mocks.sendMail).not.toHaveBeenCalled();
 });
 
 test('a late acceptance after the deadline is never reported as success', async () => {
@@ -352,10 +368,6 @@ describe('local SMTP integration', () => {
 	let sockets: Socket[];
 	let greet: boolean;
 	let authOk: boolean;
-	// When true the server never finishes the DATA verdict: it keeps the
-	// socket busy with '451-' continuation lines so only the client's own
-	// teardown (never a socket-inactivity timeout) can end the send.
-	let stallVerdict: boolean;
 
 	beforeAll(async () => {
 		realCreateTransport = (await vi.importActual<typeof import('nodemailer')>('nodemailer')).createTransport;
@@ -379,7 +391,6 @@ describe('local SMTP integration', () => {
 		sockets = [];
 		greet = true;
 		authOk = true;
-		stallVerdict = false;
 		server = createServer((socket) => {
 			sockets.push(socket);
 			const session: SmtpSession = {
@@ -468,15 +479,7 @@ describe('local SMTP integration', () => {
 					if (inData) {
 						if (line === '.') {
 							inData = false;
-							if (stallVerdict) {
-								// An unfinished '451-' continuation keeps replying
-								// without a verdict — the socket stays active, so a
-								// socket-inactivity timeout could never fire here.
-								const keepalive = setInterval(() => write('451-queued, still deciding'), 40);
-								socket.once('close', () => clearInterval(keepalive));
-							} else {
-								write('250 2.0.0 Ok: queued as TEST-QUEUE-1');
-							}
+							write('250 2.0.0 Ok: queued as TEST-QUEUE-1');
 						} else {
 							session.data += line + '\n';
 						}
@@ -547,24 +550,7 @@ describe('local SMTP integration', () => {
 		const send = sendProtonMailEmail(MESSAGE, Date.now() + 300);
 		await expect(send).rejects.toBeInstanceOf(DeadlineExceededError);
 		expect(sessions).toHaveLength(1);
-		await sessions[0].ended; // socket.destroy() / transport close tore it down
+		await sessions[0].ended; // transport.close() destroyed the socket
 		expect(sessions[0].commands).toHaveLength(0);
-	});
-
-	test('a caller deadline mid-DATA-verdict destroys the held socket even while the server keeps it busy', async () => {
-		// The guard must cancel the wire itself: transport.close() on a
-		// non-pooled send only emits 'close' and cannot abort the in-flight
-		// SMTPConnection (codex/cubic PR #170/#172). The server stalls the
-		// DATA verdict with '451-' keepalives, so the socket is never idle —
-		// nodemailer's own socketTimeout can never fire; if the session's
-		// socket closes here, our destroy did it.
-		stallVerdict = true;
-		const send = sendProtonMailEmail(MESSAGE, Date.now() + 400);
-		await expect(send).rejects.toBeInstanceOf(DeadlineExceededError);
-		expect(sessions).toHaveLength(1);
-		const session = sessions[0];
-		expect(session.rcptTo).toEqual(['fan@example.com']);
-		expect(session.data).toContain('To: fan@example.com'); // DATA was in flight
-		await session.ended; // the held socket was destroyed mid-send
 	});
 });

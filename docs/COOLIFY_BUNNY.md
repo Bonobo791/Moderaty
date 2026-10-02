@@ -106,7 +106,8 @@ One-time setup (human, in the Coolify dashboard):
    | `STRIPE_TEST_PRODUCT` | optional | optional | a Product (`prod_…`) or Price (`price_…`) id in the app's own Stripe environment — enables the "Test checkout" card that smoke-tests the billing pipeline with a real purchase (grants 1 credit); the card renders only for the operator account hardcoded in `src/lib/server/billing/checkout.ts`, never for other users |
    | `MERCADOPAGO_ACCESS_TOKEN` / `MERCADOPAGO_WEBHOOK_SECRET` | production | dev | optional BRL prepaid credit checkout; webhook fulfillment is signed and idempotent |
    | `MERCADOPAGO_ENVIRONMENT` / `MERCADOPAGO_PRICE_CREDITS_*_BRL_CENTS` | production | sandbox | optional Mercado Pago sandbox/production mode and BRL bundle prices in cents |
-   | `PROTON_SMTP_USERNAME` / `PROTON_SMTP_TOKEN` / `PROTON_FROM_NAME` | production | dev | Proton Mail SMTP submission credentials for contact-form verification e-mails and zero-credit notices (`PROTON_SMTP_USERNAME` is the Proton account e-mail and doubles as the From address; the token is the account's dedicated SMTP token, not the mailbox password) |
+   | `PROTON_SMTP_USERNAME` / `PROTON_SMTP_TOKEN` | production token | dev token | Proton Mail SMTP for transactional e-mail (contact-form verification and service notices, incl. zero-credit account warnings). Username = the custom-domain sender mailbox and doubles as the From address (domain active in Proton, SPF/DKIM/DMARC verified); token from Proton → Settings → All settings → IMAP/SMTP → SMTP tokens — never the mailbox password, and a separate token per environment |
+   | `PROTON_FROM_NAME` | `Moderaty` | `Moderaty` | optional sender display name; defaults to `Moderaty` |
 
    **Stripe webhook endpoint is per-environment, per-sandbox.** Register
    `https://<app-domain>/api/stripe/webhook` under **Developers → Webhooks**
@@ -139,6 +140,31 @@ One-time setup (human, in the Coolify dashboard):
    Do not set `MODERATY_ADAPTER` at runtime — it is build-time only (the
    Dockerfile sets it). Do not set `CONTEXT` — unset is the always-migrate
    default.
+
+   **E-mail cutover (per app, env before code).** The transport is fixed —
+   `smtp.protonmail.ch:587`, mandatory STARTTLS
+   (`src/lib/server/protonMail.ts`). Set `PROTON_SMTP_USERNAME`,
+   `PROTON_SMTP_TOKEN`, and `PROTON_FROM_NAME` as Runtime Variables BEFORE
+   the deploy that sends e-mail reaches the app; the transport fails loudly
+   with a variable-specific `is not configured` error until both required
+   vars exist, so env-before-code ordering makes the switch a config step,
+   not an outage. The container must egress outbound **TCP 587** — verify
+   on the actual deployment by submitting the contact form once and
+   expecting the verification e-mail (or a loud `500 e-mail could not be
+   sent (...)`); a copy lands in the Proton mailbox's Sent folder as the
+   submission record (SMTP acceptance, not recipient delivery — there are
+   no delivery webhooks on this transport). Failure mapping is
+   generic-to-client with sanitized codes in the server
+   log: `authentication failure` (bad/absent/expired token), `TLS failure`,
+   `provider throttled the request` (every Proton 4xx maps to this label —
+   check the logged response code before assuming a send limit; Proton is
+   a mailbox service, not a bulk-mail platform),
+   `provider rejected the request` (5xx), `send timed out`. Token rotation:
+   mint the new SMTP token, update the var, verify a send, THEN revoke the
+   old one. Rollback: redeploy the previous release and remove the
+   `PROTON_*` vars — no Mailjet env was ever provisioned, so rollback
+   restores the unconfigured-transport state; there is no Mailjet side to
+   retire.
 
    **Critical build setting**: enable **Use Docker Build Secrets** for the
    application — in current Coolify it lives on the application's

@@ -11,7 +11,7 @@ import { env } from '$env/dynamic/private';
 
 import nodemailer from 'nodemailer';
 
-import { assertBeforeDeadline, DeadlineExceededError } from './http';
+import { DeadlineExceededError } from './http';
 
 const PROTON_SMTP_HOST = 'smtp.protonmail.ch';
 const PROTON_SMTP_PORT = 587;
@@ -21,16 +21,18 @@ const DEFAULT_FROM_NAME = 'Moderaty';
 // Envelope/header injection guard: a bare mailbox only — no whitespace
 // (covers CR/LF folding), no control characters, and none of the
 // address-list or display-name vectors (`,` `;` `<` `>` `"` `(` `)` `[` `]`
-// `\` `:`). `'` stays legal — it is a valid RFC 5321 local-part character
-// (`o'connor@…`), and a quoted-pair display name never reaches this point.
-// Deliberately stricter than the /contact form's EMAIL_PATTERN, whose
-// `[^\s@]` still admits `a@b,c@d` lists — the form reuses
-// `isSendableRecipient` so persisted rows can always be sent.
-const BARE_ADDRESS = /^[^\s@,;<>"()[\]\\:\x00-\x1f\x7f]+@[^\s@,;<>"()[\]\\:\x00-\x1f\x7f]+$/i;
+// `\` `:`). An apostrophe is legal in an RFC local part and stays allowed —
+// the /contact form accepts it (codex+cubic). Deliberately stricter than
+// the form's EMAIL_PATTERN, whose `[^\s@]` still admits `a,b@example.com`.
+const BARE_ADDRESS = /^[^\s@,;:<>"()[\]\\\x00-\x1f\x7f]+@[^\s@,;:<>"()[\]\\\x00-\x1f\x7f]+$/i;
 
-/** What the transport can put on the wire: one bare mailbox, length-bounded. */
-export function isSendableRecipient(email: unknown): email is string {
-	return typeof email === 'string' && email.length > 0 && email.length <= 254 && BARE_ADDRESS.test(email);
+/**
+ * True when `email` is a single bare mailbox this transport will accept —
+ * the shared contract the /contact form enforces at validation time, so a
+ * submitted address can never fail the send with a 500 (codex).
+ */
+export function isBareAddress(email: string): boolean {
+	return email.length > 0 && email.length <= 254 && BARE_ADDRESS.test(email);
 }
 
 // Any value that lands inside an SMTP header line (subject, display names)
@@ -61,7 +63,7 @@ export function loadProtonMailConfig(): ProtonMailConfig {
 	const token = env.PROTON_SMTP_TOKEN;
 	if (!username) throw new Error('PROTON_SMTP_USERNAME is not configured');
 	if (!token) throw new Error('PROTON_SMTP_TOKEN is not configured');
-	if (!BARE_ADDRESS.test(username)) throw new Error('PROTON_SMTP_USERNAME must be a bare e-mail address');
+	if (!isBareAddress(username)) throw new Error('PROTON_SMTP_USERNAME must be a bare e-mail address');
 	const fromName = env.PROTON_FROM_NAME?.trim() || DEFAULT_FROM_NAME;
 	if (HEADER_UNSAFE.test(fromName)) throw new Error('PROTON_FROM_NAME must not contain control characters');
 	return { username, token, fromName };
@@ -85,7 +87,7 @@ export interface ProtonMailSendResult {
  * header-safe line, and both body parts must be present.
  */
 function validateMessage(message: ProtonMailMessage): void {
-	if (!isSendableRecipient(message.toEmail)) {
+	if (typeof message.toEmail !== 'string' || !isBareAddress(message.toEmail)) {
 		throw new Error('e-mail could not be sent (invalid recipient address)');
 	}
 	if (typeof message.subject !== 'string' || message.subject.length === 0 || HEADER_UNSAFE.test(message.subject)) {
@@ -106,27 +108,6 @@ function addressText(entry: unknown): string {
 	if (typeof entry === 'string') return entry;
 	const address = (entry as { address?: unknown } | null)?.address;
 	return typeof address === 'string' ? address : '';
-}
-
-/**
- * Whether the provider verdict proves acceptance: the intended recipient is
- * the sole accepted envelope, nothing was rejected, DATA closed with a 250,
- * and a message id came back. Shared with the post-send deadline decision —
- * only this proof may skip the defer check.
- */
-function acceptanceProven(info: unknown, toEmail: string): boolean {
-	const verdict = (info ?? {}) as { accepted?: unknown; rejected?: unknown; response?: unknown; messageId?: unknown };
-	const rejected = Array.isArray(verdict.rejected) ? verdict.rejected : [];
-	const accepted = Array.isArray(verdict.accepted) ? verdict.accepted : [];
-	const finalResponse = typeof verdict.response === 'string' ? verdict.response : '';
-	return (
-		rejected.length === 0 &&
-		accepted.length === 1 &&
-		addressText(accepted[0]).toLowerCase() === toEmail.toLowerCase() &&
-		/^250[\s-]/.test(finalResponse) &&
-		typeof verdict.messageId === 'string' &&
-		verdict.messageId.length > 0
-	);
 }
 
 /**
@@ -167,22 +148,12 @@ function validatedMessageId(info: unknown, toEmail: string): string {
  * — never the token, message bodies, links, or the server's raw reply text.
  */
 function smtpFailure(error: unknown): Error {
-	const detail = (error ?? {}) as {
-		code?: unknown;
-		responseCode?: unknown;
-		command?: unknown;
-		response?: unknown;
-	};
+	const detail = (error ?? {}) as { code?: unknown; responseCode?: unknown; command?: unknown };
 	const code = typeof detail.code === 'string' ? detail.code : undefined;
 	const responseCode = typeof detail.responseCode === 'number' ? detail.responseCode : undefined;
 	const command = typeof detail.command === 'string' ? detail.command : undefined;
-	// The server's SMTP reply text and the original error message stay in the
-	// server log — without them two distinct provider failures sharing a code
-	// are indistinguishable in production. Client-facing text stays generic.
-	const response = typeof detail.response === 'string' ? detail.response : undefined;
-	const message = error instanceof Error ? error.message : undefined;
 	// Stryker disable next-line StringLiteral: log-only message — mutating it changes no observable behavior
-	console.error('proton mail send failed:', JSON.stringify({ code, responseCode, command, response, message }));
+	console.error('proton mail send failed:', JSON.stringify({ code, responseCode, command }));
 	if (code === 'EAUTH') return new Error('e-mail could not be sent (authentication failure)');
 	if (code === 'ETIMEDOUT' || code === 'ESOCKETTIMEOUT') return new Error('e-mail could not be sent (send timed out)');
 	if (code === 'EENVELOPE') return new Error('e-mail could not be sent (recipient rejected)');
@@ -226,16 +197,10 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 	// Per-send transport — no pooling (MOD-116). secure:false + requireTLS
 	// means STARTTLS is mandatory: the send fails rather than authenticating
 	// on a plaintext socket, and Node's default CA verification stays on.
-	// The socket is injected and held: transport.close() on a non-pooled send
-	// only emits 'close' and cannot cancel the in-flight SMTPConnection, so
-	// the guard below must destroy the wire itself — a "timed out" send that
-	// kept a live socket could still deliver, and the retry would duplicate
-	// the mail.
-	const socket = new Socket();
+	let smtpSocket: Socket | undefined;
 	const transport = nodemailer.createTransport({
 		host: PROTON_SMTP_HOST,
 		port: PROTON_SMTP_PORT,
-		socket,
 		secure: false,
 		requireTLS: true,
 		auth: { user: config.username, pass: config.token },
@@ -245,24 +210,35 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 		greetingTimeout: timeoutMs,
 		socketTimeout: timeoutMs,
 		dnsTimeout: timeoutMs,
-		tls: { rejectUnauthorized: true }
+		tls: { rejectUnauthorized: true },
+		// A non-pooled transport's close() only emits 'close' — it cannot
+		// reach the live SMTPConnection, so an expired guard would reject
+		// while sendMail kept streaming and could still be accepted (codex).
+		// Supplying the socket through nodemailer's getSocket seam keeps a
+		// reference the guard can destroy; after STARTTLS the TLS socket
+		// wraps this handle, so destroy() kills the session either way.
+		getSocket: (_options, callback) => {
+			smtpSocket = new Socket();
+			callback(null, { socket: smtpSocket });
+		}
 	});
 
-	// Transport setup above took real time — re-verify the caller's budget
-	// before arming anything so an expired deadline never starts SMTP, and arm
-	// the guard with a fresh delay so it fires AT the deadline rather than
-	// deadline + setup skew.
-	assertBeforeDeadline(deadline);
+	// Setup is synchronous but the budget can still be spent between the
+	// pre-check above and here — recheck so an exhausted caller deadline
+	// never opens an SMTP connection (cubic).
+	if (deadline !== undefined && Date.now() >= deadline) {
+		transport.close();
+		throw new DeadlineExceededError();
+	}
 
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const guard = new Promise<never>((_, reject) => {
-		const guardMs = Math.max(0, Math.min(PROTON_TIMEOUT_MS, (deadline ?? Infinity) - Date.now()));
 		timer = setTimeout(() => {
-			// Destroy the held socket BEFORE rejecting so an in-flight DATA
+			// Destroy the real socket BEFORE rejecting so an in-flight DATA
 			// acceptance can never outlive the budget; the send's late
 			// settlement is swallowed by the race (handled, ignored).
+			smtpSocket?.destroy();
 			try {
-				socket.destroy();
 				transport.close();
 			} catch {
 				// Stryker disable next-line StringLiteral: log-only message — mutating it changes no observable behavior
@@ -298,16 +274,19 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 		throw smtpFailure(error);
 	} finally {
 		if (timer !== undefined) clearTimeout(timer);
-		socket.destroy();
+		smtpSocket?.destroy();
 		transport.close();
 	}
-	// A resolved sendMail with a proven 250 acceptance means the message
-	// already left — a deadline that expired mid-return must not reclassify
-	// delivered mail as deferrable (the caller would release its claim and
-	// send a duplicate). Any other verdict keeps the old semantics: expired
-	// deadline defers, otherwise the acceptance check fails loudly.
-	if (!acceptanceProven(info, message.toEmail) && deadline !== undefined && Date.now() >= deadline) {
-		throw new DeadlineExceededError();
+	if (deadline !== undefined && Date.now() >= deadline) {
+		// The provider already accepted the message — a confirmed side effect
+		// must not be reported as a deferral, which would resend the delivered
+		// mail (codex). Only an unconfirmed or malformed result degrades to
+		// the deferral; validatedMessageId already logged its diagnostic.
+		try {
+			return { messageId: validatedMessageId(info, message.toEmail) };
+		} catch {
+			throw new DeadlineExceededError();
+		}
 	}
 	return { messageId: validatedMessageId(info, message.toEmail) };
 }

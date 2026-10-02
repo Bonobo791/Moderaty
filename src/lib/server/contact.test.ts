@@ -122,6 +122,30 @@ describe('parseContactForm', () => {
 		const result = parseContactForm(form);
 		expect(result).toEqual({ ok: false, error: expect.any(String), name: 'Fan', email: 'bad-address' });
 	});
+
+	test.each(['a,b@example.com', 'a;b@example.com', 'x"y@example.com', 'a\\b@example.com'])(
+		'rejects a transport-unsafe address (%s) at the form instead of failing the send later',
+		(email) => {
+			// The submit path validates the same contract the sender enforces —
+			// a form-accepted address the transport rejects would 500 on every
+			// retry with the pending row already written (codex+cubic+codeant).
+			const form = new FormData();
+			form.set('name', 'Fan');
+			form.set('email', email);
+			form.set('opt_in', 'on');
+			const result = parseContactForm(form);
+			expect(result.ok).toBe(false);
+			if (!result.ok) expect(result.error).toMatch(/e-mail/i);
+		}
+	);
+
+	test('accepts an apostrophe local part — a legal mailbox the transport also sends', () => {
+		const form = new FormData();
+		form.set('name', 'Fan');
+		form.set('email', "o'connor@example.com");
+		form.set('opt_in', 'on');
+		expect(parseContactForm(form)).toEqual({ ok: true, name: 'Fan', email: "o'connor@example.com" });
+	});
 });
 
 describe('createOrReusePendingSubmission', () => {

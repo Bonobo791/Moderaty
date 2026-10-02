@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { creditTransactions, organizations, stripeSubscriptionPeriods, stripeAutoTopupRecoveries, stripeRefundObservations } from '$lib/server/db/schema';
 import { applyLedgerDelta, getCredits, pauseAutoTopupForRefund } from '$lib/server/billing/ledger';
-import { grantAutoTopupCredits, handleAutoTopupFailure, maybeTriggerAutoTopUp, readAutoTopupState, recordAutoTopupFailure, stripeErrorCode, sweepAutoTopUp } from './autotopup';
+import { grantAutoTopupCredits, handleAutoTopupFailure, maybeTriggerAutoTopUp, readAutoTopupState, reconcileAutoTopup, recordAutoTopupFailure, stripeErrorCode, sweepAutoTopUp } from './autotopup';
 import { recoverPausedTopup, sweepPausedTopups } from './autoTopupRecovery';
 
 const mocks = vi.hoisted(() => ({
@@ -71,6 +71,17 @@ async function orgRow() {
 	const row = await testDb().db.select().from(organizations).where(eq(organizations.id, 'org-1')).get();
 	if (!row) throw new Error('org-1 was not seeded');
 	return row;
+}
+
+/** Seeds org-1 idle with a stale (released) attempt marker; returns the marker ISO. */
+async function seedStaleAttemptOrg(): Promise<string> {
+	const stale = new Date(Date.now() - 4 * 24 * 60 * 60_000).toISOString();
+	await seedOrg({ creditsRemaining: 0, autoTopupState: 'idle', autoTopupAttemptAt: stale, autoTopupSubmittedAt: stale, autoTopupLastAttemptAt: stale });
+	return stale;
+}
+
+function mockPaymentIntents(pis: Record<string, unknown>[]): void {
+	mocks.paymentIntentsList.mockResolvedValue({ data: pis, has_more: false });
 }
 
 beforeEach(() => {
@@ -292,12 +303,8 @@ describe('maybeTriggerAutoTopUp', () => {
 		// that PaymentIntent as nonterminal, minting a new attempt would create
 		// a second chargeable PI — a double charge if the first settles
 		// (codex P1). The marker is the trigger: no marker, no Stripe call.
-		const stale = new Date(Date.now() - 4 * 24 * 60 * 60_000).toISOString();
-		await seedOrg({ creditsRemaining: 0, autoTopupState: 'idle', autoTopupAttemptAt: stale, autoTopupSubmittedAt: stale, autoTopupLastAttemptAt: stale });
-		mocks.paymentIntentsList.mockResolvedValue({
-			data: [{ id: 'pi_processing', status: 'processing', created: Math.floor(Date.parse(stale) / 1000), metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_500', auto_topup_attempt_at: stale } }],
-			has_more: false
-		});
+		const stale = await seedStaleAttemptOrg();
+		mockPaymentIntents([{ id: 'pi_processing', status: 'processing', created: Math.floor(Date.parse(stale) / 1000), metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_500', auto_topup_attempt_at: stale } }]);
 
 		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
 		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
@@ -318,6 +325,63 @@ describe('maybeTriggerAutoTopUp', () => {
 
 		expect(await sweepAutoTopUp(5)).toBe(1);
 		expect(mocks.paymentIntentsCreate).toHaveBeenCalledOnce();
+	});
+
+	test.each(['requires_future_thing', undefined])('an unrecognized PI status (%s) fails loudly instead of guessing settleability', async (status) => {
+		// Stripe can introduce a status this build has never seen (or omit
+		// status in a partial response). An out-of-enum value means the
+		// response no longer means what the code assumes: treating it as safe
+		// could double-charge (codex PR #168), and classifying it as settling
+		// would starve the org silently for the whole reconcile window while
+		// logging "still in flight" (codex PR #169). Wrong-typed external
+		// data = the API call failed (I2).
+		const stale = await seedStaleAttemptOrg();
+		mockPaymentIntents([{ id: 'pi_unknown', status, created: Math.floor(Date.parse(stale) / 1000), metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_500', auto_topup_attempt_at: stale } }]);
+
+		await expect(maybeTriggerAutoTopUp('org-1')).rejects.toThrow('unrecognized PaymentIntent status');
+		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+		expect((await orgRow()).autoTopupState).toBe('idle');
+	});
+
+	test('an unrecognized PI status fails the sweep loudly without charging', async () => {
+		// The sweep isolates per-org failures: the unknown status surfaces as
+		// a logged reconcile failure (retried next invocation), never as a
+		// silent settle/dead classification.
+		const stale = await seedStaleAttemptOrg();
+		mockPaymentIntents([{ id: 'pi_unknown', status: 'requires_future_thing', created: Math.floor(Date.parse(stale) / 1000), metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_500', auto_topup_attempt_at: stale } }]);
+		const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			expect(await sweepAutoTopUp(5)).toBe(0);
+			expect(log).toHaveBeenCalledWith(expect.stringContaining('sweep failed for org org-1'), expect.anything());
+			expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+		} finally { log.mockRestore(); }
+	});
+
+	test('an unrecognized status on an unrelated PI does not stall reconciliation', async () => {
+		// paymentIntents.list returns every PI for the customer — manual
+		// Checkouts, subscription invoices. Settleability decisions only apply
+		// to our own auto_topup PIs: an out-of-enum status on an unrelated
+		// charge must never abort reconcile for the whole org (gitar/codeant
+		// PR #169).
+		const stale = await seedStaleAttemptOrg();
+		mockPaymentIntents([{ id: 'pi_unrelated', status: 'requires_future_thing', created: Math.floor(Date.parse(stale) / 1000), metadata: { type: 'checkout_credits', org_id: 'org-1' } }]);
+
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(true);
+		expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(1);
+	});
+
+	test('a succeeded grant still commits when an earlier PI has an unrecognized status', async () => {
+		// The enum-violation throw is deferred until every provably-safe grant
+		// in the page commits — one bad item must never stall lost-webhook
+		// recovery of a succeeded charge listed after it (gitar PR #169).
+		const stale = await seedStaleAttemptOrg();
+		mockPaymentIntents([
+			{ id: 'pi_bad', status: 'requires_future_thing', created: Math.floor(Date.parse(stale) / 1000), metadata: { type: 'auto_topup', org_id: 'org-1', auto_topup_attempt_at: stale } },
+			{ id: 'pi_granted', status: 'succeeded', created: Math.floor(Date.parse(stale) / 1000), metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_100' } }
+		]);
+
+		await expect(reconcileAutoTopup('org-1')).rejects.toThrow('unrecognized PaymentIntent status');
+		expect(await getCredits('org-1')).toBe(100); // the credits_100 grant committed before the throw
 	});
 
 	test('never triggers when the balance is at or above the threshold', async () => {

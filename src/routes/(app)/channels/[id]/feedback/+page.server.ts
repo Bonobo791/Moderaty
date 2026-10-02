@@ -1,11 +1,11 @@
-import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import { error, fail } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
 import { randomUUID } from 'node:crypto';
 
 import { db } from '$lib/server/db';
 import { channels, comments, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence } from '$lib/server/db/schema';
-import { enabledCategories, generateFeedbackDigest, previewFeedbackDigest, type DigestResult } from '$lib/server/feedbackDigest';
+import { enabledCategories, generateFeedbackDigest, previewFeedbackDigest, TRANSIENT_DIGEST_STATUSES, type DigestResult } from '$lib/server/feedbackDigest';
 import { claimDryRun } from '$lib/server/dryRun';
 import { historyAccessError } from '$lib/server/historyAccess';
 import { historyWindowBoundary, parseHistoryWindow } from '$lib/historyWindow';
@@ -20,6 +20,9 @@ const MANUAL_RUN_BUDGET_MS = 15_000;
 
 /** Digest rows a history page lists — older ones paginate off behind a cursor. */
 const HISTORY_PAGE_SIZE = 25;
+
+/** Rows with finished, viewable findings — paid digests and completed previews. */
+const SELECTABLE_DIGEST_STATUSES = ['complete', 'dry-run'] as const;
 
 const DIGEST_FIELDS = {
 	id: feedbackDigests.id,
@@ -36,10 +39,11 @@ const DIGEST_FIELDS = {
 } as const;
 
 /**
- * One page of a channel's digest history, newest first: complete digests —
- * each a paid batch whose findings stay selectable — plus transient rows
- * newer than the newest complete (the current attempt state; older
- * transient leftovers are resolved noise). `before` is the cursor — the
+ * One page of a channel's digest history, newest first: complete digests
+ * and finished previews — each a batch whose findings stay selectable —
+ * are permanent rows, plus anything newer than the newest complete (the
+ * current attempt state: transient rows and pending/failed previews;
+ * older leftovers are resolved noise). `before` is the cursor — the
  * oldest id of the previous page — so a high-volume channel's backlog
  * never loads, serializes, and renders all at once (codex #155). Ids are
  * monotonic; createdAt can tie within a millisecond.
@@ -51,7 +55,10 @@ async function digestHistoryPage(channelId: string, latestCompleteId: number, be
 		.where(
 			and(
 				eq(feedbackDigests.channelId, channelId),
-				or(eq(feedbackDigests.status, 'complete'), gt(feedbackDigests.id, latestCompleteId)),
+				or(
+					inArray(feedbackDigests.status, SELECTABLE_DIGEST_STATUSES),
+					gt(feedbackDigests.id, latestCompleteId)
+				),
 				before === undefined ? undefined : lt(feedbackDigests.id, before)
 			)
 		)
@@ -100,18 +107,22 @@ export async function load({ params, locals, url }) {
 			.where(
 				and(
 					eq(feedbackDigests.channelId, params.id),
-					ne(feedbackDigests.status, 'complete'),
+					// The banner names a failed/deferred RUN only — preview rows
+					// are lifecycle state and would hide a real attempt behind a
+					// status the page cannot render (gitar+codex PR 170).
+					inArray(feedbackDigests.status, TRANSIENT_DIGEST_STATUSES),
 					gt(feedbackDigests.id, latest?.id ?? -1)
 				)
 			)
 			.orderBy(desc(feedbackDigests.id))
 			.limit(1)
 			.get()) ?? null;
-	// Every complete digest is selectable (?digest=N): a multi-page history
+	// Every finished digest is selectable (?digest=N): a multi-page history
 	// drain writes one digest per bounded batch, and the paid findings on
 	// earlier pages stay reachable instead of being replaced by the newest
-	// page's result (codex). A forged/stale/non-complete id falls back to
-	// latest — the param only ever selects, never leaks.
+	// page's result (codex); finished previews select the same way. A
+	// forged/stale/non-finished id falls back to latest — the param only
+	// ever selects, never leaks.
 	const digestParam = Number(url.searchParams.get('digest'));
 	const selected =
 		(Number.isInteger(digestParam) &&
@@ -122,11 +133,21 @@ export async function load({ params, locals, url }) {
 					and(
 						eq(feedbackDigests.channelId, params.id),
 						eq(feedbackDigests.id, digestParam),
-						eq(feedbackDigests.status, 'complete')
+						inArray(feedbackDigests.status, SELECTABLE_DIGEST_STATUSES)
 					)
 				)
 				.get())) ||
-		latestComplete;
+		latestComplete ||
+		// No paid digest yet: the newest finished preview is still the
+		// channel's first result — its findings render without needing a
+		// ?digest= deep link (MOD-232). Only queried when nothing above hit.
+		((await db
+			.select(DIGEST_FIELDS)
+			.from(feedbackDigests)
+			.where(and(eq(feedbackDigests.channelId, params.id), eq(feedbackDigests.status, 'dry-run')))
+			.orderBy(desc(feedbackDigests.id))
+			.limit(1)
+			.get()) ?? null);
 	let findings: {
 		id: number;
 		category: string;
@@ -207,7 +228,10 @@ function evidenceSource(channelId: string, evidenceId: number) {
 			and(
 				eq(findingEvidence.id, evidenceId),
 				eq(feedbackDigests.channelId, channelId),
-				sql`coalesce(${feedbackHistoryComments.text}, ${comments.text}) IS NOT NULL`
+				// The guard must match the projection: preview comments live in
+				// neither store, and a deleted comment's digest keeps only its
+				// pinned text — both reveal through sourceText alone (codeant).
+				sql`${sourceText} IS NOT NULL`
 			)
 		)
 		.get();

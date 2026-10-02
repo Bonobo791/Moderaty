@@ -146,8 +146,8 @@ the site exists), local work, and outage recovery.
   | `STRIPE_TEST_PRODUCT` | optional — a Stripe Product (`prod_…`) or Price (`price_…`) id; when set, a "Test checkout" card on the usage page runs a real purchase end-to-end and grants 1 credit — visible only to the operator account hardcoded in `src/lib/server/billing/checkout.ts` (`TEST_CHECKOUT_OPERATOR_EMAIL`), never to other users |
   | `ENCRYPTION_KEY` | `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
   | `CRON_SECRET` | any long random string; also used to trigger cron manually |
-  | `PROTON_SMTP_USERNAME` / `PROTON_SMTP_TOKEN` | Proton Mail SMTP submission credentials — the account e-mail (also the From address) and the dedicated SMTP token from the Proton account's security settings (never the mailbox password) — for contact-form verification e-mails and zero-credit notices |
-  | `PROTON_FROM_NAME` | optional sender display name, defaults to `Moderaty` |
+  | `PROTON_SMTP_USERNAME` / `PROTON_SMTP_TOKEN` | Proton Mail SMTP credentials for transactional e-mail (contact-form verification and service notices, including zero-credit account warnings). The username is the custom-domain sender address and doubles as the From address; the token comes from Proton → **Settings → All settings → IMAP/SMTP → SMTP tokens** — never the mailbox password. Mint a separate token per environment |
+  | `PROTON_FROM_NAME` | optional sender display name; defaults to `Moderaty` |
   | `APP_URL` | the deployed site URL, e.g. `https://moderaty.netlify.app` |
   | `DRY_RUN` | start with `true`; flip to `false` after verifying a dry run |
 
@@ -185,6 +185,48 @@ the site exists), local work, and outage recovery.
   doesn't match the endpoint, `500 webhook not configured`/`stripe not
   configured` means the env vars never reached the deployment, and `500
   handler failed` is an application bug (check the server log).
+- **Transactional e-mail — Proton Mail SMTP.** The transport is hardcoded
+  to `smtp.protonmail.ch:587` with mandatory STARTTLS
+  (`src/lib/server/protonMail.ts`); there are no host/port variables.
+  - *Prerequisites:* a Proton business account with an **active
+    custom-domain sending address** (the `PROTON_SMTP_USERNAME` mailbox)
+    and sender authentication (SPF/DKIM/DMARC) verified for that domain in
+    Proton. Generate the token at **Settings → All settings → IMAP/SMTP →
+    SMTP tokens** — never use the mailbox password, and never Proton Mail
+    Bridge.
+  - *Ordering:* set `PROTON_SMTP_USERNAME` and `PROTON_SMTP_TOKEN` on the
+    environment BEFORE deploying a build that sends e-mail. The transport
+    fails loudly with a variable-specific `is not configured` error until
+    both exist, so env-before-code ordering makes cutover a config step
+    rather than an outage.
+  - *Egress:* the app opens outbound TCP 587 — on Netlify, verify the
+    functions runtime permits it before relying on delivery: submit the
+    contact form once and expect either the verification e-mail or a loud
+    `500 e-mail could not be sent (...)`. If egress is blocked, e-mail
+    cannot work on that target and the failure must stay loud.
+  - *Failure modes:* every failure is loud and generic to the client —
+    missing env, `authentication failure` (bad/absent token — rotate or
+    check the token), `TLS failure` (STARTTLS/cert negotiation — check
+    interception middleboxes), `provider throttled the request` (every
+    Proton 4xx maps to this label — check the logged response code before
+    assuming a send limit; Proton is a mailbox service, not a bulk-mail
+    platform, and paid-account send limits apply), `provider
+    rejected the request` (5xx), and `send timed out`. Sanitized codes land
+    in the server log only.
+  - *Staged delivery check:* after configuring, submit the contact form
+    and confirm the verification e-mail arrives; a copy lands in the
+    Proton mailbox's **Sent** folder, which is the submission record (there
+    are no delivery webhooks or an analytics dashboard on this transport —
+    SMTP acceptance is not recipient delivery, and Sent retention is the
+    audit trail).
+  - *Token rotation:* generate the replacement token first, update the env
+    var and redeploy, verify a send, THEN revoke the old token — revoking
+    first guarantees an authentication-failure window.
+  - *Rollback:* redeploy the previous release and remove the `PROTON_*`
+    variables. No Mailjet env was ever provisioned on this codebase, so
+    rollback restores the unconfigured-transport state — e-mail sends fail
+    loudly until transport is configured again; there is no Mailjet side
+    to retire.
 
 ## 3. Mercado Pago (optional BRL prepaid credits)
 

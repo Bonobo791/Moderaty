@@ -28,7 +28,8 @@ as a second opinion, and sends uncertain decisions to a human review queue.
 - Matches top-level comments against keyword, regex, and blocked-user rules.
 - Applies `hold`, `reject`, `delete`, or `ban` actions to matching comments.
 - Uses OpenAI moderation and an optional per-channel tone pass for comments that
-  rules do not decide.
+  rules do not decide — screened for prompt injection first, with flagged
+  comments held for human review.
 - Routes AI failures and borderline scores to a human review queue instead of
   silently approving or rejecting them.
 - Records decisions in an audit log and supports `DRY_RUN=true` previews.
@@ -43,8 +44,10 @@ Moderaty is a SvelteKit 2 application using Svelte 5, TypeScript, and a
 **dual deploy adapter** (the choice is the build-time `MODERATY_ADAPTER` env):
 the default Netlify adapter, or adapter-node for the self-hosted Coolify +
 Bunny CDN target (see `DEPLOY.md` and `docs/COOLIFY_BUNNY.md`). Server code
-calls the Google and OpenAI HTTP APIs directly; there are no auth, Google, or
-OpenAI SDKs in the dependency tree.
+calls the Google and OpenAI HTTP APIs directly — no auth or Google SDKs. The
+only third-party runtime SDKs are `stripe` (billing), `@openai/guardrails`
+(prompt-injection screening), and `nodemailer` (Proton Mail SMTP), all
+server-only.
 
 | Path | Purpose |
 | --- | --- |
@@ -118,14 +121,23 @@ Copy [.env.example](.env.example) and provide these values as appropriate:
 | --- | --- |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Google OAuth client credentials |
 | `APP_URL` | Canonical app URL used for OAuth redirects |
+| `ORIGIN` | adapter-node (Coolify) only — the public origin behind the CDN |
 | `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` | Local SQLite or production Turso connection |
-| `OPENAI_API_KEY` | AI moderation and tone scoring |
-| `OPENAI_TONE_MODEL` | Optional tone model; defaults to `gpt-6-luna` |
+| `OPENAI_API_KEY` | AI moderation, tone scoring, and feedback digests |
+| `OPENAI_JAILBREAK_MODEL`, `OPENAI_TONE_MODEL` | Optional prompt-injection and tone models; default to `gpt-6-luna` |
+| `OPENAI_FEEDBACK_MODEL`, `OPENAI_FEEDBACK_CLUSTER_MODEL` | Optional feedback classification and clustering models; default to `gpt-6-luna` |
 | `CRON_SECRET` | Secret for scheduled and manual cron requests |
 | `ENCRYPTION_KEY` | Key used to encrypt stored YouTube refresh tokens |
 | `DRY_RUN` | Must be `true` or `false`; `true` records audit previews without durable moderation changes |
+| `PROTON_SMTP_USERNAME`, `PROTON_SMTP_TOKEN` | Proton Mail SMTP submission credentials for transactional e-mail (contact-form verification, zero-credit warnings) |
+| `PROTON_FROM_NAME` | Optional sender display name; defaults to `Moderaty` |
+| `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Stripe billing credentials for credit bundles and hosted/lifetime plans |
+| `STRIPE_PRICE_CREDITS_*`, `STRIPE_PRICE_HOSTED_MONTHLY`, `STRIPE_PRICE_LIFETIME` | Stripe Price ids for the credit bundles, the hosted monthly plan, and lifetime access |
+| `STRIPE_TEST_PRODUCT` | Optional operator-only "Test checkout" card that runs a real end-to-end purchase |
 | `MERCADOPAGO_ACCESS_TOKEN`, `MERCADOPAGO_WEBHOOK_SECRET` | Optional Mercado Pago BRL prepaid-credit checkout credentials |
 | `MERCADOPAGO_ENVIRONMENT`, `MERCADOPAGO_PRICE_CREDITS_*_BRL_CENTS` | Optional Mercado Pago mode and BRL bundle prices in cents |
+| `ADAFLOW_API_TOKEN` | Optional AdaFlow accounting-export Bearer token (`docs/adaflow-api-validation.md`) |
+| `FOCUS_NFE_TOKEN`, `FOCUS_NFE_ENVIRONMENT` | Optional Focus NFe NFS-e emission credentials (`docs/focus-nfe-validation.md`) |
 
 Never commit `.env` or real credentials. Netlify environment-variable setup is
 covered by [DEPLOY.md](DEPLOY.md).
@@ -134,18 +146,22 @@ covered by [DEPLOY.md](DEPLOY.md).
 
 ```bash
 npm run dev          # Start the development server
+npm run dev:cron     # Tick the cron endpoint alongside the dev server
 npm run check        # Run SvelteKit sync and strict TypeScript diagnostics
 npm run test         # Run the Vitest suite
 npm run build        # Build (default Netlify adapter; MODERATY_ADAPTER=node for Coolify)
 npm run preview      # Serve the production build locally
 npm run db:migrate   # Apply Drizzle migrations
+npm run db:verify    # Verify every journaled migration is applied (read-only)
 ```
 
 The test suite includes route, OAuth, session, database, moderation, pipeline,
-and UI-state tests. The tone evaluator is a separate live API check:
+and UI-state tests. The tone and feedback evaluators are separate live API
+checks:
 
 ```bash
 node scripts/tone-eval.mjs
+node scripts/feedback-eval.mjs
 ```
 
 ## Accounts and hosting
@@ -158,6 +174,8 @@ target (Scheduled Function, see [DEPLOY.md](DEPLOY.md)) and the self-hosted
 **Coolify + Bunny CDN** target (Dockerfile + in-container scheduled task, see
 [docs/COOLIFY_BUNNY.md](docs/COOLIFY_BUNNY.md)); both use Turso as the
 production database and share the same `DRY_RUN`-first verification flow.
+Transactional e-mail (contact-form verification and zero-credit warnings)
+goes out through Proton Mail SMTP submission.
 
 ## License
 

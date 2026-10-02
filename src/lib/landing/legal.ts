@@ -76,7 +76,12 @@ export const LEGAL_EFFECTIVE_DATE = '22 October 2026';
 // 1.5: Terms §6.1(c) corrected — the lifetime hosted plan has no per-account
 // key flow (hosted scoring runs on the deployment's OPENAI_API_KEY), so the
 // "your own OpenAI key" promise was removed from the lifetime clause.
-export const LEGAL_VERSION = '1.16';
+// 1.17: BILLING ADDRESS — Privacy §2's billing row now lists the billing
+// address Stripe Checkout collects on every purchase (MOD-236); the row
+// previously named only name, e-mail, purchase history, and tax ID.
+// Material change: users without a 1.17 consent row are routed back
+// through /consent.
+export const LEGAL_VERSION = '1.17';
 export const LEGAL_KICKER = 'YouTube Comment Moderation Service';
 
 /**

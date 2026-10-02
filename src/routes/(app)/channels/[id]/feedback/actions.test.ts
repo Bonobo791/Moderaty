@@ -8,16 +8,27 @@ import { channels, comments, feedbackDigests, feedbackFindings, feedbackHistoryC
 const mocks = vi.hoisted(() => ({
 	env: { DRY_RUN: 'false', ENCRYPTION_KEY: 'feedback-actions-test-key' } as Record<string, string | undefined>,
 	generateFeedbackDigest: vi.fn(),
-	previewFeedbackDigest: vi.fn()
+	startFeedbackPreview: vi.fn(),
+	runFeedbackPreview: vi.fn(),
+	// The real plant runs by default so the pending row is actually written —
+	// a test that needs the plant to fail swaps in a rejection.
+	realStartFeedbackPreview: undefined as unknown as typeof import('$lib/server/feedbackDigest').startFeedbackPreview
 }));
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 
-// generateFeedbackDigest is the only job export mocked — enabledCategories
-// stays real so the load projection is exercised end-to-end.
+// generateFeedbackDigest + runFeedbackPreview are the only job exports
+// mocked — enabledCategories stays real so the load projection is exercised
+// end-to-end, and the runner is mocked because it would call YouTube/OpenAI.
 vi.mock('$lib/server/feedbackDigest', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('$lib/server/feedbackDigest')>();
-	return { ...actual, generateFeedbackDigest: mocks.generateFeedbackDigest, previewFeedbackDigest: mocks.previewFeedbackDigest };
+	mocks.realStartFeedbackPreview = actual.startFeedbackPreview;
+	return {
+		...actual,
+		generateFeedbackDigest: mocks.generateFeedbackDigest,
+		startFeedbackPreview: mocks.startFeedbackPreview,
+		runFeedbackPreview: mocks.runFeedbackPreview
+	};
 });
 
 import { actions, load } from './+page.server';
@@ -33,7 +44,10 @@ let digestSeq = 0;
 beforeEach(async () => {
 	mocks.env.DRY_RUN = 'false';
 	mocks.generateFeedbackDigest.mockReset();
-	mocks.previewFeedbackDigest.mockReset();
+	mocks.startFeedbackPreview.mockReset();
+	mocks.startFeedbackPreview.mockImplementation((...args: Parameters<typeof mocks.realStartFeedbackPreview>) => mocks.realStartFeedbackPreview(...args));
+	mocks.runFeedbackPreview.mockReset();
+	mocks.runFeedbackPreview.mockResolvedValue({ commentsClassified: 0, commentsFailed: 0, pooled: 0, hasMore: false, findings: [] });
 	await testDb().db.insert(organizations).values({ id: 'org-1', name: 'Organization 1', plan: 'free', creditsRemaining: 100 });
 });
 
@@ -587,46 +601,99 @@ test('a failing access check is a loud 503, never a silently planted checkpoint'
 	}
 });
 
-test('feedback dry run returns a sanitized preview, claims its one-time allowance, and denies repeats', async () => {
+test('feedback dry run plants a pending row, kicks the runner, and returns immediately', async () => {
 	mocks.env.DRY_RUN = 'true';
 	await seedChannel('UC1');
-	const preview = { commentsClassified: 2, commentsFailed: 1, pooled: 1, hasMore: true, findings: [{ category: 'question', summary: '2 viewers asked about timing', supporterCount: 2, evidence: [{ sanitizedExcerpt: 'When is it?', hasAbuse: 0 }] }] };
-	mocks.previewFeedbackDigest.mockResolvedValue(preview);
+	// Keep the kicked run in flight — a resolved mock's finally releases the
+	// claim lease before the assertion can read it.
+	mocks.runFeedbackPreview.mockReturnValue(new Promise(() => {}));
 
 	const result = await postFeedbackAction('dryRun', 'UC1', { months: 'all' });
 
-	expect(mocks.previewFeedbackDigest).toHaveBeenCalledWith('UC1', {
+	// Bound to the claimed row — a delete/reconnect on the same channel id
+	// must abort the preview instead of running the new connector (cubic).
+	expect(mocks.startFeedbackPreview).toHaveBeenCalledWith('UC1', {
 		boundary: '1970-01-01T00:00:00.000Z',
-		deadline: expect.any(Number),
-		// Bound to the claimed row — a delete/reconnect on the same channel id
-		// must abort the preview instead of running the new connector (cubic).
 		claim: { orgId: 'org-1', refreshTokenEnc: 'enc', leaseExpiresAt: expect.any(String) }
 	});
-	expect(result).toMatchObject({ ok: true, scope: 'feedbackDryRun', dryRunUsed: true, preview, message: 'Free feedback dry run complete. Limited to 1 per channel; no credits used.' });
-	let channel = (await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())!;
+	expect(result).toMatchObject({
+		ok: true,
+		scope: 'feedbackDryRun',
+		dryRunUsed: true,
+		message: expect.stringContaining('Recent digests')
+	});
+	// No inline result — the response returns before classification, so there
+	// is nothing to render but the start message.
+	expect(result).not.toHaveProperty('preview');
+	// The planted row is the resume record: windowStart pins the requested
+	// boundary, windowEnd is the plant stamp the drainer ages the row by.
+	const row = await testDb().db.select().from(feedbackDigests).where(eq(feedbackDigests.channelId, 'UC1')).get();
+	expect(row).toMatchObject({ status: 'dry-run-pending', windowStart: '1970-01-01T00:00:00.000Z', creditsUsed: null });
+	const channel = (await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())!;
 	expect(channel.feedbackDryRunUsedAt).toBeTruthy();
-	expect(channel.leaseExpiresAt).toBeNull();
+	// The claim's 60s lease stays with the channel — the kicked runner
+	// executes under it and the drainer re-claims after it expires; the
+	// action itself never holds work across the response.
+	expect(channel.leaseExpiresAt).toBeTruthy();
+	// The pending state reaches the next load (autoRefresh polls it into the
+	// feed) — reload is never required to see the preview started.
+	const data = (await callLoad('UC1')) as unknown as { digests: { id: number; status: string }[] };
+	expect(data.digests.find((d) => d.id === row?.id)?.status).toBe('dry-run-pending');
 
 	const denied = await postFeedbackAction('dryRun', 'UC1', { months: '3' });
 	expect(denied).toMatchObject({ status: 409, data: { scope: 'feedbackDryRun', error: expect.stringContaining('Limited to 1 free feedback dry run') } });
-	expect(mocks.previewFeedbackDigest).toHaveBeenCalledTimes(1);
-	channel = (await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())!;
-	expect(channel.feedbackDryRunUsedAt).toBeTruthy();
-	expect(channel.leaseExpiresAt).toBeNull();
+	expect(mocks.startFeedbackPreview).toHaveBeenCalledTimes(1);
 });
 
-test('a failed feedback preview consumes its allowance and returns only a sanitized error', async () => {
+test('the planted row is kicked to the node runner unawaited — cron remains the backstop', async () => {
+	// On adapter-node the process outlives the response, so the action kicks
+	// runFeedbackPreview without awaiting it: the preview lands within
+	// seconds instead of a cron tick. Netlify may freeze the invocation —
+	// the row stays pending and the MOD-231 drainer resolves it.
 	await seedChannel('UC1');
-	mocks.previewFeedbackDigest.mockRejectedValue(new Error('private provider response token-123'));
+
+	const result = await postFeedbackAction('dryRun', 'UC1', { months: '3' });
+	expect(result).toMatchObject({ ok: true });
+
+	const row = (await testDb().db.select().from(feedbackDigests).where(eq(feedbackDigests.channelId, 'UC1')).get())!;
+	expect(mocks.runFeedbackPreview).toHaveBeenCalledWith('UC1', row.id, {
+		boundary: row.windowStart,
+		deadline: expect.any(Number),
+		claim: { orgId: 'org-1', refreshTokenEnc: 'enc', leaseExpiresAt: expect.any(String) }
+	});
+});
+
+test('a kicked runner that dies leaves the pending row for the drainer — loud, never silent', async () => {
+	// If the unawaited run throws, the row resolves to 'dry-run-failed'
+	// inside runFeedbackPreview (deadline aborts stay pending for cron); the
+	// action's fire-and-forget catch only needs to log — but it MUST log.
+	await seedChannel('UC1');
+	mocks.runFeedbackPreview.mockRejectedValue(new Error('boom'));
 	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 	try {
 		const result = await postFeedbackAction('dryRun', 'UC1', { months: '3' });
-		expect(result).toMatchObject({ status: 502, data: { scope: 'feedbackDryRun', attempted: true, error: expect.stringContaining('one free preview') } });
+		expect(result).toMatchObject({ ok: true });
+		await vi.waitFor(() => {
+			expect(errorSpy).toHaveBeenCalledWith('feedback preview runner failed for channel:', 'UC1', expect.any(Error));
+		});
+	} finally {
+		errorSpy.mockRestore();
+	}
+});
+
+test('a failed preview plant consumes its allowance, writes no row, and returns only a sanitized error', async () => {
+	await seedChannel('UC1');
+	mocks.startFeedbackPreview.mockRejectedValue(new Error('private provider response token-123'));
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		const result = await postFeedbackAction('dryRun', 'UC1', { months: '3' });
+		expect(result).toMatchObject({ status: 500, data: { scope: 'feedbackDryRun', attempted: true, error: expect.stringContaining('one free preview') } });
 		expect(JSON.stringify(result)).not.toContain('token-123');
 		expect(errorSpy).toHaveBeenCalledWith('feedback dry run failed for channel:', 'UC1', expect.any(Error));
-		expect((await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())).toMatchObject({ feedbackDryRunUsedAt: expect.any(String), leaseExpiresAt: null });
+		expect(await testDb().db.select().from(feedbackDigests).where(eq(feedbackDigests.channelId, 'UC1')).all()).toHaveLength(0);
 		expect(await postFeedbackAction('dryRun', 'UC1', { months: '3' })).toMatchObject({ status: 409 });
-		expect(mocks.previewFeedbackDigest).toHaveBeenCalledTimes(1);
+		expect(mocks.startFeedbackPreview).toHaveBeenCalledTimes(1);
+		expect(mocks.runFeedbackPreview).not.toHaveBeenCalled();
 	} finally {
 		errorSpy.mockRestore();
 	}
@@ -648,7 +715,8 @@ test('feedback dry run validates access and inputs before claiming its allowance
 	for (const id of ['UC1', 'UCpaused', 'UC2']) {
 		expect((await testDb().db.select().from(channels).where(eq(channels.id, id)).get())?.feedbackDryRunUsedAt).toBeNull();
 	}
-	expect(mocks.previewFeedbackDigest).not.toHaveBeenCalled();
+	expect(mocks.startFeedbackPreview).not.toHaveBeenCalled();
+	expect(mocks.runFeedbackPreview).not.toHaveBeenCalled();
 });
 
 function postReveal(

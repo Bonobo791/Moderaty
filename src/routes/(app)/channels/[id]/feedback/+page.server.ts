@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 
 import { db } from '$lib/server/db';
 import { channels, comments, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence } from '$lib/server/db/schema';
-import { enabledCategories, generateFeedbackDigest, previewFeedbackDigest, TRANSIENT_DIGEST_STATUSES, type DigestResult } from '$lib/server/feedbackDigest';
+import { enabledCategories, generateFeedbackDigest, runFeedbackPreview, startFeedbackPreview, TRANSIENT_DIGEST_STATUSES, type DigestResult } from '$lib/server/feedbackDigest';
 import { claimDryRun } from '$lib/server/dryRun';
 import { historyAccessError } from '$lib/server/historyAccess';
 import { historyWindowBoundary, parseHistoryWindow } from '$lib/historyWindow';
@@ -306,30 +306,41 @@ export const actions = {
 			return fail(500, { scope: 'feedbackDryRun', error: 'The feedback dry run could not be started. Check the server log and try again.' });
 		}
 		if ('status' in claim) return fail(claim.status, { scope: 'feedbackDryRun', error: claim.error });
+		const boundary = historyWindowBoundary(window);
+		let digestId: number;
 		try {
 			// Same claim binding as the moderation preview: the row executing
 			// must be the row that claimed the allowance (cubic+codeant).
-			const preview = await previewFeedbackDigest(params.id, { boundary: historyWindowBoundary(window), deadline: Date.now() + 15_000, claim: claim.identity });
-			return {
-				ok: true,
-				scope: 'feedbackDryRun',
-				dryRunUsed: true,
-				preview,
-				message: 'Free feedback dry run complete. Limited to 1 per channel; no credits used.'
-			};
+			digestId = await startFeedbackPreview(params.id, { boundary, claim: claim.identity });
 		} catch (cause) {
 			console.error('feedback dry run failed for channel:', params.id, cause);
-			return fail(502, { scope: 'feedbackDryRun', attempted: true, error: 'The feedback dry run failed. This attempt used your one free preview; no credits were charged. Check the server log.' });
-		} finally {
-			try {
-				await db
-					.update(channels)
-					.set({ leaseExpiresAt: null })
-					.where(and(eq(channels.id, params.id), eq(channels.orgId, user.orgId), eq(channels.leaseExpiresAt, claim.lease)));
-			} catch (cause) {
-				console.error('feedback dry-run lease release failed for channel:', params.id, cause);
-			}
+			return fail(500, { scope: 'feedbackDryRun', attempted: true, error: 'The feedback dry run could not be started. This attempt used your one free preview; no credits were charged. Check the server log.' });
 		}
+		// Lease ownership moves to the runner: the kick executes under the
+		// claim's 60s lease (channelMatchesClaim still matches), and on a
+		// deployment that freezes after the response the row simply stays
+		// 'dry-run-pending' for the cron drainer (MOD-231). Unawaited by
+		// design — the response must not wait on YouTube/OpenAI.
+		void runFeedbackPreview(params.id, digestId, { boundary, deadline: Date.now() + MANUAL_RUN_BUDGET_MS, claim: claim.identity })
+			.catch((cause) => console.error('feedback preview runner failed for channel:', params.id, cause))
+			.finally(async () => {
+				try {
+					// Release only OUR lease: if it expired mid-run and the drainer
+					// claimed the channel, that lease is untouched.
+					await db
+						.update(channels)
+						.set({ leaseExpiresAt: null })
+						.where(and(eq(channels.id, params.id), eq(channels.orgId, user.orgId), eq(channels.leaseExpiresAt, claim.lease)));
+				} catch (cause) {
+					console.error('feedback dry-run lease release failed for channel:', params.id, cause);
+				}
+			});
+		return {
+			ok: true,
+			scope: 'feedbackDryRun',
+			dryRunUsed: true,
+			message: 'Free feedback preview started — it will appear under Recent digests at the bottom of this page. Limited to 1 per channel; no credits used.'
+		};
 	},
 	reveal: async ({ params, request, locals }) => {
 		const user = requireUser(locals);

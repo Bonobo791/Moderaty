@@ -16,7 +16,8 @@ vi.mock('$lib/server/youtube', () => ({
 
 import { countDbStatements, setupTestDb, testDb } from '$lib/server/testdb';
 import { channels, comments, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, organizations } from '$lib/server/db/schema';
-import { digestDue, generateFeedbackDigest, previewFeedbackDigest, runFeedbackPreview, startFeedbackPreview } from './feedbackDigest';
+import { digestDue, generateFeedbackDigest, runFeedbackPreview, startFeedbackPreview } from './feedbackDigest';
+import type { DryRunClaim } from './dryRun';
 import { CONCEALED_MESSAGE } from './feedbackSanitize';
 import * as ledger from './billing/ledger';
 
@@ -77,6 +78,15 @@ function installFetch() {
 			return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(verdict) } }] }), { status: 200 });
 		})
 	);
+}
+
+/** Plant + run in one call — what the action's kick and the cron drainer do on either side of the pending row. */
+async function runPlantedPreview(
+	channelId: string,
+	opts: { boundary: string; deadline?: number; claim?: DryRunClaim }
+) {
+	const digestId = await startFeedbackPreview(channelId, { boundary: opts.boundary, claim: opts.claim });
+	return runFeedbackPreview(channelId, digestId, opts);
 }
 
 async function seedChannel(id: string, over: Record<string, unknown> = {}) {
@@ -290,7 +300,7 @@ test('preview uses original-claim recovery and persists a dry-run row without co
 	mocks.fetchNewComments.mockResolvedValue({ comments: texts.map((text, index) => ({ id: `p${index}`, text, publishedAt: '2026-01-01T00:00:00.000Z' })), nextPageToken: null, reachedCursor: true });
 	RESPONSES = Object.fromEntries(texts.map((text) => [text, { category: 'question', claim: 'same question', hasAbuse: false }]));
 	CLUSTER_RAW = 'not json';
-	const preview = await previewFeedbackDigest('UC1', { boundary: '2025-01-01T00:00:00.000Z' });
+	const preview = await runPlantedPreview('UC1', { boundary: '2025-01-01T00:00:00.000Z' });
 	expect(preview).toMatchObject({ commentsClassified: 3, commentsFailed: 0, clusteringDegraded: true, pooled: 0, hasMore: false });
 	expect(preview.findings).toMatchObject([{ supporterCount: 3, summary: '3 comments asked: same question' }]);
 	// The preview persists as a 'dry-run' digest row with its findings —
@@ -1436,7 +1446,7 @@ test('feedback dry-run resolves an empty first page to a dry-run row without cre
 	await seedChannel('UC1');
 	mocks.fetchNewComments.mockResolvedValue({ comments: [], nextPageToken: null, reachedCursor: true });
 
-	const preview = await previewFeedbackDigest('UC1', { boundary: '2025-01-01T00:00:00.000Z' });
+	const preview = await runPlantedPreview('UC1', { boundary: '2025-01-01T00:00:00.000Z' });
 
 	expect(preview).toEqual({ commentsClassified: 0, commentsFailed: 0, pooled: 0, hasMore: false, findings: [] });
 	expect(vi.mocked(fetch)).not.toHaveBeenCalled();
@@ -1460,7 +1470,7 @@ test('feedback dry-run persists grouped sanitized findings without coverage or c
 	RESPONSES = Object.fromEntries(texts.map((text) => [text, { category: 'question', hasAbuse: false, claim: 'when is the next stream' }]));
 	RESPONSES[texts[2]] = { category: 'question', hasAbuse: true, claim: 'when is the next stream' };
 
-	const preview = await previewFeedbackDigest('UC1', { boundary: '2025-12-01T00:00:00.000Z', deadline: Date.now() + 15_000 });
+	const preview = await runPlantedPreview('UC1', { boundary: '2025-12-01T00:00:00.000Z', deadline: Date.now() + 15_000 });
 
 	expect(preview).toMatchObject({ commentsClassified: 3, commentsFailed: 0, pooled: 0, hasMore: true });
 	expect(preview.findings).toHaveLength(1);
@@ -1497,7 +1507,7 @@ test('a feedback preview aborts when its claimed row was swapped mid-claim', asy
 	await seedChannel('UC1', { feedbackEnabled: 1, refreshTokenEnc: 'enc-reconnected' });
 
 	await expect(
-		previewFeedbackDigest('UC1', { boundary: '2025-01-01T00:00:00.000Z', claim })
+		runPlantedPreview('UC1', { boundary: '2025-01-01T00:00:00.000Z', claim })
 	).rejects.toThrow('changed under the dry-run claim');
 	expect(mocks.fetchNewComments).not.toHaveBeenCalled();
 	// The claim check precedes the plant — no pending row leaks.

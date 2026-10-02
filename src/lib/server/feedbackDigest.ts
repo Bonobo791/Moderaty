@@ -1101,15 +1101,4 @@ export async function runFeedbackPreview(
 	}
 }
 
-/**
- * The synchronous entry point — plant + run in one call. The dashboard's
- * dryRun action uses it while the inline preview render exists; the async
- * path calls the two halves separately (action plants, cron drains).
- */
-export async function previewFeedbackDigest(
-	channelId: string,
-	{ boundary, deadline, claim }: { boundary: string; deadline?: number; claim?: DryRunClaim }
-): Promise<FeedbackPreview> {
-	const digestId = await startFeedbackPreview(channelId, { boundary, claim });
-	return runFeedbackPreview(channelId, digestId, { boundary, deadline, claim });
-}
+

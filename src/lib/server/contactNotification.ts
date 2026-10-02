@@ -13,27 +13,24 @@ import { sendProtonMailEmail, type ProtonMailMessage } from './protonMail';
 // lease and a retry delay, so repeated clicks cannot hammer a failed provider.
 const RETRY_DELAY_MS = 60_000;
 
-export function buildContactNotification(input: {
-	id: number;
-	verificationToken: string;
-	name: string;
-	email: string;
-	message: string | null;
-}): ProtonMailMessage {
+type ContactNotificationInput = Pick<typeof contactSubmissions.$inferSelect, 'id' | 'verificationToken' | 'name' | 'email' | 'message'>;
+
+export function buildContactNotification(input: ContactNotificationInput): ProtonMailMessage {
 	const message = input.message ?? 'No message provided.';
+	const textPart = [`Verified contact request #${input.id}`, '', `Name: ${input.name}`, `E-mail: ${input.email}`, '', 'Message:', message].join('\n');
+	// Escape the whole body once so every displayed value, including the
+	// request identity, goes through the same safe text-to-HTML boundary.
+	const htmlPart = ['<p>', escapeHtml(textPart).replace(/\r\n?|\n/g, '<br>'), '</p>'].join('');
+	// Hash the random identity: integer IDs collide across environments.
+	// These angle brackets delimit an SMTP header ID, not HTML markup.
+	const identity = createHash('sha256').update(input.verificationToken).digest('hex');
 	return {
 		toEmail: 'contact@moderaty.com',
 		replyTo: input.email,
-		// Hash the random submission identity: integer IDs collide across dev,
-		// production, and self-hosts. Never expose the verification token.
-		messageId: `<moderaty-contact-${createHash('sha256').update(input.verificationToken).digest('hex')}@moderaty.com>`,
+		messageId: ['<moderaty-contact-', identity, '@moderaty.com>'].join(''),
 		subject: 'Verified contact request — Moderaty',
-		textPart: [`Verified contact request #${input.id}`, '', `Name: ${input.name}`, `E-mail: ${input.email}`, '', 'Message:', message].join('\n'),
-		htmlPart: [
-			`<h1>Verified contact request #${input.id}</h1>`,
-			`<p>Name: ${escapeHtml(input.name)}<br>E-mail: ${escapeHtml(input.email)}</p>`,
-			`<p>Message:<br>${escapeHtml(message).replace(/\r\n?|\n/g, '<br>')}</p>`
-		].join('')
+		textPart,
+		htmlPart
 	};
 }
 

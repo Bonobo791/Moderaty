@@ -34,7 +34,7 @@
 
 ## Verification and release notes
 
-- Final aggregate: 3,120 tests in 169 files pass; Svelte check reports zero errors and warnings. Node and Netlify builds pass.
+- Final aggregate: 3,121 tests in 169 files pass; Svelte check reports zero errors and warnings. Node and Netlify builds pass.
 - Independent review found a Message-ID collision between databases with the same integer row IDs. A failing regression test reproduced it; the fix hashes the random verification token and passes. The token is never included in the notification.
 - Migration 0059 is additive; tests preserve historical pending/verified rows and verify nullable columns, the retry index, and SQLite integrity. The 0026 → 0028 → 0059 contact migration chain was also checked independently.
 - Apply and verify 0059 on each target database before code relying on the new columns is exercised. No live migration was run.
@@ -43,3 +43,5 @@
 - SMTP acceptance followed by a crash before the database acknowledgement can result in a retry copy. Stable, globally unique Message-IDs aid identification but are not an exactly-once SMTP guarantee.
 - Visual browser QA could not run because the cloud browser blocks localhost. A desktop/mobile visual pass remains before release.
 - Publication, merge, deployment, and production database changes remain outside this implementation.
+
+- Remote review: Codacy flagged new HTML interpolation. A failing malformed-request-ID regression led to escaping the complete plaintext body once before adding static HTML framing. This also removes HTML-looking interpolation from the SMTP Message-ID. The full suite, check, and both builds pass after the fix.

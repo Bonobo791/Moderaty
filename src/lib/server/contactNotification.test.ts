@@ -140,3 +140,11 @@ test('stable notification IDs distinguish independent databases with the same ro
 	expect(buildContactNotification(first).messageId).not.toBe(buildContactNotification(second).messageId);
 	expect(buildContactNotification(first).messageId).not.toContain(first.verificationToken);
 });
+
+test('escapes the entire notification body even if a malformed request ID crosses the runtime boundary', () => {
+	const id = '<img src=x onerror=alert(1)>' as unknown as number;
+	const mail = buildContactNotification({ ...INPUT, id });
+	expect(mail.htmlPart).not.toContain('<img');
+	expect(mail.htmlPart).toContain('&lt;img src=x onerror=alert(1)&gt;');
+	expect(mail.textPart).toContain('<img src=x onerror=alert(1)>');
+});

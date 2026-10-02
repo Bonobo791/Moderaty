@@ -368,6 +368,7 @@ describe('local SMTP integration', () => {
 		rcptTo: string[];
 		data: string;
 		ended: Promise<void>; // resolves when the client socket fully closes
+		stallTimersDrained: boolean; // set when the close hook clears a pending DATA stall
 	}
 
 	let secureContext: SecureContext;
@@ -414,7 +415,8 @@ describe('local SMTP integration', () => {
 				mailFrom: null,
 				rcptTo: [],
 				data: '',
-				ended: new Promise((resolve) => socket.once('close', resolve))
+				ended: new Promise((resolve) => socket.once('close', resolve)),
+				stallTimersDrained: false
 			};
 			sessions.push(session);
 			let tls = false;
@@ -483,13 +485,22 @@ describe('local SMTP integration', () => {
 								if (w.destroyed || !w.writable) return clearInterval(chatter);
 								w.write('354-still preparing\r\n');
 							}, 50);
-							setTimeout(() => {
+							const stall = setTimeout(() => {
 								clearInterval(chatter);
 								const w = wire();
 								if (w.destroyed || !w.writable) return;
 								inData = true;
 								write('354 End data with <CR><LF>.<CR><LF>');
 							}, stallDataMs);
+							// A teardown that wins the race drains both pending
+							// callbacks with the session — a surviving timer would
+							// retain the closure and keep firing against dead
+							// sockets after the test ends (codeant).
+							socket.once('close', () => {
+								session.stallTimersDrained = true;
+								clearInterval(chatter);
+								clearTimeout(stall);
+							});
 							return;
 						}
 						inData = true;
@@ -602,5 +613,16 @@ describe('local SMTP integration', () => {
 		expect(session.commands.at(-1)).toBe('DATA'); // torn down awaiting the 354
 		await session.ended; // the socket really died — no lingering session
 		expect(session.data).toBe(''); // the body was never consumed server-side
+	});
+
+	test('a mid-DATA teardown drains the stall timers with the session', async () => {
+		stallDataMs = 600;
+		const send = sendProtonMailEmail(MESSAGE, Date.now() + 300);
+		await expect(send).rejects.toThrow(/request deadline exceeded|send timed out/);
+		expect(sessions).toHaveLength(1);
+		await sessions[0].ended;
+		// The close hook cleared both pending callbacks — nothing stays armed
+		// to retain the session closure or fire against dead sockets.
+		expect(sessions[0].stallTimersDrained).toBe(true);
 	});
 });

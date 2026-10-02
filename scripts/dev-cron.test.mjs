@@ -189,7 +189,7 @@ describe('dev cron tick', () => {
 		await expect(netlifyCron()).rejects.toThrow('stripeScrubSweepError');
 	});
 
-	it.each(['dryRunWindow', 'digest'])('fails the tick when the %s job reports an error on a 200', async (field) => {
+	it.each(['dryRunWindow', 'digest', 'feedbackPreview'])('fails the tick when the %s job reports an error on a 200', async (field) => {
 		// codex: the aux jobs catch their failures into top-level `{error}`
 		// fields — a classifier that only inspects sweeps + results lets a
 		// digest that fails every rotation read as a healthy tick forever.

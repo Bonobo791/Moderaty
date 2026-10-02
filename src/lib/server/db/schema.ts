@@ -425,6 +425,10 @@ export const feedbackDigests = sqliteTable('feedback_digests', {
 	pooledCount: integer('pooled_count').notNull().default(0), // feedback comments that fell below the evidence threshold
 	creditsUsed: integer('credits_used'), // metered credits charged for this run; null = unmetered/none
 	error: text('error'), // sanitized failure category only — raw provider detail stays in the server log
+	// First cron-drain claim stamp on a 'dry-run-pending' row; NULL = queued
+	// but never attempted. The stale sweep only expires rows that got a real
+	// opportunity — queue age alone never expires a preview (codex, PR #178).
+	attemptedAt: text('attempted_at'),
 	emailedAt: text('emailed_at'), // set once the digest e-mail went out — RESERVED, unwired until MOD-92; always null today
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
@@ -437,7 +441,13 @@ export const feedbackDigests = sqliteTable('feedback_digests', {
 		table.windowStart,
 		table.windowEnd
 	),
-	index('feedback_digests_channel_created_idx').on(table.channelId, table.createdAt)
+	index('feedback_digests_channel_created_idx').on(table.channelId, table.createdAt),
+	// The cron drainer probes status='dry-run-pending' every tick (select +
+	// stale finalize) — a partial index keeps that O(pending) instead of
+	// scanning all digest history as the table grows (codex, PR #178).
+	index('feedback_digests_pending_idx')
+		.on(table.id)
+		.where(sql`${table.status} = 'dry-run-pending'`)
 ]);
 
 export const feedbackFindings = sqliteTable('feedback_findings', {

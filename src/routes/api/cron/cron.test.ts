@@ -1218,6 +1218,22 @@ test('a stale pending row on a leased channel is NOT finalized — a live runner
 	).toBe('dry-run-pending');
 });
 
+test('a stale pending row on a PAUSED channel under a live lease still survives', async () => {
+	// The lease guard is hoisted above the un-drainable clause: a channel
+	// paused while a runner still holds its 60s claim lease must not have
+	// its preview finalized out from under the run — finalizing waits one
+	// sweep for the lease to expire (coderabbit+cubic, PR #181).
+	await seedChannel('UC-paused-leased', { active: 0, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() });
+	const digestId = await seedPendingPreview('UC-paused-leased', { plantAge: 22 * 60 * 1000, attemptedAge: 21 * 60 * 1000 });
+
+	await call({ bearer: 'test-secret' });
+
+	expect(mocks.runFeedbackPreview).not.toHaveBeenCalled();
+	expect(
+		(await testDb().db.select().from(feedbackDigests).where(eq(feedbackDigests.id, digestId)).get())?.status
+	).toBe('dry-run-pending');
+});
+
 test('a stale pending row whose channel lease expired still finalizes', async () => {
 	await seedChannel('UC-exp', { leaseExpiresAt: new Date(Date.now() - 60_000).toISOString() });
 	const digestId = await seedPendingPreview('UC-exp', { plantAge: 22 * 60 * 1000, attemptedAge: 21 * 60 * 1000 });

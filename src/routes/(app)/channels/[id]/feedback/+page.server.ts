@@ -147,7 +147,12 @@ export async function load({ params, locals, url }) {
 				and(
 					eq(feedbackDigests.channelId, params.id),
 					inArray(feedbackDigests.status, ['dry-run-pending', 'dry-run-failed']),
-					gt(feedbackDigests.id, latest?.id ?? -1)
+					// A pending preview is LIVE lifecycle state: a paid digest
+					// completing mid-run (id ordering) must not hide the running
+					// banner. Only a terminal failed row follows the
+					// superseded-by-latest-complete rule (gitar+cubic+codex
+					// PR 181).
+					or(eq(feedbackDigests.status, 'dry-run-pending'), gt(feedbackDigests.id, latest?.id ?? -1))
 				)
 			)
 			.orderBy(desc(feedbackDigests.id))

@@ -53,8 +53,13 @@ export function s3Store(config, { env = process.env, signal, runTool = run } = {
 			}
 			await temporary(async (dir) => {
 				const file = join(dir, 'encrypted-or-manifest'); writeFileSync(file, bytes, { mode: 0o600, flag: 'wx' });
-				await command('put-object', ['--key', key, '--body', file, '--if-none-match', '*', '--checksum-algorithm', 'SHA256', '--checksum-sha256', Buffer.from(sha256(bytes), 'hex').toString('base64'), '--content-type', contentType]);
+				await command('put-object', ['--key', key, '--body', file, '--if-none-match', '*', '--checksum-algorithm', 'SHA256', '--checksum-sha256', Buffer.from(sha256(bytes), 'hex').toString('base64'), '--content-type', contentType, '--server-side-encryption', 'AES256']);
 			});
+		},
+		async head(key) {
+			const metadata = await command('head-object', ['--key', key, '--checksum-mode', 'ENABLED']);
+			if (!Number.isSafeInteger(metadata.ContentLength) || metadata.ContentLength < 100 || metadata.ContentLength > 65 * 1024 * 1024 || metadata.ChecksumType !== 'FULL_OBJECT' || !/^[A-Za-z0-9+/]{43}=$/.test(metadata.ChecksumSHA256 ?? '') || metadata.ServerSideEncryption !== 'AES256') throw new BackupError('integrity', 'Stored full-object checksum metadata is missing or unsupported.');
+			return { bytes: metadata.ContentLength, sha256: Buffer.from(metadata.ChecksumSHA256, 'base64').toString('hex') };
 		},
 		async get(key, maxBytes = 65 * 1024 * 1024) {
 			return temporary(async (dir) => {
@@ -85,6 +90,10 @@ export async function verifyObject(store, key, expected) {
 	if (bytes.length !== expected.bytes || sha256(bytes) !== expected.sha256) throw new BackupError('integrity', 'Stored backup checksum or size mismatch.');
 	return bytes;
 }
+export async function verifyStoredMetadata(store, key, expected) {
+	const metadata = await store.head(key);
+	if (metadata.bytes !== expected.bytes || metadata.sha256 !== expected.sha256) throw new BackupError('integrity', 'Stored backup checksum metadata or size mismatch.');
+}
 export async function completedBackups(store, config) {
 	const objects = await store.list(); const manifests = [];
 	for (const object of objects) {
@@ -102,7 +111,7 @@ export async function enforceRetention(store, config, current, now = new Date())
 	const { objects, manifests } = await completedBackups(store, config);
 	const newest = manifests[0];
 	if (!newest || newest.id !== current.id || now - Date.parse(newest.startedAt) > DAY) throw new BackupError('retention', 'Retention requires the new verified backup; preserve recovery copies and escalate.');
-	await verifyObject(store, `${config.prefix}${newest.id}/payload.sql.gz.age`, newest);
+	await verifyStoredMetadata(store, `${config.prefix}${newest.id}/payload.sql.gz.age`, newest);
 	const cutoff = now.getTime() - RETENTION_DAYS * DAY;
 	for (const backup of manifests) {
 		if (backup.id === newest.id || Date.parse(backup.startedAt) >= cutoff) continue;

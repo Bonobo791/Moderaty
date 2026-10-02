@@ -16,7 +16,7 @@ function manifest(date, suffix = '1') {
 function fakeStore(backups = []) {
 	const map = new Map();
 	for (const backup of backups) { map.set(`${config.prefix}${backup.id}/payload.sql.gz.age`, ciphertext); map.set(`${config.prefix}${backup.id}/complete.json`, Buffer.from(JSON.stringify(backup))); }
-	return { map, preflight: vi.fn(async () => {}), put: vi.fn(async (key, bytes) => { if (map.has(key)) throw Error('immutable'); map.set(key, bytes); }), get: vi.fn(async (key) => { if (!map.has(key)) throw Error('not found'); return map.get(key); }), list: vi.fn(async () => [...map.keys()].map((Key) => ({ Key, LastModified: now.toISOString() }))), remove: vi.fn(async (key) => { map.delete(key); }) };
+	return { map, head: vi.fn(async (key) => { if (!map.has(key)) throw Error('not found'); const bytes = map.get(key); return { bytes: bytes.length, sha256: sha256(bytes) }; }), preflight: vi.fn(async () => {}), put: vi.fn(async (key, bytes) => { if (map.has(key)) throw Error('immutable'); map.set(key, bytes); }), get: vi.fn(async (key) => { if (!map.has(key)) throw Error('not found'); return map.get(key); }), list: vi.fn(async () => [...map.keys()].map((Key) => ({ Key, LastModified: now.toISOString() }))), remove: vi.fn(async (key) => { map.delete(key); }) };
 }
 const options = (store) => ({ env, contract: simpleContract, store, exportData: async () => ({ dump: syntheticDump(), tool: 'turso-http-dump-v1' }), encrypt: async () => ciphertext });
 
@@ -57,6 +57,19 @@ describe('durable completion and retention', () => {
 });
 
 describe('independent freshness and alerts', () => {
+	it('checks authenticated object checksum metadata without downloading ciphertext every hour', async () => {
+		const fresh = manifest(now.toISOString()); const store = fakeStore([fresh]);
+		expect((await checkFreshness(store, config, { now })).stage).toBe('recovery');
+		expect(store.head).toHaveBeenCalledWith(`${config.prefix}${fresh.id}/payload.sql.gz.age`);
+		expect(store.get.mock.calls.every(([key]) => key.endsWith('/complete.json'))).toBe(true);
+	});
+	it('fails closed on missing or mismatched server checksum metadata', async () => {
+		const fresh = manifest(now.toISOString()); const store = fakeStore([fresh]);
+		store.head.mockResolvedValue({ bytes: ciphertext.length });
+		await expect(checkFreshness(store, config, { now })).rejects.toMatchObject({ stage: 'integrity' });
+		store.head.mockResolvedValue({ bytes: ciphertext.length, sha256: '0'.repeat(64) });
+		await expect(checkFreshness(store, config, { now })).rejects.toMatchObject({ stage: 'integrity' });
+	});
 	it('alerts on monitor setup/credentials failure before a freshness check can run', async () => {
 		const alert = vi.fn(async () => {}); const store = fakeStore(); store.preflight.mockRejectedValue(Error('synthetic credential denial'));
 		const event = await monitorOnce({ prepare: async () => ({ store, config }), alert, now });
@@ -89,6 +102,14 @@ describe('independent freshness and alerts', () => {
 });
 
 describe('S3 adapter boundaries', () => {
+	it('uses authenticated HEAD with full-object SHA-256; rejects missing/composite checksums', async () => {
+		const result = { ContentLength: ciphertext.length, ChecksumSHA256: Buffer.from(sha256(ciphertext), 'hex').toString('base64'), ChecksumType: 'FULL_OBJECT', ServerSideEncryption: 'AES256' };
+		const runTool = vi.fn(async () => Buffer.from(JSON.stringify(result))); const store = s3Store(config, { runTool });
+		expect(await store.head(`${config.prefix}fixture/payload.sql.gz.age`)).toEqual({ bytes: ciphertext.length, sha256: sha256(ciphertext) });
+		expect(runTool.mock.calls[0][1]).toContain('head-object'); expect(runTool.mock.calls[0][1]).toContain('ENABLED');
+		result.ChecksumType = 'COMPOSITE';
+		await expect(store.head(`${config.prefix}fixture/payload.sql.gz.age`)).rejects.toMatchObject({ stage: 'integrity' });
+	});
 	it.each(['Enabled', 'Suspended'])('rejects versioning %s because versionless deletion cannot enforce retention', async (Status) => {
 		const runTool = vi.fn(async (_cmd, args) => {
 			if (args[0] === '--version') return Buffer.from('aws-cli/2.37.8 Python/3');

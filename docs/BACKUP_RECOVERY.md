@@ -13,7 +13,7 @@ changed by the implementation or synthetic rehearsal.
   caches, dump logging, or fallback destination.
 - The implemented remote adapter supports **AWS S3 only**, with bucket-owner
   enforced ownership, all four public-access blocks, a pinned account/region,
-  and versioning **never enabled**. Versioning/suspended buckets and Object Lock
+  SSE-S3 encryption (in addition to client-side age), and versioning **never enabled**. Versioning/suspended buckets and Object Lock
   need a separate version-aware retention design and are rejected. This is a
   reviewable implementation default, not an approved vendor or data transfer.
 - CI uses an existing database-scoped token through HTTPS `/dump`; it does not
@@ -40,9 +40,10 @@ changed by the implementation or synthetic rehearsal.
 Measure database size, encrypted daily export size `S`, growth, quota headroom,
 region and expected monthly restore/download count in a **restricted** record.
 Budget at least `30 * S` steady-state bytes plus one in-flight object, manifests,
-failed-upload allowance, and growth. This monitor downloads the newest encrypted
-payload every hour: include roughly `24 * 30 * S` monthly transfer in the budget,
-plus job readbacks and drills. Restrict the monitor to the same approved region
+failed-upload allowance, and growth. Hourly freshness checks read small manifests
+and authenticated S3 full-object checksum/size metadata, without repeatedly
+downloading the payload. Include about `30 * S` monthly upload readback transfer
+plus approved restore/integrity drills, manifest traffic and requests in the budget. Restrict the monitor to the same approved region
 where appropriate; do not assume free transfer. Price storage, requests,
 retrieval, transfer, logs, tax and alert service together, with a numeric cap and
 cost alarm chosen by the owner.
@@ -52,6 +53,16 @@ adapter and account/private-access controls. Cloudflare R2 is an alternative
 with different regional/compliance and request/transfer terms, but is **not
 supported by this adapter** and must not be enabled via an endpoint override.
 A second provider requires its own access, integrity and retention tests.
+For a concrete example only, US East (N. Virginia) Standard currently lists
+$0.023/GB-month, $0.005/1,000 PUT/COPY/POST/LIST, and $0.0004/1,000 GET/HEAD
+([official regional price list](https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonS3/current/us-east-1/index.json), published 2026-09-28).
+A hypothetical 10 MiB encrypted daily copy retained 30 days is about 0.293 GiB,
+or $0.0067/month storage, plus roughly 1–2 cents of normal requests. Full upload
+readbacks transfer about 0.293 GiB/month; drills add their payload size. Transfer,
+monitor hosting and taxes are separate. Propose a $5/month budget alarm pending
+measured usage and approval; an alarm is not a hard spending cap. US East is a
+pricing example: current repo documentation does not establish Turso's region,
+so residency alignment must be confirmed before selecting the bucket region.
 Current source links: [S3 pricing](https://aws.amazon.com/s3/pricing/) and
 [R2 pricing](https://developers.cloudflare.com/r2/pricing/).
 
@@ -209,8 +220,14 @@ Success requires schema validation, encryption, immutable S3 upload, downloaded
 ciphertext checksum/size match, completion manifest uploaded/read-back verified,
 and retention success. A green process or job-start heartbeat is insufficient.
 A partial upload without a valid completion manifest cannot count as a backup.
-The monitor also downloads/hashes the ciphertext, validates timestamps and reports
-retention violations. The checksum is a transfer-integrity check, not a signature;
+The hourly monitor checks authenticated S3 HEAD metadata with ENABLED checksum
+mode against the manifest: exact size, full-object SHA-256 and supported SSE-S3
+encryption. Missing/composite/mismatched checksum metadata fails closed. It also
+validates timestamps and reports retention violations. Uploads still download
+and hash the entire ciphertext once before completion, and scheduled isolated
+restore/integrity drills repeat full download/decryption. Metadata checks do not
+replace those drills. SSE-KMS is not configured or granted extra decrypt rights
+by this adapter; its use needs a separately approved design. The checksum is a transfer-integrity check, not a signature;
 age authentication is verified during restore. An attacker controlling the
 writer/storage can destroy or substitute files; separate key custody protects
 confidentiality, not availability against that attacker.

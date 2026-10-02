@@ -149,7 +149,7 @@ async function drainDryRunWindow(channel: typeof channels.$inferSelect, deadline
  * re-evaluates atomically with the write.
  */
 async function finalizeStalePreviews(nowIso: string, staleBefore: string): Promise<number> {
-	const existingChannels = db.select({ id: channels.id }).from(channels);
+	const drainableChannels = db.select({ id: channels.id }).from(channels).where(eq(channels.active, 1));
 	const leasedChannels = db.select({ id: channels.id }).from(channels).where(gte(channels.leaseExpiresAt, nowIso));
 	const staleIds = db
 		.select({ id: feedbackDigests.id })
@@ -157,15 +157,21 @@ async function finalizeStalePreviews(nowIso: string, staleBefore: string): Promi
 		.where(
 			and(
 				eq(feedbackDigests.status, 'dry-run-pending'),
+				// A live lease may belong to an in-flight runner — never
+				// finalize under it (cubic+codex).
+				notInArray(feedbackDigests.channelId, leasedChannels),
 				or(
-					// An orphaned row can never satisfy the drainer's channel join —
-					// finalize it regardless of attempt state.
-					notInArray(feedbackDigests.channelId, existingChannels),
-					// Attempted but never finished = a dead runner's leftover. NULL
-					// attempted_at rows are queued, never claimed — the stale window
-					// must not expire a preview before its first scheduler
-					// opportunity (codex).
-					and(lt(feedbackDigests.attemptedAt, staleBefore), notInArray(feedbackDigests.channelId, leasedChannels))
+					// A row on a deleted or paused channel can never satisfy the
+					// drainer's join — finalize regardless of attempt state. A
+					// kicked runner would fail ERR_PREVIEW_PAUSED anyway, so
+					// pausing already kills the preview; 'pending forever' is a
+					// lie the feed would render (codex).
+					notInArray(feedbackDigests.channelId, drainableChannels),
+					// Attempted but never finished = a dead runner's leftover.
+					// NULL attempted_at rows are queued, never claimed — the
+					// stale window must not expire a preview before its first
+					// scheduler opportunity (codex).
+					lt(feedbackDigests.attemptedAt, staleBefore)
 				)
 			)
 		)

@@ -1092,14 +1092,24 @@ test('a pending preview on a leased channel is not drained — the plant lease c
 	expect((await testDb().db.select().from(feedbackDigests).all())[0].status).toBe('dry-run-pending');
 });
 
-test('a pending preview on a paused channel is skipped, not drained', async () => {
+test('a pending preview on a paused channel is never drained and finalizes — it has no opportunity', async () => {
+	// Paused channels are un-drainable by definition (the pending select
+	// requires active=1) — and the kicked runner would fail
+	// ERR_PREVIEW_PAUSED anyway — so a pending row there is a corpse, not a
+	// queue. Leaving it pending would show 'preview in progress' forever
+	// (codex review, PR #178).
 	await seedChannel('UC-paused', { active: 0 });
 	await seedPendingPreview('UC-paused');
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	onTestFinished(() => errorSpy.mockRestore());
 
 	await call({ bearer: 'test-secret' });
 
 	expect(mocks.runFeedbackPreview).not.toHaveBeenCalled();
-	expect((await testDb().db.select().from(feedbackDigests).all())[0].status).toBe('dry-run-pending');
+	expect((await testDb().db.select().from(feedbackDigests).all())[0]).toMatchObject({
+		status: 'dry-run-failed',
+		error: 'preview-timeout'
+	});
 });
 
 test('a pending preview older than the stale window is finalized loudly, not retried forever', async () => {

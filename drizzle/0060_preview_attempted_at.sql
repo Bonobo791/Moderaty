@@ -1,0 +1,1 @@
+ALTER TABLE `feedback_digests` ADD `attempted_at` text;

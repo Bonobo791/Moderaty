@@ -9,6 +9,8 @@ vi.mock('./protonMail', async (importOriginal) => ({
 
 import { setupTestDb, testDb } from './testdb';
 import { contactSubmissions } from './db/schema';
+import { DeadlineExceededError } from './http';
+import { ProtonMailConfigurationError } from './protonMail';
 import { CONTACT_OPT_IN_TEXT, createOrReusePendingSubmission, verifyContactToken } from './contact';
 import { buildContactNotification, deliverContactNotification, retryContactNotifications } from './contactNotification';
 
@@ -147,4 +149,27 @@ test('escapes the entire notification body even if a malformed request ID crosse
 	expect(mail.htmlPart).not.toContain('<img');
 	expect(mail.htmlPart).toContain('&lt;img src=x onerror=alert(1)&gt;');
 	expect(mail.textPart).toContain('<img src=x onerror=alert(1)>');
+});
+
+
+test('shared-deadline exhaustion defers delivery without an SMTP error or lost retry', async () => {
+	const submission = await createOrReusePendingSubmission(INPUT);
+	await testDb().db.update(contactSubmissions).set({ status: 'verified', notificationDueAt: new Date(0).toISOString() }).where(eq(contactSubmissions.id, submission.id));
+	mocks.send.mockRejectedValueOnce(new DeadlineExceededError());
+	const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+	expect(await retryContactNotifications(Date.now() + 1000)).toEqual({ sent: 0, errors: 0 });
+	expect(await row(submission.id)).toMatchObject({ notificationClaim: null, notificationDueAt: expect.any(String), notificationSentAt: null });
+	expect(errors).not.toHaveBeenCalled();
+});
+
+test('preserves safe SMTP configuration diagnostics without exposing arbitrary provider errors', async () => {
+	const submission = await createOrReusePendingSubmission(INPUT);
+	const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+	mocks.send.mockRejectedValueOnce(new ProtonMailConfigurationError('PROTON_SMTP_TOKEN is not configured'));
+	await verifyContactToken(submission.verificationToken);
+	expect(JSON.stringify(errors.mock.calls)).toContain('PROTON_SMTP_TOKEN is not configured');
+	await due(submission.id);
+	mocks.send.mockRejectedValueOnce(new Error('raw provider secret and message content'));
+	await verifyContactToken(submission.verificationToken);
+	expect(JSON.stringify(errors.mock.calls)).not.toContain('raw provider secret');
 });

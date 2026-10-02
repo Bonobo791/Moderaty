@@ -212,3 +212,11 @@ test('message field shares input styling and a visible keyboard focus state', ()
 	expect(css).toContain('textarea:focus-visible');
 	expect(css).toContain('textarea::placeholder');
 });
+
+
+test('textarea keyboard focus remains outlined and placeholder text meets the readable contrast style', () => {
+	expect(contactPage).toContain('.contact-form textarea:focus-visible');
+	expect(contactPage).toContain('outline: 1px solid var(--accent)');
+	expect(contactPage).toContain('.contact-form textarea::placeholder');
+	expect(contactPage).toContain('color: rgb(244 244 248 / 70%)');
+});

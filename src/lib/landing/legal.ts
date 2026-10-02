@@ -16,6 +16,9 @@ export type LegalDoc = {
 };
 
 export const LEGAL_EFFECTIVE_DATE = '22 October 2026';
+// 1.18: CONTACT MESSAGES — optional request content is stored and forwarded
+// to the contact inbox after explicit e-mail confirmation. The current
+// planned effective date stays unchanged; prior versions re-consent.
 // 1.16: E-MAIL PROVIDER — the disclosed transactional e-mail provider is
 // Proton AG (Switzerland), replacing the Mailjet disclosure made in 1.9.
 // This is a correction, not a live-provider switch: Mailjet was named but
@@ -76,7 +79,12 @@ export const LEGAL_EFFECTIVE_DATE = '22 October 2026';
 // 1.5: Terms §6.1(c) corrected — the lifetime hosted plan has no per-account
 // key flow (hosted scoring runs on the deployment's OPENAI_API_KEY), so the
 // "your own OpenAI key" promise was removed from the lifetime clause.
-export const LEGAL_VERSION = '1.16';
+// 1.17: BILLING ADDRESS — Privacy §2's billing row now lists the billing
+// address Stripe Checkout collects on every purchase (MOD-236); the row
+// previously named only name, e-mail, purchase history, and tax ID.
+// Material change: users without a 1.17 consent row are routed back
+// through /consent.
+export const LEGAL_VERSION = '1.18';
 export const LEGAL_KICKER = 'YouTube Comment Moderation Service';
 
 /**

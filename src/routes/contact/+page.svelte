@@ -29,15 +29,15 @@
 		<h1 class="title">Contact Moderaty</h1>
 		<p class="lede">
 			License questions, support, feature ideas — whatever you need. Leave your name and e-mail, add an optional message,
-			tick the opt-in box, and confirm your address with one click from the e-mail we send you.
+			tick the opt-in box, and open the link in our e-mail and confirm your request.
 		</p>
 
 		{#if data.sent}
 			<div class="card success" role="status">
 				<h2 class="success-title">Check your inbox</h2>
 				<p>
-					We sent a one-time verification link to the address you entered. Open it to confirm
-					your e-mail and complete your contact request. The link is valid for 7 days.
+					We sent a one-time verification link to the address you entered. Open it and choose Confirm contact request
+					to verify your e-mail and complete your request. The link is valid for 7 days.
 				</p>
 				<p class="success-note">
 					Didn't get it? Check the spam folder, or submit the form again — we will resend the
@@ -150,6 +150,13 @@
 	.contact-form textarea {
 		resize: vertical;
 		min-height: 140px;
+	}
+	.contact-form textarea:focus-visible {
+		outline: 1px solid var(--accent);
+		outline-offset: 2px;
+	}
+	.contact-form textarea::placeholder {
+		color: rgb(244 244 248 / 70%);
 	}
 	.message-help {
 		margin: 0;

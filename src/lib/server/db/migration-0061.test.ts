@@ -7,7 +7,7 @@ afterEach(closeMigratedDbs);
 test('contact message migration is additive, nullable, and never queues historical requests', async () => {
 	const client = await applyMigration(`
 		CREATE TABLE contact_submissions (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL, status TEXT NOT NULL);
-	`, '0059_contact_message_delivery.sql', `
+	`, '0061_contact_message_delivery.sql', `
 		INSERT INTO contact_submissions VALUES (1, 'Pending', 'pending@example.com', 'pending');
 		INSERT INTO contact_submissions VALUES (2, 'Verified', 'verified@example.com', 'verified');
 	`);
@@ -22,5 +22,5 @@ test('contact message migration is additive, nullable, and never queues historic
 	expect((await client.execute("PRAGMA index_info('contact_submissions_notification_due_idx')")).rows.map(row => row.name)).toEqual(['notification_due_at']);
 	expect((await client.execute('PRAGMA integrity_check')).rows[0]).toEqual({ integrity_check: 'ok' });
 	const journal = JSON.parse(readFileSync(new URL('../../../../drizzle/meta/_journal.json', import.meta.url), 'utf8'));
-	expect(journal.entries.at(-1)).toMatchObject({ idx: 59, tag: '0059_contact_message_delivery' });
+	expect(journal.entries.at(-1)).toMatchObject({ idx: 61, tag: '0061_contact_message_delivery' });
 });

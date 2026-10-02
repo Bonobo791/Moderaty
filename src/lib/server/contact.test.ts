@@ -47,6 +47,15 @@ afterEach(() => {
 });
 
 describe('parseContactForm', () => {
+	/** Builds the {name, e-mail, opt_in} form body and parses it — the shared submit shape every field case exercises. */
+	function formResult(fields: { name?: string; email?: string; optIn?: boolean }) {
+		const form = new FormData();
+		form.set('name', fields.name ?? 'Fan');
+		form.set('email', fields.email ?? 'fan@example.com');
+		if (fields.optIn !== false) form.set('opt_in', 'on');
+		return parseContactForm(form);
+	}
+
 	test('accepts name, e-mail, and the ticked opt-in box; normalizes case and whitespace', () => {
 		const form = new FormData();
 		form.set('name', '  Fan  ');
@@ -84,18 +93,39 @@ describe('parseContactForm', () => {
 		if (!result.ok) expect(result.error).toMatch(/201|characters/);
 	});
 
-	test.each(['not-an-email', 'a@b', 'a b@example.com', '@example.com', 'a@'])(
-		'rejects invalid e-mail %s',
-		(email) => {
-			const form = new FormData();
-			form.set('name', 'Fan');
-			form.set('email', email);
-			form.set('opt_in', 'on');
-			const result = parseContactForm(form);
-			expect(result.ok).toBe(false);
-			if (!result.ok) expect(result.error).toMatch(/e-mail/i);
-		}
-	);
+	test.each([
+		'not-an-email',
+		'a@b',
+		'a b@example.com',
+		'@example.com',
+		'a@',
+		'a@b.example,c@d.example', // address list the transport guard rejects
+		'a@b.example;c@d.example', // semicolon list
+		'Fan <fan@example.com>', // display-name form
+		'a,b@example.com',
+		'a;b@example.com',
+		'x"y@example.com',
+		'a\\b@example.com'
+	])('rejects invalid e-mail %s', (email) => {
+		// The submit path validates the same contract the sender enforces —
+		// a form-accepted address the transport rejects would 500 on every
+		// retry with the pending row already written (codex+cubic+codeant).
+		const result = formResult({ email });
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error).toMatch(/e-mail/i);
+	});
+
+	test("accepts a legal apostrophe local part — the transport can send it", () => {
+		// The form and the SMTP recipient guard must agree: a persisted pending
+		// row whose verification e-mail can never send is a permanent 500 loop
+		// (cubic/codex PR #171).
+		expect(formResult({ email: "o'connor@example.com" })).toEqual({
+			ok: true,
+			name: 'Fan',
+			email: "o'connor@example.com",
+			message: null
+		});
+	});
 
 	test('keeps submitted values on error so the form can re-render them', () => {
 		const form = new FormData();
@@ -104,30 +134,6 @@ describe('parseContactForm', () => {
 		form.set('opt_in', 'on');
 		const result = parseContactForm(form);
 		expect(result).toEqual({ ok: false, error: expect.any(String), name: 'Fan', email: 'bad-address', message: '' });
-	});
-
-	test.each(['a,b@example.com', 'a;b@example.com', 'x"y@example.com', 'a\\b@example.com'])(
-		'rejects a transport-unsafe address (%s) at the form instead of failing the send later',
-		(email) => {
-			// The submit path validates the same contract the sender enforces —
-			// a form-accepted address the transport rejects would 500 on every
-			// retry with the pending row already written (codex+cubic+codeant).
-			const form = new FormData();
-			form.set('name', 'Fan');
-			form.set('email', email);
-			form.set('opt_in', 'on');
-			const result = parseContactForm(form);
-			expect(result.ok).toBe(false);
-			if (!result.ok) expect(result.error).toMatch(/e-mail/i);
-		}
-	);
-
-	test('accepts an apostrophe local part — a legal mailbox the transport also sends', () => {
-		const form = new FormData();
-		form.set('name', 'Fan');
-		form.set('email', "o'connor@example.com");
-		form.set('opt_in', 'on');
-		expect(parseContactForm(form)).toEqual({ ok: true, name: 'Fan', email: "o'connor@example.com", message: null });
 	});
 });
 
@@ -444,4 +450,14 @@ describe('optional contact message', () => {
 			expect(mail.htmlPart).not.toContain('Private');
 		}
 	});
+});
+
+
+test('rejects duplicate message values, including a text value followed by a file', () => {
+	for (const extra of [new Blob(['payload']), 'second text']) {
+		const form = new FormData();
+		form.set('name', 'Fan'); form.set('email', 'fan@example.com'); form.set('opt_in', 'on');
+		form.append('message', 'first text'); form.append('message', extra);
+		expect(parseContactForm(form)).toMatchObject({ ok: false, error: expect.stringMatching(/message/i) });
+	}
 });

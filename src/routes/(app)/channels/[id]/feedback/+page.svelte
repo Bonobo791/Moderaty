@@ -9,19 +9,15 @@
 	import { autoRefresh } from '$lib/auto-refresh.svelte';
 	import { HISTORY_MONTH_PRESETS } from '$lib/historyWindow';
 	import { relativeTime } from '$lib/relative-time';
-	import type { FeedbackPreview } from '$lib/server/feedbackDigest';
 
 	let { data, form } = $props();
 	autoRefresh();
 	const feedbackDryRunForm = $derived(
-		form as { scope?: string; ok?: boolean; attempted?: boolean; dryRunUsed?: boolean; preview?: FeedbackPreview; message?: string; error?: string } | null | undefined
+		form as { scope?: string; ok?: boolean; attempted?: boolean; dryRunUsed?: boolean; message?: string; error?: string } | null | undefined
 	);
 	const feedbackPreviewUsed = $derived(
 		data.dryRunUsed ||
 			(feedbackDryRunForm?.scope === 'feedbackDryRun' && (feedbackDryRunForm.attempted === true || feedbackDryRunForm.dryRunUsed === true))
-	);
-	const feedbackPreview = $derived(
-		feedbackDryRunForm?.scope === 'feedbackDryRun' && feedbackDryRunForm.ok ? feedbackDryRunForm.preview ?? null : null
 	);
 	const revealForm = $derived(
 		form as { scope?: string; evidenceId?: number; text?: string; error?: string; confirmationRequired?: boolean } | null | undefined
@@ -148,6 +144,21 @@
 			{:else}
 				History scan in progress — the next batch runs automatically, even while digests are set to manual. No action needed.
 			{/if}
+		</div>
+	{/if}
+
+	<!-- The async preview lifecycle banner (MOD-233): the action returns
+	     immediately, and the next autoRefresh poll surfaces this row. It is
+	     deliberately separate from newestAttention — a pending preview must
+	     not hide a real failed/deferred paid attempt. -->
+	{#if data.previewAttempt?.status === 'dry-run-pending'}
+		<div class="flash" role="status">
+			Free feedback preview is running — it will appear under Recent digests at the bottom of this page.
+		</div>
+	{:else if data.previewAttempt?.status === 'dry-run-failed'}
+		<div class="error-box" role="alert">
+			<strong>Free feedback preview failed</strong> — this channel's one free preview is spent and won't
+			retry automatically. No credits were charged.
 		</div>
 	{/if}
 
@@ -410,7 +421,7 @@
 							<option value="all">All time</option>
 						</select>
 					</label>
-					<p class="muted settings-note">1 free feedback dry run per channel — scores only the first YouTube page (up to 100 comments) and changes no moderation state. Used when it starts, even if it fails. No credits are charged.</p>
+					<p class="muted settings-note">1 free feedback dry run per channel — scores only the first YouTube page (up to 100 comments) and changes no moderation state or history coverage. Used when it starts, even if it fails. Results appear as a free preview under Recent digests; no credits are charged.</p>
 					<button class="btn small" disabled={previewingFeedback || feedbackPreviewUsed || !data.ch.active}>
 						{previewingFeedback ? 'Previewing…' : feedbackPreviewUsed ? 'Feedback preview already used' : 'Run feedback dry run'}
 					</button>
@@ -420,33 +431,6 @@
 		{#if !canOperate}<p class="muted settings-note">Only an organization owner can start a history scan or run the feedback preview.</p>{/if}
 		{#if analyzingHistory}<div class="preview-loading" role="status" aria-busy="true"><Skeleton rows={1} /></div>{/if}
 		{#if previewingFeedback}<div class="preview-loading" role="status" aria-busy="true"><Skeleton rows={2} /></div>{/if}
-		{#if feedbackPreview}
-			<section class="preview-results" aria-label="Feedback dry-run results">
-				<h4>Feedback dry-run preview</h4>
-				{#if feedbackPreview.clusteringDegraded}{@render clusteringNotice()}{/if}
-				<p class="muted">{feedbackPreview.commentsClassified} classified · {feedbackPreview.commentsFailed} failed · {feedbackPreview.pooled} pooled · 0 credits used</p>
-				<p class="muted">Run a history scan to cover the full window.</p>
-				{#if feedbackPreview.hasMore}<p class="muted">More comments are available beyond this preview page.</p>{/if}
-				{#if feedbackPreview.findings.length}
-					{#each feedbackPreview.findings as finding, index (index)}
-						<div class="preview-finding">
-							<h5>{finding.category}: {finding.summary}</h5>
-						<p class="muted">{finding.supporterCount} supporting comments</p>
-						<ul class="preview-evidence">
-							{#each finding.evidence as evidence, evidenceIndex (`${index}-${evidenceIndex}`)}
-								<li class:concealed={evidence.hasAbuse === 1}>
-									<blockquote class="quote">{evidence.sanitizedExcerpt}</blockquote>
-									{#if evidence.hasAbuse === 1}<span class="caps-label concealed-label">wording concealed</span>{/if}
-								</li>
-							{/each}
-						</ul>
-						</div>
-					{/each}
-				{:else}
-					{@render noFeedback()}
-				{/if}
-			</section>
-		{/if}
 	</section>
 
 	<section class="card settings-card" aria-label="Feedback digest settings">
@@ -612,41 +596,6 @@
 	}
 	.preview-loading {
 		margin-top: 16px;
-	}
-	.preview-results {
-		margin-top: 22px;
-		padding-top: 18px;
-		border-top: 1px solid var(--line);
-	}
-	.preview-results h4,
-	.preview-finding h5 {
-		margin: 0 0 8px;
-	}
-	.preview-results > p {
-		margin: 0 0 8px;
-	}
-	.preview-finding {
-		padding: 14px 0;
-		border-bottom: 1px solid var(--line);
-	}
-	.preview-finding > p {
-		margin: 0 0 10px;
-	}
-	.preview-evidence {
-		list-style: none;
-		margin: 0;
-		padding: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
-	}
-	.preview-evidence li {
-		padding: 10px;
-		border-radius: 6px;
-		background: var(--bg);
-	}
-	.preview-evidence .quote {
-		margin: 0;
 	}
 	.settings-readonly {
 		margin: 0 0 12px;

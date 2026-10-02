@@ -574,6 +574,7 @@ describe('feedback_digests', () => {
 			pooled_count: { notNull: true, hasDefault: true },
 			credits_used: { notNull: false },
 			error: { notNull: false },
+			attempted_at: { notNull: false },
 			emailed_at: { notNull: false },
 			created_at: { notNull: true, hasDefault: true }
 		});

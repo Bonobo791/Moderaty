@@ -7,7 +7,8 @@ import { and, asc, eq, isNull, lte } from 'drizzle-orm';
 import { db } from './db';
 import { contactSubmissions } from './db/schema';
 import { escapeHtml } from './emailText';
-import { sendProtonMailEmail, type ProtonMailMessage } from './protonMail';
+import { DeadlineExceededError } from './http';
+import { sendProtonMailEmail, ProtonMailConfigurationError, type ProtonMailMessage } from './protonMail';
 
 // Longer than the SMTP client's hard 10-second deadline. It is both a crash
 // lease and a retry delay, so repeated clicks cannot hammer a failed provider.
@@ -15,6 +16,7 @@ const RETRY_DELAY_MS = 60_000;
 
 type ContactNotificationInput = Pick<typeof contactSubmissions.$inferSelect, 'id' | 'verificationToken' | 'name' | 'email' | 'message'>;
 
+/** Builds plaintext and escaped HTML for the fixed contact inbox and verified Reply-To. */
 export function buildContactNotification(input: ContactNotificationInput): ProtonMailMessage {
 	const message = input.message ?? 'No message provided.';
 	const textPart = [`Verified contact request #${input.id}`, '', `Name: ${input.name}`, `E-mail: ${input.email}`, '', 'Message:', message].join('\n');
@@ -56,12 +58,17 @@ export async function deliverContactNotification(id: number, deadline?: number):
 			.where(ownedClaim).returning({ id: contactSubmissions.id });
 		if (acknowledged.length !== 1) throw new Error('contact notification delivery claim was lost');
 		return 'sent';
-	} catch {
-		// Do not log message bodies, addresses, tokens, or provider errors.
-		console.error('[contact] notification delivery failed; retry remains queued', { id });
+	} catch (cause) {
 		await db.update(contactSubmissions)
 			.set({ notificationClaim: null, notificationDueAt: new Date(Date.now() + RETRY_DELAY_MS).toISOString() })
 			.where(ownedClaim);
+		if (cause instanceof DeadlineExceededError) {
+			console.info('[contact] notification deferred after shared deadline', { id });
+			return 'deferred';
+		}
+		// Only typed configuration errors carry a fixed, safe diagnosis.
+		const diagnostic = cause instanceof ProtonMailConfigurationError ? cause.message : 'delivery failed';
+		console.error('[contact] notification retry remains queued:', diagnostic, { id });
 		throw new Error('Contact notification delivery failed; retry queued.');
 	}
 }

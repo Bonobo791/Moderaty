@@ -258,9 +258,11 @@ Recorded decisions/constraints to carry into dependent issues:
    - MOD-178 outstanding (partially answered 2026-10-01): service codes and
      export treatment are now accountant-approved (`01.05.01` national /
      `02800` SP municipal, ISS 2,9% domestic; exportação sem ISS foreign —
-     `tributacao_iss = 3` + `codigo_pais_exportacao`). Still open:
-     refund/cancellation/substitution treatment and IM status in the national
-     environment (omit `inscricao_municipal_prestador` if absent).
+     `tributacao_iss = 3` + `codigo_pais_exportacao`). Refund/cancellation
+     treatment is ruled on MOD-178 (refund → invoice review → cancellation
+     only after the confirmed fiscal outcome; no substitution). Still open:
+     IM status in the national environment
+     (omit `inscricao_municipal_prestador` if absent).
    - Whether SP/Focus already accept national issuance from this prestador before the 2026-11-01
      enforcement date (voluntary early use for go-live before the mandate) — exercise in
      homologation (MOD-193).

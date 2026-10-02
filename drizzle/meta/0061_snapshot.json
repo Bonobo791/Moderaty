@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "bd4b6067-7528-427b-80f7-d457d836d817",
-  "prevId": "43d55039-f940-4321-b3fc-396491d2e554",
+  "id": "fab91ff1-490c-4493-922f-fdfe6fdfe50e",
+  "prevId": "17ae629c-3fe8-4011-a60c-aa9c3b7dc69d",
   "tables": {
     "audit_log": {
       "name": "audit_log",
@@ -654,6 +654,34 @@
           "notNull": true,
           "autoincrement": false
         },
+        "message": {
+          "name": "message",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "notification_due_at": {
+          "name": "notification_due_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "notification_claim": {
+          "name": "notification_claim",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "notification_sent_at": {
+          "name": "notification_sent_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "status": {
           "name": "status",
           "type": "text",
@@ -726,6 +754,13 @@
           "columns": [
             "status",
             "email"
+          ],
+          "isUnique": false
+        },
+        "contact_submissions_notification_due_idx": {
+          "name": "contact_submissions_notification_due_idx",
+          "columns": [
+            "notification_due_at"
           ],
           "isUnique": false
         },
@@ -948,6 +983,13 @@
         },
         "error": {
           "name": "error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "attempted_at": {
+          "name": "attempted_at",
           "type": "text",
           "primaryKey": false,
           "notNull": false,

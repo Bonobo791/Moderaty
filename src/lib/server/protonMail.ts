@@ -44,6 +44,9 @@ const HEADER_UNSAFE = /[\x00-\x1f\x7f]/;
 /** Marker for our own whole-operation guard firing (not a provider error). */
 class SendGuardExpiredError extends Error {}
 
+/** Configuration-only diagnostics are fixed strings safe for server logs. */
+export class ProtonMailConfigurationError extends Error {}
+
 export interface ProtonMailConfig {
 	username: string;
 	token: string;
@@ -61,11 +64,11 @@ export interface ProtonMailConfig {
 export function loadProtonMailConfig(): ProtonMailConfig {
 	const username = env.PROTON_SMTP_USERNAME;
 	const token = env.PROTON_SMTP_TOKEN;
-	if (!username) throw new Error('PROTON_SMTP_USERNAME is not configured');
-	if (!token) throw new Error('PROTON_SMTP_TOKEN is not configured');
-	if (!isBareAddress(username)) throw new Error('PROTON_SMTP_USERNAME must be a bare e-mail address');
+	if (!username) throw new ProtonMailConfigurationError('PROTON_SMTP_USERNAME is not configured');
+	if (!token) throw new ProtonMailConfigurationError('PROTON_SMTP_TOKEN is not configured');
+	if (!isBareAddress(username)) throw new ProtonMailConfigurationError('PROTON_SMTP_USERNAME must be a bare e-mail address');
 	const fromName = env.PROTON_FROM_NAME?.trim() || DEFAULT_FROM_NAME;
-	if (HEADER_UNSAFE.test(fromName)) throw new Error('PROTON_FROM_NAME must not contain control characters');
+	if (HEADER_UNSAFE.test(fromName)) throw new ProtonMailConfigurationError('PROTON_FROM_NAME must not contain control characters');
 	return { username, token, fromName };
 }
 
@@ -241,6 +244,11 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const guard = new Promise<never>((_, reject) => {
+		// Arm with the budget remaining NOW — transport setup already consumed
+		// part of the caller's deadline since timeoutMs was computed at entry;
+		// a stale entry-time value would let the send outlive the deadline.
+		const guardMs =
+			deadline === undefined ? timeoutMs : Math.min(timeoutMs, deadline - Date.now());
 		timer = setTimeout(() => {
 			// Destroy the real socket BEFORE rejecting so an in-flight DATA
 			// acceptance can never outlive the budget; the send's late
@@ -253,7 +261,7 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 				console.error('proton mail: transport close failed during timeout teardown');
 			}
 			reject(new SendGuardExpiredError());
-		}, timeoutMs);
+		}, guardMs);
 	});
 
 	let info: unknown;

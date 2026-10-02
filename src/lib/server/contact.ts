@@ -53,11 +53,12 @@ export type ContactParse =
 export function parseContactForm(form: FormData): ContactParse {
 	const name = String(form.get('name') ?? '').trim();
 	const email = String(form.get('email') ?? '').trim();
-	const rawMessage = form.get('message');
+	const messages = form.getAll('message');
+	const rawMessage = messages[0] ?? null;
 	// Browsers serialize textarea line breaks as CRLF; count/store the same
 	// LF characters that maxlength counts in the textarea.
 	const message = typeof rawMessage === 'string' ? rawMessage.replace(/\r\n?/g, '\n') : '';
-	if (rawMessage !== null && typeof rawMessage !== 'string') {
+	if (messages.length > 1 || (rawMessage !== null && typeof rawMessage !== 'string')) {
 		return { ok: false, error: 'Please enter your message as text.', name, email, message };
 	}
 	if (message.length > MAX_MESSAGE_LENGTH) {
@@ -227,11 +228,23 @@ export function isUniqueViolation(error: unknown): boolean {
 }
 
 export type ContactVerificationResult =
+	| { status: 'pending'; email: string }
 	| { status: 'verified'; email: string }
 	| { status: 'already_verified'; email: string }
 	| { status: 'delivery_pending'; email: string }
 	| { status: 'expired'; email: string }
 	| { status: 'invalid' };
+
+/** Reads a verification link without accepting consent or sending mail. */
+export async function getContactVerificationStatus(token: string): Promise<ContactVerificationResult> {
+	const row = await db.select().from(contactSubmissions)
+		.where(eq(contactSubmissions.verificationToken, token)).get();
+	if (!row) return { status: 'invalid' };
+	if (row.status === 'verified') {
+		return { status: row.notificationDueAt !== null && row.notificationSentAt === null ? 'delivery_pending' : 'already_verified', email: row.email };
+	}
+	return { status: Date.parse(row.expiresAt) <= Date.now() ? 'expired' : 'pending', email: row.email };
+}
 
 /**
  * Marks a submission verified when its token is valid, unexpired, and not
@@ -289,7 +302,7 @@ export function buildVerificationEmail(input: { name: string; verifyUrl: string 
 		'',
 		'Someone (hopefully you) asked Moderaty to contact them using this e-mail address.',
 		'',
-		`Confirm your e-mail address by opening this link: ${input.verifyUrl}`,
+		`Open this link, then choose Confirm contact request: ${input.verifyUrl}`,
 		'',
 		'The link is valid for 7 days. If you did not submit this request, ignore this e-mail.',
 		'',
@@ -298,7 +311,7 @@ export function buildVerificationEmail(input: { name: string; verifyUrl: string 
 	const htmlPart = [
 		`<p>Hi ${escapeHtml(input.name)},</p>`,
 		'<p>Someone (hopefully you) asked Moderaty to contact them using this e-mail address.</p>',
-		`<p>Confirm your e-mail address by opening this link: <a href="${escapeHtml(input.verifyUrl)}">${escapeHtml(input.verifyUrl)}</a></p>`,
+		`<p>Open this link, then choose Confirm contact request: <a href="${escapeHtml(input.verifyUrl)}">${escapeHtml(input.verifyUrl)}</a></p>`,
 		'<p>The link is valid for 7 days. If you did not submit this request, ignore this e-mail.</p>',
 		'<p>— Moderaty</p>'
 	].join('');

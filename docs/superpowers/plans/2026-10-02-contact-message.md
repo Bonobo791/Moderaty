@@ -34,14 +34,26 @@
 
 ## Verification and release notes
 
-- Final aggregate: 3,121 tests in 169 files pass; Svelte check reports zero errors and warnings. Node and Netlify builds pass.
+- Final aggregate: 3,167 tests in 170 files pass; Svelte check reports zero errors and warnings. Node and Netlify builds pass.
 - Independent review found a Message-ID collision between databases with the same integer row IDs. A failing regression test reproduced it; the fix hashes the random verification token and passes. The token is never included in the notification.
-- Migration 0059 is additive; tests preserve historical pending/verified rows and verify nullable columns, the retry index, and SQLite integrity. The 0026 → 0028 → 0059 contact migration chain was also checked independently.
-- Apply and verify 0059 on each target database before code relying on the new columns is exercised. No live migration was run.
+- Migration 0061 is additive; tests preserve historical pending/verified rows and verify nullable columns, the retry index, and SQLite integrity. The 0026 → 0028 → 0061 contact migration chain was also checked independently.
+- Apply and verify 0061 on each target database before code relying on the new columns is exercised. No live migration was run.
 - The current cron must remain scheduled for automatic retries. It sends at most one due notification per tick, uses the shared deadline, and skips delivery under DRY_RUN. Failed sends retain a 60-second retry delay; crashed claims recover after expiry.
 - Existing verified requests are not backfilled. Messages stay out of visitor verification mail. Only new verifications queue inbox delivery.
 - SMTP acceptance followed by a crash before the database acknowledgement can result in a retry copy. Stable, globally unique Message-IDs aid identification but are not an exactly-once SMTP guarantee.
 - Visual browser QA could not run because the cloud browser blocks localhost. A desktop/mobile visual pass remains before release.
-- Publication, merge, deployment, and production database changes remain outside this implementation.
+- Base-branch merges, deployment, and production database changes remain outside this implementation.
 
 - Remote review: Codacy flagged new HTML interpolation. A failing malformed-request-ID regression led to escaping the complete plaintext body once before adding static HTML framing. This also removes HTML-looking interpolation from the SMTP Message-ID. The full suite, check, and both builds pass after the fix.
+
+
+## Conflict resolution and review triage
+
+- Merge main 21cb34e into the feature branch only. Main contains current dev and its newer feedback-preview changes. Preserve all historical migration SQL/snapshots and journal entries byte-for-byte, including main 0059/0060; regenerate the unapplied contact migration as 0061 against the 0060 snapshot.
+- Preserve native Turso-only backup documentation and retired backup code/workflow deletions from main.
+- Verification GET is read-only; an explicit POST confirmation performs verification and delivery. Multipart duplicate message fields are rejected.
+- Deadline exhaustion defers a queued delivery without reporting a provider error. Contact retries receive the first five seconds of the shared 20-second cron budget. The shared scheduler health classifier recognizes contact failures even alongside owner-actionable channel errors.
+- Typed SMTP configuration diagnostics remain visible without logging arbitrary provider details. Textarea keyboard focus and placeholder contrast are corrected.
+- Legal version is 1.18; main's existing planned 22 October 2026 effective date is retained.
+- Rate-limit thresholds and database-retention defaults await the maintainer's decision. Mailbox Inbox/Sent retention remains an operator responsibility; this branch does not change mailbox settings.
+- Synthetic upgrades from dev 0058 and main 0060 use the actual libSQL migrator, preserve existing data, pass integrity/foreign-key checks, are idempotent, and pass the migration-hash verification script. No live database was accessed.

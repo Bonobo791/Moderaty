@@ -437,7 +437,13 @@ export const feedbackDigests = sqliteTable('feedback_digests', {
 		table.windowStart,
 		table.windowEnd
 	),
-	index('feedback_digests_channel_created_idx').on(table.channelId, table.createdAt)
+	index('feedback_digests_channel_created_idx').on(table.channelId, table.createdAt),
+	// The cron drainer probes status='dry-run-pending' every tick (select +
+	// stale finalize) — a partial index keeps that O(pending) instead of
+	// scanning all digest history as the table grows (codex, PR #178).
+	index('feedback_digests_pending_idx')
+		.on(table.id)
+		.where(sql`${table.status} = 'dry-run-pending'`)
 ]);
 
 export const feedbackFindings = sqliteTable('feedback_findings', {

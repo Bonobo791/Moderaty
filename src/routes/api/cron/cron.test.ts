@@ -1018,27 +1018,39 @@ async function seedPendingPreview(channelId: string, opts: { boundary?: string; 
 	return row.id;
 }
 
-test('drains the oldest pending feedback preview under a fresh lease before the rotation claim', async () => {
+test('drains the oldest pending feedback preview under a fresh lease — the rotation waits a tick', async () => {
 	await seedChannel('UC-prev');
 	const digestId = await seedPendingPreview('UC-prev');
 	const preview = { commentsClassified: 2, commentsFailed: 0, pooled: 0, hasMore: false, findings: [] };
-	mocks.runFeedbackPreview.mockResolvedValue(preview);
+	// Capture the live lease mid-run: the claim fingerprint the drainer hands
+	// the runner must be the lease it stamped (cubic, PR #178).
+	let leaseDuringRun: string | null = null;
+	mocks.runFeedbackPreview.mockImplementation(async () => {
+		leaseDuringRun = (await channelRow('UC-prev'))?.leaseExpiresAt ?? null;
+		return preview;
+	});
 	mocks.runChannel.mockResolvedValue(runResult());
 
 	const res = await call({ bearer: 'test-secret' });
 
 	// The pending row is the resume record: the drainer hands the runner the
-	// row's pinned windowStart as the boundary, not a recomputed one.
+	// row's pinned windowStart as the boundary, not a recomputed one — and
+	// binds the run to the claimed fingerprint so a reconnect mid-queue
+	// aborts instead of executing on the wrong org (cubic).
+	expect(leaseDuringRun).toBeTruthy();
 	expect(mocks.runFeedbackPreview).toHaveBeenCalledWith('UC-prev', digestId, {
 		boundary: '2026-05-01T00:00:00.000Z',
-		deadline: expect.any(Number)
+		deadline: expect.any(Number),
+		claim: { orgId: null, refreshTokenEnc: 'enc', leaseExpiresAt: leaseDuringRun }
 	});
 	const body = await res.json();
-	expect(body).toMatchObject({ ok: true, feedbackPreview: preview });
-	// The drainer's lease is released after the run — and the rotation still
-	// claimed and ran the channel normally afterwards.
+	expect(body).toMatchObject({ ok: true, feedbackPreview: preview, results: {} });
+	// The drainer's lease is released after the run.
 	expect((await channelRow('UC-prev'))?.leaseExpiresAt).toBeNull();
-	expect(mocks.runChannel).toHaveBeenCalledWith('UC-prev', expect.objectContaining({ maxPages: 1 }));
+	// One claimed workload per invocation (I10): the drained preview IS this
+	// tick's channel work — a rotation claim would inherit a spent deadline
+	// and log a fake timeout for a channel never moderated (gitar+cubic+codex).
+	expect(mocks.runChannel).not.toHaveBeenCalled();
 });
 
 test('a pending preview on a leased channel is not drained — the plant lease covers its window', async () => {
@@ -1102,16 +1114,19 @@ test('a deadline-aborted preview stays pending for the next tick and releases th
 	expect((await testDb().db.select().from(feedbackDigests).all())[0].status).toBe('dry-run-pending');
 	expect((await channelRow('UC-slow'))?.leaseExpiresAt).toBeNull();
 	expect(res.status).toBe(200);
-	expect((await res.json()).feedbackPreview).toMatchObject({ error: 'timeout' });
-	expect(mocks.runChannel).toHaveBeenCalled();
+	const body = await res.json();
+	expect(body.feedbackPreview).toMatchObject({ error: 'timeout' });
+	expect(body.results).toEqual({});
+	// The drain consumed the budget — the rotation must not inherit the spent
+	// deadline and record a fake timeout for a channel never run (gitar+cubic).
+	expect(mocks.runChannel).not.toHaveBeenCalled();
 });
 
-test('a failed preview drain surfaces in the payload without masking the moderation run', async () => {
+test('a failed preview drain is surfaced and ends the tick — the rotation defers (I10)', async () => {
 	await seedChannel('UC-fail');
 	await seedPendingPreview('UC-fail');
-	const normal = runResult({ fetched: 3 });
 	mocks.runFeedbackPreview.mockRejectedValue(new Error('provider exploded — token-xyz'));
-	mocks.runChannel.mockResolvedValue(normal);
+	mocks.runChannel.mockResolvedValue(runResult());
 	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 	onTestFinished(() => errorSpy.mockRestore());
 
@@ -1119,11 +1134,16 @@ test('a failed preview drain surfaces in the payload without masking the moderat
 
 	expect(res.status).toBe(200);
 	const body = await res.json();
-	expect(body).toMatchObject({ ok: true, results: { 'UC-fail': normal } });
+	expect(body).toMatchObject({ ok: true, results: {} });
 	// Only the sanitized category reaches the payload — provider error bodies
 	// can echo request detail and must never reach the caller (codeant).
 	expect(body.feedbackPreview).toEqual({ error: 'error' });
 	expect(JSON.stringify(body)).not.toContain('token-xyz');
+	// Moderation is deferred, not masked: no claim, no run, no bookkeeping —
+	// the channel keeps its rotation place for the next tick.
+	expect(mocks.runChannel).not.toHaveBeenCalled();
+	expect((await channelRow('UC-fail'))?.lastRunAt).toBeNull();
+	expect((await channelRow('UC-fail'))?.lastRunStatus).toBeNull();
 });
 
 test('the drain is bounded: only the oldest pending preview runs per tick (I10)', async () => {
@@ -1137,4 +1157,100 @@ test('the drain is bounded: only the oldest pending preview runs per tick (I10)'
 
 	expect(mocks.runFeedbackPreview).toHaveBeenCalledTimes(1);
 	expect(mocks.runFeedbackPreview).toHaveBeenCalledWith('UC-b', oldest, expect.objectContaining({ boundary: '2026-05-01T00:00:00.000Z' }));
+});
+
+test('a stale pending row on a leased channel is NOT finalized — a live runner may own it', async () => {
+	// A drainer that claimed the channel just before the 10-minute mark holds
+	// a live lease while the row ages past it; finalizing now would flip a
+	// mid-flight preview to a false 'preview-timeout' — and the runner's
+	// guarded completion then fails on a row that was never dead
+	// (cubic+codex, PR #178).
+	await seedChannel('UC-leased', { leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() });
+	const digestId = await seedPendingPreview('UC-leased', { plantAge: 11 * 60 * 1000 });
+
+	await call({ bearer: 'test-secret' });
+
+	expect(mocks.runFeedbackPreview).not.toHaveBeenCalled();
+	expect(
+		(await testDb().db.select().from(feedbackDigests).where(eq(feedbackDigests.id, digestId)).get())?.status
+	).toBe('dry-run-pending');
+});
+
+test('a stale pending row whose channel lease expired still finalizes', async () => {
+	await seedChannel('UC-exp', { leaseExpiresAt: new Date(Date.now() - 60_000).toISOString() });
+	const digestId = await seedPendingPreview('UC-exp', { plantAge: 11 * 60 * 1000 });
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	onTestFinished(() => errorSpy.mockRestore());
+
+	await call({ bearer: 'test-secret' });
+
+	expect(
+		(await testDb().db.select().from(feedbackDigests).where(eq(feedbackDigests.id, digestId)).get())
+	).toMatchObject({ status: 'dry-run-failed', error: 'preview-timeout' });
+});
+
+test('a stale pending row on a deleted channel still finalizes', async () => {
+	// channel_id is plain text (no FK) — a deleted channel's leftover must
+	// still age out or it pins the pending state forever.
+	const digestId = await seedPendingPreview('UC-gone', { plantAge: 11 * 60 * 1000 });
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	onTestFinished(() => errorSpy.mockRestore());
+
+	await call({ bearer: 'test-secret' });
+
+	expect(
+		(await testDb().db.select().from(feedbackDigests).where(eq(feedbackDigests.id, digestId)).get())
+	).toMatchObject({ status: 'dry-run-failed', error: 'preview-timeout' });
+});
+
+test('the stale sweep is bounded — an outage backlog finalizes across ticks', async () => {
+	// A deployment freeze can leave a backlog of dead pending rows; the sweep
+	// caps per tick so the finalize+log work stays proportional to the bound,
+	// not the whole backlog (codex, PR #178).
+	await seedChannel('UC-stale');
+	for (let i = 0; i < 30; i++) await seedPendingPreview('UC-stale', { plantAge: 11 * 60 * 1000 });
+	mocks.runFeedbackPreview.mockResolvedValue({ commentsClassified: 0, commentsFailed: 0, pooled: 0, hasMore: false, findings: [] });
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	onTestFinished(() => errorSpy.mockRestore());
+
+	const res = await call({ bearer: 'test-secret' });
+
+	const rows = await testDb().db.select().from(feedbackDigests).all();
+	expect(rows.filter((r) => r.status === 'dry-run-failed')).toHaveLength(25);
+	// The leftovers stay pending — the oldest one is still a resume record and
+	// the drainer runs it this same tick; the rest finalize on later ticks.
+	expect(rows.filter((r) => r.status === 'dry-run-pending')).toHaveLength(5);
+	expect(mocks.runFeedbackPreview).toHaveBeenCalledTimes(1);
+	expect((await res.json()).feedbackPreview).toMatchObject({ staleFailed: 25 });
+});
+
+test('a preview drain that spends the budget never claims a channel onto a dead deadline', async () => {
+	// Regression for gitar+cubic PR #178: without the post-drain guard the
+	// rotation claimed a channel on an expired deadline, runChannel returned
+	// a deadline-partial, and runAndRecord stamped a fake failed/timeout —
+	// bumping lastRunAt so the channel lost its rotation place.
+	mocks.env.DRY_RUN = 'false';
+	await seedChannel('UC-prev');
+	await seedPendingPreview('UC-prev');
+	const realNow = Date.now;
+	const dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => realNow());
+	mocks.runFeedbackPreview.mockImplementation(async () => {
+		// The preview legitimately ran to the shared deadline.
+		dateSpy.mockImplementation(() => realNow() + 60_000);
+		return { commentsClassified: 0, commentsFailed: 0, pooled: 0, hasMore: false, findings: [] };
+	});
+	mocks.runChannel.mockResolvedValue(runResult({ dryRun: false, partial: true, stoppedReason: 'deadline' }));
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	onTestFinished(() => {
+		dateSpy.mockRestore();
+		errorSpy.mockRestore();
+	});
+
+	const res = await call({ bearer: 'test-secret' });
+
+	expect(mocks.runChannel).not.toHaveBeenCalled();
+	const row = await channelRow('UC-prev');
+	expect(row?.lastRunAt).toBeNull();
+	expect(row?.lastRunStatus).toBeNull();
+	expect(await res.json()).toMatchObject({ results: {} });
 });

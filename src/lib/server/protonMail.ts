@@ -247,8 +247,12 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 		// Arm with the budget remaining NOW — transport setup already consumed
 		// part of the caller's deadline since timeoutMs was computed at entry;
 		// a stale entry-time value would let the send outlive the deadline.
-		const guardMs =
-			deadline === undefined ? timeoutMs : Math.min(timeoutMs, deadline - Date.now());
+		const callerBudget = deadline === undefined ? Infinity : deadline - Date.now();
+		const guardMs = Math.min(timeoutMs, callerBudget);
+		// Classify the bound that armed the timer. Timer scheduling and the
+		// wall clock can differ at the boundary; a caller-limited guard must
+		// still defer rather than be mislabeled as an SMTP failure.
+		const guardError = callerBudget <= timeoutMs ? new DeadlineExceededError() : new SendGuardExpiredError();
 		timer = setTimeout(() => {
 			// Destroy the real socket BEFORE rejecting so an in-flight DATA
 			// acceptance can never outlive the budget; the send's late
@@ -260,7 +264,7 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 				// Stryker disable next-line StringLiteral: log-only message — mutating it changes no observable behavior
 				console.error('proton mail: transport close failed during timeout teardown');
 			}
-			reject(new SendGuardExpiredError());
+			reject(guardError);
 		}, guardMs);
 	});
 
@@ -283,6 +287,7 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 	} catch (error) {
 		// A spent caller budget is a scheduling condition, not a provider
 		// failure — keep it distinguishable so callers can defer cleanly.
+		if (error instanceof DeadlineExceededError) throw error;
 		if (deadline !== undefined && Date.now() >= deadline) throw new DeadlineExceededError();
 		if (error instanceof SendGuardExpiredError) {
 			// Stryker disable next-line StringLiteral: log-only message — mutating it changes no observable behavior

@@ -669,3 +669,15 @@ test.each(['bad\r\nBcc: a@example.com', 'not-a-message-id', '', 123])('rejects u
 	await expect(sendProtonMailEmail({ ...MESSAGE, messageId } as never)).rejects.toThrow(/message-id/i);
 	expect(mocks.createTransport).not.toHaveBeenCalled();
 });
+
+test('a caller-limited guard remains a deadline when timer scheduling and the wall clock differ', async () => {
+	vi.useFakeTimers();
+	const now = Date.now();
+	vi.spyOn(Date, 'now').mockReturnValue(now);
+	mocks.sendMail.mockReturnValue(new Promise(() => {}));
+	const send = sendProtonMailEmail(MESSAGE, now + 300);
+	const assertion = expect(send).rejects.toBeInstanceOf(DeadlineExceededError);
+	await vi.advanceTimersByTimeAsync(301);
+	await assertion;
+	expect(mocks.close).toHaveBeenCalled();
+});

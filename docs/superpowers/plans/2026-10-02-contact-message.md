@@ -34,7 +34,7 @@
 
 ## Verification and release notes
 
-- Final aggregate: 3,167 tests in 170 files pass; Svelte check reports zero errors and warnings. Node and Netlify builds pass.
+- Final aggregate: 3,168 tests in 170 files pass; Svelte check reports zero errors and warnings. Node and Netlify builds pass.
 - Independent review found a Message-ID collision between databases with the same integer row IDs. A failing regression test reproduced it; the fix hashes the random verification token and passes. The token is never included in the notification.
 - Migration 0061 is additive; tests preserve historical pending/verified rows and verify nullable columns, the retry index, and SQLite integrity. The 0026 → 0028 → 0061 contact migration chain was also checked independently.
 - Apply and verify 0061 on each target database before code relying on the new columns is exercised. No live migration was run.
@@ -57,3 +57,5 @@
 - Legal version is 1.18; main's existing planned 22 October 2026 effective date is retained.
 - Rate-limit thresholds and database-retention defaults await the maintainer's decision. Mailbox Inbox/Sent retention remains an operator responsibility; this branch does not change mailbox settings.
 - Synthetic upgrades from dev 0058 and main 0060 use the actual libSQL migrator, preserve existing data, pass integrity/foreign-key checks, are idempotent, and pass the migration-hash verification script. No live database was accessed.
+
+- CI exposed a caller-deadline classification race in the SMTP guard. A deterministic wall-clock/timer regression fails on the old code; the guard now preserves which budget armed it, while confirmed acceptance remains success. All local checks and both builds pass after the fix.

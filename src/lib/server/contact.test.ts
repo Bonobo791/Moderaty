@@ -47,6 +47,15 @@ afterEach(() => {
 });
 
 describe('parseContactForm', () => {
+	/** Builds the {name, e-mail, opt_in} form body and parses it — the shared submit shape every field case exercises. */
+	function formResult(fields: { name?: string; email?: string; optIn?: boolean }) {
+		const form = new FormData();
+		form.set('name', fields.name ?? 'Fan');
+		form.set('email', fields.email ?? 'fan@example.com');
+		if (fields.optIn !== false) form.set('opt_in', 'on');
+		return parseContactForm(form);
+	}
+
 	test('accepts name, e-mail, and the ticked opt-in box; normalizes case and whitespace', () => {
 		const form = new FormData();
 		form.set('name', '  Fan  ');
@@ -101,11 +110,7 @@ describe('parseContactForm', () => {
 		// The submit path validates the same contract the sender enforces —
 		// a form-accepted address the transport rejects would 500 on every
 		// retry with the pending row already written (codex+cubic+codeant).
-		const form = new FormData();
-		form.set('name', 'Fan');
-		form.set('email', email);
-		form.set('opt_in', 'on');
-		const result = parseContactForm(form);
+		const result = formResult({ email });
 		expect(result.ok).toBe(false);
 		if (!result.ok) expect(result.error).toMatch(/e-mail/i);
 	});
@@ -114,11 +119,11 @@ describe('parseContactForm', () => {
 		// The form and the SMTP recipient guard must agree: a persisted pending
 		// row whose verification e-mail can never send is a permanent 500 loop
 		// (cubic/codex PR #171).
-		const form = new FormData();
-		form.set('name', 'Fan');
-		form.set('email', "o'connor@example.com");
-		form.set('opt_in', 'on');
-		expect(parseContactForm(form)).toEqual({ ok: true, name: 'Fan', email: "o'connor@example.com" });
+		expect(formResult({ email: "o'connor@example.com" })).toEqual({
+			ok: true,
+			name: 'Fan',
+			email: "o'connor@example.com"
+		});
 	});
 
 	test('keeps submitted values on error so the form can re-render them', () => {

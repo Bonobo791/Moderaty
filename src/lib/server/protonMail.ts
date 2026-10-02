@@ -233,6 +233,11 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const guard = new Promise<never>((_, reject) => {
+		// Arm with the budget remaining NOW — transport setup already consumed
+		// part of the caller's deadline since timeoutMs was computed at entry;
+		// a stale entry-time value would let the send outlive the deadline.
+		const guardMs =
+			deadline === undefined ? timeoutMs : Math.min(timeoutMs, deadline - Date.now());
 		timer = setTimeout(() => {
 			// Destroy the real socket BEFORE rejecting so an in-flight DATA
 			// acceptance can never outlive the budget; the send's late
@@ -245,7 +250,7 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 				console.error('proton mail: transport close failed during timeout teardown');
 			}
 			reject(new SendGuardExpiredError());
-		}, timeoutMs);
+		}, guardMs);
 	});
 
 	let info: unknown;

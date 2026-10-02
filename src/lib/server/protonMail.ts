@@ -197,7 +197,15 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 	// Per-send transport — no pooling (MOD-116). secure:false + requireTLS
 	// means STARTTLS is mandatory: the send fails rather than authenticating
 	// on a plaintext socket, and Node's default CA verification stays on.
-	let smtpSocket: Socket | undefined;
+	// A non-pooled transport's close() only emits 'close' — it cannot reach
+	// the live SMTPConnection, and a getSocket {socket} result is dropped
+	// unless it is a proxy `connection` (MOD-238, verified against
+	// nodemailer 10.0.10). Passing the socket through the documented
+	// `socket` connection option makes SMTPConnection itself drive
+	// .connect() on this handle, so the guard can always destroy the real
+	// session socket — the STARTTLS upgrade wraps it in a TLSSocket that
+	// shares the same fd.
+	const smtpSocket = new Socket();
 	const transport = nodemailer.createTransport({
 		host: PROTON_SMTP_HOST,
 		port: PROTON_SMTP_PORT,
@@ -211,22 +219,14 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 		socketTimeout: timeoutMs,
 		dnsTimeout: timeoutMs,
 		tls: { rejectUnauthorized: true },
-		// A non-pooled transport's close() only emits 'close' — it cannot
-		// reach the live SMTPConnection, so an expired guard would reject
-		// while sendMail kept streaming and could still be accepted (codex).
-		// Supplying the socket through nodemailer's getSocket seam keeps a
-		// reference the guard can destroy; after STARTTLS the TLS socket
-		// wraps this handle, so destroy() kills the session either way.
-		getSocket: (_options, callback) => {
-			smtpSocket = new Socket();
-			callback(null, { socket: smtpSocket });
-		}
+		socket: smtpSocket
 	});
 
 	// Setup is synchronous but the budget can still be spent between the
 	// pre-check above and here — recheck so an exhausted caller deadline
 	// never opens an SMTP connection (cubic).
 	if (deadline !== undefined && Date.now() >= deadline) {
+		smtpSocket.destroy();
 		transport.close();
 		throw new DeadlineExceededError();
 	}
@@ -242,7 +242,7 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 			// Destroy the real socket BEFORE rejecting so an in-flight DATA
 			// acceptance can never outlive the budget; the send's late
 			// settlement is swallowed by the race (handled, ignored).
-			smtpSocket?.destroy();
+			smtpSocket.destroy();
 			try {
 				transport.close();
 			} catch {
@@ -279,7 +279,7 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 		throw smtpFailure(error);
 	} finally {
 		if (timer !== undefined) clearTimeout(timer);
-		smtpSocket?.destroy();
+		smtpSocket.destroy();
 		transport.close();
 	}
 	if (deadline !== undefined && Date.now() >= deadline) {

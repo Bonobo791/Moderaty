@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { createServer, type Server, type Socket } from 'node:net';
+import { createServer, Socket, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createSecureContext, TLSSocket, type SecureContext } from 'node:tls';
@@ -282,37 +282,47 @@ test('an unconfirmed result discovered after the deadline still defers', async (
 	await expect(sendProtonMailEmail(MESSAGE, Date.now() + 1_000)).rejects.toBeInstanceOf(DeadlineExceededError);
 });
 
+test('the transport is given a caller-owned socket the guard can always reach', async () => {
+	// A getSocket seam cannot be trusted: send() only merges its result when
+	// it carries a proxy `connection`, silently dropping a bare {socket}
+	// (MOD-238). The `socket` option is the handle SMTPConnection connects on.
+	await sendProtonMailEmail(MESSAGE);
+
+	const opts = mocks.createTransport.mock.calls[0][0] as Record<string, unknown>;
+	expect(opts.socket).toBeInstanceOf(Socket);
+	expect(opts.getSocket).toBeUndefined();
+});
+
 test('the guard destroys the live SMTP socket so a late acceptance can never complete', async () => {
 	vi.useFakeTimers();
-	const sockets: { destroyed: boolean }[] = [];
-	// Mirror real nodemailer: the transport obtains its socket through the
-	// supplied getSocket seam, then holds the provider response until the
-	// socket dies — the only settlement a real server can still deliver.
-	mocks.createTransport.mockImplementationOnce((options: Record<string, unknown>) => ({
-		close: mocks.close,
-		sendMail: vi.fn(
-			() =>
-				new Promise((resolve) => {
-					(options.getSocket as (o: unknown, cb: (e: Error | null, so?: { socket: { destroyed: boolean } }) => void) => void)(
-						{},
-						(_e, so) => sockets.push(so!.socket)
-					);
-					const waiter = setInterval(() => {
-						if (sockets[0].destroyed) {
-							clearInterval(waiter);
-							resolve(acceptedInfo());
-						}
-					}, 5);
-				})
-		)
-	}));
+	// Mirror real nodemailer: the transport drives .connect() on the
+	// caller-supplied socket option, then holds the provider response until
+	// the socket dies — the only settlement a real server can still deliver.
+	let liveSocket: { destroyed: boolean } | undefined;
+	mocks.createTransport.mockImplementationOnce((options: Record<string, unknown>) => {
+		liveSocket = options.socket as { destroyed: boolean };
+		return {
+			close: mocks.close,
+			sendMail: vi.fn(
+				() =>
+					new Promise((resolve) => {
+						const waiter = setInterval(() => {
+							if (liveSocket!.destroyed) {
+								clearInterval(waiter);
+								resolve(acceptedInfo());
+							}
+						}, 5);
+					})
+			)
+		};
+	});
 
 	const promise = sendProtonMailEmail(MESSAGE);
 	const assertion = expect(promise).rejects.toThrow('e-mail could not be sent (send timed out)');
 	await vi.advanceTimersByTimeAsync(11_000);
 	await assertion;
-	expect(sockets).toHaveLength(1);
-	expect(sockets[0].destroyed).toBe(true);
+	expect(liveSocket).toBeDefined();
+	expect(liveSocket!.destroyed).toBe(true);
 });
 
 test('a deadline spent during transport setup never opens an SMTP connection', async () => {
@@ -378,6 +388,8 @@ describe('local SMTP integration', () => {
 		rcptTo: string[];
 		data: string;
 		ended: Promise<void>; // resolves when the client socket fully closes
+		stallTimersDrained: boolean; // set when the close hook clears a pending DATA stall
+		stallFired: boolean; // set when the armed DATA-stall callback actually runs
 	}
 
 	let secureContext: SecureContext;
@@ -388,6 +400,7 @@ describe('local SMTP integration', () => {
 	let sockets: Socket[];
 	let greet: boolean;
 	let authOk: boolean;
+	let stallDataMs: number;
 
 	beforeAll(async () => {
 		realCreateTransport = (await vi.importActual<typeof import('nodemailer')>('nodemailer')).createTransport;
@@ -411,6 +424,7 @@ describe('local SMTP integration', () => {
 		sockets = [];
 		greet = true;
 		authOk = true;
+		stallDataMs = 0;
 		server = createServer((socket) => {
 			sockets.push(socket);
 			const session: SmtpSession = {
@@ -422,7 +436,9 @@ describe('local SMTP integration', () => {
 				mailFrom: null,
 				rcptTo: [],
 				data: '',
-				ended: new Promise((resolve) => socket.once('close', resolve))
+				ended: new Promise((resolve) => socket.once('close', resolve)),
+				stallTimersDrained: false,
+				stallFired: false
 			};
 			sessions.push(session);
 			let tls = false;
@@ -455,6 +471,9 @@ describe('local SMTP integration', () => {
 						write('220 2.0.0 Ready to start TLS');
 						socket.removeListener('data', feed);
 						tlsSocket = new TLSSocket(socket, { isServer: true, secureContext });
+						// An abrupt client RST is the asserted outcome of the
+						// teardown tests — it must not crash the fixture.
+						tlsSocket.on('error', () => {});
 						tlsSocket.on('data', feed);
 						tls = true;
 						return;
@@ -476,10 +495,40 @@ describe('local SMTP integration', () => {
 						if (!tls) return write('530 5.7.0 Must issue a STARTTLS command first');
 						session.rcptTo.push(/<([^>]*)>/.exec(line)?.[1] ?? line);
 						return write('250 2.1.5 OK');
-					case 'DATA':
+					case 'DATA': {
 						if (!tls) return write('530 5.7.0 Must issue a STARTTLS command first');
+						if (stallDataMs > 0) {
+							// Hold the 354 past the caller deadline while emitting
+							// multiline continuations — inbound bytes keep the
+							// client's socketTimeout from firing, so only the
+							// whole-operation guard can end the session (MOD-238).
+							const chatter = setInterval(() => {
+								const w = wire();
+								if (w.destroyed || !w.writable) return clearInterval(chatter);
+								w.write('354-still preparing\r\n');
+							}, 50);
+							const stall = setTimeout(() => {
+								session.stallFired = true;
+								clearInterval(chatter);
+								const w = wire();
+								if (w.destroyed || !w.writable) return;
+								inData = true;
+								write('354 End data with <CR><LF>.<CR><LF>');
+							}, stallDataMs);
+							// A teardown that wins the race drains both pending
+							// callbacks with the session — a surviving timer would
+							// retain the closure and keep firing against dead
+							// sockets after the test ends (codeant).
+							socket.once('close', () => {
+								session.stallTimersDrained = true;
+								clearInterval(chatter);
+								clearTimeout(stall);
+							});
+							return;
+						}
 						inData = true;
 						return write('354 End data with <CR><LF>.<CR><LF>');
+					}
 					case 'RSET':
 					case 'NOOP':
 						return write('250 2.0.0 OK');
@@ -509,6 +558,7 @@ describe('local SMTP integration', () => {
 				}
 			};
 			socket.on('data', feed);
+			socket.on('error', () => {}); // client teardown asserts the close; RST is expected
 			if (greet) write('220 localhost ESMTP test server');
 		});
 		await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -570,7 +620,36 @@ describe('local SMTP integration', () => {
 		const send = sendProtonMailEmail(MESSAGE, Date.now() + 300);
 		await expect(send).rejects.toBeInstanceOf(DeadlineExceededError);
 		expect(sessions).toHaveLength(1);
-		await sessions[0].ended; // transport.close() destroyed the socket
+		await sessions[0].ended; // the guard's socket destroy ended the connection
 		expect(sessions[0].commands).toHaveLength(0);
+	});
+
+	test('a caller deadline mid-DATA kills the session before the server consumes the body', async () => {
+		stallDataMs = 600; // the 354 arrives only after the caller gave up
+		const send = sendProtonMailEmail(MESSAGE, Date.now() + 300);
+		// At the budget boundary the guard may fire a hair before the wall
+		// deadline flips — caller-deadline deferral and provider timeout are
+		// both correct; the contract under test is the teardown.
+		await expect(send).rejects.toThrow(/request deadline exceeded|send timed out/);
+		expect(sessions).toHaveLength(1);
+		const session = sessions[0];
+		expect(session.commands.at(-1)).toBe('DATA'); // torn down awaiting the 354
+		await session.ended; // the socket really died — no lingering session
+		expect(session.data).toBe(''); // the body was never consumed server-side
+	});
+
+	test('a mid-DATA teardown drains the stall timers with the session', async () => {
+		stallDataMs = 600;
+		const send = sendProtonMailEmail(MESSAGE, Date.now() + 300);
+		await expect(send).rejects.toThrow(/request deadline exceeded|send timed out/);
+		expect(sessions).toHaveLength(1);
+		await sessions[0].ended;
+		// The close hook cleared both pending callbacks — nothing stays armed
+		// to retain the session closure or fire against dead sockets.
+		expect(sessions[0].stallTimersDrained).toBe(true);
+		// Outlast the armed stall: a callback that survived clearTimeout
+		// would have flipped stallFired by now (gitar).
+		await new Promise((resolve) => setTimeout(resolve, stallDataMs + 150));
+		expect(sessions[0].stallFired).toBe(false);
 	});
 });

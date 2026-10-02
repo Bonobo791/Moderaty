@@ -24,6 +24,22 @@ const HISTORY_PAGE_SIZE = 25;
 /** Rows with finished, viewable findings — paid digests and completed previews. */
 const SELECTABLE_DIGEST_STATUSES = ['complete', 'dry-run'] as const;
 
+/**
+ * Releases the channel lease only while it is still ours — an expired lease
+ * reclaimed by the drainer or a newer claim is never touched. Loud on
+ * failure, never silent.
+ */
+async function releaseClaimLease(channelId: string, orgId: string, lease: string) {
+	try {
+		await db
+			.update(channels)
+			.set({ leaseExpiresAt: null })
+			.where(and(eq(channels.id, channelId), eq(channels.orgId, orgId), eq(channels.leaseExpiresAt, lease)));
+	} catch (cause) {
+		console.error('feedback dry-run lease release failed for channel:', channelId, cause);
+	}
+}
+
 const DIGEST_FIELDS = {
 	id: feedbackDigests.id,
 	windowStart: feedbackDigests.windowStart,
@@ -314,6 +330,10 @@ export const actions = {
 			digestId = await startFeedbackPreview(params.id, { boundary, claim: claim.identity });
 		} catch (cause) {
 			console.error('feedback dry run failed for channel:', params.id, cause);
+			// Planting failed before the runner could take the lease over —
+			// release OUR lease or the channel reads busy to moderation and
+			// other claims for the remaining ~60s (cubic+codex+codeant).
+			await releaseClaimLease(params.id, user.orgId, claim.lease);
 			return fail(500, { scope: 'feedbackDryRun', attempted: true, error: 'The feedback dry run could not be started. This attempt used your one free preview; no credits were charged. Check the server log.' });
 		}
 		// Lease ownership moves to the runner: the kick executes under the
@@ -323,18 +343,7 @@ export const actions = {
 		// design — the response must not wait on YouTube/OpenAI.
 		void runFeedbackPreview(params.id, digestId, { boundary, deadline: Date.now() + MANUAL_RUN_BUDGET_MS, claim: claim.identity })
 			.catch((cause) => console.error('feedback preview runner failed for channel:', params.id, cause))
-			.finally(async () => {
-				try {
-					// Release only OUR lease: if it expired mid-run and the drainer
-					// claimed the channel, that lease is untouched.
-					await db
-						.update(channels)
-						.set({ leaseExpiresAt: null })
-						.where(and(eq(channels.id, params.id), eq(channels.orgId, user.orgId), eq(channels.leaseExpiresAt, claim.lease)));
-				} catch (cause) {
-					console.error('feedback dry-run lease release failed for channel:', params.id, cause);
-				}
-			});
+			.finally(() => releaseClaimLease(params.id, user.orgId, claim.lease));
 		return {
 			ok: true,
 			scope: 'feedbackDryRun',

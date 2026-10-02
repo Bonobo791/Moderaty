@@ -676,6 +676,11 @@ test('a kicked runner that dies leaves the pending row for the drainer — loud,
 		await vi.waitFor(() => {
 			expect(errorSpy).toHaveBeenCalledWith('feedback preview runner failed for channel:', 'UC1', expect.any(Error));
 		});
+		// And crucially the fire-and-forget catch never touches the row — the
+		// plant stays 'dry-run-pending' so the cron drainer resumes it (the
+		// whole point of the durable pending row, cubic PR #178).
+		const row = (await testDb().db.select().from(feedbackDigests).where(eq(feedbackDigests.channelId, 'UC1')).get())!;
+		expect(row.status).toBe('dry-run-pending');
 	} finally {
 		errorSpy.mockRestore();
 	}
@@ -691,6 +696,10 @@ test('a failed preview plant consumes its allowance, writes no row, and returns 
 		expect(JSON.stringify(result)).not.toContain('token-123');
 		expect(errorSpy).toHaveBeenCalledWith('feedback dry run failed for channel:', 'UC1', expect.any(Error));
 		expect(await testDb().db.select().from(feedbackDigests).where(eq(feedbackDigests.channelId, 'UC1')).all()).toHaveLength(0);
+		// Planting failed before the runner could take the lease over — the
+		// action must release its own claim lease or the channel reads busy to
+		// moderation and other claims for the remaining ~60s (cubic+codex).
+		expect((await testDb().db.select().from(channels).where(eq(channels.id, 'UC1')).get())?.leaseExpiresAt).toBeNull();
 		expect(await postFeedbackAction('dryRun', 'UC1', { months: '3' })).toMatchObject({ status: 409 });
 		expect(mocks.startFeedbackPreview).toHaveBeenCalledTimes(1);
 		expect(mocks.runFeedbackPreview).not.toHaveBeenCalled();

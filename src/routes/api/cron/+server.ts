@@ -149,7 +149,7 @@ async function drainDryRunWindow(channel: typeof channels.$inferSelect, deadline
  * re-evaluates atomically with the write.
  */
 async function finalizeStalePreviews(nowIso: string, staleBefore: string): Promise<number> {
-	const existingChannels = db.select({ id: channels.id }).from(channels);
+	const drainableChannels = db.select({ id: channels.id }).from(channels).where(eq(channels.active, 1));
 	const leasedChannels = db.select({ id: channels.id }).from(channels).where(gte(channels.leaseExpiresAt, nowIso));
 	const staleIds = db
 		.select({ id: feedbackDigests.id })
@@ -158,12 +158,11 @@ async function finalizeStalePreviews(nowIso: string, staleBefore: string): Promi
 			and(
 				eq(feedbackDigests.status, 'dry-run-pending'),
 				or(
-					// An orphaned row can never satisfy the drainer's channel join —
-					// finalize it regardless of attempt state.
-					notInArray(feedbackDigests.channelId, existingChannels),
+					// Rows on inactive or deleted channels can never satisfy the drainer's channel join.
+					notInArray(feedbackDigests.channelId, drainableChannels),
 					// Attempted but never finished = a dead runner's leftover. NULL
-					// attempted_at rows are queued, never claimed — the stale window
-					// must not expire a preview before its first scheduler
+					// attempted_at rows on drainable channels are queued, never claimed —
+					// the stale window must not expire them before their first scheduler
 					// opportunity (codex).
 					and(lt(feedbackDigests.attemptedAt, staleBefore), notInArray(feedbackDigests.channelId, leasedChannels))
 				)

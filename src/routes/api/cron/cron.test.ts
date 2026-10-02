@@ -1,8 +1,9 @@
 import { beforeEach, expect, onTestFinished, test, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { DAY_MS, seedConsent as seedConsentRecord, seedUser, setupTestDb, testDb } from '$lib/server/testdb';
-import { auditLog, channels, consents, moderationActions } from '$lib/server/db/schema';
+import { auditLog, channels, consents, feedbackDigests, moderationActions } from '$lib/server/db/schema';
 import { AUDIT_HANDLE_RETENTION_MS, CONSENT_EMAIL_RETENTION_MS } from '$lib/server/deletion';
+import { DeadlineExceededError } from '$lib/server/http';
 
 // Synthetic credential fixture — same maintainer-approved exception as
 // netlify/cron.test.mjs (2026-07-30, PR #13 review, per AGENTS.md).
@@ -10,6 +11,7 @@ const mocks = vi.hoisted(() => ({
 	env: { CRON_SECRET: 'test-secret', DRY_RUN: 'true' } as Record<string, string | undefined>,
 	runChannel: vi.fn(),
 	generateFeedbackDigest: vi.fn(),
+	runFeedbackPreview: vi.fn(),
 	retryStripeCustomerDeletions: vi.fn(async (_limit: number, _deadline: number) => 0),
 	sweepZeroCreditAccounts: vi.fn(async (_limit: number, _deadline: number) => ({ evaluated: 0, warned: 0, deleted: 0, errors: 0 }))
 }));
@@ -18,7 +20,7 @@ vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 vi.mock('$lib/server/pipeline', () => ({ runChannel: mocks.runChannel }));
 vi.mock('$lib/server/feedbackDigest', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('$lib/server/feedbackDigest')>();
-	return { ...actual, generateFeedbackDigest: mocks.generateFeedbackDigest };
+	return { ...actual, generateFeedbackDigest: mocks.generateFeedbackDigest, runFeedbackPreview: mocks.runFeedbackPreview };
 });
 vi.mock('$lib/server/deletion', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('$lib/server/deletion')>();
@@ -35,7 +37,7 @@ vi.mock('$lib/server/zeroCredits', async (importOriginal) => {
 
 import { GET } from './+server';
 
-setupTestDb(['channels', 'users', 'consents', 'audit_log', 'moderation_actions']);
+setupTestDb(['channels', 'users', 'consents', 'audit_log', 'moderation_actions', 'feedback_digests']);
 
 /** Seeds a user with a consent record accepted at `createdAt`, e-mail retained. */
 async function seedConsent(id: string, createdAt: string) {
@@ -74,6 +76,7 @@ beforeEach(() => {
 	mocks.env.DRY_RUN = 'true';
 	vi.clearAllMocks();
 	mocks.generateFeedbackDigest.mockResolvedValue({ status: 'skipped', reason: 'disabled' });
+	mocks.runFeedbackPreview.mockResolvedValue({ commentsClassified: 0, commentsFailed: 0, pooled: 0, hasMore: false, findings: [] });
 });
 
 function call(secret?: { query?: string; bearer?: string }) {
@@ -998,4 +1001,140 @@ test.each([
 	await call({ bearer: 'test-secret' });
 
 	expectDrainState(await channelRow('UC1'), '2026-06-01T00:00:00.000Z', 'fresh-token');
+});
+
+/** Seeds a planted feedback preview row; `plantAge` backdates the plant stamp. */
+async function seedPendingPreview(channelId: string, opts: { boundary?: string; plantAge?: number } = {}) {
+	const planted = new Date(Date.now() - (opts.plantAge ?? 0)).toISOString();
+	const [row] = await testDb()
+		.db.insert(feedbackDigests)
+		.values({
+			channelId,
+			windowStart: opts.boundary ?? '2026-05-01T00:00:00.000Z',
+			windowEnd: planted,
+			status: 'dry-run-pending'
+		})
+		.returning({ id: feedbackDigests.id });
+	return row.id;
+}
+
+test('drains the oldest pending feedback preview under a fresh lease before the rotation claim', async () => {
+	await seedChannel('UC-prev');
+	const digestId = await seedPendingPreview('UC-prev');
+	const preview = { commentsClassified: 2, commentsFailed: 0, pooled: 0, hasMore: false, findings: [] };
+	mocks.runFeedbackPreview.mockResolvedValue(preview);
+	mocks.runChannel.mockResolvedValue(runResult());
+
+	const res = await call({ bearer: 'test-secret' });
+
+	// The pending row is the resume record: the drainer hands the runner the
+	// row's pinned windowStart as the boundary, not a recomputed one.
+	expect(mocks.runFeedbackPreview).toHaveBeenCalledWith('UC-prev', digestId, {
+		boundary: '2026-05-01T00:00:00.000Z',
+		deadline: expect.any(Number)
+	});
+	const body = await res.json();
+	expect(body).toMatchObject({ ok: true, feedbackPreview: preview });
+	// The drainer's lease is released after the run — and the rotation still
+	// claimed and ran the channel normally afterwards.
+	expect((await channelRow('UC-prev'))?.leaseExpiresAt).toBeNull();
+	expect(mocks.runChannel).toHaveBeenCalledWith('UC-prev', expect.objectContaining({ maxPages: 1 }));
+});
+
+test('a pending preview on a leased channel is not drained — the plant lease covers its window', async () => {
+	// The dryRun action leaves the claim's 60s lease on the channel; the
+	// kicked runner (or that lease's expiry) owns it — the drainer must wait
+	// rather than run the same channel concurrently.
+	await seedChannel('UC-leased', { leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() });
+	await seedPendingPreview('UC-leased');
+	mocks.runChannel.mockResolvedValue(runResult());
+
+	await call({ bearer: 'test-secret' });
+
+	expect(mocks.runFeedbackPreview).not.toHaveBeenCalled();
+	expect((await testDb().db.select().from(feedbackDigests).all())[0].status).toBe('dry-run-pending');
+});
+
+test('a pending preview on a paused channel is skipped, not drained', async () => {
+	await seedChannel('UC-paused', { active: 0 });
+	await seedPendingPreview('UC-paused');
+
+	await call({ bearer: 'test-secret' });
+
+	expect(mocks.runFeedbackPreview).not.toHaveBeenCalled();
+	expect((await testDb().db.select().from(feedbackDigests).all())[0].status).toBe('dry-run-pending');
+});
+
+test('a pending preview older than the stale window is finalized loudly, not retried forever', async () => {
+	// A crashed runner leaves the row pending; ~10 minutes of unclaimed age
+	// means a dead run — finalizing 'dry-run-failed' keeps it out of
+	// transient digest state and tells the user it died (I3 audit trail).
+	await seedChannel('UC-stale');
+	await seedPendingPreview('UC-stale', { plantAge: 11 * 60 * 1000 });
+	mocks.runChannel.mockResolvedValue(runResult());
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	onTestFinished(() => errorSpy.mockRestore());
+
+	const res = await call({ bearer: 'test-secret' });
+
+	expect(mocks.runFeedbackPreview).not.toHaveBeenCalled();
+	const row = (await testDb().db.select().from(feedbackDigests).all())[0];
+	expect(row).toMatchObject({ status: 'dry-run-failed', error: 'preview-timeout' });
+	expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('UC-stale'));
+	expect((await res.json()).feedbackPreview).toMatchObject({ staleFailed: 1 });
+	// The rotation is unaffected.
+	expect(mocks.runChannel).toHaveBeenCalledWith('UC-stale', expect.objectContaining({ maxPages: 1 }));
+});
+
+test('a deadline-aborted preview stays pending for the next tick and releases the lease', async () => {
+	// DeadlineExceededError is the one non-terminal outcome — the row must
+	// remain 'dry-run-pending' so a later tick (or the next deployment)
+	// resumes it (I3).
+	await seedChannel('UC-slow');
+	await seedPendingPreview('UC-slow');
+	mocks.runFeedbackPreview.mockRejectedValue(new DeadlineExceededError());
+	mocks.runChannel.mockResolvedValue(runResult());
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	onTestFinished(() => errorSpy.mockRestore());
+
+	const res = await call({ bearer: 'test-secret' });
+
+	expect((await testDb().db.select().from(feedbackDigests).all())[0].status).toBe('dry-run-pending');
+	expect((await channelRow('UC-slow'))?.leaseExpiresAt).toBeNull();
+	expect(res.status).toBe(200);
+	expect((await res.json()).feedbackPreview).toMatchObject({ error: 'timeout' });
+	expect(mocks.runChannel).toHaveBeenCalled();
+});
+
+test('a failed preview drain surfaces in the payload without masking the moderation run', async () => {
+	await seedChannel('UC-fail');
+	await seedPendingPreview('UC-fail');
+	const normal = runResult({ fetched: 3 });
+	mocks.runFeedbackPreview.mockRejectedValue(new Error('provider exploded — token-xyz'));
+	mocks.runChannel.mockResolvedValue(normal);
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	onTestFinished(() => errorSpy.mockRestore());
+
+	const res = await call({ bearer: 'test-secret' });
+
+	expect(res.status).toBe(200);
+	const body = await res.json();
+	expect(body).toMatchObject({ ok: true, results: { 'UC-fail': normal } });
+	// Only the sanitized category reaches the payload — provider error bodies
+	// can echo request detail and must never reach the caller (codeant).
+	expect(body.feedbackPreview).toEqual({ error: 'error' });
+	expect(JSON.stringify(body)).not.toContain('token-xyz');
+});
+
+test('the drain is bounded: only the oldest pending preview runs per tick (I10)', async () => {
+	await seedChannel('UC-a');
+	await seedChannel('UC-b');
+	const oldest = await seedPendingPreview('UC-b');
+	await seedPendingPreview('UC-a');
+	mocks.runFeedbackPreview.mockResolvedValue({ commentsClassified: 0, commentsFailed: 0, pooled: 0, hasMore: false, findings: [] });
+
+	await call({ bearer: 'test-secret' });
+
+	expect(mocks.runFeedbackPreview).toHaveBeenCalledTimes(1);
+	expect(mocks.runFeedbackPreview).toHaveBeenCalledWith('UC-b', oldest, expect.objectContaining({ boundary: '2026-05-01T00:00:00.000Z' }));
 });

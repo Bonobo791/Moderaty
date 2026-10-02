@@ -522,6 +522,10 @@ export async function createTestDb(): Promise<TestDb> {
 		)`,
 		`CREATE TABLE contact_submissions (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			message TEXT,
+			notification_due_at TEXT,
+			notification_claim TEXT,
+			notification_sent_at TEXT,
 			email TEXT NOT NULL,
 			name TEXT NOT NULL,
 			status TEXT NOT NULL DEFAULT 'pending',
@@ -534,6 +538,7 @@ export async function createTestDb(): Promise<TestDb> {
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE INDEX contact_submissions_status_email_idx ON contact_submissions (status, email)`,
+		`CREATE INDEX contact_submissions_notification_due_idx ON contact_submissions (notification_due_at)`,
 		// Partial unique index (human review): at most one pending row per
 		// e-mail; verified rows free the slot. Mirrors the drizzle schema.
 		`CREATE UNIQUE INDEX contact_submissions_pending_email_unique ON contact_submissions (email) WHERE status = 'pending'`,

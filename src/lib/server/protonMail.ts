@@ -71,6 +71,8 @@ export function loadProtonMailConfig(): ProtonMailConfig {
 
 export interface ProtonMailMessage {
 	toEmail: string;
+	replyTo?: string;
+	messageId?: string;
 	subject: string;
 	textPart: string;
 	htmlPart: string;
@@ -87,6 +89,12 @@ export interface ProtonMailSendResult {
  * header-safe line, and both body parts must be present.
  */
 function validateMessage(message: ProtonMailMessage): void {
+	if (message.replyTo !== undefined && (typeof message.replyTo !== 'string' || !isBareAddress(message.replyTo))) {
+		throw new Error('e-mail could not be sent (invalid reply-to address)');
+	}
+	if (message.messageId !== undefined && (typeof message.messageId !== 'string' || !/^<[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+>$/.test(message.messageId))) {
+		throw new Error('e-mail could not be sent (invalid message-id)');
+	}
 	if (typeof message.toEmail !== 'string' || !isBareAddress(message.toEmail)) {
 		throw new Error('e-mail could not be sent (invalid recipient address)');
 	}
@@ -256,6 +264,8 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 			transport.sendMail({
 				from: { name: config.fromName, address: config.username },
 				to: message.toEmail,
+				...(message.replyTo !== undefined ? { replyTo: message.replyTo } : {}),
+				...(message.messageId !== undefined ? { messageId: message.messageId } : {}),
 				subject: message.subject,
 				text: message.textPart,
 				html: message.htmlPart

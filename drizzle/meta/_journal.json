@@ -414,6 +414,13 @@
       "when": 1790858891707,
       "tag": "0058_recovery_refund_boundary",
       "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "6",
+      "when": 1790979874861,
+      "tag": "0059_contact_message_delivery",
+      "breakpoints": true
     }
   ]
 }

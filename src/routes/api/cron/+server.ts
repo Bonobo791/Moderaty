@@ -8,6 +8,7 @@ import { nullExpiredConsentEmails, nullExpiredHandles, retryGoogleRevocations, r
 import { sweepAutoTopUp } from '$lib/server/billing/autotopup';
 import { sweepStalePendingReversals } from '$lib/server/billing/ledger';
 import { DeadlineExceededError } from '$lib/server/http';
+import { retryContactNotifications } from '$lib/server/contactNotification';
 import { generateFeedbackDigest } from '$lib/server/feedbackDigest';
 import { sweepZeroCreditAccounts, ZERO_CREDIT_SWEEP_BATCH } from '$lib/server/zeroCredits';
 import { runChannel, type ChannelRunResult } from '$lib/server/pipeline';
@@ -202,13 +203,17 @@ const runCronSweeps = async (dryRun: boolean, deadline: number, startedAt: numbe
 	// Bounded per invocation (I10); under DRY_RUN no account is touched.
 	const zeroCredit = await runSweep(dryRun, 'zero-credit account sweep', () => sweepZeroCreditAccounts(ZERO_CREDIT_SWEEP_BATCH, deadline));
 
+	// Verified contact requests retain delivery intent through SMTP failures.
+	// One due notification per tick, under the same bounded run deadline.
+	const contactNotifications = await runSweep(dryRun, 'contact notification retry', () => retryContactNotifications(deadline));
+
 	// A failed sweep must never tick as success: ok reflects every sweep's
 	// outcome (each failure is also surfaced in its own *Error field and
 	// logged). Per-account zero-credit eval failures count too — they ride
 	// an answered 200 by design, so without them in `ok` a permanently
 	// throwing evaluation would retry forever, invisible (codeant).
 	const base = {
-		ok: !consent.error && !handles.error && !autoTopup.error && !stripeDeletions.error && !googleRevocations.error && !stripeScrubs.error && !reversals.error && !zeroCredit.error && !zeroCredit.value?.errors,
+		ok: !consent.error && !handles.error && !autoTopup.error && !stripeDeletions.error && !googleRevocations.error && !stripeScrubs.error && !reversals.error && !zeroCredit.error && !zeroCredit.value?.errors && !contactNotifications.error && !contactNotifications.value?.errors,
 		dryRun,
 		consentEmailsNulled: orZero(consent.value),
 		sweepError: consent.error,
@@ -229,7 +234,10 @@ const runCronSweeps = async (dryRun: boolean, deadline: number, startedAt: numbe
 		zeroCreditWarningsSent: orZero(zeroCredit.value?.warned),
 		zeroCreditAccountsDeleted: orZero(zeroCredit.value?.deleted),
 		zeroCreditItemErrors: orZero(zeroCredit.value?.errors),
-		zeroCreditSweepError: zeroCredit.error
+		zeroCreditSweepError: zeroCredit.error,
+		contactNotificationsSent: orZero(contactNotifications.value?.sent),
+		contactNotificationErrors: orZero(contactNotifications.value?.errors),
+		contactNotificationSweepError: contactNotifications.error
 	};
 	console.info(`cron: sweeps finished in ${Date.now() - startedAt}ms`);
 	return base;

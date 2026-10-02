@@ -173,3 +173,42 @@ describe('contact action', () => {
 		expect(mocks.sendProtonMailEmail).toHaveBeenCalledTimes(2);
 	});
 });
+
+
+test('renders a labeled, bounded optional message textarea with error repopulation', () => {
+	expect(contactPage).toContain('<textarea');
+	expect(contactPage).toContain('for="contact-message"');
+	expect(contactPage).toContain('name="message"');
+	expect(contactPage).toContain('maxlength="2000"');
+	expect(contactPage).toContain('form?.values?.message');
+});
+
+test('retains message on validation and transport failures and persists it on retry', async () => {
+	const message = 'Line one\nLine two';
+	const invalid = await captureAction({ ...VALID, email: 'bad', message });
+	expect(invalid).toMatchObject({ status: 400, data: { values: { message } } });
+	mocks.sendProtonMailEmail.mockRejectedValueOnce(new Error('SMTP failed'));
+	const failed = await captureAction({ ...VALID, message });
+	expect(failed).toMatchObject({ status: 500, data: { values: { message } } });
+	expect((await pendingRows())[0].message).toBe(message);
+	await captureAction({ ...VALID, message: 'Updated\nrequest' });
+	expect(await pendingRows()).toHaveLength(1);
+	expect((await pendingRows())[0].message).toBe('Updated\nrequest');
+});
+
+
+test('consent and privacy disclosures include the optional message and contact inbox', () => {
+	expect(CONTACT_OPT_IN_TEXT).toContain('optional message');
+	const privacy = readFileSync(join(here, '../../lib/components/landing/legal/Privacy.svelte'), 'utf8');
+	expect(privacy).toContain('Contact form: name, e-mail, optional message');
+	expect(privacy).toContain('verified contact requests');
+	expect(contactPage).toContain('contact inbox');
+});
+
+
+test('message field shares input styling and a visible keyboard focus state', () => {
+	const css = readFileSync(join(here, '../../app.css'), 'utf8');
+	expect(css).toContain('input, select, textarea {');
+	expect(css).toContain('textarea:focus-visible');
+	expect(css).toContain('textarea::placeholder');
+});

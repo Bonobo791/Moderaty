@@ -26,6 +26,12 @@
 				<p>This e-mail address was already verified — no further action is needed.</p>
 				<a href="/" class="btn secondary">Back to homepage</a>
 			</div>
+		{:else if data.state === 'delivery_pending'}
+			<div class="card outcome" role="status">
+				<h1 class="outcome-title">E-mail confirmed</h1>
+				<p>Your request is saved, but delivery to our contact inbox is still pending. We will retry automatically. You can reopen this link to check again.</p>
+				<a href="/" class="btn secondary">Back to homepage</a>
+			</div>
 		{:else if data.state === 'expired'}
 			<div class="card outcome">
 				<h1 class="outcome-title">Link expired</h1>

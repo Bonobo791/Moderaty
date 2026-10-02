@@ -1,4 +1,11 @@
-import { expect, test } from 'vitest';
+import { beforeEach, expect, test, vi } from 'vitest';
+
+const mail = vi.hoisted(() => ({ send: vi.fn() }));
+vi.mock('$lib/server/protonMail', async (importOriginal) => ({
+	...(await importOriginal<typeof import('$lib/server/protonMail')>()),
+	sendProtonMailEmail: mail.send
+}));
+beforeEach(() => { mail.send.mockReset(); mail.send.mockResolvedValue({ messageId: '<test@example.com>' }); });
 
 import { eq } from 'drizzle-orm';
 
@@ -74,4 +81,13 @@ test('reports expired for an unverified token past its expiry and does not flip 
 test('reports invalid for an unknown token', async () => {
 	const data = await loadVerify('nope');
 	expect(data).toEqual({ state: 'invalid', email: null });
+});
+
+
+test('SMTP failure returns a safe pending state while preserving verified status', async () => {
+	await seedRow('tok-retry');
+	mail.send.mockRejectedValueOnce(new Error('private provider details'));
+	expect(await loadVerify('tok-retry')).toEqual({ state: 'delivery_pending', email: 'fan@example.com' });
+	const row = await testDb().db.select().from(contactSubmissions).where(eq(contactSubmissions.verificationToken, 'tok-retry')).get();
+	expect(row).toMatchObject({ status: 'verified', notificationDueAt: expect.any(String), notificationSentAt: null });
 });

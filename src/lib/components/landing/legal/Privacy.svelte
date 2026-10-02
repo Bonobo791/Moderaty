@@ -50,8 +50,8 @@
 				<td>Up to 2 years after the last interaction</td>
 			</tr>
 			<tr>
-				<td>Contact form: name, e-mail, and your opt-in consent (the exact checkbox sentence, timestamp, IP, user agent)</td>
-				<td>Respond to your contact request; verify your e-mail address before we reply</td>
+				<td>Contact form: name, e-mail, optional message, and your opt-in consent (the exact checkbox sentence, timestamp, IP, user agent)</td>
+				<td>Respond to your contact request; verify your e-mail address before forwarding your name, e-mail, and message to our contact inbox and replying</td>
 				<td>Consent (Art. 7, I) for the opt-in; legitimate interest (Art. 7, IX) to respond</td>
 				<td>Until the request is resolved; up to 2 years after the last interaction</td>
 			</tr>
@@ -86,7 +86,7 @@
 <h2 id="s5">5. Sharing and Recipients</h2>
 <p>We share personal data only with:</p>
 <ul>
-	<li>(a) Infrastructure and service providers acting as our sub-processors or processors under contract, each limited to what it needs to perform its function: Netlify, Inc. (application hosting and delivery — United States); Turso / ChiselStrike, Inc. (database hosting — United States, with edge replicas only in regions we disclose and record); OpenAI, LLC (transient comment classification only, no retention, no model training — United States); Stripe, Inc. (payment processing — United States); and Proton AG (transactional e-mail — contact-form verification and service notices, including zero-credit account warnings; recipient e-mail address and message content — Switzerland);</li>
+	<li>(a) Infrastructure and service providers acting as our sub-processors or processors under contract, each limited to what it needs to perform its function: Netlify, Inc. (application hosting and delivery — United States); Turso / ChiselStrike, Inc. (database hosting — United States, with edge replicas only in regions we disclose and record); OpenAI, LLC (transient comment classification only, no retention, no model training — United States); Stripe, Inc. (payment processing — United States); and Proton AG (transactional e-mail — contact-form verification, verified contact requests, and service notices, including zero-credit account warnings; recipient e-mail address and message content — Switzerland);</li>
 	<li>(b) Google/YouTube, as the platform through which the Service operates and as an independent controller of its own processing;</li>
 	<li>(c) Public authorities, courts, or regulators, only when required by law, court order, or to protect our rights, users, or third parties, and always limited to what is legally required; and</li>
 	<li>(d) A successor entity in the event of a merger, acquisition, or sale of the Service, subject to this Policy and with prior notice to you.</li>

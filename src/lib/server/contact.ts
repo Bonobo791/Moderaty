@@ -14,6 +14,7 @@ import { and, eq, gt } from 'drizzle-orm';
 import { db } from '$lib/server/db';
 import { contactSubmissions } from '$lib/server/db/schema';
 import { escapeHtml } from './emailText';
+import { deliverContactNotification } from './contactNotification';
 import { isBareAddress, sendProtonMailEmail } from './protonMail';
 
 /**
@@ -22,11 +23,12 @@ import { isBareAddress, sendProtonMailEmail } from './protonMail';
  * (consents pattern). Passed to the page through the load function.
  */
 export const CONTACT_OPT_IN_TEXT =
-	'Yes, contact me at this e-mail address — I agree that Moderaty stores and processes my name and e-mail to respond to my request.';
+	'Yes, contact me at this e-mail address — I agree that Moderaty stores and processes my name, e-mail, and optional message to respond to my request.';
 
 /** Verification link TTL: 7 days, matching invite links. */
 export const CONTACT_VERIFICATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const MAX_NAME_LENGTH = 200;
+export const MAX_MESSAGE_LENGTH = 2000;
 
 // Deliberately simple RFC-5322-ish shape check: no zod (banned), and the
 // real gate is the verification e-mail itself — a wrong address simply never
@@ -37,8 +39,8 @@ export const MAX_NAME_LENGTH = 200;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export type ContactParse =
-	| { ok: true; name: string; email: string }
-	| { ok: false; error: string; name: string; email: string };
+	| { ok: true; name: string; email: string; message: string | null }
+	| { ok: false; error: string; name: string; email: string; message: string };
 
 /**
  * Validates the /contact form payload (name, e-mail, explicit opt-in box).
@@ -51,19 +53,29 @@ export type ContactParse =
 export function parseContactForm(form: FormData): ContactParse {
 	const name = String(form.get('name') ?? '').trim();
 	const email = String(form.get('email') ?? '').trim();
+	const rawMessage = form.get('message');
+	// Browsers serialize textarea line breaks as CRLF; count/store the same
+	// LF characters that maxlength counts in the textarea.
+	const message = typeof rawMessage === 'string' ? rawMessage.replace(/\r\n?/g, '\n') : '';
+	if (rawMessage !== null && typeof rawMessage !== 'string') {
+		return { ok: false, error: 'Please enter your message as text.', name, email, message };
+	}
+	if (message.length > MAX_MESSAGE_LENGTH) {
+		return { ok: false, error: `Message must be ${MAX_MESSAGE_LENGTH} characters or fewer.`, name, email, message };
+	}
 	if (form.get('opt_in') !== 'on') {
-		return { ok: false, error: 'You must tick the opt-in box to be contacted.', name, email };
+		return { ok: false, error: 'You must tick the opt-in box to be contacted.', name, email, message };
 	}
 	if (name.length === 0) {
-		return { ok: false, error: 'Please enter your name.', name, email };
+		return { ok: false, error: 'Please enter your name.', name, email, message };
 	}
 	if (name.length > MAX_NAME_LENGTH) {
-		return { ok: false, error: `Name must be ${MAX_NAME_LENGTH} characters or fewer.`, name, email };
+		return { ok: false, error: `Name must be ${MAX_NAME_LENGTH} characters or fewer.`, name, email, message };
 	}
 	if (email.length === 0 || email.length > 254 || !EMAIL_PATTERN.test(email) || !isBareAddress(email)) {
-		return { ok: false, error: 'Please enter a valid e-mail address.', name, email };
+		return { ok: false, error: 'Please enter a valid e-mail address.', name, email, message };
 	}
-	return { ok: true, name, email: email.toLowerCase() };
+	return { ok: true, name, email: email.toLowerCase(), message: message.trim() ? message : null };
 }
 
 export interface ContactSubmission {
@@ -90,6 +102,7 @@ export interface ContactSubmission {
 export async function createOrReusePendingSubmission(input: {
 	name: string;
 	email: string;
+	message?: string | null;
 	consentText: string;
 	ip: string;
 	userAgent: string;
@@ -127,6 +140,7 @@ export async function createOrReusePendingSubmission(input: {
 				.values({
 					email,
 					name: input.name,
+					message: input.message ?? null,
 					status: 'pending',
 					verificationToken: token,
 					expiresAt,
@@ -174,12 +188,12 @@ export async function createOrReusePendingSubmission(input: {
  */
 async function refreshPendingSubmission(
 	email: string,
-	input: { name: string; consentText: string; ip: string; userAgent: string },
+	input: { name: string; message?: string | null; consentText: string; ip: string; userAgent: string },
 	expiresAt: string
 ): Promise<ContactSubmission | null> {
 	const updated = await db
 		.update(contactSubmissions)
-		.set({ name: input.name, consentText: input.consentText, ip: input.ip, userAgent: input.userAgent, expiresAt })
+		.set({ name: input.name, message: input.message ?? null, consentText: input.consentText, ip: input.ip, userAgent: input.userAgent, expiresAt })
 		.where(and(eq(contactSubmissions.email, email), eq(contactSubmissions.status, 'pending')))
 		.returning();
 	const row = updated[0];
@@ -215,6 +229,7 @@ export function isUniqueViolation(error: unknown): boolean {
 export type ContactVerificationResult =
 	| { status: 'verified'; email: string }
 	| { status: 'already_verified'; email: string }
+	| { status: 'delivery_pending'; email: string }
 	| { status: 'expired'; email: string }
 	| { status: 'invalid' };
 
@@ -227,19 +242,32 @@ export type ContactVerificationResult =
  * @returns The outcome and the verified e-mail address (when known).
  */
 export async function verifyContactToken(token: string): Promise<ContactVerificationResult> {
-	const row = await db
-		.select()
-		.from(contactSubmissions)
-		.where(eq(contactSubmissions.verificationToken, token))
-		.get();
+	const now = new Date().toISOString();
+	// Queue in the same write as verification. The conditional update fences
+	// concurrent clicks and never re-queues historical/already verified rows.
+	const verified = await db.update(contactSubmissions)
+		.set({ status: 'verified', verifiedAt: now, notificationDueAt: now })
+		.where(and(
+			eq(contactSubmissions.verificationToken, token),
+			eq(contactSubmissions.status, 'pending'),
+			gt(contactSubmissions.expiresAt, now)
+		)).returning({ id: contactSubmissions.id });
+	const row = await db.select().from(contactSubmissions)
+		.where(eq(contactSubmissions.verificationToken, token)).get();
 	if (!row) return { status: 'invalid' };
-	if (row.status === 'verified') return { status: 'already_verified', email: row.email };
-	if (Date.parse(row.expiresAt) <= Date.now()) return { status: 'expired', email: row.email };
-	await db
-		.update(contactSubmissions)
-		.set({ status: 'verified', verifiedAt: new Date().toISOString() })
-		.where(eq(contactSubmissions.id, row.id));
-	return { status: 'verified', email: row.email };
+	if (row.status !== 'verified') return { status: 'expired', email: row.email };
+	if (row.notificationDueAt !== null && row.notificationSentAt === null) {
+		try {
+			const delivery = await deliverContactNotification(row.id);
+			if (delivery === 'deferred') return { status: 'delivery_pending', email: row.email };
+		} catch {
+			// Verified data is durable. Show the retry state instead of claiming
+			// the request has reached the inbox while SMTP is unavailable.
+			console.error('[contact] verified request awaiting notification', { id: row.id });
+			return { status: 'delivery_pending', email: row.email };
+		}
+	}
+	return { status: verified.length ? 'verified' : 'already_verified', email: row.email };
 }
 
 export interface VerificationEmail {
@@ -288,6 +316,7 @@ export function buildVerificationEmail(input: { name: string; verifyUrl: string 
 export async function submitContactRequest(input: {
 	name: string;
 	email: string;
+	message?: string | null;
 	consentText: string;
 	ip: string;
 	userAgent: string;

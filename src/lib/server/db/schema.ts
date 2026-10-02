@@ -425,6 +425,10 @@ export const feedbackDigests = sqliteTable('feedback_digests', {
 	pooledCount: integer('pooled_count').notNull().default(0), // feedback comments that fell below the evidence threshold
 	creditsUsed: integer('credits_used'), // metered credits charged for this run; null = unmetered/none
 	error: text('error'), // sanitized failure category only — raw provider detail stays in the server log
+	// First cron-drain claim stamp on a 'dry-run-pending' row; NULL = queued
+	// but never attempted. The stale sweep only expires rows that got a real
+	// opportunity — queue age alone never expires a preview (codex, PR #178).
+	attemptedAt: text('attempted_at'),
 	emailedAt: text('emailed_at'), // set once the digest e-mail went out — RESERVED, unwired until MOD-92; always null today
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [

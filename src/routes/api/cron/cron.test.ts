@@ -1003,15 +1003,17 @@ test.each([
 	expectDrainState(await channelRow('UC1'), '2026-06-01T00:00:00.000Z', 'fresh-token');
 });
 
-/** Seeds a planted feedback preview row; `plantAge` backdates the plant stamp. */
-async function seedPendingPreview(channelId: string, opts: { boundary?: string; plantAge?: number } = {}) {
+/** Seeds a planted feedback preview row; `plantAge`/`attemptedAge` backdate the plant/first-claim stamps. */
+async function seedPendingPreview(channelId: string, opts: { boundary?: string; plantAge?: number; attemptedAge?: number } = {}) {
 	const planted = new Date(Date.now() - (opts.plantAge ?? 0)).toISOString();
+	const attemptedAt = opts.attemptedAge === undefined ? null : new Date(Date.now() - opts.attemptedAge).toISOString();
 	const [row] = await testDb()
 		.db.insert(feedbackDigests)
 		.values({
 			channelId,
 			windowStart: opts.boundary ?? '2026-05-01T00:00:00.000Z',
 			windowEnd: planted,
+			attemptedAt,
 			status: 'dry-run-pending'
 		})
 		.returning({ id: feedbackDigests.id });
@@ -1101,11 +1103,13 @@ test('a pending preview on a paused channel is skipped, not drained', async () =
 });
 
 test('a pending preview older than the stale window is finalized loudly, not retried forever', async () => {
-	// A crashed runner leaves the row pending; ~10 minutes of unclaimed age
-	// means a dead run — finalizing 'dry-run-failed' keeps it out of
-	// transient digest state and tells the user it died (I3 audit trail).
+	// A crashed runner leaves the row pending; ~10 minutes since its first
+	// drain attempt means a dead run — finalizing 'dry-run-failed' keeps it
+	// out of transient digest state and tells the user it died (I3 audit
+	// trail). Plant age alone is NOT the signal — a queued row that never
+	// got a scheduler opportunity must not expire (codex, PR #178).
 	await seedChannel('UC-stale');
-	await seedPendingPreview('UC-stale', { plantAge: 11 * 60 * 1000 });
+	await seedPendingPreview('UC-stale', { plantAge: 12 * 60 * 1000, attemptedAge: 11 * 60 * 1000 });
 	mocks.runChannel.mockResolvedValue(runResult());
 	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 	onTestFinished(() => errorSpy.mockRestore());
@@ -1134,7 +1138,11 @@ test('a deadline-aborted preview stays pending for the next tick and releases th
 
 	const res = await call({ bearer: 'test-secret' });
 
-	expect((await testDb().db.select().from(feedbackDigests).all())[0].status).toBe('dry-run-pending');
+	const abortedRow = (await testDb().db.select().from(feedbackDigests).all())[0];
+	expect(abortedRow.status).toBe('dry-run-pending');
+	// The claim stamped the first-attempt marker — the stale window measures
+	// from it, so the abort still resumes next tick instead of expiring.
+	expect(abortedRow.attemptedAt).toBeTruthy();
 	expect((await channelRow('UC-slow'))?.leaseExpiresAt).toBeNull();
 	expect(res.status).toBe(200);
 	const body = await res.json();
@@ -1189,7 +1197,7 @@ test('a stale pending row on a leased channel is NOT finalized — a live runner
 	// guarded completion then fails on a row that was never dead
 	// (cubic+codex, PR #178).
 	await seedChannel('UC-leased', { leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() });
-	const digestId = await seedPendingPreview('UC-leased', { plantAge: 11 * 60 * 1000 });
+	const digestId = await seedPendingPreview('UC-leased', { plantAge: 12 * 60 * 1000, attemptedAge: 11 * 60 * 1000 });
 
 	await call({ bearer: 'test-secret' });
 
@@ -1201,7 +1209,7 @@ test('a stale pending row on a leased channel is NOT finalized — a live runner
 
 test('a stale pending row whose channel lease expired still finalizes', async () => {
 	await seedChannel('UC-exp', { leaseExpiresAt: new Date(Date.now() - 60_000).toISOString() });
-	const digestId = await seedPendingPreview('UC-exp', { plantAge: 11 * 60 * 1000 });
+	const digestId = await seedPendingPreview('UC-exp', { plantAge: 12 * 60 * 1000, attemptedAge: 11 * 60 * 1000 });
 	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 	onTestFinished(() => errorSpy.mockRestore());
 
@@ -1231,7 +1239,7 @@ test('the stale sweep is bounded — an outage backlog finalizes across ticks', 
 	// caps per tick so the finalize+log work stays proportional to the bound,
 	// not the whole backlog (codex, PR #178).
 	await seedChannel('UC-stale');
-	for (let i = 0; i < 30; i++) await seedPendingPreview('UC-stale', { plantAge: 11 * 60 * 1000 });
+	for (let i = 0; i < 30; i++) await seedPendingPreview('UC-stale', { plantAge: 12 * 60 * 1000, attemptedAge: 11 * 60 * 1000 });
 	mocks.runFeedbackPreview.mockResolvedValue({ commentsClassified: 0, commentsFailed: 0, pooled: 0, hasMore: false, findings: [] });
 	mocks.runChannel.mockResolvedValue(runResult());
 	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -1249,6 +1257,39 @@ test('the stale sweep is bounded — an outage backlog finalizes across ticks', 
 	expect((await res.json()).feedbackPreview).toMatchObject({ staleFailed: 25 });
 	// With no live preview drained, the tick's workload is the rotation run.
 	expect(mocks.runChannel).toHaveBeenCalledWith('UC-stale', expect.objectContaining({ maxPages: 1 }));
+});
+
+test('a never-attempted pending row drains regardless of plant age — queue age is not a crash signal', async () => {
+	// The stale window expires only rows that had a real drain opportunity:
+	// a burst queue or the documented */15 schedule can leave a planted row
+	// unclaimed past PREVIEW_PENDING_STALE_MS through no fault of a runner —
+	// expiring it would burn the user's one-time preview without ever
+	// running it (codex, PR #178).
+	await seedChannel('UC-queued');
+	const digestId = await seedPendingPreview('UC-queued', { plantAge: 30 * 60 * 1000 });
+	mocks.runFeedbackPreview.mockResolvedValue({ commentsClassified: 1, commentsFailed: 0, pooled: 0, hasMore: false, findings: [] });
+
+	const res = await call({ bearer: 'test-secret' });
+
+	expect(mocks.runFeedbackPreview).toHaveBeenCalledWith(
+		'UC-queued',
+		digestId,
+		expect.objectContaining({ boundary: '2026-05-01T00:00:00.000Z' })
+	);
+	expect((await res.json()).feedbackPreview).toMatchObject({ commentsClassified: 1 });
+});
+
+test('a deadline-aborted preview re-drains while its first attempt is still inside the window', async () => {
+	// The attempt anchor is the FIRST claim: a pending row aborted by the
+	// deadline stays drainable inside the stale window (I3 resume), while a
+	// poison row still dies ~PREVIEW_PENDING_STALE_MS after first attempt.
+	await seedChannel('UC-retry');
+	const digestId = await seedPendingPreview('UC-retry', { plantAge: 6 * 60 * 1000, attemptedAge: 5 * 60 * 1000 });
+	mocks.runFeedbackPreview.mockResolvedValue({ commentsClassified: 1, commentsFailed: 0, pooled: 0, hasMore: false, findings: [] });
+
+	await call({ bearer: 'test-secret' });
+
+	expect(mocks.runFeedbackPreview).toHaveBeenCalledWith('UC-retry', digestId, expect.anything());
 });
 
 test('a lease-release failure after a drained preview still counts the tick as worked', async () => {

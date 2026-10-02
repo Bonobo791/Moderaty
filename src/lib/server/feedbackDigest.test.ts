@@ -1567,6 +1567,26 @@ test('a preview aborted by the deadline leaves the pending row for the drainer',
 	expect((await testDb().db.select().from(feedbackDigests).all())[0]).toMatchObject({ id: digestId, status: 'dry-run-pending' });
 });
 
+test('a preview finishing inside the write reserve aborts BEFORE the persistence tx', async () => {
+	// Same reserve as the digest path: classification may still run, but
+	// entering the findings tx with <WRITE_RESERVE_MS left would race the
+	// scheduler's hard abort mid-commit — the preview throws first and the
+	// row stays pending for a retry with real headroom (codex, PR #178).
+	await seedChannel('UC1');
+	mocks.fetchNewComments.mockResolvedValue({
+		comments: [{ id: 'p1', text: 'preview one', publishedAt: '2026-01-01T00:00:00.000Z' }],
+		nextPageToken: null,
+		reachedCursor: true
+	});
+	const digestId = await startFeedbackPreview('UC1', { boundary: '2025-01-01T00:00:00.000Z' });
+
+	await expect(
+		runFeedbackPreview('UC1', digestId, { boundary: '2025-01-01T00:00:00.000Z', deadline: Date.now() + 4_999 })
+	).rejects.toThrow('deadline exceeded');
+	expect((await testDb().db.select().from(feedbackDigests).all())[0]).toMatchObject({ id: digestId, status: 'dry-run-pending' });
+	expect(await testDb().db.select().from(feedbackFindings).all()).toHaveLength(0);
+});
+
 test('a failed preview flips its row to dry-run-failed with the preview error tag', async () => {
 	await seedChannel('UC1');
 	mocks.fetchNewComments.mockRejectedValue(new Error('youtube exploded'));

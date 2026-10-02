@@ -149,6 +149,7 @@ async function drainDryRunWindow(channel: typeof channels.$inferSelect, deadline
  * re-evaluates atomically with the write.
  */
 async function finalizeStalePreviews(nowIso: string, staleBefore: string): Promise<number> {
+	const existingChannels = db.select({ id: channels.id }).from(channels);
 	const leasedChannels = db.select({ id: channels.id }).from(channels).where(gte(channels.leaseExpiresAt, nowIso));
 	const staleIds = db
 		.select({ id: feedbackDigests.id })
@@ -156,8 +157,16 @@ async function finalizeStalePreviews(nowIso: string, staleBefore: string): Promi
 		.where(
 			and(
 				eq(feedbackDigests.status, 'dry-run-pending'),
-				lt(feedbackDigests.windowEnd, staleBefore),
-				notInArray(feedbackDigests.channelId, leasedChannels)
+				or(
+					// An orphaned row can never satisfy the drainer's channel join —
+					// finalize it regardless of attempt state.
+					notInArray(feedbackDigests.channelId, existingChannels),
+					// Attempted but never finished = a dead runner's leftover. NULL
+					// attempted_at rows are queued, never claimed — the stale window
+					// must not expire a preview before its first scheduler
+					// opportunity (codex).
+					and(lt(feedbackDigests.attemptedAt, staleBefore), notInArray(feedbackDigests.channelId, leasedChannels))
+				)
 			)
 		)
 		.orderBy(asc(feedbackDigests.id))
@@ -179,10 +188,11 @@ async function finalizeStalePreviews(nowIso: string, staleBefore: string): Promi
  * Drains ONE planted feedback preview per tick (I10), ahead of the rotation
  * claim — a user is actively waiting on it, the same priority class as a
  * dry-run-boundary channel. The pending row IS the resume record: its
- * windowStart pins the boundary the claimant asked for and its windowEnd is
- * the plant stamp that ages the row out. A row pending past ~10 minutes is
- * a dead runner's leftover, not a queue — it finalizes 'dry-run-failed'
- * loudly instead of retrying or pinning forever. A failure is loud,
+ * windowStart pins the boundary the claimant asked for. A row still pending
+ * ~10 minutes after its first drain attempt is a dead runner's leftover —
+ * it finalizes 'dry-run-failed' loudly instead of retrying or pinning
+ * forever; a row never claimed is a queue, not a corpse, and waits for its
+ * first opportunity (codex). A failure is loud,
  * surfaced in the payload, and must never mask the moderation run.
  * `ran` marks that the preview claimed the tick's workload — the caller
  * ends the invocation rather than running a second channel on a spent
@@ -195,10 +205,11 @@ async function drainPendingFeedbackPreview(nowIso: string, deadline: number): Pr
 	const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, nowIso));
 	// Oldest pending row on a claimable, active channel — a fresh row's own
 	// 60s plant lease keeps it out until expiry (or its kicked runner), and a
-	// busy channel's row waits rather than pinning the queue. Rows past the
-	// stale window are dead leftovers the bounded sweep finalizes across
-	// ticks — draining one would run remote work on a row the sweep already
-	// declared dead (codex).
+	// busy channel's row waits rather than pinning the queue. Rows with a
+	// stale attempt stamp are dead leftovers the bounded sweep finalizes
+	// across ticks — draining one would run remote work on a row the sweep
+	// already declared dead (codex). Never-attempted rows drain at any plant
+	// age: queue position is not a crash signal.
 	const pending = await db
 		.select({ digest: feedbackDigests, channel: channels })
 		.from(feedbackDigests)
@@ -208,7 +219,7 @@ async function drainPendingFeedbackPreview(nowIso: string, deadline: number): Pr
 				eq(feedbackDigests.status, 'dry-run-pending'),
 				eq(channels.active, 1),
 				claimable,
-				gte(feedbackDigests.windowEnd, staleBefore)
+				or(isNull(feedbackDigests.attemptedAt), gte(feedbackDigests.attemptedAt, staleBefore))
 			)
 		)
 		.orderBy(asc(feedbackDigests.id))
@@ -226,6 +237,13 @@ async function drainPendingFeedbackPreview(nowIso: string, deadline: number): Pr
 		return { ran: false, payload: staleFailed ? stalePayload : undefined };
 	}
 	try {
+		// First-attempt marker — the stale window measures from the first drain
+		// claim, not the plant. Retries (deadline aborts) keep the anchor, so a
+		// poison row still dies ~PREVIEW_PENDING_STALE_MS after first contact
+		// instead of retrying forever.
+		if (!pending.digest.attemptedAt) {
+			await db.update(feedbackDigests).set({ attemptedAt: nowIso }).where(eq(feedbackDigests.id, pending.digest.id));
+		}
 		const preview = await runFeedbackPreview(pending.channel.id, pending.digest.id, {
 			boundary: pending.digest.windowStart,
 			deadline,

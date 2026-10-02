@@ -9,9 +9,10 @@ The previous dump/artifact workflow and custom backup tools are retired in this
 branch. That retirement reaches the deployed/default branch only after the human
 merges the change. Repository CI is code validation, not a backup-success signal.
 
-The current organization plan, usable recovery points, operator permissions and
-live restore have **not been verified**. Do not declare recovery ready from this
-document or a passing build. This design relies on Turso and access to its account;
+The owner confirmed the current **Free** plan and accepted its 24-hour PITR window
+on 2026-10-02. Usable recovery points, operator permissions and a live restore
+have **not been verified**. Do not declare recovery ready from this document or
+a passing build. This design relies on Turso and access to its account;
 a provider/account outage or an expired recovery window can prevent recovery.
 
 ## 1. Verify the native recovery window
@@ -29,8 +30,10 @@ quota and require approved connection/access setup. A plan's nominal window does
 not prove that a particular requested timestamp is available. See
 [Turso PITR](https://docs.turso.tech/features/point-in-time-recovery).
 
-Keep the current plan if its confirmed window meets the owner's needs. If Free's
-24 hours is too short, Developer is the lowest listed paid tier: **US$5.99/month
+The current decision is to stay on Free. No paid upgrade or deleted-database
+recovery capability is required for this scope. A paid tier can be reconsidered
+later if needs change; that is a separate decision. For reference, Developer is
+the lowest listed paid tier: **US$5.99/month
 billed monthly**, or $59.88 prepaid yearly ($4.99/month equivalent). Usage, taxes
 and checkout terms may add cost; check the actual account first. No upgrade or
 purchase is approved by this runbook. Sources: [pricing](https://turso.tech/pricing)
@@ -128,6 +131,9 @@ require separate approval.
   mechanisms; they do not prove a real post-restore reconciliation succeeded.
 
 ## 4. Deleted-database recovery is a separate path
+
+This section is reference only and does **not** apply to the selected Free plan.
+Do not delete a database expecting Free PITR to bring it back.
 
 Paid-plan recovery can restore eligible deleted databases for up to five days.
 The organization must have been paid **when deletion occurred**, the operator

@@ -306,8 +306,9 @@ the site exists), local work, and outage recovery.
 
 Use Turso's automatic commit-time backups and native point-in-time recovery.
 No custom backup schedule, export script or workflow artifact is required.
-Free includes a 24-hour recovery window; Developer includes 10 days. Confirm
-the actual account plan and available recovery points before relying on them.
+The owner confirmed Free, with a 24-hour recovery window, on 2026-10-02.
+Usable recovery points and an isolated restore still need verification. Free
+PITR cannot recover a deleted database; no paid upgrade is part of this change.
 
 [docs/BACKUP_RECOVERY.md](docs/BACKUP_RECOVERY.md) covers entitlement checks,
 isolated restore drills, billing reconciliation and human-approved cutover.

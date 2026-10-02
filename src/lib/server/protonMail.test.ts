@@ -325,6 +325,26 @@ test('a deadline spent during transport setup never opens an SMTP connection', a
 	expect(mocks.sendMail).not.toHaveBeenCalled();
 });
 
+test('the guard is armed with the budget left after setup, not the entry-time budget', async () => {
+	vi.useFakeTimers();
+	// createTransport runs after timeoutMs is computed: 4s of an 8s caller
+	// deadline is gone before the timer exists. If the guard still uses the
+	// entry-time budget it fires 4s late and the send outlives the deadline
+	// (codex). Assert the deadline-time teardown, not settlement — a stale
+	// timer would leave the send pending and this test must not hang on it.
+	mocks.createTransport.mockImplementationOnce(() => {
+		vi.setSystemTime(Date.now() + 4_000);
+		return { sendMail: mocks.sendMail, close: mocks.close };
+	});
+	mocks.sendMail.mockReturnValue(new Promise(() => {}));
+
+	const send = sendProtonMailEmail(MESSAGE, Date.now() + 8_000);
+	void send.catch(() => {});
+	await vi.advanceTimersByTimeAsync(4_001); // the caller deadline has now passed
+	expect(mocks.close).toHaveBeenCalled();
+	await expect(send).rejects.toBeInstanceOf(DeadlineExceededError);
+});
+
 test('a late acceptance after the deadline is never reported as success', async () => {
 	vi.useFakeTimers();
 	mocks.sendMail.mockImplementation(

@@ -167,6 +167,24 @@ function checkoutRedirectUrls(appUrl: URL): { success_url: string; cancel_url: s
 }
 
 /**
+ * Fiscal collection on every real Checkout Session (MOD-236): Stripe
+ * natively collects the billing address and a business tax ID on its
+ * supported-types list (BR CPF/CNPJ are not on it — Brazilian recipients
+ * get their identifiers through the MOD-181 fiscal profile instead), so
+ * the org fiscal profile is seeded from processor data instead of
+ * re-asking the customer. The operator test checkout skips these — a smoke
+ * test is not a sale and never feeds the fiscal profile.
+ */
+const fiscalCollection = {
+	billing_address_collection: 'required',
+	tax_id_collection: { enabled: true },
+	// Existing-customer tax-ID sessions require name='auto' or Stripe rejects
+	// session creation; address='auto' persists the required billing address
+	// onto the Customer so the MOD-181 persist step can read it there too.
+	customer_update: { name: 'auto', address: 'auto' }
+} as const;
+
+/**
  * Creates a Stripe Checkout Session for a credit bundle.
  *
  * @param orgId - The organization receiving the credits
@@ -207,6 +225,7 @@ export async function createCreditCheckout(orgId: string, user: SessionUser, bun
 			client_reference_id: orgId,
 			metadata: { org_id: orgId, bundle: bundle.id, credits: String(bundle.credits) },
 			payment_intent_data: { setup_future_usage: 'off_session' },
+			...fiscalCollection,
 			// new URL(path, base) per the repo URL-construction guideline — the
 			// literal {CHECKOUT_SESSION_ID} placeholder must survive verbatim.
 			...checkoutRedirectUrls(appUrl)
@@ -347,6 +366,7 @@ export async function createPlanCheckout(orgId: string, user: SessionUser, plan:
 				client_reference_id: orgId,
 				metadata,
 				...(plan === 'hosted' ? { subscription_data: { metadata } } : {}),
+				...fiscalCollection,
 				...checkoutRedirectUrls(appUrl)
 			},
 			{ idempotencyKey }

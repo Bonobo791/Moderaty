@@ -133,6 +133,31 @@ export async function load({ params, locals, url }) {
 			.orderBy(desc(feedbackDigests.id))
 			.limit(1)
 			.get()) ?? null;
+	// The preview lifecycle row (dry-run-pending/dry-run-failed) is its own
+	// query for the same reason: paging must not hide the running banner,
+	// and the banner must not ride currentAttempt — a pending preview would
+	// otherwise hide a real failed/deferred attempt behind a status the
+	// page cannot render (gitar+codex PR 170). There is only ever one free
+	// preview per channel, so the newest lifecycle row is unambiguous.
+	const previewAttempt =
+		(await db
+			.select(DIGEST_FIELDS)
+			.from(feedbackDigests)
+			.where(
+				and(
+					eq(feedbackDigests.channelId, params.id),
+					inArray(feedbackDigests.status, ['dry-run-pending', 'dry-run-failed']),
+					// A pending preview is LIVE lifecycle state: a paid digest
+					// completing mid-run (id ordering) must not hide the running
+					// banner. Only a terminal failed row follows the
+					// superseded-by-latest-complete rule (gitar+cubic+codex
+					// PR 181).
+					or(eq(feedbackDigests.status, 'dry-run-pending'), gt(feedbackDigests.id, latest?.id ?? -1))
+				)
+			)
+			.orderBy(desc(feedbackDigests.id))
+			.limit(1)
+			.get()) ?? null;
 	// Every finished digest is selectable (?digest=N): a multi-page history
 	// drain writes one digest per bounded batch, and the paid findings on
 	// earlier pages stay reachable instead of being replaced by the newest
@@ -211,6 +236,7 @@ export async function load({ params, locals, url }) {
 		dryRunDeployment: env.DRY_RUN === 'true',
 		digests,
 		currentAttempt,
+		previewAttempt,
 		historyCursor: historyBefore ?? null,
 		historyNext: historyPage.next,
 		latest: latestComplete,

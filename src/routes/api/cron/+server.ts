@@ -15,7 +15,12 @@ import type { RequestHandler } from './$types';
 
 const LEASE_MS = 10 * 60 * 1000; // exceeds one bounded run; expiry alone re-eligibilizes after a crash
 const RUN_BUDGET_MS = 20 * 1000; // below the scheduled trigger's 25s abort, so the server stops first
-const PREVIEW_PENDING_STALE_MS = 10 * 60 * 1000; // a pending preview older than this is a dead runner, not a queue
+// A pending preview whose FIRST attempt is older than this is a dead
+// runner, not a queue. The window must exceed the longest documented cron
+// interval (*/15 production — AGENTS.md) so a deadline-aborted attempt
+// survives to its retry tick; a smaller window lets the sweep finalize the
+// row before the retry ever runs (codex, PR #178).
+const PREVIEW_PENDING_STALE_MS = 20 * 60 * 1000;
 const STALE_PREVIEW_BATCH = 25; // an outage backlog finalizes across ticks — never one unbounded sweep (codex)
 
 /** Constant-time secret comparison; never throws on length mismatch. */
@@ -157,14 +162,21 @@ async function finalizeStalePreviews(nowIso: string, staleBefore: string): Promi
 		.where(
 			and(
 				eq(feedbackDigests.status, 'dry-run-pending'),
+				// A live lease may belong to an in-flight runner — never
+				// finalize under it (cubic+codex).
+				notInArray(feedbackDigests.channelId, leasedChannels),
 				or(
-					// Rows on inactive or deleted channels can never satisfy the drainer's channel join.
+					// A row on a deleted or paused channel can never satisfy the
+					// drainer's join — finalize regardless of attempt state. A
+					// kicked runner would fail ERR_PREVIEW_PAUSED anyway, so
+					// pausing already kills the preview; 'pending forever' is a
+					// lie the feed would render (codex).
 					notInArray(feedbackDigests.channelId, drainableChannels),
-					// Attempted but never finished = a dead runner's leftover. NULL
-					// attempted_at rows on drainable channels are queued, never claimed —
-					// the stale window must not expire them before their first scheduler
-					// opportunity (codex).
-					and(lt(feedbackDigests.attemptedAt, staleBefore), notInArray(feedbackDigests.channelId, leasedChannels))
+					// Attempted but never finished = a dead runner's leftover.
+					// NULL attempted_at rows are queued, never claimed — the
+					// stale window must not expire a preview before its first
+					// scheduler opportunity (codex).
+					lt(feedbackDigests.attemptedAt, staleBefore)
 				)
 			)
 		)
@@ -188,7 +200,8 @@ async function finalizeStalePreviews(nowIso: string, staleBefore: string): Promi
  * claim — a user is actively waiting on it, the same priority class as a
  * dry-run-boundary channel. The pending row IS the resume record: its
  * windowStart pins the boundary the claimant asked for. A row still pending
- * ~10 minutes after its first drain attempt is a dead runner's leftover —
+ * past PREVIEW_PENDING_STALE_MS after its first drain attempt is a dead
+ * runner's leftover —
  * it finalizes 'dry-run-failed' loudly instead of retrying or pinning
  * forever; a row never claimed is a queue, not a corpse, and waits for its
  * first opportunity (codex). A failure is loud,

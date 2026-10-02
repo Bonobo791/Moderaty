@@ -175,7 +175,11 @@ function checkoutRedirectUrls(appUrl: URL): { success_url: string; cancel_url: s
  */
 const fiscalCollection = {
 	billing_address_collection: 'required',
-	tax_id_collection: { enabled: true }
+	tax_id_collection: { enabled: true },
+	// Existing-customer tax-ID sessions require name='auto' or Stripe rejects
+	// session creation; address='auto' persists the required billing address
+	// onto the Customer so the MOD-181 persist step can read it there too.
+	customer_update: { name: 'auto', address: 'auto' }
 } as const;
 
 /**

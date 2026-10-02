@@ -131,7 +131,8 @@ describe('createPlanCheckout', () => {
 			metadata: { org_id: 'org-1', product: 'hosted' },
 			subscription_data: { metadata: { org_id: 'org-1', product: 'hosted' } },
 			billing_address_collection: 'required',
-			tax_id_collection: { enabled: true }
+			tax_id_collection: { enabled: true },
+			customer_update: { name: 'auto', address: 'auto' }
 		}), { idempotencyKey: expect.stringMatching(/^checkout:attempt-hosted:/) });
 	});
 
@@ -216,7 +217,8 @@ describe('createPlanCheckout', () => {
 			line_items: [{ price: 'price_lifetime', quantity: 1 }],
 			metadata: { org_id: 'org-1', product: 'lifetime' },
 			billing_address_collection: 'required',
-			tax_id_collection: { enabled: true }
+			tax_id_collection: { enabled: true },
+			customer_update: { name: 'auto', address: 'auto' }
 		}), { idempotencyKey: expect.stringMatching(/^checkout:attempt-lifetime:/) });
 		expect(mocks.sessionsCreate.mock.calls[0][0].payment_intent_data).toBeUndefined();
 	});
@@ -252,6 +254,7 @@ describe('createCreditCheckout', () => {
 				metadata: { org_id: 'org-1', bundle: 'credits_500', credits: '500' },
 				billing_address_collection: 'required',
 				tax_id_collection: { enabled: true },
+				customer_update: { name: 'auto', address: 'auto' },
 				success_url: 'https://app.example/usage/success?session_id={CHECKOUT_SESSION_ID}',
 				cancel_url: 'https://app.example/usage'
 			}),

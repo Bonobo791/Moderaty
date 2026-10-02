@@ -42,12 +42,14 @@ MOD-191 (refund/cancellation workflow).
 | Auto top-up (credits_500/credits_2000) | off-session `paymentIntents.create` | `payment_intent.succeeded` with `metadata.type = 'auto_topup'` | `payment_intent.amount`, USD |
 | Mercado Pago credit bundle (BRL prices from env) | Checkout Pro preference → Payment | webhook-fetched `status = 'approved'` (`fulfillMercadoPagoPayment`) | `payment.transaction_amount`, BRL |
 
-**Receipt timestamp** = the processor's authoritative payment-confirmation timestamp:
-the paid Charge's `created` (or `invoice.status_transitions.paid_at`) for Stripe
-invoices, the PaymentIntent/Charge `created` behind a Checkout Session, the
-PaymentIntent `created` for top-ups, `date_approved` for Mercado Pago. All timestamps
-are stored in UTC; the competence date derives from the America/São_Paulo calendar
-date (§4).
+**Receipt timestamp** = the payment-confirmation time: the `created` time of the
+successful Stripe event (`invoice.paid`, `payment_intent.succeeded`,
+`checkout.session.completed` when `payment_status` is `paid`, or
+`checkout.session.async_payment_succeeded`), or `invoice.status_transitions.paid_at`
+where applicable; Mercado Pago's `date_approved`. Processor object `created` times
+(PaymentIntent, Charge, Session) predate confirmation for delayed payment methods and
+are never a receipt time. All timestamps are stored in UTC; the competence date
+derives from the America/São_Paulo calendar date (§4).
 
 ## 2. Canonical sale identity (one payment = one sale)
 
@@ -169,9 +171,12 @@ Every USD receipt needs a recorded, reproducible BRL figure — for the note's
 - **Source**: Banco Central **PTAX** (`olinda.bcb.gov.br` — `CotacaoDolarDia`,
   verified 2026-10-01: e.g. 2026-09-30 closing `cotacaoVenda` 5.18090).
 - **Rate**: `cotacaoVenda` (sell) of the **closing bulletin of the receipt date**
-  (America/São_Paulo). If the receipt date has no bulletin — weekend, holiday, or
-  before the ~13:11 BRT close — use the most recent prior business day's closing
-  bulletin. Deterministic: same receipt date → same rate, forever.
+  (America/São_Paulo). If the receipt date is not a business day (weekend or
+  holiday) use the most recent prior business day's closing bulletin. A
+  business-day receipt-date bulletin not yet published at conversion time (before
+  the ~13:11 BRT close) is not a fallback case — it is a missing input inside its
+  own window, so the sale stays `pending` per the blocker rule below.
+  Deterministic: same receipt date → same rate, forever.
 - **Computation**: `valor_brl = ROUND_HALF_UP(amount_usd × rate, 2)` — decimal
   arithmetic on integer cents, never binary float (same rule as
   `paymentAmountCents` in the Mercado Pago webhook).

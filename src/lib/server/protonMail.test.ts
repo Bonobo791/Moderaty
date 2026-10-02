@@ -369,6 +369,7 @@ describe('local SMTP integration', () => {
 		data: string;
 		ended: Promise<void>; // resolves when the client socket fully closes
 		stallTimersDrained: boolean; // set when the close hook clears a pending DATA stall
+		stallFired: boolean; // set when the armed DATA-stall callback actually runs
 	}
 
 	let secureContext: SecureContext;
@@ -416,7 +417,8 @@ describe('local SMTP integration', () => {
 				rcptTo: [],
 				data: '',
 				ended: new Promise((resolve) => socket.once('close', resolve)),
-				stallTimersDrained: false
+				stallTimersDrained: false,
+				stallFired: false
 			};
 			sessions.push(session);
 			let tls = false;
@@ -486,6 +488,7 @@ describe('local SMTP integration', () => {
 								w.write('354-still preparing\r\n');
 							}, 50);
 							const stall = setTimeout(() => {
+								session.stallFired = true;
 								clearInterval(chatter);
 								const w = wire();
 								if (w.destroyed || !w.writable) return;
@@ -624,5 +627,9 @@ describe('local SMTP integration', () => {
 		// The close hook cleared both pending callbacks — nothing stays armed
 		// to retain the session closure or fire against dead sockets.
 		expect(sessions[0].stallTimersDrained).toBe(true);
+		// Outlast the armed stall: a callback that survived clearTimeout
+		// would have flipped stallFired by now (gitar).
+		await new Promise((resolve) => setTimeout(resolve, stallDataMs + 150));
+		expect(sessions[0].stallFired).toBe(false);
 	});
 });

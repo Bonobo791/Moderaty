@@ -4,6 +4,10 @@ import { run } from './backup-lib/common.mjs';
 const workflow = readFileSync(new URL('../.github/workflows/db-backup.yml', import.meta.url), 'utf8');
 
 describe('backup trust boundaries', () => {
+	it('fetches history needed by the existing aggregate test suite', () => {
+		const tests = readFileSync(new URL('../.github/workflows/backup-tests.yml', import.meta.url), 'utf8');
+		expect(tests).toContain('fetch-depth: 0');
+	});
 	it('keeps credentials behind explicit activation and default-branch/environment gates', () => {
 		expect(workflow).toContain("vars.BACKUP_PRODUCTION_ENABLED == 'true'");
 		expect(workflow).toContain('github.event.repository.default_branch');

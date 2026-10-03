@@ -229,8 +229,12 @@ One-time setup (human, in the Coolify dashboard):
 
 5. **Scheduled Task** (Scheduled Tasks → application): expression `* * * * *`,
    command `APP_URL=http://127.0.0.1:3000 node scripts/dev-cron.mjs --once`.
-   One task replaces the Netlify Scheduled Function; N channels ⇒ each
-   channel scanned every N minutes, exactly as on Netlify. The script exits
+   One task replaces the Netlify Scheduled Function. Without pending feedback
+   previews, N channels rotate about every N minutes. When previews and live
+   moderation are both ready, they alternate slots, so the live rotation is
+   about 2N minutes; neither class can monopolize ticks. See
+   [cron workload fairness](cron-workload-fairness.md) for leases and retry expiry.
+   The script exits
    non-zero (→ Coolify's task-failure notification) only for
    operator-actionable failures: the endpoint unreachable/non-OK, a failed
    sweep (`ok:false`), `budgetExhausted`, a lost run-health write, or a

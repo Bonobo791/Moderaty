@@ -59,6 +59,12 @@ export const welcomeEmails = sqliteTable('welcome_emails', {
 	check('welcome_emails_state', sql`${table.state} IN ('never_sent', 'historical_unknown', 'queued', 'claimed', 'in_flight', 'accepted', 'retryable_failure', 'permanent_failure', 'suppressed', 'ambiguous')`)
 ]);
 
+// Recipient-independent pacing contains no user identity and survives account erasure.
+export const welcomeCampaigns = sqliteTable('welcome_campaigns', {
+	campaign: text('campaign').primaryKey(),
+	nextAttemptAt: text('next_attempt_at').notNull()
+});
+
 export const sessions = sqliteTable('sessions', {
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	id: text('id').primaryKey(), // random 32-byte hex token; also the cookie value

@@ -1,5 +1,6 @@
 // Shared enrollment/eligibility for transactional signup and operator backfill.
 import { randomBytes } from 'node:crypto';
+import { domainToASCII } from 'node:url';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { db } from './db';
@@ -28,11 +29,11 @@ export function sendingEnabled(): boolean {
 function validWelcomeAddress(email: string): boolean {
 	if (!isBareAddress(email)) return false;
 	const domain = email.split('@')[1]?.toLowerCase();
-	if (!domain || domain === 'accounts.google.com' || domain.includes('..')) return false;
+	if (!domain || domain === 'accounts.google.com' || domain.includes('..') || domainToASCII(domain) !== domain) return false;
 	const labels = domain.split('.');
 	if (labels.length < 2) return false;
 	if (!labels.every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) return false;
-	return /^[a-z]{2,63}$/.test(labels[labels.length - 1]);
+	return /^(?:[a-z]{2,63}|xn--[a-z0-9-]+)$/.test(labels[labels.length - 1]);
 }
 
 /** Same recipient policy at enrollment, preview/backfill, and immediately before SMTP. */

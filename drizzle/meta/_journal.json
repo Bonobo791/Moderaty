@@ -442,6 +442,13 @@
       "when": 1791045006660,
       "tag": "0062_hosted_welcome_email",
       "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "6",
+      "when": 1791058492001,
+      "tag": "0063_welcome_campaign_pacing",
+      "breakpoints": true
     }
   ]
 }

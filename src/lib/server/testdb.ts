@@ -599,5 +599,6 @@ export async function createTestDb(): Promise<TestDb> {
 		`CREATE INDEX feedback_history_comments_channel_idx ON feedback_history_comments (channel_id)`
 	]);
 	await client.executeMultiple(readFileSync(new URL('../../../drizzle/0062_hosted_welcome_email.sql', import.meta.url), 'utf8'));
+	await client.executeMultiple(readFileSync(new URL('../../../drizzle/0063_welcome_campaign_pacing.sql', import.meta.url), 'utf8'));
 	return { db: drizzle(client, { schema }), client };
 }

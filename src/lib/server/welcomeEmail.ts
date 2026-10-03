@@ -1,14 +1,14 @@
 // First service welcome only. Historical unknown is not a new ambiguous send.
 import { randomBytes } from 'node:crypto';
-import { and, asc, eq, inArray, isNull, lte, sql, type SQL } from 'drizzle-orm';
+import { and, asc, eq, gt, inArray, isNull, lte, sql, type SQL } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
-import { db } from './db';
-import { channels, memberships, users, welcomeEmails } from './db/schema';
+import { db, withBusyRetry } from './db';
+import { channels, memberships, users, welcomeCampaigns, welcomeEmails } from './db/schema';
 import { sendProtonMailEmail, type ProtonMailMessage } from './protonMail';
 import { buildWelcomeEmail, welcomeAppOrigin, type WelcomeTeam } from './welcomeEmailTemplate';
 import { WELCOME_CAMPAIGN, exclusion, key, sendingEnabled, type WelcomeRow, type Account } from './welcomeEnrollment';
-import { recordWelcomeAcceptance, recordWelcomeFailure, WELCOME_TRANSPORT_OUTAGES, type WelcomeDelivery } from './welcomeDeliveryOutcome';
-import { welcomeQueueStatus } from './welcomeBackfill';
+import { recordWelcomeAcceptance, recordWelcomeFailure, type WelcomeDelivery } from './welcomeDeliveryOutcome';
+import { WelcomePreparationError, welcomeFailureCategory } from './welcomeDiagnostics';
 export { WELCOME_CAMPAIGN, enqueueWelcome, isOfficialHosted } from './welcomeEnrollment';
 export { previewWelcomeBackfill, backfillWelcomeBatch, welcomeQueueStatus } from './welcomeBackfill';
 export type { WelcomeDelivery } from './welcomeDeliveryOutcome';
@@ -24,27 +24,24 @@ const due = (now: string) => and(eq(welcomeEmails.campaign, WELCOME_CAMPAIGN),
 	isNull(welcomeEmails.suppressionReason), lte(welcomeEmails.nextRetryAt, now));
 
 async function claimWelcome(userId: string) {
-	const now = new Date().toISOString();
-	const claimToken = randomBytes(16).toString('hex');
-	const [claimed] = await db.update(welcomeEmails).set({ state: 'claimed', claimToken, leaseExpiresAt: new Date(Date.now() + LEASE_MS).toISOString() })
-		.where(and(key(userId), due(now),
-			// One campaign-wide slot. Transport-wide faults pause every
-			// recipient until the failed row's durable cooldown expires.
-			sql`NOT EXISTS (SELECT 1 FROM welcome_emails AS busy WHERE busy.campaign = ${WELCOME_CAMPAIGN} AND (
-				(busy.state IN ('claimed', 'in_flight') AND busy.lease_expires_at > ${now})
-				OR busy.last_attempt_at > ${new Date(Date.now() - THROTTLE_MS).toISOString()}
-				OR (busy.state = 'queued' AND busy.last_error IN (${sql.join(WELCOME_TRANSPORT_OUTAGES.map(category => sql`${category}`), sql`, `)})
-					AND busy.accepted_at IS NULL AND busy.suppression_reason IS NULL AND busy.next_retry_at > ${now})
-			))`
-		)).returning();
-	return claimed;
+	return withBusyRetry(() => db.transaction(async tx => {
+		const now = new Date().toISOString();
+		const leaseExpiresAt = new Date(Date.now() + LEASE_MS).toISOString();
+		const claimToken = randomBytes(16).toString('hex');
+		await tx.insert(welcomeCampaigns).values({ campaign: WELCOME_CAMPAIGN, nextAttemptAt: now }).onConflictDoNothing();
+		const [claimed] = await tx.update(welcomeEmails).set({ state: 'claimed', claimToken, leaseExpiresAt })
+			.where(and(key(userId), due(now), sql`EXISTS (SELECT 1 FROM welcome_campaigns
+				WHERE campaign = ${WELCOME_CAMPAIGN} AND next_attempt_at <= ${now})`)).returning();
+		if (claimed) await tx.update(welcomeCampaigns).set({ nextAttemptAt: leaseExpiresAt }).where(eq(welcomeCampaigns.campaign, WELCOME_CAMPAIGN));
+		return claimed;
+	}));
 }
 
 async function contentTeams(userId: string): Promise<WelcomeTeam[]> {
 	const rows = await db.select({ role: memberships.role, channelId: channels.id, active: channels.active, used: channels.moderationDryRunUsedAt })
 		.from(memberships).leftJoin(channels, eq(channels.orgId, memberships.orgId)).where(eq(memberships.userId, userId));
 	return rows.map(row => {
-		if (!['owner', 'admin', 'member'].includes(row.role)) throw new Error('Unknown welcome membership role');
+		if (!['owner', 'admin', 'member'].includes(row.role)) throw new WelcomePreparationError('invalid_membership');
 		return { role: row.role as WelcomeTeam['role'], channels: row.channelId ? [{ active: row.active === 1, previewUsed: row.used !== null }] : [] };
 	});
 }
@@ -53,11 +50,16 @@ type Submission = { owned: SQL | undefined; fresh: WelcomeRow; message: ProtonMa
 type Preparation = Submission | { outcome: WelcomeDelivery };
 
 async function startSubmission(owned: SQL | undefined, account: Account, fresh: WelcomeRow): Promise<boolean> {
-	const started = await db.update(welcomeEmails).set({ state: 'in_flight', attempts: fresh.attempts + 1, lastAttemptAt: new Date().toISOString(), lastError: null })
-		.where(and(owned, eq(welcomeEmails.state, 'claimed'), isNull(welcomeEmails.suppressionReason), isNull(welcomeEmails.acceptedAt),
-			sql`EXISTS (SELECT 1 FROM users WHERE users.id = ${account.id} AND users.email = ${account.email} AND users.google_sub = ${account.googleSub})`))
-		.returning({ userId: welcomeEmails.userId });
-	return started.length === 1;
+	return withBusyRetry(() => db.transaction(async tx => {
+		const now = new Date().toISOString();
+		const started = await tx.update(welcomeEmails).set({ state: 'in_flight', attempts: fresh.attempts + 1, lastAttemptAt: now, lastError: null })
+			.where(and(owned, eq(welcomeEmails.state, 'claimed'), gt(welcomeEmails.leaseExpiresAt, now), isNull(welcomeEmails.suppressionReason), isNull(welcomeEmails.acceptedAt),
+				sql`EXISTS (SELECT 1 FROM users WHERE users.id = ${account.id} AND users.email = ${account.email} AND users.google_sub = ${account.googleSub})`))
+			.returning({ userId: welcomeEmails.userId });
+		if (started.length !== 1) return false;
+		await tx.update(welcomeCampaigns).set({ nextAttemptAt: new Date(Date.now() + THROTTLE_MS).toISOString() }).where(eq(welcomeCampaigns.campaign, WELCOME_CAMPAIGN));
+		return true;
+	}));
 }
 
 async function deferPreparation(owned: SQL | undefined): Promise<Preparation> {
@@ -81,8 +83,16 @@ async function prepareWelcome(userId: string, deadline: number, appUrl: string):
 	if (!sendingEnabled() || Date.now() >= deadline) return deferPreparation(owned);
 	// Read advisory channel/role context last, as close to the submission
 	// boundary as possible. The UI still enforces current permissions/usage.
-	const teams = await contentTeams(userId);
-	const message = buildWelcomeEmail({ email: account!.email, displayName: account!.displayName, messageId: fresh.messageId, appUrl, teams });
+	let message: ProtonMailMessage;
+	try {
+		const teams = await contentTeams(userId);
+		message = buildWelcomeEmail({ email: account!.email, displayName: account!.displayName, messageId: fresh.messageId, appUrl, teams });
+	} catch (cause) {
+		if (cause instanceof WelcomePreparationError && cause.category === 'invalid_membership') {
+			await db.update(welcomeEmails).set({ state: 'suppressed', suppressionReason: cause.category, lastError: cause.category, nextRetryAt: null, claimToken: null, leaseExpiresAt: null }).where(and(owned, eq(welcomeEmails.state, 'claimed')));
+		}
+		throw cause;
+	}
 	if (!await startSubmission(owned, account!, fresh)) return { outcome: 'deferred' };
 	return { owned, fresh, message };
 }
@@ -90,7 +100,9 @@ async function prepareWelcome(userId: string, deadline: number, appUrl: string):
 /** Fenced claim + fresh eligibility, followed by one bounded SMTP attempt. */
 export async function deliverWelcome(userId: string, deadline: number): Promise<WelcomeDelivery> {
 	if (!sendingEnabled() || Date.now() >= deadline) return 'deferred';
-	const appUrl = welcomeAppOrigin(env.APP_URL ?? '');
+	let appUrl: string;
+	try { appUrl = welcomeAppOrigin(env.APP_URL ?? ''); }
+	catch { throw new WelcomePreparationError('configuration'); }
 	const prepared = await prepareWelcome(userId, deadline, appUrl);
 	if ('outcome' in prepared) return prepared.outcome;
 	let result;
@@ -128,18 +140,23 @@ async function attemptNextWelcome(deadline: number): Promise<WelcomeDelivery> {
 		.orderBy(asc(welcomeEmails.nextRetryAt), asc(welcomeEmails.userId)).limit(1).get();
 	if (!next || Date.now() >= deadline) return 'deferred';
 	try { return await deliverWelcome(next.userId, deadline); }
-	catch { console.error(DIAGNOSTIC.processing); return 'failed'; }
+	catch (cause) { console.error(DIAGNOSTIC.processing, { category: welcomeFailureCategory(cause) }); return 'failed'; }
 }
 
 /** Existing authenticated cron calls this. At most one send and 25 crash recoveries. */
 export async function sweepWelcomeEmails(deadline: number) {
 	const counts = { accepted: 0, errors: 0, ambiguous: 0, suppressed: 0 };
 	if (!sendingEnabled() || Date.now() >= deadline) return counts;
-	counts.ambiguous = (await welcomeQueueStatus()).ambiguous ?? 0;
-	counts.ambiguous += await recoverExpiredClaims(deadline);
+	const unresolved = await db.select({ userId: welcomeEmails.userId }).from(welcomeEmails)
+		.where(and(eq(welcomeEmails.campaign, WELCOME_CAMPAIGN), eq(welcomeEmails.state, 'ambiguous'))).limit(1).get();
+	counts.ambiguous = unresolved ? 1 : 0;
+	if (Date.now() >= deadline) return counts;
+	counts.ambiguous = Math.min(1, counts.ambiguous + await recoverExpiredClaims(deadline));
+	if (Date.now() >= deadline) return counts;
 	const outcome = await attemptNextWelcome(deadline);
 	const counter: Partial<Record<WelcomeDelivery, keyof typeof counts>> = { accepted: 'accepted', failed: 'errors', ambiguous: 'ambiguous', suppressed: 'suppressed' };
 	const metric = counter[outcome];
-	if (metric) counts[metric]++;
+	if (metric === 'ambiguous') counts.ambiguous = 1;
+	else if (metric) counts[metric]++;
 	return counts;
 }

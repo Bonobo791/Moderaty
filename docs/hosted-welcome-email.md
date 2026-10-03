@@ -36,7 +36,11 @@ no prior email was sent. This is reflected in the durable `source` value:
 
 The current main schema and repository history contained no first-welcome record.
 Migration 0062 creates the separate outbox without updating/enrolling any existing
-user. A missing row is counted as historical unknown by the preview. Previously
+user. Migration 0063 adds recipient-independent campaign pacing, carrying forward
+any recent attempt, live lease or transport-outage cooldown without enrolling
+users. The campaign row contains only the campaign key and next allowed attempt
+time; account deletion cannot erase this pacing fence. A missing row is counted as
+historical unknown by the preview. Previously
 recorded success (`state=accepted` or `accepted_at` present), suppression, terminal
 failure, and uncertain new submissions are excluded from automatic backfill.
 A template-version change never changes the campaign key or reenrolls accounts.
@@ -70,13 +74,15 @@ and consent evidence are not copied into the outbox.
 - `ambiguous`: manual reconciliation required; never an automatic retry candidate
 
 A fenced atomic claim and campaign-wide throttle allow at most one SMTP attempt
-per 60 seconds, including overlapping cron invocations. One cron tick attempts at
+per 60 seconds, including overlapping cron invocations and account deletion
+during submission. Claiming reserves the campaign slot transactionally; the
+pre-send transition refreshes the interval and rejects expired claims. One cron tick attempts at
 most one recipient and recovers at most 25 stale claims, within its five-second
 share of the existing 20-second budget. Retry delays for definite failures are
 60s, 120s, 240s, 480s, then terminal after the fifth failed attempt. DNS, explicit transient SMTP rejection and proven pre-DATA errors
 are safe retry categories. Configuration/authentication, TLS and DNS outages instead preserve
 the recipient attempt count and pause the entire campaign for 15 minutes through
-a durable cooldown. They cannot permanently exhaust the queued users while an
+a recipient-independent durable cooldown. They cannot permanently exhaust the queued users while an
 operator repairs the transport. A deadline proven to occur before `sendMail` defers
 without consuming an attempt; a deadline during transport is uncertain.
 
@@ -90,7 +96,12 @@ not guarantee provider deduplication, exactly-once SMTP, or inbox delivery.
 Immediately before submission the worker rereads live account/recipient, cohort,
 suppression, memberships and channel preview state, then fences the write against
 account changes and the claim. Deletion erases the outbox in the account-deletion
-transaction. A deletion/suppression committed after SMTP has started cannot recall
+transaction. Invalid stored membership roles suppress that welcome with
+`invalid_membership`, release its claim, and emit a fixed diagnostic category;
+operators must repair the membership before deliberately requeueing it. Other
+preparation/persistence failures emit fixed, bounded diagnostics without raw SQL,
+addresses or credentials. Valid IDNA ASCII-label domains remain eligible.
+A deletion/suppression committed after SMTP has started cannot recall
 a message already submitted; there is no cross-system transaction with SMTP.
 
 ## Copy review and local previews
@@ -172,7 +183,7 @@ These steps are **human rollout gates**, not actions performed by the implementa
 1. Review copy, the branch diff, migration and existing-user preview policy
 2. Verify the actual deployed migration journal/history, prepare a recoverable
    backup through the existing operator process, then apply and verify migration
-   0062 before exercising the new code; confirm key, indexes and integrity checks
+   0062 and 0063 before exercising the new code; confirm key, indexes and integrity checks
 3. Validate in an isolated synthetic staging database, with sending disabled;
    exercise signup rollback/duplicate submission and count-only backfill
 4. Obtain separate authorization for a controlled external-inbox test and any
@@ -182,7 +193,9 @@ These steps are **human rollout gates**, not actions performed by the implementa
    and enable delivery only after explicit rollout authorization
 6. Monitor cron `welcomeEmailsAccepted`, `welcomeEmailErrors`,
    `welcomeEmailAmbiguous`, `welcomeEmailSuppressed`, `welcomeEmailSweepError`, and
-   state counts. Ambiguous rows stay visible in subsequent enabled cron health
+   operator state counts. `welcomeEmailAmbiguous` is a bounded presence flag
+   (0 or 1), not the queue total. Ambiguous rows stay visible in subsequent
+   enabled cron health without scanning/counting the complete campaign
 7. Stop with `WELCOME_EMAIL_ENABLED=false` if errors, uncertainty, bad copy or
    recipient issues appear. The switch prevents new claims; it cannot recall an
    attempt already in progress. Resolve the cause before resuming

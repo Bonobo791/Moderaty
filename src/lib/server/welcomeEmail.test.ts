@@ -7,11 +7,11 @@ const mocks = vi.hoisted(() => ({
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 vi.mock('./protonMail', async (original) => ({ ...(await original<typeof import('./protonMail')>()), sendProtonMailEmail: mocks.send }));
 import { setupTestDb, testDb, seedUser } from './testdb';
-import { channels, memberships, organizations, users, welcomeEmails } from './db/schema';
+import { channels, memberships, organizations, users, welcomeCampaigns, welcomeEmails } from './db/schema';
 import { enqueueWelcome, deliverWelcome, sweepWelcomeEmails, previewWelcomeBackfill, backfillWelcomeBatch, WELCOME_CAMPAIGN } from './welcomeEmail';
 import { buildWelcomeEmail } from './welcomeEmailTemplate';
 import { ProtonMailSubmissionError, ProtonMailPreSubmissionDeadlineError, ProtonMailConfigurationError } from './protonMail';
-setupTestDb(['users', 'organizations', 'memberships', 'channels', 'welcome_emails']);
+setupTestDb(['users', 'organizations', 'memberships', 'channels', 'welcome_emails', 'welcome_campaigns']);
 beforeEach(() => {
  mocks.env.MODERATY_DEPLOYMENT = 'official-hosted'; mocks.env.WELCOME_EMAIL_ENABLED = 'true'; mocks.env.APP_URL = 'https://moderaty.com'; mocks.env.DRY_RUN = 'false';
  mocks.send.mockReset().mockResolvedValue({ messageId: '<accepted@moderaty.com>' });
@@ -19,7 +19,10 @@ beforeEach(() => {
 const row = (id = 'one') => testDb().db.select().from(welcomeEmails).where(and(eq(welcomeEmails.userId, id), eq(welcomeEmails.campaign, WELCOME_CAMPAIGN))).get();
 async function queued(id = 'one') { await seedUser(id); await enqueueWelcome(testDb().db, id, 'signup'); return (await row(id))!; }
 const budget = () => Date.now() + 10_000;
-async function due(id = 'one') { await testDb().db.update(welcomeEmails).set({ nextRetryAt: new Date(0).toISOString(), lastAttemptAt: new Date(0).toISOString() }).where(eq(welcomeEmails.userId, id)); }
+async function due(id = 'one') {
+ await testDb().db.update(welcomeEmails).set({ nextRetryAt: new Date(0).toISOString(), lastAttemptAt: new Date(0).toISOString() }).where(eq(welcomeEmails.userId, id));
+ await testDb().db.update(welcomeCampaigns).set({ nextAttemptAt: new Date(0).toISOString() });
+}
 
 test('committed queue is unique per campaign, version edits do not reenroll, acceptance follows SMTP', async () => {
  await queued(); await enqueueWelcome(testDb().db, 'one', 'signup');
@@ -119,8 +122,18 @@ test('copy escapes personalization and accurately distinguishes channel setup, u
 });
 
 test('global throttle prevents multiple recipients across overlapping cron ticks', async () => {
- await queued('one'); await queued('two'); await deliverWelcome('one', budget());
- expect(await deliverWelcome('two', budget())).toBe('deferred'); expect(mocks.send).toHaveBeenCalledTimes(1);
+ await queued('one'); await queued('two');
+ let release!: () => void; let started!: () => void;
+ const ready = new Promise<void>(resolve => { started = resolve; });
+ mocks.send.mockImplementationOnce(async () => {
+  started(); await new Promise<void>(resolve => { release = resolve; });
+  return { messageId: '<accepted@moderaty.com>' };
+ });
+ const first = deliverWelcome('one', budget()); await ready;
+ try {
+  expect(await deliverWelcome('two', budget())).toBe('deferred'); expect(mocks.send).toHaveBeenCalledTimes(1);
+ } finally { release(); await first; }
+ expect(await deliverWelcome('two', budget())).toBe('deferred');
  await due('one'); await deliverWelcome('two', budget()); expect(mocks.send).toHaveBeenCalledTimes(2);
 });
 test('a provider acceptance followed by failed persistence becomes ambiguous after restart', async () => {
@@ -296,4 +309,107 @@ test.each(['one@foo-.bar.com', 'one@foo.-bar.com', `one@${'a'.repeat(64)}.com`])
 test('recipient recheck rejects a newly invalid domain label before SMTP', async () => {
  await queued(); await testDb().db.update(users).set({ email: 'one@foo-.bar.com' }).where(eq(users.id, 'one'));
  expect(await deliverWelcome('one', budget())).toBe('suppressed'); expect(mocks.send).not.toHaveBeenCalled();
+});
+
+test.each(['one@example.xn--p1ai', 'one@xn--e1afmkfd.xn--p1ai'])('valid IDNA A-label recipients enroll and reach SMTP: %s', async email => {
+ await seedUser('one'); await testDb().db.update(users).set({ email }).where(eq(users.id, 'one'));
+ expect(await enqueueWelcome(testDb().db, 'one', 'signup')).toBe(true);
+ expect(await deliverWelcome('one', budget())).toBe('accepted');
+ expect(mocks.send.mock.calls[0][0].toEmail).toBe(email);
+});
+
+test.each(['one@example.xn--a', 'one@example.xn--', 'one@example.123'])('invalid IDNA and numeric TLDs stay excluded: %s', async email => {
+ await seedUser('one'); await testDb().db.update(users).set({ email }).where(eq(users.id, 'one'));
+ expect(await enqueueWelcome(testDb().db, 'one', 'signup')).toBe(false);
+ expect(await row()).toMatchObject({ suppressionReason: 'invalid_recipient' });
+});
+
+test('recipient deletion during pending SMTP cannot release campaign pacing', async () => {
+ await queued('one'); await queued('two');
+ let release!: () => void; let started!: () => void;
+ const ready = new Promise<void>(resolve => { started = resolve; });
+ mocks.send.mockImplementationOnce(async () => {
+  started(); await new Promise<void>(resolve => { release = resolve; });
+  return { messageId: '<accepted@moderaty.com>' };
+ });
+ const first = deliverWelcome('one', budget());
+ // Account deletion intentionally makes acceptance persistence fail; observe it immediately.
+ const outcome = first.catch(cause => cause);
+ await ready;
+ try {
+  const { deleteUserRecords } = await import('./deletion'); await deleteUserRecords('one');
+  expect(await row('one')).toBeUndefined();
+  expect(await deliverWelcome('two', budget())).toBe('deferred');
+  expect(mocks.send).toHaveBeenCalledTimes(1);
+ } finally { release(); await outcome; }
+});
+
+test('deleting the failed recipient cannot erase the transport outage cooldown', async () => {
+ await queued('one'); await queued('two'); mocks.send.mockRejectedValueOnce(new ProtonMailConfigurationError('missing token'));
+ expect(await deliverWelcome('one', budget())).toBe('failed');
+ const { deleteUserRecords } = await import('./deletion'); await deleteUserRecords('one');
+ expect(await deliverWelcome('two', budget())).toBe('deferred');
+ expect(mocks.send).toHaveBeenCalledTimes(1);
+});
+
+test('bad membership context is suppressed and cannot poison every subsequent sweep', async () => {
+ await queued('one'); await queued('two');
+ await testDb().db.insert(organizations).values({ id: 'bad-team', name: 'Team' });
+ await testDb().db.insert(memberships).values({ userId: 'one', orgId: 'bad-team', role: 'unexpected-role' });
+ const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+ try {
+  expect(await sweepWelcomeEmails(budget())).toMatchObject({ errors: 1 });
+  expect(await row('one')).toMatchObject({ state: 'suppressed', suppressionReason: 'invalid_membership', claimToken: null, leaseExpiresAt: null, attempts: 0 });
+  expect(log).toHaveBeenCalledWith(expect.stringContaining('[welcome]'), { category: 'invalid_membership' });
+  await due('one');
+  expect(await sweepWelcomeEmails(budget())).toMatchObject({ accepted: 1 });
+  expect(await row('two')).toMatchObject({ state: 'accepted' });
+ } finally { log.mockRestore(); }
+});
+
+test('malformed origin produces a sanitized actionable category without claiming a user', async () => {
+ await queued(); mocks.env.APP_URL = 'private-origin-value';
+ const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+ try {
+  expect(await sweepWelcomeEmails(budget())).toMatchObject({ errors: 1 });
+  expect(log).toHaveBeenCalledWith(expect.stringContaining('[welcome]'), { category: 'configuration' });
+  expect(JSON.stringify(log.mock.calls)).not.toContain('private-origin-value');
+  expect(await row()).toMatchObject({ state: 'queued', claimToken: null });
+ } finally { log.mockRestore(); }
+});
+
+test('cron health is a bounded ambiguity indicator while operator status retains full counts', async () => {
+ for (const id of ['one', 'two', 'three']) {
+  await queued(id); await testDb().db.update(welcomeEmails).set({ state: 'ambiguous' }).where(eq(welcomeEmails.userId, id));
+ }
+ const execute = vi.spyOn(testDb().client, 'execute');
+ try {
+  expect((await sweepWelcomeEmails(budget())).ambiguous).toBe(1);
+  expect(JSON.stringify(execute.mock.calls)).not.toMatch(/count\(\*\)/i);
+ } finally { execute.mockRestore(); }
+ const { welcomeQueueStatus } = await import('./welcomeEmail');
+ expect(await welcomeQueueStatus()).toEqual({ ambiguous: 3 });
+});
+
+test('ambiguity health remains a presence flag when a new unknown outcome joins an existing row', async () => {
+ await queued('old'); await testDb().db.update(welcomeEmails).set({ state: 'ambiguous' }).where(eq(welcomeEmails.userId, 'old'));
+ await queued('new'); mocks.send.mockRejectedValueOnce(new Error('uncertain'));
+ expect((await sweepWelcomeEmails(budget())).ambiguous).toBe(1);
+});
+
+test('simultaneous fresh claims for distinct recipients share one campaign slot', async () => {
+ await queued('one'); await queued('two');
+ const results = await Promise.all([deliverWelcome('one', budget()), deliverWelcome('two', budget())]);
+ expect(results.sort()).toEqual(['accepted', 'deferred']);
+ expect(mocks.send).toHaveBeenCalledTimes(1);
+});
+
+test('existing ambiguity stays visible if the recovery budget runs out', async () => {
+ await queued('uncertain'); await testDb().db.update(welcomeEmails).set({ state: 'ambiguous' }).where(eq(welcomeEmails.userId, 'uncertain'));
+ await queued('expired'); await testDb().db.update(welcomeEmails).set({ state: 'claimed', claimToken: 'expired', leaseExpiresAt: new Date(0).toISOString() }).where(eq(welcomeEmails.userId, 'expired'));
+ const now = Date.now(); const deadline = now + 1000;
+ const clock = vi.spyOn(Date, 'now').mockReturnValueOnce(now).mockReturnValue(deadline);
+ try { expect((await sweepWelcomeEmails(deadline)).ambiguous).toBe(1); }
+ finally { clock.mockRestore(); }
+ expect(mocks.send).not.toHaveBeenCalled();
 });

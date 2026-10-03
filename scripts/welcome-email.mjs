@@ -35,7 +35,7 @@ export function parseWelcomeArgs(args) {
 /** Fixed categories never echo libSQL URLs, bound SQL or authentication values. */
 function databaseDiagnostic(cause) {
 	const message = cause instanceof Error ? cause.message : '';
-	if (/no such (table|column)/i.test(message)) return 'Database schema is missing: verify migration 0062 on the selected target.';
+	if (/no such (table|column)/i.test(message)) return 'Database schema is missing: verify migrations 0062 and 0063 on the selected target.';
 	const code = cause?.code;
 	if (code === 'SQLITE_BUSY' || code === 'SQLITE_LOCKED') return 'The database is busy; retry this bounded operation after the active transaction finishes.';
 	if (code === 'UNAUTHORIZED' || code === 'AUTH_ERROR') return 'The database rejected authentication; verify the selected target credentials without printing them.';

@@ -15,7 +15,7 @@ test('operator diagnostics identify safe causes without echoing SQL, credentials
  expect(welcomeOperationDiagnostic(new Error('MODERATY_DEPLOYMENT must be official-hosted or self-hosted'))).toContain('MODERATY_DEPLOYMENT');
  expect(welcomeOperationDiagnostic(new Error('TURSO_DATABASE_URL is required'))).toContain('TURSO_DATABASE_URL');
  const missing = Object.assign(new Error('no such table: welcome_emails; recipient@example.com'), { code: 'SQLITE_ERROR' });
- expect(welcomeOperationDiagnostic(missing)).toContain('migration 0062');
+ expect(welcomeOperationDiagnostic(missing)).toContain('migrations 0062 and 0063');
  expect(welcomeOperationDiagnostic(missing)).not.toContain('recipient@example.com');
  const connection = Object.assign(new Error('https://account:redaction-marker@example.invalid/path'), { code: 'SERVER_ERROR' });
  expect(welcomeOperationDiagnostic(connection)).toContain('database');
@@ -25,7 +25,7 @@ test('operator diagnostics identify safe causes without echoing SQL, credentials
 test('real Drizzle wrappers retain actionable diagnostics without exposing query parameters', async () => {
  const { DrizzleQueryError } = await import('drizzle-orm');
  for (const [code, message, expected] of [
-  ['SQLITE_ERROR', 'no such table: welcome_emails', 'migration 0062'],
+  ['SQLITE_ERROR', 'no such table: welcome_emails', 'migrations 0062 and 0063'],
   ['SQLITE_BUSY', 'database is busy', 'database is busy'],
   ['UNAUTHORIZED', 'credential rejected', 'rejected authentication']
  ]) {

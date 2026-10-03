@@ -1,9 +1,9 @@
 // Durable outcome recording, separate from claiming and SMTP submission.
-import { and, eq, type SQL } from 'drizzle-orm';
-import { db } from './db';
-import { welcomeEmails } from './db/schema';
+import { and, eq, sql, type SQL } from 'drizzle-orm';
+import { db, withBusyRetry } from './db';
+import { welcomeCampaigns, welcomeEmails } from './db/schema';
 import { ProtonMailConfigurationError, ProtonMailPreSubmissionDeadlineError, ProtonMailSubmissionError } from './protonMail';
-import type { WelcomeRow } from './welcomeEnrollment';
+import { WELCOME_CAMPAIGN, type WelcomeRow } from './welcomeEnrollment';
 
 export type WelcomeDelivery = 'accepted' | 'deferred' | 'suppressed' | 'failed' | 'ambiguous';
 const MAX_ATTEMPTS = 5;
@@ -17,8 +17,8 @@ function deploymentFailure(cause: unknown): string | null {
 	return null;
 }
 
-async function deferSubmission(owned: SQL | undefined, fresh: WelcomeRow, category: string, delay: number) {
-	const updated = await db.update(welcomeEmails).set({ state: 'queued', attempts: fresh.attempts,
+async function deferSubmission(owned: SQL | undefined, fresh: WelcomeRow, category: string, delay: number, handle: Pick<typeof db, 'update'> = db) {
+	const updated = await handle.update(welcomeEmails).set({ state: 'queued', attempts: fresh.attempts,
 		lastAttemptAt: fresh.lastAttemptAt, lastError: category,
 		nextRetryAt: new Date(Date.now() + delay).toISOString(), claimToken: null, leaseExpiresAt: null })
 		.where(and(owned, eq(welcomeEmails.state, 'in_flight'))).returning({ userId: welcomeEmails.userId });
@@ -41,7 +41,12 @@ export async function recordWelcomeFailure(owned: SQL | undefined, fresh: Welcom
 	}
 	const outage = deploymentFailure(cause);
 	if (outage) {
-		if (!await deferSubmission(owned, fresh, outage, OUTAGE_BACKOFF_MS)) return 'deferred';
+		const updated = await withBusyRetry(() => db.transaction(async tx => {
+			const until = new Date(Date.now() + OUTAGE_BACKOFF_MS).toISOString();
+			await tx.update(welcomeCampaigns).set({ nextAttemptAt: sql`max(${welcomeCampaigns.nextAttemptAt}, ${until})` }).where(eq(welcomeCampaigns.campaign, WELCOME_CAMPAIGN));
+			return deferSubmission(owned, fresh, outage, OUTAGE_BACKOFF_MS, tx);
+		}));
+		if (!updated) return 'deferred';
 		console.error(SUBMISSION_DIAGNOSTIC, { category: outage, state: 'queued' });
 		return 'failed';
 	}

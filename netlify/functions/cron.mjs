@@ -74,7 +74,8 @@ function unreachableError(error) {
 
 // The schedule is every minute while the app is in early operation; raise to
 // '*/15 * * * *' when user volume grows. The endpoint itself enforces one
-// channel per invocation (least-recently-run first), so with N connected
-// channels the per-channel scan cadence is N minutes at '* * * * *' — keep
-// the schedule fast enough that N × interval stays an acceptable cadence.
+// workload per invocation. Live channels rotate least-recently-run first,
+// alternating with feedback previews when both classes are ready. N live
+// channels rotate about every N minutes without previews, or 2N minutes
+// under sustained preview contention. Keep that cadence acceptable.
 export const config = { schedule: '* * * * *' };

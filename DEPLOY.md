@@ -267,10 +267,12 @@ the site exists), local work, and outage recovery.
 - `netlify/functions/cron.mjs` runs on a `* * * * *` schedule and calls
   `GET $APP_URL/api/cron` with the secret in an `Authorization: Bearer` header
   (never in the URL). Each invocation processes exactly
-  one channel (least-recently-run first), so with N connected channels the
-  per-channel scan cadence is N minutes at `* * * * *` (e.g. 5 channels ⇒ each
-  scanned every 5 minutes). Raise the schedule frequency if N × interval grows
-  past an acceptable cadence. A failed run throws and appears as a failed
+  one workload. Live moderation rotates least-recently-run channels and
+  alternates with feedback previews when both are ready. With N connected
+  channels, live scans rotate about every N minutes without pending previews,
+  or 2N minutes under sustained preview contention. See
+  [cron workload fairness](docs/cron-workload-fairness.md) for retry expiry and
+  leases. Keep the schedule fast enough for an acceptable live scan cadence. A failed run throws and appears as a failed
   invocation in **Netlify → Functions → cron** logs.
 - **Function timeout:** Netlify's default is 10s, below the trigger's 25s
   abort and the endpoint's 20s run budget. Raise it to 26s (Site settings →

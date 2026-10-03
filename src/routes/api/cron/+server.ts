@@ -8,6 +8,7 @@ import { nullExpiredConsentEmails, nullExpiredHandles, retryGoogleRevocations, r
 import { sweepAutoTopUp } from '$lib/server/billing/autotopup';
 import { sweepStalePendingReversals } from '$lib/server/billing/ledger';
 import { DeadlineExceededError } from '$lib/server/http';
+import { claimCronWorkload, releaseCronWorkload, PREVIEW_PENDING_STALE_MS, type CronWorkload } from '$lib/server/cronWorkload';
 import { sweepWelcomeEmails } from '$lib/server/welcomeEmail';
 import { retryContactNotifications } from '$lib/server/contactNotification';
 import { generateFeedbackDigest, runFeedbackPreview } from '$lib/server/feedbackDigest';
@@ -15,15 +16,8 @@ import { sweepZeroCreditAccounts, ZERO_CREDIT_SWEEP_BATCH } from '$lib/server/ze
 import { runChannel, type ChannelRunResult } from '$lib/server/pipeline';
 import type { RequestHandler } from './$types';
 
-const LEASE_MS = 10 * 60 * 1000; // exceeds one bounded run; expiry alone re-eligibilizes after a crash
 const CONTACT_NOTIFICATION_BUDGET_MS = 5 * 1000;
 const RUN_BUDGET_MS = 20 * 1000; // below the scheduled trigger's 25s abort, so the server stops first
-// A pending preview whose FIRST attempt is older than this is a dead
-// runner, not a queue. The window must exceed the longest documented cron
-// interval (*/15 production — AGENTS.md) so a deadline-aborted attempt
-// survives to its retry tick; a smaller window lets the sweep finalize the
-// row before the retry ever runs (codex, PR #178).
-const PREVIEW_PENDING_STALE_MS = 20 * 60 * 1000;
 const STALE_PREVIEW_BATCH = 25; // an outage backlog finalizes across ticks — never one unbounded sweep (codex)
 
 /** Constant-time secret comparison; never throws on length mismatch. */
@@ -198,66 +192,15 @@ async function finalizeStalePreviews(nowIso: string, staleBefore: string): Promi
 	return stale.length;
 }
 
-/**
- * Drains ONE planted feedback preview per tick (I10), ahead of the rotation
- * claim — a user is actively waiting on it. The pending row IS the resume
- * record: its windowStart pins the boundary the claimant asked for. A row still pending
- * past PREVIEW_PENDING_STALE_MS after its first drain attempt is a dead
- * runner's leftover —
- * it finalizes 'dry-run-failed' loudly instead of retrying or pinning
- * forever; a row never claimed is a queue, not a corpse, and waits for its
- * first opportunity (codex). A failure is loud,
- * surfaced in the payload, and must never mask the moderation run.
- * `ran` marks that the preview claimed the tick's workload — the caller
- * ends the invocation rather than running a second channel on a spent
- * deadline (gitar+cubic+codex).
- */
-async function drainPendingFeedbackPreview(nowIso: string, deadline: number): Promise<{ ran: boolean; payload: unknown }> {
-	const staleBefore = new Date(Date.now() - PREVIEW_PENDING_STALE_MS).toISOString();
-	const staleFailed = await finalizeStalePreviews(nowIso, staleBefore);
+/** Runs the preview already selected by the fair scheduler under its lease. */
+async function runClaimedFeedbackPreview(
+	pending: Extract<CronWorkload, { kind: 'preview' }>,
+	deadline: number,
+	staleFailed: number
+): Promise<unknown> {
 	const stalePayload = staleFailed ? { staleFailed } : {};
-	const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, nowIso));
-	// Oldest pending row on a claimable, active channel — a fresh row's own
-	// 60s plant lease keeps it out until expiry (or its kicked runner), and a
-	// busy channel's row waits rather than pinning the queue. Rows with a
-	// stale attempt stamp are dead leftovers the bounded sweep finalizes
-	// across ticks — draining one would run remote work on a row the sweep
-	// already declared dead (codex). Never-attempted rows drain at any plant
-	// age: queue position is not a crash signal.
-	const pending = await db
-		.select({ digest: feedbackDigests, channel: channels })
-		.from(feedbackDigests)
-		.innerJoin(channels, eq(feedbackDigests.channelId, channels.id))
-		.where(
-			and(
-				eq(feedbackDigests.status, 'dry-run-pending'),
-				eq(channels.active, 1),
-				claimable,
-				or(isNull(feedbackDigests.attemptedAt), gte(feedbackDigests.attemptedAt, staleBefore))
-			)
-		)
-		.orderBy(asc(feedbackDigests.id))
-		.limit(1)
-		.get();
-	if (!pending || Date.now() >= deadline) return { ran: false, payload: staleFailed ? stalePayload : undefined };
-	const lease = new Date(Date.now() + LEASE_MS).toISOString();
-	const claimed = await db
-		.update(channels)
-		.set({ leaseExpiresAt: lease })
-		.where(and(eq(channels.id, pending.channel.id), claimable))
-		.returning({ id: channels.id });
-	if (!claimed.length) {
-		console.info('cron: lost preview claim race for channel %s', pending.channel.id);
-		return { ran: false, payload: staleFailed ? stalePayload : undefined };
-	}
+	const lease = pending.leaseExpiresAt;
 	try {
-		// First-attempt marker — the stale window measures from the first drain
-		// claim, not the plant. Retries (deadline aborts) keep the anchor, so a
-		// poison row still dies ~PREVIEW_PENDING_STALE_MS after first contact
-		// instead of retrying forever.
-		if (!pending.digest.attemptedAt) {
-			await db.update(feedbackDigests).set({ attemptedAt: nowIso }).where(eq(feedbackDigests.id, pending.digest.id));
-		}
 		const preview = await runFeedbackPreview(pending.channel.id, pending.digest.id, {
 			boundary: pending.digest.windowStart,
 			deadline,
@@ -273,19 +216,16 @@ async function drainPendingFeedbackPreview(nowIso: string, deadline: number): Pr
 		});
 		console.info('cron: feedback preview %s for %s finished — classified=%d', pending.digest.id, pending.channel.id, preview.commentsClassified);
 		return {
-			ran: true,
-			payload: {
-				// Operational counts only — `findings` carry near-verbatim
-				// commenter excerpts persisted for the feed; the scheduler
-				// drivers log this response, so evidence never crosses the
-				// cron boundary (codex).
-				commentsClassified: preview.commentsClassified,
-				commentsFailed: preview.commentsFailed,
-				...(preview.clusteringDegraded ? { clusteringDegraded: true } : {}),
-				pooled: preview.pooled,
-				hasMore: preview.hasMore,
-				...stalePayload
-			}
+			// Operational counts only — `findings` carry near-verbatim
+			// commenter excerpts persisted for the feed; the scheduler
+			// drivers log this response, so evidence never crosses the
+			// cron boundary (codex).
+			commentsClassified: preview.commentsClassified,
+			commentsFailed: preview.commentsFailed,
+			...(preview.clusteringDegraded ? { clusteringDegraded: true } : {}),
+			pooled: preview.pooled,
+			hasMore: preview.hasMore,
+			...stalePayload
 		};
 	} catch (cause) {
 		// DeadlineExceededError leaves the row pending — a later tick resumes
@@ -293,17 +233,14 @@ async function drainPendingFeedbackPreview(nowIso: string, deadline: number): Pr
 		// failures already wrote 'dry-run-failed' inside the runner. Only the
 		// sanitized category reaches the payload (codeant).
 		console.error('cron: feedback preview %s for channel %s failed:', pending.digest.id, pending.channel.id, cause);
-		return { ran: true, payload: { error: cause instanceof DeadlineExceededError ? 'timeout' : 'error', ...stalePayload } };
+		return { error: cause instanceof DeadlineExceededError ? 'timeout' : 'error', ...stalePayload };
 	} finally {
 		// Release only OUR lease — an expired lease reclaimed by the rotation
 		// or another tick is untouched. A release failure must not override
-		// the result: the lease self-expires, but losing `ran` would let the
-		// handler claim a second channel's remote work this tick (codex).
+		// the result: the lease self-expires, and this invocation still ran
+		// its one workload even if bookkeeping fails.
 		try {
-			await db
-				.update(channels)
-				.set({ leaseExpiresAt: null })
-				.where(and(eq(channels.id, pending.channel.id), eq(channels.leaseExpiresAt, lease)));
+			await releaseCronWorkload(pending);
 		} catch (releaseCause) {
 			console.error('cron: feedback preview %s lease release failed for channel %s:', pending.digest.id, pending.channel.id, releaseCause);
 		}
@@ -435,11 +372,11 @@ type RunCategory = 'token' | 'quota' | 'scoring' | 'timeout' | 'credits' | 'erro
  * stamping failed/timeout would lie on resume (codex+cubic).
  */
 const runAndRecord = async (
-	channel: typeof channels.$inferSelect,
+	claim: Extract<CronWorkload, { kind: 'live' }>,
 	deadline: number,
-	base: Record<string, unknown>,
-	nowIso: string
+	base: Record<string, unknown>
 ): Promise<{ body: Record<string, unknown>; status: number }> => {
+	const { channel, nowIso, leaseExpiresAt } = claim;
 	let runHealth: 'success' | 'none' | { status: 'failed'; error: RunCategory } = 'success';
 	let body: Record<string, unknown>;
 	let status = 200;
@@ -464,9 +401,9 @@ const runAndRecord = async (
 	// Record the run even on failure so a failing channel cannot starve the
 	// others — but health is kept separate from the rotation timestamp
 	// (MOD-7): a failure must not update the success fields. The write is
-	// guarded by connector identity like assertChannelActive: a reconnect
-	// mid-run replaces refreshTokenEnc, and the old run's verdict must not
-	// land on the new connector (codex). A bookkeeping failure never masks
+	// guarded by connector identity and the claimed lease: a reconnect or
+	// expired lease reclaimed by another runner must not receive the old
+	// run's verdict or have its newer lease cleared. A bookkeeping failure never masks
 	// the run result but IS flagged in the payload — a server-log-only
 	// fallback would hide the degraded state (codeant+codex); the lease
 	// self-expires either way.
@@ -486,12 +423,13 @@ const runAndRecord = async (
 				and(
 					eq(channels.id, channel.id),
 					channel.userId === null ? isNull(channels.userId) : eq(channels.userId, channel.userId),
-					eq(channels.refreshTokenEnc, channel.refreshTokenEnc)
+					eq(channels.refreshTokenEnc, channel.refreshTokenEnc),
+					eq(channels.leaseExpiresAt, leaseExpiresAt)
 				)
 			)
 			.returning({ id: channels.id });
 		if (written.length === 0) {
-			console.error('run-health write skipped: channel connector changed mid-run:', channel.id);
+			console.error('run-health write skipped: channel connector or lease changed mid-run:', channel.id);
 			body = { ...body, bookkeepingError: true };
 		}
 	} catch (writeCause) {
@@ -526,61 +464,62 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		);
 		return json({ ...base, budgetExhausted: true, results: {} });
 	}
-	// A planted feedback preview is a user actively waiting, so it runs
-	// before the rotation claim. Its failure is isolated and surfaced in the
-	// payload; it must never mask the moderation run below.
-	let feedbackPreview: unknown;
-	let previewRan = false;
+	let workload: CronWorkload;
+	let staleFailed = 0;
+	let feedbackPreviewSweepError = false;
 	try {
-		const drain = await drainPendingFeedbackPreview(nowIso, deadline);
-		feedbackPreview = drain.payload;
-		previewRan = drain.ran;
+		staleFailed = await finalizeStalePreviews(nowIso, new Date(Date.now() - PREVIEW_PENDING_STALE_MS).toISOString());
 	} catch (cause) {
-		console.error('cron: feedback preview drain failed:', cause);
-		feedbackPreview = { error: 'error' };
+		console.error('cron: stale feedback preview cleanup failed:', cause);
+		feedbackPreviewSweepError = true;
 	}
-	const withPreview = { ...base, feedbackPreview };
-	// A drained preview IS this tick's claimed workload — one channel's remote
-	// work per invocation (I10, codex). Ending the tick here also forecloses
-	// the deadline hand-off: a rotation claim on a spent budget would abort
-	// instantly and stamp a fake 'timeout' on a channel never moderated
-	// (gitar+cubic).
-	if (previewRan) return json({ ...withPreview, results: {} });
-	// The stale sweep and claim attempts still take time — never claim a
-	// channel onto an expired deadline.
-	if (Date.now() >= deadline) {
-		console.error(`cron: feedback preview drain consumed the ${RUN_BUDGET_MS}ms run budget — no channel claimed this tick`);
+	const afterCleanup = { ...base, ...(feedbackPreviewSweepError ? { ok: false, feedbackPreviewSweepError } : {}) };
+	try {
+		workload = await claimCronWorkload(deadline);
+	} catch (cause) {
+		// A transaction failure rolls back the lease and turn together. Fail
+		// loudly rather than guessing which workload another tick owns.
+		console.error('cron: workload claim failed:', cause);
+		return json({ ...afterCleanup, ok: false, schedulerError: true, results: {} }, { status: 500 });
+	}
+	const withPreview = { ...afterCleanup, feedbackPreview: staleFailed ? { staleFailed } : undefined };
+	if (workload.kind === 'budget-exhausted') {
+		console.error(`cron: workload selection consumed the ${RUN_BUDGET_MS}ms run budget — no channel claimed this tick`);
 		return json({ ...withPreview, budgetExhausted: true, results: {} });
 	}
-	const claimable = or(isNull(channels.leaseExpiresAt), lt(channels.leaseExpiresAt, nowIso));
-	const [channel] = await db
-		.select()
-		.from(channels)
-		.where(and(eq(channels.active, 1), claimable))
-		// Every channel shares the least-recently-run rotation. A failed live
-		// run can leave its dry-run boundary untouched, and a healthy preview
-		// can span many pages; neither may monopolize future ticks (MOD-107).
-		.orderBy(asc(channels.lastRunAt))
-		.limit(1);
-	if (!channel) {
+	if (workload.kind === 'none') {
 		console.info('cron: no active, unleased channel to run');
 		return json({ ...withPreview, results: {} });
 	}
-
-	// Atomic claim: a concurrent claimant's UPDATE matches 0 rows and exits cleanly.
-	const claimed = await db
-		.update(channels)
-		.set({ leaseExpiresAt: new Date(Date.now() + LEASE_MS).toISOString() })
-		.where(and(eq(channels.id, channel.id), claimable))
-		.returning({ id: channels.id });
-	if (claimed.length === 0) {
-		console.info(`cron: lost claim race for channel ${channel.id}`);
+	if (workload.kind === 'claim-lost') {
+		console.info(`cron: lost claim race for channel ${workload.channelId}`);
 		return json({ ...withPreview, claimed: false, results: {} });
 	}
+	// Even a short transaction can return after its deadline (remote DB
+	// latency or lock contention). Never start remote work or stamp live
+	// health on that spent budget. The committed claim spent its turn;
+	// resetting the shared turn here could overwrite a concurrent claimant.
+	if (Date.now() >= deadline) {
+		console.error('cron: claim finished after the run budget — skipping workload');
+		let bookkeepingError = false;
+		try {
+			await releaseCronWorkload(workload);
+		} catch (cause) {
+			console.error('cron: expired-budget claim release failed:', cause);
+			bookkeepingError = true;
+		}
+		return json({ ...withPreview, budgetExhausted: true, ...(bookkeepingError ? { bookkeepingError } : {}), results: {} });
+	}
+	// Exactly one selected workload shares the original deadline. A retry or
+	// failure still spends this class's turn; the next tick serves its peer.
+	if (workload.kind === 'preview') {
+		const feedbackPreview = await runClaimedFeedbackPreview(workload, deadline, staleFailed);
+		return json({ ...afterCleanup, feedbackPreview, results: {} });
+	}
+	const { channel } = workload;
 	console.info(
 		`cron: claimed channel ${channel.id} (lastRunAt=${channel.lastRunAt ?? 'never'}, cursor=${channel.cursor ?? 'none'}, resumingPage=${channel.nextPageToken !== null}, dryRunDrain=${channel.dryRunBoundary !== null})`
 	);
-
-	const { body, status } = await runAndRecord(channel, deadline, withPreview, nowIso);
+	const { body, status } = await runAndRecord(workload, deadline, withPreview);
 	return json(body, { status });
 };

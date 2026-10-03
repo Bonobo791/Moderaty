@@ -148,7 +148,7 @@ async function attemptNextWelcome(deadline: number): Promise<WelcomeDelivery> {
 
 /** At most 25 enrollments, one send and 25 crash recoveries within the shared budget. */
 async function sweepWelcomeQueue(deadline: number) {
-	const counts = { scanned: 0, queued: 0, accepted: 0, errors: 0, ambiguous: 0, suppressed: 0 };
+	const counts = { scanned: 0, queued: 0, enrollmentErrors: 0, accepted: 0, errors: 0, ambiguous: 0, suppressed: 0 };
 	if (!sendingEnabled() || Date.now() >= deadline) return counts;
 	const unresolved = await db.select({ userId: welcomeEmails.userId }).from(welcomeEmails)
 		.where(and(eq(welcomeEmails.campaign, WELCOME_CAMPAIGN), eq(welcomeEmails.state, 'ambiguous'))).limit(1).get();

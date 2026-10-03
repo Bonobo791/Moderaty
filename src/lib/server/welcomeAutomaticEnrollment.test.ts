@@ -132,7 +132,7 @@ test('concurrent candidate reads converge on one durable enrollment', async () =
 	expect(mocks.send).not.toHaveBeenCalled();
 });
 
-test('a partial enrollment failure resumes from committed rows on the next sweep', async () => {
+test('a failed enrollment preserves successful rows, continues the page, and resumes next sweep', async () => {
 	await pauseDelivery();
 	for (const id of ['one', 'two', 'three']) await seedUser(id);
 	const original = testDb().db.transaction.bind(testDb().db);
@@ -141,13 +141,42 @@ test('a partial enrollment failure resumes from committed rows on the next sweep
 		if (++calls === 2) throw new Error('fixture interrupted enrollment');
 		return original(callback, ...rest);
 	}) as typeof original);
-	await expect(sweepWelcomeEmails(budget())).rejects.toThrow('Welcome email sweep failed');
+	expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 3, queued: 2, enrollmentErrors: 1 });
 	interrupted.mockRestore();
-	expect(await rows()).toHaveLength(1);
+	expect(await rows()).toHaveLength(2);
 	const first = (await rows())[0];
-	expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 2, queued: 2 });
+	expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 1, queued: 1, enrollmentErrors: 0 });
 	expect(await rows()).toHaveLength(3);
 	expect(await row(first.userId)).toEqual(first);
+});
+
+test('persistent enrollment failure after busy retries cannot block other accounts or queued delivery', async () => {
+	for (const id of ['a-bad', 'b-good', 'c-good', 'z-ready']) await seedUser(id);
+	await enqueueWelcome(testDb().db, 'z-ready', 'signup');
+	await testDb().db.update(welcomeEmails).set({ nextRetryAt: new Date(0).toISOString() }).where(eq(welcomeEmails.userId, 'z-ready'));
+	const original = testDb().db.transaction.bind(testDb().db);
+	let failuresLeft = 3;
+	const failure = Object.assign(new Error('private-query-fixture private-recipient-fixture'), { code: 'SQLITE_BUSY' });
+	const interrupted = vi.spyOn(testDb().db, 'transaction').mockImplementation((async (callback, ...rest) => {
+		if (failuresLeft > 0) { failuresLeft--; throw failure; }
+		return original(callback, ...rest);
+	}) as typeof original);
+	const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+	try {
+		expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 3, queued: 2, enrollmentErrors: 1, accepted: 1, errors: 0 });
+		expect(await row('a-bad')).toBeUndefined();
+		expect(await row('z-ready')).toMatchObject({ state: 'accepted', attempts: 1 });
+		for (const id of ['b-good', 'c-good']) {
+			failuresLeft = 3;
+			await testDb().db.update(welcomeCampaigns).set({ nextAttemptAt: new Date(0).toISOString() });
+			expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 1, queued: 0, enrollmentErrors: 1, accepted: 1 });
+			expect(await row(id)).toMatchObject({ state: 'accepted', attempts: 1 });
+		}
+		expect(await rows()).toHaveLength(3);
+		expect(mocks.send.mock.calls.map(call => call[0].toEmail).sort()).toEqual(['b-good@example.com', 'c-good@example.com', 'z-ready@example.com']);
+		expect(log).toHaveBeenCalledWith(expect.stringContaining('[welcome]'), { category: 'database_busy' });
+		expect(JSON.stringify(log.mock.calls)).not.toMatch(/private-query-fixture|private-recipient-fixture/);
+	} finally { interrupted.mockRestore(); log.mockRestore(); }
 });
 
 test('enrollment stops between accounts when the shared deadline expires, then resumes', async () => {

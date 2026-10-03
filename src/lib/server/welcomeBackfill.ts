@@ -2,6 +2,7 @@
 import { and, asc, eq, gt, inArray, isNull, ne, notLike, or, sql } from 'drizzle-orm';
 import { db, withBusyRetry } from './db';
 import { users, welcomeEmails } from './db/schema';
+import { welcomeFailureCategory } from './welcomeDiagnostics';
 import { WELCOME_CAMPAIGN, enqueueWelcome, exclusion, isHistoricalCandidate, isOfficialHosted, sendingEnabled, type Account, type WelcomeRow } from './welcomeEnrollment';
 const MAX_BACKFILL_BATCH = 25;
 
@@ -49,7 +50,7 @@ async function enrollHistoricalAccount(account: Account, welcome: WelcomeRow | n
  * records; deleted/terminal/excluded rows never pin the bounded candidate page.
  */
 export async function enrollWelcomeCandidates(deadline: number) {
-	const counts = { scanned: 0, queued: 0 };
+	const counts = { scanned: 0, queued: 0, enrollmentErrors: 0 };
 	if (!sendingEnabled() || Date.now() >= deadline) return counts;
 	const page = await db.select({ account: users, welcome: welcomeEmails }).from(users)
 		.leftJoin(welcomeEmails, and(eq(welcomeEmails.userId, users.id), eq(welcomeEmails.campaign, WELCOME_CAMPAIGN)))
@@ -61,7 +62,12 @@ export async function enrollWelcomeCandidates(deadline: number) {
 	for (const { account, welcome } of page) {
 		if (Date.now() >= deadline) break;
 		counts.scanned++;
-		if (await enrollHistoricalAccount(account, welcome)) counts.queued++;
+		try {
+			if (await enrollHistoricalAccount(account, welcome)) counts.queued++;
+		} catch (cause) {
+			counts.enrollmentErrors++;
+			console.error('[welcome] account enrollment failed; continuing candidate page', { category: welcomeFailureCategory(cause) });
+		}
 	}
 	return counts;
 }

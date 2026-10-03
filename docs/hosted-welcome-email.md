@@ -161,6 +161,12 @@ prevents reenrollment even if the other marker is missing. New SMTP uncertainty
 stays held for reconciliation. Existing users are included regardless of plan or
 marketing opt-in.
 
+An account enrollment that still fails after busy retries logs a fixed diagnostic
+category and increments `welcomeEmailEnrollmentErrors`; the remaining candidates
+and queued deliveries continue within the shared deadline. Failed candidates
+remain eligible for a later tick. The cron health response and both schedulers
+report these failures without exposing account identifiers or raw database errors.
+
 The following CLI commands remain optional diagnostic and enrollment tools;
 they are never prerequisites for the app's automatic enrollment.
 
@@ -218,6 +224,7 @@ These steps are **human rollout gates**, not actions performed by the implementa
    Official-hosted cron then enrolls every eligible existing account automatically;
    no manual batch enrollment or additional activation flag is required
 6. Monitor cron `welcomeEmailCandidatesScanned`, `welcomeEmailsQueued`,
+   `welcomeEmailEnrollmentErrors`,
    `welcomeEmailsAccepted`, `welcomeEmailErrors`,
    `welcomeEmailAmbiguous`, `welcomeEmailSuppressed`, `welcomeEmailSweepError`, and
    operator state counts. `welcomeEmailAmbiguous` is a bounded presence flag

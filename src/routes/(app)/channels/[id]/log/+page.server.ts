@@ -3,11 +3,11 @@ import { auditLog, comments, moderationActions } from '$lib/server/db/schema';
 import { ownedChannel } from '$lib/server/ownership';
 import { requireUser } from '$lib/server/session';
 import { refreshAccessToken } from '$lib/server/youtube';
-import { applyHumanIntent, assertChannelActive, finalizeHumanIntent } from '$lib/server/pipeline/enforcement';
+import { applyHumanIntent, assertChannelActive, claimedHumanIntent, finalizeHumanIntent } from '$lib/server/pipeline/enforcement';
 import { decrypt } from '$lib/server/crypto';
 import { env } from '$env/dynamic/private';
 import { error, fail } from '@sveltejs/kit';
-import { and, eq, desc, inArray, isNotNull, lt, or, sql } from 'drizzle-orm';
+import { and, eq, desc, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 
 /** Audit-log page size; the load fetches one extra row to detect a next page. */
 const PAGE_SIZE = 200;
@@ -123,7 +123,7 @@ export const actions = {
 		if (!commentId) return fail(400, { error: 'Invalid comment ID' });
 		const ch = await ownedChannel(params.id, locals);
 		const comment = await db
-			.select({ status: comments.status, decidedBy: comments.decidedBy })
+			.select({ status: comments.status, decidedBy: comments.decidedBy, restoreIntentId: comments.restoreIntentId })
 			.from(comments)
 			.where(and(eq(comments.id, commentId), eq(comments.channelId, params.id)))
 			.get();
@@ -133,7 +133,6 @@ export const actions = {
 		// 'restoring' means a previous undo claimed the comment (or restored it
 		// remotely) but crashed before the audit commit: resume it. The YouTube
 		// call is idempotent (I4), so re-applying it is safe.
-		// Stryker disable next-line ConditionalExpression, StringLiteral: →false/''-literal equivalent — when the comment IS 'restoring', judging it non-resuming only adds a re-claim `SET status='restoring' WHERE status='restoring'` (always matches, writes the value the row already holds) and a failure-release writing back the same selected values; observable state is identical. Sweeps the killable →true sibling, which stays pinned by the failed-audit test via the claim's 'restoring' effect.
 		const resuming = comment.status === 'restoring';
 		const dryRun = env.DRY_RUN === 'true';
 		if (dryRun) {
@@ -142,8 +141,9 @@ export const actions = {
 			const claimed = await db.transaction(async (tx) => {
 				const rows = await tx
 					.update(comments)
-					.set({ status: 'approved', decidedBy: 'human' })
-					.where(and(eq(comments.id, commentId), eq(comments.status, comment.status)))
+					.set({ status: 'approved', decidedBy: 'human', restoreIntentId: null })
+					.where(and(eq(comments.id, commentId), eq(comments.status, comment.status),
+						comment.restoreIntentId === null ? isNull(comments.restoreIntentId) : eq(comments.restoreIntentId, comment.restoreIntentId)))
 					.returning({ id: comments.id });
 				if (!rows.length) return false;
 				// Name the action being undone — server-side, never from the form.
@@ -177,22 +177,19 @@ export const actions = {
 			const rows = await tx
 				.update(comments)
 				.set({ status: 'restoring' })
-				.where(and(eq(comments.id, commentId), eq(comments.status, comment.status)))
+				.where(and(eq(comments.id, commentId), eq(comments.status, comment.status),
+					comment.restoreIntentId === null ? isNull(comments.restoreIntentId) : eq(comments.restoreIntentId, comment.restoreIntentId)))
 				.returning({ id: comments.id });
 			if (!rows.length) return null;
-			if (resuming) {
-				// The crashed attempt's intent row is the durable record — reuse
-				// it rather than writing a duplicate. A fresh claim always writes
-				// its own row (each undo is its own audit entry).
-				const existing = await tx
-					.select({ id: auditLog.id })
-					.from(auditLog)
-					.where(and(eq(auditLog.channelId, params.id), eq(auditLog.commentId, commentId), eq(auditLog.action, 'restore')))
-					.orderBy(desc(auditLog.createdAt), desc(auditLog.id))
-					.limit(1)
-					.get();
-				if (existing) return { intentId: existing.id };
+			if (resuming && comment.restoreIntentId !== null) {
+				const existing = await claimedHumanIntent(params.id, commentId, comment.restoreIntentId, tx);
+				if (!existing || existing.action !== 'restore') {
+					throw error(409, 'This comment has a different or invalid pending action. Refresh the log or contact support before retrying Undo.');
+				}
+				return { intentId: existing.id };
 			}
+			// An explicit owner retry is new evidence for an unbound legacy
+			// restore. Never infer that claim from an earlier audit row.
 			// Name the action being undone — server-side, never from the form.
 			const prior = await tx
 				.select({ action: auditLog.action })
@@ -214,6 +211,7 @@ export const actions = {
 					createdAt: new Date().toISOString()
 				})
 				.returning({ id: auditLog.id });
+			await tx.update(comments).set({ restoreIntentId: intent[0].id }).where(eq(comments.id, commentId));
 			return { intentId: intent[0].id };
 		}));
 		if (!claim) throw error(404, 'reversible comment not found in this channel');
@@ -236,10 +234,12 @@ export const actions = {
 			// sweep still owes a finish.
 			if (!resuming) {
 				await db.transaction(async (tx) => {
-					await tx
+					const released = await tx
 						.update(comments)
-						.set({ status: comment.status, decidedBy: comment.decidedBy })
-						.where(eq(comments.id, commentId));
+						.set({ status: comment.status, decidedBy: comment.decidedBy, restoreIntentId: null })
+						.where(and(eq(comments.id, commentId), eq(comments.status, 'restoring'), eq(comments.restoreIntentId, claim.intentId)))
+						.returning({ id: comments.id });
+					if (!released.length) return;
 					await tx.delete(auditLog).where(eq(auditLog.id, claim.intentId));
 				});
 			}
@@ -250,7 +250,7 @@ export const actions = {
 		// repair the desync (codeant). 'restoring' + the durable intent row
 		// are exactly what the reconcile sweep needs to finish the commit.
 		try {
-			await finalizeHumanIntent(params.id, commentId, remoteMissing ? 'delete' : 'restore', ch);
+			await finalizeHumanIntent(params.id, commentId, remoteMissing ? 'delete' : 'restore', claim.intentId, ch);
 		} catch (e) {
 			// Remote succeeded, local commit failed: keep the claim and the
 			// intent row for the reconcile sweep, and tell the user it

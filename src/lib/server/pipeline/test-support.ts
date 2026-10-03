@@ -41,6 +41,7 @@ const mocks = vi.hoisted(() => {
 		commentStatuses: {} as Record<string, string>,
 		// comments.decidedBy for pre-stored rows (existingIds).
 		commentDecidedBy: {} as Record<string, string>,
+		commentRestoreIntentIds: {} as Record<string, number | null>,
 		// Fired at the start of every comments .all() query with its call index,
 		// so a test can flip a stored status BETWEEN two reads in one flow
 		// (e.g. a human release landing between partition and supersede).
@@ -64,7 +65,8 @@ const mocks = vi.hoisted(() => {
 			id,
 			status: staged?.status ?? state.commentStatuses[id] ?? 'held',
 			decidedBy: staged?.decidedBy ?? state.commentDecidedBy[id] ?? 'ai',
-			scanId: staged?.scanId ?? null
+			scanId: staged?.scanId ?? null,
+			restoreIntentId: staged?.restoreIntentId ?? state.commentRestoreIntentIds[id] ?? null
 		};
 	};
 	const commentsAll = (condition: unknown) => {
@@ -114,12 +116,14 @@ const mocks = vi.hoisted(() => {
 		// subscription periods, so no row matches — the honest answer.
 		if (table === state.tables.stripeSubscriptionPeriods) return undefined;
 		if (table === state.tables.auditLog) {
-			// "Latest" reads sort createdAt/id desc — approximate by
-			// returning the last inserted row matching both eq()s.
+			// Audit reads honor the channel/comment scope and, when present,
+			// the exact intent ID and user actor instead of borrowing history.
 			const params = queryParams(condition);
 			const matches = state.insertedAudits.filter((row) =>
 				params.includes(queryKey(row.commentId)) && params.includes(queryKey(row.channelId)));
-			return matches.at(-1);
+			const id = boundParam(condition, 'id');
+			const actor = boundParam(condition, 'actor');
+			return matches.filter((row) => (id.kind !== 'eq' || row.id === id.value) && (actor.kind !== 'eq' || row.actor === actor.value)).at(-1);
 		}
 		if (table === state.tables.creditTransactions) {
 			// hasChargeAnchor's (org_id, ref_type, ref_id) lookup: a row only
@@ -229,7 +233,8 @@ const mocks = vi.hoisted(() => {
 		const applied: Record<string, unknown>[] = [];
 		const apply = (row: Record<string, unknown>) => {
 			const current = row.status as string;
-			if (params.includes(queryKey(row.id)) && (!statusFilter.length || statusFilter.includes(current))) {
+			const intent = boundParam(condition, 'restore_intent_id');
+			if (params.includes(queryKey(row.id)) && (!statusFilter.length || statusFilter.includes(current)) && (intent.kind !== 'eq' || row.restoreIntentId === intent.value)) {
 				Object.assign(row, values);
 				applied.push(row);
 			}
@@ -237,9 +242,11 @@ const mocks = vi.hoisted(() => {
 		state.insertedComments.forEach(apply);
 		for (const id of state.existingIds) {
 			const current = state.commentStatuses[id] ?? 'held';
-			if (params.includes(id) && (!statusFilter.length || statusFilter.includes(current))) {
+			const intent = boundParam(condition, 'restore_intent_id');
+			if (params.includes(id) && (!statusFilter.length || statusFilter.includes(current)) && (intent.kind !== 'eq' || state.commentRestoreIntentIds[id] === intent.value)) {
 				if ('status' in values) state.commentStatuses[id] = values.status as string;
 				if ('decidedBy' in values) state.commentDecidedBy[id] = values.decidedBy as string;
+				if ('restoreIntentId' in values) state.commentRestoreIntentIds[id] = values.restoreIntentId as number | null;
 				applied.push({ id });
 			}
 		}
@@ -683,6 +690,7 @@ export function resetPipelineMocks() {
 	mocks.state.moderationActions = [];
 	mocks.state.commentStatuses = {};
 	mocks.state.commentDecidedBy = {};
+	mocks.state.commentRestoreIntentIds = {};
 	mocks.state.commentsSelectCalls = 0;
 	mocks.state.onCommentsSelect = undefined;
 	mocks.decrypt.mockReturnValue('refresh-token');

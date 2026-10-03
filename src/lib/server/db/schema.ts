@@ -366,7 +366,9 @@ export const comments = sqliteTable('comments', {
 	text: text('text').notNull(), // truncated to 500 chars on insert
 	publishedAt: text('published_at').notNull(),
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
-	status: text('status').notNull(), // 'pending' | 'approved' | 'held' | 'rejected' | 'deleted' | 'restoring' (in-flight undo)
+	status: text('status').notNull(), // 'pending' | 'approved' | 'held' | 'rejected' | 'deleted' | 'restoring' (in-flight human action)
+	// Exact audit row for the current human claim; NULL legacy rows cannot be replayed safely.
+	restoreIntentId: integer('restore_intent_id'),
 	decidedBy: text('decided_by').notNull(), // 'rule' | 'ai' | 'human' | 'none' | 'allowlist'
 	matchedRuleId: integer('matched_rule_id'),
 	aiScore: text('ai_score'), // JSON string of the six category scores, or null

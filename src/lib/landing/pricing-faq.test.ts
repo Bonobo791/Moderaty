@@ -143,3 +143,13 @@ it('preserves the approved hosted and lifetime offers with BYOK disclosure', () 
 	expect(lifetime).toContain('hosted forever');
 	expect(lifetime).toContain('your own OpenAI API key');
 });
+
+it('explains channel setup and video context alongside comment moderation on shared CTAs', () => {
+	for (const path of ['../components/landing/FinalCta.svelte', '../components/landing/TrustBar.svelte']) {
+		const text = readFileSync(new URL(path, import.meta.url), 'utf8');
+		expect(text).not.toMatch(/used only on your comments/i);
+		expect(text).toContain('channel setup');
+		expect(text).toContain('comment moderation');
+		expect(text).toContain('video titles and descriptions');
+	}
+});

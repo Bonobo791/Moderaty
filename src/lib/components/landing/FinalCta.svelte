@@ -10,7 +10,7 @@
 		</Reveal>
 		<Reveal delay={0.08}>
 			<a href={LOGIN_URL} class="btn-press cta">Connect YouTube channel</a>
-			<p class="microcopy">Google asks for standard YouTube access, used only on your comments. Source-available under PolyForm Shield, free to self-host.</p>
+			<p class="microcopy">Google asks for standard YouTube access. Moderaty uses it for channel setup, comment moderation, and video titles and descriptions for context. Source-available under PolyForm Shield, free to self-host.</p>
 		</Reveal>
 	</div>
 </section>

@@ -83,3 +83,42 @@ test('rejects oversized response bodies without printing them', async () => {
 	assert.equal(result.ok, false);
 	assert.ok(!JSON.stringify(result).includes('sensitive'));
 });
+
+test('stops and cancels an oversized response stream before buffering the rest', async () => {
+	let cancelled = false;
+	let pulls = 0;
+	const body = new ReadableStream({
+		pull(controller) {
+			pulls++;
+			if (pulls <= 3) controller.enqueue(new Uint8Array(4097));
+			else controller.close();
+		},
+		cancel() { cancelled = true; }
+	});
+
+	const result = await runPreflight(BASE, SHA, fakeResponses([new Response(body), goodCommit()]));
+
+	assert.equal(result.checks[0].detail, 'Unexpected oversized response');
+	assert.equal(cancelled, true);
+	assert.ok(pulls <= 2, 'must stop consuming after the first oversized chunk');
+	assert.equal(result.checks[1].ok, true);
+});
+
+test('enforces the response limit in bytes rather than UTF-16 characters', async () => {
+	const body = 'é'.repeat(3000);
+	const result = await runPreflight(BASE, SHA, fakeResponses([new Response(body), goodCommit()]));
+	assert.equal(result.checks[0].detail, 'Unexpected oversized response');
+});
+
+test('accepts valid JSON at the exact 4 KiB limit across streamed chunks', async () => {
+	const bytes = new TextEncoder().encode('{"status":"ok"}'.padEnd(4096, ' '));
+	const body = new ReadableStream({
+		start(controller) {
+			controller.enqueue(bytes.slice(0, 11));
+			controller.enqueue(bytes.slice(11));
+			controller.close();
+		}
+	});
+	const result = await runPreflight(BASE, SHA, fakeResponses([new Response(body), goodCommit()]));
+	assert.equal(result.ok, true);
+});

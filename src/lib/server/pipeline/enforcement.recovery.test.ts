@@ -28,6 +28,13 @@ async function audit(action: string, actor: string, createdAt: string, channelId
 const reconcile = () => runEnforcement('channel', 'access-token', undefined, null, 0);
 const comment = () => testDb().db.select().from(comments).where(eq(comments.id, 'comment')).get();
 
+async function expectNoReplayedIntent() {
+	await reconcile();
+	expect(youtube.setModerationStatus).not.toHaveBeenCalled();
+	expect(youtube.deleteComment).not.toHaveBeenCalled();
+	expect((await comment())?.status).toBe('restoring');
+}
+
 test.each(['approve', 'restore'])('an interrupted %s survives a newer system audit and finalizes once', async (action) => {
 	await audit(action, 'user', '2026-01-01T00:00:00.000Z');
 	await audit('reject', 'system', '2026-01-02T00:00:00.000Z');
@@ -62,11 +69,7 @@ test('does not reuse a human intent from another channel', async () => {
 	await audit('approve', 'user', '2026-01-01T00:00:00.000Z', 'other-channel');
 	await audit('reject', 'system', '2026-01-02T00:00:00.000Z');
 
-	await reconcile();
-
-	expect(youtube.setModerationStatus).not.toHaveBeenCalled();
-	expect(youtube.deleteComment).not.toHaveBeenCalled();
-	expect((await comment())?.status).toBe('restoring');
+	await expectNoReplayedIntent();
 });
 
 test('an unsupported latest user action never falls back to an older destructive intent', async () => {
@@ -74,9 +77,5 @@ test('an unsupported latest user action never falls back to an older destructive
 	await audit('dry-run', 'user', '2026-01-02T00:00:00.000Z');
 	await audit('approve', 'system', '2026-01-03T00:00:00.000Z');
 
-	await reconcile();
-
-	expect(youtube.setModerationStatus).not.toHaveBeenCalled();
-	expect(youtube.deleteComment).not.toHaveBeenCalled();
-	expect((await comment())?.status).toBe('restoring');
+	await expectNoReplayedIntent();
 });

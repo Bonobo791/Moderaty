@@ -118,7 +118,7 @@ Day-to-day work commits directly to `dev`; pull requests are optional
   window (1/3/6/12/24, default 3): the first page scores synchronously, then
   cron drains one page per invocation (drain state in
   `channels.dry_run_boundary`/`dry_run_page_token`, independent of the live
-  cursor; draining channels sort first in the rotation). Window mode
+  cursor; draining channels share the least-recently-run rotation). Window mode
   deliberately re-scores comments real runs already moderated — that
   re-scoring is the point of the preview.
 - **I9 — Tests are the spec.** No PR opens while checks/tests are red.

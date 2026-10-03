@@ -1,5 +1,5 @@
 <script lang="ts">
-	const SIGNALS = ['YouTube Data API', 'OpenAI Moderation', 'Open source on GitHub'];
+	const SIGNALS = ['YouTube Data API', 'OpenAI Moderation', 'Source available on GitHub'];
 </script>
 
 <section class="trust">
@@ -10,7 +10,7 @@
 			{/each}
 		</ul>
 		<p class="microcopy">
-			Google asks for standard YouTube access, used only on your comments. Free and open source (PolyForm Shield). 1 free dry run per feature per channel, no credits. Moderation previews drain the selected window in the background; feedback previews cover the first page, up to 100 comments.
+			Google asks for standard YouTube access, used only on your comments. Source-available under PolyForm Shield, free to self-host. 1 free dry run per feature per channel, no credits. Moderation previews drain the selected window in the background; feedback previews cover the first page, up to 100 comments.
 			We keep no data on you beyond what your account needs to run, and nothing after you leave that
 			the LGPD does not require.
 		</p>

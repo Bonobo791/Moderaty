@@ -725,7 +725,10 @@ async function reconcileRestoring(channelId: string, accessToken: string, deadli
 		const intent = await db
 			.select({ action: auditLog.action, actor: auditLog.actor })
 			.from(auditLog)
-			.where(and(eq(auditLog.channelId, channelId), eq(auditLog.commentId, row.id)))
+			// A delayed system completion can append an audit after the human
+			// claim. It is evidence of remote work, not a replacement intent
+			// (MOD-108). Select the latest USER row, then validate its verb.
+			.where(and(eq(auditLog.channelId, channelId), eq(auditLog.commentId, row.id), eq(auditLog.actor, 'user')))
 			.orderBy(desc(auditLog.createdAt), desc(auditLog.id))
 			.limit(1)
 			.get();

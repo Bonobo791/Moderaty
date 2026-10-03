@@ -940,16 +940,15 @@ test('clears the drain state when the dry-run window completes', async () => {
 	expectDrainState(await channelRow('UC1'), null, null);
 });
 
-test('a channel with a drain in flight is selected before older ordinary channels', async () => {
-	// Otherwise a busy rotation would starve the drain (a preview the user is
-	// actively waiting on) behind every ordinary channel.
+test('a channel with a drain in flight waits for older ordinary channels', async () => {
+	// A pending preview shares the live rotation; it must not monopolize cron.
 	await seedChannel('UC-old', { lastRunAt: '2026-01-01T00:00:00.000Z' });
 	await seedDrainChannel('UC-drain', null, { lastRunAt: '2026-08-01T00:00:00.000Z' });
 	mocks.runChannel.mockResolvedValue(runResult({ windowComplete: true, windowNextPageToken: null }));
 
 	await call({ bearer: 'test-secret' });
 
-	expect(mocks.runChannel.mock.calls[0][0]).toBe('UC-drain');
+	expect(mocks.runChannel.mock.calls[0][0]).toBe('UC-old');
 });
 
 test('a drain failure is loud, surfaced in the payload, and never masks the normal run', async () => {
@@ -1457,4 +1456,50 @@ test('contact retries get an early bounded slice of the shared cron budget', asy
 	expect(contactDeadline).toBe(Math.min(sharedDeadline, now + 5_000));
 	expect(mocks.retryContactNotifications.mock.invocationCallOrder[0]).toBeLessThan(mocks.retryStripeCustomerDeletions.mock.invocationCallOrder[0]);
 	expect(mocks.sweepZeroCreditAccounts).toHaveBeenCalledWith(expect.any(Number), sharedDeadline);
+});
+
+
+test.each(['live', 'preview'] as const)('a failing %s run with a dry-run boundary cannot starve another channel', async (phase) => {
+	mocks.env.DRY_RUN = 'false';
+	await seedDrainChannel('UC-failing', 'resume-page', { lastRunAt: '2026-01-01T00:00:00.000Z' });
+	await seedChannel('UC-healthy', { lastRunAt: '2026-02-01T00:00:00.000Z' });
+	mocks.runChannel.mockImplementation(async (id, options) => {
+		if (id === 'UC-failing' && (phase === 'live' || options.forceDryRun)) {
+			throw new Error('YouTube unavailable');
+		}
+		return runResult({ dryRun: false });
+	});
+	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	onTestFinished(() => errorSpy.mockRestore());
+
+	const failed = await call({ bearer: 'test-secret' });
+	expect(failed.status).toBe(phase === 'live' ? 500 : 200);
+	expectDrainState(await channelRow('UC-failing'), '2026-05-01T00:00:00.000Z', 'resume-page');
+
+	const next = await call({ bearer: 'test-secret' });
+
+	expect(await next.json()).toMatchObject({ results: { 'UC-healthy': { dryRun: false } } });
+	expect((await channelRow('UC-healthy'))?.lastRunStatus).toBe('success');
+	expectDrainState(await channelRow('UC-failing'), '2026-05-01T00:00:00.000Z', 'resume-page');
+});
+
+test('a multi-page dry-run yields to live moderation and resumes its saved page on its next turn', async () => {
+	mocks.env.DRY_RUN = 'false';
+	await seedDrainChannel('UC-preview', null, { lastRunAt: '2026-01-01T00:00:00.000Z' });
+	await seedChannel('UC-live', { lastRunAt: '2026-02-01T00:00:00.000Z' });
+	mocks.runChannel.mockImplementation(async (_id, options) => options.forceDryRun
+		? runResult(options.window.pageToken === null
+			? { windowComplete: false, windowNextPageToken: 'page-2' }
+			: { windowComplete: true })
+		: runResult({ dryRun: false }));
+
+	await call({ bearer: 'test-secret' });
+	expectDrainState(await channelRow('UC-preview'), '2026-05-01T00:00:00.000Z', 'page-2');
+	const liveTurn = await call({ bearer: 'test-secret' });
+	expect(await liveTurn.json()).toMatchObject({ results: { 'UC-live': { dryRun: false } } });
+	await call({ bearer: 'test-secret' });
+
+	expect(mocks.runChannel.mock.calls.map(([id]) => id)).toEqual(['UC-preview', 'UC-preview', 'UC-live', 'UC-preview', 'UC-preview']);
+	expect(mocks.runChannel.mock.calls[4][1]).toMatchObject({ window: { pageToken: 'page-2' } });
+	expectDrainState(await channelRow('UC-preview'), null, null);
 });

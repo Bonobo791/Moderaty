@@ -52,7 +52,8 @@ const SWEEP_ERROR_FIELDS = [
 	'stripeScrubSweepError',
 	'googleRevocationSweepError',
 	'pendingReversalSweepError',
-	'zeroCreditSweepError'
+	'zeroCreditSweepError',
+	'contactNotificationSweepError'
 ];
 
 /** Renders a parsed payload or raw body for logs without letting response newlines forge log lines. */
@@ -121,6 +122,9 @@ function detailProblems(payload) {
 	// would retry forever, invisible to the scheduler (codeant).
 	if (typeof payload.zeroCreditItemErrors === 'number' && payload.zeroCreditItemErrors > 0) {
 		problems.push(`zeroCreditItemErrors: ${payload.zeroCreditItemErrors} account evaluation(s) failed`);
+	}
+	if (typeof payload.contactNotificationErrors === 'number' && payload.contactNotificationErrors > 0) {
+		problems.push(`contactNotificationErrors: ${payload.contactNotificationErrors} contact delivery attempt(s) failed`);
 	}
 	problems.push(...channelRunProblems(payload));
 	return problems;

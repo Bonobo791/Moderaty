@@ -8,12 +8,14 @@ import { nullExpiredConsentEmails, nullExpiredHandles, retryGoogleRevocations, r
 import { sweepAutoTopUp } from '$lib/server/billing/autotopup';
 import { sweepStalePendingReversals } from '$lib/server/billing/ledger';
 import { DeadlineExceededError } from '$lib/server/http';
+import { retryContactNotifications } from '$lib/server/contactNotification';
 import { generateFeedbackDigest, runFeedbackPreview } from '$lib/server/feedbackDigest';
 import { sweepZeroCreditAccounts, ZERO_CREDIT_SWEEP_BATCH } from '$lib/server/zeroCredits';
 import { runChannel, type ChannelRunResult } from '$lib/server/pipeline';
 import type { RequestHandler } from './$types';
 
 const LEASE_MS = 10 * 60 * 1000; // exceeds one bounded run; expiry alone re-eligibilizes after a crash
+const CONTACT_NOTIFICATION_BUDGET_MS = 5 * 1000;
 const RUN_BUDGET_MS = 20 * 1000; // below the scheduled trigger's 25s abort, so the server stops first
 // A pending preview whose FIRST attempt is older than this is a dead
 // runner, not a queue. The window must exceed the longest documented cron
@@ -343,6 +345,10 @@ const orZero = (value: number | null | undefined): number => value ?? 0;
  * the response builds on.
  */
 const runCronSweeps = async (dryRun: boolean, deadline: number, startedAt: number) => {
+	// Give one due contact request an early opportunity without consuming
+	// more than five seconds of the shared 20-second maintenance/run budget.
+	const contactDeadline = Math.min(deadline, Date.now() + CONTACT_NOTIFICATION_BUDGET_MS);
+	const contactNotifications = await runSweep(dryRun, 'contact notification retry', () => retryContactNotifications(contactDeadline));
 	// Consent-evidence retention sweep runs first, while the full budget
 	// remains: consent e-mails older than 10 years (CC Art. 205) are erased —
 	// the row stays as anonymized evidence.
@@ -375,13 +381,14 @@ const runCronSweeps = async (dryRun: boolean, deadline: number, startedAt: numbe
 	// Bounded per invocation (I10); under DRY_RUN no account is touched.
 	const zeroCredit = await runSweep(dryRun, 'zero-credit account sweep', () => sweepZeroCreditAccounts(ZERO_CREDIT_SWEEP_BATCH, deadline));
 
+
 	// A failed sweep must never tick as success: ok reflects every sweep's
 	// outcome (each failure is also surfaced in its own *Error field and
 	// logged). Per-account zero-credit eval failures count too — they ride
 	// an answered 200 by design, so without them in `ok` a permanently
 	// throwing evaluation would retry forever, invisible (codeant).
 	const base = {
-		ok: !consent.error && !handles.error && !autoTopup.error && !stripeDeletions.error && !googleRevocations.error && !stripeScrubs.error && !reversals.error && !zeroCredit.error && !zeroCredit.value?.errors,
+		ok: !consent.error && !handles.error && !autoTopup.error && !stripeDeletions.error && !googleRevocations.error && !stripeScrubs.error && !reversals.error && !zeroCredit.error && !zeroCredit.value?.errors && !contactNotifications.error && !contactNotifications.value?.errors,
 		dryRun,
 		consentEmailsNulled: orZero(consent.value),
 		sweepError: consent.error,
@@ -402,7 +409,10 @@ const runCronSweeps = async (dryRun: boolean, deadline: number, startedAt: numbe
 		zeroCreditWarningsSent: orZero(zeroCredit.value?.warned),
 		zeroCreditAccountsDeleted: orZero(zeroCredit.value?.deleted),
 		zeroCreditItemErrors: orZero(zeroCredit.value?.errors),
-		zeroCreditSweepError: zeroCredit.error
+		zeroCreditSweepError: zeroCredit.error,
+		contactNotificationsSent: orZero(contactNotifications.value?.sent),
+		contactNotificationErrors: orZero(contactNotifications.value?.errors),
+		contactNotificationSweepError: contactNotifications.error
 	};
 	console.info(`cron: sweeps finished in ${Date.now() - startedAt}ms`);
 	return base;

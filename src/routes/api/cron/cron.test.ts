@@ -11,12 +11,14 @@ const mocks = vi.hoisted(() => ({
 	env: { CRON_SECRET: 'test-secret', DRY_RUN: 'true' } as Record<string, string | undefined>,
 	runChannel: vi.fn(),
 	generateFeedbackDigest: vi.fn(),
+	retryContactNotifications: vi.fn(async (_deadline: number) => ({ sent: 0, errors: 0 })),
 	runFeedbackPreview: vi.fn(),
 	retryStripeCustomerDeletions: vi.fn(async (_limit: number, _deadline: number) => 0),
 	sweepZeroCreditAccounts: vi.fn(async (_limit: number, _deadline: number) => ({ evaluated: 0, warned: 0, deleted: 0, errors: 0 }))
 }));
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
+vi.mock('$lib/server/contactNotification', () => ({ retryContactNotifications: mocks.retryContactNotifications }));
 vi.mock('$lib/server/pipeline', () => ({ runChannel: mocks.runChannel }));
 vi.mock('$lib/server/feedbackDigest', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('$lib/server/feedbackDigest')>();
@@ -1003,6 +1005,32 @@ test.each([
 	expectDrainState(await channelRow('UC1'), '2026-06-01T00:00:00.000Z', 'fresh-token');
 });
 
+
+test('contact notification retry shares the deadline and reports deliveries and failures', async () => {
+	mocks.env.DRY_RUN = 'false';
+	mocks.retryContactNotifications.mockResolvedValueOnce({ sent: 1, errors: 1 });
+	const response = await call({ query: 'test-secret' });
+	const body = await response.json();
+	expect(mocks.retryContactNotifications).toHaveBeenCalledTimes(1);
+	const [deadline] = mocks.retryContactNotifications.mock.calls[0];
+	expect(deadline).toBeGreaterThan(Date.now() - 30_000);
+	expect(body).toMatchObject({ ok: false, contactNotificationsSent: 1, contactNotificationErrors: 1 });
+});
+
+test('dry runs never send or claim contact notifications', async () => {
+	const response = await call({ query: 'test-secret' });
+	expect(mocks.retryContactNotifications).not.toHaveBeenCalled();
+	expect(await response.json()).toMatchObject({ contactNotificationsSent: 0, contactNotificationErrors: 0 });
+});
+
+test('contact notification database failure is surfaced without stopping the other sweeps', async () => {
+	mocks.env.DRY_RUN = 'false';
+	mocks.retryContactNotifications.mockRejectedValueOnce(new Error('database unavailable'));
+	const response = await call({ query: 'test-secret' });
+	expect(await response.json()).toMatchObject({ ok: false, contactNotificationSweepError: 'database unavailable' });
+	expect(mocks.sweepZeroCreditAccounts).toHaveBeenCalled();
+});
+
 /** Seeds a planted feedback preview row; `plantAge`/`attemptedAge` backdate the plant/first-claim stamps. */
 async function seedPendingPreview(channelId: string, opts: { boundary?: string; plantAge?: number; attemptedAge?: number } = {}) {
 	const planted = new Date(Date.now() - (opts.plantAge ?? 0)).toISOString();
@@ -1415,4 +1443,18 @@ test('a preview drain that spends the budget never claims a channel onto a dead 
 	expect(row?.lastRunAt).toBeNull();
 	expect(row?.lastRunStatus).toBeNull();
 	expect(await res.json()).toMatchObject({ results: {} });
+});
+
+test('contact retries get an early bounded slice of the shared cron budget', async () => {
+	mocks.env.DRY_RUN = 'false';
+	const now = 1_900_000_000_000;
+	const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+	onTestFinished(() => clock.mockRestore());
+	await call({ query: 'test-secret' });
+	const [contactDeadline] = mocks.retryContactNotifications.mock.calls[0];
+	const sharedDeadline = mocks.retryStripeCustomerDeletions.mock.calls[0][1];
+	expect(sharedDeadline).toBe(now + 20_000);
+	expect(contactDeadline).toBe(Math.min(sharedDeadline, now + 5_000));
+	expect(mocks.retryContactNotifications.mock.invocationCallOrder[0]).toBeLessThan(mocks.retryStripeCustomerDeletions.mock.invocationCallOrder[0]);
+	expect(mocks.sweepZeroCreditAccounts).toHaveBeenCalledWith(expect.any(Number), sharedDeadline);
 });

@@ -61,7 +61,7 @@ describe('parseContactForm', () => {
 		form.set('name', '  Fan  ');
 		form.set('email', '  Fan@Example.com ');
 		form.set('opt_in', 'on');
-		expect(parseContactForm(form)).toEqual({ ok: true, name: 'Fan', email: 'fan@example.com' });
+		expect(parseContactForm(form)).toEqual({ ok: true, name: 'Fan', email: 'fan@example.com', message: null });
 	});
 
 	test('rejects an unticked opt-in box even with valid name and e-mail', () => {
@@ -122,7 +122,8 @@ describe('parseContactForm', () => {
 		expect(formResult({ email: "o'connor@example.com" })).toEqual({
 			ok: true,
 			name: 'Fan',
-			email: "o'connor@example.com"
+			email: "o'connor@example.com",
+			message: null
 		});
 	});
 
@@ -132,7 +133,7 @@ describe('parseContactForm', () => {
 		form.set('email', 'bad-address');
 		form.set('opt_in', 'on');
 		const result = parseContactForm(form);
-		expect(result).toEqual({ ok: false, error: expect.any(String), name: 'Fan', email: 'bad-address' });
+		expect(result).toEqual({ ok: false, error: expect.any(String), name: 'Fan', email: 'bad-address', message: '' });
 	});
 });
 
@@ -402,4 +403,61 @@ describe('buildVerificationEmail', () => {
 		expect(email.htmlPart).toContain('A &amp; B');
 		expect(email.textPart).toContain('A & B');
 	});
+});
+
+
+describe('optional contact message', () => {
+	function form(message?: string | Blob) {
+		const data = new FormData();
+		data.set('name', 'Fan'); data.set('email', 'fan@example.com'); data.set('opt_in', 'on');
+		if (message !== undefined) data.set('message', message);
+		return data;
+	}
+	test.each([undefined, '', ' \n\t '])('stores blank message as null (%s)', (message) => {
+		expect(parseContactForm(form(message))).toMatchObject({ ok: true, message: null });
+	});
+	test('preserves multiline text and accepts exactly 2000 characters', () => {
+		const message = ' First line\nSecond line ';
+		expect(parseContactForm(form(message))).toMatchObject({ ok: true, message });
+		expect(parseContactForm(form('x'.repeat(2000)))).toMatchObject({ ok: true, message: 'x'.repeat(2000) });
+	});
+	test.each(['x'.repeat(2001), ' '.repeat(2001)])('rejects all over-limit values without trimming', (message) => {
+		expect(parseContactForm(form(message))).toMatchObject({ ok: false, error: expect.stringContaining('2000'), message });
+	});
+	test('rejects multipart file values', () => {
+		expect(parseContactForm(form(new Blob(['hello'])))).toMatchObject({ ok: false, error: expect.stringMatching(/message/i) });
+	});
+	test('persists and refreshes multiline messages, then clears a blank resubmission', async () => {
+		const first = await createOrReusePendingSubmission({ ...SUBMIT, message: 'First\nmessage' });
+		expect((await rows())[0].message).toBe('First\nmessage');
+		const updated = await createOrReusePendingSubmission({ ...SUBMIT, message: 'Updated\nmessage' });
+		expect(updated.id).toBe(first.id);
+		expect((await rows())[0].message).toBe('Updated\nmessage');
+		await createOrReusePendingSubmission({ ...SUBMIT, message: null });
+		expect((await rows())[0].message).toBeNull();
+	});
+	test('verification send failure preserves message and retry uses the same row without exposing it in mail', async () => {
+		mocks.sendProtonMailEmail.mockRejectedValueOnce(new Error('SMTP unavailable'));
+		const input = { ...SUBMIT, message: 'Private\nrequest' };
+		await expect(submitContactRequest(input)).rejects.toThrow('SMTP unavailable');
+		const first = (await rows())[0];
+		expect(first.message).toBe(input.message);
+		await submitContactRequest(input);
+		expect(await rows()).toHaveLength(1);
+		expect((await rows())[0].id).toBe(first.id);
+		for (const [mail] of mocks.sendProtonMailEmail.mock.calls) {
+			expect(mail.textPart).not.toContain(input.message);
+			expect(mail.htmlPart).not.toContain('Private');
+		}
+	});
+});
+
+
+test('rejects duplicate message values, including a text value followed by a file', () => {
+	for (const extra of [new Blob(['payload']), 'second text']) {
+		const form = new FormData();
+		form.set('name', 'Fan'); form.set('email', 'fan@example.com'); form.set('opt_in', 'on');
+		form.append('message', 'first text'); form.append('message', extra);
+		expect(parseContactForm(form)).toMatchObject({ ok: false, error: expect.stringMatching(/message/i) });
+	}
 });

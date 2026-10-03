@@ -1,4 +1,11 @@
-import { expect, test } from 'vitest';
+import { beforeEach, expect, test, vi } from 'vitest';
+
+const mail = vi.hoisted(() => ({ send: vi.fn() }));
+vi.mock('$lib/server/protonMail', async (importOriginal) => ({
+	...(await importOriginal<typeof import('$lib/server/protonMail')>()),
+	sendProtonMailEmail: mail.send
+}));
+beforeEach(() => { mail.send.mockReset(); mail.send.mockResolvedValue({ messageId: '<test@example.com>' }); });
 
 import { eq } from 'drizzle-orm';
 
@@ -6,7 +13,7 @@ import { setupTestDb, testDb } from '$lib/server/testdb';
 import { contactSubmissions } from '$lib/server/db/schema';
 import { CONTACT_OPT_IN_TEXT } from '$lib/server/contact';
 
-import { load } from './+page.server';
+import { actions, load } from './+page.server';
 
 setupTestDb(['contact_submissions']);
 
@@ -48,13 +55,14 @@ test('rejects a tokenless visit with 400', async () => {
 	}
 });
 
-test('marks a valid token verified and returns the confirmed e-mail', async () => {
+test('GET only displays confirmation and never verifies or sends mail', async () => {
 	await seedRow('tok-ok');
 	const data = await loadVerify('tok-ok');
-	expect(data).toEqual({ state: 'verified', email: 'fan@example.com' });
+	expect(data).toEqual({ state: 'pending', email: 'fan@example.com' });
 	const row = await testDb().db.select().from(contactSubmissions).where(eq(contactSubmissions.verificationToken, 'tok-ok')).get();
-	expect(row!.status).toBe('verified');
-	expect(row!.verifiedAt).toEqual(expect.any(String));
+	expect(row!.status).toBe('pending');
+	expect(row!.verifiedAt).toBeNull();
+	expect(mail.send).not.toHaveBeenCalled();
 });
 
 test('is idempotent: re-opening an already verified link reports already_verified', async () => {
@@ -74,4 +82,29 @@ test('reports expired for an unverified token past its expiry and does not flip 
 test('reports invalid for an unknown token', async () => {
 	const data = await loadVerify('nope');
 	expect(data).toEqual({ state: 'invalid', email: null });
+});
+
+
+test('SMTP failure returns a safe pending state while preserving verified status', async () => {
+	await seedRow('tok-retry');
+	mail.send.mockRejectedValueOnce(new Error('private provider details'));
+	expect(await confirm('tok-retry')).toEqual({ state: 'delivery_pending', email: 'fan@example.com' });
+	const row = await testDb().db.select().from(contactSubmissions).where(eq(contactSubmissions.verificationToken, 'tok-retry')).get();
+	expect(row).toMatchObject({ status: 'verified', notificationDueAt: expect.any(String), notificationSentAt: null });
+});
+
+
+async function confirm(token: string, confirmed = true) {
+	const url = new URL('http://localhost/contact/verify'); url.searchParams.set('token', token);
+	const form = new FormData(); if (confirmed) form.set('confirm', 'yes');
+	return actions.default!({ url, request: new Request(url, { method: 'POST', body: form }) } as never);
+}
+
+test('explicit POST confirmation verifies and sends once; repeated GETs remain read-only', async () => {
+	await seedRow('post-confirm');
+	expect(await confirm('post-confirm', false)).toMatchObject({ status: 400 });
+	expect(mail.send).not.toHaveBeenCalled();
+	expect(await confirm('post-confirm')).toEqual({ state: 'verified', email: 'fan@example.com' });
+	await loadVerify('post-confirm'); await loadVerify('post-confirm'); await confirm('post-confirm');
+	expect(mail.send).toHaveBeenCalledTimes(1);
 });

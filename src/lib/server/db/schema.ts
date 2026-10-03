@@ -714,6 +714,10 @@ export const contactSubmissions = sqliteTable('contact_submissions', {
 	email: text('email').notNull(), // submitted address, normalized to lowercase
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	name: text('name').notNull(), // submitted display name
+	message: text('message'), // optional contact message, at most 2,000 characters
+	notificationDueAt: text('notification_due_at'), // due time / expiring delivery lease; null = not queued
+	notificationClaim: text('notification_claim'), // fences acknowledgments from stale delivery workers
+	notificationSentAt: text('notification_sent_at'), // recorded SMTP acceptance
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	status: text('status').notNull().default('pending'), // 'pending' | 'verified'
 	verificationToken: text('verification_token').notNull().unique(), // random 32-byte hex; the URL token
@@ -728,6 +732,7 @@ export const contactSubmissions = sqliteTable('contact_submissions', {
 	// Resubmission dedupe (unexpired pending per e-mail) filters
 	// status='pending' AND email=?; the status leftmost serves it.
 	index('contact_submissions_status_email_idx').on(table.status, table.email),
+	index('contact_submissions_notification_due_idx').on(table.notificationDueAt),
 	// Idempotency backstop (human review): at most ONE pending submission per
 	// e-mail. createOrReusePendingSubmission is check-then-act — two
 	// concurrent submissions can both miss the lookup and insert two rows with

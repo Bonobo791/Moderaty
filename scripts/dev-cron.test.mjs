@@ -332,3 +332,11 @@ describe('healthcheck ping', () => {
 		expect(console.error).toHaveBeenCalledWith('healthcheck ping failed:', 'dns failure');
 	});
 });
+
+
+describe('contact delivery health', () => {
+	it.each([{ contactNotificationErrors: 1 }, { contactNotificationSweepError: 'database unavailable' }])('alerts operators on contact failures even alongside an owner-actionable channel failure (%j)', async (contactFailure) => {
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse({ ok: false, results: { UC1: { error: 'token' } }, ...contactFailure }, 500)));
+		await expect(tickOnce()).rejects.toThrow(/contactNotification/);
+	});
+});

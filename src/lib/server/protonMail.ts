@@ -44,6 +44,9 @@ const HEADER_UNSAFE = /[\x00-\x1f\x7f]/;
 /** Marker for our own whole-operation guard firing (not a provider error). */
 class SendGuardExpiredError extends Error {}
 
+/** Configuration-only diagnostics are fixed strings safe for server logs. */
+export class ProtonMailConfigurationError extends Error {}
+
 export interface ProtonMailConfig {
 	username: string;
 	token: string;
@@ -61,16 +64,18 @@ export interface ProtonMailConfig {
 export function loadProtonMailConfig(): ProtonMailConfig {
 	const username = env.PROTON_SMTP_USERNAME;
 	const token = env.PROTON_SMTP_TOKEN;
-	if (!username) throw new Error('PROTON_SMTP_USERNAME is not configured');
-	if (!token) throw new Error('PROTON_SMTP_TOKEN is not configured');
-	if (!isBareAddress(username)) throw new Error('PROTON_SMTP_USERNAME must be a bare e-mail address');
+	if (!username) throw new ProtonMailConfigurationError('PROTON_SMTP_USERNAME is not configured');
+	if (!token) throw new ProtonMailConfigurationError('PROTON_SMTP_TOKEN is not configured');
+	if (!isBareAddress(username)) throw new ProtonMailConfigurationError('PROTON_SMTP_USERNAME must be a bare e-mail address');
 	const fromName = env.PROTON_FROM_NAME?.trim() || DEFAULT_FROM_NAME;
-	if (HEADER_UNSAFE.test(fromName)) throw new Error('PROTON_FROM_NAME must not contain control characters');
+	if (HEADER_UNSAFE.test(fromName)) throw new ProtonMailConfigurationError('PROTON_FROM_NAME must not contain control characters');
 	return { username, token, fromName };
 }
 
 export interface ProtonMailMessage {
 	toEmail: string;
+	replyTo?: string;
+	messageId?: string;
 	subject: string;
 	textPart: string;
 	htmlPart: string;
@@ -87,6 +92,12 @@ export interface ProtonMailSendResult {
  * header-safe line, and both body parts must be present.
  */
 function validateMessage(message: ProtonMailMessage): void {
+	if (message.replyTo !== undefined && (typeof message.replyTo !== 'string' || !isBareAddress(message.replyTo))) {
+		throw new Error('e-mail could not be sent (invalid reply-to address)');
+	}
+	if (message.messageId !== undefined && (typeof message.messageId !== 'string' || !/^<[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+>$/.test(message.messageId))) {
+		throw new Error('e-mail could not be sent (invalid message-id)');
+	}
 	if (typeof message.toEmail !== 'string' || !isBareAddress(message.toEmail)) {
 		throw new Error('e-mail could not be sent (invalid recipient address)');
 	}
@@ -236,8 +247,12 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 		// Arm with the budget remaining NOW — transport setup already consumed
 		// part of the caller's deadline since timeoutMs was computed at entry;
 		// a stale entry-time value would let the send outlive the deadline.
-		const guardMs =
-			deadline === undefined ? timeoutMs : Math.min(timeoutMs, deadline - Date.now());
+		const callerBudget = deadline === undefined ? Infinity : deadline - Date.now();
+		const guardMs = Math.min(timeoutMs, callerBudget);
+		// Classify the bound that armed the timer. Timer scheduling and the
+		// wall clock can differ at the boundary; a caller-limited guard must
+		// still defer rather than be mislabeled as an SMTP failure.
+		const guardError = callerBudget <= timeoutMs ? new DeadlineExceededError() : new SendGuardExpiredError();
 		timer = setTimeout(() => {
 			// Destroy the real socket BEFORE rejecting so an in-flight DATA
 			// acceptance can never outlive the budget; the send's late
@@ -249,7 +264,7 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 				// Stryker disable next-line StringLiteral: log-only message — mutating it changes no observable behavior
 				console.error('proton mail: transport close failed during timeout teardown');
 			}
-			reject(new SendGuardExpiredError());
+			reject(guardError);
 		}, guardMs);
 	});
 
@@ -261,6 +276,8 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 			transport.sendMail({
 				from: { name: config.fromName, address: config.username },
 				to: message.toEmail,
+				...(message.replyTo !== undefined ? { replyTo: message.replyTo } : {}),
+				...(message.messageId !== undefined ? { messageId: message.messageId } : {}),
 				subject: message.subject,
 				text: message.textPart,
 				html: message.htmlPart
@@ -270,6 +287,7 @@ export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?:
 	} catch (error) {
 		// A spent caller budget is a scheduling condition, not a provider
 		// failure — keep it distinguishable so callers can defer cleanly.
+		if (error instanceof DeadlineExceededError) throw error;
 		if (deadline !== undefined && Date.now() >= deadline) throw new DeadlineExceededError();
 		if (error instanceof SendGuardExpiredError) {
 			// Stryker disable next-line StringLiteral: log-only message — mutating it changes no observable behavior

@@ -22,12 +22,13 @@ export const actions: Actions = {
 		const form = await request.formData();
 		const parsed = parseContactForm(form);
 		if (!parsed.ok) {
-			return fail(400, { error: parsed.error, values: { name: parsed.name, email: parsed.email } });
+			return fail(400, { error: parsed.error, values: { name: parsed.name, email: parsed.email, message: parsed.message } });
 		}
 		try {
 			await submitContactRequest({
 				name: parsed.name,
 				email: parsed.email,
+				message: parsed.message,
 				consentText: CONTACT_OPT_IN_TEXT,
 				ip: getClientAddress(),
 				userAgent: request.headers.get('user-agent') ?? ''
@@ -39,7 +40,7 @@ export const actions: Actions = {
 			console.error('contact verification e-mail send failed:', error);
 			return fail(500, {
 				error: 'We could not send the verification e-mail right now — please try again in a few minutes.',
-				values: { name: parsed.name, email: parsed.email }
+				values: { name: parsed.name, email: parsed.email, message: parsed.message }
 			});
 		}
 		throw redirect(303, '/contact?sent=1');

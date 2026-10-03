@@ -7,6 +7,13 @@ const here = dirname(fileURLToPath(import.meta.url));
 const helpPage = readFileSync(join(here, '+page.svelte'), 'utf8');
 const appLayout = readFileSync(join(here, '..', '+layout.svelte'), 'utf8');
 
+/** Read visible copy from one Help topic so another topic cannot satisfy its disclosures. */
+function sectionText(id: string): string {
+	const section = helpPage.match(new RegExp(`<section[^>]*id="${id}"[^>]*>([\\s\\S]*?)</section>`));
+	expect(section, `Help section ${id}`).not.toBeNull();
+	return section![1].replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+}
+
 describe('help tab (reversibility disclosure)', () => {
 	it('is linked from the app nav', () => {
 		expect(appLayout).toContain('href="/help"');
@@ -75,6 +82,20 @@ describe('help covers the available product', () => {
 		expect(text).toMatch(/Older.*Newest/i);
 	});
 
+	it('distinguishes audit actors from rule and AI decision reasons', () => {
+		const audit = sectionText('audit');
+		expect(audit).toMatch(/actor.*system.*automatic.*user.*manual/i);
+		expect(audit).toMatch(/reason.*rule.*AI/i);
+		expect(audit).not.toMatch(/actor:\s*rule, AI, or you/i);
+	});
+
+	it('directs stored scoring failures to manual review instead of promising automatic rescoring', () => {
+		const troubleshooting = sectionText('troubleshooting');
+		expect(troubleshooting).toMatch(/quota or timeout.*retr(?:y|ies).*later scheduled checks/i);
+		expect(troubleshooting).toMatch(/AI scoring failure.*stored.*review queue.*not automatically.*scored again.*later.*checks.*manually/i);
+		expect(troubleshooting).not.toMatch(/quota, scoring, or timeout failure.*retr(?:y|ies)/i);
+	});
+
 	it('documents digest controls and distinguishes free preview sizes', () => {
 		expect(text).toMatch(/weekly.*100 new comments.*manual/i);
 		expect(text).toMatch(/2 to 10 comments/i);
@@ -91,11 +112,26 @@ describe('help covers the available product', () => {
 		expect(text).toMatch(/Manage cards.*Manage subscription/i);
 	});
 
+	it('requires a usable lifetime OpenAI key and rejects keyless or operator-funded scoring claims', () => {
+		const billing = sectionText('billing');
+		expect(billing).toMatch(/lifetime:.*requires your own OpenAI API key/i);
+		expect(billing).toMatch(/without a usable key, AI scoring cannot run/i);
+		expect(billing).not.toMatch(/(?:AI )?scoring (?:works|runs|continues|is available) without (?:your|a|the customer(?:'|’)?s) (?:own |usable )?(?:OpenAI(?: API)? )?key/i);
+		expect(billing).not.toMatch(/(?:operator|Moderaty)[- ](?:provided|funded) (?:AI scoring|scoring|OpenAI(?: API)? key)/i);
+	});
+
 	it('describes team permissions and single-use invitations', () => {
-		expect(text).toMatch(/members.*review queue.*rules/i);
-		expect(text).toMatch(/admins.*channels.*invite/i);
-		expect(text).toMatch(/owners.*billing.*feedback/i);
-		expect(text).toMatch(/invite.*once.*7 days/i);
+		const teams = sectionText('teams');
+		const members = teams.match(/Members\b(.*?)Admins\b/)?.[1] ?? '';
+		const admins = teams.match(/Admins\b(.*?)Owners\b/)?.[1] ?? '';
+		expect(members).toMatch(/review queue.*rules/i);
+		expect(members).toMatch(/change sensitivity.*protections/i);
+		expect(members).toMatch(/pause.*resume.*moderation/i);
+		expect(members).toMatch(/start moderation history scans.*(?:spend|consume).*credits/i);
+		expect(members).toMatch(/erase stored.*handles/i);
+		expect(admins).toMatch(/connect.*disconnect.*channels.*rename teams.*invite/i);
+		expect(teams).toMatch(/owners.*billing.*feedback/i);
+		expect(teams).toMatch(/invite.*once.*7 days/i);
 	});
 
 	it('covers privacy, support, current language coverage, and restricted licensing', () => {
@@ -110,10 +146,24 @@ describe('help covers the available product', () => {
 	});
 
 	it('offers in-page navigation to every help section', () => {
+		const expectedIds = [
+			'getting-started',
+			'moderation',
+			'rules',
+			'channel-controls',
+			'review',
+			'audit',
+			'feedback',
+			'history',
+			'billing',
+			'teams',
+			'privacy',
+			'troubleshooting'
+		];
 		const ids = [...helpPage.matchAll(/<section[^>]*id="([^"]+)"/g)].map((match) => match[1]);
-		expect(ids.length).toBeGreaterThanOrEqual(10);
+		expect(ids).toEqual(expectedIds);
 		expect(new Set(ids).size).toBe(ids.length);
-		for (const id of ids) expect(helpPage).toContain(`href="#${id}"`);
+		for (const id of expectedIds) expect(helpPage).toContain(`href="#${id}"`);
 		expect(helpPage).toMatch(/a\s*\{[^}]*color:\s*var\(--text\)/);
 		expect(helpPage).toMatch(/a:visited\s*\{[^}]*color:\s*var\(--text-2\)/);
 		expect(helpPage).toMatch(/a:hover\s*\{[^}]*color:\s*var\(--accent\)/);

@@ -128,7 +128,8 @@
 	<h2>The audit log and what you can undo</h2>
 	<p>
 		Every moderation action, automatic or manual, is recorded in the channel's audit log, newest
-		first, with its reason and actor: rule, AI, or you. Dry-run entries show simulated decisions.
+		first, with its reason, such as a rule match or AI score, and actor: <code>system</code> for
+		automatic actions or <code>user</code> for manual actions. Dry-run entries show simulated decisions.
 		Use <strong>Older</strong> to read previous pages and <strong>Newest</strong> to return.
 		Undo controls appear where a comment can be restored.
 	</p>
@@ -264,8 +265,12 @@
 		active team in the navigation. Its channels and credit balance are separate from other teams.
 	</p>
 	<ul>
-		<li><strong>Members</strong> work the review queue, manage rules, and read the audit log and digests.</li>
-		<li><strong>Admins</strong> also manage channels, rename teams, and create or revoke invite links.</li>
+		<li>
+			<strong>Members</strong> work the review queue, manage rules, and read the audit log and digests.
+			They can also change sensitivity and protections, pause or resume moderation, start
+			moderation history scans that can spend team credits, and erase stored commenter handles.
+		</li>
+		<li><strong>Admins</strong> also connect or disconnect channels, rename teams, and create or revoke invite links.</li>
 		<li><strong>Owners</strong> also manage member roles, billing, feedback settings and runs, and the lifetime OpenAI key.</li>
 	</ul>
 	<p>
@@ -303,7 +308,12 @@
 		<li><strong>Not checked yet:</strong> wait for the first scheduled check; inspect the channel status again.</li>
 		<li><strong>YouTube access expired:</strong> reconnect the channel using Connect YouTube channel on Dashboard.</li>
 		<li><strong>Out of credits:</strong> ask an owner to add credits on Usage; lifetime owners should check their OpenAI key on Team.</li>
-		<li><strong>Quota, scoring, or timeout failure:</strong> read the status message. Moderaty retries on later scheduled checks; review queued comments meanwhile.</li>
+		<li><strong>Quota or timeout failure:</strong> read the status message. Moderaty retries unfinished work on later scheduled checks.</li>
+		<li>
+			<strong>AI scoring failure:</strong> affected comments are stored in the review queue and are
+			not automatically scored again on later normal checks. Review and resolve them manually
+			in Review queue.
+		</li>
 		<li><strong>Digest deferred:</strong> resolve the reported credit or key issue. Manual digests need Generate now; scheduled digests and history scans retry automatically.</li>
 		<li><strong>Maintenance:</strong> the database is temporarily unavailable. Wait for recovery before changing settings or moderating.</li>
 		<li><strong>Self-hosted scans are not advancing:</strong> verify that your installation's cron job is running. Keeping a browser tab open does not run the scheduler.</li>

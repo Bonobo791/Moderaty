@@ -18,10 +18,12 @@ const server = await createServer({ logLevel: 'error', server: { middlewareMode:
 try {
 	const { buildWelcomeEmail } = await server.ssrLoadModule('/src/lib/server/welcomeEmailTemplate.ts');
 	await mkdir(output, { recursive: true });
-	for (const [name, teams] of Object.entries(variants)) {
+	await Promise.all(Object.entries(variants).map(async ([name, teams]) => {
 		const email = buildWelcomeEmail({ email: 'preview@example.com', displayName: 'Alex & friends', messageId: '<local-preview@moderaty.com>', appUrl: 'https://moderaty.com', teams });
-		await writeFile(resolve(output, `${name}.html`), email.htmlPart);
-		await writeFile(resolve(output, `${name}.txt`), `Subject: ${email.subject}\nReply-To: ${email.replyTo}\n\n${email.textPart}\n`);
-	}
+		await Promise.all([
+			writeFile(resolve(output, `${name}.html`), email.htmlPart),
+			writeFile(resolve(output, `${name}.txt`), `Subject: ${email.subject}\nReply-To: ${email.replyTo}\n\n${email.textPart}\n`)
+		]);
+	}));
 	console.info(`Wrote ${Object.keys(variants).length} synthetic HTML/plain-text pairs to ${output}`);
 } finally { await server.close(); }

@@ -10,7 +10,7 @@ import { setupTestDb, testDb, seedUser } from './testdb';
 import { channels, memberships, organizations, users, welcomeEmails } from './db/schema';
 import { enqueueWelcome, deliverWelcome, sweepWelcomeEmails, previewWelcomeBackfill, backfillWelcomeBatch, WELCOME_CAMPAIGN } from './welcomeEmail';
 import { buildWelcomeEmail } from './welcomeEmailTemplate';
-import { ProtonMailSubmissionError, ProtonMailPreSubmissionDeadlineError } from './protonMail';
+import { ProtonMailSubmissionError, ProtonMailPreSubmissionDeadlineError, ProtonMailConfigurationError } from './protonMail';
 setupTestDb(['users', 'organizations', 'memberships', 'channels', 'welcome_emails']);
 beforeEach(() => {
  mocks.env.MODERATY_DEPLOYMENT = 'official-hosted'; mocks.env.WELCOME_EMAIL_ENABLED = 'true'; mocks.env.APP_URL = 'https://moderaty.com'; mocks.env.DRY_RUN = 'false';
@@ -197,4 +197,67 @@ test('a deletion committed after the backfill page read is rechecked inside each
   expect((await testDb().db.select().from(users).where(eq(users.id, 'one')).get())?.googleSub).toBe('deleted:one');
   expect(await row()).toBeUndefined();
  } finally { spy.mockRestore(); }
+});
+
+
+test.each([
+ new ProtonMailConfigurationError('PROTON_SMTP_TOKEN is not configured'),
+ new ProtonMailSubmissionError('retryable', 'authentication', 'authentication failure')
+])('a deployment-wide transport outage never exhausts a recipient budget: %s', async cause => {
+ await queued(); mocks.send.mockRejectedValue(cause);
+ for (let index = 0; index < 7; index++) { await due(); await deliverWelcome('one', budget()); }
+ expect(await row()).toMatchObject({ state: 'queued', attempts: 0, claimToken: null });
+ await due(); mocks.send.mockResolvedValueOnce({ messageId: '<accepted@moderaty.com>' });
+ expect(await deliverWelcome('one', budget())).toBe('accepted');
+});
+test.each([
+ [new ProtonMailConfigurationError('missing token'), 'configuration'],
+ [new ProtonMailSubmissionError('retryable', 'authentication', 'auth failure'), 'authentication']
+])('transport outages put a durable campaign cooldown on the next user: %s', async (cause, category) => {
+ await queued('one'); await queued('two'); mocks.send.mockRejectedValueOnce(cause);
+ expect((await sweepWelcomeEmails(budget())).errors).toBe(1);
+ expect(await deliverWelcome('two', budget())).toBe('deferred');
+ expect(mocks.send).toHaveBeenCalledTimes(1);
+ expect(await row('one')).toMatchObject({ state: 'queued', attempts: 0, lastError: category });
+});
+
+test('channel context is refreshed after the fresh account read', async () => {
+ await queued();
+ await testDb().db.insert(organizations).values({ id: 'team', name: 'Team' });
+ await testDb().db.insert(memberships).values({ userId: 'one', orgId: 'team', role: 'owner' });
+ const originalSelect = testDb().db.select.bind(testDb().db);
+ const spy = vi.spyOn(testDb().db, 'select').mockImplementation(((fields?: Parameters<typeof originalSelect>[0]) => {
+  const builder = Reflect.apply(originalSelect, testDb().db, fields === undefined ? [] : [fields]) as ReturnType<typeof originalSelect>; const originalFrom = builder.from.bind(builder);
+  builder.from = ((table: typeof users) => {
+   const query = originalFrom(table);
+   if (table === users) {
+    const originalGet = query.get.bind(query);
+    query.get = (async () => {
+     const account = await originalGet();
+     await testDb().db.update(memberships).set({ role: 'member' }).where(eq(memberships.userId, 'one'));
+     await testDb().db.insert(channels).values({ id: 'newly-connected', orgId: 'team', title: 'New', refreshTokenEnc: 'fixture', moderationDryRunUsedAt: new Date(0).toISOString() });
+     return account;
+    }) as typeof query.get;
+   }
+   return query;
+  }) as typeof builder.from;
+  return builder;
+ }) as unknown as typeof originalSelect);
+ try { await deliverWelcome('one', budget()); }
+ finally { spy.mockRestore(); }
+ expect(mocks.send.mock.calls[0][0].textPart).toContain('already been used');
+ expect(mocks.send.mock.calls[0][0].textPart).not.toContain('Try the free moderation dry run');
+});
+
+
+test.each([
+ new ProtonMailConfigurationError('missing token'),
+ new ProtonMailSubmissionError('retryable', 'authentication', 'auth failure')
+])('transport outages preserve the existing nonzero attempt history exactly: %s', async cause => {
+ await queued();
+ const previousAttempt = new Date(Date.now() - 3_600_000).toISOString();
+ await testDb().db.update(welcomeEmails).set({ state: 'retryable_failure', attempts: 2, lastAttemptAt: previousAttempt, nextRetryAt: new Date(0).toISOString() }).where(eq(welcomeEmails.userId, 'one'));
+ mocks.send.mockRejectedValueOnce(cause);
+ expect(await deliverWelcome('one', budget())).toBe('failed');
+ expect(await row()).toMatchObject({ state: 'queued', attempts: 2, lastAttemptAt: previousAttempt, claimToken: null, acceptedAt: null });
 });

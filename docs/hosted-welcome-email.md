@@ -73,9 +73,11 @@ A fenced atomic claim and campaign-wide throttle allow at most one SMTP attempt
 per 60 seconds, including overlapping cron invocations. One cron tick attempts at
 most one recipient and recovers at most 25 stale claims, within its five-second
 share of the existing 20-second budget. Retry delays for definite failures are
-60s, 120s, 240s, 480s, then terminal after the fifth failed attempt. Configuration,
-authentication, DNS, explicit transient SMTP rejection and proven pre-DATA errors
-are safe retry categories. A deadline proven to occur before `sendMail` defers
+60s, 120s, 240s, 480s, then terminal after the fifth failed attempt. DNS, explicit transient SMTP rejection and proven pre-DATA errors
+are safe retry categories. Configuration/authentication outages instead preserve
+the recipient attempt count and pause the entire campaign for 15 minutes through
+a durable cooldown. They cannot permanently exhaust the queued users while an
+operator repairs the transport. A deadline proven to occur before `sendMail` defers
 without consuming an attempt; a deadline during transport is uncertain.
 
 Nodemailer's `CONN` command label also occurs after the complete DATA body, so it
@@ -140,7 +142,9 @@ node scripts/welcome-email.mjs status
 
 Preview returns **counts only**: total, eligible, excluded, and the eligible
 historical-unknown subset. It paginates 250 rows internally and does not return
-addresses or mutate records. Status returns campaign counts by durable state.
+addresses or mutate records. Status returns campaign counts by durable state. CLI failures identify safe usage, configuration, missing-
+schema, busy-database, authentication or connectivity categories without printing
+raw database errors, URLs, SQL parameters or credentials.
 Counts are a point-in-time observation; enrollment and sending recheck eligibility.
 
 After reviewing the preview and authorizing that batch, the human operator runs:

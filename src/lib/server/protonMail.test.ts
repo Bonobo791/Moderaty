@@ -708,3 +708,15 @@ test('an already-spent caller deadline is definitely not submitted', async () =>
  await expect(sendProtonMailEmail(MESSAGE, Date.now() - 1)).rejects.toMatchObject({ outcome: 'retryable', category: 'deadline_before_submission' });
  expect(mocks.sendMail).not.toHaveBeenCalled();
 });
+
+
+test('an expired deadline takes precedence over missing configuration and invalid message input', async () => {
+ delete mocks.env.PROTON_SMTP_TOKEN;
+ await expect(sendProtonMailEmail({ ...MESSAGE, toEmail: 'invalid' }, Date.now() - 1)).rejects.toMatchObject({ outcome: 'retryable', category: 'deadline_before_submission' });
+ expect(mocks.sendMail).not.toHaveBeenCalled();
+});
+
+test('malformed SMTP response codes cannot become definite rejections', async () => {
+ mocks.sendMail.mockRejectedValueOnce({ code: 'ESOCKET', responseCode: NaN });
+ await expect(sendProtonMailEmail(MESSAGE)).rejects.toMatchObject({ outcome: 'unknown' });
+});

@@ -168,6 +168,13 @@ function validatedMessageId(info: unknown, toEmail: string): string {
 	return verdict.messageId;
 }
 
+/** An explicit negative SMTP response proves non-acceptance, including DATA. */
+function smtpRejection(responseCode: number | undefined): ProtonMailSubmissionError | null {
+	if (responseCode === undefined || !Number.isFinite(responseCode) || responseCode < 400) return null;
+	if (responseCode < 500) return new ProtonMailSubmissionError('retryable', 'throttled', 'e-mail could not be sent (provider throttled the request)');
+	return new ProtonMailSubmissionError('permanent', 'rejected', 'e-mail could not be sent (provider rejected the request)');
+}
+
 /**
  * Maps a Nodemailer/SMTP failure to a generic client-safe error and logs
  * sanitized diagnostics (error code, numeric response code, command name)
@@ -188,13 +195,8 @@ function smtpFailure(error: unknown): Error {
 	if (code !== undefined && /CERT|TLS|SSL|ALTNAME|SELF_SIGNED|UNABLE_TO/i.test(code)) {
 		return failure('retryable', 'tls', 'TLS failure');
 	}
-	// An explicit negative SMTP response proves non-acceptance, including DATA.
-	if (responseCode !== undefined && responseCode >= 400 && responseCode < 500) {
-		return failure('retryable', 'throttled', 'provider throttled the request');
-	}
-	if (responseCode !== undefined && responseCode >= 500) {
-		return failure('permanent', 'rejected', 'provider rejected the request');
-	}
+	const rejection = smtpRejection(responseCode);
+	if (rejection) return rejection;
 	if (code === 'EDNS') return failure('retryable', 'dns', 'SMTP failure');
 	// Nodemailer reports CONN for socket closes after DATA too: it is NOT
 	// proof of a pre-submission failure. Only known pre-submission phases
@@ -219,6 +221,7 @@ function smtpFailure(error: unknown): Error {
  * @returns The provider-accepted message id.
  */
 export async function sendProtonMailEmail(message: ProtonMailMessage, deadline?: number): Promise<ProtonMailSendResult> {
+	if (deadline !== undefined && Date.now() >= deadline) throw new ProtonMailPreSubmissionDeadlineError();
 	const config = loadProtonMailConfig();
 	validateMessage(message);
 	// The caller's run budget composes with (never widens) the 10s client

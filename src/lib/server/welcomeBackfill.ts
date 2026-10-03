@@ -1,8 +1,8 @@
-// Human-operated, bounded backfill and count-only monitoring. Never calls SMTP.
-import { and, asc, eq, gt, sql } from 'drizzle-orm';
+// Bounded automatic discovery, optional operator backfill and count-only monitoring. Never calls SMTP.
+import { and, asc, eq, gt, inArray, isNull, ne, notLike, or, sql } from 'drizzle-orm';
 import { db, withBusyRetry } from './db';
 import { users, welcomeEmails } from './db/schema';
-import { WELCOME_CAMPAIGN, enqueueWelcome, exclusion, isHistoricalCandidate, isOfficialHosted, type Account, type WelcomeRow } from './welcomeEnrollment';
+import { WELCOME_CAMPAIGN, enqueueWelcome, exclusion, isHistoricalCandidate, isOfficialHosted, sendingEnabled, type Account, type WelcomeRow } from './welcomeEnrollment';
 const MAX_BACKFILL_BATCH = 25;
 
 function backfillEligible(account: Account, row?: WelcomeRow): boolean {
@@ -37,10 +37,33 @@ function validateBackfillBatch(limit: number): void {
 }
 
 async function enrollHistoricalAccount(account: Account, welcome: WelcomeRow | null): Promise<boolean> {
-	if (!backfillEligible(account, welcome ?? undefined)) return false;
 	// Serialize the fresh eligibility read/write with account teardown.
 	return withBusyRetry(() => db.transaction(tx =>
 		enqueueWelcome(tx, account.id, welcome?.state === 'never_sent' ? 'never_sent' : 'historical_unknown')));
+}
+
+/**
+ * Committed campaign rows are the resume record: only unenrolled candidates
+ * enter the page. No in-memory cursor can lose progress or miss a later signup
+ * that sorts before a previous page. Invalid recipients acquire suppression
+ * records; deleted/terminal/excluded rows never pin the bounded candidate page.
+ */
+export async function enrollWelcomeCandidates(deadline: number) {
+	const counts = { scanned: 0, queued: 0 };
+	if (!sendingEnabled() || Date.now() >= deadline) return counts;
+	const page = await db.select({ account: users, welcome: welcomeEmails }).from(users)
+		.leftJoin(welcomeEmails, and(eq(welcomeEmails.userId, users.id), eq(welcomeEmails.campaign, WELCOME_CAMPAIGN)))
+		.where(and(notLike(users.googleSub, 'deleted:%'), ne(users.email, '[deleted]'),
+			or(isNull(welcomeEmails.userId), and(inArray(welcomeEmails.state, ['historical_unknown', 'never_sent']),
+				isNull(welcomeEmails.acceptedAt), isNull(welcomeEmails.suppressionReason),
+				or(isNull(welcomeEmails.cohort), eq(welcomeEmails.cohort, ''), eq(welcomeEmails.cohort, 'official-hosted'))))))
+		.orderBy(asc(users.id)).limit(MAX_BACKFILL_BATCH);
+	for (const { account, welcome } of page) {
+		if (Date.now() >= deadline) break;
+		counts.scanned++;
+		if (await enrollHistoricalAccount(account, welcome)) counts.queued++;
+	}
+	return counts;
 }
 
 /** Bounded/resumable enrollment only; operator reviews preview and chooses each batch. */
@@ -51,7 +74,7 @@ export async function backfillWelcomeBatch(options: { afterUserId?: string | nul
 	for (const { account, welcome } of page) {
 		// Deliberately sequential SQLite writers; the next record starts only
 		// after the previous short transaction commits or exhausts busy retry.
-		if (await enrollHistoricalAccount(account, welcome)) queued++;
+		if (backfillEligible(account, welcome ?? undefined) && await enrollHistoricalAccount(account, welcome)) queued++;
 	}
 	return { scanned: page.length, queued, nextCursor: page.length === options.limit ? page[page.length - 1].account.id : null };
 }

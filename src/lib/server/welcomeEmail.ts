@@ -9,6 +9,7 @@ import { buildWelcomeEmail, welcomeAppOrigin, type WelcomeTeam } from './welcome
 import { WELCOME_CAMPAIGN, exclusion, key, sendingEnabled, type WelcomeRow, type Account } from './welcomeEnrollment';
 import { recordWelcomeAcceptance, recordWelcomeFailure, type WelcomeDelivery } from './welcomeDeliveryOutcome';
 import { WelcomePreparationError, welcomeFailureCategory } from './welcomeDiagnostics';
+import { enrollWelcomeCandidates } from './welcomeBackfill';
 export { WELCOME_CAMPAIGN, enqueueWelcome, isOfficialHosted } from './welcomeEnrollment';
 export { previewWelcomeBackfill, backfillWelcomeBatch, welcomeQueueStatus } from './welcomeBackfill';
 export type { WelcomeDelivery } from './welcomeDeliveryOutcome';
@@ -145,15 +146,17 @@ async function attemptNextWelcome(deadline: number): Promise<WelcomeDelivery> {
 	catch (cause) { console.error(DIAGNOSTIC.processing, { category: welcomeFailureCategory(cause) }); return 'failed'; }
 }
 
-/** At most one send and 25 crash recoveries; called through the safe public boundary. */
+/** At most 25 enrollments, one send and 25 crash recoveries within the shared budget. */
 async function sweepWelcomeQueue(deadline: number) {
-	const counts = { accepted: 0, errors: 0, ambiguous: 0, suppressed: 0 };
+	const counts = { scanned: 0, queued: 0, accepted: 0, errors: 0, ambiguous: 0, suppressed: 0 };
 	if (!sendingEnabled() || Date.now() >= deadline) return counts;
 	const unresolved = await db.select({ userId: welcomeEmails.userId }).from(welcomeEmails)
 		.where(and(eq(welcomeEmails.campaign, WELCOME_CAMPAIGN), eq(welcomeEmails.state, 'ambiguous'))).limit(1).get();
 	counts.ambiguous = unresolved ? 1 : 0;
 	if (Date.now() >= deadline) return counts;
 	counts.ambiguous = Math.min(1, counts.ambiguous + await recoverExpiredClaims(deadline));
+	if (Date.now() >= deadline) return counts;
+	Object.assign(counts, await enrollWelcomeCandidates(deadline));
 	if (Date.now() >= deadline) return counts;
 	const outcome = await attemptNextWelcome(deadline);
 	const counter: Partial<Record<WelcomeDelivery, keyof typeof counts>> = { accepted: 'accepted', failed: 'errors', ambiguous: 'ambiguous', suppressed: 'suppressed' };

@@ -415,6 +415,8 @@ const runCronSweeps = async (dryRun: boolean, deadline: number, startedAt: numbe
 		contactNotificationsSent: orZero(contactNotifications.value?.sent),
 		contactNotificationErrors: orZero(contactNotifications.value?.errors),
 		contactNotificationSweepError: contactNotifications.error,
+		welcomeEmailCandidatesScanned: orZero(welcome.value?.scanned),
+		welcomeEmailsQueued: orZero(welcome.value?.queued),
 		welcomeEmailsAccepted: orZero(welcome.value?.accepted),
 		welcomeEmailErrors: orZero(welcome.value?.errors),
 		welcomeEmailAmbiguous: orZero(welcome.value?.ambiguous),

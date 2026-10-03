@@ -11,7 +11,7 @@ const mocks = vi.hoisted(() => ({
 	env: { CRON_SECRET: 'test-secret', DRY_RUN: 'true' } as Record<string, string | undefined>,
 	runChannel: vi.fn(),
 	generateFeedbackDigest: vi.fn(),
-	sweepWelcomeEmails: vi.fn(async (_deadline: number) => ({ accepted: 0, errors: 0, ambiguous: 0, suppressed: 0 })),
+	sweepWelcomeEmails: vi.fn(async (_deadline: number) => ({ scanned: 0, queued: 0, accepted: 0, errors: 0, ambiguous: 0, suppressed: 0 })),
 	retryContactNotifications: vi.fn(async (_deadline: number) => ({ sent: 0, errors: 0 })),
 	runFeedbackPreview: vi.fn(),
 	retryStripeCustomerDeletions: vi.fn(async (_limit: number, _deadline: number) => 0),
@@ -1512,10 +1512,10 @@ test('welcome sweep is authenticated, skipped in dry-run and reports uncertain s
 	await call({ bearer: 'test-secret' });
 	expect(mocks.sweepWelcomeEmails).not.toHaveBeenCalled();
 	mocks.env.DRY_RUN = 'false';
-	mocks.sweepWelcomeEmails.mockResolvedValueOnce({ accepted: 0, errors: 0, ambiguous: 1, suppressed: 0 });
+	mocks.sweepWelcomeEmails.mockResolvedValueOnce({ scanned: 25, queued: 24, accepted: 0, errors: 0, ambiguous: 1, suppressed: 0 });
 	const started = Date.now();
 	const response = await call({ bearer: 'test-secret' });
 	expect(mocks.sweepWelcomeEmails).toHaveBeenCalledTimes(1);
 	expect(mocks.sweepWelcomeEmails.mock.calls[0][0]).toBeLessThanOrEqual(started + 6000);
-	expect(await response.json()).toMatchObject({ ok: false, welcomeEmailsAccepted: 0, welcomeEmailAmbiguous: 1 });
+	expect(await response.json()).toMatchObject({ ok: false, welcomeEmailCandidatesScanned: 25, welcomeEmailsQueued: 24, welcomeEmailsAccepted: 0, welcomeEmailAmbiguous: 1 });
 });

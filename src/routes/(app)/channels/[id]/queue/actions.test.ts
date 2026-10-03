@@ -522,3 +522,49 @@ test('act rejects a signed-out request with 401', async () => {
 	}
 	await expectNothingDecided('c8', 'pending');
 });
+
+test.each(actionNames)('queue %s binds its intent before YouTube', async (name) => {
+	mocks.env.DRY_RUN = 'false';
+	await seedComment('c1', 'UC1');
+	const checkBinding = async () => {
+		const row = await commentRow('c1');
+		expect(row?.status).toBe('restoring');
+		const intent = await testDb().db.select().from(auditLog).where(eq(auditLog.id, row!.restoreIntentId!)).get();
+		expect(intent).toMatchObject({ action: name === 'del' ? 'delete' : name, actor: 'user', channelId: 'UC1', commentId: 'c1' });
+	};
+	if (name === 'del') mocks.deleteComment.mockImplementationOnce(checkBinding);
+	else mocks.setModerationStatus.mockImplementationOnce(checkBinding);
+	const result = await act(name, { commentId: 'c1' });
+	expect(result).toHaveProperty('success');
+	expect((await commentRow('c1'))?.restoreIntentId).toBeNull();
+});
+
+test('a binding failure rolls back the queue claim and audit before YouTube', async () => {
+	mocks.env.DRY_RUN = 'false';
+	await seedComment('c1', 'UC1');
+	await testDb().client.execute(`CREATE TRIGGER fail_binding BEFORE UPDATE OF restore_intent_id ON comments WHEN NEW.restore_intent_id IS NOT NULL BEGIN SELECT RAISE(ABORT, 'binding failed'); END`);
+	try {
+		await expect(act('ban', { commentId: 'c1' })).rejects.toThrow();
+	} finally {
+		await testDb().client.execute('DROP TRIGGER fail_binding');
+	}
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	expect(await commentRow('c1')).toMatchObject({ status: 'pending', restoreIntentId: null });
+	expect(await auditRows()).toHaveLength(0);
+});
+
+test('a stale failed queue action cannot release a newer claim', async () => {
+	mocks.env.DRY_RUN = 'false';
+	await seedComment('c1', 'UC1');
+	let newIntentId = 0;
+	mocks.setModerationStatus.mockImplementationOnce(async () => {
+		const [intent] = await testDb().db.insert(auditLog).values({ channelId: 'UC1', commentId: 'c1', action: 'restore', reason: 'New claim', actor: 'user' }).returning({ id: auditLog.id });
+		newIntentId = intent.id;
+		await testDb().db.update(comments).set({ restoreIntentId: intent.id }).where(eq(comments.id, 'c1'));
+		throw new Error('old action failed');
+	});
+	const result = await act('reject', { commentId: 'c1' });
+	expect(result).toMatchObject({ status: 500, data: { error: expect.stringContaining('changed while') } });
+	expect(await commentRow('c1')).toMatchObject({ status: 'restoring', restoreIntentId: newIntentId });
+	expect(await testDb().db.select().from(auditLog).where(eq(auditLog.id, newIntentId)).get()).toMatchObject({ action: 'restore' });
+});

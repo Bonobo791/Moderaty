@@ -264,6 +264,7 @@ export async function createTestDb(): Promise<TestDb> {
 			text TEXT NOT NULL,
 			published_at TEXT NOT NULL,
 			status TEXT NOT NULL,
+			restore_intent_id INTEGER,
 			decided_by TEXT NOT NULL,
 			matched_rule_id INTEGER,
 			ai_score TEXT,

@@ -449,6 +449,13 @@
       "when": 1791058492001,
       "tag": "0063_welcome_campaign_pacing",
       "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": "6",
+      "when": 1791063820829,
+      "tag": "0065_restore_intent_binding",
+      "breakpoints": true
     }
   ]
 }

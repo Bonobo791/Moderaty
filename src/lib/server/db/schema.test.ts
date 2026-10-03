@@ -429,6 +429,7 @@ describe('comments', () => {
 			text: { notNull: true },
 			published_at: { notNull: true },
 			status: { notNull: true },
+			restore_intent_id: { notNull: false },
 			decided_by: { notNull: true },
 			matched_rule_id: { notNull: false },
 			ai_score: { notNull: false },

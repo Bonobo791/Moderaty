@@ -108,6 +108,7 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
 				createdAt: new Date().toISOString()
 			})
 			.returning({ id: auditLog.id });
+		await transaction.update(comments).set({ restoreIntentId: intent[0].id }).where(eq(comments.id, commentId));
 		return { intentId: intent[0].id };
 	}));
 	if (!claim) throw error(404, 'pending comment not found in this channel');
@@ -132,11 +133,13 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
 		// public on YouTube while the queue calls it held. A 'dispatched'
 		// hold stays dispatched — the reconcile loop re-applies it against
 		// the restored 'pending'.
-		await db.transaction(async (transaction) => {
-			await transaction
+		const released = await db.transaction(async (transaction) => {
+			const released = await transaction
 				.update(comments)
-				.set({ status: 'pending', decidedBy: 'none' })
-				.where(eq(comments.id, commentId));
+				.set({ status: 'pending', decidedBy: 'none', restoreIntentId: null })
+				.where(and(eq(comments.id, commentId), eq(comments.status, 'restoring'), eq(comments.restoreIntentId, claim.intentId)))
+				.returning({ id: comments.id });
+			if (!released.length) return false;
 			await transaction.delete(auditLog).where(eq(auditLog.id, claim.intentId));
 			await transaction
 				.update(moderationActions)
@@ -148,11 +151,14 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
 						eq(moderationActions.state, 'superseded')
 					)
 				);
+			return true;
 		});
 		// Full error detail stays server-side; the client gets a generic
 		// message in the error-box instead of a bare 500 page (I12).
 		console.error('[queue] %s failed for comment %s', action, commentId, e);
-		return fail(500, { error: 'The YouTube action failed — the comment is back in the queue. Try again.' });
+		return fail(500, { error: released
+			? 'The YouTube action failed — the comment is back in the queue. Try again.'
+			: 'The YouTube action failed, but this comment changed while it was running. Refresh before retrying.' });
 	}
 	// The remote write landed — releasing the claim now would revert the
 	// local row and drop the intent while YouTube already reflects the
@@ -160,7 +166,7 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
 	// the durable intent row; the reconcile sweep re-applies the idempotent
 	// write and commits the final status on its next run.
 	try {
-		await finalizeHumanIntent(paramsId, commentId, remoteMissing ? 'delete' : action, ch);
+		await finalizeHumanIntent(paramsId, commentId, remoteMissing ? 'delete' : action, claim.intentId, ch);
 	} catch (e) {
 		console.error('[queue] %s reached YouTube but finalize failed for comment %s — the reconcile sweep will finish it', action, commentId, e);
 		return fail(500, { error: 'The action reached YouTube but is still being recorded — it resolves automatically.' });

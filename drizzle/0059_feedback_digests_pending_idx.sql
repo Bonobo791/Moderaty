@@ -1,0 +1,1 @@
+CREATE INDEX `feedback_digests_pending_idx` ON `feedback_digests` (`id`) WHERE "feedback_digests"."status" = 'dry-run-pending';

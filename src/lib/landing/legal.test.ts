@@ -30,11 +30,13 @@ describe('LEGAL_DOCS', () => {
 		// dormant zero-credit account deletion (Terms §17.3); 1.15 introduced
 		// the owner-selected credit bundles; 1.16 corrects the transactional
 		// e-mail provider disclosure to Proton AG (Mailjet was disclosed since
-		// 1.9 but never provisioned). Material changes must bump LEGAL_VERSION
+		// 1.9 but never provisioned); 1.17 adds the billing address Stripe
+		// Checkout now requires (MOD-236) to Privacy §2's billing row.
+		// Material changes must bump LEGAL_VERSION
 		// so the re-consent gate (hasCurrentConsent) routes every user back
 		// through /consent. Never let legal changes ride along under an old
 		// version.
-		expect(LEGAL_VERSION).toBe('1.16');
+		expect(LEGAL_VERSION).toBe('1.18');
 	});
 
 	it('lists exactly the three published legal documents', () => {
@@ -771,6 +773,20 @@ describe('transactional e-mail provider disclosure (1.16)', () => {
 	it('no live disclosure still names Mailjet as the provider', () => {
 		expect(readComponent('privacy')).not.toMatch(/Mailjet/i);
 		expect(readComponent('dpa')).not.toMatch(/Mailjet/i);
+	});
+});
+
+// LEGAL_VERSION 1.17: MOD-236 made the billing address mandatory and enabled
+// tax-ID collection on every real Checkout Session, so Privacy §2's billing
+// row must enumerate both categories. If checkout's collected fields and the
+// row ever drift apart again the row must change with them — under a new
+// LEGAL_VERSION (codex on PR #179).
+describe('billing disclosure covers checkout collection (1.17)', () => {
+	it('Privacy §2 billing row discloses the billing address Stripe now collects', () => {
+		const row = readComponent('privacy').match(/Billing:([\s\S]*?)<\/td>/)?.[1] ?? '';
+		expect(row, 'Privacy §2 billing row not found').not.toBe('');
+		expect(row).toMatch(/billing address/i);
+		expect(row).toMatch(/tax ID/i);
 	});
 });
 

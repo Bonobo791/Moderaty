@@ -302,25 +302,18 @@ the site exists), local work, and outage recovery.
   top-up" — or "A card is saved" while details are still resolving).
 - Watch the next scheduled invocation succeed in the Netlify function logs.
 
-## 7. Backups
+## 7. Turso backups and recovery
 
-- **Automated:** `.github/workflows/db-backup.yml` dumps the production
-  database daily at 03:23 UTC and keeps the gzipped SQL dump as a workflow
-  artifact for 30 days. One-time setup: mint a Turso platform API token
-  (`turso auth api-tokens mint <name>`) and add it to the repo as the
-  `TURSO_API_TOKEN` secret (Settings → Secrets and variables → Actions).
-  A run without the secret, or one that produces no dump, fails loudly.
-- **Manual:** with the turso CLI logged in,
-  `node scripts/backup-db.mjs moderaty backups` writes
-  `backups/moderaty-<timestamp>.sql.gz` (the `backups/` dir is gitignored).
-  The script is read-only against the database and refuses to write an empty
-  or schema-less dump.
-- **Restore:** create a fresh Turso database, then load the dump:
-  `gunzip -c backups/moderaty-<timestamp>.sql.gz | turso db shell <new-db>`.
-  Point `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN` at the new database in
-  Netlify env vars, redeploy, and re-run `npm run db:migrate` only if the
-  dump predates a newer migration (the dump includes `__drizzle_migrations`,
-  so drizzle-kit applies just the gap). Verify per §1 afterwards.
+Use Turso's automatic commit-time backups and native point-in-time recovery.
+No custom backup schedule, export script or workflow artifact is required.
+The owner confirmed Free, with a 24-hour recovery window, on 2026-10-02.
+Usable recovery points and an isolated restore still need verification. Free
+PITR cannot recover a deleted database; no paid upgrade is part of this change.
+
+[docs/BACKUP_RECOVERY.md](docs/BACKUP_RECOVERY.md) covers entitlement checks,
+isolated restore drills, billing reconciliation and human-approved cutover.
+The former scheduled dump/artifact workflow is retired in this change. Normal
+CI checks the repository only; it does not prove a usable native recovery point.
 
 ## 8. Database outage runbook
 

@@ -335,6 +335,26 @@ test('a deadline spent during transport setup never opens an SMTP connection', a
 	expect(mocks.sendMail).not.toHaveBeenCalled();
 });
 
+test('the guard is armed with the budget left after setup, not the entry-time budget', async () => {
+	vi.useFakeTimers();
+	// createTransport runs after timeoutMs is computed: 4s of an 8s caller
+	// deadline is gone before the timer exists. If the guard still uses the
+	// entry-time budget it fires 4s late and the send outlives the deadline
+	// (codex). Assert the deadline-time teardown, not settlement — a stale
+	// timer would leave the send pending and this test must not hang on it.
+	mocks.createTransport.mockImplementationOnce(() => {
+		vi.setSystemTime(Date.now() + 4_000);
+		return { sendMail: mocks.sendMail, close: mocks.close };
+	});
+	mocks.sendMail.mockReturnValue(new Promise(() => {}));
+
+	const send = sendProtonMailEmail(MESSAGE, Date.now() + 8_000);
+	void send.catch(() => {});
+	await vi.advanceTimersByTimeAsync(4_001); // the caller deadline has now passed
+	expect(mocks.close).toHaveBeenCalled();
+	await expect(send).rejects.toBeInstanceOf(DeadlineExceededError);
+});
+
 test('a late acceptance after the deadline is never reported as success', async () => {
 	vi.useFakeTimers();
 	mocks.sendMail.mockImplementation(
@@ -632,4 +652,32 @@ describe('local SMTP integration', () => {
 		await new Promise((resolve) => setTimeout(resolve, stallDataMs + 150));
 		expect(sessions[0].stallFired).toBe(false);
 	});
+});
+
+
+test('passes a validated Reply-To and stable Message-ID to SMTP', async () => {
+	await sendProtonMailEmail({ ...MESSAGE, replyTo: 'visitor@example.com', messageId: '<moderaty-contact-12@moderaty.com>' });
+	expect(mocks.sendMail.mock.calls[0][0]).toMatchObject({ replyTo: 'visitor@example.com', messageId: '<moderaty-contact-12@moderaty.com>' });
+});
+
+test.each(['a@example.com\r\nBcc: evil@example.com', 'a@example.com,b@example.com', 'Name <a@example.com>', '', 123])('rejects unsafe Reply-To %s before connecting', async (replyTo) => {
+	await expect(sendProtonMailEmail({ ...MESSAGE, replyTo } as never)).rejects.toThrow(/reply-to/i);
+	expect(mocks.createTransport).not.toHaveBeenCalled();
+});
+
+test.each(['bad\r\nBcc: a@example.com', 'not-a-message-id', '', 123])('rejects unsafe Message-ID %s before connecting', async (messageId) => {
+	await expect(sendProtonMailEmail({ ...MESSAGE, messageId } as never)).rejects.toThrow(/message-id/i);
+	expect(mocks.createTransport).not.toHaveBeenCalled();
+});
+
+test('a caller-limited guard remains a deadline when timer scheduling and the wall clock differ', async () => {
+	vi.useFakeTimers();
+	const now = Date.now();
+	vi.spyOn(Date, 'now').mockReturnValue(now);
+	mocks.sendMail.mockReturnValue(new Promise(() => {}));
+	const send = sendProtonMailEmail(MESSAGE, now + 300);
+	const assertion = expect(send).rejects.toBeInstanceOf(DeadlineExceededError);
+	await vi.advanceTimersByTimeAsync(301);
+	await assertion;
+	expect(mocks.close).toHaveBeenCalled();
 });

@@ -425,6 +425,10 @@ export const feedbackDigests = sqliteTable('feedback_digests', {
 	pooledCount: integer('pooled_count').notNull().default(0), // feedback comments that fell below the evidence threshold
 	creditsUsed: integer('credits_used'), // metered credits charged for this run; null = unmetered/none
 	error: text('error'), // sanitized failure category only — raw provider detail stays in the server log
+	// First cron-drain claim stamp on a 'dry-run-pending' row; NULL = queued
+	// but never attempted. The stale sweep only expires rows that got a real
+	// opportunity — queue age alone never expires a preview (codex, PR #178).
+	attemptedAt: text('attempted_at'),
 	emailedAt: text('emailed_at'), // set once the digest e-mail went out — RESERVED, unwired until MOD-92; always null today
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
 }, (table) => [
@@ -437,7 +441,13 @@ export const feedbackDigests = sqliteTable('feedback_digests', {
 		table.windowStart,
 		table.windowEnd
 	),
-	index('feedback_digests_channel_created_idx').on(table.channelId, table.createdAt)
+	index('feedback_digests_channel_created_idx').on(table.channelId, table.createdAt),
+	// The cron drainer probes status='dry-run-pending' every tick (select +
+	// stale finalize) — a partial index keeps that O(pending) instead of
+	// scanning all digest history as the table grows (codex, PR #178).
+	index('feedback_digests_pending_idx')
+		.on(table.id)
+		.where(sql`${table.status} = 'dry-run-pending'`)
 ]);
 
 export const feedbackFindings = sqliteTable('feedback_findings', {
@@ -704,6 +714,10 @@ export const contactSubmissions = sqliteTable('contact_submissions', {
 	email: text('email').notNull(), // submitted address, normalized to lowercase
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	name: text('name').notNull(), // submitted display name
+	message: text('message'), // optional contact message, at most 2,000 characters
+	notificationDueAt: text('notification_due_at'), // due time / expiring delivery lease; null = not queued
+	notificationClaim: text('notification_claim'), // fences acknowledgments from stale delivery workers
+	notificationSentAt: text('notification_sent_at'), // recorded SMTP acceptance
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	status: text('status').notNull().default('pending'), // 'pending' | 'verified'
 	verificationToken: text('verification_token').notNull().unique(), // random 32-byte hex; the URL token
@@ -718,6 +732,7 @@ export const contactSubmissions = sqliteTable('contact_submissions', {
 	// Resubmission dedupe (unexpired pending per e-mail) filters
 	// status='pending' AND email=?; the status leftmost serves it.
 	index('contact_submissions_status_email_idx').on(table.status, table.email),
+	index('contact_submissions_notification_due_idx').on(table.notificationDueAt),
 	// Idempotency backstop (human review): at most ONE pending submission per
 	// e-mail. createOrReusePendingSubmission is check-then-act — two
 	// concurrent submissions can both miss the lookup and insert two rows with

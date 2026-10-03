@@ -370,13 +370,13 @@ h1 {
 	font-size: 11px;
 }
 
-.btn:focus-visible, a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
+.btn:focus-visible, a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible {
 	outline: 1px solid var(--accent);
 	outline-offset: 2px;
 }
 
 /* ── forms ──────────────────────────────────────────────── */
-input, select {
+input, select, textarea {
 	padding: 8px 10px;
 	border: 1px solid var(--line);
 	font-size: 14px;
@@ -385,11 +385,11 @@ input, select {
 	color: var(--paper);
 }
 
-input:focus, select:focus {
+input:focus, select:focus, textarea:focus {
 	border-color: var(--accent);
 	outline: none;
 }
-input::placeholder { color: rgb(244 244 248 / 35%); }
+input::placeholder, textarea::placeholder { color: rgb(244 244 248 / 35%); }
 form.inline { display: inline; }
 
 /* ── redesign primitives (spec §7 / Step 1.3) ───────────── */

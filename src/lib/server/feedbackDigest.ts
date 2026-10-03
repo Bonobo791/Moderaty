@@ -967,9 +967,10 @@ export async function startFeedbackPreview(
 			throw new Error(`channel ${channelId} changed under the dry-run claim — aborting the preview`);
 		}
 		if (!channel.active) throw new Error(ERR_PREVIEW_PAUSED);
-		// windowEnd starts as the plant time — it doubles as the row's age
-		// marker for the drainer's stale age-out and is replaced by the
-		// batch's newest publishedAt when the run completes.
+		// windowEnd starts as the plant time (audit trail) and is replaced by
+		// the batch's newest publishedAt when the run completes; the drainer's
+		// stale age-out measures from attempted_at, stamped on first claim —
+		// never from the plant, so queued rows can't expire unattempted.
 		const [row] = await tx
 			.insert(feedbackDigests)
 			.values({
@@ -1026,11 +1027,22 @@ export async function runFeedbackPreview(
 		if (failed > 0 && classified.length === 0) throw new Error(`classification failed for all ${failed} preview comments`);
 		const categories = enabledCategories(channel);
 		const threshold = channel.feedbackThreshold ?? 3;
+		// Same write reserve as the digest path: the clustering call gets the
+		// reserved bound so it can never consume the headroom the persistence
+		// tx needs (codex).
+		const clusterDeadline = deadline === undefined ? undefined : deadline - WRITE_RESERVE_MS;
 		const { classified: themed, clusteringDegraded } = themePassCanMatter(classified, categories, threshold)
-			? await clusterClassifiedClaims(classified, categories, threshold, deadline, apiKey)
+			? await clusterClassifiedClaims(classified, categories, threshold, clusterDeadline, apiKey)
 			: { classified, clusteringDegraded: false };
 		const { findings, pooled } = groupFeedback(themed, { categories, threshold });
 		const batchIds = new Set(page.batch.map((comment) => comment.id));
+		// Abort before the write when the reserve is already spent — entering
+		// the tx would race the caller's hard abort and leave the commit
+		// outcome unknown (codex). DeadlineExceededError leaves the row
+		// pending, so the retry runs with real headroom.
+		if (deadline !== undefined && Date.now() > deadline - WRITE_RESERVE_MS) {
+			throw new DeadlineExceededError();
+		}
 		// ONE transaction resolves the row and writes its children — never a
 		// partial preview. The guarded UPDATE is the idempotency backstop: a
 		// second runner (expired lease → cron pickup) finds the row no longer
@@ -1101,15 +1113,4 @@ export async function runFeedbackPreview(
 	}
 }
 
-/**
- * The synchronous entry point — plant + run in one call. The dashboard's
- * dryRun action uses it while the inline preview render exists; the async
- * path calls the two halves separately (action plants, cron drains).
- */
-export async function previewFeedbackDigest(
-	channelId: string,
-	{ boundary, deadline, claim }: { boundary: string; deadline?: number; claim?: DryRunClaim }
-): Promise<FeedbackPreview> {
-	const digestId = await startFeedbackPreview(channelId, { boundary, claim });
-	return runFeedbackPreview(channelId, digestId, { boundary, deadline, claim });
-}
+

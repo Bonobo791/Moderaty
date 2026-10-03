@@ -24,8 +24,18 @@ import { findPausedTopup, recoverPausedTopup, sweepPausedTopups, topupAttemptCor
 
 export const AUTO_TOPUP_DEFAULT_THRESHOLD = 100;
 const COOLDOWN_MS = 24 * 60 * 60 * 1000;
-/** PI statuses that can still settle on their own — a new charge while one exists could double-charge. `requires_payment_method` is excluded: Stripe leaves a declined off-session PI there, and it cannot settle without a re-confirmation this code never sends. */
-const SETTLING_PI_STATUSES = new Set(['processing', 'requires_capture', 'requires_confirmation', 'requires_action']);
+// The ONLY nonterminal PI status that can never settle: Stripe leaves a
+// declined off-session PI in requires_payment_method, and it cannot move
+// without a re-confirmation this code never sends. Every other non-canceled
+// status defers a new charge (a second PI could double-charge).
+const DEAD_PI_STATUS = 'requires_payment_method';
+// Every PaymentIntent status Stripe documents today (the SDK's
+// PaymentIntent.Status union). An out-of-enum value — missing, renamed, or
+// brand-new — means the response can no longer be trusted to mean what this
+// code assumes about money movement, so the API call fails loudly (I2)
+// rather than guessing: guessing "dead" risks a double charge; guessing
+// "settling" starves the org silently for the whole reconcile window.
+const KNOWN_PI_STATUSES = new Set([DEAD_PI_STATUS, 'requires_confirmation', 'requires_action', 'processing', 'requires_capture', 'canceled', 'succeeded']);
 const MAX_PER_DAY = 1;
 const MAX_PER_MONTH = 30;
 const MAX_CONSECUTIVE_FAILURES = 2;
@@ -617,10 +627,12 @@ async function releaseClaimForPi(
  *   is still in a non-terminal Stripe status (processing/requires_*): callers
  *   must not clear the row's reconciliation markers yet, or a PI that
  *   succeeds later with a lost webhook becomes undiscoverable (codex P1).
- *   `settling` — the subset that can still move money (a declined
- *   requires_payment_method PI is dead: it cannot settle without a
- *   re-confirmation this code never sends, so it must not gate new charges —
- *   gitar).
+ *   `settling` — the subset that can still move money: every non-canceled
+ *   status EXCEPT requires_payment_method (a declined PI is dead: it cannot
+ *   settle without a re-confirmation this code never sends, so it must not
+ *   gate new charges — gitar). A missing or never-before-seen status ON OUR
+ *   OWN PIs fails loudly as an API contract violation rather than guessing
+ *   settleability (codex PR #168/#169); unrelated PIs are never inspected.
  */
 export async function reconcileAutoTopup(orgId: string): Promise<{ recovered: number; inFlight: boolean; settling: boolean }> {
 	const org = await readAutoTopupState(orgId);
@@ -634,18 +646,35 @@ export async function reconcileAutoTopup(orgId: string): Promise<{ recovered: nu
 	let granted = 0;
 	let inFlight = false;
 	let settling = false;
+	let invalid: Error | undefined;
 	for (const pi of list.data) {
-		if (pi.status !== 'succeeded') {
-			// Only OUR still-unresolved top-up PIs pin the marker — a terminal
-			// (canceled) or unrelated PI must not keep the row selected.
-			if (pi.status !== 'canceled' && pi.metadata?.type === 'auto_topup' && pi.metadata?.org_id === orgId) {
-				inFlight = true;
-				if (SETTLING_PI_STATUSES.has(pi.status)) settling = true;
-			}
+		// Only OUR top-up PIs drive settle/grant decisions. The list is
+		// customer-scoped, so unrelated PIs (manual Checkout purchases,
+		// subscription invoices) are ignored entirely — status included
+		// (gitar PR #169).
+		const ours = pi.metadata?.type === 'auto_topup' && pi.metadata?.org_id === orgId;
+		if (!ours) continue;
+		// Validate at the boundary (I2): a missing or unrecognized status is
+		// wrong-typed external data — the API call failed. The throw is
+		// DEFERRED until every provably-safe grant in this page has
+		// committed, so one bad item never stalls lost-webhook recovery of
+		// a succeeded charge listed after it. Every caller path then logs
+		// the failure loudly and retries next invocation.
+		if (typeof pi.status !== 'string' || !KNOWN_PI_STATUSES.has(pi.status)) {
+			invalid ??= new Error(`unrecognized PaymentIntent status ${JSON.stringify(pi.status)} on ${pi.id} — cannot tell whether it can still settle`);
 			continue;
 		}
-		if (await grantAutoTopupCredits(orgId, pi)) granted += 1;
+		if (pi.status === 'succeeded') {
+			if (await grantAutoTopupCredits(orgId, pi)) granted += 1;
+			continue;
+		}
+		// A terminal (canceled) PI must not keep the row selected.
+		if (pi.status !== 'canceled') {
+			inFlight = true;
+			if (pi.status !== DEAD_PI_STATUS) settling = true;
+		}
 	}
+	if (invalid) throw invalid;
 	if (granted > 0) {
 		console.info(`auto top-up reconciliation granted ${granted} recovered charge(s) for org ${orgId}`);
 	}

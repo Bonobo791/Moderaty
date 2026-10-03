@@ -28,16 +28,16 @@
 	<div class="contact-inner">
 		<h1 class="title">Contact Moderaty</h1>
 		<p class="lede">
-			License questions, support, feature ideas — whatever you need. Leave your name and e-mail,
-			tick the opt-in box, and confirm your address with one click from the e-mail we send you.
+			License questions, support, feature ideas — whatever you need. Leave your name and e-mail, add an optional message,
+			tick the opt-in box, and open the link in our e-mail and confirm your request.
 		</p>
 
 		{#if data.sent}
 			<div class="card success" role="status">
 				<h2 class="success-title">Check your inbox</h2>
 				<p>
-					We sent a one-time verification link to the address you entered. Open it to confirm
-					your e-mail and complete your contact request. The link is valid for 7 days.
+					We sent a one-time verification link to the address you entered. Open it and choose Confirm contact request
+					to verify your e-mail and complete your request. The link is valid for 7 days.
 				</p>
 				<p class="success-note">
 					Didn't get it? Check the spam folder, or submit the form again — we will resend the
@@ -75,6 +75,18 @@
 					required
 				/>
 
+				<label class="field" for="contact-message">Message (optional)</label>
+				<textarea
+					id="contact-message"
+					name="message"
+					rows="6"
+					maxlength="2000"
+					aria-describedby="contact-message-help"
+					placeholder="How can we help?"
+					value={form?.values?.message ?? ''}
+				></textarea>
+				<p id="contact-message-help" class="message-help">Up to 2,000 characters. Please don’t include passwords or payment details.</p>
+
 				<label class="check" for="contact-opt-in">
 					<input id="contact-opt-in" name="opt_in" type="checkbox" required />
 					<span>{data.optInText}</span>
@@ -82,8 +94,8 @@
 
 				<button class="btn" type="submit">Send verification e-mail</button>
 				<p class="microcopy">
-					Your name and e-mail are stored only after you confirm the opt-in above, and only so we
-					can reply to your request.
+					Your name, e-mail, and optional message are stored when you submit with the opt-in above.
+					After you verify your e-mail, we forward your request to our contact inbox so we can reply.
 				</p>
 			</form>
 		{/if}
@@ -130,9 +142,27 @@
 		color: rgb(244 244 248 / 0.55);
 	}
 	.contact-form input[type='text'],
-	.contact-form input[type='email'] {
+	.contact-form input[type='email'],
+	.contact-form textarea {
 		width: 100%;
 		box-sizing: border-box;
+	}
+	.contact-form textarea {
+		resize: vertical;
+		min-height: 140px;
+	}
+	.contact-form textarea:focus-visible {
+		outline: 1px solid var(--accent);
+		outline-offset: 2px;
+	}
+	.contact-form textarea::placeholder {
+		color: rgb(244 244 248 / 70%);
+	}
+	.message-help {
+		margin: 0;
+		font-size: 12px;
+		line-height: 1.5;
+		color: rgb(244 244 248 / 0.6);
 	}
 	.check {
 		display: flex;

@@ -537,6 +537,10 @@ describe('contact_submissions', () => {
 			id: { notNull: true, primary: true, autoIncrement: true },
 			email: { notNull: true },
 			name: { notNull: true },
+			message: { notNull: false },
+			notification_due_at: { notNull: false },
+			notification_claim: { notNull: false },
+			notification_sent_at: { notNull: false },
 			status: { notNull: true, hasDefault: true },
 			verification_token: { notNull: true },
 			expires_at: { notNull: true },
@@ -549,6 +553,7 @@ describe('contact_submissions', () => {
 		expectUnique(contactSubmissions, 'verification_token', 'contact_submissions_verification_token_unique');
 		expect(getTableConfig(contactSubmissions).columns.find((c) => c.name === 'status')!.default).toBe('pending');
 		expectIndex(contactSubmissions, 'contact_submissions_status_email_idx', ['status', 'email']);
+		expectIndex(contactSubmissions, 'contact_submissions_notification_due_idx', ['notification_due_at']);
 		expectCreatedAtDefault(contactSubmissions);
 	});
 });
@@ -569,6 +574,7 @@ describe('feedback_digests', () => {
 			pooled_count: { notNull: true, hasDefault: true },
 			credits_used: { notNull: false },
 			error: { notNull: false },
+			attempted_at: { notNull: false },
 			emailed_at: { notNull: false },
 			created_at: { notNull: true, hasDefault: true }
 		});

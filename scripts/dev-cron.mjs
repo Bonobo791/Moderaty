@@ -52,7 +52,8 @@ const SWEEP_ERROR_FIELDS = [
 	'stripeScrubSweepError',
 	'googleRevocationSweepError',
 	'pendingReversalSweepError',
-	'zeroCreditSweepError'
+	'zeroCreditSweepError',
+	'contactNotificationSweepError'
 ];
 
 /** Renders a parsed payload or raw body for logs without letting response newlines forge log lines. */
@@ -106,11 +107,11 @@ function detailProblems(payload) {
 	}
 	if (payload.budgetExhausted) problems.push('sweeps consumed the run budget — no channel claimed');
 	if (payload.bookkeepingError) problems.push('run-health bookkeeping write failed');
-	// The dry-run drain and feedback digest ride the same 200 as top-level
-	// fields; both catch their failures into `{ error }` so a broken aux job
-	// must not read as a healthy tick (codex). Success objects have no
-	// `error` key; absent fields classify as not-run.
-	for (const field of ['dryRunWindow', 'digest']) {
+	// The dry-run drain, feedback digest, and pending-preview drain ride the
+	// same 200 as top-level fields; all catch their failures into `{ error }`
+	// so a broken aux job must not read as a healthy tick (codex). Success
+	// objects have no `error` key; absent fields classify as not-run.
+	for (const field of ['dryRunWindow', 'digest', 'feedbackPreview']) {
 		const outcome = payload[field];
 		if (outcome && typeof outcome === 'object' && typeof outcome.error === 'string') {
 			problems.push(`${field}: ${outcome.error.replaceAll(/[\r\n]+/g, ' ').slice(0, 120)}`);
@@ -121,6 +122,9 @@ function detailProblems(payload) {
 	// would retry forever, invisible to the scheduler (codeant).
 	if (typeof payload.zeroCreditItemErrors === 'number' && payload.zeroCreditItemErrors > 0) {
 		problems.push(`zeroCreditItemErrors: ${payload.zeroCreditItemErrors} account evaluation(s) failed`);
+	}
+	if (typeof payload.contactNotificationErrors === 'number' && payload.contactNotificationErrors > 0) {
+		problems.push(`contactNotificationErrors: ${payload.contactNotificationErrors} contact delivery attempt(s) failed`);
 	}
 	problems.push(...channelRunProblems(payload));
 	return problems;

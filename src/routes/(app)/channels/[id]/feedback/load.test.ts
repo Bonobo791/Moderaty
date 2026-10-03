@@ -18,6 +18,7 @@ type HistoryResult = {
 	latest: { id: number } | null;
 	selected: { id: number; status: string } | null;
 	currentAttempt: { id: number; status: string } | null;
+	previewAttempt: { id: number; status: string } | null;
 	historyCursor: number | null;
 	historyNext: number | null;
 	findings: { summary: string; evidence: { sanitizedExcerpt: string }[] }[];
@@ -159,6 +160,57 @@ test('pending and failed previews ride page 1 only, like other transient rows', 
 
 	const second = await callLoad(new URL(`${PAGE_URL}?history=${first.historyNext}`));
 	expect(second.digests.every((d) => d.status === 'complete')).toBe(true);
+});
+
+test('the preview lifecycle row is reported independently of the history page', async () => {
+	// MOD-233: the running-banner row must reach the page even when the
+	// user is paging older digest history — same independence as
+	// currentAttempt, but for preview lifecycle state.
+	await seedChannel();
+	await seedDigests(30);
+	const [pending] = await testDb()
+		.db.insert(feedbackDigests)
+		.values({ channelId: 'UC1', windowStart: '2026-03-01', windowEnd: '2026-04-01', status: 'dry-run-pending' })
+		.returning({ id: feedbackDigests.id });
+
+	const first = await callLoad(PAGE_URL);
+	expect(first.previewAttempt).toMatchObject({ id: pending.id, status: 'dry-run-pending' });
+	// It is NOT the transient attempt banner — paid attempt state stays separate.
+	expect(first.currentAttempt).toBeNull();
+
+	const older = await callLoad(new URL(`${PAGE_URL}?history=${first.historyNext}`));
+	expect(older.digests.every((d) => d.status === 'complete')).toBe(true);
+	expect(older.previewAttempt).toMatchObject({ id: pending.id, status: 'dry-run-pending' });
+});
+
+test('a pending preview stays visible even when a paid digest lands after it', async () => {
+	// The preview is live lifecycle state, not history: if it deadline-aborts
+	// and a paid digest completes before the retry tick, its id is older than
+	// the newest complete — an id-cutoff would hide the running banner and,
+	// if the retry later failed, the spent-preview notice too (gitar+cubic+
+	// codex+coderabbit, PR #181).
+	await seedChannel();
+	const [pending] = await testDb()
+		.db.insert(feedbackDigests)
+		.values({ channelId: 'UC1', windowStart: '2026-01-01', windowEnd: '2026-02-01', status: 'dry-run-pending' })
+		.returning({ id: feedbackDigests.id });
+	await seedDigests(1); // a complete digest with a NEWER id
+
+	const page = await callLoad(PAGE_URL);
+	expect(page.previewAttempt).toMatchObject({ id: pending.id, status: 'dry-run-pending' });
+});
+
+test('a preview lifecycle row older than the latest complete digest is stale — no banner', async () => {
+	// Same staleness rule as currentAttempt: once a paid digest lands after
+	// the failed preview, the spent-preview banner is history.
+	await seedChannel();
+	await testDb()
+		.db.insert(feedbackDigests)
+		.values({ channelId: 'UC1', windowStart: '2025-01-01', windowEnd: '2025-02-01', status: 'dry-run-failed', error: 'preview' });
+	await seedDigests(1);
+
+	const page = await callLoad(PAGE_URL);
+	expect(page.previewAttempt).toBeNull();
 });
 
 test('?digest= selects a finished preview; a pending or unknown id falls back', async () => {

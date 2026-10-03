@@ -1,0 +1,92 @@
+// Durable delivery intent lives on the verified submission, not in memory.
+// One atomic claim covers verification clicks and cron retries. SMTP cannot
+// promise exactly-once delivery after acceptance followed by a process crash;
+// a stable Message-ID makes that narrow at-least-once retry identifiable.
+import { createHash, randomBytes } from 'node:crypto';
+import { and, asc, eq, isNull, lte } from 'drizzle-orm';
+import { db } from './db';
+import { contactSubmissions } from './db/schema';
+import { escapeHtml } from './emailText';
+import { DeadlineExceededError } from './http';
+import { sendProtonMailEmail, ProtonMailConfigurationError, type ProtonMailMessage } from './protonMail';
+
+// Longer than the SMTP client's hard 10-second deadline. It is both a crash
+// lease and a retry delay, so repeated clicks cannot hammer a failed provider.
+const RETRY_DELAY_MS = 60_000;
+
+type ContactNotificationInput = Pick<typeof contactSubmissions.$inferSelect, 'id' | 'verificationToken' | 'name' | 'email' | 'message'>;
+
+/** Builds plaintext and escaped HTML for the fixed contact inbox and verified Reply-To. */
+export function buildContactNotification(input: ContactNotificationInput): ProtonMailMessage {
+	const message = input.message ?? 'No message provided.';
+	const textPart = [`Verified contact request #${input.id}`, '', `Name: ${input.name}`, `E-mail: ${input.email}`, '', 'Message:', message].join('\n');
+	// Escape the whole body once so every displayed value, including the
+	// request identity, goes through the same safe text-to-HTML boundary.
+	const htmlPart = ['<p>', escapeHtml(textPart).replace(/\r\n?|\n/g, '<br>'), '</p>'].join('');
+	// Hash the random identity: integer IDs collide across environments.
+	// These angle brackets delimit an SMTP header ID, not HTML markup.
+	const identity = createHash('sha256').update(input.verificationToken).digest('hex');
+	return {
+		toEmail: 'contact@moderaty.com',
+		replyTo: input.email,
+		messageId: ['<moderaty-contact-', identity, '@moderaty.com>'].join(''),
+		subject: 'Verified contact request — Moderaty',
+		textPart,
+		htmlPart
+	};
+}
+
+/** Claims one due verified row and acknowledges only the same claim. */
+export async function deliverContactNotification(id: number, deadline?: number): Promise<'sent' | 'deferred'> {
+	if (deadline !== undefined && Date.now() >= deadline) return 'deferred';
+	const claim = randomBytes(16).toString('hex');
+	const [submission] = await db.update(contactSubmissions)
+		.set({ notificationClaim: claim, notificationDueAt: new Date(Date.now() + RETRY_DELAY_MS).toISOString() })
+		.where(and(
+			eq(contactSubmissions.id, id),
+			eq(contactSubmissions.status, 'verified'),
+			isNull(contactSubmissions.notificationSentAt),
+			lte(contactSubmissions.notificationDueAt, new Date().toISOString())
+		))
+		.returning();
+	if (!submission) return 'deferred';
+	const ownedClaim = and(eq(contactSubmissions.id, id), eq(contactSubmissions.notificationClaim, claim));
+	try {
+		await sendProtonMailEmail(buildContactNotification(submission), deadline);
+		const acknowledged = await db.update(contactSubmissions)
+			.set({ notificationSentAt: new Date().toISOString(), notificationDueAt: null, notificationClaim: null })
+			.where(ownedClaim).returning({ id: contactSubmissions.id });
+		if (acknowledged.length !== 1) throw new Error('contact notification delivery claim was lost');
+		return 'sent';
+	} catch (cause) {
+		await db.update(contactSubmissions)
+			.set({ notificationClaim: null, notificationDueAt: new Date(Date.now() + RETRY_DELAY_MS).toISOString() })
+			.where(ownedClaim);
+		if (cause instanceof DeadlineExceededError) {
+			console.info('[contact] notification deferred after shared deadline', { id });
+			return 'deferred';
+		}
+		// Only typed configuration errors carry a fixed, safe diagnosis.
+		const diagnostic = cause instanceof ProtonMailConfigurationError ? cause.message : 'delivery failed';
+		console.error('[contact] notification retry remains queued:', diagnostic, { id });
+		throw new Error('Contact notification delivery failed; retry queued.');
+	}
+}
+
+/** Existing cron drives recovery, at most one request per invocation. */
+export async function retryContactNotifications(deadline: number): Promise<{ sent: number; errors: number }> {
+	if (Date.now() >= deadline) return { sent: 0, errors: 0 };
+	const submission = await db.select({ id: contactSubmissions.id }).from(contactSubmissions)
+		.where(and(
+			eq(contactSubmissions.status, 'verified'),
+			isNull(contactSubmissions.notificationSentAt),
+			lte(contactSubmissions.notificationDueAt, new Date().toISOString())
+		))
+		.orderBy(asc(contactSubmissions.notificationDueAt), asc(contactSubmissions.id)).limit(1).get();
+	if (!submission) return { sent: 0, errors: 0 };
+	try {
+		return { sent: await deliverContactNotification(submission.id, deadline) === 'sent' ? 1 : 0, errors: 0 };
+	} catch {
+		return { sent: 0, errors: 1 };
+	}
+}

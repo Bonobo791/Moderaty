@@ -22,5 +22,5 @@ test('contact message migration is additive, nullable, and never queues historic
 	expect((await client.execute("PRAGMA index_info('contact_submissions_notification_due_idx')")).rows.map(row => row.name)).toEqual(['notification_due_at']);
 	expect((await client.execute('PRAGMA integrity_check')).rows[0]).toEqual({ integrity_check: 'ok' });
 	const journal = JSON.parse(readFileSync(new URL('../../../../drizzle/meta/_journal.json', import.meta.url), 'utf8'));
-	expect(journal.entries.at(-1)).toMatchObject({ idx: 61, tag: '0061_contact_message_delivery' });
+	expect(journal.entries.find((entry: { idx: number }) => entry.idx === 61)).toMatchObject({ idx: 61, tag: '0061_contact_message_delivery' });
 });

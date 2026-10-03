@@ -31,6 +31,34 @@ export const users = sqliteTable('users', {
 	index('users_zero_credits_checked_idx').on(table.zeroCreditsCheckedAt)
 ]);
 
+// MOD-258: one first-service welcome per account, independent of marketing consent.
+// No copied address/body: each attempt resolves the current live account.
+export const welcomeEmails = sqliteTable('welcome_emails', {
+	userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+	campaign: text('campaign').notNull(),
+	templateVersion: integer('template_version').notNull(),
+	state: text('state').notNull(),
+	cohort: text('cohort'),
+	source: text('source').notNull(),
+	messageId: text('message_id').notNull(),
+	queuedAt: text('queued_at'),
+	attempts: integer('attempts').notNull().default(0),
+	lastAttemptAt: text('last_attempt_at'),
+	lastError: text('last_error'),
+	nextRetryAt: text('next_retry_at'),
+	claimToken: text('claim_token'),
+	leaseExpiresAt: text('lease_expires_at'),
+	acceptedAt: text('accepted_at'),
+	providerMessageId: text('provider_message_id'),
+	suppressionReason: text('suppression_reason'),
+	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
+}, (table) => [
+	primaryKey({ columns: [table.userId, table.campaign] }),
+	index('welcome_emails_due_idx').on(table.state, table.nextRetryAt),
+	index('welcome_emails_lease_idx').on(table.state, table.leaseExpiresAt),
+	check('welcome_emails_state', sql`${table.state} IN ('never_sent', 'historical_unknown', 'queued', 'claimed', 'in_flight', 'accepted', 'retryable_failure', 'permanent_failure', 'suppressed', 'ambiguous')`)
+]);
+
 export const sessions = sqliteTable('sessions', {
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	id: text('id').primaryKey(), // random 32-byte hex token; also the cookie value

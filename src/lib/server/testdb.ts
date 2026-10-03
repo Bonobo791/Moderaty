@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 // Test helper: real in-memory libsql database with the app schema.
 // Never imported by app code — tests only.
 
@@ -597,5 +598,6 @@ export async function createTestDb(): Promise<TestDb> {
 		)`,
 		`CREATE INDEX feedback_history_comments_channel_idx ON feedback_history_comments (channel_id)`
 	]);
+	await client.executeMultiple(readFileSync(new URL('../../../drizzle/0062_hosted_welcome_email.sql', import.meta.url), 'utf8'));
 	return { db: drizzle(client, { schema }), client };
 }

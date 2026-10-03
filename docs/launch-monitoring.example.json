@@ -1,0 +1,45 @@
+{
+  "format": "vendor-neutral preparation worksheet; not a provider import",
+  "enabled": false,
+  "approvalRequired": ["monitor provider and independent host", "alert destination", "primary responder and backup route", "production enablement"],
+  "publicHealth": {
+    "enabled": false,
+    "productionUrl": "https://moderaty.com/api/health",
+    "developmentUrl": null,
+    "method": "GET",
+    "credentials": "none",
+    "intervalSeconds": 60,
+    "timeoutSeconds": 10,
+    "expectedHttpStatus": 200,
+    "expectedJson": { "status": "ok" },
+    "consecutiveFailuresToAlert": 3,
+    "consecutiveSuccessesToRecover": 2
+  },
+  "completedCronTick": {
+    "enabled": false,
+    "expectedPeriodSeconds": 60,
+    "graceSeconds": 180,
+    "successPingRuntimeVariable": "HEALTHCHECK_PING_URL",
+    "separateDevAndProdPingUrls": true,
+    "storePingUrlsInThisFile": false,
+    "recalculateWhenScheduleChanges": true
+  },
+  "delivery": {
+    "enabled": false,
+    "primaryResponder": null,
+    "primaryChannel": null,
+    "independentOfApplicationMail": true,
+    "backupRoute": null,
+    "notifyOnIncidentOpen": true,
+    "repeatMinutes": 30,
+    "notifyOnRecovery": true,
+    "maintenanceSilenceMaximumMinutes": 30
+  },
+  "proofRequiredBeforeCompletion": [
+    "dev app unavailable and recovery delivered",
+    "dev database outage and recovery delivered",
+    "dev scheduler stopped while app stays healthy and recovery delivered",
+    "operator-actionable task error exits nonzero and withholds success ping",
+    "production checks enabled by owner and delivery verified"
+  ]
+}

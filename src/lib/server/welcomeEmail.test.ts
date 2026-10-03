@@ -1,5 +1,5 @@
 import { beforeEach, expect, test, vi } from 'vitest';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, DrizzleQueryError } from 'drizzle-orm';
 const mocks = vi.hoisted(() => ({
  env: { MODERATY_DEPLOYMENT: 'official-hosted', WELCOME_EMAIL_ENABLED: 'true', APP_URL: 'https://moderaty.com', DRY_RUN: 'false' } as Record<string, string | undefined>,
  send: vi.fn()
@@ -425,4 +425,23 @@ test('sender-policy rejection preserves retry history and pauses other recipient
  expect(await deliverWelcome('two', budget())).toBe('deferred');
  expect(mocks.send).toHaveBeenCalledTimes(1);
  expect(Date.parse((await row('one'))!.nextRetryAt!) - Date.now()).toBeGreaterThan(14 * 60_000);
+});
+
+
+test.each(['health', 'recovery'] as const)('a %s database failure cannot expose SQL or bound values through the welcome sweep', async stage => {
+ await queued();
+ if (stage === 'recovery') await testDb().db.update(welcomeEmails).set({ state: 'in_flight', claimToken: 'private-claim-fixture', leaseExpiresAt: new Date(0).toISOString() }).where(eq(welcomeEmails.userId, 'one'));
+ const cause = new DrizzleQueryError('SELECT private_query WHERE claim_token = ?', ['private-claim-fixture'], Object.assign(new Error('database busy'), { code: 'SQLITE_BUSY' }));
+ const operation = vi.spyOn(testDb().db, stage === 'health' ? 'select' : 'update').mockImplementationOnce(() => { throw cause; });
+ const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+ try {
+  const failure = await sweepWelcomeEmails(budget()).catch(error => error);
+  expect(failure).toBeInstanceOf(Error);
+  expect(failure.cause).toBeUndefined();
+  expect(failure.message).toBe('Welcome email sweep failed; inspect server diagnostics');
+  expect(log).toHaveBeenCalledWith(expect.stringContaining('[welcome]'), { category: 'database_busy' });
+  expect(JSON.stringify(log.mock.calls)).not.toMatch(/private_query|private-claim-fixture/);
+  expect(mocks.send).not.toHaveBeenCalled();
+ } finally { operation.mockRestore(); log.mockRestore(); }
+ if (stage === 'recovery') expect(await row()).toMatchObject({ state: 'in_flight', claimToken: 'private-claim-fixture' });
 });

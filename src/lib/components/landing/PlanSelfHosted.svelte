@@ -23,7 +23,7 @@
 	ticks={detailed ? TICKS_SELF_HOSTED_DETAILED : TICKS_SELF_HOSTED}
 >
 	{#snippet body()}
-		The whole product, PolyForm Shield 1.0.0. Bring your own OpenAI key for the AI scoring. On your hardware
+		The whole product, source-available under PolyForm Shield 1.0.0. Bring your own OpenAI key for the AI scoring. On your hardware
 		the running cost is near zero.
 	{/snippet}
 	{#snippet cta()}

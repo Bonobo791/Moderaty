@@ -145,8 +145,8 @@ async function attemptNextWelcome(deadline: number): Promise<WelcomeDelivery> {
 	catch (cause) { console.error(DIAGNOSTIC.processing, { category: welcomeFailureCategory(cause) }); return 'failed'; }
 }
 
-/** Existing authenticated cron calls this. At most one send and 25 crash recoveries. */
-export async function sweepWelcomeEmails(deadline: number) {
+/** At most one send and 25 crash recoveries; called through the safe public boundary. */
+async function sweepWelcomeQueue(deadline: number) {
 	const counts = { accepted: 0, errors: 0, ambiguous: 0, suppressed: 0 };
 	if (!sendingEnabled() || Date.now() >= deadline) return counts;
 	const unresolved = await db.select({ userId: welcomeEmails.userId }).from(welcomeEmails)
@@ -161,4 +161,14 @@ export async function sweepWelcomeEmails(deadline: number) {
 	if (metric === 'ambiguous') counts.ambiguous = 1;
 	else if (metric) counts[metric]++;
 	return counts;
+}
+
+
+/** The cron response and both scheduler logs must never receive raw database errors. */
+export async function sweepWelcomeEmails(deadline: number) {
+	try { return await sweepWelcomeQueue(deadline); }
+	catch (cause) {
+		console.error(DIAGNOSTIC.processing, { category: welcomeFailureCategory(cause) });
+		throw new Error('Welcome email sweep failed; inspect server diagnostics');
+	}
 }

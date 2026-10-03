@@ -1,6 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import { error, json } from '@sveltejs/kit';
-import { and, asc, desc, eq, gte, inArray, isNull, lt, notInArray, or, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, inArray, isNull, lt, notInArray, or } from 'drizzle-orm';
 import { env } from '$env/dynamic/private';
 import { db } from '$lib/server/db';
 import { channels, feedbackDigests } from '$lib/server/db/schema';
@@ -200,9 +200,8 @@ async function finalizeStalePreviews(nowIso: string, staleBefore: string): Promi
 
 /**
  * Drains ONE planted feedback preview per tick (I10), ahead of the rotation
- * claim — a user is actively waiting on it, the same priority class as a
- * dry-run-boundary channel. The pending row IS the resume record: its
- * windowStart pins the boundary the claimant asked for. A row still pending
+ * claim — a user is actively waiting on it. The pending row IS the resume
+ * record: its windowStart pins the boundary the claimant asked for. A row still pending
  * past PREVIEW_PENDING_STALE_MS after its first drain attempt is a dead
  * runner's leftover —
  * it finalizes 'dry-run-failed' loudly instead of retrying or pinning
@@ -527,10 +526,9 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		);
 		return json({ ...base, budgetExhausted: true, results: {} });
 	}
-	// A planted feedback preview is a user actively waiting — same priority
-	// class as a dry-run-boundary drain, so it runs before the rotation
-	// claim. Its failure is isolated and surfaced in the payload; it must
-	// never mask the moderation run below.
+	// A planted feedback preview is a user actively waiting, so it runs
+	// before the rotation claim. Its failure is isolated and surfaced in the
+	// payload; it must never mask the moderation run below.
 	let feedbackPreview: unknown;
 	let previewRan = false;
 	try {
@@ -559,11 +557,10 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		.select()
 		.from(channels)
 		.where(and(eq(channels.active, 1), claimable))
-		// Channels with a dry-run drain in flight first — a preview the user is
-		// actively waiting on must not starve behind the ordinary rotation.
-		// History jobs get no such priority: a multi-page or stuck history
-		// drain must never outrank least-recently-run moderation (codex+cubic).
-		.orderBy(desc(sql`${channels.dryRunBoundary} is not null`), asc(channels.lastRunAt))
+		// Every channel shares the least-recently-run rotation. A failed live
+		// run can leave its dry-run boundary untouched, and a healthy preview
+		// can span many pages; neither may monopolize future ticks (MOD-107).
+		.orderBy(asc(channels.lastRunAt))
 		.limit(1);
 	if (!channel) {
 		console.info('cron: no active, unleased channel to run');

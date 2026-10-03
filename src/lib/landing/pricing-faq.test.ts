@@ -38,7 +38,8 @@ const COMPONENT_SURFACES = [
 	'../components/landing/Pricing.svelte',
 	'../components/landing/pricing/PricingHero.svelte',
 	'../components/landing/pricing/CostMath.svelte',
-	'../../routes/pricing/+page.svelte'
+	'../../routes/pricing/+page.svelte',
+	'../../routes/+page.svelte'
 ];
 
 const COMPONENT_CLAIM_LINES = COMPONENT_SURFACES.flatMap((path) =>
@@ -105,4 +106,50 @@ describe('pricing copy guardrails', () => {
 			}
 		}
 	});
+});
+
+it('describes PolyForm as source-available consistently across homepage and pricing surfaces', () => {
+	const sources = [
+		...COMPONENT_SURFACES,
+		'../components/landing/TrustBar.svelte',
+		'../components/landing/FinalCta.svelte',
+		'./faq.ts',
+		'./pricing-faq.ts'
+	].map((path) => readFileSync(new URL(path, import.meta.url), 'utf8'));
+	for (const text of sources) {
+		expect(text).not.toMatch(/\bopen[ -]source\b/i);
+		if (/PolyForm/.test(text)) expect(text).toMatch(/source-available/i);
+	}
+	expect(PRICING_FAQ_ENTRIES.find(({ q }) => q === 'Why is self-hosting free?')?.a).toContain('PolyForm Shield 1.0.0');
+});
+
+it('discloses irreversible moderation actions instead of promising universal undo', () => {
+	const howItWorks = readFileSync(new URL('../components/landing/HowItWorks.svelte', import.meta.url), 'utf8');
+	for (const text of [TICKS_SELF_HOSTED_DETAILED.join(' '), howItWorks]) {
+		expect(text).not.toMatch(/every action reversible|reversible, always|crash mid-run never repeats an action/i);
+		expect(text).toMatch(/held and rejected comments can be restored/i);
+		expect(text).toMatch(/deletions? (?:are|is) permanent/i);
+		expect(text).toMatch(/author bans? cannot be lifted in Moderaty/i);
+	}
+});
+
+it('preserves the approved hosted and lifetime offers with BYOK disclosure', () => {
+	const subscription = PRICING_FAQ_ENTRIES.find(({ q }) => q === 'Is there a subscription?')?.a;
+	expect(subscription).toContain('$5 a month');
+	expect(subscription).toContain('100 AI-scored comments');
+	const lifetime = PRICING_FAQ_ENTRIES.find(({ q }) => q === 'What is the $49 lifetime deal?')?.a;
+	expect(lifetime).toContain('First 1,000 users');
+	expect(lifetime).toContain('one $49 payment');
+	expect(lifetime).toContain('hosted forever');
+	expect(lifetime).toContain('your own OpenAI API key');
+});
+
+it('explains channel setup and video context alongside comment moderation on shared CTAs', () => {
+	for (const path of ['../components/landing/FinalCta.svelte', '../components/landing/TrustBar.svelte']) {
+		const text = readFileSync(new URL(path, import.meta.url), 'utf8');
+		expect(text).not.toMatch(/used only on your comments/i);
+		expect(text).toContain('channel setup');
+		expect(text).toContain('comment moderation');
+		expect(text).toContain('video titles and descriptions');
+	}
 });

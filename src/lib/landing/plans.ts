@@ -17,7 +17,7 @@ export const TICKS_SELF_HOSTED_DETAILED = [
 	'13-category AI scoring with your thresholds',
 	'Feedback digest: recurring questions, criticism, corrections, and requests, grouped',
 	'Review queue for the borderline, with team roles for whoever helps',
-	'Audit log: every action logged, every action reversible',
+	'Audit log: held and rejected comments can be restored. Deletions are permanent; author bans cannot be lifted in Moderaty',
 	'1 free dry run per feature per channel'
 ];
 

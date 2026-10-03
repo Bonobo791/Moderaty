@@ -855,8 +855,7 @@ test('a missing comment during a crashed intent warns and finalizes the real out
 });
 
 test('the reconcile sweep ignores a restoring comment without a user intent audit', async () => {
-	// 'restoring' rows a human never claimed (or whose latest audit is a
-	// system action) are not ours to finish.
+	// 'restoring' rows with only system audits have no human intent to finish.
 	mocks.state.insertedComments = [
 		{ id: 'comment', channelId: 'channel', text: 'x', publishedAt: '2026-01-01T00:00:00Z', status: 'restoring', decidedBy: 'human' }
 	];

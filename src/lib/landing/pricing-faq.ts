@@ -17,7 +17,7 @@ export const PRICING_FAQ_ENTRIES: { q: string; a: string }[] = [
 	},
 	{
 		q: 'Why is self-hosting free?',
-		a: 'Moderaty is PolyForm Shield 1.0.0 open source. On your hardware, with your key, there is nothing of ours to meter. We would rather you be protected for free than profitable for us.'
+		a: 'Moderaty is source-available under PolyForm Shield 1.0.0 and free to self-host under its terms. On your hardware, with your key, there is nothing of ours to meter. We would rather you be protected for free than profitable for us.'
 	},
 	{
 		q: 'What happens when my 100 comments run out?',

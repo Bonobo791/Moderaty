@@ -401,6 +401,7 @@ describe('local SMTP integration', () => {
 	let greet: boolean;
 	let authOk: boolean;
 	let stallDataMs: number;
+	let disconnectAfterData: boolean;
 
 	beforeAll(async () => {
 		realCreateTransport = (await vi.importActual<typeof import('nodemailer')>('nodemailer')).createTransport;
@@ -425,6 +426,7 @@ describe('local SMTP integration', () => {
 		greet = true;
 		authOk = true;
 		stallDataMs = 0;
+		disconnectAfterData = false;
 		server = createServer((socket) => {
 			sockets.push(socket);
 			const session: SmtpSession = {
@@ -548,6 +550,7 @@ describe('local SMTP integration', () => {
 					if (inData) {
 						if (line === '.') {
 							inData = false;
+							if (disconnectAfterData) { wire().end(); return; }
 							write('250 2.0.0 Ok: queued as TEST-QUEUE-1');
 						} else {
 							session.data += line + '\n';
@@ -599,6 +602,13 @@ describe('local SMTP integration', () => {
 		expect(session.data).toContain('text/plain');
 		expect(session.data).toContain('text/html');
 		await session.ended; // transport.close() terminated the conversation
+	});
+
+	test('a disconnect after the complete DATA body is ambiguous even when Nodemailer reports CONN', async () => {
+		disconnectAfterData = true;
+		await expect(sendProtonMailEmail(MESSAGE)).rejects.toMatchObject({ outcome: 'unknown' });
+		expect(sessions[0].data).toContain('text/plain');
+		expect(sessions[0].data).toContain('text/html');
 	});
 
 	test('fails loudly on a wire-level auth rejection', async () => {
@@ -680,4 +690,42 @@ test('a caller-limited guard remains a deadline when timer scheduling and the wa
 	await vi.advanceTimersByTimeAsync(301);
 	await assertion;
 	expect(mocks.close).toHaveBeenCalled();
+});
+
+test.each([
+ ['authentication', { code: 'EAUTH', command: 'AUTH PLAIN' }, 'retryable'],
+ ['phase-ambiguous CONN disconnect', { code: 'ECONNECTION', command: 'CONN' }, 'unknown'],
+ ['throttled DATA', { code: 'EMESSAGE', responseCode: 451, command: 'DATA' }, 'retryable'],
+ ['rejected DATA', { code: 'EMESSAGE', responseCode: 550, command: 'DATA' }, 'permanent'],
+ ['disconnect during DATA', { code: 'ECONNECTION', command: 'DATA' }, 'unknown'],
+ ['unclassified disconnect', { code: 'ESOCKET' }, 'unknown']
+])('exposes a sanitized submission outcome for %s', async (_name, cause, outcome) => {
+ mocks.sendMail.mockRejectedValueOnce(cause);
+ await expect(sendProtonMailEmail(MESSAGE)).rejects.toMatchObject({ outcome, category: expect.any(String) });
+});
+
+test('an already-spent caller deadline is definitely not submitted', async () => {
+ await expect(sendProtonMailEmail(MESSAGE, Date.now() - 1)).rejects.toMatchObject({ outcome: 'retryable', category: 'deadline_before_submission' });
+ expect(mocks.sendMail).not.toHaveBeenCalled();
+});
+
+
+test('an expired deadline takes precedence over missing configuration and invalid message input', async () => {
+ delete mocks.env.PROTON_SMTP_TOKEN;
+ await expect(sendProtonMailEmail({ ...MESSAGE, toEmail: 'invalid' }, Date.now() - 1)).rejects.toMatchObject({ outcome: 'retryable', category: 'deadline_before_submission' });
+ expect(mocks.sendMail).not.toHaveBeenCalled();
+});
+
+test('malformed SMTP response codes cannot become definite rejections', async () => {
+ mocks.sendMail.mockRejectedValueOnce({ code: 'ESOCKET', responseCode: NaN });
+ await expect(sendProtonMailEmail(MESSAGE)).rejects.toMatchObject({ outcome: 'unknown' });
+});
+
+test.each([450, 550])('MAIL FROM rejection %s is a sender-wide failure, not a recipient failure', async responseCode => {
+ mocks.sendMail.mockRejectedValueOnce({ code: 'EENVELOPE', responseCode, command: 'MAIL FROM' });
+ await expect(sendProtonMailEmail(MESSAGE)).rejects.toMatchObject({ outcome: 'retryable', category: 'sender_rejected' });
+});
+test.each([[450, 'retryable'], [550, 'permanent']])('RCPT TO rejection %s remains recipient-specific', async (responseCode, outcome) => {
+ mocks.sendMail.mockRejectedValueOnce({ code: 'EENVELOPE', responseCode, command: 'RCPT TO' });
+ await expect(sendProtonMailEmail(MESSAGE)).rejects.toMatchObject({ outcome, category: 'recipient_rejected' });
 });

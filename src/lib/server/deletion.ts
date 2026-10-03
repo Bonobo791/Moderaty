@@ -17,7 +17,7 @@ import { and, asc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizz
 import type Stripe from 'stripe';
 
 import { db } from '$lib/server/db';
-import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, googleRevocationOutbox, invites, memberships, moderationActions, organizations, rules, sessions, stripeAutoTopupRecoveries, stripeRefundObservations, stripeDeletionOutbox, stripeLifetimeSlots, stripeLifetimeEntitlements, stripeSubscriptionPeriods, stripeScrubOutbox, users } from '$lib/server/db/schema';
+import { auditLog, channelAllowedHandles, channels, comments, consents, creditTransactions, feedbackDigests, feedbackFindings, feedbackHistoryComments, findingEvidence, googleRevocationOutbox, invites, memberships, moderationActions, organizations, rules, sessions, stripeAutoTopupRecoveries, stripeRefundObservations, stripeDeletionOutbox, stripeLifetimeSlots, stripeLifetimeEntitlements, stripeSubscriptionPeriods, stripeScrubOutbox, users, welcomeEmails } from '$lib/server/db/schema';
 import { pauseAutoTopupForRefund } from '$lib/server/billing/ledger';
 import { decrypt } from '$lib/server/crypto';
 import { revokeGoogleToken } from '$lib/server/google';
@@ -504,6 +504,8 @@ export async function deleteUserRecords(userId: string, options?: DeleteUserOpti
 			.set({ userId: null, refreshTokenEnc: WIPED_REFRESH_TOKEN })
 			.where(eq(channels.userId, userId));
 		await tx.delete(sessions).where(eq(sessions.userId, userId));
+		// Users are tombstoned, so FK cascade does not erase delivery metadata.
+		await tx.delete(welcomeEmails).where(eq(welcomeEmails.userId, userId));
 		if (dissolveOrgIds.length) stripeCustomerIds.push(...(await dissolveOrgs(tx, dissolveOrgIds)));
 		await tx.delete(invites).where(eq(invites.createdBy, userId));
 		await tx.delete(memberships).where(eq(memberships.userId, userId));

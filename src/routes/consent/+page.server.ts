@@ -19,6 +19,7 @@ import {
 } from '$lib/server/legal';
 import { cookieSecure } from '$lib/server/oauthState';
 import { ensurePersonalOrg } from '$lib/server/org';
+import { enqueueWelcome } from '$lib/server/welcomeEmail';
 import { createSession, SESSION_COOKIE, type SessionUser } from '$lib/server/session';
 
 import type { Actions, PageServerLoad } from './$types';
@@ -144,7 +145,7 @@ export const actions: Actions = {
 			// rolls everything back and the parked cookie lets the same
 			// submission retry cleanly.
 			const created = await db.transaction(async (tx) => {
-				await tx
+				const inserted = await tx
 					.insert(users)
 					.values({
 						id: randomBytes(16).toString('hex'),
@@ -152,7 +153,8 @@ export const actions: Actions = {
 						email: pending.email,
 						displayName: pending.displayName
 					})
-					.onConflictDoNothing();
+					.onConflictDoNothing()
+					.returning({ id: users.id });
 				const user = await tx.select().from(users).where(eq(users.googleSub, pending.sub)).get();
 				// Stryker disable next-line ConditionalExpression, StringLiteral: unreachable — the onConflictDoNothing insert above guarantees a row with this googleSub exists, so the select in the same transaction always returns it
 				if (!user) throw error(500, 'account creation failed — please retry');
@@ -163,6 +165,9 @@ export const actions: Actions = {
 					.set({ userId: user.id, orgId })
 					.where(and(isNull(channels.userId), sql`(select count(*) from ${users}) = 1`));
 				await tx.insert(consents).values(consentRecord(user.id, pending.email));
+				// Durable intent commits with signup; only cron contacts SMTP. A
+				// losing concurrent/stale signup must not enroll an existing user.
+				if (inserted.length) await enqueueWelcome(tx, user.id, 'signup');
 				return createSession(user.id, tx, orgId);
 			});
 			session = created;

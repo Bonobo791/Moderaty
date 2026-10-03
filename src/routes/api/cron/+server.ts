@@ -8,6 +8,7 @@ import { nullExpiredConsentEmails, nullExpiredHandles, retryGoogleRevocations, r
 import { sweepAutoTopUp } from '$lib/server/billing/autotopup';
 import { sweepStalePendingReversals } from '$lib/server/billing/ledger';
 import { DeadlineExceededError } from '$lib/server/http';
+import { sweepWelcomeEmails } from '$lib/server/welcomeEmail';
 import { retryContactNotifications } from '$lib/server/contactNotification';
 import { generateFeedbackDigest, runFeedbackPreview } from '$lib/server/feedbackDigest';
 import { sweepZeroCreditAccounts, ZERO_CREDIT_SWEEP_BATCH } from '$lib/server/zeroCredits';
@@ -348,6 +349,8 @@ const runCronSweeps = async (dryRun: boolean, deadline: number, startedAt: numbe
 	// more than five seconds of the shared 20-second maintenance/run budget.
 	const contactDeadline = Math.min(deadline, Date.now() + CONTACT_NOTIFICATION_BUDGET_MS);
 	const contactNotifications = await runSweep(dryRun, 'contact notification retry', () => retryContactNotifications(contactDeadline));
+	const welcomeDeadline = Math.min(deadline, Date.now() + 5_000);
+	const welcome = await runSweep(dryRun, 'hosted welcome email sweep', () => sweepWelcomeEmails(welcomeDeadline));
 	// Consent-evidence retention sweep runs first, while the full budget
 	// remains: consent e-mails older than 10 years (CC Art. 205) are erased —
 	// the row stays as anonymized evidence.
@@ -387,7 +390,7 @@ const runCronSweeps = async (dryRun: boolean, deadline: number, startedAt: numbe
 	// an answered 200 by design, so without them in `ok` a permanently
 	// throwing evaluation would retry forever, invisible (codeant).
 	const base = {
-		ok: !consent.error && !handles.error && !autoTopup.error && !stripeDeletions.error && !googleRevocations.error && !stripeScrubs.error && !reversals.error && !zeroCredit.error && !zeroCredit.value?.errors && !contactNotifications.error && !contactNotifications.value?.errors,
+		ok: !welcome.error && !welcome.value?.errors && !welcome.value?.ambiguous && !consent.error && !handles.error && !autoTopup.error && !stripeDeletions.error && !googleRevocations.error && !stripeScrubs.error && !reversals.error && !zeroCredit.error && !zeroCredit.value?.errors && !contactNotifications.error && !contactNotifications.value?.errors,
 		dryRun,
 		consentEmailsNulled: orZero(consent.value),
 		sweepError: consent.error,
@@ -411,7 +414,12 @@ const runCronSweeps = async (dryRun: boolean, deadline: number, startedAt: numbe
 		zeroCreditSweepError: zeroCredit.error,
 		contactNotificationsSent: orZero(contactNotifications.value?.sent),
 		contactNotificationErrors: orZero(contactNotifications.value?.errors),
-		contactNotificationSweepError: contactNotifications.error
+		contactNotificationSweepError: contactNotifications.error,
+		welcomeEmailsAccepted: orZero(welcome.value?.accepted),
+		welcomeEmailErrors: orZero(welcome.value?.errors),
+		welcomeEmailAmbiguous: orZero(welcome.value?.ambiguous),
+		welcomeEmailSuppressed: orZero(welcome.value?.suppressed),
+		welcomeEmailSweepError: welcome.error
 	};
 	console.info(`cron: sweeps finished in ${Date.now() - startedAt}ms`);
 	return base;

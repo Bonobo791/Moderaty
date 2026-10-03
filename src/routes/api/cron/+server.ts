@@ -372,11 +372,11 @@ type RunCategory = 'token' | 'quota' | 'scoring' | 'timeout' | 'credits' | 'erro
  * stamping failed/timeout would lie on resume (codex+cubic).
  */
 const runAndRecord = async (
-	channel: typeof channels.$inferSelect,
+	claim: Extract<CronWorkload, { kind: 'live' }>,
 	deadline: number,
-	base: Record<string, unknown>,
-	nowIso: string
+	base: Record<string, unknown>
 ): Promise<{ body: Record<string, unknown>; status: number }> => {
+	const { channel, nowIso, leaseExpiresAt } = claim;
 	let runHealth: 'success' | 'none' | { status: 'failed'; error: RunCategory } = 'success';
 	let body: Record<string, unknown>;
 	let status = 200;
@@ -401,9 +401,9 @@ const runAndRecord = async (
 	// Record the run even on failure so a failing channel cannot starve the
 	// others — but health is kept separate from the rotation timestamp
 	// (MOD-7): a failure must not update the success fields. The write is
-	// guarded by connector identity like assertChannelActive: a reconnect
-	// mid-run replaces refreshTokenEnc, and the old run's verdict must not
-	// land on the new connector (codex). A bookkeeping failure never masks
+	// guarded by connector identity and the claimed lease: a reconnect or
+	// expired lease reclaimed by another runner must not receive the old
+	// run's verdict or have its newer lease cleared. A bookkeeping failure never masks
 	// the run result but IS flagged in the payload — a server-log-only
 	// fallback would hide the degraded state (codeant+codex); the lease
 	// self-expires either way.
@@ -423,12 +423,13 @@ const runAndRecord = async (
 				and(
 					eq(channels.id, channel.id),
 					channel.userId === null ? isNull(channels.userId) : eq(channels.userId, channel.userId),
-					eq(channels.refreshTokenEnc, channel.refreshTokenEnc)
+					eq(channels.refreshTokenEnc, channel.refreshTokenEnc),
+					eq(channels.leaseExpiresAt, leaseExpiresAt)
 				)
 			)
 			.returning({ id: channels.id });
 		if (written.length === 0) {
-			console.error('run-health write skipped: channel connector changed mid-run:', channel.id);
+			console.error('run-health write skipped: channel connector or lease changed mid-run:', channel.id);
 			body = { ...body, bookkeepingError: true };
 		}
 	} catch (writeCause) {
@@ -519,6 +520,6 @@ export const GET: RequestHandler = async ({ url, request }) => {
 	console.info(
 		`cron: claimed channel ${channel.id} (lastRunAt=${channel.lastRunAt ?? 'never'}, cursor=${channel.cursor ?? 'none'}, resumingPage=${channel.nextPageToken !== null}, dryRunDrain=${channel.dryRunBoundary !== null})`
 	);
-	const { body, status } = await runAndRecord(channel, deadline, withPreview, workload.nowIso);
+	const { body, status } = await runAndRecord(workload, deadline, withPreview);
 	return json(body, { status });
 };

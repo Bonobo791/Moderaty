@@ -13,8 +13,10 @@ transaction. Provider work runs after commit, outside the transaction. A failed
 or rolled-back claim cannot advance the turn, while a worker crash or provider
 failure after a committed claim cannot give previews the next contested turn
 again. The existing ten-minute channel lease prevents overlapping work for that
-channel and expires after a crash. Each invocation still runs only one claimed
-workload under the original twenty-second deadline.
+channel and expires after a crash. Live health and lease-release bookkeeping
+also require ownership of the original claimed lease, so a late runner cannot
+clear a successor's lease or overwrite its newer health. Each invocation still
+runs only one claimed workload under the original twenty-second deadline.
 
 Preview attempts do not update live rotation or health fields. If a claim
 finishes after the deadline, cron releases only its own lease and reports an

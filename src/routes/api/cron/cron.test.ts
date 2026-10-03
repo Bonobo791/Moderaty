@@ -1661,3 +1661,32 @@ test('scheduler transaction errors fail loudly without starting an unclaimed wor
 	expect(mocks.runFeedbackPreview).not.toHaveBeenCalled();
 	expect((await channelRow('UC-claim-error'))?.leaseExpiresAt).toBeNull();
 });
+
+test.each(['success', 'failure'] as const)('a late live %s cannot overwrite its successor lease or health', async (outcome) => {
+	await seedChannel('UC-live-successor');
+	const startedAt = Date.now();
+	const successorTime = startedAt + 10 * 60_000 + 1;
+	const successorState = {
+		leaseExpiresAt: new Date(successorTime + 10 * 60_000).toISOString(),
+		lastRunAt: new Date(successorTime).toISOString(),
+		lastRunStatus: 'success',
+		lastSuccessAt: new Date(successorTime).toISOString(),
+		lastRunError: null
+	};
+	const clock = vi.spyOn(Date, 'now').mockReturnValue(startedAt);
+	const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+	onTestFinished(() => { clock.mockRestore(); log.mockRestore(); });
+	mocks.runChannel.mockImplementation(async () => {
+		// The original process resumes after its lease expired and another
+		// claimant has already written newer health under a replacement lease.
+		clock.mockReturnValue(successorTime);
+		await testDb().db.update(channels).set(successorState).where(eq(channels.id, 'UC-live-successor'));
+		if (outcome === 'failure') throw new Error('scoring unavailable');
+		return runResult({ dryRun: false });
+	});
+	const response = await call({ bearer: 'test-secret' });
+	expect(response.status).toBe(outcome === 'failure' ? 500 : 200);
+	expect(await response.json()).toMatchObject({ bookkeepingError: true });
+	expect(await channelRow('UC-live-successor')).toMatchObject(successorState);
+	expect(log).toHaveBeenCalledWith('run-health write skipped: channel connector or lease changed mid-run:', 'UC-live-successor');
+});

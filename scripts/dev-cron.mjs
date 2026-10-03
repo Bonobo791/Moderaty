@@ -53,7 +53,8 @@ const SWEEP_ERROR_FIELDS = [
 	'googleRevocationSweepError',
 	'pendingReversalSweepError',
 	'zeroCreditSweepError',
-	'contactNotificationSweepError'
+	'contactNotificationSweepError',
+	'welcomeEmailSweepError'
 ];
 
 /** Renders a parsed payload or raw body for logs without letting response newlines forge log lines. */
@@ -126,6 +127,12 @@ function detailProblems(payload) {
 	if (typeof payload.contactNotificationErrors === 'number' && payload.contactNotificationErrors > 0) {
 		problems.push(`contactNotificationErrors: ${payload.contactNotificationErrors} contact delivery attempt(s) failed`);
 	}
+	if (typeof payload.welcomeEmailErrors === 'number' && payload.welcomeEmailErrors > 0) {
+		problems.push(`welcomeEmailErrors: ${payload.welcomeEmailErrors} delivery attempt(s) failed`);
+	}
+	if (typeof payload.welcomeEmailAmbiguous === 'number' && payload.welcomeEmailAmbiguous > 0) {
+		problems.push('welcomeEmailAmbiguous: reconciliation required');
+	}
 	problems.push(...channelRunProblems(payload));
 	return problems;
 }
@@ -166,7 +173,7 @@ export function evaluateTick(resOk, payload) {
 	}
 	// On a 200, `ok` is the real sweep aggregate — a failure there never
 	// reaches the dashboard, so the caller's exit/report is its only alert.
-	if (payload !== null && payload.ok === false && !SWEEP_ERROR_FIELDS.some((field) => payload[field])) {
+	if (payload !== null && payload.ok === false && problems.length === 0) {
 		problems.push('ok:false with no sweep error detail');
 	}
 	return { ownerActionableOnly: false, problems };

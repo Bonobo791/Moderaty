@@ -9,7 +9,8 @@ import { eq } from 'drizzle-orm';
 const mocks = vi.hoisted(() => ({
 	env: {
 		APP_URL: 'http://localhost:5173',
-		ENCRYPTION_KEY: 'test-encryption-key'
+		ENCRYPTION_KEY: 'test-encryption-key',
+		MODERATY_DEPLOYMENT: 'official-hosted'
 	} as Record<string, string | undefined>
 }));
 
@@ -23,7 +24,7 @@ vi.mock('$lib/server/session', async (importOriginal) => {
 import { segmentConsentText } from '$lib/consentText';
 import { TEST_OWNER, seedConsent, setupTestDb, testDb } from '$lib/server/testdb';
 import { makeCookies } from '$lib/server/testcookies';
-import { channels, consents, memberships, organizations, sessions, users } from '$lib/server/db/schema';
+import { channels, consents, memberships, organizations, sessions, users, welcomeEmails } from '$lib/server/db/schema';
 import {
 	CONSENT_CHECKBOX_TEXT,
 	LEGAL_VERSION,
@@ -37,7 +38,7 @@ import { createSession, getSessionUser, type SessionUser } from '$lib/server/ses
 
 import { actions, load } from './+page.server';
 
-setupTestDb(['consents', 'sessions', 'users', 'channels', 'organizations', 'memberships']);
+setupTestDb(['welcome_emails', 'consents', 'sessions', 'users', 'channels', 'organizations', 'memberships']);
 
 const here = dirname(fileURLToPath(import.meta.url));
 const consentPage = readFileSync(join(here, '+page.svelte'), 'utf8');
@@ -577,4 +578,44 @@ test('a parked identity completed by its OWN signed-in user is still accepted', 
 
 	expect(thrown).toMatchObject({ status: 302, location: '/dashboard' });
 	expect(await testDb().db.select().from(consents).all()).toHaveLength(1);
+});
+
+
+test('successful hosted signup atomically queues one informational welcome even without marketing opt-in', async () => {
+	const result = await captureAction(cookiesWithPending(NEW_SUB), { consent: 'on' }, { state: 'state-1' });
+	expect(result).toMatchObject({ status: 302, location: '/dashboard' });
+	const [user] = await testDb().db.select().from(users);
+	expect(await testDb().db.select().from(welcomeEmails)).toEqual([expect.objectContaining({ userId: user.id, campaign: 'hosted-signup-welcome', state: 'queued', source: 'signup', acceptedAt: null })]);
+	expect((await testDb().db.select().from(consents))[0].marketingOptIn).toBe(0);
+	// Two already-parked callbacks for the same sub and later re-consent may
+	// add consent evidence/session rows, but cannot reenroll this campaign.
+	await captureAction(cookiesWithPending(NEW_SUB), { consent: 'on' }, { state: 'state-1' });
+	await captureAction(cookiesWithPending({ kind: 'existing', userId: user.id }), { consent: 'on' }, { state: 'state-1' });
+	expect(await testDb().db.select().from(welcomeEmails)).toHaveLength(1);
+});
+test('failed session creation rolls back the hosted welcome too', async () => {
+	vi.mocked(createSession).mockRejectedValueOnce(new Error('session failed'));
+	await captureAction(cookiesWithPending(NEW_SUB), { consent: 'on' }, { state: 'state-1' });
+	expect(await testDb().db.select().from(welcomeEmails)).toHaveLength(0);
+	expect(await testDb().db.select().from(users)).toHaveLength(0);
+});
+test('a stale new-user callback for an existing account does not silently enroll historical users', async () => {
+	await seedOwner();
+	await captureAction(cookiesWithPending(NEW_SUB), { consent: 'on' }, { state: 'state-1' });
+	expect(await testDb().db.select().from(welcomeEmails)).toHaveLength(0);
+});
+
+test('concurrent parked signups and a retry produce one welcome identity', async () => {
+	const first = cookiesWithPending(NEW_SUB, 'first');
+	const second = cookiesWithPending(NEW_SUB, 'second');
+	const results = await Promise.all([
+		captureAction(first, { consent: 'on' }, { state: 'first' }),
+		captureAction(second, { consent: 'on' }, { state: 'second' })
+	]);
+	expect(results.some(result => result?.status === 302)).toBe(true);
+	// Local SQLite can reject a concurrent writer; a retry of its preserved
+	// consent flow must converge to the same user/campaign record.
+	await captureAction(cookiesWithPending(NEW_SUB, 'retry'), { consent: 'on' }, { state: 'retry' });
+	expect(await testDb().db.select().from(users)).toHaveLength(1);
+	expect(await testDb().db.select().from(welcomeEmails)).toHaveLength(1);
 });

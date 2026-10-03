@@ -191,6 +191,9 @@ function smtpFailure(error: unknown): Error {
 		new ProtonMailSubmissionError(outcome, category, `e-mail could not be sent (${message})`);
 	if (code === 'EAUTH') return failure('retryable', 'authentication', 'authentication failure');
 	if (code === 'ETIMEDOUT' || code === 'ESOCKETTIMEOUT') return failure('unknown', 'timeout', 'send timed out');
+	// MAIL FROM is configured deployment identity; only RCPT TO failures
+	// concern the recipient. A sender rejection must pause the campaign.
+	if (code === 'EENVELOPE' && command?.toUpperCase() === 'MAIL FROM') return failure('retryable', 'sender_rejected', 'sender rejected');
 	if (code === 'EENVELOPE') return failure(responseCode !== undefined && responseCode < 500 ? 'retryable' : 'permanent', 'recipient_rejected', 'recipient rejected');
 	if (code !== undefined && /CERT|TLS|SSL|ALTNAME|SELF_SIGNED|UNABLE_TO/i.test(code)) {
 		return failure('retryable', 'tls', 'TLS failure');

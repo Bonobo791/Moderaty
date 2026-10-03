@@ -720,3 +720,12 @@ test('malformed SMTP response codes cannot become definite rejections', async ()
  mocks.sendMail.mockRejectedValueOnce({ code: 'ESOCKET', responseCode: NaN });
  await expect(sendProtonMailEmail(MESSAGE)).rejects.toMatchObject({ outcome: 'unknown' });
 });
+
+test.each([450, 550])('MAIL FROM rejection %s is a sender-wide failure, not a recipient failure', async responseCode => {
+ mocks.sendMail.mockRejectedValueOnce({ code: 'EENVELOPE', responseCode, command: 'MAIL FROM' });
+ await expect(sendProtonMailEmail(MESSAGE)).rejects.toMatchObject({ outcome: 'retryable', category: 'sender_rejected' });
+});
+test.each([[450, 'retryable'], [550, 'permanent']])('RCPT TO rejection %s remains recipient-specific', async (responseCode, outcome) => {
+ mocks.sendMail.mockRejectedValueOnce({ code: 'EENVELOPE', responseCode, command: 'RCPT TO' });
+ await expect(sendProtonMailEmail(MESSAGE)).rejects.toMatchObject({ outcome, category: 'recipient_rejected' });
+});

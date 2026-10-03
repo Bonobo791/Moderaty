@@ -24,6 +24,17 @@ async function due(id = 'one') {
  await testDb().db.update(welcomeCampaigns).set({ nextAttemptAt: new Date(0).toISOString() });
 }
 
+/** A deterministic SMTP barrier shared by race tests; every caller releases it in finally. */
+function holdNextSubmission() {
+ let release!: () => void; let started!: () => void;
+ const ready = new Promise<void>(resolve => { started = resolve; });
+ const pending = new Promise<void>(resolve => { release = resolve; });
+ mocks.send.mockImplementationOnce(async () => {
+  started(); await pending; return { messageId: '<accepted@moderaty.com>' };
+ });
+ return { ready, release };
+}
+
 test('committed queue is unique per campaign, version edits do not reenroll, acceptance follows SMTP', async () => {
  await queued(); await enqueueWelcome(testDb().db, 'one', 'signup');
  expect(await testDb().db.select().from(welcomeEmails)).toHaveLength(1);
@@ -62,10 +73,10 @@ test.each(['deleted', 'synthetic', 'suppressed', 'non-hosted'])('rechecks %s bef
  await deliverWelcome('one', budget()); expect(mocks.send).not.toHaveBeenCalled();
 });
 test('concurrent claims have one sender and cannot take a live lease', async () => {
- await queued(); let release!: () => void; let started!: () => void; const ready = new Promise<void>(resolve => { started = resolve; });
- mocks.send.mockImplementationOnce(async () => { started(); await new Promise<void>(resolve => { release = resolve; }); return { messageId: '<accepted@moderaty.com>' }; });
+ await queued(); const { ready, release } = holdNextSubmission();
  const first = deliverWelcome('one', budget()); await ready;
- expect(await deliverWelcome('one', budget())).toBe('deferred'); expect(mocks.send).toHaveBeenCalledTimes(1); release(); await first;
+ try { expect(await deliverWelcome('one', budget())).toBe('deferred'); expect(mocks.send).toHaveBeenCalledTimes(1); }
+ finally { release(); await first; }
 });
 test('expired in-flight leases become ambiguous and never automatically retry', async () => {
  await queued(); await testDb().db.update(welcomeEmails).set({ state: 'in_flight', claimToken: 'crashed', leaseExpiresAt: new Date(0).toISOString() }).where(eq(welcomeEmails.userId, 'one'));
@@ -123,12 +134,7 @@ test('copy escapes personalization and accurately distinguishes channel setup, u
 
 test('global throttle prevents multiple recipients across overlapping cron ticks', async () => {
  await queued('one'); await queued('two');
- let release!: () => void; let started!: () => void;
- const ready = new Promise<void>(resolve => { started = resolve; });
- mocks.send.mockImplementationOnce(async () => {
-  started(); await new Promise<void>(resolve => { release = resolve; });
-  return { messageId: '<accepted@moderaty.com>' };
- });
+ const { ready, release } = holdNextSubmission();
  const first = deliverWelcome('one', budget()); await ready;
  try {
   expect(await deliverWelcome('two', budget())).toBe('deferred'); expect(mocks.send).toHaveBeenCalledTimes(1);
@@ -326,12 +332,7 @@ test.each(['one@example.xn--a', 'one@example.xn--', 'one@example.123'])('invalid
 
 test('recipient deletion during pending SMTP cannot release campaign pacing', async () => {
  await queued('one'); await queued('two');
- let release!: () => void; let started!: () => void;
- const ready = new Promise<void>(resolve => { started = resolve; });
- mocks.send.mockImplementationOnce(async () => {
-  started(); await new Promise<void>(resolve => { release = resolve; });
-  return { messageId: '<accepted@moderaty.com>' };
- });
+ const { ready, release } = holdNextSubmission();
  const first = deliverWelcome('one', budget());
  // Account deletion intentionally makes acceptance persistence fail; observe it immediately.
  const outcome = first.catch(cause => cause);
@@ -412,4 +413,16 @@ test('existing ambiguity stays visible if the recovery budget runs out', async (
  try { expect((await sweepWelcomeEmails(deadline)).ambiguous).toBe(1); }
  finally { clock.mockRestore(); }
  expect(mocks.send).not.toHaveBeenCalled();
+});
+
+test('sender-policy rejection preserves retry history and pauses other recipients', async () => {
+ await queued('one'); await queued('two');
+ const previousAttempt = new Date(Date.now() - 3_600_000).toISOString();
+ await testDb().db.update(welcomeEmails).set({ attempts: 2, lastAttemptAt: previousAttempt }).where(eq(welcomeEmails.userId, 'one'));
+ mocks.send.mockRejectedValueOnce(new ProtonMailSubmissionError('retryable', 'sender_rejected', 'sender rejected'));
+ expect(await deliverWelcome('one', budget())).toBe('failed');
+ expect(await row('one')).toMatchObject({ state: 'queued', attempts: 2, lastAttemptAt: previousAttempt, lastError: 'sender_rejected' });
+ expect(await deliverWelcome('two', budget())).toBe('deferred');
+ expect(mocks.send).toHaveBeenCalledTimes(1);
+ expect(Date.parse((await row('one'))!.nextRetryAt!) - Date.now()).toBeGreaterThan(14 * 60_000);
 });

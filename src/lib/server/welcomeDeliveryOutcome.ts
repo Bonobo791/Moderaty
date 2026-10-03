@@ -8,7 +8,7 @@ import { WELCOME_CAMPAIGN, type WelcomeRow } from './welcomeEnrollment';
 export type WelcomeDelivery = 'accepted' | 'deferred' | 'suppressed' | 'failed' | 'ambiguous';
 const MAX_ATTEMPTS = 5;
 const OUTAGE_BACKOFF_MS = 15 * 60_000;
-export const WELCOME_TRANSPORT_OUTAGES: readonly string[] = ['configuration', 'authentication', 'tls', 'dns'];
+export const WELCOME_TRANSPORT_OUTAGES: readonly string[] = ['configuration', 'authentication', 'tls', 'dns', 'sender_rejected'];
 const SUBMISSION_DIAGNOSTIC = '[welcome] submission not accepted';
 
 function deploymentFailure(cause: unknown): string | null {
@@ -17,7 +17,7 @@ function deploymentFailure(cause: unknown): string | null {
 	return null;
 }
 
-async function deferSubmission(owned: SQL | undefined, fresh: WelcomeRow, category: string, delay: number, handle: Pick<typeof db, 'update'> = db) {
+async function deferSubmission(owned: SQL | undefined, fresh: WelcomeRow, { category, delay }: { category: string; delay: number }, handle: Pick<typeof db, 'update'> = db) {
 	const updated = await handle.update(welcomeEmails).set({ state: 'queued', attempts: fresh.attempts,
 		lastAttemptAt: fresh.lastAttemptAt, lastError: category,
 		nextRetryAt: new Date(Date.now() + delay).toISOString(), claimToken: null, leaseExpiresAt: null })
@@ -36,7 +36,7 @@ function failedSubmission(cause: unknown, attempts: number) {
 /** Deployment-wide faults pause the campaign; they cannot spend recipient retries. */
 export async function recordWelcomeFailure(owned: SQL | undefined, fresh: WelcomeRow, cause: unknown): Promise<WelcomeDelivery> {
 	if (cause instanceof ProtonMailPreSubmissionDeadlineError) {
-		await deferSubmission(owned, fresh, cause.category, 60_000);
+		await deferSubmission(owned, fresh, { category: cause.category, delay: 60_000 });
 		return 'deferred';
 	}
 	const outage = deploymentFailure(cause);
@@ -44,7 +44,7 @@ export async function recordWelcomeFailure(owned: SQL | undefined, fresh: Welcom
 		const updated = await withBusyRetry(() => db.transaction(async tx => {
 			const until = new Date(Date.now() + OUTAGE_BACKOFF_MS).toISOString();
 			await tx.update(welcomeCampaigns).set({ nextAttemptAt: sql`max(${welcomeCampaigns.nextAttemptAt}, ${until})` }).where(eq(welcomeCampaigns.campaign, WELCOME_CAMPAIGN));
-			return deferSubmission(owned, fresh, outage, OUTAGE_BACKOFF_MS, tx);
+			return deferSubmission(owned, fresh, { category: outage, delay: OUTAGE_BACKOFF_MS }, tx);
 		}));
 		if (!updated) return 'deferred';
 		console.error(SUBMISSION_DIAGNOSTIC, { category: outage, state: 'queued' });

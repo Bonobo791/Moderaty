@@ -67,6 +67,19 @@ async function deferPreparation(owned: SQL | undefined): Promise<Preparation> {
 	return { outcome: 'deferred' };
 }
 
+/** Refresh advisory context at the send boundary; a corrupt role cannot poison the queue. */
+async function buildClaimedMessage(owned: SQL | undefined, account: Account, fresh: WelcomeRow, appUrl: string): Promise<ProtonMailMessage> {
+	try {
+		const teams = await contentTeams(account.id);
+		return buildWelcomeEmail({ email: account.email, displayName: account.displayName, messageId: fresh.messageId, appUrl, teams });
+	} catch (cause) {
+		if (cause instanceof WelcomePreparationError && cause.category === 'invalid_membership') {
+			await db.update(welcomeEmails).set({ state: 'suppressed', suppressionReason: cause.category, lastError: cause.category, nextRetryAt: null, claimToken: null, leaseExpiresAt: null }).where(and(owned, eq(welcomeEmails.state, 'claimed')));
+		}
+		throw cause;
+	}
+}
+
 /** No SMTP before this durable boundary; abandoned preflight claims recover safely. */
 async function prepareWelcome(userId: string, deadline: number, appUrl: string): Promise<Preparation> {
 	const claimed = await claimWelcome(userId);
@@ -81,18 +94,7 @@ async function prepareWelcome(userId: string, deadline: number, appUrl: string):
 		return { outcome: 'suppressed' };
 	}
 	if (!sendingEnabled() || Date.now() >= deadline) return deferPreparation(owned);
-	// Read advisory channel/role context last, as close to the submission
-	// boundary as possible. The UI still enforces current permissions/usage.
-	let message: ProtonMailMessage;
-	try {
-		const teams = await contentTeams(userId);
-		message = buildWelcomeEmail({ email: account!.email, displayName: account!.displayName, messageId: fresh.messageId, appUrl, teams });
-	} catch (cause) {
-		if (cause instanceof WelcomePreparationError && cause.category === 'invalid_membership') {
-			await db.update(welcomeEmails).set({ state: 'suppressed', suppressionReason: cause.category, lastError: cause.category, nextRetryAt: null, claimToken: null, leaseExpiresAt: null }).where(and(owned, eq(welcomeEmails.state, 'claimed')));
-		}
-		throw cause;
-	}
+	const message = await buildClaimedMessage(owned, account!, fresh, appUrl);
 	if (!await startSubmission(owned, account!, fresh)) return { outcome: 'deferred' };
 	return { owned, fresh, message };
 }

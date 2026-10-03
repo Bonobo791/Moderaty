@@ -80,7 +80,7 @@ pre-send transition refreshes the interval and rejects expired claims. One cron 
 most one recipient and recovers at most 25 stale claims, within its five-second
 share of the existing 20-second budget. Retry delays for definite failures are
 60s, 120s, 240s, 480s, then terminal after the fifth failed attempt. DNS, explicit transient SMTP rejection and proven pre-DATA errors
-are safe retry categories. Configuration/authentication, TLS and DNS outages instead preserve
+are safe retry categories. Configuration/authentication, TLS, DNS and sender-policy (`MAIL FROM`) outages preserve
 the recipient attempt count and pause the entire campaign for 15 minutes through
 a recipient-independent durable cooldown. They cannot permanently exhaust the queued users while an
 operator repairs the transport. A deadline proven to occur before `sendMail` defers
@@ -195,7 +195,9 @@ These steps are **human rollout gates**, not actions performed by the implementa
    `welcomeEmailAmbiguous`, `welcomeEmailSuppressed`, `welcomeEmailSweepError`, and
    operator state counts. `welcomeEmailAmbiguous` is a bounded presence flag
    (0 or 1), not the queue total. Ambiguous rows stay visible in subsequent
-   enabled cron health without scanning/counting the complete campaign
+   enabled cron health without scanning/counting the complete campaign. Both the
+   local/Coolify driver and Netlify wrapper name welcome sweep, delivery and
+   reconciliation failures, including alongside owner-actionable channel errors
 7. Stop with `WELCOME_EMAIL_ENABLED=false` if errors, uncertainty, bad copy or
    recipient issues appear. The switch prevents new claims; it cannot recall an
    attempt already in progress. Resolve the cause before resuming

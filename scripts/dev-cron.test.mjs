@@ -340,3 +340,24 @@ describe('contact delivery health', () => {
 		await expect(tickOnce()).rejects.toThrow(/contactNotification/);
 	});
 });
+
+describe.each(['driver', 'netlify'])('%s welcome delivery health', wrapper => {
+ const invoke = async () => wrapper === 'driver' ? tickOnce() : (await import('../netlify/functions/cron.mjs')).default();
+ it.each([
+  [{ welcomeEmailSweepError: 'database unavailable' }, 'welcomeEmailSweepError: database unavailable'],
+  [{ welcomeEmailErrors: 1 }, 'welcomeEmailErrors: 1 delivery attempt(s) failed'],
+  [{ welcomeEmailAmbiguous: 1 }, 'welcomeEmailAmbiguous: reconciliation required']
+ ])('names the actionable welcome problem in a 200 response (%j)', async (failure, expected) => {
+  vi.stubGlobal('fetch', vi.fn(async () => cronResponse({ ok: false, results: {}, ...failure })));
+  await expect(invoke()).rejects.toThrow(expected);
+ });
+ it('does not suppress welcome failures behind an owner-actionable channel error', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => cronResponse({ ok: false, results: { UC1: { error: 'token' } }, welcomeEmailErrors: 1 }, 500)));
+  await expect(invoke()).rejects.toThrow(/welcomeEmailErrors/);
+ });
+ it('zero welcome counters remain healthy', async () => {
+  const payload = { ok: true, results: {}, welcomeEmailErrors: 0, welcomeEmailAmbiguous: 0 };
+  vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
+  await expect(invoke()).resolves.toEqual(wrapper === 'driver' ? payload : undefined);
+ });
+});

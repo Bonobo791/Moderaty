@@ -21,3 +21,23 @@ test('operator diagnostics identify safe causes without echoing SQL, credentials
  expect(welcomeOperationDiagnostic(connection)).toContain('database');
  expect(welcomeOperationDiagnostic(connection)).not.toContain('redaction-marker');
 });
+
+test('real Drizzle wrappers retain actionable diagnostics without exposing query parameters', async () => {
+ const { DrizzleQueryError } = await import('drizzle-orm');
+ for (const [code, message, expected] of [
+  ['SQLITE_ERROR', 'no such table: welcome_emails', 'migration 0062'],
+  ['SQLITE_BUSY', 'database is busy', 'database is busy'],
+  ['UNAUTHORIZED', 'credential rejected', 'rejected authentication']
+ ]) {
+  const cause = Object.assign(new Error(message), { code });
+  const wrapped = new DrizzleQueryError('select private_fixture where email = ?', ['private-fixture@example.com'], cause);
+  const diagnostic = welcomeOperationDiagnostic(wrapped);
+  expect(diagnostic).toContain(expected);
+  expect(diagnostic).not.toContain('private-fixture@example.com');
+  expect(diagnostic).not.toContain('select private_fixture');
+ }
+});
+test('diagnostic cause traversal is bounded even with cyclic error causes', () => {
+ const cause = new Error('unknown wrapper'); cause.cause = cause;
+ expect(welcomeOperationDiagnostic(cause)).toContain('database operation failed');
+});

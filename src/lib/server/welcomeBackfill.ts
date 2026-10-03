@@ -2,11 +2,11 @@
 import { and, asc, eq, gt, sql } from 'drizzle-orm';
 import { db, withBusyRetry } from './db';
 import { users, welcomeEmails } from './db/schema';
-import { WELCOME_CAMPAIGN, enqueueWelcome, exclusion, isOfficialHosted, type Account, type WelcomeRow } from './welcomeEnrollment';
+import { WELCOME_CAMPAIGN, enqueueWelcome, exclusion, isHistoricalCandidate, isOfficialHosted, type Account, type WelcomeRow } from './welcomeEnrollment';
 const MAX_BACKFILL_BATCH = 25;
 
 function backfillEligible(account: Account, row?: WelcomeRow): boolean {
-	return !exclusion(account, row) && !row?.acceptedAt && (!row || ['historical_unknown', 'never_sent'].includes(row.state));
+	return !exclusion(account, row) && isHistoricalCandidate(row);
 }
 function backfillPage(afterUserId: string | null, limit: number) {
 	return db.select({ account: users, welcome: welcomeEmails }).from(users)
@@ -31,20 +31,27 @@ export async function previewWelcomeBackfill() {
 		cursor = page[page.length - 1].account.id;
 	}
 }
+function validateBackfillBatch(limit: number): void {
+	if (!Number.isInteger(limit) || limit < 1 || limit > MAX_BACKFILL_BATCH) throw new Error('Welcome backfill limit must be 1–25');
+	if (!isOfficialHosted()) throw new Error('Welcome backfill requires official-hosted deployment');
+}
+
+async function enrollHistoricalAccount(account: Account, welcome: WelcomeRow | null): Promise<boolean> {
+	if (!backfillEligible(account, welcome ?? undefined)) return false;
+	// Serialize the fresh eligibility read/write with account teardown.
+	return withBusyRetry(() => db.transaction(tx =>
+		enqueueWelcome(tx, account.id, welcome?.state === 'never_sent' ? 'never_sent' : 'historical_unknown')));
+}
+
 /** Bounded/resumable enrollment only; operator reviews preview and chooses each batch. */
 export async function backfillWelcomeBatch(options: { afterUserId?: string | null; limit: number }) {
-	if (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > MAX_BACKFILL_BATCH) throw new Error('Welcome backfill limit must be 1–25');
-	if (!isOfficialHosted()) throw new Error('Welcome backfill requires official-hosted deployment');
+	validateBackfillBatch(options.limit);
 	const page = await backfillPage(options.afterUserId ?? null, options.limit);
 	let queued = 0;
 	for (const { account, welcome } of page) {
-		if (backfillEligible(account, welcome ?? undefined)) {
-			// Serialize the fresh eligibility read/write with account teardown.
-			// The page snapshot above can be stale by the time this batch runs.
-			const enrolled = await withBusyRetry(() => db.transaction(tx =>
-				enqueueWelcome(tx, account.id, welcome?.state === 'never_sent' ? 'never_sent' : 'historical_unknown')));
-			if (enrolled) queued++;
-		}
+		// Deliberately sequential SQLite writers; the next record starts only
+		// after the previous short transaction commits or exhausts busy retry.
+		if (await enrollHistoricalAccount(account, welcome)) queued++;
 	}
 	return { scanned: page.length, queued, nextCursor: page.length === options.limit ? page[page.length - 1].account.id : null };
 }

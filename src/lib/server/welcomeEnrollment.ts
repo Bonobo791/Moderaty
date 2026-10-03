@@ -29,7 +29,10 @@ function validWelcomeAddress(email: string): boolean {
 	if (!isBareAddress(email)) return false;
 	const domain = email.split('@')[1]?.toLowerCase();
 	if (!domain || domain === 'accounts.google.com' || domain.includes('..')) return false;
-	return /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,}$/i.test(domain);
+	const labels = domain.split('.');
+	if (labels.length < 2) return false;
+	if (!labels.every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) return false;
+	return /^[a-z]{2,63}$/.test(labels[labels.length - 1]);
 }
 
 /** Same recipient policy at enrollment, preview/backfill, and immediately before SMTP. */
@@ -49,6 +52,12 @@ function enrollmentValues(userId: string, source: string, reason: string | null,
 		queuedAt: reason ? null : now, nextRetryAt: reason ? null : now, suppressionReason: reason };
 }
 
+export function isHistoricalCandidate(row?: WelcomeRow): boolean {
+	if (!row) return true;
+	if (row.acceptedAt) return false;
+	return ['historical_unknown', 'never_sent'].includes(row.state);
+}
+
 /** Call inside signup's transaction ONLY for a newly inserted user. Never sends mail. */
 export async function enqueueWelcome(handle: Handle, userId: string, source: 'signup' | 'historical_unknown' | 'never_sent'): Promise<boolean> {
 	if (!isOfficialHosted()) return false;
@@ -57,7 +66,7 @@ export async function enqueueWelcome(handle: Handle, userId: string, source: 'si
 	// Never recreate erased delivery metadata, including a suppressed row.
 	if (!account || account.googleSub.startsWith('deleted:') || account.email === '[deleted]') return false;
 	const existing = await handle.select().from(welcomeEmails).where(key(userId)).get();
-	if (existing?.acceptedAt || (existing && !['historical_unknown', 'never_sent'].includes(existing.state))) return false;
+	if (!isHistoricalCandidate(existing)) return false;
 	const reason = exclusion(account, existing);
 	const values = enrollmentValues(userId, source, reason, existing);
 	if (!existing) {

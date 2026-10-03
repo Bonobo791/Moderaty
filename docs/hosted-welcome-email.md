@@ -74,7 +74,7 @@ per 60 seconds, including overlapping cron invocations. One cron tick attempts a
 most one recipient and recovers at most 25 stale claims, within its five-second
 share of the existing 20-second budget. Retry delays for definite failures are
 60s, 120s, 240s, 480s, then terminal after the fifth failed attempt. DNS, explicit transient SMTP rejection and proven pre-DATA errors
-are safe retry categories. Configuration/authentication outages instead preserve
+are safe retry categories. Configuration/authentication, TLS and DNS outages instead preserve
 the recipient attempt count and pause the entire campaign for 15 minutes through
 a durable cooldown. They cannot permanently exhaust the queued users while an
 operator repairs the transport. A deadline proven to occur before `sendMail` defers

@@ -7,7 +7,7 @@ import { channels, memberships, users, welcomeEmails } from './db/schema';
 import { sendProtonMailEmail, type ProtonMailMessage } from './protonMail';
 import { buildWelcomeEmail, welcomeAppOrigin, type WelcomeTeam } from './welcomeEmailTemplate';
 import { WELCOME_CAMPAIGN, exclusion, key, sendingEnabled, type WelcomeRow, type Account } from './welcomeEnrollment';
-import { recordWelcomeAcceptance, recordWelcomeFailure, type WelcomeDelivery } from './welcomeDeliveryOutcome';
+import { recordWelcomeAcceptance, recordWelcomeFailure, WELCOME_TRANSPORT_OUTAGES, type WelcomeDelivery } from './welcomeDeliveryOutcome';
 import { welcomeQueueStatus } from './welcomeBackfill';
 export { WELCOME_CAMPAIGN, enqueueWelcome, isOfficialHosted } from './welcomeEnrollment';
 export { previewWelcomeBackfill, backfillWelcomeBatch, welcomeQueueStatus } from './welcomeBackfill';
@@ -28,12 +28,12 @@ async function claimWelcome(userId: string) {
 	const claimToken = randomBytes(16).toString('hex');
 	const [claimed] = await db.update(welcomeEmails).set({ state: 'claimed', claimToken, leaseExpiresAt: new Date(Date.now() + LEASE_MS).toISOString() })
 		.where(and(key(userId), due(now),
-			// One campaign-wide slot. Configuration/auth faults pause every
+			// One campaign-wide slot. Transport-wide faults pause every
 			// recipient until the failed row's durable cooldown expires.
 			sql`NOT EXISTS (SELECT 1 FROM welcome_emails AS busy WHERE busy.campaign = ${WELCOME_CAMPAIGN} AND (
 				(busy.state IN ('claimed', 'in_flight') AND busy.lease_expires_at > ${now})
 				OR busy.last_attempt_at > ${new Date(Date.now() - THROTTLE_MS).toISOString()}
-				OR (busy.state = 'queued' AND busy.last_error IN ('configuration', 'authentication')
+				OR (busy.state = 'queued' AND busy.last_error IN (${sql.join(WELCOME_TRANSPORT_OUTAGES.map(category => sql`${category}`), sql`, `)})
 					AND busy.accepted_at IS NULL AND busy.suppression_reason IS NULL AND busy.next_retry_at > ${now})
 			))`
 		)).returning();
@@ -60,6 +60,11 @@ async function startSubmission(owned: SQL | undefined, account: Account, fresh: 
 	return started.length === 1;
 }
 
+async function deferPreparation(owned: SQL | undefined): Promise<Preparation> {
+	await db.update(welcomeEmails).set({ state: 'queued', claimToken: null, leaseExpiresAt: null }).where(owned);
+	return { outcome: 'deferred' };
+}
+
 /** No SMTP before this durable boundary; abandoned preflight claims recover safely. */
 async function prepareWelcome(userId: string, deadline: number, appUrl: string): Promise<Preparation> {
 	const claimed = await claimWelcome(userId);
@@ -73,10 +78,7 @@ async function prepareWelcome(userId: string, deadline: number, appUrl: string):
 		await db.update(welcomeEmails).set({ state: 'suppressed', suppressionReason: reason, nextRetryAt: null, claimToken: null, leaseExpiresAt: null }).where(owned);
 		return { outcome: 'suppressed' };
 	}
-	if (!sendingEnabled() || Date.now() >= deadline) {
-		await db.update(welcomeEmails).set({ state: 'queued', claimToken: null, leaseExpiresAt: null }).where(owned);
-		return { outcome: 'deferred' };
-	}
+	if (!sendingEnabled() || Date.now() >= deadline) return deferPreparation(owned);
 	// Read advisory channel/role context last, as close to the submission
 	// boundary as possible. The UI still enforces current permissions/usage.
 	const teams = await contentTeams(userId);

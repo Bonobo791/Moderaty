@@ -32,14 +32,27 @@ export function parseWelcomeArgs(args) {
 	return enqueueOptions(flags);
 }
 
-/** Fixed categories are actionable without echoing libSQL URLs, bound SQL or tokens. */
-export function welcomeOperationDiagnostic(cause) {
+/** Fixed categories never echo libSQL URLs, bound SQL or authentication values. */
+function databaseDiagnostic(cause) {
 	const message = cause instanceof Error ? cause.message : '';
-	if (SAFE_DIAGNOSTICS.has(message)) return message;
 	if (/no such (table|column)/i.test(message)) return 'Database schema is missing: verify migration 0062 on the selected target.';
 	const code = cause?.code;
 	if (code === 'SQLITE_BUSY' || code === 'SQLITE_LOCKED') return 'The database is busy; retry this bounded operation after the active transaction finishes.';
 	if (code === 'UNAUTHORIZED' || code === 'AUTH_ERROR') return 'The database rejected authentication; verify the selected target credentials without printing them.';
+	return null;
+}
+
+export function welcomeOperationDiagnostic(cause) {
+	const message = cause instanceof Error ? cause.message : '';
+	if (SAFE_DIAGNOSTICS.has(message)) return message;
+	const chain = [];
+	// Drizzle keeps the driver error in .cause; a hard bound handles cycles
+	// and avoids retaining an unbounded chain. Prefer the deepest diagnosis.
+	for (let current = cause, depth = 0; current && depth < 5; current = current.cause, depth++) chain.push(current);
+	for (const current of chain.reverse()) {
+		const diagnostic = databaseDiagnostic(current);
+		if (diagnostic) return diagnostic;
+	}
 	return 'The database operation failed; verify target connectivity, authentication and migration state.';
 }
 

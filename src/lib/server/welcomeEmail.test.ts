@@ -202,7 +202,9 @@ test('a deletion committed after the backfill page read is rechecked inside each
 
 test.each([
  new ProtonMailConfigurationError('PROTON_SMTP_TOKEN is not configured'),
- new ProtonMailSubmissionError('retryable', 'authentication', 'authentication failure')
+ new ProtonMailSubmissionError('retryable', 'authentication', 'authentication failure'),
+ new ProtonMailSubmissionError('retryable', 'tls', 'TLS failure'),
+ new ProtonMailSubmissionError('retryable', 'dns', 'DNS failure')
 ])('a deployment-wide transport outage never exhausts a recipient budget: %s', async cause => {
  await queued(); mocks.send.mockRejectedValue(cause);
  for (let index = 0; index < 7; index++) { await due(); await deliverWelcome('one', budget()); }
@@ -212,7 +214,9 @@ test.each([
 });
 test.each([
  [new ProtonMailConfigurationError('missing token'), 'configuration'],
- [new ProtonMailSubmissionError('retryable', 'authentication', 'auth failure'), 'authentication']
+ [new ProtonMailSubmissionError('retryable', 'authentication', 'auth failure'), 'authentication'],
+ [new ProtonMailSubmissionError('retryable', 'tls', 'TLS failure'), 'tls'],
+ [new ProtonMailSubmissionError('retryable', 'dns', 'DNS failure'), 'dns']
 ])('transport outages put a durable campaign cooldown on the next user: %s', async (cause, category) => {
  await queued('one'); await queued('two'); mocks.send.mockRejectedValueOnce(cause);
  expect((await sweepWelcomeEmails(budget())).errors).toBe(1);
@@ -252,7 +256,9 @@ test('channel context is refreshed after the fresh account read', async () => {
 
 test.each([
  new ProtonMailConfigurationError('missing token'),
- new ProtonMailSubmissionError('retryable', 'authentication', 'auth failure')
+ new ProtonMailSubmissionError('retryable', 'authentication', 'auth failure'),
+ new ProtonMailSubmissionError('retryable', 'tls', 'TLS failure'),
+ new ProtonMailSubmissionError('retryable', 'dns', 'DNS failure')
 ])('transport outages preserve the existing nonzero attempt history exactly: %s', async cause => {
  await queued();
  const previousAttempt = new Date(Date.now() - 3_600_000).toISOString();
@@ -260,4 +266,34 @@ test.each([
  mocks.send.mockRejectedValueOnce(cause);
  expect(await deliverWelcome('one', budget())).toBe('failed');
  expect(await row()).toMatchObject({ state: 'queued', attempts: 2, lastAttemptAt: previousAttempt, claimToken: null, acceptedAt: null });
+});
+
+
+test.each([
+ new Error('uncertain'),
+ new ProtonMailSubmissionError('retryable', 'throttled', 'throttled'),
+ new ProtonMailSubmissionError('retryable', 'authentication', 'auth failure')
+])('a lost claim cannot report a failure transition it did not persist: %s', async cause => {
+ await queued();
+ mocks.send.mockImplementationOnce(async () => {
+  await testDb().db.update(welcomeEmails).set({ state: 'suppressed', claimToken: null, suppressionReason: 'operator' }).where(eq(welcomeEmails.userId, 'one'));
+  throw cause;
+ });
+ expect(await sweepWelcomeEmails(budget())).toMatchObject({ ambiguous: 0, errors: 0 });
+ expect(await row()).toMatchObject({ state: 'suppressed', suppressionReason: 'operator' });
+});
+test('an explicitly uncertain outcome remains ambiguous even with a transport-outage category', async () => {
+ await queued(); mocks.send.mockRejectedValueOnce(new ProtonMailSubmissionError('unknown', 'tls', 'uncertain TLS outcome'));
+ expect(await deliverWelcome('one', budget())).toBe('ambiguous');
+ expect(await row()).toMatchObject({ state: 'ambiguous', nextRetryAt: null });
+});
+
+test.each(['one@foo-.bar.com', 'one@foo.-bar.com', `one@${'a'.repeat(64)}.com`])('suppresses an invalid DNS label before enrollment: %s', async email => {
+ await seedUser('one'); await testDb().db.update(users).set({ email }).where(eq(users.id, 'one'));
+ expect(await enqueueWelcome(testDb().db, 'one', 'signup')).toBe(false);
+ expect(await row()).toMatchObject({ state: 'suppressed', suppressionReason: 'invalid_recipient' });
+});
+test('recipient recheck rejects a newly invalid domain label before SMTP', async () => {
+ await queued(); await testDb().db.update(users).set({ email: 'one@foo-.bar.com' }).where(eq(users.id, 'one'));
+ expect(await deliverWelcome('one', budget())).toBe('suppressed'); expect(mocks.send).not.toHaveBeenCalled();
 });

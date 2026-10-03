@@ -8,19 +8,21 @@ import type { WelcomeRow } from './welcomeEnrollment';
 export type WelcomeDelivery = 'accepted' | 'deferred' | 'suppressed' | 'failed' | 'ambiguous';
 const MAX_ATTEMPTS = 5;
 const OUTAGE_BACKOFF_MS = 15 * 60_000;
+export const WELCOME_TRANSPORT_OUTAGES: readonly string[] = ['configuration', 'authentication', 'tls', 'dns'];
 const SUBMISSION_DIAGNOSTIC = '[welcome] submission not accepted';
 
 function deploymentFailure(cause: unknown): string | null {
 	if (cause instanceof ProtonMailConfigurationError) return 'configuration';
-	if (cause instanceof ProtonMailSubmissionError && cause.category === 'authentication') return 'authentication';
+	if (cause instanceof ProtonMailSubmissionError && cause.outcome === 'retryable' && WELCOME_TRANSPORT_OUTAGES.includes(cause.category)) return cause.category;
 	return null;
 }
 
 async function deferSubmission(owned: SQL | undefined, fresh: WelcomeRow, category: string, delay: number) {
-	await db.update(welcomeEmails).set({ state: 'queued', attempts: fresh.attempts,
+	const updated = await db.update(welcomeEmails).set({ state: 'queued', attempts: fresh.attempts,
 		lastAttemptAt: fresh.lastAttemptAt, lastError: category,
 		nextRetryAt: new Date(Date.now() + delay).toISOString(), claimToken: null, leaseExpiresAt: null })
-		.where(and(owned, eq(welcomeEmails.state, 'in_flight')));
+		.where(and(owned, eq(welcomeEmails.state, 'in_flight'))).returning({ userId: welcomeEmails.userId });
+	return updated.length === 1;
 }
 
 function failedSubmission(cause: unknown, attempts: number) {
@@ -39,14 +41,15 @@ export async function recordWelcomeFailure(owned: SQL | undefined, fresh: Welcom
 	}
 	const outage = deploymentFailure(cause);
 	if (outage) {
-		await deferSubmission(owned, fresh, outage, OUTAGE_BACKOFF_MS);
+		if (!await deferSubmission(owned, fresh, outage, OUTAGE_BACKOFF_MS)) return 'deferred';
 		console.error(SUBMISSION_DIAGNOSTIC, { category: outage, state: 'queued' });
 		return 'failed';
 	}
 	const { state, category } = failedSubmission(cause, fresh.attempts + 1);
 	const nextRetryAt = state === 'retryable_failure' ? new Date(Date.now() + Math.min(60_000 * 2 ** fresh.attempts, 3_600_000)).toISOString() : null;
-	await db.update(welcomeEmails).set({ state, lastError: category, nextRetryAt, claimToken: null, leaseExpiresAt: null })
-		.where(and(owned, eq(welcomeEmails.state, 'in_flight')));
+	const updated = await db.update(welcomeEmails).set({ state, lastError: category, nextRetryAt, claimToken: null, leaseExpiresAt: null })
+		.where(and(owned, eq(welcomeEmails.state, 'in_flight'))).returning({ userId: welcomeEmails.userId });
+	if (updated.length !== 1) return 'deferred';
 	console.error(SUBMISSION_DIAGNOSTIC, { category, state });
 	return state === 'ambiguous' ? 'ambiguous' : 'failed';
 }

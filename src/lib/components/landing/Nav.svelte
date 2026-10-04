@@ -68,8 +68,11 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
+		gap: 24px;
 	}
 	.wordmark {
+		flex-shrink: 0;
+		white-space: nowrap;
 		font-family: var(--font-mono);
 		font-size: 14px;
 		font-weight: 600;
@@ -79,11 +82,13 @@
 		text-decoration: none;
 	}
 	.links {
+		flex-shrink: 0;
 		display: none;
 		align-items: center;
-		gap: 28px;
+		gap: 20px;
 	}
 	.link {
+		white-space: nowrap;
 		font-family: var(--font-mono);
 		font-size: 11px;
 		text-transform: uppercase;
@@ -96,11 +101,13 @@
 		color: var(--paper);
 	}
 	.nav-actions {
+		flex-shrink: 0;
 		display: flex;
 		align-items: center;
 		gap: 12px;
 	}
 	.cta {
+		white-space: nowrap;
 		display: none;
 		border-radius: 999px;
 		background: var(--ban);
@@ -141,7 +148,8 @@
 		width: fit-content;
 		margin-top: 8px;
 	}
-	@media (min-width: 1024px) {
+	/* Keep the compact menu until every desktop group fits with its gap. */
+	@media (min-width: 1152px) {
 		.links {
 			display: flex;
 		}

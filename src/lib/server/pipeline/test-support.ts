@@ -41,6 +41,7 @@ const mocks = vi.hoisted(() => {
 		commentStatuses: {} as Record<string, string>,
 		// comments.decidedBy for pre-stored rows (existingIds).
 		commentDecidedBy: {} as Record<string, string>,
+		commentRestoreIntentIds: {} as Record<string, number | null>,
 		// Fired at the start of every comments .all() query with its call index,
 		// so a test can flip a stored status BETWEEN two reads in one flow
 		// (e.g. a human release landing between partition and supersede).
@@ -64,7 +65,8 @@ const mocks = vi.hoisted(() => {
 			id,
 			status: staged?.status ?? state.commentStatuses[id] ?? 'held',
 			decidedBy: staged?.decidedBy ?? state.commentDecidedBy[id] ?? 'ai',
-			scanId: staged?.scanId ?? null
+			scanId: staged?.scanId ?? null,
+			restoreIntentId: staged?.restoreIntentId ?? state.commentRestoreIntentIds[id] ?? null
 		};
 	};
 	const commentsAll = (condition: unknown) => {
@@ -114,12 +116,12 @@ const mocks = vi.hoisted(() => {
 		// subscription periods, so no row matches — the honest answer.
 		if (table === state.tables.stripeSubscriptionPeriods) return undefined;
 		if (table === state.tables.auditLog) {
-			// "Latest" reads sort createdAt/id desc — approximate by
-			// returning the last inserted row matching both eq()s.
+			// Audit reads honor the channel/comment scope and, when present,
+			// the exact intent ID and user actor instead of borrowing history.
 			const params = queryParams(condition);
 			const matches = state.insertedAudits.filter((row) =>
 				params.includes(queryKey(row.commentId)) && params.includes(queryKey(row.channelId)));
-			return matches.at(-1);
+			return matches.filter((row) => matchesBoundParam(condition, auditLog.id, row.id) && matchesBoundParam(condition, auditLog.actor, row.actor)).at(-1);
 		}
 		if (table === state.tables.creditTransactions) {
 			// hasChargeAnchor's (org_id, ref_type, ref_id) lookup: a row only
@@ -206,14 +208,8 @@ const mocks = vi.hoisted(() => {
 		// (isNull). Compare against the LIVE row — a mid-run replant
 		// mismatches, the real UPDATE affects 0 rows, and nothing
 		// records (codeant race).
-		const scanGuard = (column: 'history_scan_id' | 'history_boundary'): boolean => {
-			const bound = boundParam(condition, column);
-			const live = column === 'history_scan_id' ? state.channel?.historyScanId : state.channel?.historyBoundary;
-			if (bound.kind === 'eq') return bound.value === live;
-			if (bound.kind === 'isNull') return live == null;
-			return true;
-		};
-		if (!scanGuard('history_scan_id') || !scanGuard('history_boundary')) {
+		if (!matchesBoundParam(condition, channels.historyScanId, state.channel?.historyScanId)
+			|| !matchesBoundParam(condition, channels.historyBoundary, state.channel?.historyBoundary)) {
 			return { returning: async () => [] as Record<string, unknown>[] };
 		}
 		state.channelUpdates.push(values);
@@ -229,7 +225,7 @@ const mocks = vi.hoisted(() => {
 		const applied: Record<string, unknown>[] = [];
 		const apply = (row: Record<string, unknown>) => {
 			const current = row.status as string;
-			if (params.includes(queryKey(row.id)) && (!statusFilter.length || statusFilter.includes(current))) {
+			if (params.includes(queryKey(row.id)) && (!statusFilter.length || statusFilter.includes(current)) && matchesBoundParam(condition, comments.restoreIntentId, row.restoreIntentId)) {
 				Object.assign(row, values);
 				applied.push(row);
 			}
@@ -237,9 +233,10 @@ const mocks = vi.hoisted(() => {
 		state.insertedComments.forEach(apply);
 		for (const id of state.existingIds) {
 			const current = state.commentStatuses[id] ?? 'held';
-			if (params.includes(id) && (!statusFilter.length || statusFilter.includes(current))) {
+			if (params.includes(id) && (!statusFilter.length || statusFilter.includes(current)) && matchesBoundParam(condition, comments.restoreIntentId, state.commentRestoreIntentIds[id])) {
 				if ('status' in values) state.commentStatuses[id] = values.status as string;
 				if ('decidedBy' in values) state.commentDecidedBy[id] = values.decidedBy as string;
+				if ('restoreIntentId' in values) state.commentRestoreIntentIds[id] = values.restoreIntentId as number | null;
 				applied.push({ id });
 			}
 		}
@@ -457,7 +454,8 @@ vi.mock('$lib/server/youtube', async (importOriginal) => ({
 }));
 
 import { auditLog, channelAllowedHandles, channels, comments, creditTransactions, moderationActions, organizations, rules, stripeSubscriptionPeriods } from '$lib/server/db/schema';
-import { SQLiteSyncDialect } from 'drizzle-orm/sqlite-core';
+import { sql } from 'drizzle-orm';
+import { SQLiteSyncDialect, type SQLiteColumn } from 'drizzle-orm/sqlite-core';
 import type { NewComment } from '../youtube';
 
 const dialect = new SQLiteSyncDialect();
@@ -480,14 +478,22 @@ function querySql(condition: unknown): string {
 
 type BoundParam = { kind: 'eq'; value: unknown } | { kind: 'isNull' | 'absent' };
 
-/** The bound value of a `"channels"."col" = ?` clause — its position among the
+/** The bound value of a qualified column equality — its position among the
  * placeholders is counted, not assumed, so predicate order stays the caller's
  * business. 'isNull' and 'absent' cover the other clause shapes. */
-function boundParam(condition: unknown, column: string): BoundParam {
-	const sql = querySql(condition);
-	const eqPos = sql.indexOf(`"channels"."${column}" = ?`);
-	if (eqPos === -1) return { kind: sql.includes(`"channels"."${column}" is null`) ? 'isNull' : 'absent' };
-	return { kind: 'eq', value: queryParams(condition)[sql.slice(0, eqPos).split('?').length - 1] };
+function boundParam(condition: unknown, column: SQLiteColumn): BoundParam {
+	const conditionSql = querySql(condition);
+	const columnSql = querySql(sql`${column}`);
+	const eqPos = conditionSql.indexOf(`${columnSql} = ?`);
+	if (eqPos === -1) return { kind: conditionSql.includes(`${columnSql} is null`) ? 'isNull' : 'absent' };
+	return { kind: 'eq', value: queryParams(condition)[conditionSql.slice(0, eqPos).split('?').length - 1] };
+}
+
+function matchesBoundParam(condition: unknown, column: SQLiteColumn, value: unknown): boolean {
+	const bound = boundParam(condition, column);
+	if (bound.kind === 'eq') return value === bound.value;
+	if (bound.kind === 'isNull') return value == null;
+	return true;
 }
 
 function valueRows(values: unknown): Record<string, unknown>[] {
@@ -683,6 +689,7 @@ export function resetPipelineMocks() {
 	mocks.state.moderationActions = [];
 	mocks.state.commentStatuses = {};
 	mocks.state.commentDecidedBy = {};
+	mocks.state.commentRestoreIntentIds = {};
 	mocks.state.commentsSelectCalls = 0;
 	mocks.state.onCommentsSelect = undefined;
 	mocks.decrypt.mockReturnValue('refresh-token');

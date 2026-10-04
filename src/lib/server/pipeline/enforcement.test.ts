@@ -278,8 +278,9 @@ test('a hold on a restoring comment is not converged — the human flow and the 
 	mocks.state.existingIds = ['comment'];
 	mocks.state.commentStatuses = { comment: 'restoring' };
 	mocks.state.moderationActions = [dispatchedAction({ action: 'hold' })];
+	mocks.state.commentRestoreIntentIds = { comment: 1 };
 	mocks.state.insertedAudits = [
-		{ channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'queue UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
+		{ id: 1, channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'queue UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
 	];
 
 	await runChannel('channel');
@@ -321,8 +322,9 @@ test('a dispatched reject on a restoring comment stays reconcilable — the corr
 	mocks.state.existingIds = ['comment'];
 	mocks.state.commentStatuses = { comment: 'restoring' };
 	mocks.state.moderationActions = [dispatchedAction({ action: 'reject' })];
+	mocks.state.commentRestoreIntentIds = { comment: 1 };
 	mocks.state.insertedAudits = [
-		{ channelId: 'channel', commentId: 'comment', action: 'restore', reason: 'undo', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
+		{ id: 1, channelId: 'channel', commentId: 'comment', action: 'restore', reason: 'undo', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
 	];
 
 	await runChannel('channel');
@@ -372,8 +374,9 @@ test('a dispatched action AGREEING with the human outcome completes at finalize'
 	mocks.state.existingIds = ['comment'];
 	mocks.state.commentStatuses = { comment: 'restoring' };
 	mocks.state.moderationActions = [dispatchedAction({ action: 'reject' })];
+	mocks.state.commentRestoreIntentIds = { comment: 1 };
 	mocks.state.insertedAudits = [
-		{ channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'queue UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
+		{ id: 1, channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'queue UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
 	];
 
 	await runChannel('channel');
@@ -409,8 +412,9 @@ test('a rescan replacing the restoring claim keeps its freshly staged action', a
 	// mid-write would still see its fresh pending action superseded.
 	mocks.state.existingIds = ['comment'];
 	mocks.state.commentStatuses = { comment: 'restoring' };
+	mocks.state.commentRestoreIntentIds = { comment: 1 };
 	mocks.state.insertedAudits = [
-		{ channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'queue UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
+		{ id: 1, channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'queue UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
 	];
 	mocks.setModerationStatus.mockImplementationOnce(async () => {
 		// The rescan stages a fresh verdict + action while the human's remote
@@ -435,8 +439,9 @@ test.each([
 ] as const)('a completed replacement %s for a %s comment reconciles after a late human publish', async (action, status, remoteOutcome) => {
 	mocks.state.existingIds = ['comment'];
 	mocks.state.commentStatuses = { comment: 'restoring' };
+	mocks.state.commentRestoreIntentIds = { comment: 1 };
 	mocks.state.insertedAudits = [
-		{ channelId: 'channel', commentId: 'comment', action: 'restore', reason: 'log UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
+		{ id: 1, channelId: 'channel', commentId: 'comment', action: 'restore', reason: 'log UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
 	];
 	let remoteStatus = 'rejected';
 	mocks.setModerationStatus.mockImplementation(async (_ids, moderationStatus) => {
@@ -466,8 +471,9 @@ test.each([
 test('a completed replacement already agreeing with the landed human write stays completed', async () => {
 	mocks.state.existingIds = ['comment'];
 	mocks.state.commentStatuses = { comment: 'restoring' };
+	mocks.state.commentRestoreIntentIds = { comment: 1 };
 	mocks.state.insertedAudits = [
-		{ channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'queue UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
+		{ id: 1, channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'queue UI', actor: 'user', createdAt: '2026-01-04T00:00:01.000Z' }
 	];
 	mocks.setModerationStatus.mockImplementationOnce(async () => {
 		mocks.state.commentStatuses.comment = 'rejected';
@@ -805,11 +811,11 @@ test('a crashed human action is re-executed and finalized by the reconcile sweep
 	// (I3) and crashed before finishing: the next run must finish exactly the
 	// recorded intent and land the final status — not leave it dangling.
 	mocks.state.insertedComments = [
-		{ id: 'comment', channelId: 'channel', text: 'x', publishedAt: '2026-01-01T00:00:00Z', status: 'restoring', decidedBy: 'human' }
+		{ id: 'comment', channelId: 'channel', text: 'x', publishedAt: '2026-01-01T00:00:00Z', status: 'restoring', decidedBy: 'human', restoreIntentId: 1 }
 	];
 	mocks.fetchNewComments.mockResolvedValue({ comments: [], nextPageToken: null, reachedCursor: true });
 	mocks.state.insertedAudits = [
-		{ channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'manual review', actor: 'user', createdAt: '2026-01-01T00:00:00Z' }
+		{ id: 1, channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'manual review', actor: 'user', createdAt: '2026-01-01T00:00:00Z' }
 	];
 
 	await runChannel('channel');
@@ -820,11 +826,11 @@ test('a crashed human action is re-executed and finalized by the reconcile sweep
 
 test('a crashed approve intent is republished and finalized by the reconcile sweep', async () => {
 	mocks.state.insertedComments = [
-		{ id: 'comment', channelId: 'channel', text: 'x', publishedAt: '2026-01-01T00:00:00Z', status: 'restoring', decidedBy: 'human' }
+		{ id: 'comment', channelId: 'channel', text: 'x', publishedAt: '2026-01-01T00:00:00Z', status: 'restoring', decidedBy: 'human', restoreIntentId: 1 }
 	];
 	mocks.fetchNewComments.mockResolvedValue({ comments: [], nextPageToken: null, reachedCursor: true });
 	mocks.state.insertedAudits = [
-		{ channelId: 'channel', commentId: 'comment', action: 'approve', reason: 'manual review', actor: 'user', createdAt: '2026-01-01T00:00:00Z' }
+		{ id: 1, channelId: 'channel', commentId: 'comment', action: 'approve', reason: 'manual review', actor: 'user', createdAt: '2026-01-01T00:00:00Z' }
 	];
 
 	await runChannel('channel');
@@ -838,11 +844,11 @@ test('a missing comment during a crashed intent warns and finalizes the real out
 	// reject. Finalizing 'rejected' would record a remote state that does not
 	// exist; the comment is gone, so the honest terminal status is 'deleted'.
 	mocks.state.insertedComments = [
-		{ id: 'comment', channelId: 'channel', text: 'x', publishedAt: '2026-01-01T00:00:00Z', status: 'restoring', decidedBy: 'human' }
+		{ id: 'comment', channelId: 'channel', text: 'x', publishedAt: '2026-01-01T00:00:00Z', status: 'restoring', decidedBy: 'human', restoreIntentId: 1 }
 	];
 	mocks.fetchNewComments.mockResolvedValue({ comments: [], nextPageToken: null, reachedCursor: true });
 	mocks.state.insertedAudits = [
-		{ channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'manual review', actor: 'user', createdAt: '2026-01-01T00:00:00Z' }
+		{ id: 1, channelId: 'channel', commentId: 'comment', action: 'reject', reason: 'manual review', actor: 'user', createdAt: '2026-01-01T00:00:00Z' }
 	];
 	const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
 	mocks.setModerationStatus.mockRejectedValueOnce(new CommentNotFoundError(['comment']));

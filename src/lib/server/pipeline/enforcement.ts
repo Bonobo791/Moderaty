@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { maybeTriggerAutoTopUp } from '$lib/server/billing/autotopup';
 import { db } from '$lib/server/db';
 import { auditLog, channels, comments, moderationActions } from '$lib/server/db/schema';
@@ -618,7 +618,7 @@ export async function applyHumanIntent(
 
 /**
  * Commits the local result of a human intent in ONE transaction: the final
- * comment status is guarded on 'restoring', and every outstanding action row
+ * comment status is guarded on 'restoring' and the exact intent ID, and every outstanding action row
  * for the comment is resolved by whether its remote outcome AGREES with the
  * human's. A dispatched row whose outcome equals the final status completes
  * and is audited — both writes land the same remote state either order. A
@@ -633,6 +633,7 @@ export async function finalizeHumanIntent(
 	channelId: string,
 	commentId: string,
 	action: string,
+	intentId: number,
 	expected?: ChannelIdentity
 ): Promise<void> {
 	const status = humanFinalStatus(action);
@@ -642,8 +643,13 @@ export async function finalizeHumanIntent(
 		await assertChannelActive(channelId, transaction, expected);
 		const claimed = await transaction
 			.update(comments)
-			.set({ status, decidedBy: 'human' })
-			.where(and(eq(comments.id, commentId), eq(comments.status, 'restoring')))
+			.set({ status, decidedBy: 'human', restoreIntentId: null })
+			.where(and(
+				eq(comments.id, commentId),
+				eq(comments.channelId, channelId),
+				eq(comments.status, 'restoring'),
+				eq(comments.restoreIntentId, intentId)
+			))
 			.returning({ id: comments.id });
 		if (!claimed.length) {
 			const current = await transaction
@@ -707,43 +713,51 @@ export async function finalizeHumanIntent(
 	});
 }
 
+/** Reads only the audit bound to this claim, never a historical fallback. */
+export async function claimedHumanIntent(
+	channelId: string,
+	commentId: string,
+	intentId: number | null,
+	handle: Pick<typeof db, 'select'> = db
+) {
+	if (intentId === null) return undefined;
+	const intent = await handle
+		.select({ id: auditLog.id, action: auditLog.action, actor: auditLog.actor })
+		.from(auditLog)
+		.where(and(
+			eq(auditLog.id, intentId),
+			eq(auditLog.channelId, channelId),
+			eq(auditLog.commentId, commentId),
+			eq(auditLog.actor, 'user')
+		))
+		.get();
+	return intent && intent.actor === 'user' && humanFinalStatus(intent.action) ? intent : undefined;
+}
+
 /**
- * Human actions claim a comment into 'restoring' and record their intent as
- * an audit row BEFORE the remote call (I3). A crash leaves 'restoring' +
- * the intent row — this sweep re-executes the intent (every remote verb is
- * idempotent) and commits the final status, so a crashed action converges
- * instead of sitting invisible between states forever. A 'restoring' row
- * without a user intent audit is not ours to finish.
+ * A restoring claim and its exact audit ID commit together before remote
+ * work (I3). Only that audit is replayable. Legacy or invalid bindings stay
+ * untouched until the owner explicitly retries; history cannot prove intent.
  */
 async function reconcileRestoring(channelId: string, accessToken: string, deadline?: number, expected?: ChannelIdentity) {
 	const stuck = await db
-		.select({ id: comments.id })
+		.select({ id: comments.id, restoreIntentId: comments.restoreIntentId })
 		.from(comments)
 		.where(and(eq(comments.channelId, channelId), eq(comments.status, 'restoring')))
 		.all();
 	for (const row of stuck) {
-		const intent = await db
-			.select({ action: auditLog.action, actor: auditLog.actor })
-			.from(auditLog)
-			// A delayed system completion can append an audit after the human
-			// claim. It is evidence of remote work, not a replacement intent
-			// (MOD-108). Select the latest USER row, then validate its verb.
-			.where(and(eq(auditLog.channelId, channelId), eq(auditLog.commentId, row.id), eq(auditLog.actor, 'user')))
-			.orderBy(desc(auditLog.createdAt), desc(auditLog.id))
-			.limit(1)
-			.get();
-		if (!intent || intent.actor !== 'user' || !humanFinalStatus(intent.action)) continue;
+		const intent = await claimedHumanIntent(channelId, row.id, row.restoreIntentId);
+		if (!intent) {
+			console.warn('reconcile: comment %s has no valid bound human intent — leaving restoring unchanged; owner retry required', row.id);
+			continue;
+		}
 		try {
 			assertBeforeDeadline(deadline);
 			const outcome = await applyHumanIntent(row.id, intent.action, accessToken, deadline);
-			// A comment YouTube no longer has IS deleted — finalize the real
-			// remote outcome rather than stamping the requested intent over a
-			// remote deletion (codex).
-			await finalizeHumanIntent(channelId, row.id, outcome === 'missing' ? 'delete' : intent.action, expected);
+			// A missing comment is deleted, regardless of the requested action.
+			await finalizeHumanIntent(channelId, row.id, outcome === 'missing' ? 'delete' : intent.action, intent.id, expected);
 		} catch (error) {
 			if (error instanceof DeadlineExceededError) throw error;
-			// Leave it 'restoring' for the next run — one stuck comment must
-			// never abort the sweep or the run (I1), and never fail silently.
 			console.error(
 				`reconcile: could not finish '${intent.action}' for comment ${row.id}: ${error instanceof Error ? error.message : String(error)} — retrying next run`
 			);

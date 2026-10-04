@@ -1,0 +1,1 @@
+ALTER TABLE `comments` ADD `restore_intent_id` integer;

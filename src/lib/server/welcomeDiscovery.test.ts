@@ -135,21 +135,62 @@ test('deadline expiry commits the last inspected id and resumes unprocessed ids'
 	for (const id of ['a-first', 'b-next', 'c-last']) expect(await row(id)).toMatchObject({ state: 'queued' });
 });
 
-test('a failed enrollment remains visible when its rollback outlasts the discovery lease', async () => {
-	await seedUser('slow-failing');
+test('a slow failed enrollment checkpoints before expiry cleanup so later accounts remain reachable', async () => {
+	await seedUser('a-slow-failing');
+	await seedUser('b-next');
+	const now = Date.now();
+	const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+	const enrollment = await import('./welcomeEnrollment');
+	const enqueue = enrollment.enqueueWelcome;
+	vi.spyOn(enrollment, 'enqueueWelcome').mockImplementation(async (...args) => {
+		if (args[1] === 'a-slow-failing') {
+			clock.mockReturnValue(Date.now() + 60_001);
+			throw new Error('fixture slow persistence failure');
+		}
+		return enqueue(...args);
+	});
+	const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+	expect(await enrollWelcomeCandidates(now + 5_000)).toEqual({ scanned: 1, queued: 0, enrollmentErrors: 1 });
+	expect(log).toHaveBeenCalledWith(expect.stringContaining('[welcome]'), { category: 'unexpected_preparation_or_persistence' });
+	expect(await testDb().db.select().from(welcomeEmails)).toHaveLength(0);
+	expect(await testDb().db.select().from(welcomeDiscovery).get()).toMatchObject({
+		afterUserId: 'a-slow-failing', cycleEndUserId: 'b-next', claimToken: null, leaseExpiresAt: null
+	});
+	expect(await enrollWelcomeCandidates(budget())).toEqual({ scanned: 1, queued: 1, enrollmentErrors: 0 });
+	expect(await row('b-next')).toMatchObject({ state: 'queued' });
+	// The failed account returns on wrap and cannot repeatedly pin b-next.
+	expect(await enrollWelcomeCandidates(budget())).toEqual({ scanned: 1, queued: 0, enrollmentErrors: 1 });
+	expect(await enrollWelcomeCandidates(budget())).toEqual({ scanned: 1, queued: 0, enrollmentErrors: 0 });
+});
+
+test('a failed expired worker cannot checkpoint over a successor token', async () => {
+	await seedUser('a-failing');
+	await seedUser('b-successor');
 	const now = Date.now();
 	const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
 	const enrollment = await import('./welcomeEnrollment');
 	vi.spyOn(enrollment, 'enqueueWelcome').mockImplementation(async () => {
 		clock.mockReturnValue(now + 60_001);
-		throw new Error('fixture slow persistence failure');
+		throw new Error('fixture persistence failure');
 	});
-	const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+	// Take over after the old account transaction rolls back, before its
+	// separate failure checkpoint. The successor's lease and cursor survive.
+	const client = testDb().client;
+	const execute = client.execute.bind(client);
+	let takenOver = false;
+	vi.spyOn(client, 'execute').mockImplementation(async (...args) => {
+		if (!takenOver && statementSql(args[0]).startsWith('update "welcome_discovery" set "after_user_id"')) {
+			takenOver = true;
+			await execute({ sql: 'UPDATE welcome_discovery SET claim_token = ?, after_user_id = ?, cycle_end_user_id = ?, lease_expires_at = ?',
+				args: ['successor', 'b-successor', 'z-successor-bound', new Date(now + 120_000).toISOString()] });
+		}
+		return execute(...args);
+	});
+	vi.spyOn(console, 'error').mockImplementation(() => {});
 	expect(await enrollWelcomeCandidates(now + 5_000)).toEqual({ scanned: 0, queued: 0, enrollmentErrors: 1 });
-	expect(log).toHaveBeenCalledWith(expect.stringContaining('[welcome]'), { category: 'unexpected_preparation_or_persistence' });
-	expect(await testDb().db.select().from(welcomeEmails)).toHaveLength(0);
+	expect(takenOver).toBe(true);
 	expect(await testDb().db.select().from(welcomeDiscovery).get()).toMatchObject({
-		afterUserId: null, cycleEndUserId: 'slow-failing', claimToken: null, leaseExpiresAt: null
+		claimToken: 'successor', afterUserId: 'b-successor', cycleEndUserId: 'z-successor-bound', leaseExpiresAt: new Date(now + 120_000).toISOString()
 	});
 });
 

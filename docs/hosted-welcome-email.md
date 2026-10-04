@@ -47,7 +47,8 @@ user. Migration 0063 adds recipient-independent campaign pacing, carrying forwar
 any recent attempt, live lease or transport-outage cooldown without enrolling
 users. The campaign row contains only the campaign key and next allowed attempt
 time; account deletion cannot erase this pacing fence. Automatic discovery reuses
-these tables and requires no new migration. A missing row is counted as
+the welcome outbox; migration `0067_welcome_discovery` adds its traversal checkpoint.
+A missing row is counted as
 historical unknown by the preview. Previously
 recorded success (`state=accepted` or `accepted_at` present), suppression, terminal
 failure, and uncertain new submissions are excluded from automatic backfill.
@@ -159,12 +160,13 @@ The `welcome_discovery` campaign row saves the last inspected user ID and the
 highest user ID at the start of each traversal. The fixed upper bound makes
 each traversal finite even while new accounts arrive. Reaching the end resets
 the cursor, revisiting failed or newly eligible accounts and later inserts that
-sort before the previous position. A 60-second discovery lease and claim-token
-checks prevent overlapping or expired workers from overwriting that position.
-The inspected position and successful enrollment commit together; failed
-enrollment advances the position separately while the worker still owns a valid
-lease. An expired worker reports the failure but leaves the saved position for
-the next worker to retry; it cannot advance another worker's checkpoint.
+sort before the previous position. Successful enrollment and its inspected
+position commit together under a live 60-second discovery lease. After a failed
+enrollment rolls back, the worker checkpoints that failed ID separately while
+its claim token still owns discovery, even if the lease has expired. This keeps
+repeated slow failures from pinning later accounts. A successor's token fences
+both that failure checkpoint and late cleanup; expired workers cannot enroll
+another account or overwrite a successor's position.
 Migration `0067_welcome_discovery` creates this state.
 
 `welcomeEmailCandidatesScanned` counts users inspected for enrollment, including

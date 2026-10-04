@@ -70,11 +70,67 @@ type DiscoveryClaim = NonNullable<Awaited<ReturnType<typeof claimDiscovery>>>;
 function discoveryOwner(claim: DiscoveryClaim) {
 	return and(eq(welcomeDiscovery.campaign, WELCOME_CAMPAIGN), eq(welcomeDiscovery.claimToken, claim.claimToken));
 }
-async function advanceDiscovery(handle: Pick<typeof db, 'update'>, claim: DiscoveryClaim, userId: string) {
+async function advanceDiscovery(handle: Pick<typeof db, 'update'>, claim: DiscoveryClaim, userId: string,
+	options: { allowExpiredLease?: boolean } = {}) {
 	const advanced = await handle.update(welcomeDiscovery).set({ afterUserId: userId })
-		.where(and(discoveryOwner(claim), gt(welcomeDiscovery.leaseExpiresAt, new Date(Date.now()).toISOString())))
+		.where(and(discoveryOwner(claim), options.allowExpiredLease ? undefined : gt(welcomeDiscovery.leaseExpiresAt, new Date(Date.now()).toISOString())))
 		.returning({ campaign: welcomeDiscovery.campaign });
 	return advanced.length === 1;
+}
+
+function checkpointFailedDiscovery(claim: DiscoveryClaim, userId: string) {
+	// Enrollment has rolled back. Persist only the failed id after expiry,
+	// provided no successor replaced our token; never enqueue under this guard.
+	return withBusyRetry(() => advanceDiscovery(db, claim, userId, { allowExpiredLease: true }));
+}
+
+async function discoveryPage(claim: DiscoveryClaim) {
+	if (claim.cycleEndUserId === null) return [];
+	// Eligibility reads happen afterwards on these <=25 ids. LIMIT bounds
+	// examined users, even if every account has already received a welcome.
+	return await db.select({ id: users.id }).from(users)
+		.where(and(claim.afterUserId === null ? undefined : gt(users.id, claim.afterUserId), lte(users.id, claim.cycleEndUserId)))
+		.orderBy(asc(users.id)).limit(MAX_BACKFILL_BATCH);
+}
+
+async function enrollDiscoveryAccount(claim: DiscoveryClaim, userId: string) {
+	return await withBusyRetry(() => db.transaction(async tx => {
+		// Advancing and enrolling commit together. A stale lease owner
+		// cannot enroll a page or overwrite a successor's checkpoint.
+		if (!await advanceDiscovery(tx, claim, userId)) return undefined;
+		const welcome = await tx.select().from(welcomeEmails)
+			.where(and(eq(welcomeEmails.userId, userId), eq(welcomeEmails.campaign, WELCOME_CAMPAIGN))).get();
+		if (!isHistoricalCandidate(welcome) || welcome?.suppressionReason ||
+			(welcome?.cohort && welcome.cohort !== 'official-hosted')) return false;
+		return enqueueWelcome(tx, userId, welcome?.state === 'never_sent' ? 'never_sent' : 'historical_unknown');
+	}));
+}
+
+type DiscoveryCounts = { scanned: number; queued: number; enrollmentErrors: number };
+async function inspectDiscoveryAccount(claim: DiscoveryClaim, userId: string, counts: DiscoveryCounts) {
+	try {
+		const queued = await enrollDiscoveryAccount(claim, userId);
+		if (queued === undefined) return false;
+		counts.scanned++;
+		if (queued) counts.queued++;
+		return true;
+	} catch (cause) {
+		counts.enrollmentErrors++;
+		console.error('[welcome] account enrollment failed; continuing candidate page', { category: welcomeFailureCategory(cause) });
+		// Enrollment rolled back its checkpoint. Persist the failed id
+		// separately so repeated failures cannot pin other users behind it.
+		if (!await checkpointFailedDiscovery(claim, userId)) return false;
+		counts.scanned++;
+		return true;
+	}
+}
+
+async function releaseDiscovery(claim: DiscoveryClaim, completed: boolean) {
+	// Only inspected ids advance; a spent deadline resumes unprocessed ids.
+	// Empty/deleted tails also wrap. The token protects against late cleanup
+	// from an expired worker after another invocation acquired the lease.
+	await withBusyRetry(() => db.update(welcomeDiscovery).set({ claimToken: null, leaseExpiresAt: null,
+		...(completed ? { afterUserId: null, cycleEndUserId: null } : {}) }).where(discoveryOwner(claim)));
 }
 
 /** One unfiltered keyset page per tick; failed accounts return after a finite traversal. */
@@ -86,44 +142,17 @@ export async function enrollWelcomeCandidates(deadline: number) {
 	let completed = false;
 	try {
 		if (Date.now() >= deadline) return counts;
-		// Resolve only ids here. Eligibility reads and writes happen afterwards
-		// on these <=25 ids, so LIMIT bounds examined users, even if all are sent.
-		const page = claim.cycleEndUserId === null ? [] : await db.select({ id: users.id }).from(users)
-			.where(and(claim.afterUserId === null ? undefined : gt(users.id, claim.afterUserId), lte(users.id, claim.cycleEndUserId)))
-			.orderBy(asc(users.id)).limit(MAX_BACKFILL_BATCH);
-		for (const account of page) {
-			if (Date.now() >= deadline) break;
-			try {
-				const queued = await withBusyRetry(() => db.transaction(async tx => {
-					// Advancing and enrolling commit together. A stale lease owner
-					// cannot enroll a page or overwrite a successor's checkpoint.
-					if (!await advanceDiscovery(tx, claim, account.id)) return undefined;
-					const welcome = await tx.select().from(welcomeEmails)
-						.where(and(eq(welcomeEmails.userId, account.id), eq(welcomeEmails.campaign, WELCOME_CAMPAIGN))).get();
-					if (!isHistoricalCandidate(welcome) || welcome?.suppressionReason ||
-						(welcome?.cohort && welcome.cohort !== 'official-hosted')) return false;
-					return enqueueWelcome(tx, account.id, welcome?.state === 'never_sent' ? 'never_sent' : 'historical_unknown');
-				}));
-				if (queued === undefined) break;
-				counts.scanned++;
-				if (queued) counts.queued++;
-			} catch (cause) {
-				counts.enrollmentErrors++;
-				console.error('[welcome] account enrollment failed; continuing candidate page', { category: welcomeFailureCategory(cause) });
-				// Enrollment rolled back its checkpoint. Persist the failed id
-				// separately so repeated failures cannot pin other users behind it.
-				if (!await withBusyRetry(() => advanceDiscovery(db, claim, account.id))) break;
-				counts.scanned++;
-			}
-		}
+		const page = await discoveryPage(claim);
+		// SQLite writers stay sequential; false stops the page after lease loss
+		// or a spent deadline without starting another account transaction.
+		await page.reduce(async (previous, account) => {
+			if (!await previous || Date.now() >= deadline) return false;
+			return inspectDiscoveryAccount(claim, account.id, counts);
+		}, Promise.resolve(true));
 		completed = counts.scanned === page.length && (page.length < MAX_BACKFILL_BATCH || page.at(-1)?.id === claim.cycleEndUserId);
 		return counts;
 	} finally {
-		// Only inspected ids advance; a spent deadline resumes unprocessed ids.
-		// Empty/deleted tails also wrap. The token protects against late cleanup
-		// from an expired worker after another invocation acquired the lease.
-		await withBusyRetry(() => db.update(welcomeDiscovery).set({ claimToken: null, leaseExpiresAt: null,
-			...(completed ? { afterUserId: null, cycleEndUserId: null } : {}) }).where(discoveryOwner(claim)));
+		await releaseDiscovery(claim, completed);
 	}
 }
 

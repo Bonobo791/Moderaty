@@ -109,6 +109,32 @@ test('cron defers a human intent when too little request budget remains', async 
 	expect(await row()).toMatchObject({ status: 'restoring', restoreIntentId: intent.id, humanDispatchToken: null, humanDispatchState: null });
 });
 
+test('reconciliation settles one recorded human write before starting the next', async () => {
+	await testDb().db.insert(comments).values({ id: 'second', channelId: 'channel', text: 'Second', publishedAt: '2026-01-01T00:00:00Z', status: 'restoring', decidedBy: 'none' });
+	for (const id of ['comment', 'second']) {
+		const [intent] = await testDb().db.insert(auditLog).values({ channelId: 'channel', commentId: id, action: 'reject', actor: 'user', reason: 'Recorded intent' }).returning({ id: auditLog.id });
+		await testDb().db.update(comments).set({ status: 'restoring', restoreIntentId: intent.id }).where(eq(comments.id, id));
+	}
+	const entered = deferred();
+	const finish = deferred();
+	let firstSettled = false;
+	provider.setModerationStatus.mockImplementationOnce(async () => {
+		entered.resolve();
+		await finish.promise;
+		firstSettled = true;
+	}).mockImplementation(async () => { expect(firstSettled).toBe(true); });
+	const running = reconcile();
+	await entered.promise;
+	try {
+		expect(provider.setModerationStatus).toHaveBeenCalledTimes(1);
+		expect(await testDb().db.select().from(comments).where(eq(comments.id, 'second')).get()).toMatchObject({
+			status: 'restoring', humanDispatchToken: null, humanDispatchState: null
+		});
+	} finally { finish.resolve(); await running; }
+	expect(provider.setModerationStatus).toHaveBeenCalledTimes(2);
+	expect((await testDb().db.select().from(comments)).map((comment) => comment.status)).toEqual(['rejected', 'rejected']);
+});
+
 test('a history rescan preserves an active human decision and its audit while recording the scan', async () => {
 	const entered = deferred();
 	const finish = deferred();

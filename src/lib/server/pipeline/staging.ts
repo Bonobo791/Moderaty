@@ -257,50 +257,60 @@ async function preserveRescanHumanClaims(transaction: LedgerHandle, channelId: s
 	return decisions.filter(decision => !reservedIds.has(decision.comment.id));
 }
 
+type DecisionCounts = { acted: number; queued: number; stagedCount: number };
+function decisionCounts(decisions: Decision[]): DecisionCounts {
+	return {
+		acted: decisions.filter(decision => decision.youtubeAction).length,
+		queued: decisions.filter(decision => decision.auditAction === 'queue').length,
+		stagedCount: decisions.length
+	};
+}
+
 export async function stageDecisions(channelId: string, decisions: Decision[], options: StageOptions = {}) {
-	if (!decisions.length) return;
-	await db.transaction(async (transaction) => {
+	if (!decisions.length) return decisionCounts(decisions);
+	return await db.transaction(async (transaction) => {
 		// The channel check and all staging writes share one transaction. Account
 		// deletion either commits first (and this fails) or waits until these rows
 		// are complete; no orphaned rows can be created between a preflight read
 		// and the inserts.
 		await assertChannelActive(channelId, transaction, options.expected);
 		const handle = transaction as LedgerHandle;
+		const committedDecisions = options.rescan
+			? await preserveRescanHumanClaims(handle, channelId, decisions, options.rescan.scanStamp) : decisions;
+		if (!committedDecisions.length) return decisionCounts(committedDecisions);
 		if (options.rescan) {
-			decisions = await preserveRescanHumanClaims(handle, channelId, decisions, options.rescan.scanStamp);
-			if (!decisions.length) return;
-			await upsertRescannedCommentRows(handle, channelId, decisions, options.rescan.scanStamp);
+			await upsertRescannedCommentRows(handle, channelId, committedDecisions, options.rescan.scanStamp);
 		} else {
-			await transaction.insert(comments).values(commentRows(channelId, decisions));
+			await transaction.insert(comments).values(commentRows(channelId, committedDecisions));
 		}
-		await stageActionRows(handle, decisions, actionRows(channelId, decisions), options.rescan !== undefined);
+		await stageActionRows(handle, committedDecisions, actionRows(channelId, committedDecisions), options.rescan !== undefined);
 		// Enforcement decisions (ban/reject/delete/hold) get their audit row at
 		// completion from completeActions — EXCEPT a queued comment's 'queue'
 		// row, which records WHY it waits for a human even though its 'hold'
 		// row is written later by enforcement.
 		const audits = auditRows(
 			channelId,
-			decisions.filter((decision) => !decision.youtubeAction || decision.auditAction === 'queue'),
+			committedDecisions.filter((decision) => !decision.youtubeAction || decision.auditAction === 'queue'),
 			false
 		);
 		if (audits.length) await transaction.insert(auditLog).values(audits);
-		await chargeBillableDecisions(handle, options.orgId, decisions, options.rescan?.chargeScope);
+		await chargeBillableDecisions(handle, options.orgId, committedDecisions, options.rescan?.chargeScope);
+		return decisionCounts(committedDecisions);
 	});
 }
 
 
 /**
  * Stages decisions (live) or writes the audit trail (dry run) once the
- * channel is confirmed still active. Returns the acted count.
+ * channel is confirmed still active. Returns counts from the committed batch.
  */
 export async function stageOrAuditDecisions(
 	channelId: string,
 	decisions: Decision[],
 	dryRun: boolean,
 	options: StageOptions = {}
-): Promise<number> {
+): Promise<DecisionCounts> {
 	if (dryRun) {
-		const acted = decisions.filter((decision) => decision.youtubeAction).length;
 		const audits = auditRows(channelId, decisions, true);
 		if (audits.length) {
 			await db.transaction(async (transaction) => {
@@ -308,8 +318,7 @@ export async function stageOrAuditDecisions(
 				await transaction.insert(auditLog).values(audits);
 			});
 		}
-		return acted;
+		return decisionCounts(decisions);
 	}
-	await stageDecisions(channelId, decisions, options);
-	return decisions.filter((decision) => decision.youtubeAction).length;
+	return await stageDecisions(channelId, decisions, options);
 }

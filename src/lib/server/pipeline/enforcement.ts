@@ -644,7 +644,7 @@ export async function finalizeHumanIntent(
 	const status = humanFinalStatus(action);
 	if (!status) throw new Error(`unsupported human intent '${action}'`);
 	const agreeing = (Object.keys(ACTION_OUTCOME) as YoutubeAction[]).filter((verb) => ACTION_OUTCOME[verb] === status);
-	return db.transaction(async (transaction) => {
+	return await db.transaction(async (transaction) => {
 		await assertChannelActive(channelId, transaction, expected);
 		const claimed = await transaction
 			.update(comments)
@@ -747,6 +747,41 @@ export async function claimedHumanIntent(
 	return intent && intent.actor === 'user' && humanFinalStatus(intent.action) ? intent : undefined;
 }
 
+async function reconcileHumanClaim(channelId: string, row: { id: string; restoreIntentId: number | null }, accessToken: string,
+	deadline?: number, expected?: ChannelIdentity) {
+	const intent = await claimedHumanIntent(channelId, row.id, row.restoreIntentId);
+	if (!intent) {
+		console.warn('reconcile: comment %s has no valid bound human intent — leaving restoring unchanged; owner retry required', row.id);
+		return;
+	}
+	try {
+		// Outstanding actions and earlier restores may have taken time since
+		// runEnforcement's connector check. Never spend a detached grant.
+		await assertChannelActive(channelId, db, expected);
+		// Intent lookup can race a request releasing or finishing this claim.
+		// Re-read its exact binding immediately before remote dispatch; the
+		// initial restoring snapshot is not authority for a replaced row.
+		const [current] = await db.select({ status: comments.status, restoreIntentId: comments.restoreIntentId })
+			.from(comments).where(and(eq(comments.id, row.id), eq(comments.channelId, channelId))).all();
+		if (current?.status !== 'restoring' || current.restoreIntentId !== intent.id) {
+			console.warn('reconcile: comment %s changed before human-intent dispatch — skipping stale claim', row.id);
+			return;
+		}
+		assertBeforeDeadline(deadline);
+		const dispatch = await reserveHumanDispatch(channelId, row.id, intent.id, expected);
+		if (!dispatch) {
+			console.warn('reconcile: comment %s has an active or uncertain human write — automatic replay is paused', row.id);
+			return;
+		}
+		await executeHumanDispatch(dispatch, intent.action, accessToken, expected, deadline);
+	} catch (error) {
+		if (error instanceof DeadlineExceededError) throw error;
+		console.error(
+			`reconcile: could not finish '${intent.action}' for comment ${row.id}: ${error instanceof Error ? error.message : String(error)} — retrying next run`
+		);
+	}
+}
+
 /**
  * A restoring claim and its exact audit ID commit together before remote
  * work (I3). Only that audit is replayable. Legacy or invalid bindings stay
@@ -758,39 +793,9 @@ async function reconcileRestoring(channelId: string, accessToken: string, deadli
 		.from(comments)
 		.where(and(eq(comments.channelId, channelId), eq(comments.status, 'restoring')))
 		.all();
-	for (const row of stuck) {
-		const intent = await claimedHumanIntent(channelId, row.id, row.restoreIntentId);
-		if (!intent) {
-			console.warn('reconcile: comment %s has no valid bound human intent — leaving restoring unchanged; owner retry required', row.id);
-			continue;
-		}
-		try {
-			// Outstanding actions and earlier restores may have taken time since
-			// runEnforcement's connector check. Never spend a detached grant.
-			await assertChannelActive(channelId, db, expected);
-			// Intent lookup can race a request releasing or finishing this claim.
-			// Re-read its exact binding immediately before remote dispatch; the
-			// initial restoring snapshot is not authority for a replaced row.
-			const [current] = await db.select({ status: comments.status, restoreIntentId: comments.restoreIntentId })
-				.from(comments).where(and(eq(comments.id, row.id), eq(comments.channelId, channelId))).all();
-			if (!current || current.status !== 'restoring' || current.restoreIntentId !== intent.id) {
-				console.warn('reconcile: comment %s changed before human-intent dispatch — skipping stale claim', row.id);
-				continue;
-			}
-			assertBeforeDeadline(deadline);
-			const dispatch = await reserveHumanDispatch(channelId, row.id, intent.id, expected);
-			if (!dispatch) {
-				console.warn('reconcile: comment %s has an active or uncertain human write — automatic replay is paused', row.id);
-				continue;
-			}
-			await executeHumanDispatch(dispatch, intent.action, accessToken, expected, deadline);
-		} catch (error) {
-			if (error instanceof DeadlineExceededError) throw error;
-			console.error(
-				`reconcile: could not finish '${intent.action}' for comment ${row.id}: ${error instanceof Error ? error.message : String(error)} — retrying next run`
-			);
-		}
-	}
+	// Each provider write and its settlement finish before the next claim.
+	await stuck.reduce((previous, row) => previous.then(() =>
+		reconcileHumanClaim(channelId, row, accessToken, deadline, expected)), Promise.resolve());
 }
 
 export async function runEnforcement(

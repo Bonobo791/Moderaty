@@ -66,7 +66,7 @@ async function dispatchOnce(claim: HumanDispatch, action: string, accessToken: s
 		await assertChannelActive(claim.channelId, db, expected);
 		const [current] = await db.select({ status: comments.status, restoreIntentId: comments.restoreIntentId, humanDispatchToken: comments.humanDispatchToken, humanDispatchState: comments.humanDispatchState })
 			.from(comments).where(and(eq(comments.channelId, claim.channelId), eq(comments.id, claim.commentId))).all();
-		if (!current || current.status !== claim.status || current.restoreIntentId !== claim.intentId || current.humanDispatchToken !== claim.token || current.humanDispatchState !== 'in_flight') {
+		if (current?.status !== claim.status || current.restoreIntentId !== claim.intentId || current.humanDispatchToken !== claim.token || current.humanDispatchState !== 'in_flight') {
 			throw new HumanDispatchChangedError('The pending action changed before its YouTube write.');
 		}
 		if (deadline !== undefined && deadline - Date.now() < MIN_DISPATCH_BUDGET_MS) throw new DeadlineExceededError();

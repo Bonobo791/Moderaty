@@ -87,7 +87,16 @@ describe('seed-dev comment author PII (PR #40 review)', () => {
 	it('migrates from a directory whose path contains spaces', async () => {
 		const folder = join(tmp, 'drizzle folder');
 		symlinkSync(fileURLToPath(DRIZZLE), folder, 'dir');
-		await applyMigrations('file::memory:', pathToFileURL(`${folder}/`));
+		const url = `file:${join(tmp, 'space-path.db')}`;
+		await applyMigrations(url, pathToFileURL(`${folder}/`));
+		const client = createClient({ url });
+		try {
+			const journal = JSON.parse(readFileSync(new URL('meta/_journal.json', DRIZZLE), 'utf8'));
+			const applied = await client.execute('SELECT COUNT(DISTINCT hash) AS n FROM __drizzle_migrations');
+			expect(applied.rows[0].n).toBe(journal.entries.length);
+			const columns = (await client.execute("PRAGMA table_info('comments')")).rows.map(row => row.name);
+			expect(columns).toEqual(expect.arrayContaining(['restore_intent_id', 'human_dispatch_token', 'human_dispatch_state']));
+		} finally { client.close(); }
 	});
 	it('the comments INSERT never names the author columns', () => {
 		const source = readFileSync(SEED, 'utf8');

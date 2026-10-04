@@ -5,6 +5,7 @@ import {
 	expectActionState,
 	expectAiUnavailableQueued,
 	getMocks,
+	expectNoYoutubeWrites,
 	moderation,
 	newComment,
 	resetPipelineMocks,
@@ -17,6 +18,27 @@ import {
 const mocks = getMocks();
 
 beforeEach(resetPipelineMocks);
+
+test.each(['restoring', 'in_flight', 'uncertain', 'state-only'])('a rescan reports no queued or staged work for a preserved %s human decision', async (claim) => {
+	mocks.state.channel.historyBoundary = '2026-01-01T00:00:00.000Z';
+	mocks.state.channel.historyScanId = 'scan-req-1';
+	mocks.state.existingIds = ['comment'];
+	mocks.state.commentStatuses.comment = claim === 'restoring' ? 'restoring' : 'rejected';
+	if (claim === 'restoring') mocks.state.commentRestoreIntentIds.comment = 17;
+	else {
+		mocks.state.commentHumanDispatchTokens.comment = claim === 'state-only' ? null : 'owner';
+		mocks.state.commentHumanDispatchStates.comment = claim === 'in_flight' ? 'in_flight' : 'uncertain';
+	}
+	mocks.scoreComment.mockResolvedValue(moderation(0.6));
+	const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+	try {
+		expect(await runChannel('channel')).toMatchObject({ fetched: 1, queued: 0, acted: 0, partial: false });
+		expect(info).toHaveBeenCalledWith(expect.stringContaining('skippedAlreadySeen=1 staged=0 deferred=0 acted=0 queued=0 rescan=true'));
+		expect(mocks.state.insertedComments).toEqual([]);
+		expect(mocks.state.insertedAudits).toEqual([]);
+		expectNoYoutubeWrites();
+	} finally { info.mockRestore(); }
+});
 afterEach(restoreDryRun);
 
 test('resetPipelineMocks removes test-specific mock implementations', async () => {

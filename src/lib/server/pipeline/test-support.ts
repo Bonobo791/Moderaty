@@ -221,6 +221,22 @@ const mocks = vi.hoisted(() => {
 		state.channelUpdates.push(values);
 		return { returning: async () => [{ id: state.channel.id }] };
 	};
+	const matchesCommentUpdate = (row: Record<string, unknown>, condition: unknown, params: unknown[], statusFilter: unknown[]) =>
+		params.includes(queryKey(row.id)) && (!statusFilter.length || statusFilter.includes(row.status))
+		&& matchesBoundParam(condition, comments.restoreIntentId, row.restoreIntentId)
+		&& matchesBoundParam(condition, comments.humanDispatchToken, row.humanDispatchToken)
+		&& matchesBoundParam(condition, comments.humanDispatchState, row.humanDispatchState);
+	const updateExistingComment = (id: string, values: Record<string, unknown>) => {
+		if ('status' in values) state.commentStatuses[id] = values.status as string;
+		if ('decidedBy' in values) state.commentDecidedBy[id] = values.decidedBy as string;
+		if ('restoreIntentId' in values) state.commentRestoreIntentIds[id] = values.restoreIntentId as number | null;
+		if ('humanDispatchToken' in values) state.commentHumanDispatchTokens[id] = values.humanDispatchToken as string | null;
+		if ('humanDispatchState' in values) state.commentHumanDispatchStates[id] = values.humanDispatchState as string | null;
+	};
+	const projectCommentUpdates = (fields: unknown, applied: Record<string, unknown>[]) => {
+		if (!fields || typeof fields !== 'object') return [];
+		return applied.map((row) => Object.fromEntries(Object.keys(fields).map((key) => [key, row[key]])));
+	};
 	const updateComments = (values: Record<string, unknown>, condition: unknown) => {
 		// Status/decidedBy writes honor the where: id predicates AND
 		// status predicates (eq 'restoring' guards the finalize; the
@@ -230,31 +246,22 @@ const mocks = vi.hoisted(() => {
 		const statusFilter = params.filter((param) => COMMENT_STATUSES.has(param as string));
 		const applied: Record<string, unknown>[] = [];
 		const apply = (row: Record<string, unknown>) => {
-			const current = row.status as string;
-			if (params.includes(queryKey(row.id)) && (!statusFilter.length || statusFilter.includes(current)) && matchesBoundParam(condition, comments.restoreIntentId, row.restoreIntentId)
-				&& matchesBoundParam(condition, comments.humanDispatchToken, row.humanDispatchToken) && matchesBoundParam(condition, comments.humanDispatchState, row.humanDispatchState)) {
+			if (matchesCommentUpdate(row, condition, params, statusFilter)) {
 				Object.assign(row, values);
 				applied.push(row);
 			}
 		};
 		state.insertedComments.forEach(apply);
 		for (const id of state.existingIds) {
-			const current = state.commentStatuses[id] ?? 'held';
-			if (params.includes(id) && (!statusFilter.length || statusFilter.includes(current)) && matchesBoundParam(condition, comments.restoreIntentId, state.commentRestoreIntentIds[id])
-				&& matchesBoundParam(condition, comments.humanDispatchToken, state.commentHumanDispatchTokens[id]) && matchesBoundParam(condition, comments.humanDispatchState, state.commentHumanDispatchStates[id])) {
-				if ('status' in values) state.commentStatuses[id] = values.status as string;
-				if ('decidedBy' in values) state.commentDecidedBy[id] = values.decidedBy as string;
-				if ('restoreIntentId' in values) state.commentRestoreIntentIds[id] = values.restoreIntentId as number | null;
-				if ('humanDispatchToken' in values) state.commentHumanDispatchTokens[id] = values.humanDispatchToken as string | null;
-				if ('humanDispatchState' in values) state.commentHumanDispatchStates[id] = values.humanDispatchState as string | null;
+			const row = { id, status: state.commentStatuses[id] ?? 'held', restoreIntentId: state.commentRestoreIntentIds[id],
+				humanDispatchToken: state.commentHumanDispatchTokens[id], humanDispatchState: state.commentHumanDispatchStates[id] };
+			if (matchesCommentUpdate(row, condition, params, statusFilter)) {
+				updateExistingComment(id, values);
 				applied.push({ id });
 			}
 		}
 		return {
-			returning: async (fields: unknown) =>
-				fields && typeof fields === 'object'
-					? applied.map((row) => Object.fromEntries(Object.keys(fields).map((key) => [key, row[key]])))
-					: []
+			returning: async (fields: unknown) => projectCommentUpdates(fields, applied)
 		};
 	};
 	const claimActionRows = (values: Record<string, unknown>, condition: unknown) => {

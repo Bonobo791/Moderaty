@@ -146,7 +146,7 @@ async function attemptNextWelcome(deadline: number): Promise<WelcomeDelivery> {
 	catch (cause) { console.error(DIAGNOSTIC.processing, { category: welcomeFailureCategory(cause) }); return 'failed'; }
 }
 
-/** At most 25 enrollments, one send and 25 crash recoveries within the shared budget. */
+/** At most 25 enrollments, one send and 25 crash recoveries; deadline checks between operations. */
 async function sweepWelcomeQueue(deadline: number) {
 	const counts = { scanned: 0, queued: 0, enrollmentErrors: 0, accepted: 0, errors: 0, ambiguous: 0, suppressed: 0 };
 	if (!sendingEnabled() || Date.now() >= deadline) return counts;

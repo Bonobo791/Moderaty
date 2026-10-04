@@ -84,8 +84,9 @@ per 60 seconds, including overlapping cron invocations and account deletion
 during submission. Claiming reserves the campaign slot transactionally; the
 pre-send transition refreshes the interval and rejects expired claims. One cron tick attempts at
 most one recipient, enrolls at most 25 candidates and recovers at most 25 stale
-claims, within its five-second
-share of the existing 20-second budget. Retry delays for definite failures are
+claims, checking its five-second share of the existing 20-second budget between
+operations. An in-progress discovery query cannot be interrupted by these
+deadline checks; its scaling limit is described below. Retry delays for definite failures are
 60s, 120s, 240s, 480s, then terminal after the fifth failed attempt. DNS, explicit transient SMTP rejection and proven pre-DATA errors
 are safe retry categories. Configuration/authentication, TLS, DNS and sender-policy (`MAIL FROM`) outages preserve
 the recipient attempt count and pause the entire campaign for 15 minutes through
@@ -151,6 +152,18 @@ fresh ambiguous submissions do not enter the candidate page. Deleted account
 tombstones never acquire fresh delivery metadata. Invalid recipients receive a
 suppression record so they cannot block subsequent pages. Enrollment rereads the
 account and campaign state inside the same short transaction used by signup.
+
+The enrollment batch is capped at 25; candidate discovery is not strictly bounded.
+The ordered left join can scan all users when most already have campaign records,
+so query work grows with the total user count even when it returns no candidates.
+`welcomeEmailCandidatesScanned` counts returned candidates processed by the loop,
+not database rows inspected. If discovery consumes the remaining welcome budget,
+enrollment and delivery defer until a later tick. An isolated synthetic libSQL
+fixture with one million already-enrolled users took roughly 0.68 seconds; this
+measurement does not establish production timing. Durable, indexed discovery
+progress remains a scaling follow-up requiring a coordinated schema change.
+This launch fix retains the existing schema and the review limitation remains
+documented.
 
 Committed campaign records are the durable checkpoint: the next tick selects
 only remaining candidates. Restarting, overlapping ticks, retrying a partially

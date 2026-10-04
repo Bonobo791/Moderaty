@@ -1,4 +1,4 @@
-// Bounded automatic discovery, optional operator backfill and count-only monitoring. Never calls SMTP.
+// Capped automatic enrollment, optional operator backfill and count-only monitoring. Never calls SMTP.
 import { and, asc, eq, gt, inArray, isNull, ne, notLike, or, sql } from 'drizzle-orm';
 import { db, withBusyRetry } from './db';
 import { users, welcomeEmails } from './db/schema';
@@ -48,6 +48,8 @@ async function enrollHistoricalAccount(account: Account, welcome: WelcomeRow | n
  * enter the page. No in-memory cursor can lose progress or miss a later signup
  * that sorts before a previous page. Invalid recipients acquire suppression
  * records; deleted/terminal/excluded rows never pin the bounded candidate page.
+ * LIMIT caps returned candidates and enrollment work, not the user scan needed
+ * to discover them. The shared deadline cannot interrupt an in-progress query.
  */
 export async function enrollWelcomeCandidates(deadline: number) {
 	const counts = { scanned: 0, queued: 0, enrollmentErrors: 0 };

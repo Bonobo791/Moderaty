@@ -1,4 +1,5 @@
-import { and, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import { maybeTriggerAutoTopUp } from '$lib/server/billing/autotopup';
 import { db } from '$lib/server/db';
 import { auditLog, channels, comments, moderationActions } from '$lib/server/db/schema';
@@ -21,7 +22,7 @@ export class ChannelDeactivatedError extends Error {}
  * in-flight run, so the run must stop at the next boundary instead of writing
  * rows or moderating comments for a deleted account.
  */
-export type ChannelIdentity = Pick<typeof channels.$inferSelect, 'userId' | 'refreshTokenEnc'>;
+export type ChannelIdentity = Pick<typeof channels.$inferSelect, 'userId' | 'refreshTokenEnc'> & { leaseExpiresAt?: string | null };
 type ChannelGuardHandle = Pick<typeof db, 'update'>;
 type OutstandingState = 'pending' | 'dispatched' | 'cancelling';
 
@@ -775,27 +776,92 @@ async function reconcileHumanClaim(channelId: string, row: { id: string; restore
 		}
 		await executeHumanDispatch(dispatch, intent.action, accessToken, expected, deadline);
 	} catch (error) {
-		if (error instanceof DeadlineExceededError) throw error;
+		if (error instanceof DeadlineExceededError || error instanceof ChannelDeactivatedError) throw error;
 		console.error(
 			`reconcile: could not finish '${intent.action}' for comment ${row.id}: ${error instanceof Error ? error.message : String(error)} — retrying next run`
 		);
 	}
 }
 
-/**
- * A restoring claim and its exact audit ID commit together before remote
- * work (I3). Only that audit is replayable. Legacy or invalid bindings stay
- * untouched until the owner explicitly retries; history cannot prove intent.
- */
+const HUMAN_RECOVERY_PAGE_SIZE = 25;
+type HumanRecoveryCursor = { cycleId: string; afterId: string | null; endId: string; done: boolean };
+
+function readHumanRecoveryCursor(raw: string | null): HumanRecoveryCursor | null {
+	if (raw === null) return null;
+	const value = JSON.parse(raw) as Partial<HumanRecoveryCursor> | null;
+	if (!value || typeof value.cycleId !== 'string' || !value.cycleId || typeof value.endId !== 'string' || !value.endId
+		|| !(value.afterId === null || typeof value.afterId === 'string') || typeof value.done !== 'boolean') {
+		throw new Error('invalid human recovery checkpoint — reconciliation stopped');
+	}
+	return value as HumanRecoveryCursor;
+}
+
+function eligibleHumanClaims(channelId: string) {
+	// Keep this predicate identical to the eligible partial index: permanently
+	// fenced requests must cost no automatic scan or audit-lookup work.
+	return and(eq(comments.channelId, channelId), sql`${comments.status} = 'restoring'`, isNull(comments.humanDispatchToken), isNull(comments.humanDispatchState));
+}
+
+function humanRecoveryLease(expected: ChannelIdentity) {
+	if (expected.leaseExpiresAt === undefined) return undefined;
+	return expected.leaseExpiresAt === null ? isNull(channels.leaseExpiresAt) : eq(channels.leaseExpiresAt, expected.leaseExpiresAt);
+}
+
+async function writeHumanRecoveryCursor(channelId: string, previous: string | null, next: HumanRecoveryCursor, expected: ChannelIdentity) {
+	const serialized = JSON.stringify(next);
+	const changed = await db.transaction(async transaction => {
+		await assertChannelActive(channelId, transaction, expected);
+		return await transaction.update(channels).set({ humanRecoveryCursor: serialized })
+			.where(and(eq(channels.id, channelId), previous === null ? isNull(channels.humanRecoveryCursor) : eq(channels.humanRecoveryCursor, previous), humanRecoveryLease(expected)))
+			.returning({ id: channels.id });
+	});
+	if (!changed.length) {
+		console.warn('reconcile: channel %s recovery ownership changed — stopping this page', channelId);
+		return null;
+	}
+	return serialized;
+}
+
+async function startHumanRecoveryCycle(channelId: string, raw: string | null, expected: ChannelIdentity) {
+	const [last] = await db.select({ id: sql<string>`${comments.id}`.mapWith(comments.id) }).from(sql`${comments} indexed by comments_human_recovery_eligible_idx`).where(eligibleHumanClaims(channelId))
+		.orderBy(desc(comments.id)).limit(1).all();
+	if (!last) return null;
+	const cursor: HumanRecoveryCursor = { cycleId: randomUUID(), afterId: null, endId: last.id, done: false };
+	const saved = await writeHumanRecoveryCursor(channelId, raw, cursor, expected);
+	return saved === null ? null : { cursor, raw: saved };
+}
+
+/** One finite, persisted page per tick; invalid intents cannot pin later work. */
 async function reconcileRestoring(channelId: string, accessToken: string, deadline?: number, expected?: ChannelIdentity) {
-	const stuck = await db
-		.select({ id: comments.id, restoreIntentId: comments.restoreIntentId })
-		.from(comments)
-		.where(and(eq(comments.channelId, channelId), eq(comments.status, 'restoring')))
-		.all();
-	// Each provider write and its settlement finish before the next claim.
-	await stuck.reduce((previous, row) => previous.then(() =>
-		reconcileHumanClaim(channelId, row, accessToken, deadline, expected)), Promise.resolve());
+	assertBeforeDeadline(deadline);
+	const channel = await db.select().from(channels).where(eq(channels.id, channelId)).get();
+	if (!channel) throw new ChannelDeactivatedError(`channel deactivated mid-run: ${channelId}`);
+	const identity = expected ?? channel;
+	let raw = channel.humanRecoveryCursor;
+	let cursor = readHumanRecoveryCursor(raw);
+	if (!cursor || cursor.done) {
+		const started = await startHumanRecoveryCycle(channelId, raw, identity);
+		if (!started) return;
+		({ cursor, raw } = started);
+	}
+	const page = await db.select({ id: sql<string>`${comments.id}`.mapWith(comments.id), restoreIntentId: sql<number | null>`${comments.restoreIntentId}`.mapWith(comments.restoreIntentId) }).from(sql`${comments} indexed by comments_human_recovery_eligible_idx`)
+		.where(and(eligibleHumanClaims(channelId), cursor.afterId === null ? undefined : gt(comments.id, cursor.afterId), lte(comments.id, cursor.endId)))
+		.orderBy(asc(comments.id)).limit(HUMAN_RECOVERY_PAGE_SIZE).all();
+	let progress = cursor;
+	// Sequential settlement is necessary: a provider write must finish before
+	// the next one begins. A failed cursor CAS stops the chain immediately.
+	await page.reduce((previous, row) => previous.then(async () => {
+		if (raw === null) return;
+		assertBeforeDeadline(deadline);
+		await reconcileHumanClaim(channelId, row, accessToken, deadline, identity);
+		progress = { ...progress, afterId: row.id };
+		raw = await writeHumanRecoveryCursor(channelId, raw, progress, identity);
+	}), Promise.resolve());
+	if (raw !== null && (page.length < HUMAN_RECOVERY_PAGE_SIZE || progress.afterId === progress.endId)) {
+		// Retain the completed nonce. Replacing it for a new cycle prevents an
+		// old worker matching the same cursor/end pair after traversal wraps.
+		await writeHumanRecoveryCursor(channelId, raw, { ...progress, done: true }, identity);
+	}
 }
 
 export async function runEnforcement(

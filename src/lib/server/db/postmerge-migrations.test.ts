@@ -27,7 +27,7 @@ function migrationFolder(entries: Entry[]) {
 async function database() {
 	const client = createClient({ url: 'file::memory:' });
 	clients.push(client);
-	await client.executeMultiple("CREATE TABLE comments (id TEXT PRIMARY KEY, channel_id TEXT NOT NULL DEFAULT 'channel', status TEXT NOT NULL); INSERT INTO comments (id, status) VALUES ('legacy', 'restoring');");
+	await client.executeMultiple("CREATE TABLE channels (id TEXT PRIMARY KEY); CREATE TABLE comments (id TEXT PRIMARY KEY, channel_id TEXT NOT NULL DEFAULT 'channel', status TEXT NOT NULL); INSERT INTO comments (id, status) VALUES ('legacy', 'restoring');");
 	return client;
 }
 
@@ -66,6 +66,18 @@ test('the combined journal creates the scheduler on a fresh upgrade and preserve
 	}]);
 	expect((await client.execute('SELECT * FROM welcome_discovery')).rows).toEqual([]);
 	await expectRecorded(client);
+});
+
+test('recovery progress expands existing channels without changing their data and indexes only eligible claims', async () => {
+	const client = await database();
+	await client.execute("INSERT INTO channels (id) VALUES ('legacy-channel')");
+	const entries = journal.entries.filter((entry: Entry) => entry.idx >= 64);
+	await apply(client, entries);
+	await apply(client, entries);
+	expect((await client.execute('SELECT id, human_recovery_cursor FROM channels')).rows).toEqual([{ id: 'legacy-channel', human_recovery_cursor: null }]);
+	const indexes = (await client.execute("PRAGMA index_list('comments')")).rows;
+	expect(indexes).toContainEqual(expect.objectContaining({ name: 'comments_human_recovery_eligible_idx', partial: 1 }));
+	expect((await client.execute('PRAGMA integrity_check')).rows).toEqual([{ integrity_check: 'ok' }]);
 });
 
 test('a database already at 0065 repairs the omitted scheduler migration and records its actual replay', async () => {

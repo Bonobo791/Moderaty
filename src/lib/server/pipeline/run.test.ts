@@ -36,6 +36,7 @@ test.each(['restoring', 'in_flight', 'uncertain', 'state-only'])('a rescan repor
 		expect(info).toHaveBeenCalledWith(expect.stringContaining('skippedAlreadySeen=1 staged=0 deferred=0 acted=0 queued=0 rescan=true'));
 		expect(mocks.state.insertedComments).toEqual([]);
 		expect(mocks.state.insertedAudits).toEqual([]);
+		expect(mocks.scoreComment).not.toHaveBeenCalled();
 		expectNoYoutubeWrites();
 	} finally { info.mockRestore(); }
 });

@@ -307,6 +307,7 @@ export const channels = sqliteTable('channels', {
 	historyNextPageToken: text('history_next_page_token'), // RESERVED (issue #70): a future history drain that walks independently of the live cursor; nothing reads or writes it yet
 	historyBoundary: text('history_boundary'), // user-requested history rescan marker: non-null while an "Analyze history" drain is re-walking comments down to this boundary (planted with cursor=boundary)
 	historyScanId: text('history_scan_id'), // per-request nonce planted with history_boundary: scopes the rescan's credit anchors so each requested scan debits once while retries of the SAME scan stay idempotent; cleared with the boundary on completion
+	humanRecoveryCursor: text('human_recovery_cursor'), // exact JSON checkpoint; a fresh cycle nonce fences stale progress after wrap
 	dryRunBoundary: text('dry_run_boundary'), // on-demand dry-run window (ISO): the drain rescores comments down to this timestamp; null = no dry-run drain in flight
 	dryRunPageToken: text('dry_run_page_token'), // YouTube continuation token for the dry-run drain's next page
 	lastRunAt: text('last_run_at'), // ISO timestamp of last cron run; rotation orders by it ASC (NULLs first)
@@ -413,7 +414,9 @@ export const comments = sqliteTable('comments', {
 	index('comments_channel_digested_idx').on(table.channelId, table.feedbackDigestedAt),
 	index('comments_dispatch_recovery_idx').on(table.channelId, table.id)
 		.where(sql`${table.humanDispatchToken} is not null or ${table.humanDispatchState} is not null`),
-	index('comments_restoring_recovery_idx').on(table.channelId, table.id).where(sql`${table.status} = 'restoring'`)
+	index('comments_restoring_recovery_idx').on(table.channelId, table.id).where(sql`${table.status} = 'restoring'`),
+	index('comments_human_recovery_eligible_idx').on(table.channelId, table.id)
+		.where(sql`${table.status} = 'restoring' and ${table.humanDispatchToken} is null and ${table.humanDispatchState} is null`)
 ]);
 
 export const moderationActions = sqliteTable('moderation_actions', {

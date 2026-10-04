@@ -220,6 +220,7 @@ export async function createTestDb(): Promise<TestDb> {
 			history_next_page_token TEXT,
 			history_boundary TEXT,
 			history_scan_id TEXT,
+			human_recovery_cursor TEXT,
 			dry_run_boundary TEXT,
 			dry_run_page_token TEXT,
 			last_run_at TEXT,
@@ -279,6 +280,7 @@ export async function createTestDb(): Promise<TestDb> {
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE INDEX comments_channel_digested_idx ON comments (channel_id, feedback_digested_at)`,
+		`CREATE INDEX comments_human_recovery_eligible_idx ON comments (channel_id, id) WHERE status = 'restoring' AND human_dispatch_token IS NULL AND human_dispatch_state IS NULL`,
 		`CREATE TABLE audit_log (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			channel_id TEXT NOT NULL,

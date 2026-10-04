@@ -166,10 +166,11 @@ test('recovery does not dispatch after the channel is deactivated during intent 
 		return result;
 	});
 	try {
-		await reconcile();
+		await expect(reconcile()).rejects.toThrow(/deactivated/);
 		expect(changed).toBe(true);
 		expect(youtube.setModerationStatus).not.toHaveBeenCalled();
 		expect(await comment()).toMatchObject({ status: 'restoring', restoreIntentId: expect.any(Number) });
+		expect(JSON.parse((await testDb().db.select().from(channels).get())?.humanRecoveryCursor ?? 'null')).toMatchObject({ afterId: null, done: false });
 	} finally {
 		spy.mockRestore();
 	}

@@ -19,6 +19,7 @@ import { actions as log } from '../../../routes/(app)/channels/[id]/log/+page.se
 import { applyHumanIntent, finalizeHumanIntent, runEnforcement } from './enforcement';
 import { stageDecisions } from './staging';
 import { DeadlineExceededError, RequestNotSentError } from '$lib/server/http';
+import * as http from '$lib/server/http';
 
 setupTestDb(['channels', 'comments', 'audit_log', 'moderation_actions']);
 beforeEach(async () => {
@@ -39,6 +40,140 @@ function deferred() {
 }
 const row = () => testDb().db.select().from(comments).where(eq(comments.id, 'comment')).get();
 const reconcile = () => runEnforcement('channel', 'access-token', undefined, null, 0);
+
+async function seedRecoveryRows(count: number) {
+	await testDb().db.insert(comments).values(Array.from({ length: count }, (_, index) => ({
+		id: `a-${String(index).padStart(3, '0')}`, channelId: 'channel', text: 'Invalid binding',
+		publishedAt: '2026-01-01T00:00:00Z', status: 'restoring', decidedBy: 'none'
+	})));
+}
+async function recoveryCursor() {
+	const raw = (await testDb().db.select().from(channels).get())?.humanRecoveryCursor;
+	if (!raw) throw new Error('fixture has no recovery checkpoint');
+	return JSON.parse(raw);
+}
+
+test('recovery visits at most 25 unreserved claims per tick and progresses past invalid bindings', async () => {
+	await seedRecoveryRows(60);
+	const [intent] = await testDb().db.insert(auditLog).values({ channelId: 'channel', commentId: 'comment', action: 'reject', actor: 'user', reason: 'Recorded intent' }).returning({ id: auditLog.id });
+	await testDb().db.update(comments).set({ status: 'restoring', restoreIntentId: intent.id }).where(eq(comments.id, 'comment'));
+	await reconcile();
+	expect(provider.setModerationStatus).not.toHaveBeenCalled();
+	await reconcile();
+	expect(provider.setModerationStatus).not.toHaveBeenCalled();
+	await reconcile();
+	expect(provider.setModerationStatus).toHaveBeenCalledExactlyOnceWith(['comment'], 'rejected', false, 'access-token', undefined, true);
+	expect(await row()).toMatchObject({ status: 'rejected', restoreIntentId: null });
+});
+
+test('recovery uses the eligible partial index to skip thousands of permanent reservations', async () => {
+	await testDb().client.execute({ sql: `WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i + 1 < ?)
+		INSERT INTO comments (id, channel_id, text, published_at, status, decided_by, human_dispatch_token, human_dispatch_state)
+		SELECT printf('a-%04d', i), 'channel', 'Blocked', '2026-01-01', 'restoring', 'human', printf('token-%04d', i), 'uncertain' FROM n`, args: [2000] });
+	const [intent] = await testDb().db.insert(auditLog).values({ channelId: 'channel', commentId: 'comment', action: 'reject', actor: 'user', reason: 'Recorded intent' }).returning({ id: auditLog.id });
+	await testDb().db.update(comments).set({ status: 'restoring', restoreIntentId: intent.id }).where(eq(comments.id, 'comment'));
+	const execute = testDb().client.execute.bind(testDb().client);
+	let scanSteps = 0;
+	let vmSteps = 0;
+	let eligibleQueries = 0;
+	const spy = vi.spyOn(testDb().client, 'execute').mockImplementation(async (statement, args) => {
+		const result = await execute(statement, args);
+		const sql = statementSql(statement);
+		if (sql.startsWith('select ') && sql.includes('from "comments"') && sql.includes('"human_dispatch_token" is null')) {
+			eligibleQueries++;
+			const stats = await execute({ sql: 'SELECT nscan, nstep FROM sqlite_stmt WHERE sql = ?', args: [sql] });
+			expect(stats.rows.length).toBeGreaterThan(0);
+			for (const entry of stats.rows) { scanSteps += Number(entry.nscan); vmSteps += Number(entry.nstep); }
+			expect(sql).toContain('indexed by comments_human_recovery_eligible_idx');
+		}
+		return result;
+	});
+	try { await reconcile(); } finally { spy.mockRestore(); }
+	expect(eligibleQueries).toBe(2);
+	expect(scanSteps).toBeLessThan(10);
+	expect(vmSteps).toBeLessThan(200);
+	expect(provider.setModerationStatus).toHaveBeenCalledOnce();
+	expect(await row()).toMatchObject({ status: 'rejected' });
+	expect((await execute("SELECT count(*) AS count FROM comments WHERE human_dispatch_state = 'uncertain'")).rows[0].count).toBe(2000);
+});
+
+test('deadline expiry between claims retains the last completed checkpoint and retries the untouched row', async () => {
+	await seedRecoveryRows(1);
+	const [intent] = await testDb().db.insert(auditLog).values({ channelId: 'channel', commentId: 'comment', action: 'reject', actor: 'user', reason: 'Recorded intent' }).returning({ id: auditLog.id });
+	await testDb().db.update(comments).set({ status: 'restoring', restoreIntentId: intent.id }).where(eq(comments.id, 'comment'));
+	const deadline = Date.now() + 60_000;
+	let expired = false;
+	const assertBeforeDeadline = http.assertBeforeDeadline;
+	const deadlineCheck = vi.spyOn(http, 'assertBeforeDeadline').mockImplementation(value => { if (expired) throw new DeadlineExceededError(); assertBeforeDeadline(value); });
+	const warning = vi.spyOn(console, 'warn').mockImplementation((message) => { if (String(message).includes('no valid bound')) expired = true; });
+	try { await expect(runEnforcement('channel', 'access-token', deadline, null, 0)).rejects.toBeInstanceOf(DeadlineExceededError); }
+	finally { deadlineCheck.mockRestore(); warning.mockRestore(); }
+	expect(await recoveryCursor()).toMatchObject({ afterId: 'a-000', endId: 'comment', done: false });
+	expect(provider.setModerationStatus).not.toHaveBeenCalled();
+	await reconcile();
+	expect(provider.setModerationStatus).toHaveBeenCalledOnce();
+	expect(await recoveryCursor()).toMatchObject({ afterId: 'comment', done: true });
+});
+
+test('a fixed recovery end wraps despite new high IDs and visits new low IDs in the next cycle', async () => {
+	await seedRecoveryRows(30);
+	await reconcile();
+	const first = await recoveryCursor();
+	expect(first).toMatchObject({ afterId: 'a-024', endId: 'a-029', done: false });
+	await testDb().db.insert(comments).values(['0-new', 'z-new'].map(id => ({ id, channelId: 'channel', text: 'New', publishedAt: '2026-01-01', status: 'restoring', decidedBy: 'none' })));
+	await reconcile();
+	expect(await recoveryCursor()).toMatchObject({ cycleId: first.cycleId, afterId: 'a-029', endId: 'a-029', done: true });
+	const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+	try {
+		await reconcile();
+		expect(warning).toHaveBeenCalledWith(expect.stringContaining('no valid bound'), '0-new');
+	} finally { warning.mockRestore(); }
+	expect(await recoveryCursor()).toMatchObject({ afterId: 'a-023', endId: 'z-new', done: false });
+	expect((await recoveryCursor()).cycleId).not.toBe(first.cycleId);
+});
+
+test('a disappeared or newly reserved tail completes the finite recovery cycle', async () => {
+	await seedRecoveryRows(30);
+	await reconcile();
+	await testDb().client.execute("UPDATE comments SET human_dispatch_token = 'owner', human_dispatch_state = 'uncertain' WHERE id >= 'a-025' AND status = 'restoring'");
+	await reconcile();
+	expect(await recoveryCursor()).toMatchObject({ afterId: 'a-024', endId: 'a-029', done: true });
+});
+
+test.each(['checkpoint', 'lease', 'connector', 'cycle'])('stale recovery stops after a successor changes its %s', async (replacement) => {
+	await seedRecoveryRows(2);
+	const initialLease = '2026-10-04T22:00:00Z';
+	await testDb().db.update(channels).set({ leaseExpiresAt: initialLease });
+	const expected = await testDb().db.select().from(channels).get();
+	if (!expected) throw new Error('fixture has no channel');
+	let successorRaw: string | null = null;
+	let changed = false;
+	const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+	// Change ownership after the old worker reads the first intent, before its
+	// progress CAS. A new cycle deliberately repeats all other checkpoint data.
+	const execute = testDb().client.execute.bind(testDb().client);
+	const spy = vi.spyOn(testDb().client, 'execute').mockImplementation(async (statement, args) => {
+		const result = await execute(statement, args);
+		if (!changed && statementSql(statement).includes('from "comments"') && statementSql(statement).includes('order by "comments"."id" asc')) {
+			changed = true;
+			const cursor = await recoveryCursor();
+			let changedCursor = cursor;
+			if (replacement === 'cycle') changedCursor = { ...cursor, cycleId: 'successor-cycle' };
+			if (replacement === 'checkpoint') changedCursor = { ...cursor, afterId: 'a-001', done: true };
+			successorRaw = JSON.stringify(changedCursor);
+			await testDb().db.update(channels).set({ humanRecoveryCursor: successorRaw, ...(replacement === 'lease' ? { leaseExpiresAt: 'successor-lease' } : {}), ...(replacement === 'connector' ? { userId: 'successor', refreshTokenEnc: 'successor-grant' } : {}) });
+		}
+		return result;
+	});
+	try {
+		const running = runEnforcement('channel', 'access-token', undefined, null, 0, expected);
+		if (replacement === 'connector') await expect(running).rejects.toThrow(/deactivated/); else await running;
+		expect(warning.mock.calls.filter(([message]) => String(message).includes('no valid bound'))).toHaveLength(1);
+	} finally { spy.mockRestore(); warning.mockRestore(); }
+	expect(changed).toBe(true);
+	expect((await testDb().db.select().from(channels).get())?.humanRecoveryCursor).toBe(successorRaw);
+	expect(provider.setModerationStatus).not.toHaveBeenCalled();
+});
 
 function rescanApproval() {
 	return stageDecisions('channel', [{

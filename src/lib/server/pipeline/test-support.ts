@@ -87,13 +87,19 @@ const mocks = vi.hoisted(() => {
 		// row only matches when its stamp equals the bound value — NULL
 		// never equals, like real SQL.
 		const scanFiltered = querySql(condition).includes('"comments"."scan_id"');
+		const eligibleRecovery = querySql(condition).includes("\"comments\".\"status\" = 'restoring'");
+		const recoveryAfter = comparisonParam(condition, comments.id, '>');
+		const recoveryEnd = comparisonParam(condition, comments.id, '<=');
 		return [...new Set([
 			...state.existingIds,
 			...state.insertedComments.map((comment) => queryKey(comment.id))
 		])].map((id) => commentRowFor(id)).filter((row) =>
-			(params.includes(row.id) || (statusFilter.length > 0 && statusFilter.includes(row.status)) ||
+			(params.includes(row.id) || (eligibleRecovery && row.status === 'restoring') || (statusFilter.length > 0 && statusFilter.includes(row.status)) ||
 				(includesDispatchOwners && (row.humanDispatchToken !== null || row.humanDispatchState !== null)))
-			&& (!scanFiltered || params.includes(row.scanId)));
+			&& (!scanFiltered || params.includes(row.scanId))
+			&& (!eligibleRecovery || (row.status === 'restoring' && row.humanDispatchToken === null && row.humanDispatchState === null))
+			&& (recoveryAfter === undefined || row.id > recoveryAfter)
+			&& (recoveryEnd === undefined || row.id <= recoveryEnd));
 	};
 	const selectGet = async (table: unknown, condition: unknown) => {
 		if (table === state.tables.channels) {
@@ -180,13 +186,17 @@ const mocks = vi.hoisted(() => {
 	};
 	const query = (table: unknown) => ({
 		where: (condition?: unknown) => {
+			let rowLimit: number | undefined;
+			let descending = false;
 			const inner = {
 			get: async () => selectGet(table, condition),
-			all: async () => selectAll(table, condition)
+			all: async () => {
+				const rows = await selectAll(table, condition);
+				if (table === state.tables.comments) (rows as Array<{ id: string }>).sort((a, b) => a.id.localeCompare(b.id) * (descending ? -1 : 1));
+				return rows.slice(0, rowLimit);
+			}
 			};
-			// The fake stores no sort order — orderBy/limit pass through so
-			// query-builder chains keep working, returning the same shape.
-			const chain = { ...inner, orderBy: () => chain, limit: () => chain };
+			const chain = { ...inner, orderBy: (order: unknown) => { descending = querySql(order).includes('desc'); return chain; }, limit: (count: number) => { rowLimit = count; return chain; } };
 			return chain;
 		}
 	});
@@ -208,6 +218,12 @@ const mocks = vi.hoisted(() => {
 			const params = queryParams(condition);
 			const identityMatches = params.length <= 2 || params.includes(state.channel?.refreshTokenEnc);
 			return { returning: async () => state.channel?.active && identityMatches ? [{ id: state.channel.id }] : [] };
+		}
+		if ('humanRecoveryCursor' in values) {
+			if (!matchesBoundParam(condition, channels.humanRecoveryCursor, state.channel?.humanRecoveryCursor)
+				|| !matchesBoundParam(condition, channels.leaseExpiresAt, state.channel?.leaseExpiresAt)) return { returning: async () => [] };
+			Object.assign(state.channel, values);
+			return { returning: async () => [{ id: state.channel.id }] };
 		}
 		// persistResults' scan-identity checkpoint guard: the WHERE
 		// binds the run's read values (eq) or asserts the column null
@@ -361,7 +377,7 @@ const mocks = vi.hoisted(() => {
 				};
 			}
 		})),
-		select: vi.fn(() => ({ from: (table: unknown) => query(table) })),
+		select: vi.fn(() => ({ from: (table: unknown) => query(table instanceof SQL && querySql(table).includes('indexed by comments_human_recovery_eligible_idx') ? state.tables.comments : table) })),
 		delete: vi.fn((table: unknown) => ({
 			where: async () => {
 				if (table === state.tables.creditTransactions) {
@@ -417,7 +433,7 @@ const mocks = vi.hoisted(() => {
 	return {
 		state,
 		db: {
-			select: vi.fn(() => ({ from: (table: unknown) => query(table) })),
+			select: vi.fn(() => ({ from: (table: unknown) => query(table instanceof SQL && querySql(table).includes('indexed by comments_human_recovery_eligible_idx') ? state.tables.comments : table) })),
 			insert: vi.fn((table: unknown) => ({ values: async (values: unknown) => store(table, values) })),
 			transaction: vi.fn(runTransaction),
 			update: vi.fn((table: unknown) => transaction.update(table)),
@@ -483,7 +499,7 @@ vi.mock('$lib/server/youtube', async (importOriginal) => ({
 }));
 
 import { auditLog, channelAllowedHandles, channels, comments, creditTransactions, moderationActions, organizations, rules, stripeSubscriptionPeriods } from '$lib/server/db/schema';
-import { sql } from 'drizzle-orm';
+import { SQL, sql } from 'drizzle-orm';
 import { SQLiteSyncDialect, type SQLiteColumn } from 'drizzle-orm/sqlite-core';
 import type { NewComment } from '../youtube';
 
@@ -523,6 +539,13 @@ function matchesBoundParam(condition: unknown, column: SQLiteColumn, value: unkn
 	if (bound.kind === 'eq') return value === bound.value;
 	if (bound.kind === 'isNull') return value == null;
 	return true;
+}
+
+function comparisonParam(condition: unknown, column: SQLiteColumn, operator: string): string | undefined {
+	const expression = querySql(condition);
+	const position = expression.indexOf(`${querySql(sql`${column}`)} ${operator} ?`);
+	if (position < 0) return undefined;
+	return queryParams(condition)[expression.slice(0, position).split('?').length - 1] as string;
 }
 
 function valueRows(values: unknown): Record<string, unknown>[] {
@@ -704,6 +727,8 @@ export function resetPipelineMocks() {
 		scanCursor: null,
 		historyBoundary: null,
 		historyScanId: null,
+		humanRecoveryCursor: null,
+		leaseExpiresAt: null,
 		active: 1,
 		toneLevel: null,
 		createdAt: '2026-01-01T00:00:00.000Z'

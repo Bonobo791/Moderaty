@@ -4,6 +4,7 @@ import { commentChargeRef, consumeCreditsBulk, type LedgerHandle } from '$lib/se
 import { db } from '$lib/server/db';
 import { auditLog, comments, moderationActions } from '$lib/server/db/schema';
 import { assertChannelActive, type ChannelIdentity } from './enforcement';
+import { hasHumanClaim } from './human-claims';
 import type { Decision, RescanCharge } from './types';
 
 /**
@@ -240,12 +241,14 @@ async function chargeBillableDecisions(
 
 /** Optional staging knobs: org to bill, channel identity for the liveness
  * assert, and rescan mode (upserts + scan-scoped charge anchors). */
-export type StageOptions = { orgId?: string | null; expected?: ChannelIdentity; rescan?: RescanCharge };
+export type StageOptions = { orgId?: string | null; expected?: ChannelIdentity; rescan?: RescanCharge; protectedIds?: string[] };
 
-async function preserveRescanHumanClaims(transaction: LedgerHandle, channelId: string, decisions: Decision[], scanStamp?: string | null): Promise<Decision[]> {
+async function preserveRescanHumanClaims(transaction: LedgerHandle, channelId: string, decisions: Decision[], scanStamp?: string | null, protectedIds: string[] = []): Promise<Decision[]> {
+	const candidateIds = [...new Set([...decisions.map(decision => decision.comment.id), ...protectedIds])];
+	if (!candidateIds.length) return decisions;
 	const existing = await transaction.select({ id: comments.id, status: comments.status, humanDispatchToken: comments.humanDispatchToken, humanDispatchState: comments.humanDispatchState })
-		.from(comments).where(and(eq(comments.channelId, channelId), inArray(comments.id, decisions.map(decision => decision.comment.id)))).all();
-	const reserved = existing.filter(row => row.status === 'restoring' || row.humanDispatchToken !== null || row.humanDispatchState !== null).map(row => row.id);
+		.from(comments).where(and(eq(comments.channelId, channelId), inArray(comments.id, candidateIds))).all();
+	const reserved = existing.filter(hasHumanClaim).map(row => row.id);
 	if (!reserved.length) return decisions;
 	// The restoring claim owns intent before token refresh and reservation.
 	// Record this scan's visit without changing that pending/active/uncertain
@@ -267,7 +270,7 @@ function decisionCounts(decisions: Decision[]): DecisionCounts {
 }
 
 export async function stageDecisions(channelId: string, decisions: Decision[], options: StageOptions = {}) {
-	if (!decisions.length) return decisionCounts(decisions);
+	if (!decisions.length && !(options.rescan && options.protectedIds?.length)) return decisionCounts(decisions);
 	return await db.transaction(async (transaction) => {
 		// The channel check and all staging writes share one transaction. Account
 		// deletion either commits first (and this fails) or waits until these rows
@@ -276,7 +279,7 @@ export async function stageDecisions(channelId: string, decisions: Decision[], o
 		await assertChannelActive(channelId, transaction, options.expected);
 		const handle = transaction as LedgerHandle;
 		const committedDecisions = options.rescan
-			? await preserveRescanHumanClaims(handle, channelId, decisions, options.rescan.scanStamp) : decisions;
+			? await preserveRescanHumanClaims(handle, channelId, decisions, options.rescan.scanStamp, options.protectedIds) : decisions;
 		if (!committedDecisions.length) return decisionCounts(committedDecisions);
 		if (options.rescan) {
 			await upsertRescannedCommentRows(handle, channelId, committedDecisions, options.rescan.scanStamp);

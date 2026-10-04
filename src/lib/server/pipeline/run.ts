@@ -160,7 +160,7 @@ const decideAndStage = async (
 	}
 ): Promise<{ acted: number; queued: number; skipped: number; deferred: number; stagedCount: number }> => {
 	const { channel, accessToken, deadline, dryRun, window, rescan } = ctx;
-	const { decisions, failures, deferred } = await decideNewComments(channelId, page, {
+	const { decisions, failures, deferred, protectedIds } = await decideNewComments(channelId, page, {
 		accessToken,
 		toneLevel: channel.toneLevel ?? TONE_LEVEL_OMNI_ONLY,
 		protections: {
@@ -191,7 +191,7 @@ const decideAndStage = async (
 	// Deletion may have committed during the YouTube/AI calls above: re-check
 	// before any durable write (I3) so a deleted account gets no new rows.
 	await assertChannelActive(channelId, db, channel);
-	const { acted, queued, stagedCount } = await stageOrAuditDecisions(channelId, decisions, dryRun, { orgId: channel.orgId, expected: channel, rescan });
+	const { acted, queued, stagedCount } = await stageOrAuditDecisions(channelId, decisions, dryRun, { orgId: channel.orgId, expected: channel, rescan, protectedIds });
 	// Fail loudly only after successful decisions are staged, and before the
 	// cursor advances, so the next run retries just the failed comments.
 	if (failures.length) {

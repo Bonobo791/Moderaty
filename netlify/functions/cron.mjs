@@ -75,7 +75,8 @@ function unreachableError(error) {
 // The schedule is every minute while the app is in early operation; raise to
 // '*/15 * * * *' when user volume grows. The endpoint itself enforces one
 // workload per invocation. Live channels rotate least-recently-run first,
-// alternating with feedback previews when both classes are ready. N live
-// channels rotate about every N minutes without previews, or 2N minutes
-// under sustained preview contention. Keep that cadence acceptable.
+// alternating with feedback previews when both classes are ready. N eligible
+// live channels rotate about every N schedule intervals without previews,
+// or 2N intervals under sustained preview contention. Multiply by the
+// configured interval between invocations to get the elapsed time.
 export const config = { schedule: '* * * * *' };

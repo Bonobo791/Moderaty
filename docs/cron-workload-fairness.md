@@ -27,9 +27,10 @@ otherwise eligible workload; scheduler transaction errors fail loudly.
 
 ## Preview expiry and cadence
 
-The checked-in Netlify schedule and Coolify instructions run every minute. The
-optional fifteen-minute schedule mentioned in the operator guidance remains
-supported. Alternation means a retry can be thirty minutes after the first
+The checked-in Netlify schedule and example Coolify expression use one-minute
+intervals; operators may configure a different interval. The optional
+fifteen-minute schedule mentioned in the operator guidance remains supported.
+Alternation means a retry can be thirty minutes after the first
 preview attempt on that slower cadence. Attempted previews therefore expire
 strictly after **35 minutes**, replacing the former 20-minute window and keeping
 a five-minute scheduling margin. The first-attempt timestamp stays fixed across
@@ -37,11 +38,19 @@ retries, so poison previews still age out. Unattempted queued previews do not
 expire just because they waited. Paused/deleted channels and held leases retain
 the existing cleanup behavior.
 
-At one-minute cadence with both classes continuously ready, live moderation gets
-one slot every two minutes. With N eligible live channels, their approximate
-rotation is 2N minutes during that contention, versus N minutes when there are
-no pending previews. Per-channel history/dry-run-window work keeps its existing
-live rotation semantics.
+With both classes continuously ready, live moderation gets one slot every two
+schedule intervals. For N eligible live channels (active and unleased), their
+approximate rotation is 2N schedule intervals during that contention, versus N
+schedule intervals without pending previews. Multiply those counts by the
+configured time between cron invocations:
+
+| Schedule interval | Without pending previews | Sustained preview contention |
+| --- | --- | --- |
+| 1 minute | N minutes | 2N minutes |
+| 5 minutes | 5N minutes | 10N minutes |
+| 15 minutes | 15N minutes | 30N minutes |
+
+Per-channel history/dry-run-window work keeps its existing live rotation semantics.
 
 ## Migration and verification
 

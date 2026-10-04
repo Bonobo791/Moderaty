@@ -390,7 +390,7 @@ const runCronSweeps = async (dryRun: boolean, deadline: number, startedAt: numbe
 	// an answered 200 by design, so without them in `ok` a permanently
 	// throwing evaluation would retry forever, invisible (codeant).
 	const base = {
-		ok: !welcome.error && !welcome.value?.errors && !welcome.value?.ambiguous && !consent.error && !handles.error && !autoTopup.error && !stripeDeletions.error && !googleRevocations.error && !stripeScrubs.error && !reversals.error && !zeroCredit.error && !zeroCredit.value?.errors && !contactNotifications.error && !contactNotifications.value?.errors,
+		ok: !welcome.error && !welcome.value?.enrollmentErrors && !welcome.value?.errors && !welcome.value?.ambiguous && !consent.error && !handles.error && !autoTopup.error && !stripeDeletions.error && !googleRevocations.error && !stripeScrubs.error && !reversals.error && !zeroCredit.error && !zeroCredit.value?.errors && !contactNotifications.error && !contactNotifications.value?.errors,
 		dryRun,
 		consentEmailsNulled: orZero(consent.value),
 		sweepError: consent.error,
@@ -415,6 +415,9 @@ const runCronSweeps = async (dryRun: boolean, deadline: number, startedAt: numbe
 		contactNotificationsSent: orZero(contactNotifications.value?.sent),
 		contactNotificationErrors: orZero(contactNotifications.value?.errors),
 		contactNotificationSweepError: contactNotifications.error,
+		welcomeEmailCandidatesScanned: orZero(welcome.value?.scanned),
+		welcomeEmailsQueued: orZero(welcome.value?.queued),
+		welcomeEmailEnrollmentErrors: orZero(welcome.value?.enrollmentErrors),
 		welcomeEmailsAccepted: orZero(welcome.value?.accepted),
 		welcomeEmailErrors: orZero(welcome.value?.errors),
 		welcomeEmailAmbiguous: orZero(welcome.value?.ambiguous),

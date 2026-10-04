@@ -40,7 +40,7 @@ export function runNpmCi(start = spawn) {
 	});
 }
 
-export async function installDependencies({ run = runNpmCi, wait = setTimeout, log = console.error } = {}) {
+export function installDependencies({ run = runNpmCi, wait = setTimeout, log = console.error } = {}) {
 	async function attempt(number) {
 		log(`install-dependencies: npm ci attempt ${number}/${maxAttempts}`);
 		const result = await run();

@@ -9,7 +9,12 @@ import { isAbsolute, join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { expect, test, vi } from 'vitest';
-import { installDependencies, runNpmCi } from './install-dependencies.mjs';
+import { installDependencies, npmCliPath, runNpmCi } from './install-dependencies.mjs';
+
+vi.mock('node:child_process', async (importOriginal) => {
+	const actual = await importOriginal();
+	return { ...actual, spawn: vi.fn(actual.spawn), execFileSync: vi.fn(actual.execFileSync) };
+});
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const helper = join(root, 'scripts/install-dependencies.mjs');
@@ -17,14 +22,10 @@ const helper = join(root, 'scripts/install-dependencies.mjs');
 /** Serve a locked fixture tarball, optionally interrupting its body before later requests succeed. */
 async function fixture(resetCount = 1) {
 	const directory = await mkdtemp(join(tmpdir(), 'moderaty-install-'));
-	const archiveRoot = join(directory, 'archive');
-	await mkdir(join(archiveRoot, 'package'), { recursive: true });
 	const dependency = { name: 'stream-reset-fixture', version: '1.0.0', scripts: { install: "node -e \"require('node:fs').writeFileSync('lifecycle-ran', 'unsafe')\"" } };
-	await writeFile(join(archiveRoot, 'package/package.json'), JSON.stringify(dependency));
-	await writeFile(join(archiveRoot, 'package/index.js'), 'module.exports = 42;\n');
-	const archive = join(directory, 'fixture.tgz');
-	execFileSync('/usr/bin/tar', ['-czf', archive, '-C', archiveRoot, 'package']);
-	const body = await readFile(archive);
+	// This fixed archive contains the metadata above and index.js. Real npm
+	// extraction is checked below, so a stale/incorrect fixture fails the test.
+	const body = await readFile(new URL('./fixtures/install-dependencies.tgz', import.meta.url));
 	let requests = 0;
 	const server = createServer((request, response) => {
 		if (request.url !== '/fixture.tgz') { response.writeHead(404); response.end(); return; }
@@ -47,6 +48,7 @@ async function fixture(resetCount = 1) {
 	} }));
 	return {
 		project,
+		dependency,
 		get requests() { return requests; },
 		env: { ...process.env, npm_config_cache: join(directory, 'cache'), npm_config_audit: 'false', npm_config_fund: 'false', npm_config_update_notifier: 'false' },
 		close: async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await rm(directory, { recursive: true, force: true }); }
@@ -73,8 +75,12 @@ function firstRunCommand(dockerfile) {
 /** Execute the repository's actual dependency RUN against an isolated local fixture. */
 async function runDockerInstall(context) {
 	const command = firstRunCommand(await readFile(join(root, 'Dockerfile'), 'utf8'));
+	const [executable, ...args] = command.split(/\s+/);
+	if (executable !== 'node' || args.length !== 1 || args[0] !== 'scripts/install-dependencies.mjs') {
+		throw new Error('Docker dependency RUN must invoke the Node install helper directly');
+	}
 	let output = '';
-	const child = spawn('/bin/sh', ['-c', command], { cwd: context.project, env: context.env, timeout: 30_000 });
+	const child = spawn(process.execPath, args, { cwd: context.project, env: context.env, timeout: 30_000 });
 	child.stdout.on('data', chunk => output += chunk);
 	child.stderr.on('data', chunk => output += chunk);
 	const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
@@ -97,12 +103,43 @@ test('fails loudly when a Docker install RUN is missing or unfinished', () => {
 	expect(() => firstRunCommand('RUN node \\')).toThrow('unfinished continuation');
 });
 
+test('installs the real fixture when host tar and Unix shell executables are unavailable', async () => {
+	const native = await vi.importActual('node:child_process');
+	const unavailable = (name) => Object.assign(new Error(`${name} is unavailable on this host`), { code: 'ENOENT' });
+	execFileSync.mockClear().mockImplementation(() => { throw unavailable('tar'); });
+	spawn.mockImplementation((executable, ...args) => {
+		if (executable === '/bin/sh') throw unavailable('/bin/sh');
+		return native.spawn(executable, ...args);
+	});
+	let context;
+	try {
+		context = await fixture(0);
+		const result = await runDockerInstall(context);
+		expect(result.code, result.output).toBe(0);
+		expect(await readFile(join(context.project, 'node_modules/stream-reset-fixture/index.js'), 'utf8')).toBe('module.exports = 42;\n');
+		expect(execFileSync).not.toHaveBeenCalled();
+	} finally {
+		execFileSync.mockImplementation(native.execFileSync);
+		spawn.mockImplementation(native.spawn);
+		if (context) await context.close();
+	}
+}, 35_000);
+
+test.each([
+	['linux', '/usr/local/bin/node', '/usr/local/lib/node_modules/npm/bin/npm-cli.js'],
+	['darwin', '/opt/node/bin/node', '/opt/node/lib/node_modules/npm/bin/npm-cli.js'],
+	['win32', 'C:\\Program Files\\nodejs\\node.exe', 'C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js']
+])('uses the bundled npm CLI on %s without PATH lookup', (platform, nodeExecutable, expected) => {
+	expect(npmCliPath(nodeExecutable, platform)).toBe(expected);
+});
+
 test('the actual Docker install automatically recovers an interrupted tarball without running lifecycle scripts', async () => {
 	const context = await fixture();
 	try {
 		const result = await runDockerInstall(context);
 		expect(result.code, result.output).toBe(0);
 		expect(context.requests).toBe(2);
+		expect(JSON.parse(await readFile(join(context.project, 'node_modules/stream-reset-fixture/package.json'), 'utf8'))).toEqual(context.dependency);
 		expect(await readFile(join(context.project, 'node_modules/stream-reset-fixture/index.js'), 'utf8')).toBe('module.exports = 42;\n');
 		expect(existsSync(join(context.project, 'root-lifecycle-ran'))).toBe(false);
 		expect(existsSync(join(context.project, 'node_modules/stream-reset-fixture/lifecycle-ran'))).toBe(false);

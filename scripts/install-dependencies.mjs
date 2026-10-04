@@ -1,9 +1,18 @@
 import { spawn } from 'node:child_process';
-import { dirname, resolve } from 'node:path';
+import { posix, resolve, win32 } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 
-const npmCli = resolve(dirname(process.execPath), '../lib/node_modules/npm/bin/npm-cli.js');
+/** Locate the npm CLI bundled with the absolute Node executable, without searching PATH. */
+export function npmCliPath(nodeExecutable = process.execPath, platform = process.platform) {
+	const paths = platform === 'win32' ? win32 : posix;
+	const bundledCli = platform === 'win32'
+		? 'node_modules/npm/bin/npm-cli.js'
+		: '../lib/node_modules/npm/bin/npm-cli.js';
+	return paths.resolve(paths.dirname(nodeExecutable), bundledCli);
+}
+
+const npmCli = npmCliPath();
 const retryableCodes = new Set(['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN']);
 const maxAttempts = 3;
 

@@ -12,7 +12,7 @@
 The repo is deploy-ready: `netlify.toml` pins the build
 (`node scripts/netlify-migrate.mjs && npm run build`, publish `build`,
 Node 24) and `netlify/functions/cron.mjs` is a Netlify
-Scheduled Function that triggers one bounded moderation run every minute
+Scheduled Function that calls the bounded cron endpoint every minute
 (during early operation; raise to `*/15 * * * *` when user volume grows).
 Scheduled functions only fire on the published production deploy — branch
 deploys and Deploy Previews never trigger them — so non-production
@@ -266,15 +266,24 @@ the site exists), local work, and outage recovery.
 
 - `netlify/functions/cron.mjs` runs on a `* * * * *` schedule and calls
   `GET $APP_URL/api/cron` with the secret in an `Authorization: Bearer` header
-  (never in the URL). Each invocation processes exactly
+  (never in the URL). Each invocation processes at most
   one workload. Live moderation rotates least-recently-run channels and
   alternates with feedback previews when both are ready. For N eligible live
   channels, scans rotate about every N schedule intervals without pending
   previews, or 2N schedule intervals under sustained preview contention. See
   [cron workload fairness](docs/cron-workload-fairness.md) for leases, retry
   expiry, and examples at different schedule intervals. Keep the schedule fast
-  enough for an acceptable live scan cadence. A failed run throws and appears
-  as a failed invocation in **Netlify → Functions → cron** logs.
+  enough for an acceptable live scan cadence. No eligible work, an exhausted
+  budget, or a lost claim can result in zero workload runs.
+- **Invocation failures:** configuration or transport errors, non-suppressed
+  HTTP failures, invalid response bodies, and operator-actionable tick problems
+  throw and appear as failed invocations in **Netlify → Functions → cron** logs.
+  Tick problems include failed sweeps or auxiliary jobs, exhausted budgets,
+  lost bookkeeping writes, and channel errors the owner cannot fix. A non-OK
+  response whose channel failures are all `credits` (top-up needed) or `token`
+  (reconnect needed), with no operator problems, logs a warning without failing
+  the invocation; those states are already shown on the dashboard. Both
+  schedulers share the classifier in [`scripts/dev-cron.mjs`](scripts/dev-cron.mjs).
 - **Function timeout:** Netlify's default is 10s, below the trigger's 25s
   abort and the endpoint's 20s run budget. Raise it to 26s (Site settings →
   Functions) so the graceful-timeout path can fire; on a 10s limit the

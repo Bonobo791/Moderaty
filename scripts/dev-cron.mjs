@@ -4,8 +4,8 @@
 // `npm run dev` — so in every non-production environment the moderation
 // pipeline only advances when something calls GET /api/cron. This script is
 // that something: it ticks the endpoint on the same every-minute cadence as
-// the Netlify function (one channel per tick, one page per dry-run window
-// drain), with the secret in an Authorization header, never in the URL.
+// the Netlify function (at most one workload per tick, one page per dry-run
+// window drain), with the secret in an Authorization header, never in the URL.
 //
 // Usage (run alongside `npm run dev` in a second terminal):
 //   node --env-file=.env scripts/dev-cron.mjs            tick every 60s
@@ -20,17 +20,19 @@
 // `APP_URL=http://127.0.0.1:3000 node scripts/dev-cron.mjs --once` every
 // minute inside the app container, replacing the Netlify Scheduled Function.
 // Coolify emails on every non-zero exit, so the exit code is the alert
-// channel: the script exits 1 only for operator-actionable failures (endpoint
-// unreachable/non-OK, a failed sweep, a lost bookkeeping write, a channel
-// error category the channel owner cannot fix). Channel-owner-actionable
+// channel: the script exits 1 only for operator-actionable failures:
+// configuration/transport errors, non-suppressed HTTP failures, invalid payloads,
+// failed sweeps/auxiliary jobs, an exhausted budget, a lost bookkeeping write,
+// or a channel error category the channel owner cannot fix. Channel-owner
 // states — 'credits' (top-up needed) and 'token' (reconnect needed) — are
-// persistent and dashboard-visible, so they log a warning and exit 0 instead
-// of emailing once a minute until the owner acts.
+// persistent and dashboard-visible. A non-OK response with only those channel
+// failures and no operator problems logs a warning and exits 0 instead of
+// emailing once a minute until the owner acts.
 //
 // Dead-man's switch: set HEALTHCHECK_PING_URL (healthchecks.io, Uptime Kuma
-// push monitor, …) and every tick the endpoint answers pings it. A tick that
-// threw does NOT ping, so the monitor alerts once on silence — which also
-// covers the failure a non-zero exit can never report: the task never ran.
+// push monitor, …): healthy and suppressed owner-actionable ticks attempt the
+// ping. A tick that threw does NOT ping, so the monitor alerts on silence —
+// which also covers a failure an exit code cannot report: the task never ran.
 
 const DEFAULT_INTERVAL_MS = 60_000;
 
@@ -158,9 +160,9 @@ function channelRunProblems(payload) {
 /**
  * Classifies an answered tick: `problems` lists every operator-actionable
  * failure the payload reports; `ownerActionableOnly` marks a non-OK response
- * whose ONLY failures are channel-owner categories (credits/token —
- * dashboard-visible, self-resolving, suppressible). Shared by the local
- * driver and the Netlify scheduled function so both schedulers classify
+ * whose channel errors are all credits/token (dashboard-visible and resolved
+ * when the owner acts). Callers suppress that response only when `problems`
+ * is empty. Shared by the local driver and the Netlify scheduled function so both classify
  * identical ticks identically (codex).
  */
 export function evaluateTick(resOk, payload) {
@@ -231,9 +233,9 @@ export async function tickOnce(fetchImpl = fetch) {
 }
 
 /**
- * Dead-man's switch ping: GETs HEALTHCHECK_PING_URL after a tick the endpoint
- * answered. Never throws — a monitor hiccup must not turn a healthy tick into
- * a failed scheduled task.
+ * Dead-man's switch ping: GETs HEALTHCHECK_PING_URL after a healthy or suppressed
+ * owner-actionable tick. Never throws — a monitor hiccup must not turn a healthy
+ * tick into a failed scheduled task.
  */
 export async function pingHealthcheck(fetchImpl = fetch) {
 	const url = process.env.HEALTHCHECK_PING_URL;

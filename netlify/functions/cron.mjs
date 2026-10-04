@@ -5,12 +5,14 @@
 import { evaluateTick, validTickPayload } from '../../scripts/dev-cron.mjs';
 
 /**
- * Netlify Scheduled Function: triggers one bounded moderation run by
+ * Netlify Scheduled Function: requests at most one bounded workload by
  * calling the app's cron endpoint on the deployed site (see the schedule
  * note at `config` below). The secret travels in an Authorization
  * header, never in the URL; the request aborts after 25s rather than hanging
- * into the platform limit. Any failure throws so the invocation shows up as
- * failed in the Netlify function logs.
+ * into the platform limit. Configuration or transport errors, invalid responses,
+ * and operator-actionable tick failures throw and fail the invocation. A non-OK
+ * response containing only credits/token channel failures and no operator
+ * problems logs a warning without failing the invocation.
  */
 export default async function cron() {
 	const base = process.env.APP_URL;
@@ -43,8 +45,8 @@ export default async function cron() {
 	const { ownerActionableOnly, problems } = evaluateTick(res.ok, payload);
 	if (!res.ok) {
 		// A run whose only failures are channel-owner categories (credits/
-		// token) is dashboard-visible and self-resolving — suppress the
-		// invocation failure, same contract as the local driver.
+		// token) is dashboard-visible and resolves when the owner acts. With no
+		// operator problems, suppress the failure as the local driver does.
 		if (ownerActionableOnly && problems.length === 0) {
 			console.warn(`cron endpoint answered ${res.status} with only channel-owner failure(s) — suppressing`);
 			return;
@@ -73,7 +75,7 @@ function unreachableError(error) {
 }
 
 // The schedule is every minute while the app is in early operation; raise to
-// '*/15 * * * *' when user volume grows. The endpoint itself enforces one
+// '*/15 * * * *' when user volume grows. The endpoint itself enforces at most one
 // workload per invocation. Live channels rotate least-recently-run first,
 // alternating with feedback previews when both classes are ready. N eligible
 // live channels rotate about every N schedule intervals without previews,

@@ -140,14 +140,21 @@ describe('scheduled cron trigger', () => {
 		await expect(handler()).rejects.toThrow(/invalid/);
 	});
 
-	it('suppresses a non-OK whose only failures are channel-owner categories', async () => {
+	it.each(['token', 'credits'])('suppresses a non-OK whose only failure is the owner category %s', async (category) => {
 		// Same contract as the local driver: 'credits'/'token' failures are
 		// dashboard-visible and self-resolving — an invocation failure every
 		// minute would be pure noise.
-		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ok: false, results: { UC1: { error: 'credits' } } }, 500)));
+		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ok: false, results: { UC1: { error: category } } }, 500)));
 		const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
 		await expect(handler()).resolves.toBeUndefined();
 		expect(warning).toHaveBeenCalled();
+	});
+
+	it.each(['token', 'credits'])('does not suppress a stale-preview cleanup failure behind %s errors', async (category) => {
+		const payload = { ok: false, feedbackPreviewSweepError: true, results: { UC1: { error: category } } };
+		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(payload, 500)));
+
+		await expect(handler()).rejects.toThrow('feedbackPreviewSweepError');
 	});
 });

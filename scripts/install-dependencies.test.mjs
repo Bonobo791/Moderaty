@@ -14,6 +14,7 @@ import { installDependencies, runNpmCi } from './install-dependencies.mjs';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const helper = join(root, 'scripts/install-dependencies.mjs');
 
+/** Serve a locked fixture tarball, optionally interrupting its body before later requests succeed. */
 async function fixture(resetCount = 1) {
 	const directory = await mkdtemp(join(tmpdir(), 'moderaty-install-'));
 	const archiveRoot = join(directory, 'archive');
@@ -52,11 +53,26 @@ async function fixture(resetCount = 1) {
 	};
 }
 
+/** Join the first RUN's continuation lines and remove its BuildKit cache mount without nested regexes. */
+function firstRunCommand(dockerfile) {
+	const lines = dockerfile.split('\n').map(line => line.trimEnd());
+	let index = lines.findIndex(line => line.startsWith('RUN '));
+	if (index === -1) throw new Error('Dockerfile has no dependency install RUN');
+	const parts = [];
+	while (index < lines.length) {
+		const line = lines[index++];
+		if (!line.endsWith('\\')) {
+			parts.push(line);
+			return parts.join(' ').slice(4).trim().replace(/^--mount=\S+\s*/, '').trim();
+		}
+		parts.push(line.slice(0, -1));
+	}
+	throw new Error('Dockerfile dependency install RUN has an unfinished continuation');
+}
+
+/** Execute the repository's actual dependency RUN against an isolated local fixture. */
 async function runDockerInstall(context) {
-	const dockerfile = await readFile(join(root, 'Dockerfile'), 'utf8');
-	const firstRun = dockerfile.match(/^RUN ((?:[^\n]*\\\n)*[^\n]*)/m);
-	if (!firstRun) throw new Error('Dockerfile has no dependency install RUN');
-	const command = firstRun[1].replace(/\\\n/g, ' ').replace(/^--mount=\S+\s*/, '').trim();
+	const command = firstRunCommand(await readFile(join(root, 'Dockerfile'), 'utf8'));
 	let output = '';
 	const child = spawn('/bin/sh', ['-c', command], { cwd: context.project, env: context.env, timeout: 30_000 });
 	child.stdout.on('data', chunk => output += chunk);
@@ -64,6 +80,22 @@ async function runDockerInstall(context) {
 	const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
 	return { code, output };
 }
+
+test.each(['\n', '\r\n'])('reads the first multiline Docker RUN with %j line endings', (newline) => {
+	const dockerfile = [
+		'FROM node:24-alpine',
+		'RUN --mount=type=cache,target=/root/.npm,sharing=locked node \\',
+		'  scripts/install-dependencies.mjs',
+		'COPY . .',
+		'RUN node scripts/netlify-migrate.mjs'
+	].join(newline);
+	expect(firstRunCommand(dockerfile).split(/\s+/)).toEqual(['node', 'scripts/install-dependencies.mjs']);
+});
+
+test('fails loudly when a Docker install RUN is missing or unfinished', () => {
+	expect(() => firstRunCommand('FROM node:24-alpine\nCOPY . .')).toThrow('no dependency install RUN');
+	expect(() => firstRunCommand('RUN node \\')).toThrow('unfinished continuation');
+});
 
 test('the actual Docker install automatically recovers an interrupted tarball without running lifecycle scripts', async () => {
 	const context = await fixture();

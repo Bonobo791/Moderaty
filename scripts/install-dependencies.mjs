@@ -7,8 +7,7 @@ const npmCli = resolve(dirname(process.execPath), '../lib/node_modules/npm/bin/n
 const retryableCodes = new Set(['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN']);
 const maxAttempts = 3;
 
-// Fetch retries cover getting the response, but not a reset while consuming
-// its tarball body. Retry the locked install; npm ci clears partial installs.
+/** Run one locked install and drain stderr before returning the final npm error code. */
 export function runNpmCi(start = spawn) {
 	return new Promise((finish) => {
 		let errorCode;
@@ -40,13 +39,24 @@ export function runNpmCi(start = spawn) {
 	});
 }
 
+/** Only network failures from a normally terminated npm process can be retried. */
+function isRetryableFailure(result) {
+	return !result.error && !result.signal && retryableCodes.has(result.errorCode);
+}
+
+/** Describe process failures without treating a missing npm error code as retryable. */
+function describeFailure(result) {
+	return result.error?.message ?? result.signal ?? result.errorCode ?? `exit ${result.code}`;
+}
+
+/** Retry interrupted locked installs at most three times; permanent failures block the build. */
 export function installDependencies({ run = runNpmCi, wait = setTimeout, log = console.error } = {}) {
 	async function attempt(number) {
 		log(`install-dependencies: npm ci attempt ${number}/${maxAttempts}`);
 		const result = await run();
 		if (result.code === 0 && !result.signal && !result.error) return 0;
-		const failure = result.error?.message ?? result.signal ?? result.errorCode ?? `exit ${result.code}`;
-		if (result.error || result.signal || !retryableCodes.has(result.errorCode) || number === maxAttempts) {
+		const failure = describeFailure(result);
+		if (!isRetryableFailure(result) || number === maxAttempts) {
 			log(`install-dependencies: ${failure} — blocking the build after attempt ${number}/${maxAttempts}`);
 			return result.code || 1;
 		}

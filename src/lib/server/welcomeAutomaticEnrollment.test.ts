@@ -154,13 +154,14 @@ test('persistent enrollment failure after busy retries cannot block other accoun
 	for (const id of ['a-bad', 'b-good', 'c-good', 'z-ready']) await seedUser(id);
 	await enqueueWelcome(testDb().db, 'z-ready', 'signup');
 	await testDb().db.update(welcomeEmails).set({ nextRetryAt: new Date(0).toISOString() }).where(eq(welcomeEmails.userId, 'z-ready'));
-	const original = testDb().db.transaction.bind(testDb().db);
+	const enrollment = await import('./welcomeEnrollment');
+	const original = enrollment.enqueueWelcome;
 	let failuresLeft = 3;
 	const failure = Object.assign(new Error('private-query-fixture private-recipient-fixture'), { code: 'SQLITE_BUSY' });
-	const interrupted = vi.spyOn(testDb().db, 'transaction').mockImplementation((async (callback, ...rest) => {
-		if (failuresLeft > 0) { failuresLeft--; throw failure; }
-		return original(callback, ...rest);
-	}) as typeof original);
+	const interrupted = vi.spyOn(enrollment, 'enqueueWelcome').mockImplementation(async (handle, userId, source) => {
+		if (userId === 'a-bad' && failuresLeft > 0) { failuresLeft--; throw failure; }
+		return original(handle, userId, source);
+	});
 	const log = vi.spyOn(console, 'error').mockImplementation(() => {});
 	try {
 		expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 3, queued: 2, enrollmentErrors: 1, accepted: 1, errors: 0 });
@@ -177,6 +178,33 @@ test('persistent enrollment failure after busy retries cannot block other accoun
 		expect(log).toHaveBeenCalledWith(expect.stringContaining('[welcome]'), { category: 'database_busy' });
 		expect(JSON.stringify(log.mock.calls)).not.toMatch(/private-query-fixture|private-recipient-fixture/);
 	} finally { interrupted.mockRestore(); log.mockRestore(); }
+});
+
+test('queued welcomes keep making progress when every discovery run exhausts its deadline', async () => {
+	for (const id of ['one', 'two']) {
+		await seedUser(id);
+		await enqueueWelcome(testDb().db, id, 'signup');
+	}
+	await seedUser('unenrolled');
+	const now = Date.now();
+	const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+	const discovery = vi.spyOn(await import('./welcomeBackfill'), 'enrollWelcomeCandidates').mockImplementation(async deadline => {
+		// Model a discovery query that returns only after the shared budget is spent.
+		clock.mockReturnValue(deadline + 1);
+		return { scanned: 0, queued: 0, enrollmentErrors: 0 };
+	});
+	for (const id of ['one', 'two']) {
+		clock.mockReturnValue(now);
+		await testDb().db.update(welcomeCampaigns).set({ nextAttemptAt: new Date(0).toISOString() });
+		expect(await sweepWelcomeEmails(now + 10_000)).toMatchObject({ accepted: 1, scanned: 0, queued: 0 });
+		expect(await row(id)).toMatchObject({ state: 'accepted', attempts: 1 });
+	}
+	expect(discovery).toHaveBeenCalledTimes(2);
+	expect(mocks.send.mock.calls.map(call => call[0].toEmail)).toEqual(['one@example.com', 'two@example.com']);
+	expect(await row('unenrolled')).toBeUndefined();
+	clock.mockReturnValue(now);
+	await sweepWelcomeEmails(now + 10_000);
+	expect(mocks.send).toHaveBeenCalledTimes(2);
 });
 
 test('enrollment stops between accounts when the shared deadline expires, then resumes', async () => {

@@ -14,7 +14,9 @@ authenticated cron drains after commit; SMTP is never called by signup. A rolled
 back signup leaves no welcome. Re-consent, repeated OAuth flows, subsequent login,
 and organization switches do not reenroll the campaign. Each enabled cron tick
 also discovers existing hosted users with missing, unknown or never-sent history
-and automatically enrolls at most 25 candidates before attempting delivery.
+and automatically enrolls at most 25 candidates. Already queued delivery takes
+priority over discovery; when the queue is empty, a newly enrolled welcome can
+be attempted in the same tick if budget remains.
 No operator command or per-user action is required.
 
 Automatic discovery and delivery use the existing runtime guards:
@@ -158,7 +160,9 @@ The ordered left join can scan all users when most already have campaign records
 so query work grows with the total user count even when it returns no candidates.
 `welcomeEmailCandidatesScanned` counts returned candidates processed by the loop,
 not database rows inspected. If discovery consumes the remaining welcome budget,
-enrollment and delivery defer until a later tick. An isolated synthetic libSQL
+new enrollment and delivery from an initially empty queue defer until a later
+tick. Already queued delivery is attempted before discovery so repeated slow
+queries cannot starve that queue. An isolated synthetic libSQL
 fixture with one million already-enrolled users took roughly 0.68 seconds; this
 measurement does not establish production timing. Durable, indexed discovery
 progress remains a scaling follow-up requiring a coordinated schema change.

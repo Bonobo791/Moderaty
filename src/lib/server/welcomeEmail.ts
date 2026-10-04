@@ -138,10 +138,11 @@ async function recoverExpiredClaims(deadline: number): Promise<number> {
 	return ambiguous;
 }
 
-async function attemptNextWelcome(deadline: number): Promise<WelcomeDelivery> {
+async function attemptNextWelcome(deadline: number): Promise<WelcomeDelivery | undefined> {
 	const next = await db.select({ userId: welcomeEmails.userId }).from(welcomeEmails).where(due(new Date().toISOString()))
 		.orderBy(asc(welcomeEmails.nextRetryAt), asc(welcomeEmails.userId)).limit(1).get();
-	if (!next || Date.now() >= deadline) return 'deferred';
+	if (!next) return undefined;
+	if (Date.now() >= deadline) return 'deferred';
 	try { return await deliverWelcome(next.userId, deadline); }
 	catch (cause) { console.error(DIAGNOSTIC.processing, { category: welcomeFailureCategory(cause) }); return 'failed'; }
 }
@@ -156,13 +157,19 @@ async function sweepWelcomeQueue(deadline: number) {
 	if (Date.now() >= deadline) return counts;
 	counts.ambiguous = Math.min(1, counts.ambiguous + await recoverExpiredClaims(deadline));
 	if (Date.now() >= deadline) return counts;
-	Object.assign(counts, await enrollWelcomeCandidates(deadline));
-	if (Date.now() >= deadline) return counts;
+	// Existing queued delivery must not wait behind an unbounded discovery query.
 	const outcome = await attemptNextWelcome(deadline);
 	const counter: Partial<Record<WelcomeDelivery, keyof typeof counts>> = { accepted: 'accepted', failed: 'errors', ambiguous: 'ambiguous', suppressed: 'suppressed' };
-	const metric = counter[outcome];
-	if (metric === 'ambiguous') counts.ambiguous = 1;
-	else if (metric) counts[metric]++;
+	const countDelivery = (result: WelcomeDelivery | undefined) => {
+		const metric = result && counter[result];
+		if (metric === 'ambiguous') counts.ambiguous = 1;
+		else if (metric) counts[metric]++;
+	};
+	countDelivery(outcome);
+	if (Date.now() >= deadline) return counts;
+	Object.assign(counts, await enrollWelcomeCandidates(deadline));
+	// Only an empty queue gets a post-enrollment attempt; never attempt two recipients.
+	if (outcome === undefined && Date.now() < deadline) countDelivery(await attemptNextWelcome(deadline));
 	return counts;
 }
 

@@ -138,9 +138,15 @@ Copy [.env.example](.env.example) and provide these values as appropriate:
 | `MERCADOPAGO_ENVIRONMENT`, `MERCADOPAGO_PRICE_CREDITS_*_BRL_CENTS` | Optional Mercado Pago mode and BRL bundle prices in cents |
 | `ADAFLOW_API_TOKEN` | Optional AdaFlow accounting-export Bearer token (`docs/adaflow-api-validation.md`) |
 | `FOCUS_NFE_TOKEN`, `FOCUS_NFE_ENVIRONMENT` | Optional Focus NFe NFS-e emission credentials (`docs/focus-nfe-validation.md`) |
+| `ANALYTICS_ENABLED`, `GTM_ID`, `GTM_ALLOWED_HOSTNAMES` | Optional GTM opt-in, container ID, and exact hostname list; runtime only, disabled by default |
 
 Never commit `.env` or real credentials. Netlify environment-variable setup is
 covered by [DEPLOY.md](DEPLOY.md).
+
+Google Tag Manager is optional and disabled by default: unchanged forks make no
+GTM requests. Keep your container ID in your hosting runtime configuration and
+opt in with your own allowed hostnames. See [analytics setup](docs/ANALYTICS.md)
+for configuration, hostname checks, and the privacy review before activation.
 
 ## Useful commands
 

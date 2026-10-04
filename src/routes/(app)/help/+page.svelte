@@ -270,7 +270,10 @@
 			They can also change sensitivity and protections, pause or resume moderation, start
 			moderation history scans that can spend team credits, and erase stored commenter handles.
 		</li>
-		<li><strong>Admins</strong> also connect or disconnect channels, rename teams, and create or revoke invite links.</li>
+		<li>
+			<strong>Admins</strong> also connect or disconnect channels, rename teams, and create or revoke
+			invite links. They can remove ordinary members, but cannot remove owners or other admins.
+		</li>
 		<li><strong>Owners</strong> also manage member roles, billing, feedback settings and runs, and the lifetime OpenAI key.</li>
 	</ul>
 	<p>

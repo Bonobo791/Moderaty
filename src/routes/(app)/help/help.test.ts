@@ -130,6 +130,8 @@ describe('help covers the available product', () => {
 		expect(members).toMatch(/start moderation history scans.*(?:spend|consume).*credits/i);
 		expect(members).toMatch(/erase stored.*handles/i);
 		expect(admins).toMatch(/connect.*disconnect.*channels.*rename teams.*invite/i);
+		expect(admins).toMatch(/remove ordinary members/i);
+		expect(admins).toMatch(/cannot remove (?:owners or other admins|other admins or owners)/i);
 		expect(teams).toMatch(/owners.*billing.*feedback/i);
 		expect(teams).toMatch(/invite.*once.*7 days/i);
 	});

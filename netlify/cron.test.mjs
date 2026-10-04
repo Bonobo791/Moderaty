@@ -54,6 +54,31 @@ describe('scheduled cron trigger', () => {
 		vi.useRealTimers();
 	});
 
+	it('keeps the original timeout while reading a stalled response body', async () => {
+		vi.useFakeTimers();
+		let streamController;
+		vi.stubGlobal('fetch', vi.fn(async (_endpoint, init) => {
+			await new Promise((resolve) => setTimeout(resolve, 24_000));
+			return new Response(new ReadableStream({
+				start(controller) {
+					streamController = controller;
+					init.signal.addEventListener('abort', () => controller.error(new DOMException('The operation was aborted', 'AbortError')));
+				}
+			}));
+		}));
+		let failure;
+		const promise = handler().catch((error) => { failure = error; });
+		try {
+			await vi.advanceTimersByTimeAsync(25_000);
+			expect(failure).toBeInstanceOf(Error);
+			expect(failure.message).toMatch(/abort/i);
+		} finally {
+			streamController.error(new DOMException('Test cleanup aborted the body', 'AbortError'));
+			await promise;
+			vi.useRealTimers();
+		}
+	});
+
 	it('bounds response bodies written to logs and errors', async () => {
 		const huge = (overrides) => ({ results: { channel: { note: 'x'.repeat(2000) } }, ...overrides });
 		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(huge({ ok: true }))));

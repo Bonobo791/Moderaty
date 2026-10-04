@@ -14,6 +14,14 @@ function sectionText(id: string): string {
 	return section![1].replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
 }
 
+/** Pin each role's own list item so another role cannot supply a missing capability. */
+function roleText(role: 'Members' | 'Admins' | 'Owners'): string {
+	const teams = helpPage.match(/<section[^>]*id="teams"[^>]*>([\s\S]*?)<\/section>/)?.[1] ?? '';
+	const item = teams.match(new RegExp(`<li>\\s*<strong>${role}</strong>([\\s\\S]*?)</li>`));
+	expect(item, `Help role ${role}`).not.toBeNull();
+	return item![1].replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+}
+
 describe('help tab (reversibility disclosure)', () => {
 	it('is linked from the app nav', () => {
 		expect(appLayout).toContain('href="/help"');
@@ -120,20 +128,42 @@ describe('help covers the available product', () => {
 		expect(billing).not.toMatch(/(?:operator|Moderaty)[- ](?:provided|funded) (?:AI scoring|scoring|OpenAI(?: API)? key)/i);
 	});
 
-	it('describes team permissions and single-use invitations', () => {
-		const teams = sectionText('teams');
-		const members = teams.match(/Members\b(.*?)Admins\b/)?.[1] ?? '';
-		const admins = teams.match(/Admins\b(.*?)Owners\b/)?.[1] ?? '';
-		expect(members).toMatch(/review queue.*rules/i);
+	it('discloses members\' moderation controls without granting owner-only feedback access', () => {
+		const members = roleText('Members');
+		expect(members).toMatch(/review queue.*manage rules.*protected handles/i);
+		expect(members).toMatch(/read the audit log.*digests/i);
 		expect(members).toMatch(/change sensitivity.*protections/i);
 		expect(members).toMatch(/pause.*resume.*moderation/i);
+		expect(members).toMatch(/moderation previews/i);
 		expect(members).toMatch(/start moderation history scans.*(?:spend|consume).*credits/i);
 		expect(members).toMatch(/erase stored.*handles/i);
-		expect(admins).toMatch(/connect.*disconnect.*channels.*rename teams.*invite/i);
+		expect(members).not.toMatch(/feedback (?:settings|previews|history runs)/i);
+	});
+
+	it('discloses admin channel management, member/admin invites, and removal limits', () => {
+		const admins = roleText('Admins');
+		expect(admins).toMatch(/also connect.*disconnect.*channels.*rename teams/i);
+		expect(admins).toMatch(/create or revoke invite links for new members or admins.*never owners/i);
 		expect(admins).toMatch(/remove ordinary members/i);
 		expect(admins).toMatch(/cannot remove (?:owners or other admins|other admins or owners)/i);
-		expect(teams).toMatch(/owners.*billing.*feedback/i);
+		expect(admins).not.toMatch(/change existing member roles|manage billing|feedback (?:settings|previews)|lifetime OpenAI key/i);
+	});
+
+	it('discloses owner role changes, admin removal, and exclusive billing and feedback controls', () => {
+		const owners = roleText('Owners');
+		expect(owners).toMatch(/also change existing member roles.*promot.*owner/i);
+		expect(owners).toMatch(/remove admins.*never owners/i);
+		expect(owners).toMatch(/manage billing/i);
+		expect(owners).toMatch(/feedback settings.*feedback previews.*digest.*history runs/i);
+		expect(owners).toMatch(/lifetime OpenAI key/i);
+	});
+
+	it('describes shared-team invitations and last-owner and sole-member safeguards', () => {
+		const teams = sectionText('teams');
+		expect(teams).toMatch(/shared team.*invite teammates/i);
 		expect(teams).toMatch(/invite.*once.*7 days/i);
+		expect(teams).toMatch(/last owner cannot be demoted or leave while others remain/i);
+		expect(teams).toMatch(/only member.*delete your account/i);
 	});
 
 	it('covers privacy, support, current language coverage, and restricted licensing', () => {

@@ -263,22 +263,30 @@
 	<p>
 		Create or manage teams on <a href="/org">Team</a>. If you belong to more than one, choose the
 		active team in the navigation. Its channels and credit balance are separate from other teams.
+		Use a shared team to invite teammates.
 	</p>
 	<ul>
 		<li>
-			<strong>Members</strong> work the review queue, manage rules, and read the audit log and digests.
-			They can also change sensitivity and protections, pause or resume moderation, start
-			moderation history scans that can spend team credits, and erase stored commenter handles.
+			<strong>Members</strong> work the review queue, manage rules and protected handles, and read
+			the audit log and digests. They can also change sensitivity and protections, pause or resume
+			moderation, run moderation previews, start moderation history scans that can spend team
+			credits, and erase stored commenter handles.
 		</li>
 		<li>
 			<strong>Admins</strong> also connect or disconnect channels, rename teams, and create or revoke
-			invite links. They can remove ordinary members, but cannot remove owners or other admins.
+			invite links for new members or admins (never owners). They can remove ordinary members,
+			but cannot remove owners or other admins.
 		</li>
-		<li><strong>Owners</strong> also manage member roles, billing, feedback settings and runs, and the lifetime OpenAI key.</li>
+		<li>
+			<strong>Owners</strong> also change existing member roles, including promotions to owner,
+			remove admins but never owners, and manage billing, feedback settings, feedback previews,
+			digest and feedback history runs, and the lifetime OpenAI key.
+		</li>
 	</ul>
 	<p>
 		An invite link works once and expires after 7 days. Share it with the intended teammate; revoke
-		unused invitations on Team. Owners must promote a teammate before leaving a team.
+		unused invitations on Team. The last owner cannot be demoted or leave while others remain;
+		promote a teammate to owner first. If you are the only member, delete your account instead.
 	</p>
 </section>
 

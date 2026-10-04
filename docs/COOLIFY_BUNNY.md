@@ -340,14 +340,34 @@ instance doubles as the live branch-deploy that Netlify used to provide.
 - Prod and dev each drain through their own container's Scheduled Task; both
   hit `/api/cron` on localhost with `CRON_SECRET` in the Authorization header.
 - Until Netlify is retired its production Scheduled Function keeps ticking the
-  same production DB — the per-channel DB lease makes the overlap safe
-  (double cadence at worst, never double processing).
+  same production DB. Overlap requires every writer to run the same
+  reservation-aware moderation version. The per-channel DB lease coordinates
+  cron runs; it does not make older queue actions or reconciliation workers
+  honor newer human-dispatch reservations.
 - Retention sweeps (consent e-mails 10y, handles 30d) run inside the same
   endpoint and move to Coolify with it; `DRY_RUN` keeps both no-ops (I8).
 
 ## 8. Cutover & Netlify retirement (human-only, in order)
 
 Each step has a verify gate; do not proceed past a failed gate.
+
+For the first deployment of `human_dispatch_token` / `human_dispatch_state`,
+pause both cron schedules and quiesce older moderation writers, including
+manual queue/Undo requests and every app replica, before starting the new
+version. Drain outstanding requests and investigate any unresolved remote
+outcome. Apply and verify the additive migrations, start only reservation-aware
+writers, and then resume scheduling. Both deployment targets must honor the
+reservation before their schedules overlap. This is a human-operated cutover;
+the additive database schema alone does not provide that runtime barrier.
+
+Do not roll back to reservation-unaware code while a reservation exists.
+Keep affected writers paused and investigate instead of clearing ownership
+to permit a rollback. A paused dispatch can be released only with evidence
+that its request never began or has settled; elapsed time and the current
+YouTube comment state alone do not prove an earlier request cannot still land.
+Record the evidence and reconcile the exact comment, intent, and dispatch
+token with a guarded update so a newer owner cannot be overwritten. Production
+record changes remain human-only.
 
 1. **Dev app first** (dev DB is safe to break): deploy, check health, sign in,
    connect a channel, confirm the scheduled task ticks with `dryRun: true`.
@@ -364,7 +384,7 @@ Each step has a verify gate; do not proceed past a failed gate.
 6. **Go live**: `DRY_RUN=false` on prod, trigger one tick, verify held
    comments appear in YouTube Studio.
 7. **Soak 1–2 weeks** with Netlify production still published (its cron
-   overlaps safely per §7 — or pause it from Netlify's Functions UI).
+   overlaps under the version barrier in §7 — or pause it from Netlify's Functions UI).
 8. **Retire Netlify**: delete the Netlify site (stops its builds and
    Scheduled Function); optionally remove the Netlify redirect URIs from both
    Google clients. Leave `netlify.toml`, `netlify/`, and adapter-netlify in

@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { and, eq } from 'drizzle-orm';
-import type { Client, InStatement } from '@libsql/client';
+import type { Client } from '@libsql/client';
 
 const mocks = vi.hoisted(() => ({ env: {} as Record<string, string | undefined> }));
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
-import { setupTestDb, testDb, seedUser } from './testdb';
+import { setupTestDb, testDb, seedUser, statementSql } from './testdb';
 import { users, welcomeDiscovery, welcomeEmails } from './db/schema';
 import { enrollWelcomeCandidates } from './welcomeBackfill';
 import { WELCOME_CAMPAIGN } from './welcomeEnrollment';
@@ -19,10 +19,6 @@ afterEach(() => vi.restoreAllMocks());
 const budget = () => Date.now() + 10_000;
 const row = (id: string) => testDb().db.select().from(welcomeEmails)
 	.where(and(eq(welcomeEmails.userId, id), eq(welcomeEmails.campaign, WELCOME_CAMPAIGN))).get();
-
-function statementSql(statement: InStatement): string {
-	return typeof statement === 'string' ? statement : statement.sql;
-}
 
 async function seedAccounts(count: number, accepted = false) {
 	// One statement per fixture table keeps SQLite's statement counters focused

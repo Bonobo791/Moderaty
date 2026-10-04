@@ -1,5 +1,5 @@
-import { expect, test } from 'vitest';
-import { TEST_OWNER, setupTestDb, testDb } from '$lib/server/testdb';
+import { expect, test, vi } from 'vitest';
+import { TEST_OWNER, setupTestDb, statementSql, testDb } from '$lib/server/testdb';
 import { auditLog, channels, comments } from '$lib/server/db/schema';
 import { eq } from 'drizzle-orm';
 
@@ -10,6 +10,80 @@ setupTestDb(['audit_log', 'channels', 'comments']);
 const OWNER = TEST_OWNER;
 
 const LOG_URL = new URL('http://localhost/channels/UC1/log');
+
+test('sparse blocked lists use bounded SQLite work through the recovery indexes', async () => {
+	await seedChannel();
+	await testDb().client.execute(`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i + 1 FROM n WHERE i < 2000)
+		INSERT INTO comments (id, channel_id, text, published_at, status, decided_by)
+		SELECT printf('history-%04d', i), 'UC1', 'History', '2026-01-01', 'approved', 'human' FROM n`);
+	await testDb().db.insert(comments).values([
+		{ id: 'invalid', channelId: 'UC1', text: 'Invalid', publishedAt: '2026-01-01', status: 'restoring', decidedBy: 'human' },
+		{ id: 'uncertain', channelId: 'UC1', text: 'Unknown', publishedAt: '2026-01-01', status: 'approved', decidedBy: 'human', humanDispatchToken: 'owner', humanDispatchState: 'uncertain' }
+	]);
+	const client = testDb().client;
+	const execute = client.execute.bind(client);
+	let scans = 0;
+	let steps = 0;
+	const spy = vi.spyOn(client, 'execute').mockImplementation(async (...args) => {
+		const result = await execute(...args);
+		const sql = statementSql(args[0]);
+		if (sql.startsWith('select ') && sql.includes('from "comments"')) {
+			const stats = await execute({ sql: 'SELECT nscan, nstep FROM sqlite_stmt WHERE sql = ?', args: [sql] });
+			expect(stats.rows.length).toBeGreaterThan(0);
+			for (const row of stats.rows) { scans += Number(row.nscan); steps += Number(row.nstep); }
+		}
+		return result;
+	});
+	try {
+		const result = await loadPage();
+		expect(result.dispatches).toHaveLength(1);
+		expect(result.recovery).toHaveLength(1);
+	} finally { spy.mockRestore(); }
+	expect(scans).toBeLessThan(10);
+	expect(steps).toBeLessThan(500);
+});
+
+test('blocked lists page independently with bounded payloads and visible continuations', async () => {
+	await seedChannel();
+	await testDb().db.insert(comments).values(Array.from({ length: 105 }, (_, i) => [
+		{ id: `d-${String(i).padStart(3, '0')}`, channelId: 'UC1', text: 'Remote outcome', publishedAt: '2026-01-01', status: 'approved', decidedBy: 'human', humanDispatchToken: `private-${i}`, humanDispatchState: 'uncertain' as const },
+		{ id: `r-${String(i).padStart(3, '0')}`, channelId: 'UC1', text: 'Unbound claim', publishedAt: '2026-01-01', status: 'restoring', decidedBy: 'human' }
+	]).flat());
+	const first = await loadPage();
+	expect(first.dispatches).toHaveLength(100);
+	expect(first.recovery).toHaveLength(100);
+	expect(first.nextDispatchHref).toBeTruthy();
+	expect(first.nextRecoveryHref).toBeTruthy();
+	expect(JSON.stringify(first)).not.toContain('private-');
+	const nextUrl = new URL(first.nextDispatchHref ?? '', LOG_URL);
+	nextUrl.searchParams.set('afterRecovery', new URL(first.nextRecoveryHref ?? '', LOG_URL).searchParams.get('afterRecovery') ?? '');
+	const second = await load({ params: { id: 'UC1' }, locals: { user: OWNER }, url: nextUrl } as never);
+	expect(second.dispatches.map((row) => row.id)).toEqual(['d-100', 'd-101', 'd-102', 'd-103', 'd-104']);
+	expect(second.recovery.map((row) => row.id)).toEqual(['r-100', 'r-101', 'r-102', 'r-103', 'r-104']);
+	expect(second.nextDispatchHref).toBeNull();
+	expect(second.nextRecoveryHref).toBeNull();
+	expect(second.firstDispatchHref).toBeTruthy();
+	expect(second.firstRecoveryHref).toBeTruthy();
+});
+
+test('Undo eligibility follows exact claims even outside the blocked-list pages', async () => {
+	await seedChannel();
+	await testDb().db.insert(comments).values(Array.from({ length: 101 }, (_, i) => ({
+		id: `a-${i}`, channelId: 'UC1', text: 'Other claim', publishedAt: '2026-01-01', status: 'restoring', decidedBy: 'human', humanDispatchToken: `owner-${i}`, humanDispatchState: 'uncertain' as const
+	})));
+	const [intent] = await testDb().db.insert(auditLog).values({ channelId: 'UC1', commentId: 'z-restore', action: 'restore', actor: 'user', reason: 'Existing restore', createdAt: '2026-01-01T00:00:00.000Z' }).returning({ id: auditLog.id });
+	await testDb().db.insert(comments).values([
+		{ id: 'z-restore', channelId: 'UC1', text: 'Valid restore', publishedAt: '2026-01-01', status: 'restoring', decidedBy: 'human', restoreIntentId: intent.id },
+		{ id: 'z-dispatch', channelId: 'UC1', text: 'Uncertain hold', publishedAt: '2026-01-01', status: 'held', decidedBy: 'human', humanDispatchToken: 'last-owner', humanDispatchState: 'uncertain' }
+	]);
+	await seedEntries(['z-restore', 'z-dispatch'].map((commentId) => ({ commentId, action: 'hold', createdAt: '2026-01-02T00:00:00.000Z' })));
+	const first = await loadPage();
+	expect(first.dispatches.some((row) => row.id === 'z-dispatch')).toBe(false);
+	expect(first.recovery).toEqual([]);
+	expect(first.nextRecoveryHref).toBeTruthy();
+	expect(first.entries.find((entry) => entry.commentId === 'z-restore' && entry.action === 'hold')?.undoable).toBe('full');
+	expect(first.entries.find((entry) => entry.commentId === 'z-dispatch')?.undoable).toBeNull();
+});
 
 async function seedChannel() {
 	await testDb()
@@ -28,7 +102,8 @@ test('load returns the maintenance payload during a database outage instead of a
 	// null-user outage shape.
 	const result = await load({ params: { id: 'UC1' }, locals: { user: null, dbDown: true }, url: LOG_URL } as never);
 	// Exact payload: the page renders ch.id/title even in the outage shape.
-	expect(result).toEqual({ ch: { id: 'UC1', title: '' }, entries: [], recovery: [], dispatches: [], canRecover: false, maintenance: true });
+	expect(result).toEqual({ ch: { id: 'UC1', title: '' }, entries: [], recovery: [], dispatches: [], canRecover: false, maintenance: true,
+		nextDispatchHref: null, firstDispatchHref: null, nextRecoveryHref: null, firstRecoveryHref: null });
 });
 
 test.each(['restoring', 'approved', 'rejected'])('an uncertain write stays visible on a %s comment and cannot offer Undo', async (status) => {

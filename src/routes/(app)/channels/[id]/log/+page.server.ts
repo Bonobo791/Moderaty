@@ -8,10 +8,22 @@ import { executeHumanDispatch, reserveHumanDispatch, HumanDispatchUncertainError
 import { decrypt } from '$lib/server/crypto';
 import { env } from '$env/dynamic/private';
 import { error, fail, isHttpError } from '@sveltejs/kit';
-import { and, eq, desc, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, asc, eq, desc, gt, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 
 /** Audit-log page size; the load fetches one extra row to detect a next page. */
 const PAGE_SIZE = 200;
+const RECOVERY_PAGE_SIZE = 100;
+
+function listLinks(url: URL, parameter: string, nextId: string | null) {
+	const next = new URL(url);
+	if (nextId !== null) next.searchParams.set(parameter, nextId);
+	const first = new URL(url);
+	first.searchParams.delete(parameter);
+	return {
+		next: nextId === null ? null : `${next.pathname}${next.search}`,
+		first: url.searchParams.has(parameter) ? `${first.pathname}${first.search}` : null
+	};
+}
 
 // Keyset cursor for a streaming log: offset paging would skip/duplicate rows
 // as cron keeps inserting. The cursor is the (createdAt, id) pair of the last
@@ -48,31 +60,43 @@ function undoableFor(latest: boolean, action: string, commentStatus: string | un
 export async function load({ params, locals, url }) {
 	// Database outage: the layout renders the overlay; this load must not 401
 	// on the null-user outage shape.
-	if (locals.dbDown) return { ch: { id: params.id, title: '' }, entries: [], recovery: [], dispatches: [], canRecover: false, maintenance: true };
+	if (locals.dbDown) return { ch: { id: params.id, title: '' }, entries: [], recovery: [], dispatches: [], canRecover: false, maintenance: true,
+		nextDispatchHref: null, firstDispatchHref: null, nextRecoveryHref: null, firstRecoveryHref: null };
 	// Ownership-scoped: another user's channel (and its audit log) reads as "not found".
 	const ch = await ownedChannel(params.id, locals);
 	const cursor = parseCursor(url.searchParams.get('before'));
+	const afterDispatch = url.searchParams.get('afterDispatch');
+	const afterRecovery = url.searchParams.get('afterRecovery');
 	// Reservations on both restoring and already-decided comments remain
 	// visible. Never expose the dispatch owner token to the browser.
-	const dispatches = (await db.select({ id: comments.id, text: comments.text, state: comments.humanDispatchState })
+	const dispatchRows = await db.select({ id: comments.id, text: comments.text, state: comments.humanDispatchState })
 		.from(comments).where(and(eq(comments.channelId, params.id),
-			or(isNotNull(comments.humanDispatchToken), isNotNull(comments.humanDispatchState)))).all())
+			or(isNotNull(comments.humanDispatchToken), isNotNull(comments.humanDispatchState)),
+			afterDispatch === null ? undefined : gt(comments.id, afterDispatch)))
+		.orderBy(asc(comments.id)).limit(RECOVERY_PAGE_SIZE + 1).all();
+	const dispatches = dispatchRows.slice(0, RECOVERY_PAGE_SIZE)
 		.map((row) => ({ ...row, state: row.state === 'in_flight' ? 'in_flight' as const : 'uncertain' as const }));
-	const dispatchIds = new Set(dispatches.map((row) => row.id));
+	const dispatchLinks = listLinks(url, 'afterDispatch', dispatchRows.length > RECOVERY_PAGE_SIZE ? dispatches.at(-1)?.id ?? null : null);
 	// Read claims independently of the audit page: legacy claims may have no
 	// audit row at all. The stored status/binding keeps this error visible
 	// until an owner explicitly records a new decision.
 	const restoring = await db.select({
 		id: comments.id, text: comments.text, restoreIntentId: comments.restoreIntentId,
+		humanDispatchToken: comments.humanDispatchToken, humanDispatchState: comments.humanDispatchState,
 		boundId: auditLog.id, action: auditLog.action
 	}).from(comments).leftJoin(auditLog, and(
 		eq(auditLog.id, comments.restoreIntentId), eq(auditLog.channelId, comments.channelId),
 		eq(auditLog.commentId, comments.id), eq(auditLog.actor, 'user')
-	)).where(and(eq(comments.channelId, params.id), eq(comments.status, 'restoring'))).all();
-	const validClaims = new Map(restoring.filter((row) => row.boundId !== null && row.action !== null && humanFinalStatus(row.action))
-		.map((row) => [row.id, row.action]));
-	const recovery = restoring.filter((row) => !validClaims.has(row.id) && !dispatchIds.has(row.id))
+	)).where(and(eq(comments.channelId, params.id), eq(comments.status, 'restoring'),
+		afterRecovery === null ? undefined : gt(comments.id, afterRecovery)))
+		.orderBy(asc(comments.id)).limit(RECOVERY_PAGE_SIZE + 1).all();
+	// Page the raw claims before filtering. A page can contain no invalid
+	// claims but still has a visible continuation, keeping DB work bounded.
+	const restoringPage = restoring.slice(0, RECOVERY_PAGE_SIZE);
+	const recovery = restoringPage.filter((row) => !(row.boundId !== null && row.action !== null && humanFinalStatus(row.action))
+		&& row.humanDispatchToken === null && row.humanDispatchState === null)
 		.map(({ id, text, restoreIntentId }) => ({ id, text, restoreIntentId }));
+	const recoveryLinks = listLinks(url, 'afterRecovery', restoring.length > RECOVERY_PAGE_SIZE ? restoringPage.at(-1)?.id ?? null : null);
 	const rows = await db
 		.select()
 		.from(auditLog)
@@ -99,6 +123,8 @@ export async function load({ params, locals, url }) {
 	// display order. Bounded by the page's comment ids.
 	const latestIds = new Map<string, number>();
 	const statusById = new Map<string, string>();
+	const validClaims = new Map<string, string>();
+	const dispatchIds = new Set<string>();
 	if (page.length) {
 		const commentIds = [...new Set(page.map((row) => row.commentId))];
 		const latest = await db.all<{ commentId: string; latestId: number }>(sql`
@@ -114,11 +140,18 @@ export async function load({ params, locals, url }) {
 		// Comment status gates Undo the same way the handler does: offering it
 		// on a comment the handler would reject is a guaranteed-404 button.
 		const statusRows = await db
-			.select({ id: comments.id, status: comments.status })
+			.select({ id: comments.id, status: comments.status, boundId: auditLog.id, action: auditLog.action,
+				humanDispatchToken: comments.humanDispatchToken, humanDispatchState: comments.humanDispatchState })
 			.from(comments)
+			.leftJoin(auditLog, and(eq(auditLog.id, comments.restoreIntentId), eq(auditLog.channelId, comments.channelId),
+				eq(auditLog.commentId, comments.id), eq(auditLog.actor, 'user')))
 			.where(and(eq(comments.channelId, params.id), inArray(comments.id, commentIds)))
 			.all();
-		for (const row of statusRows) statusById.set(row.id, row.status);
+		for (const row of statusRows) {
+			statusById.set(row.id, row.status);
+			if (row.boundId !== null && row.action !== null && humanFinalStatus(row.action)) validClaims.set(row.id, row.action);
+			if (row.humanDispatchToken !== null || row.humanDispatchState !== null) dispatchIds.add(row.id);
+		}
 	}
 	const entries = page.map((entry) => ({
 		...entry,
@@ -129,7 +162,8 @@ export async function load({ params, locals, url }) {
 	const nextCursor = hasMore && last ? `${last.createdAt}|${last.id}` : null;
 	// Project only what the page renders — never serialize refreshTokenEnc (or
 	// any future secret column) to the browser.
-	return { ch: { id: ch.id, title: ch.title }, entries, recovery, dispatches, canRecover: locals.user?.orgRole === 'owner', nextCursor, hasPrev: cursor !== null };
+	return { ch: { id: ch.id, title: ch.title }, entries, recovery, dispatches, canRecover: locals.user?.orgRole === 'owner', nextCursor, hasPrev: cursor !== null,
+		nextDispatchHref: dispatchLinks.next, firstDispatchHref: dispatchLinks.first, nextRecoveryHref: recoveryLinks.next, firstRecoveryHref: recoveryLinks.first };
 }
 
 async function restore({ params, request, locals }: { params: { id: string }; request: Request; locals: App.Locals }, recovery = false) {
@@ -153,7 +187,7 @@ async function restore({ params, request, locals }: { params: { id: string }; re
 		.from(comments)
 		.where(and(eq(comments.id, commentId), eq(comments.channelId, params.id)))
 		.get();
-	if (recovery && (!comment || comment.status !== 'restoring' || comment.restoreIntentId !== expectedIntentId)) {
+	if (recovery && (comment?.status !== 'restoring' || comment.restoreIntentId !== expectedIntentId)) {
 		return fail(409, { error: 'This pending action changed. Refresh the log before retrying.' });
 	}
 	if (!comment || (comment.status !== 'held' && comment.status !== 'rejected' && comment.status !== 'restoring')) {
@@ -171,7 +205,7 @@ async function restore({ params, request, locals }: { params: { id: string }; re
 			if (existing) throw error(409, 'This comment has a verified pending action. Refresh the log and wait for it to finish.');
 			return null;
 		}
-		if (!existing || existing.action !== 'restore') {
+		if (existing?.action !== 'restore') {
 			throw error(409, 'This comment has a different or invalid pending action. Refresh the log or contact support before retrying Undo.');
 		}
 		return { intentId: existing.id };

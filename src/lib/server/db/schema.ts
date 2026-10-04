@@ -409,7 +409,12 @@ export const comments = sqliteTable('comments', {
 	// and unmetered verdicts stamp it too (codex).
 	scanId: text('scan_id'),
 	createdAt: text('created_at').notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`)
-}, (table) => [index('comments_channel_digested_idx').on(table.channelId, table.feedbackDigestedAt)]);
+}, (table) => [
+	index('comments_channel_digested_idx').on(table.channelId, table.feedbackDigestedAt),
+	index('comments_dispatch_recovery_idx').on(table.channelId, table.id)
+		.where(sql`${table.humanDispatchToken} is not null or ${table.humanDispatchState} is not null`),
+	index('comments_restoring_recovery_idx').on(table.channelId, table.id).where(sql`${table.status} = 'restoring'`)
+]);
 
 export const moderationActions = sqliteTable('moderation_actions', {
 	commentId: text('comment_id').primaryKey(),

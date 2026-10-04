@@ -1,5 +1,5 @@
 // Browser regression for recovery confirmation identity during auto-refresh.
-// Requires Chromium and Python Playwright; runs only local compiled components.
+// Requires Chromium and Python 3 Playwright; runs only local compiled components.
 // Run with CHROMIUM_BINARY=/usr/bin/chromium node scripts/test-recovery-confirmation.mjs.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -49,7 +49,7 @@ try {
 			}));
 		} }]
 	});
-	const result = spawnSync('python', ['-c', `
+	const result = spawnSync('python3', ['-c', `
 import os, shutil, sys
 from playwright.sync_api import sync_playwright
 with sync_playwright() as p:
@@ -63,7 +63,7 @@ with sync_playwright() as p:
  finally:
   browser.close()
 `, path.join(fixture, 'browser.js')], { encoding: 'utf8', timeout: 30_000 });
-	assert.equal(result.error, undefined, 'Python Playwright and Chromium must be available to run this regression');
+	assert.equal(result.error, undefined, 'Python 3 Playwright and Chromium must be available to run this regression');
 	assert.equal(result.status, 0, result.stderr);
 	console.log('Recovery confirmation remains attached to the same comment and binding across refresh.');
 } finally {

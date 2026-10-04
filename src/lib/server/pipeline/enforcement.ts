@@ -2,7 +2,7 @@ import { and, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { maybeTriggerAutoTopUp } from '$lib/server/billing/autotopup';
 import { db } from '$lib/server/db';
 import { auditLog, channels, comments, moderationActions } from '$lib/server/db/schema';
-import { assertBeforeDeadline, DeadlineExceededError } from '$lib/server/http';
+import { assertBeforeDeadline, DeadlineExceededError, RequestNotSentError } from '$lib/server/http';
 import {
 	CommentNotFoundError,
 	deleteComment,
@@ -603,7 +603,7 @@ export async function applyHumanIntent(
 	deadline?: number
 ): Promise<'applied' | 'missing'> {
 	if (!humanFinalStatus(action)) throw new Error(`unsupported human intent '${action}'`);
-	assertBeforeDeadline(deadline);
+	try { assertBeforeDeadline(deadline); } catch (cause) { throw new RequestNotSentError(cause); }
 	try {
 		if (action === 'approve' || action === 'restore') {
 			await setModerationStatus([commentId], 'published', false, accessToken, deadline, true);

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 // Test helper: real in-memory libsql database with the app schema.
 // Never imported by app code — tests only.
 
-import { createClient, type Client } from '@libsql/client';
+import { createClient, type Client, type InStatement } from '@libsql/client';
 import { getTableName, is } from 'drizzle-orm';
 import { drizzle, type LibSQLDatabase } from 'drizzle-orm/libsql';
 import { SQLiteTable } from 'drizzle-orm/sqlite-core';
@@ -10,6 +10,10 @@ import { beforeAll, beforeEach, vi } from 'vitest';
 import * as schema from './db/schema';
 import { consents, users } from './db/schema';
 import { LIFETIME_SLOT_LIMIT } from './billing/plans';
+
+export function statementSql(statement: InStatement): string {
+	return typeof statement === 'string' ? statement : statement.sql;
+}
 
 export interface TestDb {
 	db: LibSQLDatabase<typeof schema>;
@@ -605,5 +609,6 @@ export async function createTestDb(): Promise<TestDb> {
 	await client.executeMultiple(readFileSync(new URL('../../../drizzle/0063_welcome_campaign_pacing.sql', import.meta.url), 'utf8'));
 	await client.executeMultiple(readFileSync(new URL('../../../drizzle/0064_cron_workload_fairness.sql', import.meta.url), 'utf8'));
 	await client.executeMultiple(readFileSync(new URL('../../../drizzle/0067_welcome_discovery.sql', import.meta.url), 'utf8'));
+	await client.executeMultiple(readFileSync(new URL('../../../drizzle/0069_recovery_pagination.sql', import.meta.url), 'utf8'));
 	return { db: drizzle(client, { schema }), client };
 }

@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from 'vitest';
-import { assertBeforeDeadline, DeadlineExceededError, fetchWithRetry } from './http';
+import { assertBeforeDeadline, DeadlineExceededError, fetchSingleAttempt, fetchWithRetry } from './http';
 
 afterEach(() => {
 	vi.unstubAllGlobals();
@@ -8,6 +8,26 @@ afterEach(() => {
 	// useRealTimers would reinstall the fake one for the next test.
 	vi.restoreAllMocks();
 	vi.useRealTimers();
+});
+
+test('a single attempt distinguishes an expired deadline before sending from an in-flight timeout', async () => {
+	const fetch = vi.fn();
+	vi.stubGlobal('fetch', fetch);
+	await expect(fetchSingleAttempt('https://example.test', {}, Date.now() - 1)).rejects.toMatchObject({
+		name: 'RequestNotSentError', cause: expect.any(DeadlineExceededError)
+	});
+	expect(fetch).not.toHaveBeenCalled();
+});
+
+test('deadline expiry after a single fetch begins remains an ambiguous in-flight failure', async () => {
+	vi.spyOn(Date, 'now').mockReturnValue(1_000);
+	const fetch = vi.fn().mockImplementation(async () => {
+		vi.spyOn(Date, 'now').mockReturnValue(2_000);
+		throw new DOMException('timed out', 'TimeoutError');
+	});
+	vi.stubGlobal('fetch', fetch);
+	await expect(fetchSingleAttempt('https://example.test', {}, 1_500)).rejects.toBeInstanceOf(DeadlineExceededError);
+	expect(fetch).toHaveBeenCalledTimes(1);
 });
 
 // Stubs fetch to respond with `first` once, then 200: the request must

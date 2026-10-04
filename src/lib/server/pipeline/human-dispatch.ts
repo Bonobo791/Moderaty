@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { and, eq, isNull } from 'drizzle-orm';
 import { db, withBusyRetry } from '$lib/server/db';
 import { comments } from '$lib/server/db/schema';
-import { assertBeforeDeadline } from '$lib/server/http';
+import { DeadlineExceededError, RequestNotSentError } from '$lib/server/http';
 import { YoutubeWriteRefusedError } from '$lib/server/youtube';
 import { applyHumanIntent, assertChannelActive, finalizeHumanIntent, type ChannelIdentity } from './enforcement';
 
@@ -12,6 +12,8 @@ export const HUMAN_DISPATCH_UNCERTAIN = 'YouTube did not confirm the action. You
 export class HumanDispatchChangedError extends Error {}
 export class HumanDispatchUncertainError extends Error {}
 export class HumanFinalizeError extends Error {}
+
+const MIN_DISPATCH_BUDGET_MS = 5_000;
 
 export interface HumanDispatch {
 	channelId: string;
@@ -53,9 +55,9 @@ async function reserveCommentDispatch(channelId: string, commentId: string, stat
 
 /** Release only a known settled attempt; uncertainty keeps its owner forever. */
 async function settleHumanDispatch(claim: HumanDispatch, uncertain: boolean) {
-	await db.update(comments).set({ humanDispatchToken: uncertain ? claim.token : null, humanDispatchState: uncertain ? 'uncertain' : null })
+	await withBusyRetry(() => db.update(comments).set({ humanDispatchToken: uncertain ? claim.token : null, humanDispatchState: uncertain ? 'uncertain' : null })
 		.where(and(eq(comments.channelId, claim.channelId), eq(comments.id, claim.commentId),
-			eq(comments.humanDispatchToken, claim.token), eq(comments.humanDispatchState, 'in_flight')));
+			eq(comments.humanDispatchToken, claim.token), eq(comments.humanDispatchState, 'in_flight'))));
 }
 
 /** Dispatch once, retaining ambiguous outcomes and fencing the finalizer. */
@@ -67,7 +69,7 @@ async function dispatchOnce(claim: HumanDispatch, action: string, accessToken: s
 		if (!current || current.status !== claim.status || current.restoreIntentId !== claim.intentId || current.humanDispatchToken !== claim.token || current.humanDispatchState !== 'in_flight') {
 			throw new HumanDispatchChangedError('The pending action changed before its YouTube write.');
 		}
-		assertBeforeDeadline(deadline);
+		if (deadline !== undefined && deadline - Date.now() < MIN_DISPATCH_BUDGET_MS) throw new DeadlineExceededError();
 	} catch (cause) {
 		// No provider request began, so this reservation can safely be retried.
 		await settleHumanDispatch(claim, false);
@@ -76,9 +78,10 @@ async function dispatchOnce(claim: HumanDispatch, action: string, accessToken: s
 	try {
 		return await applyHumanIntent(claim.commentId, action, accessToken, deadline);
 	} catch (cause) {
-		const uncertain = !(cause instanceof YoutubeWriteRefusedError);
+		const uncertain = !(cause instanceof YoutubeWriteRefusedError || cause instanceof RequestNotSentError);
 		await settleHumanDispatch(claim, uncertain);
 		if (uncertain) throw new HumanDispatchUncertainError(HUMAN_DISPATCH_UNCERTAIN, { cause });
+		if (cause instanceof RequestNotSentError) throw cause.cause;
 		throw cause;
 	}
 }

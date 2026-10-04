@@ -1,0 +1,2 @@
+CREATE INDEX `comments_dispatch_recovery_idx` ON `comments` (`channel_id`,`id`) WHERE "comments"."human_dispatch_token" is not null or "comments"."human_dispatch_state" is not null;--> statement-breakpoint
+CREATE INDEX `comments_restoring_recovery_idx` ON `comments` (`channel_id`,`id`) WHERE "comments"."status" = 'restoring';

@@ -68,9 +68,9 @@ const mocks = vi.hoisted(() => {
 			status: staged?.status ?? state.commentStatuses[id] ?? 'held',
 			decidedBy: staged?.decidedBy ?? state.commentDecidedBy[id] ?? 'ai',
 			scanId: staged?.scanId ?? null,
-			restoreIntentId: staged?.restoreIntentId ?? state.commentRestoreIntentIds[id] ?? null,
-			humanDispatchToken: staged?.humanDispatchToken ?? state.commentHumanDispatchTokens[id] ?? null,
-			humanDispatchState: staged?.humanDispatchState ?? state.commentHumanDispatchStates[id] ?? null
+			restoreIntentId: staged?.restoreIntentId !== undefined ? staged.restoreIntentId : state.commentRestoreIntentIds[id] ?? null,
+			humanDispatchToken: staged?.humanDispatchToken !== undefined ? staged.humanDispatchToken : state.commentHumanDispatchTokens[id] ?? null,
+			humanDispatchState: staged?.humanDispatchState !== undefined ? staged.humanDispatchState : state.commentHumanDispatchStates[id] ?? null
 		};
 	};
 	const commentsAll = (condition: unknown) => {
@@ -441,7 +441,8 @@ vi.mock('recheck', () => ({ checkSync: mocks.checkSync }));
 vi.mock('$lib/server/crypto', () => ({ decrypt: mocks.decrypt }));
 vi.mock('$lib/server/db', () => ({ db: mocks.db, withBusyRetry: (run: () => Promise<unknown>) => run() }));
 vi.mock('$env/dynamic/private', () => ({ env: mocks.state.env }));
-vi.mock('$lib/server/http', () => ({
+vi.mock('$lib/server/http', async (original) => ({
+	...await original<typeof import('$lib/server/http')>(),
 	assertBeforeDeadline: mocks.assertBeforeDeadline,
 	DeadlineExceededError: mocks.DeadlineExceededError,
 	// importOriginal evaluates the real youtube.ts under this mock — its

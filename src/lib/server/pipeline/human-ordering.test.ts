@@ -1,6 +1,6 @@
 import { beforeEach, expect, test, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
-import { TEST_OWNER, postForm, setupTestDb, testDb } from '$lib/server/testdb';
+import { TEST_OWNER, postForm, setupTestDb, statementSql, testDb } from '$lib/server/testdb';
 import { auditLog, channels, comments, moderationActions } from '$lib/server/db/schema';
 
 const provider = vi.hoisted(() => ({
@@ -16,8 +16,9 @@ vi.mock('$lib/server/youtube', async (original) => ({
 
 import { actions as queue } from '../../../routes/(app)/channels/[id]/queue/+page.server';
 import { actions as log } from '../../../routes/(app)/channels/[id]/log/+page.server';
-import { finalizeHumanIntent, runEnforcement } from './enforcement';
+import { applyHumanIntent, finalizeHumanIntent, runEnforcement } from './enforcement';
 import { stageDecisions } from './staging';
+import { DeadlineExceededError, RequestNotSentError } from '$lib/server/http';
 
 setupTestDb(['channels', 'comments', 'audit_log', 'moderation_actions']);
 beforeEach(async () => {
@@ -39,6 +40,75 @@ function deferred() {
 const row = () => testDb().db.select().from(comments).where(eq(comments.id, 'comment')).get();
 const reconcile = () => runEnforcement('channel', 'access-token', undefined, null, 0);
 
+function rescanApproval() {
+	return stageDecisions('channel', [{
+		comment: { id: 'comment', threadId: 'thread', videoId: null, authorChannelId: 'author', authorName: 'Author', text: 'Comment', publishedAt: '2026-01-01T00:00:00Z' },
+		status: 'approved', decidedBy: 'allowlist', matchedRuleId: null, aiScore: null,
+		auditAction: 'approve', reason: 'Rescan', youtubeAction: null
+	}], { rescan: { scanStamp: 'new-scan' } });
+}
+
+test.each(['rejection', 'restore'])('a rescan preserves the recorded %s while token refresh precedes dispatch reservation', async (action) => {
+	if (action === 'restore') await testDb().db.update(comments).set({ status: 'held' }).where(eq(comments.id, 'comment'));
+	const entered = deferred();
+	const finish = deferred();
+	provider.refreshAccessToken.mockImplementationOnce(async () => { entered.resolve(); await finish.promise; return 'access-token'; });
+	const original = action === 'restore' ? log.undo(event()) : queue.reject(event());
+	await entered.promise;
+	try {
+		const before = await row();
+		expect(before).toMatchObject({ status: 'restoring', restoreIntentId: expect.any(Number), humanDispatchToken: null });
+		await rescanApproval();
+		expect(await row()).toMatchObject({ status: 'restoring', restoreIntentId: before!.restoreIntentId, humanDispatchToken: null, scanId: 'new-scan' });
+		expect(await testDb().db.select().from(auditLog)).toHaveLength(1);
+	} finally { finish.resolve(); await original; }
+	expect(provider.setModerationStatus).toHaveBeenCalledTimes(1);
+	expect(await row()).toMatchObject({ status: action === 'restore' ? 'approved' : 'rejected', decidedBy: 'human', restoreIntentId: null });
+});
+
+test('the human intent preflight reports deadline expiry as a request that never began', async () => {
+	await expect(applyHumanIntent('comment', 'reject', 'access-token', Date.now() - 1)).rejects.toMatchObject({
+		name: 'RequestNotSentError', cause: expect.any(DeadlineExceededError)
+	});
+	expect(provider.setModerationStatus).not.toHaveBeenCalled();
+});
+
+test('a local preparation failure before fetch returns the claim safely to the queue', async () => {
+	provider.setModerationStatus.mockRejectedValueOnce(new RequestNotSentError(new DeadlineExceededError()));
+	expect(await queue.reject(event())).toMatchObject({ status: 500 });
+	expect(await row()).toMatchObject({ status: 'pending', restoreIntentId: null, humanDispatchToken: null, humanDispatchState: null });
+	expect(await testDb().db.select().from(auditLog)).toEqual([]);
+});
+
+test('a settled corrective write releases its reservation after transient SQLite contention', async () => {
+	await testDb().db.update(comments).set({ status: 'rejected', decidedBy: 'human' }).where(eq(comments.id, 'comment'));
+	await testDb().db.insert(moderationActions).values({ channelId: 'channel', commentId: 'comment', action: 'hold', reason: 'Raced hold', state: 'cancelling' });
+	const client = testDb().client;
+	const execute = client.execute.bind(client);
+	let blocked = false;
+	const spy = vi.spyOn(client, 'execute').mockImplementation(async (...args) => {
+		const sql = statementSql(args[0]);
+		if (!blocked && sql.startsWith('update "comments" set "human_dispatch_token"')) {
+			blocked = true;
+			throw Object.assign(new Error('database is busy'), { code: 'SQLITE_BUSY' });
+		}
+		return execute(...args);
+	});
+	try { await reconcile(); } finally { spy.mockRestore(); }
+	expect(blocked).toBe(true);
+	expect(provider.setModerationStatus).toHaveBeenCalledTimes(1);
+	expect(await row()).toMatchObject({ humanDispatchToken: null, humanDispatchState: null });
+	expect((await testDb().db.select().from(moderationActions).get())?.state).toBe('superseded');
+});
+
+test('cron defers a human intent when too little request budget remains', async () => {
+	const [intent] = await testDb().db.insert(auditLog).values({ channelId: 'channel', commentId: 'comment', action: 'reject', actor: 'user', reason: 'Recorded intent' }).returning({ id: auditLog.id });
+	await testDb().db.update(comments).set({ status: 'restoring', restoreIntentId: intent.id }).where(eq(comments.id, 'comment'));
+	await expect(runEnforcement('channel', 'access-token', Date.now() + 1_000, null, 0)).rejects.toBeInstanceOf(DeadlineExceededError);
+	expect(provider.setModerationStatus).not.toHaveBeenCalled();
+	expect(await row()).toMatchObject({ status: 'restoring', restoreIntentId: intent.id, humanDispatchToken: null, humanDispatchState: null });
+});
+
 test('a history rescan preserves an active human decision and its audit while recording the scan', async () => {
 	const entered = deferred();
 	const finish = deferred();
@@ -47,11 +117,7 @@ test('a history rescan preserves an active human decision and its audit while re
 	await entered.promise;
 	try {
 		const before = await row();
-		await stageDecisions('channel', [{
-			comment: { id: 'comment', threadId: 'thread', videoId: null, authorChannelId: 'author', authorName: 'Author', text: 'Comment', publishedAt: '2026-01-01T00:00:00Z' },
-			status: 'approved', decidedBy: 'allowlist', matchedRuleId: null, aiScore: null,
-			auditAction: 'approve', reason: 'Rescan', youtubeAction: null
-		}], { rescan: { scanStamp: 'new-scan' } });
+		await rescanApproval();
 		expect(await row()).toMatchObject({ status: 'restoring', restoreIntentId: before!.restoreIntentId, humanDispatchToken: before!.humanDispatchToken, scanId: 'new-scan' });
 		expect(await testDb().db.select().from(auditLog)).toHaveLength(1);
 	} finally { finish.resolve(); await original; }
@@ -83,12 +149,12 @@ test('cron cannot finish a duplicate rejection while the original request can st
 	expect(remote).toBe('published');
 });
 
-test('an uncertain rejection keeps its exact intent and blocks a newer approval', async () => {
+test.each([new TypeError('connection lost after dispatch'), new DeadlineExceededError()])('an uncertain rejection keeps its exact intent and blocks a newer approval after %s', async (failureCause) => {
 	let remote = 'published';
 	let lateWrite!: () => void;
 	provider.setModerationStatus.mockImplementationOnce(async () => {
 		lateWrite = () => { remote = 'rejected'; };
-		throw new TypeError('connection lost after dispatch');
+		throw failureCause;
 	}).mockImplementation(async (_ids, status) => { remote = status; });
 	const failure = await queue.reject(event());
 	expect(failure).toMatchObject({ status: 500 });

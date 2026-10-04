@@ -10,6 +10,14 @@ export class DeadlineExceededError extends Error {
 export class HttpResponseError extends Error {}
 export class HttpTransportError extends Error {}
 
+/** Local preparation failed before fetch began; no remote mutation is possible. */
+export class RequestNotSentError extends Error {
+	constructor(cause: unknown) {
+		super('request was not sent', { cause });
+		this.name = 'RequestNotSentError';
+	}
+}
+
 function transportFailure(cause: unknown): HttpTransportError {
 	if (cause instanceof TypeError || (cause instanceof DOMException && ['AbortError', 'TimeoutError', 'NetworkError'].includes(cause.name))) {
 		return new HttpTransportError(cause.message, { cause });
@@ -96,12 +104,15 @@ function requestTimeout(deadline?: number): number {
 
 type FetchAttempt = { response: Response } | { error: unknown };
 
-async function fetchAttempt(input: RequestInfo | URL, init: RequestInit, deadline?: number): Promise<FetchAttempt> {
+async function fetchAttempt(input: RequestInfo | URL, init: RequestInit, deadline?: number, distinguishUnsent = false): Promise<FetchAttempt> {
+	let started = false;
 	try {
 		const timeout = AbortSignal.timeout(requestTimeout(deadline));
 		const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+		started = true;
 		return { response: await fetch(input, { ...init, signal }) };
 	} catch (error) {
+		if (distinguishUnsent && !started) throw new RequestNotSentError(error);
 		if (init.signal?.aborted) throw error;
 		if (
 			// Stryker disable next-line ConditionalExpression: `deadline !== undefined` -> `true` is equivalent — `Date.now() >= undefined` is always false, so the && result is unchanged; the directive also sweeps the killable whole-condition siblings that start on the same line
@@ -114,7 +125,7 @@ async function fetchAttempt(input: RequestInfo | URL, init: RequestInit, deadlin
 
 /** One bounded attempt for mutations whose uncertain outcome must stay visible. */
 export async function fetchSingleAttempt(input: RequestInfo | URL, init: RequestInit = {}, deadline?: number): Promise<Response> {
-	const attempt = await fetchAttempt(input, init, deadline);
+	const attempt = await fetchAttempt(input, init, deadline, true);
 	if ('error' in attempt) throw attempt.error;
 	return attempt.response;
 }

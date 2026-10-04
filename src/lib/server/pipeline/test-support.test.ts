@@ -7,6 +7,15 @@ const mocks = getMocks();
 beforeEach(resetPipelineMocks);
 afterEach(restoreDryRun);
 
+test('explicitly cleared staged intent and dispatch fields replace seeded values', async () => {
+	mocks.state.commentRestoreIntentIds.comment = 7;
+	mocks.state.commentHumanDispatchTokens.comment = 'old-token';
+	mocks.state.commentHumanDispatchStates.comment = 'uncertain';
+	mocks.state.insertedComments = [{ id: 'comment', restoreIntentId: null, humanDispatchToken: null, humanDispatchState: null }];
+	const [row] = await mocks.db.select().from(comments).where(eq(comments.id, 'comment')).all();
+	expect(row).toMatchObject({ restoreIntentId: null, humanDispatchToken: null, humanDispatchState: null });
+});
+
 test.each(['ID first', 'ID last'])('audit queries select the exact intent with %s', async (order) => {
 	mocks.state.insertedAudits = [
 		{ id: 7, channelId: 'channel', commentId: 'comment', actor: 'user', action: 'restore' },

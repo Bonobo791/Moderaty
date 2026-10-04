@@ -162,8 +162,10 @@ the cursor, revisiting failed or newly eligible accounts and later inserts that
 sort before the previous position. A 60-second discovery lease and claim-token
 checks prevent overlapping or expired workers from overwriting that position.
 The inspected position and successful enrollment commit together; failed
-enrollment advances the position separately so one failing account cannot pin
-the remaining users. Migration `0067_welcome_discovery` creates this state.
+enrollment advances the position separately while the worker still owns a valid
+lease. An expired worker reports the failure but leaves the saved position for
+the next worker to retry; it cannot advance another worker's checkpoint.
+Migration `0067_welcome_discovery` creates this state.
 
 `welcomeEmailCandidatesScanned` counts users inspected for enrollment, including
 excluded and already enrolled users, and is at most 25 per tick. SQLite regression

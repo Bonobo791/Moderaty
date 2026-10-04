@@ -242,17 +242,18 @@ async function chargeBillableDecisions(
  * assert, and rescan mode (upserts + scan-scoped charge anchors). */
 export type StageOptions = { orgId?: string | null; expected?: ChannelIdentity; rescan?: RescanCharge };
 
-async function preserveRescanDispatches(transaction: LedgerHandle, channelId: string, decisions: Decision[], scanStamp?: string | null): Promise<Decision[]> {
-	const existing = await transaction.select({ id: comments.id, humanDispatchToken: comments.humanDispatchToken, humanDispatchState: comments.humanDispatchState })
+async function preserveRescanHumanClaims(transaction: LedgerHandle, channelId: string, decisions: Decision[], scanStamp?: string | null): Promise<Decision[]> {
+	const existing = await transaction.select({ id: comments.id, status: comments.status, humanDispatchToken: comments.humanDispatchToken, humanDispatchState: comments.humanDispatchState })
 		.from(comments).where(and(eq(comments.channelId, channelId), inArray(comments.id, decisions.map(decision => decision.comment.id)))).all();
-	const reserved = existing.filter(row => row.humanDispatchToken !== null || row.humanDispatchState !== null).map(row => row.id);
+	const reserved = existing.filter(row => row.status === 'restoring' || row.humanDispatchToken !== null || row.humanDispatchState !== null).map(row => row.id);
 	if (!reserved.length) return decisions;
-	// Record this scan's visit without changing the active/uncertain
+	// The restoring claim owns intent before token refresh and reservation.
+	// Record this scan's visit without changing that pending/active/uncertain
 	// decision, its action rows, audit history, or credit balance.
 	await transaction.update(comments).set({ scanId: scanStamp ?? null })
 		.where(and(eq(comments.channelId, channelId), inArray(comments.id, reserved)));
 	const reservedIds = new Set(reserved);
-	console.warn('staging: preserved %d reserved moderation decisions during history rescan', reserved.length);
+	console.warn('staging: preserved %d pending or reserved human decisions during history rescan', reserved.length);
 	return decisions.filter(decision => !reservedIds.has(decision.comment.id));
 }
 
@@ -266,7 +267,7 @@ export async function stageDecisions(channelId: string, decisions: Decision[], o
 		await assertChannelActive(channelId, transaction, options.expected);
 		const handle = transaction as LedgerHandle;
 		if (options.rescan) {
-			decisions = await preserveRescanDispatches(handle, channelId, decisions, options.rescan.scanStamp);
+			decisions = await preserveRescanHumanClaims(handle, channelId, decisions, options.rescan.scanStamp);
 			if (!decisions.length) return;
 			await upsertRescannedCommentRows(handle, channelId, decisions, options.rescan.scanStamp);
 		} else {

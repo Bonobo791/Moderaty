@@ -49,7 +49,10 @@ export const withBusyRetry = async <T>(work: () => Promise<T>, attempts = 3): Pr
 		try {
 			return await work();
 		} catch (error) {
-			const code = (error as { code?: string }).code ?? '';
+			// Drizzle wraps failed statements in a query error; libSQL's lock
+			// code lives on its cause rather than on that wrapper.
+			const failure = error as { code?: string; cause?: { code?: string } };
+			const code = failure.code ?? failure.cause?.code ?? '';
 			if (attempt >= attempts || !/^SQLITE_(LOCKED|BUSY)/.test(code)) throw error;
 			await new Promise((resolve) => setTimeout(resolve, attempt * 25));
 		}

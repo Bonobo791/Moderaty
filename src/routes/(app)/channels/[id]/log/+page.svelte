@@ -29,7 +29,7 @@
 	restored here; deletions and author bans are permanent.
 </p>
 
-{#if data.dispatches.length}
+{#if data.dispatches.length || data.nextDispatchHref || data.firstDispatchHref}
 	<div class="card">
 		<h2>Pending YouTube actions</h2>
 		{#each data.dispatches as comment (comment.id)}
@@ -43,16 +43,24 @@
 				{/if}
 			</p>
 		{/each}
+		<nav class="pager" aria-label="Pending YouTube action pages">
+			{#if data.firstDispatchHref}<a class="btn secondary small" href={data.firstDispatchHref}>First pending actions</a>{/if}
+			{#if data.nextDispatchHref}<a class="btn secondary small" href={data.nextDispatchHref}>More pending YouTube actions →</a>{/if}
+		</nav>
 	</div>
 {/if}
 
-{#if data.recovery.length}
+{#if data.recovery.length || data.nextRecoveryHref || data.firstRecoveryHref}
 	<div class="card">
 		<h2>Comments needing recovery</h2>
+		{#if data.recovery.length}
 		<p class="error-box" role="alert">
 			Automatic recovery is paused because these pending actions could not be verified.
 			Restore only if you want the comment published on YouTube. Deleted comments and author bans cannot be reversed.
 		</p>
+		{:else}
+			<p class="muted">Continue through the pending claims to check whether any need recovery.</p>
+		{/if}
 		{#each data.recovery as comment (`${comment.id}:${comment.restoreIntentId ?? ''}`)}
 			<p>{comment.text}<br /><small class="muted">{comment.id}</small></p>
 			{#if data.canRecover}
@@ -69,6 +77,10 @@
 				<p class="muted">Ask your organization owner to choose whether to restore this comment.</p>
 			{/if}
 		{/each}
+		<nav class="pager" aria-label="Pending claim pages">
+			{#if data.firstRecoveryHref}<a class="btn secondary small" href={data.firstRecoveryHref}>First pending claims</a>{/if}
+			{#if data.nextRecoveryHref}<a class="btn secondary small" href={data.nextRecoveryHref}>More pending claims →</a>{/if}
+		</nav>
 	</div>
 {/if}
 

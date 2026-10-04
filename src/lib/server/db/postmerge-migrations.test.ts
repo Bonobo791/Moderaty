@@ -27,7 +27,7 @@ function migrationFolder(entries: Entry[]) {
 async function database() {
 	const client = createClient({ url: 'file::memory:' });
 	clients.push(client);
-	await client.executeMultiple("CREATE TABLE comments (id TEXT PRIMARY KEY, status TEXT NOT NULL); INSERT INTO comments VALUES ('legacy', 'restoring');");
+	await client.executeMultiple("CREATE TABLE comments (id TEXT PRIMARY KEY, channel_id TEXT NOT NULL DEFAULT 'channel', status TEXT NOT NULL); INSERT INTO comments (id, status) VALUES ('legacy', 'restoring');");
 	return client;
 }
 
@@ -48,6 +48,12 @@ async function expectRecorded(client: Client) {
 afterEach(() => {
 	for (const client of clients.splice(0)) client.close();
 	for (const folder of folders.splice(0)) rmSync(folder, { recursive: true, force: true });
+});
+
+test('new migration SQL stays free of explanatory comment blocks before deployment hashes it', () => {
+	for (const entry of journal.entries.filter((entry: Entry) => entry.idx >= 66)) {
+		expect(readFileSync(new URL(`../../../../drizzle/${entry.tag}.sql`, import.meta.url), 'utf8')).not.toMatch(/^--(?!>)/m);
+	}
 });
 
 test('the combined journal creates the scheduler on a fresh upgrade and preserves legacy intent', async () => {

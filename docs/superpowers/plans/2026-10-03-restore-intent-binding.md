@@ -51,7 +51,7 @@
 - Existing restoring rows are deliberately left unbound; no historical action is guessed or replayed
 - The audit log lists unverifiable restoring claims independently of audit pagination, including rows without audit history; an organization owner can explicitly confirm a new restore request without borrowing historical intent
 - Ordinary Undo resumes only verified restore claims; valid pending approve/reject/delete/ban intents cannot be replaced by owner recovery, and stale recovery forms are fenced on their observed binding
-- Recovery validates the current connector and then rereads the exact comment claim as its last awaited database operation before dispatch, skipping claims replaced since the initial snapshot
+- Recovery validates the current connector, rereads the exact comment claim, and conditionally reserves it before dispatch; the reservation and subsequent preflight fence claims changed since the initial snapshot
 - The October 4 post-merge fix adds durable dispatch ownership for human intents and decided-state corrections; its recovery limits are described below
 - No production records were inspected, so whether any existing row needs manual recovery is unknown
 - All database verification here uses disposable local SQLite only
@@ -69,9 +69,10 @@
 ## October 4 post-merge remote ordering fix
 
 - Nullable `comments.humanDispatchToken` and `humanDispatchState` reserve one comment for a human write or a corrective write. Routes and cron cannot dispatch the same intent concurrently; finalization requires the dispatch owner as well as the exact audit binding.
-- Human mutations use one bounded HTTP attempt. Transparent retries after a transport failure could otherwise report a later success while the earlier write still runs remotely.
+- Human mutations use one bounded HTTP attempt. Cron defers dispatch with less than five seconds remaining, and preparation failures before fetch release reservations. Transparent retries after a transport failure could otherwise report a later success while the earlier write still runs remotely.
 - Predispatch credential/channel failures and settled validation, authorization, or quota refusals can release a fresh claim safely. A known successful remote call followed by a database failure keeps its exact intent and releases only the settled reservation, so cron can finish recording it.
 - A timeout, transport failure, uncertain server response, or process crash keeps the durable reservation. There is no expiring takeover: YouTube provides no fencing token or cancellation proof. Unknown outcomes pause newer human actions and staged enforcement and require manual investigation before any operator clears the reservation.
-- The audit log displays active and uncertain writes independently of pagination, including corrections on already-decided comments. These rows cannot offer a new restore/Undo while their prior write may still land; unverifiable legacy claims without a reservation retain confirmed owner recovery.
-- History rescans preserve reserved decisions, their action rows, audit history, and credit balance. They record the scan visit so a paused page does not repeatedly reclassify the same reserved comment.
+- The audit log displays active and uncertain writes independently of audit pagination, including corrections on already-decided comments. Both blocked lists use separate 100-row keyset pages and partial indexes; continuation links remain visible even when a pending-claim page contains no claims needing recovery. Undo eligibility is resolved independently for each audit page. These rows cannot offer a new restore/Undo while their prior write may still land; unverifiable legacy claims without a reservation retain confirmed owner recovery.
+- History rescans preserve recorded restoring claims before token refresh as well as reserved decisions, their action rows, audit history, and credit balance. They record the scan visit so a paused page does not repeatedly reclassify the same pending comment.
+- Reservation settlement retries transient SQLite lock contention, including Drizzle-wrapped driver errors; prolonged database failure still needs investigation.
 - This does not provide provider exactly-once delivery or replace the existing automated moderation outbox. Previously dispatched automated writes retain their existing convergence behavior.

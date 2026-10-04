@@ -430,6 +430,8 @@ describe('comments', () => {
 			published_at: { notNull: true },
 			status: { notNull: true },
 			restore_intent_id: { notNull: false },
+			human_dispatch_token: { notNull: false },
+			human_dispatch_state: { notNull: false },
 			decided_by: { notNull: true },
 			matched_rule_id: { notNull: false },
 			ai_score: { notNull: false },

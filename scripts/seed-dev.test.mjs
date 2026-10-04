@@ -5,11 +5,13 @@
 // breaks the moment it lands.
 
 import { execFile } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { createClient } from '@libsql/client';
+import { drizzle } from 'drizzle-orm/libsql';
+import { migrate } from 'drizzle-orm/libsql/migrator';
 import { afterAll, describe, expect, it } from 'vitest';
 
 const execFileAsync = promisify(execFile);
@@ -71,21 +73,13 @@ CREATE TABLE audit_log (
 
 async function applyMigrations(url) {
 	const client = createClient({ url });
-	for (const statement of BASE_DDL.split(';')) {
-		const trimmed = statement.trim();
-		if (trimmed) await client.execute(trimmed);
+	try {
+		await client.executeMultiple(BASE_DDL);
+		// Exercise the actual journal and bookkeeping, including repair migrations.
+		await migrate(drizzle(client), { migrationsFolder: DRIZZLE.pathname });
+	} finally {
+		client.close();
 	}
-	const files = readdirSync(DRIZZLE)
-		.filter((f) => f.endsWith('.sql'))
-		.sort();
-	for (const file of files) {
-		const sql = readFileSync(new URL(`../drizzle/${file}`, import.meta.url), 'utf8');
-		for (const statement of sql.split('--> statement-breakpoint')) {
-			const trimmed = statement.trim();
-			if (trimmed) await client.execute(trimmed);
-		}
-	}
-	client.close();
 }
 
 describe('seed-dev comment author PII (PR #40 review)', () => {

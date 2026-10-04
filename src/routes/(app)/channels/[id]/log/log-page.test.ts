@@ -26,6 +26,7 @@ function renderLog(overrides: Record<string, unknown> = {}) {
 				ch: { id: 'UC1', title: 'Ch' },
 				entries: [ENTRY],
 				recovery: [],
+				dispatches: [],
 				canRecover: true,
 				nextCursor: null,
 				hasPrev: false,
@@ -103,5 +104,14 @@ test('a blocked comment with no audit entry renders a visible error and a confir
 test('members see an owner recovery instruction without a recovery form', () => {
 	const body = renderLog({ recovery: [{ id: 'blocked', text: 'blocked text', restoreIntentId: null }], canRecover: false });
 	expect(body).toContain('Ask your organization owner');
+	expect(body).not.toContain('action="?/recoverRestore"');
+});
+
+test.each(['in_flight', 'uncertain'])('a %s write displays its paused-action explanation without a restore form', (state) => {
+	const body = renderLog({ entries: [], dispatches: [{ id: 'blocked', text: 'Pending remote result', state }] });
+	expect(body).toContain('Pending YouTube actions');
+	expect(body).toContain('Pending remote result');
+	expect(body).toContain('Further actions are paused');
+	expect(body).toContain(state === 'uncertain' ? 'Contact support' : 'Check again shortly');
 	expect(body).not.toContain('action="?/recoverRestore"');
 });

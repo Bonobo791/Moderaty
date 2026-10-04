@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import { setupTestDb, testDb } from './testdb';
 import { channels, cronWorkloadState, feedbackDigests } from './db/schema';
 import { claimCronWorkload } from './cronWorkload';
+import { seedPendingFeedbackPreview, withTestTrigger } from './cronTestSupport';
 
 setupTestDb(['channels', 'feedback_digests', 'cron_workload_state']);
 afterEach(() => vi.restoreAllMocks());
@@ -12,10 +13,7 @@ async function seedWork() {
 		{ id: 'UC-a', title: 'Preview channel', refreshTokenEnc: 'enc' },
 		{ id: 'UC-b', title: 'Live channel', refreshTokenEnc: 'enc' }
 	]);
-	await testDb().db.insert(feedbackDigests).values({
-		channelId: 'UC-a', windowStart: '2026-01-01T00:00:00.000Z',
-		windowEnd: new Date().toISOString(), status: 'dry-run-pending'
-	});
+	await seedPendingFeedbackPreview('UC-a', { boundary: '2026-01-01T00:00:00.000Z' });
 }
 
 async function nextWorkload() {
@@ -41,45 +39,29 @@ test('concurrent scheduler calls cannot lease the same channel or spend the same
 	expect((await claimCronWorkload(Date.now() + 20_000)).kind).toBe('none');
 });
 
-test('a failed turn write rolls back both the channel lease and first preview attempt', async () => {
+test.each([
+	{ write: 'turn', table: 'cron_workload_state', message: 'turn unavailable' },
+	{ write: 'first-attempt', table: 'feedback_digests', message: 'attempt unavailable' }
+])('a failed $write write rolls back the channel lease and first preview attempt without advancing the turn', async ({ table, message }) => {
 	await seedWork();
-	await testDb().client.execute(`CREATE TRIGGER fail_turn BEFORE UPDATE ON cron_workload_state
-		BEGIN SELECT RAISE(ABORT, 'turn unavailable'); END`);
-	try {
-		await expect(claimCronWorkload(Date.now() + 20_000)).rejects.toMatchObject({ cause: { message: expect.stringContaining('turn unavailable') } });
+	await withTestTrigger('fail_claim_write', `BEFORE UPDATE ON ${table}
+		BEGIN SELECT RAISE(ABORT, '${message}'); END`, async () => {
+		await expect(claimCronWorkload(Date.now() + 20_000)).rejects.toMatchObject({ cause: { message: expect.stringContaining(message) } });
 		await expectUnclaimed();
 		expect(await nextWorkload()).toBeUndefined();
-	} finally {
-		await testDb().client.execute('DROP TRIGGER fail_turn');
-	}
+	});
 	expect((await claimCronWorkload(Date.now() + 20_000)).kind).toBe('preview');
 	expect(await nextWorkload()).toBe('live');
 });
 
 test('a zero-row channel claim does not spend the turn or mark the preview attempted', async () => {
 	await seedWork();
-	await testDb().client.execute(`CREATE TRIGGER lose_claim BEFORE UPDATE ON channels
-		WHEN NEW.lease_expires_at IS NOT NULL BEGIN SELECT RAISE(IGNORE); END`);
-	try {
+	await withTestTrigger('lose_claim', `BEFORE UPDATE ON channels
+		WHEN NEW.lease_expires_at IS NOT NULL BEGIN SELECT RAISE(IGNORE); END`, async () => {
 		expect(await claimCronWorkload(Date.now() + 20_000)).toEqual({ kind: 'claim-lost', channelId: 'UC-a' });
 		await expectUnclaimed();
 		expect(await nextWorkload()).toBe('preview');
-	} finally {
-		await testDb().client.execute('DROP TRIGGER lose_claim');
-	}
-});
-
-test('a first-attempt write failure rolls back the lease without advancing the turn', async () => {
-	await seedWork();
-	await testDb().client.execute(`CREATE TRIGGER fail_attempt BEFORE UPDATE ON feedback_digests
-		BEGIN SELECT RAISE(ABORT, 'attempt unavailable'); END`);
-	try {
-		await expect(claimCronWorkload(Date.now() + 20_000)).rejects.toMatchObject({ cause: { message: expect.stringContaining('attempt unavailable') } });
-		await expectUnclaimed();
-		expect(await nextWorkload()).toBeUndefined();
-	} finally {
-		await testDb().client.execute('DROP TRIGGER fail_attempt');
-	}
+	});
 });
 
 test('live-only work remains available while the missing preview class keeps its turn', async () => {
@@ -89,10 +71,7 @@ test('live-only work remains available while the missing preview class keeps its
 	expect(first.kind).toBe('live');
 	expect(await nextWorkload()).toBe('preview');
 	await testDb().db.update(channels).set({ leaseExpiresAt: null });
-	await testDb().db.insert(feedbackDigests).values({
-		channelId: 'UC-a', windowStart: '2026-01-01T00:00:00.000Z',
-		windowEnd: new Date().toISOString(), status: 'dry-run-pending'
-	});
+	await seedPendingFeedbackPreview('UC-a', { boundary: '2026-01-01T00:00:00.000Z' });
 	expect((await claimCronWorkload(Date.now() + 20_000)).kind).toBe('preview');
 });
 

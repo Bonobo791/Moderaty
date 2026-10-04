@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { maybeTriggerAutoTopUp } from '$lib/server/billing/autotopup';
 import { db } from '$lib/server/db';
 import { auditLog, channels, comments, moderationActions } from '$lib/server/db/schema';
@@ -10,6 +10,7 @@ import {
 	YOUTUBE_ID_BATCH_SIZE
 } from '$lib/server/youtube';
 import type { OutstandingAction, YoutubeAction } from './types';
+import { executeDecidedDispatch, executeHumanDispatch, reserveDecidedDispatch, reserveHumanDispatch } from './human-dispatch';
 
 /** Thrown when account deletion deactivates (or removes) the channel mid-run. */
 export class ChannelDeactivatedError extends Error {}
@@ -280,7 +281,10 @@ async function convergeOneHold(
 	expected?: ChannelIdentity
 ): Promise<boolean> {
 	await assertChannelActive(action.channelId, db, expected);
-	const outcome = await applyHumanIntent(action.commentId, intent, accessToken, deadline);
+	if (status === undefined) return false;
+	const dispatch = await reserveDecidedDispatch(action.channelId, action.commentId, status, expected);
+	if (!dispatch) return false;
+	const outcome = await executeDecidedDispatch(dispatch, intent, accessToken, expected, deadline);
 	if (outcome === 'missing' && intent !== 'delete') {
 		// The corrective write 404'd: YouTube has no comment to publish
 		// or reject — a dispatched delete already landed (or the owner
@@ -529,16 +533,16 @@ async function processOutstandingActions(channelId: string, accessToken: string,
 			inArray(moderationActions.state, ['pending', 'dispatched', 'cancelling'])
 		))
 		.all()).map(outstandingAction);
-	// A 'restoring' comment is owned by the human flow end-to-end: its
-	// outstanding action rows are bookkeeping only, and finalizeHumanIntent
-	// terminalizes them — this sweep must neither apply nor supersede them
-	// (codex).
+	// Human claims and unresolved corrective writes own their comment.
+	// A rescan may change its local status, but no newer staged enforcement
+	// can bypass the durable reservation while an older write may land.
 	const restoringIds = actions.length
 		? (
 				await db
 					.select({ id: comments.id })
 					.from(comments)
-					.where(and(eq(comments.channelId, channelId), eq(comments.status, 'restoring')))
+					.where(and(eq(comments.channelId, channelId), or(eq(comments.status, 'restoring'),
+						isNotNull(comments.humanDispatchToken), isNotNull(comments.humanDispatchState))))
 					.all()
 			).map((row) => row.id)
 		: [];
@@ -602,11 +606,11 @@ export async function applyHumanIntent(
 	assertBeforeDeadline(deadline);
 	try {
 		if (action === 'approve' || action === 'restore') {
-			await setModerationStatus([commentId], 'published', false, accessToken, deadline);
+			await setModerationStatus([commentId], 'published', false, accessToken, deadline, true);
 		} else if (action === 'reject' || action === 'ban') {
-			await setModerationStatus([commentId], 'rejected', action === 'ban', accessToken, deadline);
+			await setModerationStatus([commentId], 'rejected', action === 'ban', accessToken, deadline, true);
 		} else {
-			await deleteComment(commentId, accessToken, deadline);
+			await deleteComment(commentId, accessToken, deadline, true);
 		}
 	} catch (error) {
 		if (!(error instanceof CommentNotFoundError)) throw error;
@@ -634,29 +638,37 @@ export async function finalizeHumanIntent(
 	commentId: string,
 	action: string,
 	intentId: number,
-	expected?: ChannelIdentity
-): Promise<void> {
+	expected?: ChannelIdentity,
+	dispatchToken?: string
+): Promise<boolean> {
 	const status = humanFinalStatus(action);
 	if (!status) throw new Error(`unsupported human intent '${action}'`);
 	const agreeing = (Object.keys(ACTION_OUTCOME) as YoutubeAction[]).filter((verb) => ACTION_OUTCOME[verb] === status);
-	await db.transaction(async (transaction) => {
+	return db.transaction(async (transaction) => {
 		await assertChannelActive(channelId, transaction, expected);
 		const claimed = await transaction
 			.update(comments)
-			.set({ status, decidedBy: 'human', restoreIntentId: null })
+			.set({ status, decidedBy: 'human', restoreIntentId: null, humanDispatchToken: null, humanDispatchState: null })
 			.where(and(
 				eq(comments.id, commentId),
 				eq(comments.channelId, channelId),
 				eq(comments.status, 'restoring'),
-				eq(comments.restoreIntentId, intentId)
+				eq(comments.restoreIntentId, intentId),
+				dispatchToken ? eq(comments.humanDispatchToken, dispatchToken) : isNull(comments.humanDispatchToken),
+				dispatchToken ? eq(comments.humanDispatchState, 'in_flight') : isNull(comments.humanDispatchState)
 			))
 			.returning({ id: comments.id });
 		if (!claimed.length) {
 			const current = await transaction
-				.select({ status: comments.status })
+				.select({ status: comments.status, humanDispatchToken: comments.humanDispatchToken, humanDispatchState: comments.humanDispatchState })
 				.from(comments)
 				.where(inArray(comments.id, [commentId]))
 				.all();
+			if ((current[0]?.humanDispatchToken || current[0]?.humanDispatchState) &&
+				(current[0].humanDispatchToken !== dispatchToken || current[0].humanDispatchState !== 'in_flight')) {
+				console.warn('finalize: comment %s has a different dispatch owner — leaving its claim unchanged', commentId);
+				return false;
+			}
 			if (current[0] && current[0].status !== status) {
 				await transaction
 					.update(moderationActions)
@@ -664,7 +676,7 @@ export async function finalizeHumanIntent(
 					.where(and(eq(moderationActions.commentId, commentId), eq(moderationActions.state, 'completed')));
 			}
 			console.warn('finalize: comment %s left restoring mid-flight — conflicting completed actions re-armed for reconciliation', commentId);
-			return;
+			return false;
 		}
 		const dispatched = agreeing.length
 			? await transaction
@@ -710,6 +722,7 @@ export async function finalizeHumanIntent(
 				}))
 			);
 		}
+		return true;
 	});
 }
 
@@ -765,9 +778,12 @@ async function reconcileRestoring(channelId: string, accessToken: string, deadli
 				continue;
 			}
 			assertBeforeDeadline(deadline);
-			const outcome = await applyHumanIntent(row.id, intent.action, accessToken, deadline);
-			// A missing comment is deleted, regardless of the requested action.
-			await finalizeHumanIntent(channelId, row.id, outcome === 'missing' ? 'delete' : intent.action, intent.id, expected);
+			const dispatch = await reserveHumanDispatch(channelId, row.id, intent.id, expected);
+			if (!dispatch) {
+				console.warn('reconcile: comment %s has an active or uncertain human write — automatic replay is paused', row.id);
+				continue;
+			}
+			await executeHumanDispatch(dispatch, intent.action, accessToken, expected, deadline);
 		} catch (error) {
 			if (error instanceof DeadlineExceededError) throw error;
 			console.error(

@@ -1,8 +1,9 @@
 import { db, withBusyRetry } from '$lib/server/db';
 import { comments, auditLog, moderationActions } from '$lib/server/db/schema';
-import { and, eq, desc } from 'drizzle-orm';
+import { and, eq, desc, isNull } from 'drizzle-orm';
 import { refreshAccessToken } from '$lib/server/youtube';
-import { applyHumanIntent, assertChannelActive, finalizeHumanIntent } from '$lib/server/pipeline/enforcement';
+import { assertChannelActive } from '$lib/server/pipeline/enforcement';
+import { executeHumanDispatch, reserveHumanDispatch, HumanDispatchUncertainError, HumanFinalizeError, HUMAN_DISPATCH_BLOCKED, HUMAN_DISPATCH_UNCERTAIN } from '$lib/server/pipeline/human-dispatch';
 import { decrypt } from '$lib/server/crypto';
 import { ownedChannel } from '$lib/server/ownership';
 import { requireUser } from '$lib/server/session';
@@ -67,7 +68,7 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
 			const rows = await transaction
 				.update(comments)
 				.set({ status, decidedBy: 'human' })
-				.where(and(eq(comments.id, commentId), eq(comments.channelId, paramsId), eq(comments.status, 'pending')))
+				.where(and(eq(comments.id, commentId), eq(comments.channelId, paramsId), eq(comments.status, 'pending'), isNull(comments.humanDispatchToken), isNull(comments.humanDispatchState)))
 				.returning({ id: comments.id });
 			if (!rows.length) return false;
 			await transaction.insert(auditLog).values({
@@ -93,7 +94,7 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
 		const claimed = await transaction
 			.update(comments)
 			.set({ status: 'restoring', decidedBy: 'human' })
-			.where(and(eq(comments.id, commentId), eq(comments.channelId, paramsId), eq(comments.status, 'pending')))
+			.where(and(eq(comments.id, commentId), eq(comments.channelId, paramsId), eq(comments.status, 'pending'), isNull(comments.humanDispatchToken), isNull(comments.humanDispatchState)))
 			.returning({ id: comments.id });
 		if (claimed.length === 0) return null;
 		const intent = await transaction
@@ -119,25 +120,25 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
 	try {
 		// The channel snapshot was loaded before the claim — account deletion
 		// can have detached it since. Revalidate the connector identity before
-		// spending the grant, or a remote write fires on a dead channel
-		// (cubic). The catch releases the claim like any remote failure.
+		// spending the grant. A failure before dispatch can release the claim.
 		await assertChannelActive(paramsId, db, ch);
 		const token = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
-		remoteMissing = (await applyHumanIntent(commentId, action, token)) === 'missing';
+		const dispatch = await reserveHumanDispatch(paramsId, commentId, claim.intentId, ch);
+		if (!dispatch) return fail(409, { error: HUMAN_DISPATCH_BLOCKED });
+		remoteMissing = (await executeHumanDispatch(dispatch, action, token, ch)) === 'missing';
 	} catch (e) {
-		// The remote write did not land: release the claim — the comment
-		// returns to 'pending', the staged intent row is dropped (nothing
-		// committed), and any hold a concurrent enforcement superseded on
-		// the strength of the claim is re-armed — one transaction, or the
-		// comment can sit 'pending' with a terminally-superseded hold:
-		// public on YouTube while the queue calls it held. A 'dispatched'
-		// hold stays dispatched — the reconcile loop re-applies it against
-		// the restored 'pending'.
+		console.error('[queue] %s failed for comment %s', action, commentId, e);
+		if (e instanceof HumanDispatchUncertainError) return fail(500, { error: HUMAN_DISPATCH_UNCERTAIN });
+		if (e instanceof HumanFinalizeError) return fail(500, { error: 'The action reached YouTube but is still being recorded — it resolves automatically.' });
+		// Only a known predispatch failure or settled refusal can release.
+		// Another dispatcher may have reserved while token refresh yielded:
+		// an owned/uncertain reservation must never be cleared here.
 		const released = await db.transaction(async (transaction) => {
 			const released = await transaction
 				.update(comments)
 				.set({ status: 'pending', decidedBy: 'none', restoreIntentId: null })
-				.where(and(eq(comments.id, commentId), eq(comments.status, 'restoring'), eq(comments.restoreIntentId, claim.intentId)))
+				.where(and(eq(comments.id, commentId), eq(comments.channelId, paramsId), eq(comments.status, 'restoring'), eq(comments.restoreIntentId, claim.intentId),
+					isNull(comments.humanDispatchToken), isNull(comments.humanDispatchState)))
 				.returning({ id: comments.id });
 			if (!released.length) return false;
 			await transaction.delete(auditLog).where(eq(auditLog.id, claim.intentId));
@@ -155,21 +156,9 @@ async function act(paramsId: string, commentId: string, action: 'approve' | 'rej
 		});
 		// Full error detail stays server-side; the client gets a generic
 		// message in the error-box instead of a bare 500 page (I12).
-		console.error('[queue] %s failed for comment %s', action, commentId, e);
 		return fail(500, { error: released
 			? 'The YouTube action failed — the comment is back in the queue. Try again.'
 			: 'The YouTube action failed, but this comment changed while it was running. Refresh before retrying.' });
-	}
-	// The remote write landed — releasing the claim now would revert the
-	// local row and drop the intent while YouTube already reflects the
-	// action: a desync nothing could repair (codeant). Keep 'restoring' +
-	// the durable intent row; the reconcile sweep re-applies the idempotent
-	// write and commits the final status on its next run.
-	try {
-		await finalizeHumanIntent(paramsId, commentId, remoteMissing ? 'delete' : action, claim.intentId, ch);
-	} catch (e) {
-		console.error('[queue] %s reached YouTube but finalize failed for comment %s — the reconcile sweep will finish it', action, commentId, e);
-		return fail(500, { error: 'The action reached YouTube but is still being recorded — it resolves automatically.' });
 	}
 	return { success: remoteMissing ? 'The comment no longer exists on YouTube — recorded as deleted.' : SUCCESS_TEXT[action] };
 }

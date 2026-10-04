@@ -65,6 +65,15 @@ export const welcomeCampaigns = sqliteTable('welcome_campaigns', {
 	nextAttemptAt: text('next_attempt_at').notNull()
 });
 
+// Bounded round-robin account discovery, separate from SMTP campaign pacing.
+export const welcomeDiscovery = sqliteTable('welcome_discovery', {
+	campaign: text('campaign').primaryKey(),
+	afterUserId: text('after_user_id'),
+	cycleEndUserId: text('cycle_end_user_id'),
+	claimToken: text('claim_token'),
+	leaseExpiresAt: text('lease_expires_at')
+});
+
 // Shared scheduler turn, independent of any channel's live health or account.
 export const cronWorkloadState = sqliteTable('cron_workload_state', {
 	id: integer('id').primaryKey(),
@@ -378,6 +387,9 @@ export const comments = sqliteTable('comments', {
 	status: text('status').notNull(), // 'pending' | 'approved' | 'held' | 'rejected' | 'deleted' | 'restoring' (in-flight human action)
 	// Exact audit row for the current human claim; NULL legacy rows cannot be replayed safely.
 	restoreIntentId: integer('restore_intent_id'),
+	// A dispatched human write cannot be taken over after an uncertain remote outcome.
+	humanDispatchToken: text('human_dispatch_token'),
+	humanDispatchState: text('human_dispatch_state', { enum: ['in_flight', 'uncertain'] }),
 	decidedBy: text('decided_by').notNull(), // 'rule' | 'ai' | 'human' | 'none' | 'allowlist'
 	matchedRuleId: integer('matched_rule_id'),
 	aiScore: text('ai_score'), // JSON string of the six category scores, or null

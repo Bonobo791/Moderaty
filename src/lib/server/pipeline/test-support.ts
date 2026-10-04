@@ -42,6 +42,8 @@ const mocks = vi.hoisted(() => {
 		// comments.decidedBy for pre-stored rows (existingIds).
 		commentDecidedBy: {} as Record<string, string>,
 		commentRestoreIntentIds: {} as Record<string, number | null>,
+		commentHumanDispatchTokens: {} as Record<string, string | null>,
+		commentHumanDispatchStates: {} as Record<string, string | null>,
 		// Fired at the start of every comments .all() query with its call index,
 		// so a test can flip a stored status BETWEEN two reads in one flow
 		// (e.g. a human release landing between partition and supersede).
@@ -66,7 +68,9 @@ const mocks = vi.hoisted(() => {
 			status: staged?.status ?? state.commentStatuses[id] ?? 'held',
 			decidedBy: staged?.decidedBy ?? state.commentDecidedBy[id] ?? 'ai',
 			scanId: staged?.scanId ?? null,
-			restoreIntentId: staged?.restoreIntentId ?? state.commentRestoreIntentIds[id] ?? null
+			restoreIntentId: staged?.restoreIntentId ?? state.commentRestoreIntentIds[id] ?? null,
+			humanDispatchToken: staged?.humanDispatchToken ?? state.commentHumanDispatchTokens[id] ?? null,
+			humanDispatchState: staged?.humanDispatchState ?? state.commentHumanDispatchStates[id] ?? null
 		};
 	};
 	const commentsAll = (condition: unknown) => {
@@ -78,6 +82,7 @@ const mocks = vi.hoisted(() => {
 		state.onCommentsSelect?.(state.commentsSelectCalls);
 		const params = queryParams(condition);
 		const statusFilter = params.filter((param) => COMMENT_STATUSES.has(param as string));
+		const includesDispatchOwners = querySql(condition).includes('"comments"."human_dispatch_token" is not null');
 		// The rescan staged-marker read (eq comments.scan_id = stamp): a
 		// row only matches when its stamp equals the bound value — NULL
 		// never equals, like real SQL.
@@ -86,7 +91,8 @@ const mocks = vi.hoisted(() => {
 			...state.existingIds,
 			...state.insertedComments.map((comment) => queryKey(comment.id))
 		])].map((id) => commentRowFor(id)).filter((row) =>
-			(params.includes(row.id) || (statusFilter.length > 0 && statusFilter.includes(row.status)))
+			(params.includes(row.id) || (statusFilter.length > 0 && statusFilter.includes(row.status)) ||
+				(includesDispatchOwners && (row.humanDispatchToken !== null || row.humanDispatchState !== null)))
 			&& (!scanFiltered || params.includes(row.scanId)));
 	};
 	const selectGet = async (table: unknown, condition: unknown) => {
@@ -225,7 +231,8 @@ const mocks = vi.hoisted(() => {
 		const applied: Record<string, unknown>[] = [];
 		const apply = (row: Record<string, unknown>) => {
 			const current = row.status as string;
-			if (params.includes(queryKey(row.id)) && (!statusFilter.length || statusFilter.includes(current)) && matchesBoundParam(condition, comments.restoreIntentId, row.restoreIntentId)) {
+			if (params.includes(queryKey(row.id)) && (!statusFilter.length || statusFilter.includes(current)) && matchesBoundParam(condition, comments.restoreIntentId, row.restoreIntentId)
+				&& matchesBoundParam(condition, comments.humanDispatchToken, row.humanDispatchToken) && matchesBoundParam(condition, comments.humanDispatchState, row.humanDispatchState)) {
 				Object.assign(row, values);
 				applied.push(row);
 			}
@@ -233,10 +240,13 @@ const mocks = vi.hoisted(() => {
 		state.insertedComments.forEach(apply);
 		for (const id of state.existingIds) {
 			const current = state.commentStatuses[id] ?? 'held';
-			if (params.includes(id) && (!statusFilter.length || statusFilter.includes(current)) && matchesBoundParam(condition, comments.restoreIntentId, state.commentRestoreIntentIds[id])) {
+			if (params.includes(id) && (!statusFilter.length || statusFilter.includes(current)) && matchesBoundParam(condition, comments.restoreIntentId, state.commentRestoreIntentIds[id])
+				&& matchesBoundParam(condition, comments.humanDispatchToken, state.commentHumanDispatchTokens[id]) && matchesBoundParam(condition, comments.humanDispatchState, state.commentHumanDispatchStates[id])) {
 				if ('status' in values) state.commentStatuses[id] = values.status as string;
 				if ('decidedBy' in values) state.commentDecidedBy[id] = values.decidedBy as string;
 				if ('restoreIntentId' in values) state.commentRestoreIntentIds[id] = values.restoreIntentId as number | null;
+				if ('humanDispatchToken' in values) state.commentHumanDispatchTokens[id] = values.humanDispatchToken as string | null;
+				if ('humanDispatchState' in values) state.commentHumanDispatchStates[id] = values.humanDispatchState as string | null;
 				applied.push({ id });
 			}
 		}
@@ -374,6 +384,8 @@ const mocks = vi.hoisted(() => {
 			commentStatuses: { ...state.commentStatuses },
 			commentDecidedBy: { ...state.commentDecidedBy },
 			commentRestoreIntentIds: { ...state.commentRestoreIntentIds },
+			commentHumanDispatchTokens: { ...state.commentHumanDispatchTokens },
+			commentHumanDispatchStates: { ...state.commentHumanDispatchStates },
 			moderationActions: state.moderationActions.map((row) => ({ ...row }))
 		};
 		try {
@@ -388,6 +400,8 @@ const mocks = vi.hoisted(() => {
 			state.commentStatuses = snapshot.commentStatuses;
 			state.commentDecidedBy = snapshot.commentDecidedBy;
 			state.commentRestoreIntentIds = snapshot.commentRestoreIntentIds;
+			state.commentHumanDispatchTokens = snapshot.commentHumanDispatchTokens;
+			state.commentHumanDispatchStates = snapshot.commentHumanDispatchStates;
 			state.moderationActions = snapshot.moderationActions;
 			throw error;
 		}
@@ -425,7 +439,7 @@ export function getMocks() { return mocks; }
 
 vi.mock('recheck', () => ({ checkSync: mocks.checkSync }));
 vi.mock('$lib/server/crypto', () => ({ decrypt: mocks.decrypt }));
-vi.mock('$lib/server/db', () => ({ db: mocks.db }));
+vi.mock('$lib/server/db', () => ({ db: mocks.db, withBusyRetry: (run: () => Promise<unknown>) => run() }));
 vi.mock('$env/dynamic/private', () => ({ env: mocks.state.env }));
 vi.mock('$lib/server/http', () => ({
 	assertBeforeDeadline: mocks.assertBeforeDeadline,
@@ -433,7 +447,8 @@ vi.mock('$lib/server/http', () => ({
 	// importOriginal evaluates the real youtube.ts under this mock — its
 	// fetchWithRetry import must resolve, or an un-stubbed real export
 	// fails as "undefined is not a function" instead of a clear mock call.
-	fetchWithRetry: mocks.fetchWithRetry
+	fetchWithRetry: mocks.fetchWithRetry,
+	fetchSingleAttempt: mocks.fetchWithRetry
 }));
 vi.mock('$lib/server/moderation', () => ({
 	scoreComment: mocks.scoreComment,
@@ -696,6 +711,8 @@ export function resetPipelineMocks() {
 	mocks.state.commentStatuses = {};
 	mocks.state.commentDecidedBy = {};
 	mocks.state.commentRestoreIntentIds = {};
+	mocks.state.commentHumanDispatchTokens = {};
+	mocks.state.commentHumanDispatchStates = {};
 	mocks.state.commentsSelectCalls = 0;
 	mocks.state.onCommentsSelect = undefined;
 	mocks.decrypt.mockReturnValue('refresh-token');

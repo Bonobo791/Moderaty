@@ -28,7 +28,18 @@ test('load returns the maintenance payload during a database outage instead of a
 	// null-user outage shape.
 	const result = await load({ params: { id: 'UC1' }, locals: { user: null, dbDown: true }, url: LOG_URL } as never);
 	// Exact payload: the page renders ch.id/title even in the outage shape.
-	expect(result).toEqual({ ch: { id: 'UC1', title: '' }, entries: [], recovery: [], canRecover: false, maintenance: true });
+	expect(result).toEqual({ ch: { id: 'UC1', title: '' }, entries: [], recovery: [], dispatches: [], canRecover: false, maintenance: true });
+});
+
+test.each(['restoring', 'approved', 'rejected'])('an uncertain write stays visible on a %s comment and cannot offer Undo', async (status) => {
+	await seedChannel();
+	await testDb().db.insert(comments).values({ id: 'uncertain', channelId: 'UC1', text: 'Pending remote result', publishedAt: '2026-01-01', status,
+		decidedBy: 'human', humanDispatchToken: 'private-owner-token', humanDispatchState: 'uncertain' });
+	await seedEntries([{ commentId: 'uncertain', action: 'reject', createdAt: '2026-01-01T00:00:01.000Z' }]);
+	const result = await load({ params: { id: 'UC1' }, locals: { user: OWNER }, url: LOG_URL } as never);
+	expect(result).toMatchObject({ dispatches: [{ id: 'uncertain', text: 'Pending remote result', state: 'uncertain' }], recovery: [] });
+	expect(result!.entries[0].undoable).toBeNull();
+	expect(JSON.stringify(result)).not.toContain('private-owner-token');
 });
 
 test('load marks only the latest reversible action per comment as undoable', async () => {

@@ -20,7 +20,8 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 vi.mock('$lib/server/crypto', () => ({ decrypt: mocks.decrypt }));
-vi.mock('$lib/server/youtube', () => ({
+vi.mock('$lib/server/youtube', async (original) => ({
+	...await original<typeof import('$lib/server/youtube')>(),
 	refreshAccessToken: mocks.refreshAccessToken,
 	setModerationStatus: mocks.setModerationStatus,
 	deleteComment: mocks.deleteComment,
@@ -31,6 +32,7 @@ vi.mock('$lib/server/youtube', () => ({
 }));
 
 import { actions } from './+page.server';
+import { YoutubeWriteRefusedError } from '$lib/server/youtube';
 
 setupTestDb(['audit_log', 'comments', 'channels', 'moderation_actions']);
 
@@ -99,7 +101,7 @@ test('undo restores a rejected comment at YouTube and records the restore', asyn
 	expect(mocks.decrypt).toHaveBeenCalledWith('enc-1');
 	expect(mocks.refreshAccessToken).toHaveBeenCalledWith('decrypted-refresh-token');
 	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined, true);
 	expect(await commentRow('c1')).toMatchObject({ status: 'approved', decidedBy: 'human' });
 	expect(await testDb().db.select().from(auditLog).all()).toContainEqual(
 		// authorHandle is null: manual actions have no handle source (the
@@ -114,7 +116,7 @@ test('undo of a ban restores the comment and names the original action', async (
 	await undo('c1');
 
 	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined, true);
 	expect(await commentRow('c1')).toMatchObject({ status: 'approved' });
 	expect(await testDb().db.select().from(auditLog).all()).toContainEqual(
 		expect.objectContaining({ commentId: 'c1', action: 'restore', reason: 'undo of ban', actor: 'user' })
@@ -134,9 +136,9 @@ test('undo on a deleted comment 404s and changes nothing', async () => {
 	expect(await testDb().db.select().from(auditLog).all()).toHaveLength(1); // only the seeded row
 });
 
-test('a YouTube failure releases the claim and fails loudly', async () => {
+test('a settled YouTube refusal releases the claim and fails loudly', async () => {
 	await seedComment('c1', 'rejected', 'reject');
-	mocks.setModerationStatus.mockRejectedValueOnce(new Error('YouTube refused the transition'));
+	mocks.setModerationStatus.mockRejectedValueOnce(new YoutubeWriteRefusedError('YouTube refused the transition'));
 
 	await expect(undo('c1')).rejects.toThrow('YouTube refused the transition');
 
@@ -157,7 +159,7 @@ test('a missing YouTube comment finalizes a restore as deleted — nothing exist
 
 		expect(res).toMatchObject({ success: 'The comment no longer exists on YouTube — recorded as deleted.' });
 		expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
-		expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined);
+		expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined, true);
 		expect(await commentRow('c1')).toMatchObject({ status: 'deleted', decidedBy: 'human' });
 		expect(warning).toHaveBeenCalledWith('comment c1 no longer exists on YouTube — completing restore');
 	} finally {
@@ -284,7 +286,7 @@ test('a crashed undo leaves durable intent the reconcile sweep can finish', asyn
 	const res = await undo('c1');
 
 	expect(res).toMatchObject({ success: expect.stringContaining('estored') });
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined, true);
 	expect(await commentRow('c1')).toMatchObject({ status: 'approved', decidedBy: 'human' });
 	// Exactly ONE restore row — the crashed attempt's intent row, reused.
 	expect((await testDb().db.select().from(auditLog).all()).filter((row) => row.action === 'restore')).toHaveLength(1);
@@ -484,9 +486,9 @@ test('a fresh Undo binds its own intent before YouTube and clears it when releas
 		const row = await commentRow('c1');
 		const intent = await testDb().db.select().from(auditLog).where(eq(auditLog.id, row!.restoreIntentId!)).get();
 		expect(intent).toMatchObject({ action: 'restore', actor: 'user', channelId: 'UC1', commentId: 'c1' });
-		throw new Error('remote unavailable');
+		throw new YoutubeWriteRefusedError('remote refused');
 	});
-	await expect(undo('c1')).rejects.toThrow('remote unavailable');
+	await expect(undo('c1')).rejects.toThrow('remote refused');
 	expect(await commentRow('c1')).toMatchObject({ status: 'rejected', restoreIntentId: null });
 	expect(await testDb().db.select().from(auditLog).all()).toHaveLength(1);
 });
@@ -509,7 +511,7 @@ test('a stale failed Undo does not release or erase a newer claim', async () => 
 		await testDb().db.update(comments).set({ restoreIntentId: intent.id }).where(eq(comments.id, 'c1'));
 		throw new Error('old restore failed');
 	});
-	await expect(undo('c1')).rejects.toThrow('old restore failed');
+	expect(await undo('c1')).toMatchObject({ status: 500, data: { error: expect.stringContaining('paused') } });
 	expect(await commentRow('c1')).toMatchObject({ status: 'restoring', restoreIntentId: newIntentId });
 	expect(await testDb().db.select().from(auditLog).where(eq(auditLog.id, newIntentId)).get()).toMatchObject({ action: 'reject' });
 });
@@ -548,7 +550,7 @@ test.each(['no audit', 'missing audit', 'wrong comment'])('owner recovery record
 	});
 	const res = await recoverRestore('blocked', originalId === null ? '' : String(originalId));
 	expect(res).toMatchObject({ success: expect.stringContaining('Restored') });
-	expect(mocks.setModerationStatus).toHaveBeenCalledExactlyOnceWith(['blocked'], 'published', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledExactlyOnceWith(['blocked'], 'published', false, 'access-token', undefined, true);
 	expect(await commentRow('blocked')).toMatchObject({ status: 'approved', decidedBy: 'human', restoreIntentId: null });
 	if (kind === 'wrong comment') expect(await testDb().db.select().from(auditLog).where(eq(auditLog.id, originalId!)).get()).toMatchObject({ action: 'delete', commentId: 'other' });
 });
@@ -590,9 +592,9 @@ test('concurrent owner recoveries create only one new intent and one remote rest
 	expect((await testDb().db.select().from(auditLog).all()).filter((row) => row.action === 'restore')).toHaveLength(1);
 });
 
-test('a recovery remote failure is visible and leaves the new bound intent for reconciliation', async () => {
+test('a settled recovery refusal is visible and leaves the new bound intent for reconciliation', async () => {
 	await seedComment('blocked', 'restoring', 'delete');
-	mocks.setModerationStatus.mockRejectedValueOnce(new Error('remote unavailable'));
+	mocks.setModerationStatus.mockRejectedValueOnce(new YoutubeWriteRefusedError('remote refused'));
 	expect(await recoverRestore('blocked')).toMatchObject({ status: 500, data: { error: expect.stringContaining('retry') } });
 	expect(await commentRow('blocked')).toMatchObject({ status: 'restoring', restoreIntentId: expect.any(Number) });
 	const { runEnforcement } = await import('$lib/server/pipeline/enforcement');

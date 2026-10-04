@@ -14,7 +14,7 @@ import { users, welcomeCampaigns, welcomeEmails } from './db/schema';
 import { enqueueWelcome, sweepWelcomeEmails, WELCOME_CAMPAIGN } from './welcomeEmail';
 import { ProtonMailSubmissionError } from './protonMail';
 
-setupTestDb(['users', 'organizations', 'memberships', 'channels', 'welcome_emails', 'welcome_campaigns']);
+setupTestDb(['users', 'organizations', 'memberships', 'channels', 'welcome_emails', 'welcome_campaigns', 'welcome_discovery']);
 beforeEach(() => {
 	for (const name of Object.keys(mocks.env)) delete mocks.env[name];
 	Object.assign(mocks.env, { MODERATY_DEPLOYMENT: 'official-hosted', APP_URL: 'https://moderaty.com', DRY_RUN: 'false' });
@@ -35,23 +35,25 @@ async function historical(id: string, state: string, extra: Partial<typeof welco
 		templateVersion: 1, state, source: state === 'never_sent' ? 'never_sent' : 'historical_unknown', messageId: `<fixture-${id}@moderaty.com>`, ...extra });
 }
 
-test('normal sweeps automatically enroll all existing hosted users across bounded pages without a cursor', async () => {
+test('normal sweeps automatically enroll all existing hosted users across bounded pages without a caller cursor', async () => {
 	await pauseDelivery();
 	for (let i = 0; i < 61; i++) await seedUser(`user-${String(i).padStart(3, '0')}`);
 	await testDb().db.update(users).set({ plan: 'lifetime' }).where(eq(users.id, 'user-060'));
 	expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 25, queued: 25, accepted: 0 });
 	expect(await rows()).toHaveLength(25);
-	// No caller cursor or process-local progress; committed rows are the checkpoint.
+	// The campaign cursor is durable; callers keep no process-local progress.
 	expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 25, queued: 25 });
 	expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 11, queued: 11 });
 	const enrolled = await rows();
 	expect(enrolled).toHaveLength(61);
 	expect(enrolled.every(item => item.state === 'queued' && item.source === 'historical_unknown')).toBe(true);
-	expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 0, queued: 0 });
+	expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 25, queued: 0 });
 	expect(await rows()).toEqual(enrolled);
-	// A later account sorts before the previous page, so a high-water cursor would miss it.
+	// The next traversal revisits a later account that sorts before the cursor.
 	await seedUser('earlier-new-account');
-	expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 1, queued: 1 });
+	expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 25, queued: 0 });
+	expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 11, queued: 0 });
+	expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 25, queued: 1 });
 	expect(await rows()).toHaveLength(62);
 	expect(mocks.send).not.toHaveBeenCalled();
 });
@@ -73,14 +75,15 @@ test('historical unknown and never-sent enroll; terminal states and markers cann
 	await historical('z-unsent', 'never_sent');
 	await seedUser('z-missing');
 	const before = await rows();
-	expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 4, queued: 3, accepted: 0, ambiguous: 1 });
+	expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 25, queued: 0, accepted: 0, ambiguous: 1 });
+	expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 20, queued: 3, accepted: 0, ambiguous: 1 });
 	for (const id of ['z-unknown', 'z-unsent', 'z-missing']) expect(await row(id)).toMatchObject({ state: 'queued' });
 	expect(await row('z-unsent')).toMatchObject({ source: 'never_sent' });
 	expect(await row('z-unknown')).toMatchObject({ messageId: '<fixture-z-unknown@moderaty.com>' });
 	expect(await row('b-invalid')).toMatchObject({ state: 'suppressed', suppressionReason: 'invalid_recipient' });
 	expect(await row('b-deleted')).toBeUndefined();
 	for (const item of before.filter(item => !item.userId.startsWith('z-'))) expect(await row(item.userId)).toEqual(item);
-	expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 0, queued: 0 });
+	expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 25, queued: 0 });
 	expect(mocks.send).not.toHaveBeenCalled();
 });
 
@@ -145,7 +148,7 @@ test('a failed enrollment preserves successful rows, continues the page, and res
 	interrupted.mockRestore();
 	expect(await rows()).toHaveLength(2);
 	const first = (await rows())[0];
-	expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 1, queued: 1, enrollmentErrors: 0 });
+	expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 3, queued: 1, enrollmentErrors: 0 });
 	expect(await rows()).toHaveLength(3);
 	expect(await row(first.userId)).toEqual(first);
 });
@@ -164,13 +167,13 @@ test('persistent enrollment failure after busy retries cannot block other accoun
 	});
 	const log = vi.spyOn(console, 'error').mockImplementation(() => {});
 	try {
-		expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 3, queued: 2, enrollmentErrors: 1, accepted: 1, errors: 0 });
+		expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 4, queued: 2, enrollmentErrors: 1, accepted: 1, errors: 0 });
 		expect(await row('a-bad')).toBeUndefined();
 		expect(await row('z-ready')).toMatchObject({ state: 'accepted', attempts: 1 });
 		for (const id of ['b-good', 'c-good']) {
 			failuresLeft = 3;
 			await testDb().db.update(welcomeCampaigns).set({ nextAttemptAt: new Date(0).toISOString() });
-			expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 1, queued: 0, enrollmentErrors: 1, accepted: 1 });
+			expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 4, queued: 0, enrollmentErrors: 1, accepted: 1 });
 			expect(await row(id)).toMatchObject({ state: 'accepted', attempts: 1 });
 		}
 		expect(await rows()).toHaveLength(3);
@@ -210,13 +213,14 @@ test('queued welcomes keep making progress when every discovery run exhausts its
 test('enrollment stops between accounts when the shared deadline expires, then resumes', async () => {
 	await pauseDelivery(); await seedUser('one'); await seedUser('two');
 	const now = Date.now();
-	const original = testDb().db.transaction.bind(testDb().db);
+	const enrollment = await import('./welcomeEnrollment');
+	const original = enrollment.enqueueWelcome;
 	const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
-	const interrupted = vi.spyOn(testDb().db, 'transaction').mockImplementation((async (callback, ...rest) => {
-		const result = await original(callback, ...rest);
+	const interrupted = vi.spyOn(enrollment, 'enqueueWelcome').mockImplementation(async (...args) => {
+		const result = await original(...args);
 		clock.mockReturnValue(now + 10_001);
 		return result;
-	}) as typeof original);
+	});
 	expect(await sweepWelcomeEmails(now + 10_000)).toMatchObject({ scanned: 1, queued: 1, accepted: 0 });
 	interrupted.mockRestore(); clock.mockRestore();
 	expect(await rows()).toHaveLength(1);
@@ -262,7 +266,7 @@ test('a fresh uncertain automatic send is held through repeated discovery and an
 	expect(await sweepWelcomeEmails(budget())).toMatchObject({ queued: 1, ambiguous: 1 });
 	await testDb().db.update(welcomeCampaigns).set({ nextAttemptAt: new Date(0).toISOString() });
 	await testDb().db.update(welcomeEmails).set({ acceptedAt: null, leaseExpiresAt: new Date(0).toISOString() }).where(eq(welcomeEmails.userId, 'one'));
-	expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 0, queued: 0, ambiguous: 1 });
+	expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 1, queued: 0, ambiguous: 1 });
 	expect(await row('one')).toMatchObject({ state: 'ambiguous', nextRetryAt: null, attempts: 1 });
 	expect(mocks.send).toHaveBeenCalledTimes(1);
 });
@@ -270,7 +274,7 @@ test('a fresh uncertain automatic send is held through repeated discovery and an
 test('a new template version cannot reenroll an already accepted campaign', async () => {
 	await historical('one', 'accepted', { templateVersion: 1, acceptedAt: '2026-01-01T00:00:00.000Z', attempts: 1 });
 	const accepted = await row('one');
-	expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 0, queued: 0, accepted: 0 });
+	expect(await sweepWelcomeEmails(budget())).toMatchObject({ scanned: 1, queued: 0, accepted: 0 });
 	expect(await enqueueWelcome(testDb().db, 'one', 'signup')).toBe(false);
 	expect(await row('one')).toEqual(accepted);
 	expect(mocks.send).not.toHaveBeenCalled();

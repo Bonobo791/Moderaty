@@ -13,8 +13,8 @@ session transaction. Only a newly inserted account can enqueue there. The existi
 authenticated cron drains after commit; SMTP is never called by signup. A rolled
 back signup leaves no welcome. Re-consent, repeated OAuth flows, subsequent login,
 and organization switches do not reenroll the campaign. Each enabled cron tick
-also discovers existing hosted users with missing, unknown or never-sent history
-and automatically enrolls at most 25 candidates. Already queued delivery takes
+also examines at most 25 user IDs for existing hosted accounts with missing,
+unknown or never-sent history and automatically enrolls eligible accounts. Already queued delivery takes
 priority over discovery; when the queue is empty, a newly enrolled welcome can
 be attempted in the same tick if budget remains.
 No operator command or per-user action is required.
@@ -85,10 +85,10 @@ A fenced atomic claim and campaign-wide throttle allow at most one SMTP attempt
 per 60 seconds, including overlapping cron invocations and account deletion
 during submission. Claiming reserves the campaign slot transactionally; the
 pre-send transition refreshes the interval and rejects expired claims. One cron tick attempts at
-most one recipient, enrolls at most 25 candidates and recovers at most 25 stale
+most one recipient, examines at most 25 users for enrollment and recovers at most 25 stale
 claims, checking its five-second share of the existing 20-second budget between
-operations. An in-progress discovery query cannot be interrupted by these
-deadline checks; its scaling limit is described below. Retry delays for definite failures are
+operations. Discovery uses an indexed keyset page capped before eligibility
+checks; deadline checks occur between short transactions. Retry delays for definite failures are
 60s, 120s, 240s, 480s, then terminal after the fifth failed attempt. DNS, explicit transient SMTP rejection and proven pre-DATA errors
 are safe retry categories. Configuration/authentication, TLS, DNS and sender-policy (`MAIL FROM`) outages preserve
 the recipient attempt count and pause the entire campaign for 15 minutes through
@@ -148,40 +148,40 @@ local tests use only a loopback fake SMTP server and synthetic database.
 
 ## Automatic existing-user enrollment and optional monitoring
 
-Normal authenticated cron selects up to 25 unenrolled candidates in user-ID
-order. Already queued, accepted, suppressed, non-hosted, terminal-failure and
-fresh ambiguous submissions do not enter the candidate page. Deleted account
-tombstones never acquire fresh delivery metadata. Invalid recipients receive a
-suppression record so they cannot block subsequent pages. Enrollment rereads the
-account and campaign state inside the same short transaction used by signup.
+Normal authenticated cron selects an unfiltered, indexed page of at most 25
+user IDs before checking eligibility. Already queued, accepted, suppressed,
+non-hosted, terminal-failure and fresh ambiguous submissions are skipped while
+the saved position advances. Deleted account tombstones never acquire fresh
+delivery metadata. Invalid recipients receive a suppression record. Enrollment
+rereads account and campaign state inside the same short transaction used by signup.
 
-The enrollment batch is capped at 25; candidate discovery is not strictly bounded.
-The ordered left join can scan all users when most already have campaign records,
-so query work grows with the total user count even when it returns no candidates.
-`welcomeEmailCandidatesScanned` counts returned candidates processed by the loop,
-not database rows inspected. If discovery consumes the remaining welcome budget,
-new enrollment and delivery from an initially empty queue defer until a later
-tick. Already queued delivery is attempted before discovery so repeated slow
-queries cannot starve that queue. An isolated synthetic libSQL
-fixture with one million already-enrolled users took roughly 0.68 seconds; this
-measurement does not establish production timing. Durable, indexed discovery
-progress remains a scaling follow-up requiring a coordinated schema change.
-This launch fix retains the existing schema and the review limitation remains
-documented.
+The `welcome_discovery` campaign row saves the last inspected user ID and the
+highest user ID at the start of each traversal. The fixed upper bound makes
+each traversal finite even while new accounts arrive. Reaching the end resets
+the cursor, revisiting failed or newly eligible accounts and later inserts that
+sort before the previous position. A 60-second discovery lease and claim-token
+checks prevent overlapping or expired workers from overwriting that position.
+The inspected position and successful enrollment commit together; failed
+enrollment advances the position separately so one failing account cannot pin
+the remaining users. Migration `0067_welcome_discovery` creates this state.
 
-Committed campaign records are the durable checkpoint: the next tick selects
-only remaining candidates. Restarting, overlapping ticks, retrying a partially
-failed run, or adding a new account that sorts before an earlier page cannot
-duplicate enrollment or skip that account. Each account is checked against the
-shared deadline before its transaction starts. Acceptance state or timestamp
-prevents reenrollment even if the other marker is missing. New SMTP uncertainty
-stays held for reconciliation. Existing users are included regardless of plan or
-marketing opt-in.
+`welcomeEmailCandidatesScanned` counts users inspected for enrollment, including
+excluded and already enrolled users, and is at most 25 per tick. SQLite regression
+tests verify actual scan and VM work on a mostly enrolled population, rather than
+only the number of eligible results. If the shared deadline expires, unprocessed
+IDs resume on the next tick. Already queued delivery is attempted before discovery;
+an initially empty queue gets at most one post-enrollment attempt when time remains.
+An in-progress database operation is still subject to database and network latency.
+
+Restarting or overlapping ticks cannot duplicate campaign enrollment. Acceptance
+state or timestamp prevents reenrollment even if the other marker is missing.
+New SMTP uncertainty stays held for reconciliation. Existing users are included
+regardless of plan or marketing opt-in.
 
 An account enrollment that still fails after busy retries logs a fixed diagnostic
-category and increments `welcomeEmailEnrollmentErrors`; the remaining candidates
+category and increments `welcomeEmailEnrollmentErrors`; the remaining users
 and queued deliveries continue within the shared deadline. Failed candidates
-remain eligible for a later tick. The cron health response and both schedulers
+are retried after the saved traversal wraps. The cron health response and both schedulers
 report these failures without exposing account identifiers or raw database errors.
 
 The following CLI commands remain optional diagnostic and enrollment tools;

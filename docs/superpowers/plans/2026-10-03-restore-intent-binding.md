@@ -52,7 +52,7 @@
 - The audit log lists unverifiable restoring claims independently of audit pagination, including rows without audit history; an organization owner can explicitly confirm a new restore request without borrowing historical intent
 - Ordinary Undo resumes only verified restore claims; valid pending approve/reject/delete/ban intents cannot be replaced by owner recovery, and stale recovery forms are fenced on their observed binding
 - Recovery validates the current connector and then rereads the exact comment claim as its last awaited database operation before dispatch, skipping claims replaced since the initial snapshot
-- These database checks and guarded finalization do not make a YouTube request atomic with local state. A release/replacement after the final check or while remote work is in flight can still race an old remote write; this remains an unresolved release gate requiring a broader serialization/convergence decision. Do not treat the pre-dispatch reread as complete remote fencing
+- The October 4 post-merge fix adds durable dispatch ownership for human intents and decided-state corrections; its recovery limits are described below
 - No production records were inspected, so whether any existing row needs manual recovery is unknown
 - All database verification here uses disposable local SQLite only
 
@@ -65,3 +65,13 @@
 - verify-migrations: both standalone and combined trees pass
 - drizzle-kit check: standalone snapshot chain passes
 - Aggregate check, build, and full suite pending the shared validation resource window
+
+## October 4 post-merge remote ordering fix
+
+- Nullable `comments.humanDispatchToken` and `humanDispatchState` reserve one comment for a human write or a corrective write. Routes and cron cannot dispatch the same intent concurrently; finalization requires the dispatch owner as well as the exact audit binding.
+- Human mutations use one bounded HTTP attempt. Transparent retries after a transport failure could otherwise report a later success while the earlier write still runs remotely.
+- Predispatch credential/channel failures and settled validation, authorization, or quota refusals can release a fresh claim safely. A known successful remote call followed by a database failure keeps its exact intent and releases only the settled reservation, so cron can finish recording it.
+- A timeout, transport failure, uncertain server response, or process crash keeps the durable reservation. There is no expiring takeover: YouTube provides no fencing token or cancellation proof. Unknown outcomes pause newer human actions and staged enforcement and require manual investigation before any operator clears the reservation.
+- The audit log displays active and uncertain writes independently of pagination, including corrections on already-decided comments. These rows cannot offer a new restore/Undo while their prior write may still land; unverifiable legacy claims without a reservation retain confirmed owner recovery.
+- History rescans preserve reserved decisions, their action rows, audit history, and credit balance. They record the scan visit so a paused page does not repeatedly reclassify the same reserved comment.
+- This does not provide provider exactly-once delivery or replace the existing automated moderation outbox. Previously dispatched automated writes retain their existing convergence behavior.

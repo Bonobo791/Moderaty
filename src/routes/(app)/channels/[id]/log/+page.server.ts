@@ -3,7 +3,8 @@ import { auditLog, comments, moderationActions } from '$lib/server/db/schema';
 import { ownedChannel, requireOrgRole } from '$lib/server/ownership';
 import { requireUser } from '$lib/server/session';
 import { refreshAccessToken } from '$lib/server/youtube';
-import { applyHumanIntent, assertChannelActive, claimedHumanIntent, finalizeHumanIntent, humanFinalStatus } from '$lib/server/pipeline/enforcement';
+import { assertChannelActive, claimedHumanIntent, humanFinalStatus } from '$lib/server/pipeline/enforcement';
+import { executeHumanDispatch, reserveHumanDispatch, HumanDispatchUncertainError, HumanFinalizeError, HUMAN_DISPATCH_BLOCKED, HUMAN_DISPATCH_UNCERTAIN } from '$lib/server/pipeline/human-dispatch';
 import { decrypt } from '$lib/server/crypto';
 import { env } from '$env/dynamic/private';
 import { error, fail, isHttpError } from '@sveltejs/kit';
@@ -47,10 +48,17 @@ function undoableFor(latest: boolean, action: string, commentStatus: string | un
 export async function load({ params, locals, url }) {
 	// Database outage: the layout renders the overlay; this load must not 401
 	// on the null-user outage shape.
-	if (locals.dbDown) return { ch: { id: params.id, title: '' }, entries: [], recovery: [], canRecover: false, maintenance: true };
+	if (locals.dbDown) return { ch: { id: params.id, title: '' }, entries: [], recovery: [], dispatches: [], canRecover: false, maintenance: true };
 	// Ownership-scoped: another user's channel (and its audit log) reads as "not found".
 	const ch = await ownedChannel(params.id, locals);
 	const cursor = parseCursor(url.searchParams.get('before'));
+	// Reservations on both restoring and already-decided comments remain
+	// visible. Never expose the dispatch owner token to the browser.
+	const dispatches = (await db.select({ id: comments.id, text: comments.text, state: comments.humanDispatchState })
+		.from(comments).where(and(eq(comments.channelId, params.id),
+			or(isNotNull(comments.humanDispatchToken), isNotNull(comments.humanDispatchState)))).all())
+		.map((row) => ({ ...row, state: row.state === 'in_flight' ? 'in_flight' as const : 'uncertain' as const }));
+	const dispatchIds = new Set(dispatches.map((row) => row.id));
 	// Read claims independently of the audit page: legacy claims may have no
 	// audit row at all. The stored status/binding keeps this error visible
 	// until an owner explicitly records a new decision.
@@ -63,7 +71,7 @@ export async function load({ params, locals, url }) {
 	)).where(and(eq(comments.channelId, params.id), eq(comments.status, 'restoring'))).all();
 	const validClaims = new Map(restoring.filter((row) => row.boundId !== null && row.action !== null && humanFinalStatus(row.action))
 		.map((row) => [row.id, row.action]));
-	const recovery = restoring.filter((row) => !validClaims.has(row.id))
+	const recovery = restoring.filter((row) => !validClaims.has(row.id) && !dispatchIds.has(row.id))
 		.map(({ id, text, restoreIntentId }) => ({ id, text, restoreIntentId }));
 	const rows = await db
 		.select()
@@ -114,14 +122,14 @@ export async function load({ params, locals, url }) {
 	}
 	const entries = page.map((entry) => ({
 		...entry,
-		undoable: statusById.get(entry.commentId) === 'restoring' && validClaims.get(entry.commentId) !== 'restore'
+		undoable: dispatchIds.has(entry.commentId) || (statusById.get(entry.commentId) === 'restoring' && validClaims.get(entry.commentId) !== 'restore')
 			? null : undoableFor(entry.id === latestIds.get(entry.commentId), entry.action, statusById.get(entry.commentId))
 	}));
 	const last = page.at(-1);
 	const nextCursor = hasMore && last ? `${last.createdAt}|${last.id}` : null;
 	// Project only what the page renders — never serialize refreshTokenEnc (or
 	// any future secret column) to the browser.
-	return { ch: { id: ch.id, title: ch.title }, entries, recovery, canRecover: locals.user?.orgRole === 'owner', nextCursor, hasPrev: cursor !== null };
+	return { ch: { id: ch.id, title: ch.title }, entries, recovery, dispatches, canRecover: locals.user?.orgRole === 'owner', nextCursor, hasPrev: cursor !== null };
 }
 
 async function restore({ params, request, locals }: { params: { id: string }; request: Request; locals: App.Locals }, recovery = false) {
@@ -141,7 +149,7 @@ async function restore({ params, request, locals }: { params: { id: string }; re
 	if (!commentId) return fail(400, { error: 'Invalid comment ID' });
 	const ch = await ownedChannel(params.id, locals);
 	const comment = await db
-		.select({ status: comments.status, decidedBy: comments.decidedBy, restoreIntentId: comments.restoreIntentId })
+		.select({ status: comments.status, decidedBy: comments.decidedBy, restoreIntentId: comments.restoreIntentId, humanDispatchToken: comments.humanDispatchToken, humanDispatchState: comments.humanDispatchState })
 		.from(comments)
 		.where(and(eq(comments.id, commentId), eq(comments.channelId, params.id)))
 		.get();
@@ -151,6 +159,7 @@ async function restore({ params, request, locals }: { params: { id: string }; re
 	if (!comment || (comment.status !== 'held' && comment.status !== 'rejected' && comment.status !== 'restoring')) {
 		throw error(404, 'reversible comment not found in this channel');
 	}
+	if (comment.humanDispatchToken !== null || comment.humanDispatchState !== null) throw error(409, HUMAN_DISPATCH_BLOCKED);
 	// A restoring row may belong to any human action. Ordinary Undo resumes
 	// only a verified restore; owner recovery explicitly records a new one.
 	const resuming = comment.status === 'restoring';
@@ -176,7 +185,8 @@ async function restore({ params, request, locals }: { params: { id: string }; re
 				.update(comments)
 				.set({ status: 'approved', decidedBy: 'human', restoreIntentId: null })
 				.where(and(eq(comments.id, commentId), eq(comments.channelId, params.id), eq(comments.status, comment.status),
-					comment.restoreIntentId === null ? isNull(comments.restoreIntentId) : eq(comments.restoreIntentId, comment.restoreIntentId)))
+					comment.restoreIntentId === null ? isNull(comments.restoreIntentId) : eq(comments.restoreIntentId, comment.restoreIntentId),
+					isNull(comments.humanDispatchToken), isNull(comments.humanDispatchState)))
 				.returning({ id: comments.id });
 			if (!rows.length) return false;
 			// Name the action being undone — server-side, never from the form.
@@ -214,7 +224,8 @@ async function restore({ params, request, locals }: { params: { id: string }; re
 			.update(comments)
 			.set({ status: 'restoring' })
 			.where(and(eq(comments.id, commentId), eq(comments.channelId, params.id), eq(comments.status, comment.status),
-				comment.restoreIntentId === null ? isNull(comments.restoreIntentId) : eq(comments.restoreIntentId, comment.restoreIntentId)))
+				comment.restoreIntentId === null ? isNull(comments.restoreIntentId) : eq(comments.restoreIntentId, comment.restoreIntentId),
+				isNull(comments.humanDispatchToken), isNull(comments.humanDispatchState)))
 			.returning({ id: comments.id });
 		if (!rows.length) return null;
 		const existing = await resumedIntent(tx);
@@ -255,23 +266,30 @@ async function restore({ params, request, locals }: { params: { id: string }; re
 	try {
 		// Revalidate the connector identity before spending the grant:
 		// account deletion can have detached the channel since ownedChannel
-		// loaded it, and a remote write must never fire on a dead channel
-		// (cubic). The catch releases a fresh claim like any remote failure.
+		// loaded it. A failure before dispatch can release a fresh claim.
 		await assertChannelActive(params.id, db, ch);
 		const token = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
-		remoteMissing = (await applyHumanIntent(commentId, 'restore', token)) === 'missing';
+		const dispatch = await reserveHumanDispatch(params.id, commentId, claim.intentId, ch);
+		if (!dispatch) return fail(409, { error: HUMAN_DISPATCH_BLOCKED });
+		remoteMissing = (await executeHumanDispatch(dispatch, 'restore', token, ch)) === 'missing';
 	} catch (e) {
-		// The remote write did not land: release a fresh claim so the
-		// failed restore stays retryable and drop its staged intent row —
-		// nothing committed. A resumed attempt keeps its claim and its
-		// intent row: they belong to the earlier crash the reconcile
-		// sweep still owes a finish.
+		if (e instanceof HumanDispatchUncertainError) {
+			console.error('log undo: uncertain YouTube outcome for comment %s — further actions paused', commentId, e);
+			return fail(500, { error: HUMAN_DISPATCH_UNCERTAIN });
+		}
+		if (e instanceof HumanFinalizeError) {
+			console.error('log undo: finalize failed for comment %s — reconcile sweep will finish it:', commentId, e);
+			return fail(500, { error: 'The restore reached YouTube but saving it failed — it will finish automatically on the next moderation run.' });
+		}
+		// A known predispatch failure or settled refusal can release a fresh
+		// claim. A resumed intent and any concurrent dispatch stay durable.
 		if (!resuming) {
 			await db.transaction(async (tx) => {
 				const released = await tx
 					.update(comments)
 					.set({ status: comment.status, decidedBy: comment.decidedBy, restoreIntentId: null })
-					.where(and(eq(comments.id, commentId), eq(comments.status, 'restoring'), eq(comments.restoreIntentId, claim.intentId)))
+					.where(and(eq(comments.id, commentId), eq(comments.channelId, params.id), eq(comments.status, 'restoring'), eq(comments.restoreIntentId, claim.intentId),
+						isNull(comments.humanDispatchToken), isNull(comments.humanDispatchState)))
 					.returning({ id: comments.id });
 				if (!released.length) return;
 				await tx.delete(auditLog).where(eq(auditLog.id, claim.intentId));
@@ -282,20 +300,6 @@ async function restore({ params, request, locals }: { params: { id: string }; re
 			return fail(500, { error: 'The restore failed. Your recorded restore request will retry on the next moderation run; refresh the log before retrying.' });
 		}
 		throw e;
-	}
-	// The publish landed — releasing the claim now would revert the local
-	// row while YouTube already shows the comment, with no record left to
-	// repair the desync (codeant). 'restoring' + the durable intent row
-	// are exactly what the reconcile sweep needs to finish the commit.
-	try {
-		await finalizeHumanIntent(params.id, commentId, remoteMissing ? 'delete' : 'restore', claim.intentId, ch);
-	} catch (e) {
-		// Remote succeeded, local commit failed: keep the claim and the
-		// intent row for the reconcile sweep, and tell the user it
-		// resolves itself — an uncaught throw would surface the same 500
-		// without explaining the self-heal (codex).
-		console.error('log undo: finalize failed for comment %s — reconcile sweep will finish it:', commentId, e);
-		return fail(500, { error: 'The restore reached YouTube but saving it failed — it will finish automatically on the next moderation run.' });
 	}
 	return { success: remoteMissing ? 'The comment no longer exists on YouTube — recorded as deleted.' : 'Restored — recorded in audit log.' };
 }

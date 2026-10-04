@@ -48,7 +48,7 @@ test.each(['approve', 'restore'])('an interrupted %s survives a newer system aud
 
 	await reconcile();
 
-	expect(youtube.setModerationStatus).toHaveBeenCalledExactlyOnceWith(['comment'], 'published', false, 'access-token', undefined);
+	expect(youtube.setModerationStatus).toHaveBeenCalledExactlyOnceWith(['comment'], 'published', false, 'access-token', undefined, true);
 	expect((await comment())?.status).toBe('approved');
 	expect((await testDb().db.select().from(moderationActions).get())?.state).toBe('cancelling');
 	// The stale remote rejection may still land after the human publish. The
@@ -67,7 +67,7 @@ test.each(['later timestamp', 'same timestamp'])('replays the bound human intent
 
 	await reconcile();
 
-	expect(youtube.setModerationStatus).toHaveBeenCalledExactlyOnceWith(['comment'], 'rejected', false, 'access-token', undefined);
+	expect(youtube.setModerationStatus).toHaveBeenCalledExactlyOnceWith(['comment'], 'rejected', false, 'access-token', undefined, true);
 	expect((await comment())?.status).toBe('rejected');
 });
 
@@ -101,7 +101,7 @@ test('recovery uses the bound restore even when a later user audit says ban', as
 	await bind(await audit('restore', 'user', '2026-01-01T00:00:00.000Z'));
 	await audit('ban', 'user', '2026-01-02T00:00:00.000Z');
 	await reconcile();
-	expect(youtube.setModerationStatus).toHaveBeenCalledExactlyOnceWith(['comment'], 'published', false, 'access-token', undefined);
+	expect(youtube.setModerationStatus).toHaveBeenCalledExactlyOnceWith(['comment'], 'published', false, 'access-token', undefined, true);
 	expect(await comment()).toMatchObject({ status: 'approved', restoreIntentId: null });
 });
 

@@ -416,7 +416,7 @@ test('a parked rescan page skips comments this scan already staged — no repeat
 	expect(mocks.state.channelUpdates).toEqual([]);
 
 	await runChannel('channel');
-	expect(mocks.setModerationStatus).toHaveBeenLastCalledWith(['paid'], 'published', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenLastCalledWith(['paid'], 'published', false, 'access-token', undefined, true);
 	expect(mocks.state.moderationActions).toEqual([expect.objectContaining({ commentId: 'paid', state: 'superseded' })]);
 });
 

@@ -112,6 +112,13 @@ async function fetchAttempt(input: RequestInfo | URL, init: RequestInit, deadlin
 	}
 }
 
+/** One bounded attempt for mutations whose uncertain outcome must stay visible. */
+export async function fetchSingleAttempt(input: RequestInfo | URL, init: RequestInit = {}, deadline?: number): Promise<Response> {
+	const attempt = await fetchAttempt(input, init, deadline);
+	if ('error' in attempt) throw attempt.error;
+	return attempt.response;
+}
+
 function boundedRetryDelay(response: Response | undefined, retry: number, deadline?: number): number {
 	const delay = retryDelay(response, retry);
 	return deadline === undefined ? delay : Math.min(delay, Math.max(0, deadline - Date.now()));

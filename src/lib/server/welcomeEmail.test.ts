@@ -11,7 +11,7 @@ import { channels, memberships, organizations, users, welcomeCampaigns, welcomeE
 import { enqueueWelcome, deliverWelcome, sweepWelcomeEmails, previewWelcomeBackfill, backfillWelcomeBatch, WELCOME_CAMPAIGN } from './welcomeEmail';
 import { buildWelcomeEmail } from './welcomeEmailTemplate';
 import { ProtonMailSubmissionError, ProtonMailPreSubmissionDeadlineError, ProtonMailConfigurationError } from './protonMail';
-setupTestDb(['users', 'organizations', 'memberships', 'channels', 'welcome_emails', 'welcome_campaigns']);
+setupTestDb(['users', 'organizations', 'memberships', 'channels', 'welcome_emails', 'welcome_campaigns', 'welcome_discovery']);
 beforeEach(() => {
  mocks.env.MODERATY_DEPLOYMENT = 'official-hosted'; mocks.env.WELCOME_EMAIL_ENABLED = 'true'; mocks.env.APP_URL = 'https://moderaty.com'; mocks.env.DRY_RUN = 'false';
  mocks.send.mockReset().mockResolvedValue({ messageId: '<accepted@moderaty.com>' });

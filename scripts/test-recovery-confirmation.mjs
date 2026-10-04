@@ -15,7 +15,7 @@ const fixture = await mkdtemp(path.join(tmpdir(), 'moderaty-recovery-confirmatio
 try {
 	await writeFile(path.join(fixture, 'Wrapper.svelte'), `<script>
 		import Page from ${JSON.stringify(path.join(root, 'src/routes/(app)/channels/[id]/log/+page.svelte'))};
-		let data = $state({ch:{id:'UC1',title:'Ch'},entries:[],nextCursor:null,hasPrev:false,canRecover:true,recovery:[]});
+		let data = $state({ch:{id:'UC1',title:'Ch'},entries:[],nextCursor:null,hasPrev:false,canRecover:true,recovery:[],dispatches:[]});
 		export function updateRecovery(recovery) {data = {...data,recovery};}
 	</script><Page {data} form={null}/>`);
 	await writeFile(path.join(fixture, 'entry.js'), `import { mount, flushSync } from 'svelte';

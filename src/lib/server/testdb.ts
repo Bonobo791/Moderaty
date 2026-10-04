@@ -265,6 +265,8 @@ export async function createTestDb(): Promise<TestDb> {
 			published_at TEXT NOT NULL,
 			status TEXT NOT NULL,
 			restore_intent_id INTEGER,
+			human_dispatch_token TEXT,
+			human_dispatch_state TEXT,
 			decided_by TEXT NOT NULL,
 			matched_rule_id INTEGER,
 			ai_score TEXT,
@@ -602,5 +604,6 @@ export async function createTestDb(): Promise<TestDb> {
 	await client.executeMultiple(readFileSync(new URL('../../../drizzle/0062_hosted_welcome_email.sql', import.meta.url), 'utf8'));
 	await client.executeMultiple(readFileSync(new URL('../../../drizzle/0063_welcome_campaign_pacing.sql', import.meta.url), 'utf8'));
 	await client.executeMultiple(readFileSync(new URL('../../../drizzle/0064_cron_workload_fairness.sql', import.meta.url), 'utf8'));
+	await client.executeMultiple(readFileSync(new URL('../../../drizzle/0067_welcome_discovery.sql', import.meta.url), 'utf8'));
 	return { db: drizzle(client, { schema }), client };
 }

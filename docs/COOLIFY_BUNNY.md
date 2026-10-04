@@ -216,6 +216,18 @@ One-time setup (human, in the Coolify dashboard):
    worktree `.env`, this app's env vars, and the Netlify branch-deploys
    context.
 
+   **An extra migration hash can indicate a lost journal entry.** The
+   2026-10-04 deployment of `bd7e04e` passed preflight and migration, then
+   verification rejected `EXTRA applied hash da0cfc786b88…` (66 applied,
+   65 journal entries). That hash belongs to the unchanged
+   `0064_cron_workload_fairness.sql`; a merge had omitted its journal entry.
+   The repair restores that entry and the snapshot chain. Additive migration
+   `0066_repair_scheduler_journal` also handles installations that already
+   applied 0065 without 0064: it creates the missing scheduler table and
+   records the replayed 0064 hash, preserving an existing scheduler turn.
+   Deploy the repaired source through the normal migrate-and-verify gate.
+   Do not erase applied hashes or disable verification to clear this error.
+
    **Build Variable flags — only the two TURSO_* variables need them.**
    Coolify injects an `ARG` statement into the Dockerfile for every env var
    with Build Variable ON (a misconfigured app logs hadolint

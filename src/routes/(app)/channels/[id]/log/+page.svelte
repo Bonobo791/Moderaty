@@ -29,6 +29,23 @@
 	restored here; deletions and author bans are permanent.
 </p>
 
+{#if data.dispatches.length}
+	<div class="card">
+		<h2>Pending YouTube actions</h2>
+		{#each data.dispatches as comment (comment.id)}
+			<p>{comment.text}<br /><small class="muted">{comment.id}</small></p>
+			<p class="error-box" role="alert">
+				Further actions are paused to protect the recorded decision.
+				{#if comment.state === 'uncertain'}
+					YouTube did not confirm the outcome. Contact support before changing this comment's moderation.
+				{:else}
+					The action is in progress. Check again shortly; if it stays pending, contact support.
+				{/if}
+			</p>
+		{/each}
+	</div>
+{/if}
+
 {#if data.recovery.length}
 	<div class="card">
 		<h2>Comments needing recovery</h2>

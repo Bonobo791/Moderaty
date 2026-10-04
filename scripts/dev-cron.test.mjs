@@ -173,6 +173,13 @@ describe('dev cron tick', () => {
 		await expect(tickOnce()).rejects.toThrow('zeroCreditSweepError');
 	});
 
+	it.each(['token', 'credits'])('does not suppress a stale-preview cleanup failure behind %s errors', async (category) => {
+		const payload = { ok: false, feedbackPreviewSweepError: true, results: { UC1: { error: category } } };
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, 500)));
+
+		await expect(tickOnce()).rejects.toThrow('feedbackPreviewSweepError');
+	});
+
 	it('names the zero-credit sweep failure on a 200 instead of the generic ok:false', async () => {
 		const payload = { ok: false, zeroCreditSweepError: 'db down', results: {} };
 		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));

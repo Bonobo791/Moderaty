@@ -26,8 +26,8 @@ GitHub ──push──▶ Coolify (self-hosted server)
 Turso (external): prod app → production DB · dev app → dev-2 DB
 Netlify: unchanged until cutover; its production scheduled function keeps
 ticking the SAME production DB — safe, because /api/cron claims each channel
-with an expiring DB lease (channels.lease_expires_at), so two schedulers can
-never process one channel twice.
+with an expiring DB lease (channels.lease_expires_at), so a second scheduler
+cannot claim a channel while its lease remains held.
 ```
 
 Requirements met by this design:
@@ -51,10 +51,11 @@ Requirements met by this design:
 - **Fail-loud, bounded, idempotent — the same invariants as Netlify.**
   The image build is gated by `scripts/netlify-migrate.mjs` (migrate + verify
   before build; `CONTEXT` unset = the conservative always-run default); the
-  health check hits `/api/health` (fails on a dead database); cron ticks one
-  channel per minute via the lease-protected `/api/cron`; `DRY_RUN=true`
-  until verified (I8); a failed tick exits non-zero and appears in the
-  scheduled-task log.
+  health check hits `/api/health` (fails on a dead database); each cron tick
+  runs at most one workload via the lease-protected `/api/cron`;
+  `DRY_RUN=true` until verified (I8). Operator-actionable tick failures exit
+  non-zero and appear in the scheduled-task log; channel-owner-only failures
+  are suppressed as described in the Scheduled Task setup below.
 
 ## 2. What already ships in the repo (this change)
 
@@ -229,19 +230,28 @@ One-time setup (human, in the Coolify dashboard):
 
 5. **Scheduled Task** (Scheduled Tasks → application): expression `* * * * *`,
    command `APP_URL=http://127.0.0.1:3000 node scripts/dev-cron.mjs --once`.
-   One task replaces the Netlify Scheduled Function; N channels ⇒ each
-   channel scanned every N minutes, exactly as on Netlify. The script exits
+   One task replaces the Netlify Scheduled Function. Without pending feedback
+   previews, N eligible live channels rotate about every N schedule intervals.
+   When previews and live moderation are both ready, they alternate slots, so
+   the live rotation is about 2N schedule intervals; neither class can monopolize
+   ticks. See [cron workload fairness](cron-workload-fairness.md) for leases,
+   retry expiry, and examples at different schedule intervals.
+   The script exits
    non-zero (→ Coolify's task-failure notification) only for
-   operator-actionable failures: the endpoint unreachable/non-OK, a failed
-   sweep (`ok:false`), `budgetExhausted`, a lost run-health write, or a
-   channel error category the owner cannot fix. Channel-owner states —
+   operator-actionable failures: configuration or transport errors,
+   non-suppressed HTTP failures, invalid response bodies, failed sweeps or
+   auxiliary jobs, `budgetExhausted`, a lost run-health write, or a channel
+   error category the owner cannot fix. A non-OK response whose only channel
+   failures are `credits` or `token`, with no operator problems, is suppressed.
+   These channel-owner states —
    `credits` (top-up needed) and `token` (reconnect needed) — are persistent
    and already surfaced on the dashboard, so they log a warning and keep the
    task green instead of emailing once a minute until the owner acts.
    Optionally set **`HEALTHCHECK_PING_URL`** (Runtime Variable; healthchecks.io
-   or a Uptime Kuma push monitor) — every answered tick pings it, a thrown
-   tick stays silent, so the monitor alerts once per outage and also catches
-   the task never running at all, which an exit code can't report.
+   or a Uptime Kuma push monitor) — healthy and suppressed owner-actionable
+   ticks attempt the ping; ticks that throw stay silent, so the monitor alerts
+   on silence and also catches the task never running at all, which an exit
+   code can't report.
 6. **Domain**: the app's fqdn is the *origin* hostname (e.g.
    `moderaty-prod.<server>`); the public domain points at Bunny (§5), not at
    the app.

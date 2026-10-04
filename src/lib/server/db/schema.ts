@@ -65,6 +65,15 @@ export const welcomeCampaigns = sqliteTable('welcome_campaigns', {
 	nextAttemptAt: text('next_attempt_at').notNull()
 });
 
+// Shared scheduler turn, independent of any channel's live health or account.
+export const cronWorkloadState = sqliteTable('cron_workload_state', {
+	id: integer('id').primaryKey(),
+	nextWorkload: text('next_workload', { enum: ['preview', 'live'] }).notNull().default('preview')
+}, (table) => [
+	check('cron_workload_singleton', sql`${table.id} = 1`),
+	check('cron_workload_kind', sql`${table.nextWorkload} IN ('preview', 'live')`)
+]);
+
 export const sessions = sqliteTable('sessions', {
 	// Stryker disable next-line StringLiteral: "" equivalent (drizzle falls back to property key)
 	id: text('id').primaryKey(), // random 32-byte hex token; also the cookie value

@@ -4,7 +4,7 @@
 
 **Goal:** Prevent interrupted human-action recovery from replaying an unrelated historical user action.
 
-**Architecture:** A nullable `comments.restoreIntentId` binds a restoring claim to one audit row. Human-action transactions set the binding before remote work; recovery validates the exact row and fails closed when no trustworthy binding exists. Explicit legacy Undo creates a fresh restore intent.
+**Architecture:** A nullable `comments.restoreIntentId` binds a restoring claim to one audit row. Human-action transactions set the binding before remote work; recovery validates the exact row and fails closed when no trustworthy binding exists. Confirmed owner recovery creates a fresh restore intent for an unverifiable claim.
 
 **Tech Stack:** SvelteKit, TypeScript, Drizzle, SQLite/libSQL, Vitest.
 
@@ -23,7 +23,7 @@
 - Legacy restoring row with historical ban: no replay; warning retained
 - Matching ID with wrong actor/channel/comment or unsupported verb: no replay
 - A later audit cannot replace the bound intent, even with equal or skewed timestamps
-- Explicit Undo can reconstruct an unbound legacy restore without reusing an old restore row
+- Confirmed owner recovery can record a new legacy restore without reusing an old restore row; ordinary Undo rejects unverifiable claims
 - Stale finalization/release cannot clear a newer claim
 
 ## Task 1: Bind and validate human-action claims
@@ -49,7 +49,10 @@
 - Before merging this recovery PR: merge fairness first, rebase recovery, preserve both journal entries, regenerate snapshot 0065 over snapshot 0064, and rerun checks/migration tests
 - Do not deploy recovery ahead of fairness: the timestamp-based migrator could otherwise skip the later-added lower migration
 - Existing restoring rows are deliberately left unbound; no historical action is guessed or replayed
-- Owners can explicitly retry Undo where offered in the audit log, which creates a new bound restore intent; rows without an available Undo or with invalid non-null bindings require operator investigation
+- The audit log lists unverifiable restoring claims independently of audit pagination, including rows without audit history; an organization owner can explicitly confirm a new restore request without borrowing historical intent
+- Ordinary Undo resumes only verified restore claims; valid pending approve/reject/delete/ban intents cannot be replaced by owner recovery, and stale recovery forms are fenced on their observed binding
+- Recovery validates the current connector and then rereads the exact comment claim as its last awaited database operation before dispatch, skipping claims replaced since the initial snapshot
+- These database checks and guarded finalization do not make a YouTube request atomic with local state. A release/replacement after the final check or while remote work is in flight can still race an old remote write; this remains an unresolved release gate requiring a broader serialization/convergence decision. Do not treat the pre-dispatch reread as complete remote fencing
 - No production records were inspected, so whether any existing row needs manual recovery is unknown
 - All database verification here uses disposable local SQLite only
 

@@ -100,3 +100,21 @@ test('channel guards still match their qualified columns after earlier parameter
 	expect(changed).toEqual([]);
 	expect(mocks.state.channelUpdates).toEqual([]);
 });
+
+test.each(['staged', 'existing'])('a failed transaction restores the %s comment and intent binding', async (kind) => {
+	const original = { id: 'comment', status: 'restoring', decidedBy: 'human', restoreIntentId: 7 };
+	if (kind === 'staged') mocks.state.insertedComments = [{ ...original }];
+	else {
+		mocks.state.existingIds = ['comment'];
+		mocks.state.commentStatuses = { comment: original.status };
+		mocks.state.commentDecidedBy = { comment: original.decidedBy };
+		mocks.state.commentRestoreIntentIds = { comment: original.restoreIntentId };
+	}
+	await expect(mocks.db.transaction(async (tx) => {
+		await tx.update(comments).set({ status: 'approved', decidedBy: 'none', restoreIntentId: null })
+			.where(and(eq(comments.id, 'comment'), eq(comments.restoreIntentId, 7))).returning({ id: comments.id });
+		throw new Error('rollback fixture');
+	})).rejects.toThrow('rollback fixture');
+	const rows = await mocks.db.select().from(comments).where(eq(comments.id, 'comment')).all();
+	expect(rows).toEqual([expect.objectContaining(original)]);
+});

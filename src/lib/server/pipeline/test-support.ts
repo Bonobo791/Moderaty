@@ -369,8 +369,11 @@ const mocks = vi.hoisted(() => {
 			channel: state.channel ? { ...state.channel } : state.channel,
 			channelUpdates: [...state.channelUpdates],
 			insertedCredits: [...state.insertedCredits],
-			insertedComments: [...state.insertedComments],
+			insertedComments: state.insertedComments.map((row) => ({ ...row })),
 			insertedAudits: [...state.insertedAudits],
+			commentStatuses: { ...state.commentStatuses },
+			commentDecidedBy: { ...state.commentDecidedBy },
+			commentRestoreIntentIds: { ...state.commentRestoreIntentIds },
 			moderationActions: state.moderationActions.map((row) => ({ ...row }))
 		};
 		try {
@@ -382,6 +385,9 @@ const mocks = vi.hoisted(() => {
 			state.insertedCredits = snapshot.insertedCredits;
 			state.insertedComments = snapshot.insertedComments;
 			state.insertedAudits = snapshot.insertedAudits;
+			state.commentStatuses = snapshot.commentStatuses;
+			state.commentDecidedBy = snapshot.commentDecidedBy;
+			state.commentRestoreIntentIds = snapshot.commentRestoreIntentIds;
 			state.moderationActions = snapshot.moderationActions;
 			throw error;
 		}

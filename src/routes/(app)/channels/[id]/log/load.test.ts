@@ -1,6 +1,7 @@
 import { expect, test } from 'vitest';
 import { TEST_OWNER, setupTestDb, testDb } from '$lib/server/testdb';
 import { auditLog, channels, comments } from '$lib/server/db/schema';
+import { eq } from 'drizzle-orm';
 
 import { load } from './+page.server';
 
@@ -27,7 +28,7 @@ test('load returns the maintenance payload during a database outage instead of a
 	// null-user outage shape.
 	const result = await load({ params: { id: 'UC1' }, locals: { user: null, dbDown: true }, url: LOG_URL } as never);
 	// Exact payload: the page renders ch.id/title even in the outage shape.
-	expect(result).toEqual({ ch: { id: 'UC1', title: '' }, entries: [], maintenance: true });
+	expect(result).toEqual({ ch: { id: 'UC1', title: '' }, entries: [], recovery: [], canRecover: false, maintenance: true });
 });
 
 test('load marks only the latest reversible action per comment as undoable', async () => {
@@ -93,6 +94,38 @@ test('a hold row on a held comment still offers Undo', async () => {
 	const result = await load({ params: { id: 'UC1' }, locals: { user: OWNER }, url: LOG_URL } as never);
 
 	expect(result!.entries[0]).toMatchObject({ commentId: 'c-held', action: 'hold', undoable: 'full' });
+});
+
+test.each(['reject', 'ban'])('a valid pending %s offers no guaranteed-failing Undo or recovery override', async (action) => {
+	await seedChannel();
+	const [intent] = await testDb().db.insert(auditLog).values({ channelId: 'UC1', commentId: 'c-pending', action, actor: 'user', reason: 'manual review' }).returning({ id: auditLog.id });
+	await testDb().db.insert(comments).values({ id: 'c-pending', channelId: 'UC1', text: 'pending text', publishedAt: '2026-01-01', status: 'restoring', decidedBy: 'human', restoreIntentId: intent.id });
+	const result = await load({ params: { id: 'UC1' }, locals: { user: OWNER }, url: LOG_URL } as never);
+	expect(result.entries[0].undoable).toBeNull();
+	expect(result).toHaveProperty('recovery', []);
+});
+
+test.each(['no audit', 'approve', 'delete', 'restore', 'mismatched binding'])('blocked claims stay visible with %s even outside the audit page', async (kind) => {
+	await seedChannel();
+	await testDb().db.insert(comments).values({ id: 'blocked', channelId: 'UC1', text: 'blocked text', publishedAt: '2026-01-01', status: 'restoring', decidedBy: 'human' });
+	if (kind !== 'no audit') {
+		const [audit] = await testDb().db.insert(auditLog).values({ channelId: 'UC1', commentId: kind === 'mismatched binding' ? 'other-comment' : 'blocked', action: kind === 'mismatched binding' ? 'restore' : kind, actor: 'user', reason: 'historical', createdAt: '2025-01-01T00:00:00.000Z' }).returning({ id: auditLog.id });
+		if (kind === 'mismatched binding') await testDb().db.update(comments).set({ restoreIntentId: audit.id }).where(eq(comments.id, 'blocked'));
+	}
+	await seedEntries(manyEntries(PAGE_SIZE + 1));
+	const result = await loadPage();
+	expect(result.entries.some((entry) => entry.commentId === 'blocked')).toBe(false);
+	expect(result).toHaveProperty('recovery', [expect.objectContaining({ id: 'blocked', text: 'blocked text' })]);
+	expect(result).toHaveProperty('canRecover', true);
+	expect(await testDb().db.select().from(comments).where(eq(comments.id, 'blocked')).get()).toMatchObject({ status: 'restoring', decidedBy: 'human' });
+});
+
+test('members can see blocked claims but only owners receive recovery controls', async () => {
+	await seedChannel();
+	await testDb().db.insert(comments).values({ id: 'blocked', channelId: 'UC1', text: 'blocked text', publishedAt: '2026-01-01', status: 'restoring', decidedBy: 'human' });
+	const result = await load({ params: { id: 'UC1' }, locals: { user: { ...OWNER, orgRole: 'member' } }, url: LOG_URL } as never);
+	expect(result).toHaveProperty('recovery', [expect.objectContaining({ id: 'blocked' })]);
+	expect(result).toHaveProperty('canRecover', false);
 });
 
 test('tied timestamps still pick the truly latest action (auto-increment id breaks the tie)', async () => {

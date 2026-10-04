@@ -1,12 +1,12 @@
 import { db, withBusyRetry } from '$lib/server/db';
 import { auditLog, comments, moderationActions } from '$lib/server/db/schema';
-import { ownedChannel } from '$lib/server/ownership';
+import { ownedChannel, requireOrgRole } from '$lib/server/ownership';
 import { requireUser } from '$lib/server/session';
 import { refreshAccessToken } from '$lib/server/youtube';
-import { applyHumanIntent, assertChannelActive, claimedHumanIntent, finalizeHumanIntent } from '$lib/server/pipeline/enforcement';
+import { applyHumanIntent, assertChannelActive, claimedHumanIntent, finalizeHumanIntent, humanFinalStatus } from '$lib/server/pipeline/enforcement';
 import { decrypt } from '$lib/server/crypto';
 import { env } from '$env/dynamic/private';
-import { error, fail } from '@sveltejs/kit';
+import { error, fail, isHttpError } from '@sveltejs/kit';
 import { and, eq, desc, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 
 /** Audit-log page size; the load fetches one extra row to detect a next page. */
@@ -47,10 +47,24 @@ function undoableFor(latest: boolean, action: string, commentStatus: string | un
 export async function load({ params, locals, url }) {
 	// Database outage: the layout renders the overlay; this load must not 401
 	// on the null-user outage shape.
-	if (locals.dbDown) return { ch: { id: params.id, title: '' }, entries: [], maintenance: true };
+	if (locals.dbDown) return { ch: { id: params.id, title: '' }, entries: [], recovery: [], canRecover: false, maintenance: true };
 	// Ownership-scoped: another user's channel (and its audit log) reads as "not found".
 	const ch = await ownedChannel(params.id, locals);
 	const cursor = parseCursor(url.searchParams.get('before'));
+	// Read claims independently of the audit page: legacy claims may have no
+	// audit row at all. The stored status/binding keeps this error visible
+	// until an owner explicitly records a new decision.
+	const restoring = await db.select({
+		id: comments.id, text: comments.text, restoreIntentId: comments.restoreIntentId,
+		boundId: auditLog.id, action: auditLog.action
+	}).from(comments).leftJoin(auditLog, and(
+		eq(auditLog.id, comments.restoreIntentId), eq(auditLog.channelId, comments.channelId),
+		eq(auditLog.commentId, comments.id), eq(auditLog.actor, 'user')
+	)).where(and(eq(comments.channelId, params.id), eq(comments.status, 'restoring'))).all();
+	const validClaims = new Map(restoring.filter((row) => row.boundId !== null && row.action !== null && humanFinalStatus(row.action))
+		.map((row) => [row.id, row.action]));
+	const recovery = restoring.filter((row) => !validClaims.has(row.id))
+		.map(({ id, text, restoreIntentId }) => ({ id, text, restoreIntentId }));
 	const rows = await db
 		.select()
 		.from(auditLog)
@@ -100,100 +114,71 @@ export async function load({ params, locals, url }) {
 	}
 	const entries = page.map((entry) => ({
 		...entry,
-		undoable: undoableFor(entry.id === latestIds.get(entry.commentId), entry.action, statusById.get(entry.commentId))
+		undoable: statusById.get(entry.commentId) === 'restoring' && validClaims.get(entry.commentId) !== 'restore'
+			? null : undoableFor(entry.id === latestIds.get(entry.commentId), entry.action, statusById.get(entry.commentId))
 	}));
 	const last = page.at(-1);
 	const nextCursor = hasMore && last ? `${last.createdAt}|${last.id}` : null;
 	// Project only what the page renders — never serialize refreshTokenEnc (or
 	// any future secret column) to the browser.
-	return { ch: { id: ch.id, title: ch.title }, entries, nextCursor, hasPrev: cursor !== null };
+	return { ch: { id: ch.id, title: ch.title }, entries, recovery, canRecover: locals.user?.orgRole === 'owner', nextCursor, hasPrev: cursor !== null };
 }
 
-export const actions = {
-	/**
-	 * Reverses a reversible moderation action: restores a held or rejected
-	 * comment to published at YouTube (DB claim before the remote call, I3).
-	 * Deleted comments are gone and author bans cannot be lifted — YouTube
-	 * offers no API for either, so neither is undoable.
-	 */
-	undo: async ({ params, request, locals }) => {
-		requireUser(locals);
-		const raw = (await request.formData()).get('commentId');
-		const commentId = typeof raw === 'string' ? raw.trim() : '';
-		if (!commentId) return fail(400, { error: 'Invalid comment ID' });
-		const ch = await ownedChannel(params.id, locals);
-		const comment = await db
-			.select({ status: comments.status, decidedBy: comments.decidedBy, restoreIntentId: comments.restoreIntentId })
-			.from(comments)
-			.where(and(eq(comments.id, commentId), eq(comments.channelId, params.id)))
-			.get();
-		if (!comment || (comment.status !== 'held' && comment.status !== 'rejected' && comment.status !== 'restoring')) {
-			throw error(404, 'reversible comment not found in this channel');
+async function restore({ params, request, locals }: { params: { id: string }; request: Request; locals: App.Locals }, recovery = false) {
+	requireUser(locals);
+	const form = await request.formData();
+	const raw = form.get('commentId');
+	let expectedIntentId: number | null = null;
+	if (recovery) {
+		if (form.get('confirmRestore') !== 'yes') return fail(400, { error: 'Confirm that you want to publish this comment before restoring it.' });
+		const expected = form.get('expectedIntentId');
+		if (typeof expected !== 'string' || (expected !== '' && (!/^[1-9]\d*$/.test(expected) || !Number.isSafeInteger(Number(expected))))) {
+			return fail(400, { error: 'Invalid recovery request. Refresh the log before retrying.' });
 		}
-		// 'restoring' means a previous undo claimed the comment (or restored it
-		// remotely) but crashed before the audit commit: resume it. The YouTube
-		// call is idempotent (I4), so re-applying it is safe.
-		const resuming = comment.status === 'restoring';
-		const dryRun = env.DRY_RUN === 'true';
-		const resumedIntent = async (tx: Pick<typeof db, 'select'>) => {
-			if (!resuming || comment.restoreIntentId === null) return null;
-			const existing = await claimedHumanIntent(params.id, commentId, comment.restoreIntentId, tx);
-			if (!existing || existing.action !== 'restore') {
-				throw error(409, 'This comment has a different or invalid pending action. Refresh the log or contact support before retrying Undo.');
-			}
-			return { intentId: existing.id };
-		};
-		if (dryRun) {
-			// No remote call in dry run: final status and the dry-run audit row
-			// commit atomically — nothing dangles between them.
-			const claimed = await db.transaction(async (tx) => {
-				await resumedIntent(tx);
-				const rows = await tx
-					.update(comments)
-					.set({ status: 'approved', decidedBy: 'human', restoreIntentId: null })
-					.where(and(eq(comments.id, commentId), eq(comments.status, comment.status),
-						comment.restoreIntentId === null ? isNull(comments.restoreIntentId) : eq(comments.restoreIntentId, comment.restoreIntentId)))
-					.returning({ id: comments.id });
-				if (!rows.length) return false;
-				// Name the action being undone — server-side, never from the form.
-				const prior = await tx
-					.select({ action: auditLog.action })
-					.from(auditLog)
-					.where(and(eq(auditLog.channelId, params.id), eq(auditLog.commentId, commentId), inArray(auditLog.action, ['hold', 'reject', 'ban'])))
-					.orderBy(desc(auditLog.createdAt), desc(auditLog.id))
-					.limit(1)
-					.get();
-				await tx.insert(auditLog).values({
-					channelId: params.id,
-					commentId,
-					action: 'dry-run',
-					reason: `undo of ${prior?.action ?? 'moderation action'}`,
-					actor: 'user',
-					authorHandle: null,
-					createdAt: new Date().toISOString()
-				});
-				return true;
-			});
-			if (!claimed) throw error(404, 'reversible comment not found in this channel');
-			return { success: 'Restored — recorded in audit log.' };
+		expectedIntentId = expected === '' ? null : Number(expected);
+	}
+	const commentId = typeof raw === 'string' ? raw.trim() : '';
+	if (!commentId) return fail(400, { error: 'Invalid comment ID' });
+	const ch = await ownedChannel(params.id, locals);
+	const comment = await db
+		.select({ status: comments.status, decidedBy: comments.decidedBy, restoreIntentId: comments.restoreIntentId })
+		.from(comments)
+		.where(and(eq(comments.id, commentId), eq(comments.channelId, params.id)))
+		.get();
+	if (recovery && (!comment || comment.status !== 'restoring' || comment.restoreIntentId !== expectedIntentId)) {
+		return fail(409, { error: 'This pending action changed. Refresh the log before retrying.' });
+	}
+	if (!comment || (comment.status !== 'held' && comment.status !== 'rejected' && comment.status !== 'restoring')) {
+		throw error(404, 'reversible comment not found in this channel');
+	}
+	// A restoring row may belong to any human action. Ordinary Undo resumes
+	// only a verified restore; owner recovery explicitly records a new one.
+	const resuming = comment.status === 'restoring';
+	const dryRun = env.DRY_RUN === 'true';
+	const resumedIntent = async (tx: Pick<typeof db, 'select'>) => {
+		if (!resuming) return null;
+		const existing = await claimedHumanIntent(params.id, commentId, comment.restoreIntentId, tx);
+		if (recovery) {
+			if (existing) throw error(409, 'This comment has a verified pending action. Refresh the log and wait for it to finish.');
+			return null;
 		}
-		// Claim into 'restoring' and record the 'restore' intent row in ONE
-		// transaction (I3): a crash leaves durable intent the reconcile sweep
-		// re-executes — never a comment restored remotely with no local record.
-		// The resume path only fills in an intent row for a claim that crashed
-		// before this durability existed.
-		const claim = await withBusyRetry(() => db.transaction(async (tx) => {
+		if (!existing || existing.action !== 'restore') {
+			throw error(409, 'This comment has a different or invalid pending action. Refresh the log or contact support before retrying Undo.');
+		}
+		return { intentId: existing.id };
+	};
+	if (dryRun) {
+		// No remote call in dry run: final status and the dry-run audit row
+		// commit atomically — nothing dangles between them.
+		const claimed = await db.transaction(async (tx) => {
+			await resumedIntent(tx);
 			const rows = await tx
 				.update(comments)
-				.set({ status: 'restoring' })
-				.where(and(eq(comments.id, commentId), eq(comments.status, comment.status),
+				.set({ status: 'approved', decidedBy: 'human', restoreIntentId: null })
+				.where(and(eq(comments.id, commentId), eq(comments.channelId, params.id), eq(comments.status, comment.status),
 					comment.restoreIntentId === null ? isNull(comments.restoreIntentId) : eq(comments.restoreIntentId, comment.restoreIntentId)))
 				.returning({ id: comments.id });
-			if (!rows.length) return null;
-			const existing = await resumedIntent(tx);
-			if (existing) return existing;
-			// An explicit owner retry is new evidence for an unbound legacy
-			// restore. Never infer that claim from an earlier audit row.
+			if (!rows.length) return false;
 			// Name the action being undone — server-side, never from the form.
 			const prior = await tx
 				.select({ action: auditLog.action })
@@ -202,68 +187,137 @@ export const actions = {
 				.orderBy(desc(auditLog.createdAt), desc(auditLog.id))
 				.limit(1)
 				.get();
-			const intent = await tx
-				.insert(auditLog)
-				.values({
-					channelId: params.id,
-					commentId,
-					action: 'restore',
-					reason: `undo of ${prior?.action ?? 'moderation action'}`,
-					actor: 'user',
-					// No handle source at manual-action time: comments.author_name is never persisted by design.
-					authorHandle: null,
-					createdAt: new Date().toISOString()
-				})
-				.returning({ id: auditLog.id });
-			await tx.update(comments).set({ restoreIntentId: intent[0].id }).where(eq(comments.id, commentId));
-			return { intentId: intent[0].id };
-		}));
-		if (!claim) throw error(404, 'reversible comment not found in this channel');
-		// 'missing' means YouTube reports the comment gone — nothing exists to
-		// restore, so the honest outcome to finalize is 'deleted' (codex).
-		let remoteMissing = false;
+			await tx.insert(auditLog).values({
+				channelId: params.id,
+				commentId,
+				action: 'dry-run',
+				reason: recovery ? 'owner requested restore after blocked recovery' : `undo of ${prior?.action ?? 'moderation action'}`,
+				actor: 'user',
+				authorHandle: null,
+				createdAt: new Date().toISOString()
+			});
+			return true;
+		});
+		if (!claimed) {
+			if (recovery) return fail(409, { error: 'This pending action changed. Refresh the log before retrying.' });
+			throw error(404, 'reversible comment not found in this channel');
+		}
+		return { success: 'Restored — recorded in audit log.' };
+	}
+	// Claim into 'restoring' and record the 'restore' intent row in ONE
+	// transaction (I3): a crash leaves durable intent the reconcile sweep
+	// re-executes — never a comment restored remotely with no local record.
+	// Owner recovery records a new intent only when the observed claim is
+	// still invalid; a verified pending human decision is never replaced.
+	const claim = await withBusyRetry(() => db.transaction(async (tx) => {
+		const rows = await tx
+			.update(comments)
+			.set({ status: 'restoring' })
+			.where(and(eq(comments.id, commentId), eq(comments.channelId, params.id), eq(comments.status, comment.status),
+				comment.restoreIntentId === null ? isNull(comments.restoreIntentId) : eq(comments.restoreIntentId, comment.restoreIntentId)))
+			.returning({ id: comments.id });
+		if (!rows.length) return null;
+		const existing = await resumedIntent(tx);
+		if (existing) return existing;
+		// An explicit owner retry is new evidence for an unbound legacy
+		// restore. Never infer that claim from an earlier audit row.
+		// Name the action being undone — server-side, never from the form.
+		const prior = await tx
+			.select({ action: auditLog.action })
+			.from(auditLog)
+			.where(and(eq(auditLog.channelId, params.id), eq(auditLog.commentId, commentId), inArray(auditLog.action, ['hold', 'reject', 'ban'])))
+			.orderBy(desc(auditLog.createdAt), desc(auditLog.id))
+			.limit(1)
+			.get();
+		const intent = await tx
+			.insert(auditLog)
+			.values({
+				channelId: params.id,
+				commentId,
+				action: 'restore',
+				reason: recovery ? 'owner requested restore after blocked recovery' : `undo of ${prior?.action ?? 'moderation action'}`,
+				actor: 'user',
+				// No handle source at manual-action time: comments.author_name is never persisted by design.
+				authorHandle: null,
+				createdAt: new Date().toISOString()
+			})
+			.returning({ id: auditLog.id });
+		await tx.update(comments).set({ restoreIntentId: intent[0].id }).where(eq(comments.id, commentId));
+		return { intentId: intent[0].id };
+	}));
+	if (!claim) {
+		if (recovery) return fail(409, { error: 'This pending action changed. Refresh the log before retrying.' });
+		throw error(404, 'reversible comment not found in this channel');
+	}
+	// 'missing' means YouTube reports the comment gone — nothing exists to
+	// restore, so the honest outcome to finalize is 'deleted' (codex).
+	let remoteMissing = false;
+	try {
+		// Revalidate the connector identity before spending the grant:
+		// account deletion can have detached the channel since ownedChannel
+		// loaded it, and a remote write must never fire on a dead channel
+		// (cubic). The catch releases a fresh claim like any remote failure.
+		await assertChannelActive(params.id, db, ch);
+		const token = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
+		remoteMissing = (await applyHumanIntent(commentId, 'restore', token)) === 'missing';
+	} catch (e) {
+		// The remote write did not land: release a fresh claim so the
+		// failed restore stays retryable and drop its staged intent row —
+		// nothing committed. A resumed attempt keeps its claim and its
+		// intent row: they belong to the earlier crash the reconcile
+		// sweep still owes a finish.
+		if (!resuming) {
+			await db.transaction(async (tx) => {
+				const released = await tx
+					.update(comments)
+					.set({ status: comment.status, decidedBy: comment.decidedBy, restoreIntentId: null })
+					.where(and(eq(comments.id, commentId), eq(comments.status, 'restoring'), eq(comments.restoreIntentId, claim.intentId)))
+					.returning({ id: comments.id });
+				if (!released.length) return;
+				await tx.delete(auditLog).where(eq(auditLog.id, claim.intentId));
+			});
+		}
+		if (recovery) {
+			console.error('log recovery: recorded restore failed for comment %s', commentId, e);
+			return fail(500, { error: 'The restore failed. Your recorded restore request will retry on the next moderation run; refresh the log before retrying.' });
+		}
+		throw e;
+	}
+	// The publish landed — releasing the claim now would revert the local
+	// row while YouTube already shows the comment, with no record left to
+	// repair the desync (codeant). 'restoring' + the durable intent row
+	// are exactly what the reconcile sweep needs to finish the commit.
+	try {
+		await finalizeHumanIntent(params.id, commentId, remoteMissing ? 'delete' : 'restore', claim.intentId, ch);
+	} catch (e) {
+		// Remote succeeded, local commit failed: keep the claim and the
+		// intent row for the reconcile sweep, and tell the user it
+		// resolves itself — an uncaught throw would surface the same 500
+		// without explaining the self-heal (codex).
+		console.error('log undo: finalize failed for comment %s — reconcile sweep will finish it:', commentId, e);
+		return fail(500, { error: 'The restore reached YouTube but saving it failed — it will finish automatically on the next moderation run.' });
+	}
+	return { success: remoteMissing ? 'The comment no longer exists on YouTube — recorded as deleted.' : 'Restored — recorded in audit log.' };
+}
+
+export const actions = {
+	/** Restores a held/rejected comment or resumes its verified restore. */
+	undo: (event) => restore(event),
+	/** An owner explicitly requests a new restore for an unverifiable claim. */
+	recoverRestore: async (event) => {
+		const user = requireUser(event.locals);
+		requireOrgRole(user, 'owner');
 		try {
-			// Revalidate the connector identity before spending the grant:
-			// account deletion can have detached the channel since ownedChannel
-			// loaded it, and a remote write must never fire on a dead channel
-			// (cubic). The catch releases a fresh claim like any remote failure.
-			await assertChannelActive(params.id, db, ch);
-			const token = await refreshAccessToken(decrypt(ch.refreshTokenEnc));
-			remoteMissing = (await applyHumanIntent(commentId, 'restore', token)) === 'missing';
-		} catch (e) {
-			// The remote write did not land: release a fresh claim so the
-			// failed restore stays retryable and drop its staged intent row —
-			// nothing committed. A resumed attempt keeps its claim and its
-			// intent row: they belong to the earlier crash the reconcile
-			// sweep still owes a finish.
-			if (!resuming) {
-				await db.transaction(async (tx) => {
-					const released = await tx
-						.update(comments)
-						.set({ status: comment.status, decidedBy: comment.decidedBy, restoreIntentId: null })
-						.where(and(eq(comments.id, commentId), eq(comments.status, 'restoring'), eq(comments.restoreIntentId, claim.intentId)))
-						.returning({ id: comments.id });
-					if (!released.length) return;
-					await tx.delete(auditLog).where(eq(auditLog.id, claim.intentId));
-				});
+			return await restore(event, true);
+		} catch (cause) {
+			if (isHttpError(cause)) {
+				if (cause.status !== 409) throw cause;
+				console.warn('log recovery: claim changed for channel %s', event.params.id, cause);
+				return fail(409, { error: cause.body.message });
 			}
-			throw e;
+			console.error('log recovery: restore failed for channel %s', event.params.id, cause);
+			return fail(500, { error: 'The restore could not be completed. Refresh the log to check whether a restore request was recorded before retrying.' });
 		}
-		// The publish landed — releasing the claim now would revert the local
-		// row while YouTube already shows the comment, with no record left to
-		// repair the desync (codeant). 'restoring' + the durable intent row
-		// are exactly what the reconcile sweep needs to finish the commit.
-		try {
-			await finalizeHumanIntent(params.id, commentId, remoteMissing ? 'delete' : 'restore', claim.intentId, ch);
-		} catch (e) {
-			// Remote succeeded, local commit failed: keep the claim and the
-			// intent row for the reconcile sweep, and tell the user it
-			// resolves itself — an uncaught throw would surface the same 500
-			// without explaining the self-heal (codex).
-			console.error('log undo: finalize failed for comment %s — reconcile sweep will finish it:', commentId, e);
-			return fail(500, { error: 'The restore reached YouTube but saving it failed — it will finish automatically on the next moderation run.' });
-		}
-		return { success: remoteMissing ? 'The comment no longer exists on YouTube — recorded as deleted.' : 'Restored — recorded in audit log.' };
 	},
 	/**
 	 * Erases every stored commenter handle on this channel immediately, ahead

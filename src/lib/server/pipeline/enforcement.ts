@@ -752,6 +752,18 @@ async function reconcileRestoring(channelId: string, accessToken: string, deadli
 			continue;
 		}
 		try {
+			// Outstanding actions and earlier restores may have taken time since
+			// runEnforcement's connector check. Never spend a detached grant.
+			await assertChannelActive(channelId, db, expected);
+			// Intent lookup can race a request releasing or finishing this claim.
+			// Re-read its exact binding immediately before remote dispatch; the
+			// initial restoring snapshot is not authority for a replaced row.
+			const [current] = await db.select({ status: comments.status, restoreIntentId: comments.restoreIntentId })
+				.from(comments).where(and(eq(comments.id, row.id), eq(comments.channelId, channelId))).all();
+			if (!current || current.status !== 'restoring' || current.restoreIntentId !== intent.id) {
+				console.warn('reconcile: comment %s changed before human-intent dispatch — skipping stale claim', row.id);
+				continue;
+			}
 			assertBeforeDeadline(deadline);
 			const outcome = await applyHumanIntent(row.id, intent.action, accessToken, deadline);
 			// A missing comment is deleted, regardless of the requested action.

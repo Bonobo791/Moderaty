@@ -29,6 +29,32 @@
 	restored here; deletions and author bans are permanent.
 </p>
 
+{#if data.recovery.length}
+	<div class="card">
+		<h2>Comments needing recovery</h2>
+		<p class="error-box" role="alert">
+			Automatic recovery is paused because these pending actions could not be verified.
+			Restore only if you want the comment published on YouTube. Deleted comments and author bans cannot be reversed.
+		</p>
+		{#each data.recovery as comment (`${comment.id}:${comment.restoreIntentId ?? ''}`)}
+			<p>{comment.text}<br /><small class="muted">{comment.id}</small></p>
+			{#if data.canRecover}
+				<form method="POST" action="?/recoverRestore">
+					<input type="hidden" name="commentId" value={comment.id} />
+					<input type="hidden" name="expectedIntentId" value={comment.restoreIntentId ?? ''} />
+					<label>
+						<input type="checkbox" name="confirmRestore" value="yes" required />
+						I want to publish this comment with a new restore request.
+					</label>
+					<button class="btn secondary small" type="submit" aria-label="Restore blocked comment {comment.id}">Restore comment</button>
+				</form>
+			{:else}
+				<p class="muted">Ask your organization owner to choose whether to restore this comment.</p>
+			{/if}
+		{/each}
+	</div>
+{/if}
+
 {#if form?.error}
 	<p class="error-box" role="alert">{form.error}</p>
 {/if}

@@ -56,7 +56,8 @@ const SWEEP_ERROR_FIELDS = [
 	'pendingReversalSweepError',
 	'zeroCreditSweepError',
 	'contactNotificationSweepError',
-	'welcomeEmailSweepError'
+	'welcomeEmailSweepError',
+	'feedbackPreviewSweepError'
 ];
 
 /** Renders a parsed payload or raw body for logs without letting response newlines forge log lines. */

@@ -29,12 +29,14 @@
 	<ol>
 		<li>Sign in with Google and complete the account consent screen.</li>
 		<li>
-			Open <a href="/dashboard">Dashboard</a> and select <strong>Connect YouTube channel</strong>.
+			Owners and admins of the active team: open <a href="/dashboard">Dashboard</a> and select
+			<strong>Connect YouTube channel</strong>.
 			Google sign-in identifies you; the separate YouTube connection asks for permission to read
 			and moderate comments. If your Google account owns multiple channels, choose the one to connect.
+			Members should ask an owner or admin to connect a channel for the team.
 		</li>
 		<li>Open the channel to find Overview, Rules, Review queue, Feedback, and Audit log.</li>
-		<li>Set your sensitivity and rules, then use a free preview to see what Moderaty would do.</li>
+		<li>Set your sensitivity and rules, then use a free moderation preview to see what Moderaty would do.</li>
 	</ol>
 	<p>
 		YouTube's permission is broader than comments alone because Google offers no comments-only
@@ -168,10 +170,10 @@
 	<h2>The feedback digest</h2>
 	<p>
 		The channel's <strong>Feedback</strong> tab groups recurring questions, substantive criticism,
-		corrections, and requests. The owner can enable it, choose categories, and generate a digest
-		weekly, every 100 new comments, or manually with <strong>Generate now</strong>. Set an evidence
-		threshold of 2 to 10 comments before a theme becomes a finding; one-off remarks are counted
-		but not listed as findings. Use <strong>Recent digests</strong> to revisit past results.
+		corrections, and requests. Owners can enable it, choose categories and an evidence threshold
+		of 2 to 10 comments, and generate a digest weekly, every 100 new comments, or manually with
+		<strong>Generate now</strong>. A theme must meet the threshold to become a finding; one-off
+		remarks are counted but not listed as findings. Use <strong>Recent digests</strong> to revisit past results.
 	</p>
 	<p>
 		The digest is read-only: it never changes moderation status or replies for you. Abusive wording
@@ -242,15 +244,16 @@
 		</li>
 	</ul>
 	<p>
-		Use <strong>Manage cards</strong> for saved payment methods and <strong>Manage subscription</strong>
+		Owners use <strong>Manage cards</strong> for saved payment methods and <strong>Manage subscription</strong>
 		for a hosted subscription. To switch from hosted to lifetime, cancel the hosted subscription
 		first; its included allowance remains available until the paid period ends.
 	</p>
 	<p>
 		<strong>Automatic top-up</strong> is optional and requires your consent, a saved Stripe payment
 		method, a bundle, and a balance threshold. Charges are limited to once every 24 hours and up to
-		30 times per month. You can disable it in Usage. After a card change, payment failure, or refund,
-		read its status before expecting another top-up. Buy credits in advance for large scans.
+		30 times per month. Owners configure or disable it in Usage and can buy credits in advance
+		for large scans. After a card change, payment failure, or refund, read its status before
+		expecting another top-up.
 	</p>
 	<p>
 		Mercado Pago prepaid-credit purchases in Brazilian reais are available when offered on Usage.
@@ -263,7 +266,7 @@
 	<p>
 		Create or manage teams on <a href="/org">Team</a>. If you belong to more than one, choose the
 		active team in the navigation. Its channels and credit balance are separate from other teams.
-		Use a shared team to invite teammates.
+		Owners and admins use a shared team to invite teammates.
 	</p>
 	<ul>
 		<li>
@@ -284,8 +287,8 @@
 		</li>
 	</ul>
 	<p>
-		An invite link works once and expires after 7 days. Share it with the intended teammate; revoke
-		unused invitations on Team. The last owner cannot be demoted or leave while others remain;
+		An invite link works once and expires after 7 days. Share it with the intended teammate;
+		owners and admins can revoke unused invitations on Team. The last owner cannot be demoted or leave while others remain;
 		promote a teammate to owner first. If you are the only member, delete your account instead.
 	</p>
 </section>
@@ -302,7 +305,7 @@
 		Open <a href="/account">Account</a> from your name in the navigation to see your connection
 		details, sign out, or delete your account. Account deletion is immediate and permanent, with
 		no restore window. Teams where you are the only member and their channel data are erased. Shared teams with other
-		members remain, and channels you connected there need a teammate to reconnect them. Consent
+		members remain, and channels you connected there need an owner or admin to reconnect them. Consent
 		evidence is retained under the legal retention policy; your email in those records is erased
 		after 10 years.
 	</p>
@@ -317,7 +320,10 @@
 	<h2>Troubleshooting and support</h2>
 	<ul>
 		<li><strong>Not checked yet:</strong> wait for the first scheduled check; inspect the channel status again.</li>
-		<li><strong>YouTube access expired:</strong> reconnect the channel using Connect YouTube channel on Dashboard.</li>
+		<li>
+			<strong>YouTube access expired:</strong> owners and admins can reconnect the channel using
+			Connect YouTube channel on Dashboard. Members should ask an owner or admin to reconnect it.
+		</li>
 		<li><strong>Out of credits:</strong> ask an owner to add credits on Usage; lifetime owners should check their OpenAI key on Team.</li>
 		<li><strong>Quota or timeout failure:</strong> read the status message. Moderaty retries unfinished work on later scheduled checks.</li>
 		<li>
@@ -325,7 +331,10 @@
 			not automatically scored again on later normal checks. Review and resolve them manually
 			in Review queue.
 		</li>
-		<li><strong>Digest deferred:</strong> resolve the reported credit or key issue. Manual digests need Generate now; scheduled digests and history scans retry automatically.</li>
+		<li>
+			<strong>Digest deferred:</strong> ask an owner to resolve the reported credit or key issue and
+			use Generate now for manual digests. Scheduled digests and history scans retry automatically.
+		</li>
 		<li><strong>Maintenance:</strong> the database is temporarily unavailable. Wait for recovery before changing settings or moderating.</li>
 		<li><strong>Self-hosted scans are not advancing:</strong> verify that your installation's cron job is running. Keeping a browser tab open does not run the scheduler.</li>
 	</ul>

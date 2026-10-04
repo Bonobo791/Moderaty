@@ -7,19 +7,32 @@ const here = dirname(fileURLToPath(import.meta.url));
 const helpPage = readFileSync(join(here, '+page.svelte'), 'utf8');
 const appLayout = readFileSync(join(here, '..', '+layout.svelte'), 'utf8');
 
-/** Read visible copy from one Help topic so another topic cannot satisfy its disclosures. */
-function sectionText(id: string): string {
+function sectionMarkup(id: string): string {
 	const section = helpPage.match(new RegExp(`<section[^>]*id="${id}"[^>]*>([\\s\\S]*?)</section>`));
 	expect(section, `Help section ${id}`).not.toBeNull();
-	return section![1].replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+	return section![1];
+}
+
+const visibleText = (markup: string) => markup.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+
+/** Read one topic so a different topic cannot supply its missing disclosures. */
+function sectionText(id: string): string {
+	return visibleText(sectionMarkup(id));
+}
+
+/** Require permission guidance beside the instruction, rather than elsewhere on the page. */
+function instructionText(id: string, element: 'p' | 'li', marker: string): string {
+	const items = [...sectionMarkup(id).matchAll(new RegExp(`<${element}(?:\\s[^>]*)?>([\\s\\S]*?)</${element}>`, 'g'))];
+	const item = items.find((match) => match[1].includes(marker));
+	expect(item, `Help instruction ${id}: ${marker}`).toBeDefined();
+	return visibleText(item![1]);
 }
 
 /** Pin each role's own list item so another role cannot supply a missing capability. */
 function roleText(role: 'Members' | 'Admins' | 'Owners'): string {
-	const teams = helpPage.match(/<section[^>]*id="teams"[^>]*>([\s\S]*?)<\/section>/)?.[1] ?? '';
-	const item = teams.match(new RegExp(`<li>\\s*<strong>${role}</strong>([\\s\\S]*?)</li>`));
+	const item = sectionMarkup('teams').match(new RegExp(`<li>\\s*<strong>${role}</strong>([\\s\\S]*?)</li>`));
 	expect(item, `Help role ${role}`).not.toBeNull();
-	return item![1].replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+	return visibleText(item![1]);
 }
 
 describe('help tab (reversibility disclosure)', () => {
@@ -63,6 +76,26 @@ describe('help covers the available product', () => {
 		expect(text).toMatch(/Connect YouTube channel/i);
 		expect(text).toMatch(/multiple channels.*choose/i);
 		expect(text).toMatch(/never.*repl(?:y|ies).*post/i);
+	});
+
+	it.each<{
+		id: string; element: 'p' | 'li'; marker: string; permissions: RegExp[];
+	}>([
+		{ id: 'getting-started', element: 'li', marker: 'Connect YouTube channel', permissions: [/owners and admins.*Connect YouTube channel/i, /members.*ask an owner or admin/i] },
+		{ id: 'getting-started', element: 'li', marker: 'Set your sensitivity', permissions: [/free moderation preview/i] },
+		{ id: 'channel-controls', element: 'p', marker: 'disconnect channel', permissions: [/owners and admins can use.*disconnect channel/i] },
+		{ id: 'feedback', element: 'p', marker: 'recurring questions', permissions: [/owners can enable it.*choose categories.*evidence threshold of 2 to 10 comments.*generate a digest/i] },
+		{ id: 'history', element: 'p', marker: 'A history scan on the Feedback tab', permissions: [/only an owner can start feedback history scans or previews/i] },
+		{ id: 'billing', element: 'p', marker: 'Manage cards', permissions: [/owners use Manage cards.*Manage subscription/i] },
+		{ id: 'billing', element: 'p', marker: 'Automatic top-up', permissions: [/owners configure or disable it in Usage.*buy credits/i] },
+		{ id: 'teams', element: 'p', marker: 'Create or manage teams', permissions: [/owners and admins use a shared team to invite teammates/i] },
+		{ id: 'teams', element: 'p', marker: 'An invite link', permissions: [/owners and admins can revoke unused invitations/i] },
+		{ id: 'privacy', element: 'p', marker: 'Account deletion', permissions: [/channels you connected.*need an owner or admin to reconnect/i] },
+		{ id: 'troubleshooting', element: 'li', marker: 'YouTube access expired', permissions: [/owners and admins.*reconnect/i, /members.*ask an owner or admin/i] },
+		{ id: 'troubleshooting', element: 'li', marker: 'Digest deferred', permissions: [/ask an owner.*credit or key issue.*Generate now/i] }
+	])('qualifies $id instruction: $marker', ({ id, element, marker, permissions }) => {
+		const instruction = instructionText(id, element, marker);
+		for (const permission of permissions) expect(instruction).toMatch(permission);
 	});
 
 	it('explains both sensitivity modes and the strict protection switches', () => {

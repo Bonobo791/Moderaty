@@ -135,10 +135,19 @@ export const actions = {
 		// call is idempotent (I4), so re-applying it is safe.
 		const resuming = comment.status === 'restoring';
 		const dryRun = env.DRY_RUN === 'true';
+		const resumedIntent = async (tx: Pick<typeof db, 'select'>) => {
+			if (!resuming || comment.restoreIntentId === null) return null;
+			const existing = await claimedHumanIntent(params.id, commentId, comment.restoreIntentId, tx);
+			if (!existing || existing.action !== 'restore') {
+				throw error(409, 'This comment has a different or invalid pending action. Refresh the log or contact support before retrying Undo.');
+			}
+			return { intentId: existing.id };
+		};
 		if (dryRun) {
 			// No remote call in dry run: final status and the dry-run audit row
 			// commit atomically — nothing dangles between them.
 			const claimed = await db.transaction(async (tx) => {
+				await resumedIntent(tx);
 				const rows = await tx
 					.update(comments)
 					.set({ status: 'approved', decidedBy: 'human', restoreIntentId: null })
@@ -181,13 +190,8 @@ export const actions = {
 					comment.restoreIntentId === null ? isNull(comments.restoreIntentId) : eq(comments.restoreIntentId, comment.restoreIntentId)))
 				.returning({ id: comments.id });
 			if (!rows.length) return null;
-			if (resuming && comment.restoreIntentId !== null) {
-				const existing = await claimedHumanIntent(params.id, commentId, comment.restoreIntentId, tx);
-				if (!existing || existing.action !== 'restore') {
-					throw error(409, 'This comment has a different or invalid pending action. Refresh the log or contact support before retrying Undo.');
-				}
-				return { intentId: existing.id };
-			}
+			const existing = await resumedIntent(tx);
+			if (existing) return existing;
 			// An explicit owner retry is new evidence for an unbound legacy
 			// restore. Never infer that claim from an earlier audit row.
 			// Name the action being undone — server-side, never from the form.

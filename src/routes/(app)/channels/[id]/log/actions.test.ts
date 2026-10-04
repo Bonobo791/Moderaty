@@ -178,6 +178,58 @@ test('a dry run records a dry-run audit row and makes no YouTube call', async ()
 	);
 });
 
+test.each([
+	'missing audit', 'system actor', 'another comment', 'another channel', 'unsupported action', 'different pending action'
+].flatMap((kind) => [['dry-run', kind], ['live', kind]]))('%s Undo preserves an invalid non-null binding (%s)', async (mode, kind) => {
+	mocks.env.DRY_RUN = mode === 'dry-run' ? 'true' : 'false';
+	await seedComment('c1', 'restoring', 'ban');
+	const [intent] = await testDb().db.insert(auditLog).values({
+		channelId: kind === 'another channel' ? 'other-channel' : 'UC1',
+		commentId: kind === 'another comment' ? 'other-comment' : 'c1',
+		action: kind === 'unsupported action' ? 'dry-run' : kind === 'different pending action' ? 'reject' : 'restore',
+		actor: kind === 'system actor' ? 'system' : 'user',
+		reason: 'Pending action fixture'
+	}).returning({ id: auditLog.id });
+	await testDb().db.update(comments).set({ restoreIntentId: kind === 'missing audit' ? 999999 : intent.id }).where(eq(comments.id, 'c1'));
+	const beforeComment = await commentRow('c1');
+	const beforeAudits = await testDb().db.select().from(auditLog).all();
+
+	await expect(undo('c1')).rejects.toMatchObject({
+		status: 409,
+		body: { message: expect.stringContaining('different or invalid pending action') }
+	});
+
+	expect(await commentRow('c1')).toEqual(beforeComment);
+	expect(await testDb().db.select().from(auditLog).all()).toEqual(beforeAudits);
+	expect(mocks.decrypt).not.toHaveBeenCalled();
+	expect(mocks.refreshAccessToken).not.toHaveBeenCalled();
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
+});
+
+test.each(['bound restore', 'unbound legacy'])('dry-run Undo can explicitly resume a %s', async (kind) => {
+	mocks.env.DRY_RUN = 'true';
+	await seedComment('c1', 'restoring', 'reject');
+	const [intent] = await testDb().db.insert(auditLog).values({
+		channelId: 'UC1', commentId: 'c1', action: 'restore', actor: 'user', reason: 'Earlier undo fixture'
+	}).returning({ id: auditLog.id });
+	if (kind === 'bound restore') {
+		await testDb().db.update(comments).set({ restoreIntentId: intent.id }).where(eq(comments.id, 'c1'));
+	}
+	const beforeAudits = await testDb().db.select().from(auditLog).all();
+
+	await expect(undo('c1')).resolves.toMatchObject({ success: expect.stringContaining('Restored') });
+
+	expect(await commentRow('c1')).toMatchObject({ status: 'approved', decidedBy: 'human', restoreIntentId: null });
+	const afterAudits = await testDb().db.select().from(auditLog).all();
+	expect(afterAudits.slice(0, beforeAudits.length)).toEqual(beforeAudits);
+	expect(afterAudits).toHaveLength(beforeAudits.length + 1);
+	expect(afterAudits.at(-1)).toMatchObject({ commentId: 'c1', action: 'dry-run', actor: 'user', reason: 'undo of reject' });
+	expect(mocks.refreshAccessToken).not.toHaveBeenCalled();
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+	expect(mocks.deleteComment).not.toHaveBeenCalled();
+});
+
 test('a failed finalize keeps the claim — the reconcile sweep converges the landed remote write', async () => {
 	await seedComment('c1', 'rejected', 'reject');
 	// The remote restore lands but the finalize transaction fails (codeant):

@@ -353,6 +353,7 @@ describe.each(['driver', 'netlify'])('%s welcome delivery health', wrapper => {
  it.each([
   [{ welcomeEmailSweepError: 'database unavailable' }, 'welcomeEmailSweepError: database unavailable'],
   [{ welcomeEmailErrors: 1 }, 'welcomeEmailErrors: 1 delivery attempt(s) failed'],
+  [{ welcomeEmailEnrollmentErrors: 1 }, 'welcomeEmailEnrollmentErrors: 1 account enrollment(s) failed'],
   [{ welcomeEmailAmbiguous: 1 }, 'welcomeEmailAmbiguous: reconciliation required']
  ])('names the actionable welcome problem in a 200 response (%j)', async (failure, expected) => {
   vi.stubGlobal('fetch', vi.fn(async () => cronResponse({ ok: false, results: {}, ...failure })));
@@ -363,7 +364,7 @@ describe.each(['driver', 'netlify'])('%s welcome delivery health', wrapper => {
   await expect(invoke()).rejects.toThrow(/welcomeEmailErrors/);
  });
  it('zero welcome counters remain healthy', async () => {
-  const payload = { ok: true, results: {}, welcomeEmailErrors: 0, welcomeEmailAmbiguous: 0 };
+  const payload = { ok: true, results: {}, welcomeEmailEnrollmentErrors: 0, welcomeEmailErrors: 0, welcomeEmailAmbiguous: 0 };
   vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
   await expect(invoke()).resolves.toEqual(wrapper === 'driver' ? payload : undefined);
  });

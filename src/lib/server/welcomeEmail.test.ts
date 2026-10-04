@@ -58,8 +58,8 @@ test.each(['sub@accounts.google.com', 'bad', 'x@y', 'list,a@example.com', 'x\r\n
  expect(await enqueueWelcome(testDb().db, 'one', 'signup')).toBe(false); expect(await row()).toMatchObject({ state: 'suppressed' });
  await sweepWelcomeEmails(budget()); expect(mocks.send).not.toHaveBeenCalled();
 });
-test('self-hosted deployments and the default-off send switch never send', async () => {
- await queued(); delete mocks.env.WELCOME_EMAIL_ENABLED; expect((await sweepWelcomeEmails(budget())).accepted).toBe(0);
+test('self-hosted deployments and the explicit send kill switch never send', async () => {
+ await queued(); mocks.env.WELCOME_EMAIL_ENABLED = 'false'; expect((await sweepWelcomeEmails(budget())).accepted).toBe(0);
  mocks.env.WELCOME_EMAIL_ENABLED = 'true'; mocks.env.MODERATY_DEPLOYMENT = 'self-hosted';
  await sweepWelcomeEmails(budget()); expect(mocks.send).not.toHaveBeenCalled();
  await seedUser('two'); expect(await enqueueWelcome(testDb().db, 'two', 'signup')).toBe(false); expect(await row('two')).toBeUndefined();

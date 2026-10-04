@@ -1,4 +1,4 @@
-// Shared enrollment/eligibility for transactional signup and operator backfill.
+// Shared enrollment/eligibility for transactional signup and automatic discovery.
 import { randomBytes } from 'node:crypto';
 import { domainToASCII } from 'node:url';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
@@ -23,7 +23,7 @@ export function isOfficialHosted(): boolean {
 }
 export function sendingEnabled(): boolean {
 	if (env.WELCOME_EMAIL_ENABLED && !['true', 'false'].includes(env.WELCOME_EMAIL_ENABLED)) throw new Error('WELCOME_EMAIL_ENABLED must be true or false');
-	return isOfficialHosted() && env.WELCOME_EMAIL_ENABLED === 'true' && env.DRY_RUN === 'false';
+	return isOfficialHosted() && env.WELCOME_EMAIL_ENABLED !== 'false' && env.DRY_RUN === 'false';
 }
 
 function validWelcomeAddress(email: string): boolean {
@@ -77,4 +77,3 @@ export async function enqueueWelcome(handle: Handle, userId: string, source: 'si
 	const updated = await handle.update(welcomeEmails).set(values).where(and(key(userId), inArray(welcomeEmails.state, ['historical_unknown', 'never_sent']), isNull(welcomeEmails.acceptedAt), isNull(welcomeEmails.suppressionReason))).returning({ userId: welcomeEmails.userId });
 	return updated.length === 1 && !reason;
 }
-

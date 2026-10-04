@@ -133,6 +133,9 @@ function detailProblems(payload) {
 	if (typeof payload.welcomeEmailErrors === 'number' && payload.welcomeEmailErrors > 0) {
 		problems.push(`welcomeEmailErrors: ${payload.welcomeEmailErrors} delivery attempt(s) failed`);
 	}
+	if (typeof payload.welcomeEmailEnrollmentErrors === 'number' && payload.welcomeEmailEnrollmentErrors > 0) {
+		problems.push(`welcomeEmailEnrollmentErrors: ${payload.welcomeEmailEnrollmentErrors} account enrollment(s) failed`);
+	}
 	if (typeof payload.welcomeEmailAmbiguous === 'number' && payload.welcomeEmailAmbiguous > 0) {
 		problems.push('welcomeEmailAmbiguous: reconciliation required');
 	}

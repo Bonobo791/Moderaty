@@ -4,7 +4,7 @@
 
 **Goal:** Prevent interrupted human-action recovery from replaying an unrelated historical user action.
 
-**Architecture:** A nullable `comments.restoreIntentId` binds a restoring claim to one audit row. Human-action transactions set the binding before remote work; recovery validates the exact row and fails closed when no trustworthy binding exists. Explicit legacy Undo creates a fresh restore intent.
+**Architecture:** A nullable `comments.restoreIntentId` binds a restoring claim to one audit row. Human-action transactions set the binding before remote work; recovery validates the exact row and fails closed when no trustworthy binding exists. Confirmed owner recovery creates a fresh restore intent for an unverifiable claim.
 
 **Tech Stack:** SvelteKit, TypeScript, Drizzle, SQLite/libSQL, Vitest.
 
@@ -23,7 +23,7 @@
 - Legacy restoring row with historical ban: no replay; warning retained
 - Matching ID with wrong actor/channel/comment or unsupported verb: no replay
 - A later audit cannot replace the bound intent, even with equal or skewed timestamps
-- Explicit Undo can reconstruct an unbound legacy restore without reusing an old restore row
+- Confirmed owner recovery can record a new legacy restore without reusing an old restore row; ordinary Undo rejects unverifiable claims
 - Stale finalization/release cannot clear a newer claim
 
 ## Task 1: Bind and validate human-action claims
@@ -49,7 +49,10 @@
 - Before merging this recovery PR: merge fairness first, rebase recovery, preserve both journal entries, regenerate snapshot 0065 over snapshot 0064, and rerun checks/migration tests
 - Do not deploy recovery ahead of fairness: the timestamp-based migrator could otherwise skip the later-added lower migration
 - Existing restoring rows are deliberately left unbound; no historical action is guessed or replayed
-- Owners can explicitly retry Undo where offered in the audit log, which creates a new bound restore intent; rows without an available Undo or with invalid non-null bindings require operator investigation
+- The audit log lists unverifiable restoring claims independently of audit pagination, including rows without audit history; an organization owner can explicitly confirm a new restore request without borrowing historical intent
+- Ordinary Undo resumes only verified restore claims; valid pending approve/reject/delete/ban intents cannot be replaced by owner recovery, and stale recovery forms are fenced on their observed binding
+- Recovery validates the current connector, rereads the exact comment claim, and conditionally reserves it before dispatch; the reservation and subsequent preflight fence claims changed since the initial snapshot
+- The October 4 post-merge fix adds durable dispatch ownership for human intents and decided-state corrections; its recovery limits are described below
 - No production records were inspected, so whether any existing row needs manual recovery is unknown
 - All database verification here uses disposable local SQLite only
 
@@ -62,3 +65,14 @@
 - verify-migrations: both standalone and combined trees pass
 - drizzle-kit check: standalone snapshot chain passes
 - Aggregate check, build, and full suite pending the shared validation resource window
+
+## October 4 post-merge remote ordering fix
+
+- Nullable `comments.humanDispatchToken` and `humanDispatchState` reserve one comment for a human write or a corrective write. Routes and cron cannot dispatch the same intent concurrently; finalization requires the dispatch owner as well as the exact audit binding.
+- Human mutations use one bounded HTTP attempt. Cron defers dispatch with less than five seconds remaining, and preparation failures before fetch release reservations. Transparent retries after a transport failure could otherwise report a later success while the earlier write still runs remotely.
+- Predispatch credential/channel failures and settled validation, authorization, or quota refusals can release a fresh claim safely. A known successful remote call followed by a database failure keeps its exact intent and releases only the settled reservation, so cron can finish recording it.
+- A timeout, transport failure, uncertain server response, or process crash keeps the durable reservation. There is no expiring takeover: YouTube provides no fencing token or cancellation proof. Unknown outcomes pause newer human actions and staged enforcement and require manual investigation before any operator clears the reservation.
+- The audit log displays active and uncertain writes independently of audit pagination, including corrections on already-decided comments. Both blocked lists use separate 100-row keyset pages and partial indexes; continuation links remain visible even when a pending-claim page contains no claims needing recovery. Undo eligibility is resolved independently for each audit page. These rows cannot offer a new restore/Undo while their prior write may still land; unverifiable legacy claims without a reservation retain confirmed owner recovery.
+- History rescans preserve recorded restoring claims before token refresh as well as reserved decisions, their action rows, audit history, and credit balance. They record the scan visit so a paused page does not repeatedly reclassify the same pending comment. Run counts exclude these preserved claims; dry-run counts continue to describe the audited preview.
+- Reservation settlement retries transient SQLite lock contention, including Drizzle-wrapped driver errors; prolonged database failure still needs investigation.
+- This does not provide provider exactly-once delivery or replace the existing automated moderation outbox. Previously dispatched automated writes retain their existing convergence behavior.

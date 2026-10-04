@@ -19,7 +19,8 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 vi.mock('$lib/server/crypto', () => ({ decrypt: vi.fn(() => 'decrypted-refresh-token') }));
-vi.mock('$lib/server/youtube', () => ({
+vi.mock('$lib/server/youtube', async (original) => ({
+	...await original<typeof import('$lib/server/youtube')>(),
 	refreshAccessToken: mocks.refreshAccessToken,
 	setModerationStatus: mocks.setModerationStatus,
 	deleteComment: mocks.deleteComment,
@@ -30,6 +31,7 @@ vi.mock('$lib/server/youtube', () => ({
 }));
 
 import { actions, load } from './+page.server';
+import { YoutubeWriteRefusedError } from '$lib/server/youtube';
 
 setupTestDb(['audit_log', 'comments', 'channels', 'moderation_actions']);
 
@@ -173,11 +175,11 @@ test('a second act on an already-claimed comment 404s and audits nothing new', a
 	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
 });
 
-test('a failed YouTube call releases the claim so the action stays retryable', async () => {
+test('a settled YouTube refusal releases the claim so the action stays retryable', async () => {
 	// The failure surfaces as a form failure in the error-box — not a bare
 	// 500 page — and the comment returns to the queue for a retry.
 	mocks.env.DRY_RUN = 'false';
-	mocks.setModerationStatus.mockRejectedValueOnce(new Error('youtube 500'));
+	mocks.setModerationStatus.mockRejectedValueOnce(new YoutubeWriteRefusedError('youtube 403'));
 	vi.spyOn(console, 'error').mockImplementation(() => {});
 	await seedComment('c1', 'UC1');
 
@@ -220,7 +222,7 @@ test('a failed human action re-arms a hold enforcement superseded mid-claim', as
 	// the comment sits in the queue public on YouTube while the page calls
 	// it held ('superseded' is terminal; nothing retries it).
 	mocks.env.DRY_RUN = 'false';
-	mocks.setModerationStatus.mockRejectedValueOnce(new Error('youtube 500'));
+	mocks.setModerationStatus.mockRejectedValueOnce(new YoutubeWriteRefusedError('youtube 403'));
 	const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 	await seedComment('c1', 'UC1');
 	await seedHold('c1', 'UC1', 'superseded');
@@ -306,7 +308,7 @@ test('reject outside DRY_RUN calls YouTube and audits reject', async () => {
 
 	expect(mocks.refreshAccessToken).toHaveBeenCalledWith('decrypted-refresh-token');
 	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'rejected', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'rejected', false, 'access-token', undefined, true);
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
 	expect((await commentRow('c1'))?.status).toBe('rejected');
 
@@ -330,7 +332,7 @@ test('a missing YouTube comment finalizes the human action as deleted — approv
 
 	expect(res).toMatchObject({ success: 'The comment no longer exists on YouTube — recorded as deleted.' });
 	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined, true);
 	expect(await commentRow('c1')).toMatchObject({ status: 'deleted', decidedBy: 'human' });
 	expect(await auditRows()).toEqual([expect.objectContaining({ commentId: 'c1', action: 'approve', actor: 'user' })]);
 	expect(warning).toHaveBeenCalledWith('comment c1 no longer exists on YouTube — completing approve');
@@ -343,7 +345,7 @@ test('approve outside DRY_RUN issues one publish and audits approve', async () =
 	expect(res).toMatchObject({ success: 'Approved — recorded in audit log.' });
 
 	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined, true);
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
 	expect((await commentRow('c1'))?.status).toBe('approved');
 
@@ -356,7 +358,7 @@ test('approve outside DRY_RUN publishes a comment the pipeline held on YouTube',
 	await approveHeldComment('completed');
 
 	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined, true);
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
 	expect((await commentRow('c1'))?.status).toBe('approved');
 
@@ -369,7 +371,7 @@ test('approve publishes exactly once without reading current YouTube status', as
 	await approveHeldComment('pending');
 
 	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined, true);
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
 	expect((await commentRow('c1'))?.status).toBe('approved');
 });
@@ -415,7 +417,7 @@ test('del outside DRY_RUN deletes on YouTube, marks deleted, and audits delete',
 
 	expect(mocks.refreshAccessToken).toHaveBeenCalledWith('decrypted-refresh-token');
 	expect(mocks.deleteComment).toHaveBeenCalledTimes(1);
-	expect(mocks.deleteComment).toHaveBeenCalledWith('c1', 'access-token', undefined);
+	expect(mocks.deleteComment).toHaveBeenCalledWith('c1', 'access-token', undefined, true);
 	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
 	expect((await commentRow('c1'))?.status).toBe('deleted');
 
@@ -432,7 +434,7 @@ test('ban outside DRY_RUN rejects with the author ban on YouTube and audits ban'
 
 	expect(mocks.refreshAccessToken).toHaveBeenCalledWith('decrypted-refresh-token');
 	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'rejected', true, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'rejected', true, 'access-token', undefined, true);
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
 	expect((await commentRow('c1'))?.status).toBe('rejected');
 
@@ -564,7 +566,7 @@ test('a stale failed queue action cannot release a newer claim', async () => {
 		throw new Error('old action failed');
 	});
 	const result = await act('reject', { commentId: 'c1' });
-	expect(result).toMatchObject({ status: 500, data: { error: expect.stringContaining('changed while') } });
+	expect(result).toMatchObject({ status: 500, data: { error: expect.stringContaining('paused') } });
 	expect(await commentRow('c1')).toMatchObject({ status: 'restoring', restoreIntentId: newIntentId });
 	expect(await testDb().db.select().from(auditLog).where(eq(auditLog.id, newIntentId)).get()).toMatchObject({ action: 'restore' });
 });

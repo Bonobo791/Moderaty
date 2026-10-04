@@ -23,18 +23,19 @@ export default async function cron() {
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 	let res;
+	let rawText;
 	try {
 		res = await fetch(endpoint, {
 			headers: { authorization: `Bearer ${secret}` },
 			signal: controller.signal
 		});
+		rawText = await res.text();
 	} catch (error) {
 		throw unreachableError(error);
 	} finally {
 		clearTimeout(timer);
 	}
 	// Bound what lands in Netlify logs; pipeline error bodies can be long.
-	const rawText = await res.text();
 	const body = rawText.slice(0, 500);
 	let payload = null;
 	try {

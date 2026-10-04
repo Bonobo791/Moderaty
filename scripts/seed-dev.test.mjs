@@ -5,11 +5,14 @@
 // breaks the moment it lands.
 
 import { execFile } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createClient } from '@libsql/client';
+import { drizzle } from 'drizzle-orm/libsql';
+import { migrate } from 'drizzle-orm/libsql/migrator';
 import { afterAll, describe, expect, it } from 'vitest';
 
 const execFileAsync = promisify(execFile);
@@ -69,26 +72,32 @@ CREATE TABLE audit_log (
 );
 `;
 
-async function applyMigrations(url) {
+async function applyMigrations(url, migrationDirectory = DRIZZLE) {
 	const client = createClient({ url });
-	for (const statement of BASE_DDL.split(';')) {
-		const trimmed = statement.trim();
-		if (trimmed) await client.execute(trimmed);
+	try {
+		await client.executeMultiple(BASE_DDL);
+		// Exercise the actual journal and bookkeeping, including repair migrations.
+		await migrate(drizzle(client), { migrationsFolder: fileURLToPath(migrationDirectory) });
+	} finally {
+		client.close();
 	}
-	const files = readdirSync(DRIZZLE)
-		.filter((f) => f.endsWith('.sql'))
-		.sort();
-	for (const file of files) {
-		const sql = readFileSync(new URL(`../drizzle/${file}`, import.meta.url), 'utf8');
-		for (const statement of sql.split('--> statement-breakpoint')) {
-			const trimmed = statement.trim();
-			if (trimmed) await client.execute(trimmed);
-		}
-	}
-	client.close();
 }
 
 describe('seed-dev comment author PII (PR #40 review)', () => {
+	it('migrates from a directory whose path contains spaces', async () => {
+		const folder = join(tmp, 'drizzle folder');
+		symlinkSync(fileURLToPath(DRIZZLE), folder, 'dir');
+		const url = `file:${join(tmp, 'space-path.db')}`;
+		await applyMigrations(url, pathToFileURL(`${folder}/`));
+		const client = createClient({ url });
+		try {
+			const journal = JSON.parse(readFileSync(new URL('meta/_journal.json', DRIZZLE), 'utf8'));
+			const applied = await client.execute('SELECT COUNT(DISTINCT hash) AS n FROM __drizzle_migrations');
+			expect(applied.rows[0].n).toBe(journal.entries.length);
+			const columns = (await client.execute("PRAGMA table_info('comments')")).rows.map(row => row.name);
+			expect(columns).toEqual(expect.arrayContaining(['restore_intent_id', 'human_dispatch_token', 'human_dispatch_state']));
+		} finally { client.close(); }
+	});
 	it('the comments INSERT never names the author columns', () => {
 		const source = readFileSync(SEED, 'utf8');
 		const insert = source.match(/INSERT INTO comments[^`]*`/s);
@@ -98,7 +107,7 @@ describe('seed-dev comment author PII (PR #40 review)', () => {
 
 	it('runs clean against the fully migrated schema and seeds NULL author identifiers', async () => {
 		await applyMigrations(dbUrl);
-		const { stdout } = await execFileAsync('node', [SEED.pathname], {
+		const { stdout } = await execFileAsync('node', [fileURLToPath(SEED)], {
 			env: { ...process.env, TURSO_DATABASE_URL: dbUrl }
 		});
 		expect(stdout).toMatch(/seed|done|insert/i);
@@ -121,7 +130,7 @@ describe('seed-dev multi-channel demo data', () => {
 
 	const runSeed = async (url, args = []) => {
 		try {
-			const { stdout } = await execFileAsync('node', [SEED.pathname, ...args], {
+			const { stdout } = await execFileAsync('node', [fileURLToPath(SEED), ...args], {
 				env: { ...process.env, TURSO_DATABASE_URL: url }
 			});
 			return { code: 0, stdout };

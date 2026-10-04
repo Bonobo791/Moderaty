@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "544caa2a-18a5-4a94-8ada-7407447164be",
-  "prevId": "7f0d891f-2781-4138-8ddd-1cdf8a68ed71",
+  "id": "57427b89-075b-4f51-b9cd-b6d56ba60967",
+  "prevId": "743686c1-efa2-41ec-9290-058138444857",
   "tables": {
     "audit_log": {
       "name": "audit_log",
@@ -473,6 +473,20 @@
           "notNull": false,
           "autoincrement": false
         },
+        "human_dispatch_token": {
+          "name": "human_dispatch_token",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "human_dispatch_state": {
+          "name": "human_dispatch_state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "decided_by": {
           "name": "decided_by",
           "type": "text",
@@ -525,6 +539,24 @@
             "feedback_digested_at"
           ],
           "isUnique": false
+        },
+        "comments_dispatch_recovery_idx": {
+          "name": "comments_dispatch_recovery_idx",
+          "columns": [
+            "channel_id",
+            "id"
+          ],
+          "isUnique": false,
+          "where": "\"comments\".\"human_dispatch_token\" is not null or \"comments\".\"human_dispatch_state\" is not null"
+        },
+        "comments_restoring_recovery_idx": {
+          "name": "comments_restoring_recovery_idx",
+          "columns": [
+            "channel_id",
+            "id"
+          ],
+          "isUnique": false,
+          "where": "\"comments\".\"status\" = 'restoring'"
         }
       },
       "foreignKeys": {},
@@ -911,6 +943,40 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
+    },
+    "cron_workload_state": {
+      "name": "cron_workload_state",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "next_workload": {
+          "name": "next_workload",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'preview'"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "cron_workload_singleton": {
+          "name": "cron_workload_singleton",
+          "value": "\"cron_workload_state\".\"id\" = 1"
+        },
+        "cron_workload_kind": {
+          "name": "cron_workload_kind",
+          "value": "\"cron_workload_state\".\"next_workload\" IN ('preview', 'live')"
+        }
+      }
     },
     "feedback_digests": {
       "name": "feedback_digests",
@@ -3271,6 +3337,51 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
+    "welcome_discovery": {
+      "name": "welcome_discovery",
+      "columns": {
+        "campaign": {
+          "name": "campaign",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "after_user_id": {
+          "name": "after_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "cycle_end_user_id": {
+          "name": "cycle_end_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "claim_token": {
+          "name": "claim_token",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "lease_expires_at": {
+          "name": "lease_expires_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
     "welcome_emails": {
       "name": "welcome_emails",
       "columns": {
@@ -3450,40 +3561,6 @@
         "welcome_emails_state": {
           "name": "welcome_emails_state",
           "value": "\"welcome_emails\".\"state\" IN ('never_sent', 'historical_unknown', 'queued', 'claimed', 'in_flight', 'accepted', 'retryable_failure', 'permanent_failure', 'suppressed', 'ambiguous')"
-        }
-      }
-    },
-    "cron_workload_state": {
-      "name": "cron_workload_state",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "integer",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "next_workload": {
-          "name": "next_workload",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "'preview'"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {
-        "cron_workload_singleton": {
-          "name": "cron_workload_singleton",
-          "value": "\"cron_workload_state\".\"id\" = 1"
-        },
-        "cron_workload_kind": {
-          "name": "cron_workload_kind",
-          "value": "\"cron_workload_state\".\"next_workload\" IN ('preview', 'live')"
         }
       }
     }

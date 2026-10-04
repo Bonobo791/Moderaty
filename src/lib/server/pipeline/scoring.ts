@@ -9,6 +9,7 @@ import type { ToneProtections } from '$lib/server/tone';
 import { TONE_LEVEL_OMNI_AND_TONE } from '$lib/toneLevels';
 import { fetchVideoMetadata, type CommentPage } from '$lib/server/youtube';
 import { decide, metadataUnavailable } from './decisions';
+import { hasHumanClaim } from './human-claims';
 import type { AiBudget, Decision, DecisionBatchOptions, ScoreOutcome } from './types';
 
 /**
@@ -41,34 +42,20 @@ export async function loadVideoContext(
 	return { videoContext, metadataError };
 }
 
-/**
- * The page comments this history scan already charged+staged. The staging
- * transaction writes verdict+action+anchor atomically, so an anchor under
- * THIS scan's ref means the comment is DONE — re-scoring it while the page
- * sits parked on outOfCredits would re-pend its completed action and burn
- * an OpenAI call + YouTube write on every tick until top-up (codex). The
- * committed moderation_actions row still drives the enforcement sweep, so
- * the crash-after-charge case drains with no extra work. The ref shape
- * matches staging's exactly, including the plain comment id a pre-nonce
- * drain charges.
- */
-/** Which of this page's stored comment rows the ACTIVE rescan already staged.
- * The upsert stamps comments.scan_id with the scan marker, so the marker — not
- * the credit ledger — tracks staged work: rule/allowlist and unmetered-org
- * verdicts mint no anchor but must skip just the same (codex). */
-async function loadStagedIds(
+/** One page-scoped read excludes prior scan visits and current human claims
+ * before enrichment and AI budget consumption. Staging rechecks protection
+ * inside its write transaction and stamps still-protected visits. */
+async function loadRescanExclusions(
+	channelId: string,
 	pageComments: CommentPage['comments'],
-	scanStamp: string
-): Promise<Set<string>> {
-	return new Set(
-		(
-			await db
-				.select({ id: comments.id })
-				.from(comments)
-				.where(and(inArray(comments.id, pageComments.map((comment) => comment.id)), eq(comments.scanId, scanStamp)))
-				.all()
-		).map((row) => row.id)
-	);
+	scanStamp: string | null | undefined
+): Promise<{ stagedIds: Set<string>; protectedIds: string[] }> {
+	const rows = await db.select({ id: comments.id, scanId: comments.scanId, status: comments.status, humanDispatchToken: comments.humanDispatchToken, humanDispatchState: comments.humanDispatchState })
+		.from(comments).where(and(eq(comments.channelId, channelId), inArray(comments.id, pageComments.map(comment => comment.id)))).all();
+	return {
+		stagedIds: new Set(rows.filter(row => scanStamp != null && row.scanId === scanStamp).map(row => row.id)),
+		protectedIds: rows.filter(hasHumanClaim).map(row => row.id)
+	};
 }
 
 export async function prepareDecisionBatch(
@@ -82,6 +69,7 @@ export async function prepareDecisionBatch(
 	aiBudget: AiBudget;
 	videoContext: Awaited<ReturnType<typeof fetchVideoMetadata>> | null;
 	metadataError: unknown;
+	protectedIds: string[];
 }> {
 // Credits gate AI scoring for live runs only (I8: a dry run changes nothing
 // durable) — and only for METERED orgs. An org that never engaged billing
@@ -100,16 +88,14 @@ if (options.consumeCredits && options.orgId) {
 const aiBudget: AiBudget = {
 	remaining: metered && options.orgId ? await getCredits(options.orgId) : Number.POSITIVE_INFINITY
 };
-// Comments the ACTIVE rescan already committed (stamped comments.scan_id =
-// scanStamp by the staging upsert) are done — verdict, action row, and any
-// charge landed atomically. Re-scoring them would burn an OpenAI call and
-// re-pend completed actions every tick a page sits parked (codex). Queried
-// only for rescans: live runs dedupe by storedIds below, and a null stamp
-// (non-rescan or dry-run window) has no marker to match.
-const stagedIds =
-	options.rescore && options.scanStamp && page.comments.length
-		? await loadStagedIds(page.comments, options.scanStamp)
-		: new Set<string>();
+// A live rescan skips committed visits and pending/active/uncertain human
+// claims. Dry-run previews deliberately score the original page without
+// changing reservations or scan markers.
+const { stagedIds, protectedIds } =
+	options.rescore && options.consumeCredits && page.comments.length
+		? await loadRescanExclusions(channelId, page.comments, options.scanStamp)
+		: { stagedIds: new Set<string>(), protectedIds: [] };
+const protectedIdSet = new Set(protectedIds);
 // Dry-run window mode (rescore: true) skips the stored-IDs dedupe entirely:
 // re-scoring comments a real run already moderated is the point of the
 // preview. The within-batch dedupe below still applies. The DB query is
@@ -140,7 +126,7 @@ const allowlist = await loadHandleSet(channelId);
 // aborts the batch).
 const seen = new Set<string>();
 const newComments = page.comments.filter((comment) => {
-	if (existingIds.has(comment.id) || seen.has(comment.id) || stagedIds.has(comment.id)) return false;
+	if (existingIds.has(comment.id) || seen.has(comment.id) || stagedIds.has(comment.id) || protectedIdSet.has(comment.id)) return false;
 	seen.add(comment.id);
 	return true;
 });
@@ -155,7 +141,7 @@ const { videoContext, metadataError } = await loadVideoContext(
 	options.accessToken,
 	options.deadline
 );
-return { newComments, rulesForChannel, allowlist, aiBudget, videoContext, metadataError };
+return { newComments, rulesForChannel, allowlist, aiBudget, videoContext, metadataError, protectedIds };
 }
 export async function scoreComments(
 	newComments: Array<CommentPage['comments'][number]>,
@@ -232,7 +218,7 @@ export async function decideNewComments(
 		scanStamp,
 		consumeCredits
 	}: DecisionBatchOptions
-): Promise<{ decisions: Decision[]; failures: string[]; deferred: number }> {
+): Promise<{ decisions: Decision[]; failures: string[]; deferred: number; protectedIds: string[] }> {
 	const batch = await prepareDecisionBatch(channelId, page, {
 		accessToken,
 		toneLevel,
@@ -254,5 +240,5 @@ export async function decideNewComments(
 		protections,
 		openAiKey
 	});
-	return foldDecisions(settled);
+	return { ...foldDecisions(settled), protectedIds: batch.protectedIds };
 }

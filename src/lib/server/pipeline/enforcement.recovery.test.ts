@@ -1,5 +1,6 @@
 import { beforeEach, expect, test, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
+import type { InStatement } from '@libsql/client';
 import { setupTestDb, testDb } from '$lib/server/testdb';
 import { auditLog, channels, comments, moderationActions } from '$lib/server/db/schema';
 
@@ -47,7 +48,7 @@ test.each(['approve', 'restore'])('an interrupted %s survives a newer system aud
 
 	await reconcile();
 
-	expect(youtube.setModerationStatus).toHaveBeenCalledExactlyOnceWith(['comment'], 'published', false, 'access-token', undefined);
+	expect(youtube.setModerationStatus).toHaveBeenCalledExactlyOnceWith(['comment'], 'published', false, 'access-token', undefined, true);
 	expect((await comment())?.status).toBe('approved');
 	expect((await testDb().db.select().from(moderationActions).get())?.state).toBe('cancelling');
 	// The stale remote rejection may still land after the human publish. The
@@ -66,7 +67,7 @@ test.each(['later timestamp', 'same timestamp'])('replays the bound human intent
 
 	await reconcile();
 
-	expect(youtube.setModerationStatus).toHaveBeenCalledExactlyOnceWith(['comment'], 'rejected', false, 'access-token', undefined);
+	expect(youtube.setModerationStatus).toHaveBeenCalledExactlyOnceWith(['comment'], 'rejected', false, 'access-token', undefined, true);
 	expect((await comment())?.status).toBe('rejected');
 });
 
@@ -100,7 +101,7 @@ test('recovery uses the bound restore even when a later user audit says ban', as
 	await bind(await audit('restore', 'user', '2026-01-01T00:00:00.000Z'));
 	await audit('ban', 'user', '2026-01-02T00:00:00.000Z');
 	await reconcile();
-	expect(youtube.setModerationStatus).toHaveBeenCalledExactlyOnceWith(['comment'], 'published', false, 'access-token', undefined);
+	expect(youtube.setModerationStatus).toHaveBeenCalledExactlyOnceWith(['comment'], 'published', false, 'access-token', undefined, true);
 	expect(await comment()).toMatchObject({ status: 'approved', restoreIntentId: null });
 });
 
@@ -120,4 +121,85 @@ test('stale finalization cannot clear a newer restoring claim', async () => {
 	expect(await comment()).toMatchObject({ status: 'restoring', restoreIntentId: newId });
 	expect((await testDb().db.select().from(moderationActions).get())?.state).toBe('cancelling');
 	expect((await testDb().db.select().from(auditLog).all()).map((row) => row.id)).toEqual([oldId, newId]);
+});
+
+test.each(['released claim', 'new restoring claim', 'completed human decision'])('recovery does not dispatch a snapshot after a %s replaces it', async (kind) => {
+	const oldId = await audit('ban', 'user', '2026-01-01T00:00:00.000Z');
+	const newId = await audit('approve', 'user', '2026-01-02T00:00:00.000Z');
+	await bind(oldId);
+	const client = testDb().client;
+	const execute = client.execute.bind(client);
+	let changed = false;
+	const spy = vi.spyOn(client, 'execute').mockImplementation(async (statement: InStatement) => {
+		const result = await execute(statement);
+		const text = typeof statement === 'string' ? statement : statement.sql;
+		if (!changed && text.startsWith('select') && text.includes('from "audit_log"')) {
+			changed = true;
+			await execute({ sql: 'UPDATE comments SET status = ?, restore_intent_id = ? WHERE id = ?',
+				args: [kind === 'new restoring claim' ? 'restoring' : kind === 'released claim' ? 'pending' : 'approved', kind === 'new restoring claim' ? newId : null, 'comment'] });
+		}
+		return result;
+	});
+	try {
+		await reconcile();
+		expect(changed).toBe(true);
+		expect(youtube.setModerationStatus).not.toHaveBeenCalled();
+		expect(youtube.deleteComment).not.toHaveBeenCalled();
+		expect((await comment())?.restoreIntentId).toBe(kind === 'new restoring claim' ? newId : null);
+	} finally {
+		spy.mockRestore();
+	}
+});
+
+test('recovery does not dispatch after the channel is deactivated during intent lookup', async () => {
+	await bind(await audit('restore', 'user', '2026-01-01T00:00:00.000Z'));
+	const client = testDb().client;
+	const execute = client.execute.bind(client);
+	let changed = false;
+	const spy = vi.spyOn(client, 'execute').mockImplementation(async (statement: InStatement) => {
+		const result = await execute(statement);
+		const text = typeof statement === 'string' ? statement : statement.sql;
+		if (!changed && text.startsWith('select') && text.includes('from "audit_log"')) {
+			changed = true;
+			await execute('UPDATE channels SET active = 0 WHERE id = \'channel\'');
+		}
+		return result;
+	});
+	try {
+		await expect(reconcile()).rejects.toThrow(/deactivated/);
+		expect(changed).toBe(true);
+		expect(youtube.setModerationStatus).not.toHaveBeenCalled();
+		expect(await comment()).toMatchObject({ status: 'restoring', restoreIntentId: expect.any(Number) });
+		expect(JSON.parse((await testDb().db.select().from(channels).get())?.humanRecoveryCursor ?? 'null')).toMatchObject({ afterId: null, done: false });
+	} finally {
+		spy.mockRestore();
+	}
+});
+
+test('recovery rechecks the claim after its last connector guard yields', async () => {
+	const oldId = await audit('ban', 'user', '2026-01-01T00:00:00.000Z');
+	const newId = await audit('approve', 'user', '2026-01-02T00:00:00.000Z');
+	await bind(oldId);
+	const client = testDb().client;
+	const execute = client.execute.bind(client);
+	let lookedUpIntent = false;
+	let changed = false;
+	const spy = vi.spyOn(client, 'execute').mockImplementation(async (statement: InStatement) => {
+		const result = await execute(statement);
+		const text = typeof statement === 'string' ? statement : statement.sql;
+		if (text.startsWith('select') && text.includes('from "audit_log"')) lookedUpIntent = true;
+		if (lookedUpIntent && !changed && text.startsWith('update "channels"')) {
+			changed = true;
+			await execute({ sql: 'UPDATE comments SET restore_intent_id = ? WHERE id = ?', args: [newId, 'comment'] });
+		}
+		return result;
+	});
+	try {
+		await reconcile();
+		expect(changed).toBe(true);
+		expect(youtube.setModerationStatus).not.toHaveBeenCalled();
+		expect(await comment()).toMatchObject({ status: 'restoring', restoreIntentId: newId });
+	} finally {
+		spy.mockRestore();
+	}
 });

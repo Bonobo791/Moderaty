@@ -1,5 +1,5 @@
 import { env } from '$env/dynamic/private';
-import { fetchWithRetry } from '$lib/server/http';
+import { fetchSingleAttempt, fetchWithRetry } from '$lib/server/http';
 
 const YT = 'https://www.googleapis.com/youtube/v3';
 
@@ -44,6 +44,18 @@ export class CommentNotFoundError extends Error {
 		this.name = 'CommentNotFoundError';
 		this.commentIds = [...commentIds];
 	}
+}
+
+/** A settled validation/auth/quota refusal proves this attempt did not apply. */
+export class YoutubeWriteRefusedError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = 'YoutubeWriteRefusedError';
+	}
+}
+
+function writeFailure(status: number, message: string): Error {
+	return [400, 401, 403, 405, 422, 429].includes(status) ? new YoutubeWriteRefusedError(message) : new Error(message);
 }
 
 function object(value: unknown, context: string): JsonObject {
@@ -208,9 +220,11 @@ async function ytFetch(
 	path: string,
 	accessToken: string,
 	init?: RequestInit,
-	deadline?: number
+	deadline?: number,
+	singleAttempt = false
 ): Promise<Response> {
-	const res = await fetchWithRetry(`${YT}${path}`, {
+	const request = singleAttempt ? fetchSingleAttempt : fetchWithRetry;
+	const res = await request(`${YT}${path}`, {
 		...init,
 		// Normalize the caller's headers into a plain object before spreading:
 		// spreading a Headers instance (or tuple array) yields an empty object,
@@ -313,7 +327,8 @@ export async function setModerationStatus(
 	status: 'heldForReview' | 'rejected' | 'published',
 	banAuthor: boolean,
 	accessToken: string,
-	deadline?: number
+	deadline?: number,
+	singleAttempt = false
 ): Promise<void> {
 	for (let i = 0; i < ids.length; i += YOUTUBE_ID_BATCH_SIZE) {
 		const batch = ids.slice(i, i + YOUTUBE_ID_BATCH_SIZE);
@@ -328,12 +343,13 @@ export async function setModerationStatus(
 			`/comments/setModerationStatus?${params}`,
 			accessToken,
 			{ method: 'POST' },
-			deadline
+			deadline,
+			singleAttempt
 		);
 		if (res.status === 404) throw new CommentNotFoundError(batch);
 		if (!res.ok) {
 			const body = await res.text();
-			throw new Error(`setModerationStatus failed: ${res.status} ${body}`);
+			throw writeFailure(res.status, `setModerationStatus failed: ${res.status} ${body}`);
 		}
 	}
 }
@@ -347,15 +363,16 @@ export async function setModerationStatus(
  * @param accessToken - The OAuth access token for the YouTube API
  * @param deadline - Optional request deadline
  */
-export async function deleteComment(id: string, accessToken: string, deadline?: number): Promise<void> {
+export async function deleteComment(id: string, accessToken: string, deadline?: number, singleAttempt = false): Promise<void> {
 	const res = await ytFetch(
 		`/comments?id=${encodeURIComponent(id)}`,
 		accessToken,
 		{ method: 'DELETE' },
-		deadline
+		deadline,
+		singleAttempt
 	);
 	if (!res.ok && res.status !== 404) {
 		const body = await res.text();
-		throw new Error(`comments.delete failed: ${res.status} ${body}`);
+		throw writeFailure(res.status, `comments.delete failed: ${res.status} ${body}`);
 	}
 }

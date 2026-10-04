@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 // Test helper: real in-memory libsql database with the app schema.
 // Never imported by app code — tests only.
 
-import { createClient, type Client } from '@libsql/client';
+import { createClient, type Client, type InStatement } from '@libsql/client';
 import { getTableName, is } from 'drizzle-orm';
 import { drizzle, type LibSQLDatabase } from 'drizzle-orm/libsql';
 import { SQLiteTable } from 'drizzle-orm/sqlite-core';
@@ -10,6 +10,10 @@ import { beforeAll, beforeEach, vi } from 'vitest';
 import * as schema from './db/schema';
 import { consents, users } from './db/schema';
 import { LIFETIME_SLOT_LIMIT } from './billing/plans';
+
+export function statementSql(statement: InStatement): string {
+	return typeof statement === 'string' ? statement : statement.sql;
+}
 
 export interface TestDb {
 	db: LibSQLDatabase<typeof schema>;
@@ -216,6 +220,7 @@ export async function createTestDb(): Promise<TestDb> {
 			history_next_page_token TEXT,
 			history_boundary TEXT,
 			history_scan_id TEXT,
+			human_recovery_cursor TEXT,
 			dry_run_boundary TEXT,
 			dry_run_page_token TEXT,
 			last_run_at TEXT,
@@ -265,6 +270,8 @@ export async function createTestDb(): Promise<TestDb> {
 			published_at TEXT NOT NULL,
 			status TEXT NOT NULL,
 			restore_intent_id INTEGER,
+			human_dispatch_token TEXT,
+			human_dispatch_state TEXT,
 			decided_by TEXT NOT NULL,
 			matched_rule_id INTEGER,
 			ai_score TEXT,
@@ -273,6 +280,7 @@ export async function createTestDb(): Promise<TestDb> {
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		)`,
 		`CREATE INDEX comments_channel_digested_idx ON comments (channel_id, feedback_digested_at)`,
+		`CREATE INDEX comments_human_recovery_eligible_idx ON comments (channel_id, id) WHERE status = 'restoring' AND human_dispatch_token IS NULL AND human_dispatch_state IS NULL`,
 		`CREATE TABLE audit_log (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			channel_id TEXT NOT NULL,
@@ -602,5 +610,7 @@ export async function createTestDb(): Promise<TestDb> {
 	await client.executeMultiple(readFileSync(new URL('../../../drizzle/0062_hosted_welcome_email.sql', import.meta.url), 'utf8'));
 	await client.executeMultiple(readFileSync(new URL('../../../drizzle/0063_welcome_campaign_pacing.sql', import.meta.url), 'utf8'));
 	await client.executeMultiple(readFileSync(new URL('../../../drizzle/0064_cron_workload_fairness.sql', import.meta.url), 'utf8'));
+	await client.executeMultiple(readFileSync(new URL('../../../drizzle/0067_welcome_discovery.sql', import.meta.url), 'utf8'));
+	await client.executeMultiple(readFileSync(new URL('../../../drizzle/0069_recovery_pagination.sql', import.meta.url), 'utf8'));
 	return { db: drizzle(client, { schema }), client };
 }

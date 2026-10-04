@@ -451,10 +451,52 @@
       "breakpoints": true
     },
     {
+      "idx": 64,
+      "version": "6",
+      "when": 1791063231735,
+      "tag": "0064_cron_workload_fairness",
+      "breakpoints": true
+    },
+    {
       "idx": 65,
       "version": "6",
       "when": 1791063820829,
       "tag": "0065_restore_intent_binding",
+      "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "6",
+      "when": 1791141401289,
+      "tag": "0066_repair_scheduler_journal",
+      "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "6",
+      "when": 1791141401290,
+      "tag": "0067_welcome_discovery",
+      "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "6",
+      "when": 1791141432396,
+      "tag": "0068_human_dispatch_reservation",
+      "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "6",
+      "when": 1791144891236,
+      "tag": "0069_recovery_pagination",
+      "breakpoints": true
+    },
+    {
+      "idx": 70,
+      "version": "6",
+      "when": 1791150244877,
+      "tag": "0070_human_recovery_progress",
       "breakpoints": true
     }
   ]

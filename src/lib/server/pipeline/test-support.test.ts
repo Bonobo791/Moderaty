@@ -7,6 +7,15 @@ const mocks = getMocks();
 beforeEach(resetPipelineMocks);
 afterEach(restoreDryRun);
 
+test('explicitly cleared staged intent and dispatch fields replace seeded values', async () => {
+	mocks.state.commentRestoreIntentIds.comment = 7;
+	mocks.state.commentHumanDispatchTokens.comment = 'old-token';
+	mocks.state.commentHumanDispatchStates.comment = 'uncertain';
+	mocks.state.insertedComments = [{ id: 'comment', restoreIntentId: null, humanDispatchToken: null, humanDispatchState: null }];
+	const [row] = await mocks.db.select().from(comments).where(eq(comments.id, 'comment')).all();
+	expect(row).toMatchObject({ restoreIntentId: null, humanDispatchToken: null, humanDispatchState: null });
+});
+
 test.each(['ID first', 'ID last'])('audit queries select the exact intent with %s', async (order) => {
 	mocks.state.insertedAudits = [
 		{ id: 7, channelId: 'channel', commentId: 'comment', actor: 'user', action: 'restore' },
@@ -99,4 +108,22 @@ test('channel guards still match their qualified columns after earlier parameter
 	)).returning({ id: channels.id });
 	expect(changed).toEqual([]);
 	expect(mocks.state.channelUpdates).toEqual([]);
+});
+
+test.each(['staged', 'existing'])('a failed transaction restores the %s comment and intent binding', async (kind) => {
+	const original = { id: 'comment', status: 'restoring', decidedBy: 'human', restoreIntentId: 7 };
+	if (kind === 'staged') mocks.state.insertedComments = [{ ...original }];
+	else {
+		mocks.state.existingIds = ['comment'];
+		mocks.state.commentStatuses = { comment: original.status };
+		mocks.state.commentDecidedBy = { comment: original.decidedBy };
+		mocks.state.commentRestoreIntentIds = { comment: original.restoreIntentId };
+	}
+	await expect(mocks.db.transaction(async (tx) => {
+		await tx.update(comments).set({ status: 'approved', decidedBy: 'none', restoreIntentId: null })
+			.where(and(eq(comments.id, 'comment'), eq(comments.restoreIntentId, 7))).returning({ id: comments.id });
+		throw new Error('rollback fixture');
+	})).rejects.toThrow('rollback fixture');
+	const rows = await mocks.db.select().from(comments).where(eq(comments.id, 'comment')).all();
+	expect(rows).toEqual([expect.objectContaining(original)]);
 });

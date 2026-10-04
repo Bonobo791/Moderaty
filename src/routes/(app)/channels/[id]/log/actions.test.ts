@@ -20,7 +20,8 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 vi.mock('$lib/server/crypto', () => ({ decrypt: mocks.decrypt }));
-vi.mock('$lib/server/youtube', () => ({
+vi.mock('$lib/server/youtube', async (original) => ({
+	...await original<typeof import('$lib/server/youtube')>(),
 	refreshAccessToken: mocks.refreshAccessToken,
 	setModerationStatus: mocks.setModerationStatus,
 	deleteComment: mocks.deleteComment,
@@ -31,6 +32,7 @@ vi.mock('$lib/server/youtube', () => ({
 }));
 
 import { actions } from './+page.server';
+import { YoutubeWriteRefusedError } from '$lib/server/youtube';
 
 setupTestDb(['audit_log', 'comments', 'channels', 'moderation_actions']);
 
@@ -99,7 +101,7 @@ test('undo restores a rejected comment at YouTube and records the restore', asyn
 	expect(mocks.decrypt).toHaveBeenCalledWith('enc-1');
 	expect(mocks.refreshAccessToken).toHaveBeenCalledWith('decrypted-refresh-token');
 	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined, true);
 	expect(await commentRow('c1')).toMatchObject({ status: 'approved', decidedBy: 'human' });
 	expect(await testDb().db.select().from(auditLog).all()).toContainEqual(
 		// authorHandle is null: manual actions have no handle source (the
@@ -114,7 +116,7 @@ test('undo of a ban restores the comment and names the original action', async (
 	await undo('c1');
 
 	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined, true);
 	expect(await commentRow('c1')).toMatchObject({ status: 'approved' });
 	expect(await testDb().db.select().from(auditLog).all()).toContainEqual(
 		expect.objectContaining({ commentId: 'c1', action: 'restore', reason: 'undo of ban', actor: 'user' })
@@ -134,9 +136,9 @@ test('undo on a deleted comment 404s and changes nothing', async () => {
 	expect(await testDb().db.select().from(auditLog).all()).toHaveLength(1); // only the seeded row
 });
 
-test('a YouTube failure releases the claim and fails loudly', async () => {
+test('a settled YouTube refusal releases the claim and fails loudly', async () => {
 	await seedComment('c1', 'rejected', 'reject');
-	mocks.setModerationStatus.mockRejectedValueOnce(new Error('YouTube refused the transition'));
+	mocks.setModerationStatus.mockRejectedValueOnce(new YoutubeWriteRefusedError('YouTube refused the transition'));
 
 	await expect(undo('c1')).rejects.toThrow('YouTube refused the transition');
 
@@ -157,7 +159,7 @@ test('a missing YouTube comment finalizes a restore as deleted — nothing exist
 
 		expect(res).toMatchObject({ success: 'The comment no longer exists on YouTube — recorded as deleted.' });
 		expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
-		expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined);
+		expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined, true);
 		expect(await commentRow('c1')).toMatchObject({ status: 'deleted', decidedBy: 'human' });
 		expect(warning).toHaveBeenCalledWith('comment c1 no longer exists on YouTube — completing restore');
 	} finally {
@@ -207,7 +209,7 @@ test.each([
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
 });
 
-test.each(['bound restore', 'unbound legacy'])('dry-run Undo can explicitly resume a %s', async (kind) => {
+test.each(['bound restore', 'unbound legacy'])('dry-run can explicitly resume a %s through its authorized action', async (kind) => {
 	mocks.env.DRY_RUN = 'true';
 	await seedComment('c1', 'restoring', 'reject');
 	const [intent] = await testDb().db.insert(auditLog).values({
@@ -218,13 +220,13 @@ test.each(['bound restore', 'unbound legacy'])('dry-run Undo can explicitly resu
 	}
 	const beforeAudits = await testDb().db.select().from(auditLog).all();
 
-	await expect(undo('c1')).resolves.toMatchObject({ success: expect.stringContaining('Restored') });
+	await expect(kind === 'bound restore' ? undo('c1') : recoverRestore('c1')).resolves.toMatchObject({ success: expect.stringContaining('Restored') });
 
 	expect(await commentRow('c1')).toMatchObject({ status: 'approved', decidedBy: 'human', restoreIntentId: null });
 	const afterAudits = await testDb().db.select().from(auditLog).all();
 	expect(afterAudits.slice(0, beforeAudits.length)).toEqual(beforeAudits);
 	expect(afterAudits).toHaveLength(beforeAudits.length + 1);
-	expect(afterAudits.at(-1)).toMatchObject({ commentId: 'c1', action: 'dry-run', actor: 'user', reason: 'undo of reject' });
+	expect(afterAudits.at(-1)).toMatchObject({ commentId: 'c1', action: 'dry-run', actor: 'user', reason: kind === 'bound restore' ? 'undo of reject' : 'owner requested restore after blocked recovery' });
 	expect(mocks.refreshAccessToken).not.toHaveBeenCalled();
 	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
 	expect(mocks.deleteComment).not.toHaveBeenCalled();
@@ -284,7 +286,7 @@ test('a crashed undo leaves durable intent the reconcile sweep can finish', asyn
 	const res = await undo('c1');
 
 	expect(res).toMatchObject({ success: expect.stringContaining('estored') });
-	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined);
+	expect(mocks.setModerationStatus).toHaveBeenCalledWith(['c1'], 'published', false, 'access-token', undefined, true);
 	expect(await commentRow('c1')).toMatchObject({ status: 'approved', decidedBy: 'human' });
 	// Exactly ONE restore row — the crashed attempt's intent row, reused.
 	expect((await testDb().db.select().from(auditLog).all()).filter((row) => row.action === 'restore')).toHaveLength(1);
@@ -463,7 +465,7 @@ test('eraseHandles rejects a signed-out request with 401 and erases nothing', as
 	expect((await testDb().db.select().from(auditLog).all())[0]).toMatchObject({ authorHandle: '@some.user' });
 });
 
-test('explicit legacy Undo writes and binds a fresh restore rather than reusing history', async () => {
+test('confirmed owner recovery writes and binds a fresh legacy restore rather than reusing history', async () => {
 	await seedComment('c1', 'restoring', 'reject');
 	const [old] = await testDb().db.insert(auditLog).values({ channelId: 'UC1', commentId: 'c1', action: 'restore', reason: 'Earlier completed undo', actor: 'user' }).returning({ id: auditLog.id });
 	mocks.setModerationStatus.mockImplementationOnce(async () => {
@@ -473,7 +475,7 @@ test('explicit legacy Undo writes and binds a fresh restore rather than reusing 
 		const intent = await testDb().db.select().from(auditLog).where(eq(auditLog.id, row!.restoreIntentId!)).get();
 		expect(intent).toMatchObject({ action: 'restore', actor: 'user', channelId: 'UC1', commentId: 'c1' });
 	});
-	await undo('c1');
+	await recoverRestore('c1');
 	expect((await testDb().db.select().from(auditLog).all()).filter((row) => row.action === 'restore')).toHaveLength(2);
 	expect(await commentRow('c1')).toMatchObject({ status: 'approved', restoreIntentId: null });
 });
@@ -484,9 +486,9 @@ test('a fresh Undo binds its own intent before YouTube and clears it when releas
 		const row = await commentRow('c1');
 		const intent = await testDb().db.select().from(auditLog).where(eq(auditLog.id, row!.restoreIntentId!)).get();
 		expect(intent).toMatchObject({ action: 'restore', actor: 'user', channelId: 'UC1', commentId: 'c1' });
-		throw new Error('remote unavailable');
+		throw new YoutubeWriteRefusedError('remote refused');
 	});
-	await expect(undo('c1')).rejects.toThrow('remote unavailable');
+	await expect(undo('c1')).rejects.toThrow('remote refused');
 	expect(await commentRow('c1')).toMatchObject({ status: 'rejected', restoreIntentId: null });
 	expect(await testDb().db.select().from(auditLog).all()).toHaveLength(1);
 });
@@ -509,7 +511,114 @@ test('a stale failed Undo does not release or erase a newer claim', async () => 
 		await testDb().db.update(comments).set({ restoreIntentId: intent.id }).where(eq(comments.id, 'c1'));
 		throw new Error('old restore failed');
 	});
-	await expect(undo('c1')).rejects.toThrow('old restore failed');
+	expect(await undo('c1')).toMatchObject({ status: 500, data: { error: expect.stringContaining('paused') } });
 	expect(await commentRow('c1')).toMatchObject({ status: 'restoring', restoreIntentId: newIntentId });
 	expect(await testDb().db.select().from(auditLog).where(eq(auditLog.id, newIntentId)).get()).toMatchObject({ action: 'reject' });
+});
+
+function recoverRestore(commentId: string, expectedIntentId = '', confirmRestore = 'yes', user: App.Locals['user'] = OWNER, channelId = 'UC1') {
+	return actions.recoverRestore({ params: { id: channelId }, locals: { user },
+		request: postForm({ commentId, expectedIntentId, confirmRestore }, LOG_URL) } as never);
+}
+
+test.each(['live', 'dry-run'])('%s ordinary Undo cannot bypass confirmed owner recovery for an unbound claim', async (mode) => {
+	mocks.env.DRY_RUN = mode === 'dry-run' ? 'true' : 'false';
+	await seedComment('blocked', 'restoring', 'delete');
+	for (const orgRole of ['member', 'admin', 'owner'] as const) {
+		await expect(actions.undo({ params: { id: 'UC1' }, locals: { user: { ...OWNER, orgRole } },
+			request: postForm({ commentId: 'blocked' }, LOG_URL) } as never)).rejects.toMatchObject({ status: 409 });
+	}
+	expect(await commentRow('blocked')).toMatchObject({ status: 'restoring', restoreIntentId: null });
+	expect(await testDb().db.select().from(auditLog).all()).toHaveLength(1);
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+});
+
+test.each(['no audit', 'missing audit', 'wrong comment'])('owner recovery records a new restore for %s before remote work', async (kind) => {
+	await testDb().db.insert(comments).values({ id: 'blocked', channelId: 'UC1', text: 'blocked text', publishedAt: '2026-01-01', status: 'restoring', decidedBy: 'human' });
+	let originalId: number | null = null;
+	if (kind === 'wrong comment') {
+		const [invalid] = await testDb().db.insert(auditLog).values({ channelId: 'UC1', commentId: 'other', action: 'delete', actor: 'user', reason: 'other decision' }).returning({ id: auditLog.id });
+		originalId = invalid.id;
+	} else if (kind === 'missing audit') originalId = 999999;
+	await testDb().db.update(comments).set({ restoreIntentId: originalId }).where(eq(comments.id, 'blocked'));
+	mocks.setModerationStatus.mockImplementationOnce(async () => {
+		const row = await commentRow('blocked');
+		expect(row?.restoreIntentId).toEqual(expect.any(Number));
+		expect(row?.restoreIntentId).not.toBe(originalId);
+		const intent = await testDb().db.select().from(auditLog).where(eq(auditLog.id, row!.restoreIntentId!)).get();
+		expect(intent).toMatchObject({ commentId: 'blocked', action: 'restore', actor: 'user', reason: 'owner requested restore after blocked recovery' });
+	});
+	const res = await recoverRestore('blocked', originalId === null ? '' : String(originalId));
+	expect(res).toMatchObject({ success: expect.stringContaining('Restored') });
+	expect(mocks.setModerationStatus).toHaveBeenCalledExactlyOnceWith(['blocked'], 'published', false, 'access-token', undefined, true);
+	expect(await commentRow('blocked')).toMatchObject({ status: 'approved', decidedBy: 'human', restoreIntentId: null });
+	if (kind === 'wrong comment') expect(await testDb().db.select().from(auditLog).where(eq(auditLog.id, originalId!)).get()).toMatchObject({ action: 'delete', commentId: 'other' });
+});
+
+test('recovery needs explicit confirmation and rejects non-owner roles without changes', async () => {
+	await seedComment('blocked', 'restoring', 'delete');
+	expect(await recoverRestore('blocked', '', '')).toMatchObject({ status: 400, data: { error: expect.stringContaining('Confirm') } });
+	for (const orgRole of ['member', 'admin'] as const) {
+		await expect(recoverRestore('blocked', '', 'yes', { ...OWNER, orgRole })).rejects.toMatchObject({ status: 403 });
+	}
+	expect(await commentRow('blocked')).toMatchObject({ status: 'restoring', restoreIntentId: null });
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+});
+
+test.each(['approve', 'reject', 'delete', 'ban', 'restore'])('recovery never replaces a valid pending %s', async (action) => {
+	await seedComment('blocked', 'restoring', action);
+	const [intent] = await testDb().db.insert(auditLog).values({ channelId: 'UC1', commentId: 'blocked', action, actor: 'user', reason: 'current human decision' }).returning({ id: auditLog.id });
+	await testDb().db.update(comments).set({ restoreIntentId: intent.id }).where(eq(comments.id, 'blocked'));
+	expect(await recoverRestore('blocked', String(intent.id))).toMatchObject({ status: 409, data: { error: expect.stringContaining('Refresh') } });
+	expect(await commentRow('blocked')).toMatchObject({ status: 'restoring', restoreIntentId: intent.id });
+	expect(await testDb().db.select().from(auditLog).all()).toHaveLength(2);
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+});
+
+test('a stale recovery form cannot replace a different invalid binding', async () => {
+	await seedComment('blocked', 'restoring', 'delete');
+	await testDb().db.update(comments).set({ restoreIntentId: 999999 }).where(eq(comments.id, 'blocked'));
+	expect(await recoverRestore('blocked', '')).toMatchObject({ status: 409 });
+	expect(await commentRow('blocked')).toMatchObject({ status: 'restoring', restoreIntentId: 999999 });
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+});
+
+test('concurrent owner recoveries create only one new intent and one remote restore', async () => {
+	await seedComment('blocked', 'restoring', 'delete');
+	const res = await Promise.all([recoverRestore('blocked'), recoverRestore('blocked')]);
+	expect(res.filter((value) => 'success' in value)).toHaveLength(1);
+	expect(res.filter((value) => 'status' in value && value.status === 409)).toHaveLength(1);
+	expect(mocks.setModerationStatus).toHaveBeenCalledTimes(1);
+	expect((await testDb().db.select().from(auditLog).all()).filter((row) => row.action === 'restore')).toHaveLength(1);
+});
+
+test('a settled recovery refusal is visible and leaves the new bound intent for reconciliation', async () => {
+	await seedComment('blocked', 'restoring', 'delete');
+	mocks.setModerationStatus.mockRejectedValueOnce(new YoutubeWriteRefusedError('remote refused'));
+	expect(await recoverRestore('blocked')).toMatchObject({ status: 500, data: { error: expect.stringContaining('retry') } });
+	expect(await commentRow('blocked')).toMatchObject({ status: 'restoring', restoreIntentId: expect.any(Number) });
+	const { runEnforcement } = await import('$lib/server/pipeline/enforcement');
+	await runEnforcement('UC1', 'access-token', undefined, null, 0);
+	expect(await commentRow('blocked')).toMatchObject({ status: 'approved', restoreIntentId: null });
+});
+
+test('recovery on another organization channel fails without remote work', async () => {
+	await testDb().db.insert(channels).values({ id: 'UC2', userId: OWNER.id, orgId: 'org-2', title: 'Two', refreshTokenEnc: 'enc-2' });
+	await seedComment('blocked', 'restoring', 'delete', 'UC2');
+	await expect(recoverRestore('blocked', '', 'yes', OWNER, 'UC2')).rejects.toMatchObject({ status: 404 });
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
+});
+
+test('a recovery binding failure does not claim automatic retry when no request was recorded', async () => {
+	await seedComment('blocked', 'restoring', 'delete');
+	await testDb().client.execute(`CREATE TRIGGER fail_recovery_binding BEFORE UPDATE OF restore_intent_id ON comments WHEN NEW.restore_intent_id IS NOT NULL BEGIN SELECT RAISE(ABORT, 'binding failed'); END`);
+	try {
+		const result = await recoverRestore('blocked');
+		expect(result).toMatchObject({ status: 500, data: { error: expect.stringContaining('check whether a restore request was recorded') } });
+	} finally {
+		await testDb().client.execute('DROP TRIGGER fail_recovery_binding');
+	}
+	expect(await commentRow('blocked')).toMatchObject({ status: 'restoring', restoreIntentId: null });
+	expect(await testDb().db.select().from(auditLog).all()).toHaveLength(1);
+	expect(mocks.setModerationStatus).not.toHaveBeenCalled();
 });

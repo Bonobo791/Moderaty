@@ -1,8 +1,9 @@
-import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import { maybeTriggerAutoTopUp } from '$lib/server/billing/autotopup';
 import { db } from '$lib/server/db';
 import { auditLog, channels, comments, moderationActions } from '$lib/server/db/schema';
-import { assertBeforeDeadline, DeadlineExceededError } from '$lib/server/http';
+import { assertBeforeDeadline, DeadlineExceededError, RequestNotSentError } from '$lib/server/http';
 import {
 	CommentNotFoundError,
 	deleteComment,
@@ -10,6 +11,7 @@ import {
 	YOUTUBE_ID_BATCH_SIZE
 } from '$lib/server/youtube';
 import type { OutstandingAction, YoutubeAction } from './types';
+import { executeDecidedDispatch, executeHumanDispatch, reserveDecidedDispatch, reserveHumanDispatch } from './human-dispatch';
 
 /** Thrown when account deletion deactivates (or removes) the channel mid-run. */
 export class ChannelDeactivatedError extends Error {}
@@ -20,7 +22,7 @@ export class ChannelDeactivatedError extends Error {}
  * in-flight run, so the run must stop at the next boundary instead of writing
  * rows or moderating comments for a deleted account.
  */
-export type ChannelIdentity = Pick<typeof channels.$inferSelect, 'userId' | 'refreshTokenEnc'>;
+export type ChannelIdentity = Pick<typeof channels.$inferSelect, 'userId' | 'refreshTokenEnc'> & { leaseExpiresAt?: string | null };
 type ChannelGuardHandle = Pick<typeof db, 'update'>;
 type OutstandingState = 'pending' | 'dispatched' | 'cancelling';
 
@@ -280,7 +282,10 @@ async function convergeOneHold(
 	expected?: ChannelIdentity
 ): Promise<boolean> {
 	await assertChannelActive(action.channelId, db, expected);
-	const outcome = await applyHumanIntent(action.commentId, intent, accessToken, deadline);
+	if (status === undefined) return false;
+	const dispatch = await reserveDecidedDispatch(action.channelId, action.commentId, status, expected);
+	if (!dispatch) return false;
+	const outcome = await executeDecidedDispatch(dispatch, intent, accessToken, expected, deadline);
 	if (outcome === 'missing' && intent !== 'delete') {
 		// The corrective write 404'd: YouTube has no comment to publish
 		// or reject — a dispatched delete already landed (or the owner
@@ -529,16 +534,16 @@ async function processOutstandingActions(channelId: string, accessToken: string,
 			inArray(moderationActions.state, ['pending', 'dispatched', 'cancelling'])
 		))
 		.all()).map(outstandingAction);
-	// A 'restoring' comment is owned by the human flow end-to-end: its
-	// outstanding action rows are bookkeeping only, and finalizeHumanIntent
-	// terminalizes them — this sweep must neither apply nor supersede them
-	// (codex).
+	// Human claims and unresolved corrective writes own their comment.
+	// A rescan may change its local status, but no newer staged enforcement
+	// can bypass the durable reservation while an older write may land.
 	const restoringIds = actions.length
 		? (
 				await db
 					.select({ id: comments.id })
 					.from(comments)
-					.where(and(eq(comments.channelId, channelId), eq(comments.status, 'restoring')))
+					.where(and(eq(comments.channelId, channelId), or(eq(comments.status, 'restoring'),
+						isNotNull(comments.humanDispatchToken), isNotNull(comments.humanDispatchState))))
 					.all()
 			).map((row) => row.id)
 		: [];
@@ -599,14 +604,14 @@ export async function applyHumanIntent(
 	deadline?: number
 ): Promise<'applied' | 'missing'> {
 	if (!humanFinalStatus(action)) throw new Error(`unsupported human intent '${action}'`);
-	assertBeforeDeadline(deadline);
+	try { assertBeforeDeadline(deadline); } catch (cause) { throw new RequestNotSentError(cause); }
 	try {
 		if (action === 'approve' || action === 'restore') {
-			await setModerationStatus([commentId], 'published', false, accessToken, deadline);
+			await setModerationStatus([commentId], 'published', false, accessToken, deadline, true);
 		} else if (action === 'reject' || action === 'ban') {
-			await setModerationStatus([commentId], 'rejected', action === 'ban', accessToken, deadline);
+			await setModerationStatus([commentId], 'rejected', action === 'ban', accessToken, deadline, true);
 		} else {
-			await deleteComment(commentId, accessToken, deadline);
+			await deleteComment(commentId, accessToken, deadline, true);
 		}
 	} catch (error) {
 		if (!(error instanceof CommentNotFoundError)) throw error;
@@ -634,29 +639,37 @@ export async function finalizeHumanIntent(
 	commentId: string,
 	action: string,
 	intentId: number,
-	expected?: ChannelIdentity
-): Promise<void> {
+	expected?: ChannelIdentity,
+	dispatchToken?: string
+): Promise<boolean> {
 	const status = humanFinalStatus(action);
 	if (!status) throw new Error(`unsupported human intent '${action}'`);
 	const agreeing = (Object.keys(ACTION_OUTCOME) as YoutubeAction[]).filter((verb) => ACTION_OUTCOME[verb] === status);
-	await db.transaction(async (transaction) => {
+	return await db.transaction(async (transaction) => {
 		await assertChannelActive(channelId, transaction, expected);
 		const claimed = await transaction
 			.update(comments)
-			.set({ status, decidedBy: 'human', restoreIntentId: null })
+			.set({ status, decidedBy: 'human', restoreIntentId: null, humanDispatchToken: null, humanDispatchState: null })
 			.where(and(
 				eq(comments.id, commentId),
 				eq(comments.channelId, channelId),
 				eq(comments.status, 'restoring'),
-				eq(comments.restoreIntentId, intentId)
+				eq(comments.restoreIntentId, intentId),
+				dispatchToken ? eq(comments.humanDispatchToken, dispatchToken) : isNull(comments.humanDispatchToken),
+				dispatchToken ? eq(comments.humanDispatchState, 'in_flight') : isNull(comments.humanDispatchState)
 			))
 			.returning({ id: comments.id });
 		if (!claimed.length) {
 			const current = await transaction
-				.select({ status: comments.status })
+				.select({ status: comments.status, humanDispatchToken: comments.humanDispatchToken, humanDispatchState: comments.humanDispatchState })
 				.from(comments)
 				.where(inArray(comments.id, [commentId]))
 				.all();
+			if ((current[0]?.humanDispatchToken || current[0]?.humanDispatchState) &&
+				(current[0].humanDispatchToken !== dispatchToken || current[0].humanDispatchState !== 'in_flight')) {
+				console.warn('finalize: comment %s has a different dispatch owner — leaving its claim unchanged', commentId);
+				return false;
+			}
 			if (current[0] && current[0].status !== status) {
 				await transaction
 					.update(moderationActions)
@@ -664,7 +677,7 @@ export async function finalizeHumanIntent(
 					.where(and(eq(moderationActions.commentId, commentId), eq(moderationActions.state, 'completed')));
 			}
 			console.warn('finalize: comment %s left restoring mid-flight — conflicting completed actions re-armed for reconciliation', commentId);
-			return;
+			return false;
 		}
 		const dispatched = agreeing.length
 			? await transaction
@@ -710,6 +723,7 @@ export async function finalizeHumanIntent(
 				}))
 			);
 		}
+		return true;
 	});
 }
 
@@ -734,34 +748,119 @@ export async function claimedHumanIntent(
 	return intent && intent.actor === 'user' && humanFinalStatus(intent.action) ? intent : undefined;
 }
 
-/**
- * A restoring claim and its exact audit ID commit together before remote
- * work (I3). Only that audit is replayable. Legacy or invalid bindings stay
- * untouched until the owner explicitly retries; history cannot prove intent.
- */
+async function reconcileHumanClaim(channelId: string, row: { id: string; restoreIntentId: number | null }, accessToken: string,
+	deadline?: number, expected?: ChannelIdentity) {
+	const intent = await claimedHumanIntent(channelId, row.id, row.restoreIntentId);
+	if (!intent) {
+		console.warn('reconcile: comment %s has no valid bound human intent — leaving restoring unchanged; owner retry required', row.id);
+		return;
+	}
+	try {
+		// Outstanding actions and earlier restores may have taken time since
+		// runEnforcement's connector check. Never spend a detached grant.
+		await assertChannelActive(channelId, db, expected);
+		// Intent lookup can race a request releasing or finishing this claim.
+		// Re-read its exact binding immediately before remote dispatch; the
+		// initial restoring snapshot is not authority for a replaced row.
+		const [current] = await db.select({ status: comments.status, restoreIntentId: comments.restoreIntentId })
+			.from(comments).where(and(eq(comments.id, row.id), eq(comments.channelId, channelId))).all();
+		if (current?.status !== 'restoring' || current.restoreIntentId !== intent.id) {
+			console.warn('reconcile: comment %s changed before human-intent dispatch — skipping stale claim', row.id);
+			return;
+		}
+		assertBeforeDeadline(deadline);
+		const dispatch = await reserveHumanDispatch(channelId, row.id, intent.id, expected);
+		if (!dispatch) {
+			console.warn('reconcile: comment %s has an active or uncertain human write — automatic replay is paused', row.id);
+			return;
+		}
+		await executeHumanDispatch(dispatch, intent.action, accessToken, expected, deadline);
+	} catch (error) {
+		if (error instanceof DeadlineExceededError || error instanceof ChannelDeactivatedError) throw error;
+		console.error(
+			`reconcile: could not finish '${intent.action}' for comment ${row.id}: ${error instanceof Error ? error.message : String(error)} — retrying next run`
+		);
+	}
+}
+
+const HUMAN_RECOVERY_PAGE_SIZE = 25;
+type HumanRecoveryCursor = { cycleId: string; afterId: string | null; endId: string; done: boolean };
+
+function readHumanRecoveryCursor(raw: string | null): HumanRecoveryCursor | null {
+	if (raw === null) return null;
+	const value = JSON.parse(raw) as Partial<HumanRecoveryCursor> | null;
+	if (!value || typeof value.cycleId !== 'string' || !value.cycleId || typeof value.endId !== 'string' || !value.endId
+		|| !(value.afterId === null || typeof value.afterId === 'string') || typeof value.done !== 'boolean') {
+		throw new Error('invalid human recovery checkpoint — reconciliation stopped');
+	}
+	return value as HumanRecoveryCursor;
+}
+
+function eligibleHumanClaims(channelId: string) {
+	// Keep this predicate identical to the eligible partial index: permanently
+	// fenced requests must cost no automatic scan or audit-lookup work.
+	return and(eq(comments.channelId, channelId), sql`${comments.status} = 'restoring'`, isNull(comments.humanDispatchToken), isNull(comments.humanDispatchState));
+}
+
+function humanRecoveryLease(expected: ChannelIdentity) {
+	if (expected.leaseExpiresAt === undefined) return undefined;
+	return expected.leaseExpiresAt === null ? isNull(channels.leaseExpiresAt) : eq(channels.leaseExpiresAt, expected.leaseExpiresAt);
+}
+
+async function writeHumanRecoveryCursor(channelId: string, previous: string | null, next: HumanRecoveryCursor, expected: ChannelIdentity) {
+	const serialized = JSON.stringify(next);
+	const changed = await db.transaction(async transaction => {
+		await assertChannelActive(channelId, transaction, expected);
+		return await transaction.update(channels).set({ humanRecoveryCursor: serialized })
+			.where(and(eq(channels.id, channelId), previous === null ? isNull(channels.humanRecoveryCursor) : eq(channels.humanRecoveryCursor, previous), humanRecoveryLease(expected)))
+			.returning({ id: channels.id });
+	});
+	if (!changed.length) {
+		console.warn('reconcile: channel %s recovery ownership changed — stopping this page', channelId);
+		return null;
+	}
+	return serialized;
+}
+
+async function startHumanRecoveryCycle(channelId: string, raw: string | null, expected: ChannelIdentity) {
+	const [last] = await db.select({ id: sql<string>`${comments.id}`.mapWith(comments.id) }).from(sql`${comments} indexed by comments_human_recovery_eligible_idx`).where(eligibleHumanClaims(channelId))
+		.orderBy(desc(comments.id)).limit(1).all();
+	if (!last) return null;
+	const cursor: HumanRecoveryCursor = { cycleId: randomUUID(), afterId: null, endId: last.id, done: false };
+	const saved = await writeHumanRecoveryCursor(channelId, raw, cursor, expected);
+	return saved === null ? null : { cursor, raw: saved };
+}
+
+/** One finite, persisted page per tick; invalid intents cannot pin later work. */
 async function reconcileRestoring(channelId: string, accessToken: string, deadline?: number, expected?: ChannelIdentity) {
-	const stuck = await db
-		.select({ id: comments.id, restoreIntentId: comments.restoreIntentId })
-		.from(comments)
-		.where(and(eq(comments.channelId, channelId), eq(comments.status, 'restoring')))
-		.all();
-	for (const row of stuck) {
-		const intent = await claimedHumanIntent(channelId, row.id, row.restoreIntentId);
-		if (!intent) {
-			console.warn('reconcile: comment %s has no valid bound human intent — leaving restoring unchanged; owner retry required', row.id);
-			continue;
-		}
-		try {
-			assertBeforeDeadline(deadline);
-			const outcome = await applyHumanIntent(row.id, intent.action, accessToken, deadline);
-			// A missing comment is deleted, regardless of the requested action.
-			await finalizeHumanIntent(channelId, row.id, outcome === 'missing' ? 'delete' : intent.action, intent.id, expected);
-		} catch (error) {
-			if (error instanceof DeadlineExceededError) throw error;
-			console.error(
-				`reconcile: could not finish '${intent.action}' for comment ${row.id}: ${error instanceof Error ? error.message : String(error)} — retrying next run`
-			);
-		}
+	assertBeforeDeadline(deadline);
+	const channel = await db.select().from(channels).where(eq(channels.id, channelId)).get();
+	if (!channel) throw new ChannelDeactivatedError(`channel deactivated mid-run: ${channelId}`);
+	const identity = expected ?? channel;
+	let raw = channel.humanRecoveryCursor;
+	let cursor = readHumanRecoveryCursor(raw);
+	if (!cursor || cursor.done) {
+		const started = await startHumanRecoveryCycle(channelId, raw, identity);
+		if (!started) return;
+		({ cursor, raw } = started);
+	}
+	const page = await db.select({ id: sql<string>`${comments.id}`.mapWith(comments.id), restoreIntentId: sql<number | null>`${comments.restoreIntentId}`.mapWith(comments.restoreIntentId) }).from(sql`${comments} indexed by comments_human_recovery_eligible_idx`)
+		.where(and(eligibleHumanClaims(channelId), cursor.afterId === null ? undefined : gt(comments.id, cursor.afterId), lte(comments.id, cursor.endId)))
+		.orderBy(asc(comments.id)).limit(HUMAN_RECOVERY_PAGE_SIZE).all();
+	let progress = cursor;
+	// Sequential settlement is necessary: a provider write must finish before
+	// the next one begins. A failed cursor CAS stops the chain immediately.
+	await page.reduce((previous, row) => previous.then(async () => {
+		if (raw === null) return;
+		assertBeforeDeadline(deadline);
+		await reconcileHumanClaim(channelId, row, accessToken, deadline, identity);
+		progress = { ...progress, afterId: row.id };
+		raw = await writeHumanRecoveryCursor(channelId, raw, progress, identity);
+	}), Promise.resolve());
+	if (raw !== null && (page.length < HUMAN_RECOVERY_PAGE_SIZE || progress.afterId === progress.endId)) {
+		// Retain the completed nonce. Replacing it for a new cycle prevents an
+		// old worker matching the same cursor/end pair after traversal wraps.
+		await writeHumanRecoveryCursor(channelId, raw, { ...progress, done: true }, identity);
 	}
 }
 

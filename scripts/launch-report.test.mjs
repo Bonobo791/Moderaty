@@ -305,8 +305,8 @@ async function seedPopulated() {
 	const client = createClient({ url: POPULATED_URL });
 	try {
 		await client.executeMultiple(SEED_SQL);
-		// Exact-boundary rows are parameterized: a '${...}' literal inside the
-		// SQL template trips static analysis, and the bound value lands
+		// Exact-boundary rows are parameterized: an interpolation literal inside
+		// the SQL template trips static analysis, and the bound value lands
 		// verbatim either way.
 		await client.execute({ sql: "INSERT INTO users (id, google_sub, email, display_name, created_at) VALUES ('u-boundary-in', 'gsub-boundary-in', 'b-in@example.com', 'B In', ?)", args: [SINCE] });
 		await client.execute({ sql: "INSERT INTO users (id, google_sub, email, display_name, created_at) VALUES ('u-boundary-out', 'gsub-boundary-out', 'b-out@example.com', 'B Out', ?)", args: [UNTIL] });

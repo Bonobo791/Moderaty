@@ -219,10 +219,6 @@ async function reportBilling(client, inWindow) {
 	};
 }
 
-// Grouped maps may legitimately miss a state — absent means zero rows, not an
-// error to surface.
-const at = (map, key) => map[key] ?? 0;
-
 // Persisted queue/outbox backlogs an operator needs to see draining.
 async function attentionQueues(client) {
 	return {
@@ -238,26 +234,29 @@ async function attentionQueues(client) {
 }
 
 // Attention rolls up signals already grouped by other sections plus direct
-// counts, so it takes their results instead of re-querying.
+// counts, so it takes their results instead of re-querying. An absent key in
+// a grouped map means zero rows in that state — legitimate, not an error.
 async function reportAttention(client, sections) {
-	const { users, organizations, channels, moderation, lifecycle, billing } = sections;
-	const welcome = lifecycle.welcomeEmailsByState;
+	const welcome = sections.lifecycle.welcomeEmailsByState;
 	return {
 		...(await attentionQueues(client)),
-		channelsLatestRunFailed: channels.latestRunFailed,
-		usersInZeroCreditCountdown: users.inZeroCreditCountdown,
-		orgsAutoTopupPausedOrDisabled: organizations.autoTopupPausedOrDisabled,
+		channelsLatestRunFailed: sections.channels.latestRunFailed,
+		usersInZeroCreditCountdown: sections.users.inZeroCreditCountdown,
+		orgsAutoTopupPausedOrDisabled: sections.organizations.autoTopupPausedOrDisabled,
 		manualRefundRequiredCheckouts:
-			at(billing.stripeCheckoutAttemptsByStatus, 'manual_refund_required') +
-			at(billing.mercadoPagoCheckoutAttemptsByStatus, 'manual_refund_required'),
-		restoringComments: at(moderation.commentsByStatus, 'restoring'),
+			(sections.billing.stripeCheckoutAttemptsByStatus.manual_refund_required ?? 0) +
+			(sections.billing.mercadoPagoCheckoutAttemptsByStatus.manual_refund_required ?? 0),
+		restoringComments: sections.moderation.commentsByStatus.restoring ?? 0,
 		queuedModerationActions:
-			at(moderation.actionsByState, 'pending') + at(moderation.actionsByState, 'dispatched') + at(moderation.actionsByState, 'cancelling'),
-		failedFeedbackDigests: at(moderation.feedbackDigestsByStatus, 'failed'),
-		failedFeedbackDryRuns: at(moderation.feedbackDigestsByStatus, 'dry-run-failed'),
-		pendingFeedbackDryRuns: at(moderation.feedbackDigestsByStatus, 'dry-run-pending'),
-		failedWelcomeEmails: at(welcome, 'permanent_failure') + at(welcome, 'ambiguous'),
-		backloggedWelcomeEmails: at(welcome, 'queued') + at(welcome, 'claimed') + at(welcome, 'in_flight') + at(welcome, 'retryable_failure')
+			(sections.moderation.actionsByState.pending ?? 0) +
+			(sections.moderation.actionsByState.dispatched ?? 0) +
+			(sections.moderation.actionsByState.cancelling ?? 0),
+		failedFeedbackDigests: sections.moderation.feedbackDigestsByStatus.failed ?? 0,
+		failedFeedbackDryRuns: sections.moderation.feedbackDigestsByStatus['dry-run-failed'] ?? 0,
+		pendingFeedbackDryRuns: sections.moderation.feedbackDigestsByStatus['dry-run-pending'] ?? 0,
+		failedWelcomeEmails: (welcome.permanent_failure ?? 0) + (welcome.ambiguous ?? 0),
+		backloggedWelcomeEmails:
+			(welcome.queued ?? 0) + (welcome.claimed ?? 0) + (welcome.in_flight ?? 0) + (welcome.retryable_failure ?? 0)
 	};
 }
 

@@ -131,15 +131,17 @@ async function scalar(client, name, sql, args = []) {
 	}
 }
 
+// Group keys are enum columns: anything that is not a string means the driver
+// returned a shape the report does not model — louder than coercion.
+function requireKey(name, k) {
+	if (typeof k !== 'string') throw new Error('malformed aggregate (key is missing or not a string)');
+	return k;
+}
+
 async function grouped(client, name, sql, args = []) {
 	try {
 		const result = await client.execute({ sql, args });
-		return Object.fromEntries(
-			result.rows.map((row) => {
-				if (row.k === null || row.k === undefined) throw new Error('malformed aggregate (key is missing)');
-				return [String(row.k), requireFinite(name, 'n', row.n)];
-			})
-		);
+		return Object.fromEntries(result.rows.map((row) => [requireKey(name, row.k), requireFinite(name, 'n', row.n)]));
 	} catch (error) {
 		throw new Error(`launch-report: query ${name} failed — ${error instanceof Error ? error.message : String(error)}`);
 	}
@@ -151,10 +153,10 @@ async function ledgerGrouped(client, name, sql) {
 	try {
 		const result = await client.execute(sql);
 		return Object.fromEntries(
-			result.rows.map((row) => {
-				if (row.k === null || row.k === undefined) throw new Error('malformed aggregate (key is missing)');
-				return [String(row.k), { rows: requireFinite(name, 'n', row.n), netCredits: requireFinite(name, 's', row.s) }];
-			})
+			result.rows.map((row) => [
+				requireKey(name, row.k),
+				{ rows: requireFinite(name, 'n', row.n), netCredits: requireFinite(name, 's', row.s) }
+			])
 		);
 	} catch (error) {
 		throw new Error(`launch-report: query ${name} failed — ${error instanceof Error ? error.message : String(error)}`);
@@ -295,29 +297,44 @@ async function attentionQueues(client) {
 	};
 }
 
-// Attention rolls up signals already grouped by other sections plus direct
-// counts, so it takes their results instead of re-querying. An absent key in
-// a grouped map means zero rows in that state — legitimate, not an error.
-async function reportAttention(client, sections) {
-	const welcome = sections.lifecycle.welcomeEmailsByState;
+// Lifecycle + moderation rollups from the grouped maps — an absent key means
+// zero rows in that state, legitimate rather than an error.
+function digestAttention({ welcome, digests }) {
 	return {
-		...(await attentionQueues(client)),
-		channelsLatestRunFailed: sections.channels.latestRunFailed,
-		usersInZeroCreditCountdown: sections.users.inZeroCreditCountdown,
-		manualRefundRequiredCheckouts:
-			(sections.billing.stripeCheckoutAttemptsByStatus.manual_refund_required ?? 0) +
-			(sections.billing.mercadoPagoCheckoutAttemptsByStatus.manual_refund_required ?? 0),
-		restoringComments: sections.moderation.commentsByStatus.restoring ?? 0,
-		queuedModerationActions:
-			(sections.moderation.actionsByState.pending ?? 0) +
-			(sections.moderation.actionsByState.dispatched ?? 0) +
-			(sections.moderation.actionsByState.cancelling ?? 0),
-		failedFeedbackDigests: sections.moderation.feedbackDigestsByStatus.failed ?? 0,
-		failedFeedbackDryRuns: sections.moderation.feedbackDigestsByStatus['dry-run-failed'] ?? 0,
-		pendingFeedbackDryRuns: sections.moderation.feedbackDigestsByStatus['dry-run-pending'] ?? 0,
+		failedFeedbackDigests: digests.failed ?? 0,
+		failedFeedbackDryRuns: digests['dry-run-failed'] ?? 0,
+		pendingFeedbackDryRuns: digests['dry-run-pending'] ?? 0,
 		failedWelcomeEmails: (welcome.permanent_failure ?? 0) + (welcome.ambiguous ?? 0),
 		backloggedWelcomeEmails:
 			(welcome.queued ?? 0) + (welcome.claimed ?? 0) + (welcome.in_flight ?? 0) + (welcome.retryable_failure ?? 0)
+	};
+}
+
+function sectionAttention({ channels, users, billing, moderation }) {
+	return {
+		channelsLatestRunFailed: channels.latestRunFailed,
+		usersInZeroCreditCountdown: users.inZeroCreditCountdown,
+		manualRefundRequiredCheckouts:
+			(billing.stripeCheckoutAttemptsByStatus.manual_refund_required ?? 0) +
+			(billing.mercadoPagoCheckoutAttemptsByStatus.manual_refund_required ?? 0),
+		restoringComments: moderation.commentsByStatus.restoring ?? 0,
+		queuedModerationActions:
+			(moderation.actionsByState.pending ?? 0) +
+			(moderation.actionsByState.dispatched ?? 0) +
+			(moderation.actionsByState.cancelling ?? 0)
+	};
+}
+
+// Attention rolls up signals already grouped by other sections plus direct
+// counts, so it takes their results instead of re-querying.
+async function reportAttention(client, sections) {
+	return {
+		...(await attentionQueues(client)),
+		...sectionAttention(sections),
+		...digestAttention({
+			welcome: sections.lifecycle.welcomeEmailsByState,
+			digests: sections.moderation.feedbackDigestsByStatus
+		})
 	};
 }
 

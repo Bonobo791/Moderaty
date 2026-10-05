@@ -17,6 +17,7 @@ import { createClient } from '@libsql/client';
 import { drizzle } from 'drizzle-orm/libsql';
 import { migrate } from 'drizzle-orm/libsql/migrator';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { buildReport, REQUIRED_TABLES } from './launch-report.mjs';
 
 const execFileAsync = promisify(execFile);
 const SCRIPT = fileURLToPath(new URL('./launch-report.mjs', import.meta.url));
@@ -142,7 +143,10 @@ INSERT INTO channels (id, user_id, org_id, title, refresh_token_enc, active, las
 	('UC-failed', 'u-in-window', 'org-personal-1', 'Chan Two', 'enc-2', 1, 'failed', NULL, 'token', '2026-10-05T07:00:00.000Z', '2026-10-04T14:00:00.000Z', '2026-10-05T01:00:00.000Z', '2026-10-04T13:00:00.000Z'),
 	('UC-washealthy', 'u-old', 'org-sentinel', 'Chan Three', 'enc-3', 1, 'failed', '2026-10-04T20:00:00.000Z', 'quota', '2026-10-05T08:00:00.000Z', NULL, NULL, '2026-10-05T00:00:00.000Z'),
 	('UC-idle', 'u-old', 'org-personal-2', 'Chan Four', 'enc-4', 0, NULL, NULL, NULL, NULL, NULL, NULL, '2026-09-02T00:00:00.000Z'),
-	('UC-orphan', NULL, NULL, 'Orphan Chan', 'enc-5', 0, NULL, NULL, NULL, NULL, NULL, NULL, '2026-10-05T09:00:00.000Z');
+	('UC-orphan', NULL, NULL, 'Orphan Chan', 'enc-5', 0, NULL, NULL, NULL, NULL, NULL, NULL, '2026-10-05T09:00:00.000Z'),
+	-- Team channel detached by an account deletion: org kept, user cleared —
+	-- it needs a reconnect, not a first-login claim.
+	('UC-detached', NULL, 'org-sentinel', 'Detached Chan', 'enc-6', 0, NULL, NULL, NULL, NULL, NULL, NULL, '2026-09-15T00:00:00.000Z');
 INSERT INTO comments (id, channel_id, text, published_at, status, decided_by) VALUES
 	('c-1', 'UCsentinelchan', 'raw sentinel comment text', '2026-10-04T12:00:00.000Z', 'approved', 'ai'),
 	('c-2', 'UCsentinelchan', 'held text', '2026-10-04T12:30:00.000Z', 'held', 'rule'),
@@ -158,15 +162,26 @@ INSERT INTO audit_log (channel_id, comment_id, action, reason, actor) VALUES
 	('UCsentinelchan', 'dr-1', 'dry-run', 'preview', 'system'),
 	('UC-failed', 'c-4', 'delete', 'ai', 'system'),
 	('UCsentinelchan', 'c-3', 'restore', 'user', 'user');
-INSERT INTO stripe_checkout_attempts (attempt_id, org_id, product, idempotency_key, status, created_at) VALUES
-	('sa-1', 'org-personal-1', 'credits_100', 'idem-sentinel', 'fulfilled', '2026-10-04T15:00:00.000Z'),
-	('sa-2', 'org-personal-1', 'credits_500', 'idem-2', 'open', '2026-10-05T00:00:00.000Z'),
-	('sa-3', 'org-personal-2', 'credits_100', 'idem-3', 'expired', '2026-10-04T16:00:00.000Z'),
-	('sa-4', 'org-sentinel', 'credits_100', 'idem-4', 'manual_refund_required', '2026-10-05T01:00:00.000Z'),
-	('sa-5', 'org-personal-1', 'credits_100', 'idem-5', 'pending', '2026-09-20T00:00:00.000Z');
-INSERT INTO mercado_pago_checkout_attempts (attempt_id, org_id, bundle_id, idempotency_key, status, amount_cents, created_at) VALUES
-	('mp-1', 'org-sentinel', 'credits_100', 'mpidem-1', 'fulfilled', 4900, '2026-10-05T02:00:00.000Z'),
-	('mp-2', 'org-personal-1', 'credits_100', 'mpidem-2', 'manual_refund_required', 4900, '2026-10-05T03:00:00.000Z');
+INSERT INTO stripe_checkout_attempts (attempt_id, org_id, product, idempotency_key, status, created_at, updated_at) VALUES
+	('sa-1', 'org-personal-1', 'credits_100', 'idem-sentinel', 'fulfilled', '2026-10-04T15:00:00.000Z', '2026-10-04T15:05:00.000Z'),
+	('sa-2', 'org-personal-1', 'credits_500', 'idem-2', 'open', '2026-10-05T00:00:00.000Z', '2026-10-05T00:00:00.000Z'),
+	('sa-3', 'org-personal-2', 'credits_100', 'idem-3', 'expired', '2026-10-04T16:00:00.000Z', '2026-10-04T16:00:00.000Z'),
+	('sa-4', 'org-sentinel', 'credits_100', 'idem-4', 'manual_refund_required', '2026-10-05T01:00:00.000Z', '2026-10-05T01:00:00.000Z'),
+	('sa-5', 'org-personal-1', 'credits_100', 'idem-5', 'pending', '2026-09-20T00:00:00.000Z', '2026-09-20T00:00:00.000Z'),
+	-- Opened before the window, fulfilled inside it: fulfillment time counts.
+	('sa-6', 'org-personal-1', 'credits_100', 'idem-6', 'fulfilled', '2026-10-03T20:00:00.000Z', '2026-10-05T05:00:00.000Z'),
+	-- Opened inside the window, fulfilled a week later: outside the window.
+	('sa-7', 'org-personal-2', 'credits_100', 'idem-7', 'fulfilled', '2026-10-05T06:00:00.000Z', '2026-10-07T00:00:00.000Z');
+INSERT INTO mercado_pago_checkout_attempts (attempt_id, org_id, bundle_id, idempotency_key, status, amount_cents, paid_at, created_at) VALUES
+	('mp-1', 'org-sentinel', 'credits_100', 'mpidem-1', 'fulfilled', 4900, '2026-10-05T02:00:00.000Z', '2026-10-05T02:00:00.000Z'),
+	-- Approved but refused before granting (unmetered org): paid_at stays NULL,
+	-- so it is a manual-refund alert, not a paid grant.
+	('mp-2', 'org-personal-1', 'credits_100', 'mpidem-2', 'manual_refund_required', 4900, NULL, '2026-10-05T03:00:00.000Z'),
+	-- Granted in-window but later refunded: still a paid grant in the period.
+	('mp-3', 'org-sentinel', 'credits_100', 'mpidem-3', 'refunded', 4900, '2026-10-04T10:00:00.000Z', '2026-10-03T23:00:00.000Z'),
+	-- Opened in-window, paid the week after: payment time falls outside.
+	('mp-4', 'org-personal-2', 'credits_100', 'mpidem-4', 'fulfilled', 4900, '2026-10-07T01:00:00.000Z', '2026-10-05T01:00:00.000Z'),
+	('mp-5', 'org-personal-1', 'credits_100', 'mpidem-5', 'open', 4900, NULL, '2026-10-05T04:00:00.000Z');
 INSERT INTO credit_transactions (org_id, delta, reason, ref_type, ref_id, payment_intent_id, charge_id, balance_after, created_at) VALUES
 	('org-personal-1', 100, 'purchase', 'checkout_session', 'cs_sentinel_session', 'pi_sentinel', 'ch_sentinel', 100, '2026-10-04T15:00:00.000Z'),
 	('org-personal-1', -10, 'consume', 'comment', 'c-1', NULL, NULL, 90, '2026-10-05T00:00:00.000Z'),
@@ -268,10 +283,21 @@ describe('launch-report CLI contract', () => {
 	});
 
 	it('rejects unknown arguments and malformed dates with usage errors', async () => {
-		for (const args of [['--bogus'], ['--since', 'yesterday'], ['--until', '2026-13-40']]) {
+		for (const args of [
+			['--bogus'],
+			['--since', 'yesterday'],
+			['--until', '2026-13-40'],
+			// Date.parse silently normalizes impossible dates and accepts
+			// non-ISO input — the operator must get an error, not a quiet
+			// report over the wrong window.
+			['--since', '2026-02-30'],
+			['--until', 'October 4, 2026'],
+			['--since', '2026-10-04T15:00'], // datetime without a zone is ambiguous
+			['--since', SINCE, '--since', SINCE] // duplicate flag
+		]) {
 			const { code, stderr, report } = await runReport(POPULATED_URL, args);
 			expect(code, `args ${args} must exit 2`).toBe(2);
-			expect(stderr).toMatch(/usage|invalid/i);
+			expect(stderr).toMatch(/usage|invalid|ISO|duplicate/i);
 			expect(report).toBeNull();
 		}
 	});
@@ -341,12 +367,15 @@ describe('launch-report content', () => {
 		expect(report.organizations.shared).toBe(1);
 		// org-sentinel has two members and one channel — neither join may
 		// multiply it into two orgs or two users.
-		expect(report.channels.total).toBe(5);
+		expect(report.channels.total).toBe(6);
 		expect(report.channels.orgsWithChannels).toBe(3);
 		expect(report.channels.usersWhoConnected).toBe(2);
+		// Only UC-orphan is claimable; UC-detached kept its org and needs a
+		// reconnect — it is not a pre-account orphan.
 		expect(report.channels.orphanedAwaitingClaim).toBe(1);
+		expect(report.channels.detachedAwaitingReconnect).toBe(1);
 		expect(report.channels.active).toBe(3);
-		expect(report.channels.inactive).toBe(2);
+		expect(report.channels.inactive).toBe(3);
 		expect(report.channels.createdInWindow).toBe(4);
 	});
 
@@ -360,7 +389,7 @@ describe('launch-report content', () => {
 		expect(report.channels.everSuccessfulLiveRun).toBe(2);
 		expect(report.channels.latestRunSucceeded).toBe(1);
 		expect(report.channels.latestRunFailed).toBe(2);
-		expect(report.channels.neverRun).toBe(2);
+		expect(report.channels.neverRun).toBe(3);
 		expect(report.channels.lastRunFailureByCategory).toEqual({ token: 1, quota: 1 });
 	});
 
@@ -375,10 +404,17 @@ describe('launch-report content', () => {
 		expect(report.lifecycle.contactSubmissionsByStatus).toEqual({ pending: 1, verified: 1 });
 		// A checkout row is not a grant: statuses are reported verbatim, and
 		// only 'fulfilled' counts toward the in-window completed checkouts.
-		expect(report.billing.stripeCheckoutAttemptsByStatus).toEqual({ fulfilled: 1, open: 1, expired: 1, manual_refund_required: 1, pending: 1 });
-		expect(report.billing.mercadoPagoCheckoutAttemptsByStatus).toEqual({ fulfilled: 1, manual_refund_required: 1 });
-		expect(report.billing.stripeCheckoutsFulfilledInWindow).toBe(1);
-		expect(report.billing.mercadoPagoCheckoutsFulfilledInWindow).toBe(1);
+		expect(report.billing.stripeCheckoutAttemptsByStatus).toEqual({ fulfilled: 3, open: 1, expired: 1, manual_refund_required: 1, pending: 1 });
+		expect(report.billing.mercadoPagoCheckoutAttemptsByStatus).toEqual({ fulfilled: 2, manual_refund_required: 1, refunded: 1, open: 1 });
+		// Stripe keys on updated_at (stamped at fulfillment): sa-6 paid inside
+		// the window though created before it; sa-7 paid after the window
+		// though created inside it.
+		expect(report.billing.stripeCheckoutsFulfilledInWindow).toBe(2);
+		// MP keys on paid_at (set only when a grant actually completes): the
+		// refunded row paid inside the window still counts, the in-window
+		// checkout paid a week later does not, and manual_refund_required —
+		// approved but never granted — is excluded via its NULL paid_at.
+		expect(report.billing.mercadoPagoCheckoutsFulfilledInWindow).toBe(2);
 		expect(report.billing.creditLedgerByReason).toEqual({
 			purchase: { rows: 2, netCredits: 200 },
 			consume: { rows: 2, netCredits: -40 },
@@ -471,5 +507,57 @@ describe('launch-report content', () => {
 		const { observedAt: a, ...restA } = first.report;
 		const { observedAt: b, ...restB } = second.report;
 		expect(restA).toEqual(restB);
+	});
+
+	it('runs every read inside one read transaction so the report is a single snapshot', async () => {
+		let committed = false;
+		let rolledBack = false;
+		const executions = [];
+		const tx = {
+			execute: async (stmt) => {
+				const sql = typeof stmt === 'string' ? stmt : stmt.sql;
+				executions.push(sql);
+				if (sql.includes('sqlite_master')) return { rows: REQUIRED_TABLES.map((name) => ({ name })) };
+				return { rows: [{ n: 0, k: 'none', s: 0 }] };
+			},
+			commit: async () => {
+				committed = true;
+			},
+			rollback: async () => {
+				rolledBack = true;
+			}
+		};
+		const client = {
+			// Any read that escapes the transaction fails the test.
+			execute: async () => {
+				throw new Error('report read escaped the snapshot transaction');
+			},
+			transaction: async (mode) => {
+				expect(mode).toBe('read');
+				return tx;
+			}
+		};
+		const report = await buildReport(client, { since: SINCE, until: UNTIL });
+		expect(report.report).toBe('launch-activity-snapshot');
+		expect(committed).toBe(true);
+		expect(rolledBack).toBe(false);
+		expect(executions.length).toBeGreaterThan(10);
+	});
+
+	it('rolls the snapshot transaction back when a read fails', async () => {
+		let rolledBack = false;
+		const client = {
+			transaction: async () => ({
+				execute: async () => {
+					throw new Error('db gone');
+				},
+				commit: async () => {},
+				rollback: async () => {
+					rolledBack = true;
+				}
+			})
+		};
+		await expect(buildReport(client, { since: SINCE, until: UNTIL })).rejects.toThrow('db gone');
+		expect(rolledBack).toBe(true);
 	});
 });

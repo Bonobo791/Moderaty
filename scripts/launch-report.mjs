@@ -116,9 +116,7 @@ async function scalar(client, name, sql, args = []) {
 async function grouped(client, name, sql, args = []) {
 	try {
 		const result = await client.execute({ sql, args });
-		const out = {};
-		for (const row of result.rows) out[String(row.k)] = Number(row.n);
-		return out;
+		return Object.fromEntries(result.rows.map((row) => [String(row.k), Number(row.n)]));
 	} catch (error) {
 		throw new Error(`launch-report: query ${name} failed — ${error instanceof Error ? error.message : String(error)}`);
 	}
@@ -129,9 +127,7 @@ async function grouped(client, name, sql, args = []) {
 async function ledgerGrouped(client, name, sql) {
 	try {
 		const result = await client.execute(sql);
-		const out = {};
-		for (const row of result.rows) out[String(row.k)] = { rows: Number(row.n), netCredits: Number(row.s) };
-		return out;
+		return Object.fromEntries(result.rows.map((row) => [String(row.k), { rows: Number(row.n), netCredits: Number(row.s) }]));
 	} catch (error) {
 		throw new Error(`launch-report: query ${name} failed — ${error instanceof Error ? error.message : String(error)}`);
 	}
@@ -223,19 +219,13 @@ async function reportBilling(client, inWindow) {
 	};
 }
 
-// Attention rolls up signals already grouped by other sections plus direct
-// counts, so it takes their results instead of re-querying.
-async function reportAttention(client, { users, organizations, channels, moderation, lifecycle, stripeAttempts, mercadoPagoAttempts }) {
-	const commentsByStatus = moderation.commentsByStatus;
-	const actionsByState = moderation.actionsByState;
-	const digestsByStatus = moderation.feedbackDigestsByStatus;
-	const welcomeByState = lifecycle.welcomeEmailsByState;
+// Grouped maps may legitimately miss a state — absent means zero rows, not an
+// error to surface.
+const at = (map, key) => map[key] ?? 0;
+
+// Persisted queue/outbox backlogs an operator needs to see draining.
+async function attentionQueues(client) {
 	return {
-		channelsLatestRunFailed: channels.latestRunFailed,
-		usersInZeroCreditCountdown: users.inZeroCreditCountdown,
-		orgsAutoTopupPausedOrDisabled: organizations.autoTopupPausedOrDisabled,
-		manualRefundRequiredCheckouts:
-			(stripeAttempts.manual_refund_required ?? 0) + (mercadoPagoAttempts.manual_refund_required ?? 0),
 		pendingReversals: await scalar(client, 'attention.pendingReversals', 'SELECT count(*) AS n FROM stripe_pending_reversals'),
 		pendingDisputeReversals: await scalar(client, 'attention.pendingDisputeReversals', "SELECT count(*) AS n FROM stripe_dispute_reversals WHERE status = 'pending'"),
 		unresolvedAutoTopupRecoveries: await scalar(client, 'attention.unresolvedAutoTopupRecoveries', 'SELECT count(*) AS n FROM stripe_auto_topup_recoveries WHERE resolved_at IS NULL'),
@@ -243,16 +233,58 @@ async function reportAttention(client, { users, organizations, channels, moderat
 		pendingDeletionOutbox: await scalar(client, 'attention.pendingDeletionOutbox', 'SELECT count(*) AS n FROM stripe_deletion_outbox'),
 		pendingGoogleRevocationOutbox: await scalar(client, 'attention.pendingGoogleRevocationOutbox', 'SELECT count(*) AS n FROM google_revocation_outbox'),
 		pendingStripeScrubOutbox: await scalar(client, 'attention.pendingStripeScrubOutbox', 'SELECT count(*) AS n FROM stripe_scrub_outbox'),
-		restoringComments: commentsByStatus.restoring ?? 0,
-		queuedModerationActions: (actionsByState.pending ?? 0) + (actionsByState.dispatched ?? 0) + (actionsByState.cancelling ?? 0),
-		failedFeedbackDigests: digestsByStatus.failed ?? 0,
-		failedFeedbackDryRuns: digestsByStatus['dry-run-failed'] ?? 0,
-		pendingFeedbackDryRuns: digestsByStatus['dry-run-pending'] ?? 0,
-		failedWelcomeEmails: (welcomeByState.permanent_failure ?? 0) + (welcomeByState.ambiguous ?? 0),
-		backloggedWelcomeEmails:
-			(welcomeByState.queued ?? 0) + (welcomeByState.claimed ?? 0) + (welcomeByState.in_flight ?? 0) + (welcomeByState.retryable_failure ?? 0),
 		pendingContactNotifications: await scalar(client, 'attention.pendingContactNotifications', 'SELECT count(*) AS n FROM contact_submissions WHERE notification_due_at IS NOT NULL AND notification_sent_at IS NULL')
 	};
+}
+
+// Attention rolls up signals already grouped by other sections plus direct
+// counts, so it takes their results instead of re-querying.
+async function reportAttention(client, sections) {
+	const { users, organizations, channels, moderation, lifecycle, billing } = sections;
+	const welcome = lifecycle.welcomeEmailsByState;
+	return {
+		...(await attentionQueues(client)),
+		channelsLatestRunFailed: channels.latestRunFailed,
+		usersInZeroCreditCountdown: users.inZeroCreditCountdown,
+		orgsAutoTopupPausedOrDisabled: organizations.autoTopupPausedOrDisabled,
+		manualRefundRequiredCheckouts:
+			at(billing.stripeCheckoutAttemptsByStatus, 'manual_refund_required') +
+			at(billing.mercadoPagoCheckoutAttemptsByStatus, 'manual_refund_required'),
+		restoringComments: at(moderation.commentsByStatus, 'restoring'),
+		queuedModerationActions:
+			at(moderation.actionsByState, 'pending') + at(moderation.actionsByState, 'dispatched') + at(moderation.actionsByState, 'cancelling'),
+		failedFeedbackDigests: at(moderation.feedbackDigestsByStatus, 'failed'),
+		failedFeedbackDryRuns: at(moderation.feedbackDigestsByStatus, 'dry-run-failed'),
+		pendingFeedbackDryRuns: at(moderation.feedbackDigestsByStatus, 'dry-run-pending'),
+		failedWelcomeEmails: at(welcome, 'permanent_failure') + at(welcome, 'ambiguous'),
+		backloggedWelcomeEmails: at(welcome, 'queued') + at(welcome, 'claimed') + at(welcome, 'in_flight') + at(welcome, 'retryable_failure')
+	};
+}
+
+// The schema gate lives apart from the report body so a stale database fails
+// before any section query runs.
+async function requireSchema(tx) {
+	const tables = new Set(
+		(await tx.execute("SELECT name FROM sqlite_master WHERE type = 'table'")).rows.map((r) => String(r.name))
+	);
+	const missing = REQUIRED_TABLES.filter((t) => !tables.has(t));
+	if (missing.length) {
+		throw new Error(`launch-report: database is missing required table(s): ${missing.join(', ')} — is this database fully migrated?`);
+	}
+}
+
+async function readSections(tx, { since, until }) {
+	const inWindow = [since, until];
+	const sections = {
+		users: await reportUsers(tx, inWindow),
+		organizations: await reportOrganizations(tx),
+		channels: await reportChannels(tx, inWindow),
+		moderation: await reportModeration(tx),
+		lifecycle: await reportLifecycle(tx),
+		billing: await reportBilling(tx, inWindow)
+	};
+	sections.attention = await reportAttention(tx, sections);
+	return sections;
 }
 
 export async function buildReport(client, { since, until }) {
@@ -260,43 +292,14 @@ export async function buildReport(client, { since, until }) {
 	// otherwise a signup or webhook landing mid-report would mix snapshots.
 	const tx = await client.transaction('read');
 	try {
-		const tables = new Set(
-			(await tx.execute("SELECT name FROM sqlite_master WHERE type = 'table'")).rows.map((r) => String(r.name))
-		);
-		const missing = REQUIRED_TABLES.filter((t) => !tables.has(t));
-		if (missing.length) {
-			throw new Error(`launch-report: database is missing required table(s): ${missing.join(', ')} — is this database fully migrated?`);
-		}
-
-		const inWindow = [since, until];
-		const users = await reportUsers(tx, inWindow);
-		const organizations = await reportOrganizations(tx);
-		const channels = await reportChannels(tx, inWindow);
-		const moderation = await reportModeration(tx);
-		const lifecycle = await reportLifecycle(tx);
-		const billing = await reportBilling(tx, inWindow);
-		const attention = await reportAttention(tx, {
-			users,
-			organizations,
-			channels,
-			moderation,
-			lifecycle,
-			stripeAttempts: billing.stripeCheckoutAttemptsByStatus,
-			mercadoPagoAttempts: billing.mercadoPagoCheckoutAttemptsByStatus
-		});
-
+		await requireSchema(tx);
+		const sections = await readSections(tx, { since, until });
 		await tx.commit();
 		return {
 			report: 'launch-activity-snapshot',
 			observedAt: new Date().toISOString(),
 			window: { since, until },
-			users,
-			organizations,
-			channels,
-			moderation,
-			lifecycle,
-			billing,
-			attention
+			...sections
 		};
 	} catch (error) {
 		await tx.rollback().catch(() => {});

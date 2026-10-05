@@ -518,7 +518,7 @@ describe('launch-report content', () => {
 			const names = (await client.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")).rows.map((r) => r.name);
 			const tables = {};
 			for (const name of names) {
-				tables[name] = JSON.stringify((await client.execute(`SELECT * FROM "${name}" ORDER BY rowid`)).rows);
+				tables[name] = (await client.execute(`SELECT * FROM "${name}" ORDER BY rowid`)).rows;
 			}
 			return { tables, schemaVersion: (await client.execute('PRAGMA schema_version')).rows[0].schema_version };
 		};

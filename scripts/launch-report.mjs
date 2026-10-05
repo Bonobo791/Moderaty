@@ -124,8 +124,9 @@ function requireFinite(name, column, value) {
 async function scalar(client, name, sql, args = []) {
 	try {
 		const result = await client.execute({ sql, args });
-		if (result.rows.length === 0) throw new Error('malformed aggregate (no row)');
-		return requireFinite(name, 'n', result.rows[0].n);
+		const [row] = result.rows;
+		if (!row) throw new Error('malformed aggregate (no row)');
+		return requireFinite(name, 'n', row.n);
 	} catch (error) {
 		throw new Error(`launch-report: query ${name} failed — ${error instanceof Error ? error.message : String(error)}`);
 	}
@@ -141,11 +142,11 @@ function requireKey(name, k) {
 async function grouped(client, name, sql, args = []) {
 	try {
 		const result = await client.execute({ sql, args });
-		const out = {};
+		const out = new Map();
 		for (const row of result.rows) {
-			out[requireKey(name, row.k)] = requireFinite(name, 'n', row.n);
+			out.set(requireKey(name, row.k), requireFinite(name, 'n', row.n));
 		}
-		return out;
+		return Object.fromEntries(out);
 	} catch (error) {
 		throw new Error(`launch-report: query ${name} failed — ${error instanceof Error ? error.message : String(error)}`);
 	}
@@ -156,11 +157,11 @@ async function grouped(client, name, sql, args = []) {
 async function ledgerGrouped(client, name, sql) {
 	try {
 		const result = await client.execute(sql);
-		const out = {};
+		const out = new Map();
 		for (const row of result.rows) {
-			out[requireKey(name, row.k)] = { rows: requireFinite(name, 'n', row.n), netCredits: requireFinite(name, 's', row.s) };
+			out.set(requireKey(name, row.k), { rows: requireFinite(name, 'n', row.n), netCredits: requireFinite(name, 's', row.s) });
 		}
-		return out;
+		return Object.fromEntries(out);
 	} catch (error) {
 		throw new Error(`launch-report: query ${name} failed — ${error instanceof Error ? error.message : String(error)}`);
 	}
@@ -303,13 +304,21 @@ async function attentionQueues(client) {
 // Lifecycle + moderation rollups from the grouped maps — an absent key means
 // zero rows in that state, legitimate rather than an error.
 function digestAttention({ welcome, digests }) {
+	const { 'dry-run-failed': dryRunFailed = 0, 'dry-run-pending': dryRunPending = 0, failed: failedDigests = 0 } = digests;
+	const {
+		permanent_failure: permFailed = 0,
+		ambiguous = 0,
+		queued = 0,
+		claimed = 0,
+		in_flight: inFlight = 0,
+		retryable_failure: retryable = 0
+	} = welcome;
 	return {
-		failedFeedbackDigests: digests.failed ?? 0,
-		failedFeedbackDryRuns: digests['dry-run-failed'] ?? 0,
-		pendingFeedbackDryRuns: digests['dry-run-pending'] ?? 0,
-		failedWelcomeEmails: (welcome.permanent_failure ?? 0) + (welcome.ambiguous ?? 0),
-		backloggedWelcomeEmails:
-			(welcome.queued ?? 0) + (welcome.claimed ?? 0) + (welcome.in_flight ?? 0) + (welcome.retryable_failure ?? 0)
+		failedFeedbackDigests: failedDigests,
+		failedFeedbackDryRuns: dryRunFailed,
+		pendingFeedbackDryRuns: dryRunPending,
+		failedWelcomeEmails: permFailed + ambiguous,
+		backloggedWelcomeEmails: queued + claimed + inFlight + retryable
 	};
 }
 

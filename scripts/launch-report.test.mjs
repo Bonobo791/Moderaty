@@ -185,7 +185,7 @@ INSERT INTO channels (id, user_id, org_id, title, refresh_token_enc, active, las
 	-- it needs a reconnect, not a first-login claim.
 	('UC-detached', NULL, 'org-sentinel', 'Detached Chan', 'enc-6', 0, NULL, NULL, NULL, NULL, NULL, NULL, '2026-09-15T00:00:00.000Z'),
 	-- Cron's bookkeeping writes last_run_at on EVERY rotation — including a
-	-- DRY_RUN run, which records no verdict (runHealth='none' spreads {}).
+	-- DRY_RUN run, which records no verdict (runHealth 'none' spreads nothing).
 	-- A dry-run-only channel has run_at set but status/success NULL: it has
 	-- never completed a LIVE run and must stay in neverRun.
 	('UC-dryrun', 'u-old', 'org-personal-2', 'Dryrun Chan', 'enc-7', 1, NULL, NULL, NULL, '2026-10-05T10:00:00.000Z', NULL, NULL, '2026-10-05T09:30:00.000Z'),

@@ -84,6 +84,16 @@ function declarations(selector: string) {
 }
 
 describe('landing navigation', () => {
+	it('marks desktop and expanded mobile CTAs with distinct reviewed placements', () => {
+		const menu = menuInteraction();
+		menu.clickButton();
+		const body = menu.body();
+		for (const placement of ['nav', 'nav_mobile']) {
+			for (const event of ['connect_click', 'pricing_click', 'source_click']) {
+				expect(body).toContain(`data-moderaty-event="${event}" data-moderaty-placement="${placement}"`);
+			}
+		}
+	});
 	it('keeps explicit space between the brand, primary links, and connection action', () => {
 		expect(declarations('.nav-inner')).toMatch(/gap:\s*24px;/);
 		expect(declarations('.links')).toMatch(/gap:\s*20px;/);

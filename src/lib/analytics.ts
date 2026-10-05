@@ -1,5 +1,7 @@
 import { validateAnalyticsConfig } from './analytics-config';
 import { buildPagePayload, parseMarketingClick, type AnalyticsConfig, type MarketingEvent, type MarketingPlacement, type PagePayload } from './analytics-policy';
+import { browserRequestsPrivacy, getAnalyticsOptOut } from './analytics-preference';
+export { getAnalyticsOptOut, setAnalyticsOptOut } from './analytics-preference';
 
 export type AnalyticsClient = {
 	pageview(url: URL, signal?: AbortSignal): Promise<'sent' | 'skipped'>;
@@ -7,6 +9,14 @@ export type AnalyticsClient = {
 	stop(): void;
 };
 const failureMessage = 'Optional usage measurement is unavailable.';
+
+/** Reads only reviewed marker pairs from links, including nested/keyboard clicks. */
+export function readMarketingClick(event: MouseEvent) {
+	if (!((event.type === 'click' && event.button === 0) || (event.type === 'auxclick' && event.button === 1))) return null;
+	const target = event.target instanceof Element ? event.target : null;
+	const link = target?.closest('a[data-moderaty-event][data-moderaty-placement]');
+	return link ? parseMarketingClick(link.getAttribute('data-moderaty-event'), link.getAttribute('data-moderaty-placement')) : null;
+}
 
 /** Exact browser claim; supports aliases with adapter-node's pinned ORIGIN. */
 function configurationUrl(): string {
@@ -39,6 +49,11 @@ export function createAnalyticsClient(options: { onFailure: () => void }): Analy
 	/** Checks the current browser document without needing runtime settings. */
 	function currentPage(): PagePayload | null {
 		if (stopped) return null;
+		try {
+			if (browserRequestsPrivacy() || getAnalyticsOptOut()) { stop(); return null; }
+		} catch {
+			stop(); console.error('analytics preference failed'); options.onFailure(); return null;
+		}
 		const url = new URL(window.location.href);
 		const page = buildPagePayload(url, document.referrer, { umamiUrl: '', websiteId: '', hostname: url.hostname });
 		if (!page) stop();

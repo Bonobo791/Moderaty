@@ -19,13 +19,13 @@
 		<a href="/#top" class="wordmark">Moderaty</a>
 		<nav class="links" aria-label="Primary">
 			{#each LINKS as l}
-				<a href={l.href} class="link">{l.label}</a>
+				<a href={l.href} data-moderaty-event={l.href === '/pricing' ? 'pricing_click' : undefined} data-moderaty-placement={l.href === '/pricing' ? 'nav' : undefined} class="link">{l.label}</a>
 			{/each}
-			<a href={GITHUB_URL} target="_blank" rel="noreferrer" class="link">GitHub</a>
+			<a href={GITHUB_URL} data-moderaty-event="source_click" data-moderaty-placement="nav" target="_blank" rel="noreferrer" class="link">GitHub</a>
 			<a href={FEEDBACK_URL} target="_blank" rel="noreferrer" class="link">Feedback</a>
 		</nav>
 		<div class="nav-actions">
-			<a href={LOGIN_URL} class="btn-press cta">Connect YouTube channel</a>
+			<a href={LOGIN_URL} data-moderaty-event="connect_click" data-moderaty-placement="nav" class="btn-press cta">Connect YouTube channel</a>
 			<button
 				class="btn-press menu-btn"
 				onclick={() => (open = !open)}
@@ -39,11 +39,11 @@
 	{#if open}
 		<nav class="mobile-links" aria-label="Mobile">
 			{#each LINKS as l}
-				<a href={l.href} class="mobile-link" onclick={() => (open = false)}>{l.label}</a>
+				<a href={l.href} data-moderaty-event={l.href === '/pricing' ? 'pricing_click' : undefined} data-moderaty-placement={l.href === '/pricing' ? 'nav_mobile' : undefined} class="mobile-link" onclick={() => (open = false)}>{l.label}</a>
 			{/each}
-			<a href={GITHUB_URL} target="_blank" rel="noreferrer" class="mobile-link">GitHub</a>
+			<a href={GITHUB_URL} data-moderaty-event="source_click" data-moderaty-placement="nav_mobile" target="_blank" rel="noreferrer" class="mobile-link">GitHub</a>
 			<a href={FEEDBACK_URL} target="_blank" rel="noreferrer" class="mobile-link">Feedback</a>
-			<a href={LOGIN_URL} class="btn-press cta mobile-cta">Connect YouTube channel</a>
+			<a href={LOGIN_URL} data-moderaty-event="connect_click" data-moderaty-placement="nav_mobile" class="btn-press cta mobile-cta">Connect YouTube channel</a>
 		</nav>
 	{/if}
 </header>

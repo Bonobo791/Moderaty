@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { GITHUB_URL, POLYFORM_URL, CONTACT_URL } from '$lib/landing/links';
+	import AnalyticsPreference from '$lib/components/AnalyticsPreference.svelte';
 	import { LEGAL_DOCS } from '$lib/landing/legal';
 
 	// Illustrative "quiet night": 24 hourly bars, comments handled while the
@@ -40,15 +41,16 @@
 				to 30 days, then are erased automatically — erase them on demand at any time.
 			</p>
 			<nav class="footer-links" aria-label="Footer">
-				<a href={GITHUB_URL} target="_blank" rel="noreferrer" class="footer-link">GitHub</a>
+				<a href={GITHUB_URL} data-moderaty-event="source_click" data-moderaty-placement="footer" target="_blank" rel="noreferrer" class="footer-link">GitHub</a>
 				<a href={POLYFORM_URL} target="_blank" rel="noreferrer" class="footer-link">PolyForm Shield License</a>
-				<a href="/pricing" class="footer-link">Pricing</a>
+				<a href="/pricing" data-moderaty-event="pricing_click" data-moderaty-placement="footer" class="footer-link">Pricing</a>
 				<a href="/#faq" class="footer-link">FAQ</a>
 				{#each LEGAL_DOCS as doc (doc.slug)}
 					<a href="/{doc.slug}" class="footer-link">{doc.label}</a>
 				{/each}
-				<a href={CONTACT_URL} class="footer-link">Contact</a>
+				<a href={CONTACT_URL} data-moderaty-event="contact_click" data-moderaty-placement="footer" class="footer-link">Contact</a>
 			</nav>
+			<AnalyticsPreference />
 		</div>
 		<div class="chart-col">
 			<figure class="chart">

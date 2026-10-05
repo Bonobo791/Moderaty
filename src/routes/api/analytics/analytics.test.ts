@@ -53,17 +53,16 @@ test.each([
 	}
 });
 
-test('an unchanged fork returns disabled configuration with no caching', async () => {
+test.each([
+	{},
+	{ ANALYTICS_ENABLED: '', GTM_ID: 'invalid', GTM_ALLOWED_HOSTNAMES: '*' },
+	{ ANALYTICS_ENABLED: 'false', GTM_ID: 'invalid', GTM_ALLOWED_HOSTNAMES: '*' }
+])('default or disabled analytics ignores leftover settings with no caching: %j', async (settings) => {
+	Object.assign(runtime.env, settings);
 	const response = await request();
 	expect(response.status).toBe(200);
 	expect(await response.json()).toBeNull();
 	expect(response.headers.get('cache-control')).toBe('no-store');
-	expect(console.error).not.toHaveBeenCalled();
-});
-
-test.each(['', 'false'])('disabled analytics ignores even invalid leftover settings: %s', async (enabled) => {
-	configure({ ANALYTICS_ENABLED: enabled, GTM_ID: 'invalid', GTM_ALLOWED_HOSTNAMES: '*' });
-	expect(await (await request()).json()).toBeNull();
 	expect(console.error).not.toHaveBeenCalled();
 });
 
@@ -110,6 +109,7 @@ test('configuration is read on each request rather than captured at import or bu
 
 test.each([
 	{ ANALYTICS_ENABLED: '1' }, { ANALYTICS_ENABLED: 'TRUE' },
+	{ GTM_ID: undefined }, { GTM_ALLOWED_HOSTNAMES: undefined },
 	{ GTM_ID: '' }, { GTM_ID: 'G-TEST123' }, { GTM_ID: 'GTM-TEST123&x=1' },
 	{ GTM_ID: 'GTM-<script>' }, { GTM_ID: ' GTM-TEST123' }, { GTM_ID: 'GTM-TEST123\n' },
 	{ GTM_ALLOWED_HOSTNAMES: '' }, { GTM_ALLOWED_HOSTNAMES: ',' }, { GTM_ALLOWED_HOSTNAMES: ', , ' }, { GTM_ALLOWED_HOSTNAMES: '*' },
@@ -126,13 +126,4 @@ test.each([
 	expect(await response.json()).toEqual({ message: 'Optional usage measurement is unavailable.' });
 	expect(response.headers.get('cache-control')).toBe('no-store');
 	expect(console.error).toHaveBeenCalledWith('analytics configuration failed:', expect.any(Error));
-});
-
-test.each(['GTM_ID', 'GTM_ALLOWED_HOSTNAMES'])('enabled analytics fails closed when %s is unset', async (key) => {
-	configure();
-	delete runtime.env[key];
-	const response = await request();
-	expect(response.status).toBe(503);
-	expect(await response.json()).toEqual({ message: 'Optional usage measurement is unavailable.' });
-	expect(console.error).toHaveBeenCalled();
 });

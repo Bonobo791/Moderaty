@@ -238,20 +238,19 @@ async function reportLifecycle(client) {
 // on ref_id = stripe_session_id; Mercado Pago on 'mercadopago:<payment_id>'.
 // manual_refund_required rows (approved, never granted) have no purchase row
 // and stay excluded; refunds/disputes keep theirs and stay counted.
-const GRANT_ANCHOR = "t.org_id = a.org_id AND t.ref_type = 'checkout_session' AND t.reason = 'purchase' AND t.delta > 0";
-
 async function grantsInWindow(client, inWindow) {
+	const anchor = "t.org_id = a.org_id AND t.ref_type = 'checkout_session' AND t.reason = 'purchase' AND t.delta > 0";
 	return {
 		stripeCheckoutsFulfilledInWindow: await scalar(
 			client,
 			'billing.stripeFulfilledInWindow',
-			`SELECT count(*) AS n FROM stripe_checkout_attempts a JOIN credit_transactions t ON ${GRANT_ANCHOR} AND t.ref_id = a.stripe_session_id WHERE t.created_at >= ? AND t.created_at < ?`,
+			`SELECT count(*) AS n FROM stripe_checkout_attempts a JOIN credit_transactions t ON ${anchor} AND t.ref_id = a.stripe_session_id WHERE t.created_at >= ? AND t.created_at < ?`,
 			inWindow
 		),
 		mercadoPagoCheckoutsFulfilledInWindow: await scalar(
 			client,
 			'billing.mercadoFulfilledInWindow',
-			`SELECT count(*) AS n FROM mercado_pago_checkout_attempts a JOIN credit_transactions t ON ${GRANT_ANCHOR} AND t.ref_id = 'mercadopago:' || a.payment_id WHERE t.created_at >= ? AND t.created_at < ?`,
+			`SELECT count(*) AS n FROM mercado_pago_checkout_attempts a JOIN credit_transactions t ON ${anchor} AND t.ref_id = 'mercadopago:' || a.payment_id WHERE t.created_at >= ? AND t.created_at < ?`,
 			inWindow
 		)
 	};

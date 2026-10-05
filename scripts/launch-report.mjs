@@ -144,11 +144,7 @@ function requireKey(name, k) {
 async function grouped(client, name, sql, args = []) {
 	try {
 		const result = await client.execute({ sql, args });
-		const out = new Map();
-		for (const row of result.rows) {
-			out.set(requireKey(name, row.k), requireFinite(name, 'n', row.n));
-		}
-		return Object.fromEntries(out);
+		return Object.fromEntries(result.rows.map((row) => [requireKey(name, row.k), requireFinite(name, 'n', row.n)]));
 	} catch (error) {
 		throw new Error(`launch-report: query ${name} failed — ${error instanceof Error ? error.message : String(error)}`);
 	}
@@ -159,11 +155,9 @@ async function grouped(client, name, sql, args = []) {
 async function ledgerGrouped(client, name, sql) {
 	try {
 		const result = await client.execute(sql);
-		const out = new Map();
-		for (const row of result.rows) {
-			out.set(requireKey(name, row.k), { rows: requireFinite(name, 'n', row.n), netCredits: requireFinite(name, 's', row.s) });
-		}
-		return Object.fromEntries(out);
+		return Object.fromEntries(
+			result.rows.map((row) => [requireKey(name, row.k), { rows: requireFinite(name, 'n', row.n), netCredits: requireFinite(name, 's', row.s) }])
+		);
 	} catch (error) {
 		throw new Error(`launch-report: query ${name} failed — ${error instanceof Error ? error.message : String(error)}`);
 	}
@@ -370,7 +364,7 @@ async function attentionQueues(client) {
 // Lifecycle + moderation rollups from the grouped maps — an absent key means
 // zero rows in that state, legitimate rather than an error.
 function digestAttention({ welcome, digests }) {
-	const { 'dry-run-failed': dryRunFailed = 0, 'dry-run-pending': dryRunPending = 0, failed: failedDigests = 0 } = digests;
+	const { 'dry-run-failed': dryRunFailed = 0, 'dry-run-pending': dryRunPending = 0, failed: failedDigests = 0, deferred = 0 } = digests;
 	const {
 		permanent_failure: permFailed = 0,
 		ambiguous = 0,
@@ -381,6 +375,10 @@ function digestAttention({ welcome, digests }) {
 	} = welcome;
 	return {
 		failedFeedbackDigests: failedDigests,
+		// 'deferred' is transient work awaiting retry (deadline/credit pause) —
+		// the feedback page lists it beside failures, so it is its own
+		// attention count rather than folded into failed.
+		deferredFeedbackDigests: deferred,
 		failedFeedbackDryRuns: dryRunFailed,
 		pendingFeedbackDryRuns: dryRunPending,
 		failedWelcomeEmails: permFailed + ambiguous,

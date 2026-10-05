@@ -300,7 +300,10 @@ INSERT INTO feedback_digests (channel_id, window_start, window_end, status, comm
 	('UCsentinelchan', '2026-10-04T00:00:00.000Z', '2026-10-05T00:00:00.000Z', 'complete', 12),
 	('UC-failed', '2026-10-04T00:00:00.000Z', '2026-10-05T00:00:00.000Z', 'failed', 0),
 	('UCsentinelchan', '2026-10-05T00:00:00.000Z', '2026-10-06T00:00:00.000Z', 'dry-run-pending', 0),
-	('UC-failed', '2026-10-05T00:00:00.000Z', '2026-10-05T12:00:00.000Z', 'dry-run-failed', 0);
+	('UC-failed', '2026-10-05T00:00:00.000Z', '2026-10-05T12:00:00.000Z', 'dry-run-failed', 0),
+	-- A deadline-deferred digest is unresolved work awaiting retry — the
+	-- feedback page lists it beside failures, so attention must surface it.
+	('UC-washealthy', '2026-10-04T00:00:00.000Z', '2026-10-05T00:00:00.000Z', 'deferred', 0);
 INSERT INTO contact_submissions (email, name, verification_token, expires_at, consent_text, ip, user_agent, status, notification_due_at, notification_sent_at) VALUES
 	('contact-sentinel@example.com', 'Sentinel Name', 'tok-1', '2026-10-11T00:00:00.000Z', 'I agree', '192.0.2.77', 'SentinelAgent/1.0', 'pending', '2026-10-05T05:00:00.000Z', NULL),
 	('verified@example.com', 'Ver', 'tok-2', '2026-10-11T00:00:00.000Z', 'I agree', '192.0.2.78', 'UA', 'verified', NULL, '2026-10-04T20:00:00.000Z');
@@ -515,7 +518,7 @@ describe('launch-report content', () => {
 		expect(report.moderation.commentsByStatus).toEqual({ approved: 2, held: 1, restoring: 1, deleted: 1 });
 		expect(report.moderation.auditActionsByType).toEqual({ approve: 1, hold: 1, 'dry-run': 1, delete: 1, restore: 1 });
 		expect(report.moderation.actionsByState).toEqual({ pending: 1, completed: 1, dispatched: 1 });
-		expect(report.moderation.feedbackDigestsByStatus).toEqual({ complete: 1, failed: 1, 'dry-run-pending': 1, 'dry-run-failed': 1 });
+		expect(report.moderation.feedbackDigestsByStatus).toEqual({ complete: 1, failed: 1, 'dry-run-pending': 1, 'dry-run-failed': 1, deferred: 1 });
 		// Remote human dispatches tracked per comment, independent of status:
 		// c-1 is in flight, c-3's write may or may not have landed remotely.
 		expect(report.moderation.humanDispatchesByState).toEqual({ in_flight: 1, uncertain: 1 });
@@ -595,6 +598,7 @@ describe('launch-report content', () => {
 			restoringComments: 1,
 			queuedModerationActions: 2,
 			failedFeedbackDigests: 1,
+			deferredFeedbackDigests: 1,
 			failedFeedbackDryRuns: 1,
 			pendingFeedbackDryRuns: 1,
 			failedWelcomeEmails: 1,

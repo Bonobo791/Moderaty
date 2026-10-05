@@ -182,6 +182,18 @@ One-time setup (human, in the Coolify dashboard):
    by design: the credentials must never appear in build args, image history,
    or baked layers.
 
+   **Interrupted npm downloads.** The dependency-install step runs
+   `scripts/install-dependencies.mjs`, keeping `npm ci --ignore-scripts` and
+   npm's fetch retries. A connection reset while reading a tarball can escape
+   those fetch retries. The helper logs and retries the whole locked install
+   for `ECONNRESET`, `ETIMEDOUT`, or `EAI_AGAIN`, with at most three attempts
+   and waits of 5 then 10 seconds. A BuildKit npm cache retains verified
+   downloads; `npm ci` replaces partial `node_modules`. Permanent errors
+   (including invalid lockfiles, integrity failures, and authentication
+   failures) stop immediately. If all three attempts fail, the image build
+   remains blocked: inspect the build server's registry connectivity and
+   retry the deployment after it recovers.
+
    **Operator checklist (all three, then redeploy):**
    1. **Use Docker Build Secrets** is ON (Environment Variables settings).
    2. **Build Variable ON for `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`

@@ -26,8 +26,13 @@ const dockerfile = readFileSync(new URL('../Dockerfile', import.meta.url), 'utf8
 const runbook = readFileSync(new URL('../docs/COOLIFY_BUNNY.md', import.meta.url), 'utf8');
 
 describe('Dockerfile (docker:S6505 — no third-party install scripts)', () => {
-	it('installs dependencies with --ignore-scripts', () => {
-		expect(dockerfile).toMatch(/npm ci --ignore-scripts/);
+	it('copies and executes the dependency helper before copying application code', () => {
+		const instructions = dockerfile.split('\n').filter(line => !line.startsWith('#')).join('\n');
+		expect(instructions).toMatch(
+			/COPY scripts\/install-dependencies\.mjs scripts\/install-dependencies\.mjs[\s\S]*?RUN --mount=type=cache,target=\/root\/\.npm,sharing=locked node scripts\/install-dependencies\.mjs\nCOPY \. \./
+		);
+		// install-dependencies.test.mjs executes this RUN against a real package
+		// with install/prepare scripts and verifies that neither script runs.
 	});
 });
 

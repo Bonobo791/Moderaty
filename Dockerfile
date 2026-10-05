@@ -8,16 +8,17 @@
 FROM node:24-alpine AS builder
 WORKDIR /app
 COPY package.json package-lock.json ./
+COPY scripts/install-dependencies.mjs scripts/install-dependencies.mjs
 # --ignore-scripts: never run third-party lifecycle scripts during install
 # (docker:S6505). Safe here: esbuild's binary ships as a platform
 # optionalDependency (its install script is only a validator) and fsevents is
 # macOS-only; the root `prepare` (svelte-kit sync) is skipped too, but the
 # SvelteKit vite plugin regenerates .svelte-kit itself during `vite build`.
-# Retry flags: a single ECONNRESET from the registry must not kill the deploy.
-RUN npm ci --ignore-scripts \
-	--fetch-retries=5 --fetch-retry-factor=2 \
-	--fetch-retry-mintimeout=10000 --fetch-retry-maxtimeout=120000 \
-	--fetch-timeout=300000
+# npm's fetch retries do not cover interrupted tarball bodies. The helper
+# retries the whole npm ci --ignore-scripts up to three times for transient
+# network errors, logs each attempt, and fails immediately on permanent errors.
+# Keep verified downloads across retries/builds without caching node_modules.
+RUN --mount=type=cache,target=/root/.npm,sharing=locked node scripts/install-dependencies.mjs
 COPY . .
 # Same deploy gate as Netlify (scripts/netlify-migrate.mjs): migrate + verify
 # the database BEFORE building, so an image can never be built against an

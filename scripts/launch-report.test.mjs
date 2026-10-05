@@ -61,6 +61,33 @@ const SENTINELS = [
 	'WelcomeTemplateSentinel'
 ];
 
+// Non-sentinel identifiers also planted in the fixture. The ENUM/KEY shape
+// checks below would happily pass 'org-personal-1' as an enum label, so every
+// identifying fixture literal — row ids, google subs, emails, names, tokens,
+// provider refs — is asserted absent from raw stdout regardless of shape.
+// (Enum values like 'fulfilled'/'token'/'quota' are legitimately emitted and
+// are deliberately not listed.)
+const FIXTURE_IDENTIFIERS = [
+	'u-in-window', 'u-old', 'u-gone', 'u-boundary-in', 'u-boundary-out', 'u-broke',
+	'gsub-old', 'gsub-broke', 'gsub-boundary-in', 'gsub-boundary-out',
+	'old@example.com', 'b-in@example.com', 'b-out@example.com', 'broke@example.com',
+	'Old User', 'B In', 'B Out', 'Broke User',
+	'org-personal-1', 'org-personal-2', 'org-broke',
+	'Personal One', 'Personal Two', 'Shared Org', 'Broke Org',
+	'UC-failed', 'UC-washealthy', 'UC-idle', 'UC-orphan', 'UC-detached',
+	'Chan One', 'Chan Two', 'Chan Three', 'Chan Four', 'Orphan Chan', 'Detached Chan',
+	'enc-2', 'enc-3', 'enc-4', 'enc-5', 'enc-6',
+	'c-1', 'c-2', 'c-3', 'c-4', 'c-x', 'c-y', 'dr-1',
+	'held text', 'restoring text', 'deleted text',
+	'sa-1', 'sa-2', 'sa-3', 'sa-4', 'sa-5', 'sa-6', 'sa-7',
+	'idem-2', 'idem-3', 'idem-4', 'idem-5', 'idem-6', 'idem-7',
+	'mp-1', 'mp-2', 'mp-3', 'mp-4', 'mp-5',
+	'mpidem-1', 'mpidem-2', 'mpidem-3', 'mpidem-4', 'mpidem-5',
+	'mp-pay-1', 'pi_topup_1', 'ch_topup_1', 'ch_ref', 'adj-1',
+	'sub_old', 'in_old', 'cs_life_1', 'cs_life_2',
+	'du_won', 'ch_dsp_1', 'ch_dsp_2', 'ch_pend_1'
+];
+
 // Base tables predate migration tracking (same shape as seed-dev.test.mjs):
 // channels/rules/comments/audit_log existed before drizzle/0000, so the
 // journal only ALTERs them. Everything else comes from the migrations.
@@ -459,7 +486,7 @@ describe('launch-report content', () => {
 	it('emits only aggregate-safe values — no raw user content, identifiers, or prose', async () => {
 		const { code, stdout, report } = await runReport(POPULATED_URL);
 		expect(code).toBe(0);
-		for (const sentinel of SENTINELS) {
+		for (const sentinel of [...SENTINELS, ...FIXTURE_IDENTIFIERS]) {
 			expect(stdout, `output leaked ${sentinel}`).not.toContain(sentinel);
 		}
 		const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
@@ -485,16 +512,21 @@ describe('launch-report content', () => {
 	});
 
 	it('writes nothing: schema, journal and fixture rows are untouched', async () => {
+		// Snapshot every table's full contents — a field-level write inside any
+		// fixture row must fail this test, not just a changed row count.
+		const dump = async (client) => {
+			const names = (await client.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")).rows.map((r) => r.name);
+			const tables = {};
+			for (const name of names) {
+				tables[name] = JSON.stringify((await client.execute(`SELECT * FROM "${name}" ORDER BY rowid`)).rows);
+			}
+			return { tables, schemaVersion: (await client.execute('PRAGMA schema_version')).rows[0].schema_version };
+		};
 		const before = createClient({ url: POPULATED_URL });
-		const count = async (client, sql) => Number((await client.execute(sql)).rows[0].n);
-		const migrationsBefore = await count(before, 'SELECT count(*) AS n FROM __drizzle_migrations');
-		const usersBefore = await count(before, 'SELECT count(*) AS n FROM users');
-		const schemaVersion = (await before.execute('PRAGMA schema_version')).rows[0].schema_version;
+		const prior = await dump(before);
 		await runReport(POPULATED_URL);
 		const after = createClient({ url: POPULATED_URL });
-		expect(await count(after, 'SELECT count(*) AS n FROM __drizzle_migrations')).toBe(migrationsBefore);
-		expect(await count(after, 'SELECT count(*) AS n FROM users')).toBe(usersBefore);
-		expect((await after.execute('PRAGMA schema_version')).rows[0].schema_version).toBe(schemaVersion);
+		expect(await dump(after)).toEqual(prior);
 		before.close();
 		after.close();
 	});

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 const runtime = vi.hoisted(() => ({ env: {} as Record<string, string> }));
 vi.mock('$env/dynamic/private', () => runtime);
 
-import { GET } from './+server';
+import * as handlers from './+server';
 
 beforeEach(() => {
 	for (const key of Object.keys(runtime.env)) delete runtime.env[key];
@@ -23,8 +23,25 @@ function configure(overrides: Partial<Record<string, string>> = {}) {
 function request(hostname = 'moderaty.example', query = '') {
 	const url = new URL(`https://${hostname}/api/analytics`);
 	url.search = query;
-	return GET({ url } as never);
+	return handlers.GET({ url, request: new Request(url) } as never);
 }
+
+test.each([
+	['true', 'www.moderaty.example', 204, '', [['analytics browser initialization failed']]],
+	['false', 'moderaty.example', 200, 'null', []],
+	['true', 'fork.example', 200, 'null', []]
+] as const)('browser reports retain runtime/hostname gates and never log payloads: %s, %s', async (enabled, hostname, status, body, logs) => {
+	configure({ ANALYTICS_ENABLED: enabled });
+	expect(handlers).toHaveProperty('POST', expect.any(Function));
+	const url = new URL(`https://moderaty.example/api/analytics?hostname=${hostname}`);
+	const response = await handlers.POST({ url,
+		request: new Request(url, { method: 'POST', body: 'token=secret&error=private-account-data' })
+	} as never);
+	expect(response.status).toBe(status);
+	expect(await response.text()).toBe(body);
+	expect(response.headers.get('cache-control')).toBe('no-store');
+	expect(vi.mocked(console.error).mock.calls).toEqual(logs);
+});
 
 test('an unchanged fork returns disabled configuration with no caching', async () => {
 	const response = await request();

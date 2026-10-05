@@ -33,7 +33,7 @@ beforeEach(() => {
 	});
 	vi.stubGlobal('fetch', vi.fn(async () => response.clone()));
 });
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 function expectNoTracking() {
 	expect(scripts).toEqual([]);
@@ -41,30 +41,42 @@ function expectNoTracking() {
 	expect(document.createElement).not.toHaveBeenCalled();
 }
 
-test('disabled configuration creates no tracking elements or dataLayer', async () => {
-	response = Response.json(null);
-	await loadAnalytics();
-	expectNoTracking();
-	expect(fetch).toHaveBeenCalledWith('https://moderaty.example/api/analytics?hostname=moderaty.example', expect.objectContaining({ cache: 'no-store', credentials: 'omit' }));
-});
-
-test.each(['fork.example', 'www.moderaty.example', 'moderaty.example.evil.test', 'sub.moderaty.example', 'moderaty.example.'])(
-	'copied official configuration makes no tracking request on another browser hostname: %s', async (hostname) => {
+const enabledConfig = { gtmId: 'GTM-TEST123', hostname: 'moderaty.example' };
+test.each([
+	['moderaty.example', null],
+	['fork.example', enabledConfig],
+	['www.moderaty.example', enabledConfig],
+	['moderaty.example.evil.test', enabledConfig],
+	['sub.moderaty.example', enabledConfig],
+	['moderaty.example.', enabledConfig]
+] as const)(
+	'disabled or copied configuration creates no tracking on browser hostname %s', async (hostname, config) => {
 		browser.location.hostname = hostname;
+		response = Response.json(config);
 		await loadAnalytics();
 		expectNoTracking();
+		expect(fetch).toHaveBeenCalledWith(new URL(`/api/analytics?hostname=${hostname}`, browser.location).href,
+			expect.objectContaining({ cache: 'no-store', credentials: 'omit' }));
 	}
 );
 
-test('existing dataLayer events are preserved and GTM is inserted once even with concurrent initialization', async () => {
+test.each([
+	[false, { status: 'fulfilled', value: undefined }, 3],
+	[true, { status: 'rejected', reason: new Error('Google Tag Manager failed to load') }, 4]
+] as const)('concurrent and later initialization shares one script (failure: %s)', async (fails, outcome, requests) => {
+	scriptFails = fails;
 	const existing = [{ event: 'existing-event' }];
 	browser.dataLayer = existing;
-	await Promise.all([loadAnalytics(), loadAnalytics()]);
+	const results = await Promise.allSettled([loadAnalytics(), loadAnalytics()]);
+	const later = await Promise.allSettled([loadAnalytics()]);
+	expect([...results, ...later]).toEqual([outcome, outcome, outcome]);
 	expect(scripts).toHaveLength(1);
 	expect(browser.dataLayer).toBe(existing);
 	expect(browser.dataLayer).toEqual([
 		{ event: 'existing-event' }, { 'gtm.start': expect.any(Number), event: 'gtm.js' }
 	]);
+	// Configuration reads share one script and, on failure, one server report.
+	expect(fetch).toHaveBeenCalledTimes(requests);
 });
 
 test.each([
@@ -85,12 +97,32 @@ test.each([
 	expectNoTracking();
 });
 
-test('all concurrent and later callers observe a GTM script failure', async () => {
-	scriptFails = true;
-	const results = await Promise.allSettled([loadAnalytics(), loadAnalytics()]);
-	expect(results.map((result) => result.status)).toEqual(['rejected', 'rejected']);
-	await expect(loadAnalytics()).rejects.toThrow('Google Tag Manager failed to load');
-	expect(scripts).toHaveLength(1);
+test.each([
+	['delivered', vi.fn().mockResolvedValue(new Response(null, { status: 204 })), 0],
+	['HTTP failure', vi.fn().mockResolvedValue(new Response(null, { status: 503 })), 1],
+	['network failure', vi.fn().mockRejectedValue(new Error('report unavailable')), 1]
+] as const)(
+	'script failures report only a generic signal to the server: %s', async (_delivery, reporting, logs) => {
+		scriptFails = true;
+		const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const fetcher = vi.fn().mockResolvedValueOnce(response.clone()).mockImplementationOnce(reporting);
+		vi.stubGlobal('fetch', fetcher);
+		await expect(loadAnalytics()).rejects.toThrow('Google Tag Manager failed to load');
+		expect(fetcher).toHaveBeenLastCalledWith('https://moderaty.example/api/analytics?hostname=moderaty.example', {
+			method: 'POST', cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: expect.any(AbortSignal)
+		});
+		expect(log.mock.calls.length).toBe(logs);
+	}
+);
+
+test('a stalled GTM script times out and reports its failure to the server', async () => {
+	vi.useFakeTimers();
+	const appended = vi.spyOn(document.head, 'appendChild').mockReturnValue({} as HTMLElement);
+	const outcome = Promise.allSettled([loadAnalytics()]);
+	await vi.waitFor(() => expect(appended).toHaveBeenCalledOnce());
+	await vi.advanceTimersByTimeAsync(5000);
+	expect(fetch).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ method: 'POST' }));
+	expect(await outcome).toEqual([{ status: 'rejected', reason: new Error('Google Tag Manager failed to load') }]);
 });
 
 test.each([
@@ -104,29 +136,20 @@ test.each([
 	expectNoTracking();
 });
 
-test('navigation to a token page while configuration loads cannot initialize GTM', async () => {
-	vi.stubGlobal('fetch', vi.fn(async () => {
-		browser.location = new URL('https://moderaty.example/consent?state=oauth-secret');
-		return response.clone();
-	}));
-	await loadAnalytics();
-	expectNoTracking();
-});
-
-test('returning from a same-origin token page cannot expose its URL through document.referrer', async () => {
-	Object.assign(document, { referrer: 'https://moderaty.example/contact/verify?token=contact-secret' });
-	await loadAnalytics();
-	expect(fetch).not.toHaveBeenCalled();
-	expectNoTracking();
-});
-
-test('navigation started before the router changes the URL cancels a pending GTM initialization', async () => {
+test.each([
+	['', 'https://moderaty.example/consent?state=oauth-secret', false, 1],
+	['https://moderaty.example/contact/verify?token=contact-secret', 'https://moderaty.example/privacy', false, 0],
+	['', 'https://moderaty.example/privacy', true, 1]
+] as const)('sensitive navigation/referrers and cancellation cannot initialize GTM: %s, %s, %s', async (referrer, destination, aborted, requests) => {
 	const controller = new AbortController();
+	Object.assign(document, { referrer });
 	vi.stubGlobal('fetch', vi.fn(async () => {
-		controller.abort();
+		browser.location = new URL(destination);
+		if (aborted) controller.abort();
 		return response.clone();
 	}));
 	await loadAnalytics(controller.signal);
+	expect(fetch).toHaveBeenCalledTimes(requests);
 	expectNoTracking();
 });
 

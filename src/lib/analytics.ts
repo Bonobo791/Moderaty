@@ -8,7 +8,8 @@ export function isAnalyticsPage(url: URL): boolean {
 	return publicPaths.has(url.pathname) && !url.search;
 }
 
-function canInitializeAnalytics(): boolean {
+function canInitializeAnalytics(signal?: AbortSignal): boolean {
+	if (signal?.aborted) return false;
 	const url = new URL(window.location.href);
 	if (!isAnalyticsPage(url)) return false;
 	if (!document.referrer) return true;
@@ -25,6 +26,26 @@ function validateConfig(config: unknown): AnalyticsConfig {
 	return { gtmId, hostname };
 }
 
+function configurationUrl(): string {
+	// Use the browser's hostname: adapter-node can pin event.url to another ORIGIN.
+	const url = new URL('/api/analytics', window.location.origin);
+	url.searchParams.set('hostname', window.location.hostname);
+	return url.toString();
+}
+
+async function reportScriptFailure(cause: unknown): Promise<never> {
+	try {
+		// No page URL, container ID, error text, or account data is sent.
+		const response = await fetch(configurationUrl(), {
+			method: 'POST', cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: AbortSignal.timeout(5000)
+		});
+		if (!response.ok) throw new Error('Analytics failure report failed');
+	} catch (reportCause) {
+		console.error('analytics failure reporting failed:', reportCause);
+	}
+	throw cause;
+}
+
 function insertScript(gtmId: string): Promise<void> {
 	const src = new URL('https://www.googletagmanager.com/gtm.js');
 	src.searchParams.set('id', gtmId);
@@ -32,11 +53,14 @@ function insertScript(gtmId: string): Promise<void> {
 	script.id = 'moderaty-gtm';
 	script.async = true;
 	script.src = src.toString();
+	let timer: ReturnType<typeof setTimeout> | undefined;
 	const loading = new Promise<void>((resolve, reject) => {
+		const fail = reject.bind(null, new Error('Google Tag Manager failed to load'));
+		timer = setTimeout(fail, 5000);
 		script.onload = () => resolve();
-		script.onerror = () => reject(new Error('Google Tag Manager failed to load'));
+		script.onerror = fail;
 		document.head.appendChild(script);
-	});
+	}).finally(() => clearTimeout(timer)).catch(reportScriptFailure);
 	scriptLoads.set(script, loading);
 	return loading;
 }
@@ -55,10 +79,7 @@ function initializeAnalytics(gtmId: string): Promise<void> {
 }
 
 async function readConfiguration(signal?: AbortSignal): Promise<AnalyticsConfig | null> {
-	// Use the browser's hostname: adapter-node can pin event.url to another ORIGIN.
-	const url = new URL('/api/analytics', window.location.origin);
-	url.searchParams.set('hostname', window.location.hostname);
-	const response = await fetch(url.toString(), {
+	const response = await fetch(configurationUrl(), {
 		cache: 'no-store', credentials: 'omit',
 		signal: AbortSignal.any([AbortSignal.timeout(5000), ...(signal ? [signal] : [])])
 	});
@@ -68,11 +89,11 @@ async function readConfiguration(signal?: AbortSignal): Promise<AnalyticsConfig 
 }
 
 export async function loadAnalytics(signal?: AbortSignal): Promise<void> {
-	if (signal?.aborted || !canInitializeAnalytics()) return;
+	if (!canInitializeAnalytics(signal)) return;
 	const config = await readConfiguration(signal);
 	if (config === null) return;
 	// Recheck after async work: neither navigation nor a copied response may
 	// activate tracking on a sensitive page or a different browser hostname.
-	if (signal?.aborted || !canInitializeAnalytics() || window.location.hostname !== config.hostname) return;
+	if (!canInitializeAnalytics(signal) || window.location.hostname !== config.hostname) return;
 	await initializeAnalytics(config.gtmId);
 }

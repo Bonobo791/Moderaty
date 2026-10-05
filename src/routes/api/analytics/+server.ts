@@ -10,7 +10,7 @@ function invalidHostname(hostname: string): boolean {
 }
 
 function runtimeConfiguration() {
-	if (!env.ANALYTICS_ENABLED || env.ANALYTICS_ENABLED === 'false') return null;
+	if ([undefined, '', 'false'].includes(env.ANALYTICS_ENABLED)) return null;
 	if (env.ANALYTICS_ENABLED !== 'true') {
 		throw new Error('ANALYTICS_ENABLED must be true or false');
 	}
@@ -25,7 +25,7 @@ function runtimeConfiguration() {
 }
 
 // Public pages are prerendered. Read deployment settings only at runtime.
-export const GET: RequestHandler = ({ url }) => {
+export const GET: RequestHandler = ({ url, request }) => {
 	try {
 		const config = runtimeConfiguration();
 		if (config === null) return json(null, { headers });
@@ -33,9 +33,17 @@ export const GET: RequestHandler = ({ url }) => {
 		// The browser independently checks the returned hostname before loading GTM.
 		const hostname = url.searchParams.get('hostname') ?? url.hostname;
 		if (!config.hostnames.includes(hostname)) return json(null, { headers });
+		if (request.method === 'POST') {
+			// Ignore request bodies: never log client error text, URLs, or tokens.
+			console.error('analytics browser initialization failed');
+			return new Response(null, { status: 204, headers });
+		}
 		return json({ gtmId: config.gtmId, hostname }, { headers });
 	} catch (cause) {
 		console.error('analytics configuration failed:', cause);
 		return json({ message: 'Optional usage measurement is unavailable.' }, { status: 503, headers });
 	}
 };
+
+// Apply the same runtime and exact-hostname gates to generic failure reports.
+export const POST = GET;

@@ -1,104 +1,145 @@
-type AnalyticsWindow = Window & { dataLayer?: Record<string, unknown>[] };
-type AnalyticsConfig = { gtmId: string; hostname: string };
-const scriptLoads = new WeakMap<Element, Promise<void>>();
-const publicPaths = new Set(['/', '/pricing', '/privacy', '/terms', '/dpa']);
+import { validateAnalyticsConfig } from './analytics-config';
+import { buildPagePayload, parseMarketingClick, type AnalyticsConfig, type MarketingEvent, type MarketingPlacement, type PagePayload } from './analytics-policy';
 
-/** Only clean public pages may expose their URL and DOM to a container. */
-export function isAnalyticsPage(url: URL): boolean {
-	return publicPaths.has(url.pathname) && !url.search;
-}
+export type AnalyticsClient = {
+	pageview(url: URL, signal?: AbortSignal): Promise<'sent' | 'skipped'>;
+	click(event: MarketingEvent, placement: MarketingPlacement): Promise<'sent' | 'skipped'>;
+	stop(): void;
+};
+const failureMessage = 'Optional usage measurement is unavailable.';
 
-/** Checks cancellation, the current page and sensitive same-origin referrers. */
-function canInitializeAnalytics(signal?: AbortSignal): boolean {
-	if (signal?.aborted) return false;
-	const url = new URL(window.location.href);
-	if (!isAnalyticsPage(url)) return false;
-	if (!document.referrer) return true;
-	const referrer = new URL(document.referrer);
-	return referrer.origin !== url.origin || isAnalyticsPage(referrer);
-}
-
-/** Rejects malformed public configuration before touching tracking globals. */
-function validateConfig(config: unknown): AnalyticsConfig {
-	if (config === null || typeof config !== 'object') throw new Error('Analytics configuration is invalid');
-	const { gtmId, hostname } = config as Record<string, unknown>;
-	if (typeof gtmId !== 'string' || !/^GTM-[A-Z0-9]+$/.test(gtmId) || typeof hostname !== 'string') {
-		throw new Error('Analytics configuration is invalid');
-	}
-	return { gtmId, hostname };
-}
-
-/** Uses a browser hostname claim so configured aliases work with pinned ORIGIN. */
+/** Exact browser claim; supports aliases with adapter-node's pinned ORIGIN. */
 function configurationUrl(): string {
-	// Use the browser's hostname: adapter-node can pin event.url to another ORIGIN.
 	const url = new URL('/api/analytics', window.location.origin);
 	url.searchParams.set('hostname', window.location.hostname);
-	return url.toString();
+	return url.href;
 }
 
-/** Sends a payload-free diagnostic and preserves the original script rejection. */
-async function reportScriptFailure(cause: unknown): Promise<never> {
-	try {
-		// No page URL, container ID, error text, or account data is sent.
-		const response = await fetch(configurationUrl(), {
-			method: 'POST', cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: AbortSignal.timeout(5000)
-		});
-		if (!response.ok) throw new Error('Analytics failure report failed');
-	} catch (error_) {
-		console.error('analytics failure reporting failed:', error_);
+/** Independent deadline composed with all caller cancellation, never substituted. */
+function deadline(...signals: (AbortSignal | undefined)[]): AbortSignal {
+	return AbortSignal.any([AbortSignal.timeout(5000), ...signals.filter((signal): signal is AbortSignal => signal !== undefined)]);
+}
+
+/** One document owns its safe-page latch, configuration, deduplication and cache. */
+export function createAnalyticsClient(options: { onFailure: () => void }): AnalyticsClient {
+	let stopped = false;
+	let generation = 0;
+	let config: AnalyticsConfig | null = null;
+	let cache: string | undefined;
+	let lastUrl: string | undefined;
+	let reported = false;
+	const pending = new Set<AbortController>();
+
+	function stop(): void {
+		stopped = true; generation++; cache = undefined; config = null;
+		for (const controller of pending) controller.abort();
+		pending.clear();
 	}
-	throw cause;
-}
 
-/** Inserts one async script whose actual load/error events settle its state. */
-function insertScript(gtmId: string): Promise<void> {
-	const src = new URL('https://www.googletagmanager.com/gtm.js');
-	src.searchParams.set('id', gtmId);
-	const script = document.createElement('script');
-	script.id = 'moderaty-gtm';
-	script.async = true;
-	script.src = src.toString();
-	const loading = new Promise<void>((resolve, reject) => {
-		script.onload = () => resolve();
-		script.onerror = reject.bind(null, new Error('Google Tag Manager failed to load'));
-		document.head.appendChild(script);
-	}).catch(reportScriptFailure);
-	scriptLoads.set(script, loading);
-	return loading;
-}
-
-/** Preserves dataLayer and shares the script's success or failure per document. */
-function initializeAnalytics(gtmId: string): Promise<void> {
-	const existing = document.getElementById('moderaty-gtm');
-	if (existing) {
-		const loading = scriptLoads.get(existing);
-		if (loading === undefined) throw new Error('Google Tag Manager script state is unknown');
-		return loading;
+	/** Checks the current browser document without needing runtime settings. */
+	function currentPage(): PagePayload | null {
+		if (stopped) return null;
+		const url = new URL(window.location.href);
+		const page = buildPagePayload(url, document.referrer, { umamiUrl: '', websiteId: '', hostname: url.hostname });
+		if (!page) stop();
+		return page;
 	}
-	const analyticsWindow = window as AnalyticsWindow;
-	analyticsWindow.dataLayer ??= [];
-	analyticsWindow.dataLayer.push({ 'gtm.start': Date.now(), event: 'gtm.js' });
-	return insertScript(gtmId);
-}
+	// A document beginning on a private route/referrer is permanently ineligible.
+	currentPage();
 
-/** Reads runtime settings with a timeout combined with caller cancellation. */
-async function readConfiguration(signal?: AbortSignal): Promise<AnalyticsConfig | null> {
-	const response = await fetch(configurationUrl(), {
-		cache: 'no-store', credentials: 'omit',
-		signal: AbortSignal.any([AbortSignal.timeout(5000), ...(signal ? [signal] : [])])
-	});
-	if (!response.ok) throw new Error('Analytics configuration request failed');
-	const body: unknown = await response.json();
-	return body === null ? null : validateConfig(body);
-}
+	/** Reports only a generic signal, once per document, without raw error details. */
+	async function fail(): Promise<never> {
+		if (!stopped) {
+			console.error('analytics collection failed');
+			options.onFailure();
+			if (!reported) {
+				reported = true;
+				try {
+					const response = await fetch(configurationUrl(), {
+						method: 'POST', cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: deadline()
+					});
+					if (!response.ok) throw new Error(failureMessage);
+				} catch {
+					console.error('analytics failure reporting failed');
+				}
+			}
+		}
+		throw new Error(failureMessage);
+	}
 
-/** Loads only for eligible documents on independently approved browser hosts. */
-export async function loadAnalytics(signal?: AbortSignal): Promise<void> {
-	if (!canInitializeAnalytics(signal)) return;
-	const config = await readConfiguration(signal);
-	if (config === null) return;
-	// Recheck after async work: neither navigation nor a copied response may
-	// activate tracking on a sensitive page or a different browser hostname.
-	if (!canInitializeAnalytics(signal) || window.location.hostname !== config.hostname) return;
-	await initializeAnalytics(config.gtmId);
+	/** Re-reads runtime settings for changed public URLs, with bounded cancellation. */
+	async function readConfiguration(signal?: AbortSignal): Promise<AnalyticsConfig | null> {
+		const controller = new AbortController(); pending.add(controller);
+		try {
+			const response = await fetch(configurationUrl(), {
+				cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: deadline(signal, controller.signal)
+			});
+			if (!response.ok) throw new Error(failureMessage);
+			const body: unknown = await response.json();
+			return body === null ? null : validateAnalyticsConfig(body);
+		} finally {
+			pending.delete(controller);
+		}
+	}
+
+	/** Discards session cache whenever public measurement settings change. */
+	function useConfiguration(next: AnalyticsConfig | null): void {
+		if (JSON.stringify(next) !== JSON.stringify(config)) { cache = undefined; generation++; }
+		config = next;
+	}
+
+	/** Sends an immutable public payload; late results cannot restore discarded state. */
+	async function send(payload: PagePayload & { name?: MarketingEvent; data?: { placement: MarketingPlacement } }, signal?: AbortSignal): Promise<'sent' | 'skipped'> {
+		if (!config) return 'skipped';
+		const started = generation;
+		const url = new URL('/api/send', config.umamiUrl).href;
+		const body = JSON.stringify({ type: 'event', payload });
+		try {
+			const response = await fetch(url, {
+				method: 'POST', headers: { 'content-type': 'application/json', ...(cache ? { 'x-umami-cache': cache } : {}) },
+				body, credentials: 'omit', referrerPolicy: 'no-referrer', keepalive: true, signal: deadline(signal)
+			});
+			if (!response.ok) throw new Error(failureMessage);
+			const result: unknown = await response.json();
+			if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error(failureMessage);
+			const fields = result as Record<string, unknown>;
+			if (fields.beep === 'boop' && fields.cache === undefined) return 'skipped';
+			if (typeof fields.cache !== 'string' || !fields.cache.length || fields.cache.length > 4096) throw new Error(failureMessage);
+			if (!stopped && generation === started) cache = fields.cache;
+			return 'sent';
+		} catch {
+			if (signal?.aborted) return 'skipped';
+			return fail();
+		}
+	}
+
+	return {
+		stop,
+		async pageview(url, signal) {
+			const current = currentPage();
+			const page = buildPagePayload(url, document.referrer, { umamiUrl: '', websiteId: '', hostname: window.location.hostname });
+			if (!current || !page || signal?.aborted || page.url !== current.url || page.url === lastUrl) return 'skipped';
+			lastUrl = page.url;
+			try {
+				const next = await readConfiguration(signal);
+				// Both browser hostname and current safe URL are checked after the await.
+				if (signal?.aborted || currentPage()?.url !== page.url) return 'skipped';
+				if (next && next.hostname !== window.location.hostname) return 'skipped';
+				useConfiguration(next);
+				if (!next) return 'skipped';
+				const payload = buildPagePayload(new URL(window.location.href), document.referrer, next);
+				return payload ? send(payload, signal) : 'skipped';
+			} catch {
+				if (stopped || signal?.aborted) return 'skipped';
+				return fail();
+			}
+		},
+		click(event, placement) {
+			if (!currentPage() || !config) return Promise.resolve('skipped');
+			const pair = parseMarketingClick(event, placement);
+			const payload = buildPagePayload(new URL(window.location.href), document.referrer, config);
+			// Start immediately. The route effect's cancellation is deliberately absent.
+			return pair && payload ? send({ ...payload, name: pair.name, data: { placement: pair.placement } }) : Promise.resolve('skipped');
+		}
+	};
 }

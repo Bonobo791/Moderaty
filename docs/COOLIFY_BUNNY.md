@@ -109,18 +109,20 @@ One-time setup (human, in the Coolify dashboard):
    | `MERCADOPAGO_ENVIRONMENT` / `MERCADOPAGO_PRICE_CREDITS_*_BRL_CENTS` | production | sandbox | optional Mercado Pago sandbox/production mode and BRL bundle prices in cents |
    | `PROTON_SMTP_USERNAME` / `PROTON_SMTP_TOKEN` | production token | dev token | Proton Mail SMTP for transactional e-mail (contact-form verification and service notices, incl. zero-credit account warnings). Username = the custom-domain sender mailbox and doubles as the From address (domain active in Proton, SPF/DKIM/DMARC verified); token from Proton → Settings → All settings → IMAP/SMTP → SMTP tokens — never the mailbox password, and a separate token per environment |
    | `PROTON_FROM_NAME` | `Moderaty` | `Moderaty` | optional sender display name; defaults to `Moderaty` |
-   | `ANALYTICS_ENABLED` | `false` until activation review | `false` | optional GTM opt-in; Runtime Variable only, **Build Variable OFF** |
-   | `GTM_ID` / `GTM_ALLOWED_HOSTNAMES` | own container ID / exact public hostname list | empty | Runtime Variables only, **Build Variable OFF**; no values in Docker images |
+   | `ANALYTICS_ENABLED` | `false` until activation checklist passes | `false` until staging verification | optional Umami opt-in; Runtime Variable only, **Build Variable OFF** |
+   | `UMAMI_URL` / `UMAMI_WEBSITE_ID` | own HTTPS collector origin / production website UUID | separate staging website UUID | Runtime Variables only, **Build Variable OFF**; no configured values in Docker images |
+   | `ANALYTICS_ALLOWED_HOSTNAMES` | exact production browser hostnames | exact staging browser hostnames | comma-separated DNS names, at most 100 characters each; Runtime Variable only, **Build Variable OFF** |
 
-   **Optional analytics.** GTM stays disabled unless explicitly enabled with a
-   valid container ID and exact allowed hostname. The browser checks its own
-   hostname before loading any Google script; eligible public pages fetch settings
-   from the no-store `/api/analytics` endpoint at runtime. Keep the official ID
-   exclusively in the prod app's runtime settings, and keep `/api/analytics`
-   under the existing Bunny `/api/*` cache bypass. Account and token flows are
-   excluded, including navigation from tracked public pages. Review privacy disclosures and
-   visitor-consent requirements before activation: the current Privacy Policy
-   says no third-party tracking cookies. See [ANALYTICS.md](ANALYTICS.md).
+   **Optional audience measurement.** Use a separate Umami service and PostgreSQL
+   volume; Moderaty's database is unchanged. Keep production measurement disabled
+   until the privacy assessment, disclosures/notices, transfer records, tested
+   retention and actual-proxy browser acceptance are complete. Public pages read
+   settings from the no-store `/api/analytics` endpoint; retain the Bunny `/api/*`
+   cache bypass. No tracking script, Google request or GTM fallback is installed.
+   DNT, GPC and the public footer's Audience measurement preference suppress
+   collection. Exact browser hostname checks protect forks and pinned-ORIGIN
+   aliases. See [ANALYTICS.md](ANALYTICS.md) for the service setup, strict payload
+   policy, operator checklist and rollback procedure.
 
    **Stripe webhook endpoint is per-environment, per-sandbox.** Register
    `https://<app-domain>/api/stripe/webhook` under **Developers → Webhooks**

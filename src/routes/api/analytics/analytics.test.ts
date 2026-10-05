@@ -17,8 +17,8 @@ afterEach(() => vi.restoreAllMocks());
 function configure(overrides: Partial<Record<string, string>> = {}) {
 	Object.assign(runtime.env, {
 		ANALYTICS_ENABLED: 'true',
-		GTM_ID: 'GTM-TEST123',
-		GTM_ALLOWED_HOSTNAMES: 'moderaty.example,www.moderaty.example',
+		UMAMI_URL: 'https://collector.example', UMAMI_WEBSITE_ID: '11111111-2222-4333-8444-555555555555',
+		ANALYTICS_ALLOWED_HOSTNAMES: 'moderaty.example,www.moderaty.example',
 		...overrides
 	});
 }
@@ -55,8 +55,8 @@ test.each([
 
 test.each([
 	{},
-	{ ANALYTICS_ENABLED: '', GTM_ID: 'invalid', GTM_ALLOWED_HOSTNAMES: '*' },
-	{ ANALYTICS_ENABLED: 'false', GTM_ID: 'invalid', GTM_ALLOWED_HOSTNAMES: '*' }
+	{ ANALYTICS_ENABLED: '', UMAMI_WEBSITE_ID: 'invalid', ANALYTICS_ALLOWED_HOSTNAMES: '*' },
+	{ ANALYTICS_ENABLED: 'false', UMAMI_WEBSITE_ID: 'invalid', ANALYTICS_ALLOWED_HOSTNAMES: '*' }
 ])('default or disabled analytics ignores leftover settings with no caching: %j', async (settings) => {
 	Object.assign(runtime.env, settings);
 	const response = await request();
@@ -67,8 +67,8 @@ test.each([
 });
 
 const allowedHosts = 'moderaty.example,www.moderaty.example';
-const primaryConfig = { gtmId: 'GTM-TEST123', hostname: 'moderaty.example' };
-const aliasConfig = { gtmId: 'GTM-TEST123', hostname: 'www.moderaty.example' };
+const primaryConfig = { umamiUrl: 'https://collector.example', websiteId: '11111111-2222-4333-8444-555555555555', hostname: 'moderaty.example' };
+const aliasConfig = { umamiUrl: 'https://collector.example', websiteId: '11111111-2222-4333-8444-555555555555', hostname: 'www.moderaty.example' };
 
 // server host, browser-host query, configured hostnames, expected public response
 // Include claims separately from event.url to exercise pinned ORIGIN without trusting headers.
@@ -89,7 +89,7 @@ test.each([
 	['moderaty.example', '?hostname=*.moderaty.example', allowedHosts, null],
 	['moderaty.example', '?hostname=MODERATY.EXAMPLE', allowedHosts, null]
 ] as const)('exact hostname gates: server %s, claim %s, allowlist %s', async (hostname, query, hosts, expected) => {
-	configure({ GTM_ALLOWED_HOSTNAMES: hosts });
+	configure({ ANALYTICS_ALLOWED_HOSTNAMES: hosts });
 	const response = await request(hostname, query);
 	expect(response.status).toBe(200);
 	expect(await response.json()).toEqual(expected);
@@ -100,25 +100,28 @@ test.each([
 test('configuration is read on each request rather than captured at import or build time', async () => {
 	expect(await (await request()).json()).toBeNull();
 	configure();
-	expect(await (await request()).json()).toEqual({ gtmId: 'GTM-TEST123', hostname: 'moderaty.example' });
-	runtime.env.GTM_ID = 'GTM-OTHER456';
-	expect(await (await request()).json()).toEqual({ gtmId: 'GTM-OTHER456', hostname: 'moderaty.example' });
+	expect(await (await request()).json()).toEqual({ umamiUrl: 'https://collector.example', websiteId: '11111111-2222-4333-8444-555555555555', hostname: 'moderaty.example' });
+	runtime.env.UMAMI_WEBSITE_ID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+	expect(await (await request()).json()).toEqual({ umamiUrl: 'https://collector.example', websiteId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', hostname: 'moderaty.example' });
 	runtime.env.ANALYTICS_ENABLED = 'false';
 	expect(await (await request()).json()).toBeNull();
 });
 
 test.each([
 	{ ANALYTICS_ENABLED: '1' }, { ANALYTICS_ENABLED: 'TRUE' },
-	{ GTM_ID: undefined }, { GTM_ALLOWED_HOSTNAMES: undefined },
-	{ GTM_ID: '' }, { GTM_ID: 'G-TEST123' }, { GTM_ID: 'GTM-TEST123&x=1' },
-	{ GTM_ID: 'GTM-<script>' }, { GTM_ID: ' GTM-TEST123' }, { GTM_ID: 'GTM-TEST123\n' },
-	{ GTM_ALLOWED_HOSTNAMES: '' }, { GTM_ALLOWED_HOSTNAMES: ',' }, { GTM_ALLOWED_HOSTNAMES: ', , ' }, { GTM_ALLOWED_HOSTNAMES: '*' },
-	{ GTM_ALLOWED_HOSTNAMES: '*.moderaty.example' },
-	{ GTM_ALLOWED_HOSTNAMES: 'https://moderaty.example' },
-	{ GTM_ALLOWED_HOSTNAMES: 'moderaty.example:3000' },
-	{ GTM_ALLOWED_HOSTNAMES: 'moderaty.example/path' },
-	{ GTM_ALLOWED_HOSTNAMES: 'moderaty.example,' },
-	{ GTM_ALLOWED_HOSTNAMES: '-moderaty.example' }
+	{ UMAMI_URL: undefined }, { UMAMI_WEBSITE_ID: undefined }, { ANALYTICS_ALLOWED_HOSTNAMES: undefined },
+	{ UMAMI_URL: '' }, { UMAMI_URL: 'http://collector.example' }, { UMAMI_URL: 'https://user:secret@collector.example' },
+	{ UMAMI_URL: 'https://collector.example/path' }, { UMAMI_URL: 'https://collector.example/?token=secret' },
+	{ UMAMI_URL: 'https://collector.example/#fragment' }, { UMAMI_URL: ' https://collector.example' },
+	{ UMAMI_WEBSITE_ID: '' }, { UMAMI_WEBSITE_ID: 'not-a-uuid' }, { UMAMI_WEBSITE_ID: '11111111-2222-4333-8444-555555555555\n' },
+	{ ANALYTICS_ALLOWED_HOSTNAMES: 'a'.repeat(101) },
+	{ ANALYTICS_ALLOWED_HOSTNAMES: '' }, { ANALYTICS_ALLOWED_HOSTNAMES: ',' }, { ANALYTICS_ALLOWED_HOSTNAMES: ', , ' }, { ANALYTICS_ALLOWED_HOSTNAMES: '*' },
+	{ ANALYTICS_ALLOWED_HOSTNAMES: '*.moderaty.example' },
+	{ ANALYTICS_ALLOWED_HOSTNAMES: 'https://moderaty.example' },
+	{ ANALYTICS_ALLOWED_HOSTNAMES: 'moderaty.example:3000' },
+	{ ANALYTICS_ALLOWED_HOSTNAMES: 'moderaty.example/path' },
+	{ ANALYTICS_ALLOWED_HOSTNAMES: 'moderaty.example,' },
+	{ ANALYTICS_ALLOWED_HOSTNAMES: '-moderaty.example' }
 ])('invalid enabled configuration fails closed with a logged generic response: %j', async (overrides) => {
 	configure(overrides);
 	const response = await request();

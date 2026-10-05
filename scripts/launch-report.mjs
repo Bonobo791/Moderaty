@@ -141,7 +141,11 @@ function requireKey(name, k) {
 async function grouped(client, name, sql, args = []) {
 	try {
 		const result = await client.execute({ sql, args });
-		return Object.fromEntries(result.rows.map((row) => [requireKey(name, row.k), requireFinite(name, 'n', row.n)]));
+		const out = {};
+		for (const row of result.rows) {
+			out[requireKey(name, row.k)] = requireFinite(name, 'n', row.n);
+		}
+		return out;
 	} catch (error) {
 		throw new Error(`launch-report: query ${name} failed — ${error instanceof Error ? error.message : String(error)}`);
 	}
@@ -152,12 +156,11 @@ async function grouped(client, name, sql, args = []) {
 async function ledgerGrouped(client, name, sql) {
 	try {
 		const result = await client.execute(sql);
-		return Object.fromEntries(
-			result.rows.map((row) => [
-				requireKey(name, row.k),
-				{ rows: requireFinite(name, 'n', row.n), netCredits: requireFinite(name, 's', row.s) }
-			])
-		);
+		const out = {};
+		for (const row of result.rows) {
+			out[requireKey(name, row.k)] = { rows: requireFinite(name, 'n', row.n), netCredits: requireFinite(name, 's', row.s) };
+		}
+		return out;
 	} catch (error) {
 		throw new Error(`launch-report: query ${name} failed — ${error instanceof Error ? error.message : String(error)}`);
 	}

@@ -7,7 +7,7 @@ import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { PassThrough } from 'node:stream';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { expect, test, vi } from 'vitest';
 import { installDependencies, npmCliPath, runNpmCi } from './install-dependencies.mjs';
 
@@ -79,6 +79,11 @@ async function runDockerInstall(context) {
 	if (executable !== 'node' || args.length !== 1 || args[0] !== 'scripts/install-dependencies.mjs') {
 		throw new Error('Docker dependency RUN must invoke the Node install helper directly');
 	}
+	return runNode(context, args);
+}
+
+/** Run the actual Node executable with the fixture environment and capture its completed output. */
+async function runNode(context, args) {
 	let output = '';
 	const child = spawn(process.execPath, args, { cwd: context.project, env: context.env, timeout: 30_000 });
 	child.stdout.on('data', chunk => output += chunk);
@@ -114,8 +119,18 @@ test('installs the real fixture when host tar and Unix shell executables are una
 	let context;
 	try {
 		context = await fixture(0);
+		const preload = join(context.project, 'no external tools.mjs');
+		await copyFile(new URL('./fixtures/no-external-tools.mjs', import.meta.url), preload);
+		context.env = { ...context.env, NODE_OPTIONS: `${context.env.NODE_OPTIONS ?? ''} --import=${pathToFileURL(preload).href}`.trim() };
+		for (const executable of ['/usr/bin/tar', '/bin/sh']) {
+			const probe = await runNode(context, ['--input-type=module', '--eval', 'import { execFileSync } from "node:child_process"; execFileSync(process.argv[1], ["--version"]);', executable]);
+			expect(probe.code, probe.output).not.toBe(0);
+			expect(probe.output).toContain('external executables unavailable in install fixture');
+		}
 		const result = await runDockerInstall(context);
 		expect(result.code, result.output).toBe(0);
+		expect(result.output).toContain('external tools disabled for install-dependencies.mjs');
+		expect(result.output).toContain('external tools disabled for npm-cli.js');
 		expect(await readFile(join(context.project, 'node_modules/stream-reset-fixture/index.js'), 'utf8')).toBe('module.exports = 42;\n');
 		expect(execFileSync).not.toHaveBeenCalled();
 	} finally {

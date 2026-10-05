@@ -51,12 +51,14 @@ values. The existing `.dockerignore` excludes local `.env` files.
 4. Before touching `dataLayer` or inserting a script, the browser independently
    checks its current hostname against the response and rechecks page eligibility
    after the asynchronous request. A copied response cannot enable a fork.
-5. Navigation between excluded routes and public pages creates a new document
-   when entering public pages, or when leaving a document containing GTM. Removing
-   a script cannot stop an executed container; reloading prevents it from reading
-   sensitive page content and same-document Back history. Pending initialization
-   is cancelled before navigation to an excluded page. A public page reached with
-   a same-origin excluded URL in `document.referrer` also skips initialization.
+5. When leaving a document containing GTM for an excluded route, navigation
+   creates a new document. Removing a script cannot stop an executed container;
+   reloading isolates it from sensitive page content. A document that starts on
+   or visits an excluded route never initializes GTM later, even after SPA
+   navigation to a public page. This prevents sensitive Back-history exposure
+   while preserving normal navigation on disabled deployments. Pending
+   initialization is cancelled before navigation to an excluded page. A public
+   page with a same-origin excluded URL in `document.referrer` also skips GTM.
 6. The loader preserves existing `dataLayer` entries, queues the standard GTM
    start event, and inserts one asynchronous GTM script per document. A failed
    configuration or script request logs a browser error and shows a small generic
@@ -95,11 +97,3 @@ ID; it must be absent. Keep `/api/analytics` out of CDN caching (Bunny's existin
 Changing environment settings requires restarting/redeploying the server
 instances according to the hosting platform. Disabling stops loading in new
 documents; already-open tabs have already loaded the container and must reload.
-
-A reproducible Chromium regression checks a local adapter-node server using
-fixture IDs only (Python Playwright and Chromium are required):
-
-```sh
-MODERATY_ADAPTER=node npm run build
-python3 scripts/test-analytics-browser.py
-```

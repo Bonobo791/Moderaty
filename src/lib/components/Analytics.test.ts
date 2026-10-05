@@ -56,7 +56,7 @@ test.each([
 });
 
 test.each(['/contact', '/login', '/consent?state=secret', '/privacy?token=secret'])(
-	'entering a public page from %s creates a new document before GTM can read sensitive Back history', (path) => {
+	'an excluded document entering a public page from %s preserves normal router navigation', (path) => {
 		state.page.url = new URL(path, 'https://moderaty.example');
 		render(Analytics);
 		const assign = vi.fn();
@@ -64,7 +64,7 @@ test.each(['/contact', '/login', '/consent?state=secret', '/privacy?token=secret
 		vi.stubGlobal('document', { getElementById: () => null });
 		vi.stubGlobal('window', { location: { assign } });
 		navigation.callback?.({ to: { url: new URL('https://moderaty.example/privacy') }, willUnload: false, cancel });
-		expect(cancel).toHaveBeenCalledOnce();
-		expect(assign).toHaveBeenCalledWith('https://moderaty.example/privacy');
+		expect(cancel).not.toHaveBeenCalled();
+		expect(assign).not.toHaveBeenCalled();
 	}
 );

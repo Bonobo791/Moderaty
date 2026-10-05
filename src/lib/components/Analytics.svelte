@@ -8,23 +8,24 @@
 	let pending: AbortController | undefined;
 
 	const eligible = $derived(browser && isAnalyticsPage(page.url));
+	let safeDocument = $state(browser && isAnalyticsPage(page.url));
 
 	// Removing the script cannot stop an executed container. Unload this
 	// document before the router exposes a sensitive URL or account content.
 	beforeNavigate((navigation) => {
 		if (navigation.willUnload || !navigation.to) return;
-		const destinationEligible = isAnalyticsPage(navigation.to.url);
-		if (!destinationEligible) pending?.abort();
-		if (destinationEligible === isAnalyticsPage(page.url)) return;
-		// Entering public pages must also unload: otherwise Back can expose
-		// sensitive history URLs to a container before the router handles them.
-		if (!destinationEligible && !document.getElementById('moderaty-gtm')) return;
+		if (isAnalyticsPage(navigation.to.url)) return;
+		// A document that visits a sensitive page must never initialize GTM
+		// later: Back would expose that URL before the router could intercept it.
+		safeDocument = false;
+		pending?.abort();
+		if (!document.getElementById('moderaty-gtm')) return;
 		navigation.cancel();
 		window.location.assign(navigation.to.url.href);
 	});
 
 	$effect(() => {
-		if (!eligible) return;
+		if (!eligible || !safeDocument) return;
 		unavailable = false;
 		const controller = new AbortController();
 		pending = controller;
@@ -37,7 +38,7 @@
 	});
 </script>
 
-{#if eligible && unavailable}
+{#if eligible && safeDocument && unavailable}
 	<p class="analytics-status" role="status">Optional usage measurement is unavailable.</p>
 {/if}
 

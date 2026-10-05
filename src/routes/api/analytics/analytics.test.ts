@@ -20,9 +20,9 @@ function configure(overrides: Partial<Record<string, string>> = {}) {
 	});
 }
 
-function request(hostname = 'moderaty.example', browserHostname?: string) {
+function request(hostname = 'moderaty.example', query = '') {
 	const url = new URL(`https://${hostname}/api/analytics`);
-	if (browserHostname !== undefined) url.searchParams.set('hostname', browserHostname);
+	url.search = query;
 	return GET({ url } as never);
 }
 
@@ -40,26 +40,35 @@ test.each(['', 'false'])('disabled analytics ignores even invalid leftover setti
 	expect(console.error).not.toHaveBeenCalled();
 });
 
-test.each(['moderaty.example', 'www.moderaty.example'])('an exactly allowed host gets runtime configuration: %s', async (hostname) => {
-	configure();
-	const response = await request(hostname);
+const allowedHosts = 'moderaty.example,www.moderaty.example';
+const primaryConfig = { gtmId: 'GTM-TEST123', hostname: 'moderaty.example' };
+const aliasConfig = { gtmId: 'GTM-TEST123', hostname: 'www.moderaty.example' };
+
+// server host, browser-host query, configured hostnames, expected public response
+// Include claims separately from event.url to exercise pinned ORIGIN without trusting headers.
+test.each([
+	['moderaty.example', '', allowedHosts, primaryConfig],
+	['www.moderaty.example', '', allowedHosts, aliasConfig],
+	['fork.example', '', allowedHosts, null],
+	['dev.moderaty.example', '', allowedHosts, null],
+	['moderaty.example.evil.test', '', allowedHosts, null],
+	['notmoderaty.example', '', allowedHosts, null],
+	['moderaty.example.', '', allowedHosts, null],
+	['moderaty.example', '', ' MODERATY.EXAMPLE , www.moderaty.example ', primaryConfig],
+	['sub.moderaty.example', '', ' MODERATY.EXAMPLE , www.moderaty.example ', null],
+	['moderaty.example', '?hostname=www.moderaty.example', allowedHosts, aliasConfig],
+	['moderaty.example', '?hostname=fork.example', allowedHosts, null],
+	['moderaty.example', '?hostname=moderaty.example.evil.test', allowedHosts, null],
+	['moderaty.example', '?hostname=', allowedHosts, null],
+	['moderaty.example', '?hostname=*.moderaty.example', allowedHosts, null],
+	['moderaty.example', '?hostname=MODERATY.EXAMPLE', allowedHosts, null]
+] as const)('exact hostname gates: server %s, claim %s, allowlist %s', async (hostname, query, hosts, expected) => {
+	configure({ GTM_ALLOWED_HOSTNAMES: hosts });
+	const response = await request(hostname, query);
 	expect(response.status).toBe(200);
-	expect(await response.json()).toEqual({ gtmId: 'GTM-TEST123', hostname });
+	expect(await response.json()).toEqual(expected);
 	expect(response.headers.get('cache-control')).toBe('no-store');
-});
-
-test.each(['fork.example', 'dev.moderaty.example', 'moderaty.example.evil.test', 'notmoderaty.example', 'moderaty.example.'])(
-	'a nonallowlisted host never receives the container ID: %s', async (hostname) => {
-		configure();
-		expect(await (await request(hostname)).json()).toBeNull();
-		expect(console.error).not.toHaveBeenCalled();
-	}
-);
-
-test('hostname configuration accepts whitespace and case without widening the allowlist', async () => {
-	configure({ GTM_ALLOWED_HOSTNAMES: ' MODERATY.EXAMPLE , www.moderaty.example ' });
-	expect(await (await request()).json()).toEqual({ gtmId: 'GTM-TEST123', hostname: 'moderaty.example' });
-	expect(await (await request('sub.moderaty.example')).json()).toBeNull();
+	expect(console.error).not.toHaveBeenCalled();
 });
 
 test('configuration is read on each request rather than captured at import or build time', async () => {
@@ -100,16 +109,3 @@ test.each(['GTM_ID', 'GTM_ALLOWED_HOSTNAMES'])('enabled analytics fails closed w
 	expect(await response.json()).toEqual({ message: 'Optional usage measurement is unavailable.' });
 	expect(console.error).toHaveBeenCalled();
 });
-
-test('an allowed browser alias works when adapter-node pins event.url to its canonical ORIGIN', async () => {
-	configure();
-	expect(await (await request('moderaty.example', 'www.moderaty.example')).json())
-		.toEqual({ gtmId: 'GTM-TEST123', hostname: 'www.moderaty.example' });
-});
-
-test.each(['fork.example', 'moderaty.example.evil.test', '', '*.moderaty.example', 'MODERATY.EXAMPLE'])(
-	'a browser hostname outside the exact allowlist cannot receive configuration: %s', async (hostname) => {
-		configure();
-		expect(await (await request('moderaty.example', hostname)).json()).toBeNull();
-	}
-);

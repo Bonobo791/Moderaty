@@ -5,8 +5,8 @@ export const prerender = false;
 const headers = { 'cache-control': 'no-store' };
 const labelPattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
-function validHostname(hostname: string): boolean {
-	return hostname.length <= 253 && hostname.split('.').every((label) => labelPattern.test(label));
+function invalidHostname(hostname: string): boolean {
+	return hostname.length > 253 || hostname.split('.').some((label) => !labelPattern.test(label));
 }
 
 function runtimeConfiguration() {
@@ -18,7 +18,7 @@ function runtimeConfiguration() {
 		throw new Error('GTM_ID must be a valid Google Tag Manager container ID');
 	}
 	const hostnames = (env.GTM_ALLOWED_HOSTNAMES ?? '').split(',').map((host) => host.trim().toLowerCase());
-	if (hostnames.some((host) => !validHostname(host))) {
+	if (hostnames.some(invalidHostname)) {
 		throw new Error('GTM_ALLOWED_HOSTNAMES must contain comma-separated exact DNS hostnames');
 	}
 	return { gtmId: env.GTM_ID, hostnames };

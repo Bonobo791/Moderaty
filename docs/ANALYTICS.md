@@ -63,6 +63,7 @@ values. The existing `.dockerignore` excludes local `.env` files.
    start event, and inserts one asynchronous GTM script per document. A failed
    configuration or script request logs a browser error and shows a small generic
    usage-measurement status on eligible public pages; it does not block the app.
+   Reload the document to retry a failed initialization.
 
 There is no `noscript` iframe: JavaScript must perform the browser hostname check
 before a GTM request. This integration supplies no account identifiers, e-mails,

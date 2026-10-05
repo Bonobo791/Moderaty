@@ -63,11 +63,16 @@ values. The existing `.dockerignore` excludes local `.env` files.
    start event, and inserts one asynchronous GTM script per document. A failed
    configuration or script request logs a browser error and shows a small generic
    usage-measurement status on eligible public pages; it does not block the app.
-   Script failures, including a five-second load timeout, also send a generic
+   Script load errors also send a generic
    POST to `/api/analytics` for server logging. This uses the same runtime and
    hostname gates and sends no error text, page URL, tokens or account data.
    Concurrent callers share one failure report. Report-delivery failures log in
    the browser while retaining the analytics failure status.
+   The server coalesces analytics diagnostics, including configuration errors,
+   to at most one per minute per worker,
+   using constant memory and no client identifiers. Reports still receive 204.
+   A slow script stays pending until the browser emits its actual load or error
+   event; a timer cannot guarantee that an inserted script will never execute.
    Reload the document to retry a failed initialization.
 
 There is no `noscript` iframe: JavaScript must perform the browser hostname check

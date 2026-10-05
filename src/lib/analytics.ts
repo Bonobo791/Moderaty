@@ -8,6 +8,7 @@ export function isAnalyticsPage(url: URL): boolean {
 	return publicPaths.has(url.pathname) && !url.search;
 }
 
+/** Checks cancellation, the current page and sensitive same-origin referrers. */
 function canInitializeAnalytics(signal?: AbortSignal): boolean {
 	if (signal?.aborted) return false;
 	const url = new URL(window.location.href);
@@ -17,6 +18,7 @@ function canInitializeAnalytics(signal?: AbortSignal): boolean {
 	return referrer.origin !== url.origin || isAnalyticsPage(referrer);
 }
 
+/** Rejects malformed public configuration before touching tracking globals. */
 function validateConfig(config: unknown): AnalyticsConfig {
 	if (config === null || typeof config !== 'object') throw new Error('Analytics configuration is invalid');
 	const { gtmId, hostname } = config as Record<string, unknown>;
@@ -26,6 +28,7 @@ function validateConfig(config: unknown): AnalyticsConfig {
 	return { gtmId, hostname };
 }
 
+/** Uses a browser hostname claim so configured aliases work with pinned ORIGIN. */
 function configurationUrl(): string {
 	// Use the browser's hostname: adapter-node can pin event.url to another ORIGIN.
 	const url = new URL('/api/analytics', window.location.origin);
@@ -33,6 +36,7 @@ function configurationUrl(): string {
 	return url.toString();
 }
 
+/** Sends a payload-free diagnostic and preserves the original script rejection. */
 async function reportScriptFailure(cause: unknown): Promise<never> {
 	try {
 		// No page URL, container ID, error text, or account data is sent.
@@ -40,12 +44,13 @@ async function reportScriptFailure(cause: unknown): Promise<never> {
 			method: 'POST', cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: AbortSignal.timeout(5000)
 		});
 		if (!response.ok) throw new Error('Analytics failure report failed');
-	} catch (reportCause) {
-		console.error('analytics failure reporting failed:', reportCause);
+	} catch (error_) {
+		console.error('analytics failure reporting failed:', error_);
 	}
 	throw cause;
 }
 
+/** Inserts one async script whose actual load/error events settle its state. */
 function insertScript(gtmId: string): Promise<void> {
 	const src = new URL('https://www.googletagmanager.com/gtm.js');
 	src.searchParams.set('id', gtmId);
@@ -53,18 +58,16 @@ function insertScript(gtmId: string): Promise<void> {
 	script.id = 'moderaty-gtm';
 	script.async = true;
 	script.src = src.toString();
-	let timer: ReturnType<typeof setTimeout> | undefined;
 	const loading = new Promise<void>((resolve, reject) => {
-		const fail = reject.bind(null, new Error('Google Tag Manager failed to load'));
-		timer = setTimeout(fail, 5000);
 		script.onload = () => resolve();
-		script.onerror = fail;
+		script.onerror = reject.bind(null, new Error('Google Tag Manager failed to load'));
 		document.head.appendChild(script);
-	}).finally(() => clearTimeout(timer)).catch(reportScriptFailure);
+	}).catch(reportScriptFailure);
 	scriptLoads.set(script, loading);
 	return loading;
 }
 
+/** Preserves dataLayer and shares the script's success or failure per document. */
 function initializeAnalytics(gtmId: string): Promise<void> {
 	const existing = document.getElementById('moderaty-gtm');
 	if (existing) {
@@ -78,6 +81,7 @@ function initializeAnalytics(gtmId: string): Promise<void> {
 	return insertScript(gtmId);
 }
 
+/** Reads runtime settings with a timeout combined with caller cancellation. */
 async function readConfiguration(signal?: AbortSignal): Promise<AnalyticsConfig | null> {
 	const response = await fetch(configurationUrl(), {
 		cache: 'no-store', credentials: 'omit',
@@ -88,6 +92,7 @@ async function readConfiguration(signal?: AbortSignal): Promise<AnalyticsConfig 
 	return body === null ? null : validateConfig(body);
 }
 
+/** Loads only for eligible documents on independently approved browser hosts. */
 export async function loadAnalytics(signal?: AbortSignal): Promise<void> {
 	if (!canInitializeAnalytics(signal)) return;
 	const config = await readConfiguration(signal);

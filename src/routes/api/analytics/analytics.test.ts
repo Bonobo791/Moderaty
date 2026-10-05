@@ -4,13 +4,16 @@ const runtime = vi.hoisted(() => ({ env: {} as Record<string, string> }));
 vi.mock('$env/dynamic/private', () => runtime);
 
 import * as handlers from './+server';
+let fixtureMinute = 0;
 
 beforeEach(() => {
 	for (const key of Object.keys(runtime.env)) delete runtime.env[key];
-	vi.spyOn(console, 'error').mockImplementation(() => {});
+	vi.spyOn(console, 'error').mockImplementation(vi.fn());
+	vi.spyOn(Date, 'now').mockReturnValue(++fixtureMinute * 120_000);
 });
 afterEach(() => vi.restoreAllMocks());
 
+/** Supplies enabled fixture settings; individual cases override invalid values. */
 function configure(overrides: Partial<Record<string, string>> = {}) {
 	Object.assign(runtime.env, {
 		ANALYTICS_ENABLED: 'true',
@@ -20,6 +23,7 @@ function configure(overrides: Partial<Record<string, string>> = {}) {
 	});
 }
 
+/** Calls the real GET handler with a fixture host and untrusted browser claim. */
 function request(hostname = 'moderaty.example', query = '') {
 	const url = new URL(`https://${hostname}/api/analytics`);
 	url.search = query;
@@ -29,18 +33,24 @@ function request(hostname = 'moderaty.example', query = '') {
 test.each([
 	['true', 'www.moderaty.example', 204, '', [['analytics browser initialization failed']]],
 	['false', 'moderaty.example', 200, 'null', []],
-	['true', 'fork.example', 200, 'null', []]
+	['true', 'fork.example', 200, 'null', []],
+	['1', 'moderaty.example', 503, '{"message":"Optional usage measurement is unavailable."}', [['analytics configuration failed:', expect.any(Error)]]]
 ] as const)('browser reports retain runtime/hostname gates and never log payloads: %s, %s', async (enabled, hostname, status, body, logs) => {
 	configure({ ANALYTICS_ENABLED: enabled });
 	expect(handlers).toHaveProperty('POST', expect.any(Function));
 	const url = new URL(`https://moderaty.example/api/analytics?hostname=${hostname}`);
-	const response = await handlers.POST({ url,
+	const event = { url,
 		request: new Request(url, { method: 'POST', body: 'token=secret&error=private-account-data' })
-	} as never);
-	expect(response.status).toBe(status);
-	expect(await response.text()).toBe(body);
-	expect(response.headers.get('cache-control')).toBe('no-store');
-	expect(vi.mocked(console.error).mock.calls).toEqual(logs);
+	} as never;
+	const started = Date.now();
+	for (const [elapsed, copies] of [[0, 1], [0, 1], [59_999, 1], [60_000, 2]] as const) {
+		vi.mocked(Date.now).mockReturnValue(started + elapsed);
+		const response = await handlers.POST(event);
+		expect(response.status).toBe(status);
+		expect(await response.text()).toBe(body);
+		expect(response.headers.get('cache-control')).toBe('no-store');
+		expect(vi.mocked(console.error).mock.calls).toEqual(Array(copies).fill(logs).flat());
+	}
 });
 
 test('an unchanged fork returns disabled configuration with no caching', async () => {

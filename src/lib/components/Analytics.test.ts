@@ -52,6 +52,5 @@ test.each([
 	expect(navigation.callback).toBeTypeOf('function');
 	navigation.callback?.({ to: { url }, willUnload, cancel });
 	expect(cancel).toHaveBeenCalledTimes(forced);
-	expect(assign).toHaveBeenCalledTimes(forced);
-	if (forced) expect(assign).toHaveBeenCalledWith(url.href);
+	expect(assign.mock.calls).toEqual(Array(forced).fill([url.href]));
 });

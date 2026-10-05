@@ -3,12 +3,16 @@ import { env } from '$env/dynamic/private';
 
 export const prerender = false;
 const headers = { 'cache-control': 'no-store' };
+const browserFailureMessage = 'analytics browser initialization failed';
+let nextDiagnosticLog = 0;
 const labelPattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
+/** Enforces bounded exact DNS labels for the operator's hostname allowlist. */
 function invalidHostname(hostname: string): boolean {
 	return hostname.length > 253 || hostname.split('.').some((label) => !labelPattern.test(label));
 }
 
+/** Keeps analytics off by default and validates enabled deployment settings. */
 function runtimeConfiguration() {
 	if ([undefined, '', 'false'].includes(env.ANALYTICS_ENABLED)) return null;
 	if (env.ANALYTICS_ENABLED !== 'true') {
@@ -24,7 +28,16 @@ function runtimeConfiguration() {
 	return { gtmId: env.GTM_ID, hostnames };
 }
 
-// Public pages are prerendered. Read deployment settings only at runtime.
+/** Coalesces analytics diagnostics per worker without retaining caller data. */
+function recordDiagnostic(...details: unknown[]): void {
+	const now = Date.now();
+	if (now >= nextDiagnosticLog) {
+		nextDiagnosticLog = now + 60_000;
+		console.error(...details);
+	}
+}
+
+/** Serves uncached runtime config and accepts generic, hostname-gated reports. */
 export const GET: RequestHandler = ({ url, request }) => {
 	try {
 		const config = runtimeConfiguration();
@@ -35,12 +48,14 @@ export const GET: RequestHandler = ({ url, request }) => {
 		if (!config.hostnames.includes(hostname)) return json(null, { headers });
 		if (request.method === 'POST') {
 			// Ignore request bodies: never log client error text, URLs, or tokens.
-			console.error('analytics browser initialization failed');
+			// One diagnostic per minute per worker, with constant memory and no
+			// caller-controlled keys that can evade the limit or fill a Map.
+			recordDiagnostic(browserFailureMessage);
 			return new Response(null, { status: 204, headers });
 		}
 		return json({ gtmId: config.gtmId, hostname }, { headers });
 	} catch (cause) {
-		console.error('analytics configuration failed:', cause);
+		recordDiagnostic('analytics configuration failed:', cause);
 		return json({ message: 'Optional usage measurement is unavailable.' }, { status: 503, headers });
 	}
 };

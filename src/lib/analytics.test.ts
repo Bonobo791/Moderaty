@@ -35,6 +35,7 @@ beforeEach(() => {
 });
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
+/** Verifies skipped initialization creates neither tracking DOM nor dataLayer. */
 function expectNoTracking() {
 	expect(scripts).toEqual([]);
 	expect(browser.dataLayer).toBeUndefined();
@@ -104,25 +105,26 @@ test.each([
 ] as const)(
 	'script failures report only a generic signal to the server: %s', async (_delivery, reporting, logs) => {
 		scriptFails = true;
-		const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const log = vi.spyOn(console, 'error').mockImplementation(vi.fn());
 		const fetcher = vi.fn().mockResolvedValueOnce(response.clone()).mockImplementationOnce(reporting);
 		vi.stubGlobal('fetch', fetcher);
 		await expect(loadAnalytics()).rejects.toThrow('Google Tag Manager failed to load');
 		expect(fetcher).toHaveBeenLastCalledWith('https://moderaty.example/api/analytics?hostname=moderaty.example', {
 			method: 'POST', cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: expect.any(AbortSignal)
 		});
-		expect(log.mock.calls.length).toBe(logs);
+		expect(log.mock.calls).toHaveLength(logs);
 	}
 );
 
-test('a stalled GTM script times out and reports its failure to the server', async () => {
+test('a slow script can finish loading without a premature failure report', async () => {
 	vi.useFakeTimers();
 	const appended = vi.spyOn(document.head, 'appendChild').mockReturnValue({} as HTMLElement);
 	const outcome = Promise.allSettled([loadAnalytics()]);
 	await vi.waitFor(() => expect(appended).toHaveBeenCalledOnce());
-	await vi.advanceTimersByTimeAsync(5000);
-	expect(fetch).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ method: 'POST' }));
-	expect(await outcome).toEqual([{ status: 'rejected', reason: new Error('Google Tag Manager failed to load') }]);
+	await vi.advanceTimersByTimeAsync(6000);
+	expect(fetch).toHaveBeenCalledOnce();
+	(appended.mock.calls[0][0] as unknown as Script).onload();
+	expect(await outcome).toEqual([{ status: 'fulfilled', value: undefined }]);
 });
 
 test.each([

@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { createClient } from '@libsql/client';
 import { drizzle } from 'drizzle-orm/libsql';
 import { migrate } from 'drizzle-orm/libsql/migrator';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { buildReport, REQUIRED_TABLES } from './launch-report.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -83,7 +83,10 @@ const FIXTURE_IDENTIFIERS = [
 	'idem-2', 'idem-3', 'idem-4', 'idem-5', 'idem-6', 'idem-7',
 	'mp-1', 'mp-2', 'mp-3', 'mp-4', 'mp-5',
 	'mpidem-1', 'mpidem-2', 'mpidem-3', 'mpidem-4', 'mpidem-5',
-	'mp-pay-1', 'pi_topup_1', 'ch_topup_1', 'ch_ref', 'adj-1',
+	'mp-pay-1', 'mp-pay-2', 'mp-pay-3', 'mp-pay-4',
+	'mercadopago:mp-pay-1', 'mercadopago:mp-pay-3', 'mercadopago:mp-pay-4',
+	'cs_sa2', 'cs_sa3', 'cs_sa4', 'cs_sa5', 'cs_sa6', 'cs_sa7',
+	'pi_topup_1', 'ch_topup_1', 'ch_ref', 'adj-1',
 	'sub_old', 'in_old', 'cs_life_1', 'cs_life_2',
 	'du_won', 'ch_dsp_1', 'ch_dsp_2', 'ch_pend_1'
 ];
@@ -154,11 +157,16 @@ INSERT INTO users (id, google_sub, email, display_name, created_at) VALUES
 	('u-boundary-out', 'gsub-boundary-out', 'b-out@example.com', 'B Out', '${UNTIL}'),
 	('u-broke', 'gsub-broke', 'broke@example.com', 'Broke User', '2026-10-05T10:00:00.000Z');
 UPDATE users SET zero_credits_since = '2026-10-05T12:00:00.000Z' WHERE id = 'u-broke';
-INSERT INTO organizations (id, name, personal_for, credits_remaining, stripe_customer_id, stripe_subscription_status, auto_topup_state, auto_topup_pause_reason, created_at) VALUES
-	('org-personal-1', 'Personal One', 'u-in-window', 50, 'cus_sentinel', NULL, 'disabled', 'sca_required', '2026-10-04T12:00:00.000Z'),
-	('org-personal-2', 'Personal Two', 'u-old', 0, NULL, 'active', 'idle', NULL, '2026-09-01T00:00:00.000Z'),
-	('org-sentinel', 'Shared Org', NULL, 130, NULL, NULL, NULL, NULL, '2026-10-05T00:00:00.000Z'),
-	('org-broke', 'Broke Org', 'u-broke', 0, NULL, NULL, NULL, NULL, '2026-10-05T10:00:00.000Z');
+-- auto_topup_state='disabled' conflates intent: org-personal-1 was forced off
+-- by a refund pause (pause_reason set), org-personal-2 failed off with consent
+-- still recorded (enabled=1 — auth/max-failure path, autotopup.ts), and a plain
+-- owner opt-out would read enabled=0/disabled/no reason. Each needs its own
+-- report bucket.
+INSERT INTO organizations (id, name, personal_for, credits_remaining, stripe_customer_id, stripe_subscription_status, auto_topup_enabled, auto_topup_state, auto_topup_pause_reason, created_at) VALUES
+	('org-personal-1', 'Personal One', 'u-in-window', 50, 'cus_sentinel', NULL, 0, 'disabled', 'refund', '2026-10-04T12:00:00.000Z'),
+	('org-personal-2', 'Personal Two', 'u-old', 0, NULL, 'active', 1, 'disabled', NULL, '2026-09-01T00:00:00.000Z'),
+	('org-sentinel', 'Shared Org', NULL, 130, NULL, NULL, NULL, NULL, NULL, '2026-10-05T00:00:00.000Z'),
+	('org-broke', 'Broke Org', 'u-broke', 0, NULL, NULL, NULL, NULL, NULL, '2026-10-05T10:00:00.000Z');
 INSERT INTO memberships (user_id, org_id, role) VALUES
 	('u-in-window', 'org-personal-1', 'owner'),
 	('u-in-window', 'org-sentinel', 'member'),
@@ -169,7 +177,10 @@ INSERT INTO channels (id, user_id, org_id, title, refresh_token_enc, active, las
 	('UCsentinelchan', 'u-in-window', 'org-personal-1', 'Chan One', 'S3NTINEL-TOKEN', 1, 'success', '2026-10-05T06:00:00.000Z', NULL, '2026-10-05T06:00:00.000Z', '2026-10-04T13:00:00.000Z', NULL, '2026-10-04T12:30:00.000Z'),
 	('UC-failed', 'u-in-window', 'org-personal-1', 'Chan Two', 'enc-2', 1, 'failed', NULL, 'token', '2026-10-05T07:00:00.000Z', '2026-10-04T14:00:00.000Z', '2026-10-05T01:00:00.000Z', '2026-10-04T13:00:00.000Z'),
 	('UC-washealthy', 'u-old', 'org-sentinel', 'Chan Three', 'enc-3', 1, 'failed', '2026-10-04T20:00:00.000Z', 'quota', '2026-10-05T08:00:00.000Z', NULL, NULL, '2026-10-05T00:00:00.000Z'),
-	('UC-idle', 'u-old', 'org-personal-2', 'Chan Four', 'enc-4', 0, NULL, NULL, NULL, NULL, NULL, NULL, '2026-09-02T00:00:00.000Z'),
+	-- Paused then resumed: the resume cleared the run verdict (last_run_status
+	-- NULL) but the channel DID run once — last_run_at/last_success_at survive.
+	-- It must not count as neverRun while also counting as ever successful.
+	('UC-idle', 'u-old', 'org-personal-2', 'Chan Four', 'enc-4', 0, NULL, '2026-08-01T00:00:00.000Z', NULL, '2026-08-01T00:00:00.000Z', NULL, NULL, '2026-09-02T00:00:00.000Z'),
 	('UC-orphan', NULL, NULL, 'Orphan Chan', 'enc-5', 0, NULL, NULL, NULL, NULL, NULL, NULL, '2026-10-05T09:00:00.000Z'),
 	-- Team channel detached by an account deletion: org kept, user cleared —
 	-- it needs a reconnect, not a first-login claim.
@@ -189,31 +200,44 @@ INSERT INTO audit_log (channel_id, comment_id, action, reason, actor) VALUES
 	('UCsentinelchan', 'dr-1', 'dry-run', 'preview', 'system'),
 	('UC-failed', 'c-4', 'delete', 'ai', 'system'),
 	('UCsentinelchan', 'c-3', 'restore', 'user', 'user');
-INSERT INTO stripe_checkout_attempts (attempt_id, org_id, product, idempotency_key, status, created_at, updated_at) VALUES
-	('sa-1', 'org-personal-1', 'credits_100', 'idem-sentinel', 'fulfilled', '2026-10-04T15:00:00.000Z', '2026-10-04T15:05:00.000Z'),
-	('sa-2', 'org-personal-1', 'credits_500', 'idem-2', 'open', '2026-10-05T00:00:00.000Z', '2026-10-05T00:00:00.000Z'),
-	('sa-3', 'org-personal-2', 'credits_100', 'idem-3', 'expired', '2026-10-04T16:00:00.000Z', '2026-10-04T16:00:00.000Z'),
-	('sa-4', 'org-sentinel', 'credits_100', 'idem-4', 'manual_refund_required', '2026-10-05T01:00:00.000Z', '2026-10-05T01:00:00.000Z'),
-	('sa-5', 'org-personal-1', 'credits_100', 'idem-5', 'pending', '2026-09-20T00:00:00.000Z', '2026-09-20T00:00:00.000Z'),
-	-- Opened before the window, fulfilled inside it: fulfillment time counts.
-	('sa-6', 'org-personal-1', 'credits_100', 'idem-6', 'fulfilled', '2026-10-03T20:00:00.000Z', '2026-10-05T05:00:00.000Z'),
-	-- Opened inside the window, fulfilled a week later: outside the window.
-	('sa-7', 'org-personal-2', 'credits_100', 'idem-7', 'fulfilled', '2026-10-05T06:00:00.000Z', '2026-10-07T00:00:00.000Z');
-INSERT INTO mercado_pago_checkout_attempts (attempt_id, org_id, bundle_id, idempotency_key, status, amount_cents, paid_at, created_at) VALUES
-	('mp-1', 'org-sentinel', 'credits_100', 'mpidem-1', 'fulfilled', 4900, '2026-10-05T02:00:00.000Z', '2026-10-05T02:00:00.000Z'),
-	-- Approved but refused before granting (unmetered org): paid_at stays NULL,
-	-- so it is a manual-refund alert, not a paid grant.
-	('mp-2', 'org-personal-1', 'credits_100', 'mpidem-2', 'manual_refund_required', 4900, NULL, '2026-10-05T03:00:00.000Z'),
-	-- Granted in-window but later refunded: still a paid grant in the period.
-	('mp-3', 'org-sentinel', 'credits_100', 'mpidem-3', 'refunded', 4900, '2026-10-04T10:00:00.000Z', '2026-10-03T23:00:00.000Z'),
-	-- Opened in-window, paid the week after: payment time falls outside.
-	('mp-4', 'org-personal-2', 'credits_100', 'mpidem-4', 'fulfilled', 4900, '2026-10-07T01:00:00.000Z', '2026-10-05T01:00:00.000Z'),
-	('mp-5', 'org-personal-1', 'credits_100', 'mpidem-5', 'open', 4900, NULL, '2026-10-05T04:00:00.000Z');
+-- updated_at is NOT the grant time: webhooks restamp it on replay (sa-1's
+	-- replay moved it past the window; sa-7's row was touched in-window though
+	-- its durable grant landed days later). The immutable credit_transactions
+	-- purchase row — inserted once per (org_id, ref_type, ref_id) — is the only
+	-- honest window anchor.
+INSERT INTO stripe_checkout_attempts (attempt_id, org_id, product, idempotency_key, stripe_session_id, status, created_at, updated_at) VALUES
+	('sa-1', 'org-personal-1', 'credits_100', 'idem-sentinel', 'cs_sentinel_session', 'fulfilled', '2026-10-04T15:00:00.000Z', '2026-10-08T00:00:00.000Z'),
+	('sa-2', 'org-personal-1', 'credits_500', 'idem-2', 'cs_sa2', 'open', '2026-10-05T00:00:00.000Z', '2026-10-05T00:00:00.000Z'),
+	('sa-3', 'org-personal-2', 'credits_100', 'idem-3', 'cs_sa3', 'expired', '2026-10-04T16:00:00.000Z', '2026-10-04T16:00:00.000Z'),
+	('sa-4', 'org-sentinel', 'credits_100', 'idem-4', 'cs_sa4', 'manual_refund_required', '2026-10-05T01:00:00.000Z', '2026-10-05T01:00:00.000Z'),
+	('sa-5', 'org-personal-1', 'credits_100', 'idem-5', 'cs_sa5', 'pending', '2026-09-20T00:00:00.000Z', '2026-09-20T00:00:00.000Z'),
+	-- Opened before the window, granted inside it: the ledger row counts.
+	('sa-6', 'org-personal-1', 'credits_100', 'idem-6', 'cs_sa6', 'fulfilled', '2026-10-03T20:00:00.000Z', '2026-10-05T05:00:00.000Z'),
+	-- Opened inside the window, granted a week later; an in-window webhook
+	-- replay restamped updated_at — still outside the grant window.
+	('sa-7', 'org-personal-2', 'credits_100', 'idem-7', 'cs_sa7', 'fulfilled', '2026-10-05T06:00:00.000Z', '2026-10-05T06:00:00.000Z');
+INSERT INTO mercado_pago_checkout_attempts (attempt_id, org_id, bundle_id, idempotency_key, payment_id, status, amount_cents, paid_at, created_at) VALUES
+	-- A fulfillment replay restamped paid_at past the window; the immutable
+	-- purchase ledger row still anchors the grant to 2026-10-05.
+	('mp-1', 'org-sentinel', 'credits_100', 'mpidem-1', 'mp-pay-1', 'fulfilled', 4900, '2026-10-08T02:00:00.000Z', '2026-10-05T02:00:00.000Z'),
+	-- Approved but refused before granting (unmetered org): payment_id exists
+	-- but no purchase row was ever written — an alert, not a paid grant.
+	('mp-2', 'org-personal-1', 'credits_100', 'mpidem-2', 'mp-pay-2', 'manual_refund_required', 4900, NULL, '2026-10-05T03:00:00.000Z'),
+	-- Granted in-window but later refunded: the purchase row still counts.
+	('mp-3', 'org-sentinel', 'credits_100', 'mpidem-3', 'mp-pay-3', 'refunded', 4900, '2026-10-04T10:00:00.000Z', '2026-10-03T23:00:00.000Z'),
+	-- Opened in-window, paid the week after: paid_at lies in-window (a replay
+	-- artifact) but the durable grant was on 2026-10-07 — outside.
+	('mp-4', 'org-personal-2', 'credits_100', 'mpidem-4', 'mp-pay-4', 'fulfilled', 4900, '2026-10-05T12:00:00.000Z', '2026-10-05T01:00:00.000Z'),
+	('mp-5', 'org-personal-1', 'credits_100', 'mpidem-5', NULL, 'open', 4900, NULL, '2026-10-05T04:00:00.000Z');
 INSERT INTO credit_transactions (org_id, delta, reason, ref_type, ref_id, payment_intent_id, charge_id, balance_after, created_at) VALUES
 	('org-personal-1', 100, 'purchase', 'checkout_session', 'cs_sentinel_session', 'pi_sentinel', 'ch_sentinel', 100, '2026-10-04T15:00:00.000Z'),
 	('org-personal-1', -10, 'consume', 'comment', 'c-1', NULL, NULL, 90, '2026-10-05T00:00:00.000Z'),
 	('org-personal-1', 100, 'auto_topup', 'payment_intent', 'pi_topup_1', 'pi_topup_1', 'ch_topup_1', 190, '2026-10-05T01:00:00.000Z'),
-	('org-sentinel', 100, 'purchase', 'payment_id', 'mp-pay-1', NULL, NULL, 100, '2026-10-05T02:00:00.000Z'),
+	('org-personal-1', 100, 'purchase', 'checkout_session', 'cs_sa6', NULL, NULL, 390, '2026-10-05T05:00:00.000Z'),
+	('org-personal-2', 100, 'purchase', 'checkout_session', 'cs_sa7', NULL, NULL, 100, '2026-10-07T00:00:00.000Z'),
+	('org-sentinel', 100, 'purchase', 'checkout_session', 'mercadopago:mp-pay-1', NULL, NULL, 100, '2026-10-05T02:00:00.000Z'),
+	('org-sentinel', 100, 'purchase', 'checkout_session', 'mercadopago:mp-pay-3', NULL, NULL, 200, '2026-10-04T10:00:00.000Z'),
+	('org-personal-2', 100, 'purchase', 'checkout_session', 'mercadopago:mp-pay-4', NULL, NULL, 200, '2026-10-07T01:00:00.000Z'),
 	('org-sentinel', -30, 'consume', 'comment', 'c-9', NULL, NULL, 70, '2026-10-05T03:00:00.000Z'),
 	('org-sentinel', 60, 'adjust', 'admin', 'adj-1', NULL, NULL, 130, '2026-10-05T04:00:00.000Z'),
 	('org-broke', -100, 'refund', 'charge', 'ch_ref', 'pi_ref', 'ch_ref', -100, '2026-10-05T05:00:00.000Z');
@@ -329,6 +353,16 @@ describe('launch-report CLI contract', () => {
 		}
 	});
 
+	it('honors year-0 leap days (Date.UTC would map 0000 to 1900)', async () => {
+		// Year 0 is a leap year: '0000-02-29' is a real calendar day and must
+		// parse, while '1900-02-29' (non-leap) must still be rejected.
+		const { code, report } = await runReport(EMPTY_URL, ['--since', '0000-02-29', '--until', '0001-01-01']);
+		expect(code).toBe(0);
+		expect(report.window.since).toBe('0000-02-29T00:00:00.000Z');
+		const bad = await runReport(EMPTY_URL, ['--since', '1900-02-29', '--until', UNTIL]);
+		expect(bad.code).toBe(2);
+	});
+
 	it('rejects an empty or inverted window', async () => {
 		for (const args of [
 			['--since', UNTIL, '--until', SINCE],
@@ -413,10 +447,13 @@ describe('launch-report content', () => {
 		// UC-failed both consumed it, but UC-failed never succeeded live.
 		expect(report.channels.moderationPreviewAttempted).toBe(2);
 		expect(report.channels.feedbackPreviewAttempted).toBe(1);
-		expect(report.channels.everSuccessfulLiveRun).toBe(2);
+		// UC-idle paused and resumed: its verdict was cleared but its run and
+		// success history are durable — it counts as ever-successful, never as
+		// neverRun (that bucket is last_run_at IS NULL: UC-orphan + UC-detached).
+		expect(report.channels.everSuccessfulLiveRun).toBe(3);
 		expect(report.channels.latestRunSucceeded).toBe(1);
 		expect(report.channels.latestRunFailed).toBe(2);
-		expect(report.channels.neverRun).toBe(3);
+		expect(report.channels.neverRun).toBe(2);
 		expect(report.channels.lastRunFailureByCategory).toEqual({ token: 1, quota: 1 });
 	});
 
@@ -433,17 +470,19 @@ describe('launch-report content', () => {
 		// only 'fulfilled' counts toward the in-window completed checkouts.
 		expect(report.billing.stripeCheckoutAttemptsByStatus).toEqual({ fulfilled: 3, open: 1, expired: 1, manual_refund_required: 1, pending: 1 });
 		expect(report.billing.mercadoPagoCheckoutAttemptsByStatus).toEqual({ fulfilled: 2, manual_refund_required: 1, refunded: 1, open: 1 });
-		// Stripe keys on updated_at (stamped at fulfillment): sa-6 paid inside
-		// the window though created before it; sa-7 paid after the window
-		// though created inside it.
+		// Grant windows anchor on the immutable credit_transactions purchase row
+		// (inserted once per org/ref anchor), never on restampable attempt
+		// timestamps: sa-1's replayed updated_at moved past the window but its
+		// grant row still counts; sa-7's in-window restamp does not move its
+		// post-window grant forward.
 		expect(report.billing.stripeCheckoutsFulfilledInWindow).toBe(2);
-		// MP keys on paid_at (set only when a grant actually completes): the
-		// refunded row paid inside the window still counts, the in-window
-		// checkout paid a week later does not, and manual_refund_required —
-		// approved but never granted — is excluded via its NULL paid_at.
+		// Same on MP: mp-1's replayed paid_at is ignored (ledger says in-window),
+		// mp-3's refund doesn't erase the grant, mp-4's in-window paid_at replay
+		// can't move its post-window ledger row, and mp-2 was approved but never
+		// granted — no purchase row, no count.
 		expect(report.billing.mercadoPagoCheckoutsFulfilledInWindow).toBe(2);
 		expect(report.billing.creditLedgerByReason).toEqual({
-			purchase: { rows: 2, netCredits: 200 },
+			purchase: { rows: 6, netCredits: 600 },
 			consume: { rows: 2, netCredits: -40 },
 			auto_topup: { rows: 1, netCredits: 100 },
 			adjust: { rows: 1, netCredits: 60 },
@@ -455,6 +494,11 @@ describe('launch-report content', () => {
 		expect(report.billing.lifetimeSlots).toEqual({ total: 1000, held: 1 });
 		expect(report.organizations.withPositiveCredits).toBe(2);
 		expect(report.organizations.creditsRemainingTotal).toBe(180);
+		// 'disabled' is reported as a raw state, not as attention: org-personal-1
+		// was refund-paused (pause_reason set) and org-personal-2 was
+		// failure-disabled with consent still recorded (enabled=1).
+		expect(report.organizations.autoTopupDisabled).toBe(2);
+		expect(report.organizations.autoTopupPaused).toBe(1);
 	});
 
 	it('surfaces the persisted failure states that need attention', async () => {
@@ -463,7 +507,10 @@ describe('launch-report content', () => {
 		expect(report.attention).toMatchObject({
 			channelsLatestRunFailed: 2,
 			usersInZeroCreditCountdown: 1,
-			orgsAutoTopupPausedOrDisabled: 1,
+			// Refund-paused (org-personal-1) and failure-disabled with consent
+			// still recorded (org-personal-2) both need operator follow-up; a
+			// plain owner opt-out would not.
+			orgsAutoTopupNeedingAttention: 2,
 			manualRefundRequiredCheckouts: 2,
 			pendingReversals: 1,
 			pendingDisputeReversals: 1,
@@ -591,5 +638,66 @@ describe('launch-report content', () => {
 		};
 		await expect(buildReport(client, { since: SINCE, until: UNTIL })).rejects.toThrow('db gone');
 		expect(rolledBack).toBe(true);
+	});
+
+	it('reports a failed rollback loudly while rethrowing the original error', async () => {
+		const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const client = {
+				transaction: async () => ({
+					execute: async () => {
+						throw new Error('db gone');
+					},
+					commit: async () => {},
+					rollback: async () => {
+						throw new Error('rollback failed');
+					}
+				})
+			};
+			// The original read failure is the error the caller sees; the
+			// rollback failure is a stderr line, never a swallowed secret.
+			await expect(buildReport(client, { since: SINCE, until: UNTIL })).rejects.toThrow('db gone');
+			expect(stderr).toHaveBeenCalledWith(expect.stringContaining('rollback failed'));
+		} finally {
+			stderr.mockRestore();
+		}
+	});
+
+	it('rejects a malformed aggregate row instead of emitting NaN or a silent zero', async () => {
+		for (const rows of [
+			[], // count(*) driver bug: no row at all
+			[{ n: null }], // SUM over an empty set without COALESCE
+			[{ n: 'not-a-number' }]
+		]) {
+			const client = {
+				transaction: async () => ({
+					execute: async (stmt) => {
+						const sql = typeof stmt === 'string' ? stmt : stmt.sql;
+						if (sql.includes('sqlite_master')) return { rows: REQUIRED_TABLES.map((name) => ({ name })) };
+						return { rows };
+					},
+					commit: async () => {},
+					rollback: async () => {}
+				})
+			};
+			await expect(buildReport(client, { since: SINCE, until: UNTIL })).rejects.toThrow(/malformed aggregate/);
+		}
+		// Grouped breakdowns get the same check: a NULL key or non-finite count
+		// must fail loudly, not serialize as a 'null' bucket or JSON null.
+		for (const rows of [[{ k: null, n: 1 }], [{ k: 'x', n: null }]]) {
+			const client = {
+				transaction: async () => ({
+					execute: async (stmt) => {
+						const sql = typeof stmt === 'string' ? stmt : stmt.sql;
+						if (sql.includes('sqlite_master')) return { rows: REQUIRED_TABLES.map((name) => ({ name })) };
+						if (sql.includes('GROUP BY')) return { rows };
+						return { rows: [{ n: 0 }] };
+					},
+					commit: async () => {},
+					rollback: async () => {}
+				})
+			};
+			await expect(buildReport(client, { since: SINCE, until: UNTIL })).rejects.toThrow(/malformed aggregate/);
+		}
 	});
 });

@@ -73,7 +73,11 @@ function parseIsoTimestamp(flag, value) {
 	if (!match) throw new UsageError(`${flag} must be an ISO-8601 timestamp: ${value}`);
 	const month = Number(match[2]);
 	const day = Number(match[3]);
-	const lastDay = new Date(Date.UTC(Number(match[1]), month, 0)).getUTCDate();
+	// setUTCFullYear takes the year literally; Date.UTC(0,…) maps to 1900,
+	// which would wrongly reject the real leap day '0000-02-29'.
+	const lastDayProbe = new Date(0);
+	lastDayProbe.setUTCFullYear(Number(match[1]), month, 0);
+	const lastDay = lastDayProbe.getUTCDate();
 	const ms = Date.parse(value);
 	if (month < 1 || month > 12 || day < 1 || day > lastDay || !Number.isFinite(ms)) {
 		throw new UsageError(`${flag} is not a valid timestamp: ${value}`);
@@ -104,10 +108,24 @@ export function parseArgs(argv, now = Date.now()) {
 	return { since, until };
 }
 
+// An aggregate query that returns a missing/NULL/non-finite value has failed
+// silently — emitting it would serialize NaN to null and lie to the operator.
+function requireFinite(name, column, value) {
+	if (value === null || value === undefined) {
+		throw new Error(`launch-report: query ${name} returned a malformed aggregate (${column} is missing)`);
+	}
+	const n = Number(value);
+	if (!Number.isFinite(n)) {
+		throw new Error(`launch-report: query ${name} returned a malformed aggregate (${column}=${String(value)})`);
+	}
+	return n;
+}
+
 async function scalar(client, name, sql, args = []) {
 	try {
 		const result = await client.execute({ sql, args });
-		return Number(result.rows[0]?.n ?? 0);
+		if (result.rows.length === 0) throw new Error('malformed aggregate (no row)');
+		return requireFinite(name, 'n', result.rows[0].n);
 	} catch (error) {
 		throw new Error(`launch-report: query ${name} failed — ${error instanceof Error ? error.message : String(error)}`);
 	}
@@ -116,7 +134,12 @@ async function scalar(client, name, sql, args = []) {
 async function grouped(client, name, sql, args = []) {
 	try {
 		const result = await client.execute({ sql, args });
-		return Object.fromEntries(result.rows.map((row) => [String(row.k), Number(row.n)]));
+		return Object.fromEntries(
+			result.rows.map((row) => {
+				if (row.k === null || row.k === undefined) throw new Error('malformed aggregate (key is missing)');
+				return [String(row.k), requireFinite(name, 'n', row.n)];
+			})
+		);
 	} catch (error) {
 		throw new Error(`launch-report: query ${name} failed — ${error instanceof Error ? error.message : String(error)}`);
 	}
@@ -127,7 +150,12 @@ async function grouped(client, name, sql, args = []) {
 async function ledgerGrouped(client, name, sql) {
 	try {
 		const result = await client.execute(sql);
-		return Object.fromEntries(result.rows.map((row) => [String(row.k), { rows: Number(row.n), netCredits: Number(row.s) }]));
+		return Object.fromEntries(
+			result.rows.map((row) => {
+				if (row.k === null || row.k === undefined) throw new Error('malformed aggregate (key is missing)');
+				return [String(row.k), { rows: requireFinite(name, 'n', row.n), netCredits: requireFinite(name, 's', row.s) }];
+			})
+		);
 	} catch (error) {
 		throw new Error(`launch-report: query ${name} failed — ${error instanceof Error ? error.message : String(error)}`);
 	}
@@ -151,7 +179,13 @@ async function reportOrganizations(client) {
 		withMeteredCredits: await scalar(client, 'organizations.withMeteredCredits', 'SELECT count(*) AS n FROM organizations WHERE credits_remaining IS NOT NULL'),
 		withPositiveCredits: await scalar(client, 'organizations.withPositiveCredits', 'SELECT count(*) AS n FROM organizations WHERE credits_remaining > 0'),
 		creditsRemainingTotal: await scalar(client, 'organizations.creditsRemainingTotal', 'SELECT COALESCE(SUM(credits_remaining), 0) AS n FROM organizations'),
-		autoTopupPausedOrDisabled: await scalar(client, 'organizations.autoTopupPausedOrDisabled', "SELECT count(*) AS n FROM organizations WHERE auto_topup_state = 'disabled' OR auto_topup_pause_reason IS NOT NULL")
+		// 'disabled' is a shared terminal state: a plain owner opt-out, a refund
+		// pause (pause_reason set), a card change, a dispute, or an auth/max-
+		// failure disable (auto_topup_enabled stays 1 there — consent recorded
+		// but the charge path failed). Report the raw states; attention weighs
+		// only the operator-forced ones.
+		autoTopupDisabled: await scalar(client, 'organizations.autoTopupDisabled', "SELECT count(*) AS n FROM organizations WHERE auto_topup_state = 'disabled'"),
+		autoTopupPaused: await scalar(client, 'organizations.autoTopupPaused', 'SELECT count(*) AS n FROM organizations WHERE auto_topup_pause_reason IS NOT NULL')
 	};
 }
 
@@ -174,7 +208,10 @@ async function reportChannels(client, inWindow) {
 		everSuccessfulLiveRun: await scalar(client, 'channels.everSuccessfulLiveRun', 'SELECT count(*) AS n FROM channels WHERE last_success_at IS NOT NULL'),
 		latestRunSucceeded: await scalar(client, 'channels.latestRunSucceeded', "SELECT count(*) AS n FROM channels WHERE last_run_status = 'success'"),
 		latestRunFailed: await scalar(client, 'channels.latestRunFailed', "SELECT count(*) AS n FROM channels WHERE last_run_status = 'failed'"),
-		neverRun: await scalar(client, 'channels.neverRun', 'SELECT count(*) AS n FROM channels WHERE last_run_status IS NULL'),
+		// Resuming a paused channel clears the run verdict (last_run_status →
+		// NULL) but keeps last_run_at — the durable marker that a live run ever
+		// happened. neverRun means "no live run yet", not "no current verdict".
+		neverRun: await scalar(client, 'channels.neverRun', 'SELECT count(*) AS n FROM channels WHERE last_run_at IS NULL'),
 		lastRunFailureByCategory: await grouped(client, 'channels.lastRunFailureByCategory', "SELECT COALESCE(last_run_error, 'uncategorized') AS k, count(*) AS n FROM channels WHERE last_run_status = 'failed' GROUP BY k")
 	};
 }
@@ -199,15 +236,34 @@ async function reportBilling(client, inWindow) {
 	return {
 		stripeCheckoutAttemptsByStatus: await grouped(client, 'billing.stripeAttempts', 'SELECT status AS k, count(*) AS n FROM stripe_checkout_attempts GROUP BY status'),
 		mercadoPagoCheckoutAttemptsByStatus: await grouped(client, 'billing.mercadoPagoAttempts', 'SELECT status AS k, count(*) AS n FROM mercado_pago_checkout_attempts GROUP BY status'),
-		// 'fulfilled' is the only attempt state that drove a real grant — an
-		// open/abandoned Checkout redirect is never counted as paid. The window
-		// keys on updated_at, which the webhook stamps at fulfillment; Stripe
-		// has no paid_at, and created_at misattributes cross-window checkouts.
-		stripeCheckoutsFulfilledInWindow: await scalar(client, 'billing.stripeFulfilledInWindow', "SELECT count(*) AS n FROM stripe_checkout_attempts WHERE status = 'fulfilled' AND updated_at >= ? AND updated_at < ?", inWindow),
-		// paid_at is stamped only when the grant actually completes; it survives
-		// later status moves to refunded/disputed, while manual_refund_required
-		// (approved but never granted) keeps paid_at NULL and stays excluded.
-		mercadoPagoCheckoutsFulfilledInWindow: await scalar(client, 'billing.mercadoFulfilledInWindow', 'SELECT count(*) AS n FROM mercado_pago_checkout_attempts WHERE paid_at >= ? AND paid_at < ?', inWindow),
+		// A grant is the immutable credit_transactions purchase row: applied once
+		// per (org_id, ref_type, ref_id) and never rewritten, while attempt
+		// timestamps (Stripe updated_at, MP paid_at) restamp on webhook replays.
+		// Stripe purchase rows anchor on ref_id = stripe_session_id.
+		stripeCheckoutsFulfilledInWindow: await scalar(
+			client,
+			'billing.stripeFulfilledInWindow',
+			`SELECT count(*) AS n FROM stripe_checkout_attempts a
+				JOIN credit_transactions t
+					ON t.org_id = a.org_id AND t.ref_type = 'checkout_session' AND t.reason = 'purchase' AND t.delta > 0
+					AND t.ref_id = a.stripe_session_id
+				WHERE t.created_at >= ? AND t.created_at < ?`,
+			inWindow
+		),
+		// Same anchor for Mercado Pago — its ledger ref_id is provider-prefixed
+		// 'mercadopago:<payment_id>'. A refunded/disputed checkout keeps its
+		// purchase row; manual_refund_required (approved, never granted) has
+		// none and stays excluded.
+		mercadoPagoCheckoutsFulfilledInWindow: await scalar(
+			client,
+			'billing.mercadoFulfilledInWindow',
+			`SELECT count(*) AS n FROM mercado_pago_checkout_attempts a
+				JOIN credit_transactions t
+					ON t.org_id = a.org_id AND t.ref_type = 'checkout_session' AND t.reason = 'purchase' AND t.delta > 0
+					AND t.ref_id = 'mercadopago:' || a.payment_id
+				WHERE t.created_at >= ? AND t.created_at < ?`,
+			inWindow
+		),
 		creditLedgerByReason: await ledgerGrouped(client, 'billing.ledgerByReason', 'SELECT reason AS k, count(*) AS n, COALESCE(SUM(delta), 0) AS s FROM credit_transactions GROUP BY reason'),
 		subscriptionPeriodsByStatus: await grouped(client, 'billing.subscriptionPeriods', 'SELECT status AS k, count(*) AS n FROM stripe_subscription_periods GROUP BY status'),
 		orgsWithPaidSubscriptionPeriod: await scalar(client, 'billing.orgsWithPaidPeriod', "SELECT count(DISTINCT org_id) AS n FROM stripe_subscription_periods WHERE status = 'paid'"),
@@ -242,7 +298,15 @@ async function reportAttention(client, sections) {
 		...(await attentionQueues(client)),
 		channelsLatestRunFailed: sections.channels.latestRunFailed,
 		usersInZeroCreditCountdown: sections.users.inZeroCreditCountdown,
-		orgsAutoTopupPausedOrDisabled: sections.organizations.autoTopupPausedOrDisabled,
+		// Forced pauses only: a refund pause (reason recorded) or a failure-
+		// disabled org still holding consent (enabled=1 + disabled = auth/max-
+		// failure path). A plain owner opt-out (enabled=0, no reason) is a
+		// preference, not a problem.
+		orgsAutoTopupNeedingAttention: await scalar(
+			client,
+			'attention.orgsAutoTopupNeedingAttention',
+			"SELECT count(*) AS n FROM organizations WHERE auto_topup_pause_reason IS NOT NULL OR (auto_topup_enabled = 1 AND auto_topup_state = 'disabled')"
+		),
 		manualRefundRequiredCheckouts:
 			(sections.billing.stripeCheckoutAttemptsByStatus.manual_refund_required ?? 0) +
 			(sections.billing.mercadoPagoCheckoutAttemptsByStatus.manual_refund_required ?? 0),
@@ -301,7 +365,11 @@ export async function buildReport(client, { since, until }) {
 			...sections
 		};
 	} catch (error) {
-		await tx.rollback().catch(() => {});
+		// The original failure is what the caller gets — but a cleanup failure
+		// is still an operational fact, so it is logged, never swallowed.
+		await tx.rollback().catch((rollbackError) => {
+			console.error(`launch-report: snapshot rollback failed — ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+		});
 		throw error;
 	}
 }

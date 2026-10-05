@@ -262,19 +262,20 @@ async function reportLifecycle(client) {
 // product='test' is the operator's smoke checkout (fiscal doc: not a
 // customer sale): its real grant is bucketed separately, never as a
 // customer conversion.
-async function grantsInWindow(client, inWindow) {
-	const ledgerAnchor = "t.org_id = a.org_id AND t.ref_type = 'checkout_session' AND t.reason = 'purchase' AND t.delta > 0";
+const LEDGER_PURCHASE_ANCHOR = "t.org_id = a.org_id AND t.ref_type = 'checkout_session' AND t.reason = 'purchase' AND t.delta > 0";
+
+async function stripeGrantsInWindow(client, inWindow) {
 	return {
 		stripeCreditGrantsInWindow: await scalar(
 			client,
 			'billing.stripeCreditGrantsInWindow',
-			`SELECT count(*) AS n FROM stripe_checkout_attempts a JOIN credit_transactions t ON ${ledgerAnchor} AND t.ref_id = a.stripe_session_id WHERE a.product <> 'test' AND t.created_at >= ? AND t.created_at < ?`,
+			`SELECT count(*) AS n FROM stripe_checkout_attempts a JOIN credit_transactions t ON ${LEDGER_PURCHASE_ANCHOR} AND t.ref_id = a.stripe_session_id WHERE a.product <> 'test' AND t.created_at >= ? AND t.created_at < ?`,
 			inWindow
 		),
 		stripeTestCreditGrantsInWindow: await scalar(
 			client,
 			'billing.stripeTestCreditGrantsInWindow',
-			`SELECT count(*) AS n FROM stripe_checkout_attempts a JOIN credit_transactions t ON ${ledgerAnchor} AND t.ref_id = a.stripe_session_id WHERE a.product = 'test' AND t.created_at >= ? AND t.created_at < ?`,
+			`SELECT count(*) AS n FROM stripe_checkout_attempts a JOIN credit_transactions t ON ${LEDGER_PURCHASE_ANCHOR} AND t.ref_id = a.stripe_session_id WHERE a.product = 'test' AND t.created_at >= ? AND t.created_at < ?`,
 			inWindow
 		),
 		stripeLifetimeGrantsInWindow: await scalar(
@@ -291,11 +292,17 @@ async function grantsInWindow(client, inWindow) {
 			'billing.stripeHostedSubscriptionsStartedInWindow',
 			'SELECT count(*) AS n FROM (SELECT subscription_id AS sid, MIN(created_at) AS first_at FROM stripe_subscription_periods GROUP BY subscription_id) WHERE first_at >= ? AND first_at < ?',
 			inWindow
-		),
+		)
+	};
+}
+
+async function grantsInWindow(client, inWindow) {
+	return {
+		...(await stripeGrantsInWindow(client, inWindow)),
 		mercadoPagoCreditGrantsInWindow: await scalar(
 			client,
 			'billing.mercadoPagoCreditGrantsInWindow',
-			`SELECT count(*) AS n FROM mercado_pago_checkout_attempts a JOIN credit_transactions t ON ${ledgerAnchor} AND t.ref_id = 'mercadopago:' || a.payment_id WHERE t.created_at >= ? AND t.created_at < ?`,
+			`SELECT count(*) AS n FROM mercado_pago_checkout_attempts a JOIN credit_transactions t ON ${LEDGER_PURCHASE_ANCHOR} AND t.ref_id = 'mercadopago:' || a.payment_id WHERE t.created_at >= ? AND t.created_at < ?`,
 			inWindow
 		)
 	};

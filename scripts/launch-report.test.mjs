@@ -154,8 +154,6 @@ INSERT INTO users (id, google_sub, email, display_name, created_at) VALUES
 	('u-in-window', 'google-sub-sentinel', 'sensitive-user@example.com', 'Sentinel Name', '2026-10-04T12:00:00.000Z'),
 	('u-old', 'gsub-old', 'old@example.com', 'Old User', '2026-09-01T00:00:00.000Z'),
 	('u-gone', 'deleted:u-gone', '[deleted]', '[deleted]', '2026-10-05T00:00:00.000Z'),
-	('u-boundary-in', 'gsub-boundary-in', 'b-in@example.com', 'B In', '${SINCE}'),
-	('u-boundary-out', 'gsub-boundary-out', 'b-out@example.com', 'B Out', '${UNTIL}'),
 	('u-broke', 'gsub-broke', 'broke@example.com', 'Broke User', '2026-10-05T10:00:00.000Z');
 UPDATE users SET zero_credits_since = '2026-10-05T12:00:00.000Z' WHERE id = 'u-broke';
 -- auto_topup_state='disabled' conflates intent: org-personal-1 was forced off
@@ -307,6 +305,11 @@ async function seedPopulated() {
 	const client = createClient({ url: POPULATED_URL });
 	try {
 		await client.executeMultiple(SEED_SQL);
+		// Exact-boundary rows are parameterized: a '${...}' literal inside the
+		// SQL template trips static analysis, and the bound value lands
+		// verbatim either way.
+		await client.execute({ sql: "INSERT INTO users (id, google_sub, email, display_name, created_at) VALUES ('u-boundary-in', 'gsub-boundary-in', 'b-in@example.com', 'B In', ?)", args: [SINCE] });
+		await client.execute({ sql: "INSERT INTO users (id, google_sub, email, display_name, created_at) VALUES ('u-boundary-out', 'gsub-boundary-out', 'b-out@example.com', 'B Out', ?)", args: [UNTIL] });
 	} finally {
 		client.close();
 	}

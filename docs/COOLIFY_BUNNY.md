@@ -109,6 +109,18 @@ One-time setup (human, in the Coolify dashboard):
    | `MERCADOPAGO_ENVIRONMENT` / `MERCADOPAGO_PRICE_CREDITS_*_BRL_CENTS` | production | sandbox | optional Mercado Pago sandbox/production mode and BRL bundle prices in cents |
    | `PROTON_SMTP_USERNAME` / `PROTON_SMTP_TOKEN` | production token | dev token | Proton Mail SMTP for transactional e-mail (contact-form verification and service notices, incl. zero-credit account warnings). Username = the custom-domain sender mailbox and doubles as the From address (domain active in Proton, SPF/DKIM/DMARC verified); token from Proton → Settings → All settings → IMAP/SMTP → SMTP tokens — never the mailbox password, and a separate token per environment |
    | `PROTON_FROM_NAME` | `Moderaty` | `Moderaty` | optional sender display name; defaults to `Moderaty` |
+   | `ANALYTICS_ENABLED` | `false` until activation review | `false` | optional GTM opt-in; Runtime Variable only, **Build Variable OFF** |
+   | `GTM_ID` / `GTM_ALLOWED_HOSTNAMES` | own container ID / exact public hostname list | empty | Runtime Variables only, **Build Variable OFF**; no values in Docker images |
+
+   **Optional analytics.** GTM stays disabled unless explicitly enabled with a
+   valid container ID and exact allowed hostname. The browser checks its own
+   hostname before loading any Google script; eligible public pages fetch settings
+   from the no-store `/api/analytics` endpoint at runtime. Keep the official ID
+   exclusively in the prod app's runtime settings, and keep `/api/analytics`
+   under the existing Bunny `/api/*` cache bypass. Account and token flows are
+   excluded, including navigation from tracked public pages. Review privacy disclosures and
+   visitor-consent requirements before activation: the current Privacy Policy
+   says no third-party tracking cookies. See [ANALYTICS.md](ANALYTICS.md).
 
    **Stripe webhook endpoint is per-environment, per-sandbox.** Register
    `https://<app-domain>/api/stripe/webhook` under **Developers → Webhooks**

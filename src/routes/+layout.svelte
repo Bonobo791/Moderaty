@@ -1,6 +1,7 @@
 <script lang="ts">
 	import '../app.css';
 	import favicon from '$lib/assets/favicon.svg';
+	import Analytics from '$lib/components/Analytics.svelte';
 
 	let { children, data } = $props();
 
@@ -18,3 +19,5 @@
 </svelte:head>
 
 {@render children()}
+
+<Analytics />

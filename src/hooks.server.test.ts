@@ -41,6 +41,18 @@ function makeEvent() {
 	};
 }
 
+test('analytics configuration remains available without the database or session and stays noindex', async () => {
+	mocks.assertMigrationsCurrent.mockRejectedValue(new Error('database unavailable'));
+	vi.spyOn(console, 'error').mockImplementation(() => {});
+	mocks.getSessionUser.mockRejectedValue(new Error('database unavailable'));
+	const event = { ...makeEvent(), route: { id: '/api/analytics' } };
+	const response = await handle({ event, resolve: async () => new Response('null') } as never);
+	expect(await response.text()).toBe('null');
+	expect(response.headers.get('x-robots-tag')).toBe('noindex');
+	expect(mocks.assertMigrationsCurrent).not.toHaveBeenCalled();
+	expect(mocks.getSessionUser).not.toHaveBeenCalled();
+});
+
 test('the locale is read from the exported LOCALE_COOKIE and applied to the html lang', async () => {
 	// The cookie name must come from $lib/i18n/locale's LOCALE_COOKIE, not a
 	// hardcoded string that can drift from the writer in /api/locale (cubic).

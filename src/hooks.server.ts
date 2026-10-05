@@ -42,10 +42,10 @@ export const handle: Handle = async ({ event, resolve }) => {
 		if (isNoIndexRoute(event.route.id)) response.headers.set('X-Robots-Tag', 'noindex');
 		return response;
 	};
-	// The health probe reports database health itself, and the public metadata
-	// endpoints are independent of the application schema and session.
-	// Bypassing the guard and session keeps all four available during outages.
-	if (['/api/health', '/robots.txt', '/sitemap.xml', '/llms.txt'].includes(event.route.id ?? '')) {
+	// The health probe reports database health itself; public metadata and
+	// analytics configuration are independent of the schema and session.
+	// Bypassing the guard keeps them available during database outages.
+	if (['/api/health', '/api/analytics', '/robots.txt', '/sitemap.xml', '/llms.txt'].includes(event.route.id ?? '')) {
 		return respond(resolve(event));
 	}
 	// Deploy-ordering boundary (issue #81): if the database is behind the

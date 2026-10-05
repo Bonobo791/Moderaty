@@ -38,6 +38,11 @@ function publicPath(url: URL): string {
 	return url.pathname + (query.size ? `?${query}` : '');
 }
 
+/** Identifies a pageview without reacting to discarded query data or fragments. */
+export function analyticsPageUrl(url: URL): string | null {
+	return isAnalyticsPage(url) ? publicPath(url) : null;
+}
+
 /** Null suppresses a document reached from a private or unparseable referrer. */
 function publicReferrer(value: string, url: URL): string | null {
 	if (!value) return '';

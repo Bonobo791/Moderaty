@@ -157,6 +157,22 @@ information. Small payloads and no cookies do not guarantee anonymity or LGPD
 compliance. The collector's geography derivation and infrastructure logs also
 need assessment. The published Privacy page explains the scope and preference.
 
+## Local browser regression
+
+Run `MODERATY_ADAPTER=node npm run build`, then
+`node scripts/test-analytics-browser.mjs`. This uses Python 3 Playwright and
+Chromium; set absolute `PYTHON_BINARY` and `CHROMIUM_BINARY` paths if needed.
+One unchanged Node build is restarted with disabled, enabled, denied-host and
+invalid runtime settings. Chromium exercises actual SvelteKit navigation,
+pending-configuration races, CTA clicks, private-document blocking, browser
+privacy signals, storage errors, cross-tab opt-out and generic failure reporting.
+
+All collector and other external requests are intercepted. The temporary local
+database contains only synthetic migration-count bookkeeping for anonymous public
+and login requests; it does not verify migrations or authenticated flows. Actual
+collector CORS, persistence, dashboard counts and purge behavior remain operator
+checks on staging.
+
 ## Rollback and historical reports
 
 Set `ANALYTICS_ENABLED=false` in runtime settings and restart/redeploy the instance.

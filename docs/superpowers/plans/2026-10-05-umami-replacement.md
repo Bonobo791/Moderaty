@@ -116,11 +116,11 @@ Retain loud, generic browser failures, the existing optional-measurement status 
 - buildPagePayload(url: URL, referrer: string, config: AnalyticsConfig): PagePayload | null.
 - parseMarketingClick(name: string | null, placement: string | null): { name: MarketingEvent; placement: MarketingPlacement } | null.
 
-- [ ] Add failing tests: public path allowlist, sensitive query-key casing/encoding, approved versus arbitrary UTMs, duplicate UTM removal, fragment removal, fixed titles, external-origin referrers, private same-origin referrer suppression, and exact event/placement pairs. Assert complete returned payloads and rejected cases, rather than source-text matches.
-- [ ] Run npm run test -- src/lib/analytics-policy.test.ts and confirm the tests fail for absent behavior.
-- [ ] Implement the interfaces and exact registry/rules above without new packages.
-- [ ] Re-run the targeted tests, then npm run check, npm run build and npm run test. Confirm all pass.
-- [ ] Commit as step 1: define public Umami payload policy.
+- [x] Add failing tests: public path allowlist, sensitive query-key casing/encoding, approved versus arbitrary UTMs, duplicate UTM removal, fragment removal, fixed titles, external-origin referrers, private same-origin referrer suppression, and exact event/placement pairs. Assert complete returned payloads and rejected cases, rather than source-text matches.
+- [x] Run npm run test -- src/lib/analytics-policy.test.ts and confirm the tests fail for absent behavior.
+- [x] Implement the interfaces and exact registry/rules above without new packages.
+- [x] Re-run the targeted tests, then npm run check, npm run build and npm run test. Confirm all pass.
+- [x] Commit as step 1: define public Umami payload policy.
 
 ## Task 2: Replace the runtime integration atomically
 
@@ -135,13 +135,13 @@ Retain loud, generic browser failures, the existing optional-measurement status 
 - AnalyticsClient.stop(): void.
 - The runtime configuration response described in Design.
 
-- [ ] Replace GTM-specific tests with failing assertions for the complete Umami config/transport/lifecycle contract. Retain disabled/fork, pinned ORIGIN, cache-control, cancellation and generic diagnostic tests.
-- [ ] Add regression tests for all five Review Focus conditions. Also assert exactly one initial pageview, one public SPA pageview per changed canonical URL, no hash-only duplicate, no private-history reactivation, no tracking globals/scripts, bounded cache reuse, successful bot suppression, malformed/failed responses and no automatic retry.
-- [ ] Run npm run test -- src/lib/analytics.test.ts src/lib/components/Analytics.test.ts src/routes/api/analytics/analytics.test.ts; confirm the new assertions fail.
-- [ ] Change server and client together so the new response shape never leaves a committed dev version with a mismatched loader. Remove GTM script/dataLayer logic and forced navigation; retain the lifetime safety latch.
-- [ ] Rework runtime examples and the analytics runbook around the new settings, limitations and same-artifact runtime checks. Keep all example measurement values empty or synthetic.
-- [ ] Re-run targeted tests, then npm run check, npm run build and npm run test. Confirm all pass.
-- [ ] Commit as step 2: replace GTM with guarded Umami collection.
+- [x] Replace GTM-specific tests with failing assertions for the complete Umami config/transport/lifecycle contract. Retain disabled/fork, pinned ORIGIN, cache-control, cancellation and generic diagnostic tests.
+- [x] Add regression tests for all five Review Focus conditions. Also assert exactly one initial pageview, one public SPA pageview per changed canonical URL, no hash-only duplicate, no private-history reactivation, no tracking globals/scripts, bounded cache reuse, successful bot suppression, malformed/failed responses and no automatic retry.
+- [x] Run npm run test -- src/lib/analytics.test.ts src/lib/components/Analytics.test.ts src/routes/api/analytics/analytics.test.ts; confirm the new assertions fail.
+- [x] Change server and client together so the new response shape never leaves a committed dev version with a mismatched loader. Remove GTM script/dataLayer logic and forced navigation; retain the lifetime safety latch.
+- [x] Rework runtime examples and the analytics runbook around the new settings, limitations and same-artifact runtime checks. Keep all example measurement values empty or synthetic.
+- [x] Re-run targeted tests, then npm run check, npm run build and npm run test. Confirm all pass.
+- [x] Commit as step 2: replace GTM with guarded Umami collection.
 
 ## Task 3: Instrument public CTAs and add visitor control
 
@@ -155,12 +155,12 @@ Retain loud, generic browser failures, the existing optional-measurement status 
 - Static link markers using the exact event/placement table.
 - AnalyticsPreference embedded in Footer; no account preference storage.
 
-- [ ] Add failing tests: static event payloads contain only approved placement; nested target, keyboard, modifier and middle clicks behave correctly; no handler prevents navigation or waits for the network.
-- [ ] Assert DNT, GPC and stored opt-out create zero collector requests. Assert preference storage failure remains disabled, cross-tab opt-out stops future requests, and late responses cannot restore cache.
-- [ ] Run npm run test -- src/lib/analytics.test.ts src/lib/components/Analytics.test.ts src/lib/components/AnalyticsPreference.test.ts and confirm failure.
-- [ ] Implement delegation in the owning Analytics component and add static markers to the listed links. Add the accessible preference control; keep arbitrary DOM/text/URLs outside event data.
-- [ ] Re-run targeted tests, then npm run check, npm run build and npm run test. Confirm all pass.
-- [ ] Commit as step 3: add public marketing events and measurement preference.
+- [x] Add failing tests: static event payloads contain only approved placement; nested target, keyboard, modifier and middle clicks behave correctly; no handler prevents navigation or waits for the network.
+- [x] Assert DNT, GPC and stored opt-out create zero collector requests. Assert preference storage failure remains disabled, cross-tab opt-out stops future requests, and late responses cannot restore cache.
+- [x] Run npm run test -- src/lib/analytics.test.ts src/lib/components/Analytics.test.ts src/lib/components/AnalyticsPreference.test.ts and confirm failure.
+- [x] Implement delegation in the owning Analytics component and add static markers to the listed links. Add the accessible preference control; keep arbitrary DOM/text/URLs outside event data.
+- [x] Re-run targeted tests, then npm run check, npm run build and npm run test. Confirm all pass.
+- [x] Commit as step 3: add public marketing events and measurement preference.
 
 ## Task 4: Update disclosures and prepare the operator rollout
 
@@ -168,13 +168,32 @@ Retain loud, generic browser failures, the existing optional-measurement status 
 
 **Add operator assessment:** docs/privacy/2026-10-05-umami-audience-measurement.md.
 
-- [ ] Add a behavior/content regression for accurate audience-measurement disclosure and the working opt-out explanation. Run npm run test -- src/lib/landing/legal.test.ts src/lib/components/AnalyticsPreference.test.ts before editing copy and confirm the new assertions fail.
-- [ ] Update Privacy sections 1, 2, 9 and 12 to cover visitors, purpose, data flow, lawful basis, hosting/sharing, retention and rights. Describe IP/UA processing and pseudonymous session derivation accurately; do not claim guaranteed anonymity or automatic LGPD compliance.
-- [ ] Advance legal version 1.18 to 1.19 if still current, following the existing legal-version and renewed-acceptance mechanism. Set the effective date to the actual approved publication schedule, not an invented date.
-- [ ] Preserve the existing Privacy section 13 promise of 30 days' advance notice, including its user notification commitments. Operator activation must occur after the notice period; do not silently remove the promise or enable measurement during it.
-- [ ] Prepare an assessment template with the defined purpose, necessity, balancing factors and safeguards. Mark the operator's legal-basis decision as awaiting completion; never publish a statement that the assessment is finished when it is not.
-- [ ] Document the deployment and acceptance checklist below, including retention as an activation prerequisite.
-- [ ] Run relevant legal/analytics tests, npm run check, npm run build and npm run test. Confirm all pass, then commit as step 4: document Umami privacy and activation requirements.
+- [x] Add a behavior/content regression for accurate audience-measurement disclosure and the working opt-out explanation. Run npm run test -- src/lib/landing/legal.test.ts src/lib/components/AnalyticsPreference.test.ts before editing copy and confirm the new assertions fail.
+- [x] Update Privacy sections 1, 2, 9 and 12 to cover visitors, purpose, data flow, lawful basis, hosting/sharing, retention and rights. Describe IP/UA processing and pseudonymous session derivation accurately; do not claim guaranteed anonymity or automatic LGPD compliance.
+- [x] Advance legal version 1.18 to 1.19 if still current, following the existing legal-version and renewed-acceptance mechanism. Set the effective date to the actual approved publication schedule, not an invented date.
+- [x] Preserve the existing Privacy section 13 promise of 30 days' advance notice, including its user notification commitments. Operator activation must occur after the notice period; do not silently remove the promise or enable measurement during it.
+- [x] Prepare an assessment template with the defined purpose, necessity, balancing factors and safeguards. Mark the operator's legal-basis decision as awaiting completion; never publish a statement that the assessment is finished when it is not.
+- [x] Document the deployment and acceptance checklist below, including retention as an activation prerequisite.
+- [x] Run relevant legal/analytics tests, npm run check, npm run build and npm run test. Confirm all pass, then commit as step 4: document Umami privacy and activation requirements.
+
+## Implementation verification — 5 October 2026
+
+Implemented on `feat/umami-gtm` at the user's request. The user confirmed there
+are no existing users and no required publication schedule; version 1.19 uses
+5 October 2026 while preserving section 13's future notice commitment.
+
+The final suite passes 194 files / 3,745 tests, with zero Svelte/TypeScript errors
+or warnings. Both Netlify and Node builds pass. Synthetic runtime origins and
+UUIDs are absent from deployment/client artifacts. Chromium checks one unchanged
+Node build under multiple runtime configurations with all external requests
+intercepted. A review found and reproduced a pending-pageview loss on equivalent
+URL navigation; canonical effect dependencies fix it, with browser regressions
+for hash, discarded-query and reordered-UTM changes. Follow-up independent review
+found no remaining material issues.
+
+Operator deployment, actual collector delivery/CORS/dashboard/purge verification,
+publication, production activation and pushing remain pending. Local browser
+regression instructions are in `docs/ANALYTICS.md`.
 
 ## Operator deployment and acceptance checklist
 

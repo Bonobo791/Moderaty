@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { buildPagePayload, isAnalyticsPage, parseMarketingClick } from './analytics-policy';
+import { analyticsPageUrl, buildPagePayload, isAnalyticsPage, parseMarketingClick } from './analytics-policy';
 
 const config = { umamiUrl: 'https://collector.example', websiteId: '11111111-2222-4333-8444-555555555555', hostname: 'moderaty.example' };
 const page = (path: string) => new URL(path, 'https://moderaty.example');
@@ -49,6 +49,17 @@ test.each(['utm_source=google&utm_source=google', 'utm_source=google&utm_source=
 test('canonicalizes UTM ordering without preserving caller query order', () => {
 	expect(buildPagePayload(page('/?utm_medium=email&utm_source=newsletter&ignored=value'), '', config))
 		.toEqual(payload('/?utm_source=newsletter&utm_medium=email'));
+});
+
+test('uses the same pageview identity for hash, ignored query and reordered UTM navigation', () => {
+	for (const path of ['/', '/#regulars', '/?ignored=value', '/?utm_campaign=unapproved#regulars']) {
+		expect(analyticsPageUrl(page(path))).toBe('/');
+	}
+	for (const path of ['/?utm_source=google&utm_medium=cpc', '/?utm_medium=cpc&ignored=value&utm_source=google#regulars']) {
+		expect(analyticsPageUrl(page(path))).toBe('/?utm_source=google&utm_medium=cpc');
+	}
+	expect(analyticsPageUrl(page('/login'))).toBeNull();
+	expect(analyticsPageUrl(page('/?token='))).toBeNull();
 });
 
 test.each(['https://ref.example/private?email=secret#fragment', 'https://user:password@ref.example:8443/private?token=secret'])(

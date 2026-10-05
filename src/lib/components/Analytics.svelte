@@ -5,11 +5,12 @@
 	import { onDestroy, onMount } from 'svelte';
 	import { createAnalyticsClient, readMarketingClick } from '$lib/analytics';
 	import { ANALYTICS_OPT_OUT_KEY, ANALYTICS_PREFERENCE_EVENT, browserRequestsPrivacy, getAnalyticsOptOut } from '$lib/analytics-preference';
-	import { isAnalyticsPage } from '$lib/analytics-policy';
+	import { analyticsPageUrl, isAnalyticsPage } from '$lib/analytics-policy';
 
 	let unavailable = $state(false);
 	let pending: AbortController | undefined;
-	const eligible = $derived(browser && isAnalyticsPage(page.url));
+	const publicUrl = $derived(browser ? analyticsPageUrl(page.url) : null);
+	const eligible = $derived(publicUrl !== null);
 	let safeDocument = $state(browser && isAnalyticsPage(page.url));
 	const client = browser ? createAnalyticsClient({ onFailure: () => { unavailable = true; } }) : undefined;
 
@@ -43,10 +44,10 @@
 		};
 	});
 	$effect(() => {
-		if (!eligible || !safeDocument || !client) return;
+		if (publicUrl === null || !safeDocument || !client) return;
 		const controller = new AbortController();
 		pending = controller;
-		void client.pageview(page.url, controller.signal).catch(() => {
+		void client.pageview(new URL(publicUrl, window.location.origin), controller.signal).catch(() => {
 			if (!controller.signal.aborted) unavailable = true;
 		});
 		return () => controller.abort();

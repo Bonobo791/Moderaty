@@ -86,7 +86,7 @@ const FIXTURE_IDENTIFIERS = [
 	'mp-pay-1', 'mp-pay-2', 'mp-pay-3', 'mp-pay-4',
 	'mercadopago:mp-pay-1', 'mercadopago:mp-pay-3', 'mercadopago:mp-pay-4',
 	'cs_sa2', 'cs_sa3', 'cs_sa4', 'cs_sa5', 'cs_sa6', 'cs_sa7', 'cs_sa8', 'cs_test_1',
-	'UC-dryrun', 'UC-pausedfailed', 'Dryrun Chan', 'Pausedfailed Chan', 'enc-7', 'enc-8',
+	'UC-dryrun', 'UC-pausedfailed', 'UC-resumedfailed', 'Dryrun Chan', 'Pausedfailed Chan', 'Resumedfailed Chan', 'enc-7', 'enc-8', 'enc-9', 'c-5',
 	'pi_topup_1', 'ch_topup_1', 'ch_ref', 'adj-1',
 	'sub_old', 'in_old', 'cs_life_1', 'cs_life_2',
 	'du_won', 'ch_dsp_1', 'ch_dsp_2', 'ch_pend_1'
@@ -192,14 +192,21 @@ INSERT INTO channels (id, user_id, org_id, title, refresh_token_enc, active, las
 	-- Pausing keeps the run verdict (only active flips to 0): a channel paused
 	-- while holding 'failed' carries a stale failure forever. It belongs to the
 	-- all-channel breakdown but not to live attention.
-	('UC-pausedfailed', 'u-old', 'org-personal-2', 'Pausedfailed Chan', 'enc-8', 0, 'failed', NULL, 'timeout', '2026-10-05T11:00:00.000Z', NULL, NULL, '2026-10-05T08:00:00.000Z');
+	('UC-pausedfailed', 'u-old', 'org-personal-2', 'Pausedfailed Chan', 'enc-8', 0, 'failed', NULL, 'timeout', '2026-10-05T11:00:00.000Z', NULL, NULL, '2026-10-05T08:00:00.000Z'),
+	-- Ran live, produced output (c-5 below), failed, then was paused and
+	-- resumed: the verdict is cleared but the moderation output proves a live
+	-- run — it must NOT read as neverRun.
+	('UC-resumedfailed', 'u-old', 'org-personal-2', 'Resumedfailed Chan', 'enc-9', 1, NULL, NULL, NULL, '2026-10-05T12:00:00.000Z', NULL, NULL, '2026-10-05T07:00:00.000Z');
 INSERT INTO comments (id, channel_id, text, published_at, status, decided_by, human_dispatch_state) VALUES
 	('c-1', 'UCsentinelchan', 'raw sentinel comment text', '2026-10-04T12:00:00.000Z', 'approved', 'ai', 'in_flight'),
 	('c-2', 'UCsentinelchan', 'held text', '2026-10-04T12:30:00.000Z', 'held', 'rule', NULL),
 	-- A remote human action that may or may not have landed: the verdict is
 	-- recorded on the comment, independent of its moderation status.
 	('c-3', 'UCsentinelchan', 'restoring text', '2026-10-04T13:00:00.000Z', 'restoring', 'human', 'uncertain'),
-	('c-4', 'UC-failed', 'deleted text', '2026-10-04T14:00:00.000Z', 'deleted', 'ai', NULL);
+	('c-4', 'UC-failed', 'deleted text', '2026-10-04T14:00:00.000Z', 'deleted', 'ai', NULL),
+	-- Durable live-run output for UC-resumedfailed: a dry run never writes
+	-- comments rows, so this is what separates it from a dry-run-only channel.
+	('c-5', 'UC-resumedfailed', 'resumed run text', '2026-10-05T11:30:00.000Z', 'approved', 'ai', NULL);
 INSERT INTO moderation_actions (comment_id, channel_id, action, reason, state, author_handle) VALUES
 	('c-2', 'UCsentinelchan', 'hold', 'rule 1', 'pending', '@sentinelhandle'),
 	('c-x', 'UCsentinelchan', 'reject', 'ai', 'completed', NULL),
@@ -468,16 +475,16 @@ describe('launch-report content', () => {
 		expect(report.organizations.shared).toBe(1);
 		// org-sentinel has two members and one channel — neither join may
 		// multiply it into two orgs or two users.
-		expect(report.channels.total).toBe(8);
+		expect(report.channels.total).toBe(9);
 		expect(report.channels.orgsWithChannels).toBe(3);
 		expect(report.channels.usersWhoConnected).toBe(2);
 		// Only UC-orphan is claimable; UC-detached kept its org and needs a
 		// reconnect — it is not a pre-account orphan.
 		expect(report.channels.orphanedAwaitingClaim).toBe(1);
 		expect(report.channels.detachedAwaitingReconnect).toBe(1);
-		expect(report.channels.active).toBe(4);
+		expect(report.channels.active).toBe(5);
 		expect(report.channels.inactive).toBe(4);
-		expect(report.channels.createdInWindow).toBe(6);
+		expect(report.channels.createdInWindow).toBe(7);
 	});
 
 	it('separates a preview attempt from a completed live run', async () => {
@@ -490,8 +497,9 @@ describe('launch-report content', () => {
 		// UC-idle paused and resumed: its verdict was cleared but its run and
 		// success history are durable — it counts as ever-successful, never as
 		// neverRun. UC-dryrun rotated under DRY_RUN (last_run_at written, no
-		// verdict) — a rotation timestamp is not a live run, so it joins
-		// UC-orphan and UC-detached in neverRun.
+		// verdict, no output) — a rotation is not a live run, so it joins
+		// UC-orphan and UC-detached in neverRun. UC-resumedfailed's cleared
+		// verdict looks identical but c-5's live output keeps it out.
 		expect(report.channels.everSuccessfulLiveRun).toBe(3);
 		expect(report.channels.latestRunSucceeded).toBe(1);
 		// UC-pausedfailed carries a stale 'failed' verdict while paused — it is
@@ -504,7 +512,7 @@ describe('launch-report content', () => {
 	it('reports moderation activity and billing truth without counting redirects as grants', async () => {
 		const { code, report } = await runReport(POPULATED_URL);
 		expect(code).toBe(0);
-		expect(report.moderation.commentsByStatus).toEqual({ approved: 1, held: 1, restoring: 1, deleted: 1 });
+		expect(report.moderation.commentsByStatus).toEqual({ approved: 2, held: 1, restoring: 1, deleted: 1 });
 		expect(report.moderation.auditActionsByType).toEqual({ approve: 1, hold: 1, 'dry-run': 1, delete: 1, restore: 1 });
 		expect(report.moderation.actionsByState).toEqual({ pending: 1, completed: 1, dispatched: 1 });
 		expect(report.moderation.feedbackDigestsByStatus).toEqual({ complete: 1, failed: 1, 'dry-run-pending': 1, 'dry-run-failed': 1 });

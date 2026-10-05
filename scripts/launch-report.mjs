@@ -216,14 +216,17 @@ async function reportChannels(client, inWindow) {
 		everSuccessfulLiveRun: await scalar(client, 'channels.everSuccessfulLiveRun', 'SELECT count(*) AS n FROM channels WHERE last_success_at IS NOT NULL'),
 		latestRunSucceeded: await scalar(client, 'channels.latestRunSucceeded', "SELECT count(*) AS n FROM channels WHERE last_run_status = 'success'"),
 		latestRunFailed: await scalar(client, 'channels.latestRunFailed', "SELECT count(*) AS n FROM channels WHERE last_run_status = 'failed'"),
-		// neverRun = no live-run outcome recorded. last_run_at is only the
+		// neverRun = no recorded live run at all. last_run_at is only the
 		// rotation timestamp — cron writes it for every claim, including a
 		// DRY_RUN run, which records no verdict (runHealth 'none' writes
-		// nothing). A dry-run-only channel therefore has last_run_at set yet
-		// never ran live. last_run_status IS NULL alone is not enough either:
-		// a resume clears the verdict but keeps last_success_at, so a channel
-		// with a recorded success must stay out of the bucket.
-		neverRun: await scalar(client, 'channels.neverRun', 'SELECT count(*) AS n FROM channels WHERE last_run_status IS NULL AND last_success_at IS NULL'),
+		// nothing). A cleared verdict after resume (status NULL, success NULL)
+		// is column-identical to dry-run-only, so the durable separator is
+		// live output: dry runs never write comments rows (I8), a live run
+		// that got as far as scoring does. A channel that only ever failed
+		// before scoring — or was resumed after clearing — still reads
+		// neverRun: nothing proves it ran live, matching the app's own
+		// 'not checked yet' state.
+		neverRun: await scalar(client, 'channels.neverRun', 'SELECT count(*) AS n FROM channels c WHERE c.last_run_status IS NULL AND c.last_success_at IS NULL AND NOT EXISTS (SELECT 1 FROM comments x WHERE x.channel_id = c.id)'),
 		lastRunFailureByCategory: await grouped(client, 'channels.lastRunFailureByCategory', "SELECT COALESCE(last_run_error, 'uncategorized') AS k, count(*) AS n FROM channels WHERE last_run_status = 'failed' GROUP BY k")
 	};
 }

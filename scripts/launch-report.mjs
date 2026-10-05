@@ -232,38 +232,36 @@ async function reportLifecycle(client) {
 	};
 }
 
+// A grant is the immutable credit_transactions purchase row: applied once per
+// (org_id, ref_type, ref_id) and never rewritten, while attempt timestamps
+// (Stripe updated_at, MP paid_at) restamp on webhook replays. Stripe anchors
+// on ref_id = stripe_session_id; Mercado Pago on 'mercadopago:<payment_id>'.
+// manual_refund_required rows (approved, never granted) have no purchase row
+// and stay excluded; refunds/disputes keep theirs and stay counted.
+const GRANT_ANCHOR = "t.org_id = a.org_id AND t.ref_type = 'checkout_session' AND t.reason = 'purchase' AND t.delta > 0";
+
+async function grantsInWindow(client, inWindow) {
+	return {
+		stripeCheckoutsFulfilledInWindow: await scalar(
+			client,
+			'billing.stripeFulfilledInWindow',
+			`SELECT count(*) AS n FROM stripe_checkout_attempts a JOIN credit_transactions t ON ${GRANT_ANCHOR} AND t.ref_id = a.stripe_session_id WHERE t.created_at >= ? AND t.created_at < ?`,
+			inWindow
+		),
+		mercadoPagoCheckoutsFulfilledInWindow: await scalar(
+			client,
+			'billing.mercadoFulfilledInWindow',
+			`SELECT count(*) AS n FROM mercado_pago_checkout_attempts a JOIN credit_transactions t ON ${GRANT_ANCHOR} AND t.ref_id = 'mercadopago:' || a.payment_id WHERE t.created_at >= ? AND t.created_at < ?`,
+			inWindow
+		)
+	};
+}
+
 async function reportBilling(client, inWindow) {
 	return {
 		stripeCheckoutAttemptsByStatus: await grouped(client, 'billing.stripeAttempts', 'SELECT status AS k, count(*) AS n FROM stripe_checkout_attempts GROUP BY status'),
 		mercadoPagoCheckoutAttemptsByStatus: await grouped(client, 'billing.mercadoPagoAttempts', 'SELECT status AS k, count(*) AS n FROM mercado_pago_checkout_attempts GROUP BY status'),
-		// A grant is the immutable credit_transactions purchase row: applied once
-		// per (org_id, ref_type, ref_id) and never rewritten, while attempt
-		// timestamps (Stripe updated_at, MP paid_at) restamp on webhook replays.
-		// Stripe purchase rows anchor on ref_id = stripe_session_id.
-		stripeCheckoutsFulfilledInWindow: await scalar(
-			client,
-			'billing.stripeFulfilledInWindow',
-			`SELECT count(*) AS n FROM stripe_checkout_attempts a
-				JOIN credit_transactions t
-					ON t.org_id = a.org_id AND t.ref_type = 'checkout_session' AND t.reason = 'purchase' AND t.delta > 0
-					AND t.ref_id = a.stripe_session_id
-				WHERE t.created_at >= ? AND t.created_at < ?`,
-			inWindow
-		),
-		// Same anchor for Mercado Pago — its ledger ref_id is provider-prefixed
-		// 'mercadopago:<payment_id>'. A refunded/disputed checkout keeps its
-		// purchase row; manual_refund_required (approved, never granted) has
-		// none and stays excluded.
-		mercadoPagoCheckoutsFulfilledInWindow: await scalar(
-			client,
-			'billing.mercadoFulfilledInWindow',
-			`SELECT count(*) AS n FROM mercado_pago_checkout_attempts a
-				JOIN credit_transactions t
-					ON t.org_id = a.org_id AND t.ref_type = 'checkout_session' AND t.reason = 'purchase' AND t.delta > 0
-					AND t.ref_id = 'mercadopago:' || a.payment_id
-				WHERE t.created_at >= ? AND t.created_at < ?`,
-			inWindow
-		),
+		...(await grantsInWindow(client, inWindow)),
 		creditLedgerByReason: await ledgerGrouped(client, 'billing.ledgerByReason', 'SELECT reason AS k, count(*) AS n, COALESCE(SUM(delta), 0) AS s FROM credit_transactions GROUP BY reason'),
 		subscriptionPeriodsByStatus: await grouped(client, 'billing.subscriptionPeriods', 'SELECT status AS k, count(*) AS n FROM stripe_subscription_periods GROUP BY status'),
 		orgsWithPaidSubscriptionPeriod: await scalar(client, 'billing.orgsWithPaidPeriod', "SELECT count(DISTINCT org_id) AS n FROM stripe_subscription_periods WHERE status = 'paid'"),
@@ -285,7 +283,16 @@ async function attentionQueues(client) {
 		pendingDeletionOutbox: await scalar(client, 'attention.pendingDeletionOutbox', 'SELECT count(*) AS n FROM stripe_deletion_outbox'),
 		pendingGoogleRevocationOutbox: await scalar(client, 'attention.pendingGoogleRevocationOutbox', 'SELECT count(*) AS n FROM google_revocation_outbox'),
 		pendingStripeScrubOutbox: await scalar(client, 'attention.pendingStripeScrubOutbox', 'SELECT count(*) AS n FROM stripe_scrub_outbox'),
-		pendingContactNotifications: await scalar(client, 'attention.pendingContactNotifications', 'SELECT count(*) AS n FROM contact_submissions WHERE notification_due_at IS NOT NULL AND notification_sent_at IS NULL')
+		pendingContactNotifications: await scalar(client, 'attention.pendingContactNotifications', 'SELECT count(*) AS n FROM contact_submissions WHERE notification_due_at IS NOT NULL AND notification_sent_at IS NULL'),
+		// Forced pauses only: a refund pause (reason recorded) or a failure-
+		// disabled org still holding consent (enabled=1 + disabled = auth/max-
+		// failure path). A plain owner opt-out (enabled=0, no reason) is a
+		// preference, not a problem.
+		orgsAutoTopupNeedingAttention: await scalar(
+			client,
+			'attention.orgsAutoTopupNeedingAttention',
+			"SELECT count(*) AS n FROM organizations WHERE auto_topup_pause_reason IS NOT NULL OR (auto_topup_enabled = 1 AND auto_topup_state = 'disabled')"
+		)
 	};
 }
 
@@ -298,15 +305,6 @@ async function reportAttention(client, sections) {
 		...(await attentionQueues(client)),
 		channelsLatestRunFailed: sections.channels.latestRunFailed,
 		usersInZeroCreditCountdown: sections.users.inZeroCreditCountdown,
-		// Forced pauses only: a refund pause (reason recorded) or a failure-
-		// disabled org still holding consent (enabled=1 + disabled = auth/max-
-		// failure path). A plain owner opt-out (enabled=0, no reason) is a
-		// preference, not a problem.
-		orgsAutoTopupNeedingAttention: await scalar(
-			client,
-			'attention.orgsAutoTopupNeedingAttention',
-			"SELECT count(*) AS n FROM organizations WHERE auto_topup_pause_reason IS NOT NULL OR (auto_topup_enabled = 1 AND auto_topup_state = 'disabled')"
-		),
 		manualRefundRequiredCheckouts:
 			(sections.billing.stripeCheckoutAttemptsByStatus.manual_refund_required ?? 0) +
 			(sections.billing.mercadoPagoCheckoutAttemptsByStatus.manual_refund_required ?? 0),

@@ -114,10 +114,11 @@ One-time setup (human, in the Coolify dashboard):
 
    **Optional analytics.** GTM stays disabled unless explicitly enabled with a
    valid container ID and exact allowed hostname. The browser checks its own
-   hostname before loading any Google script; prerendered pages fetch settings
+   hostname before loading any Google script; eligible public pages fetch settings
    from the no-store `/api/analytics` endpoint at runtime. Keep the official ID
    exclusively in the prod app's runtime settings, and keep `/api/analytics`
-   under the existing Bunny `/api/*` cache bypass. Review privacy disclosures and
+   under the existing Bunny `/api/*` cache bypass. Account and token flows are
+   excluded, including navigation from tracked public pages. Review privacy disclosures and
    visitor-consent requirements before activation: the current Privacy Policy
    says no third-party tracking cookies. See [ANALYTICS.md](ANALYTICS.md).
 

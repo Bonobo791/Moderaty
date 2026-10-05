@@ -2,8 +2,8 @@
 
 Google Tag Manager (GTM) is disabled by default. An unchanged fork or an
 unconfigured deployment makes **zero GTM requests**, including on prerendered
-marketing and legal pages. The browser makes one same-origin configuration
-request to `/api/analytics`; a disabled deployment responds with `null`.
+marketing and legal pages. On eligible public pages the browser makes a same-origin
+configuration request to `/api/analytics`; a disabled deployment responds with `null`.
 
 ## Runtime configuration
 
@@ -35,21 +35,32 @@ values. The existing `.dockerignore` excludes local `.env` files.
 
 ## Loading behavior
 
-1. The root layout starts the loader only after mounting in the browser. SSR and
-   prerendering never initialize it or emit a GTM script, iframe, or container ID.
+1. The root layout initializes analytics in the browser only on `/`, `/pricing`,
+   `/privacy`, `/terms`, and `/dpa`, with no query string. Section anchors on
+   those pages work normally. Login, consent, invitations, contact verification,
+   contact forms, and all application/account pages never initialize it or show
+   an analytics failure notice. SSR and prerendering emit no GTM elements or ID.
 2. `/api/analytics` reads `$env/dynamic/private` on each request. Disabled settings
-   return `null`. Enabled settings must have a valid GTM ID and hostname list;
-   invalid configuration returns a generic 503 and logs the cause on the server.
-3. The endpoint returns configuration only if the request's hostname matches an
-   exact configured hostname. Its responses use `Cache-Control: no-store`.
-4. Before touching `dataLayer` or inserting any tracking element, the browser
-   compares `window.location.hostname` with the returned allowed hostname. A
-   mismatch loads nothing, even if copied configuration or an incorrect CDN
-   response reached a fork. This also covers adapter-node's pinned `ORIGIN`.
-5. The loader preserves existing `dataLayer` entries, queues the standard GTM
+   return `null`. Invalid enabled configuration returns a generic 503 and logs
+   the cause on the server. All responses use `Cache-Control: no-store`.
+3. The browser supplies its hostname as a query parameter; the endpoint matches
+   this untrusted claim against the operator's exact allowlist. This works for
+   configured aliases even when adapter-node pins `event.url` to one `ORIGIN`.
+   No forwarded headers need to be trusted. The endpoint exposes only a public
+   container ID and allowed hostname, not a secret or an authorization grant.
+4. Before touching `dataLayer` or inserting a script, the browser independently
+   checks its current hostname against the response and rechecks page eligibility
+   after the asynchronous request. A copied response cannot enable a fork.
+5. Navigation between excluded routes and public pages creates a new document
+   when entering public pages, or when leaving a document containing GTM. Removing
+   a script cannot stop an executed container; reloading prevents it from reading
+   sensitive page content and same-document Back history. Pending initialization
+   is cancelled before navigation to an excluded page. A public page reached with
+   a same-origin excluded URL in `document.referrer` also skips initialization.
+6. The loader preserves existing `dataLayer` entries, queues the standard GTM
    start event, and inserts one asynchronous GTM script per document. A failed
    configuration or script request logs a browser error and shows a small generic
-   usage-measurement status; it does not block the application.
+   usage-measurement status on eligible public pages; it does not block the app.
 
 There is no `noscript` iframe: JavaScript must perform the browser hostname check
 before a GTM request. This integration supplies no account identifiers, e-mails,
@@ -69,8 +80,11 @@ For a deployment test, open browser developer tools → Network and filter for
 
 - With default settings, there must be no GTM request and no GTM iframe.
 - With enabled settings and your exact allowed hostname, there should be one
-  `gtm.js` request using your container ID, also on prerendered pages.
+  `gtm.js` request using your container ID on eligible prerendered pages.
 - With enabled settings on a different hostname, there must be no GTM request.
+- Account, consent, invitation and contact-verification URLs must make no GTM
+  requests, including after navigating from a tracked public page and using Back.
+- With adapter-node `ORIGIN` pinned, verify each configured hostname separately.
 - Reload after switching back to `ANALYTICS_ENABLED=false`: no GTM request.
 
 Test runtime changes against the **same built artifact** to confirm that a
@@ -81,3 +95,11 @@ ID; it must be absent. Keep `/api/analytics` out of CDN caching (Bunny's existin
 Changing environment settings requires restarting/redeploying the server
 instances according to the hosting platform. Disabling stops loading in new
 documents; already-open tabs have already loaded the container and must reload.
+
+A reproducible Chromium regression checks a local adapter-node server using
+fixture IDs only (Python Playwright and Chromium are required):
+
+```sh
+MODERATY_ADAPTER=node npm run build
+python3 scripts/test-analytics-browser.py
+```

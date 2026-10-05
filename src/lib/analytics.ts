@@ -1,39 +1,33 @@
 type AnalyticsWindow = Window & { dataLayer?: Record<string, unknown>[] };
+type AnalyticsConfig = { gtmId: string; hostname: string };
 const scriptLoads = new WeakMap<Element, Promise<void>>();
+const publicPaths = new Set(['/', '/pricing', '/privacy', '/terms', '/dpa']);
 
-export async function loadAnalytics(): Promise<void> {
-	const response = await fetch('/api/analytics', {
-		cache: 'no-store',
-		credentials: 'omit',
-		signal: AbortSignal.timeout(5000)
-	});
-	if (!response.ok) throw new Error('Analytics configuration request failed');
-	const config: unknown = await response.json();
-	if (config === null) return;
-	if (
-		typeof config !== 'object' ||
-		!('gtmId' in config) || typeof config.gtmId !== 'string' ||
-		!/^GTM-[A-Z0-9]+$/.test(config.gtmId) ||
-		!('hostname' in config) || typeof config.hostname !== 'string'
-	) {
+/** Only clean public pages may expose their URL and DOM to a container. */
+export function isAnalyticsPage(url: URL): boolean {
+	return publicPaths.has(url.pathname) && !url.search;
+}
+
+function canInitializeAnalytics(): boolean {
+	const url = new URL(window.location.href);
+	if (!isAnalyticsPage(url)) return false;
+	if (!document.referrer) return true;
+	const referrer = new URL(document.referrer);
+	return referrer.origin !== url.origin || isAnalyticsPage(referrer);
+}
+
+function validateConfig(config: unknown): AnalyticsConfig {
+	if (config === null || typeof config !== 'object') throw new Error('Analytics configuration is invalid');
+	const { gtmId, hostname } = config as Record<string, unknown>;
+	if (typeof gtmId !== 'string' || !/^GTM-[A-Z0-9]+$/.test(gtmId) || typeof hostname !== 'string') {
 		throw new Error('Analytics configuration is invalid');
 	}
-	// This browser check is mandatory even after the server's gate: copied
-	// responses, a CDN mistake or adapter-node's pinned ORIGIN must never
-	// activate this deployment's container on a different hostname.
-	if (window.location.hostname !== config.hostname) return;
-	const existing = document.getElementById('moderaty-gtm');
-	if (existing) {
-		const loading = scriptLoads.get(existing);
-		if (!loading) throw new Error('Google Tag Manager script state is unknown');
-		return loading;
-	}
+	return { gtmId, hostname };
+}
 
-	const analyticsWindow = window as AnalyticsWindow;
-	analyticsWindow.dataLayer ??= [];
-	analyticsWindow.dataLayer.push({ 'gtm.start': Date.now(), event: 'gtm.js' });
+function insertScript(gtmId: string): Promise<void> {
 	const src = new URL('https://www.googletagmanager.com/gtm.js');
-	src.searchParams.set('id', config.gtmId);
+	src.searchParams.set('id', gtmId);
 	const script = document.createElement('script');
 	script.id = 'moderaty-gtm';
 	script.async = true;
@@ -44,5 +38,41 @@ export async function loadAnalytics(): Promise<void> {
 		document.head.appendChild(script);
 	});
 	scriptLoads.set(script, loading);
-	await loading;
+	return loading;
+}
+
+function initializeAnalytics(gtmId: string): Promise<void> {
+	const existing = document.getElementById('moderaty-gtm');
+	if (existing) {
+		const loading = scriptLoads.get(existing);
+		if (loading === undefined) throw new Error('Google Tag Manager script state is unknown');
+		return loading;
+	}
+	const analyticsWindow = window as AnalyticsWindow;
+	analyticsWindow.dataLayer ??= [];
+	analyticsWindow.dataLayer.push({ 'gtm.start': Date.now(), event: 'gtm.js' });
+	return insertScript(gtmId);
+}
+
+async function readConfiguration(signal?: AbortSignal): Promise<AnalyticsConfig | null> {
+	// Use the browser's hostname: adapter-node can pin event.url to another ORIGIN.
+	const url = new URL('/api/analytics', window.location.origin);
+	url.searchParams.set('hostname', window.location.hostname);
+	const response = await fetch(url.toString(), {
+		cache: 'no-store', credentials: 'omit',
+		signal: AbortSignal.any([AbortSignal.timeout(5000), ...(signal ? [signal] : [])])
+	});
+	if (!response.ok) throw new Error('Analytics configuration request failed');
+	const body: unknown = await response.json();
+	return body === null ? null : validateConfig(body);
+}
+
+export async function loadAnalytics(signal?: AbortSignal): Promise<void> {
+	if (signal?.aborted || !canInitializeAnalytics()) return;
+	const config = await readConfiguration(signal);
+	if (config === null) return;
+	// Recheck after async work: neither navigation nor a copied response may
+	// activate tracking on a sensitive page or a different browser hostname.
+	if (signal?.aborted || !canInitializeAnalytics() || window.location.hostname !== config.hostname) return;
+	await initializeAnalytics(config.gtmId);
 }

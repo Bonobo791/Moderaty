@@ -20,8 +20,10 @@ function configure(overrides: Partial<Record<string, string>> = {}) {
 	});
 }
 
-function request(hostname = 'moderaty.example') {
-	return GET({ url: new URL(`https://${hostname}/api/analytics`) } as never);
+function request(hostname = 'moderaty.example', browserHostname?: string) {
+	const url = new URL(`https://${hostname}/api/analytics`);
+	if (browserHostname !== undefined) url.searchParams.set('hostname', browserHostname);
+	return GET({ url } as never);
 }
 
 test('an unchanged fork returns disabled configuration with no caching', async () => {
@@ -74,7 +76,7 @@ test.each([
 	{ ANALYTICS_ENABLED: '1' }, { ANALYTICS_ENABLED: 'TRUE' },
 	{ GTM_ID: '' }, { GTM_ID: 'G-TEST123' }, { GTM_ID: 'GTM-TEST123&x=1' },
 	{ GTM_ID: 'GTM-<script>' }, { GTM_ID: ' GTM-TEST123' }, { GTM_ID: 'GTM-TEST123\n' },
-	{ GTM_ALLOWED_HOSTNAMES: '' }, { GTM_ALLOWED_HOSTNAMES: '*' },
+	{ GTM_ALLOWED_HOSTNAMES: '' }, { GTM_ALLOWED_HOSTNAMES: ',' }, { GTM_ALLOWED_HOSTNAMES: ', , ' }, { GTM_ALLOWED_HOSTNAMES: '*' },
 	{ GTM_ALLOWED_HOSTNAMES: '*.moderaty.example' },
 	{ GTM_ALLOWED_HOSTNAMES: 'https://moderaty.example' },
 	{ GTM_ALLOWED_HOSTNAMES: 'moderaty.example:3000' },
@@ -98,3 +100,16 @@ test.each(['GTM_ID', 'GTM_ALLOWED_HOSTNAMES'])('enabled analytics fails closed w
 	expect(await response.json()).toEqual({ message: 'Optional usage measurement is unavailable.' });
 	expect(console.error).toHaveBeenCalled();
 });
+
+test('an allowed browser alias works when adapter-node pins event.url to its canonical ORIGIN', async () => {
+	configure();
+	expect(await (await request('moderaty.example', 'www.moderaty.example')).json())
+		.toEqual({ gtmId: 'GTM-TEST123', hostname: 'www.moderaty.example' });
+});
+
+test.each(['fork.example', 'moderaty.example.evil.test', '', '*.moderaty.example', 'MODERATY.EXAMPLE'])(
+	'a browser hostname outside the exact allowlist cannot receive configuration: %s', async (hostname) => {
+		configure();
+		expect(await (await request('moderaty.example', hostname)).json()).toBeNull();
+	}
+);

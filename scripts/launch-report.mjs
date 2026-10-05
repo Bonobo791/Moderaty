@@ -385,6 +385,17 @@ function digestAttention({ welcome, digests }) {
 	};
 }
 
+function moderationAttention(moderation) {
+	return {
+		uncertainHumanDispatches: moderation.humanDispatchesByState.uncertain ?? 0,
+		restoringComments: moderation.commentsByStatus.restoring ?? 0,
+		queuedModerationActions:
+			(moderation.actionsByState.pending ?? 0) +
+			(moderation.actionsByState.dispatched ?? 0) +
+			(moderation.actionsByState.cancelling ?? 0)
+	};
+}
+
 function sectionAttention({ users, billing, moderation }) {
 	return {
 		usersInZeroCreditCountdown: users.inZeroCreditCountdown,
@@ -392,12 +403,7 @@ function sectionAttention({ users, billing, moderation }) {
 		// via the reversal webhook). Stripe's is terminal — reported in
 		// billing as history, it cannot distinguish resolved work.
 		mercadoPagoManualRefundsOutstanding: billing.mercadoPagoCheckoutAttemptsByStatus.manual_refund_required ?? 0,
-		uncertainHumanDispatches: moderation.humanDispatchesByState.uncertain ?? 0,
-		restoringComments: moderation.commentsByStatus.restoring ?? 0,
-		queuedModerationActions:
-			(moderation.actionsByState.pending ?? 0) +
-			(moderation.actionsByState.dispatched ?? 0) +
-			(moderation.actionsByState.cancelling ?? 0)
+		...moderationAttention(moderation)
 	};
 }
 

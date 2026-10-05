@@ -15,7 +15,12 @@ export type LegalDoc = {
 	toc: LegalTocEntry[];
 };
 
-export const LEGAL_EFFECTIVE_DATE = '22 October 2026';
+export const LEGAL_EFFECTIVE_DATE = '5 October 2026';
+// 1.19: PUBLIC AUDIENCE MEASUREMENT — conditional Umami disclosure, visitor
+// controls, IP/UA processing and a separate assessment awaiting completion.
+// The operator confirmed there are no users to notify; prepared publication
+// date is 5 October 2026. Future Privacy §13 notice commitments are preserved.
+// Prior versions re-consent through the existing legal-version gate.
 // 1.18: CONTACT MESSAGES — optional request content is stored and forwarded
 // to the contact inbox after explicit e-mail confirmation. The current
 // planned effective date stays unchanged; prior versions re-consent.
@@ -84,7 +89,7 @@ export const LEGAL_EFFECTIVE_DATE = '22 October 2026';
 // previously named only name, e-mail, purchase history, and tax ID.
 // Material change: users without a 1.17 consent row are routed back
 // through /consent.
-export const LEGAL_VERSION = '1.18';
+export const LEGAL_VERSION = '1.19';
 export const LEGAL_KICKER = 'YouTube Comment Moderation Service';
 
 /**

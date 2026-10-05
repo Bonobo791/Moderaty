@@ -101,8 +101,10 @@ export function parseArgs(argv, now = Date.now()) {
 		if (flag === '--since') since = iso;
 		else until = iso;
 	}
-	since ??= new Date(now - DEFAULT_WINDOW_MS).toISOString();
+	// An explicit --until is the window's end: deriving --since from the
+	// current clock instead would report a wrong (or inverted) window.
 	until ??= new Date(now).toISOString();
+	since ??= new Date(Date.parse(until) - DEFAULT_WINDOW_MS).toISOString();
 	// Normalized ISO-8601 UTC strings compare lexically = chronologically.
 	if (!(since < until)) throw new UsageError('window is empty: --since must be before --until');
 	return { since, until };
@@ -214,10 +216,14 @@ async function reportChannels(client, inWindow) {
 		everSuccessfulLiveRun: await scalar(client, 'channels.everSuccessfulLiveRun', 'SELECT count(*) AS n FROM channels WHERE last_success_at IS NOT NULL'),
 		latestRunSucceeded: await scalar(client, 'channels.latestRunSucceeded', "SELECT count(*) AS n FROM channels WHERE last_run_status = 'success'"),
 		latestRunFailed: await scalar(client, 'channels.latestRunFailed', "SELECT count(*) AS n FROM channels WHERE last_run_status = 'failed'"),
-		// Resuming a paused channel clears the run verdict (last_run_status →
-		// NULL) but keeps last_run_at — the durable marker that a live run ever
-		// happened. neverRun means "no live run yet", not "no current verdict".
-		neverRun: await scalar(client, 'channels.neverRun', 'SELECT count(*) AS n FROM channels WHERE last_run_at IS NULL'),
+		// neverRun = no live-run outcome recorded. last_run_at is only the
+		// rotation timestamp — cron writes it for every claim, including a
+		// DRY_RUN run, which records no verdict (runHealth 'none' writes
+		// nothing). A dry-run-only channel therefore has last_run_at set yet
+		// never ran live. last_run_status IS NULL alone is not enough either:
+		// a resume clears the verdict but keeps last_success_at, so a channel
+		// with a recorded success must stay out of the bucket.
+		neverRun: await scalar(client, 'channels.neverRun', 'SELECT count(*) AS n FROM channels WHERE last_run_status IS NULL AND last_success_at IS NULL'),
 		lastRunFailureByCategory: await grouped(client, 'channels.lastRunFailureByCategory', "SELECT COALESCE(last_run_error, 'uncategorized') AS k, count(*) AS n FROM channels WHERE last_run_status = 'failed' GROUP BY k")
 	};
 }
@@ -227,7 +233,11 @@ async function reportModeration(client) {
 		commentsByStatus: await grouped(client, 'comments.byStatus', 'SELECT status AS k, count(*) AS n FROM comments GROUP BY status'),
 		auditActionsByType: await grouped(client, 'audit.byAction', 'SELECT action AS k, count(*) AS n FROM audit_log GROUP BY action'),
 		actionsByState: await grouped(client, 'moderationActions.byState', 'SELECT state AS k, count(*) AS n FROM moderation_actions GROUP BY state'),
-		feedbackDigestsByStatus: await grouped(client, 'feedbackDigests.byStatus', 'SELECT status AS k, count(*) AS n FROM feedback_digests GROUP BY status')
+		feedbackDigestsByStatus: await grouped(client, 'feedbackDigests.byStatus', 'SELECT status AS k, count(*) AS n FROM feedback_digests GROUP BY status'),
+		// Remote human dispatches tracked per comment, independent of the
+		// moderation status: 'in_flight' is an outstanding write, 'uncertain'
+		// means the YouTube outcome is unknown and needs a human look.
+		humanDispatchesByState: await grouped(client, 'comments.humanDispatchState', 'SELECT human_dispatch_state AS k, count(*) AS n FROM comments WHERE human_dispatch_state IS NOT NULL GROUP BY human_dispatch_state')
 	};
 }
 
@@ -238,25 +248,54 @@ async function reportLifecycle(client) {
 	};
 }
 
-// A grant is the immutable credit_transactions purchase row: applied once per
-// (org_id, ref_type, ref_id) and never rewritten, while attempt timestamps
-// (Stripe updated_at, MP paid_at) restamp on webhook replays. Stripe anchors
-// on ref_id = stripe_session_id; Mercado Pago on 'mercadopago:<payment_id>'.
-// manual_refund_required rows (approved, never granted) have no purchase row
-// and stay excluded; refunds/disputes keep theirs and stay counted.
+// A credit grant is the immutable credit_transactions purchase row: applied
+// once per (org_id, ref_type, ref_id) and never rewritten, while attempt
+// timestamps (Stripe updated_at, MP paid_at) restamp on webhook replays.
+// Stripe anchors on ref_id = stripe_session_id; Mercado Pago on
+// 'mercadopago:<payment_id>'. manual_refund_required rows (approved, never
+// granted) have no purchase row and stay excluded; refunds/disputes keep
+// theirs and stay counted.
+//
+// Plan checkouts are product-aware: 'hosted' and 'lifetime' grant no
+// credits, so they anchor on their own durable records — the entitlement
+// row for lifetime, the subscription's first paid period for hosted.
+// product='test' is the operator's smoke checkout (fiscal doc: not a
+// customer sale): its real grant is bucketed separately, never as a
+// customer conversion.
 async function grantsInWindow(client, inWindow) {
-	const anchor = "t.org_id = a.org_id AND t.ref_type = 'checkout_session' AND t.reason = 'purchase' AND t.delta > 0";
+	const ledgerAnchor = "t.org_id = a.org_id AND t.ref_type = 'checkout_session' AND t.reason = 'purchase' AND t.delta > 0";
 	return {
-		stripeCheckoutsFulfilledInWindow: await scalar(
+		stripeCreditGrantsInWindow: await scalar(
 			client,
-			'billing.stripeFulfilledInWindow',
-			`SELECT count(*) AS n FROM stripe_checkout_attempts a JOIN credit_transactions t ON ${anchor} AND t.ref_id = a.stripe_session_id WHERE t.created_at >= ? AND t.created_at < ?`,
+			'billing.stripeCreditGrantsInWindow',
+			`SELECT count(*) AS n FROM stripe_checkout_attempts a JOIN credit_transactions t ON ${ledgerAnchor} AND t.ref_id = a.stripe_session_id WHERE a.product <> 'test' AND t.created_at >= ? AND t.created_at < ?`,
 			inWindow
 		),
-		mercadoPagoCheckoutsFulfilledInWindow: await scalar(
+		stripeTestCreditGrantsInWindow: await scalar(
 			client,
-			'billing.mercadoFulfilledInWindow',
-			`SELECT count(*) AS n FROM mercado_pago_checkout_attempts a JOIN credit_transactions t ON ${anchor} AND t.ref_id = 'mercadopago:' || a.payment_id WHERE t.created_at >= ? AND t.created_at < ?`,
+			'billing.stripeTestCreditGrantsInWindow',
+			`SELECT count(*) AS n FROM stripe_checkout_attempts a JOIN credit_transactions t ON ${ledgerAnchor} AND t.ref_id = a.stripe_session_id WHERE a.product = 'test' AND t.created_at >= ? AND t.created_at < ?`,
+			inWindow
+		),
+		stripeLifetimeGrantsInWindow: await scalar(
+			client,
+			'billing.stripeLifetimeGrantsInWindow',
+			'SELECT count(*) AS n FROM stripe_checkout_attempts a JOIN stripe_lifetime_entitlements e ON e.checkout_session_id = a.stripe_session_id WHERE e.created_at >= ? AND e.created_at < ?',
+			inWindow
+		),
+		// A hosted checkout's durable outcome is the subscription it starts;
+		// the first recorded period row is the closest immutable timestamp —
+		// the org row it claims carries none.
+		stripeHostedSubscriptionsStartedInWindow: await scalar(
+			client,
+			'billing.stripeHostedSubscriptionsStartedInWindow',
+			'SELECT count(*) AS n FROM (SELECT subscription_id AS sid, MIN(created_at) AS first_at FROM stripe_subscription_periods GROUP BY subscription_id) WHERE first_at >= ? AND first_at < ?',
+			inWindow
+		),
+		mercadoPagoCreditGrantsInWindow: await scalar(
+			client,
+			'billing.mercadoPagoCreditGrantsInWindow',
+			`SELECT count(*) AS n FROM mercado_pago_checkout_attempts a JOIN credit_transactions t ON ${ledgerAnchor} AND t.ref_id = 'mercadopago:' || a.payment_id WHERE t.created_at >= ? AND t.created_at < ?`,
 			inWindow
 		)
 	};
@@ -265,7 +304,14 @@ async function grantsInWindow(client, inWindow) {
 async function reportBilling(client, inWindow) {
 	return {
 		stripeCheckoutAttemptsByStatus: await grouped(client, 'billing.stripeAttempts', 'SELECT status AS k, count(*) AS n FROM stripe_checkout_attempts GROUP BY status'),
+		stripeCheckoutAttemptsByProduct: await grouped(client, 'billing.stripeAttemptsByProduct', 'SELECT product AS k, count(*) AS n FROM stripe_checkout_attempts GROUP BY product'),
 		mercadoPagoCheckoutAttemptsByStatus: await grouped(client, 'billing.mercadoPagoAttempts', 'SELECT status AS k, count(*) AS n FROM mercado_pago_checkout_attempts GROUP BY status'),
+		// Stripe's manual_refund_required is terminal: refund.updated only
+		// flips 'ungrantable'-tagged auto-refunds on failure, and a manual
+		// Dashboard refund never writes back — so the flag is a historical
+		// record, not outstanding work. MP's resolves to 'refunded' via the
+		// reversal webhook, so only its count belongs in attention.
+		stripeCheckoutsFlaggedManualRefund: await scalar(client, 'billing.stripeFlaggedManualRefund', "SELECT count(*) AS n FROM stripe_checkout_attempts WHERE status = 'manual_refund_required'"),
 		...(await grantsInWindow(client, inWindow)),
 		creditLedgerByReason: await ledgerGrouped(client, 'billing.ledgerByReason', 'SELECT reason AS k, count(*) AS n, COALESCE(SUM(delta), 0) AS s FROM credit_transactions GROUP BY reason'),
 		subscriptionPeriodsByStatus: await grouped(client, 'billing.subscriptionPeriods', 'SELECT status AS k, count(*) AS n FROM stripe_subscription_periods GROUP BY status'),
@@ -297,7 +343,11 @@ async function attentionQueues(client) {
 			client,
 			'attention.orgsAutoTopupNeedingAttention',
 			"SELECT count(*) AS n FROM organizations WHERE auto_topup_pause_reason IS NOT NULL OR (auto_topup_enabled = 1 AND auto_topup_state = 'disabled')"
-		)
+		),
+		// Pausing keeps last_run_status (page.server.ts flips only active) —
+		// a stale 'failed' verdict on a paused channel is a preserved record,
+		// not a live problem, so attention counts active channels only.
+		activeChannelsLatestRunFailed: await scalar(client, 'attention.activeChannelsLatestRunFailed', "SELECT count(*) AS n FROM channels WHERE active = 1 AND last_run_status = 'failed'")
 	};
 }
 
@@ -322,13 +372,14 @@ function digestAttention({ welcome, digests }) {
 	};
 }
 
-function sectionAttention({ channels, users, billing, moderation }) {
+function sectionAttention({ users, billing, moderation }) {
 	return {
-		channelsLatestRunFailed: channels.latestRunFailed,
 		usersInZeroCreditCountdown: users.inZeroCreditCountdown,
-		manualRefundRequiredCheckouts:
-			(billing.stripeCheckoutAttemptsByStatus.manual_refund_required ?? 0) +
-			(billing.mercadoPagoCheckoutAttemptsByStatus.manual_refund_required ?? 0),
+		// Only MP's flag is resolvable (a manual refund flips it to 'refunded'
+		// via the reversal webhook). Stripe's is terminal — reported in
+		// billing as history, it cannot distinguish resolved work.
+		mercadoPagoManualRefundsOutstanding: billing.mercadoPagoCheckoutAttemptsByStatus.manual_refund_required ?? 0,
+		uncertainHumanDispatches: moderation.humanDispatchesByState.uncertain ?? 0,
 		restoringComments: moderation.commentsByStatus.restoring ?? 0,
 		queuedModerationActions:
 			(moderation.actionsByState.pending ?? 0) +
@@ -372,21 +423,23 @@ async function readSections(tx, { since, until }) {
 		lifecycle: await reportLifecycle(tx),
 		billing: await reportBilling(tx, inWindow)
 	};
-	sections.attention = await reportAttention(tx, sections);
-	return sections;
+	return { ...sections, attention: await reportAttention(tx, sections) };
 }
 
 export async function buildReport(client, { since, until }) {
 	// One read transaction pins every query to the same database state —
 	// otherwise a signup or webhook landing mid-report would mix snapshots.
 	const tx = await client.transaction('read');
+	// The observation point is when the snapshot is established — before the
+	// first pinned read — not when the last query finishes.
+	const observedAt = new Date().toISOString();
 	try {
 		await requireSchema(tx);
 		const sections = await readSections(tx, { since, until });
 		await tx.commit();
 		return {
 			report: 'launch-activity-snapshot',
-			observedAt: new Date().toISOString(),
+			observedAt,
 			window: { since, until },
 			...sections
 		};
@@ -404,7 +457,7 @@ export async function buildReport(client, { since, until }) {
 async function emitReport(url, authToken, window) {
 	const client = createClient({ url, authToken });
 	try {
-		console.log(JSON.stringify(await buildReport(client, window), null, 2));
+		process.stdout.write(`${JSON.stringify(await buildReport(client, window), null, 2)}\n`);
 		return 0;
 	} catch (error) {
 		console.error(error instanceof Error ? error.message : String(error));

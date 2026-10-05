@@ -79,13 +79,14 @@ const FIXTURE_IDENTIFIERS = [
 	'enc-2', 'enc-3', 'enc-4', 'enc-5', 'enc-6',
 	'c-1', 'c-2', 'c-3', 'c-4', 'c-x', 'c-y', 'dr-1',
 	'held text', 'restoring text', 'deleted text',
-	'sa-1', 'sa-2', 'sa-3', 'sa-4', 'sa-5', 'sa-6', 'sa-7',
-	'idem-2', 'idem-3', 'idem-4', 'idem-5', 'idem-6', 'idem-7',
+	'sa-1', 'sa-2', 'sa-3', 'sa-4', 'sa-5', 'sa-6', 'sa-7', 'sa-8', 'sa-9', 'sa-10',
+	'idem-2', 'idem-3', 'idem-4', 'idem-5', 'idem-6', 'idem-7', 'idem-8', 'idem-9', 'idem-10',
 	'mp-1', 'mp-2', 'mp-3', 'mp-4', 'mp-5',
 	'mpidem-1', 'mpidem-2', 'mpidem-3', 'mpidem-4', 'mpidem-5',
 	'mp-pay-1', 'mp-pay-2', 'mp-pay-3', 'mp-pay-4',
 	'mercadopago:mp-pay-1', 'mercadopago:mp-pay-3', 'mercadopago:mp-pay-4',
-	'cs_sa2', 'cs_sa3', 'cs_sa4', 'cs_sa5', 'cs_sa6', 'cs_sa7',
+	'cs_sa2', 'cs_sa3', 'cs_sa4', 'cs_sa5', 'cs_sa6', 'cs_sa7', 'cs_sa8', 'cs_test_1',
+	'UC-dryrun', 'UC-pausedfailed', 'Dryrun Chan', 'Pausedfailed Chan', 'enc-7', 'enc-8',
 	'pi_topup_1', 'ch_topup_1', 'ch_ref', 'adj-1',
 	'sub_old', 'in_old', 'cs_life_1', 'cs_life_2',
 	'du_won', 'ch_dsp_1', 'ch_dsp_2', 'ch_pend_1'
@@ -184,12 +185,23 @@ INSERT INTO channels (id, user_id, org_id, title, refresh_token_enc, active, las
 	('UC-orphan', NULL, NULL, 'Orphan Chan', 'enc-5', 0, NULL, NULL, NULL, NULL, NULL, NULL, '2026-10-05T09:00:00.000Z'),
 	-- Team channel detached by an account deletion: org kept, user cleared —
 	-- it needs a reconnect, not a first-login claim.
-	('UC-detached', NULL, 'org-sentinel', 'Detached Chan', 'enc-6', 0, NULL, NULL, NULL, NULL, NULL, NULL, '2026-09-15T00:00:00.000Z');
-INSERT INTO comments (id, channel_id, text, published_at, status, decided_by) VALUES
-	('c-1', 'UCsentinelchan', 'raw sentinel comment text', '2026-10-04T12:00:00.000Z', 'approved', 'ai'),
-	('c-2', 'UCsentinelchan', 'held text', '2026-10-04T12:30:00.000Z', 'held', 'rule'),
-	('c-3', 'UCsentinelchan', 'restoring text', '2026-10-04T13:00:00.000Z', 'restoring', 'human'),
-	('c-4', 'UC-failed', 'deleted text', '2026-10-04T14:00:00.000Z', 'deleted', 'ai');
+	('UC-detached', NULL, 'org-sentinel', 'Detached Chan', 'enc-6', 0, NULL, NULL, NULL, NULL, NULL, NULL, '2026-09-15T00:00:00.000Z'),
+	-- Cron's bookkeeping writes last_run_at on EVERY rotation — including a
+	-- DRY_RUN run, which records no verdict (runHealth='none' spreads {}).
+	-- A dry-run-only channel has run_at set but status/success NULL: it has
+	-- never completed a LIVE run and must stay in neverRun.
+	('UC-dryrun', 'u-old', 'org-personal-2', 'Dryrun Chan', 'enc-7', 1, NULL, NULL, NULL, '2026-10-05T10:00:00.000Z', NULL, NULL, '2026-10-05T09:30:00.000Z'),
+	-- Pausing keeps the run verdict (only active flips to 0): a channel paused
+	-- while holding 'failed' carries a stale failure forever. It belongs to the
+	-- all-channel breakdown but not to live attention.
+	('UC-pausedfailed', 'u-old', 'org-personal-2', 'Pausedfailed Chan', 'enc-8', 0, 'failed', NULL, 'timeout', '2026-10-05T11:00:00.000Z', NULL, NULL, '2026-10-05T08:00:00.000Z');
+INSERT INTO comments (id, channel_id, text, published_at, status, decided_by, human_dispatch_state) VALUES
+	('c-1', 'UCsentinelchan', 'raw sentinel comment text', '2026-10-04T12:00:00.000Z', 'approved', 'ai', 'in_flight'),
+	('c-2', 'UCsentinelchan', 'held text', '2026-10-04T12:30:00.000Z', 'held', 'rule', NULL),
+	-- A remote human action that may or may not have landed: the verdict is
+	-- recorded on the comment, independent of its moderation status.
+	('c-3', 'UCsentinelchan', 'restoring text', '2026-10-04T13:00:00.000Z', 'restoring', 'human', 'uncertain'),
+	('c-4', 'UC-failed', 'deleted text', '2026-10-04T14:00:00.000Z', 'deleted', 'ai', NULL);
 INSERT INTO moderation_actions (comment_id, channel_id, action, reason, state, author_handle) VALUES
 	('c-2', 'UCsentinelchan', 'hold', 'rule 1', 'pending', '@sentinelhandle'),
 	('c-x', 'UCsentinelchan', 'reject', 'ai', 'completed', NULL),
@@ -215,7 +227,16 @@ INSERT INTO stripe_checkout_attempts (attempt_id, org_id, product, idempotency_k
 	('sa-6', 'org-personal-1', 'credits_100', 'idem-6', 'cs_sa6', 'fulfilled', '2026-10-03T20:00:00.000Z', '2026-10-05T05:00:00.000Z'),
 	-- Opened inside the window, granted a week later; an in-window webhook
 	-- replay restamped updated_at — still outside the grant window.
-	('sa-7', 'org-personal-2', 'credits_100', 'idem-7', 'cs_sa7', 'fulfilled', '2026-10-05T06:00:00.000Z', '2026-10-05T06:00:00.000Z');
+	('sa-7', 'org-personal-2', 'credits_100', 'idem-7', 'cs_sa7', 'fulfilled', '2026-10-05T06:00:00.000Z', '2026-10-05T06:00:00.000Z'),
+	-- A hosted-plan checkout grants no credits: its durable outcome is the
+	-- subscription it starts, recorded by the first paid period below.
+	('sa-8', 'org-personal-2', 'hosted', 'idem-8', 'cs_sa8', 'fulfilled', '2026-10-05T02:00:00.000Z', '2026-10-05T02:00:00.000Z'),
+	-- A lifetime checkout grants no credits either: its durable outcome is the
+	-- entitlement row (cs_life_1), whose created_at is immutable.
+	('sa-9', 'org-sentinel', 'lifetime', 'idem-9', 'cs_life_1', 'fulfilled', '2026-10-05T03:00:00.000Z', '2026-10-05T03:00:00.000Z'),
+	-- The operator's smoke test purchases through the same ledger path with
+	-- product='test': real grant, but not a customer conversion.
+	('sa-10', 'org-personal-1', 'test', 'idem-10', 'cs_test_1', 'fulfilled', '2026-10-05T04:00:00.000Z', '2026-10-05T04:00:00.000Z');
 INSERT INTO mercado_pago_checkout_attempts (attempt_id, org_id, bundle_id, idempotency_key, payment_id, status, amount_cents, paid_at, created_at) VALUES
 	-- A fulfillment replay restamped paid_at past the window; the immutable
 	-- purchase ledger row still anchors the grant to 2026-10-05.
@@ -240,13 +261,17 @@ INSERT INTO credit_transactions (org_id, delta, reason, ref_type, ref_id, paymen
 	('org-personal-2', 100, 'purchase', 'checkout_session', 'mercadopago:mp-pay-4', NULL, NULL, 200, '2026-10-07T01:00:00.000Z'),
 	('org-sentinel', -30, 'consume', 'comment', 'c-9', NULL, NULL, 70, '2026-10-05T03:00:00.000Z'),
 	('org-sentinel', 60, 'adjust', 'admin', 'adj-1', NULL, NULL, 130, '2026-10-05T04:00:00.000Z'),
-	('org-broke', -100, 'refund', 'charge', 'ch_ref', 'pi_ref', 'ch_ref', -100, '2026-10-05T05:00:00.000Z');
-INSERT INTO stripe_subscription_periods (org_id, subscription_id, invoice_id, period_key, period_start, period_end, included_credits, consumed_credits, status) VALUES
-	('org-personal-2', 'sub_sentinel', 'in_sentinel', '2026-10', '2026-10-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z', 100, 40, 'paid'),
-	('org-sentinel', 'sub_old', 'in_old', '2026-09', '2026-09-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z', 100, 100, 'refunded');
-INSERT INTO stripe_lifetime_entitlements (org_id, slot, checkout_session_id, status) VALUES
-	('org-sentinel', 1, 'cs_life_1', 'active'),
-	('org-personal-2', 2, 'cs_life_2', 'released');
+	('org-broke', -100, 'refund', 'charge', 'ch_ref', 'pi_ref', 'ch_ref', -100, '2026-10-05T05:00:00.000Z'),
+	-- The smoke-test checkout's real (1-credit) purchase row.
+	('org-personal-1', 1, 'purchase', 'checkout_session', 'cs_test_1', NULL, NULL, 391, '2026-10-05T06:00:00.000Z');
+-- created_at is set explicitly: the default is NOW, which would drift the
+-- subscription-start metric relative to the fixed reporting window.
+INSERT INTO stripe_subscription_periods (org_id, subscription_id, invoice_id, period_key, period_start, period_end, included_credits, consumed_credits, status, created_at) VALUES
+	('org-personal-2', 'sub_sentinel', 'in_sentinel', '2026-10', '2026-10-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z', 100, 40, 'paid', '2026-10-05T00:00:00.000Z'),
+	('org-sentinel', 'sub_old', 'in_old', '2026-09', '2026-09-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z', 100, 100, 'refunded', '2026-09-01T00:00:00.000Z');
+INSERT INTO stripe_lifetime_entitlements (org_id, slot, checkout_session_id, status, created_at) VALUES
+	('org-sentinel', 1, 'cs_life_1', 'active', '2026-10-05T00:00:00.000Z'),
+	('org-personal-2', 2, 'cs_life_2', 'released', '2026-09-01T00:00:00.000Z');
 UPDATE stripe_lifetime_slots SET active_org_id = 'org-sentinel', claimed_at = '2026-10-05T00:00:00.000Z' WHERE slot = 1;
 UPDATE stripe_lifetime_slots SET claimed_at = '2026-09-15T00:00:00.000Z', released_at = '2026-10-01T00:00:00.000Z' WHERE slot = 2;
 INSERT INTO stripe_pending_reversals (charge_id, reason) VALUES ('ch_pend_1', 'refund');
@@ -381,6 +406,18 @@ describe('launch-report CLI contract', () => {
 		expect(until - since).toBe(30 * 24 * 60 * 60 * 1000);
 	});
 
+	it('anchors a missing --since to the explicit --until, not to now', async () => {
+		// With only --until given the window must END there: anchoring the
+		// start to the current clock would produce a wrong or inverted window.
+		const { code, report } = await runReport(EMPTY_URL, ['--until', UNTIL]);
+		expect(code).toBe(0);
+		expect(report.window.until).toBe(UNTIL);
+		const since = Date.parse(report.window.since);
+		const until = Date.parse(report.window.until);
+		expect(until - since).toBe(30 * 24 * 60 * 60 * 1000);
+		expect(report.window.since).toBe('2026-09-06T00:00:00.000Z');
+	});
+
 	it('fails loudly naming the missing tables on a pre-migration database', async () => {
 		const { code, stderr } = await runReport(PREMIGRATION_URL);
 		expect(code).toBe(1);
@@ -428,16 +465,16 @@ describe('launch-report content', () => {
 		expect(report.organizations.shared).toBe(1);
 		// org-sentinel has two members and one channel — neither join may
 		// multiply it into two orgs or two users.
-		expect(report.channels.total).toBe(6);
+		expect(report.channels.total).toBe(8);
 		expect(report.channels.orgsWithChannels).toBe(3);
 		expect(report.channels.usersWhoConnected).toBe(2);
 		// Only UC-orphan is claimable; UC-detached kept its org and needs a
 		// reconnect — it is not a pre-account orphan.
 		expect(report.channels.orphanedAwaitingClaim).toBe(1);
 		expect(report.channels.detachedAwaitingReconnect).toBe(1);
-		expect(report.channels.active).toBe(3);
-		expect(report.channels.inactive).toBe(3);
-		expect(report.channels.createdInWindow).toBe(4);
+		expect(report.channels.active).toBe(4);
+		expect(report.channels.inactive).toBe(4);
+		expect(report.channels.createdInWindow).toBe(6);
 	});
 
 	it('separates a preview attempt from a completed live run', async () => {
@@ -449,12 +486,16 @@ describe('launch-report content', () => {
 		expect(report.channels.feedbackPreviewAttempted).toBe(1);
 		// UC-idle paused and resumed: its verdict was cleared but its run and
 		// success history are durable — it counts as ever-successful, never as
-		// neverRun (that bucket is last_run_at IS NULL: UC-orphan + UC-detached).
+		// neverRun. UC-dryrun rotated under DRY_RUN (last_run_at written, no
+		// verdict) — a rotation timestamp is not a live run, so it joins
+		// UC-orphan and UC-detached in neverRun.
 		expect(report.channels.everSuccessfulLiveRun).toBe(3);
 		expect(report.channels.latestRunSucceeded).toBe(1);
-		expect(report.channels.latestRunFailed).toBe(2);
-		expect(report.channels.neverRun).toBe(2);
-		expect(report.channels.lastRunFailureByCategory).toEqual({ token: 1, quota: 1 });
+		// UC-pausedfailed carries a stale 'failed' verdict while paused — it is
+		// part of the raw state breakdown but not live attention.
+		expect(report.channels.latestRunFailed).toBe(3);
+		expect(report.channels.neverRun).toBe(3);
+		expect(report.channels.lastRunFailureByCategory).toEqual({ token: 1, quota: 1, timeout: 1 });
 	});
 
 	it('reports moderation activity and billing truth without counting redirects as grants', async () => {
@@ -464,25 +505,40 @@ describe('launch-report content', () => {
 		expect(report.moderation.auditActionsByType).toEqual({ approve: 1, hold: 1, 'dry-run': 1, delete: 1, restore: 1 });
 		expect(report.moderation.actionsByState).toEqual({ pending: 1, completed: 1, dispatched: 1 });
 		expect(report.moderation.feedbackDigestsByStatus).toEqual({ complete: 1, failed: 1, 'dry-run-pending': 1, 'dry-run-failed': 1 });
+		// Remote human dispatches tracked per comment, independent of status:
+		// c-1 is in flight, c-3's write may or may not have landed remotely.
+		expect(report.moderation.humanDispatchesByState).toEqual({ in_flight: 1, uncertain: 1 });
 		expect(report.lifecycle.welcomeEmailsByState).toEqual({ accepted: 1, permanent_failure: 1, queued: 1 });
 		expect(report.lifecycle.contactSubmissionsByStatus).toEqual({ pending: 1, verified: 1 });
-		// A checkout row is not a grant: statuses are reported verbatim, and
-		// only 'fulfilled' counts toward the in-window completed checkouts.
-		expect(report.billing.stripeCheckoutAttemptsByStatus).toEqual({ fulfilled: 3, open: 1, expired: 1, manual_refund_required: 1, pending: 1 });
+		// A checkout row is not a grant: statuses and products are reported
+		// verbatim; only a durable grant record counts toward conversions.
+		expect(report.billing.stripeCheckoutAttemptsByStatus).toEqual({ fulfilled: 6, open: 1, expired: 1, manual_refund_required: 1, pending: 1 });
+		expect(report.billing.stripeCheckoutAttemptsByProduct).toEqual({ credits_100: 6, credits_500: 1, hosted: 1, lifetime: 1, test: 1 });
 		expect(report.billing.mercadoPagoCheckoutAttemptsByStatus).toEqual({ fulfilled: 2, manual_refund_required: 1, refunded: 1, open: 1 });
 		// Grant windows anchor on the immutable credit_transactions purchase row
 		// (inserted once per org/ref anchor), never on restampable attempt
 		// timestamps: sa-1's replayed updated_at moved past the window but its
 		// grant row still counts; sa-7's in-window restamp does not move its
-		// post-window grant forward.
-		expect(report.billing.stripeCheckoutsFulfilledInWindow).toBe(2);
+		// post-window grant forward. The operator's product='test' smoke
+		// purchase is bucketed separately, never as a customer conversion.
+		expect(report.billing.stripeCreditGrantsInWindow).toBe(2);
+		expect(report.billing.stripeTestCreditGrantsInWindow).toBe(1);
+		// Plan checkouts grant no credits — their durable outcomes anchor the
+		// window instead: sa-9's lifetime entitlement and sa-8's subscription
+		// first paid period (sub_sentinel) both landed in-window.
+		expect(report.billing.stripeLifetimeGrantsInWindow).toBe(1);
+		expect(report.billing.stripeHostedSubscriptionsStartedInWindow).toBe(1);
 		// Same on MP: mp-1's replayed paid_at is ignored (ledger says in-window),
 		// mp-3's refund doesn't erase the grant, mp-4's in-window paid_at replay
 		// can't move its post-window ledger row, and mp-2 was approved but never
 		// granted — no purchase row, no count.
-		expect(report.billing.mercadoPagoCheckoutsFulfilledInWindow).toBe(2);
+		expect(report.billing.mercadoPagoCreditGrantsInWindow).toBe(2);
+		// Stripe's manual_refund_required is terminal — nothing transitions it
+		// after a human refunds — so it is a historical flag, not live
+		// attention. MP's resolves to 'refunded' via the reversal webhook.
+		expect(report.billing.stripeCheckoutsFlaggedManualRefund).toBe(1);
 		expect(report.billing.creditLedgerByReason).toEqual({
-			purchase: { rows: 6, netCredits: 600 },
+			purchase: { rows: 7, netCredits: 601 },
 			consume: { rows: 2, netCredits: -40 },
 			auto_topup: { rows: 1, netCredits: 100 },
 			adjust: { rows: 1, netCredits: 60 },
@@ -505,13 +561,19 @@ describe('launch-report content', () => {
 		const { code, report } = await runReport(POPULATED_URL);
 		expect(code).toBe(0);
 		expect(report.attention).toMatchObject({
-			channelsLatestRunFailed: 2,
+			// UC-pausedfailed is paused with a stale verdict — only active
+			// channels can need attention now (UC-failed + UC-washealthy).
+			activeChannelsLatestRunFailed: 2,
 			usersInZeroCreditCountdown: 1,
 			// Refund-paused (org-personal-1) and failure-disabled with consent
 			// still recorded (org-personal-2) both need operator follow-up; a
 			// plain owner opt-out would not.
 			orgsAutoTopupNeedingAttention: 2,
-			manualRefundRequiredCheckouts: 2,
+			// MP's flag resolves to 'refunded' when the operator's manual refund
+			// webhook lands; Stripe's terminal flag lives in billing instead.
+			mercadoPagoManualRefundsOutstanding: 1,
+			// c-3's remote human action may or may not have landed.
+			uncertainHumanDispatches: 1,
 			pendingReversals: 1,
 			pendingDisputeReversals: 1,
 			unresolvedAutoTopupRecoveries: 1,
@@ -591,9 +653,11 @@ describe('launch-report content', () => {
 	it('runs every read inside one read transaction so the report is a single snapshot', async () => {
 		let committed = false;
 		let rolledBack = false;
+		let firstReadAt = Number.POSITIVE_INFINITY;
 		const executions = [];
 		const tx = {
 			execute: async (stmt) => {
+				firstReadAt = Math.min(firstReadAt, Date.now());
 				const sql = typeof stmt === 'string' ? stmt : stmt.sql;
 				executions.push(sql);
 				if (sql.includes('sqlite_master')) return { rows: REQUIRED_TABLES.map((name) => ({ name })) };
@@ -621,6 +685,9 @@ describe('launch-report content', () => {
 		expect(committed).toBe(true);
 		expect(rolledBack).toBe(false);
 		expect(executions.length).toBeGreaterThan(10);
+		// observedAt is the snapshot-establishment time, not the time all
+		// queries finished — it must not postdate the first pinned read.
+		expect(Date.parse(report.observedAt)).toBeLessThanOrEqual(firstReadAt);
 	});
 
 	it('rolls the snapshot transaction back when a read fails', async () => {

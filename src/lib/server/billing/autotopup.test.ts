@@ -1081,7 +1081,7 @@ describe('sweepAutoTopUp', () => {
 		const log = vi.spyOn(console, 'error').mockImplementation(vi.fn());
 		onTestFinished(log.mockRestore);
 		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
-		expect(log).toHaveBeenCalledWith('auto top-up charge failed:', expect.stringMatching(/httpStatus=500.*provider=stripe.*operation=auto_topup\.charge/));
+		expect(log).toHaveBeenCalledWith('auto top-up operation failed:', expect.stringMatching(/httpStatus=500.*provider=stripe.*operation=auto_topup\.charge/));
 		expect(format(...log.mock.calls.flat())).not.toMatch(/cron failure:|run=|cronRunId|autoTopupSweepError|test-secret|org-1|cus_1/);
 		expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(1);
 		expect(await orgRow()).toMatchObject({ autoTopupState: 'idle', autoTopupFailures: 0, creditsRemaining: 50 });
@@ -1118,7 +1118,7 @@ describe('sweepAutoTopUp', () => {
 	test.each([
 		{ plan: 'lifetime', failureMock: 'paymentIntentsList', operation: 'auto_topup.lifetime_reconciliation', expectedCreateCalls: 0 },
 		{ plan: 'free', failureMock: 'paymentIntentsList', operation: 'auto_topup.eligible_reconciliation', expectedCreateCalls: 0 },
-		{ plan: 'free', failureMock: 'pricesRetrieve', operation: 'auto_topup.charge', expectedCreateCalls: 0 },
+		{ plan: 'free', failureMock: 'pricesRetrieve', operation: 'auto_topup.price_lookup', expectedCreateCalls: 0 },
 		{ plan: 'free', failureMock: 'paymentIntentsCreate', operation: 'auto_topup.charge', expectedCreateCalls: 1 }
 	] as const)('caught $failureMock failure retains safe $operation diagnostics without replay', async ({ plan, failureMock, operation, expectedCreateCalls }) => {
 		await seedOrg({ plan });
@@ -1139,6 +1139,79 @@ describe('sweepAutoTopUp', () => {
 		expect([mocks.refundsCreate.mock.calls, mocks.paymentIntentsCancel.mock.calls]).toEqual([[], []]);
 		expect(await orgRow()).toMatchObject({ autoTopupState: 'idle', autoTopupFailures: 0, creditsRemaining: 50 });
 		expect(await testDb().db.select().from(creditTransactions)).toHaveLength(0);
+	});
+
+	test('a pre-charge reconciliation recheck failure reports its own phase without taking a claim', async () => {
+		const attemptAt = new Date(Date.now() - 48 * 3600_000).toISOString();
+		await seedOrg({ autoTopupAttemptAt: attemptAt, autoTopupLastAttemptAt: attemptAt });
+		const before = await orgRow();
+		mocks.paymentIntentsList.mockResolvedValueOnce({ data: [], has_more: false })
+			.mockRejectedValueOnce({ type: 'StripeAPIError', statusCode: 500, message: 'test-secret' });
+		const log = vi.spyOn(console, 'error').mockImplementation(vi.fn());
+		onTestFinished(log.mockRestore);
+		const diagnostics = new CronDiagnostics();
+		expect(await sweepAutoTopUp(5, Date.now() + 20_000, diagnostics)).toBe(0);
+		expect(await orgRow()).toEqual(before);
+		expect(mocks.paymentIntentsList).toHaveBeenCalledTimes(2);
+		expect(mocks.pricesRetrieve).not.toHaveBeenCalled();
+		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+		expect(diagnostics.failures).toHaveLength(1);
+		expect(diagnostics.failures[0]).toMatchObject({ operation: 'auto_topup.precharge_reconciliation', provider: 'stripe', httpStatus: 500, cronRunId: diagnostics.cronRunId });
+		expect(format(...log.mock.calls.flat())).not.toMatch(/test-secret|org-1|cus_1/);
+	});
+
+	test.each([
+		{ stage: 'initial read', operation: 'auto_topup.charge_preparation', sqlPrefix: 'select "auto_topup_enabled"', occurrence: 2, creates: 0 },
+		{ stage: 'rate-limit count', operation: 'auto_topup.charge_preparation', sqlPrefix: 'select count(*) from "credit_transactions"', occurrence: 1, creates: 0 },
+		{ stage: 'atomic claim', operation: 'auto_topup.charge_preparation', sqlPrefix: 'update "organizations" set "auto_topup_state" = ?, "auto_topup_last_attempt_at" = CASE', occurrence: 1, creates: 0 },
+		{ stage: 'claimed state recheck', operation: 'auto_topup.charge_preparation', sqlPrefix: 'select "auto_topup_enabled"', occurrence: 3, creates: 0 },
+		{ stage: 'submission write', operation: 'auto_topup.charge_preparation', sqlPrefix: 'update "organizations" set "auto_topup_submitted_at"', occurrence: 1, creates: 0 },
+		{ stage: 'post-charge recovery lookup', operation: 'auto_topup.postcharge_check', sqlPrefix: 'select "id", "org_id", "customer_id", "attempt_at"', sqlContains: '"payment_intent_id" = ?', occurrence: 1, creates: 1 }
+	])('a $stage DB failure reports $operation without changing charge or retry behavior', async ({ operation, sqlPrefix, sqlContains, occurrence, creates }) => {
+		await seedOrg();
+		const log = vi.spyOn(console, 'error').mockImplementation(vi.fn());
+		onTestFinished(log.mockRestore);
+		const execute = testDb().client.execute.bind(testDb().client);
+		let matches = 0;
+		const query = vi.spyOn(testDb().client, 'execute').mockImplementation((statement) => {
+			const querySql = statementSql(statement);
+			if (querySql.startsWith(sqlPrefix) && querySql.includes(sqlContains ?? '') && ++matches === occurrence) return Promise.reject(new LibsqlError('test-secret', 'SQLITE_BUSY'));
+			return execute(statement);
+		});
+		onTestFinished(query.mockRestore);
+		const diagnostics = new CronDiagnostics();
+		expect(await sweepAutoTopUp(5, Date.now() + 20_000, diagnostics)).toBe(0);
+		expect(matches).toBeGreaterThanOrEqual(occurrence);
+		expect(diagnostics.failures).toHaveLength(1);
+		expect(diagnostics.failures[0]).toMatchObject({ operation, category: 'database_busy', code: 'SQLITE_BUSY', provider: 'turso', cronRunId: diagnostics.cronRunId });
+		expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(creates);
+		expect([mocks.refundsCreate.mock.calls, mocks.paymentIntentsCancel.mock.calls]).toEqual([[], []]);
+		query.mockRestore();
+		expect(await orgRow()).toMatchObject({ autoTopupState: 'idle', autoTopupFailures: 0, creditsRemaining: 50 });
+		expect(await testDb().db.select().from(creditTransactions)).toHaveLength(0);
+		expect(format(...log.mock.calls.flat())).not.toMatch(/test-secret|org-1|cus_1|select |update /);
+	});
+
+	test('a post-charge cancellation failure reports recovery without replaying the charge', async () => {
+		await seedOrg();
+		mocks.paymentIntentsCreate.mockImplementationOnce(async () => {
+			await pauseAutoTopupForRefund(testDb().db, 'org-1');
+			log.mockClear(); // Isolate the failure diagnostics from the existing refund-pause log.
+			return { id: 'pi_new', status: 'requires_action' };
+		});
+		mocks.paymentIntentsCancel.mockRejectedValueOnce({ type: 'StripeAPIError', statusCode: 500, message: 'test-secret' });
+		const log = vi.spyOn(console, 'error').mockImplementation(vi.fn());
+		onTestFinished(log.mockRestore);
+		const diagnostics = new CronDiagnostics();
+		expect(await sweepAutoTopUp(5, Date.now() + 20_000, diagnostics)).toBe(0);
+		expect(diagnostics.failures).toHaveLength(1);
+		expect(diagnostics.failures[0]).toMatchObject({ operation: 'auto_topup.paused_recovery', provider: 'stripe', httpStatus: 500, cronRunId: diagnostics.cronRunId });
+		expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(1);
+		expect(mocks.paymentIntentsCancel).toHaveBeenCalledTimes(1);
+		expect(mocks.refundsCreate).not.toHaveBeenCalled();
+		expect(await orgRow()).toMatchObject({ autoTopupEnabled: 0, autoTopupFailures: 0, creditsRemaining: 50 });
+		expect(await testDb().db.select().from(stripeAutoTopupRecoveries).get()).toMatchObject({ paymentIntentId: 'pi_new', lastError: 'refund_or_cancellation_failed', resolvedAt: null });
+		expect(format(...log.mock.calls.flat())).not.toMatch(/test-secret|org-1|cus_1|pi_new/);
 	});
 
 	test('a lifetime candidate SELECT failure never starts reconciliation, charges or refunds', async () => {

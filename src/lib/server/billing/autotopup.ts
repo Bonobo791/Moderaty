@@ -247,18 +247,23 @@ async function handleTopupFailure(orgId: string, attemptAt: string, error: unkno
 }
 
 /** Preserve failure-state handling and report the original error even if that write fails. */
-async function handleAndReportTopupFailure(orgId: string, attemptAt: string, error: unknown, paymentCreated: boolean, diagnostics: CronDiagnostics | undefined): Promise<void> {
+async function handleAndReportTopupFailure(orgId: string, attemptAt: string, error: unknown, paymentCreated: boolean, reporting: { diagnostics?: CronDiagnostics; label: string }): Promise<void> {
 	try {
 		await handleTopupFailure(orgId, attemptAt, error, paymentCreated);
 	} finally {
-		if (diagnostics) diagnostics.report('auto top-up charge', error);
-		else console.error('auto top-up charge failed:', formatCronFailure(describeCronFailure(error, 'auto top-up charge')));
+		if (reporting.diagnostics) reporting.diagnostics.report(reporting.label, error);
+		else console.error('auto top-up operation failed:', formatCronFailure(describeCronFailure(error, reporting.label)));
 	}
 }
 
 /** The enabled in-flight claim must still belong to this attempt before submission. */
 function hasCurrentTopupClaim(org: AutoTopupState, attemptAt: string): boolean {
 	return org.enabled === 1 && org.state === 'in_flight' && org.lastAttemptAt === attemptAt;
+}
+
+/** Preserve thrown setup errors for callers outside a correlated cron sweep. */
+function withTopupDiagnosticOperation<T>(diagnostics: CronDiagnostics | undefined, operation: string, run: () => Promise<T>): Promise<T> {
+	return diagnostics ? withDiagnosticOperation(operation, run) : run();
 }
 
 /** Resolve and validate pricing before any claim can be taken. */
@@ -291,7 +296,7 @@ export async function maybeTriggerAutoTopUp(orgId: string, diagnostics?: CronDia
 	// attempt. A PaymentIntent still in a nonterminal status defers this
 	// charge — a second PI could double-charge when the first settles (codex
 	// P1). Orgs with no marker have no prior attempt: skip the Stripe call.
-	if (org.attemptAt && (await reconcileAutoTopup(orgId)).settling) {
+	if (org.attemptAt && (await withTopupDiagnosticOperation(diagnostics, 'auto_topup.precharge_reconciliation', () => reconcileAutoTopup(orgId))).settling) {
 		console.error(`auto top-up deferred for org ${orgId}: a previous payment is still in flight — not charging until it resolves`);
 		return false;
 	}
@@ -309,7 +314,7 @@ export async function maybeTriggerAutoTopUp(orgId: string, diagnostics?: CronDia
 	// archived prices at session creation, but the auto-charge path copies
 	// unit_amount and charges USD unconditionally — an archived, non-USD, or
 	// recurring Price must never fund a differently denominated charge.
-	const pricing = await resolveTopupPricing(orgId, org.bundle);
+	const pricing = await withTopupDiagnosticOperation(diagnostics, 'auto_topup.price_lookup', () => resolveTopupPricing(orgId, org.bundle));
 	if (!pricing) return false;
 	const { bundle, amount } = pricing;
 
@@ -380,6 +385,7 @@ export async function maybeTriggerAutoTopUp(orgId: string, diagnostics?: CronDia
 	if (!attemptAt) throw new Error('auto top-up claim returned no logical attempt');
 	const idempotencyKey = `autotopup:${customerId}:${attemptAt}`;
 	let paymentCreated = false;
+	let failureLabel = 'auto top-up charge preparation';
 	try {
 		const current = await readAutoTopupState(orgId);
 		if (!hasCurrentTopupClaim(current, attemptAt)) {
@@ -396,6 +402,7 @@ export async function maybeTriggerAutoTopUp(orgId: string, diagnostics?: CronDia
 			return false;
 		}
 		const metadata = { type: 'auto_topup', org_id: orgId, bundle: bundle.id, auto_topup_attempt_day: attemptAt.slice(0, 10), auto_topup_attempt_at: attemptAt };
+		failureLabel = 'auto top-up charge';
 		const pi = await getStripe().paymentIntents.create(
 			{
 				amount,
@@ -409,16 +416,18 @@ export async function maybeTriggerAutoTopUp(orgId: string, diagnostics?: CronDia
 			{ idempotencyKey }
 		);
 		paymentCreated = true;
+		failureLabel = 'auto top-up post-charge check';
 		const payment = { ...pi, metadata };
 		const canceled = await findPausedTopup(db, orgId, payment);
 		if (canceled) {
+			failureLabel = 'paused auto top-up recovery';
 			await recoverPausedTopup(canceled, payment);
 			return false;
 		}
 		console.info(`auto top-up initiated for org ${orgId}: bundle ${bundle.id} (${idempotencyKey})`);
 		return true;
 	} catch (error) {
-		await handleAndReportTopupFailure(orgId, attemptAt, error, paymentCreated, diagnostics);
+		await handleAndReportTopupFailure(orgId, attemptAt, error, paymentCreated, { diagnostics, label: failureLabel });
 		return false;
 	}
 }
@@ -876,7 +885,7 @@ async function triggerEligibleTopups(limit: number, offeredBundles: string[], re
 			// maybeTriggerAutoTopUp re-checks this itself for non-sweep callers.
 			if (settling) {
 				console.error(`auto top-up deferred for org ${row.id}: a previous payment is still in flight — not charging until it resolves`);
-			} else if (await withDiagnosticOperation('auto_topup.charge', () => maybeTriggerAutoTopUp(row.id, diagnostics))) triggered += 1;
+			} else if (await withDiagnosticOperation('auto_topup.charge_preparation', () => maybeTriggerAutoTopUp(row.id, diagnostics))) triggered += 1;
 		} catch (error) {
 			diagnostics.report('eligible auto top-up reconciliation', error);
 		}

@@ -42,6 +42,8 @@ const CONTEXTS = new Map(Object.entries({
 	'lifetime auto top-up reconciliation': { sweep: 'autoTopupSweepError', operation: 'auto_topup.lifetime_reconciliation', service: 'billing' },
 	'eligible auto top-up reconciliation': { sweep: 'autoTopupSweepError', operation: 'auto_topup.eligible_reconciliation', service: 'billing' },
 	'auto top-up charge': { sweep: 'autoTopupSweepError', operation: 'auto_topup.charge', service: 'billing' },
+	'auto top-up charge preparation': { sweep: 'autoTopupSweepError', operation: 'auto_topup.charge_preparation', service: 'billing' },
+	'auto top-up post-charge check': { sweep: 'autoTopupSweepError', operation: 'auto_topup.postcharge_check', service: 'database', provider: 'turso' },
 	'consent e-mail retention sweep': { sweep: 'sweepError', operation: 'consent_retention', service: 'database', provider: 'turso' },
 	'commenter-handle retention sweep': { sweep: 'handleSweepError', operation: 'handle_retention', service: 'database', provider: 'turso' },
 	'hosted welcome email sweep': { sweep: 'welcomeEmailSweepError', operation: 'welcome_email', service: 'mail' },
@@ -71,6 +73,9 @@ const OPERATIONS = {
 	'auto_topup.paused_bundles': { service: 'database', provider: 'turso' },
 	'auto_topup.eligible_candidates': { service: 'database', provider: 'turso' },
 	'auto_topup.eligible_reconciliation': { service: 'billing' },
+	'auto_topup.precharge_reconciliation': { service: 'billing' },
+	'auto_topup.price_lookup': { service: 'payments', provider: 'stripe' },
+	'auto_topup.charge_preparation': { service: 'billing' },
 	'auto_topup.charge': { service: 'billing' }
 };
 const SWEEPS = allowlist([...CONTEXTS.values()].map((context) => context.sweep));

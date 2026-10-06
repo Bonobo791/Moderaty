@@ -9,6 +9,7 @@ export function validCountInput(value: number | null | undefined): boolean {
 	return value == null || (Number.isSafeInteger(value) && value >= 0 && value <= MAX_CALCULATOR_COMMENTS);
 }
 
+/** Return a valid calculator count; reject missing, fractional, negative, or oversized values. */
 export function validateCommentCount(value: number): number {
 	if (value == null || !validCountInput(value)) {
 		throw new Error(`comment count must be an integer between 0 and ${MAX_CALCULATOR_COMMENTS}`);
@@ -33,6 +34,7 @@ export function estimateHostedMonth(moderationClassifications: number, digestCla
 	};
 }
 
+/** Include the subscription and the cheapest manual bundles covering both classification types. */
 export function hostedCostUsd(value: number, digestClassifications = 0): number {
 	return estimateHostedMonth(value, digestClassifications).cashCostUsd;
 }
@@ -57,6 +59,7 @@ export function forecastMonths(months: ReadonlyArray<number | null | undefined>)
 	return forecastCost(counts);
 }
 
+/** Summarize three independent monthly scenarios without carrying purchased balances between them. */
 export function forecastCost(values: readonly number[]): CostForecast {
 	if (values.length !== 3) throw new Error('cost forecast requires exactly three monthly comment counts');
 	const comments = values.map(validateCommentCount);

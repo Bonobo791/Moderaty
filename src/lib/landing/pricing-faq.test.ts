@@ -75,11 +75,12 @@ const APPROVED_POLICY = 'Automatic top-up is opt-in';
 const REFUND_ANCHOR = /CDC Art\. 49/;
 // Credit consumption and purchased-balance copy describe the verified ledger,
 // not a refund promise. Refund/cancellation promises still need the legal anchor.
-const REFUND_CLAIM = /refund|cancel|money[\s-]+back|reimburs|credits?\s+(?:back|(?:are\s+)?returned)/i;
+const REFUND_CLAIM = /refund|cancel|money[\s-]+back|reimburs|credits?\s+(?:back|(?:(?:is|are|will\s+be)\s+)?returned)/i;
 
 /** Never supported, anchored or not: expiry, rollover, trials, discounts, fees. */
 const UNSUPPORTED_CLAIM = /expir|rollover|roll over|trial|discount|\bfees?\b/i;
 
+/** Reject unsupported billing claims and require the legal anchor for refund wording. */
 function assertSupportedPricingClaim(line: string) {
 	expect(line).not.toMatch(UNSUPPORTED_CLAIM);
 	if (REFUND_CLAIM.test(line)) {
@@ -95,7 +96,9 @@ const REFUND_PROMISES = [
 	'Get a refund within 7 days.',
 	'You can cancel within 7 days.',
 	'Get your credits back within 7 days.',
-	'Your credits are returned within 7 days.'
+	'Your credits are returned within 7 days.',
+	'Your credit is returned within 7 days.',
+	'Unused credits will be returned within 7 days.'
 ];
 
 describe('pricing copy guardrails', () => {

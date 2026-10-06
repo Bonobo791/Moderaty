@@ -5,7 +5,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import Reveal from '../Reveal.svelte';
-	import { estimateHostedMonth, forecastMonths, MAX_CALCULATOR_COMMENTS, validCountInput } from '$lib/landing/cost';
+	import { estimateHostedMonth, forecastMonths, MAX_CALCULATOR_COMMENTS, MONTHLY_PLAN_USD, validCountInput } from '$lib/landing/cost';
 
 	let moderationCount = $state<number | null | undefined>(undefined);
 	let digestCount = $state<number | null | undefined>(0);
@@ -76,8 +76,9 @@
 				{#if invalidMonth}
 					<p class="input-error" role="alert">{locale === 'pt-BR' ? 'Informe um número inteiro válido.' : 'Enter a valid whole number.'}</p>
 				{:else if monthEstimate}
-					<strong aria-live="polite">{formatUsd(monthEstimate.cashCostUsd)} <span>{locale === 'pt-BR' ? 'em compras estimadas' : 'estimated purchases'}</span></strong>
+					<strong aria-live="polite">{formatUsd(monthEstimate.cashCostUsd)} <span>{locale === 'pt-BR' ? 'total mensal estimado' : 'estimated monthly total'}</span></strong>
 					<dl class="estimate-breakdown">
+						<div><dt>Subscription</dt><dd>{formatUsd(MONTHLY_PLAN_USD)}</dd></div>
 						<div><dt>AI classifications</dt><dd>{monthEstimate.classifications.toLocaleString(locale)}</dd></div>
 						<div><dt>Included used</dt><dd>{monthEstimate.includedUsed.toLocaleString(locale)} / 100</dd></div>
 						<div><dt>Purchased credits used</dt><dd>{monthEstimate.purchasedUsed.toLocaleString(locale)}</dd></div>

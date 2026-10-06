@@ -104,6 +104,7 @@ export function purchasableCreditEstimate(credits: number): { costUsd: number; c
 	return { costUsd: bestCents / 100, credits: purchasedCredits };
 }
 
+/** Return the cheapest manual-bundle purchase cost for the requested credits. */
 export function purchasableCreditCostUsd(credits: number): number {
 	return purchasableCreditEstimate(credits).costUsd;
 }

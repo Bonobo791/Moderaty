@@ -13,6 +13,8 @@ const ORIGINAL_ENV = {
 	CRON_SECRET: process.env.CRON_SECRET,
 	HEALTHCHECK_PING_URL: process.env.HEALTHCHECK_PING_URL
 };
+const pausedRecoveryPayload = { ok: true, results: {},
+	failureDiagnostics: [{ sweep: 'autoTopupSweepError', operation: 'auto_topup.paused_recovery', category: 'http', httpStatus: 500, provider: 'stripe', service: 'payments', message: 'test-secret' }] };
 
 function cronResponse(payload, status = 200) {
 	return new Response(JSON.stringify(payload), { status });
@@ -50,6 +52,7 @@ afterEach(() => {
 describe('dev cron tick', () => {
 	it.each([
 		[{ ok: true, results: {} }, 200, 0, 2],
+		[pausedRecoveryPayload, 200, 0, 2],
 		[{ ok: false, results: { channel: { error: 'credits' } } }, 500, 0, 2],
 		[{ ok: false, results: {}, autoTopupSweepError: 'test-secret' }, 200, 1, 1],
 		[{ ok: false, results: { channel: { error: 'token' } }, autoTopupSweepError: 'test-secret' }, 500, 1, 1],
@@ -61,6 +64,21 @@ describe('dev cron tick', () => {
 		expect(child.status).toBe(exit);
 		expect(child.stderr).toContain(`fixture-requests=${requests}`);
 		expect(child.stderr + child.stdout).not.toContain('test-secret');
+		if (payload.failureDiagnostics) expect(child.stdout).toContain('auto_topup.paused_recovery');
+	});
+
+	it('logs swallowed recovery diagnostics in both wrappers while retaining the healthy verdict', async () => {
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(pausedRecoveryPayload)));
+		const { default: netlifyCron } = await import('../netlify/functions/cron.mjs');
+		await expect(tickOnce()).resolves.toEqual(pausedRecoveryPayload);
+		await expect(netlifyCron()).resolves.toBeUndefined();
+		expect(fetch).toHaveBeenCalledTimes(2);
+		expect(console.log).toHaveBeenCalledTimes(2);
+		for (const [output] of console.log.mock.calls) {
+			expect(output).toContain('auto_topup.paused_recovery');
+			expect(output).toContain('httpStatus=500');
+			expect(output).not.toContain('test-secret');
+		}
 	});
 
 	it('rejects executable fixture status data before loading the driver', () => {

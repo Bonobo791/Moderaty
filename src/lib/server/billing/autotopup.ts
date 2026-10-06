@@ -15,7 +15,7 @@
 import { and, asc, count, eq, gte, inArray, isNotNull, isNull, ne, not, or, sql } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
-import { withDiagnosticOperation } from '../../../../scripts/lib/cron-diagnostics.mjs';
+import { type CronDiagnostics, withDiagnosticOperation } from '../../../../scripts/lib/cron-diagnostics.mjs';
 import { activeAllowanceSql, applyLedgerDelta, pauseForObservedStripeRefund, drainPendingReversals, effectiveBalanceSql, isUnmeteredPlan, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
 import { creditTransactions, organizations } from '$lib/server/db/schema';
 import { autoTopupBundle, bundleById, configuredAutoTopupBundles, priceIdFor } from '$lib/server/stripe/bundles';
@@ -693,8 +693,8 @@ export async function reconcileAutoTopup(orgId: string): Promise<{ recovered: nu
  *   cron invocation continues).
  * @returns The number of newly initiated top-ups
  */
-export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<number> {
-	const recovering = await withDiagnosticOperation('auto_topup.paused_recovery', () => sweepPausedTopups(limit > 1 ? Math.floor(limit / 2) : limit, deadline));
+export async function sweepAutoTopUp(limit = 5, deadline?: number, diagnostics?: CronDiagnostics): Promise<number> {
+	const recovering = await withDiagnosticOperation('auto_topup.paused_recovery', () => sweepPausedTopups(limit > 1 ? Math.floor(limit / 2) : limit, deadline, diagnostics));
 	if (recovering >= limit) return 0;
 	limit -= recovering;
 	// Unstick stale in-flight claims first: a webhook delivery lost past

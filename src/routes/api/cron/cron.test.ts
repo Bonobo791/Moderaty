@@ -1,7 +1,7 @@
 import { beforeEach, expect, onTestFinished, test, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { DAY_MS, seedConsent as seedConsentRecord, seedUser, setupTestDb, statementSql, testDb } from '$lib/server/testdb';
-import { auditLog, channels, consents, feedbackDigests, moderationActions } from '$lib/server/db/schema';
+import { auditLog, channels, consents, feedbackDigests, moderationActions, organizations, stripeAutoTopupRecoveries } from '$lib/server/db/schema';
 import { AUDIT_HANDLE_RETENTION_MS, CONSENT_EMAIL_RETENTION_MS } from '$lib/server/deletion';
 import { DeadlineExceededError } from '$lib/server/http';
 import { seedPendingFeedbackPreview as seedPendingPreview, withTestTrigger } from '$lib/server/cronTestSupport';
@@ -15,6 +15,8 @@ const mocks = vi.hoisted(() => ({
 	sweepWelcomeEmails: vi.fn(async (_deadline: number) => ({ scanned: 0, queued: 0, enrollmentErrors: 0, accepted: 0, errors: 0, ambiguous: 0, suppressed: 0 })),
 	retryContactNotifications: vi.fn(async (_deadline: number) => ({ sent: 0, errors: 0 })),
 	runFeedbackPreview: vi.fn(),
+	paymentIntentsRetrieve: vi.fn(),
+	paymentIntentsCancel: vi.fn(),
 	retryStripeCustomerDeletions: vi.fn(async (_limit: number, _deadline: number) => 0),
 	sweepZeroCreditAccounts: vi.fn(async (_limit: number, _deadline: number) => ({ evaluated: 0, warned: 0, deleted: 0, errors: 0 }))
 }));
@@ -23,6 +25,7 @@ vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 vi.mock('$lib/server/welcomeEmail', () => ({ sweepWelcomeEmails: mocks.sweepWelcomeEmails }));
 vi.mock('$lib/server/contactNotification', () => ({ retryContactNotifications: mocks.retryContactNotifications }));
 vi.mock('$lib/server/pipeline', () => ({ runChannel: mocks.runChannel }));
+vi.mock('$lib/server/stripe/client', () => ({ getStripe: () => ({ paymentIntents: { retrieve: mocks.paymentIntentsRetrieve, cancel: mocks.paymentIntentsCancel } }) }));
 vi.mock('$lib/server/feedbackDigest', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('$lib/server/feedbackDigest')>();
 	return { ...actual, generateFeedbackDigest: mocks.generateFeedbackDigest, runFeedbackPreview: mocks.runFeedbackPreview };
@@ -42,7 +45,7 @@ vi.mock('$lib/server/zeroCredits', async (importOriginal) => {
 
 import { GET } from './+server';
 
-setupTestDb(['cron_workload_state', 'channels', 'users', 'consents', 'audit_log', 'moderation_actions', 'feedback_digests']);
+setupTestDb(['cron_workload_state', 'channels', 'users', 'consents', 'audit_log', 'moderation_actions', 'feedback_digests', 'organizations', 'stripe_auto_topup_recoveries']);
 
 /** Seeds a user with a consent record accepted at `createdAt`, e-mail retained. */
 async function seedConsent(id: string, createdAt: string) {
@@ -138,6 +141,10 @@ function expectCronLog(log: { mock: { calls: unknown[][] } }, sweep: string, ope
 	expect(entries).toContainEqual(expect.objectContaining({ sweep, operation, cronRunId: expect.stringMatching(/^[a-f0-9-]{36}$/) }));
 }
 
+function expectResponseDiagnostic(body: Record<string, unknown>, sweep: string, operation: string) {
+	expect(body.failureDiagnostics).toContainEqual(expect.objectContaining({ sweep, operation, cronRunId: body.cronRunId }));
+}
+
 function mockClock(now: number) {
 	const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
 	onTestFinished(() => clock.mockRestore());
@@ -191,6 +198,39 @@ test('retains diagnostics appended by channel failures after the sweep payload i
 	}));
 	expect(JSON.stringify(body.failureDiagnostics)).not.toContain('test-secret');
 	expect(mocks.runChannel).toHaveBeenCalledTimes(1);
+});
+
+test.each(['lookup', 'cancellation'] as const)('reports a swallowed paused top-up %s failure without changing health or replaying work', async (phase) => {
+	mocks.env.DRY_RUN = 'false';
+	await testDb().db.insert(organizations).values({ id: 'org-private', name: 'Fixture', autoTopupEnabled: 0, creditsRemaining: 50 });
+	await testDb().db.insert(stripeAutoTopupRecoveries).values({ orgId: 'org-private', attemptAt: 'completed:pi_private', paymentIntentId: 'pi_private' });
+	await seedChannel('UC-row-error');
+	mocks.runChannel.mockResolvedValue(runResult({ dryRun: false }));
+	const failure = { type: 'StripeAPIError', statusCode: 500, message: 'https://user:test-secret@private-host.invalid/ cus_private', headers: { authorization: 'test-secret' } };
+	mocks.paymentIntentsRetrieve.mockImplementation(async () => {
+		if (phase === 'lookup') throw failure;
+		return { id: 'pi_private', status: 'processing', metadata: { type: 'auto_topup', org_id: 'org-private' } };
+	});
+	mocks.paymentIntentsCancel.mockRejectedValue(failure);
+	const log = mockConsoleError();
+	const response = await call({ bearer: 'test-secret' });
+	const body = await response.json();
+	expect(response.status).toBe(200);
+	expect(body).toMatchObject({ ok: true, autoTopupSweepError: null, autoTopupsTriggered: 0 });
+	expect(body.failureDiagnostics).toContainEqual(expect.objectContaining({
+		sweep: 'autoTopupSweepError', operation: 'auto_topup.paused_recovery', category: 'http', httpStatus: 500,
+		provider: 'stripe', service: 'payments', cronRunId: body.cronRunId
+	}));
+	expect(mocks.paymentIntentsRetrieve).toHaveBeenCalledTimes(1);
+	expect(mocks.paymentIntentsCancel).toHaveBeenCalledTimes(phase === 'lookup' ? 0 : 1);
+	expect(mocks.runChannel).toHaveBeenCalledTimes(1);
+	expect(await channelRow('UC-row-error')).toMatchObject({ lastRunStatus: 'success' });
+	expect(await testDb().db.select().from(organizations).get()).toMatchObject({ autoTopupEnabled: 0, creditsRemaining: 50 });
+	expect(await testDb().db.select().from(stripeAutoTopupRecoveries).get()).toMatchObject({ resolvedAt: null, lastError: 'refund_or_cancellation_failed' });
+	const emitted = log.mock.calls.map((args) => JSON.stringify(args)).join(' ');
+	expect(emitted).toContain('httpStatus');
+	expect(emitted).toContain(body.cronRunId);
+	for (const value of ['test-secret', 'private-host', 'cus_private', 'org-private', 'pi_private', 'authorization']) expect(emitted + JSON.stringify(body)).not.toContain(value);
 });
 
 test('preserves zero defaults for absent sweep counters without projecting arbitrary fields', async () => {
@@ -611,6 +651,7 @@ test('history digest failure does not prevent moderation or trigger a second dig
 		expect(mocks.generateFeedbackDigest).toHaveBeenCalledTimes(1);
 		expectCronLog(errorSpy, 'digest', 'feedback_digest');
 		const body = await response.json();
+		expectResponseDiagnostic(body, 'digest', 'feedback_digest');
 		expect(JSON.stringify(body)).not.toContain('raw feedback failure');
 	} finally {
 		errorSpy.mockRestore();
@@ -793,7 +834,9 @@ test('a bookkeeping failure in the run-recording finally cannot mask the run res
 		// codex, PR #142 r2: the run result is preserved, but the bookkeeping
 		// failure is surfaced in the payload — a silent server-log-only
 		// fallback would hide a degraded state from the scheduled caller.
-		expect(await res.json()).toMatchObject({ results: { 'UC-rec': runResult() }, bookkeepingError: true });
+		const body = await res.json();
+		expect(body).toMatchObject({ results: { 'UC-rec': runResult() }, bookkeepingError: true });
+		expectResponseDiagnostic(body, 'bookkeepingError', 'run_health_write');
 		expectCronLog(errorSpy, 'bookkeepingError', 'run_health_write');
 	} finally {
 		errorSpy.mockRestore();
@@ -1268,6 +1311,7 @@ test('a deadline-aborted preview stays pending for the next tick and releases th
 	expect(res.status).toBe(200);
 	const body = await res.json();
 	expect(body.feedbackPreview).toMatchObject({ error: 'timeout' });
+	expectResponseDiagnostic(body, 'feedbackPreview', 'feedback_preview');
 	expect(body.results).toEqual({});
 	// The drain consumed the budget — the rotation must not inherit the spent
 	// deadline and record a fake timeout for a channel never run (gitar+cubic).
@@ -1473,6 +1517,7 @@ test('a lease-release failure after a drained preview still counts the tick as w
 	const body = await res.json();
 	expect(body).toMatchObject({ ok: true, results: {} });
 	expect(body.feedbackPreview).toMatchObject({ commentsClassified: 1 });
+	expectResponseDiagnostic(body, 'leaseRelease', 'lease_release');
 	// Loud, not silent — and the failed release leaves the lease in place
 	// (it self-expires; the channel is not pinned forever).
 	expectCronLog(errorSpy, 'leaseRelease', 'lease_release');
@@ -1660,7 +1705,9 @@ test('a failed stale-preview cleanup is surfaced without blocking eligible live 
 		WHEN NEW.status = 'dry-run-failed' BEGIN SELECT RAISE(ABORT, 'cleanup unavailable'); END`, async () => {
 		const response = await call({ bearer: 'test-secret' });
 		expect(mocks.runChannel).toHaveBeenCalledWith('UC-live', expect.anything());
-		expect(await response.json()).toMatchObject({ ok: false, feedbackPreviewSweepError: true });
+		const body = await response.json();
+		expect(body).toMatchObject({ ok: false, feedbackPreviewSweepError: true });
+		expectResponseDiagnostic(body, 'feedbackPreviewSweepError', 'preview_cleanup');
 		expectCronLog(log, 'feedbackPreviewSweepError', 'preview_cleanup');
 	});
 });
@@ -1720,7 +1767,9 @@ test('scheduler transaction errors fail loudly without starting an unclaimed wor
 	onTestFinished(() => transaction.mockRestore());
 	const response = await call({ bearer: 'test-secret' });
 	expect(response.status).toBe(500);
-	expect(await response.json()).toMatchObject({ ok: false, schedulerError: true, results: {} });
+	const body = await response.json();
+	expect(body).toMatchObject({ ok: false, schedulerError: true, results: {} });
+	expectResponseDiagnostic(body, 'schedulerError', 'workload_claim');
 	expect(mocks.runChannel).not.toHaveBeenCalled();
 	expect(mocks.runFeedbackPreview).not.toHaveBeenCalled();
 	expect((await channelRow('UC-claim-error'))?.leaseExpiresAt).toBeNull();

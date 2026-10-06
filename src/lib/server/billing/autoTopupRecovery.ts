@@ -7,6 +7,7 @@ import { applyLedgerDelta, type LedgerHandle } from './ledger';
 import { topupAttemptCorrelation, InvalidTopupPayment, type TopupPayment } from './topupCorrelation';
 import { getStripe } from '$lib/server/stripe/client';
 import { chargeFullyRefunded, refundUngrantablePayment } from '$lib/server/stripe/refunds';
+import { CronDiagnostics, describeCronFailure } from '../../../../scripts/lib/cron-diagnostics.mjs';
 
 export { topupAttemptCorrelation } from './topupCorrelation';
 export type { TopupPayment } from './topupCorrelation';
@@ -129,7 +130,7 @@ export async function recoverPausedTopup(row: Recovery, pi: TopupPayment, deadli
 	} catch (error) {
 		const failed = await db.update(stripeAutoTopupRecoveries).set({ lastError: 'refund_or_cancellation_failed' }).where(and(predicate, isNull(stripeAutoTopupRecoveries.resolvedAt))).returning({ id: stripeAutoTopupRecoveries.id });
 		if (!failed.length && (await db.select().from(stripeAutoTopupRecoveries).where(predicate).get())?.resolvedAt) return true;
-		console.error('auto top-up recovery failed — retry or manual refund required', { orgId: row.orgId, paymentIntentId: pi.id }, error);
+		console.error('auto top-up recovery failed — retry or manual refund required', JSON.stringify(describeCronFailure(error, 'paused auto top-up recovery')));
 		throw error;
 	}
 }
@@ -159,7 +160,7 @@ async function selectListedCandidate(row: Recovery, payments: TopupPayment[]) {
 			skipped++;
 		}
 	}
-	if (skipped) console.error('auto top-up recovery skipped malformed payment items', { orgId: row.orgId, skipped });
+	if (skipped) console.error('auto top-up recovery skipped malformed payment items', { skipped });
 	return { candidateId, candidate };
 }
 
@@ -195,7 +196,7 @@ async function recoverListedPayment(row: Recovery, deadline?: number): Promise<v
 }
 
 /** Count attempted work (including failures), excluding rows skipped at the deadline. */
-export async function sweepPausedTopups(limit: number, deadline?: number): Promise<number> {
+export async function sweepPausedTopups(limit: number, deadline?: number, diagnostics = new CronDiagnostics()): Promise<number> {
 	const rows = await db.select().from(stripeAutoTopupRecoveries).where(and(isNull(stripeAutoTopupRecoveries.resolvedAt), or(isNull(stripeAutoTopupRecoveries.lastError), ne(stripeAutoTopupRecoveries.lastError, 'ambiguous_payment')))).orderBy(asc(stripeAutoTopupRecoveries.lastCheckedAt), asc(stripeAutoTopupRecoveries.id)).limit(limit).all();
 	let attempted = 0;
 	for (const row of rows) {
@@ -208,7 +209,7 @@ export async function sweepPausedTopups(limit: number, deadline?: number): Promi
 			else await recoverListedPayment(row, deadline);
 		} catch (error) {
 			await db.update(stripeAutoTopupRecoveries).set({ lastError: sql`CASE WHEN ${stripeAutoTopupRecoveries.lastError} = 'ambiguous_payment' THEN ${stripeAutoTopupRecoveries.lastError} ELSE 'refund_or_cancellation_failed' END` }).where(predicate);
-			console.error('auto top-up recovery sweep failed', { orgId: row.orgId }, error);
+			diagnostics.report('paused auto top-up recovery', error);
 		}
 	}
 	return attempted;

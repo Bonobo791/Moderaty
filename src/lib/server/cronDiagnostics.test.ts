@@ -1,12 +1,28 @@
 import { DrizzleQueryError } from 'drizzle-orm';
 import { LibsqlError } from '@libsql/client';
 import Stripe from 'stripe';
-import { describeCronFailure, formatCronFailure, sanitizeCronFailure, withDiagnosticOperation } from '../../../scripts/lib/cron-diagnostics.mjs';
-import { expect, test } from 'vitest';
+import { CronDiagnostics, describeCronFailure, formatCronFailure, sanitizeCronFailure, withDiagnosticOperation } from '../../../scripts/lib/cron-diagnostics.mjs';
+import { expect, onTestFinished, test, vi } from 'vitest';
 
 const runId = '11111111-1111-4111-8111-111111111111';
 // Synthetic test-secret fixture uses the maintainer-approved exception
 // documented in the existing cron tests (2026-07-30, PR #13).
+
+test('reporting preserves earlier diagnostic snapshots and the bounded failure list', () => {
+	const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+	onTestFinished(() => log.mockRestore());
+	const diagnostics = new CronDiagnostics();
+	const emptySnapshot = diagnostics.failures;
+	diagnostics.report('channel run', { code: 'ECONNRESET' });
+	expect(emptySnapshot).toEqual([]);
+	const firstSnapshot = Object.freeze(diagnostics.failures);
+	for (let index = 0; index < 24; index++) diagnostics.report('lease release', { code: 'SQLITE_BUSY' });
+	expect(firstSnapshot).toHaveLength(1);
+	expect(firstSnapshot[0]).toMatchObject({ code: 'ECONNRESET', cronRunId: diagnostics.cronRunId });
+	expect(diagnostics.failures).toHaveLength(20);
+	expect(diagnostics.failures[19]).toMatchObject({ code: 'SQLITE_BUSY', cronRunId: diagnostics.cronRunId });
+	expect(log).toHaveBeenCalledTimes(25);
+});
 
 test.each([
 	[{ code: 'EAI_AGAIN', status: 503 }, 'dns', 'auto top-up sweep'],

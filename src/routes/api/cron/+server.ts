@@ -343,13 +343,12 @@ function sweepCounter(sweeps: CronSweepResults, source: SweepCounterSource): num
 	return orZero(count);
 }
 
-function cronSweepPayload(sweeps: CronSweepResults, dryRun: boolean, diagnostics: CronDiagnostics) {
+function cronSweepPayload(sweeps: CronSweepResults, dryRun: boolean) {
 	const counters: Record<string, number> = Object.fromEntries(Object.entries(SWEEP_COUNTER_FIELDS)
 		.map(([output, source]) => [output, sweepCounter(sweeps, source)]));
 	const errors = Object.fromEntries(Object.entries(SWEEP_ERROR_FIELDS).map(([output, sweep]) => [output, sweeps[sweep].error]));
 	const failures = [...Object.values(errors), ...ITEM_ERROR_FIELDS.map((field) => counters[field])];
-	return { cronRunId: diagnostics.cronRunId, failureDiagnostics: diagnostics.failures,
-		ok: failures.every((failure) => !failure), dryRun, ...counters, ...errors };
+	return { ok: failures.every((failure) => !failure), dryRun, ...counters, ...errors };
 }
 
 /**
@@ -375,7 +374,7 @@ const runCronSweeps = async (dryRun: boolean, deadline: number, startedAt: numbe
 	// Auto top-up sweep: the backstop for orgs whose balance dropped below
 	// their threshold without an on-consume trigger. Bounded per invocation
 	// (I10); under DRY_RUN nothing is charged.
-	const autoTopup = await runSweep(dryRun, 'auto top-up sweep', () => sweepAutoTopUp(5, deadline), diagnostics);
+	const autoTopup = await runSweep(dryRun, 'auto top-up sweep', () => sweepAutoTopUp(5, deadline, diagnostics), diagnostics);
 	// Stripe deletion outbox retry: customers owed erasure from account
 	// teardown whose first attempt hit a Stripe outage. Bounded per
 	// invocation (I10); a row is removed only after Stripe confirms.
@@ -396,7 +395,7 @@ const runCronSweeps = async (dryRun: boolean, deadline: number, startedAt: numbe
 	// Bounded per invocation (I10); under DRY_RUN no account is touched.
 	const zeroCredit = await runSweep(dryRun, 'zero-credit account sweep', () => sweepZeroCreditAccounts(ZERO_CREDIT_SWEEP_BATCH, deadline), diagnostics);
 
-	const base = cronSweepPayload({ contactNotifications, welcome, consent, handles, autoTopup, stripeDeletions, googleRevocations, stripeScrubs, reversals, zeroCredit }, dryRun, diagnostics);
+	const base = cronSweepPayload({ contactNotifications, welcome, consent, handles, autoTopup, stripeDeletions, googleRevocations, stripeScrubs, reversals, zeroCredit }, dryRun);
 	console.info(`cron: sweeps finished in ${Date.now() - startedAt}ms`);
 	return base;
 };
@@ -492,6 +491,10 @@ export const GET: RequestHandler = async ({ url, request }) => {
 	}
 	const dryRun = env.DRY_RUN === 'true';
 	const diagnostics = new CronDiagnostics();
+	// Snapshot at serialization: failures can arrive after the sweeps finish.
+	const respond = (body: Record<string, unknown>, status = 200) => json({
+		...body, cronRunId: diagnostics.cronRunId, failureDiagnostics: diagnostics.failures
+	}, { status });
 	console.info(`cron: tick start (dryRun=${dryRun}, run=${diagnostics.cronRunId})`);
 	const base = await runCronSweeps(dryRun, deadline, startedAt, diagnostics);
 	const nowIso = new Date().toISOString();
@@ -503,7 +506,7 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		console.error(
 			`cron: sweeps consumed the ${RUN_BUDGET_MS}ms run budget (${elapsedMs}ms) — no channel claimed this tick`
 		);
-		return json({ ...base, budgetExhausted: true, results: {} });
+		return respond({ ...base, budgetExhausted: true, results: {} });
 	}
 	let workload: CronWorkload;
 	let staleFailed = 0;
@@ -521,20 +524,20 @@ export const GET: RequestHandler = async ({ url, request }) => {
 		// A transaction failure rolls back the lease and turn together. Fail
 		// loudly rather than guessing which workload another tick owns.
 		diagnostics.report('workload claim', cause);
-		return json({ ...afterCleanup, ok: false, schedulerError: true, results: {} }, { status: 500 });
+		return respond({ ...afterCleanup, ok: false, schedulerError: true, results: {} }, 500);
 	}
 	const withPreview = { ...afterCleanup, feedbackPreview: staleFailed ? { staleFailed } : undefined };
 	if (workload.kind === 'budget-exhausted') {
 		console.error(`cron: workload selection consumed the ${RUN_BUDGET_MS}ms run budget — no channel claimed this tick`);
-		return json({ ...withPreview, budgetExhausted: true, results: {} });
+		return respond({ ...withPreview, budgetExhausted: true, results: {} });
 	}
 	if (workload.kind === 'none') {
 		console.info('cron: no active, unleased channel to run');
-		return json({ ...withPreview, results: {} });
+		return respond({ ...withPreview, results: {} });
 	}
 	if (workload.kind === 'claim-lost') {
 		console.info(`cron: lost claim race for channel ${workload.channelId}`);
-		return json({ ...withPreview, claimed: false, results: {} });
+		return respond({ ...withPreview, claimed: false, results: {} });
 	}
 	// Even a short transaction can return after its deadline (remote DB
 	// latency or lock contention). Never start remote work or stamp live
@@ -549,18 +552,18 @@ export const GET: RequestHandler = async ({ url, request }) => {
 			diagnostics.report('lease release', cause);
 			bookkeepingError = true;
 		}
-		return json({ ...withPreview, budgetExhausted: true, ...(bookkeepingError ? { bookkeepingError } : {}), results: {} });
+		return respond({ ...withPreview, budgetExhausted: true, ...(bookkeepingError ? { bookkeepingError } : {}), results: {} });
 	}
 	// Exactly one selected workload shares the original deadline. A retry or
 	// failure still spends this class's turn; the next tick serves its peer.
 	if (workload.kind === 'preview') {
 		const feedbackPreview = await runClaimedFeedbackPreview(workload, deadline, staleFailed, diagnostics);
-		return json({ ...afterCleanup, feedbackPreview, results: {} });
+		return respond({ ...afterCleanup, feedbackPreview, results: {} });
 	}
 	const { channel } = workload;
 	console.info(
 		`cron: claimed channel ${channel.id} (lastRunAt=${channel.lastRunAt ?? 'never'}, cursor=${channel.cursor ?? 'none'}, resumingPage=${channel.nextPageToken !== null}, dryRunDrain=${channel.dryRunBoundary !== null})`
 	);
 	const { body, status } = await runAndRecord(workload, deadline, withPreview, diagnostics);
-	return json(body, { status });
+	return respond(body, status);
 };

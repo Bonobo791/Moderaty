@@ -38,6 +38,7 @@ const FORMAT_FIELDS = {
 /** @type {Map<unknown, {sweep: string, operation: string, service: string, provider?: string}>} */
 const CONTEXTS = new Map(Object.entries({
 	'auto top-up sweep': { sweep: 'autoTopupSweepError', operation: 'auto_topup', service: 'billing' },
+	'paused auto top-up recovery': { sweep: 'autoTopupSweepError', operation: 'auto_topup.paused_recovery', service: 'billing' },
 	'consent e-mail retention sweep': { sweep: 'sweepError', operation: 'consent_retention', service: 'database', provider: 'turso' },
 	'commenter-handle retention sweep': { sweep: 'handleSweepError', operation: 'handle_retention', service: 'database', provider: 'turso' },
 	'hosted welcome email sweep': { sweep: 'welcomeEmailSweepError', operation: 'welcome_email', service: 'mail' },
@@ -205,7 +206,7 @@ export class CronDiagnostics {
 	/** @param {string} label @param {unknown} cause */
 	report(label, cause) {
 		const diagnostic = describeCronFailure(cause, label, this.cronRunId);
-		if (this.failures.length < MAX_FAILURES) this.failures.push(diagnostic);
+		if (this.failures.length < MAX_FAILURES) this.failures = [...this.failures, diagnostic];
 		console.error('cron failure:', JSON.stringify(diagnostic));
 		return formatCronFailure(diagnostic);
 	}

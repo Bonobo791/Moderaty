@@ -122,8 +122,9 @@ function safeCause(value) {
 	const provider = prefer(undefined, [PROVIDERS.get(field(value, 'provider')), CODE_PROVIDERS.get(code),
 		NAME_PROVIDERS.get(name), /^OpenAI\b/i.test(text) ? 'openai' : undefined]);
 	const service = prefer(undefined, [SERVICES.get(field(value, 'service')), PROVIDER_SERVICES.get(provider)]);
-	const status = prefer(undefined, ['httpStatus', 'status', 'statusCode'].map((key) => HTTP_STATUSES.get(field(value, key))).concat([
-		HTTP_STATUSES.get(field(field(value, 'response'), 'status')), HTTP_STATUSES.get(Number(/\bfailed: ([45]\d{2})\b/.exec(text)?.[1]))]));
+	const status = prefer(undefined, [HTTP_STATUSES.get(field(value, 'httpStatus')), HTTP_STATUSES.get(field(value, 'status')),
+		HTTP_STATUSES.get(field(value, 'statusCode')), HTTP_STATUSES.get(field(field(value, 'response'), 'status')),
+		HTTP_STATUSES.get(Number(/\bfailed: ([45]\d{2})\b/.exec(text)?.[1]))]);
 	const category = prefer('unknown', [CODE_CATEGORIES.get(code), TIMEOUT_CATEGORIES.get(name),
 		status ? 'http' : undefined, FALLBACK_CATEGORIES.get(code), FALLBACK_CATEGORIES.get(name),
 		code ? 'network' : undefined, MESSAGE_CATEGORIES.get(text), /^fetch failed\b/.test(text) ? 'network' : undefined]);

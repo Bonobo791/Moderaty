@@ -25,7 +25,7 @@ vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 vi.mock('$lib/server/welcomeEmail', () => ({ sweepWelcomeEmails: mocks.sweepWelcomeEmails }));
 vi.mock('$lib/server/contactNotification', () => ({ retryContactNotifications: mocks.retryContactNotifications }));
 vi.mock('$lib/server/pipeline', () => ({ runChannel: mocks.runChannel }));
-vi.mock('$lib/server/stripe/client', () => ({ getStripe: () => ({ paymentIntents: { retrieve: mocks.paymentIntentsRetrieve, cancel: mocks.paymentIntentsCancel } }) }));
+vi.mock('$lib/server/stripe/client', () => ({ getStripe: vi.fn().mockReturnValue({ paymentIntents: { retrieve: mocks.paymentIntentsRetrieve, cancel: mocks.paymentIntentsCancel } }) }));
 vi.mock('$lib/server/feedbackDigest', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('$lib/server/feedbackDigest')>();
 	return { ...actual, generateFeedbackDigest: mocks.generateFeedbackDigest, runFeedbackPreview: mocks.runFeedbackPreview };
@@ -141,8 +141,8 @@ function expectCronLog(log: { mock: { calls: unknown[][] } }, sweep: string, ope
 	expect(entries).toContainEqual(expect.objectContaining({ sweep, operation, cronRunId: expect.stringMatching(/^[a-f0-9-]{36}$/) }));
 }
 
-function expectResponseDiagnostic(body: Record<string, unknown>, sweep: string, operation: string) {
-	expect(body.failureDiagnostics).toContainEqual(expect.objectContaining({ sweep, operation, cronRunId: body.cronRunId }));
+function expectResponseDiagnostic(body: Record<string, unknown>, sweep: string, operation: string, fields: Record<string, unknown> = {}) {
+	expect(body.failureDiagnostics).toContainEqual(expect.objectContaining({ sweep, operation, cronRunId: body.cronRunId, ...fields }));
 }
 
 function mockClock(now: number) {
@@ -162,17 +162,16 @@ test('nested Turso DNS failures reach safe sweep diagnostics while moderation st
 		if (statementSql(statement).startsWith('select "id", "auto_topup_enabled"')) return Promise.reject(failure);
 		return execute(statement);
 	});
-	onTestFinished(() => query.mockRestore());
+	onTestFinished(query.mockRestore);
 	const log = mockConsoleError();
 	const response = await call({ bearer: 'test-secret' });
 	const body = await response.json();
 	expect(response.status).toBe(200);
 	expect(body.ok).toBe(false);
 	expect(body.autoTopupSweepError).toContain('EAI_AGAIN');
-	expect(body.failureDiagnostics).toContainEqual(expect.objectContaining({
-		sweep: 'autoTopupSweepError', operation: 'auto_topup.lifetime_candidates',
-		category: 'dns', code: 'EAI_AGAIN', syscall: 'getaddrinfo', provider: 'turso', service: 'database', cronRunId: body.cronRunId
-	}));
+	expectResponseDiagnostic(body, 'autoTopupSweepError', 'auto_topup.lifetime_candidates', {
+		category: 'dns', code: 'EAI_AGAIN', syscall: 'getaddrinfo', provider: 'turso', service: 'database'
+	});
 	expect(body.cronRunId).toMatch(/^[a-f0-9-]{36}$/);
 	expect(mocks.runChannel).toHaveBeenCalledTimes(1);
 	const emitted = log.mock.calls.map((args) => JSON.stringify(args)).join(' ');
@@ -193,44 +192,41 @@ test('retains diagnostics appended by channel failures after the sweep payload i
 	expect(response.status).toBe(500);
 	const body = await response.json();
 	expect(body).toMatchObject({ ok: false, results: { 'UC-late-failure': { error: 'error' } } });
-	expect(body.failureDiagnostics).toContainEqual(expect.objectContaining({
-		sweep: 'channelRun', operation: 'channel_run', category: 'network', code: 'ECONNRESET', cronRunId: body.cronRunId
-	}));
+	expectResponseDiagnostic(body, 'channelRun', 'channel_run', { category: 'network', code: 'ECONNRESET' });
 	expect(JSON.stringify(body.failureDiagnostics)).not.toContain('test-secret');
 	expect(mocks.runChannel).toHaveBeenCalledTimes(1);
 });
 
-test.each(['lookup', 'cancellation'] as const)('reports a swallowed paused top-up %s failure without changing health or replaying work', async (phase) => {
+test.each([
+	{ phase: 'lookup', fail: mocks.paymentIntentsRetrieve, cancellations: 0 },
+	{ phase: 'cancellation', fail: mocks.paymentIntentsCancel, cancellations: 1 }
+])('reports a swallowed paused top-up $phase failure without changing health or replaying work', async ({ fail, cancellations }) => {
 	mocks.env.DRY_RUN = 'false';
 	await testDb().db.insert(organizations).values({ id: 'org-private', name: 'Fixture', autoTopupEnabled: 0, creditsRemaining: 50 });
 	await testDb().db.insert(stripeAutoTopupRecoveries).values({ orgId: 'org-private', attemptAt: 'completed:pi_private', paymentIntentId: 'pi_private' });
 	await seedChannel('UC-row-error');
 	mocks.runChannel.mockResolvedValue(runResult({ dryRun: false }));
 	const failure = { type: 'StripeAPIError', statusCode: 500, message: 'https://user:test-secret@private-host.invalid/ cus_private', headers: { authorization: 'test-secret' } };
-	mocks.paymentIntentsRetrieve.mockImplementation(async () => {
-		if (phase === 'lookup') throw failure;
-		return { id: 'pi_private', status: 'processing', metadata: { type: 'auto_topup', org_id: 'org-private' } };
-	});
-	mocks.paymentIntentsCancel.mockRejectedValue(failure);
+	mocks.paymentIntentsRetrieve.mockResolvedValue({ id: 'pi_private', status: 'processing', metadata: { type: 'auto_topup', org_id: 'org-private' } });
+	fail.mockRejectedValueOnce(failure);
 	const log = mockConsoleError();
 	const response = await call({ bearer: 'test-secret' });
 	const body = await response.json();
 	expect(response.status).toBe(200);
 	expect(body).toMatchObject({ ok: true, autoTopupSweepError: null, autoTopupsTriggered: 0 });
-	expect(body.failureDiagnostics).toContainEqual(expect.objectContaining({
-		sweep: 'autoTopupSweepError', operation: 'auto_topup.paused_recovery', category: 'http', httpStatus: 500,
-		provider: 'stripe', service: 'payments', cronRunId: body.cronRunId
-	}));
+	expectResponseDiagnostic(body, 'autoTopupSweepError', 'auto_topup.paused_recovery', {
+		category: 'http', httpStatus: 500, provider: 'stripe', service: 'payments'
+	});
 	expect(mocks.paymentIntentsRetrieve).toHaveBeenCalledTimes(1);
-	expect(mocks.paymentIntentsCancel).toHaveBeenCalledTimes(phase === 'lookup' ? 0 : 1);
+	expect(mocks.paymentIntentsCancel).toHaveBeenCalledTimes(cancellations);
 	expect(mocks.runChannel).toHaveBeenCalledTimes(1);
 	expect(await channelRow('UC-row-error')).toMatchObject({ lastRunStatus: 'success' });
 	expect(await testDb().db.select().from(organizations).get()).toMatchObject({ autoTopupEnabled: 0, creditsRemaining: 50 });
 	expect(await testDb().db.select().from(stripeAutoTopupRecoveries).get()).toMatchObject({ resolvedAt: null, lastError: 'refund_or_cancellation_failed' });
-	const emitted = log.mock.calls.map((args) => JSON.stringify(args)).join(' ');
+	const emitted = JSON.stringify(log.mock.calls);
 	expect(emitted).toContain('httpStatus');
 	expect(emitted).toContain(body.cronRunId);
-	for (const value of ['test-secret', 'private-host', 'cus_private', 'org-private', 'pi_private', 'authorization']) expect(emitted + JSON.stringify(body)).not.toContain(value);
+	expect(emitted + JSON.stringify(body)).not.toMatch(/test-secret|private-host|cus_private|org-private|pi_private|authorization/);
 });
 
 test('preserves zero defaults for absent sweep counters without projecting arbitrary fields', async () => {

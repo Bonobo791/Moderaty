@@ -9,8 +9,8 @@ const runId = '11111111-1111-4111-8111-111111111111';
 // documented in the existing cron tests (2026-07-30, PR #13).
 
 test('reporting preserves earlier diagnostic snapshots and the bounded failure list', () => {
-	const log = vi.spyOn(console, 'error').mockImplementation(() => {});
-	onTestFinished(() => log.mockRestore());
+	const log = vi.spyOn(console, 'error').mockImplementation(vi.fn());
+	onTestFinished(log.mockRestore);
 	const diagnostics = new CronDiagnostics();
 	const emptySnapshot = diagnostics.failures;
 	diagnostics.report('channel run', { code: 'ECONNRESET' });

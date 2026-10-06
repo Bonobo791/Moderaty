@@ -43,6 +43,7 @@ export default async function cron() {
 	} catch {
 		payload = null;
 	}
+	console.log(`cron endpoint replied: ${renderTick(payload, res.ok)}`);
 	const { ownerActionableOnly, problems } = evaluateTick(res.ok, payload);
 	if (!res.ok) {
 		// A run whose only failures are channel-owner categories (credits/
@@ -60,7 +61,6 @@ export default async function cron() {
 	// A 200 can still report failure — `ok:false`, an exhausted run budget,
 	// a failed sweep — none of which HTTP status exposes (codex).
 	if (problems.length) throw new Error(`cron tick reported failure(s): ${formatTickFailure(payload, problems)}`);
-	console.log(`cron endpoint ok: ${renderTick(payload, res.ok)}`);
 }
 
 const TIMEOUT_MS = 25_000; // below Netlify's 26s function limit; the endpoint's own run budget is 20s

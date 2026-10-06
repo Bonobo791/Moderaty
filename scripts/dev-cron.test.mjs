@@ -14,7 +14,9 @@ const ORIGINAL_ENV = {
 	HEALTHCHECK_PING_URL: process.env.HEALTHCHECK_PING_URL
 };
 const pausedRecoveryPayload = { ok: true, results: {},
+	cronRunId: '11111111-1111-4111-8111-111111111111',
 	failureDiagnostics: [{ sweep: 'autoTopupSweepError', operation: 'auto_topup.paused_recovery', category: 'http', httpStatus: 500, provider: 'stripe', service: 'payments', message: 'test-secret' }] };
+const suppressedRecoveryPayload = { ...pausedRecoveryPayload, ok: false, results: { 'private-customer': { error: 'credits' } } };
 
 function cronResponse(payload, status = 200) {
 	return new Response(JSON.stringify(payload), { status });
@@ -53,6 +55,7 @@ describe('dev cron tick', () => {
 	it.each([
 		[{ ok: true, results: {} }, 200, 0, 2],
 		[pausedRecoveryPayload, 200, 0, 2],
+		[suppressedRecoveryPayload, 500, 0, 2],
 		[{ ok: false, results: { channel: { error: 'credits' } } }, 500, 0, 2],
 		[{ ok: false, results: {}, autoTopupSweepError: 'test-secret' }, 200, 1, 1],
 		[{ ok: false, results: { channel: { error: 'token' } }, autoTopupSweepError: 'test-secret' }, 500, 1, 1],
@@ -67,18 +70,21 @@ describe('dev cron tick', () => {
 		if (payload.failureDiagnostics) expect(child.stdout).toContain('auto_topup.paused_recovery');
 	});
 
-	it('logs swallowed recovery diagnostics in both wrappers while retaining the healthy verdict', async () => {
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(pausedRecoveryPayload)));
+	it.each([
+		{ label: 'healthy', payload: pausedRecoveryPayload, status: 200 },
+		{ label: 'suppressed', payload: suppressedRecoveryPayload, status: 500 }
+	])('logs $label recovery diagnostics in both wrappers while retaining the alert verdict', async ({ payload, status }) => {
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, status)));
 		const { default: netlifyCron } = await import('../netlify/functions/cron.mjs');
-		await expect(tickOnce()).resolves.toEqual(pausedRecoveryPayload);
+		await expect(tickOnce()).resolves.toEqual(payload);
 		await expect(netlifyCron()).resolves.toBeUndefined();
 		expect(fetch).toHaveBeenCalledTimes(2);
 		expect(console.log).toHaveBeenCalledTimes(2);
-		for (const [output] of console.log.mock.calls) {
-			expect(output).toContain('auto_topup.paused_recovery');
-			expect(output).toContain('httpStatus=500');
-			expect(output).not.toContain('test-secret');
-		}
+		const renderedDiagnostic = expect.stringMatching(/httpStatus=500.*operation=auto_topup\.paused_recovery/);
+		expect(console.log.mock.calls).toEqual([[renderedDiagnostic], [renderedDiagnostic]]);
+		const output = JSON.stringify(console.log.mock.calls);
+		expect(output).toContain(payload.cronRunId);
+		expect(output).not.toMatch(/test-secret|private-customer/);
 	});
 
 	it('rejects executable fixture status data before loading the driver', () => {

@@ -56,6 +56,9 @@ same-origin referrers contribute an empty string. A private or credential-bearin
 same-origin referrer suppresses the document. Future blog routes require separate
 public-route and query-policy review.
 
+Only the first pageview attempt carries the sanitized external landing referrer;
+later SPA pageviews, including Back, send an empty referrer.
+
 One client belongs to each document. It sends one initial pageview and one per
 committed change of the canonical public URL, including Back between distinct
 public URLs. Hash-only changes, discarded query changes and duplicate effects do
@@ -65,6 +68,11 @@ future collection and discards cache; normal navigation proceeds without the old
 GTM forced reload. Requests already started contain immutable safe public data
 and may finish. Click requests have their own bounded lifetime, independent of
 route-effect cancellation, so a connection CTA can still navigate to login.
+Clicks made while configuration is pending are frozen and queued only in memory
+(at most 32 clicks, expiring after five seconds). Safe public navigation can
+finish configuration for those clicks; private navigation, opt-out, disabled or
+failed configuration discards them. No collector request starts before the
+runtime settings and current document pass their checks.
 
 | Event | Allowed placements |
 | --- | --- |
@@ -98,7 +106,7 @@ Requests are `{ type: 'event', payload }` sent to `new URL('/api/send', UMAMI_UR
 with credentials omitted, `no-referrer`, keepalive and a five-second deadline.
 Caller cancellation is composed with deadlines; click sends use their own
 deadline. The normal browser User-Agent is used. Successful responses provide a
-nonempty cache string of at most 4096 characters, retained only in memory and
+nonempty printable ASCII cache string of at most 4096 characters, retained only in memory and
 passed as `x-umami-cache`. SessionId, visitId and other response fields are ignored.
 The Umami 3.0.3 bot response `{ beep: 'boop' }` is an intentional skip.
 Cache is discarded on stop, opt-out and configuration changes. Late responses
@@ -111,6 +119,9 @@ local endpoint and exact runtime/hostname gates. They contain no error text,
 URLs, cache tokens or account information. Reports are shared per document and
 server logs coalesced to one per minute per worker with constant memory. Failure
 to deliver a diagnostic is logged generically without hiding the original failure.
+Preference-storage failures on eligible public documents use the same generic
+diagnostic even though collection stops. The server applies runtime/hostname
+gates; private documents send no diagnostic.
 
 ## Operator activation checklist
 
@@ -162,6 +173,10 @@ need assessment. The published Privacy page explains the scope and preference.
 Run `MODERATY_ADAPTER=node npm run build`, then
 `node scripts/test-analytics-browser.mjs`. This uses Python 3 Playwright and
 Chromium; set absolute `PYTHON_BINARY` and `CHROMIUM_BINARY` paths if needed.
+The runner requires Linux or macOS process groups and terminates the regression
+runner and its local server group on timeout. Browser cleanup relies on Playwright's
+shutdown handlers. Python optimization is rejected so assertions
+cannot silently disappear.
 One unchanged Node build is restarted with disabled, enabled, denied-host and
 invalid runtime settings. Chromium exercises actual SvelteKit navigation,
 pending-configuration races, CTA clicks, private-document blocking, browser

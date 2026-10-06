@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { createAnalyticsClient, getAnalyticsOptOut, setAnalyticsOptOut, readMarketingClick } from './analytics';
 
 const config = { umamiUrl: 'https://collector.example', websiteId: '11111111-2222-4333-8444-555555555555', hostname: 'moderaty.example' };
-let browser: { location: URL; localStorage: Storage; dispatchEvent: (event: Event) => boolean };
+let browser: { location: URL; localStorage: Storage; dispatchEvent: (event: Event) => boolean; doNotTrack?: string };
 let referrer: string;
 let requests: { url: string; options: RequestInit; body?: Record<string, unknown> }[];
 let configBody: unknown;
@@ -26,7 +26,7 @@ beforeEach(() => {
 	}));
 	vi.spyOn(console, 'error').mockImplementation(vi.fn());
 });
-afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 const sent = () => requests.filter((request) => request.url.startsWith(config.umamiUrl));
 const client = () => createAnalyticsClient({ onFailure: failure });
 const view = (instance: ReturnType<typeof client>) => instance.pageview(new URL(browser.location));
@@ -57,6 +57,15 @@ test('counts initially and per changed canonical public URL, including Back, wit
 		navigate(path); await view(instance);
 	}
 	expect(sent().map((request) => (request.body?.payload as { url: string }).url)).toEqual(['/', '/pricing', '/', '/?utm_source=newsletter&utm_medium=email']);
+});
+
+test('attributes only the first pageview to the landing referrer across SPA navigation and Back', async () => {
+	referrer = 'https://ref.example/private?email=secret';
+	const instance = client(); await view(instance);
+	navigate('/pricing'); await view(instance); navigate('/'); await view(instance);
+	expect(sent().map((request) => request.body?.payload)).toEqual([
+		expectedPayload('/', 'Home', { referrer: 'https://ref.example' }), expectedPayload('/pricing', 'Pricing'), expectedPayload()
+	]);
 });
 test.each(['/login', '/contact/verify?token=secret', '/?%74OKEN=secret'])('a document starting on or visiting %s never reactivates', async (path) => {
 	navigate(path); const startedPrivate = client(); await view(startedPrivate); navigate('/'); await view(startedPrivate); expect(requests).toEqual([]);
@@ -92,7 +101,7 @@ test('uses only bounded in-memory cache and clears it when runtime configuration
 test('bot suppression is a deliberate skip', async () => {
 	collector = async () => Response.json({ beep: 'boop' }); expect(await view(client())).toBe('skipped'); expect(failure).not.toHaveBeenCalled();
 });
-test.each([{}, [], { cache: '' }, { cache: 'x'.repeat(4097) }, { cache: 12 }, { sessionId: 'not-a-cache' }])('malformed collector success rejects without retry: %j', async (body) => {
+test.each([{}, [], { cache: '' }, { cache: 'x'.repeat(4097) }, { cache: 12 }, { sessionId: 'not-a-cache' }, { cache: 'unsafe\r\nheader' }, { cache: 'unsafe\u0000value' }, { cache: 'private\u2603' }])('malformed collector success rejects without retry: %j', async (body) => {
 	collector = async () => Response.json(body); const instance = client(); await expect(view(instance)).rejects.toThrow('Optional usage measurement is unavailable.');
 	expect(await view(instance)).toBe('skipped'); expect(sent()).toHaveLength(1); expect(failure).toHaveBeenCalled();
 });
@@ -127,21 +136,103 @@ test('validates event pairs even when the caller bypasses TypeScript', async () 
 	expect(await instance.click('email=secret' as never, 'hero')).toBe('skipped'); expect(sent()).toHaveLength(1);
 });
 
+test('waits for pending initial configuration before sending a frozen approved click', async () => {
+	const original = fetch; let configure!: (response: Response) => void;
+	vi.stubGlobal('fetch', vi.fn((url: string, options: RequestInit) => url.includes('/api/analytics') && options.method !== 'POST'
+		? new Promise<Response>((resolve) => { configure = resolve; }) : original(url, options)));
+	const instance = client(); const pageview = view(instance); const click = instance.click('source_click', 'nav');
+	let settled = false; void click.then(() => { settled = true; }); await Promise.resolve();
+	expect(settled).toBe(false); expect(sent()).toEqual([]);
+	configure(Response.json(config)); expect(await pageview).toBe('sent'); expect(await click).toBe('sent');
+	expect(sent().map((request) => request.body?.payload)).toEqual([expectedPayload(), expectedPayload('/', 'Home', { name: 'source_click', data: { placement: 'nav' } })]);
+});
+
+test('a pending click survives canceled configuration on public navigation with its original safe payload', async () => {
+	const original = fetch; let configure!: (response: Response) => void; let initial = true;
+	vi.stubGlobal('fetch', vi.fn((url: string, options: RequestInit) => {
+		if (url.includes('/api/analytics') && options.method !== 'POST' && initial) {
+			initial = false; return new Promise<Response>((resolve) => { configure = resolve; });
+		}
+		return original(url, options);
+	}));
+	const instance = client(); const controller = new AbortController();
+	const first = instance.pageview(new URL(browser.location), controller.signal);
+	const click = instance.click('pricing_click', 'nav'); controller.abort(); navigate('/pricing');
+	expect(await view(instance)).toBe('sent'); expect(await click).toBe('sent');
+	configure(Response.json(config)); expect(await first).toBe('skipped');
+	expect(sent().map((request) => request.body?.payload)).toEqual([
+		expectedPayload('/pricing', 'Pricing'), expectedPayload('/', 'Home', { name: 'pricing_click', data: { placement: 'nav' } })
+	]);
+});
+
+test.each(['stop', 'disabled'])('a pending click is skipped when %s prevents configuration activation', async (mode) => {
+	const original = fetch; let configure!: (response: Response) => void;
+	vi.stubGlobal('fetch', vi.fn((url: string, options: RequestInit) => url.includes('/api/analytics') && options.method !== 'POST'
+		? new Promise<Response>((resolve) => { configure = resolve; }) : original(url, options)));
+	const instance = client(); const pageview = view(instance); const click = instance.click('connect_click', 'hero');
+	if (mode === 'stop') { navigate('/login'); instance.stop(); }
+	configure(Response.json(mode === 'disabled' ? null : config));
+	expect(await pageview).toBe('skipped'); expect(await click).toBe('skipped'); expect(sent()).toEqual([]);
+});
+
+test('pending clicks expire after five seconds and cannot be released by late configuration', async () => {
+	vi.useFakeTimers(); const original = fetch; let configure!: (response: Response) => void;
+	vi.stubGlobal('fetch', vi.fn((url: string, options: RequestInit) => url.includes('/api/analytics') && options.method !== 'POST'
+		? new Promise<Response>((resolve) => { configure = resolve; }) : original(url, options)));
+	const instance = client(); const pageview = view(instance); const click = instance.click('source_click', 'nav');
+	await vi.advanceTimersByTimeAsync(5000); expect(await click).toBe('skipped');
+	configure(Response.json(config)); expect(await pageview).toBe('sent'); expect(sent()).toHaveLength(1);
+});
+
+test('pending clicks are bounded at 32 and overflow reports generically without dropping accepted clicks', async () => {
+	const original = fetch; let configure!: (response: Response) => void;
+	vi.stubGlobal('fetch', vi.fn((url: string, options: RequestInit) => url.includes('/api/analytics') && options.method !== 'POST'
+		? new Promise<Response>((resolve) => { configure = resolve; }) : original(url, options)));
+	const instance = client(); const pageview = view(instance);
+	const clicks = Array.from({ length: 32 }, () => instance.click('source_click', 'nav'));
+	await expect(instance.click('source_click', 'nav')).rejects.toThrow('Optional usage measurement is unavailable.');
+	expect(failure).toHaveBeenCalledOnce(); expect(sent()).toEqual([]);
+	configure(Response.json(config)); expect(await pageview).toBe('sent'); expect(await Promise.all(clicks)).toEqual(Array(32).fill('sent'));
+	expect(sent()).toHaveLength(33);
+});
+
 test.each(['dnt', 'gpc', 'stored'])('%s preference prevents configuration and collector requests', async (preference) => {
 	if (preference === 'dnt') vi.stubGlobal('navigator', { doNotTrack: '1' });
 	if (preference === 'gpc') vi.stubGlobal('navigator', { globalPrivacyControl: true });
 	if (preference === 'stored') browser.localStorage.setItem('moderaty.analytics.optOut', '1');
 	const instance = client(); expect(await view(instance)).toBe('skipped'); expect(await instance.click('connect_click', 'hero')).toBe('skipped'); expect(requests).toEqual([]);
 });
+test.each(['1', 'yes'])('a positive window DNT signal %s overrides a negative navigator signal', async (signal) => {
+	vi.stubGlobal('navigator', { doNotTrack: '0' }); browser.doNotTrack = signal;
+	expect(await view(client())).toBe('skipped'); expect(requests).toEqual([]);
+});
 test('storage read failure remains disabled and reports a generic visible failure', async () => {
 	browser.localStorage.getItem = () => { throw new Error('private storage details'); };
-	const instance = client(); expect(await view(instance)).toBe('skipped'); expect(requests).toEqual([]); expect(failure).toHaveBeenCalled(); expect(logs()).not.toContain('private');
+	const instance = client(); expect(await view(instance)).toBe('skipped');
+	expect(requests).toEqual([{ url: 'https://moderaty.example/api/analytics?hostname=moderaty.example', options: {
+		method: 'POST', cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: expect.any(AbortSignal)
+	} }]);
+	expect(failure).toHaveBeenCalled(); expect(logs()).not.toContain('private');
+});
+test.each(['/login', '/?token=secret'])('storage failure on %s cannot send a diagnostic', async (path) => {
+	navigate(path); browser.localStorage.getItem = () => { throw new Error('private storage details'); };
+	expect(await view(client())).toBe('skipped'); expect(requests).toEqual([]);
 });
 test('storage write failure blocks an already active client', async () => {
 	const instance = client(); await view(instance);
 	browser.localStorage.setItem = () => { throw new Error('private storage details'); };
 	expect(() => setAnalyticsOptOut(true)).toThrow('Audience measurement preference is unavailable.');
 	navigate('/pricing'); expect(await view(instance)).toBe('skipped'); expect(sent()).toHaveLength(1);
+});
+test('a same-tab preference failure reports once and remains blocked after storage recovers', async () => {
+	const instance = client(); await view(instance);
+	browser.dispatchEvent = () => { instance.preferenceChanged(); return true; };
+	browser.localStorage.setItem = () => { throw new Error('private storage details'); };
+	expect(() => setAnalyticsOptOut(true)).toThrow('Audience measurement preference is unavailable.');
+	instance.preferenceChanged();
+	expect(requests.filter((request) => request.options.method === 'POST' && request.url.includes('/api/analytics'))).toHaveLength(1);
+	expect(failure).toHaveBeenCalled(); expect(await instance.click('connect_click', 'hero')).toBe('skipped');
+	expect(logs()).not.toContain('private');
 });
 test('preference stores only the opt-out key and broadcasts successful same-tab changes', () => {
 	expect(getAnalyticsOptOut()).toBe(false); setAnalyticsOptOut(true); expect(getAnalyticsOptOut()).toBe(true);

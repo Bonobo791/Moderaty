@@ -12,7 +12,7 @@ function unavailable(): never {
 
 /** Reads only the local opt-out flag; never stores measurement identifiers. */
 export function getAnalyticsOptOut(): boolean {
-	if (unavailableDocuments.has(window)) return true;
+	if (unavailableDocuments.has(window)) throw new Error(message);
 	try { return window.localStorage.getItem(ANALYTICS_OPT_OUT_KEY) === '1'; }
 	catch { return unavailable(); }
 }
@@ -30,5 +30,6 @@ export function setAnalyticsOptOut(disabled: boolean): void {
 export function browserRequestsPrivacy(): boolean {
 	const privacyNavigator = navigator as Navigator & { globalPrivacyControl?: boolean };
 	const privacyWindow = window as Window & { doNotTrack?: string };
-	return privacyNavigator.globalPrivacyControl === true || ['1', 'yes'].includes(navigator.doNotTrack ?? privacyWindow.doNotTrack ?? '');
+	return privacyNavigator.globalPrivacyControl === true ||
+		[navigator.doNotTrack, privacyWindow.doNotTrack].some((signal) => ['1', 'yes'].includes(signal ?? ''));
 }

@@ -78,6 +78,11 @@ describe('LEGAL_DOCS', () => {
 });
 
 describe('public audience measurement disclosure', () => {
+	it('states the actual URL exclusion boundary without claiming every credential-like query suppresses a pageview', () => {
+		const body = render(Privacy).body;
+		expect(body).toContain('URLs with embedded usernames or passwords, or recognized sensitive query keys');
+		expect(body).not.toContain('Credential-bearing URLs and');
+	});
 	it('describes visitor processing, safeguards and the pending basis without claiming anonymity', () => {
 		const body = render(Privacy).body;
 		for (const phrase of ['visitors to our public website', 'Umami', 'network IP address', 'browser user agent', 'pseudonymous', '90 days', '7 days', 'awaiting completion', 'Do Not Track', 'Global Privacy Control', 'Audience measurement']) {

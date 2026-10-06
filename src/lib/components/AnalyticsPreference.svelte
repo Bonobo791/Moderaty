@@ -29,9 +29,10 @@
 
 <div class="measurement-preference">
 	<p>Audience measurement</p>
-	<button type="button" aria-pressed={disabled} disabled={!ready || unavailable} onclick={toggle}>
+	<button type="button" disabled={!ready || unavailable} onclick={toggle}>
 		{disabled ? 'Allow audience measurement' : 'Disable audience measurement'}
 	</button>
+	{#if ready}<p aria-live="polite">Your preference {disabled ? 'blocks' : 'allows'} audience measurement.</p>{/if}
 	<p class="explanation">Optional public-page statistics. Browser privacy settings are always respected. <a href="/privacy#s12">Privacy and your choices</a>.</p>
 	{#if unavailable}<p role="status">Audience measurement preference is unavailable. Measurement is disabled.</p>{/if}
 </div>

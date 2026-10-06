@@ -1,12 +1,12 @@
 // Run after MODERATY_ADAPTER=node npm run build. Uses only local fixtures.
 // Requires Python 3 Playwright and Chromium, matching test-recovery-confirmation.mjs.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createClient } from '@libsql/client';
+import { runBrowserProcess } from './browser-process.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const pythonBinary = process.env.PYTHON_BINARY ?? '/usr/bin/python3';
@@ -28,9 +28,7 @@ try {
 	} finally {
 		client.close();
 	}
-	const result = spawnSync(pythonBinary, [path.join(root, 'scripts/test-analytics-browser.py'), root, fixture, process.execPath, chromiumBinary], {
-		encoding: 'utf8', timeout: 180_000
-	});
+	const result = await runBrowserProcess(pythonBinary, [path.join(root, 'scripts/test-analytics-browser.py'), root, fixture, process.execPath, chromiumBinary]);
 	process.stdout.write(result.stdout ?? '');
 	assert.equal(result.error, undefined, 'Python 3 Playwright, Chromium and the Node build must be available');
 	assert.equal(result.status, 0, result.stderr);

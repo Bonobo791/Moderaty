@@ -13,7 +13,8 @@ import PricingPlans from './landing/pricing/PricingPlans.svelte';
 test('prerenders an accessible preference control and privacy explanation without browser storage', () => {
 	const body = render(AnalyticsPreference).body;
 	expect(body).toContain('Audience measurement');
-	expect(body).toContain('aria-pressed=');
+	expect(body).not.toContain('aria-pressed=');
+	expect(body).toContain('Disable audience measurement');
 	expect(body).toContain('href="/privacy#s12"');
 	expect(body).toContain('disabled');
 	expect(body).not.toContain('unavailable');

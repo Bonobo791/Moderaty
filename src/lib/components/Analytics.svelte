@@ -4,15 +4,16 @@
 	import { page } from '$app/state';
 	import { onDestroy, onMount } from 'svelte';
 	import { createAnalyticsClient, readMarketingClick } from '$lib/analytics';
-	import { ANALYTICS_OPT_OUT_KEY, ANALYTICS_PREFERENCE_EVENT, browserRequestsPrivacy, getAnalyticsOptOut } from '$lib/analytics-preference';
+	import { ANALYTICS_OPT_OUT_KEY, ANALYTICS_PREFERENCE_EVENT } from '$lib/analytics-preference';
 	import { analyticsPageUrl, isAnalyticsPage } from '$lib/analytics-policy';
 
 	let unavailable = $state(false);
+	let failureGeneration = 0;
 	let pending: AbortController | undefined;
 	const publicUrl = $derived(browser ? analyticsPageUrl(page.url) : null);
 	const eligible = $derived(publicUrl !== null);
 	let safeDocument = $state(browser && isAnalyticsPage(page.url));
-	const client = browser ? createAnalyticsClient({ onFailure: () => { unavailable = true; } }) : undefined;
+	const client = browser ? createAnalyticsClient({ onFailure: () => { failureGeneration++; unavailable = true; } }) : undefined;
 
 	beforeNavigate((navigation) => {
 		if (!navigation.to || isAnalyticsPage(navigation.to.url)) return;
@@ -27,10 +28,7 @@
 			const pair = readMarketingClick(event);
 			if (pair) void client.click(pair.name, pair.placement).catch(() => { unavailable = true; });
 		};
-		const preference = () => {
-			try { if (browserRequestsPrivacy() || getAnalyticsOptOut()) client?.stop(); }
-			catch { client?.stop(); console.error('analytics preference failed'); unavailable = true; }
-		};
+		const preference = () => client?.preferenceChanged();
 		const storage = (event: StorageEvent) => {
 			if (event.key === ANALYTICS_OPT_OUT_KEY || event.key === null) preference();
 		};
@@ -46,8 +44,11 @@
 	$effect(() => {
 		if (publicUrl === null || !safeDocument || !client) return;
 		const controller = new AbortController();
+		const failureAtStart = failureGeneration;
 		pending = controller;
-		void client.pageview(new URL(publicUrl, window.location.origin), controller.signal).catch(() => {
+		void client.pageview(new URL(publicUrl, window.location.origin), controller.signal).then((result) => {
+			if (result === 'sent' && !controller.signal.aborted && failureGeneration === failureAtStart) unavailable = false;
+		}).catch(() => {
 			if (!controller.signal.aborted) unavailable = true;
 		});
 		return () => controller.abort();

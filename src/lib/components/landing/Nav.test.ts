@@ -29,7 +29,8 @@ function descendants(node: TemplateNode): TemplateNode[] {
 }
 
 /** Execute the real callbacks and render the actual template at their resulting state, without a DOM dependency. */
-function menuInteraction() {
+function menuInteraction(templateSource = source) {
+	const source = templateSource;
 	const ast = parse(source, { modern: true });
 	const initial = ast.instance?.content.body
 		.flatMap((node) => node.type === 'VariableDeclaration' ? node.declarations : [])
@@ -88,11 +89,13 @@ describe('landing navigation', () => {
 		const menu = menuInteraction();
 		menu.clickButton();
 		const body = menu.body();
-		for (const placement of ['nav', 'nav_mobile']) {
-			for (const event of ['connect_click', 'pricing_click', 'source_click']) {
-				expect(body).toContain(`data-moderaty-event="${event}" data-moderaty-placement="${placement}"`);
-			}
-		}
+		assertMarkers(body);
+	});
+	it('rejects swapped desktop/mobile attribution even when every marker remains present', () => {
+		const swapped = source.replaceAll('nav_mobile', 'swapped_placement').replaceAll("'nav'", "'nav_mobile'")
+			.replaceAll('data-moderaty-placement="nav"', 'data-moderaty-placement="nav_mobile"').replaceAll('swapped_placement', 'nav');
+		const menu = menuInteraction(swapped); menu.clickButton();
+		expect(() => assertMarkers(menu.body())).toThrow();
 	});
 	it('keeps explicit space between the brand, primary links, and connection action', () => {
 		expect(declarations('.nav-inner')).toMatch(/gap:\s*24px;/);
@@ -138,3 +141,18 @@ describe('landing navigation', () => {
 		expect(menu.body()).not.toContain('aria-label="Mobile"');
 	});
 });
+
+function assertMarkers(body: string) {
+	const mobile = body.match(/<nav[^>]*aria-label="Mobile"[^>]*>[\s\S]*?<\/nav>/)?.[0] ?? '';
+	const expected = [
+		{ href: LOGIN_URL, event: 'connect_click' }, { href: '/pricing', event: 'pricing_click' }, { href: GITHUB_URL, event: 'source_click' }
+	];
+	for (const [markup, placement] of [[body.replace(mobile, ''), 'nav'], [mobile, 'nav_mobile']]) {
+		const actual = [...markup.matchAll(/<a\b([^>]*)>/g)].filter((match) => match[1].includes('data-moderaty-event='))
+			.map((match) => ({
+				href: match[1].match(/href="([^"]+)"/)?.[1], event: match[1].match(/data-moderaty-event="([^"]+)"/)?.[1],
+				placement: match[1].match(/data-moderaty-placement="([^"]+)"/)?.[1]
+			})).sort((a, b) => String(a.event).localeCompare(String(b.event)));
+		expect(actual).toEqual(expected.map((pair) => ({ ...pair, placement })).sort((a, b) => a.event.localeCompare(b.event)));
+	}
+}

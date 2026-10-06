@@ -95,6 +95,12 @@ function call(secret?: { query?: string; bearer?: string }) {
 	return GET({ url, request: new Request(url, { headers }) } as never);
 }
 
+async function callBody(expectedStatus = 200) {
+	const response = await call({ bearer: 'test-secret' });
+	expect(response.status).toBe(expectedStatus);
+	return response.json();
+}
+
 async function expectUnauthorized(secret?: { query?: string; bearer?: string }) {
 	// Exact message: a 401 with an empty or wrong message stayed green in the
 	// mutation audit (StringLiteral '' on 'bad secret').
@@ -131,8 +137,8 @@ function feedbackRow(id: number) {
 }
 
 function mockConsoleError() {
-	const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
-	onTestFinished(() => spy.mockRestore());
+	const spy = vi.spyOn(console, 'error').mockImplementation(vi.fn());
+	onTestFinished(spy.mockRestore);
 	return spy;
 }
 
@@ -164,9 +170,7 @@ test('nested Turso DNS failures reach safe sweep diagnostics while moderation st
 	});
 	onTestFinished(query.mockRestore);
 	const log = mockConsoleError();
-	const response = await call({ bearer: 'test-secret' });
-	const body = await response.json();
-	expect(response.status).toBe(200);
+	const body = await callBody();
 	expect(body.ok).toBe(false);
 	expect(body.autoTopupSweepError).toContain('EAI_AGAIN');
 	expectResponseDiagnostic(body, 'autoTopupSweepError', 'auto_topup.lifetime_candidates', {
@@ -188,9 +192,7 @@ test('retains diagnostics appended by channel failures after the sweep payload i
 	await seedChannel('UC-late-failure');
 	mocks.runChannel.mockRejectedValueOnce(Object.assign(new Error('test-secret'), { code: 'ECONNRESET' }));
 	mockConsoleError();
-	const response = await call({ bearer: 'test-secret' });
-	expect(response.status).toBe(500);
-	const body = await response.json();
+	const body = await callBody(500);
 	expect(body).toMatchObject({ ok: false, results: { 'UC-late-failure': { error: 'error' } } });
 	expectResponseDiagnostic(body, 'channelRun', 'channel_run', { category: 'network', code: 'ECONNRESET' });
 	expect(JSON.stringify(body.failureDiagnostics)).not.toContain('test-secret');
@@ -210,9 +212,7 @@ test.each([
 	mocks.paymentIntentsRetrieve.mockResolvedValue({ id: 'pi_private', status: 'processing', metadata: { type: 'auto_topup', org_id: 'org-private' } });
 	fail.mockRejectedValueOnce(failure);
 	const log = mockConsoleError();
-	const response = await call({ bearer: 'test-secret' });
-	const body = await response.json();
-	expect(response.status).toBe(200);
+	const body = await callBody();
 	expect(body).toMatchObject({ ok: true, autoTopupSweepError: null, autoTopupsTriggered: 0 });
 	expectResponseDiagnostic(body, 'autoTopupSweepError', 'auto_topup.paused_recovery', {
 		category: 'http', httpStatus: 500, provider: 'stripe', service: 'payments'
@@ -641,12 +641,10 @@ test('history digest failure does not prevent moderation or trigger a second dig
 	mocks.runChannel.mockResolvedValueOnce(runResult());
 
 	try {
-		const response = await call({ bearer: 'test-secret' });
-		expect(response.status).toBe(200);
+		const body = await callBody();
 		expect(mocks.runChannel).toHaveBeenCalledTimes(1);
 		expect(mocks.generateFeedbackDigest).toHaveBeenCalledTimes(1);
 		expectCronLog(errorSpy, 'digest', 'feedback_digest');
-		const body = await response.json();
 		expectResponseDiagnostic(body, 'digest', 'feedback_digest');
 		expect(JSON.stringify(body)).not.toContain('raw feedback failure');
 	} finally {
@@ -817,27 +815,18 @@ test('a bookkeeping failure in the run-recording finally cannot mask the run res
 	mocks.runChannel.mockResolvedValue(runResult());
 	// Only the health write sets last_run_at — the claim's lease write leaves
 	// it untouched, so this trigger fires exactly on the finally UPDATE.
-	await testDb().client.execute(
-		`CREATE TRIGGER fail_run_record BEFORE UPDATE ON channels
-		 WHEN NEW.last_run_at IS NOT NULL
-		 BEGIN SELECT RAISE(ABORT, 'simulated bookkeeping failure'); END`
-	);
-	const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-	try {
-		const res = await call({ bearer: 'test-secret' });
-
-		expect(res.status).toBe(200);
+	const errorSpy = mockConsoleError();
+	await withTestTrigger('fail_run_record', `BEFORE UPDATE ON channels
+		WHEN NEW.last_run_at IS NOT NULL
+		BEGIN SELECT RAISE(ABORT, 'simulated bookkeeping failure'); END`, async () => {
+		const body = await callBody();
 		// codex, PR #142 r2: the run result is preserved, but the bookkeeping
 		// failure is surfaced in the payload — a silent server-log-only
 		// fallback would hide a degraded state from the scheduled caller.
-		const body = await res.json();
 		expect(body).toMatchObject({ results: { 'UC-rec': runResult() }, bookkeepingError: true });
 		expectResponseDiagnostic(body, 'bookkeepingError', 'run_health_write');
 		expectCronLog(errorSpy, 'bookkeepingError', 'run_health_write');
-	} finally {
-		errorSpy.mockRestore();
-		await testDb().client.execute('DROP TRIGGER fail_run_record');
-	}
+	});
 });
 
 test('a dry-run result writes no health verdict — preview work is not a live check (codex, PR #142)', async () => {
@@ -1296,7 +1285,7 @@ test('a deadline-aborted preview stays pending for the next tick and releases th
 	mocks.runChannel.mockResolvedValue(runResult());
 	mockConsoleError();
 
-	const res = await call({ bearer: 'test-secret' });
+	const body = await callBody();
 
 	const abortedRow = (await testDb().db.select().from(feedbackDigests).all())[0];
 	expect(abortedRow.status).toBe('dry-run-pending');
@@ -1304,8 +1293,6 @@ test('a deadline-aborted preview stays pending for the next tick and releases th
 	// from it, so the abort still resumes next tick instead of expiring.
 	expect(abortedRow.attemptedAt).toBeTruthy();
 	expect((await channelRow('UC-slow'))?.leaseExpiresAt).toBeNull();
-	expect(res.status).toBe(200);
-	const body = await res.json();
 	expect(body.feedbackPreview).toMatchObject({ error: 'timeout' });
 	expectResponseDiagnostic(body, 'feedbackPreview', 'feedback_preview');
 	expect(body.results).toEqual({});
@@ -1505,12 +1492,10 @@ test('a lease-release failure after a drained preview still counts the tick as w
 		errorSpy.mockRestore();
 	});
 
-	const res = await call({ bearer: 'test-secret' });
-
+	const body = await callBody();
 	expect(mocks.runFeedbackPreview).toHaveBeenCalledTimes(1);
 	// `ran` survived the release failure — no second workload this tick.
 	expect(mocks.runChannel).not.toHaveBeenCalled();
-	const body = await res.json();
 	expect(body).toMatchObject({ ok: true, results: {} });
 	expect(body.feedbackPreview).toMatchObject({ commentsClassified: 1 });
 	expectResponseDiagnostic(body, 'leaseRelease', 'lease_release');
@@ -1699,9 +1684,8 @@ test('a failed stale-preview cleanup is surfaced without blocking eligible live 
 	const log = mockConsoleError();
 	await withTestTrigger('fail_stale_cleanup', `BEFORE UPDATE ON feedback_digests
 		WHEN NEW.status = 'dry-run-failed' BEGIN SELECT RAISE(ABORT, 'cleanup unavailable'); END`, async () => {
-		const response = await call({ bearer: 'test-secret' });
+		const body = await callBody();
 		expect(mocks.runChannel).toHaveBeenCalledWith('UC-live', expect.anything());
-		const body = await response.json();
 		expect(body).toMatchObject({ ok: false, feedbackPreviewSweepError: true });
 		expectResponseDiagnostic(body, 'feedbackPreviewSweepError', 'preview_cleanup');
 		expectCronLog(log, 'feedbackPreviewSweepError', 'preview_cleanup');
@@ -1760,10 +1744,8 @@ test('scheduler transaction errors fail loudly without starting an unclaimed wor
 	await seedChannel('UC-claim-error');
 	const transaction = vi.spyOn(testDb().db, 'transaction').mockRejectedValue(new Error('scheduler unavailable'));
 	mockConsoleError();
-	onTestFinished(() => transaction.mockRestore());
-	const response = await call({ bearer: 'test-secret' });
-	expect(response.status).toBe(500);
-	const body = await response.json();
+	onTestFinished(transaction.mockRestore);
+	const body = await callBody(500);
 	expect(body).toMatchObject({ ok: false, schedulerError: true, results: {} });
 	expectResponseDiagnostic(body, 'schedulerError', 'workload_claim');
 	expect(mocks.runChannel).not.toHaveBeenCalled();

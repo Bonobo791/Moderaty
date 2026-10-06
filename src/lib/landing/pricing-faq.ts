@@ -5,7 +5,7 @@
 export const PRICING_FAQ_ENTRIES: { q: string; a: string }[] = [
 	{
 		q: 'Is there a subscription?',
-		a: 'Yes, exactly one: $5 a month, auto-renewed, with 100 AI-scored comments included; live moderation and enabled feedback digests share that allowance. Everything else is opt-in and off by default: automatic top-up that charges your saved card for a comment bundle whenever your balance drops below the threshold you set.'
+		a: 'Yes: the hosted plan renews at $5 a month, even when you process no AI classifications. Its 100 AI classifications cover moderation scoring and enabled feedback digests together. Automatic top-up is opt-in and off by default; it charges your saved card for your selected bundle when your balance drops below your chosen threshold.'
 	},
 	{
 		q: 'What is the $49 lifetime deal?',
@@ -20,8 +20,8 @@ export const PRICING_FAQ_ENTRIES: { q: string; a: string }[] = [
 		a: 'Moderaty is source-available under PolyForm Shield 1.0.0 and free to self-host under its terms. On your hardware, with your key, there is nothing of ours to meter. We would rather you be protected for free than profitable for us.'
 	},
 	{
-		q: 'What happens when my 100 comments run out?',
-		a: 'Buy a bundle of 500 or 2,000 comments; every comment your channel processes with AI scoring on a live run, and again when an enabled feedback digest classifies it, consumes one from your balance (rules and protected handles are free), and the Usage tab shows exactly how many are left. Top up manually any time, or switch on automatic top-up and we charge your saved card for the bundle you select (500 or 2,000 comments) whenever your balance drops below the threshold you set.'
+		q: 'What happens when my 100 AI classifications run out?',
+		a: 'Buy 500 credits for $20.40 or 2,000 for $64.65. One credit covers one AI moderation score; one more covers a digest classification of that comment. Rule and protected-handle moderation decisions use no credit, but digest classifications of those comments do. Requested history scans can charge again; retries of the same scan do not. With the full 100-credit allowance and zero purchased balance, 100 moderation scores plus 100 digest classifications need one 500-credit bundle: $25.40 including the subscription, with 400 purchased credits left. Those leftovers stay on your balance. The Usage tab shows your actual balance; automatic top-up uses your selected bundle and threshold.'
 	},
 	{
 		q: 'Can I pay in Brazilian reais?',

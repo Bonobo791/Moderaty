@@ -1,25 +1,42 @@
-import { purchasableCreditCostUsd } from '$lib/credit-pricing';
+import { purchasableCreditEstimate } from '$lib/credit-pricing';
 
 export const MONTHLY_PLAN_USD = 5;
 export const INCLUDED_COMMENTS = 100;
 export const MAX_CALCULATOR_COMMENTS = 10_000_000;
 
+/** Blank form inputs are incomplete, not invalid; zero remains a real count. */
+export function validCountInput(value: number | null | undefined): boolean {
+	return value == null || (Number.isSafeInteger(value) && value >= 0 && value <= MAX_CALCULATOR_COMMENTS);
+}
+
+/** Return a valid calculator count; reject missing, fractional, negative, or oversized values. */
 export function validateCommentCount(value: number): number {
-	if (!Number.isSafeInteger(value) || value < 0 || value > MAX_CALCULATOR_COMMENTS) {
+	if (value == null || !validCountInput(value)) {
 		throw new Error(`comment count must be an integer between 0 and ${MAX_CALCULATOR_COMMENTS}`);
 	}
 	return value;
 }
 
-export function hostedCostUsd(value: number): number {
-	const comments = validateCommentCount(value);
-	if (comments === 0) return 0;
-	// Past the included 100, top-up comments are forecast at the cheapest
-	// purchasable combination of the fixed 500/2,000-credit bundles (the
-	// 100-credit size is retained only for historical grants) — the per-tranche progressive
-	// rate is not buyable between bundle sizes,
-	// so it would understate the real cost (codex).
-	return MONTHLY_PLAN_USD + purchasableCreditCostUsd(Math.max(0, comments - INCLUDED_COMMENTS));
+/** A full paid monthly allowance, zero purchased balance, and manual bundles. */
+export function estimateHostedMonth(moderationClassifications: number, digestClassifications = 0) {
+	const classifications = validateCommentCount(moderationClassifications) + validateCommentCount(digestClassifications);
+	const includedUsed = Math.min(classifications, INCLUDED_COMMENTS);
+	const purchasedUsed = classifications - includedUsed;
+	const purchase = purchasableCreditEstimate(purchasedUsed);
+	return {
+		classifications,
+		includedUsed,
+		purchasedUsed,
+		topupCredits: purchase.credits,
+		topupCostUsd: purchase.costUsd,
+		remainingPurchasedCredits: purchase.credits - purchasedUsed,
+		cashCostUsd: MONTHLY_PLAN_USD + purchase.costUsd
+	};
+}
+
+/** Include the subscription and the cheapest manual bundles covering both classification types. */
+export function hostedCostUsd(value: number, digestClassifications = 0): number {
+	return estimateHostedMonth(value, digestClassifications).cashCostUsd;
 }
 
 export type CostForecast = {
@@ -32,16 +49,17 @@ export type CostForecast = {
 };
 
 /**
- * Forecasts from three monthly comment counts. A BLANK month (undefined) or
+ * Forecasts from three monthly classification counts. A BLANK month or
  * an invalid one yields null — never a forecast silently built on zeros.
  */
-export function forecastMonths(months: ReadonlyArray<number | undefined>): CostForecast | null {
-	if (months.some((month) => month === undefined)) return null;
+export function forecastMonths(months: ReadonlyArray<number | null | undefined>): CostForecast | null {
+	if (months.some((month) => month == null)) return null;
 	const counts = months as number[];
 	if (!counts.every((count) => Number.isSafeInteger(count) && count >= 0 && count <= MAX_CALCULATOR_COMMENTS)) return null;
 	return forecastCost(counts);
 }
 
+/** Summarize three independent monthly scenarios without carrying purchased balances between them. */
 export function forecastCost(values: readonly number[]): CostForecast {
 	if (values.length !== 3) throw new Error('cost forecast requires exactly three monthly comment counts');
 	const comments = values.map(validateCommentCount);

@@ -115,7 +115,7 @@ describe('scheduled cron trigger', () => {
 		}));
 
 		const error = await handler().catch((e) => e);
-		expect(error.message).toContain('fetch failed');
+		expect(error.message).toContain('dns');
 		expect(error.message).toContain('ENOTFOUND');
 	});
 

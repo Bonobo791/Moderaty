@@ -285,6 +285,17 @@ One-time setup (human, in the Coolify dashboard):
    `credits` (top-up needed) and `token` (reconnect needed) — are persistent
    and already surfaced on the dashboard, so they log a warning and keep the
    task green instead of emailing once a minute until the owner acts.
+   Failure output includes safe nested diagnostics (category, known code,
+   syscall, provider/service, HTTP error status and operation) plus a
+   server-generated `run` identifier matching `cronRunId` in the structured
+   `cron failure:` log entry. For example, `EAI_AGAIN` with
+   `operation=auto_topup.lifetime_candidates` identifies a database lookup
+   failure before lifetime reconciliation or new charges. Cause traversal is
+   limited to eight nodes; `causeChainTruncated=true` marks a longer or cyclic
+   chain. SQL, parameters, URLs, tokens, customer identifiers and raw provider
+   bodies are excluded. Older responses without safe diagnostics name the
+   failed job and withhold their raw details. These diagnostics do not change
+   alert decisions, add retries, or resolve the underlying network failure.
    Optionally set **`HEALTHCHECK_PING_URL`** (Runtime Variable; healthchecks.io
    or a Uptime Kuma push monitor) — healthy and suppressed owner-actionable
    ticks attempt the ping; ticks that throw stay silent, so the monitor alerts

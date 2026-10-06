@@ -2,7 +2,7 @@
 // (scripts/dev-cron.mjs): a 200 reporting `ok:false`, an exhausted budget,
 // a failed sweep, or a non-owner channel error must fail the invocation —
 // HTTP status alone cannot see them (codex).
-import { evaluateTick, validTickPayload } from '../../scripts/dev-cron.mjs';
+import { cronTransportError, evaluateTick, formatTickFailure, renderTick, validTickPayload } from '../../scripts/dev-cron.mjs';
 
 /**
  * Netlify Scheduled Function: requests at most one bounded workload by
@@ -19,7 +19,9 @@ export default async function cron() {
 	if (!base) throw new Error('APP_URL environment variable is required (set it in Netlify Site settings)');
 	const secret = process.env.CRON_SECRET;
 	if (!secret) throw new Error('CRON_SECRET environment variable is required');
-	const endpoint = new URL('/api/cron', base);
+	let endpoint;
+	try { endpoint = new URL('/api/cron', base); }
+	catch { throw new Error('APP_URL must be a valid URL'); }
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 	let res;
@@ -31,12 +33,10 @@ export default async function cron() {
 		});
 		rawText = await res.text();
 	} catch (error) {
-		throw unreachableError(error);
+		throw cronTransportError(error);
 	} finally {
 		clearTimeout(timer);
 	}
-	// Bound what lands in Netlify logs; pipeline error bodies can be long.
-	const body = rawText.slice(0, 500);
 	let payload = null;
 	try {
 		payload = JSON.parse(rawText);
@@ -52,28 +52,18 @@ export default async function cron() {
 			console.warn(`cron endpoint answered ${res.status} with only channel-owner failure(s) — suppressing`);
 			return;
 		}
-		throw new Error(`cron endpoint failed: ${res.status} ${body}`);
+		throw new Error(`cron endpoint failed: ${res.status} ${formatTickFailure(payload, problems) || 'no safe diagnostic'}`);
 	}
 	// A 200 answering a scalar/array/foreign object is not the cron payload —
 	// classifying it healthy would hide a proxy or scheduler failure (cubic).
-	if (!validTickPayload(payload)) throw new Error(`cron endpoint returned a non-JSON or invalid body: ${body}`);
+	if (!validTickPayload(payload)) throw new Error('cron endpoint returned a non-JSON or invalid body');
 	// A 200 can still report failure — `ok:false`, an exhausted run budget,
 	// a failed sweep — none of which HTTP status exposes (codex).
-	if (problems.length) throw new Error(`cron tick reported failure(s): ${problems.join('; ')}`);
-	console.log(`cron endpoint ok: ${body}`);
+	if (problems.length) throw new Error(`cron tick reported failure(s): ${formatTickFailure(payload, problems)}`);
+	console.log(`cron endpoint ok: ${renderTick(payload)}`);
 }
 
 const TIMEOUT_MS = 25_000; // below Netlify's 26s function limit; the endpoint's own run budget is 20s
-
-// undici hides the real network reason (DNS, TLS, refused) in `cause`;
-// surface it so failed invocations are diagnosable from the logs alone.
-function unreachableError(error) {
-	const cause = error instanceof Error ? error.cause : undefined;
-	const detail = cause instanceof Error ? `${cause.code ?? cause.name}: ${cause.message}` : 'no cause';
-	return new Error(
-		`cron endpoint unreachable: ${error instanceof Error ? error.message : String(error)} (${detail})`
-	);
-}
 
 // The schedule is every minute while the app is in early operation; raise to
 // '*/15 * * * *' when user volume grows. The endpoint itself enforces at most one

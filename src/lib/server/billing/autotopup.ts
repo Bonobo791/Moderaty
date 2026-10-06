@@ -15,6 +15,7 @@
 import { and, asc, count, eq, gte, inArray, isNotNull, isNull, ne, not, or, sql } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
+import { withDiagnosticOperation } from '../../../../scripts/lib/cron-diagnostics.mjs';
 import { activeAllowanceSql, applyLedgerDelta, pauseForObservedStripeRefund, drainPendingReversals, effectiveBalanceSql, isUnmeteredPlan, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
 import { creditTransactions, organizations } from '$lib/server/db/schema';
 import { autoTopupBundle, bundleById, configuredAutoTopupBundles, priceIdFor } from '$lib/server/stripe/bundles';
@@ -693,16 +694,16 @@ export async function reconcileAutoTopup(orgId: string): Promise<{ recovered: nu
  * @returns The number of newly initiated top-ups
  */
 export async function sweepAutoTopUp(limit = 5, deadline?: number): Promise<number> {
-	const recovering = await sweepPausedTopups(limit > 1 ? Math.floor(limit / 2) : limit, deadline);
+	const recovering = await withDiagnosticOperation('auto_topup.paused_recovery', () => sweepPausedTopups(limit > 1 ? Math.floor(limit / 2) : limit, deadline));
 	if (recovering >= limit) return 0;
 	limit -= recovering;
 	// Unstick stale in-flight claims first: a webhook delivery lost past
 	// Stripe's 3-day retry horizon would otherwise wedge auto top-up forever.
-	await releaseStaleTopupClaims();
+	await withDiagnosticOperation('auto_topup.release_claims', () => releaseStaleTopupClaims());
 	const reconcileCutoff = new Date(Date.now() - RECONCILE_WINDOW_MS).toISOString();
 	const reconciled = await reconcileStaleLifetimeRows(limit, reconcileCutoff, deadline);
 	const offeredBundles = configuredAutoTopupBundles().map((bundle) => bundle.id);
-	await warnPausedTopupOrgs(offeredBundles);
+	await withDiagnosticOperation('auto_topup.paused_bundles', () => warnPausedTopupOrgs(offeredBundles));
 	return triggerEligibleTopups(limit - reconciled, offeredBundles, reconcileCutoff, deadline);
 }
 
@@ -740,7 +741,7 @@ async function releaseStaleTopupClaims(): Promise<void> {
  *   bounded budget whether or not each was reconciled before the deadline.
  */
 async function reconcileStaleLifetimeRows(limit: number, reconcileCutoff: string, deadline?: number): Promise<number> {
-	const staleLifetime = await db
+	const staleLifetime = await withDiagnosticOperation('auto_topup.lifetime_candidates', () => db
 		.select({ id: organizations.id, enabled: organizations.autoTopupEnabled })
 		.from(organizations)
 		.where(
@@ -751,7 +752,7 @@ async function reconcileStaleLifetimeRows(limit: number, reconcileCutoff: string
 		)
 		.orderBy(asc(organizations.autoTopupLastAttemptAt), asc(organizations.id))
 		.limit(limit)
-		.all();
+		.all());
 	for (const row of staleLifetime) {
 		if (deadline !== undefined && Date.now() >= deadline) break;
 		try {
@@ -797,7 +798,7 @@ async function warnPausedTopupOrgs(offeredBundles: string[]): Promise<void> {
  */
 async function triggerEligibleTopups(limit: number, offeredBundles: string[], reconcileCutoff: string, deadline?: number): Promise<number> {
 	const nowIso = new Date().toISOString();
-	const rows = await db
+	const rows = await withDiagnosticOperation('auto_topup.eligible_candidates', () => db
 		.select({ id: organizations.id, bundle: organizations.autoTopupBundle, lastAttemptAt: organizations.autoTopupLastAttemptAt })
 		.from(organizations)
 		.where(
@@ -826,7 +827,7 @@ async function triggerEligibleTopups(limit: number, offeredBundles: string[], re
 		)
 		.orderBy(asc(organizations.autoTopupLastAttemptAt), asc(organizations.id))
 		.limit(limit)
-		.all();
+		.all());
 	let triggered = 0;
 	for (const row of rows) {
 		// Deadline guard: the sweep shares the cron's budget with moderation —

@@ -34,6 +34,8 @@
 // ping. A tick that threw does NOT ping, so the monitor alerts on silence —
 // which also covers a failure an exit code cannot report: the task never ran.
 
+import { describeCronFailure, formatCronFailure, sanitizeCronFailure } from './lib/cron-diagnostics.mjs';
+
 const DEFAULT_INTERVAL_MS = 60_000;
 
 // Channel-run failure categories only the channel owner can resolve:
@@ -60,10 +62,35 @@ const SWEEP_ERROR_FIELDS = [
 	'feedbackPreviewSweepError'
 ];
 
-/** Renders a parsed payload or raw body for logs without letting response newlines forge log lines. */
-function renderTick(payload, rawText) {
-	const rendered = payload === null ? rawText.slice(0, 200) : JSON.stringify(payload);
-	return rendered.replaceAll(/[\r\n]+/g, ' ');
+/** Only allowlisted diagnostics cross back into scheduled task output. */
+function tickDiagnostics(payload) {
+	return Array.isArray(payload?.failureDiagnostics) ? payload.failureDiagnostics.slice(0, 20).map(sanitizeCronFailure) : [];
+}
+
+function failureDetail(payload, field) {
+	const diagnostic = tickDiagnostics(payload).find((item) => item.sweep === field);
+	return diagnostic ? formatCronFailure(diagnostic) : 'failure (no safe diagnostic)';
+}
+
+/** Bounded root-first output; legacy/raw body details are deliberately withheld. */
+export function formatTickFailure(payload, problems) {
+	const diagnostics = tickDiagnostics(payload);
+	const details = diagnostics.map((item) => `${item.sweep}: ${formatCronFailure(item)}`);
+	details.push(...problems.filter((problem) => !diagnostics.some((item) => problem.startsWith(`${item.sweep}:`))));
+	const summary = details.map((detail) => detail.slice(0, 500)).join('; ');
+	return summary.length > 5500 ? `${summary.slice(0, 5480)}; details truncated` : summary;
+}
+
+/** Never log response bodies or result keys (which identify customers/channels). */
+export function renderTick(payload) {
+	const problems = evaluateTick(true, payload).problems;
+	const id = sanitizeCronFailure({ cronRunId: payload?.cronRunId }).cronRunId;
+	return JSON.stringify({ valid: validTickPayload(payload), ok: typeof payload?.ok === 'boolean' ? payload.ok : undefined,
+		cronRunId: id, problems: formatTickFailure(payload, problems) || undefined });
+}
+
+export function cronTransportError(cause) {
+	return new Error(`cron endpoint unreachable: ${formatCronFailure(describeCronFailure(cause, 'cron transport'))}`);
 }
 
 /**
@@ -107,7 +134,7 @@ function detailProblems(payload) {
 	for (const field of SWEEP_ERROR_FIELDS) {
 		// Sweep error text interpolates into a thrown Error the driver logs —
 		// flatten CR/LF or a hostile body forges extra log lines (cubic).
-		if (payload[field]) problems.push(`${field}: ${String(payload[field]).replaceAll(/[\r\n]+/g, ' ').slice(0, 120)}`);
+		if (payload[field]) problems.push(`${field}: ${failureDetail(payload, field)}`);
 	}
 	if (payload.budgetExhausted) problems.push('sweeps consumed the run budget — no channel claimed');
 	if (payload.bookkeepingError) problems.push('run-health bookkeeping write failed');
@@ -118,7 +145,7 @@ function detailProblems(payload) {
 	for (const field of ['dryRunWindow', 'digest', 'feedbackPreview']) {
 		const outcome = payload[field];
 		if (outcome && typeof outcome === 'object' && typeof outcome.error === 'string') {
-			problems.push(`${field}: ${outcome.error.replaceAll(/[\r\n]+/g, ' ').slice(0, 120)}`);
+			problems.push(`${field}: ${failureDetail(payload, field)}`);
 		}
 	}
 	// Per-account zero-credit eval failures ride a `ok:true` payload by design
@@ -147,7 +174,7 @@ function channelRunProblems(payload) {
 	const problems = [];
 	for (const entry of channelResultEntries(payload)) {
 		if (typeof entry.error === 'string' && !USER_ACTIONABLE_CATEGORIES.has(entry.error)) {
-			problems.push(`channel run failed: ${entry.error.replaceAll(/[\r\n]+/g, ' ')}`);
+			problems.push(`channel run failed: ${['quota', 'scoring', 'timeout', 'error'].includes(entry.error) ? entry.error : 'error'}`);
 		}
 		// A channel run that ended partial on the tick deadline returns inside
 		// a 200 payload — without this check a moderation run that never
@@ -202,18 +229,22 @@ export async function tickOnce(fetchImpl = fetch) {
 	if (!secret) {
 		throw new Error('CRON_SECRET is not set. Run with: node --env-file=.env scripts/dev-cron.mjs');
 	}
-	const res = await fetchImpl(`${base}/api/cron`, {
-		headers: { Authorization: `Bearer ${secret}` },
-		signal: AbortSignal.timeout(30_000)
-	});
-	const rawText = await res.text();
+	let res;
+	let rawText;
+	try {
+		res = await fetchImpl(`${base}/api/cron`, {
+			headers: { Authorization: `Bearer ${secret}` },
+			signal: AbortSignal.timeout(30_000)
+		});
+		rawText = await res.text();
+	} catch (cause) { throw cronTransportError(cause); }
 	let payload = null;
 	try {
 		payload = JSON.parse(rawText);
 	} catch {
 		payload = null;
 	}
-	console.log(`[${new Date().toISOString()}] tick → ${renderTick(payload, rawText)}`);
+	console.log(`[${new Date().toISOString()}] tick → ${renderTick(payload)}`);
 	const { ownerActionableOnly, problems } = evaluateTick(res.ok, payload);
 	if (!res.ok) {
 		if (ownerActionableOnly && problems.length === 0) {
@@ -225,13 +256,13 @@ export async function tickOnce(fetchImpl = fetch) {
 			);
 			return payload;
 		}
-		throw new Error(`cron endpoint answered ${res.status}: ${renderTick(payload, rawText)}`);
+		throw new Error(`cron endpoint answered ${res.status}: ${formatTickFailure(payload, problems) || 'no safe diagnostic'}`);
 	}
 	if (!validTickPayload(payload)) {
 		throw new Error('cron endpoint returned a non-JSON or invalid body');
 	}
 	if (problems.length) {
-		throw new Error(`cron tick reported failure(s): ${problems.join('; ')}`);
+		throw new Error(`cron tick reported failure(s): ${formatTickFailure(payload, problems)}`);
 	}
 	return payload;
 }
@@ -250,7 +281,7 @@ export async function pingHealthcheck(fetchImpl = fetch) {
 			console.error(`healthcheck ping answered ${res.status}`);
 		}
 	} catch (cause) {
-		console.error('healthcheck ping failed:', cause instanceof Error ? cause.message : String(cause));
+		console.error('healthcheck ping failed:', formatCronFailure(describeCronFailure(cause, 'healthcheck ping')));
 	}
 }
 
@@ -305,7 +336,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 			// dead-man's switch fires — that silence IS the alert.
 			await pingHealthcheck();
 		} catch (cause) {
-			console.error('cron tick failed:', cause);
+			console.error('cron tick failed:', cause instanceof Error ? cause.message : 'unknown failure');
 			return false;
 		}
 		return true;

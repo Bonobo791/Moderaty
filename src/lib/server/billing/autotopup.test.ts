@@ -4,7 +4,8 @@ import { env } from '$env/dynamic/private';
 import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { setupTestDb, testDb } from '$lib/server/testdb';
+import { setupTestDb, statementSql, testDb } from '$lib/server/testdb';
+import { describeCronFailure } from '../../../../scripts/lib/cron-diagnostics.mjs';
 import { creditTransactions, organizations, stripeSubscriptionPeriods, stripeAutoTopupRecoveries, stripeRefundObservations } from '$lib/server/db/schema';
 import { applyLedgerDelta, getCredits, pauseAutoTopupForRefund } from '$lib/server/billing/ledger';
 import { grantAutoTopupCredits, handleAutoTopupFailure, maybeTriggerAutoTopUp, readAutoTopupState, reconcileAutoTopup, recordAutoTopupFailure, stripeErrorCode, sweepAutoTopUp } from './autotopup';
@@ -1007,6 +1008,25 @@ describe('handleAutoTopupFailure (webhook)', () => {
 });
 
 describe('sweepAutoTopUp', () => {
+	test('a lifetime candidate SELECT failure never starts reconciliation, charges or refunds', async () => {
+		await seedOrg({ plan: 'lifetime' });
+		const before = await orgRow();
+		const root = Object.assign(new Error('getaddrinfo EAI_AGAIN private-host.invalid'), { code: 'EAI_AGAIN', syscall: 'getaddrinfo' });
+		const execute = testDb().client.execute.bind(testDb().client);
+		const query = vi.spyOn(testDb().client, 'execute').mockImplementation((statement) => {
+			if (statementSql(statement).startsWith('select "id", "auto_topup_enabled"')) return Promise.reject(new TypeError('fetch failed', { cause: root }));
+			return execute(statement);
+		});
+		let cause: unknown;
+		try { await sweepAutoTopUp(5); }
+		catch (failure) { cause = failure; }
+		finally { query.mockRestore(); }
+		expect(describeCronFailure(cause, 'auto top-up sweep')).toMatchObject({ operation: 'auto_topup.lifetime_candidates', category: 'dns', code: 'EAI_AGAIN', provider: 'turso', service: 'database' });
+		for (const remote of Object.values(mocks)) expect(remote).not.toHaveBeenCalled();
+		expect(await orgRow()).toEqual(before);
+		expect(await testDb().db.select().from(creditTransactions)).toHaveLength(0);
+	});
+
 	test('a malformed payment item does not prevent cron from canceling the valid paused payment', async () => {
 		await seedOrg({ creditsRemaining: 0 });
 		await maybeTriggerAutoTopUp('org-1');

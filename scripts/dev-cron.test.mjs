@@ -1,4 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { cpSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseDriverArgs, pingHealthcheck, scheduleTicks, tickOnce } from './dev-cron.mjs';
 
 // 'test-secret' is a synthetic credential fixture — maintainer-approved
@@ -32,6 +37,87 @@ afterEach(() => {
 });
 
 describe('dev cron tick', () => {
+	it.each([
+		[{ ok: true, results: {} }, 200, 0, 2],
+		[{ ok: false, results: { channel: { error: 'credits' } } }, 500, 0, 2],
+		[{ ok: false, results: {}, autoTopupSweepError: 'test-secret' }, 200, 1, 1],
+		[{ ok: false, results: { channel: { error: 'token' } }, autoTopupSweepError: 'test-secret' }, 500, 1, 1],
+		[{ ok: true }, 200, 1, 1]
+	])('--once keeps alert exit and health-ping behavior for fixture %j', (payload, status, exit, requests) => {
+		// The child has a complete fetch stub before loading the driver. No
+		// app, provider, monitor, database or mail transport is contacted.
+		const bootstrap = `let requests = 0; globalThis.fetch = async () => { requests++; return new Response(${JSON.stringify(JSON.stringify(payload))}, { status: ${status} }); }; process.on('exit', () => console.error('fixture-requests=' + requests));`;
+		const child = spawnSync(process.execPath, ['--import', `data:text/javascript,${encodeURIComponent(bootstrap)}`, fileURLToPath(new URL('dev-cron.mjs', import.meta.url)), '--once'], {
+			encoding: 'utf8', env: { CRON_SECRET: 'test-secret', APP_URL: 'http://fixture.invalid', HEALTHCHECK_PING_URL: 'http://monitor.invalid' }
+		});
+		expect(child.status).toBe(exit);
+		expect(child.stderr).toContain(`fixture-requests=${requests}`);
+		expect(child.stderr + child.stdout).not.toContain('test-secret');
+	});
+
+	it.each([200, 500])('retains provider HTTP status through both wrappers on HTTP %s', async (status) => {
+		const payload = { ok: false, results: {}, autoTopupSweepError: 'test-secret',
+			failureDiagnostics: [{ sweep: 'autoTopupSweepError', operation: 'auto_topup', category: 'http', httpStatus: 500, provider: 'stripe', service: 'payments' }] };
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, status)));
+		const { default: netlifyCron } = await import('../netlify/functions/cron.mjs');
+		for (const run of [tickOnce, netlifyCron]) {
+			const error = await run().catch((e) => e);
+			expect(error.message).toContain('httpStatus=500');
+			expect(error.message).toContain('provider=stripe');
+			expect(error.message).not.toContain('test-secret');
+		}
+	});
+
+	it('loads in the Docker runtime layout without source files or runtime credentials', () => {
+		const runtime = mkdtempSync(join(tmpdir(), 'moderaty-cron-runtime-'));
+		try {
+			// Dockerfile ships scripts/ and package.json, but omits src/. Import
+			// only: the direct-execution guard must prevent any request or send.
+			cpSync(fileURLToPath(new URL('.', import.meta.url)), join(runtime, 'scripts'), { recursive: true });
+			writeFileSync(join(runtime, 'package.json'), '{"type":"module"}');
+			const probe = spawnSync(process.execPath, ['--input-type=module', '-e', 'globalThis.fetch = () => { throw new Error("Unexpected network request"); }; await import(process.argv[1]);', pathToFileURL(join(runtime, 'scripts/dev-cron.mjs')).href], { encoding: 'utf8', env: {} });
+			expect(probe.stderr).toBe('');
+			expect(probe.status).toBe(0);
+		} finally { rmSync(runtime, { recursive: true, force: true }); }
+	});
+
+	it.each([200, 500])('keeps root diagnostics in bounded, sanitized scheduler output on HTTP %s', async (status) => {
+		const payload = {
+			ok: false, results: { 'private-customer': { error: 'token' } },
+			noise: 'test-secret'.repeat(500), autoTopupSweepError: 'Failed query: private SQL params: test-secret',
+			cronRunId: '11111111-1111-4111-8111-111111111111',
+			failureDiagnostics: [{ sweep: 'autoTopupSweepError', operation: 'auto_topup.lifetime_candidates',
+				category: 'dns', code: 'EAI_AGAIN', syscall: 'getaddrinfo', provider: 'turso', service: 'database',
+				cronRunId: '11111111-1111-4111-8111-111111111111', message: 'test-secret', headers: { authorization: 'test-secret' } }]
+		};
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, status)));
+		const { default: netlifyCron } = await import('../netlify/functions/cron.mjs');
+		for (const run of [tickOnce, netlifyCron]) {
+			const error = await run().catch((e) => e);
+			expect(error).toBeInstanceOf(Error);
+			expect(error.message).toContain('EAI_AGAIN');
+			expect(error.message).toContain('getaddrinfo');
+			expect(error.message).toContain('auto_topup.lifetime_candidates');
+			expect(error.message).toContain(payload.cronRunId);
+			expect(error.message.length).toBeLessThan(6000);
+			for (const forbidden of ['test-secret', 'private-customer', 'private SQL', 'authorization']) expect(error.message).not.toContain(forbidden);
+		}
+		const output = console.log.mock.calls.flat().join(' ');
+		expect(output).toContain('EAI_AGAIN');
+		expect(output).not.toContain('test-secret');
+		expect(output).not.toContain('private-customer');
+	});
+
+	it('sanitizes nested transport failures without replaying the cron request', async () => {
+		const root = Object.assign(new Error('https://user:test-secret@private-host.invalid/'), { code: 'EAI_AGAIN', syscall: 'getaddrinfo' });
+		const fetchImpl = vi.fn().mockRejectedValue(new TypeError('fetch failed test-secret', { cause: root }));
+		const error = await tickOnce(fetchImpl).catch((e) => e);
+		expect(error.message).toContain('EAI_AGAIN');
+		expect(error.message).not.toContain('test-secret');
+		expect(error.message).not.toContain('private-host');
+		expect(fetchImpl).toHaveBeenCalledTimes(1);
+	});
+
 	it('fails loudly when CRON_SECRET is missing', async () => {
 		delete process.env.CRON_SECRET;
 		vi.stubGlobal('fetch', vi.fn());
@@ -95,7 +181,8 @@ describe('dev cron tick', () => {
 		const thrown = await tickOnce().catch((e) => e);
 		expect(thrown).toBeInstanceOf(Error);
 		expect(thrown.message).not.toMatch(/[\r\n]/);
-		expect(thrown.message).toContain('sweep blew up');
+		expect(thrown.message).toContain('sweepError');
+		expect(thrown.message).not.toContain('sweep blew up');
 	});
 
 	it('does not fail the tick when every channel failure is owner-actionable', async () => {
@@ -160,7 +247,7 @@ describe('dev cron tick', () => {
 		const payload = { ok: false, sweepError: 'retention sweep blew up', results: {} };
 		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
 
-		await expect(tickOnce()).rejects.toThrow('sweepError: retention sweep blew up');
+		await expect(tickOnce()).rejects.toThrow('sweepError: failure (no safe diagnostic)');
 	});
 
 	it('does not suppress a zero-credit sweep failure behind owner-actionable channel errors', async () => {
@@ -184,7 +271,7 @@ describe('dev cron tick', () => {
 		const payload = { ok: false, zeroCreditSweepError: 'db down', results: {} };
 		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
 
-		await expect(tickOnce()).rejects.toThrow('zeroCreditSweepError: db down');
+		await expect(tickOnce()).rejects.toThrow('zeroCreditSweepError: failure (no safe diagnostic)');
 	});
 
 	it.each(['token', 'credits'])('does not suppress Stripe scrub failures behind %s errors in either scheduler', async (category) => {
@@ -336,7 +423,8 @@ describe('healthcheck ping', () => {
 
 		fetch.mockRejectedValueOnce(new Error('dns failure'));
 		await expect(pingHealthcheck()).resolves.toBeUndefined();
-		expect(console.error).toHaveBeenCalledWith('healthcheck ping failed:', 'dns failure');
+		expect(console.error).toHaveBeenCalledWith('healthcheck ping failed:', expect.stringContaining('operation=healthcheck_ping'));
+		expect(console.error.mock.calls.flat().join(' ')).not.toContain('dns failure');
 	});
 });
 
@@ -351,7 +439,7 @@ describe('contact delivery health', () => {
 describe.each(['driver', 'netlify'])('%s welcome delivery health', wrapper => {
  const invoke = async () => wrapper === 'driver' ? tickOnce() : (await import('../netlify/functions/cron.mjs')).default();
  it.each([
-  [{ welcomeEmailSweepError: 'database unavailable' }, 'welcomeEmailSweepError: database unavailable'],
+  [{ welcomeEmailSweepError: 'database unavailable' }, 'welcomeEmailSweepError: failure (no safe diagnostic)'],
   [{ welcomeEmailErrors: 1 }, 'welcomeEmailErrors: 1 delivery attempt(s) failed'],
   [{ welcomeEmailEnrollmentErrors: 1 }, 'welcomeEmailEnrollmentErrors: 1 account enrollment(s) failed'],
   [{ welcomeEmailAmbiguous: 1 }, 'welcomeEmailAmbiguous: reconciliation required']

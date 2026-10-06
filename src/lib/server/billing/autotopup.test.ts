@@ -762,6 +762,27 @@ describe('maybeTriggerAutoTopUp', () => {
 		errorSpy.mockRestore();
 	});
 
+	test('an infra failure log does not claim release after a concurrent webhook changes the claim', async () => {
+		await seedOrg();
+		const log = vi.spyOn(console, 'error').mockImplementation(vi.fn());
+		onTestFinished(log.mockRestore);
+		const diagnostics = new CronDiagnostics();
+		mocks.paymentIntentsCreate.mockImplementationOnce(async () => {
+			await recordAutoTopupFailure('org-1', 'authentication_required');
+			throw { type: 'StripeAPIError', statusCode: 500, message: 'test-secret org-1 cus_1' };
+		});
+
+		expect(await maybeTriggerAutoTopUp('org-1', diagnostics)).toBe(false);
+		expect(await orgRow()).toMatchObject({ autoTopupState: 'disabled', autoTopupFailures: 1,
+			autoTopupLastAttemptAt: expect.any(String), autoTopupAttemptAt: null, autoTopupSubmittedAt: null, creditsRemaining: 50 });
+		expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(1);
+		expect(mocks.refundsCreate).not.toHaveBeenCalled();
+		expect(log).toHaveBeenCalledWith('auto top-up infra failure — conditional claim release attempted without counting a decline');
+		expect(diagnostics.failures).toHaveLength(1);
+		expect(diagnostics.failures[0]).toMatchObject({ operation: 'auto_topup.charge', provider: 'stripe', httpStatus: 500 });
+		expect(format(...log.mock.calls.flat())).not.toMatch(/claim released|no cooldown|test-secret|org-1|cus_1/);
+	});
+
 	test('a create-time SCA failure (authentication_required code) disables auto top-up', async () => {
 		await seedOrg();
 		// Stripe errors carry the code on the error object, not in the message.

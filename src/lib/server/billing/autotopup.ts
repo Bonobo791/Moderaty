@@ -242,7 +242,7 @@ async function handleTopupFailure(orgId: string, attemptAt: string, error: unkno
 			.update(organizations)
 			.set({ autoTopupState: 'idle', autoTopupLastAttemptAt: null, ...(definitelyUncreated ? { autoTopupAttemptAt: null, autoTopupSubmittedAt: null } : {}) })
 			.where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight'), eq(organizations.autoTopupAttemptAt, attemptAt)));
-		console.error('auto top-up infra failure — claim released, no decline counted, no cooldown');
+		console.error('auto top-up infra failure — conditional claim release attempted without counting a decline');
 	}
 }
 

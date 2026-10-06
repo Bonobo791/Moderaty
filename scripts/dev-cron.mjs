@@ -77,7 +77,7 @@ export function formatTickFailure(payload, problems) {
 	const diagnostics = tickDiagnostics(payload);
 	const details = diagnostics.map((item) => `${item.sweep}: ${formatCronFailure(item)}`);
 	details.push(...problems.filter((problem) => !diagnostics.some((item) => problem.startsWith(`${item.sweep}:`))));
-	const summary = details.map((detail) => detail.slice(0, 500)).join('; ');
+	const summary = details.map((detail) => detail.replace(/[\r\n\u2028\u2029]/g, ' ').slice(0, 500)).join('; ');
 	return summary.length > 5500 ? `${summary.slice(0, 5480)}; details truncated` : summary;
 }
 
@@ -244,7 +244,7 @@ export async function tickOnce(fetchImpl = fetch) {
 	} catch {
 		payload = null;
 	}
-	console.log(`[${new Date().toISOString()}] tick → ${renderTick(payload)}`);
+	console.log(`[${new Date().toISOString()}] tick → ${renderTick(payload)}`.replace(/[\r\n\u2028\u2029]/g, ' '));
 	const { ownerActionableOnly, problems } = evaluateTick(res.ok, payload);
 	if (!res.ok) {
 		if (ownerActionableOnly && problems.length === 0) {

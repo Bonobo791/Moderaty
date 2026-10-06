@@ -9,6 +9,47 @@ const runId = '11111111-1111-4111-8111-111111111111';
 // documented in the existing cron tests (2026-07-30, PR #13).
 
 test.each([
+	[{ code: 'EAI_AGAIN', status: 503 }, 'dns'],
+	[{ code: 'SQLITE_BUSY', name: 'AbortError', status: 503 }, 'database_busy'],
+	[{ code: 'AUTH_ERROR', status: 500 }, 'authentication'],
+	[{ code: 'ETIMEDOUT', status: 500 }, 'timeout'],
+	[{ name: 'AbortError', status: 500 }, 'timeout'],
+	[{ code: 'SQLITE_ERROR', status: 503 }, 'http'],
+	[{ code: 'ECONNRESET', status: 503 }, 'http'],
+	[{ code: 'SQLITE_ERROR' }, 'database'],
+	[{ code: 'ECONNRESET' }, 'network']
+])('preserves classification precedence for overlapping fields %j', (cause, category) => {
+	expect(describeCronFailure(cause, 'auto top-up sweep', runId).category).toBe(category);
+});
+
+test.each([
+	[{ httpStatus: 401, status: 503, statusCode: 500, response: { status: 429 }, message: 'failed: 502' }, 401],
+	[{ httpStatus: '401', status: 600, statusCode: 500, response: { status: 429 } }, 500],
+	[{ status: 200, statusCode: 499.5, response: { status: 429 } }, 429],
+	[{ status: '500', statusCode: null, message: 'failed: 503 test-secret' }, 503],
+	[{ status: Infinity, statusCode: 399, response: { status: '500' } }, undefined]
+])('selects the first valid HTTP status and rejects malformed fields %j', (cause, status) => {
+	const detail = describeCronFailure(cause, 'cron transport', runId);
+	expect(detail.httpStatus).toBe(status);
+	expect(JSON.stringify(detail)).not.toContain('test-secret');
+});
+
+test.each(['__proto__', 'constructor', 'toString'])('rejects prototype-like provider and service names %s', (value) => {
+	const detail = describeCronFailure({ provider: value, service: value, diagnosticOperation: value }, value, runId);
+	expect(detail).toMatchObject({ category: 'unknown', service: 'cron', operation: 'cron_request' });
+	expect(detail.provider).toBeUndefined();
+});
+
+test('retains the deepest known operation and classification through an unknown leaf', () => {
+	const root = Object.assign(new Error('test-secret', { cause: 'test-secret' }), { code: 'EAI_AGAIN' });
+	const inner = Object.assign(new Error('test-secret', { cause: root }), { diagnosticOperation: 'auto_topup.lifetime_candidates' });
+	const outer = Object.assign(new Error('test-secret', { cause: inner }), { diagnosticOperation: 'auto_topup.paused_recovery' });
+	expect(describeCronFailure(outer, 'auto top-up sweep', runId)).toMatchObject({
+		category: 'dns', code: 'EAI_AGAIN', operation: 'auto_topup.lifetime_candidates', service: 'database', provider: 'turso'
+	});
+});
+
+test.each([
 	Object.assign(new Error('private timeout body'), { code: 'ETIMEDOUT', syscall: 'connect' }),
 	new Error('request deadline exceeded')
 ])('classifies transport and shared run deadline timeouts', (cause) => {

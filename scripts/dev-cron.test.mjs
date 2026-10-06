@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { parseDriverArgs, pingHealthcheck, scheduleTicks, tickOnce } from './dev-cron.mjs';
+import { formatTickFailure, parseDriverArgs, pingHealthcheck, scheduleTicks, tickOnce } from './dev-cron.mjs';
 
 // 'test-secret' is a synthetic credential fixture — maintainer-approved
 // documented exception per AGENTS.md (approved 2026-07-30, PR #13 review).
@@ -16,6 +16,17 @@ const ORIGINAL_ENV = {
 
 function cronResponse(payload, status = 200) {
 	return new Response(JSON.stringify(payload), { status });
+}
+
+function runFixtureTick(payload, status) {
+	const fixtureDirectory = mkdtempSync(join(tmpdir(), 'moderaty-cron-fixture-'));
+	try {
+		const fixturePath = join(fixtureDirectory, 'response.json');
+		writeFileSync(fixturePath, JSON.stringify({ payload, status }));
+		return spawnSync(process.execPath, ['--import', fileURLToPath(new URL('test-fixtures/cron-fetch.mjs', import.meta.url)), fileURLToPath(new URL('dev-cron.mjs', import.meta.url)), '--once'], {
+			encoding: 'utf8', env: { CRON_SECRET: 'test-secret', APP_URL: 'http://fixture.invalid', HEALTHCHECK_PING_URL: 'http://monitor.invalid', MODERATY_CRON_FIXTURE_PATH: fixturePath }
+		});
+	} finally { rmSync(fixtureDirectory, { recursive: true, force: true }); }
 }
 
 beforeEach(() => {
@@ -46,13 +57,32 @@ describe('dev cron tick', () => {
 	])('--once keeps alert exit and health-ping behavior for fixture %j', (payload, status, exit, requests) => {
 		// The child has a complete fetch stub before loading the driver. No
 		// app, provider, monitor, database or mail transport is contacted.
-		const bootstrap = `let requests = 0; globalThis.fetch = async () => { requests++; return new Response(${JSON.stringify(JSON.stringify(payload))}, { status: ${status} }); }; process.on('exit', () => console.error('fixture-requests=' + requests));`;
-		const child = spawnSync(process.execPath, ['--import', `data:text/javascript,${encodeURIComponent(bootstrap)}`, fileURLToPath(new URL('dev-cron.mjs', import.meta.url)), '--once'], {
-			encoding: 'utf8', env: { CRON_SECRET: 'test-secret', APP_URL: 'http://fixture.invalid', HEALTHCHECK_PING_URL: 'http://monitor.invalid' }
-		});
+		const child = runFixtureTick(payload, status);
 		expect(child.status).toBe(exit);
 		expect(child.stderr).toContain(`fixture-requests=${requests}`);
 		expect(child.stderr + child.stdout).not.toContain('test-secret');
+	});
+
+	it('rejects executable fixture status data before loading the driver', () => {
+		const child = runFixtureTick({ ok: true, results: {} }, '200, fixtureCode: console.error("fixture-code-executed")');
+		expect(child.status).toBe(1);
+		expect(child.stderr).toContain('Invalid cron fixture status');
+		expect(child.stderr).not.toContain('fixture-code-executed');
+		expect(child.stderr).not.toContain('fixture-requests=');
+	});
+
+	it('keeps hostile payload strings as fixture data and preserves one failed tick', () => {
+		const hostile = '"` ${console.error("fixture-code-executed")}\r\n\u2028\u2029';
+		const child = runFixtureTick({ ok: false, results: {}, autoTopupSweepError: hostile }, 200);
+		expect(child.status).toBe(1);
+		expect(child.stderr).toContain('fixture-requests=1');
+		expect(child.stderr + child.stdout).not.toContain('fixture-code-executed');
+	});
+
+	it('flattens line separators at the failure formatter boundary', () => {
+		const summary = formatTickFailure(null, ['channel run failed:\r\nerror\u2028continued\u2029end']);
+		expect(summary).toBe('channel run failed:  error continued end');
+		expect(summary).not.toMatch(/[\r\n\u2028\u2029]/);
 	});
 
 	it.each([200, 500])('retains provider HTTP status through both wrappers on HTTP %s', async (status) => {

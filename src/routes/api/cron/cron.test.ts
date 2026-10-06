@@ -177,6 +177,22 @@ test('nested Turso DNS failures reach safe sweep diagnostics while moderation st
 	}
 });
 
+test('retains diagnostics appended by channel failures after the sweep payload is built', async () => {
+	mocks.env.DRY_RUN = 'false';
+	await seedChannel('UC-late-failure');
+	mocks.runChannel.mockRejectedValueOnce(Object.assign(new Error('test-secret'), { code: 'ECONNRESET' }));
+	mockConsoleError();
+	const response = await call({ bearer: 'test-secret' });
+	expect(response.status).toBe(500);
+	const body = await response.json();
+	expect(body).toMatchObject({ ok: false, results: { 'UC-late-failure': { error: 'error' } } });
+	expect(body.failureDiagnostics).toContainEqual(expect.objectContaining({
+		sweep: 'channelRun', operation: 'channel_run', category: 'network', code: 'ECONNRESET', cronRunId: body.cronRunId
+	}));
+	expect(JSON.stringify(body.failureDiagnostics)).not.toContain('test-secret');
+	expect(mocks.runChannel).toHaveBeenCalledTimes(1);
+});
+
 function expectDrainState(row: Awaited<ReturnType<typeof channelRow>>, boundary: string | null, pageToken: string | null) {
 	expect(row?.dryRunBoundary).toBe(boundary);
 	expect(row?.dryRunPageToken).toBe(pageToken);

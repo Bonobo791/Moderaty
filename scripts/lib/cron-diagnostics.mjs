@@ -15,6 +15,15 @@ const NAMES = new Set(['Error', 'TypeError', 'SyntaxError', 'AbortError', 'Timeo
 const SYSCALLS = new Set(['getaddrinfo', 'connect', 'read', 'write', 'send', 'recv']);
 const PROVIDERS = new Set(['turso', 'stripe', 'google', 'openai', 'proton']);
 const SERVICES = new Set(['database', 'payments', 'billing', 'youtube', 'ai', 'mail', 'cron', 'monitoring']);
+const CODE_CATEGORIES = new Map([
+	['EAI_AGAIN', 'dns'], ['ENOTFOUND', 'dns'], ['EDNS', 'dns'],
+	['SQLITE_BUSY', 'database_busy'], ['SQLITE_BUSY_SNAPSHOT', 'database_busy'],
+	['SQLITE_LOCKED', 'database_busy'], ['SQLITE_LOCKED_SHAREDCACHE', 'database_busy'],
+	['UNAUTHORIZED', 'authentication'], ['AUTH_ERROR', 'authentication'], ['EAUTH', 'authentication'],
+	['ETIMEDOUT', 'timeout'], ['UND_ERR_CONNECT_TIMEOUT', 'timeout'],
+	['UND_ERR_HEADERS_TIMEOUT', 'timeout'], ['UND_ERR_BODY_TIMEOUT', 'timeout'], ['ESOCKETTIMEOUT', 'timeout']
+]);
+const PROVIDER_SERVICES = new Map([['turso', 'database'], ['stripe', 'payments'], ['openai', 'ai']]);
 
 /** @type {Record<string, {sweep: string, operation: string, service: string, provider?: string}>} */
 const CONTEXTS = {
@@ -67,65 +76,98 @@ function runId(value) { return typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-
 
 /** @param {SafeCause} cause */
 function category(cause) {
-	if (cause.code === 'EAI_AGAIN' || cause.code === 'ENOTFOUND' || cause.code === 'EDNS') return 'dns';
-	if (/^SQLITE_(BUSY|LOCKED)/.test(cause.code ?? '')) return 'database_busy';
-	if (['UNAUTHORIZED', 'AUTH_ERROR', 'EAUTH'].includes(cause.code ?? '')) return 'authentication';
-	if (cause.code === 'ETIMEDOUT' || /TIMEOUT/.test(cause.code ?? '') || cause.name === 'AbortError' || cause.name === 'TimeoutError') return 'timeout';
+	const codeCategory = CODE_CATEGORIES.get(cause.code ?? '');
+	if (codeCategory) return codeCategory;
+	if (['AbortError', 'TimeoutError'].includes(cause.name ?? '')) return 'timeout';
 	if (cause.httpStatus) return 'http';
-	if (cause.code?.startsWith('SQLITE_')) return 'database';
+	if (cause.code === 'SQLITE_ERROR') return 'database';
 	if (cause.code || cause.name === 'NetworkError') return 'network';
+	return 'unknown';
+}
+
+/** @param {unknown} value */
+function boundedMessage(value) {
+	const message = field(value, 'message');
+	return typeof message === 'string' ? message.slice(0, 2048) : '';
+}
+
+/** @param {unknown} value @param {string} text */
+function causeStatus(value, text) {
+	for (const key of ['httpStatus', 'status', 'statusCode']) {
+		const status = httpStatus(field(value, key));
+		if (status) return status;
+	}
+	// Existing provider helpers encode the status after "failed:". Only
+	// that numeric field is recovered; all body text remains private.
+	return httpStatus(field(field(value, 'response'), 'status'))
+		?? httpStatus(Number(/\bfailed: ([45]\d{2})\b/.exec(text)?.[1]));
+}
+
+/** @param {unknown} value @param {string | undefined} code @param {string | undefined} name @param {string} text */
+function causeProvider(value, code, name, text) {
+	const explicit = allowed(PROVIDERS, field(value, 'provider'));
+	if (explicit) return explicit;
+	if (code?.startsWith('SQLITE_') || name === 'LibsqlError') return 'turso';
+	if (name?.startsWith('Stripe')) return 'stripe';
+	if (/^OpenAI\b/i.test(text)) return 'openai';
+	return undefined;
+}
+
+/** Recognized message-only transport errors get a fixed category. @param {SafeCause} safe @param {string} text */
+function causeCategory(safe, text) {
+	const classified = category(safe);
+	if (classified !== 'unknown') return classified;
+	if (/^fetch failed\b/.test(text)) return 'network';
+	if (text === 'request deadline exceeded') return 'timeout';
 	return 'unknown';
 }
 
 /** Select fixed classifications from text, never return text. @param {unknown} value @returns {SafeCause} */
 function safeCause(value) {
-	const message = field(value, 'message');
-	const text = typeof message === 'string' ? message.slice(0, 2048) : '';
+	const text = boundedMessage(value);
 	// Stripe's SDK uses name="Error" and a specific type; retain that type.
 	const name = allowed(NAMES, field(value, 'type')) ?? allowed(NAMES, field(value, 'name'));
 	const code = allowed(CODES, field(value, 'code'));
-	const status = httpStatus(field(value, 'httpStatus')) ?? httpStatus(field(value, 'status')) ?? httpStatus(field(value, 'statusCode')) ?? httpStatus(field(field(value, 'response'), 'status'))
-		// Existing provider helpers encode the status after "failed:". Only
-		// that numeric field is recovered; all body text remains private.
-		?? httpStatus(Number(/\bfailed: ([45]\d{2})\b/.exec(text)?.[1]));
-	const provider = allowed(PROVIDERS, field(value, 'provider'))
-		?? (code?.startsWith('SQLITE_') || name === 'LibsqlError' ? 'turso' : undefined)
-		?? (/^Stripe/.test(name ?? '') ? 'stripe' : undefined)
-		?? (/^OpenAI\b/i.test(text) ? 'openai' : undefined);
-	const service = allowed(SERVICES, field(value, 'service'))
-		?? (provider === 'turso' ? 'database' : provider === 'stripe' ? 'payments' : provider === 'openai' ? 'ai' : undefined);
-	const safe = { name, code, syscall: allowed(SYSCALLS, field(value, 'syscall')), httpStatus: status, provider, service, category: 'unknown' };
-	safe.category = category(safe);
-	// Recognized message-only transport errors still get a fixed category.
-	if (safe.category === 'unknown' && /^fetch failed\b/.test(text)) safe.category = 'network';
-	if (safe.category === 'unknown' && text === 'request deadline exceeded') safe.category = 'timeout';
-	return safe;
+	const provider = causeProvider(value, code, name, text);
+	const service = allowed(SERVICES, field(value, 'service')) ?? PROVIDER_SERVICES.get(provider ?? '');
+	const safe = { name, code, syscall: allowed(SYSCALLS, field(value, 'syscall')), httpStatus: causeStatus(value, text), provider, service, category: 'unknown' };
+	return { ...safe, category: causeCategory(safe, text) };
 }
 
-/** @param {unknown} cause @param {string} label @param {string} [cronRunId] @returns {CronFailure} */
-export function describeCronFailure(cause, label, cronRunId) {
-	const context = Object.hasOwn(CONTEXTS, label) ? CONTEXTS[label] : CONTEXTS['cron transport'];
+/** @param {unknown} cause @param {string} defaultOperation */
+function causeChain(cause, defaultOperation) {
 	/** @type {SafeCause[]} */
 	const causes = [];
 	const seen = new Set();
 	let current = cause;
-	let operation = context.operation;
-	let operationContext;
+	let operation = defaultOperation;
 	while (current !== undefined && current !== null && !seen.has(current) && causes.length < MAX_CAUSES) {
 		seen.add(current);
 		causes.push(safeCause(current));
 		const annotated = field(current, 'diagnosticOperation');
 		if (typeof annotated === 'string' && Object.hasOwn(OPERATIONS, annotated)) {
 			operation = annotated;
-			operationContext = OPERATIONS[annotated];
 		}
 		current = field(current, 'cause');
 	}
+	return { causes, operation, truncated: current !== undefined && current !== null };
+}
+
+/** @param {SafeCause} root @param {SafeCause[]} causes @param {'provider' | 'service'} key @param {string | undefined} fallback */
+function inheritedField(root, causes, key, fallback) {
+	return root[key] ?? causes.findLast((item) => item[key])?.[key] ?? fallback;
+}
+
+/** @param {unknown} cause @param {string} label @param {string} [cronRunId] @returns {CronFailure} */
+export function describeCronFailure(cause, label, cronRunId) {
+	const context = Object.hasOwn(CONTEXTS, label) ? CONTEXTS[label] : CONTEXTS['cron transport'];
+	const { causes, operation, truncated } = causeChain(cause, context.operation);
+	const operationContext = OPERATIONS[operation];
 	const root = causes.findLast((item) => item.category !== 'unknown') ?? causes.at(-1) ?? { category: 'unknown' };
 	return { ...root, sweep: context.sweep, operation, cronRunId: runId(cronRunId),
-		provider: root.provider ?? causes.findLast((item) => item.provider)?.provider ?? operationContext?.provider ?? context.provider,
-		service: root.service ?? causes.findLast((item) => item.service)?.service ?? operationContext?.service ?? context.service, causes,
-		...(current !== undefined && current !== null ? { causeChainTruncated: true } : {}) };
+		provider: inheritedField(root, causes, 'provider', operationContext?.provider ?? context.provider),
+		service: inheritedField(root, causes, 'service', operationContext?.service ?? context.service), causes,
+		...(truncated ? { causeChainTruncated: true } : {}) };
 }
 
 /** Revalidate diagnostics from the HTTP boundary before formatting. @param {unknown} value @returns {CronFailure} */

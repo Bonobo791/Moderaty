@@ -63,13 +63,15 @@ function authorizeCron(url: URL, request: Request): void {
 	}
 }
 
+type SweepResult<T> = { value: T | null; error: string | null };
+
 /**
  * Runs one retention/top-up/outbox sweep. I8: a dry run changes nothing
  * durable (the would-be sweep is only logged). A sweep failure must never stop
  * scheduled moderation: it is logged loudly, reported in the payload, and
  * skipped — the handler continues.
  */
-const runSweep = async <T>(dryRun: boolean, label: string, run: () => Promise<T>, diagnostics: CronDiagnostics): Promise<{ value: T | null; error: string | null }> => {
+const runSweep = async <T>(dryRun: boolean, label: string, run: () => Promise<T>, diagnostics: CronDiagnostics): Promise<SweepResult<T>> => {
 	if (dryRun) {
 		console.info(`dry run: ${label} skipped`);
 		return { value: null, error: null };
@@ -277,6 +279,69 @@ async function runClaimedChannel(
 
 const orZero = (value: number | null | undefined): number => value ?? 0;
 
+type CronSweepResults = {
+	contactNotifications: SweepResult<Awaited<ReturnType<typeof retryContactNotifications>>>;
+	welcome: SweepResult<Awaited<ReturnType<typeof sweepWelcomeEmails>>>;
+	consent: SweepResult<Awaited<ReturnType<typeof nullExpiredConsentEmails>>>;
+	handles: SweepResult<Awaited<ReturnType<typeof nullExpiredHandles>>>;
+	autoTopup: SweepResult<Awaited<ReturnType<typeof sweepAutoTopUp>>>;
+	stripeDeletions: SweepResult<Awaited<ReturnType<typeof retryStripeCustomerDeletions>>>;
+	googleRevocations: SweepResult<Awaited<ReturnType<typeof retryGoogleRevocations>>>;
+	stripeScrubs: SweepResult<Awaited<ReturnType<typeof retryStripeCustomerScrubs>>>;
+	reversals: SweepResult<Awaited<ReturnType<typeof sweepStalePendingReversals>>>;
+	zeroCredit: SweepResult<Awaited<ReturnType<typeof sweepZeroCreditAccounts>>>;
+};
+
+function cronSweepPayload(sweeps: CronSweepResults, dryRun: boolean, diagnostics: CronDiagnostics) {
+	const { contactNotifications, welcome, consent, handles, autoTopup, stripeDeletions, googleRevocations, stripeScrubs, reversals, zeroCredit } = sweeps;
+	const failures = [
+		...Object.values(sweeps).map((sweep) => sweep.error), welcome.value?.enrollmentErrors, welcome.value?.errors,
+		welcome.value?.ambiguous, zeroCredit.value?.errors, contactNotifications.value?.errors
+	];
+	// A failed sweep must never tick as success: ok reflects every sweep's
+	// outcome (each failure is also surfaced in its own *Error field and
+	// logged). Per-account zero-credit eval failures count too — they ride
+	// an answered 200 by design, so without them in `ok` a permanently
+	// throwing evaluation would retry forever, invisible (codeant).
+	return {
+		cronRunId: diagnostics.cronRunId,
+		failureDiagnostics: diagnostics.failures,
+		ok: failures.every((failure) => !failure),
+		dryRun,
+		consentEmailsNulled: orZero(consent.value),
+		sweepError: consent.error,
+		auditHandlesNulled: orZero(handles.value?.auditLog),
+		actionHandlesNulled: orZero(handles.value?.moderationActions),
+		handleSweepError: handles.error,
+		autoTopupsTriggered: orZero(autoTopup.value),
+		autoTopupSweepError: autoTopup.error,
+		stripeCustomersDeleted: orZero(stripeDeletions.value),
+		stripeDeletionSweepError: stripeDeletions.error,
+		googleGrantsRevoked: orZero(googleRevocations.value),
+		googleRevocationSweepError: googleRevocations.error,
+		stripeCustomersScrubbed: orZero(stripeScrubs.value),
+		stripeScrubSweepError: stripeScrubs.error,
+		pendingReversalsDropped: orZero(reversals.value),
+		pendingReversalSweepError: reversals.error,
+		zeroCreditAccountsChecked: orZero(zeroCredit.value?.evaluated),
+		zeroCreditWarningsSent: orZero(zeroCredit.value?.warned),
+		zeroCreditAccountsDeleted: orZero(zeroCredit.value?.deleted),
+		zeroCreditItemErrors: orZero(zeroCredit.value?.errors),
+		zeroCreditSweepError: zeroCredit.error,
+		contactNotificationsSent: orZero(contactNotifications.value?.sent),
+		contactNotificationErrors: orZero(contactNotifications.value?.errors),
+		contactNotificationSweepError: contactNotifications.error,
+		welcomeEmailCandidatesScanned: orZero(welcome.value?.scanned),
+		welcomeEmailsQueued: orZero(welcome.value?.queued),
+		welcomeEmailEnrollmentErrors: orZero(welcome.value?.enrollmentErrors),
+		welcomeEmailsAccepted: orZero(welcome.value?.accepted),
+		welcomeEmailErrors: orZero(welcome.value?.errors),
+		welcomeEmailAmbiguous: orZero(welcome.value?.ambiguous),
+		welcomeEmailSuppressed: orZero(welcome.value?.suppressed),
+		welcomeEmailSweepError: welcome.error
+	};
+}
+
 /**
  * The maintenance sweeps that share the tick's budget, each isolated by
  * runSweep so one failure never stops the rest. Returns the `base` payload
@@ -321,49 +386,7 @@ const runCronSweeps = async (dryRun: boolean, deadline: number, startedAt: numbe
 	// Bounded per invocation (I10); under DRY_RUN no account is touched.
 	const zeroCredit = await runSweep(dryRun, 'zero-credit account sweep', () => sweepZeroCreditAccounts(ZERO_CREDIT_SWEEP_BATCH, deadline), diagnostics);
 
-
-	// A failed sweep must never tick as success: ok reflects every sweep's
-	// outcome (each failure is also surfaced in its own *Error field and
-	// logged). Per-account zero-credit eval failures count too — they ride
-	// an answered 200 by design, so without them in `ok` a permanently
-	// throwing evaluation would retry forever, invisible (codeant).
-	const base = {
-		cronRunId: diagnostics.cronRunId,
-		failureDiagnostics: diagnostics.failures,
-		ok: !welcome.error && !welcome.value?.enrollmentErrors && !welcome.value?.errors && !welcome.value?.ambiguous && !consent.error && !handles.error && !autoTopup.error && !stripeDeletions.error && !googleRevocations.error && !stripeScrubs.error && !reversals.error && !zeroCredit.error && !zeroCredit.value?.errors && !contactNotifications.error && !contactNotifications.value?.errors,
-		dryRun,
-		consentEmailsNulled: orZero(consent.value),
-		sweepError: consent.error,
-		auditHandlesNulled: orZero(handles.value?.auditLog),
-		actionHandlesNulled: orZero(handles.value?.moderationActions),
-		handleSweepError: handles.error,
-		autoTopupsTriggered: orZero(autoTopup.value),
-		autoTopupSweepError: autoTopup.error,
-		stripeCustomersDeleted: orZero(stripeDeletions.value),
-		stripeDeletionSweepError: stripeDeletions.error,
-		googleGrantsRevoked: orZero(googleRevocations.value),
-		googleRevocationSweepError: googleRevocations.error,
-		stripeCustomersScrubbed: orZero(stripeScrubs.value),
-		stripeScrubSweepError: stripeScrubs.error,
-		pendingReversalsDropped: orZero(reversals.value),
-		pendingReversalSweepError: reversals.error,
-		zeroCreditAccountsChecked: orZero(zeroCredit.value?.evaluated),
-		zeroCreditWarningsSent: orZero(zeroCredit.value?.warned),
-		zeroCreditAccountsDeleted: orZero(zeroCredit.value?.deleted),
-		zeroCreditItemErrors: orZero(zeroCredit.value?.errors),
-		zeroCreditSweepError: zeroCredit.error,
-		contactNotificationsSent: orZero(contactNotifications.value?.sent),
-		contactNotificationErrors: orZero(contactNotifications.value?.errors),
-		contactNotificationSweepError: contactNotifications.error,
-		welcomeEmailCandidatesScanned: orZero(welcome.value?.scanned),
-		welcomeEmailsQueued: orZero(welcome.value?.queued),
-		welcomeEmailEnrollmentErrors: orZero(welcome.value?.enrollmentErrors),
-		welcomeEmailsAccepted: orZero(welcome.value?.accepted),
-		welcomeEmailErrors: orZero(welcome.value?.errors),
-		welcomeEmailAmbiguous: orZero(welcome.value?.ambiguous),
-		welcomeEmailSuppressed: orZero(welcome.value?.suppressed),
-		welcomeEmailSweepError: welcome.error
-	};
+	const base = cronSweepPayload({ contactNotifications, welcome, consent, handles, autoTopup, stripeDeletions, googleRevocations, stripeScrubs, reversals, zeroCredit }, dryRun, diagnostics);
 	console.info(`cron: sweeps finished in ${Date.now() - startedAt}ms`);
 	return base;
 };

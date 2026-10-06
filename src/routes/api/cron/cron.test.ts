@@ -1,7 +1,7 @@
 import { beforeEach, expect, onTestFinished, test, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
-import { DAY_MS, seedConsent as seedConsentRecord, seedUser, setupTestDb, testDb } from '$lib/server/testdb';
-import { auditLog, channels, consents, feedbackDigests, moderationActions } from '$lib/server/db/schema';
+import { DAY_MS, seedConsent as seedConsentRecord, seedUser, setupTestDb, statementSql, testDb } from '$lib/server/testdb';
+import { auditLog, channels, consents, feedbackDigests, moderationActions, organizations, stripeAutoTopupRecoveries } from '$lib/server/db/schema';
 import { AUDIT_HANDLE_RETENTION_MS, CONSENT_EMAIL_RETENTION_MS } from '$lib/server/deletion';
 import { DeadlineExceededError } from '$lib/server/http';
 import { seedPendingFeedbackPreview as seedPendingPreview, withTestTrigger } from '$lib/server/cronTestSupport';
@@ -15,6 +15,8 @@ const mocks = vi.hoisted(() => ({
 	sweepWelcomeEmails: vi.fn(async (_deadline: number) => ({ scanned: 0, queued: 0, enrollmentErrors: 0, accepted: 0, errors: 0, ambiguous: 0, suppressed: 0 })),
 	retryContactNotifications: vi.fn(async (_deadline: number) => ({ sent: 0, errors: 0 })),
 	runFeedbackPreview: vi.fn(),
+	paymentIntentsRetrieve: vi.fn(),
+	paymentIntentsCancel: vi.fn(),
 	retryStripeCustomerDeletions: vi.fn(async (_limit: number, _deadline: number) => 0),
 	sweepZeroCreditAccounts: vi.fn(async (_limit: number, _deadline: number) => ({ evaluated: 0, warned: 0, deleted: 0, errors: 0 }))
 }));
@@ -23,6 +25,7 @@ vi.mock('$env/dynamic/private', () => ({ env: mocks.env }));
 vi.mock('$lib/server/welcomeEmail', () => ({ sweepWelcomeEmails: mocks.sweepWelcomeEmails }));
 vi.mock('$lib/server/contactNotification', () => ({ retryContactNotifications: mocks.retryContactNotifications }));
 vi.mock('$lib/server/pipeline', () => ({ runChannel: mocks.runChannel }));
+vi.mock('$lib/server/stripe/client', () => ({ getStripe: vi.fn().mockReturnValue({ paymentIntents: { retrieve: mocks.paymentIntentsRetrieve, cancel: mocks.paymentIntentsCancel } }) }));
 vi.mock('$lib/server/feedbackDigest', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('$lib/server/feedbackDigest')>();
 	return { ...actual, generateFeedbackDigest: mocks.generateFeedbackDigest, runFeedbackPreview: mocks.runFeedbackPreview };
@@ -42,7 +45,7 @@ vi.mock('$lib/server/zeroCredits', async (importOriginal) => {
 
 import { GET } from './+server';
 
-setupTestDb(['cron_workload_state', 'channels', 'users', 'consents', 'audit_log', 'moderation_actions', 'feedback_digests']);
+setupTestDb(['cron_workload_state', 'channels', 'users', 'consents', 'audit_log', 'moderation_actions', 'feedback_digests', 'organizations', 'stripe_auto_topup_recoveries']);
 
 /** Seeds a user with a consent record accepted at `createdAt`, e-mail retained. */
 async function seedConsent(id: string, createdAt: string) {
@@ -133,11 +136,112 @@ function mockConsoleError() {
 	return spy;
 }
 
+function expectCronLog(log: { mock: { calls: unknown[][] } }, sweep: string, operation: string) {
+	const entries = log.mock.calls.filter(([label]) => label === 'cron failure:').map(([, value]) => JSON.parse(String(value)));
+	expect(entries).toContainEqual(expect.objectContaining({ sweep, operation, cronRunId: expect.stringMatching(/^[a-f0-9-]{36}$/) }));
+}
+
+function expectResponseDiagnostic(body: Record<string, unknown>, sweep: string, operation: string, fields: Record<string, unknown> = {}) {
+	expect(body.failureDiagnostics).toContainEqual(expect.objectContaining({ sweep, operation, cronRunId: body.cronRunId, ...fields }));
+}
+
 function mockClock(now: number) {
 	const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
 	onTestFinished(() => clock.mockRestore());
 	return clock;
 }
+
+test('nested Turso DNS failures reach safe sweep diagnostics while moderation still runs', async () => {
+	mocks.env.DRY_RUN = 'false';
+	await seedChannel('UC1');
+	mocks.runChannel.mockResolvedValue(runResult());
+	const root = Object.assign(new Error('getaddrinfo EAI_AGAIN private-host.invalid test-secret'), { code: 'EAI_AGAIN', syscall: 'getaddrinfo' });
+	const failure = new TypeError('fetch failed', { cause: root });
+	const execute = testDb().client.execute.bind(testDb().client);
+	const query = vi.spyOn(testDb().client, 'execute').mockImplementation((statement) => {
+		if (statementSql(statement).startsWith('select "id", "auto_topup_enabled"')) return Promise.reject(failure);
+		return execute(statement);
+	});
+	onTestFinished(query.mockRestore);
+	const log = mockConsoleError();
+	const response = await call({ bearer: 'test-secret' });
+	const body = await response.json();
+	expect(response.status).toBe(200);
+	expect(body.ok).toBe(false);
+	expect(body.autoTopupSweepError).toContain('EAI_AGAIN');
+	expectResponseDiagnostic(body, 'autoTopupSweepError', 'auto_topup.lifetime_candidates', {
+		category: 'dns', code: 'EAI_AGAIN', syscall: 'getaddrinfo', provider: 'turso', service: 'database'
+	});
+	expect(body.cronRunId).toMatch(/^[a-f0-9-]{36}$/);
+	expect(mocks.runChannel).toHaveBeenCalledTimes(1);
+	const emitted = log.mock.calls.map((args) => JSON.stringify(args)).join(' ');
+	expect(emitted).toContain('EAI_AGAIN');
+	expect(emitted).toContain(body.cronRunId);
+	for (const forbidden of ['private-host.invalid', 'test-secret', 'Failed query:', 'params:']) {
+		expect(emitted).not.toContain(forbidden);
+		expect(JSON.stringify(body)).not.toContain(forbidden);
+	}
+});
+
+test('retains diagnostics appended by channel failures after the sweep payload is built', async () => {
+	mocks.env.DRY_RUN = 'false';
+	await seedChannel('UC-late-failure');
+	mocks.runChannel.mockRejectedValueOnce(Object.assign(new Error('test-secret'), { code: 'ECONNRESET' }));
+	mockConsoleError();
+	const response = await call({ bearer: 'test-secret' });
+	expect(response.status).toBe(500);
+	const body = await response.json();
+	expect(body).toMatchObject({ ok: false, results: { 'UC-late-failure': { error: 'error' } } });
+	expectResponseDiagnostic(body, 'channelRun', 'channel_run', { category: 'network', code: 'ECONNRESET' });
+	expect(JSON.stringify(body.failureDiagnostics)).not.toContain('test-secret');
+	expect(mocks.runChannel).toHaveBeenCalledTimes(1);
+});
+
+test.each([
+	{ phase: 'lookup', fail: mocks.paymentIntentsRetrieve, cancellations: 0 },
+	{ phase: 'cancellation', fail: mocks.paymentIntentsCancel, cancellations: 1 }
+])('reports a swallowed paused top-up $phase failure without changing health or replaying work', async ({ fail, cancellations }) => {
+	mocks.env.DRY_RUN = 'false';
+	await testDb().db.insert(organizations).values({ id: 'org-private', name: 'Fixture', autoTopupEnabled: 0, creditsRemaining: 50 });
+	await testDb().db.insert(stripeAutoTopupRecoveries).values({ orgId: 'org-private', attemptAt: 'completed:pi_private', paymentIntentId: 'pi_private' });
+	await seedChannel('UC-row-error');
+	mocks.runChannel.mockResolvedValue(runResult({ dryRun: false }));
+	const failure = { type: 'StripeAPIError', statusCode: 500, message: 'https://user:test-secret@private-host.invalid/ cus_private', headers: { authorization: 'test-secret' } };
+	mocks.paymentIntentsRetrieve.mockResolvedValue({ id: 'pi_private', status: 'processing', metadata: { type: 'auto_topup', org_id: 'org-private' } });
+	fail.mockRejectedValueOnce(failure);
+	const log = mockConsoleError();
+	const response = await call({ bearer: 'test-secret' });
+	const body = await response.json();
+	expect(response.status).toBe(200);
+	expect(body).toMatchObject({ ok: true, autoTopupSweepError: null, autoTopupsTriggered: 0 });
+	expectResponseDiagnostic(body, 'autoTopupSweepError', 'auto_topup.paused_recovery', {
+		category: 'http', httpStatus: 500, provider: 'stripe', service: 'payments'
+	});
+	expect(mocks.paymentIntentsRetrieve).toHaveBeenCalledTimes(1);
+	expect(mocks.paymentIntentsCancel).toHaveBeenCalledTimes(cancellations);
+	expect(mocks.runChannel).toHaveBeenCalledTimes(1);
+	expect(await channelRow('UC-row-error')).toMatchObject({ lastRunStatus: 'success' });
+	expect(await testDb().db.select().from(organizations).get()).toMatchObject({ autoTopupEnabled: 0, creditsRemaining: 50 });
+	expect(await testDb().db.select().from(stripeAutoTopupRecoveries).get()).toMatchObject({ resolvedAt: null, lastError: 'refund_or_cancellation_failed' });
+	const emitted = JSON.stringify(log.mock.calls);
+	expect(emitted).toContain('httpStatus');
+	expect(emitted).toContain(body.cronRunId);
+	expect(emitted + JSON.stringify(body)).not.toMatch(/test-secret|private-host|cus_private|org-private|pi_private|authorization/);
+});
+
+test('preserves zero defaults for absent sweep counters without projecting arbitrary fields', async () => {
+	mocks.env.DRY_RUN = 'false';
+	mocks.sweepWelcomeEmails.mockResolvedValueOnce({ scanned: null, queued: undefined, enrollmentErrors: null,
+		accepted: undefined, errors: null, ambiguous: undefined, suppressed: null, privatePayload: 'test-secret' } as never);
+	mocks.sweepZeroCreditAccounts.mockResolvedValueOnce(null as never);
+	mocks.retryContactNotifications.mockResolvedValueOnce({ sent: undefined, errors: null } as never);
+	const body = await (await call({ bearer: 'test-secret' })).json();
+	expect(body).toMatchObject({ ok: true, welcomeEmailCandidatesScanned: 0, welcomeEmailsQueued: 0,
+		welcomeEmailEnrollmentErrors: 0, welcomeEmailsAccepted: 0, welcomeEmailErrors: 0, welcomeEmailAmbiguous: 0,
+		welcomeEmailSuppressed: 0, zeroCreditAccountsChecked: 0, zeroCreditWarningsSent: 0,
+		zeroCreditAccountsDeleted: 0, zeroCreditItemErrors: 0, contactNotificationsSent: 0, contactNotificationErrors: 0 });
+	expect(JSON.stringify(body)).not.toContain('test-secret');
+});
 
 function expectDrainState(row: Awaited<ReturnType<typeof channelRow>>, boundary: string | null, pageToken: string | null) {
 	expect(row?.dryRunBoundary).toBe(boundary);
@@ -226,7 +330,7 @@ test('a zero-credit sweep failure surfaces in the payload without stopping moder
 
 	try {
 		const res = await call({ bearer: 'test-secret' });
-		expect(await res.json()).toMatchObject({ ok: false, zeroCreditSweepError: 'db exploded' });
+		expect(await res.json()).toMatchObject({ ok: false, zeroCreditSweepError: expect.stringContaining('operation=zero_credit') });
 		// The sweep threw but the channel still ran — retention must never
 		// starve scheduled moderation.
 		expect(mocks.runChannel).toHaveBeenCalledWith('UC1', expect.anything());
@@ -541,8 +645,9 @@ test('history digest failure does not prevent moderation or trigger a second dig
 		expect(response.status).toBe(200);
 		expect(mocks.runChannel).toHaveBeenCalledTimes(1);
 		expect(mocks.generateFeedbackDigest).toHaveBeenCalledTimes(1);
-		expect(errorSpy).toHaveBeenCalledWith('feedback digest failed for channel:', 'UC-history', expect.any(Error));
+		expectCronLog(errorSpy, 'digest', 'feedback_digest');
 		const body = await response.json();
+		expectResponseDiagnostic(body, 'digest', 'feedback_digest');
 		expect(JSON.stringify(body)).not.toContain('raw feedback failure');
 	} finally {
 		errorSpy.mockRestore();
@@ -579,9 +684,9 @@ test('a failing channel run reports failure, never success', async () => {
 		// message — error bodies can echo request details/tokens (codeant,
 		// PR #142). The full error stays in the server log.
 		expect(await res.json()).toMatchObject({ ok: false, results: { 'UC-bad': { error: 'quota' } } });
-		// The failure is logged loudly with the channel id (an emptied log
+		// The failure is logged loudly with its operation and run ID (an emptied log
 		// message stayed green in the mutation audit).
-		expect(errorSpy).toHaveBeenCalledWith('channel run %s failed:', 'UC-bad', expect.any(Error));
+		expectCronLog(errorSpy, 'channelRun', 'channel_run');
 		// The run is still recorded, so a failing channel cannot starve the others.
 		const row = await testDb().db.select().from(channels).where(eq(channels.id, 'UC-bad')).get();
 		expect(row?.lastRunAt).not.toBeNull();
@@ -725,8 +830,10 @@ test('a bookkeeping failure in the run-recording finally cannot mask the run res
 		// codex, PR #142 r2: the run result is preserved, but the bookkeeping
 		// failure is surfaced in the payload — a silent server-log-only
 		// fallback would hide a degraded state from the scheduled caller.
-		expect(await res.json()).toMatchObject({ results: { 'UC-rec': runResult() }, bookkeepingError: true });
-		expect(errorSpy).toHaveBeenCalledWith('run-health write failed for channel:', 'UC-rec', expect.any(Error));
+		const body = await res.json();
+		expect(body).toMatchObject({ results: { 'UC-rec': runResult() }, bookkeepingError: true });
+		expectResponseDiagnostic(body, 'bookkeepingError', 'run_health_write');
+		expectCronLog(errorSpy, 'bookkeepingError', 'run_health_write');
 	} finally {
 		errorSpy.mockRestore();
 		await testDb().client.execute('DROP TRIGGER fail_run_record');
@@ -810,13 +917,13 @@ test('a sweep failure is reported and does not stop the channel run', async () =
 
 		expect(res.status).toBe(200);
 		const body = await res.json();
-		expect(body.sweepError).toEqual(expect.stringContaining('Failed query'));
+		expect(body.sweepError).toEqual(expect.stringContaining('operation=consent_retention'));
 		expect(body.ok).toBe(false); // a failed sweep must not tick as success (codeant)
 		expect(body.consentEmailsNulled).toBe(0);
 		expect(mocks.runChannel).toHaveBeenCalledWith('UC-live', expect.objectContaining({ deadline: expect.any(Number) }));
 		// The sweep failure is logged loudly (an emptied log message stayed
 		// green in the mutation audit).
-		expect(errorSpy).toHaveBeenCalledWith('%s failed:', 'consent e-mail retention sweep', expect.any(Error));
+		expectCronLog(errorSpy, 'sweepError', 'consent_retention');
 	} finally {
 		errorSpy.mockRestore();
 		await testDb().client.execute('DROP TRIGGER fail_consent_update');
@@ -900,12 +1007,12 @@ test('a handle sweep failure is reported and does not stop the channel run', asy
 
 		expect(res.status).toBe(200);
 		const body = await res.json();
-		expect(body.handleSweepError).toEqual(expect.stringContaining('Failed query'));
+		expect(body.handleSweepError).toEqual(expect.stringContaining('operation=handle_retention'));
 		expect(body.auditHandlesNulled).toBe(0);
 		expect(body.actionHandlesNulled).toBe(0);
 		expect(mocks.runChannel).toHaveBeenCalledWith('UC-live', expect.objectContaining({ deadline: expect.any(Number) }));
 		// The sweep failure is logged loudly.
-		expect(errorSpy).toHaveBeenCalledWith('%s failed:', 'commenter-handle retention sweep', expect.any(Error));
+		expectCronLog(errorSpy, 'handleSweepError', 'handle_retention');
 	} finally {
 		errorSpy.mockRestore();
 		await testDb().client.execute('DROP TRIGGER fail_audit_handle_update');
@@ -965,6 +1072,16 @@ test('clears the drain state when the dry-run window completes', async () => {
 	expectDrainState(await channelRow('UC1'), null, null);
 });
 
+test.each([undefined, null, 0, 1, 'true', 'false'])('rejects non-Boolean drain completion without changing its checkpoint: %s', async (windowComplete) => {
+	await seedDrainChannel('UC1', 'tok-1');
+	mocks.runChannel.mockResolvedValueOnce(runResult())
+		.mockResolvedValueOnce(runResult({ windowComplete, windowNextPageToken: 'must-not-save' }));
+	const response = await call({ bearer: 'test-secret' });
+	expect(response.status).toBe(200);
+	expect(mocks.runChannel).toHaveBeenCalledTimes(2);
+	expectDrainState(await channelRow('UC1'), '2026-05-01T00:00:00.000Z', 'tok-1');
+});
+
 test('a channel with a drain in flight waits for older ordinary channels', async () => {
 	// A pending preview shares the live rotation; it must not monopolize cron.
 	await seedChannel('UC-old', { lastRunAt: '2026-01-01T00:00:00.000Z' });
@@ -988,9 +1105,9 @@ test('a drain failure is loud, surfaced in the payload, and never masks the norm
 	expect(res.status).toBe(200);
 	const body = await res.json();
 	expect(body).toMatchObject({ ok: true, results: { UC1: normal } });
-	expect(body.dryRunWindow).toEqual({ error: 'drain exploded' });
+	expect(body.dryRunWindow).toEqual({ error: expect.stringContaining('operation=dry_run_window') });
 	// Exact message: an emptied or altered log line must fail this test.
-	expect(spy).toHaveBeenCalledWith('dry-run window drain failed for channel:', 'UC1', expect.any(Error));
+	expectCronLog(spy, 'dryRunWindow', 'dry_run_window');
 	// The drain state is untouched so the next invocation retries it.
 	expectDrainState(await channelRow('UC1'), '2026-05-01T00:00:00.000Z', 'tok-1');
 });
@@ -1051,7 +1168,7 @@ test('contact notification database failure is surfaced without stopping the oth
 	mocks.env.DRY_RUN = 'false';
 	mocks.retryContactNotifications.mockRejectedValueOnce(new Error('database unavailable'));
 	const response = await call({ query: 'test-secret' });
-	expect(await response.json()).toMatchObject({ ok: false, contactNotificationSweepError: 'database unavailable' });
+	expect(await response.json()).toMatchObject({ ok: false, contactNotificationSweepError: expect.stringContaining('operation=contact_notification') });
 	expect(mocks.sweepZeroCreditAccounts).toHaveBeenCalled();
 });
 
@@ -1190,6 +1307,7 @@ test('a deadline-aborted preview stays pending for the next tick and releases th
 	expect(res.status).toBe(200);
 	const body = await res.json();
 	expect(body.feedbackPreview).toMatchObject({ error: 'timeout' });
+	expectResponseDiagnostic(body, 'feedbackPreview', 'feedback_preview');
 	expect(body.results).toEqual({});
 	// The drain consumed the budget — the rotation must not inherit the spent
 	// deadline and record a fake timeout for a channel never run (gitar+cubic).
@@ -1395,9 +1513,10 @@ test('a lease-release failure after a drained preview still counts the tick as w
 	const body = await res.json();
 	expect(body).toMatchObject({ ok: true, results: {} });
 	expect(body.feedbackPreview).toMatchObject({ commentsClassified: 1 });
+	expectResponseDiagnostic(body, 'leaseRelease', 'lease_release');
 	// Loud, not silent — and the failed release leaves the lease in place
 	// (it self-expires; the channel is not pinned forever).
-	expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('lease release'), expect.anything(), expect.anything(), expect.anything());
+	expectCronLog(errorSpy, 'leaseRelease', 'lease_release');
 	expect((await channelRow('UC-prev'))?.leaseExpiresAt).toBeTruthy();
 });
 
@@ -1582,8 +1701,10 @@ test('a failed stale-preview cleanup is surfaced without blocking eligible live 
 		WHEN NEW.status = 'dry-run-failed' BEGIN SELECT RAISE(ABORT, 'cleanup unavailable'); END`, async () => {
 		const response = await call({ bearer: 'test-secret' });
 		expect(mocks.runChannel).toHaveBeenCalledWith('UC-live', expect.anything());
-		expect(await response.json()).toMatchObject({ ok: false, feedbackPreviewSweepError: true });
-		expect(log).toHaveBeenCalledWith('cron: stale feedback preview cleanup failed:', expect.anything());
+		const body = await response.json();
+		expect(body).toMatchObject({ ok: false, feedbackPreviewSweepError: true });
+		expectResponseDiagnostic(body, 'feedbackPreviewSweepError', 'preview_cleanup');
+		expectCronLog(log, 'feedbackPreviewSweepError', 'preview_cleanup');
 	});
 });
 
@@ -1642,7 +1763,9 @@ test('scheduler transaction errors fail loudly without starting an unclaimed wor
 	onTestFinished(() => transaction.mockRestore());
 	const response = await call({ bearer: 'test-secret' });
 	expect(response.status).toBe(500);
-	expect(await response.json()).toMatchObject({ ok: false, schedulerError: true, results: {} });
+	const body = await response.json();
+	expect(body).toMatchObject({ ok: false, schedulerError: true, results: {} });
+	expectResponseDiagnostic(body, 'schedulerError', 'workload_claim');
 	expect(mocks.runChannel).not.toHaveBeenCalled();
 	expect(mocks.runFeedbackPreview).not.toHaveBeenCalled();
 	expect((await channelRow('UC-claim-error'))?.leaseExpiresAt).toBeNull();
@@ -1673,5 +1796,5 @@ test.each(['success', 'failure'] as const)('a late live %s cannot overwrite its 
 	expect(response.status).toBe(outcome === 'failure' ? 500 : 200);
 	expect(await response.json()).toMatchObject({ bookkeepingError: true });
 	expect(await channelRow('UC-live-successor')).toMatchObject(successorState);
-	expect(log).toHaveBeenCalledWith('run-health write skipped: channel connector or lease changed mid-run:', 'UC-live-successor');
+	expectCronLog(log, 'bookkeepingError', 'run_health_write');
 });

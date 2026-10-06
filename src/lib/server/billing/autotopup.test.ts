@@ -1,10 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { format } from 'node:util';
 import { env } from '$env/dynamic/private';
-import { eq } from 'drizzle-orm';
-import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { DrizzleQueryError, eq } from 'drizzle-orm';
+import { LibsqlError } from '@libsql/client';
+import { beforeEach, describe, expect, onTestFinished, test, vi } from 'vitest';
 
-import { setupTestDb, testDb } from '$lib/server/testdb';
+import { setupTestDb, statementSql, testDb } from '$lib/server/testdb';
+import { CronDiagnostics, describeCronFailure } from '../../../../scripts/lib/cron-diagnostics.mjs';
 import { creditTransactions, organizations, stripeSubscriptionPeriods, stripeAutoTopupRecoveries, stripeRefundObservations } from '$lib/server/db/schema';
 import { applyLedgerDelta, getCredits, pauseAutoTopupForRefund } from '$lib/server/billing/ledger';
 import { grantAutoTopupCredits, handleAutoTopupFailure, maybeTriggerAutoTopUp, readAutoTopupState, reconcileAutoTopup, recordAutoTopupFailure, stripeErrorCode, sweepAutoTopUp } from './autotopup';
@@ -83,6 +85,36 @@ async function seedStaleAttemptOrg(): Promise<string> {
 function mockPaymentIntents(pis: Record<string, unknown>[]): void {
 	mocks.paymentIntentsList.mockResolvedValue({ data: pis, has_more: false });
 }
+
+const cyclicRecoveryError = new Error('test-secret');
+cyclicRecoveryError.cause = cyclicRecoveryError;
+const pausedFailureFixtures = [
+	{ cause: new DrizzleQueryError('select private_fixture', ['test-secret'], new LibsqlError('test-secret', 'SERVER_ERROR', undefined, undefined,
+		new TypeError('fetch failed', { cause: Object.assign(new Error('private-host test-secret'), { code: 'EAI_AGAIN', syscall: 'getaddrinfo' }) }))),
+		expected: { category: 'dns', code: 'EAI_AGAIN', syscall: 'getaddrinfo', provider: 'turso', service: 'database' } },
+	{ cause: { code: 'SQLITE_BUSY', message: 'test-secret' }, expected: { category: 'database_busy', code: 'SQLITE_BUSY', provider: 'turso', service: 'database' } },
+	{ cause: { type: 'StripeAPIError', statusCode: 500, headers: { authorization: 'test-secret' } }, expected: { category: 'http', httpStatus: 500, provider: 'stripe', service: 'payments' } },
+	{ cause: undefined, expected: { category: 'unknown', service: 'billing' } },
+	{ cause: 'test-secret', expected: { category: 'unknown', service: 'billing' } },
+	{ cause: cyclicRecoveryError, expected: { category: 'unknown', service: 'billing' } }
+];
+
+test.each(pausedFailureFixtures)('paused row diagnostics safely preserve $expected.category without replay or charges', async ({ cause, expected }) => {
+	await seedOrg({ autoTopupEnabled: 0 });
+	await testDb().db.insert(stripeAutoTopupRecoveries).values({ orgId: 'org-1', attemptAt: 'completed:pi_private', paymentIntentId: 'pi_private' });
+	mocks.paymentIntentsRetrieve.mockRejectedValueOnce(cause);
+	const log = vi.spyOn(console, 'error').mockImplementation(vi.fn());
+	onTestFinished(log.mockRestore);
+	const diagnostics = new CronDiagnostics();
+	expect(await sweepAutoTopUp(1, Date.now() + 20_000, diagnostics)).toBe(0);
+	expect(diagnostics.failures).toHaveLength(1);
+	expect(diagnostics.failures[0]).toMatchObject({ ...expected, operation: 'auto_topup.paused_recovery', cronRunId: diagnostics.cronRunId });
+	expect(mocks.paymentIntentsRetrieve).toHaveBeenCalledTimes(1);
+	expect([mocks.paymentIntentsCreate.mock.calls, mocks.paymentIntentsList.mock.calls, mocks.paymentIntentsCancel.mock.calls, mocks.refundsCreate.mock.calls]).toEqual([[], [], [], []]);
+	expect(await orgRow()).toMatchObject({ autoTopupEnabled: 0, creditsRemaining: 50 });
+	expect(await testDb().db.select().from(stripeAutoTopupRecoveries).get()).toMatchObject({ lastError: 'refund_or_cancellation_failed', resolvedAt: null });
+	expect(format(...log.mock.calls.flat())).not.toMatch(/test-secret|private-host|org-1|pi_private|select |authorization/);
+});
 
 beforeEach(() => {
 	vi.resetAllMocks();
@@ -840,15 +872,20 @@ describe('sweepPausedTopups', () => {
 		expect(mocks.refundsCreate).toHaveBeenCalledWith(expect.objectContaining({ payment_intent: pi.id }), expect.anything());
 		expect((await testDb().db.select().from(stripeAutoTopupRecoveries).get())?.resolvedAt).toEqual(expect.any(String));
 	});
-	test('recovery diagnostics preserve percent tokens in external identifiers', async () => {
+	test('recovery diagnostics exclude external identifiers and raw provider payloads', async () => {
 		await seedOrg({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: new Date().toISOString() });
 		await pauseAutoTopupForRefund(testDb().db, 'org-1');
 		const row = (await testDb().db.select().from(stripeAutoTopupRecoveries).get())!;
-		mocks.paymentIntentsCancel.mockRejectedValueOnce(new Error('Stripe unavailable'));
-		const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const failure = Object.assign(new Error('https://user:test-secret@private-host.invalid/ cus_private'), { type: 'StripeAPIError', statusCode: 500 });
+		mocks.paymentIntentsCancel.mockRejectedValueOnce(failure);
+		const spy = vi.spyOn(console, 'error').mockImplementation(vi.fn());
 		try {
-			await expect(recoverPausedTopup(row, { id: 'pi_%s', status: 'requires_action', metadata: { type: 'auto_topup', org_id: row.orgId } })).rejects.toThrow('Stripe unavailable');
-			expect(spy.mock.calls.map((args) => format(...args)).join('\n')).toContain('pi_%s');
+			await expect(recoverPausedTopup(row, { id: 'pi_%s', status: 'requires_action', metadata: { type: 'auto_topup', org_id: row.orgId } })).rejects.toBe(failure);
+			const output = format(...spy.mock.calls.flat());
+			expect(output).toContain('manual refund required');
+			expect(JSON.parse(String(spy.mock.calls[0][1]))).toMatchObject({ operation: 'auto_topup.paused_recovery', httpStatus: 500, provider: 'stripe', service: 'payments' });
+			expect(output).not.toMatch(/org-1|pi_%s|test-secret|private-host|cus_private/);
+			expect(mocks.paymentIntentsCancel).toHaveBeenCalledTimes(1);
 		} finally { spy.mockRestore(); }
 	});
 
@@ -873,9 +910,15 @@ describe('sweepPausedTopups', () => {
 	test('deadline-skipped rows consume no sweep slots, while failed remote attempts consume one', async () => {
 		await seedOrg({ autoTopupState: 'in_flight', autoTopupLastAttemptAt: new Date().toISOString() });
 		await pauseAutoTopupForRefund(testDb().db, 'org-1');
+		const log = vi.spyOn(console, 'error').mockImplementation(vi.fn());
+		onTestFinished(log.mockRestore);
 		expect(await sweepPausedTopups(1, Date.now() - 1)).toBe(0);
 		mocks.paymentIntentsList.mockRejectedValueOnce(new Error('Stripe unavailable'));
 		expect(await sweepPausedTopups(1)).toBe(1);
+		const diagnostic = JSON.parse(String(log.mock.calls.find(([label]) => label === 'cron failure:')?.[1]));
+		expect(diagnostic).toMatchObject({ operation: 'auto_topup.paused_recovery', category: 'unknown', cronRunId: expect.stringMatching(/^[a-f0-9-]{36}$/) });
+		expect(format(...log.mock.calls.flat())).not.toMatch(/org-1|cus_1|Stripe unavailable/);
+		expect(mocks.paymentIntentsList).toHaveBeenCalledTimes(1);
 	});
 
 	test('a concurrent successful cancellation cannot be overwritten by a losing worker', async () => {
@@ -1007,6 +1050,25 @@ describe('handleAutoTopupFailure (webhook)', () => {
 });
 
 describe('sweepAutoTopUp', () => {
+	test('a lifetime candidate SELECT failure never starts reconciliation, charges or refunds', async () => {
+		await seedOrg({ plan: 'lifetime' });
+		const before = await orgRow();
+		const root = Object.assign(new Error('getaddrinfo EAI_AGAIN private-host.invalid'), { code: 'EAI_AGAIN', syscall: 'getaddrinfo' });
+		const execute = testDb().client.execute.bind(testDb().client);
+		const query = vi.spyOn(testDb().client, 'execute').mockImplementation((statement) => {
+			if (statementSql(statement).startsWith('select "id", "auto_topup_enabled"')) return Promise.reject(new TypeError('fetch failed', { cause: root }));
+			return execute(statement);
+		});
+		let cause: unknown;
+		try { await sweepAutoTopUp(5); }
+		catch (failure) { cause = failure; }
+		finally { query.mockRestore(); }
+		expect(describeCronFailure(cause, 'auto top-up sweep')).toMatchObject({ operation: 'auto_topup.lifetime_candidates', category: 'dns', code: 'EAI_AGAIN', provider: 'turso', service: 'database' });
+		for (const remote of Object.values(mocks)) expect(remote).not.toHaveBeenCalled();
+		expect(await orgRow()).toEqual(before);
+		expect(await testDb().db.select().from(creditTransactions)).toHaveLength(0);
+	});
+
 	test('a malformed payment item does not prevent cron from canceling the valid paused payment', async () => {
 		await seedOrg({ creditsRemaining: 0 });
 		await maybeTriggerAutoTopUp('org-1');
@@ -1014,9 +1076,12 @@ describe('sweepAutoTopUp', () => {
 		const pi = { id: 'pi_new', status: 'requires_action', created: Math.floor(Date.now() / 1000), metadata: { type: 'auto_topup', org_id: 'org-1', bundle: 'credits_100' } };
 		mocks.paymentIntentsList.mockResolvedValueOnce({ data: [null, { ...pi, id: 'pi_bad', metadata: { ...pi.metadata, auto_topup_attempt_day: '2026-99-99' } }, pi], has_more: false });
 		mocks.paymentIntentsCancel.mockResolvedValueOnce({ ...pi, status: 'canceled' });
+		const log = vi.spyOn(console, 'error').mockImplementation(vi.fn());
+		onTestFinished(log.mockRestore);
 		await sweepAutoTopUp(5);
 		expect((await testDb().db.select().from(stripeAutoTopupRecoveries).get())?.resolvedAt).toEqual(expect.any(String));
 		expect(mocks.paymentIntentsCancel).toHaveBeenCalledTimes(1);
+		expect(log).toHaveBeenCalledWith('auto top-up recovery skipped malformed payment items', { skipped: 2 });
 	});
 
 	test('the reported two-refund sequence leaves cron unable to charge again', async () => {

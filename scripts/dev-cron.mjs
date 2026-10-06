@@ -34,7 +34,12 @@
 // ping. A tick that threw does NOT ping, so the monitor alerts on silence —
 // which also covers a failure an exit code cannot report: the task never ran.
 
+import { describeCronFailure, formatCronFailure, sanitizeCronFailure } from './lib/cron-diagnostics.mjs';
+
 const DEFAULT_INTERVAL_MS = 60_000;
+// Response status comes from fetch, but accept only numeric HTTP codes here.
+/** @type {Map<unknown, number>} */
+const RESPONSE_STATUSES = new Map(Array.from({ length: 500 }, /** @returns {[number, number]} */ (_, index) => [index + 100, index + 100]));
 
 // Channel-run failure categories only the channel owner can resolve:
 // 'credits' (buy a bundle / fix auto top-up) and 'token' (reconnect the
@@ -60,10 +65,48 @@ const SWEEP_ERROR_FIELDS = [
 	'feedbackPreviewSweepError'
 ];
 
-/** Renders a parsed payload or raw body for logs without letting response newlines forge log lines. */
-function renderTick(payload, rawText) {
-	const rendered = payload === null ? rawText.slice(0, 200) : JSON.stringify(payload);
-	return rendered.replaceAll(/[\r\n]+/g, ' ');
+/** Only allowlisted diagnostics cross back into scheduled task output. */
+function tickDiagnostics(payload) {
+	return Array.isArray(payload?.failureDiagnostics) ? payload.failureDiagnostics.slice(0, 20).map(sanitizeCronFailure) : [];
+}
+
+function failureDetail(payload, field) {
+	const diagnostic = tickDiagnostics(payload).find((item) => item.sweep === field);
+	return diagnostic ? formatCronFailure(diagnostic) : 'failure (no safe diagnostic)';
+}
+
+/** Bounded root-first output; legacy/raw body details are deliberately withheld.
+ * @param {unknown} payload @param {string[]} problems
+ * @param {'' | 'no safe diagnostic'} [fallback] Fixed text for a failed reply without detail.
+ */
+export function formatTickFailure(payload, problems, fallback = '') {
+	const diagnostics = tickDiagnostics(payload);
+	const details = diagnostics.map((item) => `${item.sweep}: ${formatCronFailure(item)}`);
+	details.push(...problems.filter((problem) => !diagnostics.some((item) => problem.startsWith(`${item.sweep}:`))));
+	let summary = details.map((detail) => detail.replace(/[\r\n\u2028\u2029]/g, ' ').slice(0, 500)).join('; ') || fallback;
+	const id = sanitizeCronFailure({ cronRunId: payload?.cronRunId }).cronRunId;
+	if (summary && id) summary = `run=${id}; ${summary}`;
+	return summary.length > 5500 ? `${summary.slice(0, 5480)}; details truncated` : summary;
+}
+
+/** Never log response bodies or result keys (which identify customers/channels). */
+export function renderTick(payload, resOk = true) {
+	const problems = evaluateTick(resOk, payload).problems;
+	const id = sanitizeCronFailure({ cronRunId: payload?.cronRunId }).cronRunId;
+	return JSON.stringify({ valid: validTickPayload(payload), ok: typeof payload?.ok === 'boolean' ? payload.ok : undefined,
+		cronRunId: id, problems: formatTickFailure(payload, problems) || undefined });
+}
+
+/** Distinguish an unanswered request from a failure reading an answered body.
+ * @param {unknown} cause @param {{status?: unknown}} [response]
+ */
+export function cronTransportError(cause, response) {
+	const label = response === undefined ? 'cron transport' : 'cron response body';
+	const stage = response === undefined ? 'unreachable' : 'response body read failed';
+	const status = RESPONSE_STATUSES.get(response?.status);
+	const statusSuffix = status ? ` (HTTP ${status})` : '';
+	const detail = formatCronFailure(describeCronFailure(cause, label));
+	return new Error(`cron endpoint ${stage}${statusSuffix}: ${detail}`);
 }
 
 /**
@@ -107,7 +150,7 @@ function detailProblems(payload) {
 	for (const field of SWEEP_ERROR_FIELDS) {
 		// Sweep error text interpolates into a thrown Error the driver logs —
 		// flatten CR/LF or a hostile body forges extra log lines (cubic).
-		if (payload[field]) problems.push(`${field}: ${String(payload[field]).replaceAll(/[\r\n]+/g, ' ').slice(0, 120)}`);
+		if (payload[field]) problems.push(`${field}: ${failureDetail(payload, field)}`);
 	}
 	if (payload.budgetExhausted) problems.push('sweeps consumed the run budget — no channel claimed');
 	if (payload.bookkeepingError) problems.push('run-health bookkeeping write failed');
@@ -118,7 +161,7 @@ function detailProblems(payload) {
 	for (const field of ['dryRunWindow', 'digest', 'feedbackPreview']) {
 		const outcome = payload[field];
 		if (outcome && typeof outcome === 'object' && typeof outcome.error === 'string') {
-			problems.push(`${field}: ${outcome.error.replaceAll(/[\r\n]+/g, ' ').slice(0, 120)}`);
+			problems.push(`${field}: ${failureDetail(payload, field)}`);
 		}
 	}
 	// Per-account zero-credit eval failures ride a `ok:true` payload by design
@@ -147,7 +190,7 @@ function channelRunProblems(payload) {
 	const problems = [];
 	for (const entry of channelResultEntries(payload)) {
 		if (typeof entry.error === 'string' && !USER_ACTIONABLE_CATEGORIES.has(entry.error)) {
-			problems.push(`channel run failed: ${entry.error.replaceAll(/[\r\n]+/g, ' ')}`);
+			problems.push(`channel run failed: ${['quota', 'scoring', 'timeout', 'error'].includes(entry.error) ? entry.error : 'error'}`);
 		}
 		// A channel run that ended partial on the tick deadline returns inside
 		// a 200 payload — without this check a moderation run that never
@@ -202,18 +245,22 @@ export async function tickOnce(fetchImpl = fetch) {
 	if (!secret) {
 		throw new Error('CRON_SECRET is not set. Run with: node --env-file=.env scripts/dev-cron.mjs');
 	}
-	const res = await fetchImpl(`${base}/api/cron`, {
-		headers: { Authorization: `Bearer ${secret}` },
-		signal: AbortSignal.timeout(30_000)
-	});
-	const rawText = await res.text();
+	let res;
+	let rawText;
+	try {
+		res = await fetchImpl(`${base}/api/cron`, {
+			headers: { Authorization: `Bearer ${secret}` },
+			signal: AbortSignal.timeout(30_000)
+		});
+		rawText = await res.text();
+	} catch (cause) { throw cronTransportError(cause, res); }
 	let payload = null;
 	try {
 		payload = JSON.parse(rawText);
 	} catch {
 		payload = null;
 	}
-	console.log(`[${new Date().toISOString()}] tick → ${renderTick(payload, rawText)}`);
+	console.log(`[${new Date().toISOString()}] tick → ${renderTick(payload, res.ok)}`.replace(/[\r\n\u2028\u2029]/g, ' '));
 	const { ownerActionableOnly, problems } = evaluateTick(res.ok, payload);
 	if (!res.ok) {
 		if (ownerActionableOnly && problems.length === 0) {
@@ -225,13 +272,13 @@ export async function tickOnce(fetchImpl = fetch) {
 			);
 			return payload;
 		}
-		throw new Error(`cron endpoint answered ${res.status}: ${renderTick(payload, rawText)}`);
+		throw new Error(`cron endpoint answered ${res.status}: ${formatTickFailure(payload, problems, 'no safe diagnostic')}`);
 	}
 	if (!validTickPayload(payload)) {
 		throw new Error('cron endpoint returned a non-JSON or invalid body');
 	}
 	if (problems.length) {
-		throw new Error(`cron tick reported failure(s): ${problems.join('; ')}`);
+		throw new Error(`cron tick reported failure(s): ${formatTickFailure(payload, problems)}`);
 	}
 	return payload;
 }
@@ -250,7 +297,7 @@ export async function pingHealthcheck(fetchImpl = fetch) {
 			console.error(`healthcheck ping answered ${res.status}`);
 		}
 	} catch (cause) {
-		console.error('healthcheck ping failed:', cause instanceof Error ? cause.message : String(cause));
+		console.error('healthcheck ping failed:', formatCronFailure(describeCronFailure(cause, 'healthcheck ping')));
 	}
 }
 
@@ -305,7 +352,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 			// dead-man's switch fires — that silence IS the alert.
 			await pingHealthcheck();
 		} catch (cause) {
-			console.error('cron tick failed:', cause);
+			console.error('cron tick failed:', cause instanceof Error ? cause.message : 'unknown failure');
 			return false;
 		}
 		return true;

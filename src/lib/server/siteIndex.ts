@@ -18,6 +18,9 @@ export const PUBLIC_PAGES = [
 	HATE_COMMENTS.path
 ] as const;
 
+// Runtime-rendered editorial pages need the configured origin, not a session or DB.
+export const PUBLIC_BLOG_ROUTE_IDS = ['/blogs', HATE_COMMENTS.path.slice(0, -1)];
+
 // Route ids that must never appear in a search index: the authenticated
 // (app) console, single-use flow pages, and every API endpoint. Keyed on
 // route.id (not the URL) so trailing-slash variants and param routes match.
@@ -35,7 +38,7 @@ export function isNoIndexRoute(routeId: string | null | undefined): boolean {
 // APP_URL is the canonical public origin (the Bunny domain in production).
 // Absolute sitemap/robots URLs come from it — not the request — so a
 // misconfigured deployment fails loudly instead of serving internal hosts.
-function appUrl(): string {
+export function siteOrigin(): string {
 	if (!env.APP_URL) throw error(500, 'APP_URL is not configured');
 	const parsed = URL.parse(env.APP_URL);
 	if (
@@ -63,13 +66,13 @@ export function robotsTxt(): string {
 		// hide the tag, letting bare URLs index anyway.
 		'Disallow: /api/',
 		'',
-		`Sitemap: ${new URL('/sitemap.xml', appUrl()).toString()}`,
+		`Sitemap: ${new URL('/sitemap.xml', siteOrigin()).toString()}`,
 		''
 	].join('\n');
 }
 
 export function sitemapXml(): string {
-	const base = appUrl();
+	const base = siteOrigin();
 	const urls = PUBLIC_PAGES.map((path) =>
 		['\t<url><loc>', new URL(path, base).toString(), '</loc></url>'].join('')
 	).join('\n');
@@ -83,7 +86,7 @@ export function sitemapXml(): string {
 }
 
 export function llmsTxt(): string {
-	const base = appUrl();
+	const base = siteOrigin();
 	const link = (path: string) => new URL(path, base).toString();
 	return [
 		'# Moderaty',

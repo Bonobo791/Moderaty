@@ -1,9 +1,11 @@
 <script lang="ts">
 	import BlogMeta from '$lib/components/blogs/BlogMeta.svelte';
 	import { COMMENT_SOURCES as sources, HATE_COMMENTS } from '$lib/blogs/hate-comments';
+	import type { PageData } from './$types';
+	let { data }: { data: PageData } = $props();
 </script>
 
-<BlogMeta {...HATE_COMMENTS} article />
+<BlogMeta {...HATE_COMMENTS} origin={data.siteOrigin} article />
 
 <nav class="breadcrumbs" aria-label="Breadcrumb">
 	<ol><li><a href="/">Home</a></li><li><a href="/blogs/">Blogs</a></li><li aria-current="page">Hate comments on YouTube</li></ol>

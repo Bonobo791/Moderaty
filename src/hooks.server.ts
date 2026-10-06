@@ -7,7 +7,7 @@ import { cookieSecure } from '$lib/server/oauthState';
 import { LOCALE_COOKIE, isBilingualPath, resolveLocale } from '$lib/i18n/locale';
 import { assertMigrationsCurrent } from '$lib/server/migrationGuard';
 import { getSessionUser, SESSION_COOKIE } from '$lib/server/session';
-import { isNoIndexRoute } from '$lib/server/siteIndex';
+import { isNoIndexRoute, PUBLIC_BLOG_ROUTE_IDS } from '$lib/server/siteIndex';
 
 // Resolves the session cookie into locals.user for every request. When the
 // session slid into its renewal window, the cookie is refreshed with the new
@@ -42,6 +42,9 @@ export const handle: Handle = async ({ event, resolve }) => {
 		if (isNoIndexRoute(event.route.id)) response.headers.set('X-Robots-Tag', 'noindex');
 		return response;
 	};
+	if (PUBLIC_BLOG_ROUTE_IDS.includes(event.route.id ?? '')) {
+		return respond(resolveLocalized());
+	}
 	// The health probe reports database health itself; public metadata and
 	// analytics configuration are independent of the schema and session.
 	// Bypassing the guard keeps them available during database outages.

@@ -1,15 +1,15 @@
 <script lang="ts">
 	import { jsonLd } from '$lib/landing/json-ld';
 
-	let { title, description, path, article = false }: {
+	let { title, description, path, origin, article = false }: {
 		title: string;
 		description: string;
 		path: string;
+		origin: string;
 		article?: boolean;
 	} = $props();
 
-	const origin = 'https://moderaty.com';
-	const image = new URL('/og.png', origin).href;
+	let image = $derived(new URL('/og.png', origin).href);
 	let canonical = $derived(new URL(path, origin).href);
 	let schema = $derived({
 		'@context': 'https://schema.org',

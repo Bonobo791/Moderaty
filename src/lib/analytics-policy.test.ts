@@ -5,17 +5,33 @@ const config = { umamiUrl: 'https://collector.example', websiteId: '11111111-222
 const page = (path: string) => new URL(path, 'https://moderaty.example');
 const payload = (url = '/', title = 'Home', referrer = '') => ({ website: config.websiteId, hostname: config.hostname, url, title, referrer });
 
-test.each([['/', 'Home'], ['/pricing', 'Pricing'], ['/privacy', 'Privacy'], ['/terms', 'Terms'], ['/dpa', 'DPA']])(
+test.each([
+	['/', 'Home'], ['/pricing', 'Pricing'], ['/privacy', 'Privacy'], ['/terms', 'Terms'], ['/dpa', 'DPA'],
+	['/blogs/', 'YouTube comment moderation blog'],
+	['/blogs/how-to-deal-with-hate-comments-on-youtube/', 'How to deal with hate comments on YouTube']
+])(
 	'builds only the fixed public payload for %s', (path, title) => {
 		expect(isAnalyticsPage(page(path))).toBe(true);
 		expect(buildPagePayload(page(path), '', config)).toEqual(payload(path, title));
 	}
 );
 
-test.each(['/login', '/consent', '/dashboard', '/contact', '/contact/verify', '/invite/secret', '/pricing/', '/blog', '/unknown'])(
+test.each(['/login', '/consent', '/dashboard', '/contact', '/contact/verify', '/invite/secret', '/pricing/', '/blog', '/unknown',
+	'/blogs', '/blogs/unreviewed/', '/blogs/how-to-deal-with-hate-comments-on-youtube'])(
 	'excludes %s', (path) => {
 		expect(isAnalyticsPage(page(path))).toBe(false);
 		expect(buildPagePayload(page(path), '', config)).toBeNull();
+	}
+);
+
+test.each(['/blogs/', '/blogs/how-to-deal-with-hate-comments-on-youtube/'])(
+	'public blog %s retains credential-query and private-referrer suppression', (path) => {
+		for (const query of ['token=secret', '%74OKEN=secret', 'email=secret', 'state=secret']) {
+			const url = page(`${path}?${query}`);
+			expect(isAnalyticsPage(url)).toBe(false);
+			expect(buildPagePayload(url, '', config)).toBeNull();
+		}
+		expect(buildPagePayload(page(path), 'https://moderaty.example/consent?state=secret', config)).toBeNull();
 	}
 );
 

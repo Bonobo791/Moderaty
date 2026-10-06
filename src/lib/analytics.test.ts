@@ -34,6 +34,25 @@ const navigate = (path: string) => { browser.location = new URL(path, 'https://m
 const expectedPayload = (url = '/', title = 'Home', extra = {}) => ({ website: config.websiteId, hostname: config.hostname, url, title, referrer: '', ...extra });
 const logs = () => vi.mocked(console.error).mock.calls.flat().join(' ');
 
+test.each([
+	['/blogs/', 'YouTube comment moderation blog'],
+	['/blogs/how-to-deal-with-hate-comments-on-youtube/', 'How to deal with hate comments on YouTube']
+])('a direct public blog landing at %s measures approved clicks and later public navigation', async (path, title) => {
+	navigate(`${path}?utm_source=youtube&discard=secret#section`);
+	const instance = client();
+	expect(await view(instance)).toBe('sent');
+	expect(await instance.click('pricing_click', 'footer')).toBe('sent');
+	navigate('/pricing');
+	expect(await view(instance)).toBe('sent');
+	const landing = `${path}?utm_source=youtube`;
+	expect(sent().map((request) => request.body?.payload)).toEqual([
+		expectedPayload(landing, title),
+		expectedPayload(landing, title, { name: 'pricing_click', data: { placement: 'footer' } }),
+		expectedPayload('/pricing', 'Pricing')
+	]);
+	expect(JSON.stringify(sent())).not.toContain('secret');
+});
+
 test.each([null, { ...config, hostname: 'fork.example' }, { ...config, hostname: 'www.moderaty.example' }])('disabled/copied configuration makes no collector request: %j', async (body) => {
 	configBody = body; expect(await view(client())).toBe('skipped'); expect(sent()).toEqual([]);
 	expect(document.createElement).not.toHaveBeenCalled(); expect(browser).not.toHaveProperty('dataLayer'); expect(failure).not.toHaveBeenCalled();

@@ -1,0 +1,72 @@
+{
+	"viewports": [
+		{
+			"width": 320,
+			"page_overflow": false,
+			"article_accessibility_violations": 0,
+			"browser_errors": [],
+			"index_accessibility_violations": 0
+		},
+		{
+			"width": 390,
+			"page_overflow": false,
+			"article_accessibility_violations": 0,
+			"browser_errors": [],
+			"index_accessibility_violations": 0
+		},
+		{
+			"width": 768,
+			"page_overflow": false,
+			"article_accessibility_violations": 0,
+			"browser_errors": [],
+			"index_accessibility_violations": 0
+		},
+		{
+			"width": 1152,
+			"page_overflow": false,
+			"article_accessibility_violations": 0,
+			"browser_errors": [],
+			"index_accessibility_violations": 0
+		},
+		{
+			"width": 1440,
+			"page_overflow": false,
+			"article_accessibility_violations": 0,
+			"browser_errors": [],
+			"index_accessibility_violations": 0
+		}
+	],
+	"source_text_match": true,
+	"routes": {
+		"/": 200,
+		"/pricing": 200,
+		"/blogs/": 200,
+		"/blogs/how-to-deal-with-hate-comments-on-youtube/": 200,
+		"/robots.txt": 200,
+		"/sitemap.xml": 200,
+		"/llms.txt": 200,
+		"/blog/": 404,
+		"/guides/youtube-hate-comments/": 404
+	},
+	"index_accessibility_violations": 0,
+	"check": {
+		"command": "npm run check",
+		"errors": 0,
+		"warnings": 0
+	},
+	"build": {
+		"command": "MODERATY_ADAPTER=node npm run build",
+		"exit_code": 0
+	},
+	"tests": {
+		"command": "npm run test",
+		"files_passed": 200,
+		"tests_passed": 3965
+	},
+	"independent_review": {
+		"findings": "No actionable defects",
+		"followup": "Local table typography override reviewed; no regression concerns."
+	},
+	"accessibility_scope": "Article and index main content; axe-core 4.10.3 WCAG A/AA checks, keyboard scroll, focus, heading/table semantics. Existing global navigation and footer were exercised for links and layout; no claim of a site-wide accessibility audit.",
+	"browser": "Local adapter-node build in Chromium; only a disposable synthetic database was used."
+}

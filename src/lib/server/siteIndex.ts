@@ -1,5 +1,6 @@
 import { error } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
+import { HATE_COMMENTS } from '$lib/blogs/hate-comments';
 
 // The crawlable surface: marketing, legal, and the two public utility
 // pages. Everything else — the (app) console, OAuth/consent/invite/verify
@@ -12,8 +13,13 @@ export const PUBLIC_PAGES = [
 	'/login',
 	'/privacy',
 	'/terms',
-	'/dpa'
+	'/dpa',
+	'/blogs/',
+	HATE_COMMENTS.path
 ] as const;
+
+// Runtime-rendered editorial pages need the configured origin, not a session or DB.
+export const PUBLIC_BLOG_ROUTE_IDS = ['/blogs', HATE_COMMENTS.path.slice(0, -1)];
 
 // Route ids that must never appear in a search index: the authenticated
 // (app) console, single-use flow pages, and every API endpoint. Keyed on
@@ -29,10 +35,11 @@ export function isNoIndexRoute(routeId: string | null | undefined): boolean {
 	return NOINDEX_ROUTES.includes(routeId) || NOINDEX_PREFIXES.some((prefix) => routeId.startsWith(prefix));
 }
 
-// APP_URL is the canonical public origin (the Bunny domain in production).
-// Absolute sitemap/robots URLs come from it — not the request — so a
-// misconfigured deployment fails loudly instead of serving internal hosts.
-function appUrl(): string {
+/**
+ * Return the canonical public APP_URL origin, independent of the request host.
+ * Missing or malformed configuration fails with HTTP 500 without exposing its value.
+ */
+export function siteOrigin(): string {
 	if (!env.APP_URL) throw error(500, 'APP_URL is not configured');
 	const parsed = URL.parse(env.APP_URL);
 	if (
@@ -51,6 +58,7 @@ function appUrl(): string {
 	return parsed.origin;
 }
 
+/** Keep internal pages crawlable for noindex headers and link the configured sitemap. */
 export function robotsTxt(): string {
 	return [
 		'User-agent: *',
@@ -60,13 +68,14 @@ export function robotsTxt(): string {
 		// hide the tag, letting bare URLs index anyway.
 		'Disallow: /api/',
 		'',
-		`Sitemap: ${new URL('/sitemap.xml', appUrl()).toString()}`,
+		`Sitemap: ${new URL('/sitemap.xml', siteOrigin()).toString()}`,
 		''
 	].join('\n');
 }
 
+/** List only reviewed public routes as absolute URLs under the configured origin. */
 export function sitemapXml(): string {
-	const base = appUrl();
+	const base = siteOrigin();
 	const urls = PUBLIC_PAGES.map((path) =>
 		['\t<url><loc>', new URL(path, base).toString(), '</loc></url>'].join('')
 	).join('\n');
@@ -79,8 +88,9 @@ export function sitemapXml(): string {
 	].join('\n');
 }
 
+/** Build the product, blog, and legal discovery links under the configured origin. */
 export function llmsTxt(): string {
-	const base = appUrl();
+	const base = siteOrigin();
 	const link = (path: string) => new URL(path, base).toString();
 	return [
 		'# Moderaty',
@@ -97,6 +107,8 @@ export function llmsTxt(): string {
 		`- [Pricing](${link('/pricing')}) — plans and usage-based billing`,
 		`- [Contact](${link('/contact')}) — support and inquiries`,
 		`- [Sign in](${link('/login')}) — Google sign-in`,
+		`- [Blogs](${link('/blogs/')}) — YouTube comment moderation advice`,
+		`- [${HATE_COMMENTS.title}](${link(HATE_COMMENTS.path)}) — choosing a response to hurtful comments`,
 		'',
 		'## Legal',
 		'',

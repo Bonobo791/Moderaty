@@ -18,7 +18,7 @@ import { db } from '$lib/server/db';
 import { CronDiagnostics, describeCronFailure, formatCronFailure, withDiagnosticOperation } from '../../../../scripts/lib/cron-diagnostics.mjs';
 import { activeAllowanceSql, applyLedgerDelta, pauseForObservedStripeRefund, drainPendingReversals, effectiveBalanceSql, isUnmeteredPlan, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
 import { creditTransactions, organizations } from '$lib/server/db/schema';
-import { autoTopupBundle, bundleById, configuredAutoTopupBundles, priceIdFor } from '$lib/server/stripe/bundles';
+import { type CreditBundle, autoTopupBundle, bundleById, configuredAutoTopupBundles, priceIdFor } from '$lib/server/stripe/bundles';
 import { getStripe } from '$lib/server/stripe/client';
 import { refundUngrantablePayment } from '$lib/server/stripe/refunds';
 import { findPausedTopup, recoverPausedTopup, sweepPausedTopups, topupAttemptCorrelation } from './autoTopupRecovery';
@@ -256,6 +256,33 @@ async function handleAndReportTopupFailure(orgId: string, attemptAt: string, err
 	}
 }
 
+/** The enabled in-flight claim must still belong to this attempt before submission. */
+function hasCurrentTopupClaim(org: AutoTopupState, attemptAt: string): boolean {
+	return org.enabled === 1 && org.state === 'in_flight' && org.lastAttemptAt === attemptAt;
+}
+
+/** Resolve and validate pricing before any claim can be taken. */
+async function resolveTopupPricing(orgId: string, choice: string | null): Promise<{ bundle: CreditBundle; amount: number } | undefined> {
+	const bundle = autoTopupBundle(choice);
+	if (!bundle) {
+		console.error(`auto top-up paused for org ${orgId}: ${choice === null ? 'no bundle chosen' : 'stored bundle is not a configured option'}`);
+		return;
+	}
+	const price = await getStripe().prices.retrieve(priceIdFor(bundle));
+	if (!price.active || price.currency !== 'usd' || price.type !== 'one_time') {
+		console.error(
+			`auto top-up skipped for org ${orgId}: bundle ${bundle.id} price ${price.id} is not an active one-time USD price (active=${price.active}, currency=${price.currency}, type=${price.type})`
+		);
+		return;
+	}
+	const amount = price.unit_amount ?? 0;
+	if (!amount) {
+		console.error(`auto top-up skipped for org ${orgId}: bundle ${bundle.id} price has no unit_amount`);
+		return;
+	}
+	return { bundle, amount };
+}
+
 export async function maybeTriggerAutoTopUp(orgId: string, diagnostics?: CronDiagnostics): Promise<boolean> {
 	const org = await readAutoTopupState(orgId);
 	if (!basicEligibility(org)) return false;
@@ -278,27 +305,13 @@ export async function maybeTriggerAutoTopUp(orgId: string, diagnostics?: CronDia
 	// (missing env config, Stripe network/API error) must never leave the org
 	// wedged in in_flight. The claim is taken only once a charge is about to be
 	// attempted, so a failure here leaves the org idle for the next sweep.
-	const bundle = autoTopupBundle(org.bundle);
-	if (!bundle) {
-		console.error(`auto top-up paused for org ${orgId}: ${org.bundle === null ? 'no bundle chosen' : 'stored bundle is not a configured option'}`);
-		return false;
-	}
-	const price = await getStripe().prices.retrieve(priceIdFor(bundle));
 	// Validate the configured Price BEFORE claiming: manual Checkout rejects
 	// archived prices at session creation, but the auto-charge path copies
 	// unit_amount and charges USD unconditionally — an archived, non-USD, or
 	// recurring Price must never fund a differently denominated charge.
-	if (!price.active || price.currency !== 'usd' || price.type !== 'one_time') {
-		console.error(
-			`auto top-up skipped for org ${orgId}: bundle ${bundle.id} price ${price.id} is not an active one-time USD price (active=${price.active}, currency=${price.currency}, type=${price.type})`
-		);
-		return false;
-	}
-	const amount = price.unit_amount ?? 0;
-	if (!amount) {
-		console.error(`auto top-up skipped for org ${orgId}: bundle ${bundle.id} price has no unit_amount`);
-		return false;
-	}
+	const pricing = await resolveTopupPricing(orgId, org.bundle);
+	if (!pricing) return false;
+	const { bundle, amount } = pricing;
 
 	// Atomic claim: exactly one concurrent caller wins the transition. The
 	// claim RE-CHECKS eligibility (enabled flag, balance below threshold,
@@ -369,7 +382,7 @@ export async function maybeTriggerAutoTopUp(orgId: string, diagnostics?: CronDia
 	let paymentCreated = false;
 	try {
 		const current = await readAutoTopupState(orgId);
-		if (current.enabled !== 1 || current.state !== 'in_flight' || current.lastAttemptAt !== attemptAt) {
+		if (!hasCurrentTopupClaim(current, attemptAt)) {
 			await db.update(organizations).set({ autoTopupState: 'idle' }).where(and(eq(organizations.id, orgId), eq(organizations.autoTopupState, 'in_flight'), eq(organizations.autoTopupAttemptAt, attemptAt)));
 			return false;
 		}

@@ -75,12 +75,47 @@ const APPROVED_POLICY = 'Automatic top-up is opt-in';
 const REFUND_ANCHOR = /CDC Art\. 49/;
 // Credit consumption and purchased-balance copy describe the verified ledger,
 // not a refund promise. Refund/cancellation promises still need the legal anchor.
-const REFUND_CLAIM = /refund|cancel|credits? (?:back|returned)/i;
+const REFUND_CLAIM = /refund|cancel|money[\s-]+back|reimburs|credits?\s+(?:back|(?:are\s+)?returned)/i;
 
 /** Never supported, anchored or not: expiry, rollover, trials, discounts, fees. */
 const UNSUPPORTED_CLAIM = /expir|rollover|roll over|trial|discount|\bfees?\b/i;
 
+function assertSupportedPricingClaim(line: string) {
+	expect(line).not.toMatch(UNSUPPORTED_CLAIM);
+	if (REFUND_CLAIM.test(line)) {
+		expect(line).toMatch(REFUND_ANCHOR);
+	}
+}
+
+const REFUND_PROMISES = [
+	'Get your money back within 7 days.',
+	'A money-back guarantee applies.',
+	'Get a reimbursement within 7 days.',
+	'We reimburse payments within 7 days.',
+	'Get a refund within 7 days.',
+	'You can cancel within 7 days.',
+	'Get your credits back within 7 days.',
+	'Your credits are returned within 7 days.'
+];
+
 describe('pricing copy guardrails', () => {
+	it.each(REFUND_PROMISES)('rejects an unanchored refund promise: %s', (line) => {
+		expect(() => assertSupportedPricingClaim(line)).toThrow();
+	});
+
+	it.each(REFUND_PROMISES)('accepts a legally anchored refund promise: %s', (line) => {
+		expect(() => assertSupportedPricingClaim(`${line} CDC Art. 49.`)).not.toThrow();
+	});
+
+	it.each([
+		'One credit is used for each moderation score.',
+		'Feedback digest classifications also use credits.',
+		'400 purchased credits left.',
+		'Top-up purchase: 500 credits ($20.40).'
+	])('accepts credit accounting without a refund anchor: %s', (line) => {
+		expect(() => assertSupportedPricingClaim(line)).not.toThrow();
+	});
+
 	it('discloses zero-usage recurrence and separate moderation and digest classifications', () => {
 		const subscription = PRICING_FAQ_ENTRIES.find(({ q }) => q === 'Is there a subscription?')?.a;
 		expect(subscription).toMatch(/even (?:with|when).*no (?:comments|AI classifications)/i);
@@ -120,12 +155,7 @@ describe('pricing copy guardrails', () => {
 		// the approved policy is present, verbatim
 		expect(PRICING_COPY.join(' ')).toContain(APPROVED_POLICY);
 		for (const line of CLAIM_LINES) {
-			// never supported, anchored or not
-			expect(line).not.toMatch(UNSUPPORTED_CLAIM);
-			// refund claims only with the ToS §7 legal anchor on the same line
-			if (REFUND_CLAIM.test(line)) {
-				expect(line).toMatch(REFUND_ANCHOR);
-			}
+			assertSupportedPricingClaim(line);
 		}
 	});
 });

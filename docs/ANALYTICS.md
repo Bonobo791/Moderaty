@@ -110,8 +110,11 @@ nonempty printable ASCII cache string of at most 4096 characters, retained only 
 passed as `x-umami-cache`. SessionId, visitId and other response fields are ignored.
 The Umami 3.0.3 bot response `{ beep: 'boop' }` is an intentional skip.
 Cache is discarded on stop, opt-out and configuration changes. Late responses
-cannot restore a discarded cache. Failed/malformed responses show a generic
+cannot replace a cache already accepted from a later send or restore discarded
+state. Failed/malformed responses show a generic
 measurement status on eligible public pages and log generic browser errors.
+Rejected configuration refreshes discard prior settings and cache; collection
+cannot resume until a later configuration read succeeds.
 There is no automatic retry: an event might have been saved before delivery failed.
 
 Payload-free, credential-free and referrer-free POST diagnostics use the same

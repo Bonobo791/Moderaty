@@ -92,11 +92,56 @@ test.each(['http', 'network', 'json'])('configuration %s failures remain generic
 	}));
 	await expect(view(client())).rejects.toThrow('Optional usage measurement is unavailable.'); expect(failure).toHaveBeenCalled(); expect(logs()).not.toContain('private');
 });
+test.each(['http', 'network', 'json'])('a %s configuration refresh failure discards old settings and cache before later clicks', async (mode) => {
+	const instance = client(); await view(instance); const original = fetch;
+	vi.stubGlobal('fetch', vi.fn(async (url: string, options: RequestInit) => {
+		if (!url.includes('/api/analytics') || options.method === 'POST') return original(url, options);
+		if (mode === 'network') throw new Error('private runtime details');
+		return mode === 'http' ? new Response(null, { status: 503 }) : Response.json({ ...config, websiteId: 'invalid' });
+	}));
+	navigate('/pricing'); await expect(view(instance)).rejects.toThrow('Optional usage measurement is unavailable.');
+	expect(await instance.click('source_click', 'nav')).toBe('skipped'); expect(sent()).toHaveLength(1);
+	vi.stubGlobal('fetch', original); navigate('/privacy'); expect(await view(instance)).toBe('sent');
+	expect(sent().at(-1)?.options.headers).toEqual({ 'content-type': 'application/json' });
+});
+test('a copied-host configuration refresh cannot retain old settings for later clicks', async () => {
+	const instance = client(); await view(instance);
+	configBody = { ...config, hostname: 'fork.example' }; navigate('/pricing');
+	expect(await view(instance)).toBe('skipped'); expect(await instance.click('source_click', 'nav')).toBe('skipped');
+	expect(sent()).toHaveLength(1);
+	configBody = config; navigate('/privacy'); expect(await view(instance)).toBe('sent');
+	expect(sent().at(-1)?.options.headers).toEqual({ 'content-type': 'application/json' });
+});
 test('uses only bounded in-memory cache and clears it when runtime configuration changes', async () => {
 	const instance = client(); await view(instance); navigate('/pricing'); await view(instance);
 	expect(sent()[1].options.headers).toEqual({ 'content-type': 'application/json', 'x-umami-cache': 'memory-token' });
 	configBody = { ...config, websiteId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' }; navigate('/privacy'); await view(instance);
 	expect(sent()[2].options.headers).toEqual({ 'content-type': 'application/json' }); expect((sent()[2].body?.payload as { website: string }).website).toBe('aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee');
+});
+test('an older concurrent response cannot replace the cache accepted from a later send', async () => {
+	const instance = client(); await view(instance);
+	let finishOld!: (response: Response) => void; let finishNew!: (response: Response) => void;
+	collector = () => new Promise((resolve) => { finishOld = resolve; });
+	const older = instance.click('source_click', 'nav');
+	collector = () => new Promise((resolve) => { finishNew = resolve; });
+	const newer = instance.click('source_click', 'nav');
+	finishNew(Response.json({ cache: 'newer-token' })); expect(await newer).toBe('sent');
+	finishOld(Response.json({ cache: 'older-token' })); expect(await older).toBe('sent');
+	collector = async () => Response.json({ cache: 'next-token' }); await instance.click('source_click', 'nav');
+	expect(sent().at(-1)?.options.headers).toEqual({ 'content-type': 'application/json', 'x-umami-cache': 'newer-token' });
+});
+test.each(['failed', 'bot'])('a later %s send cannot prevent an earlier valid cache response being accepted', async (mode) => {
+	const instance = client(); await view(instance);
+	let finish!: (response: Response) => void;
+	collector = () => new Promise((resolve) => { finish = resolve; });
+	const older = instance.click('source_click', 'nav');
+	collector = async () => mode === 'bot' ? Response.json({ beep: 'boop' }) : new Response(null, { status: 500 });
+	const newer = instance.click('source_click', 'nav');
+	if (mode === 'bot') expect(await newer).toBe('skipped');
+	else await expect(newer).rejects.toThrow('Optional usage measurement is unavailable.');
+	finish(Response.json({ cache: 'valid-token' })); expect(await older).toBe('sent');
+	collector = async () => Response.json({ cache: 'next-token' }); await instance.click('source_click', 'nav');
+	expect(sent().at(-1)?.options.headers).toEqual({ 'content-type': 'application/json', 'x-umami-cache': 'valid-token' });
 });
 test('bot suppression is a deliberate skip', async () => {
 	collector = async () => Response.json({ beep: 'boop' }); expect(await view(client())).toBe('skipped'); expect(failure).not.toHaveBeenCalled();
@@ -255,7 +300,7 @@ test('a late old-configuration response cannot replace the new-configuration cac
 	finish(Response.json({ cache: 'old-config-token' })); await click; navigate('/privacy'); await view(instance);
 	expect(sent().at(-1)?.options.headers).toEqual({ 'content-type': 'application/json', 'x-umami-cache': 'new-config-token' });
 });
-test.each([['click', 0], ['auxclick', 1]])('nested %s activation uses only the approved marker pair', (type, button) => {
+function markedClick(type: string, button: number) {
 	class Marker {
 		closest(selector: string) { expect(selector).toBe('a[data-moderaty-event][data-moderaty-placement]'); return this; }
 		getAttribute(name: string) { return name === 'data-moderaty-event' ? 'connect_click' : 'hero'; }
@@ -263,10 +308,13 @@ test.each([['click', 0], ['auxclick', 1]])('nested %s activation uses only the a
 		get href() { throw new Error('Destination must not be read'); }
 	}
 	vi.stubGlobal('Element', Marker);
-	const event = { type, button, target: new Marker(), ctrlKey: true, metaKey: true, detail: 0, preventDefault: vi.fn(), stopPropagation: vi.fn() };
+	return { type, button, target: new Marker(), ctrlKey: true, metaKey: true, detail: 0, preventDefault: vi.fn(), stopPropagation: vi.fn() };
+}
+test.each([['click', 0], ['auxclick', 1]])('nested %s activation uses only the approved marker pair', (type, button) => {
+	const event = markedClick(type, button);
 	expect(readMarketingClick(event as unknown as MouseEvent)).toEqual({ name: 'connect_click', placement: 'hero' });
 	expect(event.preventDefault).not.toHaveBeenCalled(); expect(event.stopPropagation).not.toHaveBeenCalled();
 });
 test.each([['click', 1], ['auxclick', 0], ['auxclick', 2], ['contextmenu', 2]])('ignores %s button %s', (type, button) => {
-	expect(readMarketingClick({ type, button, target: null } as unknown as MouseEvent)).toBeNull();
+	expect(readMarketingClick(markedClick(type, button) as unknown as MouseEvent)).toBeNull();
 });

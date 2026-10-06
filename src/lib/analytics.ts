@@ -37,6 +37,8 @@ export function createAnalyticsClient(options: { onFailure: () => void }): Analy
 	let generation = 0;
 	let config: AnalyticsConfig | null = null;
 	let cache: string | undefined;
+	let sendSequence = 0;
+	let cacheSequence = 0;
 	let lastUrl: string | undefined;
 	let reported = false;
 	let hasPageview = false;
@@ -120,6 +122,7 @@ export function createAnalyticsClient(options: { onFailure: () => void }): Analy
 	async function send(payload: PagePayload & { name?: MarketingEvent; data?: { placement: MarketingPlacement } }, signal?: AbortSignal): Promise<'sent' | 'skipped'> {
 		if (!config) return 'skipped';
 		const started = generation;
+		const sequence = ++sendSequence;
 		const url = new URL('/api/send', config.umamiUrl).href;
 		const body = JSON.stringify({ type: 'event', payload });
 		try {
@@ -133,7 +136,9 @@ export function createAnalyticsClient(options: { onFailure: () => void }): Analy
 			const fields = result as Record<string, unknown>;
 			if (fields.beep === 'boop' && fields.cache === undefined) return 'skipped';
 			if (typeof fields.cache !== 'string' || !fields.cache.length || fields.cache.length > 4096 || !/^[\x21-\x7e]+$/.test(fields.cache)) throw new Error(failureMessage);
-			if (!stopped && generation === started) cache = fields.cache;
+			if (!stopped && generation === started && sequence > cacheSequence) {
+				cache = fields.cache; cacheSequence = sequence;
+			}
 			return 'sent';
 		} catch {
 			if (signal?.aborted) return 'skipped';
@@ -163,7 +168,7 @@ export function createAnalyticsClient(options: { onFailure: () => void }): Analy
 				const next = await readConfiguration(signal);
 				// Both browser hostname and current safe URL are checked after the await.
 				if (signal?.aborted || currentPage()?.url !== page.url) return 'skipped';
-				if (next && next.hostname !== window.location.hostname) return 'skipped';
+				if (next && next.hostname !== window.location.hostname) { useConfiguration(null); discardClicks(); return 'skipped'; }
 				useConfiguration(next);
 				if (!next) { discardClicks(); return 'skipped'; }
 				const payload = buildPagePayload(new URL(window.location.href), document.referrer, next);
@@ -172,7 +177,7 @@ export function createAnalyticsClient(options: { onFailure: () => void }): Analy
 				hasPageview = true; flushClicks(); return result;
 			} catch {
 				if (stopped || signal?.aborted) return 'skipped';
-				discardClicks();
+				useConfiguration(null); discardClicks();
 				return fail();
 			}
 		},

@@ -1,5 +1,6 @@
 import { error } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
+import { HATE_COMMENTS } from '$lib/blogs/hate-comments';
 
 // The crawlable surface: marketing, legal, and the two public utility
 // pages. Everything else — the (app) console, OAuth/consent/invite/verify
@@ -12,7 +13,9 @@ export const PUBLIC_PAGES = [
 	'/login',
 	'/privacy',
 	'/terms',
-	'/dpa'
+	'/dpa',
+	'/blogs/',
+	HATE_COMMENTS.path
 ] as const;
 
 // Route ids that must never appear in a search index: the authenticated
@@ -97,6 +100,8 @@ export function llmsTxt(): string {
 		`- [Pricing](${link('/pricing')}) — plans and usage-based billing`,
 		`- [Contact](${link('/contact')}) — support and inquiries`,
 		`- [Sign in](${link('/login')}) — Google sign-in`,
+		`- [Blogs](${link('/blogs/')}) — YouTube comment moderation advice`,
+		`- [${HATE_COMMENTS.title}](${link(HATE_COMMENTS.path)}) — choosing a response to hurtful comments`,
 		'',
 		'## Legal',
 		'',

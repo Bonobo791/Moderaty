@@ -45,6 +45,7 @@
 				<a href={POLYFORM_URL} target="_blank" rel="noreferrer" class="footer-link">PolyForm Shield License</a>
 				<a href="/pricing" data-moderaty-event="pricing_click" data-moderaty-placement="footer" class="footer-link">Pricing</a>
 				<a href="/#faq" class="footer-link">FAQ</a>
+				<a href="/blogs/" class="footer-link">Blogs</a>
 				{#each LEGAL_DOCS as doc (doc.slug)}
 					<a href="/{doc.slug}" class="footer-link">{doc.label}</a>
 				{/each}

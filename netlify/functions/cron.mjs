@@ -52,7 +52,7 @@ export default async function cron() {
 			console.warn(`cron endpoint answered ${res.status} with only channel-owner failure(s) — suppressing`);
 			return;
 		}
-		throw new Error(`cron endpoint failed: ${res.status} ${formatTickFailure(payload, problems) || 'no safe diagnostic'}`);
+		throw new Error(`cron endpoint failed: ${res.status} ${formatTickFailure(payload, problems, 'no safe diagnostic')}`);
 	}
 	// A 200 answering a scalar/array/foreign object is not the cron payload —
 	// classifying it healthy would hide a proxy or scheduler failure (cubic).

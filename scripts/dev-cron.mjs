@@ -75,12 +75,15 @@ function failureDetail(payload, field) {
 	return diagnostic ? formatCronFailure(diagnostic) : 'failure (no safe diagnostic)';
 }
 
-/** Bounded root-first output; legacy/raw body details are deliberately withheld. */
-export function formatTickFailure(payload, problems) {
+/** Bounded root-first output; legacy/raw body details are deliberately withheld.
+ * @param {unknown} payload @param {string[]} problems
+ * @param {'' | 'no safe diagnostic'} [fallback] Fixed text for a failed reply without detail.
+ */
+export function formatTickFailure(payload, problems, fallback = '') {
 	const diagnostics = tickDiagnostics(payload);
 	const details = diagnostics.map((item) => `${item.sweep}: ${formatCronFailure(item)}`);
 	details.push(...problems.filter((problem) => !diagnostics.some((item) => problem.startsWith(`${item.sweep}:`))));
-	let summary = details.map((detail) => detail.replace(/[\r\n\u2028\u2029]/g, ' ').slice(0, 500)).join('; ');
+	let summary = details.map((detail) => detail.replace(/[\r\n\u2028\u2029]/g, ' ').slice(0, 500)).join('; ') || fallback;
 	const id = sanitizeCronFailure({ cronRunId: payload?.cronRunId }).cronRunId;
 	if (summary && id) summary = `run=${id}; ${summary}`;
 	return summary.length > 5500 ? `${summary.slice(0, 5480)}; details truncated` : summary;
@@ -101,7 +104,9 @@ export function cronTransportError(cause, response) {
 	const label = response === undefined ? 'cron transport' : 'cron response body';
 	const stage = response === undefined ? 'unreachable' : 'response body read failed';
 	const status = RESPONSE_STATUSES.get(response?.status);
-	return new Error(`cron endpoint ${stage}${status ? ` (HTTP ${status})` : ''}: ${formatCronFailure(describeCronFailure(cause, label))}`);
+	const statusSuffix = status ? ` (HTTP ${status})` : '';
+	const detail = formatCronFailure(describeCronFailure(cause, label));
+	return new Error(`cron endpoint ${stage}${statusSuffix}: ${detail}`);
 }
 
 /**
@@ -267,7 +272,7 @@ export async function tickOnce(fetchImpl = fetch) {
 			);
 			return payload;
 		}
-		throw new Error(`cron endpoint answered ${res.status}: ${formatTickFailure(payload, problems) || 'no safe diagnostic'}`);
+		throw new Error(`cron endpoint answered ${res.status}: ${formatTickFailure(payload, problems, 'no safe diagnostic')}`);
 	}
 	if (!validTickPayload(payload)) {
 		throw new Error('cron endpoint returned a non-JSON or invalid body');

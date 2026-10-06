@@ -87,11 +87,12 @@ describe('dev cron tick', () => {
 
 	it.each([
 		{ ok: true, budgetExhausted: true, results: {} },
-		{ ok: true, results: { 'private-customer': { partial: true, stoppedReason: 'deadline' } } }
+		{ ok: true, results: { 'private-customer': { partial: true, stoppedReason: 'deadline' } } },
+		{ ok: false, results: {} }
 	])('correlates failures without individual diagnostics in both schedulers: %j', async (failure) => {
 		const cronRunId = '11111111-1111-4111-8111-111111111111';
 		const payload = { ...failure, cronRunId };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, failure.ok ? 200 : 500)));
 		const { default: netlifyCron } = await import('../netlify/functions/cron.mjs');
 		for (const run of [tickOnce, netlifyCron]) {
 			const error = await run().catch((cause) => cause);
@@ -305,12 +306,20 @@ describe('dev cron tick', () => {
 		{ label: 'per-account zero-credit errors on an otherwise healthy tick', status: 200, expected: 'zeroCreditItemErrors',
 			payload: { ok: true, zeroCreditItemErrors: 2, results: {} } },
 		{ label: 'per-account zero-credit errors alongside owner error', status: 500, expected: 'zeroCreditItemErrors',
-			payload: { ok: false, zeroCreditItemErrors: 1, results: { UC1: { error: 'credits' } } } }
+			payload: { ok: false, zeroCreditItemErrors: 1, results: { UC1: { error: 'credits' } } } },
+		{ label: 'preview cleanup failure alongside token error', status: 500, expected: 'feedbackPreviewSweepError',
+			payload: { ok: false, feedbackPreviewSweepError: true, results: { UC1: { error: 'token' } } } },
+		{ label: 'preview cleanup failure alongside credits error', status: 500, expected: 'feedbackPreviewSweepError',
+			payload: { ok: false, feedbackPreviewSweepError: true, results: { UC1: { error: 'credits' } } } },
+		{ label: 'Stripe scrub failure alongside token error', status: 500, expected: 'stripeScrubSweepError',
+			payload: { ok: false, results: { UC1: { error: 'token' } }, stripeScrubSweepError: 'scrub failed' } },
+		{ label: 'Stripe scrub failure alongside credits error', status: 500, expected: 'stripeScrubSweepError',
+			payload: { ok: false, results: { UC1: { error: 'credits' } }, stripeScrubSweepError: 'scrub failed' } }
 	])('fails on $label', async ({ payload, status, expected }) => {
 		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, status)));
-		await expect(tickOnce()).rejects.toThrow(expected);
+		const { default: netlifyCron } = await import('../netlify/functions/cron.mjs');
+		for (const run of [tickOnce, netlifyCron]) await expect(run()).rejects.toThrow(expected);
 	});
-
 
 	it('an out-of-credits channel result on a 200 is a healthy tick', async () => {
 		const payload = { ok: true, results: { UC1: { fetched: 2, outOfCredits: true } } };
@@ -319,32 +328,11 @@ describe('dev cron tick', () => {
 		await expect(tickOnce()).resolves.toEqual(payload);
 	});
 
-
 	it('does not fail the tick for a channel paused mid-run — deactivation is owner-actionable', async () => {
 		const payload = { ok: true, results: { UC1: { partial: true, stoppedReason: 'deactivated' } } };
 		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
 
 		await expect(tickOnce()).resolves.toEqual(payload);
-	});
-
-
-
-
-	it.each(['token', 'credits'])('does not suppress a stale-preview cleanup failure behind %s errors', async (category) => {
-		const payload = { ok: false, feedbackPreviewSweepError: true, results: { UC1: { error: category } } };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, 500)));
-
-		await expect(tickOnce()).rejects.toThrow('feedbackPreviewSweepError');
-	});
-
-
-	it.each(['token', 'credits'])('does not suppress Stripe scrub failures behind %s errors in either scheduler', async (category) => {
-		const payload = { ok: false, results: { UC1: { error: category } }, stripeScrubSweepError: 'scrub failed' };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, 500)));
-		const { default: netlifyCron } = await import('../netlify/functions/cron.mjs');
-
-		await expect(tickOnce()).rejects.toThrow('stripeScrubSweepError');
-		await expect(netlifyCron()).rejects.toThrow('stripeScrubSweepError');
 	});
 
 	it.each(['dryRunWindow', 'digest', 'feedbackPreview'])('fails the tick when the %s job reports an error on a 200', async (field) => {
@@ -357,19 +345,12 @@ describe('dev cron tick', () => {
 		await expect(tickOnce()).rejects.toThrow(field);
 	});
 
-
 	it('treats successful aux-job results as healthy', async () => {
 		const payload = { ok: true, results: { UC1: { fetched: 3 } }, dryRunWindow: { fetched: 5, windowComplete: true }, digest: { generated: true } };
 		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
 
 		await expect(tickOnce()).resolves.toEqual(payload);
 	});
-
-
-
-
-
-
 
 });
 
@@ -461,7 +442,6 @@ describe('healthcheck ping', () => {
 		expect(console.error.mock.calls.flat().join(' ')).not.toContain('dns failure');
 	});
 });
-
 
 describe('contact delivery health', () => {
 	it.each([{ contactNotificationErrors: 1 }, { contactNotificationSweepError: 'database unavailable' }])('alerts operators on contact failures even alongside an owner-actionable channel failure (%j)', async (contactFailure) => {

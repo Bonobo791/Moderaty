@@ -15,7 +15,7 @@
 import { and, asc, count, eq, gte, inArray, isNotNull, isNull, ne, not, or, sql } from 'drizzle-orm';
 
 import { db } from '$lib/server/db';
-import { CronDiagnostics, withDiagnosticOperation } from '../../../../scripts/lib/cron-diagnostics.mjs';
+import { CronDiagnostics, describeCronFailure, formatCronFailure, withDiagnosticOperation } from '../../../../scripts/lib/cron-diagnostics.mjs';
 import { activeAllowanceSql, applyLedgerDelta, pauseForObservedStripeRefund, drainPendingReversals, effectiveBalanceSql, isUnmeteredPlan, UNMETERED_CREDIT_GRANT_ERROR } from '$lib/server/billing/ledger';
 import { creditTransactions, organizations } from '$lib/server/db/schema';
 import { autoTopupBundle, bundleById, configuredAutoTopupBundles, priceIdFor } from '$lib/server/stripe/bundles';
@@ -246,7 +246,17 @@ async function handleTopupFailure(orgId: string, attemptAt: string, error: unkno
 	}
 }
 
-export async function maybeTriggerAutoTopUp(orgId: string, diagnostics = new CronDiagnostics()): Promise<boolean> {
+/** Preserve failure-state handling and report the original error even if that write fails. */
+async function handleAndReportTopupFailure(orgId: string, attemptAt: string, error: unknown, paymentCreated: boolean, diagnostics: CronDiagnostics | undefined): Promise<void> {
+	try {
+		await handleTopupFailure(orgId, attemptAt, error, paymentCreated);
+	} finally {
+		if (diagnostics) diagnostics.report('auto top-up charge', error);
+		else console.error('auto top-up charge failed:', formatCronFailure(describeCronFailure(error, 'auto top-up charge')));
+	}
+}
+
+export async function maybeTriggerAutoTopUp(orgId: string, diagnostics?: CronDiagnostics): Promise<boolean> {
 	const org = await readAutoTopupState(orgId);
 	if (!basicEligibility(org)) return false;
 	// A surviving attempt marker means a previous charge may still be live at
@@ -395,11 +405,7 @@ export async function maybeTriggerAutoTopUp(orgId: string, diagnostics = new Cro
 		console.info(`auto top-up initiated for org ${orgId}: bundle ${bundle.id} (${idempotencyKey})`);
 		return true;
 	} catch (error) {
-		try {
-			await handleTopupFailure(orgId, attemptAt, error, paymentCreated);
-		} finally {
-			diagnostics.report('auto top-up charge', error);
-		}
+		await handleAndReportTopupFailure(orgId, attemptAt, error, paymentCreated, diagnostics);
 		return false;
 	}
 }

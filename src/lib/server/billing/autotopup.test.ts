@@ -1054,6 +1054,17 @@ describe('handleAutoTopupFailure (webhook)', () => {
 });
 
 describe('sweepAutoTopUp', () => {
+	test('a non-sweep charge failure logs safe details without inventing a cron run', async () => {
+		await seedOrg();
+		mocks.paymentIntentsCreate.mockRejectedValueOnce({ type: 'StripeAPIError', statusCode: 500, message: 'test-secret org-1 cus_1' });
+		const log = vi.spyOn(console, 'error').mockImplementation(vi.fn());
+		onTestFinished(log.mockRestore);
+		expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
+		expect(log).toHaveBeenCalledWith('auto top-up charge failed:', expect.stringMatching(/httpStatus=500.*provider=stripe.*operation=auto_topup\.charge/));
+		expect(format(...log.mock.calls.flat())).not.toMatch(/cron failure:|run=|cronRunId|autoTopupSweepError|test-secret|org-1|cus_1/);
+		expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(1);
+		expect(await orgRow()).toMatchObject({ autoTopupState: 'idle', autoTopupFailures: 0, creditsRemaining: 50 });
+	});
 	test('a retired-bundle marker write failure keeps its reconciliation phase and state', async () => {
 		const marker = new Date(Date.now() - 25 * 3600_000).toISOString();
 		await seedOrg({ autoTopupBundle: null, autoTopupLastAttemptAt: marker });

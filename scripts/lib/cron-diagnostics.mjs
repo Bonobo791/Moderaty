@@ -11,7 +11,7 @@ const CODES = allowlist(['EAI_AGAIN', 'ENOTFOUND', 'ECONNREFUSED', 'ECONNRESET',
 	'SQLITE_BUSY', 'SQLITE_BUSY_SNAPSHOT', 'SQLITE_LOCKED', 'SQLITE_LOCKED_SHAREDCACHE', 'SQLITE_ERROR',
 	'SERVER_ERROR', 'UNAUTHORIZED', 'AUTH_ERROR', 'RATE_LIMITED', 'EAUTH', 'ESOCKET', 'EDNS', 'ESOCKETTIMEOUT']);
 const NAMES = allowlist(['Error', 'TypeError', 'SyntaxError', 'AbortError', 'TimeoutError', 'NetworkError',
-	'DrizzleQueryError', 'LibsqlError', 'StripeAPIError', 'StripeConnectionError', 'StripeAuthenticationError', 'StripeRateLimitError']);
+	'DrizzleQueryError', 'LibsqlError', 'StripeAPIError', 'StripeConnectionError', 'StripeAuthenticationError', 'StripeRateLimitError', 'StripeCardError', 'StripeInvalidRequestError']);
 const SYSCALLS = allowlist(['getaddrinfo', 'connect', 'read', 'write', 'send', 'recv']);
 const PROVIDERS = allowlist(['turso', 'stripe', 'google', 'openai', 'proton']);
 const SERVICES = allowlist(['database', 'payments', 'billing', 'youtube', 'ai', 'mail', 'cron', 'monitoring']);
@@ -39,6 +39,9 @@ const FORMAT_FIELDS = {
 const CONTEXTS = new Map(Object.entries({
 	'auto top-up sweep': { sweep: 'autoTopupSweepError', operation: 'auto_topup', service: 'billing' },
 	'paused auto top-up recovery': { sweep: 'autoTopupSweepError', operation: 'auto_topup.paused_recovery', service: 'billing' },
+	'lifetime auto top-up reconciliation': { sweep: 'autoTopupSweepError', operation: 'auto_topup.lifetime_reconciliation', service: 'billing' },
+	'eligible auto top-up reconciliation': { sweep: 'autoTopupSweepError', operation: 'auto_topup.eligible_reconciliation', service: 'billing' },
+	'auto top-up charge': { sweep: 'autoTopupSweepError', operation: 'auto_topup.charge', service: 'billing' },
 	'consent e-mail retention sweep': { sweep: 'sweepError', operation: 'consent_retention', service: 'database', provider: 'turso' },
 	'commenter-handle retention sweep': { sweep: 'handleSweepError', operation: 'handle_retention', service: 'database', provider: 'turso' },
 	'hosted welcome email sweep': { sweep: 'welcomeEmailSweepError', operation: 'welcome_email', service: 'mail' },
@@ -66,7 +69,9 @@ const OPERATIONS = {
 	'auto_topup.release_claims': { service: 'database', provider: 'turso' },
 	'auto_topup.lifetime_candidates': { service: 'database', provider: 'turso' },
 	'auto_topup.paused_bundles': { service: 'database', provider: 'turso' },
-	'auto_topup.eligible_candidates': { service: 'database', provider: 'turso' }
+	'auto_topup.eligible_candidates': { service: 'database', provider: 'turso' },
+	'auto_topup.eligible_reconciliation': { service: 'billing' },
+	'auto_topup.charge': { service: 'billing' }
 };
 const SWEEPS = allowlist([...CONTEXTS.values()].map((context) => context.sweep));
 const OPERATION_NAMES = allowlist([...CONTEXTS.values()].map((context) => context.operation).concat(Object.keys(OPERATIONS)));
@@ -102,7 +107,8 @@ const CODE_PROVIDERS = new Map([
 /** @type {Map<unknown, string>} */
 const NAME_PROVIDERS = new Map([
 	['LibsqlError', 'turso'], ['StripeAPIError', 'stripe'], ['StripeConnectionError', 'stripe'],
-	['StripeAuthenticationError', 'stripe'], ['StripeRateLimitError', 'stripe']
+	['StripeAuthenticationError', 'stripe'], ['StripeRateLimitError', 'stripe'],
+	['StripeCardError', 'stripe'], ['StripeInvalidRequestError', 'stripe']
 ]);
 const MESSAGE_CATEGORIES = new Map([['request deadline exceeded', 'timeout']]);
 

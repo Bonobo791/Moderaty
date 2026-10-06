@@ -95,6 +95,15 @@ describe('dev cron tick', () => {
 		expect(child.stderr).not.toContain('fixture-requests=');
 	});
 
+	it.each([[204, 'non-JSON or invalid body'], [205, 'non-JSON or invalid body'], [304, 'answered 304']])('bodyless HTTP %s fixtures reach the driver and fail once without a health ping', (status, error) => {
+		const child = runFixtureTick({ ok: true, results: {} }, status);
+		expect(child.status).toBe(1);
+		expect(child.stderr).toContain('fixture-requests=1');
+		expect(child.stderr).toContain(error);
+		expect(child.stdout).toContain('tick →');
+		expect(child.stderr + child.stdout).not.toContain('test-secret');
+	});
+
 	it('keeps hostile payload strings as fixture data and preserves one failed tick', () => {
 		const hostile = '"` ${console.error("fixture-code-executed")}\r\n\u2028\u2029';
 		const child = runFixtureTick({ ok: false, results: {}, autoTopupSweepError: hostile }, 200);

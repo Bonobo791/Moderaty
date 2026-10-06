@@ -6,6 +6,7 @@ import { LibsqlError } from '@libsql/client';
 import { beforeEach, describe, expect, onTestFinished, test, vi } from 'vitest';
 
 import { setupTestDb, statementSql, testDb } from '$lib/server/testdb';
+import { withTestTrigger } from '$lib/server/cronTestSupport';
 import { CronDiagnostics, describeCronFailure } from '../../../../scripts/lib/cron-diagnostics.mjs';
 import { creditTransactions, organizations, stripeSubscriptionPeriods, stripeAutoTopupRecoveries, stripeRefundObservations } from '$lib/server/db/schema';
 import { applyLedgerDelta, getCredits, pauseAutoTopupForRefund } from '$lib/server/billing/ledger';
@@ -384,7 +385,10 @@ describe('maybeTriggerAutoTopUp', () => {
 		const log = vi.spyOn(console, 'error').mockImplementation(() => {});
 		try {
 			expect(await sweepAutoTopUp(5)).toBe(0);
-			expect(log).toHaveBeenCalledWith(expect.stringContaining('sweep failed for org org-1'), expect.anything());
+			expect(log).toHaveBeenCalledTimes(1);
+			expect(log.mock.calls[0][0]).toBe('cron failure:');
+			expect(JSON.parse(String(log.mock.calls[0][1]))).toMatchObject({ operation: 'auto_topup.eligible_reconciliation', category: 'unknown', cronRunId: expect.stringMatching(/^[a-f0-9-]{36}$/) });
+			expect(format(...log.mock.calls.flat())).not.toMatch(/org-1|pi_unknown|requires_future_thing/);
 			expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
 		} finally { log.mockRestore(); }
 	});
@@ -1050,6 +1054,61 @@ describe('handleAutoTopupFailure (webhook)', () => {
 });
 
 describe('sweepAutoTopUp', () => {
+	test('a retired-bundle marker write failure keeps its reconciliation phase and state', async () => {
+		const marker = new Date(Date.now() - 25 * 3600_000).toISOString();
+		await seedOrg({ autoTopupBundle: null, autoTopupLastAttemptAt: marker });
+		const log = vi.spyOn(console, 'error').mockImplementation(vi.fn());
+		onTestFinished(log.mockRestore);
+		const diagnostics = new CronDiagnostics();
+		await withTestTrigger('fail_retired_marker', "BEFORE UPDATE OF auto_topup_last_attempt_at ON organizations WHEN NEW.auto_topup_last_attempt_at IS NULL BEGIN SELECT RAISE(ABORT, 'test-secret'); END", async () => {
+			expect(await sweepAutoTopUp(5, Date.now() + 20_000, diagnostics)).toBe(0);
+		});
+		expect(diagnostics.failures).toHaveLength(1);
+		expect(diagnostics.failures[0]).toMatchObject({ operation: 'auto_topup.eligible_reconciliation', cronRunId: diagnostics.cronRunId });
+		expect(await orgRow()).toMatchObject({ autoTopupLastAttemptAt: marker, autoTopupState: 'idle', creditsRemaining: 50 });
+		expect(mocks.paymentIntentsList).toHaveBeenCalledTimes(1);
+		expect(mocks.paymentIntentsCreate).not.toHaveBeenCalled();
+		expect(format(...log.mock.calls.flat())).not.toMatch(/test-secret|org-1|cus_1|select |update /);
+	});
+	test('a caught card failure retains its failure counter and excludes message-derived codes from logs', async () => {
+		await seedOrg();
+		mocks.paymentIntentsCreate.mockRejectedValueOnce({ type: 'StripeCardError', statusCode: 402, message: 'test-secret org-1 cus_1' });
+		const log = vi.spyOn(console, 'error').mockImplementation(vi.fn());
+		onTestFinished(log.mockRestore);
+		const diagnostics = new CronDiagnostics();
+		expect(await sweepAutoTopUp(5, Date.now() + 20_000, diagnostics)).toBe(0);
+		expect(await orgRow()).toMatchObject({ autoTopupState: 'idle', autoTopupFailures: 1, creditsRemaining: 50 });
+		expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(1);
+		expect(diagnostics.failures).toHaveLength(1);
+		expect(diagnostics.failures[0]).toMatchObject({ operation: 'auto_topup.charge', category: 'http', provider: 'stripe', service: 'payments', httpStatus: 402 });
+		expect(format(...log.mock.calls.flat())).not.toMatch(/test-secret|org-1|cus_1/);
+	});
+	test.each([
+		{ plan: 'lifetime', failureMock: 'paymentIntentsList', operation: 'auto_topup.lifetime_reconciliation', expectedCreateCalls: 0 },
+		{ plan: 'free', failureMock: 'paymentIntentsList', operation: 'auto_topup.eligible_reconciliation', expectedCreateCalls: 0 },
+		{ plan: 'free', failureMock: 'pricesRetrieve', operation: 'auto_topup.charge', expectedCreateCalls: 0 },
+		{ plan: 'free', failureMock: 'paymentIntentsCreate', operation: 'auto_topup.charge', expectedCreateCalls: 1 }
+	] as const)('caught $failureMock failure retains safe $operation diagnostics without replay', async ({ plan, failureMock, operation, expectedCreateCalls }) => {
+		await seedOrg({ plan });
+		const rejection = Object.assign(new Error('test-secret org-1 cus_1 pm_1 https://private-host.invalid?token=test-secret'), {
+			type: 'StripeAPIError', statusCode: 500, headers: { authorization: 'test-secret' }, raw: { customer: 'cus_1' }
+		});
+		mocks[failureMock].mockRejectedValueOnce(rejection);
+		const log = vi.spyOn(console, 'error').mockImplementation(vi.fn());
+		onTestFinished(log.mockRestore);
+		const diagnostics = new CronDiagnostics();
+		expect(await sweepAutoTopUp(5, Date.now() + 20_000, diagnostics)).toBe(0);
+		expect(diagnostics.failures).toHaveLength(1);
+		expect(diagnostics.failures[0]).toMatchObject({ sweep: 'autoTopupSweepError', operation, category: 'http', provider: 'stripe', service: 'payments', httpStatus: 500, cronRunId: diagnostics.cronRunId });
+		expect(log).toHaveBeenCalledWith('cron failure:', JSON.stringify(diagnostics.failures[0]));
+		expect(format(...log.mock.calls.flat())).not.toMatch(/test-secret|org-1|cus_1|pm_1|private-host|authorization|customer/);
+		expect(mocks[failureMock]).toHaveBeenCalledTimes(1);
+		expect(mocks.paymentIntentsCreate).toHaveBeenCalledTimes(expectedCreateCalls);
+		expect([mocks.refundsCreate.mock.calls, mocks.paymentIntentsCancel.mock.calls]).toEqual([[], []]);
+		expect(await orgRow()).toMatchObject({ autoTopupState: 'idle', autoTopupFailures: 0, creditsRemaining: 50 });
+		expect(await testDb().db.select().from(creditTransactions)).toHaveLength(0);
+	});
+
 	test('a lifetime candidate SELECT failure never starts reconciliation, charges or refunds', async () => {
 		await seedOrg({ plan: 'lifetime' });
 		const before = await orgRow();
@@ -1848,7 +1907,8 @@ test('a deterministic amount validation failure releases the uncreated attempt',
 	mocks.paymentIntentsCreate.mockRejectedValue(rejection);
 	expect(await maybeTriggerAutoTopUp('org-1')).toBe(false);
 	expect(await orgRow()).toMatchObject({ autoTopupState: 'idle', autoTopupAttemptAt: null, autoTopupSubmittedAt: null });
-	expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('infra failure'), rejection);
+	expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('infra failure'));
+	expect(format(...errorSpy.mock.calls.flat())).not.toContain('amount_too_small');
 	await pauseAutoTopupForRefund(testDb().db, 'org-1');
 	expect(await testDb().db.select().from(stripeAutoTopupRecoveries)).toEqual([]);
 });

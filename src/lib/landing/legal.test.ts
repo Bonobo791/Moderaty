@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { render } from 'svelte/server';
+import Privacy from '../components/landing/legal/Privacy.svelte';
 import { PRIVACY_NOTICE_TEXT, REFUND_NOTICE_TEXT, AUTO_TOPUP_CONSENT_TEXT } from '../server/legal';
 import { FAQ_ENTRIES } from './faq';
 import { LEGAL_DOCS, LEGAL_EFFECTIVE_DATE, LEGAL_VERSION } from './legal';import { PRICING_FAQ_ENTRIES } from './pricing-faq';
@@ -36,7 +38,7 @@ describe('LEGAL_DOCS', () => {
 		// so the re-consent gate (hasCurrentConsent) routes every user back
 		// through /consent. Never let legal changes ride along under an old
 		// version.
-		expect(LEGAL_VERSION).toBe('1.18');
+		expect(LEGAL_VERSION).toBe('1.19');
 	});
 
 	it('lists exactly the three published legal documents', () => {
@@ -72,6 +74,28 @@ describe('LEGAL_DOCS', () => {
 				expect(readComponent(doc.slug)).toContain(`id="${entry.id}"`);
 			}
 		}
+	});
+});
+
+describe('public audience measurement disclosure', () => {
+	it('states the actual URL exclusion boundary without claiming every credential-like query suppresses a pageview', () => {
+		const body = render(Privacy).body;
+		expect(body).toContain('URLs with embedded usernames or passwords, or recognized sensitive query keys');
+		expect(body).not.toContain('Credential-bearing URLs and');
+	});
+	it('describes visitor processing, safeguards and the pending basis without claiming anonymity', () => {
+		const body = render(Privacy).body;
+		for (const phrase of ['visitors to our public website', 'Umami', 'network IP address', 'browser user agent', 'pseudonymous', '90 days', '7 days', 'awaiting completion', 'Do Not Track', 'Global Privacy Control', 'Audience measurement']) {
+			expect(body).toContain(phrase);
+		}
+		expect(body).not.toMatch(/guaranteed anonym|automatically LGPD compliant|audience measurement[^.]*assessment is complete/i);
+		expect(LEGAL_EFFECTIVE_DATE).toBe('5 October 2026');
+	});
+	it('preserves prominent advance notice and email commitments', () => {
+		const body = render(Privacy).body;
+		const notice = body.slice(body.indexOf('id="s13"'), body.indexOf('id="s14"'));
+		expect(notice).toContain("at least 30 days' prior notice");
+		expect(notice).toContain('displayed prominently in the Service and sent by e-mail');
 	});
 });
 

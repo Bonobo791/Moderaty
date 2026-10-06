@@ -1,110 +1,203 @@
-# Optional Google Tag Manager
+# Optional Umami audience measurement
 
-Google Tag Manager (GTM) is disabled by default. An unchanged fork or an
-unconfigured deployment makes **zero GTM requests**, including on prerendered
-marketing and legal pages. On eligible public pages the browser makes a same-origin
-configuration request to `/api/analytics`; a disabled deployment responds with `null`.
+Measurement is disabled by default. Unconfigured deployments and unchanged forks
+make **zero requests to the official collector**. This integration replaces GTM;
+it loads no third-party script, tracking SDK, iframe or tracking global. It sends
+restricted public-page payloads directly to a self-hosted Umami collection API.
+No Moderaty database migration or new product package is required.
 
 ## Runtime configuration
 
-Set these variables only in the hosting platform's **runtime** environment:
-
-| Variable | Default | Operator configuration |
+| Setting | Default | Enabled deployment requirement |
 | --- | --- | --- |
-| `ANALYTICS_ENABLED` | `false` / unset | Literal `true` to opt in |
-| `GTM_ID` | empty | Your own GTM container ID |
-| `GTM_ALLOWED_HOSTNAMES` | empty | Comma-separated exact hostnames |
+| `ANALYTICS_ENABLED` | `false` / unset | Literal `true` opts in |
+| `UMAMI_URL` | empty | Browser-reachable HTTPS origin; no credentials, subpath, query or fragment |
+| `UMAMI_WEBSITE_ID` | empty | Website UUID created in your own Umami instance |
+| `ANALYTICS_ALLOWED_HOSTNAMES` | empty | Comma-separated exact DNS browser hostnames, at most 100 characters each |
 
-Hostnames contain no scheme, port, path, or wildcard. For example, an operator
-hosting on `app.example.com` supplies that exact hostname. List `www.example.com`
-separately if it also serves the application. Configuration trims whitespace and
-normalizes hostname case; it does not include subdomains automatically.
+Hostnames are trimmed and lowercased in operator configuration. They contain no
+scheme, port, path, trailing dot or wildcard; subdomains require separate entries.
+Use separate staging and production website records. Real origins and UUIDs
+belong exclusively in hosting runtime settings, with **Build Variable OFF** in
+Coolify. Netlify uses the Functions environment scope. Never use `PUBLIC_*`,
+static environment imports, Docker `ARG`/`ENV` or Vite substitutions. Remove old
+GTM settings from hosting; there is no GTM fallback. Public measurement settings
+are visible to enabled-site visitors; no Umami password, admin token, APP_SECRET
+or database credential is returned to a browser.
 
-The official Moderaty container ID belongs only in the official deployment's
-hosting settings. Self-hosters opt in with their **own** container ID and
-hostnames. Never commit actual IDs to `.env.example`, source, Dockerfiles, image
-defaults, or CI build settings. GTM IDs are public to visitors when a container
-loads; deployment-only configuration prevents automatic inheritance by forks,
-and does not make the ID secret.
+`GET /api/analytics` reads private runtime settings on every request and returns
+`null` when disabled or when the browser hostname claim is not exactly allowed.
+Invalid enabled settings return a generic 503 and a bounded server diagnostic.
+Every response is `Cache-Control: no-store`; the endpoint is never prerendered
+and bypasses session/database checks. Keep the existing CDN `/api/*` cache bypass.
+Browser claims support configured aliases even when adapter-node pins `ORIGIN`.
+The browser independently validates settings and its actual hostname before
+collection, so copied configuration cannot activate a fork.
 
-On **Coolify**, make all three variables Runtime Variables with **Build Variable
-OFF**. On **Netlify**, give them the Functions scope so the server endpoint reads
-them at runtime. No analytics configuration is needed for a build. Do not use
-`PUBLIC_*`, `$env/static/*`, Docker `ARG`/`ENV`, or Vite substitutions for these
-values. The existing `.dockerignore` excludes local `.env` files.
+## Data and lifecycle
 
-## Loading behavior
+Only `/`, `/pricing`, `/privacy`, `/terms` and `/dpa` are eligible. A parsed query
+key matching `code`, `state`, `token`, `access_token`, `refresh_token`, `id_token`,
+`email`, `invite`, `session`, `password`, `reset` or `verification`, ignoring case,
+excludes the entire page. Other unknown keys are dropped. Rebuilt relative page
+URLs contain no fragments, advertising click IDs, arbitrary query values or
+credentials. Fixed titles are Home, Pricing, Privacy, Terms and DPA.
 
-1. The root layout initializes analytics in the browser only on `/`, `/pricing`,
-   `/privacy`, `/terms`, and `/dpa`, with no query string. Section anchors on
-   those pages work normally. Login, consent, invitations, contact verification,
-   contact forms, and all application/account pages never initialize it or show
-   an analytics failure notice. SSR and prerendering emit no GTM elements or ID.
-2. `/api/analytics` reads `$env/dynamic/private` on each request. Disabled settings
-   return `null`. Invalid enabled configuration returns a generic 503 and logs
-   the cause on the server. All responses use `Cache-Control: no-store`.
-3. The browser supplies its hostname as a query parameter; the endpoint matches
-   this untrusted claim against the operator's exact allowlist. This works for
-   configured aliases even when adapter-node pins `event.url` to one `ORIGIN`.
-   No forwarded headers need to be trusted. The endpoint exposes only a public
-   container ID and allowed hostname, not a secret or an authorization grant.
-4. Before touching `dataLayer` or inserting a script, the browser independently
-   checks its current hostname against the response and rechecks page eligibility
-   after the asynchronous request. A copied response cannot enable a fork.
-5. When leaving a document containing GTM for an excluded route, navigation
-   creates a new document. Removing a script cannot stop an executed container;
-   reloading isolates it from sensitive page content. A document that starts on
-   or visits an excluded route never initializes GTM later, even after SPA
-   navigation to a public page. This prevents sensitive Back-history exposure
-   while preserving normal navigation on disabled deployments. Pending
-   initialization is cancelled before navigation to an excluded page. A public
-   page with a same-origin excluded URL in `document.referrer` also skips GTM.
-6. The loader preserves existing `dataLayer` entries, queues the standard GTM
-   start event, and inserts one asynchronous GTM script per document. A failed
-   configuration or script request logs a browser error and shows a small generic
-   usage-measurement status on eligible public pages; it does not block the app.
-   Script load errors also send a generic
-   POST to `/api/analytics` for server logging. This uses the same runtime and
-   hostname gates and sends no error text, page URL, tokens or account data.
-   Concurrent callers share one failure report. Report-delivery failures log in
-   the browser while retaining the analytics failure status.
-   The server coalesces analytics diagnostics, including configuration errors,
-   to at most one per minute per worker,
-   using constant memory and no client identifiers. Reports still receive 204.
-   A slow script stays pending until the browser emits its actual load or error
-   event; a timer cannot guarantee that an inserted script will never execute.
-   Reload the document to retry a failed initialization.
+Only exact reviewed values survive campaign filtering:
 
-There is no `noscript` iframe: JavaScript must perform the browser hostname check
-before a GTM request. This integration supplies no account identifiers, e-mails,
-channel data, comment content, or application events. Tags configured within the
-container control their own collection and must be reviewed separately.
+- `utm_source`: google, youtube, instagram, facebook, linkedin, newsletter.
+- `utm_medium`: organic, social, cpc, email, referral.
+- `utm_campaign`: initially none. Add actual nonidentifying campaign slugs to
+  `APPROVED_CAMPAIGNS` in `src/lib/analytics-policy.ts` after review.
 
-## Activation and verification
+Duplicate UTM keys are removed entirely. External HTTP(S) referrers contribute
+only their origin, discarding credentials, path, query and fragment. Safe
+same-origin referrers contribute an empty string. A private or credential-bearing
+same-origin referrer suppresses the document. Future blog routes require separate
+public-route and query-policy review.
 
-Before enabling GTM, review the container's tags, privacy disclosures, notices,
-and any required visitor consent. The current Privacy Policy §12 states that the
-service does not use third-party tracking cookies. Do not enable a container that
-contradicts those disclosures. This loader's deployment opt-in is **not visitor
-consent** and does not add a consent-management banner.
+Only the first pageview attempt carries the sanitized external landing referrer;
+later SPA pageviews, including Back, send an empty referrer.
 
-For a deployment test, open browser developer tools → Network and filter for
-`googletagmanager.com`:
+One client belongs to each document. It sends one initial pageview and one per
+committed change of the canonical public URL, including Back between distinct
+public URLs. Hash-only changes, discarded query changes and duplicate effects do
+not create pageviews. A document beginning on or visiting an excluded route is
+permanently ineligible. Private navigation cancels pending configuration, stops
+future collection and discards cache; normal navigation proceeds without the old
+GTM forced reload. Requests already started contain immutable safe public data
+and may finish. Click requests have their own bounded lifetime, independent of
+route-effect cancellation, so a connection CTA can still navigate to login.
+Clicks made while configuration is pending are frozen and queued only in memory
+(at most 32 clicks, expiring after five seconds). Safe public navigation can
+finish configuration for those clicks; private navigation, opt-out, disabled or
+failed configuration discards them. No collector request starts before the
+runtime settings and current document pass their checks.
 
-- With default settings, there must be no GTM request and no GTM iframe.
-- With enabled settings and your exact allowed hostname, there should be one
-  `gtm.js` request using your container ID on eligible prerendered pages.
-- With enabled settings on a different hostname, there must be no GTM request.
-- Account, consent, invitation and contact-verification URLs must make no GTM
-  requests, including after navigating from a tracked public page and using Back.
-- With adapter-node `ORIGIN` pinned, verify each configured hostname separately.
-- Reload after switching back to `ANALYTICS_ENABLED=false`: no GTM request.
+| Event | Allowed placements |
+| --- | --- |
+| `connect_click` | nav, nav_mobile, hero, final_cta, plan_hosted, plan_lifetime |
+| `pricing_click` | nav, nav_mobile, home_pricing, footer |
+| `source_click` | nav, nav_mobile, footer, plan_self_hosted |
+| `contact_click` | footer, pricing_contact |
 
-Test runtime changes against the **same built artifact** to confirm that a
-rebuild is unnecessary. Check static HTML and client bundles for your configured
-ID; it must be absent. Keep `/api/analytics` out of CDN caching (Bunny's existing
-`/api/*` bypass covers it).
+Static approved link attributes provide these values. Click and middle-button
+auxclick handling records neither destinations, visible text, form inputs nor
+arbitrary attributes. `connect_click` is a public CTA click, **not a completed
+signup or YouTube connection**. Signups, payments, accounts and channel activity
+remain outside measurement.
 
-Changing environment settings requires restarting/redeploying the server
-instances according to the hosting platform. Disabling stops loading in new
-documents; already-open tabs have already loaded the container and must reload.
+Page payloads contain only website UUID, approved hostname, rebuilt URL, fixed
+title and sanitized referrer. Clicks add the approved name and
+`data: { placement }`. There are no explicit visitor identifiers, identify calls,
+comment/channel content, timestamps, screen sizes, language, replay, heatmaps,
+performance capture or advertising conversion tracking.
+
+## Preferences and transport
+
+DNT, GPC or a stored opt-out suppresses collection. The public footer's accessible
+**Audience measurement** control stores only `moderaty.analytics.optOut=1` on
+opt-out; opting in removes that key and may reload the public document. No visitor
+identifier or Umami cache is persisted. Storage failures fail closed with a
+generic visible error; cross-tab opt-out stops the document client. A private
+document cannot become eligible by opting in.
+
+Requests are `{ type: 'event', payload }` sent to `new URL('/api/send', UMAMI_URL)`
+with credentials omitted, `no-referrer`, keepalive and a five-second deadline.
+Caller cancellation is composed with deadlines; click sends use their own
+deadline. The normal browser User-Agent is used. Successful responses provide a
+nonempty printable ASCII cache string of at most 4096 characters, retained only in memory and
+passed as `x-umami-cache`. SessionId, visitId and other response fields are ignored.
+The Umami 3.0.3 bot response `{ beep: 'boop' }` is an intentional skip.
+Cache is discarded on stop, opt-out and configuration changes. Late responses
+cannot replace a cache already accepted from a later send or restore discarded
+state. Failed/malformed responses show a generic
+measurement status on eligible public pages and log generic browser errors.
+Rejected configuration refreshes discard prior settings and cache; collection
+cannot resume until a later configuration read succeeds.
+There is no automatic retry: an event might have been saved before delivery failed.
+
+Payload-free, credential-free and referrer-free POST diagnostics use the same
+local endpoint and exact runtime/hostname gates. They contain no error text,
+URLs, cache tokens or account information. Reports are shared per document and
+server logs coalesced to one per minute per worker with constant memory. Failure
+to deliver a diagnostic is logged generically without hiding the original failure.
+Preference-storage failures on eligible public documents use the same generic
+diagnostic even though collection stops. The server applies runtime/hostname
+gates; private documents send no diagnostic.
+
+## Operator activation checklist
+
+These are human handoff steps, not actions performed by implementing this code.
+Keep production `ANALYTICS_ENABLED=false` until all prerequisites pass.
+
+- Confirm service health and record the **actual deployed Umami version**. The
+  reviewed Coolify template pins 3.0.3; this transport follows that version's API.
+  Upgrades are a separate operator decision. Use a separate PostgreSQL volume,
+  unique APP_SECRET, HTTPS, a changed default admin password and restricted
+  dashboard access.
+- Set `DISABLE_TELEMETRY=1` and `PRIVATE_MODE=1`; confirm those flags are supported
+  by the deployed version. Create separate staging/production website records.
+- Complete the [audience measurement assessment](privacy/2026-10-05-umami-audience-measurement.md).
+  The legitimate-interest decision is **awaiting operator completion**. If that
+  basis is unsuitable, keep measurement disabled and implement visitor consent
+  gating before activation. Deployment opt-in is not visitor consent.
+- Record hosting, proxy/CDN and backup providers/countries and the applicable
+  international-transfer mechanism. Review their access logs independently.
+- Establish and verify a version-tested purge confined to the **Umami database**:
+  proposed detailed-data retention is 90 days and backup expiry is 7 days. These
+  are operational limits, not LGPD deadlines; self-hosted Umami does not impose
+  them automatically. Verify actual deletion and disclose backup deletion lag.
+- Publish the approved disclosure and required notices. Privacy §13's promise of
+  30 days' advance notice, including prominent service notice and e-mail, remains.
+  Activation must follow any applicable effective date and notice period.
+- Verify real CORS preflight through the Coolify proxy, including JSON and
+  `x-umami-cache`. Any deployed CSP must allow only the intended collector origin
+  in `connect-src`; never broadly permit unrelated hosts.
+- On staging, inspect a synthetic approved campaign and click. Confirm only the
+  permitted payload reaches Umami and dashboard counts match. Test private routes,
+  parsed credential queries, copied settings on another host, DNT/GPC and opt-out.
+- Check that no Google requests or tracking scripts occur. Confirm configured
+  UUIDs/origins are absent from prerendered HTML and distributed client artifacts;
+  test runtime switching against **one unchanged built artifact**.
+- Verify Netlify (`npm run build`) and node (`MODERATY_ADAPTER=node npm run build`)
+  with isolated development inputs; never copy production credentials.
+- Follow human review and the dev-to-main release process with analytics disabled.
+  Only the operator enables production collection after every prerequisite passes
+  and verifies actual network delivery and counts.
+
+Umami processes network IP and browser user agent to derive session/visit
+information. Small payloads and no cookies do not guarantee anonymity or LGPD
+compliance. The collector's geography derivation and infrastructure logs also
+need assessment. The published Privacy page explains the scope and preference.
+
+## Local browser regression
+
+Run `MODERATY_ADAPTER=node npm run build`, then
+`node scripts/test-analytics-browser.mjs`. This uses Python 3 Playwright and
+Chromium; set absolute `PYTHON_BINARY` and `CHROMIUM_BINARY` paths if needed.
+The runner requires Linux or macOS process groups and terminates the regression
+runner and its local server group on timeout. Browser cleanup relies on Playwright's
+shutdown handlers. Python optimization is rejected so assertions
+cannot silently disappear.
+One unchanged Node build is restarted with disabled, enabled, denied-host and
+invalid runtime settings. Chromium exercises actual SvelteKit navigation,
+pending-configuration races, CTA clicks, private-document blocking, browser
+privacy signals, storage errors, cross-tab opt-out and generic failure reporting.
+
+All collector and other external requests are intercepted. The temporary local
+database contains only synthetic migration-count bookkeeping for anonymous public
+and login requests; it does not verify migrations or authenticated flows. Actual
+collector CORS, persistence, dashboard counts and purge behavior remain operator
+checks on staging.
+
+## Rollback and historical reports
+
+Set `ANALYTICS_ENABLED=false` in runtime settings and restart/redeploy the instance.
+Existing documents must reload or opt out to stop an initialized client. Keep
+isolated Umami data under its retention policy. Do not automatically reactivate
+GTM. Code rollback is separate from this immediate disable switch.
+
+Start a new measurement baseline at activation. GTM is a tag manager: inspect
+any downstream analytics separately for historical reports. No GA/GTM history
+import or advertising-conversion replacement is included.

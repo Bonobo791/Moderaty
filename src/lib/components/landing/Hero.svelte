@@ -21,7 +21,7 @@
 			</Reveal>
 			<Reveal amount={0.1} delay={0.24}>
 				<div class="cta-row">
-					<a href={LOGIN_URL} class="btn-press cta-primary">Connect YouTube channel</a>
+					<a href={LOGIN_URL} data-moderaty-event="connect_click" data-moderaty-placement="hero" class="btn-press cta-primary">Connect YouTube channel</a>
 					<a href="#regulars" class="btn-press cta-ghost">See who gets bonked</a>
 				</div>
 			</Reveal>

@@ -27,6 +27,6 @@
 		the running cost is near zero.
 	{/snippet}
 	{#snippet cta()}
-		<a href={GITHUB_URL} target="_blank" rel="noreferrer" class="btn-press ghost-btn">Self-host on GitHub</a>
+		<a href={GITHUB_URL} data-moderaty-event="source_click" data-moderaty-placement="plan_self_hosted" target="_blank" rel="noreferrer" class="btn-press ghost-btn">Self-host on GitHub</a>
 	{/snippet}
 </PlanCard>

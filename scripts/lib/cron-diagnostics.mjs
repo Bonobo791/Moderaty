@@ -56,6 +56,7 @@ const CONTEXTS = new Map(Object.entries({
 	'lease release': { sweep: 'leaseRelease', operation: 'lease_release', service: 'database', provider: 'turso' },
 	'run-health bookkeeping': { sweep: 'bookkeepingError', operation: 'run_health_write', service: 'database', provider: 'turso' },
 	'cron transport': { sweep: 'cronTransport', operation: 'cron_request', service: 'cron' },
+	'cron response body': { sweep: 'cronResponseBody', operation: 'cron_response_body', service: 'cron' },
 	'healthcheck ping': { sweep: 'healthcheckPing', operation: 'healthcheck_ping', service: 'monitoring' }
 }));
 /** @type {Record<string, {service: string, provider?: string}>} */

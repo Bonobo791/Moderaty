@@ -37,6 +37,9 @@
 import { describeCronFailure, formatCronFailure, sanitizeCronFailure } from './lib/cron-diagnostics.mjs';
 
 const DEFAULT_INTERVAL_MS = 60_000;
+// Response status comes from fetch, but accept only numeric HTTP codes here.
+/** @type {Map<unknown, number>} */
+const RESPONSE_STATUSES = new Map(Array.from({ length: 500 }, /** @returns {[number, number]} */ (_, index) => [index + 100, index + 100]));
 
 // Channel-run failure categories only the channel owner can resolve:
 // 'credits' (buy a bundle / fix auto top-up) and 'token' (reconnect the
@@ -77,20 +80,28 @@ export function formatTickFailure(payload, problems) {
 	const diagnostics = tickDiagnostics(payload);
 	const details = diagnostics.map((item) => `${item.sweep}: ${formatCronFailure(item)}`);
 	details.push(...problems.filter((problem) => !diagnostics.some((item) => problem.startsWith(`${item.sweep}:`))));
-	const summary = details.map((detail) => detail.replace(/[\r\n\u2028\u2029]/g, ' ').slice(0, 500)).join('; ');
+	let summary = details.map((detail) => detail.replace(/[\r\n\u2028\u2029]/g, ' ').slice(0, 500)).join('; ');
+	const id = sanitizeCronFailure({ cronRunId: payload?.cronRunId }).cronRunId;
+	if (summary && id) summary = `run=${id}; ${summary}`;
 	return summary.length > 5500 ? `${summary.slice(0, 5480)}; details truncated` : summary;
 }
 
 /** Never log response bodies or result keys (which identify customers/channels). */
-export function renderTick(payload) {
-	const problems = evaluateTick(true, payload).problems;
+export function renderTick(payload, resOk = true) {
+	const problems = evaluateTick(resOk, payload).problems;
 	const id = sanitizeCronFailure({ cronRunId: payload?.cronRunId }).cronRunId;
 	return JSON.stringify({ valid: validTickPayload(payload), ok: typeof payload?.ok === 'boolean' ? payload.ok : undefined,
 		cronRunId: id, problems: formatTickFailure(payload, problems) || undefined });
 }
 
-export function cronTransportError(cause) {
-	return new Error(`cron endpoint unreachable: ${formatCronFailure(describeCronFailure(cause, 'cron transport'))}`);
+/** Distinguish an unanswered request from a failure reading an answered body.
+ * @param {unknown} cause @param {{status?: unknown}} [response]
+ */
+export function cronTransportError(cause, response) {
+	const label = response === undefined ? 'cron transport' : 'cron response body';
+	const stage = response === undefined ? 'unreachable' : 'response body read failed';
+	const status = RESPONSE_STATUSES.get(response?.status);
+	return new Error(`cron endpoint ${stage}${status ? ` (HTTP ${status})` : ''}: ${formatCronFailure(describeCronFailure(cause, label))}`);
 }
 
 /**
@@ -237,14 +248,14 @@ export async function tickOnce(fetchImpl = fetch) {
 			signal: AbortSignal.timeout(30_000)
 		});
 		rawText = await res.text();
-	} catch (cause) { throw cronTransportError(cause); }
+	} catch (cause) { throw cronTransportError(cause, res); }
 	let payload = null;
 	try {
 		payload = JSON.parse(rawText);
 	} catch {
 		payload = null;
 	}
-	console.log(`[${new Date().toISOString()}] tick → ${renderTick(payload)}`.replace(/[\r\n\u2028\u2029]/g, ' '));
+	console.log(`[${new Date().toISOString()}] tick → ${renderTick(payload, res.ok)}`.replace(/[\r\n\u2028\u2029]/g, ' '));
 	const { ownerActionableOnly, problems } = evaluateTick(res.ok, payload);
 	if (!res.ok) {
 		if (ownerActionableOnly && problems.length === 0) {

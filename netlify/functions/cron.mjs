@@ -33,7 +33,7 @@ export default async function cron() {
 		});
 		rawText = await res.text();
 	} catch (error) {
-		throw cronTransportError(error);
+		throw cronTransportError(error, res);
 	} finally {
 		clearTimeout(timer);
 	}
@@ -60,7 +60,7 @@ export default async function cron() {
 	// A 200 can still report failure — `ok:false`, an exhausted run budget,
 	// a failed sweep — none of which HTTP status exposes (codex).
 	if (problems.length) throw new Error(`cron tick reported failure(s): ${formatTickFailure(payload, problems)}`);
-	console.log(`cron endpoint ok: ${renderTick(payload)}`);
+	console.log(`cron endpoint ok: ${renderTick(payload, res.ok)}`);
 }
 
 const TIMEOUT_MS = 25_000; // below Netlify's 26s function limit; the endpoint's own run budget is 20s

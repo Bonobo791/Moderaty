@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { formatTickFailure, parseDriverArgs, pingHealthcheck, scheduleTicks, tickOnce } from './dev-cron.mjs';
+import { cronTransportError, formatTickFailure, parseDriverArgs, pingHealthcheck, scheduleTicks, tickOnce } from './dev-cron.mjs';
 
 // 'test-secret' is a synthetic credential fixture — maintainer-approved
 // documented exception per AGENTS.md (approved 2026-07-30, PR #13 review).
@@ -83,6 +83,50 @@ describe('dev cron tick', () => {
 		const summary = formatTickFailure(null, ['channel run failed:\r\nerror\u2028continued\u2029end']);
 		expect(summary).toBe('channel run failed:  error continued end');
 		expect(summary).not.toMatch(/[\r\n\u2028\u2029]/);
+	});
+
+	it.each([
+		{ ok: true, budgetExhausted: true, results: {} },
+		{ ok: true, results: { 'private-customer': { partial: true, stoppedReason: 'deadline' } } }
+	])('correlates failures without individual diagnostics in both schedulers: %j', async (failure) => {
+		const cronRunId = '11111111-1111-4111-8111-111111111111';
+		const payload = { ...failure, cronRunId };
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
+		const { default: netlifyCron } = await import('../netlify/functions/cron.mjs');
+		for (const run of [tickOnce, netlifyCron]) {
+			const error = await run().catch((cause) => cause);
+			expect(error).toBeInstanceOf(Error);
+			expect(error.message).toContain(`run=${cronRunId}`);
+			expect(error.message).not.toContain('private-customer');
+		}
+		expect(fetch).toHaveBeenCalledTimes(2);
+	});
+
+	it('bounds and sanitizes top-level run IDs without inventing a healthy failure', () => {
+		const cronRunId = '11111111-1111-4111-8111-111111111111';
+		const summary = formatTickFailure({ cronRunId }, Array(40).fill('x'.repeat(600)));
+		expect(summary).toContain(`run=${cronRunId}`);
+		expect(summary.length).toBeLessThanOrEqual(5500);
+		expect(summary).toContain('details truncated');
+		expect(formatTickFailure({ cronRunId: 'test-secret\r\n' }, ['budget exhausted'])).toBe('budget exhausted');
+		expect(formatTickFailure({ cronRunId }, [])).toBe('');
+		expect(cronTransportError(new Error('test-secret'), { status: '503 test-secret' }).message).not.toMatch(/HTTP|test-secret/);
+		expect(cronTransportError(new Error('test-secret'), { status: Object(503) }).message).not.toMatch(/HTTP|test-secret/);
+	});
+
+	it.each([200, 503])('distinguishes a failed HTTP %s body read from an unanswered endpoint', async (status) => {
+		const root = Object.assign(new Error('private URL test-secret'), { code: 'ECONNRESET' });
+		vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({ start(controller) { controller.error(root); } }), { status })));
+		const { default: netlifyCron } = await import('../netlify/functions/cron.mjs');
+		for (const run of [tickOnce, netlifyCron]) {
+			const error = await run().catch((cause) => cause);
+			expect(error.message).toContain('response body read failed');
+			expect(error.message).toContain(`HTTP ${status}`);
+			expect(error.message).toContain('operation=cron_response_body');
+			expect(error.message).toContain('ECONNRESET');
+			expect(error.message).not.toMatch(/unreachable|test-secret|private URL/);
+		}
+		expect(fetch).toHaveBeenCalledTimes(2);
 	});
 
 	it.each([200, 500])('retains provider HTTP status through both wrappers on HTTP %s', async (status) => {
@@ -233,21 +277,40 @@ describe('dev cron tick', () => {
 		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, 500)));
 
 		await expect(tickOnce()).resolves.toEqual(payload);
+		const rendered = JSON.parse(console.log.mock.calls[0][0].split('tick → ')[1]);
+		expect(rendered.problems).toBeUndefined();
 	});
 
-	it('still throws when a suppressed category shares the tick with an ops failure', async () => {
-		const payload = { ok: false, results: { UC1: { error: 'token' }, UC2: { error: 'quota' } } };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, 500)));
-
-		await expect(tickOnce()).rejects.toThrow('500');
+	// Every operator problem must retain its existing exit verdict, including
+	// a problem sharing a 500 with otherwise suppressible owner categories.
+	it.each([
+		{ label: 'owner category plus operator quota error', status: 500, expected: '500',
+			payload: { ok: false, results: { UC1: { error: 'token' }, UC2: { error: 'quota' } } } },
+		{ label: 'operator scoring error', status: 500, expected: 'scoring',
+			payload: { ok: false, results: { UC1: { error: 'scoring' } } } },
+		{ label: 'partial run at deadline', status: 200, expected: 'timed out',
+			payload: { ok: true, results: { UC1: { fetched: 2, acted: 1, partial: true, stoppedReason: 'deadline' } } } },
+		{ label: 'retention sweep failure', status: 200, expected: 'sweepError: failure (no safe diagnostic)',
+			payload: { ok: false, sweepError: 'retention sweep blew up', results: {} } },
+		{ label: 'zero-credit sweep failure alongside owner error', status: 500, expected: 'zeroCreditSweepError',
+			payload: { ok: false, results: { UC1: { error: 'token' } }, zeroCreditSweepError: 'sweep blew up' } },
+		{ label: 'named zero-credit sweep failure', status: 200, expected: 'zeroCreditSweepError: failure (no safe diagnostic)',
+			payload: { ok: false, zeroCreditSweepError: 'db down', results: {} } },
+		{ label: 'digest failure alongside owner error', status: 500, expected: 'digest',
+			payload: { ok: false, results: { UC1: { error: 'token' } }, digest: { error: 'error' } } },
+		{ label: 'sweeps spent the run budget', status: 200, expected: 'budget',
+			payload: { ok: true, budgetExhausted: true, results: {} } },
+		{ label: 'lost run-health bookkeeping', status: 200, expected: 'bookkeeping',
+			payload: { ok: true, bookkeepingError: true, results: { UC1: { fetched: 1 } } } },
+		{ label: 'per-account zero-credit errors on an otherwise healthy tick', status: 200, expected: 'zeroCreditItemErrors',
+			payload: { ok: true, zeroCreditItemErrors: 2, results: {} } },
+		{ label: 'per-account zero-credit errors alongside owner error', status: 500, expected: 'zeroCreditItemErrors',
+			payload: { ok: false, zeroCreditItemErrors: 1, results: { UC1: { error: 'credits' } } } }
+	])('fails on $label', async ({ payload, status, expected }) => {
+		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, status)));
+		await expect(tickOnce()).rejects.toThrow(expected);
 	});
 
-	it('throws on a 500 whose only channel error is an ops category', async () => {
-		const payload = { ok: false, results: { UC1: { error: 'scoring' } } };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, 500)));
-
-		await expect(tickOnce()).rejects.toThrow('scoring');
-	});
 
 	it('an out-of-credits channel result on a 200 is a healthy tick', async () => {
 		const payload = { ok: true, results: { UC1: { fetched: 2, outOfCredits: true } } };
@@ -256,15 +319,6 @@ describe('dev cron tick', () => {
 		await expect(tickOnce()).resolves.toEqual(payload);
 	});
 
-	it('fails the tick when a channel run ended partial on the tick deadline', async () => {
-		// codex: a partial deadline return rides the 200 payload — classifying
-		// only `entry.error` let a moderation run that never finished read as
-		// a healthy tick to the dead-man ping.
-		const payload = { ok: true, results: { UC1: { fetched: 2, acted: 1, partial: true, stoppedReason: 'deadline' } } };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
-
-		await expect(tickOnce()).rejects.toThrow('timed out');
-	});
 
 	it('does not fail the tick for a channel paused mid-run — deactivation is owner-actionable', async () => {
 		const payload = { ok: true, results: { UC1: { partial: true, stoppedReason: 'deactivated' } } };
@@ -273,22 +327,8 @@ describe('dev cron tick', () => {
 		await expect(tickOnce()).resolves.toEqual(payload);
 	});
 
-	it('fails the tick when a sweep failed — the payload field is otherwise invisible to the scheduler', async () => {
-		const payload = { ok: false, sweepError: 'retention sweep blew up', results: {} };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
 
-		await expect(tickOnce()).rejects.toThrow('sweepError: failure (no safe diagnostic)');
-	});
 
-	it('does not suppress a zero-credit sweep failure behind owner-actionable channel errors', async () => {
-		// A 500 whose channel errors are all owner-actionable is normally
-		// silenced — but a failed retention sweep rides the same payload and
-		// must still trip the operator alert.
-		const payload = { ok: false, results: { UC1: { error: 'token' } }, zeroCreditSweepError: 'sweep blew up' };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, 500)));
-
-		await expect(tickOnce()).rejects.toThrow('zeroCreditSweepError');
-	});
 
 	it.each(['token', 'credits'])('does not suppress a stale-preview cleanup failure behind %s errors', async (category) => {
 		const payload = { ok: false, feedbackPreviewSweepError: true, results: { UC1: { error: category } } };
@@ -297,12 +337,6 @@ describe('dev cron tick', () => {
 		await expect(tickOnce()).rejects.toThrow('feedbackPreviewSweepError');
 	});
 
-	it('names the zero-credit sweep failure on a 200 instead of the generic ok:false', async () => {
-		const payload = { ok: false, zeroCreditSweepError: 'db down', results: {} };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
-
-		await expect(tickOnce()).rejects.toThrow('zeroCreditSweepError: failure (no safe diagnostic)');
-	});
 
 	it.each(['token', 'credits'])('does not suppress Stripe scrub failures behind %s errors in either scheduler', async (category) => {
 		const payload = { ok: false, results: { UC1: { error: category } }, stripeScrubSweepError: 'scrub failed' };
@@ -323,12 +357,6 @@ describe('dev cron tick', () => {
 		await expect(tickOnce()).rejects.toThrow(field);
 	});
 
-	it('does not suppress an aux-job failure behind an owner-actionable channel error', async () => {
-		const payload = { ok: false, results: { UC1: { error: 'token' } }, digest: { error: 'error' } };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, 500)));
-
-		await expect(tickOnce()).rejects.toThrow('digest');
-	});
 
 	it('treats successful aux-job results as healthy', async () => {
 		const payload = { ok: true, results: { UC1: { fetched: 3 } }, dryRunWindow: { fetched: 5, windowComplete: true }, digest: { generated: true } };
@@ -337,36 +365,12 @@ describe('dev cron tick', () => {
 		await expect(tickOnce()).resolves.toEqual(payload);
 	});
 
-	it('fails the tick when sweeps consumed the whole run budget', async () => {
-		const payload = { ok: true, budgetExhausted: true, results: {} };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
 
-		await expect(tickOnce()).rejects.toThrow('budget');
-	});
 
-	it('fails the tick when the run-health bookkeeping write was lost', async () => {
-		const payload = { ok: true, bookkeepingError: true, results: { UC1: { fetched: 1 } } };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
 
-		await expect(tickOnce()).rejects.toThrow('bookkeeping');
-	});
 
-	it('fails the tick when per-account zero-credit evaluations failed — the count is the only alert channel', async () => {
-		// `ok` stays true for per-item sweep errors by design, so a user whose
-		// evaluation throws every rotation would retry silently forever
-		// without this check (codeant).
-		const payload = { ok: true, zeroCreditItemErrors: 2, results: {} };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload)));
 
-		await expect(tickOnce()).rejects.toThrow('zeroCreditItemErrors');
-	});
 
-	it('does not suppress zero-credit item failures behind owner-actionable channel errors on a 500', async () => {
-		const payload = { ok: false, zeroCreditItemErrors: 1, results: { UC1: { error: 'credits' } } };
-		vi.stubGlobal('fetch', vi.fn(async () => cronResponse(payload, 500)));
-
-		await expect(tickOnce()).rejects.toThrow('zeroCreditItemErrors');
-	});
 });
 
 describe('driver args', () => {

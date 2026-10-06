@@ -106,48 +106,28 @@ const MESSAGE_CATEGORIES = new Map([['request deadline exceeded', 'timeout']]);
 
 /** Read only known fields; unusual thrown objects must not break the reporter. @param {unknown} value @param {string} key */
 function field(value, key) {
-	try { return value !== null && typeof value === 'object' ? Reflect.get(value, key) : undefined; }
+	try { return typeof value === 'object' ? Reflect.get(Object(value), key) : undefined; }
 	catch { return undefined; }
 }
 /** @param {unknown} value */
 function runId(value) { return typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value) ? value : undefined; }
 
-/** @param {SafeCause} cause @param {string} text */
-function category(cause, text) {
-	return prefer('unknown', [CODE_CATEGORIES.get(cause.code), TIMEOUT_CATEGORIES.get(cause.name),
-		cause.httpStatus ? 'http' : undefined, FALLBACK_CATEGORIES.get(cause.code), FALLBACK_CATEGORIES.get(cause.name),
-		cause.code ? 'network' : undefined, MESSAGE_CATEGORIES.get(text), /^fetch failed\b/.test(text) ? 'network' : undefined]);
-}
-
-/** @param {unknown} value */
-function boundedMessage(value) {
-	const message = field(value, 'message');
-	return typeof message === 'string' ? message.slice(0, 2048) : '';
-}
-
-/** @param {unknown} value @param {string} text */
-function causeStatus(value, text) {
-	for (const key of ['httpStatus', 'status', 'statusCode']) {
-		const status = HTTP_STATUSES.get(field(value, key));
-		if (status) return status;
-	}
-	// Existing provider helpers encode the status after "failed:". Only
-	// that numeric field is recovered; all body text remains private.
-	return prefer(undefined, [HTTP_STATUSES.get(field(field(value, 'response'), 'status')),
-		HTTP_STATUSES.get(Number(/\bfailed: ([45]\d{2})\b/.exec(text)?.[1]))]);
-}
-
 /** Select fixed classifications from text, never return text. @param {unknown} value @returns {SafeCause} */
 function safeCause(value) {
-	const text = boundedMessage(value);
+	const message = field(value, 'message');
+	const text = typeof message === 'string' ? message.slice(0, 2048) : '';
 	// Stripe's SDK uses name="Error" and a specific type; retain that type.
 	const name = prefer(undefined, [NAMES.get(field(value, 'type')), NAMES.get(field(value, 'name'))]);
 	const code = CODES.get(field(value, 'code'));
 	const provider = prefer(undefined, [PROVIDERS.get(field(value, 'provider')), CODE_PROVIDERS.get(code),
 		NAME_PROVIDERS.get(name), /^OpenAI\b/i.test(text) ? 'openai' : undefined]);
 	const service = prefer(undefined, [SERVICES.get(field(value, 'service')), PROVIDER_SERVICES.get(provider)]);
-	const safe = { name, code, syscall: SYSCALLS.get(field(value, 'syscall')), httpStatus: causeStatus(value, text), provider, service, category: 'unknown' };
-	return { ...safe, category: category(safe, text) };
+	const status = prefer(undefined, ['httpStatus', 'status', 'statusCode'].map((key) => HTTP_STATUSES.get(field(value, key))).concat([
+		HTTP_STATUSES.get(field(field(value, 'response'), 'status')), HTTP_STATUSES.get(Number(/\bfailed: ([45]\d{2})\b/.exec(text)?.[1]))]));
+	const category = prefer('unknown', [CODE_CATEGORIES.get(code), TIMEOUT_CATEGORIES.get(name),
+		status ? 'http' : undefined, FALLBACK_CATEGORIES.get(code), FALLBACK_CATEGORIES.get(name),
+		code ? 'network' : undefined, MESSAGE_CATEGORIES.get(text), /^fetch failed\b/.test(text) ? 'network' : undefined]);
+	return { name, code, syscall: SYSCALLS.get(field(value, 'syscall')), httpStatus: status, provider, service, category };
 }
 
 /** @param {unknown} cause @param {string} defaultOperation */
@@ -157,16 +137,13 @@ function causeChain(cause, defaultOperation) {
 	const seen = new Set();
 	let current = cause;
 	let operation = defaultOperation;
-	while (current !== undefined && current !== null && !seen.has(current) && causes.length < MAX_CAUSES) {
+	while (current != null && !seen.has(current) && causes.length < MAX_CAUSES) {
 		seen.add(current);
 		causes.push(safeCause(current));
-		const annotated = OPERATION_PHASES.get(field(current, 'diagnosticOperation'));
-		if (annotated) {
-			operation = annotated;
-		}
+		operation = prefer(operation, [OPERATION_PHASES.get(field(current, 'diagnosticOperation'))]);
 		current = field(current, 'cause');
 	}
-	return { causes, operation, truncated: current !== undefined && current !== null };
+	return { causes, operation, truncated: current != null };
 }
 
 /** @param {SafeCause} root @param {SafeCause[]} causes @param {'provider' | 'service'} key @param {string | undefined} fallback */

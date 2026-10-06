@@ -104,6 +104,19 @@ function categorizeRunFailure(cause: unknown): 'token' | 'quota' | 'scoring' | '
 	return 'error';
 }
 
+async function saveDryRunDrain(channel: typeof channels.$inferSelect, boundary: string, drain: ChannelRunResult) {
+	const updates = new Map<unknown, { dryRunPageToken: string | null; dryRunBoundary?: null }>([
+		[true, { dryRunBoundary: null, dryRunPageToken: null }],
+		[false, { dryRunPageToken: drain.windowNextPageToken ?? null }]
+	]);
+	const update = updates.get(drain.windowComplete);
+	if (!update) return;
+	// The boundary predicate keeps a stale drain from overwriting a new
+	// dashboard preview planted after the channel was read for its claim.
+	await db.update(channels).set(update)
+		.where(and(eq(channels.id, channel.id), eq(channels.dryRunBoundary, boundary)));
+}
+
 /**
  * One dry-run window page under the claimed channel's lease (I10 — bounded).
  * A drain failure must never mask the normal run — loud, surfaced in the
@@ -118,22 +131,7 @@ async function drainDryRunWindow(channel: typeof channels.$inferSelect, deadline
 			window: { boundary: channel.dryRunBoundary, pageToken: channel.dryRunPageToken ?? null }
 		});
 		console.info(`cron: dry-run drain for ${channel.id}: fetched=${drain.fetched} windowComplete=${drain.windowComplete}`);
-		// Both writes are predicated on the boundary actually drained: the
-		// row was read BEFORE the atomic claim, so a dashboard preview can
-		// have replanted a new window in between — a stale drain must never
-		// clear or overwrite the replacement state (0-row update = no-op).
-		const drainedBoundary = eq(channels.dryRunBoundary, channel.dryRunBoundary);
-		if (drain.windowComplete === true) {
-			await db
-				.update(channels)
-				.set({ dryRunBoundary: null, dryRunPageToken: null })
-				.where(and(eq(channels.id, channel.id), drainedBoundary));
-		} else if (drain.windowComplete === false) {
-			await db
-				.update(channels)
-				.set({ dryRunPageToken: drain.windowNextPageToken ?? null })
-				.where(and(eq(channels.id, channel.id), drainedBoundary));
-		}
+		await saveDryRunDrain(channel, channel.dryRunBoundary, drain);
 		return drain;
 	} catch (cause) {
 		return { error: diagnostics.report('dry-run window drain', cause) };
@@ -292,54 +290,66 @@ type CronSweepResults = {
 	zeroCredit: SweepResult<Awaited<ReturnType<typeof sweepZeroCreditAccounts>>>;
 };
 
+type SweepCounterSource = {
+	[K in keyof CronSweepResults]: NonNullable<CronSweepResults[K]['value']> extends number
+		? readonly [K] : readonly [K, keyof NonNullable<CronSweepResults[K]['value']>]
+}[keyof CronSweepResults];
+
+// Each public field selects one known numeric counter; outcome payloads are
+// never spread into the response. The type checks every sweep/field pairing.
+const SWEEP_COUNTER_FIELDS = {
+	consentEmailsNulled: ['consent'],
+	auditHandlesNulled: ['handles', 'auditLog'],
+	actionHandlesNulled: ['handles', 'moderationActions'],
+	pendingReversalsDropped: ['reversals'],
+	autoTopupsTriggered: ['autoTopup'],
+	stripeCustomersDeleted: ['stripeDeletions'],
+	googleGrantsRevoked: ['googleRevocations'],
+	stripeCustomersScrubbed: ['stripeScrubs'],
+	zeroCreditAccountsChecked: ['zeroCredit', 'evaluated'],
+	zeroCreditWarningsSent: ['zeroCredit', 'warned'],
+	zeroCreditAccountsDeleted: ['zeroCredit', 'deleted'],
+	zeroCreditItemErrors: ['zeroCredit', 'errors'],
+	contactNotificationsSent: ['contactNotifications', 'sent'],
+	contactNotificationErrors: ['contactNotifications', 'errors'],
+	welcomeEmailCandidatesScanned: ['welcome', 'scanned'],
+	welcomeEmailsQueued: ['welcome', 'queued'],
+	welcomeEmailEnrollmentErrors: ['welcome', 'enrollmentErrors'],
+	welcomeEmailsAccepted: ['welcome', 'accepted'],
+	welcomeEmailErrors: ['welcome', 'errors'],
+	welcomeEmailAmbiguous: ['welcome', 'ambiguous'],
+	welcomeEmailSuppressed: ['welcome', 'suppressed'],
+} satisfies Record<string, SweepCounterSource>;
+
+const SWEEP_ERROR_FIELDS: Record<string, keyof CronSweepResults> = {
+	sweepError: 'consent',
+	handleSweepError: 'handles',
+	pendingReversalSweepError: 'reversals',
+	autoTopupSweepError: 'autoTopup',
+	stripeDeletionSweepError: 'stripeDeletions',
+	googleRevocationSweepError: 'googleRevocations',
+	stripeScrubSweepError: 'stripeScrubs',
+	zeroCreditSweepError: 'zeroCredit',
+	contactNotificationSweepError: 'contactNotifications',
+	welcomeEmailSweepError: 'welcome',
+};
+const ITEM_ERROR_FIELDS: Array<keyof typeof SWEEP_COUNTER_FIELDS> = [
+	'welcomeEmailEnrollmentErrors', 'welcomeEmailErrors', 'welcomeEmailAmbiguous', 'zeroCreditItemErrors', 'contactNotificationErrors'
+];
+
+function sweepCounter(sweeps: CronSweepResults, source: SweepCounterSource): number {
+	const value = sweeps[source[0]].value;
+	const count = source.length === 1 ? value : Reflect.get(Object(value), source[1]);
+	return orZero(count);
+}
+
 function cronSweepPayload(sweeps: CronSweepResults, dryRun: boolean, diagnostics: CronDiagnostics) {
-	const { contactNotifications, welcome, consent, handles, autoTopup, stripeDeletions, googleRevocations, stripeScrubs, reversals, zeroCredit } = sweeps;
-	const failures = [
-		...Object.values(sweeps).map((sweep) => sweep.error), welcome.value?.enrollmentErrors, welcome.value?.errors,
-		welcome.value?.ambiguous, zeroCredit.value?.errors, contactNotifications.value?.errors
-	];
-	// A failed sweep must never tick as success: ok reflects every sweep's
-	// outcome (each failure is also surfaced in its own *Error field and
-	// logged). Per-account zero-credit eval failures count too — they ride
-	// an answered 200 by design, so without them in `ok` a permanently
-	// throwing evaluation would retry forever, invisible (codeant).
-	return {
-		cronRunId: diagnostics.cronRunId,
-		failureDiagnostics: diagnostics.failures,
-		ok: failures.every((failure) => !failure),
-		dryRun,
-		consentEmailsNulled: orZero(consent.value),
-		sweepError: consent.error,
-		auditHandlesNulled: orZero(handles.value?.auditLog),
-		actionHandlesNulled: orZero(handles.value?.moderationActions),
-		handleSweepError: handles.error,
-		autoTopupsTriggered: orZero(autoTopup.value),
-		autoTopupSweepError: autoTopup.error,
-		stripeCustomersDeleted: orZero(stripeDeletions.value),
-		stripeDeletionSweepError: stripeDeletions.error,
-		googleGrantsRevoked: orZero(googleRevocations.value),
-		googleRevocationSweepError: googleRevocations.error,
-		stripeCustomersScrubbed: orZero(stripeScrubs.value),
-		stripeScrubSweepError: stripeScrubs.error,
-		pendingReversalsDropped: orZero(reversals.value),
-		pendingReversalSweepError: reversals.error,
-		zeroCreditAccountsChecked: orZero(zeroCredit.value?.evaluated),
-		zeroCreditWarningsSent: orZero(zeroCredit.value?.warned),
-		zeroCreditAccountsDeleted: orZero(zeroCredit.value?.deleted),
-		zeroCreditItemErrors: orZero(zeroCredit.value?.errors),
-		zeroCreditSweepError: zeroCredit.error,
-		contactNotificationsSent: orZero(contactNotifications.value?.sent),
-		contactNotificationErrors: orZero(contactNotifications.value?.errors),
-		contactNotificationSweepError: contactNotifications.error,
-		welcomeEmailCandidatesScanned: orZero(welcome.value?.scanned),
-		welcomeEmailsQueued: orZero(welcome.value?.queued),
-		welcomeEmailEnrollmentErrors: orZero(welcome.value?.enrollmentErrors),
-		welcomeEmailsAccepted: orZero(welcome.value?.accepted),
-		welcomeEmailErrors: orZero(welcome.value?.errors),
-		welcomeEmailAmbiguous: orZero(welcome.value?.ambiguous),
-		welcomeEmailSuppressed: orZero(welcome.value?.suppressed),
-		welcomeEmailSweepError: welcome.error
-	};
+	const counters: Record<string, number> = Object.fromEntries(Object.entries(SWEEP_COUNTER_FIELDS)
+		.map(([output, source]) => [output, sweepCounter(sweeps, source)]));
+	const errors = Object.fromEntries(Object.entries(SWEEP_ERROR_FIELDS).map(([output, sweep]) => [output, sweeps[sweep].error]));
+	const failures = [...Object.values(errors), ...ITEM_ERROR_FIELDS.map((field) => counters[field])];
+	return { cronRunId: diagnostics.cronRunId, failureDiagnostics: diagnostics.failures,
+		ok: failures.every((failure) => !failure), dryRun, ...counters, ...errors };
 }
 
 /**

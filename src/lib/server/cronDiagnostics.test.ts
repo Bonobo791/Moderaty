@@ -40,6 +40,20 @@ test.each(['__proto__', 'constructor', 'toString'])('rejects prototype-like prov
 	expect(detail.provider).toBeUndefined();
 });
 
+test('rejects boxed and coercible metadata without invoking coercion', () => {
+	const coercible = { toString() { throw new Error('test-secret'); } };
+	const cause = { code: Object('EAI_AGAIN'), name: Object('LibsqlError'), status: Object(500),
+		provider: coercible, service: Object('database'), diagnosticOperation: Object('auto_topup.lifetime_candidates') };
+	expect(describeCronFailure(cause, 'cron transport', runId)).toMatchObject({
+		category: 'unknown', operation: 'cron_request', service: 'cron', code: undefined, httpStatus: undefined, provider: undefined
+	});
+});
+
+test('ignores ordinary operation names used as annotation phases', () => {
+	expect(describeCronFailure({ diagnosticOperation: 'channel_run' }, 'auto top-up sweep', runId))
+		.toMatchObject({ operation: 'auto_topup', service: 'billing' });
+});
+
 test('retains the deepest known operation and classification through an unknown leaf', () => {
 	const root = Object.assign(new Error('test-secret', { cause: 'test-secret' }), { code: 'EAI_AGAIN' });
 	const inner = Object.assign(new Error('test-secret', { cause: root }), { diagnosticOperation: 'auto_topup.lifetime_candidates' });

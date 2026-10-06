@@ -4,17 +4,18 @@ import { randomUUID } from 'node:crypto';
 // stacks, URLs, SQL, parameters, headers and response bodies never leave it.
 const MAX_CAUSES = 8;
 const MAX_FAILURES = 20;
-const CATEGORIES = new Set(['unknown', 'dns', 'database_busy', 'database', 'authentication', 'network', 'timeout', 'http']);
-const CODES = new Set(['EAI_AGAIN', 'ENOTFOUND', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT',
+const CATEGORIES = allowlist(['unknown', 'dns', 'database_busy', 'database', 'authentication', 'network', 'timeout', 'http']);
+const CODES = allowlist(['EAI_AGAIN', 'ENOTFOUND', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT',
 	'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET',
 	'CERT_HAS_EXPIRED', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'ERR_TLS_CERT_ALTNAME_INVALID',
 	'SQLITE_BUSY', 'SQLITE_BUSY_SNAPSHOT', 'SQLITE_LOCKED', 'SQLITE_LOCKED_SHAREDCACHE', 'SQLITE_ERROR',
 	'SERVER_ERROR', 'UNAUTHORIZED', 'AUTH_ERROR', 'RATE_LIMITED', 'EAUTH', 'ESOCKET', 'EDNS', 'ESOCKETTIMEOUT']);
-const NAMES = new Set(['Error', 'TypeError', 'SyntaxError', 'AbortError', 'TimeoutError', 'NetworkError',
+const NAMES = allowlist(['Error', 'TypeError', 'SyntaxError', 'AbortError', 'TimeoutError', 'NetworkError',
 	'DrizzleQueryError', 'LibsqlError', 'StripeAPIError', 'StripeConnectionError', 'StripeAuthenticationError', 'StripeRateLimitError']);
-const SYSCALLS = new Set(['getaddrinfo', 'connect', 'read', 'write', 'send', 'recv']);
-const PROVIDERS = new Set(['turso', 'stripe', 'google', 'openai', 'proton']);
-const SERVICES = new Set(['database', 'payments', 'billing', 'youtube', 'ai', 'mail', 'cron', 'monitoring']);
+const SYSCALLS = allowlist(['getaddrinfo', 'connect', 'read', 'write', 'send', 'recv']);
+const PROVIDERS = allowlist(['turso', 'stripe', 'google', 'openai', 'proton']);
+const SERVICES = allowlist(['database', 'payments', 'billing', 'youtube', 'ai', 'mail', 'cron', 'monitoring']);
+/** @type {Map<unknown, string>} */
 const CODE_CATEGORIES = new Map([
 	['EAI_AGAIN', 'dns'], ['ENOTFOUND', 'dns'], ['EDNS', 'dns'],
 	['SQLITE_BUSY', 'database_busy'], ['SQLITE_BUSY_SNAPSHOT', 'database_busy'],
@@ -23,10 +24,19 @@ const CODE_CATEGORIES = new Map([
 	['ETIMEDOUT', 'timeout'], ['UND_ERR_CONNECT_TIMEOUT', 'timeout'],
 	['UND_ERR_HEADERS_TIMEOUT', 'timeout'], ['UND_ERR_BODY_TIMEOUT', 'timeout'], ['ESOCKETTIMEOUT', 'timeout']
 ]);
+/** @type {Map<unknown, string>} */
 const PROVIDER_SERVICES = new Map([['turso', 'database'], ['stripe', 'payments'], ['openai', 'ai']]);
+/** @type {Map<unknown, string>} */
+const TIMEOUT_CATEGORIES = new Map([['AbortError', 'timeout'], ['TimeoutError', 'timeout']]);
+/** @type {Map<unknown, string>} */
+const FALLBACK_CATEGORIES = new Map([['SQLITE_ERROR', 'database'], ['NetworkError', 'network']]);
+const FORMAT_FIELDS = {
+	code: 'code', syscall: 'syscall', httpStatus: 'httpStatus', provider: 'provider', service: 'service',
+	operation: 'operation', cronRunId: 'run', chain: 'causes', causeChainTruncated: 'causeChainTruncated'
+};
 
-/** @type {Record<string, {sweep: string, operation: string, service: string, provider?: string}>} */
-const CONTEXTS = {
+/** @type {Map<unknown, {sweep: string, operation: string, service: string, provider?: string}>} */
+const CONTEXTS = new Map(Object.entries({
 	'auto top-up sweep': { sweep: 'autoTopupSweepError', operation: 'auto_topup', service: 'billing' },
 	'consent e-mail retention sweep': { sweep: 'sweepError', operation: 'consent_retention', service: 'database', provider: 'turso' },
 	'commenter-handle retention sweep': { sweep: 'handleSweepError', operation: 'handle_retention', service: 'database', provider: 'turso' },
@@ -47,7 +57,7 @@ const CONTEXTS = {
 	'run-health bookkeeping': { sweep: 'bookkeepingError', operation: 'run_health_write', service: 'database', provider: 'turso' },
 	'cron transport': { sweep: 'cronTransport', operation: 'cron_request', service: 'cron' },
 	'healthcheck ping': { sweep: 'healthcheckPing', operation: 'healthcheck_ping', service: 'monitoring' }
-};
+}));
 /** @type {Record<string, {service: string, provider?: string}>} */
 const OPERATIONS = {
 	'auto_topup.paused_recovery': { service: 'billing' },
@@ -56,33 +66,57 @@ const OPERATIONS = {
 	'auto_topup.paused_bundles': { service: 'database', provider: 'turso' },
 	'auto_topup.eligible_candidates': { service: 'database', provider: 'turso' }
 };
-const SWEEPS = new Set(Object.values(CONTEXTS).map((context) => context.sweep));
-const OPERATION_NAMES = new Set([...Object.values(CONTEXTS).map((context) => context.operation), ...Object.keys(OPERATIONS)]);
+const SWEEPS = allowlist([...CONTEXTS.values()].map((context) => context.sweep));
+const OPERATION_NAMES = allowlist([...CONTEXTS.values()].map((context) => context.operation).concat(Object.keys(OPERATIONS)));
+
+const OPERATION_PHASES = allowlist(Object.keys(OPERATIONS));
 
 /** @typedef {{name?: string, category: string, code?: string, syscall?: string, httpStatus?: number, provider?: string, service?: string}} SafeCause */
 /** @typedef {SafeCause & {sweep: string, operation: string, cronRunId?: string, causes: SafeCause[], causeChainTruncated?: boolean}} CronFailure */
+/** @type {SafeCause} */
+const UNKNOWN_CAUSE = { category: 'unknown' };
+
+/** The first defined value wins; the required fallback covers an empty list.
+ * @template T @param {T} fallback @param {Array<T | undefined>} values @returns {T}
+ */
+function prefer(fallback, values) {
+	for (const value of values) {
+		if (value !== undefined) return value;
+	}
+	return fallback;
+}
+
+/** @param {string} value @returns {[string, string]} */
+function identicalEntry(value) { return [value, value]; }
+/** @param {string[]} values @returns {Map<unknown, string>} */
+function allowlist(values) { return new Map(values.map(identicalEntry)); }
+/** @type {Map<unknown, number>} */
+const HTTP_STATUSES = new Map(Array.from({ length: 200 }, /** @returns {[number, number]} */ (_, index) => [index + 400, index + 400]));
+/** @type {Map<unknown, string>} */
+const CODE_PROVIDERS = new Map([
+	['SQLITE_BUSY', 'turso'], ['SQLITE_BUSY_SNAPSHOT', 'turso'], ['SQLITE_LOCKED', 'turso'],
+	['SQLITE_LOCKED_SHAREDCACHE', 'turso'], ['SQLITE_ERROR', 'turso']
+]);
+/** @type {Map<unknown, string>} */
+const NAME_PROVIDERS = new Map([
+	['LibsqlError', 'turso'], ['StripeAPIError', 'stripe'], ['StripeConnectionError', 'stripe'],
+	['StripeAuthenticationError', 'stripe'], ['StripeRateLimitError', 'stripe']
+]);
+const MESSAGE_CATEGORIES = new Map([['request deadline exceeded', 'timeout']]);
 
 /** Read only known fields; unusual thrown objects must not break the reporter. @param {unknown} value @param {string} key */
 function field(value, key) {
 	try { return value !== null && typeof value === 'object' ? Reflect.get(value, key) : undefined; }
 	catch { return undefined; }
 }
-/** @param {Set<string>} allowed @param {unknown} value */
-function allowed(allowed, value) { return typeof value === 'string' && allowed.has(value) ? value : undefined; }
-/** @param {unknown} value */
-function httpStatus(value) { return typeof value === 'number' && Number.isInteger(value) && value >= 400 && value <= 599 ? value : undefined; }
 /** @param {unknown} value */
 function runId(value) { return typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value) ? value : undefined; }
 
-/** @param {SafeCause} cause */
-function category(cause) {
-	const codeCategory = CODE_CATEGORIES.get(cause.code ?? '');
-	if (codeCategory) return codeCategory;
-	if (['AbortError', 'TimeoutError'].includes(cause.name ?? '')) return 'timeout';
-	if (cause.httpStatus) return 'http';
-	if (cause.code === 'SQLITE_ERROR') return 'database';
-	if (cause.code || cause.name === 'NetworkError') return 'network';
-	return 'unknown';
+/** @param {SafeCause} cause @param {string} text */
+function category(cause, text) {
+	return prefer('unknown', [CODE_CATEGORIES.get(cause.code), TIMEOUT_CATEGORIES.get(cause.name),
+		cause.httpStatus ? 'http' : undefined, FALLBACK_CATEGORIES.get(cause.code), FALLBACK_CATEGORIES.get(cause.name),
+		cause.code ? 'network' : undefined, MESSAGE_CATEGORIES.get(text), /^fetch failed\b/.test(text) ? 'network' : undefined]);
 }
 
 /** @param {unknown} value */
@@ -94,44 +128,26 @@ function boundedMessage(value) {
 /** @param {unknown} value @param {string} text */
 function causeStatus(value, text) {
 	for (const key of ['httpStatus', 'status', 'statusCode']) {
-		const status = httpStatus(field(value, key));
+		const status = HTTP_STATUSES.get(field(value, key));
 		if (status) return status;
 	}
 	// Existing provider helpers encode the status after "failed:". Only
 	// that numeric field is recovered; all body text remains private.
-	return httpStatus(field(field(value, 'response'), 'status'))
-		?? httpStatus(Number(/\bfailed: ([45]\d{2})\b/.exec(text)?.[1]));
-}
-
-/** @param {unknown} value @param {string | undefined} code @param {string | undefined} name @param {string} text */
-function causeProvider(value, code, name, text) {
-	const explicit = allowed(PROVIDERS, field(value, 'provider'));
-	if (explicit) return explicit;
-	if (code?.startsWith('SQLITE_') || name === 'LibsqlError') return 'turso';
-	if (name?.startsWith('Stripe')) return 'stripe';
-	if (/^OpenAI\b/i.test(text)) return 'openai';
-	return undefined;
-}
-
-/** Recognized message-only transport errors get a fixed category. @param {SafeCause} safe @param {string} text */
-function causeCategory(safe, text) {
-	const classified = category(safe);
-	if (classified !== 'unknown') return classified;
-	if (/^fetch failed\b/.test(text)) return 'network';
-	if (text === 'request deadline exceeded') return 'timeout';
-	return 'unknown';
+	return prefer(undefined, [HTTP_STATUSES.get(field(field(value, 'response'), 'status')),
+		HTTP_STATUSES.get(Number(/\bfailed: ([45]\d{2})\b/.exec(text)?.[1]))]);
 }
 
 /** Select fixed classifications from text, never return text. @param {unknown} value @returns {SafeCause} */
 function safeCause(value) {
 	const text = boundedMessage(value);
 	// Stripe's SDK uses name="Error" and a specific type; retain that type.
-	const name = allowed(NAMES, field(value, 'type')) ?? allowed(NAMES, field(value, 'name'));
-	const code = allowed(CODES, field(value, 'code'));
-	const provider = causeProvider(value, code, name, text);
-	const service = allowed(SERVICES, field(value, 'service')) ?? PROVIDER_SERVICES.get(provider ?? '');
-	const safe = { name, code, syscall: allowed(SYSCALLS, field(value, 'syscall')), httpStatus: causeStatus(value, text), provider, service, category: 'unknown' };
-	return { ...safe, category: causeCategory(safe, text) };
+	const name = prefer(undefined, [NAMES.get(field(value, 'type')), NAMES.get(field(value, 'name'))]);
+	const code = CODES.get(field(value, 'code'));
+	const provider = prefer(undefined, [PROVIDERS.get(field(value, 'provider')), CODE_PROVIDERS.get(code),
+		NAME_PROVIDERS.get(name), /^OpenAI\b/i.test(text) ? 'openai' : undefined]);
+	const service = prefer(undefined, [SERVICES.get(field(value, 'service')), PROVIDER_SERVICES.get(provider)]);
+	const safe = { name, code, syscall: SYSCALLS.get(field(value, 'syscall')), httpStatus: causeStatus(value, text), provider, service, category: 'unknown' };
+	return { ...safe, category: category(safe, text) };
 }
 
 /** @param {unknown} cause @param {string} defaultOperation */
@@ -144,8 +160,8 @@ function causeChain(cause, defaultOperation) {
 	while (current !== undefined && current !== null && !seen.has(current) && causes.length < MAX_CAUSES) {
 		seen.add(current);
 		causes.push(safeCause(current));
-		const annotated = field(current, 'diagnosticOperation');
-		if (typeof annotated === 'string' && Object.hasOwn(OPERATIONS, annotated)) {
+		const annotated = OPERATION_PHASES.get(field(current, 'diagnosticOperation'));
+		if (annotated) {
 			operation = annotated;
 		}
 		current = field(current, 'cause');
@@ -155,18 +171,18 @@ function causeChain(cause, defaultOperation) {
 
 /** @param {SafeCause} root @param {SafeCause[]} causes @param {'provider' | 'service'} key @param {string | undefined} fallback */
 function inheritedField(root, causes, key, fallback) {
-	return root[key] ?? causes.findLast((item) => item[key])?.[key] ?? fallback;
+	return prefer(fallback, [root[key], ...causes.toReversed().map((item) => item[key])]);
 }
 
 /** @param {unknown} cause @param {string} label @param {string} [cronRunId] @returns {CronFailure} */
 export function describeCronFailure(cause, label, cronRunId) {
-	const context = Object.hasOwn(CONTEXTS, label) ? CONTEXTS[label] : CONTEXTS['cron transport'];
+	const context = prefer({ sweep: 'cronTransport', operation: 'cron_request', service: 'cron' }, [CONTEXTS.get(label)]);
 	const { causes, operation, truncated } = causeChain(cause, context.operation);
-	const operationContext = OPERATIONS[operation];
-	const root = causes.findLast((item) => item.category !== 'unknown') ?? causes.at(-1) ?? { category: 'unknown' };
+	const operationContext = { ...context, ...OPERATIONS[operation] };
+	const root = prefer(UNKNOWN_CAUSE, [causes.findLast((item) => item.category !== 'unknown'), causes.at(-1)]);
 	return { ...root, sweep: context.sweep, operation, cronRunId: runId(cronRunId),
-		provider: inheritedField(root, causes, 'provider', operationContext?.provider ?? context.provider),
-		service: inheritedField(root, causes, 'service', operationContext?.service ?? context.service), causes,
+		provider: inheritedField(root, causes, 'provider', operationContext.provider),
+		service: inheritedField(root, causes, 'service', operationContext.service), causes,
 		...(truncated ? { causeChainTruncated: true } : {}) };
 }
 
@@ -174,9 +190,9 @@ export function describeCronFailure(cause, label, cronRunId) {
 export function sanitizeCronFailure(value) {
 	const safe = safeCause(value);
 	const causes = field(value, 'causes');
-	return { ...safe, category: allowed(CATEGORIES, field(value, 'category')) ?? safe.category,
-		sweep: allowed(SWEEPS, field(value, 'sweep')) ?? 'cronTransport',
-		operation: allowed(OPERATION_NAMES, field(value, 'operation')) ?? 'cron_request',
+	return { ...safe, category: prefer(safe.category, [CATEGORIES.get(field(value, 'category'))]),
+		sweep: prefer('cronTransport', [SWEEPS.get(field(value, 'sweep'))]),
+		operation: prefer('cron_request', [OPERATION_NAMES.get(field(value, 'operation'))]),
 		cronRunId: runId(field(value, 'cronRunId')),
 		causes: Array.isArray(causes) ? causes.slice(0, MAX_CAUSES).map(safeCause) : [],
 		...(field(value, 'causeChainTruncated') === true ? { causeChainTruncated: true } : {}) };
@@ -185,13 +201,10 @@ export function sanitizeCronFailure(value) {
 /** Root fields precede the bounded chain so wrapper limits cannot bury them. @param {unknown} value */
 export function formatCronFailure(value) {
 	const safe = sanitizeCronFailure(value);
-	const fields = [safe.category, safe.code && `code=${safe.code}`, safe.syscall && `syscall=${safe.syscall}`,
-		safe.httpStatus && `httpStatus=${safe.httpStatus}`, safe.provider && `provider=${safe.provider}`, safe.service && `service=${safe.service}`,
-		`operation=${safe.operation}`, safe.cronRunId && `run=${safe.cronRunId}`];
-	const chain = safe.causes.map((cause) => cause.code ?? cause.name ?? 'unknown').join('>');
-	if (chain) fields.push(`causes=${chain}`);
-	if (safe.causeChainTruncated) fields.push('causeChainTruncated=true');
-	return fields.filter(Boolean).join(' ');
+	const parts = { ...safe, chain: safe.causes.map((cause) => prefer('unknown', [cause.code, cause.name])).join('>') };
+	const fields = Object.entries(FORMAT_FIELDS).filter(([key]) => field(parts, key))
+		.map(([key, label]) => `${label}=${field(parts, key)}`);
+	return [safe.category, ...fields].join(' ');
 }
 
 /** Adds a fixed phase without altering attempts or retaining data in a message.

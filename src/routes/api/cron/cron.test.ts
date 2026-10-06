@@ -193,6 +193,20 @@ test('retains diagnostics appended by channel failures after the sweep payload i
 	expect(mocks.runChannel).toHaveBeenCalledTimes(1);
 });
 
+test('preserves zero defaults for absent sweep counters without projecting arbitrary fields', async () => {
+	mocks.env.DRY_RUN = 'false';
+	mocks.sweepWelcomeEmails.mockResolvedValueOnce({ scanned: null, queued: undefined, enrollmentErrors: null,
+		accepted: undefined, errors: null, ambiguous: undefined, suppressed: null, privatePayload: 'test-secret' } as never);
+	mocks.sweepZeroCreditAccounts.mockResolvedValueOnce(null as never);
+	mocks.retryContactNotifications.mockResolvedValueOnce({ sent: undefined, errors: null } as never);
+	const body = await (await call({ bearer: 'test-secret' })).json();
+	expect(body).toMatchObject({ ok: true, welcomeEmailCandidatesScanned: 0, welcomeEmailsQueued: 0,
+		welcomeEmailEnrollmentErrors: 0, welcomeEmailsAccepted: 0, welcomeEmailErrors: 0, welcomeEmailAmbiguous: 0,
+		welcomeEmailSuppressed: 0, zeroCreditAccountsChecked: 0, zeroCreditWarningsSent: 0,
+		zeroCreditAccountsDeleted: 0, zeroCreditItemErrors: 0, contactNotificationsSent: 0, contactNotificationErrors: 0 });
+	expect(JSON.stringify(body)).not.toContain('test-secret');
+});
+
 function expectDrainState(row: Awaited<ReturnType<typeof channelRow>>, boundary: string | null, pageToken: string | null) {
 	expect(row?.dryRunBoundary).toBe(boundary);
 	expect(row?.dryRunPageToken).toBe(pageToken);
@@ -1017,6 +1031,16 @@ test('clears the drain state when the dry-run window completes', async () => {
 	await call({ bearer: 'test-secret' });
 
 	expectDrainState(await channelRow('UC1'), null, null);
+});
+
+test.each([undefined, null, 0, 1, 'true', 'false'])('rejects non-Boolean drain completion without changing its checkpoint: %s', async (windowComplete) => {
+	await seedDrainChannel('UC1', 'tok-1');
+	mocks.runChannel.mockResolvedValueOnce(runResult())
+		.mockResolvedValueOnce(runResult({ windowComplete, windowNextPageToken: 'must-not-save' }));
+	const response = await call({ bearer: 'test-secret' });
+	expect(response.status).toBe(200);
+	expect(mocks.runChannel).toHaveBeenCalledTimes(2);
+	expectDrainState(await channelRow('UC1'), '2026-05-01T00:00:00.000Z', 'tok-1');
 });
 
 test('a channel with a drain in flight waits for older ordinary channels', async () => {

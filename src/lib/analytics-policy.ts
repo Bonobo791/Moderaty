@@ -1,10 +1,13 @@
+import { HATE_COMMENTS } from '$lib/blogs/hate-comments';
+
 export type AnalyticsConfig = { umamiUrl: string; websiteId: string; hostname: string };
 export type PagePayload = { website: string; hostname: string; url: string; title: string; referrer: string };
 export type MarketingEvent = 'connect_click' | 'pricing_click' | 'source_click' | 'contact_click';
 export type MarketingPlacement = 'nav' | 'nav_mobile' | 'hero' | 'final_cta' | 'plan_hosted' | 'plan_lifetime' | 'home_pricing' | 'footer' | 'plan_self_hosted' | 'pricing_contact';
 
 const titles = new Map([
-	['/', 'Home'], ['/pricing', 'Pricing'], ['/privacy', 'Privacy'], ['/terms', 'Terms'], ['/dpa', 'DPA']
+	['/', 'Home'], ['/pricing', 'Pricing'], ['/privacy', 'Privacy'], ['/terms', 'Terms'], ['/dpa', 'DPA'],
+	['/blogs/', 'YouTube comment moderation blog'], [HATE_COMMENTS.path, HATE_COMMENTS.title]
 ]);
 const sensitiveKeys = new Set(['code', 'state', 'token', 'access_token', 'refresh_token', 'id_token', 'email', 'invite', 'session', 'password', 'reset', 'verification']);
 

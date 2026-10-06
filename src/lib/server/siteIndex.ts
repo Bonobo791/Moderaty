@@ -35,9 +35,10 @@ export function isNoIndexRoute(routeId: string | null | undefined): boolean {
 	return NOINDEX_ROUTES.includes(routeId) || NOINDEX_PREFIXES.some((prefix) => routeId.startsWith(prefix));
 }
 
-// APP_URL is the canonical public origin (the Bunny domain in production).
-// Absolute sitemap/robots URLs come from it — not the request — so a
-// misconfigured deployment fails loudly instead of serving internal hosts.
+/**
+ * Return the canonical public APP_URL origin, independent of the request host.
+ * Missing or malformed configuration fails with HTTP 500 without exposing its value.
+ */
 export function siteOrigin(): string {
 	if (!env.APP_URL) throw error(500, 'APP_URL is not configured');
 	const parsed = URL.parse(env.APP_URL);
@@ -57,6 +58,7 @@ export function siteOrigin(): string {
 	return parsed.origin;
 }
 
+/** Keep internal pages crawlable for noindex headers and link the configured sitemap. */
 export function robotsTxt(): string {
 	return [
 		'User-agent: *',
@@ -71,6 +73,7 @@ export function robotsTxt(): string {
 	].join('\n');
 }
 
+/** List only reviewed public routes as absolute URLs under the configured origin. */
 export function sitemapXml(): string {
 	const base = siteOrigin();
 	const urls = PUBLIC_PAGES.map((path) =>
@@ -85,6 +88,7 @@ export function sitemapXml(): string {
 	].join('\n');
 }
 
+/** Build the product, blog, and legal discovery links under the configured origin. */
 export function llmsTxt(): string {
 	const base = siteOrigin();
 	const link = (path: string) => new URL(path, base).toString();

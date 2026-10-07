@@ -8,7 +8,11 @@
 		let frame = 0;
 		const update = () => {
 			frame = 0;
-			activeId = targets.findLast(({ element }) => element && element.getBoundingClientRect().top <= 112)?.id ?? '';
+			const atBottom = window.scrollY > 0 && window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 1;
+			const current = atBottom
+				? targets.findLast(({ element }) => element)
+				: targets.findLast(({ element }) => element && element.getBoundingClientRect().top <= 112);
+			activeId = current?.id ?? '';
 		};
 		const schedule = () => {
 			if (!frame) frame = requestAnimationFrame(update);

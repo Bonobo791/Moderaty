@@ -37,6 +37,7 @@
 		letter-spacing: -0.025em;
 		margin: 24px 0 32px;
 	}
+	.blog-content :global(.blog-article) { position: relative; }
 	.blog-content :global(h2) {
 		font-size: clamp(24px, 4vw, 30px);
 		line-height: 1.3;

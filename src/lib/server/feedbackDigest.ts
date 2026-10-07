@@ -66,6 +66,11 @@ class InsufficientCreditsError extends Error {
 const ERR_PREVIEW_PAUSED = 'channel is paused';
 const ERR_PREVIEW_NO_KEY = 'no OpenAI key resolved for feedback preview';
 
+// 'dry-run' means "nothing was spent or covered" on two planes by design
+// (MOD-228): DigestResult.status is the in-memory echo an env/forced dry
+// run returns — it never reaches a table (I8) — while the same word
+// persisted on feedback_digests marks a finished free PREVIEW, a permanent
+// feed row outside TRANSIENT_DIGEST_STATUSES.
 export type DigestStatus = 'complete' | 'empty' | 'deferred' | 'skipped' | 'failed' | 'dry-run';
 
 export interface DigestResult {
